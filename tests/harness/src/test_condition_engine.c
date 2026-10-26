@@ -93,10 +93,418 @@ static const struct json_value *ce_json_condition(
     return NULL;
 }
 
+static bool ce_first_remedy_runs(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    struct condition_engine_summary summary;
+    condition_engine_get_summary(&summary);
+    ok = ok && summary.registered_count == 1;
+    ok = ok && summary.active_count == 1;
+    ok = ok && summary.unresolved_count == 0;
+    ok = ok && summary.unresolved_critical_count == 0;
+    return ok;
+}
+
+static bool ce_backoff_suppresses_retry(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 1;
+    return ok;
+}
+
+static bool ce_urgent_bypasses_backoff(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    atomic_store(&g_urgent, true);
+    condition_engine_tick();
+    condition_engine_tick();
+    /* Both ticks run the remedy despite the 30s backoff (urgent bypass). */
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+    return ok;
+}
+
+static bool ce_urgent_false_keeps_backoff(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    atomic_store(&g_urgent, false);   /* not urgent → backoff still holds */
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 1;
+    return ok;
+}
+
+static bool ce_poll_suppresses_recheck(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, false);
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_detect_calls) == 1;
+    ok = ok && atomic_load(&g_remedy_calls) == 0;
+    return ok;
+}
+
+static bool ce_witness_clears_active(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    atomic_store(&g_witness, true);
+    condition_engine_tick();
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && atomic_load(&cond->state.cleared_count) == 1;
+    return ok;
+}
+
+static bool ce_max_attempts_pages_operator(struct condition *cond)
+{
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+    ok = ok && condition_engine_get_unresolved_count() == 1;
+    ok = ok && atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&cond->state.last_operator_needed_unix) > 0;
+    return ok;
+}
+
+static bool ce_unresolved_critical_is_scoped(struct condition *cond)
+{
+    /* An unresolved CRITICAL condition must count toward BOTH the plain
+     * and the severity-scoped accessor (sticky_escalator's belt +
+     * suspenders auto-arm gates on the scoped one). */
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && condition_engine_get_unresolved_count() == 1;
+    ok = ok && condition_engine_get_unresolved_critical_count() == 1;
+    return ok;
+}
+
+static bool ce_unresolved_warn_not_critical(struct condition *cond)
+{
+    /* download_queue_starved (COND_WARN) can sit
+     * "unresolved" (operator_needed_emitted latched) for hours on a
+     * healthy, tip-synced node. It must count toward the plain unresolved
+     * total (unchanged behavior for health_controller / event_agent_summary
+     * reporting) but NOT toward the CRITICAL-scoped count sticky_escalator
+     * uses to decide whether to auto-arm its chain-recovery ladder. */
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+    ok = ok && condition_engine_get_unresolved_count() == 1;
+    ok = ok && condition_engine_get_unresolved_critical_count() == 0;
+    return ok;
+}
+
+static bool ce_duplicate_register_rejected(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    ok = ok && !condition_register(cond);
+    return ok;
+}
+
+static bool ce_unwitnessed_remedy_escalates(struct condition *cond)
+{
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    atomic_store(&g_witness, false); /* symptom NEVER clears */
+
+    /* Run enough ticks to exhaust max_attempts. */
+    condition_engine_tick();
+    condition_engine_tick();
+    condition_engine_tick();
+    condition_engine_tick();
+
+    /* Remedy returned OK every time, but because the witness never
+     * confirmed the symptom cleared, the reported outcome must be
+     * UNWITNESSED — never OK. A frozen tip cannot self-report success. */
+    ok = ok && atomic_load(&cond->state.last_outcome) ==
+                   COND_REMEDY_UNWITNESSED;
+    /* The condition must still be active and never marked cleared. */
+    ok = ok && atomic_load(&cond->state.currently_active);
+    ok = ok && atomic_load(&cond->state.cleared_count) == 0;
+    /* After max_attempts un-witnessed remedies it must escalate. */
+    ok = ok && condition_engine_get_unresolved_count() == 1;
+    ok = ok &&
+         atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok &&
+         atomic_load(&cond->state.last_operator_needed_unix) > 0;
+    return ok;
+}
+
+static bool ce_witnessed_clear_after_unwitnessed(struct condition *cond)
+{
+    /* Counter-case: once the symptom DOES clear, a witnessed remedy clears
+     * the condition and never escalates — even after prior failed attempts. */
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    atomic_store(&g_witness, false);
+    condition_engine_tick();            /* attempt 1: unwitnessed */
+    ok = ok && atomic_load(&cond->state.last_outcome) ==
+                   COND_REMEDY_UNWITNESSED;
+    atomic_store(&g_witness, true);     /* symptom now resolved */
+    condition_engine_tick();            /* early-witness clears it */
+    ok = ok && atomic_load(&cond->state.cleared_count) == 1;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool ce_limbo_keeps_remedy_cadence(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();            /* activates, attempt 1 */
+    ok = ok && atomic_load(&g_remedy_calls) == 1;
+    atomic_store(&g_detect, false);     /* detect flaps false */
+    atomic_store(&g_witness, false);    /* symptom NOT cleared */
+    condition_engine_tick();            /* must retry, not freeze */
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+    ok = ok && atomic_load(&cond->state.attempts) == 2;
+    ok = ok && atomic_load(&cond->state.currently_active);
+    return ok;
+}
+
+static bool ce_limbo_escalates_to_operator(struct condition *cond)
+{
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();            /* attempt 1 */
+    atomic_store(&g_detect, false);
+    condition_engine_tick();            /* attempt 2 */
+    condition_engine_tick();            /* attempt 3 = max_attempts */
+    ok = ok && atomic_load(&g_remedy_calls) == 3;
+    ok = ok && atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&g_operator_events) >= 1;
+    ok = ok && condition_engine_get_unresolved_count() == 1;
+    return ok;
+}
+
+static bool ce_aged_episode_pages_operator(struct condition *cond)
+{
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();            /* activates, attempt 1 */
+    ok = ok && atomic_load(&cond->state.attempts) == 1;
+    ok = ok && !atomic_load(&cond->state.operator_needed_emitted);
+    /* Age the episode past the budget (1 + 1000*5*2 = 10001s): rewind
+     * first_detect_unix by 20000s. */
+    atomic_store(&cond->state.first_detect_unix,
+                 atomic_load(&cond->state.first_detect_unix) - 20000);
+    condition_engine_tick();            /* backoff holds attempt 2 */
+    ok = ok && atomic_load(&cond->state.attempts) == 1;
+    ok = ok && atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&g_operator_events) >= 1;
+    return ok;
+}
+
+static bool ce_witness_resets_limbo_episode(struct condition *cond)
+{
+    /* Witness-clear still ends a limbo episode and resets its state. */
+    reset_fixture();
+    bool ok = condition_register(cond);
+    int cleared_before = atomic_load(&cond->state.cleared_count);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();            /* attempt 1 */
+    atomic_store(&g_detect, false);
+    condition_engine_tick();            /* limbo retry, attempt 2 */
+    ok = ok && atomic_load(&cond->state.currently_active);
+    atomic_store(&g_witness, true);     /* symptom resolved */
+    condition_engine_tick();            /* witness-clear */
+    ok = ok && !atomic_load(&cond->state.currently_active);
+    ok = ok && atomic_load(&cond->state.cleared_count) ==
+                   cleared_before + 1;
+    ok = ok && atomic_load(&cond->state.attempts) == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool ce_snapshot_exposes_guardable_state(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    struct condition_runtime_snapshot snap;
+    memset(&snap, 0, sizeof(snap));
+    ok = ok &&
+         condition_engine_get_registered_snapshot("ce_basic", &snap);
+    ok = ok && snap.registered;
+    ok = ok && snap.severity == COND_CRITICAL;
+    ok = ok && snap.poll_secs == 1;
+    ok = ok && snap.backoff_secs == 30;
+    ok = ok && snap.max_attempts == 3;
+    ok = ok && snap.witness_window_secs == 60;
+    ok = ok && !snap.currently_active;
+    ok = ok && snap.attempts == 0;
+    ok = ok &&
+         !condition_engine_get_registered_snapshot("not_a_condition",
+                                                   &snap);
+    return ok;
+}
+
+static bool ce_dump_json_includes_details(struct condition *cond)
+{
+    reset_fixture();
+    bool ok = condition_register(cond);
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    ok = ok && condition_engine_dump_state_json(&out, NULL);
+    ok = ok && json_get(&out, "registered_count") != NULL;
+    ok = ok && json_get(&out, "conditions") != NULL;
+    const struct json_value *conditions = json_get(&out, "conditions");
+    const struct json_value *basic =
+        ce_json_condition(conditions, "ce_basic");
+    ok = ok && basic != NULL;
+    ok = ok && json_get(basic, "last_remedy_unix") != NULL;
+    ok = ok && json_get(basic, "last_operator_needed_unix") != NULL;
+    ok = ok && json_get(basic, "target_at_detect") != NULL;
+    ok = ok && json_get(basic, "operator_needed_emitted") != NULL;
+    const struct json_value *detail = json_get(basic, "detail");
+    ok = ok && detail != NULL;
+    ok = ok && json_get_int(json_get(detail, "fixture_detail")) == 42;
+    ok = ok && atomic_load(&g_detail_calls) == 1;
+    json_free(&out);
+    return ok;
+}
+
+static bool ce_registry_expected_names_match(
+    const struct json_value *conditions,
+    const char *const *expected,
+    int expected_count,
+    bool ok)
+{
+    for (size_t i = 0; i < (size_t)expected_count; i++) {
+        const struct json_value *condition = json_at(conditions, i);
+        const struct json_value *name = condition
+                                            ? json_get(condition, "name")
+                                            : NULL;
+        ok = ok && name && strcmp(json_get_str(name), expected[i]) == 0;
+        for (size_t j = i + 1; j < (size_t)expected_count; j++)
+            ok = ok && strcmp(expected[i], expected[j]) != 0;
+    }
+    return ok;
+}
+
+static bool ce_registry_has_self_heal_names(bool ok)
+{
+    ok = ok &&
+         condition_engine_has_registered("body_fetch_missing_have_data");
+    ok = ok &&
+         condition_engine_has_registered("have_data_unreadable");
+    ok = ok &&
+         condition_engine_has_registered("stale_validate_headers_repair");
+    ok = ok &&
+         condition_engine_has_registered(
+             "reducer_frontier_reconcile_light");
+    ok = ok && !condition_engine_has_registered("not_a_condition");
+    return ok;
+}
+
+static bool ce_cooldown_rearms_past_max_attempts(struct condition *cond)
+{
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    atomic_store(&g_witness, false);   /* symptom never clears */
+
+    /* Tick 1: breach detected, remedy attempt 1/1 exhausts max_attempts
+     * immediately (unwitnessed) -> operator paged, but NOT latched. */
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 1;
+    ok = ok && atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&cond->state.currently_active);
+
+    /* Tick 2: attempts(1) >= max_attempts(1) so condition_due_for_remedy
+     * consults cooldown_rearm(); last_cooldown_unix is still 0 (never
+     * armed before), so the FIRST re-arm is immediate — proving the
+     * engine tries again in the very next tick rather than requiring a
+     * human. A legacy (cooldown_secs==0) condition would stay at
+     * g_remedy_calls==1 forever from here on (condition_cooldown_rearm
+     * returns false unconditionally when cooldown_secs<=0). */
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+    ok = ok && atomic_load(&cond->state.cooldown_rearms) == 1;
+
+    /* Tick 3: right after a re-arm the cooldown gap has not elapsed
+     * (last_cooldown_unix == now), so the engine rate-limits and the count
+     * holds; the next step distinguishes this from latched-forever. */
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 2;
+
+    /* Simulate the cooldown window elapsing (mirrors the existing
+     * first_detect_unix-rewind aging trick used by c_aged above) and
+     * tick again: a SECOND re-arm must fire, proving the engine keeps
+     * retrying indefinitely rather than latching after one re-arm. */
+    atomic_store(&cond->state.last_cooldown_unix,
+                 atomic_load(&cond->state.last_cooldown_unix) - 10);
+    condition_engine_tick();
+    ok = ok && atomic_load(&g_remedy_calls) == 3;
+    ok = ok && atomic_load(&cond->state.cooldown_rearms) == 2;
+    ok = ok && atomic_load(&cond->state.currently_active);
+    ok = ok && atomic_load(&cond->state.cleared_count) == 0;
+    return ok;
+}
+
+static bool ce_cooldown_witness_clear_resets(struct condition *cond, bool ok)
+{
+    /* Finally the symptom clears: witness-clear must still end the
+     * episode and fully reset the cooldown bookkeeping, ready for a
+     * fresh episode with a clean budget next time. */
+    atomic_store(&g_witness, true);
+    condition_engine_tick();
+    ok = ok && atomic_load(&cond->state.cleared_count) == 1;
+    ok = ok && !atomic_load(&cond->state.currently_active);
+    ok = ok && atomic_load(&cond->state.cooldown_rearms) == 0;
+    ok = ok && atomic_load(&cond->state.last_cooldown_unix) == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok;
+}
+
+static bool ce_cooldown_rearms_then_resets(struct condition *cond)
+{
+    bool ok = ce_cooldown_rearms_past_max_attempts(cond);
+    return ce_cooldown_witness_clear_resets(cond, ok);
+}
+
 int test_condition_engine(void)
 {
     printf("\n=== condition engine tests ===\n");
     int failures = 0;
+    bool ok = false;
 
     static struct condition c_basic = {
         .name = "ce_basic",
@@ -111,31 +519,11 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        struct condition_engine_summary summary;
-        condition_engine_get_summary(&summary);
-        ok = ok && summary.registered_count == 1;
-        ok = ok && summary.active_count == 1;
-        ok = ok && summary.unresolved_count == 0;
-        ok = ok && summary.unresolved_critical_count == 0;
-        CE_CHECK("register + first remedy", ok);
-    }
+    ok = ce_first_remedy_runs(&c_basic);
+    CE_CHECK("register + first remedy", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 1;
-        CE_CHECK("backoff suppresses immediate retry", ok);
-    }
+    ok = ce_backoff_suppresses_retry(&c_basic);
+    CE_CHECK("backoff suppresses immediate retry", ok);
 
     /* An urgent() hook returning true makes the remedy immediately due,
      * bypassing the 30s backoff — the second tick runs the remedy even though
@@ -154,28 +542,11 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_urgent);
-        atomic_store(&g_detect, true);
-        atomic_store(&g_urgent, true);
-        condition_engine_tick();
-        condition_engine_tick();
-        /* Both ticks run the remedy despite the 30s backoff (urgent bypass). */
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-        CE_CHECK("urgent hook bypasses backoff (remedy runs immediately)", ok);
-    }
+    ok = ce_urgent_bypasses_backoff(&c_urgent);
+    CE_CHECK("urgent hook bypasses backoff (remedy runs immediately)", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_urgent);
-        atomic_store(&g_detect, true);
-        atomic_store(&g_urgent, false);   /* not urgent → backoff still holds */
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 1;
-        CE_CHECK("urgent hook false leaves backoff intact", ok);
-    }
+    ok = ce_urgent_false_keeps_backoff(&c_urgent);
+    CE_CHECK("urgent hook false leaves backoff intact", ok);
 
     static struct condition c_slow_poll = {
         .name = "ce_slow_poll",
@@ -189,28 +560,11 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_slow_poll);
-        atomic_store(&g_detect, false);
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_detect_calls) == 1;
-        ok = ok && atomic_load(&g_remedy_calls) == 0;
-        CE_CHECK("poll interval suppresses immediate recheck", ok);
-    }
+    ok = ce_poll_suppresses_recheck(&c_slow_poll);
+    CE_CHECK("poll interval suppresses immediate recheck", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        atomic_store(&g_witness, true);
-        condition_engine_tick();
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && atomic_load(&c_basic.state.cleared_count) == 1;
-        CE_CHECK("witness clears active state", ok);
-    }
+    ok = ce_witness_clears_active(&c_basic);
+    CE_CHECK("witness clears active state", ok);
 
     static struct condition c_max = {
         .name = "ce_max",
@@ -224,34 +578,12 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_max);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok && atomic_load(&c_max.state.operator_needed_emitted);
-        ok = ok && atomic_load(&c_max.state.last_operator_needed_unix) > 0;
-        CE_CHECK("max attempts emits operator event", ok);
-    }
+    ok = ce_max_attempts_pages_operator(&c_max);
+    CE_CHECK("max attempts emits operator event", ok);
 
-    {
-        /* An unresolved CRITICAL condition must count toward BOTH the plain
-         * and the severity-scoped accessor (sticky_escalator's belt +
-         * suspenders auto-arm gates on the scoped one). */
-        reset_fixture();
-        bool ok = condition_register(&c_max);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok && condition_engine_get_unresolved_critical_count() == 1;
-        CE_CHECK("unresolved CRITICAL condition counts in the scoped total",
-                 ok);
-    }
+    ok = ce_unresolved_critical_is_scoped(&c_max);
+    CE_CHECK("unresolved CRITICAL condition counts in the scoped total",
+             ok);
 
     static struct condition c_max_warn = {
         .name = "ce_max_warn",
@@ -265,31 +597,12 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        /* download_queue_starved (COND_WARN) can sit
-         * "unresolved" (operator_needed_emitted latched) for hours on a
-         * healthy, tip-synced node. It must count toward the plain unresolved
-         * total (unchanged behavior for health_controller / event_agent_summary
-         * reporting) but NOT toward the CRITICAL-scoped count sticky_escalator
-         * uses to decide whether to auto-arm its chain-recovery ladder. */
-        reset_fixture();
-        bool ok = condition_register(&c_max_warn);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok && condition_engine_get_unresolved_critical_count() == 0;
-        CE_CHECK("unresolved WARN condition excluded from the CRITICAL-scoped "
-                 "count", ok);
-    }
+    ok = ce_unresolved_warn_not_critical(&c_max_warn);
+    CE_CHECK("unresolved WARN condition excluded from the CRITICAL-scoped "
+             "count", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        ok = ok && !condition_register(&c_basic);
-        CE_CHECK("duplicate registration rejected", ok);
-    }
+    ok = ce_duplicate_register_rejected(&c_basic);
+    CE_CHECK("duplicate registration rejected", ok);
 
     /* P0 RESILIENCE REGRESSION: a remedy that returns COND_REMEDY_OK but whose
      * symptom never clears (witness stays false) must NOT be reported as `ok`,
@@ -308,53 +621,11 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_unwitnessed);
-        atomic_store(&g_detect, true);
-        atomic_store(&g_witness, false); /* symptom NEVER clears */
+    ok = ce_unwitnessed_remedy_escalates(&c_unwitnessed);
+    CE_CHECK("unwitnessed remedy is not ok and escalates", ok);
 
-        /* Run enough ticks to exhaust max_attempts. */
-        condition_engine_tick();
-        condition_engine_tick();
-        condition_engine_tick();
-        condition_engine_tick();
-
-        /* Remedy returned OK every time, but because the witness never
-         * confirmed the symptom cleared, the reported outcome must be
-         * UNWITNESSED — never OK. A frozen tip cannot self-report success. */
-        ok = ok && atomic_load(&c_unwitnessed.state.last_outcome) ==
-                       COND_REMEDY_UNWITNESSED;
-        /* The condition must still be active and never marked cleared. */
-        ok = ok && atomic_load(&c_unwitnessed.state.currently_active);
-        ok = ok && atomic_load(&c_unwitnessed.state.cleared_count) == 0;
-        /* After max_attempts un-witnessed remedies it must escalate. */
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        ok = ok &&
-             atomic_load(&c_unwitnessed.state.operator_needed_emitted);
-        ok = ok &&
-             atomic_load(&c_unwitnessed.state.last_operator_needed_unix) > 0;
-        CE_CHECK("unwitnessed remedy is not ok and escalates", ok);
-    }
-
-    {
-        /* Counter-case: once the symptom DOES clear, a witnessed remedy clears
-         * the condition and never escalates — even after prior failed attempts. */
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_unwitnessed);
-        atomic_store(&g_detect, true);
-        atomic_store(&g_witness, false);
-        condition_engine_tick();            /* attempt 1: unwitnessed */
-        ok = ok && atomic_load(&c_unwitnessed.state.last_outcome) ==
-                       COND_REMEDY_UNWITNESSED;
-        atomic_store(&g_witness, true);     /* symptom now resolved */
-        condition_engine_tick();            /* early-witness clears it */
-        ok = ok && atomic_load(&c_unwitnessed.state.cleared_count) == 1;
-        ok = ok && condition_engine_get_active_count() == 0;
-        CE_CHECK("witnessed clear after unwitnessed attempt resolves", ok);
-    }
+    ok = ce_witnessed_clear_after_unwitnessed(&c_unwitnessed);
+    CE_CHECK("witnessed clear after unwitnessed attempt resolves", ok);
 
     /* P0 LIMBO REGRESSION: an ACTIVE episode
      * whose detect() flaps false while witness() stays false must not freeze
@@ -375,37 +646,12 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_limbo);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();            /* activates, attempt 1 */
-        ok = ok && atomic_load(&g_remedy_calls) == 1;
-        atomic_store(&g_detect, false);     /* detect flaps false */
-        atomic_store(&g_witness, false);    /* symptom NOT cleared */
-        condition_engine_tick();            /* must retry, not freeze */
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-        ok = ok && atomic_load(&c_limbo.state.attempts) == 2;
-        ok = ok && atomic_load(&c_limbo.state.currently_active);
-        CE_CHECK("active undetected unwitnessed episode keeps remedy cadence",
-                 ok);
-    }
+    ok = ce_limbo_keeps_remedy_cadence(&c_limbo);
+    CE_CHECK("active undetected unwitnessed episode keeps remedy cadence",
+             ok);
 
-    {
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_limbo);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();            /* attempt 1 */
-        atomic_store(&g_detect, false);
-        condition_engine_tick();            /* attempt 2 */
-        condition_engine_tick();            /* attempt 3 = max_attempts */
-        ok = ok && atomic_load(&g_remedy_calls) == 3;
-        ok = ok && atomic_load(&c_limbo.state.operator_needed_emitted);
-        ok = ok && atomic_load(&g_operator_events) >= 1;
-        ok = ok && condition_engine_get_unresolved_count() == 1;
-        CE_CHECK("undetected active episode still escalates to operator", ok);
-    }
+    ok = ce_limbo_escalates_to_operator(&c_limbo);
+    CE_CHECK("undetected active episode still escalates to operator", ok);
 
     /* Age-based page: an episode older than its schedule budget
      * (max(600, poll + backoff*max_attempts*2)) pages even at attempts=1. */
@@ -421,90 +667,17 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_aged);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();            /* activates, attempt 1 */
-        ok = ok && atomic_load(&c_aged.state.attempts) == 1;
-        ok = ok && !atomic_load(&c_aged.state.operator_needed_emitted);
-        /* Age the episode past the budget (1 + 1000*5*2 = 10001s): rewind
-         * first_detect_unix by 20000s. */
-        atomic_store(&c_aged.state.first_detect_unix,
-                     atomic_load(&c_aged.state.first_detect_unix) - 20000);
-        condition_engine_tick();            /* backoff holds attempt 2 */
-        ok = ok && atomic_load(&c_aged.state.attempts) == 1;
-        ok = ok && atomic_load(&c_aged.state.operator_needed_emitted);
-        ok = ok && atomic_load(&g_operator_events) >= 1;
-        CE_CHECK("age budget pages operator at attempts below max", ok);
-    }
+    ok = ce_aged_episode_pages_operator(&c_aged);
+    CE_CHECK("age budget pages operator at attempts below max", ok);
 
-    {
-        /* Witness-clear still ends a limbo episode and resets its state. */
-        reset_fixture();
-        bool ok = condition_register(&c_limbo);
-        int cleared_before = atomic_load(&c_limbo.state.cleared_count);
-        atomic_store(&g_detect, true);
-        condition_engine_tick();            /* attempt 1 */
-        atomic_store(&g_detect, false);
-        condition_engine_tick();            /* limbo retry, attempt 2 */
-        ok = ok && atomic_load(&c_limbo.state.currently_active);
-        atomic_store(&g_witness, true);     /* symptom resolved */
-        condition_engine_tick();            /* witness-clear */
-        ok = ok && !atomic_load(&c_limbo.state.currently_active);
-        ok = ok && atomic_load(&c_limbo.state.cleared_count) ==
-                       cleared_before + 1;
-        ok = ok && atomic_load(&c_limbo.state.attempts) == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        CE_CHECK("witness clear resets active undetected episode", ok);
-    }
+    ok = ce_witness_resets_limbo_episode(&c_limbo);
+    CE_CHECK("witness clear resets active undetected episode", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        struct condition_runtime_snapshot snap;
-        memset(&snap, 0, sizeof(snap));
-        ok = ok &&
-             condition_engine_get_registered_snapshot("ce_basic", &snap);
-        ok = ok && snap.registered;
-        ok = ok && snap.severity == COND_CRITICAL;
-        ok = ok && snap.poll_secs == 1;
-        ok = ok && snap.backoff_secs == 30;
-        ok = ok && snap.max_attempts == 3;
-        ok = ok && snap.witness_window_secs == 60;
-        ok = ok && !snap.currently_active;
-        ok = ok && snap.attempts == 0;
-        ok = ok &&
-             !condition_engine_get_registered_snapshot("not_a_condition",
-                                                       &snap);
-        CE_CHECK("registered snapshot exposes guardable state", ok);
-    }
+    ok = ce_snapshot_exposes_guardable_state(&c_basic);
+    CE_CHECK("registered snapshot exposes guardable state", ok);
 
-    {
-        reset_fixture();
-        bool ok = condition_register(&c_basic);
-        struct json_value out;
-        json_init(&out);
-        json_set_object(&out);
-        ok = ok && condition_engine_dump_state_json(&out, NULL);
-        ok = ok && json_get(&out, "registered_count") != NULL;
-        ok = ok && json_get(&out, "conditions") != NULL;
-        const struct json_value *conditions = json_get(&out, "conditions");
-        const struct json_value *basic =
-            ce_json_condition(conditions, "ce_basic");
-        ok = ok && basic != NULL;
-        ok = ok && json_get(basic, "last_remedy_unix") != NULL;
-        ok = ok && json_get(basic, "last_operator_needed_unix") != NULL;
-        ok = ok && json_get(basic, "target_at_detect") != NULL;
-        ok = ok && json_get(basic, "operator_needed_emitted") != NULL;
-        const struct json_value *detail = json_get(basic, "detail");
-        ok = ok && detail != NULL;
-        ok = ok && json_get_int(json_get(detail, "fixture_detail")) == 42;
-        ok = ok && atomic_load(&g_detail_calls) == 1;
-        json_free(&out);
-        CE_CHECK("dump json includes registry, liveness, and details", ok);
-    }
+    ok = ce_dump_json_includes_details(&c_basic);
+    CE_CHECK("dump json includes registry, liveness, and details", ok);
 
     {
         reset_fixture();
@@ -529,25 +702,9 @@ int test_condition_engine(void)
         const int expected_count = CONDITION_REGISTRY_COUNT;
         ok = ok && registered && json_get_int(registered) == expected_count;
         ok = ok && conditions && json_size(conditions) == (size_t)expected_count;
-        for (size_t i = 0; i < (size_t)expected_count; i++) {
-            const struct json_value *condition = json_at(conditions, i);
-            const struct json_value *name = condition
-                                                ? json_get(condition, "name")
-                                                : NULL;
-            ok = ok && name && strcmp(json_get_str(name), expected[i]) == 0;
-            for (size_t j = i + 1; j < (size_t)expected_count; j++)
-                ok = ok && strcmp(expected[i], expected[j]) != 0;
-        }
-        ok = ok &&
-             condition_engine_has_registered("body_fetch_missing_have_data");
-        ok = ok &&
-             condition_engine_has_registered("have_data_unreadable");
-        ok = ok &&
-             condition_engine_has_registered("stale_validate_headers_repair");
-        ok = ok &&
-             condition_engine_has_registered(
-                 "reducer_frontier_reconcile_light");
-        ok = ok && !condition_engine_has_registered("not_a_condition");
+        ok = ce_registry_expected_names_match(conditions, expected,
+                                              expected_count, ok);
+        ok = ce_registry_has_self_heal_names(ok);
         json_free(&out);
         CE_CHECK("register_all exposes current self-heal set", ok);
     }
@@ -571,63 +728,9 @@ int test_condition_engine(void)
         .witness_window_secs = 60,
     };
 
-    {
-        reset_fixture();
-        event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
-        bool ok = condition_register(&c_cooldown);
-        atomic_store(&g_detect, true);
-        atomic_store(&g_witness, false);   /* symptom never clears */
-
-        /* Tick 1: breach detected, remedy attempt 1/1 exhausts max_attempts
-         * immediately (unwitnessed) -> operator paged, but NOT latched. */
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 1;
-        ok = ok && atomic_load(&c_cooldown.state.operator_needed_emitted);
-        ok = ok && atomic_load(&c_cooldown.state.currently_active);
-
-        /* Tick 2: attempts(1) >= max_attempts(1) so condition_due_for_remedy
-         * consults cooldown_rearm(); last_cooldown_unix is still 0 (never
-         * armed before), so the FIRST re-arm is immediate — proving the
-         * engine tries again in the very next tick rather than requiring a
-         * human. A legacy (cooldown_secs==0) condition would stay at
-         * g_remedy_calls==1 forever from here on (condition_cooldown_rearm
-         * returns false unconditionally when cooldown_secs<=0). */
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-        ok = ok && atomic_load(&c_cooldown.state.cooldown_rearms) == 1;
-
-        /* Tick 3: right after a re-arm the cooldown gap has not elapsed
-         * (last_cooldown_unix == now), so the engine rate-limits and the count
-         * holds; the next step distinguishes this from latched-forever. */
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 2;
-
-        /* Simulate the cooldown window elapsing (mirrors the existing
-         * first_detect_unix-rewind aging trick used by c_aged above) and
-         * tick again: a SECOND re-arm must fire, proving the engine keeps
-         * retrying indefinitely rather than latching after one re-arm. */
-        atomic_store(&c_cooldown.state.last_cooldown_unix,
-                     atomic_load(&c_cooldown.state.last_cooldown_unix) - 10);
-        condition_engine_tick();
-        ok = ok && atomic_load(&g_remedy_calls) == 3;
-        ok = ok && atomic_load(&c_cooldown.state.cooldown_rearms) == 2;
-        ok = ok && atomic_load(&c_cooldown.state.currently_active);
-        ok = ok && atomic_load(&c_cooldown.state.cleared_count) == 0;
-
-        /* Finally the symptom clears: witness-clear must still end the
-         * episode and fully reset the cooldown bookkeeping, ready for a
-         * fresh episode with a clean budget next time. */
-        atomic_store(&g_witness, true);
-        condition_engine_tick();
-        ok = ok && atomic_load(&c_cooldown.state.cleared_count) == 1;
-        ok = ok && !atomic_load(&c_cooldown.state.currently_active);
-        ok = ok && atomic_load(&c_cooldown.state.cooldown_rearms) == 0;
-        ok = ok && atomic_load(&c_cooldown.state.last_cooldown_unix) == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-
-        CE_CHECK("cooldown-bearing CRITICAL re-arms past max_attempts "
-                 "instead of latching, then witness-clear resets it", ok);
-    }
+    ok = ce_cooldown_rearms_then_resets(&c_cooldown);
+    CE_CHECK("cooldown-bearing CRITICAL re-arms past max_attempts "
+             "instead of latching, then witness-clear resets it", ok);
 
     reset_fixture();
     return failures;

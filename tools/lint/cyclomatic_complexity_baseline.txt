@@ -1592,7 +1592,6 @@ tests/harness/src/test_cold_start_driver.c:test_cold_start_driver:35
 tests/harness/src/test_command_input_bounds.c:t_fleet_ledger_numeric_keys:18
 tests/harness/src/test_command_input_bounds.c:t_frame_budget:19
 tests/harness/src/test_compact_blocks.c:test_compact_blocks:57
-tests/harness/src/test_condition_engine.c:test_condition_engine:102
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
 tests/harness/src/test_consensus_db_flip.c:flip_build_source:29
