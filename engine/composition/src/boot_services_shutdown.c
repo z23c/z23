@@ -323,6 +323,55 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
     printf("[shutdown] runtime consumers drained; DB provider retained\n");
 }
 
+/* progress.kv may have run synchronous=OFF during IBD. Restore its safe
+ * mode and prove its WAL checkpoint before closing the handle. */
+static void shutdown_persist_progress_store(bool *ok)
+{
+    if (progress_store_db()) {
+        if (!progress_store_set_sync_mode(false))
+            *ok = false;
+        if (!progress_store_checkpoint())
+            *ok = false;
+        progress_store_close();
+    }
+}
+
+/* node.db durability barrier and gated close: flush, mempool save,
+ * synchronous=FULL, WAL checkpoint; the handle itself is closed only when
+ * no undrained diagnostics capture may still be reading it. */
+static void shutdown_persist_node_db(struct boot_svc_ctx *svc,
+                                     bool diagnostics_drained, bool *ok)
+{
+    if (svc->node_db->open) {
+        if (!db_service_flush_write(svc->db_service))
+            *ok = false;
+        node_db_sync_mempool_save(svc->node_db, svc->mempool);
+        /* IBD paths may have selected synchronous=OFF. The last authoritative
+         * commit and checkpoint must run behind SQLite's strongest barrier. */
+        if (!db_service_exec_write(svc->db_service,
+                                   "PRAGMA synchronous=FULL"))
+            *ok = false;
+        if (db_service_wal_checkpoint(svc->db_service))
+            printf("[shutdown] WAL checkpoint complete\n");
+        else {
+            fprintf(stderr, "[shutdown] WAL checkpoint failed\n");
+            *ok = false;
+        }
+        /* Flush, PRAGMA and checkpoint above are unconditional: they are
+         * durability. Only the close is gated: app_runtime_node_db() hands
+         * this handle to diagnostics dumpers, and node_db_close() flips
+         * ndb->open and calls sqlite3_close() with no lock, so closing while
+         * an undrained capture is inside a dumper races that reader. */
+        if (diagnostics_drained) {
+            if (!db_service_close_write(svc->db_service))
+                *ok = false;
+        } else {
+            printf("[shutdown] node.db handle retained: an undrained "
+                   "diagnostics capture may still be reading it\n");
+        }
+    }
+}
+
 static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
                                           bool diagnostics_drained)
 {
@@ -358,44 +407,8 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
         wallet_sqlite_close(svc->wallet_sqlite);
     }
 
-    /* progress.kv may have run synchronous=OFF during IBD. Restore its safe
-     * mode and prove its WAL checkpoint before closing the handle. */
-    if (progress_store_db()) {
-        if (!progress_store_set_sync_mode(false))
-            ok = false;
-        if (!progress_store_checkpoint())
-            ok = false;
-        progress_store_close();
-    }
-
-    if (svc->node_db->open) {
-        if (!db_service_flush_write(svc->db_service))
-            ok = false;
-        node_db_sync_mempool_save(svc->node_db, svc->mempool);
-        /* IBD paths may have selected synchronous=OFF. The last authoritative
-         * commit and checkpoint must run behind SQLite's strongest barrier. */
-        if (!db_service_exec_write(svc->db_service,
-                                   "PRAGMA synchronous=FULL"))
-            ok = false;
-        if (db_service_wal_checkpoint(svc->db_service))
-            printf("[shutdown] WAL checkpoint complete\n");
-        else {
-            fprintf(stderr, "[shutdown] WAL checkpoint failed\n");
-            ok = false;
-        }
-        /* Flush, PRAGMA and checkpoint above are unconditional: they are
-         * durability. Only the close is gated: app_runtime_node_db() hands
-         * this handle to diagnostics dumpers, and node_db_close() flips
-         * ndb->open and calls sqlite3_close() with no lock, so closing while
-         * an undrained capture is inside a dumper races that reader. */
-        if (diagnostics_drained) {
-            if (!db_service_close_write(svc->db_service))
-                ok = false;
-        } else {
-            printf("[shutdown] node.db handle retained: an undrained "
-                   "diagnostics capture may still be reading it\n");
-        }
-    }
+    shutdown_persist_progress_store(&ok);
+    shutdown_persist_node_db(svc, diagnostics_drained, &ok);
     printf("[shutdown] stopping DB provider kernel\n");
     boot_stop_db_service_kernel();
 
