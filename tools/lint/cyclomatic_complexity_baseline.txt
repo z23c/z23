@@ -1396,7 +1396,6 @@ tests/harness/src/test_anchor_peers.c:test_anchor_peers:45
 tests/harness/src/test_api_access.c:api_access_focused_tests:62
 tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_focused_tests:37
-tests/harness/src/test_api_http_contract.c:api_http_contract_focused_tests:51
 tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
 tests/harness/src/test_api_routes.c:api_route_table_focused_tests:236
 tests/harness/src/test_atomic_commit_ordering.c:test_atomic_commit_ordering:16
