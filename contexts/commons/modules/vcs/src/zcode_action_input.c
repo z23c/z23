@@ -87,11 +87,9 @@ static bool action_input_entry_allowed(const struct vcs_entry *entry,
     return (entry->mode & 0111u) != 0;
 }
 
-static enum vcs_zcode_action_input_result action_input_shape(
+static enum vcs_zcode_action_input_result action_input_header_shape(
     const struct vcs_zcode_action_input_v1 *input)
 {
-    if (!input || !input->path || !input->payload)
-        return VCS_ZCODE_ACTION_INPUT_NULL;
     size_t path_len = strnlen(input->path, (size_t)UINT16_MAX + 1u);
     if (input->schema_version != VCS_ZCODE_ACTION_INPUT_VERSION ||
         !action_input_kind_valid(input->work_kind) || path_len == 0 ||
@@ -99,6 +97,12 @@ static enum vcs_zcode_action_input_result action_input_shape(
         input->payload_len == 0 ||
         input->payload_len > VCS_BUILD_ARTIFACT_MAX_BYTES)
         return VCS_ZCODE_ACTION_INPUT_SHAPE;
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+static enum vcs_zcode_action_input_result action_input_roots_shape(
+    const struct vcs_zcode_action_input_v1 *input)
+{
     if (!zcl_bytes_any_set(input->task_root, 32) ||
         !zcl_bytes_any_set(input->candidate_root, 32) ||
         !zcl_bytes_any_set(input->candidate_source_root, 32) ||
@@ -106,6 +110,19 @@ static enum vcs_zcode_action_input_result action_input_shape(
         !zcl_bytes_any_set(input->acceptance_tests_root, 32) ||
         !zcl_bytes_any_set(input->payload_blob_root, 32))
         return VCS_ZCODE_ACTION_INPUT_BINDING;
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+static enum vcs_zcode_action_input_result action_input_shape(
+    const struct vcs_zcode_action_input_v1 *input)
+{
+    if (!input || !input->path || !input->payload)
+        return VCS_ZCODE_ACTION_INPUT_NULL;
+    enum vcs_zcode_action_input_result result =
+        action_input_header_shape(input);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    result = action_input_roots_shape(input);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     uint8_t blob[32];
     vcs_sha3_tag(VCS_TAG_BLOB, input->payload, input->payload_len, blob);
     return memcmp(blob, input->payload_blob_root, 32) == 0
@@ -200,12 +217,9 @@ enum vcs_zcode_action_input_result vcs_zcode_action_input_serialize(
     return VCS_ZCODE_ACTION_INPUT_OK;
 }
 
-enum vcs_zcode_action_input_result vcs_zcode_action_input_parse(
-    const uint8_t *wire, size_t wire_len,
-    struct vcs_zcode_action_input_v1 *out)
+static enum vcs_zcode_action_input_result action_input_wire_shape(
+    const uint8_t *wire, size_t wire_len)
 {
-    if (!wire || !out) return VCS_ZCODE_ACTION_INPUT_NULL;
-    vcs_zcode_action_input_init(out);
     if (wire_len < VCS_ZCODE_ACTION_INPUT_HEADER_BYTES ||
         wire_len > VCS_BUILD_ARTIFACT_MAX_BYTES + UINT16_MAX +
                        VCS_ZCODE_ACTION_INPUT_HEADER_BYTES ||
@@ -219,6 +233,20 @@ enum vcs_zcode_action_input_result vcs_zcode_action_input_parse(
         (uint64_t)VCS_ZCODE_ACTION_INPUT_HEADER_BYTES + path_len +
             payload_len != wire_len)
         return VCS_ZCODE_ACTION_INPUT_SHAPE;
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+enum vcs_zcode_action_input_result vcs_zcode_action_input_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_action_input_v1 *out)
+{
+    if (!wire || !out) return VCS_ZCODE_ACTION_INPUT_NULL;
+    vcs_zcode_action_input_init(out);
+    enum vcs_zcode_action_input_result result =
+        action_input_wire_shape(wire, wire_len);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    uint16_t path_len = vcs_rd_u16le(wire + 12);
+    uint64_t payload_len = vcs_rd_u64le(wire + 16);
     size_t off = 24;
     out->work_kind = wire[10];
     memcpy(out->task_root, wire + off, 32); off += 32;
@@ -242,7 +270,7 @@ enum vcs_zcode_action_input_result vcs_zcode_action_input_parse(
     }
     off += path_len; out->payload_len = (size_t)payload_len;
     memcpy(out->payload, wire + off, out->payload_len);
-    enum vcs_zcode_action_input_result result = action_input_shape(out);
+    result = action_input_shape(out);
     if (result != VCS_ZCODE_ACTION_INPUT_OK)
         vcs_zcode_action_input_free(out);
     return result;
@@ -392,19 +420,13 @@ enum vcs_zcode_action_input_result vcs_zcode_component_input_key_derive_cas(
     return VCS_ZCODE_ACTION_INPUT_OK;
 }
 
-enum vcs_zcode_action_input_result
-vcs_zcode_action_input_validate_for_candidate(
-    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+static enum vcs_zcode_action_input_result action_input_bindings_match(
+    const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
     const struct vcs_zcode_action_input_v1 *input,
     const uint8_t task_root[32], const uint8_t candidate_root[32],
     uint8_t expected_work_kind)
 {
-    if (!repo_root || !task || !candidate || !input || !task_root ||
-        !candidate_root)
-        return VCS_ZCODE_ACTION_INPUT_NULL;
-    enum vcs_zcode_action_input_result result = action_input_shape(input);
-    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     uint8_t checked_task[32], checked_candidate[32];
     if (vcs_zcode_task_root(task, checked_task) != VCS_ZCODE_DEV_OK ||
         vcs_zcode_candidate_root(candidate, checked_candidate) !=
@@ -421,6 +443,35 @@ vcs_zcode_action_input_validate_for_candidate(
         memcmp(input->acceptance_tests_root,
                task->acceptance_tests_root, 32) != 0)
         return VCS_ZCODE_ACTION_INPUT_BINDING;
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+static bool action_input_manifest_binds(
+    const struct vcs_manifest *manifest,
+    const struct vcs_zcode_action_input_v1 *input)
+{
+    const struct vcs_entry *entry = action_input_find(manifest, input->path);
+    return action_input_entry_allowed(entry, input->work_kind) &&
+        entry->size == input->payload_len &&
+        memcmp(entry->blob, input->payload_blob_root, 32) == 0;
+}
+
+enum vcs_zcode_action_input_result
+vcs_zcode_action_input_validate_for_candidate(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_action_input_v1 *input,
+    const uint8_t task_root[32], const uint8_t candidate_root[32],
+    uint8_t expected_work_kind)
+{
+    if (!repo_root || !task || !candidate || !input || !task_root ||
+        !candidate_root)
+        return VCS_ZCODE_ACTION_INPUT_NULL;
+    enum vcs_zcode_action_input_result result = action_input_shape(input);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    result = action_input_bindings_match(task, candidate, input, task_root,
+                                         candidate_root, expected_work_kind);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     if (vcs_zcode_task_authority_validate_for_candidate(
             repo_root, task, candidate) != VCS_ZCODE_TASK_AUTHORITY_OK)
         return VCS_ZCODE_ACTION_INPUT_CAS;
@@ -428,13 +479,27 @@ vcs_zcode_action_input_validate_for_candidate(
     if (!vcs_tree_load(repo_root, candidate->candidate_source_root,
                        &manifest))
         return VCS_ZCODE_ACTION_INPUT_CAS;
-    const struct vcs_entry *entry = action_input_find(&manifest, input->path);
-    bool valid = action_input_entry_allowed(entry, input->work_kind) &&
-        entry->size == input->payload_len &&
-        memcmp(entry->blob, input->payload_blob_root, 32) == 0;
+    bool valid = action_input_manifest_binds(&manifest, input);
     vcs_manifest_free(&manifest);
     return valid ? VCS_ZCODE_ACTION_INPUT_OK
                  : VCS_ZCODE_ACTION_INPUT_BINDING;
+}
+
+static enum vcs_zcode_action_input_result action_input_roots_bound(
+    const struct vcs_zcode_action_input_v1 *input,
+    const uint8_t input_root[32], const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    uint8_t task_root[32], uint8_t candidate_root[32])
+{
+    uint8_t checked[32];
+    if (vcs_zcode_action_input_root(input, checked) !=
+            VCS_ZCODE_ACTION_INPUT_OK ||
+        memcmp(checked, input_root, 32) != 0 ||
+        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(candidate, candidate_root) !=
+            VCS_ZCODE_DEV_OK)
+        return VCS_ZCODE_ACTION_INPUT_BINDING;
+    return VCS_ZCODE_ACTION_INPUT_OK;
 }
 
 static enum vcs_zcode_action_input_result action_input_load_cas(
@@ -454,15 +519,11 @@ static enum vcs_zcode_action_input_result action_input_load_cas(
     enum vcs_zcode_action_input_result result = vcs_zcode_action_input_parse(
         wire, wire_len, &input);
     free(wire);
-    uint8_t checked[32], task_root[32], candidate_root[32];
-    if (result == VCS_ZCODE_ACTION_INPUT_OK &&
-        (vcs_zcode_action_input_root(&input, checked) !=
-            VCS_ZCODE_ACTION_INPUT_OK ||
-         memcmp(checked, input_root, 32) != 0 ||
-         vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
-         vcs_zcode_candidate_root(candidate, candidate_root) !=
-            VCS_ZCODE_DEV_OK))
-        result = VCS_ZCODE_ACTION_INPUT_BINDING;
+    uint8_t task_root[32], candidate_root[32];
+    if (result == VCS_ZCODE_ACTION_INPUT_OK)
+        result = action_input_roots_bound(&input, input_root, task,
+                                          candidate, task_root,
+                                          candidate_root);
     if (result == VCS_ZCODE_ACTION_INPUT_OK)
         result = vcs_zcode_action_input_validate_for_candidate(
             repo_root, task, candidate, &input, task_root, candidate_root,
@@ -620,19 +681,13 @@ enum vcs_zcode_action_input_result vcs_zcode_package_action_input_root(
     return VCS_ZCODE_ACTION_INPUT_OK;
 }
 
-enum vcs_zcode_action_input_result
-vcs_zcode_package_action_input_validate_for_candidate(
-    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+static enum vcs_zcode_action_input_result package_action_input_bindings_match(
+    const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
     const struct vcs_zcode_package_action_input_v1 *input,
     const uint8_t task_root[32], const uint8_t candidate_root[32])
 {
-    if (!repo_root || !task || !candidate || !input || !task_root ||
-        !candidate_root)
-        return VCS_ZCODE_ACTION_INPUT_NULL;
-    enum vcs_zcode_action_input_result result = package_action_input_shape(input);
     uint8_t checked_task[32], checked_candidate[32];
-    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     if (vcs_zcode_task_root(task, checked_task) != VCS_ZCODE_DEV_OK ||
         vcs_zcode_candidate_root(candidate, checked_candidate) !=
             VCS_ZCODE_DEV_OK ||
@@ -648,6 +703,24 @@ vcs_zcode_package_action_input_validate_for_candidate(
         memcmp(input->acceptance_recipe_root,
                task->acceptance_tests_root, 32) != 0)
         return VCS_ZCODE_ACTION_INPUT_BINDING;
+    return VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+enum vcs_zcode_action_input_result
+vcs_zcode_package_action_input_validate_for_candidate(
+    const char *repo_root, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_package_action_input_v1 *input,
+    const uint8_t task_root[32], const uint8_t candidate_root[32])
+{
+    if (!repo_root || !task || !candidate || !input || !task_root ||
+        !candidate_root)
+        return VCS_ZCODE_ACTION_INPUT_NULL;
+    enum vcs_zcode_action_input_result result = package_action_input_shape(input);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
+    result = package_action_input_bindings_match(task, candidate, input,
+                                                 task_root, candidate_root);
+    if (result != VCS_ZCODE_ACTION_INPUT_OK) return result;
     if (vcs_zcode_task_authority_validate_for_candidate(
             repo_root, task, candidate) != VCS_ZCODE_TASK_AUTHORITY_OK)
         return VCS_ZCODE_ACTION_INPUT_CAS;

@@ -198,11 +198,6 @@ contexts/commons/modules/vcs/src/zcode_accepted_work.c:vcs_zcode_accepted_work_r
 contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:accepted_bundle_parse:21
 contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:vcs_zcode_accepted_work_bundle_export:29
 contexts/commons/modules/vcs/src/zcode_accepted_work_bundle.c:vcs_zcode_accepted_work_bundle_import:24
-contexts/commons/modules/vcs/src/zcode_action_input.c:action_input_load_cas:16
-contexts/commons/modules/vcs/src/zcode_action_input.c:action_input_shape:18
-contexts/commons/modules/vcs/src/zcode_action_input.c:vcs_zcode_action_input_parse:17
-contexts/commons/modules/vcs/src/zcode_action_input.c:vcs_zcode_action_input_validate_for_candidate:23
-contexts/commons/modules/vcs/src/zcode_action_input.c:vcs_zcode_package_action_input_validate_for_candidate:19
 contexts/commons/modules/vcs/src/zcode_agent_context.c:context_measure:31
 contexts/commons/modules/vcs/src/zcode_agent_context.c:vcs_zcode_agent_context_parse:25
 contexts/commons/modules/vcs/src/zcode_agent_context.c:vcs_zcode_agent_context_validate_for_task:16
