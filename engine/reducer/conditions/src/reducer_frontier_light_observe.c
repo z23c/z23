@@ -599,15 +599,9 @@ int rfrl_tear_bypass_warn_total(void)
     return atomic_load(&g_tear_bypass_warn_total);
 }
 
-bool rfrl_detail_push(struct json_value *out)
+static bool rfrl_detail_push_detect_cursors(struct json_value *out)
 {
-    if (!out)
-        return false;
-
     bool ok = true;
-    int phase = atomic_load(&g_last_rr_phase);
-    int coin_status =
-        atomic_load(&g_last_rr_values[RFRL_RR_COIN_BACKFILL_STATUS]);
 
     ok = ok && json_push_kv_int(out, "local_height_at_detect",
                                 atomic_load(&g_local_height_at_detect));
@@ -636,6 +630,13 @@ bool rfrl_detail_push(struct json_value *out)
     ok = ok && json_push_kv_int(
         out, "tip_finalize_cursor_at_detect",
         atomic_load(&g_tip_finalize_cursor_at_detect));
+    return ok;
+}
+
+static bool rfrl_detail_push_backfill_and_bypass(struct json_value *out)
+{
+    bool ok = true;
+
     ok = ok && json_push_kv_int(
         out, "coin_backfill_scan_present_at_detect",
         atomic_load(&g_coin_backfill_scan_present_at_detect));
@@ -657,13 +658,13 @@ bool rfrl_detail_push(struct json_value *out)
                                  atomic_load(&g_tear_bypass_active));
     ok = ok && json_push_kv_int(out, "tear_bypass_warn_total",
                                 atomic_load(&g_tear_bypass_warn_total));
+    return ok;
+}
 
-    ok = ok && json_push_kv_bool(out, "last_reconcile_seen",
-                                 atomic_load(&g_last_rr_seen) != 0);
-    ok = ok && json_push_kv_str(out, "last_reconcile_phase",
-                                rfrl_rr_phase_label(phase));
-    ok = ok && json_push_kv_int(out, "last_reconcile_remedy_call",
-                                atomic_load(&g_last_rr_remedy_call));
+static bool rfrl_detail_push_reconcile_fields(struct json_value *out)
+{
+    bool ok = true;
+
     for (int i = 0; i < RFRL_RR_FIELD_N; i++) {
         int value = atomic_load(&g_last_rr_values[i]);
         if (k_rfrl_rr_fields[i].is_bool) {
@@ -674,6 +675,29 @@ bool rfrl_detail_push(struct json_value *out)
                                         value);
         }
     }
+    return ok;
+}
+
+bool rfrl_detail_push(struct json_value *out)
+{
+    if (!out)
+        return false;
+
+    bool ok = true;
+    int phase = atomic_load(&g_last_rr_phase);
+    int coin_status =
+        atomic_load(&g_last_rr_values[RFRL_RR_COIN_BACKFILL_STATUS]);
+
+    ok = ok && rfrl_detail_push_detect_cursors(out);
+    ok = ok && rfrl_detail_push_backfill_and_bypass(out);
+
+    ok = ok && json_push_kv_bool(out, "last_reconcile_seen",
+                                 atomic_load(&g_last_rr_seen) != 0);
+    ok = ok && json_push_kv_str(out, "last_reconcile_phase",
+                                rfrl_rr_phase_label(phase));
+    ok = ok && json_push_kv_int(out, "last_reconcile_remedy_call",
+                                atomic_load(&g_last_rr_remedy_call));
+    ok = ok && rfrl_detail_push_reconcile_fields(out);
     ok = ok && json_push_kv_str(
         out, "last_reconcile_coin_backfill_status_label",
         rfrl_coin_backfill_status_label(coin_status));
