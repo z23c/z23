@@ -302,29 +302,100 @@ static void tw_child(const struct mesh_terminal_worker_config *cfg,
     tw_fail(stage_fd, TW_STAGE_EXEC, 127);
 }
 
+/* True when either spawn argument pointer is absent; the caller refuses
+ * by name before touching either. */
+static bool tw_spawn_args_missing(const struct mesh_terminal_worker_config *cfg,
+                                  const struct mesh_terminal_worker *out)
+{
+    return !cfg || !out;
+}
+
+/* NULL when the config passes every spawn precondition, otherwise the
+ * refusal reason; every failure here shares MESH_TERMINAL_WORKER_ERR_CONFIG
+ * (the same shape as tw_argv_refusal). The checks keep their spawn order. */
+static const char *tw_spawn_config_refusal(
+    const struct mesh_terminal_worker_config *cfg)
+{
+    if (!cfg->shell_path || cfg->shell_path[0] != '/' || !cfg->workdir ||
+        cfg->workdir[0] != '/')
+        return "spawn: shell_path and workdir must be absolute";
+    if (!geometry_in_bounds(cfg->cols, cfg->rows))
+        return "spawn: cols/rows out of proto bounds";
+    if (cfg->max_bytes_in == 0 || cfg->max_bytes_out == 0 ||
+        cfg->lifetime_seconds == 0)
+        return "spawn: byte and lifetime budgets must be nonzero";
+    if (strlen(cfg->workdir) >= 512)
+        return "spawn: workdir path too long";
+    return NULL;
+}
+
+/* True when the granted pty slave could not be unlocked for the child. */
+static bool tw_pty_unlock_failed(int master)
+{
+    return grantpt(master) != 0 || unlockpt(master) != 0;
+}
+
+/* Opens the pty master, unlocks its slave, and writes the slave's path;
+ * on failure returns the PTY error naming the failing step, with the
+ * master already closed whenever one had been opened. */
+static struct zcl_result tw_open_pty(int *master_out, char *slave_path,
+                                     size_t slave_cap)
+{
+    int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (master < 0)
+        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
+                       "posix_openpt failed errno=%d", errno);
+    if (tw_pty_unlock_failed(master)) {
+        close(master);
+        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
+                       "grantpt/unlockpt failed errno=%d", errno);
+    }
+    if (ptsname_r(master, slave_path, slave_cap) != 0) {
+        close(master);
+        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
+                       "ptsname failed errno=%d", errno);
+    }
+    *master_out = master;
+    return ZCL_OK;
+}
+
+/* Block every signal on this thread ahead of the fork; 0 on success,
+ * otherwise the errno of the step that failed. */
+static int tw_block_all_signals(sigset_t *blocked, sigset_t *original_mask)
+{
+    if (sigfillset(blocked) != 0)
+        return errno;
+    if (sigprocmask(SIG_SETMASK, blocked, original_mask) != 0)
+        return errno;
+    return 0;
+}
+
+/* Restore the caller's mask in the parent after the fork; 0 on success,
+ * otherwise the errno. */
+static int tw_restore_signal_mask(const sigset_t *original_mask)
+{
+    return sigprocmask(SIG_SETMASK, original_mask, NULL) == 0 ? 0 : errno;
+}
+
+/* True when fork itself failed or the parent's signal mask could not be
+ * restored — either way the child, if any, must not be kept. */
+static bool tw_fork_or_restore_failed(pid_t pid, int restore_error)
+{
+    return pid < 0 || restore_error != 0;
+}
+
 static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     const struct mesh_terminal_worker_config *cfg, int64_t now_unix,
     struct mesh_terminal_worker *out)
 {
-    if (!cfg || !out)
+    if (tw_spawn_args_missing(cfg, out))
         return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_NULL,
                        "spawn: cfg/out required");
     memset(out, 0, sizeof(*out));
     out->master_fd = -1;
-    if (!cfg->shell_path || cfg->shell_path[0] != '/' || !cfg->workdir ||
-        cfg->workdir[0] != '/')
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_CONFIG,
-                       "spawn: shell_path and workdir must be absolute");
-    if (!geometry_in_bounds(cfg->cols, cfg->rows))
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_CONFIG,
-                       "spawn: cols/rows out of proto bounds");
-    if (cfg->max_bytes_in == 0 || cfg->max_bytes_out == 0 ||
-        cfg->lifetime_seconds == 0)
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_CONFIG,
-                       "spawn: byte and lifetime budgets must be nonzero");
-    if (strlen(cfg->workdir) >= 512)
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_CONFIG,
-                       "spawn: workdir path too long");
+    const char *bad = tw_spawn_config_refusal(cfg);
+    if (bad)
+        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_CONFIG, "%s", bad);
 
     out->pid = 0;
     out->pgid = 0;
@@ -336,21 +407,12 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     out->idle_seconds = cfg->idle_seconds;
     out->close_reason = MESH_TERMINAL_CLOSE_REQUESTED;
 
-    int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
-    if (master < 0)
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
-                       "posix_openpt failed errno=%d", errno);
-    if (grantpt(master) != 0 || unlockpt(master) != 0) {
-        close(master);
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
-                       "grantpt/unlockpt failed errno=%d", errno);
-    }
     char slave_path[128];
-    if (ptsname_r(master, slave_path, sizeof(slave_path)) != 0) {
-        close(master);
-        return ZCL_ERR(MESH_TERMINAL_WORKER_ERR_PTY,
-                       "ptsname failed errno=%d", errno);
-    }
+    int master = -1;
+    struct zcl_result pty = tw_open_pty(&master, slave_path,
+                                        sizeof(slave_path));
+    if (!pty.ok)
+        return pty;
 
     /* The staging pipe tells the parent WHICH named stage failed, and its
      * O_CLOEXEC turns EOF into the exec-succeeded signal. */
@@ -364,9 +426,9 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
     /* Only this calling thread's mask changes. Blocking before fork prevents
      * an inherited caught handler from opening a descriptor around the sweep. */
     sigset_t blocked, original_mask;
-    if (sigfillset(&blocked) != 0 ||
-        sigprocmask(SIG_SETMASK, &blocked, &original_mask) != 0) {
-        int saved = errno;
+    int block_errno = tw_block_all_signals(&blocked, &original_mask);
+    if (block_errno != 0) {
+        int saved = block_errno;
         close(master);
         close(stage_pipe[0]);
         close(stage_pipe[1]);
@@ -380,8 +442,8 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
         tw_child(cfg, slave_path, master, stage_pipe[1], &original_mask);
         _exit(127); /* unreachable */
     }
-    int restore_error = sigprocmask(SIG_SETMASK, &original_mask, NULL) == 0 ? 0 : errno;
-    if (pid < 0 || restore_error) {
+    int restore_error = tw_restore_signal_mask(&original_mask);
+    if (tw_fork_or_restore_failed(pid, restore_error)) {
         /* A restore failure cannot discard ownership of a successfully forked
          * child: it is killed and reaped here, never leaked. */
         twx_abandon_child(pid);
@@ -416,6 +478,7 @@ static struct zcl_result mesh_terminal_worker_spawn_platform_arm(
      * became its own leader). */
     (void)setpgid(pid, pid);
 
+    /* Raise O_NONBLOCK on the pty master when its flags can be read. */
     int flags = fcntl(master, F_GETFL, 0);
     if (flags >= 0)
         (void)fcntl(master, F_SETFL, flags | O_NONBLOCK);
