@@ -595,29 +595,6 @@ static void wrpl_sort_uniq(char *set, size_t row, int *n)
     *n = w + 1;
 }
 
-/* grep --exclude-dir=<base> semantics, active only under a production scan. */
-static int wrpl_excl_dir(const char *base)
-{
-    static const char *const skip[] = {
-        "planted", "build", "vendor", ".claude", "test-tmp"
-    };
-    if (!lint_prod_scan())
-        return 0;
-    for (size_t i = 0; i < sizeof skip / sizeof skip[0]; i++)
-        if (strcmp(base, skip[i]) == 0)
-            return 1;
-    return 0;
-}
-
-/* grep --exclude='_*fixture*.[ch]' basename-glob semantics. */
-static int wrpl_excl_file(const char *base)
-{
-    if (!lint_prod_scan())
-        return 0;
-    return fnmatch("_*fix" "ture*.c", base, 0) == 0
-        || fnmatch("_*fix" "ture*.h", base, 0) == 0;
-}
-
 struct wrpl_re {
     regex_t semi;  /* ;[ \t]*$            — prototype ender */
     regex_t log;   /* LOG_(FAIL|ERR|NULL|RETURN|WARN) */
@@ -883,10 +860,10 @@ static int wrpl_walk_entry(const char *dir, const char *name,
     else if (lstat(path, &st) != 0)
         rc = 0; /* vanished mid-scan: grep would just lose the race */
     else if (S_ISDIR(st.st_mode)) {
-        if (!wrpl_excl_dir(name))
+        if (!rd_excl_dir(name))
             rc = wrpl_walk(path, r);
     } else if (S_ISREG(st.st_mode) && wrpl_is_c(name, nl)
-               && !wrpl_excl_file(name))
+               && !rd_excl_file(name))
         rc = wrpl_scan_file(path, r);
     return rc;
 }
@@ -923,14 +900,6 @@ static int wrpl_for_each_dir(const char *dirs, const struct wrpl_re *r)
     return rc;
 }
 
-/* grep -vE '^[[:space:]]*#|^[[:space:]]*$' line filter. */
-static int wrpl_skip_line(const char *s)
-{
-    while (*s && isspace((unsigned char)*s))
-        s++;
-    return *s == '#' || *s == '\0';
-}
-
 static int wrpl_base_read(char base[][WRPL_KEY], int *nb)
 {
     *nb = 0;
@@ -944,7 +913,7 @@ static int wrpl_base_read(char base[][WRPL_KEY], int *nb)
     while ((n = getline(&line, &cap, f)) >= 0) {
         while (n > 0 && line[n - 1] == '\n')
             line[--n] = '\0';
-        if (wrpl_skip_line(line))
+        if (rd_skip_line(line))
             continue;
         if (*nb >= WRPL_MAX_KEYS || (size_t)n >= WRPL_KEY) {
             rc = die("z23-lint: raw-prepare baseline overflow\n", "");
@@ -1028,15 +997,6 @@ static int wrpl_print_new_keys(char base[][WRPL_KEY], int nb)
     return 0;
 }
 
-static int wrpl_count_base_keys(char base[][WRPL_KEY], int nb)
-{
-    int nbase = 0;
-    for (int i = 0; i < nb; i++)
-        if (strstr(base[i], "::") != NULL)
-            nbase++;
-    return nbase;
-}
-
 static int wrpl_fail_mode(void)
 {
     static char base[WRPL_MAX_KEYS][WRPL_KEY];
@@ -1059,7 +1019,7 @@ static int wrpl_fail_mode(void)
             return rc;
         return 1;
     }
-    int nbase = wrpl_count_base_keys(base, nb);
+    int nbase = rd_count_base_keys(base, nb);
     printf("  OK: no new unlogged raw-prepare NULL-check (%d tracked; baseline %d)\n",
            g_wrpl_nkeys, nbase);
     if (ngone > 0)
@@ -1284,4 +1244,5 @@ int check_wallet_raw_prepare_log_selftest(void)
     g_wrpl_nkeys = 0;
     return st_ok(bad, "check_wallet_raw_prepare_log selftest: OK\n");
 }
+
 
