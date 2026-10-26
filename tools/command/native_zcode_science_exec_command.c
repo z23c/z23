@@ -101,6 +101,162 @@ static bool zsx_root_ok(const char *hex)
     return hex && zsx_hex32(hex, root);
 }
 
+static bool zsx_is_reproduction(const char *original_result_root)
+{
+    return original_result_root && original_result_root[0];
+}
+
+static const char *zsx_root_reject_detail(const struct json_value *input,
+                                          bool is_repro, char *root_err,
+                                          size_t root_err_size)
+{
+    /* Root grammar is checked for every field the caller supplied; the
+     * executor enforces the per-kind required set. */
+    const char *root_keys[] = {
+        "study_root", "task_root", "candidate_root", "method_root",
+        "original_result_root",
+    };
+    for (size_t i = 0; i < sizeof(root_keys) / sizeof(root_keys[0]); i++) {
+        const char *value = zsx_str(input, root_keys[i]);
+        if (value && value[0] &&
+            !zcl_native_require_hex64(root_keys[i], value, NULL, root_err,
+                                      root_err_size))
+            return root_err;
+    }
+    if (is_repro) {
+        if (!zsx_root_ok(zsx_str(input, "method_root")))
+            return "a reproduction requires method_root";
+    } else if (!zsx_root_ok(zsx_str(input, "study_root")) ||
+               !zsx_root_ok(zsx_str(input, "task_root")) ||
+               !zsx_root_ok(zsx_str(input, "candidate_root")) ||
+               !zsx_root_ok(zsx_str(input, "method_root"))) {
+        return "a benchmark run requires study_root, task_root, candidate_root, and method_root";
+    }
+    return NULL;
+}
+
+static bool zsx_fill_execute_request(
+    const struct json_value *input,
+    struct zcode_benchmark_execute_request *req, bool is_repro,
+    const char *original)
+{
+    req->study_root_hex = zsx_str(input, "study_root");
+    req->task_root_hex = zsx_str(input, "task_root");
+    req->candidate_root_hex = zsx_str(input, "candidate_root");
+    req->method_root_hex = zsx_str(input, "method_root");
+    req->original_result_root_hex = is_repro ? original : NULL;
+    req->action_kind = zsx_str(input, "action_kind");
+    req->action_sequence = (uint64_t)zsx_int(input, "action_sequence", 1);
+    req->result_sequence = (uint64_t)zsx_int(input, "result_sequence", 1);
+    req->reproduction_sequence =
+        (uint64_t)zsx_int(input, "reproduction_sequence", 1);
+    req->challenge_block_height =
+        (uint64_t)zsx_int(input, "challenge_block_height", 0);
+    const char *challenge_hash = zsx_str(input, "challenge_block_hash");
+    return challenge_hash &&
+           zsx_hex32(challenge_hash, req->challenge_block_hash) &&
+           req->challenge_block_height != 0;
+}
+
+static const char *zsx_reproducer_reject_detail(
+    const struct json_value *input,
+    struct zcode_benchmark_execute_request *req, bool is_repro,
+    char *reproducer_err, size_t reproducer_err_size)
+{
+    const char *reproducer = zsx_str(input, "reproducer_pubkey");
+    if (reproducer &&
+        !zcl_native_require_hex64("reproducer_pubkey", reproducer,
+                                  req->reproducer_pubkey, reproducer_err,
+                                  reproducer_err_size))
+        return reproducer_err;
+    if (is_repro && !reproducer)
+        return "a reproduction requires reproducer_pubkey";
+    return NULL;
+}
+
+enum zsx_sovereignty_status {
+    ZSX_SOVEREIGNTY_ALLOWED = 0,
+    ZSX_SOVEREIGNTY_BAD_AUTHORITY,
+    ZSX_SOVEREIGNTY_DENIED,
+};
+
+static enum zsx_sovereignty_status zsx_sovereignty_check(
+    const struct json_value *input, bool is_repro, const char *original,
+    const char *candidate_root_hex, char *policy_error,
+    size_t policy_error_size)
+{
+    struct vcs_zcode_sovereignty_subject subject;
+    memset(&subject, 0, sizeof(subject));
+    const char *authority_root = is_repro ? original : candidate_root_hex;
+    if (!zsx_hex32(authority_root, subject.semantic_root))
+        return ZSX_SOVEREIGNTY_BAD_AUTHORITY;
+    memcpy(subject.package_root, subject.semantic_root, 32);
+    (void)snprintf(subject.service_type, sizeof(subject.service_type),
+                   "science");
+    if (!zcl_native_zcode_policy_allows(
+            zsx_datadir(input), VCS_ZCODE_SOVEREIGNTY_EXECUTE, &subject,
+            policy_error, policy_error_size))
+        return ZSX_SOVEREIGNTY_DENIED;
+    return ZSX_SOVEREIGNTY_ALLOWED;
+}
+
+static const char *zsx_policy_denial_detail(const char *policy_error)
+{
+    return policy_error[0] ? policy_error : "local policy denied EXECUTE";
+}
+
+static void zsx_push_execute_reply(
+    struct zcl_command_reply *reply,
+    const struct zcode_benchmark_execute_out *out)
+{
+    (void)json_push_kv_str(&reply->data, "kind",
+                           out->run.is_reproduction ? "reproduction"
+                                                    : "result");
+    if (!out->committed) {
+        (void)json_push_kv_str(&reply->data, "plan_root",
+                               out->plan.plan_root);
+        (void)json_push_kv_str(&reply->data, "request_hash",
+                               out->plan.request_hash);
+        (void)json_push_kv_int(&reply->data, "expires_unix",
+                               out->plan.expires_unix);
+        (void)json_push_kv_bool(&reply->data, "already_planned",
+                                out->plan.already_planned);
+        (void)json_push_kv_str(&reply->data, "state", "PLANNED");
+        (void)json_push_kv_str(&reply->data, "commit_command",
+                               "zcode.science.work.execute");
+    } else {
+        (void)json_push_kv_str(&reply->data, "result_root",
+                               out->commit.result_root);
+        (void)json_push_kv_bool(&reply->data, "already_committed",
+                                out->commit.already_committed);
+        (void)json_push_kv_str(&reply->data, "state", "COMMITTED");
+        (void)json_push_kv_str(&reply->data, "authority",
+                               "CANONICAL_CAS_WIRE");
+    }
+    char hex[65];
+    if (out->run.is_reproduction) {
+        (void)json_push_kv_int(&reply->data, "verdict", out->run.verdict);
+        zcl_hex_encode(out->run.reproduced_root, 32, hex);
+        (void)json_push_kv_str(&reply->data, "reproduced_result_root", hex);
+        zcl_hex_encode(out->run.reproduction_root, 32, hex);
+        (void)json_push_kv_str(&reply->data, "reproduction_root", hex);
+    } else {
+        (void)json_push_kv_int(&reply->data, "status",
+                               out->run.result.status);
+        zcl_hex_encode(out->run.result_root, 32, hex);
+        (void)json_push_kv_str(&reply->data, "observation_root", hex);
+    }
+    zcl_hex_encode(out->run.manifest_root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "raw_sample_root", hex);
+    zcl_hex_encode(out->run.sample_payload_root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "sample_payload_root", hex);
+    zcl_hex_encode(out->run.evidence_root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "evidence_root", hex);
+    zcl_hex_encode(out->run.hardware_profile_root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "hardware_profile_root", hex);
+    (void)json_push_kv_str(&reply->data, "observation", "NEVER_TRUTH");
+}
+
 void zcl_native_handle_zcode_science_work_execute(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -117,96 +273,44 @@ void zcl_native_handle_zcode_science_work_execute(
 #endif
     const struct json_value *input = request->input;
     const char *original = zsx_str(input, "original_result_root");
-    bool is_repro = original && original[0];
-    /* Root grammar is checked for every field the caller supplied; the
-     * executor enforces the per-kind required set. */
-    const char *root_keys[] = {
-        "study_root", "task_root", "candidate_root", "method_root",
-        "original_result_root",
-    };
-    for (size_t i = 0; i < sizeof(root_keys) / sizeof(root_keys[0]); i++) {
-        const char *value = zsx_str(input, root_keys[i]);
-        char root_err[128];
-        if (value && value[0] &&
-            !zcl_native_require_hex64(root_keys[i], value, NULL, root_err,
-                                      sizeof(root_err))) {
-            zsx_fail(reply, "BAD_ROOT", root_err);
-            return;
-        }
-    }
-    if (is_repro) {
-        if (!zsx_root_ok(zsx_str(input, "method_root"))) {
-            zsx_fail(reply, "BAD_ROOT",
-                     "a reproduction requires method_root");
-            return;
-        }
-    } else {
-        if (!zsx_root_ok(zsx_str(input, "study_root")) ||
-            !zsx_root_ok(zsx_str(input, "task_root")) ||
-            !zsx_root_ok(zsx_str(input, "candidate_root")) ||
-            !zsx_root_ok(zsx_str(input, "method_root"))) {
-            zsx_fail(reply, "BAD_ROOT",
-                     "a benchmark run requires study_root, task_root, candidate_root, and method_root");
-            return;
-        }
+    bool is_repro = zsx_is_reproduction(original);
+    char root_err_buf[128];
+    const char *root_err = zsx_root_reject_detail(
+        input, is_repro, root_err_buf, sizeof(root_err_buf));
+    if (root_err) {
+        zsx_fail(reply, "BAD_ROOT", root_err);
+        return;
     }
     struct zcode_benchmark_execute_request req;
     memset(&req, 0, sizeof(req));
-    req.study_root_hex = zsx_str(input, "study_root");
-    req.task_root_hex = zsx_str(input, "task_root");
-    req.candidate_root_hex = zsx_str(input, "candidate_root");
-    req.method_root_hex = zsx_str(input, "method_root");
-    req.original_result_root_hex = is_repro ? original : NULL;
-    req.action_kind = zsx_str(input, "action_kind");
-    req.action_sequence = (uint64_t)zsx_int(input, "action_sequence", 1);
-    req.result_sequence = (uint64_t)zsx_int(input, "result_sequence", 1);
-    req.reproduction_sequence =
-        (uint64_t)zsx_int(input, "reproduction_sequence", 1);
-    req.challenge_block_height =
-        (uint64_t)zsx_int(input, "challenge_block_height", 0);
-    const char *challenge_hash = zsx_str(input, "challenge_block_hash");
-    if (!challenge_hash ||
-        !zsx_hex32(challenge_hash, req.challenge_block_hash) ||
-        req.challenge_block_height == 0) {
+    if (!zsx_fill_execute_request(input, &req, is_repro, original)) {
         zsx_fail(reply, "BAD_CHALLENGE",
                  "challenge_block_height (>=1) and challenge_block_hash (64 lowercase hex) are required");
         return;
     }
-    const char *reproducer = zsx_str(input, "reproducer_pubkey");
-    char reproducer_err[128];
-    if (reproducer &&
-        !zcl_native_require_hex64("reproducer_pubkey", reproducer,
-                                  req.reproducer_pubkey, reproducer_err,
-                                  sizeof(reproducer_err))) {
+    char reproducer_err_buf[128];
+    const char *reproducer_err = zsx_reproducer_reject_detail(
+        input, &req, is_repro, reproducer_err_buf,
+        sizeof(reproducer_err_buf));
+    if (reproducer_err) {
         zsx_fail(reply, "BAD_REPRODUCER", reproducer_err);
-        return;
-    }
-    if (is_repro && !reproducer) {
-        zsx_fail(reply, "BAD_REPRODUCER",
-                 "a reproduction requires reproducer_pubkey");
         return;
     }
     req.now = zsx_int(input, "now_unix",
                       (int64_t)platform_time_wall_unix());
     req.confirm = zsx_confirm(input);
     req.hooks = NULL;
-    struct vcs_zcode_sovereignty_subject subject;
-    memset(&subject, 0, sizeof(subject));
-    const char *authority_root = is_repro ? original : req.candidate_root_hex;
-    if (!zsx_hex32(authority_root, subject.semantic_root)) {
+    char policy_error[192] = {0};
+    enum zsx_sovereignty_status sovereignty = zsx_sovereignty_check(
+        input, is_repro, original, req.candidate_root_hex, policy_error,
+        sizeof(policy_error));
+    if (sovereignty == ZSX_SOVEREIGNTY_BAD_AUTHORITY) {
         zsx_fail(reply, "BAD_ROOT", "execution authority root is invalid");
         return;
     }
-    memcpy(subject.package_root, subject.semantic_root, 32);
-    (void)snprintf(subject.service_type, sizeof(subject.service_type),
-                   "science");
-    char policy_error[192] = {0};
-    if (!zcl_native_zcode_policy_allows(
-            zsx_datadir(input), VCS_ZCODE_SOVEREIGNTY_EXECUTE, &subject,
-            policy_error, sizeof(policy_error))) {
+    if (sovereignty == ZSX_SOVEREIGNTY_DENIED) {
         zsx_fail_service(reply, "SOVEREIGNTY_DENIED",
-                         policy_error[0] ? policy_error
-                                         : "local policy denied EXECUTE");
+                         zsx_policy_denial_detail(policy_error));
         return;
     }
     char ws[ZSX_PATH_MAX];
@@ -229,49 +333,5 @@ void zcl_native_handle_zcode_science_work_execute(
         zsx_fail_service(reply, "WORK_EXECUTE_REFUSED", executed.message);
         return;
     }
-    (void)json_push_kv_str(&reply->data, "kind",
-                           out.run.is_reproduction ? "reproduction"
-                                                   : "result");
-    if (!out.committed) {
-        (void)json_push_kv_str(&reply->data, "plan_root",
-                               out.plan.plan_root);
-        (void)json_push_kv_str(&reply->data, "request_hash",
-                               out.plan.request_hash);
-        (void)json_push_kv_int(&reply->data, "expires_unix",
-                               out.plan.expires_unix);
-        (void)json_push_kv_bool(&reply->data, "already_planned",
-                                out.plan.already_planned);
-        (void)json_push_kv_str(&reply->data, "state", "PLANNED");
-        (void)json_push_kv_str(&reply->data, "commit_command",
-                               "zcode.science.work.execute");
-    } else {
-        (void)json_push_kv_str(&reply->data, "result_root",
-                               out.commit.result_root);
-        (void)json_push_kv_bool(&reply->data, "already_committed",
-                                out.commit.already_committed);
-        (void)json_push_kv_str(&reply->data, "state", "COMMITTED");
-        (void)json_push_kv_str(&reply->data, "authority",
-                               "CANONICAL_CAS_WIRE");
-    }
-    char hex[65];
-    if (out.run.is_reproduction) {
-        (void)json_push_kv_int(&reply->data, "verdict", out.run.verdict);
-        zcl_hex_encode(out.run.reproduced_root, 32, hex);
-        (void)json_push_kv_str(&reply->data, "reproduced_result_root", hex);
-        zcl_hex_encode(out.run.reproduction_root, 32, hex);
-        (void)json_push_kv_str(&reply->data, "reproduction_root", hex);
-    } else {
-        (void)json_push_kv_int(&reply->data, "status", out.run.result.status);
-        zcl_hex_encode(out.run.result_root, 32, hex);
-        (void)json_push_kv_str(&reply->data, "observation_root", hex);
-    }
-    zcl_hex_encode(out.run.manifest_root, 32, hex);
-    (void)json_push_kv_str(&reply->data, "raw_sample_root", hex);
-    zcl_hex_encode(out.run.sample_payload_root, 32, hex);
-    (void)json_push_kv_str(&reply->data, "sample_payload_root", hex);
-    zcl_hex_encode(out.run.evidence_root, 32, hex);
-    (void)json_push_kv_str(&reply->data, "evidence_root", hex);
-    zcl_hex_encode(out.run.hardware_profile_root, 32, hex);
-    (void)json_push_kv_str(&reply->data, "hardware_profile_root", hex);
-    (void)json_push_kv_str(&reply->data, "observation", "NEVER_TRUTH");
+    zsx_push_execute_reply(reply, &out);
 }
