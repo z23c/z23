@@ -414,6 +414,46 @@ static bool snapshot(sqlite3 *db, int *hstar, int *served_floor,
     return true;
 }
 
+static bool seed_wedge_residue_row(sqlite3 *db, int R,
+                                   const struct uint256 *h,
+                                   const char *tip_status)
+{
+    /* R: upstream logs ok=1; tip_finalize is the stale ok=0 residue
+     * with reorg_depth=2. */
+    return put_upstream_ok(db, R, &h[R - A]) &&
+           put_tip(db, R, tip_status, 0, 2, &h[R - A + 1]);
+}
+
+static bool seed_wedge_header_admits(sqlite3 *db, int R,
+                                     const struct uint256 *h,
+                                     bool admit_at_gap)
+{
+    /* R+1, R+2: the column gap — validate..tip_finalize ALL absent (nothing
+     * seeded). header_admit DOES carry them (real parent-linked blocks). */
+    /* header_admit for every real height A+1 .. R+2. */
+    bool ok = true;
+    for (int x = A + 1; x <= R + 2; x++) {
+        if (x == R + 1 && !admit_at_gap)
+            continue;  /* RED control: starve FIX-A's lookahead binder */
+        ok = ok && put_header_admit(db, x, &h[x - A], &h[x - A - 1]);
+    }
+    return ok;
+}
+
+static bool seed_wedge_cursors(sqlite3 *db, int R, int top_cursor)
+{
+    /* Cursors: upstream all high; utxo_apply at the gap (R+1 unapplied). */
+    return seed_cursor(db, "validate_headers", top_cursor) &&
+           seed_cursor(db, "header_admit", top_cursor) &&
+           seed_cursor(db, "body_fetch", top_cursor) &&
+           seed_cursor(db, "body_persist", top_cursor) &&
+           seed_cursor(db, "script_validate", top_cursor) &&
+           seed_cursor(db, "proof_validate", top_cursor) &&
+           seed_cursor(db, "utxo_apply", R + 1) &&
+           seed_cursor(db, "tip_finalize", top_cursor) &&
+           seed_coins_applied(db, R + 1);
+}
+
 /* Seed the wedge: ok=0 reorg_detected at R, a column gap at R+1,R+2,
  * header_admit present through R+2 unless !admit_at_gap, coins_applied =
  * utxo_apply cursor = R+1, upper cursors high. */
@@ -432,28 +472,9 @@ static bool seed_wedge_with_tip_status(sqlite3 *db, int R, int top_cursor,
         /* tip_finalize finalized row carries lookahead hash(x+1). */
         ok = ok && put_tip(db, x, "finalized", 1, 0, &h[x - A + 1]);
     }
-    /* R: upstream logs ok=1; tip_finalize is the stale ok=0 residue
-     * with reorg_depth=2. */
-    ok = ok && put_upstream_ok(db, R, &h[R - A]) &&
-         put_tip(db, R, tip_status, 0, 2, &h[R - A + 1]);
-    /* R+1, R+2: the column gap — validate..tip_finalize ALL absent (nothing
-     * seeded). header_admit DOES carry them (real parent-linked blocks). */
-    /* header_admit for every real height A+1 .. R+2. */
-    for (int x = A + 1; x <= R + 2; x++) {
-        if (x == R + 1 && !admit_at_gap)
-            continue;  /* RED control: starve FIX-A's lookahead binder */
-        ok = ok && put_header_admit(db, x, &h[x - A], &h[x - A - 1]);
-    }
-    /* Cursors: upstream all high; utxo_apply at the gap (R+1 unapplied). */
-    ok = ok && seed_cursor(db, "validate_headers", top_cursor) &&
-         seed_cursor(db, "header_admit", top_cursor) &&
-         seed_cursor(db, "body_fetch", top_cursor) &&
-         seed_cursor(db, "body_persist", top_cursor) &&
-         seed_cursor(db, "script_validate", top_cursor) &&
-         seed_cursor(db, "proof_validate", top_cursor) &&
-         seed_cursor(db, "utxo_apply", R + 1) &&
-         seed_cursor(db, "tip_finalize", top_cursor) &&
-         seed_coins_applied(db, R + 1);
+    ok = ok && seed_wedge_residue_row(db, R, h, tip_status);
+    ok = ok && seed_wedge_header_admits(db, R, h, admit_at_gap);
+    ok = ok && seed_wedge_cursors(db, R, top_cursor);
     return ok;
 }
 
@@ -461,6 +482,262 @@ static bool seed_wedge(sqlite3 *db, int R, int top_cursor, bool admit_at_gap)
 {
     return seed_wedge_with_tip_status(db, R, top_cursor, admit_at_gap,
                                       "reorg_detected");
+}
+
+static int run_red_pin_check(sqlite3 *db, int R)
+{
+    int failures = 0;
+    int hstar = 0, sf = 0, coins = 0;
+    bool tear = false;
+    /* The residue pins H* at R-1; coins lead it but utxo_apply's own log
+     * is solid through R, so this is not a tear. */
+    RR_CHECK("RED snapshot pins H* at R-1 with NO coin tear (vs utxo_apply)",
+             snapshot(db, &hstar, &sf, &coins, &tear) &&
+             hstar == R - 1 && coins == R + 1 && !tear);
+    return failures;
+}
+
+/* RED control: header_admit absent at the gap, so the residue row is not
+ * replaced and H* stays at R-1; the refill re-derives the column without
+ * touching coins. */
+static int run_red_case(int R, int top_cursor)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir),
+                     "reorg_residue_tipfin_replace", "red");
+    RR_CHECK("RED open", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RR_CHECK("RED schema", seed_schema(db));
+    RR_CHECK("RED seed (no header_admit at gap)",
+             seed_wedge(db, R, top_cursor, /*admit_at_gap=*/false));
+
+    failures += run_red_pin_check(db, R);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct stage_reducer_frontier_reconcile_result rr;
+    /* The lookahead binder fails before the row is counted, so the
+     * residue is neither found nor replaced and H* is not lifted. */
+    RR_CHECK("RED reconcile: residue NOT replaced, no tear refusal",
+             stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
+             !rr.refused_coin_tear &&
+             rr.reorg_residue_tipfin_found == 0 &&
+             rr.reorg_residue_tipfin_replaced == 0 &&
+             rr.lowest_reorg_residue_tipfin == -1);
+    struct tip_view row;
+    RR_CHECK("RED residue row untouched (still ok=0 reorg_detected)",
+             tip_at(db, R, &row) && row.found && row.ok == 0 &&
+             strcmp(row.status, "reorg_detected") == 0);
+    /* H* unchanged at R-1 (residue still caps it). */
+    int hstar2 = 0, sf2 = 0, coins2 = 0;
+    bool tear2 = false;
+    RR_CHECK("RED H* still pinned at R-1 (residue not replaced)",
+             snapshot(db, &hstar2, &sf2, &coins2, &tear2) &&
+             hstar2 == R - 1 && !tear2);
+    /* Downstream heal: upstream cursors clamp back to re-walk the
+     * unfinalized column; forward-only, nothing deleted. */
+    RR_CHECK("RED downstream refill clamps the column (no refusal)",
+             rr.repaired &&
+             cursor_value(db, "validate_headers") == R + 2 &&
+             cursor_value(db, "tip_finalize") == R);
+    /* COINS UNTOUCHED even without FIX-A: utxo_apply cursor and
+     * coins_applied are never rewound by the downstream refill. */
+    RR_CHECK("RED utxo_apply + coins UNCHANGED at R+1 (no coin rewind)",
+             cursor_value(db, "utxo_apply") == R + 1 && coins2 == R + 1);
+    main_state_free(&ms);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* REWOUND: the header_admit row at R+1 exists but the cursor is rewound
+ * to R+1, so it is replay territory and not a lookahead binder. */
+static int run_rewound_case(int R, int top_cursor)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir),
+                     "reorg_residue_tipfin_replace", "rewound");
+    RR_CHECK("REWOUND open", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RR_CHECK("REWOUND schema", seed_schema(db));
+    RR_CHECK("REWOUND seed with header_admit row at gap",
+             seed_wedge(db, R, top_cursor, /*admit_at_gap=*/true));
+    RR_CHECK("REWOUND force header_admit cursor to gap",
+             seed_cursor(db, "header_admit", R + 1) &&
+             cursor_value(db, "header_admit") == R + 1);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct stage_reducer_frontier_reconcile_result rr;
+    RR_CHECK("REWOUND reconcile refuses row at header_admit cursor",
+             stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
+             rr.reorg_residue_tipfin_found == 0 &&
+             rr.reorg_residue_tipfin_replaced == 0 &&
+             rr.lowest_reorg_residue_tipfin == -1);
+    struct tip_view row;
+    RR_CHECK("REWOUND residue row untouched",
+             tip_at(db, R, &row) && row.found && row.ok == 0 &&
+             strcmp(row.status, "reorg_detected") == 0);
+    RR_CHECK("REWOUND header_admit cursor remains at replay point",
+             cursor_value(db, "header_admit") == R + 1);
+    main_state_free(&ms);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Reconcile the residue: the verdict is replaced in place, never deleted. */
+static int run_green_reconcile(sqlite3 *db, int R, struct main_state *ms,
+        struct stage_reducer_frontier_reconcile_result *rr)
+{
+    int failures = 0;
+    long long rows_before = tip_row_count(db);
+
+    struct uint256 admit_next;  /* hash(R+1) the replacement must carry */
+    mk_hash(&admit_next, R + 1);
+
+    main_state_init(ms);
+    RR_CHECK("GREEN reconcile replaces residue + clears the tear",
+             stage_reducer_frontier_reconcile_light(db, ms, rr) &&
+             !rr->refused_coin_tear &&
+             rr->reorg_residue_tipfin_replaced == 1 &&
+             rr->reorg_residue_tipfin_found == 1 &&
+             rr->lowest_reorg_residue_tipfin == R &&
+             rr->repaired);
+
+    /* The residue verdict is REPLACED in place — same height, fresh ok=1
+     * 'finalize_backfill' carrying the lookahead hash(R+1); NEVER deleted
+     * (row count unchanged), served_floor preserved. */
+    struct tip_view fixed;
+    RR_CHECK("GREEN residue REPLACED in place -> ok=1 finalize_backfill",
+             tip_at(db, R, &fixed) && fixed.found && fixed.ok == 1 &&
+             strcmp(fixed.status, "finalize_backfill") == 0 &&
+             fixed.has_hash &&
+             memcmp(fixed.hash.data, admit_next.data, 32) == 0);
+    RR_CHECK("GREEN no tip_finalize row deleted (replace, not delete)",
+             tip_row_count(db) == rows_before);
+    return failures;
+}
+
+/* Post-reconcile: H* lifts to R and the column clamps; coins are untouched. */
+static int run_green_clamp_checks(
+        sqlite3 *db, int R,
+        const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    int failures = 0;
+    /* H* lifted to R; the column clamps to the header_admit hole R+1. */
+    int hstar2 = 0, sf2 = 0, coins2 = 0;
+    bool tear2 = false;
+    RR_CHECK("GREEN H* lifted to R, tear cleared arithmetically",
+             snapshot(db, &hstar2, &sf2, &coins2, &tear2) &&
+             hstar2 == R && !tear2);
+    RR_CHECK("GREEN validate_headers clamped to the column hole R+1",
+             rr->clamped_validate_headers &&
+             cursor_value(db, "validate_headers") == R + 1);
+    RR_CHECK("GREEN body_fetch + body_persist cascade to R+1",
+             cursor_value(db, "body_fetch") == R + 1 &&
+             cursor_value(db, "body_persist") == R + 1);
+    /* tip_finalize's cursor is the served tip: R+1, backed by the replaced
+     * ok=1 row at R; upstream column cursors stay at R+1. */
+    RR_CHECK("GREEN tip_finalize clamped to the served tip R+1",
+             cursor_value(db, "tip_finalize") == R + 1);
+
+    /* COINS UNTOUCHED: utxo_apply cursor and coins_applied unchanged —
+     * no coin rewind, no double-apply. */
+    RR_CHECK("GREEN utxo_apply cursor UNCHANGED at R+1 (no coin rewind)",
+             cursor_value(db, "utxo_apply") == R + 1);
+    RR_CHECK("GREEN coins_applied UNCHANGED at R+1",
+             coins2 == R + 1);
+    return failures;
+}
+
+/* GREEN: header_admit present at the gap. The residue is replaced, H*
+ * lifts to R, and the column clamps to R+1; coins are untouched. */
+static int run_green_case(int R, int top_cursor)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir),
+                     "reorg_residue_tipfin_replace", "green");
+    RR_CHECK("GREEN open", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RR_CHECK("GREEN schema", seed_schema(db));
+    RR_CHECK("GREEN seed THE wedge",
+             seed_wedge(db, R, top_cursor, /*admit_at_gap=*/true));
+
+    int hstar = 0, sf = 0, coins = 0;
+    bool tear = false;
+    /* H* capped at R-1 by the ok=0 residue; coins at R+1 are not a tear. */
+    RR_CHECK("GREEN snapshot reproduces the live pin (H*=R-1, no tear)",
+             snapshot(db, &hstar, &sf, &coins, &tear) &&
+             hstar == R - 1 && coins == R + 1 && !tear);
+    struct tip_view residue;
+    RR_CHECK("GREEN residue row present ok=0 reorg_detected before fix",
+             tip_at(db, R, &residue) && residue.found &&
+             residue.ok == 0 &&
+             strcmp(residue.status, "reorg_detected") == 0);
+
+    struct main_state ms;
+    struct stage_reducer_frontier_reconcile_result rr;
+    failures += run_green_reconcile(db, R, &ms, &rr);
+    failures += run_green_clamp_checks(db, R, &rr);
+
+    /* Idempotent: a second reconcile finds nothing to replace and holds
+     * the clamped column (no re-pin, no re-tear). */
+    struct stage_reducer_frontier_reconcile_result rr2;
+    RR_CHECK("GREEN second reconcile is a stable no-replace",
+             stage_reducer_frontier_reconcile_light(db, &ms, &rr2) &&
+             !rr2.refused_coin_tear &&
+             rr2.reorg_residue_tipfin_replaced == 0 &&
+             cursor_value(db, "utxo_apply") == R + 1);
+    main_state_free(&ms);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* One non-residue status: the guarded ok=0 row must stay unreplaced. */
+static int run_nonresidue_case(int R, int top_cursor, const char *status)
+{
+    int failures = 0;
+    char dir[256];
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), "nonresidue-%s", status);
+    test_make_tmpdir(dir, sizeof(dir),
+                     "reorg_residue_tipfin_replace", suffix);
+    RR_CHECK("NONRESIDUE open", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RR_CHECK("NONRESIDUE schema", seed_schema(db));
+    RR_CHECK("NONRESIDUE seed guarded status",
+             seed_wedge_with_tip_status(db, R, top_cursor,
+                                        /*admit_at_gap=*/true, status));
+
+    long long rows_before = tip_row_count(db);
+    struct main_state ms;
+    main_state_init(&ms);
+    struct stage_reducer_frontier_reconcile_result rr;
+    RR_CHECK("NONRESIDUE reconcile leaves guarded status unreplaced",
+             stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
+             rr.reorg_residue_tipfin_found == 0 &&
+             rr.reorg_residue_tipfin_replaced == 0 &&
+             rr.lowest_reorg_residue_tipfin == -1);
+
+    struct tip_view row;
+    RR_CHECK("NONRESIDUE row remains ok=0 with original status",
+             tip_at(db, R, &row) && row.found && row.ok == 0 &&
+             strcmp(row.status, status) == 0);
+    RR_CHECK("NONRESIDUE no tip_finalize row deleted or replaced",
+             tip_row_count(db) == rows_before);
+    main_state_free(&ms);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
 int test_reorg_residue_tipfin_replace(void);
@@ -472,187 +749,9 @@ int test_reorg_residue_tipfin_replace(void)
     const int R = A + 3;            /* residue height */
     const int top_cursor = A + 100; /* upper stages far ahead of the gap */
 
-    /* RED control: header_admit absent at the gap, so the residue row is not
-     * replaced and H* stays at R-1; the refill re-derives the column without
-     * touching coins. */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir),
-                         "reorg_residue_tipfin_replace", "red");
-        RR_CHECK("RED open", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        RR_CHECK("RED schema", seed_schema(db));
-        RR_CHECK("RED seed (no header_admit at gap)",
-                 seed_wedge(db, R, top_cursor, /*admit_at_gap=*/false));
-
-        int hstar = 0, sf = 0, coins = 0;
-        bool tear = false;
-        /* The residue pins H* at R-1; coins lead it but utxo_apply's own log
-         * is solid through R, so this is not a tear. */
-        RR_CHECK("RED snapshot pins H* at R-1 with NO coin tear (vs utxo_apply)",
-                 snapshot(db, &hstar, &sf, &coins, &tear) &&
-                 hstar == R - 1 && coins == R + 1 && !tear);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct stage_reducer_frontier_reconcile_result rr;
-        /* The lookahead binder fails before the row is counted, so the
-         * residue is neither found nor replaced and H* is not lifted. */
-        RR_CHECK("RED reconcile: residue NOT replaced, no tear refusal",
-                 stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
-                 !rr.refused_coin_tear &&
-                 rr.reorg_residue_tipfin_found == 0 &&
-                 rr.reorg_residue_tipfin_replaced == 0 &&
-                 rr.lowest_reorg_residue_tipfin == -1);
-        struct tip_view row;
-        RR_CHECK("RED residue row untouched (still ok=0 reorg_detected)",
-                 tip_at(db, R, &row) && row.found && row.ok == 0 &&
-                 strcmp(row.status, "reorg_detected") == 0);
-        /* H* unchanged at R-1 (residue still caps it). */
-        int hstar2 = 0, sf2 = 0, coins2 = 0;
-        bool tear2 = false;
-        RR_CHECK("RED H* still pinned at R-1 (residue not replaced)",
-                 snapshot(db, &hstar2, &sf2, &coins2, &tear2) &&
-                 hstar2 == R - 1 && !tear2);
-        /* Downstream heal: upstream cursors clamp back to re-walk the
-         * unfinalized column; forward-only, nothing deleted. */
-        RR_CHECK("RED downstream refill clamps the column (no refusal)",
-                 rr.repaired &&
-                 cursor_value(db, "validate_headers") == R + 2 &&
-                 cursor_value(db, "tip_finalize") == R);
-        /* COINS UNTOUCHED even without FIX-A: utxo_apply cursor and
-         * coins_applied are never rewound by the downstream refill. */
-        RR_CHECK("RED utxo_apply + coins UNCHANGED at R+1 (no coin rewind)",
-                 cursor_value(db, "utxo_apply") == R + 1 && coins2 == R + 1);
-        main_state_free(&ms);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    /* REWOUND: the header_admit row at R+1 exists but the cursor is rewound
-     * to R+1, so it is replay territory and not a lookahead binder. */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir),
-                         "reorg_residue_tipfin_replace", "rewound");
-        RR_CHECK("REWOUND open", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        RR_CHECK("REWOUND schema", seed_schema(db));
-        RR_CHECK("REWOUND seed with header_admit row at gap",
-                 seed_wedge(db, R, top_cursor, /*admit_at_gap=*/true));
-        RR_CHECK("REWOUND force header_admit cursor to gap",
-                 seed_cursor(db, "header_admit", R + 1) &&
-                 cursor_value(db, "header_admit") == R + 1);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct stage_reducer_frontier_reconcile_result rr;
-        RR_CHECK("REWOUND reconcile refuses row at header_admit cursor",
-                 stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
-                 rr.reorg_residue_tipfin_found == 0 &&
-                 rr.reorg_residue_tipfin_replaced == 0 &&
-                 rr.lowest_reorg_residue_tipfin == -1);
-        struct tip_view row;
-        RR_CHECK("REWOUND residue row untouched",
-                 tip_at(db, R, &row) && row.found && row.ok == 0 &&
-                 strcmp(row.status, "reorg_detected") == 0);
-        RR_CHECK("REWOUND header_admit cursor remains at replay point",
-                 cursor_value(db, "header_admit") == R + 1);
-        main_state_free(&ms);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-
-    /* GREEN: header_admit present at the gap. The residue is replaced, H*
-     * lifts to R, and the column clamps to R+1; coins are untouched. */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir),
-                         "reorg_residue_tipfin_replace", "green");
-        RR_CHECK("GREEN open", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        RR_CHECK("GREEN schema", seed_schema(db));
-        RR_CHECK("GREEN seed THE wedge",
-                 seed_wedge(db, R, top_cursor, /*admit_at_gap=*/true));
-
-        int hstar = 0, sf = 0, coins = 0;
-        bool tear = false;
-        /* H* capped at R-1 by the ok=0 residue; coins at R+1 are not a tear. */
-        RR_CHECK("GREEN snapshot reproduces the live pin (H*=R-1, no tear)",
-                 snapshot(db, &hstar, &sf, &coins, &tear) &&
-                 hstar == R - 1 && coins == R + 1 && !tear);
-        struct tip_view residue;
-        RR_CHECK("GREEN residue row present ok=0 reorg_detected before fix",
-                 tip_at(db, R, &residue) && residue.found &&
-                 residue.ok == 0 &&
-                 strcmp(residue.status, "reorg_detected") == 0);
-        long long rows_before = tip_row_count(db);
-
-        struct uint256 admit_next;  /* hash(R+1) the replacement must carry */
-        mk_hash(&admit_next, R + 1);
-
-        struct main_state ms;
-        main_state_init(&ms);
-        struct stage_reducer_frontier_reconcile_result rr;
-        RR_CHECK("GREEN reconcile replaces residue + clears the tear",
-                 stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
-                 !rr.refused_coin_tear &&
-                 rr.reorg_residue_tipfin_replaced == 1 &&
-                 rr.reorg_residue_tipfin_found == 1 &&
-                 rr.lowest_reorg_residue_tipfin == R &&
-                 rr.repaired);
-
-        /* The residue verdict is REPLACED in place — same height, fresh ok=1
-         * 'finalize_backfill' carrying the lookahead hash(R+1); NEVER deleted
-         * (row count unchanged), served_floor preserved. */
-        struct tip_view fixed;
-        RR_CHECK("GREEN residue REPLACED in place -> ok=1 finalize_backfill",
-                 tip_at(db, R, &fixed) && fixed.found && fixed.ok == 1 &&
-                 strcmp(fixed.status, "finalize_backfill") == 0 &&
-                 fixed.has_hash &&
-                 memcmp(fixed.hash.data, admit_next.data, 32) == 0);
-        RR_CHECK("GREEN no tip_finalize row deleted (replace, not delete)",
-                 tip_row_count(db) == rows_before);
-
-        /* H* lifted to R; the column clamps to the header_admit hole R+1. */
-        int hstar2 = 0, sf2 = 0, coins2 = 0;
-        bool tear2 = false;
-        RR_CHECK("GREEN H* lifted to R, tear cleared arithmetically",
-                 snapshot(db, &hstar2, &sf2, &coins2, &tear2) &&
-                 hstar2 == R && !tear2);
-        RR_CHECK("GREEN validate_headers clamped to the column hole R+1",
-                 rr.clamped_validate_headers &&
-                 cursor_value(db, "validate_headers") == R + 1);
-        RR_CHECK("GREEN body_fetch + body_persist cascade to R+1",
-                 cursor_value(db, "body_fetch") == R + 1 &&
-                 cursor_value(db, "body_persist") == R + 1);
-        /* tip_finalize's cursor is the served tip: R+1, backed by the replaced
-         * ok=1 row at R; upstream column cursors stay at R+1. */
-        RR_CHECK("GREEN tip_finalize clamped to the served tip R+1",
-                 cursor_value(db, "tip_finalize") == R + 1);
-
-        /* COINS UNTOUCHED: utxo_apply cursor and coins_applied unchanged —
-         * no coin rewind, no double-apply. */
-        RR_CHECK("GREEN utxo_apply cursor UNCHANGED at R+1 (no coin rewind)",
-                 cursor_value(db, "utxo_apply") == R + 1);
-        RR_CHECK("GREEN coins_applied UNCHANGED at R+1",
-                 coins2 == R + 1);
-
-        /* Idempotent: a second reconcile finds nothing to replace and holds
-         * the clamped column (no re-pin, no re-tear). */
-        struct stage_reducer_frontier_reconcile_result rr2;
-        RR_CHECK("GREEN second reconcile is a stable no-replace",
-                 stage_reducer_frontier_reconcile_light(db, &ms, &rr2) &&
-                 !rr2.refused_coin_tear &&
-                 rr2.reorg_residue_tipfin_replaced == 0 &&
-                 cursor_value(db, "utxo_apply") == R + 1);
-        main_state_free(&ms);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
+    failures += run_red_case(R, top_cursor);
+    failures += run_rewound_case(R, top_cursor);
+    failures += run_green_case(R, top_cursor);
 
     /* ── NEGATIVE GUARD — ok=0 tip_finalize rows that represent a real
      * upstream/precondition failure are NOT reorg residue. They must stay
@@ -666,38 +765,7 @@ int test_reorg_residue_tipfin_replace(void)
          i < sizeof(non_residue_statuses) / sizeof(non_residue_statuses[0]);
          i++) {
         const char *status = non_residue_statuses[i];
-        char dir[256];
-        char suffix[64];
-        snprintf(suffix, sizeof(suffix), "nonresidue-%s", status);
-        test_make_tmpdir(dir, sizeof(dir),
-                         "reorg_residue_tipfin_replace", suffix);
-        RR_CHECK("NONRESIDUE open", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        RR_CHECK("NONRESIDUE schema", seed_schema(db));
-        RR_CHECK("NONRESIDUE seed guarded status",
-                 seed_wedge_with_tip_status(db, R, top_cursor,
-                                            /*admit_at_gap=*/true, status));
-
-        long long rows_before = tip_row_count(db);
-        struct main_state ms;
-        main_state_init(&ms);
-        struct stage_reducer_frontier_reconcile_result rr;
-        RR_CHECK("NONRESIDUE reconcile leaves guarded status unreplaced",
-                 stage_reducer_frontier_reconcile_light(db, &ms, &rr) &&
-                 rr.reorg_residue_tipfin_found == 0 &&
-                 rr.reorg_residue_tipfin_replaced == 0 &&
-                 rr.lowest_reorg_residue_tipfin == -1);
-
-        struct tip_view row;
-        RR_CHECK("NONRESIDUE row remains ok=0 with original status",
-                 tip_at(db, R, &row) && row.found && row.ok == 0 &&
-                 strcmp(row.status, status) == 0);
-        RR_CHECK("NONRESIDUE no tip_finalize row deleted or replaced",
-                 tip_row_count(db) == rows_before);
-        main_state_free(&ms);
-
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
+        failures += run_nonresidue_case(R, top_cursor, status);
     }
 
     printf("reorg_residue_tipfin_replace: %d failures\n", failures);
