@@ -307,7 +307,8 @@ static int scan_sapling_bundle_raw(const uint8_t *bdata, size_t bsize,
     return 0;
 }
 
-/* Skips the JoinSplit list of a v2+ pre-Sapling transaction.
+/* Skips the JoinSplit list of a transaction whose version carries one
+ * (v2 to v4, including Sapling v4).
  * Returns -1 on malformed data, 0 on success. */
 static int skip_joinsplit_section_raw(const uint8_t *bdata, size_t bsize,
                                       size_t *pos, bool overwintered,
@@ -327,9 +328,10 @@ static int skip_joinsplit_section_raw(const uint8_t *bdata, size_t bsize,
     return 0;
 }
 
-/* Walks one transaction, leaving *pos at the start of the next one.
- * Returns -1 on malformed data, 1 when a shielded element is present,
- * 0 otherwise. */
+/* Walks one transaction. Returns -1 on malformed data, 1 when a Sapling
+ * output is present (*pos is then left mid-transaction, not at the next
+ * one), 0 otherwise (*pos at the start of the next transaction). Only Sapling
+ * outputs are detected; spends and JoinSplits are skipped. */
 static int scan_tx_shielded_raw(const uint8_t *bdata, size_t bsize, size_t *pos)
 {
     bool overwintered;
