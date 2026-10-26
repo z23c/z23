@@ -461,6 +461,39 @@ static void induced_failure_scope(struct node_db *ndb)
     return;
 }
 
+static bool dt_induced_keys_absent(struct node_db *ndb, char *buf,
+                                   size_t buf_sz, size_t *got)
+{
+    return !node_db_state_get(ndb, "induced.k1", buf, buf_sz, got) &&
+           !node_db_state_get(ndb, "induced.k2", buf, buf_sz, got) &&
+           !node_db_state_get(ndb, "induced.k3", buf, buf_sz, got);
+}
+
+static bool dt_induced_leak_events_seen(void)
+{
+    return atomic_load(&g_ev_begin)    == 1 &&
+           atomic_load(&g_ev_leaked)   == 1 &&
+           atomic_load(&g_ev_rollback) == 1 &&
+           atomic_load(&g_ev_commit)   == 0;
+}
+
+static bool dt_induced_followup_commits(struct node_db *ndb)
+{
+    struct db_txn *good = db_txn_begin(ndb, "test.induced_followup");
+    bool follow_ok = good != NULL &&
+                     node_db_state_set(ndb, "induced.k4", "v4", 2) &&
+                     db_txn_commit(good);
+    db_txn_auto_rollback(&good);
+    return follow_ok;
+}
+
+static bool dt_induced_followup_visible(struct node_db *ndb, char *buf,
+                                        size_t buf_sz, size_t *got)
+{
+    return node_db_state_get(ndb, "induced.k4", buf, buf_sz, got) &&
+           *got == 2 && memcmp(buf, "v4", 2) == 0;
+}
+
 static int t_rollback_on_induced_failure(void)
 {
     int failures = 0;
@@ -477,38 +510,24 @@ static int t_rollback_on_induced_failure(void)
     /* Sanity: none of the keys exist yet. */
     char buf[64];
     size_t got = 0;
-    bool absent_before =
-        !node_db_state_get(&ndb, "induced.k1", buf, sizeof(buf), &got) &&
-        !node_db_state_get(&ndb, "induced.k2", buf, sizeof(buf), &got) &&
-        !node_db_state_get(&ndb, "induced.k3", buf, sizeof(buf), &got);
+    bool absent_before = dt_induced_keys_absent(&ndb, buf, sizeof(buf), &got);
 
     /* Run the aborted scope. */
     induced_failure_scope(&ndb);
 
     /* All three keys must still be absent — auto_rollback dropped
      * the partial writes. */
-    bool absent_after =
-        !node_db_state_get(&ndb, "induced.k1", buf, sizeof(buf), &got) &&
-        !node_db_state_get(&ndb, "induced.k2", buf, sizeof(buf), &got) &&
-        !node_db_state_get(&ndb, "induced.k3", buf, sizeof(buf), &got);
+    bool absent_after = dt_induced_keys_absent(&ndb, buf, sizeof(buf), &got);
 
     /* And the event trail shows exactly the leak pattern: one begin,
      * one LEAKED, one rollback(leaked), zero commits. */
-    bool events_ok = atomic_load(&g_ev_begin)    == 1 &&
-                     atomic_load(&g_ev_leaked)   == 1 &&
-                     atomic_load(&g_ev_rollback) == 1 &&
-                     atomic_load(&g_ev_commit)   == 0;
+    bool events_ok = dt_induced_leak_events_seen();
 
     /* Cross-check: a follow-up committed write IS visible, proving
      * the db itself is still healthy after the rollback. */
-    struct db_txn *good = db_txn_begin(&ndb, "test.induced_followup");
-    bool follow_ok = good != NULL &&
-                     node_db_state_set(&ndb, "induced.k4", "v4", 2) &&
-                     db_txn_commit(good);
-    db_txn_auto_rollback(&good);
+    bool follow_ok = dt_induced_followup_commits(&ndb);
     bool follow_visible =
-        node_db_state_get(&ndb, "induced.k4", buf, sizeof(buf), &got) &&
-        got == 2 && memcmp(buf, "v4", 2) == 0;
+        dt_induced_followup_visible(&ndb, buf, sizeof(buf), &got);
 
     bool ok = absent_before && absent_after && events_ok &&
               follow_ok && follow_visible;
@@ -566,39 +585,65 @@ static int t_rollback_preserves_pre_existing_rows(void)
 
 /* ── 17. Failed COMMIT explicitly unwinds SQLite state ───────── */
 
+static bool dt_open_child_fk_db(struct node_db *ndb, bool *opened)
+{
+    memset(ndb, 0, sizeof(*ndb));
+    *opened = node_db_open(ndb, ":memory:");
+    return *opened && node_db_exec(ndb,
+        "CREATE TABLE dt_parent(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE dt_child(parent_id INTEGER NOT NULL,"
+        "FOREIGN KEY(parent_id) REFERENCES dt_parent(id) "
+        "DEFERRABLE INITIALLY DEFERRED)");
+}
+
+static bool dt_failed_commit_insert(struct node_db *ndb, bool schema_ok,
+                                    bool *inserted)
+{
+    struct db_txn *txn = schema_ok
+        ? db_txn_begin(ndb, "test.failed_commit") : NULL;
+    *inserted = txn && node_db_exec(
+        ndb, "INSERT INTO dt_child(parent_id) VALUES(7)");
+    bool commit_failed = *inserted && !db_txn_commit(txn);
+    db_txn_auto_rollback(&txn);
+    return commit_failed;
+}
+
+static bool dt_child_table_empty(struct node_db *ndb)
+{
+    sqlite3_stmt *st = NULL;
+    bool count_ok = sqlite3_prepare_v2(ndb->db,
+        "SELECT COUNT(*) FROM dt_child", -1, &st, NULL) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0;
+    sqlite3_finalize(st);
+    return count_ok;
+}
+
+static bool dt_commit_followup_txn(struct node_db *ndb, bool opened)
+{
+    struct db_txn *followup = opened
+        ? db_txn_begin(ndb, "test.failed_followup") : NULL;
+    bool followup_ok = followup && db_txn_commit(followup);
+    db_txn_auto_rollback(&followup);
+    return followup_ok;
+}
+
 static int t_failed_commit_rolls_back(void)
 {
     int failures = 0;
     dt_install_observer();
 
     struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool opened = node_db_open(&ndb, ":memory:");
-    bool schema_ok = opened && node_db_exec(&ndb,
-        "CREATE TABLE dt_parent(id INTEGER PRIMARY KEY);"
-        "CREATE TABLE dt_child(parent_id INTEGER NOT NULL,"
-        "FOREIGN KEY(parent_id) REFERENCES dt_parent(id) "
-        "DEFERRABLE INITIALLY DEFERRED)");
+    bool opened = false;
+    bool schema_ok = dt_open_child_fk_db(&ndb, &opened);
 
-    struct db_txn *txn = schema_ok
-        ? db_txn_begin(&ndb, "test.failed_commit") : NULL;
-    bool inserted = txn && node_db_exec(
-        &ndb, "INSERT INTO dt_child(parent_id) VALUES(7)");
-    bool commit_failed = inserted && !db_txn_commit(txn);
-    db_txn_auto_rollback(&txn);
+    bool inserted = false;
+    bool commit_failed = dt_failed_commit_insert(&ndb, schema_ok, &inserted);
 
     struct node_db_status status = {0};
     node_db_get_status(&ndb, &status);
-    sqlite3_stmt *st = NULL;
-    bool count_ok = opened && sqlite3_prepare_v2(ndb.db,
-        "SELECT COUNT(*) FROM dt_child", -1, &st, NULL) == SQLITE_OK &&
-        sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0;
-    sqlite3_finalize(st);
+    bool count_ok = opened && dt_child_table_empty(&ndb);
 
-    struct db_txn *followup = opened
-        ? db_txn_begin(&ndb, "test.failed_followup") : NULL;
-    bool followup_ok = followup && db_txn_commit(followup);
-    db_txn_auto_rollback(&followup);
+    bool followup_ok = dt_commit_followup_txn(&ndb, opened);
     bool ok = opened && schema_ok && inserted && commit_failed && count_ok &&
               followup_ok && !status.tx_open &&
               atomic_load(&g_ev_rollback) == 1 &&
@@ -617,64 +662,70 @@ static int t_failed_commit_rolls_back(void)
  * cure is ROLLBACK +
  * a fresh BEGIN IMMEDIATE. Drives two real connections on one file-backed
  * WAL db (the class cannot occur on a single connection). */
-static int t_busy_snapshot_rollback_rebegin(void)
+static bool dt_busy_snap_open_pair(struct node_db *a, sqlite3 **b,
+                                   const char *path, bool *opened)
 {
-    int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "db_txn", "busy_snapshot");
-    char path[512];
-    snprintf(path, sizeof(path), "%s/node.db", dir);
-
-    struct node_db a;
-    memset(&a, 0, sizeof(a));
-    bool opened = node_db_open(&a, path);
+    memset(a, 0, sizeof(*a));
+    *opened = node_db_open(a, path);
     /* Bound the (uncurable) busy wait so the assertion stays fast. */
-    if (opened)
-        sqlite3_busy_timeout(a.db, 1000);
+    if (*opened)
+        sqlite3_busy_timeout(a->db, 1000);
 
-    sqlite3 *b = NULL;
-    bool b_open = opened &&
-        sqlite3_open_v2(path, &b, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
+    bool b_open = *opened &&
+        sqlite3_open_v2(path, b, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
     if (b_open)
-        sqlite3_busy_timeout(b, 30000);
+        sqlite3_busy_timeout(*b, 30000);
+    return b_open;
+}
 
+static bool dt_busy_snap_pin_snapshot(struct node_db *a, bool b_open)
+{
     /* A: deferred BEGIN + a SELECT to pin read snapshot S1. */
-    bool begun = b_open && node_db_begin(&a);
+    bool begun = b_open && node_db_begin(a);
     char buf[8];
     size_t got = 0;
-    bool pinned = begun &&
-        !node_db_state_get(&a, "snap.nokey", buf, sizeof(buf), &got);
+    return begun &&
+        !node_db_state_get(a, "snap.nokey", buf, sizeof(buf), &got);
+}
 
+static bool dt_busy_snap_concurrent_commit(sqlite3 *b, bool pinned)
+{
     /* B: a concurrent writer commits, advancing the db past S1. */
-    bool b_committed = pinned &&
+    return pinned &&
         sqlite3_exec(b,
             "BEGIN IMMEDIATE;"
             "INSERT OR REPLACE INTO node_state(key,value) VALUES('snap.b', X'01');"
             "COMMIT;", NULL, NULL, NULL) == SQLITE_OK;
+}
 
+static bool dt_busy_snap_failing_write(struct node_db *a, bool b_committed)
+{
     /* A: its first write after B's commit fails as BUSY_SNAPSHOT. Driven
      * with a raw write stmt so the extended code is read straight off the
      * failing sqlite3_step, not through a wrapper's finalize. */
     sqlite3_stmt *w = NULL;
     bool prep = b_committed &&
-        sqlite3_prepare_v2(a.db,
+        sqlite3_prepare_v2(a->db,
             "INSERT OR REPLACE INTO node_state(key,value) VALUES('snap.a', X'01')",
             -1, &w, NULL) == SQLITE_OK;
     int wrc = prep ? sqlite3_step(w) : SQLITE_OK;
-    int xrc = sqlite3_extended_errcode(a.db);
+    int xrc = sqlite3_extended_errcode(a->db);
     sqlite3_finalize(w);
-    bool snapshot_class = prep && wrc == SQLITE_BUSY &&
-                          xrc == SQLITE_BUSY_SNAPSHOT;
-    DT_RUN("dt: deferred write after concurrent commit is BUSY_SNAPSHOT",
-           snapshot_class);
+    return prep && wrc == SQLITE_BUSY && xrc == SQLITE_BUSY_SNAPSHOT;
+}
 
+static bool dt_busy_snap_cure(struct node_db *a, bool snapshot_class)
+{
     /* The cure: ROLLBACK + BEGIN IMMEDIATE + write + COMMIT lands. */
-    bool cured = snapshot_class &&
-        node_db_rollback(&a) &&
-        node_db_begin_immediate(&a) &&
-        node_db_state_set(&a, "snap.a", "v", 1) &&
-        node_db_commit(&a);
+    return snapshot_class &&
+        node_db_rollback(a) &&
+        node_db_begin_immediate(a) &&
+        node_db_state_set(a, "snap.a", "v", 1) &&
+        node_db_commit(a);
+}
 
+static bool dt_busy_snap_read_back(sqlite3 *b, bool cured)
+{
     bool visible = false;
     if (cured) {
         sqlite3_stmt *q = NULL;
@@ -684,6 +735,30 @@ static int t_busy_snapshot_rollback_rebegin(void)
                   sqlite3_step(q) == SQLITE_ROW;
         sqlite3_finalize(q);
     }
+    return visible;
+}
+
+static int t_busy_snapshot_rollback_rebegin(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "db_txn", "busy_snapshot");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+
+    struct node_db a;
+    sqlite3 *b = NULL;
+    bool opened = false;
+    bool b_open = dt_busy_snap_open_pair(&a, &b, path, &opened);
+    bool pinned = dt_busy_snap_pin_snapshot(&a, b_open);
+    bool b_committed = dt_busy_snap_concurrent_commit(b, pinned);
+
+    bool snapshot_class = dt_busy_snap_failing_write(&a, b_committed);
+    DT_RUN("dt: deferred write after concurrent commit is BUSY_SNAPSHOT",
+           snapshot_class);
+
+    bool cured = dt_busy_snap_cure(&a, snapshot_class);
+    bool visible = dt_busy_snap_read_back(b, cured);
     DT_RUN("dt: ROLLBACK + BEGIN IMMEDIATE retry lands the write",
            cured && visible);
 
