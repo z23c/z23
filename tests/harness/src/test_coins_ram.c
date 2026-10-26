@@ -191,21 +191,18 @@ static void *cr_md_reader_thread(void *p)
     return NULL;
 }
 
-int test_coins_ram(void);
-int test_coins_ram(void)
+/* ── overlay fold: bind the overlay to a coins_kv handle and apply via the
+ *    PUBLIC API (routed into the overlay) ── */
+static int cr_overlay_fold_reads(char *dir, size_t dir_cap, sqlite3 **db_out,
+                                 uint8_t ov_root[32])
 {
     int failures = 0;
 
-    /* Force the flag ON before the first coins_ram_enabled() (cached once). */
-    setenv("ZCL_FOLD_INRAM", "1", 1);
     CR_CHECK("flag enabled", coins_ram_enabled());
-
-    /* ── overlay fold: bind the overlay to a coins_kv handle and apply via the
-     *    PUBLIC API (routed into the overlay) ── */
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "coins_ram_main", "main");
+    test_make_tmpdir(dir, dir_cap, "coins_ram_main", "main");
     CR_CHECK("ov: progress_store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
+    *db_out = db;
     CR_CHECK("ov: db handle", db != NULL);
     CR_CHECK("ov: schema", coins_kv_ensure_schema(db));
     CR_CHECK("ov: init", coins_ram_init(
@@ -220,7 +217,6 @@ int test_coins_ram(void)
     apply_script_public(db);
 
     /* The overlay is the effective set. Compute its commitment. */
-    uint8_t ov_root[32] = {0};
     CR_CHECK("ov: commitment ok", coins_kv_commitment(db, ov_root) == 0);
 
     /* Determinism / stability: a second commitment over the unchanged overlay
@@ -248,59 +244,84 @@ int test_coins_ram(void)
     /* Effective live count: created 7 outputs (t1.0,t1.1,t2.0,t3.0,t4.0,t5.0,
      * t4.1), spent t2.0,t5.0,t1.0 -> 4 live. */
     CR_CHECK("count: 4 live before flush", coins_kv_count(db) == 4);
+    return failures;
+}
+
+static int cr_check_get_coins_t4(sqlite3 *db)
+{
+    int failures = 0;
 
     /* get_coins reconstruction for t4 (two live vouts 0 and 1). */
+    struct uint256 t4 = cr_txid(0x04);
     struct coins c4; coins_init(&c4);
     bool g4 = coins_kv_get_coins(db, t4.data, &c4);
     CR_CHECK("get_coins: t4 has >=2 vouts", g4 && c4.num_vout >= 2 &&
              coins_is_available(&c4, 0) && coins_is_available(&c4, 1));
     coins_free(&c4);
+    return failures;
+}
 
-     /* coins_ram_get_prevout: the O(1) resolver returns the same four fields
-      * (value/script/height/is_coinbase) as the get_coins reconstruction for a
-      * live overlay coin, and ABSENT for a spent or never-created vout. */
-    {
-        int64_t  pv = 0; size_t pl = 0; int32_t ph = -1; bool pcb = true;
-        uint8_t  pbuf[16] = {0};
-        /* t4.1 is LIVE in the overlay: value=4321, height=15, cb=false,
-         * script {0xF0,0xF1,0xF2} (3 bytes) — from SCRIPT[8]. */
-        bool h41 = coins_ram_get_prevout(t4.data, 1, &pv, pbuf, sizeof(pbuf),
-                                         &pl, &ph, &pcb);
-        CR_CHECK("prevout: t4.1 live hit", h41);
-        CR_CHECK("prevout: t4.1 value==4321", h41 && pv == 4321);
-        CR_CHECK("prevout: t4.1 script_len==3", h41 && pl == 3);
-        CR_CHECK("prevout: t4.1 script bytes",
-                 h41 && pbuf[0] == 0xF0 && pbuf[1] == 0xF1 && pbuf[2] == 0xF2);
-        CR_CHECK("prevout: t4.1 height==15", h41 && ph == 15);
-        CR_CHECK("prevout: t4.1 is_coinbase==false", h41 && !pcb);
+static int cr_check_prevout_live_t41(void)
+{
+    int failures = 0;
 
-        /* t4.0 is LIVE: value=9000, height=13, cb=false, script {0xD0,0xD1}. */
-        int64_t  pv0 = 0; size_t pl0 = 0; int32_t ph0 = -1; bool pcb0 = true;
-        uint8_t  pbuf0[16] = {0};
-        bool h40 = coins_ram_get_prevout(t4.data, 0, &pv0, pbuf0, sizeof(pbuf0),
-                                         &pl0, &ph0, &pcb0);
-        CR_CHECK("prevout: t4.0 live hit", h40 && pv0 == 9000 && ph0 == 13 &&
-                 !pcb0 && pl0 == 2 && pbuf0[0] == 0xD0 && pbuf0[1] == 0xD1);
+    /* coins_ram_get_prevout: the O(1) resolver returns the same four fields
+     * (value/script/height/is_coinbase) as the get_coins reconstruction for a
+     * live overlay coin, and ABSENT for a spent or never-created vout. */
+    int64_t  pv = 0; size_t pl = 0; int32_t ph = -1; bool pcb = true;
+    uint8_t  pbuf[16] = {0};
+    struct uint256 t4 = cr_txid(0x04);
+    /* t4.1 is LIVE in the overlay: value=4321, height=15, cb=false,
+     * script {0xF0,0xF1,0xF2} (3 bytes) — from SCRIPT[8]. */
+    bool h41 = coins_ram_get_prevout(t4.data, 1, &pv, pbuf, sizeof(pbuf),
+                                     &pl, &ph, &pcb);
+    CR_CHECK("prevout: t4.1 live hit", h41);
+    CR_CHECK("prevout: t4.1 value==4321", h41 && pv == 4321);
+    CR_CHECK("prevout: t4.1 script_len==3", h41 && pl == 3);
+    CR_CHECK("prevout: t4.1 script bytes",
+             h41 && pbuf[0] == 0xF0 && pbuf[1] == 0xF1 && pbuf[2] == 0xF2);
+    CR_CHECK("prevout: t4.1 height==15", h41 && ph == 15);
+    CR_CHECK("prevout: t4.1 is_coinbase==false", h41 && !pcb);
+    return failures;
+}
 
-        /* t1.0 was SPENT (tombstoned) -> ABSENT. */
-        int32_t junk_h = 7; bool junk_cb = true;
-        bool h10 = coins_ram_get_prevout(t1.data, 0, NULL, NULL, 0, NULL,
-                                         &junk_h, &junk_cb);
-        CR_CHECK("prevout: t1.0 spent -> absent", !h10);
+static int cr_check_prevout_t40_and_absent(void)
+{
+    int failures = 0;
 
-        /* t5.0 create-then-spend -> ABSENT. */
-        bool h50 = coins_ram_get_prevout(t5.data, 0, NULL, NULL, 0, NULL,
-                                         NULL, NULL);
-        CR_CHECK("prevout: t5.0 create-then-spend -> absent", !h50);
+    struct uint256 t1 = cr_txid(0x01), t4 = cr_txid(0x04), t5 = cr_txid(0x05);
+    /* t4.0 is LIVE: value=9000, height=13, cb=false, script {0xD0,0xD1}. */
+    int64_t  pv0 = 0; size_t pl0 = 0; int32_t ph0 = -1; bool pcb0 = true;
+    uint8_t  pbuf0[16] = {0};
+    bool h40 = coins_ram_get_prevout(t4.data, 0, &pv0, pbuf0, sizeof(pbuf0),
+                                     &pl0, &ph0, &pcb0);
+    CR_CHECK("prevout: t4.0 live hit", h40 && pv0 == 9000 && ph0 == 13 &&
+             !pcb0 && pl0 == 2 && pbuf0[0] == 0xD0 && pbuf0[1] == 0xD1);
 
-        /* never-created vout on a live txid -> ABSENT. */
-        bool h4x = coins_ram_get_prevout(t4.data, 99, NULL, NULL, 0, NULL,
-                                         NULL, NULL);
-        CR_CHECK("prevout: t4.99 never-created -> absent", !h4x);
-    }
+    /* t1.0 was SPENT (tombstoned) -> ABSENT. */
+    int32_t junk_h = 7; bool junk_cb = true;
+    bool h10 = coins_ram_get_prevout(t1.data, 0, NULL, NULL, 0, NULL,
+                                     &junk_h, &junk_cb);
+    CR_CHECK("prevout: t1.0 spent -> absent", !h10);
 
-    /* ── FLUSH: drain the overlay into coins_kv, then the overlay is empty and
-     *    reads fall through to the (now-complete) durable set. ── */
+    /* t5.0 create-then-spend -> ABSENT. */
+    bool h50 = coins_ram_get_prevout(t5.data, 0, NULL, NULL, 0, NULL,
+                                     NULL, NULL);
+    CR_CHECK("prevout: t5.0 create-then-spend -> absent", !h50);
+
+    /* never-created vout on a live txid -> ABSENT. */
+    bool h4x = coins_ram_get_prevout(t4.data, 99, NULL, NULL, 0, NULL,
+                                     NULL, NULL);
+    CR_CHECK("prevout: t4.99 never-created -> absent", !h4x);
+    return failures;
+}
+
+/* ── FLUSH: drain the overlay into coins_kv, then the overlay is empty and
+ *    reads fall through to the (now-complete) durable set. ── */
+static int cr_flush_commitment_identity(sqlite3 *db, const uint8_t ov_root[32])
+{
+    int failures = 0;
+
     uint8_t pre_flush_root[32];
     memcpy(pre_flush_root, ov_root, 32);
     CR_CHECK("flush: ok", coins_ram_flush(20));
@@ -329,39 +350,580 @@ int test_coins_ram(void)
     CR_CHECK("stale flush cannot rewind applied frontier",
              coins_kv_get_applied_height(db, &applied, &found) &&
              found && applied == 21 && coins_kv_count(db) == 4);
+    return failures;
+}
 
-    /* ── coins_applied_height bound check (Wave N hardening, FORWARD_PLAN.md
-     * item 7): the stored width is int64 but every reader treats the value
-     * as int32_t. A corrupted blob decoding outside int32_t range must be a
-     * hard read error, never a silently-truncated in-range-looking height. */
-    {
-        uint8_t out_of_range[8];
-        int64_t huge = (int64_t)INT32_MAX + 1;  /* one past the valid range */
-        for (int i = 0; i < 8; i++)
-            out_of_range[i] = (uint8_t)(((uint64_t)huge) >> (8 * i));
-        CR_CHECK("applied_height bound: corrupt blob written",
-                 progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY,
-                                   out_of_range, sizeof(out_of_range)));
-        int32_t bad_applied = -1; bool bad_found = true;
-        CR_CHECK("applied_height bound: out-of-range value REFUSED",
-                 !coins_kv_get_applied_height(db, &bad_applied, &bad_found));
-        CR_CHECK("applied_height bound: found not stamped true on refusal",
-                 !bad_found);
+/* ── coins_applied_height bound check (Wave N hardening, FORWARD_PLAN.md
+ * item 7): the stored width is int64 but every reader treats the value
+ * as int32_t. A corrupted blob decoding outside int32_t range must be a
+ * hard read error, never a silently-truncated in-range-looking height. */
+static int cr_applied_height_int32_bound(sqlite3 *db)
+{
+    int failures = 0;
 
-        /* Restore the real (in-range) value so the rest of this test group
-         * keeps reading a valid applied frontier. */
-        uint8_t restore[8];
-        int64_t good = 21;
-        for (int i = 0; i < 8; i++)
-            restore[i] = (uint8_t)(((uint64_t)good) >> (8 * i));
-        CR_CHECK("applied_height bound: restored valid blob",
-                 progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY,
-                                   restore, sizeof(restore)));
-        int32_t restored = -1; bool restored_found = false;
-        CR_CHECK("applied_height bound: restored value reads back ok",
-                 coins_kv_get_applied_height(db, &restored, &restored_found) &&
-                 restored_found && restored == 21);
+    uint8_t out_of_range[8];
+    int64_t huge = (int64_t)INT32_MAX + 1;  /* one past the valid range */
+    for (int i = 0; i < 8; i++)
+        out_of_range[i] = (uint8_t)(((uint64_t)huge) >> (8 * i));
+    CR_CHECK("applied_height bound: corrupt blob written",
+             progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY,
+                               out_of_range, sizeof(out_of_range)));
+    int32_t bad_applied = -1; bool bad_found = true;
+    CR_CHECK("applied_height bound: out-of-range value REFUSED",
+             !coins_kv_get_applied_height(db, &bad_applied, &bad_found));
+    CR_CHECK("applied_height bound: found not stamped true on refusal",
+             !bad_found);
+
+    /* Restore the real (in-range) value so the rest of this test group
+     * keeps reading a valid applied frontier. */
+    uint8_t restore[8];
+    int64_t good = 21;
+    for (int i = 0; i < 8; i++)
+        restore[i] = (uint8_t)(((uint64_t)good) >> (8 * i));
+    CR_CHECK("applied_height bound: restored valid blob",
+             progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY,
+                               restore, sizeof(restore)));
+    int32_t restored = -1; bool restored_found = false;
+    CR_CHECK("applied_height bound: restored value reads back ok",
+             coins_kv_get_applied_height(db, &restored, &restored_found) &&
+             restored_found && restored == 21);
+    return failures;
+}
+
+/* Read the utxo_apply stage cursor. Both reconcile legs use this exact query. */
+static int64_t cr_read_utxo_apply_cursor(sqlite3 *db)
+{
+    progress_store_tx_lock();
+    sqlite3_stmt *s = NULL;
+    int64_t cur = -1;
+    if (sqlite3_prepare_v2(db,
+            "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
+            -1, &s, NULL) == SQLITE_OK) {
+        if (sqlite3_step(s) == SQLITE_ROW) cur = sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
     }
+    progress_store_tx_unlock();
+    return cur;
+}
+
+/* ── stage-batch deferred flush: the live mint drains utxo_apply under an
+ *    outer stage batch. Crossing the flush cadence inside that batch must
+ *    NOT try a nested BEGIN; it should defer until after stage_batch_end. */
+static int cr_deferred_flush_inside_batch(void)
+{
+    int failures = 0;
+
+    char dirD[256];
+    test_make_tmpdir(dirD, sizeof(dirD), "coins_ram_deferred", "d");
+    CR_CHECK("defer: open", progress_store_open(dirD));
+    sqlite3 *dbD = progress_store_db();
+    CR_CHECK("defer: schema", coins_kv_ensure_schema(dbD));
+    CR_CHECK("defer: stage schema", stage_table_ensure(dbD));
+    CR_CHECK("defer: init flush_every=1", coins_ram_init(
+                 dbD, 1, coins_kv_set_applied_height_in_tx));
+    coins_ram_writer_enter();
+
+    struct uint256 dt = cr_txid(0x77);
+    CR_CHECK("defer: add overlay coin",
+             coins_kv_add(dbD, dt.data, 0, 7777, 40, false,
+                          (const uint8_t *)"d", 1));
+
+    progress_store_tx_lock();
+    CR_CHECK("defer: batch begin", stage_batch_begin(dbD));
+    CR_CHECK("defer: note_applied defers inside batch",
+             coins_ram_note_applied(40));
+    CR_CHECK("defer: batch still active", stage_batch_active());
+    CR_CHECK("defer: batch end", stage_batch_end(dbD, true));
+    progress_store_tx_unlock();
+
+    CR_CHECK("defer: flush due after batch", coins_ram_flush_due());
+    CR_CHECK("defer: durable count after flush", coins_kv_count(dbD) == 1);
+    int32_t dapplied = -1; bool dfound = false;
+    CR_CHECK("defer: applied frontier read",
+             coins_kv_get_applied_height(dbD, &dapplied, &dfound));
+    CR_CHECK("defer: applied frontier == 41",
+             dfound && dapplied == 41);
+
+    struct uint256 dt2 = cr_txid(0x78);
+    CR_CHECK("stale-dirty: add next-height overlay coin",
+             coins_kv_add(dbD, dt2.data, 0, 8888, 41, false,
+                          (const uint8_t *)"e", 1));
+    progress_store_tx_lock();
+    CR_CHECK("stale-dirty: batch begin", stage_batch_begin(dbD));
+    CR_CHECK("stale-dirty: note next height", coins_ram_note_applied(41));
+    CR_CHECK("stale-dirty: batch end", stage_batch_end(dbD, true));
+    progress_store_tx_unlock();
+    CR_CHECK("stale-dirty: old waiter promotes to dirty height",
+             coins_ram_flush(40));
+    dapplied = -1; dfound = false;
+    CR_CHECK("stale-dirty: promoted flush lands overlay without rewind",
+             cr_scalar_i64(dbD, "SELECT COUNT(*) FROM coins") == 2 &&
+             coins_kv_get_applied_height(dbD, &dapplied, &dfound) &&
+             dfound && dapplied == 42);
+
+    coins_ram_writer_exit();
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirD);
+    return failures;
+}
+
+/* ── flush witness guard: when reducer witness tables exist, a RAM flush
+ *    may not stamp the durable cursor/frontier unless the same height has
+ *    an ok=1 utxo_apply_log row and an inverse-delta row. This is the
+ *    guard against a rowless coins_applied_height span. ── */
+static int cr_witness_flush_requires_rows(void)
+{
+    int failures = 0;
+
+    char dirW[256];
+    test_make_tmpdir(dirW, sizeof(dirW), "coins_ram_witness", "w");
+    CR_CHECK("witness: open", progress_store_open(dirW));
+    sqlite3 *dbW = progress_store_db();
+    CR_CHECK("witness: schema", coins_kv_ensure_schema(dbW));
+    CR_CHECK("witness: init", coins_ram_init(
+                 dbW, 1000000, coins_kv_set_applied_height_in_tx));
+    coins_ram_writer_enter();
+
+    struct uint256 wt = cr_txid(0x88);
+    CR_CHECK("witness: add overlay coin",
+             coins_kv_add(dbW, wt.data, 0, 8888, 30, false,
+                          (const uint8_t *)"w", 1));
+    CR_CHECK("witness: create reducer tables",
+             sqlite3_exec(dbW,
+                 "CREATE TABLE IF NOT EXISTS utxo_apply_log ("
+                 "height INTEGER PRIMARY KEY, status TEXT NOT NULL, "
+                 "ok INTEGER NOT NULL, spent_count INTEGER NOT NULL, "
+                 "added_count INTEGER NOT NULL, "
+                 "total_value_delta INTEGER NOT NULL, "
+                 "first_failure_kind TEXT, first_failure_detail BLOB, "
+                 "applied_at INTEGER NOT NULL);"
+                 "CREATE TABLE IF NOT EXISTS utxo_apply_delta ("
+                 "height INTEGER PRIMARY KEY, branch_hash BLOB NOT NULL, "
+                 "spent_blob BLOB NOT NULL, added_blob BLOB NOT NULL);",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    CR_CHECK("witness: missing log refuses flush",
+             !coins_ram_flush(30));
+    CR_CHECK("witness: insert log only",
+             sqlite3_exec(dbW,
+                 "INSERT OR REPLACE INTO utxo_apply_log"
+                 "(height,status,ok,spent_count,added_count,"
+                 "total_value_delta,applied_at) "
+                 "VALUES(30,'verified',1,0,1,8888,1)",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    CR_CHECK("witness: missing delta refuses flush",
+             !coins_ram_flush(30));
+    CR_CHECK("witness: insert delta",
+             sqlite3_exec(dbW,
+                 "INSERT OR REPLACE INTO utxo_apply_delta"
+                 "(height,branch_hash,spent_blob,added_blob) "
+                 "VALUES(30,zeroblob(32),x'',x'')",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    CR_CHECK("witness: complete witness permits flush",
+             coins_ram_flush(30));
+    int32_t wapplied = -1; bool wfound = false;
+    CR_CHECK("witness: applied frontier read",
+             coins_kv_get_applied_height(dbW, &wapplied, &wfound));
+    CR_CHECK("witness: applied frontier == 31",
+             wfound && wapplied == 31);
+
+    coins_ram_writer_exit();
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirW);
+    return failures;
+}
+
+/* (b) Multi-flush: the overlay merged over an already-populated durable
+ *     set across many flushes, with cross-flush tombstones and a re-add
+ *     over a flushed key. The same op stream is folded pure-SQLite
+ *     (golden) and with real interleaved coins_ram_flush calls (overlay);
+ *     the final commitment and per-coin reads must match. */
+static int cr_multiflush_overlay_matches_sqlite(void)
+{
+    int failures = 0;
+
+    /* Round 1: mint a base set.            (tags 200..205)
+     * flush.
+     * Round 2: spend two NOW-DURABLE coins (cross-flush tombstone),
+     *          spend a coin minted+spent in THIS round (overlay-only),
+     *          re-add (REPLACE) a durably-flushed key,
+     *          mint fresh coins.
+     * flush.
+     * Round 3: spend a coin minted in round 2 (durable now),
+     *          spend a coin that was re-added in round 2 (durable now),
+     *          mint more.
+     * flush.
+     * Round 4: spend across all prior rounds + mint, NO trailing flush so
+     *          the final commitment is taken with a non-empty overlay over
+     *          a populated durable set (the live mint's actual posture). */
+    static const struct ab_op MF[] = {
+        /* round 1 */
+        { AB_ADD,200, 0, 1000, 1, true,  {0x01},           1, },
+        { AB_ADD,200, 1, 1100, 1, true,  {0x02,0x03},      2, },
+        { AB_ADD,201, 0, 1200, 2, false, {0x04},           1, },
+        { AB_ADD,202, 0, 1300, 3, false, {0},              0, },
+        { AB_ADD,203, 0, 1400, 4, false, {0x05,0x06,0x07}, 3, },
+        { AB_ADD,204, 0, 1500, 5, false, {0x08},           1, },
+        { AB_ADD,205, 0, 1600, 6, false, {0x09},           1, },
+        { AB_FLUSH,0,   0, 0,    6, false, {0},              0, },
+        /* round 2 */
+        { AB_SPEND,201, 0, 0,    0, false, {0},              0, }, /* cross-flush tomb */
+        { AB_SPEND,200, 1, 0,    0, false, {0},              0, }, /* cross-flush tomb */
+        { AB_ADD,206, 0, 1700, 7, false, {0x0A},           1, },
+        { AB_SPEND,206, 0, 0,    0, false, {0},              0, }, /* overlay-only c+s */
+        { AB_ADD,202, 0, 9999, 8, false, {0x0B,0x0C},      2, }, /* REPLACE durable key */
+        { AB_ADD,207, 0, 1800, 8, false, {0x0D},           1, },
+        { AB_ADD,207, 1, 1850, 8, false, {0x0E},           1, },
+        { AB_FLUSH,0,   0, 0,    8, false, {0},              0, },
+        /* round 3 */
+        { AB_SPEND,207, 0, 0,    0, false, {0},              0, }, /* round-2 coin now durable */
+        { AB_SPEND,202, 0, 0,    0, false, {0},              0, }, /* the REPLACEd coin, now durable */
+        { AB_ADD,208, 0, 1900, 9, false, {0x0F},           1, },
+        { AB_ADD,208, 1, 1950, 9, false, {0x10,0x11},      2, },
+        { AB_FLUSH,0,   0, 0,    9, false, {0},              0, },
+        /* round 4 — NO trailing flush */
+        { AB_SPEND,200, 0, 0,    0, false, {0},              0, }, /* round-1 coinbase, durable */
+        { AB_SPEND,208, 1, 0,    0, false, {0},              0, }, /* round-3 coin, durable */
+        { AB_ADD,209, 0, 2000, 10,false, {0x12},          1, },
+        { AB_ADD,205, 0, 7777, 11,false, {0x13,0x14},     2, }, /* REPLACE round-1 durable */
+    };
+    const size_t MF_N = sizeof(MF) / sizeof(MF[0]);
+
+    /* golden: pure SQLite. */
+    char dirG[256];
+    test_make_tmpdir(dirG, sizeof(dirG), "coins_ram_mf_g", "g");
+    CR_CHECK("mf.G: open", progress_store_open(dirG));
+    sqlite3 *dbG = progress_store_db();
+    CR_CHECK("mf.G: schema", coins_kv_ensure_schema(dbG));
+    CR_CHECK("mf.G: pure sqlite", !coins_ram_active());
+    CR_CHECK("mf.G: apply clean", ab_apply_all(dbG, MF, MF_N, false) == 0);
+    uint8_t rootG[32] = {0};
+    CR_CHECK("mf.G: commitment ok", coins_kv_commitment(dbG, rootG) == 0);
+    int64_t cntG = coins_kv_count(dbG);
+    /* Capture a few golden point reads to compare against the overlay leg. */
+    struct uint256 q_live  = ab_txid(209);  /* minted round 4, vout 0 */
+    struct uint256 q_repl  = ab_txid(205);  /* re-added round 4, vout 0 */
+    struct uint256 q_spent = ab_txid(202);  /* spent round 3, vout 0 */
+    struct uint256 q_xtomb = ab_txid(201);  /* cross-flush tomb, vout 0 */
+    int64_t gv_live = 0, gv_repl = 0;
+    bool gex_live  = coins_kv_get(dbG, q_live.data,  0, &gv_live, NULL, 0, NULL);
+    bool gex_repl  = coins_kv_get(dbG, q_repl.data,  0, &gv_repl, NULL, 0, NULL);
+    bool gex_spent = coins_kv_exists(dbG, q_spent.data, 0);
+    bool gex_xtomb = coins_kv_exists(dbG, q_xtomb.data, 0);
+    progress_store_close();
+    test_rm_rf_recursive(dirG);
+
+    /* overlay: real flushes interleaved. */
+    char dirO[256];
+    test_make_tmpdir(dirO, sizeof(dirO), "coins_ram_mf_o", "o");
+    CR_CHECK("mf.O: open", progress_store_open(dirO));
+    sqlite3 *dbO = progress_store_db();
+    CR_CHECK("mf.O: schema", coins_kv_ensure_schema(dbO));
+    CR_CHECK("mf.O: init", coins_ram_init(
+                 dbO, 1000000, coins_kv_set_applied_height_in_tx));
+    CR_CHECK("mf.O: overlay active", coins_ram_active());
+    /* Single writer driving the overlay leg (mirrors the reducer). */
+    coins_ram_writer_enter();
+    CR_CHECK("mf.O: apply clean", ab_apply_all(dbO, MF, MF_N, true) == 0);
+
+    /* Final commitment taken with a NON-EMPTY overlay over a populated
+     * durable set (round 4 has no trailing flush). */
+    uint8_t rootO[32] = {0};
+    CR_CHECK("mf.O: commitment ok", coins_kv_commitment(dbO, rootO) == 0);
+    int64_t cntO = coins_kv_count(dbO);
+    int64_t ov_live = 0, ov_repl = 0;
+    bool oex_live  = coins_kv_get(dbO, q_live.data,  0, &ov_live, NULL, 0, NULL);
+    bool oex_repl  = coins_kv_get(dbO, q_repl.data,  0, &ov_repl, NULL, 0, NULL);
+    bool oex_spent = coins_kv_exists(dbO, q_spent.data, 0);
+    bool oex_xtomb = coins_kv_exists(dbO, q_xtomb.data, 0);
+    coins_ram_writer_exit();
+
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirO);
+
+    CR_CHECK("MULTIFLUSH: count golden == overlay", cntG == cntO);
+    CR_CHECK("MULTIFLUSH: final root golden == overlay",
+             memcmp(rootG, rootO, 32) == 0);
+    CR_CHECK("MULTIFLUSH: live read matches (val + presence)",
+             gex_live == oex_live && gex_live && gv_live == ov_live);
+    CR_CHECK("MULTIFLUSH: replaced-key read matches",
+             gex_repl == oex_repl && gex_repl && gv_repl == ov_repl);
+    CR_CHECK("MULTIFLUSH: spent-after-flush reads ABSENT both legs",
+             gex_spent == oex_spent && !gex_spent);
+    CR_CHECK("MULTIFLUSH: cross-flush tombstone reads ABSENT both legs",
+             gex_xtomb == oex_xtomb && !gex_xtomb);
+    return failures;
+}
+
+/* Time SQLite B-tree gets (overlay off), then warm the same keys into the
+ * overlay and time in-RAM hits. Both intervals share `sink`. */
+static void cr_bench_time_sqlite_and_overlay(sqlite3 *db, int probes, int filled,
+                                            volatile int64_t *sink,
+                                            double *sqlite_ns, double *ram_ns,
+                                            int *hit_out, int *hit2_out)
+{
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);  // platform-ok:coins-ram-benchmark-realtime
+    *sink = 0;
+    int hit = 0;
+    for (int p = 0; p < probes; p++) {
+        uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
+        struct uint256 t = ab_txid(idx + 1000000u);
+        int64_t v = 0;
+        if (coins_kv_get_sqlite(db, t.data, 0, &v, NULL, 0, NULL)) {
+            *sink += v; hit++;
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);  // platform-ok:coins-ram-benchmark-realtime
+    *sqlite_ns = ((t1.tv_sec - t0.tv_sec) * 1e9
+                + (t1.tv_nsec - t0.tv_nsec)) / probes;
+    *hit_out = hit;
+
+    /* ── overlay probe cost: bind the overlay to the SAME db and read
+     *    the SAME keys. The keys live ONLY in durable coins_kv, so each
+     *    overlay get is a probe (miss) + read-through; to isolate the
+     *    in-RAM probe cost we ALSO pre-load the keys into the overlay
+     *    (LIVE slots) and read those (overlay hit, no SQLite). ── */
+    coins_ram_init(db, 1000000,
+                   coins_kv_set_applied_height_in_tx);
+    /* warm the overlay with the probed keys as LIVE slots */
+    for (int p = 0; p < probes; p++) {
+        uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
+        struct uint256 t = ab_txid(idx + 1000000u);
+        uint8_t scr[24];
+        for (int k = 0; k < 24; k++) scr[k] = (uint8_t)(idx + k);
+        coins_ram_add(t.data, 0, 1000 + idx, (int32_t)(idx % 1000), false,
+                      scr, sizeof(scr));
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t0);  // platform-ok:coins-ram-benchmark-realtime
+    int hit2 = 0;
+    for (int p = 0; p < probes; p++) {
+        uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
+        struct uint256 t = ab_txid(idx + 1000000u);
+        int64_t v = 0;
+        if (coins_ram_get(t.data, 0, &v, NULL, 0, NULL)) { *sink += v; hit2++; }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);  // platform-ok:coins-ram-benchmark-realtime
+    *ram_ns = ((t1.tv_sec - t0.tv_sec) * 1e9
+             + (t1.tv_nsec - t0.tv_nsec)) / probes;
+    *hit2_out = hit2;
+}
+
+/* (e) Mint-drive read marker: coins_ram_mint_drive_thread() is false by
+ *     default, true only inside the bracket, counter-balanced and
+ *     per-thread. An overlay tombstone shadowing a durable coin is ABSENT
+ *     to a marked thread and PRESENT to an unmarked one (which takes the
+ *     durable SQLite path). */
+static int cr_mintdrive_tombstone_visibility(void)
+{
+    int failures = 0;
+
+    char dirM[256];
+    test_make_tmpdir(dirM, sizeof(dirM), "coins_ram_mintdrive", "md");
+    CR_CHECK("md: open", progress_store_open(dirM));
+    sqlite3 *dbM = progress_store_db();
+    CR_CHECK("md: schema", coins_kv_ensure_schema(dbM));
+    CR_CHECK("md: init", coins_ram_init(
+                 dbM, 1000000, coins_kv_set_applied_height_in_tx));
+    CR_CHECK("md: active", coins_ram_active());
+
+    /* A durable coin the overlay will SHADOW as spent. Write it straight to
+     * SQLite (the overlay-bypassing raw variant) so the two layers disagree:
+     * durable=present, overlay=tombstone. */
+    struct uint256 md = cr_txid(0x7D);
+    uint8_t mdscript[2] = { 0xAB, 0xCD };
+    struct coins_kv_add_row row = {
+        .txid = md.data, .vout = 0, .value = 12345, .height = 9,
+        .is_coinbase = false, .script = mdscript, .script_len = 2 };
+    CR_CHECK("md: durable add (raw sqlite)",
+             coins_kv_add_many_sqlite(dbM, &row, 1));
+
+    /* Overlay tombstone (a spend of a durable coin) — the mutation needs the
+     * writer bracket, exactly as the fold holds it around utxo_apply. */
+    coins_ram_writer_enter();
+    CR_CHECK("md: overlay tombstone", coins_ram_spend(md.data, 0));
+    coins_ram_writer_exit();
+
+    /* (1) marker contract — mirrors the writer-bracket contract. */
+    CR_CHECK("md: main not drive-thread yet", !coins_ram_mint_drive_thread());
+    coins_ram_mint_drive_enter();
+    CR_CHECK("md: enter -> drive thread", coins_ram_mint_drive_thread());
+    coins_ram_mint_drive_enter();      /* nested */
+    coins_ram_mint_drive_exit();
+    CR_CHECK("md: nested -> still drive (counter)",
+             coins_ram_mint_drive_thread());
+
+     /* (2a) On the marked thread coins_kv_get routes to the overlay, so
+      *      the tombstone shadows the durable row: ABSENT. */
+    int64_t mv = 0; size_t ml = 0; uint8_t mb[8];
+    CR_CHECK("md: marked thread sees overlay tombstone (absent)",
+             !coins_kv_get(dbM, md.data, 0, &mv, mb, sizeof(mb), &ml));
+
+    coins_ram_mint_drive_exit();
+    CR_CHECK("md: final exit -> not drive thread",
+             !coins_ram_mint_drive_thread());
+
+    /* (2b) On an UNMARKED thread (no writer, no mint-drive) coins_kv_get
+     *      takes the durable SQLite path → the tombstone is invisible → the
+     *      coin is PRESENT. Confirms the marker is _Thread_local and gates
+     *      overlay visibility per-thread (the UAF guard for a live node). */
+    struct cr_md_arg ma = { .db = dbM, .txid = md.data,
+                            .present = false, .drive = true };
+    pthread_t mt;
+    int mpc = pthread_create(&mt, NULL, cr_md_reader_thread, &ma);
+    CR_CHECK("md: unmarked reader spawned", mpc == 0);
+    if (mpc == 0) {
+        pthread_join(mt, NULL);
+        CR_CHECK("md: unmarked thread is NOT a drive thread", !ma.drive);
+        CR_CHECK("md: unmarked thread sees durable coin (present)",
+                 ma.present);
+    }
+
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirM);
+    return failures;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * (f) HIGH-WATER flush: when the live overlay slot count crosses
+ *     ZCL_FOLD_INRAM_MAX_SLOTS, coins_ram_note_applied flushes MID-window
+ *     even though the block cadence (flush_every) is nowhere near due — the
+ *     OOM guard for a dense window that mints many coins between cadence
+ *     boundaries. We set the cap to 4 and prove the 4th applied height
+ *     drains the overlay to durable coins_kv. flush_every is huge so ONLY
+ *     the high water can trigger the flush.
+ * ────────────────────────────────────────────────────────────────────── */
+static int cr_highwater_flushes_at_cap(void)
+{
+    int failures = 0;
+
+    setenv("ZCL_FOLD_INRAM_MAX_SLOTS", "4", 1);
+    char dirH[256];
+    test_make_tmpdir(dirH, sizeof(dirH), "coins_ram_hiwater", "h");
+    CR_CHECK("hw: open", progress_store_open(dirH));
+    sqlite3 *dbH = progress_store_db();
+    CR_CHECK("hw: schema", coins_kv_ensure_schema(dbH));
+    CR_CHECK("hw: init (flush_every huge)", coins_ram_init(
+                 dbH, 1000000, coins_kv_set_applied_height_in_tx));
+    CR_CHECK("hw: active", coins_ram_active());
+    coins_ram_writer_enter();
+
+    /* Add 4 live coins, noting each applied height. live_count reaches the
+     * cap (4) on the 4th note_applied → that call flushes. */
+    bool durable_empty_before = coins_kv_count_sqlite(dbH) == 0;
+    CR_CHECK("hw: durable empty before", durable_empty_before);
+    for (int k = 0; k < 4; k++) {
+        struct uint256 hk = cr_txid((uint8_t)(0x90 + k));
+        uint8_t sc[1] = { (uint8_t)k };
+        CR_CHECK("hw: add",
+                 coins_kv_add(dbH, hk.data, 0, 1000 + k, 100 + k,
+                              false, sc, 1));
+        CR_CHECK("hw: note_applied", coins_ram_note_applied(100 + k));
+    }
+
+    /* The high-water flush drained the overlay into durable coins_kv: read
+     * the durable set directly (overlay-bypassing) to prove the 4 rows
+     * landed WITHOUT hitting the block cadence. */
+    CR_CHECK("hw: durable count == 4 after high-water flush",
+             coins_kv_count_sqlite(dbH) == 4);
+    /* And the effective count is unchanged (overlay now empty, rows durable). */
+    CR_CHECK("hw: effective count == 4", coins_kv_count(dbH) == 4);
+
+    coins_ram_writer_exit();
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirH);
+    unsetenv("ZCL_FOLD_INRAM_MAX_SLOTS");
+    return failures;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * (d) UAF GUARD contract: coins_ram_writer_thread() is the per-thread
+ *     "am-the-writer" flag the coins_kv.c READ shims gate overlay use on.
+ *     It MUST be false on ANY thread that did not bracket with
+ *     coins_ram_writer_enter (the cross-thread reader case: bg-validation
+ *     pthreads, RPC pool, seal_service), true only inside the bracket, and
+ *     balanced on exit. This pins the exact contract the shim gating relies
+ *     on — if this ever regresses, a cross-thread reader would touch the
+ *     lock-free overlay concurrently with the writer's free()+repoint. */
+static int cr_uaf_writer_thread_contract(void)
+{
+    int failures = 0;
+
+    /* (1) The main test thread never entered the bracket → false. */
+    CR_CHECK("uaf: main thread not a writer", !coins_ram_writer_thread());
+
+    /* (2) A FRESH pthread that never called _enter is also NOT a writer —
+     *    this is the precise cross-thread-reader scenario (a bg-validation
+     *    worker pthread). The guard is _Thread_local, so the new thread's
+     *    counter is 0 regardless of overlay activity or what the main
+     *    thread did. */
+    struct cr_reader_arg ra = { .is_writer = true /* expect false */ };
+    pthread_t rt;
+    int pc = pthread_create(&rt, NULL, cr_reader_thread, &ra);
+    CR_CHECK("uaf: reader pthread spawned", pc == 0);
+    if (pc == 0) {
+        pthread_join(rt, NULL);
+        CR_CHECK("uaf: fresh pthread is NOT a writer", !ra.is_writer);
+    }
+
+    /* (3) After _enter, the CALLING (main) thread IS the writer. */
+    coins_ram_writer_enter();
+    CR_CHECK("uaf: enter -> is writer", coins_ram_writer_thread());
+
+    /* (4) A nested _enter keeps it true (counter form, re-entrancy-safe). */
+    coins_ram_writer_enter();
+    CR_CHECK("uaf: nested enter -> still writer",
+             coins_ram_writer_thread());
+    coins_ram_writer_exit();
+    CR_CHECK("uaf: one exit -> still writer (counter)",
+             coins_ram_writer_thread());
+
+    /* (5) After the matching final _exit, it is false again. */
+    coins_ram_writer_exit();
+    CR_CHECK("uaf: final exit -> not writer", !coins_ram_writer_thread());
+
+    /* (6) While the main thread is the writer, a fresh pthread is STILL NOT
+     *    — the flag is _Thread_local, so the writer's bracket does not leak
+     *    into another thread. This is the crux: the guard isolates the
+     *    writer from concurrent readers. */
+    coins_ram_writer_enter();
+    struct cr_reader_arg ra2 = { .is_writer = false /* expect false */ };
+    pthread_t rt2;
+    pc = pthread_create(&rt2, NULL, cr_reader_thread, &ra2);
+    CR_CHECK("uaf: 2nd reader pthread spawned", pc == 0);
+    if (pc == 0) {
+        pthread_join(rt2, NULL);
+        CR_CHECK("uaf: pthread NOT writer while main is writer",
+                 !ra2.is_writer);
+    }
+    CR_CHECK("uaf: main still writer after pthread join",
+             coins_ram_writer_thread());
+    coins_ram_writer_exit();
+    CR_CHECK("uaf: main exits cleanly", !coins_ram_writer_thread());
+    return failures;
+}
+
+int test_coins_ram(void);
+int test_coins_ram(void)
+{
+    int failures = 0;
+
+    /* Force the flag ON before the first coins_ram_enabled() (cached once). */
+    setenv("ZCL_FOLD_INRAM", "1", 1);
+
+    char dir[256];
+    sqlite3 *db = NULL;
+    uint8_t ov_root[32] = {0};
+    failures += cr_overlay_fold_reads(dir, sizeof(dir), &db, ov_root);
+    failures += cr_check_get_coins_t4(db);
+    failures += cr_check_prevout_live_t41();
+    failures += cr_check_prevout_t40_and_absent();
+    failures += cr_flush_commitment_identity(db, ov_root);
+    failures += cr_applied_height_int32_bound(db);
 
     /* ── crash-replay reconcile: simulate the cursor advancing PAST the last
      *    flush (a crash between flushes), then reconcile must rewind it. ── */
@@ -379,18 +941,9 @@ int test_coins_ram(void)
     }
     CR_CHECK("reconcile: ok", coins_ram_reconcile_boot(
                  db, coins_kv_set_applied_height_in_tx));
+    /* watermark was 20 -> cursor rewound to 21 (watermark+1). */
     {
-        progress_store_tx_lock();
-        sqlite3_stmt *s = NULL;
-        int64_t cur = -1;
-        if (sqlite3_prepare_v2(db,
-                "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (sqlite3_step(s) == SQLITE_ROW) cur = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-        }
-        progress_store_tx_unlock();
-        /* watermark was 20 -> cursor rewound to 21 (watermark+1). */
+        int64_t cur = cr_read_utxo_apply_cursor(db);
         CR_CHECK("reconcile: cursor rewound to watermark+1 (21)", cur == 21);
     }
      /* If the first replay height flushed, cursor can equal watermark+1 while
@@ -601,16 +1154,7 @@ int test_coins_ram(void)
         CR_CHECK("reconcile: absent watermark + refold marker ok",
                  coins_ram_reconcile_boot(
                      db, coins_kv_set_applied_height_in_tx));
-        progress_store_tx_lock();
-        sqlite3_stmt *s = NULL;
-        int64_t cur = -1;
-        if (sqlite3_prepare_v2(db,
-                "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (sqlite3_step(s) == SQLITE_ROW) cur = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-        }
-        progress_store_tx_unlock();
+        int64_t cur = cr_read_utxo_apply_cursor(db);
         CR_CHECK("reconcile: absent watermark rewinds mint/refold to 0",
                  cur == 0);
         int32_t zero_applied = -1; bool zero_found = false;
@@ -652,125 +1196,8 @@ int test_coins_ram(void)
     progress_store_close();
     test_rm_rf_recursive(dir);
 
-    /* ── stage-batch deferred flush: the live mint drains utxo_apply under an
-     *    outer stage batch. Crossing the flush cadence inside that batch must
-     *    NOT try a nested BEGIN; it should defer until after stage_batch_end. */
-    {
-        char dirD[256];
-        test_make_tmpdir(dirD, sizeof(dirD), "coins_ram_deferred", "d");
-        CR_CHECK("defer: open", progress_store_open(dirD));
-        sqlite3 *dbD = progress_store_db();
-        CR_CHECK("defer: schema", coins_kv_ensure_schema(dbD));
-        CR_CHECK("defer: stage schema", stage_table_ensure(dbD));
-        CR_CHECK("defer: init flush_every=1", coins_ram_init(
-                     dbD, 1, coins_kv_set_applied_height_in_tx));
-        coins_ram_writer_enter();
-
-        struct uint256 dt = cr_txid(0x77);
-        CR_CHECK("defer: add overlay coin",
-                 coins_kv_add(dbD, dt.data, 0, 7777, 40, false,
-                              (const uint8_t *)"d", 1));
-
-        progress_store_tx_lock();
-        CR_CHECK("defer: batch begin", stage_batch_begin(dbD));
-        CR_CHECK("defer: note_applied defers inside batch",
-                 coins_ram_note_applied(40));
-        CR_CHECK("defer: batch still active", stage_batch_active());
-        CR_CHECK("defer: batch end", stage_batch_end(dbD, true));
-        progress_store_tx_unlock();
-
-        CR_CHECK("defer: flush due after batch", coins_ram_flush_due());
-        CR_CHECK("defer: durable count after flush", coins_kv_count(dbD) == 1);
-        int32_t dapplied = -1; bool dfound = false;
-        CR_CHECK("defer: applied frontier read",
-                 coins_kv_get_applied_height(dbD, &dapplied, &dfound));
-        CR_CHECK("defer: applied frontier == 41",
-                 dfound && dapplied == 41);
-
-        struct uint256 dt2 = cr_txid(0x78);
-        CR_CHECK("stale-dirty: add next-height overlay coin",
-                 coins_kv_add(dbD, dt2.data, 0, 8888, 41, false,
-                              (const uint8_t *)"e", 1));
-        progress_store_tx_lock();
-        CR_CHECK("stale-dirty: batch begin", stage_batch_begin(dbD));
-        CR_CHECK("stale-dirty: note next height", coins_ram_note_applied(41));
-        CR_CHECK("stale-dirty: batch end", stage_batch_end(dbD, true));
-        progress_store_tx_unlock();
-        CR_CHECK("stale-dirty: old waiter promotes to dirty height",
-                 coins_ram_flush(40));
-        dapplied = -1; dfound = false;
-        CR_CHECK("stale-dirty: promoted flush lands overlay without rewind",
-                 cr_scalar_i64(dbD, "SELECT COUNT(*) FROM coins") == 2 &&
-                 coins_kv_get_applied_height(dbD, &dapplied, &dfound) &&
-                 dfound && dapplied == 42);
-
-        coins_ram_writer_exit();
-        coins_ram_shutdown();
-        progress_store_close();
-        test_rm_rf_recursive(dirD);
-    }
-
-    /* ── flush witness guard: when reducer witness tables exist, a RAM flush
-     *    may not stamp the durable cursor/frontier unless the same height has
-     *    an ok=1 utxo_apply_log row and an inverse-delta row. This is the
-     *    guard against a rowless coins_applied_height span. ── */
-    {
-        char dirW[256];
-        test_make_tmpdir(dirW, sizeof(dirW), "coins_ram_witness", "w");
-        CR_CHECK("witness: open", progress_store_open(dirW));
-        sqlite3 *dbW = progress_store_db();
-        CR_CHECK("witness: schema", coins_kv_ensure_schema(dbW));
-        CR_CHECK("witness: init", coins_ram_init(
-                     dbW, 1000000, coins_kv_set_applied_height_in_tx));
-        coins_ram_writer_enter();
-
-        struct uint256 wt = cr_txid(0x88);
-        CR_CHECK("witness: add overlay coin",
-                 coins_kv_add(dbW, wt.data, 0, 8888, 30, false,
-                              (const uint8_t *)"w", 1));
-        CR_CHECK("witness: create reducer tables",
-                 sqlite3_exec(dbW,
-                     "CREATE TABLE IF NOT EXISTS utxo_apply_log ("
-                     "height INTEGER PRIMARY KEY, status TEXT NOT NULL, "
-                     "ok INTEGER NOT NULL, spent_count INTEGER NOT NULL, "
-                     "added_count INTEGER NOT NULL, "
-                     "total_value_delta INTEGER NOT NULL, "
-                     "first_failure_kind TEXT, first_failure_detail BLOB, "
-                     "applied_at INTEGER NOT NULL);"
-                     "CREATE TABLE IF NOT EXISTS utxo_apply_delta ("
-                     "height INTEGER PRIMARY KEY, branch_hash BLOB NOT NULL, "
-                     "spent_blob BLOB NOT NULL, added_blob BLOB NOT NULL);",
-                     NULL, NULL, NULL) == SQLITE_OK);
-        CR_CHECK("witness: missing log refuses flush",
-                 !coins_ram_flush(30));
-        CR_CHECK("witness: insert log only",
-                 sqlite3_exec(dbW,
-                     "INSERT OR REPLACE INTO utxo_apply_log"
-                     "(height,status,ok,spent_count,added_count,"
-                     "total_value_delta,applied_at) "
-                     "VALUES(30,'verified',1,0,1,8888,1)",
-                     NULL, NULL, NULL) == SQLITE_OK);
-        CR_CHECK("witness: missing delta refuses flush",
-                 !coins_ram_flush(30));
-        CR_CHECK("witness: insert delta",
-                 sqlite3_exec(dbW,
-                     "INSERT OR REPLACE INTO utxo_apply_delta"
-                     "(height,branch_hash,spent_blob,added_blob) "
-                     "VALUES(30,zeroblob(32),x'',x'')",
-                     NULL, NULL, NULL) == SQLITE_OK);
-        CR_CHECK("witness: complete witness permits flush",
-                 coins_ram_flush(30));
-        int32_t wapplied = -1; bool wfound = false;
-        CR_CHECK("witness: applied frontier read",
-                 coins_kv_get_applied_height(dbW, &wapplied, &wfound));
-        CR_CHECK("witness: applied frontier == 31",
-                 wfound && wapplied == 31);
-
-        coins_ram_writer_exit();
-        coins_ram_shutdown();
-        progress_store_close();
-        test_rm_rf_recursive(dirW);
-    }
+    failures += cr_deferred_flush_inside_batch();
+    failures += cr_witness_flush_requires_rows();
 
     /* ──────────────────────────────────────────────────────────────────────
      * (a) TRUE A/B: identical op script, pure-SQLite leg vs overlay leg.
@@ -862,124 +1289,12 @@ int test_coins_ram(void)
                  memcmp(rootA, rootB_flushed, 32) == 0);
     }
 
-     /* (b) Multi-flush: the overlay merged over an already-populated durable
-      *     set across many flushes, with cross-flush tombstones and a re-add
-      *     over a flushed key. The same op stream is folded pure-SQLite
-      *     (golden) and with real interleaved coins_ram_flush calls (overlay);
-      *     the final commitment and per-coin reads must match. */
-    {
-        /* Round 1: mint a base set.            (tags 200..205)
-         * flush.
-         * Round 2: spend two NOW-DURABLE coins (cross-flush tombstone),
-         *          spend a coin minted+spent in THIS round (overlay-only),
-         *          re-add (REPLACE) a durably-flushed key,
-         *          mint fresh coins.
-         * flush.
-         * Round 3: spend a coin minted in round 2 (durable now),
-         *          spend a coin that was re-added in round 2 (durable now),
-         *          mint more.
-         * flush.
-         * Round 4: spend across all prior rounds + mint, NO trailing flush so
-         *          the final commitment is taken with a non-empty overlay over
-         *          a populated durable set (the live mint's actual posture). */
-        static const struct ab_op MF[] = {
-            /* round 1 */
-            { AB_ADD,200, 0, 1000, 1, true,  {0x01},           1, },
-            { AB_ADD,200, 1, 1100, 1, true,  {0x02,0x03},      2, },
-            { AB_ADD,201, 0, 1200, 2, false, {0x04},           1, },
-            { AB_ADD,202, 0, 1300, 3, false, {0},              0, },
-            { AB_ADD,203, 0, 1400, 4, false, {0x05,0x06,0x07}, 3, },
-            { AB_ADD,204, 0, 1500, 5, false, {0x08},           1, },
-            { AB_ADD,205, 0, 1600, 6, false, {0x09},           1, },
-            { AB_FLUSH,0,   0, 0,    6, false, {0},              0, },
-            /* round 2 */
-            { AB_SPEND,201, 0, 0,    0, false, {0},              0, }, /* cross-flush tomb */
-            { AB_SPEND,200, 1, 0,    0, false, {0},              0, }, /* cross-flush tomb */
-            { AB_ADD,206, 0, 1700, 7, false, {0x0A},           1, },
-            { AB_SPEND,206, 0, 0,    0, false, {0},              0, }, /* overlay-only c+s */
-            { AB_ADD,202, 0, 9999, 8, false, {0x0B,0x0C},      2, }, /* REPLACE durable key */
-            { AB_ADD,207, 0, 1800, 8, false, {0x0D},           1, },
-            { AB_ADD,207, 1, 1850, 8, false, {0x0E},           1, },
-            { AB_FLUSH,0,   0, 0,    8, false, {0},              0, },
-            /* round 3 */
-            { AB_SPEND,207, 0, 0,    0, false, {0},              0, }, /* round-2 coin now durable */
-            { AB_SPEND,202, 0, 0,    0, false, {0},              0, }, /* the REPLACEd coin, now durable */
-            { AB_ADD,208, 0, 1900, 9, false, {0x0F},           1, },
-            { AB_ADD,208, 1, 1950, 9, false, {0x10,0x11},      2, },
-            { AB_FLUSH,0,   0, 0,    9, false, {0},              0, },
-            /* round 4 — NO trailing flush */
-            { AB_SPEND,200, 0, 0,    0, false, {0},              0, }, /* round-1 coinbase, durable */
-            { AB_SPEND,208, 1, 0,    0, false, {0},              0, }, /* round-3 coin, durable */
-            { AB_ADD,209, 0, 2000, 10,false, {0x12},          1, },
-            { AB_ADD,205, 0, 7777, 11,false, {0x13,0x14},     2, }, /* REPLACE round-1 durable */
-        };
-        const size_t MF_N = sizeof(MF) / sizeof(MF[0]);
-
-        /* golden: pure SQLite. */
-        char dirG[256];
-        test_make_tmpdir(dirG, sizeof(dirG), "coins_ram_mf_g", "g");
-        CR_CHECK("mf.G: open", progress_store_open(dirG));
-        sqlite3 *dbG = progress_store_db();
-        CR_CHECK("mf.G: schema", coins_kv_ensure_schema(dbG));
-        CR_CHECK("mf.G: pure sqlite", !coins_ram_active());
-        CR_CHECK("mf.G: apply clean", ab_apply_all(dbG, MF, MF_N, false) == 0);
-        uint8_t rootG[32] = {0};
-        CR_CHECK("mf.G: commitment ok", coins_kv_commitment(dbG, rootG) == 0);
-        int64_t cntG = coins_kv_count(dbG);
-        /* Capture a few golden point reads to compare against the overlay leg. */
-        struct uint256 q_live  = ab_txid(209);  /* minted round 4, vout 0 */
-        struct uint256 q_repl  = ab_txid(205);  /* re-added round 4, vout 0 */
-        struct uint256 q_spent = ab_txid(202);  /* spent round 3, vout 0 */
-        struct uint256 q_xtomb = ab_txid(201);  /* cross-flush tomb, vout 0 */
-        int64_t gv_live = 0, gv_repl = 0;
-        bool gex_live  = coins_kv_get(dbG, q_live.data,  0, &gv_live, NULL, 0, NULL);
-        bool gex_repl  = coins_kv_get(dbG, q_repl.data,  0, &gv_repl, NULL, 0, NULL);
-        bool gex_spent = coins_kv_exists(dbG, q_spent.data, 0);
-        bool gex_xtomb = coins_kv_exists(dbG, q_xtomb.data, 0);
-        progress_store_close();
-        test_rm_rf_recursive(dirG);
-
-        /* overlay: real flushes interleaved. */
-        char dirO[256];
-        test_make_tmpdir(dirO, sizeof(dirO), "coins_ram_mf_o", "o");
-        CR_CHECK("mf.O: open", progress_store_open(dirO));
-        sqlite3 *dbO = progress_store_db();
-        CR_CHECK("mf.O: schema", coins_kv_ensure_schema(dbO));
-        CR_CHECK("mf.O: init", coins_ram_init(
-                     dbO, 1000000, coins_kv_set_applied_height_in_tx));
-        CR_CHECK("mf.O: overlay active", coins_ram_active());
-        /* Single writer driving the overlay leg (mirrors the reducer). */
-        coins_ram_writer_enter();
-        CR_CHECK("mf.O: apply clean", ab_apply_all(dbO, MF, MF_N, true) == 0);
-
-        /* Final commitment taken with a NON-EMPTY overlay over a populated
-         * durable set (round 4 has no trailing flush). */
-        uint8_t rootO[32] = {0};
-        CR_CHECK("mf.O: commitment ok", coins_kv_commitment(dbO, rootO) == 0);
-        int64_t cntO = coins_kv_count(dbO);
-        int64_t ov_live = 0, ov_repl = 0;
-        bool oex_live  = coins_kv_get(dbO, q_live.data,  0, &ov_live, NULL, 0, NULL);
-        bool oex_repl  = coins_kv_get(dbO, q_repl.data,  0, &ov_repl, NULL, 0, NULL);
-        bool oex_spent = coins_kv_exists(dbO, q_spent.data, 0);
-        bool oex_xtomb = coins_kv_exists(dbO, q_xtomb.data, 0);
-        coins_ram_writer_exit();
-
-        coins_ram_shutdown();
-        progress_store_close();
-        test_rm_rf_recursive(dirO);
-
-        CR_CHECK("MULTIFLUSH: count golden == overlay", cntG == cntO);
-        CR_CHECK("MULTIFLUSH: final root golden == overlay",
-                 memcmp(rootG, rootO, 32) == 0);
-        CR_CHECK("MULTIFLUSH: live read matches (val + presence)",
-                 gex_live == oex_live && gex_live && gv_live == ov_live);
-        CR_CHECK("MULTIFLUSH: replaced-key read matches",
-                 gex_repl == oex_repl && gex_repl && gv_repl == ov_repl);
-        CR_CHECK("MULTIFLUSH: spent-after-flush reads ABSENT both legs",
-                 gex_spent == oex_spent && !gex_spent);
-        CR_CHECK("MULTIFLUSH: cross-flush tombstone reads ABSENT both legs",
-                 gex_xtomb == oex_xtomb && !gex_xtomb);
-    }
+    /* (b) Multi-flush: the overlay merged over an already-populated durable
+     *     set across many flushes, with cross-flush tombstones and a re-add
+     *     over a flushed key. The same op stream is folded pure-SQLite
+     *     (golden) and with real interleaved coins_ram_flush calls (overlay);
+     *     the final commitment and per-coin reads must match. */
+    failures += cr_multiflush_overlay_matches_sqlite();
 
     /* ──────────────────────────────────────────────────────────────────────
      * (c) MICRO-BENCHMARK: per-op cost of an in-RAM overlay probe vs a SQLite
@@ -1029,47 +1344,13 @@ int test_coins_ram(void)
 
             /* ── SQLite B-tree get cost (overlay OFF) ── */
             const int PROBES = getenv("ZCL_TEST_PERF_ASSERTS") ? 200000 : 5000;
-            clock_gettime(CLOCK_MONOTONIC, &t0);  // platform-ok:coins-ram-benchmark-realtime
-            volatile int64_t sink = 0; int hit = 0;
-            for (int p = 0; p < PROBES; p++) {
-                uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
-                struct uint256 t = ab_txid(idx + 1000000u);
-                int64_t v = 0;
-                if (coins_kv_get_sqlite(dbP, t.data, 0, &v, NULL, 0, NULL)) {
-                    sink += v; hit++;
-                }
-            }
-            clock_gettime(CLOCK_MONOTONIC, &t1);  // platform-ok:coins-ram-benchmark-realtime
-            double sqlite_ns = ((t1.tv_sec - t0.tv_sec) * 1e9
-                              + (t1.tv_nsec - t0.tv_nsec)) / PROBES;
-
-            /* ── overlay probe cost: bind the overlay to the SAME db and read
-             *    the SAME keys. The keys live ONLY in durable coins_kv, so each
-             *    overlay get is a probe (miss) + read-through; to isolate the
-             *    in-RAM probe cost we ALSO pre-load the keys into the overlay
-             *    (LIVE slots) and read those (overlay hit, no SQLite). ── */
-            coins_ram_init(dbP, 1000000,
-                           coins_kv_set_applied_height_in_tx);
-            /* warm the overlay with the probed keys as LIVE slots */
-            for (int p = 0; p < PROBES; p++) {
-                uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
-                struct uint256 t = ab_txid(idx + 1000000u);
-                uint8_t scr[24];
-                for (int k = 0; k < 24; k++) scr[k] = (uint8_t)(idx + k);
-                coins_ram_add(t.data, 0, 1000 + idx, (int32_t)(idx % 1000), false,
-                              scr, sizeof(scr));
-            }
-            clock_gettime(CLOCK_MONOTONIC, &t0);  // platform-ok:coins-ram-benchmark-realtime
+            volatile int64_t sink = 0;
+            int hit = 0;
             int hit2 = 0;
-            for (int p = 0; p < PROBES; p++) {
-                uint32_t idx = (uint32_t)(((uint64_t)p * 2654435761u) % (uint32_t)filled);
-                struct uint256 t = ab_txid(idx + 1000000u);
-                int64_t v = 0;
-                if (coins_ram_get(t.data, 0, &v, NULL, 0, NULL)) { sink += v; hit2++; }
-            }
-            clock_gettime(CLOCK_MONOTONIC, &t1);  // platform-ok:coins-ram-benchmark-realtime
-            double ram_ns = ((t1.tv_sec - t0.tv_sec) * 1e9
-                           + (t1.tv_nsec - t0.tv_nsec)) / PROBES;
+            double sqlite_ns = 0;
+            double ram_ns = 0;
+            cr_bench_time_sqlite_and_overlay(dbP, PROBES, filled, &sink,
+                                            &sqlite_ns, &ram_ns, &hit, &hit2);
 
             printf("  coins_ram: BENCH N=%d  sqlite_get=%.0f ns/op  "
                    "ram_probe=%.0f ns/op  speedup=%.1fx  (sqlite_hits=%d "
@@ -1086,189 +1367,9 @@ int test_coins_ram(void)
         test_rm_rf_recursive(dirP);
     }
 
-     /* (e) Mint-drive read marker: coins_ram_mint_drive_thread() is false by
-      *     default, true only inside the bracket, counter-balanced and
-      *     per-thread. An overlay tombstone shadowing a durable coin is ABSENT
-      *     to a marked thread and PRESENT to an unmarked one (which takes the
-      *     durable SQLite path). */
-    {
-        char dirM[256];
-        test_make_tmpdir(dirM, sizeof(dirM), "coins_ram_mintdrive", "md");
-        CR_CHECK("md: open", progress_store_open(dirM));
-        sqlite3 *dbM = progress_store_db();
-        CR_CHECK("md: schema", coins_kv_ensure_schema(dbM));
-        CR_CHECK("md: init", coins_ram_init(
-                     dbM, 1000000, coins_kv_set_applied_height_in_tx));
-        CR_CHECK("md: active", coins_ram_active());
-
-        /* A durable coin the overlay will SHADOW as spent. Write it straight to
-         * SQLite (the overlay-bypassing raw variant) so the two layers disagree:
-         * durable=present, overlay=tombstone. */
-        struct uint256 md = cr_txid(0x7D);
-        uint8_t mdscript[2] = { 0xAB, 0xCD };
-        struct coins_kv_add_row row = {
-            .txid = md.data, .vout = 0, .value = 12345, .height = 9,
-            .is_coinbase = false, .script = mdscript, .script_len = 2 };
-        CR_CHECK("md: durable add (raw sqlite)",
-                 coins_kv_add_many_sqlite(dbM, &row, 1));
-
-        /* Overlay tombstone (a spend of a durable coin) — the mutation needs the
-         * writer bracket, exactly as the fold holds it around utxo_apply. */
-        coins_ram_writer_enter();
-        CR_CHECK("md: overlay tombstone", coins_ram_spend(md.data, 0));
-        coins_ram_writer_exit();
-
-        /* (1) marker contract — mirrors the writer-bracket contract. */
-        CR_CHECK("md: main not drive-thread yet", !coins_ram_mint_drive_thread());
-        coins_ram_mint_drive_enter();
-        CR_CHECK("md: enter -> drive thread", coins_ram_mint_drive_thread());
-        coins_ram_mint_drive_enter();      /* nested */
-        coins_ram_mint_drive_exit();
-        CR_CHECK("md: nested -> still drive (counter)",
-                 coins_ram_mint_drive_thread());
-
-         /* (2a) On the marked thread coins_kv_get routes to the overlay, so
-          *      the tombstone shadows the durable row: ABSENT. */
-        int64_t mv = 0; size_t ml = 0; uint8_t mb[8];
-        CR_CHECK("md: marked thread sees overlay tombstone (absent)",
-                 !coins_kv_get(dbM, md.data, 0, &mv, mb, sizeof(mb), &ml));
-
-        coins_ram_mint_drive_exit();
-        CR_CHECK("md: final exit -> not drive thread",
-                 !coins_ram_mint_drive_thread());
-
-        /* (2b) On an UNMARKED thread (no writer, no mint-drive) coins_kv_get
-         *      takes the durable SQLite path → the tombstone is invisible → the
-         *      coin is PRESENT. Confirms the marker is _Thread_local and gates
-         *      overlay visibility per-thread (the UAF guard for a live node). */
-        struct cr_md_arg ma = { .db = dbM, .txid = md.data,
-                                .present = false, .drive = true };
-        pthread_t mt;
-        int mpc = pthread_create(&mt, NULL, cr_md_reader_thread, &ma);
-        CR_CHECK("md: unmarked reader spawned", mpc == 0);
-        if (mpc == 0) {
-            pthread_join(mt, NULL);
-            CR_CHECK("md: unmarked thread is NOT a drive thread", !ma.drive);
-            CR_CHECK("md: unmarked thread sees durable coin (present)",
-                     ma.present);
-        }
-
-        coins_ram_shutdown();
-        progress_store_close();
-        test_rm_rf_recursive(dirM);
-    }
-
-    /* ──────────────────────────────────────────────────────────────────────
-     * (f) HIGH-WATER flush: when the live overlay slot count crosses
-     *     ZCL_FOLD_INRAM_MAX_SLOTS, coins_ram_note_applied flushes MID-window
-     *     even though the block cadence (flush_every) is nowhere near due — the
-     *     OOM guard for a dense window that mints many coins between cadence
-     *     boundaries. We set the cap to 4 and prove the 4th applied height
-     *     drains the overlay to durable coins_kv. flush_every is huge so ONLY
-     *     the high water can trigger the flush.
-     * ────────────────────────────────────────────────────────────────────── */
-    {
-        setenv("ZCL_FOLD_INRAM_MAX_SLOTS", "4", 1);
-        char dirH[256];
-        test_make_tmpdir(dirH, sizeof(dirH), "coins_ram_hiwater", "h");
-        CR_CHECK("hw: open", progress_store_open(dirH));
-        sqlite3 *dbH = progress_store_db();
-        CR_CHECK("hw: schema", coins_kv_ensure_schema(dbH));
-        CR_CHECK("hw: init (flush_every huge)", coins_ram_init(
-                     dbH, 1000000, coins_kv_set_applied_height_in_tx));
-        CR_CHECK("hw: active", coins_ram_active());
-        coins_ram_writer_enter();
-
-        /* Add 4 live coins, noting each applied height. live_count reaches the
-         * cap (4) on the 4th note_applied → that call flushes. */
-        bool durable_empty_before = coins_kv_count_sqlite(dbH) == 0;
-        CR_CHECK("hw: durable empty before", durable_empty_before);
-        for (int k = 0; k < 4; k++) {
-            struct uint256 hk = cr_txid((uint8_t)(0x90 + k));
-            uint8_t sc[1] = { (uint8_t)k };
-            CR_CHECK("hw: add",
-                     coins_kv_add(dbH, hk.data, 0, 1000 + k, 100 + k,
-                                  false, sc, 1));
-            CR_CHECK("hw: note_applied", coins_ram_note_applied(100 + k));
-        }
-
-        /* The high-water flush drained the overlay into durable coins_kv: read
-         * the durable set directly (overlay-bypassing) to prove the 4 rows
-         * landed WITHOUT hitting the block cadence. */
-        CR_CHECK("hw: durable count == 4 after high-water flush",
-                 coins_kv_count_sqlite(dbH) == 4);
-        /* And the effective count is unchanged (overlay now empty, rows durable). */
-        CR_CHECK("hw: effective count == 4", coins_kv_count(dbH) == 4);
-
-        coins_ram_writer_exit();
-        coins_ram_shutdown();
-        progress_store_close();
-        test_rm_rf_recursive(dirH);
-        unsetenv("ZCL_FOLD_INRAM_MAX_SLOTS");
-    }
-
-    /* ──────────────────────────────────────────────────────────────────────
-     * (d) UAF GUARD contract: coins_ram_writer_thread() is the per-thread
-     *     "am-the-writer" flag the coins_kv.c READ shims gate overlay use on.
-     *     It MUST be false on ANY thread that did not bracket with
-     *     coins_ram_writer_enter (the cross-thread reader case: bg-validation
-     *     pthreads, RPC pool, seal_service), true only inside the bracket, and
-     *     balanced on exit. This pins the exact contract the shim gating relies
-     *     on — if this ever regresses, a cross-thread reader would touch the
-     *     lock-free overlay concurrently with the writer's free()+repoint. */
-    {
-        /* (1) The main test thread never entered the bracket → false. */
-        CR_CHECK("uaf: main thread not a writer", !coins_ram_writer_thread());
-
-        /* (2) A FRESH pthread that never called _enter is also NOT a writer —
-         *    this is the precise cross-thread-reader scenario (a bg-validation
-         *    worker pthread). The guard is _Thread_local, so the new thread's
-         *    counter is 0 regardless of overlay activity or what the main
-         *    thread did. */
-        struct cr_reader_arg ra = { .is_writer = true /* expect false */ };
-        pthread_t rt;
-        int pc = pthread_create(&rt, NULL, cr_reader_thread, &ra);
-        CR_CHECK("uaf: reader pthread spawned", pc == 0);
-        if (pc == 0) {
-            pthread_join(rt, NULL);
-            CR_CHECK("uaf: fresh pthread is NOT a writer", !ra.is_writer);
-        }
-
-        /* (3) After _enter, the CALLING (main) thread IS the writer. */
-        coins_ram_writer_enter();
-        CR_CHECK("uaf: enter -> is writer", coins_ram_writer_thread());
-
-        /* (4) A nested _enter keeps it true (counter form, re-entrancy-safe). */
-        coins_ram_writer_enter();
-        CR_CHECK("uaf: nested enter -> still writer",
-                 coins_ram_writer_thread());
-        coins_ram_writer_exit();
-        CR_CHECK("uaf: one exit -> still writer (counter)",
-                 coins_ram_writer_thread());
-
-        /* (5) After the matching final _exit, it is false again. */
-        coins_ram_writer_exit();
-        CR_CHECK("uaf: final exit -> not writer", !coins_ram_writer_thread());
-
-        /* (6) While the main thread is the writer, a fresh pthread is STILL NOT
-         *    — the flag is _Thread_local, so the writer's bracket does not leak
-         *    into another thread. This is the crux: the guard isolates the
-         *    writer from concurrent readers. */
-        coins_ram_writer_enter();
-        struct cr_reader_arg ra2 = { .is_writer = false /* expect false */ };
-        pthread_t rt2;
-        pc = pthread_create(&rt2, NULL, cr_reader_thread, &ra2);
-        CR_CHECK("uaf: 2nd reader pthread spawned", pc == 0);
-        if (pc == 0) {
-            pthread_join(rt2, NULL);
-            CR_CHECK("uaf: pthread NOT writer while main is writer",
-                     !ra2.is_writer);
-        }
-        CR_CHECK("uaf: main still writer after pthread join",
-                 coins_ram_writer_thread());
-        coins_ram_writer_exit();
-        CR_CHECK("uaf: main exits cleanly", !coins_ram_writer_thread());
-    }
+    failures += cr_mintdrive_tombstone_visibility();
+    failures += cr_highwater_flushes_at_cap();
+    failures += cr_uaf_writer_thread_contract();
 
     printf("test_coins_ram: %d failures\n", failures);
     return failures;

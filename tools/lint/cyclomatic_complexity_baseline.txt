@@ -1190,7 +1190,6 @@ tests/harness/src/test_coins_kv.c:ck_case_anchor_coin_byte_flip:19
 tests/harness/src/test_coins_kv.c:ck_case_seed_checkpoint_gate:17
 tests/harness/src/test_coins_kv.c:test_coins_kv:18
 tests/harness/src/test_coins_kv_read_cache.c:test_coins_kv_read_cache:40
-tests/harness/src/test_coins_ram.c:test_coins_ram:63
 tests/harness/src/test_cold_join_sovereign.c:cj_count_trust_store_refs:23
 tests/harness/src/test_cold_join_sovereign.c:test_cold_join_sovereign:19
 tests/harness/src/test_command_input_bounds.c:t_fleet_ledger_numeric_keys:18
