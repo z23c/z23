@@ -62,6 +62,78 @@
     else { printf("FAIL\n"); failures++; }                 \
 } while (0)
 
+/* Step helpers: each computes one derivation or negative probe for a
+ * single SSS_CHECK below and returns the resulting bool. All printing
+ * (and the failure tally) stays in test_shielded_spend_slice, so the
+ * checks, their order and their messages are exactly as before. */
+
+/* Both derivations succeeded and recomputing produced identical bytes
+ * (the determinism property asserted for cv and for nf). */
+static bool sss_recompute_matches(bool ok, bool ok_again, uint8_t *out,
+                                  uint8_t *out_again)
+{
+    return ok && ok_again && memcmp(out, out_again, 32) == 0;
+}
+
+/* A different rcv yields a different cv (hiding). */
+static bool sss_cv_differs_under_fresh_rcv(uint64_t value, uint8_t *cv)
+{
+    uint8_t rcv2[32], cv2[32];
+    bool s = sapling_generate_r(rcv2);
+    bool c = s && sapling_value_commit(value, rcv2, cv2);
+    return c && memcmp(cv, cv2, 32) != 0;
+}
+
+/* The SAME note at a DIFFERENT position yields a DIFFERENT nf —
+ * the position binding that prevents replaying one note's nf. */
+static bool sss_nf_differs_at_next_leaf(uint8_t *nf, uint8_t *d,
+                                        uint8_t *pk_d, uint64_t value,
+                                        uint8_t *rcm, uint8_t *ak,
+                                        uint8_t *nk, uint64_t position)
+{
+    uint8_t nf_pos[32];
+    bool ok = sapling_compute_nf(d, pk_d, value, rcm, ak, nk,
+                                 position + 1, nf_pos);
+    return ok && memcmp(nf, nf_pos, 32) != 0;
+}
+
+/* The sig must NOT verify under the given verification key. */
+static bool sss_sig_rejected_under(bool sign_ok, uint8_t *vk, uint8_t *msg,
+                                   uint8_t *sig)
+{
+    return sign_ok && !redjubjub_verify(vk, msg, 32, sig, sig + 32, 5);
+}
+
+/* True while every zkproof byte is zero (the stubbed placeholder). */
+static bool sss_zkproof_is_stub_zero(const struct spend_description *sd)
+{
+    bool zproof_zero = true;
+    for (size_t i = 0; i < GROTH_PROOF_SIZE; i++) {
+        if (sd->zkproof[i] != 0) {
+            zproof_zero = false;
+            break;
+        }
+    }
+    return zproof_zero;
+}
+
+/* bsk = rcv_spend − rcv_output (one spend, one output). */
+static bool sss_create_binding_sig_for_balance(uint8_t *rcv_spend,
+                                               uint8_t *rcv_out,
+                                               uint8_t *sighash,
+                                               uint8_t *bsk,
+                                               uint8_t *binding_sig,
+                                               bool cv_out_ok)
+{
+    struct fs spend_fs, out_fs, neg_out_fs, bsk_fs;
+    fs_from_bytes(&spend_fs, rcv_spend);
+    fs_from_bytes(&out_fs, rcv_out);
+    fs_neg(&neg_out_fs, &out_fs);
+    fs_add(&bsk_fs, &spend_fs, &neg_out_fs);
+    fs_to_bytes(bsk, &bsk_fs);
+    return cv_out_ok && sapling_create_binding_sig(bsk, sighash, binding_sig);
+}
+
 int test_shielded_spend_slice(void);
 int test_shielded_spend_slice(void)
 {
@@ -132,15 +204,9 @@ int test_shielded_spend_slice(void)
     bool cv_ok2 = sapling_value_commit(SPEND_VALUE, rcv, cv_again);
     SSS_CHECK("value commitment cv built", cv_ok && cv_ok2);
     SSS_CHECK("cv is deterministic in (value, rcv)",
-              cv_ok && cv_ok2 && memcmp(cv, cv_again, 32) == 0);
-    {
-        /* A different rcv yields a different cv (hiding). */
-        uint8_t rcv2[32], cv2[32];
-        bool s = sapling_generate_r(rcv2);
-        bool c = s && sapling_value_commit(SPEND_VALUE, rcv2, cv2);
-        SSS_CHECK("cv differs under fresh rcv (binding randomness used)",
-                  c && memcmp(cv, cv2, 32) != 0);
-    }
+              sss_recompute_matches(cv_ok, cv_ok2, cv, cv_again));
+    SSS_CHECK("cv differs under fresh rcv (binding randomness used)",
+              sss_cv_differs_under_fresh_rcv(SPEND_VALUE, cv));
 
     /* ── (3) NULLIFIER DERIVATION: nf = BLAKE2s("Zcash_nf", nk || rho),
      * rho = cm_full + position·NullifierPosition. Deterministic in
@@ -152,16 +218,10 @@ int test_shielded_spend_slice(void)
                                      POSITION, nf_again);
     SSS_CHECK("nullifier nf derived", nf_ok && nf_ok2);
     SSS_CHECK("nf is deterministic in (note, position)",
-              nf_ok && nf_ok2 && memcmp(nf, nf_again, 32) == 0);
-    {
-        /* The SAME note at a DIFFERENT position yields a DIFFERENT nf —
-         * the position binding that prevents replaying one note's nf. */
-        uint8_t nf_pos[32];
-        bool ok = sapling_compute_nf(d, pk_d, SPEND_VALUE, rcm, ak, nk,
-                                     POSITION + 1, nf_pos);
-        SSS_CHECK("nf is position-bound (differs at a different leaf)",
-                  ok && memcmp(nf, nf_pos, 32) != 0);
-    }
+              sss_recompute_matches(nf_ok, nf_ok2, nf, nf_again));
+    SSS_CHECK("nf is position-bound (differs at a different leaf)",
+              sss_nf_differs_at_next_leaf(nf, d, pk_d, SPEND_VALUE, rcm,
+                                          ak, nk, POSITION));
 
     /* ── (4) SPEND-AUTH: rk = ak + ar·G_spendauth; the spend authorization
      * signature is RedJubjub_sign(rsk = ask + ar, sighash) and must verify
@@ -200,9 +260,7 @@ int test_shielded_spend_slice(void)
     /* NEGATIVE: it must NOT verify under the bare ak (rk's re-randomization
      * is load-bearing — verifying under ak would leak the un-randomized vk). */
     SSS_CHECK("spend_auth_sig is REJECTED under the un-randomized ak",
-              sign_ok && !redjubjub_verify(ak, sighash, 32,
-                                           spend_auth_sig,
-                                           spend_auth_sig + 32, 5));
+              sss_sig_rejected_under(sign_ok, ak, sighash, spend_auth_sig));
 
     /* NEGATIVE: a tampered sighash must be rejected under rk. */
     {
@@ -210,9 +268,8 @@ int test_shielded_spend_slice(void)
         memcpy(bad_sighash, sighash, 32);
         bad_sighash[0] ^= 0xFF;
         SSS_CHECK("spend_auth_sig is REJECTED for a tampered sighash",
-                  sign_ok && !redjubjub_verify(rk, bad_sighash, 32,
-                                               spend_auth_sig,
-                                               spend_auth_sig + 32, 5));
+                  sss_sig_rejected_under(sign_ok, rk, bad_sighash,
+                                         spend_auth_sig));
     }
 
     /* ── (5) Assemble the SpendDescription with a STUBBED Groth16 proof.
@@ -232,13 +289,8 @@ int test_shielded_spend_slice(void)
               memcmp(sd.nullifier.data, nf, 32) == 0);
     SSS_CHECK("spend description carries the re-randomized rk",
               memcmp(sd.rk.data, rk, 32) == 0);
-    {
-        bool zproof_zero = true;
-        for (size_t i = 0; i < GROTH_PROOF_SIZE; i++)
-            if (sd.zkproof[i] != 0) { zproof_zero = false; break; }
-        SSS_CHECK("Groth16 zkproof is the stubbed (zeroed) placeholder",
-                  zproof_zero);
-    }
+    SSS_CHECK("Groth16 zkproof is the stubbed (zeroed) placeholder",
+              sss_zkproof_is_stub_zero(&sd));
 
     /* ── (6) VALUE-BALANCE ACCOUNTING + BINDING SIG.
      * Spend 1.00000000 ZCL, re-output 0.90000000 ZCL into one shielded
@@ -256,20 +308,12 @@ int test_shielded_spend_slice(void)
                       sapling_value_commit(OUTPUT_VALUE, rcv_out, cv_out);
     SSS_CHECK("output value commitment built", cv_out_ok);
 
-    /* bsk = rcv_spend − rcv_output (one spend, one output). */
     uint8_t bsk[32];
-    {
-        struct fs spend_fs, out_fs, neg_out_fs, bsk_fs;
-        fs_from_bytes(&spend_fs, rcv);
-        fs_from_bytes(&out_fs, rcv_out);
-        fs_neg(&neg_out_fs, &out_fs);
-        fs_add(&bsk_fs, &spend_fs, &neg_out_fs);
-        fs_to_bytes(bsk, &bsk_fs);
-    }
-
     uint8_t binding_sig[64];
-    bool binding_ok = cv_out_ok &&
-                      sapling_create_binding_sig(bsk, sighash, binding_sig);
+    bool binding_ok = sss_create_binding_sig_for_balance(rcv, rcv_out,
+                                                         sighash, bsk,
+                                                         binding_sig,
+                                                         cv_out_ok);
     SSS_CHECK("binding signature produced over bsk", binding_ok);
 
     /* Verifier-side bundle balance: ADD the spend cv, SUBTRACT the output cv,
