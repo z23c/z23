@@ -4,6 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define main zsha256_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef stdout
+#undef stdin
+
 #define CHECK(cond) do { \
     if (!(cond)) { \
         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
@@ -277,8 +290,101 @@ static void test_empty_updates_and_failure_state(void)
     }
 }
 
+static int cli_check(bool hmac, bool dash, FILE *output, int status)
+{
+    FILE *source = tmpfile();
+    if (!source) return 1;
+    if (fputs("abc", source) < 0 || fflush(source) != 0) {
+        fclose(source);
+        return 1;
+    }
+    rewind(source);
+    cli_source = source;
+    cli_sink = output;
+    char *hash_args[] = {"zsha256", "-", NULL};
+    char *hmac_args[] = {"zsha256", "--hmac", "key", "-", NULL};
+    int rc = zsha256_cli_main((hmac ? 3 : 1) + (dash ? 1 : 0),
+                              hmac ? hmac_args : hash_args);
+    return fclose(source) != 0 || rc != status;
+}
+
+static void test_cli_output(void)
+{
+    const char *digests[] = {
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "9c196e32dc0175f86f4b1cb89289d6619de6bee699e4c378e68309ed97a1a6ab"};
+    for (int hmac = 0; hmac < 2; hmac++) {
+        for (int dash = 0; dash < 2; dash++) {
+            FILE *output = tmpfile();
+            CHECK(output != NULL);
+            CHECK(cli_check(hmac, dash, output, 0) == 0);
+            rewind(output);
+            char got[80], want[80];
+            snprintf(want, sizeof want, "%s  -\n", digests[hmac]);
+            CHECK(fgets(got, sizeof got, output) != NULL);
+            CHECK(strcmp(got, want) == 0 && fgetc(output) == EOF);
+            CHECK(fclose(output) == 0);
+#if defined(_WIN32)
+            output = fopen("NUL", "r");
+#else
+            output = fopen("/dev/null", "r");
+#endif
+            CHECK(output != NULL);
+            CHECK(cli_check(hmac, dash, output, 1) == 0);
+            CHECK(fclose(output) == 0);
+#if defined(__linux__)
+            output = fopen("/dev/full", "w");
+            CHECK(output != NULL);
+            char buffer[4096];
+            CHECK(setvbuf(output, buffer, _IOFBF, sizeof buffer) == 0);
+            CHECK(cli_check(hmac, dash, output, 1) == 0);
+            (void)fclose(output);
+#endif
+        }
+    }
+}
+
+static void test_cli_files(void)
+{
+#if defined(_WIN32)
+    char *path = "NUL";
+#else
+    char *path = "/dev/null";
+#endif
+    for (int hmac = 0; hmac < 2; hmac++) {
+        char *hash_args[] = {"zsha256", path, path, NULL};
+        char *hmac_args[] = {"zsha256", "--hmac", "key", path, path, NULL};
+        uint8_t digest[ZSHA256_DIGEST_LEN];
+        if (hmac) zsha256_hmac("key", 3, "", 0, digest);
+        else zsha256("", 0, digest);
+        char hex[65], want[160], got[160];
+        hex_of(digest, sizeof digest, hex);
+        snprintf(want, sizeof want, "%s  %s\n", hex, path);
+        for (int count = 1; count <= 2; count++) {
+            cli_sink = tmpfile();
+            CHECK(cli_sink != NULL);
+            CHECK(zsha256_cli_main((hmac ? 3 : 1) + count,
+                                  hmac ? hmac_args : hash_args) == 0);
+            rewind(cli_sink);
+            for (int i = 0; i < count; i++) {
+                CHECK(fgets(got, sizeof got, cli_sink) != NULL);
+                CHECK(strcmp(got, want) == 0);
+            }
+            CHECK(fgetc(cli_sink) == EOF);
+            CHECK(fclose(cli_sink) == 0);
+            cli_sink = fopen(path, "r");
+            CHECK(cli_sink != NULL);
+            CHECK(zsha256_cli_main((hmac ? 3 : 1) + count,
+                                  hmac ? hmac_args : hash_args) == 1);
+            CHECK(fclose(cli_sink) == 0);
+        }
+    }
+}
+
 int main(void)
 {
+    test_cli_output();
+    test_cli_files();
     test_sha_vectors();
     test_hmac_vectors();
     test_incremental();

@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zsha256/zsha256",
-      "root": "061ca24e84e53d73c0181273c02a53488b31b5300327f95d26a8ee004860cccd",
+      "root": "1718606af180103a3c718da2ead41711d49541c7ccd510c0ab3e87d33dfc801d",
       "semver": "0.1.0"
     }
   ],

@@ -8,6 +8,15 @@
 #include <stdio.h>
 #include <string.h>
 
+static int finish_output(int written)
+{
+    if (written < 0 || fflush(stdout) != 0 || ferror(stdout)) {
+        fputs("zsha256: output write failed\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 static int hash_stream(FILE *f, const char *label)
 {
     zsha256_ctx ctx;
@@ -29,8 +38,7 @@ static int hash_stream(FILE *f, const char *label)
         out[2 * i + 1] = digits[d[i] & 0x0f];
     }
     out[64] = '\0';
-    printf("%s  %s\n", out, label);
-    return 0;
+    return finish_output(printf("%s  %s\n", out, label));
 }
 
 static int hmac_stream(FILE *f, const char *label,
@@ -55,8 +63,7 @@ static int hmac_stream(FILE *f, const char *label,
         out[2 * i + 1] = digits[d[i] & 0x0f];
     }
     out[64] = '\0';
-    printf("%s  %s\n", out, label);
-    return 0;
+    return finish_output(printf("%s  %s\n", out, label));
 }
 
 int main(int argc, char **argv)
