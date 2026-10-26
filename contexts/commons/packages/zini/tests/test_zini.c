@@ -267,6 +267,66 @@ cleanup:
   return failed;
 }
 
+static bool cli_padding(FILE *stream, size_t count) {
+  char bytes[4096];
+  memset(bytes, ' ', sizeof bytes);
+  while (count) {
+    size_t n = count < sizeof bytes ? count : sizeof bytes;
+    if (fwrite(bytes, 1, n, stream) != n) return false;
+    count -= n;
+  }
+  return true;
+}
+
+static bool cli_bound_output(FILE *output, int status) {
+  rewind(output);
+  char bytes[16] = {0};
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output)) return false;
+  return status == 0 ? n == 6 && memcmp(bytes, "k = v\n", 6) == 0 : n == 0;
+}
+
+static int cli_bound_case(size_t length, int tail, int status) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fputs("k=v\n", source) < 0 || !cli_padding(source, length - 5) ||
+      fputc(tail, source) == EOF || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (cli_run(source, output) != status) goto cleanup;
+  if (!cli_bound_output(output, status)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_input_error(const char *path) {
+  FILE *source = fopen(path, "w"), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (cli_run(source, output) == 2 && ferror(source) && ftell(output) == 0)
+    failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static void test_cli_bound(void) {
+  CHECK(cli_bound_case(MAX_INPUT - 1, ' ', 0) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, ' ', 0) == 0);
+  CHECK(cli_bound_case(MAX_INPUT + 1, ' ', 2) == 0);
+  CHECK(cli_bound_case(MAX_INPUT, '=', 1) == 0);
+  CHECK(cli_bound_case(MAX_INPUT + 1, '=', 2) == 0);
+#if defined(_WIN32)
+  CHECK(cli_input_error("NUL") == 0);
+#else
+  CHECK(cli_input_error("/dev/null") == 0);
+#endif
+}
+
 static void test_cli_output(void) {
   CHECK(cli_case("", false, 0, "") == 0);
   CHECK(cli_case("k=v\n", true, 2, "") == 0);
@@ -284,6 +344,7 @@ static void test_cli_output(void) {
 }
 
 int main(void) {
+  test_cli_bound();
   test_cli_output();
   test_sections_and_keys();
   test_global_section();

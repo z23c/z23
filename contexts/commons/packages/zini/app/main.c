@@ -4,7 +4,7 @@
  *
  * Usage: inidump < config.ini
  *
- * Input is bounded at 16 MiB.  Entries print in sorted (section, key)
+ * Input accepts at most 16 MiB.  Entries print in sorted (section, key)
  * order; global-section keys print with an empty section prefix.
  */
 #include "zini/zini.h"
@@ -38,7 +38,8 @@ static void print_entry(void *ctx, const char *section, const char *key,
 static int cli_run(FILE *source, FILE *output) {
   static char input[MAX_INPUT];
   size_t len = fread(input, 1, sizeof(input), source);
-  if (ferror(source) || !feof(source)) {
+  int extra = len == sizeof(input) ? fgetc(source) : EOF;
+  if (ferror(source) || extra != EOF) {
     fprintf(stderr, "inidump: read error or input over 16 MiB bound\n");
     return 2;
   }
