@@ -22,16 +22,43 @@ static bool snapshot_directory_path(const char *root, char out[CI_PATH_MAX])
     return n > 0 && n < CI_PATH_MAX;
 }
 
-bool ci_merkle_snapshot_image_load_windows(
-    const char *root, const char *leaf, size_t maximum,
-    unsigned char **image_out, size_t *length_out, bool *found)
+static void snapshot_load_reset_outputs(unsigned char **image_out,
+                                        size_t *length_out, bool *found)
 {
     if (image_out) *image_out = NULL;
     if (length_out) *length_out = 0;
     if (found) *found = false;
+}
+
+static bool snapshot_load_info_usable(
+    struct platform_directory_child *child,
+    struct platform_directory_child_info *info, size_t maximum)
+{
+    return platform_directory_child_info(child, info) &&
+           info->size > 32 && info->size <= maximum &&
+           info->size <= SIZE_MAX && info->link_count == 1 &&
+           info->current_user_only;
+}
+
+static bool snapshot_load_read_image(
+    struct platform_directory_child *child,
+    const struct platform_directory_child_info *info, bool valid,
+    unsigned char **image_out)
+{
+    unsigned char *image = valid
+        ? zcl_malloc((size_t)info->size, "ci_merkle_snapshot") : NULL;
+    *image_out = image;
+    return valid && image && platform_directory_child_read_exact(
+        child, image, (size_t)info->size, 0);
+}
+
+bool ci_merkle_snapshot_image_load_windows(
+    const char *root, const char *leaf, size_t maximum,
+    unsigned char **image_out, size_t *length_out, bool *found)
+{
+    snapshot_load_reset_outputs(image_out, length_out, found);
     if (!root || !leaf || !image_out || !length_out || !found)
         LOG_FAIL("codeindex", "invalid Windows Merkle snapshot load input");
-
     char path[CI_PATH_MAX];
     struct platform_directory_transaction directory;
     platform_directory_transaction_init(&directory);
@@ -48,14 +75,9 @@ bool ci_merkle_snapshot_image_load_windows(
         return true;
     }
     struct platform_directory_child_info info;
-    bool valid = platform_directory_child_info(&child, &info) &&
-                 info.size > 32 && info.size <= maximum &&
-                 info.size <= SIZE_MAX && info.link_count == 1 &&
-                 info.current_user_only;
-    unsigned char *image = valid
-        ? zcl_malloc((size_t)info.size, "ci_merkle_snapshot") : NULL;
-    bool read_ok = valid && image && platform_directory_child_read_exact(
-        &child, image, (size_t)info.size, 0);
+    bool valid = snapshot_load_info_usable(&child, &info, maximum);
+    unsigned char *image = NULL;
+    bool read_ok = snapshot_load_read_image(&child, &info, valid, &image);
     platform_directory_child_close(&child);
     platform_directory_transaction_close(&directory);
     if (!read_ok) { free(image); return true; }
@@ -63,6 +85,47 @@ bool ci_merkle_snapshot_image_load_windows(
     *length_out = (size_t)info.size;
     *found = true;
     return true;
+}
+
+static bool snapshot_save_open_transaction(
+    const char *root, char path[CI_PATH_MAX],
+    struct platform_directory_transaction *directory)
+{
+    return snapshot_directory_path(root, path) &&
+           platform_private_directory_ensure(path) &&
+           platform_directory_transaction_open(directory, path);
+}
+
+static bool snapshot_save_stage_create(
+    struct platform_directory_transaction *directory,
+    struct platform_directory_child *stage, const char *leaf,
+    char *stage_name, size_t stage_name_size)
+{
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 32 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &g_merkle_snapshot_sequence, 1, memory_order_relaxed);
+        int n = snprintf(stage_name, stage_name_size, "%s.tmp.%llu", leaf,
+                         (unsigned long long)sequence);
+        if (n <= 0 || (size_t)n >= stage_name_size) break;
+        created = platform_directory_child_create(directory, stage_name,
+                                                  stage);
+    }
+    return created;
+}
+
+static bool snapshot_save_stage_write_verified(
+    struct platform_directory_child *stage, const unsigned char *image,
+    size_t length)
+{
+    bool ok = platform_directory_child_write_exact(stage, image, length, 0) &&
+        platform_directory_child_truncate(stage, length) &&
+        platform_directory_child_flush(stage);
+    struct platform_directory_child_info info;
+    ok = ok && platform_directory_child_info(stage, &info) &&
+         info.size == length && info.link_count == 1 &&
+         info.current_user_only;
+    return ok;
 }
 
 bool ci_merkle_snapshot_image_save_windows(
@@ -74,33 +137,17 @@ bool ci_merkle_snapshot_image_save_windows(
     char path[CI_PATH_MAX];
     struct platform_directory_transaction directory;
     platform_directory_transaction_init(&directory);
-    if (!snapshot_directory_path(root, path) ||
-        !platform_private_directory_ensure(path) ||
-        !platform_directory_transaction_open(&directory, path))
+    if (!snapshot_save_open_transaction(root, path, &directory))
         return false;
 
     struct platform_directory_child stage;
     platform_directory_child_init(&stage);
     char stage_name[128] = "";
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 32 && !created; attempt++) {
-        uint64_t sequence = atomic_fetch_add_explicit(
-            &g_merkle_snapshot_sequence, 1, memory_order_relaxed);
-        int n = snprintf(stage_name, sizeof(stage_name), "%s.tmp.%llu", leaf,
-                         (unsigned long long)sequence);
-        if (n <= 0 || (size_t)n >= sizeof(stage_name)) break;
-        created = platform_directory_child_create(&directory, stage_name,
-                                                  &stage);
-    }
+    bool created = snapshot_save_stage_create(&directory, &stage, leaf,
+                                              stage_name, sizeof(stage_name));
     bool stage_named = created;
-    bool ok = created && platform_directory_child_write_exact(
-        &stage, image, length, 0) &&
-        platform_directory_child_truncate(&stage, length) &&
-        platform_directory_child_flush(&stage);
-    struct platform_directory_child_info info;
-    ok = ok && platform_directory_child_info(&stage, &info) &&
-         info.size == length && info.link_count == 1 &&
-         info.current_user_only;
+    bool ok = created && snapshot_save_stage_write_verified(
+        &stage, image, length);
     enum platform_directory_result published = PLATFORM_DIRECTORY_IO;
     if (ok)
         published = platform_directory_child_move_between(
