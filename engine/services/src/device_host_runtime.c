@@ -614,11 +614,12 @@ static enum device_host_bridge_result device_host_runtime_client_run_state(
     if (out) { memset(out, 0, sizeof(*out)); out->result = DEVICE_HOST_BRIDGE_UNSUPPORTED; out->cleanup_complete = true; }
     return DEVICE_HOST_BRIDGE_UNSUPPORTED;
 }
-/* Shared unsupported fallback; spec is never dereferenced, so the cast is safe. */
 static enum device_host_bridge_result device_host_runtime_receiver_run_state(
     const struct device_host_runtime_receiver_spec *spec, struct device_host_runtime_observation *out)
 {
-    return device_host_runtime_client_run_state((const struct device_host_runtime_client_spec *)spec, out);
+    (void)spec;
+    if (out) { memset(out, 0, sizeof(*out)); out->result = DEVICE_HOST_BRIDGE_UNSUPPORTED; out->cleanup_complete = true; }
+    return DEVICE_HOST_BRIDGE_UNSUPPORTED;
 }
 #endif
 
