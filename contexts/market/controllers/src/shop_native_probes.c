@@ -252,6 +252,33 @@ static void shp_probe_key_encryption_row(sqlite3 *db, bool *encrypted)
     }
 }
 
+/* The read-only open statuses that mean there is no node.db at all to
+ * probe: no database file, no datadir, or a datadir path too long to
+ * name one. */
+static bool shp_ro_status_is_no_node_db(enum zcl_node_db_ro_status ro)
+{
+    return ro == ZCL_NODE_DB_RO_ABSENT || ro == ZCL_NODE_DB_RO_NO_DATADIR ||
+           ro == ZCL_NODE_DB_RO_PATH_TOO_LONG;
+}
+
+/* Fold the finished scan's three facts into the posture to report:
+ * envelope first, then whether the scan saw every row, then whether any
+ * row exists at all. */
+static enum shop_wallet_posture shp_posture_from_scan(bool encrypted,
+                                                      bool scan_complete,
+                                                      bool any_rows)
+{
+    if (encrypted)
+        return SHOP_WALLET_ENCRYPTED;
+    /* A truncated scan can only prove "no envelope in the first N rows",
+     * which must not be reported as plaintext custody. */
+    if (!scan_complete)
+        return SHOP_WALLET_UNREADABLE;
+    if (any_rows)
+        return SHOP_WALLET_PLAINTEXT;
+    return SHOP_WALLET_ABSENT;
+}
+
 enum shop_wallet_posture shop_probe_wallet_posture(const char *datadir)
 {
     /* The open is the shared guarded read-only one
@@ -267,8 +294,7 @@ enum shop_wallet_posture shop_probe_wallet_posture(const char *datadir)
     struct node_db ndb;
     enum zcl_node_db_ro_status ro =
         zcl_native_node_db_open_readonly(datadir, &db, &ndb, NULL, 0);
-    if (ro == ZCL_NODE_DB_RO_ABSENT || ro == ZCL_NODE_DB_RO_NO_DATADIR ||
-        ro == ZCL_NODE_DB_RO_PATH_TOO_LONG)
+    if (shp_ro_status_is_no_node_db(ro))
         return SHOP_WALLET_UNREADABLE;  /* no node.db: nothing to probe */
     if (ro != ZCL_NODE_DB_RO_OK)
         LOG_RETURN(SHOP_WALLET_UNREADABLE, SHOP_TAG,
@@ -286,15 +312,7 @@ enum shop_wallet_posture shop_probe_wallet_posture(const char *datadir)
     shp_probe_key_encryption_row(db, &encrypted);
     zcl_native_node_db_close_readonly(&db, &ndb);
 
-    if (encrypted)
-        return SHOP_WALLET_ENCRYPTED;
-    /* A truncated scan can only prove "no envelope in the first N rows",
-     * which must not be reported as plaintext custody. */
-    if (!scan_complete)
-        return SHOP_WALLET_UNREADABLE;
-    if (any_rows)
-        return SHOP_WALLET_PLAINTEXT;
-    return SHOP_WALLET_ABSENT;
+    return shp_posture_from_scan(encrypted, scan_complete, any_rows);
 }
 
 /* ── products.json provisioning ───────────────────────────────────────── */
