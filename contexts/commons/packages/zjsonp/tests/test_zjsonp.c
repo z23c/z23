@@ -475,6 +475,37 @@ static int test_negative_zero_integer(void) {
   return 0;
 }
 
+static bool cli_text_input(FILE *source) {
+  rewind(source);
+#if defined(_WIN32)
+  return _setmode(_fileno(source), _O_TEXT) != -1;
+#else
+  return true;
+#endif
+}
+
+static bool cli_preserves_bytes(FILE *source, const char *bytes, size_t size) {
+  size_t len = 0;
+  return cli_read(source, &len) && len == size && memcmp(input, bytes, size) == 0;
+}
+
+static int test_cli_binary_input(void) {
+  const char bytes[] = {'0', '\r', '\n', 0x1a, 'x'};
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(bytes, 1, sizeof bytes, source) != sizeof bytes ||
+      fflush(source) != 0) goto cleanup;
+  if (!cli_text_input(source) || !cli_preserves_bytes(source, bytes, sizeof bytes))
+    goto cleanup;
+  if (!cli_text_input(source) || cli_run(source, output) != 1) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
 static bool cli_boundary_document(FILE *source, size_t size, char last) {
   char spaces[4096];
   memset(spaces, ' ', sizeof spaces);
@@ -551,6 +582,7 @@ int main(void) {
     const char *name;
     int (*fn)(void);
   } tests[] = {
+      {"cli_binary_input", test_cli_binary_input},
       {"cli_output", test_cli_output},
       {"cli_input_bound", test_cli_input_bound},
       {"terminal_syntax", test_terminal_syntax},

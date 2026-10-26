@@ -6,6 +6,10 @@
 #include "zjsonp/zjsonp.h"
 
 #include <stdio.h>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 enum { MAX_INPUT = 16 << 20 };
 
@@ -27,6 +31,12 @@ static const char *kind_name(zjsonp_event_kind k) {
 }
 
 static bool cli_read(FILE *source, size_t *len) {
+#if defined(_WIN32)
+  if (_setmode(_fileno(source), _O_BINARY) == -1) {
+    fputs("zjsonp: cannot select binary input mode\n", stderr);
+    return false;
+  }
+#endif
   *len = fread(input, 1, sizeof input, source);
   if (*len == sizeof input && !ferror(source))
     (void)fgetc(source); /* Distinguish exact capacity from one extra byte. */
