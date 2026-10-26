@@ -112,6 +112,17 @@ static void frame_hash(const uint8_t prev[HASH], const uint8_t prefix[PRE],
     sha3_256_finalize(&c, (unsigned char *)out);
 }
 
+/* Recompute a frame's chain value and compare it with the stored one. */
+static bool stored_hash_matches(const uint8_t prev[HASH],
+                                const uint8_t prefix[PRE],
+                                const uint8_t *payload, size_t len,
+                                const uint8_t stored[HASH])
+{
+    uint8_t want[HASH];
+    frame_hash(prev, prefix, payload, len, want);
+    return memcmp(want, stored, HASH) == 0;
+}
+
 static void sentinel_build(uint8_t out[SENT], uint64_t start)
 {
     memset(out, 0, SENT);
@@ -145,6 +156,100 @@ static bool offsets_reserve(uint64_t **arr, size_t *cap, size_t need)
     return true;
 }
 
+/* Read the prefix of the frame at `at` and decide whether the bytes left
+ * can still hold a whole frame. Sets *stop when only an uncommitted tail
+ * remains, which ends the scan without an error. */
+static enum zcl_chainlog_status scan_frame_prefix(struct platform_private_file *f,
+    uint64_t size, uint64_t at, struct zcl_chainlog_report *rep,
+    uint8_t prefix[PRE], uint64_t *need, bool *stop)
+{
+    uint64_t left = size - at;
+    if (left < PRE) {
+        rep->torn_bytes = left;
+        *stop = true;
+        return ZCL_CHAINLOG_OK;
+    }
+    if (!platform_private_file_read_at(f, prefix, PRE, at))
+        return ZCL_CHAINLOG_IO;
+
+    uint32_t kind = zcl_read_u32_be(prefix);
+    uint64_t seq = zcl_read_u64_be(prefix + 4);
+    uint32_t len = zcl_read_u32_be(prefix + 12);
+    (void)kind;
+
+    /* An impossible length REFUSES; it is never treated as a torn tail.
+     * The prefix is written by one 16-byte write, so a length this wrong
+     * is far more likely an edit than an interrupted append — and the
+     * two are indistinguishable from here. Discarding the rest of the
+     * file on that guess would destroy the evidence. */
+    if (len > ZCL_CHAINLOG_PAYLOAD_MAX) {
+        rep->first_bad_seq = seq;
+        return ZCL_CHAINLOG_FORMAT;
+    }
+    *need = (uint64_t)PRE + len + HASH + SENT;
+    if (left < *need) {
+        rep->torn_bytes = left;
+        *stop = true;
+    }
+    return ZCL_CHAINLOG_OK;
+}
+
+/* Read one frame's payload, stored chain value and sentinel; check them;
+ * and, once the frame proves committed and intact, fold it into `chain`,
+ * `rep` and the offset table. Sets *stop when this frame begins the
+ * uncommitted tail. */
+static enum zcl_chainlog_status scan_accept_frame(struct platform_private_file *f,
+    uint64_t size, uint64_t at, uint64_t need, uint8_t chain[HASH],
+    const uint8_t prefix[PRE], uint8_t *scratch,
+    struct zcl_chainlog_report *rep, uint64_t **offset, size_t *offset_cap,
+    bool *stop)
+{
+    uint64_t left = size - at;
+    uint64_t seq = zcl_read_u64_be(prefix + 4);
+    uint32_t len = zcl_read_u32_be(prefix + 12);
+
+    if (len && !platform_private_file_read_at(f, scratch, len, at + PRE))
+        return ZCL_CHAINLOG_IO;
+    uint8_t stored[HASH], sent[SENT];
+    if (!platform_private_file_read_at(f, stored, HASH, at + PRE + len))
+        return ZCL_CHAINLOG_IO;
+    if (!platform_private_file_read_at(f, sent, SENT,
+                                       at + PRE + len + HASH))
+        return ZCL_CHAINLOG_IO;
+
+    if (!sentinel_ok(sent, at)) {
+        /* Uncommitted. Only the LAST frame can be: a crash cannot commit
+         * a frame after failing to commit an earlier one, so anything
+         * else means the file was cut or spliced. */
+        if (at + need != size) {
+            rep->first_bad_seq = seq;
+            return ZCL_CHAINLOG_UNCOMMITTED_GAP;
+        }
+        rep->torn_bytes = left;
+        *stop = true;
+        return ZCL_CHAINLOG_OK;
+    }
+
+    if (!stored_hash_matches(chain, prefix, scratch, len, stored)) {
+        rep->first_bad_seq = seq;
+        return ZCL_CHAINLOG_BROKEN_CHAIN;
+    }
+    if (seq != rep->records + 1) {
+        rep->first_bad_seq = seq;
+        return ZCL_CHAINLOG_SEQUENCE;
+    }
+
+    if (offset) {
+        if (!offsets_reserve(offset, offset_cap, (size_t)rep->records + 1))
+            return ZCL_CHAINLOG_IO;
+        (*offset)[rep->records] = at;
+    }
+    memcpy(chain, stored, HASH);
+    memcpy(rep->head, stored, HASH);
+    rep->records++;
+    return ZCL_CHAINLOG_OK;
+}
+
 /* Walk every frame from `seed`, filling `rep`. Never writes. `rep->torn_bytes`
  * reports an uncommitted tail; deciding what to do about it belongs to the
  * caller, because only open-for-append is allowed to remove it. */
@@ -160,75 +265,17 @@ static enum zcl_chainlog_status scan(struct platform_private_file *f,
 
     uint64_t at = HDR;
     while (at < size) {
-        uint64_t left = size - at;
         uint8_t prefix[PRE];
-        if (left < PRE) {
-            rep->torn_bytes = left;
-            break;
-        }
-        if (!platform_private_file_read_at(f, prefix, PRE, at))
-            return ZCL_CHAINLOG_IO;
-
-        uint32_t kind = zcl_read_u32_be(prefix);
-        uint64_t seq = zcl_read_u64_be(prefix + 4);
-        uint32_t len = zcl_read_u32_be(prefix + 12);
-        (void)kind;
-
-        /* An impossible length REFUSES; it is never treated as a torn tail.
-         * The prefix is written by one 16-byte write, so a length this wrong
-         * is far more likely an edit than an interrupted append — and the
-         * two are indistinguishable from here. Discarding the rest of the
-         * file on that guess would destroy the evidence. */
-        if (len > ZCL_CHAINLOG_PAYLOAD_MAX) {
-            rep->first_bad_seq = seq;
-            return ZCL_CHAINLOG_FORMAT;
-        }
-        uint64_t need = (uint64_t)PRE + len + HASH + SENT;
-        if (left < need) {
-            rep->torn_bytes = left;
-            break;
-        }
-
-        if (len && !platform_private_file_read_at(f, scratch, len, at + PRE))
-            return ZCL_CHAINLOG_IO;
-        uint8_t stored[HASH], sent[SENT];
-        if (!platform_private_file_read_at(f, stored, HASH, at + PRE + len))
-            return ZCL_CHAINLOG_IO;
-        if (!platform_private_file_read_at(f, sent, SENT,
-                                           at + PRE + len + HASH))
-            return ZCL_CHAINLOG_IO;
-
-        if (!sentinel_ok(sent, at)) {
-            /* Uncommitted. Only the LAST frame can be: a crash cannot commit
-             * a frame after failing to commit an earlier one, so anything
-             * else means the file was cut or spliced. */
-            if (at + need != size) {
-                rep->first_bad_seq = seq;
-                return ZCL_CHAINLOG_UNCOMMITTED_GAP;
-            }
-            rep->torn_bytes = left;
-            break;
-        }
-
-        uint8_t want[HASH];
-        frame_hash(chain, prefix, scratch, len, want);
-        if (memcmp(want, stored, HASH) != 0) {
-            rep->first_bad_seq = seq;
-            return ZCL_CHAINLOG_BROKEN_CHAIN;
-        }
-        if (seq != rep->records + 1) {
-            rep->first_bad_seq = seq;
-            return ZCL_CHAINLOG_SEQUENCE;
-        }
-
-        if (offset) {
-            if (!offsets_reserve(offset, offset_cap, (size_t)rep->records + 1))
-                return ZCL_CHAINLOG_IO;
-            (*offset)[rep->records] = at;
-        }
-        memcpy(chain, stored, HASH);
-        memcpy(rep->head, stored, HASH);
-        rep->records++;
+        uint64_t need = 0;
+        bool stop = false;
+        enum zcl_chainlog_status st = scan_frame_prefix(f, size, at, rep,
+                                                        prefix, &need, &stop);
+        if (st != ZCL_CHAINLOG_OK || stop)
+            return st;
+        st = scan_accept_frame(f, size, at, need, chain, prefix, scratch,
+                               rep, offset, offset_cap, &stop);
+        if (st != ZCL_CHAINLOG_OK || stop)
+            return st;
         at += need;
     }
     return ZCL_CHAINLOG_OK;
@@ -439,6 +486,42 @@ enum zcl_chainlog_status zcl_chainlog_append(struct zcl_chainlog *log,
 
 /* ── read ──────────────────────────────────────────────────────────── */
 
+/* Re-verify on the way out. A reader that trusts the offset table it
+ * built at open time cannot notice a file edited since. */
+static enum zcl_chainlog_status read_reverify_frame(struct zcl_chainlog *log,
+    uint64_t seq, uint64_t at, uint32_t plen, const uint8_t prefix[PRE])
+{
+    struct platform_private_file *f = &log->file;
+    uint8_t prev[HASH];
+    if (seq == 1) {
+        memcpy(prev, log->seed, HASH);
+    } else if (!platform_private_file_read_at(
+                   f, prev, HASH,
+                   log->offset[seq - 1] - HASH - SENT)) {
+        return ZCL_CHAINLOG_IO;
+    }
+    if (plen && !platform_private_file_read_at(f, log->scratch, plen, at + PRE))
+        return ZCL_CHAINLOG_IO;
+    uint8_t stored[HASH];
+    if (!platform_private_file_read_at(f, stored, HASH, at + PRE + plen))
+        return ZCL_CHAINLOG_IO;
+    if (!stored_hash_matches(prev, prefix, log->scratch, plen, stored))
+        return ZCL_CHAINLOG_BROKEN_CHAIN;
+    return ZCL_CHAINLOG_OK;
+}
+
+/* Hand the verified payload to the caller, or refuse it when the buffer
+ * given is too small to hold it. */
+static enum zcl_chainlog_status read_copy_payload(void *buf, size_t cap,
+    const uint8_t *scratch, size_t plen)
+{
+    if (cap < plen)
+        return ZCL_CHAINLOG_TRUNCATED;
+    if (plen && buf)
+        memcpy(buf, scratch, plen);
+    return ZCL_CHAINLOG_OK;
+}
+
 enum zcl_chainlog_status zcl_chainlog_read(struct zcl_chainlog *log,
                                            uint64_t seq, uint32_t *kind,
                                            void *buf, size_t cap, size_t *len)
@@ -460,30 +543,11 @@ enum zcl_chainlog_status zcl_chainlog_read(struct zcl_chainlog *log,
     if (kind)
         *kind = zcl_read_u32_be(prefix);
 
-    /* Re-verify on the way out. A reader that trusts the offset table it
-     * built at open time cannot notice a file edited since. */
-    uint8_t prev[HASH];
-    if (seq == 1) {
-        memcpy(prev, log->seed, HASH);
-    } else if (!platform_private_file_read_at(
-                   f, prev, HASH,
-                   log->offset[seq - 1] - HASH - SENT)) {
-        return ZCL_CHAINLOG_IO;
-    }
-    if (plen && !platform_private_file_read_at(f, log->scratch, plen, at + PRE))
-        return ZCL_CHAINLOG_IO;
-    uint8_t stored[HASH], want[HASH];
-    if (!platform_private_file_read_at(f, stored, HASH, at + PRE + plen))
-        return ZCL_CHAINLOG_IO;
-    frame_hash(prev, prefix, log->scratch, plen, want);
-    if (memcmp(want, stored, HASH) != 0)
-        return ZCL_CHAINLOG_BROKEN_CHAIN;
-
-    if (cap < plen)
-        return ZCL_CHAINLOG_TRUNCATED;
-    if (plen && buf)
-        memcpy(buf, log->scratch, plen);
-    return ZCL_CHAINLOG_OK;
+    enum zcl_chainlog_status st =
+        read_reverify_frame(log, seq, at, plen, prefix);
+    if (st != ZCL_CHAINLOG_OK)
+        return st;
+    return read_copy_payload(buf, cap, log->scratch, plen);
 }
 
 uint64_t zcl_chainlog_count(const struct zcl_chainlog *log)

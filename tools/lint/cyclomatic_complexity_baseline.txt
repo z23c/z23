@@ -1277,8 +1277,6 @@ engine/models/src/query_builder.c:qb_prepare_db:17
 engine/models/src/query_builder.c:qb_where_lead:16
 engine/models/src/schema_migration.c:schema_migration_rollback_last:16
 engine/models/src/schema_migration.c:schema_migration_run_pending:17
-engine/modules/chainlog/src/chainlog.c:scan:16
-engine/modules/chainlog/src/chainlog.c:zcl_chainlog_read:17
 engine/modules/determinism/src/classify.c:zcl_det_classify:21
 engine/modules/determinism/src/verdict.c:zcl_det_parse_check_line:16
 engine/modules/determinism/src/verdict.c:zcl_det_transcript_scan:17
