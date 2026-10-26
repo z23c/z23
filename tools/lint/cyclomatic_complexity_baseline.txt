@@ -66,11 +66,6 @@ contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_error_str
 contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_intent_parse:31
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
-contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_benchmark_result_validate_for_study:24
-contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_hardware_profile_capture:22
-contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_reproduction_validate_for_results:19
-contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_science_error_string:38
-contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_science_findings_validate_for_review:18
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:55
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_derive:23
 contexts/commons/modules/vcs/src/zcode_science_index.c:vcs_zcode_science_index_build:22
