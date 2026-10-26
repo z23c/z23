@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <errno.h>
 
 #define CHECK(cond) do { \
     if (!(cond)) { \
@@ -248,8 +250,11 @@ static void test_fuzz_vs_snprintf(void)
     CHECK(strcmp(buf, want) == 0);
 }
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_strings();
     test_integers();
     test_double();
@@ -259,4 +264,179 @@ int main(void)
     test_fuzz_vs_snprintf();
     puts("test_zfmt: all groups passed (strings ints double overflow compose fuzz)");
     return 0;
+}
+
+static FILE *cli_sink;
+static size_t cli_flushes;
+static FILE *real_stdout(void) { return stdout; }
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdout
+#define stdout cli_sink
+#define puts(text) fprintf(cli_sink, "%s\n", (text))
+#define fflush cli_flush
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef fflush
+#undef puts
+#undef stdout
+#define stdout real_stdout()
+
+static int cli_invoke(FILE *sink, int argc, char **args)
+{
+    cli_sink = sink;
+    cli_flushes = 0;
+    errno = ERANGE;
+    int rc = embedded_cli_main(argc, args);
+    cli_sink = stdout;
+    return rc;
+}
+static void cli_case(int argc, char **args, int status, const char *want)
+{
+    FILE *sink = tmpfile();
+    CHECK(sink != NULL);
+    CHECK(cli_invoke(sink, argc, args) == status);
+    if (!*want) { CHECK(cli_flushes == 0); }
+    char got[256];
+    rewind(sink);
+    size_t n = fread(got, 1, sizeof got, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(got, want, n));
+    CHECK(fclose(sink) == 0);
+}
+static void cli_unsigned_errors(void)
+{
+    char negative[64], overflow[64];
+    snprintf(negative, sizeof negative, "-%llu", ULLONG_MAX);
+    snprintf(overflow, sizeof overflow, "%llu0", ULLONG_MAX);
+    const char *bad[] = {"", " \t", "junk", "1x", "1 ", "-1", negative, overflow};
+    const char *commands[] = {"u64", "hex", "pad"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        for (size_t c = 0; c < sizeof commands / sizeof commands[0]; c++) {
+            char *args[] = {"zfmt", (char *)commands[c], (char *)bad[i], "1", NULL};
+            cli_case(4, args, 2, "");
+        }
+        char *template[] = {"zfmt", "template", "Ada", (char *)bad[i], NULL};
+        cli_case(4, template, 2, "");
+    }
+}
+static void cli_option_errors(void)
+{
+    char overflow[64];
+    snprintf(overflow, sizeof overflow, "%u0", UINT_MAX);
+    const char *bad[] = {"", " ", "junk", "1x", "1 ", "-1", "4294967296", "4294967297", overflow};
+    const char *commands[] = {"pad", "double"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        for (size_t c = 0; c < 2; c++) {
+            char *args[] = {"zfmt", (char *)commands[c], "1", (char *)bad[i], NULL};
+            cli_case(4, args, 2, "");
+        }
+    }
+}
+static void cli_signed_double_errors(void)
+{
+    char high[64], low[64];
+    snprintf(high, sizeof high, "%lld0", (long long)INT64_MAX);
+    snprintf(low, sizeof low, "%lld0", (long long)INT64_MIN);
+    const char *signed_bad[] = {"", " ", "junk", "1x", "1 ", high, low};
+    for (size_t i = 0; i < sizeof signed_bad / sizeof signed_bad[0]; i++) {
+        char *args[] = {"zfmt", "i64", (char *)signed_bad[i], NULL};
+        cli_case(3, args, 2, "");
+    }
+    const char *double_bad[] = {"", " ", "junk", "1x", "1 ", "1e9999", "1e-9999"};
+    for (size_t i = 0; i < sizeof double_bad / sizeof double_bad[0]; i++) {
+        char *args[] = {"zfmt", "double", (char *)double_bad[i], "1", NULL};
+        cli_case(4, args, 2, "");
+    }
+}
+static void cli_normal(void)
+{
+    char maximum[64], minimum[64], option[64];
+    snprintf(maximum, sizeof maximum, "%llu", (unsigned long long)UINT64_MAX);
+    snprintf(minimum, sizeof minimum, "%lld", (long long)INT64_MIN);
+    snprintf(option, sizeof option, "%u", UINT_MAX);
+    char maxwant[80], minwant[80];
+    snprintf(maxwant, sizeof maxwant, "%s\n", maximum);
+    snprintf(minwant, sizeof minwant, "%s\n", minimum);
+    char *u64[] = {"zfmt", "u64", maximum, "ignored", NULL};
+    cli_case(4, u64, 0, maxwant);
+    char *i64[] = {"zfmt", "i64", minimum, NULL};
+    cli_case(3, i64, 0, minwant);
+    char signed_max[64], signed_want[80];
+    snprintf(signed_max, sizeof signed_max, "%lld", (long long)INT64_MAX);
+    snprintf(signed_want, sizeof signed_want, "%s\n", signed_max);
+    i64[2] = signed_max;
+    cli_case(3, i64, 0, signed_want);
+    char *hex[] = {"zfmt", "hex", " \t+42", NULL};
+    cli_case(3, hex, 0, "000000000000002a\n");
+    char *zero[] = {"zfmt", "u64", "-0", NULL};
+    cli_case(3, zero, 0, "0\n");
+    char *pad[] = {"zfmt", "pad", "7", option, NULL};
+    char padding[66];
+    memset(padding, '0', 63); memcpy(padding + 63, "7\n", 3);
+    cli_case(4, pad, 0, padding);
+    char *precision[] = {"zfmt", "double", "0x1.4p1", option, NULL};
+    cli_case(4, precision, 0, "2.500000000\n");
+    char *zero_width[] = {"zfmt", "pad", "7", "-0", NULL};
+    cli_case(4, zero_width, 0, "7\n");
+    char *zero_precision[] = {"zfmt", "double", "2", "-0", NULL};
+    cli_case(4, zero_precision, 0, "2\n");
+    char *negative[] = {"zfmt", "double", "-2.5", " \t+2", NULL};
+    cli_case(4, negative, 0, "-2.50\n");
+    char *template[] = {"zfmt", "template", "Ada", " \t+7", NULL};
+    cli_case(4, template, 0, "hello Ada, count=7\n");
+}
+static void cli_special_doubles(void)
+{
+    const char *values[] = {"nan", "inf", "-inf"};
+    const char *wants[] = {"nan\n", "inf\n", "-inf\n"};
+    for (size_t i = 0; i < 3; i++) {
+        char *args[] = {"zfmt", "double", (char *)values[i], "2", NULL};
+        cli_case(4, args, 0, wants[i]);
+    }
+}
+static void cli_output_failure(const char *command, bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    char *args[] = {"zfmt", (char *)command, "1", "2", NULL};
+    CHECK(cli_invoke(sink, 4, args) == 1 && ferror(sink));
+    (void)fclose(sink);
+}
+static void cli_no_output(void)
+{
+    char large[256];
+    memset(large, 'a', sizeof large - 1); large[sizeof large - 1] = 0;
+    char *truncated[] = {"zfmt", "template", large, "1", NULL};
+    cli_case(4, truncated, 1, "");
+    char *missing[] = {"zfmt", "pad", "1", NULL};
+    cli_case(3, missing, 2, "");
+    char *unknown[] = {"zfmt", "unknown", "1", NULL};
+    cli_case(3, unknown, 2, "");
+}
+static void test_cli(void)
+{
+    cli_unsigned_errors();
+    cli_option_errors();
+    cli_signed_double_errors();
+    cli_normal();
+    cli_special_doubles();
+    cli_no_output();
+    const char *commands[] = {"u64", "i64", "hex", "pad", "double", "template"};
+    for (size_t i = 0; i < 6; i++) {
+        cli_output_failure(commands[i], false);
+#ifdef __linux__
+        cli_output_failure(commands[i], true);
+#endif
+    }
 }
