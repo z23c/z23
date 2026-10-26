@@ -82,13 +82,10 @@ static bool scripts_equal(const struct script *a, const struct script *b)
     return a->size == b->size && memcmp(a->data, b->data, a->size) == 0;
 }
 
-int test_domain_consensus_coinbase(void)
+/* Script-sig builder error paths: null out, negative height, height range. */
+static int coinbase_script_sig_error_checks(void)
 {
     int failures = 0;
-    const struct chain_params *cp = chain_params_get();
-    const struct consensus_params *params = &cp->consensus;
-
-    /* --- error-path / contract tests --- */
 
     /* placeholder: null out. */
     {
@@ -138,6 +135,14 @@ int test_domain_consensus_coinbase(void)
         DCC_CHECK("extra_nonce h=2^24 -> ERR_HEIGHT_RANGE",
                   !r.ok && r.code == DOMAIN_CONSENSUS_COINBASE_ERR_HEIGHT_RANGE);
     }
+
+    return failures;
+}
+
+/* Build error paths: null args, negative values, height range, prealloc. */
+static int coinbase_build_error_checks(const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* build: null out_tx. */
     {
@@ -217,6 +222,15 @@ int test_domain_consensus_coinbase(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+/* --- script-sig shape regression seals against the zclassicd reference
+ * construction copied above. --- */
+static int coinbase_script_sig_seal_checks(void)
+{
+    int failures = 0;
+
     /* --- script-sig shape regression seal (placeholder vs zclassicd) --- */
     {
         int heights[] = { 0, 1, 16, 17, 100, 0x7f, 0x80, 0xff, 0x100, 0xffff,
@@ -268,6 +282,13 @@ int test_domain_consensus_coinbase(void)
                   all_match);
     }
 
+    return failures;
+}
+
+static int coinbase_golden_bytes_check(void)
+{
+    int failures = 0;
+
     /* --- implementation-independent golden seal: hand-computed bytes for
      * `CScript() << nHeight << OP_0`, the placeholder scriptSig. Each row is
      * {height, {expected bytes...}, size}. */
@@ -299,6 +320,13 @@ int test_domain_consensus_coinbase(void)
                   all_ok);
     }
 
+    return failures;
+}
+
+static int coinbase_extra_nonce_zero_check(void)
+{
+    int failures = 0;
+
     /* extra-nonce 0 is a CScriptNum(0) data push, a single 0x00 byte, not a
      * 4-byte field: `CScript() << 1 << CScriptNum(0)` = [OP_1, 0x00]. */
     {
@@ -308,6 +336,102 @@ int test_domain_consensus_coinbase(void)
         DCC_CHECK("extra_nonce=0 -> [OP_1, 0x00] (size=2)",
                   r.ok && s.size == 2 && s.data[0] == 0x51 && s.data[1] == 0x00);
     }
+
+    return failures;
+}
+
+/* Structural invariants the legacy code held. */
+static bool coinbase_build_structure_matches(struct transaction *tx,
+                                             int64_t subsidy, int64_t fees,
+                                             const struct script *miner)
+{
+    return transaction_is_coinbase(tx)
+        && tx->num_vin == 1
+        && tx->num_vout == 1
+        && tx->vout[0].value == subsidy + fees
+        && tx->vout[0].script_pub_key.size == miner->size
+        && memcmp(tx->vout[0].script_pub_key.data,
+                  miner->data, miner->size) == 0
+        && tx->expiry_height == 0;
+}
+
+/* Version per epoch matches legacy `create_new_block`. */
+static bool coinbase_build_version_matches_epoch(
+        const struct consensus_params *params, int h,
+        const struct transaction *tx)
+{
+    if (consensus_network_upgrade_active(params, h, UPGRADE_SAPLING)) {
+        return tx->version == SAPLING_TX_VERSION
+            && tx->version_group_id == SAPLING_VERSION_GROUP_ID;
+    } else if (consensus_network_upgrade_active(params, h,
+                                                UPGRADE_OVERWINTER)) {
+        return tx->version == OVERWINTER_TX_VERSION
+            && tx->version_group_id == OVERWINTER_VERSION_GROUP_ID;
+    }
+    /* pre-Overwinter: legacy left version untouched (v1) — same
+     * here, transaction_init() sets version=1. */
+    else {
+        return tx->version == 1 && tx->version_group_id == 0;
+    }
+}
+
+/* One (height, fees) case of the build seal: 0 if every invariant held,
+ * 1 if anything failed (mismatches are printed here). */
+static int coinbase_build_case_check(int h, int64_t fees, int64_t subsidy,
+                                     struct script *miner,
+                                     const struct consensus_params *params,
+                                     struct transaction *tx)
+{
+    struct domain_consensus_coinbase_inputs in = {
+        .n_height = h, .subsidy = subsidy, .total_fees = fees,
+        .miner_script = miner, .params = params,
+    };
+    struct zcl_result r = domain_consensus_coinbase_build(&in, tx);
+    if (!r.ok) return 1;
+
+    bool structure_ok = coinbase_build_structure_matches(tx, subsidy, fees,
+                                                         miner);
+
+    /* coinbase scriptSig == zclassicd's `CScript() << nHeight << OP_0`
+     * (minimal BIP34 height push, height-derived), using the same
+     * reference as the placeholder seal. */
+    struct script exp_ss; script_init(&exp_ss);
+    zcd_script_sig_placeholder(h, &exp_ss);
+    bool script_sig_ok = tx->vin[0].script_sig.size == exp_ss.size
+                      && memcmp(tx->vin[0].script_sig.data,
+                                exp_ss.data, exp_ss.size) == 0;
+
+    bool version_ok = coinbase_build_version_matches_epoch(params, h, tx);
+
+    bool ok = structure_ok && script_sig_ok && version_ok;
+
+    if (!ok) {
+        printf("\n  BUILD MISMATCH h=%d fees=%lld subsidy=%lld "
+               "version=%d gid=0x%x scriptSig.size=%u\n",
+               h, (long long)fees, (long long)subsidy,
+               tx->version, tx->version_group_id,
+               (unsigned)tx->vin[0].script_sig.size);
+    }
+
+    /* Determinism: rebuild and compare hashes. */
+    struct transaction tx2; transaction_init(&tx2);
+    if (transaction_alloc(&tx2, 1, 1)) {
+        struct zcl_result r2 = domain_consensus_coinbase_build(&in, &tx2);
+        if (!r2.ok || memcmp(&tx->hash, &tx2.hash, sizeof(tx->hash)) != 0) {
+            printf("\n  BUILD NON-DETERMINISTIC h=%d\n", h);
+            ok = false;
+        }
+        transaction_free(&tx2);
+    }
+
+    if (!ok) return 1;
+    return 0;
+}
+
+static int coinbase_build_epoch_seal_check(
+        const struct consensus_params *params)
+{
+    int failures = 0;
 
     /* --- coinbase_build full-tx regression seal across epochs: heights
      * spanning pre-Overwinter / Overwinter / Sapling / pre- and
@@ -343,73 +467,34 @@ int test_domain_consensus_coinbase(void)
 
             struct transaction tx; transaction_init(&tx);
             if (!transaction_alloc(&tx, 1, 1)) { all_match = false; continue; }
-            struct domain_consensus_coinbase_inputs in = {
-                .n_height = h, .subsidy = subsidy, .total_fees = fees,
-                .miner_script = &miner, .params = params,
-            };
-            struct zcl_result r = domain_consensus_coinbase_build(&in, &tx);
-            if (!r.ok) { all_match = false; transaction_free(&tx); continue; }
-
-            /* Structural invariants the legacy code held. */
-            bool ok = transaction_is_coinbase(&tx)
-                   && tx.num_vin == 1
-                   && tx.num_vout == 1
-                   && tx.vout[0].value == subsidy + fees
-                   && tx.vout[0].script_pub_key.size == miner.size
-                   && memcmp(tx.vout[0].script_pub_key.data,
-                             miner.data, miner.size) == 0
-                   && tx.expiry_height == 0;
-
-            /* coinbase scriptSig == zclassicd's `CScript() << nHeight << OP_0`
-             * (minimal BIP34 height push, height-derived), using the same
-             * reference as the placeholder seal. */
-            struct script exp_ss; script_init(&exp_ss);
-            zcd_script_sig_placeholder(h, &exp_ss);
-            ok = ok
-                   && tx.vin[0].script_sig.size == exp_ss.size
-                   && memcmp(tx.vin[0].script_sig.data,
-                             exp_ss.data, exp_ss.size) == 0;
-
-            /* Version per epoch matches legacy `create_new_block`. */
-            if (consensus_network_upgrade_active(params, h, UPGRADE_SAPLING)) {
-                ok = ok && tx.version == SAPLING_TX_VERSION
-                        && tx.version_group_id == SAPLING_VERSION_GROUP_ID;
-            } else if (consensus_network_upgrade_active(params, h,
-                                                        UPGRADE_OVERWINTER)) {
-                ok = ok && tx.version == OVERWINTER_TX_VERSION
-                        && tx.version_group_id == OVERWINTER_VERSION_GROUP_ID;
-            }
-            /* pre-Overwinter: legacy left version untouched (v1) — same
-             * here, transaction_init() sets version=1. */
-            else {
-                ok = ok && tx.version == 1 && tx.version_group_id == 0;
-            }
-
-            if (!ok) {
-                printf("\n  BUILD MISMATCH h=%d fees=%lld subsidy=%lld "
-                       "version=%d gid=0x%x scriptSig.size=%u\n",
-                       h, (long long)fees, (long long)subsidy,
-                       tx.version, tx.version_group_id,
-                       (unsigned)tx.vin[0].script_sig.size);
-                all_match = false;
-            }
-
-            /* Determinism: rebuild and compare hashes. */
-            struct transaction tx2; transaction_init(&tx2);
-            if (transaction_alloc(&tx2, 1, 1)) {
-                struct zcl_result r2 = domain_consensus_coinbase_build(&in, &tx2);
-                if (!r2.ok ||
-                    memcmp(&tx.hash, &tx2.hash, sizeof(tx.hash)) != 0) {
-                    printf("\n  BUILD NON-DETERMINISTIC h=%d\n", h);
-                    all_match = false;
-                }
-                transaction_free(&tx2);
-            }
+            if (coinbase_build_case_check(h, fees, subsidy, &miner, params,
+                                          &tx) != 0) { all_match = false; }
             transaction_free(&tx);
         }
         DCC_CHECK("coinbase_build invariants + version selection across "
                   "pre/post-Sapling and pre/post-Buttercup", all_match);
     }
+
+    return failures;
+}
+
+int test_domain_consensus_coinbase(void)
+{
+    int failures = 0;
+    const struct chain_params *cp = chain_params_get();
+    const struct consensus_params *params = &cp->consensus;
+
+    /* --- error-path / contract tests --- */
+    failures += coinbase_script_sig_error_checks();
+    failures += coinbase_build_error_checks(params);
+
+    failures += coinbase_script_sig_seal_checks();
+
+    failures += coinbase_golden_bytes_check();
+
+    failures += coinbase_extra_nonce_zero_check();
+
+    failures += coinbase_build_epoch_seal_check(params);
 
     return failures;
 }
