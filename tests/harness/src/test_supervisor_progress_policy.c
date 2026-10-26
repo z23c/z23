@@ -61,6 +61,50 @@ static int stall_of(const struct liveness_contract *c)
     return atomic_load(&c->stall_reason);
 }
 
+/* Record what one dumped root_orphan must carry for its policy: the armed
+ * entry reports idle_ticks apart from ticks_run, and the exempt entry
+ * carries its reason verbatim. */
+static void note_dump_child_policy(const struct json_value *k, const char *p,
+                                   bool *saw_armed, bool *saw_exempt,
+                                   bool *saw_undeclared, bool *saw_reason,
+                                   bool *saw_idle)
+{
+    if (strcmp(p, "armed") == 0) {
+        *saw_armed = true;
+        const struct json_value *it = json_get(k, "idle_ticks");
+        const struct json_value *tr = json_get(k, "ticks_run");
+        *saw_idle = it && tr && json_get_int(it) == 1 &&
+                    json_get_int(tr) == 0;
+    } else if (strcmp(p, "exempt") == 0) {
+        *saw_exempt = true;
+        const struct json_value *r =
+            json_get(k, "progress_exempt_reason");
+        const char *rs = r ? json_get_str(r) : NULL;
+        *saw_reason = rs && strcmp(rs,
+            "no work units by construction") == 0;
+    } else if (strcmp(p, "undeclared") == 0) {
+        *saw_undeclared = true;
+    }
+}
+
+/* Walk root_orphans[] from a state dump and note which policies appear,
+ * delegating each child's field checks to note_dump_child_policy(). */
+static void scan_dump_orphan_policies(const struct json_value *kids,
+                                      bool *saw_armed, bool *saw_exempt,
+                                      bool *saw_undeclared, bool *saw_reason,
+                                      bool *saw_idle)
+{
+    for (size_t i = 0; kids && i < json_size(kids); i++) {
+        const struct json_value *k = json_at(kids, i);
+        const struct json_value *pol = k ? json_get(k, "progress_policy")
+                                         : NULL;
+        const char *p = pol ? json_get_str(pol) : NULL;
+        if (!p) continue;
+        note_dump_child_policy(k, p, saw_armed, saw_exempt, saw_undeclared,
+                               saw_reason, saw_idle);
+    }
+}
+
 int test_supervisor_progress_policy(void)
 {
     int failures = 0;
@@ -292,29 +336,8 @@ int test_supervisor_progress_policy(void)
         const struct json_value *kids = json_get(&out, "root_orphans");
         bool saw_armed = false, saw_exempt = false, saw_undeclared = false;
         bool saw_reason = false, saw_idle = false;
-        for (size_t i = 0; kids && i < json_size(kids); i++) {
-            const struct json_value *k = json_at(kids, i);
-            const struct json_value *pol = k ? json_get(k, "progress_policy")
-                                             : NULL;
-            const char *p = pol ? json_get_str(pol) : NULL;
-            if (!p) continue;
-            if (strcmp(p, "armed") == 0) {
-                saw_armed = true;
-                const struct json_value *it = json_get(k, "idle_ticks");
-                const struct json_value *tr = json_get(k, "ticks_run");
-                saw_idle = it && tr && json_get_int(it) == 1 &&
-                           json_get_int(tr) == 0;
-            } else if (strcmp(p, "exempt") == 0) {
-                saw_exempt = true;
-                const struct json_value *r =
-                    json_get(k, "progress_exempt_reason");
-                const char *rs = r ? json_get_str(r) : NULL;
-                saw_reason = rs && strcmp(rs,
-                    "no work units by construction") == 0;
-            } else if (strcmp(p, "undeclared") == 0) {
-                saw_undeclared = true;
-            }
-        }
+        scan_dump_orphan_policies(kids, &saw_armed, &saw_exempt,
+                                  &saw_undeclared, &saw_reason, &saw_idle);
         PP_CHECK("dump names each child's policy",
             saw_armed && saw_exempt && saw_undeclared);
         PP_CHECK("dump carries the exemption reason verbatim", saw_reason);
