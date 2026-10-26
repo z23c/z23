@@ -558,7 +558,7 @@ static void parity_check_compressed_key_representation(
         bool ak_repr_ok = true, nk_repr_ok = true;
         for (size_t b = 0; b < 256; b++) {
             bool want_ak = (pw.wit.ak[b / 8] >> (b % 8)) & 1;
-            bool want_nk = (nk_ref[b / 8] >> (b % 8)) & 1;
+            bool want_nk = have_nk_ref && ((nk_ref[b / 8] >> (b % 8)) & 1);
             size_t vak = probe.ak_repr[b], vnk = probe.nk_repr[b];
             struct fr one_fr;
             fr_one(&one_fr);
