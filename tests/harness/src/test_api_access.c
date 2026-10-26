@@ -30,45 +30,45 @@ static bool method_rejected_as_405(const char *method)
     return (n > 0 && strstr((char *)resp, "405") != NULL);
 }
 
-/* Expected verdicts of the operator-private classifier, in check order. */
+/* True only at a path boundary (next char '\0', '/', '?'). */
+static bool route_classifier_flags_private_paths(void)
+{
+    return api_route_is_operator_private("/api/wallet") &&
+           api_route_is_operator_private("/api/v1/wallet") &&
+           api_route_is_operator_private("/api/wallet/") &&
+           api_route_is_operator_private("/api/v1/wallet/") &&
+           api_route_is_operator_private("/api/wallet?x=1") &&
+           api_route_is_operator_private("/api/v1/wallet?x=1") &&
+           api_route_is_operator_private("/api/wallet/keys") &&
+           api_route_is_operator_private("/api/messages") &&
+           api_route_is_operator_private("/api/messages/thread/1") &&
+           api_route_is_operator_private("/api/v1/messages") &&
+           api_route_is_operator_private("/api/v1/swaps") &&
+           api_route_is_operator_private("/api/swaps") &&
+           api_route_is_operator_private("/api/swaps/contracts");
+}
+
+/* Public routes must stay public — swap chain discovery must not be
+ * captured by the private /api/swaps resource prefix. */
+static bool route_classifier_clears_public_paths(void)
+{
+    return !api_route_is_operator_private("/api/swap_chains") &&
+           !api_route_is_operator_private("/api/v1/swap_chains") &&
+           !api_route_is_operator_private("/api/swaps/chains") &&
+           !api_route_is_operator_private("/api/v1/swaps/chains") &&
+           !api_route_is_operator_private("/api/swaps/chains?x=1") &&
+           !api_route_is_operator_private("/api/swaps/chains/zcl") &&
+           !api_route_is_operator_private("/api/blocks") &&
+           !api_route_is_operator_private("/api/v1/blocks") &&
+           !api_route_is_operator_private("/api/stats") &&
+           !api_route_is_operator_private("/api/walletfoo") &&
+           !api_route_is_operator_private(NULL);
+}
+
 static bool route_classifier_flags_expected_private_paths(void)
 {
-    /* True only at a path boundary (next char '\0', '/', '?'). */
-    static const struct {
-        const char *path;
-        bool expect_private;
-    } routes[] = {
-        {"/api/wallet", true},
-        {"/api/v1/wallet", true},
-        {"/api/wallet/", true},
-        {"/api/v1/wallet/", true},
-        {"/api/wallet?x=1", true},
-        {"/api/v1/wallet?x=1", true},
-        {"/api/wallet/keys", true},
-        {"/api/messages", true},
-        {"/api/messages/thread/1", true},
-        {"/api/v1/messages", true},
-        {"/api/v1/swaps", true},
-        {"/api/swaps", true},
-        {"/api/swaps/contracts", true},
-        /* Public routes must stay public — swap chain discovery must not be
-         * captured by the private /api/swaps resource prefix. */
-        {"/api/swap_chains", false},
-        {"/api/v1/swap_chains", false},
-        {"/api/swaps/chains", false},
-        {"/api/v1/swaps/chains", false},
-        {"/api/swaps/chains?x=1", false},
-        {"/api/swaps/chains/zcl", false},
-        {"/api/blocks", false},
-        {"/api/v1/blocks", false},
-        {"/api/stats", false},
-        {"/api/walletfoo", false},
-        {NULL, false},
-    };
-    bool ok = true;
-    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++)
-        ok = ok && (api_route_is_operator_private(routes[i].path) ==
-                    routes[i].expect_private);
+    bool ok = route_classifier_flags_private_paths();
+    ok = ok && route_classifier_clears_public_paths();
     return ok;
 }
 
