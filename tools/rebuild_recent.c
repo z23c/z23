@@ -376,6 +376,71 @@ static bool snapshot_index_dir(const char *src, char *out, size_t out_cap)
     return true;
 }
 
+/* Serialize and append one block's header and raw body events. */
+static bool frame_block_append_header(struct uw *u,
+                                      const struct legacy_block_loc *loc,
+                                      struct block *blk,
+                                      const uint8_t *payload, size_t plen)
+{
+    uint8_t hdr_buf[EV_BLOCK_HEADER_FIXED_BYTES + EV_BLOCK_HEADER_MAX_SOLUTION];
+
+    struct uint256 bhash; block_get_hash(blk, &bhash);
+    struct ev_block_header eh; memset(&eh, 0, sizeof eh);
+    memcpy(eh.hash, bhash.data, 32);
+    memcpy(eh.hashPrev, blk->header.hashPrevBlock.data, 32);
+    eh.height=loc->height; eh.nStatus=loc->nStatus; eh.nFile=loc->nFile;
+    eh.nDataPos=loc->nDataPos; eh.nUndoPos=loc->nUndoPos;
+    eh.nTime=blk->header.nTime; eh.nBits=blk->header.nBits;
+    memcpy(eh.nNonce, blk->header.nNonce.data, 32);
+    memcpy(eh.hashMerkleRoot, blk->header.hashMerkleRoot.data, 32);
+    memcpy(eh.hashFinalSaplingRoot, blk->header.hashFinalSaplingRoot.data, 32);
+    eh.nVersion=blk->header.nVersion; eh.nTx=(uint32_t)blk->num_vtx;
+    eh.nSolutionSize=(uint16_t)blk->header.nSolutionSize;
+    size_t hw = 0;
+    bool ok = ev_block_header_serialize(&eh, blk->header.nSolution, hdr_buf, sizeof hdr_buf, &hw)
+           && uw_append(u, EV_BLOCK_HEADER, hdr_buf, (uint32_t)hw)
+           && uw_append(u, EV_BLOCK_BODY, payload, (uint32_t)plen);
+    return ok;
+}
+
+/* Append the UTXO-add events for one transaction's outputs. */
+static bool frame_block_tx_outputs(struct uw *u,
+                                   const struct legacy_block_loc *loc,
+                                   struct transaction *tx, bool cb,
+                                   uint64_t *nadd, bool ok)
+{
+    uint8_t add_buf[EV_UTXO_ADD_HDR_WIRE_LEN + MAX_SCRIPT_SIZE];
+
+    for (size_t vo = 0; vo < tx->num_vout && ok; vo++) {
+        const struct tx_out *o = &tx->vout[vo];
+        struct ev_utxo_add_hdr ah; memset(&ah, 0, sizeof ah);
+        memcpy(ah.txid, tx->hash.data, 32);
+        ah.vout=(uint32_t)vo; ah.value=o->value; ah.height=(uint32_t)loc->height;
+        ah.is_coinbase=cb?1u:0u; ah.script_len=(uint32_t)o->script_pub_key.size;
+        size_t aw=0;
+        ok = ev_utxo_add_serialize(&ah, o->script_pub_key.data, add_buf, sizeof add_buf, &aw)
+          && uw_append(u, EV_UTXO_ADD, add_buf, (uint32_t)aw);
+        (*nadd)++;
+    }
+    return ok;
+}
+
+/* Append the UTXO-spend events for one non-coinbase transaction's inputs. */
+static bool frame_block_tx_spends(struct uw *u, struct transaction *tx,
+                                  uint64_t *nspend, bool ok)
+{
+    uint8_t spend_buf[EV_UTXO_SPEND_WIRE_LEN];
+
+    for (size_t vi = 0; vi < tx->num_vin && ok; vi++) {
+        struct ev_utxo_spend sp; memcpy(sp.txid, tx->vin[vi].prevout.hash.data, 32);
+        sp.vout = tx->vin[vi].prevout.n;
+        ok = ev_utxo_spend_serialize(&sp, spend_buf)
+          && uw_append(u, EV_UTXO_SPEND, spend_buf, EV_UTXO_SPEND_WIRE_LEN);
+        (*nspend)++;
+    }
+    return ok;
+}
+
 /* Frame one block's events into writer `u`. Counts accumulate into the
  * caller's (thread-local) counters — no shared state. Returns false on
  * read/parse/write error. */
@@ -383,10 +448,6 @@ static bool frame_block(struct uw *u, const struct legacy_block_loc *loc,
                         struct blocks_mmap *bmr,
                         uint64_t *ntx, uint64_t *nadd, uint64_t *nspend)
 {
-    uint8_t hdr_buf[EV_BLOCK_HEADER_FIXED_BYTES + EV_BLOCK_HEADER_MAX_SOLUTION];
-    uint8_t add_buf[EV_UTXO_ADD_HDR_WIRE_LEN + MAX_SCRIPT_SIZE];
-    uint8_t spend_buf[EV_UTXO_SPEND_WIRE_LEN];
-
     size_t plen = 0;
     const uint8_t *payload = bmr_get_payload(bmr, loc->nFile, loc->nDataPos, &plen);
     if (!payload || !plen) return false;
@@ -395,45 +456,13 @@ static bool frame_block(struct uw *u, const struct legacy_block_loc *loc,
     bool dok = block_deserialize(&blk, &s); stream_free(&s);
     if (!dok) { block_free(&blk); return false; }
 
-    struct uint256 bhash; block_get_hash(&blk, &bhash);
-    struct ev_block_header eh; memset(&eh, 0, sizeof eh);
-    memcpy(eh.hash, bhash.data, 32);
-    memcpy(eh.hashPrev, blk.header.hashPrevBlock.data, 32);
-    eh.height=loc->height; eh.nStatus=loc->nStatus; eh.nFile=loc->nFile;
-    eh.nDataPos=loc->nDataPos; eh.nUndoPos=loc->nUndoPos;
-    eh.nTime=blk.header.nTime; eh.nBits=blk.header.nBits;
-    memcpy(eh.nNonce, blk.header.nNonce.data, 32);
-    memcpy(eh.hashMerkleRoot, blk.header.hashMerkleRoot.data, 32);
-    memcpy(eh.hashFinalSaplingRoot, blk.header.hashFinalSaplingRoot.data, 32);
-    eh.nVersion=blk.header.nVersion; eh.nTx=(uint32_t)blk.num_vtx;
-    eh.nSolutionSize=(uint16_t)blk.header.nSolutionSize;
-    size_t hw = 0;
-    bool ok = ev_block_header_serialize(&eh, blk.header.nSolution, hdr_buf, sizeof hdr_buf, &hw)
-           && uw_append(u, EV_BLOCK_HEADER, hdr_buf, (uint32_t)hw)
-           && uw_append(u, EV_BLOCK_BODY, payload, (uint32_t)plen);
-
+    bool ok = frame_block_append_header(u, loc, &blk, payload, plen);
     for (size_t ti = 0; ti < blk.num_vtx && ok; ti++) {
         struct transaction *tx = &blk.vtx[ti];
         transaction_compute_hash(tx);
         bool cb = transaction_is_coinbase(tx);
-        for (size_t vo = 0; vo < tx->num_vout && ok; vo++) {
-            const struct tx_out *o = &tx->vout[vo];
-            struct ev_utxo_add_hdr ah; memset(&ah, 0, sizeof ah);
-            memcpy(ah.txid, tx->hash.data, 32);
-            ah.vout=(uint32_t)vo; ah.value=o->value; ah.height=(uint32_t)loc->height;
-            ah.is_coinbase=cb?1u:0u; ah.script_len=(uint32_t)o->script_pub_key.size;
-            size_t aw=0;
-            ok = ev_utxo_add_serialize(&ah, o->script_pub_key.data, add_buf, sizeof add_buf, &aw)
-              && uw_append(u, EV_UTXO_ADD, add_buf, (uint32_t)aw);
-            (*nadd)++;
-        }
-        if (!cb) for (size_t vi = 0; vi < tx->num_vin && ok; vi++) {
-            struct ev_utxo_spend sp; memcpy(sp.txid, tx->vin[vi].prevout.hash.data, 32);
-            sp.vout = tx->vin[vi].prevout.n;
-            ok = ev_utxo_spend_serialize(&sp, spend_buf)
-              && uw_append(u, EV_UTXO_SPEND, spend_buf, EV_UTXO_SPEND_WIRE_LEN);
-            (*nspend)++;
-        }
+        ok = frame_block_tx_outputs(u, loc, tx, cb, nadd, ok);
+        if (!cb) ok = frame_block_tx_spends(u, tx, nspend, ok);
         (*ntx)++;
     }
     block_free(&blk);
@@ -464,21 +493,79 @@ static void run_range(const struct legacy_block_loc *map, int64_t lo, int64_t hi
     uw_close(&u); bmr_close(bmr);
 }
 
+static const char *select_datadir(int argc, char **argv,
+                                  char *default_dd, size_t cap)
+{
+    const char *home = getenv("HOME");
+    snprintf(default_dd, cap, "%s/.zclassic", home ? home : ".");
+    return (argc > 1) ? argv[1] : default_dd;
+}
+
+static void parse_rebuild_mode(int argc, char **argv, bool *whole, int *N)
+{
+    if (argc > 2) {
+        if (!strcmp(argv[2], "all") || !strcmp(argv[2], "0")) *whole = true;
+        else { *N = atoi(argv[2]); if (*N <= 0) *N = 10; }
+    }
+}
+
+static int64_t first_rebuild_height(bool whole, int64_t tip, int N)
+{
+    return whole ? 0 : (tip - N + 1 < 0 ? 0 : tip - N + 1);
+}
+
+static int count_rebuild_segments(bool whole, int nthreads)
+{
+    return whole ? nthreads * 2 : 1;
+}
+
+static void run_segments(const struct legacy_block_loc *map, int64_t lo,
+                         int64_t tip, int64_t span, int NT, int nthreads,
+                         const char *blocks_dir, const char *out_path,
+                         struct shard_res *res)
+{
+    if (NT == 1) {
+        run_range(map, lo, tip, blocks_dir, out_path, &res[0]);
+    } else {
+        #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
+        for (int s = 0; s < NT; s++) {
+            int64_t mlo = lo + (int64_t)s * span;
+            int64_t mhi = mlo + span - 1; if (mhi > tip) mhi = tip;
+            if (mlo > tip) { res[s].ok = true; continue; }
+            char sp[2300]; snprintf(sp, sizeof sp, "%s.%d", out_path, s);
+            run_range(map, mlo, mhi, blocks_dir, sp, &res[s]);
+        }
+    }
+}
+
+static bool sum_shards(const struct shard_res *res, int NT, bool ok,
+                       uint64_t *n_blocks, uint64_t *n_tx, uint64_t *n_add,
+                       uint64_t *n_spend, uint64_t *bytes, int *short_writes)
+{
+    for (int k=0;k<NT;k++){ ok = ok && res[k].ok;
+        *n_blocks+=res[k].blocks; *n_tx+=res[k].tx; *n_add+=res[k].add;
+        *n_spend+=res[k].spend; *bytes+=res[k].bytes;
+        *short_writes+=res[k].short_writes; }
+    return ok;
+}
+
+static void remove_segments(bool out_is_temp, const char *out_path, int NT)
+{
+    if (out_is_temp && NT > 1)
+        for (int k=0;k<NT;k++){ char sp[2300]; snprintf(sp,sizeof sp,"%s.%d",out_path,k); unlink(sp); }
+}
+
 int main(int argc, char **argv)
 {
     crc_init();
     crc_selfcheck();
-    const char *home = getenv("HOME");
     char default_dd[2048];
-    snprintf(default_dd, sizeof default_dd, "%s/.zclassic", home ? home : ".");
-    const char *datadir = (argc > 1) ? argv[1] : default_dd;
+    const char *datadir = select_datadir(argc, argv, default_dd,
+                                         sizeof default_dd);
 
     bool whole = false;
     int N = 10;
-    if (argc > 2) {
-        if (!strcmp(argv[2], "all") || !strcmp(argv[2], "0")) whole = true;
-        else { N = atoi(argv[2]); if (N <= 0) N = 10; }
-    }
+    parse_rebuild_mode(argc, argv, &whole, &N);
     const char *out_path = (argc > 3) ? argv[3] : "rebuild_recent.evlog";
     bool out_is_temp = (argc <= 3);
 
@@ -512,7 +599,7 @@ int main(int argc, char **argv)
         ldb_snapshot_destroy(idx_snap);
         return 1;
     }
-    int64_t lo = whole ? 0 : (tip - N + 1 < 0 ? 0 : tip - N + 1);
+    int64_t lo = first_rebuild_height(whole, tip, N);
     int64_t t_load = now_ms() - t1;
 
     /* ── Rebuild ─────────────────────────────────────────────────────
@@ -522,7 +609,7 @@ int main(int argc, char **argv)
      * segment is a standalone valid event log. last-N: single file. */
     /* More segments than threads + dynamic scheduling balances the very
      * uneven historical block density (some height ranges are far heavier). */
-    int NT = whole ? nthreads * 2 : 1;
+    int NT = count_rebuild_segments(whole, nthreads);
     struct shard_res *res = zcl_calloc((size_t)NT, sizeof *res,
                                        "rebuild_recent shard results");
     if (!res) {
@@ -534,24 +621,12 @@ int main(int argc, char **argv)
     bool ok = true;
 
     int64_t t2 = now_ms();
-    if (NT == 1) {
-        run_range(map, lo, tip, blocks_dir, out_path, &res[0]);
-    } else {
-        #pragma omp parallel for schedule(dynamic) num_threads(nthreads)
-        for (int s = 0; s < NT; s++) {
-            int64_t mlo = lo + (int64_t)s * span;
-            int64_t mhi = mlo + span - 1; if (mhi > tip) mhi = tip;
-            if (mlo > tip) { res[s].ok = true; continue; }
-            char sp[2300]; snprintf(sp, sizeof sp, "%s.%d", out_path, s);
-            run_range(map, mlo, mhi, blocks_dir, sp, &res[s]);
-        }
-    }
+    run_segments(map, lo, tip, span, NT, nthreads, blocks_dir, out_path, res);
     int64_t t_rebuild = now_ms() - t2;
 
     uint64_t n_blocks=0,n_tx=0,n_add=0,n_spend=0,bytes=0; int short_writes=0;
-    for (int k=0;k<NT;k++){ ok = ok && res[k].ok;
-        n_blocks+=res[k].blocks; n_tx+=res[k].tx; n_add+=res[k].add;
-        n_spend+=res[k].spend; bytes+=res[k].bytes; short_writes+=res[k].short_writes; }
+    ok = sum_shards(res, NT, ok, &n_blocks, &n_tx, &n_add, &n_spend, &bytes,
+                    &short_writes);
     uint64_t events = 2*n_blocks + n_add + n_spend;
 
     double secs = (double)t_rebuild / 1000.0;
@@ -576,8 +651,7 @@ int main(int argc, char **argv)
            secs>0 ? (double)bytes/1e6/secs : 0.0,
            secs>0 ? (double)bytes/1e9/secs : 0.0);
 
-    if (out_is_temp && NT > 1)
-        for (int k=0;k<NT;k++){ char sp[2300]; snprintf(sp,sizeof sp,"%s.%d",out_path,k); unlink(sp); }
+    remove_segments(out_is_temp, out_path, NT);
     free(res);
     bilr_free_height_map(map);
     ldb_snapshot_destroy(idx_snap);
