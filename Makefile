@@ -11130,7 +11130,7 @@ PARITY_ORACLE_DIRECT_BIN = $(BIN_DIR)/parity-oracle-direct
 PARITY_ORACLE_INCS = core/modules/sapling/include core/modules/crypto/include platform/modules/util/include platform/modules/base/include
 PARITY_ORACLE_SRCS = core/modules/sapling/src/bls12_381.c core/modules/sapling/src/fr_avx512.c core/modules/crypto/src/blake2b.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
 # Same flags, include dirs and sources as the run-parity-oracle driver compiles.
-$(PARITY_ORACLE_DIRECT_BIN): $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(wildcard $(PARITY_ORACLE_DIR)/*.h) $(PARITY_ORACLE_SRCS) $(foreach d,$(PARITY_ORACLE_INCS),$(wildcard $(d)/*.h))
+$(PARITY_ORACLE_DIRECT_BIN): $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(wildcard $(PARITY_ORACLE_DIR)/*.h) $(PARITY_ORACLE_SRCS) $(foreach d,$(PARITY_ORACLE_INCS),$(wildcard $(d)/*.h $(d)/*/*.h))
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -march=x86-64-v3 -DZCL_TESTING -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -I$(PARITY_ORACLE_DIR) $(addprefix -I,$(PARITY_ORACLE_INCS)) $< $(PARITY_ORACLE_SRCS) -o $@
 
