@@ -5,10 +5,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 
+static FILE *cli_sink;
+static size_t cli_flushes;
+static FILE *real_stdout(void) { return stdout; }
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define puts(text) fprintf(cli_sink, "%s\n", (text))
+#define fflush cli_flush
 #define main zu256_cli_main
 #include "../app/main.c"
 #undef main
+#undef printf
+#undef puts
+#undef fflush
+#undef stdout
+#define stdout real_stdout()
 
 #define CHECK(cond) \
     if (!(cond)) { \
@@ -178,8 +198,67 @@ static void test_cli_rejects_unknown_operations(void)
     CHECK(failures == 0);
 }
 
+static int cli_shift_case(char *mode, char *operand, const char *count,
+                           int status, const char *want, bool stale_errno)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    cli_sink = output;
+    char *args[] = {"zu256", mode, operand, (char *)count, NULL};
+    errno = stale_errno ? ERANGE : 0;
+    int bad = zu256_cli_main(4, args) != status;
+    cli_sink = stdout;
+    rewind(output);
+    char got[128];
+    size_t n = fread(got, 1, sizeof got, output);
+    if (ferror(output) || n != strlen(want) || memcmp(got, want, n) != 0) bad = 1;
+    if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static void test_cli_shift_counts(void)
+{
+    char maximum[3 * sizeof(unsigned long long) + 1];
+    snprintf(maximum, sizeof maximum, "%llu", ULLONG_MAX);
+    const struct { const char *text; unsigned shift; } counts[] = {
+        {"0", 0}, {"1", 1}, {"255", 255}, {"256", 256}, {"257", 256},
+        {"4294967296", 256}, {"4294967297", 256}, {maximum, 256},
+        {"+1", 1}, {" \t1", 1}, {"-0", 0}, {" \t-0", 0}
+    };
+    char high[] = "0x8000000000000000000000000000000000000000000000000000000000000000";
+    for (int right = 0; right < 2; right++) {
+        zu256256 operand;
+        CHECK(parse(right ? high : "1", &operand));
+        for (size_t i = 0; i < sizeof counts / sizeof counts[0]; i++) {
+            zu256256 want = right ? zu256_shr(operand, counts[i].shift)
+                                  : zu256_shl(operand, counts[i].shift);
+            char hex[65], text[68];
+            zu256_to_hex(want, hex);
+            snprintf(text, sizeof text, "0x%s\n", hex);
+            CHECK(cli_shift_case(right ? "shr" : "shl", right ? high : "1",
+                  counts[i].text, 0, text, false) == 0);
+        }
+    }
+    const char *bad[] = {"", " ", "-1", " -2", "1junk", "1 ",
+                         "184467440737095516160", "-18446744073709551615"};
+    for (int right = 0; right < 2; right++) {
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            CHECK(cli_shift_case(right ? "shr" : "shl", "1", bad[i], 2, "", false) == 0);
+        }
+    }
+    char hex[65], want[68];
+    zu256_to_hex(zu256_from_u64(2), hex);
+    snprintf(want, sizeof want, "0x%s\n", hex);
+    CHECK(cli_shift_case("shl", "1", "1", 0, want, true) == 0);
+}
+
+static void test_cli_output(void);
+
 int main(void)
 {
+    cli_sink = stdout;
+    test_cli_output();
+    test_cli_shift_counts();
     test_cli_rejects_unknown_operations();
     test_identities();
     test_arith_vectors();
@@ -189,4 +268,88 @@ int main(void)
     test_dec();
     puts("test_zu256: all groups passed (ids arith shift be32 hex dec)");
     return 0;
+}
+
+static const struct output_row {
+    const char *op, *a, *b, *decimal;
+} output_rows[] = {
+    {"dec", "42", NULL, "42"}, {"hex", "42", NULL, "42"},
+    {"add", "40", "2", "42"}, {"sub", "44", "2", "42"},
+    {"mul", "21", "2", "42"}, {"div", "84", "2", "42"},
+    {"mod", "85", "43", "42"}, {"shl", "21", "1", "42"},
+    {"shr", "84", "1", "42"}
+};
+static int output_invoke(FILE *sink, const char *op, const char *a, const char *b)
+{
+    char *args[] = {"zu256", (char *)op, (char *)a, (char *)b, NULL};
+    cli_sink = sink;
+    cli_flushes = 0;
+    int rc = zu256_cli_main(b ? 4 : (a ? 3 : 2), args);
+    cli_sink = stdout;
+    return rc;
+}
+static void output_normal(const struct output_row *row)
+{
+    FILE *sink = tmpfile();
+    CHECK(sink != NULL);
+    CHECK(output_invoke(sink, row->op, row->a, row->b) == 0);
+    char want[80], got[80];
+    if (!strcmp(row->op, "dec")) snprintf(want, sizeof want, "%s\n", row->decimal);
+    else {
+        zu256256 value;
+        CHECK(zu256_from_dec(row->decimal, &value));
+        char hex[65];
+        zu256_to_hex(value, hex);
+        snprintf(want, sizeof want, "0x%s\n", hex);
+    }
+    rewind(sink);
+    size_t n = fread(got, 1, sizeof got, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(got, want, n));
+    CHECK(fclose(sink) == 0);
+}
+static void output_failure(const struct output_row *row, bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    CHECK(output_invoke(sink, row->op, row->a, row->b) == 1);
+    CHECK(ferror(sink));
+    (void)fclose(sink);
+}
+static void output_unused(void)
+{
+    const struct { const char *op, *a, *b; int rc; } rows[] = {
+        {"hex", NULL, NULL, 2}, {"hex", "garbage!", NULL, 2},
+        {"add", "1", NULL, 2}, {"add", "1", "garbage!", 2},
+        {"shl", "1", "bad", 2}, {"unknown", "1", "2", 2},
+        {"div", "1", "0", 1}, {"mod", "1", "0", 1}
+    };
+#ifdef _WIN32
+    FILE *sink = fopen("NUL", "r");
+#else
+    FILE *sink = fopen("/dev/null", "r");
+#endif
+    CHECK(sink != NULL);
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        CHECK(output_invoke(sink, rows[i].op, rows[i].a, rows[i].b) == rows[i].rc);
+        CHECK(cli_flushes == 0 && !ferror(sink));
+    }
+    CHECK(fclose(sink) == 0);
+}
+static void test_cli_output(void)
+{
+    for (size_t i = 0; i < sizeof output_rows / sizeof output_rows[0]; i++) {
+        output_normal(&output_rows[i]);
+        output_failure(&output_rows[i], false);
+#ifdef __linux__
+        output_failure(&output_rows[i], true);
+#endif
+    }
+    output_unused();
 }
