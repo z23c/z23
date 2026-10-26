@@ -1054,8 +1054,6 @@ tests/harness/src/test_core_seal_interop.c:csi_real_sections:37
 tests/harness/src/test_core_seal_interop.c:csi_synthetic_tree:27
 tests/harness/src/test_crypto_perf_selftest.c:test_crypto_perf_selftest:27
 tests/harness/src/test_crypto_registry.c:test_crypto_registry:66
-tests/harness/src/test_db_migration_idempotent.c:db_mig_family_same:27
-tests/harness/src/test_db_migration_idempotent.c:db_mig_snapshot_family:22
 tests/harness/src/test_db_txn.c:t_busy_snapshot_rollback_rebegin:20
 tests/harness/src/test_db_txn.c:t_failed_commit_rolls_back:19
 tests/harness/src/test_db_txn.c:t_rollback_on_induced_failure:17

@@ -116,6 +116,92 @@ static struct timespec db_mig_stat_ctime(const struct stat *st)
 #endif
 }
 
+/* Split dbpath into its parent directory (copied into dir) and a pointer to
+ * its basename. Returns 0, or -1 when dbpath has no slash, its slash is
+ * leading or trailing, or the parent directory will not fit in dir. */
+static int db_mig_split_db_path(const char *dbpath, char *dir,
+                                size_t dir_cap, const char **base)
+{
+    const char *slash = strrchr(dbpath, '/');
+    if (!slash || slash == dbpath || slash[1] == '\0')
+        return -1;
+    size_t dir_len = (size_t)(slash - dbpath);
+    if (dir_len >= dir_cap)
+        return -1;
+    memcpy(dir, dbpath, dir_len);
+    dir[dir_len] = '\0';
+    *base = slash + 1;
+    return 0;
+}
+
+/* Record the database directory's own mtime/ctime in out; returns stat()'s
+ * own result. */
+static int db_mig_snapshot_dir_meta(const char *dir,
+                                    struct db_mig_family_snapshot *out)
+{
+    struct stat dst;
+    int rc = stat(dir, &dst);
+    if (rc == 0) {
+        out->dir_mtime = db_mig_stat_mtime(&dst);
+        out->dir_ctime = db_mig_stat_ctime(&dst);
+    }
+    return rc;
+}
+
+/* True when a directory entry name is exactly base, or base followed by a
+ * '-' or '.' — the node.db, node.db-wal, node.db-journal family shape. */
+static bool db_mig_entry_in_family(const char *name, const char *base,
+                                   size_t base_len)
+{
+    int prefix = strncmp(name, base, base_len);
+    char next = name[base_len];
+    return prefix == 0 && (next == '\0' || next == '-' || next == '.');
+}
+
+/* Stat and hash dir/name into f; returns 0, or -1 when the joined path does
+ * not fit, is not a regular file, or cannot be read. */
+static int db_mig_fill_family_file(const char *dir, const char *name,
+                                   struct db_mig_family_file *f)
+{
+    char path[800];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    struct stat st;
+    if (n <= 0 || (size_t)n >= sizeof(path) || stat(path, &st) != 0 ||
+        !S_ISREG(st.st_mode) ||
+        !db_mig_hash_file(path, f->sha3, &f->size))
+        return -1;
+    f->mode = st.st_mode;
+    f->mtime = db_mig_stat_mtime(&st);
+    f->ctime = db_mig_stat_ctime(&st);
+    return 0;
+}
+
+/* Snapshot every family member found in the already-open directory stream
+ * into out. Returns 0, or -1 when an entry cannot be snapshotted or the
+ * family outgrows DB_MIG_FAMILY_MAX. */
+static int db_mig_scan_family_entries(DIR *d, const char *dir,
+                                      const char *base, size_t base_len,
+                                      struct db_mig_family_snapshot *out)
+{
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        bool in_family = db_mig_entry_in_family(de->d_name, base, base_len);
+        if (!in_family)
+            continue;
+        if (out->count >= DB_MIG_FAMILY_MAX)
+            return -1;
+        struct db_mig_family_file *f = &out->files[out->count];
+        int name_len = snprintf(f->name, sizeof(f->name), "%s", de->d_name);
+        if (name_len <= 0)
+            return -1;
+        int filled = db_mig_fill_family_file(dir, de->d_name, f);
+        if (filled != 0)
+            return filled;
+        out->count++;
+    }
+    return 0;
+}
+
 /* Snapshot every directory entry in the SQLite database family, not merely
  * node.db.  A refusal that creates/deletes/changes WAL, SHM, rollback-journal
  * or master-journal state has mutated the database even when node.db itself
@@ -128,58 +214,21 @@ static bool db_mig_snapshot_family(const char *dbpath,
         return false;
     memset(out, 0, sizeof(*out));
 
-    const char *slash = strrchr(dbpath, '/');
-    if (!slash || slash == dbpath || slash[1] == '\0')
-        return false;
     char dir[512];
-    size_t dir_len = (size_t)(slash - dbpath);
-    if (dir_len >= sizeof(dir))
+    const char *base = NULL;
+    int split = db_mig_split_db_path(dbpath, dir, sizeof(dir), &base);
+    if (split != 0)
         return false;
-    memcpy(dir, dbpath, dir_len);
-    dir[dir_len] = '\0';
-    const char *base = slash + 1;
     size_t base_len = strlen(base);
 
-    struct stat dst;
-    if (stat(dir, &dst) != 0)
+    int meta = db_mig_snapshot_dir_meta(dir, out);
+    if (meta != 0)
         return false;
-    out->dir_mtime = db_mig_stat_mtime(&dst);
-    out->dir_ctime = db_mig_stat_ctime(&dst);
 
     DIR *d = opendir(dir);
     if (!d)
         return false;
-    bool ok = true;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (strncmp(de->d_name, base, base_len) != 0)
-            continue;
-        char next = de->d_name[base_len];
-        if (next != '\0' && next != '-' && next != '.')
-            continue;
-        if (out->count >= DB_MIG_FAMILY_MAX) {
-            ok = false;
-            break;
-        }
-        struct db_mig_family_file *f = &out->files[out->count];
-        if (snprintf(f->name, sizeof(f->name), "%s", de->d_name) <= 0) {
-            ok = false;
-            break;
-        }
-        char path[800];
-        int n = snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        struct stat st;
-        if (n <= 0 || (size_t)n >= sizeof(path) || stat(path, &st) != 0 ||
-            !S_ISREG(st.st_mode) ||
-            !db_mig_hash_file(path, f->sha3, &f->size)) {
-            ok = false;
-            break;
-        }
-        f->mode = st.st_mode;
-        f->mtime = db_mig_stat_mtime(&st);
-        f->ctime = db_mig_stat_ctime(&st);
-        out->count++;
-    }
+    bool ok = db_mig_scan_family_entries(d, dir, base, base_len, out) == 0;
     closedir(d);
     if (!ok)
         return false;
@@ -188,39 +237,66 @@ static bool db_mig_snapshot_family(const char *dbpath,
     return true;
 }
 
+/* True when both fields of two timespecs are equal. */
+static bool db_mig_timespec_same(const struct timespec *x,
+                                 const struct timespec *y)
+{
+    return x->tv_sec == y->tv_sec && x->tv_nsec == y->tv_nsec;
+}
+
+/* True when two snapshots' entry counts and directory timestamps match. */
+static bool db_mig_family_meta_same(const struct db_mig_family_snapshot *a,
+                                    const struct db_mig_family_snapshot *b)
+{
+    return a->count == b->count &&
+           db_mig_timespec_same(&a->dir_mtime, &b->dir_mtime) &&
+           db_mig_timespec_same(&a->dir_ctime, &b->dir_ctime);
+}
+
+/* True when two family entries match in name, size, mode, timestamps and
+ * hash. */
+static bool db_mig_family_file_same(const struct db_mig_family_file *fa,
+                                    const struct db_mig_family_file *fb)
+{
+    return strcmp(fa->name, fb->name) == 0 && fa->size == fb->size &&
+           fa->mode == fb->mode &&
+           db_mig_timespec_same(&fa->mtime, &fb->mtime) &&
+           db_mig_timespec_same(&fa->ctime, &fb->ctime) &&
+           memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) == 0;
+}
+
+/* Print the family metadata "changed" line to stderr; a NULL snapshot
+ * prints as zeros. */
+static void db_mig_report_family_meta_change(
+    const struct db_mig_family_snapshot *a,
+    const struct db_mig_family_snapshot *b)
+{
+    fprintf(stderr,
+            "db_mig family metadata changed count=%zu/%zu "
+            "dir_mtime=%lld.%09ld/%lld.%09ld "
+            "dir_ctime=%lld.%09ld/%lld.%09ld\n",
+            a ? a->count : 0, b ? b->count : 0,
+            a ? (long long)a->dir_mtime.tv_sec : 0,
+            a ? a->dir_mtime.tv_nsec : 0,
+            b ? (long long)b->dir_mtime.tv_sec : 0,
+            b ? b->dir_mtime.tv_nsec : 0,
+            a ? (long long)a->dir_ctime.tv_sec : 0,
+            a ? a->dir_ctime.tv_nsec : 0,
+            b ? (long long)b->dir_ctime.tv_sec : 0,
+            b ? b->dir_ctime.tv_nsec : 0);
+}
+
 static bool db_mig_family_same(const struct db_mig_family_snapshot *a,
                                const struct db_mig_family_snapshot *b)
 {
-    if (!a || !b || a->count != b->count ||
-        a->dir_mtime.tv_sec != b->dir_mtime.tv_sec ||
-        a->dir_mtime.tv_nsec != b->dir_mtime.tv_nsec ||
-        a->dir_ctime.tv_sec != b->dir_ctime.tv_sec ||
-        a->dir_ctime.tv_nsec != b->dir_ctime.tv_nsec) {
-        fprintf(stderr,
-                "db_mig family metadata changed count=%zu/%zu "
-                "dir_mtime=%lld.%09ld/%lld.%09ld "
-                "dir_ctime=%lld.%09ld/%lld.%09ld\n",
-                a ? a->count : 0, b ? b->count : 0,
-                a ? (long long)a->dir_mtime.tv_sec : 0,
-                a ? a->dir_mtime.tv_nsec : 0,
-                b ? (long long)b->dir_mtime.tv_sec : 0,
-                b ? b->dir_mtime.tv_nsec : 0,
-                a ? (long long)a->dir_ctime.tv_sec : 0,
-                a ? a->dir_ctime.tv_nsec : 0,
-                b ? (long long)b->dir_ctime.tv_sec : 0,
-                b ? b->dir_ctime.tv_nsec : 0);
+    if (!a || !b || !db_mig_family_meta_same(a, b)) {
+        db_mig_report_family_meta_change(a, b);
         return false;
     }
     for (size_t i = 0; i < a->count; i++) {
         const struct db_mig_family_file *fa = &a->files[i];
         const struct db_mig_family_file *fb = &b->files[i];
-        if (strcmp(fa->name, fb->name) != 0 || fa->size != fb->size ||
-            fa->mode != fb->mode ||
-            fa->mtime.tv_sec != fb->mtime.tv_sec ||
-            fa->mtime.tv_nsec != fb->mtime.tv_nsec ||
-            fa->ctime.tv_sec != fb->ctime.tv_sec ||
-            fa->ctime.tv_nsec != fb->ctime.tv_nsec ||
-            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) != 0) {
+        if (!db_mig_family_file_same(fa, fb)) {
             fprintf(stderr, "db_mig family file changed: %s/%s\n",
                     fa->name, fb->name);
             return false;
