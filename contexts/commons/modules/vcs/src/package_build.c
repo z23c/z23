@@ -179,12 +179,9 @@ enum vcs_package_build_error vcs_package_build_add_output(
     return VCS_PACKAGE_BUILD_OK;
 }
 
-enum vcs_package_build_error vcs_package_build_validate(
+static enum vcs_package_build_error build_validate_version_capsule(
     const struct vcs_package_build_receipt *r)
 {
-    if (!r)
-        LOG_RETURN(VCS_PACKAGE_BUILD_ERR_NULL, BUILD_LOG,
-                   "null build receipt to validate");
     if (r->schema_version != VCS_PACKAGE_BUILD_VERSION &&
         r->schema_version != VCS_PACKAGE_BUILD_VERSION_MIN)
         return VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION;
@@ -196,6 +193,12 @@ enum vcs_package_build_error vcs_package_build_validate(
     if (r->has_toolchain_capsule &&
         build_root_is_zero(r->toolchain_capsule_root))
         return VCS_PACKAGE_BUILD_ERR_CAPSULE;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_roots(
+    const struct vcs_package_build_receipt *r)
+{
     if (build_root_is_zero(r->package_root) ||
         build_root_is_zero(r->recipe_root))
         return VCS_PACKAGE_BUILD_ERR_ROOT;
@@ -203,6 +206,12 @@ enum vcs_package_build_error vcs_package_build_validate(
      * (a one-node lock), so an all-zero lock root means "nobody locked". */
     if (build_root_is_zero(r->lock_root))
         return VCS_PACKAGE_BUILD_ERR_ROOT;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_deps(
+    const struct vcs_package_build_receipt *r)
+{
     if (r->dep_count > VCS_PACKAGE_BUILD_MAX_DEPS)
         return VCS_PACKAGE_BUILD_ERR_DEP_COUNT;
     for (size_t i = 0; i < r->dep_count; i++) {
@@ -211,15 +220,33 @@ enum vcs_package_build_error vcs_package_build_validate(
         if (i > 0 && memcmp(r->dep_roots[i - 1], r->dep_roots[i], 32) >= 0)
             return VCS_PACKAGE_BUILD_ERR_DEP_ORDER;
     }
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_strings(
+    const struct vcs_package_build_receipt *r)
+{
     if (!build_printable(r->compiler_id, VCS_PACKAGE_BUILD_ID_MAX) ||
         !build_printable(r->compiler_version, VCS_PACKAGE_BUILD_VERSION_MAX))
         return VCS_PACKAGE_BUILD_ERR_COMPILER;
     if (!build_printable(r->flags, VCS_PACKAGE_BUILD_FLAGS_MAX))
         return VCS_PACKAGE_BUILD_ERR_FLAGS;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_verdict(
+    const struct vcs_package_build_receipt *r)
+{
     if (r->result_class > (uint8_t)VCS_PACKAGE_BUILD_RESULT_TEST_PASS)
         return VCS_PACKAGE_BUILD_ERR_RESULT;
     if (r->isolation > (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_DEGRADED)
         return VCS_PACKAGE_BUILD_ERR_ISOLATION;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_test_state(
+    const struct vcs_package_build_receipt *r)
+{
     /* A test verdict requires a test run, and a run that did not happen
      * carries no exit code. */
     const bool test_verdict =
@@ -229,6 +256,12 @@ enum vcs_package_build_error vcs_package_build_validate(
         return VCS_PACKAGE_BUILD_ERR_TEST_STATE;
     if (!r->test_ran && r->test_exit_code != 0)
         return VCS_PACKAGE_BUILD_ERR_TEST_STATE;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_validate_outputs(
+    const struct vcs_package_build_receipt *r)
+{
     if (r->output_count > VCS_PACKAGE_BUILD_MAX_OUTPUTS)
         return VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT;
     for (size_t i = 0; i < r->output_count; i++) {
@@ -239,6 +272,36 @@ enum vcs_package_build_error vcs_package_build_validate(
             strcmp(r->outputs[i - 1].path, r->outputs[i].path) >= 0)
             return VCS_PACKAGE_BUILD_ERR_OUTPUT_ORDER;
     }
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+enum vcs_package_build_error vcs_package_build_validate(
+    const struct vcs_package_build_receipt *r)
+{
+    if (!r)
+        LOG_RETURN(VCS_PACKAGE_BUILD_ERR_NULL, BUILD_LOG,
+                   "null build receipt to validate");
+    enum vcs_package_build_error err = build_validate_version_capsule(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_roots(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_deps(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_strings(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_verdict(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_test_state(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_validate_outputs(r);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
     if (vcs_package_build_installable(r) && r->output_count == 0)
         return VCS_PACKAGE_BUILD_ERR_OUTPUT_EMPTY;
     return VCS_PACKAGE_BUILD_OK;
@@ -350,6 +413,137 @@ static bool build_rd_str(const uint8_t *wire, size_t wire_len, size_t *o,
     return true;
 }
 
+static enum vcs_package_build_error build_parse_envelope(const uint8_t *wire,
+                                                         size_t wire_len)
+{
+    if (wire_len > VCS_PACKAGE_BUILD_MAX_WIRE_BYTES)
+        return VCS_PACKAGE_BUILD_ERR_WIRE_OVERSIZE;
+    if (wire_len < VCS_PACKAGE_BUILD_WIRE_MAGIC_BYTES + 2u + 96u + 2u)
+        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+    if (memcmp(wire, build_wire_magic, sizeof(build_wire_magic)) != 0)
+        return VCS_PACKAGE_BUILD_ERR_WIRE_MAGIC;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_schema(
+    struct vcs_package_build_receipt *out)
+{
+    if (out->schema_version != VCS_PACKAGE_BUILD_VERSION &&
+        out->schema_version != VCS_PACKAGE_BUILD_VERSION_MIN) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION;
+    }
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_roots_deps(
+    const uint8_t *wire, size_t wire_len, size_t *o,
+    struct vcs_package_build_receipt *out)
+{
+    memcpy(out->package_root, wire + *o, 32);
+    *o += 32;
+    memcpy(out->recipe_root, wire + *o, 32);
+    *o += 32;
+    memcpy(out->lock_root, wire + *o, 32);
+    *o += 32;
+    uint16_t dep_count = vcs_rd_u16le(wire + *o);
+    *o += 2;
+    if (dep_count > VCS_PACKAGE_BUILD_MAX_DEPS) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_DEP_COUNT;
+    }
+    if (wire_len - *o < (size_t)dep_count * 32u) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+    }
+    for (uint16_t i = 0; i < dep_count; i++) {
+        memcpy(out->dep_roots[i], wire + *o, 32);
+        *o += 32;
+    }
+    out->dep_count = dep_count;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_strings(
+    const uint8_t *wire, size_t wire_len, size_t *o,
+    struct vcs_package_build_receipt *out)
+{
+    if (!build_rd_str(wire, wire_len, o, out->compiler_id,
+                      sizeof(out->compiler_id)) ||
+        !build_rd_str(wire, wire_len, o, out->compiler_version,
+                      sizeof(out->compiler_version)) ||
+        !build_rd_str(wire, wire_len, o, out->flags, sizeof(out->flags))) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+    }
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_capsule(
+    const uint8_t *wire, size_t wire_len, size_t *o,
+    struct vcs_package_build_receipt *out)
+{
+    if (out->schema_version == VCS_PACKAGE_BUILD_VERSION) {
+        if (wire_len - *o < 32u) {
+            vcs_package_build_receipt_init(out);
+            return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+        }
+        memcpy(out->toolchain_capsule_root, wire + *o, 32);
+        *o += 32;
+        out->has_toolchain_capsule = true;
+    }
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_verdict(
+    const uint8_t *wire, size_t wire_len, size_t *o,
+    struct vcs_package_build_receipt *out)
+{
+    if (wire_len - *o < 1u + 1u + 1u + 4u + 2u) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+    }
+    out->result_class = wire[(*o)++];
+    out->isolation = wire[(*o)++];
+    uint8_t ran = wire[(*o)++];
+    if (ran > 1u) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_TEST_STATE;
+    }
+    out->test_ran = ran == 1u;
+    out->test_exit_code = vcs_rd_u32le(wire + *o);
+    *o += 4;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
+static enum vcs_package_build_error build_parse_outputs(
+    const uint8_t *wire, size_t wire_len, size_t *o,
+    struct vcs_package_build_receipt *out)
+{
+    uint16_t output_count = vcs_rd_u16le(wire + *o);
+    *o += 2;
+    if (output_count > VCS_PACKAGE_BUILD_MAX_OUTPUTS) {
+        vcs_package_build_receipt_init(out);
+        return VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT;
+    }
+    for (uint16_t i = 0; i < output_count; i++) {
+        struct vcs_package_build_output e;
+        memset(&e, 0, sizeof(e));
+        if (!build_rd_str(wire, wire_len, o, e.path, sizeof(e.path)) ||
+            wire_len - *o < 32u + 8u) {
+            vcs_package_build_receipt_init(out);
+            return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
+        }
+        memcpy(e.sha3, wire + *o, 32);
+        *o += 32;
+        e.bytes = vcs_rd_u64le(wire + *o);
+        *o += 8;
+        out->outputs[i] = e;
+    }
+    out->output_count = output_count;
+    return VCS_PACKAGE_BUILD_OK;
+}
+
 enum vcs_package_build_error vcs_package_build_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_package_build_receipt *out)
@@ -358,93 +552,30 @@ enum vcs_package_build_error vcs_package_build_parse(
         LOG_RETURN(VCS_PACKAGE_BUILD_ERR_NULL, BUILD_LOG,
                    "null argument parsing a build receipt");
     vcs_package_build_receipt_init(out);
-    if (wire_len > VCS_PACKAGE_BUILD_MAX_WIRE_BYTES)
-        return VCS_PACKAGE_BUILD_ERR_WIRE_OVERSIZE;
-    if (wire_len < VCS_PACKAGE_BUILD_WIRE_MAGIC_BYTES + 2u + 96u + 2u)
-        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-    if (memcmp(wire, build_wire_magic, sizeof(build_wire_magic)) != 0)
-        return VCS_PACKAGE_BUILD_ERR_WIRE_MAGIC;
+    enum vcs_package_build_error err = build_parse_envelope(wire, wire_len);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
     size_t o = sizeof(build_wire_magic);
     out->schema_version = vcs_rd_u16le(wire + o);
     o += 2;
-    if (out->schema_version != VCS_PACKAGE_BUILD_VERSION &&
-        out->schema_version != VCS_PACKAGE_BUILD_VERSION_MIN) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION;
-    }
-    memcpy(out->package_root, wire + o, 32);
-    o += 32;
-    memcpy(out->recipe_root, wire + o, 32);
-    o += 32;
-    memcpy(out->lock_root, wire + o, 32);
-    o += 32;
-    uint16_t dep_count = vcs_rd_u16le(wire + o);
-    o += 2;
-    if (dep_count > VCS_PACKAGE_BUILD_MAX_DEPS) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_DEP_COUNT;
-    }
-    if (wire_len - o < (size_t)dep_count * 32u) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-    }
-    for (uint16_t i = 0; i < dep_count; i++) {
-        memcpy(out->dep_roots[i], wire + o, 32);
-        o += 32;
-    }
-    out->dep_count = dep_count;
-    if (!build_rd_str(wire, wire_len, &o, out->compiler_id,
-                      sizeof(out->compiler_id)) ||
-        !build_rd_str(wire, wire_len, &o, out->compiler_version,
-                      sizeof(out->compiler_version)) ||
-        !build_rd_str(wire, wire_len, &o, out->flags, sizeof(out->flags))) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-    }
-    if (out->schema_version == VCS_PACKAGE_BUILD_VERSION) {
-        if (wire_len - o < 32u) {
-            vcs_package_build_receipt_init(out);
-            return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-        }
-        memcpy(out->toolchain_capsule_root, wire + o, 32);
-        o += 32;
-        out->has_toolchain_capsule = true;
-    }
-    if (wire_len - o < 1u + 1u + 1u + 4u + 2u) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-    }
-    out->result_class = wire[o++];
-    out->isolation = wire[o++];
-    uint8_t ran = wire[o++];
-    if (ran > 1u) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_TEST_STATE;
-    }
-    out->test_ran = ran == 1u;
-    out->test_exit_code = vcs_rd_u32le(wire + o);
-    o += 4;
-    uint16_t output_count = vcs_rd_u16le(wire + o);
-    o += 2;
-    if (output_count > VCS_PACKAGE_BUILD_MAX_OUTPUTS) {
-        vcs_package_build_receipt_init(out);
-        return VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT;
-    }
-    for (uint16_t i = 0; i < output_count; i++) {
-        struct vcs_package_build_output e;
-        memset(&e, 0, sizeof(e));
-        if (!build_rd_str(wire, wire_len, &o, e.path, sizeof(e.path)) ||
-            wire_len - o < 32u + 8u) {
-            vcs_package_build_receipt_init(out);
-            return VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED;
-        }
-        memcpy(e.sha3, wire + o, 32);
-        o += 32;
-        e.bytes = vcs_rd_u64le(wire + o);
-        o += 8;
-        out->outputs[i] = e;
-    }
-    out->output_count = output_count;
+    err = build_parse_schema(out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_parse_roots_deps(wire, wire_len, &o, out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_parse_strings(wire, wire_len, &o, out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_parse_capsule(wire, wire_len, &o, out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_parse_verdict(wire, wire_len, &o, out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
+    err = build_parse_outputs(wire, wire_len, &o, out);
+    if (err != VCS_PACKAGE_BUILD_OK)
+        return err;
     if (o != wire_len) {
         vcs_package_build_receipt_init(out);
         return VCS_PACKAGE_BUILD_ERR_WIRE_TRAILING;

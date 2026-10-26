@@ -40,8 +40,6 @@ contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_ledger:17
 contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_publish:16
 contexts/commons/modules/vcs/src/package_badge_eligible.c:vcs_badge_evaluate:44
 contexts/commons/modules/vcs/src/package_badge_eligible.c:vcs_badge_issue:52
-contexts/commons/modules/vcs/src/package_build.c:vcs_package_build_parse:24
-contexts/commons/modules/vcs/src/package_build.c:vcs_package_build_validate:32
 contexts/commons/modules/vcs/src/package_capsule.c:vcs_package_capsule_parse:17
 contexts/commons/modules/vcs/src/package_checkout.c:checkout_materialize:19
 contexts/commons/modules/vcs/src/package_checkout.c:vcs_package_checkout#2:29
