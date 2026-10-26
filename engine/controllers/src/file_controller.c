@@ -493,7 +493,7 @@ static int file_manifest_count_block_files(const char *blocks_dir)
     return num_files;
 }
 
-enum file_scan_result {
+enum file_manifest_scan_status {
     FILE_SCAN_CONTINUE = 0,
     FILE_SCAN_STOP,
     FILE_SCAN_HASH_FAILED,
@@ -503,7 +503,7 @@ enum file_scan_result {
  * the node may be actively appending blocks via P2P, which
  * changes the file after we hash it, causing SHA3 mismatches.
  * Only serve stable, immutable files. */
-static enum file_scan_result file_manifest_scan_block_file(
+static enum file_manifest_scan_status file_manifest_scan_block_file(
                                                   const char *path,
                                                   int file_index,
                                                   int64_t cutoff,
@@ -582,7 +582,7 @@ bool file_manifest_build(struct file_manifest *fm, const char *datadir)
     for (int i = 0; i < num_files; i++) {
         char path[576];
         snprintf(path, sizeof(path), "%s/blk%05d.dat", blocks_dir, i);
-        enum file_scan_result rc =
+        enum file_manifest_scan_status rc =
             file_manifest_scan_block_file(path, i, cutoff, fm);
         if (rc == FILE_SCAN_HASH_FAILED)
             LOG_FAIL("file", "manifest_build: hash_file_chunks failed for %s", path);
