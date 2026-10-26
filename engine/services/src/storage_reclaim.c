@@ -5,7 +5,7 @@
  * actually free derived bytes (and the condition clears) instead of latching.
  */
 
-// one-result-type-ok:reclaim-count-out-struct — E2 (one way out): the public
+// one-result-type-ok:reclaim-counts-out-struct — E2 (one way out): the public
 // surface is best-effort and reports a COUNT SUMMARY, not a fallible op whose
 // reason must travel. storage_reclaim_derived() always runs every source it can
 // (a failed/absent source is recorded in sources_ok/sources_total, never an
