@@ -246,6 +246,39 @@ static size_t fsx_serialize(const struct fsx_call *c, char *buf, size_t cap)
 
 /* ── the fixtures ───────────────────────────────────────────────────────── */
 
+/* Branch main in the clone, land the one base commit, publish it to origin. */
+static bool fsx_repo_seed_main(const char *main_dir)
+{
+    const char *checkout[] = {"checkout", "-q", "-b", "main", NULL};
+    const char *push[] = {"push", "-q", "-u", "origin", "main", NULL};
+    return fsx_git(main_dir, checkout) &&
+           fsx_write(main_dir, "a.c", "int a(void){return 1;}\n") &&
+           fsx_commit(main_dir, "base") && fsx_git(main_dir, push);
+}
+
+/* Link the three worktrees off origin/main: clean (detached), ahead, dirty. */
+static bool fsx_repo_link_worktrees(const char *main_dir, const char *clean,
+                                    const char *ahead, const char *dirty)
+{
+    const char *add_clean[] = {"worktree", "add", "-q", "--detach", clean,
+                               "origin/main", NULL};
+    const char *add_ahead[] = {"worktree", "add", "-q", "-b", "lane/ahead",
+                               ahead, "origin/main", NULL};
+    const char *add_dirty[] = {"worktree", "add", "-q", "-b", "lane/dirty",
+                               dirty, "origin/main", NULL};
+    return fsx_git(main_dir, add_clean) && fsx_git(main_dir, add_ahead) &&
+           fsx_git(main_dir, add_dirty);
+}
+
+/* Land exactly two commits on the ahead branch: write, commit, write, commit. */
+static bool fsx_repo_commit_two_ahead(const char *ahead)
+{
+    return fsx_write(ahead, "b.c", "int b(void){return 2;}\n") &&
+           fsx_commit(ahead, "ahead one") &&
+           fsx_write(ahead, "c.c", "int c(void){return 3;}\n") &&
+           fsx_commit(ahead, "ahead two");
+}
+
 /* A bare origin, a main clone, and three linked worktrees: one clean at
  * origin/main, one two commits ahead, one dirty. This is the shape the leaf
  * exists to summarize, at three rows instead of 276. */
@@ -275,30 +308,12 @@ static bool fsx_repo_fixture(const char *root, char *main_dir, size_t cap)
         if (zcl_spawn_capture(argv, out, sizeof(out), 60000) != 0)
             return false;
     }
-    {
-        const char *checkout[] = {"checkout", "-q", "-b", "main", NULL};
-        const char *push[] = {"push", "-q", "-u", "origin", "main", NULL};
-        if (!fsx_git(main_dir, checkout) ||
-            !fsx_write(main_dir, "a.c", "int a(void){return 1;}\n") ||
-            !fsx_commit(main_dir, "base") || !fsx_git(main_dir, push))
-            return false;
-    }
-    {
-        const char *add_clean[] = {"worktree", "add", "-q", "--detach", clean,
-                                   "origin/main", NULL};
-        const char *add_ahead[] = {"worktree", "add", "-q", "-b", "lane/ahead",
-                                   ahead, "origin/main", NULL};
-        const char *add_dirty[] = {"worktree", "add", "-q", "-b", "lane/dirty",
-                                   dirty, "origin/main", NULL};
-        if (!fsx_git(main_dir, add_clean) || !fsx_git(main_dir, add_ahead) ||
-            !fsx_git(main_dir, add_dirty))
-            return false;
-    }
+    if (!fsx_repo_seed_main(main_dir))
+        return false;
+    if (!fsx_repo_link_worktrees(main_dir, clean, ahead, dirty))
+        return false;
     /* Two commits ahead of origin/main, and nothing else. */
-    if (!fsx_write(ahead, "b.c", "int b(void){return 2;}\n") ||
-        !fsx_commit(ahead, "ahead one") ||
-        !fsx_write(ahead, "c.c", "int c(void){return 3;}\n") ||
-        !fsx_commit(ahead, "ahead two"))
+    if (!fsx_repo_commit_two_ahead(ahead))
         return false;
     /* One tracked edit and one untracked file: two porcelain rows. */
     if (!fsx_write(dirty, "a.c", "int a(void){return 99;}\n") ||
@@ -409,6 +424,70 @@ _test_next:;
     /* Restore the group's own pin on every exit path, including a failed
      * assertion inside the window above. */
     fsx_home_restore(pinned);
+    return failures;
+}
+
+/* The declared latency budget: the packet reports both that it stayed inside
+ * the class and the class itself. */
+static int fsx_case_latency_budget(const char *board)
+{
+    int failures = 0;
+    TEST("start: the declared latency budget holds on the fixture") {
+        struct fsx_call c;
+        fsx_begin(&c);
+        (void)json_push_kv_str(&c.input, "board_dir", board);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        const struct json_value *v =
+            json_get(&c.reply.data, "budget_exceeded");
+        ASSERT(v && v->type == JSON_BOOL && !json_get_bool(v));
+        /* The declared class, reported so a caller can judge a slow answer
+         * without reading the .def. */
+        const struct json_value *b =
+            json_get(&c.reply.data, "latency_budget_ms");
+        ASSERT(b && b->type == JSON_INT && json_get_int(b) > 0);
+        fsx_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* A tight byte budget: the packet fits inside it and names what it cut. */
+static int fsx_case_packet_budget(const char *board)
+{
+    int failures = 0;
+    TEST("start: a 1024-byte packet stays inside 1024 bytes and says what it cut") {
+        struct fsx_call c;
+        fsx_begin(&c);
+        (void)json_push_kv_str(&c.input, "board_dir", board);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        (void)json_push_kv_int(&c.input, "budget_bytes", 1024);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        const struct json_value *bytes = json_get(&c.reply.data, "bytes");
+        ASSERT(bytes && bytes->type == JSON_INT);
+        ASSERT(json_get_int(bytes) <= 1024);
+        /* At least one section says it was cut and names its row count. */
+        static const char *const sections[] = {
+            "checkout", "mission", "worktrees", "units",
+            "hosts",    "board",   "main",      "next", NULL};
+        bool saw_truncated = false;
+        for (size_t i = 0; sections[i]; i++) {
+            if (!fsx_sec(&c, sections[i]))
+                continue;
+            if (!fsx_sec_bool(&c, sections[i], "truncated"))
+                continue;
+            saw_truncated = true;
+            ASSERT(fsx_sec_int(&c, sections[i], "total") >=
+                   fsx_sec_int(&c, sections[i], "count"));
+        }
+        ASSERT(saw_truncated);
+        fsx_end(&c);
+        PASS();
+    }
+_test_next:;
     return failures;
 }
 
@@ -548,24 +627,7 @@ int test_dev_fleet_start(void)
     failures += fsx_case_outside_home(root, board);
 
     /* (g) the declared latency budget holds */
-    TEST("start: the declared latency budget holds on the fixture") {
-        struct fsx_call c;
-        fsx_begin(&c);
-        (void)json_push_kv_str(&c.input, "board_dir", board);
-        (void)json_push_kv_bool(&c.input, "include_units", false);
-        ASSERT(fsx_run(&c));
-        ASSERT(fsx_ok(&c));
-        const struct json_value *v =
-            json_get(&c.reply.data, "budget_exceeded");
-        ASSERT(v && v->type == JSON_BOOL && !json_get_bool(v));
-        /* The declared class, reported so a caller can judge a slow answer
-         * without reading the .def. */
-        const struct json_value *b =
-            json_get(&c.reply.data, "latency_budget_ms");
-        ASSERT(b && b->type == JSON_INT && json_get_int(b) > 0);
-        fsx_end(&c);
-        PASS();
-    }
+    failures += fsx_case_latency_budget(board);
 
     /* (e) a missing board dir is unavailable with a reason, not a failure */
     TEST("start: a board directory that is not there is unavailable, not fatal") {
@@ -593,35 +655,7 @@ int test_dev_fleet_start(void)
     }
 
     /* (d) budget */
-    TEST("start: a 1024-byte packet stays inside 1024 bytes and says what it cut") {
-        struct fsx_call c;
-        fsx_begin(&c);
-        (void)json_push_kv_str(&c.input, "board_dir", board);
-        (void)json_push_kv_bool(&c.input, "include_units", false);
-        (void)json_push_kv_int(&c.input, "budget_bytes", 1024);
-        ASSERT(fsx_run(&c));
-        ASSERT(fsx_ok(&c));
-        const struct json_value *bytes = json_get(&c.reply.data, "bytes");
-        ASSERT(bytes && bytes->type == JSON_INT);
-        ASSERT(json_get_int(bytes) <= 1024);
-        /* At least one section says it was cut and names its row count. */
-        static const char *const sections[] = {
-            "checkout", "mission", "worktrees", "units",
-            "hosts",    "board",   "main",      "next", NULL};
-        bool saw_truncated = false;
-        for (size_t i = 0; sections[i]; i++) {
-            if (!fsx_sec(&c, sections[i]))
-                continue;
-            if (!fsx_sec_bool(&c, sections[i], "truncated"))
-                continue;
-            saw_truncated = true;
-            ASSERT(fsx_sec_int(&c, sections[i], "total") >=
-                   fsx_sec_int(&c, sections[i], "count"));
-        }
-        ASSERT(saw_truncated);
-        fsx_end(&c);
-        PASS();
-    }
+    failures += fsx_case_packet_budget(board);
 
     TEST("start: a budget outside the declared range is refused by name") {
         struct fsx_call c;
