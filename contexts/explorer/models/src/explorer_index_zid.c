@@ -279,6 +279,97 @@ bool explorer_index_apply_zid_overlay(struct node_db *ndb,
 
 /* ── Feed 1: the ZNAM "zid" text convention ────────────────────────── */
 
+/* Outcome bits of a znam "zid" text apply, returned to the public entry
+ * point so that IT logs (a LOG_* names its enclosing function, so the warns
+ * must stay in explorer_index_apply_znam_zid_text). The three refusals are
+ * mutually exclusive; a rotate save and an anchor save can fail on the same
+ * call, so the save failures are bits. */
+enum {
+    ZID_ZNAM_F_REVOKE_NOT_OWNER   = 1u << 0,
+    ZID_ZNAM_F_REVOKE_SAVE_FAILED = 1u << 1,
+    ZID_ZNAM_F_OTHER_OWNER        = 1u << 2,
+    ZID_ZNAM_F_KEY_CLAIMED        = 1u << 3,
+    ZID_ZNAM_F_ROTATE_SAVE_FAILED = 1u << 4,
+    ZID_ZNAM_F_ANCHOR_SAVE_FAILED = 1u << 5
+};
+
+/* The empty-value reading: revoke the standing row, recorded-owner signer
+ * only. Returns 0 when there is nothing to log. */
+static unsigned zid_znam_revoke(struct node_db *ndb, const char *name,
+                                const char *owner, int height)
+{
+    struct zid_identity prev;
+    if (!db_zid_identity_find_by_name(ndb, name, &prev))
+        return 0;                       /* nothing to revoke */
+    if (!zid_owner_matches(&prev, owner))
+        return ZID_ZNAM_F_REVOKE_NOT_OWNER;
+    zid_mark_revoked(&prev, height);
+    if (!zid_save_and_publish(ndb, &prev, height))
+        return ZID_ZNAM_F_REVOKE_SAVE_FAILED;
+    return 0;
+}
+
+/* The non-empty-value reading: decode the key, refuse takeovers, rotate a
+ * superseded standing row, then anchor the new one. */
+static unsigned zid_znam_anchor(struct node_db *ndb,
+                                const struct transaction *tx,
+                                const char *name, const char *value,
+                                const char *owner, int height)
+{
+    struct zid_identity prev;
+    const bool prev_found = db_zid_identity_find_by_name(ndb, name, &prev);
+
+    uint8_t key32[32];
+    if (!zid_hex64_to_key(value, key32))
+        return 0;   /* not 64 hex chars → a plain text record, not an identity */
+
+    const bool same_key = prev_found &&
+                          memcmp(prev.master_pubkey, key32, 32) == 0;
+
+    if (prev_found && !zid_owner_matches(&prev, owner)) {
+        /* The name changed hands (ZNAM TRANSFER) or the row was anchored by
+         * an unresolvable signer. Fail closed: the standing identity is not
+         * silently reassigned. */
+        return ZID_ZNAM_F_OTHER_OWNER;
+    }
+    if (!zid_target_free(ndb, key32, owner))
+        return ZID_ZNAM_F_KEY_CLAIMED;
+
+    /* A NEW key from the same owner rotates the standing one. A revoked row
+     * stays revoked — it is dead, not superseded. */
+    unsigned rc = 0;
+    if (prev_found && !same_key &&
+        strcmp(prev.status, ZID_IDENTITY_STATUS_REVOKED) != 0) {
+        zid_mark_rotated(&prev, key32, height);
+        if (!zid_save_and_publish(ndb, &prev, height))
+            rc |= ZID_ZNAM_F_ROTATE_SAVE_FAILED;
+    }
+
+    struct zid_identity row;
+    zid_fill_active(&row, key32, tx->hash.data, height,
+                    ZID_IDENTITY_SOURCE_ZNAM_TEXT, name, owner);
+    if (!zid_save_and_publish(ndb, &row, height))
+        rc |= ZID_ZNAM_F_ANCHOR_SAVE_FAILED;
+    return rc;
+}
+
+static unsigned zid_znam_apply(struct node_db *ndb,
+                               const struct transaction *tx,
+                               const char *name, const char *key,
+                               const char *value, const char *owner,
+                               int height)
+{
+    if (strcmp(key, "zid") != 0)
+        return 0;                       /* an ordinary text record */
+
+    /* ZNAM stores an empty text value rather than deleting the record; the
+     * identity reading of that is "this name no longer asserts a key". */
+    if (value[0] == '\0')
+        return zid_znam_revoke(ndb, name, owner, height);
+
+    return zid_znam_anchor(ndb, tx, name, value, owner, height);
+}
+
 void explorer_index_apply_znam_zid_text(struct node_db *ndb,
                                         const struct transaction *tx,
                                         const char *name, const char *key,
@@ -289,63 +380,24 @@ void explorer_index_apply_znam_zid_text(struct node_db *ndb,
         LOG_WARN("zid", "znam zid text: invalid args at h=%d", height);
         return;
     }
-    if (strcmp(key, "zid") != 0)
-        return;                             /* an ordinary text record */
 
-    struct zid_identity prev;
-    const bool prev_found = db_zid_identity_find_by_name(ndb, name, &prev);
-
-    /* ZNAM stores an empty text value rather than deleting the record; the
-     * identity reading of that is "this name no longer asserts a key". */
-    if (value[0] == '\0') {
-        if (!prev_found)
-            return;                         /* nothing to revoke */
-        if (!zid_owner_matches(&prev, owner)) {
-            LOG_WARN("zid", "znam zid text: revoke by non-owner of '%s' at"
-                     " h=%d — refused", name, height);
-            return;
-        }
-        zid_mark_revoked(&prev, height);
-        if (!zid_save_and_publish(ndb, &prev, height))
-            LOG_WARN("zid", "znam zid text: revoke save failed at h=%d",
-                     height);
-        return;
-    }
-
-    uint8_t key32[32];
-    if (!zid_hex64_to_key(value, key32))
-        return;   /* not 64 hex chars → a plain text record, not an identity */
-
-    const bool same_key = prev_found &&
-                          memcmp(prev.master_pubkey, key32, 32) == 0;
-
-    if (prev_found && !zid_owner_matches(&prev, owner)) {
-        /* The name changed hands (ZNAM TRANSFER) or the row was anchored by
-         * an unresolvable signer. Fail closed: the standing identity is not
-         * silently reassigned. */
+    const unsigned rc = zid_znam_apply(ndb, tx, name, key, value, owner,
+                                       height);
+    if (rc & ZID_ZNAM_F_REVOKE_NOT_OWNER)
+        LOG_WARN("zid", "znam zid text: revoke by non-owner of '%s' at"
+                 " h=%d — refused", name, height);
+    if (rc & ZID_ZNAM_F_REVOKE_SAVE_FAILED)
+        LOG_WARN("zid", "znam zid text: revoke save failed at h=%d",
+                 height);
+    if (rc & ZID_ZNAM_F_OTHER_OWNER)
         LOG_WARN("zid", "znam zid text: '%s' is anchored by another owner at"
                  " h=%d — refused", name, height);
-        return;
-    }
-    if (!zid_target_free(ndb, key32, owner)) {
+    if (rc & ZID_ZNAM_F_KEY_CLAIMED)
         LOG_WARN("zid", "znam zid text: key already claimed by another owner"
                  " at h=%d — refused", height);
-        return;
-    }
-
-    /* A NEW key from the same owner rotates the standing one. A revoked row
-     * stays revoked — it is dead, not superseded. */
-    if (prev_found && !same_key &&
-        strcmp(prev.status, ZID_IDENTITY_STATUS_REVOKED) != 0) {
-        zid_mark_rotated(&prev, key32, height);
-        if (!zid_save_and_publish(ndb, &prev, height))
-            LOG_WARN("zid", "znam zid text: rotate save failed at h=%d",
-                     height);
-    }
-
-    struct zid_identity row;
-    zid_fill_active(&row, key32, tx->hash.data, height,
-                    ZID_IDENTITY_SOURCE_ZNAM_TEXT, name, owner);
-    if (!zid_save_and_publish(ndb, &row, height))
+    if (rc & ZID_ZNAM_F_ROTATE_SAVE_FAILED)
+        LOG_WARN("zid", "znam zid text: rotate save failed at h=%d",
+                 height);
+    if (rc & ZID_ZNAM_F_ANCHOR_SAVE_FAILED)
         LOG_WARN("zid", "znam zid text: anchor save failed at h=%d", height);
 }
