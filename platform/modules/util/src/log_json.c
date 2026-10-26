@@ -25,6 +25,42 @@ static const char *level_name(enum log_json_level level)
     return "info";
 }
 
+/* Two-byte JSON escapes: input byte mapped to the character written
+ * after the backslash. */
+static const struct {
+    unsigned char code;
+    char letter;
+} json_escape_table[] = {
+    { '\\', '\\' },
+    { '"',  '"'  },
+    { '\b', 'b'  },
+    { '\f', 'f'  },
+    { '\n', 'n'  },
+    { '\r', 'r'  },
+    { '\t', 't'  },
+};
+
+/* Second character of the two-byte JSON escape for `c`, or 0 when `c`
+ * has no two-byte escape. */
+static char json_escape_letter(unsigned char c)
+{
+    for (size_t i = 0; i < sizeof(json_escape_table) / sizeof(json_escape_table[0]); i++) {
+        if (json_escape_table[i].code == c) return json_escape_table[i].letter;
+    }
+    return 0;
+}
+
+/* Append the six-byte \uXXXX escape for control byte `c` at out[pos].
+ * Returns the new position, or (size_t)-1 when it does not fit. */
+static size_t append_unicode_escape(char *out, size_t cap, size_t pos,
+                                    unsigned char c)
+{
+    if (pos + 7 >= cap) return (size_t)-1;
+    int n = snprintf(out + pos, cap - pos, "\\u%04x", c);
+    if (n < 0 || (size_t)n >= cap - pos) return (size_t)-1;
+    return pos + (size_t)n;
+}
+
 size_t log_json_escape(char *out, size_t cap, const char *in)
 {
     if (!out || cap == 0) return 0;
@@ -33,42 +69,17 @@ size_t log_json_escape(char *out, size_t cap, const char *in)
     size_t pos = 0;
     for (size_t i = 0; in[i] != '\0' && pos + 2 < cap; i++) {
         unsigned char c = (unsigned char)in[i];
-        switch (c) {
-        case '\\': case '"':
+        char letter = json_escape_letter(c);
+        if (letter != '\0') {
             if (pos + 3 >= cap) goto done;
             out[pos++] = '\\';
+            out[pos++] = letter;
+        } else if (c < 0x20) {
+            size_t next = append_unicode_escape(out, cap, pos, c);
+            if (next == (size_t)-1) goto done;
+            pos = next;
+        } else {
             out[pos++] = (char)c;
-            break;
-        case '\b':
-            if (pos + 3 >= cap) goto done;
-            out[pos++] = '\\'; out[pos++] = 'b';
-            break;
-        case '\f':
-            if (pos + 3 >= cap) goto done;
-            out[pos++] = '\\'; out[pos++] = 'f';
-            break;
-        case '\n':
-            if (pos + 3 >= cap) goto done;
-            out[pos++] = '\\'; out[pos++] = 'n';
-            break;
-        case '\r':
-            if (pos + 3 >= cap) goto done;
-            out[pos++] = '\\'; out[pos++] = 'r';
-            break;
-        case '\t':
-            if (pos + 3 >= cap) goto done;
-            out[pos++] = '\\'; out[pos++] = 't';
-            break;
-        default:
-            if (c < 0x20) {
-                if (pos + 7 >= cap) goto done;
-                int n = snprintf(out + pos, cap - pos, "\\u%04x", c);
-                if (n < 0 || (size_t)n >= cap - pos) goto done;
-                pos += (size_t)n;
-            } else {
-                out[pos++] = (char)c;
-            }
-            break;
         }
     }
 done:
@@ -186,3 +197,4 @@ size_t log_json_format(char *buf, size_t cap, enum log_json_level level,
     va_end(ap);
     return n;
 }
+
