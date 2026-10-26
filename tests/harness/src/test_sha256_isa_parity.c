@@ -264,6 +264,223 @@ static int sha256_guarded_blocks(void)
     return result;
 }
 
+#define failures (*failure_count)
+static void sha256_parity_check_known_answers(int *failure_count)
+{
+    /* ── 2. FIPS-180-4 known-answer vectors through BOTH transforms ──── */
+    static const struct { const char *msg; size_t len; const char *want; } kat[] = {
+        { "", 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+        { "abc", 3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+        { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56,
+          "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+        { "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
+          "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", 112,
+          "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1" },
+    };
+    printf("sha256_isa_parity: FIPS-180-4 KATs on both transforms... ");
+    {
+        int kat_fail = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
+            for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
+                uint8_t want[32], got[32];
+                hex2bin(kat[k].want, want, 32);
+                sha256_oneshot((const uint8_t *)kat[k].msg, kat[k].len, got);
+                if (memcmp(got, want, 32) != 0) kat_fail++;
+            }
+        }
+        if (kat_fail == 0) printf("OK\n");
+        else { printf("FAIL (%d)\n", kat_fail); failures++; }
+    }
+
+}
+
+static void sha256_parity_check_all_lengths(int *failure_count)
+{
+    /* ── 3. Exhaustive-length parity 0..600 ─────────────────────────── */
+    printf("sha256_isa_parity: parity over every length 0..600... ");
+    {
+        int diff_fail = 0;
+        uint8_t buf[601];
+        for (size_t len = 0; len <= 600; ++len) {
+            rng_fill(buf, len);
+            uint8_t ref[32], got[32];
+            sha256_select_impl(SHA256_IMPL_PORTABLE);
+            sha256_oneshot(buf, len, ref);
+            sha256_select_impl(SHA256_IMPL_SHANI);
+            sha256_oneshot(buf, len, got);
+            if (memcmp(ref, got, 32) != 0) {
+                if (diff_fail < 3) printf("[len %zu] ", len);
+                diff_fail++;
+            }
+        }
+        if (diff_fail == 0) printf("OK\n");
+        else { printf("FAIL (%d)\n", diff_fail); failures++; }
+    }
+
+}
+
+static void sha256_parity_check_random_lengths(int *failure_count)
+{
+    /* ── 4. Randomized parity, random lengths up to 4 KiB ───────────── */
+    printf("sha256_isa_parity: randomized parity x20000 (len 0..4096)... ");
+    {
+        int diff_fail = 0;
+        uint8_t *buf = (uint8_t *)malloc(4097);
+        if (!buf) { printf("alloc FAIL\n"); failures++; }
+        else {
+            for (int trial = 0; trial < 20000; ++trial) {
+                size_t len = (size_t)(rng_next() % 4097);
+                rng_fill(buf, len);
+                uint8_t ref[32], got[32];
+                sha256_select_impl(SHA256_IMPL_PORTABLE);
+                sha256_oneshot(buf, len, ref);
+                sha256_select_impl(SHA256_IMPL_SHANI);
+                sha256_oneshot(buf, len, got);
+                if (memcmp(ref, got, 32) != 0) diff_fail++;
+            }
+            free(buf);
+            if (diff_fail == 0) printf("OK\n");
+            else { printf("FAIL (%d)\n", diff_fail); failures++; }
+        }
+    }
+
+}
+
+static void sha256_parity_check_chunked_writes(int *failure_count)
+{
+    /* ── 5. Chunked-write parity (partial-block buffer path) ────────── */
+    printf("sha256_isa_parity: chunked-write parity x4000... ");
+    {
+        int diff_fail = 0;
+        uint8_t *buf = (uint8_t *)malloc(2048);
+        if (!buf) { printf("alloc FAIL\n"); failures++; }
+        else {
+            for (int trial = 0; trial < 4000; ++trial) {
+                size_t len = (size_t)(rng_next() % 2049);
+                rng_fill(buf, len);
+
+                uint8_t ref[32], got[32];
+                sha256_select_impl(SHA256_IMPL_PORTABLE);
+                sha256_oneshot(buf, len, ref);
+
+                /* Same bytes, arbitrary write boundaries, hardware transform. */
+                sha256_select_impl(SHA256_IMPL_SHANI);
+                struct sha256_ctx c;
+                sha256_init(&c);
+                size_t off = 0;
+                while (off < len) {
+                    size_t chunk = (size_t)(rng_next() % 97) + 1;
+                    if (chunk > len - off) chunk = len - off;
+                    sha256_write(&c, buf + off, chunk);
+                    off += chunk;
+                }
+                sha256_finalize(&c, got);
+                if (memcmp(ref, got, 32) != 0) diff_fail++;
+            }
+            free(buf);
+            if (diff_fail == 0) printf("OK\n");
+            else { printf("FAIL (%d)\n", diff_fail); failures++; }
+        }
+    }
+
+}
+
+static void sha256_parity_check_midstates(int *failure_count)
+{
+    /* ── 6. Midstate parity: sha256_finalize_no_padding ─────────────── */
+    printf("sha256_isa_parity: midstate (finalize_no_padding) parity x4000... ");
+    {
+        int diff_fail = 0;
+        uint8_t block[64];
+        for (int trial = 0; trial < 4000; ++trial) {
+            rng_fill(block, sizeof block);
+            uint8_t ref[32], got[32];
+            struct sha256_ctx c;
+
+            sha256_select_impl(SHA256_IMPL_PORTABLE);
+            sha256_init(&c); sha256_write(&c, block, sizeof block);
+            sha256_finalize_no_padding(&c, ref, 1);
+
+            sha256_select_impl(SHA256_IMPL_SHANI);
+            sha256_init(&c); sha256_write(&c, block, sizeof block);
+            sha256_finalize_no_padding(&c, got, 1);
+
+            if (memcmp(ref, got, 32) != 0) diff_fail++;
+        }
+        if (diff_fail == 0) printf("OK\n");
+        else { printf("FAIL (%d)\n", diff_fail); failures++; }
+    }
+
+}
+
+static void sha256_parity_check_digest_sensitivity(int *failure_count)
+{
+    /* ── 7. Teeth — both directions, on each transform ───────────────── */
+    printf("sha256_isa_parity: teeth (KAT hit + one-bit-flip miss)\n");
+    {
+        static const uint8_t abc_digest[32] = {
+            0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,
+            0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
+            0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad };
+        for (int pass = 0; pass < 2; ++pass) {
+            const char *nm = pass == 0 ? "portable" : "hardware";
+            sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
+            uint8_t good[32], bad[32];
+            uint8_t msg[3] = { 'a', 'b', 'c' };
+            sha256_oneshot(msg, 3, good);
+            msg[2] ^= 0x01;                    /* "abc" -> "abb" */
+            sha256_oneshot(msg, 3, bad);
+            printf("  %s valid -> published digest... ", nm);
+            if (memcmp(good, abc_digest, 32) == 0) printf("OK\n");
+            else { printf("FAIL\n"); failures++; }
+            printf("  %s one-bit-flipped -> different... ", nm);
+            if (memcmp(bad, abc_digest, 32) != 0) printf("OK\n");
+            else { printf("FAIL\n"); failures++; }
+        }
+    }
+
+}
+
+static void sha256_parity_report_throughput(int *failure_count, bool have_shani)
+{
+    /* ── 9. Honest benchmark — reported, never gated ─────────────────── */
+    {
+        static const size_t sizes[] = { 64, 80, 1024, 65536 };
+        static const char  *names[] = { "64B (merkle)", "80B (header)",
+                                        "1KiB", "64KiB" };
+        static const size_t iters[] = { 300000, 300000, 60000, 2000 };
+        const size_t maxsz = 65536;
+        uint8_t *b = (uint8_t *)malloc(maxsz);
+        if (!b) { printf("sha256_isa_parity: bench alloc failed\n"); failures++; }
+        else {
+            rng_fill(b, maxsz);
+            printf("sha256_isa_parity: --- benchmark (median-free, single run) ---\n");
+            for (int s = 0; s < 4; ++s) {
+                uint8_t out[32];
+                double ns[2];
+                for (int pass = 0; pass < 2; ++pass) {
+                    sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE
+                                                 : SHA256_IMPL_SHANI);
+                    for (size_t w = 0; w < iters[s] / 8 + 1; ++w)
+                        sha256_oneshot(b, sizes[s], out);
+                    double t0 = now_s();
+                    for (size_t i = 0; i < iters[s]; ++i)
+                        sha256_oneshot(b, sizes[s], out);
+                    ns[pass] = (now_s() - t0) * 1e9 / (double)iters[s];
+                }
+                printf("sha256_isa_parity:   %-13s portable %9.1f ns   hardware %9.1f ns   %.2fx%s\n",
+                       names[s], ns[0], ns[1], ns[0] / ns[1],
+                       have_shani ? "" : " (no hardware: portable-vs-portable)");
+            }
+            free(b);
+        }
+    }
+
+}
+
+#undef failures
+
 int test_sha256_isa_parity(void)
 {
     printf("\n=== sha256_isa_parity (portable vs native-hardware differential oracle) ===\n");
@@ -303,158 +520,17 @@ int test_sha256_isa_parity(void)
     printf("sha256_isa_parity: guarded direct and buffered blocks...\n");
     failures += sha256_guarded_blocks();
 
-    /* ── 2. FIPS-180-4 known-answer vectors through BOTH transforms ──── */
-    static const struct { const char *msg; size_t len; const char *want; } kat[] = {
-        { "", 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
-        { "abc", 3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
-        { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56,
-          "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
-        { "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno"
-          "ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu", 112,
-          "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1" },
-    };
-    printf("sha256_isa_parity: FIPS-180-4 KATs on both transforms... ");
-    {
-        int kat_fail = 0;
-        for (int pass = 0; pass < 2; ++pass) {
-            sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
-            for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
-                uint8_t want[32], got[32];
-                hex2bin(kat[k].want, want, 32);
-                sha256_oneshot((const uint8_t *)kat[k].msg, kat[k].len, got);
-                if (memcmp(got, want, 32) != 0) kat_fail++;
-            }
-        }
-        if (kat_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", kat_fail); failures++; }
-    }
+    sha256_parity_check_known_answers(&failures);
 
-    /* ── 3. Exhaustive-length parity 0..600 ─────────────────────────── */
-    printf("sha256_isa_parity: parity over every length 0..600... ");
-    {
-        int diff_fail = 0;
-        uint8_t buf[601];
-        for (size_t len = 0; len <= 600; ++len) {
-            rng_fill(buf, len);
-            uint8_t ref[32], got[32];
-            sha256_select_impl(SHA256_IMPL_PORTABLE);
-            sha256_oneshot(buf, len, ref);
-            sha256_select_impl(SHA256_IMPL_SHANI);
-            sha256_oneshot(buf, len, got);
-            if (memcmp(ref, got, 32) != 0) {
-                if (diff_fail < 3) printf("[len %zu] ", len);
-                diff_fail++;
-            }
-        }
-        if (diff_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", diff_fail); failures++; }
-    }
+    sha256_parity_check_all_lengths(&failures);
 
-    /* ── 4. Randomized parity, random lengths up to 4 KiB ───────────── */
-    printf("sha256_isa_parity: randomized parity x20000 (len 0..4096)... ");
-    {
-        int diff_fail = 0;
-        uint8_t *buf = (uint8_t *)malloc(4097);
-        if (!buf) { printf("alloc FAIL\n"); failures++; }
-        else {
-            for (int trial = 0; trial < 20000; ++trial) {
-                size_t len = (size_t)(rng_next() % 4097);
-                rng_fill(buf, len);
-                uint8_t ref[32], got[32];
-                sha256_select_impl(SHA256_IMPL_PORTABLE);
-                sha256_oneshot(buf, len, ref);
-                sha256_select_impl(SHA256_IMPL_SHANI);
-                sha256_oneshot(buf, len, got);
-                if (memcmp(ref, got, 32) != 0) diff_fail++;
-            }
-            free(buf);
-            if (diff_fail == 0) printf("OK\n");
-            else { printf("FAIL (%d)\n", diff_fail); failures++; }
-        }
-    }
+    sha256_parity_check_random_lengths(&failures);
 
-    /* ── 5. Chunked-write parity (partial-block buffer path) ────────── */
-    printf("sha256_isa_parity: chunked-write parity x4000... ");
-    {
-        int diff_fail = 0;
-        uint8_t *buf = (uint8_t *)malloc(2048);
-        if (!buf) { printf("alloc FAIL\n"); failures++; }
-        else {
-            for (int trial = 0; trial < 4000; ++trial) {
-                size_t len = (size_t)(rng_next() % 2049);
-                rng_fill(buf, len);
+    sha256_parity_check_chunked_writes(&failures);
 
-                uint8_t ref[32], got[32];
-                sha256_select_impl(SHA256_IMPL_PORTABLE);
-                sha256_oneshot(buf, len, ref);
+    sha256_parity_check_midstates(&failures);
 
-                /* Same bytes, arbitrary write boundaries, hardware transform. */
-                sha256_select_impl(SHA256_IMPL_SHANI);
-                struct sha256_ctx c;
-                sha256_init(&c);
-                size_t off = 0;
-                while (off < len) {
-                    size_t chunk = (size_t)(rng_next() % 97) + 1;
-                    if (chunk > len - off) chunk = len - off;
-                    sha256_write(&c, buf + off, chunk);
-                    off += chunk;
-                }
-                sha256_finalize(&c, got);
-                if (memcmp(ref, got, 32) != 0) diff_fail++;
-            }
-            free(buf);
-            if (diff_fail == 0) printf("OK\n");
-            else { printf("FAIL (%d)\n", diff_fail); failures++; }
-        }
-    }
-
-    /* ── 6. Midstate parity: sha256_finalize_no_padding ─────────────── */
-    printf("sha256_isa_parity: midstate (finalize_no_padding) parity x4000... ");
-    {
-        int diff_fail = 0;
-        uint8_t block[64];
-        for (int trial = 0; trial < 4000; ++trial) {
-            rng_fill(block, sizeof block);
-            uint8_t ref[32], got[32];
-            struct sha256_ctx c;
-
-            sha256_select_impl(SHA256_IMPL_PORTABLE);
-            sha256_init(&c); sha256_write(&c, block, sizeof block);
-            sha256_finalize_no_padding(&c, ref, 1);
-
-            sha256_select_impl(SHA256_IMPL_SHANI);
-            sha256_init(&c); sha256_write(&c, block, sizeof block);
-            sha256_finalize_no_padding(&c, got, 1);
-
-            if (memcmp(ref, got, 32) != 0) diff_fail++;
-        }
-        if (diff_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", diff_fail); failures++; }
-    }
-
-    /* ── 7. Teeth — both directions, on each transform ───────────────── */
-    printf("sha256_isa_parity: teeth (KAT hit + one-bit-flip miss)\n");
-    {
-        static const uint8_t abc_digest[32] = {
-            0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,
-            0x5d,0xae,0x22,0x23,0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
-            0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad };
-        for (int pass = 0; pass < 2; ++pass) {
-            const char *nm = pass == 0 ? "portable" : "hardware";
-            sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
-            uint8_t good[32], bad[32];
-            uint8_t msg[3] = { 'a', 'b', 'c' };
-            sha256_oneshot(msg, 3, good);
-            msg[2] ^= 0x01;                    /* "abc" -> "abb" */
-            sha256_oneshot(msg, 3, bad);
-            printf("  %s valid -> published digest... ", nm);
-            if (memcmp(good, abc_digest, 32) == 0) printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-            printf("  %s one-bit-flipped -> different... ", nm);
-            if (memcmp(bad, abc_digest, 32) != 0) printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-        }
-    }
+    sha256_parity_check_digest_sensitivity(&failures);
 
     /* ── 8. Boot self-test path still reachable ──────────────────────── */
     printf("sha256_isa_parity: boot self-test (sha256_selftest) green... ");
@@ -471,38 +547,7 @@ int test_sha256_isa_parity(void)
         else { printf("FAIL (%s)\n", impl); failures++; }
     }
 
-    /* ── 9. Honest benchmark — reported, never gated ─────────────────── */
-    {
-        static const size_t sizes[] = { 64, 80, 1024, 65536 };
-        static const char  *names[] = { "64B (merkle)", "80B (header)",
-                                        "1KiB", "64KiB" };
-        static const size_t iters[] = { 300000, 300000, 60000, 2000 };
-        const size_t maxsz = 65536;
-        uint8_t *b = (uint8_t *)malloc(maxsz);
-        if (!b) { printf("sha256_isa_parity: bench alloc failed\n"); failures++; }
-        else {
-            rng_fill(b, maxsz);
-            printf("sha256_isa_parity: --- benchmark (median-free, single run) ---\n");
-            for (int s = 0; s < 4; ++s) {
-                uint8_t out[32];
-                double ns[2];
-                for (int pass = 0; pass < 2; ++pass) {
-                    sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE
-                                                 : SHA256_IMPL_SHANI);
-                    for (size_t w = 0; w < iters[s] / 8 + 1; ++w)
-                        sha256_oneshot(b, sizes[s], out);
-                    double t0 = now_s();
-                    for (size_t i = 0; i < iters[s]; ++i)
-                        sha256_oneshot(b, sizes[s], out);
-                    ns[pass] = (now_s() - t0) * 1e9 / (double)iters[s];
-                }
-                printf("sha256_isa_parity:   %-13s portable %9.1f ns   hardware %9.1f ns   %.2fx%s\n",
-                       names[s], ns[0], ns[1], ns[0] / ns[1],
-                       have_shani ? "" : " (no hardware: portable-vs-portable)");
-            }
-            free(b);
-        }
-    }
+    sha256_parity_report_throughput(&failures, have_shani);
 
     /* Restore the shipped default for any subsequent in-process hashing. */
     sha256_select_impl(SHA256_IMPL_AUTO);
