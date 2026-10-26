@@ -1786,7 +1786,6 @@ tests/harness/src/test_shutdown_stagewatch.c:test_shutdown_stagewatch:50
 tests/harness/src/test_sighash_edge.c:test_sighash_edge:34
 tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
 tests/harness/src/test_simnet.c:test_simnet:245
-tests/harness/src/test_simnet_cluster.c:test_simnet_cluster:36
 tests/harness/src/test_simnet_fuzz.c:fz_byz_wide:52
 tests/harness/src/test_simnet_fuzz.c:fz_perf_scenario:28
 tests/harness/src/test_simnet_fuzz.c:fz_run_byz_parity:46
