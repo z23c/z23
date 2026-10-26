@@ -53,12 +53,141 @@ static const struct {
     { "proof_validate",  "proof_validate_log" },
 };
 
+/* sqlite3_exec reports failures through a message that may be NULL; the
+ * rederive log lines print a placeholder instead. */
+static const char *rederive_sqlite_err_text(const char *err)
+{
+    return err ? err : "(no message)";
+}
+
+/* Release a sqlite3_exec error string when one was allocated. */
+static void rederive_free_sqlite_err(char *err)
+{
+    if (err)
+        sqlite3_free(err);
+}
+
+/* Zero the caller's result block; out may be NULL. */
+static void rederive_result_zero(struct stage_rederive_range_result *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+}
+
+/* Record the coin frontier the rewind decision was made against. */
+static void rederive_result_note_coins_frontier(
+    struct stage_rederive_range_result *out, int utxo_cursor)
+{
+    if (out)
+        out->coins_frontier_before = utxo_cursor;
+}
+
+/* Mark the result as a clean LCC refusal, not a store error. */
+static void rederive_result_set_refused(
+    struct stage_rederive_range_result *out)
+{
+    if (out) {
+        out->ok = false;
+        out->refused_no_inverse = true;
+    }
+}
+
+/* Fill the success fields once the rewind txn has committed. */
+static void rederive_result_set_committed(
+    struct stage_rederive_range_result *out, int cursors_rewound,
+    bool coins_rewound)
+{
+    if (out) {
+        out->ok = true;
+        out->rewound = cursors_rewound > 0;
+        out->coins_rewound = coins_rewound;
+        out->cursors_rewound = cursors_rewound;
+    }
+}
+
+/* Snapshot every cursor the rederive may lower; stops at the first read
+ * that fails. Callers hold the progress-store tx lock. */
+static bool rederive_snapshot_all_cursors(sqlite3 *db, int *utxo_cursor,
+                                          int *tip_cursor, int *scur)
+{
+    bool read_ok =
+        stage_repair_cursor_at_unlocked(db, "utxo_apply", utxo_cursor) &&
+        stage_repair_cursor_at_unlocked(db, "tip_finalize", tip_cursor);
+    for (size_t i = 0; read_ok &&
+         i < sizeof(k_rederive_stages) / sizeof(k_rederive_stages[0]); i++)
+        read_ok = stage_repair_cursor_at_unlocked(
+            db, k_rederive_stages[i].stage, &scur[i]);
+    return read_ok;
+}
+
+/* Outcome of the coins-side rewind step inside the rederive txn. */
+enum rederive_coins_status {
+    REDERIVE_COINS_OK,      /* nothing to rewind, or rewound cleanly */
+    REDERIVE_COINS_REFUSED, /* an applied height lacks its inverse delta */
+    REDERIVE_COINS_FAILED   /* a coins rewind write failed */
+};
+
+/* Coins side of the rederive txn: check the inverse-delta image for
+ * [from_height, utxo_cursor), then delete the stale rows and lower the
+ * utxo_apply cursor + frontier. */
+static enum rederive_coins_status rederive_rewind_coins_side(
+    sqlite3 *db, int from_height, int utxo_cursor, bool rewind_coins,
+    int *cursors_rewound, bool *coins_rewound)
+{
+    if (!rewind_coins)
+        return REDERIVE_COINS_OK;
+    if (!reducer_frontier_replay_inverse_delta_range_checked(
+            db, from_height, utxo_cursor))
+        return REDERIVE_COINS_REFUSED;
+    bool ok = utxo_apply_delete_rows_above(db, from_height, utxo_cursor - 1) &&
+              utxo_apply_unwind_write_cursor(db, (uint64_t)from_height) &&
+              utxo_apply_frontier_set_in_tx(db, from_height);
+    if (ok) {
+        *coins_rewound = true;
+        (*cursors_rewound)++; /* utxo_apply */
+    }
+    return ok ? REDERIVE_COINS_OK : REDERIVE_COINS_FAILED;
+}
+
+/* Rewind the body-dependent verdict logs + cursors and the tip_finalize
+ * cursor inside the rederive txn, counting every cursor lowered. */
+static bool rederive_rewind_stage_logs_and_tip_cursor(
+    sqlite3 *db, int from_height, int tip_cursor, const int *scur,
+    int *cursors_rewound)
+{
+    bool ok = true;
+    /* (2) Upstream body-dependent verdict logs + cursors: delete the stale
+     * suffix and lower the cursor. Gated per stage so a cursor already at/below
+     * from_height is left untouched (idempotent; never moves a cursor up). The
+     * delete helper itself no-ops when cursor <= from_height. */
+    for (size_t i = 0;
+         ok && i < sizeof(k_rederive_stages) / sizeof(k_rederive_stages[0]);
+         i++) {
+        if (scur[i] <= from_height)
+            continue;
+        ok = reducer_frontier_replay_delete_log_range(
+                 db, k_rederive_stages[i].log, from_height, scur[i]) &&
+             stage_repair_force_stage_cursor(
+                 db, k_rederive_stages[i].stage, from_height);
+        if (ok)
+            (*cursors_rewound)++;
+    }
+    /* (3) tip_finalize: rewind the CURSOR only — its log rows are the durable
+     * served-floor evidence and are NEVER deleted; the surviving rows
+     * re-finalize forward once the upstream stages re-derive. */
+    if (ok && tip_cursor > from_height) {
+        ok = stage_repair_force_stage_cursor(db, "tip_finalize", from_height);
+        if (ok)
+            (*cursors_rewound)++;
+    }
+    return ok;
+}
+
 bool stage_rederive_range(sqlite3 *db, struct main_state *ms,
                           int from_height, int to_height,
                           struct stage_rederive_range_result *out)
 {
-    if (out)
-        memset(out, 0, sizeof(*out));
+    rederive_result_zero(out);
     /* ms is accepted for API symmetry; the forward fold re-creates
      * created_outputs itself, so the coins rewind never depends on it. */
     (void)ms;
@@ -79,14 +208,8 @@ bool stage_rederive_range(sqlite3 *db, struct main_state *ms,
     /* Snapshot every cursor we may lower (all reads want the lock held). */
     int utxo_cursor = -1, tip_cursor = -1;
     int scur[sizeof(k_rederive_stages) / sizeof(k_rederive_stages[0])];
-    bool read_ok =
-        stage_repair_cursor_at_unlocked(db, "utxo_apply", &utxo_cursor) &&
-        stage_repair_cursor_at_unlocked(db, "tip_finalize", &tip_cursor);
-    for (size_t i = 0; read_ok &&
-         i < sizeof(k_rederive_stages) / sizeof(k_rederive_stages[0]); i++)
-        read_ok = stage_repair_cursor_at_unlocked(
-            db, k_rederive_stages[i].stage, &scur[i]);
-    if (!read_ok) {
+    if (!rederive_snapshot_all_cursors(db, &utxo_cursor, &tip_cursor,
+                                       scur)) {
         progress_store_tx_unlock();
         LOG_FAIL("stage_rederive",
                  "stage_rederive_range: cursor snapshot failed from=%d",
@@ -97,15 +220,14 @@ bool stage_rederive_range(sqlite3 *db, struct main_state *ms,
      * must be inverse-rewound in the same txn (LCC). Never lower the utxo_apply
      * cursor UP: only act when it sits strictly above from_height. */
     bool rewind_coins = utxo_cursor > from_height;
-    if (out)
-        out->coins_frontier_before = utxo_cursor;
+    rederive_result_note_coins_frontier(out, utxo_cursor);
 
     char *err = NULL;
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("stage_rederive",
                  "[stage_rederive] BEGIN failed from=%d: %s",
-                 from_height, err ? err : "(no message)");
-        if (err) sqlite3_free(err);
+                 from_height, rederive_sqlite_err_text(err));
+        rederive_free_sqlite_err(err);
         progress_store_tx_unlock();
         return false;  // raw-return-ok:logged-above
     }
@@ -117,71 +239,38 @@ bool stage_rederive_range(sqlite3 *db, struct main_state *ms,
      * when an applied height lacks its inverse image — that is an LCC refusal,
      * NOT a store error: roll back cleanly and report so the caller escalates
      * to a refold-from-anchor rung instead of manufacturing a coin hole. */
-    if (rewind_coins) {
-        if (!reducer_frontier_replay_inverse_delta_range_checked(
-                db, from_height, utxo_cursor)) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            progress_store_tx_unlock();
-            LOG_WARN("stage_rederive",
-                     "[stage_rederive] LCC refusal: missing inverse delta in "
-                     "[%d,%d) — escalate to refold-from-anchor",
-                     from_height, utxo_cursor);
-            if (out) {
-                out->ok = false;
-                out->refused_no_inverse = true;
-            }
-            return true;  /* clean refusal, not a hard error */
-        }
-        if (!utxo_apply_delete_rows_above(db, from_height, utxo_cursor - 1) ||
-            !utxo_apply_unwind_write_cursor(db, (uint64_t)from_height) ||
-            !utxo_apply_frontier_set_in_tx(db, from_height))
-            goto rollback;
-        coins_rewound = true;
-        cursors_rewound++; /* utxo_apply */
+    enum rederive_coins_status coins_rc = rederive_rewind_coins_side(
+        db, from_height, utxo_cursor, rewind_coins, &cursors_rewound,
+        &coins_rewound);
+    if (coins_rc == REDERIVE_COINS_REFUSED) {
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        progress_store_tx_unlock();
+        LOG_WARN("stage_rederive",
+                 "[stage_rederive] LCC refusal: missing inverse delta in "
+                 "[%d,%d) — escalate to refold-from-anchor",
+                 from_height, utxo_cursor);
+        rederive_result_set_refused(out);
+        return true;  /* clean refusal, not a hard error */
     }
+    if (coins_rc == REDERIVE_COINS_FAILED)
+        goto rollback;
 
-    /* (2) Upstream body-dependent verdict logs + cursors: delete the stale
-     * suffix and lower the cursor. Gated per stage so a cursor already at/below
-     * from_height is left untouched (idempotent; never moves a cursor up). The
-     * delete helper itself no-ops when cursor <= from_height. */
-    for (size_t i = 0;
-         i < sizeof(k_rederive_stages) / sizeof(k_rederive_stages[0]); i++) {
-        if (scur[i] <= from_height)
-            continue;
-        if (!reducer_frontier_replay_delete_log_range(
-                db, k_rederive_stages[i].log, from_height, scur[i]) ||
-            !stage_repair_force_stage_cursor(
-                db, k_rederive_stages[i].stage, from_height))
-            goto rollback;
-        cursors_rewound++;
-    }
-
-    /* (3) tip_finalize: rewind the CURSOR only — its log rows are the durable
-     * served-floor evidence and are NEVER deleted; the surviving rows
-     * re-finalize forward once the upstream stages re-derive. */
-    if (tip_cursor > from_height) {
-        if (!stage_repair_force_stage_cursor(db, "tip_finalize", from_height))
-            goto rollback;
-        cursors_rewound++;
-    }
+    if (!rederive_rewind_stage_logs_and_tip_cursor(
+            db, from_height, tip_cursor, scur, &cursors_rewound))
+        goto rollback;
 
     if (sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("stage_rederive",
                  "[stage_rederive] COMMIT failed from=%d: %s",
-                 from_height, err ? err : "(no message)");
-        if (err) sqlite3_free(err);
+                 from_height, rederive_sqlite_err_text(err));
+        rederive_free_sqlite_err(err);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
         return false;  // raw-return-ok:logged-above
     }
     progress_store_tx_unlock();
 
-    if (out) {
-        out->ok = true;
-        out->rewound = cursors_rewound > 0;
-        out->coins_rewound = coins_rewound;
-        out->cursors_rewound = cursors_rewound;
-    }
+    rederive_result_set_committed(out, cursors_rewound, coins_rewound);
     LOG_INFO("stage_rederive",
              "[stage_rederive] rederive [%d,%d] committed: cursors_rewound=%d "
              "coins_rewound=%d (fold re-derives forward)",
