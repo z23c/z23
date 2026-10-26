@@ -271,21 +271,8 @@ static bool canonical_component_utf8(HANDLE component, char *out,
                                -1, out, (int)out_size, NULL, NULL) > 0;
 }
 
-bool platform_directory_canonical_real(const char *path, char *out,
-                                       size_t out_size)
+static bool windows_canonical_walk(wchar_t *full, char *out, size_t out_size)
 {
-    wchar_t *input = utf8_to_wide(path);
-    wchar_t full[32768];
-    if (!input || !out || !out_size) { free(input); return false; }
-    DWORD count = GetFullPathNameW(input, 32768, full, NULL);
-    free(input);
-    if (!count || count >= 32768 || !full[0])
-        return false;
-    for (wchar_t *p = full; *p; ++p)
-        if (*p == L'/') *p = L'\\';
-    /* platform_windows_wide_path extends a drive path with \\?\. The
-     * component walk still requires a DOS drive letter; keep the prefix
-     * on the buffer so CreateFileW accepts a path longer than MAX_PATH. */
     wchar_t *body = full;
     if (wcsncmp(full, L"\\\\?\\", 4) == 0)
         body = full + 4;
@@ -305,29 +292,46 @@ bool platform_directory_canonical_real(const char *path, char *out,
     }
 }
 
-bool platform_directory_list_real_sorted(const char *path,
-                                         struct platform_directory_list *out)
+bool platform_directory_canonical_real(const char *path, char *out,
+                                       size_t out_size)
 {
-    if (!out) return false;
-    *out = (struct platform_directory_list){0};
-    wchar_t *root = utf8_to_wide(path);
-    if (!root) return false;
-    HANDLE root_handle = CreateFileW(
-        root, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    FILE_ATTRIBUTE_TAG_INFO root_info;
-    bool root_ok = root_handle != INVALID_HANDLE_VALUE &&
-        GetFileInformationByHandleEx(root_handle, FileAttributeTagInfo,
-                                     &root_info, sizeof(root_info)) &&
-        (root_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (root_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-    free(root);
-    if (!root_ok) {
-        if (root_handle != INVALID_HANDLE_VALUE) CloseHandle(root_handle);
+    wchar_t *input = utf8_to_wide(path);
+    wchar_t full[32768];
+    if (!input || !out || !out_size) { free(input); return false; }
+    DWORD count = GetFullPathNameW(input, 32768, full, NULL);
+    free(input);
+    if (!count || count >= 32768 || !full[0])
         return false;
-    }
+    for (wchar_t *p = full; *p; ++p)
+        if (*p == L'/') *p = L'\\';
+    /* platform_windows_wide_path extends a drive path with \\?\. The
+     * component walk still requires a DOS drive letter; keep the prefix
+     * on the buffer so CreateFileW accepts a path longer than MAX_PATH. */
+    return windows_canonical_walk(full, out, out_size);
+}
+
+static bool windows_find_directories(
+    HANDLE find, WIN32_FIND_DATAW *data, struct platform_directory_list *out)
+{
+    bool ok = true;
+    do {
+        DWORD attrs = data->dwFileAttributes;
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            wcscmp(data->cFileName, L".") == 0 ||
+            wcscmp(data->cFileName, L"..") == 0)
+            continue;
+        char *name = wide_to_utf8(data->cFileName);
+        if (!name || !append_entry(out, name, NULL)) ok = false;
+        free(name);
+        if (!ok) break;
+    } while (FindNextFileW(find, data));
+    return ok;
+}
+
+static bool windows_finish_real_listing(
+    const char *path, HANDLE root_handle, struct platform_directory_list *out)
+{
     wchar_t *wide = utf8_to_wide(path);
     if (!wide) { CloseHandle(root_handle); return false; }
     size_t len = wcslen(wide);
@@ -355,19 +359,7 @@ bool platform_directory_list_real_sorted(const char *path,
         CloseHandle(root_handle);
         return false;
     }
-    bool ok = true;
-    do {
-        DWORD attrs = data.dwFileAttributes;
-        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-            wcscmp(data.cFileName, L".") == 0 ||
-            wcscmp(data.cFileName, L"..") == 0)
-            continue;
-        char *name = wide_to_utf8(data.cFileName);
-        if (!name || !append_entry(out, name, NULL)) ok = false;
-        free(name);
-        if (!ok) break;
-    } while (FindNextFileW(find, &data));
+    bool ok = windows_find_directories(find, &data, out);
     DWORD error = GetLastError();
     FindClose(find);
     CloseHandle(root_handle);
@@ -375,6 +367,171 @@ bool platform_directory_list_real_sorted(const char *path,
     if (!ok) { platform_directory_list_free(out); return false; }
     sort_entries(out);
     return true;
+}
+
+bool platform_directory_list_real_sorted(const char *path,
+                                         struct platform_directory_list *out)
+{
+    if (!out) return false;
+    *out = (struct platform_directory_list){0};
+    wchar_t *root = utf8_to_wide(path);
+    if (!root) return false;
+    HANDLE root_handle = CreateFileW(
+        root, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    FILE_ATTRIBUTE_TAG_INFO root_info;
+    bool root_ok = root_handle != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandleEx(root_handle, FileAttributeTagInfo,
+                                     &root_info, sizeof(root_info)) &&
+        (root_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (root_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    free(root);
+    if (!root_ok) {
+        if (root_handle != INVALID_HANDLE_VALUE) CloseHandle(root_handle);
+        return false;
+    }
+    return windows_finish_real_listing(path, root_handle, out);
+}
+
+static bool windows_root_handle_valid(
+    HANDLE root_handle, BY_HANDLE_FILE_INFORMATION *root_info)
+{
+    return root_handle != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandle(root_handle, root_info) &&
+        (root_info->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (root_info->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+static bool windows_append_directory_record(
+    FILE_ID_BOTH_DIR_INFO *entry, size_t name_bytes,
+    const BY_HANDLE_FILE_INFORMATION *root_info,
+    struct platform_directory_list *directories, struct platform_directory_list *files,
+    size_t information, size_t offset, const char **failure,
+    size_t *failure_information, size_t *failure_offset)
+{
+    bool ok = true;
+    DWORD attrs = entry->FileAttributes;
+    bool is_directory =
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    bool is_reparse =
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    bool is_dot = is_directory &&
+        ((name_bytes == sizeof(wchar_t) &&
+          entry->FileName[0] == L'.') ||
+         (name_bytes == 2u * sizeof(wchar_t) &&
+          entry->FileName[0] == L'.' &&
+          entry->FileName[1] == L'.'));
+    struct platform_directory_list *selected = is_directory
+        ? directories : files;
+    if (!is_reparse && !is_dot && selected) {
+        char *name = wide_span_to_utf8(
+            entry->FileName, name_bytes / sizeof(wchar_t));
+        struct platform_directory_entry snapshot = {
+            .snapshot_valid = true,
+            .size = (uint64_t)entry->EndOfFile.QuadPart,
+            .volume = root_info->dwVolumeSerialNumber,
+            .file_low = (uint64_t)entry->FileId.QuadPart,
+            .file_high = 0,
+        };
+        windows_ticks_split(entry->LastWriteTime.QuadPart,
+                            &snapshot.modified_seconds,
+                            &snapshot.modified_nanoseconds);
+        windows_ticks_split(entry->ChangeTime.QuadPart,
+                             &snapshot.changed_seconds,
+                             &snapshot.changed_nanoseconds);
+        if (!name || !append_entry(selected, name,
+                                     is_directory ? NULL
+                                                  : &snapshot)) {
+            ok = false;
+            *failure = "append directory record";
+            *failure_information = information;
+            *failure_offset = offset;
+        }
+        free(name);
+        if (!ok) return false;
+    }
+    return ok;
+}
+
+static bool windows_scan_directory_records(
+    unsigned char *buffer, size_t information,
+    const BY_HANDLE_FILE_INFORMATION *root_info,
+    struct platform_directory_list *directories, struct platform_directory_list *files,
+    const char **failure, size_t *failure_information, size_t *failure_offset)
+{
+    bool ok = true;
+    size_t offset = 0;
+    for (;;) {
+        const size_t record_bytes =
+            offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+        if (information - offset < record_bytes) {
+            ok = false;
+            *failure = "short directory record";
+            *failure_information = information;
+            *failure_offset = offset;
+            break;
+        }
+        FILE_ID_BOTH_DIR_INFO *entry =
+            (FILE_ID_BOTH_DIR_INFO *)(buffer + offset);
+        size_t name_bytes = entry->FileNameLength;
+        if ((name_bytes % sizeof(wchar_t)) != 0 ||
+            name_bytes > information - offset - record_bytes) {
+            ok = false;
+            *failure = "invalid directory name span";
+            *failure_information = information;
+            *failure_offset = offset;
+            break;
+        }
+        ok = windows_append_directory_record(entry, name_bytes,
+            root_info, directories, files, information, offset,
+            failure, failure_information, failure_offset);
+        if (!ok) break;
+        if (entry->NextEntryOffset == 0) break;
+        if (entry->NextEntryOffset > information - offset) {
+            ok = false;
+            *failure = "invalid next directory record";
+            *failure_information = information;
+            *failure_offset = offset;
+            break;
+        }
+        offset += entry->NextEntryOffset;
+    }
+    return ok;
+}
+
+static bool windows_query_children(
+    directory_query_fn query, HANDLE root_handle,
+    const BY_HANDLE_FILE_INFORMATION *root_info,
+    struct platform_directory_list *directories, struct platform_directory_list *files,
+    bool ok, const char **failure, ULONG *failure_status,
+    size_t *failure_information, size_t *failure_offset)
+{
+    bool restart = true;
+    unsigned char buffer[64 * 1024];
+    while (ok) {
+        IO_STATUS_BLOCK status = {0};
+        NTSTATUS result = query(root_handle, NULL, NULL, NULL, &status,
+                                buffer, sizeof(buffer),
+                                FileIdBothDirectoryInformation, FALSE, NULL,
+                                restart ? TRUE : FALSE);
+        restart = false;
+        if ((ULONG)result == 0x80000006u) break; /* STATUS_NO_MORE_FILES */
+        bool partial = (ULONG)result == 0x80000005u; /* BUFFER_OVERFLOW */
+        if ((result < 0 && !partial) || status.Information == 0 ||
+            status.Information > sizeof(buffer)) {
+            ok = false;
+            *failure = "query status or byte count";
+            *failure_status = (ULONG)result;
+            *failure_information = status.Information;
+            break;
+        }
+        ok = windows_scan_directory_records(buffer, status.Information,
+            root_info, directories, files,
+            failure, failure_information, failure_offset);
+    }
+    return ok;
 }
 
 static bool platform_directory_list_children_sorted_impl(
@@ -392,10 +549,7 @@ static bool platform_directory_list_children_sorted_impl(
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     BY_HANDLE_FILE_INFORMATION root_info = {0};
-    bool root_ok = root_handle != INVALID_HANDLE_VALUE &&
-        GetFileInformationByHandle(root_handle, &root_info) &&
-        (root_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (root_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    bool root_ok = windows_root_handle_valid(root_handle, &root_info);
     free(root);
     if (!root_ok) {
         if (root_handle != INVALID_HANDLE_VALUE) CloseHandle(root_handle);
@@ -406,98 +560,9 @@ static bool platform_directory_list_children_sorted_impl(
     const char *failure = ok ? NULL : "resolve NtQueryDirectoryFile";
     ULONG failure_status = 0;
     size_t failure_information = 0, failure_offset = 0;
-    bool restart = true;
-    unsigned char buffer[64 * 1024];
-    while (ok) {
-        IO_STATUS_BLOCK status = {0};
-        NTSTATUS result = query(root_handle, NULL, NULL, NULL, &status,
-                                buffer, sizeof(buffer),
-                                FileIdBothDirectoryInformation, FALSE, NULL,
-                                restart ? TRUE : FALSE);
-        restart = false;
-        if ((ULONG)result == 0x80000006u) break; /* STATUS_NO_MORE_FILES */
-        bool partial = (ULONG)result == 0x80000005u; /* BUFFER_OVERFLOW */
-        if ((result < 0 && !partial) || status.Information == 0 ||
-            status.Information > sizeof(buffer)) {
-            ok = false;
-            failure = "query status or byte count";
-            failure_status = (ULONG)result;
-            failure_information = status.Information;
-            break;
-        }
-        size_t offset = 0;
-        for (;;) {
-            const size_t record_bytes =
-                offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
-            if (status.Information - offset < record_bytes) {
-                ok = false;
-                failure = "short directory record";
-                failure_information = status.Information;
-                failure_offset = offset;
-                break;
-            }
-            FILE_ID_BOTH_DIR_INFO *entry =
-                (FILE_ID_BOTH_DIR_INFO *)(buffer + offset);
-            size_t name_bytes = entry->FileNameLength;
-            if ((name_bytes % sizeof(wchar_t)) != 0 ||
-                name_bytes > status.Information - offset - record_bytes) {
-                ok = false;
-                failure = "invalid directory name span";
-                failure_information = status.Information;
-                failure_offset = offset;
-                break;
-            }
-            DWORD attrs = entry->FileAttributes;
-            bool is_directory =
-                (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            bool is_reparse =
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-            bool is_dot = is_directory &&
-                ((name_bytes == sizeof(wchar_t) &&
-                  entry->FileName[0] == L'.') ||
-                 (name_bytes == 2u * sizeof(wchar_t) &&
-                  entry->FileName[0] == L'.' &&
-                  entry->FileName[1] == L'.'));
-            struct platform_directory_list *selected = is_directory
-                ? directories : files;
-            if (!is_reparse && !is_dot && selected) {
-                char *name = wide_span_to_utf8(
-                    entry->FileName, name_bytes / sizeof(wchar_t));
-                struct platform_directory_entry snapshot = {
-                    .snapshot_valid = true,
-                    .size = (uint64_t)entry->EndOfFile.QuadPart,
-                    .volume = root_info.dwVolumeSerialNumber,
-                    .file_low = (uint64_t)entry->FileId.QuadPart,
-                    .file_high = 0,
-                };
-                windows_ticks_split(entry->LastWriteTime.QuadPart,
-                                    &snapshot.modified_seconds,
-                                    &snapshot.modified_nanoseconds);
-                windows_ticks_split(entry->ChangeTime.QuadPart,
-                                     &snapshot.changed_seconds,
-                                     &snapshot.changed_nanoseconds);
-                if (!name || !append_entry(selected, name,
-                                             is_directory ? NULL
-                                                          : &snapshot)) {
-                    ok = false;
-                    failure = "append directory record";
-                    failure_information = status.Information;
-                    failure_offset = offset;
-                }
-                free(name);
-                if (!ok) break;
-            }
-            if (entry->NextEntryOffset == 0) break;
-            if (entry->NextEntryOffset > status.Information - offset) {
-                ok = false;
-                failure = "invalid next directory record";
-                failure_information = status.Information;
-                failure_offset = offset;
-                break;
-            }
-            offset += entry->NextEntryOffset;
-        }
-    }
+    ok = windows_query_children(query, root_handle, &root_info,
+        directories, files, ok, &failure, &failure_status,
+        &failure_information, &failure_offset);
     CloseHandle(root_handle);
     if (!ok) {
         fprintf(stderr, /* obs-ok:directory-compat-list-refusal */
