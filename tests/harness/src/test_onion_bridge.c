@@ -23,6 +23,7 @@
  * thread, so the read/event callbacks fire off the caller's thread exactly
  * as the fork's contract says they do. */
 
+#undef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE   /* usleep */
 #include "platform/time_compat.h"
 #include "test/test_core.h"
@@ -288,242 +289,304 @@ static bool write_all(zcl_socket_t fd, const uint8_t *buf, size_t len,
     return sent == len;
 }
 
+/* Seed one OLD successful session for the same endpoint; the fresh
+ * dial must classify from its own generation delta. */
+static void note_prior_onion_session(const struct net_service *svc)
+{
+    peer_lifecycle_reset_for_test();
+    struct p2p_node old_peer = {0};
+    old_peer.addr.svc = *svc;
+    old_peer.id = 9001;
+    old_peer.state = PEER_HANDSHAKE_COMPLETE;
+    net_service_to_string(svc, old_peer.addr_name,
+                          sizeof(old_peer.addr_name));
+    peer_lifecycle_note_connected(&old_peer,
+                                  PEER_LIFECYCLE_SOURCE_ADDNODE);
+    peer_lifecycle_note_version_sent(&old_peer, NODE_NETWORK, 1, "old");
+    peer_lifecycle_note_version_received(&old_peer, NODE_NETWORK, 1,
+                                         "old");
+    peer_lifecycle_note_verack_received(&old_peer);
+    peer_lifecycle_note_handshake_complete(&old_peer);
+    peer_lifecycle_note_disconnected(&old_peer, "test_old_session");
+}
+
+/* A version-frame-sized round trip, then a burst larger than one
+ * 16 KiB pump read so the staging path is exercised too. */
+static bool exchange_sized_bridge_frames(bool ok, zcl_socket_t app)
+{
+    static const size_t sizes[] = { 126, 24, 70000 };
+    for (size_t si = 0; ok && si < sizeof(sizes) / sizeof(sizes[0]); si++) {
+        size_t n = sizes[si];
+        uint8_t *tx = malloc(n), *rx = malloc(n);
+        if (!tx || !rx) { ok = false; free(tx); free(rx); break; }
+        for (size_t i = 0; i < n; i++)
+            tx[i] = (uint8_t)((i * 31u + si * 7u) & 0xff);
+        ok = write_all(app, tx, n, 5000) &&
+             read_exact(app, rx, n, 5000) &&
+             memcmp(tx, rx, n) == 0;
+        free(tx);
+        free(rx);
+    }
+    return ok;
+}
+
+static bool stages_name_successful_onion_dial(
+    bool ok, const struct onion_stream_stages *st)
+{
+    return ok && st->dial_started == 1 && st->stream_queued == 1 &&
+           st->circuit_ready == 1 && st->bridge_up == 1 &&
+           st->peers_answered == 1 &&
+           st->bytes_to_peer == 126 + 24 + 70000 &&
+           st->bytes_from_peer == 126 + 24 + 70000 &&
+           st->circuit_torn_down == 0 && st->circuit_timeout == 0;
+}
+
+static bool recent_dial_records_live_exchange(
+    bool ok, const struct onion_stream_dial_snapshot *recent,
+    size_t recent_count)
+{
+    return ok && recent_count == 1 && recent[0].active &&
+           strstr(recent[0].target, ".onion:39150") != NULL &&
+           recent[0].stages.dial_started == 1 &&
+           recent[0].stages.bridge_up == 1 &&
+           recent[0].stages.peers_answered == 1 &&
+           recent[0].stages.bytes_to_peer == 126 + 24 + 70000 &&
+           recent[0].stages.bytes_from_peer == 126 + 24 + 70000 &&
+           recent[0].p2p_baseline.handshake_complete == 1;
+}
+
+static bool onion_status_rpc_fresh_generation(bool ok)
+{
+    struct json_value params = {0};
+    struct json_value status = {0};
+    json_set_array(&params);
+    ok = ok && network_onion_status_rpc(&params, false, &status);
+    const struct json_value *dial = json_at(
+        json_get(&status, "recent_dials"), 0);
+    const struct json_value *delta = dial
+        ? json_get(dial, "p2p_handshake_delta") : NULL;
+    ok = ok && dial &&
+         strcmp(json_get_str(json_get(dial, "first_incomplete_stage")),
+                "p2p_not_connected") == 0 &&
+         delta && json_get_int(json_get(delta, "connected")) == 0 &&
+         json_get_int(json_get(delta, "handshake_complete")) == 0;
+    json_free(&status);
+    json_free(&params);
+    return ok;
+}
+
+/* The pump must notice the app-side EOF and name its own teardown. */
+static bool confirm_bridge_closed_after_eof(
+    bool ok, struct onion_stream_dial_snapshot *recent)
+{
+    ok = ok && wait_bridge_closed(1, 5000);
+    size_t recent_count = onion_stream_get_recent_dials(recent, 2);
+    return ok && recent_count == 1 && !recent[0].active &&
+           recent[0].stages.bridge_closed == 1 &&
+           recent[0].ended_ms >= recent[0].started_ms;
+}
+
+static bool onion_bridge_bytes_cross_both_ways(void)
+{
+    stub_reset();
+    struct net_service svc;
+    bool ok = make_onion_service(&svc, 39150);
+    note_prior_onion_session(&svc);
+
+    zcl_socket_t app = ZCL_INVALID_SOCKET;
+    ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
+                                                     &g_stub_backend) &&
+         app != ZCL_INVALID_SOCKET;
+    ok = exchange_sized_bridge_frames(ok, app);
+
+    /* The ledger must have named every stage of a successful dial. */
+    struct onion_stream_stages st;
+    onion_stream_get_stages(&st);
+    ok = stages_name_successful_onion_dial(ok, &st);
+
+    struct onion_stream_dial_snapshot recent[2];
+    size_t recent_count = onion_stream_get_recent_dials(recent, 2);
+    ok = recent_dial_records_live_exchange(ok, recent, recent_count);
+    ok = onion_status_rpc_fresh_generation(ok);
+
+    if (app != ZCL_INVALID_SOCKET)
+        close_socket(&app);
+    ok = confirm_bridge_closed_after_eof(ok, recent);
+    stub_reset();
+    peer_lifecycle_reset_for_test();
+    return ok;
+}
+
+static bool bridged_fd_nonblocking_flag(zcl_socket_t app)
+{
+#if defined(_WIN32)
+    /* Windows cannot query a socket's blocking mode; the retry
+     * loops in read_exact/write_all blow their budgets on a
+     * blocking fd. */
+    printf("\nonion_bridge: NOTE (Windows): O_NONBLOCK flag query "
+           "unavailable; nonblocking behavior covered by the I/O "
+           "loops ");
+    (void)app;
+    return true;
+#else
+    /* Non-blocking, exactly as connect_socket_start() leaves a
+     * clearnet fd — the reactor polls and must never stall a send. */
+    int fl = fcntl(app, F_GETFL, 0);
+    return fl >= 0 && (fl & O_NONBLOCK) != 0;
+#endif
+}
+
+/* A connected SOCK_STREAM with no pending error: what
+ * connect_socket_check() asserts before connman adopts an fd. */
+static bool bridged_fd_connected_stream(bool ok, zcl_socket_t app)
+{
+    int type = 0, so_err = -1;
+#if defined(_WIN32)
+    int tlen = sizeof(type), elen = sizeof(so_err);
+    ok = ok &&
+         getsockopt(app, SOL_SOCKET, SO_TYPE, (char *)&type,
+                    &tlen) == 0 &&
+         type == SOCK_STREAM;
+    ok = ok &&
+         getsockopt(app, SOL_SOCKET, SO_ERROR, (char *)&so_err,
+                    &elen) == 0 &&
+         so_err == 0;
+#else
+    socklen_t tlen = sizeof(type), elen = sizeof(so_err);
+    ok = ok && getsockopt(app, SOL_SOCKET, SO_TYPE, &type, &tlen) == 0 &&
+         type == SOCK_STREAM;
+    ok = ok &&
+         getsockopt(app, SOL_SOCKET, SO_ERROR, &so_err, &elen) == 0 &&
+         so_err == 0;
+#endif
+    return ok;
+}
+
+/* Immediately writable and not hung up — the reactor's first
+ * POLLOUT edge is where the version frame goes out. */
+static bool bridged_fd_polls_writable(bool ok, zcl_socket_t app)
+{
+#if defined(_WIN32)
+    platform_socket_pollfd p = {
+        .fd = app, .events = PLATFORM_SOCKET_POLL_WRITE,
+        .revents = 0,
+    };
+    ok = ok && platform_socket_poll(&p, 1, 250) == 1 &&
+         (p.revents & PLATFORM_SOCKET_POLL_WRITE) != 0 &&
+         (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
+#else
+    struct pollfd p = { .fd = app, .events = POLLOUT, .revents = 0 };
+    ok = ok && poll(&p, 1, 250) == 1 && (p.revents & POLLOUT) != 0 &&
+         (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
+#endif
+    return ok;
+}
+
+static bool bridged_fd_matches_clearnet_contract(void)
+{
+    stub_reset();
+    struct net_service svc;
+    bool ok = make_onion_service(&svc, 39150);
+    zcl_socket_t app = ZCL_INVALID_SOCKET;
+    ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
+                                                     &g_stub_backend);
+
+    if (ok) {
+        ok = bridged_fd_nonblocking_flag(app);
+        ok = bridged_fd_connected_stream(ok, app);
+        ok = bridged_fd_polls_writable(ok, app);
+    }
+
+    if (app != ZCL_INVALID_SOCKET)
+        close_socket(&app);
+    (void)wait_bridge_closed(1, 5000);
+    stub_reset();
+    return ok;
+}
+
+static bool onion_circuit_death_fails_dial(void)
+{
+    stub_reset();
+    g_stub.die_after_connect = true;
+    struct net_service svc;
+    bool ok = make_onion_service(&svc, 39150);
+
+    zcl_socket_t app = ZCL_INVALID_SOCKET;
+    /* Under the retry ceiling, so exactly one attempt is made. */
+    ok = ok && !onion_stream_connect_backend_for_test(&svc, &app, 2000,
+                                                      &g_stub_backend) &&
+         app == ZCL_INVALID_SOCKET;
+
+    struct onion_stream_stages st;
+    onion_stream_get_stages(&st);
+    ok = ok && st.circuit_torn_down == 1 && st.bridge_up == 0 &&
+         st.circuit_ready == 0;
+    struct onion_stream_dial_snapshot recent[2];
+    size_t recent_count = onion_stream_get_recent_dials(recent, 2);
+    ok = ok && recent_count == 1 && !recent[0].active &&
+         recent[0].stages.circuit_torn_down == 1 &&
+         recent[0].stages.bridge_up == 0;
+    stub_reset();
+    return ok;
+}
+
+static bool onion_backpressure_keeps_bytes(void)
+{
+    stub_reset();
+    /* ~1 s of refusals at the pump's 25 ms retry cadence: inside
+     * ONION_TX_BACKPRESSURE_MS, the shape of "queue full until the
+     * next flush tick". */
+    g_stub.refuse_writes_ticks = 40;
+    struct net_service svc;
+    bool ok = make_onion_service(&svc, 39150);
+
+    zcl_socket_t app = ZCL_INVALID_SOCKET;
+    ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
+                                                     &g_stub_backend);
+
+    uint8_t tx[126], rx[126];
+    for (size_t i = 0; i < sizeof(tx); i++)
+        tx[i] = (uint8_t)(0xa0 + (i & 0x1f));
+    ok = ok && write_all(app, tx, sizeof(tx), 5000) &&
+         read_exact(app, rx, sizeof(rx), 8000) &&
+         memcmp(tx, rx, sizeof(tx)) == 0;
+
+    struct onion_stream_stages st;
+    onion_stream_get_stages(&st);
+    ok = ok && st.bridge_closed == 0 && st.bytes_to_peer == sizeof(tx);
+
+    if (app != ZCL_INVALID_SOCKET)
+        close_socket(&app);
+    (void)wait_bridge_closed(1, 5000);
+    stub_reset();
+    return ok;
+}
+
 int test_onion_bridge(void);
 int test_onion_bridge(void)
 {
     int failures = 0;
 
     printf("onion_bridge: bytes cross the bridge in both directions... ");
-    {
-        stub_reset();
-        struct net_service svc;
-        bool ok = make_onion_service(&svc, 39150);
-
-        /* Seed one OLD successful session for the same endpoint; the fresh
-         * dial must classify from its own generation delta. */
-        peer_lifecycle_reset_for_test();
-        struct p2p_node old_peer = {0};
-        old_peer.addr.svc = svc;
-        old_peer.id = 9001;
-        old_peer.state = PEER_HANDSHAKE_COMPLETE;
-        net_service_to_string(&svc, old_peer.addr_name,
-                              sizeof(old_peer.addr_name));
-        peer_lifecycle_note_connected(&old_peer,
-                                      PEER_LIFECYCLE_SOURCE_ADDNODE);
-        peer_lifecycle_note_version_sent(&old_peer, NODE_NETWORK, 1, "old");
-        peer_lifecycle_note_version_received(&old_peer, NODE_NETWORK, 1,
-                                             "old");
-        peer_lifecycle_note_verack_received(&old_peer);
-        peer_lifecycle_note_handshake_complete(&old_peer);
-        peer_lifecycle_note_disconnected(&old_peer, "test_old_session");
-
-        zcl_socket_t app = ZCL_INVALID_SOCKET;
-        ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
-                                                         &g_stub_backend) &&
-             app != ZCL_INVALID_SOCKET;
-
-        /* A version-frame-sized round trip, then a burst larger than one
-         * 16 KiB pump read so the staging path is exercised too. */
-        static const size_t sizes[] = { 126, 24, 70000 };
-        for (size_t si = 0; ok && si < sizeof(sizes) / sizeof(sizes[0]); si++) {
-            size_t n = sizes[si];
-            uint8_t *tx = malloc(n), *rx = malloc(n);
-            if (!tx || !rx) { ok = false; free(tx); free(rx); break; }
-            for (size_t i = 0; i < n; i++)
-                tx[i] = (uint8_t)((i * 31u + si * 7u) & 0xff);
-            ok = write_all(app, tx, n, 5000) &&
-                 read_exact(app, rx, n, 5000) &&
-                 memcmp(tx, rx, n) == 0;
-            free(tx);
-            free(rx);
-        }
-
-        /* The ledger must have named every stage of a successful dial. */
-        struct onion_stream_stages st;
-        onion_stream_get_stages(&st);
-        ok = ok && st.dial_started == 1 && st.stream_queued == 1 &&
-             st.circuit_ready == 1 && st.bridge_up == 1 &&
-             st.peers_answered == 1 &&
-             st.bytes_to_peer == 126 + 24 + 70000 &&
-             st.bytes_from_peer == 126 + 24 + 70000 &&
-             st.circuit_torn_down == 0 && st.circuit_timeout == 0;
-
-        struct onion_stream_dial_snapshot recent[2];
-        size_t recent_count = onion_stream_get_recent_dials(recent, 2);
-        ok = ok && recent_count == 1 && recent[0].active &&
-             strstr(recent[0].target, ".onion:39150") != NULL &&
-             recent[0].stages.dial_started == 1 &&
-             recent[0].stages.bridge_up == 1 &&
-             recent[0].stages.peers_answered == 1 &&
-             recent[0].stages.bytes_to_peer == 126 + 24 + 70000 &&
-             recent[0].stages.bytes_from_peer == 126 + 24 + 70000 &&
-             recent[0].p2p_baseline.handshake_complete == 1;
-
-        struct json_value params = {0};
-        struct json_value status = {0};
-        json_set_array(&params);
-        ok = ok && network_onion_status_rpc(&params, false, &status);
-        const struct json_value *dial = json_at(
-            json_get(&status, "recent_dials"), 0);
-        const struct json_value *delta = dial
-            ? json_get(dial, "p2p_handshake_delta") : NULL;
-        ok = ok && dial &&
-             strcmp(json_get_str(json_get(dial, "first_incomplete_stage")),
-                    "p2p_not_connected") == 0 &&
-             delta && json_get_int(json_get(delta, "connected")) == 0 &&
-             json_get_int(json_get(delta, "handshake_complete")) == 0;
-        json_free(&status);
-        json_free(&params);
-
-        if (app != ZCL_INVALID_SOCKET)
-            close_socket(&app);
-        /* The pump must notice the app-side EOF and name its own teardown. */
-        ok = ok && wait_bridge_closed(1, 5000);
-        recent_count = onion_stream_get_recent_dials(recent, 2);
-        ok = ok && recent_count == 1 && !recent[0].active &&
-             recent[0].stages.bridge_closed == 1 &&
-             recent[0].ended_ms >= recent[0].started_ms;
-        stub_reset();
-        peer_lifecycle_reset_for_test();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (onion_bridge_bytes_cross_both_ways())
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("onion_bridge: bridged fd matches the clearnet socket contract... ");
-    {
-        stub_reset();
-        struct net_service svc;
-        bool ok = make_onion_service(&svc, 39150);
-        zcl_socket_t app = ZCL_INVALID_SOCKET;
-        ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
-                                                         &g_stub_backend);
-
-        if (ok) {
-#if defined(_WIN32)
-            /* Windows cannot query a socket's blocking mode; the retry
-             * loops in read_exact/write_all blow their budgets on a
-             * blocking fd. */
-            printf("\nonion_bridge: NOTE (Windows): O_NONBLOCK flag query "
-                   "unavailable; nonblocking behavior covered by the I/O "
-                   "loops ");
-#else
-            /* Non-blocking, exactly as connect_socket_start() leaves a
-             * clearnet fd — the reactor polls and must never stall a send. */
-            int fl = fcntl(app, F_GETFL, 0);
-            ok = ok && fl >= 0 && (fl & O_NONBLOCK) != 0;
-#endif
-
-            /* A connected SOCK_STREAM with no pending error: what
-             * connect_socket_check() asserts before connman adopts an fd. */
-            int type = 0, so_err = -1;
-#if defined(_WIN32)
-            int tlen = sizeof(type), elen = sizeof(so_err);
-            ok = ok &&
-                 getsockopt(app, SOL_SOCKET, SO_TYPE, (char *)&type,
-                            &tlen) == 0 &&
-                 type == SOCK_STREAM;
-            ok = ok &&
-                 getsockopt(app, SOL_SOCKET, SO_ERROR, (char *)&so_err,
-                            &elen) == 0 &&
-                 so_err == 0;
-#else
-            socklen_t tlen = sizeof(type), elen = sizeof(so_err);
-            ok = ok && getsockopt(app, SOL_SOCKET, SO_TYPE, &type, &tlen) == 0 &&
-                 type == SOCK_STREAM;
-            ok = ok &&
-                 getsockopt(app, SOL_SOCKET, SO_ERROR, &so_err, &elen) == 0 &&
-                 so_err == 0;
-#endif
-
-            /* Immediately writable and not hung up — the reactor's first
-             * POLLOUT edge is where the version frame goes out. */
-#if defined(_WIN32)
-            platform_socket_pollfd p = {
-                .fd = app, .events = PLATFORM_SOCKET_POLL_WRITE,
-                .revents = 0,
-            };
-            ok = ok && platform_socket_poll(&p, 1, 250) == 1 &&
-                 (p.revents & PLATFORM_SOCKET_POLL_WRITE) != 0 &&
-                 (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
-#else
-            struct pollfd p = { .fd = app, .events = POLLOUT, .revents = 0 };
-            ok = ok && poll(&p, 1, 250) == 1 && (p.revents & POLLOUT) != 0 &&
-                 (p.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
-#endif
-        }
-
-        if (app != ZCL_INVALID_SOCKET)
-            close_socket(&app);
-        (void)wait_bridge_closed(1, 5000);
-        stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (bridged_fd_matches_clearnet_contract())
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("onion_bridge: a circuit that dies at CONNECTED is a failed dial... ");
-    {
-        stub_reset();
-        g_stub.die_after_connect = true;
-        struct net_service svc;
-        bool ok = make_onion_service(&svc, 39150);
-
-        zcl_socket_t app = ZCL_INVALID_SOCKET;
-        /* Under the retry ceiling, so exactly one attempt is made. */
-        ok = ok && !onion_stream_connect_backend_for_test(&svc, &app, 2000,
-                                                          &g_stub_backend) &&
-             app == ZCL_INVALID_SOCKET;
-
-        struct onion_stream_stages st;
-        onion_stream_get_stages(&st);
-        ok = ok && st.circuit_torn_down == 1 && st.bridge_up == 0 &&
-             st.circuit_ready == 0;
-        struct onion_stream_dial_snapshot recent[2];
-        size_t recent_count = onion_stream_get_recent_dials(recent, 2);
-        ok = ok && recent_count == 1 && !recent[0].active &&
-             recent[0].stages.circuit_torn_down == 1 &&
-             recent[0].stages.bridge_up == 0;
-        stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (onion_circuit_death_fails_dial())
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     printf("onion_bridge: circuit backpressure does not drop bytes or the "
            "peer... ");
-    {
-        stub_reset();
-        /* ~1 s of refusals at the pump's 25 ms retry cadence: inside
-         * ONION_TX_BACKPRESSURE_MS, the shape of "queue full until the
-         * next flush tick". */
-        g_stub.refuse_writes_ticks = 40;
-        struct net_service svc;
-        bool ok = make_onion_service(&svc, 39150);
-
-        zcl_socket_t app = ZCL_INVALID_SOCKET;
-        ok = ok && onion_stream_connect_backend_for_test(&svc, &app, 4000,
-                                                         &g_stub_backend);
-
-        uint8_t tx[126], rx[126];
-        for (size_t i = 0; i < sizeof(tx); i++)
-            tx[i] = (uint8_t)(0xa0 + (i & 0x1f));
-        ok = ok && write_all(app, tx, sizeof(tx), 5000) &&
-             read_exact(app, rx, sizeof(rx), 8000) &&
-             memcmp(tx, rx, sizeof(tx)) == 0;
-
-        struct onion_stream_stages st;
-        onion_stream_get_stages(&st);
-        ok = ok && st.bridge_closed == 0 && st.bytes_to_peer == sizeof(tx);
-
-        if (app != ZCL_INVALID_SOCKET)
-            close_socket(&app);
-        (void)wait_bridge_closed(1, 5000);
-        stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    if (onion_backpressure_keeps_bytes())
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     return failures;
 }

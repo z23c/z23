@@ -1590,7 +1590,6 @@ tests/harness/src/test_network_crawler.c:test_network_crawler:46
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
 tests/harness/src/test_nullifier_backfill_service.c:nbf_reader:16
 tests/harness/src/test_nullifier_backfill_service.c:test_nullifier_backfill_service:42
-tests/harness/src/test_onion_bridge.c:test_onion_bridge:81
 tests/harness/src/test_onion_directory.c:od_durable_directory:16
 tests/harness/src/test_onion_directory.c:od_parse_relay_hints:26
 tests/harness/src/test_onion_directory.c:od_test_response_bounds:17
