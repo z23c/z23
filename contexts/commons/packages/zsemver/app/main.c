@@ -37,9 +37,21 @@ static int row_cmp(const void *va, const void *vb) {
 static char input[MAX_INPUT];
 static row rows[MAX_LINES];
 
+static int print_rows(size_t n) {
+  if (!n) return 0;
+  for (size_t i = 0; i < n; i++)
+    if (printf("%.*s\n", (int)rows[i].len, rows[i].text) < 0) goto output_error;
+  if (fflush(stdout) != 0 || ferror(stdout)) goto output_error;
+  return 0;
+output_error:
+  fprintf(stderr, "semversort: output write failed\n");
+  return 2;
+}
+
 int main(void) {
   size_t len = fread(input, 1, sizeof(input), stdin);
-  if (ferror(stdin) || !feof(stdin)) {
+  int extra = len == sizeof input ? fgetc(stdin) : EOF;
+  if (ferror(stdin) || extra != EOF) {
     fprintf(stderr, "semversort: read error or input over 1 MiB bound\n");
     return 2;
   }
@@ -72,7 +84,5 @@ int main(void) {
   }
 
   qsort(rows, n, sizeof(rows[0]), row_cmp);
-  for (size_t i = 0; i < n; i++)
-    printf("%.*s\n", (int)rows[i].len, rows[i].text);
-  return 0;
+  return print_rows(n);
 }

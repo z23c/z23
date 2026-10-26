@@ -5,6 +5,26 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_source, *cli_sink;
+static unsigned cli_output_flushes;
+static int cli_fflush(FILE *stream) {
+  if (stream == cli_sink) cli_output_flushes++;
+  return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define fflush cli_fflush
+#define main zsemver_cli_main
+#include "../app/main.c"
+#undef main
+#undef printf
+#undef fflush
+#undef stdout
+#undef stdin
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -150,7 +170,136 @@ static void test_failed_parse_zeroes(void) {
 }
 
 
+static bool cli_equal(FILE *a, FILE *b) {
+  rewind(a); rewind(b);
+  for (;;) {
+    char aa[4096], bb[4096];
+    size_t an = fread(aa, 1, sizeof aa, a), bn = fread(bb, 1, sizeof bb, b);
+    if (ferror(a) || ferror(b) || an != bn || memcmp(aa, bb, an) != 0) return false;
+    if (!an) return true;
+  }
+}
+
+static bool cli_result(FILE *source, FILE *output, FILE *want, int status) {
+  if (fflush(source) != 0 || fflush(want) != 0) return false;
+  rewind(source);
+  cli_source = source; cli_sink = output;
+  if (zsemver_cli_main() != status) return false;
+  if (status) return ftell(output) == 0;
+  return cli_equal(output, want);
+}
+
+static bool cli_rows(FILE *source, FILE *want, const char *line, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    if (fputs(line, source) < 0 || fputs(line, want) < 0) return false;
+  return true;
+}
+
+static int cli_close(FILE *source, FILE *output, FILE *want, int bad) {
+  FILE *streams[] = {source, output, want};
+  for (size_t i = 0; i < sizeof streams / sizeof streams[0]; i++)
+    if (streams[i] && fclose(streams[i]) != 0) bad = 1;
+  return bad;
+}
+
+static int cli_bound_case(const char *line, size_t count, const char *tail,
+                          int status) {
+  FILE *source = tmpfile(), *output = tmpfile(), *want = tmpfile();
+  int bad = 1;
+  if (!source || !output || !want) goto cleanup;
+  if (!cli_rows(source, want, line, count)) goto cleanup;
+  if (fputs(tail, source) < 0) goto cleanup;
+  if (*tail && status == 0) {
+    if (fputs(tail, want) < 0 || fputc('\n', want) == EOF) goto cleanup;
+  }
+  if (!cli_result(source, output, want, status)) goto cleanup;
+  bad = 0;
+cleanup:
+  return cli_close(source, output, want, bad);
+}
+
+static void test_cli_bound(void) {
+  CHECK(cli_bound_case("1.2.3+abcdefghi\n", MAX_LINES - 1, "1.2.3+abcdefghi", 0) == 0);
+  CHECK(cli_bound_case("1.2.3+abcdefghi\n", MAX_LINES, "", 0) == 0);
+  CHECK(cli_bound_case("1.2.3+abcdefghi\n", MAX_LINES, "\n", 2) == 0);
+  CHECK(cli_bound_case("1.2.3+abcdefghi\n", MAX_LINES - 1, "1.2.3+abcdefghij", 0) == 0);
+  CHECK(cli_bound_case("1.2.3\n", MAX_LINES, "", 0) == 0);
+  CHECK(cli_bound_case("1.2.3\n", MAX_LINES + 1, "", 2) == 0);
+}
+
+static void test_cli_ordering(void) {
+  FILE *source = tmpfile(), *output = tmpfile(), *want = tmpfile();
+  if (!source || !output || !want) { CHECK(false); goto cleanup; }
+  CHECK(fputs("2.0.0\n1.0.0+b\n1.0.0+a\n1.0.0-rc.1\n", source) >= 0);
+  CHECK(fputs("1.0.0-rc.1\n1.0.0+b\n1.0.0+a\n2.0.0\n", want) >= 0);
+  CHECK(cli_result(source, output, want, 0));
+cleanup:
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+  if (want) CHECK(fclose(want) == 0);
+}
+
+static void test_cli_read_error(void) {
+#if defined(_WIN32)
+  FILE *source = fopen("NUL", "w");
+#else
+  FILE *source = fopen("/dev/null", "w");
+#endif
+  FILE *output = tmpfile();
+  if (source && output) {
+    cli_source = source; cli_sink = output;
+    CHECK(zsemver_cli_main() == 2);
+    CHECK(ferror(source) && ftell(output) == 0);
+  } else CHECK(false);
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+}
+
+static int cli_output_cleanup(FILE *source, FILE *output, int bad) {
+  if (source && fclose(source) != 0) bad = 1;
+  if (output) (void)fclose(output);
+  return bad;
+}
+
+static int cli_sink_case(const char *text, bool buffered, int status) {
+  FILE *source = tmpfile();
+#if defined(__linux__)
+  FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+  FILE *output = fopen("NUL", "r");
+#else
+  FILE *output = fopen("/dev/null", "r");
+#endif
+  int bad = 1;
+  char buffer[4096];
+  if (!source || !output) goto cleanup;
+  if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs(text, source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  cli_source = source; cli_sink = output; cli_output_flushes = 0;
+  if (zsemver_cli_main() != status) goto cleanup;
+  if (status == 2 ? !ferror(output) : (ferror(output) || cli_output_flushes != 0)) goto cleanup;
+  bad = 0;
+cleanup:
+  return cli_output_cleanup(source, output, bad);
+}
+
+static void test_cli_output(void) {
+  CHECK(cli_sink_case("2.0.0\n1.0.0\n", false, 2) == 0);
+  CHECK(cli_sink_case("", false, 0) == 0);
+  CHECK(cli_sink_case("\n\r\n\n", false, 0) == 0);
+#if defined(__linux__)
+  CHECK(cli_sink_case("2.0.0\n1.0.0\n", true, 2) == 0);
+  CHECK(cli_sink_case("", true, 0) == 0);
+  CHECK(cli_sink_case("\n\r\n\n", true, 0) == 0);
+#endif
+}
+
 int main(void) {
+  test_cli_output();
+  test_cli_bound();
+  test_cli_ordering();
+  test_cli_read_error();
   test_failed_parse_zeroes();
   test_valid_grammar();
   test_invalid_grammar();
