@@ -16,11 +16,49 @@
 #include <stdio.h>
 #include <string.h>
 
+struct print_state { bool attempted, failed; };
+
 static bool print_one(const uint8_t *key, size_t key_len, void *value, void *ctx)
 {
-    (void)ctx;
-    printf("%.*s=%s\n", (int)key_len, (const char *)key, (const char *)value);
-    return true;
+    struct print_state *state = ctx;
+    state->attempted = true;
+    state->failed = printf("%.*s=%s\n", (int)key_len, (const char *)key,
+                           (const char *)value) < 0;
+    return !state->failed;
+}
+
+static int finish_output(struct print_state state)
+{
+    if (!state.attempted) return 0;
+    if (state.failed || fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "ztrie: output write failed\n");
+        return 2;
+    }
+    return 0;
+}
+
+static int list_routes(ztrie *t, const char *prefix)
+{
+    struct print_state state = {0};
+    bool ok = ztrie_foreach_prefix(t, prefix, strlen(prefix), print_one, &state);
+    if (!ok && !state.failed) {
+        fprintf(stderr, "ztrie: route enumeration failed\n");
+        return 2;
+    }
+    return finish_output(state);
+}
+
+static int match_routes(ztrie *t, int argc, char **argv)
+{
+    struct print_state state = {0};
+    for (int i = 1; i < argc; i++) {
+        size_t ml = 0;
+        const char *v = ztrie_longest_prefix(t, argv[i], strlen(argv[i]), &ml);
+        state.attempted = true;
+        if (printf("%s -> %s\n", argv[i], v ? v : "(no match)") < 0)
+            state.failed = true;
+    }
+    return finish_output(state);
 }
 
 int main(int argc, char **argv)
@@ -52,6 +90,11 @@ int main(int argc, char **argv)
         }
         n++;
     }
+    if (ferror(stdin)) {
+        fprintf(stderr, "ztrie: input read failed\n");
+        ztrie_destroy(t);
+        return 2;
+    }
 
     if (argc < 2) {
         fprintf(stderr, "usage: ztrie <text>...   (routes from stdin: prefix=value)\n");
@@ -60,15 +103,11 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "list") == 0) {
         const char *pfx = argc > 2 ? argv[2] : "";
-        ztrie_foreach_prefix(t, pfx, strlen(pfx), print_one, NULL);
+        int rc = list_routes(t, pfx);
         ztrie_destroy(t);
-        return 0;
+        return rc;
     }
-    for (int i = 1; i < argc; i++) {
-        size_t ml = 0;
-        const char *v = ztrie_longest_prefix(t, argv[i], strlen(argv[i]), &ml);
-        printf("%s -> %s\n", argv[i], v ? v : "(no match)");
-    }
+    int rc = match_routes(t, argc, argv);
     ztrie_destroy(t);
-    return 0;
+    return rc;
 }
