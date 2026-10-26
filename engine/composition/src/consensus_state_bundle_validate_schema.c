@@ -209,62 +209,101 @@ static bool canonical_table_columns(sqlite3 *db,
     return ok;
 }
 
-bool consensus_state_bundle_validate_canonical_schema(
-    sqlite3 *db, struct consensus_state_install_result *result)
+static void canonical_schema_table_set(bool composite,
+                                       const struct canonical_table **tables,
+                                       size_t *table_count)
 {
-    bool composite = false;
-    if (!canonical_table_present(db, "proof_parent", &composite))
-        return schema_fail(result, "bundle schema lineage probe failed");
-    const struct canonical_table *tables =
-        composite ? k_composite_tables : k_legacy_tables;
-    size_t table_count = composite
-                             ? sizeof(k_composite_tables) /
-                                   sizeof(k_composite_tables[0])
-                             : sizeof(k_legacy_tables) /
-                                   sizeof(k_legacy_tables[0]);
-    sqlite3_stmt *st = NULL;
-    static const char sql[] =
-        "SELECT type,name,sql FROM sqlite_schema "
-        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
-        return schema_fail(result, "bundle schema catalog unreadable");
+    *tables = composite ? k_composite_tables : k_legacy_tables;
+    *table_count = composite
+                       ? sizeof(k_composite_tables) /
+                             sizeof(k_composite_tables[0])
+                       : sizeof(k_legacy_tables) /
+                             sizeof(k_legacy_tables[0]);
+}
+
+static bool canonical_table_tokens_present(const struct canonical_table *want,
+                                           const char *definition)
+{
+    bool required = strstr(definition, want->required_sql_token) != NULL;
+    bool optional = want->required_sql_token_2 == NULL ||
+                    strstr(definition, want->required_sql_token_2) != NULL;
+    return required && optional;
+}
+
+static bool canonical_table_rowid_clause_ok(const struct canonical_table *want,
+                                            const char *definition)
+{
+    if (strcmp(want->name, "anchors") != 0 &&
+        strcmp(want->name, "nullifiers") != 0)
+        return true;
+    return strstr(definition, "WITHOUT ROWID") != NULL;
+}
+
+static bool canonical_catalog_row_matches(sqlite3 *db, sqlite3_stmt *st,
+                                          int rc,
+                                          const struct canonical_table *want,
+                                          const char *definition)
+{
+    return rc == SQLITE_ROW &&
+           consensus_state_sqlite_text_equal(st, 0, "table") &&
+           consensus_state_sqlite_text_equal(st, 1, want->name) &&
+           definition != NULL &&
+           sqlite3_column_bytes(st, 2) == (int)strlen(definition) &&
+           canonical_table_tokens_present(want, definition) &&
+           canonical_table_rowid_clause_ok(want, definition) &&
+           canonical_table_columns(db, want);
+}
+
+static bool canonical_schema_tables_match(sqlite3 *db, sqlite3_stmt *st,
+                                          const struct canonical_table *tables,
+                                          size_t table_count)
+{
     bool ok = true;
-    for (size_t i = 0; i < table_count; i++) {
+    for (size_t i = 0; ok && i < table_count; i++) {
         int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
         const struct canonical_table *want = &tables[i];
         int definition_type = rc == SQLITE_ROW
             ? sqlite3_column_type(st, 2) : SQLITE_NULL;
         const char *definition = definition_type == SQLITE_TEXT
             ? (const char *)sqlite3_column_text(st, 2) : NULL;
-        if (rc != SQLITE_ROW ||
-            !consensus_state_sqlite_text_equal(st, 0, "table") ||
-            !consensus_state_sqlite_text_equal(st, 1, want->name) ||
-            !definition ||
-            sqlite3_column_bytes(st, 2) != (int)strlen(definition) ||
-            !strstr(definition, want->required_sql_token) ||
-            (want->required_sql_token_2 &&
-             !strstr(definition, want->required_sql_token_2)) ||
-            ((strcmp(want->name, "anchors") == 0 ||
-              strcmp(want->name, "nullifiers") == 0) &&
-             !strstr(definition, "WITHOUT ROWID")) ||
-            !canonical_table_columns(db, want)) {
-            ok = false;
-            break;
-        }
+        ok = canonical_catalog_row_matches(db, st, rc, want, definition);
     }
     if (ok)
         ok = sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    return ok;
+}
+
+static bool canonical_bundle_meta_has_single_row(sqlite3_stmt *st)
+{
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    return rc == SQLITE_ROW && sqlite3_column_int64(st, 0) == 1 &&
+           sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+}
+
+bool consensus_state_bundle_validate_canonical_schema(
+    sqlite3 *db, struct consensus_state_install_result *result)
+{
+    bool composite = false;
+    if (!canonical_table_present(db, "proof_parent", &composite))
+        return schema_fail(result, "bundle schema lineage probe failed");
+    const struct canonical_table *tables = NULL;
+    size_t table_count = 0;
+    canonical_schema_table_set(composite, &tables, &table_count);
+    sqlite3_stmt *st = NULL;
+    static const char sql[] =
+        "SELECT type,name,sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return schema_fail(result, "bundle schema catalog unreadable");
+    bool ok = canonical_schema_tables_match(db, st, tables, table_count);
     sqlite3_finalize(st);
     if (!ok)
         return schema_fail(result,
                            "bundle schema is not the canonical closed set");
-
     if (sqlite3_prepare_v2(db, "SELECT count(*) FROM bundle_meta", -1,
                            &st, NULL) != SQLITE_OK)
         return schema_fail(result, "bundle_meta cardinality unavailable");
-    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
-    ok = rc == SQLITE_ROW && sqlite3_column_int64(st, 0) == 1 &&
-         sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:read-only-introspection
+    ok = canonical_bundle_meta_has_single_row(st);
     sqlite3_finalize(st);
     if (!ok)
         return schema_fail(result, "bundle_meta must contain exactly one row");
