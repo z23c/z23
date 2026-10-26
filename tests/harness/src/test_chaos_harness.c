@@ -192,12 +192,9 @@ static int t_safe_alloc_impl(void)
     return failures;
 }
 
-int test_chaos_harness(void)
+static int t_chaos_smoke_and_rejects(struct chaos_ctx *ctx)
 {
-    printf("\n=== chaos_harness tests ===\n");
-    int failures = t_safe_alloc_impl();
-
-    struct chaos_ctx ctx;
+    int failures = 0;
     int rc = run_temp_scenario(
         "# valid smoke\n"
         "seed 0x2a\n"
@@ -206,16 +203,16 @@ int test_chaos_harness(void)
         "expect no_crash\n"
         "expect tip_height >= 0\n"
         "expect reorg_count == 0\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("valid scenario passes", rc == 0);
     CHAOS_CHECK("valid scenario records seed",
-                ctx.seed_set && ctx.seed == 0x2a);
+                ctx->seed_set && ctx->seed == 0x2a);
     CHAOS_CHECK("valid scenario records boot phase",
-                strcmp(ctx.boot_phase, "listening") == 0);
-    CHAOS_CHECK("valid scenario records peers", ctx.peer_count == 3);
+                strcmp(ctx->boot_phase, "listening") == 0);
+    CHAOS_CHECK("valid scenario records peers", ctx->peer_count == 3);
     CHAOS_CHECK("valid scenario creates simulated peers",
-                ctx.peers.count == 3 && ctx.peers.active_count == 3);
-    CHAOS_CHECK("valid scenario counts expects", ctx.expect_count == 3);
+                ctx->peers.count == 3 && ctx->peers.active_count == 3);
+    CHAOS_CHECK("valid scenario counts expects", ctx->expect_count == 3);
 
     rc = run_temp_scenario(
         "# comments only\n"
@@ -237,7 +234,12 @@ int test_chaos_harness(void)
         "expect no_crash\n",
         NULL);
     CHAOS_CHECK("send_block without peer setup fails", rc != 0);
+    return failures;
+}
 
+static int t_chaos_send_block(struct chaos_ctx *ctx)
+{
+    int failures = 0;
     char block_path[128];
     CHAOS_CHECK("block fixture write succeeds",
                 write_temp_scenario("synthetic block bytes\n", block_path,
@@ -252,17 +254,17 @@ int test_chaos_harness(void)
         "expect block_bytes > 0\n"
         "expect tip_height == 7\n",
         block_path);
-    rc = send_block_len > 0 && (size_t)send_block_len < sizeof(send_block_scenario)
-        ? run_temp_scenario(send_block_scenario, &ctx)
+    int rc = send_block_len > 0 && (size_t)send_block_len < sizeof(send_block_scenario)
+        ? run_temp_scenario(send_block_scenario, ctx)
         : 99;
     unlink(block_path);
     CHAOS_CHECK("send_block scenario passes", rc == 0);
-    const struct sim_peer *block_peer = sim_peer_get(&ctx.peers, 0);
+    const struct sim_peer *block_peer = sim_peer_get(&ctx->peers, 0);
     CHAOS_CHECK("send_block records peer block state",
-                ctx.peers.blocks_sent == 1 &&
-                ctx.peers.block_bytes_sent > 0 &&
-                ctx.block_bytes > 0 &&
-                ctx.tip_height == 7 &&
+                ctx->peers.blocks_sent == 1 &&
+                ctx->peers.block_bytes_sent > 0 &&
+                ctx->block_bytes > 0 &&
+                ctx->tip_height == 7 &&
                 block_peer && block_peer->blocks_sent == 1 &&
                 block_peer->block_bytes_sent > 0);
 
@@ -272,23 +274,28 @@ int test_chaos_harness(void)
         "send_block peer=0 file=tests/fixtures/blocks/synthetic_good_block.fixture\n"
         "expect blocks_sent == 1\n"
         "expect tip_height == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("send_block checked-in fixture passes", rc == 0);
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_peer_churn(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed 1\n"
         "peer_count 3\n"
         "kill_peer 1\n"
         "expect active_peers == 2\n"
         "expect killed_peers == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("kill_peer scenario passes", rc == 0);
     CHAOS_CHECK("kill_peer records simulated peer state",
-                ctx.peers.count == 3 &&
-                ctx.peers.active_count == 2 &&
-                ctx.peers.killed_count == 1 &&
-                sim_peer_get(&ctx.peers, 1) &&
-                !sim_peer_get(&ctx.peers, 1)->connected);
+                ctx->peers.count == 3 &&
+                ctx->peers.active_count == 2 &&
+                ctx->peers.killed_count == 1 &&
+                sim_peer_get(&ctx->peers, 1) &&
+                !sim_peer_get(&ctx->peers, 1)->connected);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -304,34 +311,39 @@ int test_chaos_harness(void)
         "random_kill_peers count=2\n"
         "expect active_peers == 3\n"
         "expect killed_peers == 2\n";
-    rc = run_temp_scenario(seeded_churn_scenario, &ctx);
+    rc = run_temp_scenario(seeded_churn_scenario, ctx);
     struct chaos_ctx ctx_again;
     int rc_again = run_temp_scenario(seeded_churn_scenario, &ctx_again);
     bool same_killed = true;
     for (unsigned i = 0; i < 5; i++) {
         same_killed = same_killed &&
-            (ctx.peers.peers[i].connected ==
+            (ctx->peers.peers[i].connected ==
              ctx_again.peers.peers[i].connected);
     }
     CHAOS_CHECK("random_kill_peers seeded scenario passes",
                 rc == 0 && rc_again == 0);
     CHAOS_CHECK("random_kill_peers is deterministic for seed",
                 same_killed &&
-                ctx.peers.active_count == 3 &&
-                ctx.peers.killed_count == 2);
+                ctx->peers.active_count == 3 &&
+                ctx->peers.killed_count == 2);
+    return failures;
+}
 
-    rc = run_temp_scenario_with_seed(
+static int t_chaos_seed_and_malformed(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario_with_seed(
         "seed not-a-number\n"
         "peer_count 4\n"
         "random_kill_peers count=2\n"
         "expect active_peers == 2\n"
         "expect killed_peers == 2\n",
-        0xfeed, &ctx);
+        0xfeed, ctx);
     CHAOS_CHECK("seed override supersedes scenario seed",
                 rc == 0 &&
-                ctx.seed_override_set &&
-                ctx.seed == 0xfeed &&
-                ctx.seed_set);
+                ctx->seed_override_set &&
+                ctx->seed == 0xfeed &&
+                ctx->seed_set);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -341,13 +353,13 @@ int test_chaos_harness(void)
         "expect malformed_blocks == 2\n"
         "expect consensus_rejects == 2\n"
         "expect active_peers == 2\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("send_malformed_block scenario passes", rc == 0);
-    const struct sim_peer *mal_peer = sim_peer_get(&ctx.peers, 1);
+    const struct sim_peer *mal_peer = sim_peer_get(&ctx->peers, 1);
     CHAOS_CHECK("send_malformed_block records peer rejection state",
-                ctx.consensus_rejects == 2 &&
-                ctx.peers.malformed_blocks_sent == 2 &&
-                ctx.peers.malformed_blocks_rejected == 2 &&
+                ctx->consensus_rejects == 2 &&
+                ctx->peers.malformed_blocks_sent == 2 &&
+                ctx->peers.malformed_blocks_rejected == 2 &&
                 mal_peer && mal_peer->malformed_blocks_sent == 2 &&
                 strcmp(mal_peer->last_malformed_type, "bad_merkle") == 0);
 
@@ -367,8 +379,13 @@ int test_chaos_harness(void)
         "expect no_crash\n",
         NULL);
     CHAOS_CHECK("send_malformed_block unknown type fails", rc != 0);
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_clock_and_events(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed 1\n"
         "peer_count 1\n"
         "advance_clock +60s\n"
@@ -377,13 +394,13 @@ int test_chaos_harness(void)
         "expect tip_height == 3\n"
         "expect clock_advance_seconds == 180\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("advance_clock scenario passes", rc == 0);
     CHAOS_CHECK("advance_clock updates virtual clock",
-                ctx.clock_advance_count == 2 &&
-                ctx.clock_advance_seconds == 180 &&
-                ctx.sim_monotonic_us == 180000000LL &&
-                ctx.tip_height == 3);
+                ctx->clock_advance_count == 2 &&
+                ctx->clock_advance_seconds == 180 &&
+                ctx->sim_monotonic_us == 180000000LL &&
+                ctx->tip_height == 3);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -391,19 +408,19 @@ int test_chaos_harness(void)
         "at_event 10 kill_peer 0\n"
         "expect scheduled_events == 1\n"
         "expect active_peers == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("at_event scenario passes", rc == 0);
     CHAOS_CHECK("at_event records dispatched event",
-                ctx.scheduled_event_count == 1 &&
-                ctx.last_event_height == 10 &&
-                ctx.peers.active_count == 1);
+                ctx->scheduled_event_count == 1 &&
+                ctx->last_event_height == 10 &&
+                ctx->peers.active_count == 1);
 
     rc = run_temp_scenario(
         "seed 1\n"
         "boot_phase mempool_open\n"
         "advance_clock +1h\n"
         "expect mempool_prune_runs == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("clock skew records mempool prune run", rc == 0);
 
     rc = run_temp_scenario(
@@ -413,11 +430,11 @@ int test_chaos_harness(void)
         "expect clock_advance_seconds == 3600\n"
         "expect mempool_prune_runs == 1\n"
         "expect mempool_prunes == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("advance_clock scenario passes", rc == 0);
     CHAOS_CHECK("advance_clock records simulated time effects",
-                ctx.clock_advance_seconds == 3600 &&
-                ctx.mempool_prune_runs == 1);
+                ctx->clock_advance_seconds == 3600 &&
+                ctx->mempool_prune_runs == 1);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -425,18 +442,23 @@ int test_chaos_harness(void)
         "expect no_crash\n",
         NULL);
     CHAOS_CHECK("bad advance_clock duration fails", rc != 0);
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_alloc_fault(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed 1\n"
         "trigger_oom_at chaos_test_alloc\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("trigger_oom_at scenario passes", rc == 0);
     CHAOS_CHECK("trigger_oom_at records synthetic fire",
-                ctx.alloc_fault_triggered &&
-                ctx.alloc_fault_count == 1 &&
+                ctx->alloc_fault_triggered &&
+                ctx->alloc_fault_count == 1 &&
                 zcl_alloc_fault_armed_label() == NULL &&
-                ctx.graceful_shutdowns == 1);
+                ctx->graceful_shutdowns == 1);
 
     zcl_alloc_fault_fail_next("unit_alloc");
     void *failed = zcl_malloc(16, "unit_alloc");
@@ -446,17 +468,22 @@ int test_chaos_harness(void)
                 zcl_alloc_fault_armed_label() == NULL);
     free(after);
     zcl_alloc_fault_clear();
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_net_partition(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed 1\n"
         "partition_network for=5s\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("partition_network scenario passes", rc == 0);
     CHAOS_CHECK("partition_network records armed window",
-                ctx.net_partition_triggered &&
-                ctx.net_partition_seconds == 5 &&
-                net_partition_armed_until_unix() == ctx.net_partition_until);
+                ctx->net_partition_triggered &&
+                ctx->net_partition_seconds == 5 &&
+                net_partition_armed_until_unix() == ctx->net_partition_until);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -468,13 +495,13 @@ int test_chaos_harness(void)
         "expect blocks_sent == 0\n"
         "expect consensus_rejects == 0\n"
         "expect tip_height == 0\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("partition drops peer messages", rc == 0);
     CHAOS_CHECK("partition drop counters record suppressed traffic",
-                ctx.net_partition_drops == 2 &&
-                ctx.peers.blocks_sent == 0 &&
-                ctx.consensus_rejects == 0 &&
-                ctx.tip_height == 0);
+                ctx->net_partition_drops == 2 &&
+                ctx->peers.blocks_sent == 0 &&
+                ctx->consensus_rejects == 0 &&
+                ctx->tip_height == 0);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -485,7 +512,7 @@ int test_chaos_harness(void)
         "expect partition_drops == 0\n"
         "expect blocks_sent == 1\n"
         "expect tip_height == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("partition expiry allows peer messages", rc == 0);
 
     net_partition_until_unix(42);
@@ -493,8 +520,13 @@ int test_chaos_harness(void)
                 net_partition_active_at(41) &&
                 !net_partition_active_at(42));
     net_partition_clear();
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_auto_reindex(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed 1\n"
         "auto_reindex_request anchor=3173739\n"
         "expect auto_reindex_pending == 1\n"
@@ -508,15 +540,15 @@ int test_chaos_harness(void)
         "auto_reindex_clear_if_covered coins_best=3173740\n"
         "expect auto_reindex_pending == 0\n"
         "expect auto_reindex_clears == 1\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("auto_reindex stale clear boundary passes", rc == 0);
     CHAOS_CHECK("auto_reindex stale clear records final metrics",
-                ctx.auto_reindex_anchor == 0 &&
-                ctx.auto_reindex_count == 0 &&
-                ctx.auto_reindex_pending == 0 &&
-                ctx.auto_reindex_terminal == 0 &&
-                ctx.auto_reindex_requests == 1 &&
-                ctx.auto_reindex_clears == 1);
+                ctx->auto_reindex_anchor == 0 &&
+                ctx->auto_reindex_count == 0 &&
+                ctx->auto_reindex_pending == 0 &&
+                ctx->auto_reindex_terminal == 0 &&
+                ctx->auto_reindex_requests == 1 &&
+                ctx->auto_reindex_clears == 1);
 
     rc = run_temp_scenario(
         "seed 1\n"
@@ -526,7 +558,7 @@ int test_chaos_harness(void)
         "expect auto_reindex_anchor == 4980\n"
         "expect auto_reindex_count == 3\n"
         "expect auto_reindex_requests == 3\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("auto_reindex moving-tip budget passes", rc == 0);
 
     rc = run_temp_scenario(
@@ -538,7 +570,7 @@ int test_chaos_harness(void)
         "expect auto_reindex_terminal == 1\n"
         "expect auto_reindex_count == -1\n"
         "expect auto_reindex_clears == 0\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("auto_reindex terminal marker is not stale-cleared", rc == 0);
 
     rc = run_temp_scenario(
@@ -546,7 +578,27 @@ int test_chaos_harness(void)
         "expect tip_height > 0\n",
         NULL);
     CHAOS_CHECK("failing expect fails scenario", rc != 0);
+    return failures;
+}
 
+static bool t_chaos_artifact_metrics_match(int rc, int artifact_rc,
+                                           const char *summary_path,
+                                           const char *copied_path)
+{
+    return rc != 0 && artifact_rc == 0 &&
+           file_contains_text(summary_path, "seed=0x000000000000feed") &&
+           file_contains_text(summary_path, "block_bytes=12") &&
+           file_contains_text(summary_path, "clock_advance_seconds=30") &&
+           file_contains_text(summary_path, "partition_drops=1") &&
+           file_contains_text(summary_path, "auto_reindex_anchor=3173739") &&
+           file_contains_text(summary_path, "auto_reindex_pending=1") &&
+           file_contains_text(summary_path, "replay_command=build/bin/z23-chaos") &&
+           file_contains_text(copied_path, "expect tip_height > 0");
+}
+
+static int t_chaos_failure_artifacts(void)
+{
+    int failures = 0;
     char fail_path[128];
     CHAOS_CHECK("artifact scenario write succeeds",
                 write_temp_scenario(
@@ -556,7 +608,7 @@ int test_chaos_harness(void)
     struct chaos_ctx fail_ctx;
     chaos_ctx_init(&fail_ctx);
     fail_ctx.scenario_path = fail_path;
-    rc = run_scenario(&fail_ctx);
+    int rc = run_scenario(&fail_ctx);
     fail_ctx.block_bytes = 12;
     fail_ctx.clock_advance_count = 2;
     fail_ctx.clock_advance_seconds = 30;
@@ -583,21 +635,19 @@ int test_chaos_harness(void)
     snprintf(copied_path, sizeof(copied_path), "%s/%s.scenario",
              made_dir ? made_dir : "", stem);
     CHAOS_CHECK("failure artifact writer succeeds",
-                rc != 0 && artifact_rc == 0 &&
-                file_contains_text(summary_path, "seed=0x000000000000feed") &&
-                file_contains_text(summary_path, "block_bytes=12") &&
-                file_contains_text(summary_path, "clock_advance_seconds=30") &&
-                file_contains_text(summary_path, "partition_drops=1") &&
-                file_contains_text(summary_path, "auto_reindex_anchor=3173739") &&
-                file_contains_text(summary_path, "auto_reindex_pending=1") &&
-                file_contains_text(summary_path, "replay_command=build/bin/z23-chaos") &&
-                file_contains_text(copied_path, "expect tip_height > 0"));
+                t_chaos_artifact_metrics_match(rc, artifact_rc,
+                                               summary_path, copied_path));
     unlink(summary_path);
     unlink(copied_path);
     if (made_dir) rmdir(made_dir);
     unlink(fail_path);
+    return failures;
+}
 
-    rc = run_temp_scenario(
+static int t_chaos_bad_seed_and_simnet(struct chaos_ctx *ctx)
+{
+    int failures = 0;
+    int rc = run_temp_scenario(
         "seed not-a-number\n"
         "expect no_crash\n",
         NULL);
@@ -626,7 +676,7 @@ int test_chaos_harness(void)
         "expect simnet_converged == 1\n"
         "expect simnet_tip_monotonic == 1\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("simnet partition-then-heal converges", rc == 0);
 
     rc = run_temp_scenario(
@@ -646,7 +696,7 @@ int test_chaos_harness(void)
         "expect simnet_converged == 1\n"
         "expect simnet_tip_monotonic == 1\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("simnet competing-chains reorg converges on more work",
                 rc == 0);
 
@@ -680,9 +730,28 @@ int test_chaos_harness(void)
         "simnet_relay node=1\n"
         "simnet_deliver\n"
         "expect no_crash\n",
-        &ctx);
+        ctx);
     CHAOS_CHECK("simnet non-convergence is caught, not silently passed",
-                rc != 0 && ctx.simnet_mode);
+                rc != 0 && ctx->simnet_mode);
+    return failures;
+}
+
+int test_chaos_harness(void)
+{
+    printf("\n=== chaos_harness tests ===\n");
+    int failures = t_safe_alloc_impl();
+
+    struct chaos_ctx ctx;
+    failures += t_chaos_smoke_and_rejects(&ctx);
+    failures += t_chaos_send_block(&ctx);
+    failures += t_chaos_peer_churn(&ctx);
+    failures += t_chaos_seed_and_malformed(&ctx);
+    failures += t_chaos_clock_and_events(&ctx);
+    failures += t_chaos_alloc_fault(&ctx);
+    failures += t_chaos_net_partition(&ctx);
+    failures += t_chaos_auto_reindex(&ctx);
+    failures += t_chaos_failure_artifacts();
+    failures += t_chaos_bad_seed_and_simnet(&ctx);
 
     if (failures == 0)
         printf("=== chaos_harness tests: ALL PASS ===\n\n");
