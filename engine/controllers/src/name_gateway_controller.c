@@ -60,12 +60,74 @@ static bool gw_refuse(const char *rule, char *out)
     return false; /* raw-return-ok:refusal-logged-on-the-line-above */
 }
 
+/* Point *after at the first byte past a leading "scheme://", or at
+ * `target` itself when the target has no scheme separator, and report
+ * whether the scheme, when there is one, is http or https. */
+static bool gw_scheme_ok(const char *target, const char **after)
+{
+    const char *sep = strstr(target, "://");
+    size_t slen;
+
+    if (!sep) {
+        *after = target;
+        return true;
+    }
+    slen = (size_t)(sep - target);
+    *after = sep + 3;
+    return gw_ascii_ieq(target, slen, "http") ||
+           gw_ascii_ieq(target, slen, "https");
+}
+
+/* True when the authority at `p` carries user@ userinfo. */
+static bool gw_host_has_userinfo(const char *p)
+{
+    for (const char *q = p; *q && *q != '/' && *q != '?' && *q != '#'; q++)
+        if (*q == '@')
+            return true;
+    return false;
+}
+
+/* Copy the authority at `p` into `out` and NUL-terminate it. Returns
+ * false, with `out` left unterminated, once one more byte would leave no
+ * room for the terminator. */
+static bool gw_copy_authority(const char *p, char *out, size_t cap)
+{
+    size_t n = 0;
+    while (p[n] && p[n] != '/' && p[n] != '?' && p[n] != '#') {
+        if (n + 1 >= cap)
+            return false;
+        out[n] = p[n];
+        n++;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+/* Truncate an explicit ":80" off `host`; any other explicit port leaves
+ * `host` untouched and is reported as false for the caller to refuse. */
+static bool gw_port_is_default(char *host)
+{
+    char *colon = strchr(host, ':');
+    bool port80;
+
+    if (!colon)
+        return true;
+    port80 = strcmp(colon + 1, "80") == 0;
+    if (port80)
+        *colon = '\0';
+    return port80;
+}
+
+/* Fold A-Z down to a-z in place. */
+static void gw_ascii_lower(char *s)
+{
+    for (size_t i = 0; s[i]; i++)
+        if (s[i] >= 'A' && s[i] <= 'Z') s[i] = (char)(s[i] + 32);
+}
+
 bool name_gateway_host_from_target(const char *target, char *out, size_t cap)
 {
     const char *p;
-    const char *sep;
-    char *colon;
-    size_t n = 0;
 
     if (!out || cap == 0)
         LOG_FAIL("name.gateway", "host_from_target: no output buffer");
@@ -77,45 +139,27 @@ bool name_gateway_host_from_target(const char *target, char *out, size_t cap)
      * (javascript:, data:, a bare "://") is refused rather than guessed.
      * URL schemes are case-insensitive, so "HTTP://" is the same scheme —
      * comparing case-sensitively would reject a legitimate target. */
-    p = target;
-    sep = strstr(target, "://");
-    if (sep) {
-        size_t slen = (size_t)(sep - target);
-        if (!(gw_ascii_ieq(target, slen, "http") ||
-              gw_ascii_ieq(target, slen, "https")))
-            return gw_refuse("scheme is not http/https", out);
-        p = sep + 3;
-    }
+    if (!gw_scheme_ok(target, &p))
+        return gw_refuse("scheme is not http/https", out);
 
     /* Userinfo (user@host) is a phishing shape and we have no use for it. */
-    for (const char *q = p; *q && *q != '/' && *q != '?' && *q != '#'; q++)
-        if (*q == '@')
-            return gw_refuse("userinfo in host", out);
+    if (gw_host_has_userinfo(p))
+        return gw_refuse("userinfo in host", out);
 
     /* Authority runs to the first path/query/fragment delimiter. */
-    while (p[n] && p[n] != '/' && p[n] != '?' && p[n] != '#') {
-        if (n + 1 >= cap)
-            return gw_refuse("host longer than the buffer", out);
-        out[n] = p[n];
-        n++;
-    }
-    out[n] = '\0';
+    if (!gw_copy_authority(p, out, cap))
+        return gw_refuse("host longer than the buffer", out);
 
     /* An explicit port is only tolerated when it is the one we dial. The
      * fetch primitive is hardwired to 80; silently ignoring :8080 would
      * send the visitor somewhere they did not ask for. */
-    colon = strchr(out, ':');
-    if (colon) {
-        if (strcmp(colon + 1, "80") != 0)
-            return gw_refuse("port other than 80", out);
-        *colon = '\0';
-    }
+    if (!gw_port_is_default(out))
+        return gw_refuse("port other than 80", out);
 
     /* Hostnames are case-insensitive; onion base32 is lowercase. Fold
      * before validating so "ABCD….ONION" is accepted, not silently
      * rejected as malformed. */
-    for (size_t i = 0; out[i]; i++)
-        if (out[i] >= 'A' && out[i] <= 'Z') out[i] = (char)(out[i] + 32);
+    gw_ascii_lower(out);
 
     if (!name_gateway_host_valid(out))
         return gw_refuse("not an exact Tor v3 onion host", out);
