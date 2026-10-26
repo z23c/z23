@@ -202,6 +202,224 @@ static int query_rpc(void)
 #ifndef Z23_BOT_RPC_ONLY
 /* ═══════════════════════════════════════════════════════ */
 
+/* ── Per-page checks ───────────────────────────────────── */
+
+static double check_dashboard_renders(void)
+{
+    start_timer();
+    GET("/wallet");
+    double dash_ms = elapsed_ms();
+
+    CHECK("renders (>1000 bytes)", _len > 1000);
+    CHECK("renders fast (<500ms)", dash_ms < 500);
+    CHECK("shows ZCL balance", has("ZCL"));
+    CHECK("has Send button", has("href='/wallet/send'"));
+    CHECK("has Receive button", has("href='/wallet/receive'"));
+    CHECK("has privacy meter", has("private"));
+    return dash_ms;
+}
+
+static void check_dashboard_markup(void)
+{
+    CHECK("has nav: Home/Send/Receive/History/Node",
+          has(">Home<") && has(">Send<") && has(">Receive<") &&
+          has(">History<") && has(">Node<"));
+    CHECK("no SQL leaks", has_not("sqlite3") && has_not("SELECT "));
+    CHECK("no template leaks", has_not("{{{"));
+}
+
+static void check_dashboard_rpc_balance(int have_rpc)
+{
+    CHECK("no 'untraceable' at <100%",
+          !have_rpc || rpc_z / (rpc_t + rpc_z + 0.0001) > 0.999 ||
+          has_not("untraceable"));
+
+    if (have_rpc) {
+        char expected[32];
+        snprintf(expected, sizeof(expected), "%.8f", rpc_total);
+        CHECK("balance matches zclassicd", has(expected));
+
+        int pct = (int)(100.0 * rpc_z / (rpc_t + rpc_z + 0.0001));
+        char pct_s[8]; snprintf(pct_s, sizeof(pct_s), "%d%%", pct);
+        char pct_lo[8]; snprintf(pct_lo, sizeof(pct_lo), "%d%%", pct > 0 ? pct-1 : 0);
+        char pct_hi[8]; snprintf(pct_hi, sizeof(pct_hi), "%d%%", pct < 100 ? pct+1 : 100);
+        CHECK("privacy % accurate",
+              has(pct_s) || has(pct_lo) || has(pct_hi));
+    }
+}
+
+static void check_dashboard_rpc_nudge(int have_rpc)
+{
+    if (have_rpc) {
+        if (rpc_t < 0.00011)
+            CHECK("no shield nudge for dust", has_not("Shield All"));
+        else
+            CHECK("shield nudge shown", has("Shield All") || has("/wallet/shield"));
+    }
+}
+
+static double check_send_page_render(void)
+{
+    start_timer();
+    GET("/wallet/send");
+    double send_ms = elapsed_ms();
+
+    CHECK("renders", _len > 1000);
+    CHECK("has address input", has("name=\"address\"") || has("name='address'"));
+    CHECK("has amount input", has("name=\"amount\"") || has("name='amount'"));
+    CHECK("shows fee", has("0.0001"));
+    CHECK("Send tab active", has("active'>Send"));
+    CHECK("no SQL leaks", has_not("sqlite3"));
+    return send_ms;
+}
+
+static void check_send_page_rpc(int have_rpc)
+{
+    if (have_rpc) {
+        /* THE BIG CHECK: JS BAL must include shielded balance */
+        double bal = extract_js_var("var BAL");
+        CHECK("JS BAL > 0 (has funds)", bal > 0.0001 || rpc_total < 0.001);
+        if (rpc_total > 0.001) {
+            CHECK("JS BAL includes shielded",
+                  fabs(bal - rpc_total) < 0.001);
+        }
+
+        char tot_s[32]; snprintf(tot_s, sizeof(tot_s), "%.8f", rpc_total);
+        CHECK("spendable shows total balance", has(tot_s));
+    }
+}
+
+static void check_send_flow(void)
+{
+    POST("/wallet/send/review", "address=bad&amount=1.0");
+    CHECK("bad address → error page", has("Invalid") || has("invalid") || has("short"));
+    CHECK("error page has retry", has("Try Again") || has("/wallet/send"));
+
+    POST("/wallet/send/review",
+        "address=zs19hc6ghlrzklr7y82u9w6822zuvrpfmgzlqz7alx8eqtwh2rvzgykl6m3lu8gwarpflcczgyse2p&amount=0.001");
+    CHECK("valid z-addr review renders", _len > 200);
+    CHECK("review shows amount", has("0.001"));
+    CHECK("review no 'Insufficient'", has_not("Insufficient"));
+
+    POST("/wallet/send/review", "address=&amount=0");
+    CHECK("empty form → no crash", _len > 200);
+
+    POST("/wallet/send/review", NULL);
+    CHECK("NULL body → no crash", _len > 0);
+}
+
+static void check_receive_page(void)
+{
+    GET("/wallet/receive");
+
+    CHECK("renders", _len > 500);
+    CHECK("private tab recommended", has("recommended"));
+    CHECK("zero-knowledge proof described", has("zero-knowledge proof"));
+    CHECK("on-chain warning for t-addr", has("on-chain"));
+    CHECK("has QR SVG", has("<svg"));
+    CHECK("Receive tab active", has("active'>Receive"));
+}
+
+static void check_history_page(void)
+{
+    GET("/wallet/history");
+
+    CHECK("renders", _len > 500);
+    CHECK("History tab active", has("active'>History"));
+    CHECK("no 'Secured Secured' duplicate", has_not("Secured Secured"));
+    CHECK("no zero-value entries", has_not("+0.00000000"));
+    CHECK("no SQL leaks", has_not("sqlite3") && has_not("SELECT "));
+
+    GET("/wallet/history?page=0");
+    CHECK("page 0 works", _len > 200);
+    GET("/wallet/history?page=99999");
+    CHECK("huge page → no crash", _len > 200);
+    GET("/wallet/history?filter=sent");
+    CHECK("filter=sent works", _len > 200);
+    GET("/wallet/history?q=<script>alert(1)</script>");
+    CHECK("XSS in search escaped", has_not("<script>alert"));
+}
+
+static void check_node_page(void)
+{
+    GET("/wallet/node");
+
+    CHECK("renders", _len > 1000);
+    CHECK("Command Center heading", has("Command Center"));
+    CHECK("sovereignty statement", has("sovereign"));
+    CHECK("block height shown", has("Block Height"));
+    CHECK("peers shown", has("Connected Peers"));
+    CHECK("version shown", has("ZClassic23:0.1.0"));
+    CHECK("Node tab active", has("active'>Node"));
+}
+
+static void check_coins_page(void)
+{
+    GET("/wallet/coins");
+
+    CHECK("renders", _len > 200);
+    CHECK("Coin Audit heading", has("Coin Audit"));
+    CHECK("no SQL leaks", has_not("sqlite3"));
+}
+
+static void check_shield_page(int have_rpc)
+{
+    GET("/wallet/shield");
+
+    CHECK("renders", _len > 200);
+    if (have_rpc && rpc_t < 0.00011) {
+        CHECK("nothing to shield (dust)", has("Nothing to shield"));
+    } else {
+        CHECK("shield form or nothing-to-shield",
+              has("Amount") || has("Nothing to shield"));
+    }
+}
+
+static void check_shield_confirm_flow(void)
+{
+    GET("/wallet/shield?amount=0.5");
+    CHECK("confirm page renders", _len > 500);
+    CHECK("confirm shows amount", has("0.5"));
+
+    POST("/wallet/shield/confirm", "amount=0");
+    CHECK("zero amount → invalid", has("Invalid") || has("invalid"));
+
+    POST("/wallet/shield/confirm", "amount=-1");
+    CHECK("negative amount → invalid", has("Invalid") || has("invalid"));
+}
+
+static void check_tx_detail_page(void)
+{
+    GET("/wallet/tx/0000000000000000000000000000000000000000000000000000000000000000");
+    CHECK("valid txid renders", _len > 200);
+
+    GET("/wallet/tx/<script>alert(1)</script>");
+    CHECK("XSS in txid escaped", has_not("<script>alert"));
+
+    GET("/wallet/tx/short");
+    CHECK("short txid → error", _len > 200);
+}
+
+static void check_pulse_api(void)
+{
+    GET("/api/wallet/pulse");
+
+    CHECK("returns JSON", has("{"));
+    CHECK("has height", has("\"height\""));
+    CHECK("has balance", has("\"balance\""));
+    CHECK("has shielded", has("\"shielded\""));
+    CHECK("has peers", has("\"peers\""));
+    CHECK("is not HTML", has_not("<!DOCTYPE"));
+}
+
+static void check_unknown_routes(void)
+{
+    { size_t n = GET("/wallet/doesnotexist");
+      CHECK("/wallet/doesnotexist → empty", n == 0); }
+    { size_t n = GET("/wallet/send/badpath");
+      CHECK("/wallet/send/badpath → empty", n == 0); }
+}
+
 int main(int argc, char **argv)
 {
     const char *datadir = NULL;
@@ -239,190 +457,54 @@ int main(int argc, char **argv)
 
     /* ═══ DASHBOARD ═══ */
     SECTION("Dashboard");
-    start_timer();
-    GET("/wallet");
-    double dash_ms = elapsed_ms();
-
-    CHECK("renders (>1000 bytes)", _len > 1000);
-    CHECK("renders fast (<500ms)", dash_ms < 500);
-    CHECK("shows ZCL balance", has("ZCL"));
-    CHECK("has Send button", has("href='/wallet/send'"));
-    CHECK("has Receive button", has("href='/wallet/receive'"));
-    CHECK("has privacy meter", has("private"));
-    CHECK("has nav: Home/Send/Receive/History/Node",
-          has(">Home<") && has(">Send<") && has(">Receive<") &&
-          has(">History<") && has(">Node<"));
-    CHECK("no SQL leaks", has_not("sqlite3") && has_not("SELECT "));
-    CHECK("no template leaks", has_not("{{{"));
-    CHECK("no 'untraceable' at <100%",
-          !have_rpc || rpc_z / (rpc_t + rpc_z + 0.0001) > 0.999 ||
-          has_not("untraceable"));
-
-    if (have_rpc) {
-        char expected[32];
-        snprintf(expected, sizeof(expected), "%.8f", rpc_total);
-        CHECK("balance matches zclassicd", has(expected));
-
-        int pct = (int)(100.0 * rpc_z / (rpc_t + rpc_z + 0.0001));
-        char pct_s[8]; snprintf(pct_s, sizeof(pct_s), "%d%%", pct);
-        char pct_lo[8]; snprintf(pct_lo, sizeof(pct_lo), "%d%%", pct > 0 ? pct-1 : 0);
-        char pct_hi[8]; snprintf(pct_hi, sizeof(pct_hi), "%d%%", pct < 100 ? pct+1 : 100);
-        CHECK("privacy % accurate",
-              has(pct_s) || has(pct_lo) || has(pct_hi));
-
-        if (rpc_t < 0.00011)
-            CHECK("no shield nudge for dust", has_not("Shield All"));
-        else
-            CHECK("shield nudge shown", has("Shield All") || has("/wallet/shield"));
-    }
+    double dash_ms = check_dashboard_renders();
+    check_dashboard_markup();
+    check_dashboard_rpc_balance(have_rpc);
+    check_dashboard_rpc_nudge(have_rpc);
     printf("  (%.0f ms)\n", dash_ms);
 
     /* ═══ SEND ═══ */
     SECTION("Send page");
-    start_timer();
-    GET("/wallet/send");
-    double send_ms = elapsed_ms();
-
-    CHECK("renders", _len > 1000);
-    CHECK("has address input", has("name=\"address\"") || has("name='address'"));
-    CHECK("has amount input", has("name=\"amount\"") || has("name='amount'"));
-    CHECK("shows fee", has("0.0001"));
-    CHECK("Send tab active", has("active'>Send"));
-    CHECK("no SQL leaks", has_not("sqlite3"));
-
-    if (have_rpc) {
-        /* THE BIG CHECK: JS BAL must include shielded balance */
-        double bal = extract_js_var("var BAL");
-        CHECK("JS BAL > 0 (has funds)", bal > 0.0001 || rpc_total < 0.001);
-        if (rpc_total > 0.001) {
-            CHECK("JS BAL includes shielded",
-                  fabs(bal - rpc_total) < 0.001);
-        }
-
-        char tot_s[32]; snprintf(tot_s, sizeof(tot_s), "%.8f", rpc_total);
-        CHECK("spendable shows total balance", has(tot_s));
-    }
+    double send_ms = check_send_page_render();
+    check_send_page_rpc(have_rpc);
     printf("  (%.0f ms)\n", send_ms);
 
     /* ═══ SEND FORM SUBMISSION ═══ */
     SECTION("Send flow (form submission)");
-
-    POST("/wallet/send/review", "address=bad&amount=1.0");
-    CHECK("bad address → error page", has("Invalid") || has("invalid") || has("short"));
-    CHECK("error page has retry", has("Try Again") || has("/wallet/send"));
-
-    POST("/wallet/send/review",
-        "address=zs19hc6ghlrzklr7y82u9w6822zuvrpfmgzlqz7alx8eqtwh2rvzgykl6m3lu8gwarpflcczgyse2p&amount=0.001");
-    CHECK("valid z-addr review renders", _len > 200);
-    CHECK("review shows amount", has("0.001"));
-    CHECK("review no 'Insufficient'", has_not("Insufficient"));
-
-    POST("/wallet/send/review", "address=&amount=0");
-    CHECK("empty form → no crash", _len > 200);
-
-    POST("/wallet/send/review", NULL);
-    CHECK("NULL body → no crash", _len > 0);
+    check_send_flow();
 
     /* ═══ RECEIVE ═══ */
     SECTION("Receive page");
-    GET("/wallet/receive");
-
-    CHECK("renders", _len > 500);
-    CHECK("private tab recommended", has("recommended"));
-    CHECK("zero-knowledge proof described", has("zero-knowledge proof"));
-    CHECK("on-chain warning for t-addr", has("on-chain"));
-    CHECK("has QR SVG", has("<svg"));
-    CHECK("Receive tab active", has("active'>Receive"));
+    check_receive_page();
 
     /* ═══ HISTORY ═══ */
     SECTION("History");
-    GET("/wallet/history");
-
-    CHECK("renders", _len > 500);
-    CHECK("History tab active", has("active'>History"));
-    CHECK("no 'Secured Secured' duplicate", has_not("Secured Secured"));
-    CHECK("no zero-value entries", has_not("+0.00000000"));
-    CHECK("no SQL leaks", has_not("sqlite3") && has_not("SELECT "));
-
-    GET("/wallet/history?page=0");
-    CHECK("page 0 works", _len > 200);
-    GET("/wallet/history?page=99999");
-    CHECK("huge page → no crash", _len > 200);
-    GET("/wallet/history?filter=sent");
-    CHECK("filter=sent works", _len > 200);
-    GET("/wallet/history?q=<script>alert(1)</script>");
-    CHECK("XSS in search escaped", has_not("<script>alert"));
+    check_history_page();
 
     /* ═══ NODE ═══ */
     SECTION("Node / Command Center");
-    GET("/wallet/node");
-
-    CHECK("renders", _len > 1000);
-    CHECK("Command Center heading", has("Command Center"));
-    CHECK("sovereignty statement", has("sovereign"));
-    CHECK("block height shown", has("Block Height"));
-    CHECK("peers shown", has("Connected Peers"));
-    CHECK("version shown", has("ZClassic23:0.1.0"));
-    CHECK("Node tab active", has("active'>Node"));
+    check_node_page();
 
     /* ═══ COINS ═══ */
     SECTION("Coins / Audit");
-    GET("/wallet/coins");
-
-    CHECK("renders", _len > 200);
-    CHECK("Coin Audit heading", has("Coin Audit"));
-    CHECK("no SQL leaks", has_not("sqlite3"));
+    check_coins_page();
 
     /* ═══ SHIELD ═══ */
     SECTION("Shield");
-    GET("/wallet/shield");
-
-    CHECK("renders", _len > 200);
-    if (have_rpc && rpc_t < 0.00011) {
-        CHECK("nothing to shield (dust)", has("Nothing to shield"));
-    } else {
-        CHECK("shield form or nothing-to-shield",
-              has("Amount") || has("Nothing to shield"));
-    }
-
-    GET("/wallet/shield?amount=0.5");
-    CHECK("confirm page renders", _len > 500);
-    CHECK("confirm shows amount", has("0.5"));
-
-    POST("/wallet/shield/confirm", "amount=0");
-    CHECK("zero amount → invalid", has("Invalid") || has("invalid"));
-
-    POST("/wallet/shield/confirm", "amount=-1");
-    CHECK("negative amount → invalid", has("Invalid") || has("invalid"));
+    check_shield_page(have_rpc);
+    check_shield_confirm_flow();
 
     /* ═══ TX DETAIL ═══ */
     SECTION("Transaction detail");
-    GET("/wallet/tx/0000000000000000000000000000000000000000000000000000000000000000");
-    CHECK("valid txid renders", _len > 200);
-
-    GET("/wallet/tx/<script>alert(1)</script>");
-    CHECK("XSS in txid escaped", has_not("<script>alert"));
-
-    GET("/wallet/tx/short");
-    CHECK("short txid → error", _len > 200);
+    check_tx_detail_page();
 
     /* ═══ PULSE API ═══ */
     SECTION("Pulse API");
-    GET("/api/wallet/pulse");
-
-    CHECK("returns JSON", has("{"));
-    CHECK("has height", has("\"height\""));
-    CHECK("has balance", has("\"balance\""));
-    CHECK("has shielded", has("\"shielded\""));
-    CHECK("has peers", has("\"peers\""));
-    CHECK("is not HTML", has_not("<!DOCTYPE"));
+    check_pulse_api();
 
     /* ═══ UNKNOWN ROUTES ═══ */
     SECTION("Unknown routes");
-    { size_t n = GET("/wallet/doesnotexist");
-      CHECK("/wallet/doesnotexist → empty", n == 0); }
-    { size_t n = GET("/wallet/send/badpath");
-      CHECK("/wallet/send/badpath → empty", n == 0); }
+    check_unknown_routes();
 
     /* ═══ RESULTS ═══ */
     printf("\n═══════════════════════════════════════════════════\n");
