@@ -71,6 +71,30 @@ struct purchase_fixture {
     size_t sapling_tree_size;
 };
 
+struct purchase_test_run {
+    struct node_db ndb;
+    struct purchase_fixture fixture;
+    struct market_purchase_runtime runtime;
+    struct market_purchase_request request;
+    struct file_offer offer;
+    struct file_offer onion_offer;
+    struct market_purchase_view plan;
+    struct market_purchase_view replay;
+    struct market_purchase_view committed;
+    struct market_purchase_view downloaded;
+    struct market_purchase_view onion_plan;
+    struct market_purchase_view onion_committed;
+    struct zcl_result onion_planned;
+    struct zcl_result onion_commit;
+    char dir[256];
+    char path[320];
+    char absolute_dir[MARKET_DOWNLOAD_PATH_MAX];
+    char destination[MARKET_DOWNLOAD_PATH_MAX];
+    char onion_destination[MARKET_DOWNLOAD_PATH_MAX];
+    int64_t now;
+    bool onion_ready;
+};
+
 static const uint8_t k_purchase_content[] =
     "verified paid market content\n";
 
@@ -150,43 +174,43 @@ static bool purchase_binding_sig(const uint8_t output_rcv[32],
     return ok;
 }
 
-static struct zcl_result purchase_send(
-    void *opaque, const char *source, const char *seller, int64_t amount,
-    const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES], uint8_t txid[32])
+static bool purchase_send_contract_violated(
+    struct purchase_fixture *f, const char *source, const char *seller,
+    int64_t amount, const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES])
 {
-    struct purchase_fixture *f = opaque;
-    if (!f || strcmp(source, "fixture-owned-source") != 0 ||
+    return !f || strcmp(source, "fixture-owned-source") != 0 ||
         !seller || seller[0] == '\0' || amount != f->expected_amount ||
-        memcmp(memo, f->expected_memo, FILE_MARKET_PAYMENT_MEMO_BYTES) != 0)
-        return ZCL_ERR(-2, "exact send contract changed");
-    uint8_t d[11], pk_d[32];
-    if (!f->sim_ready || !sapling_decode_payment_address(seller, d, pk_d))
-        return ZCL_ERR(-3, "isolated seller address cannot be decoded");
+        memcmp(memo, f->expected_memo, FILE_MARKET_PAYMENT_MEMO_BYTES) != 0;
+}
 
-    struct transaction tx;
-    transaction_init(&tx);
-    tx.overwintered = true;
-    tx.version = SAPLING_TX_VERSION;
-    tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-    if (!transaction_alloc(&tx, 1, 0))
-        return ZCL_ERR(-4, "isolated payment input allocation failed");
-    tx.vin[0].prevout.hash = f->funding_txid;
-    tx.vin[0].prevout.n = 0;
-    tx.vin[0].sequence = UINT32_MAX;
+static int purchase_payment_tx_build(
+    struct purchase_fixture *f, uint8_t d[11], uint8_t pk_d[32],
+    int64_t amount, const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES],
+    struct transaction *tx)
+{
+    transaction_init(tx);
+    tx->overwintered = true;
+    tx->version = SAPLING_TX_VERSION;
+    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+    if (!transaction_alloc(tx, 1, 0))
+        return -4;
+    tx->vin[0].prevout.hash = f->funding_txid;
+    tx->vin[0].prevout.n = 0;
+    tx->vin[0].sequence = UINT32_MAX;
     {
         static const uint8_t placeholder_sig[] = {0x00, 0x00};
-        script_set(&tx.vin[0].script_sig, placeholder_sig,
+        script_set(&tx->vin[0].script_sig, placeholder_sig,
                    sizeof(placeholder_sig));
     }
-    tx.value_balance = -amount;
-    tx.v_shielded_output = zcl_calloc(
+    tx->value_balance = -amount;
+    tx->v_shielded_output = zcl_calloc(
         1, sizeof(struct output_description), "market purchase output");
-    if (!tx.v_shielded_output) {
-        transaction_free(&tx);
-        return ZCL_ERR(-5, "isolated payment output allocation failed");
+    if (!tx->v_shielded_output) {
+        transaction_free(tx);
+        return -5;
     }
-    tx.num_shielded_output = 1;
-    struct output_description *od = tx.v_shielded_output;
+    tx->num_shielded_output = 1;
+    struct output_description *od = tx->v_shielded_output;
     uint8_t ovk[32], output_rcv[32];
     memset(ovk, 0x6d, sizeof(ovk));
     bool built = sapling_build_output_description(
@@ -197,36 +221,72 @@ static struct zcl_result purchase_send(
         uint32_t branch = consensus_current_epoch_branch_id(
             simnet_tip_height(&f->sim) + 1, &f->sim.params.consensus);
         struct precomputed_tx_data txdata;
-        precompute_tx_data(&tx, &txdata);
+        precompute_tx_data(tx, &txdata);
         struct script empty;
         script_init(&empty);
         struct sighash_type hash_type = {.raw = SIGHASH_ALL};
         struct uint256 sighash;
-        built = signature_hash(&empty, &tx, NOT_AN_INPUT, hash_type, 0,
+        built = signature_hash(&empty, tx, NOT_AN_INPUT, hash_type, 0,
                                branch, &txdata, &sighash) &&
                 purchase_binding_sig(output_rcv, sighash.data,
-                                     tx.binding_sig);
+                                     tx->binding_sig);
     }
     if (!built) {
-        transaction_free(&tx);
-        return ZCL_ERR(-6, "isolated market payment could not be built");
+        transaction_free(tx);
+        return -6;
     }
-    transaction_compute_hash(&tx);
-    struct uint256 payment_txid = tx.hash;
-    struct output_description *shielded_owned = tx.v_shielded_output;
-    bool mined = simnet_mint_txs(&f->sim, &tx, 1);
-    free(shielded_owned);
-    if (!mined)
-        return ZCL_ERR(-7, "isolated market payment was not mined");
+    return 0;
+}
 
-    memcpy(txid, payment_txid.data, 32);
-    f->sends++;
+static bool purchase_send_mint_payment(struct purchase_fixture *f,
+                                       struct transaction *tx,
+                                       struct uint256 *payment_txid)
+{
+    transaction_compute_hash(tx);
+    *payment_txid = tx->hash;
+    struct output_description *shielded_owned = tx->v_shielded_output;
+    bool mined = simnet_mint_txs(&f->sim, tx, 1);
+    free(shielded_owned);
+    return mined;
+}
+
+static void purchase_send_record_chain_state(struct purchase_fixture *f)
+{
     f->payment_height = simnet_tip_height(&f->sim);
     f->chain_confirmed =
         simnet_sapling_tree_size(&f->sim) == f->sapling_tree_size + 1 &&
         !simnet_coin_value(&f->sim, &f->funding_txid, 0, NULL);
     if (f->chain_confirmed)
         f->sapling_tree_size = simnet_sapling_tree_size(&f->sim);
+}
+
+static struct zcl_result purchase_send(
+    void *opaque, const char *source, const char *seller, int64_t amount,
+    const uint8_t memo[FILE_MARKET_PAYMENT_MEMO_BYTES], uint8_t txid[32])
+{
+    struct purchase_fixture *f = opaque;
+    if (purchase_send_contract_violated(f, source, seller, amount, memo))
+        return ZCL_ERR(-2, "exact send contract changed");
+    uint8_t d[11], pk_d[32];
+    if (!f->sim_ready || !sapling_decode_payment_address(seller, d, pk_d))
+        return ZCL_ERR(-3, "isolated seller address cannot be decoded");
+
+    struct transaction tx;
+    int build_code = purchase_payment_tx_build(f, d, pk_d, amount, memo,
+                                               &tx);
+    if (build_code == -4)
+        return ZCL_ERR(-4, "isolated payment input allocation failed");
+    if (build_code == -5)
+        return ZCL_ERR(-5, "isolated payment output allocation failed");
+    if (build_code == -6)
+        return ZCL_ERR(-6, "isolated market payment could not be built");
+    struct uint256 payment_txid;
+    if (!purchase_send_mint_payment(f, &tx, &payment_txid))
+        return ZCL_ERR(-7, "isolated market payment was not mined");
+
+    memcpy(txid, payment_txid.data, 32);
+    f->sends++;
+    purchase_send_record_chain_state(f);
     return f->chain_confirmed
         ? ZCL_OK : ZCL_ERR(-8, "isolated payment chain state is incomplete");
 }
@@ -242,6 +302,18 @@ static bool purchase_notify(void *opaque, const struct file_payment *payment)
     return true;
 }
 
+static bool purchase_fetch_args_malformed(
+    struct purchase_fixture *f, const uint8_t peer_ip[16], uint16_t peer_port,
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    const struct file_market_delivery_chunk *out)
+{
+    return !f || !peer_ip || peer_ip[15] != 1 || peer_port != 18034 ||
+        !network_genesis || !offer_id || chunk_index > 1 ||
+        !buyer_pubkey || !buyer_seed || !out;
+}
+
 static enum file_market_delivery_status purchase_fetch(
     void *opaque, const uint8_t peer_ip[16], uint16_t peer_port,
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
@@ -251,9 +323,9 @@ static enum file_market_delivery_status purchase_fetch(
 {
     struct purchase_fixture *f = opaque;
     uint8_t derived[32], secret[32];
-    if (!f || !peer_ip || peer_ip[15] != 1 || peer_port != 18034 ||
-        !network_genesis || !offer_id || chunk_index > 1 ||
-        !buyer_pubkey || !buyer_seed || !out)
+    if (purchase_fetch_args_malformed(f, peer_ip, peer_port, network_genesis,
+                                      offer_id, chunk_index, buyer_pubkey,
+                                      buyer_seed, out))
         return FILE_MARKET_DELIVERY_MALFORMED;
     ed25519_keypair(derived, secret, buyer_seed);
     if (memcmp(derived, buyer_pubkey, 32) != 0)
@@ -385,324 +457,418 @@ static bool purchase_offer(struct file_offer *offer, int64_t now)
     return file_offer_auth_seal(offer, seed) == FILE_OFFER_AUTH_OK;
 }
 
-int file_market_purchase_tests(void)
+static bool purchase_test_fixture_ready(struct purchase_test_run *run)
 {
-    int failures = 0;
-    char dir[256], path[320];
-    test_make_tmpdir(dir, sizeof(dir), "file_market_purchase", "intent");
-    snprintf(path, sizeof(path), "%s/node.db", dir);
-    struct node_db ndb; memset(&ndb, 0, sizeof(ndb));
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    struct file_offer offer;
-    bool ready = node_db_open(&ndb, path) && purchase_offer(&offer, now) &&
-                 db_file_offer_save(&ndb, &offer);
+    test_make_tmpdir(run->dir, sizeof(run->dir), "file_market_purchase",
+                     "intent");
+    snprintf(run->path, sizeof(run->path), "%s/node.db", run->dir);
+    memset(&run->ndb, 0, sizeof(run->ndb));
+    run->now = (int64_t)platform_time_wall_time_t();
+    bool ready = node_db_open(&run->ndb, run->path) &&
+                 purchase_offer(&run->offer, run->now) &&
+                 db_file_offer_save(&run->ndb, &run->offer);
     const struct chain_params *params = chain_params_get();
-    struct purchase_fixture fixture; memset(&fixture, 0, sizeof(fixture));
-    fixture.ndb = &ndb;
-    memset(fixture.initial_root, 0x31, 32);
-    memset(fixture.reserved_root, 0x32, 32);
-    fixture.tip_height = 420;
-    fixture.deadline_wall_unix = now;
-    memset(fixture.tip_hash, 0x44, 32);
-    fixture.money_current = true;
-    fixture.source_owned = true;
+    memset(&run->fixture, 0, sizeof(run->fixture));
+    run->fixture.ndb = &run->ndb;
+    memset(run->fixture.initial_root, 0x31, 32);
+    memset(run->fixture.reserved_root, 0x32, 32);
+    run->fixture.tip_height = 420;
+    run->fixture.deadline_wall_unix = run->now;
+    memset(run->fixture.tip_hash, 0x44, 32);
+    run->fixture.money_current = true;
+    run->fixture.source_owned = true;
     ready = ready && params && wallet_identity_ensure(
-        &ndb, params->consensus.hashGenesisBlock.data, "dev",
-        &fixture.identity);
+        &run->ndb, params->consensus.hashGenesisBlock.data, "dev",
+        &run->fixture.identity);
     wallet_lock_reset_for_test();
     wallet_lock_note_encrypted_at_rest();
     ready = ready && wallet_lock_unlock(NULL, NULL, "market-purchase-test").ok;
-    PURCHASE_CHECK("authenticated offer, identity, and encrypted fixture", ready);
-    if (!ready) goto cleanup;
+    return ready;
+}
 
-    struct market_purchase_runtime runtime; memset(&runtime, 0, sizeof(runtime));
-    runtime.node_db = &ndb;
-    runtime.read_money = purchase_money;
-    runtime.money_ctx = &fixture;
-    runtime.check_source = purchase_source;
-    runtime.source_ctx = &fixture;
-    runtime.send = purchase_send;
-    runtime.send_ctx = &fixture;
-    runtime.notify = purchase_notify;
-    runtime.notify_ctx = &fixture;
-    runtime.fetch = purchase_fetch;
-    runtime.fetch_ctx = &fixture;
-    runtime.tip_height = fixture.tip_height;
-    memcpy(runtime.tip_hash, fixture.tip_hash, 32);
-    runtime.maximum_fee_zat = 10000;
-    runtime.now_unix = now;
-    struct market_purchase_request request; memset(&request, 0, sizeof(request));
-    snprintf(request.wallet_scope, sizeof(request.wallet_scope), "dev");
-    memcpy(request.offer_id, offer.offer_id, 32);
-    snprintf(request.source_address, sizeof(request.source_address),
+static void purchase_test_runtime_init(struct purchase_test_run *run)
+{
+    struct market_purchase_runtime *runtime = &run->runtime;
+    memset(runtime, 0, sizeof(*runtime));
+    runtime->node_db = &run->ndb;
+    runtime->read_money = purchase_money;
+    runtime->money_ctx = &run->fixture;
+    runtime->check_source = purchase_source;
+    runtime->source_ctx = &run->fixture;
+    runtime->send = purchase_send;
+    runtime->send_ctx = &run->fixture;
+    runtime->notify = purchase_notify;
+    runtime->notify_ctx = &run->fixture;
+    runtime->fetch = purchase_fetch;
+    runtime->fetch_ctx = &run->fixture;
+    runtime->tip_height = run->fixture.tip_height;
+    memcpy(runtime->tip_hash, run->fixture.tip_hash, 32);
+    runtime->maximum_fee_zat = 10000;
+    runtime->now_unix = run->now;
+    struct market_purchase_request *request = &run->request;
+    memset(request, 0, sizeof(*request));
+    snprintf(request->wallet_scope, sizeof(request->wallet_scope), "dev");
+    memcpy(request->offer_id, run->offer.offer_id, 32);
+    snprintf(request->source_address, sizeof(request->source_address),
              "fixture-owned-source");
-    request.chunk_start = 0;
-    request.chunks_paid = offer.num_chunks;
-    snprintf(request.idempotency_key, sizeof(request.idempotency_key),
+    request->chunk_start = 0;
+    request->chunks_paid = run->offer.num_chunks;
+    snprintf(request->idempotency_key, sizeof(request->idempotency_key),
              "purchase-1");
-    file_market_offer_range_zat(&offer, 0, request.chunks_paid,
-                                &fixture.expected_amount);
+    file_market_offer_range_zat(&run->offer, 0, request->chunks_paid,
+                                &run->fixture.expected_amount);
+}
 
+static bool purchase_test_funding_ready(struct purchase_test_run *run)
+{
+    enum { PURCHASE_SAPLING_HEIGHT = 100 };
+    bool ready = simnet_init(&run->fixture.sim);
+    run->fixture.sim_ready = ready;
     if (ready) {
-        enum { PURCHASE_SAPLING_HEIGHT = 100 };
-        ready = simnet_init(&fixture.sim);
-        fixture.sim_ready = ready;
-        if (ready) {
-            simnet_activate_sapling_at(&fixture.sim,
-                                       PURCHASE_SAPLING_HEIGHT);
-            ready = simnet_enable_sapling_tree(&fixture.sim);
-            simnet_enable_contextual_check(&fixture.sim, false);
-        }
-        if (ready) {
-            struct script funding_script;
-            script_init(&funding_script);
-            static const uint8_t funding_prefix[] = {0x76, 0xa9, 0x14};
-            script_set(&funding_script, funding_prefix,
-                       sizeof(funding_prefix));
-            int funding_height = simnet_tip_height(&fixture.sim) + 1;
-            ready = simnet_mint_coinbase_to(
-                &fixture.sim, &funding_script,
-                fixture.expected_amount + runtime.maximum_fee_zat,
-                &fixture.funding_txid) &&
-                simnet_mint_to_height(
-                    &fixture.sim, funding_height + COINBASE_MATURITY);
-        }
+        simnet_activate_sapling_at(&run->fixture.sim,
+                                   PURCHASE_SAPLING_HEIGHT);
+        ready = simnet_enable_sapling_tree(&run->fixture.sim);
+        simnet_enable_contextual_check(&run->fixture.sim, false);
     }
-    PURCHASE_CHECK("isolated payment funding is mature", ready);
-    if (!ready) goto cleanup;
+    if (ready) {
+        struct script funding_script;
+        script_init(&funding_script);
+        static const uint8_t funding_prefix[] = {0x76, 0xa9, 0x14};
+        script_set(&funding_script, funding_prefix,
+                   sizeof(funding_prefix));
+        int funding_height = simnet_tip_height(&run->fixture.sim) + 1;
+        ready = simnet_mint_coinbase_to(
+            &run->fixture.sim, &funding_script,
+            run->fixture.expected_amount + run->runtime.maximum_fee_zat,
+            &run->fixture.funding_txid) &&
+            simnet_mint_to_height(
+                &run->fixture.sim, funding_height + COINBASE_MATURITY);
+    }
+    return ready;
+}
 
-    struct market_purchase_view plan, replay, committed;
-    struct zcl_result planned = market_purchase_plan(&runtime, &request, &plan);
+static int purchase_test_plan_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
+    struct zcl_result planned = market_purchase_plan(
+        &run->runtime, &run->request, &run->plan);
     struct file_payment memo_contract; memset(&memo_contract, 0,
                                                sizeof(memo_contract));
     memo_contract.version = FILE_MARKET_PAYMENT_VERSION;
-    memcpy(memo_contract.network_genesis, offer.network_genesis, 32);
-    memcpy(memo_contract.offer_id, offer.offer_id, 32);
-    memcpy(memo_contract.txid, plan.plan_id, 32);
-    memo_contract.chunk_start = request.chunk_start;
-    memo_contract.chunks_paid = request.chunks_paid;
-    memo_contract.amount_zat = fixture.expected_amount;
-    memcpy(memo_contract.buyer_pubkey, plan.buyer_pubkey, 32);
+    memcpy(memo_contract.network_genesis, run->offer.network_genesis, 32);
+    memcpy(memo_contract.offer_id, run->offer.offer_id, 32);
+    memcpy(memo_contract.txid, run->plan.plan_id, 32);
+    memo_contract.chunk_start = run->request.chunk_start;
+    memo_contract.chunks_paid = run->request.chunks_paid;
+    memo_contract.amount_zat = run->fixture.expected_amount;
+    memcpy(memo_contract.buyer_pubkey, run->plan.buyer_pubkey, 32);
     bool memo_ready = file_payment_memo_encode(
-        &memo_contract, fixture.expected_memo) == FILE_PAYMENT_AUTH_OK;
+        &memo_contract, run->fixture.expected_memo) == FILE_PAYMENT_AUTH_OK;
     PURCHASE_CHECK("plan reserves exact range value plus maximum fee",
-        planned.ok && memo_ready && plan.amount_zat == fixture.expected_amount &&
-        plan.reserved_zat == fixture.expected_amount + 10000 &&
+        planned.ok && memo_ready &&
+        run->plan.amount_zat == run->fixture.expected_amount &&
+        run->plan.reserved_zat == run->fixture.expected_amount + 10000 &&
         vault_intent_reserved_total(
-            &ndb, "dev", fixture.identity.wallet_instance_id) ==
-                plan.reserved_zat);
+            &run->ndb, "dev", run->fixture.identity.wallet_instance_id) ==
+                run->plan.reserved_zat);
+    return failures;
+}
 
+static int purchase_test_plan_replay_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
     struct zcl_result replayed = market_purchase_plan(
-        &runtime, &request, &replay);
+        &run->runtime, &run->request, &run->replay);
     PURCHASE_CHECK("same idempotency key returns the same durable plan",
-        replayed.ok && replay.idempotent_replay &&
-        memcmp(replay.plan_id, plan.plan_id, 32) == 0);
-    struct market_purchase_request changed = request;
+        replayed.ok && run->replay.idempotent_replay &&
+        memcmp(run->replay.plan_id, run->plan.plan_id, 32) == 0);
+    struct market_purchase_request changed = run->request;
     changed.chunk_start = 1;
     PURCHASE_CHECK("changed request under same idempotency key conflicts",
-        !market_purchase_plan(&runtime, &changed, &replay).ok);
+        !market_purchase_plan(&run->runtime, &changed, &run->replay).ok);
+    return failures;
+}
 
+static int purchase_test_commit_check(struct purchase_test_run *run)
+{
+    int failures = 0;
     struct zcl_result committed_result = market_purchase_commit(
-        &runtime, "dev", plan.plan_id, &committed);
+        &run->runtime, "dev", run->plan.plan_id, &run->committed);
     PURCHASE_CHECK("commit sends exact memo and seals a buyer payment claim",
-        committed_result.ok && fixture.sends == 1 &&
-        fixture.chain_confirmed && fixture.payment_height > 0 &&
-        fixture.notifications == 1 && committed.has_txid &&
-        committed.has_claim && committed.payment_notification_queued);
-    struct zcl_result committed_replay = market_purchase_commit(
-        &runtime, "dev", plan.plan_id, &replay);
-    PURCHASE_CHECK("commit replay never broadcasts a second transaction",
-        committed_replay.ok && replay.idempotent_replay && fixture.sends == 1 &&
-        fixture.notifications == 2 &&
-        memcmp(replay.txid, committed.txid, 32) == 0);
+        committed_result.ok && run->fixture.sends == 1 &&
+        run->fixture.chain_confirmed && run->fixture.payment_height > 0 &&
+        run->fixture.notifications == 1 && run->committed.has_txid &&
+        run->committed.has_claim && run->committed.payment_notification_queued);
+    return failures;
+}
 
-    node_db_close(&ndb);
+static int purchase_test_commit_replay_check(struct purchase_test_run *run)
+{
+    int failures = 0;
+    struct zcl_result committed_replay = market_purchase_commit(
+        &run->runtime, "dev", run->plan.plan_id, &run->replay);
+    PURCHASE_CHECK("commit replay never broadcasts a second transaction",
+        committed_replay.ok && run->replay.idempotent_replay &&
+        run->fixture.sends == 1 &&
+        run->fixture.notifications == 2 &&
+        memcmp(run->replay.txid, run->committed.txid, 32) == 0);
+    return failures;
+}
+
+static int purchase_test_restart_claim_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
+    node_db_close(&run->ndb);
     PURCHASE_CHECK("restart reopens durable purchase intent",
-                   node_db_open(&ndb, path));
-    fixture.ndb = &ndb;
+                   node_db_open(&run->ndb, run->path));
+    run->fixture.ndb = &run->ndb;
     struct market_purchase_view restarted;
     PURCHASE_CHECK("restart reconstructs claim without buyer key disclosure",
-        market_purchase_status(&runtime, plan.plan_id, &restarted).ok &&
+        market_purchase_status(
+            &run->runtime, run->plan.plan_id, &restarted).ok &&
         restarted.has_claim &&
-        memcmp(restarted.claim_id, committed.claim_id, 32) == 0);
+        memcmp(restarted.claim_id, run->committed.claim_id, 32) == 0);
+    return failures;
+}
 
-    char absolute_dir[MARKET_DOWNLOAD_PATH_MAX];
-    char destination[MARKET_DOWNLOAD_PATH_MAX];
+static int purchase_test_pending_download_checks(
+    struct purchase_test_run *run)
+{
+    int failures = 0;
     bool destination_ready = platform_directory_canonical_real(
-        dir, absolute_dir, sizeof(absolute_dir));
-    snprintf(destination, sizeof(destination), "%s/purchased.bin",
-             destination_ready ? absolute_dir : "");
-    struct market_purchase_view downloaded;
-    fixture.fetch_ready = false;
+        run->dir, run->absolute_dir, sizeof(run->absolute_dir));
+    snprintf(run->destination, sizeof(run->destination), "%s/purchased.bin",
+             destination_ready ? run->absolute_dir : "");
+    run->fixture.fetch_ready = false;
     struct zcl_result pending_download = market_purchase_retrieve(
-        &runtime, plan.plan_id, destination, &downloaded);
+        &run->runtime, run->plan.plan_id, run->destination, &run->downloaded);
     if (pending_download.ok == false)
         printf("file_market purchase: pending retrieve reason=%s\n",
                pending_download.message);
     struct market_download_record durable_download;
     PURCHASE_CHECK("pending seller keeps a path-private restartable download",
-        destination_ready && !pending_download.ok && fixture.fetches == 1 &&
-        db_market_download_find(&ndb, plan.plan_id, &durable_download) &&
+        destination_ready && !pending_download.ok &&
+        run->fixture.fetches == 1 &&
+        db_market_download_find(
+            &run->ndb, run->plan.plan_id, &durable_download) &&
         durable_download.state == MARKET_DOWNLOAD_FETCHING &&
         durable_download.chunks_received == 0 &&
-        access(destination, F_OK) != 0);
+        access(run->destination, F_OK) != 0);
+    return failures;
+}
 
-    node_db_close(&ndb);
+static bool purchase_test_budget_progress_exact(
+    struct purchase_test_run *run, const struct zcl_result *budget_limited,
+    const struct market_download_record *bounded_progress, bool bounded_found,
+    int bounded_chunk_count, int fetches_before_budget)
+{
+    return !budget_limited->ok && budget_limited->code == -76 &&
+        run->fixture.fetches == fetches_before_budget + 1 &&
+        bounded_found &&
+        bounded_progress->state == MARKET_DOWNLOAD_FETCHING &&
+        bounded_progress->chunks_received == 1 &&
+        bounded_progress->bytes_received == FILE_MARKET_CHUNK_SIZE &&
+        bounded_chunk_count == 1 &&
+        !run->downloaded.destination_published &&
+        access(run->destination, F_OK) != 0;
+}
+
+static int purchase_test_budget_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
+    node_db_close(&run->ndb);
     PURCHASE_CHECK("download progress survives database restart",
-                   node_db_open(&ndb, path));
-    fixture.ndb = &ndb;
-    fixture.fetch_ready = true;
+                   node_db_open(&run->ndb, run->path));
+    run->fixture.ndb = &run->ndb;
+    run->fixture.fetch_ready = true;
     failures += purchase_invalid_ready_tests(
-        &runtime, &fixture, plan.plan_id, destination);
-    int fetches_before_budget = fixture.fetches;
-    atomic_init(&fixture.deadline_clock_reads, 0);
+        &run->runtime, &run->fixture, run->plan.plan_id, run->destination);
+    int fetches_before_budget = run->fixture.fetches;
+    atomic_init(&run->fixture.deadline_clock_reads, 0);
     struct platform_clock_source budget_source = {
         .monotonic_us = purchase_deadline_monotonic_us,
         .wall_unix = purchase_deadline_wall_unix,
-        .user = &fixture,
+        .user = &run->fixture,
     };
     platform_clock_set_source(&budget_source);
     struct zcl_result budget_limited = market_purchase_retrieve(
-        &runtime, plan.plan_id, destination, &downloaded);
+        &run->runtime, run->plan.plan_id, run->destination, &run->downloaded);
     platform_clock_clear_source();
     struct market_download_record bounded_progress;
     bool bounded_found = db_market_download_find(
-        &ndb, plan.plan_id, &bounded_progress);
+        &run->ndb, run->plan.plan_id, &bounded_progress);
     int bounded_chunk_count = db_market_download_chunk_count(
-        &ndb, plan.plan_id);
-    bool bounded_exact =
-        !budget_limited.ok && budget_limited.code == -76 &&
-        fixture.fetches == fetches_before_budget + 1 &&
-        bounded_found &&
-        bounded_progress.state == MARKET_DOWNLOAD_FETCHING &&
-        bounded_progress.chunks_received == 1 &&
-        bounded_progress.bytes_received == FILE_MARKET_CHUNK_SIZE &&
-        bounded_chunk_count == 1 && !downloaded.destination_published &&
-        access(destination, F_OK) != 0;
+        &run->ndb, run->plan.plan_id);
+    bool bounded_exact = purchase_test_budget_progress_exact(
+        run, &budget_limited, &bounded_progress, bounded_found,
+        bounded_chunk_count, fetches_before_budget);
     if (!bounded_exact)
         printf("file_market purchase: clearnet budget detail ok=%d code=%d "
                "fetch=%d/%d clock=%d found=%d state=%d chunks=%u bytes=%llu "
                "rows=%d published=%d exists=%d\n",
-               budget_limited.ok, budget_limited.code, fixture.fetches,
-               fetches_before_budget, atomic_load(&fixture.deadline_clock_reads),
+               budget_limited.ok, budget_limited.code, run->fixture.fetches,
+               fetches_before_budget,
+               atomic_load(&run->fixture.deadline_clock_reads),
                bounded_found,
                bounded_found ? (int)bounded_progress.state : -1,
                bounded_found ? bounded_progress.chunks_received : 0,
                (unsigned long long)(bounded_found
                    ? bounded_progress.bytes_received : 0),
-               bounded_chunk_count, downloaded.destination_published,
-               access(destination, F_OK) == 0);
+               bounded_chunk_count, run->downloaded.destination_published,
+               access(run->destination, F_OK) == 0);
     PURCHASE_CHECK("clearnet budget persists one chunk and starts no next fetch",
                    bounded_exact);
-    node_db_close(&ndb);
+    return failures;
+}
+
+static size_t purchase_test_read_published_tail(const char *destination,
+                                                uint8_t *disk,
+                                                size_t disk_size)
+{
+    FILE *published = fopen(destination, "rb");
+    bool tail_seek = published &&
+        fseeko(published, (off_t)FILE_MARKET_CHUNK_SIZE, SEEK_SET) == 0;
+    size_t disk_len = tail_seek ? fread(disk, 1, disk_size, published) : 0;
+    if (published) fclose(published);
+    return disk_len;
+}
+
+static int purchase_test_publish_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
+    node_db_close(&run->ndb);
     PURCHASE_CHECK("budgeted clearnet prefix survives database restart",
-                   node_db_open(&ndb, path));
-    fixture.ndb = &ndb;
+                   node_db_open(&run->ndb, run->path));
+    run->fixture.ndb = &run->ndb;
     struct zcl_result retrieved = market_purchase_retrieve(
-        &runtime, plan.plan_id, destination, &downloaded);
+        &run->runtime, run->plan.plan_id, run->destination, &run->downloaded);
     if (!retrieved.ok)
         printf("file_market purchase: retrieve reason=%s\n",
                retrieved.message);
     uint8_t disk[sizeof(k_purchase_content)];
-    FILE *published = fopen(destination, "rb");
-    bool tail_seek = published &&
-        fseeko(published, (off_t)FILE_MARKET_CHUNK_SIZE, SEEK_SET) == 0;
-    size_t disk_len = tail_seek ? fread(disk, 1, sizeof(disk), published) : 0;
-    if (published) fclose(published);
+    size_t disk_len = purchase_test_read_published_tail(
+        run->destination, disk, sizeof(disk));
     PURCHASE_CHECK("verified manifest is atomically published after restart",
-        retrieved.ok && downloaded.destination_published &&
-        downloaded.chunks_received == 2 && downloaded.num_chunks == 2 &&
+        retrieved.ok && run->downloaded.destination_published &&
+        run->downloaded.chunks_received == 2 &&
+        run->downloaded.num_chunks == 2 &&
         disk_len == sizeof(k_purchase_content) &&
         memcmp(disk, k_purchase_content, sizeof(disk)) == 0);
-    int fetches_after_publish = fixture.fetches;
-    PURCHASE_CHECK("retrieve replay never downloads or republishes twice",
-        market_purchase_retrieve(&runtime, plan.plan_id, destination,
-                                 &downloaded).ok &&
-        downloaded.idempotent_replay &&
-        fixture.fetches == fetches_after_publish);
+    return failures;
+}
 
-    request.idempotency_key[9] = '2';
-    fixture.money_reads = 1;
+static int purchase_test_replay_retrieve_check(struct purchase_test_run *run)
+{
+    int failures = 0;
+    int fetches_after_publish = run->fixture.fetches;
+    PURCHASE_CHECK("retrieve replay never downloads or republishes twice",
+        market_purchase_retrieve(&run->runtime, run->plan.plan_id,
+                                 run->destination, &run->downloaded).ok &&
+        run->downloaded.idempotent_replay &&
+        run->fixture.fetches == fetches_after_publish);
+    return failures;
+}
+
+static int purchase_test_state_conflict_refusals(struct purchase_test_run *run)
+{
+    int failures = 0;
+    run->request.idempotency_key[9] = '2';
+    run->fixture.money_reads = 1;
     struct market_purchase_view uncertain;
     struct zcl_result planned_uncertain = market_purchase_plan(
-        &runtime, &request, &uncertain);
+        &run->runtime, &run->request, &uncertain);
     bool claimed = planned_uncertain.ok && vault_intent_claim_commit(
-        &ndb, uncertain.plan_id, now);
-    int before = fixture.sends;
+        &run->ndb, uncertain.plan_id, run->now);
+    int before = run->fixture.sends;
     struct zcl_result refused = market_purchase_commit(
-        &runtime, "dev", uncertain.plan_id, &replay);
+        &run->runtime, "dev", uncertain.plan_id, &run->replay);
     PURCHASE_CHECK("restart-uncertain proving state fails closed without resend",
-        claimed && !refused.ok && fixture.sends == before);
+        claimed && !refused.ok && run->fixture.sends == before);
 
-    request.idempotency_key[9] = '3';
-    fixture.money_reads = 1;
+    run->request.idempotency_key[9] = '3';
+    run->fixture.money_reads = 1;
     struct market_purchase_view stale;
     struct zcl_result planned_stale = market_purchase_plan(
-        &runtime, &request, &stale);
-    runtime.tip_hash[0] ^= 1;
-    before = fixture.sends;
+        &run->runtime, &run->request, &stale);
+    run->runtime.tip_hash[0] ^= 1;
+    before = run->fixture.sends;
     struct zcl_result stale_commit = market_purchase_commit(
-        &runtime, "dev", stale.plan_id, &replay);
+        &run->runtime, "dev", stale.plan_id, &run->replay);
     PURCHASE_CHECK("changed tip-bound state conflicts before wallet mutation",
-        planned_stale.ok && !stale_commit.ok && fixture.sends == before);
+        planned_stale.ok && !stale_commit.ok &&
+        run->fixture.sends == before);
+    return failures;
+}
 
-    runtime.tip_hash[0] ^= 1;
-    request.idempotency_key[9] = '4';
-    fixture.money_reads = 1;
+static int purchase_test_policy_conflict_refusals(struct purchase_test_run *run)
+{
+    int failures = 0;
+    run->runtime.tip_hash[0] ^= 1;
+    run->request.idempotency_key[9] = '4';
+    run->fixture.money_reads = 1;
     struct market_purchase_view fee_bound;
     struct zcl_result planned_fee = market_purchase_plan(
-        &runtime, &request, &fee_bound);
-    runtime.maximum_fee_zat++;
-    before = fixture.sends;
+        &run->runtime, &run->request, &fee_bound);
+    run->runtime.maximum_fee_zat++;
+    int before = run->fixture.sends;
     struct zcl_result changed_fee = market_purchase_commit(
-        &runtime, "dev", fee_bound.plan_id, &replay);
+        &run->runtime, "dev", fee_bound.plan_id, &run->replay);
     PURCHASE_CHECK("changed maximum fee conflicts before wallet mutation",
-        planned_fee.ok && !changed_fee.ok && fixture.sends == before);
-    runtime.maximum_fee_zat--;
+        planned_fee.ok && !changed_fee.ok && run->fixture.sends == before);
+    run->runtime.maximum_fee_zat--;
 
-    request.idempotency_key[9] = '5';
-    fixture.money_reads = 1;
+    run->request.idempotency_key[9] = '5';
+    run->fixture.money_reads = 1;
     struct market_purchase_view source_bound;
     struct zcl_result planned_source = market_purchase_plan(
-        &runtime, &request, &source_bound);
-    fixture.source_owned = false;
-    before = fixture.sends;
+        &run->runtime, &run->request, &source_bound);
+    run->fixture.source_owned = false;
+    before = run->fixture.sends;
     struct zcl_result unowned = market_purchase_commit(
-        &runtime, "dev", source_bound.plan_id, &replay);
+        &run->runtime, "dev", source_bound.plan_id, &run->replay);
     PURCHASE_CHECK("unowned source refuses before wallet mutation",
-        planned_source.ok && !unowned.ok && fixture.sends == before);
-    fixture.source_owned = true;
+        planned_source.ok && !unowned.ok && run->fixture.sends == before);
+    run->fixture.source_owned = true;
+    return failures;
+}
 
-    request.idempotency_key[9] = '6';
-    fixture.money_reads = 1;
-    fixture.identity.network_genesis[0] ^= 1;
+static int purchase_test_plan_refusals(struct purchase_test_run *run)
+{
+    int failures = 0;
+    run->request.idempotency_key[9] = '6';
+    run->fixture.money_reads = 1;
+    run->fixture.identity.network_genesis[0] ^= 1;
     PURCHASE_CHECK("wrong-network signed offer refuses without reservation",
-        !market_purchase_plan(&runtime, &request, &replay).ok);
-    fixture.identity.network_genesis[0] ^= 1;
+        !market_purchase_plan(&run->runtime, &run->request,
+                              &run->replay).ok);
+    run->fixture.identity.network_genesis[0] ^= 1;
 
-    request.idempotency_key[9] = '7';
-    fixture.money_reads = 1;
-    fixture.money_current = false;
+    run->request.idempotency_key[9] = '7';
+    run->fixture.money_reads = 1;
+    run->fixture.money_current = false;
     PURCHASE_CHECK("unknown money reader never collapses to a zero-balance plan",
-        !market_purchase_plan(&runtime, &request, &replay).ok);
-    fixture.money_current = true;
+        !market_purchase_plan(&run->runtime, &run->request,
+                              &run->replay).ok);
+    run->fixture.money_current = true;
+    return failures;
+}
 
-    /* ── Phase B5: an onion-endpoint signed offer refuses delivery outright
-     * when no embedded Tor client is running — never a clearnet fallback. ── */
-    struct file_offer onion_offer;
-    bool onion_ready = purchase_offer(&onion_offer, now);
+static void purchase_test_onion_fixture_prepare(struct purchase_test_run *run)
+{
+    bool onion_ready = purchase_offer(&run->onion_offer, run->now);
     if (onion_ready) {
         uint8_t onion_seed[32];
         memset(onion_seed, 0x57, sizeof(onion_seed));
-        memset(onion_offer.peer_ip, 0, sizeof(onion_offer.peer_ip));
-        onion_offer.peer_port = 0;
-        onion_offer.auth_version = FILE_MARKET_OFFER_VERSION_V2;
-        onion_offer.endpoint_type = FILE_MARKET_ENDPOINT_ONION;
-        onion_offer.nonce++;
-        memset(onion_offer.onion_pubkey, 0xab,
-               sizeof(onion_offer.onion_pubkey));
-        onion_ready = file_offer_auth_seal(&onion_offer, onion_seed) ==
-            FILE_OFFER_AUTH_OK && db_file_offer_save(&ndb, &onion_offer);
+        memset(run->onion_offer.peer_ip, 0, sizeof(run->onion_offer.peer_ip));
+        run->onion_offer.peer_port = 0;
+        run->onion_offer.auth_version = FILE_MARKET_OFFER_VERSION_V2;
+        run->onion_offer.endpoint_type = FILE_MARKET_ENDPOINT_ONION;
+        run->onion_offer.nonce++;
+        memset(run->onion_offer.onion_pubkey, 0xab,
+               sizeof(run->onion_offer.onion_pubkey));
+        onion_ready = file_offer_auth_seal(&run->onion_offer, onion_seed) ==
+            FILE_OFFER_AUTH_OK &&
+            db_file_offer_save(&run->ndb, &run->onion_offer);
     }
     if (onion_ready) {
         struct script onion_funding_script;
@@ -710,90 +876,172 @@ int file_market_purchase_tests(void)
         static const uint8_t onion_funding_prefix[] = {0x76, 0xa9, 0x14};
         script_set(&onion_funding_script, onion_funding_prefix,
                    sizeof(onion_funding_prefix));
-        int onion_funding_height = simnet_tip_height(&fixture.sim) + 1;
+        int onion_funding_height = simnet_tip_height(&run->fixture.sim) + 1;
         onion_ready = simnet_mint_coinbase_to(
-            &fixture.sim, &onion_funding_script,
-            fixture.expected_amount + runtime.maximum_fee_zat,
-            &fixture.funding_txid) &&
+            &run->fixture.sim, &onion_funding_script,
+            run->fixture.expected_amount + run->runtime.maximum_fee_zat,
+            &run->fixture.funding_txid) &&
             simnet_mint_to_height(
-                &fixture.sim, onion_funding_height + COINBASE_MATURITY);
+                &run->fixture.sim, onion_funding_height + COINBASE_MATURITY);
     }
-    struct market_purchase_view onion_plan, onion_committed;
-    struct zcl_result onion_planned = ZCL_OK, onion_commit = ZCL_OK;
-    if (onion_ready) {
-        memcpy(request.offer_id, onion_offer.offer_id, 32);
-        request.idempotency_key[9] = '8';
-        fixture.money_reads = 1;
-        onion_planned = market_purchase_plan(&runtime, &request,
-                                             &onion_plan);
+    run->onion_ready = onion_ready;
+}
+
+static void purchase_test_onion_plan_prepare(struct purchase_test_run *run)
+{
+    run->onion_planned = ZCL_OK;
+    run->onion_commit = ZCL_OK;
+    if (run->onion_ready) {
+        memcpy(run->request.offer_id, run->onion_offer.offer_id, 32);
+        run->request.idempotency_key[9] = '8';
+        run->fixture.money_reads = 1;
+        run->onion_planned = market_purchase_plan(&run->runtime,
+                                                  &run->request,
+                                                  &run->onion_plan);
         struct file_payment onion_memo;
         memset(&onion_memo, 0, sizeof(onion_memo));
         onion_memo.version = FILE_MARKET_PAYMENT_VERSION;
-        memcpy(onion_memo.network_genesis, onion_offer.network_genesis, 32);
-        memcpy(onion_memo.offer_id, onion_offer.offer_id, 32);
-        memcpy(onion_memo.txid, onion_plan.plan_id, 32);
-        onion_memo.chunk_start = request.chunk_start;
-        onion_memo.chunks_paid = request.chunks_paid;
-        onion_memo.amount_zat = fixture.expected_amount;
-        memcpy(onion_memo.buyer_pubkey, onion_plan.buyer_pubkey, 32);
-        onion_ready = onion_planned.ok && file_payment_memo_encode(
-            &onion_memo, fixture.expected_memo) == FILE_PAYMENT_AUTH_OK;
+        memcpy(onion_memo.network_genesis, run->onion_offer.network_genesis,
+               32);
+        memcpy(onion_memo.offer_id, run->onion_offer.offer_id, 32);
+        memcpy(onion_memo.txid, run->onion_plan.plan_id, 32);
+        onion_memo.chunk_start = run->request.chunk_start;
+        onion_memo.chunks_paid = run->request.chunks_paid;
+        onion_memo.amount_zat = run->fixture.expected_amount;
+        memcpy(onion_memo.buyer_pubkey, run->onion_plan.buyer_pubkey, 32);
+        run->onion_ready = run->onion_planned.ok && file_payment_memo_encode(
+            &onion_memo, run->fixture.expected_memo) == FILE_PAYMENT_AUTH_OK;
     }
-    if (onion_ready)
-        onion_commit = market_purchase_commit(
-            &runtime, "dev", onion_plan.plan_id, &onion_committed);
-    char onion_destination[MARKET_DOWNLOAD_PATH_MAX];
-    snprintf(onion_destination, sizeof(onion_destination),
-             "%s/onion-purchased.bin", absolute_dir);
-    int fetches_before_onion = fixture.fetches;
+    if (run->onion_ready)
+        run->onion_commit = market_purchase_commit(
+            &run->runtime, "dev", run->onion_plan.plan_id,
+            &run->onion_committed);
+}
+
+static bool purchase_test_onion_refusal_exact(
+    struct purchase_test_run *run, const struct zcl_result *onion_retrieved,
+    int fetches_before_onion)
+{
+    return run->onion_planned.ok && run->onion_commit.ok &&
+        !onion_retrieved->ok && onion_retrieved->code == -78 &&
+        run->fixture.fetches == fetches_before_onion;
+}
+
+static int purchase_test_onion_refusal_checks(struct purchase_test_run *run)
+{
+    int failures = 0;
+    snprintf(run->onion_destination, sizeof(run->onion_destination),
+             "%s/onion-purchased.bin", run->absolute_dir);
+    int fetches_before_onion = run->fixture.fetches;
     struct market_purchase_view onion_download;
-    struct zcl_result onion_retrieved = onion_ready
-        ? market_purchase_retrieve(&runtime, onion_plan.plan_id,
-                                   onion_destination, &onion_download)
+    struct zcl_result onion_retrieved = run->onion_ready
+        ? market_purchase_retrieve(&run->runtime, run->onion_plan.plan_id,
+                                   run->onion_destination, &onion_download)
         : ZCL_ERR(-1, "onion fixture could not be built");
-    if (!(onion_planned.ok && onion_commit.ok && !onion_retrieved.ok &&
-          onion_retrieved.code == -78 &&
-          fixture.fetches == fetches_before_onion))
+    if (!purchase_test_onion_refusal_exact(
+            run, &onion_retrieved, fetches_before_onion))
         printf("file_market purchase: onion detail planned=%d(%d %s) "
                "commit=%d(%d %s) retrieve=%d code=%d msg=%s fetches=%d/%d\n",
-               onion_planned.ok, onion_planned.code, onion_planned.message,
-               onion_commit.ok, onion_commit.code, onion_commit.message,
+               run->onion_planned.ok, run->onion_planned.code,
+               run->onion_planned.message,
+               run->onion_commit.ok, run->onion_commit.code,
+               run->onion_commit.message,
                onion_retrieved.ok, onion_retrieved.code,
-               onion_retrieved.message, fixture.fetches,
+               onion_retrieved.message, run->fixture.fetches,
                fetches_before_onion);
     PURCHASE_CHECK("onion-endpoint offer refuses delivery without a Tor client",
-        onion_planned.ok && onion_commit.ok && !onion_retrieved.ok &&
-        onion_retrieved.code == -78 &&
-        fixture.fetches == fetches_before_onion);
-    runtime.fetch_onion = purchase_fetch_onion_limited;
-    runtime.fetch_onion_ctx = &fixture;
-    runtime.onion_transport_ready = true;
+        purchase_test_onion_refusal_exact(
+            run, &onion_retrieved, fetches_before_onion));
+    return failures;
+}
+
+static bool purchase_test_onion_progress_durable(
+    struct purchase_test_run *run,
+    struct market_download_record *onion_progress)
+{
+    return db_market_download_find(
+               &run->ndb, run->onion_plan.plan_id, onion_progress) &&
+        onion_progress->state == MARKET_DOWNLOAD_FETCHING &&
+        onion_progress->chunks_received == 0 &&
+        onion_progress->bytes_received == 0 &&
+        db_market_download_chunk_count(
+            &run->ndb, run->onion_plan.plan_id) == 0;
+}
+
+static bool purchase_test_onion_budget_exact(
+    struct purchase_test_run *run, const struct zcl_result *onion_limited,
+    const struct market_purchase_view *onion_limited_view,
+    struct market_download_record *onion_progress, int64_t observed_now_ms)
+{
+    return !onion_limited->ok && onion_limited->code == -76 &&
+        run->fixture.onion_fetches == 1 &&
+        run->fixture.onion_deadline_ms > observed_now_ms &&
+        run->fixture.onion_deadline_ms - observed_now_ms <=
+            MARKET_PURCHASE_RETRIEVE_BUDGET_MS &&
+        purchase_test_onion_progress_durable(run, onion_progress) &&
+        !onion_limited_view->destination_published &&
+        access(run->onion_destination, F_OK) != 0;
+}
+
+static int purchase_test_onion_budget_check(struct purchase_test_run *run)
+{
+    int failures = 0;
+    run->runtime.fetch_onion = purchase_fetch_onion_limited;
+    run->runtime.fetch_onion_ctx = &run->fixture;
+    run->runtime.onion_transport_ready = true;
     struct market_purchase_view onion_limited_view;
     memset(&onion_limited_view, 0, sizeof(onion_limited_view));
-    struct zcl_result onion_limited = onion_ready
-        ? market_purchase_retrieve(&runtime, onion_plan.plan_id,
-                                   onion_destination, &onion_limited_view)
+    struct zcl_result onion_limited = run->onion_ready
+        ? market_purchase_retrieve(&run->runtime, run->onion_plan.plan_id,
+                                   run->onion_destination, &onion_limited_view)
         : ZCL_ERR(-1, "onion fixture could not be built");
     struct market_download_record onion_progress;
     int64_t observed_now_ms = platform_time_monotonic_ms();
     PURCHASE_CHECK("onion retrieval budget leaves only durable progress",
-        !onion_limited.ok && onion_limited.code == -76 &&
-        fixture.onion_fetches == 1 &&
-        fixture.onion_deadline_ms > observed_now_ms &&
-        fixture.onion_deadline_ms - observed_now_ms <=
-            MARKET_PURCHASE_RETRIEVE_BUDGET_MS &&
-        db_market_download_find(&ndb, onion_plan.plan_id, &onion_progress) &&
-        onion_progress.state == MARKET_DOWNLOAD_FETCHING &&
-        onion_progress.chunks_received == 0 &&
-        onion_progress.bytes_received == 0 &&
-        db_market_download_chunk_count(&ndb, onion_plan.plan_id) == 0 &&
-        !onion_limited_view.destination_published &&
-        access(onion_destination, F_OK) != 0);
+        purchase_test_onion_budget_exact(
+            run, &onion_limited, &onion_limited_view, &onion_progress,
+            observed_now_ms));
+    return failures;
+}
+
+int file_market_purchase_tests(void)
+{
+    int failures = 0;
+    struct purchase_test_run run;
+    memset(&run, 0, sizeof(run));
+    bool ready = purchase_test_fixture_ready(&run);
+    PURCHASE_CHECK("authenticated offer, identity, and encrypted fixture", ready);
+    if (!ready) goto cleanup;
+
+    purchase_test_runtime_init(&run);
+    ready = purchase_test_funding_ready(&run);
+    PURCHASE_CHECK("isolated payment funding is mature", ready);
+    if (!ready) goto cleanup;
+
+    failures += purchase_test_plan_checks(&run);
+    failures += purchase_test_plan_replay_checks(&run);
+    failures += purchase_test_commit_check(&run);
+    failures += purchase_test_commit_replay_check(&run);
+    failures += purchase_test_restart_claim_checks(&run);
+    failures += purchase_test_pending_download_checks(&run);
+    failures += purchase_test_budget_checks(&run);
+    failures += purchase_test_publish_checks(&run);
+    failures += purchase_test_replay_retrieve_check(&run);
+    failures += purchase_test_state_conflict_refusals(&run);
+    failures += purchase_test_policy_conflict_refusals(&run);
+    failures += purchase_test_plan_refusals(&run);
+
+    /* ── Phase B5: an onion-endpoint signed offer refuses delivery outright
+     * when no embedded Tor client is running — never a clearnet fallback. ── */
+    purchase_test_onion_fixture_prepare(&run);
+    purchase_test_onion_plan_prepare(&run);
+    failures += purchase_test_onion_refusal_checks(&run);
+    failures += purchase_test_onion_budget_check(&run);
 
 cleanup:
-    if (ndb.open) node_db_close(&ndb);
-    if (fixture.sim_ready) simnet_free(&fixture.sim);
+    if (run.ndb.open) node_db_close(&run.ndb);
+    if (run.fixture.sim_ready) simnet_free(&run.fixture.sim);
     wallet_lock_reset_for_test();
-    test_rm_rf(dir);
+    test_rm_rf(run.dir);
     return failures;
 }
