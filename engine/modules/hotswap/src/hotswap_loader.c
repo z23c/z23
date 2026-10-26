@@ -13,7 +13,7 @@
  * -D_FORTIFY_SOURCE=2 pulls in at -O3 — so any -O0, -U_FORTIFY_SOURCE, or
  * non-glibc build fails with "implicit declaration of realpath", which is a
  * hard error in C23. Matches core/modules/net/src/connman.c and 26 other TUs. */
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
 #include "hotswap/hotswap.h"
@@ -113,6 +113,50 @@ static bool path_is_under(const char *path, const char *directory)
            strncmp(path, directory, directory_len) == 0 &&
            path[directory_len] == '/';
 }
+
+/* Lexical admission checks on a candidate artifact path: absolute, no
+ * parent-directory escape, and the .so suffix. Returns 0 when every check
+ * passes; nonzero with why[] set to the first failure's reason. */
+static int path_lexical_check(const char *so_path, char *why, size_t why_sz)
+{
+    if (so_path[0] != '/') {
+        if (why) snprintf(why, why_sz, "path must be absolute");
+        return 1;
+    }
+    if (strstr(so_path, "..")) {
+        if (why) snprintf(why, why_sz, "path must not contain '..'");
+        return 1;
+    }
+    if (!has_suffix(so_path, ".so")) {
+        if (why) snprintf(why, why_sz, "path must end in .so");
+        return 1;
+    }
+    return 0;
+}
+
+/* Resolves the candidate with realpath() and admits only locations under
+ * /tmp or the build/hotswap staging tree. Returns 0 when the resolved
+ * location is acceptable; nonzero with why[] set to the reason. */
+static int path_location_check(const char *so_path, char *why, size_t why_sz)
+{
+    char real[PATH_MAX];
+    if (!realpath(so_path, real)) {
+        if (why) snprintf(why, why_sz, "realpath failed");
+        return 1;
+    }
+    char real_tmp[PATH_MAX];
+    const char *tmp = realpath("/tmp", real_tmp) ? real_tmp : "/tmp";
+    bool under_tmp = path_is_under(real, tmp);
+    bool under_build = strstr(real, "/build/hotswap/") != NULL;
+    if (!under_tmp && !under_build) {
+        if (why)
+            snprintf(why, why_sz,
+                     "resolved path %s not under /tmp or build/hotswap",
+                     real);
+        return 1;
+    }
+    return 0;
+}
 #endif
 
 bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
@@ -130,40 +174,13 @@ bool hotswap_path_is_acceptable(const char *so_path, char *why, size_t why_sz)
                  "PE imports and immutable generation loading");
     return false;
 #else
-    if (so_path[0] != '/') {
-        if (why) snprintf(why, why_sz, "path must be absolute");
+    if (path_lexical_check(so_path, why, why_sz) != 0)
         return false;
-    }
-    if (strstr(so_path, "..")) {
-        if (why) snprintf(why, why_sz, "path must not contain '..'");
-        return false;
-    }
-    if (!has_suffix(so_path, ".so")) {
-        if (why) snprintf(why, why_sz, "path must end in .so");
-        return false;
-    }
     if (access(so_path, R_OK) != 0) {
         if (why) snprintf(why, why_sz, "file does not exist / unreadable");
         return false;
     }
-
-    char real[PATH_MAX];
-    if (!realpath(so_path, real)) {
-        if (why) snprintf(why, why_sz, "realpath failed");
-        return false;
-    }
-    char real_tmp[PATH_MAX];
-    const char *tmp = realpath("/tmp", real_tmp) ? real_tmp : "/tmp";
-    bool under_tmp = path_is_under(real, tmp);
-    bool under_build = strstr(real, "/build/hotswap/") != NULL;
-    if (!under_tmp && !under_build) {
-        if (why)
-            snprintf(why, why_sz,
-                     "resolved path %s not under /tmp or build/hotswap",
-                     real);
-        return false;
-    }
-    return true;
+    return path_location_check(so_path, why, why_sz) == 0;
 #endif
 }
 
@@ -381,6 +398,24 @@ static bool artifact_sha256_fd(int fd, char hex_out[65])
     return true;
 }
 
+/* Opens the candidate artifact, verifies it is a regular file, and hashes it
+ * through the pinned descriptor. Returns the open descriptor, or -1 when any
+ * step fails (an already-opened descriptor is closed before returning). */
+static int artifact_open_and_hash(const char *so_path, char hex_out[65])
+{
+    int artifact_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (artifact_fd < 0)
+        return -1;
+    struct stat artifact_stat;
+    if (fstat(artifact_fd, &artifact_stat) != 0 ||
+        !S_ISREG(artifact_stat.st_mode) ||
+        !artifact_sha256_fd(artifact_fd, hex_out)) {
+        close(artifact_fd);
+        return -1;
+    }
+    return artifact_fd;
+}
+
 struct hotswap_leaf_tx {
     struct zcl_hotswap_leaf_replacement staged[ZCL_HOTSWAP_GEN_MAX_REPLACED];
     size_t staged_count;
@@ -479,6 +514,47 @@ static void manifest_copy(struct hotswap_generation *slot,
 #undef COPY_MANIFEST_TEXT
 }
 
+/* Manifest-stage checks shared by every provider class: resolve the exported
+ * manifest symbol, capture provenance once its schema proves every field
+ * exists, validate it, and enforce the requested probe. Returns 0 with
+ * *manifest_out set on success; nonzero with why[] describing the first
+ * failure so the caller rejects at the "manifest" stage. g_lock is HELD. */
+static int manifest_probe_check_locked(
+    void *handle, const char *required_probe,
+    struct hotswap_generation *slot, struct hotswap_load_report *report,
+    const struct zcl_hotswap_manifest_v2 **manifest_out,
+    char *why, size_t why_sz)
+{
+    dlerror();
+    const struct zcl_hotswap_manifest_v2 *manifest =
+        dlsym(handle, "zcl_hotswap_manifest_v2");
+    const char *manifest_symbol_error = dlerror();
+    if (!manifest || manifest_symbol_error) {
+        snprintf(why, why_sz, "missing zcl_hotswap_manifest_v2: %s",
+                 manifest_symbol_error ? manifest_symbol_error :
+                                         "symbol not found");
+        return 1;
+    }
+    /* Once the exported object's schema and byte size prove all fields exist,
+     * capture bounded provenance even when a later ABI/capability/identity
+     * check rejects it. Rejected generations must remain diagnosable. */
+    if (manifest->schema_version == ZCL_HOTSWAP_MANIFEST_SCHEMA_V2 &&
+        manifest->struct_size == sizeof(*manifest))
+        manifest_copy(slot, report, manifest);
+    if (!hotswap_manifest_v2_validate(manifest, why, why_sz))
+        return 1;
+    if (!required_probe || !required_probe[0] ||
+        strcmp(required_probe, manifest->probe_tools_csv) != 0) {
+        (void)snprintf(why, why_sz,
+                       "requested probe mismatch: requested=%s manifest=%s",
+                       required_probe ? required_probe : "",
+                       manifest->probe_tools_csv);
+        return 1;
+    }
+    *manifest_out = manifest;
+    return 0;
+}
+
 static bool generation_reject_locked(struct hotswap_generation *slot,
                                      struct hotswap_load_report *report,
                                      const char *stage, const char *error)
@@ -565,17 +641,11 @@ static bool load_prepare_locked(const char *so_path, const char *required_probe,
                                 struct hotswap_prepared *out)
 {
     memset(out, 0, sizeof(*out));
-    int artifact_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat artifact_stat;
-    if (artifact_fd < 0 || fstat(artifact_fd, &artifact_stat) != 0 ||
-        !S_ISREG(artifact_stat.st_mode) ||
-        !artifact_sha256_fd(artifact_fd, report->artifact_sha256)) {
-        if (artifact_fd >= 0)
-            close(artifact_fd);
+    int artifact_fd = artifact_open_and_hash(so_path, report->artifact_sha256);
+    if (artifact_fd < 0)
         return generation_reject_locked(
             NULL, report, "artifact_hash",
             "could not pin and hash a regular generation artifact");
-    }
     /* Hash and dlopen the same pinned inode. Opening by the original pathname
      * after hashing creates a replacement race during rapid editor/build
      * activity; platform_dlopen_pin_path() keeps identity exact through the
@@ -616,33 +686,11 @@ static bool load_prepare_locked(const char *so_path, const char *required_probe,
     copy_text(slot->artifact_sha256, sizeof(slot->artifact_sha256),
               report->artifact_sha256);
 
-    dlerror();
-    const struct zcl_hotswap_manifest_v2 *manifest =
-        dlsym(handle, "zcl_hotswap_manifest_v2");
-    const char *manifest_symbol_error = dlerror();
     char why[256] = {0};
-    if (!manifest || manifest_symbol_error) {
-        snprintf(why, sizeof(why), "missing zcl_hotswap_manifest_v2: %s",
-                 manifest_symbol_error ? manifest_symbol_error :
-                                         "symbol not found");
+    const struct zcl_hotswap_manifest_v2 *manifest = NULL;
+    if (manifest_probe_check_locked(handle, required_probe, slot, report,
+                                    &manifest, why, sizeof(why)) != 0)
         return generation_reject_locked(slot, report, "manifest", why);
-    }
-    /* Once the exported object's schema and byte size prove all fields exist,
-     * capture bounded provenance even when a later ABI/capability/identity
-     * check rejects it. Rejected generations must remain diagnosable. */
-    if (manifest->schema_version == ZCL_HOTSWAP_MANIFEST_SCHEMA_V2 &&
-        manifest->struct_size == sizeof(*manifest))
-        manifest_copy(slot, report, manifest);
-    if (!hotswap_manifest_v2_validate(manifest, why, sizeof(why)))
-        return generation_reject_locked(slot, report, "manifest", why);
-    if (!required_probe || !required_probe[0] ||
-        strcmp(required_probe, manifest->probe_tools_csv) != 0) {
-        (void)snprintf(why, sizeof(why),
-                       "requested probe mismatch: requested=%s manifest=%s",
-                       required_probe ? required_probe : "",
-                       manifest->probe_tools_csv);
-        return generation_reject_locked(slot, report, "manifest", why);
-    }
 
     dlerror();
     zcl_hotswap_gen_init_fn gen_init = NULL;
