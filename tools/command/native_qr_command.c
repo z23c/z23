@@ -140,6 +140,151 @@ static bool np_output_mode(const struct json_value *input, bool *text_only,
     return true;
 }
 
+static bool np_export_text(const struct zcl_present_model_v1 *model,
+                           bool page_explicit, uint32_t *text_page,
+                           char *plain_text, size_t plain_cap,
+                           size_t *text_len, uint32_t *text_pages,
+                           bool *text_complete, char *why, size_t why_cap)
+{
+    *text_complete = !page_explicit &&
+        zcl_present_model_text_all_v1(
+            model, plain_text, plain_cap, text_len, why, why_cap);
+    if (*text_complete) {
+        *text_page = 0;
+        *text_pages = 1;
+        return true;
+    }
+    return zcl_present_model_text_page_v1(
+        model, *text_page, plain_text, plain_cap, text_len, text_pages,
+        why, why_cap);
+}
+
+static void np_reply_text(const struct zcl_present_model_v1 *model,
+                          struct zcl_command_reply *reply,
+                          uint32_t text_page, uint32_t text_pages,
+                          bool text_complete, size_t text_len,
+                          const char *plain_text)
+{
+    (void)json_push_kv_bool(&reply->data, "launched", false);
+    (void)json_push_kv_str(&reply->data, "delivery", "text");
+    (void)json_push_kv_str(&reply->data, "presentation_kind",
+                           zcl_present_model_kind_name(model->kind));
+    (void)json_push_kv_str(&reply->data, "request_id", model->request_id);
+    (void)json_push_kv_int(&reply->data, "item_count", model->item_count);
+    (void)json_push_kv_bool(&reply->data, "text_export", true);
+    (void)json_push_kv_int(&reply->data, "text_page", text_page);
+    (void)json_push_kv_int(&reply->data, "text_page_count", text_pages);
+    (void)json_push_kv_bool(&reply->data, "text_complete",
+                            text_complete || text_pages == 1u);
+    (void)json_push_kv_int(&reply->data, "text_bytes", text_len);
+    (void)json_push_kv_str(&reply->data, "plain_text", plain_text);
+    (void)json_push_kv_bool(&reply->data, "event_return", false);
+    (void)json_push_kv_str(&reply->data, "authority", "display-only");
+    (void)json_push_kv_bool(&reply->data,
+                           "privileged_action_performed", false);
+    (void)json_push_kv_str(&reply->data, "backend",
+                           "c23-deterministic-text");
+    (void)json_push_kv_str(&reply->data, "platform",
+                           zcl_present_platform_name());
+}
+
+static struct zcl_result np_launch_native(
+    const struct zcl_present_model_v1 *model,
+    struct ui_present_host_result *host, bool *cold_fallback,
+    int64_t *handoff_us)
+{
+    bool wait_for_event = model->action_count > 0;
+    int64_t started_us = platform_time_monotonic_us();
+    struct zcl_result launched = ui_present_host_submit(
+        model, wait_for_event, host);
+    *cold_fallback = false;
+#if !defined(__linux__)
+    if (!launched.ok && !wait_for_event) {
+        launched = ui_present_model_launch(model);
+        *cold_fallback = launched.ok;
+    }
+#endif
+    *handoff_us = platform_time_monotonic_us() - started_us;
+    return launched;
+}
+
+static void np_reply_native_event(const struct zcl_present_model_v1 *model,
+                                  struct zcl_command_reply *reply,
+                                  const struct ui_present_host_result *host)
+{
+    bool action = host->action_index < model->action_count;
+    (void)json_push_kv_str(&reply->data, "event",
+                           action ? "action" : "dismissed");
+    if (action) {
+        (void)json_push_kv_str(&reply->data, "action_id",
+            model->actions[host->action_index].id);
+        (void)json_push_kv_int(&reply->data, "action_index",
+                               host->action_index);
+        if (host->form_submitted) {
+            struct json_value values;
+            json_init(&values);
+            json_set_object(&values);
+            for (uint32_t i = 0; i < host->form_value_count; i++)
+                (void)json_push_kv_str(
+                    &values, host->form_values[i].id,
+                    host->form_values[i].value);
+            (void)json_push_kv_bool(&reply->data,
+                                   "form_submitted", true);
+            (void)json_push_kv(&reply->data, "form_values", &values);
+            json_free(&values);
+        }
+        if (host->canvas_submitted) {
+            (void)json_push_kv_bool(&reply->data,
+                                   "canvas_submitted", true);
+            (void)json_push_kv_str(&reply->data,
+                                  "canvas_point_id",
+                                  host->canvas_point_id);
+            (void)json_push_kv_int(&reply->data,
+                                  "canvas_x", host->canvas_x);
+            (void)json_push_kv_int(&reply->data,
+                                  "canvas_y", host->canvas_y);
+        }
+    }
+    if (model->exact_root[0])
+        (void)json_push_kv_str(&reply->data, "exact_root",
+                               model->exact_root);
+}
+
+static void np_reply_native(const struct zcl_present_model_v1 *model,
+                            struct zcl_command_reply *reply,
+                            const struct ui_present_host_result *host,
+                            bool cold_fallback, int64_t handoff_us)
+{
+    (void)json_push_kv_bool(&reply->data, "launched", true);
+    (void)json_push_kv_str(&reply->data, "delivery", "native");
+    (void)json_push_kv_str(&reply->data, "presentation_kind",
+                           zcl_present_model_kind_name(model->kind));
+    (void)json_push_kv_str(&reply->data, "request_id", model->request_id);
+    (void)json_push_kv_int(&reply->data, "item_count", model->item_count);
+    (void)json_push_kv_bool(&reply->data, "text_export_available", true);
+    (void)json_push_kv_int(&reply->data, "launch_handoff_us", handoff_us);
+    (void)json_push_kv_bool(&reply->data, "resident_host",
+                            !cold_fallback && host->resident_host);
+    (void)json_push_kv_bool(&reply->data, "host_reused",
+                            !cold_fallback && host->host_reused);
+    (void)json_push_kv_bool(&reply->data, "view_replaced",
+                            !cold_fallback && host->view_replaced);
+    (void)json_push_kv_int(&reply->data, "window_ready_us",
+                           cold_fallback ? -1 : host->ready_us);
+    (void)json_push_kv_bool(&reply->data, "event_return",
+                            !cold_fallback && host->event_received);
+    if (!cold_fallback && host->event_received) {
+        np_reply_native_event(model, reply, host);
+    }
+    (void)json_push_kv_str(&reply->data, "authority", "display-only");
+    (void)json_push_kv_bool(&reply->data,
+                           "privileged_action_performed", false);
+    (void)json_push_kv_str(&reply->data, "backend",
+                           zcl_present_backend_name());
+    (void)json_push_kv_str(&reply->data, "platform",
+                           zcl_present_platform_name());
+}
+
 void zcl_native_present_model(
     const struct zcl_present_model_v1 *model, const char *leaf,
     const struct json_value *input, struct zcl_command_reply *reply)
@@ -164,40 +309,15 @@ void zcl_native_present_model(
         char plain_text[ZCL_PRESENT_MODEL_TEXT_MAX];
         size_t text_len = 0;
         uint32_t text_pages = 0;
-        bool text_complete = !page_explicit &&
-            zcl_present_model_text_all_v1(
-                model, plain_text, sizeof(plain_text), &text_len,
-                why, sizeof(why));
-        if (text_complete) {
-            text_page = 0;
-            text_pages = 1;
-        } else if (!zcl_present_model_text_page_v1(
-                       model, text_page, plain_text, sizeof(plain_text),
-                       &text_len, &text_pages, why, sizeof(why))) {
+        bool text_complete = false;
+        if (!np_export_text(model, page_explicit, &text_page, plain_text,
+                            sizeof(plain_text), &text_len, &text_pages,
+                            &text_complete, why, sizeof(why))) {
             np_fail(reply, "PRESENTATION_TEXT_EXPORT_FAILED", why, leaf);
             return;
         }
-        (void)json_push_kv_bool(&reply->data, "launched", false);
-        (void)json_push_kv_str(&reply->data, "delivery", "text");
-        (void)json_push_kv_str(&reply->data, "presentation_kind",
-                               zcl_present_model_kind_name(model->kind));
-        (void)json_push_kv_str(&reply->data, "request_id", model->request_id);
-        (void)json_push_kv_int(&reply->data, "item_count", model->item_count);
-        (void)json_push_kv_bool(&reply->data, "text_export", true);
-        (void)json_push_kv_int(&reply->data, "text_page", text_page);
-        (void)json_push_kv_int(&reply->data, "text_page_count", text_pages);
-        (void)json_push_kv_bool(&reply->data, "text_complete",
-                               text_complete || text_pages == 1u);
-        (void)json_push_kv_int(&reply->data, "text_bytes", text_len);
-        (void)json_push_kv_str(&reply->data, "plain_text", plain_text);
-        (void)json_push_kv_bool(&reply->data, "event_return", false);
-        (void)json_push_kv_str(&reply->data, "authority", "display-only");
-        (void)json_push_kv_bool(&reply->data,
-                               "privileged_action_performed", false);
-        (void)json_push_kv_str(&reply->data, "backend",
-                               "c23-deterministic-text");
-        (void)json_push_kv_str(&reply->data, "platform",
-                               zcl_present_platform_name());
+        np_reply_text(model, reply, text_page, text_pages, text_complete,
+                      text_len, plain_text);
         return;
     }
     char display_why[96];
@@ -205,84 +325,15 @@ void zcl_native_present_model(
         np_fail(reply, "HEADLESS_DISPLAY_UNAVAILABLE", display_why, leaf);
         return;
     }
-    bool wait_for_event = model->action_count > 0;
-    int64_t started_us = platform_time_monotonic_us();
     struct ui_present_host_result host;
-    struct zcl_result launched = ui_present_host_submit(
-        model, wait_for_event, &host);
     bool cold_fallback = false;
-#if !defined(__linux__)
-    if (!launched.ok && !wait_for_event) {
-        launched = ui_present_model_launch(model);
-        cold_fallback = launched.ok;
-    }
-#endif
-    int64_t handoff_us = platform_time_monotonic_us() - started_us;
+    int64_t handoff_us = 0;
+    struct zcl_result launched = np_launch_native(model, &host,
+                                                  &cold_fallback,
+                                                  &handoff_us);
     if (!launched.ok) {
         np_fail(reply, "PRESENTATION_LAUNCH_FAILED", launched.message, leaf);
         return;
     }
-    (void)json_push_kv_bool(&reply->data, "launched", true);
-    (void)json_push_kv_str(&reply->data, "delivery", "native");
-    (void)json_push_kv_str(&reply->data, "presentation_kind",
-                           zcl_present_model_kind_name(model->kind));
-    (void)json_push_kv_str(&reply->data, "request_id", model->request_id);
-    (void)json_push_kv_int(&reply->data, "item_count", model->item_count);
-    (void)json_push_kv_bool(&reply->data, "text_export_available", true);
-    (void)json_push_kv_int(&reply->data, "launch_handoff_us", handoff_us);
-    (void)json_push_kv_bool(&reply->data, "resident_host",
-                            !cold_fallback && host.resident_host);
-    (void)json_push_kv_bool(&reply->data, "host_reused",
-                            !cold_fallback && host.host_reused);
-    (void)json_push_kv_bool(&reply->data, "view_replaced",
-                            !cold_fallback && host.view_replaced);
-    (void)json_push_kv_int(&reply->data, "window_ready_us",
-                           cold_fallback ? -1 : host.ready_us);
-    (void)json_push_kv_bool(&reply->data, "event_return",
-                            !cold_fallback && host.event_received);
-    if (!cold_fallback && host.event_received) {
-        bool action = host.action_index < model->action_count;
-        (void)json_push_kv_str(&reply->data, "event",
-                               action ? "action" : "dismissed");
-        if (action) {
-            (void)json_push_kv_str(&reply->data, "action_id",
-                model->actions[host.action_index].id);
-            (void)json_push_kv_int(&reply->data, "action_index",
-                                   host.action_index);
-            if (host.form_submitted) {
-                struct json_value values;
-                json_init(&values);
-                json_set_object(&values);
-                for (uint32_t i = 0; i < host.form_value_count; i++)
-                    (void)json_push_kv_str(
-                        &values, host.form_values[i].id,
-                        host.form_values[i].value);
-                (void)json_push_kv_bool(&reply->data,
-                                       "form_submitted", true);
-                (void)json_push_kv(&reply->data, "form_values", &values);
-                json_free(&values);
-            }
-            if (host.canvas_submitted) {
-                (void)json_push_kv_bool(&reply->data,
-                                       "canvas_submitted", true);
-                (void)json_push_kv_str(&reply->data,
-                                      "canvas_point_id",
-                                      host.canvas_point_id);
-                (void)json_push_kv_int(&reply->data,
-                                      "canvas_x", host.canvas_x);
-                (void)json_push_kv_int(&reply->data,
-                                      "canvas_y", host.canvas_y);
-            }
-        }
-        if (model->exact_root[0])
-            (void)json_push_kv_str(&reply->data, "exact_root",
-                                   model->exact_root);
-    }
-    (void)json_push_kv_str(&reply->data, "authority", "display-only");
-    (void)json_push_kv_bool(&reply->data,
-                           "privileged_action_performed", false);
-    (void)json_push_kv_str(&reply->data, "backend",
-                           zcl_present_backend_name());
-    (void)json_push_kv_str(&reply->data, "platform",
-                           zcl_present_platform_name());
+    np_reply_native(model, reply, &host, cold_fallback, handoff_us);
 }
