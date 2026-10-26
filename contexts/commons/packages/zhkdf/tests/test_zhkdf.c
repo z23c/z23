@@ -4,6 +4,18 @@
 #include <stdio.h>
 #include <string.h>
 
+static FILE *cli_sink;
+#undef stdout
+#define stdout cli_sink
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define putchar(c) fputc((c), cli_sink)
+#define main zhkdf_cli_main
+#include "../app/main.c"
+#undef main
+#undef putchar
+#undef printf
+#undef stdout
+
 static int failures;
 
 static void check(int cond, const char *name)
@@ -151,8 +163,73 @@ static void test_max_len_and_errors(void)
           "null ikm rejected");
 }
 
+static int cli_case(int argc, char **args, FILE *output, int status,
+                    const char *want)
+{
+    cli_sink = output;
+    if (zhkdf_cli_main(argc, args) != status) return 1;
+    if (!want) return 0;
+    rewind(output);
+    char bytes[80];
+    size_t n = fread(bytes, 1, sizeof bytes, output);
+    return ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0;
+}
+
+static int cli_output_case(int argc, char **args, const char *want)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    int bad = cli_case(argc, args, output, 0, want);
+    if (fclose(output) != 0) bad = 1;
+#if defined(_WIN32)
+    output = fopen("NUL", "r");
+#else
+    output = fopen("/dev/null", "r");
+#endif
+    if (!output) return 1;
+    bad |= cli_case(argc, args, output, 1, NULL);
+    if (fclose(output) != 0) bad = 1;
+#if defined(__linux__)
+    output = fopen("/dev/full", "w");
+    if (!output) return 1;
+    char buffer[4096];
+    if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) {
+        fclose(output);
+        return 1;
+    }
+    bad |= cli_case(argc, args, output, 1, NULL);
+    (void)fclose(output);
+#endif
+    return bad;
+}
+
+static void test_cli_output(void)
+{
+    char *args[] = {"zhkdf", "fixture-passphrase", "salt", "info", NULL};
+    for (int argc = 2; argc <= 4; argc++) {
+        uint8_t key[32];
+        const char *salt = argc > 2 ? args[2] : "";
+        const char *info = argc > 3 ? args[3] : "";
+        if (zhkdf_sha256(salt, strlen(salt), args[1], strlen(args[1]),
+                         info, strlen(info), key, sizeof key) != 0) {
+            check(0, "CLI reference derivation");
+            continue;
+        }
+        char want[66];
+        for (size_t i = 0; i < sizeof key; i++)
+            snprintf(want + 2 * i, 3, "%02x", key[i]);
+        want[64] = '\n'; want[65] = '\0';
+        check(cli_output_case(argc, args, want) == 0, "CLI output and sink errors");
+    }
+    FILE *output = tmpfile();
+    if (!output) { check(0, "CLI usage fixture"); return; }
+    check(cli_case(1, args, output, 2, "") == 0, "CLI usage without output");
+    check(fclose(output) == 0, "CLI usage fixture close");
+}
+
 int main(void)
 {
+    test_cli_output();
     test_case1();
     test_case2();
     test_case3();

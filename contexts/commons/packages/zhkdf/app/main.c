@@ -4,6 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
+static int print_key(const uint8_t *key, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (printf("%02x", key[i]) < 0) return 1;
+    return putchar('\n') == EOF;
+}
+
 int main(int argc, char **argv)
 {
     uint8_t okm[32];
@@ -22,8 +29,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "hkdf failed\n");
         return 1;
     }
-    for (size_t i = 0; i < sizeof okm; i++)
-        printf("%02x", okm[i]);
-    putchar('\n');
+    if (print_key(okm, sizeof okm) || fflush(stdout) != 0 || ferror(stdout)) {
+        fputs("zhkdf: output write failed\n", stderr);
+        return 1;
+    }
     return 0;
 }
