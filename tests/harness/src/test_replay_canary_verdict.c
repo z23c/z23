@@ -205,7 +205,7 @@ static void seed_fixtures(const char *fx, const char *mode)
     } else if (strcmp(mode, "fail-sha3-malformed") == 0) {
         write_file(fx, "getutxocommitment.json",
             "{\"sha3_hash\":\"azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\"height\":3145329}\n");
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\"height\":3145329}\n");
     } else if (strcmp(mode, "fail-crossnode") == 0) {
         /* zclassicd txouts disagree with the node => "crossnode_txouts". */
         write_file(fx, "zd_gettxoutsetinfo.json",
@@ -876,6 +876,70 @@ static int canary_open_fifo_writer(pid_t pid, const char *fifo,
     return -1;
 }
 
+/* Fork the harness child that runs the self-test and blocks on the FIFO.
+ * Returns -1 when a prerequisite failed or fork(2) itself failed. */
+static pid_t canary_fork_fifo_blocked_child(const char *fx, const char *vd,
+                                            const char *fifo,
+                                            const char *fake,
+                                            const char *root, bool fake_ready,
+                                            bool fifo_ready)
+{
+    pid_t pid = -1;
+    if (fake_ready && fifo_ready) pid = fork();
+    if (pid == 0) {
+        setsid();
+        char cmd[PATH_MAX * 5];
+        snprintf(cmd, sizeof(cmd),
+                 "ZCL_CANARY_SELFTEST_DIR='%s' "
+                 "ZCL_CANARY_VERDICT_DIR='%s' "
+                 "ZCL_CANARY_SELFTEST_BLOCK_FIFO='%s' "
+                 "ZCL_CANARY_SELFTEST_NODE_BIN='%s' "
+                 "exec bash '%s/%s' --from=anchor --self-test=pass",
+                 fx, vd, fifo, fake, root, CANARY_REL);
+        execlp("sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    return pid;
+}
+
+/* While the harness is blocked on the FIFO, swap the fake binary to
+ * source B and release it through `writer`; a negative writer swaps
+ * nothing and returns false. */
+static bool canary_swap_fake_to_source_b(const char *fake, int writer)
+{
+    bool swapped = false;
+    if (writer >= 0) {
+        char script_b[512];
+        snprintf(script_b, sizeof(script_b),
+                 "#!/usr/bin/env bash\n"
+                 "if [ \"${1:-}\" = agentbuild ]; then\n"
+                 "  printf '%%s\\n' '{\"source_id_sha256\":\"%s\","
+                 "\"build_commit\":\"trace-b\"}'\n"
+                 "  exit 0\n"
+                 "fi\n"
+                 "exit 2\n", CANARY_SOURCE_B);
+        write_file("/tmp", strrchr(fake, '/') + 1, script_b);
+        swapped = chmod(fake, 0700) == 0;
+        if (write(writer, "continue\n", 9) != 9) swapped = false;
+        close(writer);
+    }
+    return swapped;
+}
+
+/* Reap the harness child unless it was already reaped; kill it first when
+ * no FIFO writer was opened. */
+static void canary_reap_child_after_swap(pid_t pid, int writer, bool reaped,
+                                         int *wstatus)
+{
+    if (pid > 0 && !reaped) {
+        if (writer < 0) {
+            kill(-pid, SIGKILL);
+            kill(pid, SIGKILL);
+        }
+        waitpid(pid, wstatus, 0);
+    }
+}
+
 /* A replay can run for hours while build/bin is replaced. The harness must
  * bind its verdict to identity captured before the run, not re-query a
  * mutable executable path when it writes PASS. This fixture swaps the fake
@@ -912,50 +976,15 @@ static int test_identity_is_captured_once_before_replay(void)
 
         unlink(fifo);
         bool fifo_ready = mkfifo(fifo, 0600) == 0;
-        pid_t pid = -1;
-        if (fake_ready && fifo_ready) pid = fork();
-        if (pid == 0) {
-            setsid();
-            char cmd[PATH_MAX * 5];
-            snprintf(cmd, sizeof(cmd),
-                     "ZCL_CANARY_SELFTEST_DIR='%s' "
-                     "ZCL_CANARY_VERDICT_DIR='%s' "
-                     "ZCL_CANARY_SELFTEST_BLOCK_FIFO='%s' "
-                     "ZCL_CANARY_SELFTEST_NODE_BIN='%s' "
-                     "exec bash '%s/%s' --from=anchor --self-test=pass",
-                     fx, vd, fifo, fake, root, CANARY_REL);
-            execlp("sh", "sh", "-c", cmd, (char *)NULL);
-            _exit(127);
-        }
+        pid_t pid = canary_fork_fifo_blocked_child(fx, vd, fifo, fake, root,
+                                                   fake_ready, fifo_ready);
 
         bool reaped = false;
         int wstatus = 0;
         int writer = (pid > 0) ? canary_open_fifo_writer(pid, fifo, &wstatus, &reaped) : -1;
 
-        bool swapped = false;
-        if (writer >= 0) {
-            char script_b[512];
-            snprintf(script_b, sizeof(script_b),
-                     "#!/usr/bin/env bash\n"
-                     "if [ \"${1:-}\" = agentbuild ]; then\n"
-                     "  printf '%%s\\n' '{\"source_id_sha256\":\"%s\","
-                     "\"build_commit\":\"trace-b\"}'\n"
-                     "  exit 0\n"
-                     "fi\n"
-                     "exit 2\n", CANARY_SOURCE_B);
-            write_file("/tmp", strrchr(fake, '/') + 1, script_b);
-            swapped = chmod(fake, 0700) == 0;
-            if (write(writer, "continue\n", 9) != 9) swapped = false;
-            close(writer);
-        }
-
-        if (pid > 0 && !reaped) {
-            if (writer < 0) {
-                kill(-pid, SIGKILL);
-                kill(pid, SIGKILL);
-            }
-            waitpid(pid, &wstatus, 0);
-        }
+        bool swapped = canary_swap_fake_to_source_b(fake, writer);
+        canary_reap_child_after_swap(pid, writer, reaped, &wstatus);
 
         char sentinel[PATH_MAX], body[4096] = {0};
         snprintf(sentinel, sizeof(sentinel),

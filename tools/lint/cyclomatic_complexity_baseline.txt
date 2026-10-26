@@ -1372,7 +1372,6 @@ tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_step_drain_harn
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_reorg_residue_tipfin_replace.c:seed_wedge_with_tip_status:20
 tests/harness/src/test_reorg_residue_tipfin_replace.c:test_reorg_residue_tipfin_replace:53
-tests/harness/src/test_replay_canary_verdict.c:test_identity_is_captured_once_before_replay:18
 tests/harness/src/test_resident_launch_contract.c:rlc_fixture_selfcheck:18
 tests/harness/src/test_resident_launch_contract.c:rlc_publish:30
 tests/harness/src/test_resident_launch_contract.c:rlc_stage_f_trap:59
