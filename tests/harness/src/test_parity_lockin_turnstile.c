@@ -18,6 +18,7 @@
 #include "storage/nullifier_kv.h"
 #include "storage/shielded_pool_kv.h"
 #include "util/safe_alloc.h"
+#include "validation/connect_block.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -73,7 +74,7 @@ static int test_block_values(void)
     blk.vtx[1].value_balance = 20;
 
     int64_t s = -1, p = -1;
-    utxo_apply_turnstile_block_values(&blk, &s, &p);
+    connect_block_shielded_values(&blk, &s, &p);
     TS_CHECK("block sums: sprout += old - new, sapling -= value_balance",
              s == 25 && p == -13);
 
@@ -88,7 +89,7 @@ static int test_block_values(void)
     blk.num_vtx = 1;
     blk.vtx = zcl_calloc(1, sizeof(struct transaction), "ts_vtx_476977");
     blk.vtx[0].value_balance = -100000000;
-    utxo_apply_turnstile_block_values(&blk, &s, &p);
+    connect_block_shielded_values(&blk, &s, &p);
     TS_CHECK("oracle 476977: valueBalance -1 ZCL grows the Sapling pool by 1 ZCL",
              s == 0 && p == 100000000);
     free(blk.vtx);
@@ -101,7 +102,7 @@ static int test_block_values(void)
                  op.known && op.total == 100000000);
     }
     memset(&blk, 0, sizeof(blk));
-    utxo_apply_turnstile_block_values(&blk, &s, &p);
+    connect_block_shielded_values(&blk, &s, &p);
     TS_CHECK("empty block sums to zero", s == 0 && p == 0);
     return failures;
 }

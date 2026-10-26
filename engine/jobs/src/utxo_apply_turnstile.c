@@ -12,6 +12,7 @@
 #include "primitives/transaction.h"
 #include "storage/shielded_pool_kv.h"
 #include "util/log_macros.h"
+#include "validation/connect_block.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -19,29 +20,6 @@
 
 _Atomic uint64_t g_ua_turnstile_would_reject_total = 0;
 _Atomic uint64_t g_ua_turnstile_unknown_total = 0;
-
-void utxo_apply_turnstile_block_values(const struct block *blk,
-                                       int64_t *sprout, int64_t *sapling)
-{
-    int64_t sprout_value = 0;
-    int64_t sapling_value = 0;
-    for (size_t i = 0; blk && i < blk->num_vtx; i++) {
-        const struct transaction *tx = &blk->vtx[i];
-        for (size_t j = 0; j < tx->num_joinsplit; j++) {
-            sprout_value += tx->v_joinsplit[j].vpub_old;
-            sprout_value -= tx->v_joinsplit[j].vpub_new;
-        }
-        /* valueBalance is value LEAVING the Sapling pool, so the pool moves
-         * by its negation (zclassicd ConnectBlock: saplingValue +=
-         * -tx.valueBalance). Oracle, height 476977: a tx with valueBalance
-         * -1.00000000 takes the Sapling chainValue from 0 to +1.00000000. */
-        sapling_value -= tx->value_balance;
-    }
-    if (sprout)
-        *sprout = sprout_value;
-    if (sapling)
-        *sapling = sapling_value;
-}
 
 const char *utxo_apply_turnstile_check(
     struct utxo_apply_turnstile_pool prev_sprout,
@@ -125,7 +103,7 @@ bool utxo_apply_turnstile_stage_check(
         atomic_fetch_add(&g_ua_turnstile_unknown_total, 1);
         return true;
     }
-    utxo_apply_turnstile_block_values(blk, &blockv.sprout, &blockv.sapling);
+    connect_block_shielded_values(blk, &blockv.sprout, &blockv.sapling);
     struct utxo_apply_turnstile_pool ns, np;
     const char *reject = utxo_apply_turnstile_check(
         (struct utxo_apply_turnstile_pool){ parent.sprout, true },

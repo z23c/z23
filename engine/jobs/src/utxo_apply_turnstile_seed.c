@@ -24,6 +24,7 @@
 #include "util/log_macros.h"
 #include "util/reducer_drive_guard.h"
 #include "utxo_apply_stage_internal.h"
+#include "validation/connect_block.h"
 #include "validation/main_state.h"
 
 #include <sqlite3.h>
@@ -150,8 +151,8 @@ static int seed_scan(struct main_state *ms, const char *datadir,
         }
         g_rows[n].height = h;
         g_rows[n].hash = *bi->phashBlock;
-        utxo_apply_turnstile_block_values(&blk, &g_rows[n].sprout,
-                                          &g_rows[n].sapling);
+        connect_block_shielded_values(&blk, &g_rows[n].sprout,
+                                      &g_rows[n].sapling);
         block_free(&blk);
         seed_body_clear();
         n++;
