@@ -1874,9 +1874,6 @@ tools/engine_unit.c:parse_args:30
 tools/engine_unit.c:probe_cli:30
 tools/engine_unit.c:unit_ledger_row:17
 tools/engine_unit.c:write_receipt:67
-tools/file_size_policy.c:load_baseline:22
-tools/file_size_policy.c:main:37
-tools/file_size_policy.c:rewrite_baseline:21
 tools/fingerprint_scan.c:fp_collect_undefined:16
 tools/fingerprint_scan.c:fp_prune_group:18
 tools/fingerprint_scan.c:fp_prune_link:29

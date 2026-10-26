@@ -297,6 +297,50 @@ static bool find_repo_root(void)
     return false;
 }
 
+/* ── Baseline line parsing ─────────────────────────────────────────────── */
+
+/* Cut a line at its first '#', in place. */
+static void strip_comment(char *s)
+{
+    char *hash = strchr(s, '#');
+    if (hash) *hash = '\0';
+}
+
+/* Step past a run of blanks (' ' or '\t'). */
+static char *skip_blank_columns(char *p)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+/* Step past one path token: up to the next blank or line end. */
+static char *scan_path_token(char *p)
+{
+    size_t len = strcspn(p, " \t\n\r");
+    return p + len;
+}
+
+/* Append one parsed row to the run, growing the vector when full. */
+static void append_baseline_row(struct policy_run *run, const char *path,
+                                size_t path_len, long recorded)
+{
+    if (run->row_count == run->row_cap) {
+        size_t next = run->row_cap ? run->row_cap * 2 : 64;
+        struct baseline_row *grown =
+            zcl_realloc(run->rows, next * sizeof(*grown),
+                        "file_size_policy_rows");
+        if (!grown) die_oom();
+        run->rows = grown;
+        run->row_cap = next;
+    }
+    struct baseline_row *row = &run->rows[run->row_count++];
+    memset(row, 0, sizeof *row);
+    memcpy(row->path, path, path_len + 1);
+    row->recorded = recorded;
+    row->observed = -1;
+    row->state = ROW_UNSEEN;
+}
+
 /* Load `<path> <max-loc>` rows. A missing baseline file is not an error —
  * a tree with nothing over the limit legitimately has no baseline. */
 static bool load_baseline(struct policy_run *run, const char *file)
@@ -309,17 +353,13 @@ static bool load_baseline(struct policy_run *run, const char *file)
 
     char line[PATH_MAX_LEN + 64];
     while (fgets(line, (int)sizeof line, fp)) {
-        char *hash = strchr(line, '#');
-        if (hash) *hash = '\0';
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        char *path_start = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-        if (p == path_start) continue;
-        size_t path_len = (size_t)(p - path_start);
+        strip_comment(line);
+        char *path_start = skip_blank_columns(line);
+        char *end_of_path = scan_path_token(path_start);
+        if (end_of_path == path_start) continue;
+        size_t path_len = (size_t)(end_of_path - path_start);
         if (path_len >= PATH_MAX_LEN) continue;
-        char *num = p;
-        while (*num == ' ' || *num == '\t') num++;
+        char *num = skip_blank_columns(end_of_path);
         path_start[path_len] = '\0';
         long recorded = strtol(num, NULL, 10);
         if (recorded <= 0) continue;
@@ -332,21 +372,7 @@ static bool load_baseline(struct policy_run *run, const char *file)
             continue;
         }
 
-        if (run->row_count == run->row_cap) {
-            size_t next = run->row_cap ? run->row_cap * 2 : 64;
-            struct baseline_row *grown =
-                zcl_realloc(run->rows, next * sizeof(*grown),
-                            "file_size_policy_rows");
-            if (!grown) die_oom();
-            run->rows = grown;
-            run->row_cap = next;
-        }
-        struct baseline_row *row = &run->rows[run->row_count++];
-        memset(row, 0, sizeof *row);
-        memcpy(row->path, path_start, path_len + 1);
-        row->recorded = recorded;
-        row->observed = -1;
-        row->state = ROW_UNSEEN;
+        append_baseline_row(run, path_start, path_len, recorded);
     }
     fclose(fp);
     return true;
@@ -503,9 +529,53 @@ static void walk(struct policy_run *run, const char *rel_dir, int depth,
     platform_directory_list_free(&dirs);
 }
 
+/* Walk each ':'- or ' '-separated root in roots_env, which the caller has
+ * already read from ZCL_FILE_SIZE_POLICY_SCAN_ROOTS. */
+static void walk_roots_from_env(struct policy_run *run, const char *roots_env,
+                                bool production)
+{
+    char *copy = dup_str(roots_env);
+    char *save = copy;
+    while (*save) {
+        while (*save == ':' || *save == ' ') save++;
+        if (!*save) break;
+        char *end = save;
+        while (*end && *end != ':' && *end != ' ') end++;
+        char saved = *end;
+        *end = '\0';
+        walk(run, save, 0, 0, production);
+        *end = saved;
+        save = end;
+    }
+    free(copy);
+}
+
+/* Walk the compiled-in default scan roots. */
+static void walk_default_roots(struct policy_run *run, bool production)
+{
+    for (size_t i = 0; i < DEFAULT_ROOT_COUNT; i++)
+        walk(run, DEFAULT_ROOTS[i].path, 0, DEFAULT_ROOTS[i].max_depth,
+             production);
+}
+
 /* ── Baseline rewrite (--fix). Tighten-only, by construction: it copies the
  * file line for line, lowers a number, or drops a row. It has no branch that
  * raises a number or appends one. ──────────────────────────────────────── */
+
+/* Emit the --fix replacement for one baselined row's line. Returns 1 when
+ * the line was tightened or the row dropped, 0 when it passes through. */
+static int emit_baseline_fix(const struct baseline_row *row, const char *line,
+                             FILE *out)
+{
+    if (row->state == ROW_TIGHTENABLE) {
+        fprintf(out, "%s %ld\n", row->path, row->observed);
+        return 1;
+    }
+    if (row->state == ROW_RETIRED || row->state == ROW_UNSEEN)
+        return 1;   /* row dropped entirely */
+    fputs(line, out);
+    return 0;
+}
 
 static int rewrite_baseline(struct policy_run *run, const char *file)
 {
@@ -526,13 +596,10 @@ static int rewrite_baseline(struct policy_run *run, const char *file)
     while (fgets(line, (int)sizeof line, in)) {
         char scratch[PATH_MAX_LEN + 64];
         memcpy(scratch, line, strlen(line) + 1);
-        char *hash = strchr(scratch, '#');
-        if (hash) *hash = '\0';
-        char *p = scratch;
-        while (*p == ' ' || *p == '\t') p++;
-        char *path_start = p;
-        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
-        size_t path_len = (size_t)(p - path_start);
+        strip_comment(scratch);
+        char *path_start = skip_blank_columns(scratch);
+        char *end_of_path = scan_path_token(path_start);
+        size_t path_len = (size_t)(end_of_path - path_start);
         if (path_len == 0 || path_len >= PATH_MAX_LEN) {
             fputs(line, out);
             continue;
@@ -540,14 +607,7 @@ static int rewrite_baseline(struct policy_run *run, const char *file)
         path_start[path_len] = '\0';
         struct baseline_row *row = find_row(run, path_start);
         if (!row) { fputs(line, out); continue; }
-        if (row->state == ROW_TIGHTENABLE) {
-            fprintf(out, "%s %ld\n", row->path, row->observed);
-            changed++;
-        } else if (row->state == ROW_RETIRED || row->state == ROW_UNSEEN) {
-            changed++;   /* row dropped entirely */
-        } else {
-            fputs(line, out);
-        }
+        changed += emit_baseline_fix(row, line, out);
     }
     fclose(in);
     fclose(out);
@@ -616,24 +676,119 @@ static void report_failures(const struct policy_run *run, const char *baseline,
     printf("  read in one go; past it every later reader works blind.\n");
 }
 
+/* ── Command line ──────────────────────────────────────────────────────── */
+
+enum arg_status {
+    ARGS_RUN = 0,   /* flags parsed; carry on */
+    ARGS_HELP,      /* --help seen; caller prints usage and exits 0 */
+    ARGS_BAD,       /* unknown option; *bad_option names it */
+};
+
+/* Parse --fix/--verbose/-v/--help. Returns ARGS_RUN to continue; ARGS_HELP
+ * or ARGS_BAD for the caller to report and exit. */
+static enum arg_status parse_command_line(int argc, char **argv, bool *fix,
+                                          bool *verbose,
+                                          const char **bad_option)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--fix") == 0) *fix = true;
+        else if (strcmp(argv[i], "--verbose") == 0 ||
+                 strcmp(argv[i], "-v") == 0) *verbose = true;
+        else if (strcmp(argv[i], "--help") == 0) return ARGS_HELP;
+        else {
+            *bad_option = argv[i];
+            return ARGS_BAD;
+        }
+    }
+    return ARGS_RUN;
+}
+
+/* ── Verdict tallies and epilogue reports ──────────────────────────────── */
+
+struct row_summary {
+    size_t grown;
+    size_t retired;
+    size_t unseen;
+    size_t held;
+    size_t tightenable;
+};
+
+/* Tally the baseline rows by state. */
+static struct row_summary summarize_row_states(const struct policy_run *run,
+                                               bool fixed)
+{
+    struct row_summary s = { 0 };
+    for (size_t i = 0; i < run->row_count; i++) {
+        switch (run->rows[i].state) {
+        case ROW_GROWN:       s.grown++; break;
+        case ROW_RETIRED:     s.retired++; break;
+        case ROW_UNSEEN:      s.unseen++; break;
+        case ROW_HELD:        s.held++; break;
+        case ROW_TIGHTENABLE: s.tightenable++; break;
+        }
+    }
+    /* --fix already removed the retired/stale rows and lowered the tightenable
+     * ones, so they are no longer violations on this run. */
+    if (fixed) {
+        s.retired = 0; s.unseen = 0;
+        s.held += s.tightenable; s.tightenable = 0;
+    }
+    return s;
+}
+
+/* Run --fix when asked; report how many baseline rows it tightened. */
+static int apply_fix(struct policy_run *run, const char *baseline, bool fix)
+{
+    int fixed = fix ? rewrite_baseline(run, baseline) : 0;
+    if (fixed > 0)
+        printf(GATE_NAME ": --fix tightened %d baseline row(s) in %s\n",
+               fixed, baseline);
+    return fixed;
+}
+
+/* --verbose epilogue: list the buffer band. */
+static void print_verbose_buffer_band(const struct policy_run *run,
+                                      bool verbose)
+{
+    if (!verbose || run->buffer_count == 0) return;
+    printf("\n  Buffer band (%d-%d lines — allowed, no action needed):\n",
+           TARGET_LINES + 1, LIMIT_LINES);
+    for (size_t i = 0; i < run->buffer_count; i++)
+        printf("    %s\n", run->buffer_files[i]);
+}
+
+/* Epilogue hint: baselined files that shrank and could tighten. The count
+ * is the post---fix tally, so a --fix run stays quiet. */
+static void print_tightenable_hints(const struct policy_run *run,
+                                    size_t tightenable)
+{
+    if (tightenable == 0) return;
+    printf("\n  Baseline can tighten (still over %d, but smaller than "
+           "recorded) — run `--fix`:\n", LIMIT_LINES);
+    for (size_t i = 0; i < run->row_count; i++)
+        if (run->rows[i].state == ROW_TIGHTENABLE)
+            printf("    %s is now %ld lines (recorded %ld)\n",
+                   run->rows[i].path, run->rows[i].observed,
+                   run->rows[i].recorded);
+}
+
 int main(int argc, char **argv)
 {
     bool fix = false;
     bool verbose = false;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fix") == 0) fix = true;
-        else if (strcmp(argv[i], "--verbose") == 0 ||
-                 strcmp(argv[i], "-v") == 0) verbose = true;
-        else if (strcmp(argv[i], "--help") == 0) {
-            printf("usage: file_size_policy [--fix] [--verbose]\n");
-            printf("  target %d lines, buffer %d-%d, hard limit %d\n",
-                   TARGET_LINES, TARGET_LINES + 1, LIMIT_LINES, LIMIT_LINES);
-            return 0;
-        } else {
-            fprintf(stderr, GATE_NAME ": FATAL — unknown option '%s'\n",
-                    argv[i]);
-            return 2;
-        }
+    const char *bad_option = NULL;
+    enum arg_status args = parse_command_line(argc, argv, &fix, &verbose,
+                                              &bad_option);
+    if (args == ARGS_HELP) {
+        printf("usage: file_size_policy [--fix] [--verbose]\n");
+        printf("  target %d lines, buffer %d-%d, hard limit %d\n",
+               TARGET_LINES, TARGET_LINES + 1, LIMIT_LINES, LIMIT_LINES);
+        return 0;
+    }
+    if (args == ARGS_BAD) {
+        fprintf(stderr, GATE_NAME ": FATAL — unknown option '%s'\n",
+                bad_option);
+        return 2;
     }
 
     if (!find_repo_root()) {
@@ -652,26 +807,10 @@ int main(int argc, char **argv)
 
     bool production = production_scan();
     const char *roots_env = getenv("ZCL_FILE_SIZE_POLICY_SCAN_ROOTS");
-    if (roots_env && *roots_env) {
-        char *copy = dup_str(roots_env);
-        char *save = copy;
-        while (*save) {
-            while (*save == ':' || *save == ' ') save++;
-            if (!*save) break;
-            char *end = save;
-            while (*end && *end != ':' && *end != ' ') end++;
-            char saved = *end;
-            *end = '\0';
-            walk(&run, save, 0, 0, production);
-            *end = saved;
-            save = end;
-        }
-        free(copy);
-    } else {
-        for (size_t i = 0; i < DEFAULT_ROOT_COUNT; i++)
-            walk(&run, DEFAULT_ROOTS[i].path, 0, DEFAULT_ROOTS[i].max_depth,
-                 production);
-    }
+    if (roots_env && *roots_env)
+        walk_roots_from_env(&run, roots_env, production);
+    else
+        walk_default_roots(&run, production);
 
     if (run.walk_failed) {
         fprintf(stderr, GATE_NAME ": FATAL — a file in the scan set could not "
@@ -689,29 +828,12 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int fixed = fix ? rewrite_baseline(&run, baseline) : 0;
-    if (fixed > 0)
-        printf(GATE_NAME ": --fix tightened %d baseline row(s) in %s\n",
-               fixed, baseline);
+    int fixed = apply_fix(&run, baseline, fix);
 
-    size_t grown = 0, retired = 0, unseen = 0, held = 0, tightenable = 0;
-    for (size_t i = 0; i < run.row_count; i++) {
-        switch (run.rows[i].state) {
-        case ROW_GROWN:       grown++; break;
-        case ROW_RETIRED:     retired++; break;
-        case ROW_UNSEEN:      unseen++; break;
-        case ROW_HELD:        held++; break;
-        case ROW_TIGHTENABLE: tightenable++; break;
-        }
-    }
-    /* --fix already removed the retired/stale rows and lowered the tightenable
-     * ones, so they are no longer violations on this run. */
-    if (fixed > 0) {
-        retired = 0; unseen = 0;
-        held += tightenable; tightenable = 0;
-    }
+    struct row_summary summary = summarize_row_states(&run, fixed > 0);
 
-    size_t fail_count = run.over_count + grown + retired + unseen;
+    size_t fail_count = run.over_count + summary.grown + summary.retired +
+                        summary.unseen;
     if (fail_count > 0) {
         report_failures(&run, baseline, fail_count);
         return 1;
@@ -721,23 +843,10 @@ int main(int argc, char **argv)
            "target, %zu in the %d-%d buffer, %zu legacy over %d "
            "(shrink-only baseline), %zu allowlisted.\n",
            run.scanned, run.at_target, TARGET_LINES, run.buffer_count,
-           TARGET_LINES + 1, LIMIT_LINES, held + tightenable, LIMIT_LINES,
-           run.allowlisted);
+           TARGET_LINES + 1, LIMIT_LINES, summary.held + summary.tightenable,
+           LIMIT_LINES, run.allowlisted);
 
-    if (verbose && run.buffer_count > 0) {
-        printf("\n  Buffer band (%d-%d lines — allowed, no action needed):\n",
-               TARGET_LINES + 1, LIMIT_LINES);
-        for (size_t i = 0; i < run.buffer_count; i++)
-            printf("    %s\n", run.buffer_files[i]);
-    }
-    if (tightenable > 0) {
-        printf("\n  Baseline can tighten (still over %d, but smaller than "
-               "recorded) — run `--fix`:\n", LIMIT_LINES);
-        for (size_t i = 0; i < run.row_count; i++)
-            if (run.rows[i].state == ROW_TIGHTENABLE)
-                printf("    %s is now %ld lines (recorded %ld)\n",
-                       run.rows[i].path, run.rows[i].observed,
-                       run.rows[i].recorded);
-    }
+    print_verbose_buffer_band(&run, verbose);
+    print_tightenable_hints(&run, summary.tightenable);
     return 0;
 }
