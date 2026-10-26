@@ -408,6 +408,157 @@ static bool parse_positive_form_id(const char *body, size_t body_len,
     return true;
 }
 
+/* POST /store/orders or /store/buy/:id — parse the order form, then gate
+ * it in the original order (product id, CSRF token, customer address,
+ * proof of work, pending-pool bounds) before serve_create_order mints the
+ * one-time payment address. Every refusal is a complete error response;
+ * the caller closes the database on every path. */
+static size_t store_serve_order_create(sqlite3 *db, struct node_db *ndb,
+                                       const char *path,
+                                       const uint8_t *body, size_t body_len,
+                                       const char *datadir,
+                                       uint8_t *response, size_t response_max)
+{
+    int64_t id = -1;
+    char addr[128] = "";
+    char csrf[64] = "";
+    char pow_ts[32] = "";
+    char pow_nonce[32] = "";
+    char pay_kind[16] = "";
+    if (body && body_len > 0) {
+        web_form_field((const char *)body, body_len,
+                         "customer_addr", addr, sizeof(addr));
+        web_form_field((const char *)body, body_len,
+                         "csrf_token", csrf, sizeof(csrf));
+        web_form_field((const char *)body, body_len,
+                         "pow_ts", pow_ts, sizeof(pow_ts));
+        web_form_field((const char *)body, body_len,
+                         "pow_nonce", pow_nonce, sizeof(pow_nonce));
+        /* Absent ⇒ shielded, so every existing caller and the HTML form
+         * keep the shielded default. Only the exact string "transparent"
+         * opts in; anything else is shielded rather than a guess. */
+        web_form_field((const char *)body, body_len,
+                         "payment_kind", pay_kind, sizeof(pay_kind));
+    }
+    bool want_transparent = (strcmp(pay_kind, "transparent") == 0);
+    if (path_has_prefix(path, "/store/buy/")) {
+        if (!parse_positive_path_id(path, &id))
+            id = -1;
+    } else if (!parse_positive_form_id((const char *)body, body_len,
+                                       "product_id", &id)) {
+        const char *err_body = "<h1>Invalid product</h1>"
+            "<p>product_id must be a positive integer.</p>"
+            "<p><a href='/store/products'>&larr; Back to store</a></p>";
+        return store_error_response("400 Bad Request",
+            err_body, strlen(err_body), response, response_max);
+    }
+    char csrf_ctx[64];
+    store_csrf_context(csrf_ctx, sizeof(csrf_ctx), id);
+    if (!store_csrf_verify(csrf_ctx, csrf)) {
+        const char *err_body = "<h1>Invalid CSRF token</h1>"
+            "<p>Form token missing or did not verify. "
+            "Please reload the product page and resubmit.</p>"
+            "<p><a href='/store/products'>&larr; Back to store</a></p>";
+        return store_error_response("400 Bad Request",
+            err_body, strlen(err_body), response, response_max);
+    }
+    size_t result = 0;
+    if (!zcl_validate_zcl_address(addr)) {
+        const char *err_body = "<h1>Invalid address</h1>"
+            "<p>Must be a ZClassic t-address (t1.../t3...) or "
+            "z-address (zs1...).</p>"
+            "<p><a href='/store/products'>&larr; Back to store</a></p>";
+        result = store_error_response("400 Bad Request",
+            err_body, strlen(err_body), response, response_max);
+    } else if (!store_pow_verify_and_claim(id, pow_ts, pow_nonce)) {
+        /* Refused BEFORE the expensive z-address mint + DB write —
+         * CSRF alone no longer suffices for this path. */
+        const char *err_body = "<h1>Proof of work required</h1>"
+            "<p>This order requires a small proof-of-work puzzle to "
+            "be solved before submission (this prevents automated "
+            "flooding of the order queue). Reload the product page "
+            "and submit again — the page solves the puzzle "
+            "automatically. The challenge seed rotates and its "
+            "difficulty rises with load, so a stale page must be "
+            "reloaded. Programmatic callers: see the pow_ts / "
+            "pow_nonce protocol documented next to "
+            "store_pow_verify_and_claim() in store_controller_pow.c.</p>"
+            "<p><a href='/store/products'>&larr; Back to store</a></p>";
+        result = store_error_response("402 Payment Required",
+            err_body, strlen(err_body), response, response_max);
+    } else {
+        /* Bound the pending pool BEFORE the expensive mint. No prune
+         * here: this request cannot see the wallet's scan coverage,
+         * and deleting an expired pending order is a verdict that it
+         * was never paid. Only the background payment pass deletes
+         * one, after checking it against a covering scan, so a pool
+         * full of expired rows refuses new orders for at most one
+         * ~30s pass. */
+        int pending_global = db_store_order_count_pending(ndb);
+        int pending_product =
+            db_store_order_count_pending_for_product(ndb, id);
+        if (pending_global >= STORE_ORDER_MAX_PENDING_GLOBAL) {
+            const char *err_body = "<h1>Store busy</h1>"
+                "<p>The order queue is at capacity. Please try "
+                "again shortly.</p>"
+                "<p><a href='/store/products'>&larr; Back to store</a></p>";
+            result = store_error_response("503 Service Unavailable",
+                err_body, strlen(err_body), response, response_max);
+        } else if (pending_product >= STORE_ORDER_MAX_PENDING_PER_PRODUCT) {
+            const char *err_body = "<h1>Product busy</h1>"
+                "<p>Too many pending orders for this product. "
+                "Please try again shortly.</p>"
+                "<p><a href='/store/products'>&larr; Back to store</a></p>";
+            result = store_error_response("503 Service Unavailable",
+                err_body, strlen(err_body), response, response_max);
+        } else {
+            result = serve_create_order(db, id, addr, datadir,
+                                          want_transparent,
+                                          response, response_max);
+        }
+    }
+    return result;
+}
+
+/* GET /store/order/:id or /store/orders/:id — one order's status page. */
+static size_t store_serve_order_show(sqlite3 *db, const char *path,
+                                     uint8_t *response, size_t response_max)
+{
+    int64_t id = -1;
+    if (!parse_positive_path_id(path, &id)) {
+        const char *err_body = "<h1>Invalid order</h1>"
+            "<p>Order id must be a positive integer.</p>"
+            "<p><a href='/store/orders'>&larr; Back to orders</a></p>";
+        return store_error_response("400 Bad Request",
+            err_body, strlen(err_body), response, response_max);
+    }
+    return serve_order_status(db, id, response, response_max);
+}
+
+/* Token-gated content: /store/access?addr=t1...&token=ZCL23ACCESS
+ * The token buffer must hold the canonical 64-hex-char txid form
+ * PLUS the NUL — store_parse_query_field caps a field at
+ * out_max-1 chars, so token[64] silently truncates a full txid to
+ * 63 chars, the validator then rejects it as a truncated-txid look-
+ * alike, and the gate 400s every real token holder (the C5 collect
+ * wedge's second half). */
+static size_t store_serve_access_gate(sqlite3 *db, const char *path,
+                                      const char *datadir,
+                                      uint8_t *response, size_t response_max)
+{
+    char addr[128] = "", token[65] = "";
+    if (!store_parse_access_query(path, addr, sizeof(addr),
+                                  token, sizeof(token))) {
+        const char *err_body = "<h1>Invalid access request</h1>"
+            "<p>addr must be a valid ZClassic address and token must be a valid token id.</p>"
+            "<p><a href='/store/products'>&larr; Back to store</a></p>";
+        return store_error_response("400 Bad Request",
+            err_body, strlen(err_body), response, response_max);
+    }
+    return serve_gated_content(db, addr, token, 1, datadir,
+                                response, response_max);
+}
+
 /* Main request handler */
 size_t store_handle_request(const char *method, const char *path,
                              const uint8_t *body, size_t body_len,
@@ -434,140 +585,15 @@ size_t store_handle_request(const char *method, const char *path,
         result = serve_order_index(db, response, response_max);
 
     } else if (route_is_order_create(method, path)) {
-        int64_t id = -1;
-        char addr[128] = "";
-        char csrf[64] = "";
-        char pow_ts[32] = "";
-        char pow_nonce[32] = "";
-        char pay_kind[16] = "";
-        if (body && body_len > 0) {
-            web_form_field((const char *)body, body_len,
-                             "customer_addr", addr, sizeof(addr));
-            web_form_field((const char *)body, body_len,
-                             "csrf_token", csrf, sizeof(csrf));
-            web_form_field((const char *)body, body_len,
-                             "pow_ts", pow_ts, sizeof(pow_ts));
-            web_form_field((const char *)body, body_len,
-                             "pow_nonce", pow_nonce, sizeof(pow_nonce));
-            /* Absent ⇒ shielded, so every existing caller and the HTML form
-             * keep the shielded default. Only the exact string "transparent"
-             * opts in; anything else is shielded rather than a guess. */
-            web_form_field((const char *)body, body_len,
-                             "payment_kind", pay_kind, sizeof(pay_kind));
-        }
-        bool want_transparent = (strcmp(pay_kind, "transparent") == 0);
-        if (path_has_prefix(path, "/store/buy/")) {
-            if (!parse_positive_path_id(path, &id))
-                id = -1;
-        } else if (!parse_positive_form_id((const char *)body, body_len,
-                                           "product_id", &id)) {
-            const char *err_body = "<h1>Invalid product</h1>"
-                "<p>product_id must be a positive integer.</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-            node_db_close(&ndb);
-            return result;
-        }
-        char csrf_ctx[64];
-        store_csrf_context(csrf_ctx, sizeof(csrf_ctx), id);
-        if (!store_csrf_verify(csrf_ctx, csrf)) {
-            const char *err_body = "<h1>Invalid CSRF token</h1>"
-                "<p>Form token missing or did not verify. "
-                "Please reload the product page and resubmit.</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-            node_db_close(&ndb);
-            return result;
-        }
-        if (!zcl_validate_zcl_address(addr)) {
-            const char *err_body = "<h1>Invalid address</h1>"
-                "<p>Must be a ZClassic t-address (t1.../t3...) or "
-                "z-address (zs1...).</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-        } else if (!store_pow_verify_and_claim(id, pow_ts, pow_nonce)) {
-            /* Refused BEFORE the expensive z-address mint + DB write —
-             * CSRF alone no longer suffices for this path. */
-            const char *err_body = "<h1>Proof of work required</h1>"
-                "<p>This order requires a small proof-of-work puzzle to "
-                "be solved before submission (this prevents automated "
-                "flooding of the order queue). Reload the product page "
-                "and submit again — the page solves the puzzle "
-                "automatically. The challenge seed rotates and its "
-                "difficulty rises with load, so a stale page must be "
-                "reloaded. Programmatic callers: see the pow_ts / "
-                "pow_nonce protocol documented next to "
-                "store_pow_verify_and_claim() in store_controller_pow.c.</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("402 Payment Required",
-                err_body, strlen(err_body), response, response_max);
-        } else {
-            /* Bound the pending pool BEFORE the expensive mint. No prune
-             * here: this request cannot see the wallet's scan coverage,
-             * and deleting an expired pending order is a verdict that it
-             * was never paid. Only the background payment pass deletes
-             * one, after checking it against a covering scan, so a pool
-             * full of expired rows refuses new orders for at most one
-             * ~30s pass. */
-            int pending_global = db_store_order_count_pending(&ndb);
-            int pending_product =
-                db_store_order_count_pending_for_product(&ndb, id);
-            if (pending_global >= STORE_ORDER_MAX_PENDING_GLOBAL) {
-                const char *err_body = "<h1>Store busy</h1>"
-                    "<p>The order queue is at capacity. Please try "
-                    "again shortly.</p>"
-                    "<p><a href='/store/products'>&larr; Back to store</a></p>";
-                result = store_error_response("503 Service Unavailable",
-                    err_body, strlen(err_body), response, response_max);
-            } else if (pending_product >= STORE_ORDER_MAX_PENDING_PER_PRODUCT) {
-                const char *err_body = "<h1>Product busy</h1>"
-                    "<p>Too many pending orders for this product. "
-                    "Please try again shortly.</p>"
-                    "<p><a href='/store/products'>&larr; Back to store</a></p>";
-                result = store_error_response("503 Service Unavailable",
-                    err_body, strlen(err_body), response, response_max);
-            } else {
-                result = serve_create_order(db, id, addr, datadir,
-                                              want_transparent,
-                                              response, response_max);
-            }
-        }
+        result = store_serve_order_create(db, &ndb, path, body, body_len,
+                                          datadir, response, response_max);
 
     } else if (route_is_order_show(path)) {
-        int64_t id = -1;
-        if (!parse_positive_path_id(path, &id)) {
-            const char *err_body = "<h1>Invalid order</h1>"
-                "<p>Order id must be a positive integer.</p>"
-                "<p><a href='/store/orders'>&larr; Back to orders</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-        } else {
-            result = serve_order_status(db, id, response, response_max);
-        }
+        result = store_serve_order_show(db, path, response, response_max);
 
     } else if (strncmp(path, "/store/access", 13) == 0) {
-        /* Token-gated content: /store/access?addr=t1...&token=ZCL23ACCESS
-         * The token buffer must hold the canonical 64-hex-char txid form
-         * PLUS the NUL — store_parse_query_field caps a field at
-         * out_max-1 chars, so token[64] silently truncates a full txid to
-         * 63 chars, the validator then rejects it as a truncated-txid look-
-         * alike, and the gate 400s every real token holder (the C5 collect
-         * wedge's second half). */
-        char addr[128] = "", token[65] = "";
-        if (!store_parse_access_query(path, addr, sizeof(addr),
-                                      token, sizeof(token))) {
-            const char *err_body = "<h1>Invalid access request</h1>"
-                "<p>addr must be a valid ZClassic address and token must be a valid token id.</p>"
-                "<p><a href='/store/products'>&larr; Back to store</a></p>";
-            result = store_error_response("400 Bad Request",
-                err_body, strlen(err_body), response, response_max);
-        } else {
-            result = serve_gated_content(db, addr, token, 1, datadir,
-                                          response, response_max);
-        }
+        result = store_serve_access_gate(db, path, datadir,
+                                         response, response_max);
     }
 
     node_db_close(&ndb);
