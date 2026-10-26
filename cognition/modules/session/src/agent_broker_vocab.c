@@ -177,12 +177,6 @@ uint16_t mvap_kind_from_metaverse(enum metaverse_kind kind)
 
 /* ── verdicts ───────────────────────────────────────────────────────────── */
 
-/* The verdict-to-status mapping, split one verdict family per helper so no
- * single function carries all nineteen case labels. A helper answers true and
- * writes the status only for its own family and false for everything else, so
- * a verdict no helper claims — METAVERSE_GRANT_VERDICT_COUNT included — still
- * reaches the MVAP_ERR_INTERNAL return in the public function below, exactly
- * as the break in the former one-piece switch did. */
 static bool mvap_status_for_request_validity_verdict(
     enum metaverse_grant_verdict verdict, int32_t *out)
 {
