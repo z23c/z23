@@ -113,6 +113,84 @@ static bool cold_start_extract_refusal(const char *tail, char *reason,
     return true;
 }
 
+/* Empty the optional reason note; a no-op when it is absent or zero-sized. */
+static void cold_start_reason_clear(char *reason, size_t reason_n)
+{
+    if (reason && reason_n)
+        reason[0] = '\0';
+}
+
+/* POSIX-only spawn plumbing (read / waitpid / WIF*); the Windows half of the
+ * spawn lives in boot_cold_start_spawn_windows.inc. */
+#ifndef _WIN32
+/* Drain the child's stderr from `fd` to EOF, teeing each chunk to our own
+ * stderr while appending it to the bounded tail. A read error just ends the
+ * drain — the exit-code decision never read the terminal. */
+static void cold_start_drain_child_stderr(int fd, char *tail, size_t *tail_len)
+{
+    char chunk[1024];
+    for (;;) {
+        ssize_t m = read(fd, chunk, sizeof(chunk));
+        if (m < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (m == 0)
+            break;
+        /* Operator tee, discarded on purpose: the refusal/exit-code decision
+         * below reads `tail`, never the terminal, so a dead stderr cannot
+         * change it. The loop is the part that matters — an unlooped write(2)
+         * short-writes the transcript the operator is reading. */
+        (void)zcl_write_all(STDERR_FILENO, chunk, (size_t)m);
+        cold_start_tail_append(tail, tail_len, COLD_START_TAIL_CAP, chunk,
+                               (size_t)m);
+    }
+}
+
+/* Reap the child, retrying only EINTR. Returns 0 with *status set, or -1 with
+ * errno left exactly as waitpid set it, for the caller to report. */
+static int cold_start_wait_child(pid_t pid, int *status)
+{
+    while (waitpid(pid, status, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        return -1;
+    }
+    return 0;
+}
+
+/* Shape of a reaped child's outcome, ahead of any reporting. */
+enum cold_start_outcome {
+    COLD_START_OUTCOME_EXIT_ZERO,
+    COLD_START_OUTCOME_REFUSED,
+    COLD_START_OUTCOME_EXIT_NONZERO,
+    COLD_START_OUTCOME_SIGNALED,
+    COLD_START_OUTCOME_ABNORMAL,
+};
+
+/* Classify a reaped child against its stderr tail: exit 0; a non-zero or
+ * abnormal end with a printed REFUSED line (a decision — `refusal` receives
+ * that verbatim line); otherwise the shape of the transient note. */
+static enum cold_start_outcome cold_start_classify_outcome(int status,
+                                                           const char *tail,
+                                                           char *refusal,
+                                                           size_t refusal_n)
+{
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return COLD_START_OUTCOME_EXIT_ZERO;
+
+    /* Non-zero / abnormal: a printed REFUSED line makes it a decision. */
+    if (cold_start_extract_refusal(tail, refusal, refusal_n))
+        return COLD_START_OUTCOME_REFUSED;
+    if (WIFEXITED(status))
+        return COLD_START_OUTCOME_EXIT_NONZERO;
+    if (WIFSIGNALED(status))
+        return COLD_START_OUTCOME_SIGNALED;
+    return COLD_START_OUTCOME_ABNORMAL;
+}
+#endif
+
 /* Fork/exec a child (argv NULL-terminated), teeing its stderr to ours while
  * capturing a bounded tail, then classify: OK (exit 0); BLOCKED (non-zero exit
  * AND a printed REFUSED line — a decision, `reason` = that verbatim line);
@@ -121,8 +199,7 @@ static enum cold_start_result cold_start_spawn_classify(char *const child_argv[]
                                                         char *reason,
                                                         size_t reason_n)
 {
-    if (reason && reason_n)
-        reason[0] = '\0';
+    cold_start_reason_clear(reason, reason_n);
 
     char exe[PATH_MAX];
     if (!cold_start_self_exe(exe, sizeof(exe))) {
@@ -165,53 +242,34 @@ static enum cold_start_result cold_start_spawn_classify(char *const child_argv[]
     (void)close(pipefd[1]);
     char tail[COLD_START_TAIL_CAP + 1];
     size_t tail_len = 0;
-    char chunk[1024];
-    for (;;) {
-        ssize_t m = read(pipefd[0], chunk, sizeof(chunk));
-        if (m < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (m == 0)
-            break;
-        /* Operator tee, discarded on purpose: the refusal/exit-code decision
-         * below reads `tail`, never the terminal, so a dead stderr cannot
-         * change it. The loop is the part that matters — an unlooped write(2)
-         * short-writes the transcript the operator is reading. */
-        (void)zcl_write_all(STDERR_FILENO, chunk, (size_t)m);
-        cold_start_tail_append(tail, &tail_len, COLD_START_TAIL_CAP, chunk,
-                               (size_t)m);
-    }
+    cold_start_drain_child_stderr(pipefd[0], tail, &tail_len);
     (void)close(pipefd[0]);
     tail[tail_len] = '\0';
 
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno == EINTR)
-            continue;
+    if (cold_start_wait_child(pid, &status) != 0) {
         cold_start_reason_copy(reason, reason_n, "waitpid failed");
         LOG_ERROR(COLD_START_SUBSYS, "spawn: waitpid failed: %s",
                   strerror(errno));
         return COLD_START_TRANSIENT;
     }
 
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return COLD_START_OK;
-
-    /* Non-zero / abnormal: a printed REFUSED line makes it a decision. */
     char refusal[COLD_START_REASON_MAX];
-    if (cold_start_extract_refusal(tail, refusal, sizeof(refusal))) {
+    enum cold_start_outcome outcome = cold_start_classify_outcome(
+        status, tail, refusal, sizeof(refusal));
+    if (outcome == COLD_START_OUTCOME_EXIT_ZERO)
+        return COLD_START_OK;
+    if (outcome == COLD_START_OUTCOME_REFUSED) {
         cold_start_reason_copy(reason, reason_n, refusal);
         return COLD_START_BLOCKED;
     }
-    if (WIFEXITED(status)) {
+    if (outcome == COLD_START_OUTCOME_EXIT_NONZERO) {
         char msg[96];
         snprintf(msg, sizeof(msg), "child exited with code %d",
                  WEXITSTATUS(status));
         cold_start_reason_copy(reason, reason_n, msg);
         LOG_WARN(COLD_START_SUBSYS, "%s", msg);
-    } else if (WIFSIGNALED(status)) {
+    } else if (outcome == COLD_START_OUTCOME_SIGNALED) {
         char msg[96];
         snprintf(msg, sizeof(msg), "child killed by signal %d",
                  WTERMSIG(status));
@@ -349,53 +407,74 @@ static int cold_start_exec_serve(int argc, char **argv)
 #endif
 }
 
+/* Point each cold-start planning slot in `plan` at the text after its flag in
+ * argv: -datadir=, -cold-start-source=, -cold-start-seed= and
+ * -cold-start-bundle=. Later occurrences win, as this loop always allowed. */
+static void cold_start_parse_plan_flags(struct cold_start_plan *plan, int argc,
+                                        char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "-datadir=", 9) == 0)
+            plan->datadir = argv[i] + 9;
+        else if (strncmp(argv[i], "-cold-start-source=", 19) == 0)
+            plan->header_source = argv[i] + 19;
+        else if (strncmp(argv[i], "-cold-start-seed=", 17) == 0)
+            plan->seed_snapshot = argv[i] + 17;
+        else if (strncmp(argv[i], "-cold-start-bundle=", 19) == 0)
+            plan->install_bundle = argv[i] + 19;
+    }
+}
+
+/* Format the default datadir — <HOME>/.zclassic-c23, or ./.zclassic-c23 with
+ * no HOME — into `buf`. Returns the snprintf result so the caller can refuse
+ * and log on truncation. */
+static int cold_start_format_default_datadir(char *buf, size_t n)
+{
+    const char *home = getenv("HOME");
+    return snprintf(buf, n, "%s/.zclassic-c23", home ? home : ".");
+}
+
+/* Default header source: a co-located legacy zclassicd datadir with a block
+ * index. Absent => skip the header stage and let the serving boot P2P-sync
+ * headers. */
+static void cold_start_default_header_source(struct cold_start_plan *plan)
+{
+    if (plan->header_source && plan->header_source[0])
+        return;
+    static char default_source[PATH_MAX];
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        return;
+    char idx[PATH_MAX];
+    if (snprintf(idx, sizeof(idx), "%s/.zclassic/blocks/index", home) >=
+        (int)sizeof(idx))
+        return;
+    struct platform_directory_list probe = {0};
+    if (platform_directory_list_regular_sorted(idx, &probe)) {
+        platform_directory_list_free(&probe);
+        if (snprintf(default_source, sizeof(default_source), "%s/.zclassic",
+                     home) < (int)sizeof(default_source))
+            plan->header_source = default_source;
+    }
+}
+
 int boot_cold_start_run(int argc, char **argv)
 {
     struct cold_start_plan plan = {0};
     plan.datadir = NULL;
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "-datadir=", 9) == 0)
-            plan.datadir = argv[i] + 9;
-        else if (strncmp(argv[i], "-cold-start-source=", 19) == 0)
-            plan.header_source = argv[i] + 19;
-        else if (strncmp(argv[i], "-cold-start-seed=", 17) == 0)
-            plan.seed_snapshot = argv[i] + 17;
-        else if (strncmp(argv[i], "-cold-start-bundle=", 19) == 0)
-            plan.install_bundle = argv[i] + 19;
-    }
+    cold_start_parse_plan_flags(&plan, argc, argv);
 
     /* Default datadir mirrors the rest of the binary. */
     static char default_datadir[PATH_MAX];
     if (!plan.datadir || !plan.datadir[0]) {
-        const char *home = getenv("HOME");
-        if (snprintf(default_datadir, sizeof(default_datadir),
-                     "%s/.zclassic-c23", home ? home : ".") >=
+        if (cold_start_format_default_datadir(default_datadir,
+                                              sizeof(default_datadir)) >=
             (int)sizeof(default_datadir))
             LOG_ERR(COLD_START_SUBSYS, "default datadir path too long");
         plan.datadir = default_datadir;
     }
 
-    /* Default header source: a co-located legacy zclassicd datadir with a block
-     * index. Absent => skip the header stage and let the serving boot P2P-sync
-     * headers. */
-    static char default_source[PATH_MAX];
-    if (!plan.header_source || !plan.header_source[0]) {
-        const char *home = getenv("HOME");
-        if (home && home[0]) {
-            char idx[PATH_MAX];
-            if (snprintf(idx, sizeof(idx), "%s/.zclassic/blocks/index", home) <
-                (int)sizeof(idx)) {
-                struct platform_directory_list probe = {0};
-                if (platform_directory_list_regular_sorted(idx, &probe)) {
-                    platform_directory_list_free(&probe);
-                    if (snprintf(default_source, sizeof(default_source),
-                                 "%s/.zclassic", home) <
-                        (int)sizeof(default_source))
-                        plan.header_source = default_source;
-                }
-            }
-        }
-    }
+    cold_start_default_header_source(&plan);
 
     LOG_INFO(COLD_START_SUBSYS,
              "cold-start: datadir=%s source=%s seed=%s bundle=%s",

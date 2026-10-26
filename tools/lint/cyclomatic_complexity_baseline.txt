@@ -899,8 +899,6 @@ engine/composition/src/boot_bundle_fetch_seeds.c:bbf_assemble_seeds:17
 engine/composition/src/boot_cold_start.c:cold_start_drive:16
 engine/composition/src/boot_cold_start.c:cold_start_receipt_load:25
 engine/composition/src/boot_cold_start.c:cold_start_receipt_write:26
-engine/composition/src/boot_cold_start_driver.c:boot_cold_start_run:25
-engine/composition/src/boot_cold_start_driver.c:cold_start_spawn_classify:19
 engine/composition/src/boot_cursor_state.c:boot_cursor_propagate_nchaintx:25
 engine/composition/src/boot_datadir_lock.c:boot_datadir_lock_acquire#2:42
 engine/composition/src/boot_endpoint_records.c:ber_read_record_file:23
