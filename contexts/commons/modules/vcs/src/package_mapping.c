@@ -80,12 +80,11 @@ static bool blob_map_serialize(
     return true;
 }
 
-static bool blob_map_parse(
+static bool blob_map_check_header(
     const uint8_t *wire, size_t wire_len, const uint8_t expected_blob[32],
-    uint64_t expected_size, uint8_t **hashes_out, uint32_t *chunk_count_out)
+    uint64_t expected_size, uint8_t **hashes_out, uint32_t *chunk_count_out,
+    uint32_t *count_out)
 {
-    if (hashes_out) *hashes_out = NULL;
-    if (chunk_count_out) *chunk_count_out = 0;
     if (!wire || !expected_blob || !hashes_out || !chunk_count_out ||
         wire_len < PACKAGE_BLOB_MAP_HEADER_BYTES ||
         memcmp(wire, blob_map_magic, 8) != 0 ||
@@ -97,6 +96,20 @@ static bool blob_map_parse(
     if (!mapping_expected_chunks(expected_size, &expected) ||
         count != expected ||
         wire_len != PACKAGE_BLOB_MAP_HEADER_BYTES + (size_t)count * 32u)
+        return false;
+    *count_out = count;
+    return true;
+}
+
+static bool blob_map_parse(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_blob[32],
+    uint64_t expected_size, uint8_t **hashes_out, uint32_t *chunk_count_out)
+{
+    if (hashes_out) *hashes_out = NULL;
+    if (chunk_count_out) *chunk_count_out = 0;
+    uint32_t count = 0;
+    if (!blob_map_check_header(wire, wire_len, expected_blob,
+            expected_size, hashes_out, chunk_count_out, &count))
         return false;
     uint8_t *hashes = count > 0
         ? zcl_malloc((size_t)count * 32u, "vcs.package.map_hashes") : NULL;
@@ -204,6 +217,31 @@ static bool mapping_work_from_tree(
     return true;
 }
 
+static bool mapping_set_finish_wire(
+    const struct vcs_package_mapping_set *set,
+    uint8_t *wire, size_t wire_len, size_t off,
+    uint8_t **wire_out, size_t *wire_len_out)
+{
+    for (size_t i = 0; i < set->count; i++) {
+        if (!zcl_bytes_any_set(set->entries[i].blob_root, 32) ||
+            !zcl_bytes_any_set(set->entries[i].mapping_root, 32) ||
+            (i > 0 && memcmp(set->entries[i - 1u].blob_root,
+                             set->entries[i].blob_root, 32) >= 0)) {
+            free(wire);
+            return false;
+        }
+        memcpy(wire + off, set->entries[i].blob_root, 32); off += 32;
+        memcpy(wire + off, set->entries[i].mapping_root, 32); off += 32;
+    }
+    if (off != wire_len) {
+        free(wire);
+        return false;
+    }
+    *wire_out = wire;
+    *wire_len_out = wire_len;
+    return true;
+}
+
 static bool mapping_set_serialize(
     const struct vcs_package_mapping_set *set,
     uint8_t **wire_out, size_t *wire_len_out)
@@ -229,24 +267,8 @@ static bool mapping_set_serialize(
     memcpy(wire + off, set->source_tree_root, 32); off += 32;
     memcpy(wire + off, set->lane_receipt_root, 32); off += 32;
     zcl_write_u32_le(wire + off, (uint32_t)set->count); off += 4;
-    for (size_t i = 0; i < set->count; i++) {
-        if (!zcl_bytes_any_set(set->entries[i].blob_root, 32) ||
-            !zcl_bytes_any_set(set->entries[i].mapping_root, 32) ||
-            (i > 0 && memcmp(set->entries[i - 1u].blob_root,
-                             set->entries[i].blob_root, 32) >= 0)) {
-            free(wire);
-            return false;
-        }
-        memcpy(wire + off, set->entries[i].blob_root, 32); off += 32;
-        memcpy(wire + off, set->entries[i].mapping_root, 32); off += 32;
-    }
-    if (off != wire_len) {
-        free(wire);
-        return false;
-    }
-    *wire_out = wire;
-    *wire_len_out = wire_len;
-    return true;
+    return mapping_set_finish_wire(set, wire, wire_len, off,
+                                   wire_out, wire_len_out);
 }
 
 void vcs_package_mapping_set_init(struct vcs_package_mapping_set *set)
@@ -372,23 +394,15 @@ static bool mapping_index_commit(struct vcs_index *index,
     return vcs_index_commit(index);
 }
 
-bool vcs_package_mapping_set_build(
+static bool mapping_set_finish_build(
     const char *repo_root, const uint8_t source_tree_root[32],
     const uint8_t lane_receipt_root[32],
     struct vcs_package_mapping_metrics *metrics,
-    uint8_t mapping_set_root[32])
+    uint8_t mapping_set_root[32], struct vcs_manifest *tree)
 {
-    if (!repo_root || !repo_root[0] || !source_tree_root ||
-        !lane_receipt_root || !metrics || !mapping_set_root ||
-        !zcl_bytes_any_set(source_tree_root, 32) ||
-        !zcl_bytes_any_set(lane_receipt_root, 32))
-        return false;
-    memset(metrics, 0, sizeof(*metrics));
-    struct vcs_manifest tree;
-    if (!vcs_tree_load(repo_root, source_tree_root, &tree)) return false;
     struct package_mapping_work *work = NULL;
     size_t count = 0;
-    bool ok = mapping_work_from_tree(&tree, &work, &count);
+    bool ok = mapping_work_from_tree(tree, &work, &count);
     struct vcs_index *index = ok ? vcs_index_open(repo_root) : NULL;
     ok = ok && index != NULL;
     for (size_t i = 0; ok && i < count; i++)
@@ -418,8 +432,26 @@ bool vcs_package_mapping_set_build(
     if (index) vcs_index_close(index);
     free(entries);
     free(work);
-    vcs_manifest_free(&tree);
+    vcs_manifest_free(tree);
     return ok;
+}
+
+bool vcs_package_mapping_set_build(
+    const char *repo_root, const uint8_t source_tree_root[32],
+    const uint8_t lane_receipt_root[32],
+    struct vcs_package_mapping_metrics *metrics,
+    uint8_t mapping_set_root[32])
+{
+    if (!repo_root || !repo_root[0] || !source_tree_root ||
+        !lane_receipt_root || !metrics || !mapping_set_root ||
+        !zcl_bytes_any_set(source_tree_root, 32) ||
+        !zcl_bytes_any_set(lane_receipt_root, 32))
+        return false;
+    memset(metrics, 0, sizeof(*metrics));
+    struct vcs_manifest tree;
+    if (!vcs_tree_load(repo_root, source_tree_root, &tree)) return false;
+    return mapping_set_finish_build(repo_root, source_tree_root,
+        lane_receipt_root, metrics, mapping_set_root, &tree);
 }
 
 bool vcs_package_mapping_set_find(
