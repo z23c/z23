@@ -29,8 +29,8 @@
  *   model    post only, optional model id, default picks flash until
  *            attempt 3, then the stronger model.
  *   engine   post only, optional registered engine id (glm, glm-cli,
- *            claude-haiku, claude-sonnet, gpt-luna, gpt-sol, ...). Absent
- *            means glm. With an
+ *            claude-haiku, claude-sonnet, gpt-luna, gpt-sol, gpt-astra,
+ *            ...). Absent means glm. With an
  *            engine, next passes --engine and --model only if model is set;
  *            a model outside the engine's family is refused at post.
  *   attempt  post only, optional integer >= 1, default 1.
@@ -1075,8 +1075,8 @@ static bool dvq_engine_ok(const char *s)
 }
 
 /* The model belongs to the vendor's family: its default model up to the first
- * "-<digit>". A gpt-6 row (gpt-luna, gpt-sol) takes only the gpt-6 generation,
- * so a gpt-4 model is refused on it. */
+ * "-<digit>". A gpt-6 row (gpt-luna, gpt-sol, gpt-astra) takes only the
+ * gpt-6 generation, so a gpt-4 model is refused on it. */
 static bool dvq_model_in_family(const struct engine_vendor *v, const char *model)
 {
     if (v->cli_no_model_arg)
@@ -1112,7 +1112,7 @@ static bool dvq_engine_model_ok(const char *engine, const char *model,
     if (!v) {
         *code = "UNKNOWN_ENGINE";
         *msg = "engine is a registered engine id (glm, glm-cli, claude-haiku, "
-               "claude-sonnet, gpt-luna, gpt-sol, ...)";
+               "claude-sonnet, gpt-luna, gpt-sol, gpt-astra, ...)";
         *why = "input.engine not in the engine registry";
         return false;
     }
