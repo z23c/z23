@@ -43,6 +43,31 @@ char *ldb_errf(const char *fmt, ...)
     return ldb_strdup(buf);
 }
 
+/* Opens the read mapping for the size recorded in `before` and takes a
+ * second snapshot, refusing the mapping unless the file is unchanged.
+ * Returns 0 on success, -1 on failure; the caller logs and unmaps. */
+static int map_if_stable(struct ldb_file_mapping *m,
+                         const struct platform_positioned_file_snapshot *before)
+{
+    struct platform_positioned_file_snapshot after;
+    if (!platform_read_mapping_open_positioned(&m->mapping, &m->file,
+                                               (size_t)before->size) ||
+        !platform_positioned_file_snapshot(&m->file, &after))
+        return -1;
+    /* True when both snapshots describe the same file: same size, volume and
+     * file identity, and the same modification and change timestamps. */
+    if (before->size != after.size ||
+        before->volume != after.volume ||
+        before->file_low != after.file_low ||
+        before->file_high != after.file_high ||
+        before->modified_seconds != after.modified_seconds ||
+        before->modified_nanoseconds != after.modified_nanoseconds ||
+        before->changed_seconds != after.changed_seconds ||
+        before->changed_nanoseconds != after.changed_nanoseconds)
+        return -1;
+    return 0;
+}
+
 bool ldb_map_file(const char *path, struct ldb_file_mapping *out, char **err)
 {
     if (!path || !out) return false;
@@ -53,7 +78,7 @@ bool ldb_map_file(const char *path, struct ldb_file_mapping *out, char **err)
             *err = ldb_errf("ldb: validated open %s failed", path);
         return false;
     }
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     if (!platform_positioned_file_snapshot(&out->file, &before) ||
         before.size > SIZE_MAX) {
         if (err)
@@ -66,15 +91,7 @@ bool ldb_map_file(const char *path, struct ldb_file_mapping *out, char **err)
          * rather than dereferencing a zero-length mapping. */
         return true;
     }
-    if (!platform_read_mapping_open_positioned(&out->mapping, &out->file,
-                                                (size_t)before.size) ||
-        !platform_positioned_file_snapshot(&out->file, &after) ||
-        before.size != after.size || before.volume != after.volume ||
-        before.file_low != after.file_low || before.file_high != after.file_high ||
-        before.modified_seconds != after.modified_seconds ||
-        before.modified_nanoseconds != after.modified_nanoseconds ||
-        before.changed_seconds != after.changed_seconds ||
-        before.changed_nanoseconds != after.changed_nanoseconds) {
+    if (map_if_stable(out, &before) != 0) {
         if (err)
             *err = ldb_errf("ldb: stable mapping %s failed", path);
         ldb_unmap_file(out);
