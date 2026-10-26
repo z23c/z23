@@ -1629,7 +1629,6 @@ tests/harness/src/test_bip113_bip65.c:test_bip113_bip65:33
 tests/harness/src/test_bip44.c:test_bip44:75
 tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
 tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
-tests/harness/src/test_blob_read_bounds.c:test_blob_read_bounds:24
 tests/harness/src/test_block_index_loader.c:test_block_index_loader:299
 tests/harness/src/test_block_index_node_db_topup.c:test_block_index_node_db_topup:42
 tests/harness/src/test_block_index_projection.c:run_bound_dirty_delta:22
