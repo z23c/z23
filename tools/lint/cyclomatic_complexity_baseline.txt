@@ -149,11 +149,6 @@ contexts/commons/modules/vcs/src/space.c:vcs_space_result_string:17
 contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:26
 contexts/commons/modules/vcs/src/vcs_devloop.c:publication_artifact_chain_load:35
 contexts/commons/modules/vcs/src/vcs_devloop.c:vcs_devloop_publication_bind_accepted_candidate:33
-contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:mirror_build_from_provider:21
-contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:mirror_receipt_serialize:16
-contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:mirror_scan_child:17
-contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:vcs_devloop_mirror_load_for_job:23
-contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:vcs_devloop_mirror_record:35
 contexts/commons/modules/vcs/src/vcs_devloop_publication.c:vcs_devloop_publication_advance_source_reproduction_ack:34
 contexts/commons/modules/vcs/src/vcs_devloop_publication.c:vcs_devloop_publication_advance_workspace:37
 contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16

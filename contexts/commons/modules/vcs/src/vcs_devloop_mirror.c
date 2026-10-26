@@ -34,6 +34,17 @@
 
 static const uint8_t mirror_magic[8] = {'Z','M','R','R','1',0,0,0};
 
+static bool mirror_receipt_oid_padding_clear(
+    const struct vcs_devloop_mirror_receipt *receipt)
+{
+    for (size_t i = receipt->git_oid_len;
+         i < VCS_DEVLOOP_MIRROR_OID_MAX_BYTES; i++) {
+        if (receipt->git_oid[i] != 0)
+            return false;
+    }
+    return true;
+}
+
 static bool mirror_receipt_serialize(
     const struct vcs_devloop_mirror_receipt *receipt,
     uint8_t wire[VCS_DEVLOOP_MIRROR_WIRE_BYTES])
@@ -48,13 +59,9 @@ static bool mirror_receipt_serialize(
         !zcl_bytes_any_set(receipt->workspace_root, 32) ||
         !zcl_bytes_any_set(receipt->provider_record_root, 32) ||
         (receipt->git_oid_len != 0 && receipt->git_oid_len != 20 &&
-         receipt->git_oid_len != 32))
+         receipt->git_oid_len != 32) ||
+        !mirror_receipt_oid_padding_clear(receipt))
         return false;
-    for (size_t i = receipt->git_oid_len;
-         i < VCS_DEVLOOP_MIRROR_OID_MAX_BYTES; i++) {
-        if (receipt->git_oid[i] != 0)
-            return false;
-    }
     size_t off = 0;
     memcpy(wire + off, mirror_magic, sizeof(mirror_magic)); off += 8;
     zcl_write_u32_le(wire + off, receipt->version); off += 4;
@@ -201,6 +208,21 @@ static bool mirror_child_read_exact(struct platform_directory_child *file,
            (int64_t)size;
 }
 
+static bool mirror_child_frame_matches(
+    struct platform_directory_child *file, uint8_t *record,
+    uint64_t size, uint64_t offset)
+{
+    return size - offset >= VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES &&
+        mirror_child_read_exact(file, record,
+                                VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES, offset) &&
+        zcl_read_u32_le(record) == 32u &&
+        zcl_read_u32_le(record + 4) == EV_VCS_DEV_MIRROR_RECEIPT &&
+        zcl_read_u32_le(record + 8) == 0u &&
+        zcl_read_u32_le(record + 12) == zcl_crc32c(record + 16, 32) &&
+        zcl_read_u64_le(record + 48) == EVENT_LOG_SENTINEL_MAGIC &&
+        zcl_read_u64_le(record + 56) == offset;
+}
+
 static bool mirror_scan_child(
     const char *repo_root, const uint8_t job_root[32],
     struct platform_directory_child *file, bool recover_tail,
@@ -214,14 +236,8 @@ static bool mirror_scan_child(
     uint64_t offset = 0;
     while (offset < info.size) {
         uint8_t record[VCS_DEVLOOP_MIRROR_LOG_RECORD_BYTES];
-        bool frame_ok = info.size - offset >= sizeof(record) &&
-            mirror_child_read_exact(file, record, sizeof(record), offset) &&
-            zcl_read_u32_le(record) == 32u &&
-            zcl_read_u32_le(record + 4) == EV_VCS_DEV_MIRROR_RECEIPT &&
-            zcl_read_u32_le(record + 8) == 0u &&
-            zcl_read_u32_le(record + 12) == zcl_crc32c(record + 16, 32) &&
-            zcl_read_u64_le(record + 48) == EVENT_LOG_SENTINEL_MAGIC &&
-            zcl_read_u64_le(record + 56) == offset;
+        bool frame_ok = mirror_child_frame_matches(
+            file, record, info.size, offset);
         if (!frame_ok) {
             if (!recover_tail ||
                 !platform_directory_child_truncate(file, offset) ||
@@ -261,15 +277,12 @@ static bool mirror_append_child(struct platform_directory_child *file,
 }
 #endif
 
-enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
+#ifdef _WIN32
+static enum vcs_devloop_mirror_lookup mirror_load_for_job_windows(
     const char *repo_root, const uint8_t job_root[32],
     struct vcs_devloop_mirror_receipt *out,
     uint8_t receipt_root_out[32])
 {
-    if (!repo_root || !repo_root[0] || !job_root || !out ||
-        !receipt_root_out)
-        return VCS_DEVLOOP_MIRROR_INVALID;
-#ifdef _WIN32
     char zvcs_path[PATH_MAX];
     struct platform_directory_transaction directory;
     struct platform_directory_lock lock;
@@ -308,7 +321,13 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
     *out = scan.receipt;
     memcpy(receipt_root_out, scan.receipt_root, 32);
     return VCS_DEVLOOP_MIRROR_FOUND;
+}
 #else
+static enum vcs_devloop_mirror_lookup mirror_load_for_job_posix(
+    const char *repo_root, const uint8_t job_root[32],
+    struct vcs_devloop_mirror_receipt *out,
+    uint8_t receipt_root_out[32])
+{
     char path[PATH_MAX], lock_path[PATH_MAX];
     struct stat st;
     if (!mirror_path(repo_root, "publication.mirrors.log", path) ||
@@ -333,7 +352,63 @@ enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
     *out = scan.receipt;
     memcpy(receipt_root_out, scan.receipt_root, 32);
     return VCS_DEVLOOP_MIRROR_FOUND;
+}
 #endif
+
+enum vcs_devloop_mirror_lookup vcs_devloop_mirror_load_for_job(
+    const char *repo_root, const uint8_t job_root[32],
+    struct vcs_devloop_mirror_receipt *out,
+    uint8_t receipt_root_out[32])
+{
+    if (!repo_root || !repo_root[0] || !job_root || !out ||
+        !receipt_root_out)
+        return VCS_DEVLOOP_MIRROR_INVALID;
+#ifdef _WIN32
+    return mirror_load_for_job_windows(repo_root, job_root, out,
+                                       receipt_root_out);
+#else
+    return mirror_load_for_job_posix(repo_root, job_root, out,
+                                     receipt_root_out);
+#endif
+}
+
+static bool mirror_load_provider_receipt(
+    const char *repo_root, const uint8_t job_root[32],
+    struct vcs_devloop_publication_job *job,
+    struct vcs_devloop_publication_receipt *provider,
+    uint8_t provider_progress_root[32])
+{
+    return vcs_devloop_publication_job_is_queued(repo_root, job_root) &&
+        vcs_devloop_publication_job_load(repo_root, job_root, job) &&
+        vcs_devloop_publication_progress_load(
+            repo_root, job_root, provider, provider_progress_root) &&
+        provider->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED &&
+        memcmp(provider->job_root, job_root, 32) == 0;
+}
+
+static bool mirror_load_workspace_chain(
+    const char *repo_root, const uint8_t job_root[32],
+    struct vcs_devloop_publication_receipt *provider,
+    struct vcs_devloop_publication_receipt *workspace,
+    struct vcs_devloop_publication_receipt *passport,
+    struct vcs_devloop_publication_receipt *release)
+{
+    return vcs_devloop_publication_receipt_load(
+            repo_root, provider->predecessor_receipt_root, workspace) &&
+        workspace->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED &&
+        memcmp(workspace->job_root, job_root, 32) == 0 &&
+        vcs_devloop_publication_receipt_load(
+            repo_root, workspace->predecessor_receipt_root, passport) &&
+        passport->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED &&
+        memcmp(passport->job_root, job_root, 32) == 0 &&
+        vcs_devloop_publication_receipt_load(
+            repo_root, passport->predecessor_receipt_root, release) &&
+        release->phase ==
+            VCS_DEVLOOP_PUBLICATION_PHASE_RELEASE_PUBLISHED &&
+        memcmp(release->job_root, job_root, 32) == 0;
 }
 
 static bool mirror_build_from_provider(
@@ -349,24 +424,10 @@ static bool mirror_build_from_provider(
     struct vcs_devloop_publication_receipt provider, workspace, passport;
     struct vcs_devloop_publication_receipt release;
     uint8_t provider_progress_root[32];
-    if (!vcs_devloop_publication_job_is_queued(repo_root, job_root) ||
-        !vcs_devloop_publication_job_load(repo_root, job_root, &job) ||
-        !vcs_devloop_publication_progress_load(
-            repo_root, job_root, &provider, provider_progress_root) ||
-        provider.phase != VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED ||
-        memcmp(provider.job_root, job_root, 32) != 0 ||
-        !vcs_devloop_publication_receipt_load(
-            repo_root, provider.predecessor_receipt_root, &workspace) ||
-        workspace.phase != VCS_DEVLOOP_PUBLICATION_PHASE_WORKSPACE_PUBLISHED ||
-        memcmp(workspace.job_root, job_root, 32) != 0 ||
-        !vcs_devloop_publication_receipt_load(
-            repo_root, workspace.predecessor_receipt_root, &passport) ||
-        passport.phase != VCS_DEVLOOP_PUBLICATION_PHASE_PASSPORT_PUBLISHED ||
-        memcmp(passport.job_root, job_root, 32) != 0 ||
-        !vcs_devloop_publication_receipt_load(
-            repo_root, passport.predecessor_receipt_root, &release) ||
-        release.phase != VCS_DEVLOOP_PUBLICATION_PHASE_RELEASE_PUBLISHED ||
-        memcmp(release.job_root, job_root, 32) != 0)
+    if (!mirror_load_provider_receipt(repo_root, job_root, &job, &provider,
+                                      provider_progress_root) ||
+        !mirror_load_workspace_chain(repo_root, job_root, &provider,
+                                     &workspace, &passport, &release))
         return false;
     *out = (struct vcs_devloop_mirror_receipt) {
         .version = VCS_DEVLOOP_MIRROR_RECEIPT_VERSION,
@@ -384,71 +445,71 @@ static bool mirror_build_from_provider(
     return true;
 }
 
-bool vcs_devloop_mirror_record(
+static bool mirror_record_put_receipt(
     const char *repo_root, const uint8_t job_root[32],
     const uint8_t *git_oid, size_t git_oid_len,
-    uint8_t receipt_root_out[32], bool *reused_out)
+    uint8_t receipt_root_out[32])
 {
-    if (reused_out) *reused_out = false;
     if (!repo_root || !repo_root[0] || !job_root || !receipt_root_out)
         return false;
     struct vcs_devloop_mirror_receipt receipt;
     uint8_t wire[VCS_DEVLOOP_MIRROR_WIRE_BYTES];
-    if (!mirror_build_from_provider(
-            repo_root, job_root, git_oid, git_oid_len, &receipt) ||
-        !mirror_receipt_serialize(&receipt, wire) ||
-        !vcs_object_put_repair(repo_root, wire, sizeof(wire),
-                               VCS_TAG_DEV_MIRROR_RECEIPT,
-                               receipt_root_out, NULL))
-        return false;
+    return mirror_build_from_provider(
+               repo_root, job_root, git_oid, git_oid_len, &receipt) &&
+        mirror_receipt_serialize(&receipt, wire) &&
+        vcs_object_put_repair(repo_root, wire, sizeof(wire),
+                              VCS_TAG_DEV_MIRROR_RECEIPT,
+                              receipt_root_out, NULL);
+}
+
 #ifdef _WIN32
-    char zvcs_path[PATH_MAX];
-    struct platform_directory_transaction directory;
-    struct platform_directory_lock lock;
-    struct platform_directory_child log;
-    platform_directory_transaction_init(&directory);
-    platform_directory_lock_init(&lock);
-    platform_directory_child_init(&log);
-    if (!mirror_zvcs_path(repo_root, zvcs_path) ||
-        !platform_directory_transaction_open(&directory, zvcs_path))
-        return false;
+static bool mirror_record_locked_windows(
+    const char *repo_root, const uint8_t job_root[32],
+    struct platform_directory_transaction *directory,
+    struct platform_directory_lock *lock,
+    struct platform_directory_child *log,
+    uint8_t receipt_root_out[32], bool *reused_out)
+{
     bool ok = platform_directory_lock_acquire(
-        &directory, "publication.mirrors.lock", true,
-        PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &lock) == PLATFORM_DIRECTORY_OK;
+        directory, "publication.mirrors.lock", true,
+        PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, lock) == PLATFORM_DIRECTORY_OK;
     bool created = false;
     if (ok)
         ok = platform_directory_child_open_result(
-            &directory, "publication.mirrors.log", true, true, &log,
+            directory, "publication.mirrors.log", true, true, log,
             &created) == PLATFORM_DIRECTORY_OK;
     if (ok && created)
-        ok = platform_directory_transaction_flush(&directory);
+        ok = platform_directory_transaction_flush(directory);
     struct mirror_scan scan = {0};
     uint64_t end = 0;
     if (ok)
-        ok = mirror_scan_child(repo_root, job_root, &log, true, &scan, &end);
+        ok = mirror_scan_child(repo_root, job_root, log, true, &scan, &end);
     if (ok && scan.found) {
         ok = memcmp(scan.receipt_root, receipt_root_out, 32) == 0;
         if (ok && reused_out) *reused_out = true;
     } else if (ok) {
-        ok = mirror_append_child(&log, end, receipt_root_out);
+        ok = mirror_append_child(log, end, receipt_root_out);
     }
-    platform_directory_child_close(&log);
-    platform_directory_lock_release(&lock);
-    platform_directory_transaction_close(&directory);
-    if (!ok)
-        LOG_WARN("vcs.devloop.mirror",
-                 "mirror receipt append or exact retry validation failed");
+    platform_directory_child_close(log);
+    platform_directory_lock_release(lock);
+    platform_directory_transaction_close(directory);
     return ok;
+}
 #else
-    char lock_path[PATH_MAX], log_path[PATH_MAX];
-    if (!mirror_path(repo_root, "publication.mirrors.lock", lock_path) ||
-        !mirror_path(repo_root, "publication.mirrors.log", log_path))
-        return false;
+static int mirror_record_open_lock(const char *lock_path)
+{
     int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0) {
         if (lock_fd >= 0) close(lock_fd);
-        return false;
+        return -1;
     }
+    return lock_fd;
+}
+
+static bool mirror_record_append_locked(
+    const char *repo_root, const uint8_t job_root[32], const char *log_path,
+    int lock_fd, uint8_t receipt_root_out[32], bool *reused_out)
+{
     struct stat st;
     struct mirror_scan scan = {0};
     bool log_exists = stat(log_path, &st) == 0;
@@ -465,6 +526,48 @@ bool vcs_devloop_mirror_record(
     }
     (void)flock(lock_fd, LOCK_UN);
     close(lock_fd);
+    return ok;
+}
+#endif
+
+bool vcs_devloop_mirror_record(
+    const char *repo_root, const uint8_t job_root[32],
+    const uint8_t *git_oid, size_t git_oid_len,
+    uint8_t receipt_root_out[32], bool *reused_out)
+{
+    if (reused_out) *reused_out = false;
+    if (!mirror_record_put_receipt(repo_root, job_root, git_oid, git_oid_len,
+                                   receipt_root_out))
+        return false;
+#ifdef _WIN32
+    char zvcs_path[PATH_MAX];
+    struct platform_directory_transaction directory;
+    struct platform_directory_lock lock;
+    struct platform_directory_child log;
+    platform_directory_transaction_init(&directory);
+    platform_directory_lock_init(&lock);
+    platform_directory_child_init(&log);
+    if (!mirror_zvcs_path(repo_root, zvcs_path) ||
+        !platform_directory_transaction_open(&directory, zvcs_path))
+        return false;
+    bool ok = mirror_record_locked_windows(
+        repo_root, job_root, &directory, &lock, &log, receipt_root_out,
+        reused_out);
+    if (!ok)
+        LOG_WARN("vcs.devloop.mirror",
+                 "mirror receipt append or exact retry validation failed");
+    return ok;
+#else
+    char lock_path[PATH_MAX], log_path[PATH_MAX];
+    if (!mirror_path(repo_root, "publication.mirrors.lock", lock_path) ||
+        !mirror_path(repo_root, "publication.mirrors.log", log_path))
+        return false;
+    int lock_fd = mirror_record_open_lock(lock_path);
+    if (lock_fd < 0)
+        return false;
+    bool ok = mirror_record_append_locked(
+        repo_root, job_root, log_path, lock_fd, receipt_root_out,
+        reused_out);
     if (!ok)
         LOG_WARN("vcs.devloop.mirror",
                  "mirror receipt append or exact retry validation failed");
