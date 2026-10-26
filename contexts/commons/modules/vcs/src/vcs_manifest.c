@@ -222,6 +222,27 @@ bool vcs_manifest_serialize(const struct vcs_manifest *m, uint8_t **out,
     return true;
 }
 
+enum manifest_entry_header_result {
+    MANIFEST_ENTRY_HEADER_OK,
+    MANIFEST_ENTRY_HEADER_TRUNCATED,
+    MANIFEST_ENTRY_HEADER_BAD_PATH,
+};
+
+static enum manifest_entry_header_result manifest_read_entry_header(
+    const uint8_t *in, size_t len, size_t *off, uint16_t *plen_out)
+{
+    if (*off + 2 > len)
+        return MANIFEST_ENTRY_HEADER_TRUNCATED;
+    uint16_t plen = vcs_rd_u16le(in + *off);
+    *off += 2;
+    if (plen == 0 || plen > VCS_PATH_MAX)
+        return MANIFEST_ENTRY_HEADER_BAD_PATH;
+    if (*off + plen + 4 + 8 + 32 > len)
+        return MANIFEST_ENTRY_HEADER_TRUNCATED;
+    *plen_out = plen;
+    return MANIFEST_ENTRY_HEADER_OK;
+}
+
 bool vcs_manifest_parse(const uint8_t *in, size_t len, struct vcs_manifest *out)
 {
     if (!in || !out)
@@ -237,14 +258,11 @@ bool vcs_manifest_parse(const uint8_t *in, size_t len, struct vcs_manifest *out)
     off += 8;
 
     for (uint64_t i = 0; i < count; i++) {
-        if (off + 2 > len)
-            goto trunc;
-        uint16_t plen = vcs_rd_u16le(in + off);
-        off += 2;
-        if (plen == 0 || plen > VCS_PATH_MAX)
-            goto badpath;
-        if (off + plen + 4 + 8 + 32 > len)
-            goto trunc;
+        uint16_t plen = 0;
+        enum manifest_entry_header_result header =
+            manifest_read_entry_header(in, len, &off, &plen);
+        if (header == MANIFEST_ENTRY_HEADER_TRUNCATED) goto trunc;
+        if (header == MANIFEST_ENTRY_HEADER_BAD_PATH) goto badpath;
         char *path = zcl_malloc((size_t)plen + 1, "vcs_parse_path");
         if (!path) {
             vcs_manifest_free(out);
@@ -336,6 +354,21 @@ struct build_ctx {
     bool                    err;
 };
 
+static void manifest_find_cached_blob(
+    struct build_ctx *b, const char *relpath, uint64_t size,
+    int64_t mtime_ns, int64_t ctime_ns, bool settled,
+    uint8_t blob[32], bool *have_blob)
+{
+    if (b->sc && settled) {
+        const struct vcs_stat_row *row = vcs_stat_cache_find(b->sc, relpath);
+        if (row && row->mtime_ns == mtime_ns && row->size == (int64_t)size &&
+            row->ctime_ns == ctime_ns) {
+            memcpy(blob, row->blob, 32);
+            *have_blob = true;
+        }
+    }
+}
+
 static bool build_cb(const char *relpath, uint32_t mode, uint64_t size,
                      int64_t mtime_ns, int64_t ctime_ns, void *user)
 {
@@ -347,14 +380,8 @@ static bool build_cb(const char *relpath, uint32_t mode, uint64_t size,
      * VCS_STAT_SETTLE_NS in vcs/vcs_index.h. Inside the tick that stamped
      * it, a same-length rewrite reproduces every field of the key. */
     bool settled = vcs_stat_row_settled(mtime_ns, ctime_ns);
-    if (b->sc && settled) {
-        const struct vcs_stat_row *row = vcs_stat_cache_find(b->sc, relpath);
-        if (row && row->mtime_ns == mtime_ns && row->size == (int64_t)size &&
-            row->ctime_ns == ctime_ns) {
-            memcpy(blob, row->blob, 32);
-            have_blob = true;
-        }
-    }
+    manifest_find_cached_blob(b, relpath, size, mtime_ns, ctime_ns,
+                              settled, blob, &have_blob);
 
     if (!have_blob) {
         if (!vcs_blob_hash_file(b->repo_root, relpath, blob)) {
@@ -388,6 +415,32 @@ static bool build_cb(const char *relpath, uint32_t mode, uint64_t size,
         return false;
     }
     return true;
+}
+
+static bool manifest_write_stat_cache(
+    struct vcs_index *idx, struct vcs_manifest *out, struct build_ctx *b)
+{
+    bool ok = true;
+    if (idx) {
+        if (vcs_index_begin(idx)) {
+            ok = vcs_index_stat_prune_in_tx(idx, out);
+            for (size_t i = 0; ok && i < b->dirty_count; i++) {
+                struct dirty_row *dr = &b->dirty[i];
+                if (!vcs_index_stat_put_in_tx(idx, dr->path, dr->mtime_ns,
+                                              dr->size, dr->ctime_ns, dr->blob)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok)
+                ok = vcs_index_commit(idx);
+            else
+                vcs_index_rollback(idx);
+        } else {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 bool vcs_manifest_build(const char *repo_root, struct vcs_index *idx,
@@ -428,26 +481,7 @@ bool vcs_manifest_build(const char *repo_root, struct vcs_index *idx,
      * agent worktrees may disappear or become newly ignored, and their stale
      * cache rows must not tax every later snapshot. */
     vcs_manifest_sort(out);
-    bool ok = true;
-    if (idx) {
-        if (vcs_index_begin(idx)) {
-            ok = vcs_index_stat_prune_in_tx(idx, out);
-            for (size_t i = 0; ok && i < b.dirty_count; i++) {
-                struct dirty_row *dr = &b.dirty[i];
-                if (!vcs_index_stat_put_in_tx(idx, dr->path, dr->mtime_ns,
-                                              dr->size, dr->ctime_ns, dr->blob)) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok)
-                ok = vcs_index_commit(idx);
-            else
-                vcs_index_rollback(idx);
-        } else {
-            ok = false;
-        }
-    }
+    bool ok = manifest_write_stat_cache(idx, out, &b);
 
     for (size_t i = 0; i < b.dirty_count; i++)
         free(b.dirty[i].path);

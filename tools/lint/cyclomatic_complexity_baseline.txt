@@ -108,9 +108,6 @@ contexts/commons/modules/vcs/src/space.c:vcs_space_result_string:17
 contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:26
 contexts/commons/modules/vcs/src/vcs_devloop.c:publication_artifact_chain_load:35
 contexts/commons/modules/vcs/src/vcs_devloop.c:vcs_devloop_publication_bind_accepted_candidate:33
-contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16
-contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_build:18
-contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_parse:16
 contexts/commons/modules/vcs/src/vcs_revert.c:vcs_revert:25
 contexts/commons/modules/vcs/src/vcs_seal.c:vcs_seal_load_globs:21
 contexts/commons/modules/vcs/src/zcode_app_run_observation.c:vcs_zcode_app_run_observation_v1_validate:21
