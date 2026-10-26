@@ -115,6 +115,48 @@ void boot_endpoint_records_register(void)
 
 /* ── loading filed records at start ────────────────────────────────── */
 
+/* Whether two snapshots of one file describe the same bytes: size and
+ * every timestamp and identity field equal, so the read raced no
+ * rewrite. */
+static bool ber_snapshots_match(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    if (before->size != after->size ||
+        before->modified_seconds != after->modified_seconds ||
+        before->modified_nanoseconds != after->modified_nanoseconds)
+        return false;
+    if (before->changed_seconds != after->changed_seconds ||
+        before->changed_nanoseconds != after->changed_nanoseconds)
+        return false;
+    return before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high;
+}
+
+/* Length of the hex once trailing newline, carriage-return and space
+ * bytes are dropped. */
+static size_t ber_trim_hex_tail(char *hex, size_t len)
+{
+    while (len > 0 && (hex[len - 1] == '\n' || hex[len - 1] == '\r' ||
+                       hex[len - 1] == ' '))
+        len--;
+    return len;
+}
+
+/* NUL-terminate and decode hex[0..len) into `wire`. Returns the decoded
+ * byte count, or 0 when the text is empty, not even-length, not hex, or
+ * decodes to nothing. */
+static size_t ber_decode_hex_record(char *hex, size_t len, uint8_t *wire,
+                                    size_t wire_size)
+{
+    hex[len] = '\0';
+    if (len == 0 || (len & 1) != 0 || !IsHex(hex))
+        return 0;
+    int decoded = ParseHex(hex, wire, wire_size);
+    return decoded > 0 ? (size_t)decoded : 0;
+}
+
 /* Read one <record_key>.zid file's hex into `wire`. Returns the byte
  * count, or 0 for anything malformed — a file that is not even-length
  * hex is not a record, and guessing at it is how a witness becomes an
@@ -137,26 +179,33 @@ static size_t ber_read_record_file(const char *dir, const char *name,
         &file, hex, (size_t)before.size, 0);
     bool stable = read == (int64_t)before.size &&
                   platform_positioned_file_snapshot(&file, &after) &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high;
+                  ber_snapshots_match(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable)
         return 0;
-    size_t r = (size_t)read;
-    while (r > 0 && (hex[r - 1] == '\n' || hex[r - 1] == '\r' ||
-                     hex[r - 1] == ' '))
-        r--;
-    hex[r] = '\0';
-    if (r == 0 || (r & 1) != 0 || !IsHex(hex))
-        return 0;
-    int decoded = ParseHex(hex, wire, wire_size);
-    return decoded > 0 ? (size_t)decoded : 0;
+    size_t r = ber_trim_hex_tail(hex, (size_t)read);
+    return ber_decode_hex_record(hex, r, wire, wire_size);
+}
+
+/* <64 hex chars>.zid — anything else is not one of ours. */
+static bool ber_name_is_record_key(const char *name)
+{
+    bool ok = strlen(name) == 68 && strcmp(name + 64, ".zid") == 0;
+    for (size_t j = 0; ok && j < 64; ++j) {
+        char c = name[j];
+        ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+             (c >= 'A' && c <= 'F');
+    }
+    return ok;
+}
+
+/* Build "<datadir>/zcode/endpoints" in `dir`. Returns false when the
+ * path does not fit — the caller reports it. */
+static bool ber_endpoints_dir_path(const char *datadir, char *dir,
+                                   size_t dir_size)
+{
+    int n = snprintf(dir, dir_size, "%s/zcode/endpoints", datadir);
+    return n > 0 && (size_t)n < dir_size;
 }
 
 int boot_endpoint_records_load(const char *datadir)
@@ -165,8 +214,7 @@ int boot_endpoint_records_load(const char *datadir)
         return 0;
 
     char dir[1200];
-    int n = snprintf(dir, sizeof(dir), "%s/zcode/endpoints", datadir);
-    if (n <= 0 || (size_t)n >= sizeof(dir))
+    if (!ber_endpoints_dir_path(datadir, dir, sizeof(dir)))
         LOG_RETURN(0, BER_LOG, "load: path too long under datadir");
 
     struct platform_directory_list files;
@@ -179,19 +227,8 @@ int boot_endpoint_records_load(const char *datadir)
     int installed = 0, discarded = 0, scanned = 0;
     for (size_t i = 0; i < files.count && scanned < BER_SCAN_MAX; ++i) {
         const char *name = files.entries[i].name;
-        size_t len = strlen(name);
-        /* <64 hex chars>.zid — anything else is not one of ours. */
-        if (len != 68 || strcmp(name + 64, ".zid") != 0)
+        if (!ber_name_is_record_key(name))
             continue;
-        bool name_is_hex = true;
-        for (size_t j = 0; j < 64; ++j)
-            if (!((name[j] >= '0' && name[j] <= '9') ||
-                  (name[j] >= 'a' && name[j] <= 'f') ||
-                  (name[j] >= 'A' && name[j] <= 'F'))) {
-                name_is_hex = false;
-                break;
-            }
-        if (!name_is_hex) continue;
         scanned++;
 
         uint8_t wire[ZID_DOC_MAX];
