@@ -85,12 +85,15 @@ static enum snap_row_status snapshot_emit_record(FILE *out,
  * canonical 32-byte txid, size the inline/heap record buffer for its script,
  * then emit the record.  Always reports the row's effective script length in
  * *eff_slen_out (the OOM log needs it) and, on SNAP_ROW_WRITTEN, its value in
- * *value_out.  Returns the row status; the caller logs the failures. */
+ * *value_out.  The heap record buffer (if any) is handed back in *heap_out and
+ * stays owned by the caller, who frees it after logging a failure.  Returns the
+ * row status; the caller logs the failures. */
 static enum snap_row_status snapshot_stream_row(FILE *out,
                                                 struct sha3_256_ctx *ctx,
                                                 sqlite3_stmt *s,
                                                 uint32_t *eff_slen_out,
-                                                int64_t *value_out)
+                                                int64_t *value_out,
+                                                uint8_t **heap_out)
 {
     const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
     int txid_len = sqlite3_column_bytes(s, 0);
@@ -115,16 +118,13 @@ static enum snap_row_status snapshot_stream_row(FILE *out,
         cap = UTXO_SHA3_RECORD_MAX(eff_slen);
         heap = zcl_malloc(cap, "coins_kv_snapshot_record");
         if (!heap) return SNAP_ROW_OOM;
+        *heap_out = heap;
         rec = heap;
     }
     enum snap_row_status emitted = snapshot_emit_record(
         out, ctx, rec, cap, txid, vout, value, eff_script, eff_slen,
         height_c, cb_int);
-    if (emitted != SNAP_ROW_WRITTEN) {
-        if (heap) free(heap);
-        return emitted;
-    }
-    if (heap) free(heap);
+    if (emitted != SNAP_ROW_WRITTEN) return emitted;
 
     *value_out = value;
     return SNAP_ROW_WRITTEN;
@@ -169,8 +169,9 @@ static bool stream_coins_body(FILE *out, sqlite3 *db, struct sha3_256_ctx *ctx,
     while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
         uint32_t eff_slen = 0;
         int64_t value = 0;
+        uint8_t *heap = NULL;
         enum snap_row_status row =
-            snapshot_stream_row(out, ctx, s, &eff_slen, &value);
+            snapshot_stream_row(out, ctx, s, &eff_slen, &value, &heap);
         if (row == SNAP_ROW_SKIPPED) continue;
         if (row == SNAP_ROW_OOM) {
             LOG_WARN("coins_kv", "snapshot_write: oom for script_len=%u",
@@ -180,14 +181,17 @@ static bool stream_coins_body(FILE *out, sqlite3 *db, struct sha3_256_ctx *ctx,
         }
         if (row == SNAP_ROW_SERIALISE) {
             LOG_WARN("coins_kv", "snapshot_write: serialise failed");
+            if (heap) free(heap);
             ok = false;
             break;
         }
         if (row == SNAP_ROW_FWRITE) {
             LOG_WARN("coins_kv", "snapshot_write: record fwrite failed");
+            if (heap) free(heap);
             ok = false;
             break;
         }
+        if (heap) free(heap);
         total_supply += value;
         count++;
     }
