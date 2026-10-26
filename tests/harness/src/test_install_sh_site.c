@@ -58,6 +58,19 @@ int test_install_sh_site(void)
               body && strstr(body, "__Z23_PIN__") == NULL);
     ISH_CHECK("the Z23_PIN= assignment line survived substitution",
               body && strstr(body, "Z23_PIN=\"") != NULL);
+    ISH_CHECK("the script reports each step on stderr",
+              body && strstr(body, "say \"checking tools") != NULL &&
+                  strstr(body, "say \"cloning ") != NULL &&
+                  strstr(body, "say \"updating existing clone") != NULL &&
+                  strstr(body, "say \"building with $jobs jobs") != NULL &&
+                  strstr(body, "say \"done\"") != NULL &&
+                  strstr(body, ">&2") != NULL);
+    ISH_CHECK("the script ends with the contributor pointer after Built",
+              body && strstr(body, "echo \"Built. Next:") != NULL &&
+                  strstr(strstr(body, "echo \"Built. Next:"),
+                         "Want to contribute? Read $SRC/.github/"
+                         "CONTRIBUTING.md, then post a claim in board room "
+                         "contrib (https://z23.sh/start).") != NULL);
 
     /* HEAD: same headers, no body. */
     size_t head_n = install_sh_handle_request("HEAD", "/install.sh", NULL, 0,

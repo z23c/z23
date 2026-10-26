@@ -20,29 +20,33 @@ static const char INSTALL_FROM_SOURCE_SH_0[] =
     "3_SRC:-$HOME/z23}\"\n# The server that serves this file rewrites this literal placeholder to\n# i"
     "ts own build commit before responding; an empty value means the\n# running node could not name on"
     "e, and this script falls back to main.\nZ23_PIN=\"__Z23_PIN__\"\n\ndie() {\n    echo \"install_fr"
-    "om_source: $*\" >&2\n    exit 2\n}\n\nneed() {\n    command -v \"$1\" >/dev/null 2>&1 || die \"mi"
-    "ssing required command: $1\"\n}\n\nneed git\nneed make\n\ncc_ok=\"\"\nprobe=\"./.z23-cc-probe.$$\""
-    "\nmkdir -p \"$probe\" 2>/dev/null ||\n    die \"cannot create a working directory to probe the C "
-    "compiler\"\nprintf 'int main(void){return 0;}\\n' >\"$probe/probe.c\"\nfor candidate in cc gcc cl"
-    "ang; do\n    command -v \"$candidate\" >/dev/null 2>&1 || continue\n    if \"$candidate\" -std=c2"
-    "3 -o \"$probe/probe\" \"$probe/probe.c\" \\\n            >/dev/null 2>&1; then\n        cc_ok=\"$"
-    "candidate\"\n        break\n    fi\ndone\nrm -rf \"$probe\"\n[ -n \"$cc_ok\" ] ||\n    die \"miss"
-    "ing required command: a C compiler (cc, gcc, or clang) accepting -std=c23\"\n\nif [ -d \"$SRC\" ]"
-    "; then\n    [ -d \"$SRC/.git\" ] ||\n        die \"$SRC exists and is not a z23 git clone; set Z2"
-    "3_SRC to pick another path\"\n    url=$(git -C \"$SRC\" remote get-url origin 2>/dev/null || echo"
-    " \"\")\n    case \"$url\" in\n    \"$REPO_URL\" | \"${REPO_URL%.git}\") ;;\n    *)\n        die \""
-    "$SRC is a git clone of '$url', not $REPO_URL; set Z23_SRC to pick another path\"\n        ;;\n   "
-    " esac\n    git -C \"$SRC\" fetch origin\nelse\n    git clone \"$REPO_URL\" \"$SRC\"\nfi\n\nif [ -"
-    "n \"$Z23_PIN\" ]; then\n    echo \"install_from_source: checking out pinned commit $Z23_PIN\"\n  "
-    "  git -C \"$SRC\" checkout \"$Z23_PIN\"\nelse\n    echo \"install_from_source: no commit pin was "
-    "served; building main instead\"\n    git -C \"$SRC\" checkout main\n    git -C \"$SRC\" p"
-    "ull --ff-only origin main\nfi\n\njobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)\n\n(\n  "
-    "  cd \"$SRC\"\n    CC=\"$cc_ok\" make setup\n    CC=\"$cc_ok\" make -j\"$jo";
+    "om_source: $*\" >&2\n    exit 2\n}\n\nsay() {\n    echo \"install_from_source: $*\" >&2\n}\n\nnee"
+    "d() {\n    command -v \"$1\" >/dev/null 2>&1 || die \"missing required command: $1\"\n}\n\nsay \""
+    "checking tools (git, make, a C23 compiler)\"\nneed git\nneed make\n\ncc_ok=\"\"\nprobe=\"./.z23-c"
+    "c-probe.$$\"\nmkdir -p \"$probe\" 2>/dev/null ||\n    die \"cannot create a working directory to "
+    "probe the C compiler\"\nprintf 'int main(void){return 0;}\\n' >\"$probe/probe.c\"\nfor candidate "
+    "in cc gcc clang; do\n    command -v \"$candidate\" >/dev/null 2>&1 || continue\n    if \"$candida"
+    "te\" -std=c23 -o \"$probe/probe\" \"$probe/probe.c\" \\\n            >/dev/null 2>&1; then\n     "
+    "   cc_ok=\"$candidate\"\n        break\n    fi\ndone\nrm -rf \"$probe\"\n[ -n \"$cc_ok\" ] ||\n  "
+    "  die \"missing required command: a C compiler (cc, gcc, or clang) accepting -std=c23\"\n\nif [ -"
+    "d \"$SRC\" ]; then\n    [ -d \"$SRC/.git\" ] ||\n        die \"$SRC exists and is not a z23 git c"
+    "lone; set Z23_SRC to pick another path\"\n    url=$(git -C \"$SRC\" remote get-url origin 2>/dev/"
+    "null || echo \"\")\n    case \"$url\" in\n    \"$REPO_URL\" | \"${REPO_URL%.git}\") ;;\n    *)\n "
+    "       die \"$SRC is a git clone of '$url', not $REPO_URL; set Z23_SRC to pick another path\"\n  "
+    "      ;;\n    esac\n    say \"updating existing clone in $SRC\"\n    git -C \"$SRC\" fetch origin"
+    "\nelse\n    say \"cloning $REPO_URL into $SRC\"\n    git clone \"$REPO_URL\" \"$SRC\"\nfi\n\nif ["
+    " -n \"$Z23_PIN\" ]; then\n    say \"checking out pinned commit $Z23_PIN\"\n    git -C \"$SR"
+    "C\" checkout \"$Z23_PIN\"\nelse\n    say \"no commit pin was served; building main instead\"\n   "
+    " git -C \"$SRC\" checkout main\n    git -C \"$SRC\" pull --ff-only origin m";
 static const char INSTALL_FROM_SOURCE_SH_1[] =
-    "bs\" z23\n)\n\necho \"Built. Next: (cd \\\"$SRC\\\" && build/bin/z23) to start your node, then (c"
-    "d \\\"$SRC\\\" && build/bin/z23 join) to join the C23 software commons.\"\n";
+    "ain\nfi\n\njobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)\nsay \"building with $jobs job"
+    "s (this takes a while)\"\n\n(\n    cd \"$SRC\"\n    CC=\"$cc_ok\" make setup\n    CC=\"$cc_ok\" m"
+    "ake -j\"$jobs\" z23\n)\n\nsay \"done\"\necho \"Built. Next: (cd \\\"$SRC\\\" && build/bin/z23) to"
+    " start your node, then (cd \\\"$SRC\\\" && build/bin/z23 join) to join the C23 software commons.\""
+    "\n\necho \"Want to contribute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room"
+    " contrib (https://z23.sh/start).\"\n";
 
-static char _INSTALL_FROM_SOURCE_SH_buf[3158];
+static char _INSTALL_FROM_SOURCE_SH_buf[3483];
 __attribute__((unused))
 static const char *INSTALL_FROM_SOURCE_SH_get(void) {
     size_t off = 0;

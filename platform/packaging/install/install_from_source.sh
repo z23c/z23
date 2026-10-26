@@ -33,10 +33,15 @@ die() {
     exit 2
 }
 
+say() {
+    echo "install_from_source: $*" >&2
+}
+
 need() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+say "checking tools (git, make, a C23 compiler)"
 need git
 need make
 
@@ -67,21 +72,24 @@ if [ -d "$SRC" ]; then
         die "$SRC is a git clone of '$url', not $REPO_URL; set Z23_SRC to pick another path"
         ;;
     esac
+    say "updating existing clone in $SRC"
     git -C "$SRC" fetch origin
 else
+    say "cloning $REPO_URL into $SRC"
     git clone "$REPO_URL" "$SRC"
 fi
 
 if [ -n "$Z23_PIN" ]; then
-    echo "install_from_source: checking out pinned commit $Z23_PIN"
+    say "checking out pinned commit $Z23_PIN"
     git -C "$SRC" checkout "$Z23_PIN"
 else
-    echo "install_from_source: no commit pin was served; building main instead"
+    say "no commit pin was served; building main instead"
     git -C "$SRC" checkout main
     git -C "$SRC" pull --ff-only origin main
 fi
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+say "building with $jobs jobs (this takes a while)"
 
 (
     cd "$SRC"
@@ -89,4 +97,7 @@ jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
     CC="$cc_ok" make -j"$jobs" z23
 )
 
+say "done"
 echo "Built. Next: (cd \"$SRC\" && build/bin/z23) to start your node, then (cd \"$SRC\" && build/bin/z23 join) to join the C23 software commons."
+
+echo "Want to contribute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room contrib (https://z23.sh/start)."
