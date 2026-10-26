@@ -313,15 +313,11 @@ done:
     return matches;
 }
 
-/* What mv_prepare_possession_verification() decided. */
 enum mv_possession_preflight {
-    MV_POSSESSION_PREFLIGHT_RUN,  /* fingerprints allocated; run both passes */
-    MV_POSSESSION_PREFLIGHT_STOP, /* manifest state is already final */
+    MV_POSSESSION_PREFLIGHT_RUN,
+    MV_POSSESSION_PREFLIGHT_STOP,
 };
 
-/* Zero the caller's running totals, re-check the manifest's own root
- * evidence, and allocate the fingerprint table the two passes fill. Every
- * STOP path but a null manifest records its verification_gap here. */
 static enum mv_possession_preflight mv_prepare_possession_verification(
     const char *zcode_dir, struct mv_manifest_read *manifest,
     struct mv_chunk_fingerprint **fingerprints_out,
@@ -363,11 +359,6 @@ static enum mv_possession_preflight mv_prepare_possession_verification(
     return MV_POSSESSION_PREFLIGHT_RUN;
 }
 
-/* First pass over one chunk coordinate: budget it, open its CAS object,
- * read and hash it, and file the fingerprint the second pass re-checks.
- * Returns NULL when the coordinate verifies; any other return is the
- * reason to hand to mv_verification_gap(), with every resource already
- * released. */
 static const char *mv_verify_chunk_coordinate(
     const char *zcode_dir, const struct vcs_package_file *file,
     uint32_t chunk_index, uint64_t byte_budget, uint32_t operation_budget,
@@ -589,9 +580,6 @@ static int mv_name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-/* Zero the caller's outputs, then say whether the request can be served:
- * a store directory and every output pointer must be given, and capacity
- * may only be requested when there is a buffer to fill. */
 static bool mv_names_prepare_scan(const char *zcode_dir, char (*out)[65],
                                   size_t out_cap, size_t *written_out,
                                   size_t *total_out, bool *truncated_out)
@@ -606,10 +594,6 @@ static bool mv_names_prepare_scan(const char *zcode_dir, char (*out)[65],
         (out || out_cap == 0);
 }
 
-/* Collect manifest names from an open directory stream, keeping at most
- * MV_MANIFEST_SCAN_MAX of them; entries that are not lowercase hex roots
- * are skipped. Leaves errno exactly as the final readdir() left it, so the
- * caller decides whether the scan failed. */
 static void mv_scan_manifest_names(DIR *dir, char (*names)[65],
                                    size_t *seen_out, bool *truncated_out)
 {
