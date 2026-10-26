@@ -282,31 +282,13 @@ bool node_db_turbo_maybe_checkpoint(struct node_db *ndb,
     return true;
 }
 
-bool node_db_wal_checkpoint_result(struct node_db *ndb,
-                                   struct wal_ckpt_record *out)
+/* True only when the connection's journal mode is actually WAL — in-memory
+ * and rollback-journal handles report something else here. */
+static bool wal_checkpoint_journal_mode_is_wal(sqlite3 *db)
 {
     sqlite3_stmt *stmt = NULL;
     bool is_wal = false;
-
-    /* Give `out` a definite meaning on every exit, including the two early
-     * ones. A caller that reads a record this function never touched would be
-     * reading the last checkpoint's numbers as if they were this one's. */
-    if (out) {
-        static const struct wal_ckpt_record unattempted = {
-            .outcome = WAL_CKPT_UNKNOWN, .rc = 0,
-            .log_frames = -1, .ckpt_frames = -1, .source = "node_db",
-        };
-        *out = unattempted;
-    }
-
-    if (!ndb || !ndb->open) return false;
-    struct db_lifetime_scope lifetime_scope;
-    db_lifetime_scope_enter(
-        &lifetime_scope, "node_db.checkpoint",
-        ndb->lifetime_backing_owner ? DB_LIFETIME_BACKING_OWNER
-                                    : DB_LIFETIME_HANDLE_OWNER,
-        ndb->lifetime_generation);
-    if (sqlite3_prepare_v2(ndb->db, "PRAGMA journal_mode", -1, &stmt, NULL) == SQLITE_OK &&
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &stmt, NULL) == SQLITE_OK &&
         stmt && sqlite3_step(stmt) == SQLITE_ROW) {  // raw-sql-ok:read-only-introspection
         /* sqlite3_column_text points INTO the stmt; it is freed by
          * sqlite3_finalize below. Capture the comparison while the stmt is
@@ -316,6 +298,62 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
     }
     if (stmt)
         sqlite3_finalize(stmt);
+    return is_wal;
+}
+
+/* A .wal file reset (TRUNCATE) failure that is a real error: not "never
+ * ran" (-1), not success, and not the benign reader-lock race (BUSY/LOCKED)
+ * that PASSIVE already owns the verdict for. */
+static bool wal_checkpoint_truncate_hard_failure(int truncate_rc)
+{
+    return truncate_rc != -1 && truncate_rc != SQLITE_OK &&
+           truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
+}
+
+/* Build the outcome record from the PASSIVE checkpoint's verdict and counts. */
+static struct wal_ckpt_record wal_checkpoint_record_from_result(
+    int rc, int log_frames, int ckpt_frames)
+{
+    struct wal_ckpt_record rec = {
+        .outcome = wal_ckpt_classify(rc == SQLITE_OK,
+                                     rc == SQLITE_BUSY || rc == SQLITE_LOCKED,
+                                     log_frames, ckpt_frames),
+        .rc = rc,
+        .log_frames = log_frames,
+        .ckpt_frames = ckpt_frames,
+        .source = "node_db",
+    };
+    return rec;
+}
+
+/* Pre-fill *out so an untouched record can never be mistaken for a result. */
+static void wal_checkpoint_out_set_unattempted(struct wal_ckpt_record *out)
+{
+    if (out) {
+        static const struct wal_ckpt_record unattempted = {
+            .outcome = WAL_CKPT_UNKNOWN, .rc = 0,
+            .log_frames = -1, .ckpt_frames = -1, .source = "node_db",
+        };
+        *out = unattempted;
+    }
+}
+
+bool node_db_wal_checkpoint_result(struct node_db *ndb,
+                                   struct wal_ckpt_record *out)
+{
+    /* Give `out` a definite meaning on every exit, including the two early
+     * ones. A caller that reads a record this function never touched would be
+     * reading the last checkpoint's numbers as if they were this one's. */
+    wal_checkpoint_out_set_unattempted(out);
+
+    if (!ndb || !ndb->open) return false;
+    struct db_lifetime_scope lifetime_scope;
+    db_lifetime_scope_enter(
+        &lifetime_scope, "node_db.checkpoint",
+        ndb->lifetime_backing_owner ? DB_LIFETIME_BACKING_OWNER
+                                    : DB_LIFETIME_HANDLE_OWNER,
+        ndb->lifetime_generation);
+    bool is_wal = wal_checkpoint_journal_mode_is_wal(ndb->db);
     if (!is_wal) {
         /* Not a WAL database (an in-memory or rollback-journal handle): there
          * is no write-ahead log to reclaim, so this is exempt, not drained.
@@ -359,8 +397,7 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
                                                  SQLITE_CHECKPOINT_TRUNCATE,
                                                  NULL, NULL);
     bool truncate_hard_failure =
-        truncate_rc != -1 && truncate_rc != SQLITE_OK &&
-        truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
+        wal_checkpoint_truncate_hard_failure(truncate_rc);
     int rc = truncate_hard_failure ? truncate_rc : passive_rc;
     if (truncate_hard_failure)
         LOG_ERROR("db",
@@ -368,15 +405,8 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
                   "truncate_rc=%d wal_frames=%d moved=%d",
                   truncate_rc, log_frames, ckpt_frames);
 
-    struct wal_ckpt_record rec = {
-        .outcome = wal_ckpt_classify(rc == SQLITE_OK,
-                                     rc == SQLITE_BUSY || rc == SQLITE_LOCKED,
-                                     log_frames, ckpt_frames),
-        .rc = rc,
-        .log_frames = log_frames,
-        .ckpt_frames = ckpt_frames,
-        .source = "node_db",
-    };
+    struct wal_ckpt_record rec =
+        wal_checkpoint_record_from_result(rc, log_frames, ckpt_frames);
     wal_ckpt_stats_note(&rec);
     if (out)
         *out = rec;

@@ -1212,7 +1212,6 @@ engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
 engine/models/src/database_migrate_features.c:node_db_migrate_features:37
 engine/models/src/database_migrate_features_v49_up.c:node_db_migrate_features_v49_up:25
 engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
-engine/models/src/database_modes.c:node_db_wal_checkpoint_result:21
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
 engine/models/src/fleet_board_post.c:db_fleet_board_ids_before:18
