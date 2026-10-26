@@ -131,6 +131,190 @@ static void offer_runtime(struct market_offer_runtime *rt,
     rt->now_unix = now_unix;
 }
 
+static bool offer_write_content_fixtures(const char *filepath,
+                                        const char *second_path,
+                                        const uint8_t *payload,
+                                        size_t payload_size)
+{
+    return offer_write_file(filepath, payload, payload_size) &&
+        offer_write_file(second_path, payload, payload_size - 1);
+}
+
+static bool offer_open_wallet_database(bool files_ready,
+                                      const struct chain_params *params,
+                                      struct node_db *ndb,
+                                      const char *dbpath)
+{
+    return files_ready && params && node_db_open(ndb, dbpath) &&
+        wallet_lock_unlock(NULL, NULL, "market-offer-test").ok;
+}
+
+static bool offer_plan_matches(const struct zcl_result *r,
+                              const struct market_offer_view *plan,
+                              const uint8_t expected_root[32],
+                              size_t payload_size, int64_t now,
+                              const struct offer_fixture *fixture)
+{
+    return r->ok && memcmp(plan->root_hash, expected_root, 32) == 0 &&
+        plan->size_bytes == payload_size && plan->num_chunks == 1 &&
+        plan->price_per_mb == 1200 && plan->total_zat > 0 &&
+        strcmp(plan->filename, "offer.bin") == 0 &&
+        plan->expires_unix == now + FILE_MARKET_OFFER_MAX_LIFETIME_SECS &&
+        !plan->idempotent_replay && !plan->announced &&
+        fixture->announcements == 0;
+}
+
+static bool offer_refused_with_code(const struct zcl_result *r, int code)
+{
+    return !r->ok && r->code == code;
+}
+
+static bool offer_commit_sealed(const struct zcl_result *r,
+                               struct node_db *ndb,
+                               const struct market_offer_view *committed,
+                               struct file_offer *persisted,
+                               const uint8_t genesis[32], int64_t now,
+                               const uint8_t expected_root[32])
+{
+    return r->ok &&
+        db_file_offer_find_by_id(ndb, committed->offer_id, persisted) &&
+        file_offer_auth_verify_at(persisted, genesis, now) ==
+            FILE_OFFER_AUTH_OK &&
+        memcmp(persisted->root_hash, expected_root, 32) == 0 &&
+        persisted->price_per_mb == 1200;
+}
+
+static bool offer_commit_announced(bool persisted_ok,
+                                  const struct market_offer_view *committed,
+                                  const struct offer_fixture *fixture)
+{
+    return persisted_ok && committed->announced &&
+        !committed->idempotent_replay && fixture->announcements == 1 &&
+        fixture->wire_len == FILE_MARKET_OFFER_WIRE_BYTES;
+}
+
+static bool offer_served_payload(
+    const struct zcl_result *load,
+    const struct file_market_delivery_chunk *served,
+    const uint8_t *payload, size_t payload_size)
+{
+    return load->ok && served->size == payload_size &&
+        memcmp(served->data, payload, payload_size) == 0;
+}
+
+static bool offer_wire_roundtrip(enum file_offer_auth_error decoded_err,
+                                const struct file_offer *decoded,
+                                const struct market_offer_view *committed,
+                                enum file_market_offer_ingest ingest,
+                                const struct file_offer *ingested)
+{
+    return decoded_err == FILE_OFFER_AUTH_OK &&
+        memcmp(decoded->offer_id, committed->offer_id, 32) == 0 &&
+        decoded->price_per_mb == 1200 &&
+        strcmp(decoded->filename, "offer.bin") == 0 &&
+        (ingest == FILE_MARKET_INGEST_NEW ||
+         ingest == FILE_MARKET_INGEST_DEDUP) &&
+        memcmp(ingested->offer_id, committed->offer_id, 32) == 0;
+}
+
+static bool offer_live_replay(const struct zcl_result *r,
+                             const struct market_offer_view *replayed,
+                             const struct market_offer_view *committed,
+                             const struct offer_fixture *fixture)
+{
+    return r->ok && replayed->idempotent_replay && !replayed->announced &&
+        memcmp(replayed->offer_id, committed->offer_id, 32) == 0 &&
+        fixture->announcements == 1;
+}
+
+static bool offer_restart_reuses_seller(
+    const struct zcl_result *r,
+    const struct market_offer_view *second_view,
+    const struct market_offer_view *committed)
+{
+    return r->ok && !second_view->idempotent_replay &&
+        memcmp(second_view->seller_pubkey, committed->seller_pubkey,
+               32) == 0 &&
+        memcmp(second_view->offer_id, committed->offer_id, 32) != 0;
+}
+
+static bool offer_fresh_endpoint_commit(
+    const struct zcl_result *r, const struct market_offer_view *view,
+    const struct market_offer_view *other, uint8_t endpoint_type,
+    size_t wire_len, size_t expected_wire_len)
+{
+    return r->ok && !view->idempotent_replay &&
+        view->endpoint_type == endpoint_type &&
+        memcmp(view->offer_id, other->offer_id, 32) != 0 &&
+        wire_len == expected_wire_len;
+}
+
+static bool offer_v2_wire_roundtrip(const struct offer_fixture *fixture,
+                                   const struct market_offer_view *onion_view,
+                                   const uint8_t genesis[32], int64_t now)
+{
+    struct file_offer v2_decoded;
+    return file_offer_auth_decode(fixture->wire, fixture->wire_len,
+                                  &v2_decoded) == FILE_OFFER_AUTH_OK &&
+        v2_decoded.auth_version == FILE_MARKET_OFFER_VERSION_V2 &&
+        v2_decoded.endpoint_type == FILE_MARKET_ENDPOINT_ONION &&
+        memcmp(v2_decoded.onion_pubkey, fixture->onion_pubkey, 32) == 0 &&
+        v2_decoded.peer_port == 0 &&
+        memcmp(v2_decoded.offer_id, onion_view->offer_id, 32) == 0 &&
+        file_offer_auth_verify_at(&v2_decoded, genesis, now) ==
+            FILE_OFFER_AUTH_OK;
+}
+
+static bool offer_v2_persisted(struct node_db *ndb,
+                              const struct market_offer_view *onion_view,
+                              const struct offer_fixture *fixture)
+{
+    struct file_offer v2_persisted;
+    return db_file_offer_find_by_id(ndb, onion_view->offer_id,
+                                    &v2_persisted) &&
+        v2_persisted.auth_version == FILE_MARKET_OFFER_VERSION_V2 &&
+        v2_persisted.endpoint_type == FILE_MARKET_ENDPOINT_ONION &&
+        memcmp(v2_persisted.onion_pubkey, fixture->onion_pubkey, 32) == 0;
+}
+
+static bool offer_v1_decodes_beside_v2(const struct file_offer *persisted)
+{
+    uint8_t v1_wire[FILE_MARKET_OFFER_WIRE_BYTES];
+    struct file_offer v1_roundtrip;
+    return file_offer_auth_encode(persisted, v1_wire) ==
+            FILE_OFFER_AUTH_OK &&
+        file_offer_auth_decode(v1_wire, sizeof(v1_wire), &v1_roundtrip) ==
+            FILE_OFFER_AUTH_OK &&
+        v1_roundtrip.auth_version == FILE_MARKET_OFFER_VERSION &&
+        v1_roundtrip.endpoint_type == FILE_MARKET_ENDPOINT_CLEARNET &&
+        memcmp(v1_roundtrip.offer_id, persisted->offer_id, 32) == 0;
+}
+
+static bool offer_ingest_keeps_identity(enum file_market_offer_ingest ingest,
+                                       const struct file_offer *ingested,
+                                       const uint8_t offer_id[32])
+{
+    return (ingest == FILE_MARKET_INGEST_NEW ||
+            ingest == FILE_MARKET_INGEST_DEDUP) &&
+        memcmp(ingested->offer_id, offer_id, 32) == 0;
+}
+
+static bool offer_onion_replay(const struct zcl_result *r,
+                              const struct market_offer_view *replay,
+                              const struct market_offer_view *onion_view)
+{
+    return r->ok && replay->idempotent_replay &&
+        memcmp(replay->offer_id, onion_view->offer_id, 32) == 0;
+}
+
+static bool offer_onion_outage_refused(const struct zcl_result *r,
+                                      int announcements,
+                                      int announcements_before)
+{
+    return !r->ok && r->code == -14 /* ONION_ENDPOINT_UNAVAILABLE */ &&
+        announcements == announcements_before;
+}
+
 int file_market_offer_tests(void)
 {
     int failures = 0;
@@ -144,8 +328,8 @@ int file_market_offer_tests(void)
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
     snprintf(filepath, sizeof(filepath), "%s/offer.bin", dir);
     snprintf(second_path, sizeof(second_path), "%s/second.bin", dir);
-    bool files_ready = offer_write_file(filepath, payload, sizeof(payload)) &&
-        offer_write_file(second_path, payload, sizeof(payload) - 1);
+    bool files_ready = offer_write_content_fixtures(filepath, second_path,
+                                                    payload, sizeof(payload));
     OFFER_CHECK("private content fixtures written", files_ready);
 
     const struct chain_params *params = chain_params_get();
@@ -153,8 +337,7 @@ int file_market_offer_tests(void)
     memset(&ndb, 0, sizeof(ndb));
     wallet_lock_reset_for_test();
     wallet_lock_note_encrypted_at_rest();
-    bool ready = files_ready && params && node_db_open(&ndb, dbpath) &&
-        wallet_lock_unlock(NULL, NULL, "market-offer-test").ok;
+    bool ready = offer_open_wallet_database(files_ready, params, &ndb, dbpath);
     OFFER_CHECK("database and encrypted wallet fixture", ready);
     if (!ready) {
         if (ndb.open) node_db_close(&ndb);
@@ -183,38 +366,27 @@ int file_market_offer_tests(void)
     sha3_256(payload, sizeof(payload), chunk);
     sha3_256(chunk, 32, expected_root);
     OFFER_CHECK("plan hashes and prices without an offer identity",
-        r.ok && memcmp(plan.root_hash, expected_root, 32) == 0 &&
-        plan.size_bytes == sizeof(payload) && plan.num_chunks == 1 &&
-        plan.price_per_mb == 1200 && plan.total_zat > 0 &&
-        strcmp(plan.filename, "offer.bin") == 0 &&
-        plan.expires_unix == now + FILE_MARKET_OFFER_MAX_LIFETIME_SECS &&
-        !plan.idempotent_replay && !plan.announced &&
-        fixture.announcements == 0);
+        offer_plan_matches(&r, &plan, expected_root, sizeof(payload), now,
+                           &fixture));
 
     struct market_offer_request bad = request;
     bad.filepath = "no-such-file.bin";
     r = file_market_offer_plan(&rt, &bad, &plan);
     OFFER_CHECK("missing file refused with named code",
-        !r.ok && r.code == -2 /* CONTENT_UNAVAILABLE */);
+        offer_refused_with_code(&r, -2 /* CONTENT_UNAVAILABLE */));
     bad = request;
     bad.price_per_mb_zat = 0;
     r = file_market_offer_plan(&rt, &bad, &plan);
     OFFER_CHECK("zero price refused with named code",
-        !r.ok && r.code == -6 /* PRICE_INVALID */);
+        offer_refused_with_code(&r, -6 /* PRICE_INVALID */));
 
     struct market_offer_view committed;
     r = file_market_offer_commit(&rt, &request, &committed);
     struct file_offer persisted;
-    bool persisted_ok = r.ok &&
-        db_file_offer_find_by_id(&ndb, committed.offer_id, &persisted) &&
-        file_offer_auth_verify_at(&persisted, genesis, now) ==
-            FILE_OFFER_AUTH_OK &&
-        memcmp(persisted.root_hash, expected_root, 32) == 0 &&
-        persisted.price_per_mb == 1200;
+    bool persisted_ok = offer_commit_sealed(&r, &ndb, &committed, &persisted,
+                                            genesis, now, expected_root);
     OFFER_CHECK("commit seals, persists, binds, and announces",
-        persisted_ok && committed.announced && !committed.idempotent_replay &&
-        fixture.announcements == 1 &&
-        fixture.wire_len == FILE_MARKET_OFFER_WIRE_BYTES);
+        offer_commit_announced(persisted_ok, &committed, &fixture));
     if (!persisted_ok)
         goto cleanup;
 
@@ -222,8 +394,7 @@ int file_market_offer_tests(void)
     struct zcl_result load = file_market_content_load_chunk(
         &ndb, committed.offer_id, 0, &served);
     OFFER_CHECK("committed content binding serves exact bytes",
-        load.ok && served.size == sizeof(payload) &&
-        memcmp(served.data, payload, sizeof(payload)) == 0);
+        offer_served_payload(&load, &served, payload, sizeof(payload)));
     free(served.data);
 
     struct file_offer decoded;
@@ -233,20 +404,13 @@ int file_market_offer_tests(void)
     enum file_market_offer_ingest ingest = file_market_ingest_offer_wire(
         fixture.wire, fixture.wire_len, genesis, 99, now, &ingested);
     OFFER_CHECK("announced wire round-trips through decode and ingest",
-        decoded_err == FILE_OFFER_AUTH_OK &&
-        memcmp(decoded.offer_id, committed.offer_id, 32) == 0 &&
-        decoded.price_per_mb == 1200 &&
-        strcmp(decoded.filename, "offer.bin") == 0 &&
-        (ingest == FILE_MARKET_INGEST_NEW ||
-         ingest == FILE_MARKET_INGEST_DEDUP) &&
-        memcmp(ingested.offer_id, committed.offer_id, 32) == 0);
+        offer_wire_roundtrip(decoded_err, &decoded, &committed, ingest,
+                             &ingested));
 
     struct market_offer_view replayed;
     r = file_market_offer_commit(&rt, &request, &replayed);
     OFFER_CHECK("re-commit of the same live offer replays idempotently",
-        r.ok && replayed.idempotent_replay && !replayed.announced &&
-        memcmp(replayed.offer_id, committed.offer_id, 32) == 0 &&
-        fixture.announcements == 1);
+        offer_live_replay(&r, &replayed, &committed, &fixture));
 
     node_db_close(&ndb);
     memset(&ndb, 0, sizeof(ndb));
@@ -258,9 +422,7 @@ int file_market_offer_tests(void)
     r = reopened ? file_market_offer_commit(&rt, &second, &second_view)
                  : ZCL_ERR(-1, "database reopen failed");
     OFFER_CHECK("restart reuses the owner seller key for a new offer",
-        r.ok && !second_view.idempotent_replay &&
-        memcmp(second_view.seller_pubkey, committed.seller_pubkey, 32) == 0 &&
-        memcmp(second_view.offer_id, committed.offer_id, 32) != 0);
+        offer_restart_reuses_seller(&r, &second_view, &committed));
 
     fixture.endpoint_ok = false;
     struct market_offer_view refused;
@@ -268,18 +430,18 @@ int file_market_offer_tests(void)
     third.price_per_mb_zat = 42;
     r = file_market_offer_commit(&rt, &third, &refused);
     OFFER_CHECK("unknown own endpoint refuses before signing",
-        !r.ok && r.code == -7 /* ENDPOINT_UNKNOWN */);
+        offer_refused_with_code(&r, -7 /* ENDPOINT_UNKNOWN */));
     fixture.endpoint_ok = true;
     fixture.payee_ok = false;
     r = file_market_offer_commit(&rt, &third, &refused);
     OFFER_CHECK("missing wallet payee refuses before signing",
-        !r.ok && r.code == -8 /* PAYEE_UNAVAILABLE */);
+        offer_refused_with_code(&r, -8 /* PAYEE_UNAVAILABLE */));
     fixture.payee_ok = true;
 
     wallet_lock_reset_for_test();
     r = file_market_offer_commit(&rt, &third, &refused);
     OFFER_CHECK("locked wallet refuses at the seller-key custody gate",
-        !r.ok && r.code == -9 /* SELLER_KEY_UNAVAILABLE */);
+        offer_refused_with_code(&r, -9 /* SELLER_KEY_UNAVAILABLE */));
     wallet_lock_note_encrypted_at_rest();
     ZCL_IGNORE_RESULT(wallet_lock_unlock(NULL, NULL, "market-offer-test"),
         "post-custody-gate re-unlock; a failure surfaces in the next use");
@@ -294,43 +456,21 @@ int file_market_offer_tests(void)
     struct market_offer_view onion_view;
     r = file_market_offer_commit(&rt, &request, &onion_view);
     OFFER_CHECK("onion-preferred commit signs a fresh v2 onion-endpoint offer",
-        r.ok && !onion_view.idempotent_replay &&
-        onion_view.endpoint_type == FILE_MARKET_ENDPOINT_ONION &&
-        memcmp(onion_view.offer_id, committed.offer_id, 32) != 0 &&
-        fixture.wire_len == FILE_MARKET_OFFER_WIRE_BYTES_V2);
+        offer_fresh_endpoint_commit(&r, &onion_view, &committed,
+                                    FILE_MARKET_ENDPOINT_ONION,
+                                    fixture.wire_len,
+                                    FILE_MARKET_OFFER_WIRE_BYTES_V2));
     if (!r.ok)
         goto cleanup;
 
-    struct file_offer v2_decoded;
     OFFER_CHECK("v2 wire round-trips with the onion endpoint committed",
-        file_offer_auth_decode(fixture.wire, fixture.wire_len,
-                               &v2_decoded) == FILE_OFFER_AUTH_OK &&
-        v2_decoded.auth_version == FILE_MARKET_OFFER_VERSION_V2 &&
-        v2_decoded.endpoint_type == FILE_MARKET_ENDPOINT_ONION &&
-        memcmp(v2_decoded.onion_pubkey, fixture.onion_pubkey, 32) == 0 &&
-        v2_decoded.peer_port == 0 &&
-        memcmp(v2_decoded.offer_id, onion_view.offer_id, 32) == 0 &&
-        file_offer_auth_verify_at(&v2_decoded, genesis, now) ==
-            FILE_OFFER_AUTH_OK);
+        offer_v2_wire_roundtrip(&fixture, &onion_view, genesis, now));
 
-    struct file_offer v2_persisted;
     OFFER_CHECK("v2 offer persists and reloads by offer_id",
-        db_file_offer_find_by_id(&ndb, onion_view.offer_id,
-                                 &v2_persisted) &&
-        v2_persisted.auth_version == FILE_MARKET_OFFER_VERSION_V2 &&
-        v2_persisted.endpoint_type == FILE_MARKET_ENDPOINT_ONION &&
-        memcmp(v2_persisted.onion_pubkey, fixture.onion_pubkey, 32) == 0);
+        offer_v2_persisted(&ndb, &onion_view, &fixture));
 
-    uint8_t v1_wire[FILE_MARKET_OFFER_WIRE_BYTES];
-    struct file_offer v1_roundtrip;
     OFFER_CHECK("v1 wires keep decoding beside v2 (dual decode)",
-        file_offer_auth_encode(&persisted, v1_wire) ==
-            FILE_OFFER_AUTH_OK &&
-        file_offer_auth_decode(v1_wire, sizeof(v1_wire), &v1_roundtrip) ==
-            FILE_OFFER_AUTH_OK &&
-        v1_roundtrip.auth_version == FILE_MARKET_OFFER_VERSION &&
-        v1_roundtrip.endpoint_type == FILE_MARKET_ENDPOINT_CLEARNET &&
-        memcmp(v1_roundtrip.offer_id, persisted.offer_id, 32) == 0);
+        offer_v1_decodes_beside_v2(&persisted));
 
     uint8_t v3_wire[FILE_MARKET_OFFER_WIRE_BYTES_V2];
     memcpy(v3_wire, fixture.wire, sizeof(v3_wire));
@@ -347,24 +487,22 @@ int file_market_offer_tests(void)
     enum file_market_offer_ingest v2_ingest = file_market_ingest_offer_wire(
         fixture.wire, fixture.wire_len, genesis, 100, now, &v2_ingested);
     OFFER_CHECK("v2 wire ingests from gossip with its identity intact",
-        (v2_ingest == FILE_MARKET_INGEST_NEW ||
-         v2_ingest == FILE_MARKET_INGEST_DEDUP) &&
-        memcmp(v2_ingested.offer_id, onion_view.offer_id, 32) == 0);
+        offer_ingest_keeps_identity(v2_ingest, &v2_ingested,
+                                    onion_view.offer_id));
 
     struct market_offer_view onion_replay;
     r = file_market_offer_commit(&rt, &request, &onion_replay);
     OFFER_CHECK("re-commit of the live onion offer replays idempotently",
-        r.ok && onion_replay.idempotent_replay &&
-        memcmp(onion_replay.offer_id, onion_view.offer_id, 32) == 0);
+        offer_onion_replay(&r, &onion_replay, &onion_view));
 
     struct market_offer_view clearnet_again;
     rt.prefer_onion = false;
     r = file_market_offer_commit(&rt, &request, &clearnet_again);
     OFFER_CHECK("flipping back to clearnet never replays the onion offer",
-        r.ok && !clearnet_again.idempotent_replay &&
-        clearnet_again.endpoint_type == FILE_MARKET_ENDPOINT_CLEARNET &&
-        memcmp(clearnet_again.offer_id, onion_view.offer_id, 32) != 0 &&
-        fixture.wire_len == FILE_MARKET_OFFER_WIRE_BYTES);
+        offer_fresh_endpoint_commit(&r, &clearnet_again, &onion_view,
+                                    FILE_MARKET_ENDPOINT_CLEARNET,
+                                    fixture.wire_len,
+                                    FILE_MARKET_OFFER_WIRE_BYTES));
 
     rt.prefer_onion = true;
     fixture.onion_ok = false;
@@ -372,8 +510,8 @@ int file_market_offer_tests(void)
     struct market_offer_view onion_refused;
     r = file_market_offer_commit(&rt, &request, &onion_refused);
     OFFER_CHECK("onion endpoint outage refuses by name, never downgrades",
-        !r.ok && r.code == -14 /* ONION_ENDPOINT_UNAVAILABLE */ &&
-        fixture.announcements == announcements_before);
+        offer_onion_outage_refused(&r, fixture.announcements,
+                                   announcements_before));
     fixture.onion_ok = true;
     rt.prefer_onion = false;
 
