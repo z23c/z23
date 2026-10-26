@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main zutf16_cli_main
+#include "../app/main.c"
+#undef main
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -213,7 +217,138 @@ static void test_fuzz(void) {
   }
 }
 
+static bool cli_output_matches(FILE *output, const void *expected, size_t size) {
+  if (ftell(output) != (long)size) return false;
+  rewind(output);
+  const unsigned char *bytes = expected;
+  for (size_t i = 0; i < size; i++)
+    if (fgetc(output) != bytes[i]) return false;
+  return fgetc(output) == EOF && !ferror(output);
+}
+
+static bool cli_fixture_text_mode(FILE *source, FILE *output) {
+#if defined(_WIN32)
+  return _setmode(_fileno(source), _O_TEXT) != -1 &&
+         _setmode(_fileno(output), _O_TEXT) != -1;
+#else
+  (void)source;
+  (void)output;
+  return true;
+#endif
+}
+
+static int cli_case(char *mode, const void *wire, size_t size, int status,
+                      const void *expected, size_t expected_size) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(wire, 1, size, source) != size || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_fixture_text_mode(source, output)) goto cleanup;
+  char *argv[] = {"zutf16", mode, NULL};
+  if (cli_run(2, argv, source, output) != status) goto cleanup;
+  if (expected && !cli_output_matches(output, expected, expected_size)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_valid_fixture(char *mode, const void *wire, size_t size) {
+  static unsigned char expected[65536];
+  size_t need = strcmp(mode, "to-utf16") == 0
+      ? zutf16_from_utf8(expected, sizeof expected, wire, size)
+      : zutf16_to_utf8(expected, sizeof expected, wire, size);
+  if (need == SIZE_MAX || need >= sizeof expected) return 1;
+  return cli_case(mode, wire, size, 0, expected, need);
+}
+
+static void test_cli_boundaries(void) {
+  unsigned char wire[32768];
+  const unsigned char sequences[][4] = {{0xc3, 0xa9}, {0xe2, 0x82, 0xac},
+                                       {0xf0, 0x9f, 0x98, 0x80}};
+  const unsigned char tail[] = {0, '\r', '\n', 0x1a, 'X'};
+  for (size_t row = 0; row < 3; row++) {
+    size_t len = row + 2;
+    for (size_t split = 1; split < len; split++) {
+      size_t prefix = 8192 - split;
+      memset(wire, 'a', prefix);
+      memcpy(wire + prefix, sequences[row], len);
+      memcpy(wire + prefix + len, tail, sizeof tail);
+      CHECK(cli_valid_fixture("to-utf16", wire, prefix + len + sizeof tail) == 0);
+    }
+  }
+  memset(wire, 'a', 24575);
+  memcpy(wire + 24575, sequences[2], 4);
+  memcpy(wire + 24579, tail, sizeof tail);
+  CHECK(cli_valid_fixture("to-utf16", wire, 24579 + sizeof tail) == 0);
+  const unsigned char pair_tail[] = {0x3d, 0xd8, 0, 0xde, 0, 0, '\r', 0,
+                                     '\n', 0, 0x1a, 0, 'X', 0};
+  const size_t prefixes[] = {0, 8190, 24574};
+  for (size_t i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++) {
+    memset(wire, 0, prefixes[i]);
+    memcpy(wire + prefixes[i], pair_tail, sizeof pair_tail);
+    CHECK(cli_valid_fixture("to-utf8", wire, prefixes[i] + sizeof pair_tail) == 0);
+  }
+}
+
+static void test_cli_invalid(void) {
+  static const struct { char *mode; const char *bytes; size_t size; } bad[] = {
+      {"to-utf16", "\xc3", 1}, {"to-utf16", "\xe2\x82", 2},
+      {"to-utf16", "\xf0\x9f\x98", 3}, {"to-utf16", "\xe2\x28\xa1", 3},
+      {"to-utf16", "\xc0\xaf", 2}, {"to-utf16", "\xed\xa0\x80", 3},
+      {"to-utf16", "\xf4\x90\x80\x80", 4}, {"to-utf16", "\xff\xc3", 2},
+      {"to-utf8", "\x3d\xd8", 2}, {"to-utf8", "\x00\xdc", 2},
+      {"to-utf8", "\x3d\xd8" "A\0", 4}, {"to-utf8", "A", 1},
+      {"to-utf8", "\x3d\xd8\0", 3}, {"to-utf8", "\x00\xdc\x3d\xd8", 4}};
+  unsigned char wire[9000];
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    CHECK(cli_case(bad[i].mode, bad[i].bytes, bad[i].size, 1, NULL, 0) == 0);
+    size_t prefix = strcmp(bad[i].mode, "to-utf16") == 0 ? 8191 : 8190;
+    memset(wire, prefix == 8191 ? 'a' : 0, prefix);
+    memcpy(wire + prefix, bad[i].bytes, bad[i].size);
+    CHECK(cli_case(bad[i].mode, wire, prefix + bad[i].size, 1, NULL, 0) == 0);
+  }
+}
+
+static int cli_output_error(const char *path, const char *access, char *mode) {
+  FILE *source = tmpfile(), *output = fopen(path, access);
+  char buffer[4096];
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputc(0, source) == EOF || fputc(0, source) == EOF || fflush(source) != 0)
+    goto cleanup;
+  rewind(source);
+  char *argv[] = {"zutf16", mode, NULL};
+  if (cli_run(2, argv, source, output) != 1 || !ferror(output)) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output) (void)fclose(output);
+  return failed;
+}
+
+static void test_cli_output_errors(void) {
+#if defined(_WIN32)
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  char *modes[] = {"to-utf16", "to-utf8"};
+  for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+    CHECK(cli_output_error(null_path, "r", modes[i]) == 0);
+#if defined(__linux__)
+    CHECK(cli_output_error("/dev/full", "w", modes[i]) == 0);
+#endif
+  }
+}
+
 int main(void) {
+  test_cli_boundaries();
+  test_cli_invalid();
+  test_cli_output_errors();
   test_kat();
   test_err();
   test_roundtrip();
