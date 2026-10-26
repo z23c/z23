@@ -111,9 +111,6 @@ contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_body:28
 contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_fields:38
 contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_error_string:21
 contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_intent_parse:31
-contexts/commons/modules/vcs/src/zcode_patronage_funding.c:funding_body:19
-contexts/commons/modules/vcs/src/zcode_patronage_funding.c:vcs_zcode_patronage_funding_parse:22
-contexts/commons/modules/vcs/src/zcode_patronage_funding.c:vcs_zcode_patronage_funding_verify_cas:19
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
 contexts/commons/modules/vcs/src/zcode_reproduction_qualification.c:vcs_zcode_reproduction_qualification_string:17

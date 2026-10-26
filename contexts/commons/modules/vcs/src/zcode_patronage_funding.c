@@ -96,6 +96,26 @@ vcs_zcode_patronage_funding_validate(
     return funding_fields(funding, true);
 }
 
+static bool funding_write_fields(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_funding_v1 *funding)
+{
+    return zcl_codec_write_bytes(writer, funding_magic, 8) &&
+        zcl_codec_write_u16le(writer, funding->schema_version) &&
+        zcl_codec_write_u8(writer, funding->funding_kind) &&
+        zcl_codec_write_u8(writer, funding->flags) &&
+        zcl_codec_write_u32le(writer, 0) &&
+        zcl_codec_write_bytes(writer, funding->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer, funding->patronage_intent_root, 32) &&
+        zcl_codec_write_bytes(writer, funding->simulation_plan_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            funding->funder_contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, funding->funder_zid_pubkey, 32) &&
+        zcl_codec_write_u64le(writer, funding->amount_atoms) &&
+        zcl_codec_write_i64le(writer, funding->created_unix) &&
+        zcl_codec_write_u64le(writer, funding->sequence);
+}
+
 static enum vcs_zcode_patronage_funding_error funding_body(
     const struct vcs_zcode_patronage_funding_v1 *funding,
     uint8_t out[VCS_ZCODE_PATRONAGE_FUNDING_BODY_BYTES])
@@ -106,20 +126,7 @@ static enum vcs_zcode_patronage_funding_error funding_body(
         return out ? error : VCS_ZCODE_PATRONAGE_FUNDING_NULL;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_PATRONAGE_FUNDING_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, funding_magic, 8) &&
-        zcl_codec_write_u16le(&writer, funding->schema_version) &&
-        zcl_codec_write_u8(&writer, funding->funding_kind) &&
-        zcl_codec_write_u8(&writer, funding->flags) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer, funding->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer, funding->patronage_intent_root, 32) &&
-        zcl_codec_write_bytes(&writer, funding->simulation_plan_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            funding->funder_contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, funding->funder_zid_pubkey, 32) &&
-        zcl_codec_write_u64le(&writer, funding->amount_atoms) &&
-        zcl_codec_write_i64le(&writer, funding->created_unix) &&
-        zcl_codec_write_u64le(&writer, funding->sequence);
+    bool ok = funding_write_fields(&writer, funding);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_PATRONAGE_FUNDING_BODY_BYTES
@@ -158,6 +165,29 @@ vcs_zcode_patronage_funding_serialize(
     return error;
 }
 
+static bool funding_read_fields(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_funding_v1 *out,
+    uint8_t magic[8], uint32_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->funding_kind) &&
+        zcl_codec_read_u8(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, reserved) &&
+        zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, out->patronage_intent_root, 32) &&
+        zcl_codec_read_bytes(reader, out->simulation_plan_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->funder_contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, out->funder_zid_pubkey, 32) &&
+        zcl_codec_read_u64le(reader, &out->amount_atoms) &&
+        zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_zcode_patronage_funding_error vcs_zcode_patronage_funding_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_patronage_funding_v1 *out)
@@ -169,22 +199,7 @@ enum vcs_zcode_patronage_funding_error vcs_zcode_patronage_funding_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint32_t reserved = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->funding_kind) &&
-        zcl_codec_read_u8(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &reserved) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->patronage_intent_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->simulation_plan_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->funder_contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->funder_zid_pubkey, 32) &&
-        zcl_codec_read_u64le(&reader, &out->amount_atoms) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = funding_read_fields(&reader, out, magic, &reserved);
     enum vcs_zcode_patronage_funding_error error = !ok
         ? VCS_ZCODE_PATRONAGE_FUNDING_WIRE_SIZE
         : memcmp(magic, funding_magic, 8) != 0
@@ -245,6 +260,27 @@ enum vcs_zcode_patronage_funding_error vcs_zcode_patronage_funding_verify(
         : VCS_ZCODE_PATRONAGE_FUNDING_SIGNATURE;
 }
 
+static enum vcs_zcode_patronage_funding_error funding_check_intent(
+    const struct vcs_zcode_patronage_funding_v1 *funding,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    if (intent->settlement_trust_mode !=
+            VCS_ZCODE_PATRONAGE_SIMULATED_FUNDING ||
+        memcmp(intent->network_genesis_root,
+               funding->network_genesis_root, 32) != 0 ||
+        memcmp(intent->patron_contributor_binding_root,
+               funding->funder_contributor_binding_root, 32) != 0 ||
+        memcmp(intent->patron_zid_pubkey,
+               funding->funder_zid_pubkey, 32) != 0)
+        return VCS_ZCODE_PATRONAGE_FUNDING_INTENT;
+    if (intent->amount_atoms != funding->amount_atoms)
+        return VCS_ZCODE_PATRONAGE_FUNDING_AMOUNT;
+    if (funding->created_unix < intent->created_unix ||
+        funding->created_unix >= intent->expires_unix)
+        return VCS_ZCODE_PATRONAGE_FUNDING_TIME;
+    return VCS_ZCODE_PATRONAGE_FUNDING_OK;
+}
+
 enum vcs_zcode_patronage_funding_error
 vcs_zcode_patronage_funding_verify_cas(
     const struct vcs_zcode_patronage_funding_v1 *funding,
@@ -275,19 +311,5 @@ vcs_zcode_patronage_funding_verify_cas(
         return VCS_ZCODE_PATRONAGE_FUNDING_INTENT;
     }
     free(wire);
-    if (intent.settlement_trust_mode !=
-            VCS_ZCODE_PATRONAGE_SIMULATED_FUNDING ||
-        memcmp(intent.network_genesis_root,
-               funding->network_genesis_root, 32) != 0 ||
-        memcmp(intent.patron_contributor_binding_root,
-               funding->funder_contributor_binding_root, 32) != 0 ||
-        memcmp(intent.patron_zid_pubkey,
-               funding->funder_zid_pubkey, 32) != 0)
-        return VCS_ZCODE_PATRONAGE_FUNDING_INTENT;
-    if (intent.amount_atoms != funding->amount_atoms)
-        return VCS_ZCODE_PATRONAGE_FUNDING_AMOUNT;
-    if (funding->created_unix < intent.created_unix ||
-        funding->created_unix >= intent.expires_unix)
-        return VCS_ZCODE_PATRONAGE_FUNDING_TIME;
-    return VCS_ZCODE_PATRONAGE_FUNDING_OK;
+    return funding_check_intent(funding, &intent);
 }
