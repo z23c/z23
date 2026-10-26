@@ -1311,7 +1311,6 @@ tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
 tests/harness/src/test_sha256_isa_parity.c:test_sha256_isa_parity:43
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
 tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41
-tests/harness/src/test_sha3_stream.c:test_sha3_stream:36
 tests/harness/src/test_sha3_windows.c:test_sha3_windows:28
 tests/harness/src/test_shielded_spend_slice.c:test_shielded_spend_slice:21
 tests/harness/src/test_shop_reputation.c:sr_populate:17

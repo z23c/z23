@@ -60,35 +60,9 @@ static double now_s(void)
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
-int test_sha3_stream(void)
+#define failures (*failure_count)
+static void sha3_stream_check_bytewise_absorption(int *failure_count)
 {
-    int failures = 0;
-
-    /* ── 1. FIPS-202 known-answer vectors ────────────────────────────── */
-    struct { const char *msg; size_t msglen; const char *h256; const char *h512; } kat[] = {
-        { "", 0,
-          "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
-          "a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a6"
-          "15b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26" },
-        { "abc", 3,
-          "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
-          "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e"
-          "10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0" },
-    };
-    for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
-        uint8_t want256[32], want512[64];
-        hex2bin(kat[k].h256, want256, 32);
-        hex2bin(kat[k].h512, want512, 64);
-
-        uint8_t got256[32], got512[64];
-        sha3_256((const unsigned char *)kat[k].msg, kat[k].msglen, got256);
-        sha3_512((const unsigned char *)kat[k].msg, kat[k].msglen, got512);
-        printf("sha3_stream: FIPS-202 KAT[%u] SHA3-256/512... ", k);
-        if (memcmp(got256, want256, 32) == 0 && memcmp(got512, want512, 64) == 0)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
     /* ── 2. Streamed vs one-shot, every length 0..1100 ───────────────── */
     printf("sha3_stream: streamed == one-shot, lengths 0..1100... ");
     {
@@ -121,6 +95,10 @@ int test_sha3_stream(void)
         else { printf("FAIL (%d mismatches)\n", diff_fail); failures++; }
     }
 
+}
+
+static void sha3_stream_check_random_chunk_absorption(int *failure_count)
+{
     /* ── 3. Incremental absorb at random split points ────────────────── */
     printf("sha3_stream: incremental absorb vs one-shot (random splits)... ");
     {
@@ -150,6 +128,10 @@ int test_sha3_stream(void)
         else { printf("FAIL (%d)\n", inc_fail); failures++; }
     }
 
+}
+
+static void sha3_stream_check_shake_known_answers(int *failure_count)
+{
     /* ── 4. SHAKE KATs, multi-block squeeze and checked pointers ────── */
     printf("sha3_stream: FIPS-202 SHAKE128/256 KATs... ");
     {
@@ -170,6 +152,10 @@ int test_sha3_stream(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+}
+
+static void sha3_stream_check_shake_output_contract(int *failure_count)
+{
     printf("sha3_stream: SHAKE multi-block prefix/canary/NULL contract... ");
     {
         uint8_t msg[169], long_out[402], prefix[169], untouched[8];
@@ -190,6 +176,47 @@ int test_sha3_stream(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+}
+
+#undef failures
+
+int test_sha3_stream(void)
+{
+    int failures = 0;
+
+    /* ── 1. FIPS-202 known-answer vectors ────────────────────────────── */
+    struct { const char *msg; size_t msglen; const char *h256; const char *h512; } kat[] = {
+        { "", 0,
+          "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+          "a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a6"
+          "15b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26" },
+        { "abc", 3,
+          "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+          "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e"
+          "10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0" },
+    };
+    for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
+        uint8_t want256[32], want512[64];
+        hex2bin(kat[k].h256, want256, 32);
+        hex2bin(kat[k].h512, want512, 64);
+
+        uint8_t got256[32], got512[64];
+        sha3_256((const unsigned char *)kat[k].msg, kat[k].msglen, got256);
+        sha3_512((const unsigned char *)kat[k].msg, kat[k].msglen, got512);
+        printf("sha3_stream: FIPS-202 KAT[%u] SHA3-256/512... ", k);
+        if (memcmp(got256, want256, 32) == 0 && memcmp(got512, want512, 64) == 0)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    sha3_stream_check_bytewise_absorption(&failures);
+
+    sha3_stream_check_random_chunk_absorption(&failures);
+
+    sha3_stream_check_shake_known_answers(&failures);
+
+    sha3_stream_check_shake_output_contract(&failures);
 
     /* ── 5. Honest throughput report (informational, never gated) ────── */
     {
