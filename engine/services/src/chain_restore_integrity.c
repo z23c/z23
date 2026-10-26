@@ -47,6 +47,94 @@ void chain_restore_validate(struct chain_restore_validation *out,
                && out->tip_matches_expected;
 }
 
+static void scan_block_map_zero_nbits(struct chain_integrity_result *out,
+                                      struct block_index **indices,
+                                      size_t index_count)
+{
+    /* every pindex with on-disk data must have nBits != 0.
+     *
+     * skip nBits=0 entries that have no BLOCK_HAVE_DATA bit.
+     * Those are metadata-anchor placeholders left by chain_restore when
+     * coins_best_block was unrecoverable from disk. They never enter
+     * validation walks (no header is loaded), so a zero nBits on them
+     * is harmless. Failing the integrity gate on such an entry —
+     * which is the only thing we ever WRITE during the anchor-recovery
+     * path — would crash-loop the node forever. */
+    for (size_t i = 0; i < index_count; i++) {
+        struct block_index *pi = indices[i];
+        if (!pi || pi->nHeight <= 0)
+            continue;
+        if (!(pi->nStatus & BLOCK_HAVE_DATA))
+            continue;
+        if (pi->nBits == 0) {
+            out->zero_nbits_count++;
+            if (out->first_nbits_zero_height < 0 ||
+                pi->nHeight < out->first_nbits_zero_height)
+                out->first_nbits_zero_height = pi->nHeight;
+        }
+    }
+}
+
+static void record_chain_hole(struct chain_integrity_result *out, int h,
+                              int window_lo)
+{
+    out->active_chain_holes++;
+    if (out->first_hole_height < 0 || h < out->first_hole_height)
+        out->first_hole_height = h;
+    if (h >= window_lo) {
+        out->tip_window_holes++;
+        if (out->first_tip_window_hole < 0 ||
+            h < out->first_tip_window_hole)
+            out->first_tip_window_hole = h;
+    }
+}
+
+static void record_chain_mismatch(struct chain_integrity_result *out, int h)
+{
+    out->active_chain_mismatches++;
+    if (out->first_mismatch_height < 0 || h < out->first_mismatch_height)
+        out->first_mismatch_height = h;
+}
+
+static void scan_active_chain_slots(struct chain_integrity_result *out,
+                                    struct active_chain *chain,
+                                    int window_lo)
+{
+    for (int h = 0; h <= out->tip_height; h++) {
+        struct block_index *at = active_chain_at(chain, h);
+        if (at == NULL) {
+            record_chain_hole(out, h, window_lo);
+        } else if (at->nHeight != h) {
+            record_chain_mismatch(out, h);
+        } else if (h > 0) {
+            struct block_index *prev = active_chain_at(chain, h - 1);
+            /* A sparse live-tip window can intentionally omit `prev` while
+             * `at->pprev` still names the correct block-map object. A sparse
+             * retained prefix can also omit both (the first retained child
+             * has no loaded parent and the parent slot is a hole). Absence is
+             * reconcilable; only wrong-height ancestry or disagreement with
+             * a PRESENT slot is evidence of corruption. */
+            if ((at->pprev && at->pprev->nHeight != h - 1) ||
+                (prev && at->pprev != prev)) {
+                record_chain_mismatch(out, h);
+            }
+        }
+    }
+}
+
+static bool tip_counts_as_real(const struct block_index *tip)
+{
+    return !tip || ((tip->nStatus & BLOCK_HAVE_DATA) && tip->nBits != 0);
+}
+
+static bool integrity_verdict_passes(const struct chain_integrity_result *out)
+{
+    return out->zero_nbits_count == 0 &&
+           out->tip_window_holes == 0 &&
+           out->active_chain_mismatches == 0 &&
+           out->tip_slot_ok && out->tip_real;
+}
+
 void chain_integrity_check_post_restore(struct chain_integrity_result *out,
                                         const struct main_state *ms)
 {
@@ -61,15 +149,6 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
         return;
     }
 
-    /* every pindex with on-disk data must have nBits != 0.
-     *
-     * skip nBits=0 entries that have no BLOCK_HAVE_DATA bit.
-     * Those are metadata-anchor placeholders left by chain_restore when
-     * coins_best_block was unrecoverable from disk. They never enter
-     * validation walks (no header is loaded), so a zero nBits on them
-     * is harmless. Failing the integrity gate on such an entry —
-     * which is the only thing we ever WRITE during the anchor-recovery
-     * path — would crash-loop the node forever. */
     struct block_index **indices = NULL;
     size_t index_count = 0;
     if (!block_map_snapshot_indices(&ms->map_block_index, &indices,
@@ -77,19 +156,7 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
         out->ok = false;
         return;
     }
-    for (size_t i = 0; i < index_count; i++) {
-        struct block_index *pi = indices[i];
-        if (!pi || pi->nHeight <= 0)
-            continue;
-        if (!(pi->nStatus & BLOCK_HAVE_DATA))
-            continue;
-        if (pi->nBits == 0) {
-            out->zero_nbits_count++;
-            if (out->first_nbits_zero_height < 0 ||
-                pi->nHeight < out->first_nbits_zero_height)
-                out->first_nbits_zero_height = pi->nHeight;
-        }
-    }
+    scan_block_map_zero_nbits(out, indices, index_count);
     free(indices);
 
     /* chain_active.chain[h] non-NULL for h in [0, tip].
@@ -109,40 +176,7 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
     if (window_lo < 0) window_lo = 0;
     struct active_chain *chain = (struct active_chain *)&ms->chain_active;
     zcl_mutex_lock(&chain->write_lock);
-    for (int h = 0; h <= out->tip_height; h++) {
-        struct block_index *at = active_chain_at(chain, h);
-        if (at == NULL) {
-            out->active_chain_holes++;
-            if (out->first_hole_height < 0 || h < out->first_hole_height)
-                out->first_hole_height = h;
-            if (h >= window_lo) {
-                out->tip_window_holes++;
-                if (out->first_tip_window_hole < 0 ||
-                    h < out->first_tip_window_hole)
-                    out->first_tip_window_hole = h;
-            }
-        } else if (at->nHeight != h) {
-            out->active_chain_mismatches++;
-            if (out->first_mismatch_height < 0 ||
-                h < out->first_mismatch_height)
-                out->first_mismatch_height = h;
-        } else if (h > 0) {
-            struct block_index *prev = active_chain_at(chain, h - 1);
-            /* A sparse live-tip window can intentionally omit `prev` while
-             * `at->pprev` still names the correct block-map object. A sparse
-             * retained prefix can also omit both (the first retained child
-             * has no loaded parent and the parent slot is a hole). Absence is
-             * reconcilable; only wrong-height ancestry or disagreement with
-             * a PRESENT slot is evidence of corruption. */
-            if ((at->pprev && at->pprev->nHeight != h - 1) ||
-                (prev && at->pprev != prev)) {
-                out->active_chain_mismatches++;
-                if (out->first_mismatch_height < 0 ||
-                    h < out->first_mismatch_height)
-                    out->first_mismatch_height = h;
-            }
-        }
-    }
+    scan_active_chain_slots(out, chain, window_lo);
 
     /* `ok` reflects operational health.
      *
@@ -155,12 +189,8 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
         (out->tip_height < 0) ||
         (active_chain_at(chain, out->tip_height) == tip);
     zcl_mutex_unlock(&chain->write_lock);
-    out->tip_real =
-        !tip || ((tip->nStatus & BLOCK_HAVE_DATA) && tip->nBits != 0);
-    out->ok = (out->zero_nbits_count == 0 &&
-               out->tip_window_holes == 0 &&
-               out->active_chain_mismatches == 0 &&
-               out->tip_slot_ok && out->tip_real);
+    out->tip_real = tip_counts_as_real(tip);
+    out->ok = integrity_verdict_passes(out);
 
     /* Cache the result for `z23 dumpstate boot`. */
     chain_restore_record_integrity_result(out);
