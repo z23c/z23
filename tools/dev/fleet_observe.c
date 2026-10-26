@@ -99,8 +99,6 @@ static int fo_days_in_month(int y, int mo)
     return days[mo - 1];
 }
 
-/* Both scan helpers index s[0..19]: fo_parse_iso8601() has already checked
- * strlen(s) == 20 by the time they run. */
 static bool fo_scan_iso8601_date(const char *s, int *y, int *mo, int *d)
 {
     return digits(s, 4, y) && s[4] == '-' && digits(s + 5, 2, mo) &&
@@ -429,7 +427,7 @@ size_t fo_render_def(const struct fo_observation *obs, size_t obs_count,
         w = snprintf(out ? out + used : NULL, out ? out_cap - used : 0,     \
                      __VA_ARGS__);                                          \
         if (w > 0)                                                          \
-            used += (size_t)w;                                              \
+            used += (size_t)w;                                             \
     } while (0)
 
     FO_APPEND(
