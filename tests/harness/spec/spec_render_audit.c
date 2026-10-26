@@ -165,229 +165,407 @@ static void cleanup(void) {
     wallet_view_init(NULL);
 }
 
-/* ── The actual audit ──────────────────────────────────── */
+/* A route check. need[] is applied in order and ends at the first zero
+ * text (at most 10). alt set => contains(text) || contains(alt).
+ * absent set => !contains(text). Otherwise contains(text). */
+enum aud_len_mode {
+    AUD_LEN_MIN = 0,    /* n > min_len */
+    AUD_LEN_EQ = 1,     /* n == min_len */
+    AUD_LEN_IGNORE = 2  /* length is not part of the check */
+};
 
-int spec_render_audit(void)
+enum aud_fail_kind {
+    AUD_FAIL_PLAIN = 0,
+    AUD_FAIL_LEN = 1,
+    AUD_FAIL_DETAIL = 2
+};
+
+struct aud_need {
+    const char *text;
+    const char *alt;
+    int absent;
+};
+
+struct aud_route {
+    const char *label;
+    const char *method;
+    const char *path;
+    const char *body;
+    size_t min_len;
+    enum aud_len_mode len_mode;
+    enum aud_fail_kind fail_kind;
+    struct aud_need need[10];
+};
+
+static bool contains_either(const char *left, const char *right)
+{
+    return contains(left) || contains(right);
+}
+
+static void audit_dashboard_fail_reasons(size_t n)
+{
+    printf("FAIL:");
+    if (n <= 500) printf(" too-short");
+    if (!contains("ZCL")) printf(" no-ZCL");
+    if (!contains("private")) printf(" no-private");
+    if (!contains("Send")) printf(" no-Send");
+    if (!contains("Receive")) printf(" no-Receive");
+    if (!contains("/wallet/node")) printf(" no-node-link");
+    if (contains("{{{")) printf(" LEAKED-TEMPLATE-VAR");
+    if (contains("sqlite")) printf(" LEAKED-sqlite");
+    if (contains("SELECT ")) printf(" LEAKED-SELECT");
+    if (contains("INSERT ")) printf(" LEAKED-INSERT");
+    printf(" (len=%zu)\n", n);
+}
+
+static bool audit_route_passes(const struct aud_route *r, size_t *out_len)
+{
+    size_t n = render(r->method, r->path, r->body);
+    *out_len = n;
+    bool ok;
+    if (r->len_mode == AUD_LEN_EQ)
+        ok = n == r->min_len;
+    else if (r->len_mode == AUD_LEN_IGNORE)
+        ok = true;
+    else
+        ok = n > r->min_len;
+    for (int i = 0; i < 10 && r->need[i].text; i++) {
+        const struct aud_need *q = &r->need[i];
+        if (q->alt)
+            ok = ok && (contains(q->text) || contains(q->alt));
+        else if (q->absent)
+            ok = ok && !contains(q->text);
+        else
+            ok = ok && contains(q->text);
+    }
+    return ok;
+}
+
+static int audit_route_list(const struct aud_route *routes, size_t count)
 {
     int failures = 0;
-    printf("\n=== Render Audit (real data, every route) ===\n");
-
-    bool db_ok = make_db(81000000, 16000000, 10, 3);
-    if (!db_ok) {
-        printf("SKIP: could not create test DB\n");
-        return 0;
-    }
-    wallet_view_init(g_tmp);
-
-    /* ── Route: dashboard ── */
-    {   printf("audit: dashboard renders with data... ");
-        size_t n = render("GET", "/wallet", NULL);
-        bool ok = n > 500;
-        ok = ok && contains("ZCL");
-        ok = ok && contains("private");
-        ok = ok && contains("Send");
-        ok = ok && contains("Receive");
-        ok = ok && contains("/wallet/node");
-        /* NO unresolved template vars (}}} can appear in JS legitimately) */
-        ok = ok && !contains("{{{");
-        /* NO SQL leaks */
-        ok = ok && !contains("sqlite");
-        ok = ok && !contains("SELECT ");
-        ok = ok && !contains("INSERT ");
-        if (!ok) {
-            printf("FAIL:");
-            if (n <= 500) printf(" too-short");
-            if (!contains("ZCL")) printf(" no-ZCL");
-            if (!contains("private")) printf(" no-private");
-            if (!contains("Send")) printf(" no-Send");
-            if (!contains("Receive")) printf(" no-Receive");
-            if (!contains("/wallet/node")) printf(" no-node-link");
-            if (contains("{{{")) printf(" LEAKED-TEMPLATE-VAR");
-            if (contains("sqlite")) printf(" LEAKED-sqlite");
-            if (contains("SELECT ")) printf(" LEAKED-SELECT");
-            if (contains("INSERT ")) printf(" LEAKED-INSERT");
-            printf(" (len=%zu)\n", n);
+    for (size_t i = 0; i < count; i++) {
+        const struct aud_route *r = &routes[i];
+        size_t n = 0;
+        bool ok;
+        printf("%s", r->label);
+        ok = audit_route_passes(r, &n);
+        if (ok) {
+            printf("OK\n");
+            continue;
+        }
+        if (r->fail_kind == AUD_FAIL_DETAIL) {
+            audit_dashboard_fail_reasons(n);
             failures++;
-        } else printf("OK\n");
+            continue;
+        }
+        if (r->fail_kind == AUD_FAIL_LEN)
+            printf("FAIL (len=%zu)\n", n);
+        else
+            printf("FAIL\n");
+        failures++;
     }
+    return failures;
+}
 
+/* ── Route: dashboard ── */
+static const struct aud_route k_render_audit_early[] = {
+    {
+        .label = "audit: dashboard renders with data... ",
+        .method = "GET",
+        .path = "/wallet",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_DETAIL,
+        .need = {
+            { "ZCL", NULL, 0 },
+            { "private", NULL, 0 },
+            { "Send", NULL, 0 },
+            { "Receive", NULL, 0 },
+            { "/wallet/node", NULL, 0 },
+            /* NO unresolved template vars (}}} can appear in JS legitimately) */
+            { "{{{", NULL, 1 },
+            /* NO SQL leaks */
+            { "sqlite", NULL, 1 },
+            { "SELECT ", NULL, 1 },
+            { "INSERT ", NULL, 1 },
+        },
+    },
     /* ── Route: send ── */
-    {   printf("audit: send page renders... ");
-        size_t n = render("GET", "/wallet/send", NULL);
-        bool ok = n > 500;
-        ok = ok && (contains("address") || contains("Address"));
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        ok = ok && contains(">Send<"); /* nav active */
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: send page renders... ",
+        .method = "GET",
+        .path = "/wallet/send",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "address", "Address", 0 },
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+            { ">Send<", NULL, 0 }, /* nav active */
+        },
+    },
     /* ── Route: send review with valid-looking address ── */
-    {   printf("audit: send review handles bad address... ");
-        size_t n = render("POST", "/wallet/send/review",
-            "address=t1TestAddr12345678901234567890&amount=0.1");
-        bool ok = n > 200;
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: send review handles bad address... ",
+        .method = "POST",
+        .path = "/wallet/send/review",
+        .body = "address=t1TestAddr12345678901234567890&amount=0.1",
+        .min_len = 200,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+        },
+    },
     /* ── Route: receive ── */
-    {   printf("audit: receive page renders... ");
-        size_t n = render("GET", "/wallet/receive", NULL);
-        bool ok = n > 500;
-        ok = ok && contains("recommended");
-        ok = ok && contains("zero-knowledge proof");
-        ok = ok && !contains("{{{");
-        ok = ok && contains(">Receive<"); /* nav active */
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: receive page renders... ",
+        .method = "GET",
+        .path = "/wallet/receive",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "recommended", NULL, 0 },
+            { "zero-knowledge proof", NULL, 0 },
+            { "{{{", NULL, 1 },
+            { ">Receive<", NULL, 0 }, /* nav active */
+        },
+    },
     /* ── Route: history ── */
-    {   printf("audit: history with 10 txs renders... ");
-        size_t n = render("GET", "/wallet/history", NULL);
-        bool ok = n > 500;
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        ok = ok && contains(">History<"); /* nav active */
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: history with 10 txs renders... ",
+        .method = "GET",
+        .path = "/wallet/history",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+            { ">History<", NULL, 0 }, /* nav active */
+        },
+    },
     /* ── Route: history page 2 ── */
-    {   printf("audit: history page 2 renders... ");
-        size_t n = render("GET", "/wallet/history?page=1", NULL);
-        bool ok = n > 200;
-        ok = ok && !contains("{{{");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: history page 2 renders... ",
+        .method = "GET",
+        .path = "/wallet/history?page=1",
+        .body = NULL,
+        .min_len = 200,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+        },
+    },
     /* ── Route: history with filter ── */
-    {   printf("audit: history filter=sent... ");
-        size_t n = render("GET", "/wallet/history?filter=sent", NULL);
-        bool ok = n > 200;
-        ok = ok && !contains("{{{");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: history filter=sent... ",
+        .method = "GET",
+        .path = "/wallet/history?filter=sent",
+        .body = NULL,
+        .min_len = 200,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+        },
+    },
     /* ── Route: node ── */
-    {   printf("audit: node page with real data... ");
-        size_t n = render("GET", "/wallet/node", NULL);
-        bool ok = n > 500;
-        ok = ok && contains("Command Center");
-        ok = ok && contains("sovereign");
-        ok = ok && contains("500"); /* height 500000 */
-        ok = ok && contains("3");   /* 3 peers */
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        ok = ok && contains(">Node<"); /* nav active */
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: node page with real data... ",
+        .method = "GET",
+        .path = "/wallet/node",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "Command Center", NULL, 0 },
+            { "sovereign", NULL, 0 },
+            { "500", NULL, 0 }, /* height 500000 */
+            { "3", NULL, 0 }, /* 3 peers */
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+            { ">Node<", NULL, 0 }, /* nav active */
+        },
+    },
     /* ── Route: coins ── */
-    {   printf("audit: coins page with UTXOs... ");
-        size_t n = render("GET", "/wallet/coins", NULL);
-        bool ok = n > 200;
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: coins page with UTXOs... ",
+        .method = "GET",
+        .path = "/wallet/coins",
+        .body = NULL,
+        .min_len = 200,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+        },
+    },
     /* ── Route: shield ── */
-    {   printf("audit: shield amount form... ");
-        size_t n = render("GET", "/wallet/shield", NULL);
-        bool ok = n > 500;
-        ok = ok && (contains("Amount") || contains("amount"));
-        ok = ok && !contains("{{{");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: shield amount form... ",
+        .method = "GET",
+        .path = "/wallet/shield",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "Amount", "amount", 0 },
+            { "{{{", NULL, 1 },
+        },
+    },
     /* ── Route: shield confirm ── */
-    {   printf("audit: shield confirm page... ");
-        size_t n = render("GET", "/wallet/shield?amount=0.5", NULL);
-        bool ok = n > 500;
-        ok = ok && contains("0.5");
-        ok = ok && contains("Confirm");
-        ok = ok && !contains("{{{");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: shield confirm page... ",
+        .method = "GET",
+        .path = "/wallet/shield?amount=0.5",
+        .body = NULL,
+        .min_len = 500,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "0.5", NULL, 0 },
+            { "Confirm", NULL, 0 },
+            { "{{{", NULL, 1 },
+        },
+    },
     /* ── Route: pulse API ── */
-    {   printf("audit: pulse returns valid JSON... ");
-        size_t n = render("GET", "/api/wallet/pulse", NULL);
-        bool ok = n > 10;
-        ok = ok && contains("{");
-        ok = ok && contains("height");
-        ok = ok && contains("balance");
-        ok = ok && !contains("<!DOCTYPE");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
-
+    {
+        .label = "audit: pulse returns valid JSON... ",
+        .method = "GET",
+        .path = "/api/wallet/pulse",
+        .body = NULL,
+        .min_len = 10,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{", NULL, 0 },
+            { "height", NULL, 0 },
+            { "balance", NULL, 0 },
+            { "<!DOCTYPE", NULL, 1 },
+        },
+    },
     /* ── Route: tx detail ── */
-    {   printf("audit: tx detail with valid hex txid... ");
-        size_t n = render("GET",
-            "/wallet/tx/"
+    {
+        .label = "audit: tx detail with valid hex txid... ",
+        .method = "GET",
+        .path = "/wallet/tx/"
             "1010101010101010101010101010101010101010101010101010101010101010",
-            NULL);
-        bool ok = n > 200;
-        ok = ok && !contains("{{{");
-        ok = ok && !contains("sqlite");
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
+        .body = NULL,
+        .min_len = 200,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_LEN,
+        .need = {
+            { "{{{", NULL, 1 },
+            { "sqlite", NULL, 1 },
+        },
+    },
+};
 
-    /* ── Privacy accuracy check ── */
-    {   printf("audit: 16%% shielded matches actual data... ");
-        render("GET", "/wallet", NULL);
-        /* With 81M t-sat + 16M z-sat = 97M total, ~16% private */
-        bool ok = contains("16%") || contains("17%");
-        /* Must NOT claim untraceable */
-        ok = ok && !contains("untraceable");
-        ok = ok && !contains("Untraceable");
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+/* ── Privacy accuracy check ── */
+static int audit_privacy_accuracy(void)
+{
+    int failures = 0;
+    printf("audit: 16%% shielded matches actual data... ");
+    render("GET", "/wallet", NULL);
+    /* With 81M t-sat + 16M z-sat = 97M total, ~16% private */
+    bool ok = contains("16%") || contains("17%");
+    /* Must NOT claim untraceable */
+    ok = ok && !contains("untraceable");
+    ok = ok && !contains("Untraceable");
+    if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    return failures;
+}
 
-    /* ── Shield nudge shown when public balance exists ── */
-    {   printf("audit: shield nudge shown with public balance... ");
-        render("GET", "/wallet", NULL);
-        bool ok = contains("Shield All") || contains("/wallet/shield");
-        ok = ok && (contains("transparent addresses") ||
-             contains("chain analysis"));
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
+/* ── Shield nudge shown when public balance exists ── */
+static const struct aud_route k_render_audit_late[] = {
+    {
+        .label = "audit: shield nudge shown with public balance... ",
+        .method = "GET",
+        .path = "/wallet",
+        .body = NULL,
+        .min_len = 0,
+        .len_mode = AUD_LEN_IGNORE,
+        .fail_kind = AUD_FAIL_PLAIN,
+        .need = {
+            { "Shield All", "/wallet/shield", 0 },
+            { "transparent addresses", "chain analysis", 0 },
+        },
+    },
     /* ── XSS checks ── */
-    {   printf("audit: XSS in history search sanitized... ");
-        render("GET", "/wallet/history?q=<script>alert(1)</script>", NULL);
-        bool ok = !contains("<script>alert");
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    {   printf("audit: XSS in tx detail sanitized... ");
-        render("GET", "/wallet/tx/<img+onerror=alert(1)>", NULL);
-        bool ok = !contains("<img+onerror");
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
+    {
+        .label = "audit: XSS in history search sanitized... ",
+        .method = "GET",
+        .path = "/wallet/history?q=<script>alert(1)</script>",
+        .body = NULL,
+        .min_len = 0,
+        .len_mode = AUD_LEN_IGNORE,
+        .fail_kind = AUD_FAIL_PLAIN,
+        .need = {
+            { "<script>alert", NULL, 1 },
+        },
+    },
+    {
+        .label = "audit: XSS in tx detail sanitized... ",
+        .method = "GET",
+        .path = "/wallet/tx/<img+onerror=alert(1)>",
+        .body = NULL,
+        .min_len = 0,
+        .len_mode = AUD_LEN_IGNORE,
+        .fail_kind = AUD_FAIL_PLAIN,
+        .need = {
+            { "<img+onerror", NULL, 1 },
+        },
+    },
     /* ── Edge cases ── */
-    {   printf("audit: unknown route returns 0... ");
-        size_t n = render("GET", "/wallet/doesnotexist", NULL);
-        bool ok = n == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL (len=%zu)\n", n); failures++; }
-    }
+    {
+        .label = "audit: unknown route returns 0... ",
+        .method = "GET",
+        .path = "/wallet/doesnotexist",
+        .body = NULL,
+        .min_len = 0,
+        .len_mode = AUD_LEN_EQ,
+        .fail_kind = AUD_FAIL_LEN,
+    },
+    {
+        /* should render error page, not crash */
+        .label = "audit: POST with NULL body doesn't crash... ",
+        .method = "POST",
+        .path = "/wallet/send/review",
+        .body = NULL,
+        .min_len = 0,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_PLAIN,
+    },
+    {
+        .label = "audit: POST shield confirm with 0 amount... ",
+        .method = "POST",
+        .path = "/wallet/shield/confirm",
+        .body = "amount=0",
+        .min_len = 0,
+        .len_mode = AUD_LEN_MIN,
+        .fail_kind = AUD_FAIL_PLAIN,
+        .need = {
+            { "{{{", NULL, 1 },
+        },
+    },
+};
 
-    {   printf("audit: POST with NULL body doesn't crash... ");
-        size_t n = render("POST", "/wallet/send/review", NULL);
-        bool ok = n > 0; /* should render error page, not crash */
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    {   printf("audit: POST shield confirm with 0 amount... ");
-        size_t n = render("POST", "/wallet/shield/confirm", "amount=0");
-        bool ok = n > 0;
-        ok = ok && !contains("{{{");
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    cleanup();
+static int audit_private_and_empty_wallets(void)
+{
+    int failures = 0;
 
     /* ── 100% private wallet ── */
     {   printf("audit: 100%% private wallet shows no nudge... ");
@@ -395,7 +573,7 @@ int spec_render_audit(void)
         if (ok) {
             wallet_view_init(g_tmp);
             render("GET", "/wallet", NULL);
-            ok = contains("100%") || contains("All funds private");
+            ok = contains_either("100%", "All funds private");
             ok = ok && !contains("Shield All");
             ok = ok && !contains("transparent addresses");
             ok = ok && !contains("untraceable"); /* factual, not cutesy */
@@ -410,7 +588,7 @@ int spec_render_audit(void)
         if (ok) {
             wallet_view_init(g_tmp);
             render("GET", "/wallet", NULL);
-            ok = contains("0.00") || contains("0.0000");
+            ok = contains_either("0.00", "0.0000");
             ok = ok && !contains("{{{");
             ok = ok && !contains("sqlite");
             ok = ok && !contains("untraceable");
@@ -418,6 +596,36 @@ int spec_render_audit(void)
         cleanup();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* ── The actual audit ──────────────────────────────────── */
+
+int spec_render_audit(void)
+{
+    int failures = 0;
+    printf("\n=== Render Audit (real data, every route) ===\n");
+
+    bool db_ok = make_db(81000000, 16000000, 10, 3);
+    if (!db_ok) {
+        printf("SKIP: could not create test DB\n");
+        return 0;
+    }
+    wallet_view_init(g_tmp);
+
+    failures += audit_route_list(
+        k_render_audit_early,
+        sizeof k_render_audit_early / sizeof k_render_audit_early[0]);
+
+    failures += audit_privacy_accuracy();
+    failures += audit_route_list(
+        k_render_audit_late,
+        sizeof k_render_audit_late / sizeof k_render_audit_late[0]);
+
+    cleanup();
+
+    failures += audit_private_and_empty_wallets();
 
     printf("Render audit: %d failures\n", failures);
     return failures;
