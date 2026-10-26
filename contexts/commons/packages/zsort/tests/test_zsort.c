@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <stdint.h>
 
 static int failures = 0;
 
@@ -269,7 +271,10 @@ static void test_null_singleton(void) {
         perm == 0);
 }
 
+static void test_cli(void);
+
 int main(void) {
+  test_cli();
   test_null_singleton();
   test_basic();
 
@@ -285,4 +290,172 @@ int main(void) {
   }
   puts("zsort: all tests passed");
   return 0;
+}
+
+static FILE *cli_source, *cli_sink;
+static size_t cli_flushes, cli_reads, cli_fault_after = SIZE_MAX;
+static bool cli_read_failed;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+[[maybe_unused]] static int cli_getc(FILE *stream) {
+  if (stream == cli_source && cli_reads++ >= cli_fault_after) {
+    cli_read_failed = true;
+    return EOF;
+  }
+  return fgetc(stream);
+}
+[[maybe_unused]] static int cli_error(FILE *stream) {
+  return (stream == cli_source && cli_read_failed) || ferror(stream);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream) {
+  if (stream == cli_sink) cli_flushes++;
+  return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#define stdin cli_source
+#define stdout cli_sink
+#define fgetc cli_getc
+#define ferror cli_error
+#define fflush cli_flush
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define scanf(...) fscanf(cli_source, __VA_ARGS__)
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef scanf
+#undef printf
+#undef fflush
+#undef ferror
+#undef fgetc
+#undef stdin
+#undef stdout
+#define stdin real_stdin()
+#define stdout real_stdout()
+
+static FILE *require_stream(FILE *stream) {
+  if (!stream) { fprintf(stderr, "zsort CLI fixture setup failed\n"); exit(2); }
+  return stream;
+}
+static FILE *cli_input(const void *bytes, size_t n) {
+  FILE *stream = require_stream(tmpfile());
+  if (fwrite(bytes, 1, n, stream) != n || fflush(stream) != 0) exit(2);
+  rewind(stream);
+  return stream;
+}
+static int cli_invoke(FILE *source, FILE *sink, const char *mode) {
+  char *args[] = {"zsort", (char *)mode, NULL};
+  cli_source = source;
+  cli_sink = sink;
+  cli_flushes = cli_reads = 0;
+  cli_read_failed = false;
+  int rc = embedded_cli_main(mode ? 2 : 1, args);
+  cli_source = stdin;
+  cli_sink = stdout;
+  return rc;
+}
+static void cli_case(const void *bytes, size_t n, const char *mode,
+                      int status, const char *want) {
+  FILE *source = cli_input(bytes, n), *sink = require_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, mode) == status);
+  if (!*want) CHECK(cli_flushes == 0);
+  char got[512];
+  rewind(sink);
+  size_t count = fread(got, 1, sizeof got, sink);
+  CHECK(!ferror(sink) && count == strlen(want) && !memcmp(got, want, count));
+  CHECK(fclose(source) == 0 && fclose(sink) == 0);
+}
+static void cli_numbers(void) {
+  const char *modes[] = {NULL, "--stable", "--index"};
+  char input[256], want[256];
+  snprintf(input, sizeof input, "%lld 1-2 3+4 1 %lld", LLONG_MAX, LLONG_MIN);
+  snprintf(want, sizeof want, "%lld\n-2\n1\n1\n3\n4\n%lld\n", LLONG_MIN, LLONG_MAX);
+  for (size_t i = 0; i < 3; i++) cli_case(input, strlen(input), modes[i], 0, want);
+  const char *bad[] = {"3 garbage", "1x", "+", "- ", "1 +", "0x10",
+    "9223372036854775808", "-9223372036854775809"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+    cli_case(bad[i], strlen(bad[i]), NULL, 2, "");
+  const char nul[] = {'1', 0, '2'};
+  cli_case(nul, sizeof nul, NULL, 2, "");
+  char zeros[8193];
+  memset(zeros, '0', sizeof zeros);
+  zeros[sizeof zeros - 1] = '7';
+  cli_case(zeros, sizeof zeros, NULL, 0, "7\n");
+  cli_case("", 0, NULL, 0, "");
+  cli_case(" \t\r\n", 4, NULL, 0, "");
+  cli_case("1", 1, "--unknown", 2, "");
+}
+static void cli_faults(void) {
+  const char *inputs[] = {"3 1", "3 ", "3 +"};
+  for (size_t i = 0; i < 3; i++) {
+    cli_fault_after = strlen(inputs[i]);
+    cli_case(inputs[i], strlen(inputs[i]), NULL, 1, "");
+  }
+  cli_fault_after = SIZE_MAX;
+#ifdef _WIN32
+  FILE *source = require_stream(fopen("NUL", "w"));
+#else
+  FILE *source = require_stream(fopen("/dev/null", "w"));
+#endif
+  FILE *sink = require_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, NULL) == 1 && cli_flushes == 0);
+  CHECK(ftell(sink) == 0);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0);
+}
+static void cli_failed_sink(const char *mode, bool buffered) {
+#ifdef _WIN32
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  FILE *source = cli_input("3 1 2", 5);
+  FILE *sink = require_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+  char buffer[4096];
+  if (buffered && setvbuf(sink, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+  CHECK(cli_invoke(source, sink, mode) == 1 && ferror(sink));
+  CHECK(fclose(source) == 0);
+  (void)fclose(sink);
+}
+static void check_capacity_output(FILE *sink, size_t cap) {
+  char block[4096];
+  rewind(sink);
+  memset(block, '0', sizeof block);
+  for (size_t i = 1; i < sizeof block; i += 2) block[i] = '\n';
+  char got[4096];
+  for (size_t n = 0; n < cap * 2; n += sizeof got) {
+    size_t count = fread(got, 1, sizeof got, sink);
+    CHECK(count == sizeof got && !memcmp(got, block, sizeof got));
+  }
+  CHECK(fgetc(sink) == EOF && !ferror(sink));
+}
+static void cli_capacity(void) {
+  const size_t cap = (size_t)1 << 20;
+  FILE *source = require_stream(tmpfile()), *sink = require_stream(tmpfile());
+  char block[4096];
+  memset(block, ' ', sizeof block);
+  for (size_t i = 0; i < sizeof block; i += 2) block[i] = '0';
+  for (size_t n = 0; n < cap * 2; n += sizeof block)
+    if (fwrite(block, 1, sizeof block, source) != sizeof block) exit(2);
+  if (fputs(" \t\n", source) < 0 || fflush(source) != 0) exit(2);
+  rewind(source);
+  CHECK(cli_invoke(source, sink, NULL) == 0);
+  check_capacity_output(sink, cap);
+  CHECK(fclose(sink) == 0);
+  if (fseek(source, 0, SEEK_END) != 0 || fputs("1", source) < 0 || fflush(source) != 0) exit(2);
+  rewind(source);
+  sink = require_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, NULL) == 2 && cli_flushes == 0 && ftell(sink) == 0);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0);
+}
+static void test_cli(void) {
+  cli_numbers();
+  cli_faults();
+  const char *modes[] = {NULL, "--stable", "--index"};
+  for (size_t i = 0; i < 3; i++) {
+    cli_failed_sink(modes[i], false);
+#ifdef __linux__
+    cli_failed_sink(modes[i], true);
+#endif
+  }
+  cli_capacity();
 }
