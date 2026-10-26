@@ -147,6 +147,256 @@ static long long mut_now_ms(void)
 
 /* ── bounded spawn ──────────────────────────────────────────────────── */
 
+static long long mut_spawn_deadline(int timeout_ms)
+{
+    return mut_now_ms() + (timeout_ms > 0 ? timeout_ms : 600000);
+}
+
+/* 0 grew or no growth was needed; 1 means the buffer stays as it was. */
+static int mut_spawn_grow(char **buf, size_t *cap, size_t len)
+{
+    if (len + 8192 <= *cap)
+        return 0;
+    size_t ncap = *cap * 2;
+    char *nb = zcl_realloc(*buf, ncap, "mutation.capture");
+    if (!nb)
+        return 1;
+    *buf = nb;
+    *cap = ncap;
+    return 0;
+}
+
+static void mut_spawn_store(char **out, size_t *out_len, char *buf, size_t len)
+{
+    if (out) {
+        *out = buf;
+        if (out_len)
+            *out_len = len;
+    } else {
+        free(buf);
+    }
+}
+
+#if defined(_WIN32)
+/* 0 built; 2 does not fit. The caller already rejected an empty argv. */
+static int mut_spawn_win_cmdline(char *cmd, size_t cap, char *const argv[])
+{
+    size_t used = 0;
+    cmd[0] = '\0';
+    for (size_t i = 0; argv[i]; i++) {
+        if (i > 0 && used + 1 < cap)
+            cmd[used++] = ' ';
+        cmd[used] = '\0';
+        const char *a = argv[i];
+        bool quote = strchr(a, ' ') != NULL || strchr(a, '\t') != NULL ||
+                     a[0] == '\0';
+        size_t alen = strlen(a);
+        if (used + alen + 3 >= cap)
+            return 2;
+        if (quote)
+            cmd[used++] = '"';
+        memcpy(cmd + used, a, alen);
+        used += alen;
+        if (quote)
+            cmd[used++] = '"';
+        cmd[used] = '\0';
+    }
+    return 0;
+}
+
+/* 0 captured; 1 means the capture buffer was not allocated. */
+static int mut_spawn_win_capture(HANDLE rd, HANDLE proc, int timeout_ms,
+                                 char **buf_out, size_t *len_out,
+                                 bool *timed_out)
+{
+    size_t cap = 65536, len = 0;
+    char *buf = zcl_malloc(cap, "mutation.capture");
+    if (!buf)
+        return 1;
+    long long deadline = mut_spawn_deadline(timeout_ms);
+    *timed_out = false;
+    for (;;) {
+        long long left = deadline - mut_now_ms();
+        if (left <= 0) {
+            *timed_out = true;
+            break;
+        }
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
+            break; /* child hung up */
+        if (avail == 0) {
+            if (WaitForSingleObject(proc, 0) == WAIT_OBJECT_0)
+                break;
+            Sleep(10);
+            continue;
+        }
+        if (mut_spawn_grow(&buf, &cap, len))
+            break;
+        DWORD want = (DWORD)(cap - len - 1);
+        if (want > avail)
+            want = avail;
+        DWORD got = 0;
+        if (!ReadFile(rd, buf + len, want, &got, NULL) || got == 0)
+            break;
+        len += (size_t)got;
+    }
+    buf[len] = '\0';
+    *buf_out = buf;
+    *len_out = len;
+    return 0;
+}
+
+static int mut_spawn_win_reap(HANDLE proc, bool timed_out)
+{
+    int rc;
+    if (timed_out) {
+        TerminateProcess(proc, 137);
+        WaitForSingleObject(proc, INFINITE);
+        rc = -2;
+    } else {
+        WaitForSingleObject(proc, INFINITE);
+        DWORD code = 0;
+        if (!GetExitCodeProcess(proc, &code))
+            code = (DWORD)-1;
+        rc = (int)code;
+    }
+    CloseHandle(proc);
+    return rc;
+}
+
+static int mut_spawn_win_finish(HANDLE proc, HANDLE rd, int timeout_ms,
+                                char **out, size_t *out_len)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    bool timed_out = false;
+    if (mut_spawn_win_capture(rd, proc, timeout_ms, &buf, &len,
+                              &timed_out) != 0) {
+        CloseHandle(rd);
+        TerminateProcess(proc, 137);
+        WaitForSingleObject(proc, INFINITE);
+        CloseHandle(proc);
+        return -1;
+    }
+    CloseHandle(rd);
+    int rc = mut_spawn_win_reap(proc, timed_out);
+    mut_spawn_store(out, out_len, buf, len);
+    return rc;
+}
+#else
+static void mut_spawn_posix_child(const char *dir, int fds[2],
+                                  char *const argv[])
+{
+    /* test_parallel needs an unlimited stack for the deep-recursion
+     * groups; a child that inherits 8 MiB SIGSEGVs and would be scored
+     * as a kill the mutant did not earn. */
+    struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+    (void)setrlimit(RLIMIT_STACK, &rl);
+    if (dir && chdir(dir) != 0)
+        _exit(127);
+    (void)close(fds[0]);
+    if (dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0)
+        _exit(127);
+    (void)close(fds[1]);
+    int devnull = open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+        (void)dup2(devnull, STDIN_FILENO);
+        (void)close(devnull);
+    }
+    execvp(argv[0], argv);
+    _exit(127);
+}
+
+/* 1 retry, 0 readable, negative means the wait failed for good. */
+static int mut_spawn_posix_poll(int fd, long long left)
+{
+    struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
+    int pr = poll(&p, 1, left > 1000 ? 1000 : (int)left);
+    if (pr < 0 && errno == EINTR)
+        return 1;
+    if (pr < 0)
+        return -2;
+    if (pr == 0)
+        return 1;
+    return 0;
+}
+
+/* 0 captured; 1 means the capture buffer was not allocated. */
+static int mut_spawn_posix_capture(int fd, int timeout_ms, char **buf_out,
+                                   size_t *len_out, bool *timed_out)
+{
+    size_t cap = 65536, len = 0;
+    char *buf = zcl_malloc(cap, "mutation.capture");
+    if (!buf)
+        return 1;
+    long long deadline = mut_spawn_deadline(timeout_ms);
+    *timed_out = false;
+    for (;;) {
+        long long left = deadline - mut_now_ms();
+        if (left <= 0) {
+            *timed_out = true;
+            break;
+        }
+        int prs = mut_spawn_posix_poll(fd, left);
+        if (prs > 0)
+            continue;
+        if (prs < 0)
+            break;
+        if (mut_spawn_grow(&buf, &cap, len))
+            break;
+        ssize_t got = read(fd, buf + len, cap - len - 1);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (got == 0)
+            break;
+        len += (size_t)got;
+    }
+    buf[len] = '\0';
+    *buf_out = buf;
+    *len_out = len;
+    return 0;
+}
+
+static int mut_spawn_posix_reap(pid_t pid, bool timed_out)
+{
+    int status = 0, rc;
+    if (timed_out) {
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+        rc = -2;
+    } else {
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+            ;
+        if (WIFSIGNALED(status))
+            rc = 128 + WTERMSIG(status);
+        else
+            rc = WEXITSTATUS(status);
+    }
+    return rc;
+}
+
+static int mut_spawn_posix_finish(pid_t pid, int fd, int timeout_ms,
+                                  char **out, size_t *out_len)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    bool timed_out = false;
+    if (mut_spawn_posix_capture(fd, timeout_ms, &buf, &len, &timed_out) != 0) {
+        (void)close(fd);
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, NULL, 0);
+        return -1;
+    }
+    (void)close(fd);
+    int rc = mut_spawn_posix_reap(pid, timed_out);
+    mut_spawn_store(out, out_len, buf, len);
+    return rc;
+}
+#endif
+
 int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
                   char **out, size_t *out_len)
 {
@@ -163,29 +413,10 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
         return -1;
     }
     char cmd[8192];
-    size_t used = 0;
-    cmd[0] = '\0';
-    for (size_t i = 0; argv[i]; i++) {
-        if (i > 0 && used + 1 < sizeof(cmd))
-            cmd[used++] = ' ';
-        cmd[used] = '\0';
-        const char *a = argv[i];
-        bool quote = strchr(a, ' ') != NULL || strchr(a, '\t') != NULL ||
-                     a[0] == '\0';
-        size_t alen = strlen(a);
-        if (used + alen + 3 >= sizeof(cmd)) {
-            fprintf(stderr, "mutation: command line too long\n");
-            return -1;
-        }
-        if (quote)
-            cmd[used++] = '"';
-        memcpy(cmd + used, a, alen);
-        used += alen;
-        if (quote)
-            cmd[used++] = '"';
-        cmd[used] = '\0';
+    if (mut_spawn_win_cmdline(cmd, sizeof cmd, argv) != 0) {
+        fprintf(stderr, "mutation: command line too long\n");
+        return -1;
     }
-
     SECURITY_ATTRIBUTES sa;
     memset(&sa, 0, sizeof(sa));
     sa.nLength = sizeof(sa);
@@ -219,73 +450,7 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
     }
     CloseHandle(pi.hThread);
     CloseHandle(wr); /* ours must close so the read end sees EOF */
-
-    size_t cap = 65536, len = 0;
-    char *buf = zcl_malloc(cap, "mutation.capture");
-    if (!buf) {
-        CloseHandle(rd);
-        TerminateProcess(pi.hProcess, 137);
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        CloseHandle(pi.hProcess);
-        return -1;
-    }
-    long long deadline = mut_now_ms() + (timeout_ms > 0 ? timeout_ms : 600000);
-    bool timed_out = false;
-    for (;;) {
-        long long left = deadline - mut_now_ms();
-        if (left <= 0) {
-            timed_out = true;
-            break;
-        }
-        DWORD avail = 0;
-        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
-            break; /* child hung up */
-        if (avail == 0) {
-            if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0)
-                break;
-            Sleep(10);
-            continue;
-        }
-        if (len + 8192 > cap) {
-            size_t ncap = cap * 2;
-            char *nb = zcl_realloc(buf, ncap, "mutation.capture");
-            if (!nb)
-                break;
-            buf = nb;
-            cap = ncap;
-        }
-        DWORD want = (DWORD)(cap - len - 1);
-        if (want > avail)
-            want = avail;
-        DWORD got = 0;
-        if (!ReadFile(rd, buf + len, want, &got, NULL) || got == 0)
-            break;
-        len += (size_t)got;
-    }
-    buf[len] = '\0';
-    CloseHandle(rd);
-
-    int rc;
-    if (timed_out) {
-        TerminateProcess(pi.hProcess, 137);
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        rc = -2;
-    } else {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD code = 0;
-        if (!GetExitCodeProcess(pi.hProcess, &code))
-            code = (DWORD)-1;
-        rc = (int)code;
-    }
-    CloseHandle(pi.hProcess);
-    if (out) {
-        *out = buf;
-        if (out_len)
-            *out_len = len;
-    } else {
-        free(buf);
-    }
-    return rc;
+    return mut_spawn_win_finish(pi.hProcess, rd, timeout_ms, out, out_len);
 #else
     int fds[2];
     if (pipe(fds) != 0) {
@@ -299,95 +464,10 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
         fprintf(stderr, "mutation: fork failed: %s\n", strerror(errno));
         return -1;
     }
-    if (pid == 0) {
-        /* test_parallel needs an unlimited stack for the deep-recursion
-         * groups; a child that inherits 8 MiB SIGSEGVs and would be scored
-         * as a kill the mutant did not earn. */
-        struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
-        (void)setrlimit(RLIMIT_STACK, &rl);
-        if (dir && chdir(dir) != 0)
-            _exit(127);
-        (void)close(fds[0]);
-        if (dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0)
-            _exit(127);
-        (void)close(fds[1]);
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) {
-            (void)dup2(devnull, STDIN_FILENO);
-            (void)close(devnull);
-        }
-        execvp(argv[0], argv);
-        _exit(127);
-    }
+    if (pid == 0)
+        mut_spawn_posix_child(dir, fds, argv);
     (void)close(fds[1]);
-
-    size_t cap = 65536, len = 0;
-    char *buf = zcl_malloc(cap, "mutation.capture");
-    if (!buf) {
-        (void)close(fds[0]);
-        (void)kill(pid, SIGKILL);
-        (void)waitpid(pid, NULL, 0);
-        return -1;
-    }
-    long long deadline = mut_now_ms() + (timeout_ms > 0 ? timeout_ms : 600000);
-    bool timed_out = false;
-    for (;;) {
-        long long left = deadline - mut_now_ms();
-        if (left <= 0) {
-            timed_out = true;
-            break;
-        }
-        struct pollfd p = { .fd = fds[0], .events = POLLIN, .revents = 0 };
-        int pr = poll(&p, 1, left > 1000 ? 1000 : (int)left);
-        if (pr < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (pr == 0)
-            continue;
-        if (len + 8192 > cap) {
-            size_t ncap = cap * 2;
-            char *nb = zcl_realloc(buf, ncap, "mutation.capture");
-            if (!nb)
-                break;
-            buf = nb;
-            cap = ncap;
-        }
-        ssize_t got = read(fds[0], buf + len, cap - len - 1);
-        if (got < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (got == 0)
-            break;
-        len += (size_t)got;
-    }
-    buf[len] = '\0';
-    (void)close(fds[0]);
-
-    int status = 0, rc;
-    if (timed_out) {
-        (void)kill(pid, SIGKILL);
-        (void)waitpid(pid, &status, 0);
-        rc = -2;
-    } else {
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-            ;
-        if (WIFSIGNALED(status))
-            rc = 128 + WTERMSIG(status);
-        else
-            rc = WEXITSTATUS(status);
-    }
-    if (out) {
-        *out = buf;
-        if (out_len)
-            *out_len = len;
-    } else {
-        free(buf);
-    }
-    return rc;
+    return mut_spawn_posix_finish(pid, fds[0], timeout_ms, out, out_len);
 #endif
 }
 
@@ -416,6 +496,46 @@ static bool mut_argv_push(struct zcl_mut_argv *a, const char *word, size_t n)
     return true;
 }
 
+static bool mut_shell_is_break(char c)
+{
+    return c == '\0' || ((c == ' ' || c == '\t' || c == '\n') && true);
+}
+
+/* 0 closed the quote; 1 is an unterminated quote. */
+static int mut_shell_quoted(const char **pp, char *word, size_t *wn,
+                            size_t cap, bool *in_word)
+{
+    const char *p = *pp;
+    char q = *p;
+    *in_word = true;
+    for (p++; *p && *p != q; p++) {
+        /* No expansion: a `$tmp` inside quotes stays four literal
+         * characters so the caller can recognise the placeholder. */
+        if (q == '"' && *p == '\\' && p[1])
+            p++;
+        if (*wn + 1 < cap)
+            word[(*wn)++] = *p;
+    }
+    *pp = p;
+    if (*p != q)
+        return 1;
+    return 0;
+}
+
+static void mut_shell_push_char(char *word, size_t *wn, size_t cap,
+                                const char **pp, char c, bool *in_word)
+{
+    const char *p = *pp;
+    if (c == '\\' && p[1]) {
+        p++;
+        c = *p;
+        *pp = p;
+    }
+    *in_word = true;
+    if (*wn + 1 < cap)
+        word[(*wn)++] = c;
+}
+
 bool zcl_mut_shell_split(const char *cmd, struct zcl_mut_argv *out)
 {
     if (!cmd || !out)
@@ -426,7 +546,7 @@ bool zcl_mut_shell_split(const char *cmd, struct zcl_mut_argv *out)
     bool in_word = false;
     for (const char *p = cmd;; p++) {
         char c = *p;
-        if (c == '\0' || ((c == ' ' || c == '\t' || c == '\n') && true)) {
+        if (mut_shell_is_break(c)) {
             if (in_word) {
                 if (!mut_argv_push(out, word, wn)) {
                     zcl_mut_argv_free(out);
@@ -440,29 +560,13 @@ bool zcl_mut_shell_split(const char *cmd, struct zcl_mut_argv *out)
             continue;
         }
         if (c == '\'' || c == '"') {
-            char q = c;
-            in_word = true;
-            for (p++; *p && *p != q; p++) {
-                /* No expansion: a `$tmp` inside quotes stays four literal
-                 * characters so the caller can recognise the placeholder. */
-                if (q == '"' && *p == '\\' && p[1])
-                    p++;
-                if (wn + 1 < sizeof word)
-                    word[wn++] = *p;
-            }
-            if (*p != q) {
+            if (mut_shell_quoted(&p, word, &wn, sizeof word, &in_word) != 0) {
                 zcl_mut_argv_free(out);
                 return false; /* unterminated quote: never guess */
             }
             continue;
         }
-        if (c == '\\' && p[1]) {
-            p++;
-            c = *p;
-        }
-        in_word = true;
-        if (wn + 1 < sizeof word)
-            word[wn++] = c;
+        mut_shell_push_char(word, &wn, sizeof word, &p, c, &in_word);
     }
     return out->count > 0;
 }
@@ -615,15 +719,36 @@ fail:
     return false;
 }
 
-bool zcl_mut_plan_from_dryrun(const char *text, const char *src_rel,
-                              struct zcl_mut_plan *out, char *err,
-                              size_t err_cap)
+static bool mut_plan_args_ok(const char *text, const char *src_rel,
+                             struct zcl_mut_plan *out, char *err,
+                             size_t err_cap)
 {
     if (err && err_cap)
         err[0] = '\0';
     if (out)
         memset(out, 0, sizeof *out);
-    if (!text || !src_rel || !out)
+    return text && src_rel && out;
+}
+
+static void mut_plan_scan_segments(const char *segs, const char *src_rel,
+                                   struct zcl_mut_plan *out,
+                                   bool *have_compile, bool *have_link)
+{
+    for (const char *s = segs; *s; s += strlen(s) + 1) {
+        if (!*have_compile && mut_seg_has(s, "compile-epoch-object.sh") &&
+            mut_seg_has(s, src_rel) && mut_seg_has(s, " -- "))
+            *have_compile = mut_plan_compile(s, src_rel, out);
+        else if (!*have_link && mut_seg_has(s, ".rsp") &&
+                 mut_seg_has(s, "-o "))
+            *have_link = mut_plan_link(s, out);
+    }
+}
+
+bool zcl_mut_plan_from_dryrun(const char *text, const char *src_rel,
+                              struct zcl_mut_plan *out, char *err,
+                              size_t err_cap)
+{
+    if (!mut_plan_args_ok(text, src_rel, out, err, err_cap))
         return false;
     char *segs = mut_segments(text, strlen(text));
     if (!segs) {
@@ -632,13 +757,7 @@ bool zcl_mut_plan_from_dryrun(const char *text, const char *src_rel,
         return false;
     }
     bool have_compile = false, have_link = false;
-    for (const char *s = segs; *s; s += strlen(s) + 1) {
-        if (!have_compile && mut_seg_has(s, "compile-epoch-object.sh") &&
-            mut_seg_has(s, src_rel) && mut_seg_has(s, " -- "))
-            have_compile = mut_plan_compile(s, src_rel, out);
-        else if (!have_link && mut_seg_has(s, ".rsp") && mut_seg_has(s, "-o "))
-            have_link = mut_plan_link(s, out);
-    }
+    mut_plan_scan_segments(segs, src_rel, out, &have_compile, &have_link);
     free(segs);
     if (!have_compile) {
         if (err)
@@ -891,92 +1010,92 @@ static void mut_cache_put(const struct mut_ctx *c, const char *key,
         (void)zcl_mut_write_file(path, line, (size_t)n);
 }
 
-static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
+/* 1 paths do not fit; 2 scratch directories could not be created. */
+static int mut_prepare_paths(struct mut_ctx *c)
 {
     const struct zcl_mut_config *cfg = c->cfg;
     if (!zcl_path_join(c->subject_c, sizeof c->subject_c, cfg->work_dir,
-                  "subject.c") ||
-        !zcl_path_join(c->object, sizeof c->object, cfg->work_dir, "subject.o") ||
-        !zcl_path_join(c->binary, sizeof c->binary, cfg->work_dir, "subject.bin") ||
+                       "subject.c") ||
+        !zcl_path_join(c->object, sizeof c->object, cfg->work_dir,
+                       "subject.o") ||
+        !zcl_path_join(c->binary, sizeof c->binary, cfg->work_dir,
+                       "subject.bin") ||
         !zcl_path_join(c->rsp, sizeof c->rsp, cfg->work_dir, "link.rsp") ||
-        !zcl_path_join(c->cache_dir, sizeof c->cache_dir, cfg->work_dir, "cache")) {
-        (void)snprintf(rep->error, sizeof rep->error,
-                       "scratch paths do not fit under %s", cfg->work_dir);
-        return false;
-    }
+        !zcl_path_join(c->cache_dir, sizeof c->cache_dir, cfg->work_dir,
+                       "cache"))
+        return 1;
     if (!platform_directory_ensure(cfg->work_dir, 0755) ||
-        !platform_directory_ensure(c->cache_dir, 0755)) {
-        (void)snprintf(rep->error, sizeof rep->error,
-                       "cannot create mutation scratch directories under %.180s",
-                       cfg->work_dir);
-        return false;
-    }
+        !platform_directory_ensure(c->cache_dir, 0755))
+        return 2;
     (void)snprintf(c->runner_arg, sizeof c->runner_arg,
                    cfg->runner_arg_fmt ? cfg->runner_arg_fmt : "--exact=%s",
                    cfg->group);
+    return 0;
+}
 
+/* 0 ready (including no response file). 1 absolute path too long, 2 joined
+ * path too long, 3 unreadable, 4 object not listed, 5 out of memory,
+ * 6 the scratch response file could not be written. On 3, detail receives
+ * the path that could not be read. */
+static int mut_prepare_swap_rsp(struct mut_ctx *c, char *detail,
+                                size_t detail_cap)
+{
     /* The link input list, with this campaign's object swapped in for the
      * build tree's. The build tree's own object is never rewritten. */
-    if (c->plan->rsp[0]) {
-        char rsp_path[PATH_MAX];
-        const char *p = c->plan->rsp;
-        if (platform_path_is_absolute(p)) {
-            size_t path_len = strlen(p);
-            if (path_len >= sizeof rsp_path) {
-                (void)snprintf(rep->error, sizeof rep->error,
-                               "absolute response path is too long");
-                return false;
-            }
-            memcpy(rsp_path, p, path_len + 1u);
-        } else if (!zcl_path_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
-            (void)snprintf(rep->error, sizeof rep->error, "rsp path too long");
-            return false;
-        }
-        size_t rlen = 0;
-        char *rsp = zcl_mut_read_file(rsp_path, &rlen);
-        if (!rsp) {
-            (void)snprintf(rep->error, sizeof rep->error,
-                           "cannot read the link response file %.180s", rsp_path);
-            return false;
-        }
-        char *at = strstr(rsp, c->plan->object);
-        if (!at) {
-            free(rsp);
-            (void)snprintf(rep->error, sizeof rep->error,
-                           "the link response file does not list %.180s",
-                           c->plan->object);
-            return false;
-        }
-        size_t head = (size_t)(at - rsp);
-        size_t objn = strlen(c->plan->object);
-        size_t need = rlen - objn + strlen(c->object) + 1;
-        char *swapped = zcl_malloc(need + 1, "mutation.rsp");
-        if (!swapped) {
-            free(rsp);
-            return false;
-        }
-        memcpy(swapped, rsp, head);
-        memcpy(swapped + head, c->object, strlen(c->object));
-        memcpy(swapped + head + strlen(c->object), rsp + head + objn,
-               rlen - head - objn);
-        swapped[need - 1] = '\0';
-#if defined(_WIN32)
-        /* GCC response files use backslash as an escape character even when
-         * the driver is native Windows.  Convert path separators before the
-         * file is parsed or C:\\Users becomes the relative C:Users token. */
-        for (size_t i = 0; i + 1u < need; i++)
-            if (swapped[i] == '\\') swapped[i] = '/';
-#endif
-        bool ok = zcl_mut_write_file(c->rsp, swapped, need - 1);
-        free(swapped);
-        free(rsp);
-        if (!ok) {
-            (void)snprintf(rep->error, sizeof rep->error,
-                           "cannot write %.180s", c->rsp);
-            return false;
-        }
+    if (!c->plan->rsp[0])
+        return 0;
+    char rsp_path[PATH_MAX];
+    const char *p = c->plan->rsp;
+    const struct zcl_mut_config *cfg = c->cfg;
+    if (platform_path_is_absolute(p)) {
+        size_t path_len = strlen(p);
+        if (path_len >= sizeof rsp_path)
+            return 1;
+        memcpy(rsp_path, p, path_len + 1u);
+    } else if (!zcl_path_join(rsp_path, sizeof rsp_path, cfg->root, p)) {
+        return 2;
     }
+    size_t rlen = 0;
+    char *rsp = zcl_mut_read_file(rsp_path, &rlen);
+    if (!rsp) {
+        (void)snprintf(detail, detail_cap, "%s", rsp_path);
+        return 3;
+    }
+    char *at = strstr(rsp, c->plan->object);
+    if (!at) {
+        free(rsp);
+        return 4;
+    }
+    size_t head = (size_t)(at - rsp);
+    size_t objn = strlen(c->plan->object);
+    size_t need = rlen - objn + strlen(c->object) + 1;
+    char *swapped = zcl_malloc(need + 1, "mutation.rsp");
+    if (!swapped) {
+        free(rsp);
+        return 5;
+    }
+    memcpy(swapped, rsp, head);
+    memcpy(swapped + head, c->object, strlen(c->object));
+    memcpy(swapped + head + strlen(c->object), rsp + head + objn,
+           rlen - head - objn);
+    swapped[need - 1] = '\0';
+#if defined(_WIN32)
+    /* GCC response files use backslash as an escape character even when
+     * the driver is native Windows.  Convert path separators before the
+     * file is parsed or C:\\Users becomes the relative C:Users token. */
+    for (size_t i = 0; i + 1u < need; i++)
+        if (swapped[i] == '\\') swapped[i] = '/';
+#endif
+    bool ok = zcl_mut_write_file(c->rsp, swapped, need - 1);
+    free(swapped);
+    free(rsp);
+    if (!ok)
+        return 6;
+    return 0;
+}
 
+static void mut_prepare_tool_digest(struct mut_ctx *c)
+{
     /* Tool digest: the compiler argv, so a flag change misses the cache. */
     char tool[8192];
     size_t to = 0;
@@ -988,7 +1107,247 @@ static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
         to += (size_t)n;
     }
     zcl_mut_digest_hex(tool, to, c->tool_digest);
+}
+
+static bool mut_prepare(struct mut_ctx *c, struct zcl_mut_report *rep)
+{
+    int paths = mut_prepare_paths(c);
+    if (paths == 1) {
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "scratch paths do not fit under %s", c->cfg->work_dir);
+        return false;
+    }
+    if (paths == 2) {
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "cannot create mutation scratch directories under %.180s",
+                       c->cfg->work_dir);
+        return false;
+    }
+    char detail[PATH_MAX];
+    detail[0] = '\0';
+    switch (mut_prepare_swap_rsp(c, detail, sizeof detail)) {
+    case 0:
+        break;
+    case 1:
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "absolute response path is too long");
+        return false;
+    case 2:
+        (void)snprintf(rep->error, sizeof rep->error, "rsp path too long");
+        return false;
+    case 3:
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "cannot read the link response file %.180s", detail);
+        return false;
+    case 4:
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "the link response file does not list %.180s",
+                       c->plan->object);
+        return false;
+    case 5:
+        return false;
+    default:
+        (void)snprintf(rep->error, sizeof rep->error,
+                       "cannot write %.180s", c->rsp);
+        return false;
+    }
+    mut_prepare_tool_digest(c);
     return true;
+}
+
+enum {
+    MUT_ST_OK = 0,
+    MUT_ST_PATH = 1,
+    MUT_ST_READ = 2,
+    MUT_ST_NOSITE = 3,
+    MUT_ST_SITES = 4,
+    MUT_ST_PREPARE = 5,
+    MUT_ST_STAGE = 6,
+    MUT_ST_COMPILE = 7,
+    MUT_ST_NOOBJ = 8,
+    MUT_ST_LINK = 9,
+    MUT_ST_BASE = 10,
+    MUT_ST_RESULTS = 11
+};
+
+static int mut_campaign_load(const struct zcl_mut_config *cfg,
+                             const struct zcl_mut_plan *plan,
+                             struct zcl_mut_report *out, char *src_abs,
+                             size_t src_cap, char **src, size_t *src_len,
+                             struct zcl_mut_site **sites, size_t *total,
+                             struct mut_ctx *c)
+{
+    memset(c, 0, sizeof *c);
+    if (!zcl_path_join(src_abs, src_cap, cfg->root, cfg->src_rel))
+        return MUT_ST_PATH;
+    *src = zcl_mut_read_file(src_abs, src_len);
+    if (!*src)
+        return MUT_ST_READ;
+    zcl_sha3_256((const unsigned char *)*src, *src_len,
+                 out->source_digest_before);
+    *total = zcl_mut_enumerate(*src, *src_len, NULL, 0);
+    out->total_sites = *total;
+    if (*total == 0)
+        return MUT_ST_NOSITE;
+    *sites = zcl_calloc(*total, sizeof **sites, "mutation.sites");
+    if (!*sites)
+        return MUT_ST_SITES;
+    (void)zcl_mut_enumerate(*src, *src_len, *sites, *total);
+    c->cfg = cfg;
+    c->plan = plan;
+    char hex[65];
+    zcl_mut_digest_hex(*src, *src_len, hex);
+    (void)snprintf(c->src_digest, sizeof c->src_digest, "%s", hex);
+    if (!mut_prepare(c, out))
+        return MUT_ST_PREPARE;
+    return MUT_ST_OK;
+}
+
+static int mut_campaign_baseline(struct mut_ctx *c, const char *src,
+                                 size_t src_len, struct zcl_mut_report *out,
+                                 enum zcl_mut_outcome *base_out)
+{
+    /* ── baseline, never cached ─────────────────────────────────────── */
+    if (!mut_write_subject(c, src, src_len))
+        return MUT_ST_STAGE;
+    if (mut_compile(c) != 0)
+        return MUT_ST_COMPILE;
+    c->baseline_obj = zcl_mut_read_file(c->object, &c->baseline_obj_len);
+    if (!c->baseline_obj)
+        return MUT_ST_NOOBJ;
+    if (mut_link(c) != 0)
+        return MUT_ST_LINK;
+    size_t blen = 0;
+    char *bin = zcl_mut_read_file(c->binary, &blen);
+    if (bin) {
+        zcl_mut_digest_hex(bin, blen, c->base_digest);
+        free(bin);
+    } else {
+        (void)snprintf(c->base_digest, sizeof c->base_digest, "nobin");
+    }
+    const char *by = "";
+    enum zcl_mut_outcome base = mut_run_group(c, &by);
+    *base_out = base;
+    if (base != ZCL_MUT_OUTCOME_SURVIVED)
+        return MUT_ST_BASE;
+    out->results = zcl_calloc(out->total_sites, sizeof *out->results,
+                              "mutation.results");
+    if (!out->results)
+        return MUT_ST_RESULTS;
+    return MUT_ST_OK;
+}
+
+static void mut_campaign_write_error(struct zcl_mut_report *out, int st,
+                                     const char *src_abs,
+                                     const struct zcl_mut_config *cfg,
+                                     enum zcl_mut_outcome base)
+{
+    if (st == MUT_ST_BASE) {
+        (void)snprintf(out->error, sizeof out->error,
+                       "baseline %s is not green and executing (%s); a "
+                       "mutation score against it would mean nothing",
+                       cfg->group, zcl_mut_outcome_name(base));
+        return;
+    }
+    const char *arg = st == MUT_ST_READ ? src_abs :
+                      st == MUT_ST_NOSITE ? cfg->src_rel : "";
+    static const struct {
+        int code;
+        const char *fmt;
+    } rows[] = {
+        { MUT_ST_PATH, "source path too long" },
+        { MUT_ST_READ, "cannot read %.180s" },
+        { MUT_ST_NOSITE, "no mutation site in %s" },
+        { MUT_ST_STAGE, "cannot stage the scratch translation unit" },
+        { MUT_ST_COMPILE, "the unmodified file does not compile on its own" },
+        { MUT_ST_NOOBJ, "the baseline object was not produced" },
+        { MUT_ST_LINK, "the baseline link failed" },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        if (rows[i].code == st) {
+            (void)snprintf(out->error, sizeof out->error, rows[i].fmt, arg);
+            return;
+        }
+    }
+}
+
+static void mut_campaign_classify(struct mut_ctx *c, struct zcl_mut_result *r)
+{
+    size_t olen = 0;
+    char *obj = zcl_mut_read_file(c->object, &olen);
+    bool same = obj && olen == c->baseline_obj_len &&
+                memcmp(obj, c->baseline_obj, olen) == 0;
+    free(obj);
+    if (same)
+        r->outcome = ZCL_MUT_OUTCOME_EQUIVALENT;
+    else if (mut_link(c) != 0)
+        r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
+    else
+        r->outcome = mut_run_group(c, &r->killed_by);
+}
+
+static void mut_campaign_one(struct mut_ctx *c,
+                             const struct zcl_mut_config *cfg,
+                             const char *src, size_t src_len,
+                             const struct zcl_mut_site *site,
+                             struct zcl_mut_result *r,
+                             struct zcl_mut_report *out)
+{
+    r->site = *site;
+    r->killed_by = "";
+    long long t0 = mut_now_ms();
+    char key[65];
+    mut_cache_key(c, site, key);
+    if (cfg->use_cache &&
+        mut_cache_get(c, key, &r->outcome, &r->killed_by)) {
+        r->cached = true;
+    } else {
+        char *image = NULL;
+        size_t ilen = 0;
+        if (!zcl_mut_apply(src, src_len, site, &image, &ilen) ||
+            !mut_write_subject(c, image, ilen)) {
+            free(image);
+            r->outcome = ZCL_MUT_OUTCOME_ERROR;
+        } else {
+            free(image);
+            if (mut_compile(c) != 0)
+                r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
+            else
+                mut_campaign_classify(c, r);
+        }
+        if (cfg->use_cache && r->outcome != ZCL_MUT_OUTCOME_ERROR)
+            mut_cache_put(c, key, r->outcome, r->killed_by);
+    }
+    r->ms = mut_now_ms() - t0;
+    out->counts[r->outcome]++;
+    out->result_count++;
+}
+
+static void mut_campaign_verbose_bits(const struct zcl_mut_result *r,
+                                      const char **shown, const char **tag)
+{
+    *shown = r->site.after[0] ? r->site.after : "(delete)";
+    *tag = r->cached ? " (cached)" : "";
+}
+
+static void mut_campaign_confirm_source(const char *src_abs, const char *src,
+                                        size_t src_len,
+                                        struct zcl_mut_report *out)
+{
+    /* The file was never opened for writing; this proves it rather than
+     * asserting it. */
+    size_t again_len = 0;
+    char *again = zcl_mut_read_file(src_abs, &again_len);
+    if (again) {
+        zcl_sha3_256((const unsigned char *)again, again_len,
+                     out->source_digest_after);
+        out->source_unchanged =
+            again_len == src_len &&
+            memcmp(again, src, src_len) == 0 &&
+            memcmp(out->source_digest_before, out->source_digest_after,
+                   32) == 0;
+        free(again);
+    }
 }
 
 bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
@@ -1001,176 +1360,46 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
     long long started = mut_now_ms();
 
     char src_abs[PATH_MAX];
-    if (!zcl_path_join(src_abs, sizeof src_abs, cfg->root, cfg->src_rel)) {
-        (void)snprintf(out->error, sizeof out->error, "source path too long");
-        return false;
-    }
+    char *src = NULL;
+    struct zcl_mut_site *sites = NULL;
     size_t src_len = 0;
-    char *src = zcl_mut_read_file(src_abs, &src_len);
-    if (!src) {
-        (void)snprintf(out->error, sizeof out->error, "cannot read %.180s",
-                       src_abs);
-        return false;
-    }
-    zcl_sha3_256((const unsigned char *)src, src_len, out->source_digest_before);
-
-    size_t total = zcl_mut_enumerate(src, src_len, NULL, 0);
-    out->total_sites = total;
-    if (total == 0) {
-        free(src);
-        (void)snprintf(out->error, sizeof out->error,
-                       "no mutation site in %s", cfg->src_rel);
-        return false;
-    }
-    struct zcl_mut_site *sites =
-        zcl_calloc(total, sizeof *sites, "mutation.sites");
-    if (!sites) {
-        free(src);
-        return false;
-    }
-    (void)zcl_mut_enumerate(src, src_len, sites, total);
-
+    size_t total = 0;
     struct mut_ctx c;
-    memset(&c, 0, sizeof c);
-    c.cfg = cfg;
-    c.plan = plan;
-    char hex[65];
-    zcl_mut_digest_hex(src, src_len, hex);
-    (void)snprintf(c.src_digest, sizeof c.src_digest, "%s", hex);
-    if (!mut_prepare(&c, out)) {
+    enum zcl_mut_outcome base = ZCL_MUT_OUTCOME_ERROR;
+    int st = mut_campaign_load(cfg, plan, out, src_abs, sizeof src_abs, &src,
+                               &src_len, &sites, &total, &c);
+    if (st == 0)
+        st = mut_campaign_baseline(&c, src, src_len, out, &base);
+    if (st != 0) {
+        mut_campaign_write_error(out, st, src_abs, cfg, base);
+        free(c.baseline_obj);
         free(sites);
         free(src);
+        zcl_mut_report_free(out);
         return false;
     }
-
-    /* ── baseline, never cached ─────────────────────────────────────── */
-    if (!mut_write_subject(&c, src, src_len)) {
-        (void)snprintf(out->error, sizeof out->error,
-                       "cannot stage the scratch translation unit");
-        goto fail;
-    }
-    if (mut_compile(&c) != 0) {
-        (void)snprintf(out->error, sizeof out->error,
-                       "the unmodified file does not compile on its own");
-        goto fail;
-    }
-    c.baseline_obj = zcl_mut_read_file(c.object, &c.baseline_obj_len);
-    if (!c.baseline_obj) {
-        (void)snprintf(out->error, sizeof out->error,
-                       "the baseline object was not produced");
-        goto fail;
-    }
-    if (mut_link(&c) != 0) {
-        (void)snprintf(out->error, sizeof out->error,
-                       "the baseline link failed");
-        goto fail;
-    }
-    {
-        size_t blen = 0;
-        char *bin = zcl_mut_read_file(c.binary, &blen);
-        if (bin) {
-            zcl_mut_digest_hex(bin, blen, c.base_digest);
-            free(bin);
-        } else {
-            (void)snprintf(c.base_digest, sizeof c.base_digest, "nobin");
-        }
-    }
-    {
-        const char *by = "";
-        enum zcl_mut_outcome base = mut_run_group(&c, &by);
-        if (base != ZCL_MUT_OUTCOME_SURVIVED) {
-            (void)snprintf(out->error, sizeof out->error,
-                           "baseline %s is not green and executing (%s); a "
-                           "mutation score against it would mean nothing",
-                           cfg->group, zcl_mut_outcome_name(base));
-            goto fail;
-        }
-    }
-
-    out->results = zcl_calloc(total, sizeof *out->results, "mutation.results");
-    if (!out->results)
-        goto fail;
 
     for (size_t i = 0; i < total; i++) {
         struct zcl_mut_result *r = &out->results[out->result_count];
-        r->site = sites[i];
-        r->killed_by = "";
-        long long t0 = mut_now_ms();
-
-        char key[65];
-        mut_cache_key(&c, &sites[i], key);
-        if (cfg->use_cache &&
-            mut_cache_get(&c, key, &r->outcome, &r->killed_by)) {
-            r->cached = true;
-        } else {
-            char *image = NULL;
-            size_t ilen = 0;
-            if (!zcl_mut_apply(src, src_len, &sites[i], &image, &ilen) ||
-                !mut_write_subject(&c, image, ilen)) {
-                free(image);
-                r->outcome = ZCL_MUT_OUTCOME_ERROR;
-            } else {
-                free(image);
-                if (mut_compile(&c) != 0) {
-                    r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
-                } else {
-                    size_t olen = 0;
-                    char *obj = zcl_mut_read_file(c.object, &olen);
-                    bool same = obj && olen == c.baseline_obj_len &&
-                                memcmp(obj, c.baseline_obj, olen) == 0;
-                    free(obj);
-                    if (same)
-                        r->outcome = ZCL_MUT_OUTCOME_EQUIVALENT;
-                    else if (mut_link(&c) != 0)
-                        r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
-                    else
-                        r->outcome = mut_run_group(&c, &r->killed_by);
-                }
-            }
-            if (cfg->use_cache && r->outcome != ZCL_MUT_OUTCOME_ERROR)
-                mut_cache_put(&c, key, r->outcome, r->killed_by);
-        }
-        r->ms = mut_now_ms() - t0;
-        out->counts[r->outcome]++;
-        out->result_count++;
+        mut_campaign_one(&c, cfg, src, src_len, &sites[i], r, out);
+        const char *shown = NULL;
+        const char *tag = NULL;
+        mut_campaign_verbose_bits(r, &shown, &tag);
         if (cfg->verbose)
             fprintf(stderr, "  [%zu/%zu] %s:%zu:%zu %s -> %s  %s%s\n", i + 1,
                     total, cfg->src_rel, r->site.line, r->site.column,
-                    r->site.rule, r->site.after[0] ? r->site.after : "(delete)",
-                    zcl_mut_outcome_name(r->outcome),
-                    r->cached ? " (cached)" : "");
+                    r->site.rule, shown, zcl_mut_outcome_name(r->outcome),
+                    tag);
         if (cfg->abort_after && out->result_count >= cfg->abort_after) {
             out->aborted = true;
             break;
         }
     }
 
-    /* The file was never opened for writing; this proves it rather than
-     * asserting it. */
-    {
-        size_t again_len = 0;
-        char *again = zcl_mut_read_file(src_abs, &again_len);
-        if (again) {
-            zcl_sha3_256((const unsigned char *)again, again_len,
-                         out->source_digest_after);
-            out->source_unchanged =
-                again_len == src_len &&
-                memcmp(again, src, src_len) == 0 &&
-                memcmp(out->source_digest_before, out->source_digest_after,
-                       32) == 0;
-            free(again);
-        }
-    }
+    mut_campaign_confirm_source(src_abs, src, src_len, out);
     out->wall_ms = mut_now_ms() - started;
     free(c.baseline_obj);
     free(sites);
     free(src);
     return true;
-
-fail:
-    free(c.baseline_obj);
-    free(sites);
-    free(src);
-    zcl_mut_report_free(out);
-    return false;
 }
