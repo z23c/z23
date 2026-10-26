@@ -134,6 +134,54 @@ static void ncrawl_bank_unprobed(struct ncrawl_round_acc *acc,
     ncrawl_bank_result(acc, addr, &res);
 }
 
+/* Bank the idx[from..to) slice as NOT PROBED without dialing — the tail a
+ * deadline or a per-round cap cut off before it could be dialed. */
+static void ncrawl_bank_unprobed_range(struct ncrawl_round_acc *acc,
+                                       const struct net_address *addrs,
+                                       const int *idx, int from, int to,
+                                       const char *reason)
+{
+    for (int t = from; t < to; t++)
+        ncrawl_bank_unprobed(acc, &addrs[idx[t]], reason);
+}
+
+/* Run one wave of at most `wave` concurrent probes through fn: spawn a
+ * short-lived worker per address (inline fallback if the spawn fails), join
+ * everything spawned, then bank each recordable result. */
+static void ncrawl_dial_wave(struct ncrawl_round_acc *acc,
+                             const struct net_address *addrs,
+                             const int *idx, int base, int wave,
+                             ncrawl_probe_fn fn, int ct_ms, int ht_ms)
+{
+    struct ncrawl_work items[NCRAWL_MAX_CONCURRENT];
+    pthread_t th[NCRAWL_MAX_CONCURRENT];
+    bool spawned[NCRAWL_MAX_CONCURRENT];
+
+    for (int t = 0; t < wave; t++) {
+        items[t].fn = fn;
+        items[t].addr = &addrs[idx[base + t]];
+        items[t].connect_timeout_ms = ct_ms;
+        items[t].handshake_timeout_ms = ht_ms;
+        memset(&items[t].out, 0, sizeof(items[t].out));
+        items[t].ok = false;
+        spawned[t] = false;
+        /* Bounded (<=NCRAWL_MAX_CONCURRENT) short-lived probe workers, all
+         * joined before this wave returns — not a long-running thread. */
+        // raw-pthread-ok: bounded, joined-per-wave short-lived crawler probe worker
+        if (pthread_create(&th[t], NULL, ncrawl_worker_fn, &items[t]) == 0)
+            spawned[t] = true;
+        else
+            ncrawl_worker_fn(&items[t]); /* inline fallback on spawn fail */
+    }
+    for (int t = 0; t < wave; t++)
+        if (spawned[t])
+            pthread_join(th[t], NULL);
+
+    for (int t = 0; t < wave; t++)
+        if (items[t].ok && items[t].out.addr[0])
+            ncrawl_bank_result(acc, items[t].addr, &items[t].out);
+}
+
 /* Dial the `count` addresses named by idx[] through fn, at most `concurrent`
  * in flight, banking every recordable result. `deadline_us` (<0 = none) is a
  * monotonic wall-clock ceiling checked BEFORE each wave: once it passes, every
@@ -159,38 +207,82 @@ static void ncrawl_dial_group(struct ncrawl_round_acc *acc,
             wave = concurrent;
 
         if (deadline_us >= 0 && platform_time_monotonic_us() >= deadline_us) {
-            for (int t = base; t < count; t++)
-                ncrawl_bank_unprobed(acc, &addrs[idx[t]], skip_reason);
+            ncrawl_bank_unprobed_range(acc, addrs, idx, base, count,
+                                       skip_reason);
             return;
         }
 
-        struct ncrawl_work items[NCRAWL_MAX_CONCURRENT];
-        pthread_t th[NCRAWL_MAX_CONCURRENT];
-        bool spawned[NCRAWL_MAX_CONCURRENT];
+        ncrawl_dial_wave(acc, addrs, idx, base, wave, fn, ct_ms, ht_ms);
+    }
+}
 
-        for (int t = 0; t < wave; t++) {
-            items[t].fn = fn;
-            items[t].addr = &addrs[idx[base + t]];
-            items[t].connect_timeout_ms = ct_ms;
-            items[t].handshake_timeout_ms = ht_ms;
-            memset(&items[t].out, 0, sizeof(items[t].out));
-            items[t].ok = false;
-            spawned[t] = false;
-            /* Bounded (<=NCRAWL_MAX_CONCURRENT) short-lived probe workers, all
-             * joined before this wave returns — not a long-running thread. */
-            // raw-pthread-ok: bounded, joined-per-wave short-lived crawler probe worker
-            if (pthread_create(&th[t], NULL, ncrawl_worker_fn, &items[t]) == 0)
-                spawned[t] = true;
-            else
-                ncrawl_worker_fn(&items[t]); /* inline fallback on spawn fail */
-        }
-        for (int t = 0; t < wave; t++)
-            if (spawned[t])
-                pthread_join(th[t], NULL);
+/* Clamp a round's knobs into the ranges the dialer promises: at least one dial
+ * in flight, floors on every timeout, and onion caps that cannot exceed their
+ * per-round ceilings. */
+static void ncrawl_clamp_round_limits(struct ncrawl_round_limits *lim)
+{
+    if (lim->concurrent < 1)
+        lim->concurrent = 1;
+    if (lim->concurrent > NCRAWL_MAX_CONCURRENT)
+        lim->concurrent = NCRAWL_MAX_CONCURRENT;
+    if (lim->connect_timeout_ms < 100)
+        lim->connect_timeout_ms = 100;
+    if (lim->handshake_timeout_ms < 100)
+        lim->handshake_timeout_ms = 100;
+    if (lim->onion_per_round < 0)
+        lim->onion_per_round = 0;
+    if (lim->onion_per_round > NCRAWL_MAX_ONION_PER_ROUND)
+        lim->onion_per_round = NCRAWL_MAX_ONION_PER_ROUND;
+    if (lim->onion_concurrent < 1)
+        lim->onion_concurrent = 1;
+    if (lim->onion_concurrent > NCRAWL_MAX_ONION_CONCURRENT)
+        lim->onion_concurrent = NCRAWL_MAX_ONION_CONCURRENT;
+    if (lim->onion_timeout_ms < 100)
+        lim->onion_timeout_ms = 100;
+    if (lim->onion_round_budget_ms < 0)
+        lim->onion_round_budget_ms = 0;
+}
 
-        for (int t = 0; t < wave; t++)
-            if (items[t].ok && items[t].out.addr[0])
-                ncrawl_bank_result(acc, items[t].addr, &items[t].out);
+/* Split addrs[0..n) into clearnet and onion index lists, preserving input
+ * order inside each list. */
+static void ncrawl_partition_by_transport(const struct net_address *addrs,
+                                          int n, int *clear_idx,
+                                          int *onion_idx, int *nclear,
+                                          int *nonion)
+{
+    *nclear = 0;
+    *nonion = 0;
+    for (int i = 0; i < n; i++) {
+        if (net_addr_is_tor(&addrs[i].svc.addr))
+            onion_idx[(*nonion)++] = i;
+        else
+            clear_idx[(*nclear)++] = i;
+    }
+}
+
+/* Phase 2 — onion, on its own cap + budget. Anything past the per-round
+ * cap is banked NOT PROBED (it comes around on a later round). */
+static void ncrawl_dial_onion_phase(struct ncrawl_round_acc *acc,
+                                    const struct net_address *addrs,
+                                    const int *onion_idx, int nonion,
+                                    ncrawl_probe_fn fn,
+                                    const struct ncrawl_round_limits *lim)
+{
+    if (nonion > 0) {
+        int dial = nonion < lim->onion_per_round ? nonion
+                                                 : lim->onion_per_round;
+        ncrawl_bank_unprobed_range(acc, addrs, onion_idx, dial, nonion,
+                                   "onion per-round cap");
+        int64_t deadline = -1;
+        if (lim->onion_round_budget_ms > 0)
+            deadline = platform_time_monotonic_us() +
+                       (int64_t)lim->onion_round_budget_ms * 1000;
+        /* The onion timeout rides BOTH seam slots on purpose — see the
+         * network_crawler_default_probe contract. */
+        ncrawl_dial_group(acc, addrs, onion_idx, dial, fn,
+                          lim->onion_concurrent, lim->onion_timeout_ms,
+                          lim->onion_timeout_ms, deadline,
+                          "onion round budget spent");
     }
 }
 
@@ -222,61 +314,25 @@ int ncrawl_run_round(const struct net_address *addrs, int n,
     if (n > NCRAWL_MAX_PER_ROUND)
         n = NCRAWL_MAX_PER_ROUND;
 
-    int concurrent = lim->concurrent;
-    int ct_ms = lim->connect_timeout_ms;
-    int ht_ms = lim->handshake_timeout_ms;
-    int onion_per_round = lim->onion_per_round;
-    int onion_concurrent = lim->onion_concurrent;
-    int onion_timeout_ms = lim->onion_timeout_ms;
-    int onion_budget_ms = lim->onion_round_budget_ms;
-    if (concurrent < 1) concurrent = 1;
-    if (concurrent > NCRAWL_MAX_CONCURRENT) concurrent = NCRAWL_MAX_CONCURRENT;
-    if (ct_ms < 100) ct_ms = 100;
-    if (ht_ms < 100) ht_ms = 100;
-    if (onion_per_round < 0) onion_per_round = 0;
-    if (onion_per_round > NCRAWL_MAX_ONION_PER_ROUND)
-        onion_per_round = NCRAWL_MAX_ONION_PER_ROUND;
-    if (onion_concurrent < 1) onion_concurrent = 1;
-    if (onion_concurrent > NCRAWL_MAX_ONION_CONCURRENT)
-        onion_concurrent = NCRAWL_MAX_ONION_CONCURRENT;
-    if (onion_timeout_ms < 100) onion_timeout_ms = 100;
-    if (onion_budget_ms < 0) onion_budget_ms = 0;
+    struct ncrawl_round_limits clamped = *lim;
+    ncrawl_clamp_round_limits(&clamped);
 
     int clear_idx[NCRAWL_MAX_PER_ROUND];
     int onion_idx[NCRAWL_MAX_PER_ROUND];
     int nclear = 0, nonion = 0;
-    for (int i = 0; i < n; i++) {
-        if (net_addr_is_tor(&addrs[i].svc.addr))
-            onion_idx[nonion++] = i;
-        else
-            clear_idx[nclear++] = i;
-    }
+    ncrawl_partition_by_transport(addrs, n, clear_idx, onion_idx, &nclear,
+                                  &nonion);
 
     struct ncrawl_round_acc acc;
     memset(&acc, 0, sizeof(acc));
     acc.topo_now = platform_time_wall_unix();
 
     /* Phase 1 — clearnet, always first, always to completion. */
-    ncrawl_dial_group(&acc, addrs, clear_idx, nclear, fn, concurrent, ct_ms,
-                      ht_ms, -1, NULL);
+    ncrawl_dial_group(&acc, addrs, clear_idx, nclear, fn, clamped.concurrent,
+                      clamped.connect_timeout_ms, clamped.handshake_timeout_ms,
+                      -1, NULL);
 
-    /* Phase 2 — onion, on its own cap + budget. Anything past the per-round
-     * cap is banked NOT PROBED (it comes around on a later round). */
-    if (nonion > 0) {
-        int dial = nonion < onion_per_round ? nonion : onion_per_round;
-        for (int i = dial; i < nonion; i++)
-            ncrawl_bank_unprobed(&acc, &addrs[onion_idx[i]],
-                                 "onion per-round cap");
-        int64_t deadline = onion_budget_ms > 0
-                               ? platform_time_monotonic_us() +
-                                     (int64_t)onion_budget_ms * 1000
-                               : -1;
-        /* The onion timeout rides BOTH seam slots on purpose — see the
-         * network_crawler_default_probe contract. */
-        ncrawl_dial_group(&acc, addrs, onion_idx, dial, fn, onion_concurrent,
-                          onion_timeout_ms, onion_timeout_ms, deadline,
-                          "onion round budget spent");
-    }
+    ncrawl_dial_onion_phase(&acc, addrs, onion_idx, nonion, fn, &clamped);
 
     if (stats) {
         stats->recorded = acc.recorded;
@@ -287,4 +343,3 @@ int ncrawl_run_round(const struct net_address *addrs, int n,
     }
     return acc.recorded;
 }
-
