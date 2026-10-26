@@ -65,23 +65,9 @@ static void nps_item(struct zcl_present_model_v1 *model, const char *id,
     (void)snprintf(item->value, sizeof(item->value), "%s", value);
 }
 
-bool zcl_native_presentation_status_model_from_facts(
-    const struct json_value *status, const struct json_value *health,
-    const struct json_value *backup, const struct json_value *work,
-    struct zcl_present_model_v1 *model, char *why, size_t why_cap)
+static void nps_add_chain_status_items(const struct json_value *status,
+                                       struct zcl_present_model_v1 *model)
 {
-    if (!status || status->type != JSON_OBJ || !model) {
-        if (why && why_cap)
-            (void)snprintf(why, why_cap, "canonical status facts are missing");
-        return false;
-    }
-    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_STATUS_CARD);
-    (void)snprintf(model->request_id, sizeof(model->request_id),
-                   "node-status");
-    (void)snprintf(model->title, sizeof(model->title), "Node status");
-    (void)snprintf(model->summary, sizeof(model->summary),
-                   "Canonical node facts captured now; peer height is an untrusted availability hint.");
-
     char value[257];
     int64_t height = nps_int(status, "provable_tip", -1);
     bool published = nps_bool(status, "provable_tip_published", false);
@@ -110,7 +96,12 @@ bool zcl_native_presentation_status_model_from_facts(
     nps_item(model, "peers", "Connected peers", value,
              peers < 0 ? ZCL_PRESENT_STATUS_YELLOW :
              (peers > 0 ? ZCL_PRESENT_STATUS_GREEN : ZCL_PRESENT_STATUS_RED));
+}
 
+static void nps_add_onion_service_item(const struct json_value *health,
+                                       struct zcl_present_model_v1 *model)
+{
+    char value[257];
     const struct json_value *checks = nps_object(health, "checks");
     bool tor_enabled = nps_bool(checks, "tor_enabled", false);
     bool onion_ready = nps_bool(checks, "onion_service_ready", false);
@@ -123,7 +114,12 @@ bool zcl_native_presentation_status_model_from_facts(
              (onion_ready ? ZCL_PRESENT_STATUS_GREEN :
              (tor_enabled ? ZCL_PRESENT_STATUS_YELLOW :
                             ZCL_PRESENT_STATUS_NEUTRAL)));
+}
 
+static void nps_add_wallet_backup_item(const struct json_value *backup,
+                                       struct zcl_present_model_v1 *model)
+{
+    char value[257];
     int64_t runs = nps_int(backup, "total_runs", -1);
     int64_t failures = nps_int(backup, "total_failures", -1);
     int64_t last_run = nps_int(backup, "last_run_unix", -1);
@@ -142,7 +138,12 @@ bool zcl_native_presentation_status_model_from_facts(
     nps_item(model, "wallet-backup", "Wallet backup", value,
              backup_green ? ZCL_PRESENT_STATUS_GREEN :
                             ZCL_PRESENT_STATUS_YELLOW);
+}
 
+static void nps_add_package_workers_item(const struct json_value *work,
+                                         struct zcl_present_model_v1 *model)
+{
+    char value[257];
     bool work_known = work && work->type == JSON_OBJ;
     bool work_enabled = nps_bool(work, "enabled", false);
     int64_t capacity = nps_int(work, "worker_capacity", 0);
@@ -161,6 +162,29 @@ bool zcl_native_presentation_status_model_from_facts(
              !work_known ? ZCL_PRESENT_STATUS_YELLOW :
              (work_enabled && available > 0 ? ZCL_PRESENT_STATUS_GREEN :
                                               ZCL_PRESENT_STATUS_NEUTRAL));
+}
+
+bool zcl_native_presentation_status_model_from_facts(
+    const struct json_value *status, const struct json_value *health,
+    const struct json_value *backup, const struct json_value *work,
+    struct zcl_present_model_v1 *model, char *why, size_t why_cap)
+{
+    if (!status || status->type != JSON_OBJ || !model) {
+        if (why && why_cap)
+            (void)snprintf(why, why_cap, "canonical status facts are missing");
+        return false;
+    }
+    zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(model->request_id, sizeof(model->request_id),
+                   "node-status");
+    (void)snprintf(model->title, sizeof(model->title), "Node status");
+    (void)snprintf(model->summary, sizeof(model->summary),
+                   "Canonical node facts captured now; peer height is an untrusted availability hint.");
+
+    nps_add_chain_status_items(status, model);
+    nps_add_onion_service_item(health, model);
+    nps_add_wallet_backup_item(backup, model);
+    nps_add_package_workers_item(work, model);
 
     return zcl_present_model_validate_v1(model, why, why_cap);
 }
