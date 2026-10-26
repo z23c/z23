@@ -25,7 +25,8 @@ static const uint8_t partial_magic[8] = {'Z','S','W','P','T','L','\r','\n'};
 #define PARTIAL_FIXED_BYTES (8u + 2u + 32u + 32u + 33u + 1u + \
                              ZSWAP_SIG_FIELD_BYTES)
 
-const char *zswap_ceremony_error_string(enum zswap_ceremony_error error)
+static const char *zswap_ceremony_codec_error_string(
+    enum zswap_ceremony_error error)
 {
     switch (error) {
     case ZSWAP_CEREMONY_OK: return "ok";
@@ -39,6 +40,14 @@ const char *zswap_ceremony_error_string(enum zswap_ceremony_error error)
     case ZSWAP_CEREMONY_ERR_PUBKEY: return "pubkey-field-invalid";
     case ZSWAP_CEREMONY_ERR_SIG_FIELD: return "signature-field-invalid";
     case ZSWAP_CEREMONY_ERR_SIGHASH_TYPE: return "sighash-type-not-all";
+    default: return NULL;
+    }
+}
+
+static const char *zswap_ceremony_flow_error_string(
+    enum zswap_ceremony_error error)
+{
+    switch (error) {
     case ZSWAP_CEREMONY_ERR_AD: return "ad-invalid";
     case ZSWAP_CEREMONY_ERR_EXPIRED: return "ceremony-expired";
     case ZSWAP_CEREMONY_ERR_QUOTE_ROOT: return "quote-root-mismatch";
@@ -51,7 +60,16 @@ const char *zswap_ceremony_error_string(enum zswap_ceremony_error error)
     case ZSWAP_CEREMONY_ERR_SIGNATURE: return "signature-invalid";
     case ZSWAP_CEREMONY_ERR_SIGN: return "signing-failed";
     case ZSWAP_CEREMONY_ERR_INPUT_INDEX: return "input-index-out-of-range";
+    default: return NULL;
     }
+}
+
+const char *zswap_ceremony_error_string(enum zswap_ceremony_error error)
+{
+    const char *s = zswap_ceremony_codec_error_string(error);
+    if (s) return s;
+    s = zswap_ceremony_flow_error_string(error);
+    if (s) return s;
     return "unknown";
 }
 
@@ -186,34 +204,41 @@ enum zswap_ceremony_error zswap_accept_encode(
     return ZSWAP_CEREMONY_OK;
 }
 
-enum zswap_ceremony_error zswap_accept_decode(
-    const uint8_t *wire, size_t wire_len, struct zswap_accept_v1 *out)
+/* Decode the accept's size, magic, schema version and quote root. */
+static enum zswap_ceremony_error zswap_accept_decode_header(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct zswap_accept_v1 *out)
 {
-    if (!wire || !out) return ZSWAP_CEREMONY_ERR_NULL;
-    memset(out, 0, sizeof(*out));
     if (wire_len < ACCEPT_FIXED_BYTES + 1 ||
         wire_len > ZSWAP_ACCEPT_WIRE_MAX_BYTES)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (memcmp(wire, accept_magic, sizeof(accept_magic)) != 0)
         return ZSWAP_CEREMONY_ERR_WIRE_MAGIC;
-    size_t off = sizeof(accept_magic);
-    if (!take_u16(wire, wire_len, &off, &out->schema_version))
+    *off = sizeof(accept_magic);
+    if (!take_u16(wire, wire_len, off, &out->schema_version))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (out->schema_version != ZSWAP_ACCEPT_VERSION)
         return ZSWAP_CEREMONY_ERR_VERSION;
-    if (!take_bytes(wire, wire_len, &off, out->quote_root, 32))
+    if (!take_bytes(wire, wire_len, off, out->quote_root, 32))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Decode the accept's input list; a failure inside the loop wipes out. */
+static enum zswap_ceremony_error zswap_accept_decode_inputs(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct zswap_accept_v1 *out)
+{
     struct zswap_buyer_accept *b = &out->buyer;
     uint8_t num_inputs = 0;
-    if (!take_u8(wire, wire_len, &off, &num_inputs))
+    if (!take_u8(wire, wire_len, off, &num_inputs))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (num_inputs == 0 || num_inputs > ZSWAP_MAX_BUYER_INPUTS)
         return ZSWAP_CEREMONY_ERR_ACCEPT;
     b->num_inputs = num_inputs;
     enum zswap_ceremony_error err = ZSWAP_CEREMONY_OK;
     for (size_t i = 0; i < b->num_inputs; i++) {
-        err = take_input(wire, wire_len, &off, &b->inputs[i]);
+        err = take_input(wire, wire_len, off, &b->inputs[i]);
         if (err != ZSWAP_CEREMONY_OK) goto fail;
         /* The canonical wire is sorted: anything else is a hand-rolled or
          * corrupted message, not an accept we act on. */
@@ -225,13 +250,27 @@ enum zswap_ceremony_error zswap_accept_decode(
             goto fail;
         }
     }
+    return ZSWAP_CEREMONY_OK;
+fail:
+    memset(out, 0, sizeof(*out));
+    return err;
+}
+
+/* Decode the accept's addresses, fee and deadline, then validate it; a
+ * failed range check or validation wipes out. */
+static enum zswap_ceremony_error zswap_accept_decode_terms_and_validate(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct zswap_accept_v1 *out)
+{
+    struct zswap_buyer_accept *b = &out->buyer;
+    enum zswap_ceremony_error err = ZSWAP_CEREMONY_OK;
     uint64_t fee, deadline;
-    if (!take_bytes(wire, wire_len, &off, b->token_recv_address,
+    if (!take_bytes(wire, wire_len, off, b->token_recv_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
-        !take_bytes(wire, wire_len, &off, b->change_address,
+        !take_bytes(wire, wire_len, off, b->change_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
-        !take_u64(wire, wire_len, &off, &fee) ||
-        !take_u64(wire, wire_len, &off, &deadline))
+        !take_u64(wire, wire_len, off, &fee) ||
+        !take_u64(wire, wire_len, off, &deadline))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (fee > (uint64_t)INT64_MAX || deadline > (uint64_t)INT64_MAX) {
         err = ZSWAP_CEREMONY_ERR_ACCEPT;
@@ -239,7 +278,7 @@ enum zswap_ceremony_error zswap_accept_decode(
     }
     b->fee_sats = fee;
     b->deadline_unix = (int64_t)deadline;
-    if (off != wire_len)
+    if (*off != wire_len)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     err = zswap_accept_validate(out);
     if (err != ZSWAP_CEREMONY_OK) goto fail;
@@ -247,6 +286,20 @@ enum zswap_ceremony_error zswap_accept_decode(
 fail:
     memset(out, 0, sizeof(*out));
     return err;
+}
+
+enum zswap_ceremony_error zswap_accept_decode(
+    const uint8_t *wire, size_t wire_len, struct zswap_accept_v1 *out)
+{
+    if (!wire || !out) return ZSWAP_CEREMONY_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    size_t off = 0;
+    enum zswap_ceremony_error err =
+        zswap_accept_decode_header(wire, wire_len, &off, out);
+    if (err != ZSWAP_CEREMONY_OK) return err;
+    err = zswap_accept_decode_inputs(wire, wire_len, &off, out);
+    if (err != ZSWAP_CEREMONY_OK) return err;
+    return zswap_accept_decode_terms_and_validate(wire, wire_len, &off, out);
 }
 
 /* ── msg2 zswap_partial.v1 ─────────────────────────────────────────── */
@@ -312,48 +365,56 @@ enum zswap_ceremony_error zswap_partial_encode(
     return ZSWAP_CEREMONY_OK;
 }
 
-enum zswap_ceremony_error zswap_partial_decode(
-    const uint8_t *wire, size_t wire_len, struct zswap_partial_v1 *out)
+/* Decode the partial's size, magic, schema version and the two roots. */
+static enum zswap_ceremony_error zswap_partial_decode_header(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct zswap_partial_v1 *out)
 {
-    if (!wire || !out) return ZSWAP_CEREMONY_ERR_NULL;
-    memset(out, 0, sizeof(*out));
     if (wire_len < PARTIAL_FIXED_BYTES + (32 + 4 + 8 + 1 + 1) +
                        2 * ZSWAP_ADDRESS_FIELD_BYTES + 8 ||
         wire_len > ZSWAP_PARTIAL_WIRE_MAX_BYTES)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (memcmp(wire, partial_magic, sizeof(partial_magic)) != 0)
         return ZSWAP_CEREMONY_ERR_WIRE_MAGIC;
-    size_t off = sizeof(partial_magic);
-    if (!take_u16(wire, wire_len, &off, &out->schema_version))
+    *off = sizeof(partial_magic);
+    if (!take_u16(wire, wire_len, off, &out->schema_version))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (out->schema_version != ZSWAP_PARTIAL_VERSION)
         return ZSWAP_CEREMONY_ERR_VERSION;
-    if (!take_bytes(wire, wire_len, &off, out->quote_root, 32) ||
-        !take_bytes(wire, wire_len, &off, out->assembly_root, 32))
+    if (!take_bytes(wire, wire_len, off, out->quote_root, 32) ||
+        !take_bytes(wire, wire_len, off, out->assembly_root, 32))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Decode the seller terms, pubkey and signature, then validate the partial;
+ * a failed input, range check or validation wipes out. */
+static enum zswap_ceremony_error zswap_partial_decode_seller_and_signature(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct zswap_partial_v1 *out)
+{
     struct zswap_seller_accept *s = &out->seller;
     enum zswap_ceremony_error err =
-        take_input(wire, wire_len, &off, &s->token_input);
+        take_input(wire, wire_len, off, &s->token_input);
     if (err != ZSWAP_CEREMONY_OK) goto fail;
     uint64_t deadline;
-    if (!take_bytes(wire, wire_len, &off, s->zcl_recv_address,
+    if (!take_bytes(wire, wire_len, off, s->zcl_recv_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
-        !take_bytes(wire, wire_len, &off, s->change_address,
+        !take_bytes(wire, wire_len, off, s->change_address,
                     ZSWAP_ADDRESS_FIELD_BYTES) ||
-        !take_u64(wire, wire_len, &off, &deadline))
+        !take_u64(wire, wire_len, off, &deadline))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     if (deadline > (uint64_t)INT64_MAX) {
         err = ZSWAP_CEREMONY_ERR_ACCEPT;
         goto fail;
     }
     s->deadline_unix = (int64_t)deadline;
-    if (!take_bytes(wire, wire_len, &off, out->seller_pubkey, 33) ||
-        !take_u8(wire, wire_len, &off, &out->sig_len) ||
-        !take_bytes(wire, wire_len, &off, out->signature,
+    if (!take_bytes(wire, wire_len, off, out->seller_pubkey, 33) ||
+        !take_u8(wire, wire_len, off, &out->sig_len) ||
+        !take_bytes(wire, wire_len, off, out->signature,
                     ZSWAP_SIG_FIELD_BYTES))
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
-    if (off != wire_len)
+    if (*off != wire_len)
         return ZSWAP_CEREMONY_ERR_WIRE_SIZE;
     err = zswap_partial_validate(out);
     if (err != ZSWAP_CEREMONY_OK) goto fail;
@@ -361,6 +422,19 @@ enum zswap_ceremony_error zswap_partial_decode(
 fail:
     memset(out, 0, sizeof(*out));
     return err;
+}
+
+enum zswap_ceremony_error zswap_partial_decode(
+    const uint8_t *wire, size_t wire_len, struct zswap_partial_v1 *out)
+{
+    if (!wire || !out) return ZSWAP_CEREMONY_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    size_t off = 0;
+    enum zswap_ceremony_error err =
+        zswap_partial_decode_header(wire, wire_len, &off, out);
+    if (err != ZSWAP_CEREMONY_OK) return err;
+    return zswap_partial_decode_seller_and_signature(wire, wire_len, &off,
+                                                     out);
 }
 
 /* ── shared checks ─────────────────────────────────────────────────── */
@@ -432,15 +506,13 @@ static bool zswap_ceremony_money_terms(
     return true;
 }
 
-enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
+/* Check the ad is live, the deadlines match and both accepts validate. */
+static enum zswap_ceremony_error zswap_ceremony_check_accept_terms(
     const struct zswap_quote_v1 *ad,
     const struct zswap_buyer_accept *buyer,
     const struct zswap_seller_accept *seller,
-    const struct zswap_assembly *assembly,
     int64_t now_unix)
 {
-    if (!ad || !buyer || !seller || !assembly)
-        return ZSWAP_CEREMONY_ERR_NULL;
     enum zswap_ceremony_error e = ad_live_at(ad, now_unix);
     if (e != ZSWAP_CEREMONY_OK) return e;
     e = deadlines_match(ad, buyer, seller);
@@ -448,7 +520,14 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
     if (zswap_buyer_accept_validate(buyer) != ZSWAP_ASSEMBLY_OK ||
         zswap_seller_accept_validate(seller) != ZSWAP_ASSEMBLY_OK)
         return ZSWAP_CEREMONY_ERR_ACCEPT;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Check the canonical tx envelope and the input counts. */
+static enum zswap_ceremony_error zswap_ceremony_check_tx_shape(
+    const struct zswap_assembly *assembly,
+    const struct zswap_buyer_accept *buyer)
+{
     const struct transaction *tx = &assembly->tx;
     /* Canonical envelope. */
     if (!tx->overwintered || tx->version != SAPLING_TX_VERSION ||
@@ -463,9 +542,14 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
         assembly->buyer_input_count != buyer->num_inputs ||
         tx->num_vin != 1 + buyer->num_inputs)
         return ZSWAP_CEREMONY_ERR_TERMS;
-    struct zswap_swap_input sorted[ZSWAP_MAX_BUYER_INPUTS];
-    memcpy(sorted, buyer->inputs, sizeof(sorted));
-    for (size_t i = 1; i < buyer->num_inputs; i++) {
+    return ZSWAP_CEREMONY_OK;
+}
+
+/* Insertion-sort the first count entries by outpoint. */
+static void zswap_ceremony_sort_buyer_inputs(struct zswap_swap_input *sorted,
+                                             size_t count)
+{
+    for (size_t i = 1; i < count; i++) {
         struct zswap_swap_input key = sorted[i];
         size_t j = i;
         while (j > 0 && outpoint_cmp_fields(sorted[j - 1].txid,
@@ -476,6 +560,19 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
         }
         sorted[j] = key;
     }
+}
+
+/* Check the tx spends the seller's token input then the sorted buyer
+ * inputs, all with final sequence numbers. */
+static enum zswap_ceremony_error zswap_ceremony_check_input_prevouts(
+    const struct zswap_assembly *assembly,
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller)
+{
+    const struct transaction *tx = &assembly->tx;
+    struct zswap_swap_input sorted[ZSWAP_MAX_BUYER_INPUTS];
+    memcpy(sorted, buyer->inputs, sizeof(sorted));
+    zswap_ceremony_sort_buyer_inputs(sorted, buyer->num_inputs);
     if (memcmp(tx->vin[0].prevout.hash.data, seller->token_input.txid, 32) != 0 ||
         tx->vin[0].prevout.n != seller->token_input.vout)
         return ZSWAP_CEREMONY_ERR_TERMS;
@@ -487,13 +584,24 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
     for (size_t i = 0; i < tx->num_vin; i++)
         if (tx->vin[i].sequence != UINT32_MAX)
             return ZSWAP_CEREMONY_ERR_TERMS;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Check the re-derived money terms, the fee and the output count and
+ * indexes; returns the two change amounts. */
+static enum zswap_ceremony_error zswap_ceremony_check_money_shape(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller,
+    const struct zswap_assembly *assembly,
+    int64_t *buyer_change_out, int64_t *seller_change_out)
+{
+    const struct transaction *tx = &assembly->tx;
     /* Money math re-derived from the accept data. */
     int64_t buyer_change = 0, seller_change = 0;
     if (!zswap_ceremony_money_terms(ad, buyer, seller,
                                     &buyer_change, &seller_change))
         return ZSWAP_CEREMONY_ERR_TERMS;
-    int64_t zcl_amount = (int64_t)ad->zcl_amount;
     if (assembly->fee_sats != (int64_t)buyer->fee_sats)
         return ZSWAP_CEREMONY_ERR_TERMS;
     size_t expected_vout = 3 + (seller_change > 0 ? 1 : 0) +
@@ -502,7 +610,17 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
         assembly->vout_slp_opreturn != 0 || assembly->vout_token_dust != 1 ||
         assembly->vout_seller_payment != 2)
         return ZSWAP_CEREMONY_ERR_TERMS;
+    *buyer_change_out = buyer_change;
+    *seller_change_out = seller_change;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Check vout[0] is the SLP SEND rebuilt from the ad. */
+static enum zswap_ceremony_error zswap_ceremony_check_slp_output(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_assembly *assembly)
+{
+    const struct transaction *tx = &assembly->tx;
     /* vout[0]: the SLP SEND declaring exactly token_amount of the ad's
      * token — rebuilt from the ad and byte-compared, never trusted. */
     struct uint256 wire_token_id;
@@ -517,10 +635,22 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
     if (tx->vout[0].value != 0 ||
         !script_equals(&tx->vout[0].script_pub_key, op_script, op_len))
         return ZSWAP_CEREMONY_ERR_TERMS;
+    return ZSWAP_CEREMONY_OK;
+}
 
+/* Decode the four accept destinations and check vout[1] and vout[2];
+ * returns the two change destinations. */
+static enum zswap_ceremony_error zswap_ceremony_check_payment_outputs(
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller,
+    const struct zswap_assembly *assembly, int64_t zcl_amount,
+    struct tx_destination *buyer_change_dest,
+    struct tx_destination *seller_change_dest)
+{
+    const struct transaction *tx = &assembly->tx;
     /* The four destinations, decoded from the accept address strings. */
-    struct tx_destination buyer_token_dest, buyer_change_dest;
-    struct tx_destination seller_recv_dest, seller_change_dest;
+    struct tx_destination buyer_token_dest;
+    struct tx_destination seller_recv_dest;
     const struct chain_params *cp = chain_params_get();
     size_t pk_len, sc_len;
     const unsigned char *pk_pfx =
@@ -530,11 +660,11 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
     if (!decode_destination(buyer->token_recv_address, pk_pfx, pk_len,
                             sc_pfx, sc_len, &buyer_token_dest) ||
         !decode_destination(buyer->change_address, pk_pfx, pk_len,
-                            sc_pfx, sc_len, &buyer_change_dest) ||
+                            sc_pfx, sc_len, buyer_change_dest) ||
         !decode_destination(seller->zcl_recv_address, pk_pfx, pk_len,
                             sc_pfx, sc_len, &seller_recv_dest) ||
         !decode_destination(seller->change_address, pk_pfx, pk_len,
-                            sc_pfx, sc_len, &seller_change_dest))
+                            sc_pfx, sc_len, seller_change_dest))
         return ZSWAP_CEREMONY_ERR_ACCEPT;
 
     /* vout[1]: the dust that carries the token to the buyer. */
@@ -549,22 +679,40 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
     if (tx->vout[2].value != zcl_amount ||
         !script_equals(&tx->vout[2].script_pub_key, expect.data, expect.size))
         return ZSWAP_CEREMONY_ERR_TERMS;
+    return ZSWAP_CEREMONY_OK;
+}
 
-    size_t v = 3;
+/* Check the seller change output (when there is change) and advance v. */
+static enum zswap_ceremony_error zswap_ceremony_check_seller_change(
+    const struct zswap_assembly *assembly, int64_t seller_change,
+    const struct tx_destination *seller_change_dest, size_t *v)
+{
+    const struct transaction *tx = &assembly->tx;
+    struct script expect;
     if (seller_change > 0) {
-        if (assembly->vout_seller_change != (int)v) return ZSWAP_CEREMONY_ERR_TERMS;
-        script_for_destination(&expect, &seller_change_dest);
-        if (tx->vout[v].value != seller_change ||
-            !script_equals(&tx->vout[v].script_pub_key, expect.data,
+        if (assembly->vout_seller_change != (int)*v) return ZSWAP_CEREMONY_ERR_TERMS;
+        script_for_destination(&expect, seller_change_dest);
+        if (tx->vout[*v].value != seller_change ||
+            !script_equals(&tx->vout[*v].script_pub_key, expect.data,
                            expect.size))
             return ZSWAP_CEREMONY_ERR_TERMS;
-        v++;
+        (*v)++;
     } else if (assembly->vout_seller_change != -1) {
         return ZSWAP_CEREMONY_ERR_TERMS;
     }
+    return ZSWAP_CEREMONY_OK;
+}
+
+/* Check the buyer change output (when there is change) at index v. */
+static enum zswap_ceremony_error zswap_ceremony_check_buyer_change(
+    const struct zswap_assembly *assembly, int64_t buyer_change,
+    const struct tx_destination *buyer_change_dest, size_t v)
+{
+    const struct transaction *tx = &assembly->tx;
+    struct script expect;
     if (buyer_change > 0) {
         if (assembly->vout_buyer_change != (int)v) return ZSWAP_CEREMONY_ERR_TERMS;
-        script_for_destination(&expect, &buyer_change_dest);
+        script_for_destination(&expect, buyer_change_dest);
         if (tx->vout[v].value != buyer_change ||
             !script_equals(&tx->vout[v].script_pub_key, expect.data,
                            expect.size))
@@ -573,6 +721,46 @@ enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
         return ZSWAP_CEREMONY_ERR_TERMS;
     }
     return ZSWAP_CEREMONY_OK;
+}
+
+enum zswap_ceremony_error zswap_ceremony_seller_verify_assembly(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_buyer_accept *buyer,
+    const struct zswap_seller_accept *seller,
+    const struct zswap_assembly *assembly,
+    int64_t now_unix)
+{
+    if (!ad || !buyer || !seller || !assembly)
+        return ZSWAP_CEREMONY_ERR_NULL;
+    enum zswap_ceremony_error e =
+        zswap_ceremony_check_accept_terms(ad, buyer, seller, now_unix);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+
+    e = zswap_ceremony_check_tx_shape(assembly, buyer);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+    e = zswap_ceremony_check_input_prevouts(assembly, buyer, seller);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+
+    int64_t buyer_change = 0, seller_change = 0;
+    e = zswap_ceremony_check_money_shape(ad, buyer, seller, assembly,
+                                         &buyer_change, &seller_change);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+    int64_t zcl_amount = (int64_t)ad->zcl_amount;
+    e = zswap_ceremony_check_slp_output(ad, assembly);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+
+    struct tx_destination buyer_change_dest, seller_change_dest;
+    e = zswap_ceremony_check_payment_outputs(buyer, seller, assembly,
+                                            zcl_amount, &buyer_change_dest,
+                                            &seller_change_dest);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+
+    size_t v = 3;
+    e = zswap_ceremony_check_seller_change(assembly, seller_change,
+                                           &seller_change_dest, &v);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+    return zswap_ceremony_check_buyer_change(assembly, buyer_change,
+                                             &buyer_change_dest, v);
 }
 
 /* ── signing ───────────────────────────────────────────────────────── */
@@ -664,6 +852,27 @@ enum zswap_ceremony_error zswap_ceremony_sign_input_p2pkh(
     return ZSWAP_CEREMONY_OK;
 }
 
+/* Check the ad is live and the accept and seller terms name it and are
+ * valid; returns the ad's quote root through quote_root. */
+static enum zswap_ceremony_error zswap_ceremony_seller_check_request(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_accept_v1 *accept,
+    const struct zswap_seller_accept *seller_terms,
+    int64_t now_unix, uint8_t quote_root[32])
+{
+    enum zswap_ceremony_error e = ad_live_at(ad, now_unix);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+    if (zswap_quote_root(ad, quote_root) != ZSWAP_QUOTE_OK)
+        return ZSWAP_CEREMONY_ERR_AD;
+    if (memcmp(accept->quote_root, quote_root, 32) != 0)
+        return ZSWAP_CEREMONY_ERR_QUOTE_ROOT;
+    if (zswap_accept_validate(accept) != ZSWAP_CEREMONY_OK)
+        return ZSWAP_CEREMONY_ERR_ACCEPT;
+    if (zswap_seller_accept_validate(seller_terms) != ZSWAP_ASSEMBLY_OK)
+        return ZSWAP_CEREMONY_ERR_ACCEPT;
+    return ZSWAP_CEREMONY_OK;
+}
+
 /* ── seller msg2 builder ───────────────────────────────────────────── */
 
 enum zswap_ceremony_error zswap_ceremony_seller_build_partial(
@@ -681,17 +890,11 @@ enum zswap_ceremony_error zswap_ceremony_seller_build_partial(
     memset(partial, 0, sizeof(*partial));
     if (out_assembly) memset(out_assembly, 0, sizeof(*out_assembly));
 
-    enum zswap_ceremony_error e = ad_live_at(ad, now_unix);
-    if (e != ZSWAP_CEREMONY_OK) return e;
     uint8_t quote_root[32];
-    if (zswap_quote_root(ad, quote_root) != ZSWAP_QUOTE_OK)
-        return ZSWAP_CEREMONY_ERR_AD;
-    if (memcmp(accept->quote_root, quote_root, 32) != 0)
-        return ZSWAP_CEREMONY_ERR_QUOTE_ROOT;
-    if (zswap_accept_validate(accept) != ZSWAP_CEREMONY_OK)
-        return ZSWAP_CEREMONY_ERR_ACCEPT;
-    if (zswap_seller_accept_validate(seller_terms) != ZSWAP_ASSEMBLY_OK)
-        return ZSWAP_CEREMONY_ERR_ACCEPT;
+    enum zswap_ceremony_error e =
+        zswap_ceremony_seller_check_request(ad, accept, seller_terms,
+                                            now_unix, quote_root);
+    if (e != ZSWAP_CEREMONY_OK) return e;
 
     struct zswap_assembly assembly;
     memset(&assembly, 0, sizeof(assembly));
@@ -748,20 +951,14 @@ enum zswap_ceremony_error zswap_ceremony_seller_build_partial(
     return ZSWAP_CEREMONY_OK;
 }
 
-/* ── buyer msg2 handler ────────────────────────────────────────────── */
-
-enum zswap_ceremony_error zswap_ceremony_buyer_verify_partial(
+/* Check both wires name the signed ad, the deadlines match and the
+ * seller's assembly_root is the one this node derives. */
+static enum zswap_ceremony_error zswap_ceremony_buyer_check_wires_match(
     const struct zswap_quote_v1 *ad,
     const struct zswap_accept_v1 *accept,
     const struct zswap_partial_v1 *partial,
-    uint32_t branch_id,
-    int64_t now_unix,
-    struct transaction *tx_out)
+    int64_t now_unix)
 {
-    if (!ad || !accept || !partial || !tx_out)
-        return ZSWAP_CEREMONY_ERR_NULL;
-    memset(tx_out, 0, sizeof(*tx_out));
-
     enum zswap_ceremony_error e = ad_live_at(ad, now_unix);
     if (e != ZSWAP_CEREMONY_OK) return e;
     if (zswap_accept_validate(accept) != ZSWAP_CEREMONY_OK)
@@ -787,6 +984,91 @@ enum zswap_ceremony_error zswap_ceremony_buyer_verify_partial(
         return ZSWAP_CEREMONY_ERR_ASSEMBLY;
     if (memcmp(assembly_root, partial->assembly_root, 32) != 0)
         return ZSWAP_CEREMONY_ERR_ASSEMBLY_ROOT;
+    return ZSWAP_CEREMONY_OK;
+}
+
+/* Bind the seller's pubkey to the token input's script; frees assembly on
+ * every refusal. */
+static enum zswap_ceremony_error zswap_ceremony_buyer_bind_seller_key(
+    const struct zswap_partial_v1 *partial,
+    struct zswap_assembly *assembly,
+    struct pubkey *seller_pk)
+{
+    /* The seller's pubkey must be bound to the token input's script: a
+     * valid signature under an unrelated key buys the buyer nothing. */
+    const struct zswap_swap_input *token_input = &partial->seller.token_input;
+    struct script seller_script;
+    seller_script.size = token_input->script_len;
+    memcpy(seller_script.data, token_input->script_pub_key,
+           token_input->script_len);
+    enum txnouttype type;
+    unsigned char solutions[20][65];
+    size_t solution_sizes[20];
+    size_t num_solutions = 0;
+    if (!script_solver(&seller_script, &type, solutions, solution_sizes,
+                       &num_solutions) || type != TX_PUBKEYHASH) {
+        zswap_assembly_free(assembly);
+        return ZSWAP_CEREMONY_ERR_SCRIPT_TYPE;
+    }
+    pubkey_set(seller_pk, partial->seller_pubkey, 33);
+    if (!pubkey_is_fully_valid(seller_pk)) {
+        zswap_assembly_free(assembly);
+        return ZSWAP_CEREMONY_ERR_PUBKEY;
+    }
+    struct key_id kid = pubkey_get_id(seller_pk);
+    if (memcmp(kid.id.data, solutions[0], 20) != 0) {
+        zswap_assembly_free(assembly);
+        return ZSWAP_CEREMONY_ERR_KEY_MISMATCH;
+    }
+    return ZSWAP_CEREMONY_OK;
+}
+
+/* Check the seller's signature over the assembled tx; frees assembly on
+ * every refusal. */
+static enum zswap_ceremony_error zswap_ceremony_buyer_check_seller_signature(
+    const struct zswap_partial_v1 *partial,
+    struct zswap_assembly *assembly,
+    uint32_t branch_id,
+    const struct pubkey *seller_pk)
+{
+    const struct zswap_swap_input *token_input = &partial->seller.token_input;
+    /* The seller's SIGHASH_ALL signature over the FULL assembled tx. */
+    struct uint256 sighash;
+    if (!zswap_assembly_input_sighash(&assembly->tx, 0,
+                                      token_input->script_pub_key,
+                                      token_input->script_len,
+                                      token_input->value_sats, branch_id,
+                                      sighash.data)) {
+        zswap_assembly_free(assembly);
+        return ZSWAP_CEREMONY_ERR_ASSEMBLY;
+    }
+    size_t der_len = partial->sig_len - 1;
+    if (!pubkey_check_low_s(partial->signature, der_len) ||
+        !pubkey_verify(seller_pk, &sighash,
+                       partial->signature, der_len)) {
+        zswap_assembly_free(assembly);
+        return ZSWAP_CEREMONY_ERR_SIGNATURE;
+    }
+    return ZSWAP_CEREMONY_OK;
+}
+
+/* ── buyer msg2 handler ────────────────────────────────────────────── */
+
+enum zswap_ceremony_error zswap_ceremony_buyer_verify_partial(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_accept_v1 *accept,
+    const struct zswap_partial_v1 *partial,
+    uint32_t branch_id,
+    int64_t now_unix,
+    struct transaction *tx_out)
+{
+    if (!ad || !accept || !partial || !tx_out)
+        return ZSWAP_CEREMONY_ERR_NULL;
+    memset(tx_out, 0, sizeof(*tx_out));
+
+    enum zswap_ceremony_error e =
+        zswap_ceremony_buyer_check_wires_match(ad, accept, partial, now_unix);
+    if (e != ZSWAP_CEREMONY_OK) return e;
 
     /* Re-assemble from the signed ad and the exchanged accept data. Every
      * ad term — token id, token amount, price, the seller's address binding
@@ -804,51 +1086,12 @@ enum zswap_ceremony_error zswap_ceremony_buyer_verify_partial(
         return e;
     }
 
-    /* The seller's pubkey must be bound to the token input's script: a
-     * valid signature under an unrelated key buys the buyer nothing. */
-    const struct zswap_swap_input *token_input = &partial->seller.token_input;
-    struct script seller_script;
-    seller_script.size = token_input->script_len;
-    memcpy(seller_script.data, token_input->script_pub_key,
-           token_input->script_len);
-    enum txnouttype type;
-    unsigned char solutions[20][65];
-    size_t solution_sizes[20];
-    size_t num_solutions = 0;
-    if (!script_solver(&seller_script, &type, solutions, solution_sizes,
-                       &num_solutions) || type != TX_PUBKEYHASH) {
-        zswap_assembly_free(&assembly);
-        return ZSWAP_CEREMONY_ERR_SCRIPT_TYPE;
-    }
     struct pubkey seller_pk;
-    pubkey_set(&seller_pk, partial->seller_pubkey, 33);
-    if (!pubkey_is_fully_valid(&seller_pk)) {
-        zswap_assembly_free(&assembly);
-        return ZSWAP_CEREMONY_ERR_PUBKEY;
-    }
-    struct key_id kid = pubkey_get_id(&seller_pk);
-    if (memcmp(kid.id.data, solutions[0], 20) != 0) {
-        zswap_assembly_free(&assembly);
-        return ZSWAP_CEREMONY_ERR_KEY_MISMATCH;
-    }
-
-    /* The seller's SIGHASH_ALL signature over the FULL assembled tx. */
-    struct uint256 sighash;
-    if (!zswap_assembly_input_sighash(&assembly.tx, 0,
-                                      token_input->script_pub_key,
-                                      token_input->script_len,
-                                      token_input->value_sats, branch_id,
-                                      sighash.data)) {
-        zswap_assembly_free(&assembly);
-        return ZSWAP_CEREMONY_ERR_ASSEMBLY;
-    }
-    size_t der_len = partial->sig_len - 1;
-    if (!pubkey_check_low_s(partial->signature, der_len) ||
-        !pubkey_verify(&seller_pk, &sighash,
-                       partial->signature, der_len)) {
-        zswap_assembly_free(&assembly);
-        return ZSWAP_CEREMONY_ERR_SIGNATURE;
-    }
+    e = zswap_ceremony_buyer_bind_seller_key(partial, &assembly, &seller_pk);
+    if (e != ZSWAP_CEREMONY_OK) return e;
+    e = zswap_ceremony_buyer_check_seller_signature(partial, &assembly,
+                                                    branch_id, &seller_pk);
+    if (e != ZSWAP_CEREMONY_OK) return e;
 
     /* Insert the seller's signature — the only bytes that crossed the wire
      * — and hand the buyer the half-signed transaction. */
