@@ -146,84 +146,173 @@ static bool fleet_decimal(const char *text, unsigned long long max,
     return true;
 }
 
-static bool fleet_read_receipt(const char *dir, const char *name,
-                               struct fleet_receipt *receipt)
+/* Slurps one receipt file into a NUL-terminated heap buffer; NULL when the
+ * path cannot be joined or opened, the buffer cannot be allocated, or the
+ * read fails or exceeds the receipt limit. */
+static char *fleet_receipt_load(const char *dir, const char *name,
+                                size_t *len_out)
 {
     char path[ZCL_FLEET_PATH_MAX];
-    if (!zcl_path_join(path, sizeof(path), dir, name)) return false;
+    bool joined = zcl_path_join(path, sizeof(path), dir, name);
+    if (!joined) return NULL;
     FILE *file = fopen(path, "rb");
-    if (!file) return false;
+    if (!file) return NULL;
     char *raw = zcl_malloc(FLEET_RECEIPT_MAX + 1u, "fleet_receipt");
-    if (!raw) { (void)fclose(file); return false; }
+    if (!raw) { (void)fclose(file); return NULL; }
     size_t len = fread(raw, 1, FLEET_RECEIPT_MAX + 1u, file);
     bool ok = !ferror(file) && len <= FLEET_RECEIPT_MAX;
     if (fclose(file) != 0) ok = false;
-    if (!ok) { free(raw); return false; }
+    if (!ok) { free(raw); return NULL; }
     raw[len] = 0;
+    *len_out = len;
+    return raw;
+}
+
+/* Points at the last receipt_sha3= that starts a line; NULL when the seal
+ * is missing or sits at the very first byte. */
+static const char *fleet_receipt_find_seal(const char *raw)
+{
     const char *seal = NULL;
     for (const char *p = raw; (p = strstr(p, "receipt_sha3=")) != NULL; p++) {
         if (p == raw || p[-1] == '\n') seal = p;
     }
-    if (!seal || seal == raw || seal[-1] != '\n') { free(raw); return false; }
+    if (!seal || seal == raw || seal[-1] != '\n') return NULL;
+    return seal;
+}
+
+/* The seal line must hold exactly the digest, with one optional newline. */
+static bool fleet_receipt_seal_tail_ok(const char *raw, size_t len,
+                                       const char *seal)
+{
     const char *seal_value = seal + strlen("receipt_sha3=");
     size_t seal_tail = len - (size_t)(seal_value - raw);
-    if (!((seal_tail == 64u) ||
-          (seal_tail == 65u && seal_value[64] == '\n'))) {
-        free(raw); return false;
-    }
+    return seal_tail == 64u ||
+           (seal_tail == 65u && seal_value[64] == '\n');
+}
+
+/* The seal's declared digest must be lowercase hex and match the hash of
+ * everything before the seal line. */
+static bool fleet_receipt_seal_digest_ok(const char *raw, const char *seal)
+{
     char declared[65];
-    if (!fleet_field(seal, "receipt_sha3", declared, sizeof(declared)) ||
-        !fleet_lower_hex(declared, 64)) { free(raw); return false; }
     char body_sha[65];
+    bool declared_ok = fleet_field(seal, "receipt_sha3", declared,
+                                   sizeof(declared)) &&
+                       fleet_lower_hex(declared, 64);
+    if (!declared_ok) return false;
     fleet_hash(raw, (size_t)(seal - raw), body_sha);
-    if (strcmp(body_sha, declared) != 0) { free(raw); return false; }
-    fleet_hash(raw, len, receipt->whole_sha);
-    char index_text[32] = "", exit_text[32] = "";
-    char expect_text[32] = "", forbid_text[32] = "";
-    ok = fleet_field(raw, "chain_index", index_text, sizeof(index_text)) &&
-         fleet_field(raw, "prev_receipt_sha3", receipt->prev_sha,
-                     sizeof(receipt->prev_sha)) &&
-         fleet_field(raw, "gate", receipt->gate, sizeof(receipt->gate)) &&
-         fleet_field(raw, "branch", receipt->branch,
-                     sizeof(receipt->branch)) &&
-         fleet_field(raw, "worktree_path", receipt->worktree,
-                     sizeof(receipt->worktree)) &&
-         fleet_field(raw, "head_sha", receipt->head, sizeof(receipt->head)) &&
-         fleet_field(raw, "head_sha_after", receipt->head_after,
-                     sizeof(receipt->head_after)) &&
-         fleet_field(raw, "tree_status_sha3", receipt->status_sha,
-                     sizeof(receipt->status_sha)) &&
-         fleet_field(raw, "tree_diff_sha3_after", receipt->diff_sha,
-                     sizeof(receipt->diff_sha)) &&
-         fleet_field(raw, "output_path", receipt->output,
-                     sizeof(receipt->output)) &&
-         fleet_field(raw, "output_sha3", receipt->output_sha,
-                     sizeof(receipt->output_sha)) &&
-         fleet_field(raw, "verdict", receipt->verdict,
-                     sizeof(receipt->verdict)) &&
-         fleet_field(raw, "exit_status", exit_text, sizeof(exit_text)) &&
-         fleet_field(raw, "expect_missing", expect_text,
-                     sizeof(expect_text)) &&
-         fleet_field(raw, "forbid_present", forbid_text,
-                     sizeof(forbid_text));
-    unsigned long long index_value = 0, exit_value = 0, expect_value = 0;
-    unsigned long long forbid_value = 0;
-    bool numbers_ok = ok &&
-        fleet_decimal(index_text, ULLONG_MAX, &index_value) &&
-        fleet_decimal(exit_text, ULONG_MAX, &exit_value) &&
-        fleet_decimal(expect_text, ULONG_MAX, &expect_value) &&
-        fleet_decimal(forbid_text, ULONG_MAX, &forbid_value);
+    return strcmp(body_sha, declared) == 0;
+}
+
+/* Reads every receipt field, in chain order, into the receipt and the four
+ * numeric texts; false as soon as one is missing or too long. */
+static bool fleet_receipt_read_fields(const char *raw,
+                                      struct fleet_receipt *receipt,
+                                      char *index_text, char *exit_text,
+                                      char *expect_text, char *forbid_text)
+{
+    const struct {
+        const char *key;
+        char *dest;
+        size_t cap;
+    } fields[] = {
+        {"chain_index", index_text, 32},
+        {"prev_receipt_sha3", receipt->prev_sha, sizeof(receipt->prev_sha)},
+        {"gate", receipt->gate, sizeof(receipt->gate)},
+        {"branch", receipt->branch, sizeof(receipt->branch)},
+        {"worktree_path", receipt->worktree, sizeof(receipt->worktree)},
+        {"head_sha", receipt->head, sizeof(receipt->head)},
+        {"head_sha_after", receipt->head_after, sizeof(receipt->head_after)},
+        {"tree_status_sha3", receipt->status_sha, sizeof(receipt->status_sha)},
+        {"tree_diff_sha3_after", receipt->diff_sha, sizeof(receipt->diff_sha)},
+        {"output_path", receipt->output, sizeof(receipt->output)},
+        {"output_sha3", receipt->output_sha, sizeof(receipt->output_sha)},
+        {"verdict", receipt->verdict, sizeof(receipt->verdict)},
+        {"exit_status", exit_text, 32},
+        {"expect_missing", expect_text, 32},
+        {"forbid_present", forbid_text, 32},
+    };
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(fields) / sizeof(fields[0]); i++)
+        ok = fleet_field(raw, fields[i].key, fields[i].dest, fields[i].cap);
+    return ok;
+}
+
+/* Parses the four numeric texts; each value is written only when its own
+ * text is a plain decimal within range. */
+static bool fleet_receipt_parse_numbers(const char *index_text,
+                                        const char *exit_text,
+                                        const char *expect_text,
+                                        const char *forbid_text,
+                                        unsigned long long *index_value,
+                                        unsigned long long *exit_value,
+                                        unsigned long long *expect_value,
+                                        unsigned long long *forbid_value)
+{
+    return fleet_decimal(index_text, ULLONG_MAX, index_value) &&
+           fleet_decimal(exit_text, ULONG_MAX, exit_value) &&
+           fleet_decimal(expect_text, ULONG_MAX, expect_value) &&
+           fleet_decimal(forbid_text, ULONG_MAX, forbid_value);
+}
+
+/* head_sha is a short or full lowercase digest and prev_receipt_sha3 is
+ * either GENESIS or a full digest. */
+static bool fleet_receipt_head_shapes_ok(const struct fleet_receipt *receipt)
+{
     bool head_ok = fleet_lower_hex(receipt->head, 40) ||
                    fleet_lower_hex(receipt->head, 64);
     bool prev_ok = strcmp(receipt->prev_sha, "GENESIS") == 0 ||
                    fleet_lower_hex(receipt->prev_sha, 64);
-    if (!numbers_ok ||
-        strcmp(receipt->head, receipt->head_after) != 0 ||
-        !head_ok || !prev_ok || !fleet_lower_hex(receipt->status_sha, 64) ||
-        !fleet_lower_hex(receipt->diff_sha, 64) || !receipt->branch[0] ||
-        strchr(receipt->output, '/') ||
-        strchr(receipt->output, '\\') || !fleet_lower_hex(receipt->output_sha, 64))
-        ok = false;
+    return head_ok && prev_ok;
+}
+
+/* output_path is a bare filename and output_sha3 a full digest. */
+static bool fleet_receipt_output_ok(const struct fleet_receipt *receipt)
+{
+    return !strchr(receipt->output, '/') &&
+           !strchr(receipt->output, '\\') &&
+           fleet_lower_hex(receipt->output_sha, 64);
+}
+
+/* The numbers parsed, head_sha equals head_sha_after, every digest field is
+ * well formed and the branch is non-empty. */
+static bool fleet_receipt_fields_consistent(const struct fleet_receipt *receipt,
+                                            bool numbers_ok)
+{
+    bool shapes_ok = fleet_receipt_head_shapes_ok(receipt);
+    return numbers_ok &&
+           strcmp(receipt->head, receipt->head_after) == 0 &&
+           shapes_ok &&
+           fleet_lower_hex(receipt->status_sha, 64) &&
+           fleet_lower_hex(receipt->diff_sha, 64) && receipt->branch[0] &&
+           fleet_receipt_output_ok(receipt);
+}
+
+/* Reads one receipt file, verifies its seal against the bytes before it and
+ * fills the receipt; false when any check fails. */
+static bool fleet_read_receipt(const char *dir, const char *name,
+                               struct fleet_receipt *receipt)
+{
+    size_t len = 0;
+    char *raw = fleet_receipt_load(dir, name, &len);
+    if (!raw) return false;
+    const char *seal = fleet_receipt_find_seal(raw);
+    bool sealed = seal && fleet_receipt_seal_tail_ok(raw, len, seal) &&
+                  fleet_receipt_seal_digest_ok(raw, seal);
+    if (!sealed) { free(raw); return false; }
+    fleet_hash(raw, len, receipt->whole_sha);
+    char index_text[32] = "", exit_text[32] = "";
+    char expect_text[32] = "", forbid_text[32] = "";
+    bool ok = fleet_receipt_read_fields(raw, receipt, index_text, exit_text,
+                                        expect_text, forbid_text);
+    unsigned long long index_value = 0, exit_value = 0, expect_value = 0;
+    unsigned long long forbid_value = 0;
+    bool numbers_ok = ok &&
+        fleet_receipt_parse_numbers(index_text, exit_text, expect_text,
+                                    forbid_text, &index_value, &exit_value,
+                                    &expect_value, &forbid_value);
+    bool consistent = fleet_receipt_fields_consistent(receipt, numbers_ok);
+    if (!consistent) ok = false;
     if (ok) {
         receipt->index = index_value;
         receipt->exit_status = (unsigned long)exit_value;
