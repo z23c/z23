@@ -5,7 +5,7 @@
 #include "test/test_core.h"
 #include "net/p2p_game.h"
 
-int test_game(void)
+static int test_ttt_init_and_valid_move(void)
 {
     int failures = 0;
 
@@ -28,6 +28,13 @@ int test_game(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_ttt_rejections_and_outcomes(void)
+{
+    int failures = 0;
 
     printf("ttt: reject invalid position... ");
     {
@@ -124,6 +131,13 @@ int test_game(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_game_serialize_invite_and_move(void)
+{
+    int failures = 0;
+
     printf("game: serialize invite... ");
     {
         uint8_t buf[32];
@@ -141,6 +155,13 @@ int test_game(void)
         if (ok) printf("OK (%zu bytes)\n", n);
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+
+    return failures;
+}
+
+static int test_game_state_roundtrip_and_latency(void)
+{
+    int failures = 0;
 
     printf("game: serialize/deserialize state roundtrip... ");
     {
@@ -189,6 +210,13 @@ int test_game(void)
         else { printf("FAIL (ts=%lld)\n", (long long)ts); failures++; }
     }
 
+    return failures;
+}
+
+static int test_ping_stats_tracking(void)
+{
+    int failures = 0;
+
     /* ── Ping game tests ──────────────────────────────────── */
 
     printf("game: ping_init defaults to 10 rounds... ");
@@ -223,6 +251,13 @@ int test_game(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_ping_validation_and_render(void)
+{
+    int failures = 0;
+
     printf("game: ping_record_rtt rejects bad values... ");
     {
         struct ping_state p;
@@ -248,6 +283,13 @@ int test_game(void)
         if (ok) printf("OK (%s)\n", buf);
         else { printf("FAIL (%s)\n", buf); failures++; }
     }
+
+    return failures;
+}
+
+static int test_game_type_registry(void)
+{
+    int failures = 0;
 
     /* ── Game type registry tests ────────────────────────── */
 
@@ -295,6 +337,21 @@ int test_game(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_game(void)
+{
+    int failures = 0;
+
+    failures += test_ttt_init_and_valid_move();
+    failures += test_ttt_rejections_and_outcomes();
+    failures += test_game_serialize_invite_and_move();
+    failures += test_game_state_roundtrip_and_latency();
+    failures += test_ping_stats_tracking();
+    failures += test_ping_validation_and_render();
+    failures += test_game_type_registry();
 
     return failures;
 }
