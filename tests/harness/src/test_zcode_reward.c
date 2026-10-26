@@ -1219,7 +1219,7 @@ static int zr_cmd_contrib_pub1(const char *datadir, uint8_t pub1[33])
 }
 
 /* The second key with queued facts, then a key with no facts at all. */
-static int zr_cmd_contrib_rest(const char *datadir, uint8_t pub2[33])
+static int zr_cmd_contrib_queued_settled_and_unknown(const char *datadir, uint8_t pub2[33])
 {
     int failures = 0;
     char pub2_hex[67];
@@ -1282,7 +1282,7 @@ static int t_commands(void)
     failures += zr_cmd_queue_post(datadir);
 
     failures += zr_cmd_contrib_pub1(datadir, pub1);
-    failures += zr_cmd_contrib_rest(datadir, pub2);
+    failures += zr_cmd_contrib_queued_settled_and_unknown(datadir, pub2);
     zr_rm_rf(datadir);
     return failures;
 }
