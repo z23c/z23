@@ -104,6 +104,33 @@ static enum vcs_zcode_score_error score_fields(
     return VCS_ZCODE_SCORE_OK;
 }
 
+static bool score_body_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_score_receipt_v1 *receipt)
+{
+    return zcl_codec_write_bytes(writer, score_magic, sizeof(score_magic)) &&
+        zcl_codec_write_u16le(writer, receipt->schema_version) &&
+        zcl_codec_write_u8(writer, receipt->awarded_mask) &&
+        zcl_codec_write_u8(writer, receipt->score) &&
+        zcl_codec_write_u32le(writer, 0);
+}
+
+static bool score_body_write_roots(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_score_receipt_v1 *receipt)
+{
+    return zcl_codec_write_bytes(writer, receipt->task_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->candidate_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->proof_set_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->proven_lane_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->package_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->release_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->recipe_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->dependency_lock_root, 32) &&
+        zcl_codec_write_bytes(writer, receipt->api_capsule_root, 32);
+}
+
 static enum vcs_zcode_score_error score_body(
     const struct vcs_zcode_score_receipt_v1 *receipt,
     uint8_t out[VCS_ZCODE_SCORE_BODY_BYTES])
@@ -112,22 +139,8 @@ static enum vcs_zcode_score_error score_body(
     if (err != VCS_ZCODE_SCORE_OK || !out) return err;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_SCORE_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, score_magic,
-                                    sizeof(score_magic)) &&
-        zcl_codec_write_u16le(&writer, receipt->schema_version) &&
-        zcl_codec_write_u8(&writer, receipt->awarded_mask) &&
-        zcl_codec_write_u8(&writer, receipt->score) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer, receipt->task_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->candidate_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->proof_set_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->proven_lane_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->package_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->release_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->recipe_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->dependency_lock_root, 32) &&
-        zcl_codec_write_bytes(&writer, receipt->api_capsule_root, 32);
+    bool ok = score_body_write_header(&writer, receipt) &&
+        score_body_write_roots(&writer, receipt);
     for (size_t i = 0; ok && i < VCS_ZCODE_SCORE_UNITS; i++)
         ok = zcl_codec_write_bytes(&writer, receipt->evidence_roots[i], 32);
     ok = ok && zcl_codec_write_bytes(&writer, receipt->lane_signer, 32);
@@ -171,6 +184,42 @@ enum vcs_zcode_score_error vcs_zcode_score_receipt_serialize(
     return err;
 }
 
+static bool score_parse_read_header(
+    struct zcl_codec_reader *reader, uint8_t magic[8],
+    struct vcs_zcode_score_receipt_v1 *out, uint32_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, magic, sizeof(score_magic)) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->awarded_mask) &&
+        zcl_codec_read_u8(reader, &out->score) &&
+        zcl_codec_read_u32le(reader, reserved);
+}
+
+static bool score_parse_read_roots(
+    struct zcl_codec_reader *reader, struct vcs_zcode_score_receipt_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_set_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proven_lane_root, 32) &&
+        zcl_codec_read_bytes(reader, out->package_root, 32) &&
+        zcl_codec_read_bytes(reader, out->release_root, 32) &&
+        zcl_codec_read_bytes(reader, out->recipe_root, 32) &&
+        zcl_codec_read_bytes(reader, out->dependency_lock_root, 32) &&
+        zcl_codec_read_bytes(reader, out->api_capsule_root, 32);
+}
+
+static bool score_parse_read_trailer(
+    struct zcl_codec_reader *reader, struct vcs_zcode_score_receipt_v1 *out,
+    const uint8_t magic[8], const uint32_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, out->lane_signer, 32) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader) && *reserved == 0 &&
+        memcmp(magic, score_magic, sizeof(score_magic)) == 0;
+}
+
 enum vcs_zcode_score_error vcs_zcode_score_receipt_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_score_receipt_v1 *out)
@@ -182,27 +231,11 @@ enum vcs_zcode_score_error vcs_zcode_score_receipt_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint32_t reserved;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, sizeof(magic)) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->awarded_mask) &&
-        zcl_codec_read_u8(&reader, &out->score) &&
-        zcl_codec_read_u32le(&reader, &reserved) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proven_lane_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->package_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->release_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->recipe_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->dependency_lock_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->api_capsule_root, 32);
+    bool ok = score_parse_read_header(&reader, magic, out, &reserved) &&
+        score_parse_read_roots(&reader, out);
     for (size_t i = 0; ok && i < VCS_ZCODE_SCORE_UNITS; i++)
         ok = zcl_codec_read_bytes(&reader, out->evidence_roots[i], 32);
-    ok = ok && zcl_codec_read_bytes(&reader, out->lane_signer, 32) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader) && reserved == 0 &&
-        memcmp(magic, score_magic, sizeof(magic)) == 0;
+    ok = ok && score_parse_read_trailer(&reader, out, magic, &reserved);
     if (!ok) { memset(out, 0, sizeof(*out)); return VCS_ZCODE_SCORE_SHAPE; }
     return score_fields(out, true);
 }
@@ -245,86 +278,127 @@ static bool score_cas_load(const char *workspace, const uint8_t root[32],
         workspace, root, maximum, wire, wire_len) == 0;
 }
 
-enum vcs_zcode_score_error vcs_zcode_score_receipt_verify_cas(
-    const char *workspace,
-    const struct vcs_zcode_score_receipt_v1 *receipt)
+static enum vcs_zcode_score_error score_cas_check_task(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
+    struct vcs_zcode_task_v1 *task)
 {
-    if (!workspace || !receipt)
-        return VCS_ZCODE_SCORE_NULL;
-    if (vcs_zcode_score_receipt_verify(receipt) != VCS_ZCODE_SCORE_OK)
-        return VCS_ZCODE_SCORE_SIGNATURE;
-
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_candidate_v1 candidate;
-    struct vcs_zcode_proof_policy_v1 policy;
-    struct vcs_zcode_lane_receipt_v1 lane;
-    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
-    struct vcs_zcode_work_receipt_v1
-        works[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
-    size_t proof_count = 0;
     uint8_t *wire = NULL, observed_root[32];
     size_t wire_len = 0;
 
     if (!score_cas_load(workspace, receipt->task_root,
                         VCS_ZCODE_TASK_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_task_parse(wire, wire_len, &task) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_task_root(&task, observed_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_parse(wire, wire_len, task) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(task, observed_root) != VCS_ZCODE_DEV_OK ||
         memcmp(observed_root, receipt->task_root, 32) != 0) {
         free(wire);
         return VCS_ZCODE_SCORE_CAS;
     }
     free(wire); wire = NULL;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_cas_check_candidate(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
+    struct vcs_zcode_candidate_v1 *candidate)
+{
+    uint8_t *wire = NULL, observed_root[32];
+    size_t wire_len = 0;
+
     if (!score_cas_load(workspace, receipt->candidate_root,
                         VCS_ZCODE_CANDIDATE_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_candidate_parse(wire, wire_len, &candidate) !=
+        vcs_zcode_candidate_parse(wire, wire_len, candidate) !=
             VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_root(&candidate, observed_root) !=
+        vcs_zcode_candidate_root(candidate, observed_root) !=
             VCS_ZCODE_DEV_OK ||
         memcmp(observed_root, receipt->candidate_root, 32) != 0) {
         free(wire);
         return VCS_ZCODE_SCORE_CAS;
     }
     free(wire); wire = NULL;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_cas_check_policy(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
+    struct vcs_zcode_proof_policy_v1 *policy)
+{
+    uint8_t *wire = NULL, observed_root[32];
+    size_t wire_len = 0;
+
     if (!score_cas_load(workspace, receipt->proof_policy_root,
                         VCS_ZCODE_PROOF_POLICY_WIRE_BYTES,
                         &wire, &wire_len) ||
-        vcs_zcode_proof_policy_parse(wire, wire_len, &policy) !=
+        vcs_zcode_proof_policy_parse(wire, wire_len, policy) !=
             VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_root(&policy, observed_root) !=
+        vcs_zcode_proof_policy_root(policy, observed_root) !=
             VCS_ZCODE_DEV_OK ||
         memcmp(observed_root, receipt->proof_policy_root, 32) != 0) {
         free(wire);
         return VCS_ZCODE_SCORE_CAS;
     }
     free(wire); wire = NULL;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_cas_check_proof_set(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
+    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32],
+    size_t *proof_count)
+{
+    uint8_t *wire = NULL, observed_root[32];
+    size_t wire_len = 0;
+
     if (!score_cas_load(workspace, receipt->proof_set_root,
                         VCS_ZCODE_PROOF_SET_WIRE_MAX, &wire, &wire_len) ||
         vcs_zcode_proof_set_parse(
             wire, wire_len, proof_roots,
-            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &proof_count) !=
+            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, proof_count) !=
             VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_root(proof_roots, proof_count, observed_root) !=
+        vcs_zcode_proof_set_root(proof_roots, *proof_count, observed_root) !=
             VCS_ZCODE_DEV_OK ||
         memcmp(observed_root, receipt->proof_set_root, 32) != 0) {
         free(wire);
         return VCS_ZCODE_SCORE_CAS;
     }
     free(wire); wire = NULL;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_cas_check_lane(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
+    struct vcs_zcode_task_v1 *task, struct vcs_zcode_candidate_v1 *candidate,
+    struct vcs_zcode_proof_policy_v1 *policy,
+    struct vcs_zcode_lane_receipt_v1 *lane)
+{
+    uint8_t *wire = NULL, observed_root[32];
+    size_t wire_len = 0;
+
     if (!score_cas_load(workspace, receipt->proven_lane_root,
                         VCS_ZCODE_LANE_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_lane_receipt_parse(wire, wire_len, &lane) !=
+        vcs_zcode_lane_receipt_parse(wire, wire_len, lane) !=
             VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_id(&lane, observed_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_id(lane, observed_root) != VCS_ZCODE_DEV_OK ||
         memcmp(observed_root, receipt->proven_lane_root, 32) != 0 ||
-        lane.lane != VCS_ZCODE_LANE_PROVEN ||
-        vcs_zcode_lane_receipt_verify(&lane, receipt->lane_signer) !=
+        lane->lane != VCS_ZCODE_LANE_PROVEN ||
+        vcs_zcode_lane_receipt_verify(lane, receipt->lane_signer) !=
             VCS_ZCODE_DEV_OK ||
         vcs_zcode_lane_receipt_validate_for_candidate(
-            &lane, &task, &candidate, &policy) != VCS_ZCODE_DEV_OK) {
+            lane, task, candidate, policy) != VCS_ZCODE_DEV_OK) {
         free(wire);
         return VCS_ZCODE_SCORE_PROOF;
     }
     free(wire); wire = NULL;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_cas_check_works(
+    const char *workspace,
+    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32],
+    size_t proof_count,
+    struct vcs_zcode_work_receipt_v1 works[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS])
+{
+    uint8_t *wire = NULL, observed_root[32];
+    size_t wire_len = 0;
 
     for (size_t i = 0; i < proof_count; i++) {
         if (!score_cas_load(workspace, proof_roots[i],
@@ -342,6 +416,42 @@ enum vcs_zcode_score_error vcs_zcode_score_receipt_verify_cas(
         }
         free(wire); wire = NULL;
     }
+    return VCS_ZCODE_SCORE_OK;
+}
+
+enum vcs_zcode_score_error vcs_zcode_score_receipt_verify_cas(
+    const char *workspace,
+    const struct vcs_zcode_score_receipt_v1 *receipt)
+{
+    if (!workspace || !receipt)
+        return VCS_ZCODE_SCORE_NULL;
+    if (vcs_zcode_score_receipt_verify(receipt) != VCS_ZCODE_SCORE_OK)
+        return VCS_ZCODE_SCORE_SIGNATURE;
+
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    struct vcs_zcode_proof_policy_v1 policy;
+    struct vcs_zcode_lane_receipt_v1 lane;
+    uint8_t proof_roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
+    struct vcs_zcode_work_receipt_v1
+        works[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
+    size_t proof_count = 0;
+
+    enum vcs_zcode_score_error err =
+        score_cas_check_task(workspace, receipt, &task);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_cas_check_candidate(workspace, receipt, &candidate);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_cas_check_policy(workspace, receipt, &policy);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_cas_check_proof_set(workspace, receipt, proof_roots,
+                                    &proof_count);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_cas_check_lane(workspace, receipt, &task, &candidate,
+                               &policy, &lane);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_cas_check_works(workspace, proof_roots, proof_count, works);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
 
     struct vcs_zcode_score_plan_input input = {
         .task = &task,
@@ -395,9 +505,9 @@ static uint8_t score_unit_work_kind(enum vcs_zcode_score_unit unit)
     return 0;
 }
 
-enum vcs_zcode_score_error vcs_zcode_score_plan(
+static enum vcs_zcode_score_error score_plan_check_pointers(
     const struct vcs_zcode_score_plan_input *input,
-    struct vcs_zcode_score_receipt_v1 *out)
+    const struct vcs_zcode_score_receipt_v1 *out)
 {
     if (!input || !out || !input->task || !input->candidate ||
         !input->proof_policy || !input->proven_lane ||
@@ -405,11 +515,13 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
         !input->package_root || !input->release_root || !input->recipe_root ||
         !input->dependency_lock_root || !input->api_capsule_root)
         return VCS_ZCODE_SCORE_NULL;
-    if (input->work_receipt_count == 0 ||
-        input->work_receipt_count > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
-        return VCS_ZCODE_SCORE_SHAPE;
-    memset(out, 0, sizeof(*out));
-    out->schema_version = VCS_ZCODE_SCORE_VERSION;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_plan_compute_roots(
+    const struct vcs_zcode_score_plan_input *input,
+    struct vcs_zcode_score_receipt_v1 *out)
+{
     if (vcs_zcode_task_root(input->task, out->task_root) !=
             VCS_ZCODE_DEV_OK ||
         vcs_zcode_candidate_root(input->candidate, out->candidate_root) !=
@@ -423,6 +535,13 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
         vcs_zcode_lane_receipt_id(input->proven_lane,
                                   out->proven_lane_root) != VCS_ZCODE_DEV_OK)
         return VCS_ZCODE_SCORE_SHAPE;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_plan_check_lane(
+    const struct vcs_zcode_score_plan_input *input,
+    const struct vcs_zcode_score_receipt_v1 *out)
+{
     if (input->proven_lane->lane != VCS_ZCODE_LANE_PROVEN ||
         vcs_zcode_lane_receipt_verify(
             input->proven_lane, input->proven_lane->signer_pubkey) !=
@@ -433,6 +552,13 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
         memcmp(input->proven_lane->proof_set_root,
                out->proof_set_root, 32) != 0)
         return VCS_ZCODE_SCORE_BINDING;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_plan_bind_roots(
+    const struct vcs_zcode_score_plan_input *input,
+    struct vcs_zcode_score_receipt_v1 *out)
+{
     memcpy(out->package_root, input->package_root, 32);
     memcpy(out->release_root, input->release_root, 32);
     memcpy(out->recipe_root, input->recipe_root, 32);
@@ -447,21 +573,51 @@ enum vcs_zcode_score_error vcs_zcode_score_plan(
         memcmp(out->api_capsule_root,
                input->task->toolchain_capsule_root, 32) != 0)
         return VCS_ZCODE_SCORE_BINDING;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+static enum vcs_zcode_score_error score_plan_check_work(
+    const struct vcs_zcode_score_plan_input *input, size_t index,
+    const struct vcs_zcode_work_receipt_v1 *work,
+    const struct vcs_zcode_score_receipt_v1 *out)
+{
+    uint8_t id[32];
+    if (vcs_zcode_work_receipt_id(work, id) != VCS_ZCODE_DEV_OK ||
+        memcmp(id, input->proof_receipt_roots[index], 32) != 0 ||
+        vcs_zcode_work_receipt_verify(work, work->signer_pubkey) !=
+            VCS_ZCODE_DEV_OK ||
+        work->status != VCS_ZCODE_WORK_PASS || work->exit_status != 0 ||
+        memcmp(work->task_root, out->task_root, 32) != 0 ||
+        memcmp(work->candidate_root, out->candidate_root, 32) != 0 ||
+        memcmp(work->proof_policy_root, out->proof_policy_root, 32) != 0 ||
+        memcmp(work->toolchain_capsule_root,
+               out->api_capsule_root, 32) != 0)
+        return VCS_ZCODE_SCORE_PROOF;
+    return VCS_ZCODE_SCORE_OK;
+}
+
+enum vcs_zcode_score_error vcs_zcode_score_plan(
+    const struct vcs_zcode_score_plan_input *input,
+    struct vcs_zcode_score_receipt_v1 *out)
+{
+    enum vcs_zcode_score_error err = score_plan_check_pointers(input, out);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    if (input->work_receipt_count == 0 ||
+        input->work_receipt_count > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
+        return VCS_ZCODE_SCORE_SHAPE;
+    memset(out, 0, sizeof(*out));
+    out->schema_version = VCS_ZCODE_SCORE_VERSION;
+    err = score_plan_compute_roots(input, out);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_plan_check_lane(input, out);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
+    err = score_plan_bind_roots(input, out);
+    if (err != VCS_ZCODE_SCORE_OK) return err;
     for (size_t i = 0; i < input->work_receipt_count; i++) {
         const struct vcs_zcode_work_receipt_v1 *work =
             &input->work_receipts[i];
-        uint8_t id[32];
-        if (vcs_zcode_work_receipt_id(work, id) != VCS_ZCODE_DEV_OK ||
-            memcmp(id, input->proof_receipt_roots[i], 32) != 0 ||
-            vcs_zcode_work_receipt_verify(work, work->signer_pubkey) !=
-                VCS_ZCODE_DEV_OK ||
-            work->status != VCS_ZCODE_WORK_PASS || work->exit_status != 0 ||
-            memcmp(work->task_root, out->task_root, 32) != 0 ||
-            memcmp(work->candidate_root, out->candidate_root, 32) != 0 ||
-            memcmp(work->proof_policy_root, out->proof_policy_root, 32) != 0 ||
-            memcmp(work->toolchain_capsule_root,
-                   out->api_capsule_root, 32) != 0)
-            return VCS_ZCODE_SCORE_PROOF;
+        err = score_plan_check_work(input, i, work, out);
+        if (err != VCS_ZCODE_SCORE_OK) return err;
         int unit = score_unit_for_receipt(work);
         if (unit < 0) continue; /* Opaque/self-reported work earns nothing. */
         if (work->work_kind !=
