@@ -15,34 +15,34 @@ boot_zcode_dht_offence(enum vcs_zcode_dht_reject_reason reason) {
    * FLOOD; honest session churn (duplicate re-dials) is local retention
    * policy and scores only as a malformed message. PLAINTEXT and
    * BACKPRESSURE are non-answers, never evidence. */
-  switch (reason) {
-  case VCS_ZCODE_DHT_REJECT_SIGNATURE:
-  case VCS_ZCODE_DHT_REJECT_REPLAY:
-  case VCS_ZCODE_DHT_REJECT_POISONED:
-  case VCS_ZCODE_DHT_REJECT_IDENTITY:
-    return PEER_OFFENCE_INVALID_PROOF;
-  case VCS_ZCODE_DHT_REJECT_RATE:
-  case VCS_ZCODE_DHT_REJECT_CAP:
-    return PEER_OFFENCE_FLOOD;
-  case VCS_ZCODE_DHT_REJECT_MALFORMED:
-  case VCS_ZCODE_DHT_REJECT_SESSION:
-    return PEER_OFFENCE_INVALID_MESSAGE;
-  case VCS_ZCODE_DHT_REJECT_UNSOLICITED:
-    return PEER_OFFENCE_UNREQUESTED;
-  case VCS_ZCODE_DHT_REJECT_EXPIRED:
-    return PEER_OFFENCE_TIMEOUT;
-  /* Delegation stays at payload weight for now: the boolean authorizer
-   * cannot separate beacon mismatch (peer guilt) from tip lag or a cold
-   * chain cache (infra). Revisit when it grows a cause tri-state. */
-  case VCS_ZCODE_DHT_REJECT_DELEGATION:
-  case VCS_ZCODE_DHT_REJECT_UNAUTHORIZED:
-    return PEER_OFFENCE_INVALID_PAYLOAD;
-  case VCS_ZCODE_DHT_REJECT_PLAINTEXT:
-  case VCS_ZCODE_DHT_REJECT_BACKPRESSURE:
-    return PEER_OFFENCE_NONE;
-  case VCS_ZCODE_DHT_REJECT_COUNT:
-    break; /* unreachable sentinel: reasons are always below _COUNT */
+  static const struct {
+    enum vcs_zcode_dht_reject_reason reason;
+    enum peer_offence offence;
+  } k_offence_by_reason[] = {
+      {VCS_ZCODE_DHT_REJECT_SIGNATURE, PEER_OFFENCE_INVALID_PROOF},
+      {VCS_ZCODE_DHT_REJECT_REPLAY, PEER_OFFENCE_INVALID_PROOF},
+      {VCS_ZCODE_DHT_REJECT_POISONED, PEER_OFFENCE_INVALID_PROOF},
+      {VCS_ZCODE_DHT_REJECT_IDENTITY, PEER_OFFENCE_INVALID_PROOF},
+      {VCS_ZCODE_DHT_REJECT_RATE, PEER_OFFENCE_FLOOD},
+      {VCS_ZCODE_DHT_REJECT_CAP, PEER_OFFENCE_FLOOD},
+      {VCS_ZCODE_DHT_REJECT_MALFORMED, PEER_OFFENCE_INVALID_MESSAGE},
+      {VCS_ZCODE_DHT_REJECT_SESSION, PEER_OFFENCE_INVALID_MESSAGE},
+      {VCS_ZCODE_DHT_REJECT_UNSOLICITED, PEER_OFFENCE_UNREQUESTED},
+      {VCS_ZCODE_DHT_REJECT_EXPIRED, PEER_OFFENCE_TIMEOUT},
+      /* Delegation stays at payload weight for now: the boolean authorizer
+       * cannot separate beacon mismatch (peer guilt) from tip lag or a cold
+       * chain cache (infra). Revisit when it grows a cause tri-state. */
+      {VCS_ZCODE_DHT_REJECT_DELEGATION, PEER_OFFENCE_INVALID_PAYLOAD},
+      {VCS_ZCODE_DHT_REJECT_UNAUTHORIZED, PEER_OFFENCE_INVALID_PAYLOAD},
+      {VCS_ZCODE_DHT_REJECT_PLAINTEXT, PEER_OFFENCE_NONE},
+      {VCS_ZCODE_DHT_REJECT_BACKPRESSURE, PEER_OFFENCE_NONE},
+  };
+  for (unsigned i = 0;
+       i < sizeof k_offence_by_reason / sizeof k_offence_by_reason[0]; ++i) {
+    if (k_offence_by_reason[i].reason == reason)
+      return k_offence_by_reason[i].offence;
   }
+  /* unreachable sentinel: reasons are always below _COUNT */
   return PEER_OFFENCE_NONE;
 }
 
@@ -59,28 +59,33 @@ enum boot_zcode_dht_frame_verdict boot_zcode_dht_frame_classify(
     atomic_fetch_add_explicit(&g_local_drops, 1, memory_order_relaxed);
     return BOOT_FRAME_INFRA_NON_ANSWER;
   }
-  switch (reason) {
-  case VCS_ZCODE_DHT_REJECT_SIGNATURE:
-  case VCS_ZCODE_DHT_REJECT_REPLAY:
-  case VCS_ZCODE_DHT_REJECT_POISONED:
-  case VCS_ZCODE_DHT_REJECT_IDENTITY:
-    return BOOT_FRAME_REFUTED;
-  /* Deliberately enumerated rather than defaulted: a future reject reason
-   * must be classified consciously, not silently scored. */
-  case VCS_ZCODE_DHT_REJECT_MALFORMED:
-  case VCS_ZCODE_DHT_REJECT_PLAINTEXT:
-  case VCS_ZCODE_DHT_REJECT_DELEGATION:
-  case VCS_ZCODE_DHT_REJECT_SESSION:
-  case VCS_ZCODE_DHT_REJECT_UNSOLICITED:
-  case VCS_ZCODE_DHT_REJECT_EXPIRED:
-  case VCS_ZCODE_DHT_REJECT_RATE:
-  case VCS_ZCODE_DHT_REJECT_CAP:
-  case VCS_ZCODE_DHT_REJECT_UNAUTHORIZED:
-  case VCS_ZCODE_DHT_REJECT_BACKPRESSURE:
-    return BOOT_FRAME_DECODE_DETERMINISTIC;
-  case VCS_ZCODE_DHT_REJECT_COUNT:
-    break; /* unreachable sentinel: reasons are always below _COUNT */
+  static const struct {
+    enum vcs_zcode_dht_reject_reason reason;
+    enum boot_zcode_dht_frame_verdict verdict;
+  } k_verdict_by_reason[] = {
+      {VCS_ZCODE_DHT_REJECT_SIGNATURE, BOOT_FRAME_REFUTED},
+      {VCS_ZCODE_DHT_REJECT_REPLAY, BOOT_FRAME_REFUTED},
+      {VCS_ZCODE_DHT_REJECT_POISONED, BOOT_FRAME_REFUTED},
+      {VCS_ZCODE_DHT_REJECT_IDENTITY, BOOT_FRAME_REFUTED},
+      /* Deliberately enumerated rather than defaulted: a future reject
+       * reason must be classified consciously, not silently scored. */
+      {VCS_ZCODE_DHT_REJECT_MALFORMED, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_PLAINTEXT, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_DELEGATION, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_SESSION, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_UNSOLICITED, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_EXPIRED, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_RATE, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_CAP, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_UNAUTHORIZED, BOOT_FRAME_DECODE_DETERMINISTIC},
+      {VCS_ZCODE_DHT_REJECT_BACKPRESSURE, BOOT_FRAME_DECODE_DETERMINISTIC},
+  };
+  for (unsigned i = 0;
+       i < sizeof k_verdict_by_reason / sizeof k_verdict_by_reason[0]; ++i) {
+    if (k_verdict_by_reason[i].reason == reason)
+      return k_verdict_by_reason[i].verdict;
   }
+  /* unreachable sentinel: reasons are always below _COUNT */
   return BOOT_FRAME_DECODE_DETERMINISTIC;
 }
 
