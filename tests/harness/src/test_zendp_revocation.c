@@ -252,6 +252,26 @@ static int zr_discovery_peers(void)
     return boot_endpoint_record_peers(NULL, peers, ZENDP_DIR_MAX);
 }
 
+static int zr_check_revoked_key_stays_out(uint8_t wire[ZID_DOC_MAX],
+                                          size_t wire_len, uint8_t pk[32])
+{
+    int failures = 0;
+
+    /* Discarded, not flagged: no entry survives in a lesser state. */
+    ZR_CHECK("the entry is gone from the directory, not marked bad",
+             !zendp_directory_find(zendp_directory_global(), pk, NULL) &&
+             zendp_directory_global()->count == 0);
+
+    /* And a revoked key cannot walk back in through the front door. */
+    ZR_CHECK("re-accepting the same record is refused by name",
+             zendp_accept(zendp_directory_global(), wire, wire_len,
+                          (uint64_t)platform_time_wall_unix(), NULL, NULL) ==
+                 ZENDP_ERR_REVOKED &&
+             zr_projected() == 0);
+
+    return failures;
+}
+
 /* ── case 1: the whole property, end to end, in one process ────────── */
 
 static int zr_case_revoked_key_stops_being_advertised(void)
@@ -334,17 +354,7 @@ static int zr_case_revoked_key_stops_being_advertised(void)
              zr_projected() == 0 &&
              zr_discovery_peers() == 0);
 
-    /* Discarded, not flagged: no entry survives in a lesser state. */
-    ZR_CHECK("the entry is gone from the directory, not marked bad",
-             !zendp_directory_find(zendp_directory_global(), pk, NULL) &&
-             zendp_directory_global()->count == 0);
-
-    /* And a revoked key cannot walk back in through the front door. */
-    ZR_CHECK("re-accepting the same record is refused by name",
-             zendp_accept(zendp_directory_global(), wire, wire_len,
-                          (uint64_t)platform_time_wall_unix(), NULL, NULL) ==
-                 ZENDP_ERR_REVOKED &&
-             zr_projected() == 0);
+    failures += zr_check_revoked_key_stays_out(wire, wire_len, pk);
 
     zr_chain_down(&c);
     return failures;
@@ -478,6 +488,49 @@ static int zr_case_lock_released(void)
     return failures;
 }
 
+static int zr_check_dump_emits_contract(void)
+{
+    int failures = 0;
+    { struct json_value out;
+      json_init(&out);
+      bool ok = boot_endpoint_records_dump_state_json(&out, NULL) &&
+                out.type == JSON_OBJ &&
+                json_get(&out, "identity_status_generation") != NULL &&
+                json_get(&out, "revalidated_generation") != NULL &&
+                json_get(&out, "revalidation_pending") != NULL &&
+                json_get(&out, "sweeps_applied") != NULL &&
+                json_get(&out, "records_invalidated") != NULL &&
+                json_get(&out, "identities_checked") != NULL &&
+                json_get(&out, "chain_unavailable_passes") != NULL &&
+                json_get(&out, "records_projected") != NULL &&
+                json_get(&out, "anchor_lookup_registered") != NULL &&
+                json_get(&out, "worker_running") != NULL &&
+                json_get(&out, "last_sweep_age_us") != NULL;
+      json_free(&out);
+      ZR_CHECK("the dumper emits the whole contract", ok); }
+    return failures;
+}
+
+static int zr_check_dump_separates_activity(void)
+{
+    int failures = 0;
+    { struct json_value out;
+      json_init(&out);
+      bool ok = boot_endpoint_records_dump_state_json(&out, NULL);
+      const struct json_value *pending =
+          ok ? json_get(&out, "revalidation_pending") : NULL;
+      const struct json_value *dropped =
+          ok ? json_get(&out, "records_invalidated") : NULL;
+      const struct json_value *projected =
+          ok ? json_get(&out, "records_projected") : NULL;
+      ok = ok && pending && !pending->val.b &&
+           dropped && dropped->val.i >= 1 &&
+           projected && projected->val.i == 0;
+      json_free(&out);
+      ZR_CHECK("the dumper separates results from activity", ok); }
+    return failures;
+}
+
 /* ── case 4: the operator surface ──────────────────────────────────── */
 
 static int zr_case_dumper(void)
@@ -509,41 +562,12 @@ static int zr_case_dumper(void)
      * node has not caught up yet". */
     ZR_CHECK("after a fold the dumper reports the change as pending",
              staged && zr_fold_revoke(&c, pk, 901));
-    { struct json_value out;
-      json_init(&out);
-      bool ok = boot_endpoint_records_dump_state_json(&out, NULL) &&
-                out.type == JSON_OBJ &&
-                json_get(&out, "identity_status_generation") != NULL &&
-                json_get(&out, "revalidated_generation") != NULL &&
-                json_get(&out, "revalidation_pending") != NULL &&
-                json_get(&out, "sweeps_applied") != NULL &&
-                json_get(&out, "records_invalidated") != NULL &&
-                json_get(&out, "identities_checked") != NULL &&
-                json_get(&out, "chain_unavailable_passes") != NULL &&
-                json_get(&out, "records_projected") != NULL &&
-                json_get(&out, "anchor_lookup_registered") != NULL &&
-                json_get(&out, "worker_running") != NULL &&
-                json_get(&out, "last_sweep_age_us") != NULL;
-      json_free(&out);
-      ZR_CHECK("the dumper emits the whole contract", ok); }
+    failures += zr_check_dump_emits_contract();
 
     ZR_CHECK("revalidation clears the pending flag and counts the drop",
              boot_endpoint_records_revalidate_once() ==
                  BOOT_ENDPOINT_REVAL_APPLIED);
-    { struct json_value out;
-      json_init(&out);
-      bool ok = boot_endpoint_records_dump_state_json(&out, NULL);
-      const struct json_value *pending =
-          ok ? json_get(&out, "revalidation_pending") : NULL;
-      const struct json_value *dropped =
-          ok ? json_get(&out, "records_invalidated") : NULL;
-      const struct json_value *projected =
-          ok ? json_get(&out, "records_projected") : NULL;
-      ok = ok && pending && !pending->val.b &&
-           dropped && dropped->val.i >= 1 &&
-           projected && projected->val.i == 0;
-      json_free(&out);
-      ZR_CHECK("the dumper separates results from activity", ok); }
+    failures += zr_check_dump_separates_activity();
 
     /* The registry must have room, or the next subsystem to register runs
      * unsupervised — and this slice adds one child. */
