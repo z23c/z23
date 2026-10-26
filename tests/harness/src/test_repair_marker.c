@@ -68,26 +68,24 @@ static int rm_check_overflow_key(sqlite3 *db, const char *key,
     return failures;
 }
 
-int test_repair_marker(void);
-int test_repair_marker(void)
+struct rm_legacy_fix {
+    struct uint256 u;
+    char k_ref[192];
+    char k_rf[192];
+    char k_uo[192];
+    char k_scan[192];
+    char k_rounds[192];
+    char k_overflow[192];
+    char k_outpoint[200];
+    uint8_t scanblob[72];
+    bool overflow_seeded;
+};
+
+static int rm_check_presence(sqlite3 *db, const uint8_t h1[32],
+                             const uint8_t h2[32])
 {
-    printf("\n=== repair_marker tests ===\n");
     int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "repair_marker", "main");
-
-    RM_CHECK("progress_store opens", progress_store_open(dir));
-    sqlite3 *db = progress_store_db();
-    RM_CHECK("db handle", db != NULL);
-    if (!db) return failures;
-    /* The table is ensured at open; a second ensure must be a clean no-op. */
-    RM_CHECK("table ensure idempotent", repair_marker_table_ensure(db));
-
-    uint8_t h1[32], h2[32];
-    rm_hash(1, h1);
-    rm_hash(2, h2);
     bool have = false;
-
     /* ── presence note / have / forget ── */
     RM_CHECK("note presence", repair_marker_note(db, "k.a", 100, h1, NULL, 0));
     RM_CHECK("have present",
@@ -108,7 +106,13 @@ int test_repair_marker(void)
              !have);
     RM_CHECK("forget missing is no-op ok",
              repair_marker_forget(db, "k.a", 100, h1));
+    return failures;
+}
 
+static int rm_check_payload(sqlite3 *db, const uint8_t h1[32])
+{
+    int failures = 0;
+    bool have = false;
     /* ── payload roundtrip + upsert + truncation ── */
     {
         uint8_t pay[5] = { 1, 2, 3, 4, 5 };
@@ -132,7 +136,13 @@ int test_repair_marker(void)
                                     &plen) &&
                  have && plen == 3 && small[0] == 9 && small[1] == 9);
     }
+    return failures;
+}
 
+static int rm_check_gc_below(sqlite3 *db, const uint8_t h1[32])
+{
+    int failures = 0;
+    bool have = false;
     /* ── gc_below ── */
     {
         for (int hgt = 10; hgt <= 40; hgt += 10)
@@ -153,7 +163,12 @@ int test_repair_marker(void)
         RM_CHECK("gc bad input returns -1",
                  repair_marker_gc_below(db, NULL, 100) == -1);
     }
+    return failures;
+}
 
+static int rm_check_raise_floor(sqlite3 *db)
+{
+    int failures = 0;
     /* ── raise-only u64 primitive ── */
     {
         bool raised = false;
@@ -182,120 +197,178 @@ int test_repair_marker(void)
                  progress_meta_get(db, "rk2", back, sizeof(back), &bl, &found) &&
                  found && bl == 4);
     }
+    return failures;
+}
 
+static int rm_seed_legacy_keys(sqlite3 *db, struct rm_legacy_fix *fx)
+{
+    int failures = 0;
     /* ── one-time migration from the four legacy progress_meta namespaces ── */
-    {
-        struct uint256 u;
-        rm_hash(9, u.data);
-        char hex[65];
-        uint256_get_hex(&u, hex);
+    rm_hash(9, fx->u.data);
+    char hex[65];
+    uint256_get_hex(&fx->u, hex);
 
-        char k_ref[192], k_rf[192], k_uo[192], k_scan[192], k_rounds[192];
-        char k_overflow[192];
-        snprintf(k_ref, sizeof(k_ref), "coin_backfill.refused.%d.%s", 42, hex);
-        snprintf(k_rf, sizeof(k_rf),
-                 "reducer_frontier.tipfin_backfill_repair.%d.%s", 50, hex);
-        snprintf(k_uo, sizeof(k_uo),
-                 "utxo_apply.value_overflow_repair.%d.%s", 60, hex);
-        snprintf(k_scan, sizeof(k_scan), "coin_backfill.scan.%d.%s", 70, hex);
-        snprintf(k_rounds, sizeof(k_rounds), "coin_backfill.rounds.%d.%s", 80,
-                 hex);
-        snprintf(k_overflow, sizeof(k_overflow),
-                 "coin_backfill.refused.9223372036854775808.%s", hex);
+    snprintf(fx->k_ref, sizeof(fx->k_ref), "coin_backfill.refused.%d.%s", 42,
+             hex);
+    snprintf(fx->k_rf, sizeof(fx->k_rf),
+             "reducer_frontier.tipfin_backfill_repair.%d.%s", 50, hex);
+    snprintf(fx->k_uo, sizeof(fx->k_uo),
+             "utxo_apply.value_overflow_repair.%d.%s", 60, hex);
+    snprintf(fx->k_scan, sizeof(fx->k_scan), "coin_backfill.scan.%d.%s", 70,
+             hex);
+    snprintf(fx->k_rounds, sizeof(fx->k_rounds), "coin_backfill.rounds.%d.%s",
+             80, hex);
+    snprintf(fx->k_overflow, sizeof(fx->k_overflow),
+             "coin_backfill.refused.9223372036854775808.%s", hex);
 
-        uint8_t one = 1;
-        uint8_t scanblob[72];
-        memset(scanblob, 0xAB, sizeof(scanblob));
-        uint8_t rounds4[4] = { 3, 0, 0, 0 };
-        uint8_t wit8[8] = { 5, 0, 0, 0, 1, 0, 0, 0 };
+    uint8_t one = 1;
+    memset(fx->scanblob, 0xAB, sizeof(fx->scanblob));
+    uint8_t rounds4[4] = { 3, 0, 0, 0 };
+    uint8_t wit8[8] = { 5, 0, 0, 0, 1, 0, 0, 0 };
 
-        /* Out-of-scope keys that MUST survive the migration untouched. */
-        char k_outpoint[200];
-        snprintf(k_outpoint, sizeof(k_outpoint),
-                 "utxo_apply.coin_backfill.outpoint.%s:0", hex);
+    /* Out-of-scope keys that MUST survive the migration untouched. */
+    snprintf(fx->k_outpoint, sizeof(fx->k_outpoint),
+             "utxo_apply.coin_backfill.outpoint.%s:0", hex);
 
-        bool seeded =
-            progress_meta_set(db, k_ref, "spent:v2", 8) &&
-            progress_meta_set(db, k_rf, &one, 1) &&
-            progress_meta_set(db, k_uo, &one, 1) &&
-            progress_meta_set(db, k_scan, scanblob, sizeof(scanblob)) &&
-            progress_meta_set(db, k_rounds, rounds4, sizeof(rounds4)) &&
-            progress_meta_set(db, "tipfin_backfill.progress", wit8, 8) &&
-            progress_meta_set(db, k_outpoint, &one, 1) &&
-            progress_meta_set(db, "coins_applied_height", wit8, 8);
-        RM_CHECK("seed legacy keys", seeded);
-        bool overflow_seeded = progress_meta_set(db, k_overflow, &one, 1);
+    bool seeded =
+        progress_meta_set(db, fx->k_ref, "spent:v2", 8) &&
+        progress_meta_set(db, fx->k_rf, &one, 1) &&
+        progress_meta_set(db, fx->k_uo, &one, 1) &&
+        progress_meta_set(db, fx->k_scan, fx->scanblob, sizeof(fx->scanblob)) &&
+        progress_meta_set(db, fx->k_rounds, rounds4, sizeof(rounds4)) &&
+        progress_meta_set(db, "tipfin_backfill.progress", wit8, 8) &&
+        progress_meta_set(db, fx->k_outpoint, &one, 1) &&
+        progress_meta_set(db, "coins_applied_height", wit8, 8);
+    RM_CHECK("seed legacy keys", seeded);
+    fx->overflow_seeded = progress_meta_set(db, fx->k_overflow, &one, 1);
+    return failures;
+}
 
-        RM_CHECK("migrate runs", repair_marker_migrate_from_progress_meta(db));
+static int rm_check_migrated_kinds(sqlite3 *db, const struct rm_legacy_fix *fx)
+{
+    int failures = 0;
+    bool have = false;
+    uint8_t out[128];
+    size_t plen = 0;
 
-        uint8_t out[128];
-        size_t plen = 0;
+    RM_CHECK("migrate runs", repair_marker_migrate_from_progress_meta(db));
 
-        RM_CHECK("refused migrated w/ payload",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                    42, u.data, &have, out, sizeof(out), &plen) &&
-                 have && plen == 8 && memcmp(out, "spent:v2", 8) == 0);
-        RM_CHECK("refused old key deleted", !rm_meta_present(db, k_ref));
+    RM_CHECK("refused migrated w/ payload",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                42, fx->u.data, &have, out, sizeof(out), &plen) &&
+             have && plen == 8 && memcmp(out, "spent:v2", 8) == 0);
+    RM_CHECK("refused old key deleted", !rm_meta_present(db, fx->k_ref));
 
-        failures += rm_check_overflow_key(db, k_overflow, u.data,
-                                          overflow_seeded);
+    failures += rm_check_overflow_key(db, fx->k_overflow, fx->u.data,
+                                      fx->overflow_seeded);
 
-        RM_CHECK("reducer_frontier repair migrated",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL,
-                                    50, u.data, &have, NULL, 0, NULL) && have);
-        RM_CHECK("reducer_frontier old key deleted", !rm_meta_present(db, k_rf));
+    RM_CHECK("reducer_frontier repair migrated",
+             repair_marker_have(db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL,
+                                50, fx->u.data, &have, NULL, 0, NULL) && have);
+    RM_CHECK("reducer_frontier old key deleted", !rm_meta_present(db, fx->k_rf));
 
-        RM_CHECK("utxo value_overflow migrated",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_UTXO_VALUE_OVERFLOW,
-                                    60, u.data, &have, NULL, 0, NULL) && have);
-        RM_CHECK("utxo old key deleted", !rm_meta_present(db, k_uo));
+    RM_CHECK("utxo value_overflow migrated",
+             repair_marker_have(db, REPAIR_MARKER_KIND_UTXO_VALUE_OVERFLOW,
+                                60, fx->u.data, &have, NULL, 0, NULL) && have);
+    RM_CHECK("utxo old key deleted", !rm_meta_present(db, fx->k_uo));
+    return failures;
+}
 
-        RM_CHECK("scan migrated w/ blob",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_SCAN,
-                                    70, u.data, &have, out, sizeof(out), &plen) &&
-                 have && plen == sizeof(scanblob) && out[0] == 0xAB);
-        RM_CHECK("scan old key deleted", !rm_meta_present(db, k_scan));
+static int rm_check_migrated_payloads(sqlite3 *db,
+                                      const struct rm_legacy_fix *fx)
+{
+    int failures = 0;
+    bool have = false;
+    uint8_t out[128];
+    size_t plen = 0;
 
-        RM_CHECK("rounds migrated w/ le32",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_ROUNDS,
-                                    80, u.data, &have, out, sizeof(out), &plen) &&
-                 have && plen == 4 && out[0] == 3);
-        RM_CHECK("rounds old key deleted", !rm_meta_present(db, k_rounds));
+    RM_CHECK("scan migrated w/ blob",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_SCAN,
+                                70, fx->u.data, &have, out, sizeof(out), &plen) &&
+             have && plen == sizeof(fx->scanblob) && out[0] == 0xAB);
+    RM_CHECK("scan old key deleted", !rm_meta_present(db, fx->k_scan));
 
-        static const uint8_t zero_hash[32] = {0};
-        RM_CHECK("tipfin witness migrated to (0,zero)",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_TIPFIN_PROGRESS,
-                                    REPAIR_MARKER_TIPFIN_HEIGHT, zero_hash, &have,
-                                    out, sizeof(out), &plen) &&
-                 have && plen == 8 && out[0] == 5);
-        RM_CHECK("tipfin witness old key deleted",
-                 !rm_meta_present(db, "tipfin_backfill.progress"));
+    RM_CHECK("rounds migrated w/ le32",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_ROUNDS,
+                                80, fx->u.data, &have, out, sizeof(out), &plen) &&
+             have && plen == 4 && out[0] == 3);
+    RM_CHECK("rounds old key deleted", !rm_meta_present(db, fx->k_rounds));
 
-        /* Out-of-scope keys preserved. */
-        RM_CHECK("outpoint marker preserved", rm_meta_present(db, k_outpoint));
-        RM_CHECK("coins_applied_height preserved",
-                 rm_meta_present(db, "coins_applied_height"));
+    static const uint8_t zero_hash[32] = {0};
+    RM_CHECK("tipfin witness migrated to (0,zero)",
+             repair_marker_have(db, REPAIR_MARKER_KIND_TIPFIN_PROGRESS,
+                                REPAIR_MARKER_TIPFIN_HEIGHT, zero_hash, &have,
+                                out, sizeof(out), &plen) &&
+             have && plen == 8 && out[0] == 5);
+    RM_CHECK("tipfin witness old key deleted",
+             !rm_meta_present(db, "tipfin_backfill.progress"));
 
-        /* Idempotency: a second run is a clean no-op. */
-        RM_CHECK("migrate idempotent (2nd run)",
-                 repair_marker_migrate_from_progress_meta(db));
-        RM_CHECK("refused still present after 2nd migrate",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                    42, u.data, &have, NULL, 0, NULL) && have);
+    /* Out-of-scope keys preserved. */
+    RM_CHECK("outpoint marker preserved", rm_meta_present(db, fx->k_outpoint));
+    RM_CHECK("coins_applied_height preserved",
+             rm_meta_present(db, "coins_applied_height"));
+    return failures;
+}
 
-        /* Convergence on a half-migrated store: re-plant the old key (the row
-         * already exists in repair_marker) and re-run — the old key must be
-         * consumed again and the row must remain. */
-        RM_CHECK("re-plant old key (half-migrated)",
-                 progress_meta_set(db, k_ref, "spent:v2", 8));
-        RM_CHECK("migrate converges half-migrated",
-                 repair_marker_migrate_from_progress_meta(db));
-        RM_CHECK("half-migrated old key consumed", !rm_meta_present(db, k_ref));
-        RM_CHECK("half-migrated row intact",
-                 repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
-                                    42, u.data, &have, out, sizeof(out), &plen) &&
-                 have && plen == 8 && memcmp(out, "spent:v2", 8) == 0);
-    }
+static int rm_check_migrate_convergence(sqlite3 *db,
+                                        const struct rm_legacy_fix *fx)
+{
+    int failures = 0;
+    bool have = false;
+    uint8_t out[128];
+    size_t plen = 0;
+
+    /* Idempotency: a second run is a clean no-op. */
+    RM_CHECK("migrate idempotent (2nd run)",
+             repair_marker_migrate_from_progress_meta(db));
+    RM_CHECK("refused still present after 2nd migrate",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                42, fx->u.data, &have, NULL, 0, NULL) && have);
+
+    /* Convergence on a half-migrated store: re-plant the old key (the row
+     * already exists in repair_marker) and re-run — the old key must be
+     * consumed again and the row must remain. */
+    RM_CHECK("re-plant old key (half-migrated)",
+             progress_meta_set(db, fx->k_ref, "spent:v2", 8));
+    RM_CHECK("migrate converges half-migrated",
+             repair_marker_migrate_from_progress_meta(db));
+    RM_CHECK("half-migrated old key consumed", !rm_meta_present(db, fx->k_ref));
+    RM_CHECK("half-migrated row intact",
+             repair_marker_have(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
+                                42, fx->u.data, &have, out, sizeof(out), &plen) &&
+             have && plen == 8 && memcmp(out, "spent:v2", 8) == 0);
+    return failures;
+}
+
+int test_repair_marker(void);
+int test_repair_marker(void)
+{
+    printf("\n=== repair_marker tests ===\n");
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "repair_marker", "main");
+
+    RM_CHECK("progress_store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RM_CHECK("db handle", db != NULL);
+    if (!db) return failures;
+    /* The table is ensured at open; a second ensure must be a clean no-op. */
+    RM_CHECK("table ensure idempotent", repair_marker_table_ensure(db));
+
+    uint8_t h1[32], h2[32];
+    rm_hash(1, h1);
+    rm_hash(2, h2);
+
+    failures += rm_check_presence(db, h1, h2);
+    failures += rm_check_payload(db, h1);
+    failures += rm_check_gc_below(db, h1);
+    failures += rm_check_raise_floor(db);
+
+    struct rm_legacy_fix fx;
+    failures += rm_seed_legacy_keys(db, &fx);
+    failures += rm_check_migrated_kinds(db, &fx);
+    failures += rm_check_migrated_payloads(db, &fx);
+    failures += rm_check_migrate_convergence(db, &fx);
 
     progress_store_close();
     printf("=== repair_marker tests complete: %d failure(s) ===\n", failures);
