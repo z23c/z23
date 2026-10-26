@@ -592,13 +592,82 @@ static bool swap_settle_ready(const struct swap_contract *swap,
     return true;
 }
 
+/* Emit the usage body for a settle RPC when help was requested or too few
+ * args were passed. Returns true when the usage reply was produced. */
+static bool swap_settle_usage(const struct json_value *params, bool help,
+                              size_t min_args, const char *usage,
+                              struct json_value *result)
+{
+    if (help || !params || json_size(params) < min_args) {
+        json_set_str(result, usage);
+        return true;
+    }
+    return false;
+}
+
+/* Load the swap contract named by swap_id for settlement: presence, database
+ * availability, lookup, then the context/chain-scope guard as the terminal
+ * return so its error body and the check order are preserved verbatim. */
+static bool swap_settle_load(const char *swap_id, struct swap_contract *swap,
+                             struct json_value *result)
+{
+    if (!swap_id || !swap_id[0]) {
+        json_set_str(result, "Missing swap_id");
+        return false;
+    }
+    if (!g_swap_ndb) {
+        json_set_str(result, "Swap database unavailable");
+        return false;
+    }
+    if (!db_swap_find(g_swap_ndb, swap_id, swap)) {
+        json_set_str(result, "Swap not found");
+        return false;
+    }
+    return swap_settle_ready(swap, result);
+}
+
+/* Refuse a swap that has already been redeemed or refunded. */
+static bool swap_already_settled(const struct swap_contract *swap,
+                                 struct json_value *result)
+{
+    if (swap->state != SWAP_REDEEMED && swap->state != SWAP_REFUNDED)
+        return false;
+    json_set_str(result, "Swap already settled");
+    return true;
+}
+
+/* Parse the 64-char hex secret into secret_out and require it to hash to the
+ * contract's secret_hash, so a wrong secret is rejected before chain work. */
+static bool swap_secret_for_redeem(const char *secret_hex,
+                                   const struct swap_contract *swap,
+                                   uint8_t secret_out[32],
+                                   struct json_value *result)
+{
+    if (!secret_hex || !zcl_is_hex_string(secret_hex, 64) ||
+        ParseHex(secret_hex, secret_out, 32) != 32) {
+        json_set_str(result, "Invalid secret (expect 64-char hex)");
+        return false;
+    }
+
+    /* Verify SHA256(secret) == secret_hash before touching the chain. */
+    uint8_t check[32];
+    struct sha256_ctx sc;
+    sha256_init(&sc);
+    sha256_write(&sc, secret_out, 32);
+    sha256_finalize(&sc, check);
+    if (memcmp(check, swap->secret_hash, 32) != 0) {
+        json_set_str(result, "secret does not hash to this swap's secret_hash");
+        return false;
+    }
+    return true;
+}
+
 /* ── swap_redeem ────────────────────────────────────────────────── */
 
 static bool rpc_swap_redeem(const struct json_value *params, bool help,
                             struct json_value *result)
 {
-    if (help || !params || json_size(params) < 2) {
-        json_set_str(result,
+    if (swap_settle_usage(params, help, 2,
             "swap_redeem \"swap_id\" \"secret\" [\"funding_txid\" vout]\n"
             "\nClaim a FUNDED HTLC on the ZCL chain by revealing the secret.\n"
             "Builds the redeem tx (claim branch), signs it with the wallet's\n"
@@ -610,50 +679,19 @@ static bool rpc_swap_redeem(const struct json_value *params, bool help,
             "4. vout         (number, optional) Output index of the funding\n"
             "\nZCL-chain only: the counterparty leg on BTC/LTC/DOGE must be\n"
             "settled by that chain's wallet (cross-chain broadcast is out of\n"
-            "scope here).\n");
+            "scope here).\n", result))
         return true;
-    }
 
     const char *swap_id = json_get_str(json_at(params, 0));
     const char *secret_hex = json_get_str(json_at(params, 1));
-    if (!swap_id || !swap_id[0]) {
-        json_set_str(result, "Missing swap_id");
-        return false;
-    }
-    if (!g_swap_ndb) {
-        json_set_str(result, "Swap database unavailable");
-        return false;
-    }
 
     struct swap_contract swap;
-    if (!db_swap_find(g_swap_ndb, swap_id, &swap)) {
-        json_set_str(result, "Swap not found");
-        return false;
-    }
-    if (!swap_settle_ready(&swap, result)) return false;
+    if (!swap_settle_load(swap_id, &swap, result)) return false;
 
-    if (swap.state == SWAP_REDEEMED || swap.state == SWAP_REFUNDED) {
-        json_set_str(result, "Swap already settled");
-        return false;
-    }
+    if (swap_already_settled(&swap, result)) return false;
 
     uint8_t secret[32];
-    if (!secret_hex || !zcl_is_hex_string(secret_hex, 64) ||
-        ParseHex(secret_hex, secret, 32) != 32) {
-        json_set_str(result, "Invalid secret (expect 64-char hex)");
-        return false;
-    }
-
-    /* Verify SHA256(secret) == secret_hash before touching the chain. */
-    uint8_t check[32];
-    struct sha256_ctx sc;
-    sha256_init(&sc);
-    sha256_write(&sc, secret, 32);
-    sha256_finalize(&sc, check);
-    if (memcmp(check, swap.secret_hash, 32) != 0) {
-        json_set_str(result, "secret does not hash to this swap's secret_hash");
-        return false;
-    }
+    if (!swap_secret_for_redeem(secret_hex, &swap, secret, result)) return false;
 
     struct outpoint funding;
     if (!swap_resolve_funding(params, 2, 3, &swap, &funding, result))
@@ -728,8 +766,7 @@ static bool rpc_swap_redeem(const struct json_value *params, bool help,
 static bool rpc_swap_refund(const struct json_value *params, bool help,
                             struct json_value *result)
 {
-    if (help || !params || json_size(params) < 1) {
-        json_set_str(result,
+    if (swap_settle_usage(params, help, 1,
             "swap_refund \"swap_id\" [\"funding_txid\" vout]\n"
             "\nReclaim a FUNDED HTLC on the ZCL chain after its CLTV locktime.\n"
             "Builds the refund tx (timeout branch), signs it with the wallet's\n"
@@ -740,31 +777,16 @@ static bool rpc_swap_refund(const struct json_value *params, bool help,
             "1. swap_id      (string) The swap contract id\n"
             "2. funding_txid (string, optional) The tx that funded the P2SH\n"
             "3. vout         (number, optional) Output index of the funding\n"
-            "\nZCL-chain only (cross-chain broadcast is out of scope here).\n");
+            "\nZCL-chain only (cross-chain broadcast is out of scope here).\n",
+            result))
         return true;
-    }
 
     const char *swap_id = json_get_str(json_at(params, 0));
-    if (!swap_id || !swap_id[0]) {
-        json_set_str(result, "Missing swap_id");
-        return false;
-    }
-    if (!g_swap_ndb) {
-        json_set_str(result, "Swap database unavailable");
-        return false;
-    }
 
     struct swap_contract swap;
-    if (!db_swap_find(g_swap_ndb, swap_id, &swap)) {
-        json_set_str(result, "Swap not found");
-        return false;
-    }
-    if (!swap_settle_ready(&swap, result)) return false;
+    if (!swap_settle_load(swap_id, &swap, result)) return false;
 
-    if (swap.state == SWAP_REDEEMED || swap.state == SWAP_REFUNDED) {
-        json_set_str(result, "Swap already settled");
-        return false;
-    }
+    if (swap_already_settled(&swap, result)) return false;
 
     /* CLTV precondition: the chain must have reached the locktime height. */
     int height = swap_current_height();
