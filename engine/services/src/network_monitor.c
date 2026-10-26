@@ -179,26 +179,12 @@ static const struct nm_header_vote *nm_find_vote_locked(uint32_t peer_id)
 
 /* ── pure consensus fold ─────────────────────────────────────────────── */
 
-void network_monitor_compute_view(const struct db_peer_chain_observation *obs,
-                                  int n, int64_t our_height, int64_t now_unix,
-                                  struct network_consensus_view *out)
+/* Count peers reporting a height, track the maximum advertised height, and
+ * pick the modal height — ties break to the greater height. Fills
+ * peers_with_height, max_height, modal_height and modal_height_count. */
+static void nm_fold_modal_height(const struct db_peer_chain_observation *obs,
+                                 int n, struct network_consensus_view *out)
 {
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    out->ready = true;
-    out->computed_at = now_unix;
-    out->our_height = our_height;
-    out->modal_height = -1;
-    out->max_height = -1;
-    out->fork_height = -1;
-    if (!obs || n <= 0)
-        return;
-    if (n > NM_MAX_PEERS)
-        n = NM_MAX_PEERS;
-    out->num_peers = n;
-
-    /* modal + max advertised height */
     int64_t best_modal = -1;
     int best_modal_count = 0;
     for (int i = 0; i < n; i++) {
@@ -219,10 +205,13 @@ void network_monitor_compute_view(const struct db_peer_chain_observation *obs,
     }
     out->modal_height = best_modal;
     out->modal_height_count = best_modal_count;
-    if (our_height >= 0 && out->max_height >= 0)
-        out->delta = out->max_height - our_height;
+}
 
-    /* (height, tip_hash) clusters over peers with a known tip hash */
+/* Grow the (height, tip_hash) clusters: a matching cluster gains a peer,
+ * otherwise a new one is appended while NM_MAX_FORK_CLUSTERS bounds it. */
+static void nm_fold_tip_clusters(const struct db_peer_chain_observation *obs,
+                                 int n, struct network_consensus_view *out)
+{
     for (int i = 0; i < n; i++) {
         if (obs[i].best_height < 0 || obs[i].tip_hash[0] == '\0')
             continue;
@@ -243,10 +232,12 @@ void network_monitor_compute_view(const struct db_peer_chain_observation *obs,
             fc->peer_count = 1;
         }
     }
+}
 
-    /* fork = two clusters at the SAME height with DIFFERENT hashes, each with
-     * at least NM_FORK_MIN_CLUSTER peers. Report the pair with the largest
-     * combined support. */
+/* Scan the folded clusters for the strongest fork pair and record it in the
+ * view (fork_detected and friends); leaves the view untouched when none. */
+static void nm_fold_fork_verdict(struct network_consensus_view *out)
+{
     int best_combined = -1;
     for (int a = 0; a < out->num_clusters; a++) {
         if (out->clusters[a].peer_count < NM_FORK_MIN_CLUSTER)
@@ -273,6 +264,39 @@ void network_monitor_compute_view(const struct db_peer_chain_observation *obs,
             }
         }
     }
+}
+
+void network_monitor_compute_view(const struct db_peer_chain_observation *obs,
+                                  int n, int64_t our_height, int64_t now_unix,
+                                  struct network_consensus_view *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->ready = true;
+    out->computed_at = now_unix;
+    out->our_height = our_height;
+    out->modal_height = -1;
+    out->max_height = -1;
+    out->fork_height = -1;
+    if (!obs || n <= 0)
+        return;
+    if (n > NM_MAX_PEERS)
+        n = NM_MAX_PEERS;
+    out->num_peers = n;
+
+    /* modal + max advertised height */
+    nm_fold_modal_height(obs, n, out);
+    if (our_height >= 0 && out->max_height >= 0)
+        out->delta = out->max_height - our_height;
+
+    /* (height, tip_hash) clusters over peers with a known tip hash */
+    nm_fold_tip_clusters(obs, n, out);
+
+    /* fork = two clusters at the SAME height with DIFFERENT hashes, each with
+     * at least NM_FORK_MIN_CLUSTER peers. Report the pair with the largest
+     * combined support. */
+    nm_fold_fork_verdict(out);
 }
 
 /* ── sampling ────────────────────────────────────────────────────────── */

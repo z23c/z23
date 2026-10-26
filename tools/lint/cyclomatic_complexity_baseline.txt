@@ -1323,7 +1323,6 @@ engine/services/src/mirror_divergence_locator.c:mirror_divergence_locate:18
 engine/services/src/network_census_fold.c:network_census_compute:39
 engine/services/src/network_crawler.c:ncrawl_clamp:19
 engine/services/src/network_crawler.c:ncrawl_config_from_env:32
-engine/services/src/network_monitor.c:network_monitor_compute_view:30
 engine/services/src/node_db_catchup_decrypt.c:node_db_catchup_try_sapling_decrypt:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:113
 engine/services/src/node_db_import_pipeline.c:node_db_import_decoder_thread:17
