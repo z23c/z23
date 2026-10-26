@@ -8232,6 +8232,12 @@ check-hotfork-stories: $(LINTC_TOOL) $(HOTSWAP_ACTION_PLAN)
 	@echo "══ LINT: every HOT_FORK capsule unity compiles ══"
 	@./build/bin/z23-lint check-hotfork-stories --selftest
 	@./build/bin/z23-lint check-hotfork-stories
+# Lab tool, not a lint gate (not in LINT_GATES): compares one lane's C file
+# with its base for a behaviour-preserving split or dedup. Only the selftest
+# is registered; the lab calls `z23-lint check-split-preserved PATH...`.
+check-split-preserved: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-split-preserved --selftest
+
 $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
