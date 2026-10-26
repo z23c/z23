@@ -300,7 +300,7 @@ static bool find_repo_root(void)
 /* ── Baseline line parsing ─────────────────────────────────────────────── */
 
 /* Cut a line at its first '#', in place. */
-static void strip_comment(char *s)
+static void strip_baseline_comment(char *s)
 {
     char *hash = strchr(s, '#');
     if (hash) *hash = '\0';
@@ -353,7 +353,7 @@ static bool load_baseline(struct policy_run *run, const char *file)
 
     char line[PATH_MAX_LEN + 64];
     while (fgets(line, (int)sizeof line, fp)) {
-        strip_comment(line);
+        strip_baseline_comment(line);
         char *path_start = skip_blank_columns(line);
         char *end_of_path = scan_path_token(path_start);
         if (end_of_path == path_start) continue;
@@ -596,7 +596,7 @@ static int rewrite_baseline(struct policy_run *run, const char *file)
     while (fgets(line, (int)sizeof line, in)) {
         char scratch[PATH_MAX_LEN + 64];
         memcpy(scratch, line, strlen(line) + 1);
-        strip_comment(scratch);
+        strip_baseline_comment(scratch);
         char *path_start = skip_blank_columns(scratch);
         char *end_of_path = scan_path_token(path_start);
         size_t path_len = (size_t)(end_of_path - path_start);
