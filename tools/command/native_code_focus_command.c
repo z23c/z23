@@ -77,6 +77,24 @@ static void focus_append(char *dst, size_t cap, size_t *off,
     *off = ((size_t)w < cap - *off) ? *off + (size_t)w : cap - 1;
 }
 
+static const char *focus_input_specialist(const struct json_value *input)
+{
+    const char *name = json_get_str(json_get(input, "specialist"));
+    if (name && !name[0])
+        name = NULL;
+    return name;
+}
+
+static bool focus_load_evidence(const char *root,
+                                struct specialist_focus_evidence *ev)
+{
+    return specialist_focus_load_failed_groups(root, ev) &&
+           specialist_focus_load_failed_gates(root, ev) &&
+           specialist_focus_load_notes(root, ev) &&
+           specialist_focus_load_issues(root, ev) &&
+           specialist_focus_load_churn(root, ev);
+}
+
 static void focus_render_list(struct zcl_command_reply *reply)
 {
     size_t n = 0;
@@ -111,6 +129,94 @@ static void focus_render_list(struct zcl_command_reply *reply)
     json_free(&lines);
 }
 
+static void focus_render_hits(struct json_value *files,
+                              struct json_value *lines,
+                              const struct specialist_focus_hit *hits, int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct json_value o;
+        json_init(&o);
+        json_set_object(&o);
+        (void)json_push_kv_str(&o, "path", hits[i].path);
+        (void)json_push_kv_int(&o, "score", hits[i].score);
+        (void)json_push_kv_str(&o, "reason", hits[i].reason);
+        focus_push_obj(files, &o);
+        char line[640];
+        (void)snprintf(line, sizeof line, "%d  %s  %s", hits[i].score,
+                       hits[i].path, hits[i].reason);
+        focus_push_str(lines, line);
+    }
+}
+
+static void focus_render_coverage(struct zcl_command_reply *reply,
+                                  const struct specialist *spec,
+                                  struct specialist_focus_evidence *ev)
+{
+    struct json_value tests;
+    json_init(&tests);
+    json_set_object(&tests);
+    (void)json_push_kv_str(&tests, "source",
+                           ".cache/test-timing/last-run.json");
+    if (ev->tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        (void)json_push_kv_str(&tests, "status", "no run recorded");
+    } else {
+        (void)json_push_kv_str(&tests, "status", "recorded");
+        (void)json_push_kv_int(&tests, "failed_count",
+                               (int64_t)ev->failed_count);
+    }
+    (void)json_push_kv(&reply->data, "tests", &tests);
+    json_free(&tests);
+
+    struct json_value gates;
+    json_init(&gates);
+    json_set_object(&gates);
+    (void)json_push_kv_str(&gates, "source",
+                           ".cache/lint-timing/last-run.json");
+    if (ev->gates_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        (void)json_push_kv_str(&gates, "status", "no run recorded");
+    } else {
+        char owned[4][SPECIALIST_GROUP_MAX];
+        size_t nog = specialist_focus_owned_failed_gates(spec, ev, owned, 4);
+        (void)json_push_kv_str(&gates, "status", "recorded");
+        (void)json_push_kv_int(&gates, "failed_count", (int64_t)nog);
+        if (nog > 0) {
+            struct json_value names;
+            json_init(&names);
+            json_set_array(&names);
+            for (size_t i = 0; i < nog && i < 4; i++)
+                focus_push_str(&names, owned[i]);
+            (void)json_push_kv(&gates, "failed", &names);
+            json_free(&names);
+        }
+    }
+    (void)json_push_kv(&reply->data, "gates", &gates);
+    json_free(&gates);
+}
+
+static void focus_render_summary(struct zcl_command_reply *reply,
+                                 const char *spec_name, int n,
+                                 const struct specialist_focus_evidence *ev,
+                                 bool truncated)
+{
+    char summary[240];
+    size_t soff = 0;
+    char head[96];
+    int w = snprintf(head, sizeof head, "%s: %d file%s ranked", spec_name, n,
+                     n == 1 ? "" : "s");
+    if (w > 0)
+        focus_append(summary, sizeof summary, &soff, head);
+    if (ev->tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        focus_append(summary, sizeof summary, &soff, "; tests: no run recorded");
+    }
+    if (ev->gates_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        focus_append(summary, sizeof summary, &soff,
+                     "; gates: no run recorded");
+    }
+    focus_append(summary, sizeof summary, &soff,
+                 truncated ? " (truncated)" : "");
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+}
+
 void zcl_native_handle_code_focus(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -127,9 +233,7 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
     }
 
     bool list = json_get_bool_or(request->input, "list", false);
-    const char *name = json_get_str(json_get(request->input, "specialist"));
-    if (name && !name[0])
-        name = NULL;
+    const char *name = focus_input_specialist(request->input);
     if (list || !name) {
         focus_render_list(reply);
         return;
@@ -160,11 +264,7 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
 
     struct specialist_focus_evidence ev;
     specialist_focus_evidence_clear(&ev);
-    bool loaded = specialist_focus_load_failed_groups(root, &ev) &&
-                  specialist_focus_load_failed_gates(root, &ev) &&
-                  specialist_focus_load_notes(root, &ev) &&
-                  specialist_focus_load_issues(root, &ev) &&
-                  specialist_focus_load_churn(root, &ev);
+    bool loaded = focus_load_evidence(root, &ev);
     if (!loaded) {
         codeindex_close(ci);
         LOG_ERROR(CF_TAG, "FOCUS_EVIDENCE: could not read recorded evidence");
@@ -196,19 +296,7 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
     json_set_array(&files);
     json_init(&lines);
     json_set_array(&lines);
-    for (int i = 0; i < n; i++) {
-        struct json_value o;
-        json_init(&o);
-        json_set_object(&o);
-        (void)json_push_kv_str(&o, "path", hits[i].path);
-        (void)json_push_kv_int(&o, "score", hits[i].score);
-        (void)json_push_kv_str(&o, "reason", hits[i].reason);
-        focus_push_obj(&files, &o);
-        char line[640];
-        (void)snprintf(line, sizeof line, "%d  %s  %s", hits[i].score,
-                       hits[i].path, hits[i].reason);
-        focus_push_str(&lines, line);
-    }
+    focus_render_hits(&files, &lines, hits, n);
     (void)json_push_kv_str(&reply->data, "scope", "focus");
     (void)json_push_kv_str(&reply->data, "specialist", spec->name);
     (void)json_push_kv(&reply->data, "files", &files);
@@ -216,63 +304,8 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "count", n);
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
 
-    struct json_value tests;
-    json_init(&tests);
-    json_set_object(&tests);
-    (void)json_push_kv_str(&tests, "source",
-                           ".cache/test-timing/last-run.json");
-    if (ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
-        (void)json_push_kv_str(&tests, "status", "no run recorded");
-    } else {
-        (void)json_push_kv_str(&tests, "status", "recorded");
-        (void)json_push_kv_int(&tests, "failed_count",
-                               (int64_t)ev.failed_count);
-    }
-    (void)json_push_kv(&reply->data, "tests", &tests);
-    json_free(&tests);
-
-    struct json_value gates;
-    json_init(&gates);
-    json_set_object(&gates);
-    (void)json_push_kv_str(&gates, "source",
-                           ".cache/lint-timing/last-run.json");
-    if (ev.gates_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
-        (void)json_push_kv_str(&gates, "status", "no run recorded");
-    } else {
-        char owned[4][SPECIALIST_GROUP_MAX];
-        size_t nog = specialist_focus_owned_failed_gates(spec, &ev, owned, 4);
-        (void)json_push_kv_str(&gates, "status", "recorded");
-        (void)json_push_kv_int(&gates, "failed_count", (int64_t)nog);
-        if (nog > 0) {
-            struct json_value names;
-            json_init(&names);
-            json_set_array(&names);
-            for (size_t i = 0; i < nog && i < 4; i++)
-                focus_push_str(&names, owned[i]);
-            (void)json_push_kv(&gates, "failed", &names);
-            json_free(&names);
-        }
-    }
-    (void)json_push_kv(&reply->data, "gates", &gates);
-    json_free(&gates);
-
-    char summary[240];
-    size_t soff = 0;
-    char head[96];
-    int w = snprintf(head, sizeof head, "%s: %d file%s ranked", spec->name, n,
-                     n == 1 ? "" : "s");
-    if (w > 0)
-        focus_append(summary, sizeof summary, &soff, head);
-    if (ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
-        focus_append(summary, sizeof summary, &soff, "; tests: no run recorded");
-    }
-    if (ev.gates_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
-        focus_append(summary, sizeof summary, &soff,
-                     "; gates: no run recorded");
-    }
-    focus_append(summary, sizeof summary, &soff,
-                 truncated ? " (truncated)" : "");
-    (void)json_push_kv_str(&reply->data, "summary", summary);
+    focus_render_coverage(reply, spec, &ev);
+    focus_render_summary(reply, spec->name, n, &ev, truncated);
     json_free(&files);
     json_free(&lines);
 }
