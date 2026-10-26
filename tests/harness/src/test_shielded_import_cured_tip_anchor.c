@@ -141,20 +141,17 @@ static bool cta_seed_coins_best(sqlite3 *db, int32_t h,
     return ok;
 }
 
-int test_shielded_import_cured_tip_anchor(void);
-int test_shielded_import_cured_tip_anchor(void)
+static int cta_check_gate_installs_registered_tip(int32_t h)
 {
     int failures = 0;
-    const int32_t anchor = cta_anchor_height();
-    const int32_t H = anchor + 100;   /* cured coins tip, above the trust floor */
 
     /* ── GATE: a height-torn tip installs iff the cold-import anchor matches ── */
     {
         /* Detached island: tip at H whose pprev is height-torn (an ancestor at
          * H-50, not H-1) — exactly the shape the boot restore refuses. */
         struct block_index tip, torn_prev;
-        cta_make_block(&torn_prev, H - 50, NULL, 0x20);
-        cta_make_block(&tip, H, &torn_prev, 0x21);
+        cta_make_block(&torn_prev, h - 50, NULL, 0x20);
+        cta_make_block(&tip, h, &torn_prev, 0x21);
 
         /* No anchor registered → refused island (baseline). */
         utxo_recovery_set_cold_import_trust_anchor(NULL, -1);
@@ -162,7 +159,7 @@ int test_shielded_import_cured_tip_anchor(void)
                   !utxo_recovery_block_trust_rooted(&tip));
 
         /* Register the cured tip's exact (height, hash) → trust-rooted. */
-        utxo_recovery_set_cold_import_trust_anchor(tip.phashBlock, H);
+        utxo_recovery_set_cold_import_trust_anchor(tip.phashBlock, h);
         CTA_CHECK("torn tip becomes trust-rooted after registration",
                   utxo_recovery_block_trust_rooted(&tip));
         CTA_CHECK("ancestry_break returns NULL (no island root) for the tip",
@@ -180,13 +177,13 @@ int test_shielded_import_cured_tip_anchor(void)
         CTA_CHECK("active_chain_tip returns the cured tip after install",
                   active_chain_tip(&chain) == &tip);
         CTA_CHECK("active_chain_height is the cured tip height",
-                  active_chain_height(&chain) == H);
+                  active_chain_height(&chain) == h);
         active_chain_free(&chain);
 
         /* Security: a torn tip at the SAME height but a DIFFERENT hash is NOT
          * granted the relaxation — the detached-island guard holds. */
         struct block_index wrong;
-        cta_make_block(&wrong, H, &torn_prev, 0x99);   /* different tag → hash */
+        cta_make_block(&wrong, h, &torn_prev, 0x99);   /* different tag → hash */
         CTA_CHECK("a mismatched-hash torn tip stays a refused island",
                   !utxo_recovery_block_trust_rooted(&wrong));
 
@@ -196,6 +193,13 @@ int test_shielded_import_cured_tip_anchor(void)
                   !utxo_recovery_block_trust_rooted(&tip));
     }
 
+    return failures;
+}
+
+static int cta_check_hook_registers_cured_tip(int32_t h)
+{
+    int failures = 0;
+
     /* ── HOOK: the import registers the derived coins-best in-memory + durably ── */
     {
         char pg_dir[256], ndb_path[320];
@@ -203,14 +207,14 @@ int test_shielded_import_cured_tip_anchor(void)
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", pg_dir);
 
         struct uint256 tip_hash;
-        cta_fill_hash(&tip_hash, H, 0x42);
+        cta_fill_hash(&tip_hash, h, 0x42);
 
         utxo_recovery_set_cold_import_trust_anchor(NULL, -1);  /* clean slate */
 
         CTA_CHECK("progress.kv opens", progress_store_open(pg_dir));
         sqlite3 *db = progress_store_db();
         CTA_CHECK("coins-best derivation seeded",
-                  db && cta_seed_coins_best(db, H, &tip_hash));
+                  db && cta_seed_coins_best(db, h, &tip_hash));
 
         /* Sanity: the derivation returns exactly (H, tip_hash). */
         int32_t dh = -1;
@@ -219,7 +223,7 @@ int test_shielded_import_cured_tip_anchor(void)
         bool dok = reducer_frontier_derive_coins_best(db, &dh, dhash,
                                                       &dhash_found, &dfound);
         CTA_CHECK("derive_coins_best resolves the cured (height, hash)",
-                  dok && dfound && dhash_found && dh == H &&
+                  dok && dfound && dhash_found && dh == h &&
                   memcmp(dhash, tip_hash.data, 32) == 0);
 
         struct node_db ndb;
@@ -231,11 +235,11 @@ int test_shielded_import_cured_tip_anchor(void)
 
         /* In-memory: a torn tip at (H, tip_hash) is now trust-rooted. */
         struct block_index htip, hprev;
-        cta_make_block(&hprev, H - 30, NULL, 0x30);
+        cta_make_block(&hprev, h - 30, NULL, 0x30);
         block_index_init(&htip);
         htip.hashBlock = tip_hash;
         htip.phashBlock = &htip.hashBlock;
-        htip.nHeight = H;
+        htip.nHeight = h;
         htip.pprev = &hprev;
         CTA_CHECK("in-memory anchor makes the derived tip trust-rooted",
                   utxo_recovery_block_trust_rooted(&htip));
@@ -249,7 +253,7 @@ int test_shielded_import_cured_tip_anchor(void)
         bool got_hash = node_db_state_get(&ndb, "cold_import_seed_anchor_hash",
             seed_hash, sizeof(seed_hash), &seed_hn);
         CTA_CHECK("durable seed height persisted == cured tip height",
-                  got_h && seed_h == H);
+                  got_h && seed_h == h);
         CTA_CHECK("durable seed hash persisted == cured tip hash",
                   got_hash && seed_hn == 32 &&
                   memcmp(seed_hash, tip_hash.data, 32) == 0);
@@ -258,6 +262,13 @@ int test_shielded_import_cured_tip_anchor(void)
         progress_store_close();
         utxo_recovery_set_cold_import_trust_anchor(NULL, -1);  /* leave clean */
     }
+
+    return failures;
+}
+
+static int cta_check_hook_refuses_without_coins_best(void)
+{
+    int failures = 0;
 
     /* ── HOOK negative: no coins-best derivable → clean refusal, no seed ── */
     {
@@ -280,6 +291,13 @@ int test_shielded_import_cured_tip_anchor(void)
         progress_store_close();
         utxo_recovery_set_cold_import_trust_anchor(NULL, -1);
     }
+
+    return failures;
+}
+
+static int cta_check_relink_fixes_scrambled_labels(int32_t anchor)
+{
+    int failures = 0;
 
     /* ── RELINK FIX: a height-scrambled ancestry under intact hash-linkage is
      * relabeled in place → the coins tip becomes trust-rooted. The chain
@@ -346,6 +364,13 @@ int test_shielded_import_cured_tip_anchor(void)
         main_state_free(&ms);
     }
 
+    return failures;
+}
+
+static int cta_check_relink_refuses_hash_break(int32_t anchor)
+{
+    int failures = 0;
+
     /* ── RELINK REFUSE: a GENUINE hash-linkage break (a NULL parent above the
      * attested extent) is real corruption, not a label scramble — the repair
      * changes NOTHING and names a typed blocker. Two-pass guarantees a
@@ -395,6 +420,13 @@ int test_shielded_import_cured_tip_anchor(void)
         main_state_free(&ms);
     }
 
+    return failures;
+}
+
+static int cta_check_relink_refuses_pprev_cycle(int32_t anchor)
+{
+    int failures = 0;
+
     /* ── RELINK CYCLE (pprev lasso): a wrong pprev pointer (the loader's
      * by-height fallback wiring a parent from a scrambled height) makes the walk
      * lap a cycle. A height relabel cannot cure wrong linkage — Floyd detection
@@ -431,6 +463,13 @@ int test_shielded_import_cured_tip_anchor(void)
         main_state_free(&ms);
     }
 
+    return failures;
+}
+
+static int cta_check_relink_refuses_wrong_terminus(int32_t anchor)
+{
+    int failures = 0;
+
     /* ── RELINK WRONG-TERMINUS: an acyclic chain whose anchor-height node is NOT
      * the compiled checkpoint block is a wrong lineage — REFUSED (never stamp the
      * anchor height onto a non-checkpoint block and fail-open). Only exercised
@@ -462,6 +501,24 @@ int test_shielded_import_cured_tip_anchor(void)
             main_state_free(&ms);
         }
     }
+
+    return failures;
+}
+
+int test_shielded_import_cured_tip_anchor(void);
+int test_shielded_import_cured_tip_anchor(void)
+{
+    int failures = 0;
+    const int32_t anchor = cta_anchor_height();
+    const int32_t H = anchor + 100;   /* cured coins tip, above the trust floor */
+
+    failures += cta_check_gate_installs_registered_tip(H);
+    failures += cta_check_hook_registers_cured_tip(H);
+    failures += cta_check_hook_refuses_without_coins_best();
+    failures += cta_check_relink_fixes_scrambled_labels(anchor);
+    failures += cta_check_relink_refuses_hash_break(anchor);
+    failures += cta_check_relink_refuses_pprev_cycle(anchor);
+    failures += cta_check_relink_refuses_wrong_terminus(anchor);
 
     return failures;
 }
