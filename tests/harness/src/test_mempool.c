@@ -76,13 +76,9 @@ static void p21_build_spend(struct transaction *tx,
     transaction_compute_hash(tx);
 }
 
-int test_mempool(void)
+static int mpool_case_init_free(void)
 {
     int failures = 0;
-    struct main_state p21_main_state;
-    main_state_init(&p21_main_state);
-    const struct chain_params *p21_params = chain_params_get();
-
     printf("txmempool init/free... ");
     {
         struct tx_mempool pool;
@@ -93,7 +89,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_add_exists_lookup(void)
+{
+    int failures = 0;
     printf("txmempool add/exists/lookup... ");
     {
         struct tx_mempool pool;
@@ -130,7 +131,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_exact_insert_one_owner(void)
+{
+    int failures = 0;
     printf("txmempool exact insertion has one locked owner... ");
     {
         struct tx_mempool pool;
@@ -160,7 +166,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_remove(void)
+{
+    int failures = 0;
     printf("txmempool remove... ");
     {
         struct tx_mempool pool;
@@ -190,7 +201,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_clear(void)
+{
+    int failures = 0;
     printf("txmempool clear... ");
     {
         struct tx_mempool pool;
@@ -222,7 +238,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_prioritise_apply_deltas(void)
+{
+    int failures = 0;
     printf("txmempool prioritise/apply_deltas... ");
     {
         struct tx_mempool pool;
@@ -251,7 +272,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_query_hashes(void)
+{
+    int failures = 0;
     printf("txmempool query_hashes... ");
     {
         struct tx_mempool pool;
@@ -283,7 +309,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_remove_without_branch_id(void)
+{
+    int failures = 0;
     printf("txmempool remove_without_branch_id... ");
     {
         struct tx_mempool pool;
@@ -314,7 +345,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_has_no_inputs_of(void)
+{
+    int failures = 0;
     printf("txmempool has_no_inputs_of... ");
     {
         struct tx_mempool pool;
@@ -363,7 +399,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_entry_get_priority(void)
+{
+    int failures = 0;
     printf("mempool_entry get_priority... ");
     {
         struct transaction tx;
@@ -386,7 +427,12 @@ int test_mempool(void)
         transaction_free(&tx);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_find_bucket(void)
+{
+    int failures = 0;
     printf("tx_confirm_stats init/setup/find_bucket... ");
     {
         struct tx_confirm_stats s;
@@ -406,7 +452,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_record_update(void)
+{
+    int failures = 0;
     printf("tx_confirm_stats record/update... ");
     {
         struct tx_confirm_stats s;
@@ -425,7 +476,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_estimator_init_free(void)
+{
+    int failures = 0;
     printf("block_policy_estimator init/free... ");
     {
         struct fee_rate min_fee;
@@ -441,7 +497,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_estimate_fee_empty(void)
+{
+    int failures = 0;
     printf("block_policy_estimator estimate_fee empty... ");
     {
         struct fee_rate min_fee;
@@ -457,7 +518,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_fee_pri_data_point(void)
+{
+    int failures = 0;
     printf("policy is_fee/pri_data_point... ");
     {
         struct fee_rate min_fee;
@@ -476,7 +542,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_clear_current(void)
+{
+    int failures = 0;
     /* ================================================================
      * tx_confirm_stats: clear_current resets per-block counters
      * ================================================================ */
@@ -498,7 +569,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_new_remove_tx(void)
+{
+    int failures = 0;
     /* ================================================================
      * tx_confirm_stats: new_tx + remove_tx
      * ================================================================ */
@@ -522,7 +598,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_max_confirms(void)
+{
+    int failures = 0;
     /* ================================================================
      * tx_confirm_stats: max_confirms
      * ================================================================ */
@@ -538,7 +619,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_decay(void)
+{
+    int failures = 0;
     /* ================================================================
      * tx_confirm_stats: update_averages decays
      * ================================================================ */
@@ -564,7 +650,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_confirm_stats_median_empty(void)
+{
+    int failures = 0;
     /* ================================================================
      * tx_confirm_stats: estimate_median returns -1 with no data
      * ================================================================ */
@@ -581,7 +672,12 @@ int test_mempool(void)
         tx_confirm_stats_free(&s);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_estimate_fee_invalid_targets(void)
+{
+    int failures = 0;
     /* ================================================================
      * policy_estimate_fee: invalid conf_target
      * ================================================================ */
@@ -600,7 +696,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_estimate_priority_invalid_targets(void)
+{
+    int failures = 0;
     /* ================================================================
      * policy_estimate_priority: invalid conf_target
      * ================================================================ */
@@ -619,7 +720,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_process_block_height(void)
+{
+    int failures = 0;
     /* ================================================================
      * policy_process_block: advances best_seen_height
      * ================================================================ */
@@ -642,7 +748,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_remove_tx_unknown(void)
+{
+    int failures = 0;
     /* ================================================================
      * policy_remove_tx: no-op for unknown hash
      * ================================================================ */
@@ -661,7 +772,12 @@ int test_mempool(void)
         block_policy_estimator_free(&est);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_process_mempool_happy(void)
+{
+    int failures = 0;
     /* ================================================================
      * process_mempool happy path — all tx hashes flow into
      * node->inventory_to_send via p2p_node_push_inventory, proving
@@ -708,7 +824,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_process_mempool_oom(void)
+{
+    int failures = 0;
     /* ================================================================
      * process_mempool returns false on OOM and pushes no inv.
      * Test hook forces the scratch allocation to fail; the caller
@@ -753,7 +874,13 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_invalid_tx_ban(struct main_state *p21_main_state,
+                                     const struct chain_params *p21_params)
+{
+    int failures = 0;
     /* ================================================================
      * invalid tx (out-of-range vout value) is rejected with
      * TX_ACCEPT_INVALID, the mempool stays empty, and the sending
@@ -783,7 +910,7 @@ int test_mempool(void)
         struct msg_processor mp = {0};
         mp.mempool = &pool;
         mp.coins_tip = &coins;
-        mp.main_state = &p21_main_state;
+        mp.main_state = p21_main_state;
         mp.params = p21_params;
         mp.net_mgr = &nm;
 
@@ -812,7 +939,13 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_double_spend_conflict(struct main_state *p21_main_state,
+                                            const struct chain_params *p21_params)
+{
+    int failures = 0;
     /* ================================================================
      * double-spend vs current mempool. First tx accepted,
      * second tx spending the same UTXO rejected with TX_ACCEPT_CONFLICT,
@@ -854,7 +987,7 @@ int test_mempool(void)
         struct msg_processor mp = {0};
         mp.mempool = &pool;
         mp.coins_tip = &coins;
-        mp.main_state = &p21_main_state;
+        mp.main_state = p21_main_state;
         mp.params = p21_params;
         mp.net_mgr = &nm;
 
@@ -883,7 +1016,13 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_below_relay_fee(struct main_state *p21_main_state,
+                                      const struct chain_params *p21_params)
+{
+    int failures = 0;
     /* ================================================================
      * below-relay-fee tx is silently dropped. Returns
      * TX_ACCEPT_BELOW_FEE, mempool stays empty, and the peer's
@@ -920,7 +1059,7 @@ int test_mempool(void)
         struct msg_processor mp = {0};
         mp.mempool = &pool;
         mp.coins_tip = &coins;
-        mp.main_state = &p21_main_state;
+        mp.main_state = p21_main_state;
         mp.params = p21_params;
         mp.net_mgr = &nm;
 
@@ -938,7 +1077,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_outpoint_map_grows(void)
+{
+    int failures = 0;
     /* ================================================================
      * outpoint map grows past the old fixed 4096 ceiling.
      *
@@ -1031,7 +1175,12 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int mpool_case_grow_then_remove(void)
+{
+    int failures = 0;
     /* ================================================================
      * After growth, removals shrink live occupancy and free the
      * outpoint so a fresh tx may legitimately reuse it. Guards against
@@ -1113,6 +1262,47 @@ int test_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_mempool(void)
+{
+    int failures = 0;
+    struct main_state p21_main_state;
+    main_state_init(&p21_main_state);
+    const struct chain_params *p21_params = chain_params_get();
+
+    failures += mpool_case_init_free();
+    failures += mpool_case_add_exists_lookup();
+    failures += mpool_case_exact_insert_one_owner();
+    failures += mpool_case_remove();
+    failures += mpool_case_clear();
+    failures += mpool_case_prioritise_apply_deltas();
+    failures += mpool_case_query_hashes();
+    failures += mpool_case_remove_without_branch_id();
+    failures += mpool_case_has_no_inputs_of();
+    failures += mpool_case_entry_get_priority();
+    failures += mpool_case_confirm_stats_find_bucket();
+    failures += mpool_case_confirm_stats_record_update();
+    failures += mpool_case_estimator_init_free();
+    failures += mpool_case_estimate_fee_empty();
+    failures += mpool_case_fee_pri_data_point();
+    failures += mpool_case_confirm_stats_clear_current();
+    failures += mpool_case_confirm_stats_new_remove_tx();
+    failures += mpool_case_confirm_stats_max_confirms();
+    failures += mpool_case_confirm_stats_decay();
+    failures += mpool_case_confirm_stats_median_empty();
+    failures += mpool_case_estimate_fee_invalid_targets();
+    failures += mpool_case_estimate_priority_invalid_targets();
+    failures += mpool_case_process_block_height();
+    failures += mpool_case_remove_tx_unknown();
+    failures += mpool_case_process_mempool_happy();
+    failures += mpool_case_process_mempool_oom();
+    failures += mpool_case_invalid_tx_ban(&p21_main_state, p21_params);
+    failures += mpool_case_double_spend_conflict(&p21_main_state, p21_params);
+    failures += mpool_case_below_relay_fee(&p21_main_state, p21_params);
+    failures += mpool_case_outpoint_map_grows();
+    failures += mpool_case_grow_then_remove();
 
     main_state_free(&p21_main_state);
     return failures;
