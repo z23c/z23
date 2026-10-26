@@ -279,6 +279,90 @@ static bool pool_push(struct pool_coin **pool, size_t *n, size_t *cap,
     return true;
 }
 
+/* Build one block's transactions into txs[0..*ntx-1]: the coinbase, the
+ * cross-block spend, and the intra-block create-then-spend pair. Spent pool
+ * coins are popped, salt advances, and the coinbase hash/subsidy are reported
+ * for pool bookkeeping. Returns 0, or -1 if a tx build fails. */
+static int prf_collect_block_txs(struct transaction txs[8], size_t *ntx,
+                                 int h, const struct chain_params *cp,
+                                 uint32_t *salt, struct pool_coin *pool,
+                                 size_t *np, struct uint256 *cb_hash,
+                                 int64_t *subsidy)
+{
+    /* (0) coinbase */
+    *subsidy = get_block_subsidy(h, &cp->consensus);
+    uint32_t cb_salt = (*salt)++;
+    if (!prf_build_tx(&txs[*ntx], NULL, 0, subsidy, &cb_salt, 1)) return -1;
+    *cb_hash = txs[*ntx].hash;
+    (*ntx)++;
+
+    /* (1) cross-block spend on even heights. Guard on value >= 2 so the
+     * fee-1 output stays positive (regtest subsidy halves every 150 blocks,
+     * so high-height coins are small — a value-0 coin is left unspent, which
+     * both folds treat identically). */
+    if ((h % 2) == 0 && *np > 0 && pool[*np - 1].value >= 2) {
+        struct pool_coin pc = pool[*np - 1]; (*np)--;   /* spend newest-ish */
+        struct outpoint in = { .hash = pc.txid, .n = pc.vout };
+        int64_t ov = pc.value - 1;                  /* fee 1 */
+        uint32_t os = (*salt)++;
+        if (!prf_build_tx(&txs[*ntx], &in, 1, &ov, &os, 1)) return -1;
+        (*ntx)++;
+    }
+
+    /* (2) intra-block create-then-spend chain on every third height:
+     * tx A spends a pooled coin and creates output O; tx B (later in THIS
+     * block) spends O and creates the surviving leaf. O is created and
+     * spent within the block → net absent, exercising the intra-block
+     * create-then-spend path in both the serial builder and the join. */
+    if ((h % 3) == 0 && *np > 0 && pool[*np - 1].value >= 3) {
+        struct pool_coin pc = pool[*np - 1]; (*np)--;
+        struct outpoint inA = { .hash = pc.txid, .n = pc.vout };
+        int64_t oA = pc.value - 1; uint32_t sA = (*salt)++;
+        if (!prf_build_tx(&txs[*ntx], &inA, 1, &oA, &sA, 1)) return -1;
+        struct uint256 aHash = txs[*ntx].hash; (*ntx)++;
+        struct outpoint inB = { .hash = aHash, .n = 0 };
+        int64_t oB = oA - 1; uint32_t sB = (*salt)++;
+        if (!prf_build_tx(&txs[*ntx], &inB, 1, &oB, &sB, 1)) return -1;
+        (*ntx)++;
+    }
+    return 0;
+}
+
+/* Is output (vtx[ti].hash, vo) spent by a LATER tx in this same block? */
+static bool prf_output_spent_later(struct transaction *vtx, size_t ntx,
+                                   size_t ti, uint32_t vo)
+{
+    for (size_t tj = ti + 1; tj < ntx; tj++) {
+        struct transaction *u = &vtx[tj];
+        for (size_t vi = 0; vi < u->num_vin; vi++)
+            if (uint256_eq(&u->vin[vi].prevout.hash, &vtx[ti].hash) &&
+                u->vin[vi].prevout.n == vo)
+                return true;
+    }
+    return false;
+}
+
+/* Pool bookkeeping: the coinbase output is always live; every other
+ * output is live UNLESS a LATER tx in this same block spends it. */
+static int prf_pool_block_outputs(struct pool_coin **pool, size_t *np,
+                                  size_t *cap, struct block *blk,
+                                  const struct uint256 *cb_hash,
+                                  int64_t subsidy)
+{
+    size_t ntx = blk->num_vtx;
+    if (!pool_push(pool, np, cap, cb_hash, 0, subsidy)) return -1;
+    for (size_t ti = 1; ti < ntx; ti++) {
+        struct transaction *t = &blk->vtx[ti];
+        for (size_t vo = 0; vo < t->num_vout; vo++) {
+            if (prf_output_spent_later(blk->vtx, ntx, ti, (uint32_t)vo))
+                continue;
+            if (!pool_push(pool, np, cap, &t->hash, (uint32_t)vo,
+                           t->vout[vo].value)) return -1;
+        }
+    }
+    return 0;
+}
+
 /* Build the fixture: heights 1..n_blocks. Each block has a coinbase; even
  * blocks spend an old pooled coin (cross-block); every third block adds an
  * intra-block create-then-spend chain (tx A creates O, tx B spends O). */
@@ -302,43 +386,10 @@ static bool build_fixture(struct fixture *fx, int n_blocks,
         /* Collect this block's txs in a temp vector, then attach. */
         struct transaction txs[8];
         size_t ntx = 0;
-
-        /* (0) coinbase */
-        int64_t subsidy = get_block_subsidy(h, &cp->consensus);
-        uint32_t cb_salt = salt++;
-        if (!prf_build_tx(&txs[ntx], NULL, 0, &subsidy, &cb_salt, 1)) { ok = false; break; }
-        struct uint256 cb_hash = txs[ntx].hash;
-        ntx++;
-
-        /* (1) cross-block spend on even heights. Guard on value >= 2 so the
-         * fee-1 output stays positive (regtest subsidy halves every 150 blocks,
-         * so high-height coins are small — a value-0 coin is left unspent, which
-         * both folds treat identically). */
-        if ((h % 2) == 0 && np > 0 && pool[np - 1].value >= 2) {
-            struct pool_coin pc = pool[np - 1]; np--;   /* spend newest-ish */
-            struct outpoint in = { .hash = pc.txid, .n = pc.vout };
-            int64_t ov = pc.value - 1;                  /* fee 1 */
-            uint32_t os = salt++;
-            if (!prf_build_tx(&txs[ntx], &in, 1, &ov, &os, 1)) { ok = false; break; }
-            ntx++;
-        }
-
-        /* (2) intra-block create-then-spend chain on every third height:
-         * tx A spends a pooled coin and creates output O; tx B (later in THIS
-         * block) spends O and creates the surviving leaf. O is created and
-         * spent within the block → net absent, exercising the intra-block
-         * create-then-spend path in both the serial builder and the join. */
-        if ((h % 3) == 0 && np > 0 && pool[np - 1].value >= 3) {
-            struct pool_coin pc = pool[np - 1]; np--;
-            struct outpoint inA = { .hash = pc.txid, .n = pc.vout };
-            int64_t oA = pc.value - 1; uint32_t sA = salt++;
-            if (!prf_build_tx(&txs[ntx], &inA, 1, &oA, &sA, 1)) { ok = false; break; }
-            struct uint256 aHash = txs[ntx].hash; ntx++;
-            struct outpoint inB = { .hash = aHash, .n = 0 };
-            int64_t oB = oA - 1; uint32_t sB = salt++;
-            if (!prf_build_tx(&txs[ntx], &inB, 1, &oB, &sB, 1)) { ok = false; break; }
-            ntx++;
-        }
+        struct uint256 cb_hash;
+        int64_t subsidy = 0;
+        if (prf_collect_block_txs(txs, &ntx, h, cp, &salt, pool, &np,
+                                  &cb_hash, &subsidy) != 0) { ok = false; break; }
 
         /* Attach txs to the block (move — the block owns them now). */
         blk->vtx = zcl_calloc(ntx, sizeof(struct transaction), "prf_vtx");
@@ -347,26 +398,8 @@ static bool build_fixture(struct fixture *fx, int n_blocks,
         for (size_t i = 0; i < ntx; i++) blk->vtx[i] = txs[i];
         blk->num_vtx = ntx;
 
-        /* Pool bookkeeping: the coinbase output is always live; every other
-         * output is live UNLESS a LATER tx in this same block spends it. */
-        if (!pool_push(&pool, &np, &cap, &cb_hash, 0, subsidy)) { ok = false; break; }
-        for (size_t ti = 1; ti < ntx && ok; ti++) {
-            struct transaction *t = &blk->vtx[ti];
-            for (size_t vo = 0; vo < t->num_vout; vo++) {
-                bool spent_here = false;
-                for (size_t tj = ti + 1; tj < ntx && !spent_here; tj++) {
-                    struct transaction *u = &blk->vtx[tj];
-                    for (size_t vi = 0; vi < u->num_vin; vi++)
-                        if (uint256_eq(&u->vin[vi].prevout.hash, &t->hash) &&
-                            u->vin[vi].prevout.n == (uint32_t)vo) {
-                            spent_here = true; break;
-                        }
-                }
-                if (!spent_here &&
-                    !pool_push(&pool, &np, &cap, &t->hash, (uint32_t)vo,
-                               t->vout[vo].value)) { ok = false; break; }
-            }
-        }
+        if (prf_pool_block_outputs(&pool, &np, &cap, blk, &cb_hash,
+                                   subsidy) != 0) { ok = false; break; }
     }
 
     free(pool);

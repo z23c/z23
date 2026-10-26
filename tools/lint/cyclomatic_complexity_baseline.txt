@@ -1832,7 +1832,6 @@ tests/harness/src/test_parallel.c:main:178
 tests/harness/src/test_parallel.c:rerun_load_flaky_groups:20
 tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:34
-tests/harness/src/test_parallel_range_fold.c:build_fixture:28
 tests/harness/src/test_params_vk_embedded.c:test_params_vk_embedded:45
 tests/harness/src/test_path_check.c:test_path_check:60
 tests/harness/src/test_payment_shutdown_owner.c:payment_shutdown_lifecycle_acceptance:25
