@@ -438,6 +438,321 @@ static int bfmhd_busy_no_action(void)
 }
 #endif
 
+static bool bfmhd_positive_gap_seen(struct bfmhd_fixture *fx, bool ok)
+{
+    struct stage_repair_body_fetch_gap gap;
+    ok = ok && stage_repair_body_fetch_missing_have_data_candidate(
+        progress_store_db(), fx->target, &gap);
+    ok = ok && gap.ready && gap.target_height == fx->target;
+    ok = ok && !row_exists(progress_store_db(), "body_fetch_log",
+                           fx->target);
+    msgprocessor_test_block_mark_seen(fx->child->phashBlock);
+    return ok && msgprocessor_test_block_already_seen(
+        fx->child->phashBlock);
+}
+
+static bool bfmhd_positive_queued_dedup(
+    struct bfmhd_fixture *fx,
+    const struct condition_runtime_snapshot *snap,
+    bool got,
+    const struct watchdog_stats *wd,
+    bool ok)
+{
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && got && snap->last_outcome == COND_REMEDY_UNWITNESSED;
+    ok = ok && queue_has_target(fx);
+    ok = ok && !msgprocessor_test_block_already_seen(
+        fx->child->phashBlock);
+    return ok && wd->last_recovery == WATCHDOG_BODY_FRONTIER_MISSING;
+}
+
+static bool bfmhd_positive_row_cleared(struct condition_runtime_snapshot *snap,
+                                       bool ok2)
+{
+    ok2 = ok2 && condition_engine_get_active_count() == 0;
+    ok2 = ok2 && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", snap);
+    return ok2 && snap->cleared_count == 1;
+}
+
+static bool bfmhd_arrival_before_queue_outcome(struct bfmhd_fixture *fx,
+                                               bool ok)
+{
+    struct watchdog_stats before;
+    struct watchdog_stats after;
+    struct condition_runtime_snapshot snap_before;
+    ok = ok && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", &snap_before);
+    sync_monitor_get_stats(&before);
+    condition_engine_tick();
+    sync_monitor_get_stats(&after);
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    struct condition_runtime_snapshot snap;
+    ok = ok && g_bfmhd_arrival_seeded;
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0 && fx->dm.queue_len == 0;
+    ok = ok && after.recoveries_total == before.recoveries_total;
+    ok = ok && msgprocessor_test_block_already_seen(
+        fx->child->phashBlock);
+    ok = ok && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", &snap);
+    return ok && snap.cleared_count == snap_before.cleared_count + 1;
+}
+
+static bool bfmhd_validate_cursor_suppressed(struct bfmhd_fixture *fx, bool ok)
+{
+    ok = ok && seed_cursor(progress_store_db(), "validate_headers",
+                           fx->target);
+    condition_engine_tick();
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok && queued == 0;
+}
+
+static bool bfmhd_validate_failed_suppressed(struct bfmhd_fixture *fx, bool ok)
+{
+    ok = ok && seed_validate_row(progress_store_db(), fx->target,
+                                 fx->child->phashBlock, 0);
+    condition_engine_tick();
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok && queued == 0;
+}
+
+static bool bfmhd_existing_body_suppressed(struct bfmhd_fixture *fx, bool ok)
+{
+    ok = ok && seed_body_row(progress_store_db(), fx->target,
+                             fx->child->phashBlock);
+    condition_engine_tick();
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    return ok && queued == 0;
+}
+
+static bool bfmhd_arrival_before_remedy_outcome(struct bfmhd_fixture *fx,
+                                                bool ok)
+{
+    struct watchdog_stats before;
+    struct watchdog_stats after;
+    struct condition_runtime_snapshot snap_before;
+    ok = ok && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", &snap_before);
+    sync_monitor_get_stats(&before);
+    condition_engine_tick();
+    sync_monitor_get_stats(&after);
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    struct condition_runtime_snapshot snap;
+    ok = ok && g_bfmhd_arrival_seeded;
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0 && fx->dm.queue_len == 0;
+    ok = ok && after.recoveries_total == before.recoveries_total;
+    ok = ok && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", &snap);
+    return ok && snap.cleared_count == snap_before.cleared_count + 1;
+}
+
+static bool bfmhd_exact_have_data_skipped(struct bfmhd_fixture *fx, bool ok)
+{
+    fx->child->nStatus |= BLOCK_HAVE_DATA;
+    condition_engine_tick();
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0;
+    return ok && strcmp(
+        body_fetch_missing_have_data_test_last_skip_reason(),
+        "exact_have_data") == 0;
+}
+
+static bool bfmhd_cursor_advance_unwitnessed(struct bfmhd_fixture *fx, bool ok)
+{
+    condition_engine_tick();
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && seed_cursor(progress_store_db(), "body_fetch",
+                           fx->target + 1);
+    condition_engine_tick();
+    ok = ok && condition_engine_get_active_count() == 1;
+    return ok && !stage_repair_body_fetch_observed(progress_store_db(),
+                                                   fx->target);
+}
+
+static bool bfmhd_canonical_stale_seeded(struct bfmhd_fixture *fx,
+                                         struct block_index *stale,
+                                         bool ok)
+{
+    ok = ok && stale && stale != fx->child;
+    return ok && seed_body_row(progress_store_db(), fx->target,
+                               stale->phashBlock);
+}
+
+static bool bfmhd_canonical_sibling_queued(
+    struct bfmhd_fixture *fx,
+    struct block_index *stale,
+    struct condition_runtime_snapshot *snap,
+    bool ok)
+{
+    ok = ok && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", snap);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && snap->last_outcome == COND_REMEDY_UNWITNESSED;
+    ok = ok && queue_has_target(fx);
+    ok = ok && uint256_eq(&fx->dm.queue[0], fx->child->phashBlock);
+    ok = ok && !uint256_eq(&fx->dm.queue[0], stale->phashBlock);
+    return ok && !msgprocessor_test_block_already_seen(
+        fx->child->phashBlock);
+}
+
+static bool bfmhd_canonical_body_witnessed(
+    struct condition_runtime_snapshot *snap,
+    int cleared_before,
+    bool ok2)
+{
+    ok2 = ok2 && condition_engine_get_active_count() == 0;
+    ok2 = ok2 && condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", snap);
+    return ok2 && snap->cleared_count == cleared_before + 1;
+}
+
+static bool bfmhd_visible_parent_mismatch_closed(struct bfmhd_fixture *fx,
+                                                 bool ok)
+{
+    fx->child->pprev = NULL; /* best-header target no longer extends H */
+    struct block_index *other = insert_sibling(
+        &fx->ms, &fx->hashes[3], fx->target, fx->tip, BLOCK_VALID_TREE);
+    ok = ok && other;
+
+    condition_engine_tick();
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0;
+    ok = ok && strcmp(
+        body_fetch_missing_have_data_test_last_skip_reason(),
+        "visible_parent_mismatch") == 0;
+    return ok && strcmp(
+        body_fetch_missing_have_data_test_last_skip_reason(),
+        "exact_have_data") != 0;
+}
+
+static bool bfmhd_durable_parent_queued(struct bfmhd_fixture *fx, bool ok)
+{
+    active_chain_free(&fx->ms.chain_active);
+    active_chain_init(&fx->ms.chain_active);
+    ok = ok && seed_trusted_parent_bfmhd(
+        progress_store_db(), fx->tip_h, fx->tip->phashBlock);
+    msgprocessor_test_block_mark_seen(fx->child->phashBlock);
+
+    condition_engine_tick();
+
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && queue_has_target(fx);
+    return ok && !msgprocessor_test_block_already_seen(
+        fx->child->phashBlock);
+}
+
+static bool bfmhd_durable_parent_mismatch_closed(struct bfmhd_fixture *fx,
+                                                 bool ok)
+{
+    active_chain_free(&fx->ms.chain_active);
+    active_chain_init(&fx->ms.chain_active);
+    ok = ok && seed_trusted_parent_bfmhd(
+        progress_store_db(), fx->tip_h, &fx->hashes[0]);
+
+    condition_engine_tick();
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0;
+    return ok && strcmp(
+        body_fetch_missing_have_data_test_last_skip_reason(),
+        "visible_parent_mismatch") == 0;
+}
+
+static bool bfmhd_best_hash_mismatch_closed(struct bfmhd_fixture *fx, bool ok)
+{
+    struct block_index *other = insert_sibling(
+        &fx->ms, &fx->hashes[3], fx->target, fx->tip, BLOCK_VALID_TREE);
+    ok = ok && other;
+    fx->ms.pindex_best_header = other;
+
+    condition_engine_tick();
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+    ok = ok && condition_engine_get_active_count() == 0;
+    ok = ok && queued == 0;
+    return ok && strcmp(
+        body_fetch_missing_have_data_test_last_skip_reason(),
+        "best_hash_mismatch") == 0;
+}
+
+static bool bfmhd_mid_chain_idle_targeted(struct bfmhd_fixture *fx, bool ok)
+{
+    fx->tip->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+    fx->tip->nFile = -1;
+    fx->tip->nDataPos = 0;
+    g_bfmhd_stub_height = fx->tip_h; /* h=1, below fx.target=2 */
+    body_fetch_missing_have_data_test_set_select_idle_stubs(
+        bfmhd_stub_select_idle_height,
+        bfmhd_stub_select_idle_is_read_failure);
+
+    condition_engine_tick();
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && queued == 1 && fx->dm.queue_len == 1;
+    ok = ok && fx->dm.queue_heights[0] == fx->tip_h;
+    return ok && uint256_eq(&fx->dm.queue[0], fx->tip->phashBlock);
+}
+
+static bool bfmhd_background_note_queued(struct bfmhd_fixture *fx, bool ok)
+{
+    fx->tip->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+    fx->tip->nFile = -1;
+    fx->tip->nDataPos = 0;
+    ok = ok && seed_body_row(
+        progress_store_db(), fx->tip_h, fx->tip->phashBlock);
+    reducer_frontier_body_read_note_record(
+        fx->tip_h, 49, 46754837, REDUCER_FRONTIER_BODY_READ_DISK,
+        fx->tip->phashBlock);
+    sync_monitor_test_set_tip_advance_ts(platform_time_wall_unix());
+
+    condition_engine_tick();
+
+    uint64_t queued = 0;
+    dl_get_stats(&fx->dm, NULL, NULL, NULL, NULL, &queued);
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && queued == 1 && fx->dm.queue_len == 1;
+    ok = ok && fx->dm.queue_heights[0] == fx->tip_h;
+    ok = ok && uint256_eq(&fx->dm.queue[0], fx->tip->phashBlock);
+    return ok && reducer_frontier_body_read_note_active();
+}
+
 int test_body_fetch_missing_have_data_condition(void)
 {
     printf("\n=== body_fetch_missing_have_data condition tests ===\n");
@@ -450,15 +765,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "positive");
-        struct stage_repair_body_fetch_gap gap;
-        ok = ok && stage_repair_body_fetch_missing_have_data_candidate(
-            progress_store_db(), fx.target, &gap);
-        ok = ok && gap.ready && gap.target_height == fx.target;
-        ok = ok && !row_exists(progress_store_db(), "body_fetch_log",
-                               fx.target);
-        msgprocessor_test_block_mark_seen(fx.child->phashBlock);
-        ok = ok && msgprocessor_test_block_already_seen(
-            fx.child->phashBlock);
+        ok = bfmhd_positive_gap_seen(&fx, ok);
 
         condition_engine_tick();
 
@@ -467,13 +774,7 @@ int test_body_fetch_missing_have_data_condition(void)
             "body_fetch_missing_have_data", &snap);
         struct watchdog_stats wd;
         sync_monitor_get_stats(&wd);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && got && snap.last_outcome == COND_REMEDY_UNWITNESSED;
-        ok = ok && queue_has_target(&fx);
-        ok = ok && !msgprocessor_test_block_already_seen(
-            fx.child->phashBlock);
-        ok = ok && wd.last_recovery == WATCHDOG_BODY_FRONTIER_MISSING;
+        ok = bfmhd_positive_queued_dedup(&fx, &snap, got, &wd, ok);
         BFMHD_CHECK("detect queues missing active-frontier body and clears "
                     "dedup",
                     ok);
@@ -481,10 +782,7 @@ int test_body_fetch_missing_have_data_condition(void)
         bool ok2 = seed_body_row(progress_store_db(), fx.target,
                                  fx.child->phashBlock);
         condition_engine_tick();
-        ok2 = ok2 && condition_engine_get_active_count() == 0;
-        ok2 = ok2 && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap);
-        ok2 = ok2 && snap.cleared_count == 1;
+        ok2 = bfmhd_positive_row_cleared(&snap, ok2);
         BFMHD_CHECK("body_fetch success row witnesses clear", ok2);
         teardown_fixture(&fx);
     }
@@ -500,28 +798,7 @@ int test_body_fetch_missing_have_data_condition(void)
             bfmhd_seed_arrival_before_remedy_queue);
         msgprocessor_test_block_mark_seen(fx.child->phashBlock);
 
-        struct watchdog_stats before;
-        struct watchdog_stats after;
-        struct condition_runtime_snapshot snap_before;
-        ok = ok && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap_before);
-        sync_monitor_get_stats(&before);
-        condition_engine_tick();
-        sync_monitor_get_stats(&after);
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        struct condition_runtime_snapshot snap;
-        ok = ok && g_bfmhd_arrival_seeded;
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0 && fx.dm.queue_len == 0;
-        ok = ok && after.recoveries_total == before.recoveries_total;
-        ok = ok && msgprocessor_test_block_already_seen(
-            fx.child->phashBlock);
-        ok = ok && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap);
-        ok = ok && snap.cleared_count == snap_before.cleared_count + 1;
+        ok = bfmhd_arrival_before_queue_outcome(&fx, ok);
         BFMHD_CHECK("body arrival after final recheck is an atomic queue "
                     "no-op without recovery", ok);
         g_bfmhd_arrival_index = NULL;
@@ -531,14 +808,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "validate_cursor_not_past");
-        ok = ok && seed_cursor(progress_store_db(), "validate_headers",
-                               fx.target);
-        condition_engine_tick();
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
+        ok = bfmhd_validate_cursor_suppressed(&fx, ok);
         BFMHD_CHECK("validate cursor not past target suppresses repair", ok);
         teardown_fixture(&fx);
     }
@@ -546,14 +816,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "validate_failed");
-        ok = ok && seed_validate_row(progress_store_db(), fx.target,
-                                     fx.child->phashBlock, 0);
-        condition_engine_tick();
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
+        ok = bfmhd_validate_failed_suppressed(&fx, ok);
         BFMHD_CHECK("failed validate row suppresses repair", ok);
         teardown_fixture(&fx);
     }
@@ -561,14 +824,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "already_observed");
-        ok = ok && seed_body_row(progress_store_db(), fx.target,
-                                 fx.child->phashBlock);
-        condition_engine_tick();
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
+        ok = bfmhd_existing_body_suppressed(&fx, ok);
         BFMHD_CHECK("existing body_fetch row suppresses repair", ok);
         teardown_fixture(&fx);
     }
@@ -582,26 +838,7 @@ int test_body_fetch_missing_have_data_condition(void)
         body_fetch_missing_have_data_test_set_before_remedy_recheck(
             bfmhd_seed_arrival_before_remedy_recheck);
 
-        struct watchdog_stats before;
-        struct watchdog_stats after;
-        struct condition_runtime_snapshot snap_before;
-        ok = ok && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap_before);
-        sync_monitor_get_stats(&before);
-        condition_engine_tick();
-        sync_monitor_get_stats(&after);
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        struct condition_runtime_snapshot snap;
-        ok = ok && g_bfmhd_arrival_seeded;
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0 && fx.dm.queue_len == 0;
-        ok = ok && after.recoveries_total == before.recoveries_total;
-        ok = ok && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap);
-        ok = ok && snap.cleared_count == snap_before.cleared_count + 1;
+        ok = bfmhd_arrival_before_remedy_outcome(&fx, ok);
         BFMHD_CHECK("body arrival between detect and remedy clears without "
                     "queue or recovery", ok);
         teardown_fixture(&fx);
@@ -610,16 +847,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "exact_have_data_reason");
-        fx.child->nStatus |= BLOCK_HAVE_DATA;
-        condition_engine_tick();
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
-        ok = ok && strcmp(
-            body_fetch_missing_have_data_test_last_skip_reason(),
-            "exact_have_data") == 0;
+        ok = bfmhd_exact_have_data_skipped(&fx, ok);
         BFMHD_CHECK("exact HAVE_DATA skip has a disjoint stable reason", ok);
         teardown_fixture(&fx);
     }
@@ -627,15 +855,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "cursor_only_not_witness");
-        condition_engine_tick();
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && seed_cursor(progress_store_db(), "body_fetch",
-                               fx.target + 1);
-        condition_engine_tick();
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && !stage_repair_body_fetch_observed(progress_store_db(),
-                                                     fx.target);
+        ok = bfmhd_cursor_advance_unwitnessed(&fx, ok);
         BFMHD_CHECK("cursor advance without row does not witness", ok);
         teardown_fixture(&fx);
     }
@@ -651,24 +871,13 @@ int test_body_fetch_missing_have_data_condition(void)
         struct block_index *stale = insert_sibling(
             &fx.ms, &fx.hashes[3], fx.target, fx.tip,
             BLOCK_VALID_TREE | BLOCK_HAVE_DATA);
-        ok = ok && stale && stale != fx.child;
-        ok = ok && seed_body_row(progress_store_db(), fx.target,
-                                 stale->phashBlock);
+        ok = bfmhd_canonical_stale_seeded(&fx, stale, ok);
         msgprocessor_test_block_mark_seen(fx.child->phashBlock);
 
         condition_engine_tick();
 
         struct condition_runtime_snapshot snap;
-        ok = ok && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && snap.last_outcome == COND_REMEDY_UNWITNESSED;
-        ok = ok && queue_has_target(&fx);
-        ok = ok && uint256_eq(&fx.dm.queue[0], fx.child->phashBlock);
-        ok = ok && !uint256_eq(&fx.dm.queue[0], stale->phashBlock);
-        ok = ok && !msgprocessor_test_block_already_seen(
-            fx.child->phashBlock);
+        ok = bfmhd_canonical_sibling_queued(&fx, stale, &snap, ok);
         int cleared_before = snap.cleared_count;
         BFMHD_CHECK("canonical validate hash queues over data-flagged stale "
                     "sibling and wrong-hash body row", ok);
@@ -676,10 +885,7 @@ int test_body_fetch_missing_have_data_condition(void)
         bool ok2 = seed_body_row(progress_store_db(), fx.target,
                                  fx.child->phashBlock);
         condition_engine_tick();
-        ok2 = ok2 && condition_engine_get_active_count() == 0;
-        ok2 = ok2 && condition_engine_get_registered_snapshot(
-            "body_fetch_missing_have_data", &snap);
-        ok2 = ok2 && snap.cleared_count == cleared_before + 1;
+        ok2 = bfmhd_canonical_body_witnessed(&snap, cleared_before, ok2);
         BFMHD_CHECK("only exact canonical body row witnesses repair", ok2);
         teardown_fixture(&fx);
     }
@@ -687,24 +893,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "canonical_parent_mismatch");
-        fx.child->pprev = NULL; /* best-header target no longer extends H */
-        struct block_index *other = insert_sibling(
-            &fx.ms, &fx.hashes[3], fx.target, fx.tip, BLOCK_VALID_TREE);
-        ok = ok && other;
-
-        condition_engine_tick();
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
-        ok = ok && strcmp(
-            body_fetch_missing_have_data_test_last_skip_reason(),
-            "visible_parent_mismatch") == 0;
-        ok = ok && strcmp(
-            body_fetch_missing_have_data_test_last_skip_reason(),
-            "exact_have_data") != 0;
+        ok = bfmhd_visible_parent_mismatch_closed(&fx, ok);
         BFMHD_CHECK("canonical target whose parent is not the visible H "
                     "fails closed instead of queueing a sibling", ok);
         teardown_fixture(&fx);
@@ -716,19 +905,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "durable_checkpoint_parent");
-        active_chain_free(&fx.ms.chain_active);
-        active_chain_init(&fx.ms.chain_active);
-        ok = ok && seed_trusted_parent_bfmhd(
-            progress_store_db(), fx.tip_h, fx.tip->phashBlock);
-        msgprocessor_test_block_mark_seen(fx.child->phashBlock);
-
-        condition_engine_tick();
-
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && queue_has_target(&fx);
-        ok = ok && !msgprocessor_test_block_already_seen(
-            fx.child->phashBlock);
+        ok = bfmhd_durable_parent_queued(&fx, ok);
         BFMHD_CHECK("durable checkpoint parent queues exact H*+1 child",
                     ok);
         teardown_fixture(&fx);
@@ -737,21 +914,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "durable_checkpoint_parent_mismatch");
-        active_chain_free(&fx.ms.chain_active);
-        active_chain_init(&fx.ms.chain_active);
-        ok = ok && seed_trusted_parent_bfmhd(
-            progress_store_db(), fx.tip_h, &fx.hashes[0]);
-
-        condition_engine_tick();
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
-        ok = ok && strcmp(
-            body_fetch_missing_have_data_test_last_skip_reason(),
-            "visible_parent_mismatch") == 0;
+        ok = bfmhd_durable_parent_mismatch_closed(&fx, ok);
         BFMHD_CHECK("mismatched durable checkpoint parent fails closed",
                     ok);
         teardown_fixture(&fx);
@@ -760,21 +923,7 @@ int test_body_fetch_missing_have_data_condition(void)
     {
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "canonical_best_hash_mismatch");
-        struct block_index *other = insert_sibling(
-            &fx.ms, &fx.hashes[3], fx.target, fx.tip, BLOCK_VALID_TREE);
-        ok = ok && other;
-        fx.ms.pindex_best_header = other;
-
-        condition_engine_tick();
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
-        ok = ok && condition_engine_get_active_count() == 0;
-        ok = ok && queued == 0;
-        ok = ok && strcmp(
-            body_fetch_missing_have_data_test_last_skip_reason(),
-            "best_hash_mismatch") == 0;
+        ok = bfmhd_best_hash_mismatch_closed(&fx, ok);
         BFMHD_CHECK("best-header hash disagreement has a disjoint stable "
                     "reason", ok);
         teardown_fixture(&fx);
@@ -790,23 +939,7 @@ int test_body_fetch_missing_have_data_condition(void)
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "mid_chain_select_idle");
 
-        fx.tip->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-        fx.tip->nFile = -1;
-        fx.tip->nDataPos = 0;
-        g_bfmhd_stub_height = fx.tip_h; /* h=1, below fx.target=2 */
-        body_fetch_missing_have_data_test_set_select_idle_stubs(
-            bfmhd_stub_select_idle_height,
-            bfmhd_stub_select_idle_is_read_failure);
-
-        condition_engine_tick();
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && queued == 1 && fx.dm.queue_len == 1;
-        ok = ok && fx.dm.queue_heights[0] == fx.tip_h;
-        ok = ok && uint256_eq(&fx.dm.queue[0], fx.tip->phashBlock);
+        ok = bfmhd_mid_chain_idle_targeted(&fx, ok);
         BFMHD_CHECK("mid-chain select-idle height (below the frontier "
                     "cursor) is targeted over the frontier candidate", ok);
 
@@ -822,26 +955,7 @@ int test_body_fetch_missing_have_data_condition(void)
         struct bfmhd_fixture fx;
         bool ok = setup_fixture(&fx, "background_read_note");
 
-        fx.tip->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-        fx.tip->nFile = -1;
-        fx.tip->nDataPos = 0;
-        ok = ok && seed_body_row(
-            progress_store_db(), fx.tip_h, fx.tip->phashBlock);
-        reducer_frontier_body_read_note_record(
-            fx.tip_h, 49, 46754837, REDUCER_FRONTIER_BODY_READ_DISK,
-            fx.tip->phashBlock);
-        sync_monitor_test_set_tip_advance_ts(platform_time_wall_unix());
-
-        condition_engine_tick();
-
-        uint64_t queued = 0;
-        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
-        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
-        ok = ok && condition_engine_get_active_count() == 1;
-        ok = ok && queued == 1 && fx.dm.queue_len == 1;
-        ok = ok && fx.dm.queue_heights[0] == fx.tip_h;
-        ok = ok && uint256_eq(&fx.dm.queue[0], fx.tip->phashBlock);
-        ok = ok && reducer_frontier_body_read_note_active();
+        ok = bfmhd_background_note_queued(&fx, ok);
         BFMHD_CHECK("explicit background-read note ignores stale fetch row "
                     "and queues exact active hash while tip advances", ok);
 
