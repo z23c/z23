@@ -76,6 +76,158 @@ static void cri_free_tx(struct transaction *tx)
     free(tx->vout);
 }
 
+/* Section 4 body, run between start(16) and stop(): one hash recorded
+ * under two kinds, then the kind-filtered lookups. */
+static int cri_kind_filter_checks(void)
+{
+    int failures = 0;
+    struct cri_entry etx = {0};
+    etx.hash = make_hash(0x33); etx.kind = CRI_KIND_TX; etx.dos = 10;
+    snprintf(etx.reason, sizeof(etx.reason), "tx-reason");
+    consensus_reject_index_record(&etx);
+
+    /* Same hash but kind=BLOCK */
+    struct cri_entry eb = {0};
+    eb.hash = make_hash(0x33); eb.kind = CRI_KIND_BLOCK; eb.dos = 50;
+    snprintf(eb.reason, sizeof(eb.reason), "block-reason");
+    consensus_reject_index_record(&eb);
+
+    struct cri_entry got;
+    struct uint256 h = make_hash(0x33);
+    enum cri_kind k_tx = CRI_KIND_TX, k_blk = CRI_KIND_BLOCK;
+
+    CRI_CHECK("cri: kind=TX filter returns tx entry",
+              consensus_reject_index_lookup(&h, &k_tx, &got).ok &&
+              strcmp(got.reason, "tx-reason") == 0);
+    CRI_CHECK("cri: kind=BLOCK filter returns block entry",
+              consensus_reject_index_lookup(&h, &k_blk, &got).ok &&
+              strcmp(got.reason, "block-reason") == 0);
+    CRI_CHECK("cri: kind=NULL returns newest (block)",
+              consensus_reject_index_lookup(&h, NULL, &got).ok &&
+              strcmp(got.reason, "block-reason") == 0);
+    return failures;
+}
+
+/* Section 5 body, run between start(16) and stop(): the same hash
+ * recorded twice; the newest record must win. */
+static int cri_newest_match_wins_checks(void)
+{
+    int failures = 0;
+    struct cri_entry e1 = {0};
+    e1.hash = make_hash(0x44); e1.kind = CRI_KIND_TX; e1.dos = 100;
+    snprintf(e1.reason, sizeof(e1.reason), "first");
+    consensus_reject_index_record(&e1);
+    struct cri_entry e2 = {0};
+    e2.hash = make_hash(0x44); e2.kind = CRI_KIND_TX; e2.dos = 10;
+    snprintf(e2.reason, sizeof(e2.reason), "second");
+    consensus_reject_index_record(&e2);
+
+    struct cri_entry got;
+    struct uint256 h = make_hash(0x44);
+    CRI_CHECK("cri: duplicate hash returns newest",
+              consensus_reject_index_lookup(&h, NULL, &got).ok &&
+              strcmp(got.reason, "second") == 0 && got.dos == 10);
+    return failures;
+}
+
+/* Section 6 body, run between start(8) and stop(): 12 records into a
+ * capacity-8 ring; the oldest four must be evicted. */
+static int cri_ring_eviction_checks(void)
+{
+    int failures = 0;
+    /* Record 12 — the first 4 should be evicted. */
+    for (int i = 0; i < 12; i++) {
+        struct cri_entry e = {0};
+        e.hash = make_hash((uint8_t)i);
+        e.kind = CRI_KIND_TX;
+        e.dos  = i;
+        snprintf(e.reason, sizeof(e.reason), "r%d", i);
+        consensus_reject_index_record(&e);
+    }
+    CRI_CHECK("cri: count saturates at capacity",
+              consensus_reject_index_count() == 8);
+    CRI_CHECK("cri: total keeps counting past capacity",
+              consensus_reject_index_total() == 12);
+
+    struct cri_entry got;
+    /* hash 0..3 should be evicted */
+    for (int i = 0; i < 4; i++) {
+        struct uint256 h = make_hash((uint8_t)i);
+        if (consensus_reject_index_lookup(&h, NULL, &got).ok) {
+            printf("cri: evicted entry %d still present... FAIL\n", i);
+            failures++;
+        }
+    }
+    /* hash 4..11 should be present */
+    for (int i = 4; i < 12; i++) {
+        struct uint256 h = make_hash((uint8_t)i);
+        if (!consensus_reject_index_lookup(&h, NULL, &got).ok ||
+            got.dos != i) {
+            printf("cri: surviving entry %d missing/wrong... FAIL\n", i);
+            failures++;
+        }
+    }
+    CRI_CHECK("cri: eviction left exactly 8 survivors (implicit above)",
+              true);
+    return failures;
+}
+
+/* Section 7 body, run between start(8) and stop(): five records, then
+ * recent() must list them newest-first. */
+static int cri_recent_newest_first_checks(void)
+{
+    int failures = 0;
+    for (int i = 0; i < 5; i++) {
+        struct cri_entry e = {0};
+        e.hash = make_hash((uint8_t)(0x80 + i));
+        e.kind = CRI_KIND_TX;
+        e.dos  = i;
+        consensus_reject_index_record(&e);
+    }
+    struct cri_entry recent[8];
+    size_t n = consensus_reject_index_recent(recent, 8);
+    CRI_CHECK("cri: recent returns 5 entries", n == 5);
+    CRI_CHECK("cri: recent[0] is newest",
+              n >= 1 && recent[0].dos == 4);
+    CRI_CHECK("cri: recent[4] is oldest",
+              n >= 5 && recent[4].dos == 0);
+    return failures;
+}
+
+/* Section 13b body, run between start(16) and stop(): dump_state_json
+ * must report running/count and a one-element recent array with the
+ * newest entry's fields intact. */
+static int cri_dump_state_shape_checks(void)
+{
+    int failures = 0;
+    struct cri_entry e = {0};
+    e.hash = make_hash(0x99);
+    e.kind = CRI_KIND_BLOCK;
+    e.dos = 42;
+    e.ts_us = 123456789;
+    snprintf(e.reason, sizeof(e.reason), "test dump reason");
+    consensus_reject_index_record(&e);
+
+    struct json_value v = {0};
+    json_set_object(&v);
+    bool ok = consensus_reject_index_dump_state_json(&v, NULL);
+    const struct json_value *running = json_get(&v, "running");
+    const struct json_value *count = json_get(&v, "count");
+    const struct json_value *recent = json_get(&v, "recent");
+    const struct json_value *first = recent ? json_at(recent, 0) : NULL;
+    bool shape_ok = ok && running && json_get_bool(running) == true &&
+                    count && json_get_int(count) == 1 &&
+                    recent && recent->type == JSON_ARR &&
+                    json_size(recent) == 1 && first &&
+                    strcmp(json_get_str(json_get(first, "kind")),
+                          "block") == 0 &&
+                    json_get_int(json_get(first, "dos")) == 42;
+    json_free(&v);
+    CRI_CHECK("cri: dump_state_json reports running/count/recent[0]",
+              shape_ok);
+    return failures;
+}
+
 int test_consensus_reject_index(void)
 {
     printf("\n=== consensus reject index ===\n");
@@ -158,110 +310,28 @@ int test_consensus_reject_index(void)
     /* ── 4. Kind filter ─────────────────────────────────────── */
     {
         ZCL_TEST_SETUP(consensus_reject_index_start(16));
-        struct cri_entry etx = {0};
-        etx.hash = make_hash(0x33); etx.kind = CRI_KIND_TX; etx.dos = 10;
-        snprintf(etx.reason, sizeof(etx.reason), "tx-reason");
-        consensus_reject_index_record(&etx);
-
-        /* Same hash but kind=BLOCK */
-        struct cri_entry eb = {0};
-        eb.hash = make_hash(0x33); eb.kind = CRI_KIND_BLOCK; eb.dos = 50;
-        snprintf(eb.reason, sizeof(eb.reason), "block-reason");
-        consensus_reject_index_record(&eb);
-
-        struct cri_entry got;
-        struct uint256 h = make_hash(0x33);
-        enum cri_kind k_tx = CRI_KIND_TX, k_blk = CRI_KIND_BLOCK;
-
-        CRI_CHECK("cri: kind=TX filter returns tx entry",
-                  consensus_reject_index_lookup(&h, &k_tx, &got).ok &&
-                  strcmp(got.reason, "tx-reason") == 0);
-        CRI_CHECK("cri: kind=BLOCK filter returns block entry",
-                  consensus_reject_index_lookup(&h, &k_blk, &got).ok &&
-                  strcmp(got.reason, "block-reason") == 0);
-        CRI_CHECK("cri: kind=NULL returns newest (block)",
-                  consensus_reject_index_lookup(&h, NULL, &got).ok &&
-                  strcmp(got.reason, "block-reason") == 0);
+        failures += cri_kind_filter_checks();
         consensus_reject_index_stop();
     }
 
     /* ── 5. Newest-match-wins when same hash recorded twice ─ */
     {
         ZCL_TEST_SETUP(consensus_reject_index_start(16));
-        struct cri_entry e1 = {0};
-        e1.hash = make_hash(0x44); e1.kind = CRI_KIND_TX; e1.dos = 100;
-        snprintf(e1.reason, sizeof(e1.reason), "first");
-        consensus_reject_index_record(&e1);
-        struct cri_entry e2 = {0};
-        e2.hash = make_hash(0x44); e2.kind = CRI_KIND_TX; e2.dos = 10;
-        snprintf(e2.reason, sizeof(e2.reason), "second");
-        consensus_reject_index_record(&e2);
-
-        struct cri_entry got;
-        struct uint256 h = make_hash(0x44);
-        CRI_CHECK("cri: duplicate hash returns newest",
-                  consensus_reject_index_lookup(&h, NULL, &got).ok &&
-                  strcmp(got.reason, "second") == 0 && got.dos == 10);
+        failures += cri_newest_match_wins_checks();
         consensus_reject_index_stop();
     }
 
     /* ── 6. Ring eviction at capacity ───────────────────────── */
     {
         ZCL_TEST_SETUP(consensus_reject_index_start(8));  /* cap=8 */
-        /* Record 12 — the first 4 should be evicted. */
-        for (int i = 0; i < 12; i++) {
-            struct cri_entry e = {0};
-            e.hash = make_hash((uint8_t)i);
-            e.kind = CRI_KIND_TX;
-            e.dos  = i;
-            snprintf(e.reason, sizeof(e.reason), "r%d", i);
-            consensus_reject_index_record(&e);
-        }
-        CRI_CHECK("cri: count saturates at capacity",
-                  consensus_reject_index_count() == 8);
-        CRI_CHECK("cri: total keeps counting past capacity",
-                  consensus_reject_index_total() == 12);
-
-        struct cri_entry got;
-        /* hash 0..3 should be evicted */
-        for (int i = 0; i < 4; i++) {
-            struct uint256 h = make_hash((uint8_t)i);
-            if (consensus_reject_index_lookup(&h, NULL, &got).ok) {
-                printf("cri: evicted entry %d still present... FAIL\n", i);
-                failures++;
-            }
-        }
-        /* hash 4..11 should be present */
-        for (int i = 4; i < 12; i++) {
-            struct uint256 h = make_hash((uint8_t)i);
-            if (!consensus_reject_index_lookup(&h, NULL, &got).ok ||
-                got.dos != i) {
-                printf("cri: surviving entry %d missing/wrong... FAIL\n", i);
-                failures++;
-            }
-        }
-        CRI_CHECK("cri: eviction left exactly 8 survivors (implicit above)",
-                  true);
+        failures += cri_ring_eviction_checks();
         consensus_reject_index_stop();
     }
 
     /* ── 7. recent() returns newest-first ───────────────────── */
     {
         ZCL_TEST_SETUP(consensus_reject_index_start(8));
-        for (int i = 0; i < 5; i++) {
-            struct cri_entry e = {0};
-            e.hash = make_hash((uint8_t)(0x80 + i));
-            e.kind = CRI_KIND_TX;
-            e.dos  = i;
-            consensus_reject_index_record(&e);
-        }
-        struct cri_entry recent[8];
-        size_t n = consensus_reject_index_recent(recent, 8);
-        CRI_CHECK("cri: recent returns 5 entries", n == 5);
-        CRI_CHECK("cri: recent[0] is newest",
-                  n >= 1 && recent[0].dos == 4);
-        CRI_CHECK("cri: recent[4] is oldest",
-                  n >= 5 && recent[4].dos == 0);
+        failures += cri_recent_newest_first_checks();
         consensus_reject_index_stop();
     }
 
@@ -396,31 +466,7 @@ int test_consensus_reject_index(void)
      * entry's fields intact. ─────────────────────────────────────────── */
     {
         ZCL_TEST_SETUP(consensus_reject_index_start(16));
-        struct cri_entry e = {0};
-        e.hash = make_hash(0x99);
-        e.kind = CRI_KIND_BLOCK;
-        e.dos = 42;
-        e.ts_us = 123456789;
-        snprintf(e.reason, sizeof(e.reason), "test dump reason");
-        consensus_reject_index_record(&e);
-
-        struct json_value v = {0};
-        json_set_object(&v);
-        bool ok = consensus_reject_index_dump_state_json(&v, NULL);
-        const struct json_value *running = json_get(&v, "running");
-        const struct json_value *count = json_get(&v, "count");
-        const struct json_value *recent = json_get(&v, "recent");
-        const struct json_value *first = recent ? json_at(recent, 0) : NULL;
-        bool shape_ok = ok && running && json_get_bool(running) == true &&
-                        count && json_get_int(count) == 1 &&
-                        recent && recent->type == JSON_ARR &&
-                        json_size(recent) == 1 && first &&
-                        strcmp(json_get_str(json_get(first, "kind")),
-                              "block") == 0 &&
-                        json_get_int(json_get(first, "dos")) == 42;
-        json_free(&v);
-        CRI_CHECK("cri: dump_state_json reports running/count/recent[0]",
-                  shape_ok);
+        failures += cri_dump_state_shape_checks();
         consensus_reject_index_stop();
     }
 

@@ -1045,7 +1045,6 @@ tests/harness/src/test_coins_kv_read_cache.c:test_coins_kv_read_cache:40
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
 tests/harness/src/test_consensus_parity.c:test_consensus_parity:18
-tests/harness/src/test_consensus_reject_index.c:test_consensus_reject_index:28
 tests/harness/src/test_consensus_state_producer_receipt.c:pr_seed_fold_rows:19
 tests/harness/src/test_consensus_state_producer_receipt.c:test_consensus_state_producer_receipt:62
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tests:45
