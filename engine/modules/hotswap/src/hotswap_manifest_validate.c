@@ -45,25 +45,33 @@ bool manifest_text_present(const char *value)
     return value && value[0] && strnlen(value, 4096) < 4096;
 }
 
-bool hotswap_manifest_v2_validate(
-    const struct zcl_hotswap_manifest_v2 *manifest,
-    char *why,
-    size_t why_sz)
-{
-    if (why && why_sz)
-        why[0] = '\0';
+/* Shared rejection for the staged checks below: record the reason in the
+ * caller-supplied why buffer (when one was given) and fail the current
+ * stage. Every stage takes the same why/why_sz pair that
+ * hotswap_manifest_v2_validate() received, so a rejection from any stage
+ * reports exactly as a rejection in the old single function did. */
 #define MANIFEST_REJECT(...) do {                                            \
         if (why) snprintf(why, why_sz, __VA_ARGS__);                         \
         return false;                                                        \
     } while (0)
-    if (!manifest)
-        MANIFEST_REJECT("missing zcl_hotswap_manifest_v2");
+
+/* Stage 1: v2 schema version and struct shape. */
+static bool hotswap_manifest_v2_schema_shape_ok(
+    const struct zcl_hotswap_manifest_v2 *manifest, char *why, size_t why_sz)
+{
     if (manifest->schema_version != ZCL_HOTSWAP_MANIFEST_SCHEMA_V2)
         MANIFEST_REJECT("manifest schema %u != %u", manifest->schema_version,
                         ZCL_HOTSWAP_MANIFEST_SCHEMA_V2);
     if (manifest->struct_size != sizeof(*manifest))
         MANIFEST_REJECT("manifest struct size %u != %zu",
                         manifest->struct_size, sizeof(*manifest));
+    return true;
+}
+
+/* Stage 2: provider class and the host ABI/capability contract. */
+static bool hotswap_manifest_v2_host_contract_ok(
+    const struct zcl_hotswap_manifest_v2 *manifest, char *why, size_t why_sz)
+{
     /* Native command leaves are the sole provider class. The V4 ABI bump makes
      * every artifact built for a retired host layout fail closed here. */
     if (!manifest_text_present(manifest->provider_id) ||
@@ -81,6 +89,15 @@ bool hotswap_manifest_v2_validate(
         MANIFEST_REJECT("missing/unsupported host capabilities: 0x%llx",
                         (unsigned long long)
                             manifest->required_host_capabilities);
+    return true;
+}
+
+/* Stage 3: build-source identity and runtime-eligible source. On success
+ * *required_probe is the probe metadata the eligible-source table demands. */
+static bool hotswap_manifest_v2_build_source_ok(
+    const struct zcl_hotswap_manifest_v2 *manifest,
+    const char **required_probe, char *why, size_t why_sz)
+{
     const char *host_source_id = zcl_build_source_id_sha256();
     if (!zcl_is_lower_hex(manifest->build_identity, 64) ||
         !zcl_is_lower_hex(host_source_id, 64) ||
@@ -89,11 +106,20 @@ bool hotswap_manifest_v2_validate(
             "build source identity mismatch: generation=%s host=%s",
             manifest->build_identity ? manifest->build_identity : "",
             host_source_id ? host_source_id : "");
-    const char *required_probe = manifest_text_present(manifest->source_identity)
+    *required_probe = manifest_text_present(manifest->source_identity)
         ? eligible_probe(manifest->source_identity) : NULL;
-    if (!required_probe)
+    if (!*required_probe)
         MANIFEST_REJECT("source is not runtime-eligible: %s",
                         manifest->source_identity ? manifest->source_identity : "");
+    return true;
+}
+
+/* Stage 4: stateless payload contract - input digest, statelessness,
+ * quiescence, mapped test/probe metadata, and the self-test hook. */
+static bool hotswap_manifest_v2_payload_contract_ok(
+    const struct zcl_hotswap_manifest_v2 *manifest,
+    const char *required_probe, char *why, size_t why_sz)
+{
     if (!zcl_is_lower_hex(manifest->input_digest, 64))
         MANIFEST_REJECT("input content SHA-256 must be 64 lowercase hex chars");
     if (!manifest->stateless || manifest->state_schema_version != 0)
@@ -108,6 +134,24 @@ bool hotswap_manifest_v2_validate(
                         manifest->probe_tools_csv, required_probe);
     if (!manifest->self_test)
         MANIFEST_REJECT("generation self-test is required");
-#undef MANIFEST_REJECT
     return true;
 }
+
+bool hotswap_manifest_v2_validate(
+    const struct zcl_hotswap_manifest_v2 *manifest,
+    char *why,
+    size_t why_sz)
+{
+    if (why && why_sz)
+        why[0] = '\0';
+    if (!manifest)
+        MANIFEST_REJECT("missing zcl_hotswap_manifest_v2");
+    const char *required_probe = NULL;
+    return hotswap_manifest_v2_schema_shape_ok(manifest, why, why_sz) &&
+           hotswap_manifest_v2_host_contract_ok(manifest, why, why_sz) &&
+           hotswap_manifest_v2_build_source_ok(manifest, &required_probe,
+                                               why, why_sz) &&
+           hotswap_manifest_v2_payload_contract_ok(manifest, required_probe,
+                                                   why, why_sz);
+}
+#undef MANIFEST_REJECT
