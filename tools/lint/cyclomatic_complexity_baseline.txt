@@ -1056,7 +1056,6 @@ engine/controllers/src/sync_controller_blocks.c:node_db_sync_connect_block_local
 engine/controllers/src/sync_controller_confirmed_spends.c:node_db_reconcile_canonical_sapling_notes:16
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/controllers/src/sync_controller_sapling_tree_persist.c:sapling_tree_persist_pair_status:19
-engine/controllers/src/sync_controller_writers.c:node_db_sync_wallet_tx_local:28
 engine/controllers/src/transaction_controller.c:rawtx_find_in_node_db:19
 engine/controllers/src/transaction_controller.c:rpc_createrawtransaction:39
 engine/controllers/src/transaction_controller.c:rpc_getrawtransaction:44

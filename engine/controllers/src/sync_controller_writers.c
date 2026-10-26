@@ -114,6 +114,152 @@ struct wallet_tx_confirmed_async_ctx {
 };
 
 
+/* wallet_output_is_owned: classify an output's script into addr_hash and
+ * report whether this wallet owns the resulting address. */
+static bool wallet_output_is_owned(const struct wallet *w,
+                                   const struct tx_out *out,
+                                   uint8_t addr_hash[20])
+{
+    bool has_addr = false;
+    enum script_type stype = classify_script(
+        out->script_pub_key.data,
+        out->script_pub_key.size,
+        addr_hash, &has_addr);
+
+    if (!has_addr)
+        return false;
+
+    /* Check ownership: P2PKH checks keys, P2SH checks scripts */
+    struct key_id kid;
+    memcpy(kid.id.data, addr_hash, 20);
+    if (stype == SCRIPT_P2PKH)
+        return keystore_have_key(&w->keystore, &kid);
+    if (stype == SCRIPT_P2SH) {
+        struct uint160 sh;
+        memcpy(sh.data, addr_hash, 20);
+        return keystore_have_cscript(&w->keystore, &sh);
+    }
+    return false;
+}
+
+/* wallet_tx_save_owned_outputs: save a db_wallet_utxo row for every output
+ * the wallet owns; clears *write_ok if any row fails to save. */
+static void wallet_tx_save_owned_outputs(struct node_db *ndb,
+                                         const struct transaction *tx,
+                                         const struct wallet *w,
+                                         int block_height,
+                                         bool *is_ours,
+                                         bool *write_ok)
+{
+    /* Track outputs that belong to us */
+    for (size_t i = 0; i < tx->num_vout; i++) {
+        const struct tx_out *out = &tx->vout[i];
+        uint8_t addr_hash[20];
+
+        if (!wallet_output_is_owned(w, out, addr_hash))
+            continue;
+
+        *is_ours = true;
+
+        struct db_wallet_utxo wu;
+        memset(&wu, 0, sizeof(wu));
+        memcpy(wu.txid, tx->hash.data, 32);
+        wu.vout = (uint32_t)i;
+        wu.value = out->value;
+        memcpy(wu.address_hash, addr_hash, 20);
+        wu.script = (uint8_t *)out->script_pub_key.data;
+        wu.script_len = out->script_pub_key.size;
+        wu.height = block_height;
+        wu.is_coinbase = (tx->num_vin == 1 &&
+            tx->vin[0].prevout.n == 0xFFFFFFFF);
+
+        if (!db_wallet_utxo_save(ndb, &wu))
+            *write_ok = false;
+    }
+}
+
+/* wallet_tx_mark_spent_inputs: debit and mark spent the inputs that spend
+ * UTXOs already recorded in wallet_utxos. */
+static void wallet_tx_mark_spent_inputs(struct node_db *ndb,
+                                        const struct transaction *tx,
+                                        int64_t *debit,
+                                        bool *from_me,
+                                        bool *is_ours,
+                                        bool *write_ok)
+{
+    /* Mark inputs that spend our UTXOs.
+     * Only mark spent if the UTXO actually exists in wallet_utxos —
+     * otherwise we'd silently set is_ours on non-wallet UTXOs. */
+    for (size_t i = 0; i < tx->num_vin; i++) {
+        struct db_wallet_utxo spent;
+        if (db_wallet_utxo_find(ndb,
+                tx->vin[i].prevout.hash.data,
+                tx->vin[i].prevout.n,
+                &spent)) {
+            *debit += spent.value;
+            *from_me = true;
+            free(spent.script);
+
+            if (!db_wallet_utxo_mark_spent(ndb,
+                    tx->vin[i].prevout.hash.data,
+                    tx->vin[i].prevout.n,
+                    tx->hash.data, (int)i)) {
+                *write_ok = false;
+            }
+            *is_ours = true;
+        }
+    }
+}
+
+/* wallet_tx_check_shielded_spends: a shielded spend whose nullifier this
+ * wallet has already spent marks the transaction as ours/from-me. */
+static void wallet_tx_check_shielded_spends(const struct wallet *w,
+                                            const struct transaction *tx,
+                                            bool *from_me,
+                                            bool *is_ours)
+{
+    /* A pure z->z/z->t transaction has no wallet-owned transparent input or
+     * output, but its Sapling nullifier still makes it a wallet transaction.
+     * The caller reserves/marks owned notes before invoking this projection. */
+    for (size_t i = 0; i < tx->num_shielded_spend && !*from_me; i++) {
+        if (wallet_sapling_nullifier_is_spent(
+                w, tx->v_shielded_spend[i].nullifier.data)) {
+            *from_me = true;
+            *is_ours = true;
+        }
+    }
+}
+
+/* wallet_tx_fill_block_fields: resolve a db_wallet_tx's block hash and
+ * time_received from the caller's block identity, falling back to the
+ * blocks projection, then to wall-clock time. */
+static void wallet_tx_fill_block_fields(struct node_db *ndb,
+                                        struct db_wallet_tx *wtx,
+                                        int block_height,
+                                        const uint8_t block_hash[32],
+                                        int64_t block_time)
+{
+    if (wtx->has_block) {
+        if (block_hash) {
+            memcpy(wtx->block_hash, block_hash, 32);
+            wtx->time_received = block_time > 0
+                ? block_time
+                : (int64_t)platform_time_wall_time_t();
+        } else {
+            struct db_block blk;
+            if (db_block_find_by_height(ndb, block_height, &blk)) {
+                memcpy(wtx->block_hash, blk.hash, 32);
+                wtx->time_received = (int64_t)blk.time;
+            } else {
+                wtx->time_received =
+                    (int64_t)platform_time_wall_time_t();
+            }
+        }
+    } else {
+        wtx->time_received = (int64_t)platform_time_wall_time_t();
+    }
+}
+
 bool node_db_sync_wallet_tx_local(struct node_db *ndb,
                                   const struct transaction *tx,
                                   const struct wallet *w,
@@ -131,82 +277,11 @@ bool node_db_sync_wallet_tx_local(struct node_db *ndb,
     bool write_ok = true;
     int64_t debit = 0;
 
-    /* Track outputs that belong to us */
-    for (size_t i = 0; i < tx->num_vout; i++) {
-        const struct tx_out *out = &tx->vout[i];
-        uint8_t addr_hash[20];
-        bool has_addr = false;
-        enum script_type stype = classify_script(
-            out->script_pub_key.data,
-            out->script_pub_key.size,
-            addr_hash, &has_addr);
-
-        if (!has_addr) continue;
-
-        /* Check ownership: P2PKH checks keys, P2SH checks scripts */
-        bool owned = false;
-        struct key_id kid;
-        memcpy(kid.id.data, addr_hash, 20);
-        if (stype == SCRIPT_P2PKH)
-            owned = keystore_have_key(&w->keystore, &kid);
-        else if (stype == SCRIPT_P2SH) {
-            struct uint160 sh;
-            memcpy(sh.data, addr_hash, 20);
-            owned = keystore_have_cscript(&w->keystore, &sh);
-        }
-        if (!owned) continue;
-
-        is_ours = true;
-
-        struct db_wallet_utxo wu;
-        memset(&wu, 0, sizeof(wu));
-        memcpy(wu.txid, tx->hash.data, 32);
-        wu.vout = (uint32_t)i;
-        wu.value = out->value;
-        memcpy(wu.address_hash, addr_hash, 20);
-        wu.script = (uint8_t *)out->script_pub_key.data;
-        wu.script_len = out->script_pub_key.size;
-        wu.height = block_height;
-        wu.is_coinbase = (tx->num_vin == 1 &&
-            tx->vin[0].prevout.n == 0xFFFFFFFF);
-
-        if (!db_wallet_utxo_save(ndb, &wu))
-            write_ok = false;
-    }
-
-    /* Mark inputs that spend our UTXOs.
-     * Only mark spent if the UTXO actually exists in wallet_utxos —
-     * otherwise we'd silently set is_ours on non-wallet UTXOs. */
-    for (size_t i = 0; i < tx->num_vin; i++) {
-        struct db_wallet_utxo spent;
-        if (db_wallet_utxo_find(ndb,
-                tx->vin[i].prevout.hash.data,
-                tx->vin[i].prevout.n,
-                &spent)) {
-            debit += spent.value;
-            from_me = true;
-            free(spent.script);
-
-            if (!db_wallet_utxo_mark_spent(ndb,
-                    tx->vin[i].prevout.hash.data,
-                    tx->vin[i].prevout.n,
-                    tx->hash.data, (int)i)) {
-                write_ok = false;
-            }
-            is_ours = true;
-        }
-    }
-
-    /* A pure z->z/z->t transaction has no wallet-owned transparent input or
-     * output, but its Sapling nullifier still makes it a wallet transaction.
-     * The caller reserves/marks owned notes before invoking this projection. */
-    for (size_t i = 0; i < tx->num_shielded_spend && !from_me; i++) {
-        if (wallet_sapling_nullifier_is_spent(
-                w, tx->v_shielded_spend[i].nullifier.data)) {
-            from_me = true;
-            is_ours = true;
-        }
-    }
+    wallet_tx_save_owned_outputs(ndb, tx, w, block_height,
+                                 &is_ours, &write_ok);
+    wallet_tx_mark_spent_inputs(ndb, tx, &debit, &from_me,
+                                &is_ours, &write_ok);
+    wallet_tx_check_shielded_spends(w, tx, &from_me, &is_ours);
 
     /* Only save the full tx if it involves our wallet */
     if (is_ours) {
@@ -220,25 +295,8 @@ bool node_db_sync_wallet_tx_local(struct node_db *ndb,
             wtx.raw_tx_len = raw_len;
             wtx.has_block = (block_height > 0);
             wtx.block_height = block_height;
-            if (wtx.has_block) {
-                if (block_hash) {
-                    memcpy(wtx.block_hash, block_hash, 32);
-                    wtx.time_received = block_time > 0
-                        ? block_time
-                        : (int64_t)platform_time_wall_time_t();
-                } else {
-                    struct db_block blk;
-                    if (db_block_find_by_height(ndb, block_height, &blk)) {
-                        memcpy(wtx.block_hash, blk.hash, 32);
-                        wtx.time_received = (int64_t)blk.time;
-                    } else {
-                        wtx.time_received =
-                            (int64_t)platform_time_wall_time_t();
-                    }
-                }
-            } else {
-                wtx.time_received = (int64_t)platform_time_wall_time_t();
-            }
+            wallet_tx_fill_block_fields(ndb, &wtx, block_height,
+                                        block_hash, block_time);
             wtx.from_me = from_me;
             if (from_me) {
                 int64_t value_out = transaction_get_value_out(tx);
