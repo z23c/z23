@@ -322,6 +322,79 @@ static void mp_le32(uint8_t b[4], uint32_t v)
 static void mp_le64(uint8_t b[8], uint64_t v)
 { for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8*i)); }
 
+/* Running sidecar-body totals accumulated while streaming coins. */
+struct mp_sidecar_stats {
+    uint64_t vouts;
+    int64_t total_supply;
+    uint32_t max_height;
+};
+
+/* Write one coin record (txid, vout, value, script_len, script, height,
+ * is_coinbase) to the sidecar body and hash the same bytes into the running
+ * body SHA3. Attempts every field write exactly like the original loop did;
+ * returns false if any write failed. */
+static bool mp_write_coin_record(FILE *out, struct sha3_256_ctx *hasher,
+                                 const uint8_t *txid, uint32_t vout,
+                                 int64_t value, const uint8_t *script,
+                                 int script_len, uint32_t height, uint8_t cb)
+{
+    bool ok = true;
+    uint8_t b[8];
+    #define MP_W(p, n) do { \
+        if (fwrite((p), 1, (n), out) != (size_t)(n)) { ok = false; break; } \
+        sha3_256_write(hasher, (const unsigned char *)(p), (n)); \
+    } while (0)
+    MP_W(txid, 32);
+    mp_le32(b, vout);              MP_W(b, 4);
+    mp_le64(b, (uint64_t)value);   MP_W(b, 8);
+    mp_le32(b, (uint32_t)(script_len > 0 ? script_len : 0)); MP_W(b, 4);
+    if (script_len > 0 && script) MP_W(script, (size_t)script_len);
+    mp_le32(b, height);            MP_W(b, 4);
+    MP_W(&cb, 1);
+    #undef MP_W
+    return ok;
+}
+
+/* Stream every coins_kv row to the sidecar body in the SAME (txid,vout)
+ * order as coins_kv_commitment, accumulating the header totals into *st.
+ * Returns 0 on success, non-zero on a prepare or record-write failure (the
+ * statement is finalized on every path that had one). */
+static int mp_stream_coin_records(sqlite3 *db, FILE *out,
+                                  struct sha3_256_ctx *hasher,
+                                  struct mp_sidecar_stats *st)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT txid, vout, value, script, height, is_coinbase "
+            "FROM coins ORDER BY txid, vout", -1, &s, NULL) != SQLITE_OK) {
+        return 1;
+    }
+    bool ok = true;
+    int rc;
+    while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) {
+        const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
+        int txid_len = sqlite3_column_bytes(s, 0);
+        if (!txid || txid_len < 32) continue;
+        uint32_t vout   = (uint32_t)sqlite3_column_int(s, 1);
+        int64_t  value  = sqlite3_column_int64(s, 2);
+        const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
+        int script_len = sqlite3_column_bytes(s, 3);
+        uint32_t height = (uint32_t)sqlite3_column_int(s, 4);
+        uint8_t cb = (uint8_t)(sqlite3_column_int(s, 5) ? 1 : 0);
+
+        if (!mp_write_coin_record(out, hasher, txid, vout, value, script,
+                                  script_len, height, cb)) {
+            ok = false;
+            break;
+        }
+        st->total_supply += value;
+        if (height > st->max_height) st->max_height = height;
+        st->vouts++;
+    }
+    sqlite3_finalize(s);
+    return ok ? 0 : 2;
+}
+
 /* Write a ZCLUTXO sidecar from the live coins_kv set, byte-for-byte the
  * format engine/entry/main.c gen_utxo_snapshot_mode emits. Streams coins in the SAME
  * (txid,vout) order as coins_kv_commitment, so the body SHA3 it computes ==
@@ -341,57 +414,20 @@ static bool mp_write_sidecar_from_coins(sqlite3 *db, const char *path,
 
     struct sha3_256_ctx hasher;
     sha3_256_init(&hasher);
-    uint64_t vouts = 0;
-    int64_t total_supply = 0;
-    uint32_t max_height = 0;
+    struct mp_sidecar_stats st = { .vouts = 0, .total_supply = 0,
+                                   .max_height = 0 };
 
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT txid, vout, value, script, height, is_coinbase "
-            "FROM coins ORDER BY txid, vout", -1, &s, NULL) != SQLITE_OK) {
+    if (mp_stream_coin_records(db, out, &hasher, &st) != 0) {
         fclose(out); return false;
     }
-    bool ok = true;
-    int rc;
-    while (ok && (rc = sqlite3_step(s)) == SQLITE_ROW) {
-        const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
-        int txid_len = sqlite3_column_bytes(s, 0);
-        if (!txid || txid_len < 32) continue;
-        uint32_t vout   = (uint32_t)sqlite3_column_int(s, 1);
-        int64_t  value  = sqlite3_column_int64(s, 2);
-        const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
-        int script_len = sqlite3_column_bytes(s, 3);
-        uint32_t height = (uint32_t)sqlite3_column_int(s, 4);
-        uint8_t cb = (uint8_t)(sqlite3_column_int(s, 5) ? 1 : 0);
-
-        uint8_t b[8];
-        #define MP_W(p, n) do { \
-            if (fwrite((p), 1, (n), out) != (size_t)(n)) { ok = false; break; } \
-            sha3_256_write(&hasher, (const unsigned char *)(p), (n)); \
-        } while (0)
-        MP_W(txid, 32);
-        mp_le32(b, vout);              MP_W(b, 4);
-        mp_le64(b, (uint64_t)value);   MP_W(b, 8);
-        mp_le32(b, (uint32_t)(script_len > 0 ? script_len : 0)); MP_W(b, 4);
-        if (script_len > 0 && script) MP_W(script, (size_t)script_len);
-        mp_le32(b, height);            MP_W(b, 4);
-        MP_W(&cb, 1);
-        #undef MP_W
-        if (!ok) break;
-        total_supply += value;
-        if (height > max_height) max_height = height;
-        vouts++;
-    }
-    sqlite3_finalize(s);
-    if (!ok) { fclose(out); return false; }
 
     sha3_256_finalize(&hasher, out_body_sha3);
 
     memcpy(header, "ZCLUTXO\x00", 8);
     mp_le32(header + 8, 1);
-    mp_le32(header + 16, max_height);
-    mp_le64(header + 24, vouts);
-    mp_le64(header + 32, (uint64_t)total_supply);
+    mp_le32(header + 16, st.max_height);
+    mp_le64(header + 24, st.vouts);
+    mp_le64(header + 32, (uint64_t)st.total_supply);
     /* anchor_block_hash[32] (header+40) left zero — informational only. */
     memcpy(header + 72, out_body_sha3, 32);
 
@@ -400,7 +436,7 @@ static bool mp_write_sidecar_from_coins(sqlite3 *db, const char *path,
         fclose(out); return false;
     }
     fclose(out);
-    if (out_vouts) *out_vouts = vouts;
+    if (out_vouts) *out_vouts = st.vouts;
     return true;
 }
 
@@ -417,24 +453,15 @@ static bool mp_reload_cb(const struct uss_record *r, void *vctx)
     return c->ok;
 }
 
-static int mp_part2_roundtrip(void)
+/* Fold the synthetic source chain into the open source db, write the
+ * sidecar from it, and run the write-side checks (original commitment,
+ * shared-encoder body SHA3, vout count). Reports the snapshot results
+ * through the out-params; returns the MP_CHECK failure count. */
+static int mp_part2_write_snapshot(sqlite3 *sdb, const char *snap_path,
+                                   uint8_t orig_commit[32],
+                                   uint64_t *snap_vouts, bool *wrote)
 {
     int failures = 0;
-    printf("\n  [part 2] SNAPSHOT ROUND-TRIP (coins_kv -> sidecar -> coins_kv)\n");
-
-    /* Source datadir: fold a synthetic chain, write a sidecar, capture the
-     * original commitment. */
-    char src_dir[256], snap_path[320];
-    test_make_tmpdir(src_dir, sizeof(src_dir), "mintproof", "p2src");
-    snprintf(snap_path, sizeof(snap_path), "%s/utxo.snap", src_dir);
-
-    progress_store_close();
-    bool src_open = progress_store_open(src_dir);
-    MP_CHECK("part2: source datadir opens", src_open);
-    if (!src_open) { test_cleanup_tmpdir(src_dir); return failures; }
-
-    sqlite3 *sdb = progress_store_db();
-    (void)coins_kv_ensure_schema(sdb);
     {
         const int N = 300;
         struct mp_lookup_ctx lc = { .max_h = N - 1 };
@@ -442,38 +469,73 @@ static int mp_part2_roundtrip(void)
         for (int h = 0; h < N; h++) {
             struct block b;
             if (mp_build_block(&b, h))
-                (void)mp_fold_block_delta(sdb, &b, (uint32_t)h, mp_lookup, &lc);
+                (void)mp_fold_block_delta(sdb, &b, (uint32_t)h,
+                                          mp_lookup, &lc);
             block_free(&b);
         }
         sqlite3_exec(sdb, "COMMIT", NULL, NULL, NULL);
     }
 
-    uint8_t orig_commit[32] = {0};
     bool got_orig = (coins_kv_commitment(sdb, orig_commit) == 0);
     int64_t orig_count = coins_kv_count(sdb);
     MP_CHECK("part2: original set commitment computed", got_orig);
 
     uint8_t body_sha3[32] = {0};
-    uint64_t snap_vouts = 0;
-    bool wrote = mp_write_sidecar_from_coins(sdb, snap_path,
-                                             body_sha3, &snap_vouts);
-    MP_CHECK("part2: sidecar written from coins_kv", wrote);
+    *wrote = mp_write_sidecar_from_coins(sdb, snap_path,
+                                         body_sha3, snap_vouts);
+    MP_CHECK("part2: sidecar written from coins_kv", *wrote);
 
     /* The sidecar body SHA3 (the loader verifies it against the header) is
      * produced by the SAME canonical encoder as coins_kv_commitment, so it
      * MUST equal the original set commitment byte-for-byte. */
     MP_CHECK("part2: sidecar body SHA3 == coins_kv_commitment (shared encoder)",
-             wrote && got_orig && memcmp(body_sha3, orig_commit, 32) == 0);
+             *wrote && got_orig && memcmp(body_sha3, orig_commit, 32) == 0);
     MP_CHECK("part2: sidecar vout count == coins_kv_count",
-             wrote && snap_vouts == (uint64_t)orig_count);
+             *wrote && *snap_vouts == (uint64_t)orig_count);
+    return failures;
+}
 
-    progress_store_close();   /* close source before opening the dest handle */
+/* Reinsert every sidecar record into a fresh isolated coins_kv and compare
+ * the reloaded set commitment against the original. Returns the MP_CHECK
+ * failure count. */
+static int mp_part2_reload_into_dst(struct uss_handle *uh,
+                                    const char *dst_dir,
+                                    const uint8_t orig_commit[32],
+                                    uint64_t snap_vouts)
+{
+    int failures = 0;
+    bool dst_open = progress_store_open(dst_dir);
+    MP_CHECK("part2: destination datadir opens", dst_open);
+    if (dst_open) {
+        sqlite3 *ddb = progress_store_db();
+        (void)coins_kv_ensure_schema(ddb);
+        struct mp_reload_ctx rc = { .db = ddb, .n = 0, .ok = true };
+        sqlite3_exec(ddb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+        int64_t emitted = uss_iter(uh, mp_reload_cb, &rc);
+        sqlite3_exec(ddb, rc.ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+        MP_CHECK("part2: every sidecar record reinserted",
+                 rc.ok && emitted == (int64_t)snap_vouts);
 
-    /* Reload the sidecar into a FRESH isolated coins_kv via the real loader,
-     * verifying the body SHA3 up-front (cold-start trust mode). */
-    char dst_dir[256];
-    test_make_tmpdir(dst_dir, sizeof(dst_dir), "mintproof", "p2dst");
+        uint8_t reload_commit[32] = {0};
+        bool got_reload = (coins_kv_commitment(ddb, reload_commit) == 0);
+        MP_CHECK("part2: reloaded set commitment == original commitment",
+                 got_reload &&
+                 memcmp(reload_commit, orig_commit, 32) == 0);
+        progress_store_close();
+    }
+    return failures;
+}
 
+/* Open the written sidecar through the real loader (verifying the body
+ * SHA3 up-front and binding the expected commitment), check the header
+ * count, then reload it into the destination datadir. Returns the MP_CHECK
+ * failure count. */
+static int mp_part2_reload_snapshot(const char *snap_path,
+                                    const char *dst_dir, bool wrote,
+                                    const uint8_t orig_commit[32],
+                                    uint64_t snap_vouts)
+{
+    int failures = 0;
     struct uss_header hdr;
     memset(&hdr, 0, sizeof(hdr));
     char err[256] = {0};
@@ -486,31 +548,18 @@ static int mp_part2_roundtrip(void)
     if (uh) {
         MP_CHECK("part2: loader header count == written vouts",
                  hdr.count == snap_vouts);
-
-        bool dst_open = progress_store_open(dst_dir);
-        MP_CHECK("part2: destination datadir opens", dst_open);
-        if (dst_open) {
-            sqlite3 *ddb = progress_store_db();
-            (void)coins_kv_ensure_schema(ddb);
-            struct mp_reload_ctx rc = { .db = ddb, .n = 0, .ok = true };
-            sqlite3_exec(ddb, "BEGIN IMMEDIATE", NULL, NULL, NULL);
-            int64_t emitted = uss_iter(uh, mp_reload_cb, &rc);
-            sqlite3_exec(ddb, rc.ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
-            MP_CHECK("part2: every sidecar record reinserted",
-                     rc.ok && emitted == (int64_t)snap_vouts);
-
-            uint8_t reload_commit[32] = {0};
-            bool got_reload = (coins_kv_commitment(ddb, reload_commit) == 0);
-            MP_CHECK("part2: reloaded set commitment == original commitment",
-                     got_reload &&
-                     memcmp(reload_commit, orig_commit, 32) == 0);
-            progress_store_close();
-        }
+        failures += mp_part2_reload_into_dst(uh, dst_dir, orig_commit,
+                                             snap_vouts);
         uss_close(uh);
     }
+    return failures;
+}
 
-    /* Negative control: a one-byte body corruption MUST be caught by the
-     * loader's full-body SHA3 verify (proves the round-trip check has teeth). */
+/* Negative control: a one-byte body corruption MUST be caught by the
+ * loader's full-body SHA3 verify (proves the round-trip check has teeth). */
+static int mp_part2_corrupted_body_control(const char *snap_path, bool wrote)
+{
+    int failures = 0;
     if (wrote) {
         FILE *f = fopen(snap_path, "r+b");
         bool flipped = false;
@@ -534,6 +583,44 @@ static int mp_part2_roundtrip(void)
                  flipped && bad == NULL);
         if (bad) uss_close(bad);
     }
+    return failures;
+}
+
+static int mp_part2_roundtrip(void)
+{
+    int failures = 0;
+    printf("\n  [part 2] SNAPSHOT ROUND-TRIP (coins_kv -> sidecar -> coins_kv)\n");
+
+    /* Source datadir: fold a synthetic chain, write a sidecar, capture the
+     * original commitment. */
+    char src_dir[256], snap_path[320];
+    test_make_tmpdir(src_dir, sizeof(src_dir), "mintproof", "p2src");
+    snprintf(snap_path, sizeof(snap_path), "%s/utxo.snap", src_dir);
+
+    progress_store_close();
+    bool src_open = progress_store_open(src_dir);
+    MP_CHECK("part2: source datadir opens", src_open);
+    if (!src_open) { test_cleanup_tmpdir(src_dir); return failures; }
+
+    sqlite3 *sdb = progress_store_db();
+    (void)coins_kv_ensure_schema(sdb);
+
+    uint8_t orig_commit[32] = {0};
+    uint64_t snap_vouts = 0;
+    bool wrote = false;
+    failures += mp_part2_write_snapshot(sdb, snap_path, orig_commit,
+                                        &snap_vouts, &wrote);
+
+    progress_store_close();   /* close source before opening the dest handle */
+
+    /* Reload the sidecar into a FRESH isolated coins_kv via the real loader,
+     * verifying the body SHA3 up-front (cold-start trust mode). */
+    char dst_dir[256];
+    test_make_tmpdir(dst_dir, sizeof(dst_dir), "mintproof", "p2dst");
+
+    failures += mp_part2_reload_snapshot(snap_path, dst_dir, wrote,
+                                         orig_commit, snap_vouts);
+    failures += mp_part2_corrupted_body_control(snap_path, wrote);
 
     test_cleanup_tmpdir(src_dir);
     test_cleanup_tmpdir(dst_dir);
@@ -649,6 +736,76 @@ static long mp_copy_prefix(const char *src, const char *dst, long max_bytes)
     return total;
 }
 
+/* Read the whole isolated block copy into memory; returns the buffer
+ * (caller frees) or NULL. *fsize_out receives the size seen on disk (0 if
+ * the file could not be opened). */
+static uint8_t *mp_read_blk_copy(const char *path, long *fsize_out)
+{
+    long fsize = 0;
+    uint8_t *fdata = NULL;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END); fsize = ftell(f); fseek(f, 0, SEEK_SET);
+        if (fsize > 0) {
+            fdata = zcl_malloc((size_t)fsize, "mp_blk_copy");
+            if (fdata && fread(fdata, 1, (size_t)fsize, f) != (size_t)fsize) {
+                free(fdata); fdata = NULL;
+            }
+        }
+        fclose(f);
+    }
+    *fsize_out = fsize;
+    return fdata;
+}
+
+/* Time one window-capped fold of the real-block copy inside a single
+ * transaction, then check the folded set is commitable. Reports the
+ * measured rate and folded-block count through the out-params; returns the
+ * MP_CHECK failure count. */
+static int mp_part3_fold_window(sqlite3 *db, const uint8_t *fdata,
+                                size_t fsize, struct mp_foldrate_ctx *fc,
+                                double *blocks_per_sec,
+                                int64_t *folded_blocks)
+{
+    int failures = 0;
+    /* Cap the walk at WINDOW blocks via the visitor; early blocks are
+     * tiny, so 96 MB holds far more. */
+    const int64_t WINDOW = 1000;
+
+    char *err = NULL;
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err);
+    if (err) sqlite3_free(err);
+
+    double t0 = mp_now_sec();
+    /* The walker stops early when the visitor returns false; the wrapper
+     * stops once WINDOW blocks are folded. */
+    g_mp_window_cap = WINDOW;
+    (void)legacy_import_walk_block_file(fdata, fsize,
+                                        mp_capped_visitor, fc);
+    double t1 = mp_now_sec();
+
+    sqlite3_exec(db, fc->ok ? "COMMIT" : "ROLLBACK", NULL, NULL, &err);
+    if (err) sqlite3_free(err);
+
+    *folded_blocks = fc->blocks;
+    double elapsed = t1 - t0;
+    if (elapsed > 0 && *folded_blocks > 0)
+        *blocks_per_sec = (double)*folded_blocks / elapsed;
+
+    printf("    folded %" PRId64 " real blocks (%" PRId64 " txs, "
+           "%" PRId64 " outputs added, %" PRId64 " inputs spent) in "
+           "%.3f s\n",
+           *folded_blocks, fc->txs, fc->outputs_added, fc->inputs_spent,
+           elapsed);
+
+    /* The fold must have produced a non-empty, commitable set. */
+    uint8_t commit[32] = {0};
+    bool got = (coins_kv_commitment(db, commit) == 0);
+    MP_CHECK("part3: real-block fold produced a commitable coins set",
+             got && fc->ok && *folded_blocks > 0);
+    return failures;
+}
+
 static int mp_part3_foldrate(void)
 {
     int failures = 0;
@@ -685,20 +842,7 @@ static int mp_part3_foldrate(void)
 
     /* Read the private copy into memory. */
     long fsize = 0;
-    uint8_t *fdata = NULL;
-    {
-        FILE *f = fopen(dat_copy, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); fsize = ftell(f); fseek(f, 0, SEEK_SET);
-            if (fsize > 0) {
-                fdata = zcl_malloc((size_t)fsize, "mp_blk_copy");
-                if (fdata && fread(fdata, 1, (size_t)fsize, f) != (size_t)fsize) {
-                    free(fdata); fdata = NULL;
-                }
-            }
-            fclose(f);
-        }
-    }
+    uint8_t *fdata = mp_read_blk_copy(dat_copy, &fsize);
     MP_CHECK("part3: block copy loaded into memory", fdata != NULL);
 
     double blocks_per_sec = 0.0;
@@ -706,41 +850,8 @@ static int mp_part3_foldrate(void)
     struct mp_foldrate_ctx fc = { .db = db, .ok = true };
 
     if (fdata) {
-        /* Cap the walk at WINDOW blocks via the visitor; early blocks are
-         * tiny, so 96 MB holds far more. */
-        const int64_t WINDOW = 1000;
-
-        char *err = NULL;
-        sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        double t0 = mp_now_sec();
-        /* The walker stops early when the visitor returns false; the wrapper
-         * stops once WINDOW blocks are folded. */
-        g_mp_window_cap = WINDOW;
-        (void)legacy_import_walk_block_file(fdata, (size_t)fsize,
-                                            mp_capped_visitor, &fc);
-        double t1 = mp_now_sec();
-
-        sqlite3_exec(db, fc.ok ? "COMMIT" : "ROLLBACK", NULL, NULL, &err);
-        if (err) sqlite3_free(err);
-
-        folded_blocks = fc.blocks;
-        double elapsed = t1 - t0;
-        if (elapsed > 0 && folded_blocks > 0)
-            blocks_per_sec = (double)folded_blocks / elapsed;
-
-        printf("    folded %" PRId64 " real blocks (%" PRId64 " txs, "
-               "%" PRId64 " outputs added, %" PRId64 " inputs spent) in "
-               "%.3f s\n",
-               folded_blocks, fc.txs, fc.outputs_added, fc.inputs_spent,
-               elapsed);
-
-        /* The fold must have produced a non-empty, commitable set. */
-        uint8_t commit[32] = {0};
-        bool got = (coins_kv_commitment(db, commit) == 0);
-        MP_CHECK("part3: real-block fold produced a commitable coins set",
-                 got && fc.ok && folded_blocks > 0);
+        failures += mp_part3_fold_window(db, fdata, (size_t)fsize, &fc,
+                                         &blocks_per_sec, &folded_blocks);
     }
     free(fdata);
 
