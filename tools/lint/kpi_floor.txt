@@ -22,11 +22,11 @@
 #
 # Show the rows behind a number: `build/bin/z23 code kpi --group=<cmd|code|docs>`.
 cmd.help_pct 10000
-cmd.ready_pct 9700
-cmd.tested 565
-code.shell_scripts 388
+cmd.ready_pct 9705
+cmd.tested 573
+code.shell_scripts 379
 code.size_debt 19
 determinism_debt 4
 docs.orphans 15
 duplicate_candidates 1848
-untested_invariants 894
+untested_invariants 890
