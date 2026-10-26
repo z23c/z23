@@ -64,7 +64,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "zotp: invalid arguments (digits 6..9)\n");
             return 1;
         }
-        printf("%s\n", out);
+        if (printf("%s\n", out) < 0) goto output_error;
     }
+    if (count > 0 && (fflush(stdout) != 0 || ferror(stdout)))
+        goto output_error;
     return 0;
+
+output_error:
+    fputs("zotp: output write failed\n", stderr);
+    return 1;
 }

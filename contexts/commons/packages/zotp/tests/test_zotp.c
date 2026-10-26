@@ -12,11 +12,14 @@
 #include <string.h>
 
 static FILE *cli_sink;
+#undef stdout
+#define stdout cli_sink
 #define printf(...) fprintf(cli_sink, __VA_ARGS__)
 #define main zotp_cli_main
 #include "../app/main.c"
 #undef main
 #undef printf
+#undef stdout
 
 static int failures = 0;
 
@@ -190,8 +193,51 @@ static void test_cli_args(void)
     CHECK(parse_decimal(maximum, UINT_MAX, &parsed) && parsed == UINT_MAX);
 }
 
+static int cli_output_failure(bool buffered, char *count, int status)
+{
+#if defined(__linux__)
+    FILE *output = fopen(buffered ? "/dev/full" : "/dev/null", buffered ? "w" : "r");
+#elif defined(_WIN32)
+    (void)buffered;
+    FILE *output = fopen("NUL", "r");
+#else
+    (void)buffered;
+    FILE *output = fopen("/dev/null", "r");
+#endif
+    if (!output) return 1;
+    char buffer[4096];
+    if (buffered && setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) {
+        fclose(output);
+        return 1;
+    }
+    cli_sink = output;
+    char *args[] = {"zotp", "12345678901234567890", "0", count, NULL};
+    int bad = zotp_cli_main(4, args) != status;
+    if (status == 1 && !ferror(output)) bad = 1;
+    if (buffered) (void)fclose(output);
+    else if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static void test_cli_output(void)
+{
+    CHECK(cli_output_failure(false, "1", 1) == 0);
+    CHECK(cli_output_failure(false, "3", 1) == 0);
+    CHECK(cli_output_failure(false, "0", 0) == 0);
+#if defined(__linux__)
+    CHECK(cli_output_failure(true, "1", 1) == 0);
+    CHECK(cli_output_failure(true, "3", 1) == 0);
+    CHECK(cli_output_failure(true, "0", 0) == 0);
+#endif
+    char *args[] = {"zotp", "12345678901234567890", "0", "3", NULL};
+    CHECK(cli_case(4, args, 0, "755224\n287082\n359152\n") == 0);
+    args[3] = "0";
+    CHECK(cli_case(4, args, 0, "") == 0);
+}
+
 int main(void)
 {
+    test_cli_output();
     test_cli_args();
     test_hmac_sha1_rfc2202();
     test_hotp_rfc4226_table();
