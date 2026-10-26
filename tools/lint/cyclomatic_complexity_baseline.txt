@@ -1336,7 +1336,6 @@ tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
 tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
-tests/harness/src/test_validate_headers_stage.c:test_validate_headers_stage:59
 tests/harness/src/test_validation.c:test_validation:249
 tests/harness/src/test_vcs_core.c:t_manifest_stat_cache_identity:45
 tests/harness/src/test_vcs_core.c:t_package_manifest:20

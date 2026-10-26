@@ -509,15 +509,10 @@ static int vh_recheck_fault_throttle_invariant(void)
     return failures;
 }
 
-int test_validate_headers_stage(void);
-int test_validate_headers_stage(void)
-{
-    printf("\n=== validate_headers_stage tests ===\n");
-    int failures = 0;
-
-    blocker_module_init();
-
     /* ── happy: 5 blocks, all pass under stub ──────────────────────── */
+static int vh_check_happy_drain(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("happy: setup",
@@ -560,8 +555,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── batched: two full batches plus one partial ────────────────── */
+static int vh_check_batched_advance(void)
+{
+    int failures = 0;
     {
         const int batch_total = 2 * VH_BATCH_SIZE + 4;
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
@@ -592,8 +592,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── header_admit floor: validate stays at or below S-2 cursor ── */
+static int vh_check_admit_floor(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("floor: setup",
@@ -629,8 +634,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── injected failure: stub returns false at height=3 ──────────── */
+static int vh_check_injected_failure(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -676,8 +686,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── stale failures never starve the live frontier ─────────────── */
+static int vh_check_frontier_priority(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -731,8 +746,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── default validator must not require a body file ────────────── */
+static int vh_check_index_header_source(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("index-header: setup default validator",
@@ -763,8 +783,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── default validator loads persisted solution, not block body ── */
+static int vh_check_persisted_solution_source(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct block_tree_db btdb;
@@ -818,8 +843,13 @@ int test_validate_headers_stage(void)
             block_tree_db_close(&btdb);
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── Item 2: node.db solution loader bounds (case c) ───────────── */
+static int vh_check_node_db_loader_bounds(void)
+{
+    int failures = 0;
     {
         struct node_db ndb;
         VH_CHECK("loader: db opens",
@@ -922,6 +952,8 @@ int test_validate_headers_stage(void)
 
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── Item 2: validator fallback loads from node.db (case a) ────── *
      * block_index solution empty, persisted index absent, BUT node.db
@@ -930,6 +962,9 @@ int test_validate_headers_stage(void)
      * verdict is a real PoW/Equihash result, never the backfill reason
      * and never "no-header-solution". (A synthetic 1344B zero blob will
      * fail Equihash, which is exactly correct: no false pass.) */
+static int vh_check_node_db_fallback(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -973,8 +1008,13 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── full node.db header source wins over stale block_index fields ─ */
+static int vh_check_node_db_header_source(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1028,6 +1068,8 @@ int test_validate_headers_stage(void)
         node_db_close(&ndb);
         chain_params_select(CHAIN_MAIN);
     }
+    return failures;
+}
 
     /* ── wrong-epoch solution size must be PINNED, not self-verified ──
      * The Equihash verify derives (n,k) FROM the solution size, so an
@@ -1037,6 +1079,9 @@ int test_validate_headers_stage(void)
      * path even though every peer-facing accept path rejects it — the
      * exact asymmetry the epoch pin closes. Asserts the pin's distinct
      * reject reason fires BEFORE the Equihash verdict. */
+static int vh_check_epoch_pin_size(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1084,8 +1129,13 @@ int test_validate_headers_stage(void)
         node_db_close(&ndb);
         chain_params_select(CHAIN_MAIN);
     }
+    return failures;
+}
 
     /* ── disk block source covers stale / empty SQL header sources ───── */
+static int vh_check_disk_block_source(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1134,12 +1184,17 @@ int test_validate_headers_stage(void)
         node_db_close(&ndb);
         chain_params_select(CHAIN_MAIN);
     }
+    return failures;
+}
 
     /* ── Item 2: node.db ALSO empty → fail with backfill reason (b) ── *
      * The 675K residual rows. block_index empty, persisted index empty,
      * node.db has no solution at this height → the validator MUST fail
      * with the distinct backfill reason. Proves there is NO false-pass on
      * a header lacking a real, verified solution. */
+static int vh_check_residual_backfill(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1169,8 +1224,13 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── repair-header row feeds validation before node.db fallback ───── */
+static int vh_check_repair_header_source(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1204,6 +1264,8 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── W1 T1: resolver covers the frontier from header_solution_repair
      *           with an EMPTY node.db, via a DIRECT validator call ──────
@@ -1214,6 +1276,9 @@ int test_validate_headers_stage(void)
      * pre-PoW marker) — proving the repair bytes reached identical
      * verification. The synthetic 32B solution is non-PoW so it correctly
      * fails check_equihash_solution: a real verdict, never a false pass. */
+static int vh_check_resolver_direct(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1240,6 +1305,8 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── W1 T2: no-false-pass — empty node.db AND empty repair table ────
      * Direct validator call. With no source holding a solution, every
@@ -1247,6 +1314,9 @@ int test_validate_headers_stage(void)
      * verdict is the distinct backfill reason — never a false pass. This
      * pins that the new first branch falls through cleanly on a missing
      * repair row. */
+static int vh_check_resolver_no_false_pass(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1269,6 +1339,8 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── W1 T3: precedence — repair row consulted FIRST, still PoW-verified
      * Seed BOTH a header_solution_repair row AND a node.db solution at the
@@ -1276,6 +1348,9 @@ int test_validate_headers_stage(void)
      * still funnel through validate_header_fields, so the verdict is a real
      * PoW/Equihash result (reason NOT a pre-PoW marker). Both sources
      * hash-bind to bi->phashBlock, so the verdict is source-independent. */
+static int vh_check_resolver_precedence(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct node_db ndb;
@@ -1306,6 +1381,8 @@ int test_validate_headers_stage(void)
         vh_teardown(dir, &ms, &sc);
         node_db_close(&ndb);
     }
+    return failures;
+}
 
     /* ── W1 T4: the recheck path REACHES + VALIDATES the frontier whose
      *           height is ABOVE the finalized active-chain window tip ─────
@@ -1327,6 +1404,9 @@ int test_validate_headers_stage(void)
      * non-PoW, so it correctly fails Equihash — a real verdict, never a
      * false pass). The load-bearing point is that the frontier was REACHED
      * at all (no longer JOB_IDLE / no longer the backfill marker). */
+static int vh_check_frontier_reach(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         const int N = 4;   /* frontier height; window tip will be N-1 */
@@ -1384,8 +1464,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── persisted failures are rechecked after restart ────────────── */
+static int vh_check_persisted_recheck_restart(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -1436,6 +1521,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── unresolved solutionless rows back off without fake advances ─────
      * C3 measured the validate cursor already at peer tip while the failed-row
@@ -1445,6 +1532,9 @@ int test_validate_headers_stage(void)
      * Readiness is the hash-bound repair row (or canonical in-index solution):
      * before it exists, repeated polls are IDLE and do not call the validator;
      * after it lands, exactly one unchanged validation advances the row. */
+static int vh_check_unresolved_backoff(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -1484,8 +1574,13 @@ int test_validate_headers_stage(void)
                  log_row_at(progress_store_db(), 1, &ok, NULL, 0) && ok == 1);
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── terminal persisted failures are not retried after restart ───── */
+static int vh_check_terminal_recheck_restart(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -1521,8 +1616,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── replay across reopen: cursor + log persist ────────────────── */
+static int vh_check_replay_reopen(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("replay: setup",
@@ -1557,8 +1657,13 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── authoritative path marks successful headers valid ─────────── */
+static int vh_check_authoritative_valid(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("auth: setup",
@@ -1577,6 +1682,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── mark-failure → typed blocker, no storm (deliverable a) ──────────
      * The live 18,440-WARN/5min storm: the validator PASSES a header but the
@@ -1586,6 +1693,9 @@ int test_validate_headers_stage(void)
      * the mask must NOT be cleared; instead the stage raises ONE typed blocker,
      * emits exactly ONE WARN per streak, and backs off JOB_IDLE — the cursor
      * holds, never a hot loop. */
+static int vh_check_mark_failure_storm(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("mark-storm: setup",
@@ -1620,6 +1730,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── repairable stale FAILED mask clears on recheck (deliverable b) ──
      * A header fails solutionless (ok=0, the repairable class), THEN its
@@ -1629,6 +1741,9 @@ int test_validate_headers_stage(void)
      * mark the header valid, and flip the log row to ok=1 — cursor/floor
      * advances. The mask leaves FAILED ONLY because the unchanged validator
      * passed (E13-neutral). */
+static int vh_check_mark_repair_clears(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -1675,16 +1790,26 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── pre-init guards ───────────────────────────────────────────── */
+static int vh_check_pre_init_guards(void)
+{
+    int failures = 0;
     {
         VH_CHECK("guard: step_once with no init returns IDLE",
                  validate_headers_stage_step_once() == JOB_IDLE);
         VH_CHECK("guard: init(NULL) rejected",
                  !validate_headers_stage_init(NULL));
     }
+    return failures;
+}
 
     /* ── dump_state_json shape ─────────────────────────────────────── */
+static int vh_check_dump_state_json(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("dump: setup",
@@ -1720,6 +1845,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── stale-floor clamp: ancient solutionless rows never starve the
      *    cursor-frontier recheck ─────────────────────────────────────────
@@ -1732,6 +1859,9 @@ int test_validate_headers_stage(void)
      * The fix clamps the recheck scan floor up to the live pipeline frontier
      * = min(tip_finalize_cursor, body_fetch_cursor), excluding the ancient rows
      * so the recheck reaches and flips the frontier. */
+static int vh_check_stale_floor_clamp(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         /* Validator passes everything it is ASKED to re-validate, so the only
@@ -1813,6 +1943,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── stale high recheck floor: live frontier wins downward too ───────
      * Regression for the soak-lane wedge at 3169601: the in-process
@@ -1822,6 +1954,9 @@ int test_validate_headers_stage(void)
      * start=validated_cursor and never looked back. The durable executable
      * frontier must lower that stale in-memory floor as well as raise ancient
      * floors. */
+static int vh_check_stale_high_floor(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("stale-high-floor: setup",
@@ -1866,6 +2001,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── Task A #12: hash-mismatch recheck row with no repair pins the floor ──
      * A "header-source-hash-mismatch" failed row whose repair table entry is
@@ -1876,6 +2013,9 @@ int test_validate_headers_stage(void)
      * unrepaired. The floor must instead pin AT that unresolved height.
      * Constructed with tip_finalize/body_fetch cursors at 0 so the durable-
      * frontier anchor does not mask the in-process floor (frontier<=0 path). */
+static int vh_check_recheck_floor_pin(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("recheck-floor-pin: setup",
@@ -1911,6 +2051,8 @@ int test_validate_headers_stage(void)
 
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* ── Gap C: on-demand single-header pass-record (the instant-on seam) ───
      * validate_headers_stage_ensure_pass_record resolves the header at a height,
@@ -1919,6 +2061,9 @@ int test_validate_headers_stage(void)
      * headers-first (--importblockindex) substrate the checkpoint-header pass
      * record the -4 header-bootstrap bind needs, without running the whole
      * forward stage. */
+static int vh_check_ensure_pass_record(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("ensure-pass: setup",
@@ -1956,9 +2101,14 @@ int test_validate_headers_stage(void)
         validate_headers_ensure_set_validator_for_test(NULL, NULL);
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* A FAILING validator (wrong-block / PoW-invalid header) writes NO pass
      * record and returns false — the header-bootstrap bind then still refuses. */
+static int vh_check_ensure_pass_failure(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         struct fail_at_ctx ctx;
@@ -1978,10 +2128,15 @@ int test_validate_headers_stage(void)
         validate_headers_ensure_set_validator_for_test(NULL, NULL);
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* A fresh-genesis reset can lower pindex_best_header while the imported
      * checkpoint header remains in the map. The baked height+hash may recover
      * that header, but no arbitrary height may use the fallback. */
+static int vh_check_ensure_map_fallback(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_vh sc;
         VH_CHECK("ensure-map-fallback: setup",
@@ -2018,6 +2173,8 @@ int test_validate_headers_stage(void)
         validate_headers_ensure_set_validator_for_test(NULL, NULL);
         vh_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
     /* Genesis exemption: the loader's synthetic genesis entry (inserted on
      * an empty index with nVersion=0 and no solution — block_index_loader.c)
@@ -2026,6 +2183,9 @@ int test_validate_headers_stage(void)
      * fail version-too-low. Regression for the 2026-07-27 wipe-to-tip
      * reducer wedge (validate_headers terminal-failed h=0, proof_validate
      * dead-waited, H*=0 forever). */
+static int vh_check_genesis_exemption(void)
+{
+    int failures = 0;
     {
         const struct chain_params *cp = chain_params_get();
         VH_CHECK("genesis-exempt: chain params available", cp != NULL);
@@ -2050,7 +2210,51 @@ int test_validate_headers_stage(void)
                                                      sizeof(reason), NULL) &&
                      strcmp(reason, "version-too-low") == 0);
     }
+    return failures;
+}
 
+int test_validate_headers_stage(void);
+int test_validate_headers_stage(void)
+{
+    printf("\n=== validate_headers_stage tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+
+    failures += vh_check_happy_drain();
+    failures += vh_check_batched_advance();
+    failures += vh_check_admit_floor();
+    failures += vh_check_injected_failure();
+    failures += vh_check_frontier_priority();
+    failures += vh_check_index_header_source();
+    failures += vh_check_persisted_solution_source();
+    failures += vh_check_node_db_loader_bounds();
+    failures += vh_check_node_db_fallback();
+    failures += vh_check_node_db_header_source();
+    failures += vh_check_epoch_pin_size();
+    failures += vh_check_disk_block_source();
+    failures += vh_check_residual_backfill();
+    failures += vh_check_repair_header_source();
+    failures += vh_check_resolver_direct();
+    failures += vh_check_resolver_no_false_pass();
+    failures += vh_check_resolver_precedence();
+    failures += vh_check_frontier_reach();
+    failures += vh_check_persisted_recheck_restart();
+    failures += vh_check_unresolved_backoff();
+    failures += vh_check_terminal_recheck_restart();
+    failures += vh_check_replay_reopen();
+    failures += vh_check_authoritative_valid();
+    failures += vh_check_mark_failure_storm();
+    failures += vh_check_mark_repair_clears();
+    failures += vh_check_pre_init_guards();
+    failures += vh_check_dump_state_json();
+    failures += vh_check_stale_floor_clamp();
+    failures += vh_check_stale_high_floor();
+    failures += vh_check_recheck_floor_pin();
+    failures += vh_check_ensure_pass_record();
+    failures += vh_check_ensure_pass_failure();
+    failures += vh_check_ensure_map_fallback();
+    failures += vh_check_genesis_exemption();
     failures += vh_recheck_fault_throttle_invariant();
 
     printf("validate_headers_stage: %d failures\n", failures);
