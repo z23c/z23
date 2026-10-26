@@ -262,20 +262,13 @@ out:
     return ok;
 }
 
-/* P2 helper: scan Z23's own object files (not the linked blob) for undefined
- * references to TLS-client or trust-store entry points. Returns the number of
- * offending references, or -1 if the scan cannot be trusted. *scanned
- * receives the number of object files examined, so an empty build epoch
- * cannot read as a pass. */
-static long cj_count_trust_store_refs(char *where, size_t where_n,
-                                      long *scanned)
+static bool cj_find_newest_epoch_root(char *root, size_t root_n)
 {
     static const char *const roots[] = {
         "build/test-obj/epochs",
         "build/test-rel-obj/epochs",
         "build/node-obj/epochs",
     };
-    char root[512] = {0};
     time_t newest = 0;
     bool found = false;
 
@@ -296,12 +289,43 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
                 continue;
             if (!found || st.st_mtime > newest) {
                 newest = st.st_mtime;
-                snprintf(root, sizeof(root), "%s", cand);
+                snprintf(root, root_n, "%s", cand);
                 found = true;
             }
         }
         closedir(d);
     }
+    return found;
+}
+
+static int cj_append_trust_store_alternation(char *cmd, size_t cmd_n, int n)
+{
+    for (size_t i = 0;
+         i < sizeof(kTrustStoreSymbols) / sizeof(kTrustStoreSymbols[0]); i++) {
+        int w = snprintf(cmd + n, cmd_n - (size_t)n, "%s%s",
+                         i ? "|" : "", kTrustStoreSymbols[i]);
+        if (w < 0 || (size_t)(n + w) >= cmd_n)
+            return -1;
+        n += w;
+    }
+    {
+        int w = snprintf(cmd + n, cmd_n - (size_t)n, ")'");
+        if (w < 0 || (size_t)(n + w) >= cmd_n)
+            return -1;
+    }
+    return n;
+}
+
+/* P2 helper: scan Z23's own object files (not the linked blob) for undefined
+ * references to TLS-client or trust-store entry points. Returns the number of
+ * offending references, or -1 if the scan cannot be trusted. *scanned
+ * receives the number of object files examined, so an empty build epoch
+ * cannot read as a pass. */
+static long cj_count_trust_store_refs(char *where, size_t where_n,
+                                      long *scanned)
+{
+    char root[512] = {0};
+    bool found = cj_find_newest_epoch_root(root, sizeof(root));
     if (!found) {
         snprintf(where, where_n,
                  "no built object tree under build/*obj*/epochs");
@@ -349,19 +373,9 @@ static long cj_count_trust_store_refs(char *where, size_t where_n,
                      " | grep -cwE 'U (", root, root);
     if (n < 0 || (size_t)n >= sizeof(cmd))
         return -1;
-    for (size_t i = 0;
-         i < sizeof(kTrustStoreSymbols) / sizeof(kTrustStoreSymbols[0]); i++) {
-        int w = snprintf(cmd + n, sizeof(cmd) - (size_t)n, "%s%s",
-                         i ? "|" : "", kTrustStoreSymbols[i]);
-        if (w < 0 || (size_t)(n + w) >= sizeof(cmd))
-            return -1;
-        n += w;
-    }
-    {
-        int w = snprintf(cmd + n, sizeof(cmd) - (size_t)n, ")'");
-        if (w < 0 || (size_t)(n + w) >= sizeof(cmd))
-            return -1;
-    }
+    n = cj_append_trust_store_alternation(cmd, sizeof(cmd), n);
+    if (n < 0)
+        return -1;
 
     FILE *fp = popen(cmd, "r");
     if (!fp) {
@@ -455,6 +469,20 @@ static int cj_dir_entry_count(const char *path)
     return n;
 }
 
+static bool cj_rom_keystone_is_baked(void)
+{
+    const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
+    bool rom_baked = rom && rom->height == CJ_ROM_KEYSTONE_HEIGHT &&
+                     rom->utxo_count > 0 && rom->total_supply > 0;
+    if (rom_baked) {
+        bool root_nonzero = false;
+        for (int i = 0; i < 32; i++)
+            if (rom->rom_state_root[i] != 0) { root_nonzero = true; break; }
+        rom_baked = root_nonzero;
+    }
+    return rom_baked;
+}
+
 int test_cold_join_sovereign(void)
 {
     failures = 0;
@@ -540,15 +568,7 @@ int test_cold_join_sovereign(void)
         CJ_CHECK("P3 network-upgrade activation heights are compiled in",
                  p->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight > 0);
 
-        const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
-        bool rom_baked = rom && rom->height == CJ_ROM_KEYSTONE_HEIGHT &&
-                         rom->utxo_count > 0 && rom->total_supply > 0;
-        if (rom_baked) {
-            bool root_nonzero = false;
-            for (int i = 0; i < 32; i++)
-                if (rom->rom_state_root[i] != 0) { root_nonzero = true; break; }
-            rom_baked = root_nonzero;
-        }
+        bool rom_baked = cj_rom_keystone_is_baked();
         CJ_CHECK("P3 the ROM state keystone is BAKED, not a placeholder",
                  rom_baked);
         CJ_CHECK("P3 the datadir is still empty (nothing was registered "
