@@ -4,6 +4,16 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
+
+static FILE *cli_sink;
+#define printf(...) fprintf(cli_sink, __VA_ARGS__)
+#define putchar(c) fputc((c), cli_sink)
+#define main zscrypt_cli_main
+#include "../app/main.c"
+#undef main
+#undef putchar
+#undef printf
 
 static int failures;
 
@@ -117,8 +127,59 @@ static void test_errors(void)
           "null pbkdf2 dk rejected");
 }
 
+static int cli_case(int argc, char **argv, int status, const char *want)
+{
+    FILE *output = tmpfile();
+    if (!output) return 1;
+    cli_sink = output;
+    int bad = zscrypt_cli_main(argc, argv) != status;
+    rewind(output);
+    char bytes[80];
+    size_t n = fread(bytes, 1, sizeof bytes, output);
+    if (ferror(output) || n != strlen(want) || memcmp(bytes, want, n) != 0)
+        bad = 1;
+    if (fclose(output) != 0) bad = 1;
+    return bad;
+}
+
+static void test_cli_args(void)
+{
+    char maximum[3 * sizeof(unsigned long) + 1];
+    snprintf(maximum, sizeof maximum, "%lu", ULONG_MAX);
+    unsigned long parsed = 0;
+    check(parse_cost(maximum, &parsed) && parsed == ULONG_MAX,
+          "CLI parser accepts ULONG_MAX without deriving");
+    char *args[] = {"zscrypt", "pw", "salt", "2", "extra", NULL};
+    const char *invalid[] = {"2junk", "", "+2", "-2", " 2", "2 ",
+        "2\n", "184467440737095516160", "0x2"};
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+        args[3] = (char *)invalid[i];
+        check(cli_case(4, args, 2, "") == 0, "CLI rejects malformed N without output");
+    }
+    args[3] = "2";
+    check(cli_case(5, args, 2, "") == 0, "CLI rejects extra argument");
+    check(cli_case(1, args, 2, "") == 0, "CLI requires passphrase");
+    const unsigned long costs[] = {2, 16384, 16384};
+    for (size_t i = 0; i < sizeof costs / sizeof costs[0]; i++) {
+        uint8_t dk[32];
+        char want[66];
+        const char *salt = i == 2 ? "zscrypt" : "salt";
+        if (zscrypt("pw", 2, salt, strlen(salt), costs[i], 8, 1, dk, sizeof dk) != 0) {
+            check(0, "CLI reference derivation");
+            continue;
+        }
+        for (size_t j = 0; j < sizeof dk; j++)
+            snprintf(want + 2 * j, 3, "%02x", dk[j]);
+        want[64] = '\n'; want[65] = '\0';
+        check(cli_case(4 - (int)i, args, 0, want) == 0, "CLI valid N and default output");
+    }
+    args[3] = "3";
+    check(cli_case(4, args, 1, "") == 0, "CLI retains library power-of-two validation");
+}
+
 int main(void)
 {
+    test_cli_args();
     test_pbkdf2();
     test_scrypt_vectors();
     test_variable_output_len();
