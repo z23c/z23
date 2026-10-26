@@ -624,14 +624,6 @@ _test_next:
     return failures;
 }
 
-/* True when the chain_linkage hold latch still reads exactly the pre-report
- * values — the parity invariant every verdict must preserve. */
-static bool tw_linkage_latch_unchanged(bool hold_before, int refuse_before)
-{
-    return chain_linkage_hold_active() == hold_before &&
-           chain_linkage_hold_refuse_from() == refuse_before;
-}
-
 static int tw_linkage_parity_section(void)
 {
     int failures = 0;
@@ -662,7 +654,8 @@ static int tw_linkage_parity_section(void)
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         enum utxo_root_ladder_tripwire_result rc_healthy =
             utxo_root_ladder_tripwire_report(NULL, healthy, 1);
-        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
+        ok = ok && (chain_linkage_hold_active() == hold_before);
+        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
         ok = ok && (rc_healthy == UTXO_ROOT_LADDER_TRIPWIRE_HEALTHY);
         ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
 
@@ -674,7 +667,8 @@ static int tw_linkage_parity_section(void)
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         enum utxo_root_ladder_tripwire_result rc_unverified =
             utxo_root_ladder_tripwire_report(NULL, unverified, 1);
-        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
+        ok = ok && (chain_linkage_hold_active() == hold_before);
+        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
         ok = ok && (rc_unverified == UTXO_ROOT_LADDER_TRIPWIRE_UNVERIFIED);
         ok = ok && !blocker_exists(TRIPWIRE_BLOCKER_ID);
 
@@ -683,7 +677,8 @@ static int tw_linkage_parity_section(void)
         };
         blocker_clear(TRIPWIRE_BLOCKER_ID);
         (void)utxo_root_ladder_tripwire_report(NULL, divergent, 1);
-        ok = ok && tw_linkage_latch_unchanged(hold_before, refuse_before);
+        ok = ok && (chain_linkage_hold_active() == hold_before);
+        ok = ok && (chain_linkage_hold_refuse_from() == refuse_before);
         /* Evidence exists, but it is a plain blocker — NOT a linkage HOLD. */
         ok = ok && blocker_exists(TRIPWIRE_BLOCKER_ID);
 
