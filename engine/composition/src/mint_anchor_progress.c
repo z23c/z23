@@ -136,45 +136,49 @@ static bool table_has_non_full_success(sqlite3 *db, const char *table,
     return ok;
 }
 
-bool mint_anchor_normal_boot_allowed(sqlite3 *db, char *reason,
-                                     size_t reason_size)
+/* Normal-boot gate, marker phase: returns 1 when no offline mint in-progress
+ * marker exists, 0 when one is present (reason describes the refusal), -1
+ * when the marker cannot be read. */
+static int normal_boot_progress_marker_state(sqlite3 *db, char *reason,
+                                             size_t reason_size)
 {
-    if (reason && reason_size)
-        reason[0] = '\0';
-    if (!db)
-        LOG_FAIL("mint_anchor", "normal boot gate: NULL db");
     uint8_t in_progress[MINT_ANCHOR_MARKER_LEN] = {0};
     size_t marker_size = 0;
     bool marker_found = false;
     if (!progress_meta_get_blob_exact(
             db, MINT_ANCHOR_IN_PROGRESS_KEY, in_progress,
             sizeof(in_progress), &marker_size, &marker_found))
-        LOG_FAIL("mint_anchor", "normal boot progress marker read failed");
-    if (marker_found) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size,
-                     "datadir has an offline mint in-progress marker "
-                     "(%zu bytes); resume only with the producer command or "
-                     "install a verified artifact into a serving datadir",
-                     marker_size);
-        return false;
-    }
-    uint8_t lane = 0;
-    size_t n = 0;
-    bool found = false;
-    if (!progress_meta_get_blob_exact(db, MINT_ANCHOR_PRODUCER_LANE_KEY,
-                                      &lane, sizeof(lane), &n, &found))
-        LOG_FAIL("mint_anchor", "normal boot lane read failed");
-    if (found) {
-        if (reason && reason_size)
-            snprintf(reason, reason_size,
-                     "datadir is permanently bound to offline producer lane "
-                     "profile=%s; install its verified artifact into a separate "
-                     "serving datadir",
-                     n == 1 && lane == MINT_ANCHOR_LANE_FULL
-                         ? "full" : "checkpoint_fold_or_invalid");
-        return false;
-    }
+        return -1;
+    if (!marker_found)
+        return 1;
+    if (reason && reason_size)
+        snprintf(reason, reason_size,
+                 "datadir has an offline mint in-progress marker "
+                 "(%zu bytes); resume only with the producer command or "
+                 "install a verified artifact into a serving datadir",
+                 marker_size);
+    return 0;
+}
+
+/* Writes the normal-boot refusal reason for a lane-bound datadir. */
+static void reason_producer_lane_bound(char *reason, size_t reason_size,
+                                       uint8_t lane, size_t n)
+{
+    if (reason && reason_size)
+        snprintf(reason, reason_size,
+                 "datadir is permanently bound to offline producer lane "
+                 "profile=%s; install its verified artifact into a separate "
+                 "serving datadir",
+                 n == 1 && lane == MINT_ANCHOR_LANE_FULL
+                     ? "full" : "checkpoint_fold_or_invalid");
+}
+
+/* Normal-boot gate, evidence phase: returns 1 when every validation table is
+ * compatible with normal serving, 0 when a table carries non-full successful
+ * validation evidence (reason names it), -1 when a scan fails. */
+static int normal_boot_validation_tables_state(sqlite3 *db, char *reason,
+                                               size_t reason_size)
+{
     static const char *const tables[] = {
         "script_validate_log", "proof_validate_log", "utxo_apply_log",
     };
@@ -183,15 +187,45 @@ bool mint_anchor_normal_boot_allowed(sqlite3 *db, char *reason,
         bool allow_anchor = strcmp(tables[i], "utxo_apply_log") == 0;
         if (!table_has_non_full_success(db, tables[i], allow_anchor,
                                         &incompatible))
-            return false;
-        if (incompatible) {
-            if (reason && reason_size)
-                snprintf(reason, reason_size,
-                         "%s contains non-full successful validation evidence; "
-                         "normal serving boot is contained", tables[i]);
-            return false;
-        }
+            return -1;
+        if (!incompatible)
+            continue;
+        if (reason && reason_size)
+            snprintf(reason, reason_size,
+                     "%s contains non-full successful validation evidence; "
+                     "normal serving boot is contained", tables[i]);
+        return 0;
     }
+    return 1;
+}
+
+bool mint_anchor_normal_boot_allowed(sqlite3 *db, char *reason,
+                                     size_t reason_size)
+{
+    if (reason && reason_size)
+        reason[0] = '\0';
+    if (!db)
+        LOG_FAIL("mint_anchor", "normal boot gate: NULL db");
+    int marker = normal_boot_progress_marker_state(db, reason, reason_size);
+    if (marker < 0)
+        LOG_FAIL("mint_anchor", "normal boot progress marker read failed");
+    if (marker == 0)
+        return false;
+    uint8_t lane = 0;
+    size_t n = 0;
+    bool found = false;
+    if (!progress_meta_get_blob_exact(db, MINT_ANCHOR_PRODUCER_LANE_KEY,
+                                      &lane, sizeof(lane), &n, &found))
+        LOG_FAIL("mint_anchor", "normal boot lane read failed");
+    if (found) {
+        reason_producer_lane_bound(reason, reason_size, lane, n);
+        return false;
+    }
+    int tables = normal_boot_validation_tables_state(db, reason, reason_size);
+    if (tables < 0)
+        return false;
+    if (tables == 0)
+        return false;
     return true;
 }
 
@@ -313,96 +347,157 @@ bool mint_anchor_progress_clear(sqlite3 *db)
     return true;
 }
 
-bool mint_anchor_progress_can_resume(sqlite3 *db,
-                                     const struct sha3_utxo_checkpoint *cp,
-                                     int32_t *applied_through_out,
-                                     bool *legacy_adopted_out)
+static void resume_outputs_reset(int32_t *applied_through_out,
+                                 bool *legacy_adopted_out)
 {
     if (applied_through_out)
         *applied_through_out = -1;
     if (legacy_adopted_out)
         *legacy_adopted_out = false;
+}
+
+static void resume_report_applied(int32_t *applied_through_out,
+                                  int32_t through)
+{
+    if (applied_through_out)
+        *applied_through_out = through;
+}
+
+/* Loads every durable resume signal in inspection order. Returns 0 when the
+ * producer lane is bound and both probes succeeded, 1 when no producer lane
+ * is bound, -1 when a probe failed. */
+static int resume_state_load(sqlite3 *db,
+                             const struct sha3_utxo_checkpoint *cp,
+                             bool *marker_found, bool *marker_matches,
+                             int32_t *through, bool *have_frontier)
+{
+    uint8_t lane = 0;
+    bool lane_found = false;
+    if (!producer_lane_read(db, &lane, &lane_found))
+        return -1;
+    if (!lane_found)
+        return 1;
+    if (!read_matching_marker(db, cp, marker_found, marker_matches))
+        return -1;  /* logged */
+    if (!applied_through(db, through, have_frontier))
+        return -1;  /* logged */
+    return 0;
+}
+
+/* Outcome of comparing the durable in-progress marker against the anchor
+ * checkpoint; the caller owns every log line. */
+enum marker_phase {
+    MARKER_PHASE_LEGACY,
+    MARKER_PHASE_RESUME,
+    MARKER_PHASE_RESET_MISMATCH,
+    MARKER_PHASE_RESET_PAST_ANCHOR,
+    MARKER_PHASE_RESET_NOTHING_APPLIED,
+};
+
+static enum marker_phase marker_phase_verdict(bool found, bool matches,
+                                              bool have_frontier,
+                                              int32_t through,
+                                              int32_t anchor_height)
+{
+    if (!found)
+        return MARKER_PHASE_LEGACY;
+    if (!matches)
+        return MARKER_PHASE_RESET_MISMATCH;
+    if (have_frontier && through > anchor_height)
+        return MARKER_PHASE_RESET_PAST_ANCHOR;
+    /* A marker with NO applied progress is not a resumable fold. Nothing
+     * was ever folded, so resuming preserves nothing — but it DOES skip
+     * the genesis reset, and that reset is what truncates coins_kv. The
+     * datadir is then left carrying the node.db mirror's coin set at the
+     * SOURCE datadir's tip while coins_applied_height is 0, and
+     * utxo_apply's stage init refuses that contradiction outright
+     * ("future coin repair refused range=[1,<source tip>] cap=4096" ->
+     * "staged.utxo_apply init failed" -> "FATAL: -mint-anchor: offline
+     * reducer stage init failed"). The mint dies before the fold starts,
+     * and every re-run resumes the same dead marker. Reset instead. */
+    if (!have_frontier || through < 0)
+        return MARKER_PHASE_RESET_NOTHING_APPLIED;
+    return MARKER_PHASE_RESUME;
+}
+
+/* Legacy adoption: a producer that predates this marker may
+ * have been killed after durable stage/coins commits. Only adopt when the
+ * durable refold signal is active and the frontier is within the
+ * genesis..anchor mint span. A contaminated or wrong fold cannot publish:
+ * boot_mint_anchor_run still hard-asserts SHA3/count before writing. */
+/* through < 0 (nothing applied) is refused for the same reason as the
+ * matching-marker branch above: adopting it would skip the genesis reset
+ * and strand a seeded coins_kv against coins_applied_height=0. */
+static bool legacy_adoption_eligible(bool have_frontier, int32_t through,
+                                     int32_t anchor_height)
+{
+    return refold_in_progress() && have_frontier && through >= 0 &&
+           through <= anchor_height;
+}
+
+bool mint_anchor_progress_can_resume(sqlite3 *db,
+                                     const struct sha3_utxo_checkpoint *cp,
+                                     int32_t *applied_through_out,
+                                     bool *legacy_adopted_out)
+{
+    resume_outputs_reset(applied_through_out, legacy_adopted_out);
     if (!db || !cp)
         LOG_FAIL("mint_anchor", "can_resume: invalid args db=%p cp=%p",
                  (void *)db, (const void *)cp);
 
-    uint8_t lane = 0;
-    bool lane_found = false;
-    if (!producer_lane_read(db, &lane, &lane_found))
+    bool found = false;
+    bool matches = false;
+    int32_t through = -1;
+    bool have_frontier = false;
+    int loaded = resume_state_load(db, cp, &found, &matches, &through,
+                                   &have_frontier);
+    if (loaded < 0)
         return false;
-    if (!lane_found) {
+    if (loaded > 0) {
         LOG_WARN("mint_anchor",
                  "[mint-anchor] resume refused without a durable producer "
                  "lane; bind the requested profile before resume inspection");
         return false;
     }
 
-    bool found = false;
-    bool matches = false;
-    if (!read_matching_marker(db, cp, &found, &matches))
-        return false;  /* logged */
-
-    int32_t through = -1;
-    bool have_frontier = false;
-    if (!applied_through(db, &through, &have_frontier))
-        return false;  /* logged */
-
-    if (found && !matches) {
+    enum marker_phase verdict = marker_phase_verdict(found, matches,
+                                                     have_frontier, through,
+                                                     cp->height);
+    if (verdict == MARKER_PHASE_RESET_MISMATCH) {
         LOG_WARN("mint_anchor",
                  "[mint-anchor] existing progress marker targets a different "
                  "checkpoint — resetting the offline mint from genesis");
         return false;
     }
-
-    if (found && matches) {
-        if (have_frontier && through > cp->height) {
-            LOG_WARN("mint_anchor",
-                     "[mint-anchor] progress marker found but frontier "
-                     "applied-through=%d is past anchor=%d — resetting",
-                     through, cp->height);
-            return false;
-        }
-        /* A marker with NO applied progress is not a resumable fold. Nothing
-         * was ever folded, so resuming preserves nothing — but it DOES skip
-         * the genesis reset, and that reset is what truncates coins_kv. The
-         * datadir is then left carrying the node.db mirror's coin set at the
-         * SOURCE datadir's tip while coins_applied_height is 0, and
-         * utxo_apply's stage init refuses that contradiction outright
-         * ("future coin repair refused range=[1,<source tip>] cap=4096" ->
-         * "staged.utxo_apply init failed" -> "FATAL: -mint-anchor: offline
-         * reducer stage init failed"). The mint dies before the fold starts,
-         * and every re-run resumes the same dead marker. Reset instead. */
-        if (!have_frontier || through < 0) {
-            LOG_WARN("mint_anchor",
-                     "[mint-anchor] progress marker found but nothing has been "
-                     "applied (applied-through=%d) — resetting from genesis "
-                     "rather than resuming a fold that never started",
-                     through);
-            return false;
-        }
-        if (applied_through_out)
-            *applied_through_out = through;
+    if (verdict == MARKER_PHASE_RESET_PAST_ANCHOR) {
+        LOG_WARN("mint_anchor",
+                 "[mint-anchor] progress marker found but frontier "
+                 "applied-through=%d is past anchor=%d — resetting",
+                 through, cp->height);
+        return false;
+    }
+    if (verdict == MARKER_PHASE_RESET_NOTHING_APPLIED) {
+        LOG_WARN("mint_anchor",
+                 "[mint-anchor] progress marker found but nothing has been "
+                 "applied (applied-through=%d) — resetting from genesis "
+                 "rather than resuming a fold that never started",
+                 through);
+        return false;
+    }
+    if (verdict == MARKER_PHASE_RESUME) {
+        resume_report_applied(applied_through_out, through);
         return true;
     }
 
-    /* Legacy adoption: a producer that predates this marker may
-     * have been killed after durable stage/coins commits. Only adopt when the
-     * durable refold signal is active and the frontier is within the
-     * genesis..anchor mint span. A contaminated or wrong fold cannot publish:
-     * boot_mint_anchor_run still hard-asserts SHA3/count before writing. */
-    /* through < 0 (nothing applied) is refused for the same reason as the
-     * matching-marker branch above: adopting it would skip the genesis reset
-     * and strand a seeded coins_kv against coins_applied_height=0. */
-    if (!refold_in_progress() || !have_frontier || through < 0 ||
-        through > cp->height)
+    /* MARKER_PHASE_LEGACY: no durable marker; legacy adoption decides. */
+    if (!legacy_adoption_eligible(have_frontier, through, cp->height))
         return false;
 
     if (!mint_anchor_progress_mark(db, cp))
         return false;  /* logged */
     if (legacy_adopted_out)
         *legacy_adopted_out = true;
-    if (applied_through_out)
-        *applied_through_out = through;
+    resume_report_applied(applied_through_out, through);
     LOG_INFO("mint_anchor",
              "[mint-anchor] adopted legacy interrupted mint at "
              "applied-through=%d for checkpoint h=%d; future restarts resume "
