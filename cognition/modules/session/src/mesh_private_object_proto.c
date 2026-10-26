@@ -46,17 +46,19 @@ static bool x25519_public_key_usable(const uint8_t point[32])
     return usable;
 }
 
-static enum mesh_private_object_proto_error offer_shape(
-    const struct mesh_private_object_offer_v1 *offer, bool require_grant_id,
-    bool require_request_id, bool require_ciphertext_root,
-    bool require_signature)
+static enum mesh_private_object_proto_error offer_check_header(
+    const struct mesh_private_object_offer_v1 *offer)
 {
-    if (!offer)
-        return MESH_PRIVATE_OBJECT_PROTO_NULL;
     if (offer->version != MESH_PRIVATE_OBJECT_PROTO_VERSION)
         return MESH_PRIVATE_OBJECT_PROTO_VERSION_INVALID;
     if (offer->flags != MESH_PRIVATE_OBJECT_FLAGS_NONE)
         return MESH_PRIVATE_OBJECT_PROTO_FLAGS;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_critical_fields(
+    const struct mesh_private_object_offer_v1 *offer)
+{
     const uint8_t *critical[] = {
         offer->network_genesis, offer->pairing_id,
         offer->source_master_pubkey, offer->source_noise_static,
@@ -67,6 +69,13 @@ static enum mesh_private_object_proto_error offer_shape(
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
         if (!zcl_bytes_any_set(critical[i], 32))
             return MESH_PRIVATE_OBJECT_PROTO_FIELD;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_ids_and_generation(
+    const struct mesh_private_object_offer_v1 *offer, bool require_grant_id,
+    bool require_request_id, bool require_ciphertext_root)
+{
     if (require_grant_id && !zcl_bytes_any_set(offer->grant_id, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
     if (offer->connection_generation == 0)
@@ -76,6 +85,12 @@ static enum mesh_private_object_proto_error offer_shape(
     if (require_ciphertext_root &&
         !zcl_bytes_any_set(offer->ciphertext_root, 32))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_size_and_chunks(
+    const struct mesh_private_object_offer_v1 *offer)
+{
     uint32_t chunk_count = expected_chunks(offer->object_size_bytes);
     uint64_t expected_ciphertext = offer->object_size_bytes +
         (uint64_t)chunk_count * MESH_PRIVATE_OBJECT_TAG_BYTES;
@@ -88,16 +103,67 @@ static enum mesh_private_object_proto_error offer_shape(
     if (offer->chunk_size != MESH_PRIVATE_OBJECT_CHUNK_BYTES ||
         offer->chunk_count != chunk_count)
         return MESH_PRIVATE_OBJECT_PROTO_CHUNKS;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_ephemeral_key(
+    const struct mesh_private_object_offer_v1 *offer)
+{
     if (!x25519_public_key_usable(offer->ephemeral_x25519_pubkey))
         return MESH_PRIVATE_OBJECT_PROTO_FIELD;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_lifetime(
+    const struct mesh_private_object_offer_v1 *offer)
+{
     if (offer->issued_unix == 0 || offer->expires_unix <= offer->issued_unix ||
         offer->expires_unix - offer->issued_unix >
             MESH_PRIVATE_OBJECT_MAX_LIFETIME_SECONDS)
         return MESH_PRIVATE_OBJECT_PROTO_TIME;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_check_deny_mask(
+    const struct mesh_private_object_offer_v1 *offer)
+{
     if ((offer->deny_mask & MESH_PRIVATE_OBJECT_DENY_REQUIRED) !=
             MESH_PRIVATE_OBJECT_DENY_REQUIRED ||
         (offer->deny_mask & ~MESH_PRIVATE_OBJECT_DENY_KNOWN) != 0)
         return MESH_PRIVATE_OBJECT_PROTO_DENY;
+    return MESH_PRIVATE_OBJECT_PROTO_OK;
+}
+
+static enum mesh_private_object_proto_error offer_shape(
+    const struct mesh_private_object_offer_v1 *offer, bool require_grant_id,
+    bool require_request_id, bool require_ciphertext_root,
+    bool require_signature)
+{
+    if (!offer)
+        return MESH_PRIVATE_OBJECT_PROTO_NULL;
+    enum mesh_private_object_proto_error error = offer_check_header(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_critical_fields(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_ids_and_generation(offer, require_grant_id,
+                                           require_request_id,
+                                           require_ciphertext_root);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_size_and_chunks(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_ephemeral_key(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_lifetime(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
+    error = offer_check_deny_mask(offer);
+    if (error != MESH_PRIVATE_OBJECT_PROTO_OK)
+        return error;
     if (require_signature && !zcl_bytes_any_set(offer->signature, 64))
         return MESH_PRIVATE_OBJECT_PROTO_SIGNATURE;
     return MESH_PRIVATE_OBJECT_PROTO_OK;
