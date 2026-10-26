@@ -124,15 +124,9 @@ static int br_writer_guard(void)
     return failures;
 }
 
-int test_boot_reindex_terminates(void);
-int test_boot_reindex_terminates(void)
+static int br_term_fixed_anchor(void)
 {
-    test_reset_shared_globals();
-    printf("\n=== boot_reindex_terminates tests ===\n");
     int failures = 0;
-
-    mkdir_p_br("./test-tmp");
-
     /* ──────────────────────────────────────────────────────────────────
      * (A) The cap TERMINATES on a FIXED anchor: count climbs 1..MAX, then
      * the exhausted handler writes the TERMINAL marker, and consume stops
@@ -186,7 +180,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_recoverable(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (B) A RECOVERABLE datadir is NOT falsely exhausted: terminal fires ONLY
      * after BOOT_AUTO_REINDEX_MAX failures at a stable anchor.
@@ -225,7 +224,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_moving_tip(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (C) Moving-tip budget cannot re-arm the cap: the budget keys on the
      * MINIMUM anchor seen this episode.
@@ -256,7 +260,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_covered_anchor(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (D) A stale tip-height request self-clears once durable coins authority
      * COVERS its anchor: progress above the anchor, or a HASH-VERIFIED
@@ -310,7 +319,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_storage_gate(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (E) The boot-storage gate REFUSES to arm on an unreadable-genesis
      * (bodyless) datadir: reindex_executable=false writes no sentinel, CLEARS
@@ -349,7 +363,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_body_coverage(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (F) The body-coverage gate refuses a from-genesis reindex when coins are
      * seeded but bodies do not cover [0..target], and CLEARS the sentinel.
@@ -395,7 +414,50 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_link_damage_exhausted(const char *dir)
+{
+    int failures = 0;
+    {
+        const int TIP = 3172671;
+        const int MISMATCHES = 630;
+        const int FIRST_MISMATCH = 2004318;
+
+        /* Boot 4, budget spent: stop with a typed blocker naming the datadir
+         * action; never exit into another restart. */
+        boot_error_reset_for_testing();
+        bool exit4 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
+        BR_CHECK("integrity: the 4th identical finding stops the ladder",
+                 !exit4);
+        BR_CHECK("integrity: exhaustion persists the terminal marker",
+                 boot_auto_reindex_is_terminal(dir) &&
+                 !boot_auto_reindex_pending(dir));
+        {
+            char render[BOOT_ERROR_RENDER_MAX];
+            bool got = boot_error_last_render(render, sizeof(render)) > 0;
+            BR_CHECK("integrity: exhaustion renders the TYPED blocker",
+                     got && strstr(render, "BOOT_REINDEX_BUDGET_EXHAUSTED"));
+            BR_CHECK("integrity: the typed blocker names the datadir action",
+                     got && strstr(render, dir) && strstr(render, "next[1]"));
+            BR_CHECK("integrity: the typed blocker carries the measurement",
+                     got && strstr(render, "mismatches=630") &&
+                     strstr(render, "first_mismatch_h=2004318"));
+        }
+        BR_CHECK("integrity: a typed code is latched (not the untyped FATAL)",
+                 boot_error_reported() &&
+                 strcmp(boot_error_first_code(),
+                        "BOOT_REINDEX_BUDGET_EXHAUSTED") == 0);
+        boot_error_reset_for_testing();
+    }
+    return failures;
+}
+
+static int br_term_link_damage(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (G) Link-damage findings, both halves.
      *
@@ -481,36 +543,16 @@ int test_boot_reindex_terminates(void)
                  !exit3 && boot_repair_episode_status(dir, &sig, &attempts) &&
                  attempts == BOOT_REPAIR_EPISODE_MAX);
 
-        /* Boot 4, budget spent: stop with a typed blocker naming the datadir
-         * action; never exit into another restart. */
-        boot_error_reset_for_testing();
-        bool exit4 = boot_crashonly_handle_unrecoverable(
-            dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
-        BR_CHECK("integrity: the 4th identical finding stops the ladder",
-                 !exit4);
-        BR_CHECK("integrity: exhaustion persists the terminal marker",
-                 boot_auto_reindex_is_terminal(dir) &&
-                 !boot_auto_reindex_pending(dir));
-        {
-            char render[BOOT_ERROR_RENDER_MAX];
-            bool got = boot_error_last_render(render, sizeof(render)) > 0;
-            BR_CHECK("integrity: exhaustion renders the TYPED blocker",
-                     got && strstr(render, "BOOT_REINDEX_BUDGET_EXHAUSTED"));
-            BR_CHECK("integrity: the typed blocker names the datadir action",
-                     got && strstr(render, dir) && strstr(render, "next[1]"));
-            BR_CHECK("integrity: the typed blocker carries the measurement",
-                     got && strstr(render, "mismatches=630") &&
-                     strstr(render, "first_mismatch_h=2004318"));
-        }
-        BR_CHECK("integrity: a typed code is latched (not the untyped FATAL)",
-                 boot_error_reported() &&
-                 strcmp(boot_error_first_code(),
-                        "BOOT_REINDEX_BUDGET_EXHAUSTED") == 0);
-        boot_error_reset_for_testing();
+        failures += br_term_link_damage_exhausted(dir);
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_coins_shaped(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (H) The fix is NARROW: a coins-shaped wedge (derived tip above the
      * validated extent, NO mismatches) carries no integrity class and
@@ -541,7 +583,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_legacy_request(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (I) On-disk compatibility: a two-field request from an older binary
      * still parses, keeps its budget, and reads back as UNSPECIFIED.
@@ -587,8 +634,12 @@ int test_boot_reindex_terminates(void)
 
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-
+static int br_term_holes_only(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (J) THE HOLES-ONLY RESTART LOOP. An identical post-restore finding
      * (tip_window_holes, mismatches>0, zero_nbits=0) repeated across restarts
@@ -661,7 +712,12 @@ int test_boot_reindex_terminates(void)
         boot_error_reset_for_testing();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int br_term_reindex_verb(void)
+{
+    int failures = 0;
     /* ──────────────────────────────────────────────────────────────────
      * (K) THE VERB. A holes-only / mismatch-only finding must not arm a
      * from-genesis -reindex-chainstate (it cannot repair links); the finalize
@@ -714,6 +770,29 @@ int test_boot_reindex_terminates(void)
         test_cleanup_tmpdir(dir);
         test_cleanup_tmpdir(dir2);
     }
+    return failures;
+}
+
+int test_boot_reindex_terminates(void);
+int test_boot_reindex_terminates(void)
+{
+    test_reset_shared_globals();
+    printf("\n=== boot_reindex_terminates tests ===\n");
+    int failures = 0;
+
+    mkdir_p_br("./test-tmp");
+
+    failures += br_term_fixed_anchor();
+    failures += br_term_recoverable();
+    failures += br_term_moving_tip();
+    failures += br_term_covered_anchor();
+    failures += br_term_storage_gate();
+    failures += br_term_body_coverage();
+    failures += br_term_link_damage();
+    failures += br_term_coins_shaped();
+    failures += br_term_legacy_request();
+    failures += br_term_holes_only();
+    failures += br_term_reindex_verb();
 
     failures += br_writer_guard();
 
