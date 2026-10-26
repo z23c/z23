@@ -148,6 +148,360 @@ static int sv_collect_bad_row_releases_cursor(void)
     return failures;
 }
 
+static void sv_append_sapling_leaves(struct incremental_merkle_tree *sap_tree,
+                                    struct uint256 *sap_old_root,
+                                    struct uint256 *sap_root)
+{
+    sapling_tree_init(sap_tree);
+    uint256_set_null(sap_old_root);
+    for (uint8_t k = 1; k <= 3; k++) {
+        struct uint256 leaf; sv_u256(&leaf, (uint8_t)(0x40 + k));
+        incremental_tree_append(sap_tree, &leaf);
+        if (k == 2)
+            incremental_tree_root(sap_tree, sap_old_root);
+    }
+    incremental_tree_root(sap_tree, sap_root);
+}
+
+static void sv_append_sprout_leaves(struct incremental_merkle_tree *spr_tree)
+{
+    sprout_tree_init(spr_tree);
+    for (uint8_t k = 1; k <= 2; k++) {
+        struct uint256 leaf; sv_u256(&leaf, (uint8_t)(0x80 + k));
+        incremental_tree_append(spr_tree, &leaf);
+    }
+}
+
+static void sv_pack_fixture_nullifiers(uint8_t nf0[32], uint8_t nf1[32],
+                                      uint8_t nf_recs[])
+{
+    for (int i = 0; i < 32; i++) { nf0[i] = (uint8_t)(0xc0 + i); nf1[i] = (uint8_t)(0x30 + i); }
+    snapshot_shielded_pack_nf(nf_recs, 0, nf0, 12);
+    snapshot_shielded_pack_nf(nf_recs + SNAPSHOT_NF_RECORD_BYTES, 1, nf1, 27);
+}
+
+static void sv_fill_anchor_hash(uint8_t anchor_hash[32])
+{
+    for (int i = 0; i < 32; i++)
+        anchor_hash[i] = (uint8_t)(0xa0 + i);
+}
+
+static bool sv_write_seeded_snapshot(bool gate, const char *path,
+                                    const uint8_t anchor_hash[32],
+                                    const struct snapshot_shielded *shielded,
+                                    uint8_t sha3_out[32], sqlite3 **src_out)
+{
+    sqlite3 *src = NULL;
+    uint64_t count = 0;
+    int64_t supply = 0;
+    bool ok = gate &&
+              sqlite3_open(":memory:", &src) == SQLITE_OK &&
+              sv_seed_coins(src) &&
+              coins_kv_snapshot_write(src, path, SEED_H, anchor_hash,
+                                     shielded, sha3_out, &count, &supply);
+    *src_out = src;
+    return ok && count == 2;
+}
+
+static bool sv_snapshot_file_matches(const char *path, const char *golden_hex)
+{
+    FILE *f = fopen(path, "rb");
+    struct sha3_256_ctx c; sha3_256_init(&c);
+    uint8_t buf[4096]; size_t rd;
+    while (f && (rd = fread(buf, 1, sizeof(buf), f)) > 0)
+        sha3_256_write(&c, buf, rd);
+    if (f) fclose(f);
+    uint8_t d[32]; sha3_256_finalize(&c, d);
+    char hex[65];
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+    return f != NULL && strcmp(hex, golden_hex) == 0;
+}
+
+static bool sv_shielded_regions_match(bool ok,
+                                     const uint8_t *sap, uint32_t sap_len,
+                                     const uint8_t *spr, uint32_t spr_len,
+                                     const uint8_t *nf, uint64_t nf_count,
+                                     const struct byte_stream *sap_bs,
+                                     const struct byte_stream *spr_bs,
+                                     const uint8_t *nf_recs, size_t nf_len)
+{
+    return ok && sap_len == sap_bs->size && spr_len == spr_bs->size &&
+           nf_count == 2 &&
+           memcmp(sap, sap_bs->data, sap_bs->size) == 0 &&
+           memcmp(spr, spr_bs->data, spr_bs->size) == 0 &&
+           memcmp(nf, nf_recs, nf_len) == 0;
+}
+
+static bool sv_len_and_bytes_match(bool ok, uint64_t got_len, uint64_t want_len,
+                                  const void *got, const void *want, size_t n)
+{
+    return ok && got_len == want_len && memcmp(got, want, n) == 0;
+}
+
+static bool sv_shielded_handle_matches(bool gate, struct uss_handle *h,
+                                     const struct byte_stream *sap_bs,
+                                     const struct byte_stream *spr_bs,
+                                     const uint8_t *nf_recs, size_t nf_len)
+{
+    const uint8_t *sap = NULL, *spr = NULL, *nf = NULL;
+    uint32_t sap_len = 0, spr_len = 0; uint64_t nf_count = 0;
+    bool got = gate && h &&
+               uss_shielded(h, &sap, &sap_len, &spr, &spr_len, &nf, &nf_count);
+    return sv_shielded_regions_match(got, sap, sap_len, spr, spr_len,
+                                    nf, nf_count, sap_bs, spr_bs,
+                                    nf_recs, nf_len);
+}
+
+static bool sv_v3_body_verified(const char *path, const uint8_t sha3[32],
+                               struct uss_header *hdr, char *err, size_t err_len,
+                               struct uss_handle **h_out)
+{
+    struct uss_handle *h = uss_open(path, /*verify_full_sha3=*/true,
+                                    sha3, hdr, err, err_len);
+    *h_out = h;
+    return h != NULL && hdr->version == 3;
+}
+
+static void sv_v3_component_flags(struct uss_handle *h,
+                                 const struct uss_header *hdr,
+                                 bool *counts_ok, bool *digest_distinct)
+{
+    struct uss_utxo_component v3_component;
+    char component_err[128] = {0};
+    bool component_ok = h && uss_utxo_component_compute(
+        h, &v3_component, component_err, sizeof(component_err));
+    *counts_ok = component_ok && v3_component.count == 2 &&
+                 v3_component.total_supply == 33333;
+    *digest_distinct = component_ok &&
+                       memcmp(hdr->sha3_hash, v3_component.sha3_hash, 32) != 0;
+}
+
+static bool sv_v1_has_no_shielded(const char *path, struct uss_header *hdr,
+                                 char *err, size_t err_len,
+                                 struct uss_handle **h_out)
+{
+    const uint8_t *r_sap = NULL, *r_spr = NULL, *r_nf = NULL;
+    uint32_t r_sap_len = 0, r_spr_len = 0; uint64_t r_nf_count = 0;
+    struct uss_handle *h = uss_open(path, true, NULL, hdr, err, err_len);
+    *h_out = h;
+    return h != NULL && hdr->version == 1 &&
+           !uss_shielded(h, &r_sap, &r_sap_len, &r_spr, &r_spr_len,
+                         &r_nf, &r_nf_count);
+}
+
+static void sv_open_tampered_snapshot(const char *path, struct uss_header *hdr,
+                                     struct uss_handle **th_out)
+{
+    long sz = 0;
+    FILE *f = fopen(path, "rb+");
+    if (f) { fseek(f, 0, SEEK_END); sz = ftell(f);
+             fseek(f, sz - 1, SEEK_SET);
+             int c = fgetc(f); fseek(f, sz - 1, SEEK_SET);
+             fputc(c ^ 0xff, f); fclose(f); }
+    char terr[128] = {0};
+    *th_out = uss_open(path, true, NULL, hdr, terr, sizeof(terr));
+}
+
+static bool sv_seed_shielded_rows(sqlite3 **db_out, bool history_complete,
+                                 const struct incremental_merkle_tree *sap_tree,
+                                 const struct incremental_merkle_tree *spr_tree,
+                                 const struct uint256 *sap_root,
+                                 const uint8_t nf0[32], const uint8_t nf1[32])
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
+    if (history_complete)
+        ok = ok && anchor_kv_reset_mark_complete_in_tx(db);
+    else
+        ok = ok && anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H);
+    ok = ok && anchor_kv_seed_frontier_row(db, ANCHOR_POOL_SAPLING,
+                                           sap_tree, SEED_H, sap_root);
+    ok = ok && anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, spr_tree, SEED_H);
+    if (history_complete)
+        ok = ok && nullifier_kv_ensure_schema(db);
+    else
+        ok = ok && nullifier_kv_initialize_history(db, SEED_H);
+    ok = ok && nullifier_kv_add(db, nf0, NULLIFIER_POOL_SPROUT, 12);
+    ok = ok && nullifier_kv_add(db, nf1, NULLIFIER_POOL_SAPLING, 27);
+    *db_out = db;
+    return ok;
+}
+
+static bool sv_found_sapling_root(enum anchor_kv_lookup_result lr,
+                                 const struct uint256 *got,
+                                 const struct uint256 *want, int64_t height)
+{
+    return lr == ANCHOR_KV_FOUND && uint256_eq(got, want) && height == SEED_H;
+}
+
+static bool sv_supplied_nullifiers_retained(sqlite3 *db, const uint8_t nf0[32],
+                                           const uint8_t nf1[32])
+{
+    bool f0 = false, f1 = false;
+    return nullifier_kv_get(db, nf0, NULLIFIER_POOL_SPROUT, &f0, NULL) &&
+           f0 &&
+           nullifier_kv_get(db, nf1, NULLIFIER_POOL_SAPLING, &f1, NULL) &&
+           f1;
+}
+
+static bool sv_omitted_sprout_incomplete(sqlite3 **db_out,
+                                        const struct incremental_merkle_tree *sap_tree,
+                                        const struct uint256 *sap_root)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
+              anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H) &&
+              anchor_kv_seed_frontier_row(db, ANCHOR_POOL_SAPLING,
+                                          sap_tree, SEED_H, sap_root);
+    struct incremental_merkle_tree latest;
+    struct uint256 root;
+    int64_t height = -1;
+    enum anchor_kv_lookup_result lr = ok ?
+        anchor_kv_latest_tree(db, ANCHOR_POOL_SPROUT, &latest, &root, &height)
+        : ANCHOR_KV_ERROR;
+    *db_out = db;
+    return ok && lr == ANCHOR_KV_HISTORY_INCOMPLETE;
+}
+
+static bool sv_birth_defect_cursor_applied(sqlite3 **db_out)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
+    /* Today's coins-only restore: reset the adoption cursor above genesis
+     * over an EMPTY sapling_anchors table. */
+    ok = ok && anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H);
+    *db_out = db;
+    return ok;
+}
+
+static void sv_commit_v2_cure(struct main_state *ms,
+                             const struct uint256 *sap_root,
+                             const uint8_t *sap_data, uint32_t sap_len,
+                             sqlite3 **db_out, bool *fixture_ok, bool *committed)
+{
+    main_state_init(ms);
+    struct uint256 bh;
+    sv_u256(&bh, 0x5a);
+    struct block_index *bi =
+        chainstate_insert_block_index((struct chainstate *)ms, &bh);
+    bool have_bi = bi != NULL;
+    if (have_bi) {
+        bi->nHeight = SEED_H;
+        bi->hashFinalSaplingRoot = *sap_root;   /* header commits the seed root */
+        have_bi = active_chain_install_tip_slot(&ms->chain_active, bi);
+    }
+    *fixture_ok = have_bi &&
+                  active_chain_at(&ms->chain_active, SEED_H) == bi;
+    sqlite3 *db = NULL;
+    *committed = have_bi && sqlite3_open(":memory:", &db) == SQLITE_OK &&
+                 sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
+                     SQLITE_OK &&
+                 boot_shielded_cure_or_reset_in_tx(
+                     db, ms, SEED_H,
+                     /*sapling_verified=*/false, /*shielded_v3=*/false,
+                     sap_data, sap_len,
+                     NULL, 0, NULL, 0) &&
+                 sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    *db_out = db;
+}
+
+static bool sv_sapling_cursor_at_seed(bool ok, sqlite3 *db)
+{
+    int64_t sap_cursor = -1; bool sap_found = false;
+    return ok && anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
+                                            &sap_cursor, &sap_found) &&
+           sap_found && sap_cursor == SEED_H;
+}
+
+static bool sv_collect_shielded_ok(bool ok, sqlite3 *db,
+                                  struct snapshot_shielded *col)
+{
+    return ok && snapshot_shielded_collect_from_db(db, SEED_H, col);
+}
+
+static bool sv_reload_collected_regions(bool wok, const char *path,
+                                       const uint8_t sha3[32],
+                                       const struct byte_stream *sap_bs,
+                                       const struct byte_stream *spr_bs,
+                                       const uint8_t *nf_recs, size_t nf_len,
+                                       struct uss_handle **ch_out)
+{
+    char cerr[128] = {0}; struct uss_header chdr;
+    struct uss_handle *ch = wok ? uss_open(path, true, sha3, &chdr, cerr,
+                                           sizeof(cerr)) : NULL;
+    *ch_out = ch;
+    return sv_shielded_handle_matches(ch && chdr.version == 3, ch,
+                                     sap_bs, spr_bs, nf_recs, nf_len);
+}
+
+static bool sv_legacy_reset_committed(sqlite3 **db_out)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
+              progress_meta_table_ensure(db) &&
+              progress_meta_set(db, "nullifier_kv.activation_cursor",
+                                "0", 1) &&
+              sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
+                  SQLITE_OK &&
+              boot_shielded_cure_or_reset_in_tx(
+                  db, NULL, SEED_H, false, false,
+                  NULL, 0, NULL, 0, NULL, 0) &&
+              sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    *db_out = db;
+    return ok;
+}
+
+static bool sv_legacy_markers_at_seed(bool ok, sqlite3 *db)
+{
+    int64_t sprout_cursor = -1, sapling_cursor = -1;
+    bool sprout_found = false, sapling_found = false;
+    ok = ok && anchor_kv_activation_cursor(
+                   db, ANCHOR_POOL_SPROUT, &sprout_cursor, &sprout_found) &&
+              anchor_kv_activation_cursor(
+                   db, ANCHOR_POOL_SAPLING, &sapling_cursor, &sapling_found);
+    return ok && sprout_found && sapling_found &&
+           sprout_cursor == SEED_H && sapling_cursor == SEED_H &&
+           sv_meta_is(db, "nullifier_kv.activation_cursor", "30");
+}
+
+static bool sv_schema_rejects_text_cursor(sqlite3 **db_out)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
+              anchor_kv_ensure_schema(db);
+    int rc = ok ? sqlite3_exec(db,
+        "INSERT INTO anchor_state(pool,activation_cursor) "
+        "VALUES(0,'junk')", NULL, NULL, NULL) : SQLITE_ERROR;
+    *db_out = db;
+    return ok && rc != SQLITE_OK;
+}
+
+static bool sv_legacy_storage_class_fails(const char *bad_value, sqlite3 **db_out)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
+              sqlite3_exec(db,
+                  "CREATE TABLE anchor_state("
+                  "pool INTEGER PRIMARY KEY, activation_cursor) "
+                  "WITHOUT ROWID", NULL, NULL, NULL) == SQLITE_OK;
+    char sql[128];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO anchor_state VALUES(0,%s)", bad_value);
+    ok = ok && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    int64_t cursor = 99;
+    bool found = true;
+    bool read_ok = ok && anchor_kv_activation_cursor(
+                              db, ANCHOR_POOL_SPROUT, &cursor, &found);
+    *db_out = db;
+    return ok && !read_ok && !found && cursor == 0;
+}
+
+static void sv_close_sqlite(sqlite3 *db)
+{
+    if (db)
+        sqlite3_close(db);
+}
+
 int test_snapshot_shielded(void)
 {
     printf("\n=== snapshot_shielded ===\n");
@@ -161,16 +515,9 @@ int test_snapshot_shielded(void)
 
     /* ── Build synthetic shielded state ─────────────────────────────────── */
     struct incremental_merkle_tree sap_tree;
-    sapling_tree_init(&sap_tree);
     struct uint256 sap_old_root;
-    uint256_set_null(&sap_old_root);
-    for (uint8_t k = 1; k <= 3; k++) {
-        struct uint256 leaf; sv_u256(&leaf, (uint8_t)(0x40 + k));
-        incremental_tree_append(&sap_tree, &leaf);
-        if (k == 2)
-            incremental_tree_root(&sap_tree, &sap_old_root);
-    }
-    struct uint256 sap_root; incremental_tree_root(&sap_tree, &sap_root);
+    struct uint256 sap_root;
+    sv_append_sapling_leaves(&sap_tree, &sap_old_root, &sap_root);
     struct uint256 empty_sap_root;
     { struct incremental_merkle_tree e; sapling_tree_init(&e);
       incremental_tree_root(&e, &empty_sap_root); }
@@ -182,21 +529,15 @@ int test_snapshot_shielded(void)
     SV_CHECK("sapling frontier serializes", sap_ser);
 
     struct incremental_merkle_tree spr_tree;
-    sprout_tree_init(&spr_tree);
-    for (uint8_t k = 1; k <= 2; k++) {
-        struct uint256 leaf; sv_u256(&leaf, (uint8_t)(0x80 + k));
-        incremental_tree_append(&spr_tree, &leaf);
-    }
+    sv_append_sprout_leaves(&spr_tree);
     struct byte_stream spr_bs; stream_init(&spr_bs, 4096);
     bool spr_ser = incremental_tree_serialize(&spr_tree, &spr_bs);
     SV_CHECK("sprout frontier serializes", spr_ser);
 
     /* Two nullifiers: one Sprout (pool 0), one Sapling (pool 1). */
     uint8_t nf0[32], nf1[32];
-    for (int i = 0; i < 32; i++) { nf0[i] = (uint8_t)(0xc0 + i); nf1[i] = (uint8_t)(0x30 + i); }
     uint8_t nf_recs[2 * SNAPSHOT_NF_RECORD_BYTES];
-    snapshot_shielded_pack_nf(nf_recs, 0, nf0, 12);
-    snapshot_shielded_pack_nf(nf_recs + SNAPSHOT_NF_RECORD_BYTES, 1, nf1, 27);
+    sv_pack_fixture_nullifiers(nf0, nf1, nf_recs);
 
     struct snapshot_shielded sh = {
         .sapling = sap_bs.data, .sapling_len = (uint32_t)sap_bs.size,
@@ -209,24 +550,22 @@ int test_snapshot_shielded(void)
     snprintf(v2_path, sizeof(v2_path), "%s/sapling-only-v2.snapshot", dir);
 
     /* ── Write the v3 snapshot (+ a v1 coins-only control) ──────────────── */
-    uint8_t v3_sha3[32] = {0}; uint64_t v3_count = 0; int64_t v3_supply = 0;
+    uint8_t v3_sha3[32] = {0};
     uint8_t anchor_hash[32];
-    for (int i = 0; i < 32; i++) anchor_hash[i] = (uint8_t)(0xa0 + i);
+    sv_fill_anchor_hash(anchor_hash);
     {
         sqlite3 *src = NULL;
-        bool ok = sqlite3_open(":memory:", &src) == SQLITE_OK && sv_seed_coins(src);
-        ok = ok && coins_kv_snapshot_write(src, v3_path, SEED_H, anchor_hash,
-                                           &sh, v3_sha3, &v3_count, &v3_supply);
-        SV_CHECK("v3 snapshot written (coins + shielded)", ok && v3_count == 2);
+        bool ok = sv_write_seeded_snapshot(true, v3_path, anchor_hash, &sh,
+                                          v3_sha3, &src);
+        SV_CHECK("v3 snapshot written (coins + shielded)", ok);
         sqlite3_close(src);
     }
     {
         sqlite3 *src = NULL;
-        uint8_t r[32]; uint64_t c = 0; int64_t s = 0;
-        bool ok = sqlite3_open(":memory:", &src) == SQLITE_OK && sv_seed_coins(src);
-        ok = ok && coins_kv_snapshot_write(src, v1_path, SEED_H, anchor_hash,
-                                           /*shielded=*/NULL, r, &c, &s);
-        SV_CHECK("v1 coins-only control written", ok && c == 2);
+        uint8_t r[32];
+        bool ok = sv_write_seeded_snapshot(true, v1_path, anchor_hash,
+                                          /*shielded=*/NULL, r, &src);
+        SV_CHECK("v1 coins-only control written", ok);
         sqlite3_close(src);
     }
     {
@@ -236,11 +575,10 @@ int test_snapshot_shielded(void)
             .sapling = sap_bs.data, .sapling_len = (uint32_t)sap_bs.size,
         };
         sqlite3 *src = NULL;
-        uint8_t r[32]; uint64_t c = 0; int64_t s = 0;
-        bool ok = sqlite3_open(":memory:", &src) == SQLITE_OK && sv_seed_coins(src);
-        ok = ok && coins_kv_snapshot_write(src, v2_path, SEED_H, anchor_hash,
-                                           &sap_only, r, &c, &s);
-        SV_CHECK("v2 sapling-only control written", ok && c == 2);
+        uint8_t r[32];
+        bool ok = sv_write_seeded_snapshot(true, v2_path, anchor_hash,
+                                          &sap_only, r, &src);
+        SV_CHECK("v2 sapling-only control written", ok);
         sqlite3_close(src);
     }
 
@@ -261,72 +599,43 @@ int test_snapshot_shielded(void)
         const char *paths[3] = { v1_path, v2_path, v3_path };
         const char *names[3] = { "v1", "v2", "v3" };
         for (int p = 0; p < 3; p++) {
-            FILE *f = fopen(paths[p], "rb");
-            struct sha3_256_ctx c; sha3_256_init(&c);
-            uint8_t buf[4096]; size_t rd;
-            while (f && (rd = fread(buf, 1, sizeof(buf), f)) > 0)
-                sha3_256_write(&c, buf, rd);
-            if (f) fclose(f);
-            uint8_t d[32]; sha3_256_finalize(&c, d);
-            char hex[65];
-            for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
             char nm[64];
             snprintf(nm, sizeof(nm),
                      "%s byte-identical to pre-refactor writer", names[p]);
-            SV_CHECK(nm, f != NULL && strcmp(hex, golden[p]) == 0);
+            SV_CHECK(nm, sv_snapshot_file_matches(paths[p], golden[p]));
         }
     }
 
     /* ── Loader: single-hash verify + shielded round-trip ───────────────── */
     struct uss_header hdr; char err[128] = {0};
-    struct uss_handle *h = uss_open(v3_path, /*verify_full_sha3=*/true,
-                                    v3_sha3, &hdr, err, sizeof(err));
-    SV_CHECK("v3 body SHA3 covers coins+shielded (uss_open verifies)",
-             h != NULL && hdr.version == 3);
+    struct uss_handle *h = NULL;
+    bool v3_open = sv_v3_body_verified(v3_path, v3_sha3, &hdr, err, sizeof(err),
+                                      &h);
+    SV_CHECK("v3 body SHA3 covers coins+shielded (uss_open verifies)", v3_open);
 
-    struct uss_utxo_component v3_component;
-    char component_err[128] = {0};
-    bool component_ok = h && uss_utxo_component_compute(
-        h, &v3_component, component_err, sizeof(component_err));
+    bool component_counts = false, digest_distinct = false;
+    sv_v3_component_flags(h, &hdr, &component_counts, &digest_distinct);
     SV_CHECK("v3 independently recomputes the transparent component",
-             component_ok && v3_component.count == 2 &&
-             v3_component.total_supply == 33333);
+             component_counts);
     SV_CHECK("v3 full-payload digest is distinct from its UTXO commitment",
-             component_ok &&
-             memcmp(hdr.sha3_hash, v3_component.sha3_hash, 32) != 0);
+             digest_distinct);
 
-    const uint8_t *r_sap = NULL, *r_spr = NULL, *r_nf = NULL;
-    uint32_t r_sap_len = 0, r_spr_len = 0; uint64_t r_nf_count = 0;
-    bool got = h && uss_shielded(h, &r_sap, &r_sap_len, &r_spr, &r_spr_len,
-                                 &r_nf, &r_nf_count);
     SV_CHECK("uss_shielded round-trips all three regions",
-             got && r_sap_len == sap_bs.size && r_spr_len == spr_bs.size &&
-             r_nf_count == 2 &&
-             memcmp(r_sap, sap_bs.data, sap_bs.size) == 0 &&
-             memcmp(r_spr, spr_bs.data, spr_bs.size) == 0 &&
-             memcmp(r_nf, nf_recs, sizeof(nf_recs)) == 0);
+             sv_shielded_handle_matches(true, h, &sap_bs, &spr_bs,
+                                       nf_recs, sizeof(nf_recs)));
     if (h) uss_close(h);
 
     /* A v1 handle exposes no shielded section. */
-    h = uss_open(v1_path, true, NULL, &hdr, err, sizeof(err));
-    SV_CHECK("v1 control has no shielded section",
-             h != NULL && hdr.version == 1 &&
-             !uss_shielded(h, &r_sap, &r_sap_len, &r_spr, &r_spr_len,
-                           &r_nf, &r_nf_count));
+    h = NULL;
+    bool v1_bare = sv_v1_has_no_shielded(v1_path, &hdr, err, sizeof(err), &h);
+    SV_CHECK("v1 control has no shielded section", v1_bare);
     if (h) uss_close(h);
 
     /* Tamper: flipping a byte inside the shielded section breaks the body SHA3
      * (the single hash really commits it). */
     {
-        long sz = 0;
-        FILE *f = fopen(v3_path, "rb+");
-        if (f) { fseek(f, 0, SEEK_END); sz = ftell(f);
-                 fseek(f, sz - 1, SEEK_SET);
-                 int c = fgetc(f); fseek(f, sz - 1, SEEK_SET);
-                 fputc(c ^ 0xff, f); fclose(f); }
-        char terr[128] = {0};
-        struct uss_handle *th = uss_open(v3_path, true, NULL, &hdr, terr,
-                                         sizeof(terr));
+        struct uss_handle *th = NULL;
+        sv_open_tampered_snapshot(v3_path, &hdr, &th);
         SV_CHECK("tampered shielded byte fails body SHA3", th == NULL);
         if (th) uss_close(th);
     }
@@ -334,17 +643,11 @@ int test_snapshot_shielded(void)
     /* ── v3 current-state install remains history-incomplete ────────────── */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
         /* Exact primitive sequence of boot_seed_shielded_from_snapshot: reset to
          * seed_h (historical prefix unknown), seed current frontiers, and add
          * supplied nullifier rows under a positive completeness marker. */
-        ok = ok && anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H);
-        ok = ok && anchor_kv_seed_frontier_row(db, ANCHOR_POOL_SAPLING,
-                                               &sap_tree, SEED_H, &sap_root);
-        ok = ok && anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &spr_tree, SEED_H);
-        ok = ok && nullifier_kv_initialize_history(db, SEED_H);
-        ok = ok && nullifier_kv_add(db, nf0, NULLIFIER_POOL_SPROUT, 12);
-        ok = ok && nullifier_kv_add(db, nf1, NULLIFIER_POOL_SAPLING, 27);
+        bool ok = sv_seed_shielded_rows(&db, false, &sap_tree, &spr_tree,
+                                       &sap_root, nf0, nf1);
         SV_CHECK("v3 current-state seed installs cleanly", ok);
 
         struct incremental_merkle_tree lt; struct uint256 lroot; int64_t lh = -1;
@@ -352,23 +655,18 @@ int test_snapshot_shielded(void)
             anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, &lt, &lroot, &lh);
         SV_CHECK("current Sapling frontier is usable for forward folding (matches "
                  "seed root)",
-                 lr == ANCHOR_KV_FOUND && uint256_eq(&lroot, &sap_root) &&
-                 lh == SEED_H);
+                 sv_found_sapling_root(lr, &lroot, &sap_root, lh));
         SV_CHECK("current Sapling anchor row resolves by root",
                  anchor_kv_get(db, ANCHOR_POOL_SAPLING, &sap_root, NULL, NULL)
                      == ANCHOR_KV_FOUND);
         SV_CHECK("older valid Sapling root remains history-incomplete",
                  anchor_kv_get(db, ANCHOR_POOL_SAPLING, &sap_old_root,
                                NULL, NULL) == ANCHOR_KV_HISTORY_INCOMPLETE);
-        bool f0 = false, f1 = false;
         SV_CHECK("supplied nullifier rows are retained",
-                 nullifier_kv_get(db, nf0, NULLIFIER_POOL_SPROUT, &f0, NULL) &&
-                 f0 &&
-                 nullifier_kv_get(db, nf1, NULLIFIER_POOL_SAPLING, &f1, NULL) &&
-                 f1);
+                 sv_supplied_nullifiers_retained(db, nf0, nf1));
         SV_CHECK("supplied rows do not claim complete nullifier history",
                  sv_meta_is(db, "nullifier_kv.activation_cursor", "30"));
-        if (db) sqlite3_close(db);
+        sv_close_sqlite(db);
     }
 
     /* v3 permits an omitted Sprout frontier. That omission is never an empty
@@ -376,28 +674,15 @@ int test_snapshot_shielded(void)
      * actionable history gap, matching the live reducer's JoinSplit hold. */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
-                  anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H) &&
-                  anchor_kv_seed_frontier_row(db, ANCHOR_POOL_SAPLING,
-                                              &sap_tree, SEED_H, &sap_root);
-        struct incremental_merkle_tree latest;
-        struct uint256 root;
-        int64_t height = -1;
-        enum anchor_kv_lookup_result lr = ok ?
-            anchor_kv_latest_tree(db, ANCHOR_POOL_SPROUT, &latest, &root,
-                                  &height) : ANCHOR_KV_ERROR;
-        SV_CHECK("omitted Sprout frontier remains HISTORY_INCOMPLETE",
-                 ok && lr == ANCHOR_KV_HISTORY_INCOMPLETE);
-        if (db) sqlite3_close(db);
+        bool gap = sv_omitted_sprout_incomplete(&db, &sap_tree, &sap_root);
+        SV_CHECK("omitted Sprout frontier remains HISTORY_INCOMPLETE", gap);
+        sv_close_sqlite(db);
     }
 
     /* ── NEGATIVE control: birth-defect restore reproduces the reject ───── */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
-        /* Today's coins-only restore: reset the adoption cursor above genesis
-         * over an EMPTY sapling_anchors table. */
-        ok = ok && anchor_kv_reset_mark_empty_below_in_tx(db, SEED_H);
+        bool ok = sv_birth_defect_cursor_applied(&db);
         SV_CHECK("control restore (cursor above genesis, empty table) applies",
                  ok);
         struct incremental_merkle_tree lt; struct uint256 lroot; int64_t lh = -1;
@@ -410,7 +695,7 @@ int test_snapshot_shielded(void)
                  "HISTORY_INCOMPLETE",
                  anchor_kv_get(db, ANCHOR_POOL_SAPLING, &sap_root, NULL, NULL)
                      == ANCHOR_KV_HISTORY_INCOMPLETE);
-        if (db) sqlite3_close(db);
+        sv_close_sqlite(db);
     }
 
     /* ── v2 seed CO-COMMITS the frontier row (birth-defect CURE at source) ─
@@ -424,31 +709,12 @@ int test_snapshot_shielded(void)
      * (historical prefix remains honestly incomplete). */
     {
         struct main_state ms;
-        main_state_init(&ms);
-        struct uint256 bh;
-        sv_u256(&bh, 0x5a);
-        struct block_index *bi =
-            chainstate_insert_block_index((struct chainstate *)&ms, &bh);
-        bool have_bi = bi != NULL;
-        if (have_bi) {
-            bi->nHeight = SEED_H;
-            bi->hashFinalSaplingRoot = sap_root;   /* header commits the seed root */
-            have_bi = active_chain_install_tip_slot(&ms.chain_active, bi);
-        }
-        SV_CHECK("v2 fixture: seed block_index at SEED_H with header root",
-                 have_bi &&
-                 active_chain_at(&ms.chain_active, SEED_H) == bi);
-
         sqlite3 *db = NULL;
-        bool ok = have_bi && sqlite3_open(":memory:", &db) == SQLITE_OK &&
-                  sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
-                      SQLITE_OK &&
-                  boot_shielded_cure_or_reset_in_tx(
-                      db, &ms, SEED_H,
-                      /*sapling_verified=*/false, /*shielded_v3=*/false,
-                      sap_bs.data, (uint32_t)sap_bs.size,
-                      NULL, 0, NULL, 0) &&
-                  sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+        bool fixture_ok = false, ok = false;
+        sv_commit_v2_cure(&ms, &sap_root, sap_bs.data, (uint32_t)sap_bs.size,
+                          &db, &fixture_ok, &ok);
+        SV_CHECK("v2 fixture: seed block_index at SEED_H with header root",
+                 fixture_ok);
         SV_CHECK("v2 cure_or_reset commits (frontier co-committed)", ok);
 
         struct incremental_merkle_tree lt; struct uint256 lroot; int64_t lh = -1;
@@ -457,15 +723,11 @@ int test_snapshot_shielded(void)
             : ANCHOR_KV_ERROR;
         SV_CHECK("CURE: v2 seed makes Sapling frontier FOUND at seed_h "
                  "(no empty-table stall)",
-                 ok && lr == ANCHOR_KV_FOUND &&
-                 uint256_eq(&lroot, &sap_root) && lh == SEED_H);
-        int64_t sap_cursor = -1; bool sap_found = false;
+                 ok && sv_found_sapling_root(lr, &lroot, &sap_root, lh));
         SV_CHECK("v2 seed keeps the historical prefix incomplete "
                  "(adoption cursor == seed_h)",
-                 ok && anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING,
-                                                   &sap_cursor, &sap_found) &&
-                 sap_found && sap_cursor == SEED_H);
-        if (db) sqlite3_close(db);
+                 sv_sapling_cursor_at_seed(ok, db));
+        sv_close_sqlite(db);
         main_state_free(&ms);
     }
 
@@ -477,65 +739,48 @@ int test_snapshot_shielded(void)
      * closed loop for the frozen legacy v3 current-state path. */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK;
-        ok = ok && anchor_kv_reset_mark_complete_in_tx(db);
-        ok = ok && anchor_kv_seed_frontier_row(db, ANCHOR_POOL_SAPLING,
-                                               &sap_tree, SEED_H, &sap_root);
-        ok = ok && anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &spr_tree, SEED_H);
-        ok = ok && nullifier_kv_ensure_schema(db);
-        ok = ok && nullifier_kv_add(db, nf0, NULLIFIER_POOL_SPROUT, 12);
-        ok = ok && nullifier_kv_add(db, nf1, NULLIFIER_POOL_SAPLING, 27);
+        bool ok = sv_seed_shielded_rows(&db, true, &sap_tree, &spr_tree,
+                                       &sap_root, nf0, nf1);
         SV_CHECK("producer fixture shielded state installs", ok);
 
         struct snapshot_shielded col;
         memset(&col, 0, sizeof(col));
-        bool cok = ok && snapshot_shielded_collect_from_db(db, SEED_H, &col);
+        bool cok = sv_collect_shielded_ok(ok, db, &col);
         SV_CHECK("collect_from_db succeeds", cok);
 
         /* Sapling frontier round-trips (serialize of the stored tree == the
          * original serialization). */
         SV_CHECK("collected Sapling frontier matches",
-                 cok && col.sapling_len == sap_bs.size &&
-                 memcmp(col.sapling, sap_bs.data, sap_bs.size) == 0);
+                 sv_len_and_bytes_match(cok, col.sapling_len, sap_bs.size,
+                                       col.sapling, sap_bs.data, sap_bs.size));
         SV_CHECK("collected Sprout frontier matches",
-                 cok && col.sprout_len == spr_bs.size &&
-                 memcmp(col.sprout, spr_bs.data, spr_bs.size) == 0);
+                 sv_len_and_bytes_match(cok, col.sprout_len, spr_bs.size,
+                                       col.sprout, spr_bs.data, spr_bs.size));
         /* Nullifiers: 2 rows, deterministic (pool, nf) order == nf0 then nf1. */
         SV_CHECK("collected nullifier set matches (count + bytes)",
-                 cok && col.nf_count == 2 &&
-                 memcmp(col.nf_records, nf_recs, sizeof(nf_recs)) == 0);
+                 sv_len_and_bytes_match(cok, col.nf_count, 2,
+                                       col.nf_records, nf_recs, sizeof(nf_recs)));
 
         /* collect -> write -> read closes the loop: the collected struct emits a
          * v3 snapshot whose shielded regions the loader returns unchanged. */
         char cpath[320];
         snprintf(cpath, sizeof(cpath), "%s/collected-v3.snapshot", dir);
         sqlite3 *csrc = NULL;
-        uint8_t csha3[32] = {0}; uint64_t cc = 0; int64_t cs = 0;
-        bool wok = cok && sqlite3_open(":memory:", &csrc) == SQLITE_OK &&
-                   sv_seed_coins(csrc) &&
-                   coins_kv_snapshot_write(csrc, cpath, SEED_H, anchor_hash,
-                                           &col, csha3, &cc, &cs);
-        SV_CHECK("collected struct writes a v3 snapshot", wok && cc == 2);
-        if (csrc) sqlite3_close(csrc);
+        uint8_t csha3[32] = {0};
+        bool wok = sv_write_seeded_snapshot(cok, cpath, anchor_hash, &col,
+                                           csha3, &csrc);
+        SV_CHECK("collected struct writes a v3 snapshot", wok);
+        sv_close_sqlite(csrc);
 
-        char cerr[128] = {0}; struct uss_header chdr;
-        struct uss_handle *ch = wok ? uss_open(cpath, true, csha3, &chdr, cerr,
-                                               sizeof(cerr)) : NULL;
-        const uint8_t *c_sap = NULL, *c_spr = NULL, *c_nf = NULL;
-        uint32_t c_sap_len = 0, c_spr_len = 0; uint64_t c_nf_count = 0;
-        bool rok = ch && chdr.version == 3 &&
-                   uss_shielded(ch, &c_sap, &c_sap_len, &c_spr, &c_spr_len,
-                                &c_nf, &c_nf_count);
+        struct uss_handle *ch = NULL;
+        bool roundtrip = sv_reload_collected_regions(
+            wok, cpath, csha3, &sap_bs, &spr_bs, nf_recs, sizeof(nf_recs), &ch);
         SV_CHECK("collected v3 snapshot loader round-trips all regions",
-                 rok && c_sap_len == sap_bs.size && c_spr_len == spr_bs.size &&
-                 c_nf_count == 2 &&
-                 memcmp(c_sap, sap_bs.data, sap_bs.size) == 0 &&
-                 memcmp(c_spr, spr_bs.data, spr_bs.size) == 0 &&
-                 memcmp(c_nf, nf_recs, sizeof(nf_recs)) == 0);
+                 roundtrip);
         if (ch) uss_close(ch);
 
         snapshot_shielded_free_collected(&col);
-        if (db) sqlite3_close(db);
+        sv_close_sqlite(db);
     }
 
     /* Legacy/v1/v2 reset cannot inherit an old explicit-complete nullifier
@@ -543,28 +788,10 @@ int test_snapshot_shielded(void)
      * incomplete at the seed boundary in the same outer transaction. */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
-                  progress_meta_table_ensure(db) &&
-                  progress_meta_set(db, "nullifier_kv.activation_cursor",
-                                    "0", 1) &&
-                  sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
-                      SQLITE_OK &&
-                  boot_shielded_cure_or_reset_in_tx(
-                      db, NULL, SEED_H, false, false,
-                      NULL, 0, NULL, 0, NULL, 0) &&
-                  sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
-        int64_t sprout_cursor = -1, sapling_cursor = -1;
-        bool sprout_found = false, sapling_found = false;
-        ok = ok && anchor_kv_activation_cursor(
-                       db, ANCHOR_POOL_SPROUT, &sprout_cursor, &sprout_found) &&
-                  anchor_kv_activation_cursor(
-                       db, ANCHOR_POOL_SAPLING, &sapling_cursor,
-                       &sapling_found);
+        bool ok = sv_legacy_reset_committed(&db);
         SV_CHECK("legacy reset marks both shielded histories incomplete",
-                 ok && sprout_found && sapling_found &&
-                 sprout_cursor == SEED_H && sapling_cursor == SEED_H &&
-                 sv_meta_is(db, "nullifier_kv.activation_cursor", "30"));
-        if (db) sqlite3_close(db);
+                 sv_legacy_markers_at_seed(ok, db));
+        sv_close_sqlite(db);
     }
 
     /* Legacy dynamic-typing regression: SQLite's column_int64 would coerce
@@ -572,14 +799,9 @@ int test_snapshot_shielded(void)
      * closed, and the strengthened new schema must reject it at insertion. */
     {
         sqlite3 *db = NULL;
-        bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
-                  anchor_kv_ensure_schema(db);
-        int rc = ok ? sqlite3_exec(db,
-            "INSERT INTO anchor_state(pool,activation_cursor) "
-            "VALUES(0,'junk')", NULL, NULL, NULL) : SQLITE_ERROR;
-        SV_CHECK("new anchor_state schema rejects non-INTEGER cursor",
-                 ok && rc != SQLITE_OK);
-        if (db) sqlite3_close(db);
+        bool rejected = sv_schema_rejects_text_cursor(&db);
+        SV_CHECK("new anchor_state schema rejects non-INTEGER cursor", rejected);
+        sv_close_sqlite(db);
     }
     {
         static const char *const bad_values[] = {
@@ -588,25 +810,12 @@ int test_snapshot_shielded(void)
         static const char *const names[] = { "TEXT", "BLOB", "REAL" };
         for (size_t i = 0; i < sizeof(bad_values) / sizeof(bad_values[0]); i++) {
             sqlite3 *db = NULL;
-            bool ok = sqlite3_open(":memory:", &db) == SQLITE_OK &&
-                      sqlite3_exec(db,
-                          "CREATE TABLE anchor_state("
-                          "pool INTEGER PRIMARY KEY, activation_cursor) "
-                          "WITHOUT ROWID", NULL, NULL, NULL) == SQLITE_OK;
-            char sql[128];
-            snprintf(sql, sizeof(sql),
-                     "INSERT INTO anchor_state VALUES(0,%s)", bad_values[i]);
-            ok = ok && sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
-            int64_t cursor = 99;
-            bool found = true;
-            bool read_ok = ok && anchor_kv_activation_cursor(
-                                      db, ANCHOR_POOL_SPROUT,
-                                      &cursor, &found);
+            bool closed = sv_legacy_storage_class_fails(bad_values[i], &db);
             char label[96];
             snprintf(label, sizeof(label),
                      "legacy anchor cursor %s storage fails closed", names[i]);
-            SV_CHECK(label, ok && !read_ok && !found && cursor == 0);
-            if (db) sqlite3_close(db);
+            SV_CHECK(label, closed);
+            sv_close_sqlite(db);
         }
     }
 
