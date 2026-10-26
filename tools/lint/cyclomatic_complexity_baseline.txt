@@ -2289,7 +2289,6 @@ tests/harness/src/test_sync_reduce_fuzz.c:is_progress_event:21
 tests/harness/src/test_sync_reduce_fuzz.c:legal_next:23
 tests/harness/src/test_sync_watchdog_conditions.c:test_sync_watchdog_conditions:150
 tests/harness/src/test_syncdiag_agent_codemap.c:syncdiag_cases_agent_codemap:84
-tests/harness/src/test_syncdiag_agent_contracts.c:syncdiag_cases_agent_contracts:170
 tests/harness/src/test_syncdiag_agent_interface.c:syncdiag_cases_agent_interface:357
 tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:213
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:163
