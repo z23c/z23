@@ -77,30 +77,16 @@ static void zdir_t_base_params(struct zdir_params *p, const uint8_t ck[32])
     p->want = 8;
 }
 
-int test_zdir_selection(void)
+/* ── 1. FROZEN GOLDEN VECTORS ─────────────────────────────────────
+ * Preimages, byte for byte:
+ *   client_key  = SHA3-256(00 ‖ "ZDIR" ‖ 00 01 .. 1f)
+ *   seed        = SHA3-256(01 ‖ "ZDIR" ‖ a0 a1 .. bf ‖ client_key)
+ *   score       = SHA3-256(02 ‖ "ZDIR" ‖ seed ‖ 11×32)
+ *   endpoint_id = SHA3-256(03 ‖ "ZDIR" ‖ ::ffff:10.0.0.7 ‖ 00×32 ‖ 00
+ *                          ‖ 61 1f)         (port 8033, little-endian)
+ * All four confirmed against openssl dgst -sha3-256. */
+static int zdir_t_frozen_golden_vectors(const uint8_t client_key[32])
 {
-    int failures = 0;
-
-    /* The canonical node secret for every vector below: addrman nKey bytes
-     * 0x00..0x1f. */
-    uint8_t secret[32];
-    for (int i = 0; i < 32; i++)
-        secret[i] = (uint8_t)i;
-
-    uint8_t client_key[32];
-    if (!zdir_client_key(client_key, secret)) {
-        printf("zdir_selection: client key derivation... FAIL (returned false)\n");
-        return 1;   /* everything downstream depends on this */
-    }
-
-    /* ── 1. FROZEN GOLDEN VECTORS ─────────────────────────────────────
-     * Preimages, byte for byte:
-     *   client_key  = SHA3-256(00 ‖ "ZDIR" ‖ 00 01 .. 1f)
-     *   seed        = SHA3-256(01 ‖ "ZDIR" ‖ a0 a1 .. bf ‖ client_key)
-     *   score       = SHA3-256(02 ‖ "ZDIR" ‖ seed ‖ 11×32)
-     *   endpoint_id = SHA3-256(03 ‖ "ZDIR" ‖ ::ffff:10.0.0.7 ‖ 00×32 ‖ 00
-     *                          ‖ 61 1f)         (port 8033, little-endian)
-     * All four confirmed against openssl dgst -sha3-256. */
     printf("zdir_selection: frozen golden vectors... ");
     {
         static const char *kGoldClientKey =
@@ -146,15 +132,19 @@ int test_zdir_selection(void)
             printf("\n  want       %s\n  endpoint   ", kGoldScore);
             zdir_t_print_hex(endpoint, 32);
             printf("\n  want       %s\n", kGoldEndpoint);
-            failures++;
+            return 1;
         }
     }
+    return 0;
+}
 
-    /* ── 2. domain separation ─────────────────────────────────────────
-     * The same 64-byte payload pushed through the seed and candidate
-     * sub-domains must not collide, and neither may equal the untagged
-     * SHA3-256(a ‖ b) that a naive implementation would produce. A digest
-     * minted here can never be replayed as another protocol's digest. */
+/* ── 2. domain separation ─────────────────────────────────────────
+ * The same 64-byte payload pushed through the seed and candidate
+ * sub-domains must not collide, and neither may equal the untagged
+ * SHA3-256(a ‖ b) that a naive implementation would produce. A digest
+ * minted here can never be replayed as another protocol's digest. */
+static int zdir_t_domain_separation(void)
+{
     printf("zdir_selection: domain separation across sub-domains... ");
     {
         uint8_t a[32], b[32];
@@ -181,10 +171,14 @@ int test_zdir_selection(void)
         ok = ok && memcmp(ck_a, untagged, 32) != 0;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (sub-domain digests collided)\n"); failures++; }
+        else { printf("FAIL (sub-domain digests collided)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 3. purity: repeated calls are byte-identical ─────────────────── */
+/* ── 3. purity: repeated calls are byte-identical ─────────────────── */
+static int zdir_t_derivation_repeatable(const uint8_t client_key[32])
+{
     printf("zdir_selection: derivation is pure and repeatable... ");
     {
         struct zdir_candidate c[16];
@@ -202,10 +196,15 @@ int test_zdir_selection(void)
         ok = ok && s1.preferred_count == 8;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (count=%u)\n", s1.preferred_count); failures++; }
+        else { printf("FAIL (count=%u)\n", s1.preferred_count); return 1; }
     }
+    return 0;
+}
 
-    /* ── 4. NO GLOBAL ANSWER: one bit of client_key reorders everything ─ */
+/* ── 4. NO GLOBAL ANSWER: one bit of client_key reorders everything ─ */
+static int zdir_t_client_key_reorders(const uint8_t secret[32],
+                                      const uint8_t client_key[32])
+{
     printf("zdir_selection: one-bit client-key change reorders selection... ");
     {
         uint8_t secret2[32], ck2[32];
@@ -228,13 +227,17 @@ int test_zdir_selection(void)
                           sizeof(s1.preferred)) != 0;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (two clients agreed — monoculture)\n"); failures++; }
+        else { printf("FAIL (two clients agreed — monoculture)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 5. global diversification across many clients ────────────────
-     * 64 distinct clients over 16 relays: every relay must be chosen by
-     * someone (no relay is structurally unreachable) and no relay may be
-     * chosen by every client (no single target serves the whole network). */
+/* ── 5. global diversification across many clients ────────────────
+ * 64 distinct clients over 16 relays: every relay must be chosen by
+ * someone (no relay is structurally unreachable) and no relay may be
+ * chosen by every client (no single target serves the whole network). */
+static int zdir_t_clients_diversify(void)
+{
     printf("zdir_selection: 64 clients diversify across the candidate set... ");
     {
         struct zdir_candidate c[16];
@@ -270,11 +273,15 @@ int test_zdir_selection(void)
         if (ok) printf("OK\n");
         else {
             printf("FAIL (never_chosen=%u always_chosen=%u)\n", never, always);
-            failures++;
+            return 1;
         }
     }
+    return 0;
+}
 
-    /* ── 6. advancing the block hash rotates the ordering ─────────────── */
+/* ── 6. advancing the block hash rotates the ordering ─────────────── */
+static int zdir_t_block_hash_rotates(const uint8_t client_key[32])
+{
     printf("zdir_selection: new block hash rotates the preference set... ");
     {
         struct zdir_candidate c[16];
@@ -293,28 +300,38 @@ int test_zdir_selection(void)
                           sizeof(s1.preferred)) != 0;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (block hash did not rotate selection)\n"); failures++; }
+        else { printf("FAIL (block hash did not rotate selection)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 7. ADVISORY: weights are bounded in [1.0, 4.0], always ──────── */
-    printf("zdir_selection: weight range is bounded and never below neutral... ");
-    {
-        bool ok = true;
-        static const uint32_t kFull[] = { 0u, 1u, 10u, 10000u, 4000000u };
-        static const uint32_t kAges[] = { 0u, 1u, 5000u, 10000u, 999999999u };
+static bool zdir_t_weight_grid_in_band(void)
+{
+    bool ok = true;
+    static const uint32_t kFull[] = { 0u, 1u, 10u, 10000u, 4000000u };
+    static const uint32_t kAges[] = { 0u, 1u, 5000u, 10000u, 999999999u };
 
-        for (unsigned f = 0; ok && f < sizeof(kFull) / sizeof(kFull[0]); f++) {
-            for (unsigned a = 0; ok && a < sizeof(kAges) / sizeof(kAges[0]); a++) {
-                for (unsigned bw = 0; ok && bw <= 255u; bw++) {
-                    uint16_t w = zdir_weight_milli((uint8_t)bw, kAges[a],
-                                                   kFull[f]);
-                    double m = zdir_weight_multiplier(w);
-                    ok = w >= ZDIR_WEIGHT_NEUTRAL_MILLI &&
-                         w <= ZDIR_WEIGHT_MAX_MILLI &&
-                         m >= 1.0 && m <= 4.0;
-                }
+    for (unsigned f = 0; ok && f < sizeof(kFull) / sizeof(kFull[0]); f++) {
+        for (unsigned a = 0; ok && a < sizeof(kAges) / sizeof(kAges[0]); a++) {
+            for (unsigned bw = 0; ok && bw <= 255u; bw++) {
+                uint16_t w = zdir_weight_milli((uint8_t)bw, kAges[a],
+                                               kFull[f]);
+                double m = zdir_weight_multiplier(w);
+                ok = w >= ZDIR_WEIGHT_NEUTRAL_MILLI &&
+                     w <= ZDIR_WEIGHT_MAX_MILLI &&
+                     m >= 1.0 && m <= 4.0;
             }
         }
+    }
+    return ok;
+}
+
+/* ── 7. ADVISORY: weights are bounded in [1.0, 4.0], always ──────── */
+static int zdir_t_weight_range_bounded(void)
+{
+    printf("zdir_selection: weight range is bounded and never below neutral... ");
+    {
+        bool ok = zdir_t_weight_grid_in_band();
         /* Anchor values: no bandwidth or no seniority ⇒ exactly neutral;
          * full bandwidth + full seniority ⇒ the ceiling, never past it. */
         ok = ok && zdir_weight_milli(0, 10000, 10000) ==
@@ -337,10 +354,14 @@ int test_zdir_selection(void)
         }
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (weight escaped the advisory band)\n"); failures++; }
+        else { printf("FAIL (weight escaped the advisory band)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 8. ADVISORY: non-preferred candidates land on exact neutral ──── */
+/* ── 8. ADVISORY: non-preferred candidates land on exact neutral ──── */
+static int zdir_t_unpreferred_neutral(const uint8_t client_key[32])
+{
     printf("zdir_selection: unpreferred candidates keep neutral weight... ");
     {
         struct zdir_candidate c[16];
@@ -367,13 +388,17 @@ int test_zdir_selection(void)
         }
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (a non-preferred candidate was steered)\n"); failures++; }
+        else { printf("FAIL (a non-preferred candidate was steered)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 9. per-owner influence cap ───────────────────────────────────
-     * A Sybil owner that registers many relays cannot take the whole
-     * preferred set — and the relays it loses are merely un-boosted (test 8
-     * proves they stay dialable at neutral), never excluded. */
+/* ── 9. per-owner influence cap ───────────────────────────────────
+ * A Sybil owner that registers many relays cannot take the whole
+ * preferred set — and the relays it loses are merely un-boosted (test 8
+ * proves they stay dialable at neutral), never excluded. */
+static int zdir_t_per_owner_cap(const uint8_t client_key[32])
+{
     printf("zdir_selection: per-owner cap bounds one owner's slots... ");
     {
         struct zdir_candidate c[16];
@@ -403,10 +428,14 @@ int test_zdir_selection(void)
         ok = ok && s0.preferred_count == 4;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (count=%u)\n", s.preferred_count); failures++; }
+        else { printf("FAIL (count=%u)\n", s.preferred_count); return 1; }
     }
+    return 0;
+}
 
-    /* ── 10. total order ⇒ invariant under input permutation ─────────── */
+/* ── 10. total order ⇒ invariant under input permutation ─────────── */
+static int zdir_t_permutation_invariant(const uint8_t client_key[32])
+{
     printf("zdir_selection: result invariant under candidate permutation... ");
     {
         struct zdir_candidate c[16], r[16];
@@ -430,10 +459,14 @@ int test_zdir_selection(void)
         }
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (ordering depended on array order)\n"); failures++; }
+        else { printf("FAIL (ordering depended on array order)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 11. degenerate inputs are total, not fatal ───────────────────── */
+/* ── 11. degenerate inputs are total, not fatal ───────────────────── */
+static int zdir_t_degenerate_sets(const uint8_t client_key[32])
+{
     printf("zdir_selection: empty / short / oversized candidate sets... ");
     {
         struct zdir_params p;
@@ -462,10 +495,25 @@ int test_zdir_selection(void)
         ok = ok && s.preferred_count == (uint32_t)ZDIR_PREFERRED_MAX;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 12. null / overflow arguments are rejected and logged ────────── */
+static bool zdir_t_select_rejects_bad_args(const struct zdir_params *p,
+                                           const struct zdir_candidate *c,
+                                           struct zdir_selection *s)
+{
+    bool ok = !zdir_select(NULL, c, 1, NULL, s);
+    ok = ok && !zdir_select(p, c, 1, NULL, NULL);
+    ok = ok && !zdir_select(p, NULL, 1, NULL, s);
+    ok = ok && !zdir_select(p, c, (size_t)ZDIR_CANDIDATES_MAX + 1, NULL, s);
+    return ok;
+}
+
+/* ── 12. null / overflow arguments are rejected and logged ────────── */
+static int zdir_t_invalid_args_rejected(const uint8_t client_key[32])
+{
     printf("zdir_selection: invalid arguments rejected... ");
     {
         uint8_t out[32], a[32];
@@ -483,21 +531,22 @@ int test_zdir_selection(void)
         ok = ok && !zdir_epoch_seed(out, a, NULL);
         ok = ok && !zdir_candidate_score(out, NULL, a);
         ok = ok && !zdir_endpoint_id(out, NULL, 1);
-        ok = ok && !zdir_select(NULL, c, 1, NULL, &s);
-        ok = ok && !zdir_select(&p, c, 1, NULL, NULL);
-        ok = ok && !zdir_select(&p, NULL, 1, NULL, &s);
-        ok = ok && !zdir_select(&p, c, (size_t)ZDIR_CANDIDATES_MAX + 1, NULL, &s);
+        ok = ok && zdir_t_select_rejects_bad_args(&p, c, &s);
         ok = ok && !zdir_candidates_from_anchors(NULL, NULL, 0, NULL);
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (an invalid argument was accepted)\n"); failures++; }
+        else { printf("FAIL (an invalid argument was accepted)\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── 13. FROZEN GOLDEN SELECTION ──────────────────────────────────
-     * The whole pipeline, end to end, over the 16-relay fixture:
-     * client_key from secret 00..1f, block hash a0..bf, chain_height 20000,
-     * seniority_full 10000, per_owner_cap 2, want 8. If this list moves,
-     * every node's preference ordering moved with it. */
+/* ── 13. FROZEN GOLDEN SELECTION ──────────────────────────────────
+ * The whole pipeline, end to end, over the 16-relay fixture:
+ * client_key from secret 00..1f, block hash a0..bf, chain_height 20000,
+ * seniority_full 10000, per_owner_cap 2, want 8. If this list moves,
+ * every node's preference ordering moved with it. */
+static int zdir_t_frozen_selection(const uint8_t client_key[32])
+{
     printf("zdir_selection: frozen end-to-end selection vector... ");
     {
         static const uint32_t kGoldPreferred[8] = { 10, 6, 7, 13, 15, 9, 8, 4 };
@@ -534,11 +583,28 @@ int test_zdir_selection(void)
             for (int i = 0; i < 16; i++)
                 printf(" %u", w[i]);
             printf("\n");
-            failures++;
+            return 1;
         }
     }
+    return 0;
+}
 
-    /* ── 14. anchors.dat adapter (reuse, not a parallel peer store) ───── */
+static bool zdir_t_anchor_ids_distinct(const struct zdir_candidate *c, size_t n)
+{
+    bool ok = true;
+    /* Distinct endpoints ⇒ distinct ids; each anchor owns itself. */
+    for (size_t i = 0; ok && i < n; i++) {
+        ok = memcmp(c[i].id, c[i].owner_id, 32) == 0;
+        ok = ok && c[i].bandwidth_score == 0;
+        for (size_t j = 0; ok && j < i; j++)
+            ok = memcmp(c[i].id, c[j].id, 32) != 0;
+    }
+    return ok;
+}
+
+/* ── 14. anchors.dat adapter (reuse, not a parallel peer store) ───── */
+static int zdir_t_anchors_adapt(const uint8_t client_key[32])
+{
     printf("zdir_selection: anchor set adapts into candidates... ");
     {
         struct anchor_peer_set set;
@@ -555,14 +621,7 @@ int test_zdir_selection(void)
         size_t n = 0;
         bool ok = zdir_candidates_from_anchors(&set, c, ANCHOR_PEERS_MAX, &n);
         ok = ok && n == (size_t)ANCHOR_PEERS_MAX;
-
-        /* Distinct endpoints ⇒ distinct ids; each anchor owns itself. */
-        for (size_t i = 0; ok && i < n; i++) {
-            ok = memcmp(c[i].id, c[i].owner_id, 32) == 0;
-            ok = ok && c[i].bandwidth_score == 0;
-            for (size_t j = 0; ok && j < i; j++)
-                ok = memcmp(c[i].id, c[j].id, 32) != 0;
-        }
+        ok = ok && zdir_t_anchor_ids_distinct(c, n);
 
         /* Unmeasured anchors carry no weight opinion at all. */
         struct zdir_params p;
@@ -583,8 +642,41 @@ int test_zdir_selection(void)
         ok = ok && n2 == 3;
 
         if (ok) printf("OK\n");
-        else { printf("FAIL (n=%zu)\n", n); failures++; }
+        else { printf("FAIL (n=%zu)\n", n); return 1; }
     }
+    return 0;
+}
+
+int test_zdir_selection(void)
+{
+    int failures = 0;
+
+    /* The canonical node secret for every vector below: addrman nKey bytes
+     * 0x00..0x1f. */
+    uint8_t secret[32];
+    for (int i = 0; i < 32; i++)
+        secret[i] = (uint8_t)i;
+
+    uint8_t client_key[32];
+    if (!zdir_client_key(client_key, secret)) {
+        printf("zdir_selection: client key derivation... FAIL (returned false)\n");
+        return 1;   /* everything downstream depends on this */
+    }
+
+    failures += zdir_t_frozen_golden_vectors(client_key);
+    failures += zdir_t_domain_separation();
+    failures += zdir_t_derivation_repeatable(client_key);
+    failures += zdir_t_client_key_reorders(secret, client_key);
+    failures += zdir_t_clients_diversify();
+    failures += zdir_t_block_hash_rotates(client_key);
+    failures += zdir_t_weight_range_bounded();
+    failures += zdir_t_unpreferred_neutral(client_key);
+    failures += zdir_t_per_owner_cap(client_key);
+    failures += zdir_t_permutation_invariant(client_key);
+    failures += zdir_t_degenerate_sets(client_key);
+    failures += zdir_t_invalid_args_rejected(client_key);
+    failures += zdir_t_frozen_selection(client_key);
+    failures += zdir_t_anchors_adapt(client_key);
 
     return failures;
 }

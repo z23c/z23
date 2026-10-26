@@ -1868,7 +1868,6 @@ tests/harness/src/test_zcode_swarm_net.c:zwn_read_package_file:20
 tests/harness/src/test_zcode_swarm_net.c:zwn_t_redundant_publish_disappear:26
 tests/harness/src/test_zcode_swarm_net.c:zwn_test_golden:36
 tests/harness/src/test_zdesc.c:zd_case_publish_fetch:25
-tests/harness/src/test_zdir_selection.c:test_zdir_selection:131
 tests/harness/src/test_zdir_write_path.c:t_full_loop:44
 tests/harness/src/test_zdir_write_path.c:t_owner_proof:17
 tests/harness/src/test_zendp_revocation.c:zr_case_dumper:26
