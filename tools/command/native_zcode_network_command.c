@@ -147,11 +147,10 @@ static enum zdn_existing_result zdn_existing_sequence(const char *datadir,
   return ZDN_EXISTING_VALID;
 }
 
-void zcl_native_handle_zcode_network_delegate(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply) {
-  if (!request || !reply)
-    return;
+static bool zdn_delegate_check_inputs(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply,
+                                      const char **seed_out,
+                                      const char **datadir_out) {
   const char *seed_file = zdn_str(request->input, "seed_file");
   const char *datadir = zdn_str(request->input, "datadir");
   if (!datadir || !datadir[0])
@@ -159,103 +158,143 @@ void zcl_native_handle_zcode_network_delegate(
   if (!seed_file || !seed_file[0] || !datadir || !datadir[0]) {
     zdn_fail(reply, "MISSING_INPUT", "normalize",
              "seed_file and datadir are required", ZDN_COMMAND);
-    return;
+    return false;
   }
+  *seed_out = seed_file;
+  *datadir_out = datadir;
+  return true;
+}
 
+static bool zdn_delegate_check_window(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply,
+                                      uint64_t *now_out, uint64_t *expiry_out) {
   uint64_t now = (uint64_t)platform_time_wall_unix();
   bool supplied = false;
   if (!zdn_u64(request->input, "now", &now, &supplied)) {
     zdn_fail(reply, "BAD_NOW", "normalize", "now must be uint64", ZDN_COMMAND);
-    return;
+    return false;
   }
   if (now > (uint64_t)INT64_MAX ||
       now > UINT64_MAX - VCS_ZCODE_DHT_DELEGATION_DEFAULT_SECONDS) {
     zdn_fail(reply, "BAD_NOW", "normalize",
              "now is outside the supported signed time range", ZDN_COMMAND);
-    return;
+    return false;
   }
   uint64_t expiry = now + VCS_ZCODE_DHT_DELEGATION_DEFAULT_SECONDS;
   if (!zdn_u64(request->input, "expiry", &expiry, &supplied) || expiry <= now) {
     zdn_fail(reply, "BAD_WINDOW", "normalize",
              "expiry must be a uint64 strictly after now", ZDN_COMMAND);
-    return;
+    return false;
   }
   if (expiry > (uint64_t)INT64_MAX) {
     zdn_fail(reply, "BAD_WINDOW", "normalize",
              "expiry is outside the supported signed time range", ZDN_COMMAND);
-    return;
+    return false;
   }
+  *now_out = now;
+  *expiry_out = expiry;
+  return true;
+}
 
-  uint8_t master_seed[32], master_pub[32], master_secret_copy[32];
-  char err[192] = {0};
-  if (!zcl_native_read_master_seed_file(seed_file, master_seed, err, sizeof(err))) {
+static bool zdn_delegate_load_master_key(const char *seed_file,
+                                         struct zcl_command_reply *reply,
+                                         uint8_t master_seed[32],
+                                         uint8_t master_pub[32], char *err,
+                                         size_t err_cap) {
+  uint8_t master_secret_copy[32];
+  if (!zcl_native_read_master_seed_file(seed_file, master_seed, err,
+                                        err_cap)) {
     zdn_fail(reply, "MASTER_SEED_UNREADABLE", "normalize", err, seed_file);
-    return;
+    return false;
   }
   zcl_ed25519_keypair(master_pub, master_secret_copy, master_seed);
   memory_cleanse(master_secret_copy, sizeof(master_secret_copy));
+  return true;
+}
 
+static bool zdn_delegate_find_active_identity(
+    const char *datadir, struct zcl_command_reply *reply,
+    uint8_t master_seed[32], uint8_t master_pub[32],
+    struct zid_identity *identity) {
   sqlite3 *db = NULL;
   struct node_db ndb;
   if (!zcl_native_node_db_require_readonly(
           datadir, reply, "the ZID anchor projection", &db, &ndb)) {
-    memory_cleanse(master_seed, sizeof(master_seed));
-    return;
+    memory_cleanse(master_seed, 32);
+    return false;
   }
-  struct zid_identity identity;
-  bool found = db_zid_identity_find(&ndb, master_pub, &identity);
+  bool found = db_zid_identity_find(&ndb, master_pub, identity);
   zcl_native_node_db_close_readonly(&db, &ndb);
-  if (!found || strcmp(identity.status, ZID_IDENTITY_STATUS_ACTIVE) != 0) {
-    memory_cleanse(master_seed, sizeof(master_seed));
+  if (!found || strcmp(identity->status, ZID_IDENTITY_STATUS_ACTIVE) != 0) {
+    memory_cleanse(master_seed, 32);
     zdn_fail(reply, found ? "MASTER_NOT_ACTIVE" : "MASTER_NOT_ANCHORED",
              "authorize", "master identity must be ACTIVE on-chain",
              ZDN_COMMAND);
-    return;
+    return false;
   }
-  if (identity.anchor_height < 0 ||
-      identity.anchor_height > INT_MAX - 2 * ZCL_FINALITY_DEPTH) {
-    memory_cleanse(master_seed, sizeof(master_seed));
+  return true;
+}
+
+static bool zdn_delegate_resolve_beacon(
+    const struct zid_identity *identity, struct zcl_command_reply *reply,
+    uint8_t master_seed[32], uint32_t *height_out,
+    struct uint256 *beacon_out) {
+  if (identity->anchor_height < 0 ||
+      identity->anchor_height > INT_MAX - 2 * ZCL_FINALITY_DEPTH) {
+    memory_cleanse(master_seed, 32);
     zdn_fail(reply, "ANCHOR_HEIGHT_INVALID", "authorize",
              "anchor height cannot produce a final beacon", ZDN_COMMAND);
-    return;
+    return false;
   }
   int64_t tip = -1;
   zcl_native_bridge_ensure_rpc();
   if (!zdn_rpc_int("getblockcount", 0, false, &tip)) {
-    memory_cleanse(master_seed, sizeof(master_seed));
+    memory_cleanse(master_seed, 32);
     zdn_fail(reply, "CHAIN_UNAVAILABLE", "authorize",
              "running node did not return its provable tip", ZDN_COMMAND);
-    return;
+    return false;
   }
   uint32_t beacon_height =
-      (uint32_t)(identity.anchor_height + ZCL_FINALITY_DEPTH);
+      (uint32_t)(identity->anchor_height + ZCL_FINALITY_DEPTH);
   if (tip < (int64_t)beacon_height + ZCL_FINALITY_DEPTH) {
-    memory_cleanse(master_seed, sizeof(master_seed));
+    memory_cleanse(master_seed, 32);
     zdn_fail(reply, "BEACON_PROVISIONAL", "authorize",
              "the identity beacon is not itself ten blocks deep", ZDN_COMMAND);
-    return;
+    return false;
   }
-  struct uint256 beacon;
-  if (!zdn_rpc_block_hash(beacon_height, &beacon)) {
-    memory_cleanse(master_seed, sizeof(master_seed));
+  if (!zdn_rpc_block_hash(beacon_height, beacon_out)) {
+    memory_cleanse(master_seed, 32);
     zdn_fail(reply, "BEACON_UNAVAILABLE", "authorize",
              "running node could not resolve the beacon block", ZDN_COMMAND);
-    return;
+    return false;
   }
+  *height_out = beacon_height;
+  return true;
+}
 
-  uint8_t noise_seed[32], noise_pub[32], online_seed[32], online_pub[32];
+static bool zdn_delegate_load_online_keys(
+    const char *datadir, struct zcl_command_reply *reply,
+    uint8_t master_seed[32], uint8_t online_seed[32], uint8_t noise_pub[32],
+    uint8_t online_pub[32], char *err, size_t err_cap) {
+  uint8_t noise_seed[32];
   if (!v2_identity_load_or_create(datadir, noise_seed, noise_pub, err,
-                                  sizeof(err)) ||
+                                  err_cap) ||
       !vcs_zcode_dht_online_key_load_or_create(datadir, online_seed, online_pub,
-                                               err, sizeof(err))) {
+                                               err, err_cap)) {
     memory_cleanse(master_seed, 32);
     memory_cleanse(noise_seed, 32);
     memory_cleanse(online_seed, 32);
     zdn_fail(reply, "IDENTITY_IO", "persist", err, ZDN_COMMAND);
-    return;
+    return false;
   }
-  memory_cleanse(noise_seed, sizeof(noise_seed));
+  memory_cleanse(noise_seed, 32);
+  return true;
+}
 
+static bool zdn_delegate_resolve_sequence(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *datadir, uint8_t master_seed[32], uint8_t online_seed[32],
+    char *err, size_t err_cap, uint64_t *sequence_out) {
   uint64_t sequence = 1, previous = 0;
   bool seq_present = false;
   if (!zdn_u64(request->input, "sequence", &sequence, &seq_present)) {
@@ -263,16 +302,16 @@ void zcl_native_handle_zcode_network_delegate(
     memory_cleanse(online_seed, 32);
     zdn_fail(reply, "BAD_SEQUENCE", "normalize", "sequence must be uint64",
              ZDN_COMMAND);
-    return;
+    return false;
   }
   enum zdn_existing_result existing =
-      zdn_existing_sequence(datadir, &previous, err, sizeof(err));
+      zdn_existing_sequence(datadir, &previous, err, err_cap);
   if (existing == ZDN_EXISTING_CORRUPT) {
     memory_cleanse(master_seed, 32);
     memory_cleanse(online_seed, 32);
     zdn_fail(reply, "EXISTING_DELEGATION_CORRUPT", "normalize", err,
              ZDN_COMMAND);
-    return;
+    return false;
   }
   if (existing == ZDN_EXISTING_VALID) {
     if (!seq_present) {
@@ -281,7 +320,7 @@ void zcl_native_handle_zcode_network_delegate(
         memory_cleanse(online_seed, 32);
         zdn_fail(reply, "SEQUENCE_OVERFLOW", "normalize",
                  "delegation sequence cannot advance", ZDN_COMMAND);
-        return;
+        return false;
       }
       sequence = previous + 1;
     } else if (sequence <= previous) {
@@ -289,7 +328,7 @@ void zcl_native_handle_zcode_network_delegate(
       memory_cleanse(online_seed, 32);
       zdn_fail(reply, "STALE_SEQUENCE", "normalize",
                "sequence must exceed the filed delegation", ZDN_COMMAND);
-      return;
+      return false;
     }
   }
   if (sequence > (uint64_t)INT64_MAX) {
@@ -297,9 +336,18 @@ void zcl_native_handle_zcode_network_delegate(
     memory_cleanse(online_seed, 32);
     zdn_fail(reply, "BAD_SEQUENCE", "normalize",
              "sequence is outside the supported signed range", ZDN_COMMAND);
-    return;
+    return false;
   }
+  *sequence_out = sequence;
+  return true;
+}
 
+static bool zdn_delegate_sign_and_report(
+    const char *datadir, struct zcl_command_reply *reply,
+    uint8_t master_seed[32], uint8_t online_seed[32], uint8_t online_pub[32],
+    uint8_t noise_pub[32], uint32_t beacon_height, struct uint256 *beacon,
+    uint64_t now, uint64_t expiry, uint64_t sequence, char *err,
+    size_t err_cap) {
   /* Native command processes do not run the node boot path that selects
    * chain_params.  More importantly, the running daemon is the authority
    * for which chain this datadir/RPC endpoint serves.  Resolve block zero
@@ -307,29 +355,29 @@ void zcl_native_handle_zcode_network_delegate(
    * unselected global (or silently binding a regtest delegation to mainnet). */
   struct uint256 network_genesis;
   if (!zdn_rpc_block_hash(0, &network_genesis)) {
-    memory_cleanse(master_seed, sizeof(master_seed));
-    memory_cleanse(online_seed, sizeof(online_seed));
+    memory_cleanse(master_seed, 32);
+    memory_cleanse(online_seed, 32);
     zdn_fail(reply, "GENESIS_UNAVAILABLE", "authorize",
              "running node could not resolve its network genesis",
              ZDN_COMMAND);
-    return;
+    return false;
   }
   struct vcs_zcode_dht_delegation delegation;
   enum vcs_zcode_dht_delegation_error signed_result =
       vcs_zcode_dht_delegation_sign(
           &delegation, network_genesis.data, online_pub,
-          noise_pub, beacon_height, beacon.data, now, expiry, sequence,
+          noise_pub, beacon_height, beacon->data, now, expiry, sequence,
           master_seed);
-  memory_cleanse(master_seed, sizeof(master_seed));
-  memory_cleanse(online_seed, sizeof(online_seed));
+  memory_cleanse(master_seed, 32);
+  memory_cleanse(online_seed, 32);
   if (signed_result != VCS_ZCODE_DHT_DELEGATION_OK ||
-      !vcs_zcode_dht_delegation_save(datadir, &delegation, err, sizeof(err))) {
+      !vcs_zcode_dht_delegation_save(datadir, &delegation, err, err_cap)) {
     zdn_fail(reply, "DELEGATION_WRITE_FAILED", "persist",
              signed_result == VCS_ZCODE_DHT_DELEGATION_OK
                  ? err
                  : vcs_zcode_dht_delegation_error_string(signed_result),
              ZDN_COMMAND);
-    return;
+    return false;
   }
 
   uint8_t node_id[32];
@@ -337,10 +385,10 @@ void zcl_native_handle_zcode_network_delegate(
   if (!vcs_zcode_dht_delegation_node_id(node_id, &delegation)) {
     zdn_fail(reply, "NODE_ID_FAILED", "serialize",
              "signed delegation did not derive a node ID", ZDN_COMMAND);
-    return;
+    return false;
   }
   zcl_hex_encode(node_id, 32, node_hex);
-  zcl_hex_encode(beacon.data, 32, beacon_hex);
+  zcl_hex_encode(beacon->data, 32, beacon_hex);
   json_push_kv_str(&reply->data, "node_id", node_hex);
   json_push_kv_int(&reply->data, "sequence", (int64_t)sequence);
   json_push_kv_int(&reply->data, "not_before", (int64_t)now);
@@ -348,6 +396,55 @@ void zcl_native_handle_zcode_network_delegate(
   json_push_kv_int(&reply->data, "beacon_height", beacon_height);
   json_push_kv_str(&reply->data, "beacon_hash", beacon_hex);
   json_push_kv_bool(&reply->data, "key_material_returned", false);
+  return true;
+}
+
+void zcl_native_handle_zcode_network_delegate(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply) {
+  if (!request || !reply)
+    return;
+  const char *seed_file = NULL;
+  const char *datadir = NULL;
+  if (!zdn_delegate_check_inputs(request, reply, &seed_file, &datadir))
+    return;
+
+  uint64_t now = 0, expiry = 0;
+  if (!zdn_delegate_check_window(request, reply, &now, &expiry))
+    return;
+
+  uint8_t master_seed[32], master_pub[32];
+  char err[192] = {0};
+  if (!zdn_delegate_load_master_key(seed_file, reply, master_seed, master_pub,
+                                    err, sizeof(err)))
+    return;
+
+  struct zid_identity identity;
+  if (!zdn_delegate_find_active_identity(datadir, reply, master_seed,
+                                         master_pub, &identity))
+    return;
+
+  uint32_t beacon_height = 0;
+  struct uint256 beacon;
+  if (!zdn_delegate_resolve_beacon(&identity, reply, master_seed,
+                                   &beacon_height, &beacon))
+    return;
+
+  uint8_t online_seed[32], noise_pub[32], online_pub[32];
+  if (!zdn_delegate_load_online_keys(datadir, reply, master_seed, online_seed,
+                                     noise_pub, online_pub, err, sizeof(err)))
+    return;
+
+  uint64_t sequence = 1;
+  if (!zdn_delegate_resolve_sequence(request, reply, datadir, master_seed,
+                                     online_seed, err, sizeof(err), &sequence))
+    return;
+
+  if (!zdn_delegate_sign_and_report(datadir, reply, master_seed, online_seed,
+                                    online_pub, noise_pub, beacon_height,
+                                    &beacon, now, expiry, sequence, err,
+                                    sizeof(err)))
+    return;
   reply->status = ZCL_COMMAND_STATUS_PASSED;
   reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
@@ -775,6 +872,97 @@ static bool zdn_source_reproduce_fetch_ready(
   return false;
 }
 
+static bool zdn_source_reproduce_check_input(struct zcl_command_reply *reply,
+                                             const char *mode,
+                                             const char *root_hex,
+                                             uint8_t root[32]) {
+  if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
+      !root_hex || strlen(root_hex) != 64 ||
+      !zcl_hex_decode_lower(root_hex, root, 32)) {
+    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_INPUT", "normalize",
+             "mode=plan|commit and one canonical lowercase package root are required",
+             "zcode.package.source.reproduce");
+    return false;
+  }
+  return true;
+}
+
+static bool zdn_source_reproduce_parse_window(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *mode, struct json_value *normalized, uint64_t *sequence,
+    uint64_t *not_before, uint64_t *expiry) {
+  bool present = false;
+  if (!zdn_u64(request->input, "sequence", sequence, &present) ||
+      (strcmp(mode, "commit") == 0 && !present)) {
+    json_free(normalized);
+    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_SEQUENCE", "normalize",
+             "commit requires the sequence returned by plan",
+             "zcode.package.source.reproduce");
+    return false;
+  }
+  if (!present) *sequence = (uint64_t)platform_time_wall_unix();
+  if (!zdn_u64(request->input, "not_before", not_before, &present) ||
+      (strcmp(mode, "commit") == 0 && !present)) {
+    json_free(normalized);
+    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_WINDOW", "normalize",
+             "commit requires the not_before returned by plan",
+             "zcode.package.source.reproduce");
+    return false;
+  }
+  if (!present) *not_before = (uint64_t)platform_time_wall_unix();
+  if (!zdn_u64(request->input, "expiry", expiry, &present) ||
+      (strcmp(mode, "commit") == 0 && !present)) {
+    json_free(normalized);
+    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_WINDOW", "normalize",
+             "commit requires the expiry returned by plan",
+             "zcode.package.source.reproduce");
+    return false;
+  }
+  if (!present && *not_before <= UINT64_MAX - 3600u)
+    *expiry = *not_before + 3600u;
+  json_push_kv_int(normalized, "sequence", (int64_t)*sequence);
+  json_push_kv_int(normalized, "not_before", (int64_t)*not_before);
+  json_push_kv_int(normalized, "expiry", (int64_t)*expiry);
+  return true;
+}
+
+static void zdn_source_reproduce_report(struct zcl_command_reply *reply,
+                                        const char *mode, const char *root_hex,
+                                        const char *namespace_name,
+                                        uint64_t sequence, uint64_t not_before,
+                                        uint64_t expiry) {
+  const struct json_value *record = json_get(&reply->data, "record");
+  const char *source_root = record
+      ? json_get_str(json_get(record, "semantic_root")) : NULL;
+  json_push_kv_str(&reply->data, "schema",
+                   "zcl.zcode_source_reproduce.v1");
+  json_push_kv_str(&reply->data, "status",
+                   strcmp(mode, "commit") == 0
+                       ? "SOURCE_REPRODUCTION_PUBLISHED"
+                       : "SOURCE_REPRODUCTION_PROVEN");
+  json_push_kv_str(&reply->data, "package_root", root_hex);
+  if (source_root)
+    json_push_kv_str(&reply->data, "source_tree_root", source_root);
+  json_push_kv_bool(&reply->data, "reconstructed", true);
+  json_push_kv_bool(&reply->data, "evidence_signed", true);
+  json_push_kv_bool(&reply->data, "physical_independence_attested", false);
+  if (strcmp(mode, "plan") == 0) {
+    const char *token = json_get_str(json_get(&reply->data, "plan_token"));
+    struct json_value commit;
+    json_init(&commit);
+    json_set_object(&commit);
+    json_push_kv_str(&commit, "mode", "commit");
+    json_push_kv_str(&commit, "root", root_hex);
+    json_push_kv_str(&commit, "namespace", namespace_name);
+    json_push_kv_int(&commit, "sequence", (int64_t)sequence);
+    json_push_kv_int(&commit, "not_before", (int64_t)not_before);
+    json_push_kv_int(&commit, "expiry", (int64_t)expiry);
+    if (token) json_push_kv_str(&commit, "plan_token", token);
+    json_push_kv(&reply->data, "commit_input", &commit);
+    json_free(&commit);
+  }
+}
+
 void zcl_native_handle_zcode_package_source_reproduce(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply) {
@@ -784,14 +972,8 @@ void zcl_native_handle_zcode_package_source_reproduce(
   const char *root_hex = zdn_str(request->input, "root");
   const char *namespace_name = zdn_str(request->input, "namespace");
   uint8_t root[32];
-  if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
-      !root_hex || strlen(root_hex) != 64 ||
-      !zcl_hex_decode_lower(root_hex, root, sizeof(root))) {
-    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_INPUT", "normalize",
-             "mode=plan|commit and one canonical lowercase package root are required",
-             "zcode.package.source.reproduce");
+  if (!zdn_source_reproduce_check_input(reply, mode, root_hex, root))
     return;
-  }
   if (!namespace_name || !namespace_name[0])
     namespace_name = "zclassic23.source";
 
@@ -806,38 +988,9 @@ void zcl_native_handle_zcode_package_source_reproduce(
   json_push_kv_str(&normalized, "namespace", namespace_name);
   json_push_kv_str(&normalized, "transport_root", root_hex);
   uint64_t sequence = 0, not_before = 0, expiry = 0;
-  bool present = false;
-  if (!zdn_u64(request->input, "sequence", &sequence, &present) ||
-      (strcmp(mode, "commit") == 0 && !present)) {
-    json_free(&normalized);
-    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_SEQUENCE", "normalize",
-             "commit requires the sequence returned by plan",
-             "zcode.package.source.reproduce");
+  if (!zdn_source_reproduce_parse_window(request, reply, mode, &normalized,
+                                         &sequence, &not_before, &expiry))
     return;
-  }
-  if (!present) sequence = (uint64_t)platform_time_wall_unix();
-  if (!zdn_u64(request->input, "not_before", &not_before, &present) ||
-      (strcmp(mode, "commit") == 0 && !present)) {
-    json_free(&normalized);
-    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_WINDOW", "normalize",
-             "commit requires the not_before returned by plan",
-             "zcode.package.source.reproduce");
-    return;
-  }
-  if (!present) not_before = (uint64_t)platform_time_wall_unix();
-  if (!zdn_u64(request->input, "expiry", &expiry, &present) ||
-      (strcmp(mode, "commit") == 0 && !present)) {
-    json_free(&normalized);
-    zdn_fail(reply, "BAD_SOURCE_REPRODUCTION_WINDOW", "normalize",
-             "commit requires the expiry returned by plan",
-             "zcode.package.source.reproduce");
-    return;
-  }
-  if (!present && not_before <= UINT64_MAX - 3600u)
-    expiry = not_before + 3600u;
-  json_push_kv_int(&normalized, "sequence", (int64_t)sequence);
-  json_push_kv_int(&normalized, "not_before", (int64_t)not_before);
-  json_push_kv_int(&normalized, "expiry", (int64_t)expiry);
   const char *plan_token = zdn_str(request->input, "plan_token");
   if (strcmp(mode, "commit") == 0 && plan_token)
     json_push_kv_str(&normalized, "plan_token", plan_token);
@@ -847,36 +1000,8 @@ void zcl_native_handle_zcode_package_source_reproduce(
                      "zcode_dht_source_reproduction_ack",
                      RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS);
   if (reply->exit_code == ZCL_COMMAND_EXIT_OK) {
-    const struct json_value *record = json_get(&reply->data, "record");
-    const char *source_root = record
-        ? json_get_str(json_get(record, "semantic_root")) : NULL;
-    json_push_kv_str(&reply->data, "schema",
-                     "zcl.zcode_source_reproduce.v1");
-    json_push_kv_str(&reply->data, "status",
-                     strcmp(mode, "commit") == 0
-                         ? "SOURCE_REPRODUCTION_PUBLISHED"
-                         : "SOURCE_REPRODUCTION_PROVEN");
-    json_push_kv_str(&reply->data, "package_root", root_hex);
-    if (source_root)
-      json_push_kv_str(&reply->data, "source_tree_root", source_root);
-    json_push_kv_bool(&reply->data, "reconstructed", true);
-    json_push_kv_bool(&reply->data, "evidence_signed", true);
-    json_push_kv_bool(&reply->data, "physical_independence_attested", false);
-    if (strcmp(mode, "plan") == 0) {
-      const char *token = json_get_str(json_get(&reply->data, "plan_token"));
-      struct json_value commit;
-      json_init(&commit);
-      json_set_object(&commit);
-      json_push_kv_str(&commit, "mode", "commit");
-      json_push_kv_str(&commit, "root", root_hex);
-      json_push_kv_str(&commit, "namespace", namespace_name);
-      json_push_kv_int(&commit, "sequence", (int64_t)sequence);
-      json_push_kv_int(&commit, "not_before", (int64_t)not_before);
-      json_push_kv_int(&commit, "expiry", (int64_t)expiry);
-      if (token) json_push_kv_str(&commit, "plan_token", token);
-      json_push_kv(&reply->data, "commit_input", &commit);
-      json_free(&commit);
-    }
+    zdn_source_reproduce_report(reply, mode, root_hex, namespace_name,
+                                sequence, not_before, expiry);
   }
   json_free(&normalized);
 }
