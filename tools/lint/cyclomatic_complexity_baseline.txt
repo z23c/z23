@@ -1835,7 +1835,6 @@ tests/harness/src/test_peer_dos_fairness.c:test_peer_dos_fairness:39
 tests/harness/src/test_peer_memory.c:pm_forge_store:22
 tests/harness/src/test_peer_memory.c:test_peer_memory_platform_arm:107
 tests/harness/src/test_peer_snapshot_conditions.c:test_peer_snapshot_conditions:54
-tests/harness/src/test_peers_projection.c:t_payload_roundtrip:28
 tests/harness/src/test_policy.c:test_policy:50
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
 tests/harness/src/test_progress_store.c:test_progress_store:100

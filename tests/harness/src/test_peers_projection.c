@@ -113,7 +113,7 @@ static bool append_fork(event_log_t *log, int64_t height, int64_t observed,
            != UINT64_MAX;
 }
 
-static int t_payload_roundtrip(void)
+static int t_observed_payload_roundtrip(void)
 {
     int failures = 0;
     uint8_t payload[EV_PEER_OBSERVED_FIXED_LEN + EV_PEER_ONION_MAX];
@@ -142,7 +142,12 @@ static int t_payload_roundtrip(void)
              out.is_onion == in.is_onion &&
              out.onion_len == in.onion_len &&
              memcmp(in.onion, out.onion, in.onion_len) == 0);
+    return failures;
+}
 
+static int t_dropped_payload_roundtrip(void)
+{
+    int failures = 0;
     struct ev_peer_dropped din, dout;
     uint8_t dropped[EV_PEER_DROPPED_LEN];
     memset(&din, 0, sizeof(din));
@@ -156,7 +161,12 @@ static int t_payload_roundtrip(void)
     PP_CHECK("dropped roundtrip",
              memcmp(din.ip_v4_or_v6, dout.ip_v4_or_v6, 16) == 0 &&
              dout.port == din.port && dout.reason == din.reason);
+    return failures;
+}
 
+static int t_session_payload_roundtrip(void)
+{
+    int failures = 0;
     struct ev_peer_session_closed sin, sout;
     uint8_t sbuf[EV_PEER_SESSION_CLOSED_LEN];
     memset(&sin, 0, sizeof(sin));
@@ -188,7 +198,12 @@ static int t_payload_roundtrip(void)
              sout.last_useful_time == sin.last_useful_time);
     PP_CHECK("session rejects short", !ev_peer_session_closed_parse(sbuf,
              sizeof(sbuf) - 1, &sout));
+    return failures;
+}
 
+static int t_fork_payload_roundtrip(void)
+{
+    int failures = 0;
     struct ev_net_fork_observed fin, fout;
     uint8_t fbuf[EV_NET_FORK_OBSERVED_FIXED_LEN + 2 * EV_NET_FORK_TIP_HEX_MAX];
     size_t flen = 0;
@@ -210,6 +225,16 @@ static int t_payload_roundtrip(void)
              fout.hash_a_len == 64 && fout.hash_b_len == 64 &&
              memcmp(fout.tip_hash_a, fin.tip_hash_a, 64) == 0 &&
              memcmp(fout.tip_hash_b, fin.tip_hash_b, 64) == 0);
+    return failures;
+}
+
+static int t_payload_roundtrip(void)
+{
+    int failures = 0;
+    failures += t_observed_payload_roundtrip();
+    failures += t_dropped_payload_roundtrip();
+    failures += t_session_payload_roundtrip();
+    failures += t_fork_payload_roundtrip();
     return failures;
 }
 
