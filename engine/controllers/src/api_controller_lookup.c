@@ -57,7 +57,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Lookup queue and parameterized handlers: /api/block/:id, /api/tx/:txid, /api/address/:addr. Single-slot work queue, served via background thread. */
+/* Lookup queue and parameterized handlers: /api/block/:id, /tx/:txid, /address/:addr. Single-slot work queue, served via background thread. */
 
 #define LOOKUP_HEIGHT_UNAVAILABLE INT64_C(-1)
 
