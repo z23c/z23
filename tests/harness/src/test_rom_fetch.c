@@ -247,9 +247,11 @@ static bool rf_relay_write_all(int fd, const uint8_t *buf, size_t n)
     return true;
 }
 
-/* Forwards each direction with a ready pollfd exactly once, charging the
- * relay's turnaround latency on a flow reversal; returns -1 when either side
- * ends the byte flow (EOF or failed write), 0 to keep the session relaying. */
+/* Forwards each direction whose pollfd is ready, at most once per call, in
+ * index order, charging the relay's turnaround latency on a flow reversal.
+ * Returns -1 at once when either side ends the byte flow (EOF, read error or
+ * failed write), so a later ready direction in the same call is not relayed;
+ * returns 0 to keep the session relaying. */
 static int rf_relay_forward_ready_directions(struct rf_lat_relay *r,
                                              int cfd, int ufd,
                                              const struct pollfd *pfds,
