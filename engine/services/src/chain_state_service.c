@@ -230,14 +230,19 @@ static bool csr_commit_has_rollback_authorization(
         commit ? commit->rollback_auth : NULL);
 }
 
-static enum csr_result csr_validate_locked(
-    struct chain_state_repository *csr,
+static enum csr_result csr_validate_commit_shape(
     const struct chain_state_commit *commit)
 {
     /* Step 0: structural NULL checks. */
     if (!commit || !commit->new_tip) return CSR_REJECTED_NULL_INPUT;
     if (!commit->reason || !*commit->reason) return CSR_REJECTED_NULL_INPUT;
+    return CSR_OK;
+}
 
+static enum csr_result csr_validate_tip_shape_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
     struct block_index *new_tip = commit->new_tip;
     if (!new_tip->phashBlock) return CSR_REJECTED_NULL_INPUT;
     if (new_tip->nHeight < 0) return CSR_REJECTED_NULL_INPUT;
@@ -251,6 +256,14 @@ static enum csr_result csr_validate_locked(
         csr->chain_active && active_chain_height(csr->chain_active) > 0) {
         return CSR_REJECTED_ROLLBACK_AUTH;
     }
+    return CSR_OK;
+}
+
+static enum csr_result csr_validate_tip_consistency_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
+    struct block_index *new_tip = commit->new_tip;
 
     /* Step 1: the proposed coins_best_block must equal the tip hash.
      * If they disagree, the caller has a bug — refuse rather than
@@ -279,6 +292,14 @@ static enum csr_result csr_validate_locked(
             block_map_find(csr->block_map, new_tip->pprev->phashBlock);
         if (prev != new_tip->pprev) return CSR_REJECTED_MISSING_PREV;
     }
+    return CSR_OK;
+}
+
+static enum csr_result csr_validate_sqlite_tip_height_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
+    struct block_index *new_tip = commit->new_tip;
 
     /* Step 4: SQLite cross-check on the new tip hash itself. If
      * SQLite knows this hash, the height must agree. This is the
@@ -288,6 +309,14 @@ static enum csr_result csr_validate_locked(
     if (hf == 1 && sql_h != new_tip->nHeight) {
         return CSR_REJECTED_HASH_MISMATCH;
     }
+    return CSR_OK;
+}
+
+static enum csr_result csr_validate_stale_index_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
+    struct block_index *new_tip = commit->new_tip;
 
     /* Step 5: SQLite tip vs proposed tip. If SQLite holds blocks far
      * above the proposed tip, this commit is rolling the chain
@@ -324,7 +353,13 @@ static enum csr_result csr_validate_locked(
             }
         }
     }
+    return CSR_OK;
+}
 
+static enum csr_result csr_validate_expected_utxo_count_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
     /* Step 6: explicit expected_utxo_count check. The caller can
      * pass the count it believes the new tip should imply; if the
      * SQLite count differs by more than 50% we refuse. */
@@ -340,6 +375,14 @@ static enum csr_result csr_validate_locked(
             }
         }
     }
+    return CSR_OK;
+}
+
+static enum csr_result csr_validate_orphan_rows_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
+    struct block_index *new_tip = commit->new_tip;
 
     /* Step 7: orphan-rows guard for backward moves. Even without an
      * obviously stale block_index, we refuse to silently orphan a
@@ -354,6 +397,33 @@ static enum csr_result csr_validate_locked(
             }
         }
     }
+    return CSR_OK;
+}
+
+static enum csr_result csr_validate_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit)
+{
+    enum csr_result rc = csr_validate_commit_shape(commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_tip_shape_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_tip_consistency_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_sqlite_tip_height_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_stale_index_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_expected_utxo_count_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
+
+    rc = csr_validate_orphan_rows_locked(csr, commit);
+    if (rc != CSR_OK) return rc;
 
     return CSR_OK;
 }
@@ -716,40 +786,11 @@ bool csr_restore_in_memory_view(struct chain_state_repository *csr,
     return ok;
 }
 
-enum csr_result csr_commit_tip(struct chain_state_repository *csr,
-                                const struct chain_state_commit *commit)
+static enum csr_result csr_publish_in_memory_view_locked(
+    struct chain_state_repository *csr,
+    const struct chain_state_commit *commit,
+    int from_height)
 {
-    if (!csr) return CSR_REJECTED_NULL_INPUT;
-    if (!csr->initialized) return CSR_REJECTED_NOT_INITIALIZED;
-
-    pthread_mutex_lock(&csr->lock);
-
-    int from_height = csr->chain_active
-        ? active_chain_height(csr->chain_active) : -1;
-
-    enum csr_result rc = csr_validate_locked(csr, commit);
-    if (rc != CSR_OK) {
-        csr->commits_rejected[rc]++;
-        csr_emit_rejected_event(csr, from_height, commit, rc);
-        pthread_mutex_unlock(&csr->lock);
-        LOG_WARN("csr", "csr: REJECTED code=%s from=%d to=%d reason=%s", csr_result_name(rc), from_height, (commit && commit->new_tip) ? commit->new_tip->nHeight : -1, (commit && commit->reason) ? commit->reason : "");
-        return rc;
-    }
-
-    printf("[csr] commit_tip h=%d reason=%s\n",
-           commit->new_tip->nHeight, commit->reason);
-
-    if (commit->persist_coins_best) {
-        enum csr_result prc = csr_persist_coins_best_locked(csr, commit);
-        if (prc != CSR_OK) {
-            csr->commits_rejected[prc]++;
-            csr_emit_rejected_event(csr, from_height, commit, prc);
-            pthread_mutex_unlock(&csr->lock);
-            LOG_WARN("csr", "csr: REJECTED code=%s from=%d to=%d reason=%s " "sqlite_rc=%d detail=%s", csr_result_name(prc), from_height, commit->new_tip ? commit->new_tip->nHeight : -1, commit->reason ? commit->reason : "", csr->last_persist_sqlite_rc, csr->last_persist_error);
-            return prc;
-        }
-    }
-
     /* Publish the concrete in-memory view only after optional durable
      * cursor persistence succeeds. The remaining failure point is
      * active_chain_move_window_tip realloc/OOM, which aborts before the other
@@ -786,6 +827,45 @@ enum csr_result csr_commit_tip(struct chain_state_repository *csr,
     if (csr->wallet_scan_h && commit->wallet_scan_height >= 0) {
         *csr->wallet_scan_h = commit->wallet_scan_height;
     }
+    return CSR_OK;
+}
+
+enum csr_result csr_commit_tip(struct chain_state_repository *csr,
+                                const struct chain_state_commit *commit)
+{
+    if (!csr) return CSR_REJECTED_NULL_INPUT;
+    if (!csr->initialized) return CSR_REJECTED_NOT_INITIALIZED;
+
+    pthread_mutex_lock(&csr->lock);
+
+    int from_height = csr->chain_active
+        ? active_chain_height(csr->chain_active) : -1;
+
+    enum csr_result rc = csr_validate_locked(csr, commit);
+    if (rc != CSR_OK) {
+        csr->commits_rejected[rc]++;
+        csr_emit_rejected_event(csr, from_height, commit, rc);
+        pthread_mutex_unlock(&csr->lock);
+        LOG_WARN("csr", "csr: REJECTED code=%s from=%d to=%d reason=%s", csr_result_name(rc), from_height, (commit && commit->new_tip) ? commit->new_tip->nHeight : -1, (commit && commit->reason) ? commit->reason : "");
+        return rc;
+    }
+
+    printf("[csr] commit_tip h=%d reason=%s\n",
+           commit->new_tip->nHeight, commit->reason);
+
+    if (commit->persist_coins_best) {
+        enum csr_result prc = csr_persist_coins_best_locked(csr, commit);
+        if (prc != CSR_OK) {
+            csr->commits_rejected[prc]++;
+            csr_emit_rejected_event(csr, from_height, commit, prc);
+            pthread_mutex_unlock(&csr->lock);
+            LOG_WARN("csr", "csr: REJECTED code=%s from=%d to=%d reason=%s " "sqlite_rc=%d detail=%s", csr_result_name(prc), from_height, commit->new_tip ? commit->new_tip->nHeight : -1, commit->reason ? commit->reason : "", csr->last_persist_sqlite_rc, csr->last_persist_error);
+            return prc;
+        }
+    }
+
+    rc = csr_publish_in_memory_view_locked(csr, commit, from_height);
+    if (rc != CSR_OK) return rc;
 
     csr->commits_ok++;
     csr_emit_commit_event(csr, from_height, commit);
