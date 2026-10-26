@@ -461,134 +461,217 @@ static bool proof_indices_distinct(const uint32_t proof[128])
     return true;
 }
 
+static void gpu_equihash_reset_error(char *error, size_t cap)
+{
+    if (error && cap)
+        error[0] = '\0';
+}
+
+static bool gpu_equihash_base_state_usable(const struct z23_gpu_equihash *g,
+                                           const struct equihash_params *params,
+                                           const struct blake2b_ctx *base,
+                                           const unsigned char *solution)
+{
+    return g && params && base && solution && params->N == 192 &&
+           params->K == 7 && params->solution_width == 400 &&
+           base->buflen + 4u <= sizeof(base->buf);
+}
+
+static bool gpu_equihash_stage_base_state(struct z23_gpu_equihash *g,
+                                          const struct blake2b_ctx *base,
+                                          char *error, size_t cap)
+{
+    const size_t count_bytes = (size_t)EH_BUCKETS * 2u * 4u;
+    return ensure_buffers(g, error, cap) &&
+           write_buffer(g, g->init_h, base->h, sizeof(base->h), error, cap) &&
+           write_buffer(g, g->init_t, base->t, sizeof(base->t), error, cap) &&
+           write_buffer(g, g->init_buf, base->buf, sizeof(base->buf), error, cap) &&
+           zero_buffer(g, g->counts, count_bytes, error, cap) &&
+           zero_buffer(g, g->candidate_count, 4u, error, cap);
+}
+
+static bool gpu_equihash_run_index_sweep(struct z23_gpu_equihash *g,
+                                         cl_kernel kernel, cl_uint arg_index,
+                                         cl_uint limit, cl_uint step,
+                                         size_t global, size_t local,
+                                         char *error, size_t cap)
+{
+    bool ok = true;
+    for (cl_uint index = 0; ok && index < limit; index += step) {
+        ok = set_arg(g, kernel, arg_index, sizeof(index), &index, error, cap) &&
+             run_kernel(g, kernel, global, local, error, cap);
+    }
+    return ok;
+}
+
+static bool gpu_equihash_run_digit0_phase(struct z23_gpu_equihash *g,
+                                          const struct blake2b_ctx *base,
+                                          struct z23_gpu_equihash_stats *local_stats,
+                                          char *error, size_t cap)
+{
+    cl_uint buflen = (cl_uint)base->buflen;
+    bool args_ready =
+        set_arg(g, g->digit0, 0, sizeof(g->init_h), &g->init_h, error, cap) &&
+        set_arg(g, g->digit0, 1, sizeof(g->init_t), &g->init_t, error, cap) &&
+        set_arg(g, g->digit0, 2, sizeof(g->init_buf), &g->init_buf, error, cap) &&
+        set_arg(g, g->digit0, 3, sizeof(buflen), &buflen, error, cap) &&
+        set_arg(g, g->digit0, 5, sizeof(g->heap0), &g->heap0, error, cap) &&
+        set_arg(g, g->digit0, 6, sizeof(g->counts), &g->counts, error, cap);
+    if (!args_ready)
+        return false;
+    uint64_t stage = tick_us();
+    bool swept = gpu_equihash_run_index_sweep(g, g->digit0, 4u, EH_BLOCKS,
+                                              EH_D0_CHUNK, EH_D0_CHUNK, 256u,
+                                              error, cap);
+    if (!swept)
+        return false;
+    if (g->cl.finish(g->queue) != CL_SUCCESS) {
+        set_error(error, cap, "clFinish after digit0 failed");
+        return false;
+    }
+    local_stats->initial_hash_us = tick_us() - stage;
+    return true;
+}
+
+static bool gpu_equihash_set_round_args(struct z23_gpu_equihash *g,
+                                        cl_uint round, char *error, size_t cap)
+{
+    return set_arg(g, g->digit_round, 0, sizeof(round), &round, error, cap) &&
+           set_arg(g, g->digit_round, 2, sizeof(g->heap0), &g->heap0, error, cap) &&
+           set_arg(g, g->digit_round, 3, sizeof(g->heap1), &g->heap1, error, cap) &&
+           set_arg(g, g->digit_round, 4, sizeof(g->counts), &g->counts, error, cap);
+}
+
+static bool gpu_equihash_run_collision_phase(struct z23_gpu_equihash *g,
+                                             struct z23_gpu_equihash_stats *local_stats,
+                                             char *error, size_t cap)
+{
+    for (cl_uint round = 1; round < 7; ++round) {
+        bool args_ok = gpu_equihash_set_round_args(g, round, error, cap);
+        if (!args_ok)
+            return false;
+        uint64_t stage = tick_us();
+        bool swept = gpu_equihash_run_index_sweep(
+            g, g->digit_round, 1u, EH_BUCKETS, EH_BUCKET_CHUNK,
+            (size_t)EH_BUCKET_CHUNK * EH_SLOTS, EH_SLOTS, error, cap);
+        if (!swept)
+            return false;
+        if (g->cl.finish(g->queue) != CL_SUCCESS) {
+            set_error(error, cap, "clFinish after collision round %u failed", round);
+            return false;
+        }
+        local_stats->collision_round_us[round - 1] = tick_us() - stage;
+    }
+    bool final_args_ready =
+        set_arg(g, g->digit_final, 1, sizeof(g->heap0), &g->heap0, error, cap) &&
+        set_arg(g, g->digit_final, 2, sizeof(g->counts), &g->counts, error, cap) &&
+        set_arg(g, g->digit_final, 3, sizeof(g->candidates), &g->candidates,
+                error, cap) &&
+        set_arg(g, g->digit_final, 4, sizeof(g->candidate_count),
+                &g->candidate_count, error, cap);
+    if (!final_args_ready)
+        return false;
+    uint64_t final_stage = tick_us();
+    bool final_swept = gpu_equihash_run_index_sweep(
+        g, g->digit_final, 0u, EH_BUCKETS, EH_BUCKET_CHUNK,
+        (size_t)EH_BUCKET_CHUNK * EH_SLOTS, EH_SLOTS, error, cap);
+    if (!final_swept)
+        return false;
+    if (g->cl.finish(g->queue) != CL_SUCCESS) {
+        set_error(error, cap, "clFinish after final collision round failed");
+        return false;
+    }
+    local_stats->collision_round_us[6] = tick_us() - final_stage;
+    return true;
+}
+
+static bool gpu_equihash_read_candidate_counts(struct z23_gpu_equihash *g,
+                                               cl_uint *candidate_count,
+                                               cl_uint *retained,
+                                               char *error, size_t cap)
+{
+    *candidate_count = 0;
+    bool loaded = read_buffer(g, g->candidate_count, candidate_count,
+                              sizeof(*candidate_count), error, cap);
+    *retained = *candidate_count > EH_MAX_SOLUTIONS ? EH_MAX_SOLUTIONS
+                                                    : *candidate_count;
+    return loaded;
+}
+
+static bool gpu_equihash_rebuild_solutions(struct z23_gpu_equihash *g,
+                                           cl_uint retained,
+                                           char *error, size_t cap)
+{
+    bool rebuilt =
+        set_arg(g, g->rebuild, 0, sizeof(g->heap0), &g->heap0, error, cap) &&
+        set_arg(g, g->rebuild, 1, sizeof(g->heap1), &g->heap1, error, cap) &&
+        set_arg(g, g->rebuild, 2, sizeof(g->candidates), &g->candidates, error, cap) &&
+        set_arg(g, g->rebuild, 3, sizeof(retained), &retained, error, cap) &&
+        set_arg(g, g->rebuild, 4, sizeof(g->proofs), &g->proofs, error, cap) &&
+        run_kernel(g, g->rebuild, retained, 1u, error, cap) &&
+        g->cl.finish(g->queue) == CL_SUCCESS;
+    if (!rebuilt && (!error || !error[0]))
+        set_error(error, cap, "GPU proof reconstruction failed");
+    return rebuilt;
+}
+
+static void gpu_equihash_collect_valid_proofs(
+    uint32_t proofs[EH_MAX_SOLUTIONS][128], cl_uint retained,
+    const struct equihash_params *params, const struct blake2b_ctx *base,
+    unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
+    struct z23_gpu_equihash_stats *local_stats)
+{
+    for (cl_uint i = 0; i < retained; ++i) {
+        unsigned char candidate[Z23_GPU_EQUIHASH_SOLUTION_BYTES];
+        if (!proof_indices_distinct(proofs[i]))
+            continue;
+        size_t got = eh_get_minimal_from_indices(
+            proofs[i], 128u, params->collision_bit_length,
+            candidate, sizeof(candidate));
+        if (got != sizeof(candidate) ||
+            !equihash_is_valid_solution(params, base, candidate, got))
+            continue;
+        if (local_stats->valid_solutions == 0)
+            memcpy(solution, candidate, sizeof(candidate));
+        local_stats->valid_solutions++;
+    }
+}
+
 static bool gpu_equihash_solve_native(
     struct z23_gpu_equihash *g, const struct equihash_params *params,
     const struct blake2b_ctx *base,
     unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
     struct z23_gpu_equihash_stats *stats, char *error, size_t error_cap)
 {
-    if (error && error_cap)
-        error[0] = '\0';
-    if (!g || !params || !base || !solution || params->N != 192 ||
-        params->K != 7 || params->solution_width != 400 ||
-        base->buflen + 4u > sizeof(base->buf)) {
+    gpu_equihash_reset_error(error, error_cap);
+    if (!gpu_equihash_base_state_usable(g, params, base, solution)) {
         set_error(error, error_cap, "GPU solver requires a valid N=192,K=7 base state");
         return false;
     }
     struct z23_gpu_equihash_stats local_stats;
     memset(&local_stats, 0, sizeof(local_stats));
     uint64_t all_start = tick_us();
-    if (!ensure_buffers(g, error, error_cap))
+    if (!gpu_equihash_stage_base_state(g, base, error, error_cap))
         return false;
-
-    const size_t count_bytes = (size_t)EH_BUCKETS * 2u * 4u;
-    if (!write_buffer(g, g->init_h, base->h, sizeof(base->h), error, error_cap) ||
-        !write_buffer(g, g->init_t, base->t, sizeof(base->t), error, error_cap) ||
-        !write_buffer(g, g->init_buf, base->buf, sizeof(base->buf), error, error_cap) ||
-        !zero_buffer(g, g->counts, count_bytes, error, error_cap) ||
-        !zero_buffer(g, g->candidate_count, 4u, error, error_cap))
+    if (!gpu_equihash_run_digit0_phase(g, base, &local_stats, error, error_cap))
         return false;
-
-    cl_uint buflen = (cl_uint)base->buflen;
-    if (!set_arg(g, g->digit0, 0, sizeof(g->init_h), &g->init_h, error, error_cap) ||
-        !set_arg(g, g->digit0, 1, sizeof(g->init_t), &g->init_t, error, error_cap) ||
-        !set_arg(g, g->digit0, 2, sizeof(g->init_buf), &g->init_buf, error, error_cap) ||
-        !set_arg(g, g->digit0, 3, sizeof(buflen), &buflen, error, error_cap) ||
-        !set_arg(g, g->digit0, 5, sizeof(g->heap0), &g->heap0, error, error_cap) ||
-        !set_arg(g, g->digit0, 6, sizeof(g->counts), &g->counts, error, error_cap))
+    if (!gpu_equihash_run_collision_phase(g, &local_stats, error, error_cap))
         return false;
-
-    uint64_t stage = tick_us();
-    for (cl_uint base_index = 0; base_index < EH_BLOCKS; base_index += EH_D0_CHUNK) {
-        size_t global = EH_D0_CHUNK;
-        if (!set_arg(g, g->digit0, 4, sizeof(base_index), &base_index,
-                     error, error_cap) ||
-            !run_kernel(g, g->digit0, global, 256u, error, error_cap))
-            return false;
-    }
-    if (g->cl.finish(g->queue) != CL_SUCCESS) {
-        set_error(error, error_cap, "clFinish after digit0 failed");
-        return false;
-    }
-    local_stats.initial_hash_us = tick_us() - stage;
-
-    for (cl_uint round = 1; round < 7; ++round) {
-        if (!set_arg(g, g->digit_round, 0, sizeof(round), &round, error, error_cap) ||
-            !set_arg(g, g->digit_round, 2, sizeof(g->heap0), &g->heap0, error, error_cap) ||
-            !set_arg(g, g->digit_round, 3, sizeof(g->heap1), &g->heap1, error, error_cap) ||
-            !set_arg(g, g->digit_round, 4, sizeof(g->counts), &g->counts, error, error_cap))
-            return false;
-        stage = tick_us();
-        for (cl_uint bucket = 0; bucket < EH_BUCKETS; bucket += EH_BUCKET_CHUNK) {
-            size_t global = (size_t)EH_BUCKET_CHUNK * EH_SLOTS;
-            if (!set_arg(g, g->digit_round, 1, sizeof(bucket), &bucket,
-                         error, error_cap) ||
-                !run_kernel(g, g->digit_round, global, EH_SLOTS,
-                            error, error_cap))
-                return false;
-        }
-        if (g->cl.finish(g->queue) != CL_SUCCESS) {
-            set_error(error, error_cap, "clFinish after collision round %u failed", round);
-            return false;
-        }
-        local_stats.collision_round_us[round - 1] = tick_us() - stage;
-    }
-
-    if (!set_arg(g, g->digit_final, 1, sizeof(g->heap0), &g->heap0, error, error_cap) ||
-        !set_arg(g, g->digit_final, 2, sizeof(g->counts), &g->counts, error, error_cap) ||
-        !set_arg(g, g->digit_final, 3, sizeof(g->candidates), &g->candidates, error, error_cap) ||
-        !set_arg(g, g->digit_final, 4, sizeof(g->candidate_count), &g->candidate_count,
-                 error, error_cap))
-        return false;
-    stage = tick_us();
-    for (cl_uint bucket = 0; bucket < EH_BUCKETS; bucket += EH_BUCKET_CHUNK) {
-        size_t global = (size_t)EH_BUCKET_CHUNK * EH_SLOTS;
-        if (!set_arg(g, g->digit_final, 0, sizeof(bucket), &bucket, error, error_cap) ||
-            !run_kernel(g, g->digit_final, global, EH_SLOTS, error, error_cap))
-            return false;
-    }
-    if (g->cl.finish(g->queue) != CL_SUCCESS) {
-        set_error(error, error_cap, "clFinish after final collision round failed");
-        return false;
-    }
-    local_stats.collision_round_us[6] = tick_us() - stage;
-
     cl_uint candidate_count = 0;
-    if (!read_buffer(g, g->candidate_count, &candidate_count,
-                     sizeof(candidate_count), error, error_cap))
+    cl_uint retained = 0;
+    if (!gpu_equihash_read_candidate_counts(g, &candidate_count, &retained,
+                                            error, error_cap))
         return false;
     local_stats.candidates = candidate_count;
-    cl_uint retained = candidate_count > EH_MAX_SOLUTIONS ? EH_MAX_SOLUTIONS : candidate_count;
     if (retained > 0) {
-        if (!set_arg(g, g->rebuild, 0, sizeof(g->heap0), &g->heap0, error, error_cap) ||
-            !set_arg(g, g->rebuild, 1, sizeof(g->heap1), &g->heap1, error, error_cap) ||
-            !set_arg(g, g->rebuild, 2, sizeof(g->candidates), &g->candidates, error, error_cap) ||
-            !set_arg(g, g->rebuild, 3, sizeof(retained), &retained, error, error_cap) ||
-            !set_arg(g, g->rebuild, 4, sizeof(g->proofs), &g->proofs, error, error_cap) ||
-            !run_kernel(g, g->rebuild, retained, 1u, error, error_cap) ||
-            g->cl.finish(g->queue) != CL_SUCCESS) {
-            if (!error || !error[0])
-                set_error(error, error_cap, "GPU proof reconstruction failed");
+        if (!gpu_equihash_rebuild_solutions(g, retained, error, error_cap))
             return false;
-        }
         uint32_t proofs[EH_MAX_SOLUTIONS][128];
         if (!read_buffer(g, g->proofs, proofs,
                          retained * 128u * sizeof(uint32_t), error, error_cap))
             return false;
-        for (cl_uint i = 0; i < retained; ++i) {
-            unsigned char candidate[Z23_GPU_EQUIHASH_SOLUTION_BYTES];
-            if (!proof_indices_distinct(proofs[i]))
-                continue;
-            size_t got = eh_get_minimal_from_indices(
-                proofs[i], 128u, params->collision_bit_length,
-                candidate, sizeof(candidate));
-            if (got != sizeof(candidate) ||
-                !equihash_is_valid_solution(params, base, candidate, got))
-                continue;
-            if (local_stats.valid_solutions == 0)
-                memcpy(solution, candidate, sizeof(candidate));
-            local_stats.valid_solutions++;
-        }
+        gpu_equihash_collect_valid_proofs(proofs, retained, params, base,
+                                          solution, &local_stats);
     }
     local_stats.elapsed_us = tick_us() - all_start;
     if (stats)
