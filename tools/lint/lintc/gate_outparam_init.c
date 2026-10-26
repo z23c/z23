@@ -518,8 +518,8 @@ static int op_phase_baseline(struct op_gate *g, int failed, long pub_scanned)
         failed |= op_report_stale(&g->base, &g->keyset) > 0 && !warn;
         if (!failed)
             printf(OP_GATE ": clean — %ld function bodies scanned, %d in-scope out-param(s), "
-                   "all %d reviewed; %ld bodies checked for publish-before-free over %d "
-                   "publishers, 0 dangling\n",
+                   "all %d reviewed; %ld production bodies (brace state reset per file) "
+                   "checked for publish-before-free over %d publishers, 0 dangling\n",
                    g->scan.nfuncs, nkeys, nbase, pub_scanned, g->pubs.n);
         rc = failed ? 1 : 0;
     }

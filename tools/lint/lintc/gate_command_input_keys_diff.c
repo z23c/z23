@@ -185,11 +185,6 @@ static void cik_leaf_plain(struct cik_ctx *c, const struct cik_leaf *l,
     }
 }
 
-static int cik_cmp_word(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 /* The declared keys of one leaf, unique, sorted and comma-joined. */
 static char *cik_canon(struct cik_ctx *c)
 {
@@ -197,7 +192,7 @@ static char *cik_canon(struct cik_ctx *c)
     struct cik_buf out = { 0 };
     for (size_t i = 0; i < c->decl.n; i++)
         w[i] = c->x->dict.word[c->decl.v[i]];
-    qsort(w, c->decl.n, sizeof *w, cik_cmp_word);
+    qsort(w, c->decl.n, sizeof *w, lintc_strcmp_ptr);
     for (size_t i = 0; i < c->decl.n; i++) {
         if (i)
             cik_buf_putc(&out, ',');

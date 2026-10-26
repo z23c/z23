@@ -124,11 +124,6 @@ static int cphs_pool(char *pool, size_t cap, size_t *used, const char *s,
     return 0;
 }
 
-static int cphs_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-
 static int cphs_file_add(const char *path)
 {
     if (g_cphs_nfiles >= CPHS_MAXF)
@@ -246,7 +241,7 @@ int cphs_collect(const char *root)
     int rc = cphs_walk(root);
     if (rc == 0)
         qsort(g_cphs_files, (size_t)g_cphs_nfiles, sizeof g_cphs_files[0],
-              cphs_ptr_cmp);
+              lintc_strcmp_ptr);
     return rc;
 }
 
@@ -444,7 +439,7 @@ int cphs_scan_all(const char *root)
 void cphs_sort_uniq(void)
 {
     qsort(g_cphs_edges, (size_t)g_cphs_nedges, sizeof g_cphs_edges[0],
-          cphs_ptr_cmp);
+          lintc_strcmp_ptr);
     int w = 0;
     for (int i = 0; i < g_cphs_nedges; i++) {
         if (w > 0 && strcmp(g_cphs_edges[w - 1], g_cphs_edges[i]) == 0)
