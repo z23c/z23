@@ -39,8 +39,9 @@
 /* Outcome codes for backfill_walk_value_range: a non-negative result is the
  * highest height proven durable; negatives say why the walk stopped early. */
 enum backfill_walk_status {
-    BACKFILL_WALK_ABORTED = -1,       /* write failed; *abort_op names it */
+    BACKFILL_WALK_ABORTED = -1,       /* batch flush failed; *abort_op names it */
     BACKFILL_WALK_BEGIN_FAILED = -2,  /* BEGIN for the next batch failed */
+    BACKFILL_WALK_CLEANED = -3,       /* write failed; already rolled back */
 };
 
 struct shielded_backfill_ctx {
@@ -190,14 +191,13 @@ static int backfill_resolve_block_values(struct block_index *bi,
 }
 
 /* Write one block's derived shielded values. Returns 1 when a value row was
- * written, 0 when there was nothing to write, -1 when the UPDATE step failed
- * and -2 when the fallback INSERT step failed; on failure *abort_op names the
- * failed operation for backfill_abort_write. */
+ * written, 0 when there was nothing to write and -1 when a step failed. A
+ * failure is rolled back and both statements finalized HERE, while the
+ * SQLITE_STATIC bindings of this frame are still alive. */
 static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
                                     sqlite3_stmt *ins,
                                     struct block_index *bi,
-                                    int64_t sprout_val, int64_t sapling_val,
-                                    const char **abort_op)
+                                    int64_t sprout_val, int64_t sapling_val)
 {
     if (sprout_val == 0 && sapling_val == 0)
         return 0;
@@ -210,7 +210,7 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
     sqlite3_bind_blob(upd, 3, bi->phashBlock->data, 32, SQLITE_STATIC);
 
     if (AR_STEP_WRITE(upd) != SQLITE_DONE) {
-        *abort_op = "UPDATE value row";
+        backfill_abort_write(ndb, upd, ins, "UPDATE value row");
         return -1;
     }
     if (sqlite3_changes(ndb->db) > 0)
@@ -249,8 +249,8 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
     sqlite3_bind_int64(ins, 17, sapling_val);
     sqlite3_bind_int64(ins, 18, sprout_val);
     if (AR_STEP_WRITE(ins) != SQLITE_DONE) {
-        *abort_op = "INSERT value row";
-        return -2;
+        backfill_abort_write(ndb, upd, ins, "INSERT value row");
+        return -1;
     }
     return 1;
 }
@@ -288,8 +288,9 @@ static int backfill_final_reached_height(int h, int cursor_committed)
 
 /* Walk (start, tip] on the active chain, deriving and persisting each
  * block's shielded values. Returns the highest height proven durable,
- * BACKFILL_WALK_ABORTED after a failed write (*abort_op names the operation
- * for backfill_abort_write), or BACKFILL_WALK_BEGIN_FAILED when the BEGIN
+ * BACKFILL_WALK_CLEANED after a failed row write (already rolled back and
+ * finalized), BACKFILL_WALK_ABORTED after a failed batch flush (*abort_op
+ * names the operation for backfill_abort_write), or BACKFILL_WALK_BEGIN_FAILED when the BEGIN
  * for the next batch failed after a commit (statements are NOT finalized;
  * the caller finalizes and logs). */
 static int backfill_walk_value_range(struct node_db *ndb,
@@ -316,10 +317,9 @@ static int backfill_walk_value_range(struct node_db *ndb,
             break;
 
         int wrote = backfill_write_value_row(ndb, upd, ins, bi,
-                                             sprout_val, sapling_val,
-                                             abort_op);
+                                             sprout_val, sapling_val);
         if (wrote < 0)
-            return BACKFILL_WALK_ABORTED;
+            return BACKFILL_WALK_CLEANED;
         if (wrote > 0)
             (*updated)++;
 
@@ -387,6 +387,8 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
         LOG_FAIL("utxo_recovery", "backfill: begin next batch failed: %s",
                  sqlite3_errmsg(ndb->db));
     }
+    if (reached == BACKFILL_WALK_CLEANED)
+        return false;
     if (abort_op)
         return backfill_abort_write(ndb, upd, ins, abort_op);
     return backfill_finish_write(ndb, upd, ins, reached, start, updated, bctx);
