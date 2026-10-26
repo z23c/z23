@@ -1218,8 +1218,6 @@ tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:3
 tests/harness/src/groth16_spend_parity.c:groth16_spend_parity_oracle:75
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/lint_gate_deploy_contracts.c:t_canonical_deploy_proof_binding_contract:26
-tests/harness/src/lint_gate_hygiene_selftests.c:t_dev_proof_helpers_include_lint_tool:17
-tests/harness/src/lint_gate_hygiene_selftests.c:t_lint_umbrellas_share_built_prereqs:18
 tests/harness/src/rom_bundle_admission_refusal_acceptance.c:main:16
 tests/harness/src/syncdiag_rpc_fixture.c:syncdiag_seed_anchorstatus_progress:31
 tests/harness/src/syncdiag_rpc_fixture.c:syncdiag_seed_lookahead_reducer_progress:21

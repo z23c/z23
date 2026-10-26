@@ -1545,6 +1545,26 @@ int t_lint_explicit_gates_run_once(void)
     return failures;
 }
 
+static int lint_umbrellas_helper_mutation_trips(char *mutant,
+                                                const char *needle)
+{
+    char *assignment = mutant
+        ? strstr(mutant, "\nLINT_BUILT_PREREQS =") : NULL;
+    char *helper = assignment
+        ? strstr(assignment, needle) : NULL;
+    if (helper) helper[0] = '!';
+    return helper != NULL && !lint_built_prereqs_contract(mutant);
+}
+
+static int lint_umbrellas_target_mutation_trips(char *mutant)
+{
+    char *targets = mutant
+        ? strstr(mutant, "\nlint:") : NULL;
+    char *lint_target = targets ? targets + 1 : NULL;
+    if (lint_target) lint_target[0] = 'X';
+    return lint_target != NULL && !lint_built_prereqs_contract(mutant);
+}
+
 int t_lint_umbrellas_share_built_prereqs(void)
 {
     int failures = 0;
@@ -1555,30 +1575,16 @@ int t_lint_umbrellas_share_built_prereqs(void)
     int baseline_ok = read_ok && lint_built_prereqs_contract(makefile);
 
     char *missing_helper = read_ok ? strdup(makefile) : NULL;
-    char *assignment = missing_helper
-        ? strstr(missing_helper, "\nLINT_BUILT_PREREQS =") : NULL;
-    char *helper = assignment
-        ? strstr(assignment, "$(EQUIHASH_FACT_TOOL)") : NULL;
-    if (helper) helper[0] = '!';
-    int helper_mutation_trips = helper != NULL &&
-        !lint_built_prereqs_contract(missing_helper);
+    int helper_mutation_trips = lint_umbrellas_helper_mutation_trips(
+        missing_helper, "$(EQUIHASH_FACT_TOOL)");
 
     char *missing_git_hook = read_ok ? strdup(makefile) : NULL;
-    char *git_hook_assignment = missing_git_hook
-        ? strstr(missing_git_hook, "\nLINT_BUILT_PREREQS =") : NULL;
-    char *git_hook_helper = git_hook_assignment
-        ? strstr(git_hook_assignment, "$(GIT_HOOK_BIN)") : NULL;
-    if (git_hook_helper) git_hook_helper[0] = '!';
-    int git_hook_mutation_trips = git_hook_helper != NULL &&
-        !lint_built_prereqs_contract(missing_git_hook);
+    int git_hook_mutation_trips = lint_umbrellas_helper_mutation_trips(
+        missing_git_hook, "$(GIT_HOOK_BIN)");
 
     char *missing_target = read_ok ? strdup(makefile) : NULL;
-    char *targets = missing_target
-        ? strstr(missing_target, "\nlint:") : NULL;
-    char *lint_target = targets ? targets + 1 : NULL;
-    if (lint_target) lint_target[0] = 'X';
-    int target_mutation_trips = lint_target != NULL &&
-        !lint_built_prereqs_contract(missing_target);
+    int target_mutation_trips = lint_umbrellas_target_mutation_trips(
+        missing_target);
 
     TEST("[lint-gate] lint umbrellas share every built prerequisite; helper "
          "and target-removal mutations trip") {
@@ -1621,33 +1627,25 @@ static bool dev_proof_helper_root_hashes_lint(const char *source)
     return range_contains(block, end, "lint_tool_root");
 }
 
-int t_dev_proof_helpers_include_lint_tool(void)
+static int dev_proof_blank_lint_prereq_hits(char *source)
 {
-    int failures = 0;
-    char path[PATH_MAX];
-    char *source = NULL;
-    int read_ok = repo_path(path, sizeof(path), "tools/dev/dev_proof.c") == 0 &&
-                  read_entire_file(path, &source) == 0;
-    int prereq_ok = read_ok && dev_proof_prerequisite_argv_has_lint(source);
-    int hash_ok = read_ok && dev_proof_helper_root_hashes_lint(source);
-
-    char *missing_prereq = read_ok ? strdup(source) : NULL;
     /* "build/bin/z23-lint" names the pre-fork target and the docs-fresh
      * prebuild: blank every occurrence, as in the hash loop below. */
     int prereq_hit_count = 0;
-    char *cursor = missing_prereq;
+    char *cursor = source;
     while (cursor && (cursor = strstr(cursor, "\"build/bin/z23-lint\""))) {
         cursor[0] = '!';
         prereq_hit_count++;
         cursor++;
     }
-    int prereq_mutation_trips = prereq_hit_count > 0 &&
-        !dev_proof_prerequisite_argv_has_lint(missing_prereq);
+    return prereq_hit_count;
+}
 
-    char *missing_hash = read_ok ? strdup(source) : NULL;
-    char *hash_block = missing_hash
-        ? strstr(missing_hash, "hash_begin(&helpers, "
-                               "\"zcl.dev_proof_test_helpers.v1\");") : NULL;
+static int dev_proof_blank_helper_root_lint_hits(char *source)
+{
+    char *hash_block = source
+        ? strstr(source, "hash_begin(&helpers, "
+                         "\"zcl.dev_proof_test_helpers.v1\");") : NULL;
     char *hash_end = hash_block
         ? strstr(hash_block, "sha3_256_finalize(&helpers, helper_root);")
         : NULL;
@@ -1664,6 +1662,26 @@ int t_dev_proof_helpers_include_lint_tool(void)
             cursor = hit + 1;
         }
     }
+    return hash_hit_count;
+}
+
+int t_dev_proof_helpers_include_lint_tool(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *source = NULL;
+    int read_ok = repo_path(path, sizeof(path), "tools/dev/dev_proof.c") == 0 &&
+                  read_entire_file(path, &source) == 0;
+    int prereq_ok = read_ok && dev_proof_prerequisite_argv_has_lint(source);
+    int hash_ok = read_ok && dev_proof_helper_root_hashes_lint(source);
+
+    char *missing_prereq = read_ok ? strdup(source) : NULL;
+    int prereq_hit_count = dev_proof_blank_lint_prereq_hits(missing_prereq);
+    int prereq_mutation_trips = prereq_hit_count > 0 &&
+        !dev_proof_prerequisite_argv_has_lint(missing_prereq);
+
+    char *missing_hash = read_ok ? strdup(source) : NULL;
+    int hash_hit_count = dev_proof_blank_helper_root_lint_hits(missing_hash);
     int hash_mutation_trips = hash_hit_count > 0 &&
         !dev_proof_helper_root_hashes_lint(missing_hash);
 
