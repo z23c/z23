@@ -81,8 +81,6 @@ contexts/commons/modules/vcs/src/zcode_science.c:vcs_zcode_science_findings_vali
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:55
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_derive:23
 contexts/commons/modules/vcs/src/zcode_science_index.c:vcs_zcode_science_index_build:22
-contexts/commons/modules/vcs/src/zcode_science_statement.c:statement_fields:33
-contexts/commons/modules/vcs/src/zcode_science_statement.c:vcs_zcode_vector_navigation_preregistration_validate:34
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:score_body:23
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_plan:45
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_receipt_parse:26

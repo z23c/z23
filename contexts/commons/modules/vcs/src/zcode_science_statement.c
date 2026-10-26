@@ -76,8 +76,8 @@ static uint8_t relation_set_types(
 static uint8_t relation_type_count(uint8_t types);
 static enum vcs_zcode_science_error empty_relation_set_root(uint8_t out[32]);
 
-static enum vcs_zcode_science_error statement_fields(
-    const struct vcs_zcode_science_statement_v1 *s, bool require_signature)
+static enum vcs_zcode_science_error statement_check_enums(
+    const struct vcs_zcode_science_statement_v1 *s)
 {
     if (!s) return VCS_ZCODE_SCIENCE_ERR_NULL;
     if (s->schema_version != VCS_ZCODE_SCIENCE_STATEMENT_VERSION)
@@ -92,6 +92,12 @@ static enum vcs_zcode_science_error statement_fields(
     if (s->authorship == 0 ||
         s->authorship >= VCS_ZCODE_SCIENCE_AUTHORSHIP_COUNT)
         return VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error statement_check_roots(
+    const struct vcs_zcode_science_statement_v1 *s)
+{
     const uint8_t *roots[] = {
         s->subject_root, s->predicate_body_root, s->profile_schema_root,
         s->provenance_root, s->activity_root, s->input_root,
@@ -101,6 +107,12 @@ static enum vcs_zcode_science_error statement_fields(
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!root_nonzero(roots[i])) return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error statement_check_relations(
+    const struct vcs_zcode_science_statement_v1 *s)
+{
     if (s->relation_count > VCS_ZCODE_SCIENCE_RELATION_MAX)
         return VCS_ZCODE_SCIENCE_ERR_LIMIT;
     if ((s->relation_types & ~VCS_ZCODE_SCIENCE_RELATION_KNOWN_MASK) != 0)
@@ -115,6 +127,18 @@ static enum vcs_zcode_science_error statement_fields(
                s->relation_count < relation_type_count(s->relation_types)) {
         return VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE;
     }
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error statement_fields(
+    const struct vcs_zcode_science_statement_v1 *s, bool require_signature)
+{
+    enum vcs_zcode_science_error error = statement_check_enums(s);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = statement_check_roots(s);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = statement_check_relations(s);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
     if (s->observed_unix <= 0) return VCS_ZCODE_SCIENCE_ERR_TIME_ORDER;
     if (s->embargo_until_unix != 0 &&
         s->embargo_until_unix < s->observed_unix)
@@ -445,14 +469,10 @@ enum vcs_zcode_science_error vcs_zcode_science_statement_verify(
         ? VCS_ZCODE_SCIENCE_OK : VCS_ZCODE_SCIENCE_ERR_SIGNATURE;
 }
 
-enum vcs_zcode_science_error
-vcs_zcode_vector_navigation_preregistration_validate(
+static enum vcs_zcode_science_error
+vector_navigation_preregistration_check_counts(
     const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
 {
-    if (!prereg) return VCS_ZCODE_SCIENCE_ERR_NULL;
-    if (prereg->schema_version !=
-        VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_VERSION)
-        return VCS_ZCODE_SCIENCE_ERR_VERSION;
     if (prereg->arm_count != VCS_ZCODE_VECTOR_NAVIGATION_ARM_COUNT - 1u ||
         prereg->gate_count != VCS_ZCODE_VECTOR_NAVIGATION_GATE_COUNT - 1u ||
         prereg->development_queries !=
@@ -475,6 +495,13 @@ vcs_zcode_vector_navigation_preregistration_validate(
         prereg->approximate_recall_at_20_bp !=
             VCS_ZCODE_VECTOR_NAVIGATION_APPROX_RECALL_AT_20_BP)
         return VCS_ZCODE_SCIENCE_ERR_LIMIT;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error
+vector_navigation_preregistration_check_flags(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
     if (prereg->evidence_kind !=
             VCS_ZCODE_VECTOR_NAVIGATION_EVIDENCE_MODEL_HINT ||
         prereg->reserved != 0 || prereg->reserved_tail != 0 ||
@@ -484,6 +511,13 @@ vcs_zcode_vector_navigation_preregistration_validate(
         prereg->maximum_mandatory_proof_omissions != 0 ||
         prereg->maximum_vector_only_completeness_claims != 0)
         return VCS_ZCODE_SCIENCE_ERR_FLAGS;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error
+vector_navigation_preregistration_check_roots(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
     const uint8_t *roots[] = {
         prereg->study_spec_root, prereg->source_root, prereg->task_root,
         prereg->ontology_root, prereg->concept_card_root,
@@ -492,6 +526,13 @@ vcs_zcode_vector_navigation_preregistration_validate(
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!root_nonzero(roots[i])) return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error
+vector_navigation_preregistration_check_arm_roots(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
     for (size_t i = 0; i < prereg->arm_count; i++)
         if (!root_nonzero(prereg->arm_roots[i]))
             return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
@@ -499,6 +540,13 @@ vcs_zcode_vector_navigation_preregistration_validate(
         for (size_t j = i + 1; j < prereg->arm_count; j++)
             if (memcmp(prereg->arm_roots[i], prereg->arm_roots[j], 32) == 0)
                 return VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+static enum vcs_zcode_science_error
+vector_navigation_preregistration_check_gate_roots(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
     for (size_t i = 0; i < prereg->gate_count; i++)
         if (!root_nonzero(prereg->gate_roots[i]))
             return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
@@ -506,6 +554,28 @@ vcs_zcode_vector_navigation_preregistration_validate(
         for (size_t j = i + 1; j < prereg->gate_count; j++)
             if (memcmp(prereg->gate_roots[i], prereg->gate_roots[j], 32) == 0)
                 return VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED;
+    return VCS_ZCODE_SCIENCE_OK;
+}
+
+enum vcs_zcode_science_error
+vcs_zcode_vector_navigation_preregistration_validate(
+    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+{
+    if (!prereg) return VCS_ZCODE_SCIENCE_ERR_NULL;
+    if (prereg->schema_version !=
+        VCS_ZCODE_VECTOR_NAVIGATION_PREREGISTRATION_VERSION)
+        return VCS_ZCODE_SCIENCE_ERR_VERSION;
+    enum vcs_zcode_science_error error =
+        vector_navigation_preregistration_check_counts(prereg);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = vector_navigation_preregistration_check_flags(prereg);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = vector_navigation_preregistration_check_roots(prereg);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = vector_navigation_preregistration_check_arm_roots(prereg);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
+    error = vector_navigation_preregistration_check_gate_roots(prereg);
+    if (error != VCS_ZCODE_SCIENCE_OK) return error;
     return VCS_ZCODE_SCIENCE_OK;
 }
 
