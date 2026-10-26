@@ -617,9 +617,10 @@ static bool header_corpus_rows_ok(sqlite3_stmt *st,
                                ? sqlite3_column_blob(st, 1) : NULL;
         const void *parent = sqlite3_column_type(st, 2) == SQLITE_BLOB
                                  ? sqlite3_column_blob(st, 2) : NULL;
+        bool linked = header_row_linked(st, row_height, parent, prior);
         if (row_height != expected_height || !hash ||
             sqlite3_column_bytes(st, 1) != 32 ||
-            !header_row_linked(st, row_height, parent, prior))
+            !linked)
             return false;
         header_row_hash(ctx, row_height, hash, parent);
         memcpy(prior, hash, 32);
