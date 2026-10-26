@@ -35,6 +35,45 @@ static bool marker_set_i64_in_tx(sqlite3 *db, const char *key, int64_t value)
            progress_meta_set_in_tx(db, key, encoded, (size_t)n);
 }
 
+/* Status codes for marker_digits_parse(): marker_read_i64 owns the log
+ * lines, so the parser reports a code instead of logging. */
+enum marker_digits_parse_status {
+    MARKER_DIGITS_PARSE_OK = 0,
+    MARKER_DIGITS_PARSE_NON_DIGIT,
+    MARKER_DIGITS_PARSE_OVERFLOW,
+};
+
+static bool marker_read_args_invalid(sqlite3 *db, const char *key,
+                                     const int64_t *value_out,
+                                     const bool *found_out)
+{
+    return !db || !key || !key[0] || !value_out || !found_out;
+}
+
+static bool marker_text_shape_invalid(const uint8_t *buf, size_t len,
+                                      size_t cap)
+{
+    return len == 0 || len >= cap || (len > 1 && buf[0] == '0');
+}
+
+static enum marker_digits_parse_status marker_digits_parse(
+    const uint8_t *buf, size_t len, int64_t *value_out, size_t *bad_offset)
+{
+    int64_t value = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] < (uint8_t)'0' || buf[i] > (uint8_t)'9') {
+            *bad_offset = i;
+            return MARKER_DIGITS_PARSE_NON_DIGIT;
+        }
+        int digit = (int)(buf[i] - (uint8_t)'0');
+        if (value > (INT64_MAX - digit) / 10)
+            return MARKER_DIGITS_PARSE_OVERFLOW;
+        value = value * 10 + digit;
+    }
+    *value_out = value;
+    return MARKER_DIGITS_PARSE_OK;
+}
+
 static bool marker_read_i64(sqlite3 *db, const char *key,
                             int64_t *value_out, bool *found_out)
 {
@@ -43,7 +82,7 @@ static bool marker_read_i64(sqlite3 *db, const char *key,
     bool found = false;
     if (value_out) *value_out = 0;
     if (found_out) *found_out = false;
-    if (!db || !key || !key[0] || !value_out || !found_out) {
+    if (marker_read_args_invalid(db, key, value_out, found_out)) {
         LOG_WARN("nullifier_kv", "[nullifier_kv] marker read invalid args");
         return false;
     }
@@ -54,27 +93,26 @@ static bool marker_read_i64(sqlite3 *db, const char *key,
     }
     if (!found)
         return true;
-    if (len == 0 || len >= sizeof(buf) || (len > 1 && buf[0] == '0')) {
+    if (marker_text_shape_invalid(buf, len, sizeof(buf))) {
         LOG_WARN("nullifier_kv",
                  "[nullifier_kv] marker malformed key=%s length=%zu",
                  key, len);
         return false;
     }
     int64_t value = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (buf[i] < (uint8_t)'0' || buf[i] > (uint8_t)'9') {
-            LOG_WARN("nullifier_kv",
-                     "[nullifier_kv] marker malformed key=%s offset=%zu",
-                     key, i);
-            return false;
-        }
-        int digit = (int)(buf[i] - (uint8_t)'0');
-        if (value > (INT64_MAX - digit) / 10) {
-            LOG_WARN("nullifier_kv",
-                     "[nullifier_kv] marker overflow key=%s", key);
-            return false;
-        }
-        value = value * 10 + digit;
+    size_t bad_offset = 0;
+    enum marker_digits_parse_status parse =
+        marker_digits_parse(buf, len, &value, &bad_offset);
+    if (parse == MARKER_DIGITS_PARSE_NON_DIGIT) {
+        LOG_WARN("nullifier_kv",
+                 "[nullifier_kv] marker malformed key=%s offset=%zu",
+                 key, bad_offset);
+        return false;
+    }
+    if (parse == MARKER_DIGITS_PARSE_OVERFLOW) {
+        LOG_WARN("nullifier_kv",
+                 "[nullifier_kv] marker overflow key=%s", key);
+        return false;
     }
     *value_out = value;
     *found_out = true;
@@ -148,6 +186,39 @@ bool nullifier_kv_ensure_schema(sqlite3 *db)
     return true;
 }
 
+/* Shared sqlite transaction plumbing for the history entry points. The
+ * callers keep every log line, so these helpers never log: free an error
+ * string, clear it for reuse, or pick the COMMIT/ROLLBACK statement. */
+static void tx_free_err(char *err)
+{
+    if (err) sqlite3_free(err);
+}
+
+static void tx_err_clear(char **err)
+{
+    if (*err) { sqlite3_free(*err); *err = NULL; }
+}
+
+static const char *tx_finish_verb(bool ok)
+{
+    return ok ? "COMMIT" : "ROLLBACK";
+}
+
+/* Ensure the progress table, the nullifier schema and the activation marker
+ * inside the caller's transaction. Returns the calls' own combined result
+ * so nullifier_kv_initialize_history can log the rollback itself. */
+static bool nf_activation_ensure_in_tx(sqlite3 *db, int64_t activation_cursor)
+{
+    bool found = false;
+    size_t marker_len = 0;
+    uint8_t marker_probe[1];
+    return progress_meta_table_ensure(db) &&
+           nullifier_kv_ensure_schema(db) &&
+           progress_meta_get(db, NF_ACTIVATION_KEY, marker_probe,
+                             sizeof(marker_probe), &marker_len, &found) &&
+           (found || nf_activation_set_in_tx(db, activation_cursor));
+}
+
 bool nullifier_kv_initialize_history(sqlite3 *db, int64_t activation_cursor)
 {
     if (!db || activation_cursor < 0) {
@@ -165,34 +236,25 @@ bool nullifier_kv_initialize_history(sqlite3 *db, int64_t activation_cursor)
                       != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[nullifier_kv] initialize BEGIN: %s",
                  err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
+        tx_free_err(err);
         progress_store_tx_unlock();
         return false;
     }
 
-    bool ok = progress_meta_table_ensure(db) &&
-              nullifier_kv_ensure_schema(db);
-    bool found = false;
-    size_t marker_len = 0;
-    uint8_t marker_probe[1];
-    if (ok)
-        ok = progress_meta_get(db, NF_ACTIVATION_KEY, marker_probe,
-                               sizeof(marker_probe), &marker_len, &found);
-    if (ok && !found)
-        ok = nf_activation_set_in_tx(db, activation_cursor);
+    bool ok = nf_activation_ensure_in_tx(db, activation_cursor);
 
     if (own_tx) {
-        const char *finish = ok ? "COMMIT" : "ROLLBACK";
+        const char *finish = tx_finish_verb(ok);
         err = NULL;
         if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
             LOG_WARN("nullifier_kv", "[nullifier_kv] initialize %s: %s",
                      finish, err ? err : sqlite3_errmsg(db));
-            if (err) sqlite3_free(err);
+            tx_free_err(err);
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             progress_store_tx_unlock();
             return false;
         }
-        if (err) sqlite3_free(err);
+        tx_free_err(err);
         progress_store_tx_unlock();
     }
     if (!ok)
@@ -343,10 +405,34 @@ static bool replay_marker_required(sqlite3 *db, const char *key,
     return true;
 }
 
+static bool replay_target_height_invalid(sqlite3 *db, int64_t target_height)
+{
+    return !db || target_height < 0 || target_height == INT64_MAX ||
+           sqlite3_get_autocommit(db) == 0;
+}
+
+/* The complete in-transaction write set for starting a full replay: reset
+ * both component stores below the boundary and seed the four session
+ * markers, in the original short-circuit order. */
+static bool replay_begin_reset_and_seed_in_tx(sqlite3 *db,
+                                              int64_t target_height,
+                                              int64_t boundary)
+{
+    return progress_meta_table_ensure(db) &&
+           anchor_kv_reset_mark_empty_below_in_tx(db, boundary) &&
+           nullifier_kv_reset_mark_empty_below_in_tx(db, boundary) &&
+           marker_set_i64_in_tx(db, SHIELDED_REPLAY_TARGET_KEY,
+                                target_height) &&
+           marker_set_i64_in_tx(db, SHIELDED_REPLAY_NEXT_KEY, 0) &&
+           marker_set_i64_in_tx(
+               db, SHIELDED_REPLAY_SPROUT_STARTED_KEY, 0) &&
+           marker_set_i64_in_tx(
+               db, SHIELDED_REPLAY_SAPLING_STARTED_KEY, 0);
+}
+
 bool shielded_history_begin_full_replay(sqlite3 *db, int64_t target_height)
 {
-    if (!db || target_height < 0 || target_height == INT64_MAX ||
-        sqlite3_get_autocommit(db) == 0) {
+    if (replay_target_height_invalid(db, target_height)) {
         LOG_WARN("nullifier_kv",
                  "[shielded_history] full replay begin invalid target=%lld",
                  (long long)target_height);
@@ -358,26 +444,17 @@ bool shielded_history_begin_full_replay(sqlite3 *db, int64_t target_height)
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] replay BEGIN failed: %s",
                  err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
+        tx_free_err(err);
         progress_store_tx_unlock();
         return false;
     }
-    if (err) { sqlite3_free(err); err = NULL; }
+    tx_err_clear(&err);
 
     int64_t boundary = target_height + 1;
-    bool ok = progress_meta_table_ensure(db) &&
-              anchor_kv_reset_mark_empty_below_in_tx(db, boundary) &&
-              nullifier_kv_reset_mark_empty_below_in_tx(db, boundary) &&
-              marker_set_i64_in_tx(db, SHIELDED_REPLAY_TARGET_KEY,
-                                   target_height) &&
-              marker_set_i64_in_tx(db, SHIELDED_REPLAY_NEXT_KEY, 0) &&
-              marker_set_i64_in_tx(
-                  db, SHIELDED_REPLAY_SPROUT_STARTED_KEY, 0) &&
-              marker_set_i64_in_tx(
-                  db, SHIELDED_REPLAY_SAPLING_STARTED_KEY, 0);
+    bool ok = replay_begin_reset_and_seed_in_tx(db, target_height, boundary);
     if (!ok)
         LOG_WARN("nullifier_kv", "[shielded_history] replay reset failed");
-    const char *finish = ok ? "COMMIT" : "ROLLBACK";
+    const char *finish = tx_finish_verb(ok);
     if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] replay %s failed: %s",
                  finish, err ? err : sqlite3_errmsg(db));
@@ -385,7 +462,7 @@ bool shielded_history_begin_full_replay(sqlite3 *db, int64_t target_height)
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         ok = false;
     }
-    if (err) sqlite3_free(err);
+    tx_free_err(err);
     progress_store_tx_unlock();
     return ok;
 }
@@ -463,11 +540,41 @@ bool shielded_history_full_replay_advance_in_tx(
     return marker_set_i64_in_tx(db, SHIELDED_REPLAY_NEXT_KEY, height + 1);
 }
 
+/* Read the replay session markers and the nullifier activation cursor and
+ * check them against the completion boundary; the out-params feed the
+ * caller's refusal log. */
+static bool replay_publish_markers_match(sqlite3 *db, int64_t target_height,
+                                         int64_t boundary,
+                                         int64_t *stored_target,
+                                         int64_t *next, int64_t *nf_cursor,
+                                         bool *nf_found)
+{
+    return replay_marker_required(db, SHIELDED_REPLAY_TARGET_KEY,
+                                  stored_target) &&
+           replay_marker_required(db, SHIELDED_REPLAY_NEXT_KEY, next) &&
+           *stored_target == target_height && *next == boundary &&
+           nullifier_kv_activation_cursor(db, nf_cursor, nf_found) &&
+           *nf_found && *nf_cursor == boundary;
+}
+
+/* Durable completion writes: publish the anchor store, zero the nullifier
+ * activation marker, then delete the four replay session markers. */
+static bool replay_publish_finalize_in_tx(sqlite3 *db, int64_t boundary)
+{
+    return anchor_kv_publish_full_replay_complete_in_tx(db, boundary) &&
+           nf_activation_set_in_tx(db, 0) &&
+           progress_meta_delete_in_tx(db, SHIELDED_REPLAY_TARGET_KEY) &&
+           progress_meta_delete_in_tx(db, SHIELDED_REPLAY_NEXT_KEY) &&
+           progress_meta_delete_in_tx(
+               db, SHIELDED_REPLAY_SPROUT_STARTED_KEY) &&
+           progress_meta_delete_in_tx(
+               db, SHIELDED_REPLAY_SAPLING_STARTED_KEY);
+}
+
 bool shielded_history_publish_full_replay_complete(
     sqlite3 *db, int64_t target_height)
 {
-    if (!db || target_height < 0 || target_height == INT64_MAX ||
-        sqlite3_get_autocommit(db) == 0) {
+    if (replay_target_height_invalid(db, target_height)) {
         LOG_WARN("nullifier_kv",
                  "[shielded_history] publish complete invalid target=%lld",
                  (long long)target_height);
@@ -479,31 +586,21 @@ bool shielded_history_publish_full_replay_complete(
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] publish BEGIN failed: %s",
                  err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
+        tx_free_err(err);
         progress_store_tx_unlock();
         return false;
     }
-    if (err) { sqlite3_free(err); err = NULL; }
+    tx_err_clear(&err);
 
     int64_t stored_target = -1;
     int64_t next = -1;
     int64_t nf_cursor = -1;
     bool nf_found = false;
     int64_t boundary = target_height + 1;
-    bool ok = replay_marker_required(db, SHIELDED_REPLAY_TARGET_KEY,
-                                     &stored_target) &&
-              replay_marker_required(db, SHIELDED_REPLAY_NEXT_KEY, &next) &&
-              stored_target == target_height && next == boundary &&
-              nullifier_kv_activation_cursor(db, &nf_cursor, &nf_found) &&
-              nf_found && nf_cursor == boundary &&
-              anchor_kv_publish_full_replay_complete_in_tx(db, boundary) &&
-              nf_activation_set_in_tx(db, 0) &&
-              progress_meta_delete_in_tx(db, SHIELDED_REPLAY_TARGET_KEY) &&
-              progress_meta_delete_in_tx(db, SHIELDED_REPLAY_NEXT_KEY) &&
-              progress_meta_delete_in_tx(
-                  db, SHIELDED_REPLAY_SPROUT_STARTED_KEY) &&
-              progress_meta_delete_in_tx(
-                  db, SHIELDED_REPLAY_SAPLING_STARTED_KEY);
+    bool ok = replay_publish_markers_match(db, target_height, boundary,
+                                           &stored_target, &next, &nf_cursor,
+                                           &nf_found) &&
+              replay_publish_finalize_in_tx(db, boundary);
     if (!ok) {
         LOG_WARN("nullifier_kv",
                  "[shielded_history] publish refused target=%lld stored=%lld "
@@ -511,22 +608,28 @@ bool shielded_history_publish_full_replay_complete(
                  (long long)target_height, (long long)stored_target,
                  (long long)next, (long long)nf_cursor, nf_found ? 1 : 0);
     }
-    const char *finish = ok ? "COMMIT" : "ROLLBACK";
+    const char *finish = tx_finish_verb(ok);
     if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] publish %s failed: %s",
                  finish, err ? err : sqlite3_errmsg(db));
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         ok = false;
     }
-    if (err) sqlite3_free(err);
+    tx_free_err(err);
     progress_store_tx_unlock();
     return ok;
+}
+
+static bool boundary_reset_args_invalid(sqlite3 *db, int64_t activation_cursor)
+{
+    return !db || activation_cursor <= 0 ||
+           sqlite3_get_autocommit(db) == 0;
 }
 
 bool shielded_history_reset_to_boundary(sqlite3 *db,
                                         int64_t activation_cursor)
 {
-    if (!db || activation_cursor <= 0 || sqlite3_get_autocommit(db) == 0) {
+    if (boundary_reset_args_invalid(db, activation_cursor)) {
         LOG_WARN("nullifier_kv",
                  "[shielded_history] reset boundary invalid cursor=%lld",
                  (long long)activation_cursor);
@@ -538,11 +641,11 @@ bool shielded_history_reset_to_boundary(sqlite3 *db,
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] reset BEGIN: %s",
                  err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
+        tx_free_err(err);
         progress_store_tx_unlock();
         return false;
     }
-    if (err) { sqlite3_free(err); err = NULL; }
+    tx_err_clear(&err);
 
     bool ok = anchor_kv_reset_mark_empty_below_in_tx(db, activation_cursor);
     if (ok && !nullifier_kv_reset_mark_empty_below_in_tx(db, activation_cursor))
@@ -553,7 +656,7 @@ bool shielded_history_reset_to_boundary(sqlite3 *db,
     if (ok && !shielded_history_cancel_full_replay_in_tx(db))
         ok = false;
 
-    const char *finish = ok ? "COMMIT" : "ROLLBACK";
+    const char *finish = tx_finish_verb(ok);
     if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("nullifier_kv", "[shielded_history] reset %s: %s",
                  finish, err ? err : sqlite3_errmsg(db));
@@ -561,7 +664,7 @@ bool shielded_history_reset_to_boundary(sqlite3 *db,
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         ok = false;
     }
-    if (err) sqlite3_free(err);
+    tx_free_err(err);
     progress_store_tx_unlock();
     return ok;
 }

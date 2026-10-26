@@ -1262,11 +1262,6 @@ engine/modules/storage/src/event_log.c:event_log_stream:19
 engine/modules/storage/src/ldb_reader_version.c:apply_edit:34
 engine/modules/storage/src/ldb_reader_version.c:ldb_memtable_load:16
 engine/modules/storage/src/ldb_reader_version.c:ldb_version_load:19
-engine/modules/storage/src/nullifier_kv.c:marker_read_i64:18
-engine/modules/storage/src/nullifier_kv.c:nullifier_kv_initialize_history:19
-engine/modules/storage/src/nullifier_kv.c:shielded_history_begin_full_replay:21
-engine/modules/storage/src/nullifier_kv.c:shielded_history_publish_full_replay_complete:27
-engine/modules/storage/src/nullifier_kv.c:shielded_history_reset_to_boundary:17
 engine/modules/storage/src/progress_store.c:progress_store_open:35
 engine/modules/storage/src/projection_store.c:projection_clean_receipt_write:17
 engine/modules/storage/src/projection_store.c:projection_store_open:28
