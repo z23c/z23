@@ -153,6 +153,15 @@ static void timing_load(const char *table_path, struct timing_table *out)
     fclose(f);
 }
 
+static bool timing_write_row(FILE *f, const struct timing_row *row)
+{
+    bool ok = fprintf(f, "%s", row->key) >= 0;
+    for (size_t s = 0; s < row->count && ok; s++)
+        ok = fprintf(f, "%c%lld", s == 0 ? '\t' : ' ',
+                     (long long)row->samples[s]) >= 0;
+    return ok && fputc('\n', f) != EOF;
+}
+
 static bool timing_store(const char *dir_path, const char *table_path,
                          const struct timing_table *table)
 {
@@ -164,15 +173,8 @@ static bool timing_store(const char *dir_path, const char *table_path,
     FILE *f = fopen(temporary, "w");
     if (!f) return false;
     bool ok = true;
-    for (size_t i = 0; i < table->count && ok; i++) {
-        const struct timing_row *row = &table->rows[i];
-        if (fprintf(f, "%s", row->key) < 0) ok = false;
-        for (size_t s = 0; s < row->count && ok; s++)
-            if (fprintf(f, "%c%lld", s == 0 ? '\t' : ' ',
-                        (long long)row->samples[s]) < 0)
-                ok = false;
-        if (ok && fputc('\n', f) == EOF) ok = false;
-    }
+    for (size_t i = 0; i < table->count && ok; i++)
+        ok = timing_write_row(f, &table->rows[i]);
     if (fflush(f) != 0) ok = false;
     if (fclose(f) != 0) ok = false;
     if (!ok || rename(temporary, table_path) != 0) {
@@ -266,11 +268,43 @@ int64_t zcl_dev_proof_timing_allowance_ms(const char *state_dir,
 
 /* ── Reading the harness's own banners ─────────────────────────────────── */
 
+static bool group_line_args_present(const char *line, const char *group,
+                                    size_t group_size, const int64_t *ms)
+{
+    return line && group && group_size && ms;
+}
+
+/* The seconds are the last comma-separated field before the paren; a
+ * skip note can sit between the status and the time. */
+static const char *group_line_seconds_field(const char *status,
+                                            const char *close)
+{
+    const char *seconds = NULL;
+    for (const char *p = status; p < close; p++)
+        if (*p == ',') seconds = p + 1;
+    if (!seconds) return NULL;
+    while (seconds < close && *seconds == ' ') seconds++;
+    return seconds;
+}
+
+static bool group_line_seconds_value(const char *seconds, const char *close,
+                                     long long *value_out)
+{
+    char *end = NULL;
+    errno = 0;
+    long long value = strtoll(seconds, &end, 10);
+    if (errno || end == seconds || value < 0 || end >= close || *end != 's')
+        return false;
+    if (end + 1 != close) return false;
+    *value_out = value;
+    return true;
+}
+
 bool zcl_dev_proof_timing_parse_group_line(const char *line, char *group,
                                            size_t group_size, int64_t *ms)
 {
     static const char marker[] = "==================== ";
-    if (!line || !group || !group_size || !ms) return false;
+    if (!group_line_args_present(line, group, group_size, ms)) return false;
     if (strncmp(line, marker, sizeof(marker) - 1) != 0) return false;
     const char *name = line + sizeof(marker) - 1;
     const char *open = strstr(name, " (");
@@ -282,19 +316,10 @@ bool zcl_dev_proof_timing_parse_group_line(const char *line, char *group,
     if (strncmp(status, "PASS,", 5) != 0) return false;
     const char *close = strstr(status, ") ====");
     if (!close) return false;
-    /* The seconds are the last comma-separated field before the paren; a
-     * skip note can sit between the status and the time. */
-    const char *seconds = NULL;
-    for (const char *p = status; p < close; p++)
-        if (*p == ',') seconds = p + 1;
+    const char *seconds = group_line_seconds_field(status, close);
     if (!seconds) return false;
-    while (seconds < close && *seconds == ' ') seconds++;
-    char *end = NULL;
-    errno = 0;
-    long long value = strtoll(seconds, &end, 10);
-    if (errno || end == seconds || value < 0 || end >= close || *end != 's')
-        return false;
-    if (end + 1 != close) return false;
+    long long value = 0;
+    if (!group_line_seconds_value(seconds, close, &value)) return false;
     memcpy(group, name, name_len);
     group[name_len] = '\0';
     *ms = (int64_t)value * 1000;
@@ -598,7 +623,8 @@ bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
         return true;
     }
     int64_t now_us = platform_time_monotonic_us();
-    if (log_progress_mark(step->log_path, &step->seen_size, &step->seen_mtime))
+    if (log_progress_mark(step->log_path, &step->seen_size,
+                          &step->seen_mtime))
         step->last_progress_us = now_us;
     step->report.elapsed_ms = (now_us - step->started_us) / 1000;
     step->report.last_progress_age_ms =

@@ -1983,8 +1983,6 @@ tools/dev/dev_failure_store.c:zcl_dev_failure_match_latest:20
 tools/dev/dev_failure_store.c:zcl_dev_failure_normalize_error:19
 tools/dev/dev_failure_store.c:zcl_dev_failure_note_coalesced:32
 tools/dev/dev_failure_store.c:zcl_dev_failure_record_failure:73
-tools/dev/dev_proof_budget.c:timing_store:17
-tools/dev/dev_proof_budget.c:zcl_dev_proof_timing_parse_group_line:22
 tools/dev/dev_proof_receipt.c:verdict_payload_valid:16
 tools/dev/dev_proof_receipt.c:zcl_dev_proof_receipt_parse:17
 tools/dev/dev_proof_receipt.c:zcl_dev_verdict_leaf_verify:16
