@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
@@ -197,7 +198,10 @@ static void test_large_drop_counter_arithmetic(void) {
         r.head == SIZE_MAX - 1u && r.count == 0);
 }
 
+static void test_cli(void);
+
 int main(void) {
+  test_cli();
   test_large_drop_counter_arithmetic();
   test_basic();
   test_wrap();
@@ -211,4 +215,129 @@ int main(void) {
   }
   printf("test_zring: all groups passed (basic wrap bulk peek err null fuzz)\n");
   return 0;
+}
+
+static FILE *cli_source, *cli_sink, *cli_errors;
+static size_t cli_flushes;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+[[maybe_unused]] static int cli_flush(FILE *stream) {
+  if (stream == cli_sink) cli_flushes++;
+  return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin cli_source
+#define stdout cli_sink
+#define stderr cli_errors
+#define fflush cli_flush
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef fflush
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin real_stdin()
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static FILE *required_stream(FILE *stream) {
+  if (!stream) { fprintf(stderr, "zring CLI fixture: stream setup failed\n"); exit(2); }
+  return stream;
+}
+static FILE *input_bytes(const unsigned char *bytes, size_t n) {
+  FILE *source = required_stream(tmpfile());
+  if (fwrite(bytes, 1, n, source) != n || fflush(source) != 0) exit(2);
+  rewind(source);
+  return source;
+}
+static int cli_invoke(FILE *source, FILE *sink, FILE *errors, const char *cap) {
+  cli_source = source;
+  cli_sink = sink;
+  cli_errors = errors;
+  cli_flushes = 0;
+  char *args[] = {"zring", (char *)cap, NULL};
+  int rc = embedded_cli_main(cap ? 2 : 1, args);
+  cli_source = stdin;
+  cli_sink = stdout;
+  cli_errors = stderr;
+  return rc;
+}
+static void check_errors(FILE *stream, const char *want, bool success) {
+  char text[256];
+  rewind(stream);
+  size_t n = fread(text, 1, sizeof text - 1, stream);
+  CHECK(!ferror(stream));
+  text[n] = '\0';
+  CHECK(strstr(text, want) != NULL);
+  CHECK((strstr(text, "ok:") != NULL) == success);
+}
+static void cli_binary(const char *cap) {
+  unsigned char bytes[8193], got[8194];
+  for (size_t i = 0; i < sizeof bytes; i++) bytes[i] = (unsigned char)i;
+  FILE *source = input_bytes(bytes, sizeof bytes);
+  FILE *sink = required_stream(tmpfile()), *errors = required_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, errors, cap) == 0);
+  rewind(sink);
+  size_t n = fread(got, 1, sizeof got, sink);
+  CHECK(n == sizeof bytes && !memcmp(got, bytes, sizeof bytes) && !ferror(sink));
+  check_errors(errors, "ok: 8193 bytes pumped", true);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_failed_output(bool buffered) {
+#ifdef _WIN32
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  FILE *source = input_bytes((const unsigned char *)"abc", 3);
+  FILE *sink = required_stream(fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r"));
+  FILE *errors = required_stream(tmpfile());
+  char buffer[4096];
+  if (buffered && setvbuf(sink, buffer, _IOFBF, sizeof buffer) != 0) exit(2);
+  CHECK(cli_invoke(source, sink, errors, "16") == 1);
+  check_errors(errors, "write error", false);
+  CHECK(ferror(sink));
+  CHECK(fclose(source) == 0 && fclose(errors) == 0);
+  (void)fclose(sink);
+}
+static void cli_unused_output(const char *cap, int status, const char *message) {
+#ifdef _WIN32
+  FILE *sink = required_stream(fopen("NUL", "r"));
+#else
+  FILE *sink = required_stream(fopen("/dev/null", "r"));
+#endif
+  FILE *source = input_bytes((const unsigned char *)"", 0);
+  FILE *errors = required_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, errors, cap) == status);
+  CHECK(cli_flushes == 0 && !ferror(sink));
+  check_errors(errors, message, status == 0);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_failed_input(void) {
+#ifdef _WIN32
+  FILE *source = required_stream(fopen("NUL", "w"));
+#else
+  FILE *source = required_stream(fopen("/dev/null", "w"));
+#endif
+  FILE *sink = required_stream(tmpfile()), *errors = required_stream(tmpfile());
+  CHECK(cli_invoke(source, sink, errors, "16") == 1);
+  CHECK(cli_flushes == 0 && ftell(sink) == 0);
+  check_errors(errors, "error reading stdin", false);
+  CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void test_cli(void) {
+  cli_binary("1");
+  cli_binary("16");
+  cli_binary("65536");
+  cli_failed_output(false);
+#ifdef __linux__
+  cli_failed_output(true);
+#endif
+  cli_unused_output(NULL, 0, "ok: 0 bytes pumped");
+  cli_unused_output("0", 2, "bad capacity");
+  cli_failed_input();
 }

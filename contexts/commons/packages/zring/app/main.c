@@ -11,6 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int finish_pump(size_t total, size_t cap) {
+  if (total && (fflush(stdout) != 0 || ferror(stdout))) {
+    fprintf(stderr, "zring: write error\n");
+    return 1;
+  }
+  fprintf(stderr, "ok: %zu bytes pumped through %zu-byte ring\n", total, cap);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   static unsigned char store[65536];
   static unsigned char in[4096], out[4096];
@@ -57,7 +66,5 @@ int main(int argc, char **argv) {
       total += n;
     }
   }
-  fprintf(stderr, "ok: %zu bytes pumped through %zu-byte ring\n", total,
-          cap);
-  return 0;
+  return finish_pump(total, cap);
 }
