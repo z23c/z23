@@ -1788,9 +1788,6 @@ tests/harness/src/test_policy.c:test_policy:50
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
 tests/harness/src/test_progress_store.c:test_progress_store:100
 tests/harness/src/test_projection_replay_invariant.c:run_mempool:19
-tests/harness/src/test_proof_chain.c:pc_build_fixture:26
-tests/harness/src/test_proof_chain.c:pc_invariants:17
-tests/harness/src/test_proof_chain.c:test_proof_chain:77
 tests/harness/src/test_proof_validate_stage.c:test_proof_validate_stage:31
 tests/harness/src/test_pv_lookahead.c:la_fold_from:27
 tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:39

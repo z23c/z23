@@ -182,6 +182,129 @@ static bool pc_build_anchor_tx(struct transaction *tx,
     return true;
 }
 
+static bool pc_sign_one_release(uint8_t *wire, size_t wire_cap, size_t *wire_len,
+                                uint8_t digest[32], uint8_t master_pubkey[32],
+                                int i, enum pc_variant variant, uint64_t expiry)
+{
+    uint8_t seed[32];
+    memset(seed, 0x20 + i, 32);
+    struct zid_release rel;
+    memset(&rel, 0, sizeof(rel));
+    snprintf(rel.name, sizeof(rel.name), "pkg%d", i);
+    snprintf(rel.version, sizeof(rel.version), "1.%d", i);
+    memset(rel.manifest_root, 0x40 + i, 32);
+    struct zid_doc doc;
+    bool ok = zid_release_sign(&doc, &rel, (uint64_t)(i + 1), expiry, seed);
+    if (ok && variant == PC_DOC_BAD_SIGNATURE && i == PC_TARGET)
+        doc.signature[7] ^= 0x01; /* forged BEFORE the batch is folded */
+    if (ok && i == PC_TARGET)
+        memcpy(master_pubkey, doc.master_pubkey, 32);
+    if (ok)
+        *wire_len = zid_doc_encode(wire, wire_cap, &doc);
+    if (ok)
+        ok = *wire_len != 0;
+    if (ok)
+        zid_record_digest(digest, wire, *wire_len);
+    return ok;
+}
+
+static bool pc_sign_release_docs(uint8_t wires[][ZID_DOC_MAX],
+                                 size_t wire_lens[], uint8_t digests[][32],
+                                 uint8_t master_pubkey[32],
+                                 enum pc_variant variant, uint64_t expiry)
+{
+    bool ok = true;
+    for (int i = 0; i < PC_LEAVES && ok; i++)
+        ok = pc_sign_one_release(wires[i], sizeof(wires[i]), &wire_lens[i],
+                                 digests[i], master_pubkey, i, variant,
+                                 expiry);
+    return ok;
+}
+
+static void pc_sort_leaves(uint8_t leaves[][32], int n)
+{
+    for (int a = 0; a < n; a++)
+        for (int b = a + 1; b < n; b++)
+            if (memcmp(leaves[a], leaves[b], 32) > 0) {
+                uint8_t t[32];
+                memcpy(t, leaves[a], 32);
+                memcpy(leaves[a], leaves[b], 32);
+                memcpy(leaves[b], t, 32);
+            }
+}
+
+static uint64_t pc_leaf_index(const uint8_t leaves[][32], int n,
+                              const uint8_t digest[32])
+{
+    uint64_t index = (uint64_t)n;
+    for (int i = 0; i < n; i++)
+        if (memcmp(leaves[i], digest, 32) == 0)
+            index = (uint64_t)i;
+    return index;
+}
+
+static bool pc_fold_proof(struct pc_fixture *f, const uint8_t leaves[][32],
+                          uint64_t index, uint8_t root[32])
+{
+    uint8_t sibs[ZID_TREE_MAX_PEAKS][32];
+    uint32_t proof_len = 0;
+    bool proved = zid_tree_prove_from_leaves((const uint8_t (*)[32])leaves,
+                                             PC_LEAVES, index, sibs,
+                                             &proof_len, root);
+    uint8_t pwire[ZID_PROOF_WIRE_MAX];
+    size_t pwire_len = 0;
+    if (proved) {
+        f->index = index;
+        f->num_leaves = PC_LEAVES;
+        pc_hex(root, 32, f->root_hex);
+        pwire_len = zid_proof_encode(pwire, sizeof(pwire), index,
+                                     PC_LEAVES,
+                                     (const uint8_t (*)[32])sibs,
+                                     proof_len);
+    }
+    if (proved && pwire_len != 0)
+        pc_hex(pwire, pwire_len, f->proof_hex);
+    return proved && pwire_len != 0;
+}
+
+static size_t pc_anchor_script(unsigned char *script, size_t cap,
+                               enum pc_variant variant, const uint8_t root[32])
+{
+    if (variant == PC_ANCHOR_NOT_ZANC) {
+        /* OP_RETURN PUSH4 "ZZZZ" — an OP_RETURN that is not a ZANC anchor. */
+        script[0] = 0x6a;
+        script[1] = 0x04;
+        memcpy(script + 2, "ZZZZ", 4);
+        return 6;
+    }
+    if (variant == PC_ANCHOR_OTHER_DIGEST) {
+        uint8_t other[32];
+        memcpy(other, root, 32);
+        other[0] ^= 0xff;
+        return zanc_build_anchor(script, cap, ZANC_HASH_SHA3_256, other,
+                                 "zcode@1");
+    }
+    if (variant == PC_ANCHOR_SHA2)
+        return zanc_build_anchor(script, cap, ZANC_HASH_SHA2_256, root,
+                                 "zcode@1");
+    return zanc_build_anchor(script, cap, ZANC_HASH_SHA3_256, root, "zcode@1");
+}
+
+static bool pc_write_anchor_tx(struct pc_fixture *f,
+                               const unsigned char *script, size_t script_len,
+                               struct uint256 *txid)
+{
+    struct transaction tx;
+    bool built = pc_build_anchor_tx(&tx, script, script_len);
+    bool hexed = false;
+    if (built)
+        hexed = pc_tx_hex(&tx, f->tx_hex, sizeof(f->tx_hex));
+    if (built)
+        *txid = tx.hash;
+    transaction_free(&tx);
+    return built && hexed;
+}
+
 static bool pc_build_fixture(struct pc_fixture *f, enum pc_variant variant)
 {
     memset(f, 0, sizeof(*f));
@@ -194,102 +317,35 @@ static bool pc_build_fixture(struct pc_fixture *f, enum pc_variant variant)
     size_t wire_lens[PC_LEAVES];
     uint8_t digests[PC_LEAVES][32];
     const uint64_t expiry = 4000000000ull;
-    for (int i = 0; i < PC_LEAVES; i++) {
-        uint8_t seed[32];
-        memset(seed, 0x20 + i, 32);
-        struct zid_release rel;
-        memset(&rel, 0, sizeof(rel));
-        snprintf(rel.name, sizeof(rel.name), "pkg%d", i);
-        snprintf(rel.version, sizeof(rel.version), "1.%d", i);
-        memset(rel.manifest_root, 0x40 + i, 32);
-        struct zid_doc doc;
-        if (!zid_release_sign(&doc, &rel, (uint64_t)(i + 1), expiry, seed))
-            return false;
-        if (variant == PC_DOC_BAD_SIGNATURE && i == PC_TARGET)
-            doc.signature[7] ^= 0x01; /* forged BEFORE the batch is folded */
-        if (i == PC_TARGET)
-            memcpy(f->master_pubkey, doc.master_pubkey, 32);
-        wire_lens[i] = zid_doc_encode(wires[i], sizeof(wires[i]), &doc);
-        if (wire_lens[i] == 0)
-            return false;
-        zid_record_digest(digests[i], wires[i], wire_lens[i]);
-    }
+    if (!pc_sign_release_docs(wires, wire_lens, digests, f->master_pubkey,
+                              variant, expiry))
+        return false;
     f->expiry = expiry;
     pc_hex(wires[PC_TARGET], wire_lens[PC_TARGET], f->doc_hex);
 
     /* 2. Canonical batch: digests sorted by bytes, then folded. */
     uint8_t leaves[PC_LEAVES][32];
     memcpy(leaves, digests, sizeof(leaves));
-    for (int a = 0; a < PC_LEAVES; a++)
-        for (int b = a + 1; b < PC_LEAVES; b++)
-            if (memcmp(leaves[a], leaves[b], 32) > 0) {
-                uint8_t t[32];
-                memcpy(t, leaves[a], 32);
-                memcpy(leaves[a], leaves[b], 32);
-                memcpy(leaves[b], t, 32);
-            }
-    uint64_t index = PC_LEAVES;
-    for (int i = 0; i < PC_LEAVES; i++)
-        if (memcmp(leaves[i], digests[PC_TARGET], 32) == 0)
-            index = (uint64_t)i;
+    pc_sort_leaves(leaves, PC_LEAVES);
+    uint64_t index = pc_leaf_index(leaves, PC_LEAVES, digests[PC_TARGET]);
     if (index >= PC_LEAVES)
         return false;
 
-    uint8_t sibs[ZID_TREE_MAX_PEAKS][32];
-    uint32_t proof_len = 0;
     uint8_t root[32];
-    if (!zid_tree_prove_from_leaves((const uint8_t (*)[32])leaves, PC_LEAVES,
-                                    index, sibs, &proof_len, root))
+    if (!pc_fold_proof(f, leaves, index, root))
         return false;
-    f->index = index;
-    f->num_leaves = PC_LEAVES;
-    pc_hex(root, 32, f->root_hex);
-
-    uint8_t pwire[ZID_PROOF_WIRE_MAX];
-    size_t pwire_len = zid_proof_encode(pwire, sizeof(pwire), index,
-                                        PC_LEAVES,
-                                        (const uint8_t (*)[32])sibs,
-                                        proof_len);
-    if (pwire_len == 0)
-        return false;
-    pc_hex(pwire, pwire_len, f->proof_hex);
 
     /* 3. The on-chain anchor script. */
     unsigned char script[128];
-    size_t script_len = 0;
-    if (variant == PC_ANCHOR_NOT_ZANC) {
-        /* OP_RETURN PUSH4 "ZZZZ" — an OP_RETURN that is not a ZANC anchor. */
-        script[0] = 0x6a;
-        script[1] = 0x04;
-        memcpy(script + 2, "ZZZZ", 4);
-        script_len = 6;
-    } else if (variant == PC_ANCHOR_OTHER_DIGEST) {
-        uint8_t other[32];
-        memcpy(other, root, 32);
-        other[0] ^= 0xff;
-        script_len = zanc_build_anchor(script, sizeof(script),
-                                       ZANC_HASH_SHA3_256, other, "zcode@1");
-    } else if (variant == PC_ANCHOR_SHA2) {
-        script_len = zanc_build_anchor(script, sizeof(script),
-                                       ZANC_HASH_SHA2_256, root, "zcode@1");
-    } else {
-        script_len = zanc_build_anchor(script, sizeof(script),
-                                       ZANC_HASH_SHA3_256, root, "zcode@1");
-    }
+    size_t script_len = pc_anchor_script(script, sizeof(script), variant,
+                                         root);
     if (script_len == 0)
         return false;
 
     /* 4. The transaction carrying it, and the block committing that tx at
      *    merkle position 1 (sibling = a fixed stand-in coinbase txid). */
-    struct transaction tx;
-    if (!pc_build_anchor_tx(&tx, script, script_len)) {
-        transaction_free(&tx);
-        return false;
-    }
-    bool ok = pc_tx_hex(&tx, f->tx_hex, sizeof(f->tx_hex));
-    struct uint256 txid = tx.hash;
-    transaction_free(&tx);
-    if (!ok)
+    struct uint256 txid;
+    if (!pc_write_anchor_tx(f, script, script_len, &txid))
         return false;
 
     struct uint256 leaves256[2];
@@ -472,6 +528,51 @@ static bool pc_reason_discipline(const struct zcl_command_reply *rep)
     return true;
 }
 
+/* chain_complete is exactly "all seven rungs passed" — derived here
+ * from the rows themselves so the summary cannot drift from them. */
+static bool pc_every_rung_passed(const struct zcl_command_reply *rep)
+{
+    int all_passed = 1;
+    for (int n = 1; n <= 7; n++)
+        if (!pc_is(rep, n, "passed"))
+            all_passed = 0;
+    return all_passed != 0;
+}
+
+static bool pc_chain_complete_agrees(const struct zcl_command_reply *rep,
+                                     bool all_passed)
+{
+    const struct json_value *cc = json_get(&rep->data, "chain_complete");
+    return cc && cc->type == JSON_BOOL && json_get_bool(cc) == all_passed;
+}
+
+static bool pc_report_has_seven(const struct json_value *report)
+{
+    return report && report->type == JSON_ARR && json_size(report) == 7;
+}
+
+static bool pc_report_line_ok(const struct zcl_command_reply *rep,
+                              const struct json_value *report, int n)
+{
+    const char *line = json_get_str(json_at(report, (size_t)(n - 1)));
+    const char *result = json_get_str(json_get(pc_rung(rep, n), "result"));
+    if (!line || !result)
+        return false;
+    const char *want = strcmp(result, "passed") == 0      ? "PASS"
+                       : strcmp(result, "failed") == 0    ? "FAIL"
+                                                          : "-- SKIP";
+    return strncmp(line, want, strlen(want)) == 0;
+}
+
+static bool pc_report_lines_ok(const struct zcl_command_reply *rep,
+                               const struct json_value *report)
+{
+    bool ok = true;
+    for (int n = 1; n <= 7 && ok; n++)
+        ok = pc_report_line_ok(rep, report, n);
+    return ok;
+}
+
 /* Every case shares this floor, whatever rung 7 did: the report line for
  * each rung is tagged distinctly, `chain_complete` agrees with the rung
  * rows rather than being asserted independently, the envelope keeps
@@ -481,31 +582,16 @@ static bool pc_invariants(const struct zcl_command_reply *rep)
 {
     if (rep->status != ZCL_COMMAND_STATUS_PASSED)
         return false;
-    /* chain_complete is exactly "all seven rungs passed" — derived here
-     * from the rows themselves so the summary cannot drift from them. */
-    int all_passed = 1;
-    for (int n = 1; n <= 7; n++)
-        if (!pc_is(rep, n, "passed"))
-            all_passed = 0;
-    const struct json_value *cc = json_get(&rep->data, "chain_complete");
-    if (!cc || cc->type != JSON_BOOL || json_get_bool(cc) != (all_passed != 0))
+    bool all_passed = pc_every_rung_passed(rep);
+    if (!pc_chain_complete_agrees(rep, all_passed))
         return false;
     if (!pc_reason_discipline(rep))
         return false;
     const struct json_value *report = json_get(&rep->data, "report");
-    if (!report || report->type != JSON_ARR || json_size(report) != 7)
+    if (!pc_report_has_seven(report))
         return false;
-    for (int n = 1; n <= 7; n++) {
-        const char *line = json_get_str(json_at(report, (size_t)(n - 1)));
-        const char *result = json_get_str(json_get(pc_rung(rep, n), "result"));
-        if (!line || !result)
-            return false;
-        const char *want = strcmp(result, "passed") == 0      ? "PASS"
-                           : strcmp(result, "failed") == 0    ? "FAIL"
-                                                              : "-- SKIP";
-        if (strncmp(line, want, strlen(want)) != 0)
-            return false;
-    }
+    if (!pc_report_lines_ok(rep, report))
+        return false;
     /* The leaf's 16384-byte budget bounds the WHOLE envelope, not just
      * `data`, and write_bounded_json truncates over budget — a truncated
      * report is a lie. Assert real headroom for the envelope. */
@@ -542,6 +628,117 @@ static bool pc_detail_has(const struct zcl_command_reply *rep, int n,
     return detail && strstr(detail, needle) != NULL;
 }
 
+static bool pc_rungs_are(const struct zcl_command_reply *rep,
+                         int first, int last, const char *want)
+{
+    bool ok = true;
+    for (int n = first; n <= last && ok; n++)
+        ok = pc_is(rep, n, want);
+    return ok;
+}
+
+/* `also` NULL checks one detail needle; both NULL checks only the result. */
+static bool pc_rung_says(bool gate, const struct zcl_command_reply *rep,
+                         int n, const char *result, const char *needle,
+                         const char *also)
+{
+    bool ok = gate && pc_is(rep, n, result);
+    if (ok && needle)
+        ok = pc_detail_has(rep, n, needle);
+    if (ok && also)
+        ok = pc_detail_has(rep, n, also);
+    return ok;
+}
+
+static bool pc_root_source_has(const struct zcl_command_reply *rep,
+                               const char *result, const char *needle)
+{
+    return pc_is(rep, 5, result) &&
+           strstr(json_get_str(json_get(pc_rung(rep, 5), "root_source")),
+                  needle) != NULL;
+}
+
+static bool pc_seed_anchor(char *dir, size_t dir_size, const char *tag,
+                           const uint8_t key[32], int32_t height,
+                           const char *status, const uint8_t *successor)
+{
+    return pc_mk_datadir(dir, dir_size, tag) &&
+           pc_anchor_key(dir, key, height, status, successor);
+}
+
+static bool pc_summary_counts(const struct zcl_command_reply *rep,
+                              int64_t failed, int64_t not_checked)
+{
+    return json_get_int(json_get(json_get(&rep->data, "summary"),
+                                 "failed")) == failed
+        && json_get_int(json_get(json_get(&rep->data, "summary"),
+                                 "not_checked")) == not_checked;
+}
+
+static bool pc_no_document(const struct zcl_command_reply *rep,
+                           bool require_message)
+{
+    return rep->status == ZCL_COMMAND_STATUS_FAILED
+        && strcmp(rep->error.code, "NO_DOCUMENT") == 0
+        && (!require_message || rep->error.message[0] != '\0');
+}
+
+static bool pc_first_break_null(const struct zcl_command_reply *rep)
+{
+    return json_get(&rep->data, "first_break") != NULL
+        && json_get(&rep->data, "first_break")->type == JSON_NULL;
+}
+
+/* check_passed false skips the rung-passed test (prefix, then invariants). */
+static bool pc_prefix_holds(const struct zcl_command_reply *rep,
+                            bool check_passed, int rung, int64_t want,
+                            bool with_invariants)
+{
+    bool ok = true;
+    if (check_passed)
+        ok = pc_is(rep, rung, "passed");
+    if (ok)
+        ok = pc_prefix(rep) == want;
+    if (ok && with_invariants)
+        ok = pc_invariants(rep);
+    return ok;
+}
+
+static bool pc_break_incomplete(const struct zcl_command_reply *rep,
+                                int64_t rung)
+{
+    return json_get_int(json_get(&rep->data, "first_break")) == rung
+        && !json_get_bool(json_get(&rep->data, "chain_complete"))
+        && pc_invariants(rep);
+}
+
+static bool pc_no_gap_invariants(const struct zcl_command_reply *rep)
+{
+    return json_get(&rep->data, "first_gap") == NULL && pc_invariants(rep);
+}
+
+static bool pc_node_free_gap(const struct zcl_command_reply *rep,
+                             int64_t prefix, int64_t gap)
+{
+    return pc_node_free(rep) && pc_prefix(rep) == prefix
+        && json_get_int(json_get(&rep->data, "first_gap")) == gap;
+}
+
+static bool pc_verdict_complete(const struct zcl_command_reply *rep)
+{
+    return json_get_bool(json_get(&rep->data, "chain_complete"))
+        && strncmp(json_get_str(json_get(&rep->data, "verdict")),
+                   "COMPLETE", 8) == 0;
+}
+
+static bool pc_successor_prefix(const struct zcl_command_reply *rep,
+                                const char *prefix, size_t n)
+{
+    return json_get_str(json_get(pc_rung(rep, 7), "successor")) &&
+           strncmp(json_get_str(json_get(pc_rung(rep, 7), "successor")),
+                   prefix, n) == 0;
+}
+
 /* ── the group ─────────────────────────────────────────────────────── */
 
 int test_proof_chain(void);
@@ -569,20 +766,14 @@ int test_proof_chain(void)
         pc_run_load(&r, &good);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("valid chain: rungs 1-6 all pass",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed") &&
-                     pc_is(&r.reply, 4, "passed") &&
-                     pc_is(&r.reply, 5, "passed") &&
-                     pc_is(&r.reply, 6, "passed"));
+                 pc_rungs_are(&r.reply, 1, 6, "passed"));
         PC_CHECK("valid chain: rung 7 not_checked, and says what to pass",
-                 pc_is(&r.reply, 7, "not_checked") &&
-                     pc_detail_has(&r.reply, 7, "datadir"));
+                 pc_rung_says(true, &r.reply, 7, "not_checked", "datadir",
+                              NULL));
         PC_CHECK("valid chain: verified_prefix is 6",
                  pc_prefix(&r.reply) == 6);
         PC_CHECK("valid chain: no first_break",
-                 json_get(&r.reply.data, "first_break") != NULL &&
-                     json_get(&r.reply.data, "first_break")->type ==
-                         JSON_NULL);
+                 pc_first_break_null(&r.reply));
         PC_CHECK("valid chain: chain_complete stays false + invariants",
                  pc_node_free(&r.reply));
         PC_CHECK("valid chain: ancestor header linked",
@@ -609,9 +800,7 @@ int test_proof_chain(void)
         PC_CHECK("break 1: rung 2 still reports its own pass",
                  pc_is(&r.reply, 2, "passed"));
         PC_CHECK("break 1: rungs 3-6 still pass honestly",
-                 pc_is(&r.reply, 3, "passed") && pc_is(&r.reply, 4, "passed") &&
-                     pc_is(&r.reply, 5, "passed") &&
-                     pc_is(&r.reply, 6, "passed"));
+                 pc_rungs_are(&r.reply, 3, 6, "passed"));
         PC_CHECK("break 1: verified_prefix collapses to 0",
                  pc_prefix(&r.reply) == 0);
         PC_CHECK("break 1: first_break is 1",
@@ -630,12 +819,10 @@ int test_proof_chain(void)
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 2: rung 1 unaffected", pc_is(&r.reply, 1, "passed"));
         PC_CHECK("break 2: rung 2 failed naming the fold",
-                 pc_is(&r.reply, 2, "failed") &&
-                     pc_detail_has(&r.reply, 2, "different root"));
+                 pc_rung_says(true, &r.reply, 2, "failed", "different root",
+                              NULL));
         PC_CHECK("break 2: rungs 3-6 still pass honestly",
-                 pc_is(&r.reply, 3, "passed") && pc_is(&r.reply, 4, "passed") &&
-                     pc_is(&r.reply, 5, "passed") &&
-                     pc_is(&r.reply, 6, "passed"));
+                 pc_rungs_are(&r.reply, 3, 6, "passed"));
         PC_CHECK("break 2: verified_prefix stops at 1",
                  pc_prefix(&r.reply) == 1);
         PC_CHECK("break 2: invariants hold", pc_node_free(&r.reply));
@@ -654,16 +841,13 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 3: rungs 1-2 pass",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed"));
+                 pc_rungs_are(&r.reply, 1, 2, "passed"));
         PC_CHECK("break 3: rung 3 failed", pc_is(&r.reply, 3, "failed"));
         PC_CHECK("break 3: rung 4 is not_checked, never passed",
                  pc_is(&r.reply, 4, "not_checked"));
         PC_CHECK("break 3: rung 5 still verifies, but says the root is "
                  "unconfirmed",
-                 pc_is(&r.reply, 5, "passed") &&
-                     strstr(json_get_str(json_get(pc_rung(&r.reply, 5),
-                                                  "root_source")),
-                            "NOT confirmed") != NULL);
+                 pc_root_source_has(&r.reply, "passed", "NOT confirmed"));
         PC_CHECK("break 3: verified_prefix stops at 2",
                  pc_prefix(&r.reply) == 2);
         PC_CHECK("break 3: invariants hold", pc_node_free(&r.reply));
@@ -682,16 +866,12 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 4: rungs 1-3 pass",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed"));
+                 pc_rungs_are(&r.reply, 1, 3, "passed"));
         PC_CHECK("break 4: rung 4 failed naming the mismatch",
-                 pc_is(&r.reply, 4, "failed") &&
-                     pc_detail_has(&r.reply, 4, "NOT the digest"));
+                 pc_rung_says(true, &r.reply, 4, "failed", "NOT the digest",
+                              NULL));
         PC_CHECK("break 4: rung 5 passes but flags an unconfirmed root",
-                 pc_is(&r.reply, 5, "passed") &&
-                     strstr(json_get_str(json_get(pc_rung(&r.reply, 5),
-                                                  "root_source")),
-                            "NOT confirmed") != NULL);
+                 pc_root_source_has(&r.reply, "passed", "NOT confirmed"));
         PC_CHECK("break 4: verified_prefix stops at 3",
                  pc_prefix(&r.reply) == 3);
         PC_CHECK("break 4: invariants hold", pc_node_free(&r.reply));
@@ -709,8 +889,7 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 4b: rung 4 failed on the hash type",
-                 pc_is(&r.reply, 4, "failed") &&
-                     pc_detail_has(&r.reply, 4, "SHA3-256"));
+                 pc_rung_says(true, &r.reply, 4, "failed", "SHA3-256", NULL));
         PC_CHECK("break 4b: invariants hold", pc_node_free(&r.reply));
         pc_run_free(&r);
     }
@@ -725,12 +904,10 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 5: rungs 1-4 pass",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed") &&
-                     pc_is(&r.reply, 4, "passed"));
+                 pc_rungs_are(&r.reply, 1, 4, "passed"));
         PC_CHECK("break 5: rung 5 failed naming zid_tree_verify",
-                 pc_is(&r.reply, 5, "failed") &&
-                     pc_detail_has(&r.reply, 5, "zid_tree_verify"));
+                 pc_rung_says(true, &r.reply, 5, "failed", "zid_tree_verify",
+                              NULL));
         PC_CHECK("break 5: rung 6 still reports its own pass",
                  pc_is(&r.reply, 6, "passed"));
         PC_CHECK("break 5: verified_prefix stops at 4",
@@ -748,13 +925,9 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 6a: rungs 1-5 pass",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed") &&
-                     pc_is(&r.reply, 4, "passed") &&
-                     pc_is(&r.reply, 5, "passed"));
+                 pc_rungs_are(&r.reply, 1, 5, "passed"));
         PC_CHECK("break 6a: rung 6 failed naming expiry, not the signature",
-                 pc_is(&r.reply, 6, "failed") &&
-                     pc_detail_has(&r.reply, 6, "expired"));
+                 pc_rung_says(true, &r.reply, 6, "failed", "expired", NULL));
         PC_CHECK("break 6a: verified_prefix stops at 5",
                  pc_prefix(&r.reply) == 5);
         PC_CHECK("break 6a: invariants hold", pc_node_free(&r.reply));
@@ -775,13 +948,10 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("break 6b: rungs 1-5 pass (the forgery IS anchored)",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed") &&
-                     pc_is(&r.reply, 4, "passed") &&
-                     pc_is(&r.reply, 5, "passed"));
+                 pc_rungs_are(&r.reply, 1, 5, "passed"));
         PC_CHECK("break 6b: rung 6 failed naming the signature",
-                 pc_is(&r.reply, 6, "failed") &&
-                     pc_detail_has(&r.reply, 6, "signature does not verify"));
+                 pc_rung_says(true, &r.reply, 6, "failed",
+                              "signature does not verify", NULL));
         PC_CHECK("break 6b: verified_prefix stops at 5",
                  pc_prefix(&r.reply) == 5);
         PC_CHECK("break 6b: invariants hold", pc_node_free(&r.reply));
@@ -797,12 +967,9 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("truncated proof: rung 5 failed, named as truncated",
-                 pc_is(&r.reply, 5, "failed") &&
-                     pc_detail_has(&r.reply, 5, "truncated"));
+                 pc_rung_says(true, &r.reply, 5, "failed", "truncated", NULL));
         PC_CHECK("truncated proof: rungs 1-4 unaffected",
-                 pc_is(&r.reply, 1, "passed") && pc_is(&r.reply, 2, "passed") &&
-                     pc_is(&r.reply, 3, "passed") &&
-                     pc_is(&r.reply, 4, "passed"));
+                 pc_rungs_are(&r.reply, 1, 4, "passed"));
         PC_CHECK("truncated proof: invariants hold", pc_node_free(&r.reply));
         pc_run_free(&r);
     }
@@ -817,9 +984,8 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("unknown proof version: rung 5 failed naming the version",
-                 pc_is(&r.reply, 5, "failed") &&
-                     pc_detail_has(&r.reply, 5, "version 2 is unknown") &&
-                     pc_detail_has(&r.reply, 5, "never skipped"));
+                 pc_rung_says(true, &r.reply, 5, "failed",
+                              "version 2 is unknown", "never skipped"));
         PC_CHECK("unknown proof version: invariants hold",
                  pc_node_free(&r.reply));
         pc_run_free(&r);
@@ -842,8 +1008,8 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("bogus-index proof: rung 5 failed naming the leaf count",
-                 pc_is(&r.reply, 5, "failed") &&
-                     pc_detail_has(&r.reply, 5, "leaf 99 of a tree with only"));
+                 pc_rung_says(true, &r.reply, 5, "failed",
+                              "leaf 99 of a tree with only", NULL));
         PC_CHECK("bogus-index proof: invariants hold", pc_node_free(&r.reply));
         pc_run_free(&r);
     }
@@ -863,20 +1029,13 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("doc only: rungs 1-5 are not_checked with reasons",
-                 pc_is(&r.reply, 1, "not_checked") &&
-                     pc_is(&r.reply, 2, "not_checked") &&
-                     pc_is(&r.reply, 3, "not_checked") &&
-                     pc_is(&r.reply, 4, "not_checked") &&
-                     pc_is(&r.reply, 5, "not_checked"));
+                 pc_rungs_are(&r.reply, 1, 5, "not_checked"));
         PC_CHECK("doc only: rung 6 still verifies the signature",
                  pc_is(&r.reply, 6, "passed"));
         PC_CHECK("doc only: verified_prefix is 0 (nothing consecutive passed)",
                  pc_prefix(&r.reply) == 0);
         PC_CHECK("doc only: no rung is reported failed",
-                 json_get_int(json_get(json_get(&r.reply.data, "summary"),
-                                       "failed")) == 0 &&
-                     json_get_int(json_get(json_get(&r.reply.data, "summary"),
-                                           "not_checked")) == 6);
+                 pc_summary_counts(&r.reply, 0, 6));
         PC_CHECK("doc only: invariants hold", pc_node_free(&r.reply));
         pc_run_free(&r);
     }
@@ -888,9 +1047,7 @@ int test_proof_chain(void)
         pc_run_init(&r);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("no document: NO_DOCUMENT, not an empty report",
-                 r.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                     strcmp(r.reply.error.code, "NO_DOCUMENT") == 0 &&
-                     r.reply.error.message[0] != '\0');
+                 pc_no_document(&r.reply, true));
         pc_run_free(&r);
     }
 
@@ -901,8 +1058,7 @@ int test_proof_chain(void)
         (void)json_push_kv_str(&r.input, "doc", "00ff00ff");
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("bad document: refused with a reason",
-                 r.reply.status == ZCL_COMMAND_STATUS_FAILED &&
-                     strcmp(r.reply.error.code, "NO_DOCUMENT") == 0);
+                 pc_no_document(&r.reply, false));
         pc_run_free(&r);
     }
 
@@ -919,9 +1075,9 @@ int test_proof_chain(void)
      *     goes false because a database really was read. */
     {
         char dir[512];
-        bool made = pc_mk_datadir(dir, sizeof(dir), "active") &&
-                    pc_anchor_key(dir, good.master_pubkey, 4211,
-                                  ZID_IDENTITY_STATUS_ACTIVE, NULL);
+        bool made = pc_seed_anchor(dir, sizeof(dir), "active",
+                                   good.master_pubkey, 4211,
+                                   ZID_IDENTITY_STATUS_ACTIVE, NULL);
         PC_CHECK("rung 7 fixture: datadir + active anchor row", made);
         struct pc_fixture f = good;
         snprintf(f.datadir, sizeof(f.datadir), "%s", dir);
@@ -930,21 +1086,18 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("anchored: rung 7 passes on an active anchor",
-                 made && pc_is(&r.reply, 7, "passed"));
+                 pc_rung_says(made, &r.reply, 7, "passed", NULL, NULL));
         PC_CHECK("anchored: rung 7 publishes the anchor height it read",
                  json_get_int(json_get(pc_rung(&r.reply, 7),
                                        "anchor_height")) == 4211);
         PC_CHECK("anchored: verified_prefix reaches 7 — the whole ladder",
                  pc_prefix(&r.reply) == 7);
         PC_CHECK("anchored: chain_complete true and verdict says COMPLETE",
-                 json_get_bool(json_get(&r.reply.data, "chain_complete")) &&
-                     strncmp(json_get_str(json_get(&r.reply.data, "verdict")),
-                             "COMPLETE", 8) == 0);
+                 pc_verdict_complete(&r.reply));
         PC_CHECK("anchored: node_free is now honestly false",
                  !json_get_bool(json_get(&r.reply.data, "node_free")));
         PC_CHECK("anchored: no first_gap, structural invariants hold",
-                 json_get(&r.reply.data, "first_gap") == NULL &&
-                     pc_invariants(&r.reply));
+                 pc_no_gap_invariants(&r.reply));
         pc_run_free(&r);
     }
 
@@ -953,9 +1106,9 @@ int test_proof_chain(void)
      *     broken at 7 even though rungs 1-6 are untouched. */
     {
         char dir[512];
-        bool made = pc_mk_datadir(dir, sizeof(dir), "revoked") &&
-                    pc_anchor_key(dir, good.master_pubkey, 900,
-                                  ZID_IDENTITY_STATUS_REVOKED, NULL);
+        bool made = pc_seed_anchor(dir, sizeof(dir), "revoked",
+                                   good.master_pubkey, 900,
+                                   ZID_IDENTITY_STATUS_REVOKED, NULL);
         struct pc_fixture f = good;
         snprintf(f.datadir, sizeof(f.datadir), "%s", dir);
         struct pc_run r;
@@ -963,15 +1116,11 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("revoked: rung 7 failed, naming the revocation",
-                 made && pc_is(&r.reply, 7, "failed") &&
-                     pc_detail_has(&r.reply, 7, "REVOKED"));
+                 pc_rung_says(made, &r.reply, 7, "failed", "REVOKED", NULL));
         PC_CHECK("revoked: rungs 1-6 still report their own passes",
-                 pc_is(&r.reply, 6, "passed") && pc_prefix(&r.reply) == 6);
+                 pc_prefix_holds(&r.reply, true, 6, 6, false));
         PC_CHECK("revoked: first_break is 7, chain incomplete",
-                 json_get_int(json_get(&r.reply.data, "first_break")) == 7 &&
-                     !json_get_bool(json_get(&r.reply.data,
-                                             "chain_complete")) &&
-                     pc_invariants(&r.reply));
+                 pc_break_incomplete(&r.reply, 7));
         pc_run_free(&r);
     }
 
@@ -983,9 +1132,9 @@ int test_proof_chain(void)
         uint8_t successor[32];
         memset(successor, 0xc7, 32);
         char dir[512];
-        bool made = pc_mk_datadir(dir, sizeof(dir), "rotated") &&
-                    pc_anchor_key(dir, good.master_pubkey, 700,
-                                  ZID_IDENTITY_STATUS_ROTATED, successor);
+        bool made = pc_seed_anchor(dir, sizeof(dir), "rotated",
+                                   good.master_pubkey, 700,
+                                   ZID_IDENTITY_STATUS_ROTATED, successor);
         struct pc_fixture f = good;
         snprintf(f.datadir, sizeof(f.datadir), "%s", dir);
         struct pc_run r;
@@ -993,16 +1142,11 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("rotated: rung 7 failed, naming the rotation",
-                 made && pc_is(&r.reply, 7, "failed") &&
-                     pc_detail_has(&r.reply, 7, "ROTATED"));
+                 pc_rung_says(made, &r.reply, 7, "failed", "ROTATED", NULL));
         PC_CHECK("rotated: the successor key is published, not guessed",
-                 json_get_str(json_get(pc_rung(&r.reply, 7), "successor")) &&
-                     strncmp(json_get_str(json_get(pc_rung(&r.reply, 7),
-                                                   "successor")),
-                             "c7c7c7c7", 8) == 0);
+                 pc_successor_prefix(&r.reply, "c7c7c7c7", 8));
         PC_CHECK("rotated: authorship (rung 6) is untouched",
-                 pc_is(&r.reply, 6, "passed") && pc_prefix(&r.reply) == 6 &&
-                     pc_invariants(&r.reply));
+                 pc_prefix_holds(&r.reply, true, 6, 6, true));
         pc_run_free(&r);
     }
 
@@ -1014,9 +1158,8 @@ int test_proof_chain(void)
         uint8_t stranger[32];
         memset(stranger, 0x5e, 32);
         char dir[512];
-        bool made = pc_mk_datadir(dir, sizeof(dir), "unanchored") &&
-                    pc_anchor_key(dir, stranger, 10,
-                                  ZID_IDENTITY_STATUS_ACTIVE, NULL);
+        bool made = pc_seed_anchor(dir, sizeof(dir), "unanchored", stranger,
+                                   10, ZID_IDENTITY_STATUS_ACTIVE, NULL);
         struct pc_fixture f = good;
         snprintf(f.datadir, sizeof(f.datadir), "%s", dir);
         struct pc_run r;
@@ -1024,12 +1167,12 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("unanchored: rung 7 failed — another key's row is no help",
-                 made && pc_is(&r.reply, 7, "failed") &&
-                     pc_detail_has(&r.reply, 7, "no anchor row"));
+                 pc_rung_says(made, &r.reply, 7, "failed", "no anchor row",
+                              NULL));
         PC_CHECK("unanchored: the detail scopes the answer to this node",
                  pc_detail_has(&r.reply, 7, "behind the anchor height"));
         PC_CHECK("unanchored: prefix stops at 6, invariants hold",
-                 pc_prefix(&r.reply) == 6 && pc_invariants(&r.reply));
+                 pc_prefix_holds(&r.reply, false, 0, 6, true));
         pc_run_free(&r);
     }
 
@@ -1044,11 +1187,10 @@ int test_proof_chain(void)
         pc_run_load(&r, &f);
         zcl_native_handle_proof_chain_walk(&r.request, &r.reply);
         PC_CHECK("no node.db: rung 7 is a gap with a reason, not a failure",
-                 pc_is(&r.reply, 7, "not_checked") &&
-                     pc_detail_has(&r.reply, 7, "node.db"));
+                 pc_rung_says(true, &r.reply, 7, "not_checked", "node.db",
+                              NULL));
         PC_CHECK("no node.db: node_free stays true, prefix stops at 6",
-                 pc_node_free(&r.reply) && pc_prefix(&r.reply) == 6 &&
-                     json_get_int(json_get(&r.reply.data, "first_gap")) == 7);
+                 pc_node_free_gap(&r.reply, 6, 7));
         pc_run_free(&r);
     }
 
