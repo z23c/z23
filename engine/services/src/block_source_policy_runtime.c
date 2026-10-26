@@ -181,42 +181,34 @@ static bool p2p_minimum_viable(const struct bsp_plan_input *in,
     return true;
 }
 
-void bsp_build_runtime_input(struct bsp_plan_input *in)
+static void runtime_set_p2p_blocker(struct bsp_source_status *p2p,
+                                    const struct connman_outbound_health *ph)
 {
-    memset(in, 0, sizeof(*in));
-    in->local_height = -1;
-    in->best_header_height = -1;
-    in->target_height = -1;
+    if (ph->outbound_total > 0 && ph->healthy == 0)
+        bsp_copy_text(p2p->blocker, sizeof(p2p->blocker), "no_healthy_outbound");
+    else if (p2p->available && !p2p->healthy)
+        bsp_copy_text(p2p->blocker, sizeof(p2p->blocker), "peer_floor");
+}
 
-    bsp_lock_init_once();
-    zcl_mutex_lock(&g_bsp.lock);
-    struct connman *cm = g_bsp.connman;
-    struct main_state *ms = g_bsp.main_state;
-    struct node_db *ndb = g_bsp.node_db;
-    zcl_mutex_unlock(&g_bsp.lock);
-
-    in->local_height = runtime_local_height(ms);
-    in->best_header_height = runtime_best_header_height(ms);
-
-    struct peer_lifecycle_summary pls;
-    memset(&pls, 0, sizeof(pls));
-    peer_lifecycle_get_summary(&pls);
-
-    struct bsp_source_status *p2p = &in->sources[BSP_SOURCE_P2P];
+static void runtime_fill_p2p_source(struct bsp_plan_input *in,
+                                    struct bsp_source_status *p2p,
+                                    struct connman *cm,
+                                    const struct peer_lifecycle_summary *pls)
+{
     struct connman_outbound_health ph;
     memset(&ph, 0, sizeof(ph));
     if (cm)
         connman_get_outbound_health(cm, &ph);
     p2p->source = BSP_SOURCE_P2P;
-    p2p->available = pls.handshake_complete > 0 ||
+    p2p->available = pls->handshake_complete > 0 ||
                      ph.healthy > 0;
     p2p->height = cm ? connman_max_peer_height(cm) : -1;
     p2p->lag = (in->best_header_height > p2p->height && p2p->height >= 0)
         ? (int64_t)(in->best_header_height - p2p->height)
         : 0;
     p2p->healthy = p2p_minimum_viable(in, p2p, &ph);
-    p2p->timeouts = pls.timeout;
-    p2p->failures = pls.rejected;
+    p2p->timeouts = pls->timeout;
+    p2p->failures = pls->rejected;
     p2p->outbound_total = (int64_t)ph.outbound_total;
     p2p->inbound_total = (int64_t)ph.inbound_total;
     p2p->healthy_peers = (int64_t)ph.healthy;
@@ -236,8 +228,8 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
     p2p->addnode_backoff_max_sec = (int64_t)ph.addnode_backoff_max_sec;
     p2p->addnode_tcp_failures = ph.addnode_tcp_failures;
     p2p->addnode_protocol_failures = ph.addnode_protocol_failures;
-    p2p->progress_current = pls.handshake_complete;
-    p2p->progress_total = pls.attempted;
+    p2p->progress_current = pls->handshake_complete;
+    p2p->progress_total = pls->attempted;
     bsp_copy_text(p2p->state, sizeof(p2p->state),
                   p2p->healthy ? "healthy" :
                   (p2p->available ? "degraded" : "unavailable"));
@@ -251,7 +243,7 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
              p2p->height,
              in->best_header_height,
              (long long)p2p->lag,
-             (long long)pls.handshake_complete,
+             (long long)pls->handshake_complete,
              ph.healthy,
              ph.inbound_healthy,
              ph.healthy + ph.inbound_healthy,
@@ -267,11 +259,11 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
              ph.addnode_backoff_max_sec,
              (long long)ph.addnode_tcp_failures,
              (long long)ph.addnode_protocol_failures);
-    if (ph.outbound_total > 0 && ph.healthy == 0)
-        bsp_copy_text(p2p->blocker, sizeof(p2p->blocker), "no_healthy_outbound");
-    else if (p2p->available && !p2p->healthy)
-        bsp_copy_text(p2p->blocker, sizeof(p2p->blocker), "peer_floor");
+    runtime_set_p2p_blocker(p2p, &ph);
+}
 
+static void runtime_fill_local_import_source(struct bsp_plan_input *in)
+{
     struct watchdog_local_recovery_stats wr;
     memset(&wr, 0, sizeof(wr));
     sync_monitor_get_local_recovery_stats(&wr);
@@ -293,7 +285,10 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
     snprintf(li->reason, sizeof(li->reason),
              "mode=%s retries=%d distinct_peers=%d",
              wr.mode, wr.retry_count, wr.distinct_peer_count);
+}
 
+static void runtime_fill_snapshot_source(struct bsp_plan_input *in)
+{
     struct snapshot_sync_service *ssvc = app_runtime_snapshot_sync();
     struct snapsync_status sstat;
     memset(&sstat, 0, sizeof(sstat));
@@ -325,65 +320,84 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
              (unsigned long long)sstat.offered_count);
     if (snap->height > in->target_height)
         in->target_height = snap->height;
+}
 
-    struct legacy_mirror_sync_stats msnap;
-    memset(&msnap, 0, sizeof(msnap));
-    legacy_mirror_sync_stats_snapshot(&msnap);
-    struct bsp_source_status *mir = &in->sources[BSP_SOURCE_ZCLASSICD_MIRROR];
-    mir->source = BSP_SOURCE_ZCLASSICD_MIRROR;
-    mir->available = msnap.enabled && msnap.reachable;
-    mir->healthy = msnap.enabled && msnap.lag_known && msnap.lag >= 0 &&
-                   (msnap.state[0] == '\0' ||
-                    strcmp(msnap.state, "blocked") != 0);
-    mir->height = msnap.legacy_advisory_height_known
-                      ? msnap.legacy_height : -1;
-    mir->failures = msnap.rpc_errors;
-    mir->progress_current = msnap.blocks_applied;
-    mir->progress_total = msnap.target_height;
-    mir->lag = msnap.lag_known ? msnap.lag : -1;
-    mir->lag_known = msnap.lag_known;
-    mir->lag_valid = msnap.lag_valid;
-    mir->retry_count = msnap.local_retry_count;
-    mir->distinct_peer_count = msnap.local_distinct_peer_count;
+static void runtime_assign_mirror_health(struct bsp_source_status *mir,
+                                         const struct legacy_mirror_sync_stats *msnap)
+{
+    mir->available = msnap->enabled && msnap->reachable;
+    mir->healthy = msnap->enabled && msnap->lag_known && msnap->lag >= 0 &&
+                   (msnap->state[0] == '\0' ||
+                    strcmp(msnap->state, "blocked") != 0);
+    mir->height = msnap->legacy_advisory_height_known
+                      ? msnap->legacy_height : -1;
+    mir->failures = msnap->rpc_errors;
+    mir->progress_current = msnap->blocks_applied;
+    mir->progress_total = msnap->target_height;
+    mir->lag = msnap->lag_known ? msnap->lag : -1;
+    mir->lag_known = msnap->lag_known;
+    mir->lag_valid = msnap->lag_valid;
+    mir->retry_count = msnap->local_retry_count;
+    mir->distinct_peer_count = msnap->local_distinct_peer_count;
     bsp_copy_text(mir->state, sizeof(mir->state),
-                  msnap.state[0] ? msnap.state :
+                  msnap->state[0] ? msnap->state :
                   (mir->available ? "healthy" : "unavailable"));
-    mir->blocked = msnap.activation_blocker_reason[0] != '\0' ||
-                   strcmp(msnap.state, "blocked") == 0;
+}
+
+static void runtime_assign_mirror_blocker(struct bsp_source_status *mir,
+                                           const struct legacy_mirror_sync_stats *msnap)
+{
+    mir->blocked = msnap->activation_blocker_reason[0] != '\0' ||
+                   strcmp(msnap->state, "blocked") == 0;
     if (mir->blocked) {
         bsp_copy_text(mir->blocker, sizeof(mir->blocker),
-                      msnap.activation_blocker_reason[0] ? msnap.activation_blocker_reason
-                                                   : msnap.last_blocker_id);
+                      msnap->activation_blocker_reason[0] ? msnap->activation_blocker_reason
+                                                   : msnap->last_blocker_id);
         mir->blocked_class = bsp_classify_mirror_blocker_class(mir->blocker);
     } else {
         mir->blocked_class = BLOCKER_TRANSIENT;
     }
     mir->authorized = mir->available && mir->healthy && !mir->blocked;
-    if (msnap.lag_known) {
+}
+
+static void runtime_assign_mirror_reason(struct bsp_plan_input *in,
+                                         struct bsp_source_status *mir,
+                                         const struct legacy_mirror_sync_stats *msnap)
+{
+    if (msnap->lag_known) {
         snprintf(mir->reason, sizeof(mir->reason),
                  "state=%s lag=%d local_retries_exhausted=%s",
-                 msnap.state, msnap.lag,
-                 msnap.local_retries_exhausted ? "true" : "false");
+                 msnap->state, msnap->lag,
+                 msnap->local_retries_exhausted ? "true" : "false");
     } else {
         snprintf(mir->reason, sizeof(mir->reason),
                  "state=%s lag=unknown local_retries_exhausted=%s",
-                 msnap.state,
-                 msnap.local_retries_exhausted ? "true" : "false");
+                 msnap->state,
+                 msnap->local_retries_exhausted ? "true" : "false");
     }
-    in->mirror_lag_sla_breach_blocks = msnap.lag_sla_breach_blocks;
-    if (msnap.target_height_known && msnap.target_height > in->target_height)
-        in->target_height = msnap.target_height;
-    if (msnap.legacy_advisory_height_known &&
-        msnap.legacy_height > in->target_height)
-        in->target_height = msnap.legacy_height;
+    in->mirror_lag_sla_breach_blocks = msnap->lag_sla_breach_blocks;
+    if (msnap->target_height_known && msnap->target_height > in->target_height)
+        in->target_height = msnap->target_height;
+    if (msnap->legacy_advisory_height_known &&
+        msnap->legacy_height > in->target_height)
+        in->target_height = msnap->legacy_height;
+}
 
-    if (p2p->height > in->target_height)
-        in->target_height = p2p->height;
-    if (in->best_header_height > in->target_height)
-        in->target_height = in->best_header_height;
-    if (in->target_height < in->local_height)
-        in->target_height = in->local_height;
+static void runtime_fill_mirror_source(struct bsp_plan_input *in)
+{
+    struct legacy_mirror_sync_stats msnap;
+    memset(&msnap, 0, sizeof(msnap));
+    legacy_mirror_sync_stats_snapshot(&msnap);
+    struct bsp_source_status *mir = &in->sources[BSP_SOURCE_ZCLASSICD_MIRROR];
+    mir->source = BSP_SOURCE_ZCLASSICD_MIRROR;
+    runtime_assign_mirror_health(mir, &msnap);
+    runtime_assign_mirror_blocker(mir, &msnap);
+    runtime_assign_mirror_reason(in, mir, &msnap);
+}
 
+static void runtime_fill_projection(struct bsp_plan_input *in,
+                                    struct node_db *ndb)
+{
     in->projection_height = -1;
     in->projection_lag = -1;
     in->projection_deferred = false;
@@ -411,6 +425,43 @@ void bsp_build_runtime_input(struct bsp_plan_input *in)
                           in->projection_deferred ? "missing" : "empty");
         }
     }
+}
+
+void bsp_build_runtime_input(struct bsp_plan_input *in)
+{
+    memset(in, 0, sizeof(*in));
+    in->local_height = -1;
+    in->best_header_height = -1;
+    in->target_height = -1;
+
+    bsp_lock_init_once();
+    zcl_mutex_lock(&g_bsp.lock);
+    struct connman *cm = g_bsp.connman;
+    struct main_state *ms = g_bsp.main_state;
+    struct node_db *ndb = g_bsp.node_db;
+    zcl_mutex_unlock(&g_bsp.lock);
+
+    in->local_height = runtime_local_height(ms);
+    in->best_header_height = runtime_best_header_height(ms);
+
+    struct peer_lifecycle_summary pls;
+    memset(&pls, 0, sizeof(pls));
+    peer_lifecycle_get_summary(&pls);
+
+    struct bsp_source_status *p2p = &in->sources[BSP_SOURCE_P2P];
+    runtime_fill_p2p_source(in, p2p, cm, &pls);
+    runtime_fill_local_import_source(in);
+    runtime_fill_snapshot_source(in);
+    runtime_fill_mirror_source(in);
+
+    if (p2p->height > in->target_height)
+        in->target_height = p2p->height;
+    if (in->best_header_height > in->target_height)
+        in->target_height = in->best_header_height;
+    if (in->target_height < in->local_height)
+        in->target_height = in->local_height;
+
+    runtime_fill_projection(in, ndb);
 }
 
 void block_source_policy_note_projection_deferred(int height,
