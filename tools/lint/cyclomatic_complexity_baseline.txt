@@ -117,9 +117,6 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
-contexts/commons/modules/vcs/src/package_service.c:svc_credit:16
-contexts/commons/modules/vcs/src/package_service.c:svc_wire_decode:31
-contexts/commons/modules/vcs/src/package_service.c:vcs_service_book_load:41
 contexts/commons/modules/vcs/src/package_store.c:store_pick_victim:17
 contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_open:21
 contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:25

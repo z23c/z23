@@ -190,36 +190,20 @@ static void svc_wire_encode(const struct svc_event *e,
     svc_put_u32(out + 89, e->seq);
 }
 
-static bool svc_wire_decode(const uint8_t *wire, size_t len,
-                            struct svc_event *out)
+static bool svc_wire_check_transfer_fields(const struct svc_event *out)
 {
-    if (len != VCS_SERVICE_WIRE_BYTES)
+    if (out->sub != 0 || out->seq != 0 || out->bytes == 0 ||
+        svc_is_zero(out->subject, 32))
         return false;
-    if (wire[0] != SVC_MAGIC0 || wire[1] != SVC_MAGIC1 ||
-        wire[2] != SVC_MAGIC2 || wire[3] != SVC_MAGIC3)
-        return false;
-    if (wire[6] != 0 || wire[7] != 0 || wire[93] != 0 || wire[94] != 0 ||
-        wire[95] != 0)
-        return false;
-    memset(out, 0, sizeof(*out));
-    out->kind = wire[4];
-    out->sub = wire[5];
-    memcpy(out->contributor, wire + 8, 33);
-    memcpy(out->subject, wire + 41, 32);
-    out->bytes = svc_get_u64(wire + 73);
-    out->day = (int64_t)svc_get_u64(wire + 81);
-    out->seq = svc_get_u32(wire + 89);
-    if (out->kind < SVC_EVENT_UPLOAD || out->kind > SVC_EVENT_NO_CREDIT)
-        return false;
-    if (out->contributor[0] != 0x02 && out->contributor[0] != 0x03)
-        return false;
+    return true;
+}
+
+static bool svc_wire_check_kind_fields(const struct svc_event *out)
+{
     switch (out->kind) {
     case SVC_EVENT_UPLOAD:
     case SVC_EVENT_DOWNLOAD:
-        if (out->sub != 0 || out->seq != 0 || out->bytes == 0 ||
-            svc_is_zero(out->subject, 32))
-            return false;
-        break;
+        return svc_wire_check_transfer_fields(out);
     case SVC_EVENT_PUBLISH:
         if (out->sub != 0 || out->seq != 0 || out->bytes != 0 ||
             svc_is_zero(out->subject, 32))
@@ -237,6 +221,42 @@ static bool svc_wire_decode(const uint8_t *wire, size_t len,
         return false;
     }
     return true;
+}
+
+static bool svc_wire_check_kind_key(const struct svc_event *out)
+{
+    if (out->kind < SVC_EVENT_UPLOAD || out->kind > SVC_EVENT_NO_CREDIT)
+        return false;
+    if (out->contributor[0] != 0x02 && out->contributor[0] != 0x03)
+        return false;
+    return svc_wire_check_kind_fields(out);
+}
+
+static void svc_wire_copy_fields(const uint8_t *wire, struct svc_event *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->kind = wire[4];
+    out->sub = wire[5];
+    memcpy(out->contributor, wire + 8, 33);
+    memcpy(out->subject, wire + 41, 32);
+    out->bytes = svc_get_u64(wire + 73);
+    out->day = (int64_t)svc_get_u64(wire + 81);
+    out->seq = svc_get_u32(wire + 89);
+}
+
+static bool svc_wire_decode(const uint8_t *wire, size_t len,
+                            struct svc_event *out)
+{
+    if (len != VCS_SERVICE_WIRE_BYTES)
+        return false;
+    if (wire[0] != SVC_MAGIC0 || wire[1] != SVC_MAGIC1 ||
+        wire[2] != SVC_MAGIC2 || wire[3] != SVC_MAGIC3)
+        return false;
+    if (wire[6] != 0 || wire[7] != 0 || wire[93] != 0 || wire[94] != 0 ||
+        wire[95] != 0)
+        return false;
+    svc_wire_copy_fields(wire, out);
+    return svc_wire_check_kind_key(out);
 }
 
 static void svc_event_id(const uint8_t wire[VCS_SERVICE_WIRE_BYTES],
@@ -571,26 +591,9 @@ static bool svc_read_event_wire(DIR *dir, const char *name,
     return complete;
 }
 
-struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
+static bool svc_scan_event_names(struct vcs_service_book *book, DIR *dir,
+                                 char (**names_out)[65], size_t *count_out)
 {
-    if (!zcode_dir || !zcode_dir[0])
-        LOG_NULL(SERVICE_LOG, "missing zcode dir");
-    struct vcs_service_book *book = zcl_malloc(sizeof(*book), "svc_book");
-    if (!book)
-        LOG_NULL(SERVICE_LOG, "book alloc");
-    memset(book, 0, sizeof(*book));
-    int n = snprintf(book->events_dir, sizeof(book->events_dir),
-                     "%s/service/events", zcode_dir);
-    if (n <= 0 || (size_t)n >= sizeof(book->events_dir)) {
-        free(book);
-        LOG_NULL(SERVICE_LOG, "zcode dir path too long");
-    }
-
-    DIR *dir = svc_open_events(&book);
-    if (!dir)
-        return book; /* ENOENT is empty; hard errors freed the book */
-
-    /* Collect the 64-hex names, sort ascending, replay in order. */
     char (*names)[65] = NULL;
     size_t name_count = 0, name_cap = 0;
     struct dirent *ent;
@@ -619,12 +622,13 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
         memcpy(names[name_count], ent->d_name, 65);
         name_count++;
     }
-    if (scan_failed) {
-        closedir(dir);
-        free(names);
-        vcs_service_book_free(book);
-        LOG_NULL(SERVICE_LOG, "event scan alloc");
-    }
+    *names_out = names;
+    *count_out = name_count;
+    return !scan_failed;
+}
+
+static void svc_sort_event_names(char (*names)[65], size_t name_count)
+{
     /* Insertion sort (event counts are bounded; ascending id order). */
     for (size_t i = 1; i < name_count; i++) {
         char key[65];
@@ -636,6 +640,114 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
         }
         memcpy(names[j], key, 65);
     }
+}
+
+static bool svc_account_has_pub(const struct svc_account *a,
+                                const uint8_t release_id[32])
+{
+    bool dup = false;
+    for (size_t p = 0; p < a->pub_count; p++)
+        if (memcmp(a->pubs[p].release_id, release_id, 32) == 0) {
+            dup = true;
+            break;
+        }
+    return dup;
+}
+
+static void svc_replay_apply_event(struct vcs_service_book *book,
+                                   struct svc_account *a,
+                                   const struct svc_event *e)
+{
+    switch (e->kind) {
+    case SVC_EVENT_UPLOAD: {
+        bool seen = false;
+        if (!svc_request_seen_or_insert(book, e->contributor,
+                                        e->subject, &seen))
+            break; /* bound: counted truncated inside */
+        if (!seen)
+            svc_apply_upload(book, a, e);
+        break;
+    }
+    case SVC_EVENT_DOWNLOAD: {
+        bool seen = false;
+        if (!svc_request_seen_or_insert(book, e->contributor,
+                                        e->subject, &seen))
+            break;
+        if (!seen)
+            svc_apply_download(book, a, e);
+        break;
+    }
+    case SVC_EVENT_PUBLISH: {
+        bool dup = svc_account_has_pub(a, e->subject);
+        if (dup)
+            break;
+        if (a->pub_count >= VCS_SERVICE_MAX_PUBLISHES_PER_KEY) {
+            book->truncated = true;
+            break;
+        }
+        struct svc_publish *np = zcl_malloc(
+            (a->pub_count + 1) * sizeof(*np), "svc_pubs_grow");
+        if (!np) {
+            book->truncated = true;
+            break;
+        }
+        if (a->pubs) {
+            memcpy(np, a->pubs, a->pub_count * sizeof(*np));
+            free(a->pubs);
+        }
+        a->pubs = np;
+        memcpy(a->pubs[a->pub_count].release_id, e->subject, 32);
+        a->pubs[a->pub_count].day = e->day;
+        a->pub_count++;
+        break;
+    }
+    case SVC_EVENT_OFFENCE:
+        svc_apply_offence(book, a, e);
+        break;
+    case SVC_EVENT_NO_CREDIT:
+        svc_apply_no_credit(book, a, e);
+        break;
+    }
+}
+
+static void svc_book_count_event(struct vcs_service_book *book,
+                                 const uint8_t id[32])
+{
+    /* alloc failure already logged */
+    if (svc_event_id_insert(book, id))
+        book->event_count++;
+}
+
+struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
+{
+    if (!zcode_dir || !zcode_dir[0])
+        LOG_NULL(SERVICE_LOG, "missing zcode dir");
+    struct vcs_service_book *book = zcl_malloc(sizeof(*book), "svc_book");
+    if (!book)
+        LOG_NULL(SERVICE_LOG, "book alloc");
+    memset(book, 0, sizeof(*book));
+    int n = snprintf(book->events_dir, sizeof(book->events_dir),
+                     "%s/service/events", zcode_dir);
+    if (n <= 0 || (size_t)n >= sizeof(book->events_dir)) {
+        free(book);
+        LOG_NULL(SERVICE_LOG, "zcode dir path too long");
+    }
+
+    DIR *dir = svc_open_events(&book);
+    if (!dir)
+        return book; /* ENOENT is empty; hard errors freed the book */
+
+    /* Collect the 64-hex names, sort ascending, replay in order. */
+    char (*names)[65] = NULL;
+    size_t name_count = 0;
+    bool scan_failed = !svc_scan_event_names(book, dir, &names, &name_count);
+    if (scan_failed) {
+        closedir(dir);
+        free(names);
+        vcs_service_book_free(book);
+        LOG_NULL(SERVICE_LOG, "event scan alloc");
+    }
+    svc_sort_event_names(names, name_count);
 
     for (size_t i = 0; i < name_count; i++) {
         uint8_t wire[VCS_SERVICE_WIRE_BYTES];
@@ -674,66 +786,8 @@ struct vcs_service_book *vcs_service_book_load(const char *zcode_dir)
             book->truncated = true;
             continue;
         }
-        switch (e.kind) {
-        case SVC_EVENT_UPLOAD: {
-            bool seen = false;
-            if (!svc_request_seen_or_insert(book, e.contributor,
-                                            e.subject, &seen))
-                break; /* bound: counted truncated inside */
-            if (!seen)
-                svc_apply_upload(book, a, &e);
-            break;
-        }
-        case SVC_EVENT_DOWNLOAD: {
-            bool seen = false;
-            if (!svc_request_seen_or_insert(book, e.contributor,
-                                            e.subject, &seen))
-                break;
-            if (!seen)
-                svc_apply_download(book, a, &e);
-            break;
-        }
-        case SVC_EVENT_PUBLISH: {
-            bool dup = false;
-            for (size_t p = 0; p < a->pub_count; p++)
-                if (memcmp(a->pubs[p].release_id, e.subject, 32) == 0) {
-                    dup = true;
-                    break;
-                }
-            if (dup)
-                break;
-            if (a->pub_count >= VCS_SERVICE_MAX_PUBLISHES_PER_KEY) {
-                book->truncated = true;
-                break;
-            }
-            struct svc_publish *np = zcl_malloc(
-                (a->pub_count + 1) * sizeof(*np), "svc_pubs_grow");
-            if (!np) {
-                book->truncated = true;
-                break;
-            }
-            if (a->pubs) {
-                memcpy(np, a->pubs, a->pub_count * sizeof(*np));
-                free(a->pubs);
-            }
-            a->pubs = np;
-            memcpy(a->pubs[a->pub_count].release_id, e.subject, 32);
-            a->pubs[a->pub_count].day = e.day;
-            a->pub_count++;
-            break;
-        }
-        case SVC_EVENT_OFFENCE:
-            svc_apply_offence(book, a, &e);
-            break;
-        case SVC_EVENT_NO_CREDIT:
-            svc_apply_no_credit(book, a, &e);
-            break;
-        }
-        if (!svc_event_id_insert(book, want_id)) {
-            /* alloc failure already logged */
-            continue;
-        }
-        book->event_count++;
+        svc_replay_apply_event(book, a, &e);
+        svc_book_count_event(book, want_id);
     }
     closedir(dir);
     free(names);
@@ -852,15 +906,10 @@ static bool svc_persist_event(struct vcs_service_book *book,
     return true;
 }
 
-static enum vcs_service_credit_result svc_credit(
+static enum vcs_service_credit_result svc_credit_record_request(
     struct vcs_service_book *book, const uint8_t contributor[33],
     const uint8_t request_id[32], uint64_t bytes, int64_t day, bool upload)
 {
-    if (!book || !contributor || !request_id ||
-        svc_is_zero(request_id, 32) || bytes == 0 ||
-        (contributor[0] != 0x02 && contributor[0] != 0x03))
-        return VCS_SERVICE_CREDIT_BAD_INPUT;
-
     /* Exact redelivery dedup (the event id covers kind+key+request+bytes
      * +day) must be checked BEFORE the request-id replay check so a
      * same-event retry reports DUPLICATE, not REPLAYED_REQUEST. */
@@ -906,6 +955,18 @@ static enum vcs_service_credit_result svc_credit(
     else
         svc_apply_download(book, a, &e);
     return VCS_SERVICE_CREDIT_OK;
+}
+
+static enum vcs_service_credit_result svc_credit(
+    struct vcs_service_book *book, const uint8_t contributor[33],
+    const uint8_t request_id[32], uint64_t bytes, int64_t day, bool upload)
+{
+    if (!book || !contributor || !request_id ||
+        svc_is_zero(request_id, 32) || bytes == 0 ||
+        (contributor[0] != 0x02 && contributor[0] != 0x03))
+        return VCS_SERVICE_CREDIT_BAD_INPUT;
+    return svc_credit_record_request(book, contributor, request_id, bytes,
+                                     day, upload);
 }
 
 enum vcs_service_credit_result vcs_service_credit_upload(
