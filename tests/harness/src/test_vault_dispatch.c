@@ -246,6 +246,332 @@ static struct json_value vd_shielded_input(void)
     return input;
 }
 
+/* Each of the three vault.list predicates below carries exactly one
+ * VD_CHECK's condition, unchanged, so the policy case body stays small
+ * while the checks themselves (and their strings) stay where they were. */
+static bool vd_list_reports_six_live_classes(
+    const struct json_value *reply_data)
+{
+    const struct json_value *classes = json_get(reply_data, "classes");
+    return classes && classes->type == JSON_ARR &&
+        json_size(classes) == 6 &&
+        json_get_int(json_get(reply_data, "classes_available")) > 0 &&
+        json_get_int(json_get(reply_data, "classes_available")) +
+        json_get_int(json_get(reply_data, "classes_unavailable")) == 6;
+}
+
+static bool vd_list_first_row_is_transparent(const struct json_value *first)
+{
+    const char *first_class = json_get_str(json_get(first, "class"));
+    const char *first_source = json_get_str(json_get(first, "source"));
+    return first_class && strcmp(first_class, "transparent") == 0 &&
+        first_source && first_source[0] != '\0' &&
+        json_get(first, "spendable_zat") != NULL;
+}
+
+static bool vd_list_legacy_totals_are_exact(const struct json_value *legacy)
+{
+    return legacy &&
+        json_get_bool(json_get(legacy, "complete")) &&
+        strcmp(json_get_str(json_get(legacy, "aggregation")),
+               "excluded") == 0 &&
+        json_get_int(json_get(legacy, "transparent_zat")) == 999662 &&
+        json_get_int(json_get(legacy, "shielded_zat")) == 1970000 &&
+        json_get_int(json_get(legacy, "total_zat")) == 2969662;
+}
+
+/* Builds the block-7 fixture: tmp node_db holding one operator principal
+ * and the two agent sessions, plus a heap wallet, and stands the
+ * db_service up. Returns whether every step succeeded; the caller owns
+ * dir, ndb, dbsvc, runtime and *wallet_out and logs the outcome. */
+static bool vd_policy_fixture_open(char *dir, size_t dir_sz,
+                                   struct node_db *ndb,
+                                   struct db_service *dbsvc,
+                                   struct app_runtime_context *runtime,
+                                   struct wallet **wallet_out)
+{
+    char dbpath[320];
+    struct db_principal p;
+    /* A wallet owns the fixed 65,536-entry transaction table and is tens
+     * of MiB. Keeping it automatic made the optimized macOS harness
+     * fault in ___chkstk_darwin before the first assertion ran. */
+    struct wallet *wallet =
+        zcl_calloc(1, sizeof(*wallet), "vault_dispatch.wallet");
+    struct wallet_identity_row identity;
+    test_make_tmpdir(dir, dir_sz, "vault_dispatch", "policy");
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    memset(ndb, 0, sizeof(*ndb));
+    memset(dbsvc, 0, sizeof(*dbsvc));
+    memset(runtime, 0, sizeof(*runtime));
+    memset(&p, 0, sizeof(p));
+    memset(&identity, 0, sizeof(identity));
+    bool db_ok = wallet != NULL;
+    if (wallet) {
+        wallet_init(wallet);
+        wallet->default_fee = 0;
+    }
+    if (db_ok)
+        db_ok = node_db_open(ndb, dbpath);
+    const uint8_t genesis[32] = { 0x42 };
+    if (db_ok)
+        db_ok = wallet_identity_ensure(ndb, genesis, "canonical",
+                                       &identity);
+    if (db_ok) {
+        snprintf(p.address, sizeof(p.address), "%s",
+                 "t1VaultDispatchPolicyAccount00000");
+        snprintf(p.pubkey_hex, sizeof(p.pubkey_hex), "02%064x", 0xabcdU);
+        p.key_kind = PRINCIPAL_KEY_SECP256K1;
+        p.role = PRINCIPAL_ROLE_OPERATOR;
+        p.status = PRINCIPAL_STATUS_ACTIVE;
+        p.sybil_proof_height = -1;
+        db_ok = db_principal_save(ndb, &p);
+    }
+    if (db_ok) {
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        struct db_agent_session s;
+        /* (a) tiny per-tx cap: 1000 zatoshis, way under the 1.5-ZCL
+         * send below. */
+        memset(&s, 0, sizeof(s));
+        snprintf(s.session_id, sizeof(s.session_id), "%s",
+                 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        snprintf(s.account, sizeof(s.account), "%s", p.address);
+        s.max_per_tx_zat = 1000;
+        s.max_per_window_zat = AGENT_SESSION_MAX_ZAT;
+        s.window_seconds = 3600;
+        s.window_start_epoch = now;
+        s.created_at = now;
+        snprintf(s.wallet_scope, sizeof(s.wallet_scope), "prod");
+        snprintf(s.wallet_instance_id, sizeof(s.wallet_instance_id),
+                 "%s", identity.wallet_instance_id);
+        wallet_identity_genesis_hex(&identity, s.wallet_genesis);
+        db_ok = agent_session_save(ndb, &s);
+        /* (b) generous caps: the 1.5-ZCL send clears every gate. */
+        memset(&s, 0, sizeof(s));
+        snprintf(s.session_id, sizeof(s.session_id), "%s",
+                 "ffffffffffffffffffffffffffffffff");
+        snprintf(s.account, sizeof(s.account), "%s", p.address);
+        s.max_per_tx_zat = AGENT_SESSION_MAX_ZAT;
+        s.max_per_window_zat = AGENT_SESSION_MAX_ZAT;
+        s.window_seconds = 3600;
+        s.window_start_epoch = now;
+        s.created_at = now;
+        snprintf(s.wallet_scope, sizeof(s.wallet_scope), "prod");
+        snprintf(s.wallet_instance_id, sizeof(s.wallet_instance_id),
+                 "%s", identity.wallet_instance_id);
+        wallet_identity_genesis_hex(&identity, s.wallet_genesis);
+        db_ok = db_ok && agent_session_save(ndb, &s);
+    }
+    if (db_ok) {
+        db_service_init(dbsvc);
+        db_ok = db_service_attach(dbsvc, ndb) &&
+                db_service_start(dbsvc);
+    }
+    *wallet_out = wallet;
+    return db_ok;
+}
+
+static void vd_policy_fixture_close(struct node_db *ndb,
+                                    struct wallet *wallet, const char *dir)
+{
+    if (ndb->open)
+        node_db_close(ndb);
+    if (wallet) {
+        wallet_free(wallet);
+        free(wallet);
+    }
+    test_rm_rf(dir);
+}
+
+static int vd_case_plan_path_preflight(const struct zcl_command_spec *send,
+                                       const struct zcl_command_context *owner)
+{
+    int failures = 0;
+    /* 1. plan path: dispatch reaches the target (which answers with its own
+     * error body in this service-less process) and the vault attaches the
+     * advisory transparent-class preflight. */
+    struct json_value input = vd_send_input(false);
+    struct zcl_command_reply reply;
+    vd_run_send(send, owner, &input, &reply);
+    const struct json_value *pf = json_get(&reply.data, "preflight");
+    VD_CHECK("plan (no confirm): preflight attached",
+             pf != NULL);
+    const struct json_value *cls = pf ? json_get(pf, "class") : NULL;
+    VD_CHECK("plan (no confirm): preflight class == transparent",
+             cls && json_get_str(cls) &&
+             strcmp(json_get_str(cls), "transparent") == 0);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+static int vd_case_agent_spend_policy(const struct zcl_command_spec *send,
+                                      const struct zcl_command_spec *list,
+                                      const struct zcl_command_registry *reg,
+                                      const struct zcl_command_context *owner)
+{
+    int failures = 0;
+    /* 7. agent spend policy (docs/work/agent-spend-policy-design.md): the
+     * vault bypasses execute_json, so it re-runs the policy gate itself on
+     * the forwarded input. The helper resolves its DB through the runtime
+     * accessor, so wire a tmp node_db through db_service into
+     * app_runtime_set_current (the test_node_health_service.c seam). */
+    char dir[256];
+    struct node_db ndb;
+    struct db_service dbsvc;
+    struct app_runtime_context runtime;
+    struct wallet *wallet = NULL;
+    bool db_ok = vd_policy_fixture_open(dir, sizeof(dir), &ndb, &dbsvc,
+                                        &runtime, &wallet);
+    VD_CHECK("policy fixture: tmp node_db + runtime wired", db_ok);
+    if (db_ok) {
+        runtime.db_service = &dbsvc;
+        runtime.wallet = wallet;
+        app_runtime_set_current(&runtime);
+        node_rpc_client_set_test_hook(vd_rpc_hook);
+
+        /* The native vault vocabulary is intentionally shorter than the
+         * read model's primitive names.  Prove that the adapter maps the
+         * live model rather than reporting all six known rows absent. */
+        {
+            struct json_value input;
+            json_init(&input);
+            json_set_object(&input);
+            struct zcl_command_reply reply;
+            legacy_balance_observer_set_test_call(vd_legacy_balance_rpc);
+            vd_run_list(list, owner, &input, &reply);
+            legacy_balance_observer_set_test_call(NULL);
+            const struct json_value *classes =
+                json_get(&reply.data, "classes");
+            const struct json_value *legacy =
+                json_get(&reply.data, "legacy_wallet");
+            const struct json_value *first =
+                classes && classes->type == JSON_ARR &&
+                        json_size(classes) > 0
+                    ? json_at(classes, 0) : NULL;
+            VD_CHECK("vault.list maps all live read-model classes",
+                     vd_list_reports_six_live_classes(&reply.data));
+            VD_CHECK("vault.list maps transparent_zcl to transparent",
+                     vd_list_first_row_is_transparent(first));
+            VD_CHECK("vault.list no false unavailable blocker",
+                     strcmp(reply.error.code,
+                            "VAULT_READ_UNAVAILABLE") != 0);
+            VD_CHECK("vault.list keeps legacy custody separate and exact",
+                     vd_list_legacy_totals_are_exact(legacy));
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+
+        rpc_table_init(&g_vd_rpc_table);
+        register_agent_session_rpc_commands(&g_vd_rpc_table);
+        if (rpc_is_in_warmup(NULL, 0))
+            set_rpc_warmup_finished();
+        g_vd_rpc_ready = true;
+        /* (a) over the session's per-tx cap: refused with
+         * POLICY_TX_LIMIT before the target runs. */
+        {
+            struct zcl_command_context agent =
+                vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
+            agent.agent_session = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            struct json_value input = vd_send_input(false);
+            struct zcl_command_reply reply;
+            vd_run_send(send, &agent, &input, &reply);
+            VD_CHECK("tiny-cap session: POLICY_TX_LIMIT",
+                     strcmp(reply.error.code, "POLICY_TX_LIMIT") == 0);
+            VD_CHECK("tiny-cap session: exit DENIED",
+                     reply.exit_code == ZCL_COMMAND_EXIT_DENIED);
+            VD_CHECK("tiny-cap session: target not run (no preflight)",
+                     json_get(&reply.data, "preflight") == NULL);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+
+        /* (b) generous session: the gate passes and dispatch reaches
+         * the target (preflight attached). */
+        {
+            struct zcl_command_context agent =
+                vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
+            agent.agent_session = "ffffffffffffffffffffffffffffffff";
+            struct json_value input = vd_send_input(false);
+            struct zcl_command_reply reply;
+            vd_run_send(send, &agent, &input, &reply);
+            VD_CHECK("generous session: no policy refusal",
+                     strstr(reply.error.code, "POLICY_") == NULL);
+            VD_CHECK("generous session: target run (preflight attached)",
+                     json_get(&reply.data, "preflight") != NULL);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+
+        /* (c) THE double-debit guard. When the kernel gate has already
+         * ruled on this invocation it also already DEBITED it, and the
+         * forwarded input carries the same amount and recipient — so the
+         * vault must not evaluate again. If it did, the tiny-cap session
+         * below would be refused here even though the kernel let it
+         * through, and a session whose window cap equals its per-tx cap
+         * could never complete one send. */
+        {
+            struct zcl_command_context agent =
+                vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
+            agent.agent_session = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            struct json_value input = vd_send_input(false);
+            struct zcl_command_reply reply;
+            vd_run_send_ex(send, &agent, &input, &reply, true);
+            VD_CHECK("settled invocation: the vault does NOT re-gate "
+                     "(no second debit)",
+                     strstr(reply.error.code, "POLICY_") == NULL);
+            VD_CHECK("settled invocation: target still run",
+                     json_get(&reply.data, "preflight") != NULL);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+
+        node_rpc_client_set_test_hook(NULL);
+        g_vd_rpc_ready = false;
+        app_runtime_set_current(NULL);
+        db_service_stop(&dbsvc);
+    }
+    vd_policy_fixture_close(&ndb, wallet, dir);
+    return failures;
+}
+
+static int vd_case_shielded_plan_route(
+    const struct zcl_command_spec *send_shielded,
+    const struct zcl_command_context *owner)
+{
+    int failures = 0;
+    /* 6a. shielded plan path: preflight names the shielded class. */
+    node_rpc_client_set_test_hook(vd_rpc_hook);
+    {
+        struct json_value input = vd_shielded_input();
+        struct zcl_command_reply reply;
+        vd_run_send_shielded(send_shielded, owner, &input, &reply);
+        const struct json_value *pf = json_get(&reply.data, "preflight");
+        const struct json_value *cls = pf ? json_get(pf, "class") : NULL;
+        VD_CHECK("shielded plan: preflight class == shielded",
+                 cls && json_get_str(cls) &&
+                 strcmp(json_get_str(cls), "shielded") == 0);
+        const char *commit_input =
+            json_get_str(json_get(&reply.data, "commit_input"));
+        struct json_value commit;
+        json_init(&commit);
+        bool commit_ok = commit_input &&
+            json_read(&commit, commit_input, strlen(commit_input));
+        const char *commit_scope = commit_ok
+            ? json_get_str(json_get(&commit, "wallet_scope")) : NULL;
+        const char *commit_memo = commit_ok
+            ? json_get_str(json_get(&commit, "memo_hex")) : NULL;
+        VD_CHECK("shielded plan: route preserves wallet_scope in commit",
+                 commit_scope && strcmp(commit_scope, "dev") == 0);
+        VD_CHECK("shielded plan: route preserves Sapling memo in commit",
+                 commit_memo && strcmp(commit_memo, "aabb") == 0);
+        json_free(&commit);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+    }
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 int test_vault_dispatch(void);
 int test_vault_dispatch(void)
 {
@@ -270,23 +596,7 @@ int test_vault_dispatch(void)
     struct zcl_command_context owner =
         vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
 
-    /* 1. plan path: dispatch reaches the target (which answers with its own
-     * error body in this service-less process) and the vault attaches the
-     * advisory transparent-class preflight. */
-    {
-        struct json_value input = vd_send_input(false);
-        struct zcl_command_reply reply;
-        vd_run_send(send, &owner, &input, &reply);
-        const struct json_value *pf = json_get(&reply.data, "preflight");
-        VD_CHECK("plan (no confirm): preflight attached",
-                 pf != NULL);
-        const struct json_value *cls = pf ? json_get(pf, "class") : NULL;
-        VD_CHECK("plan (no confirm): preflight class == transparent",
-                 cls && json_get_str(cls) &&
-                 strcmp(json_get_str(cls), "transparent") == 0);
-        zcl_command_reply_free(&reply);
-        json_free(&input);
-    }
+    failures += vd_case_plan_path_preflight(send, &owner);
 
     /* 2. commit path: confirm:true forwards to the target's own commit —
      * the vault adds nothing (no preflight). */
@@ -355,262 +665,9 @@ int test_vault_dispatch(void)
         json_free(&input);
     }
 
-    /* 7. agent spend policy (docs/work/agent-spend-policy-design.md): the
-     * vault bypasses execute_json, so it re-runs the policy gate itself on
-     * the forwarded input. The helper resolves its DB through the runtime
-     * accessor, so wire a tmp node_db through db_service into
-     * app_runtime_set_current (the test_node_health_service.c seam). */
-    {
-        char dir[256];
-        char dbpath[320];
-        struct node_db ndb;
-        struct db_service dbsvc;
-        struct app_runtime_context runtime;
-        struct db_principal p;
-        /* A wallet owns the fixed 65,536-entry transaction table and is tens
-         * of MiB. Keeping it automatic made the optimized macOS harness
-         * fault in ___chkstk_darwin before the first assertion ran. */
-        struct wallet *wallet =
-            zcl_calloc(1, sizeof(*wallet), "vault_dispatch.wallet");
-        struct wallet_identity_row identity;
-        test_make_tmpdir(dir, sizeof(dir), "vault_dispatch", "policy");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
-        memset(&ndb, 0, sizeof(ndb));
-        memset(&dbsvc, 0, sizeof(dbsvc));
-        memset(&runtime, 0, sizeof(runtime));
-        memset(&p, 0, sizeof(p));
-        memset(&identity, 0, sizeof(identity));
-        bool db_ok = wallet != NULL;
-        if (wallet) {
-            wallet_init(wallet);
-            wallet->default_fee = 0;
-        }
-        if (db_ok)
-            db_ok = node_db_open(&ndb, dbpath);
-        const uint8_t genesis[32] = { 0x42 };
-        if (db_ok)
-            db_ok = wallet_identity_ensure(&ndb, genesis, "canonical",
-                                           &identity);
-        if (db_ok) {
-            snprintf(p.address, sizeof(p.address), "%s",
-                     "t1VaultDispatchPolicyAccount00000");
-            snprintf(p.pubkey_hex, sizeof(p.pubkey_hex), "02%064x", 0xabcdU);
-            p.key_kind = PRINCIPAL_KEY_SECP256K1;
-            p.role = PRINCIPAL_ROLE_OPERATOR;
-            p.status = PRINCIPAL_STATUS_ACTIVE;
-            p.sybil_proof_height = -1;
-            db_ok = db_principal_save(&ndb, &p);
-        }
-        if (db_ok) {
-            int64_t now = (int64_t)platform_time_wall_time_t();
-            struct db_agent_session s;
-            /* (a) tiny per-tx cap: 1000 zatoshis, way under the 1.5-ZCL
-             * send below. */
-            memset(&s, 0, sizeof(s));
-            snprintf(s.session_id, sizeof(s.session_id), "%s",
-                     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
-            snprintf(s.account, sizeof(s.account), "%s", p.address);
-            s.max_per_tx_zat = 1000;
-            s.max_per_window_zat = AGENT_SESSION_MAX_ZAT;
-            s.window_seconds = 3600;
-            s.window_start_epoch = now;
-            s.created_at = now;
-            snprintf(s.wallet_scope, sizeof(s.wallet_scope), "prod");
-            snprintf(s.wallet_instance_id, sizeof(s.wallet_instance_id),
-                     "%s", identity.wallet_instance_id);
-            wallet_identity_genesis_hex(&identity, s.wallet_genesis);
-            db_ok = agent_session_save(&ndb, &s);
-            /* (b) generous caps: the 1.5-ZCL send clears every gate. */
-            memset(&s, 0, sizeof(s));
-            snprintf(s.session_id, sizeof(s.session_id), "%s",
-                     "ffffffffffffffffffffffffffffffff");
-            snprintf(s.account, sizeof(s.account), "%s", p.address);
-            s.max_per_tx_zat = AGENT_SESSION_MAX_ZAT;
-            s.max_per_window_zat = AGENT_SESSION_MAX_ZAT;
-            s.window_seconds = 3600;
-            s.window_start_epoch = now;
-            s.created_at = now;
-            snprintf(s.wallet_scope, sizeof(s.wallet_scope), "prod");
-            snprintf(s.wallet_instance_id, sizeof(s.wallet_instance_id),
-                     "%s", identity.wallet_instance_id);
-            wallet_identity_genesis_hex(&identity, s.wallet_genesis);
-            db_ok = db_ok && agent_session_save(&ndb, &s);
-        }
-        if (db_ok) {
-            db_service_init(&dbsvc);
-            db_ok = db_service_attach(&dbsvc, &ndb) &&
-                    db_service_start(&dbsvc);
-        }
-        VD_CHECK("policy fixture: tmp node_db + runtime wired", db_ok);
-        if (db_ok) {
-            runtime.db_service = &dbsvc;
-            runtime.wallet = wallet;
-            app_runtime_set_current(&runtime);
-            node_rpc_client_set_test_hook(vd_rpc_hook);
+    failures += vd_case_agent_spend_policy(send, list, reg, &owner);
 
-            /* The native vault vocabulary is intentionally shorter than the
-             * read model's primitive names.  Prove that the adapter maps the
-             * live model rather than reporting all six known rows absent. */
-            {
-                struct json_value input;
-                json_init(&input);
-                json_set_object(&input);
-                struct zcl_command_reply reply;
-                legacy_balance_observer_set_test_call(vd_legacy_balance_rpc);
-                vd_run_list(list, &owner, &input, &reply);
-                legacy_balance_observer_set_test_call(NULL);
-                const struct json_value *classes =
-                    json_get(&reply.data, "classes");
-                const struct json_value *legacy =
-                    json_get(&reply.data, "legacy_wallet");
-                const struct json_value *first =
-                    classes && classes->type == JSON_ARR &&
-                            json_size(classes) > 0
-                        ? json_at(classes, 0) : NULL;
-                const char *first_class =
-                    json_get_str(json_get(first, "class"));
-                const char *first_source =
-                    json_get_str(json_get(first, "source"));
-                VD_CHECK("vault.list maps all live read-model classes",
-                         classes && classes->type == JSON_ARR &&
-                         json_size(classes) == 6 &&
-                         json_get_int(json_get(&reply.data,
-                                               "classes_available")) > 0 &&
-                         json_get_int(json_get(&reply.data,
-                                               "classes_available")) +
-                         json_get_int(json_get(&reply.data,
-                                               "classes_unavailable")) == 6);
-                VD_CHECK("vault.list maps transparent_zcl to transparent",
-                         first_class &&
-                         strcmp(first_class, "transparent") == 0 &&
-                         first_source && first_source[0] != '\0' &&
-                         json_get(first, "spendable_zat") != NULL);
-                VD_CHECK("vault.list no false unavailable blocker",
-                         strcmp(reply.error.code,
-                                "VAULT_READ_UNAVAILABLE") != 0);
-                VD_CHECK("vault.list keeps legacy custody separate and exact",
-                         legacy &&
-                         json_get_bool(json_get(legacy, "complete")) &&
-                         strcmp(json_get_str(json_get(legacy, "aggregation")),
-                                "excluded") == 0 &&
-                         json_get_int(json_get(legacy,
-                                               "transparent_zat")) == 999662 &&
-                         json_get_int(json_get(legacy,
-                                               "shielded_zat")) == 1970000 &&
-                         json_get_int(json_get(legacy,
-                                               "total_zat")) == 2969662);
-                zcl_command_reply_free(&reply);
-                json_free(&input);
-            }
-
-            rpc_table_init(&g_vd_rpc_table);
-            register_agent_session_rpc_commands(&g_vd_rpc_table);
-            if (rpc_is_in_warmup(NULL, 0))
-                set_rpc_warmup_finished();
-            g_vd_rpc_ready = true;
-            /* (a) over the session's per-tx cap: refused with
-             * POLICY_TX_LIMIT before the target runs. */
-            {
-                struct zcl_command_context agent =
-                    vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
-                agent.agent_session = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-                struct json_value input = vd_send_input(false);
-                struct zcl_command_reply reply;
-                vd_run_send(send, &agent, &input, &reply);
-                VD_CHECK("tiny-cap session: POLICY_TX_LIMIT",
-                         strcmp(reply.error.code, "POLICY_TX_LIMIT") == 0);
-                VD_CHECK("tiny-cap session: exit DENIED",
-                         reply.exit_code == ZCL_COMMAND_EXIT_DENIED);
-                VD_CHECK("tiny-cap session: target not run (no preflight)",
-                         json_get(&reply.data, "preflight") == NULL);
-                zcl_command_reply_free(&reply);
-                json_free(&input);
-            }
-
-            /* (b) generous session: the gate passes and dispatch reaches
-             * the target (preflight attached). */
-            {
-                struct zcl_command_context agent =
-                    vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
-                agent.agent_session = "ffffffffffffffffffffffffffffffff";
-                struct json_value input = vd_send_input(false);
-                struct zcl_command_reply reply;
-                vd_run_send(send, &agent, &input, &reply);
-                VD_CHECK("generous session: no policy refusal",
-                         strstr(reply.error.code, "POLICY_") == NULL);
-                VD_CHECK("generous session: target run (preflight attached)",
-                         json_get(&reply.data, "preflight") != NULL);
-                zcl_command_reply_free(&reply);
-                json_free(&input);
-            }
-
-            /* (c) THE double-debit guard. When the kernel gate has already
-             * ruled on this invocation it also already DEBITED it, and the
-             * forwarded input carries the same amount and recipient — so the
-             * vault must not evaluate again. If it did, the tiny-cap session
-             * below would be refused here even though the kernel let it
-             * through, and a session whose window cap equals its per-tx cap
-             * could never complete one send. */
-            {
-                struct zcl_command_context agent =
-                    vd_ctx(reg, ZCL_COMMAND_AUTH_OWNER, ~(uint64_t)0);
-                agent.agent_session = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-                struct json_value input = vd_send_input(false);
-                struct zcl_command_reply reply;
-                vd_run_send_ex(send, &agent, &input, &reply, true);
-                VD_CHECK("settled invocation: the vault does NOT re-gate "
-                         "(no second debit)",
-                         strstr(reply.error.code, "POLICY_") == NULL);
-                VD_CHECK("settled invocation: target still run",
-                         json_get(&reply.data, "preflight") != NULL);
-                zcl_command_reply_free(&reply);
-                json_free(&input);
-            }
-
-            node_rpc_client_set_test_hook(NULL);
-            g_vd_rpc_ready = false;
-            app_runtime_set_current(NULL);
-            db_service_stop(&dbsvc);
-        }
-        if (ndb.open)
-            node_db_close(&ndb);
-        if (wallet) {
-            wallet_free(wallet);
-            free(wallet);
-        }
-        test_rm_rf(dir);
-    }
-
-    /* 6a. shielded plan path: preflight names the shielded class. */
-    node_rpc_client_set_test_hook(vd_rpc_hook);
-    {
-        struct json_value input = vd_shielded_input();
-        struct zcl_command_reply reply;
-        vd_run_send_shielded(send_shielded, &owner, &input, &reply);
-        const struct json_value *pf = json_get(&reply.data, "preflight");
-        const struct json_value *cls = pf ? json_get(pf, "class") : NULL;
-        VD_CHECK("shielded plan: preflight class == shielded",
-                 cls && json_get_str(cls) &&
-                 strcmp(json_get_str(cls), "shielded") == 0);
-        const char *commit_input =
-            json_get_str(json_get(&reply.data, "commit_input"));
-        struct json_value commit;
-        json_init(&commit);
-        bool commit_ok = commit_input &&
-            json_read(&commit, commit_input, strlen(commit_input));
-        const char *commit_scope = commit_ok
-            ? json_get_str(json_get(&commit, "wallet_scope")) : NULL;
-        const char *commit_memo = commit_ok
-            ? json_get_str(json_get(&commit, "memo_hex")) : NULL;
-        VD_CHECK("shielded plan: route preserves wallet_scope in commit",
-                 commit_scope && strcmp(commit_scope, "dev") == 0);
-        VD_CHECK("shielded plan: route preserves Sapling memo in commit",
-                 commit_memo && strcmp(commit_memo, "aabb") == 0);
-        json_free(&commit);
-        zcl_command_reply_free(&reply);
-        json_free(&input);
-    }
-    node_rpc_client_set_test_hook(NULL);
+    failures += vd_case_shielded_plan_route(send_shielded, &owner);
 
     /* 6b. shielded route is session-gated identically. */
     {
