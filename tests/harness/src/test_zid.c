@@ -203,6 +203,308 @@ static void zd_poison_frame(void)
         pad[i] = 0xCD;
 }
 
+static int test_zid_domain_replace(struct node_db *ndb,
+                                   struct zid_domain_leaf *leaves,
+                                   uint8_t *root3, uint64_t now)
+{
+    int failures = 0;
+
+    printf("zid_domain: replace_leaves stores the batch + its root... ");
+    {
+        struct zid_domain d;
+        bool ok = zid_domain_replace_leaves(ndb, "zcode", leaves, 3, root3,
+                                            NULL, now) &&
+                  zid_domain_get(ndb, "zcode", &d) &&
+                  d.num_leaves == 3 &&
+                  memcmp(d.root, root3, 32) == 0 &&
+                  !d.anchored && d.anchored_height == -1 &&
+                  zid_domain_leaf_count(ndb, "zcode") == 3;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_zid_domain_same_root(struct node_db *ndb,
+                                     struct zd_fixture code3,
+                                     uint8_t *root3, uint64_t now)
+{
+    int failures = 0;
+
+    printf("zid_domain: the same leaf set always folds to the same root... ");
+    {
+        /* Re-store the identical set, then re-fold from what the TABLE
+         * holds: a root read back out must be a pure function of the
+         * stored leaves, never of write order or of the releases dir. */
+        struct zid_domain_leaf again[4];
+        zd_fill_leaves(again, &code3, "zcode", 3);
+        struct zid_domain_leaf read_back[4];
+        uint8_t from_table[32];
+        struct zid_domain d;
+        bool ok = zid_domain_replace_leaves(ndb, "zcode", again, 3, root3,
+                                            NULL, now + 1) &&
+                  zid_domain_get(ndb, "zcode", &d) &&
+                  memcmp(d.root, root3, 32) == 0 &&
+                  zid_domain_leaves(ndb, "zcode", read_back, 4) == 3;
+        if (ok) {
+            uint8_t digests[4][32];
+            for (int i = 0; i < 3; i++) {
+                if (read_back[i].leaf_index != i) ok = false;
+                memcpy(digests[i], read_back[i].record_digest, 32);
+            }
+            ok = ok &&
+                 zid_tree_root_from_digests((const uint8_t (*)[32])digests, 3,
+                                            from_table) &&
+                 memcmp(from_table, root3, 32) == 0;
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_zid_domain_proof(struct node_db *ndb, struct zd_fixture code3)
+{
+    int failures = 0;
+
+    printf("zid_domain: a proof built from the table verifies... ");
+    {
+        struct zid_domain_leaf read_back[4];
+        struct zid_domain d;
+        int64_t idx = -1;
+        bool ok = zid_domain_get(ndb, "zcode", &d) &&
+                  zid_domain_leaves(ndb, "zcode", read_back, 4) == 3 &&
+                  zid_domain_leaf_index_by_digest(ndb, "zcode",
+                                                  code3.digests[1], &idx) &&
+                  idx == 1;
+        if (ok) {
+            uint8_t digests[4][32];
+            for (int i = 0; i < 3; i++)
+                memcpy(digests[i], read_back[i].record_digest, 32);
+            uint8_t proof[ZID_TREE_MAX_PEAKS][32], pr[32];
+            uint32_t plen = 0;
+            ok = zid_tree_prove_from_leaves((const uint8_t (*)[32])digests, 3,
+                                            (uint64_t)idx, proof, &plen, pr) &&
+                 memcmp(pr, d.root, 32) == 0 &&
+                 zid_tree_verify(d.root, digests[idx], (uint64_t)idx, 3,
+                                 proof, plen) &&
+                 /* and the same proof must NOT verify a different leaf */
+                 !zid_tree_verify(d.root, digests[0], (uint64_t)idx, 3,
+                                  proof, plen);
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_zid_domain_set_anchor(struct node_db *ndb,
+                                      struct zd_fixture code3,
+                                      uint8_t *root3, uint64_t now)
+{
+    int failures = 0;
+
+    printf("zid_domain: set_anchor records txid+height; a same-root "
+           "re-fold keeps it... ");
+    {
+        uint8_t txid[32];
+        memset(txid, 0xC7, sizeof(txid));
+        struct zid_domain_leaf again[4];
+        zd_fill_leaves(again, &code3, "zcode", 3);
+        struct zid_domain d;
+        bool ok = zid_domain_set_anchor(ndb, "zcode", txid, 3056758) &&
+                  zid_domain_get(ndb, "zcode", &d) && d.anchored &&
+                  memcmp(d.anchored_txid, txid, 32) == 0 &&
+                  d.anchored_height == 3056758 &&
+                  zid_domain_replace_leaves(ndb, "zcode", again, 3, root3,
+                                            NULL, now + 2) &&
+                  zid_domain_get(ndb, "zcode", &d) && d.anchored &&
+                  d.anchored_height == 3056758;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_zid_domain_atomic(struct node_db *ndb,
+                                  struct zd_fixture code3,
+                                  uint8_t *root3, uint64_t now)
+{
+    int failures = 0;
+
+    printf("zid_domain: leaf replacement is atomic — a shorter set leaves "
+           "no stale leaf, and the anchor is cleared... ");
+    {
+        /* Two leaves instead of three: the dropped leaf must be GONE, the
+         * root must be the two-leaf root, and the anchor must not survive
+         * a meaning change. */
+        struct zid_domain_leaf shorter[4];
+        zd_fill_leaves(shorter, &code3, "zcode", 2);
+        uint8_t root2[32];
+        zid_tree_root_from_digests((const uint8_t (*)[32])code3.digests, 2,
+                                   root2);
+        struct zid_domain d;
+        int64_t gone = -1;
+        bool ok = zid_domain_replace_leaves(ndb, "zcode", shorter, 2, root2,
+                                            NULL, now + 3) &&
+                  zid_domain_get(ndb, "zcode", &d) &&
+                  d.num_leaves == 2 &&
+                  memcmp(d.root, root2, 32) == 0 &&
+                  zid_domain_leaf_count(ndb, "zcode") == 2 &&
+                  !zid_domain_leaf_index_by_digest(ndb, "zcode",
+                                                   code3.digests[2], &gone) &&
+                  !d.anchored && d.anchored_height == -1;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        /* Restore the three-leaf batch for the coexistence case below. */
+        struct zid_domain_leaf full[4];
+        zd_fill_leaves(full, &code3, "zcode", 3);
+        zid_domain_replace_leaves(ndb, "zcode", full, 3, root3, NULL, now + 4);
+    }
+
+    return failures;
+}
+
+static bool test_zid_domain_write_zdesc(struct node_db *ndb,
+                                        struct zid_domain_leaf *dl,
+                                        uint8_t *droot, uint8_t *txid,
+                                        uint64_t now)
+{
+    return zid_domain_replace_leaves(ndb, "zdesc", dl, 4, droot, NULL,
+                                     now + 5) &&
+           zid_domain_set_anchor(ndb, "zdesc", txid, 42);
+}
+
+static bool test_zid_domain_zcode_untouched(struct node_db *ndb,
+                                            uint8_t *root3)
+{
+    struct zid_domain a;
+    /* zcode is untouched by every zdesc write */
+    return zid_domain_get(ndb, "zcode", &a) && a.num_leaves == 3 &&
+           memcmp(a.root, root3, 32) == 0 && !a.anchored &&
+           zid_domain_leaf_count(ndb, "zcode") == 3;
+}
+
+static bool test_zid_domain_zdesc_own(struct node_db *ndb, uint8_t *droot)
+{
+    struct zid_domain b;
+    /* zdesc carries its own root, leaves and anchor */
+    return zid_domain_get(ndb, "zdesc", &b) && b.num_leaves == 4 &&
+           memcmp(b.root, droot, 32) == 0 && b.anchored &&
+           b.anchored_height == 42 &&
+           zid_domain_leaf_count(ndb, "zdesc") == 4;
+}
+
+static bool test_zid_domain_digest_scope(struct node_db *ndb,
+                                         struct zd_fixture desc)
+{
+    int64_t idx = -1;
+    /* digest lookup is scoped to its domain */
+    return zid_domain_leaf_index_by_digest(ndb, "zdesc", desc.digests[3],
+                                           &idx) &&
+           idx == 3 &&
+           !zid_domain_leaf_index_by_digest(ndb, "zcode", desc.digests[3],
+                                            &idx) &&
+           zid_domain_count(ndb) == 2;
+}
+
+static int test_zid_domain_coexist(struct node_db *ndb, uint8_t *seed,
+                                   uint64_t now, uint8_t *root3)
+{
+    int failures = 0;
+    printf("zid_domain: two domains coexist without interfering... ");
+    {
+        struct zd_fixture desc;
+        zd_build_fixture(&desc, "zdesc", 4, seed, now + 99);
+        struct zid_domain_leaf dl[4];
+        zd_fill_leaves(dl, &desc, "zdesc", 4);
+        uint8_t droot[32];
+        zid_tree_root_from_digests((const uint8_t (*)[32])desc.digests, 4,
+                                   droot);
+        uint8_t txid[32];
+        memset(txid, 0xD5, sizeof(txid));
+
+        bool ok = test_zid_domain_write_zdesc(ndb, dl, droot, txid, now) &&
+                  test_zid_domain_zcode_untouched(ndb, root3) &&
+                  test_zid_domain_zdesc_own(ndb, droot) &&
+                  test_zid_domain_digest_scope(ndb, desc);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int test_zid_domain_unknown(struct node_db *ndb, uint64_t now)
+{
+    int failures = 0;
+
+    printf("zid_domain: an unknown domain cannot be anchored, and a bad "
+           "name is refused... ");
+    {
+        uint8_t txid[32];
+        memset(txid, 0x11, sizeof(txid));
+        struct zid_domain bad;
+        memset(&bad, 0, sizeof(bad));
+        snprintf(bad.domain_name, sizeof(bad.domain_name), "Not A Domain");
+        memset(bad.root, 0x22, 32);
+        bad.updated_at = (int64_t)now;
+        struct zid_domain probe;
+        bool ok = !zid_domain_set_anchor(ndb, "nosuch", txid, 7) &&
+                  !db_zid_domain_save(ndb, &bad) &&
+                  !zid_domain_get(ndb, "Not A Domain", &probe) &&
+                  zid_domain_count(ndb) == 2;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_zid_domain_dump_state(struct node_db *ndb)
+{
+    int failures = 0;
+
+    /* zid_domain_dump_state_json ran json_set_array()/json_set_object() on
+     * uninitialised stack locals. Those setters json_free() the value first
+     * (json.h lifecycle note), so the free walked whatever the previous frame
+     * left there. On the C3 stopwatch's serving fixture peer that was a
+     * SIGSEGV every ~15 minutes, inside stopwatch runs, killing the only peer
+     * the syncing client had:
+     *   json_free+0x43 <- zid_domain_dump_state_json+0x1b9 <- debug_bundle_write
+     * Poison the frame the dumper is about to occupy, then call it for real. */
+    printf("zid_domain: dump_state_json survives a poisoned caller frame... ");
+    {
+        struct db_service dbsvc;
+        struct app_runtime_context runtime;
+        memset(&runtime, 0, sizeof(runtime));
+        db_service_init(&dbsvc);
+        bool wired = db_service_attach(&dbsvc, ndb) &&
+                     db_service_start(&dbsvc);
+        if (wired) {
+            runtime.db_service = &dbsvc;
+            app_runtime_set_current(&runtime);
+        }
+        zd_poison_frame();
+        struct json_value out = {0};
+        json_set_object(&out);
+        bool ok = wired && zid_domain_dump_state_json(&out, NULL) &&
+                  json_get(&out, "roster") != NULL;
+        json_free(&out);
+        /* Keyed form too: it has its own uninitialised local. */
+        zd_poison_frame();
+        struct json_value one = {0};
+        json_set_object(&one);
+        ok = ok && zid_domain_dump_state_json(&one, "zcode") &&
+             json_get(&one, "domain") != NULL;
+        json_free(&one);
+        if (wired) {
+            app_runtime_set_current(NULL);
+            db_service_stop(&dbsvc);
+        }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
 static int test_zid_domain_store(void)
 {
     int failures = 0;
@@ -230,217 +532,21 @@ static int test_zid_domain_store(void)
     uint8_t root3[32];
     zid_tree_root_from_digests((const uint8_t (*)[32])code3.digests, 3, root3);
 
-    printf("zid_domain: replace_leaves stores the batch + its root... ");
-    {
-        struct zid_domain d;
-        bool ok = zid_domain_replace_leaves(&ndb, "zcode", leaves, 3, root3,
-                                            NULL, now) &&
-                  zid_domain_get(&ndb, "zcode", &d) &&
-                  d.num_leaves == 3 &&
-                  memcmp(d.root, root3, 32) == 0 &&
-                  !d.anchored && d.anchored_height == -1 &&
-                  zid_domain_leaf_count(&ndb, "zcode") == 3;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_replace(&ndb, leaves, root3, now);
 
-    printf("zid_domain: the same leaf set always folds to the same root... ");
-    {
-        /* Re-store the identical set, then re-fold from what the TABLE
-         * holds: a root read back out must be a pure function of the
-         * stored leaves, never of write order or of the releases dir. */
-        struct zid_domain_leaf again[4];
-        zd_fill_leaves(again, &code3, "zcode", 3);
-        struct zid_domain_leaf read_back[4];
-        uint8_t from_table[32];
-        struct zid_domain d;
-        bool ok = zid_domain_replace_leaves(&ndb, "zcode", again, 3, root3,
-                                            NULL, now + 1) &&
-                  zid_domain_get(&ndb, "zcode", &d) &&
-                  memcmp(d.root, root3, 32) == 0 &&
-                  zid_domain_leaves(&ndb, "zcode", read_back, 4) == 3;
-        if (ok) {
-            uint8_t digests[4][32];
-            for (int i = 0; i < 3; i++) {
-                if (read_back[i].leaf_index != i) ok = false;
-                memcpy(digests[i], read_back[i].record_digest, 32);
-            }
-            ok = ok &&
-                 zid_tree_root_from_digests((const uint8_t (*)[32])digests, 3,
-                                            from_table) &&
-                 memcmp(from_table, root3, 32) == 0;
-        }
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_same_root(&ndb, code3, root3, now);
 
-    printf("zid_domain: a proof built from the table verifies... ");
-    {
-        struct zid_domain_leaf read_back[4];
-        struct zid_domain d;
-        int64_t idx = -1;
-        bool ok = zid_domain_get(&ndb, "zcode", &d) &&
-                  zid_domain_leaves(&ndb, "zcode", read_back, 4) == 3 &&
-                  zid_domain_leaf_index_by_digest(&ndb, "zcode",
-                                                  code3.digests[1], &idx) &&
-                  idx == 1;
-        if (ok) {
-            uint8_t digests[4][32];
-            for (int i = 0; i < 3; i++)
-                memcpy(digests[i], read_back[i].record_digest, 32);
-            uint8_t proof[ZID_TREE_MAX_PEAKS][32], pr[32];
-            uint32_t plen = 0;
-            ok = zid_tree_prove_from_leaves((const uint8_t (*)[32])digests, 3,
-                                            (uint64_t)idx, proof, &plen, pr) &&
-                 memcmp(pr, d.root, 32) == 0 &&
-                 zid_tree_verify(d.root, digests[idx], (uint64_t)idx, 3,
-                                 proof, plen) &&
-                 /* and the same proof must NOT verify a different leaf */
-                 !zid_tree_verify(d.root, digests[0], (uint64_t)idx, 3,
-                                  proof, plen);
-        }
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_proof(&ndb, code3);
 
-    printf("zid_domain: set_anchor records txid+height; a same-root "
-           "re-fold keeps it... ");
-    {
-        uint8_t txid[32];
-        memset(txid, 0xC7, sizeof(txid));
-        struct zid_domain_leaf again[4];
-        zd_fill_leaves(again, &code3, "zcode", 3);
-        struct zid_domain d;
-        bool ok = zid_domain_set_anchor(&ndb, "zcode", txid, 3056758) &&
-                  zid_domain_get(&ndb, "zcode", &d) && d.anchored &&
-                  memcmp(d.anchored_txid, txid, 32) == 0 &&
-                  d.anchored_height == 3056758 &&
-                  zid_domain_replace_leaves(&ndb, "zcode", again, 3, root3,
-                                            NULL, now + 2) &&
-                  zid_domain_get(&ndb, "zcode", &d) && d.anchored &&
-                  d.anchored_height == 3056758;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_set_anchor(&ndb, code3, root3, now);
 
-    printf("zid_domain: leaf replacement is atomic — a shorter set leaves "
-           "no stale leaf, and the anchor is cleared... ");
-    {
-        /* Two leaves instead of three: the dropped leaf must be GONE, the
-         * root must be the two-leaf root, and the anchor must not survive
-         * a meaning change. */
-        struct zid_domain_leaf shorter[4];
-        zd_fill_leaves(shorter, &code3, "zcode", 2);
-        uint8_t root2[32];
-        zid_tree_root_from_digests((const uint8_t (*)[32])code3.digests, 2,
-                                   root2);
-        struct zid_domain d;
-        int64_t gone = -1;
-        bool ok = zid_domain_replace_leaves(&ndb, "zcode", shorter, 2, root2,
-                                            NULL, now + 3) &&
-                  zid_domain_get(&ndb, "zcode", &d) &&
-                  d.num_leaves == 2 &&
-                  memcmp(d.root, root2, 32) == 0 &&
-                  zid_domain_leaf_count(&ndb, "zcode") == 2 &&
-                  !zid_domain_leaf_index_by_digest(&ndb, "zcode",
-                                                   code3.digests[2], &gone) &&
-                  !d.anchored && d.anchored_height == -1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-        /* Restore the three-leaf batch for the coexistence case below. */
-        struct zid_domain_leaf full[4];
-        zd_fill_leaves(full, &code3, "zcode", 3);
-        zid_domain_replace_leaves(&ndb, "zcode", full, 3, root3, NULL, now + 4);
-    }
+    failures += test_zid_domain_atomic(&ndb, code3, root3, now);
 
-    printf("zid_domain: two domains coexist without interfering... ");
-    {
-        struct zd_fixture desc;
-        zd_build_fixture(&desc, "zdesc", 4, seed, now + 99);
-        struct zid_domain_leaf dl[4];
-        zd_fill_leaves(dl, &desc, "zdesc", 4);
-        uint8_t droot[32];
-        zid_tree_root_from_digests((const uint8_t (*)[32])desc.digests, 4,
-                                   droot);
-        uint8_t txid[32];
-        memset(txid, 0xD5, sizeof(txid));
+    failures += test_zid_domain_coexist(&ndb, seed, now, root3);
 
-        struct zid_domain a, b;
-        int64_t idx = -1;
-        bool ok = zid_domain_replace_leaves(&ndb, "zdesc", dl, 4, droot, NULL,
-                                            now + 5) &&
-                  zid_domain_set_anchor(&ndb, "zdesc", txid, 42) &&
-                  /* zcode is untouched by every zdesc write */
-                  zid_domain_get(&ndb, "zcode", &a) && a.num_leaves == 3 &&
-                  memcmp(a.root, root3, 32) == 0 && !a.anchored &&
-                  zid_domain_leaf_count(&ndb, "zcode") == 3 &&
-                  /* zdesc carries its own root, leaves and anchor */
-                  zid_domain_get(&ndb, "zdesc", &b) && b.num_leaves == 4 &&
-                  memcmp(b.root, droot, 32) == 0 && b.anchored &&
-                  b.anchored_height == 42 &&
-                  zid_domain_leaf_count(&ndb, "zdesc") == 4 &&
-                  /* digest lookup is scoped to its domain */
-                  zid_domain_leaf_index_by_digest(&ndb, "zdesc",
-                                                  desc.digests[3], &idx) &&
-                  idx == 3 &&
-                  !zid_domain_leaf_index_by_digest(&ndb, "zcode",
-                                                   desc.digests[3], &idx) &&
-                  zid_domain_count(&ndb) == 2;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_unknown(&ndb, now);
 
-    printf("zid_domain: an unknown domain cannot be anchored, and a bad "
-           "name is refused... ");
-    {
-        uint8_t txid[32];
-        memset(txid, 0x11, sizeof(txid));
-        struct zid_domain bad;
-        memset(&bad, 0, sizeof(bad));
-        snprintf(bad.domain_name, sizeof(bad.domain_name), "Not A Domain");
-        memset(bad.root, 0x22, 32);
-        bad.updated_at = (int64_t)now;
-        struct zid_domain probe;
-        bool ok = !zid_domain_set_anchor(&ndb, "nosuch", txid, 7) &&
-                  !db_zid_domain_save(&ndb, &bad) &&
-                  !zid_domain_get(&ndb, "Not A Domain", &probe) &&
-                  zid_domain_count(&ndb) == 2;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    /* zid_domain_dump_state_json ran json_set_array()/json_set_object() on
-     * uninitialised stack locals. Those setters json_free() the value first
-     * (json.h lifecycle note), so the free walked whatever the previous frame
-     * left there. On the C3 stopwatch's serving fixture peer that was a
-     * SIGSEGV every ~15 minutes, inside stopwatch runs, killing the only peer
-     * the syncing client had:
-     *   json_free+0x43 <- zid_domain_dump_state_json+0x1b9 <- debug_bundle_write
-     * Poison the frame the dumper is about to occupy, then call it for real. */
-    printf("zid_domain: dump_state_json survives a poisoned caller frame... ");
-    {
-        struct db_service dbsvc;
-        struct app_runtime_context runtime;
-        memset(&runtime, 0, sizeof(runtime));
-        db_service_init(&dbsvc);
-        bool wired = db_service_attach(&dbsvc, &ndb) &&
-                     db_service_start(&dbsvc);
-        if (wired) {
-            runtime.db_service = &dbsvc;
-            app_runtime_set_current(&runtime);
-        }
-        zd_poison_frame();
-        struct json_value out = {0};
-        json_set_object(&out);
-        bool ok = wired && zid_domain_dump_state_json(&out, NULL) &&
-                  json_get(&out, "roster") != NULL;
-        json_free(&out);
-        /* Keyed form too: it has its own uninitialised local. */
-        zd_poison_frame();
-        struct json_value one = {0};
-        json_set_object(&one);
-        ok = ok && zid_domain_dump_state_json(&one, "zcode") &&
-             json_get(&one, "domain") != NULL;
-        json_free(&one);
-        if (wired) {
-            app_runtime_set_current(NULL);
-            db_service_stop(&dbsvc);
-        }
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_domain_dump_state(&ndb);
 
     node_db_close(&ndb);
     return failures;
@@ -630,38 +736,159 @@ static void zid_verify_under_capture(void)
     (void)zid_doc_verify(&g_zvcap_doc, g_zvcap_now);
 }
 
-static int test_ed25519_batch(void)
+static int test_ed25519_batch_torsion_report(int diverged, int rej_ctr,
+                                             int acc_ctr, int accepted)
 {
     int failures = 0;
-    enum zcl_log_level saved = zcl_log_level_get();
-
-    /* ── Boundaries, explicitly decided ──────────────────────────
-     * n == 0 is the empty conjunction: true, matching a zero-iteration
-     * verify loop. A caller that needs "at least one signature" must
-     * check n itself. n == 1 takes the same batch path as n == 512 —
-     * there is no special case — and must agree with ed25519_verify. */
-    edb_build(4, 12345);
-
-    printf("ed25519 batch: n == 0 is the empty conjunction (true)... ");
-    if (ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 0))
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    printf("ed25519 batch: n == 1 accepts a valid signature... ");
-    if (ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 1))
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    printf("ed25519 batch: n == 1 rejects one flipped signature byte... ");
-    {
-        zcl_log_level_set(ZCL_LOG_OFF);
-        edb_sig[0][10] ^= 0x01;
-        bool b = ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 1);
-        bool s = edb_serial(1);
-        zcl_log_level_set(saved);
-        if (!b && !s) printf("OK\n");
-        else { printf("FAIL (batch=%d serial=%d)\n", (int)b, (int)s); failures++; }
+    if (diverged == 0 && rej_ctr >= 0 && acc_ctr >= 0 && accepted == 0)
+        printf("OK (h-odd rejected, h-even accepted, 0/16 forgeries slipped)\n");
+    else {
+        printf("FAIL (diverged=%d rej_ctr=%d acc_ctr=%d forgeries_accepted=%d/16)\n",
+               diverged, rej_ctr, acc_ctr, accepted);
+        failures++;
     }
+
+    return failures;
+}
+
+static int test_ed25519_batch_torsion(enum zcl_log_level saved)
+{
+    /* ── The 8-torsion regression test ───────────────────────────
+     * Without a per-signature torsion screen this set is accepted by the
+     * batch and rejected by ed25519_verify — a forgery acceptance, not a
+     * rounding error. Measured on this code with the screen disabled:
+     * accepted 16/16. Both parities of h are covered: h odd gives
+     * e = T != O (must be rejected by BOTH paths), h even gives e = O
+     * (a genuinely valid signature under the cofactorless verifier, which
+     * BOTH paths must accept — the screen must not over-reject). */
+    printf("ed25519 batch: 8-torsion pubkey A+T agrees with the single verifier... ");
+    {
+        uint8_t seed[32], pk[32], sk[32], pkt[32];
+        for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(i * 7 + 3);
+        ed25519_keypair(pk, sk, seed);
+        edb_add_order2(pkt, pk);
+
+        int rej_ctr = -1, acc_ctr = -1, diverged = 0;
+        zcl_log_level_set(ZCL_LOG_OFF);
+        for (int c = 0; c < 64 && (rej_ctr < 0 || acc_ctr < 0); c++) {
+            uint8_t msg[4] = { (uint8_t)c, 0xAA, 0xBB, (uint8_t)(c * 3) };
+            uint8_t sig[64];
+            ed25519_sign(sig, msg, sizeof(msg), sk, pkt);
+            const uint8_t *m[1] = { msg };
+            const uint8_t *g[1] = { sig };
+            const uint8_t *k[1] = { pkt };
+            size_t l[1] = { sizeof(msg) };
+            bool single = ed25519_verify(sig, msg, sizeof(msg), pkt);
+            bool batch = ed25519_verify_batch(m, l, g, k, 1);
+            if (single != batch) diverged++;
+            if (!single && rej_ctr < 0) rej_ctr = c;
+            if (single && acc_ctr < 0) acc_ctr = c;
+        }
+        /* Hammer the rejecting case: a batch that only probabilistically
+         * catches torsion would slip through with probability 2^-16. */
+        int accepted = 0;
+        if (rej_ctr >= 0) {
+            uint8_t msg[4] = { (uint8_t)rej_ctr, 0xAA, 0xBB,
+                               (uint8_t)(rej_ctr * 3) };
+            uint8_t sig[64];
+            ed25519_sign(sig, msg, sizeof(msg), sk, pkt);
+            const uint8_t *m[1] = { msg };
+            const uint8_t *g[1] = { sig };
+            const uint8_t *k[1] = { pkt };
+            size_t l[1] = { sizeof(msg) };
+            for (int r = 0; r < 16; r++)
+                if (ed25519_verify_batch(m, l, g, k, 1)) accepted++;
+        }
+        zcl_log_level_set(saved);
+
+        return test_ed25519_batch_torsion_report(diverged, rej_ctr,
+                                                 acc_ctr, accepted);
+    }
+}
+
+static int test_ed25519_batch_fuzz(enum zcl_log_level saved)
+{
+    int failures = 0;
+
+    /* ── Differential fuzz ───────────────────────────────────────
+     * Fixed seeds; every corruption is applied at EVERY position of the
+     * set, and the batch verdict must equal the reference loop's. */
+    printf("ed25519 batch: differential fuzz vs the verify loop... ");
+    {
+        int diverged = 0;
+        zcl_log_level_set(ZCL_LOG_OFF);
+        for (uint64_t seed = 1; seed <= 8; seed++) {
+            size_t n = 1 + (size_t)(seed % 5);
+
+            edb_build(n, seed);
+            diverged += edb_diff(n, "clean");
+
+            for (size_t pos = 0; pos < n; pos++) {
+                edb_build(n, seed);
+                edb_sig[pos][(size_t)(seed * 7 + pos) % 64] ^= 0x01;
+                diverged += edb_diff(n, "signature bit flip");
+
+                edb_build(n, seed);
+                edb_sig[pos][63] |= 0x80; /* S >= L: non-canonical scalar */
+                diverged += edb_diff(n, "S high bit set");
+
+                edb_build(n, seed);
+                memcpy(edb_sig[pos] + 32, EDB_L_LE, 32); /* S == L exactly */
+                diverged += edb_diff(n, "S == L");
+
+                edb_build(n, seed);
+                if (edb_lens[pos] == 0) edb_lens[pos] = 1;
+                else edb_msg[pos][0] ^= 0x01;
+                diverged += edb_diff(n, "message tamper");
+
+                edb_build(n, seed);
+                edb_pk[pos][(size_t)(seed + pos) % 32] ^= 0x01;
+                diverged += edb_diff(n, "pubkey bit flip");
+
+                edb_build(n, seed);
+                memset(edb_pk[pos], 0, 32); /* identity pubkey */
+                diverged += edb_diff(n, "all-zero pubkey");
+
+                edb_build(n, seed);
+                memset(edb_sig[pos], 0, 32); /* R = y:0, an order-4 point */
+                diverged += edb_diff(n, "R zeroed");
+
+                edb_build(n, seed);
+                memcpy(edb_sig[pos], EDB_FIELD_P_LE, 32); /* y == p */
+                diverged += edb_diff(n, "R non-canonical (y == p)");
+
+                if (n >= 2) {
+                    size_t o = (pos + 1) % n;
+
+                    edb_build(n, seed);
+                    {
+                        uint8_t t[64];
+                        memcpy(t, edb_sig[pos], 64);
+                        memcpy(edb_sig[pos], edb_sig[o], 64);
+                        memcpy(edb_sig[o], t, 64);
+                    }
+                    diverged += edb_diff(n, "swapped signature pair");
+
+                    edb_build(n, seed);
+                    memcpy(edb_sig[o], edb_sig[pos], 64);
+                    memcpy(edb_pk[o], edb_pk[pos], 32);
+                    memcpy(edb_msg[o], edb_msg[pos], EDB_MSG_MAX);
+                    edb_lens[o] = edb_lens[pos];
+                    diverged += edb_diff(n, "duplicate entry");
+                }
+            }
+        }
+        zcl_log_level_set(saved);
+        if (diverged == 0) printf("OK\n");
+        else { printf("\n  %d divergence(s)\n", diverged); failures++; }
+    }
+
+    return failures;
+}
+
+static int test_ed25519_batch_rfc(enum zcl_log_level saved)
+{
+    int failures = 0;
 
     /* ── RFC 8032 §7.1 vectors through the batch path ────────────
      * TEST 1 is the zero-length-message case and is passed as a NULL
@@ -737,135 +964,47 @@ static int test_ed25519_batch(void)
         }
     }
 
-    /* ── The 8-torsion regression test ───────────────────────────
-     * Without a per-signature torsion screen this set is accepted by the
-     * batch and rejected by ed25519_verify — a forgery acceptance, not a
-     * rounding error. Measured on this code with the screen disabled:
-     * accepted 16/16. Both parities of h are covered: h odd gives
-     * e = T != O (must be rejected by BOTH paths), h even gives e = O
-     * (a genuinely valid signature under the cofactorless verifier, which
-     * BOTH paths must accept — the screen must not over-reject). */
-    printf("ed25519 batch: 8-torsion pubkey A+T agrees with the single verifier... ");
+    return failures;
+}
+
+static int test_ed25519_batch(void)
+{
+    int failures = 0;
+    enum zcl_log_level saved = zcl_log_level_get();
+
+    /* ── Boundaries, explicitly decided ──────────────────────────
+     * n == 0 is the empty conjunction: true, matching a zero-iteration
+     * verify loop. A caller that needs "at least one signature" must
+     * check n itself. n == 1 takes the same batch path as n == 512 —
+     * there is no special case — and must agree with ed25519_verify. */
+    edb_build(4, 12345);
+
+    printf("ed25519 batch: n == 0 is the empty conjunction (true)... ");
+    if (ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 0))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    printf("ed25519 batch: n == 1 accepts a valid signature... ");
+    if (ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 1))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    printf("ed25519 batch: n == 1 rejects one flipped signature byte... ");
     {
-        uint8_t seed[32], pk[32], sk[32], pkt[32];
-        for (int i = 0; i < 32; i++) seed[i] = (uint8_t)(i * 7 + 3);
-        ed25519_keypair(pk, sk, seed);
-        edb_add_order2(pkt, pk);
-
-        int rej_ctr = -1, acc_ctr = -1, diverged = 0;
         zcl_log_level_set(ZCL_LOG_OFF);
-        for (int c = 0; c < 64 && (rej_ctr < 0 || acc_ctr < 0); c++) {
-            uint8_t msg[4] = { (uint8_t)c, 0xAA, 0xBB, (uint8_t)(c * 3) };
-            uint8_t sig[64];
-            ed25519_sign(sig, msg, sizeof(msg), sk, pkt);
-            const uint8_t *m[1] = { msg };
-            const uint8_t *g[1] = { sig };
-            const uint8_t *k[1] = { pkt };
-            size_t l[1] = { sizeof(msg) };
-            bool single = ed25519_verify(sig, msg, sizeof(msg), pkt);
-            bool batch = ed25519_verify_batch(m, l, g, k, 1);
-            if (single != batch) diverged++;
-            if (!single && rej_ctr < 0) rej_ctr = c;
-            if (single && acc_ctr < 0) acc_ctr = c;
-        }
-        /* Hammer the rejecting case: a batch that only probabilistically
-         * catches torsion would slip through with probability 2^-16. */
-        int accepted = 0;
-        if (rej_ctr >= 0) {
-            uint8_t msg[4] = { (uint8_t)rej_ctr, 0xAA, 0xBB,
-                               (uint8_t)(rej_ctr * 3) };
-            uint8_t sig[64];
-            ed25519_sign(sig, msg, sizeof(msg), sk, pkt);
-            const uint8_t *m[1] = { msg };
-            const uint8_t *g[1] = { sig };
-            const uint8_t *k[1] = { pkt };
-            size_t l[1] = { sizeof(msg) };
-            for (int r = 0; r < 16; r++)
-                if (ed25519_verify_batch(m, l, g, k, 1)) accepted++;
-        }
+        edb_sig[0][10] ^= 0x01;
+        bool b = ed25519_verify_batch(edb_msgs, edb_lens, edb_sigs, edb_pks, 1);
+        bool s = edb_serial(1);
         zcl_log_level_set(saved);
-
-        if (diverged == 0 && rej_ctr >= 0 && acc_ctr >= 0 && accepted == 0)
-            printf("OK (h-odd rejected, h-even accepted, 0/16 forgeries slipped)\n");
-        else {
-            printf("FAIL (diverged=%d rej_ctr=%d acc_ctr=%d forgeries_accepted=%d/16)\n",
-                   diverged, rej_ctr, acc_ctr, accepted);
-            failures++;
-        }
+        if (!b && !s) printf("OK\n");
+        else { printf("FAIL (batch=%d serial=%d)\n", (int)b, (int)s); failures++; }
     }
 
-    /* ── Differential fuzz ───────────────────────────────────────
-     * Fixed seeds; every corruption is applied at EVERY position of the
-     * set, and the batch verdict must equal the reference loop's. */
-    printf("ed25519 batch: differential fuzz vs the verify loop... ");
-    {
-        int diverged = 0;
-        zcl_log_level_set(ZCL_LOG_OFF);
-        for (uint64_t seed = 1; seed <= 8; seed++) {
-            size_t n = 1 + (size_t)(seed % 5);
+    failures += test_ed25519_batch_rfc(saved);
 
-            edb_build(n, seed);
-            diverged += edb_diff(n, "clean");
+    failures += test_ed25519_batch_torsion(saved);
 
-            for (size_t pos = 0; pos < n; pos++) {
-                edb_build(n, seed);
-                edb_sig[pos][(size_t)(seed * 7 + pos) % 64] ^= 0x01;
-                diverged += edb_diff(n, "signature bit flip");
-
-                edb_build(n, seed);
-                edb_sig[pos][63] |= 0x80; /* S >= L: non-canonical scalar */
-                diverged += edb_diff(n, "S high bit set");
-
-                edb_build(n, seed);
-                memcpy(edb_sig[pos] + 32, EDB_L_LE, 32); /* S == L exactly */
-                diverged += edb_diff(n, "S == L");
-
-                edb_build(n, seed);
-                if (edb_lens[pos] == 0) edb_lens[pos] = 1;
-                else edb_msg[pos][0] ^= 0x01;
-                diverged += edb_diff(n, "message tamper");
-
-                edb_build(n, seed);
-                edb_pk[pos][(size_t)(seed + pos) % 32] ^= 0x01;
-                diverged += edb_diff(n, "pubkey bit flip");
-
-                edb_build(n, seed);
-                memset(edb_pk[pos], 0, 32); /* identity pubkey */
-                diverged += edb_diff(n, "all-zero pubkey");
-
-                edb_build(n, seed);
-                memset(edb_sig[pos], 0, 32); /* R = y:0, an order-4 point */
-                diverged += edb_diff(n, "R zeroed");
-
-                edb_build(n, seed);
-                memcpy(edb_sig[pos], EDB_FIELD_P_LE, 32); /* y == p */
-                diverged += edb_diff(n, "R non-canonical (y == p)");
-
-                if (n >= 2) {
-                    size_t o = (pos + 1) % n;
-
-                    edb_build(n, seed);
-                    {
-                        uint8_t t[64];
-                        memcpy(t, edb_sig[pos], 64);
-                        memcpy(edb_sig[pos], edb_sig[o], 64);
-                        memcpy(edb_sig[o], t, 64);
-                    }
-                    diverged += edb_diff(n, "swapped signature pair");
-
-                    edb_build(n, seed);
-                    memcpy(edb_sig[o], edb_sig[pos], 64);
-                    memcpy(edb_pk[o], edb_pk[pos], 32);
-                    memcpy(edb_msg[o], edb_msg[pos], EDB_MSG_MAX);
-                    edb_lens[o] = edb_lens[pos];
-                    diverged += edb_diff(n, "duplicate entry");
-                }
-            }
-        }
-        zcl_log_level_set(saved);
-        if (diverged == 0) printf("OK\n");
-        else { printf("\n  %d divergence(s)\n", diverged); failures++; }
-    }
+    failures += test_ed25519_batch_fuzz(saved);
 
     /* ── Benchmark (opt-in: ZCL_ED25519_BATCH_BENCH=1) ───────────
      * Off by default so the group stays in the fast pool. Timed through
@@ -1279,66 +1418,29 @@ static int test_zid_hybrid(void)
     return zh.failures;
 }
 
-int test_zid(void)
+static int test_zid_doc_round_trip(struct zid_doc doc, uint8_t *wire,
+                                   size_t wire_len, const uint8_t *body,
+                                   size_t body_len, uint64_t now)
 {
     int failures = 0;
-
-    printf("\n=== ZID Tests ===\n");
-
-    /* ── RFC 8032 §7.1 known-answer vectors ─────────────────────── */
-
-    failures += test_rfc8032_vector(
-        "TEST 1 (empty msg)",
-        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-        NULL, 0,
-        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
-        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
-
-    const uint8_t msg_r = 0x72;
-    failures += test_rfc8032_vector(
-        "TEST 2 (1-byte 0x72)",
-        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
-        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
-        &msg_r, 1,
-        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
-        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00");
-
-    /* ── Batch verification == the verify loop, on every input ───── */
-
-    failures += test_ed25519_batch();
-
-    /* ── Document sign → encode → decode → verify round-trip ─────── */
-
-    uint8_t seed[32];
-    hex_to_bytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-                 seed, sizeof(seed));
-    const uint8_t body[] = "hello sovereign identity";
-    const uint64_t now = 1700000000;
-
-    struct zid_doc doc;
-    printf("zid_doc_sign: fills and signs... ");
-    if (zid_doc_sign(&doc, body, sizeof(body) - 1, 1, now + 3600, seed))
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    uint8_t wire[ZID_DOC_MAX];
-    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
-    printf("zid_doc_encode: exact wire size... ");
-    if (wire_len == 51 + sizeof(body) - 1 + 64)
-        printf("OK\n");
-    else { printf("FAIL (len=%zu)\n", wire_len); failures++; }
-
     struct zid_doc back;
+
     printf("zid sign→encode→decode→verify round-trip... ");
     if (zid_doc_decode(&back, wire, wire_len) &&
-        back.body_len == sizeof(body) - 1 &&
-        memcmp(back.body, body, sizeof(body) - 1) == 0 &&
+        back.body_len == body_len &&
+        memcmp(back.body, body, body_len) == 0 &&
         back.seq == 1 && back.expiry == now + 3600 &&
         memcmp(back.master_pubkey, doc.master_pubkey, 32) == 0 &&
         zid_doc_verify(&back, now))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+static int test_zid_doc_tamper(struct zid_doc doc, uint64_t now)
+{
+    int failures = 0;
 
     /* ── Tamper rejection ────────────────────────────────────────── */
 
@@ -1361,6 +1463,13 @@ int test_zid(void)
     printf("zid_doc_verify: expired doc rejected (expiry <= now)... ");
     if (!zid_doc_verify(&doc, now + 3600)) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
+
+    return failures;
+}
+
+static int test_zid_doc_expiry_log(struct zid_doc doc, uint64_t now)
+{
+    int failures = 0;
 
     /* ── Expiry log rate limit ─────────────────────────────────────
      * A caller that re-verifies the same already-known-expired doc on a
@@ -1424,6 +1533,15 @@ int test_zid(void)
         zid_verify_expiry_log_reset_for_testing();
     }
 
+    return failures;
+}
+
+static int test_zid_doc_malformed(struct zid_doc doc, uint8_t *wire,
+                                  size_t wire_len, uint8_t *seed,
+                                  uint64_t now)
+{
+    int failures = 0;
+
     printf("zid_doc_decode: truncated buffer rejected... ");
     {
         struct zid_doc t;
@@ -1454,6 +1572,13 @@ int test_zid(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_blinded_keys(struct zid_doc doc)
+{
+    int failures = 0;
 
     /* ── Blinded keys ────────────────────────────────────────────── */
 
@@ -1499,6 +1624,13 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_zid_doc_supersedes(struct zid_doc doc)
+{
+    int failures = 0;
+
     /* ── Monotonic-seq supersede rule ────────────────────────────── */
 
     printf("zid_doc_supersedes: higher seq supersedes... ");
@@ -1530,23 +1662,12 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Anchor-domain tree (MMR) ────────────────────────────────── */
+    return failures;
+}
 
-    printf("\n=== ZID anchor-domain tree ===\n");
-
-    /* Deterministic record digests: SHA3-256("zid-test-leaf" ‖ seed ‖ i). */
-    #define ZID_TEST_MAX_LEAVES 32
-    uint8_t leaves[ZID_TEST_MAX_LEAVES][32];
-    uint8_t leaves_b[ZID_TEST_MAX_LEAVES][32];
-    for (uint64_t i = 0; i < ZID_TEST_MAX_LEAVES; i++) {
-        uint8_t buf[13 + 1 + 8];
-        memcpy(buf, "zid-test-leaf", 13);
-        buf[13] = 0xA0;
-        for (int b = 0; b < 8; b++) buf[14 + b] = (uint8_t)(i >> (8 * b));
-        sha3_256(buf, sizeof(buf), leaves[i]);
-        buf[13] = 0xB0;
-        sha3_256(buf, sizeof(buf), leaves_b[i]);
-    }
+static int test_zid_tree_empty_and_sizes(uint8_t (*leaves)[32])
+{
+    int failures = 0;
 
     /* Empty tree: zero root, prove/verify refuse. */
     printf("zid_tree: empty tree root is zero, prove refuses... ");
@@ -1603,6 +1724,14 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_tree_negatives(uint8_t (*leaves)[32],
+                                   uint8_t (*leaves_b)[32])
+{
+    int failures = 0;
 
     /* Tamper battery on a 17-leaf tree, leaf 7. */
     printf("zid_tree_verify: wrong root rejected... ");
@@ -1722,20 +1851,12 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("zid_tree: peak count == popcount(num_leaves)... ");
-    {
-        bool ok = true;
-        for (uint64_t n = 1; n <= 23 && ok; n++) {
-            struct zid_tree t;
-            zid_tree_init(&t);
-            for (uint64_t i = 0; i < n; i++)
-                zid_tree_append(&t, leaves[i % ZID_TEST_MAX_LEAVES]);
-            if (t.num_peaks != (uint32_t)__builtin_popcountll(n))
-                ok = false;
-        }
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    return failures;
+}
+
+static int test_zid_proof_round_trip(uint8_t (*leaves)[32])
+{
+    int failures = 0;
 
     /* ── Canonical proof wire format ─────────────────────────────── */
 
@@ -1783,6 +1904,13 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_proof_malformed(uint8_t (*leaves)[32])
+{
+    int failures = 0;
 
     printf("zid_proof_decode: truncated buffer rejected... ");
     {
@@ -1857,15 +1985,13 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Release record codec ────────────────────────────────────── */
+    return failures;
+}
 
-    printf("\n=== ZID release record ===\n");
-
-    struct zid_release rel;
-    memset(&rel, 0, sizeof(rel));
-    snprintf(rel.name, sizeof(rel.name), "zclassic23");
-    snprintf(rel.version, sizeof(rel.version), "1.0.0");
-    memset(rel.manifest_root, 0x5C, 32);
+static int test_zid_release_codec(struct zid_release rel, uint8_t *seed,
+                                  uint64_t now)
+{
+    int failures = 0;
 
     printf("zid_release: body encode→decode round-trip... ");
     {
@@ -1923,6 +2049,14 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_zid_release_negatives(struct zid_release rel, uint8_t *seed,
+                                      uint64_t now)
+{
+    int failures = 0;
+
     printf("zid_release_decode: non-printable name rejected... ");
     {
         struct zid_release bad = rel;
@@ -1975,18 +2109,19 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    /* ── Domain batching (record digest → domain root) ───────────── */
+    return failures;
+}
 
-    printf("\n=== ZID domain batching ===\n");
+static int test_zid_record_digest_checks(struct zid_release rel,
+                                         uint8_t *seed, uint64_t now)
+{
+    int failures = 0;
 
     /* The digest convention is pinned two ways: against a direct
      * sha3_256 of the same wire bytes (no tag, no length prefix), and
      * against a frozen golden hex so any drift in the doc wire layout
      * or the hash fails loudly. */
     printf("zid_record_digest: SHA3-256 of canonical wire bytes (convention)... ");
-    uint8_t batch_doc_wires[3][ZID_DOC_MAX];
-    size_t batch_doc_lens[3];
-    uint8_t batch_digests[3][32];
     {
         struct zid_doc rdoc;
         zid_release_sign(&rdoc, &rel, 7, now + 3600, seed);
@@ -2020,6 +2155,16 @@ int test_zid(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_zid_domain_root_checks(uint8_t (*batch_doc_wires)[ZID_DOC_MAX],
+                                       size_t *batch_doc_lens,
+                                       uint8_t (*batch_digests)[32],
+                                       uint8_t *seed, uint64_t now)
+{
+    int failures = 0;
 
     /* Three distinct release docs → digests → root via the batch helper
      * must equal the manual init/append/root fold. */
@@ -2086,19 +2231,13 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    failures += test_zid_domain_store();
-    /* ── ZID on-chain anchor overlay (lokad "ZID\0") ────────────────
-     *
-     * The on-chain half of the identity layer: ANCHOR / ROTATE / REVOKE of a
-     * 32-byte ed25519 master key inside a standard OP_RETURN. Round-trips,
-     * frozen wire vectors, pedantic negatives, and the relay cap. */
+    return failures;
+}
 
-    uint8_t anchor_key_a[ZID_ANCHOR_PUBKEY_LEN];
-    uint8_t anchor_key_b[ZID_ANCHOR_PUBKEY_LEN];
-    for (int i = 0; i < ZID_ANCHOR_PUBKEY_LEN; i++) {
-        anchor_key_a[i] = (uint8_t)(i + 1);      /* 01..20 */
-        anchor_key_b[i] = (uint8_t)(i + 0x21);   /* 21..40 */
-    }
+static int test_zid_anchor_build_parse(uint8_t *anchor_key_a,
+                                       uint8_t *anchor_key_b)
+{
+    int failures = 0;
 
     printf("zid anchor: ANCHOR build+parse roundtrip... ");
     {
@@ -2132,6 +2271,14 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (len=%zu)\n", len); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_anchor_revoke_golden(uint8_t *anchor_key_a,
+                                         uint8_t *anchor_key_b)
+{
+    int failures = 0;
 
     printf("zid anchor: REVOKE build+parse roundtrip... ");
     {
@@ -2198,6 +2345,14 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_zid_anchor_parse_strict(uint8_t *anchor_key_a,
+                                        uint8_t *anchor_key_b)
+{
+    int failures = 0;
+
     printf("zid anchor: golden vectors parse back to their commands... ");
     {
         struct zid_anchor_message m;
@@ -2247,6 +2402,13 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_anchor_bad_fields(uint8_t *anchor_key_a)
+{
+    int failures = 0;
 
     printf("zid anchor: wrong version byte rejects (dispatched first)... ");
     {
@@ -2307,6 +2469,14 @@ int test_zid(void)
         if (all_reject) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_anchor_bad_keys(uint8_t *anchor_key_a,
+                                    uint8_t *anchor_key_b)
+{
+    int failures = 0;
 
     printf("zid anchor: wrong-length pubkey push rejects (31/33/0/64)... ");
     {
@@ -2386,6 +2556,14 @@ int test_zid(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_zid_anchor_null_args(uint8_t *anchor_key_a,
+                                     uint8_t *anchor_key_b)
+{
+    int failures = 0;
+
     printf("zid anchor: NULL / empty-buffer arguments reject... ");
     {
         uint8_t script[ZID_ANCHOR_SCRIPT_MAX];
@@ -2415,6 +2593,14 @@ int test_zid(void)
         if (len > 0 && !zid_anchor_parse(script, len, &m)) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_zid_anchor_relay_cap(uint8_t *anchor_key_a,
+                                     uint8_t *anchor_key_b)
+{
+    int failures = 0;
 
     /* ── Relay cap (MAX_OP_RETURN_RELAY = 223) ──────────────────────*/
 
@@ -2455,6 +2641,13 @@ int test_zid(void)
         else { printf("FAIL (%zu %zu %zu)\n", a, r, v); failures++; }
     }
 
+    return failures;
+}
+
+static int test_zid_anchor_over_cap(uint8_t *anchor_key_a)
+{
+    int failures = 0;
+
     printf("zid anchor: parse refuses a script over the 223-byte cap... ");
     {
         /* Well-formed prefix, padded past the standardness ceiling: an
@@ -2470,6 +2663,172 @@ int test_zid(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_zid(void)
+{
+    int failures = 0;
+
+    printf("\n=== ZID Tests ===\n");
+
+    /* ── RFC 8032 §7.1 known-answer vectors ─────────────────────── */
+
+    failures += test_rfc8032_vector(
+        "TEST 1 (empty msg)",
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        NULL, 0,
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+        "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+
+    const uint8_t msg_r = 0x72;
+    failures += test_rfc8032_vector(
+        "TEST 2 (1-byte 0x72)",
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        &msg_r, 1,
+        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00");
+
+    /* ── Batch verification == the verify loop, on every input ───── */
+
+    failures += test_ed25519_batch();
+
+    /* ── Document sign → encode → decode → verify round-trip ─────── */
+
+    uint8_t seed[32];
+    hex_to_bytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+                 seed, sizeof(seed));
+    const uint8_t body[] = "hello sovereign identity";
+    const uint64_t now = 1700000000;
+
+    struct zid_doc doc;
+    printf("zid_doc_sign: fills and signs... ");
+    if (zid_doc_sign(&doc, body, sizeof(body) - 1, 1, now + 3600, seed))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    uint8_t wire[ZID_DOC_MAX];
+    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
+    printf("zid_doc_encode: exact wire size... ");
+    if (wire_len == 51 + sizeof(body) - 1 + 64)
+        printf("OK\n");
+    else { printf("FAIL (len=%zu)\n", wire_len); failures++; }
+
+    failures += test_zid_doc_round_trip(doc, wire, wire_len, body,
+                                        sizeof(body) - 1, now);
+
+    failures += test_zid_doc_tamper(doc, now);
+
+    failures += test_zid_doc_expiry_log(doc, now);
+
+    failures += test_zid_doc_malformed(doc, wire, wire_len, seed, now);
+
+    failures += test_zid_blinded_keys(doc);
+
+    failures += test_zid_doc_supersedes(doc);
+
+    /* ── Anchor-domain tree (MMR) ────────────────────────────────── */
+
+    printf("\n=== ZID anchor-domain tree ===\n");
+
+    /* Deterministic record digests: SHA3-256("zid-test-leaf" ‖ seed ‖ i). */
+    #define ZID_TEST_MAX_LEAVES 32
+    uint8_t leaves[ZID_TEST_MAX_LEAVES][32];
+    uint8_t leaves_b[ZID_TEST_MAX_LEAVES][32];
+    for (uint64_t i = 0; i < ZID_TEST_MAX_LEAVES; i++) {
+        uint8_t buf[13 + 1 + 8];
+        memcpy(buf, "zid-test-leaf", 13);
+        buf[13] = 0xA0;
+        for (int b = 0; b < 8; b++) buf[14 + b] = (uint8_t)(i >> (8 * b));
+        sha3_256(buf, sizeof(buf), leaves[i]);
+        buf[13] = 0xB0;
+        sha3_256(buf, sizeof(buf), leaves_b[i]);
+    }
+
+    failures += test_zid_tree_empty_and_sizes(leaves);
+
+    failures += test_zid_tree_negatives(leaves, leaves_b);
+
+    printf("zid_tree: peak count == popcount(num_leaves)... ");
+    {
+        bool ok = true;
+        for (uint64_t n = 1; n <= 23 && ok; n++) {
+            struct zid_tree t;
+            zid_tree_init(&t);
+            for (uint64_t i = 0; i < n; i++)
+                zid_tree_append(&t, leaves[i % ZID_TEST_MAX_LEAVES]);
+            if (t.num_peaks != (uint32_t)__builtin_popcountll(n))
+                ok = false;
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    failures += test_zid_proof_round_trip(leaves);
+
+    failures += test_zid_proof_malformed(leaves);
+
+    /* ── Release record codec ────────────────────────────────────── */
+
+    printf("\n=== ZID release record ===\n");
+
+    struct zid_release rel;
+    memset(&rel, 0, sizeof(rel));
+    snprintf(rel.name, sizeof(rel.name), "zclassic23");
+    snprintf(rel.version, sizeof(rel.version), "1.0.0");
+    memset(rel.manifest_root, 0x5C, 32);
+
+    failures += test_zid_release_codec(rel, seed, now);
+
+    failures += test_zid_release_negatives(rel, seed, now);
+
+    /* ── Domain batching (record digest → domain root) ───────────── */
+
+    printf("\n=== ZID domain batching ===\n");
+
+    uint8_t batch_doc_wires[3][ZID_DOC_MAX];
+    size_t batch_doc_lens[3];
+    uint8_t batch_digests[3][32];
+
+    failures += test_zid_record_digest_checks(rel, seed, now);
+
+    failures += test_zid_domain_root_checks(batch_doc_wires, batch_doc_lens,
+                                            batch_digests, seed, now);
+
+    failures += test_zid_domain_store();
+
+    /* ── ZID on-chain anchor overlay (lokad "ZID\0") ────────────────
+     *
+     * The on-chain half of the identity layer: ANCHOR / ROTATE / REVOKE of a
+     * 32-byte ed25519 master key inside a standard OP_RETURN. Round-trips,
+     * frozen wire vectors, pedantic negatives, and the relay cap. */
+
+    uint8_t anchor_key_a[ZID_ANCHOR_PUBKEY_LEN];
+    uint8_t anchor_key_b[ZID_ANCHOR_PUBKEY_LEN];
+    for (int i = 0; i < ZID_ANCHOR_PUBKEY_LEN; i++) {
+        anchor_key_a[i] = (uint8_t)(i + 1);      /* 01..20 */
+        anchor_key_b[i] = (uint8_t)(i + 0x21);   /* 21..40 */
+    }
+
+    failures += test_zid_anchor_build_parse(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_revoke_golden(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_parse_strict(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_bad_fields(anchor_key_a);
+
+    failures += test_zid_anchor_bad_keys(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_null_args(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_relay_cap(anchor_key_a, anchor_key_b);
+
+    failures += test_zid_anchor_over_cap(anchor_key_a);
+
 
     failures += test_zid_hybrid();
 
