@@ -251,10 +251,10 @@ static int auth_recover_secp256k1_signer(const uint8_t *sig,
     struct pubkey pk;
     pubkey_init(&pk);
     if (!pubkey_recover_compact(&pk, &h, sig))
-        return -1;
+        LOG_ERR("auth.login", "secp256k1 compact signature recovery failed");
     struct key_id kid = pubkey_get_id(&pk);
     if (!auth_encode_address_from_keyid(&kid, recovered, recovered_size))
-        return -1;
+        LOG_ERR("auth.login", "secp256k1 signer address encoding failed");
     /* Each iteration writes exactly two hex digits plus its own NUL; the
      * next iteration overwrites that NUL, and the last one terminates the
      * string. stored_pubkey_hex is zero-initialised, so a zero-length key
@@ -278,16 +278,16 @@ static int auth_verify_ed25519_signer(const uint8_t *sig,
 {
     /* ed25519: recovery is impossible; the client must present its key. */
     if (!pubkey_hex || !pubkey_hex[0])
-        return -1;
+        LOG_ERR("auth.login", "ed25519 login refused: client did not present a public key");
     uint8_t pk32[32];
     if (ParseHex(pubkey_hex, pk32, sizeof(pk32)) != 32)
-        return -1;
+        LOG_ERR("auth.login", "ed25519 login refused: public key is not 32 hex-encoded bytes");
     if (!ed25519_verify(sig, preimage, plen, pk32))
-        return -1;
+        LOG_ERR("auth.login", "ed25519 signature verification failed");
     struct key_id kid;
     hash160(pk32, sizeof(pk32), kid.id.data);
     if (!auth_encode_address_from_keyid(&kid, recovered, recovered_size))
-        return -1;
+        LOG_ERR("auth.login", "ed25519 signer address encoding failed");
     snprintf(stored_pubkey_hex, stored_pubkey_hex_size, "%s", pubkey_hex);
     return 0;
 }
