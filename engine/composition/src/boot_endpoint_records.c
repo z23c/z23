@@ -115,25 +115,6 @@ void boot_endpoint_records_register(void)
 
 /* ── loading filed records at start ────────────────────────────────── */
 
-/* Whether two snapshots of one file describe the same bytes: size and
- * every timestamp and identity field equal, so the read raced no
- * rewrite. */
-static bool ber_snapshots_match(
-    const struct platform_positioned_file_snapshot *before,
-    const struct platform_positioned_file_snapshot *after)
-{
-    if (before->size != after->size ||
-        before->modified_seconds != after->modified_seconds ||
-        before->modified_nanoseconds != after->modified_nanoseconds)
-        return false;
-    if (before->changed_seconds != after->changed_seconds ||
-        before->changed_nanoseconds != after->changed_nanoseconds)
-        return false;
-    return before->volume == after->volume &&
-           before->file_low == after->file_low &&
-           before->file_high == after->file_high;
-}
-
 /* Length of the hex once trailing newline, carriage-return and space
  * bytes are dropped. */
 static size_t ber_trim_hex_tail(char *hex, size_t len)
@@ -179,7 +160,7 @@ static size_t ber_read_record_file(const char *dir, const char *name,
         &file, hex, (size_t)before.size, 0);
     bool stable = read == (int64_t)before.size &&
                   platform_positioned_file_snapshot(&file, &after) &&
-                  ber_snapshots_match(&before, &after);
+                  platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable)
         return 0;
