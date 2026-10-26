@@ -1380,7 +1380,6 @@ tests/harness/src/test_api_access.c:api_access_focused_tests:62
 tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_focused_tests:37
 tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
-tests/harness/src/test_api_routes.c:api_route_table_focused_tests:236
 tests/harness/src/test_atomic_commit_ordering.c:test_atomic_commit_ordering:16
 tests/harness/src/test_bip44.c:test_bip44:75
 tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
