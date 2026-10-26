@@ -37,13 +37,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-int main(int argc, char **argv)
+/* Parse argv into the bundle path, out dir and optional chainwork bytes.
+ * Returns 0, or exit code 2 after printing the usage error. */
+static int parse_args(int argc, char **argv, const char **bundle_path,
+                      const char **out_dir, uint8_t chainwork[32],
+                      bool *have_chainwork)
 {
-    const char *bundle_path = NULL;
-    const char *out_dir = NULL;
-    uint8_t chainwork[32] = {0};
-    bool have_chainwork = false;
-
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--chainwork=", 12) == 0) {
             if (!zcl_hex_decode(argv[i] + 12, chainwork, 32)) {
@@ -51,25 +50,31 @@ int main(int argc, char **argv)
                                 "64 hex chars (32-byte big-endian)\n");
                 return 2;
             }
-            have_chainwork = true;
-        } else if (!bundle_path) {
-            bundle_path = argv[i];
-        } else if (!out_dir) {
-            out_dir = argv[i];
+            *have_chainwork = true;
+        } else if (!*bundle_path) {
+            *bundle_path = argv[i];
+        } else if (!*out_dir) {
+            *out_dir = argv[i];
         } else {
             fprintf(stderr, "checkpoint_rung_export: unexpected arg '%s'\n",
                     argv[i]);
             return 2;
         }
     }
-    if (!bundle_path || !out_dir) {
+    if (!*bundle_path || !*out_dir) {
         fprintf(stderr,
                 "usage: %s BUNDLE.sqlite OUT_DIR [--chainwork=<64hex-BE>]\n"
                 "  0 = rung written; 1 = derive/IO error; 2 = usage error\n",
                 argv[0]);
         return 2;
     }
+    return 0;
+}
 
+/* Open the bundle read-only through a file: URI; on failure prints, closes
+ * the partial handle and returns NULL. */
+static sqlite3 *open_bundle_readonly(const char *bundle_path)
+{
     char uri[4096];
     snprintf(uri, sizeof(uri), "file:%s?mode=ro", bundle_path);
     sqlite3 *db = NULL;
@@ -79,8 +84,50 @@ int main(int argc, char **argv)
                 db ? sqlite3_errmsg(db) : "unknown");
         if (db)
             sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+/* Serialize the rung and write <out_dir>/rung-<height>.rung; returns 0, or
+ * exit code 1 after printing the failure. */
+static int write_binary_artifact(struct checkpoint_rung *rung,
+                                 const char *out_dir, char *bin_path,
+                                 size_t bin_path_size)
+{
+    uint8_t wire[CHECKPOINT_RUNG_WIRE_SIZE];
+    if (!checkpoint_rung_serialize(rung, wire)) {
+        fprintf(stderr, "checkpoint_rung_export: serialize failed\n");
         return 1;
     }
+    snprintf(bin_path, bin_path_size, "%s/rung-%d.rung", out_dir,
+             rung->height);
+    FILE *bf = fopen(bin_path, "wb");
+    if (!bf || fwrite(wire, 1, sizeof(wire), bf) != sizeof(wire)) {
+        fprintf(stderr, "checkpoint_rung_export: write %s failed\n", bin_path);
+        if (bf)
+            fclose(bf);
+        return 1;
+    }
+    fclose(bf);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    const char *bundle_path = NULL;
+    const char *out_dir = NULL;
+    uint8_t chainwork[32] = {0};
+    bool have_chainwork = false;
+
+    int rc = parse_args(argc, argv, &bundle_path, &out_dir, chainwork,
+                        &have_chainwork);
+    if (rc != 0)
+        return rc;
+
+    sqlite3 *db = open_bundle_readonly(bundle_path);
+    if (!db)
+        return 1;
 
     struct checkpoint_rung rung;
     bool ok = checkpoint_rung_derive_from_bundle(
@@ -92,22 +139,10 @@ int main(int argc, char **argv)
     }
 
     /* Binary artifact. */
-    uint8_t wire[CHECKPOINT_RUNG_WIRE_SIZE];
-    if (!checkpoint_rung_serialize(&rung, wire)) {
-        fprintf(stderr, "checkpoint_rung_export: serialize failed\n");
-        return 1;
-    }
     char bin_path[4200];
-    snprintf(bin_path, sizeof(bin_path), "%s/rung-%d.rung", out_dir,
-             rung.height);
-    FILE *bf = fopen(bin_path, "wb");
-    if (!bf || fwrite(wire, 1, sizeof(wire), bf) != sizeof(wire)) {
-        fprintf(stderr, "checkpoint_rung_export: write %s failed\n", bin_path);
-        if (bf)
-            fclose(bf);
-        return 1;
-    }
-    fclose(bf);
+    rc = write_binary_artifact(&rung, out_dir, bin_path, sizeof(bin_path));
+    if (rc != 0)
+        return rc;
 
     /* C fragment. */
     char frag[8192];
