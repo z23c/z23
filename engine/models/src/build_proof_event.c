@@ -55,11 +55,10 @@ static bool proof_event_before_validate(void *record, void *ctx)
 DEFINE_MODEL_BEFORE_VALIDATE_READY(
     build_proof_event, proof_event_before_validate)
 
-bool db_build_proof_event_root(
-    const struct db_build_proof_event *row,
-    char out_hex[BUILD_PROOF_EVENT_ROOT_HEX + 1])
+static bool proof_event_root_state_and_hashes_invalid(
+    const struct db_build_proof_event *row)
 {
-    if (!row || !out_hex || proof_event_state_code(row->state) < 0 ||
+    return proof_event_state_code(row->state) < 0 ||
         !proof_event_hex(row->prior_event_root, true) ||
         !proof_event_hex(row->action_id, false) ||
         !proof_event_hex(row->source_root_sha3, true) ||
@@ -67,10 +66,23 @@ bool db_build_proof_event_root(
         !proof_event_hex(row->candidate_root_sha3, false) ||
         !proof_event_hex(row->proof_policy_root_sha3, false) ||
         !proof_event_hex(row->context_root_sha3, true) ||
-        !proof_event_hex(row->receipt_root_sha3, true) ||
-        row->workspace[0] != '/' ||
+        !proof_event_hex(row->receipt_root_sha3, true);
+}
+
+static bool proof_event_root_bounds_invalid(
+    const struct db_build_proof_event *row)
+{
+    return row->workspace[0] != '/' ||
         strlen(row->workspace) > BUILD_PROOF_EVENT_WORKSPACE_MAX ||
-        row->deadline_at < 0 || row->elapsed_us < 0 || row->created_at <= 0)
+        row->deadline_at < 0 || row->elapsed_us < 0 || row->created_at <= 0;
+}
+
+bool db_build_proof_event_root(
+    const struct db_build_proof_event *row,
+    char out_hex[BUILD_PROOF_EVENT_ROOT_HEX + 1])
+{
+    if (!row || !out_hex || proof_event_root_state_and_hashes_invalid(row) ||
+        proof_event_root_bounds_invalid(row))
         return false;
     static const char domain_v1[] = "zcl.build_proof_event.v1";
     static const char domain_v2[] = "zcl.build_proof_event.v2";
@@ -276,7 +288,7 @@ int db_build_proof_events_pending(
         "SELECT e.event_root,e.prior_event_root,e.action_id,e.source_root_sha3,e.task_root_sha3,"
         "e.candidate_root_sha3,e.proof_policy_root_sha3,e.context_root_sha3,"
         "e.receipt_root_sha3,e.workspace,e.state,e.peer_id,e.request_id,e.deadline_at,"
-        "e.elapsed_us,e.created_at FROM build_proof_events e WHERE NOT EXISTS "
+        "e.elapsed_at,e.created_at FROM build_proof_events e WHERE NOT EXISTS "
         "(SELECT 1 FROM build_proof_events newer WHERE "
         "newer.action_id=e.action_id AND newer.rowid>e.rowid) AND e.state "
         "NOT IN ('REPRODUCED','SUPERSEDED',"
@@ -305,7 +317,7 @@ int db_build_proof_events_for_task(
         "SELECT e.event_root,e.prior_event_root,e.action_id,e.source_root_sha3,e.task_root_sha3,"
         "e.candidate_root_sha3,e.proof_policy_root_sha3,e.context_root_sha3,"
         "e.receipt_root_sha3,e.workspace,e.state,e.peer_id,e.request_id,e.deadline_at,"
-        "e.elapsed_us,e.created_at FROM build_proof_events e WHERE "
+        "e.elapsed_at,e.created_at FROM build_proof_events e WHERE "
         "e.task_root_sha3=? "
         "AND NOT EXISTS (SELECT 1 FROM build_proof_events newer WHERE "
         "newer.action_id=e.action_id AND newer.rowid>e.rowid) "
