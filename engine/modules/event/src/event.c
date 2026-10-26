@@ -672,31 +672,25 @@ size_t event_dump_json(char *buf, size_t buf_size, size_t count)
     return w;
 }
 
-size_t event_dump_json_filtered(char *buf, size_t buf_size, size_t count,
-                                 const char *type_prefix)
+/* count == 0 fast path of event_dump_json_filtered: emit "[]" with the
+ * same guarded writes and report 2 bytes, matching the unfiltered
+ * empty-array result. */
+static size_t write_empty_json_array(char *buf, size_t buf_size)
 {
-    if (!atomic_load(&g_log.initialized) || !type_prefix)
-        return event_dump_json(buf, buf_size, count);
+    if (buf_size > 0) buf[0] = '[';
+    if (buf_size > 1) buf[1] = ']';
+    if (buf_size > 2) buf[2] = '\0';
+    return 2;
+}
 
-    size_t prefix_len = strlen(type_prefix);
-    if (prefix_len == 0)
-        return event_dump_json(buf, buf_size, count);
-    if (count > EVENT_LOG_SIZE)
-        count = EVENT_LOG_SIZE;
-    if (count == 0) {
-        if (buf_size > 0) buf[0] = '[';
-        if (buf_size > 1) buf[1] = ']';
-        if (buf_size > 2) buf[2] = '\0';
-        return 2;
-    }
-
-    uint64_t end = atomic_load(&g_log.write_pos);
-    uint64_t start = end > EVENT_LOG_SIZE ? end - EVENT_LOG_SIZE : 0;
-    uint64_t *matches = zcl_malloc(count * sizeof(*matches),
-                                   "event_dump_json_filtered/matches");
-    if (!matches)
-        return 0;
-
+/* Walk the ring newest-first collecting up to count sequence numbers
+ * whose event type name starts with type_prefix. Overwritten slots
+ * (sequence mismatch) are skipped exactly as in the inline scan. */
+static size_t collect_prefix_matches(uint64_t *matches, size_t count,
+                                     uint64_t end, uint64_t start,
+                                     const char *type_prefix,
+                                     size_t prefix_len)
+{
     size_t matched = 0;
     for (uint64_t i = end; i > start && matched < count; i--) {
         uint64_t seqno = i - 1;
@@ -711,7 +705,16 @@ size_t event_dump_json_filtered(char *buf, size_t buf_size, size_t count,
 
         matches[matched++] = seqno;
     }
+    return matched;
+}
 
+/* Render the collected matches oldest-first as a JSON array, re-checking
+ * each slot's sequence number (the ring may have wrapped since the scan).
+ * Returns the number of bytes written, like event_dump_json. */
+static size_t write_matched_events_json(char *buf, size_t buf_size,
+                                        const uint64_t *matches,
+                                        size_t matched)
+{
     size_t w = 0;
     if (w < buf_size) buf[w++] = '[';
 
@@ -741,6 +744,33 @@ size_t event_dump_json_filtered(char *buf, size_t buf_size, size_t count,
 
     if (w < buf_size) buf[w++] = ']';
     if (w < buf_size) buf[w] = '\0';
+    return w;
+}
+
+size_t event_dump_json_filtered(char *buf, size_t buf_size, size_t count,
+                                 const char *type_prefix)
+{
+    if (!atomic_load(&g_log.initialized) || !type_prefix)
+        return event_dump_json(buf, buf_size, count);
+
+    size_t prefix_len = strlen(type_prefix);
+    if (prefix_len == 0)
+        return event_dump_json(buf, buf_size, count);
+    if (count > EVENT_LOG_SIZE)
+        count = EVENT_LOG_SIZE;
+    if (count == 0)
+        return write_empty_json_array(buf, buf_size);
+
+    uint64_t end = atomic_load(&g_log.write_pos);
+    uint64_t start = end > EVENT_LOG_SIZE ? end - EVENT_LOG_SIZE : 0;
+    uint64_t *matches = zcl_malloc(count * sizeof(*matches),
+                                   "event_dump_json_filtered/matches");
+    if (!matches)
+        return 0;
+
+    size_t matched = collect_prefix_matches(matches, count, end, start,
+                                            type_prefix, prefix_len);
+    size_t w = write_matched_events_json(buf, buf_size, matches, matched);
     free(matches);
     return w;
 }

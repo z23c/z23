@@ -1224,7 +1224,6 @@ engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_kind_from_header:21
 engine/modules/engine/src/engine_wire_response.c:engine_response_error_text:20
 engine/modules/engine/src/engine_wire_response.c:read_text:24
-engine/modules/event/src/event.c:event_dump_json_filtered:23
 engine/modules/fleetledger/src/fleet_ledger.c:index_row:17
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_append:27
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_experiment_stats:42
