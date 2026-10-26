@@ -265,43 +265,11 @@ static int cpt_build_job_count_checks(void)
     return failures;
 }
 
-int test_cpu_topology(void)
+/* The published performance levels against the host counts. */
+static int cpt_performance_level_checks(int logical, int cores,
+                                        int performance_levels)
 {
     int failures = 0;
-
-    /* The affinity seam first: the pin_thread checks further down leave this
-     * thread bound to domain 0, and these assertions own the mask while they
-     * run and hand back exactly what they found. */
-    failures += cpt_available_cpu_count_checks();
-    failures += cpt_cpu_max_parse_checks();
-#if defined(__linux__)
-    failures += cpt_cpu_quota_live_checks();
-#endif
-    failures += cpt_build_job_count_checks();
-
-    /* ── real /sys scan (or whatever this box/container actually has) ── */
-    cpu_topology_reset_for_testing();
-    cpu_topology_set_sysfs_root_for_testing(NULL); /* default root */
-
-    CPT_CHECK("init succeeds", cpu_topology_init());
-    CPT_CHECK("init idempotent (second call also true)", cpu_topology_init());
-
-    int logical = cpu_topology_logical_cpus();
-    int cores   = cpu_topology_physical_cores();
-    int domains = cpu_topology_l3_domains();
-    const char *source = cpu_topology_source();
-
-    CPT_CHECK("logical_cpus >= 1", logical >= 1);
-    CPT_CHECK("physical_cores >= 1", cores >= 1);
-    CPT_CHECK("physical_cores <= logical_cpus", cores <= logical);
-    CPT_CHECK("l3_domains >= 1", domains >= 1);
-    CPT_CHECK("source is a native authority or fallback",
-              strcmp(source, "sysfs") == 0 ||
-              strcmp(source, "darwin_sysctl") == 0 ||
-              strcmp(source, "windows") == 0 ||
-              strcmp(source, "fallback") == 0);
-
-    int performance_levels = cpu_topology_performance_levels();
     CPT_CHECK("performance level count is bounded",
               performance_levels >= 0 &&
               performance_levels <= CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS);
@@ -342,12 +310,13 @@ int test_cpu_topology(void)
                   !cpu_topology_performance_level_at(performance_levels,
                                                      &sentinel));
     }
-#if defined(__APPLE__) && defined(__aarch64__)
-    CPT_CHECK("Apple Silicon publishes Darwin sysctl topology",
-              strcmp(source, "darwin_sysctl") == 0);
-    CPT_CHECK("Apple Silicon publishes at least one performance level",
-              performance_levels >= 1);
-#endif
+    return failures;
+}
+
+/* Mapping between logical cpus and L3 domains, plus out-of-range refusals. */
+static int cpt_domain_mapping_checks(int logical, int domains)
+{
+    int failures = 0;
 
     /* Every logical cpu resolves to a valid domain id, and per-domain
      * cpu_count sums to exactly logical_cpus (no cpu double-counted or
@@ -386,6 +355,13 @@ int test_cpu_topology(void)
         CPT_CHECK("domain_at(domains) fails",
                   !cpu_topology_domain_at(domains, &snap));
     }
+    return failures;
+}
+
+/* largest_l3_domain_cpus against a hand-computed max-L3 scan. */
+static int cpt_largest_l3_domain_checks(int logical, int domains)
+{
+    int failures = 0;
 
     /* largest_l3_domain_cpus: non-empty, matches the domain with the max
      * L3 size (ties -> lowest id), and is a subset of some domain's
@@ -414,20 +390,14 @@ int test_cpu_topology(void)
         int n2 = cpu_topology_largest_l3_domain_cpus(small, 1);
         CPT_CHECK("largest_l3_domain_cpus respects cap", n2 <= 1);
     }
+    return failures;
+}
 
-    /* pin_thread: valid domain succeeds (advisory — always attempted on
-     * the calling thread itself, which is always affinity-settable). */
-#ifdef __APPLE__
-    CPT_CHECK("pin_thread refuses where Darwin exposes no affinity API",
-              !cpu_topology_pin_thread(pthread_self(), 0));
-#else
-    CPT_CHECK("pin_thread succeeds for domain 0",
-              cpu_topology_pin_thread(pthread_self(), 0));
-#endif
-    CPT_CHECK("pin_thread fails for an invalid (negative) domain",
-              !cpu_topology_pin_thread(pthread_self(), -1));
-    CPT_CHECK("pin_thread fails for an out-of-range domain",
-              !cpu_topology_pin_thread(pthread_self(), domains + 100));
+/* The JSON dump of the live topology. */
+static int cpt_dump_json_checks(int logical, int cores, int domains,
+                                int performance_levels, const char *source)
+{
+    int failures = 0;
 
     /* dump_state_json: well-formed, keys present, domains array matches
      * l3_domains(). */
@@ -462,6 +432,74 @@ int test_cpu_topology(void)
                       performance_levels);
         json_free(&v);
     }
+    return failures;
+}
+
+int test_cpu_topology(void)
+{
+    int failures = 0;
+
+    /* The affinity seam first: the pin_thread checks further down leave this
+     * thread bound to domain 0, and these assertions own the mask while they
+     * run and hand back exactly what they found. */
+    failures += cpt_available_cpu_count_checks();
+    failures += cpt_cpu_max_parse_checks();
+#if defined(__linux__)
+    failures += cpt_cpu_quota_live_checks();
+#endif
+    failures += cpt_build_job_count_checks();
+
+    /* ── real /sys scan (or whatever this box/container actually has) ── */
+    cpu_topology_reset_for_testing();
+    cpu_topology_set_sysfs_root_for_testing(NULL); /* default root */
+
+    CPT_CHECK("init succeeds", cpu_topology_init());
+    CPT_CHECK("init idempotent (second call also true)", cpu_topology_init());
+
+    int logical = cpu_topology_logical_cpus();
+    int cores   = cpu_topology_physical_cores();
+    int domains = cpu_topology_l3_domains();
+    const char *source = cpu_topology_source();
+
+    CPT_CHECK("logical_cpus >= 1", logical >= 1);
+    CPT_CHECK("physical_cores >= 1", cores >= 1);
+    CPT_CHECK("physical_cores <= logical_cpus", cores <= logical);
+    CPT_CHECK("l3_domains >= 1", domains >= 1);
+    CPT_CHECK("source is a native authority or fallback",
+              strcmp(source, "sysfs") == 0 ||
+              strcmp(source, "darwin_sysctl") == 0 ||
+              strcmp(source, "windows") == 0 ||
+              strcmp(source, "fallback") == 0);
+
+    int performance_levels = cpu_topology_performance_levels();
+    failures += cpt_performance_level_checks(logical, cores,
+                                             performance_levels);
+#if defined(__APPLE__) && defined(__aarch64__)
+    CPT_CHECK("Apple Silicon publishes Darwin sysctl topology",
+              strcmp(source, "darwin_sysctl") == 0);
+    CPT_CHECK("Apple Silicon publishes at least one performance level",
+              performance_levels >= 1);
+#endif
+
+    failures += cpt_domain_mapping_checks(logical, domains);
+    failures += cpt_largest_l3_domain_checks(logical, domains);
+
+    /* pin_thread: valid domain succeeds (advisory — always attempted on
+     * the calling thread itself, which is always affinity-settable). */
+#ifdef __APPLE__
+    CPT_CHECK("pin_thread refuses where Darwin exposes no affinity API",
+              !cpu_topology_pin_thread(pthread_self(), 0));
+#else
+    CPT_CHECK("pin_thread succeeds for domain 0",
+              cpu_topology_pin_thread(pthread_self(), 0));
+#endif
+    CPT_CHECK("pin_thread fails for an invalid (negative) domain",
+              !cpu_topology_pin_thread(pthread_self(), -1));
+    CPT_CHECK("pin_thread fails for an out-of-range domain",
+              !cpu_topology_pin_thread(pthread_self(), domains + 100));
+
+    failures += cpt_dump_json_checks(logical, cores, domains,
+                                     performance_levels, source);
 
     /* ── fallback path: point sysfs root at a directory that cannot
      * exist, force a re-scan, and confirm graceful degradation. ── */
