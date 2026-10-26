@@ -406,7 +406,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "FATAL: progress_store unavailable; reducer cursors and "
                 "snapshot journal cannot be verified; REFUSING to boot\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                "progress_store_unavailable");
+                    "progress_store_unavailable");
         _exit(EXIT_FAILURE);
     }
     bool pending = true;
@@ -415,7 +415,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "FATAL: snapshot install journal read failed; REFUSING "
                 "possibly partial state\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                "snapshot_install_journal_read_failed");
+                    "snapshot_install_journal_read_failed");
         _exit(EXIT_FAILURE);
     }
     if (!pending)
@@ -430,7 +430,7 @@ void boot_snapshot_install_gate_boot(bool progress_open,
                 "whole-artifact SHA256 is required and the artifact must "
                 "fully verify before recovery can resume\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                "snapshot_install_pending_loader_mismatch_or_invalid");
+                    "snapshot_install_pending_loader_mismatch_or_invalid");
         _exit(EXIT_FAILURE);
     }
 }
@@ -455,7 +455,7 @@ void boot_snapshot_install_require_complete(void)
                 "FATAL: snapshot loader returned with an incomplete install "
                 "journal; REFUSING normal boot\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                "snapshot_install_loader_returned_pending");
+                    "snapshot_install_loader_returned_pending");
         _exit(EXIT_FAILURE);
     }
 }
