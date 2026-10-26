@@ -141,6 +141,28 @@ struct zcl_result block_index_flat_anchor_prepare(struct main_state *ms)
     return ZCL_OK;
 }
 
+static bool bifa_encode_args_valid(struct main_state *ms,
+                                   struct block_index **sorted, size_t count,
+                                   uint8_t *out, size_t out_cap)
+{
+    return ms && sorted && count != 0 && out &&
+           out_cap >= BIFA_ENVELOPE_SIZE;
+}
+
+static bool bifa_prepared_header_matches(struct block_index *bi)
+{
+    return g_prepared && g_prepared_height == bi->nHeight &&
+           uint256_eq(&g_prepared_hash, bi->phashBlock);
+}
+
+static bool bifa_serialize_anchor_within_bound(struct block_header *hdr,
+                                               struct byte_stream *s,
+                                               size_t out_cap)
+{
+    return block_header_serialize(hdr, s) && !s->error &&
+           s->size <= out_cap - BIFA_ENVELOPE_SIZE;
+}
+
 struct zcl_result block_index_flat_anchor_encode(
     struct main_state *ms, struct block_index **sorted, size_t count,
     uint8_t *out, size_t out_cap, size_t *out_len)
@@ -150,8 +172,7 @@ struct zcl_result block_index_flat_anchor_encode(
         return ZCL_ERR(-1, "flat anchor encode: null length output");
     }
     *out_len = 0;
-    if (!ms || !sorted || count == 0 || !out ||
-        out_cap < BIFA_ENVELOPE_SIZE) {
+    if (!bifa_encode_args_valid(ms, sorted, count, out, out_cap)) {
         LOG_WARN(BIFA_SUBSYS, "anchor encode failed: invalid arguments");
         return ZCL_ERR(-2, "flat anchor encode: invalid arguments");
     }
@@ -162,8 +183,7 @@ struct zcl_result block_index_flat_anchor_encode(
 
     struct block_header hdr;
     bool have = bifa_header_from_index(bi, &hdr);
-    if (!have && g_prepared && g_prepared_height == bi->nHeight &&
-        uint256_eq(&g_prepared_hash, bi->phashBlock)) {
+    if (!have && bifa_prepared_header_matches(bi)) {
         hdr = g_prepared_header;
         have = true;
     }
@@ -185,8 +205,7 @@ struct zcl_result block_index_flat_anchor_encode(
 
     struct byte_stream s;
     stream_init(&s, BLOCK_HEADER_SIZE + MAX_SOLUTION_SIZE + 9u);
-    if (!block_header_serialize(&hdr, &s) || s.error ||
-        s.size > out_cap - BIFA_ENVELOPE_SIZE) {
+    if (!bifa_serialize_anchor_within_bound(&hdr, &s, out_cap)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor encode failed h=%d: serialized header exceeds bound",
                  bi->nHeight);
@@ -207,6 +226,35 @@ struct zcl_result block_index_flat_anchor_encode(
     return ZCL_OK;
 }
 
+static bool bifa_trailer_envelope_ok(int32_t height, uint32_t header_len,
+                                     size_t trailer_len)
+{
+    return height >= 0 && header_len != 0 &&
+           (size_t)header_len == trailer_len - BIFA_ENVELOPE_SIZE &&
+           header_len <= BIFA_TRAILER_MAX - BIFA_ENVELOPE_SIZE;
+}
+
+static bool bifa_parse_trailer_header(struct block_header *hdr,
+                                      struct byte_stream *s)
+{
+    return block_header_deserialize(hdr, s) && !s->error &&
+           stream_remaining(s) == 0 && hdr->nSolutionSize != 0;
+}
+
+static bool bifa_row_binds_anchor(struct block_index *bi, int32_t height,
+                                  struct uint256 *hash)
+{
+    return bi && bi->nHeight == height && bi->phashBlock &&
+           uint256_eq(bi->phashBlock, hash);
+}
+
+static bool bifa_parent_hash_matches(struct block_index *bi,
+                                     struct uint256 *hash_prev_block)
+{
+    return !bi->pprev || !bi->pprev->phashBlock ||
+           uint256_eq(bi->pprev->phashBlock, hash_prev_block);
+}
+
 struct zcl_result block_index_flat_anchor_apply(
     struct main_state *ms, const uint8_t *trailer, size_t trailer_len)
 {
@@ -221,9 +269,7 @@ struct zcl_result block_index_flat_anchor_apply(
 
     int32_t height = zcl_read_i32_le(trailer + 4);
     uint32_t header_len = zcl_read_u32_le(trailer + 8);
-    if (height < 0 || header_len == 0 ||
-        (size_t)header_len != trailer_len - BIFA_ENVELOPE_SIZE ||
-        header_len > BIFA_TRAILER_MAX - BIFA_ENVELOPE_SIZE) {
+    if (!bifa_trailer_envelope_ok(height, header_len, trailer_len)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor trailer refused: malformed envelope h=%d bytes=%u/%zu",
                  height, header_len, trailer_len);
@@ -235,8 +281,7 @@ struct zcl_result block_index_flat_anchor_apply(
     stream_init_from_data(&s, trailer + BIFA_ENVELOPE_SIZE, header_len);
     struct block_header hdr;
     block_header_init(&hdr);
-    if (!block_header_deserialize(&hdr, &s) || s.error ||
-        stream_remaining(&s) != 0 || hdr.nSolutionSize == 0) {
+    if (!bifa_parse_trailer_header(&hdr, &s)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor trailer refused h=%d: malformed canonical header",
                  height);
@@ -247,15 +292,13 @@ struct zcl_result block_index_flat_anchor_apply(
     struct uint256 hash;
     block_header_get_hash(&hdr, &hash);
     struct block_index *bi = block_map_find(&ms->map_block_index, &hash);
-    if (!bi || bi->nHeight != height || !bi->phashBlock ||
-        !uint256_eq(bi->phashBlock, &hash)) {
+    if (!bifa_row_binds_anchor(bi, height, &hash)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor trailer refused h=%d: header does not bind an imported row",
                  height);
         return ZCL_ERR(-13, "flat anchor apply: unbound header h=%d", height);
     }
-    if (bi->pprev && bi->pprev->phashBlock &&
-        !uint256_eq(bi->pprev->phashBlock, &hdr.hashPrevBlock)) {
+    if (!bifa_parent_hash_matches(bi, &hdr.hashPrevBlock)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor trailer refused h=%d: parent hash mismatch", height);
         return ZCL_ERR(-14, "flat anchor apply: parent mismatch h=%d", height);

@@ -1452,8 +1452,6 @@ engine/services/src/binary_ab_fallback.c:binary_ab_promote:17
 engine/services/src/binary_ab_fallback.c:binary_ab_promote_stream:16
 engine/services/src/binary_staleness_service.c:binary_staleness_check_now:25
 engine/services/src/block_index_blocks_hydrate.c:load_block_index_from_blocks_table:63
-engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_apply:22
-engine/services/src/block_index_flat_anchor.c:block_index_flat_anchor_encode:19
 engine/services/src/block_index_integrity.c:bii_repair_post_activation_anchor:21
 engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43
 engine/services/src/block_index_integrity.c:block_index_repair_pprev:44
