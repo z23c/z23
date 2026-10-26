@@ -31,21 +31,21 @@ bool vcs_zcode_proof_set_object_valid(const char *workspace,
     return valid;
 }
 
-enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
-    const uint8_t (*roots)[32], size_t count, uint8_t *out,
-    size_t out_cap, size_t *out_len)
+static enum vcs_zcode_dev_error vcs_zcode_proof_set_check_roots(
+    const uint8_t (*roots)[32], size_t count)
 {
-    if (out_len) *out_len = 0;
-    if (!roots || !out || !out_len) return VCS_ZCODE_DEV_ERR_NULL;
-    if (count == 0 || count > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
-        return VCS_ZCODE_DEV_ERR_LIMIT;
-    size_t need = VCS_ZCODE_PROOF_SET_HEADER_BYTES + count * 32u;
-    if (out_cap < need) return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
     for (size_t i = 0; i < count; i++) {
         if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_DEV_ERR_ROOT_ZERO;
         if (i > 0 && memcmp(roots[i - 1], roots[i], 32) >= 0)
             return VCS_ZCODE_DEV_ERR_POLICY;
     }
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error vcs_zcode_proof_set_write_wire(
+    const uint8_t (*roots)[32], size_t count, uint8_t *out,
+    size_t out_cap, size_t need, size_t *out_len)
+{
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, out_cap);
     bool ok = zcl_codec_write_bytes(&writer, "ZCPSET\r\n", 8) &&
@@ -60,6 +60,66 @@ enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
     return VCS_ZCODE_DEV_OK;
 }
 
+enum vcs_zcode_dev_error vcs_zcode_proof_set_serialize(
+    const uint8_t (*roots)[32], size_t count, uint8_t *out,
+    size_t out_cap, size_t *out_len)
+{
+    if (out_len) *out_len = 0;
+    if (!roots || !out || !out_len) return VCS_ZCODE_DEV_ERR_NULL;
+    if (count == 0 || count > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS)
+        return VCS_ZCODE_DEV_ERR_LIMIT;
+    size_t need = VCS_ZCODE_PROOF_SET_HEADER_BYTES + count * 32u;
+    if (out_cap < need) return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    enum vcs_zcode_dev_error status =
+        vcs_zcode_proof_set_check_roots(roots, count);
+    if (status != VCS_ZCODE_DEV_OK) return status;
+    return vcs_zcode_proof_set_write_wire(roots, count, out, out_cap,
+        need, out_len);
+}
+
+static enum vcs_zcode_dev_error vcs_zcode_proof_set_parse_header(
+    struct zcl_codec_reader *reader, size_t wire_len, size_t roots_cap,
+    size_t *n_out)
+{
+    uint16_t version, encoded_count;
+    if (!zcl_codec_read_u16le(reader, &version) ||
+        !zcl_codec_read_u16le(reader, &encoded_count))
+        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    if (version != VCS_ZCODE_DEV_VERSION)
+        return VCS_ZCODE_DEV_ERR_VERSION;
+    size_t n = encoded_count;
+    if (n == 0 || n > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS || n > roots_cap)
+        return VCS_ZCODE_DEV_ERR_LIMIT;
+    if (wire_len != VCS_ZCODE_PROOF_SET_HEADER_BYTES + n * 32u)
+        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    *n_out = n;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error vcs_zcode_proof_set_parse_roots(
+    struct zcl_codec_reader *reader, uint8_t (*roots)[32], size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!zcl_codec_read_bytes(reader, roots[i], 32))
+            return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    if (!zcl_codec_reader_finish(reader))
+        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
+    return VCS_ZCODE_DEV_OK;
+}
+
+static enum vcs_zcode_dev_error vcs_zcode_proof_set_check_canonical(
+    uint8_t (*roots)[32], size_t n, size_t wire_len, size_t *count)
+{
+    size_t checked_len = 0;
+    enum vcs_zcode_dev_error valid = vcs_zcode_proof_set_serialize(
+        (const uint8_t (*)[32])roots, n,
+        (uint8_t[VCS_ZCODE_PROOF_SET_WIRE_MAX]){0},
+        VCS_ZCODE_PROOF_SET_WIRE_MAX, &checked_len);
+    if (valid != VCS_ZCODE_DEV_OK || checked_len != wire_len) return valid;
+    *count = n;
+    return VCS_ZCODE_DEV_OK;
+}
+
 enum vcs_zcode_dev_error vcs_zcode_proof_set_parse(
     const uint8_t *wire, size_t wire_len, uint8_t (*roots)[32],
     size_t roots_cap, size_t *count)
@@ -71,30 +131,13 @@ enum vcs_zcode_dev_error vcs_zcode_proof_set_parse(
         return VCS_ZCODE_DEV_ERR_WIRE_MAGIC;
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire + 8, wire_len - 8);
-    uint16_t version, encoded_count;
-    if (!zcl_codec_read_u16le(&reader, &version) ||
-        !zcl_codec_read_u16le(&reader, &encoded_count))
-        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
-    if (version != VCS_ZCODE_DEV_VERSION)
-        return VCS_ZCODE_DEV_ERR_VERSION;
-    size_t n = encoded_count;
-    if (n == 0 || n > VCS_ZCODE_PROOF_SET_MAX_RECEIPTS || n > roots_cap)
-        return VCS_ZCODE_DEV_ERR_LIMIT;
-    if (wire_len != VCS_ZCODE_PROOF_SET_HEADER_BYTES + n * 32u)
-        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
-    for (size_t i = 0; i < n; i++)
-        if (!zcl_codec_read_bytes(&reader, roots[i], 32))
-            return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
-    if (!zcl_codec_reader_finish(&reader))
-        return VCS_ZCODE_DEV_ERR_WIRE_SIZE;
-    size_t checked_len = 0;
-    enum vcs_zcode_dev_error valid = vcs_zcode_proof_set_serialize(
-        (const uint8_t (*)[32])roots, n,
-        (uint8_t[VCS_ZCODE_PROOF_SET_WIRE_MAX]){0},
-        VCS_ZCODE_PROOF_SET_WIRE_MAX, &checked_len);
-    if (valid != VCS_ZCODE_DEV_OK || checked_len != wire_len) return valid;
-    *count = n;
-    return VCS_ZCODE_DEV_OK;
+    size_t n = 0;
+    enum vcs_zcode_dev_error status = vcs_zcode_proof_set_parse_header(
+        &reader, wire_len, roots_cap, &n);
+    if (status != VCS_ZCODE_DEV_OK) return status;
+    status = vcs_zcode_proof_set_parse_roots(&reader, roots, n);
+    if (status != VCS_ZCODE_DEV_OK) return status;
+    return vcs_zcode_proof_set_check_canonical(roots, n, wire_len, count);
 }
 
 enum vcs_zcode_dev_error vcs_zcode_proof_set_root(
