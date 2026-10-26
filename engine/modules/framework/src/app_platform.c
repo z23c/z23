@@ -471,9 +471,10 @@ static bool event_sig_s_value_ok(const uint8_t *s, size_t len_s)
 static bool event_sig_s_ok(const uint8_t *sig, size_t len)
 {
     size_t start_s = 4 + sig[3];
+    if (sig[start_s] != 0x02)
+        return false;
     size_t len_s = sig[start_s + 1];
-    return sig[start_s] == 0x02 &&
-        len_s != 0 && len_s <= 33 && start_s + 2 + len_s == len &&
+    return len_s != 0 && len_s <= 33 && start_s + 2 + len_s == len &&
         (sig[start_s + 2] & 0x80) == 0 &&
         !(len_s > 1 && sig[start_s + 2] == 0 &&
           (sig[start_s + 3] & 0x80) == 0) &&
