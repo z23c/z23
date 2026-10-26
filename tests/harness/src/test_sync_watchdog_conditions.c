@@ -132,11 +132,122 @@ static const struct json_value *sync_watchdog_condition_json(
     return NULL;
 }
 
-int test_sync_watchdog_conditions(void)
+static bool sync_watchdog_dump_exposes_tip_fields(const struct json_value *state)
 {
-    printf("\n=== sync watchdog condition tests ===\n");
-    int failures = 0;
+    bool ok = json_get(state, "last_block_connected_height") != NULL;
+    ok = ok && json_get(state, "last_block_connected_time") != NULL;
+    ok = ok && json_get(state, "tip_advance_age_seconds") != NULL;
+    ok = ok && json_get(state, "download_queued") != NULL;
+    ok = ok && json_get(state, "download_in_flight") != NULL;
+    ok = ok && json_get(state, "download_timed_out") != NULL;
+    return ok;
+}
 
+static bool sync_watchdog_starved_refill_progress_ok(
+    const struct json_value *detail)
+{
+    bool ok = detail != NULL;
+    ok = ok && strcmp(json_get_str(json_get(detail, "sync_state")),
+                      "blocks_download") == 0;
+    ok = ok && json_get_int(json_get(detail, "peer_count")) == 1;
+    ok = ok && json_get_int(json_get(detail, "detect_age_s")) == 121;
+    ok = ok && json_get_int(json_get(
+        detail, "requested_at_detect")) == 0;
+    ok = ok && json_get_int(json_get(detail, "current_requested")) == 0;
+    ok = ok && json_get_int(json_get(detail, "current_queued")) == 1;
+    ok = ok && json_get_bool(json_get(detail, "pending_download_work"));
+    return ok;
+}
+
+static bool sync_watchdog_starved_refill_witness_ok(
+    const struct json_value *detail)
+{
+    bool ok = json_get_int(json_get(
+        detail, "last_witness_requested")) == 0;
+    ok = ok && !json_get_bool(json_get(
+        detail, "witness_request_counter_advanced"));
+    ok = ok && !json_get_bool(json_get(
+        detail, "witness_download_work_drained"));
+    ok = ok && json_get(detail, "last_assign_result") != NULL;
+    ok = ok && json_get(detail, "remedy_contract") != NULL;
+    return ok;
+}
+
+static bool sync_watchdog_permanent_blocker_active_ok(
+    const struct json_value *detail)
+{
+    bool ok = detail != NULL;
+    ok = ok && json_get_bool(json_get(detail, "permanent_blocker_active"));
+    ok = ok && strcmp(json_get_str(json_get(
+                          detail, "permanent_blocker_id")),
+                      "utxo_apply.fold_hole") == 0;
+    return ok;
+}
+
+static bool sync_watchdog_permanent_blocker_deferred_ok(const char *deferred)
+{
+    return deferred &&
+           strstr(deferred, "permanent fold blocker") &&
+           strstr(deferred, "utxo_apply.fold_hole");
+}
+
+static bool sync_watchdog_starved_cap_snapshot_reached(
+    const struct condition_runtime_snapshot *snap)
+{
+    bool ok = snap->max_attempts == 5;
+    ok = ok && snap->attempts == 5;
+    ok = ok && snap->last_outcome == COND_REMEDY_UNWITNESSED;
+    ok = ok && snap->operator_needed_emitted;
+    return ok;
+}
+
+static bool sync_watchdog_refill_rotated_all_peers(const struct p2p_node *p1,
+                                                   const struct p2p_node *p2,
+                                                   const struct p2p_node *p3)
+{
+    bool ok = p1->state == PEER_SYNCING_HEADERS;
+    ok = ok && p2->state == PEER_SYNCING_HEADERS;
+    ok = ok && p3->state == PEER_SYNCING_HEADERS;
+    ok = ok && p1->last_getheaders_time == 0;
+    return ok;
+}
+
+static bool sync_watchdog_refill_rotation_detail_ok(
+    const struct json_value *detail)
+{
+    bool ok = detail != NULL;
+    ok = ok && strcmp(json_get_str(json_get(detail, "sync_state")),
+                      "headers_download") == 0;
+    ok = ok && json_get_int(json_get(
+        detail, "tip_height_at_detect")) == 10;
+    ok = ok && json_get_int(json_get(detail, "missing_height")) == 11;
+    ok = ok && json_get_int(json_get(detail, "peer_max_at_detect")) == 20;
+    ok = ok && json_get_bool(json_get(
+        detail, "local_recovery_active"));
+    ok = ok && json_get_int(json_get(
+        detail, "local_recovery_missing_height")) == 11;
+    ok = ok && json_get_int(json_get(detail, "retry_count")) == 1;
+    ok = ok && json_get_int(json_get(
+        detail, "distinct_peer_count")) == 3;
+    ok = ok && strcmp(json_get_str(json_get(
+        detail, "local_recovery_mode")), "next-child-missing") == 0;
+    ok = ok && json_get(detail, "remedy_contract") != NULL;
+    return ok;
+}
+
+static bool sync_watchdog_fork_body_queued(const struct download_manager *dm,
+                                           const struct block_index *fork_tip)
+{
+    return local_header_refill_needed_test_remedy_calls() == 1 &&
+        sync_get_state() == SYNC_BLOCKS_DOWNLOAD &&
+        dm->queue_len == 1 &&
+        dm->queue_heights && dm->queue_heights[0] == 10 &&
+        dm->queue && uint256_eq(&dm->queue[0], fork_tip->phashBlock);
+}
+
+static int sync_watchdog_case_hstar_backpressure(void)
+{
+    int failures = 0;
     {
         /* C3: verified reducer progress must reach the network backpressure
          * clock even without a legacy block-connected event. Queue pressure
@@ -181,7 +292,12 @@ int test_sync_watchdog_conditions(void)
         cleanup_sync_watchdog();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_monitor_dump(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 6000);
@@ -191,12 +307,7 @@ int test_sync_watchdog_conditions(void)
         struct json_value state;
         json_init(&state);
         bool ok = sync_monitor_dump_state_json(&state, NULL);
-        ok = ok && json_get(&state, "last_block_connected_height") != NULL;
-        ok = ok && json_get(&state, "last_block_connected_time") != NULL;
-        ok = ok && json_get(&state, "tip_advance_age_seconds") != NULL;
-        ok = ok && json_get(&state, "download_queued") != NULL;
-        ok = ok && json_get(&state, "download_in_flight") != NULL;
-        ok = ok && json_get(&state, "download_timed_out") != NULL;
+        ok = ok && sync_watchdog_dump_exposes_tip_fields(&state);
         ok = ok && json_get_int(json_get(
             &state, "last_block_connected_height")) == -1;
         ok = ok && json_get_int(json_get(
@@ -222,7 +333,12 @@ int test_sync_watchdog_conditions(void)
         cleanup_sync_watchdog();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_reducer_progress(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 7000);
@@ -264,7 +380,12 @@ int test_sync_watchdog_conditions(void)
         cleanup_sync_watchdog();
         reducer_frontier_provable_tip_reset();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_header_stall(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 1000);
@@ -303,7 +424,12 @@ int test_sync_watchdog_conditions(void)
         SYNC_WATCHDOG_CHECK("header stall kicks header fetch", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_sync_state_stuck(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 2000);
@@ -335,7 +461,12 @@ int test_sync_watchdog_conditions(void)
         SYNC_WATCHDOG_CHECK("sync state stuck kicks FSM", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_empty_window(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 3000);
@@ -361,7 +492,12 @@ int test_sync_watchdog_conditions(void)
             "download queue starved ignores empty drained window", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_refill_detail(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 3200);
@@ -398,24 +534,8 @@ int test_sync_watchdog_conditions(void)
             conditions, "download_queue_starved");
         const struct json_value *detail = cond ? json_get(cond, "detail")
                                                : NULL;
-        ok = ok && detail != NULL;
-        ok = ok && strcmp(json_get_str(json_get(detail, "sync_state")),
-                          "blocks_download") == 0;
-        ok = ok && json_get_int(json_get(detail, "peer_count")) == 1;
-        ok = ok && json_get_int(json_get(detail, "detect_age_s")) == 121;
-        ok = ok && json_get_int(json_get(
-            detail, "requested_at_detect")) == 0;
-        ok = ok && json_get_int(json_get(detail, "current_requested")) == 0;
-        ok = ok && json_get_int(json_get(detail, "current_queued")) == 1;
-        ok = ok && json_get_bool(json_get(detail, "pending_download_work"));
-        ok = ok && json_get_int(json_get(
-            detail, "last_witness_requested")) == 0;
-        ok = ok && !json_get_bool(json_get(
-            detail, "witness_request_counter_advanced"));
-        ok = ok && !json_get_bool(json_get(
-            detail, "witness_download_work_drained"));
-        ok = ok && json_get(detail, "last_assign_result") != NULL;
-        ok = ok && json_get(detail, "remedy_contract") != NULL;
+        ok = ok && sync_watchdog_starved_refill_progress_ok(detail);
+        ok = ok && sync_watchdog_starved_refill_witness_ok(detail);
         json_free(&dump);
         SYNC_WATCHDOG_CHECK(
             "download queue starved kicks refill with detail json", ok);
@@ -423,7 +543,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_permanent_blocker(void)
+{
+    int failures = 0;
     {
         /* R3 fix (false-page class): a PERMANENT typed blocker (bad PoW,
          * malformed block, an irreducible fold hole) means H* cannot advance
@@ -474,16 +599,11 @@ int test_sync_watchdog_conditions(void)
             conditions, "download_queue_starved");
         const struct json_value *detail = cond ? json_get(cond, "detail")
                                                : NULL;
-        ok = ok && detail != NULL;
-        ok = ok && json_get_bool(json_get(detail, "permanent_blocker_active"));
-        ok = ok && strcmp(json_get_str(json_get(
-                              detail, "permanent_blocker_id")),
-                          "utxo_apply.fold_hole") == 0;
+        ok = ok && sync_watchdog_permanent_blocker_active_ok(detail);
         const struct json_value *deferred_v =
             detail ? json_get(detail, "deferred_reason") : NULL;
         const char *deferred = deferred_v ? json_get_str(deferred_v) : NULL;
-        ok = ok && deferred && strstr(deferred, "permanent fold blocker") &&
-             strstr(deferred, "utxo_apply.fold_hole");
+        ok = ok && sync_watchdog_permanent_blocker_deferred_ok(deferred);
         json_free(&dump);
 
         SYNC_WATCHDOG_CHECK(
@@ -494,7 +614,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_defer_episode(void)
+{
+    int failures = 0;
     {
         /* R3 fix, second half: an episode that is ALREADY active when the
          * permanent fold blocker is diagnosed must be DEFERRED (cleared,
@@ -559,7 +684,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_orphaned_requests(void)
+{
+    int failures = 0;
     {
         /* Regression: a request that left flight
          * without a body (disconnect-requeue / backpressure drain) must not
@@ -604,7 +734,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_clears_leaving_download(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 3500);
@@ -646,7 +781,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_clears_when_drained(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 3900);
@@ -687,7 +827,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_starved_pages_then_rearms(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 5000);
@@ -724,10 +869,7 @@ int test_sync_watchdog_conditions(void)
              condition_engine_get_registered_snapshot(
                  "download_queue_starved", &snap);
         ok = ok && download_queue_starved_test_remedy_calls() == 5;
-        ok = ok && snap.max_attempts == 5;
-        ok = ok && snap.attempts == 5;
-        ok = ok && snap.last_outcome == COND_REMEDY_UNWITNESSED;
-        ok = ok && snap.operator_needed_emitted;
+        ok = ok && sync_watchdog_starved_cap_snapshot_reached(&snap);
         ok = ok && condition_engine_get_unresolved_count() == 1;
 
         /* Never-give-up contract (changed): at the attempt cap this
@@ -751,7 +893,12 @@ int test_sync_watchdog_conditions(void)
         zcl_mutex_destroy(&dm.cs);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_refill_rotates_peers(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 4000);
@@ -780,10 +927,7 @@ int test_sync_watchdog_conditions(void)
 
         condition_engine_tick();
         ok = ok && local_header_refill_needed_test_remedy_calls() == 1;
-        ok = ok && p1.state == PEER_SYNCING_HEADERS;
-        ok = ok && p2.state == PEER_SYNCING_HEADERS;
-        ok = ok && p3.state == PEER_SYNCING_HEADERS;
-        ok = ok && p1.last_getheaders_time == 0;
+        ok = ok && sync_watchdog_refill_rotated_all_peers(&p1, &p2, &p3);
         struct watchdog_local_recovery_stats lr;
         sync_monitor_get_local_recovery_stats(&lr);
         ok = ok && lr.active && lr.missing_height == 11;
@@ -796,29 +940,18 @@ int test_sync_watchdog_conditions(void)
             conditions, "local_header_refill_needed");
         const struct json_value *detail = cond ? json_get(cond, "detail")
                                                : NULL;
-        ok = ok && detail != NULL;
-        ok = ok && strcmp(json_get_str(json_get(detail, "sync_state")),
-                          "headers_download") == 0;
-        ok = ok && json_get_int(json_get(
-            detail, "tip_height_at_detect")) == 10;
-        ok = ok && json_get_int(json_get(detail, "missing_height")) == 11;
-        ok = ok && json_get_int(json_get(detail, "peer_max_at_detect")) == 20;
-        ok = ok && json_get_bool(json_get(
-            detail, "local_recovery_active"));
-        ok = ok && json_get_int(json_get(
-            detail, "local_recovery_missing_height")) == 11;
-        ok = ok && json_get_int(json_get(detail, "retry_count")) == 1;
-        ok = ok && json_get_int(json_get(
-            detail, "distinct_peer_count")) == 3;
-        ok = ok && strcmp(json_get_str(json_get(
-            detail, "local_recovery_mode")), "next-child-missing") == 0;
-        ok = ok && json_get(detail, "remedy_contract") != NULL;
+        ok = ok && sync_watchdog_refill_rotation_detail_ok(detail);
         json_free(&dump);
         SYNC_WATCHDOG_CHECK(
             "local header refill rotates peers with detail json", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_refill_fork_body(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 4300);
@@ -865,11 +998,7 @@ int test_sync_watchdog_conditions(void)
 
         condition_engine_tick();
 
-        bool queued = local_header_refill_needed_test_remedy_calls() == 1 &&
-            sync_get_state() == SYNC_BLOCKS_DOWNLOAD &&
-            dm.queue_len == 1 &&
-            dm.queue_heights && dm.queue_heights[0] == 10 &&
-            dm.queue && uint256_eq(&dm.queue[0], fork_tip->phashBlock);
+        bool queued = sync_watchdog_fork_body_queued(&dm, fork_tip);
         struct watchdog_stats wd;
         sync_monitor_get_stats(&wd);
         bool recorded = wd.last_recovery == WATCHDOG_BODY_FRONTIER_MISSING &&
@@ -887,7 +1016,12 @@ int test_sync_watchdog_conditions(void)
         main_state_free(&ms);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_refill_waits_for_outbound(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 4500);
@@ -929,7 +1063,12 @@ int test_sync_watchdog_conditions(void)
         SYNC_WATCHDOG_CHECK("local header refill waits for outbound peer", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
 
+static int sync_watchdog_case_refill_clears_on_tip_advance(void)
+{
+    int failures = 0;
     {
         struct fake_clock clock;
         fake_clock_install(&clock, 4700);
@@ -969,6 +1108,31 @@ int test_sync_watchdog_conditions(void)
             "local header refill clears after active tip advances", ok);
         cleanup_sync_watchdog();
     }
+    return failures;
+}
+
+int test_sync_watchdog_conditions(void)
+{
+    printf("\n=== sync watchdog condition tests ===\n");
+    int failures = 0;
+
+    failures += sync_watchdog_case_hstar_backpressure();
+    failures += sync_watchdog_case_monitor_dump();
+    failures += sync_watchdog_case_reducer_progress();
+    failures += sync_watchdog_case_header_stall();
+    failures += sync_watchdog_case_sync_state_stuck();
+    failures += sync_watchdog_case_starved_empty_window();
+    failures += sync_watchdog_case_starved_refill_detail();
+    failures += sync_watchdog_case_starved_permanent_blocker();
+    failures += sync_watchdog_case_starved_defer_episode();
+    failures += sync_watchdog_case_starved_orphaned_requests();
+    failures += sync_watchdog_case_starved_clears_leaving_download();
+    failures += sync_watchdog_case_starved_clears_when_drained();
+    failures += sync_watchdog_case_starved_pages_then_rearms();
+    failures += sync_watchdog_case_refill_rotates_peers();
+    failures += sync_watchdog_case_refill_fork_body();
+    failures += sync_watchdog_case_refill_waits_for_outbound();
+    failures += sync_watchdog_case_refill_clears_on_tip_advance();
 
     cleanup_sync_watchdog();
     return failures;
