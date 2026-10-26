@@ -263,6 +263,145 @@ enum op_return_backfill_outcome {
 
 static _Atomic int g_backfill_outcome = OP_RETURN_BACKFILL_NOT_WIRED;
 
+static bool backfill_not_wired(struct node_db *ndb, struct main_state *ms,
+                               const char *datadir)
+{
+    return !ndb || !ndb->open || !ms || !datadir || !datadir[0];
+}
+
+/* An already-adopted base is a STANDING fact: re-declare it once per
+ * process so a restart does not make the coverage limit invisible. */
+static void
+backfill_declare_standing_base(const struct op_return_index_cursor *cur)
+{
+    if (cur->base_height > 0 &&
+        !atomic_load(&g_backfill_partial_declared)) {
+        int64_t floor = -1;
+        (void)backfill_seed_floor(&floor);
+        index_fold_declare_partial_coverage("op_return_index",
+                                            "op_return_index",
+                                            (int64_t)cur->base_height,
+                                            floor >= 0 ? floor
+                                                       : cur->base_height - 1);
+        atomic_store(&g_backfill_partial_declared, true);
+    }
+}
+
+static int32_t backfill_frontier_tip(void)
+{
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    if (hstar < 0) hstar = 0;
+    return hstar;
+}
+
+static int32_t backfill_batch_target(int32_t cursor, int32_t hstar)
+{
+    int32_t target = cursor + OP_RETURN_BACKFILL_BATCH_BLOCKS;
+    if (target > hstar) target = hstar;
+    return target;
+}
+
+static bool backfill_block_absent(struct block_index *bi)
+{
+    return !bi || !bi->phashBlock ||
+           !(block_index_status_load(bi) & BLOCK_HAVE_DATA);
+}
+
+static bool backfill_adopt_seed_floor(struct node_db *ndb,
+                                      struct main_state *ms,
+                                      struct op_return_index_cursor *cur,
+                                      int32_t h)
+{
+    /* Below the snapshot-seed floor the body was NEVER downloaded and
+     * never will be by this fold. Pre-seed bodies are not backfilled, so
+     * the catalog DECLARES the range it covers
+     * instead: adopt the floor as the base, prune anything outside the
+     * new range, and keep the coverage limit named via
+     * *.partial_coverage. Guarded by base_height <= seed_floor so an
+     * already-adopted base can never re-adopt (that would rewrite a
+     * published digest chain from under a verifier). */
+    int64_t seed_floor = -1;
+    if (backfill_seed_floor(&seed_floor) && seed_floor >= 0 &&
+            (int64_t)h <= seed_floor &&
+            (int64_t)cur->base_height <= seed_floor) {
+        struct block_index *fbi =
+            active_chain_at(&ms->chain_active, (int32_t)seed_floor);
+        const uint8_t *floor_hash =
+            (fbi && fbi->phashBlock) ? fbi->phashBlock->data : NULL;
+        if (backfill_adopt_base(ndb, cur, seed_floor, floor_hash))
+            return true;
+        /* Persist failed — fall through to the named blocker below so
+         * the condition stays visible rather than looking adopted. */
+    }
+    return false;
+}
+
+/* Genesis carries BLOCK_HAVE_DATA with a fake (file=0,pos=0)
+ * on seeded datadirs — its body was never written to this
+ * node's blk files, so a pread hashes whatever sits at
+ * offset 0 and the fold wedges on h=0 forever. The real
+ * genesis coinbase has no OP_RETURN outputs, so folding zero
+ * rows when the body is unreadable is byte-identical to
+ * folding the real body. When a body IS present (fixtures,
+ * a future full import) the normal path reads it and
+ * extracts whatever rows it carries — extraction parity with
+ * the state auditor is preserved. Same fact pattern as
+ * bg_validation_service.c ("if (h == 0) continue;"). */
+static bool backfill_fold_genesis_digest(struct node_db *ndb,
+                                         struct op_return_index_cursor *cur,
+                                         uint8_t *digest,
+                                         struct block_index *bi,
+                                         struct op_return_index_row *rows)
+{
+    uint8_t genesis_digest[32];
+    op_return_index_fold_block_digest(cur->base_height, cur->base_digest,
+                                      digest, 0, bi->phashBlock->data,
+                                      rows, 0, genesis_digest);
+    cur->height = 0;
+    memcpy(cur->digest, genesis_digest, 32);
+    if (!op_return_index_set_cursor(ndb, cur))
+        return false;
+    memcpy(digest, genesis_digest, 32);
+    return true;
+}
+
+static bool backfill_fold_digest_persist(struct node_db *ndb,
+                                         struct op_return_index_cursor *cur,
+                                         uint8_t *digest, int32_t h,
+                                         struct block_index *bi,
+                                         struct op_return_index_row *rows,
+                                         size_t n_rows)
+{
+    uint8_t new_digest[32];
+    op_return_index_fold_block_digest(cur->base_height, cur->base_digest,
+                                      digest, h, bi->phashBlock->data,
+                                      rows, n_rows, new_digest);
+    cur->height = h;
+    memcpy(cur->digest, new_digest, 32);
+    if (!op_return_index_set_cursor(ndb, cur))
+        return false;
+    memcpy(digest, new_digest, 32);
+    return true;
+}
+
+static enum op_return_backfill_outcome
+backfill_settle_run(int folded, bool base_adopted, int *folded_out)
+{
+    if (folded > 0)
+        atomic_fetch_add(&g_backfill_blocks_folded, (uint64_t)folded);
+    if (folded_out) *folded_out = folded;
+    /* Adopting the declared base is real, durable, forward state movement —
+     * it is not "ran and achieved nothing". Reporting it as PROGRESSED is
+     * honest precisely because the marker (see backfill_progress_marker)
+     * counts base adoptions too, so it genuinely moves. */
+    if (base_adopted)
+        return OP_RETURN_BACKFILL_PROGRESSED;
+    /* Wanted to fold (cursor < frontier, proven above) and folded nothing:
+     * a hole, an unreadable body, or a failed cursor persist. Blocked. */
+    return folded > 0 ? OP_RETURN_BACKFILL_PROGRESSED
+                      : OP_RETURN_BACKFILL_BLOCKED;
+}
+
 static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
 {
     if (folded_out) *folded_out = 0;
@@ -270,7 +409,7 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
     struct node_db *ndb = backfill_ndb();
     struct main_state *ms = backfill_main_state();
     const char *datadir = backfill_datadir();
-    if (!ndb || !ndb->open || !ms || !datadir || !datadir[0])
+    if (backfill_not_wired(ndb, ms, datadir))
         return OP_RETURN_BACKFILL_NOT_WIRED; /* early boot / unit tests */
 
     struct op_return_index_cursor cur;
@@ -281,31 +420,17 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
          * refusal that needs an operator, not a quiet no-op. */
         return OP_RETURN_BACKFILL_BLOCKED;
 
-    /* An already-adopted base is a STANDING fact: re-declare it once per
-     * process so a restart does not make the coverage limit invisible. */
-    if (cur.base_height > 0 &&
-        !atomic_load(&g_backfill_partial_declared)) {
-        int64_t floor = -1;
-        (void)backfill_seed_floor(&floor);
-        index_fold_declare_partial_coverage("op_return_index",
-                                            "op_return_index",
-                                            (int64_t)cur.base_height,
-                                            floor >= 0 ? floor
-                                                       : cur.base_height - 1);
-        atomic_store(&g_backfill_partial_declared, true);
-    }
+    backfill_declare_standing_base(&cur);
 
     int32_t cursor = cur.height;
     uint8_t digest[32];
     memcpy(digest, cur.digest, 32);
 
-    int32_t hstar = reducer_frontier_provable_tip_cached();
-    if (hstar < 0) hstar = 0;
+    int32_t hstar = backfill_frontier_tip();
     if (cursor >= hstar)
         return OP_RETURN_BACKFILL_IDLE; /* caught up to the provable frontier */
 
-    int32_t target = cursor + OP_RETURN_BACKFILL_BATCH_BLOCKS;
-    if (target > hstar) target = hstar;
+    int32_t target = backfill_batch_target(cursor, hstar);
 
     struct op_return_index_row *rows = zcl_malloc(
         (size_t)OP_RETURN_BACKFILL_MAX_ROWS_PER_BLOCK * sizeof(*rows),
@@ -325,34 +450,13 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
             break;
 
         struct block_index *bi = active_chain_at(&ms->chain_active, h);
-        if (!bi || !bi->phashBlock ||
-            !(block_index_status_load(bi) & BLOCK_HAVE_DATA)) {
+        if (backfill_block_absent(bi)) {
             atomic_fetch_add(&g_backfill_holes, 1);
-
-            /* Below the snapshot-seed floor the body was NEVER downloaded and
-             * never will be by this fold. Pre-seed bodies are not backfilled, so
-             * the catalog DECLARES the range it covers
-             * instead: adopt the floor as the base, prune anything outside the
-             * new range, and keep the coverage limit named via
-             * *.partial_coverage. Guarded by base_height <= seed_floor so an
-             * already-adopted base can never re-adopt (that would rewrite a
-             * published digest chain from under a verifier). */
-            int64_t seed_floor = -1;
-            if (backfill_seed_floor(&seed_floor) && seed_floor >= 0 &&
-                (int64_t)h <= seed_floor &&
-                (int64_t)cur.base_height <= seed_floor) {
-                struct block_index *fbi =
-                    active_chain_at(&ms->chain_active, (int32_t)seed_floor);
-                const uint8_t *floor_hash =
-                    (fbi && fbi->phashBlock) ? fbi->phashBlock->data : NULL;
-                if (backfill_adopt_base(ndb, &cur, seed_floor, floor_hash)) {
-                    base_adopted = true;
-                    /* The batch window was computed from the old cursor; stop
-                     * here and let the next tick fold forward from the base. */
-                    break;
-                }
-                /* Persist failed — fall through to the named blocker below so
-                 * the condition stays visible rather than looking adopted. */
+            if (backfill_adopt_seed_floor(ndb, ms, &cur, h)) {
+                base_adopted = true;
+                /* The batch window was computed from the old cursor; stop
+                 * here and let the next tick fold forward from the base. */
+                break;
             }
 
             /* Name the floor (same pattern as address_index/txindex): below
@@ -373,30 +477,12 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
         if (!read_block_from_disk_index_pread(&blk, bi, datadir)) {
             block_free(&blk);
             if (h == 0) {
-                /* Genesis carries BLOCK_HAVE_DATA with a fake (file=0,pos=0)
-                 * on seeded datadirs — its body was never written to this
-                 * node's blk files, so a pread hashes whatever sits at
-                 * offset 0 and the fold wedges on h=0 forever. The real
-                 * genesis coinbase has no OP_RETURN outputs, so folding zero
-                 * rows when the body is unreadable is byte-identical to
-                 * folding the real body. When a body IS present (fixtures,
-                 * a future full import) the normal path reads it and
-                 * extracts whatever rows it carries — extraction parity with
-                 * the state auditor is preserved. Same fact pattern as
-                 * bg_validation_service.c ("if (h == 0) continue;"). */
-                uint8_t genesis_digest[32];
-                op_return_index_fold_block_digest(cur.base_height,
-                                                  cur.base_digest, digest, 0,
-                                                  bi->phashBlock->data,
-                                                  rows, 0, genesis_digest);
-                cur.height = 0;
-                memcpy(cur.digest, genesis_digest, 32);
-                if (!op_return_index_set_cursor(ndb, &cur)) {
+                if (!backfill_fold_genesis_digest(ndb, &cur, digest, bi,
+                                                  rows)) {
                     LOG_WARN("op_return_index",
                              "backfill: cursor persist failed at h=0 (genesis)");
                     break;
                 }
-                memcpy(digest, genesis_digest, 32);
                 folded++;
                 atomic_store(&g_backfill_last_height, 0);
                 continue;
@@ -428,38 +514,20 @@ static enum op_return_backfill_outcome backfill_run_once_typed(int *folded_out)
             break;
         }
 
-        uint8_t new_digest[32];
-        op_return_index_fold_block_digest(cur.base_height, cur.base_digest,
-                                          digest, h, bi->phashBlock->data,
-                                          rows, n, new_digest);
-        cur.height = h;
-        memcpy(cur.digest, new_digest, 32);
-        if (!op_return_index_set_cursor(ndb, &cur)) {
+        if (!backfill_fold_digest_persist(ndb, &cur, digest, h, bi, rows,
+                                          n)) {
             block_free(&blk);
             LOG_WARN("op_return_index",
                      "backfill: cursor persist failed at h=%d", h);
             break;
         }
-        memcpy(digest, new_digest, 32);
         block_free(&blk);
         folded++;
         atomic_store(&g_backfill_last_height, h);
     }
 
     free(rows);
-    if (folded > 0)
-        atomic_fetch_add(&g_backfill_blocks_folded, (uint64_t)folded);
-    if (folded_out) *folded_out = folded;
-    /* Adopting the declared base is real, durable, forward state movement —
-     * it is not "ran and achieved nothing". Reporting it as PROGRESSED is
-     * honest precisely because the marker (see backfill_progress_marker)
-     * counts base adoptions too, so it genuinely moves. */
-    if (base_adopted)
-        return OP_RETURN_BACKFILL_PROGRESSED;
-    /* Wanted to fold (cursor < frontier, proven above) and folded nothing:
-     * a hole, an unreadable body, or a failed cursor persist. Blocked. */
-    return folded > 0 ? OP_RETURN_BACKFILL_PROGRESSED
-                      : OP_RETURN_BACKFILL_BLOCKED;
+    return backfill_settle_run(folded, base_adopted, folded_out);
 }
 
 int op_return_backfill_run_once(void)

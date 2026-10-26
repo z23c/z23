@@ -342,7 +342,6 @@ engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:113
 engine/services/src/node_db_import_service.c:node_db_import_service_run:38
 engine/services/src/nullifier_backfill_service.c:nbf_reconcile_preloaded_nullifiers:17
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:28
-engine/services/src/op_return_backfill_service.c:backfill_run_once_typed:36
 engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:31
 engine/services/src/shielded_history_promote_service.c:shielded_history_promote_run:20
