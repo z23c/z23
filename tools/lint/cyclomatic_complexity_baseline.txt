@@ -1381,7 +1381,6 @@ tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_focused_tests:37
 tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
 tests/harness/src/test_atomic_commit_ordering.c:test_atomic_commit_ordering:16
-tests/harness/src/test_bip44.c:test_bip44:75
 tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
 tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
 tests/harness/src/test_block_index_loader.c:test_block_index_loader:299

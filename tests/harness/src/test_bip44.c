@@ -51,310 +51,438 @@ static void free_wallet(struct wallet *w)
     }
 }
 
+enum {
+    BIP44_DEPTH_ACCOUNT = 0,
+    BIP44_DEPTH_CHAIN = 1,
+    BIP44_DEPTH_ADDRESS = 2
+};
+
+enum {
+    BIP44_REL_SAME_KEY = 0,
+    BIP44_REL_DIFF_INDEX = 1,
+    BIP44_REL_EXT_INT = 2,
+    BIP44_REL_MANUAL_PATH = 3
+};
+
+static int check_bip44_derived_depth(const char *label, int kind,
+                                     uint32_t change, int depth,
+                                     bool report_valid)
+{
+    printf("%s", label);
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct ext_key key;
+    bool ok = false;
+    if (kind == BIP44_DEPTH_ACCOUNT)
+        ok = bip44_derive_account(&master, &key, 0);
+    else if (kind == BIP44_DEPTH_CHAIN)
+        ok = bip44_derive_chain(&master, &key, 0, change);
+    else
+        ok = bip44_derive_key(&master, &key, 0, change, 0);
+    int fail = 0;
+    if (ok) {
+        if (privkey_is_valid(&key.key) && key.nDepth == depth)
+            printf("OK\n");
+        else {
+            if (report_valid)
+                printf("FAIL (depth=%d valid=%d)\n", key.nDepth,
+                       privkey_is_valid(&key.key));
+            else
+                printf("FAIL (depth=%d)\n", key.nDepth);
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (returned false)\n");
+        fail = 1;
+    }
+    memory_cleanse(&key, sizeof(key));
+    return fail;
+}
+
+static int check_bip44_keypair(void)
+{
+    printf("bip44_derive_keypair... ");
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct privkey priv;
+    struct pubkey pub;
+    privkey_init(&priv);
+    int fail = 0;
+    if (bip44_derive_keypair(&master, &priv, &pub, 0, 0, 0)) {
+        if (privkey_is_valid(&priv) && pubkey_is_valid(&pub) &&
+            pubkey_is_compressed(&pub))
+            printf("OK\n");
+        else {
+            printf("FAIL (priv_valid=%d pub_valid=%d)\n",
+                   privkey_is_valid(&priv), pubkey_is_valid(&pub));
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (returned false)\n");
+        fail = 1;
+    }
+    memory_cleanse(priv.vch, 32);
+    return fail;
+}
+
+static int report_bip44_key_match(bool ok_a, bool ok_b,
+                                  const struct ext_key *a,
+                                  const struct ext_key *b,
+                                  bool expect_equal, bool verbose_fail)
+{
+    if (ok_a && ok_b) {
+        int cmp = memcmp(a->key.vch, b->key.vch, 32);
+        if ((expect_equal && cmp == 0) || (!expect_equal && cmp != 0)) {
+            printf("OK\n");
+            return 0;
+        }
+    }
+    if (verbose_fail)
+        printf("FAIL (ok1=%d ok2=%d)\n", ok_a, ok_b);
+    else
+        printf("FAIL\n");
+    return 1;
+}
+
+static int check_bip44_key_relation(const char *label, int mode)
+{
+    printf("%s", label);
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct ext_key a, b;
+    bool ok_a = false;
+    bool ok_b = false;
+    bool expect_equal = false;
+    bool verbose_fail = false;
+    if (mode == BIP44_REL_SAME_KEY) {
+        ok_a = bip44_derive_key(&master, &a, 0, 0, 5);
+        ok_b = bip44_derive_key(&master, &b, 0, 0, 5);
+        expect_equal = true;
+        verbose_fail = true;
+    } else if (mode == BIP44_REL_DIFF_INDEX) {
+        ok_a = bip44_derive_key(&master, &a, 0, 0, 0);
+        ok_b = bip44_derive_key(&master, &b, 0, 0, 1);
+    } else if (mode == BIP44_REL_EXT_INT) {
+        ok_a = bip44_derive_key(&master, &a, 0, BIP44_EXTERNAL, 0);
+        ok_b = bip44_derive_key(&master, &b, 0, BIP44_INTERNAL, 0);
+    } else {
+        ok_a = bip44_derive_key(&master, &a, 0, 0, 7);
+        ok_b = hd_derive_path_str(&master, &b, "m/44'/147'/0'/0/7");
+        expect_equal = true;
+    }
+    int fail = report_bip44_key_match(ok_a, ok_b, &a, &b,
+                                      expect_equal, verbose_fail);
+    memory_cleanse(&a, sizeof(a));
+    memory_cleanse(&b, sizeof(b));
+    return fail;
+}
+
+static int check_bip44_format_path(const char *label, uint32_t account,
+                                   uint32_t change, uint32_t index,
+                                   const char *expect)
+{
+    printf("%s", label);
+    char buf[64];
+    int n = bip44_format_path(buf, sizeof(buf), account, change, index);
+    if (n > 0 && strcmp(buf, expect) == 0)
+        printf("OK\n");
+    else {
+        printf("FAIL (got \"%s\")\n", buf);
+        return 1;
+    }
+    return 0;
+}
+
+static int check_bip44_rejects_change(void)
+{
+    printf("bip44 rejects bad change value... ");
+    if (!ensure_master()) {
+        printf("FAIL (no master)\n");
+        return 1;
+    }
+    struct ext_key out;
+    bool ok = bip44_derive_key(&master, &out, 0, 2, 0); /* change=2 invalid */
+    if (!ok)
+        printf("OK\n");
+    else {
+        printf("FAIL (should reject change=2)\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int check_wallet_hd_init_state(void)
+{
+    printf("wallet_init_hd from seed... ");
+    struct wallet *w = alloc_wallet();
+    if (!w) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    unsigned char seed[32];
+    memset(seed, 0x42, sizeof(seed));
+    int fail = 0;
+    if (wallet_init_hd(w, seed, sizeof(seed))) {
+        if (w->has_master_key && w->hd_external_counter == 0 &&
+            w->hd_internal_counter == 0 && w->hd_account == 0)
+            printf("OK\n");
+        else {
+            printf("FAIL (bad state)\n");
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (returned false)\n");
+        fail = 1;
+    }
+    free_wallet(w);
+    return fail;
+}
+
+static int check_wallet_hd_same_address(void)
+{
+    printf("wallet HD getnewaddress deterministic... ");
+    struct wallet *w1 = alloc_wallet();
+    struct wallet *w2 = alloc_wallet();
+    if (!w1 || !w2) {
+        printf("FAIL (alloc)\n");
+        free_wallet(w1);
+        free_wallet(w2);
+        return 1;
+    }
+
+    unsigned char seed[32];
+    memset(seed, 0xAB, sizeof(seed));
+    bool ok1 = wallet_init_hd(w1, seed, sizeof(seed));
+    bool ok2 = wallet_init_hd(w2, seed, sizeof(seed));
+
+    int fail = 0;
+    if (ok1 && ok2) {
+        char addr1[64], addr2[64];
+        bool g1 = wallet_get_new_address(w1, addr1, sizeof(addr1));
+        bool g2 = wallet_get_new_address(w2, addr2, sizeof(addr2));
+        if (g1 && g2 && strcmp(addr1, addr2) == 0)
+            printf("OK\n");
+        else {
+            printf("FAIL (addr1=%s addr2=%s)\n",
+                   g1 ? addr1 : "err", g2 ? addr2 : "err");
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (init)\n");
+        fail = 1;
+    }
+
+    free_wallet(w1);
+    free_wallet(w2);
+    return fail;
+}
+
+static int check_wallet_hd_counter_step(void)
+{
+    printf("wallet HD counter increments... ");
+    struct wallet *w = alloc_wallet();
+    if (!w) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    unsigned char seed[32];
+    memset(seed, 0xCD, sizeof(seed));
+
+    int fail = 0;
+    if (wallet_init_hd(w, seed, sizeof(seed))) {
+        char addr1[64], addr2[64];
+        wallet_get_new_address(w, addr1, sizeof(addr1));
+        wallet_get_new_address(w, addr2, sizeof(addr2));
+
+        if (w->hd_external_counter == 2 && strcmp(addr1, addr2) != 0)
+            printf("OK\n");
+        else {
+            printf("FAIL (counter=%u same=%d)\n",
+                   w->hd_external_counter,
+                   strcmp(addr1, addr2) == 0);
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (init)\n");
+        fail = 1;
+    }
+
+    free_wallet(w);
+    return fail;
+}
+
+static int check_wallet_has_hd_after_init(void)
+{
+    printf("wallet_has_hd... ");
+    struct wallet *w = alloc_wallet();
+    if (!w) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    bool before = wallet_has_hd(w);
+    unsigned char seed[32];
+    memset(seed, 0xEF, sizeof(seed));
+    wallet_init_hd(w, seed, sizeof(seed));
+    bool after = wallet_has_hd(w);
+    int fail = 0;
+    if (!before && after)
+        printf("OK\n");
+    else {
+        printf("FAIL (before=%d after=%d)\n", before, after);
+        fail = 1;
+    }
+    free_wallet(w);
+    return fail;
+}
+
+static int check_wallet_change_on_internal(void)
+{
+    printf("wallet change address uses internal chain... ");
+    struct wallet *w = alloc_wallet();
+    if (!w) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    unsigned char seed[32];
+    memset(seed, 0x77, sizeof(seed));
+
+    int fail = 0;
+    if (wallet_init_hd(w, seed, sizeof(seed))) {
+        char ext_addr[64], chg_addr[64];
+        wallet_get_new_address(w, ext_addr, sizeof(ext_addr));
+        wallet_get_new_change_address(w, chg_addr, sizeof(chg_addr));
+
+        if (strcmp(ext_addr, chg_addr) != 0 &&
+            w->hd_external_counter == 1 &&
+            w->hd_internal_counter == 1)
+            printf("OK\n");
+        else {
+            printf("FAIL (ext=%s chg=%s ext_ctr=%u int_ctr=%u)\n",
+                   ext_addr, chg_addr,
+                   w->hd_external_counter, w->hd_internal_counter);
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (init)\n");
+        fail = 1;
+    }
+
+    free_wallet(w);
+    return fail;
+}
+
+static int check_wallet_hd_from_mnemonic(void)
+{
+    printf("wallet_init_hd_from_mnemonic... ");
+    struct wallet *w = alloc_wallet();
+    if (!w) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    /* BIP39 test vector: 128-bit all-zero entropy → "abandon" x11 + "about" */
+    const char *mnemonic = "abandon abandon abandon abandon abandon "
+                           "abandon abandon abandon abandon abandon "
+                           "abandon about";
+    int fail = 0;
+    if (wallet_init_hd_from_mnemonic(w, mnemonic, NULL)) {
+        if (w->has_master_key) {
+            char addr[64];
+            if (wallet_get_new_address(w, addr, sizeof(addr)))
+                printf("OK (%s)\n", addr);
+            else {
+                printf("FAIL (no address)\n");
+                fail = 1;
+            }
+        } else {
+            printf("FAIL (no master)\n");
+            fail = 1;
+        }
+    } else {
+        printf("FAIL (returned false)\n");
+        fail = 1;
+    }
+    free_wallet(w);
+    return fail;
+}
+
 int test_bip44(void)
 {
     int failures = 0;
 
     /* ── Test 1: account derivation ────────────────────────────────── */
-    printf("bip44_derive_account(0)... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t2; }
-        struct ext_key acct;
-        if (bip44_derive_account(&master, &acct, 0)) {
-            if (privkey_is_valid(&acct.key) && acct.nDepth == 3)
-                printf("OK\n");
-            else { printf("FAIL (depth=%d valid=%d)\n", acct.nDepth,
-                          privkey_is_valid(&acct.key)); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        memory_cleanse(&acct, sizeof(acct));
-    }
+    failures += check_bip44_derived_depth("bip44_derive_account(0)... ",
+                                          BIP44_DEPTH_ACCOUNT, 0, 3, true);
 
     /* ── Test 2: chain derivation (external) ───────────────────────── */
-t2:
-    printf("bip44_derive_chain external... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t3; }
-        struct ext_key chain;
-        if (bip44_derive_chain(&master, &chain, 0, BIP44_EXTERNAL)) {
-            if (privkey_is_valid(&chain.key) && chain.nDepth == 4)
-                printf("OK\n");
-            else { printf("FAIL (depth=%d)\n", chain.nDepth); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        memory_cleanse(&chain, sizeof(chain));
-    }
+    failures += check_bip44_derived_depth("bip44_derive_chain external... ",
+                                          BIP44_DEPTH_CHAIN, BIP44_EXTERNAL,
+                                          4, false);
 
     /* ── Test 3: chain derivation (internal) ───────────────────────── */
-t3:
-    printf("bip44_derive_chain internal... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t4; }
-        struct ext_key chain;
-        if (bip44_derive_chain(&master, &chain, 0, BIP44_INTERNAL)) {
-            if (privkey_is_valid(&chain.key) && chain.nDepth == 4)
-                printf("OK\n");
-            else { printf("FAIL (depth=%d)\n", chain.nDepth); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        memory_cleanse(&chain, sizeof(chain));
-    }
+    failures += check_bip44_derived_depth("bip44_derive_chain internal... ",
+                                          BIP44_DEPTH_CHAIN, BIP44_INTERNAL,
+                                          4, false);
 
     /* ── Test 4: full address key derivation ───────────────────────── */
-t4:
-    printf("bip44_derive_key m/44'/147'/0'/0/0... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t5; }
-        struct ext_key child;
-        if (bip44_derive_key(&master, &child, 0, BIP44_EXTERNAL, 0)) {
-            if (privkey_is_valid(&child.key) && child.nDepth == 5)
-                printf("OK\n");
-            else { printf("FAIL (depth=%d)\n", child.nDepth); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        memory_cleanse(&child, sizeof(child));
-    }
+    failures += check_bip44_derived_depth(
+        "bip44_derive_key m/44'/147'/0'/0/0... ",
+        BIP44_DEPTH_ADDRESS, BIP44_EXTERNAL, 5, false);
 
     /* ── Test 5: keypair derivation ────────────────────────────────── */
-t5:
-    printf("bip44_derive_keypair... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t6; }
-        struct privkey priv;
-        struct pubkey pub;
-        privkey_init(&priv);
-        if (bip44_derive_keypair(&master, &priv, &pub, 0, 0, 0)) {
-            if (privkey_is_valid(&priv) && pubkey_is_valid(&pub) &&
-                pubkey_is_compressed(&pub))
-                printf("OK\n");
-            else { printf("FAIL (priv_valid=%d pub_valid=%d)\n",
-                          privkey_is_valid(&priv), pubkey_is_valid(&pub)); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        memory_cleanse(priv.vch, 32);
-    }
+    failures += check_bip44_keypair();
 
     /* ── Test 6: determinism — same seed same keys ─────────────────── */
-t6:
-    printf("bip44 deterministic derivation... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t7; }
-        struct ext_key k1, k2;
-        bool ok1 = bip44_derive_key(&master, &k1, 0, 0, 5);
-        bool ok2 = bip44_derive_key(&master, &k2, 0, 0, 5);
-        if (ok1 && ok2 && memcmp(k1.key.vch, k2.key.vch, 32) == 0)
-            printf("OK\n");
-        else { printf("FAIL (ok1=%d ok2=%d)\n", ok1, ok2); failures++; }
-        memory_cleanse(&k1, sizeof(k1));
-        memory_cleanse(&k2, sizeof(k2));
-    }
+    failures += check_bip44_key_relation("bip44 deterministic derivation... ",
+                                         BIP44_REL_SAME_KEY);
 
     /* ── Test 7: different indices produce different keys ──────────── */
-t7:
-    printf("bip44 different indices differ... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t8; }
-        struct ext_key k0, k1;
-        bool ok0 = bip44_derive_key(&master, &k0, 0, 0, 0);
-        bool ok1 = bip44_derive_key(&master, &k1, 0, 0, 1);
-        if (ok0 && ok1 && memcmp(k0.key.vch, k1.key.vch, 32) != 0)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        memory_cleanse(&k0, sizeof(k0));
-        memory_cleanse(&k1, sizeof(k1));
-    }
+    failures += check_bip44_key_relation("bip44 different indices differ... ",
+                                         BIP44_REL_DIFF_INDEX);
 
     /* ── Test 8: external vs internal differ ───────────────────────── */
-t8:
-    printf("bip44 external vs internal differ... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t9; }
-        struct ext_key ext_k, int_k;
-        bool ok_e = bip44_derive_key(&master, &ext_k, 0, BIP44_EXTERNAL, 0);
-        bool ok_i = bip44_derive_key(&master, &int_k, 0, BIP44_INTERNAL, 0);
-        if (ok_e && ok_i && memcmp(ext_k.key.vch, int_k.key.vch, 32) != 0)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        memory_cleanse(&ext_k, sizeof(ext_k));
-        memory_cleanse(&int_k, sizeof(int_k));
-    }
+    failures += check_bip44_key_relation("bip44 external vs internal differ... ",
+                                         BIP44_REL_EXT_INT);
 
     /* ── Test 9: path format ───────────────────────────────────────── */
-t9:
-    printf("bip44_format_path... ");
-    {
-        char buf[64];
-        int n = bip44_format_path(buf, sizeof(buf), 0, 0, 5);
-        if (n > 0 && strcmp(buf, "m/44'/147'/0'/0/5") == 0)
-            printf("OK\n");
-        else { printf("FAIL (got \"%s\")\n", buf); failures++; }
-    }
+    failures += check_bip44_format_path("bip44_format_path... ",
+                                        0, 0, 5, "m/44'/147'/0'/0/5");
 
     /* ── Test 10: path format account 2 internal ───────────────────── */
-    printf("bip44_format_path account 2 internal... ");
-    {
-        char buf[64];
-        int n = bip44_format_path(buf, sizeof(buf), 2, 1, 42);
-        if (n > 0 && strcmp(buf, "m/44'/147'/2'/1/42") == 0)
-            printf("OK\n");
-        else { printf("FAIL (got \"%s\")\n", buf); failures++; }
-    }
+    failures += check_bip44_format_path(
+        "bip44_format_path account 2 internal... ",
+        2, 1, 42, "m/44'/147'/2'/1/42");
 
     /* ── Test 11: reject bad change value ──────────────────────────── */
-    printf("bip44 rejects bad change value... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t12; }
-        struct ext_key out;
-        bool ok = bip44_derive_key(&master, &out, 0, 2, 0); /* change=2 invalid */
-        if (!ok)
-            printf("OK\n");
-        else { printf("FAIL (should reject change=2)\n"); failures++; }
-    }
+    failures += check_bip44_rejects_change();
 
     /* ── Test 12: wallet HD init from seed ─────────────────────────── */
-t12:
-    printf("wallet_init_hd from seed... ");
-    {
-        struct wallet *w = alloc_wallet();
-        if (!w) { printf("FAIL (alloc)\n"); failures++; goto t13; }
-        unsigned char seed[32];
-        memset(seed, 0x42, sizeof(seed));
-        if (wallet_init_hd(w, seed, sizeof(seed))) {
-            if (w->has_master_key && w->hd_external_counter == 0 &&
-                w->hd_internal_counter == 0 && w->hd_account == 0)
-                printf("OK\n");
-            else { printf("FAIL (bad state)\n"); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        free_wallet(w);
-    }
+    failures += check_wallet_hd_init_state();
 
     /* ── Test 13: wallet HD generates deterministic addresses ──────── */
-t13:
-    printf("wallet HD getnewaddress deterministic... ");
-    {
-        struct wallet *w1 = alloc_wallet();
-        struct wallet *w2 = alloc_wallet();
-        if (!w1 || !w2) { printf("FAIL (alloc)\n"); failures++;
-                          free_wallet(w1); free_wallet(w2); goto t14; }
-
-        unsigned char seed[32];
-        memset(seed, 0xAB, sizeof(seed));
-        bool ok1 = wallet_init_hd(w1, seed, sizeof(seed));
-        bool ok2 = wallet_init_hd(w2, seed, sizeof(seed));
-
-        if (ok1 && ok2) {
-            char addr1[64], addr2[64];
-            bool g1 = wallet_get_new_address(w1, addr1, sizeof(addr1));
-            bool g2 = wallet_get_new_address(w2, addr2, sizeof(addr2));
-            if (g1 && g2 && strcmp(addr1, addr2) == 0)
-                printf("OK\n");
-            else { printf("FAIL (addr1=%s addr2=%s)\n",
-                          g1 ? addr1 : "err", g2 ? addr2 : "err"); failures++; }
-        } else { printf("FAIL (init)\n"); failures++; }
-
-        free_wallet(w1);
-        free_wallet(w2);
-    }
+    failures += check_wallet_hd_same_address();
 
     /* ── Test 14: wallet HD counter increments ─────────────────────── */
-t14:
-    printf("wallet HD counter increments... ");
-    {
-        struct wallet *w = alloc_wallet();
-        if (!w) { printf("FAIL (alloc)\n"); failures++; goto t15; }
-        unsigned char seed[32];
-        memset(seed, 0xCD, sizeof(seed));
-
-        if (wallet_init_hd(w, seed, sizeof(seed))) {
-            char addr1[64], addr2[64];
-            wallet_get_new_address(w, addr1, sizeof(addr1));
-            wallet_get_new_address(w, addr2, sizeof(addr2));
-
-            if (w->hd_external_counter == 2 && strcmp(addr1, addr2) != 0)
-                printf("OK\n");
-            else { printf("FAIL (counter=%u same=%d)\n",
-                          w->hd_external_counter,
-                          strcmp(addr1, addr2) == 0); failures++; }
-        } else { printf("FAIL (init)\n"); failures++; }
-
-        free_wallet(w);
-    }
+    failures += check_wallet_hd_counter_step();
 
     /* ── Test 15: wallet_has_hd ────────────────────────────────────── */
-t15:
-    printf("wallet_has_hd... ");
-    {
-        struct wallet *w = alloc_wallet();
-        if (!w) { printf("FAIL (alloc)\n"); failures++; goto t16; }
-        bool before = wallet_has_hd(w);
-        unsigned char seed[32];
-        memset(seed, 0xEF, sizeof(seed));
-        wallet_init_hd(w, seed, sizeof(seed));
-        bool after = wallet_has_hd(w);
-        if (!before && after)
-            printf("OK\n");
-        else { printf("FAIL (before=%d after=%d)\n", before, after); failures++; }
-        free_wallet(w);
-    }
+    failures += check_wallet_has_hd_after_init();
 
     /* ── Test 16: BIP44 matches manual BIP32 path derivation ──────── */
-t16:
-    printf("bip44 matches hd_derive_path_str... ");
-    {
-        if (!ensure_master()) { printf("FAIL (no master)\n"); failures++; goto t17; }
-        struct ext_key bip44_k, manual_k;
-        bool ok1 = bip44_derive_key(&master, &bip44_k, 0, 0, 7);
-        bool ok2 = hd_derive_path_str(&master, &manual_k, "m/44'/147'/0'/0/7");
-        if (ok1 && ok2 && memcmp(bip44_k.key.vch, manual_k.key.vch, 32) == 0)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        memory_cleanse(&bip44_k, sizeof(bip44_k));
-        memory_cleanse(&manual_k, sizeof(manual_k));
-    }
+    failures += check_bip44_key_relation(
+        "bip44 matches hd_derive_path_str... ", BIP44_REL_MANUAL_PATH);
 
     /* ── Test 17: change address uses internal chain ───────────────── */
-t17:
-    printf("wallet change address uses internal chain... ");
-    {
-        struct wallet *w = alloc_wallet();
-        if (!w) { printf("FAIL (alloc)\n"); failures++; goto t18; }
-        unsigned char seed[32];
-        memset(seed, 0x77, sizeof(seed));
-
-        if (wallet_init_hd(w, seed, sizeof(seed))) {
-            char ext_addr[64], chg_addr[64];
-            wallet_get_new_address(w, ext_addr, sizeof(ext_addr));
-            wallet_get_new_change_address(w, chg_addr, sizeof(chg_addr));
-
-            if (strcmp(ext_addr, chg_addr) != 0 &&
-                w->hd_external_counter == 1 &&
-                w->hd_internal_counter == 1)
-                printf("OK\n");
-            else { printf("FAIL (ext=%s chg=%s ext_ctr=%u int_ctr=%u)\n",
-                          ext_addr, chg_addr,
-                          w->hd_external_counter, w->hd_internal_counter); failures++; }
-        } else { printf("FAIL (init)\n"); failures++; }
-
-        free_wallet(w);
-    }
+    failures += check_wallet_change_on_internal();
 
     /* ── Test 18: wallet HD init from mnemonic ─────────────────────── */
-t18:
-    printf("wallet_init_hd_from_mnemonic... ");
-    {
-        struct wallet *w = alloc_wallet();
-        if (!w) { printf("FAIL (alloc)\n"); failures++; goto done; }
-        /* BIP39 test vector: 128-bit all-zero entropy → "abandon" x11 + "about" */
-        const char *mnemonic = "abandon abandon abandon abandon abandon "
-                               "abandon abandon abandon abandon abandon "
-                               "abandon about";
-        if (wallet_init_hd_from_mnemonic(w, mnemonic, NULL)) {
-            if (w->has_master_key) {
-                char addr[64];
-                if (wallet_get_new_address(w, addr, sizeof(addr)))
-                    printf("OK (%s)\n", addr);
-                else { printf("FAIL (no address)\n"); failures++; }
-            } else { printf("FAIL (no master)\n"); failures++; }
-        } else { printf("FAIL (returned false)\n"); failures++; }
-        free_wallet(w);
-    }
+    failures += check_wallet_hd_from_mnemonic();
 
-done:
     memory_cleanse(&master, sizeof(master));
     master_initialized = false;
 
