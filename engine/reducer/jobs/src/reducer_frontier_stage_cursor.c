@@ -180,6 +180,90 @@ static bool log_row_ok_one(sqlite3 *db, const char *table, int64_t height)
     return ok_one;
 }
 
+/* STALE-LOW HEAL CHECK (see the memo contract above): true when a vetoed memo
+ * entry's blocking row has since flipped ok=1, so the memoized value is stale. */
+static bool stage_cursor_memo_hit_healed(sqlite3 *progress_db, const char *name,
+                                         const struct stage_derived_memo_slot *hit,
+                                         int64_t raw)
+{
+    bool healed = false;
+    if (hit->value < (uint64_t)raw) {
+        bool served_tip_hit = false;
+        const char *hit_log =
+            reducer_frontier_cursor_log_table(name, &served_tip_hit);
+        /* The vetoed frame names the blocking row directly for an
+         * upstream stage (frame = frontier_h + 1); tip_finalize's
+         * served-tip frame stops AT the last proven row, so its blocker
+         * sits one higher. */
+        int64_t blocking_h = served_tip_hit ? (int64_t)hit->value + 1
+                                            : (int64_t)hit->value;
+        healed = hit_log &&
+                 log_row_ok_one(progress_db, hit_log, blocking_h);
+    }
+    return healed;
+}
+
+/* Derives the FORWARD-EXTEND starting floor from a veto-free prior memo entry;
+ * returns whether *delta_floor was set. */
+static bool stage_cursor_delta_floor_from_memo(
+    const struct stage_derived_memo_slot *hit, const char *name, int64_t raw,
+    int32_t *delta_floor)
+{
+    bool have_delta_floor = false;
+    *delta_floor = 0;
+    if (hit && hit->value == (uint64_t)hit->raw && raw > hit->raw) {
+        bool served_tip_prev = false;
+        (void)reducer_frontier_cursor_log_table(name, &served_tip_prev);
+        /* Invert the frame conversion below: an upstream frame is
+         * frontier_h + 1, tip_finalize's served-tip frame is frontier_h. */
+        int64_t proven = served_tip_prev ? (int64_t)hit->raw
+                                         : (int64_t)hit->raw - 1;
+        if (proven >= 0 && proven <= (int64_t)INT32_MAX) {
+            *delta_floor = (int32_t)proven;
+            have_delta_floor = true;
+        }
+    }
+    return have_delta_floor;
+}
+
+/* Walks the stage's log when both log tables are present and clamps *value
+ * down to the proven frontier. */
+static void stage_cursor_clamp_value_to_log_frontier(
+    sqlite3 *progress_db, const char *name, const char *log_table,
+    bool served_tip, bool have_delta_floor, int32_t delta_floor,
+    uint64_t *value)
+{
+    if (log_table &&
+        reducer_log_table_present(progress_db, log_table) &&
+        reducer_log_table_present(progress_db, "tip_finalize_log")) {
+        int32_t frontier_h = 0;
+        bool walked =
+            have_delta_floor
+                ? reducer_frontier_log_frontier_above(progress_db, log_table,
+                                                      name, delta_floor,
+                                                      &frontier_h)
+                : reducer_frontier_log_frontier(progress_db, log_table, name,
+                                                &frontier_h);
+        if (walked) {
+            /* Convert the frontier HEIGHT into `name`'s cursor frame (upstream:
+             * next-height = h+1; tip_finalize served-tip: h itself), then CLAMP
+             * to the raw cursor. The log may only veto the cursor DOWN to the
+             * proven prefix, never raise it above the durable row: in a
+             * contiguous state `frame` == raw exactly (the F1 equivalence); a
+             * durable hole below the cursor makes `frame` < raw (log wins). */
+            int64_t frame = served_tip ? (int64_t)frontier_h
+                                       : (int64_t)frontier_h + 1;
+            if (frame < 0)
+                frame = 0;
+            if ((uint64_t)frame < *value)
+                *value = (uint64_t)frame;
+        }
+        /* else: tables present but the walk hit a read fault — keep the raw
+         * cursor (the pre-F1 value); compute_hstar reads the same logs and
+         * surfaces a genuine fault there. */
+    }
+}
+
 bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
                                            const char *name,
                                            uint64_t *out, bool *found)
@@ -217,20 +301,8 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
          * (value < raw) names the row whose absence/failure ended the walk;
          * that row can flip ok=1 under a static cursor, so confirm the floor
          * is still blocked before serving the memoized value. */
-        bool healed = false;
-        if (hit->value < (uint64_t)raw) {
-            bool served_tip_hit = false;
-            const char *hit_log =
-                reducer_frontier_cursor_log_table(name, &served_tip_hit);
-            /* The vetoed frame names the blocking row directly for an
-             * upstream stage (frame = frontier_h + 1); tip_finalize's
-             * served-tip frame stops AT the last proven row, so its blocker
-             * sits one higher. */
-            int64_t blocking_h = served_tip_hit ? (int64_t)hit->value + 1
-                                                : (int64_t)hit->value;
-            healed = hit_log &&
-                     log_row_ok_one(progress_db, hit_log, blocking_h);
-        }
+        bool healed =
+            stage_cursor_memo_hit_healed(progress_db, name, hit, raw);
         if (!healed) {
             progress_store_tx_unlock();
             if (out)   *out = hit->value;
@@ -257,20 +329,9 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
      * stale-LOW check above owns that case), or a REWOUND cursor
      * (raw <= hit->raw), which is precisely the "an unwind deleted rows"
      * signal the delta variant tells callers to re-walk on. */
-    bool have_delta_floor = false;
     int32_t delta_floor = 0;
-    if (hit && hit->value == (uint64_t)hit->raw && raw > hit->raw) {
-        bool served_tip_prev = false;
-        (void)reducer_frontier_cursor_log_table(name, &served_tip_prev);
-        /* Invert the frame conversion below: an upstream frame is
-         * frontier_h + 1, tip_finalize's served-tip frame is frontier_h. */
-        int64_t proven = served_tip_prev ? (int64_t)hit->raw
-                                         : (int64_t)hit->raw - 1;
-        if (proven >= 0 && proven <= (int64_t)INT32_MAX) {
-            delta_floor = (int32_t)proven;
-            have_delta_floor = true;
-        }
-    }
+    bool have_delta_floor =
+        stage_cursor_delta_floor_from_memo(hit, name, raw, &delta_floor);
 
     /* Only the six success-checked logs carry a contiguous-ok=1 frontier. A
      * stage without one (header_admit, body_fetch) keeps the raw cursor as its
@@ -279,35 +340,9 @@ bool reducer_frontier_stage_cursor_derived(sqlite3 *progress_db,
      * schema falls back to the raw cursor silently. */
     bool served_tip = false;
     const char *log_table = reducer_frontier_cursor_log_table(name, &served_tip);
-    if (log_table &&
-        reducer_log_table_present(progress_db, log_table) &&
-        reducer_log_table_present(progress_db, "tip_finalize_log")) {
-        int32_t frontier_h = 0;
-        bool walked =
-            have_delta_floor
-                ? reducer_frontier_log_frontier_above(progress_db, log_table,
-                                                      name, delta_floor,
-                                                      &frontier_h)
-                : reducer_frontier_log_frontier(progress_db, log_table, name,
-                                                &frontier_h);
-        if (walked) {
-            /* Convert the frontier HEIGHT into `name`'s cursor frame (upstream:
-             * next-height = h+1; tip_finalize served-tip: h itself), then CLAMP
-             * to the raw cursor. The log may only veto the cursor DOWN to the
-             * proven prefix, never raise it above the durable row: in a
-             * contiguous state `frame` == raw exactly (the F1 equivalence); a
-             * durable hole below the cursor makes `frame` < raw (log wins). */
-            int64_t frame = served_tip ? (int64_t)frontier_h
-                                       : (int64_t)frontier_h + 1;
-            if (frame < 0)
-                frame = 0;
-            if ((uint64_t)frame < value)
-                value = (uint64_t)frame;
-        }
-        /* else: tables present but the walk hit a read fault — keep the raw
-         * cursor (the pre-F1 value); compute_hstar reads the same logs and
-         * surfaces a genuine fault there. */
-    }
+    stage_cursor_clamp_value_to_log_frontier(progress_db, name, log_table,
+                                             served_tip, have_delta_floor,
+                                             delta_floor, &value);
 
     stage_derived_memo_store(epoch, progress_db, name, raw, value);
     progress_store_tx_unlock();
