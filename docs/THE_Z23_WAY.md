@@ -17,6 +17,13 @@ in [AGENTS.md](../AGENTS.md).
 <!-- claim: file-present core/UNSEAL.md # unseal ritual -->
 <!-- claim: file-present docs/agent/AGENT_TRAPS.md # intentional-behavior list -->
 <!-- claim: file-present docs/dev/CODEBASE_MAP.md # ownership map -->
+<!-- claim: symbol-present check-cyclomatic-complexity Makefile # complexity cap -->
+<!-- claim: symbol-present check-file-size-ceiling Makefile # file-size limit -->
+<!-- claim: symbol-present check-kpi-floor Makefile # one-way quality floors -->
+<!-- claim: symbol-present check-zcc-cache Makefile # shared compile cache -->
+<!-- claim: symbol-present check-no-new-bash Makefile # shell budget -->
+<!-- claim: symbol-present check-silent-errors-bool Makefile # no silent failure -->
+<!-- claim: file-present LICENSE # Apache-2.0 text -->
 
 ## What Z23 is
 
@@ -26,6 +33,23 @@ and can serve over embedded Tor. Its optional Commons publishes, fetches,
 builds and reproduces content-addressed packages with no central registry.
 North Star: software made for you, not imposed on you, with exact source
 identity and independent reproduction.
+
+## What good looks like
+
+Z23 is beautiful, optimized, low cost, fast, secure and permissive open source.
+Each quality is held by a check that lets it get better and never worse:
+
+| Quality | Held by |
+| --- | --- |
+| Beautiful | Small functions and files: `check-cyclomatic-complexity` caps a function at 15 and its baseline only shrinks; `check-file-size-ceiling` holds a file under 1500 lines (target 800). |
+| DRY | One way to do each thing: reuse an existing helper before writing one; `check-kpi-floor` holds the count of duplicate function bodies at or below its floor. |
+| Optimized, fast | `agent-verify ONLY=@changed` runs only the test groups a change can reach; the in-tree compile cache (`check-zcc-cache`) shares objects between worktrees. |
+| Low cost | One self-contained binary; glue is C23, and the shell budget only falls (`check-no-new-bash`). |
+| Secure | The boundaries below; a failure is logged, never silent (`check-silent-errors-bool`); wallet work runs `custody-check`; commits are signed. |
+| Permissive open source | Apache-2.0 ([LICENSE](../LICENSE)); every source file starts with its header. |
+
+When a change improves a counter, `check-kpi-floor --tighten-baseline` lowers
+its floor in the same commit, so the gain stays.
 
 ## The loop
 
