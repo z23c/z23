@@ -98,12 +98,10 @@ static size_t mlt_add(struct tx_mempool *pool, struct transaction *tx,
 
 int test_mempool_limits(void);
 
-int test_mempool_limits(void)
+/* ── 1. defaults populate from env-aware config ────────── */
+static int mlt_defaults_match_builtin(void)
 {
     int failures = 0;
-    mlt_install_observer();
-
-    /* ── 1. defaults populate from env-aware config ────────── */
     printf("mempool_limits: config defaults... ");
     {
         struct mempool_limits_config cfg;
@@ -115,8 +113,13 @@ int test_mempool_limits(void)
         ok = ok && cfg.tick_seconds  == MEMPOOL_LIMITS_DEFAULT_TICK_SEC;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 2. env overrides ─────────────────────────────────── */
+/* ── 2. env overrides ─────────────────────────────────── */
+static int mlt_env_overrides_limits_config(void)
+{
+    int failures = 0;
     printf("mempool_limits: env override... ");
     {
         setenv("ZCL_MEMPOOL_MAX_BYTES",   "1048576",  1);
@@ -138,8 +141,13 @@ int test_mempool_limits(void)
         unsetenv("ZCL_MEMPOOL_LIMITS_TICK_SEC");
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 3. enforce: no-op when under caps ─────────────────── */
+/* ── 3. enforce: no-op when under caps ─────────────────── */
+static int mlt_enforce_keeps_pool_under_caps(void)
+{
+    int failures = 0;
     printf("mempool_limits: enforce no-op when under caps... ");
     {
         struct tx_mempool pool;
@@ -166,8 +174,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 4. enforce: evicts lowest fee-per-byte first (count cap) ── */
+/* ── 4. enforce: evicts lowest fee-per-byte first (count cap) ── */
+static int mlt_enforce_drops_lowest_fee_per_byte(void)
+{
+    int failures = 0;
     printf("mempool_limits: evict lowest fee/byte first... ");
     {
         struct tx_mempool pool;
@@ -202,8 +215,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 5. enforce: evicts by byte cap (count under limit) ─── */
+/* ── 5. enforce: evicts by byte cap (count under limit) ─── */
+static int mlt_enforce_drops_until_byte_cap(void)
+{
+    int failures = 0;
     printf("mempool_limits: evict by byte cap... ");
     {
         struct tx_mempool pool;
@@ -237,8 +255,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 6. enforce: fee/byte not fee alone ────────────────── */
+/* ── 6. enforce: fee/byte not fee alone ────────────────── */
+static int mlt_enforce_prefers_fee_per_byte(void)
+{
+    int failures = 0;
     printf("mempool_limits: fee-per-byte beats raw fee... ");
     {
         struct tx_mempool pool;
@@ -275,8 +298,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 7. expire: sweeps old entries (injected clock) ────── */
+/* ── 7. expire: sweeps old entries (injected clock) ────── */
+static int mlt_expire_drops_stale_tx(void)
+{
+    int failures = 0;
     printf("mempool_limits: expiry sweep... ");
     {
         struct tx_mempool pool;
@@ -312,8 +340,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 8. expire: no-op when empty ───────────────────────── */
+/* ── 8. expire: no-op when empty ───────────────────────── */
+static int mlt_expire_skips_empty_pool(void)
+{
+    int failures = 0;
     printf("mempool_limits: expire empty pool... ");
     {
         struct tx_mempool pool;
@@ -325,8 +358,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 9. min relay fee gate ─────────────────────────────── */
+/* ── 9. min relay fee gate ─────────────────────────────── */
+static int mlt_min_relay_fee_gates_tx(void)
+{
+    int failures = 0;
     printf("mempool_limits: min relay fee gate... ");
     {
         struct mempool_limits_config cfg = {0};
@@ -338,8 +376,13 @@ int test_mempool_limits(void)
         ok = ok && !mempool_limits_passes_min_relay(&cfg, 1000,   0).ok;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 10. post-add hook auto-enforces ───────────────────── */
+/* ── 10. post-add hook auto-enforces ───────────────────── */
+static int mlt_post_add_enforces_count_cap(void)
+{
+    int failures = 0;
     printf("mempool_limits: post-add hook enforces automatically... ");
     {
         struct tx_mempool pool;
@@ -371,8 +414,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 11. start/stop idempotent ─────────────────────────── */
+/* ── 11. start/stop idempotent ─────────────────────────── */
+static int mlt_start_stop_lifecycle(void)
+{
+    int failures = 0;
     printf("mempool_limits: start/stop lifecycle... ");
     {
         struct tx_mempool pool;
@@ -395,8 +443,13 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 12. stats counters reflect calls ──────────────────── */
+/* ── 12. stats counters reflect calls ──────────────────── */
+static int mlt_stats_track_enforce_expire(void)
+{
+    int failures = 0;
     printf("mempool_limits: stats counters... ");
     {
         struct tx_mempool pool;
@@ -424,12 +477,17 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── 13. fee/byte sort does NOT overflow at MoneyRange fees ──
-     * The comparator cross-multiplies fee*size. Fees are chosen from the
-     * measured size so feeA*size exceeds INT64_MAX while feeB*size does not;
-     * with count-cap=1 the lower-fee B must still be evicted. Both fees stay
-     * within MoneyRange (<= MAX_MONEY). */
+/* ── 13. fee/byte sort does NOT overflow at MoneyRange fees ──
+ * The comparator cross-multiplies fee*size. Fees are chosen from the
+ * measured size so feeA*size exceeds INT64_MAX while feeB*size does not;
+ * with count-cap=1 the lower-fee B must still be evicted. Both fees stay
+ * within MoneyRange (<= MAX_MONEY). */
+static int mlt_enforce_survives_fee_overflow(void)
+{
+    int failures = 0;
     printf("mempool_limits: fee/byte no int64 overflow at MoneyRange... ");
     {
         struct tx_mempool pool;
@@ -476,6 +534,27 @@ int test_mempool_limits(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_mempool_limits(void)
+{
+    int failures = 0;
+    mlt_install_observer();
+
+    failures += mlt_defaults_match_builtin();
+    failures += mlt_env_overrides_limits_config();
+    failures += mlt_enforce_keeps_pool_under_caps();
+    failures += mlt_enforce_drops_lowest_fee_per_byte();
+    failures += mlt_enforce_drops_until_byte_cap();
+    failures += mlt_enforce_prefers_fee_per_byte();
+    failures += mlt_expire_drops_stale_tx();
+    failures += mlt_expire_skips_empty_pool();
+    failures += mlt_min_relay_fee_gates_tx();
+    failures += mlt_post_add_enforces_count_cap();
+    failures += mlt_start_stop_lifecycle();
+    failures += mlt_stats_track_enforce_expire();
+    failures += mlt_enforce_survives_fee_overflow();
 
     event_clear_observers(EV_MEMPOOL_EVICT);
     event_clear_observers(EV_MEMPOOL_EXPIRE);

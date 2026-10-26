@@ -1856,7 +1856,6 @@ tests/harness/src/test_make_lint_gates.c:lint_entry_weight:31
 tests/harness/src/test_make_lint_gates.c:lint_owner_of:19
 tests/harness/src/test_make_lint_gates.c:t_partition_shards_all_carry_work:17
 tests/harness/src/test_mempool.c:test_mempool:117
-tests/harness/src/test_mempool_limits.c:test_mempool_limits:77
 tests/harness/src/test_mempool_orphan.c:test_mempool_orphan:45
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
