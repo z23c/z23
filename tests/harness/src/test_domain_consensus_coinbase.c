@@ -357,21 +357,21 @@ static bool coinbase_build_structure_matches(struct transaction *tx,
 
 /* Version per epoch matches legacy `create_new_block`. */
 static bool coinbase_build_version_matches_epoch(
-        const struct consensus_params *params, int h,
+        bool ok, const struct consensus_params *params, int h,
         const struct transaction *tx)
 {
     if (consensus_network_upgrade_active(params, h, UPGRADE_SAPLING)) {
-        return tx->version == SAPLING_TX_VERSION
+        return ok && tx->version == SAPLING_TX_VERSION
             && tx->version_group_id == SAPLING_VERSION_GROUP_ID;
     } else if (consensus_network_upgrade_active(params, h,
                                                 UPGRADE_OVERWINTER)) {
-        return tx->version == OVERWINTER_TX_VERSION
+        return ok && tx->version == OVERWINTER_TX_VERSION
             && tx->version_group_id == OVERWINTER_VERSION_GROUP_ID;
     }
     /* pre-Overwinter: legacy left version untouched (v1) — same
      * here, transaction_init() sets version=1. */
     else {
-        return tx->version == 1 && tx->version_group_id == 0;
+        return ok && tx->version == 1 && tx->version_group_id == 0;
     }
 }
 
@@ -389,21 +389,19 @@ static int coinbase_build_case_check(int h, int64_t fees, int64_t subsidy,
     struct zcl_result r = domain_consensus_coinbase_build(&in, tx);
     if (!r.ok) return 1;
 
-    bool structure_ok = coinbase_build_structure_matches(tx, subsidy, fees,
-                                                         miner);
+    bool ok = coinbase_build_structure_matches(tx, subsidy, fees, miner);
 
     /* coinbase scriptSig == zclassicd's `CScript() << nHeight << OP_0`
      * (minimal BIP34 height push, height-derived), using the same
      * reference as the placeholder seal. */
     struct script exp_ss; script_init(&exp_ss);
     zcd_script_sig_placeholder(h, &exp_ss);
-    bool script_sig_ok = tx->vin[0].script_sig.size == exp_ss.size
-                      && memcmp(tx->vin[0].script_sig.data,
-                                exp_ss.data, exp_ss.size) == 0;
+    ok = ok
+           && tx->vin[0].script_sig.size == exp_ss.size
+           && memcmp(tx->vin[0].script_sig.data,
+                     exp_ss.data, exp_ss.size) == 0;
 
-    bool version_ok = coinbase_build_version_matches_epoch(params, h, tx);
-
-    bool ok = structure_ok && script_sig_ok && version_ok;
+    ok = coinbase_build_version_matches_epoch(ok, params, h, tx);
 
     if (!ok) {
         printf("\n  BUILD MISMATCH h=%d fees=%lld subsidy=%lld "
