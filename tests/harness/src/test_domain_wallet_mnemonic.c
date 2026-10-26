@@ -111,7 +111,6 @@ static uint8_t lcg_byte(void)
     return (uint8_t)(lcg_state >> 24);
 }
 
-/* Fill len bytes of synthetic entropy from the deterministic LCG. */
 static void fill_entropy_with_lcg(uint8_t *entropy, size_t len)
 {
     for (size_t i = 0; i < len; i++)
