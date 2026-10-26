@@ -316,6 +316,102 @@ bool binary_staleness_capture_boot_stamp(void)
 
 /* ── Check cycle ────────────────────────────────────────────── */
 
+/* Outcome of one on-disk probe pass (bs_probe_on_disk below). Returned as
+ * a code so binary_staleness_check_now() can apply each failure path's
+ * exact bookkeeping itself, next to the lock it holds. */
+enum bs_probe_outcome {
+    BS_PROBE_OPEN_FAILED, /* open/metadata/size gate failed */
+    BS_PROBE_UNCHANGED,   /* metadata identical to the last probe */
+    BS_PROBE_UNSTABLE,    /* identity moved between snapshot and hash */
+    BS_PROBE_HASHED       /* fresh digest captured and recorded */
+};
+
+/* True when the cheap probed-once/mtime/size signals alone say the
+ * on-disk image may differ from the last recorded probe. */
+static bool bs_probe_stats_changed(int64_t cur_mtime, int64_t cur_size)
+{
+    return !g_bs.probed_once ||
+           cur_mtime != g_bs.last_probe_mtime ||
+           cur_size != g_bs.last_probe_size;
+}
+
+/* True when the file identity (volume/inode pair) no longer matches the
+ * last recorded probe, or was never validly recorded. */
+static bool bs_probe_identity_changed(
+    const struct platform_positioned_file_snapshot *snap)
+{
+    return !g_bs.last_probe_identity_valid ||
+           snap->volume != g_bs.last_probe_volume ||
+           snap->file_low != g_bs.last_probe_file_low ||
+           snap->file_high != g_bs.last_probe_file_high;
+}
+
+/* Probes the binary at g_bs.exe_path; called and returns with g_bs.lock
+ * held and owns the positioned-file open/close. On BS_PROBE_HASHED it
+ * records the re-observed identity and bumps rehash_count; every other
+ * outcome leaves the counters untouched for the caller to update. */
+static enum bs_probe_outcome bs_probe_on_disk(
+    unsigned char digest[32], int64_t *cur_mtime, int64_t *cur_size)
+{
+    struct platform_positioned_file named;
+    struct platform_positioned_file_snapshot before;
+    platform_positioned_file_init(&named);
+    if (!platform_positioned_file_open(&named, g_bs.exe_path) ||
+        !platform_positioned_file_snapshot(&named, &before) ||
+        before.size > INT64_MAX) {
+        platform_positioned_file_close(&named);
+        return BS_PROBE_OPEN_FAILED;
+    }
+    *cur_mtime = before.modified_seconds;
+    *cur_size  = (int64_t)before.size;
+    g_bs.path_valid = true;
+    if (!bs_probe_stats_changed(*cur_mtime, *cur_size) &&
+        !bs_probe_identity_changed(&before)) {
+        platform_positioned_file_close(&named);
+        return BS_PROBE_UNCHANGED;
+    }
+    struct platform_positioned_file_snapshot after;
+    if (!bs_hash_positioned(&named, before.size, digest) ||
+        !platform_positioned_file_snapshot(&named, &after) ||
+        !bs_snapshot_equal(&before, &after)) {
+        platform_positioned_file_close(&named);
+        return BS_PROBE_UNSTABLE;
+    }
+    platform_positioned_file_close(&named);
+    g_bs.last_probe_volume = after.volume;
+    g_bs.last_probe_file_low = after.file_low;
+    g_bs.last_probe_file_high = after.file_high;
+    g_bs.last_probe_identity_valid = true;
+    g_bs.rehash_count++;
+    return BS_PROBE_HASHED;
+}
+
+/* Raises or clears the transient blocker when the stale verdict flips.
+ * Runs after g_bs.lock is dropped, exactly like the tail it replaces;
+ * takes the short-digest/path copies made under the lock. */
+static void bs_update_stale_blocker(
+    bool new_stale, bool prev_stale, const char *running_short,
+    const char *disk_short, const char *exe_path, int64_t mtime, int64_t size)
+{
+    if (new_stale == prev_stale)
+        return;
+    if (new_stale) {
+        struct blocker_record rec;
+        char reason[BLOCKER_REASON_MAX];
+        snprintf(reason, sizeof(reason),
+                 "running=%s on_disk=%s path=%.100s mtime=%lld size=%lld "
+                 "— on-disk binary was replaced; restart the service "
+                 "to pick up the deployed build",
+                 running_short, disk_short, exe_path,
+                 (long long)mtime, (long long)size);
+        blocker_init(&rec, BINARY_STALENESS_BLOCKER_ID,
+                    BINARY_STALENESS_OWNER, BLOCKER_TRANSIENT, reason);
+        blocker_set(&rec);
+    } else {
+        blocker_clear(BINARY_STALENESS_BLOCKER_ID);
+    }
+}
+
 bool binary_staleness_check_now(void)
 {
     pthread_mutex_lock(&g_bs.lock);
@@ -338,63 +434,30 @@ bool binary_staleness_check_now(void)
     }
 #endif
     if (!digest_known) {
-        struct platform_positioned_file named;
-        struct platform_positioned_file_snapshot before;
-        platform_positioned_file_init(&named);
-        if (!platform_positioned_file_open(&named, g_bs.exe_path) ||
-            !platform_positioned_file_snapshot(&named, &before) ||
-            before.size > INT64_MAX) {
-            platform_positioned_file_close(&named);
-            g_bs.probe_failures++;
-            g_bs.path_valid = false;
-            g_bs.check_count++;
-            g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
+        enum bs_probe_outcome outcome =
+            bs_probe_on_disk(probe_digest, &cur_mtime, &cur_size);
+        if (outcome != BS_PROBE_HASHED) {
+            if (outcome == BS_PROBE_OPEN_FAILED) {
+                g_bs.probe_failures++;
+                g_bs.path_valid = false;
+                g_bs.check_count++;
+                g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
+            } else if (outcome == BS_PROBE_UNCHANGED) {
+                g_bs.check_count++;
+                g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
+            } else {
+                g_bs.probe_failures++;
+            }
             bool stale_now = atomic_load(&g_bs.atomic_stale);
             pthread_mutex_unlock(&g_bs.lock);
             return stale_now;
         }
-        cur_mtime = before.modified_seconds;
-        cur_size  = (int64_t)before.size;
-        g_bs.path_valid = true;
-        bool changed = !g_bs.probed_once ||
-                       cur_mtime != g_bs.last_probe_mtime ||
-                       cur_size != g_bs.last_probe_size ||
-                       !g_bs.last_probe_identity_valid ||
-                       before.volume != g_bs.last_probe_volume ||
-                       before.file_low != g_bs.last_probe_file_low ||
-                       before.file_high != g_bs.last_probe_file_high;
-        if (!changed) {
-            platform_positioned_file_close(&named);
-            g_bs.check_count++;
-            g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
-            bool stale_now = atomic_load(&g_bs.atomic_stale);
-            pthread_mutex_unlock(&g_bs.lock);
-            return stale_now;
-        }
-        struct platform_positioned_file_snapshot after;
-        if (!bs_hash_positioned(&named, before.size, probe_digest) ||
-            !platform_positioned_file_snapshot(&named, &after) ||
-            !bs_snapshot_equal(&before, &after)) {
-            platform_positioned_file_close(&named);
-            g_bs.probe_failures++;
-            bool stale_now = atomic_load(&g_bs.atomic_stale);
-            pthread_mutex_unlock(&g_bs.lock);
-            return stale_now;
-        }
-        platform_positioned_file_close(&named);
-        g_bs.last_probe_volume = after.volume;
-        g_bs.last_probe_file_low = after.file_low;
-        g_bs.last_probe_file_high = after.file_high;
-        g_bs.last_probe_identity_valid = true;
-        g_bs.rehash_count++;
     }
 
     g_bs.check_count++;
     g_bs.last_check_unix = (int64_t)platform_time_wall_time_t();
 
-    bool changed = !g_bs.probed_once ||
-                   cur_mtime != g_bs.last_probe_mtime ||
-                   cur_size  != g_bs.last_probe_size;
+    bool changed = bs_probe_stats_changed(cur_mtime, cur_size);
     if (!changed && digest_known) {
         bool stale_now = atomic_load(&g_bs.atomic_stale);
         pthread_mutex_unlock(&g_bs.lock);
@@ -423,23 +486,8 @@ bool binary_staleness_check_now(void)
 
     pthread_mutex_unlock(&g_bs.lock);
 
-    if (new_stale != prev_stale) {
-        if (new_stale) {
-            struct blocker_record rec;
-            char reason[BLOCKER_REASON_MAX];
-            snprintf(reason, sizeof(reason),
-                     "running=%s on_disk=%s path=%.100s mtime=%lld size=%lld "
-                     "— on-disk binary was replaced; restart the service "
-                     "to pick up the deployed build",
-                     running_short, disk_short, exe_path_copy,
-                     (long long)mtime_copy, (long long)size_copy);
-            blocker_init(&rec, BINARY_STALENESS_BLOCKER_ID,
-                        BINARY_STALENESS_OWNER, BLOCKER_TRANSIENT, reason);
-            blocker_set(&rec);
-        } else {
-            blocker_clear(BINARY_STALENESS_BLOCKER_ID);
-        }
-    }
+    bs_update_stale_blocker(new_stale, prev_stale, running_short, disk_short,
+                            exe_path_copy, mtime_copy, size_copy);
 
     return new_stale;
 }
