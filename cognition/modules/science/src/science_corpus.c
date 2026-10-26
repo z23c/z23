@@ -112,6 +112,29 @@ static bool count_file(const char *path, uint64_t *lines, uint64_t *bytes,
 }
 
 static bool walk_dir(const char *root, const char *rel,
+                     struct science_corpus_report *out);
+
+static bool science_corpus_walk_subdirectories(
+    const char *root, const char *rel, const char *full,
+    struct science_corpus_report *out)
+{
+    struct platform_directory_list dirs = { 0 };
+    if (!platform_directory_list_real_sorted(full, &dirs))
+        return true; /* not a directory, or unreadable: nothing to add */
+    bool ok = true;
+    for (size_t i = 0; ok && i < dirs.count; i++) {
+        const char *name = dirs.entries[i].name;
+        if (!name || prune_dir(name))
+            continue;
+        char child[SCIENCE_CORPUS_PATH_MAX];
+        int m = snprintf(child, sizeof child, "%s/%s", rel, name);
+        ok = m > 0 && (size_t)m < sizeof child && walk_dir(root, child, out);
+    }
+    platform_directory_list_free(&dirs);
+    return ok;
+}
+
+static bool walk_dir(const char *root, const char *rel,
                      struct science_corpus_report *out)
 {
     char full[SCIENCE_CORPUS_PATH_MAX];
@@ -152,20 +175,7 @@ static bool walk_dir(const char *root, const char *rel,
     }
     platform_directory_list_free(&files);
 
-    struct platform_directory_list dirs = { 0 };
-    if (!platform_directory_list_real_sorted(full, &dirs))
-        return true; /* not a directory, or unreadable: nothing to add */
-    bool ok = true;
-    for (size_t i = 0; ok && i < dirs.count; i++) {
-        const char *name = dirs.entries[i].name;
-        if (!name || prune_dir(name))
-            continue;
-        char child[SCIENCE_CORPUS_PATH_MAX];
-        int m = snprintf(child, sizeof child, "%s/%s", rel, name);
-        ok = m > 0 && (size_t)m < sizeof child && walk_dir(root, child, out);
-    }
-    platform_directory_list_free(&dirs);
-    return ok;
+    return science_corpus_walk_subdirectories(root, rel, full, out);
 }
 
 /* ── the generated inventory artifact ────────────────────────────────── */
