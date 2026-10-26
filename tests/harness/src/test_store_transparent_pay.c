@@ -588,8 +588,8 @@ static void tstp_chain_release(struct tstp_chain *c)
     test_cleanup_tmpdir(c->trustdir);
 }
 
-static struct tstp_chain_result tstp_chain_through_order(int step,
-                                                        struct tstp_chain *c)
+static struct tstp_chain_result tstp_chain_setup_merchant(int step,
+                                                          struct tstp_chain *c)
 {
     if (step == TSTP_CHAIN_CATALOG) {
         bool catalog_ok = store_buyer_catalog(c->datadir, c->offers, 8,
@@ -631,8 +631,8 @@ static struct tstp_chain_result tstp_chain_through_order(int step,
     };
 }
 
-static struct tstp_chain_result tstp_chain_through_fund(int step,
-                                                       struct tstp_chain *c)
+static struct tstp_chain_result tstp_chain_setup_funding(int step,
+                                                         struct tstp_chain *c)
 {
     if (step == TSTP_CHAIN_SIM) {
         bool sim_ok = simnet_init(&c->sim);
@@ -676,8 +676,8 @@ static struct tstp_chain_result tstp_chain_through_fund(int step,
     };
 }
 
-static struct tstp_chain_result tstp_chain_through_trust(int step,
-                                                        struct tstp_chain *c)
+static struct tstp_chain_result
+tstp_chain_setup_wallets_trust(int step, struct tstp_chain *c)
 {
     if (step == TSTP_CHAIN_WALLETS) {
         c->payer = zcl_malloc(sizeof(*c->payer), "store payment payer wallet");
@@ -828,11 +828,11 @@ static struct tstp_chain_result tstp_chain_reconcile(struct tstp_chain *c)
 static struct tstp_chain_result tstp_chain_step(int step, struct tstp_chain *c)
 {
     if (step <= TSTP_CHAIN_ORDER)
-        return tstp_chain_through_order(step, c);
+        return tstp_chain_setup_merchant(step, c);
     if (step <= TSTP_CHAIN_FUNDING)
-        return tstp_chain_through_fund(step, c);
+        return tstp_chain_setup_funding(step, c);
     if (step <= TSTP_CHAIN_TRUST)
-        return tstp_chain_through_trust(step, c);
+        return tstp_chain_setup_wallets_trust(step, c);
     if (step == TSTP_CHAIN_SEND)
         return tstp_chain_send(c);
     if (step == TSTP_CHAIN_CAPTURE)
