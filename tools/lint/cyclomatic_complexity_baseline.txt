@@ -2098,7 +2098,6 @@ tests/harness/src/test_sync_reduce_fuzz.c:check_step:33
 tests/harness/src/test_sync_reduce_fuzz.c:is_progress_event:21
 tests/harness/src/test_sync_reduce_fuzz.c:legal_next:23
 tests/harness/src/test_sync_watchdog_conditions.c:test_sync_watchdog_conditions:150
-tests/harness/src/test_syncdiag_agent_codemap.c:syncdiag_cases_agent_codemap:84
 tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:314
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
 tests/harness/src/test_telemetry_network.c:check_fill_completeness:18

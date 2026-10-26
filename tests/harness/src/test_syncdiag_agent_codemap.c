@@ -145,158 +145,265 @@ static int agent_impact_classification_cases(void)
     return ok ? 0 : 1;
 }
 
+static void agent_codemap_prepare_rpc(struct rpc_table *tbl)
+{
+    rpc_table_init(tbl);
+    register_event_rpc_commands(tbl);
+    if (rpc_is_in_warmup(NULL, 0))
+        set_rpc_warmup_finished();
+}
+
+static void agent_codemap_push_paths(struct json_value *params,
+                                    const char **paths, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        struct json_value v;
+        json_init(&v);
+        json_set_str(&v, paths[i]);
+        json_push_back(params, &v);
+        json_free(&v);
+    }
+}
+
+static void agent_codemap_begin_impact(struct rpc_table *tbl,
+                                      struct json_value *params,
+                                      struct json_value *result,
+                                      const char **files, size_t n)
+{
+    agent_codemap_prepare_rpc(tbl);
+    json_init(params);
+    json_set_array(params);
+    agent_codemap_push_paths(params, files, n);
+    json_init(result);
+}
+
+static bool agent_codemap_is_json_arr(bool ok, const struct json_value *v)
+{
+    return ok && v && v->type == JSON_ARR;
+}
+
+static bool agent_codemap_map_contract_ok(bool ok,
+                                         const struct json_value *result)
+{
+    static const struct {
+        const char *name;
+        size_t count;
+    } rows[] = {
+        { "agentmap.commands.core", 14 },
+        { "agentmap.commands.drilldown", 6 },
+        { "agentmap.telemetry", 12 },
+        { "missing.surface", 0 },
+    };
+    ok = ok && result->type == JSON_OBJ;
+    ok = ok && strcmp(json_get_str(json_get(result, "schema")),
+                      "zcl.agent_map.v3") == 0;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        ok = ok &&
+            agent_contract_command_surface_count(rows[i].name) == rows[i].count;
+    return ok;
+}
+
+/* Rows stay in the original check order. find_always calls
+ * find_object_with_str even after ok is false; otherwise that find sits
+ * inside the ok && chain. A null field is an existence check. field2, when
+ * set, is a second compare against the same object. */
+static const struct agent_codemap_field_row {
+    const char *key;
+    const char *value;
+    const char *field;
+    const char *expect;
+    const char *field2;
+    const char *expect2;
+    bool find_always;
+} agent_codemap_command_rows[] = {
+    { "method", "agentmap", NULL, NULL, NULL, NULL, false },
+    { "method", "agentdeployguard", NULL, NULL, NULL, NULL, false },
+    { "name", "impact", NULL, NULL, NULL, NULL, false },
+    { "name", "build", NULL, NULL, NULL, NULL, false },
+    { "name", "dev_status", "native", "z23 agentdevstatus", NULL, NULL, true },
+    { "name", "proof_bundle", "native", "z23 proofbundle [anchor_datadir]",
+      NULL, NULL, true },
+    { "method", "healthcheck", NULL, NULL, NULL, NULL, false },
+    { "method", "statecatalog", NULL, NULL, NULL, NULL, false },
+    { "method", "peerincidents", NULL, NULL, NULL, NULL, false },
+    { "name", "compact_status", "native", "z23 status", NULL, NULL, true },
+    { "name", "full_compatibility_status", "native", "z23 agent",
+      NULL, NULL, true },
+    { "name", "background_quality", "native", "make quality-linger-status",
+      NULL, NULL, true },
+    { "method", "dumpstate", "native", "z23 dumpstate <subsystem> [key]",
+      NULL, NULL, true },
+    { "method", "getnodelog", "native", "z23 getnodelog <pattern>",
+      NULL, NULL, true },
+};
+
+static const struct agent_codemap_field_row agent_codemap_telemetry_rows[] = {
+    { "method", "peerincidents", "native", "z23 peerincidents", NULL, NULL,
+      true },
+    { "name", "compact_status", "native", "z23 status", NULL, NULL, true },
+    { "name", "full_status", "native", "z23 healthcheck", NULL, NULL, true },
+    { "name", "node_log", NULL, NULL, NULL, NULL, false },
+    { "method", "anchorstatus", NULL, NULL, NULL, NULL, false },
+    { "method", "proofbundle", "schema", "zcl.operator_proof_bundle.v2",
+      NULL, NULL, true },
+    { "method", "dbquery", "schema", "zcl.sql_result.v1",
+      "native", "z23 dbquery <SELECT>", true },
+    { "method", "eventlog", "schema", "zcl.event_log.v1",
+      "native", "z23 eventlog <count>", true },
+    { "name", "quality_lanes", "native", "make quality-linger-status",
+      NULL, NULL, true },
+};
+
+static const struct agent_codemap_field_row agent_codemap_subsystem_rows[] = {
+    { "name", "fast_ci", NULL, NULL, NULL, NULL, false },
+};
+
+static bool agent_codemap_field_rows_ok(bool ok, const struct json_value *arr,
+                                        const struct agent_codemap_field_row *rows,
+                                        size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *obj = NULL;
+        if (rows[i].find_always || ok)
+            obj = find_object_with_str(arr, rows[i].key, rows[i].value);
+        ok = ok && obj && (rows[i].field == NULL ||
+            strcmp(json_get_str(json_get(obj, rows[i].field)),
+                   rows[i].expect) == 0);
+        if (rows[i].field2 != NULL)
+            ok = ok && obj &&
+                strcmp(json_get_str(json_get(obj, rows[i].field2)),
+                       rows[i].expect2) == 0;
+    }
+    return ok;
+}
+
+static bool agent_codemap_map_ok(void)
+{
+    struct rpc_table tbl;
+    agent_codemap_prepare_rpc(&tbl);
+
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+
+    struct json_value result;
+    json_init(&result);
+
+    bool ok = rpc_table_execute(&tbl, "agentmap", &params, &result);
+    const struct json_value *commands = json_get(&result, "commands");
+    const struct json_value *telemetry =
+        json_get(&result, "telemetry_drilldowns");
+    const struct json_value *subsystems = json_get(&result, "subsystems");
+    ok = agent_codemap_map_contract_ok(ok, &result);
+    ok = agent_codemap_is_json_arr(ok, commands);
+    ok = agent_codemap_field_rows_ok(ok, commands, agent_codemap_command_rows,
+                                    sizeof(agent_codemap_command_rows) /
+                                        sizeof(agent_codemap_command_rows[0]));
+    ok = agent_codemap_is_json_arr(ok, telemetry);
+    ok = agent_codemap_field_rows_ok(ok, telemetry,
+                                    agent_codemap_telemetry_rows,
+                                    sizeof(agent_codemap_telemetry_rows) /
+                                        sizeof(agent_codemap_telemetry_rows[0]));
+    ok = agent_codemap_is_json_arr(ok, subsystems);
+    ok = agent_codemap_field_rows_ok(ok, subsystems,
+                                    agent_codemap_subsystem_rows,
+                                    sizeof(agent_codemap_subsystem_rows) /
+                                        sizeof(agent_codemap_subsystem_rows[0]));
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool agent_codemap_impact_scalars_ok(bool ok,
+                                           const struct json_value *result)
+{
+    ok = ok && result->type == JSON_OBJ;
+    ok = ok && strcmp(json_get_str(json_get(result, "schema")),
+                      "zcl.agent_impact.v2") == 0;
+    ok = ok && json_get_int(json_get(result, "files_count")) == 6;
+    ok = ok && json_get_bool(json_get(result, "code_changed"));
+    ok = ok && !json_get_bool(json_get(result, "docs_only"));
+    ok = ok && json_get_bool(json_get(result, "agent_api_changed"));
+    ok = ok && strcmp(json_get_str(json_get(result, "mapping_source")),
+                      "cognition/controllers/include/controllers/agent_impact_rules.def") == 0;
+    ok = ok && json_get_int(json_get(result, "shared_rule_count")) > 0;
+    return ok;
+}
+
+static bool agent_codemap_needles_ok(bool ok, const struct json_value *arr,
+                                    bool (*has)(const struct json_value *,
+                                                const char *),
+                                    const char **needles, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        ok = ok && has(arr, needles[i]);
+    return ok;
+}
+
+static bool agent_codemap_impact_detail_ok(bool ok,
+                                          const struct json_value *result)
+{
+    const struct json_value *groups =
+        json_get(result, "relevant_test_groups");
+    const struct json_value *commands =
+        json_get(result, "recommended_commands");
+    const struct json_value *out_files = json_get(result, "files");
+    static const char *group_needles[] = {
+        "syncdiag_rpc",
+        "command_registry_catalog",
+        "make_lint_gates",
+    };
+    static const char *command_needles[] = {
+        "ZCL_FAST_TESTS=syncdiag_rpc",
+        "make fast-ci",
+    };
+    ok = agent_codemap_impact_scalars_ok(ok, result);
+    ok = ok && json_get_int(json_get(result, "shared_rule_hits")) >= 6;
+    ok = ok && json_get_int(json_get(result,
+                                    "relevant_test_groups_count")) >= 3;
+    ok = ok && out_files && json_size(out_files) == 6;
+    ok = agent_codemap_needles_ok(ok, groups, json_array_has_str,
+                                 group_needles,
+                                 sizeof(group_needles) /
+                                     sizeof(group_needles[0]));
+    ok = agent_codemap_needles_ok(ok, commands, json_array_has_substr,
+                                 command_needles,
+                                 sizeof(command_needles) /
+                                     sizeof(command_needles[0]));
+    return ok;
+}
+
+static bool agent_codemap_native_handlers_match(bool ok,
+                                               const struct json_value *result)
+{
+    const struct json_value *groups =
+        json_get(result, "relevant_test_groups");
+    static const char *needles[] = {
+        "command_registry_catalog",
+        "syncdiag_rpc",
+        "make_lint_gates",
+    };
+    ok = ok && result->type == JSON_OBJ;
+    ok = ok && json_get_bool(json_get(result, "code_changed"));
+    return agent_codemap_needles_ok(ok, groups, json_array_has_str, needles,
+                                   sizeof(needles) / sizeof(needles[0]));
+}
+
 int syncdiag_cases_agent_codemap(void)
 {
     int failures = 0;
 
     printf("api: native RPC returns agent code map... ");
-    {
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_event_rpc_commands(&tbl);
-        if (rpc_is_in_warmup(NULL, 0))
-            set_rpc_warmup_finished();
-
-        struct json_value params;
-        json_init(&params);
-        json_set_array(&params);
-
-        struct json_value result;
-        json_init(&result);
-
-        bool ok = rpc_table_execute(&tbl, "agentmap", &params, &result);
-        const struct json_value *commands = json_get(&result, "commands");
-        const struct json_value *telemetry =
-            json_get(&result, "telemetry_drilldowns");
-        const struct json_value *subsystems = json_get(&result, "subsystems");
-        ok = ok && result.type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
-                          "zcl.agent_map.v3") == 0;
-        ok = ok &&
-            agent_contract_command_surface_count("agentmap.commands.core") ==
-                14;
-        ok = ok &&
-            agent_contract_command_surface_count(
-                "agentmap.commands.drilldown") == 6;
-        ok = ok &&
-            agent_contract_command_surface_count("agentmap.telemetry") == 12;
-        ok = ok &&
-            agent_contract_command_surface_count("missing.surface") == 0;
-        ok = ok && commands && commands->type == JSON_ARR;
-        ok = ok && find_object_with_str(commands, "method", "agentmap") != NULL;
-        ok = ok &&
-            find_object_with_str(commands, "method", "agentdeployguard") != NULL;
-        ok = ok && find_object_with_str(commands, "name", "impact") != NULL;
-        ok = ok && find_object_with_str(commands, "name", "build") != NULL;
-        const struct json_value *map_dev_status =
-            find_object_with_str(commands, "name", "dev_status");
-        ok = ok && map_dev_status &&
-            strcmp(json_get_str(json_get(map_dev_status, "native")),
-                   "z23 agentdevstatus") == 0;
-        const struct json_value *map_proof_bundle =
-            find_object_with_str(commands, "name", "proof_bundle");
-        ok = ok && map_proof_bundle &&
-            strcmp(json_get_str(json_get(map_proof_bundle, "native")),
-                   "z23 proofbundle [anchor_datadir]") == 0;
-        ok = ok && find_object_with_str(commands, "method", "healthcheck")
-                         != NULL;
-        ok = ok && find_object_with_str(commands, "method", "statecatalog")
-                         != NULL;
-        ok = ok && find_object_with_str(commands, "method", "peerincidents")
-                         != NULL;
-        const struct json_value *map_compact_status =
-            find_object_with_str(commands, "name", "compact_status");
-        ok = ok && map_compact_status &&
-            strcmp(json_get_str(json_get(map_compact_status, "native")),
-                   "z23 status") == 0;
-        const struct json_value *map_full_compatibility =
-            find_object_with_str(commands, "name",
-                                 "full_compatibility_status");
-        ok = ok && map_full_compatibility &&
-            strcmp(json_get_str(json_get(map_full_compatibility, "native")),
-                   "z23 agent") == 0;
-        const struct json_value *map_background_quality =
-            find_object_with_str(commands, "name", "background_quality");
-        ok = ok && map_background_quality &&
-            strcmp(json_get_str(json_get(map_background_quality, "native")),
-                   "make quality-linger-status") == 0;
-        const struct json_value *map_state =
-            find_object_with_str(commands, "method", "dumpstate");
-        const struct json_value *map_log =
-            find_object_with_str(commands, "method", "getnodelog");
-        ok = ok && map_state &&
-            strcmp(json_get_str(json_get(map_state, "native")),
-                   "z23 dumpstate <subsystem> [key]") == 0;
-        ok = ok && map_log &&
-            strcmp(json_get_str(json_get(map_log, "native")),
-                   "z23 getnodelog <pattern>") == 0;
-        ok = ok && telemetry && telemetry->type == JSON_ARR;
-        const struct json_value *map_peer_incidents =
-            find_object_with_str(telemetry, "method", "peerincidents");
-        ok = ok && map_peer_incidents &&
-            strcmp(json_get_str(json_get(map_peer_incidents, "native")),
-                   "z23 peerincidents") == 0;
-        const struct json_value *map_telemetry_status =
-            find_object_with_str(telemetry, "name", "compact_status");
-        ok = ok && map_telemetry_status &&
-            strcmp(json_get_str(json_get(map_telemetry_status, "native")),
-                   "z23 status") == 0;
-        const struct json_value *map_full_status =
-            find_object_with_str(telemetry, "name", "full_status");
-        ok = ok && map_full_status &&
-            strcmp(json_get_str(json_get(map_full_status, "native")),
-                   "z23 healthcheck") == 0;
-        ok = ok &&
-            find_object_with_str(telemetry, "name", "node_log") != NULL;
-        ok = ok &&
-            find_object_with_str(telemetry, "method", "anchorstatus") != NULL;
-        const struct json_value *map_proof_telemetry =
-            find_object_with_str(telemetry, "method", "proofbundle");
-        ok = ok && map_proof_telemetry &&
-            strcmp(json_get_str(json_get(map_proof_telemetry, "schema")),
-                   "zcl.operator_proof_bundle.v2") == 0;
-        const struct json_value *map_db =
-            find_object_with_str(telemetry, "method", "dbquery");
-        ok = ok && map_db &&
-            strcmp(json_get_str(json_get(map_db, "schema")),
-                   "zcl.sql_result.v1") == 0;
-        ok = ok && map_db &&
-            strcmp(json_get_str(json_get(map_db, "native")),
-                   "z23 dbquery <SELECT>") == 0;
-        const struct json_value *map_events =
-            find_object_with_str(telemetry, "method", "eventlog");
-        ok = ok && map_events &&
-            strcmp(json_get_str(json_get(map_events, "schema")),
-                   "zcl.event_log.v1") == 0;
-        ok = ok && map_events &&
-            strcmp(json_get_str(json_get(map_events, "native")),
-                   "z23 eventlog <count>") == 0;
-        const struct json_value *map_quality_lanes =
-            find_object_with_str(telemetry, "name", "quality_lanes");
-        ok = ok && map_quality_lanes &&
-            strcmp(json_get_str(json_get(map_quality_lanes, "native")),
-                   "make quality-linger-status") == 0;
-        ok = ok && subsystems && subsystems->type == JSON_ARR;
-        ok = ok && find_object_with_str(subsystems, "name", "fast_ci") != NULL;
-        json_free(&params);
-        json_free(&result);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    if (agent_codemap_map_ok())
+        printf("OK\n");
+    else    { printf("FAIL\n"); failures++; }
 
     printf("api: native RPC maps changed files to tests... ");
     {
         struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_event_rpc_commands(&tbl);
-        if (rpc_is_in_warmup(NULL, 0))
-            set_rpc_warmup_finished();
-
         struct json_value params;
-        json_init(&params);
-        json_set_array(&params);
-        const char *files[] = {
+        struct json_value result;
+        static const char *files[] = {
             "cognition/controllers/src/agent_controller.c",
             "cognition/controllers/src/agent_lanes_controller.c",
             "engine/controllers/src/event_healthcheck_controller.c",
@@ -304,44 +411,10 @@ int syncdiag_cases_agent_codemap(void)
             "engine/controllers/src/diagnostics_native_handlers.c",
             "docs/agent/AGENT_API.md",
         };
-        for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
-            struct json_value v;
-            json_init(&v);
-            json_set_str(&v, files[i]);
-            json_push_back(&params, &v);
-            json_free(&v);
-        }
-
-        struct json_value result;
-        json_init(&result);
-
+        agent_codemap_begin_impact(&tbl, &params, &result, files,
+                                  sizeof(files) / sizeof(files[0]));
         bool ok = rpc_table_execute(&tbl, "agentimpact", &params, &result);
-        const struct json_value *groups =
-            json_get(&result, "relevant_test_groups");
-        const struct json_value *commands =
-            json_get(&result, "recommended_commands");
-        const struct json_value *out_files = json_get(&result, "files");
-        ok = ok && result.type == JSON_OBJ;
-        ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
-                          "zcl.agent_impact.v2") == 0;
-        ok = ok && json_get_int(json_get(&result, "files_count")) == 6;
-        ok = ok && json_get_bool(json_get(&result, "code_changed"));
-        ok = ok && !json_get_bool(json_get(&result, "docs_only"));
-        ok = ok && json_get_bool(json_get(&result, "agent_api_changed"));
-        ok = ok && strcmp(json_get_str(json_get(&result, "mapping_source")),
-                          "cognition/controllers/include/controllers/agent_impact_rules.def") == 0;
-        ok = ok && json_get_int(json_get(&result, "shared_rule_count")) > 0;
-        ok = ok && json_get_int(json_get(&result, "shared_rule_hits")) >= 6;
-        ok = ok && json_get_int(json_get(
-                     &result, "relevant_test_groups_count")) >= 3;
-        ok = ok && out_files && json_size(out_files) == 6;
-        ok = ok && json_array_has_str(groups, "syncdiag_rpc");
-        ok = ok && json_array_has_str(groups, "command_registry_catalog");
-        ok = ok && json_array_has_str(groups, "make_lint_gates");
-        ok = ok && json_array_has_substr(commands,
-                                         "ZCL_FAST_TESTS=syncdiag_rpc");
-        ok = ok && json_array_has_substr(commands, "make fast-ci");
-
+        ok = agent_codemap_impact_detail_ok(ok, &result);
         if (ok) {
             printf("OK\n");
         } else {
@@ -350,7 +423,6 @@ int syncdiag_cases_agent_codemap(void)
             printf("FAIL result=%s\n", dbg);
             failures++;
         }
-
         json_free(&params);
         json_free(&result);
     }
@@ -361,32 +433,15 @@ int syncdiag_cases_agent_codemap(void)
            "command_registry_catalog... ");
     {
         struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_event_rpc_commands(&tbl);
-        if (rpc_is_in_warmup(NULL, 0))
-            set_rpc_warmup_finished();
-
         struct json_value params;
-        json_init(&params);
-        json_set_array(&params);
-        struct json_value v;
-        json_init(&v);
-        json_set_str(&v, "engine/controllers/src/chain_native_handlers.c");
-        json_push_back(&params, &v);
-        json_free(&v);
-
         struct json_value result;
-        json_init(&result);
-
+        static const char *files[] = {
+            "engine/controllers/src/chain_native_handlers.c",
+        };
+        agent_codemap_begin_impact(&tbl, &params, &result, files,
+                                  sizeof(files) / sizeof(files[0]));
         bool ok = rpc_table_execute(&tbl, "agentimpact", &params, &result);
-        const struct json_value *groups =
-            json_get(&result, "relevant_test_groups");
-        ok = ok && result.type == JSON_OBJ;
-        ok = ok && json_get_bool(json_get(&result, "code_changed"));
-        ok = ok && json_array_has_str(groups, "command_registry_catalog");
-        ok = ok && json_array_has_str(groups, "syncdiag_rpc");
-        ok = ok && json_array_has_str(groups, "make_lint_gates");
-
+        ok = agent_codemap_native_handlers_match(ok, &result);
         if (ok) {
             printf("OK\n");
         } else {
@@ -395,7 +450,6 @@ int syncdiag_cases_agent_codemap(void)
             printf("FAIL result=%s\n", dbg);
             failures++;
         }
-
         json_free(&params);
         json_free(&result);
     }
