@@ -186,6 +186,34 @@ bool platform_directory_watcher_open(struct platform_directory_watcher *w,
     w->native = (uintptr_t)s; return true;
 }
 
+static bool linux_watch_created_directory(
+    struct watcher_state *s, const struct inotify_event *e, bool overflow)
+{
+    const char *base = NULL;
+    for (size_t i=0;i<s->count;i++) if(s->items[i].wd==e->wd){base=s->items[i].path;break;}
+    if (base) { size_t z=strlen(base)+strlen(e->name)+2; char *child=zcl_malloc(z,"directory-watch-child");
+        if (!child) overflow=true; else { (void)snprintf(child,z,"%s/%s",base,e->name);
+            struct stat st; if(lstat(child,&st)==0 && S_ISDIR(st.st_mode)&&!S_ISLNK(st.st_mode)&&!add_tree(s,child)) overflow=true; free(child); } }
+    return overflow;
+}
+
+static enum platform_directory_watch_result linux_read_notifications(
+    struct watcher_state *s)
+{
+    unsigned char buffer[65536]; ssize_t n = read(s->fd, buffer, sizeof(buffer));
+    if (n <= 0) return PLATFORM_DIRECTORY_WATCH_ERROR;
+    bool overflow = false;
+    for (size_t at = 0; at + sizeof(struct inotify_event) <= (size_t)n;) {
+        const struct inotify_event *e = (const void *)(buffer + at);
+        if (e->mask & IN_Q_OVERFLOW) overflow = true;
+        if ((e->mask & (IN_CREATE | IN_MOVED_TO)) && (e->mask & IN_ISDIR) && e->len) {
+            overflow = linux_watch_created_directory(s, e, overflow);
+        }
+        at += sizeof(*e) + e->len;
+    }
+    return overflow ? PLATFORM_DIRECTORY_WATCH_OVERFLOW : PLATFORM_DIRECTORY_WATCH_CHANGED;
+}
+
 enum platform_directory_watch_result platform_directory_watcher_wait(
     struct platform_directory_watcher *w, uint32_t timeout,
     platform_directory_watcher_stop stop, void *opaque)
@@ -200,22 +228,7 @@ enum platform_directory_watch_result platform_directory_watcher_wait(
         int rc; do { rc = poll(&p, 1, (int)slice); } while (rc < 0 && errno == EINTR);
         if (rc < 0) return PLATFORM_DIRECTORY_WATCH_ERROR;
         if (rc > 0) {
-            unsigned char buffer[65536]; ssize_t n = read(s->fd, buffer, sizeof(buffer));
-            if (n <= 0) return PLATFORM_DIRECTORY_WATCH_ERROR;
-            bool overflow = false;
-            for (size_t at = 0; at + sizeof(struct inotify_event) <= (size_t)n;) {
-                const struct inotify_event *e = (const void *)(buffer + at);
-                if (e->mask & IN_Q_OVERFLOW) overflow = true;
-                if ((e->mask & (IN_CREATE | IN_MOVED_TO)) && (e->mask & IN_ISDIR) && e->len) {
-                    const char *base = NULL;
-                    for (size_t i=0;i<s->count;i++) if(s->items[i].wd==e->wd){base=s->items[i].path;break;}
-                    if (base) { size_t z=strlen(base)+strlen(e->name)+2; char *child=zcl_malloc(z,"directory-watch-child");
-                        if (!child) overflow=true; else { (void)snprintf(child,z,"%s/%s",base,e->name);
-                            struct stat st; if(lstat(child,&st)==0 && S_ISDIR(st.st_mode)&&!S_ISLNK(st.st_mode)&&!add_tree(s,child)) overflow=true; free(child); } }
-                }
-                at += sizeof(*e) + e->len;
-            }
-            return overflow ? PLATFORM_DIRECTORY_WATCH_OVERFLOW : PLATFORM_DIRECTORY_WATCH_CHANGED;
+            return linux_read_notifications(s);
         }
         elapsed += slice; if (elapsed >= timeout) return PLATFORM_DIRECTORY_WATCH_TIMEOUT;
     }
@@ -316,6 +329,31 @@ static bool add_tree(struct watcher_state *s, const char *path)
     return ok;
 }
 
+static void darwin_rescan_files(
+    struct watcher_state *s, const char *path,
+    const struct platform_directory_list *files)
+{
+    for (size_t i = 0; i < files->count; i++) {
+        size_t n = strlen(path) + strlen(files->entries[i].name) + 2;
+        char *child = zcl_malloc(n, "directory-watch-file");
+        if (!child) continue;
+        (void)snprintf(child, n, "%s/%s", path, files->entries[i].name);
+        if (s->include_file && !s->include_file(child, s->filter_opaque)) {
+            free(child);
+            continue;
+        }
+        bool found = false;
+        for (size_t j = 0; j < s->count; j++)
+            if (s->items[j].fd >= 0 &&
+                strcmp(s->items[j].path, child) == 0) {
+                found = true;
+                break;
+            }
+        if (!found) (void)watch_file(s, child);
+        free(child);
+    }
+}
+
 static void rescan_children(struct watcher_state *s, const char *path)
 {
     struct platform_directory_list dirs = {0}, files = {0};
@@ -343,25 +381,7 @@ static void rescan_children(struct watcher_state *s, const char *path)
         if (!found) add_tree(s, child);
         free(child);
     }
-    for (size_t i = 0; i < files.count; i++) {
-        size_t n = strlen(path) + strlen(files.entries[i].name) + 2;
-        char *child = zcl_malloc(n, "directory-watch-file");
-        if (!child) continue;
-        (void)snprintf(child, n, "%s/%s", path, files.entries[i].name);
-        if (s->include_file && !s->include_file(child, s->filter_opaque)) {
-            free(child);
-            continue;
-        }
-        bool found = false;
-        for (size_t j = 0; j < s->count; j++)
-            if (s->items[j].fd >= 0 &&
-                strcmp(s->items[j].path, child) == 0) {
-                found = true;
-                break;
-            }
-        if (!found) (void)watch_file(s, child);
-        free(child);
-    }
+    darwin_rescan_files(s, path, &files);
     platform_directory_list_free(&dirs);
     platform_directory_list_free(&files);
 }
@@ -464,6 +484,24 @@ static struct watcher_state *darwin_watcher_live(
     return s->creator_pid == getpid() ? s : NULL;
 }
 
+static bool darwin_observe_events(
+    struct watcher_state *s, const struct kevent *evs, int n, bool *changed)
+{
+    for (int i = 0; i < n; i++) {
+        if (evs[i].flags & EV_ERROR) return false;
+        *changed = true;
+        size_t idx = (size_t)evs[i].udata;
+        if (evs[i].fflags &
+            (NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE))
+            rearm_replaced_path(s, idx);
+        if (evs[i].fflags & NOTE_WRITE) {
+            if (idx < s->count && s->items[idx].directory)
+                rescan_children(s, s->items[idx].path);
+        }
+    }
+    return true;
+}
+
 enum platform_directory_watch_result platform_directory_watcher_wait(
     struct platform_directory_watcher *w, uint32_t timeout,
     platform_directory_watcher_stop stop, void *opaque)
@@ -483,18 +521,8 @@ enum platform_directory_watch_result platform_directory_watcher_wait(
         while (n < 0 && errno == EINTR);
         if (n < 0) return PLATFORM_DIRECTORY_WATCH_ERROR;
         if (n > 0) {
-            for (int i = 0; i < n; i++) {
-                if (evs[i].flags & EV_ERROR) return PLATFORM_DIRECTORY_WATCH_ERROR;
-                changed = true;
-                size_t idx = (size_t)evs[i].udata;
-                if (evs[i].fflags &
-                    (NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE))
-                    rearm_replaced_path(s, idx);
-                if (evs[i].fflags & NOTE_WRITE) {
-                    if (idx < s->count && s->items[idx].directory)
-                        rescan_children(s, s->items[idx].path);
-                }
-            }
+            if (!darwin_observe_events(s, evs, n, &changed))
+                return PLATFORM_DIRECTORY_WATCH_ERROR;
             if (!drain_events(s, &changed)) return PLATFORM_DIRECTORY_WATCH_ERROR;
             if (changed) return PLATFORM_DIRECTORY_WATCH_CHANGED;
         }

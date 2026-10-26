@@ -1139,9 +1139,6 @@ platform/modules/encoding/src/utilstrencodings.c:ParseFixedPoint:45
 platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/json/src/json.c:json_write:33
 platform/modules/json/src/json.c:parse_value_r:22
-platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#2:27
-platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#3:19
-platform/modules/platform/src/directory_watcher.c:rescan_children:19
 platform/modules/platform/src/file_clone.c:platform_file_clone_fd:28
 platform/modules/platform/src/os_binary_slots.c:os_binary_slots_prepare_launch#2:25
 platform/modules/platform/src/os_binary_slots.c:read_streak_at:21
