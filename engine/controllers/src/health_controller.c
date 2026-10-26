@@ -330,6 +330,220 @@ static bool rpc_getsyncdetail(const struct json_value *params, bool help,
 
 /* ── RPC: getservicehealth ───────────────────────────────────── */
 
+/* Legacy mirror */
+static void push_legacy_mirror_service_entry(struct json_value *result)
+{
+    struct legacy_mirror_sync_stats ms;
+    legacy_mirror_sync_stats_snapshot(&ms);
+
+    struct json_value svc = {0};
+    json_set_object(&svc);
+    json_push_kv_str(&svc, "name", "legacy_mirror");
+    json_push_kv_str(&svc, "state", ms.enabled ? ms.state : "disabled");
+    json_push_kv_bool(&svc, "mirror_enabled", ms.enabled);
+    json_push_kv_bool(&svc, "mirror_reachable", ms.reachable);
+    json_push_kv_bool(&svc, "mirror_monitor_running", ms.running);
+    json_push_kv_bool(&svc, "zclassicd_rpc_transport_reachable",
+                      ms.zclassicd_rpc_transport_reachable);
+    json_push_kv_bool(&svc, "legacy_oracle_usable",
+                      ms.legacy_oracle_usable);
+    json_push_kv_int(&svc, "zclassicd_rpc_error_code",
+                     ms.zclassicd_rpc_error_code);
+    json_push_kv_str(&svc, "zclassicd_rpc_error_message",
+                     ms.zclassicd_rpc_error_message);
+    json_push_kv_str(&svc, "consensus_authority",
+                     ms.consensus_authority);
+    json_push_kv_str(&svc, "candidate_source", "legacy_advisory");
+    json_push_kv_str(&svc, "candidate_trust",
+                     ms.candidate_trust);
+    json_push_kv_bool(&svc, "candidate_lag_known", ms.lag_known);
+    json_push_kv_bool(&svc, "candidate_lag_valid", ms.lag_valid);
+    json_push_kv_bool(&svc, "tip_hashes_agree",
+                      ms.tip_hashes_agree);
+    json_push_kv_bool(&svc, "blocker_recovered_by_tip_agreement",
+                      ms.blocker_recovered_by_tip_agreement);
+    json_push_kv_int(&svc, "candidate_lag",
+                     legacy_mirror_sync_reported_lag(&ms));
+    legacy_mirror_sync_push_observed_lag_json(
+        &svc, "candidate_lag_observed", &ms);
+    json_push_kv_str(&svc, "candidate_blocker",
+                     ms.enabled
+                         ? legacy_mirror_sync_blocker_code(&ms)
+                         : "");
+    json_push_kv_str(&svc, "candidate_blocker_scope",
+                     ms.enabled && legacy_mirror_sync_blocker_code(&ms)[0]
+                         ? "advisory_source"
+                         : "");
+    json_push_kv_int(&svc, "legacy_height", ms.legacy_height);
+    json_push_kv_int(&svc, "local_height", ms.local_height);
+    json_push_kv_bool(&svc, "lag_known", ms.lag_known);
+    json_push_kv_bool(&svc, "lag_valid", ms.lag_valid);
+    json_push_kv_int(&svc, "lag",
+                     legacy_mirror_sync_reported_lag(&ms));
+    legacy_mirror_sync_push_observed_lag_json(&svc, "lag_observed", &ms);
+    json_push_kv_bool(&svc, "local_recovery_active",
+                      ms.local_recovery_active);
+    json_push_kv_bool(&svc, "legacy_advisory_gated_by_native_retries",
+                      ms.mirror_repair_gated_by_local_retries);
+    json_push_kv_bool(&svc, "mirror_repair_gated_by_local_retries",
+                      ms.mirror_repair_gated_by_local_retries);
+    json_push_kv_bool(&svc, "local_retries_exhausted",
+                      ms.local_retries_exhausted);
+    json_push_kv_int(&svc, "stalls_total", ms.stalls_total);
+    json_push_kv_int(&svc, "lag_sla_breach_blocks",
+                     ms.lag_sla_breach_blocks);
+    json_push_kv_int(&svc, "lag_sla_breach_secs",
+                     ms.lag_sla_breach_secs);
+    json_push_kv_int(&svc, "lag_sla_critical_blocks",
+                     ms.lag_sla_critical_blocks);
+    json_push_kv_int(&svc, "lag_sla_critical_secs",
+                     ms.lag_sla_critical_secs);
+    json_push_kv_int(&svc, "lag_breach_seconds", ms.lag_breach_seconds);
+    json_push_kv_int(&svc, "lag_critical_seconds", ms.lag_critical_seconds);
+    json_push_kv_str(&svc, "lag_breach_severity", ms.lag_breach_severity);
+    json_push_kv_str(&svc, "activation_blocker",
+                     ms.enabled ? ms.activation_blocker_reason : "");
+    json_push_kv_str(&svc, "last_blocker_code",
+                     ms.enabled ? ms.last_blocker_id : "");
+    json_push_kv_str(&svc, "active_error_code",
+                     ms.enabled ? legacy_mirror_sync_blocker_code(&ms) : "");
+    json_push_kv_str(&svc, "active_error_detail",
+                     ms.enabled && legacy_mirror_sync_blocker_code(&ms)[0]
+                         ? ms.last_error
+                         : "");
+    json_push_kv_int(&svc, "rpc_errors", ms.rpc_errors);
+    json_push_kv_int(&svc, "overrides_total", ms.overrides_total);
+    json_push_kv_int(&svc, "unsafe_overrides_total",
+                     ms.unsafe_overrides_total);
+    json_push_kv_int(&svc, "blockers_total",
+                     ms.enabled ? ms.blockers_total : 0);
+    json_push_kv_bool(&svc, "last_override_safe",
+                      ms.last_override_safe);
+    json_push_kv_str(&svc, "last_override_reason",
+                     ms.last_override_reason);
+    json_push_kv_str(&svc, "last_override_scope",
+                     ms.last_override_scope);
+    json_push_kv_int(&svc, "last_catchup", ms.last_catchup);
+    json_push_kv_str(&svc, "last_error", ms.last_error);
+    json_push_back(result, &svc);
+    json_free(&svc);
+}
+
+/* Fields mirrored from the policy module's last-decision state dump;
+ * absent keys in the dump stay absent here. */
+static void push_bsp_decision_dump_fields(struct json_value *svc)
+{
+    struct json_value dump = {0};
+    if (block_source_policy_dump_state_json(&dump, NULL)) {
+        const struct json_value *has_last =
+            json_get(&dump, "has_last_decision");
+        const struct json_value *last =
+            json_get(&dump, "last_decision");
+        const struct json_value *sources =
+            json_get(&dump, "sources");
+        const struct json_value *initialized =
+            json_get(&dump, "initialized");
+        const struct json_value *has_connman =
+            json_get(&dump, "has_connman");
+        const struct json_value *has_main_state =
+            json_get(&dump, "has_main_state");
+        const struct json_value *has_node_db =
+            json_get(&dump, "has_node_db");
+        if (initialized)
+            json_push_kv(svc, "initialized", initialized);
+        if (has_connman)
+            json_push_kv(svc, "has_connman", has_connman);
+        if (has_main_state)
+            json_push_kv(svc, "has_main_state", has_main_state);
+        if (has_node_db)
+            json_push_kv(svc, "has_node_db", has_node_db);
+        if (has_last)
+            json_push_kv(svc, "has_last_decision", has_last);
+        if (last)
+            json_push_kv(svc, "last_decision", last);
+        if (sources)
+            json_push_kv(svc, "sources", sources);
+    }
+    json_free(&dump);
+}
+
+/* Canonical chain advance coordinator */
+static void push_chain_advance_coordinator_entry(struct json_value *result)
+{
+    struct bsp_decision d;
+    block_source_policy_get_status(&d);
+
+    struct json_value svc = {0};
+    json_set_object(&svc);
+    json_push_kv_str(&svc, "name", "chain_advance_coordinator");
+    json_push_kv_str(&svc, "state",
+                     d.result == BSP_DECISION_USE_SOURCE ? "ready" :
+                     d.result == BSP_DECISION_WAIT ? "waiting" :
+                     d.result == BSP_DECISION_BLOCKED ? "blocked" :
+                     "recovering");
+    json_push_kv_str(&svc, "decision",
+                     bsp_decision_result_name(d.result));
+    json_push_kv_str(&svc, "authority",
+                     "local_consensus_validation");
+    json_push_kv_str(&svc, "selected_source",
+                     bsp_source_name(d.selected_source));
+    json_push_kv_str(&svc, "selected_source_trust",
+                     bsp_source_trust_name(d.selected_source));
+    json_push_kv_bool(&svc, "activation_allowed",
+                      d.activation_allowed);
+    json_push_kv_bool(&svc, "mirror_fallback_allowed",
+                      d.mirror_fallback_allowed);
+    json_push_kv_int(&svc, "local_height", d.local_height);
+    json_push_kv_int(&svc, "best_header_height",
+                     d.best_header_height);
+    json_push_kv_int(&svc, "target_height", d.target_height);
+    json_push_kv_int(&svc, "projection_height",
+                     d.projection_height);
+    json_push_kv_int(&svc, "projection_lag", d.projection_lag);
+    json_push_kv_bool(&svc, "projection_deferred",
+                      d.projection_deferred);
+    json_push_kv_str(&svc, "projection_state",
+                     d.projection_state);
+    json_push_kv_int(&svc, "projection_deferred_total",
+                     d.projection_deferred_total);
+    json_push_kv_int(&svc, "last_projection_deferred_height",
+                     d.last_projection_deferred_height);
+    json_push_kv_int(&svc, "last_projection_deferred_time",
+                     d.last_projection_deferred_time);
+    json_push_kv_str(&svc, "last_projection_deferred_reason",
+                     d.last_projection_deferred_reason);
+    json_push_kv_int(&svc, "selected_score", d.selected_score);
+    if (d.selected_source > BSP_SOURCE_NONE &&
+        d.selected_source < BSP_SOURCE_NUM) {
+        const struct bsp_source_status *s = &d.sources[d.selected_source];
+        json_push_kv_bool(&svc, "selected_source_selectable",
+                          s->selectable);
+        json_push_kv_str(&svc, "selected_source_selection_blocker",
+                         s->selection_reason);
+        json_push_kv_int(&svc, "selected_source_score_base",
+                         s->score_base);
+        json_push_kv_int(&svc, "selected_source_score_health",
+                         s->score_health);
+        json_push_kv_int(&svc, "selected_source_score_height",
+                         s->score_height);
+        json_push_kv_int(&svc, "selected_source_score_authorized",
+                         s->score_authorized);
+        json_push_kv_int(&svc,
+                         "selected_source_score_target_lag_penalty",
+                         s->score_target_lag_penalty);
+        json_push_kv_int(&svc, "selected_source_score_failure_penalty",
+                         s->score_failure_penalty);
+        json_push_kv_int(&svc,
+                         "selected_source_score_mirror_gate_penalty",
+                         s->score_mirror_gate_penalty);
+    }
+    json_push_kv_str(&svc, "reason", d.reason);
+    json_push_kv_str(&svc, "blocker", d.blocker);
+    push_bsp_decision_dump_fields(&svc);
+    json_push_back(result, &svc);
+    json_free(&svc);
+}
+
 static bool rpc_getservicehealth(const struct json_value *params, bool help,
                                  struct json_value *result)
 {
@@ -410,211 +624,10 @@ static bool rpc_getservicehealth(const struct json_value *params, bool help,
     }
 
     /* Legacy mirror */
-    {
-        struct legacy_mirror_sync_stats ms;
-        legacy_mirror_sync_stats_snapshot(&ms);
-
-        struct json_value svc = {0};
-        json_set_object(&svc);
-        json_push_kv_str(&svc, "name", "legacy_mirror");
-        json_push_kv_str(&svc, "state", ms.enabled ? ms.state : "disabled");
-        json_push_kv_bool(&svc, "mirror_enabled", ms.enabled);
-        json_push_kv_bool(&svc, "mirror_reachable", ms.reachable);
-        json_push_kv_bool(&svc, "mirror_monitor_running", ms.running);
-        json_push_kv_bool(&svc, "zclassicd_rpc_transport_reachable",
-                          ms.zclassicd_rpc_transport_reachable);
-        json_push_kv_bool(&svc, "legacy_oracle_usable",
-                          ms.legacy_oracle_usable);
-        json_push_kv_int(&svc, "zclassicd_rpc_error_code",
-                         ms.zclassicd_rpc_error_code);
-        json_push_kv_str(&svc, "zclassicd_rpc_error_message",
-                         ms.zclassicd_rpc_error_message);
-        json_push_kv_str(&svc, "consensus_authority",
-                         ms.consensus_authority);
-        json_push_kv_str(&svc, "candidate_source", "legacy_advisory");
-        json_push_kv_str(&svc, "candidate_trust",
-                         ms.candidate_trust);
-        json_push_kv_bool(&svc, "candidate_lag_known", ms.lag_known);
-        json_push_kv_bool(&svc, "candidate_lag_valid", ms.lag_valid);
-        json_push_kv_bool(&svc, "tip_hashes_agree",
-                          ms.tip_hashes_agree);
-        json_push_kv_bool(&svc, "blocker_recovered_by_tip_agreement",
-                          ms.blocker_recovered_by_tip_agreement);
-        json_push_kv_int(&svc, "candidate_lag",
-                         legacy_mirror_sync_reported_lag(&ms));
-        legacy_mirror_sync_push_observed_lag_json(
-            &svc, "candidate_lag_observed", &ms);
-        json_push_kv_str(&svc, "candidate_blocker",
-                         ms.enabled
-                             ? legacy_mirror_sync_blocker_code(&ms)
-                             : "");
-        json_push_kv_str(&svc, "candidate_blocker_scope",
-                         ms.enabled && legacy_mirror_sync_blocker_code(&ms)[0]
-                             ? "advisory_source"
-                             : "");
-        json_push_kv_int(&svc, "legacy_height", ms.legacy_height);
-        json_push_kv_int(&svc, "local_height", ms.local_height);
-        json_push_kv_bool(&svc, "lag_known", ms.lag_known);
-        json_push_kv_bool(&svc, "lag_valid", ms.lag_valid);
-        json_push_kv_int(&svc, "lag",
-                         legacy_mirror_sync_reported_lag(&ms));
-        legacy_mirror_sync_push_observed_lag_json(&svc, "lag_observed", &ms);
-        json_push_kv_bool(&svc, "local_recovery_active",
-                          ms.local_recovery_active);
-        json_push_kv_bool(&svc, "legacy_advisory_gated_by_native_retries",
-                          ms.mirror_repair_gated_by_local_retries);
-        json_push_kv_bool(&svc, "mirror_repair_gated_by_local_retries",
-                          ms.mirror_repair_gated_by_local_retries);
-        json_push_kv_bool(&svc, "local_retries_exhausted",
-                          ms.local_retries_exhausted);
-        json_push_kv_int(&svc, "stalls_total", ms.stalls_total);
-        json_push_kv_int(&svc, "lag_sla_breach_blocks",
-                         ms.lag_sla_breach_blocks);
-        json_push_kv_int(&svc, "lag_sla_breach_secs",
-                         ms.lag_sla_breach_secs);
-        json_push_kv_int(&svc, "lag_sla_critical_blocks",
-                         ms.lag_sla_critical_blocks);
-        json_push_kv_int(&svc, "lag_sla_critical_secs",
-                         ms.lag_sla_critical_secs);
-        json_push_kv_int(&svc, "lag_breach_seconds", ms.lag_breach_seconds);
-        json_push_kv_int(&svc, "lag_critical_seconds", ms.lag_critical_seconds);
-        json_push_kv_str(&svc, "lag_breach_severity", ms.lag_breach_severity);
-        json_push_kv_str(&svc, "activation_blocker",
-                         ms.enabled ? ms.activation_blocker_reason : "");
-        json_push_kv_str(&svc, "last_blocker_code",
-                         ms.enabled ? ms.last_blocker_id : "");
-        json_push_kv_str(&svc, "active_error_code",
-                         ms.enabled ? legacy_mirror_sync_blocker_code(&ms) : "");
-        json_push_kv_str(&svc, "active_error_detail",
-                         ms.enabled && legacy_mirror_sync_blocker_code(&ms)[0]
-                             ? ms.last_error
-                             : "");
-        json_push_kv_int(&svc, "rpc_errors", ms.rpc_errors);
-        json_push_kv_int(&svc, "overrides_total", ms.overrides_total);
-        json_push_kv_int(&svc, "unsafe_overrides_total",
-                         ms.unsafe_overrides_total);
-        json_push_kv_int(&svc, "blockers_total",
-                         ms.enabled ? ms.blockers_total : 0);
-        json_push_kv_bool(&svc, "last_override_safe",
-                          ms.last_override_safe);
-        json_push_kv_str(&svc, "last_override_reason",
-                         ms.last_override_reason);
-        json_push_kv_str(&svc, "last_override_scope",
-                         ms.last_override_scope);
-        json_push_kv_int(&svc, "last_catchup", ms.last_catchup);
-        json_push_kv_str(&svc, "last_error", ms.last_error);
-        json_push_back(result, &svc);
-        json_free(&svc);
-    }
+    push_legacy_mirror_service_entry(result);
 
     /* Canonical chain advance coordinator */
-    {
-        struct bsp_decision d;
-        block_source_policy_get_status(&d);
-
-        struct json_value svc = {0};
-        json_set_object(&svc);
-        json_push_kv_str(&svc, "name", "chain_advance_coordinator");
-        json_push_kv_str(&svc, "state",
-                         d.result == BSP_DECISION_USE_SOURCE ? "ready" :
-                         d.result == BSP_DECISION_WAIT ? "waiting" :
-                         d.result == BSP_DECISION_BLOCKED ? "blocked" :
-                         "recovering");
-        json_push_kv_str(&svc, "decision",
-                         bsp_decision_result_name(d.result));
-        json_push_kv_str(&svc, "authority",
-                         "local_consensus_validation");
-        json_push_kv_str(&svc, "selected_source",
-                         bsp_source_name(d.selected_source));
-        json_push_kv_str(&svc, "selected_source_trust",
-                         bsp_source_trust_name(d.selected_source));
-        json_push_kv_bool(&svc, "activation_allowed",
-                          d.activation_allowed);
-        json_push_kv_bool(&svc, "mirror_fallback_allowed",
-                          d.mirror_fallback_allowed);
-        json_push_kv_int(&svc, "local_height", d.local_height);
-        json_push_kv_int(&svc, "best_header_height",
-                         d.best_header_height);
-        json_push_kv_int(&svc, "target_height", d.target_height);
-        json_push_kv_int(&svc, "projection_height",
-                         d.projection_height);
-        json_push_kv_int(&svc, "projection_lag", d.projection_lag);
-        json_push_kv_bool(&svc, "projection_deferred",
-                          d.projection_deferred);
-        json_push_kv_str(&svc, "projection_state",
-                         d.projection_state);
-        json_push_kv_int(&svc, "projection_deferred_total",
-                         d.projection_deferred_total);
-        json_push_kv_int(&svc, "last_projection_deferred_height",
-                         d.last_projection_deferred_height);
-        json_push_kv_int(&svc, "last_projection_deferred_time",
-                         d.last_projection_deferred_time);
-        json_push_kv_str(&svc, "last_projection_deferred_reason",
-                         d.last_projection_deferred_reason);
-        json_push_kv_int(&svc, "selected_score", d.selected_score);
-        if (d.selected_source > BSP_SOURCE_NONE &&
-            d.selected_source < BSP_SOURCE_NUM) {
-            const struct bsp_source_status *s = &d.sources[d.selected_source];
-            json_push_kv_bool(&svc, "selected_source_selectable",
-                              s->selectable);
-            json_push_kv_str(&svc, "selected_source_selection_blocker",
-                             s->selection_reason);
-            json_push_kv_int(&svc, "selected_source_score_base",
-                             s->score_base);
-            json_push_kv_int(&svc, "selected_source_score_health",
-                             s->score_health);
-            json_push_kv_int(&svc, "selected_source_score_height",
-                             s->score_height);
-            json_push_kv_int(&svc, "selected_source_score_authorized",
-                             s->score_authorized);
-            json_push_kv_int(&svc,
-                             "selected_source_score_target_lag_penalty",
-                             s->score_target_lag_penalty);
-            json_push_kv_int(&svc, "selected_source_score_failure_penalty",
-                             s->score_failure_penalty);
-            json_push_kv_int(&svc,
-                             "selected_source_score_mirror_gate_penalty",
-                             s->score_mirror_gate_penalty);
-        }
-        json_push_kv_str(&svc, "reason", d.reason);
-        json_push_kv_str(&svc, "blocker", d.blocker);
-        {
-            struct json_value dump = {0};
-            if (block_source_policy_dump_state_json(&dump, NULL)) {
-                const struct json_value *has_last =
-                    json_get(&dump, "has_last_decision");
-                const struct json_value *last =
-                    json_get(&dump, "last_decision");
-                const struct json_value *sources =
-                    json_get(&dump, "sources");
-                const struct json_value *initialized =
-                    json_get(&dump, "initialized");
-                const struct json_value *has_connman =
-                    json_get(&dump, "has_connman");
-                const struct json_value *has_main_state =
-                    json_get(&dump, "has_main_state");
-                const struct json_value *has_node_db =
-                    json_get(&dump, "has_node_db");
-                if (initialized)
-                    json_push_kv(&svc, "initialized", initialized);
-                if (has_connman)
-                    json_push_kv(&svc, "has_connman", has_connman);
-                if (has_main_state)
-                    json_push_kv(&svc, "has_main_state", has_main_state);
-                if (has_node_db)
-                    json_push_kv(&svc, "has_node_db", has_node_db);
-                if (has_last)
-                    json_push_kv(&svc, "has_last_decision", has_last);
-                if (last)
-                    json_push_kv(&svc, "last_decision", last);
-                if (sources)
-                    json_push_kv(&svc, "sources", sources);
-            }
-            json_free(&dump);
-        }
-        json_push_back(result, &svc);
-        json_free(&svc);
-    }
+    push_chain_advance_coordinator_entry(result);
 
     return true;
 }

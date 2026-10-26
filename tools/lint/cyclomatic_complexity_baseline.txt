@@ -998,7 +998,6 @@ engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
 engine/controllers/src/event_healthcheck_controller.c:rpc_healthcheck_full:47
 engine/controllers/src/file_controller.c:file_manifest_build:20
 engine/controllers/src/file_controller.c:file_manifest_load:23
-engine/controllers/src/health_controller.c:rpc_getservicehealth:30
 engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
 engine/controllers/src/legacy_import_scan.c:block_has_shielded_raw:39
 engine/controllers/src/legacy_import_scan.c:extract_height_raw:23
