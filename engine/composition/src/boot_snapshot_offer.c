@@ -501,23 +501,23 @@ static void snapshot_offer_embed_replayed_mmb_root(struct snapshot_offer *offer)
                    "snapshot offer unavailable\n",
                    (unsigned long long)g_mmb_leaf_store.num_leaves,
                    (unsigned long long)replay_count);
-            memset(offer->mmr_root, 0, 32);
+            memset(offer->mmb_root, 0, 32);
         } else if (lh && replay_count > 0) {
             struct mmb replay;
             mmb_init(&replay);
             for (uint64_t i = 0; i < replay_count; i++)
                 mmb_append_hash(&replay, lh[i]);
-            mmb_root(&replay, offer->mmr_root);
+            mmb_root(&replay, offer->mmb_root);
             printf("Fast sync: MMB root at h=%d (%llu/%llu leaves, "
                    "%u peaks)\n", offer->height,
                    (unsigned long long)replay.num_leaves,
                    (unsigned long long)g_mmb_leaf_store.num_leaves,
                    replay.num_mountains);
         } else {
-            memset(offer->mmr_root, 0, 32);
+            memset(offer->mmb_root, 0, 32);
         }
     } else {
-        memset(offer->mmr_root, 0, 32);
+        memset(offer->mmb_root, 0, 32);
         printf("Fast sync: WARNING — no MMB leaf store\n");
     }
 }
@@ -553,8 +553,8 @@ static void snapshot_offer_prebuild_serving_snapshot(
 /* True when the offer carries any non-zero byte in its root field. */
 static bool snapshot_offer_has_mmb_root(const struct snapshot_offer *offer)
 {
-    for (size_t i = 0; i < sizeof(offer->mmr_root); i++) {
-        if (offer->mmr_root[i] != 0)
+    for (size_t i = 0; i < sizeof(offer->mmb_root); i++) {
+        if (offer->mmb_root[i] != 0)
             return true;
     }
     return false;
