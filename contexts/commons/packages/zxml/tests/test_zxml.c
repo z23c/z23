@@ -5,6 +5,37 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Only the embedded CLI's standard output is redirected; the library's
+ * existing sink tests and this test program retain their real streams. */
+static FILE *cli_output;
+static FILE *cli_stream(FILE *stream) {
+  return stream == stdout && cli_output ? cli_output : stream;
+}
+static size_t cli_fwrite(const void *data, size_t size, size_t n, FILE *stream) {
+  return fwrite(data, size, n, cli_stream(stream));
+}
+static int cli_fputc(int ch, FILE *stream) {
+  return fputc(ch, cli_stream(stream));
+}
+static int cli_fflush(FILE *stream) {
+  return fflush(cli_stream(stream));
+}
+static int cli_ferror(FILE *stream) {
+  return ferror(cli_stream(stream));
+}
+
+#define fwrite cli_fwrite
+#define fputc cli_fputc
+#define fflush cli_fflush
+#define ferror cli_ferror
+#define main zxml_cli_main
+#include "../app/main.c"
+#undef main
+#undef ferror
+#undef fflush
+#undef fputc
+#undef fwrite
+
 static int failures = 0;
 
 #define CHECK(cond)                                                          \
@@ -426,7 +457,78 @@ static void test_xml_scalar_controls(void) {
   }
 }
 
+static bool cli_feed_contents(const char *bytes, bool compact) {
+  if (strstr(bytes, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>") != bytes ||
+      !strstr(bytes, "<rss version=\"2.0\">") || !strstr(bytes, "</rss>") ||
+      !strstr(bytes, "Escaping &amp; &lt;friends&gt;")) return false;
+  size_t items = 0;
+  for (const char *p = bytes; (p = strstr(p, "<item>")) != NULL; p++) items++;
+  return items == 3 && ((strchr(bytes, '\n') == NULL) == compact);
+}
+
+static int cli_normal(bool compact) {
+  FILE *output = tmpfile();
+  if (!output) return 1;
+  cli_output = output;
+  char *argv[] = {"zxml", compact ? "--compact" : NULL, NULL};
+  bool ok = zxml_cli_main(compact ? 2 : 1, argv) == 0;
+  rewind(output);
+  char bytes[4096] = {0};
+  size_t n = fread(bytes, 1, sizeof bytes - 1, output);
+  ok = ok && !ferror(output) && n > 0 && n < sizeof bytes - 1;
+  ok = ok && cli_feed_contents(bytes, compact);
+  if (fclose(output) != 0) ok = false;
+  cli_output = NULL;
+  return ok ? 0 : 1;
+}
+
+static int cli_usage(void) {
+  FILE *output = tmpfile();
+  if (!output) return 1;
+  cli_output = output;
+  char *argv[] = {"zxml", "--bad", NULL, NULL};
+  bool ok = zxml_cli_main(2, argv) == 2 && ftell(output) == 0;
+  argv[1] = "--compact";
+  argv[2] = "extra";
+  ok = ok && zxml_cli_main(3, argv) == 2 && ftell(output) == 0;
+  if (fclose(output) != 0) ok = false;
+  cli_output = NULL;
+  return ok ? 0 : 1;
+}
+
+static int cli_output_error(const char *path, const char *access, bool compact) {
+  FILE *output = fopen(path, access);
+  if (!output) return 1;
+  char buffer[4096];
+  bool ok = setvbuf(output, buffer, _IOFBF, sizeof buffer) == 0;
+  cli_output = output;
+  char *argv[] = {"zxml", compact ? "--compact" : NULL, NULL};
+  if (ok) ok = zxml_cli_main(compact ? 2 : 1, argv) == 1 && cli_ferror(stdout);
+  (void)cli_fflush(stdout);
+  (void)fclose(output);
+  cli_output = NULL;
+  return ok ? 0 : 1;
+}
+
+static void test_cli_output(void) {
+  CHECK(cli_normal(false) == 0);
+  CHECK(cli_normal(true) == 0);
+  CHECK(cli_usage() == 0);
+#if defined(_WIN32)
+  const char *null_path = "NUL";
+#else
+  const char *null_path = "/dev/null";
+#endif
+  for (int compact = 0; compact < 2; compact++) {
+    CHECK(cli_output_error(null_path, "r", compact != 0) == 0);
+#if defined(__linux__)
+    CHECK(cli_output_error("/dev/full", "w", compact != 0) == 0);
+#endif
+  }
+}
+
 int main(void) {
+  test_cli_output();
   test_xml_scalar_controls();
   test_comment_tail_controls();
   test_xml_scalar_edges();

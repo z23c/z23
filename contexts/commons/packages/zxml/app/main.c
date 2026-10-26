@@ -26,6 +26,14 @@ static const struct {
      "https://example.com/posts/3", "Fri, 14 Aug 2026 00:00:00 +0000"},
 };
 
+static int finish_output(void) {
+  if (fflush(stdout) != 0 || ferror(stdout)) {
+    fputs("zxml: output write failed\n", stderr);
+    return 1;
+  }
+  return 0;
+}
+
 int main(int argc, char **argv) {
   unsigned flags = ZXML_PRETTY;
   if (argc == 2 && strcmp(argv[1], "--compact") == 0)
@@ -77,5 +85,5 @@ int main(int argc, char **argv) {
     fprintf(stderr, "zxml: %s\n", zxml_strerror(st));
     return 1;
   }
-  return 0;
+  return finish_output();
 }
