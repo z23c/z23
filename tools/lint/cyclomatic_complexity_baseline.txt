@@ -903,7 +903,6 @@ engine/modules/storage/src/coins_kv.c:coins_kv_seed_genesis_applied_height:18
 engine/modules/storage/src/coins_kv.c:coins_kv_spend_many_sqlite:16
 engine/modules/storage/src/coins_kv.c:coins_kv_tip_is_self_derived:22
 engine/modules/storage/src/coins_kv.c:coins_kv_verify_against_checkpoint:21
-engine/modules/storage/src/coins_kv_boot_rebuild.c:coins_kv_seed_from_node_db:25
 engine/modules/storage/src/coins_kv_read_snapshot.c:coins_kv_read_snapshot_next:17
 engine/modules/storage/src/coins_kv_read_snapshot.c:snapshot_row_valid:19
 engine/modules/storage/src/coins_kv_snapshot_write.c:coins_kv_snapshot_write:16

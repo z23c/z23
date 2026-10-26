@@ -174,6 +174,40 @@ coins_kv_stamp_self_derived_in_tx(sqlite3 *db)
     return COINS_KV_SELF_DERIVED_STAMPED;
 }
 
+static bool coins_kv_seed_copy_utxos_in_tx(sqlite3 *progress_db,
+                                         char **err_out)
+{
+    bool ok = true;
+    if (sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, err_out) != SQLITE_OK)
+        ok = false;
+    if (ok && sqlite3_exec(progress_db,
+            "INSERT OR REPLACE INTO coins"
+            "(txid,vout,value,height,is_coinbase,script) "
+            "SELECT txid,vout,value,height,is_coinbase,script "
+            "FROM coinssrc.utxos",
+            NULL, NULL, err_out) != SQLITE_OK)
+        ok = false;
+    /* Checkpoint-content gate (fail-closed): a cold-import seed that reaches the
+     * compiled SHA3 checkpoint height must reproduce its committed UTXO root
+     * BEFORE it may stamp done / commit. Evaluated on THIS txn's rows. */
+    if (ok && coins_kv_seed_checkpoint_verdict(progress_db)
+                  == COINS_KV_CHECKPOINT_MISMATCH) {
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_exec(progress_db, "DETACH DATABASE coinssrc", NULL, NULL, NULL);
+        if (*err_out) sqlite3_free(*err_out);
+        coins_kv_checkpoint_fatal(cp ? cp->height : -1);  /* _exit — no return */
+    }
+    if (ok) {
+        uint8_t one = 1;
+        if (!progress_meta_set_in_tx(progress_db, COINS_KV_MIGRATION_KEY, &one, 1))
+            ok = false;
+    }
+    if (ok && sqlite3_exec(progress_db, "COMMIT", NULL, NULL, err_out) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
 /* Seed coins_kv directly from node.db's `utxos` table after a cold
  * LevelDB import. The generic boot rebuild above copies from the utxo
  * PROJECTION, which is still EMPTY on the import boot (it catches up
@@ -225,35 +259,8 @@ bool coins_kv_seed_from_node_db(sqlite3 *progress_db,
         return false;
     }
 
-    bool ok = true;
     char *err = NULL;
-    if (sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && sqlite3_exec(progress_db,
-            "INSERT OR REPLACE INTO coins"
-            "(txid,vout,value,height,is_coinbase,script) "
-            "SELECT txid,vout,value,height,is_coinbase,script "
-            "FROM coinssrc.utxos",
-            NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    /* Checkpoint-content gate (fail-closed): a cold-import seed that reaches the
-     * compiled SHA3 checkpoint height must reproduce its committed UTXO root
-     * BEFORE it may stamp done / commit. Evaluated on THIS txn's rows. */
-    if (ok && coins_kv_seed_checkpoint_verdict(progress_db)
-                  == COINS_KV_CHECKPOINT_MISMATCH) {
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
-        sqlite3_exec(progress_db, "DETACH DATABASE coinssrc", NULL, NULL, NULL);
-        if (err) sqlite3_free(err);
-        coins_kv_checkpoint_fatal(cp ? cp->height : -1);  /* _exit — no return */
-    }
-    if (ok) {
-        uint8_t one = 1;
-        if (!progress_meta_set_in_tx(progress_db, COINS_KV_MIGRATION_KEY, &one, 1))
-            ok = false;
-    }
-    if (ok && sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
+    bool ok = coins_kv_seed_copy_utxos_in_tx(progress_db, &err);
     if (!ok) {
         LOG_WARN("coins_kv", "[coins_kv] import seed copy failed: %s",
                  err ? err : "(no message)");
