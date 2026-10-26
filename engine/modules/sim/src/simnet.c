@@ -261,31 +261,20 @@ static bool sim_stamp_sapling_root(struct simnet *s, struct transaction *txs,
  * satisfy the block-level BIP34 / Overwinter-version rules, which are
  * orthogonal to the shielded-proof verification.
  * The transparent value balance is still enforced by connect_block below. */
-/* Returns 0 when every shielded tx verifies (or the verifier is off);
- * -1 on the first rejection, with *out_rejected_tx set to that tx's index
- * and *out_vs holding its reject reason for the caller to log. */
-static int sim_contextual_check_shielded_txs(struct simnet *s,
-                                             struct transaction *txs,
-                                             size_t ntx, int height,
-                                             size_t *out_rejected_tx,
-                                             struct validation_state *out_vs)
+/* True when tx carries no shielded data, so the verifier skips it. */
+static bool sim_tx_is_transparent_only(const struct transaction *tx)
 {
-    if (!s->run_contextual_check)
-        return 0;
-    for (size_t i = 0; i < ntx; i++) {
-        if (txs[i].num_shielded_spend == 0 &&
-            txs[i].num_shielded_output == 0 &&
-            txs[i].num_joinsplit == 0)
-            continue;
-        validation_state_init(out_vs);
-        if (!contextual_check_transaction(&txs[i], out_vs,
-                                          &s->params.consensus,
-                                          height, 100 /* dosLevel */)) {
-            *out_rejected_tx = i;
-            return -1;
-        }
-    }
-    return 0;
+    return tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 &&
+           tx->num_joinsplit == 0;
+}
+
+/* Reset vs, then run the shielded verifier on one tx. */
+static bool sim_contextual_check_one(struct simnet *s, struct transaction *tx,
+                                     int height, struct validation_state *vs)
+{
+    validation_state_init(vs);
+    return contextual_check_transaction(tx, vs, &s->params.consensus,
+                                        height, 100 /* dosLevel */);
 }
 
 /* Clone the assembled block into `captured` when the caller asked for the
@@ -348,15 +337,19 @@ static bool sim_mint_block(struct simnet *s, struct transaction *txs,
     struct validation_state vs;
     validation_state_init(&vs);
 
-    size_t rejected_tx = 0;
-    struct validation_state cvs;
-    if (sim_contextual_check_shielded_txs(s, txs, ntx, height, &rejected_tx,
-                                          &cvs) != 0) {
-        free(blk.vtx);
-        sim_free_txs(txs, ntx);
-        LOG_FAIL("simnet",
-                 "contextual_check_transaction rejected tx %zu "
-                 "at height %d: %s", rejected_tx, height, cvs.reject_reason);
+    if (s->run_contextual_check) {
+        for (size_t i = 0; i < ntx; i++) {
+            if (sim_tx_is_transparent_only(&txs[i]))
+                continue;
+            struct validation_state cvs;
+            if (!sim_contextual_check_one(s, &txs[i], height, &cvs)) {
+                free(blk.vtx);
+                sim_free_txs(txs, ntx);
+                LOG_FAIL("simnet",
+                         "contextual_check_transaction rejected tx %zu "
+                         "at height %d: %s", i, height, cvs.reject_reason);
+            }
+        }
     }
 
     struct block captured;
@@ -424,14 +417,14 @@ bool simnet_init(struct simnet *s)
     s->params = *chain_params_get();
     memset(&s->cpentry, 0, sizeof(s->cpentry));
     s->cpentry.height = SIM_CHECKPOINT_HEIGHT;
-    memset(&s->cpentry.hash.data, 0x01, 32);
+    memset(s->cpentry.hash.data, 0x01, 32);
     s->params.checkpointData.entries = &s->cpentry;
     s->params.checkpointData.nEntries = 1;
 
     /* Synthetic base tip, one below the first mintable height. */
     block_index_init(&s->tip);
     s->tip.nHeight = SIM_BASE_HEIGHT - 1;
-    memset(&s->tip.hashBlock.data, 0x33, 32);
+    memset(s->tip.hashBlock.data, 0x33, 32);
     s->tip.phashBlock = &s->tip.hashBlock;
     s->tip.pprev = NULL;
     s->tip.has_chain_sprout_value = false;
