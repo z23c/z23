@@ -130,12 +130,11 @@ const char *body_fetch_exact_authority_state_name(
         ? names[state] : "unknown";
 }
 
-/* Join the durable validate_headers verdict to live chain identity.  Caller
- * owns cs_main.  `durable_parent_hash` was captured before taking cs_main and
- * is consulted only when the raw active parent slot is absent. */
-static struct block_index *body_fetch_exact_authority_locked(
+/* Best-header-tree candidate at `height`: guard the inputs, then require
+ * the ancestor to exist, to carry `expected_hash`, and to be nonfailed.
+ * NULL (with *out_state set) otherwise.  Caller owns cs_main. */
+static struct block_index *body_fetch_authority_best_match(
     struct main_state *ms, int height, const struct uint256 *expected_hash,
-    const struct uint256 *durable_parent_hash,
     enum body_fetch_exact_authority_state *out_state)
 {
     *out_state = BODY_FETCH_EXACT_BEST_ABSENT;
@@ -155,46 +154,64 @@ static struct block_index *body_fetch_exact_authority_locked(
         *out_state = BODY_FETCH_EXACT_AUTHORITY_FAILED;
         return NULL;
     }
+    return best;
+}
 
-    if (height > 0) {
-        struct block_index *parent = active_chain_at(
-            &ms->chain_active, height - 1);
-        const struct uint256 *parent_hash =
-            parent && parent->phashBlock ? parent->phashBlock
-                                         : durable_parent_hash;
-        if (!parent_hash) {
-            *out_state = BODY_FETCH_EXACT_PARENT_ABSENT;
-            return NULL;
-        }
-        if ((parent && block_has_any_failure(parent)) ||
-            (best->pprev && block_has_any_failure(best->pprev))) {
-            *out_state = BODY_FETCH_EXACT_AUTHORITY_FAILED;
-            return NULL;
-        }
-        if (!best->pprev || !best->pprev->phashBlock ||
-            !uint256_eq(best->pprev->phashBlock, parent_hash)) {
-            *out_state = BODY_FETCH_EXACT_PARENT_MISMATCH;
-            return NULL;
-        }
-    }
+/* Visible-parent linkage verdict for height > 0: the active parent hash
+ * (falling back to `durable_parent_hash`) must exist, both parent
+ * candidates must be nonfailed, and best->pprev must agree with it.
+ * BODY_FETCH_EXACT_READY when the linkage holds.  Caller owns cs_main. */
+static enum body_fetch_exact_authority_state
+body_fetch_authority_parent_link_state(
+    struct main_state *ms, int height,
+    const struct uint256 *durable_parent_hash, struct block_index *best)
+{
+    struct block_index *parent = active_chain_at(
+        &ms->chain_active, height - 1);
+    const struct uint256 *parent_hash =
+        parent && parent->phashBlock ? parent->phashBlock
+                                     : durable_parent_hash;
+    if (!parent_hash)
+        return BODY_FETCH_EXACT_PARENT_ABSENT;
+    if ((parent && block_has_any_failure(parent)) ||
+        (best->pprev && block_has_any_failure(best->pprev)))
+        return BODY_FETCH_EXACT_AUTHORITY_FAILED;
+    if (!best->pprev || !best->pprev->phashBlock ||
+        !uint256_eq(best->pprev->phashBlock, parent_hash))
+        return BODY_FETCH_EXACT_PARENT_MISMATCH;
+    return BODY_FETCH_EXACT_READY;
+}
 
+/* Active-chain verdict at `height`: the live entry, when present, must
+ * carry `expected_hash`, be nonfailed, and (height > 0) link to the same
+ * parent hash as `best`.  BODY_FETCH_EXACT_READY when it holds; the
+ * entry itself is reported through *out_active.  Caller owns cs_main. */
+static enum body_fetch_exact_authority_state
+body_fetch_authority_active_link_state(
+    struct main_state *ms, int height, const struct uint256 *expected_hash,
+    struct block_index *best, struct block_index **out_active)
+{
     struct block_index *active = active_chain_at(&ms->chain_active, height);
+    *out_active = active;
     if (active && (!active->phashBlock ||
-                   !uint256_eq(active->phashBlock, expected_hash))) {
-        *out_state = BODY_FETCH_EXACT_ACTIVE_HASH_MISMATCH;
-        return NULL;
-    }
-    if (active && block_has_any_failure(active)) {
-        *out_state = BODY_FETCH_EXACT_AUTHORITY_FAILED;
-        return NULL;
-    }
+                   !uint256_eq(active->phashBlock, expected_hash)))
+        return BODY_FETCH_EXACT_ACTIVE_HASH_MISMATCH;
+    if (active && block_has_any_failure(active))
+        return BODY_FETCH_EXACT_AUTHORITY_FAILED;
     if (height > 0 && active &&
         (!active->pprev || !active->pprev->phashBlock ||
-         !uint256_eq(active->pprev->phashBlock, best->pprev->phashBlock))) {
-        *out_state = BODY_FETCH_EXACT_PARENT_MISMATCH;
-        return NULL;
-    }
+         !uint256_eq(active->pprev->phashBlock, best->pprev->phashBlock)))
+        return BODY_FETCH_EXACT_PARENT_MISMATCH;
+    return BODY_FETCH_EXACT_READY;
+}
 
+/* Final pick once every identity check passed: prefer the active-chain
+ * entry when its body is on disk, then `best` when its body is on disk.
+ * Caller owns cs_main. */
+static struct block_index *body_fetch_authority_body_candidate(
+    struct block_index *best, struct block_index *active,
+    enum body_fetch_exact_authority_state *out_state)
+{
     *out_state = BODY_FETCH_EXACT_READY;
     if (active && (block_index_status_load(active) & BLOCK_HAVE_DATA)) {
         *out_state = BODY_FETCH_EXACT_HAVE_DATA;
@@ -205,6 +222,40 @@ static struct block_index *body_fetch_exact_authority_locked(
         return best;
     }
     return active ? active : best;
+}
+
+/* Join the durable validate_headers verdict to live chain identity.  Caller
+ * owns cs_main.  `durable_parent_hash` was captured before taking cs_main and
+ * is consulted only when the raw active parent slot is absent. */
+static struct block_index *body_fetch_exact_authority_locked(
+    struct main_state *ms, int height, const struct uint256 *expected_hash,
+    const struct uint256 *durable_parent_hash,
+    enum body_fetch_exact_authority_state *out_state)
+{
+    struct block_index *best = body_fetch_authority_best_match(
+        ms, height, expected_hash, out_state);
+    if (!best)
+        return NULL;
+
+    if (height > 0) {
+        enum body_fetch_exact_authority_state parent_state =
+            body_fetch_authority_parent_link_state(
+                ms, height, durable_parent_hash, best);
+        if (parent_state != BODY_FETCH_EXACT_READY) {
+            *out_state = parent_state;
+            return NULL;
+        }
+    }
+
+    struct block_index *active = NULL;
+    enum body_fetch_exact_authority_state active_state =
+        body_fetch_authority_active_link_state(
+            ms, height, expected_hash, best, &active);
+    if (active_state != BODY_FETCH_EXACT_READY) {
+        *out_state = active_state;
+        return NULL;
+    }
+    return body_fetch_authority_body_candidate(best, active, out_state);
 }
 
 static bool body_fetch_durable_parent_hash_at(sqlite3 *db, int height,
