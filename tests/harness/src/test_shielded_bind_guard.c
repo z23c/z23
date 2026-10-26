@@ -346,336 +346,374 @@ static bool sbg_gap_blocker_reason(char *out, size_t cap)
     return false;
 }
 
+/* ── Scenario A: IMPORT-TIME guard — a bind BELOW the island root is
+ * REFUSED with nothing committed; a fresh datadir passes the probe ── */
+static int sbg_import_refusal_scenario(void)
+{
+    int failures = 0;
+
+    char cs_dir[256], pg_dir[256];
+    test_make_tmpdir(cs_dir, sizeof(cs_dir), "sbg_refuse", "cs");
+    test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_refuse", "pg");
+
+    struct uint256 tip_root;
+    SBG_CHECK("build complete fixture chainstate",
+              sbg_build_chainstate(cs_dir, &tip_root));
+
+    SBG_CHECK("progress.kv opens", progress_store_open(pg_dir));
+    sqlite3 *db = progress_store_db();
+    SBG_CHECK("wedge seeded (cursors positive + blockers raised)",
+              db && sbg_seed_wedge(db));
+
+    /* Fresh datadir, no coins authority: the probe passes silently
+     * (shielded-first ordering is legal). */
+    int32_t cb = -1;
+    SBG_CHECK("probe passes with no coins authority (fresh datadir)",
+              shielded_history_import_bind_guard_probe(db, SBG_LAG_H,
+                                                       &cb));
+
+    /* Manufacture the coins island 100 blocks ABOVE the chainstate tip
+     * (the real case: source chainstate lags the island root). */
+    struct uint256 island_hash;
+    sbg_fill(&island_hash, 0x1C, 1);
+    SBG_CHECK("coins island seeded above the chainstate tip",
+              sbg_seed_coins_best(db, SBG_TIP_H + 100, &island_hash));
+
+    cb = -1;
+    SBG_CHECK("probe REFUSES a bind below the island root",
+              !shielded_history_import_bind_guard_probe(db, SBG_TIP_H,
+                                                        &cb));
+    SBG_CHECK("probe reports the island root height",
+              cb == SBG_TIP_H + 100);
+
+    struct shielded_import_report rep;
+    bool ok = sbg_import_fixture(
+        db, cs_dir, SBG_TIP_H, &tip_root, &rep);
+    SBG_CHECK("import REFUSES the height-mismatched bind", !ok);
+    SBG_CHECK("import did NOT commit", !rep.committed);
+
+    /* nothing committed: every table empty (the tx never began) */
+    SBG_CHECK("sapling_anchors empty after refusal",
+              sbg_count(db, "sapling_anchors") == 0);
+    SBG_CHECK("sprout_anchors empty after refusal",
+              sbg_count(db, "sprout_anchors") == 0);
+    SBG_CHECK("nullifiers empty after refusal",
+              sbg_count(db, "nullifiers") == 0);
+
+    /* the safe wedge held: cursors still POSITIVE, blockers still up */
+    SBG_CHECK("Sprout anchor cursor still positive",
+              sbg_cursor_is(db, ANCHOR_POOL_SPROUT, SBG_BOUNDARY));
+    SBG_CHECK("Sapling anchor cursor still positive",
+              sbg_cursor_is(db, ANCHOR_POOL_SAPLING, SBG_BOUNDARY));
+    SBG_CHECK("anchor gap blocker still raised",
+              blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+    SBG_CHECK("nullifier gap blocker still raised",
+              blocker_exists(UTXO_APPLY_NF_GAP_BLOCKER_ID));
+
+    progress_store_close();
+    test_rm_rf_recursive(cs_dir);
+    test_rm_rf_recursive(pg_dir);
+
+    return failures;
+}
+
+/* ── Scenario B: IMPORT-TIME guard — a bind == the island root imports ── */
+static int sbg_matching_bind_import_scenario(void)
+{
+    int failures = 0;
+
+    char cs_dir[256], pg_dir[256];
+    test_make_tmpdir(cs_dir, sizeof(cs_dir), "sbg_accept", "cs");
+    test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_accept", "pg");
+
+    struct uint256 tip_root;
+    SBG_CHECK("build complete fixture (accept scenario)",
+              sbg_build_chainstate(cs_dir, &tip_root));
+
+    SBG_CHECK("progress.kv opens (accept)", progress_store_open(pg_dir));
+    sqlite3 *db = progress_store_db();
+    SBG_CHECK("wedge seeded (accept)", db && sbg_seed_wedge(db));
+
+    /* The consistent source: chainstate best block == the island root. */
+    struct uint256 island_hash;
+    sbg_best_block(&island_hash);
+    SBG_CHECK("coins island seeded AT the chainstate tip",
+              sbg_seed_coins_best(db, SBG_TIP_H, &island_hash));
+
+    int32_t cb = -1;
+    SBG_CHECK("probe accepts a bind == the island root",
+              shielded_history_import_bind_guard_probe(db, SBG_TIP_H,
+                                                       &cb) &&
+              cb == SBG_TIP_H);
+
+    struct uint256 foreign_best;
+    sbg_fill(&foreign_best, 0xBC, 1000);
+    struct shielded_import_report rep;
+    bool ok = shielded_history_import_from_chainstate(
+        db, cs_dir, SBG_TIP_H, &foreign_best, &tip_root, &rep);
+    SBG_CHECK("import REFUSES source best block above/below target", !ok);
+    SBG_CHECK("source mismatch did NOT commit", !rep.committed);
+    SBG_CHECK("source mismatch left nullifiers empty",
+              sbg_count(db, "nullifiers") == 0);
+
+    ok = sbg_import_fixture(
+        db, cs_dir, SBG_TIP_H, &tip_root, &rep);
+    SBG_CHECK("matching bind imports + commits",
+              ok && rep.committed && rep.tip_anchor_bound);
+    SBG_CHECK("imported exactly 3 Sapling anchors",
+              rep.sapling_anchors == 3);
+    SBG_CHECK("Sapling anchor cursor flipped to 0",
+              sbg_cursor_is(db, ANCHOR_POOL_SAPLING, 0));
+    SBG_CHECK("anchor gap blocker cleared after consistent import",
+              !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+
+    /* the bound frontier is selectable for the forward fold */
+    {
+        struct incremental_merkle_tree latest;
+        struct uint256 latest_root;
+        SBG_CHECK("latest Sapling frontier == tip anchor",
+                  anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, &latest,
+                                        &latest_root, NULL) ==
+                      ANCHOR_KV_FOUND &&
+                  uint256_eq(&latest_root, &tip_root));
+    }
+
+    progress_store_close();
+    test_rm_rf_recursive(cs_dir);
+    test_rm_rf_recursive(pg_dir);
+
+    return failures;
+}
+
+/* Scenario C's two negative controls: datadirs on which the boot-time bind
+ * mismatch must NOT fire (consistent datadir, commitment-free tail). */
+static int sbg_boot_no_mismatch_controls(void)
+{
+    int failures = 0;
+
+    /* CONTROL 1 — consistent datadir (frontier at the island root,
+     * header root equal): no detection, blocker clears. */
+    {
+        char pg2[256], nd2[256];
+        test_make_tmpdir(pg2, sizeof(pg2), "sbg_bootok", "pg");
+        test_make_tmpdir(nd2, sizeof(nd2), "sbg_bootok", "nd");
+        SBG_CHECK("progress.kv opens (control)", progress_store_open(pg2));
+        sqlite3 *db2 = progress_store_db();
+        struct uint256 island2_hash;
+        sbg_fill(&island2_hash, 0x1C, 4);
+        SBG_CHECK("control: cursors complete + island + header seeded",
+                  db2 && anchor_kv_ensure_schema(db2) &&
+                  anchor_kv_reset_mark_complete_in_tx(db2) &&
+                  sbg_seed_coins_best(db2, SBG_TIP_H, &island2_hash));
+        struct incremental_merkle_tree ctree;
+        struct uint256 croot;
+        sbg_sapling_tree(9, &ctree, &croot);
+        SBG_CHECK("control: frontier keyed AT the island root",
+                  anchor_kv_add_tree(db2, ANCHOR_POOL_SAPLING, &ctree,
+                                     SBG_TIP_H));
+        char ndb2_path[320];
+        snprintf(ndb2_path, sizeof(ndb2_path), "%s/node.db", nd2);
+        struct node_db ndb2;
+        memset(&ndb2, 0, sizeof(ndb2));
+        SBG_CHECK("control: node.db opens + header root matches",
+                  node_db_open(&ndb2, ndb2_path) &&
+                  sbg_write_header_row(&ndb2, SBG_TIP_H, &croot));
+        SBG_CHECK("control: NO mismatch on a consistent datadir",
+                  !utxo_apply_anchor_bind_mismatch(db2, &ndb2, NULL,
+                                                   NULL));
+        blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
+        utxo_apply_anchor_gap_blocker_refresh_with_ndb(db2, &ndb2);
+        SBG_CHECK("control: blocker stays cleared",
+                  !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+        node_db_close(&ndb2);
+        progress_store_close();
+        test_rm_rf_recursive(pg2);
+        test_rm_rf_recursive(nd2);
+    }
+
+    /* CONTROL 2 — commitment-free tail: frontier BELOW the island root
+     * but the header root did NOT move (no Sapling-output blocks in
+     * between). This is the healthy steady state of a folded node; the
+     * guard must stay silent. */
+    {
+        char pg3[256], nd3[256];
+        test_make_tmpdir(pg3, sizeof(pg3), "sbg_boottail", "pg");
+        test_make_tmpdir(nd3, sizeof(nd3), "sbg_boottail", "nd");
+        SBG_CHECK("progress.kv opens (tail)", progress_store_open(pg3));
+        sqlite3 *db3 = progress_store_db();
+        struct uint256 island3_hash;
+        sbg_fill(&island3_hash, 0x1C, 5);
+        SBG_CHECK("tail: cursors complete + island seeded",
+                  db3 && anchor_kv_ensure_schema(db3) &&
+                  anchor_kv_reset_mark_complete_in_tx(db3) &&
+                  sbg_seed_coins_best(db3, SBG_TIP_H, &island3_hash));
+        struct incremental_merkle_tree ttree;
+        struct uint256 troot;
+        sbg_sapling_tree(9, &ttree, &troot);
+        SBG_CHECK("tail: frontier keyed below the island root",
+                  anchor_kv_add_tree(db3, ANCHOR_POOL_SAPLING, &ttree,
+                                     SBG_LAG_H));
+        char ndb3_path[320];
+        snprintf(ndb3_path, sizeof(ndb3_path), "%s/node.db", nd3);
+        struct node_db ndb3;
+        memset(&ndb3, 0, sizeof(ndb3));
+        SBG_CHECK("tail: node.db opens + header root UNMOVED",
+                  node_db_open(&ndb3, ndb3_path) &&
+                  sbg_write_header_row(&ndb3, SBG_TIP_H, &troot));
+        SBG_CHECK("tail: NO mismatch on a commitment-free tail",
+                  !utxo_apply_anchor_bind_mismatch(db3, &ndb3, NULL,
+                                                   NULL));
+        blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
+        utxo_apply_anchor_gap_blocker_refresh_with_ndb(db3, &ndb3);
+        SBG_CHECK("tail: blocker stays cleared",
+                  !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+        node_db_close(&ndb3);
+        progress_store_close();
+        test_rm_rf_recursive(pg3);
+        test_rm_rf_recursive(nd3);
+    }
+
+    return failures;
+}
+
+/* CONTROL 3 — positive cursors (the ordinary safe wedge): the bind
+ * guard does not fire; the refresh raises the STANDARD backfill
+ * blocker, not the mismatch one. */
+static int sbg_boot_positive_cursor_control(void)
+{
+    int failures = 0;
+
+    char pg4[256], nd4[256];
+    test_make_tmpdir(pg4, sizeof(pg4), "sbg_bootwedge", "pg");
+    test_make_tmpdir(nd4, sizeof(nd4), "sbg_bootwedge", "nd");
+    SBG_CHECK("progress.kv opens (wedge control)",
+              progress_store_open(pg4));
+    sqlite3 *db4 = progress_store_db();
+    SBG_CHECK("wedge control seeded", db4 && sbg_seed_wedge(db4));
+    char ndb4_path[320];
+    snprintf(ndb4_path, sizeof(ndb4_path), "%s/node.db", nd4);
+    struct node_db ndb4;
+    memset(&ndb4, 0, sizeof(ndb4));
+    SBG_CHECK("wedge control: node.db opens",
+              node_db_open(&ndb4, ndb4_path));
+    SBG_CHECK("wedge control: bind mismatch does NOT fire",
+              !utxo_apply_anchor_bind_mismatch(db4, &ndb4, NULL,
+                                               NULL));
+    utxo_apply_anchor_gap_blocker_refresh_with_ndb(db4, &ndb4);
+    char reason4[BLOCKER_REASON_MAX];
+    SBG_CHECK("wedge control: standard backfill blocker raised",
+              sbg_gap_blocker_reason(reason4, sizeof(reason4)) &&
+              strstr(reason4, "incomplete below cursor") &&
+              !strstr(reason4, "shielded anchor height mismatch"));
+    node_db_close(&ndb4);
+    progress_store_close();
+    test_rm_rf_recursive(pg4);
+    test_rm_rf_recursive(nd4);
+
+    return failures;
+}
+
+/* ── Scenario C: BOOT-TIME guard — a manufactured mismatch (cursors 0,
+ * frontier keyed BELOW the island root, header root MOVED) is detected and
+ * raises the NAMED permanent blocker; detection only, no auto-repair ── */
+static int sbg_boot_mismatch_detection_scenario(void)
+{
+    int failures = 0;
+
+    char pg_dir[256], nd_dir[256];
+    test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_boot", "pg");
+    test_make_tmpdir(nd_dir, sizeof(nd_dir), "sbg_boot", "nd");
+
+    SBG_CHECK("progress.kv opens (boot)", progress_store_open(pg_dir));
+    sqlite3 *db = progress_store_db();
+
+    /* The post-buggy-import state: both cursors 0 (complete-history
+     * claim) and ONE imported frontier row keyed at the lagging bind
+     * height SBG_LAG_H. */
+    SBG_CHECK("cursors stamped complete (0)",
+              db && anchor_kv_ensure_schema(db) &&
+              anchor_kv_reset_mark_complete_in_tx(db));
+    struct incremental_merkle_tree frontier;
+    struct uint256 frontier_root;
+    sbg_sapling_tree(9, &frontier, &frontier_root);
+    SBG_CHECK("imported frontier row keyed at the lag height",
+              anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &frontier,
+                                 SBG_LAG_H));
+
+    /* The coins island root sits 100 blocks higher. */
+    struct uint256 island_hash;
+    sbg_fill(&island_hash, 0x1C, 3);
+    SBG_CHECK("coins island seeded (boot)",
+              sbg_seed_coins_best(db, SBG_TIP_H, &island_hash));
+
+    /* The header chain at the island root commits a DIFFERENT Sapling
+     * root — the live chain moved over blocks the imported frontier
+     * never saw. */
+    char ndb_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", nd_dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    SBG_CHECK("node.db opens (boot)", node_db_open(&ndb, ndb_path));
+    struct uint256 moved_root;
+    sbg_sapling_tree(23, &frontier, &moved_root);   /* reuse tree buffer */
+    SBG_CHECK("header root at the island root moved",
+              !uint256_eq(&moved_root, &frontier_root) &&
+              sbg_write_header_row(&ndb, SBG_TIP_H, &moved_root));
+
+    /* Pure detection. */
+    int64_t fh = -1;
+    int32_t ch = -1;
+    SBG_CHECK("bind mismatch detected on the manufactured state",
+              utxo_apply_anchor_bind_mismatch(db, &ndb, &fh, &ch));
+    SBG_CHECK("detection reports the lagging frontier height",
+              fh == SBG_LAG_H);
+    SBG_CHECK("detection reports the island root height",
+              ch == SBG_TIP_H);
+
+    /* The refresh converts it into the NAMED permanent blocker. */
+    blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
+    utxo_apply_anchor_gap_blocker_refresh_with_ndb(db, &ndb);
+    SBG_CHECK("named blocker utxo_apply.anchor_backfill_gap raised",
+              blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
+    char reason[BLOCKER_REASON_MAX];
+    SBG_CHECK("blocker reason names the mismatch + both heights",
+              sbg_gap_blocker_reason(reason, sizeof(reason)) &&
+              strstr(reason, "shielded anchor height mismatch") &&
+              strstr(reason, "3176225") &&   /* SBG_LAG_H */
+              strstr(reason, "3176325"));    /* SBG_TIP_H */
+
+    /* No auto-repair: the stored state is untouched (cursors stay 0,
+     * the frontier row stays, the fold's own fail-closed root check
+     * remains the backstop). */
+    SBG_CHECK("no auto-repair: Sapling cursor still 0",
+              sbg_cursor_is(db, ANCHOR_POOL_SAPLING, 0));
+    SBG_CHECK("no auto-repair: frontier row untouched",
+              sbg_count(db, "sapling_anchors") == 1);
+
+    /* The global progress_store is single-directory: close the mismatch
+     * fixture before the controls open their own stores. */
+    node_db_close(&ndb);
+    progress_store_close();
+
+    failures += sbg_boot_no_mismatch_controls();
+    failures += sbg_boot_positive_cursor_control();
+
+    test_rm_rf_recursive(pg_dir);
+    test_rm_rf_recursive(nd_dir);
+
+    return failures;
+}
+
 int test_shielded_bind_guard(void);
 int test_shielded_bind_guard(void)
 {
     int failures = 0;
 
-    /* ── Scenario A: IMPORT-TIME guard — a bind BELOW the island root is
-     * REFUSED with nothing committed; a fresh datadir passes the probe ── */
-    {
-        char cs_dir[256], pg_dir[256];
-        test_make_tmpdir(cs_dir, sizeof(cs_dir), "sbg_refuse", "cs");
-        test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_refuse", "pg");
-
-        struct uint256 tip_root;
-        SBG_CHECK("build complete fixture chainstate",
-                  sbg_build_chainstate(cs_dir, &tip_root));
-
-        SBG_CHECK("progress.kv opens", progress_store_open(pg_dir));
-        sqlite3 *db = progress_store_db();
-        SBG_CHECK("wedge seeded (cursors positive + blockers raised)",
-                  db && sbg_seed_wedge(db));
-
-        /* Fresh datadir, no coins authority: the probe passes silently
-         * (shielded-first ordering is legal). */
-        int32_t cb = -1;
-        SBG_CHECK("probe passes with no coins authority (fresh datadir)",
-                  shielded_history_import_bind_guard_probe(db, SBG_LAG_H,
-                                                           &cb));
-
-        /* Manufacture the coins island 100 blocks ABOVE the chainstate tip
-         * (the real case: source chainstate lags the island root). */
-        struct uint256 island_hash;
-        sbg_fill(&island_hash, 0x1C, 1);
-        SBG_CHECK("coins island seeded above the chainstate tip",
-                  sbg_seed_coins_best(db, SBG_TIP_H + 100, &island_hash));
-
-        cb = -1;
-        SBG_CHECK("probe REFUSES a bind below the island root",
-                  !shielded_history_import_bind_guard_probe(db, SBG_TIP_H,
-                                                            &cb));
-        SBG_CHECK("probe reports the island root height",
-                  cb == SBG_TIP_H + 100);
-
-        struct shielded_import_report rep;
-        bool ok = sbg_import_fixture(
-            db, cs_dir, SBG_TIP_H, &tip_root, &rep);
-        SBG_CHECK("import REFUSES the height-mismatched bind", !ok);
-        SBG_CHECK("import did NOT commit", !rep.committed);
-
-        /* nothing committed: every table empty (the tx never began) */
-        SBG_CHECK("sapling_anchors empty after refusal",
-                  sbg_count(db, "sapling_anchors") == 0);
-        SBG_CHECK("sprout_anchors empty after refusal",
-                  sbg_count(db, "sprout_anchors") == 0);
-        SBG_CHECK("nullifiers empty after refusal",
-                  sbg_count(db, "nullifiers") == 0);
-
-        /* the safe wedge held: cursors still POSITIVE, blockers still up */
-        SBG_CHECK("Sprout anchor cursor still positive",
-                  sbg_cursor_is(db, ANCHOR_POOL_SPROUT, SBG_BOUNDARY));
-        SBG_CHECK("Sapling anchor cursor still positive",
-                  sbg_cursor_is(db, ANCHOR_POOL_SAPLING, SBG_BOUNDARY));
-        SBG_CHECK("anchor gap blocker still raised",
-                  blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
-        SBG_CHECK("nullifier gap blocker still raised",
-                  blocker_exists(UTXO_APPLY_NF_GAP_BLOCKER_ID));
-
-        progress_store_close();
-        test_rm_rf_recursive(cs_dir);
-        test_rm_rf_recursive(pg_dir);
-    }
-
-    /* ── Scenario B: IMPORT-TIME guard — a bind == the island root imports ── */
-    {
-        char cs_dir[256], pg_dir[256];
-        test_make_tmpdir(cs_dir, sizeof(cs_dir), "sbg_accept", "cs");
-        test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_accept", "pg");
-
-        struct uint256 tip_root;
-        SBG_CHECK("build complete fixture (accept scenario)",
-                  sbg_build_chainstate(cs_dir, &tip_root));
-
-        SBG_CHECK("progress.kv opens (accept)", progress_store_open(pg_dir));
-        sqlite3 *db = progress_store_db();
-        SBG_CHECK("wedge seeded (accept)", db && sbg_seed_wedge(db));
-
-        /* The consistent source: chainstate best block == the island root. */
-        struct uint256 island_hash;
-        sbg_best_block(&island_hash);
-        SBG_CHECK("coins island seeded AT the chainstate tip",
-                  sbg_seed_coins_best(db, SBG_TIP_H, &island_hash));
-
-        int32_t cb = -1;
-        SBG_CHECK("probe accepts a bind == the island root",
-                  shielded_history_import_bind_guard_probe(db, SBG_TIP_H,
-                                                           &cb) &&
-                  cb == SBG_TIP_H);
-
-        struct uint256 foreign_best;
-        sbg_fill(&foreign_best, 0xBC, 1000);
-        struct shielded_import_report rep;
-        bool ok = shielded_history_import_from_chainstate(
-            db, cs_dir, SBG_TIP_H, &foreign_best, &tip_root, &rep);
-        SBG_CHECK("import REFUSES source best block above/below target", !ok);
-        SBG_CHECK("source mismatch did NOT commit", !rep.committed);
-        SBG_CHECK("source mismatch left nullifiers empty",
-                  sbg_count(db, "nullifiers") == 0);
-
-        ok = sbg_import_fixture(
-            db, cs_dir, SBG_TIP_H, &tip_root, &rep);
-        SBG_CHECK("matching bind imports + commits",
-                  ok && rep.committed && rep.tip_anchor_bound);
-        SBG_CHECK("imported exactly 3 Sapling anchors",
-                  rep.sapling_anchors == 3);
-        SBG_CHECK("Sapling anchor cursor flipped to 0",
-                  sbg_cursor_is(db, ANCHOR_POOL_SAPLING, 0));
-        SBG_CHECK("anchor gap blocker cleared after consistent import",
-                  !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
-
-        /* the bound frontier is selectable for the forward fold */
-        {
-            struct incremental_merkle_tree latest;
-            struct uint256 latest_root;
-            SBG_CHECK("latest Sapling frontier == tip anchor",
-                      anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, &latest,
-                                            &latest_root, NULL) ==
-                          ANCHOR_KV_FOUND &&
-                      uint256_eq(&latest_root, &tip_root));
-        }
-
-        progress_store_close();
-        test_rm_rf_recursive(cs_dir);
-        test_rm_rf_recursive(pg_dir);
-    }
-
-    /* ── Scenario C: BOOT-TIME guard — a manufactured mismatch (cursors 0,
-     * frontier keyed BELOW the island root, header root MOVED) is detected and
-     * raises the NAMED permanent blocker; detection only, no auto-repair ── */
-    {
-        char pg_dir[256], nd_dir[256];
-        test_make_tmpdir(pg_dir, sizeof(pg_dir), "sbg_boot", "pg");
-        test_make_tmpdir(nd_dir, sizeof(nd_dir), "sbg_boot", "nd");
-
-        SBG_CHECK("progress.kv opens (boot)", progress_store_open(pg_dir));
-        sqlite3 *db = progress_store_db();
-
-        /* The post-buggy-import state: both cursors 0 (complete-history
-         * claim) and ONE imported frontier row keyed at the lagging bind
-         * height SBG_LAG_H. */
-        SBG_CHECK("cursors stamped complete (0)",
-                  db && anchor_kv_ensure_schema(db) &&
-                  anchor_kv_reset_mark_complete_in_tx(db));
-        struct incremental_merkle_tree frontier;
-        struct uint256 frontier_root;
-        sbg_sapling_tree(9, &frontier, &frontier_root);
-        SBG_CHECK("imported frontier row keyed at the lag height",
-                  anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &frontier,
-                                     SBG_LAG_H));
-
-        /* The coins island root sits 100 blocks higher. */
-        struct uint256 island_hash;
-        sbg_fill(&island_hash, 0x1C, 3);
-        SBG_CHECK("coins island seeded (boot)",
-                  sbg_seed_coins_best(db, SBG_TIP_H, &island_hash));
-
-        /* The header chain at the island root commits a DIFFERENT Sapling
-         * root — the live chain moved over blocks the imported frontier
-         * never saw. */
-        char ndb_path[320];
-        snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", nd_dir);
-        struct node_db ndb;
-        memset(&ndb, 0, sizeof(ndb));
-        SBG_CHECK("node.db opens (boot)", node_db_open(&ndb, ndb_path));
-        struct uint256 moved_root;
-        sbg_sapling_tree(23, &frontier, &moved_root);   /* reuse tree buffer */
-        SBG_CHECK("header root at the island root moved",
-                  !uint256_eq(&moved_root, &frontier_root) &&
-                  sbg_write_header_row(&ndb, SBG_TIP_H, &moved_root));
-
-        /* Pure detection. */
-        int64_t fh = -1;
-        int32_t ch = -1;
-        SBG_CHECK("bind mismatch detected on the manufactured state",
-                  utxo_apply_anchor_bind_mismatch(db, &ndb, &fh, &ch));
-        SBG_CHECK("detection reports the lagging frontier height",
-                  fh == SBG_LAG_H);
-        SBG_CHECK("detection reports the island root height",
-                  ch == SBG_TIP_H);
-
-        /* The refresh converts it into the NAMED permanent blocker. */
-        blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
-        utxo_apply_anchor_gap_blocker_refresh_with_ndb(db, &ndb);
-        SBG_CHECK("named blocker utxo_apply.anchor_backfill_gap raised",
-                  blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
-        char reason[BLOCKER_REASON_MAX];
-        SBG_CHECK("blocker reason names the mismatch + both heights",
-                  sbg_gap_blocker_reason(reason, sizeof(reason)) &&
-                  strstr(reason, "shielded anchor height mismatch") &&
-                  strstr(reason, "3176225") &&   /* SBG_LAG_H */
-                  strstr(reason, "3176325"));    /* SBG_TIP_H */
-
-        /* No auto-repair: the stored state is untouched (cursors stay 0,
-         * the frontier row stays, the fold's own fail-closed root check
-         * remains the backstop). */
-        SBG_CHECK("no auto-repair: Sapling cursor still 0",
-                  sbg_cursor_is(db, ANCHOR_POOL_SAPLING, 0));
-        SBG_CHECK("no auto-repair: frontier row untouched",
-                  sbg_count(db, "sapling_anchors") == 1);
-
-        /* The global progress_store is single-directory: close the mismatch
-         * fixture before the controls open their own stores. */
-        node_db_close(&ndb);
-        progress_store_close();
-
-        /* CONTROL 1 — consistent datadir (frontier at the island root,
-         * header root equal): no detection, blocker clears. */
-        {
-            char pg2[256], nd2[256];
-            test_make_tmpdir(pg2, sizeof(pg2), "sbg_bootok", "pg");
-            test_make_tmpdir(nd2, sizeof(nd2), "sbg_bootok", "nd");
-            SBG_CHECK("progress.kv opens (control)", progress_store_open(pg2));
-            sqlite3 *db2 = progress_store_db();
-            struct uint256 island2_hash;
-            sbg_fill(&island2_hash, 0x1C, 4);
-            SBG_CHECK("control: cursors complete + island + header seeded",
-                      db2 && anchor_kv_ensure_schema(db2) &&
-                      anchor_kv_reset_mark_complete_in_tx(db2) &&
-                      sbg_seed_coins_best(db2, SBG_TIP_H, &island2_hash));
-            struct incremental_merkle_tree ctree;
-            struct uint256 croot;
-            sbg_sapling_tree(9, &ctree, &croot);
-            SBG_CHECK("control: frontier keyed AT the island root",
-                      anchor_kv_add_tree(db2, ANCHOR_POOL_SAPLING, &ctree,
-                                         SBG_TIP_H));
-            char ndb2_path[320];
-            snprintf(ndb2_path, sizeof(ndb2_path), "%s/node.db", nd2);
-            struct node_db ndb2;
-            memset(&ndb2, 0, sizeof(ndb2));
-            SBG_CHECK("control: node.db opens + header root matches",
-                      node_db_open(&ndb2, ndb2_path) &&
-                      sbg_write_header_row(&ndb2, SBG_TIP_H, &croot));
-            SBG_CHECK("control: NO mismatch on a consistent datadir",
-                      !utxo_apply_anchor_bind_mismatch(db2, &ndb2, NULL,
-                                                       NULL));
-            blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
-            utxo_apply_anchor_gap_blocker_refresh_with_ndb(db2, &ndb2);
-            SBG_CHECK("control: blocker stays cleared",
-                      !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
-            node_db_close(&ndb2);
-            progress_store_close();
-            test_rm_rf_recursive(pg2);
-            test_rm_rf_recursive(nd2);
-        }
-
-        /* CONTROL 2 — commitment-free tail: frontier BELOW the island root
-         * but the header root did NOT move (no Sapling-output blocks in
-         * between). This is the healthy steady state of a folded node; the
-         * guard must stay silent. */
-        {
-            char pg3[256], nd3[256];
-            test_make_tmpdir(pg3, sizeof(pg3), "sbg_boottail", "pg");
-            test_make_tmpdir(nd3, sizeof(nd3), "sbg_boottail", "nd");
-            SBG_CHECK("progress.kv opens (tail)", progress_store_open(pg3));
-            sqlite3 *db3 = progress_store_db();
-            struct uint256 island3_hash;
-            sbg_fill(&island3_hash, 0x1C, 5);
-            SBG_CHECK("tail: cursors complete + island seeded",
-                      db3 && anchor_kv_ensure_schema(db3) &&
-                      anchor_kv_reset_mark_complete_in_tx(db3) &&
-                      sbg_seed_coins_best(db3, SBG_TIP_H, &island3_hash));
-            struct incremental_merkle_tree ttree;
-            struct uint256 troot;
-            sbg_sapling_tree(9, &ttree, &troot);
-            SBG_CHECK("tail: frontier keyed below the island root",
-                      anchor_kv_add_tree(db3, ANCHOR_POOL_SAPLING, &ttree,
-                                         SBG_LAG_H));
-            char ndb3_path[320];
-            snprintf(ndb3_path, sizeof(ndb3_path), "%s/node.db", nd3);
-            struct node_db ndb3;
-            memset(&ndb3, 0, sizeof(ndb3));
-            SBG_CHECK("tail: node.db opens + header root UNMOVED",
-                      node_db_open(&ndb3, ndb3_path) &&
-                      sbg_write_header_row(&ndb3, SBG_TIP_H, &troot));
-            SBG_CHECK("tail: NO mismatch on a commitment-free tail",
-                      !utxo_apply_anchor_bind_mismatch(db3, &ndb3, NULL,
-                                                       NULL));
-            blocker_clear(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID);
-            utxo_apply_anchor_gap_blocker_refresh_with_ndb(db3, &ndb3);
-            SBG_CHECK("tail: blocker stays cleared",
-                      !blocker_exists(UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID));
-            node_db_close(&ndb3);
-            progress_store_close();
-            test_rm_rf_recursive(pg3);
-            test_rm_rf_recursive(nd3);
-        }
-
-        /* CONTROL 3 — positive cursors (the ordinary safe wedge): the bind
-         * guard does not fire; the refresh raises the STANDARD backfill
-         * blocker, not the mismatch one. */
-        {
-            char pg4[256], nd4[256];
-            test_make_tmpdir(pg4, sizeof(pg4), "sbg_bootwedge", "pg");
-            test_make_tmpdir(nd4, sizeof(nd4), "sbg_bootwedge", "nd");
-            SBG_CHECK("progress.kv opens (wedge control)",
-                      progress_store_open(pg4));
-            sqlite3 *db4 = progress_store_db();
-            SBG_CHECK("wedge control seeded", db4 && sbg_seed_wedge(db4));
-            char ndb4_path[320];
-            snprintf(ndb4_path, sizeof(ndb4_path), "%s/node.db", nd4);
-            struct node_db ndb4;
-            memset(&ndb4, 0, sizeof(ndb4));
-            SBG_CHECK("wedge control: node.db opens",
-                      node_db_open(&ndb4, ndb4_path));
-            SBG_CHECK("wedge control: bind mismatch does NOT fire",
-                      !utxo_apply_anchor_bind_mismatch(db4, &ndb4, NULL,
-                                                       NULL));
-            utxo_apply_anchor_gap_blocker_refresh_with_ndb(db4, &ndb4);
-            char reason4[BLOCKER_REASON_MAX];
-            SBG_CHECK("wedge control: standard backfill blocker raised",
-                      sbg_gap_blocker_reason(reason4, sizeof(reason4)) &&
-                      strstr(reason4, "incomplete below cursor") &&
-                      !strstr(reason4, "shielded anchor height mismatch"));
-            node_db_close(&ndb4);
-            progress_store_close();
-            test_rm_rf_recursive(pg4);
-            test_rm_rf_recursive(nd4);
-        }
-
-        test_rm_rf_recursive(pg_dir);
-        test_rm_rf_recursive(nd_dir);
-    }
+    /* Each scenario helper runs its SBG_CHECKs in the original order and
+     * returns its own failure count. */
+    failures += sbg_import_refusal_scenario();
+    failures += sbg_matching_bind_import_scenario();
+    failures += sbg_boot_mismatch_detection_scenario();
 
     return failures;
 }
