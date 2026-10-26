@@ -516,11 +516,9 @@ static int check_wedged_blocker_names_child(void)
     return failures;
 }
 
-int test_supervisor(void)
+static int check_liveness_init_basics(void)
 {
-    printf("\n=== supervisor tests ===\n");
     int failures = 0;
-
     /* ── liveness_contract_init basics ──────────────────────────── */
     {
         struct liveness_contract c;
@@ -542,7 +540,12 @@ int test_supervisor(void)
         SUP_CHECK("init NULL name is safe (empty)",
             (liveness_contract_init(&c2, NULL), c2.name[0] == '\0'));
     }
+    return failures;
+}
 
+static int check_stall_reason_names(void)
+{
+    int failures = 0;
     /* ── stall reason naming ────────────────────────────────────── */
     SUP_CHECK("reason_name(NONE)",
         strcmp(supervisor_stall_reason_name(SUPERVISOR_STALL_NONE),
@@ -556,7 +559,12 @@ int test_supervisor(void)
     SUP_CHECK("reason_name(invalid) -> (invalid)",
         strcmp(supervisor_stall_reason_name((enum supervisor_stall_reason)99),
                "(invalid)") == 0);
+    return failures;
+}
 
+static int check_legacy_retry_policy(void)
+{
+    int failures = 0;
     /* Optional legacy dependencies are advisory. Prove their failure policy
      * is bounded without clocks, sockets, or a live zclassicd. */
     SUP_CHECK("legacy retry uses base while healthy",
@@ -574,7 +582,12 @@ int test_supervisor(void)
         legacy_mirror_supervisor_should_emit_stall(1024));
     SUP_CHECK("legacy stall diagnostics reject zero",
         !legacy_mirror_supervisor_should_emit_stall(0));
+    return failures;
+}
 
+static int check_register_unregister(void)
+{
+    int failures = 0;
     /* ── register / unregister ──────────────────────────────────── */
     supervisor_reset_for_testing();
     {
@@ -604,7 +617,12 @@ int test_supervisor(void)
         supervisor_unregister(ida);
         supervisor_unregister(idb);
     }
+    return failures;
+}
 
+static int check_unregister_keeps_ids(void)
+{
+    int failures = 0;
     /* ── unregister keeps every surviving id valid ──────────────────
      * The file-service restart pattern (register wkr, server, manifest;
      * retire server, manifest, wkr; start again) used to orphan the
@@ -645,7 +663,12 @@ int test_supervisor(void)
         SUP_CHECK("registry drains back to empty",
             supervisor_child_headroom() == SUPERVISOR_CAP);
     }
+    return failures;
+}
 
+static int check_registry_capacity(void)
+{
+    int failures = 0;
     /* ── registry capacity ───────────────────────────────────────── */
     supervisor_reset_for_testing();
     {
@@ -664,7 +687,12 @@ int test_supervisor(void)
         SUP_CHECK("registry rejects past capacity",
             over == SUPERVISOR_INVALID_ID);
     }
+    return failures;
+}
 
+static int check_tick_monotonicity(void)
+{
+    int failures = 0;
     /* ── tick monotonicity + ticks_run counter ──────────────────── */
     supervisor_reset_for_testing();
     {
@@ -691,7 +719,12 @@ int test_supervisor(void)
         SUP_CHECK("tick clears CHILD_REPORTED stall",
             atomic_load(&c.stall_reason) == SUPERVISOR_STALL_NONE);
     }
+    return failures;
+}
 
+static int check_progress_edge_rearm(void)
+{
+    int failures = 0;
     /* ── progress edge-rearm ─────────────────────────────────────── */
     supervisor_reset_for_testing();
     {
@@ -717,7 +750,12 @@ int test_supervisor(void)
         SUP_CHECK("changed progress clears NO_PROGRESS",
             atomic_load(&c.stall_reason) == SUPERVISOR_STALL_NONE);
     }
+    return failures;
+}
 
+static int check_child_reported_stall(void)
+{
+    int failures = 0;
     /* ── child-reported stall (rising edge only) ────────────────── */
     supervisor_reset_for_testing();
     {
@@ -743,7 +781,12 @@ int test_supervisor(void)
         SUP_CHECK("after tick+report, callback re-fires",
             atomic_load(&cc.stall_calls) == 2);
     }
+    return failures;
+}
 
+static int check_stall_observer(void)
+{
+    int failures = 0;
     /* ── process-wide stall observer (ops.debug.bundle seam) ─────── */
     supervisor_reset_for_testing();
     {
@@ -777,8 +820,13 @@ int test_supervisor(void)
         SUP_CHECK("cleared observer does not fire",
             atomic_load(&g_obs_calls) == 1);
     }
+    return failures;
+}
 
 #ifdef ZCL_TESTING
+static int check_stale_cancel_delivery(void)
+{
+    int failures = 0;
     /* A stale delivery claim must cancel the exact report generation it read.
      * If a producer publishes the same reason again before cancellation, a
      * reason-only CAS cannot distinguish the fresh report from the old one. */
@@ -864,107 +912,140 @@ int test_supervisor(void)
         pthread_cond_destroy(&blocked.changed);
         pthread_mutex_destroy(&blocked.lock);
     }
+    return failures;
+}
 
+static bool register_rearm_targets(bool registered,
+                                   struct liveness_contract *targets,
+                                   const char **names,
+                                   const enum supervisor_stall_reason *reasons,
+                                   supervisor_child_id *ids,
+                                   struct rearm_cancel_probe *probe)
+{
+    for (int i = 0; i < 5; i++) {
+        liveness_contract_init(&targets[i], names[i]);
+        probe->delivery[i].owner = probe;
+        probe->delivery[i].index = i;
+        targets[i].ctx = &probe->delivery[i];
+        targets[i].on_stall = record_rearm_delivery;
+        atomic_store(&probe->calls[i], 0);
+        atomic_store(&probe->delivered_reason[i], -1);
+        ids[i] = supervisor_register(&targets[i]);
+        registered = registered && ids[i] >= 0;
+        if (i < 4) {
+            probe->contracts[i] = &targets[i];
+            probe->ids[i] = ids[i];
+            probe->reasons[i] = reasons[i];
+        }
+    }
+    return registered;
+}
+
+static bool start_rearm_workers(bool registered, supervisor_child_id blocker_id)
+{
+    bool started = registered && supervisor_start();
+    if (started)
+        supervisor_report_stall(blocker_id,
+                                SUPERVISOR_STALL_CHILD_REPORTED);
+    return started;
+}
+
+static void arm_rearm_cancel_probe(bool worker_blocked,
+                                   struct rearm_cancel_probe *probe,
+                                   supervisor_child_id *ids,
+                                   const enum supervisor_stall_reason *reasons)
+{
+    if (worker_blocked) {
+        for (int i = 0; i < 5; i++)
+            supervisor_report_stall(ids[i], reasons[i]);
+        supervisor_set_rearm_cancel_hook_for_testing(
+            republish_during_rearm, probe);
+        supervisor_tick(ids[0]);
+        supervisor_tick(ids[1]);
+        supervisor_progress(ids[2], 1);
+        supervisor_progress_idle(ids[3]);
+        supervisor_progress(ids[4], 0);
+    }
+}
+
+static int check_rearm_cancel_delivery(void)
+{
+    int failures = 0;
     /* Rearming captures the report generation before clearing its live
      * reason. A report published through the real API in that gap is newer
      * work and must not be consumed by the rearm's cancellation. */
     supervisor_reset_for_testing();
-    {
-        struct liveness_contract blocker, targets[5];
-        struct blocking_stall blocked = {
-            .lock = PTHREAD_MUTEX_INITIALIZER,
-            .changed = PTHREAD_COND_INITIALIZER,
-        };
-        struct rearm_cancel_probe probe = {
-            .lock = PTHREAD_MUTEX_INITIALIZER,
-            .changed = PTHREAD_COND_INITIALIZER,
-        };
-        static const char *names[5] = {
-            "stall.rearm.tick_child", "stall.rearm.tick_deadline",
-            "stall.rearm.progress", "stall.rearm.idle",
-            "stall.rearm.progress_unchanged"
-        };
-        const enum supervisor_stall_reason reasons[5] = {
-            SUPERVISOR_STALL_CHILD_REPORTED,
-            SUPERVISOR_STALL_TIME_DEADLINE,
-            SUPERVISOR_STALL_NO_PROGRESS,
-            SUPERVISOR_STALL_NO_PROGRESS,
-            SUPERVISOR_STALL_NO_PROGRESS
-        };
-        liveness_contract_init(&blocker, "stall.rearm.blocker");
-        blocker.ctx = &blocked;
-        blocker.on_stall = wait_stall;
-        supervisor_child_id blocker_id = supervisor_register(&blocker);
-        bool registered = blocker_id >= 0;
-        supervisor_child_id ids[5];
-        for (int i = 0; i < 5; i++) {
-            liveness_contract_init(&targets[i], names[i]);
-            probe.delivery[i].owner = &probe;
-            probe.delivery[i].index = i;
-            targets[i].ctx = &probe.delivery[i];
-            targets[i].on_stall = record_rearm_delivery;
-            atomic_store(&probe.calls[i], 0);
-            atomic_store(&probe.delivered_reason[i], -1);
-            ids[i] = supervisor_register(&targets[i]);
-            registered = registered && ids[i] >= 0;
-            if (i < 4) {
-                probe.contracts[i] = &targets[i];
-                probe.ids[i] = ids[i];
-                probe.reasons[i] = reasons[i];
-            }
-        }
-        bool started = registered && supervisor_start();
-        if (started)
-            supervisor_report_stall(blocker_id,
-                                    SUPERVISOR_STALL_CHILD_REPORTED);
-        bool worker_blocked = started && wait_stall_entered(&blocked);
-        if (worker_blocked) {
-            for (int i = 0; i < 5; i++)
-                supervisor_report_stall(ids[i], reasons[i]);
-            supervisor_set_rearm_cancel_hook_for_testing(
-                republish_during_rearm, &probe);
-            supervisor_tick(ids[0]);
-            supervisor_tick(ids[1]);
-            supervisor_progress(ids[2], 1);
-            supervisor_progress_idle(ids[3]);
-            supervisor_progress(ids[4], 0);
-        }
-        int hooks_before_release = atomic_load(&probe.hook_calls);
-        bool unchanged_kept_reason =
-            atomic_load(&targets[4].stall_reason) ==
-                SUPERVISOR_STALL_NO_PROGRESS;
-        pthread_mutex_lock(&blocked.lock);
-        atomic_store(&blocked.release, true);
-        pthread_cond_broadcast(&blocked.changed);
-        pthread_mutex_unlock(&blocked.lock);
-        bool delivered = worker_blocked && wait_rearm_cancel_result(&probe);
-        supervisor_set_rearm_cancel_hook_for_testing(NULL, NULL);
-        if (started)
-            supervisor_stop();
+    struct liveness_contract blocker, targets[5];
+    struct blocking_stall blocked = {
+        .lock = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER,
+    };
+    struct rearm_cancel_probe probe = {
+        .lock = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER,
+    };
+    static const char *names[5] = {
+        "stall.rearm.tick_child", "stall.rearm.tick_deadline",
+        "stall.rearm.progress", "stall.rearm.idle",
+        "stall.rearm.progress_unchanged"
+    };
+    const enum supervisor_stall_reason reasons[5] = {
+        SUPERVISOR_STALL_CHILD_REPORTED,
+        SUPERVISOR_STALL_TIME_DEADLINE,
+        SUPERVISOR_STALL_NO_PROGRESS,
+        SUPERVISOR_STALL_NO_PROGRESS,
+        SUPERVISOR_STALL_NO_PROGRESS
+    };
+    liveness_contract_init(&blocker, "stall.rearm.blocker");
+    blocker.ctx = &blocked;
+    blocker.on_stall = wait_stall;
+    supervisor_child_id blocker_id = supervisor_register(&blocker);
+    bool registered = blocker_id >= 0;
+    supervisor_child_id ids[5];
+    registered = register_rearm_targets(registered, targets, names, reasons,
+                                        ids, &probe);
+    bool started = start_rearm_workers(registered, blocker_id);
+    bool worker_blocked = started && wait_stall_entered(&blocked);
+    arm_rearm_cancel_probe(worker_blocked, &probe, ids, reasons);
+    int hooks_before_release = atomic_load(&probe.hook_calls);
+    bool unchanged_kept_reason =
+        atomic_load(&targets[4].stall_reason) ==
+            SUPERVISOR_STALL_NO_PROGRESS;
+    pthread_mutex_lock(&blocked.lock);
+    atomic_store(&blocked.release, true);
+    pthread_cond_broadcast(&blocked.changed);
+    pthread_mutex_unlock(&blocked.lock);
+    bool delivered = worker_blocked && wait_rearm_cancel_result(&probe);
+    supervisor_set_rearm_cancel_hook_for_testing(NULL, NULL);
+    if (started)
+        supervisor_stop();
 
-        SUP_CHECK("each reason-clearing rearm reaches its exact-token seam",
-                  hooks_before_release == 4);
-        SUP_CHECK("unchanged progress does not rearm or run the seam",
-                  unchanged_kept_reason && hooks_before_release == 4);
-        SUP_CHECK("reports published during every rearm survive once",
-                  delivered);
-        SUP_CHECK("rearmed reports retain their published reasons",
-                  atomic_load(&probe.delivered_reason[0]) == (int)reasons[0] &&
-                  atomic_load(&probe.delivered_reason[1]) == (int)reasons[1] &&
-                  atomic_load(&probe.delivered_reason[2]) == (int)reasons[2] &&
-                  atomic_load(&probe.delivered_reason[3]) == (int)reasons[3]);
-        SUP_CHECK("unchanged progress delivers its original report once",
-                  atomic_load(&probe.calls[4]) == 1 &&
-                  atomic_load(&probe.delivered_reason[4]) == (int)reasons[4]);
-        pthread_cond_destroy(&probe.changed);
-        pthread_mutex_destroy(&probe.lock);
-        pthread_cond_destroy(&blocked.changed);
-        pthread_mutex_destroy(&blocked.lock);
-    }
+    SUP_CHECK("each reason-clearing rearm reaches its exact-token seam",
+              hooks_before_release == 4);
+    SUP_CHECK("unchanged progress does not rearm or run the seam",
+              unchanged_kept_reason && hooks_before_release == 4);
+    SUP_CHECK("reports published during every rearm survive once",
+              delivered);
+    SUP_CHECK("rearmed reports retain their published reasons",
+              atomic_load(&probe.delivered_reason[0]) == (int)reasons[0] &&
+              atomic_load(&probe.delivered_reason[1]) == (int)reasons[1] &&
+              atomic_load(&probe.delivered_reason[2]) == (int)reasons[2] &&
+              atomic_load(&probe.delivered_reason[3]) == (int)reasons[3]);
+    SUP_CHECK("unchanged progress delivers its original report once",
+              atomic_load(&probe.calls[4]) == 1 &&
+              atomic_load(&probe.delivered_reason[4]) == (int)reasons[4]);
+    pthread_cond_destroy(&probe.changed);
+    pthread_mutex_destroy(&probe.lock);
+    pthread_cond_destroy(&blocked.changed);
+    pthread_mutex_destroy(&blocked.lock);
+    return failures;
+}
+
 #endif
 
-    failures += check_periodic_tick_dispatch();
-
+static int check_event_wake_tick(void)
+{
+    int failures = 0;
     /* Explicit event wake bypasses the periodic cadence. */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(1000);
@@ -985,7 +1066,12 @@ int test_supervisor(void)
                   atomic_load(&cc.tick_calls) == 1);
         supervisor_stop();
     }
+    return failures;
+}
 
+static int check_deadline_stall_once(void)
+{
+    int failures = 0;
     /* ── deadline triggers on_stall once (edge-triggered) ───────── */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(5);
@@ -1021,7 +1107,12 @@ int test_supervisor(void)
 
         supervisor_stop();
     }
+    return failures;
+}
 
+static int check_progress_frozen_stall(void)
+{
+    int failures = 0;
     /* ── progress-frozen triggers on_stall ──────────────────────── */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(5);
@@ -1052,7 +1143,12 @@ int test_supervisor(void)
 
         supervisor_stop();
     }
+    return failures;
+}
 
+static int check_completed_child_stall(void)
+{
+    int failures = 0;
     /* ── completed child is no longer stall-monitorable ──────────── */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(5);
@@ -1096,7 +1192,12 @@ int test_supervisor(void)
 
         supervisor_stop();
     }
+    return failures;
+}
 
+static int check_start_stop_lifecycle(void)
+{
+    int failures = 0;
     /* ── lifecycle: start idempotency + stop without start ──────── */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(5);
@@ -1110,7 +1211,12 @@ int test_supervisor(void)
         SUP_CHECK("stop+start cycle works",
             (supervisor_start() && (supervisor_stop(), true)));
     }
+    return failures;
+}
 
+static int check_snapshot_and_dump(void)
+{
+    int failures = 0;
     /* ── snapshot_all + dump_state_json shape ───────────────────── */
     supervisor_reset_for_testing();
     {
@@ -1161,9 +1267,12 @@ int test_supervisor(void)
             kids && json_size(kids) == 2);
         json_free(&v);
     }
+    return failures;
+}
 
-    failures += check_restart_period_bounds();
-
+static int check_restart_policy_names(void)
+{
+    int failures = 0;
     /* ── restart policy: names + default is TEMPORARY ───────────────── */
     SUP_CHECK("policy_name(TEMPORARY)",
         strcmp(supervisor_restart_policy_name(SUPERVISOR_RESTART_TEMPORARY),
@@ -1182,7 +1291,12 @@ int test_supervisor(void)
         SUP_CHECK("init defaults worker_state to UNKNOWN",
             atomic_load(&c.worker_state) == SUPERVISOR_WORKER_UNKNOWN);
     }
+    return failures;
+}
 
+static int check_temporary_child_not_respawned(void)
+{
+    int failures = 0;
     /* ── TEMPORARY child that dies stays dead (current behavior) ─────── */
     supervisor_reset_for_testing();
     {
@@ -1203,7 +1317,12 @@ int test_supervisor(void)
         SUP_CHECK("TEMPORARY restart_count stays 0",
             atomic_load(&c.restart_count) == 0u);
     }
+    return failures;
+}
 
+static int check_permanent_child_respawned(void)
+{
+    int failures = 0;
     /* ── PERMANENT child that dies is respawned (once, then left alive) ─ */
     supervisor_reset_for_testing();
     {
@@ -1235,7 +1354,12 @@ int test_supervisor(void)
         SUP_CHECK("no double-respawn while the worker is alive",
             atomic_load(&p.respawn_calls) == 1);
     }
+    return failures;
+}
 
+static int check_restart_storm_escalates(void)
+{
+    int failures = 0;
     /* ── restart storm: N+1 deaths in the window → give up + name blocker ─ */
     supervisor_reset_for_testing();
     {
@@ -1268,124 +1392,164 @@ int test_supervisor(void)
         SUP_CHECK("storm stops respawning after escalation",
             atomic_load(&p.respawn_calls) == 3);
     }
+    return failures;
+}
 
-    /* A blocked callback must not freeze the independent sweep heartbeat. */
-    failures += check_blocked_tick_sweep_progress();
+static void start_blocked_stall_child(struct blocking_stall *stall,
+                                      bool *started, bool *entered,
+                                      bool *advanced)
+{
+    static struct liveness_contract c;
+    atomic_store(&stall->entered, false);
+    atomic_store(&stall->release, false);
+    atomic_store(&stall->returned, false);
+    liveness_contract_init(&c, "loop.blocked_stall");
+    c.ctx = stall;
+    c.on_stall = wait_stall;
+    atomic_store(&c.deadline_secs, 1);
+    supervisor_child_id id = supervisor_register(&c);
+    *started = id >= 0 && supervisor_start();
+    if (*started)
+        atomic_store(&c.last_tick_us,
+                     atomic_load(&c.last_tick_us) - 5000000);
+    *entered = *started && wait_for_flag(&stall->entered, 500);
+    uint64_t hb0 = supervisor_sweep_heartbeat();
+    *advanced = false;
+    for (int elapsed = 0; *entered && elapsed < 100; elapsed++) {
+        if (supervisor_sweep_heartbeat() > hb0) {
+            *advanced = true;
+            break;
+        }
+        sleep_ms(1);
+    }
+}
 
+static void register_pending_stall_children(
+    struct liveness_contract *pending, struct cb_counts *counts,
+    supervisor_child_id *pending_ids)
+{
+    const char *names[] = { "stall.recovered", "stall.completed",
+                           "stall.retired", "stall.remaining" };
+    for (int i = 0; i < 4; i++) {
+        atomic_store(&counts[i].stall_calls, 0);
+        liveness_contract_init(&pending[i], names[i]);
+        pending[i].ctx = &counts[i];
+        pending[i].on_stall = inc_stall;
+        atomic_store(&pending[i].deadline_secs, 1);
+        atomic_fetch_sub(&pending[i].last_tick_us, 5000000);
+        pending_ids[i] = supervisor_register(&pending[i]);
+    }
+}
+
+static bool wait_pending_stalls_detected(bool advanced,
+                                         struct liveness_contract *pending)
+{
+    bool detected = false;
+    for (int elapsed = 0; advanced && elapsed < 500; elapsed++) {
+        detected = true;
+        for (int i = 0; i < 4; i++)
+            detected = detected && atomic_load(&pending[i].stall_fires) == 1;
+        if (detected) break;
+        sleep_ms(1);
+    }
+    return detected;
+}
+
+static void rearm_pending_stall_report(bool detected,
+                                       struct liveness_contract *pending,
+                                       supervisor_child_id *pending_ids)
+{
+        /* A child may rearm its own atomic reason before reporting a new
+         * cause. Coalescing must retain the newest report, not leave an old
+         * pending cause that no longer matches the live contract. */
+    atomic_store(&pending[3].deadline_secs, 0);
+    uint64_t before_rearm = supervisor_sweep_heartbeat();
+    for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
+        if (supervisor_sweep_heartbeat() >= before_rearm + 2) break;
+        sleep_ms(1);
+    }
+    atomic_store(&pending[3].stall_reason, SUPERVISOR_STALL_NONE);
+    if (detected)
+        supervisor_report_stall(pending_ids[3], SUPERVISOR_STALL_CHILD_REPORTED);
+}
+
+static void wait_remaining_stall_delivery(bool detected,
+                                          struct cb_counts *counts)
+{
+    for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
+        if (atomic_load(&counts[3].stall_calls) > 0) break;
+        sleep_ms(1);
+    }
+}
+
+static int check_blocked_stall_recovery(void)
+{
+    int failures = 0;
     /* A recovery callback may block on disk or another worker. Detection of
      * that stall must not stall the root sweep which systemd independently
      * uses as its keepalive gate. */
     supervisor_reset_for_testing();
     supervisor_set_tick_ms_for_testing(5);
-    {
-        static struct liveness_contract c;
-        static struct blocking_stall stall = {
-            .lock = PTHREAD_MUTEX_INITIALIZER,
-            .changed = PTHREAD_COND_INITIALIZER,
-        };
-        atomic_store(&stall.entered, false);
-        atomic_store(&stall.release, false);
-        atomic_store(&stall.returned, false);
-        liveness_contract_init(&c, "loop.blocked_stall");
-        c.ctx = &stall;
-        c.on_stall = wait_stall;
-        atomic_store(&c.deadline_secs, 1);
-        supervisor_child_id id = supervisor_register(&c);
-        bool started = id >= 0 && supervisor_start();
-        if (started)
-            atomic_store(&c.last_tick_us,
-                         atomic_load(&c.last_tick_us) - 5000000);
-        bool entered = started && wait_for_flag(&stall.entered, 500);
-        uint64_t hb0 = supervisor_sweep_heartbeat();
-        bool advanced = false;
-        for (int elapsed = 0; entered && elapsed < 100; elapsed++) {
-            if (supervisor_sweep_heartbeat() > hb0) {
-                advanced = true;
-                break;
-            }
-            sleep_ms(1);
-        }
-        SUP_CHECK("blocking on_stall callback is entered", entered);
-        SUP_CHECK("sweep advances while on_stall remains blocked",
-                  entered && advanced && !atomic_load(&stall.returned));
+    static struct blocking_stall stall = {
+        .lock = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER,
+    };
+    bool started, entered, advanced;
+    start_blocked_stall_child(&stall, &started, &entered, &advanced);
+    SUP_CHECK("blocking on_stall callback is entered", entered);
+    SUP_CHECK("sweep advances while on_stall remains blocked",
+              entered && advanced && !atomic_load(&stall.returned));
 
         /* Queue later children behind the blocked callback. Recovery,
          * completion and retiring a registry slot must invalidate pending
          * delivery; a different contract reusing that slot inherits nothing. */
-        static struct liveness_contract pending[4], replacement;
-        static struct cb_counts counts[4], replacement_counts;
-        supervisor_child_id pending_ids[4];
-        const char *names[] = { "stall.recovered", "stall.completed",
-                               "stall.retired", "stall.remaining" };
-        for (int i = 0; i < 4; i++) {
-            atomic_store(&counts[i].stall_calls, 0);
-            liveness_contract_init(&pending[i], names[i]);
-            pending[i].ctx = &counts[i];
-            pending[i].on_stall = inc_stall;
-            atomic_store(&pending[i].deadline_secs, 1);
-            atomic_fetch_sub(&pending[i].last_tick_us, 5000000);
-            pending_ids[i] = supervisor_register(&pending[i]);
-        }
-        bool detected = false;
-        for (int elapsed = 0; advanced && elapsed < 500; elapsed++) {
-            detected = true;
-            for (int i = 0; i < 4; i++)
-                detected = detected && atomic_load(&pending[i].stall_fires) == 1;
-            if (detected) break;
-            sleep_ms(1);
-        }
-        SUP_CHECK("blocked recovery does not prevent later stall detection", detected);
-        /* A child may rearm its own atomic reason before reporting a new
-         * cause. Coalescing must retain the newest report, not leave an old
-         * pending cause that no longer matches the live contract. */
-        atomic_store(&pending[3].deadline_secs, 0);
-        uint64_t before_rearm = supervisor_sweep_heartbeat();
-        for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
-            if (supervisor_sweep_heartbeat() >= before_rearm + 2) break;
-            sleep_ms(1);
-        }
-        atomic_store(&pending[3].stall_reason, SUPERVISOR_STALL_NONE);
-        if (detected)
-            supervisor_report_stall(pending_ids[3], SUPERVISOR_STALL_CHILD_REPORTED);
-        supervisor_tick(pending_ids[0]);
-        supervisor_child_complete(pending_ids[1]);
-        supervisor_unregister(pending_ids[2]);
-        liveness_contract_init(&replacement, "stall.replacement");
-        atomic_store(&replacement_counts.stall_calls, 0);
-        replacement.ctx = &replacement_counts;
-        replacement.on_stall = inc_stall;
-        supervisor_child_id replacement_id = supervisor_register(&replacement);
-        SUP_CHECK("replacement reuses retired slot", replacement_id == pending_ids[2]);
+    static struct liveness_contract pending[4], replacement;
+    static struct cb_counts counts[4], replacement_counts;
+    supervisor_child_id pending_ids[4];
+    register_pending_stall_children(pending, counts, pending_ids);
+    bool detected = wait_pending_stalls_detected(advanced, pending);
+    SUP_CHECK("blocked recovery does not prevent later stall detection", detected);
+    rearm_pending_stall_report(detected, pending, pending_ids);
+    supervisor_tick(pending_ids[0]);
+    supervisor_child_complete(pending_ids[1]);
+    supervisor_unregister(pending_ids[2]);
+    liveness_contract_init(&replacement, "stall.replacement");
+    atomic_store(&replacement_counts.stall_calls, 0);
+    replacement.ctx = &replacement_counts;
+    replacement.on_stall = inc_stall;
+    supervisor_child_id replacement_id = supervisor_register(&replacement);
+    SUP_CHECK("replacement reuses retired slot", replacement_id == pending_ids[2]);
 
-        pthread_mutex_lock(&stall.lock);
-        atomic_store(&stall.release, true);
-        pthread_cond_broadcast(&stall.changed);
-        pthread_mutex_unlock(&stall.lock);
-        for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
-            if (atomic_load(&counts[3].stall_calls) > 0) break;
-            sleep_ms(1);
-        }
-        if (started)
-            supervisor_stop();
-        SUP_CHECK("blocking on_stall callback returns before teardown",
-                  !entered || atomic_load(&stall.returned));
-        SUP_CHECK("remaining stalled child is delivered once after recovery",
-                  detected && atomic_load(&counts[3].stall_calls) == 1);
-        SUP_CHECK("newer pending reason coalesces with exact accounting",
-                  atomic_load(&pending[3].stall_fires) == 2 &&
-                  atomic_load(&pending[3].stall_delivery_coalesced) == 1 &&
-                  atomic_load(&pending[3].stall_delivery_discarded) == 0);
-        SUP_CHECK("recovered completed and retired callbacks are discarded",
-                  atomic_load(&counts[0].stall_calls) == 0 &&
-                  atomic_load(&counts[1].stall_calls) == 0 &&
-                  atomic_load(&counts[2].stall_calls) == 0 &&
-                  atomic_load(&replacement_counts.stall_calls) == 0);
-        SUP_CHECK("each cancelled pending delivery is accounted for",
-                  atomic_load(&pending[0].stall_delivery_discarded) == 1 &&
-                  atomic_load(&pending[1].stall_delivery_discarded) == 1 &&
-                  atomic_load(&pending[2].stall_delivery_discarded) == 1);
-    }
+    pthread_mutex_lock(&stall.lock);
+    atomic_store(&stall.release, true);
+    pthread_cond_broadcast(&stall.changed);
+    pthread_mutex_unlock(&stall.lock);
+    wait_remaining_stall_delivery(detected, counts);
+    if (started)
+        supervisor_stop();
+    SUP_CHECK("blocking on_stall callback returns before teardown",
+              !entered || atomic_load(&stall.returned));
+    SUP_CHECK("remaining stalled child is delivered once after recovery",
+              detected && atomic_load(&counts[3].stall_calls) == 1);
+    SUP_CHECK("newer pending reason coalesces with exact accounting",
+              atomic_load(&pending[3].stall_fires) == 2 &&
+              atomic_load(&pending[3].stall_delivery_coalesced) == 1 &&
+              atomic_load(&pending[3].stall_delivery_discarded) == 0);
+    SUP_CHECK("recovered completed and retired callbacks are discarded",
+              atomic_load(&counts[0].stall_calls) == 0 &&
+              atomic_load(&counts[1].stall_calls) == 0 &&
+              atomic_load(&counts[2].stall_calls) == 0 &&
+              atomic_load(&replacement_counts.stall_calls) == 0);
+    SUP_CHECK("each cancelled pending delivery is accounted for",
+              atomic_load(&pending[0].stall_delivery_discarded) == 1 &&
+              atomic_load(&pending[1].stall_delivery_discarded) == 1 &&
+              atomic_load(&pending[2].stall_delivery_discarded) == 1);
+    return failures;
+}
 
+static int check_stop_pending_callback(void)
+{
+    int failures = 0;
     /* An incomplete bounded stop cannot authorize reinitializing a callback's
      * storage or starting a second worker over it. Releasing the retained
      * callback and retrying stop must make a later start possible. */
@@ -1423,7 +1587,12 @@ int test_supervisor(void)
         SUP_CHECK("restart succeeds after callback joined", supervisor_start());
         supervisor_stop();
     }
+    return failures;
+}
 
+static int check_wedged_tick_runner_blocker(void)
+{
+    int failures = 0;
     /* ── a wedged tick-runner becomes a NAMED blocker (edge-triggered) ─────
      * A child on_tick that never returns freezes the runner heartbeat. The
      * sweep detects the lapse and names supervisor.tick_runner_wedged — a
@@ -1454,7 +1623,45 @@ int test_supervisor(void)
 
         blocker_reset_for_testing();
     }
+    return failures;
+}
 
+int test_supervisor(void)
+{
+    printf("\n=== supervisor tests ===\n");
+    int failures = 0;
+
+    failures += check_liveness_init_basics();
+    failures += check_stall_reason_names();
+    failures += check_legacy_retry_policy();
+    failures += check_register_unregister();
+    failures += check_unregister_keeps_ids();
+    failures += check_registry_capacity();
+    failures += check_tick_monotonicity();
+    failures += check_progress_edge_rearm();
+    failures += check_child_reported_stall();
+    failures += check_stall_observer();
+#ifdef ZCL_TESTING
+    failures += check_stale_cancel_delivery();
+    failures += check_rearm_cancel_delivery();
+#endif
+    failures += check_periodic_tick_dispatch();
+    failures += check_event_wake_tick();
+    failures += check_deadline_stall_once();
+    failures += check_progress_frozen_stall();
+    failures += check_completed_child_stall();
+    failures += check_start_stop_lifecycle();
+    failures += check_snapshot_and_dump();
+    failures += check_restart_period_bounds();
+    failures += check_restart_policy_names();
+    failures += check_temporary_child_not_respawned();
+    failures += check_permanent_child_respawned();
+    failures += check_restart_storm_escalates();
+    /* A blocked callback must not freeze the independent sweep heartbeat. */
+    failures += check_blocked_tick_sweep_progress();
+    failures += check_blocked_stall_recovery();
+    failures += check_stop_pending_callback();
+    failures += check_wedged_tick_runner_blocker();
     failures += check_wedged_blocker_names_child();
 
     /* Restore default tick period for any later tests. */
