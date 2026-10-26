@@ -148,6 +148,34 @@ int t_long_functions_enforced_ratchet(void)
     return failures;
 }
 
+/* Locates the lint-gate output file and reads it whole into *out (the
+ * caller frees). Returns read_entire_file's status, or -1 when the output
+ * path cannot be resolved — the same guard the inline captures used. */
+static int lint_gate_capture_output(char **out)
+{
+    char out_path[PATH_MAX];
+    return lint_gate_out_path(out_path, sizeof(out_path)) == 0
+               ? read_entire_file(out_path, out)
+               : -1;
+}
+
+/* Gate #12 WARN-tier runner: once the preceding plant/write step succeeded
+ * (pre_ok == 0), runs the lib/ gate over the isolated lib fixture tree and
+ * baseline, then captures its output into *out (the caller frees). A
+ * skipped run reports the -999 sentinel; *out_read is 0 only when the gate
+ * ran and its output was read. Returns the gate's exit code. */
+static int longfn_lib_warn_tier_run(int pre_ok, char **out, int *out_read)
+{
+    int rc =
+        pre_ok == 0
+            ? run_gate_script_with_env2(LONGFN_SCRIPT_REL,
+                  "ZCL_LONGFN_LIB_ROOTS", LONGFN_LIB_DIR_REL,
+                  "ZCL_LONGFN_LIB_BASELINE", LONGFN_LIB_BASELINE_REL)
+            : -999;
+    *out_read = rc >= 0 ? lint_gate_capture_output(out) : -1;
+    return rc;
+}
+
 /* Gate #12 WARN tier — lib/ (excl. tests/harness/include/test/). Same mechanism, but a
  * violation must PRINT (WARN) and never fail the build (exit 0), mirroring
  * E1's lib/domain WARN tier. */
@@ -173,19 +201,10 @@ int t_long_functions_lib_warn_tier(void)
     int planted_a = plant_long_function_file(
         LONGFN_LIB_FIXTURE_REL, "longfn_lib_case_new", 520, NULL);
     int wrote_baseline_empty = write_file(LONGFN_LIB_BASELINE_REL, "");
-    int new_rc =
-        (planted_a == 0 && wrote_baseline_empty == 0)
-            ? run_gate_script_with_env2(LONGFN_SCRIPT_REL,
-                  "ZCL_LONGFN_LIB_ROOTS", LONGFN_LIB_DIR_REL,
-                  "ZCL_LONGFN_LIB_BASELINE", LONGFN_LIB_BASELINE_REL)
-            : -999;
-    char new_out_path[PATH_MAX];
+    int new_pre_ok = (planted_a == 0 && wrote_baseline_empty == 0) ? 0 : -999;
+    int new_read = -1;
     char *new_out = NULL;
-    int new_read =
-        (new_rc >= 0 &&
-         lint_gate_out_path(new_out_path, sizeof(new_out_path)) == 0)
-            ? read_entire_file(new_out_path, &new_out)
-            : -1;
+    int new_rc = longfn_lib_warn_tier_run(new_pre_ok, &new_out, &new_read);
 
     /* Case B: baseline lowered below the fixture's actual length — must
      * WARN as "grew past its baselined length" but still exit 0. */
@@ -193,36 +212,18 @@ int t_long_functions_lib_warn_tier(void)
     (void)snprintf(baseline_grown, sizeof(baseline_grown),
                    "%s longfn_lib_case_new 400\n", LONGFN_LIB_FIXTURE_REL);
     int wrote_baseline_grown = write_file(LONGFN_LIB_BASELINE_REL, baseline_grown);
-    int grown_rc =
-        wrote_baseline_grown == 0
-            ? run_gate_script_with_env2(LONGFN_SCRIPT_REL,
-                  "ZCL_LONGFN_LIB_ROOTS", LONGFN_LIB_DIR_REL,
-                  "ZCL_LONGFN_LIB_BASELINE", LONGFN_LIB_BASELINE_REL)
-            : -999;
-    char grown_out_path[PATH_MAX];
+    int grown_read = -1;
     char *grown_out = NULL;
-    int grown_read =
-        (grown_rc >= 0 &&
-         lint_gate_out_path(grown_out_path, sizeof(grown_out_path)) == 0)
-            ? read_entire_file(grown_out_path, &grown_out)
-            : -1;
+    int grown_rc = longfn_lib_warn_tier_run(wrote_baseline_grown, &grown_out,
+                                            &grown_read);
 
     /* Recovery: remove fixture + baseline entirely. */
     unlink_rel(LONGFN_LIB_FIXTURE_REL);
     int wrote_baseline_recover = write_file(LONGFN_LIB_BASELINE_REL, "");
-    int recover_rc =
-        wrote_baseline_recover == 0
-            ? run_gate_script_with_env2(LONGFN_SCRIPT_REL,
-                  "ZCL_LONGFN_LIB_ROOTS", LONGFN_LIB_DIR_REL,
-                  "ZCL_LONGFN_LIB_BASELINE", LONGFN_LIB_BASELINE_REL)
-            : -999;
-    char recover_out_path[PATH_MAX];
+    int recover_read = -1;
     char *recover_out = NULL;
-    int recover_read =
-        (recover_rc >= 0 &&
-         lint_gate_out_path(recover_out_path, sizeof(recover_out_path)) == 0)
-            ? read_entire_file(recover_out_path, &recover_out)
-            : -1;
+    int recover_rc = longfn_lib_warn_tier_run(wrote_baseline_recover,
+                                              &recover_out, &recover_read);
 
     unlink_rel(LONGFN_LIB_FIXTURE_REL);
     unlink_rel(LONGFN_LIB_BASELINE_REL);
@@ -355,6 +356,67 @@ int t_e1_file_size_bands(void)
     return failures;
 }
 
+/* Resolves the isolated scan-root, empty-root and baseline paths (stopping
+ * at the first failure, like the chained repo_path guards) and creates the
+ * two scan directories only when all three resolved. Returns repo_path's
+ * status: 0 = ready. */
+static int e1_iso_scan_setup(char scan_dir[PATH_MAX],
+                             char empty_dir[PATH_MAX],
+                             char baseline_abs[PATH_MAX])
+{
+    int setup = repo_path(scan_dir, PATH_MAX, E1_ISO_SCAN_DIR_REL);
+    if (setup == 0)
+        setup = repo_path(empty_dir, PATH_MAX, E1_EMPTY_SCAN_DIR_REL);
+    if (setup == 0)
+        setup = repo_path(baseline_abs, PATH_MAX, E1_ISO_BASELINE_REL);
+    if (setup == 0) {
+        (void)mkdir(scan_dir, 0700);
+        (void)mkdir(empty_dir, 0700);
+    }
+    return setup;
+}
+
+/* One populated root plus one missing root: builds the "present:missing"
+ * roots string, then runs E1 with it only when setup succeeded and the
+ * string fit the buffer. Returns the gate's exit code, or -1 when
+ * skipped. */
+static int e1_iso_partial_roots_gate_run(int setup, const char *baseline_abs)
+{
+    char partial_roots[PATH_MAX];
+    int partial_len = snprintf(partial_roots, sizeof(partial_roots), "%s:%s",
+                               E1_ISO_SCAN_DIR_REL,
+                               E1_MISSING_SCAN_DIR_REL);
+    if (setup == 0 && partial_len > 0 &&
+        (size_t)partial_len < sizeof(partial_roots))
+        return run_gate_script_with_env2(E1_GATE_REL,
+                                         E1_BASELINE_ENV, baseline_abs,
+                                         E1_SCAN_ROOTS_ENV, partial_roots);
+    return -1;
+}
+
+/* Grown-past-baseline case: replants the legacy fixture five lines past its
+ * recorded count, reruns E1, and captures the gate output. The out-params
+ * carry regrown / grown_read / the captured buffer (the caller frees it),
+ * exactly as the inline sequence did. Returns the grown run's exit code. */
+static int e1_iso_grown_case(int wrote_baseline, const char *baseline_abs,
+                             int *regrown_out, int *grown_read_out,
+                             char **grown_out)
+{
+    int regrown = wrote_baseline == 0
+                      ? plant_oversized_file(E1_ISO_LEGACY_REL, 1705) : -1;
+    *regrown_out = regrown;
+    int grown_rc = regrown == 0
+                       ? run_gate_script_with_env2(E1_GATE_REL,
+                                                   E1_BASELINE_ENV, baseline_abs,
+                                                   E1_SCAN_ROOTS_ENV,
+                                                   E1_ISO_SCAN_DIR_REL)
+                       : -1;
+    *grown_read_out = regrown == 0
+                          ? lint_gate_capture_output(grown_out)
+                          : -1;
+    return grown_rc;
+}
+
 /* E1 legacy baseline + hollow scan. Both cases run against an ISOLATED scan
  * root and an ISOLATED baseline (same convention as LONGFN above) so they
  * never touch the real tree or the real baseline file:
@@ -371,16 +433,7 @@ int t_e1_file_size_baseline_and_hollow_scan(void)
     char scan_dir[PATH_MAX];
     char empty_dir[PATH_MAX];
     char baseline_abs[PATH_MAX];
-    int setup = repo_path(scan_dir, sizeof(scan_dir), E1_ISO_SCAN_DIR_REL);
-    if (setup == 0)
-        setup = repo_path(empty_dir, sizeof(empty_dir), E1_EMPTY_SCAN_DIR_REL);
-    if (setup == 0)
-        setup = repo_path(baseline_abs, sizeof(baseline_abs),
-                          E1_ISO_BASELINE_REL);
-    if (setup == 0) {
-        (void)mkdir(scan_dir, 0700);
-        (void)mkdir(empty_dir, 0700);
-    }
+    int setup = e1_iso_scan_setup(scan_dir, empty_dir, baseline_abs);
 
     /* At its recorded count: clean. */
     int planted = setup == 0 ? plant_oversized_file(E1_ISO_LEGACY_REL, 1700)
@@ -401,19 +454,11 @@ int t_e1_file_size_baseline_and_hollow_scan(void)
         : -1;
 
     /* Grown past it: FAIL. */
-    int regrown = wrote_baseline == 0
-        ? plant_oversized_file(E1_ISO_LEGACY_REL, 1705) : -1;
-    int grown_rc = regrown == 0
-        ? run_gate_script_with_env2(E1_GATE_REL,
-                                    E1_BASELINE_ENV, baseline_abs,
-                                    E1_SCAN_ROOTS_ENV, E1_ISO_SCAN_DIR_REL)
-        : -1;
+    int regrown = -1;
+    int grown_read = -1;
     char *grown_out = NULL;
-    char grown_path[PATH_MAX];
-    int grown_read = (regrown == 0 &&
-                      lint_gate_out_path(grown_path, sizeof(grown_path)) == 0)
-                         ? read_entire_file(grown_path, &grown_out)
-                         : -1;
+    int grown_rc = e1_iso_grown_case(wrote_baseline, baseline_abs,
+                                     &regrown, &grown_read, &grown_out);
 
     /* Scanned nothing: exit 2, never a quiet pass. */
     int hollow_rc = setup == 0
@@ -422,16 +467,7 @@ int t_e1_file_size_baseline_and_hollow_scan(void)
                                     E1_SCAN_ROOTS_ENV, E1_EMPTY_SCAN_DIR_REL)
         : -1;
 
-    char partial_roots[PATH_MAX];
-    int partial_len = snprintf(partial_roots, sizeof(partial_roots), "%s:%s",
-                               E1_ISO_SCAN_DIR_REL,
-                               E1_MISSING_SCAN_DIR_REL);
-    int partial_rc = setup == 0 && partial_len > 0 &&
-                             (size_t)partial_len < sizeof(partial_roots)
-        ? run_gate_script_with_env2(E1_GATE_REL,
-                                    E1_BASELINE_ENV, baseline_abs,
-                                    E1_SCAN_ROOTS_ENV, partial_roots)
-        : -1;
+    int partial_rc = e1_iso_partial_roots_gate_run(setup, baseline_abs);
 
     unlink_rel(E1_ISO_LEGACY_REL);
     unlink_rel(E1_ISO_BASELINE_REL);
