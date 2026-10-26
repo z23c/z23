@@ -486,24 +486,41 @@ static bool sr_store_subject_attestations(const char *zcode_dir,
 /* The dependent package: bob's "bob/hammer" declares a root-committed
  * dependency on the subject's package root. The declaration manifest
  * is built first — its root IS the package root bob's release names. */
-static bool sr_store_dependent_package(const char *zcode_dir,
-                                       const uint8_t package_root[32])
+static bool sr_format_declaration(const uint8_t package_root[32],
+                                  char *decl, size_t decl_size)
 {
     char subject_root_hex[65];
     zcl_hex_encode(package_root, 32, subject_root_hex);
-    char decl[256];
-    int n = snprintf(decl, sizeof(decl),
+    int n = snprintf(decl, decl_size,
                      "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
                      "\"name\":\"alice/ring\",\"semver\":\"1.0.0\"}]}",
                      subject_root_hex);
+    if (n < 0 || (size_t)n >= decl_size)
+        return false;
+    return true;
+}
+
+static bool sr_store_dependent_release(const char *zcode_dir,
+                                       const char decl[256])
+{
     uint8_t bob_pkg[32], bob_recipe[32];
     sr_pattern_root(0xb2, bob_recipe);
+    if (!sr_store_declaration(zcode_dir, decl, bob_pkg))
+        return false;
     struct vcs_package_release bob_rel;
-    return n > 0 && (size_t)n < sizeof(decl) &&
-           sr_store_declaration(zcode_dir, decl, bob_pkg) &&
-           sr_release(&bob_rel, 0x22, 1, "bob/hammer", bob_pkg,
-                      bob_recipe) &&
-           sr_store_release(zcode_dir, &bob_rel, 0);
+    if (!sr_release(&bob_rel, 0x22, 1, "bob/hammer", bob_pkg, bob_recipe) ||
+        !sr_store_release(zcode_dir, &bob_rel, 0))
+        return false;
+    return true;
+}
+
+static bool sr_store_dependent_package(const char *zcode_dir,
+                                       const uint8_t package_root[32])
+{
+    char decl[256];
+    if (!sr_format_declaration(package_root, decl, sizeof(decl)))
+        return false;
+    return sr_store_dependent_release(zcode_dir, decl);
 }
 
 static bool sr_populate(const char *dir, char zcode_dir[4400],
