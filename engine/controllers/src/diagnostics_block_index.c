@@ -129,6 +129,33 @@ static void push_block_ref(struct json_value *out, const char *prefix,
     }
 }
 
+static int header_band_remaining_headers(const struct block_index *island_root,
+                                         const struct block_index *anchor)
+{
+    int remaining = -1;
+    if (island_root && anchor && island_root->nHeight > anchor->nHeight)
+        remaining = island_root->nHeight - anchor->nHeight;
+    else if (!island_root)
+        remaining = 0;
+    return remaining;
+}
+
+static const char *
+header_band_state_name(bool blocker, const struct block_index *island_root,
+                       const struct block_index *anchor)
+{
+    const char *state = "healthy";
+    if (blocker && island_root && anchor)
+        state = "backfilling";
+    else if (blocker && island_root)
+        state = "blocked_no_anchor";
+    else if (blocker && !island_root)
+        state = "closing_or_stale_blocker";
+    else if (!blocker && island_root)
+        state = "derived_band_without_blocker";
+    return state;
+}
+
 bool diag_header_band_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -160,24 +187,45 @@ bool diag_header_band_dump_state_json(struct json_value *out, const char *key)
     push_block_ref(out, "backfill_anchor", anchor);
     json_push_kv_bool(out, "band_open", island_root != NULL);
 
-    int remaining = -1;
-    if (island_root && anchor && island_root->nHeight > anchor->nHeight)
-        remaining = island_root->nHeight - anchor->nHeight;
-    else if (!island_root)
-        remaining = 0;
+    int remaining = header_band_remaining_headers(island_root, anchor);
     json_push_kv_int(out, "remaining_headers", remaining);
 
-    const char *state = "healthy";
-    if (blocker && island_root && anchor)
-        state = "backfilling";
-    else if (blocker && island_root)
-        state = "blocked_no_anchor";
-    else if (blocker && !island_root)
-        state = "closing_or_stale_blocker";
-    else if (!blocker && island_root)
-        state = "derived_band_without_blocker";
+    const char *state = header_band_state_name(blocker, island_root, anchor);
     json_push_kv_str(out, "state", state);
     return true;
+}
+
+static bool find_block_index_key_is_decimal(const char *key)
+{
+    bool is_num = true;
+    for (const char *c = key; *c; c++) {
+        if (*c < '0' || *c > '9') {
+            is_num = false;
+            break;
+        }
+    }
+    return is_num;
+}
+
+static struct block_index *find_block_index_by_height(struct main_state *ms,
+                                                      const char *key,
+                                                      const char **source_out)
+{
+    int height = atoi(key);
+    struct block_index *bi = active_chain_at(&ms->chain_active, height);
+    if (bi) {
+        if (source_out)
+            *source_out = "active_chain";
+        return bi;
+    }
+    if (ms->pindex_best_header &&
+        height <= ms->pindex_best_header->nHeight) {
+        bi = block_index_get_ancestor(ms->pindex_best_header, height);
+        if (bi && source_out)
+            *source_out = "best_header_ancestor";
+        return bi;
+    }
+    return NULL;
 }
 
 static struct block_index *find_block_index_by_key(struct main_state *ms,
@@ -189,30 +237,8 @@ static struct block_index *find_block_index_by_key(struct main_state *ms,
     if (!ms || !key || !key[0])
         return NULL;
 
-    bool is_num = true;
-    for (const char *c = key; *c; c++) {
-        if (*c < '0' || *c > '9') {
-            is_num = false;
-            break;
-        }
-    }
-    if (is_num) {
-        int height = atoi(key);
-        struct block_index *bi = active_chain_at(&ms->chain_active, height);
-        if (bi) {
-            if (source_out)
-                *source_out = "active_chain";
-            return bi;
-        }
-        if (ms->pindex_best_header &&
-            height <= ms->pindex_best_header->nHeight) {
-            bi = block_index_get_ancestor(ms->pindex_best_header, height);
-            if (bi && source_out)
-                *source_out = "best_header_ancestor";
-            return bi;
-        }
-        return NULL;
-    }
+    if (find_block_index_key_is_decimal(key))
+        return find_block_index_by_height(ms, key, source_out);
 
     if (!zcl_is_hex_string(key, 64))
         return NULL;
