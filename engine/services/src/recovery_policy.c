@@ -86,13 +86,9 @@ void policy_set_defaults(struct recovery_policy *p)
     p->operator_prompt_ctx     = NULL;
 }
 
-void policy_load_from_env(struct recovery_policy *p)
+static void recovery_policy_load_numeric_limits(struct recovery_policy *p)
 {
-    if (!p) return;
-    policy_set_defaults(p);
-
     int64_t v64;
-    bool    vb;
     const char *s;
 
     if ((s = getenv("ZCL_MAX_UTXO_WIPE_ROWS")) && zcl_parse_i64(s, &v64))
@@ -103,6 +99,17 @@ void policy_load_from_env(struct recovery_policy *p)
         p->max_validation_rebind = v64;
     if ((s = getenv("ZCL_MAX_HEADER_REWIND")) && zcl_parse_i64(s, &v64))
         p->max_header_rewind = v64;
+}
+
+void policy_load_from_env(struct recovery_policy *p)
+{
+    if (!p) return;
+    policy_set_defaults(p);
+
+    bool    vb;
+    const char *s;
+
+    recovery_policy_load_numeric_limits(p);
     if ((s = getenv("ZCL_REQUIRE_BACKUP_VERIFIED")) && parse_bool(s, &vb))
         p->require_backup_verified = vb;
     if ((s = getenv("ZCL_DRY_RUN")) && parse_bool(s, &vb))
