@@ -524,20 +524,73 @@ static bool node_db_has_no_open_transaction(struct node_db *ndb)
     return !status.tx_open && sqlite3_get_autocommit(ndb->db) != 0;
 }
 
+static bool test_wallet_scan_empty_replacement_open_db(struct node_db *ndb)
+{
+    bool ok = node_db_open(ndb, ":memory:") && seed_wallet_projection(ndb);
+    if (ok) {
+        ok = sqlite3_exec(ndb->db,
+            "CREATE TRIGGER fail_wallet_tx_clear BEFORE DELETE ON "
+            "wallet_transactions BEGIN SELECT RAISE(ABORT,'injected'); END",
+            NULL, NULL, NULL) == SQLITE_OK;
+    }
+    return ok;
+}
+
+static bool test_wallet_scan_empty_replacement_check_cleared(
+    struct node_db *ndb, bool ok, int cleared)
+{
+    uint8_t txid[32];
+    struct db_wallet_tx tx;
+    memset(txid, 0x91, sizeof(txid));
+    memset(&tx, 0, sizeof(tx));
+    bool tx_found = ok && db_wallet_tx_find(ndb, txid, &tx);
+    if (tx_found) db_wallet_tx_free(&tx);
+    return ok && cleared == 0 && !tx_found &&
+           db_wallet_utxo_balance(ndb) == 0 &&
+           db_sapling_note_balance_for_address(ndb,
+                                               "zs1scanrollback") == 5678 &&
+           node_db_has_no_open_transaction(ndb) &&
+           node_db_begin(ndb) && node_db_commit(ndb);
+}
+
+static bool test_wallet_scan_empty_replacement_zero_key_scan(
+    struct node_db *ndb, struct active_chain *chain,
+    struct wallet *empty_wallet, bool ok)
+{
+    if (ok) {
+        ok = db_sapling_note_delete_all(ndb) &&
+             seed_wallet_projection(ndb);
+    }
+    int zero_key_result = ok ? wallet_scan_blocks(
+        ndb, chain, empty_wallet, "/nonexistent", 0, 0) : -1;
+    return ok && zero_key_result == 0 &&
+           db_wallet_tx_count(ndb) == 0 &&
+           db_wallet_utxo_balance(ndb) == 0;
+}
+
+static bool test_wallet_scan_empty_replacement_empty_range_scan(
+    struct node_db *ndb, struct active_chain *chain,
+    struct wallet *empty_wallet, bool ok)
+{
+    if (ok) {
+        ok = db_sapling_note_delete_all(ndb) &&
+             seed_wallet_projection(ndb);
+    }
+    int empty_range_result = ok ? wallet_scan_blocks(
+        ndb, chain, empty_wallet, "/nonexistent", 1, 0) : -1;
+    return ok && empty_range_result == 0 &&
+           db_wallet_tx_count(ndb) == 0 &&
+           db_wallet_utxo_balance(ndb) == 0 &&
+           node_db_has_no_open_transaction(ndb);
+}
+
 static int test_wallet_scan_empty_replacement(void)
 {
     printf("GIVEN stale wallet rows WHEN empty Pass2 replaces them "
            "THEN rollback is atomic and public empty paths converge... ");
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
-    bool ok = node_db_open(&ndb, ":memory:") &&
-              seed_wallet_projection(&ndb);
-    if (ok) {
-        ok = sqlite3_exec(ndb.db,
-            "CREATE TRIGGER fail_wallet_tx_clear BEFORE DELETE ON "
-            "wallet_transactions BEGIN SELECT RAISE(ABORT,'injected'); END",
-            NULL, NULL, NULL) == SQLITE_OK;
-    }
+    bool ok = test_wallet_scan_empty_replacement_open_db(&ndb);
 
     struct active_chain chain;
     active_chain_init(&chain);
@@ -559,18 +612,7 @@ static int test_wallet_scan_empty_replacement(void)
     int cleared = ok ? wallet_scan_pass2_execute(
         &ndb, &chain, "/nonexistent", 0, 1000000000,
         &ht, file_has_match, 0, &started, &pass1) : -1;
-    uint8_t txid[32];
-    struct db_wallet_tx tx;
-    memset(txid, 0x91, sizeof(txid));
-    memset(&tx, 0, sizeof(tx));
-    bool tx_found = ok && db_wallet_tx_find(&ndb, txid, &tx);
-    if (tx_found) db_wallet_tx_free(&tx);
-    ok = ok && cleared == 0 && !tx_found &&
-         db_wallet_utxo_balance(&ndb) == 0 &&
-         db_sapling_note_balance_for_address(&ndb,
-                                              "zs1scanrollback") == 5678 &&
-         node_db_has_no_open_transaction(&ndb) &&
-         node_db_begin(&ndb) && node_db_commit(&ndb);
+    ok = test_wallet_scan_empty_replacement_check_cleared(&ndb, ok, cleared);
 
     /* The public scanner must not bypass replacement for a zero-key wallet
      * or an empty chain range. */
@@ -579,26 +621,11 @@ static int test_wallet_scan_empty_replacement(void)
      * stack before its first assertion. */
     struct wallet *empty_wallet = calloc(1, sizeof(*empty_wallet));
     if (!empty_wallet) ok = false;
-    if (ok) {
-        ok = db_sapling_note_delete_all(&ndb) &&
-             seed_wallet_projection(&ndb);
-    }
-    int zero_key_result = ok ? wallet_scan_blocks(
-        &ndb, &chain, empty_wallet, "/nonexistent", 0, 0) : -1;
-    ok = ok && zero_key_result == 0 &&
-         db_wallet_tx_count(&ndb) == 0 &&
-         db_wallet_utxo_balance(&ndb) == 0;
-
-    if (ok) {
-        ok = db_sapling_note_delete_all(&ndb) &&
-             seed_wallet_projection(&ndb);
-    }
-    int empty_range_result = ok ? wallet_scan_blocks(
-        &ndb, &chain, empty_wallet, "/nonexistent", 1, 0) : -1;
-    ok = ok && empty_range_result == 0 &&
-         db_wallet_tx_count(&ndb) == 0 &&
-         db_wallet_utxo_balance(&ndb) == 0 &&
-         node_db_has_no_open_transaction(&ndb);
+    ok = test_wallet_scan_empty_replacement_zero_key_scan(&ndb, &chain,
+                                                          empty_wallet, ok);
+    ok = test_wallet_scan_empty_replacement_empty_range_scan(&ndb, &chain,
+                                                             empty_wallet,
+                                                             ok);
 
     scan_aht_free(&ht);
     active_chain_free(&chain);
@@ -609,12 +636,9 @@ static int test_wallet_scan_empty_replacement(void)
     return 1;
 }
 
-static int test_legacy_import_clear_rollback(void)
+static bool test_legacy_import_clear_write_block_file(const char *dir)
 {
-    printf("GIVEN stale transparent+Sapling rows WHEN legacy clear fails "
-           "THEN all three model-owned deletes roll back... ");
-    char dir[256], blocks[320], file_path[384];
-    test_make_tmpdir(dir, sizeof(dir), "block_scan", "legacy_rollback");
+    char blocks[320], file_path[384];
     snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
     mkdir(blocks, 0755);
     snprintf(file_path, sizeof(file_path), "%s/blk00000.dat", blocks);
@@ -622,20 +646,49 @@ static int test_legacy_import_clear_rollback(void)
     uint8_t invalid_byte = 0;
     bool ok = fd >= 0 && write(fd, &invalid_byte, 1) == 1;
     if (fd >= 0) close(fd);
+    return ok;
+}
+
+static bool test_legacy_import_clear_add_trigger(struct node_db *ndb)
+{
+    return sqlite3_exec(ndb->db,
+        "CREATE TRIGGER fail_legacy_sapling_clear BEFORE DELETE ON "
+        "wallet_sapling_notes BEGIN SELECT RAISE(ABORT,'injected'); END",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static struct wallet *test_legacy_import_clear_new_wallet(void)
+{
+    struct wallet *wallet = calloc(1, sizeof(*wallet));
+    if (wallet) wallet_init(wallet);
+    return wallet;
+}
+
+static void test_legacy_import_clear_free_wallet(struct wallet *wallet)
+{
+    if (wallet) {
+        wallet_free(wallet);
+        free(wallet);
+    }
+}
+
+static int test_legacy_import_clear_rollback(void)
+{
+    printf("GIVEN stale transparent+Sapling rows WHEN legacy clear fails "
+           "THEN all three model-owned deletes roll back... ");
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "block_scan", "legacy_rollback");
+    bool ok = test_legacy_import_clear_write_block_file(dir);
 
     struct node_db ndb;
     memset(&ndb, 0, sizeof(ndb));
     ok = ok && node_db_open(&ndb, ":memory:") &&
          seed_wallet_projection(&ndb);
     if (ok) {
-        ok = sqlite3_exec(ndb.db,
-            "CREATE TRIGGER fail_legacy_sapling_clear BEFORE DELETE ON "
-            "wallet_sapling_notes BEGIN SELECT RAISE(ABORT,'injected'); END",
-            NULL, NULL, NULL) == SQLITE_OK;
+        ok = test_legacy_import_clear_add_trigger(&ndb);
     }
 
-    struct wallet *wallet = calloc(1, sizeof(*wallet));
-    if (wallet) wallet_init(wallet);
+    struct wallet *wallet = test_legacy_import_clear_new_wallet();
     int imported = ok && wallet
         ? legacy_import_service_run(dir, &ndb, wallet, false) : 0;
     ok = ok && wallet && imported == -1 &&
@@ -643,10 +696,7 @@ static int test_legacy_import_clear_rollback(void)
          node_db_has_no_open_transaction(&ndb) &&
          node_db_begin(&ndb) && node_db_commit(&ndb);
 
-    if (wallet) {
-        wallet_free(wallet);
-        free(wallet);
-    }
+    test_legacy_import_clear_free_wallet(wallet);
     if (ndb.open) node_db_close(&ndb);
     (void)test_rm_rf_recursive(dir);
     if (ok) { printf("OK\n"); return 0; }

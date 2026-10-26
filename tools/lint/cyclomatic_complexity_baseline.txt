@@ -1132,8 +1132,6 @@ tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
 tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
 tests/harness/src/test_block_index_loader.c:test_block_index_loader:299
 tests/harness/src/test_block_pruning.c:test_block_pruning:25
-tests/harness/src/test_block_scan.c:test_legacy_import_clear_rollback:18
-tests/harness/src/test_block_scan.c:test_wallet_scan_empty_replacement:34
 tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21
 tests/harness/src/test_blocker.c:test_blocker:67
