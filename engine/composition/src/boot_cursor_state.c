@@ -151,6 +151,67 @@ static bool bcs_nchaintx_computed_above(struct main_state *ms,
     return true;
 }
 
+/* Snapshot the live map entries into sorted[] (capacity cap, map iteration
+ * order) and return how many pointers were stored. */
+static size_t bcs_collect_block_indexes(struct main_state *ms,
+                                        struct block_index **sorted,
+                                        size_t cap)
+{
+    size_t it = 0, idx = 0;
+    struct block_index *sp;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &sp))
+        if (sp && idx < cap)
+            sorted[idx++] = sp;
+    return idx;
+}
+
+/* Apply the per-entry nChainTx rule to one height-sorted block; returns 1
+ * when the entry was stamped and 0 when it already held the right value. */
+static int bcs_update_entry_nchaintx(struct block_index *b)
+{
+    if (b->nHeight == 0) {
+        if (b->nChainTx == 0 && b->nTx > 0) {
+            b->nChainTx = b->nTx;
+            return 1;
+        }
+    } else if (b->pprev && b->pprev->nChainTx > 0 && b->nTx > 0) {
+        unsigned int expected = b->pprev->nChainTx + b->nTx;
+        if (b->nChainTx != expected) {
+            b->nChainTx = expected;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Run up to five ascending-height propagation passes over sorted[0..n);
+ * returns the total number of entries stamped. */
+static int bcs_propagate_nchaintx_passes(struct block_index **sorted,
+                                         size_t n)
+{
+    int total = 0;
+    for (int pass = 0; pass < 5; pass++) {
+        int propagated = 0;
+        for (size_t i = 0; i < n; i++)
+            propagated += bcs_update_entry_nchaintx(sorted[i]);
+        total += propagated;
+        if (propagated == 0)
+            break;
+    }
+    return total;
+}
+
+static void bcs_stamp_nchaintx_cursor(struct main_state *ms,
+                                      struct node_db *ndb, bool complete,
+                                      int64_t nct_upto)
+{
+    /* Stamp the cursor to the active tip height once the index is proven
+     * contiguous-complete above the old cursor. */
+    int tip_h = active_chain_height(&ms->chain_active);
+    if (complete && ndb && ndb->open && tip_h > (int)nct_upto)
+        node_db_state_set_int(ndb, BOOT_CUR_NCHAINTX, tip_h);
+}
+
 void boot_cursor_propagate_nchaintx(struct main_state *ms, struct node_db *ndb)
 {
     if (!ms || ms->map_block_index.size <= 100)
@@ -172,47 +233,16 @@ void boot_cursor_propagate_nchaintx(struct main_state *ms, struct node_db *ndb)
          * unstamped so the next boot retries rather than trusting a hole. */
         complete = (sorted != NULL);
         if (sorted) {
-            size_t si = 0, idx = 0;
-            struct block_index *sp;
-            while (block_map_next(&ms->map_block_index, &si, NULL, &sp))
-                if (sp && idx < n)
-                    sorted[idx++] = sp;
-            n = idx;
+            n = bcs_collect_block_indexes(ms, sorted, n);
             qsort(sorted, n, sizeof(*sorted), bcs_cmp_height);
-            int total = 0;
-            for (int pass = 0; pass < 5; pass++) {
-                int propagated = 0;
-                for (size_t i = 0; i < n; i++) {
-                    struct block_index *b = sorted[i];
-                    if (b->nHeight == 0) {
-                        if (b->nChainTx == 0 && b->nTx > 0) {
-                            b->nChainTx = b->nTx;
-                            propagated++;
-                        }
-                    } else if (b->pprev && b->pprev->nChainTx > 0 &&
-                               b->nTx > 0) {
-                        unsigned int expected = b->pprev->nChainTx + b->nTx;
-                        if (b->nChainTx != expected) {
-                            b->nChainTx = expected;
-                            propagated++;
-                        }
-                    }
-                }
-                total += propagated;
-                if (propagated == 0)
-                    break;
-            }
+            int total = bcs_propagate_nchaintx_passes(sorted, n);
             free(sorted);
             if (total > 0)
                 printf("nChainTx propagated for %d blocks\n", total);
         }
     }
 
-    /* Stamp the cursor to the active tip height once the index is proven
-     * contiguous-complete above the old cursor. */
-    int tip_h = active_chain_height(&ms->chain_active);
-    if (complete && ndb && ndb->open && tip_h > (int)nct_upto)
-        node_db_state_set_int(ndb, BOOT_CUR_NCHAINTX, tip_h);
+    bcs_stamp_nchaintx_cursor(ms, ndb, complete, nct_upto);
 }
 
 /* ── #4 — cursor-gated wallet block scan ─────────────────────────────── */
