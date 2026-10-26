@@ -61,16 +61,9 @@ static bool seed_signature_low_s(const uint8_t signature[64])
                   sizeof(seed_half_order)) <= 0;
 }
 
-static enum vcs_c23_seed_error seed_fields(
-    const struct vcs_c23_seed_v1 *seed, bool require_signatures)
+static enum vcs_c23_seed_error seed_structural_fields(
+    const struct vcs_c23_seed_v1 *seed)
 {
-    if (!seed) return VCS_C23_SEED_ERR_NULL;
-    if (seed->schema_version != VCS_C23_SEED_VERSION)
-        return VCS_C23_SEED_ERR_VERSION;
-    if (seed->flags != VCS_C23_SEED_REQUIRED_FLAGS)
-        return VCS_C23_SEED_ERR_FLAGS;
-    if (seed->source_flags != 0)
-        return VCS_C23_SEED_ERR_SOURCE_CLASSIFICATION;
     const uint8_t *const roots[] = {
         seed->network_genesis_root, seed->contributor_binding_root,
         seed->package_root, seed->release_root,
@@ -96,6 +89,21 @@ static enum vcs_c23_seed_error seed_fields(
         seed->created_unix < seed->challenge_opening_mtp)
         return VCS_C23_SEED_ERR_TIME;
     if (seed->sequence == 0) return VCS_C23_SEED_ERR_SEQUENCE;
+    return VCS_C23_SEED_OK;
+}
+
+static enum vcs_c23_seed_error seed_fields(
+    const struct vcs_c23_seed_v1 *seed, bool require_signatures)
+{
+    if (!seed) return VCS_C23_SEED_ERR_NULL;
+    if (seed->schema_version != VCS_C23_SEED_VERSION)
+        return VCS_C23_SEED_ERR_VERSION;
+    if (seed->flags != VCS_C23_SEED_REQUIRED_FLAGS)
+        return VCS_C23_SEED_ERR_FLAGS;
+    if (seed->source_flags != 0)
+        return VCS_C23_SEED_ERR_SOURCE_CLASSIFICATION;
+    enum vcs_c23_seed_error error = seed_structural_fields(seed);
+    if (error != VCS_C23_SEED_OK) return error;
     if (require_signatures) {
         if (!zcl_bytes_any_set(seed->zid_signature,
                           sizeof(seed->zid_signature)) ||
@@ -113,6 +121,42 @@ enum vcs_c23_seed_error vcs_c23_seed_validate(
     return seed_fields(seed, true);
 }
 
+static bool seed_write_prefix(
+    struct zcl_codec_writer *writer, const struct vcs_c23_seed_v1 *seed)
+{
+    return zcl_codec_write_bytes(writer, seed_magic, 8) &&
+        zcl_codec_write_u16le(writer, seed->schema_version) &&
+        zcl_codec_write_u16le(writer, seed->flags) &&
+        zcl_codec_write_u16le(writer, seed->source_flags) &&
+        zcl_codec_write_u16le(writer, 0) &&
+        zcl_codec_write_bytes(writer, seed->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->zid_pubkey, 32) &&
+        zcl_codec_write_bytes(writer, seed->zcl_pubkey, 33) &&
+        zcl_codec_write_bytes(writer, seed->package_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->release_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->dependency_lock_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->license_evidence_root, 32);
+}
+
+static bool seed_write_suffix(
+    struct zcl_codec_writer *writer, const struct vcs_c23_seed_v1 *seed)
+{
+    return zcl_codec_write_bytes(writer, seed->semantic_fingerprint_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->novelty_evidence_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->target_capsule_root, 32) &&
+        zcl_codec_write_bytes(writer, seed->compiler_capsule_roots[0], 32) &&
+        zcl_codec_write_bytes(writer, seed->compiler_capsule_roots[1], 32) &&
+        zcl_codec_write_bytes(writer, seed->build_report_roots[0], 32) &&
+        zcl_codec_write_bytes(writer, seed->build_report_roots[1], 32) &&
+        zcl_codec_write_bytes(writer, seed->dht_replication_root, 32) &&
+        zcl_codec_write_u64le(writer, seed->challenge_opening_height) &&
+        zcl_codec_write_bytes(writer, seed->challenge_opening_hash, 32) &&
+        zcl_codec_write_i64le(writer, seed->challenge_opening_mtp) &&
+        zcl_codec_write_i64le(writer, seed->created_unix) &&
+        zcl_codec_write_u64le(writer, seed->sequence);
+}
+
 static enum vcs_c23_seed_error seed_body(
     const struct vcs_c23_seed_v1 *seed,
     uint8_t out[VCS_C23_SEED_BODY_BYTES])
@@ -122,32 +166,8 @@ static enum vcs_c23_seed_error seed_body(
     if (error != VCS_C23_SEED_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_C23_SEED_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, seed_magic, 8) &&
-        zcl_codec_write_u16le(&writer, seed->schema_version) &&
-        zcl_codec_write_u16le(&writer, seed->flags) &&
-        zcl_codec_write_u16le(&writer, seed->source_flags) &&
-        zcl_codec_write_u16le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer, seed->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->zid_pubkey, 32) &&
-        zcl_codec_write_bytes(&writer, seed->zcl_pubkey, 33) &&
-        zcl_codec_write_bytes(&writer, seed->package_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->release_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->dependency_lock_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->license_evidence_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->semantic_fingerprint_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->novelty_evidence_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->target_capsule_root, 32) &&
-        zcl_codec_write_bytes(&writer, seed->compiler_capsule_roots[0], 32) &&
-        zcl_codec_write_bytes(&writer, seed->compiler_capsule_roots[1], 32) &&
-        zcl_codec_write_bytes(&writer, seed->build_report_roots[0], 32) &&
-        zcl_codec_write_bytes(&writer, seed->build_report_roots[1], 32) &&
-        zcl_codec_write_bytes(&writer, seed->dht_replication_root, 32) &&
-        zcl_codec_write_u64le(&writer, seed->challenge_opening_height) &&
-        zcl_codec_write_bytes(&writer, seed->challenge_opening_hash, 32) &&
-        zcl_codec_write_i64le(&writer, seed->challenge_opening_mtp) &&
-        zcl_codec_write_i64le(&writer, seed->created_unix) &&
-        zcl_codec_write_u64le(&writer, seed->sequence);
+    bool ok = seed_write_prefix(&writer, seed) &&
+        seed_write_suffix(&writer, seed);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_C23_SEED_BODY_BYTES
@@ -182,6 +202,46 @@ enum vcs_c23_seed_error vcs_c23_seed_serialize(
     return VCS_C23_SEED_OK;
 }
 
+static bool seed_read_prefix(
+    struct zcl_codec_reader *reader, struct vcs_c23_seed_v1 *parsed,
+    uint8_t magic[8], uint16_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &parsed->schema_version) &&
+        zcl_codec_read_u16le(reader, &parsed->flags) &&
+        zcl_codec_read_u16le(reader, &parsed->source_flags) &&
+        zcl_codec_read_u16le(reader, reserved) &&
+        zcl_codec_read_bytes(reader, parsed->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->zid_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, parsed->zcl_pubkey, 33) &&
+        zcl_codec_read_bytes(reader, parsed->package_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->release_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->dependency_lock_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->license_evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->semantic_fingerprint_root, 32);
+}
+
+static bool seed_read_suffix(
+    struct zcl_codec_reader *reader, struct vcs_c23_seed_v1 *parsed)
+{
+    return zcl_codec_read_bytes(reader, parsed->novelty_evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->target_capsule_root, 32) &&
+        zcl_codec_read_bytes(reader, parsed->compiler_capsule_roots[0], 32) &&
+        zcl_codec_read_bytes(reader, parsed->compiler_capsule_roots[1], 32) &&
+        zcl_codec_read_bytes(reader, parsed->build_report_roots[0], 32) &&
+        zcl_codec_read_bytes(reader, parsed->build_report_roots[1], 32) &&
+        zcl_codec_read_bytes(reader, parsed->dht_replication_root, 32) &&
+        zcl_codec_read_u64le(reader, &parsed->challenge_opening_height) &&
+        zcl_codec_read_bytes(reader, parsed->challenge_opening_hash, 32) &&
+        zcl_codec_read_i64le(reader, &parsed->challenge_opening_mtp) &&
+        zcl_codec_read_i64le(reader, &parsed->created_unix) &&
+        zcl_codec_read_u64le(reader, &parsed->sequence) &&
+        zcl_codec_read_bytes(reader, parsed->zid_signature, 64) &&
+        zcl_codec_read_bytes(reader, parsed->zcl_signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_c23_seed_error vcs_c23_seed_parse(
     const uint8_t *wire, size_t wire_len, struct vcs_c23_seed_v1 *out)
 {
@@ -194,35 +254,8 @@ enum vcs_c23_seed_error vcs_c23_seed_parse(
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire, wire_len);
     uint8_t magic[8]; uint16_t reserved = 0;
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &parsed.schema_version) &&
-        zcl_codec_read_u16le(&reader, &parsed.flags) &&
-        zcl_codec_read_u16le(&reader, &parsed.source_flags) &&
-        zcl_codec_read_u16le(&reader, &reserved) &&
-        zcl_codec_read_bytes(&reader, parsed.network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.zid_pubkey, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.zcl_pubkey, 33) &&
-        zcl_codec_read_bytes(&reader, parsed.package_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.release_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.dependency_lock_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.license_evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.semantic_fingerprint_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.novelty_evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.target_capsule_root, 32) &&
-        zcl_codec_read_bytes(&reader, parsed.compiler_capsule_roots[0], 32) &&
-        zcl_codec_read_bytes(&reader, parsed.compiler_capsule_roots[1], 32) &&
-        zcl_codec_read_bytes(&reader, parsed.build_report_roots[0], 32) &&
-        zcl_codec_read_bytes(&reader, parsed.build_report_roots[1], 32) &&
-        zcl_codec_read_bytes(&reader, parsed.dht_replication_root, 32) &&
-        zcl_codec_read_u64le(&reader, &parsed.challenge_opening_height) &&
-        zcl_codec_read_bytes(&reader, parsed.challenge_opening_hash, 32) &&
-        zcl_codec_read_i64le(&reader, &parsed.challenge_opening_mtp) &&
-        zcl_codec_read_i64le(&reader, &parsed.created_unix) &&
-        zcl_codec_read_u64le(&reader, &parsed.sequence) &&
-        zcl_codec_read_bytes(&reader, parsed.zid_signature, 64) &&
-        zcl_codec_read_bytes(&reader, parsed.zcl_signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = seed_read_prefix(&reader, &parsed, magic, &reserved) &&
+        seed_read_suffix(&reader, &parsed);
     if (!ok) return VCS_C23_SEED_ERR_WIRE_SIZE;
     if (memcmp(magic, seed_magic, 8) != 0) return VCS_C23_SEED_ERR_MAGIC;
     if (reserved != 0) return VCS_C23_SEED_ERR_RESERVED;

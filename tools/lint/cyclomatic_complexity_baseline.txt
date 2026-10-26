@@ -222,9 +222,6 @@ contexts/commons/modules/vcs/src/zcode_score_receipt.c:score_body:23
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_plan:45
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_receipt_parse:26
 contexts/commons/modules/vcs/src/zcode_score_receipt.c:vcs_zcode_score_receipt_verify_cas:37
-contexts/commons/modules/vcs/src/zcode_seed.c:seed_body:31
-contexts/commons/modules/vcs/src/zcode_seed.c:seed_fields:19
-contexts/commons/modules/vcs/src/zcode_seed.c:vcs_c23_seed_parse:37
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:shadow_snapshot_valid:18
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:vcs_c23_shadow_election_build:27
 contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:protocol_report_root:17
