@@ -127,6 +127,26 @@ static bool mesh_seed_block(struct node_db *ndb, int height,
 
 static const unsigned char MESH_TEST_MAGIC[4] = {0x24, 0xe9, 0x27, 0x64};
 
+/* The three XX message exchanges between ini and res, expecting the fixed
+ * handshake sizes and no early payload; both sides must end ESTABLISHED.
+ * Buffers are allocated into the caller's pointers, which the caller frees. */
+static bool mesh_handshake_exchange(struct noise_transport *ini,
+                                    struct noise_transport *res,
+                                    const uint8_t *msg1, size_t msg1_len,
+                                    uint8_t **w1, size_t *w1l,
+                                    uint8_t **w2, size_t *w2l,
+                                    uint8_t **w3, size_t *w3l,
+                                    uint8_t **p, size_t *pl)
+{
+    return noise_transport_feed(res, msg1, msg1_len, w2, w2l, p, pl) &&
+           *w2l == 1200 && *pl == 0 &&
+           noise_transport_feed(ini, *w2, *w2l, w3, w3l, p, pl) &&
+           *w3l == 64 && *pl == 0 &&
+           noise_transport_feed(res, *w3, *w3l, w1, w1l, p, pl) &&
+           *w1l == 0 && *pl == 0 && ini->state == NOISE_ESTABLISHED &&
+           res->state == NOISE_ESTABLISHED;
+}
+
 /* Full XX handshake between two in-process transports with the given static
  * private keys; both sides ESTABLISHED on return. */
 static bool mesh_handshake(const uint8_t ini_priv[32],
@@ -141,13 +161,9 @@ static bool mesh_handshake(const uint8_t ini_priv[32],
     struct noise_transport *res =
         noise_transport_begin(false, res_priv, MESH_TEST_MAGIC, NULL, NULL);
     bool ok = ini && res && msg1 && msg1_len == 1216 &&
-              noise_transport_feed(res, msg1, msg1_len, &w2, &w2l, &p, &pl) &&
-              w2l == 1200 && pl == 0 &&
-              noise_transport_feed(ini, w2, w2l, &w3, &w3l, &p, &pl) &&
-              w3l == 64 && pl == 0 &&
-              noise_transport_feed(res, w3, w3l, &w1, &w1l, &p, &pl) &&
-              w1l == 0 && pl == 0 && ini->state == NOISE_ESTABLISHED &&
-              res->state == NOISE_ESTABLISHED;
+              mesh_handshake_exchange(ini, res, msg1, msg1_len,
+                                      &w1, &w1l, &w2, &w2l, &w3, &w3l,
+                                      &p, &pl);
     free(msg1);
     free(w1);
     free(w2);

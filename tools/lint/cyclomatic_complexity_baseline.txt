@@ -2055,7 +2055,6 @@ tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
 tests/harness/src/test_mesh_observation.c:t_parse_refuses_by_name_and_leaves_out_untouched:17
 tests/harness/src/test_mesh_private_object_admission.c:admission_fixture_open:17
-tests/harness/src/test_mesh_status_wire.c:mesh_handshake:16
 tests/harness/src/test_mesh_terminal_worker.c:test_mesh_terminal_worker_platform_arm#2:33
 tests/harness/src/test_metaverse_agent_broker.c:mb_audit:36
 tests/harness/src/test_metaverse_agent_broker.c:mb_money_portfolio:33
