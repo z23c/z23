@@ -266,6 +266,35 @@ static const struct mut_pair g_pairs2[] = {
     { "||", "&&", "or_to_and", ZCL_MUT_CLASS_LOGICAL },
 };
 
+/* Is the pair glued to another of its own characters — `<<=`, `>>=`,
+ * `->=`, `&&&`, `|||` — so the flip lands inside one longer token instead
+ * of a token standing on its own? */
+static bool mut_pair2_is_doubled_or_arrow(const char *from, char prev,
+                                          char next)
+{
+    if (from[0] == '<' && prev == '<')
+        return true;
+    if (from[0] == '>' && (prev == '>' || prev == '-'))
+        return true;
+    if (from[0] == '&' && (prev == '&' || next == '&'))
+        return true;
+    if (from[0] == '|' && (prev == '|' || next == '|'))
+        return true;
+    return false;
+}
+
+/* Is the pair welded into a longer token by an extra `=` on either side
+ * of it — `<==`, `===`, `+==`? */
+static bool mut_pair2_is_glued_by_equals(const char *from, char prev,
+                                         char next)
+{
+    if (from[1] == '=' && next == '=')
+        return true;
+    if (from[0] == '=' && strchr("!<>=+-*/%&|^~", prev) != NULL)
+        return true;
+    return false;
+}
+
 /* A two-char operator only fires when it is a token on its own. `<<=`,
  * `>>=`, `&&&` and every compound assignment ending in `=` would turn into
  * a syntax error, which reports as "the compiler noticed" and teaches
@@ -274,17 +303,9 @@ static bool mut_pair2_ok(const char *t, size_t len, size_t i, const char *from)
 {
     char prev = i > 0 ? t[i - 1] : '\0';
     char next = i + 2 < len ? t[i + 2] : '\0';
-    if (from[0] == '<' && prev == '<')
+    if (mut_pair2_is_doubled_or_arrow(from, prev, next))
         return false;
-    if (from[0] == '>' && (prev == '>' || prev == '-'))
-        return false;
-    if (from[0] == '&' && (prev == '&' || next == '&'))
-        return false;
-    if (from[0] == '|' && (prev == '|' || next == '|'))
-        return false;
-    if (from[1] == '=' && next == '=')
-        return false;
-    if (from[0] == '=' && strchr("!<>=+-*/%&|^~", prev) != NULL)
+    if (mut_pair2_is_glued_by_equals(from, prev, next))
         return false;
     return true;
 }
@@ -313,31 +334,63 @@ static bool mut_not_is_unary(const char *t, size_t len, size_t i)
 
 /* ── operator: integer boundary ─────────────────────────────────────── */
 
-/* Length of a plain decimal integer literal starting at `i`, or 0. Hex,
- * binary, octal and float parts are all rejected: `0xff` is a mask and
- * `0755` is a mode, and bumping either models no defect anyone has. */
-static size_t mut_decimal_at(const char *t, size_t len, size_t i)
+/* May a plain decimal literal start at `i`: is the byte a digit that no
+ * identifier or float tail already owns? */
+static bool mut_decimal_starts_here(const char *t, size_t i)
 {
     if (t[i] < '0' || t[i] > '9')
-        return 0;
+        return false;
     if (i > 0 && (mask_ident_char(t[i - 1]) || t[i - 1] == '.'))
-        return 0;
+        return false;
+    return true;
+}
+
+/* Number of digit bytes at `i`. */
+static size_t mut_decimal_digit_run(const char *t, size_t len, size_t i)
+{
     size_t n = 0;
     while (i + n < len && t[i + n] >= '0' && t[i + n] <= '9')
         n++;
-    if (n > 18)
-        return 0; /* would not survive the +1 in unsigned long long */
-    if (n > 1 && t[i] == '0')
-        return 0; /* octal, or 0x/0b already rejected below */
-    size_t j = i + n;
-    if (j < len && (t[j] == '.' || t[j] == 'x' || t[j] == 'X' ||
-                    t[j] == 'b' || t[j] == 'B' || t[j] == 'e' || t[j] == 'E'))
-        return 0;
+    return n;
+}
+
+/* Does the byte after the digits continue a float or a based literal
+ * instead of ending a plain integer? */
+static bool mut_decimal_is_float_or_base_char(char c)
+{
+    return c == '.' || c == 'x' || c == 'X' || c == 'b' || c == 'B' ||
+           c == 'e' || c == 'E';
+}
+
+/* Does the literal end cleanly at `j`, the byte past its digits: no float
+ * or base continuation, and nothing but an integer suffix or a separator
+ * after them? */
+static bool mut_decimal_ends_cleanly(const char *t, size_t len, size_t j)
+{
+    if (j < len && mut_decimal_is_float_or_base_char(t[j]))
+        return false;
     /* An integer suffix is fine and is left in place: only the digits are
      * replaced, so `1ull` becomes `2ull` and keeps its type. */
     while (j < len && strchr("uUlL", t[j]) != NULL)
         j++;
     if (j < len && (mask_ident_char(t[j]) || t[j] == '.'))
+        return false;
+    return true;
+}
+
+/* Length of a plain decimal integer literal starting at `i`, or 0. Hex,
+ * binary, octal and float parts are all rejected: `0xff` is a mask and
+ * `0755` is a mode, and bumping either models no defect anyone has. */
+static size_t mut_decimal_at(const char *t, size_t len, size_t i)
+{
+    if (!mut_decimal_starts_here(t, i))
+        return 0;
+    size_t n = mut_decimal_digit_run(t, len, i);
+    if (n > 18)
+        return 0; /* would not survive the +1 in unsigned long long */
+    if (n > 1 && t[i] == '0')
+        return 0; /* octal, or 0x/0b already rejected below */
+    if (!mut_decimal_ends_cleanly(t, len, i + n))
         return 0;
     return n;
 }
