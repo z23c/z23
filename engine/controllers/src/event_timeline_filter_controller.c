@@ -69,16 +69,21 @@ const char *timeline_param_category(const struct json_value *params)
     return "all";
 }
 
+static int timeline_int_from_json(const struct json_value *v, int fallback)
+{
+    if (v && v->type == JSON_INT)
+        return (int)json_get_int(v);
+    if (v && v->type == JSON_REAL)
+        return (int)v->val.d;
+    return fallback;
+}
+
 static int timeline_param_count(const struct json_value *params)
 {
     int count = 50;
     const struct json_value *obj = timeline_param_object(params);
     if (obj) {
-        const struct json_value *v = json_get(obj, "count");
-        if (v && v->type == JSON_INT)
-            count = (int)json_get_int(v);
-        else if (v && v->type == JSON_REAL)
-            count = (int)v->val.d;
+        count = timeline_int_from_json(json_get(obj, "count"), 50);
         goto done;
     }
     if (!params)
@@ -88,10 +93,7 @@ static int timeline_param_count(const struct json_value *params)
         const struct json_value *v1 = json_size(params) > 1 ?
             json_at(params, 1) : NULL;
         const struct json_value *v = (v0 && v0->type == JSON_STR) ? v1 : v0;
-        if (v && v->type == JSON_INT)
-            count = (int)json_get_int(v);
-        else if (v && v->type == JSON_REAL)
-            count = (int)v->val.d;
+        count = timeline_int_from_json(v, 50);
     }
 done:
     if (count < 1) count = 1;
@@ -121,6 +123,57 @@ static void timeline_get_str_field(const struct json_value *params,
     snprintf(out, out_len, "%s", s && s[0] ? s : "");
 }
 
+static void timeline_set_since_us(const struct json_value *obj,
+                                  struct timeline_filter *f)
+{
+    int64_t since_us = timeline_get_int_field(obj, "since_us", -1);
+    int64_t since_secs =
+        timeline_get_int_field(obj, "since_secs", -1);
+    if (since_us >= 0) {
+        f->has_since_us = true;
+        f->since_us = since_us;
+    } else if (since_secs > 0) {
+        if (since_secs > 604800)
+            since_secs = 604800;
+        int64_t now = platform_time_realtime_us();
+        f->has_since_us = true;
+        f->since_us = now - since_secs * 1000000LL;
+    }
+}
+
+static void timeline_read_string_filters(const struct json_value *obj,
+                                         struct timeline_filter *f)
+{
+    timeline_get_str_field(obj, "reducer_stage",
+                           f->reducer_stage, sizeof(f->reducer_stage));
+    if (!f->reducer_stage[0])
+        timeline_get_str_field(obj, "stage",
+                               f->reducer_stage,
+                               sizeof(f->reducer_stage));
+    timeline_get_str_field(obj, "condition",
+                           f->condition, sizeof(f->condition));
+    timeline_get_str_field(obj, "deploy",
+                           f->deploy, sizeof(f->deploy));
+    timeline_get_str_field(obj, "lane", f->lane, sizeof(f->lane));
+}
+
+static bool timeline_filter_has_any(const struct timeline_filter *f)
+{
+    return f->has_since_us || f->has_peer || f->has_height ||
+        f->reducer_stage[0] || f->condition[0] || f->deploy[0] ||
+        f->lane[0];
+}
+
+static void timeline_set_scan_count(struct timeline_filter *f, int64_t scan)
+{
+    if (scan > 0)
+        f->scan_count = (int)scan;
+    else if (f->has_since_us)
+        f->scan_count = EVENT_LOG_SIZE;
+    else if (f->has_filters)
+        f->scan_count = f->count * 8 > 1000 ? f->count * 8 : 1000;
+}
+
 struct timeline_filter timeline_filter_from_params(
     const struct json_value *params)
 {
@@ -135,19 +188,7 @@ struct timeline_filter timeline_filter_from_params(
         if (scan < 0)
             scan = timeline_get_int_field(obj, "scan", -1);
 
-        int64_t since_us = timeline_get_int_field(obj, "since_us", -1);
-        int64_t since_secs =
-            timeline_get_int_field(obj, "since_secs", -1);
-        if (since_us >= 0) {
-            f.has_since_us = true;
-            f.since_us = since_us;
-        } else if (since_secs > 0) {
-            if (since_secs > 604800)
-                since_secs = 604800;
-            int64_t now = platform_time_realtime_us();
-            f.has_since_us = true;
-            f.since_us = now - since_secs * 1000000LL;
-        }
+        timeline_set_since_us(obj, &f);
 
         int64_t peer = timeline_get_int_field(obj, "peer", -1);
         if (peer >= 0) {
@@ -161,28 +202,11 @@ struct timeline_filter timeline_filter_from_params(
             f.height = height;
         }
 
-        timeline_get_str_field(obj, "reducer_stage",
-                               f.reducer_stage, sizeof(f.reducer_stage));
-        if (!f.reducer_stage[0])
-            timeline_get_str_field(obj, "stage",
-                                   f.reducer_stage,
-                                   sizeof(f.reducer_stage));
-        timeline_get_str_field(obj, "condition",
-                               f.condition, sizeof(f.condition));
-        timeline_get_str_field(obj, "deploy",
-                               f.deploy, sizeof(f.deploy));
-        timeline_get_str_field(obj, "lane", f.lane, sizeof(f.lane));
+        timeline_read_string_filters(obj, &f);
 
-        f.has_filters = f.has_since_us || f.has_peer || f.has_height ||
-            f.reducer_stage[0] || f.condition[0] || f.deploy[0] ||
-            f.lane[0];
+        f.has_filters = timeline_filter_has_any(&f);
 
-        if (scan > 0)
-            f.scan_count = (int)scan;
-        else if (f.has_since_us)
-            f.scan_count = EVENT_LOG_SIZE;
-        else if (f.has_filters)
-            f.scan_count = f.count * 8 > 1000 ? f.count * 8 : 1000;
+        timeline_set_scan_count(&f, scan);
     }
 
     if (f.scan_count < f.count)
@@ -252,6 +276,27 @@ static bool timeline_event_matches_filter(const struct json_value *ev,
     return true;
 }
 
+static void timeline_push_optional_filter_fields(
+    struct json_value *filters, const struct timeline_filter *f)
+{
+    if (!f)
+        return;
+    if (f->has_since_us)
+        json_push_kv_int(filters, "since_us", f->since_us);
+    if (f->has_peer)
+        json_push_kv_int(filters, "peer", f->peer);
+    if (f->has_height)
+        json_push_kv_int(filters, "height", f->height);
+    if (f->reducer_stage[0])
+        json_push_kv_str(filters, "reducer_stage", f->reducer_stage);
+    if (f->condition[0])
+        json_push_kv_str(filters, "condition", f->condition);
+    if (f->deploy[0])
+        json_push_kv_str(filters, "deploy", f->deploy);
+    if (f->lane[0])
+        json_push_kv_str(filters, "lane", f->lane);
+}
+
 void timeline_push_filters(struct json_value *out,
                            const struct timeline_filter *f)
 {
@@ -261,20 +306,7 @@ void timeline_push_filters(struct json_value *out,
     json_push_kv_bool(&filters, "active", f && f->has_filters);
     json_push_kv_int(&filters, "scan_count", f ? f->scan_count : 0);
     json_push_kv_int(&filters, "returned_limit", f ? f->count : 0);
-    if (f && f->has_since_us)
-        json_push_kv_int(&filters, "since_us", f->since_us);
-    if (f && f->has_peer)
-        json_push_kv_int(&filters, "peer", f->peer);
-    if (f && f->has_height)
-        json_push_kv_int(&filters, "height", f->height);
-    if (f && f->reducer_stage[0])
-        json_push_kv_str(&filters, "reducer_stage", f->reducer_stage);
-    if (f && f->condition[0])
-        json_push_kv_str(&filters, "condition", f->condition);
-    if (f && f->deploy[0])
-        json_push_kv_str(&filters, "deploy", f->deploy);
-    if (f && f->lane[0])
-        json_push_kv_str(&filters, "lane", f->lane);
+    timeline_push_optional_filter_fields(&filters, f);
     json_push_kv_str(&filters, "semantics",
         "filters apply server-side over a bounded scan of the retained structured event ring; height/stage/condition/deploy/lane match typed event payload text");
     json_push_kv(out, "filters", &filters);
