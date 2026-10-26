@@ -114,8 +114,8 @@ static bool bbf_host_already_seeded(const struct rom_fetch_peer *peers,
     return false;
 }
 
-/* Copy host_port into host, dropping a trailing ":<port>" when it is a pure
- * decimal 1..65535 suffix. */
+/* Copy host_port into host, dropping a trailing ":<port>" when strtol (base
+ * 10) consumes the whole suffix and it lies in 1..65535. */
 static void bbf_copy_connect_host(char *host, size_t hostsz,
                                   const char *host_port)
 {
