@@ -63,6 +63,31 @@ static struct node_db *site_ndb(void)
     return c.ndb;
 }
 
+/* ── REGISTER compose helpers ────────────────────────────────────── */
+
+/* Argument gate for the compose path: name/value present and a txid
+ * buffer big enough for hex + NUL. */
+static bool compose_register_args_valid(const char *name, const char *value,
+                                        const char *txid_hex, size_t txid_cap)
+{
+    return name && value && txid_hex && txid_cap >= 65;
+}
+
+/* Composing spends from the node wallet and admits the tx through the
+ * mempool — both must be wired before anything is built. */
+static bool compose_register_wallet_ready(const struct name_controller_ctx *c)
+{
+    return c->wallet != NULL && c->mempool != NULL;
+}
+
+/* Record a compose failure reason when the caller passed a buffer; the
+ * reason strings themselves stay at their original failure sites. */
+static void compose_register_set_error(char *err, size_t err_cap,
+                                       const char *msg)
+{
+    if (err) snprintf(err, err_cap, "%s", msg);
+}
+
 /* ── shared REGISTER tx-compose (declared in name_controller.h) ──────
  * THE single REGISTER compose path, shared by the JSON-RPC name_register
  * handler (name_controller.c) and the HTML register POST below, so there is
@@ -79,15 +104,15 @@ bool name_controller_compose_register(const char *name, uint8_t target_type,
 {
     if (err && err_cap) err[0] = '\0';
     if (fee_out) *fee_out = 0;
-    if (!name || !value || !txid_hex || txid_cap < 65) {
-        if (err) snprintf(err, err_cap, "invalid arguments");
+    if (!compose_register_args_valid(name, value, txid_hex, txid_cap)) {
+        compose_register_set_error(err, err_cap, "invalid arguments");
         return false;
     }
 
     struct name_controller_ctx c;
     name_controller_get_ctx(&c);
-    if (!c.wallet || !c.mempool) {
-        if (err) snprintf(err, err_cap, "wallet not loaded");
+    if (!compose_register_wallet_ready(&c)) {
+        compose_register_set_error(err, err_cap, "wallet not loaded");
         return false;
     }
 
@@ -95,7 +120,8 @@ bool name_controller_compose_register(const char *name, uint8_t target_type,
     size_t script_len = znam_build_register(script, sizeof(script),
                                             name, target_type, value);
     if (script_len == 0) {
-        if (err) snprintf(err, err_cap, "failed to build OP_RETURN script");
+        compose_register_set_error(err, err_cap,
+                                   "failed to build OP_RETURN script");
         return false;
     }
 
@@ -105,8 +131,9 @@ bool name_controller_compose_register(const char *name, uint8_t target_type,
     const char *tx_error = NULL;
     if (!zslp_command_build_genesis_base_tx(c.wallet, &wtx,
                                             &fee_paid, &tx_error).ok) {
-        if (err) snprintf(err, err_cap, "%s",
-                          tx_error ? tx_error : "failed to build transaction");
+        compose_register_set_error(err, err_cap,
+                                   tx_error ? tx_error
+                                            : "failed to build transaction");
         return false;
     }
 
@@ -119,7 +146,7 @@ bool name_controller_compose_register(const char *name, uint8_t target_type,
     struct zcl_result commit = zslp_command_commit_with_op_return(
         c.wallet, &wtx, &admission, script, script_len);
     if (!commit.ok) {
-        if (err) snprintf(err, err_cap, "%s", commit.message);
+        compose_register_set_error(err, err_cap, commit.message);
         transaction_free(&wtx.tx);
         return false;
     }
@@ -140,7 +167,7 @@ bool rpc_name_records(const struct json_value *params, bool help,
     if (help || !params || json_size(params) < 1) {
         json_set_str(result,
             "name_records \"name\"\n"
-            "\nList a registered ZCL Name's resolver records (text +\n"
+            "\nList a registered ZCL Names' resolver records (text +\n"
             "multi-coin address records — the name's has_many relationship).\n"
             "\nArguments:\n"
             "1. name (string, required) The name whose records to list\n"
@@ -557,6 +584,70 @@ static size_t name_handle_register_post(const uint8_t *body, size_t body_len,
     return name_view_register_result(name, value, txid, "", resp, max);
 }
 
+/* ── per-route handlers (dispatched by the router below) ─────────── */
+
+/* /n/<name> branch body: trim the path to the name, read ?type=, resolve. */
+static size_t name_site_serve_n_name(struct node_db *ndb, const char *path,
+                                     uint8_t *resp, size_t max)
+{
+    char name[128], type_q[32] = "";
+    const char *q = strchr(path, '?');
+    snprintf(name, sizeof(name), "%s", path + 3);
+    char *cut = strpbrk(name, "/?");
+    if (cut) *cut = '\0';
+    if (q)
+        web_form_field(q + 1, strlen(q + 1), "type",
+                         type_q, sizeof(type_q));
+    return name_resolve_site(ndb, name, type_q, resp, max);
+}
+
+/* /names/register branch body: POST creates, anything else issues the
+ * form with a fresh CSRF token and PoW timestamp. */
+static size_t name_site_serve_register(const char *method,
+                                       const uint8_t *body, size_t body_len,
+                                       uint8_t *resp, size_t max)
+{
+    if (method && strcmp(method, "POST") == 0)
+        return name_handle_register_post(body, body_len, resp, max);
+    char csrf[33];
+    name_csrf_token(NAME_CSRF_CONTEXT, csrf);
+    int64_t ts = (int64_t)platform_time_wall_time_t();
+    return name_view_register_form(csrf, ts, resp, max);
+}
+
+/* /names index body: one page of entries plus the honest uncapped total
+ * (-1 when the count is unknown). Shared by the exact-match and fallback
+ * routes, which render the identical page. */
+static size_t name_site_serve_index(struct node_db *ndb, uint8_t *resp,
+                                    size_t max)
+{
+    struct znam_entry entries[NAME_LIST_LIMIT];
+    int count = ndb ? db_znam_list(ndb, entries, NAME_LIST_LIMIT) : 0;
+    size_t rows = 0;
+    bool known = ndb && db_znam_count(ndb, &rows);
+    int total = known ? (rows > INT_MAX ? INT_MAX : (int)rows) : -1;
+    return name_view_index(entries, count, total, resp, max);
+}
+
+/* /names/<name> branch body: resolve and render the profile. */
+static size_t name_site_serve_name_profile(struct node_db *ndb,
+                                           const char *path,
+                                           uint8_t *resp, size_t max)
+{
+    char name[128];
+    struct name_resolution res;
+    enum name_resolve_status st;
+    snprintf(name, sizeof(name), "%s", path + 7);
+    char *cut = strpbrk(name, "/?");
+    if (cut) *cut = '\0';
+    st = name_resolve(ndb, name, 0, &res);
+    if (st != NAME_RESOLVE_OK)
+        return name_view_resolve_error(name, st, NULL,
+                                       res.have_entry ? &res.entry : NULL,
+                                       resp, max);
+    return name_render_profile(ndb, &res.entry, resp, max);
+}
+
 /* ── router ─────────────────────────────────────────────────────── */
 
 /* Handle any /n/ or /names request. Returns bytes written (a complete raw
@@ -571,64 +662,23 @@ size_t name_site_handle_request(const char *method, const char *path,
     /* /n/<name>[?type=<t>] — resolve to the hosted site. The optional
      * ?type= is what makes "registered, but not for that" reachable over
      * HTTP as its own verdict rather than folding into "not found". */
-    if (strncmp(path, "/n/", 3) == 0) {
-        char name[128], type_q[32] = "";
-        const char *q = strchr(path, '?');
-        snprintf(name, sizeof(name), "%s", path + 3);
-        char *cut = strpbrk(name, "/?");
-        if (cut) *cut = '\0';
-        if (q)
-            web_form_field(q + 1, strlen(q + 1), "type",
-                             type_q, sizeof(type_q));
-        return name_resolve_site(ndb, name, type_q, response, response_max);
-    }
+    if (strncmp(path, "/n/", 3) == 0)
+        return name_site_serve_n_name(ndb, path, response, response_max);
 
     /* /names/register (GET form, POST create). */
-    if (path_eq(path, "/names/register") || path_eq(path, "/names/register/")) {
-        if (method && strcmp(method, "POST") == 0)
-            return name_handle_register_post(body, body_len,
-                                             response, response_max);
-        char csrf[33];
-        name_csrf_token(NAME_CSRF_CONTEXT, csrf);
-        int64_t ts = (int64_t)platform_time_wall_time_t();
-        return name_view_register_form(csrf, ts, response, response_max);
-    }
+    if (path_eq(path, "/names/register") || path_eq(path, "/names/register/"))
+        return name_site_serve_register(method, body, body_len,
+                                        response, response_max);
 
     /* /names, /names/ — browse index. */
-    if (path_eq(path, "/names") || path_eq(path, "/names/")) {
-        struct znam_entry entries[NAME_LIST_LIMIT];
-        int count = ndb ? db_znam_list(ndb, entries, NAME_LIST_LIMIT) : 0;
-        size_t rows = 0;
-        bool known = ndb && db_znam_count(ndb, &rows);
-        int total = known ? (rows > INT_MAX ? INT_MAX : (int)rows) : -1;
-        return name_view_index(entries, count, total, response,
-                               response_max);
-    }
+    if (path_eq(path, "/names") || path_eq(path, "/names/"))
+        return name_site_serve_index(ndb, response, response_max);
 
     /* /names/<name> — profile (show), same taxonomy on failure. */
-    if (strncmp(path, "/names/", 7) == 0) {
-        char name[128];
-        struct name_resolution res;
-        enum name_resolve_status st;
-        snprintf(name, sizeof(name), "%s", path + 7);
-        char *cut = strpbrk(name, "/?");
-        if (cut) *cut = '\0';
-        st = name_resolve(ndb, name, 0, &res);
-        if (st != NAME_RESOLVE_OK)
-            return name_view_resolve_error(name, st, NULL,
-                                           res.have_entry ? &res.entry : NULL,
-                                           response, response_max);
-        return name_render_profile(ndb, &res.entry, response, response_max);
-    }
+    if (strncmp(path, "/names/", 7) == 0)
+        return name_site_serve_name_profile(ndb, path, response,
+                                            response_max);
 
     /* Bare /names index fallback for any other /names… path. */
-    {
-        struct znam_entry entries[NAME_LIST_LIMIT];
-        int count = ndb ? db_znam_list(ndb, entries, NAME_LIST_LIMIT) : 0;
-        size_t rows = 0;
-        bool known = ndb && db_znam_count(ndb, &rows);
-        int total = known ? (rows > INT_MAX ? INT_MAX : (int)rows) : -1;
-        return name_view_index(entries, count, total, response,
-                               response_max);
-    }
+    return name_site_serve_index(ndb, response, response_max);
 }
