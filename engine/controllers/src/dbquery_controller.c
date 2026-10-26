@@ -153,6 +153,153 @@ static const char *dbq_secret_hit(const char *sql)
     return NULL;
 }
 
+/* ── dbquery_execute helpers ──────────────────────────────────────
+ *
+ * Pieces of dbquery_execute() split out to hold its complexity down.
+ * Every failure is still reported by dbquery_execute() itself: these
+ * helpers return values (a clamp, a matched token, a step rc, a
+ * predicate) and never log. */
+
+static int64_t dbq_clamp_row_limit(int64_t limit)
+{
+    if (limit < 1) limit = 1;
+    if (limit > DBQUERY_HARD_ROW_CAP) limit = DBQUERY_HARD_ROW_CAP;
+    return limit;
+}
+
+/* True when the sql parameter is absent or empty. */
+static bool dbq_sql_missing(const char *sql_in)
+{
+    return !sql_in || !sql_in[0];
+}
+
+/* Skip leading whitespace. */
+static const char *dbq_skip_leading_whitespace(const char *sql)
+{
+    while (*sql && isspace((unsigned char)*sql)) sql++;
+    return sql;
+}
+
+/* True when the query opens with the SELECT keyword followed by
+ * whitespace (the original check, as its De Morgan dual). */
+static bool dbq_starts_with_select(const char *sql)
+{
+    return strncasecmp(sql, "SELECT", 6) == 0 &&
+           (sql[6] == ' ' || sql[6] == '\t' || sql[6] == '\n');
+}
+
+/* Returns the first blocked DDL/DML keyword whole-word present in the
+ * query, or NULL. */
+static const char *dbq_find_blocked_keyword(const char *sql)
+{
+    static const char *blocked[] = {
+        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
+        "REPLACE", "ATTACH", "DETACH", "PRAGMA", "VACUUM", "REINDEX",
+        "TRIGGER", "TRUNCATE",
+    };
+    for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
+        if (sql_has_word(sql, blocked[i])) return blocked[i];
+    }
+    return NULL;
+}
+
+/* Build the executed SQL: append LIMIT if not present. */
+static void dbq_build_executed_sql(const char *sql, int64_t limit,
+                                   char *executed, size_t executed_size)
+{
+    if (sql_has_word(sql, "LIMIT")) {
+        snprintf(executed, executed_size, "%s", sql);
+    } else {
+        snprintf(executed, executed_size, "%s LIMIT %lld",
+                 sql, (long long)limit);
+    }
+}
+
+/* Appends one JSON string per result column, in column order. */
+static void dbq_collect_column_names(sqlite3_stmt *stmt, int ncols,
+                                     struct json_value *cols_arr)
+{
+    for (int c = 0; c < ncols; c++) {
+        struct json_value cv = {0};
+        const char *name = sqlite3_column_name(stmt, c);
+        json_set_str(&cv, name ? name : "");
+        json_push_back(cols_arr, &cv);
+        json_free(&cv);
+    }
+}
+
+/* True when a step rc is a failure rather than a normal end of the
+ * walk (ROW = hard cap reached, DONE = exhausted, INTERRUPT = budget
+ * handler fired). */
+static bool dbq_step_failed(int rc)
+{
+    return rc != SQLITE_ROW && rc != SQLITE_DONE && rc != SQLITE_INTERRUPT;
+}
+
+/* Appends one JSON array of typed cells for the current row. */
+static void dbq_append_row_cells(sqlite3_stmt *stmt, int ncols,
+                                 struct json_value *row)
+{
+    for (int c = 0; c < ncols; c++) {
+        struct json_value cell = {0};
+        int t = sqlite3_column_type(stmt, c);
+        switch (t) {
+            case SQLITE_INTEGER:
+                json_set_int(&cell, (int64_t)sqlite3_column_int64(stmt, c));
+                break;
+            case SQLITE_FLOAT:
+                json_set_real(&cell, sqlite3_column_double(stmt, c));
+                break;
+            case SQLITE_TEXT: {
+                const char *txt = (const char *)sqlite3_column_text(stmt, c);
+                json_set_str(&cell, txt ? txt : "");
+                break;
+            }
+            case SQLITE_NULL:
+                json_set_null(&cell);
+                break;
+            case SQLITE_BLOB: {
+                /* Encode as hex string (BLOBs in our schema are
+                 * usually 20–32 byte hashes). Truncate at 256 hex
+                 * chars to keep responses small. */
+                int blen = sqlite3_column_bytes(stmt, c);
+                if (blen > 128) blen = 128;
+                const unsigned char *b = sqlite3_column_blob(stmt, c);
+                char hex[257];
+                zcl_hex_encode(b, (size_t)blen, hex);
+                json_set_str(&cell, hex);
+                break;
+            }
+        }
+        json_push_back(row, &cell);
+        json_free(&cell);
+    }
+}
+
+/* Steps the statement and appends one JSON row per result until DONE,
+ * a budget interrupt, or the hard row cap. Returns the last step rc
+ * untouched; the caller reports and fails on anything
+ * dbq_step_failed() accepts. */
+static int dbq_collect_rows(sqlite3_stmt *stmt, int ncols,
+                            struct json_value *rows_arr, int *row_count,
+                            bool *interrupted)
+{
+    int rc = SQLITE_OK;
+    while (*row_count < DBQUERY_HARD_ROW_CAP) {
+        rc = AR_STEP_ROW_READONLY(stmt);
+        if (rc == SQLITE_DONE) break;
+        if (rc == SQLITE_INTERRUPT) { *interrupted = true; break; }
+        if (rc != SQLITE_ROW) break;
+        struct json_value row = {0};
+        json_set_array(&row);
+        dbq_append_row_cells(stmt, ncols, &row);
+        json_push_back(rows_arr, &row);
+        json_free(&row);
+        (*row_count)++;
+    }
+    return rc;
+}
+
 /* See controllers/diagnostics_controller.h for the contract. Shared by
  * diag_rpc_dbquery (live node.db via app_runtime_node_db()) and the
  * core.storage.query.offline native handler (an ad hoc SQLITE_OPEN_READONLY
@@ -161,10 +308,9 @@ static const char *dbq_secret_hit(const char *sql)
 bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
                      struct json_value *result)
 {
-    if (limit < 1) limit = 1;
-    if (limit > DBQUERY_HARD_ROW_CAP) limit = DBQUERY_HARD_ROW_CAP;
+    limit = dbq_clamp_row_limit(limit);
 
-    if (!sql_in || !sql_in[0]) {
+    if (dbq_sql_missing(sql_in)) {
         json_set_str(result, "dbquery: missing sql");
         LOG_FAIL("diag", "dbquery: missing sql");
     }
@@ -175,12 +321,9 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
                  slen, DBQUERY_MAX_SQL_LEN);
     }
 
-    /* Skip leading whitespace. */
-    const char *sql = sql_in;
-    while (*sql && isspace((unsigned char)*sql)) sql++;
+    const char *sql = dbq_skip_leading_whitespace(sql_in);
 
-    if (strncasecmp(sql, "SELECT", 6) != 0 ||
-        !(sql[6] == ' ' || sql[6] == '\t' || sql[6] == '\n')) {
+    if (!dbq_starts_with_select(sql)) {
         json_set_str(result, "dbquery: query must start with SELECT");
         LOG_FAIL("diag", "dbquery: query must start with SELECT");
     }
@@ -190,17 +333,11 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
         LOG_FAIL("diag", "dbquery: semicolons not allowed");
     }
 
-    static const char *blocked[] = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
-        "REPLACE", "ATTACH", "DETACH", "PRAGMA", "VACUUM", "REINDEX",
-        "TRIGGER", "TRUNCATE",
-    };
-    for (size_t i = 0; i < sizeof(blocked) / sizeof(blocked[0]); i++) {
-        if (sql_has_word(sql, blocked[i])) {
-            json_set_str(result, "dbquery: blocked keyword not allowed");
-            LOG_FAIL("diag", "dbquery: keyword '%s' not allowed",
-                     blocked[i]);
-        }
+    const char *blocked_kw = dbq_find_blocked_keyword(sql);
+    if (blocked_kw) {
+        json_set_str(result, "dbquery: blocked keyword not allowed");
+        LOG_FAIL("diag", "dbquery: keyword '%s' not allowed",
+                 blocked_kw);
     }
 
     /* Secret-material denylist. Fails closed regardless of wallet
@@ -219,14 +356,8 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
         LOG_FAIL("diag", "dbquery: node_db not available");
     }
 
-    /* Build the executed SQL: append LIMIT if not present. */
     char executed[DBQUERY_MAX_SQL_LEN + 64];
-    if (sql_has_word(sql, "LIMIT")) {
-        snprintf(executed, sizeof(executed), "%s", sql);
-    } else {
-        snprintf(executed, sizeof(executed), "%s LIMIT %lld",
-                 sql, (long long)limit);
-    }
+    dbq_build_executed_sql(sql, limit, executed, sizeof(executed));
 
     struct dbq_progress_ctx pctx = {
         .start_ms = now_ms(),
@@ -248,76 +379,26 @@ bool dbquery_execute(sqlite3 *db, const char *sql_in, int64_t limit,
     json_set_object(result);
     struct json_value cols_arr = {0};
     json_set_array(&cols_arr);
-    for (int c = 0; c < ncols; c++) {
-        struct json_value cv = {0};
-        const char *name = sqlite3_column_name(stmt, c);
-        json_set_str(&cv, name ? name : "");
-        json_push_back(&cols_arr, &cv);
-        json_free(&cv);
-    }
+    dbq_collect_column_names(stmt, ncols, &cols_arr);
     json_push_kv(result, "columns", &cols_arr);
     json_free(&cols_arr);
 
     struct json_value rows_arr = {0};
     json_set_array(&rows_arr);
     int row_count = 0;
-    bool truncated = false;
     bool interrupted = false;
 
-    while (row_count < DBQUERY_HARD_ROW_CAP) {
-        rc = AR_STEP_ROW_READONLY(stmt);
-        if (rc == SQLITE_DONE) break;
-        if (rc == SQLITE_INTERRUPT) { interrupted = true; break; }
-        if (rc != SQLITE_ROW) {
-            const char *err = sqlite3_errmsg(db);
-            sqlite3_finalize(stmt);
-            sqlite3_progress_handler(db, 0, NULL, NULL);
-            json_set_str(result, "dbquery: step failed");
-            LOG_FAIL("diag", "dbquery: step failed (rc=%d): %s",
-                     rc, err ? err : "(null)");
-        }
-        struct json_value row = {0};
-        json_set_array(&row);
-        for (int c = 0; c < ncols; c++) {
-            struct json_value cell = {0};
-            int t = sqlite3_column_type(stmt, c);
-            switch (t) {
-                case SQLITE_INTEGER:
-                    json_set_int(&cell, (int64_t)sqlite3_column_int64(stmt, c));
-                    break;
-                case SQLITE_FLOAT:
-                    json_set_real(&cell, sqlite3_column_double(stmt, c));
-                    break;
-                case SQLITE_TEXT: {
-                    const char *txt = (const char *)sqlite3_column_text(stmt, c);
-                    json_set_str(&cell, txt ? txt : "");
-                    break;
-                }
-                case SQLITE_NULL:
-                    json_set_null(&cell);
-                    break;
-                case SQLITE_BLOB: {
-                    /* Encode as hex string (BLOBs in our schema are
-                     * usually 20–32 byte hashes). Truncate at 256 hex
-                     * chars to keep responses small. */
-                    int blen = sqlite3_column_bytes(stmt, c);
-                    if (blen > 128) blen = 128;
-                    const unsigned char *b = sqlite3_column_blob(stmt, c);
-                    char hex[257];
-                    zcl_hex_encode(b, (size_t)blen, hex);
-                    json_set_str(&cell, hex);
-                    break;
-                }
-            }
-            json_push_back(&row, &cell);
-            json_free(&cell);
-        }
-        json_push_back(&rows_arr, &row);
-        json_free(&row);
-        row_count++;
+    rc = dbq_collect_rows(stmt, ncols, &rows_arr, &row_count, &interrupted);
+    if (dbq_step_failed(rc)) {
+        const char *err = sqlite3_errmsg(db);
+        sqlite3_finalize(stmt);
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        json_set_str(result, "dbquery: step failed");
+        LOG_FAIL("diag", "dbquery: step failed (rc=%d): %s",
+                 rc, err ? err : "(null)");
     }
 
-    if (row_count >= DBQUERY_HARD_ROW_CAP) truncated = true;
+    bool truncated = row_count >= DBQUERY_HARD_ROW_CAP;
 
     int64_t elapsed = now_ms() - pctx.start_ms;
     sqlite3_finalize(stmt);
