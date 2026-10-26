@@ -307,7 +307,8 @@ static void mut_spawn_posix_child(const char *dir, int fds[2],
     _exit(127);
 }
 
-/* 1 retry, 0 readable, negative means the wait failed for good. */
+/* 1 retry, 0 poll reported activity (the read decides whether it is
+ * data, EOF or an error), negative means the wait failed for good. */
 static int mut_spawn_posix_poll(int fd, long long left)
 {
     struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
