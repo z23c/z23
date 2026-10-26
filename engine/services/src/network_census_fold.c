@@ -91,7 +91,6 @@ static void ncrawl_fold_measured_split(const struct ncrawl_probe_result *r,
     }
 }
 
-/* Bump sv's version bucket, opening a new one under NCRAWL_MAX_VERSIONS. */
 static void ncrawl_fold_version_bucket(struct network_census_view *out,
                                        const char *sv)
 {
@@ -111,7 +110,6 @@ static void ncrawl_fold_version_bucket(struct network_census_view *out,
     }
 }
 
-/* Fold one non-negative advertised height into the height extremes. */
 static void ncrawl_fold_height_extremes(int64_t height,
                                         struct network_census_view *out)
 {
