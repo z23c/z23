@@ -109,8 +109,6 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
-contexts/commons/modules/vcs/src/package_store.c:store_pick_victim:17
-contexts/commons/modules/vcs/src/package_store.c:vcs_package_store_open:21
 contexts/commons/modules/vcs/src/package_store_io.c:store_gc_cas:25
 contexts/commons/modules/vcs/src/package_store_possession.c:proof_read_chunk:21
 contexts/commons/modules/vcs/src/package_store_possession.c:vcs_package_store_possession_begin#2:19

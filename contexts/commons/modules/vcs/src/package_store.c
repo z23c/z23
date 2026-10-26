@@ -364,6 +364,24 @@ static bool store_drop_package(struct vcs_package_store *store, size_t index)
     return true;
 }
 
+/* True when pkg outranks cur as the eviction victim within pool. */
+static bool store_victim_better(const struct store_package *pkg,
+                                const struct store_package *cur,
+                                enum vcs_package_store_pool pool)
+{
+    if (pool == VCS_PACKAGE_STORE_POOL_HOT)
+        return pkg->access_count < cur->access_count ||
+            (pkg->access_count == cur->access_count &&
+             (pkg->last_access < cur->last_access ||
+              (pkg->last_access == cur->last_access &&
+               memcmp(pkg->root, cur->root, 32) < 0)));
+    return pkg->replicas > cur->replicas ||
+        (pkg->replicas == cur->replicas &&
+         (pkg->access_count < cur->access_count ||
+          (pkg->access_count == cur->access_count &&
+           memcmp(pkg->root, cur->root, 32) < 0)));
+}
+
 /* Victim selection — deterministic, frozen (see package_store.h):
  * HOT evicts least-recently-requested first; RARE evicts
  * best-replicated-elsewhere first. The incoming package and pins are
@@ -384,21 +402,7 @@ static long store_pick_victim(struct vcs_package_store *store,
             continue;
         }
         const struct store_package *cur = &store->pkgs[best];
-        bool better;
-        if (pool == VCS_PACKAGE_STORE_POOL_HOT) {
-            better = pkg->access_count < cur->access_count ||
-                (pkg->access_count == cur->access_count &&
-                 (pkg->last_access < cur->last_access ||
-                  (pkg->last_access == cur->last_access &&
-                   memcmp(pkg->root, cur->root, 32) < 0)));
-        } else {
-            better = pkg->replicas > cur->replicas ||
-                (pkg->replicas == cur->replicas &&
-                 (pkg->access_count < cur->access_count ||
-                  (pkg->access_count == cur->access_count &&
-                   memcmp(pkg->root, cur->root, 32) < 0)));
-        }
-        if (better)
+        if (store_victim_better(pkg, cur, pool))
             best = (long)i;
     }
     return best;
@@ -486,6 +490,44 @@ static bool store_open_lock_ready(struct vcs_package_store *store)
     return store->process_lock_fd >= 0 && store_process_lock(store);
 }
 
+static int store_open_lock_file(const char *lock_path)
+{
+#ifdef _WIN32
+    int fd = -1;
+    int wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                         lock_path, -1, NULL, 0);
+    wchar_t wide_lock[STORE_PATH_MAX];
+    HANDLE lock_handle = INVALID_HANDLE_VALUE;
+    if (wide_count > 0 && wide_count <= (int)STORE_PATH_MAX &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, lock_path, -1,
+                            wide_lock, wide_count) == wide_count) {
+        lock_handle = CreateFileW(
+            wide_lock, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            NULL);
+    }
+    if (lock_handle != INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_TAG_INFO tag;
+        if (!GetFileInformationByHandleEx(lock_handle, FileAttributeTagInfo,
+                                          &tag, sizeof(tag)) ||
+            (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                   FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+            CloseHandle(lock_handle);
+            lock_handle = INVALID_HANDLE_VALUE;
+        }
+    }
+    if (lock_handle != INVALID_HANDLE_VALUE) {
+        fd = _open_osfhandle((intptr_t)lock_handle, _O_RDWR | _O_BINARY);
+        if (fd < 0)
+            CloseHandle(lock_handle);
+    }
+    return fd;
+#else
+    return open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+#endif
+}
+
 struct vcs_package_store *vcs_package_store_open(const char *datadir,
                                                  uint64_t quota_bytes)
 {
@@ -514,40 +556,7 @@ struct vcs_package_store *vcs_package_store_open(const char *datadir,
         free(store);
         LOG_NULL(STORE_LOG, "process lock path too long");
     }
-#ifdef _WIN32
-    int wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                         lock_path, -1, NULL, 0);
-    wchar_t wide_lock[STORE_PATH_MAX];
-    HANDLE lock_handle = INVALID_HANDLE_VALUE;
-    if (wide_count > 0 && wide_count <= (int)STORE_PATH_MAX &&
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, lock_path, -1,
-                            wide_lock, wide_count) == wide_count) {
-        lock_handle = CreateFileW(
-            wide_lock, GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-            NULL);
-    }
-    if (lock_handle != INVALID_HANDLE_VALUE) {
-        FILE_ATTRIBUTE_TAG_INFO tag;
-        if (!GetFileInformationByHandleEx(lock_handle, FileAttributeTagInfo,
-                                          &tag, sizeof(tag)) ||
-            (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
-                                   FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-            CloseHandle(lock_handle);
-            lock_handle = INVALID_HANDLE_VALUE;
-        }
-    }
-    if (lock_handle != INVALID_HANDLE_VALUE) {
-        store->process_lock_fd = _open_osfhandle(
-            (intptr_t)lock_handle, _O_RDWR | _O_BINARY);
-        if (store->process_lock_fd < 0)
-            CloseHandle(lock_handle);
-    }
-#else
-    store->process_lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC,
-                                  0600);
-#endif
+    store->process_lock_fd = store_open_lock_file(lock_path);
     if (!store_open_lock_ready(store)) {
         if (store->process_lock_fd >= 0)
             close(store->process_lock_fd);
