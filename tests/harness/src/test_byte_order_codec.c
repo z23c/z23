@@ -251,16 +251,6 @@ static void u64_corpus(uint64_t out[U64_CORPUS_N])
         out[n++] = 0xFFull << (8 * k);
 }
 
-/* ─────────────── the five sections, one helper each ──────────────────
- *
- * Extracted from test_byte_order_codec below; section 4 is split across
- * two helpers to keep each one small. Every helper keeps the harness
- * contract the unsplit body had — a local failures counter and a
- * trailing _test_next label for the assertion macros — so a failed
- * assertion abandons the rest of that helper. The caller stops at the
- * first nonzero return, reproducing the original's single jump past
- * every later section. */
-
 static int verify_absolute_byte_layout(void)
 {
     int failures = 0;
@@ -584,8 +574,6 @@ _test_next:;
 static int verify_snapshot_png_wallet_originals(void)
 {
     int failures = 0;
-
-    /* Section 4, continued: the remaining migrated call sites. */
 
     TEST("snapshot_shielded.c: put_le32/put_le64 (the shielded snapshot "
          "file, whose bytes are also the SHA3 input)") {
