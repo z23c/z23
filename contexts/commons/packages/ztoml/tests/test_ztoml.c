@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define main ztoml_cli_main
+#include "../app/main.c"
+#undef main
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
   do {                                                                  \
@@ -365,7 +369,109 @@ static void test_fuzz(void) {
   }
 }
 
+static bool cli_fixture_text_input(FILE *source) {
+#if defined(_WIN32)
+  return _setmode(_fileno(source), _O_TEXT) != -1;
+#else
+  (void)source;
+  return true;
+#endif
+}
+
+static int cli_case(const void *wire, size_t size, bool events, int status,
+                      const char *expected) {
+  FILE *source = tmpfile(), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (fwrite(wire, 1, size, source) != size || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  if (!cli_fixture_text_input(source)) goto cleanup;
+  char *argv[] = {"ztoml", "--events", NULL};
+  if (cli_run(events ? 2 : 1, argv, source, output) != status) goto cleanup;
+  rewind(output);
+  char bytes[1024];
+  size_t n = fread(bytes, 1, sizeof bytes, output);
+  if (ferror(output) || n != strlen(expected)) goto cleanup;
+  if (memcmp(bytes, expected, n) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static void test_cli_input_bound(void) {
+  static char wire[ZTOML_MAX + 1];
+  memset(wire, ' ', sizeof wire);
+  CHECK(cli_case(wire, ZTOML_MAX - 1, false, 0, "ok: 0 events\n") == 0);
+  CHECK(cli_case(wire, ZTOML_MAX, false, 0, "ok: 0 events\n") == 0);
+  CHECK(cli_case(wire, ZTOML_MAX, true, 0, "ok: 0 events\n") == 0);
+  wire[ZTOML_MAX] = '=';
+  for (int events = 0; events < 2; events++)
+    CHECK(cli_case(wire, sizeof wire, events != 0, 1, "") == 0);
+  wire[ZTOML_MAX - 1] = '=';
+  CHECK(cli_case(wire, ZTOML_MAX, false, 1, "") == 0);
+  wire[ZTOML_MAX - 1] = ' ';
+  memcpy(wire, "k=1\n", 4);
+  CHECK(cli_case(wire, sizeof wire, true, 1, "") == 0);
+  CHECK(cli_case("k=1\n", 4, false, 0, "ok: 2 events\n") == 0);
+  CHECK(cli_case("k=1\n", 4, true, 0, "key k\nint 1\nok: 2 events\n") == 0);
+  CHECK(cli_case("k=1\n\x1a=", 6, false, 1, "") == 0);
+}
+
+static const char *cli_null_path(void) {
+#if defined(_WIN32)
+  return "NUL";
+#else
+  return "/dev/null";
+#endif
+}
+
+static int cli_input_error(bool events) {
+  FILE *source = fopen(cli_null_path(), "w"), *output = tmpfile();
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  char *argv[] = {"ztoml", "--events", NULL};
+  if (cli_run(events ? 2 : 1, argv, source, output) != 1 ||
+      !ferror(source) || ftell(output) != 0) goto cleanup;
+  failed = 0;
+cleanup:
+  if (source) (void)fclose(source);
+  if (output && fclose(output) != 0) failed = 1;
+  return failed;
+}
+
+static int cli_output_error(const char *path, const char *access, bool events) {
+  FILE *source = tmpfile(), *output = fopen(path, access);
+  char buffer[4096];
+  int failed = 1;
+  if (!source || !output) goto cleanup;
+  if (setvbuf(output, buffer, _IOFBF, sizeof buffer) != 0) goto cleanup;
+  if (fputs("k=1\n", source) < 0 || fflush(source) != 0) goto cleanup;
+  rewind(source);
+  char *argv[] = {"ztoml", "--events", NULL};
+  if (cli_run(events ? 2 : 1, argv, source, output) != 1 || !ferror(output))
+    goto cleanup;
+  failed = 0;
+cleanup:
+  if (source && fclose(source) != 0) failed = 1;
+  if (output) (void)fclose(output);
+  return failed;
+}
+
+static void test_cli_errors(void) {
+  for (int events = 0; events < 2; events++) {
+    CHECK(cli_input_error(events != 0) == 0);
+    CHECK(cli_output_error(cli_null_path(), "r", events != 0) == 0);
+#if defined(__linux__)
+    CHECK(cli_output_error("/dev/full", "w", events != 0) == 0);
+#endif
+  }
+}
+
 static int baseline_main(void) {
+  test_cli_input_bound();
+  test_cli_errors();
   test_kat();
   test_types();
   test_arr();
