@@ -6,7 +6,7 @@
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
 
-int test_model_core(void)
+static int utxo_validation_failures(void)
 {
     int failures = 0;
 
@@ -70,6 +70,13 @@ int test_model_core(void)
         if (!ar_errors_any(&e)) printf("OK\n");
         else { printf("FAIL (%s)\n", ar_errors_full(&e)); failures++; }
     }
+
+    return failures;
+}
+
+static int wallet_model_validation_failures(void)
+{
+    int failures = 0;
 
     printf("WalletTx validates presence of txid... ");
     {
@@ -135,6 +142,13 @@ int test_model_core(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int ar_callbacks_failures(void)
+{
+    int failures = 0;
+
     printf("AR callbacks: before_save can halt save... ");
     {
         struct ar_callbacks cbs;
@@ -159,6 +173,13 @@ int test_model_core(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int validates_range_failures(void)
+{
+    int failures = 0;
+
     printf("validates_range rejects out-of-range... ");
     {
         struct { int height; } rec = { .height = -5 };
@@ -178,6 +199,13 @@ int test_model_core(void)
         if (!ar_errors_any(&e)) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int ar_errors_failures(void)
+{
+    int failures = 0;
 
     printf("ar_errors accumulates multiple errors... ");
     {
@@ -206,6 +234,19 @@ int test_model_core(void)
         if (e.count == 8) printf("OK\n");
         else { printf("FAIL (count=%d)\n", e.count); failures++; }
     }
+
+    return failures;
+}
+
+int test_model_core(void)
+{
+    int failures = 0;
+
+    failures += utxo_validation_failures();
+    failures += wallet_model_validation_failures();
+    failures += ar_callbacks_failures();
+    failures += validates_range_failures();
+    failures += ar_errors_failures();
 
     return failures;
 }
