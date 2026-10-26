@@ -198,34 +198,48 @@ static double wnh_amount_real(const struct json_value *amt, bool *ok)
     return 0.0;
 }
 
-/* Exact zatoshis + RPC text; numbers must resolve to an integral zatoshi. */
-static bool wnh_amount_exact(const struct json_value *amt, CAmount *zats_out, char amount_out[32])
+/* Exact zatoshis from a decimal-string amount (the RPC wire form). */
+static bool wnh_amount_exact_str(const struct json_value *amt,
+                                 CAmount *zats_out)
 {
-    if (!amt || !zats_out || !amount_out)
+    const char *s = json_get_str(amt);
+    return s && s[0] && ParseFixedPoint(s, 8, zats_out);
+}
+
+/* Exact zatoshis from a whole-coin integer amount. */
+static bool wnh_amount_exact_int(const struct json_value *amt,
+                                 CAmount *zats_out)
+{
+    int64_t coins = json_get_int(amt);
+    if (coins <= 0 || coins > MAX_MONEY / COIN)
         return false;
-    CAmount zats = 0;
-    if (amt->type == JSON_STR) {
-        const char *s = json_get_str(amt);
-        if (!s || !s[0] || !ParseFixedPoint(s, 8, &zats))
-            return false;
-    } else if (amt->type == JSON_INT) {
-        int64_t coins = json_get_int(amt);
-        if (coins <= 0 || coins > MAX_MONEY / COIN)
-            return false;
-        zats = coins * COIN;
-    } else if (amt->type == JSON_REAL) {
-        double coins = json_get_real(amt);
-        if (!(coins > 0.0) || coins > (double)MAX_MONEY / (double)COIN)
-            return false; /* also rejects NaN and positive infinity */
-        double scaled = coins * (double)COIN;
-        int64_t rounded = (int64_t)(scaled + 0.5);
-        double delta = scaled - (double)rounded;
-        if (delta < 0.0)
-            delta = -delta;
-        if (delta > 0.000001)
-            return false;
-        zats = rounded;
-    } else return false;
+    *zats_out = coins * COIN;
+    return true;
+}
+
+/* Exact zatoshis from a real amount: the double must resolve to an integral
+ * zatoshi. */
+static bool wnh_amount_exact_real(const struct json_value *amt,
+                                  CAmount *zats_out)
+{
+    double coins = json_get_real(amt);
+    if (!(coins > 0.0) || coins > (double)MAX_MONEY / (double)COIN)
+        return false; /* also rejects NaN and positive infinity */
+    double scaled = coins * (double)COIN;
+    int64_t rounded = (int64_t)(scaled + 0.5);
+    double delta = scaled - (double)rounded;
+    if (delta < 0.0)
+        delta = -delta;
+    if (delta > 0.000001)
+        return false;
+    *zats_out = rounded;
+    return true;
+}
+
+/* Range-prove the parsed zatoshis and render the exact RPC decimal text. */
+static bool wnh_amount_exact_finish(CAmount zats, CAmount *zats_out,
+                                    char amount_out[32])
+{
     if (zats <= 0 || !MoneyRange(zats))
         return false;
     int64_t whole = zats / COIN;
@@ -236,6 +250,24 @@ static bool wnh_amount_exact(const struct json_value *amt, CAmount *zats_out, ch
         return false;
     *zats_out = zats;
     return true;
+}
+
+/* Exact zatoshis + RPC text; numbers must resolve to an integral zatoshi. */
+static bool wnh_amount_exact(const struct json_value *amt, CAmount *zats_out, char amount_out[32])
+{
+    if (!amt || !zats_out || !amount_out)
+        return false;
+    CAmount zats = 0;
+    bool parsed = false;
+    if (amt->type == JSON_STR)
+        parsed = wnh_amount_exact_str(amt, &zats);
+    else if (amt->type == JSON_INT)
+        parsed = wnh_amount_exact_int(amt, &zats);
+    else if (amt->type == JSON_REAL)
+        parsed = wnh_amount_exact_real(amt, &zats);
+    if (!parsed)
+        return false;
+    return wnh_amount_exact_finish(zats, zats_out, amount_out);
 }
 
 void wnh_fail(struct zcl_command_reply *reply,
@@ -454,6 +486,56 @@ void zcl_native_handle_wallet_address_export_key(
     json_free(&body);
 }
 
+/* Non-mutating plan half of transaction.send: echo the inputs and the exact
+ * commit input that executes them. */
+static void wnh_send_plan(struct zcl_command_reply *reply, const char *path,
+                          const char *addr, double amount, const char *idem,
+                          const char *token)
+{
+    struct json_value ci;
+    json_init(&ci);
+    json_set_object(&ci);
+    (void)json_push_kv_str(&ci, "address", addr);
+    (void)json_push_kv_real(&ci, "amount", amount);
+    if (idem && idem[0])
+        (void)json_push_kv_str(&ci, "idempotency_key", idem);
+    (void)json_push_kv_bool(&ci, "confirm", true);
+    char commit[512];
+    bool encoded = wnh_commit_input(&ci, commit, sizeof(commit));
+    json_free(&ci);
+    if (!encoded) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
+                 "exact send commit input exceeds its budget", "address");
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "address", addr);
+    (void)json_push_kv_real(&reply->data, "amount", amount);
+    if (idem && idem[0])
+        (void)json_push_kv_str(&reply->data, "idempotency_key", idem);
+    wnh_emit_plan(reply, path, "send", token, commit);
+}
+
+/* Encode the sendtoaddress params and broadcast; on false the reply already
+ * carries the typed error. */
+static bool wnh_send_broadcast(struct zcl_command_reply *reply,
+                               const char *addr, double amount,
+                               struct json_value *body)
+{
+    struct rpc_arg_builder p;
+    rpc_arg_builder_init(&p);
+    rpc_arg_builder_push_str(&p, addr);
+    rpc_arg_builder_push_real(&p, amount);
+    char *params = rpc_arg_builder_to_json(&p);
+    if (!params) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
+                 "could not encode sendtoaddress params", addr);
+        return false;
+    }
+    bool ok = wnh_call_rpc(reply, "sendtoaddress", params, body);
+    free(params);
+    return ok;
+}
+
 void zcl_native_handle_wallet_transaction_send(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -479,44 +561,12 @@ void zcl_native_handle_wallet_transaction_send(
     wnh_plan_token(token, addr, amtbuf, idem ? idem : "");
 
     if (!confirm) {
-        struct json_value ci;
-        json_init(&ci);
-        json_set_object(&ci);
-        (void)json_push_kv_str(&ci, "address", addr);
-        (void)json_push_kv_real(&ci, "amount", amount);
-        if (idem && idem[0])
-            (void)json_push_kv_str(&ci, "idempotency_key", idem);
-        (void)json_push_kv_bool(&ci, "confirm", true);
-        char commit[512];
-        bool encoded = wnh_commit_input(&ci, commit, sizeof(commit));
-        json_free(&ci);
-        if (!encoded) {
-            wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
-                     "exact send commit input exceeds its budget", "address");
-            return;
-        }
-        (void)json_push_kv_str(&reply->data, "address", addr);
-        (void)json_push_kv_real(&reply->data, "amount", amount);
-        if (idem && idem[0])
-            (void)json_push_kv_str(&reply->data, "idempotency_key", idem);
-        wnh_emit_plan(reply, request->spec->path, "send", token, commit);
+        wnh_send_plan(reply, request->spec->path, addr, amount, idem, token);
         return;
     }
 
-    struct rpc_arg_builder p;
-    rpc_arg_builder_init(&p);
-    rpc_arg_builder_push_str(&p, addr);
-    rpc_arg_builder_push_real(&p, amount);
-    char *params = rpc_arg_builder_to_json(&p);
-    if (!params) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
-                 "could not encode sendtoaddress params", addr);
-        return;
-    }
     struct json_value body;
-    bool ok = wnh_call_rpc(reply, "sendtoaddress", params, &body);
-    free(params);
-    if (!ok)
+    if (!wnh_send_broadcast(reply, addr, amount, &body))
         return;
     const char *txid = wnh_string_result(&body);
     if (!txid) {
@@ -614,84 +664,201 @@ static void wnh_emit_shielded_echo(struct zcl_command_reply *reply,
         (void)json_push_kv_str(&reply->data, "idempotency_key", idem);
 }
 
-void zcl_native_handle_wallet_shielded_send(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
-{
-    const char *wallet_scope =
-        json_get_str(json_get(request->input, "wallet_scope"));
-    if (!wallet_money_scope_valid(wallet_scope)) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_WALLET_SCOPE",
-                 "wallet_scope must explicitly be dev, prod, or test",
-                 "core.wallet.shielded.send");
-        return;
-    }
-    const char *from = json_get_str(json_get(request->input, "from"));
-    const char *to = json_get_str(json_get(request->input, "to"));
-    if (!from || !from[0] || !to || !to[0]) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_ADDRESS",
-                 "both from and to are required", "core.wallet.shielded.send");
-        return;
-    }
-    CAmount amount_zats = 0;
+/* Validated inputs of one core.wallet.shielded.send call: read and checked
+ * once, then carried by both the plan and the commit stage. */
+struct wnh_shielded_send_in {
+    const char *wallet_scope;
+    const char *from;
+    const char *to;
+    const char *idem;
+    const char *memo;
+    const char *memo_hex;
+    CAmount amount_zats;
     char amount[32];
-    if (!wnh_amount_exact(json_get(request->input, "amount"), &amount_zats,
-                          amount)) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
-                 "amount must be positive, in range, and exact to 8 decimals",
-                 "amount");
-        return;
-    }
-    (void)amount_zats; /* exact range proof; the RPC consumes decimal text */
-    const char *idem =
-        json_get_str(json_get(request->input, "idempotency_key"));
-    if (idem && strlen(idem) > 128) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_IDEMPOTENCY_KEY",
-                 "idempotency_key must be at most 128 characters",
-                 "idempotency_key");
-        return;
-    }
+};
+
+/* Even-length hex of at most 1024 chars: the raw Sapling memo wire form. */
+static bool wnh_memo_hex_shape_ok(const char *memo_hex)
+{
+    size_t hlen = strlen(memo_hex);
+    bool hex_ok = (hlen % 2 == 0) && hlen <= 1024;
+    for (size_t i = 0; hex_ok && i < hlen; i++)
+        hex_ok = isxdigit((unsigned char)memo_hex[i]) != 0;
+    return hex_ok;
+}
+
+/* Normalize and validate the memo pair; each output is NULL when absent. */
+static bool wnh_shielded_memos_valid(struct zcl_command_reply *reply,
+                                     const struct zcl_command_request *request,
+                                     const char **memo_out,
+                                     const char **memo_hex_out)
+{
     /* Optional UTF-8 or raw Sapling memo. It also carries higher-level
      * bindings such as the store's ZCL23ORDER:<id> reconciliation key. */
     const char *memo = json_get_str(json_get(request->input, "memo"));
     const char *memo_hex = json_get_str(json_get(request->input, "memo_hex"));
     if (memo && !memo[0]) memo = NULL;
     if (memo_hex && !memo_hex[0]) memo_hex = NULL;
-    if (memo_hex) {
-        size_t hlen = strlen(memo_hex);
-        bool hex_ok = (hlen % 2 == 0) && hlen <= 1024;
-        for (size_t i = 0; hex_ok && i < hlen; i++)
-            hex_ok = isxdigit((unsigned char)memo_hex[i]) != 0;
-        if (!hex_ok) {
-            wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_MEMO_HEX",
-                     "memo_hex must be even-length hex, at most 1024 chars",
-                     "memo_hex");
-            return;
-        }
+    if (memo_hex && !wnh_memo_hex_shape_ok(memo_hex)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_MEMO_HEX",
+                 "memo_hex must be even-length hex, at most 1024 chars",
+                 "memo_hex");
+        return false;
     }
     if (memo && strlen(memo) > 512) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_MEMO",
                  "memo must be at most 512 bytes", "memo");
-        return;
+        return false;
     }
-    /* One document binds every field executed by either stage. */
+    *memo_out = memo;
+    *memo_hex_out = memo_hex;
+    return true;
+}
+
+/* Read and validate every shielded.send input field, in the order the
+ * handler has always checked them. */
+static bool wnh_shielded_send_inputs(struct zcl_command_reply *reply,
+                                     const struct zcl_command_request *request,
+                                     struct wnh_shielded_send_in *in)
+{
+    in->wallet_scope =
+        json_get_str(json_get(request->input, "wallet_scope"));
+    if (!wallet_money_scope_valid(in->wallet_scope)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_WALLET_SCOPE",
+                 "wallet_scope must explicitly be dev, prod, or test",
+                 "core.wallet.shielded.send");
+        return false;
+    }
+    in->from = json_get_str(json_get(request->input, "from"));
+    in->to = json_get_str(json_get(request->input, "to"));
+    if (!in->from || !in->from[0] || !in->to || !in->to[0]) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_ADDRESS",
+                 "both from and to are required", "core.wallet.shielded.send");
+        return false;
+    }
+    in->amount_zats = 0;
+    if (!wnh_amount_exact(json_get(request->input, "amount"),
+                          &in->amount_zats, in->amount)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
+                 "amount must be positive, in range, and exact to 8 decimals",
+                 "amount");
+        return false;
+    }
+    (void)in->amount_zats; /* exact range proof; the RPC consumes decimal text */
+    in->idem = json_get_str(json_get(request->input, "idempotency_key"));
+    if (in->idem && strlen(in->idem) > 128) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_IDEMPOTENCY_KEY",
+                 "idempotency_key must be at most 128 characters",
+                 "idempotency_key");
+        return false;
+    }
+    return wnh_shielded_memos_valid(reply, request, &in->memo, &in->memo_hex);
+}
+
+/* One document binds every field executed by either stage. */
+static bool wnh_shielded_commit_input(const struct wnh_shielded_send_in *in,
+                                      char *commit, size_t commit_size)
+{
     struct json_value ci;
     json_init(&ci);
     json_set_object(&ci);
-    (void)json_push_kv_str(&ci, "wallet_scope", wallet_scope);
-    (void)json_push_kv_str(&ci, "from", from);
-    (void)json_push_kv_str(&ci, "to", to);
-    (void)json_push_kv_str(&ci, "amount", amount);
-    if (memo_hex)
-        (void)json_push_kv_str(&ci, "memo_hex", memo_hex);
-    else if (memo)
-        (void)json_push_kv_str(&ci, "memo", memo);
-    if (idem && idem[0])
-        (void)json_push_kv_str(&ci, "idempotency_key", idem);
+    (void)json_push_kv_str(&ci, "wallet_scope", in->wallet_scope);
+    (void)json_push_kv_str(&ci, "from", in->from);
+    (void)json_push_kv_str(&ci, "to", in->to);
+    (void)json_push_kv_str(&ci, "amount", in->amount);
+    if (in->memo_hex)
+        (void)json_push_kv_str(&ci, "memo_hex", in->memo_hex);
+    else if (in->memo)
+        (void)json_push_kv_str(&ci, "memo", in->memo);
+    if (in->idem && in->idem[0])
+        (void)json_push_kv_str(&ci, "idempotency_key", in->idem);
     (void)json_push_kv_bool(&ci, "confirm", true);
-    char commit[2048];
-    bool encoded = wnh_commit_input(&ci, commit, sizeof(commit));
+    bool encoded = wnh_commit_input(&ci, commit, commit_size);
     json_free(&ci);
-    if (!encoded) {
+    return encoded;
+}
+
+/* Non-mutating plan half: quote the fee the commit will pay, echo every
+ * input, and emit the plan with its exact commit input. */
+static void wnh_shielded_send_plan(struct zcl_command_reply *reply,
+                                   const char *path,
+                                   const struct wnh_shielded_send_in *in,
+                                   const char *token, const char *commit)
+{
+    CAmount quote_fee = 0, quote_total = 0;
+    if (!wnh_shielded_quote(reply, in->amount_zats, &quote_fee, &quote_total))
+        return;
+    (void)json_push_kv_str(&reply->data, "wallet_scope", in->wallet_scope);
+    (void)json_push_kv_str(&reply->data, "from", in->from);
+    (void)json_push_kv_str(&reply->data, "to", in->to);
+    (void)json_push_kv_str(&reply->data, "amount", in->amount);
+    wnh_emit_shielded_quote(reply, in->amount_zats, quote_fee, quote_total);
+    wnh_emit_plan(reply, path, "shielded-send", token, commit);
+}
+
+/* Build [from,[{address,amount,memo?}]] through the encoder so input text
+ * cannot rewrite the RPC params array. */
+static char *wnh_shielded_send_params(const struct wnh_shielded_send_in *in)
+{
+    struct rpc_arg_builder p;
+    rpc_arg_builder_init(&p);
+    rpc_arg_builder_push_str(&p, in->from);
+    struct json_value recip, recip_arr;
+    json_init(&recip);
+    json_set_object(&recip);
+    (void)json_push_kv_str(&recip, "address", in->to);
+    (void)json_push_kv_str(&recip, "amount", in->amount);
+    if (in->memo_hex)
+        (void)json_push_kv_str(&recip, "memo_hex", in->memo_hex);
+    else if (in->memo)
+        (void)json_push_kv_str(&recip, "memo", in->memo);
+    json_init(&recip_arr);
+    json_set_array(&recip_arr);
+    (void)json_push_back(&recip_arr, &recip);
+    rpc_arg_builder_push_value(&p, &recip_arr);
+    json_free(&recip);
+    json_free(&recip_arr);
+    return rpc_arg_builder_to_json(&p);
+}
+
+/* Render the committed reply from a successful z_sendmany body. */
+static bool wnh_shielded_send_committed(struct zcl_command_reply *reply,
+                                        const struct json_value *body,
+                                        const struct wnh_shielded_send_in *in,
+                                        CAmount fee_zats, const char *token)
+{
+    /* z_sendmany is synchronous here and returns the broadcast txid. */
+    const char *txid = wnh_string_result(body);
+    if (!txid || strlen(txid) != 64 || !IsHex(txid)) {
+        const char *failure = txid && txid[0]
+            ? txid
+            : "z_sendmany did not return a transaction result";
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_SEND_FAILED",
+                 failure, "z_sendmany");
+        return false;
+    }
+    (void)json_push_kv_str(&reply->data, "stage", "committed");
+    (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_str(&reply->data, "txid", txid);
+    (void)json_push_kv_str(&reply->data, "wallet_scope", in->wallet_scope);
+    (void)json_push_kv_str(&reply->data, "from", in->from);
+    (void)json_push_kv_str(&reply->data, "to", in->to);
+    (void)json_push_kv_str(&reply->data, "amount", in->amount);
+    (void)json_push_kv_int(&reply->data, "fee_zat", fee_zats);
+    wnh_emit_shielded_echo(reply, in->memo, in->memo_hex, in->idem);
+    (void)json_push_kv_str(&reply->data, "plan_token", token);
+    reply->error.mutated = true;
+    return true;
+}
+
+void zcl_native_handle_wallet_shielded_send(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    struct wnh_shielded_send_in in = { 0 };
+    if (!wnh_shielded_send_inputs(reply, request, &in))
+        return;
+    char commit[2048];
+    if (!wnh_shielded_commit_input(&in, commit, sizeof(commit))) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
                  "exact shielded commit input exceeds its response budget",
                  "memo");
@@ -702,16 +869,8 @@ void zcl_native_handle_wallet_shielded_send(
     bool confirm = json_get_bool_or(request->input, "confirm", false);
 
     if (!confirm) {
-        CAmount quote_fee = 0, quote_total = 0;
-        if (!wnh_shielded_quote(reply, amount_zats, &quote_fee, &quote_total))
-            return;
-        (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
-        (void)json_push_kv_str(&reply->data, "from", from);
-        (void)json_push_kv_str(&reply->data, "to", to);
-        (void)json_push_kv_str(&reply->data, "amount", amount);
-        wnh_emit_shielded_quote(reply, amount_zats, quote_fee, quote_total);
-        wnh_emit_plan(reply, request->spec->path, "shielded-send", token,
-                      commit);
+        wnh_shielded_send_plan(reply, request->spec->path, &in, token,
+                               commit);
         return;
     }
 
@@ -721,27 +880,7 @@ void zcl_native_handle_wallet_shielded_send(
     if (!wnh_shielded_fee_zat(reply, &fee_zats))
         return;
 
-    /* Build [from,[{address,amount,memo?}]] through the encoder so input text
-     * cannot rewrite the RPC params array. */
-    struct rpc_arg_builder p;
-    rpc_arg_builder_init(&p);
-    rpc_arg_builder_push_str(&p, from);
-    struct json_value recip, recip_arr;
-    json_init(&recip);
-    json_set_object(&recip);
-    (void)json_push_kv_str(&recip, "address", to);
-    (void)json_push_kv_str(&recip, "amount", amount);
-    if (memo_hex)
-        (void)json_push_kv_str(&recip, "memo_hex", memo_hex);
-    else if (memo)
-        (void)json_push_kv_str(&recip, "memo", memo);
-    json_init(&recip_arr);
-    json_set_array(&recip_arr);
-    (void)json_push_back(&recip_arr, &recip);
-    rpc_arg_builder_push_value(&p, &recip_arr);
-    json_free(&recip);
-    json_free(&recip_arr);
-    char *params = rpc_arg_builder_to_json(&p);
+    char *params = wnh_shielded_send_params(&in);
     if (!params) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED",
                  "could not encode z_sendmany params", "z_sendmany");
@@ -757,28 +896,10 @@ void zcl_native_handle_wallet_shielded_send(
     free(params);
     if (!ok)
         return;
-    /* z_sendmany is synchronous here and returns the broadcast txid. */
-    const char *txid = wnh_string_result(&body);
-    if (!txid || strlen(txid) != 64 || !IsHex(txid)) {
-        const char *failure = txid && txid[0]
-            ? txid
-            : "z_sendmany did not return a transaction result";
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_SEND_FAILED",
-                 failure, "z_sendmany");
+    if (!wnh_shielded_send_committed(reply, &body, &in, fee_zats, token)) {
         json_free(&body);
         return;
     }
-    (void)json_push_kv_str(&reply->data, "stage", "committed");
-    (void)json_push_kv_bool(&reply->data, "committed", true);
-    (void)json_push_kv_str(&reply->data, "txid", txid);
-    (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
-    (void)json_push_kv_str(&reply->data, "from", from);
-    (void)json_push_kv_str(&reply->data, "to", to);
-    (void)json_push_kv_str(&reply->data, "amount", amount);
-    (void)json_push_kv_int(&reply->data, "fee_zat", fee_zats);
-    wnh_emit_shielded_echo(reply, memo, memo_hex, idem);
-    (void)json_push_kv_str(&reply->data, "plan_token", token);
-    reply->error.mutated = true;
     json_free(&body);
 }
 
