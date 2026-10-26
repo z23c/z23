@@ -439,6 +439,202 @@ done:
     active_chain_free(&ms.chain_active);
 }
 
+/* ── Test phases (extracted from test_coins_wipe_rebuild_reorg) ──────── */
+
+/* The RUN A + WIPE + RUN B leg: one datadir, wiped between the two runs.
+ * Fills A and B, the post-wipe coin count, the event-scan totals and the
+ * positive-control outcome; returns the number of failed checks. */
+static int cwr_phase_ab_wipe_rebuild(struct cwr_branch *L,
+                                     struct cwr_branch *W,
+                                     const struct cwr_ext_coin *ext,
+                                     struct cwr_run_result *A,
+                                     struct cwr_run_result *B,
+                                     uint64_t *wiped_count,
+                                     struct cwr_evscan *evscan,
+                                     bool *evscan_control_ok)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_wipe_rebuild_reorg", "ab");
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+
+    CWR_CHECK("progress_store opens", progress_store_open(dir));
+    event_log_t *lg = event_log_open(log_path);
+    CWR_CHECK("event log opens", lg != NULL);
+
+    if (lg) {
+        /* RUN A — the original reorged history. */
+        cwr_drive_reorg_history(L, W, ext, A);
+        CWR_CHECK("A: history drove to completion", A->ok);
+        CWR_CHECK("A: cursor at W tip", A->cursor == (uint64_t)W->n);
+        CWR_CHECK("A: reorg unwind fired once", A->unwound == 1);
+        CWR_CHECK("A: commitment computed", A->have_commitment);
+
+        /* THE WIPE — the production reindex-epilogue primitive. */
+        sqlite3 *pdb = progress_store_db();
+        CWR_CHECK("wipe: coin state reset", cwr_wipe_coin_state(pdb));
+        *wiped_count = (uint64_t)coins_kv_count(pdb);
+        CWR_CHECK("wipe: coins_kv is EMPTY (the wipe is real)",
+                  *wiped_count == 0);
+        bool wipe_changed_commitment = false;
+        {
+            uint8_t empty_cmt[32] = {0};
+            bool have_empty = (coins_kv_commitment(pdb, empty_cmt) == 0);
+            wipe_changed_commitment =
+                have_empty && A->have_commitment &&
+                memcmp(empty_cmt, A->commitment, 32) != 0;
+        }
+        CWR_CHECK("wipe: commitment differs from A "
+                  "(no vacuous pass)", wipe_changed_commitment);
+
+        /* RUN B — rebuild the SAME history, reorg included, from block
+         * bodies alone. There is no projection left to copy from. */
+        cwr_drive_reorg_history(L, W, ext, B);
+        CWR_CHECK("B: rebuild drove to completion", B->ok);
+        CWR_CHECK("B: cursor at W tip", B->cursor == (uint64_t)W->n);
+        CWR_CHECK("B: rebuild REORGED (not a linear fold)",
+                  B->unwound == 1);
+        CWR_CHECK("B: commitment computed", B->have_commitment);
+        CWR_CHECK("B: all 4 L-only outpoints absent",
+                  B->l_only_absent == 4);
+        CWR_CHECK("B: EXT_L restored live by the inverse path",
+                  B->ext_l_live);
+        CWR_CHECK("B: EXT_W spent on the winner", B->ext_w_spent);
+
+        /* THE H1 RUNTIME INVARIANT: no EV_UTXO_* was emitted anywhere in
+         * the wipe + reorg + rebuild. Tags 5/6 stay reserved; no
+         * production emitter may come back. */
+        bool evscan_ran = false;
+        if (event_log_stream(lg, 0, cwr_evscan_cb, evscan) == 0)
+            evscan_ran = true;
+        CWR_CHECK("event log scanned", evscan_ran);
+        CWR_CHECK("H1 INVARIANT: zero EV_UTXO_ADD/EV_UTXO_SPEND events "
+                  "emitted across wipe+reorg+rebuild",
+                  evscan_ran && evscan->utxo_events == 0);
+
+        /* Positive control: append one EV_UTXO_ADD by hand and re-scan;
+         * the detector must report exactly 1, so the zero above is
+         * evidence. Runs after every proof has read its inputs. */
+        {
+            uint8_t ctl[EV_UTXO_ADD_HDR_WIRE_LEN];
+            memset(ctl, 0, sizeof(ctl));
+            (void)event_log_append(lg, EV_UTXO_ADD, ctl, sizeof(ctl));
+            struct cwr_evscan ctl_scan = { 0, 0 };
+            bool ctl_ran =
+                (event_log_stream(lg, 0, cwr_evscan_cb, &ctl_scan) == 0);
+            *evscan_control_ok = ctl_ran && ctl_scan.utxo_events == 1 &&
+                                 ctl_scan.total_events ==
+                                     evscan->total_events + 1;
+        }
+        CWR_CHECK("CONTROL: the EV_UTXO detector actually fires on a "
+                  "planted event (the zero above is not vacuous)",
+                  *evscan_control_ok);
+
+        event_log_close(lg);
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* The RUN C leg: fresh datadir, direct linear build of the winner branch.
+ * Fills C; returns the number of failed checks. */
+static int cwr_phase_c_linear_winner(struct cwr_branch *W,
+                                     const struct cwr_ext_coin *ext,
+                                     struct cwr_run_result *C)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_wipe_rebuild_reorg", "c");
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+
+    CWR_CHECK("C: progress_store opens", progress_store_open(dir));
+    event_log_t *lg = event_log_open(log_path);
+    CWR_CHECK("C: event log opens", lg != NULL);
+
+    if (lg) {
+        sqlite3 *pdb = progress_store_db();
+        cwr_seed_base_coins(pdb, ext, 2);
+
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        active_chain_init(&ms.chain_active);
+        active_chain_move_window_tip(&ms.chain_active, &W->blocks[W->n - 1]);
+
+        struct cwr_ctx ctx = { .active = W, .ext = ext, .n_ext = 2 };
+        CWR_CHECK("C: stage init", utxo_apply_stage_init(&ms));
+        utxo_apply_stage_set_reader(cwr_reader, &ctx);
+        utxo_apply_stage_set_lookup(cwr_lookup, &ctx);
+
+        CWR_CHECK("C: upstream seeded",
+                  cwr_seed_upstream(pdb, W, W->n - 1));
+        int adv = utxo_apply_stage_drain(100);
+        CWR_CHECK("C: W drains all", adv == W->n);
+        CWR_CHECK("C: no reorg unwind",
+                  utxo_apply_stage_reorg_unwound_total() == 0);
+
+        C->count = (uint64_t)coins_kv_count(pdb);
+        C->have_commitment = (coins_kv_commitment(pdb, C->commitment) == 0);
+        C->ok = true;
+        CWR_CHECK("C: commitment computed", C->have_commitment);
+
+        utxo_apply_stage_shutdown();
+        active_chain_free(&ms.chain_active);
+        event_log_close(lg);
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* The three identity claims under proof: A == B by count, A == B by SHA3
+ * commitment, and the reorged rebuild == the direct build of the winner. */
+struct cwr_proof_flags {
+    bool ab_count_eq;
+    bool ab_cmt_eq;
+    bool ac_cmt_eq;
+};
+
+static struct cwr_proof_flags cwr_compare_run_results(
+    const struct cwr_run_result *A, const struct cwr_run_result *B,
+    const struct cwr_run_result *C)
+{
+    struct cwr_proof_flags f;
+    f.ab_count_eq = (A->count == B->count) && A->ok && B->ok;
+    f.ab_cmt_eq = A->have_commitment && B->have_commitment &&
+                  memcmp(A->commitment, B->commitment, 32) == 0;
+    f.ac_cmt_eq = A->have_commitment && C->have_commitment &&
+                  memcmp(A->commitment, C->commitment, 32) == 0;
+    return f;
+}
+
+/* The [values] summary line, then the divergence note when A != B. */
+static void cwr_print_run_summary(const struct cwr_run_result *A,
+                                  const struct cwr_run_result *B,
+                                  const struct cwr_run_result *C,
+                                  const struct cwr_proof_flags *f,
+                                  uint64_t wiped_count,
+                                  const struct cwr_evscan *evscan,
+                                  bool evscan_control_ok)
+{
+    printf("[values] countA=%" PRIu64 " countB=%" PRIu64 " countC=%" PRIu64
+           " AB_match=%d AC_match=%d wiped_count=%" PRIu64
+           " unwoundA=%" PRIu64 " unwoundB=%" PRIu64
+           " ev_utxo=%" PRIu64 "/%" PRIu64 " ev_detector_control=%d"
+           " l_only_absent=%d/4\n",
+           A->count, B->count, C->count, f->ab_cmt_eq ? 1 : 0,
+           f->ac_cmt_eq ? 1 : 0, wiped_count, A->unwound, B->unwound,
+           evscan->utxo_events, evscan->total_events,
+           evscan_control_ok ? 1 : 0, B->l_only_absent);
+    if (!f->ab_cmt_eq && A->have_commitment && B->have_commitment) {
+        printf("[divergence] wiped rebuild != original THROUGH A REORG — the "
+               "deleted UTXO projection was load-bearing for recovery, or the "
+               "inverse-delta path depends on residual coin state\n");
+    }
+}
+
 /* ── Test ─────────────────────────────────────────────────────────────── */
 
 int test_coins_wipe_rebuild_reorg(void);
@@ -473,167 +669,33 @@ int test_coins_wipe_rebuild_reorg(void)
     memset(&B, 0, sizeof(B));
     memset(&C, 0, sizeof(C));
     uint64_t wiped_count = 1;          /* must become 0 */
-    bool wipe_changed_commitment = false;
     struct cwr_evscan evscan = { 0, 0 };
-    bool evscan_ran = false;
     bool evscan_control_ok = false;
 
     /* ── RUN A + WIPE + RUN B: one datadir, wiped in the middle ──────── */
     if (built) {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "coins_wipe_rebuild_reorg", "ab");
-        char log_path[512];
-        snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
-
-        CWR_CHECK("progress_store opens", progress_store_open(dir));
-        event_log_t *lg = event_log_open(log_path);
-        CWR_CHECK("event log opens", lg != NULL);
-
-        if (lg) {
-            /* RUN A — the original reorged history. */
-            cwr_drive_reorg_history(&L, &W, ext, &A);
-            CWR_CHECK("A: history drove to completion", A.ok);
-            CWR_CHECK("A: cursor at W tip", A.cursor == (uint64_t)W.n);
-            CWR_CHECK("A: reorg unwind fired once", A.unwound == 1);
-            CWR_CHECK("A: commitment computed", A.have_commitment);
-
-            /* THE WIPE — the production reindex-epilogue primitive. */
-            sqlite3 *pdb = progress_store_db();
-            CWR_CHECK("wipe: coin state reset", cwr_wipe_coin_state(pdb));
-            wiped_count = (uint64_t)coins_kv_count(pdb);
-            CWR_CHECK("wipe: coins_kv is EMPTY (the wipe is real)",
-                      wiped_count == 0);
-            {
-                uint8_t empty_cmt[32] = {0};
-                bool have_empty = (coins_kv_commitment(pdb, empty_cmt) == 0);
-                wipe_changed_commitment =
-                    have_empty && A.have_commitment &&
-                    memcmp(empty_cmt, A.commitment, 32) != 0;
-            }
-            CWR_CHECK("wipe: commitment differs from A "
-                      "(no vacuous pass)", wipe_changed_commitment);
-
-            /* RUN B — rebuild the SAME history, reorg included, from block
-             * bodies alone. There is no projection left to copy from. */
-            cwr_drive_reorg_history(&L, &W, ext, &B);
-            CWR_CHECK("B: rebuild drove to completion", B.ok);
-            CWR_CHECK("B: cursor at W tip", B.cursor == (uint64_t)W.n);
-            CWR_CHECK("B: rebuild REORGED (not a linear fold)",
-                      B.unwound == 1);
-            CWR_CHECK("B: commitment computed", B.have_commitment);
-            CWR_CHECK("B: all 4 L-only outpoints absent",
-                      B.l_only_absent == 4);
-            CWR_CHECK("B: EXT_L restored live by the inverse path",
-                      B.ext_l_live);
-            CWR_CHECK("B: EXT_W spent on the winner", B.ext_w_spent);
-
-            /* THE H1 RUNTIME INVARIANT: no EV_UTXO_* was emitted anywhere in
-             * the wipe + reorg + rebuild. Tags 5/6 stay reserved; no
-             * production emitter may come back. */
-            if (event_log_stream(lg, 0, cwr_evscan_cb, &evscan) == 0)
-                evscan_ran = true;
-            CWR_CHECK("event log scanned", evscan_ran);
-            CWR_CHECK("H1 INVARIANT: zero EV_UTXO_ADD/EV_UTXO_SPEND events "
-                      "emitted across wipe+reorg+rebuild",
-                      evscan_ran && evscan.utxo_events == 0);
-
-            /* Positive control: append one EV_UTXO_ADD by hand and re-scan;
-             * the detector must report exactly 1, so the zero above is
-             * evidence. Runs after every proof has read its inputs. */
-            {
-                uint8_t ctl[EV_UTXO_ADD_HDR_WIRE_LEN];
-                memset(ctl, 0, sizeof(ctl));
-                (void)event_log_append(lg, EV_UTXO_ADD, ctl, sizeof(ctl));
-                struct cwr_evscan ctl_scan = { 0, 0 };
-                bool ctl_ran =
-                    (event_log_stream(lg, 0, cwr_evscan_cb, &ctl_scan) == 0);
-                evscan_control_ok = ctl_ran && ctl_scan.utxo_events == 1 &&
-                                    ctl_scan.total_events ==
-                                        evscan.total_events + 1;
-            }
-            CWR_CHECK("CONTROL: the EV_UTXO detector actually fires on a "
-                      "planted event (the zero above is not vacuous)",
-                      evscan_control_ok);
-
-            event_log_close(lg);
-        }
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
+        failures += cwr_phase_ab_wipe_rebuild(&L, &W, ext, &A, &B,
+                                              &wiped_count, &evscan,
+                                              &evscan_control_ok);
     }
 
     /* ── RUN C: fresh datadir, direct linear build of the winner ─────── */
     if (built) {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "coins_wipe_rebuild_reorg", "c");
-        char log_path[512];
-        snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
-
-        CWR_CHECK("C: progress_store opens", progress_store_open(dir));
-        event_log_t *lg = event_log_open(log_path);
-        CWR_CHECK("C: event log opens", lg != NULL);
-
-        if (lg) {
-            sqlite3 *pdb = progress_store_db();
-            cwr_seed_base_coins(pdb, ext, 2);
-
-            struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
-            active_chain_move_window_tip(&ms.chain_active, &W.blocks[W.n - 1]);
-
-            struct cwr_ctx ctx = { .active = &W, .ext = ext, .n_ext = 2 };
-            CWR_CHECK("C: stage init", utxo_apply_stage_init(&ms));
-            utxo_apply_stage_set_reader(cwr_reader, &ctx);
-            utxo_apply_stage_set_lookup(cwr_lookup, &ctx);
-
-            CWR_CHECK("C: upstream seeded",
-                      cwr_seed_upstream(pdb, &W, W.n - 1));
-            int adv = utxo_apply_stage_drain(100);
-            CWR_CHECK("C: W drains all", adv == W.n);
-            CWR_CHECK("C: no reorg unwind",
-                      utxo_apply_stage_reorg_unwound_total() == 0);
-
-            C.count = (uint64_t)coins_kv_count(pdb);
-            C.have_commitment = (coins_kv_commitment(pdb, C.commitment) == 0);
-            C.ok = true;
-            CWR_CHECK("C: commitment computed", C.have_commitment);
-
-            utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
-            event_log_close(lg);
-        }
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
+        failures += cwr_phase_c_linear_winner(&W, ext, &C);
     }
 
     /* ── THE PROOF ───────────────────────────────────────────────────── */
-    bool ab_count_eq = (A.count == B.count) && A.ok && B.ok;
-    bool ab_cmt_eq = A.have_commitment && B.have_commitment &&
-                     memcmp(A.commitment, B.commitment, 32) == 0;
-    bool ac_cmt_eq = A.have_commitment && C.have_commitment &&
-                     memcmp(A.commitment, C.commitment, 32) == 0;
+    struct cwr_proof_flags proof = cwr_compare_run_results(&A, &B, &C);
+    cwr_print_run_summary(&A, &B, &C, &proof, wiped_count, &evscan,
+                          evscan_control_ok);
 
-    printf("[values] countA=%" PRIu64 " countB=%" PRIu64 " countC=%" PRIu64
-           " AB_match=%d AC_match=%d wiped_count=%" PRIu64
-           " unwoundA=%" PRIu64 " unwoundB=%" PRIu64
-           " ev_utxo=%" PRIu64 "/%" PRIu64 " ev_detector_control=%d"
-           " l_only_absent=%d/4\n",
-           A.count, B.count, C.count, ab_cmt_eq ? 1 : 0, ac_cmt_eq ? 1 : 0,
-           wiped_count, A.unwound, B.unwound,
-           evscan.utxo_events, evscan.total_events,
-           evscan_control_ok ? 1 : 0, B.l_only_absent);
-    if (!ab_cmt_eq && A.have_commitment && B.have_commitment) {
-        printf("[divergence] wiped rebuild != original THROUGH A REORG — the "
-               "deleted UTXO projection was load-bearing for recovery, or the "
-               "inverse-delta path depends on residual coin state\n");
-    }
-
-    CWR_CHECK("PROOF: wiped rebuild count == original count", ab_count_eq);
+    CWR_CHECK("PROOF: wiped rebuild count == original count",
+              proof.ab_count_eq);
     CWR_CHECK("PROOF: wiped rebuild commitment == original commitment "
               "(byte-exact SHA3, ACROSS A REORG, from block bodies alone)",
-              ab_cmt_eq);
+              proof.ab_cmt_eq);
     CWR_CHECK("PROOF: reorged rebuild == direct build of the winner",
-              ac_cmt_eq && A.count == C.count);
+              proof.ac_cmt_eq && A.count == C.count);
 
     cwr_branch_free(&L);
     cwr_branch_free(&W);
