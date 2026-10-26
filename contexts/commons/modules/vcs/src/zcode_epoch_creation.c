@@ -50,7 +50,7 @@ enum vcs_zcode_epoch_creation_error vcs_zc23_policy_epoch_cap_atoms(
         ? VCS_ZCODE_EPOCH_CREATION_OK : VCS_ZCODE_EPOCH_CREATION_OVERFLOW;
 }
 
-enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
+static enum vcs_zcode_epoch_creation_error epoch_creation_validate_roots(
     const struct vcs_zcode_epoch_creation_set_v1 *set)
 {
     if (!set)
@@ -69,7 +69,12 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
     if ((set->epoch == 0 && has_previous) ||
         (set->epoch != 0 && !has_previous))
         return VCS_ZCODE_EPOCH_CREATION_PREDECESSOR;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
 
+static enum vcs_zcode_epoch_creation_error epoch_creation_validate_amounts(
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
     uint64_t expected_cap = 0;
     if (vcs_zc23_policy_epoch_cap_atoms(set->epoch, &expected_cap) !=
             VCS_ZCODE_EPOCH_CREATION_OK ||
@@ -80,6 +85,12 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
             set->emission_cap_atoms - set->actual_mint_atoms ||
         (set->actual_mint_atoms == 0) != (set->attribution_count == 0))
         return VCS_ZCODE_EPOCH_CREATION_SUM;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_creation_validate_attributions(
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
     if (set->attribution_count >
             VCS_ZCODE_EPOCH_CREATION_MAX_ATTRIBUTIONS ||
         (set->attribution_count != 0 && !set->attribution_roots))
@@ -90,7 +101,12 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
                               set->attribution_roots[i], 32) >= 0))
             return VCS_ZCODE_EPOCH_CREATION_ORDER;
     }
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
 
+static enum vcs_zcode_epoch_creation_error epoch_creation_validate_maturity(
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
     uint64_t minimum_height = 0;
     if (!zcl_u64_add(set->opening_height, VCS_ZC23_CHALLENGE_BLOCKS,
                      &minimum_height) || set->opening_mtp <= 0 ||
@@ -100,6 +116,70 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
         set->maturity_mtp <
             set->opening_mtp + VCS_ZC23_CHALLENGE_SECONDS)
         return VCS_ZCODE_EPOCH_CREATION_TIME;
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
+    enum vcs_zcode_epoch_creation_error error = epoch_creation_validate_roots(set);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
+    error = epoch_creation_validate_amounts(set);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
+    error = epoch_creation_validate_attributions(set);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
+    return epoch_creation_validate_maturity(set);
+}
+
+static bool epoch_creation_write_accounting(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
+    return zcl_codec_write_bytes(writer, epoch_creation_magic, 8) &&
+        zcl_codec_write_u16le(writer, set->schema_version) &&
+        zcl_codec_write_u16le(writer, 0) &&
+        zcl_codec_write_u64le(writer, set->epoch) &&
+        zcl_codec_write_u32le(writer, (uint32_t)set->attribution_count) &&
+        zcl_codec_write_u32le(writer, 0) &&
+        zcl_codec_write_u64le(writer, set->emission_cap_atoms) &&
+        zcl_codec_write_u64le(writer, set->actual_mint_atoms) &&
+        zcl_codec_write_u64le(writer, set->unissued_atoms);
+}
+
+static bool epoch_creation_write_commitments(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_epoch_creation_set_v1 *set)
+{
+    return zcl_codec_write_bytes(writer, set->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer, set->zc23_policy_root, 32) &&
+        zcl_codec_write_bytes(writer,
+                              set->previous_epoch_creation_root, 32) &&
+        zcl_codec_write_bytes(writer,
+                              set->committee_evidence_snapshot_root, 32) &&
+        zcl_codec_write_u64le(writer, set->opening_height) &&
+        zcl_codec_write_bytes(writer, set->opening_hash, 32) &&
+        zcl_codec_write_i64le(writer, set->opening_mtp) &&
+        zcl_codec_write_u64le(writer, set->maturity_height) &&
+        zcl_codec_write_bytes(writer, set->maturity_hash, 32) &&
+        zcl_codec_write_i64le(writer, set->maturity_mtp);
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_creation_finish_wire(
+    const struct vcs_zcode_epoch_creation_set_v1 *set,
+    struct zcl_codec_writer *writer, uint8_t *wire, size_t wire_len,
+    uint8_t **out, size_t *out_len, bool ok)
+{
+    for (size_t i = 0; ok && i < set->attribution_count; i++)
+        ok = zcl_codec_write_bytes(writer, set->attribution_roots[i], 32);
+    size_t written = 0;
+    if (!ok || !zcl_codec_writer_finish(writer, &written) ||
+        written != wire_len) {
+        free(wire);
+        return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
+    }
+    *out = wire;
+    *out_len = wire_len;
     return VCS_ZCODE_EPOCH_CREATION_OK;
 }
 
@@ -125,38 +205,108 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_serialize(
         return VCS_ZCODE_EPOCH_CREATION_ALLOC;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, wire, wire_len);
-    bool ok = zcl_codec_write_bytes(&writer, epoch_creation_magic, 8) &&
-        zcl_codec_write_u16le(&writer, set->schema_version) &&
-        zcl_codec_write_u16le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, set->epoch) &&
-        zcl_codec_write_u32le(&writer, (uint32_t)set->attribution_count) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, set->emission_cap_atoms) &&
-        zcl_codec_write_u64le(&writer, set->actual_mint_atoms) &&
-        zcl_codec_write_u64le(&writer, set->unissued_atoms) &&
-        zcl_codec_write_bytes(&writer, set->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer, set->zc23_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-                              set->previous_epoch_creation_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-                              set->committee_evidence_snapshot_root, 32) &&
-        zcl_codec_write_u64le(&writer, set->opening_height) &&
-        zcl_codec_write_bytes(&writer, set->opening_hash, 32) &&
-        zcl_codec_write_i64le(&writer, set->opening_mtp) &&
-        zcl_codec_write_u64le(&writer, set->maturity_height) &&
-        zcl_codec_write_bytes(&writer, set->maturity_hash, 32) &&
-        zcl_codec_write_i64le(&writer, set->maturity_mtp);
-    for (size_t i = 0; ok && i < set->attribution_count; i++)
-        ok = zcl_codec_write_bytes(&writer, set->attribution_roots[i], 32);
-    size_t written = 0;
-    if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
-        written != wire_len) {
-        free(wire);
+    bool ok = epoch_creation_write_accounting(&writer, set) &&
+        epoch_creation_write_commitments(&writer, set);
+    return epoch_creation_finish_wire(set, &writer, wire, wire_len,
+                                       out, out_len, ok);
+}
+
+struct epoch_creation_wire_header {
+    uint8_t magic[8];
+    uint16_t reserved16;
+    uint32_t count, reserved32;
+};
+
+static bool epoch_creation_read_accounting(struct zcl_codec_reader *reader,
+    struct vcs_zcode_epoch_creation_set_v1 *out,
+    struct epoch_creation_wire_header *header)
+{
+    return zcl_codec_read_bytes(reader, header->magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, &header->reserved16) &&
+        zcl_codec_read_u64le(reader, &out->epoch) &&
+        zcl_codec_read_u32le(reader, &header->count) &&
+        zcl_codec_read_u32le(reader, &header->reserved32) &&
+        zcl_codec_read_u64le(reader, &out->emission_cap_atoms) &&
+        zcl_codec_read_u64le(reader, &out->actual_mint_atoms) &&
+        zcl_codec_read_u64le(reader, &out->unissued_atoms);
+}
+
+static bool epoch_creation_read_commitments(struct zcl_codec_reader *reader,
+    struct vcs_zcode_epoch_creation_set_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, out->zc23_policy_root, 32) &&
+        zcl_codec_read_bytes(reader,
+                             out->previous_epoch_creation_root, 32) &&
+        zcl_codec_read_bytes(reader,
+                             out->committee_evidence_snapshot_root, 32) &&
+        zcl_codec_read_u64le(reader, &out->opening_height) &&
+        zcl_codec_read_bytes(reader, out->opening_hash, 32) &&
+        zcl_codec_read_i64le(reader, &out->opening_mtp) &&
+        zcl_codec_read_u64le(reader, &out->maturity_height) &&
+        zcl_codec_read_bytes(reader, out->maturity_hash, 32) &&
+        zcl_codec_read_i64le(reader, &out->maturity_mtp);
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_creation_parse_header(
+    struct zcl_codec_reader *reader, size_t wire_len,
+    struct vcs_zcode_epoch_creation_set_v1 *out,
+    struct epoch_creation_wire_header *header)
+{
+    bool ok = epoch_creation_read_accounting(reader, out, header) &&
+        epoch_creation_read_commitments(reader, out);
+    size_t roots_bytes = 0, expected = 0;
+    if (!ok || header->count > VCS_ZCODE_EPOCH_CREATION_MAX_ATTRIBUTIONS ||
+        !zcl_size_mul(header->count, 32u, &roots_bytes) ||
+        !zcl_size_add(VCS_ZCODE_EPOCH_CREATION_HEADER_BYTES, roots_bytes,
+                      &expected) || expected != wire_len) {
+        vcs_zcode_epoch_creation_free(out);
         return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
     }
-    *out = wire;
-    *out_len = wire_len;
     return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_creation_parse_attributions(
+    struct zcl_codec_reader *reader, struct vcs_zcode_epoch_creation_set_v1 *out,
+    uint32_t count, bool ok)
+{
+    if (count != 0) {
+        out->attribution_roots = zcl_calloc(
+            count, 32u, "zcode_epoch_creation_roots");
+        if (!out->attribution_roots) {
+            vcs_zcode_epoch_creation_free(out);
+            return VCS_ZCODE_EPOCH_CREATION_ALLOC;
+        }
+    }
+    out->attribution_count = count;
+    for (size_t i = 0; ok && i < count; i++)
+        ok = zcl_codec_read_bytes(reader, out->attribution_roots[i], 32);
+    ok = ok && zcl_codec_reader_finish(reader);
+    if (!ok) {
+        vcs_zcode_epoch_creation_free(out);
+        return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
+    }
+    return VCS_ZCODE_EPOCH_CREATION_OK;
+}
+
+static enum vcs_zcode_epoch_creation_error epoch_creation_validate_wire_header(
+    const struct epoch_creation_wire_header *header,
+    struct vcs_zcode_epoch_creation_set_v1 *out)
+{
+    if (memcmp(header->magic, epoch_creation_magic, 8) != 0) {
+        vcs_zcode_epoch_creation_free(out);
+        return VCS_ZCODE_EPOCH_CREATION_MAGIC;
+    }
+    if (header->reserved16 != 0 || header->reserved32 != 0) {
+        vcs_zcode_epoch_creation_free(out);
+        return VCS_ZCODE_EPOCH_CREATION_RESERVED;
+    }
+    enum vcs_zcode_epoch_creation_error error =
+        vcs_zcode_epoch_creation_validate(out);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        vcs_zcode_epoch_creation_free(out);
+    return error;
 }
 
 enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_parse(
@@ -171,66 +321,16 @@ enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_parse(
         wire_len > VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES)
         return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
     struct zcl_codec_reader reader;
-    uint8_t magic[8]; uint16_t reserved16; uint32_t count, reserved32;
+    struct epoch_creation_wire_header header;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &reserved16) &&
-        zcl_codec_read_u64le(&reader, &out->epoch) &&
-        zcl_codec_read_u32le(&reader, &count) &&
-        zcl_codec_read_u32le(&reader, &reserved32) &&
-        zcl_codec_read_u64le(&reader, &out->emission_cap_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->actual_mint_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->unissued_atoms) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->zc23_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-                             out->previous_epoch_creation_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-                             out->committee_evidence_snapshot_root, 32) &&
-        zcl_codec_read_u64le(&reader, &out->opening_height) &&
-        zcl_codec_read_bytes(&reader, out->opening_hash, 32) &&
-        zcl_codec_read_i64le(&reader, &out->opening_mtp) &&
-        zcl_codec_read_u64le(&reader, &out->maturity_height) &&
-        zcl_codec_read_bytes(&reader, out->maturity_hash, 32) &&
-        zcl_codec_read_i64le(&reader, &out->maturity_mtp);
-    size_t roots_bytes = 0, expected = 0;
-    if (!ok || count > VCS_ZCODE_EPOCH_CREATION_MAX_ATTRIBUTIONS ||
-        !zcl_size_mul(count, 32u, &roots_bytes) ||
-        !zcl_size_add(VCS_ZCODE_EPOCH_CREATION_HEADER_BYTES, roots_bytes,
-                      &expected) || expected != wire_len) {
-        vcs_zcode_epoch_creation_free(out);
-        return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
-    }
-    if (count != 0) {
-        out->attribution_roots = zcl_calloc(
-            count, 32u, "zcode_epoch_creation_roots");
-        if (!out->attribution_roots) {
-            vcs_zcode_epoch_creation_free(out);
-            return VCS_ZCODE_EPOCH_CREATION_ALLOC;
-        }
-    }
-    out->attribution_count = count;
-    for (size_t i = 0; ok && i < count; i++)
-        ok = zcl_codec_read_bytes(&reader, out->attribution_roots[i], 32);
-    ok = ok && zcl_codec_reader_finish(&reader);
-    if (!ok) {
-        vcs_zcode_epoch_creation_free(out);
-        return VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE;
-    }
-    if (memcmp(magic, epoch_creation_magic, 8) != 0) {
-        vcs_zcode_epoch_creation_free(out);
-        return VCS_ZCODE_EPOCH_CREATION_MAGIC;
-    }
-    if (reserved16 != 0 || reserved32 != 0) {
-        vcs_zcode_epoch_creation_free(out);
-        return VCS_ZCODE_EPOCH_CREATION_RESERVED;
-    }
     enum vcs_zcode_epoch_creation_error error =
-        vcs_zcode_epoch_creation_validate(out);
+        epoch_creation_parse_header(&reader, wire_len, out, &header);
     if (error != VCS_ZCODE_EPOCH_CREATION_OK)
-        vcs_zcode_epoch_creation_free(out);
-    return error;
+        return error;
+    error = epoch_creation_parse_attributions(&reader, out, header.count, true);
+    if (error != VCS_ZCODE_EPOCH_CREATION_OK)
+        return error;
+    return epoch_creation_validate_wire_header(&header, out);
 }
 
 enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_root(
