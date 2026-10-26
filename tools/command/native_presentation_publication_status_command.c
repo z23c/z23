@@ -136,6 +136,80 @@ static bool npps_provider_intersection(
     return false;
 }
 
+static bool npps_publication_facts_unusable(
+    const char *schema, const char *package_root,
+    const char *transport_root, const char *confirmation,
+    const char *local_node_id, const struct json_value *package)
+{
+    return !schema || strcmp(schema, "zcl.package_publication_facts.v1") != 0 ||
+        !npps_root(package_root, false) || !npps_root(transport_root, false) ||
+        !npps_root(confirmation, false) || !npps_root(local_node_id, true) ||
+        !package;
+}
+
+static bool npps_download_complete(const struct json_value *download,
+                                   bool download_found,
+                                   const char *download_state)
+{
+    int64_t present_chunks = npps_int(download, "present_chunks");
+    int64_t total_chunks = npps_int(download, "total_chunks");
+    int64_t present_bytes = npps_int(download, "present_bytes");
+    int64_t total_bytes = npps_int(download, "total_bytes");
+    return download_found && download_state &&
+        strcmp(download_state, "complete") == 0 && total_chunks > 0 &&
+        present_chunks == total_chunks && total_bytes > 0 &&
+        present_bytes == total_bytes;
+}
+
+static bool npps_download_failed(bool download_found,
+                                 const char *download_state)
+{
+    return download_found && download_state &&
+           strcmp(download_state, "failed") == 0;
+}
+
+static void npps_signed_observation_items(
+    struct zcl_present_model_v1 *model, bool pointer_found, bool pointer_read,
+    bool provider_found, bool provider_read)
+{
+    npps_item(model, "pointer", "SIGNED OBSERVATION - Pointer published",
+              pointer_found ? "Exact package -> carrier record observed" :
+              pointer_read ? "No exact signed pointer observed" :
+                             "DHT projection unavailable",
+              pointer_found ? ZCL_PRESENT_STATUS_GREEN :
+              pointer_read ? ZCL_PRESENT_STATUS_NEUTRAL :
+                             ZCL_PRESENT_STATUS_RED,
+              pointer_found);
+    npps_item(model, "provider", "SIGNED OBSERVATION - Provider published",
+              provider_found ? "Exact carrier provider record observed" :
+              provider_read ? "No exact signed provider observed" :
+                              "DHT projection unavailable",
+              provider_found ? ZCL_PRESENT_STATUS_GREEN :
+              provider_read ? ZCL_PRESENT_STATUS_NEUTRAL :
+                              ZCL_PRESENT_STATUS_RED,
+              provider_found);
+}
+
+static void npps_peer_observation_items(
+    struct zcl_present_model_v1 *model, bool peer_discovered,
+    bool exact_fetch, bool download_failed)
+{
+    npps_item(model, "discovery", "PEER OBSERVATION - Peer discovered",
+              peer_discovered ? "Same non-self provider binds both records" :
+                                "No exact non-self record pair observed",
+              peer_discovered ? ZCL_PRESENT_STATUS_GREEN :
+                                ZCL_PRESENT_STATUS_NEUTRAL,
+              peer_discovered);
+    npps_item(model, "fetch", "PEER OBSERVATION - Exact bytes fetched",
+              exact_fetch ? "Carrier complete, imported, and peer bytes received" :
+              download_failed ? "Named carrier download failure" :
+                                "No complete peer-bound fetch observed",
+              exact_fetch ? ZCL_PRESENT_STATUS_GREEN :
+              download_failed ? ZCL_PRESENT_STATUS_RED :
+                                ZCL_PRESENT_STATUS_NEUTRAL,
+              exact_fetch);
+}
+
 bool zcl_native_presentation_publication_status_model_from_facts(
     const struct json_value *facts, struct zcl_present_model_v1 *model,
     char *why, size_t why_cap)
@@ -148,10 +222,9 @@ bool zcl_native_presentation_publication_status_model_from_facts(
     const struct json_value *package = npps_object(facts, "package");
     const struct json_value *pointer = npps_object(facts, "pointer_records");
     const struct json_value *provider = npps_object(facts, "provider_records");
-    if (!schema || strcmp(schema, "zcl.package_publication_facts.v1") != 0 ||
-        !npps_root(package_root, false) || !npps_root(transport_root, false) ||
-        !npps_root(confirmation, false) || !npps_root(local_node_id, true) ||
-        !package) {
+    if (npps_publication_facts_unusable(schema, package_root,
+                                        transport_root, confirmation,
+                                        local_node_id, package)) {
         (void)snprintf(why, why_cap,
                        "exact package publication facts are unavailable");
         return false;
@@ -177,19 +250,12 @@ bool zcl_native_presentation_publication_status_model_from_facts(
     bool download_found = npps_bool(package, "download_found");
     const struct json_value *download = npps_object(package, "download");
     const char *download_state = npps_str(download, "state");
-    int64_t present_chunks = npps_int(download, "present_chunks");
-    int64_t total_chunks = npps_int(download, "total_chunks");
-    int64_t present_bytes = npps_int(download, "present_bytes");
-    int64_t total_bytes = npps_int(download, "total_bytes");
     int64_t fetched_bytes = npps_int(download, "fetched_bytes");
-    bool download_complete = download_found && download_state &&
-        strcmp(download_state, "complete") == 0 && total_chunks > 0 &&
-        present_chunks == total_chunks && total_bytes > 0 &&
-        present_bytes == total_bytes;
+    bool download_complete = npps_download_complete(download, download_found,
+                                                    download_state);
     bool exact_fetch = local_complete && peer_discovered && download_complete &&
                        fetched_bytes > 0;
-    bool download_failed = download_found && download_state &&
-                           strcmp(download_state, "failed") == 0;
+    bool download_failed = npps_download_failed(download_found, download_state);
 
     zcl_present_model_init_v1(model, ZCL_PRESENT_MODEL_PROGRESS);
     (void)snprintf(model->request_id, sizeof(model->request_id),
@@ -213,36 +279,10 @@ bool zcl_native_presentation_publication_status_model_from_facts(
               local_complete ? ZCL_PRESENT_STATUS_GREEN :
                                ZCL_PRESENT_STATUS_NEUTRAL,
               local_complete);
-    npps_item(model, "pointer", "SIGNED OBSERVATION - Pointer published",
-              pointer_found ? "Exact package -> carrier record observed" :
-              pointer_read ? "No exact signed pointer observed" :
-                             "DHT projection unavailable",
-              pointer_found ? ZCL_PRESENT_STATUS_GREEN :
-              pointer_read ? ZCL_PRESENT_STATUS_NEUTRAL :
-                             ZCL_PRESENT_STATUS_RED,
-              pointer_found);
-    npps_item(model, "provider", "SIGNED OBSERVATION - Provider published",
-              provider_found ? "Exact carrier provider record observed" :
-              provider_read ? "No exact signed provider observed" :
-                              "DHT projection unavailable",
-              provider_found ? ZCL_PRESENT_STATUS_GREEN :
-              provider_read ? ZCL_PRESENT_STATUS_NEUTRAL :
-                              ZCL_PRESENT_STATUS_RED,
-              provider_found);
-    npps_item(model, "discovery", "PEER OBSERVATION - Peer discovered",
-              peer_discovered ? "Same non-self provider binds both records" :
-                                "No exact non-self record pair observed",
-              peer_discovered ? ZCL_PRESENT_STATUS_GREEN :
-                                ZCL_PRESENT_STATUS_NEUTRAL,
-              peer_discovered);
-    npps_item(model, "fetch", "PEER OBSERVATION - Exact bytes fetched",
-              exact_fetch ? "Carrier complete, imported, and peer bytes received" :
-              download_failed ? "Named carrier download failure" :
-                                "No complete peer-bound fetch observed",
-              exact_fetch ? ZCL_PRESENT_STATUS_GREEN :
-              download_failed ? ZCL_PRESENT_STATUS_RED :
-                                ZCL_PRESENT_STATUS_NEUTRAL,
-              exact_fetch);
+    npps_signed_observation_items(model, pointer_found, pointer_read,
+                                  provider_found, provider_read);
+    npps_peer_observation_items(model, peer_discovered, exact_fetch,
+                                download_failed);
     return zcl_present_model_validate_v1(model, why, why_cap);
 }
 
