@@ -83,6 +83,50 @@ static bool capability_geometry_valid(
            ciphertext <= MESH_CAPABILITY_GRANT_MAX_CIPHERTEXT_BYTES;
 }
 
+static bool capability_storage_bounded(
+    const struct db_mesh_capability_grant *grant)
+{
+    bool storage_sum_ok = grant->ciphertext_size_bytes <=
+        UINT64_MAX - grant->object_size_bytes;
+    uint64_t required_storage = storage_sum_ok
+        ? grant->ciphertext_size_bytes + grant->object_size_bytes
+        : UINT64_MAX;
+    return storage_sum_ok &&
+        grant->storage_limit_bytes >= required_storage &&
+        grant->storage_limit_bytes <= MESH_CAPABILITY_GRANT_MAX_STORAGE_BYTES;
+}
+
+static bool capability_validity_window_bounded(
+    const struct db_mesh_capability_grant *grant)
+{
+    return grant->not_before >= grant->issued_at &&
+        grant->expires_at > grant->not_before &&
+        grant->expires_at - grant->issued_at <=
+            MESH_CAPABILITY_GRANT_MAX_LIFETIME_SECONDS;
+}
+
+static bool capability_lifecycle_consistent(
+    const struct db_mesh_capability_grant *grant)
+{
+    bool transfer_set = zcl_bytes_any_set(grant->transfer_id, 32);
+    return (grant->claimed_at == 0 && !transfer_set &&
+            grant->consumed_at == 0) ||
+        (grant->claimed_at >= grant->not_before &&
+         grant->claimed_at < grant->expires_at && transfer_set &&
+         (grant->consumed_at == 0 ||
+          (grant->consumed_at >= grant->claimed_at &&
+           grant->consumed_at < grant->expires_at)));
+}
+
+static bool capability_revocation_consistent(
+    const struct db_mesh_capability_grant *grant)
+{
+    return (grant->revoked_at == 0 &&
+            grant->revocation_generation == 0) ||
+        (grant->revoked_at >= grant->issued_at &&
+         grant->revocation_generation > 0);
+}
+
 bool db_mesh_capability_grant_validate(
     const struct db_mesh_capability_grant *grant, struct ar_errors *errors)
 {
@@ -114,16 +158,7 @@ bool db_mesh_capability_grant_validate(
                      "ciphertext_root", "must be non-zero");
     validates_custom(errors, capability_geometry_valid(grant), "geometry",
                      "must use canonical sealed 64 KiB chunks");
-    bool storage_sum_ok = grant->ciphertext_size_bytes <=
-        UINT64_MAX - grant->object_size_bytes;
-    uint64_t required_storage = storage_sum_ok
-        ? grant->ciphertext_size_bytes + grant->object_size_bytes
-        : UINT64_MAX;
-    validates_custom(errors,
-                     storage_sum_ok &&
-                         grant->storage_limit_bytes >= required_storage &&
-                         grant->storage_limit_bytes <=
-                             MESH_CAPABILITY_GRANT_MAX_STORAGE_BYTES,
+    validates_custom(errors, capability_storage_bounded(grant),
                      "storage_limit_bytes", "does not bound both stages");
     validates_custom(errors,
                      grant->transfer_limit_bytes >=
@@ -143,27 +178,11 @@ bool db_mesh_capability_grant_validate(
                      "deny_mask", "must deny every protected authority");
     validates_custom(errors, grant->issued_at > 0, "issued_at",
                      "must be positive");
-    validates_custom(errors,
-                     grant->not_before >= grant->issued_at &&
-                         grant->expires_at > grant->not_before &&
-                         grant->expires_at - grant->issued_at <=
-                             MESH_CAPABILITY_GRANT_MAX_LIFETIME_SECONDS,
+    validates_custom(errors, capability_validity_window_bounded(grant),
                      "validity", "has an invalid or excessive window");
-    bool transfer_set = zcl_bytes_any_set(grant->transfer_id, 32);
-    validates_custom(errors,
-                     (grant->claimed_at == 0 && !transfer_set &&
-                      grant->consumed_at == 0) ||
-                         (grant->claimed_at >= grant->not_before &&
-                          grant->claimed_at < grant->expires_at && transfer_set &&
-                          (grant->consumed_at == 0 ||
-                           (grant->consumed_at >= grant->claimed_at &&
-                            grant->consumed_at < grant->expires_at))),
+    validates_custom(errors, capability_lifecycle_consistent(grant),
                      "lifecycle", "claim, transfer, and completion disagree");
-    validates_custom(errors,
-                     (grant->revoked_at == 0 &&
-                      grant->revocation_generation == 0) ||
-                         (grant->revoked_at >= grant->issued_at &&
-                          grant->revocation_generation > 0),
+    validates_custom(errors, capability_revocation_consistent(grant),
                      "revocation", "timestamp and generation disagree");
     return !ar_errors_any(errors);
 }
@@ -220,7 +239,7 @@ bool db_mesh_capability_grant_find(
         AR_BIND_TEXT(st, 1, grant_id), capability_read(out, st));
 }
 
-static bool capability_immutable_equal(
+static bool capability_immutable_identity_equal(
     const struct db_mesh_capability_grant *left,
     const struct db_mesh_capability_grant *right)
 {
@@ -234,8 +253,14 @@ static bool capability_immutable_equal(
            memcmp(left->plaintext_root, right->plaintext_root, 32) == 0 &&
            memcmp(left->ciphertext_root, right->ciphertext_root, 32) == 0 &&
            left->object_size_bytes == right->object_size_bytes &&
-           left->ciphertext_size_bytes == right->ciphertext_size_bytes &&
-           left->storage_limit_bytes == right->storage_limit_bytes &&
+           left->ciphertext_size_bytes == right->ciphertext_size_bytes;
+}
+
+static bool capability_immutable_policy_equal(
+    const struct db_mesh_capability_grant *left,
+    const struct db_mesh_capability_grant *right)
+{
+    return left->storage_limit_bytes == right->storage_limit_bytes &&
            left->transfer_limit_bytes == right->transfer_limit_bytes &&
            left->max_chunk_bytes == right->max_chunk_bytes &&
            left->chunk_count == right->chunk_count &&
@@ -247,17 +272,40 @@ static bool capability_immutable_equal(
            left->expires_at == right->expires_at;
 }
 
+static bool capability_immutable_equal(
+    const struct db_mesh_capability_grant *left,
+    const struct db_mesh_capability_grant *right)
+{
+    return capability_immutable_identity_equal(left, right) &&
+           capability_immutable_policy_equal(left, right);
+}
+
+static bool capability_grant_has_mutable_state(
+    const struct db_mesh_capability_grant *grant)
+{
+    return grant->claimed_at != 0 || grant->consumed_at != 0 ||
+           zcl_bytes_any_set(grant->transfer_id, 32) ||
+           grant->revoked_at != 0 || grant->revocation_generation != 0;
+}
+
+static bool capability_grant_within_pairing(
+    const struct db_mesh_capability_grant *grant,
+    const struct db_mesh_pairing *pairing)
+{
+    return pairing->revoked_at == 0 &&
+           grant->issued_at >= pairing->paired_at &&
+           grant->expires_at <= pairing->expires_at;
+}
+
 bool db_mesh_capability_grant_insert(
     struct node_db *ndb, const struct db_mesh_capability_grant *grant)
 {
-    if (!ndb || !ndb->open || !grant || grant->claimed_at != 0 ||
-        grant->consumed_at != 0 || zcl_bytes_any_set(grant->transfer_id, 32) ||
-        grant->revoked_at != 0 || grant->revocation_generation != 0)
+    if (!ndb || !ndb->open || !grant ||
+        capability_grant_has_mutable_state(grant))
         LOG_FAIL("mesh_capability", "insert: bad arguments or mutable state");
     struct db_mesh_pairing pairing;
     if (!db_mesh_pairing_find(ndb, grant->pairing_id, &pairing) ||
-        pairing.revoked_at != 0 || grant->issued_at < pairing.paired_at ||
-        grant->expires_at > pairing.expires_at) {
+        !capability_grant_within_pairing(grant, &pairing)) {
         LOG_ERROR("mesh_capability",
                   "insert: grant window or authority exceeds pairing %.64s",
                   grant->pairing_id);
@@ -483,16 +531,24 @@ static bool capability_completion_replay_authorized(
         AR_BIND_INT(st, 6, now));
 }
 
+static bool capability_complete_args_valid(
+    struct node_db *ndb, const uint8_t transfer_id[32],
+    uint64_t pairing_generation, uint64_t grant_generation, int64_t now)
+{
+    return ndb && ndb->open && transfer_id &&
+           zcl_bytes_any_set(transfer_id, 32) && now > 0 &&
+           pairing_generation <= (uint64_t)INT64_MAX &&
+           grant_generation <= (uint64_t)INT64_MAX;
+}
+
 enum mesh_capability_complete_result db_mesh_capability_grant_complete(
     struct node_db *ndb, const char *grant_id,
     const uint8_t transfer_id[32], uint64_t pairing_generation,
     uint64_t grant_generation, int64_t now)
 {
     struct db_mesh_capability_grant row;
-    if (!ndb || !ndb->open || !transfer_id ||
-        !zcl_bytes_any_set(transfer_id, 32) || now <= 0 ||
-        pairing_generation > (uint64_t)INT64_MAX ||
-        grant_generation > (uint64_t)INT64_MAX ||
+    if (!capability_complete_args_valid(ndb, transfer_id, pairing_generation,
+                                        grant_generation, now) ||
         !db_mesh_capability_grant_find(ndb, grant_id, &row) ||
         memcmp(row.transfer_id, transfer_id, 32) != 0)
         return MESH_CAPABILITY_COMPLETE_REFUSED;

@@ -1208,10 +1208,6 @@ engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v6
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
 engine/models/src/fleet_board_post.c:db_fleet_board_ids_before:18
-engine/models/src/mesh_capability_grant.c:capability_immutable_equal:19
-engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
-engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:16
-engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_validate:23
 engine/modules/determinism/src/classify.c:zcl_det_classify:21
 engine/modules/engine/src/engine_cli.c:engine_cli_argv_build:29
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
