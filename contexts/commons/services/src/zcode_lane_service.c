@@ -564,6 +564,177 @@ static struct zcl_result lane_prior_validate(
     return ZCL_OK;
 }
 
+static bool lane_advance_inputs_valid(
+    struct node_db *ndb, const char *workspace, const char *action_id,
+    int target_lane, int64_t now, const uint8_t signer_secret[32],
+    const uint8_t signer_pubkey[32], const struct zcode_lane_status *out)
+{
+    return ndb && ndb->open && workspace && action_id && now > 0 &&
+        signer_secret && signer_pubkey && out &&
+        target_lane >= VCS_ZCODE_LANE_FRONTIER &&
+        target_lane <= VCS_ZCODE_LANE_PROVEN;
+}
+
+static struct zcl_result lane_advance_idempotent_replay(
+    const char *workspace, const struct db_zcode_lane_receipt *prior,
+    bool have_prior, int target_lane, const struct db_build_action *action,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const uint8_t signer_pubkey[32],
+    const struct zcode_lane_view_result_v1 *target_view,
+    uint32_t view_generation, struct zcode_lane_status *out, bool *replayed)
+{
+    if (!have_prior || prior->lane < target_lane)
+        return ZCL_OK;
+    if (prior->lane > target_lane)
+        return ZCL_ERR(-1, "lane-downgrade-refused");
+    if (strcmp(prior->task_root_sha3, action->task_root_sha3) != 0 ||
+        strcmp(prior->candidate_root_sha3,
+               action->candidate_root_sha3) != 0 ||
+        strcmp(prior->proof_policy_root_sha3,
+               action->proof_policy_root_sha3) != 0)
+        return ZCL_ERR(-1, "lane-idempotency-context-mismatch");
+    ZCL_CHECK(lane_prior_validate(
+        workspace, prior, task, candidate, policy, signer_pubkey));
+    lane_status_from_row(prior, target_view, view_generation, out);
+    *replayed = true;
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_advance_transition_gate(
+    const char *workspace, const struct db_zcode_lane_receipt *prior,
+    bool have_prior, int target_lane, int64_t now,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const uint8_t signer_pubkey[32])
+{
+    if ((!have_prior && target_lane != VCS_ZCODE_LANE_FRONTIER) ||
+        (have_prior && target_lane != prior->lane + 1))
+        return ZCL_ERR(-1, "lane-transition-must-be-sequential");
+    if (have_prior)
+        ZCL_CHECK(lane_prior_validate(
+            workspace, prior, task, candidate, policy, signer_pubkey));
+    if (have_prior && now < prior->created_at)
+        return ZCL_ERR(-1, "lane-promotion-time-precedes-prior-receipt");
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_advance_proof_gate(
+    struct node_db *ndb, const char *workspace, const char *action_id,
+    int target_lane, int64_t now,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    struct build_fabric_proof_evaluation *evaluation)
+{
+    if (target_lane == VCS_ZCODE_LANE_FRONTIER)
+        return ZCL_OK;
+    ZCL_CHECK(build_fabric_proof_evaluate(
+        ndb, workspace, action_id, now, evaluation));
+    bool candidate_ready = evaluation->compile_satisfied &&
+        (!(policy->required_proofs & VCS_ZCODE_PROOF_TEST) ||
+         evaluation->test_satisfied);
+    if (target_lane == VCS_ZCODE_LANE_CANDIDATE && !candidate_ready)
+        return ZCL_ERR(-1, "candidate-fast-proof-policy-unsatisfied");
+    if (target_lane == VCS_ZCODE_LANE_PROVEN &&
+        !evaluation->policy_satisfied)
+        return ZCL_ERR(-1, "proven-proof-policy-unsatisfied");
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_receipt_nonfrontier_roots(
+    int target_lane, const struct build_fabric_proof_evaluation *evaluation,
+    const struct db_zcode_lane_receipt *prior,
+    struct vcs_zcode_lane_receipt_v1 *receipt)
+{
+    if (target_lane == VCS_ZCODE_LANE_FRONTIER)
+        return ZCL_OK;
+    if (!zcl_hex_decode_lower(evaluation->proof_set_root_sha3,
+                              receipt->proof_set_root, 32) ||
+        !zcl_hex_decode_lower(prior->receipt_id,
+                              receipt->prior_receipt_root, 32))
+        return ZCL_ERR(-1, "lane-proof-or-prior-root-invalid");
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_receipt_seal_or_refuse(
+    struct vcs_zcode_lane_receipt_v1 *receipt,
+    const uint8_t signer_secret[32], const uint8_t signer_pubkey[32],
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy)
+{
+    if (vcs_zcode_lane_receipt_seal(
+            receipt, signer_secret, signer_pubkey) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_validate_for_candidate(
+            receipt, task, candidate, policy) != VCS_ZCODE_DEV_OK)
+        return ZCL_ERR(-1, "lane-receipt-seal-refused");
+    return ZCL_OK;
+}
+
+static struct zcl_result lane_receipt_store_cas(
+    const char *workspace, const struct vcs_zcode_lane_receipt_v1 *receipt,
+    char root_hex[65])
+{
+    uint8_t wire[VCS_ZCODE_LANE_WIRE_BYTES], root[32];
+    if (vcs_zcode_lane_receipt_serialize(receipt, wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_id(receipt, root) != VCS_ZCODE_DEV_OK)
+        return ZCL_ERR(-1, "lane-receipt-encoding-failed");
+    zcl_hex_encode(root, 32, root_hex);
+    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)))
+        return ZCL_ERR(-1, "lane-receipt-cas-store-failed");
+    struct vcs_zcode_lane_receipt_v1 persisted_receipt;
+    uint8_t persisted_wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    if (!lane_load_receipt(workspace, root_hex, &persisted_receipt) ||
+        vcs_zcode_lane_receipt_serialize(
+            &persisted_receipt, persisted_wire) != VCS_ZCODE_DEV_OK ||
+        memcmp(persisted_wire, wire, sizeof(wire)) != 0)
+        return ZCL_ERR(-1, "lane-receipt-cas-readback-mismatch");
+    return ZCL_OK;
+}
+
+static void lane_advance_row_fill(
+    int target_lane, const struct db_build_action *action,
+    const struct build_fabric_proof_evaluation *evaluation,
+    const struct db_zcode_lane_receipt *prior, const char *source_hex,
+    const uint8_t signer_pubkey[32], const char *root_hex,
+    struct db_zcode_lane_receipt *row)
+{
+    (void)snprintf(row->receipt_id, sizeof(row->receipt_id), "%s", root_hex);
+    (void)snprintf(row->source_root_sha3, sizeof(row->source_root_sha3),
+                   "%s", source_hex);
+    (void)snprintf(row->task_root_sha3, sizeof(row->task_root_sha3), "%s",
+                   action->task_root_sha3);
+    (void)snprintf(row->candidate_root_sha3,
+                   sizeof(row->candidate_root_sha3), "%s",
+                   action->candidate_root_sha3);
+    (void)snprintf(row->proof_policy_root_sha3,
+                   sizeof(row->proof_policy_root_sha3), "%s",
+                   action->proof_policy_root_sha3);
+    if (target_lane != VCS_ZCODE_LANE_FRONTIER) {
+        (void)snprintf(row->proof_set_root_sha3,
+                       sizeof(row->proof_set_root_sha3), "%s",
+                       evaluation->proof_set_root_sha3);
+        (void)snprintf(row->prior_receipt_root_sha3,
+                       sizeof(row->prior_receipt_root_sha3), "%s",
+                       prior->receipt_id);
+    }
+    zcl_hex_encode(signer_pubkey, 32, row->signer_pubkey);
+}
+
+static struct zcl_result lane_projection_store_and_verify(
+    struct node_db *ndb, const struct db_zcode_lane_receipt *row,
+    const char *root_hex, const struct vcs_zcode_lane_receipt_v1 *receipt,
+    struct db_zcode_lane_receipt *stored)
+{
+    if (!db_zcode_lane_receipt_save(ndb, row))
+        return ZCL_ERR(-1, "lane-receipt-projection-save-failed");
+    if (!db_zcode_lane_receipt_find(ndb, root_hex, stored) ||
+        !lane_row_matches_receipt(stored, receipt))
+        return ZCL_ERR(-1, "lane-receipt-projection-verify-failed");
+    return ZCL_OK;
+}
+
 // long-function-ok:promotion-transaction — proof evaluation, prior-chain
 // verification, CAS write, and model projection form one fail-closed ritual.
 struct zcl_result zcode_lane_advance(
@@ -571,10 +742,8 @@ struct zcl_result zcode_lane_advance(
     int target_lane, int64_t now, const uint8_t signer_secret[32],
     const uint8_t signer_pubkey[32], struct zcode_lane_status *out)
 {
-    if (!ndb || !ndb->open || !workspace || !action_id || now <= 0 ||
-        !signer_secret || !signer_pubkey || !out ||
-        target_lane < VCS_ZCODE_LANE_FRONTIER ||
-        target_lane > VCS_ZCODE_LANE_PROVEN)
+    if (!lane_advance_inputs_valid(ndb, workspace, action_id, target_lane,
+                                   now, signer_secret, signer_pubkey, out))
         return ZCL_ERR(-1, "lane-advance-input-invalid");
     struct zcode_lane_view_result_v1 target_view;
     uint32_t view_generation = 0;
@@ -605,41 +774,19 @@ struct zcl_result zcode_lane_advance(
     zcl_hex_encode(candidate.candidate_source_root, 32, source_hex);
     struct db_zcode_lane_receipt prior;
     bool have_prior = db_zcode_lane_latest(ndb, source_hex, &prior);
-    if (have_prior && prior.lane >= target_lane) {
-        if (prior.lane > target_lane)
-            return ZCL_ERR(-1, "lane-downgrade-refused");
-        if (strcmp(prior.task_root_sha3, action.task_root_sha3) != 0 ||
-            strcmp(prior.candidate_root_sha3,
-                   action.candidate_root_sha3) != 0 ||
-            strcmp(prior.proof_policy_root_sha3,
-                   action.proof_policy_root_sha3) != 0)
-            return ZCL_ERR(-1, "lane-idempotency-context-mismatch");
-        ZCL_CHECK(lane_prior_validate(
-            workspace, &prior, &task, &candidate, &policy, signer_pubkey));
-        lane_status_from_row(&prior, &target_view, view_generation, out);
+    bool replayed = false;
+    ZCL_CHECK(lane_advance_idempotent_replay(
+        workspace, &prior, have_prior, target_lane, &action, &task,
+        &candidate, &policy, signer_pubkey, &target_view, view_generation,
+        out, &replayed));
+    if (replayed)
         return ZCL_OK;
-    }
-    if ((!have_prior && target_lane != VCS_ZCODE_LANE_FRONTIER) ||
-        (have_prior && target_lane != prior.lane + 1))
-        return ZCL_ERR(-1, "lane-transition-must-be-sequential");
-    if (have_prior)
-        ZCL_CHECK(lane_prior_validate(
-            workspace, &prior, &task, &candidate, &policy, signer_pubkey));
-    if (have_prior && now < prior.created_at)
-        return ZCL_ERR(-1, "lane-promotion-time-precedes-prior-receipt");
+    ZCL_CHECK(lane_advance_transition_gate(
+        workspace, &prior, have_prior, target_lane, now, &task, &candidate,
+        &policy, signer_pubkey));
     struct build_fabric_proof_evaluation evaluation = {0};
-    if (target_lane != VCS_ZCODE_LANE_FRONTIER) {
-        ZCL_CHECK(build_fabric_proof_evaluate(
-            ndb, workspace, action_id, now, &evaluation));
-        bool candidate_ready = evaluation.compile_satisfied &&
-            (!(policy.required_proofs & VCS_ZCODE_PROOF_TEST) ||
-             evaluation.test_satisfied);
-        if (target_lane == VCS_ZCODE_LANE_CANDIDATE && !candidate_ready)
-            return ZCL_ERR(-1, "candidate-fast-proof-policy-unsatisfied");
-        if (target_lane == VCS_ZCODE_LANE_PROVEN &&
-            !evaluation.policy_satisfied)
-            return ZCL_ERR(-1, "proven-proof-policy-unsatisfied");
-    }
+    ZCL_CHECK(lane_advance_proof_gate(
+        ndb, workspace, action_id, target_lane, now, &policy, &evaluation));
     struct vcs_zcode_lane_receipt_v1 receipt = {
         .schema_version = VCS_ZCODE_DEV_VERSION,
         .lane = (uint8_t)target_lane,
@@ -651,61 +798,19 @@ struct zcl_result zcode_lane_advance(
         action.candidate_root_sha3, receipt.candidate_root, 32);
     (void)zcl_hex_decode_lower(
         action.proof_policy_root_sha3, receipt.proof_policy_root, 32);
-    if (target_lane != VCS_ZCODE_LANE_FRONTIER) {
-        if (!zcl_hex_decode_lower(evaluation.proof_set_root_sha3,
-                                  receipt.proof_set_root, 32) ||
-            !zcl_hex_decode_lower(prior.receipt_id,
-                                  receipt.prior_receipt_root, 32))
-            return ZCL_ERR(-1, "lane-proof-or-prior-root-invalid");
-    }
-    if (vcs_zcode_lane_receipt_seal(
-            &receipt, signer_secret, signer_pubkey) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_validate_for_candidate(
-            &receipt, &task, &candidate, &policy) != VCS_ZCODE_DEV_OK)
-        return ZCL_ERR(-1, "lane-receipt-seal-refused");
-    uint8_t wire[VCS_ZCODE_LANE_WIRE_BYTES], root[32]; char root_hex[65];
-    if (vcs_zcode_lane_receipt_serialize(&receipt, wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_id(&receipt, root) != VCS_ZCODE_DEV_OK)
-        return ZCL_ERR(-1, "lane-receipt-encoding-failed");
-    zcl_hex_encode(root, 32, root_hex);
-    if (!vcs_object_put_addressed(workspace, root, wire, sizeof(wire)))
-        return ZCL_ERR(-1, "lane-receipt-cas-store-failed");
-    struct vcs_zcode_lane_receipt_v1 persisted_receipt;
-    uint8_t persisted_wire[VCS_ZCODE_LANE_WIRE_BYTES];
-    if (!lane_load_receipt(workspace, root_hex, &persisted_receipt) ||
-        vcs_zcode_lane_receipt_serialize(
-            &persisted_receipt, persisted_wire) != VCS_ZCODE_DEV_OK ||
-        memcmp(persisted_wire, wire, sizeof(wire)) != 0)
-        return ZCL_ERR(-1, "lane-receipt-cas-readback-mismatch");
+    ZCL_CHECK(lane_receipt_nonfrontier_roots(
+        target_lane, &evaluation, &prior, &receipt));
+    ZCL_CHECK(lane_receipt_seal_or_refuse(
+        &receipt, signer_secret, signer_pubkey, &task, &candidate, &policy));
+    char root_hex[65];
+    ZCL_CHECK(lane_receipt_store_cas(workspace, &receipt, root_hex));
     struct db_zcode_lane_receipt row = { .lane = target_lane,
                                         .created_at = now };
-    (void)snprintf(row.receipt_id, sizeof(row.receipt_id), "%s", root_hex);
-    (void)snprintf(row.source_root_sha3, sizeof(row.source_root_sha3),
-                   "%s", source_hex);
-    (void)snprintf(row.task_root_sha3, sizeof(row.task_root_sha3), "%s",
-                   action.task_root_sha3);
-    (void)snprintf(row.candidate_root_sha3,
-                   sizeof(row.candidate_root_sha3), "%s",
-                   action.candidate_root_sha3);
-    (void)snprintf(row.proof_policy_root_sha3,
-                   sizeof(row.proof_policy_root_sha3), "%s",
-                   action.proof_policy_root_sha3);
-    if (target_lane != VCS_ZCODE_LANE_FRONTIER) {
-        (void)snprintf(row.proof_set_root_sha3,
-                       sizeof(row.proof_set_root_sha3), "%s",
-                       evaluation.proof_set_root_sha3);
-        (void)snprintf(row.prior_receipt_root_sha3,
-                       sizeof(row.prior_receipt_root_sha3), "%s",
-                       prior.receipt_id);
-    }
-    zcl_hex_encode(signer_pubkey, 32, row.signer_pubkey);
-    if (!db_zcode_lane_receipt_save(ndb, &row))
-        return ZCL_ERR(-1, "lane-receipt-projection-save-failed");
+    lane_advance_row_fill(target_lane, &action, &evaluation, &prior,
+                          source_hex, signer_pubkey, root_hex, &row);
     struct db_zcode_lane_receipt stored;
-    if (!db_zcode_lane_receipt_find(ndb, root_hex, &stored) ||
-        !lane_row_matches_receipt(&stored, &receipt))
-        return ZCL_ERR(-1, "lane-receipt-projection-verify-failed");
+    ZCL_CHECK(lane_projection_store_and_verify(
+        ndb, &row, root_hex, &receipt, &stored));
     lane_status_from_row(&stored, &target_view, view_generation, out);
     return ZCL_OK;
 }
