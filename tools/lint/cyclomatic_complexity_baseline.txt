@@ -2366,9 +2366,6 @@ tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_stats:33
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_ledger_add:21
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_usage:31
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_vitals_sample:20
-tools/command/native_mesh_command.c:zcl_native_handle_ops_mesh_pair_commit:17
-tools/command/native_mesh_command.c:zcl_native_handle_ops_mesh_pair_revoke:18
-tools/command/native_mesh_command.c:zcl_native_handle_ops_mesh_status:23
 tools/command/native_metaverse_space_command.c:mvspace_manifest:25
 tools/command/native_metaverse_space_command.c:mvspace_verbs:19
 tools/command/native_metaverse_space_command.c:zcl_native_handle_metaverse_space_publish:21

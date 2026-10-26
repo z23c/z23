@@ -33,6 +33,12 @@ static bool mesh_status_body_ok(const struct json_value *body)
     return value && value->type == JSON_BOOL && json_get_bool(value);
 }
 
+/* Pairing ids and status request ids are exactly 64 hex characters. */
+static bool mesh_id_is_valid(const char *id)
+{
+    return id && strlen(id) == 64;
+}
+
 static void mesh_status_fail(struct zcl_command_reply *reply,
                              enum zcl_command_status status,
                              enum zcl_command_exit exit_code,
@@ -169,6 +175,61 @@ static void mesh_copy_fields(struct json_value *out,
     }
 }
 
+/* Read the pairing_id this request addresses; true when it is well formed. */
+static bool mesh_status_pairing_id(const struct zcl_command_request *request,
+                                   const char **pairing_id)
+{
+    const struct json_value *input =
+        request->input && request->input->type == JSON_OBJ ? request->input
+                                                           : NULL;
+    *pairing_id =
+        input ? json_get_str(json_get(input, "pairing_id")) : NULL;
+    return mesh_id_is_valid(*pairing_id);
+}
+
+/* Outcome of the client-side wait for the node to admit a status request. */
+enum mesh_status_wait {
+    MESH_STATUS_WAIT_ADMITTED,
+    MESH_STATUS_WAIT_FAILED,
+};
+
+/* Poll mesh_status_request until the node admits the request or the route
+ * budget ends. Owns begin_input; leaves the admitted body in *body, and the
+ * reply is already failed on every MESH_STATUS_WAIT_FAILED path. */
+static enum mesh_status_wait mesh_status_route_wait(
+    int64_t route_deadline, struct json_value *begin_input,
+    struct json_value *body, struct zcl_command_reply *reply)
+{
+    for (;;) {
+        if (!mesh_status_rpc(begin_input, "mesh_status_request", body,
+                             reply)) {
+            json_free(begin_input);
+            return MESH_STATUS_WAIT_FAILED;
+        }
+        if (mesh_status_body_ok(body))
+            break;
+        const char *code = json_get_str(json_get(body, "code"));
+        if (!code || strcmp(code, "route_pending") != 0 ||
+            platform_time_monotonic_ms() >= route_deadline) {
+            mesh_status_apply_refusal(reply, body, "mesh_status_request");
+            json_free(body);
+            json_free(begin_input);
+            return MESH_STATUS_WAIT_FAILED;
+        }
+        json_free(body);
+        platform_sleep_ms(MESH_STATUS_CLIENT_POLL_MS);
+    }
+    json_free(begin_input);
+    return MESH_STATUS_WAIT_ADMITTED;
+}
+
+/* A poll reply is actionable only when it is body-ok and names a state. */
+static bool mesh_status_poll_readable(const struct json_value *body,
+                                      const char *state)
+{
+    return mesh_status_body_ok(body) && state;
+}
+
 void zcl_native_handle_ops_mesh_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -177,12 +238,8 @@ void zcl_native_handle_ops_mesh_status(
         LOG_ERROR(NATIVE_MESH_TAG, "INVALID_REQUEST: null request or reply");
         return;
     }
-    const struct json_value *input =
-        request->input && request->input->type == JSON_OBJ ? request->input
-                                                           : NULL;
-    const char *pairing_id =
-        input ? json_get_str(json_get(input, "pairing_id")) : NULL;
-    if (!pairing_id || strlen(pairing_id) != 64) {
+    const char *pairing_id;
+    if (!mesh_status_pairing_id(request, &pairing_id)) {
         mesh_status_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                          ZCL_COMMAND_EXIT_INVALID, "MISSING_PAIRING_ID",
                          "normalize", false,
@@ -197,29 +254,12 @@ void zcl_native_handle_ops_mesh_status(
     json_set_object(&begin_input);
     json_push_kv_str(&begin_input, "pairing_id", pairing_id);
     struct json_value body;
-    for (;;) {
-        if (!mesh_status_rpc(&begin_input, "mesh_status_request", &body,
-                             reply)) {
-            json_free(&begin_input);
-            return;
-        }
-        if (mesh_status_body_ok(&body))
-            break;
-        const char *code = json_get_str(json_get(&body, "code"));
-        if (!code || strcmp(code, "route_pending") != 0 ||
-            platform_time_monotonic_ms() >= route_deadline) {
-            mesh_status_apply_refusal(reply, &body, "mesh_status_request");
-            json_free(&body);
-            json_free(&begin_input);
-            return;
-        }
-        json_free(&body);
-        platform_sleep_ms(MESH_STATUS_CLIENT_POLL_MS);
-    }
-    json_free(&begin_input);
+    if (mesh_status_route_wait(route_deadline, &begin_input, &body, reply) !=
+        MESH_STATUS_WAIT_ADMITTED)
+        return;
     const char *request_id = json_get_str(json_get(&body, "request_id"));
     char request_id_copy[65];
-    if (!request_id || strlen(request_id) != 64) {
+    if (!mesh_id_is_valid(request_id)) {
         json_free(&body);
         mesh_status_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                          ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
@@ -246,8 +286,7 @@ void zcl_native_handle_ops_mesh_status(
         if (!called)
             return;
         const char *state = json_get_str(json_get(&body, "state"));
-        bool ok = mesh_status_body_ok(&body);
-        if (!ok || !state) {
+        if (!mesh_status_poll_readable(&body, state)) {
             mesh_status_apply_refusal(reply, &body, "mesh_status_poll");
             json_free(&body);
             return;
@@ -411,6 +450,26 @@ void zcl_native_handle_ops_mesh_pair_plan(
     json_free(&plan_input);
 }
 
+/* Fill the mesh_pairing_commit params from the validated request fields. */
+static void mesh_pair_fill_commit_input(struct json_value *commit_input,
+                                        const struct json_value *input,
+                                        const char *fingerprint, int64_t days,
+                                        bool days_given)
+{
+    const char *peer = input ? json_get_str(json_get(input, "peer")) : NULL;
+    if (peer && peer[0])
+        json_push_kv_str(commit_input, "peer", peer);
+    json_push_kv_str(commit_input, "fingerprint", fingerprint);
+    if (days_given)
+        json_push_kv_int(commit_input, "days", days);
+    /* "terminal":true is forwarded verbatim so the RPC layer owns the type
+     * check (a non-boolean there is INVALID_TERMINAL, nothing written). */
+    const struct json_value *terminal =
+        input ? json_get(input, "terminal") : NULL;
+    if (terminal && terminal->type == JSON_BOOL && json_get_bool(terminal))
+        json_push_kv_bool(commit_input, "terminal", true);
+}
+
 void zcl_native_handle_ops_mesh_pair_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -444,21 +503,11 @@ void zcl_native_handle_ops_mesh_pair_commit(
                          "days");
         return;
     }
-    const char *peer = input ? json_get_str(json_get(input, "peer")) : NULL;
     struct json_value commit_input;
     json_init(&commit_input);
     json_set_object(&commit_input);
-    if (peer && peer[0])
-        json_push_kv_str(&commit_input, "peer", peer);
-    json_push_kv_str(&commit_input, "fingerprint", fingerprint);
-    if (days_given)
-        json_push_kv_int(&commit_input, "days", days);
-    /* "terminal":true is forwarded verbatim so the RPC layer owns the type
-     * check (a non-boolean there is INVALID_TERMINAL, nothing written). */
-    const struct json_value *terminal =
-        input ? json_get(input, "terminal") : NULL;
-    if (terminal && terminal->type == JSON_BOOL && json_get_bool(terminal))
-        json_push_kv_bool(&commit_input, "terminal", true);
+    mesh_pair_fill_commit_input(&commit_input, input, fingerprint, days,
+                                days_given);
     mesh_pair_bridge(request, &commit_input, "mesh_pairing_commit", true,
                      reply);
     json_free(&commit_input);
@@ -484,6 +533,46 @@ void zcl_native_handle_ops_mesh_pair_list(
     json_free(&body);
 }
 
+/* Forward the caller's confirmation token when one was given. */
+static void mesh_revoke_push_confirm(struct json_value *input,
+                                     const char *confirm)
+{
+    if (confirm && confirm[0])
+        (void)json_push_kv_str(input, "confirm", confirm);
+}
+
+/* Plan stage: report the next commit payload built from the plan's token. */
+static void mesh_revoke_stage_plan(struct zcl_command_reply *reply,
+                                   const struct json_value *body,
+                                   const char *pairing_id)
+{
+    const char *token = json_get_str(json_get(body, "confirmation"));
+    struct json_value commit = {0};
+    json_set_object(&commit);
+    (void)json_push_kv_str(&commit, "pairing_id", pairing_id);
+    (void)json_push_kv_str(&commit, "confirm", token ? token : "");
+    char encoded[384];
+    size_t wrote = json_write(&commit, encoded, sizeof(encoded));
+    json_free(&commit);
+    if (wrote >= sizeof(encoded))
+        encoded[0] = '\0';
+    (void)json_push_kv_str(&reply->data, "stage", "plan");
+    (void)json_push_kv_bool(&reply->data, "committed", false);
+    (void)json_push_kv_str(&reply->data, "commit_input", encoded);
+}
+
+/* Commit stage: authority changed unless the node reported an idempotent
+ * replay of an earlier revocation. */
+static void mesh_revoke_stage_commit(struct zcl_command_reply *reply,
+                                     const struct json_value *body)
+{
+    const struct json_value *replayed = json_get(body, "idempotent_replay");
+    reply->error.mutated = !(replayed && replayed->type == JSON_BOOL &&
+                             json_get_bool(replayed));
+    (void)json_push_kv_str(&reply->data, "stage", "commit");
+    (void)json_push_kv_bool(&reply->data, "committed", true);
+}
+
 void zcl_native_handle_ops_mesh_pair_revoke(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -496,7 +585,7 @@ void zcl_native_handle_ops_mesh_pair_revoke(
         ? json_get_str(json_get(request->input, "pairing_id")) : NULL;
     const char *confirm = request->input
         ? json_get_str(json_get(request->input, "confirm")) : NULL;
-    if (!pairing_id || strlen(pairing_id) != 64) {
+    if (!mesh_id_is_valid(pairing_id)) {
         mesh_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                   "PAIRING_ID_REQUIRED", "normalize",
                   "pairing_id must be exactly 64 lowercase hexadecimal characters",
@@ -507,8 +596,7 @@ void zcl_native_handle_ops_mesh_pair_revoke(
     struct json_value input = {0};
     json_set_object(&input);
     (void)json_push_kv_str(&input, "pairing_id", pairing_id);
-    if (confirm && confirm[0])
-        (void)json_push_kv_str(&input, "confirm", confirm);
+    mesh_revoke_push_confirm(&input, confirm);
     struct rpc_arg_builder args;
     rpc_arg_builder_init(&args);
     rpc_arg_builder_push_value(&args, &input);
@@ -537,28 +625,10 @@ void zcl_native_handle_ops_mesh_pair_revoke(
     };
     mesh_copy_fields(&reply->data, &body, fields,
                      sizeof(fields) / sizeof(fields[0]));
-    if (!committing) {
-        const char *token = json_get_str(json_get(&body, "confirmation"));
-        struct json_value commit = {0};
-        json_set_object(&commit);
-        (void)json_push_kv_str(&commit, "pairing_id", pairing_id);
-        (void)json_push_kv_str(&commit, "confirm", token ? token : "");
-        char encoded[384];
-        size_t wrote = json_write(&commit, encoded, sizeof(encoded));
-        json_free(&commit);
-        if (wrote >= sizeof(encoded))
-            encoded[0] = '\0';
-        (void)json_push_kv_str(&reply->data, "stage", "plan");
-        (void)json_push_kv_bool(&reply->data, "committed", false);
-        (void)json_push_kv_str(&reply->data, "commit_input", encoded);
-    } else {
-        const struct json_value *replayed =
-            json_get(&body, "idempotent_replay");
-        reply->error.mutated = !(replayed && replayed->type == JSON_BOOL &&
-                                 json_get_bool(replayed));
-        (void)json_push_kv_str(&reply->data, "stage", "commit");
-        (void)json_push_kv_bool(&reply->data, "committed", true);
-    }
+    if (!committing)
+        mesh_revoke_stage_plan(reply, &body, pairing_id);
+    else
+        mesh_revoke_stage_commit(reply, &body);
     json_free(&body);
 }
 
