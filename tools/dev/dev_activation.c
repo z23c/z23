@@ -119,6 +119,20 @@ void dev_activation_json_escape(const char *in, char *out, size_t out_sz)
     out[o] = 0;
 }
 
+static bool dev_snapshot_unchanged(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->size == after->size &&
+           before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
 bool dev_activation_sha256_file(const char *path, char out[65])
 {
     struct platform_positioned_file file;
@@ -143,13 +157,7 @@ bool dev_activation_sha256_file(const char *path, char out[65])
         offset += (uint64_t)got;
     }
     ok = ok && platform_positioned_file_snapshot(&file, &after) &&
-         before.size == after.size && before.volume == after.volume &&
-         before.file_low == after.file_low &&
-         before.file_high == after.file_high &&
-         before.modified_seconds == after.modified_seconds &&
-         before.modified_nanoseconds == after.modified_nanoseconds &&
-         before.changed_seconds == after.changed_seconds &&
-         before.changed_nanoseconds == after.changed_nanoseconds;
+         dev_snapshot_unchanged(&before, &after);
     platform_positioned_file_close(&file);
     if (!ok)
         LOG_FAIL("dev-activation", "sha256 read %s failed", path);
@@ -159,15 +167,57 @@ bool dev_activation_sha256_file(const char *path, char out[65])
     return true;
 }
 
+static bool dev_canon_is_absolute(const char *in)
+{
+#if defined(_WIN32)
+    return in && ((in[0] >= 'A' && in[0] <= 'Z') ||
+                  (in[0] >= 'a' && in[0] <= 'z')) &&
+           in[1] == ':' && (in[2] == '/' || in[2] == '\\');
+#else
+    return in && in[0] == '/';
+#endif
+}
+
+/* Resolves "." and ".." tokens of path into stack. Returns false when the
+ * resolved depth would exceed the 256-entry stack. */
+static bool dev_canon_push_tokens(char *path, char **stack, size_t *depth)
+{
+    for (char *tok = strtok(path, "/"); tok; tok = strtok(NULL, "/")) {
+        if (strcmp(tok, ".") == 0)
+            continue;
+        if (strcmp(tok, "..") == 0) {
+            if (*depth > 0)
+                (*depth)--;
+            continue;
+        }
+        if (*depth >= 256)
+            return false;
+        stack[(*depth)++] = tok;
+    }
+    return true;
+}
+
+/* Appends "/segment" for each stack entry at *o. Returns false when a
+ * segment does not fit in out. */
+static bool dev_canon_append_segments(char *out, size_t out_sz, size_t *o,
+                                      char **stack, size_t depth)
+{
+    for (size_t i = 0; i < depth; i++) {
+        int n = snprintf(out + *o, out_sz - *o, "/%s", stack[i]);
+        if (n <= 0 || (size_t)n >= out_sz - *o)
+            return false;
+        *o += (size_t)n;
+    }
+    return true;
+}
+
 bool dev_activation_canon(const char *in, char *out, size_t out_sz)
 {
 #if defined(_WIN32)
-    if (!in || !((in[0] >= 'A' && in[0] <= 'Z') ||
-                 (in[0] >= 'a' && in[0] <= 'z')) ||
-        in[1] != ':' || (in[2] != '/' && in[2] != '\\'))
+    if (!dev_canon_is_absolute(in))
         LOG_FAIL("dev-activation", "canon requires an absolute drive path");
 #else
-    if (!in || in[0] != '/')
+    if (!dev_canon_is_absolute(in))
         LOG_FAIL("dev-activation", "canon requires an absolute path");
 #endif
     char *stack[256];
@@ -186,18 +236,8 @@ bool dev_activation_canon(const char *in, char *out, size_t out_sz)
 #else
     char *token_input = work;
 #endif
-    for (char *tok = strtok(token_input, "/"); tok; tok = strtok(NULL, "/")) {
-        if (strcmp(tok, ".") == 0)
-            continue;
-        if (strcmp(tok, "..") == 0) {
-            if (depth > 0)
-                depth--;
-            continue;
-        }
-        if (depth >= 256)
-            LOG_FAIL("dev-activation", "canon depth overflow");
-        stack[depth++] = tok;
-    }
+    if (!dev_canon_push_tokens(token_input, stack, &depth))
+        LOG_FAIL("dev-activation", "canon depth overflow");
     size_t o = 0;
 #if defined(_WIN32)
     int prefix = snprintf(out, out_sz, "%c:/", drive);
@@ -216,12 +256,8 @@ bool dev_activation_canon(const char *in, char *out, size_t out_sz)
         return true;
 #endif
     }
-    for (size_t i = 0; i < depth; i++) {
-        int n = snprintf(out + o, out_sz - o, "/%s", stack[i]);
-        if (n <= 0 || (size_t)n >= out_sz - o)
-            LOG_FAIL("dev-activation", "canon out overflow");
-        o += (size_t)n;
-    }
+    if (!dev_canon_append_segments(out, out_sz, &o, stack, depth))
+        LOG_FAIL("dev-activation", "canon out overflow");
     return true;
 }
 
@@ -341,6 +377,32 @@ void dev_activation_refresh_gen_state(struct dev_activation_txn *txn)
         txn->last_good_generation[0] = 0;
 }
 
+#if defined(_WIN32)
+/* Writes the selection manifest to tmp and replaces link with it. On failure
+ * the staging file is removed; the caller reports the failure. */
+static bool dev_write_selection_manifest(const char *tmp, const char *link,
+                                         const char *generation)
+{
+    char payload[160];
+    int pn = snprintf(payload, sizeof(payload),
+                      "{\"schema\":\"zcl.dev_generation_selection.v1\","
+                      "\"generation\":\"%s\"}\n", generation);
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool ok = pn > 0 && (size_t)pn < sizeof(payload) &&
+              platform_private_file_create(tmp, &file) &&
+              platform_private_file_write_at(&file, payload, (size_t)pn, 0) &&
+              platform_private_file_truncate(&file, (size_t)pn) &&
+              platform_private_file_flush(&file) &&
+              platform_private_file_replace(&file, tmp, link);
+    if (!ok) {
+        platform_private_file_close(&file);
+        (void)platform_private_file_unlink_missing_ok(tmp);
+    }
+    return ok;
+}
+#endif
+
 bool dev_activation_link_generation(const struct dev_activation_txn *txn,
                                     const char *name, const char *generation)
 {
@@ -371,23 +433,8 @@ bool dev_activation_link_generation(const struct dev_activation_txn *txn,
     if (n <= 0 || (size_t)n >= sizeof(tmp))
         LOG_FAIL("dev-activation", "link tmp path overflow");
 #if defined(_WIN32)
-    char payload[160];
-    int pn = snprintf(payload, sizeof(payload),
-                      "{\"schema\":\"zcl.dev_generation_selection.v1\","
-                      "\"generation\":\"%s\"}\n", generation);
-    struct platform_private_file file;
-    platform_private_file_init(&file);
-    bool ok = pn > 0 && (size_t)pn < sizeof(payload) &&
-              platform_private_file_create(tmp, &file) &&
-              platform_private_file_write_at(&file, payload, (size_t)pn, 0) &&
-              platform_private_file_truncate(&file, (size_t)pn) &&
-              platform_private_file_flush(&file) &&
-              platform_private_file_replace(&file, tmp, link);
-    if (!ok) {
-        platform_private_file_close(&file);
-        (void)platform_private_file_unlink_missing_ok(tmp);
+    if (!dev_write_selection_manifest(tmp, link, generation))
         LOG_FAIL("dev-activation", "generation manifest replace failed");
-    }
 #else
     (void)unlink(tmp);
     if (symlink(generation, tmp) != 0)
@@ -611,48 +658,91 @@ static bool dev_paths_equal(const char *a, const char *b)
     return strcmp(ca, cb) == 0;
 }
 
+/* A generation root must be absolute: a drive path on Windows, else '/'. */
+static bool dev_gen_root_is_absolute(const char *root)
+{
+#if defined(_WIN32)
+    return root && strlen(root) >= 3 && root[1] == ':';
+#else
+    return root && root[0] == '/';
+#endif
+}
+
+/* True when the generation root holds "/../", a newline or ends in "/..". */
+static bool dev_gen_root_is_unsafe(const char *root)
+{
+    return strstr(root, "/../") || strstr(root, "\n") ||
+           (strlen(root) >= 3 && strcmp(root + strlen(root) - 3, "/..") == 0);
+}
+
+static bool dev_gen_root_in_datadir(const char *root, const char *canonical,
+                                    const char *soak, const char *legacy)
+{
+    return dev_path_under(root, canonical) || dev_path_under(root, soak) ||
+           dev_path_under(root, legacy);
+}
+
+static bool dev_unit_is_dev(const char *unit)
+{
+    return unit && strcmp(unit, "zcl23-dev.service") == 0;
+}
+
+static bool dev_datadir_is_dev(const char *datadir, const char *dev_dd)
+{
+    return datadir && dev_paths_equal(datadir, dev_dd);
+}
+
 /* TOP SEVERITY: refuse to touch anything but the isolated dev lane. */
 static bool dev_validate_confinement(struct dev_activation_txn *txn)
 {
     const struct dev_activation_request *req = txn->req;
-#if defined(_WIN32)
-    if (!req->gen_root || strlen(req->gen_root) < 3 || req->gen_root[1] != ':')
-#else
-    if (!req->gen_root || req->gen_root[0] != '/')
-#endif
+    if (!dev_gen_root_is_absolute(req->gen_root))
         LOG_FAIL("dev-activation",
                  "FATAL: generation root must be absolute: %s",
                  req->gen_root ? req->gen_root : "(null)");
-    if (strstr(req->gen_root, "/../") || strstr(req->gen_root, "\n") ||
-        (strlen(req->gen_root) >= 3 &&
-         strcmp(req->gen_root + strlen(req->gen_root) - 3, "/..") == 0))
+    if (dev_gen_root_is_unsafe(req->gen_root))
         LOG_FAIL("dev-activation", "FATAL: unsafe generation root: %s",
                  req->gen_root);
 
     char dev_dd[PATH_MAX], canonical[PATH_MAX], soak[PATH_MAX], legacy[PATH_MAX];
+    const char *dev_sub =
 #if defined(_WIN32)
-    if (!zcl_path_join(dev_dd, sizeof(dev_dd), txn->home, "z23/dev") ||
-        !zcl_path_join(canonical, sizeof(canonical), txn->home, "z23/canonical") ||
-        !zcl_path_join(soak, sizeof(soak), txn->home, "z23/soak") ||
-        !zcl_path_join(legacy, sizeof(legacy), txn->home, "z23/legacy"))
+        "z23/dev";
 #else
-    if (!zcl_path_join(dev_dd, sizeof(dev_dd), txn->home, ".zclassic-c23-dev") ||
-        !zcl_path_join(canonical, sizeof(canonical), txn->home, ".zclassic-c23") ||
-        !zcl_path_join(soak, sizeof(soak), txn->home, ".zclassic-c23-soak") ||
-        !zcl_path_join(legacy, sizeof(legacy), txn->home, ".zclassic"))
+        ".zclassic-c23-dev";
 #endif
+    const char *canon_sub =
+#if defined(_WIN32)
+        "z23/canonical";
+#else
+        ".zclassic-c23";
+#endif
+    const char *soak_sub =
+#if defined(_WIN32)
+        "z23/soak";
+#else
+        ".zclassic-c23-soak";
+#endif
+    const char *legacy_sub =
+#if defined(_WIN32)
+        "z23/legacy";
+#else
+        ".zclassic";
+#endif
+    if (!zcl_path_join(dev_dd, sizeof(dev_dd), txn->home, dev_sub) ||
+        !zcl_path_join(canonical, sizeof(canonical), txn->home, canon_sub) ||
+        !zcl_path_join(soak, sizeof(soak), txn->home, soak_sub) ||
+        !zcl_path_join(legacy, sizeof(legacy), txn->home, legacy_sub))
         return false;
 
-    if (dev_path_under(req->gen_root, canonical) ||
-        dev_path_under(req->gen_root, soak) ||
-        dev_path_under(req->gen_root, legacy))
+    if (dev_gen_root_in_datadir(req->gen_root, canonical, soak, legacy))
         LOG_FAIL("dev-activation",
                  "FATAL: generation root enters a canonical/soak/legacy datadir: %s",
                  req->gen_root);
-    if (!req->unit || strcmp(req->unit, "zcl23-dev.service") != 0)
+    if (!dev_unit_is_dev(req->unit))
         LOG_FAIL("dev-activation", "FATAL: refusing non-dev unit: %s",
                  req->unit ? req->unit : "(null)");
-    if (!req->datadir || !dev_paths_equal(req->datadir, dev_dd))
+    if (!dev_datadir_is_dev(req->datadir, dev_dd))
         LOG_FAIL("dev-activation", "FATAL: refusing non-dev datadir: %s",
                  req->datadir ? req->datadir : "(null)");
     if (req->rpcport != 18252)
@@ -688,6 +778,12 @@ static int dev_build_identity_dropin(const char *home, char *out, size_t cap)
 #endif
 }
 
+/* True when snprintf returned n for a non-empty string that fit in cap. */
+static bool dev_snprintf_fits(int n, size_t cap)
+{
+    return n > 0 && (size_t)n < cap;
+}
+
 static bool dev_derive_paths(struct dev_activation_txn *txn)
 {
     const struct dev_activation_request *req = txn->req;
@@ -700,10 +796,10 @@ static bool dev_derive_paths(struct dev_activation_txn *txn)
     if (!home || !home[0])
         LOG_FAIL("dev-activation", "HOME is unset");
     int n = snprintf(txn->home, sizeof(txn->home), "%s", home);
-    if (n <= 0 || (size_t)n >= sizeof(txn->home))
+    if (!dev_snprintf_fits(n, sizeof(txn->home)))
         LOG_FAIL("dev-activation", "HOME too long");
     n = snprintf(txn->gen_root, sizeof(txn->gen_root), "%s", req->gen_root);
-    if (n <= 0 || (size_t)n >= sizeof(txn->gen_root))
+    if (!dev_snprintf_fits(n, sizeof(txn->gen_root)))
         LOG_FAIL("dev-activation", "gen_root too long");
     if (!zcl_path_join(txn->current_link, sizeof(txn->current_link),
                   txn->gen_root, "current") ||
@@ -720,15 +816,15 @@ static bool dev_derive_paths(struct dev_activation_txn *txn)
         return false;
     n = snprintf(txn->compat_bin, sizeof(txn->compat_bin),
                  "%s/.local/bin/zclassic23-dev", txn->home);
-    if (n <= 0 || (size_t)n >= sizeof(txn->compat_bin))
+    if (!dev_snprintf_fits(n, sizeof(txn->compat_bin)))
         LOG_FAIL("dev-activation", "compat path too long");
     n = dev_build_identity_dropin(txn->home, txn->build_id_dropin,
                                   sizeof(txn->build_id_dropin));
-    if (n <= 0 || (size_t)n >= sizeof(txn->build_id_dropin))
+    if (!dev_snprintf_fits(n, sizeof(txn->build_id_dropin)))
         LOG_FAIL("dev-activation", "drop-in path too long");
     n = snprintf(txn->deploy_state, sizeof(txn->deploy_state),
                  "%s/agent-deploy.json", req->datadir);
-    if (n <= 0 || (size_t)n >= sizeof(txn->deploy_state))
+    if (!dev_snprintf_fits(n, sizeof(txn->deploy_state)))
         LOG_FAIL("dev-activation", "deploy-state path too long");
     return true;
 }
@@ -835,6 +931,42 @@ static bool dev_write_all(int fd, const char *bytes, size_t len)
 }
 #endif
 
+#if defined(_WIN32)
+static bool dev_write_marker_win(struct platform_private_file *file,
+                                 const char *tmp, const char *line,
+                                 size_t line_len, const char *inprogress)
+{
+    return platform_private_file_create(tmp, file) &&
+           platform_private_file_write_at(file, line, line_len, 0) &&
+           platform_private_file_truncate(file, line_len) &&
+           platform_private_file_flush(file) &&
+           platform_private_file_replace(file, tmp, inprogress);
+}
+#endif
+
+#if !defined(_WIN32)
+/* Sets close-on-exec and mode, writes the payload and syncs the file. */
+static bool dev_flush_marker_fd(int fd, const char *line, size_t len)
+{
+    return fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 &&
+           fchmod(fd, 0644) == 0 &&
+           dev_write_all(fd, line, len) &&
+           fsync(fd) == 0;
+}
+
+/* Syncs the directory that holds the marker and closes its descriptor. */
+static bool dev_fsync_marker_dir(const char *gen_root)
+{
+    int dfd = open(gen_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool dir_ok = dfd >= 0;
+    if (dir_ok && fsync(dfd) != 0)
+        dir_ok = false;
+    if (dfd >= 0 && close(dfd) != 0)
+        dir_ok = false;
+    return dir_ok;
+}
+#endif
+
 static bool dev_write_in_progress(struct dev_activation_txn *txn)
 {
     char now[32];
@@ -867,12 +999,8 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
 #if defined(_WIN32)
     struct platform_private_file file;
     platform_private_file_init(&file);
-    bool ok = platform_private_file_create(tmp, &file) &&
-              platform_private_file_write_at(&file, line, line_len, 0) &&
-              platform_private_file_truncate(&file, line_len) &&
-              platform_private_file_flush(&file) &&
-              platform_private_file_replace(
-                  &file, tmp, txn->inprogress_path);
+    bool ok = dev_write_marker_win(&file, tmp, line, line_len,
+                                   txn->inprogress_path);
     if (!ok) {
         platform_private_file_close(&file);
         (void)platform_private_file_unlink_missing_ok(tmp);
@@ -885,10 +1013,7 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
                  tmp, strerror(errno));
         return false;
     }
-    bool ok = fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 &&
-              fchmod(fd, 0644) == 0 &&
-              dev_write_all(fd, line, line_len) &&
-              fsync(fd) == 0;
+    bool ok = dev_flush_marker_fd(fd, line, line_len);
     if (close(fd) != 0)
         ok = false;
     if (ok && rename(tmp, txn->inprogress_path) != 0)
@@ -901,13 +1026,7 @@ static bool dev_write_in_progress(struct dev_activation_txn *txn)
         return false;
     }
 
-    int dfd = open(txn->gen_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    bool dir_ok = dfd >= 0;
-    if (dir_ok && fsync(dfd) != 0)
-        dir_ok = false;
-    if (dfd >= 0 && close(dfd) != 0)
-        dir_ok = false;
-    if (!dir_ok) {
+    if (!dev_fsync_marker_dir(txn->gen_root)) {
         LOG_WARN("dev-activation", "in-progress marker directory fsync: %s",
                  strerror(errno));
         (void)unlink(txn->inprogress_path);
