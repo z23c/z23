@@ -9,7 +9,7 @@
 /* basic_keystore is ~40MB (4096 script entries * 10KB each).
  * Must be heap-allocated to avoid stack overflow. */
 
-int test_wallet(void)
+static int wallet_harness_keystore_init_zeroes(void)
 {
     int failures = 0;
 
@@ -28,6 +28,12 @@ int test_wallet(void)
         free(ks);
     }
 skip_ks:
+    return failures;
+}
+
+static int wallet_harness_keystore_add_and_have(void)
+{
+    int failures = 0;
 
     printf("keystore_add_key + keystore_have_key... ");
     {
@@ -55,6 +61,12 @@ skip_ks:
         free(ks);
     }
 skip_add:
+    return failures;
+}
+
+static int wallet_harness_keystore_unknown_key(void)
+{
+    int failures = 0;
 
     printf("keystore_have_key returns false for unknown key... ");
     {
@@ -75,6 +87,12 @@ skip_add:
         free(ks);
     }
 skip_unknown:
+    return failures;
+}
+
+static int wallet_harness_keystore_get_key(void)
+{
+    int failures = 0;
 
     printf("keystore_get_key retrieves added key... ");
     {
@@ -102,6 +120,12 @@ skip_unknown:
         free(ks);
     }
 skip_get:
+    return failures;
+}
+
+static int wallet_harness_keystore_get_pubkey(void)
+{
+    int failures = 0;
 
     printf("keystore_get_pubkey retrieves pubkey... ");
     {
@@ -130,6 +154,12 @@ skip_get:
         free(ks);
     }
 skip_pubkey:
+    return failures;
+}
+
+static int wallet_harness_is_mine_unknown_script(void)
+{
+    int failures = 0;
 
     printf("wallet_is_mine false for unknown script... ");
     {
@@ -154,6 +184,12 @@ skip_pubkey:
         free(w);
     }
 skip_mine1:
+    return failures;
+}
+
+static int wallet_harness_is_mine_p2pkh(void)
+{
+    int failures = 0;
 
     printf("wallet_is_mine true for own P2PKH output... ");
     {
@@ -189,6 +225,12 @@ skip_mine1:
         free(w);
     }
 skip_mine2:
+    return failures;
+}
+
+static int wallet_harness_empty_balances(void)
+{
+    int failures = 0;
 
     printf("wallet_get_balance empty wallet returns 0... ");
     {
@@ -225,6 +267,12 @@ skip_bal:
         free(w);
     }
 skip_ubal:
+    return failures;
+}
+
+static int wallet_harness_sapling_init_zeroes(void)
+{
+    int failures = 0;
 
     printf("sapling_keystore_init zeroes state... ");
     {
@@ -239,6 +287,12 @@ skip_ubal:
         }
         sapling_keystore_free(&sks);
     }
+    return failures;
+}
+
+static int wallet_harness_sapling_generate_seed(void)
+{
+    int failures = 0;
 
     printf("sapling_keystore_generate_seed... ");
     {
@@ -257,6 +311,12 @@ skip_ubal:
         }
         sapling_keystore_free(&sks);
     }
+    return failures;
+}
+
+static int wallet_harness_sapling_new_address_diversifier(void)
+{
+    int failures = 0;
 
     printf("sapling_keystore_new_address produces valid diversifier... ");
     {
@@ -283,6 +343,12 @@ skip_ubal:
         }
         sapling_keystore_free(&sks);
     }
+    return failures;
+}
+
+static int wallet_harness_sapling_child_index(void)
+{
+    int failures = 0;
 
     printf("sapling_keystore_new_address increments child index... ");
     {
@@ -304,6 +370,12 @@ skip_ubal:
         }
         sapling_keystore_free(&sks);
     }
+    return failures;
+}
+
+static int wallet_harness_sapling_spending_key(void)
+{
+    int failures = 0;
 
     printf("sapling_keystore_have_spending_key... ");
     {
@@ -325,6 +397,59 @@ skip_ubal:
         }
         sapling_keystore_free(&sks);
     }
+    return failures;
+}
+
+static int wallet_harness_sap_snap_live_checks(
+    struct wallet *w,
+    struct sapling_received_note **snap_out,
+    size_t *snap_n_out)
+{
+    int ok = 1;
+    /* Balance counts only unspent, used notes. */
+    if (wallet_get_sapling_balance(w) != 100) ok = 0;
+
+    /* nullifier_is_spent matches the spent note, not the unspent one. */
+    uint8_t nf_spent[32];   memset(nf_spent, 0xB2, 32);
+    uint8_t nf_unspent[32]; memset(nf_unspent, 0xA1, 32);
+    if (!wallet_sapling_nullifier_is_spent(w, nf_spent)) ok = 0;
+    if (wallet_sapling_nullifier_is_spent(w, nf_unspent)) ok = 0;
+
+    size_t snap_n = 0;
+    struct sapling_received_note *snap =
+        wallet_copy_sapling_notes(w, &snap_n);
+    if (!snap || snap_n != 2 || snap == w->sapling_notes) ok = 0;
+    *snap_out = snap;
+    *snap_n_out = snap_n;
+    return ok;
+}
+
+static int wallet_harness_sap_snap_survives_mutation(
+    struct wallet *w,
+    struct sapling_received_note *snap,
+    size_t snap_n,
+    int ok)
+{
+    if (snap && snap_n == 2) {
+        /* Mutating the live array must not perturb the snapshot. */
+        w->sapling_notes[0].value = 999999;
+        if (snap[0].value != 100 || snap[1].value != 250) ok = 0;
+
+        /* Freeing/replacing the live array (the realloc-UAF scenario)
+         * must leave the snapshot fully readable. */
+        free(w->sapling_notes);
+        w->sapling_notes = NULL;
+        w->num_sapling_notes = 0;
+        w->sapling_notes_cap = 0;
+        if (snap[0].value != 100 || snap[1].value != 250) ok = 0;
+    }
+    free(snap);
+    return ok;
+}
+
+static int wallet_harness_sapling_note_snapshot(void)
+{
+    int failures = 0;
 
     /* Regression: the sapling-note readers race a concurrent append realloc.
      * wallet_copy_sapling_notes() must hand back an independent buffer that
@@ -355,41 +480,54 @@ skip_ubal:
         w->sapling_notes[1].spent = true; /* spent → excluded from balance */
         memset(w->sapling_notes[1].nf, 0xB2, 32);
 
-        int ok = 1;
-        /* Balance counts only unspent, used notes. */
-        if (wallet_get_sapling_balance(w) != 100) ok = 0;
-
-        /* nullifier_is_spent matches the spent note, not the unspent one. */
-        uint8_t nf_spent[32];   memset(nf_spent, 0xB2, 32);
-        uint8_t nf_unspent[32]; memset(nf_unspent, 0xA1, 32);
-        if (!wallet_sapling_nullifier_is_spent(w, nf_spent)) ok = 0;
-        if (wallet_sapling_nullifier_is_spent(w, nf_unspent)) ok = 0;
-
         size_t snap_n = 0;
-        struct sapling_received_note *snap =
-            wallet_copy_sapling_notes(w, &snap_n);
-        if (!snap || snap_n != 2 || snap == w->sapling_notes) ok = 0;
-
-        if (snap && snap_n == 2) {
-            /* Mutating the live array must not perturb the snapshot. */
-            w->sapling_notes[0].value = 999999;
-            if (snap[0].value != 100 || snap[1].value != 250) ok = 0;
-
-            /* Freeing/replacing the live array (the realloc-UAF scenario)
-             * must leave the snapshot fully readable. */
-            free(w->sapling_notes);
-            w->sapling_notes = NULL;
-            w->num_sapling_notes = 0;
-            w->sapling_notes_cap = 0;
-            if (snap[0].value != 100 || snap[1].value != 250) ok = 0;
-        }
-        free(snap);
+        struct sapling_received_note *snap = NULL;
+        int ok = wallet_harness_sap_snap_live_checks(w, &snap, &snap_n);
+        ok = wallet_harness_sap_snap_survives_mutation(w, snap, snap_n, ok);
 
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
         wallet_free(w);
         free(w);
     }
 skip_sap_snap:;
+    return failures;
+}
+
+static bool wallet_harness_atomic_oom_rejected(struct wallet *w,
+                                               struct wallet_tx *src,
+                                               bool ok)
+{
+    if (ok) {
+        zcl_alloc_fault_fail_next("tx_shielded_output");
+        bool added = wallet_add_to_wallet(w, src);
+        zcl_alloc_fault_clear();
+        if (added || w->num_wallet_tx != 0 || w->map_wallet[0].used ||
+            !src->tx.v_shielded_spend || !src->tx.v_shielded_output)
+            ok = false;
+    }
+    return ok;
+}
+
+static bool wallet_harness_atomic_copy_kept(struct wallet *w,
+                                            struct wallet_tx *src,
+                                            bool ok)
+{
+    if (ok) {
+        bool added = wallet_add_to_wallet(w, src);
+        const struct wallet_tx *stored = wallet_get_tx(w, &src->tx.hash);
+        if (!added || !stored || w->num_wallet_tx != 1 ||
+            stored->tx.num_shielded_spend != 1 ||
+            stored->tx.num_shielded_output != 1 ||
+            stored->tx.v_shielded_spend == src->tx.v_shielded_spend ||
+            stored->tx.v_shielded_output == src->tx.v_shielded_output)
+            ok = false;
+    }
+    return ok;
+}
+
+static int wallet_harness_atomic_shielded_copy(void)
+{
+    int failures = 0;
 
     /* Wallet publication must be all-or-nothing. In particular, an OOM while
      * copying a later shielded vector must not leave a partial map entry or
@@ -414,24 +552,8 @@ skip_sap_snap:;
         if (!src.tx.v_shielded_spend || !src.tx.v_shielded_output)
             ok = false;
 
-        if (ok) {
-            zcl_alloc_fault_fail_next("tx_shielded_output");
-            bool added = wallet_add_to_wallet(w, &src);
-            zcl_alloc_fault_clear();
-            if (added || w->num_wallet_tx != 0 || w->map_wallet[0].used ||
-                !src.tx.v_shielded_spend || !src.tx.v_shielded_output)
-                ok = false;
-        }
-        if (ok) {
-            bool added = wallet_add_to_wallet(w, &src);
-            const struct wallet_tx *stored = wallet_get_tx(w, &src.tx.hash);
-            if (!added || !stored || w->num_wallet_tx != 1 ||
-                stored->tx.num_shielded_spend != 1 ||
-                stored->tx.num_shielded_output != 1 ||
-                stored->tx.v_shielded_spend == src.tx.v_shielded_spend ||
-                stored->tx.v_shielded_output == src.tx.v_shielded_output)
-                ok = false;
-        }
+        ok = wallet_harness_atomic_oom_rejected(w, &src, ok);
+        ok = wallet_harness_atomic_copy_kept(w, &src, ok);
 
         transaction_free(&src.tx);
         if (w) {
@@ -440,6 +562,12 @@ skip_sap_snap:;
         }
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int wallet_harness_legacy_keypool(void)
+{
+    int failures = 0;
 
     printf("legacy keypool returns persisted pre-generated keys only... ");
     {
@@ -467,6 +595,63 @@ skip_sap_snap:;
         }
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static bool wallet_harness_rollback_only_child(
+    struct sapling_keystore *sks,
+    uint8_t *d,
+    uint8_t *pk_d,
+    struct sapling_address_undo *first)
+{
+    bool ok = sapling_keystore_new_address_transactional(sks, d, pk_d, first) &&
+              first->valid && first->generated_seed &&
+              first->child_index == 0 && sks->num_keys == 1 &&
+              sks->next_child_index == 1;
+    if (ok && !sapling_keystore_rollback_address(sks, first))
+        ok = false;
+    if (sks->has_seed || sks->num_keys != 0 || sks->next_child_index != 0)
+        ok = false;
+    return ok;
+}
+
+static bool wallet_harness_rollback_keeps_later_child(
+    struct sapling_keystore *sks,
+    uint8_t *d,
+    uint8_t *pk_d,
+    struct sapling_address_undo *first,
+    struct sapling_address_undo *second,
+    bool ok)
+{
+    if (ok && (!sapling_keystore_new_address_transactional(sks, d, pk_d, first) ||
+               !sapling_keystore_new_address_transactional(sks, d, pk_d, second)))
+        ok = false;
+    /* Once another child exists, rolling back `first` must refuse rather
+     * than erase the concurrent/latest child. */
+    if (ok && sapling_keystore_rollback_address(sks, first))
+        ok = false;
+    if (ok && (sks->num_keys != 2 || sks->next_child_index != 2))
+        ok = false;
+    return ok;
+}
+
+static bool wallet_harness_rollback_clears_both(
+    struct sapling_keystore *sks,
+    struct sapling_address_undo *second,
+    struct sapling_address_undo *first,
+    bool ok)
+{
+    if (ok && (!sapling_keystore_rollback_address(sks, second) ||
+               !sapling_keystore_rollback_address(sks, first)))
+        ok = false;
+    if (sks->has_seed || sks->num_keys != 0 || sks->next_child_index != 0)
+        ok = false;
+    return ok;
+}
+
+static int wallet_harness_sapling_address_rollback(void)
+{
+    int failures = 0;
 
     printf("Sapling address rollback removes only the exact latest child... ");
     {
@@ -474,32 +659,37 @@ skip_sap_snap:;
         uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32];
         struct sapling_address_undo first, second;
         sapling_keystore_init(&sks);
-        bool ok = sapling_keystore_new_address_transactional(&sks, d, pk_d, &first) &&
-                  first.valid && first.generated_seed &&
-                  first.child_index == 0 && sks.num_keys == 1 &&
-                  sks.next_child_index == 1;
-        if (ok && !sapling_keystore_rollback_address(&sks, &first))
-            ok = false;
-        if (sks.has_seed || sks.num_keys != 0 || sks.next_child_index != 0)
-            ok = false;
-
-        if (ok && (!sapling_keystore_new_address_transactional(&sks, d, pk_d, &first) ||
-                   !sapling_keystore_new_address_transactional(&sks, d, pk_d, &second)))
-            ok = false;
-        /* Once another child exists, rolling back `first` must refuse rather
-         * than erase the concurrent/latest child. */
-        if (ok && sapling_keystore_rollback_address(&sks, &first))
-            ok = false;
-        if (ok && (sks.num_keys != 2 || sks.next_child_index != 2))
-            ok = false;
-        if (ok && (!sapling_keystore_rollback_address(&sks, &second) ||
-                   !sapling_keystore_rollback_address(&sks, &first)))
-            ok = false;
-        if (sks.has_seed || sks.num_keys != 0 || sks.next_child_index != 0)
-            ok = false;
+        bool ok = wallet_harness_rollback_only_child(&sks, d, pk_d, &first);
+        ok = wallet_harness_rollback_keeps_later_child(
+            &sks, d, pk_d, &first, &second, ok);
+        ok = wallet_harness_rollback_clears_both(&sks, &second, &first, ok);
         sapling_keystore_free(&sks);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_wallet(void)
+{
+    int failures = 0;
+
+    failures += wallet_harness_keystore_init_zeroes();
+    failures += wallet_harness_keystore_add_and_have();
+    failures += wallet_harness_keystore_unknown_key();
+    failures += wallet_harness_keystore_get_key();
+    failures += wallet_harness_keystore_get_pubkey();
+    failures += wallet_harness_is_mine_unknown_script();
+    failures += wallet_harness_is_mine_p2pkh();
+    failures += wallet_harness_empty_balances();
+    failures += wallet_harness_sapling_init_zeroes();
+    failures += wallet_harness_sapling_generate_seed();
+    failures += wallet_harness_sapling_new_address_diversifier();
+    failures += wallet_harness_sapling_child_index();
+    failures += wallet_harness_sapling_spending_key();
+    failures += wallet_harness_sapling_note_snapshot();
+    failures += wallet_harness_atomic_shielded_copy();
+    failures += wallet_harness_legacy_keypool();
+    failures += wallet_harness_sapling_address_rollback();
 
     { extern int test_wallet_init_zeroed_checks(void);
       failures += test_wallet_init_zeroed_checks(); }
