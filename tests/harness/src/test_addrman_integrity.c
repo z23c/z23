@@ -105,6 +105,18 @@ static void aii_overwrite_bytes_at(const char *path, long offset,
     }
 }
 
+/* Write one bogus byte at the start of path (no seek); a no-op when
+ * the file cannot be opened. */
+static void aii_clobber_first_byte(const char *path)
+{
+    FILE *f = fopen(path, "r+b");
+    if (f) {
+        uint8_t bogus = 'X';
+        fwrite(&bogus, 1, 1, f);
+        fclose(f);
+    }
+}
+
 /* Append a 256-byte zero pad to the end of path; a no-op when the
  * file cannot be opened. */
 static void aii_append_zero_pad(const char *path)
@@ -303,8 +315,7 @@ int test_addrman_integrity(void)
         /* Flip the first byte of the sidecar magic. */
         char side[1024];
         snprintf(side, sizeof(side), "%s/peers.dat.sha3", dir);
-        uint8_t bogus = 'X';
-        aii_overwrite_bytes_at(side, 0, &bogus, 1);
+        aii_clobber_first_byte(side);
 
         char err[256] = {0};
         enum aii_verdict v = aii_verify(dir, err, sizeof(err));
