@@ -1722,7 +1722,6 @@ tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_drain_spin_cont
 tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_ondemand_genesis_seed:19
 tests/harness/src/test_reducer_step_drain_harness.c:test_reducer_step_drain_harness:53
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
-tests/harness/src/test_refold_retro_validate.c:test_refold_retro_validate:35
 tests/harness/src/test_regtest_generate.c:test_regtest_generate:18
 tests/harness/src/test_reindex_epilogue.c:test_reindex_epilogue:34
 tests/harness/src/test_reorg_residue_tipfin_replace.c:seed_wedge_with_tip_status:20
