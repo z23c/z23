@@ -416,13 +416,9 @@ static int bil_genesis_cases(void)
     return failures;
 }
 
-int test_block_index_loader(void)
+static int bil_flat_round_trip_case(void)
 {
-    printf("\n=== block index loader tests ===\n");
-    int failures = bil_genesis_cases();
-
-    /* ── 1. Flat file round-trip ─────────────────────────── */
-
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -496,9 +492,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 2. Flat file pprev linking ──────────────────────── */
-
+static int bil_flat_pprev_link_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -537,14 +536,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 2b. Scrambled stored height loads WITHOUT a pprev lasso ─────────
-     * The flat loader links pprev by hash only: a prev_hash that misses
-     * resolves to NULL, never a height guess.
-     *
-     * Shape: P has a prev_hash not in the file; C is P's real child (links by
-     * hash) but C's stored height is scrambled to P.height-1. A by-height
-     * fallback would set P.pprev = C, forming a 2-node lasso. */
+static int bil_flat_scrambled_height_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -627,9 +624,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 3. Flat file bad magic rejected ─────────────────── */
-
+static int bil_flat_bad_magic_case(void)
+{
+    int failures = 0;
     {
         char tmpdir[256];
         snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_badm", getpid());
@@ -659,9 +659,12 @@ int test_block_index_loader(void)
         unlink(path);
         rmdir(tmpdir);
     }
+    return failures;
+}
 
-    /* ── 4. Flat file truncated rejected ─────────────────── */
-
+static int bil_flat_truncated_case(void)
+{
+    int failures = 0;
     {
         char tmpdir[256];
         snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_trunc", getpid());
@@ -691,9 +694,12 @@ int test_block_index_loader(void)
         unlink(path);
         rmdir(tmpdir);
     }
+    return failures;
+}
 
-    /* ── 5. SQLite round-trip ────────────────────────────── */
-
+static int bil_sqlite_round_trip_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -752,9 +758,12 @@ int test_block_index_loader(void)
 
         block_map_free(&ms.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 6. SQLite rejects small cache ───────────────────── */
-
+static int bil_sqlite_small_cache_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -803,13 +812,12 @@ int test_block_index_loader(void)
 
         block_map_free(&ms.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 6b. SQLite cache integrity envelope: tamper -> demote -> rebuild ──
-     * The cache carries an XOR-combined SHA3 envelope verified in the load
-     * pass. A tampered row is detected, demotes the cache (discard + typed
-     * blocker, never refuses boot), and a clean save+load succeeds and clears
-     * the blocker. */
-
+static int bil_sqlite_envelope_tamper_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -913,9 +921,12 @@ int test_block_index_loader(void)
 
         block_map_free(&ms.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 7. Flat file chain_work preserved ───────────────── */
-
+static int bil_flat_chain_work_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -956,24 +967,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 8. Missing flat file returns false ───────────────── */
-
-    {
-        struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
-
-        bool ok = !load_block_index_flat("/nonexistent/path", &ms).ok;
-
-        BIL_CHECK("bil: load_block_index_flat returns false for missing file", ok);
-
-        block_map_free(&ms.map_block_index);
-    }
-
-    /* ── 9. Embedded format: corrupted payload byte rejected ── */
-
+static int bil_embedded_corrupt_payload_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1018,9 +1017,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 10. Embedded format: truncated file rejected ───────── */
-
+static int bil_embedded_truncated_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1056,9 +1058,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 11. Embedded format: header-only file rejected ─────── */
-
+static int bil_embedded_header_only_case(void)
+{
+    int failures = 0;
     {
         char tmpdir[256];
         snprintf(tmpdir, sizeof(tmpdir), "./test-tmp/%d_bil_hdronly", getpid());
@@ -1091,9 +1096,12 @@ int test_block_index_loader(void)
         rmdir(tmpdir);
         block_map_free(&ms.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 12. Legacy two-file format still loads ─────────────── */
-
+static int bil_legacy_two_file_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1169,9 +1177,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 13. Legacy body, missing sidecar = SIDECAR_MISSING ── */
-
+static int bil_legacy_missing_sidecar_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1232,39 +1243,14 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── 14. seed_tip_from_finalized: genesis-root install + REFUSE cases ──
-     *
-     * The genesis-root branch of block_index_loader_seed_tip_from_finalized
-     * installs the tip at N (rooted at the canonical genesis) yet refuses an
-     * oversized walk (mainnet floor cap), a link missing HAVE_DATA/VALID_SCRIPTS,
-     * a non-canonical genesis terminus, and coins_applied_height <= tip_height.
-     * It still extends an existing live tip (cur_tip != NULL). */
+static void bil_seed_tip_build_chain(struct main_state *ms,
+                                     struct uint256 *hashes, int N,
+                                     struct uint256 gen)
+{
     {
-        chain_params_select(CHAIN_REGTEST);
-        const struct chain_params *cp = chain_params_get();
-        const struct uint256 gen = cp->consensus.hashGenesisBlock;
-
-        char dir[256];
-        mkdir("./test-tmp", 0755);
-        test_fmt_tmpdir(dir, sizeof(dir), "bil_seedfin", "main");
-        mkdir(dir, 0755);
-
-        progress_store_close();
-        bool store_ok = progress_store_open(dir);
-        sqlite3 *db = store_ok ? progress_store_db() : NULL;
-        BIL_CHECK("bil/seedfin: progress_store opens", store_ok && db);
-
-        /* Build a synthetic regtest chain 0..N whose GENESIS hash is the real
-         * params genesis (so the canonical-terminus check can pass), with the
-         * rest of the chain HAVE_DATA + VALID_SCRIPTS + contiguous pprev. */
-        const int N = 5;
-        struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        block_map_init(&ms.map_block_index);
-        active_chain_init(&ms.chain_active);
-
-        struct uint256 hashes[16];
         for (int h = 0; h <= N; h++) {
             if (h == 0) {
                 hashes[0] = gen;
@@ -1274,7 +1260,7 @@ int test_block_index_loader(void)
                 hashes[h].data[31] = 0xC2; /* distinct from genesis */
             }
             struct block_index *pi = chainstate_insert_block_index(
-                (struct chainstate *)&ms, &hashes[h]);
+                (struct chainstate *)ms, &hashes[h]);
             if (pi) {
                 pi->nHeight = h;
                 pi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
@@ -1282,7 +1268,7 @@ int test_block_index_loader(void)
                 pi->nBits = 0x200f0f0f;
                 if (h > 0) {
                     struct block_index *prev = block_map_find(
-                        &ms.map_block_index, &hashes[h - 1]);
+                        &ms->map_block_index, &hashes[h - 1]);
                     pi->pprev = prev;
                     if (prev) {
                         struct arith_uint256 proof = GetBlockProof(pi);
@@ -1300,15 +1286,23 @@ int test_block_index_loader(void)
          * memcmp reads node->phashBlock->data). */
         {
             size_t it = 0; struct block_index *pi;
-            while (block_map_next(&ms.map_block_index, &it, NULL, &pi)) {
+            while (block_map_next(&ms->map_block_index, &it, NULL, &pi)) {
                 if (pi) { pi->phashBlock = &pi->hashBlock; }
             }
         }
-        struct block_index *tipN = block_map_find(&ms.map_block_index, &hashes[N]);
+    }
+}
 
+static int bil_seed_tip_anchor_refusals(struct main_state *ms,
+                                        const struct chain_params *cp,
+                                        sqlite3 *db, struct uint256 *hashes,
+                                        int N)
+{
+    int failures = 0;
+    {
         /* Register the tip_finalize stage so seed_anchor can stamp the
          * served-tip cursor that resolve_durable_tip reads. */
-        bool tf_init = tip_finalize_stage_init(&ms);
+        bool tf_init = tip_finalize_stage_init(ms);
         BIL_CHECK("bil/seedfin: tip_finalize stage init", tf_init);
 
         /* Seed the durable finalized anchor at N (cursor -> N, own-hash). */
@@ -1329,44 +1323,54 @@ int test_block_index_loader(void)
 
         /* (iv-pre) coins_applied ABSENT → refuse (cur_tip NULL, no install). */
         int r_no_coins = db ? block_index_loader_seed_tip_from_finalized(
-                                  &ms, cp, db) : 1;
+                                  ms, cp, db) : 1;
         BIL_CHECK("bil/seedfin: REFUSE when coins_applied absent (<N)",
-                  r_no_coins == 0 && active_chain_tip(&ms.chain_active) == NULL);
+                  r_no_coins == 0 && active_chain_tip(&ms->chain_active) == NULL);
 
         /* (iv-a) coins_applied = N-1 (< N) → refuse (finalized>coins). */
         BIL_SET_APPLIED(N - 1);
         int r_low_coins = db ? block_index_loader_seed_tip_from_finalized(
-                                   &ms, cp, db) : 1;
+                                   ms, cp, db) : 1;
         BIL_CHECK("bil/seedfin: REFUSE when coins_applied < tip_height",
-                  r_low_coins == 0 && active_chain_tip(&ms.chain_active) == NULL);
+                  r_low_coins == 0 && active_chain_tip(&ms->chain_active) == NULL);
 
         /* (iv-b) coins_applied = N still means coins are applied through N-1,
          * so publishing tip N must refuse too. */
         BIL_SET_APPLIED(N);
         int r_equal_coins = db ? block_index_loader_seed_tip_from_finalized(
-                                     &ms, cp, db) : 1;
+                                     ms, cp, db) : 1;
         BIL_CHECK("bil/seedfin: REFUSE when coins_applied == tip_height",
                   r_equal_coins == 0 &&
-                  active_chain_tip(&ms.chain_active) == NULL);
+                  active_chain_tip(&ms->chain_active) == NULL);
 
         /* Raise coins to N+1 for the install + remaining structural cases. */
         BIL_SET_APPLIED(N + 1);
+    }
+    return failures;
+}
 
+static int bil_seed_tip_refuse_mid_genesis(struct main_state *ms,
+                                          const struct chain_params *cp,
+                                          sqlite3 *db, struct uint256 *hashes,
+                                          struct uint256 gen)
+{
+    int failures = 0;
+    {
         /* (ii) a mid-chain link missing HAVE_DATA → refuse. Clear it, test,
          * restore it. */
-        struct block_index *mid = block_map_find(&ms.map_block_index, &hashes[3]);
+        struct block_index *mid = block_map_find(&ms->map_block_index, &hashes[3]);
         uint32_t saved_status = mid ? mid->nStatus : 0;
         if (mid) mid->nStatus &= ~(uint32_t)BLOCK_HAVE_DATA;
         int r_nodata = db ? block_index_loader_seed_tip_from_finalized(
-                                &ms, cp, db) : 1;
+                                ms, cp, db) : 1;
         BIL_CHECK("bil/seedfin: REFUSE when a mid link lacks HAVE_DATA",
-                  r_nodata == 0 && active_chain_tip(&ms.chain_active) == NULL);
+                  r_nodata == 0 && active_chain_tip(&ms->chain_active) == NULL);
         if (mid) mid->nStatus = saved_status;
 
         /* (iii) non-canonical genesis terminus → refuse. Re-point genesis's
          * stored hash to a NON-params value (height stays 0, HAVE_DATA set),
          * so the terminus memcmp fails. Restore after. */
-        struct block_index *g0 = block_map_find(&ms.map_block_index, &hashes[0]);
+        struct block_index *g0 = block_map_find(&ms->map_block_index, &hashes[0]);
         struct uint256 saved_g0 = g0 ? g0->hashBlock : gen;
         if (g0) {
             struct uint256 fake = gen; fake.data[0] ^= 0xFF;
@@ -1374,19 +1378,29 @@ int test_block_index_loader(void)
             g0->phashBlock = &g0->hashBlock;
         }
         int r_nongen = db ? block_index_loader_seed_tip_from_finalized(
-                                &ms, cp, db) : 1;
+                                ms, cp, db) : 1;
         BIL_CHECK("bil/seedfin: REFUSE when terminus is non-canonical genesis",
-                  r_nongen == 0 && active_chain_tip(&ms.chain_active) == NULL);
+                  r_nongen == 0 && active_chain_tip(&ms->chain_active) == NULL);
         if (g0) { g0->hashBlock = saved_g0; g0->phashBlock = &g0->hashBlock; }
+    }
+    return failures;
+}
 
+static int bil_seed_tip_install_and_extend(struct main_state *ms,
+                                           const struct chain_params *cp,
+                                           sqlite3 *db, struct uint256 *hashes,
+                                           int N, struct block_index *tipN)
+{
+    int failures = 0;
+    {
         /* (v) ALL preconditions hold → INSTALL h=N, cur_tip was NULL,
          * active_chain_tip() == tipN afterward. */
         int r_install = db ? block_index_loader_seed_tip_from_finalized(
-                                 &ms, cp, db) : 0;
+                                 ms, cp, db) : 0;
         BIL_CHECK("bil/seedfin: INSTALL genesis-root h=N (cur_tip NULL)",
                   r_install == 1 &&
-                  active_chain_tip(&ms.chain_active) == tipN &&
-                  active_chain_height(&ms.chain_active) == N);
+                  active_chain_tip(&ms->chain_active) == tipN &&
+                  active_chain_height(&ms->chain_active) == N);
 
         /* (vi) extend-live-chain branch (cur_tip != NULL) still returns 1 and
          * lands pointer-equal. Reset the active tip DOWN to a live tip at N-2
@@ -1394,28 +1408,28 @@ int test_block_index_loader(void)
          * seed's walk N..N-1 must land on the N-2 tip and re-install N. The
          * durable cursor is still at N from the install above. */
         {
-            struct block_index *live = block_map_find(&ms.map_block_index,
+            struct block_index *live = block_map_find(&ms->map_block_index,
                                                       &hashes[N - 2]);
-            (void)chain_set_active_tip(&ms, live, TIP_FROM_RESTORE,
+            (void)chain_set_active_tip(ms, live, TIP_FROM_RESTORE,
                                        "bil_seedfin_extend_setup");
             BIL_SET_APPLIED(N + 1);
             int r_ext = (db && live)
-                ? block_index_loader_seed_tip_from_finalized(&ms, cp, db) : 0;
+                ? block_index_loader_seed_tip_from_finalized(ms, cp, db) : 0;
             BIL_CHECK("bil/seedfin: extend-live-chain branch installs h=N",
                       r_ext == 1 &&
-                      active_chain_tip(&ms.chain_active) == tipN &&
-                      active_chain_height(&ms.chain_active) == N);
+                      active_chain_tip(&ms->chain_active) == tipN &&
+                      active_chain_height(&ms->chain_active) == N);
         }
 
         #undef BIL_SET_APPLIED
+    }
+    return failures;
+}
 
-        /* Tear down the shared cursor/stage before the isolated oversized-walk
-         * case opens its own, so the big_h anchor cannot clobber the cases above. */
-        tip_finalize_stage_shutdown();
-        progress_store_close();
-        block_map_free(&ms.map_block_index);
-        test_cleanup_tmpdir(dir);
-
+static int bil_seed_tip_oversized_walk(const struct chain_params *cp)
+{
+    int failures = 0;
+    {
         /* (i) oversized walk (tip_height - 0 > MAX_GAP) → refuse. Isolated
          * store + stage, fresh ms, cur_tip NULL, a single tip node at a height
          * beyond the cap with a durable anchor there. The MAX_GAP bound check
@@ -1464,15 +1478,91 @@ int test_block_index_loader(void)
             block_map_free(&ms2.map_block_index);
             test_cleanup_tmpdir(dir2);
         }
+    }
+    return failures;
+}
+
+static int bil_seed_tip_finalized_case(void)
+{
+    int failures = 0;
+    {
+        chain_params_select(CHAIN_REGTEST);
+        const struct chain_params *cp = chain_params_get();
+        const struct uint256 gen = cp->consensus.hashGenesisBlock;
+
+        char dir[256];
+        mkdir("./test-tmp", 0755);
+        test_fmt_tmpdir(dir, sizeof(dir), "bil_seedfin", "main");
+        mkdir(dir, 0755);
+
+        progress_store_close();
+        bool store_ok = progress_store_open(dir);
+        sqlite3 *db = store_ok ? progress_store_db() : NULL;
+        BIL_CHECK("bil/seedfin: progress_store opens", store_ok && db);
+
+        /* Build a synthetic regtest chain 0..N whose GENESIS hash is the real
+         * params genesis (so the canonical-terminus check can pass), with the
+         * rest of the chain HAVE_DATA + VALID_SCRIPTS + contiguous pprev. */
+        const int N = 5;
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        block_map_init(&ms.map_block_index);
+        active_chain_init(&ms.chain_active);
+
+        struct uint256 hashes[16];
+        bil_seed_tip_build_chain(&ms, hashes, N, gen);
+        struct block_index *tipN = block_map_find(&ms.map_block_index, &hashes[N]);
+
+        failures += bil_seed_tip_anchor_refusals(&ms, cp, db, hashes, N);
+
+        failures += bil_seed_tip_refuse_mid_genesis(&ms, cp, db, hashes, gen);
+
+        failures += bil_seed_tip_install_and_extend(&ms, cp, db, hashes,
+                                                    N, tipN);
+
+        /* Tear down the shared cursor/stage before the isolated oversized-walk
+         * case opens its own, so the big_h anchor cannot clobber the cases above. */
+        tip_finalize_stage_shutdown();
+        progress_store_close();
+        block_map_free(&ms.map_block_index);
+        test_cleanup_tmpdir(dir);
+
+        failures += bil_seed_tip_oversized_walk(cp);
 
         chain_params_select(CHAIN_MAIN);
     }
+    return failures;
+}
 
-    /* ── 15. node.db `blocks` hydrate: hash-linked rows load + link ──────
-     *
-     * --importblockindex fills `blocks` with header-only rows. Build N
-     * hash-linked rows, hydrate, and assert the map size, tip linkage to
-     * genesis, and header-only validity clamping. */
+static void bil_blocks_hydrate_tip_checks(struct main_state *ms,
+                                          struct uint256 *hashes, int N,
+                                          bool size_ok, bool *tip_ok,
+                                          bool *valid_ok)
+{
+    {
+        if (size_ok) {
+            struct block_index *tip = block_map_find(&ms->map_block_index,
+                                                     &hashes[N - 1]);
+            int walk = 0;
+            struct block_index *cur = tip;
+            while (cur && walk < N + 5) { walk++; cur = cur->pprev; }
+            *tip_ok = tip && tip->nHeight == N - 1 && walk == N;
+
+            /* Honest validity: a mid entry is clamped to header-only TREE with
+             * NO HAVE_DATA, even though the row stored SCRIPTS. */
+            struct block_index *mid = block_map_find(&ms->map_block_index,
+                                                     &hashes[N / 2]);
+            *valid_ok = mid &&
+                ((mid->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_TREE) &&
+                !(mid->nStatus & BLOCK_HAVE_DATA) &&
+                !(mid->nStatus & BLOCK_HAVE_UNDO);
+        }
+    }
+}
+
+static int bil_blocks_hydrate_case(void)
+{
+    int failures = 0;
     {
         const int N = 300;
         struct uint256 *hashes = malloc((size_t)N * sizeof(*hashes)); // raw-alloc-ok:test-fixture
@@ -1501,23 +1591,8 @@ int test_block_index_loader(void)
 
         /* Tip present at height N-1 and pprev-walks N hops to the root. */
         bool tip_ok = false, valid_ok = false;
-        if (size_ok) {
-            struct block_index *tip = block_map_find(&ms.map_block_index,
-                                                     &hashes[N - 1]);
-            int walk = 0;
-            struct block_index *cur = tip;
-            while (cur && walk < N + 5) { walk++; cur = cur->pprev; }
-            tip_ok = tip && tip->nHeight == N - 1 && walk == N;
-
-            /* Honest validity: a mid entry is clamped to header-only TREE with
-             * NO HAVE_DATA, even though the row stored SCRIPTS. */
-            struct block_index *mid = block_map_find(&ms.map_block_index,
-                                                     &hashes[N / 2]);
-            valid_ok = mid &&
-                ((mid->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_TREE) &&
-                !(mid->nStatus & BLOCK_HAVE_DATA) &&
-                !(mid->nStatus & BLOCK_HAVE_UNDO);
-        }
+        bil_blocks_hydrate_tip_checks(&ms, hashes, N, size_ok, &tip_ok,
+                                      &valid_ok);
 
         BIL_CHECK("bil: blocks-table hydrate loads N hash-linked headers",
                   size_ok && tip_ok);
@@ -1528,21 +1603,12 @@ int test_block_index_loader(void)
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
+    return failures;
+}
 
-    /* ── 15a. union boot: the hydrate re-touches rows an earlier rung
-     *        already admitted and must keep their body knowledge.
-     *
-     * A hard-killed node can boot with a flat file that lags the blocks
-     * table: the flat rung loads the first rows WITH HAVE_DATA and file
-     * positions, then the hydrate tops the map up from the table, whose
-     * rows store no body knowledge. Erasing the earlier rung's admission
-     * would make the body-history census count bodies on disk as missing. */
-    failures += bil_union_boot_case();
-
-    /* ── 15b. blocks hydrate pumps the boot-liveness marker ──────────────
-     *
-     * The hydrate pumps boot_progress_note() every 4096 rows in its
-     * validate/insert/link passes, so >4096 rows must advance the marker. */
+static int bil_blocks_hydrate_liveness_case(void)
+{
+    int failures = 0;
     {
         const int N = 4096 + 64;
         struct uint256 *hashes = malloc((size_t)N * sizeof(*hashes)); // raw-alloc-ok:test-fixture
@@ -1576,9 +1642,74 @@ int test_block_index_loader(void)
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
+    return failures;
+}
 
-    /* ── 16. node.db `blocks` hydrate: a corrupted row is quarantined per-row
-     *       (purged + typed blocker + dumpstate counter); the load continues. ── */
+static bool bil_blocks_hydrate_poison_row(struct node_db *ndb, int poison_h,
+                                          bool ok)
+{
+    {
+        /* Poison ONE row: rewrite its merkle_root so the stored hash no longer
+         * hash-binds (the header re-serializes to a different PoW hash). The
+         * `hash` column keeps its original value, so db_block_delete(that hash)
+         * addresses exactly this row. */
+        if (ok) {
+            uint8_t bad[32];
+            memset(bad, 0xEE, sizeof(bad));
+            sqlite3_stmt *u = NULL;
+            ok = (sqlite3_prepare_v2(ndb->db,
+                    "UPDATE blocks SET merkle_root=? WHERE height=?",
+                    -1, &u, NULL) == SQLITE_OK && u);
+            if (ok) {
+                sqlite3_bind_blob(u, 1, bad, 32, SQLITE_TRANSIENT);
+                sqlite3_bind_int(u, 2, poison_h);
+                ok = (sqlite3_step(u) == SQLITE_DONE);
+                sqlite3_finalize(u);
+            }
+        }
+    }
+    return ok;
+}
+
+static bool bil_blocks_hydrate_row_gone(struct node_db *ndb, int poison_h)
+{
+    bool poison_gone_db = false;
+    if (ndb->db) {
+        sqlite3_stmt *c = NULL;
+        if (sqlite3_prepare_v2(ndb->db,
+                "SELECT COUNT(*) FROM blocks WHERE height=?",
+                -1, &c, NULL) == SQLITE_OK && c) {
+            sqlite3_bind_int(c, 1, poison_h);
+            if (sqlite3_step(c) == SQLITE_ROW)
+                poison_gone_db = (sqlite3_column_int(c, 0) == 0);
+            sqlite3_finalize(c);
+        }
+    }
+    return poison_gone_db;
+}
+
+static bool bil_blocks_hydrate_neighbours_ok(struct main_state *ms,
+                                             struct uint256 *hashes,
+                                             int poison_h)
+{
+    {
+        /* A sampled surviving neighbour on each side is intact + header-only
+         * (no HAVE_DATA fabricated). */
+        struct block_index *below =
+            block_map_find(&ms->map_block_index, &hashes[poison_h - 1]);
+        struct block_index *above =
+            block_map_find(&ms->map_block_index, &hashes[poison_h + 1]);
+        bool neighbours_ok = below && above &&
+            below->nHeight == poison_h - 1 && above->nHeight == poison_h + 1 &&
+            !(below->nStatus & BLOCK_HAVE_DATA) &&
+            !(above->nStatus & BLOCK_HAVE_DATA);
+        return neighbours_ok;
+    }
+}
+
+static int bil_blocks_hydrate_row_quarantine_case(void)
+{
+    int failures = 0;
     {
         const int N = 120;
         const int POISON_H = N / 2;
@@ -1598,24 +1729,7 @@ int test_block_index_loader(void)
             ok = bih_insert_header_row(ndb.db, h, prev, &hashes[h]);
         }
 
-        /* Poison ONE row: rewrite its merkle_root so the stored hash no longer
-         * hash-binds (the header re-serializes to a different PoW hash). The
-         * `hash` column keeps its original value, so db_block_delete(that hash)
-         * addresses exactly this row. */
-        if (ok) {
-            uint8_t bad[32];
-            memset(bad, 0xEE, sizeof(bad));
-            sqlite3_stmt *u = NULL;
-            ok = (sqlite3_prepare_v2(ndb.db,
-                    "UPDATE blocks SET merkle_root=? WHERE height=?",
-                    -1, &u, NULL) == SQLITE_OK && u);
-            if (ok) {
-                sqlite3_bind_blob(u, 1, bad, 32, SQLITE_TRANSIENT);
-                sqlite3_bind_int(u, 2, POISON_H);
-                ok = (sqlite3_step(u) == SQLITE_DONE);
-                sqlite3_finalize(u);
-            }
-        }
+        ok = bil_blocks_hydrate_poison_row(&ndb, POISON_H, ok);
 
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1640,29 +1754,9 @@ int test_block_index_loader(void)
             (block_map_find(&ms.map_block_index, &hashes[POISON_H]) == NULL);
         bool remaining_ok = loaded && (ms.map_block_index.size == (size_t)(N - 1));
 
-        bool poison_gone_db = false;
-        if (ndb.db) {
-            sqlite3_stmt *c = NULL;
-            if (sqlite3_prepare_v2(ndb.db,
-                    "SELECT COUNT(*) FROM blocks WHERE height=?",
-                    -1, &c, NULL) == SQLITE_OK && c) {
-                sqlite3_bind_int(c, 1, POISON_H);
-                if (sqlite3_step(c) == SQLITE_ROW)
-                    poison_gone_db = (sqlite3_column_int(c, 0) == 0);
-                sqlite3_finalize(c);
-            }
-        }
-
-        /* A sampled surviving neighbour on each side is intact + header-only
-         * (no HAVE_DATA fabricated). */
-        struct block_index *below =
-            block_map_find(&ms.map_block_index, &hashes[POISON_H - 1]);
-        struct block_index *above =
-            block_map_find(&ms.map_block_index, &hashes[POISON_H + 1]);
-        bool neighbours_ok = below && above &&
-            below->nHeight == POISON_H - 1 && above->nHeight == POISON_H + 1 &&
-            !(below->nStatus & BLOCK_HAVE_DATA) &&
-            !(above->nStatus & BLOCK_HAVE_DATA);
+        bool poison_gone_db = bil_blocks_hydrate_row_gone(&ndb, POISON_H);
+        bool neighbours_ok =
+            bil_blocks_hydrate_neighbours_ok(&ms, hashes, POISON_H);
 
         BIL_CHECK("bil: blocks-table hydrate QUARANTINES one poisoned row + "
                   "continues (counter=1, blocker set)",
@@ -1677,9 +1771,12 @@ int test_block_index_loader(void)
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
+    return failures;
+}
 
-    /* ── 16b. node.db `blocks` hydrate (J5): an ALL-poisoned table quarantines
-     *        every row and returns .ok=false (0 usable) — never a partial map. */
+static int bil_blocks_hydrate_all_poisoned_case(void)
+{
+    int failures = 0;
     {
         const int N = 8;
         struct uint256 *hashes = malloc((size_t)N * sizeof(*hashes)); // raw-alloc-ok:test-fixture
@@ -1731,13 +1828,139 @@ int test_block_index_loader(void)
         if (ndb.db) sqlite3_close(ndb.db);
         free(hashes);
     }
+    return failures;
+}
 
-    /* ── 16d. RUNTIME poisoned-blocks-row quarantine:
-     *        stage_repair_quarantine_blocks_row purges a row that fails the
-     *        frozen block_row_verify, clears its in-memory HAVE_DATA, bumps the
-     *        process counter + typed blocker; refuses a clean row; and falls
-     *        back to db_block_delete_by_height when the stored `hash` column
-     *        does not match the canonical hash. ──────── */
+static bool bil_runtime_chain_build(struct main_state *ms,
+                                    struct uint256 *hashes,
+                                    struct block_index **bi_arr, int N,
+                                    int POISON_H, bool ok)
+{
+    {
+        for (int h = 0; ok && h < N; h++) {
+            struct block_index *bi = chainstate_insert_block_index(
+                (struct chainstate *)ms, &hashes[h]);
+            ok = ok && (bi != NULL);
+            if (bi) {
+                bi->nHeight = h;
+                bi->nStatus = (unsigned)BLOCK_VALID_TREE |
+                    (h == POISON_H ? (unsigned)BLOCK_HAVE_DATA : 0u);
+                if (h > 0)
+                    bi->pprev = bi_arr[h - 1];
+                bi_arr[h] = bi;
+            }
+        }
+    }
+    return ok;
+}
+
+static int bil_runtime_purge_row(struct node_db *ndb, struct main_state *ms,
+                                 struct uint256 *hashes,
+                                 struct block_index **bi_arr, int POISON_H,
+                                 bool ok, int64_t q0)
+{
+    int failures = 0;
+    {
+        struct stage_repair_row_quarantine_result qr;
+        memset(&qr, 0, sizeof(qr));
+        bool purged = ok && stage_repair_quarantine_blocks_row(
+            ndb, ms, POISON_H, &hashes[POISON_H], &qr);
+        int64_t q_delta = stage_repair_runtime_row_quarantined() - q0;
+
+        bool gone_db = bil_blocks_hydrate_row_gone(ndb, POISON_H);
+        bool have_data_cleared = bi_arr[POISON_H] &&
+            !(block_index_status_load(bi_arr[POISON_H]) & BLOCK_HAVE_DATA);
+        bool blocker_ok =
+            blocker_exists("block_index.runtime_row_quarantine");
+
+        BIL_CHECK("bil/B3: runtime quarantine purges poisoned row (counter+1, "
+                  "blocker set, HAVE_DATA cleared, row gone)",
+                  purged && qr.quarantined && q_delta == 1 && gone_db &&
+                  have_data_cleared && blocker_ok);
+    }
+    return failures;
+}
+
+static int bil_runtime_clean_row_refused(struct node_db *ndb,
+                                         struct main_state *ms,
+                                         struct uint256 *hashes, bool ok)
+{
+    int failures = 0;
+    {
+        /* REFUSE a clean row: calling on a still-valid neighbour must NOT delete
+         * it and must NOT bump the counter (verdict OK). */
+        int64_t q1 = stage_repair_runtime_row_quarantined();
+        struct stage_repair_row_quarantine_result qr2;
+        memset(&qr2, 0, sizeof(qr2));
+        bool purged2 = ok && stage_repair_quarantine_blocks_row(
+            ndb, ms, 1, &hashes[1], &qr2);
+        bool clean_present = false;
+        if (ndb->db) {
+            sqlite3_stmt *c = NULL;
+            if (sqlite3_prepare_v2(ndb->db,
+                    "SELECT COUNT(*) FROM blocks WHERE height=?",
+                    -1, &c, NULL) == SQLITE_OK && c) {
+                sqlite3_bind_int(c, 1, 1);
+                if (sqlite3_step(c) == SQLITE_ROW)
+                    clean_present = (sqlite3_column_int(c, 0) == 1);
+                sqlite3_finalize(c);
+            }
+        }
+        BIL_CHECK("bil/B3: runtime quarantine REFUSES a clean row (no delete, "
+                  "verdict OK)",
+                  !purged2 && qr2.refused_clean &&
+                  qr2.verdict == (int)BLOCK_ROW_VERIFY_OK &&
+                  (stage_repair_runtime_row_quarantined() - q1) == 0 &&
+                  clean_present);
+    }
+    return failures;
+}
+
+static int bil_runtime_height_fallback(struct node_db *ndb,
+                                       struct main_state *ms,
+                                       struct uint256 *hashes, bool ok)
+{
+    int failures = 0;
+    {
+        /* by_height FALLBACK: a poisoned row at height 4 whose stored `hash`
+         * column is REWRITTEN to a non-canonical value X. Read-by-canonical-hash
+         * finds nothing → the helper reads by height, verifies the stored header
+         * against the canonical hash (mismatch), and deletes by height. */
+        int64_t q2 = stage_repair_runtime_row_quarantined();
+        bool okh = ok;
+        if (okh) {
+            uint8_t xhash[32];
+            memset(xhash, 0x77, sizeof(xhash));
+            uint8_t bad[32];
+            memset(bad, 0xAB, sizeof(bad));
+            sqlite3_stmt *u = NULL;
+            okh = (sqlite3_prepare_v2(ndb->db,
+                    "UPDATE blocks SET hash=?, merkle_root=? WHERE height=?",
+                    -1, &u, NULL) == SQLITE_OK && u);
+            if (okh) {
+                sqlite3_bind_blob(u, 1, xhash, 32, SQLITE_TRANSIENT);
+                sqlite3_bind_blob(u, 2, bad, 32, SQLITE_TRANSIENT);
+                sqlite3_bind_int(u, 3, 4);
+                okh = (sqlite3_step(u) == SQLITE_DONE);
+                sqlite3_finalize(u);
+            }
+        }
+        struct stage_repair_row_quarantine_result qr3;
+        memset(&qr3, 0, sizeof(qr3));
+        bool purged3 = okh && stage_repair_quarantine_blocks_row(
+            ndb, ms, 4, &hashes[4], &qr3);
+        bool gone4 = bil_blocks_hydrate_row_gone(ndb, 4);
+        BIL_CHECK("bil/B3: runtime quarantine falls back to delete-by-height for "
+                  "a non-canonical-hash poisoned row",
+                  purged3 && qr3.quarantined && qr3.deleted_by_height &&
+                  gone4 && (stage_repair_runtime_row_quarantined() - q2) == 1);
+    }
+    return failures;
+}
+
+static int bil_runtime_row_quarantine_case(void)
+{
+    int failures = 0;
     {
         const int N = 5;
         const int POISON_H = 2;
@@ -1763,182 +1986,31 @@ int test_block_index_loader(void)
         block_map_init(&ms.map_block_index);
         active_chain_init(&ms.chain_active);
         struct block_index *bi_arr[5] = {0};
-        for (int h = 0; ok && h < N; h++) {
-            struct block_index *bi = chainstate_insert_block_index(
-                (struct chainstate *)&ms, &hashes[h]);
-            ok = ok && (bi != NULL);
-            if (bi) {
-                bi->nHeight = h;
-                bi->nStatus = (unsigned)BLOCK_VALID_TREE |
-                    (h == POISON_H ? (unsigned)BLOCK_HAVE_DATA : 0u);
-                if (h > 0)
-                    bi->pprev = bi_arr[h - 1];
-                bi_arr[h] = bi;
-            }
-        }
+        ok = bil_runtime_chain_build(&ms, hashes, bi_arr, N, POISON_H, ok);
         ok = ok && active_chain_move_window_tip(&ms.chain_active, bi_arr[N - 1]);
 
         /* Poison the durable row at POISON_H: rewrite merkle_root so the stored
          * header no longer hash-binds to its `hash` column (== canonical). */
-        if (ok) {
-            uint8_t bad[32];
-            memset(bad, 0xEE, sizeof(bad));
-            sqlite3_stmt *u = NULL;
-            ok = (sqlite3_prepare_v2(ndb.db,
-                    "UPDATE blocks SET merkle_root=? WHERE height=?",
-                    -1, &u, NULL) == SQLITE_OK && u);
-            if (ok) {
-                sqlite3_bind_blob(u, 1, bad, 32, SQLITE_TRANSIENT);
-                sqlite3_bind_int(u, 2, POISON_H);
-                ok = (sqlite3_step(u) == SQLITE_DONE);
-                sqlite3_finalize(u);
-            }
-        }
+        ok = bil_blocks_hydrate_poison_row(&ndb, POISON_H, ok);
 
         blocker_clear("block_index.runtime_row_quarantine");
         int64_t q0 = stage_repair_runtime_row_quarantined();
 
-        struct stage_repair_row_quarantine_result qr;
-        memset(&qr, 0, sizeof(qr));
-        bool purged = ok && stage_repair_quarantine_blocks_row(
-            &ndb, &ms, POISON_H, &hashes[POISON_H], &qr);
-        int64_t q_delta = stage_repair_runtime_row_quarantined() - q0;
-
-        bool gone_db = false;
-        if (ndb.db) {
-            sqlite3_stmt *c = NULL;
-            if (sqlite3_prepare_v2(ndb.db,
-                    "SELECT COUNT(*) FROM blocks WHERE height=?",
-                    -1, &c, NULL) == SQLITE_OK && c) {
-                sqlite3_bind_int(c, 1, POISON_H);
-                if (sqlite3_step(c) == SQLITE_ROW)
-                    gone_db = (sqlite3_column_int(c, 0) == 0);
-                sqlite3_finalize(c);
-            }
-        }
-        bool have_data_cleared = bi_arr[POISON_H] &&
-            !(block_index_status_load(bi_arr[POISON_H]) & BLOCK_HAVE_DATA);
-        bool blocker_ok =
-            blocker_exists("block_index.runtime_row_quarantine");
-
-        BIL_CHECK("bil/B3: runtime quarantine purges poisoned row (counter+1, "
-                  "blocker set, HAVE_DATA cleared, row gone)",
-                  purged && qr.quarantined && q_delta == 1 && gone_db &&
-                  have_data_cleared && blocker_ok);
-
-        /* REFUSE a clean row: calling on a still-valid neighbour must NOT delete
-         * it and must NOT bump the counter (verdict OK). */
-        int64_t q1 = stage_repair_runtime_row_quarantined();
-        struct stage_repair_row_quarantine_result qr2;
-        memset(&qr2, 0, sizeof(qr2));
-        bool purged2 = ok && stage_repair_quarantine_blocks_row(
-            &ndb, &ms, 1, &hashes[1], &qr2);
-        bool clean_present = false;
-        if (ndb.db) {
-            sqlite3_stmt *c = NULL;
-            if (sqlite3_prepare_v2(ndb.db,
-                    "SELECT COUNT(*) FROM blocks WHERE height=?",
-                    -1, &c, NULL) == SQLITE_OK && c) {
-                sqlite3_bind_int(c, 1, 1);
-                if (sqlite3_step(c) == SQLITE_ROW)
-                    clean_present = (sqlite3_column_int(c, 0) == 1);
-                sqlite3_finalize(c);
-            }
-        }
-        BIL_CHECK("bil/B3: runtime quarantine REFUSES a clean row (no delete, "
-                  "verdict OK)",
-                  !purged2 && qr2.refused_clean &&
-                  qr2.verdict == (int)BLOCK_ROW_VERIFY_OK &&
-                  (stage_repair_runtime_row_quarantined() - q1) == 0 &&
-                  clean_present);
-
-        /* by_height FALLBACK: a poisoned row at height 4 whose stored `hash`
-         * column is REWRITTEN to a non-canonical value X. Read-by-canonical-hash
-         * finds nothing → the helper reads by height, verifies the stored header
-         * against the canonical hash (mismatch), and deletes by height. */
-        int64_t q2 = stage_repair_runtime_row_quarantined();
-        bool okh = ok;
-        if (okh) {
-            uint8_t xhash[32];
-            memset(xhash, 0x77, sizeof(xhash));
-            uint8_t bad[32];
-            memset(bad, 0xAB, sizeof(bad));
-            sqlite3_stmt *u = NULL;
-            okh = (sqlite3_prepare_v2(ndb.db,
-                    "UPDATE blocks SET hash=?, merkle_root=? WHERE height=?",
-                    -1, &u, NULL) == SQLITE_OK && u);
-            if (okh) {
-                sqlite3_bind_blob(u, 1, xhash, 32, SQLITE_TRANSIENT);
-                sqlite3_bind_blob(u, 2, bad, 32, SQLITE_TRANSIENT);
-                sqlite3_bind_int(u, 3, 4);
-                okh = (sqlite3_step(u) == SQLITE_DONE);
-                sqlite3_finalize(u);
-            }
-        }
-        struct stage_repair_row_quarantine_result qr3;
-        memset(&qr3, 0, sizeof(qr3));
-        bool purged3 = okh && stage_repair_quarantine_blocks_row(
-            &ndb, &ms, 4, &hashes[4], &qr3);
-        bool gone4 = false;
-        if (ndb.db) {
-            sqlite3_stmt *c = NULL;
-            if (sqlite3_prepare_v2(ndb.db,
-                    "SELECT COUNT(*) FROM blocks WHERE height=?",
-                    -1, &c, NULL) == SQLITE_OK && c) {
-                sqlite3_bind_int(c, 1, 4);
-                if (sqlite3_step(c) == SQLITE_ROW)
-                    gone4 = (sqlite3_column_int(c, 0) == 0);
-                sqlite3_finalize(c);
-            }
-        }
-        BIL_CHECK("bil/B3: runtime quarantine falls back to delete-by-height for "
-                  "a non-canonical-hash poisoned row",
-                  purged3 && qr3.quarantined && qr3.deleted_by_height &&
-                  gone4 && (stage_repair_runtime_row_quarantined() - q2) == 1);
+        failures += bil_runtime_purge_row(&ndb, &ms, hashes, bi_arr,
+                                          POISON_H, ok, q0);
+        failures += bil_runtime_clean_row_refused(&ndb, &ms, hashes, ok);
+        failures += bil_runtime_height_fallback(&ndb, &ms, hashes, ok);
 
         blocker_clear("block_index.runtime_row_quarantine");
         block_map_free(&ms.map_block_index);
         if (ndb.db) sqlite3_close(ndb.db);
     }
+    return failures;
+}
 
-    /* ── 16c. Repair-storm throttle: N rapid same-key failures collapse to a
-     *        bounded emission count (first-fire + one keepalive per window),
-     *        using a caller-supplied clock. ─────── */
-    {
-        struct log_throttle t = LOG_THROTTLE_INIT;
-        const int64_t keepalive = 60;
-        const uint64_t key = 3179245;   /* a fixed "height" fingerprint */
-        int64_t now = 1000000;
-
-        int emits = 0;
-        /* 500 rapid failures within the same wall-second: exactly ONE emit. */
-        for (int i = 0; i < 500; i++)
-            if (log_throttle_should_emit(&t, key, now, keepalive, NULL))
-                emits++;
-        bool first_window_ok = (emits == 1);
-
-        /* Advance past the keepalive window: exactly one keepalive emit. */
-        now += keepalive + 1;
-        int emits2 = 0;
-        for (int i = 0; i < 500; i++)
-            if (log_throttle_should_emit(&t, key, now, keepalive, NULL))
-                emits2++;
-        bool keepalive_ok = (emits2 == 1);
-
-        /* A DIFFERENT key emits immediately (distinct episode, not throttled). */
-        bool diff_key_ok =
-            log_throttle_should_emit(&t, key + 1, now, keepalive, NULL);
-
-        BIL_CHECK("bil: repair-storm throttle bounds N rapid same-key failures "
-                  "to 1 emit/window", first_window_ok && keepalive_ok);
-        BIL_CHECK("bil: repair-storm throttle re-emits on a new-key episode",
-                  diff_key_ok);
-    }
-
-    /* ── Fast-restart: forward pass ALWAYS re-derives stored work ────────
-     * A flat file carrying stale (here: zeroed) stored nChainWork must load
-     * with the correct work, because load_block_index_flat unconditionally
-     * re-derives it from the pointer graph. */
+static int bil_fast_restart_forward_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -1988,16 +2060,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── Persisted-FAILED-bit trust policy ─────────────────────────────
-     * A stale persisted BLOCK_FAILED_VALID bit on the best-chain tip must not
-     * wedge the node. The flat + SQLite loaders reconcile it against the baked
-     * ROM checkpoint:
-     *   - below the checkpoint: STRIP it (re-derive, never trust);
-     *   - above it:            DEMOTE it (clear FAILED, set BLOCK_REVALIDATE_PENDING).
-     * The loader never blesses the block (no HAVE bit added, validity not raised). */
-
-    /* ── T1: pure unit test of the policy helper (deterministic). ──────── */
+static int bil_failed_bit_policy_unit_case(void)
+{
+    int failures = 0;
     {
         /* Below checkpoint (h=100, ckpt=1000): STRIP, no marker. */
         struct block_index bi;
@@ -2050,11 +2118,12 @@ int test_block_index_loader(void)
         BIL_CHECK("bil: policy clears a stale round-tripped marker when no "
                   "FAILED bit is present", none_ok);
     }
+    return failures;
+}
 
-    /* ── T2: end-to-end via the FLAT loader with a low override checkpoint.
-     * A synthetic chain h=0..49 with FAILED_VALID stamped on the tip is saved
-     * and reloaded; the tip is above the checkpoint, so it must be demoted and
-     * select_most_work_eligible() must return it. */
+static int bil_failed_bit_flat_low_checkpoint_case(void)
+{
+    int failures = 0;
     {
         struct rom_state_checkpoint ov;
         memset(&ov, 0, sizeof(ov));
@@ -2109,10 +2178,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── T3: FLAT loader with the DEFAULT (high) checkpoint — the whole
-     * synthetic chain is BELOW it, so a stale FAILED tip is STRIPPED (no
-     * marker) and still becomes selectable. */
+static int bil_failed_bit_flat_default_case(void)
+{
+    int failures = 0;
     {
         struct main_state ms;
         memset(&ms, 0, sizeof(ms));
@@ -2157,9 +2228,12 @@ int test_block_index_loader(void)
         block_map_free(&ms.map_block_index);
         block_map_free(&ms2.map_block_index);
     }
+    return failures;
+}
 
-    /* ── T4: SQLite loader applies the SAME reconcile. A FAILED_VALID tip
-     * above a low override checkpoint is demoted on load_block_index_sqlite. */
+static int bil_failed_bit_sqlite_case(void)
+{
+    int failures = 0;
     {
         struct rom_state_checkpoint ov;
         memset(&ov, 0, sizeof(ov));
@@ -2213,6 +2287,207 @@ int test_block_index_loader(void)
         checkpoints_reset_rom_state_override_for_test();
         block_map_free(&ms.map_block_index);
     }
+    return failures;
+}
+
+int test_block_index_loader(void)
+{
+    printf("\n=== block index loader tests ===\n");
+    int failures = bil_genesis_cases();
+
+    /* ── 1. Flat file round-trip ─────────────────────────── */
+
+    failures += bil_flat_round_trip_case();
+
+    /* ── 2. Flat file pprev linking ──────────────────────── */
+
+    failures += bil_flat_pprev_link_case();
+
+    /* ── 2b. Scrambled stored height loads WITHOUT a pprev lasso ─────────
+     * The flat loader links pprev by hash only: a prev_hash that misses
+     * resolves to NULL, never a height guess.
+     *
+     * Shape: P has a prev_hash not in the file; C is P's real child (links by
+     * hash) but C's stored height is scrambled to P.height-1. A by-height
+     * fallback would set P.pprev = C, forming a 2-node lasso. */
+    failures += bil_flat_scrambled_height_case();
+
+    /* ── 3. Flat file bad magic rejected ─────────────────── */
+
+    failures += bil_flat_bad_magic_case();
+
+    /* ── 4. Flat file truncated rejected ─────────────────── */
+
+    failures += bil_flat_truncated_case();
+
+    /* ── 5. SQLite round-trip ────────────────────────────── */
+
+    failures += bil_sqlite_round_trip_case();
+
+    /* ── 6. SQLite rejects small cache ───────────────────── */
+
+    failures += bil_sqlite_small_cache_case();
+
+    /* ── 6b. SQLite cache integrity envelope: tamper -> demote -> rebuild ──
+     * The cache carries an XOR-combined SHA3 envelope verified in the load
+     * pass. A tampered row is detected, demotes the cache (discard + typed
+     * blocker, never refuses boot), and a clean save+load succeeds and clears
+     * the blocker. */
+
+    failures += bil_sqlite_envelope_tamper_case();
+
+    /* ── 7. Flat file chain_work preserved ───────────────── */
+
+    failures += bil_flat_chain_work_case();
+
+    /* ── 8. Missing flat file returns false ───────────────── */
+
+    {
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        block_map_init(&ms.map_block_index);
+        active_chain_init(&ms.chain_active);
+
+        bool ok = !load_block_index_flat("/nonexistent/path", &ms).ok;
+
+        BIL_CHECK("bil: load_block_index_flat returns false for missing file", ok);
+
+        block_map_free(&ms.map_block_index);
+    }
+
+    /* ── 9. Embedded format: corrupted payload byte rejected ── */
+
+    failures += bil_embedded_corrupt_payload_case();
+
+    /* ── 10. Embedded format: truncated file rejected ───────── */
+
+    failures += bil_embedded_truncated_case();
+
+    /* ── 11. Embedded format: header-only file rejected ─────── */
+
+    failures += bil_embedded_header_only_case();
+
+    /* ── 12. Legacy two-file format still loads ─────────────── */
+
+    failures += bil_legacy_two_file_case();
+
+    /* ── 13. Legacy body, missing sidecar = SIDECAR_MISSING ── */
+
+    failures += bil_legacy_missing_sidecar_case();
+
+    /* ── 14. seed_tip_from_finalized: genesis-root install + REFUSE cases ──
+     *
+     * The genesis-root branch of block_index_loader_seed_tip_from_finalized
+     * installs the tip at N (rooted at the canonical genesis) yet refuses an
+     * oversized walk (mainnet floor cap), a link missing HAVE_DATA/VALID_SCRIPTS,
+     * a non-canonical genesis terminus, and coins_applied_height <= tip_height.
+     * It still extends an existing live tip (cur_tip != NULL). */
+    failures += bil_seed_tip_finalized_case();
+
+    /* ── 15. node.db `blocks` hydrate: hash-linked rows load + link ──────
+     *
+     * --importblockindex fills `blocks` with header-only rows. Build N
+     * hash-linked rows, hydrate, and assert the map size, tip linkage to
+     * genesis, and header-only validity clamping. */
+    failures += bil_blocks_hydrate_case();
+
+    /* ── 15a. union boot: the hydrate re-touches rows an earlier rung
+     *        already admitted and must keep their body knowledge.
+     *
+     * A hard-killed node can boot with a flat file that lags the blocks
+     * table: the flat rung loads the first rows WITH HAVE_DATA and file
+     * positions, then the hydrate tops the map up from the table, whose
+     * rows store no body knowledge. Erasing the earlier rung's admission
+     * would make the body-history census count bodies on disk as missing. */
+    failures += bil_union_boot_case();
+
+    /* ── 15b. blocks hydrate pumps the boot-liveness marker ──────────────
+     *
+     * The hydrate pumps boot_progress_note() every 4096 rows in its
+     * validate/insert/link passes, so >4096 rows must advance the marker. */
+    failures += bil_blocks_hydrate_liveness_case();
+
+    /* ── 16. node.db `blocks` hydrate: a corrupted row is quarantined per-row
+     *       (purged + typed blocker + dumpstate counter); the load continues. ── */
+    failures += bil_blocks_hydrate_row_quarantine_case();
+
+    /* ── 16b. node.db `blocks` hydrate (J5): an ALL-poisoned table quarantines
+     *        every row and returns .ok=false (0 usable) — never a partial map. */
+    failures += bil_blocks_hydrate_all_poisoned_case();
+
+    /* ── 16d. RUNTIME poisoned-blocks-row quarantine:
+     *        stage_repair_quarantine_blocks_row purges a row that fails the
+     *        frozen block_row_verify, clears its in-memory HAVE_DATA, bumps the
+     *        process counter + typed blocker; refuses a clean row; and falls
+     *        back to db_block_delete_by_height when the stored `hash` column
+     *        does not match the canonical hash. ──────── */
+    failures += bil_runtime_row_quarantine_case();
+
+    /* ── 16c. Repair-storm throttle: N rapid same-key failures collapse to a
+     *        bounded emission count (first-fire + one keepalive per window),
+     *        using a caller-supplied clock. ─────── */
+    {
+        struct log_throttle t = LOG_THROTTLE_INIT;
+        const int64_t keepalive = 60;
+        const uint64_t key = 3179245;   /* a fixed "height" fingerprint */
+        int64_t now = 1000000;
+
+        int emits = 0;
+        /* 500 rapid failures within the same wall-second: exactly ONE emit. */
+        for (int i = 0; i < 500; i++)
+            if (log_throttle_should_emit(&t, key, now, keepalive, NULL))
+                emits++;
+        bool first_window_ok = (emits == 1);
+
+        /* Advance past the keepalive window: exactly one keepalive emit. */
+        now += keepalive + 1;
+        int emits2 = 0;
+        for (int i = 0; i < 500; i++)
+            if (log_throttle_should_emit(&t, key, now, keepalive, NULL))
+                emits2++;
+        bool keepalive_ok = (emits2 == 1);
+
+        /* A DIFFERENT key emits immediately (distinct episode, not throttled). */
+        bool diff_key_ok =
+            log_throttle_should_emit(&t, key + 1, now, keepalive, NULL);
+
+        BIL_CHECK("bil: repair-storm throttle bounds N rapid same-key failures "
+                  "to 1 emit/window", first_window_ok && keepalive_ok);
+        BIL_CHECK("bil: repair-storm throttle re-emits on a new-key episode",
+                  diff_key_ok);
+    }
+
+    /* ── Fast-restart: forward pass ALWAYS re-derives stored work ────────
+     * A flat file carrying stale (here: zeroed) stored nChainWork must load
+     * with the correct work, because load_block_index_flat unconditionally
+     * re-derives it from the pointer graph. */
+    failures += bil_fast_restart_forward_case();
+
+    /* ── Persisted-FAILED-bit trust policy ─────────────────────────────
+     * A stale persisted BLOCK_FAILED_VALID bit on the best-chain tip must not
+     * wedge the node. The flat + SQLite loaders reconcile it against the baked
+     * ROM checkpoint:
+     *   - below the checkpoint: STRIP it (re-derive, never trust);
+     *   - above it:            DEMOTE it (clear FAILED, set BLOCK_REVALIDATE_PENDING).
+     * The loader never blesses the block (no HAVE bit added, validity not raised). */
+
+    /* ── T1: pure unit test of the policy helper (deterministic). ──────── */
+    failures += bil_failed_bit_policy_unit_case();
+
+    /* ── T2: end-to-end via the FLAT loader with a low override checkpoint.
+     * A synthetic chain h=0..49 with FAILED_VALID stamped on the tip is saved
+     * and reloaded; the tip is above the checkpoint, so it must be demoted and
+     * select_most_work_eligible() must return it. */
+    failures += bil_failed_bit_flat_low_checkpoint_case();
+
+    /* ── T3: FLAT loader with the DEFAULT (high) checkpoint — the whole
+     * synthetic chain is BELOW it, so a stale FAILED tip is STRIPPED (no
+     * marker) and still becomes selectable. */
+    failures += bil_failed_bit_flat_default_case();
+
+    /* ── T4: SQLite loader applies the SAME reconcile. A FAILED_VALID tip
+     * above a low override checkpoint is demoted on load_block_index_sqlite. */
+    failures += bil_failed_bit_sqlite_case();
 
     printf("=== block index loader: %d failures ===\n", failures);
     return failures + ZCL_TEST_SETUP_FAILURES();
