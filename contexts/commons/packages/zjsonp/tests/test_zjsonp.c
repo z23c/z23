@@ -360,33 +360,50 @@ static uint64_t rnd(void) {
   return rng_state;
 }
 
-/* Append a random valid JSON value to buf, depth-bounded. */
-static size_t gen_value(char *buf, size_t n, size_t cap, unsigned depth) {
+/* Map a pick value to a random string or number token, or NULL for
+ * a container pick. */
+static const char *gen_pick_scalar(unsigned pick) {
   static const char *strs[] = {"\"\"", "\"abc\"", "\"a\\nb\"",
                                "\"\\u00e9\"", "\"h\xc3\xa9\""};
   static const char *nums[] = {"0", "-1", "42", "1.5", "-2.5e-3",
                                "1e300", "9223372036854775807"};
-  unsigned pick = depth >= 5 ? rnd() % 4 : rnd() % 6;
-  const char *s = NULL;
   if (pick < 2)
-    s = strs[rnd() % 5];
-  else if (pick < 4)
-    s = nums[rnd() % 7];
-  if (s) {
-    size_t sl = strlen(s);
-    if (n + sl >= cap)
-      return n;
-    memcpy(buf + n, s, sl);
-    return n + sl;
-  }
+    return strs[rnd() % 5];
+  if (pick < 4)
+    return nums[rnd() % 7];
+  return NULL;
+}
+
+/* Append a scalar token if it fits in cap; returns the resulting length. */
+static size_t gen_append_scalar(char *buf, size_t n, size_t cap,
+                                const char *s) {
+  size_t sl = strlen(s);
+  if (n + sl >= cap)
+    return n;
+  memcpy(buf + n, s, sl);
+  return n + sl;
+}
+
+/* Append the ',' between generated list elements when there is room. */
+static size_t gen_comma(char *buf, size_t n, size_t cap, unsigned i) {
+  if (i && n < cap)
+    buf[n++] = ',';
+  return n;
+}
+
+/* Append a random valid JSON value to buf, depth-bounded. */
+static size_t gen_value(char *buf, size_t n, size_t cap, unsigned depth) {
+  unsigned pick = depth >= 5 ? rnd() % 4 : rnd() % 6;
+  const char *s = gen_pick_scalar(pick);
+  if (s)
+    return gen_append_scalar(buf, n, cap, s);
   if (pick == 4) { /* array */
     if (n + 2 >= cap)
       return n;
     buf[n++] = '[';
     unsigned elems = rnd() % 4;
     for (unsigned i = 0; i < elems; i++) {
-      if (i && n < cap)
-        buf[n++] = ',';
+      n = gen_comma(buf, n, cap, i);
       n = gen_value(buf, n, cap, depth + 1);
     }
     if (n < cap)
@@ -399,8 +416,7 @@ static size_t gen_value(char *buf, size_t n, size_t cap, unsigned depth) {
   buf[n++] = '{';
   unsigned elems = rnd() % 4;
   for (unsigned i = 0; i < elems; i++) {
-    if (i && n < cap)
-      buf[n++] = ',';
+    n = gen_comma(buf, n, cap, i);
     if (n + 4 < cap) {
       n += (size_t)snprintf(buf + n, cap - n, "\"k%u\":",
                             (unsigned)(rnd() % 100));

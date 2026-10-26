@@ -195,7 +195,6 @@ contexts/commons/packages/zjsonp/src/zjsonp.c:scan_number:30
 contexts/commons/packages/zjsonp/src/zjsonp.c:scan_string:23
 contexts/commons/packages/zjsonp/src/zjsonp.c:zjsonp_next:40
 contexts/commons/packages/zjsonp/src/zjsonp.c:zjsonp_str_decode:45
-contexts/commons/packages/zjsonp/tests/test_zjsonp.c:gen_value:18
 contexts/commons/packages/zlev/src/zlev.c:zlev_distance_bounded:28
 contexts/commons/packages/zmath/app/main.c:main:22
 contexts/commons/packages/zmath/tests/test_zmath.c:test_checked_i64:19
