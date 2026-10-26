@@ -133,9 +133,6 @@ static const struct json_value *tsor_json_condition(
     return NULL;
 }
 
-/* Check every detail field the engine dumps for a witnessed non-fork heal,
- * in dump order. A NULL detail fails the first check, so — as in the
- * original short-circuit chain — no field of a NULL detail is read. */
 static bool tsor_dump_detail_matches_expected(const struct json_value *detail,
                                               int tip_h)
 {
