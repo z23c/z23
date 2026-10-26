@@ -31,6 +31,45 @@ const char *zcl_det_unknown_reason_name(enum zcl_det_unknown_reason reason)
     return "invalid";
 }
 
+static void collect_observation_masks(const struct zcl_det_observation *obs,
+                                      size_t n, uint32_t *observed,
+                                      uint32_t *with_vector)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!obs[i].observed) continue;
+        *observed |= (uint32_t)1u << i;
+        if (obs[i].check_count > 0) *with_vector |= (uint32_t)1u << i;
+    }
+}
+
+static uint32_t full_perturbation_mask(size_t n)
+{
+    return (n == 32) ? UINT32_MAX : (((uint32_t)1u << n) - 1u);
+}
+
+static uint32_t digest_split_mask(const struct zcl_det_observation *obs,
+                                  size_t n)
+{
+    uint32_t split = 0;
+    for (size_t i = 1; i < n; i++) {
+        if (memcmp(obs[i].digest, obs[0].digest, ZCL_DET_DIGEST_LEN) != 0)
+            split |= (uint32_t)1u << i;
+    }
+    return split;
+}
+
+static enum zcl_det_class split_klass(uint32_t split,
+                                      const enum zcl_det_perturbation *order,
+                                      size_t n)
+{
+    for (size_t i = 1; i < n; i++) {
+        if (!(split & ((uint32_t)1u << i))) continue;
+        if (zcl_det_perturbation_class(order[i]) != ZCL_DET_PC_SCHEDULING)
+            return ZCL_DET_CLASS_NONDETERMINISTIC;
+    }
+    return ZCL_DET_CLASS_TIMING_SENSITIVE;
+}
+
 bool zcl_det_classify(const struct zcl_det_observation *obs,
                       const enum zcl_det_perturbation *order, size_t n,
                       struct zcl_det_verdict *out)
@@ -50,11 +89,7 @@ bool zcl_det_classify(const struct zcl_det_observation *obs,
 
     uint32_t observed = 0;
     uint32_t with_vector = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (!obs[i].observed) continue;
-        observed |= (uint32_t)1u << i;
-        if (obs[i].check_count > 0) with_vector |= (uint32_t)1u << i;
-    }
+    collect_observation_masks(obs, n, &observed, &with_vector);
     out->observed_mask = observed;
 
     /* Never dispatched anywhere. Say so; do not call it clean. */
@@ -66,7 +101,7 @@ bool zcl_det_classify(const struct zcl_det_observation *obs,
 
     /* Dispatched under some perturbations and gated out under others: the
      * runs are not comparable, so neither answer is earned. */
-    const uint32_t all = (n == 32) ? UINT32_MAX : (((uint32_t)1u << n) - 1u);
+    const uint32_t all = full_perturbation_mask(n);
     if (observed != all) {
         out->klass = ZCL_DET_CLASS_UNKNOWN;
         out->reason = ZCL_DET_UNKNOWN_PARTIAL;
@@ -89,11 +124,7 @@ bool zcl_det_classify(const struct zcl_det_observation *obs,
      * the comparison below already covers that case with no special path. */
     out->check_count = obs[0].check_count;
 
-    uint32_t split = 0;
-    for (size_t i = 1; i < n; i++) {
-        if (memcmp(obs[i].digest, obs[0].digest, ZCL_DET_DIGEST_LEN) != 0)
-            split |= (uint32_t)1u << i;
-    }
+    uint32_t split = digest_split_mask(obs, n);
     out->split_mask = split;
 
     if (split == 0) {
@@ -114,16 +145,7 @@ bool zcl_det_classify(const struct zcl_det_observation *obs,
      * A REFERENCE-class perturbation appearing at a slot other than 0 means
      * the caller measured BASE twice, which is a repeat run, so it counts as
      * the strong claim too. */
-    bool non_scheduling = false;
-    for (size_t i = 1; i < n; i++) {
-        if (!(split & ((uint32_t)1u << i))) continue;
-        if (zcl_det_perturbation_class(order[i]) != ZCL_DET_PC_SCHEDULING) {
-            non_scheduling = true;
-            break;
-        }
-    }
-    out->klass = non_scheduling ? ZCL_DET_CLASS_NONDETERMINISTIC
-                                : ZCL_DET_CLASS_TIMING_SENSITIVE;
+    out->klass = split_klass(split, order, n);
     return true;
 }
 
