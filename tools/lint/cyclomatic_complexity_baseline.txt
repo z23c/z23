@@ -1422,7 +1422,6 @@ engine/services/src/recovery_policy.c:policy_load_from_env:16
 engine/services/src/reindex_epilogue.c:derive_authority_from_node_db_utxos:35
 engine/services/src/rolling_anchor_service.c:ra_load_locked:23
 engine/services/src/rolling_anchor_service.c:rolling_anchor_extend_if_due:19
-engine/services/src/seal_service.c:seal_ratify_tick:23
 engine/services/src/segment_sealer_service.c:segment_sealer_seal_next:16
 engine/services/src/shielded_history_body_crosscheck.c:shielded_history_body_crosscheck_run:30
 engine/services/src/shielded_history_body_crosscheck.c:xck_build_index:16

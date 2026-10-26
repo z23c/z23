@@ -124,6 +124,94 @@ bool seal_candidate_emit_in_tx(struct sqlite3 *db, struct main_state *ms,
     return true;
 }
 
+/* Outcome codes for the two ratify helpers below. seal_ratify_tick owns every
+ * LOG_WARN line (the macros print the enclosing function), so the helpers
+ * report codes and the tick logs. Only the failures the tick logged before
+ * are distinguishable codes; every "wait" gate returned silently then and
+ * still does. */
+enum {
+    SEAL_RATIFY_GATE_READ_FAILED = -1, /* seal_kv_newest failed — tick logs */
+    SEAL_RATIFY_GATE_WAIT = 0,         /* nothing to ratify, or a gate waits */
+    SEAL_RATIFY_GATE_READY = 1,        /* all gates passed */
+    SEAL_RATIFY_TXN_OK = 0,
+    SEAL_RATIFY_TXN_BEGIN_FAILED = 1,  /* BEGIN IMMEDIATE failed — tick logs */
+    SEAL_RATIFY_TXN_FINISH_FAILED = 2, /* COMMIT/ROLLBACK failed — tick logs */
+    SEAL_RATIFY_TXN_MARK_FAILED = 3,   /* rolled back — "mark failed" log */
+};
+
+/* Pre-transaction ratify gates, in their original order: newest-candidate
+ * read, nothing-to-ratify, depth, input coverage, active-chain agreement.
+ * Reads the candidate into *r and reports whether ratification may proceed,
+ * must wait (normal), or could not read the candidate (the tick logs). */
+static int seal_ratify_check_gates(struct main_state *ms, struct sqlite3 *db,
+                                   struct seal_record *r)
+{
+    bool found = false;
+    if (!seal_kv_newest(db, r, &found))
+        return SEAL_RATIFY_GATE_READ_FAILED;
+    /* nothing to ratify */
+    if (!found || r->ratified)
+        return SEAL_RATIFY_GATE_WAIT;
+
+    /* Gate 1 — depth: the tip must have buried G by the finality depth. */
+    int tip = active_chain_height(&ms->chain_active);
+    if (tip < 0) return SEAL_RATIFY_GATE_WAIT;
+    int immutable = zcl_immutable_height(tip);
+    /* candidate too young — normal, waits */
+    if (immutable < 0 || r->height > immutable)
+        return SEAL_RATIFY_GATE_WAIT;
+
+    /* Gate 2 — input coverage: the block bytes that produced this state must
+     * themselves be sealed (the rolling_anchor INPUT prefix must cover G). */
+    int prefix_end = rolling_anchor_effective_prefix_end();
+    /* input prefix not yet sealed past G — normal, waits */
+    if (r->height > prefix_end)
+        return SEAL_RATIFY_GATE_WAIT;
+
+    /* Gate 3 — active-chain agreement: the chain still contains the block this
+     * seal was computed against (no reorg replaced G). active_chain_at is a
+     * lock-free read. */
+    struct block_index *bi = active_chain_at(&ms->chain_active, r->height);
+    /* chain moved off the sealed block — wait/supersede */
+    if (!bi || memcmp(bi->hashBlock.data, r->block_hash, 32) != 0)
+        return SEAL_RATIFY_GATE_WAIT;
+
+    return SEAL_RATIFY_GATE_READY;
+}
+
+/* Ratifies the slot in its own progress.kv BEGIN IMMEDIATE: lock, BEGIN,
+ * mark (and prune when enabled), COMMIT or ROLLBACK, unlock. Reports the
+ * outcome; seal_ratify_tick keeps each LOG_WARN where it was. */
+static int seal_ratify_commit_txn(struct sqlite3 *db, int slot,
+                                  struct seal_record *at)
+{
+    progress_store_tx_lock();
+    char *err = NULL;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+        if (err) sqlite3_free(err);
+        progress_store_tx_unlock();
+        return SEAL_RATIFY_TXN_BEGIN_FAILED;
+    }
+    bool ok = seal_kv_mark_ratified_in_tx(db, slot, at);
+#if SEAL_PRUNE_ENABLED
+    /* Seal advance IS retention: drop the now-sealed history below G. LANDS
+     * DARK in M1 (SEAL_PRUNE_ENABLED == 0) — this branch does not compile, so
+     * the first land deletes nothing and proves itself by accumulation. */
+    if (ok && !seal_prune_below_in_tx(db, at->height))
+        ok = false;
+#endif
+    if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, &err)
+            != SQLITE_OK) {
+        if (err) sqlite3_free(err);
+        progress_store_tx_unlock();
+        return SEAL_RATIFY_TXN_FINISH_FAILED;
+    }
+    progress_store_tx_unlock();
+    if (!ok)
+        return SEAL_RATIFY_TXN_MARK_FAILED;
+    return SEAL_RATIFY_TXN_OK;
+}
+
 int seal_ratify_tick(struct main_state *ms)
 {
     if (!ms) return 0;
@@ -131,33 +219,13 @@ int seal_ratify_tick(struct main_state *ms)
     if (!db) return 0;
 
     struct seal_record r;
-    bool found = false;
-    if (!seal_kv_newest(db, &r, &found)) {
+    int gate = seal_ratify_check_gates(ms, db, &r);
+    if (gate == SEAL_RATIFY_GATE_READ_FAILED) {
         LOG_WARN("seal", "[seal] ratify: newest read failed");
         return 0;
     }
-    if (!found || r.ratified)
-        return 0; /* nothing to ratify */
-
-    /* Gate 1 — depth: the tip must have buried G by the finality depth. */
-    int tip = active_chain_height(&ms->chain_active);
-    if (tip < 0) return 0;
-    int immutable = zcl_immutable_height(tip);
-    if (immutable < 0 || r.height > immutable)
-        return 0; /* candidate too young — normal, waits */
-
-    /* Gate 2 — input coverage: the block bytes that produced this state must
-     * themselves be sealed (the rolling_anchor INPUT prefix must cover G). */
-    int prefix_end = rolling_anchor_effective_prefix_end();
-    if (r.height > prefix_end)
-        return 0; /* input prefix not yet sealed past G — normal, waits */
-
-    /* Gate 3 — active-chain agreement: the chain still contains the block this
-     * seal was computed against (no reorg replaced G). active_chain_at is a
-     * lock-free read. */
-    struct block_index *bi = active_chain_at(&ms->chain_active, r.height);
-    if (!bi || memcmp(bi->hashBlock.data, r.block_hash, 32) != 0)
-        return 0; /* chain moved off the sealed block — wait/supersede */
+    if (gate != SEAL_RATIFY_GATE_READY)
+        return 0;
 
     /* All gates pass — locate the candidate's slot and ratify it in its own
      * BEGIN IMMEDIATE. */
@@ -170,31 +238,16 @@ int seal_ratify_tick(struct main_state *ms)
         return 0;
     }
 
-    progress_store_tx_lock();
-    char *err = NULL;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-        if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
+    int txn = seal_ratify_commit_txn(db, slot, &at);
+    if (txn == SEAL_RATIFY_TXN_BEGIN_FAILED) {
         LOG_WARN("seal", "[seal] ratify: BEGIN failed G=%d", r.height);
         return 0;
     }
-    bool ok = seal_kv_mark_ratified_in_tx(db, slot, &at);
-#if SEAL_PRUNE_ENABLED
-    /* Seal advance IS retention: drop the now-sealed history below G. LANDS
-     * DARK in M1 (SEAL_PRUNE_ENABLED == 0) — this branch does not compile, so
-     * the first land deletes nothing and proves itself by accumulation. */
-    if (ok && !seal_prune_below_in_tx(db, at.height))
-        ok = false;
-#endif
-    if (sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, &err)
-            != SQLITE_OK) {
-        if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
+    if (txn == SEAL_RATIFY_TXN_FINISH_FAILED) {
         LOG_WARN("seal", "[seal] ratify: COMMIT/ROLLBACK failed G=%d", r.height);
         return 0;
     }
-    progress_store_tx_unlock();
-    if (!ok) {
+    if (txn == SEAL_RATIFY_TXN_MARK_FAILED) {
         LOG_WARN("seal", "[seal] ratify: mark failed G=%d", r.height);
         return 0;
     }
