@@ -414,8 +414,6 @@ engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/boot_auto_refold.c:arf_read:17
 engine/modules/storage/src/boot_auto_refold.c:arf_write:17
 engine/modules/storage/src/census_read.c:census_read_graph:16
-engine/modules/storage/src/checkpoint_rung.c:rung_derive_anchors:18
-engine/modules/storage/src/checkpoint_rung.c:rung_derive_coins:20
 engine/modules/storage/src/coins_kv.c:coins_kv_add_many_sqlite:22
 engine/modules/storage/src/coins_kv.c:coins_kv_backfill_applied_height_if_absent:16
 engine/modules/storage/src/coins_kv.c:coins_kv_reset_for_reseed:20

@@ -229,6 +229,42 @@ bool checkpoint_rung_parse(const uint8_t *buf, size_t len,
 
 /* ── bundle derivation (read-only) ────────────────────────────────── */
 
+static bool coins_row_is_well_formed(const void *txid, int txid_len,
+                                     int64_t vout, int64_t height,
+                                     int64_t is_cb)
+{
+    return txid != NULL && txid_len == 32 && vout >= 0 && height >= 0 &&
+           (is_cb == 0 || is_cb == 1);
+}
+
+static int coins_row_compare(const uint8_t prev_txid[32], int64_t prev_vout,
+                             const void *txid, int64_t vout)
+{
+    int cmp = memcmp(prev_txid, txid, 32);
+    if (cmp != 0)
+        return cmp;
+    if (prev_vout < vout)
+        return -1;
+    if (prev_vout > vout)
+        return 1;
+    return 0;
+}
+
+static void coins_fold_row(struct sha3_256_ctx *c, const void *txid,
+                           int64_t vout, int64_t value, const void *script,
+                           int script_len, int64_t height, int64_t is_cb)
+{
+    sha3_256_write(c, txid, 32);
+    sha3_u32le(c, (uint32_t)vout);
+    sha3_u64le(c, (uint64_t)value);
+    sha3_u32le(c, (uint32_t)(script ? script_len : 0));
+    if (script && script_len > 0)
+        sha3_256_write(c, script, (size_t)script_len);
+    sha3_u32le(c, (uint32_t)height);
+    sha3_256_write(c, is_cb ? (const unsigned char *)"\x01"
+                            : (const unsigned char *)"\x00", 1);
+}
+
 static bool rung_derive_coins(sqlite3 *db, struct checkpoint_rung *out)
 {
     static const char sql[] =
@@ -254,30 +290,21 @@ static bool rung_derive_coins(sqlite3 *db, struct checkpoint_rung *out)
         int script_len = sqlite3_column_bytes(st, 3);
         int64_t height = sqlite3_column_int64(st, 4);
         int64_t is_cb = sqlite3_column_int64(st, 5);
-        if (!txid || sqlite3_column_bytes(st, 0) != 32 || vout < 0 ||
-            height < 0 || (is_cb != 0 && is_cb != 1)) {
+        if (!coins_row_is_well_formed(txid, sqlite3_column_bytes(st, 0), vout,
+                                      height, is_cb)) {
             ok = false;
             break;
         }
-        if (have_prev) {
-            int cmp = memcmp(prev_txid, txid, 32);
-            if (cmp > 0 || (cmp == 0 && prev_vout >= vout)) {
-                ok = false;
-                break;
-            }
+        if (have_prev &&
+            coins_row_compare(prev_txid, prev_vout, txid, vout) >= 0) {
+            ok = false;
+            break;
         }
         memcpy(prev_txid, txid, 32);
         prev_vout = vout;
         have_prev = true;
-        sha3_256_write(&c, txid, 32);
-        sha3_u32le(&c, (uint32_t)vout);
-        sha3_u64le(&c, (uint64_t)value);
-        sha3_u32le(&c, (uint32_t)(script ? script_len : 0));
-        if (script && script_len > 0)
-            sha3_256_write(&c, script, (size_t)script_len);
-        sha3_u32le(&c, (uint32_t)height);
-        sha3_256_write(&c, is_cb ? (const unsigned char *)"\x01"
-                                 : (const unsigned char *)"\x00", 1);
+        coins_fold_row(&c, txid, vout, value, script, script_len, height,
+                       is_cb);
         count++;
         supply += value;
     }
@@ -288,6 +315,38 @@ static bool rung_derive_coins(sqlite3 *db, struct checkpoint_rung *out)
     out->utxo_count = count;
     out->total_supply = supply;
     return true;
+}
+
+static bool anchors_row_is_well_formed(int64_t pool, const void *anchor,
+                                       int anchor_len, int64_t height,
+                                       const void *tree)
+{
+    return (pool == 0 || pool == 1) && anchor != NULL && anchor_len == 32 &&
+           height >= 0 && tree != NULL;
+}
+
+static int anchors_row_compare(int64_t prev_pool,
+                               const uint8_t prev_anchor[32], int64_t pool,
+                               const void *anchor)
+{
+    if (prev_pool > pool)
+        return 1;
+    if (prev_pool < pool)
+        return -1;
+    return memcmp(prev_anchor, anchor, 32);
+}
+
+static void anchors_track_frontier(int64_t best_h[2],
+                                   struct checkpoint_rung *out, int64_t pool,
+                                   int64_t height, const void *anchor)
+{
+    if (height > best_h[pool]) {
+        best_h[pool] = height;
+        if (pool == 0)
+            memcpy(out->sprout_frontier_root, anchor, 32);
+        else
+            memcpy(out->sapling_frontier_root, anchor, 32);
+    }
 }
 
 static bool rung_derive_anchors(sqlite3 *db, struct checkpoint_rung *out)
@@ -314,19 +373,16 @@ static bool rung_derive_anchors(sqlite3 *db, struct checkpoint_rung *out)
         int64_t height = sqlite3_column_int64(st, 2);
         const void *tree = sqlite3_column_blob(st, 3);
         int tree_len = sqlite3_column_bytes(st, 3);
-        if ((pool != 0 && pool != 1) || !anchor ||
-            sqlite3_column_bytes(st, 1) != 32 || height < 0 || !tree) {
+        if (!anchors_row_is_well_formed(pool, anchor,
+                                        sqlite3_column_bytes(st, 1), height,
+                                        tree)) {
             ok = false;
             break;
         }
-        if (have_prev) {
-            int cmp = prev_pool > pool ? 1
-                    : prev_pool < pool ? -1
-                    : memcmp(prev_anchor, anchor, 32);
-            if (cmp >= 0) {
-                ok = false;
-                break;
-            }
+        if (have_prev &&
+            anchors_row_compare(prev_pool, prev_anchor, pool, anchor) >= 0) {
+            ok = false;
+            break;
         }
         prev_pool = pool;
         memcpy(prev_anchor, anchor, 32);
@@ -338,13 +394,7 @@ static bool rung_derive_anchors(sqlite3 *db, struct checkpoint_rung *out)
         sha3_u32le(&c, (uint32_t)tree_len);
         sha3_256_write(&c, tree, (size_t)tree_len);
         count++;
-        if (height > best_h[pool]) {
-            best_h[pool] = height;
-            if (pool == 0)
-                memcpy(out->sprout_frontier_root, anchor, 32);
-            else
-                memcpy(out->sapling_frontier_root, anchor, 32);
-        }
+        anchors_track_frontier(best_h, out, pool, height, anchor);
     }
     sqlite3_finalize(st);
     if (!ok || rc != SQLITE_DONE)
