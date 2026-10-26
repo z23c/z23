@@ -1002,7 +1002,6 @@ engine/composition/src/consensus_state_snapshot_output_seal.c:descriptor_has_wri
 engine/conditions/src/download_queue_starved.c:detail_download_queue_starved:52
 engine/conditions/src/have_data_unreadable.c:detect_have_data_unreadable:19
 engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
-engine/conditions/src/local_header_refill_needed.c:detail_local_header_refill_needed:28
 engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verified_frontier:21
 engine/conditions/src/shielded_selfheal_ladder.c:shielded_selfheal_run_named_remedy:23
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18

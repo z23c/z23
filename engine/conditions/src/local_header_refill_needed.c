@@ -189,6 +189,63 @@ static bool witness_local_header_refill_needed(int64_t target_at_detect)
     return arrived; /* the missing header child actually showed up */
 }
 
+static void read_current_tip_and_missing_child(struct main_state *ms,
+                                               int missing_h,
+                                               int *current_tip,
+                                               bool *child_exists)
+{
+    if (ms) {
+        zcl_mutex_lock(&ms->cs_main);
+        struct block_index *tip = active_chain_tip(&ms->chain_active);
+        if (tip) {
+            *current_tip = tip->nHeight;
+            *child_exists = missing_h >= 0 &&
+                (tip->nHeight >= missing_h ||
+                 sync_monitor_active_next_child_exists(ms, tip, missing_h));
+        }
+        zcl_mutex_unlock(&ms->cs_main);
+    }
+}
+
+static bool push_status_and_detect_fields(struct json_value *out,
+                                          struct connman *cm,
+                                          struct main_state *ms,
+                                          int current_tip,
+                                          int missing_h,
+                                          bool current_missing_child_exists)
+{
+    return json_push_kv_str(out, "sync_state",
+                            sync_state_name(sync_get_state())) &&
+        json_push_kv_bool(out, "has_connman", cm != NULL) &&
+        json_push_kv_bool(out, "has_main_state", ms != NULL) &&
+        json_push_kv_int(out, "current_tip_height", current_tip) &&
+        json_push_kv_int(out, "current_peer_max",
+                         cm ? connman_max_peer_height(cm) : -1) &&
+        json_push_kv_int(out, "tip_height_at_detect",
+                         atomic_load(&g_tip_at_detect)) &&
+        json_push_kv_int(out, "missing_height", missing_h) &&
+        json_push_kv_int(out, "peer_max_at_detect",
+                         atomic_load(&g_peer_max_at_detect)) &&
+        json_push_kv_bool(out, "current_missing_child_exists",
+                          current_missing_child_exists);
+}
+
+static bool push_witness_and_recovery_fields(
+    struct json_value *out,
+    const struct watchdog_local_recovery_stats *lr)
+{
+    return json_push_kv_int(out, "last_witness_peer_max",
+                            atomic_load(&g_last_witness_peer_max)) &&
+        json_push_kv_bool(out, "last_witness_arrived",
+                          atomic_load(&g_last_witness_arrived) != 0) &&
+        json_push_kv_int(out, "last_best_header_body_target",
+                         atomic_load(&g_last_best_header_body_target)) &&
+        json_push_kv_bool(out, "local_recovery_active", lr->active) &&
+        json_push_kv_bool(out, "mirror_repair_gated",
+                          lr->mirror_repair_gated) &&
+        json_push_kv_bool(out, "retries_exhausted", lr->retries_exhausted);
+}
+
 static bool detail_local_header_refill_needed(struct json_value *out)
 {
     struct connman *cm = sync_monitor_connman();
@@ -199,45 +256,14 @@ static bool detail_local_header_refill_needed(struct json_value *out)
     int missing_h = atomic_load(&g_missing_height);
     int current_tip = -1;
     bool current_missing_child_exists = false;
-    if (ms) {
-        zcl_mutex_lock(&ms->cs_main);
-        struct block_index *tip = active_chain_tip(&ms->chain_active);
-        if (tip) {
-            current_tip = tip->nHeight;
-            current_missing_child_exists =
-                missing_h >= 0 &&
-                (tip->nHeight >= missing_h ||
-                 sync_monitor_active_next_child_exists(ms, tip, missing_h));
-        }
-        zcl_mutex_unlock(&ms->cs_main);
-    }
+    read_current_tip_and_missing_child(ms, missing_h, &current_tip,
+                                       &current_missing_child_exists);
 
     bool ok = true;
-    ok = ok && json_push_kv_str(out, "sync_state",
-                                sync_state_name(sync_get_state()));
-    ok = ok && json_push_kv_bool(out, "has_connman", cm != NULL);
-    ok = ok && json_push_kv_bool(out, "has_main_state", ms != NULL);
-    ok = ok && json_push_kv_int(out, "current_tip_height", current_tip);
-    ok = ok && json_push_kv_int(out, "current_peer_max",
-                                cm ? connman_max_peer_height(cm) : -1);
-    ok = ok && json_push_kv_int(out, "tip_height_at_detect",
-                                atomic_load(&g_tip_at_detect));
-    ok = ok && json_push_kv_int(out, "missing_height", missing_h);
-    ok = ok && json_push_kv_int(out, "peer_max_at_detect",
-                                atomic_load(&g_peer_max_at_detect));
-    ok = ok && json_push_kv_bool(out, "current_missing_child_exists",
-                                 current_missing_child_exists);
-    ok = ok && json_push_kv_int(out, "last_witness_peer_max",
-                                atomic_load(&g_last_witness_peer_max));
-    ok = ok && json_push_kv_bool(out, "last_witness_arrived",
-                                 atomic_load(&g_last_witness_arrived) != 0);
-    ok = ok && json_push_kv_int(out, "last_best_header_body_target",
-                                atomic_load(&g_last_best_header_body_target));
-    ok = ok && json_push_kv_bool(out, "local_recovery_active", lr.active);
-    ok = ok && json_push_kv_bool(out, "mirror_repair_gated",
-                                 lr.mirror_repair_gated);
-    ok = ok && json_push_kv_bool(out, "retries_exhausted",
-                                 lr.retries_exhausted);
+    ok = ok && push_status_and_detect_fields(out, cm, ms, current_tip,
+                                             missing_h,
+                                             current_missing_child_exists);
+    ok = ok && push_witness_and_recovery_fields(out, &lr);
     ok = ok && json_push_kv_int(out, "local_recovery_missing_height",
                                 lr.missing_height);
     ok = ok && json_push_kv_int(out, "retry_count", lr.retry_count);
