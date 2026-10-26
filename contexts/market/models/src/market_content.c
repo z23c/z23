@@ -132,13 +132,24 @@ bool db_market_content_find_chunk(
         });
 }
 
+static bool market_content_snapshot_args_valid(struct node_db *ndb,
+    struct market_content_public_record *out, size_t max, int *total_out)
+{
+    return ndb && ndb->open && out && max != 0 && total_out;
+}
+
+static bool market_content_snapshot_total_valid(int64_t total)
+{
+    return total >= 0 && total <= INT_MAX;
+}
+
 int db_market_content_list_snapshot(
     struct node_db *ndb, struct market_content_public_record *out, size_t max,
     int *total_out)
 {
     if (total_out)
         *total_out = -1;
-    if (!ndb || !ndb->open || !out || max == 0 || !total_out) {
+    if (!market_content_snapshot_args_valid(ndb, out, max, total_out)) {
         LOG_ERROR("market", "market content snapshot: invalid arguments");
         return -1;
     }
@@ -163,7 +174,7 @@ int db_market_content_list_snapshot(
     int rc = SQLITE_OK;
     while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
         int64_t total = sqlite3_column_int64(s, 5);
-        if (total < 0 || total > INT_MAX) {
+        if (!market_content_snapshot_total_valid(total)) {
             LOG_ERROR("market", "market content snapshot total is invalid");
             AR_FINALIZE(s);
             return -1;
@@ -186,12 +197,35 @@ int db_market_content_list_snapshot(
     return count;
 }
 
+static bool market_content_identity_args_valid(struct node_db *ndb,
+    const uint8_t offer_id[32], const uint8_t identity[32])
+{
+    return ndb && ndb->open && offer_id && identity;
+}
+
+static bool market_content_identity_row_blobs_valid(const uint8_t *root_hash,
+    int root_len, const uint8_t *path, int path_len,
+    const uint8_t *chunk_hashes, int chunks_len)
+{
+    return root_hash && root_len == 32 && path && path_len > 0 &&
+        path_len < (int)MARKET_CONTENT_PATH_MAX && chunk_hashes &&
+        chunks_len > 0;
+}
+
+static bool market_content_identity_row_counts_valid(int64_t num_chunks,
+    int64_t chunks_len, int64_t size_bytes, int64_t registered_at)
+{
+    return num_chunks > 0 && num_chunks <= MARKET_CONTENT_MAX_CHUNKS &&
+        chunks_len == num_chunks * 32 && size_bytes > 0 &&
+        registered_at > 0;
+}
+
 enum market_content_state_result db_market_content_registration_identity(
     struct node_db *ndb, const uint8_t offer_id[32], uint8_t identity[32])
 {
     if (identity)
         memset(identity, 0, 32);
-    if (!ndb || !ndb->open || !offer_id || !identity) {
+    if (!market_content_identity_args_valid(ndb, offer_id, identity)) {
         LOG_ERROR("market", "market content identity: invalid arguments");
         return MARKET_CONTENT_STATE_ERROR;
     }
@@ -231,12 +265,12 @@ enum market_content_state_result db_market_content_registration_identity(
     int64_t size_bytes = sqlite3_column_int64(s, 2);
     int64_t num_chunks = sqlite3_column_int64(s, 3);
     int64_t registered_at = sqlite3_column_int64(s, 5);
-    if (!root_hash || root_len != 32 || !path || path_len <= 0 ||
-        path_len >= (int)MARKET_CONTENT_PATH_MAX || !chunk_hashes ||
-        chunks_len <= 0 || num_chunks <= 0 ||
-        num_chunks > MARKET_CONTENT_MAX_CHUNKS ||
-        chunks_len != num_chunks * 32 || size_bytes <= 0 ||
-        registered_at <= 0) {
+    if (!market_content_identity_row_blobs_valid(root_hash, root_len, path,
+                                                 path_len, chunk_hashes,
+                                                 chunks_len) ||
+        !market_content_identity_row_counts_valid(num_chunks, chunks_len,
+                                                  size_bytes,
+                                                  registered_at)) {
         LOG_ERROR("market", "market content identity row is malformed");
         AR_FINALIZE(s);
         return MARKET_CONTENT_STATE_ERROR;

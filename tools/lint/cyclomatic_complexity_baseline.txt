@@ -557,8 +557,6 @@ contexts/market/controllers/src/yardsale_site_controller_buy.c:yardsale_site_han
 contexts/market/controllers/src/zslp_intent_controller.c:rpc_zslp_intent:40
 contexts/market/controllers/src/zslp_intent_controller.c:ztic_prepare:34
 contexts/market/controllers/src/zslp_intent_native_handler.c:ztin_run:34
-contexts/market/models/src/market_content.c:db_market_content_list_snapshot:16
-contexts/market/models/src/market_content.c:db_market_content_registration_identity:23
 contexts/market/models/src/market_payment_claim.c:db_market_payment_observe_authority:28
 contexts/market/models/src/zslp_validity.c:inputs_read_db:17
 contexts/market/models/src/zslp_validity.c:validate_message:56
