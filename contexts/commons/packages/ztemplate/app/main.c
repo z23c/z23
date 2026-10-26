@@ -28,6 +28,30 @@ static bool lookup(const char *name, size_t name_len,
     return false;
 }
 
+static bool read_template(char *text, size_t capacity, size_t *len)
+{
+    while (*len < capacity) {
+        size_t n = fread(text + *len, 1, capacity - *len, stdin);
+        if (n == 0) break;
+        *len += n;
+    }
+    int extra = *len == capacity ? fgetc(stdin) : EOF;
+    if (ferror(stdin) || extra != EOF) {
+        fprintf(stderr, "ztemplate: read error or template too long\n");
+        return false;
+    }
+    return true;
+}
+
+static int write_rendered(const char *bytes, size_t n)
+{
+    if (n && (fwrite(bytes, 1, n, stdout) != n || fflush(stdout) != 0 || ferror(stdout))) {
+        fprintf(stderr, "ztemplate: write error\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     static char tmpl[65536];
@@ -43,11 +67,7 @@ int main(int argc, char **argv)
         memcpy(tmpl, argv[2], tlen);
         arg0 = 3;
     } else {
-        while (tlen < sizeof tmpl - 1) {
-            size_t r = fread(tmpl + tlen, 1, sizeof tmpl - 1 - tlen, stdin);
-            if (r == 0) break;
-            tlen += r;
-        }
+        if (!read_template(tmpl, sizeof tmpl - 1, &tlen)) return 2;
     }
 
     size_t err = 0;
@@ -58,8 +78,13 @@ int main(int argc, char **argv)
     }
 
     static struct binding bs[256];
+    if (argc - arg0 > 255) {
+        fprintf(stderr, "ztemplate: too many bindings (maximum 255)\n");
+        ztemplate_free(tp);
+        return 2;
+    }
     int nb = 0;
-    for (int i = arg0; i < argc && nb < 255; i++) {
+    for (int i = arg0; i < argc; i++) {
         char *eq = strchr(argv[i], '=');
         if (!eq) {
             fprintf(stderr, "ztemplate: bad binding %s (want name=value)\n",
@@ -91,7 +116,7 @@ int main(int argc, char **argv)
         ztemplate_free(tp);
         return 1;
     }
-    fwrite(out, 1, n, stdout);
+    int result = write_rendered(out, n);
     ztemplate_free(tp);
-    return 0;
+    return result;
 }

@@ -373,8 +373,11 @@ static void test_segment_growth_bounds(void) {
 }
 
 
+static void test_cli(void);
+
 int main(void)
 {
+    test_cli();
     test_allocation_free_extent_refusal();
     test_segment_growth_bounds();
     test_owned_text_allocation();
@@ -390,4 +393,235 @@ int main(void)
     test_differential();
     puts("test_ztemplate: all groups passed (basic ws comments parseerr unknown overflow foreach diff)");
     return 0;
+}
+
+static FILE *cli_source, *cli_sink, *cli_errors;
+static size_t cli_live, cli_parse_calls, cli_flushes;
+static bool cli_read_fault;
+static FILE *real_stdin(void) { return stdin; }
+static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
+static ztemplate *cli_parse(const char *text, size_t len, size_t *err)
+{
+    cli_parse_calls++;
+    ztemplate *tp = ztemplate_parse(text, len, err);
+    if (tp) cli_live++;
+    return tp;
+}
+static void cli_free(ztemplate *tp)
+{
+    CHECK(tp != NULL && cli_live > 0);
+    ztemplate_free(tp);
+    cli_live--;
+}
+[[maybe_unused]] static int cli_error(FILE *stream)
+{
+    return (stream == cli_source && cli_read_fault) || ferror(stream);
+}
+[[maybe_unused]] static int cli_flush(FILE *stream)
+{
+    if (stream == cli_sink) cli_flushes++;
+    return fflush(stream);
+}
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin cli_source
+#define stdout cli_sink
+#define stderr cli_errors
+#define ferror cli_error
+#define fflush cli_flush
+#define ztemplate_parse cli_parse
+#define ztemplate_free cli_free
+#define main embedded_cli_main
+#include "../app/main.c"
+#undef main
+#undef ztemplate_free
+#undef ztemplate_parse
+#undef fflush
+#undef ferror
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin real_stdin()
+#define stdout real_stdout()
+#define stderr real_stderr()
+
+static void cli_arguments(int argc, const char *const *args, char **copy, size_t cap)
+{
+    CHECK(argc >= 0 && (size_t)argc < cap);
+    for (int i = 0; i < argc; i++) {
+        copy[i] = malloc(strlen(args[i]) + 1);
+        CHECK(copy[i] != NULL);
+        memcpy(copy[i], args[i], strlen(args[i]) + 1);
+    }
+    copy[argc] = NULL;
+}
+static int cli_invoke(FILE *source, FILE *sink, FILE *errors,
+                       int argc, const char *const *args)
+{
+    char *copy[260];
+    cli_arguments(argc, args, copy, sizeof copy / sizeof copy[0]);
+    cli_source = source;
+    cli_sink = sink;
+    cli_errors = errors;
+    cli_live = cli_parse_calls = cli_flushes = 0;
+    int rc = embedded_cli_main(argc, copy);
+    cli_source = stdin;
+    cli_sink = stdout;
+    cli_errors = stderr;
+    for (int i = 0; i < argc; i++) free(copy[i]);
+    CHECK(cli_live == 0);
+    return rc;
+}
+static FILE *cli_input(const void *bytes, size_t n)
+{
+    FILE *source = tmpfile();
+    CHECK(source != NULL);
+    CHECK(fwrite(bytes, 1, n, source) == n && fflush(source) == 0);
+    rewind(source);
+    return source;
+}
+static void cli_message(FILE *stream, const char *want)
+{
+    char bytes[256];
+    rewind(stream);
+    size_t n = fread(bytes, 1, sizeof bytes - 1, stream);
+    bytes[n] = '\0';
+    CHECK(!ferror(stream) && strstr(bytes, want) != NULL);
+}
+static void cli_case(const char *input, int argc, const char *const *args,
+                      int status, const char *want, const char *message)
+{
+    FILE *source = cli_input(input, strlen(input));
+    FILE *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    CHECK(cli_invoke(source, sink, errors, argc, args) == status);
+    if (!*want) { CHECK(cli_flushes == 0); }
+    char bytes[256];
+    rewind(sink);
+    size_t n = fread(bytes, 1, sizeof bytes, sink);
+    CHECK(!ferror(sink) && n == strlen(want) && !memcmp(bytes, want, n));
+    if (message) { cli_message(errors, message); }
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_binary_boundary(size_t length, int status, bool argument)
+{
+    static unsigned char bytes[65537];
+    memset(bytes, argument ? 'a' : 0, sizeof bytes);
+    bytes[length - 1] = 'Z';
+    bytes[length] = 0;
+    FILE *source = cli_input(bytes, argument ? 0 : length), *sink = tmpfile(), *errors = tmpfile();
+    CHECK(sink != NULL && errors != NULL);
+    const char *args[] = {"ztemplate", "-t", (const char *)bytes};
+    CHECK(cli_invoke(source, sink, errors, argument ? 3 : 1, args) == status);
+    if (status) { CHECK(cli_flushes == 0 && ftell(sink) == 0); }
+    else {
+        rewind(sink);
+        unsigned char got[4096];
+        size_t offset = 0;
+        while (offset < length) {
+            size_t want = length - offset < sizeof got ? length - offset : sizeof got;
+            CHECK(fread(got, 1, want, sink) == want && !memcmp(got, bytes + offset, want));
+            offset += want;
+        }
+        CHECK(fgetc(sink) == EOF && !ferror(sink));
+    }
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_bindings(void)
+{
+    char bindings[256][32];
+    const char *args[259] = {"ztemplate", "-t", "{{k254}}"};
+    for (size_t i = 0; i < 256; i++) {
+        snprintf(bindings[i], sizeof bindings[i], "k%zu=value%zu", i, i);
+        args[i + 3] = bindings[i];
+    }
+    cli_case("", 258, args, 0, "value254", NULL);
+    cli_case("", 259, args, 2, "", "too many bindings");
+    args[258] = "malformed";
+    cli_case("", 259, args, 2, "", "too many bindings");
+    args[2] = "{{";
+    cli_case("", 259, args, 2, "", "parse error");
+}
+static void cli_controls(void)
+{
+    const char *normal[] = {"ztemplate", "-t", "Hi {{x}}{{! drop}}.", "x=A", "x=B"};
+    cli_case("", 5, normal, 0, "Hi A.", NULL);
+    const char *input[] = {"ztemplate", "x=A", "empty="};
+    cli_case("{{x}}/{{empty}}", 3, input, 0, "A/", NULL);
+    const char *unknown[] = {"ztemplate", "-t", "{{missing}}"};
+    cli_case("", 3, unknown, 1, "", "render failed");
+    const char *parse[] = {"ztemplate", "-t", "{{"};
+    cli_case("", 3, parse, 2, "", "parse error");
+    const char *bad[] = {"ztemplate", "-t", "literal", "bad"};
+    cli_case("", 4, bad, 2, "", "bad binding");
+    const char *missing[] = {"ztemplate", "-t"};
+    cli_case("literal", 2, missing, 2, "", "bad binding");
+    const char *empty[] = {"ztemplate", "-t", ""};
+    cli_case("", 3, empty, 0, "", NULL);
+    cli_case("", 1, empty, 0, "", NULL);
+}
+static void cli_render_bound(void)
+{
+    char text[1281], binding[4099];
+    for (size_t i = 0; i < 256; i++) memcpy(text + i * 5, "{{x}}", 5);
+    text[1280] = '\0';
+    memcpy(binding, "x=", 2);
+    memset(binding + 2, 'a', 4096);
+    binding[4098] = '\0';
+    const char *args[] = {"ztemplate", "-t", text, binding};
+    cli_case("", 4, args, 2, "", "rendered output too long");
+}
+static void cli_read_errors(void)
+{
+    const char *args[] = {"ztemplate"};
+    cli_read_fault = true;
+    cli_case("valid", 1, args, 2, "", "read error");
+    CHECK(cli_parse_calls == 0);
+    cli_read_fault = false;
+#ifdef _WIN32
+    FILE *source = fopen("NUL", "w");
+#else
+    FILE *source = fopen("/dev/null", "w");
+#endif
+    FILE *sink = tmpfile(), *errors = tmpfile();
+    CHECK(source != NULL && sink != NULL && errors != NULL);
+    CHECK(cli_invoke(source, sink, errors, 1, args) == 2 && cli_parse_calls == 0);
+    CHECK(ftell(sink) == 0 && cli_flushes == 0);
+    CHECK(fclose(source) == 0 && fclose(sink) == 0 && fclose(errors) == 0);
+}
+static void cli_failed_sink(bool buffered)
+{
+#ifdef _WIN32
+    const char *null_path = "NUL";
+#else
+    const char *null_path = "/dev/null";
+#endif
+    FILE *source = cli_input("", 0), *errors = tmpfile();
+    FILE *sink = fopen(buffered ? "/dev/full" : null_path, buffered ? "w" : "r");
+    CHECK(sink != NULL && errors != NULL);
+    char buffer[4096];
+    if (buffered) { CHECK(setvbuf(sink, buffer, _IOFBF, sizeof buffer) == 0); }
+    const char *args[] = {"ztemplate", "-t", "abc"};
+    CHECK(cli_invoke(source, sink, errors, 3, args) == 1 && ferror(sink));
+    cli_message(errors, "write error");
+    CHECK(fclose(source) == 0 && fclose(errors) == 0);
+    (void)fclose(sink);
+}
+static void test_cli(void)
+{
+    cli_controls();
+    cli_binary_boundary(65534, 0, false);
+    cli_binary_boundary(65535, 0, false);
+    cli_binary_boundary(65536, 2, false);
+    cli_binary_boundary(65535, 0, true);
+    cli_binary_boundary(65536, 2, true);
+    cli_bindings();
+    cli_render_bound();
+    cli_read_errors();
+    cli_failed_sink(false);
+#ifdef __linux__
+    cli_failed_sink(true);
+#endif
 }
