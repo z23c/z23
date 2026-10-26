@@ -49,143 +49,158 @@ static bool tor_code_is(const char *got, const char *want)
     return got != NULL && strcmp(got, want) == 0;
 }
 
-static int test_app_context_tor_policy(void)
+/* (a) A stub-stamped binary refuses every way of asking for an onion.
+ * Each ask is checked on its own, because one arm covering for another
+ * is exactly how a flag stops being policed. */
+static int tor_policy_stub_asks_refused(void)
 {
     int failures = 0;
     struct app_context ctx;
+    bool ok = true;
 
-    /* (a) A stub-stamped binary refuses every way of asking for an onion.
-     * Each ask is checked on its own, because one arm covering for another
-     * is exactly how a flag stops being policed. */
-    {
-        bool ok = true;
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    ctx.tor = true;
+    ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                           APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
 
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    ctx.onion_persist = true;
+    ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                           APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
+
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    ctx.onion_rotate = true;
+    ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                           APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
+
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    ctx.runtime_profile = ZCL_RUNTIME_ONION_NODE;
+    ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                           APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
+
+    APPCTX_CHECK("stub build refuses -tor, -onion-persist, "
+                 "-onion-rotate and -profile=onion-node", ok);
+    return failures;
+}
+
+/* The same argv on a real-Tor build is admissible: the refusal is about
+ * what the binary CAN do, not about disliking the flags. A test that
+ * only proved the refusal would pass just as well against a function
+ * that refused everything. */
+static int tor_policy_real_asks_admitted(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    bool ok = true;
+
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_CANONICAL);
+    ctx.tor = true;
+    ctx.onion_persist = true;
+    ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
+
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_CANONICAL);
+    ctx.runtime_profile = ZCL_RUNTIME_ONION_NODE;
+    ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
+
+    /* And a stub build that asks for NOTHING still boots — the refusal
+     * is triggered by the ask, not by the build identity alone. */
+    tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
+    ok = ok && app_tor_policy_refusal_code(&ctx, false) == NULL;
+
+    APPCTX_CHECK("a real-Tor build admits every onion ask, and a stub "
+                 "build that asks for nothing still boots", ok);
+    return failures;
+}
+
+/* (b) The dev escape is refused on every lane that serves the network,
+ * and admitted on the lanes it exists for. */
+static int tor_policy_escape_on_lanes(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    bool ok = true;
+    const enum zcl_operator_lane serving[] = {
+        ZCL_OPERATOR_LANE_CANONICAL,
+        ZCL_OPERATOR_LANE_SOAK,
+        ZCL_OPERATOR_LANE_STANDBY,
+    };
+    const enum zcl_operator_lane offline[] = {
+        ZCL_OPERATOR_LANE_DEV,
+        ZCL_OPERATOR_LANE_TEST,
+        ZCL_OPERATOR_LANE_COPY,
+        ZCL_OPERATOR_LANE_UNKNOWN,
+    };
+
+    for (size_t i = 0; i < sizeof(serving) / sizeof(serving[0]); i++) {
+        /* Refused on a real-Tor build AND on a stub build: the escape is
+         * about who may weaken the rule, not about which rule. */
+        tor_ctx(&ctx, serving[i]);
+        ctx.allow_tor_stub_dev = true;
+        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                               APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
+        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, true),
+                               APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
+
+        /* The escape must not buy a serving lane past the stub-build
+         * refusal either — it is still the escape that is refused. */
         ctx.tor = true;
         ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                               APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
-
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
-        ctx.onion_persist = true;
-        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                               APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
-
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
-        ctx.onion_rotate = true;
-        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                               APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
-
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
-        ctx.runtime_profile = ZCL_RUNTIME_ONION_NODE;
-        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                               APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR);
-
-        APPCTX_CHECK("stub build refuses -tor, -onion-persist, "
-                     "-onion-rotate and -profile=onion-node", ok);
+                               APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
     }
 
-    /* The same argv on a real-Tor build is admissible: the refusal is about
-     * what the binary CAN do, not about disliking the flags. A test that
-     * only proved the refusal would pass just as well against a function
-     * that refused everything. */
-    {
-        bool ok = true;
-
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_CANONICAL);
+    for (size_t i = 0; i < sizeof(offline) / sizeof(offline[0]); i++) {
+        tor_ctx(&ctx, offline[i]);
+        ctx.allow_tor_stub_dev = true;
         ctx.tor = true;
-        ctx.onion_persist = true;
-        ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
-
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_CANONICAL);
-        ctx.runtime_profile = ZCL_RUNTIME_ONION_NODE;
-        ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
-
-        /* And a stub build that asks for NOTHING still boots — the refusal
-         * is triggered by the ask, not by the build identity alone. */
-        tor_ctx(&ctx, ZCL_OPERATOR_LANE_DEV);
         ok = ok && app_tor_policy_refusal_code(&ctx, false) == NULL;
-
-        APPCTX_CHECK("a real-Tor build admits every onion ask, and a stub "
-                     "build that asks for nothing still boots", ok);
     }
 
-    /* (b) The dev escape is refused on every lane that serves the network,
-     * and admitted on the lanes it exists for. */
-    {
-        bool ok = true;
-        const enum zcl_operator_lane serving[] = {
-            ZCL_OPERATOR_LANE_CANONICAL,
-            ZCL_OPERATOR_LANE_SOAK,
-            ZCL_OPERATOR_LANE_STANDBY,
-        };
-        const enum zcl_operator_lane offline[] = {
-            ZCL_OPERATOR_LANE_DEV,
-            ZCL_OPERATOR_LANE_TEST,
-            ZCL_OPERATOR_LANE_COPY,
-            ZCL_OPERATOR_LANE_UNKNOWN,
-        };
+    APPCTX_CHECK("-allow-tor-stub-dev is refused on canonical, soak and "
+                 "standby and admitted on dev/test/copy", ok);
+    return failures;
+}
 
-        for (size_t i = 0; i < sizeof(serving) / sizeof(serving[0]); i++) {
-            /* Refused on a real-Tor build AND on a stub build: the escape is
-             * about who may weaken the rule, not about which rule. */
-            tor_ctx(&ctx, serving[i]);
-            ctx.allow_tor_stub_dev = true;
-            ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                                   APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
-            ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, true),
-                                   APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
+/* (c) -no-tor is refused on every lane that serves the network. */
+static int tor_policy_no_tor_on_lanes(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    bool ok = true;
+    const enum zcl_operator_lane serving[] = {
+        ZCL_OPERATOR_LANE_CANONICAL,
+        ZCL_OPERATOR_LANE_SOAK,
+        ZCL_OPERATOR_LANE_STANDBY,
+    };
+    const enum zcl_operator_lane offline[] = {
+        ZCL_OPERATOR_LANE_DEV,
+        ZCL_OPERATOR_LANE_TEST,
+        ZCL_OPERATOR_LANE_COPY,
+        ZCL_OPERATOR_LANE_UNKNOWN,
+    };
 
-            /* The escape must not buy a serving lane past the stub-build
-             * refusal either — it is still the escape that is refused. */
-            ctx.tor = true;
-            ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                                   APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE);
-        }
-
-        for (size_t i = 0; i < sizeof(offline) / sizeof(offline[0]); i++) {
-            tor_ctx(&ctx, offline[i]);
-            ctx.allow_tor_stub_dev = true;
-            ctx.tor = true;
-            ok = ok && app_tor_policy_refusal_code(&ctx, false) == NULL;
-        }
-
-        APPCTX_CHECK("-allow-tor-stub-dev is refused on canonical, soak and "
-                     "standby and admitted on dev/test/copy", ok);
+    for (size_t i = 0; i < sizeof(serving) / sizeof(serving[0]); i++) {
+        tor_ctx(&ctx, serving[i]);
+        ctx.no_tor = true;
+        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, true),
+                               APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE);
+        ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
+                               APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE);
     }
 
-    /* (c) -no-tor is refused on every lane that serves the network. */
-    {
-        bool ok = true;
-        const enum zcl_operator_lane serving[] = {
-            ZCL_OPERATOR_LANE_CANONICAL,
-            ZCL_OPERATOR_LANE_SOAK,
-            ZCL_OPERATOR_LANE_STANDBY,
-        };
-        const enum zcl_operator_lane offline[] = {
-            ZCL_OPERATOR_LANE_DEV,
-            ZCL_OPERATOR_LANE_TEST,
-            ZCL_OPERATOR_LANE_COPY,
-            ZCL_OPERATOR_LANE_UNKNOWN,
-        };
-
-        for (size_t i = 0; i < sizeof(serving) / sizeof(serving[0]); i++) {
-            tor_ctx(&ctx, serving[i]);
-            ctx.no_tor = true;
-            ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, true),
-                                   APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE);
-            ok = ok && tor_code_is(app_tor_policy_refusal_code(&ctx, false),
-                                   APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE);
-        }
-
-        for (size_t i = 0; i < sizeof(offline) / sizeof(offline[0]); i++) {
-            tor_ctx(&ctx, offline[i]);
-            ctx.no_tor = true;
-            ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
-        }
-
-        APPCTX_CHECK("-no-tor is refused on canonical, soak and standby and "
-                     "admitted on dev/test/copy", ok);
+    for (size_t i = 0; i < sizeof(offline) / sizeof(offline[0]); i++) {
+        tor_ctx(&ctx, offline[i]);
+        ctx.no_tor = true;
+        ok = ok && app_tor_policy_refusal_code(&ctx, true) == NULL;
     }
+
+    APPCTX_CHECK("-no-tor is refused on canonical, soak and standby and "
+                 "admitted on dev/test/copy", ok);
+    return failures;
+}
+
+static int tor_policy_serving_lanes_exact(void)
+{
+    int failures = 0;
 
     APPCTX_CHECK("the network-serving lanes are exactly canonical, soak and "
                  "standby",
@@ -198,6 +213,12 @@ static int test_app_context_tor_policy(void)
                  !app_operator_lane_serves_network(ZCL_OPERATOR_LANE_COPY) &&
                  !app_operator_lane_serves_network(
                      ZCL_OPERATOR_LANE_UNKNOWN));
+    return failures;
+}
+
+static int tor_policy_start_and_null(void)
+{
+    int failures = 0;
 
     /* Tor is ON by default on a real build, OFF only for -no-tor, and never
      * claimed by a stub build. */
@@ -219,7 +240,19 @@ static int test_app_context_tor_policy(void)
      * function of when it is called. */
     APPCTX_CHECK("the linked-Tor fact is stable within a process",
                  app_tor_real_build_linked() == app_tor_real_build_linked());
+    return failures;
+}
 
+static int test_app_context_tor_policy(void)
+{
+    int failures = 0;
+
+    failures += tor_policy_stub_asks_refused();
+    failures += tor_policy_real_asks_admitted();
+    failures += tor_policy_escape_on_lanes();
+    failures += tor_policy_no_tor_on_lanes();
+    failures += tor_policy_serving_lanes_exact();
+    failures += tor_policy_start_and_null();
     return failures;
 }
 static int test_nonmainnet_legacy_import_default(void)
@@ -570,60 +603,81 @@ static int test_observation_switch(void)
     return failures;
 }
 
-int test_app_context(void)
+static bool app_context_defaults_paths_ports(const struct app_context *ctx)
+{
+    return ctx->datadir == NULL &&
+           ctx->params_dir == NULL &&
+           ctx->rpc_port == 18232 &&
+           ctx->p2p_port == 8033 &&
+           ctx->https_port == 8443;
+}
+
+static bool app_context_defaults_listen_profile(const struct app_context *ctx)
+{
+    return ctx->fs_port == 18034 &&
+           ctx->listen &&
+           ctx->checkpoints_enabled &&
+           ctx->runtime_profile == ZCL_RUNTIME_FULL &&
+           ctx->operator_lane == ZCL_OPERATOR_LANE_UNKNOWN;
+}
+
+static bool app_context_defaults_workers_flags(const struct app_context *ctx)
+{
+    return ctx->par_workers == 0 &&
+           !ctx->no_services &&
+           !ctx->no_legacy_auto_import &&
+           !ctx->load_verify_boot &&
+           ctx->load_snapshot_at_own_height == NULL;
+}
+
+static int app_context_check_defaults(void)
 {
     int failures = 0;
+    struct app_context ctx;
+    memset(&ctx, 0xff, sizeof(ctx));
 
-    {
-        struct app_context ctx;
-        memset(&ctx, 0xff, sizeof(ctx));
+    app_context_defaults(&ctx);
 
-        app_context_defaults(&ctx);
+    APPCTX_CHECK("defaults select full public node profile",
+                 app_context_defaults_paths_ports(&ctx) &&
+                 app_context_defaults_listen_profile(&ctx) &&
+                 app_context_defaults_workers_flags(&ctx));
+    return failures;
+}
 
-        APPCTX_CHECK("defaults select full public node profile",
-                     ctx.datadir == NULL &&
-                     ctx.params_dir == NULL &&
-                     ctx.rpc_port == 18232 &&
-                     ctx.p2p_port == 8033 &&
-                     ctx.https_port == 8443 &&
-                     ctx.fs_port == 18034 &&
-                     ctx.listen &&
-                     ctx.checkpoints_enabled &&
-                     ctx.runtime_profile == ZCL_RUNTIME_FULL &&
-                     ctx.operator_lane == ZCL_OPERATOR_LANE_UNKNOWN &&
-                     ctx.par_workers == 0 &&
-                     !ctx.no_services &&
-                     !ctx.no_legacy_auto_import &&
-                     !ctx.load_verify_boot &&
-                     ctx.load_snapshot_at_own_height == NULL);
-    }
+static int app_context_check_profile_parse(void)
+{
+    int failures = 0;
+    enum zcl_runtime_profile profile = ZCL_RUNTIME_FULL;
+    bool ok = true;
+    static const struct {
+        const char *name;
+        enum zcl_runtime_profile want;
+    } rows[] = {
+        { "full", ZCL_RUNTIME_FULL },
+        { "zclassic", ZCL_RUNTIME_ZCLASSIC_ONLY },
+        { "zclassic-only", ZCL_RUNTIME_ZCLASSIC_ONLY },
+        { "explorer", ZCL_RUNTIME_EXPLORER },
+        { "onion", ZCL_RUNTIME_ONION_NODE },
+        { "onion-node", ZCL_RUNTIME_ONION_NODE },
+        { "legacy", ZCL_RUNTIME_LEGACY_COMPAT },
+        { "legacy-compat", ZCL_RUNTIME_LEGACY_COMPAT },
+    };
 
-    {
-        enum zcl_runtime_profile profile = ZCL_RUNTIME_FULL;
-        bool ok = true;
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
+        ok = ok && app_runtime_profile_parse(rows[i].name, &profile) &&
+             profile == rows[i].want;
+    ok = ok && !app_runtime_profile_parse("unknown", &profile);
+    ok = ok && !app_runtime_profile_parse(NULL, &profile);
+    ok = ok && !app_runtime_profile_parse("full", NULL);
 
-        ok = ok && app_runtime_profile_parse("full", &profile) &&
-             profile == ZCL_RUNTIME_FULL;
-        ok = ok && app_runtime_profile_parse("zclassic", &profile) &&
-             profile == ZCL_RUNTIME_ZCLASSIC_ONLY;
-        ok = ok && app_runtime_profile_parse("zclassic-only", &profile) &&
-             profile == ZCL_RUNTIME_ZCLASSIC_ONLY;
-        ok = ok && app_runtime_profile_parse("explorer", &profile) &&
-             profile == ZCL_RUNTIME_EXPLORER;
-        ok = ok && app_runtime_profile_parse("onion", &profile) &&
-             profile == ZCL_RUNTIME_ONION_NODE;
-        ok = ok && app_runtime_profile_parse("onion-node", &profile) &&
-             profile == ZCL_RUNTIME_ONION_NODE;
-        ok = ok && app_runtime_profile_parse("legacy", &profile) &&
-             profile == ZCL_RUNTIME_LEGACY_COMPAT;
-        ok = ok && app_runtime_profile_parse("legacy-compat", &profile) &&
-             profile == ZCL_RUNTIME_LEGACY_COMPAT;
-        ok = ok && !app_runtime_profile_parse("unknown", &profile);
-        ok = ok && !app_runtime_profile_parse(NULL, &profile);
-        ok = ok && !app_runtime_profile_parse("full", NULL);
+    APPCTX_CHECK("runtime profile names and aliases parse", ok);
+    return failures;
+}
 
-        APPCTX_CHECK("runtime profile names and aliases parse", ok);
-    }
+static int app_context_check_profile_names(void)
+{
+    int failures = 0;
 
     APPCTX_CHECK("runtime profile names are stable",
                  strcmp(app_runtime_profile_name(ZCL_RUNTIME_FULL), "full") == 0 &&
@@ -637,41 +691,46 @@ int test_app_context(void)
                         "legacy-compat") == 0 &&
                  strcmp(app_runtime_profile_name((enum zcl_runtime_profile)999),
                         "unknown") == 0);
+    return failures;
+}
 
-    {
-        enum zcl_operator_lane lane = ZCL_OPERATOR_LANE_UNKNOWN;
-        bool ok = true;
+static int app_context_check_lane_parse(void)
+{
+    int failures = 0;
+    enum zcl_operator_lane lane = ZCL_OPERATOR_LANE_UNKNOWN;
+    bool ok = true;
+    static const struct {
+        const char *name;
+        enum zcl_operator_lane want;
+    } rows[] = {
+        { "canonical", ZCL_OPERATOR_LANE_CANONICAL },
+        { "live", ZCL_OPERATOR_LANE_CANONICAL },
+        { "main", ZCL_OPERATOR_LANE_CANONICAL },
+        { "soak", ZCL_OPERATOR_LANE_SOAK },
+        { "dev", ZCL_OPERATOR_LANE_DEV },
+        { "development", ZCL_OPERATOR_LANE_DEV },
+        { "test", ZCL_OPERATOR_LANE_TEST },
+        { "ci", ZCL_OPERATOR_LANE_TEST },
+        { "copy", ZCL_OPERATOR_LANE_COPY },
+        { "repro", ZCL_OPERATOR_LANE_COPY },
+        { "standby", ZCL_OPERATOR_LANE_STANDBY },
+        { "unknown", ZCL_OPERATOR_LANE_UNKNOWN },
+    };
 
-        ok = ok && app_operator_lane_parse("canonical", &lane) &&
-             lane == ZCL_OPERATOR_LANE_CANONICAL;
-        ok = ok && app_operator_lane_parse("live", &lane) &&
-             lane == ZCL_OPERATOR_LANE_CANONICAL;
-        ok = ok && app_operator_lane_parse("main", &lane) &&
-             lane == ZCL_OPERATOR_LANE_CANONICAL;
-        ok = ok && app_operator_lane_parse("soak", &lane) &&
-             lane == ZCL_OPERATOR_LANE_SOAK;
-        ok = ok && app_operator_lane_parse("dev", &lane) &&
-             lane == ZCL_OPERATOR_LANE_DEV;
-        ok = ok && app_operator_lane_parse("development", &lane) &&
-             lane == ZCL_OPERATOR_LANE_DEV;
-        ok = ok && app_operator_lane_parse("test", &lane) &&
-             lane == ZCL_OPERATOR_LANE_TEST;
-        ok = ok && app_operator_lane_parse("ci", &lane) &&
-             lane == ZCL_OPERATOR_LANE_TEST;
-        ok = ok && app_operator_lane_parse("copy", &lane) &&
-             lane == ZCL_OPERATOR_LANE_COPY;
-        ok = ok && app_operator_lane_parse("repro", &lane) &&
-             lane == ZCL_OPERATOR_LANE_COPY;
-        ok = ok && app_operator_lane_parse("standby", &lane) &&
-             lane == ZCL_OPERATOR_LANE_STANDBY;
-        ok = ok && app_operator_lane_parse("unknown", &lane) &&
-             lane == ZCL_OPERATOR_LANE_UNKNOWN;
-        ok = ok && !app_operator_lane_parse("prod", &lane);
-        ok = ok && !app_operator_lane_parse(NULL, &lane);
-        ok = ok && !app_operator_lane_parse("canonical", NULL);
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
+        ok = ok && app_operator_lane_parse(rows[i].name, &lane) &&
+             lane == rows[i].want;
+    ok = ok && !app_operator_lane_parse("prod", &lane);
+    ok = ok && !app_operator_lane_parse(NULL, &lane);
+    ok = ok && !app_operator_lane_parse("canonical", NULL);
 
-        APPCTX_CHECK("operator lane names and aliases parse", ok);
-    }
+    APPCTX_CHECK("operator lane names and aliases parse", ok);
+    return failures;
+}
+
+static int app_context_check_lane_names(void)
+{
+    int failures = 0;
 
     APPCTX_CHECK("operator lane names are stable",
                  strcmp(app_operator_lane_name(ZCL_OPERATOR_LANE_UNKNOWN),
@@ -690,6 +749,12 @@ int test_app_context(void)
                         "standby") == 0 &&
                  strcmp(app_operator_lane_name((enum zcl_operator_lane)999),
                         "unknown") == 0);
+    return failures;
+}
+
+static int app_context_check_zclassic_lean(void)
+{
+    int failures = 0;
 
     APPCTX_CHECK("zclassic-only profile stays lean",
                  !app_runtime_profile_has_explorer(ZCL_RUNTIME_ZCLASSIC_ONLY) &&
@@ -700,22 +765,51 @@ int test_app_context(void)
                      ZCL_RUNTIME_ZCLASSIC_ONLY, false) &&
                  app_runtime_profile_has_onion(
                      ZCL_RUNTIME_ZCLASSIC_ONLY, true));
+    return failures;
+}
+
+static bool app_context_surfaces_full_explorer(void)
+{
+    return app_runtime_profile_has_explorer(ZCL_RUNTIME_FULL) &&
+           app_runtime_profile_has_store(ZCL_RUNTIME_FULL) &&
+           app_runtime_profile_has_file_service(ZCL_RUNTIME_FULL) &&
+           app_runtime_profile_has_explorer(ZCL_RUNTIME_EXPLORER) &&
+           !app_runtime_profile_has_store(ZCL_RUNTIME_EXPLORER) &&
+           !app_runtime_profile_has_file_service(ZCL_RUNTIME_EXPLORER);
+}
+
+static bool app_context_surfaces_onion_legacy(void)
+{
+    return app_runtime_profile_has_explorer(ZCL_RUNTIME_ONION_NODE) &&
+           app_runtime_profile_has_store(ZCL_RUNTIME_ONION_NODE) &&
+           app_runtime_profile_has_file_service(ZCL_RUNTIME_ONION_NODE) &&
+           app_runtime_profile_has_onion(ZCL_RUNTIME_ONION_NODE, false) &&
+           app_runtime_profile_has_explorer(ZCL_RUNTIME_LEGACY_COMPAT) &&
+           app_runtime_profile_has_store(ZCL_RUNTIME_LEGACY_COMPAT) &&
+           app_runtime_profile_has_file_service(ZCL_RUNTIME_LEGACY_COMPAT);
+}
+
+static int app_context_check_profile_surfaces(void)
+{
+    int failures = 0;
 
     APPCTX_CHECK("application profiles expose expected surfaces",
-                 app_runtime_profile_has_explorer(ZCL_RUNTIME_FULL) &&
-                 app_runtime_profile_has_store(ZCL_RUNTIME_FULL) &&
-                 app_runtime_profile_has_file_service(ZCL_RUNTIME_FULL) &&
-                 app_runtime_profile_has_explorer(ZCL_RUNTIME_EXPLORER) &&
-                 !app_runtime_profile_has_store(ZCL_RUNTIME_EXPLORER) &&
-                 !app_runtime_profile_has_file_service(ZCL_RUNTIME_EXPLORER) &&
-                 app_runtime_profile_has_explorer(ZCL_RUNTIME_ONION_NODE) &&
-                 app_runtime_profile_has_store(ZCL_RUNTIME_ONION_NODE) &&
-                 app_runtime_profile_has_file_service(ZCL_RUNTIME_ONION_NODE) &&
-                 app_runtime_profile_has_onion(ZCL_RUNTIME_ONION_NODE, false) &&
-                 app_runtime_profile_has_explorer(ZCL_RUNTIME_LEGACY_COMPAT) &&
-                 app_runtime_profile_has_store(ZCL_RUNTIME_LEGACY_COMPAT) &&
-                 app_runtime_profile_has_file_service(ZCL_RUNTIME_LEGACY_COMPAT));
+                 app_context_surfaces_full_explorer() &&
+                 app_context_surfaces_onion_legacy());
+    return failures;
+}
 
+int test_app_context(void)
+{
+    int failures = 0;
+
+    failures += app_context_check_defaults();
+    failures += app_context_check_profile_parse();
+    failures += app_context_check_profile_names();
+    failures += app_context_check_lane_parse();
+    failures += app_context_check_lane_names();
+    failures += app_context_check_zclassic_lean();
+    failures += app_context_check_profile_surfaces();
     failures += test_app_context_tor_policy();
     failures += test_nonmainnet_legacy_import_default();
     failures += test_onlynet_onion_args();
