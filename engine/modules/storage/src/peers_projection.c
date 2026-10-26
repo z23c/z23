@@ -584,6 +584,19 @@ static bool apply_census_observed(sqlite3 *db,
     }
 }
 
+/* Fold-outcome bookkeeping shared by every apply_event branch: on success
+ * bump the per-type counter and mark the event handled; on failure pass the
+ * false through with no side effects. */
+static bool count_folded_event(bool folded, uint64_t *counter,
+                               bool *out_handled)
+{
+    if (folded) {
+        (*counter)++;
+        *out_handled = true;
+    }
+    return folded;
+}
+
 static bool apply_event(sqlite3 *db, enum event_log_type type,
                         const void *payload, size_t len, void *ctx,
                         bool *out_handled)
@@ -593,48 +606,38 @@ static bool apply_event(sqlite3 *db, enum event_log_type type,
 
     if (type == EV_NODE_CENSUS_OBSERVED) {
         struct ev_node_census_observed ev;
-        if (!ev_node_census_observed_parse(payload, len, &ev) ||
-            !apply_census_observed(db, &ev))
-            return false;
-        p->census_observed_total++;
-        *out_handled = true;
-        return true;
+        return count_folded_event(
+            ev_node_census_observed_parse(payload, len, &ev) &&
+            apply_census_observed(db, &ev),
+            &p->census_observed_total, out_handled);
     }
     if (type == EV_PEER_SESSION_CLOSED) {
         struct ev_peer_session_closed ev;
-        if (!ev_peer_session_closed_parse(payload, len, &ev) ||
-            !apply_session_closed(db, &ev))
-            return false;
-        p->session_closed_total++;
-        *out_handled = true;
-        return true;
+        return count_folded_event(
+            ev_peer_session_closed_parse(payload, len, &ev) &&
+            apply_session_closed(db, &ev),
+            &p->session_closed_total, out_handled);
     }
     if (type == EV_NET_FORK_OBSERVED) {
         struct ev_net_fork_observed ev;
-        if (!ev_net_fork_observed_parse(payload, len, &ev) ||
-            !apply_fork_observed(db, &ev))
-            return false;
-        p->fork_observed_total++;
-        *out_handled = true;
-        return true;
+        return count_folded_event(
+            ev_net_fork_observed_parse(payload, len, &ev) &&
+            apply_fork_observed(db, &ev),
+            &p->fork_observed_total, out_handled);
     }
     if (type == EV_PEER_OBSERVED) {
         struct ev_peer_observed ev;
-        if (!ev_peer_observed_parse(payload, len, &ev) ||
-            !apply_peer_observed(db, p, &ev))
-            return false;
-        p->peer_observed_total++;
-        *out_handled = true;
-        return true;
+        return count_folded_event(
+            ev_peer_observed_parse(payload, len, &ev) &&
+            apply_peer_observed(db, p, &ev),
+            &p->peer_observed_total, out_handled);
     }
     if (type == EV_PEER_DROPPED) {
         struct ev_peer_dropped ev;
-        if (!ev_peer_dropped_parse(payload, len, &ev) ||
-            !apply_peer_dropped(db, &ev))
-            return false;
-        p->peer_dropped_total++;
-        *out_handled = true;
-        return true;
+        return count_folded_event(
+            ev_peer_dropped_parse(payload, len, &ev) &&
+            apply_peer_dropped(db, &ev),
+            &p->peer_dropped_total, out_handled);
     }
     return true;  /* unrecognized event type: skip past it */
 }
