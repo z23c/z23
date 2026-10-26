@@ -11,6 +11,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -144,18 +146,36 @@ static int pot_remove_tree(const char *root, const char *bin, const char *tmp)
 
 
 /* Runs the oracle binary itself (record/check take a directory; the driver
- * wrapper always uses the committed corpus). Returns its exit status, or -1. */
-static int pot_run_real(const char *drv, const char *mode, const char *dir)
+ * wrapper always uses the committed corpus). stderr goes to errpath when it
+ * is non-null. Returns its exit status, or -1. */
+static int pot_run_real(const char *drv, const char *mode, const char *dir,
+                        const char *errpath)
 {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        if (errpath) {
+            int fd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0 || dup2(fd, 2) < 0) _exit(126);
+            close(fd);
+        }
         execl(drv, drv, mode, dir, (char *)nullptr);
         _exit(127);
     }
     int st = 0;
     if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) return -1;
     return WEXITSTATUS(st);
+}
+
+static bool pot_file_has(const char *path, const char *needle)
+{
+    char buf[65536];
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t got = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[got] = '\0';
+    return strstr(buf, needle) != nullptr;
 }
 
 /* Byte offset where record two starts in groth16_decode_corpus.bin: the
@@ -194,20 +214,31 @@ static void pot_remove_fixture(const char *dir)
     rmdir(dir);
 }
 
-/* A corpus whose declared records are cut before record two must FAIL the
- * check. Records the frozen files with the real driver, truncates the decode
- * corpus after record one, and expects the check to refuse it. */
-static void pot_case_truncated_decode(const char *drv, const char *root)
+/* Records the frozen files with the oracle, cuts one of them with cut(), and
+ * requires check to exit 1 AND report "truncated record". Any other failure
+ * (crash, bad magic, other mismatch) fails the selftest. */
+static void pot_case_truncated(const char *oracle, const char *root,
+                               const char *name, const char *file, bool decode)
 {
-    char dir[BUF * 2], path[BUF * 2 + 32];
-    snprintf(dir, sizeof dir, "%s/trunc", root);
-    pot_check(mkdir(dir, 0755) == 0, "truncated decode fixture dir");
-    pot_check(pot_run_real(drv, "record", dir) == 0, "truncated decode fixture record");
-    snprintf(path, sizeof path, "%s/groth16_decode_corpus.bin", dir);
-    long off = pot_record_two_offset(path);
-    pot_check(off > 0 && truncate(path, off) == 0, "truncated decode fixture cut");
-    pot_check(pot_run_real(drv, "check", dir) == 1,
-              "truncated decode corpus fails check");
+    char dir[BUF * 2], path[BUF * 2 + 32], errp[BUF * 2 + 32], msg[128];
+    snprintf(dir, sizeof dir, "%s/trunc-%s", root, name);
+    snprintf(errp, sizeof errp, "%s/stderr.txt", dir);
+    pot_check(mkdir(dir, 0755) == 0, "truncated fixture dir");
+    pot_check(pot_run_real(oracle, "record", dir, nullptr) == 0, "truncated fixture record");
+    snprintf(path, sizeof path, "%s/%s", dir, file);
+    long cut = -1;
+    if (decode) {
+        cut = pot_record_two_offset(path);
+    } else {
+        struct stat sb;
+        if (stat(path, &sb) == 0 && sb.st_size > 1) cut = (long)sb.st_size - 1;
+    }
+    pot_check(cut > 0 && truncate(path, cut) == 0, "truncated fixture cut");
+    snprintf(msg, sizeof msg, "truncated %s corpus exits 1", name);
+    pot_check(pot_run_real(oracle, "check", dir, errp) == 1, msg);
+    snprintf(msg, sizeof msg, "truncated %s corpus reports truncated record", name);
+    pot_check(pot_file_has(errp, "truncated record"), msg);
+    unlink(errp);
     pot_remove_fixture(dir);
 }
 
@@ -239,7 +270,8 @@ int main(int argc, char **argv)
     pot_case_signal(argv[1], tmp, SIGHUP, 1, "SIGHUP cleans up");
     pot_case_signal(argv[1], tmp, SIGTERM, 2, "repeated SIGTERM cleans up");
     pot_case_signal(argv[1], tmp, SIGINT, 2, "repeated SIGINT cleans up");
-    pot_case_truncated_decode(argv[3], root);
+    pot_case_truncated(argv[3], root, "decode", "groth16_decode_corpus.bin", true);
+    pot_case_truncated(argv[3], root, "pairing", "groth16_pairing_values.bin", false);
 
     if (g_failures == 0 && pot_remove_tree(root, bin, tmp) != 0) return 2;
     puts(g_failures ? "run_parity_oracle_selftest: FAILED"
