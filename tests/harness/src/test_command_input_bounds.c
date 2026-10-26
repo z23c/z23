@@ -116,6 +116,54 @@ static bool cib_fleet_value(const struct zcl_command_spec *spec,
     return accepted;
 }
 
+/* Checks one usage counter key: integer and wrong-type input shapes. */
+static int cib_fleet_counter_checks(const struct zcl_command_spec *spec,
+                                    const char *key)
+{
+    int failures = 0;
+    char name[128];
+    bool made = false;
+    bool accepted = cib_fleet_value(spec, "usage", "grok", key,
+                                    CIB_FLEET_INT, 0, false, &made);
+    snprintf(name, sizeof name, "%s measured zero constructs", key);
+    CIB_CHECK(name, made);
+    snprintf(name, sizeof name, "%s accepts measured zero", key);
+    CIB_CHECK(name, made && accepted);
+    accepted = cib_fleet_value(spec, "usage", "grok", key,
+                               CIB_FLEET_INT, INT64_C(4294967296), false,
+                               &made);
+    snprintf(name, sizeof name, "%s wide integer constructs", key);
+    CIB_CHECK(name, made);
+    snprintf(name, sizeof name, "%s accepts a wide integer", key);
+    CIB_CHECK(name, made && accepted);
+
+    if (strcmp(key, "value") != 0) {
+        accepted = cib_fleet_value(spec, "usage", "grok", key,
+                                   CIB_FLEET_INT, -1, false, &made);
+        snprintf(name, sizeof name, "%s negative counter constructs",
+                 key);
+        CIB_CHECK(name, made);
+        snprintf(name, sizeof name, "%s refuses a negative counter",
+                 key);
+        CIB_CHECK(name, made && !accepted);
+    }
+    const enum cib_fleet_type wrong[] = {
+        CIB_FLEET_STRING, CIB_FLEET_BOOL, CIB_FLEET_REAL,
+    };
+    const char *const labels[] = { "string", "boolean", "real" };
+    for (size_t j = 0; j < sizeof wrong / sizeof wrong[0]; j++) {
+        accepted = cib_fleet_value(spec, "usage", "grok", key,
+                                   wrong[j], 0, false, &made);
+        snprintf(name, sizeof name, "%s %s constructs", key,
+                 labels[j]);
+        CIB_CHECK(name, made);
+        snprintf(name, sizeof name, "%s refuses a %s", key,
+                 labels[j]);
+        CIB_CHECK(name, made && !accepted);
+    }
+    return failures;
+}
+
 static int t_fleet_ledger_numeric_keys(void)
 {
     int failures = 0;
@@ -143,46 +191,7 @@ static int t_fleet_ledger_numeric_keys(void)
     json_free(&input);
 
     for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
-        char name[128];
-        bool made = false;
-        bool accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
-                                        CIB_FLEET_INT, 0, false, &made);
-        snprintf(name, sizeof name, "%s measured zero constructs", keys[i]);
-        CIB_CHECK(name, made);
-        snprintf(name, sizeof name, "%s accepts measured zero", keys[i]);
-        CIB_CHECK(name, made && accepted);
-        accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
-                                   CIB_FLEET_INT, INT64_C(4294967296), false,
-                                   &made);
-        snprintf(name, sizeof name, "%s wide integer constructs", keys[i]);
-        CIB_CHECK(name, made);
-        snprintf(name, sizeof name, "%s accepts a wide integer", keys[i]);
-        CIB_CHECK(name, made && accepted);
-
-        if (strcmp(keys[i], "value") != 0) {
-            accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
-                                       CIB_FLEET_INT, -1, false, &made);
-            snprintf(name, sizeof name, "%s negative counter constructs",
-                     keys[i]);
-            CIB_CHECK(name, made);
-            snprintf(name, sizeof name, "%s refuses a negative counter",
-                     keys[i]);
-            CIB_CHECK(name, made && !accepted);
-        }
-        const enum cib_fleet_type wrong[] = {
-            CIB_FLEET_STRING, CIB_FLEET_BOOL, CIB_FLEET_REAL,
-        };
-        const char *const labels[] = { "string", "boolean", "real" };
-        for (size_t j = 0; j < sizeof wrong / sizeof wrong[0]; j++) {
-            accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
-                                       wrong[j], 0, false, &made);
-            snprintf(name, sizeof name, "%s %s constructs", keys[i],
-                     labels[j]);
-            CIB_CHECK(name, made);
-            snprintf(name, sizeof name, "%s refuses a %s", keys[i],
-                     labels[j]);
-            CIB_CHECK(name, made && !accepted);
-        }
+        failures += cib_fleet_counter_checks(spec, keys[i]);
     }
 
     bool accepted = cib_fleet_value(spec, "vitals", "box.load1", "value",
@@ -395,6 +404,34 @@ static int t_wiki_text_bounds(void)
     return failures;
 }
 
+/* Counts the catalog's input keys and those no frame can deliver. */
+static void cib_count_input_keys(const struct zcl_command_registry *reg,
+                                 size_t *checked, size_t *undeliverable)
+{
+    for (size_t i = 0; i < reg->count; i++) {
+        const struct zcl_command_spec *spec = &reg->commands[i];
+        if (!spec->input_keys || !spec->input_keys[0])
+            continue;
+        size_t budget = zcl_command_registry_input_budget_bytes(spec);
+        const char *at = spec->input_keys;
+        char token[128];
+        while (*at) {
+            const char *end = strchr(at, ',');
+            size_t len = end ? (size_t)(end - at) : strlen(at);
+            if (len > 0 && len < sizeof(token)) {
+                memcpy(token, at, len);
+                token[len] = 0;
+                (*checked)++;
+                if (zcl_command_registry_input_str_max(token) >= budget)
+                    (*undeliverable)++;
+            }
+            if (!end)
+                break;
+            at = end + 1;
+        }
+    }
+}
+
 static int t_frame_budget(void)
 {
     int failures = 0;
@@ -452,28 +489,7 @@ static int t_frame_budget(void)
      * its own largest single key, or that key is undeliverable by any
      * transport — the failure mode this whole group exists to prevent. */
     size_t checked = 0, undeliverable = 0;
-    for (size_t i = 0; i < reg->count; i++) {
-        const struct zcl_command_spec *spec = &reg->commands[i];
-        if (!spec->input_keys || !spec->input_keys[0])
-            continue;
-        size_t budget = zcl_command_registry_input_budget_bytes(spec);
-        const char *at = spec->input_keys;
-        char token[128];
-        while (*at) {
-            const char *end = strchr(at, ',');
-            size_t len = end ? (size_t)(end - at) : strlen(at);
-            if (len > 0 && len < sizeof(token)) {
-                memcpy(token, at, len);
-                token[len] = 0;
-                checked++;
-                if (zcl_command_registry_input_str_max(token) >= budget)
-                    undeliverable++;
-            }
-            if (!end)
-                break;
-            at = end + 1;
-        }
-    }
+    cib_count_input_keys(reg, &checked, &undeliverable);
     CIB_CHECK("the catalog declares input keys to walk", checked > 0);
     CIB_CHECK("no catalog key is larger than its own leaf's frame",
               undeliverable == 0);
@@ -1340,7 +1356,8 @@ static bool cib_machine_shape(const char *key,const char *value)
     if(!spec||n<0||(size_t)n>=sizeof raw)return false;
     struct json_value input;json_init(&input);
     bool parsed=json_read(&input,raw,(size_t)n);
-    bool accepted=parsed&&zcl_command_registry_input_validate(spec,&input,NULL,0);
+    bool accepted = parsed &&
+        zcl_command_registry_input_validate(spec, &input, NULL, 0);
     json_free(&input);return accepted;
 }
 static int t_machine_protected_object_types(void)
