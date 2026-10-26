@@ -84,7 +84,7 @@ static bool health_test_init_connman_peer(struct connman *cm,
     return true;
 }
 
-int test_node_health_service(void)
+static int health_test_resolve_network_tip_modal_clamp(void)
 {
     int failures = 0;
 
@@ -112,6 +112,44 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Idle peerless snapshot: sync flags and tip heights. */
+static bool health_test_idle_snapshot_state_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = (health->sync_state == SYNC_IDLE);
+    ok = ok && !health->synced;
+    ok = ok && !health->has_peers;
+    ok = ok && !health->healthy;
+    ok = ok && !health->tor_ready;
+    ok = ok && !health->onion_service_ready;
+    ok = ok && health->tip_height == -1;
+    ok = ok && health->header_height == -1;
+    return ok;
+}
+
+/* Idle peerless snapshot: lag, catchup, import and reason fields. */
+static bool health_test_idle_snapshot_reasons_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->tip_lag == 0;
+    ok = ok && !health->catchup_active;
+    ok = ok && health->catchup_progress_age_seconds == 0;
+    ok = ok && !health->import_active;
+    ok = ok && health->import_progress_age_seconds == 0;
+    ok = ok && strcmp(health->degraded_reason, "no_peers") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason, "no_peers") == 0;
+    ok = ok && !health->warning;
+    ok = ok && health->warning_count == 0;
+    return ok;
+}
+
+static int health_test_idle_snapshot_without_peers(void)
+{
+    int failures = 0;
 
     printf("node_health_service: idle snapshot reports unhealthy without peers... ");
     {
@@ -120,28 +158,18 @@ int test_node_health_service(void)
         sync_set_state(SYNC_IDLE, "reset");
         node_health_collect(&health, NULL, NULL);
 
-        bool ok = (health.sync_state == SYNC_IDLE);
-        ok = ok && !health.synced;
-        ok = ok && !health.has_peers;
-        ok = ok && !health.healthy;
-        ok = ok && !health.tor_ready;
-        ok = ok && !health.onion_service_ready;
-        ok = ok && health.tip_height == -1;
-        ok = ok && health.header_height == -1;
-        ok = ok && health.tip_lag == 0;
-        ok = ok && !health.catchup_active;
-        ok = ok && health.catchup_progress_age_seconds == 0;
-        ok = ok && !health.import_active;
-        ok = ok && health.import_progress_age_seconds == 0;
-        ok = ok && strcmp(health.degraded_reason, "no_peers") == 0;
-        ok = ok && !health.serving;
-        ok = ok && strcmp(health.blocking_reason, "no_peers") == 0;
-        ok = ok && !health.warning;
-        ok = ok && health.warning_count == 0;
+        bool ok = health_test_idle_snapshot_state_ok(&health);
+        ok = ok && health_test_idle_snapshot_reasons_ok(&health);
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int health_test_at_tip_without_peers(void)
+{
+    int failures = 0;
 
     printf("node_health_service: at_tip without peers stays unhealthy... ");
     {
@@ -166,6 +194,30 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot when peers exist but the active tip is unknown. */
+static bool health_test_missing_tip_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && !health->healthy;
+    ok = ok && health->tip_height == -1;
+    ok = ok && health->header_height == -1;
+    ok = ok && health->peer_best_height == 10;
+    ok = ok && strcmp(health->degraded_reason,
+                      "active_tip_unknown") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason,
+                      "active_tip_unknown") == 0;
+    return ok;
+}
+
+static int health_test_at_tip_missing_active_tip(void)
+{
+    int failures = 0;
 
     printf("node_health_service: at-tip peers without active tip stay unhealthy... ");
     {
@@ -189,17 +241,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, NULL);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && !health.healthy;
-            ok = ok && health.tip_height == -1;
-            ok = ok && health.header_height == -1;
-            ok = ok && health.peer_best_height == 10;
-            ok = ok && strcmp(health.degraded_reason,
-                              "active_tip_unknown") == 0;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.blocking_reason,
-                              "active_tip_unknown") == 0;
+            ok = health_test_missing_tip_snapshot_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -208,6 +250,27 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot when best headers run ahead of the active tip. */
+static bool health_test_headers_ahead_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && !health->healthy;
+    ok = ok && health->tip_height == 100;
+    ok = ok && health->header_height == 125;
+    ok = ok && strcmp(health->degraded_reason, "headers_ahead_25") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason,
+                      "headers_ahead_25") == 0;
+    return ok;
+}
+
+static int health_test_headers_ahead_degraded(void)
+{
+    int failures = 0;
 
     printf("node_health_service: headers ahead of active tip report degraded state... ");
     {
@@ -260,14 +323,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && !health.healthy;
-            ok = ok && health.tip_height == 100;
-            ok = ok && health.header_height == 125;
-            ok = ok && strcmp(health.degraded_reason, "headers_ahead_25") == 0;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.blocking_reason,
-                              "headers_ahead_25") == 0;
+            ok = health_test_headers_ahead_snapshot_ok(&health);
         }
 
         main_state_free(&ms);
@@ -276,6 +332,30 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot inside the warn lag threshold: serving with no reasons. */
+static bool health_test_small_gap_snapshot_ok(
+    const struct node_health_snapshot *health,
+    int tip_height,
+    int header_height)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->serving;
+    ok = ok && health->tip_height == tip_height;
+    ok = ok && health->header_height == header_height;
+    ok = ok && health->tip_lag == ZCL_NODE_HEALTH_LAG_WARN_BLOCKS;
+    ok = ok && health->degraded_reason[0] == '\0';
+    ok = ok && health->blocking_reason[0] == '\0';
+    return ok;
+}
+
+static int health_test_small_gap_serving(void)
+{
+    int failures = 0;
 
     printf("node_health_service: small header gap stays serving healthy... ");
     {
@@ -334,15 +414,8 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.serving;
-            ok = ok && health.tip_height == tip_height;
-            ok = ok && health.header_height == header_height;
-            ok = ok && health.tip_lag == ZCL_NODE_HEALTH_LAG_WARN_BLOCKS;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.blocking_reason[0] == '\0';
+            ok = health_test_small_gap_snapshot_ok(&health, tip_height,
+                                                   header_height);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -352,6 +425,32 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot when the reducer log head trails the chain tip. */
+static bool health_test_log_head_gap_snapshot_ok(
+    const struct node_health_snapshot *health,
+    int tip_height)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && !health->healthy;
+    ok = ok && health->tip_height == tip_height;
+    ok = ok && health->peer_best_height == tip_height;
+    ok = ok && health->log_head == 100;
+    ok = ok && health->log_head_gap == 2;
+    ok = ok && strcmp(health->degraded_reason,
+                      "log_head_gap_2") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason,
+                      "log_head_gap_2") == 0;
+    return ok;
+}
+
+static int health_test_log_head_gap_degrades(void)
+{
+    int failures = 0;
 
     printf("node_health_service: reducer log-head gap degrades health... ");
     {
@@ -404,18 +503,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && !health.healthy;
-            ok = ok && health.tip_height == tip.nHeight;
-            ok = ok && health.peer_best_height == tip.nHeight;
-            ok = ok && health.log_head == 100;
-            ok = ok && health.log_head_gap == 2;
-            ok = ok && strcmp(health.degraded_reason,
-                              "log_head_gap_2") == 0;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.blocking_reason,
-                              "log_head_gap_2") == 0;
+            ok = health_test_log_head_gap_snapshot_ok(&health, tip.nHeight);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -425,6 +513,29 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot when the reducer log head is unknown: blocked, not degraded. */
+static bool health_test_unknown_log_head_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && !health->healthy;
+    ok = ok && health->log_head == -1;
+    ok = ok && health->log_head_gap == -1;
+    ok = ok && strcmp(health->degraded_reason,
+                      "log_head_unknown") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason,
+                      "log_head_unknown") == 0;
+    return ok;
+}
+
+static int health_test_unknown_log_head_blocks(void)
+{
+    int failures = 0;
 
     printf("node_health_service: unknown reducer log-head blocks green health... ");
     {
@@ -452,16 +563,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && !health.healthy;
-            ok = ok && health.log_head == -1;
-            ok = ok && health.log_head_gap == -1;
-            ok = ok && strcmp(health.degraded_reason,
-                              "log_head_unknown") == 0;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.blocking_reason,
-                              "log_head_unknown") == 0;
+            ok = health_test_unknown_log_head_snapshot_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -471,6 +573,27 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot backed by a durable tip_finalize cursor at the tip. */
+static bool health_test_durable_log_head_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->serving;
+    ok = ok && health->log_head == 111;
+    ok = ok && health->log_head_gap == 0;
+    ok = ok && health->degraded_reason[0] == '\0';
+    ok = ok && health->blocking_reason[0] == '\0';
+    return ok;
+}
+
+static int health_test_durable_tip_finalize_cursor(void)
+{
+    int failures = 0;
 
     printf("node_health_service: durable tip_finalize cursor backs startup health... ");
     {
@@ -511,14 +634,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.serving;
-            ok = ok && health.log_head == 111;
-            ok = ok && health.log_head_gap == 0;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.blocking_reason[0] == '\0';
+            ok = health_test_durable_log_head_snapshot_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -529,6 +645,27 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot demoted by a source-policy chain-advance gap. */
+static bool health_test_source_gap_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = !health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && !health->healthy;
+    ok = ok && strcmp(health->degraded_reason,
+                      "chain_advance_gap_5") == 0;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->blocking_reason,
+                      "chain_advance_gap_5") == 0;
+    return ok;
+}
+
+static int health_test_source_policy_gap_demotes(void)
+{
+    int failures = 0;
 
     printf("node_health_service: source-policy gap demotes stale at-tip FSM... ");
     {
@@ -568,14 +705,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = !health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && !health.healthy;
-            ok = ok && strcmp(health.degraded_reason,
-                              "chain_advance_gap_5") == 0;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.blocking_reason,
-                              "chain_advance_gap_5") == 0;
+            ok = health_test_source_gap_snapshot_ok(&health);
         }
 
         node_health_test_set_chain_advance_decision_override(NULL);
@@ -586,6 +716,41 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Stale-tip snapshot: sync, staleness and height fields. */
+static bool health_test_stale_tip_state_ok(
+    const struct node_health_snapshot *health,
+    int tip_height)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->tip_stale;
+    ok = ok && health->tip_stale_seconds >= 600;
+    ok = ok && health->tip_height == tip_height;
+    ok = ok && health->peer_best_height == tip_height;
+    ok = ok && health->log_head_gap == 0;
+    return ok;
+}
+
+/* Stale-tip snapshot: still serving with only a staleness warning. */
+static bool health_test_stale_tip_serving_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->healthy;
+    ok = ok && health->serving;
+    ok = ok && health->degraded_reason[0] == '\0';
+    ok = ok && health->blocking_reason[0] == '\0';
+    ok = ok && health->warning;
+    ok = ok && health->warning_count >= 1;
+    ok = ok && strstr(health->warning_reasons, "tip_stale") != NULL;
+    return ok;
+}
+
+static int health_test_stale_tip_stays_healthy(void)
+{
+    int failures = 0;
 
     printf("node_health_service: at-tip stale block timestamp stays healthy... ");
     {
@@ -638,20 +803,8 @@ int test_node_health_service(void)
             sync_set_state(SYNC_AT_TIP, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.tip_stale;
-            ok = ok && health.tip_stale_seconds >= 600;
-            ok = ok && health.tip_height == tip.nHeight;
-            ok = ok && health.peer_best_height == tip.nHeight;
-            ok = ok && health.log_head_gap == 0;
-            ok = ok && health.healthy;
-            ok = ok && health.serving;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.blocking_reason[0] == '\0';
-            ok = ok && health.warning;
-            ok = ok && health.warning_count >= 1;
-            ok = ok && strstr(health.warning_reasons, "tip_stale") != NULL;
+            ok = health_test_stale_tip_state_ok(&health, tip.nHeight);
+            ok = ok && health_test_stale_tip_serving_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -661,6 +814,30 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* High-RSS snapshot: serving and healthy with a memory warning. */
+static bool health_test_high_rss_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->serving;
+    ok = ok && health->memory_rss_mb == 5000;
+    ok = ok && health->degraded_reason[0] == '\0';
+    ok = ok && health->blocking_reason[0] == '\0';
+    ok = ok && health->warning;
+    ok = ok && health->warning_count >= 1;
+    ok = ok && strstr(health->warning_reasons,
+                      "high_memory_usage") != NULL;
+    return ok;
+}
+
+static int health_test_high_rss_warns(void)
+{
+    int failures = 0;
 
     printf("node_health_service: high RSS is warning not serving blocker... ");
     {
@@ -709,17 +886,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_HEADERS_DOWNLOAD, "high rss");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.serving;
-            ok = ok && health.memory_rss_mb == 5000;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.blocking_reason[0] == '\0';
-            ok = ok && health.warning;
-            ok = ok && health.warning_count >= 1;
-            ok = ok && strstr(health.warning_reasons,
-                              "high_memory_usage") != NULL;
+            ok = health_test_high_rss_snapshot_ok(&health);
         }
 
         node_health_test_set_memory_rss_mb_override(-1);
@@ -731,6 +898,32 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot blocked by operator_needed; high RSS stays a warning. */
+static bool health_test_operator_needed_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = !health->healthy;
+    ok = ok && !health->serving;
+    ok = ok && health->operator_needed;
+    ok = ok && health->memory_rss_mb == 5000;
+    ok = ok && strcmp(health->degraded_reason,
+                      "operator_needed:chain_integrity_failed") == 0;
+    ok = ok && strcmp(health->blocking_reason,
+                      "operator_needed:chain_integrity_failed") == 0;
+    ok = ok && strstr(health->operator_needed_detail,
+                      "chain_integrity_failed") != NULL;
+    ok = ok && health->warning;
+    ok = ok && strstr(health->warning_reasons,
+                      "high_memory_usage") != NULL;
+    return ok;
+}
+
+static int health_test_high_rss_keeps_blocker_primary(void)
+{
+    int failures = 0;
 
     printf("node_health_service: high RSS keeps real blocker primary... ");
     {
@@ -786,19 +979,7 @@ int test_node_health_service(void)
             sync_set_state(SYNC_HEADERS_DOWNLOAD, "high rss blocked");
             node_health_collect(&health, NULL, &ms);
 
-            ok = !health.healthy;
-            ok = ok && !health.serving;
-            ok = ok && health.operator_needed;
-            ok = ok && health.memory_rss_mb == 5000;
-            ok = ok && strcmp(health.degraded_reason,
-                              "operator_needed:chain_integrity_failed") == 0;
-            ok = ok && strcmp(health.blocking_reason,
-                              "operator_needed:chain_integrity_failed") == 0;
-            ok = ok && strstr(health.operator_needed_detail,
-                              "chain_integrity_failed") != NULL;
-            ok = ok && health.warning;
-            ok = ok && strstr(health.warning_reasons,
-                              "high_memory_usage") != NULL;
+            ok = health_test_operator_needed_snapshot_ok(&health);
 
             alerts_operator_needed_clear();
             const char *long_blocker =
@@ -824,6 +1005,25 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Snapshot under CRITICAL memory pressure: blocked with a warning. */
+static bool health_test_mem_pressure_critical_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = !health->healthy;
+    ok = ok && !health->serving;
+    ok = ok && strcmp(health->degraded_reason,
+                      "memory_pressure_critical") == 0;
+    ok = ok && strstr(health->warning_reasons,
+                      "mem_pressure_high") != NULL;
+    return ok;
+}
+
+static int health_test_mem_pressure_critical_flips_unhealthy(void)
+{
+    int failures = 0;
 
     printf("node_health_service: mem_pressure CRITICAL flips healthy false... ");
     {
@@ -880,12 +1080,7 @@ int test_node_health_service(void)
             mem_pressure_poll_tick();
             node_health_collect(&health, NULL, &ms);
 
-            ok = !health.healthy;
-            ok = ok && !health.serving;
-            ok = ok && strcmp(health.degraded_reason,
-                              "memory_pressure_critical") == 0;
-            ok = ok && strstr(health.warning_reasons,
-                              "mem_pressure_high") != NULL;
+            ok = health_test_mem_pressure_critical_snapshot_ok(&health);
 
             struct os_proc_mem nominal = {
                 .rss_bytes = 100, .vsize_bytes = 100,
@@ -909,6 +1104,12 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int health_test_chain_advance_synced_predicate(void)
+{
+    int failures = 0;
 
     printf("node_health_service: coordinator at-tip overrides stale sync FSM... ");
     {
@@ -939,6 +1140,39 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Source-policy at-tip snapshot: synced and healthy at the tip height. */
+static bool health_test_source_at_tip_heights_ok(
+    const struct node_health_snapshot *health,
+    int tip_height)
+{
+    bool ok = health->synced;
+    ok = ok && health->sync_state == SYNC_AT_TIP;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->serving;
+    ok = ok && health->tip_height == tip_height;
+    ok = ok && health->header_height == tip_height;
+    ok = ok && health->peer_best_height == tip_height;
+    ok = ok && health->log_head == tip_height;
+    ok = ok && health->log_head_gap == 0;
+    return ok;
+}
+
+/* Source-policy at-tip snapshot: no degraded or blocking reason. */
+static bool health_test_source_at_tip_reasons_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->degraded_reason[0] == '\0';
+    ok = ok && health->blocking_reason[0] == '\0';
+    return ok;
+}
+
+static int health_test_source_at_tip_label(void)
+{
+    int failures = 0;
 
     printf("node_health_service: source-policy at-tip normalizes health sync label... ");
     {
@@ -986,18 +1220,8 @@ int test_node_health_service(void)
             sync_set_state(SYNC_HEADERS_DOWNLOAD, "test");
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.sync_state == SYNC_AT_TIP;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.serving;
-            ok = ok && health.tip_height == tip.nHeight;
-            ok = ok && health.header_height == tip.nHeight;
-            ok = ok && health.peer_best_height == tip.nHeight;
-            ok = ok && health.log_head == tip.nHeight;
-            ok = ok && health.log_head_gap == 0;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.blocking_reason[0] == '\0';
+            ok = health_test_source_at_tip_heights_ok(&health, tip.nHeight);
+            ok = ok && health_test_source_at_tip_reasons_ok(&health);
         }
 
         node_health_test_set_chain_advance_decision_override(NULL);
@@ -1008,6 +1232,31 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Old-error snapshot: recorded but not recent, still serving. */
+static bool health_test_old_error_snapshot_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->error_total == 1;
+    ok = ok && !health->last_error_recent;
+    ok = ok && health->last_error_age_seconds >= 300;
+    ok = ok && strcmp(health->last_error_type,
+                      event_type_name(EV_DB_ERROR)) == 0;
+    ok = ok && strcmp(health->last_error, "old recoverable error") == 0;
+    ok = ok && health->degraded_reason[0] == '\0';
+    ok = ok && health->serving;
+    ok = ok && !health->warning;
+    return ok;
+}
+
+static int health_test_old_errors_visible(void)
+{
+    int failures = 0;
 
     printf("node_health_service: old errors stay visible without degrading... ");
     {
@@ -1044,19 +1293,7 @@ int test_node_health_service(void)
                 ((int64_t)platform_time_wall_time_t() - 600) * 1000000;
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.error_total == 1;
-            ok = ok && !health.last_error_recent;
-            ok = ok && health.last_error_age_seconds >= 300;
-            ok = ok && strcmp(health.last_error_type,
-                              event_type_name(EV_DB_ERROR)) == 0;
-            ok = ok && strcmp(health.last_error,
-                              "old recoverable error") == 0;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.serving;
-            ok = ok && !health.warning;
+            ok = health_test_old_error_snapshot_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -1067,6 +1304,41 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Recent-error snapshot: one fresh error with its type and text. */
+static bool health_test_recent_error_fields_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->error_total == 1;
+    ok = ok && health->last_error_recent;
+    ok = ok && health->last_error_age_seconds >= 0;
+    ok = ok && health->last_error_age_seconds <= 300;
+    ok = ok && strcmp(health->last_error_type,
+                      event_type_name(EV_BLOCK_REJECTED)) == 0;
+    ok = ok && strcmp(health->last_error, "fresh reject") == 0;
+    return ok;
+}
+
+/* Recent-error snapshot: warning raised while still serving. */
+static bool health_test_recent_error_warning_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->degraded_reason[0] == '\0';
+    ok = ok && health->serving;
+    ok = ok && health->warning;
+    ok = ok && health->warning_count >= 1;
+    ok = ok && strstr(health->warning_reasons, "recent_error") != NULL;
+    return ok;
+}
+
+static int health_test_recent_errors_actionable(void)
+{
+    int failures = 0;
 
     printf("node_health_service: recent errors stay actionable without false degradation... ");
     {
@@ -1101,21 +1373,8 @@ int test_node_health_service(void)
                                 12, er);
             node_health_collect(&health, NULL, &ms);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.error_total == 1;
-            ok = ok && health.last_error_recent;
-            ok = ok && health.last_error_age_seconds >= 0;
-            ok = ok && health.last_error_age_seconds <= 300;
-            ok = ok && strcmp(health.last_error_type,
-                              event_type_name(EV_BLOCK_REJECTED)) == 0;
-            ok = ok && strcmp(health.last_error, "fresh reject") == 0;
-            ok = ok && health.degraded_reason[0] == '\0';
-            ok = ok && health.serving;
-            ok = ok && health.warning;
-            ok = ok && health.warning_count >= 1;
-            ok = ok && strstr(health.warning_reasons, "recent_error") != NULL;
+            ok = health_test_recent_error_fields_ok(&health);
+            ok = ok && health_test_recent_error_warning_ok(&health);
         }
 
         node_health_test_set_log_head_override(-2);
@@ -1126,6 +1385,12 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int health_test_unsafe_mirror_override_blocked(void)
+{
+    int failures = 0;
 
     printf("node_health_service: unsafe mirror override fails health loud... ");
     {
@@ -1177,6 +1442,12 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int health_test_mirror_hash_gap_blocked(void)
+{
+    int failures = 0;
 
     printf("node_health_service: same-height mirror hash gap fails health... ");
     {
@@ -1241,6 +1512,98 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Attaches and starts the db service and installs it app-wide. */
+static bool health_test_start_db_service(struct db_service *dbsvc,
+                                         struct node_db *ndb,
+                                         struct app_runtime_context *runtime)
+{
+    db_service_init(dbsvc);
+    bool ok = db_service_attach(dbsvc, ndb);
+    ok = ok && db_service_start(dbsvc);
+    runtime->db_service = dbsvc;
+    app_runtime_set_current(runtime);
+    return ok;
+}
+
+/* Publishes the runtime tip to the coins cache and canonical block map. */
+static void health_test_publish_runtime_tip(struct main_state *ms,
+                                            struct block_index *tip,
+                                            struct uint256 *tip_hash,
+                                            struct coins_view_cache *coins_tip,
+                                            struct block_index **header_tip)
+{
+    ms->pindex_best_header = tip;
+    *header_tip = tip;
+    coins_view_cache_set_best_block(coins_tip, tip_hash);
+    test_block_map_insert(&ms->map_block_index, tip_hash, tip);
+    const struct block_index *canon =
+        block_map_find(&ms->map_block_index, tip_hash);
+    if (canon)
+        tip->phashBlock = canon->phashBlock;
+}
+
+/* Persists the chain-evidence seed rows for the runtime tip. */
+static bool health_test_persist_runtime_evidence(struct node_db *ndb,
+                                                 struct block_index *tip)
+{
+    struct chain_evidence_controller seed = {
+        .ndb = ndb,
+        .csr = csr_instance(),
+        .state = CEC_TIP_FOLLOWING,
+    };
+    struct chain_evidence_record evidence = {
+        .source_class = CEC_SOURCE_CLASS_NATIVE_P2P,
+        .publish_state = CEC_PUBLISH_LOCAL_EVIDENCE,
+        .header_ancestry_linked = true,
+        .chainwork_recomputed = true,
+        .nakamoto_selected_best_work = true,
+        .block_bytes_hash_checked = true,
+    };
+    const char state_name[] = "tip_following";
+    bool ok = true;
+    ok = ok && node_db_state_set(ndb, "cec.sync_state",
+                                 state_name, sizeof(state_name));
+    ok = ok && node_db_state_set(ndb, "cec.active_tip_hash",
+                                 tip->phashBlock->data, 32);
+    ok = ok && node_db_state_set_int(ndb, "cec.active_tip_height",
+                                     tip->nHeight);
+    ok = ok && node_db_state_set_int(ndb, "cec.coins_best_block_height",
+                                     tip->nHeight);
+    ok = ok && node_db_state_set_int(ndb, "cec.utxo_max_height",
+                                     tip->nHeight);
+    ok = ok && node_db_state_set_int(ndb, "cec.publish_state",
+                                     CEC_PUBLISH_LOCAL_EVIDENCE);
+    ok = ok && node_db_state_set_int(ndb,
+                                     "cec.active_tip_source_class",
+                                     CEC_SOURCE_CLASS_NATIVE_P2P);
+    ok = ok && chain_evidence_store_persist(
+                   &seed, "cec.block_index_evidence_state",
+                   &evidence).ok;
+    ok = ok && chain_evidence_store_persist(
+                   &seed, "cec.active_tip_evidence", &evidence).ok;
+    return ok;
+}
+
+/* Runtime-fallback snapshot: healthy at the seeded tip, no reason. */
+static bool health_test_runtime_fallback_snapshot_ok(
+    const struct node_health_snapshot *health,
+    const struct block_index *tip)
+{
+    bool ok = health->synced;
+    ok = ok && health->has_peers;
+    ok = ok && health->healthy;
+    ok = ok && health->tip_height == tip->nHeight;
+    ok = ok && health->header_height == tip->nHeight;
+    ok = ok && health->degraded_reason[0] == '\0';
+    return ok;
+}
+
+static int health_test_runtime_fallback_reads_chain_evidence(void)
+{
+    int failures = 0;
 
     printf("node_health_service: runtime fallback reads chain evidence... ");
     {
@@ -1272,14 +1635,9 @@ int test_node_health_service(void)
         coins_view_cache_init(&coins_tip, &null_view);
         net_manager_init(&cm.manager);
 
-        ok = ok && node_db_open(&ndb, ":memory:");
-        if (ok) {
-            db_service_init(&dbsvc);
-            ok = ok && db_service_attach(&dbsvc, &ndb);
-            ok = ok && db_service_start(&dbsvc);
-            runtime.db_service = &dbsvc;
-            app_runtime_set_current(&runtime);
-        }
+        ok = node_db_open(&ndb, ":memory:");
+        if (ok)
+            ok = health_test_start_db_service(&dbsvc, &ndb, &runtime);
 
         tip_hash.data[0] = 0x7a;
         block_index_init(&tip);
@@ -1289,53 +1647,14 @@ int test_node_health_service(void)
         tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
         arith_uint256_set_u64(&tip.nChainWork, 8);
         ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
-        ms.pindex_best_header = &tip;
-        header_tip = &tip;
-        coins_view_cache_set_best_block(&coins_tip, &tip_hash);
-        test_block_map_insert(&ms.map_block_index, &tip_hash, &tip);
-        const struct block_index *canon =
-            block_map_find(&ms.map_block_index, &tip_hash);
-        if (canon)
-            tip.phashBlock = canon->phashBlock;
+        health_test_publish_runtime_tip(&ms, &tip, &tip_hash, &coins_tip,
+                                        &header_tip);
 
         if (ok) {
             csr_init(csr_instance(), &ms.map_block_index, &ms.chain_active,
                      &header_tip, &coins_tip, &ndb, NULL);
             sync_monitor_set_context(NULL, NULL, &ms);
-            struct chain_evidence_controller seed = {
-                .ndb = &ndb,
-                .csr = csr_instance(),
-                .state = CEC_TIP_FOLLOWING,
-            };
-            struct chain_evidence_record evidence = {
-                .source_class = CEC_SOURCE_CLASS_NATIVE_P2P,
-                .publish_state = CEC_PUBLISH_LOCAL_EVIDENCE,
-                .header_ancestry_linked = true,
-                .chainwork_recomputed = true,
-                .nakamoto_selected_best_work = true,
-                .block_bytes_hash_checked = true,
-            };
-            const char state_name[] = "tip_following";
-            ok = ok && node_db_state_set(&ndb, "cec.sync_state",
-                                         state_name, sizeof(state_name));
-            ok = ok && node_db_state_set(&ndb, "cec.active_tip_hash",
-                                         tip.phashBlock->data, 32);
-            ok = ok && node_db_state_set_int(&ndb, "cec.active_tip_height",
-                                             tip.nHeight);
-            ok = ok && node_db_state_set_int(&ndb, "cec.coins_best_block_height",
-                                             tip.nHeight);
-            ok = ok && node_db_state_set_int(&ndb, "cec.utxo_max_height",
-                                             tip.nHeight);
-            ok = ok && node_db_state_set_int(&ndb, "cec.publish_state",
-                                             CEC_PUBLISH_LOCAL_EVIDENCE);
-            ok = ok && node_db_state_set_int(&ndb,
-                                             "cec.active_tip_source_class",
-                                             CEC_SOURCE_CLASS_NATIVE_P2P);
-            ok = ok && chain_evidence_store_persist(
-                           &seed, "cec.block_index_evidence_state",
-                           &evidence).ok;
-            ok = ok && chain_evidence_store_persist(
-                           &seed, "cec.active_tip_evidence", &evidence).ok;
+            ok = ok && health_test_persist_runtime_evidence(&ndb, &tip);
         }
 
         cm.manager.nodes = zcl_calloc(1, sizeof(*cm.manager.nodes),
@@ -1361,12 +1680,7 @@ int test_node_health_service(void)
             node_health_test_set_log_head_override(tip.nHeight);
             node_health_collect(&health, NULL, NULL);
 
-            ok = health.synced;
-            ok = ok && health.has_peers;
-            ok = ok && health.healthy;
-            ok = ok && health.tip_height == tip.nHeight;
-            ok = ok && health.header_height == tip.nHeight;
-            ok = ok && health.degraded_reason[0] == '\0';
+            ok = health_test_runtime_fallback_snapshot_ok(&health, &tip);
             if (!ok)
                 fprintf(stderr, "node_health_service runtime fallback: "
                         "healthy=%d synced=%d peers=%d tip=%d header=%d "
@@ -1389,6 +1703,48 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* Backdates the node db's last activity to simulate a stalled transaction. */
+static void health_test_backdate_db_activity(struct node_db *ndb)
+{
+    /* Simulate an inactive open transaction and existing peers-free state. */
+    if (ndb->state_mutex_init) {
+        zcl_mutex_lock(&ndb->state_mutex);
+        ndb->last_activity_time = (int64_t)platform_time_wall_time_t() - 61;
+        zcl_mutex_unlock(&ndb->state_mutex);
+    }
+}
+
+/* Stale-open-transaction snapshot: db service liveness fields. */
+static bool health_test_stale_db_service_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = health->db_open;
+    ok = ok && health->db_tx_open;
+    ok = ok && health->db_service_started;
+    ok = ok && health->db_service_worker_started;
+    ok = ok && health->db_service_queue_depth == 0;
+    ok = ok && health->db_last_activity_age_seconds >= 60;
+    return ok;
+}
+
+/* Stale-open-transaction snapshot: idle catchup and degraded reason. */
+static bool health_test_stale_db_progress_ok(
+    const struct node_health_snapshot *health)
+{
+    bool ok = !health->catchup_active;
+    ok = ok && health->catchup_progress_age_seconds == 0;
+    ok = ok && !health->import_active;
+    ok = ok && health->import_progress_age_seconds == 0;
+    ok = ok && strncmp(health->degraded_reason, "db_tx_open_", 11) == 0;
+    return ok;
+}
+
+static int health_test_stale_db_transaction_degrades(void)
+{
+    int failures = 0;
 
     printf("node_health_service: stale DB transaction reports degraded state... ");
     {
@@ -1421,38 +1777,19 @@ int test_node_health_service(void)
             cm.manager.num_nodes = 1;
             rpc_net_set_connman(&cm);
         }
-        if (ok) {
-            db_service_init(&dbsvc);
-            ok = ok && db_service_attach(&dbsvc, &ndb);
-            ok = ok && db_service_start(&dbsvc);
-            runtime.db_service = &dbsvc;
-            app_runtime_set_current(&runtime);
-        }
+        if (ok)
+            ok = health_test_start_db_service(&dbsvc, &ndb, &runtime);
 
         ok = ok && node_db_begin(&ndb);
         node_db_get_status(&ndb, &st);
         ok = ok && st.tx_open;
 
-        /* Simulate an inactive open transaction and existing peers-free state. */
-        if (ndb.state_mutex_init) {
-            zcl_mutex_lock(&ndb.state_mutex);
-            ndb.last_activity_time = (int64_t)platform_time_wall_time_t() - 61;
-            zcl_mutex_unlock(&ndb.state_mutex);
-        }
+        health_test_backdate_db_activity(&ndb);
 
         sync_set_state(SYNC_FINDING_PEERS, "test");
         node_health_collect(&health, &ndb, NULL);
-        ok = ok && health.db_open;
-        ok = ok && health.db_tx_open;
-        ok = ok && health.db_service_started;
-        ok = ok && health.db_service_worker_started;
-        ok = ok && health.db_service_queue_depth == 0;
-        ok = ok && health.db_last_activity_age_seconds >= 60;
-        ok = ok && !health.catchup_active;
-        ok = ok && health.catchup_progress_age_seconds == 0;
-        ok = ok && !health.import_active;
-        ok = ok && health.import_progress_age_seconds == 0;
-        ok = ok && strncmp(health.degraded_reason, "db_tx_open_", 11) == 0;
+        ok = ok && health_test_stale_db_service_ok(&health);
+        ok = ok && health_test_stale_db_progress_ok(&health);
 
         app_runtime_set_current(NULL);
         rpc_net_set_connman(NULL);
@@ -1462,10 +1799,16 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* The FSM refuses at-tip while body history is unproven; the health
-     * snapshot must not overturn that. An unproven archive cannot be
-     * upgraded, and a proven one still can. */
+/* The FSM refuses at-tip while body history is unproven; the health
+ * snapshot must not overturn that. An unproven archive cannot be
+ * upgraded, and a proven one still can. */
+static int health_test_unproven_archive_refuses_at_tip(void)
+{
+    int failures = 0;
+
     printf("node_health_service: unproven body archive refuses the "
            "source-policy at-tip upgrade... ");
     {
@@ -1526,6 +1869,12 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int health_test_proven_archive_permits_at_tip(void)
+{
+    int failures = 0;
 
     printf("node_health_service: proven body archive still permits the "
            "source-policy at-tip upgrade... ");
@@ -1580,10 +1929,16 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* One canonical comparison: every at-tip gate reaches "may I claim
-     * completeness?" through body_history_status_is_proven(), so UNKNOWN can
-     * never leak through a site that wrote `!= INCOMPLETE`. */
+/* One canonical comparison: every at-tip gate reaches "may I claim
+ * completeness?" through body_history_status_is_proven(), so UNKNOWN can
+ * never leak through a site that wrote `!= INCOMPLETE`. */
+static int health_test_completeness_predicate_fail_closed(void)
+{
+    int failures = 0;
+
     printf("node_health_service: at-tip completeness predicate is "
            "fail-closed on every status... ");
     {
@@ -1593,6 +1948,38 @@ int test_node_health_service(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_node_health_service(void)
+{
+    int failures = 0;
+
+    failures += health_test_resolve_network_tip_modal_clamp();
+    failures += health_test_idle_snapshot_without_peers();
+    failures += health_test_at_tip_without_peers();
+    failures += health_test_at_tip_missing_active_tip();
+    failures += health_test_headers_ahead_degraded();
+    failures += health_test_small_gap_serving();
+    failures += health_test_log_head_gap_degrades();
+    failures += health_test_unknown_log_head_blocks();
+    failures += health_test_durable_tip_finalize_cursor();
+    failures += health_test_source_policy_gap_demotes();
+    failures += health_test_stale_tip_stays_healthy();
+    failures += health_test_high_rss_warns();
+    failures += health_test_high_rss_keeps_blocker_primary();
+    failures += health_test_mem_pressure_critical_flips_unhealthy();
+    failures += health_test_chain_advance_synced_predicate();
+    failures += health_test_source_at_tip_label();
+    failures += health_test_old_errors_visible();
+    failures += health_test_recent_errors_actionable();
+    failures += health_test_unsafe_mirror_override_blocked();
+    failures += health_test_mirror_hash_gap_blocked();
+    failures += health_test_runtime_fallback_reads_chain_evidence();
+    failures += health_test_stale_db_transaction_degrades();
+    failures += health_test_unproven_archive_refuses_at_tip();
+    failures += health_test_proven_archive_permits_at_tip();
+    failures += health_test_completeness_predicate_fail_closed();
 
     sync_set_state(SYNC_IDLE, "done");
     return failures;
