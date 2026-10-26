@@ -31,6 +31,52 @@ void vcs_zcode_agent_context_free(struct vcs_zcode_agent_context_v1 *context)
     vcs_zcode_agent_context_init(context);
 }
 
+static enum vcs_zcode_agent_context_result context_entry_shape(
+    const struct vcs_zcode_agent_context_v1 *context, size_t i, size_t path_len)
+{
+    const struct vcs_zcode_agent_context_entry_v1 *entry = &context->files[i];
+    if (path_len == 0 || path_len > VCS_ZCODE_AGENT_CONTEXT_PATH_MAX ||
+        !vcs_package_path_valid(entry->path) || entry->start_line == 0 ||
+        entry->full_file_bytes == 0 || !entry->content ||
+        entry->content_len == 0 ||
+        entry->content_len > VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX ||
+        entry->content_len > entry->full_file_bytes ||
+        (i > 0 && strcmp(context->files[i - 1].path,
+                         entry->path) >= 0))
+        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
+    return VCS_ZCODE_AGENT_CONTEXT_OK;
+}
+
+static enum vcs_zcode_agent_context_result context_measure_files(
+    const struct vcs_zcode_agent_context_v1 *context, size_t maximum_bytes,
+    size_t total, size_t *total_out, uint64_t *content_out)
+{
+    uint64_t content_total = 0;
+    for (size_t i = 0; i < context->file_count; i++) {
+        const struct vcs_zcode_agent_context_entry_v1 *entry =
+            &context->files[i];
+        size_t path_len = strnlen(entry->path, sizeof(entry->path));
+        enum vcs_zcode_agent_context_result shape =
+            context_entry_shape(context, i, path_len);
+        if (shape != VCS_ZCODE_AGENT_CONTEXT_OK) return shape;
+        uint8_t root[32];
+        sha3_256(entry->content, entry->content_len, root);
+        if (memcmp(root, entry->content_root, 32) != 0)
+            return VCS_ZCODE_AGENT_CONTEXT_ROOT;
+        size_t add = VCS_ZCODE_AGENT_CONTEXT_ENTRY_FIXED_BYTES + path_len;
+        if (add > SIZE_MAX - entry->content_len ||
+            total > SIZE_MAX - add - entry->content_len)
+            return VCS_ZCODE_AGENT_CONTEXT_LIMIT;
+        total += add + entry->content_len;
+        content_total += entry->content_len;
+    }
+    if (total > maximum_bytes)
+        return VCS_ZCODE_AGENT_CONTEXT_LIMIT;
+    *total_out = total;
+    *content_out = content_total;
+    return VCS_ZCODE_AGENT_CONTEXT_OK;
+}
+
 static enum vcs_zcode_agent_context_result context_measure(
     const struct vcs_zcode_agent_context_v1 *context, size_t maximum_bytes,
     size_t *total_out, uint64_t *content_out)
@@ -51,36 +97,8 @@ static enum vcs_zcode_agent_context_result context_measure(
         maximum_bytes > VCS_ZCODE_TASK_MAX_CONTEXT_BYTES)
         return VCS_ZCODE_AGENT_CONTEXT_LIMIT;
     size_t total = VCS_ZCODE_AGENT_CONTEXT_FIXED_BYTES + query_len;
-    uint64_t content_total = 0;
-    for (size_t i = 0; i < context->file_count; i++) {
-        const struct vcs_zcode_agent_context_entry_v1 *entry =
-            &context->files[i];
-        size_t path_len = strnlen(entry->path, sizeof(entry->path));
-        if (path_len == 0 || path_len > VCS_ZCODE_AGENT_CONTEXT_PATH_MAX ||
-            !vcs_package_path_valid(entry->path) || entry->start_line == 0 ||
-            entry->full_file_bytes == 0 || !entry->content ||
-            entry->content_len == 0 ||
-            entry->content_len > VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX ||
-            entry->content_len > entry->full_file_bytes ||
-            (i > 0 && strcmp(context->files[i - 1].path,
-                             entry->path) >= 0))
-            return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
-        uint8_t root[32];
-        sha3_256(entry->content, entry->content_len, root);
-        if (memcmp(root, entry->content_root, 32) != 0)
-            return VCS_ZCODE_AGENT_CONTEXT_ROOT;
-        size_t add = VCS_ZCODE_AGENT_CONTEXT_ENTRY_FIXED_BYTES + path_len;
-        if (add > SIZE_MAX - entry->content_len ||
-            total > SIZE_MAX - add - entry->content_len)
-            return VCS_ZCODE_AGENT_CONTEXT_LIMIT;
-        total += add + entry->content_len;
-        content_total += entry->content_len;
-    }
-    if (total > maximum_bytes)
-        return VCS_ZCODE_AGENT_CONTEXT_LIMIT;
-    *total_out = total;
-    *content_out = content_total;
-    return VCS_ZCODE_AGENT_CONTEXT_OK;
+    return context_measure_files(context, maximum_bytes, total, total_out,
+                                 content_out);
 }
 
 enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate(
@@ -134,37 +152,11 @@ enum vcs_zcode_agent_context_result vcs_zcode_agent_context_serialize(
     return VCS_ZCODE_AGENT_CONTEXT_OK;
 }
 
-enum vcs_zcode_agent_context_result vcs_zcode_agent_context_parse(
+static enum vcs_zcode_agent_context_result context_parse_files(
     const uint8_t *wire, size_t wire_len, size_t maximum_bytes,
-    struct vcs_zcode_agent_context_v1 *out)
+    struct vcs_zcode_agent_context_v1 *out, size_t off, uint16_t count,
+    uint64_t expected_content)
 {
-    if (!wire || !out) return VCS_ZCODE_AGENT_CONTEXT_NULL;
-    vcs_zcode_agent_context_init(out);
-    if (wire_len < VCS_ZCODE_AGENT_CONTEXT_FIXED_BYTES ||
-        wire_len > maximum_bytes ||
-        memcmp(wire, agent_context_magic, 8) != 0 ||
-        vcs_rd_u16le(wire + 8) != VCS_ZCODE_AGENT_CONTEXT_VERSION)
-        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
-    uint16_t count = vcs_rd_u16le(wire + 10);
-    uint16_t query_len = vcs_rd_u16le(wire + 12);
-    out->flags = vcs_rd_u16le(wire + 14);
-    uint64_t expected_content = vcs_rd_u64le(wire + 16);
-    if (count == 0 || count > VCS_ZCODE_AGENT_CONTEXT_MAX_FILES ||
-        query_len == 0 || query_len > VCS_ZCODE_AGENT_CONTEXT_QUERY_MAX)
-        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
-    size_t off = 24;
-    memcpy(out->task_root, wire + off, 32); off += 32;
-    memcpy(out->source_root, wire + off, 32); off += 32;
-    memcpy(out->goal_root, wire + off, 32); off += 32;
-    memcpy(out->source_tree_root, wire + off, 32); off += 32;
-    uint8_t query_root[32]; memcpy(query_root, wire + off, 32); off += 32;
-    if (query_len > wire_len - off)
-        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
-    memcpy(out->query, wire + off, query_len); out->query[query_len] = '\0';
-    uint8_t checked[32]; sha3_256(wire + off, query_len, checked);
-    if (memcmp(checked, query_root, 32) != 0)
-        return VCS_ZCODE_AGENT_CONTEXT_ROOT;
-    off += query_len; out->file_count = count;
     uint64_t content_total = 0;
     for (size_t i = 0; i < count; i++) {
         if (wire_len - off < VCS_ZCODE_AGENT_CONTEXT_ENTRY_FIXED_BYTES)
@@ -204,6 +196,41 @@ shape:
     return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
 }
 
+enum vcs_zcode_agent_context_result vcs_zcode_agent_context_parse(
+    const uint8_t *wire, size_t wire_len, size_t maximum_bytes,
+    struct vcs_zcode_agent_context_v1 *out)
+{
+    if (!wire || !out) return VCS_ZCODE_AGENT_CONTEXT_NULL;
+    vcs_zcode_agent_context_init(out);
+    if (wire_len < VCS_ZCODE_AGENT_CONTEXT_FIXED_BYTES ||
+        wire_len > maximum_bytes ||
+        memcmp(wire, agent_context_magic, 8) != 0 ||
+        vcs_rd_u16le(wire + 8) != VCS_ZCODE_AGENT_CONTEXT_VERSION)
+        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
+    uint16_t count = vcs_rd_u16le(wire + 10);
+    uint16_t query_len = vcs_rd_u16le(wire + 12);
+    out->flags = vcs_rd_u16le(wire + 14);
+    uint64_t expected_content = vcs_rd_u64le(wire + 16);
+    if (count == 0 || count > VCS_ZCODE_AGENT_CONTEXT_MAX_FILES ||
+        query_len == 0 || query_len > VCS_ZCODE_AGENT_CONTEXT_QUERY_MAX)
+        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
+    size_t off = 24;
+    memcpy(out->task_root, wire + off, 32); off += 32;
+    memcpy(out->source_root, wire + off, 32); off += 32;
+    memcpy(out->goal_root, wire + off, 32); off += 32;
+    memcpy(out->source_tree_root, wire + off, 32); off += 32;
+    uint8_t query_root[32]; memcpy(query_root, wire + off, 32); off += 32;
+    if (query_len > wire_len - off)
+        return VCS_ZCODE_AGENT_CONTEXT_SHAPE;
+    memcpy(out->query, wire + off, query_len); out->query[query_len] = '\0';
+    uint8_t checked[32]; sha3_256(wire + off, query_len, checked);
+    if (memcmp(checked, query_root, 32) != 0)
+        return VCS_ZCODE_AGENT_CONTEXT_ROOT;
+    off += query_len; out->file_count = count;
+    return context_parse_files(wire, wire_len, maximum_bytes, out, off,
+                               count, expected_content);
+}
+
 enum vcs_zcode_agent_context_result vcs_zcode_agent_context_root(
     const struct vcs_zcode_agent_context_v1 *context, size_t maximum_bytes,
     uint8_t out[32])
@@ -224,6 +251,24 @@ enum vcs_zcode_agent_context_result vcs_zcode_agent_context_root(
     return VCS_ZCODE_AGENT_CONTEXT_OK;
 }
 
+static enum vcs_zcode_agent_context_result context_check_task_binding(
+    const struct vcs_zcode_agent_context_v1 *context,
+    const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
+    const uint8_t context_root[32], const uint8_t expected_task_root[32],
+    const uint8_t expected_context_root[32], bool require_complete)
+{
+    if (memcmp(task_root, expected_task_root, 32) != 0 ||
+        memcmp(context_root, expected_context_root, 32) != 0 ||
+        memcmp(context->task_root, task_root, 32) != 0 ||
+        memcmp(context->source_root, task->source_root, 32) != 0 ||
+        memcmp(context->goal_root, task->goal_root, 32) != 0)
+        return VCS_ZCODE_AGENT_CONTEXT_BINDING;
+    return require_complete &&
+           (context->flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
+        ? VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE
+        : VCS_ZCODE_AGENT_CONTEXT_OK;
+}
+
 enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate_for_task(
     const struct vcs_zcode_agent_context_v1 *context,
     const struct vcs_zcode_task_v1 *task,
@@ -242,14 +287,7 @@ enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate_for_task(
             context, task->max_context_bytes, context_root) !=
             VCS_ZCODE_AGENT_CONTEXT_OK)
         return VCS_ZCODE_AGENT_CONTEXT_BINDING;
-    if (memcmp(task_root, expected_task_root, 32) != 0 ||
-        memcmp(context_root, expected_context_root, 32) != 0 ||
-        memcmp(context->task_root, task_root, 32) != 0 ||
-        memcmp(context->source_root, task->source_root, 32) != 0 ||
-        memcmp(context->goal_root, task->goal_root, 32) != 0)
-        return VCS_ZCODE_AGENT_CONTEXT_BINDING;
-    return require_complete &&
-           (context->flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
-        ? VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE
-        : VCS_ZCODE_AGENT_CONTEXT_OK;
+    return context_check_task_binding(context, task, task_root, context_root,
+                                       expected_task_root, expected_context_root,
+                                       require_complete);
 }
