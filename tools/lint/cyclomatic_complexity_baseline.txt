@@ -387,7 +387,6 @@ contexts/wallet/controllers/src/vault_intent_private.c:vault_intent_private_plan
 contexts/wallet/controllers/src/vault_intent_private.c:vip_decode:33
 contexts/wallet/controllers/src/vault_intent_private.c:vip_effect_parse:30
 contexts/wallet/controllers/src/vault_intent_private.c:vip_parse:20
-contexts/wallet/controllers/src/wallet_diagnostic_ledger.c:rpc_walletledger:109
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rescan_seed_before_oldest_note_from_db:18
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:44
