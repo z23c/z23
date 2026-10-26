@@ -1654,8 +1654,6 @@ tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_f
 tests/harness/src/test_api_http_contract.c:api_http_contract_focused_tests:51
 tests/harness/src/test_api_msg_routes.c:api_msg_routes_focused_tests:88
 tests/harness/src/test_api_openapi.c:api_openapi_focused_tests:221
-tests/harness/src/test_api_query_filters.c:name_route_cases:19
-tests/harness/src/test_api_query_filters.c:service_route_cases:16
 tests/harness/src/test_api_resource_reads.c:api_resource_reads_focused_tests:105
 tests/harness/src/test_api_routes.c:api_route_table_focused_tests:236
 tests/harness/src/test_api_status.c:api_status_focused_tests:195

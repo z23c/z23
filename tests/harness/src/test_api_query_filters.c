@@ -249,6 +249,23 @@ fail:
     return false;
 }
 
+static bool service_filters_match_rpc_query(const struct json_value *filters)
+{
+    return json_get_bool(json_get(filters, "active")) &&
+           strcmp(json_get_str(json_get(filters, "preferred_interface")),
+                  "rpc") == 0 &&
+           strcmp(json_get_str(json_get(filters, "status")), "active") == 0 &&
+           json_get(filters, "interface") == NULL &&
+           json_get(filters, "service") == NULL;
+}
+
+static bool service_filters_show_semantics(const struct json_value *filters)
+{
+    return !json_get_bool(json_get(filters, "active")) &&
+           strcmp(json_get_str(json_get(filters, "semantics")),
+                  "exact-match filters over the static operation catalog") == 0;
+}
+
 static bool service_route_cases(void)
 {
     static const char *const order[] = {
@@ -264,12 +281,7 @@ static bool service_route_cases(void)
 
     filters = ok ? json_get(&root, "filters") : NULL;
     ok = ok && strcmp(err, "sticky") == 0 && filters &&
-         json_get_bool(json_get(filters, "active")) &&
-         strcmp(json_get_str(json_get(filters, "preferred_interface")),
-                "rpc") == 0 &&
-         strcmp(json_get_str(json_get(filters, "status")), "active") == 0 &&
-         json_get(filters, "interface") == NULL &&
-         json_get(filters, "service") == NULL;
+         service_filters_match_rpc_query(filters);
     json_free(&root);
 
     if (ok) {
@@ -278,15 +290,41 @@ static bool service_route_cases(void)
             "/api/v1/service-operations?service=", &root, err, sizeof(err));
         filters = ok ? json_get(&root, "filters") : NULL;
         ok = ok && strcmp(err, "sticky") == 0 && filters &&
-             !json_get_bool(json_get(filters, "active")) &&
-             strcmp(json_get_str(json_get(filters, "semantics")),
-                    "exact-match filters over the static operation catalog") == 0;
+             service_filters_show_semantics(filters);
         json_free(&root);
     }
     return ok && http_error_has_order(
         "/api/v1/service-operations?write_safety=unsafe",
         "invalid_service_operation_filter", order,
         sizeof(order) / sizeof(order[0]));
+}
+
+static bool name_route_contract_filters_reflected(struct json_value *root,
+                                                  char *err, size_t err_size)
+{
+    const struct json_value *filters;
+    bool ok;
+
+    strcpy(err, "sticky");
+    ok = api_name_service_directory_path(
+        "filtercase",
+        "/api/v1/names/filtercase/services?contract=onion_directory&transport=onion",
+        root, err, err_size);
+    filters = ok ? json_get(root, "filters") : NULL;
+    ok = ok && strcmp(err, "sticky") == 0 && filters &&
+         strcmp(json_get_str(json_get(filters, "service_contract")),
+                "onion_directory") == 0 &&
+         json_get(filters, "contract") == NULL &&
+         json_get_int(json_get(root, "service_record_count")) == 1;
+    return ok;
+}
+
+static bool name_route_transport_filters_absent(const struct json_value *root,
+                                                const char *err)
+{
+    return strcmp(err, "sticky") == 0 &&
+           json_get(root, "filters") == NULL &&
+           json_get(root, "filter_contract") != NULL;
 }
 
 static bool name_route_cases(void)
@@ -322,17 +360,7 @@ static bool name_route_cases(void)
         rpc_name_set_state(&ndb);
 
     if (ok) {
-        strcpy(err, "sticky");
-        ok = api_name_service_directory_path(
-            "filtercase",
-            "/api/v1/names/filtercase/services?contract=onion_directory&transport=onion",
-            &root, err, sizeof(err));
-        const struct json_value *filters = ok ? json_get(&root, "filters") : NULL;
-        ok = ok && strcmp(err, "sticky") == 0 && filters &&
-             strcmp(json_get_str(json_get(filters, "service_contract")),
-                    "onion_directory") == 0 &&
-             json_get(filters, "contract") == NULL &&
-             json_get_int(json_get(&root, "service_record_count")) == 1;
+        ok = name_route_contract_filters_reflected(&root, err, sizeof(err));
         json_free(&root);
     }
     if (ok) {
@@ -340,9 +368,7 @@ static bool name_route_cases(void)
         ok = api_name_service_directory_path(
             "filtercase", "/api/v1/names/filtercase/services?transport=",
             &root, err, sizeof(err));
-        ok = ok && strcmp(err, "sticky") == 0 &&
-             json_get(&root, "filters") == NULL &&
-             json_get(&root, "filter_contract") != NULL;
+        ok = ok && name_route_transport_filters_absent(&root, err);
         json_free(&root);
     }
     if (ok) {
