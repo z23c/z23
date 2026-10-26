@@ -595,7 +595,7 @@ static int test_have_data_hook_quiesce_drains_inflight(void)
     pthread_t fire_w, quiesce_w;
     bool fire_started = false, quiesce_started = false;
 
-    TEST("have_data hook: quiesce drains an admitted callback before teardown") {
+    TEST("have-data hook: quiesce drains an admitted callback before teardown") {
         disk_block_io_set_have_data_hook(hook_lifetime_blocking_cb, &f);
         if (pthread_create(&fire_w, NULL, hook_lifetime_fire_worker, NULL) != 0) {
             printf("FAIL (fire worker)\n"); failures++; goto _test_next;
@@ -819,16 +819,14 @@ _test_next:
     return failures;
 }
 
-/* Deferred-sync mode writes a byte-identical block file to immediate mode,
- * records a pending file (no inline fdatasync), and reads back before and
- * after disk_block_io_sync_pending(). */
-static int test_deferred_sync_byte_identical(void)
+/* Format and create the immediate and deferred test datadirs, each with a
+ * blocks subdir. */
+static void make_deferred_sync_dirs(char *dir_immediate, size_t imm_len,
+                                    char *dir_deferred, size_t def_len)
 {
-    int failures = 0;
-    char dir_immediate[256], dir_deferred[256];
-    snprintf(dir_immediate, sizeof(dir_immediate),
+    snprintf(dir_immediate, imm_len,
              "./test-tmp/%d_disk_io_imm", (int)getpid());
-    snprintf(dir_deferred, sizeof(dir_deferred),
+    snprintf(dir_deferred, def_len,
              "./test-tmp/%d_disk_io_def", (int)getpid());
     mkdir("./test-tmp", 0755);
     for (int i = 0; i < 2; i++) {
@@ -838,6 +836,26 @@ static int test_deferred_sync_byte_identical(void)
         snprintf(blocks, sizeof(blocks), "%s/blocks", d);
         mkdir(blocks, 0755);
     }
+}
+
+/* True when both slurps succeeded with equal lengths and identical bytes. */
+static bool slurped_files_identical(long ni, long nd,
+                                    const unsigned char *bi,
+                                    const unsigned char *bd)
+{
+    return ni > 0 && ni == nd && bi && bd &&
+           memcmp(bi, bd, (size_t)ni) == 0;
+}
+
+/* Deferred-sync mode writes a byte-identical block file to immediate mode,
+ * records a pending file (no inline fdatasync), and reads back before and
+ * after disk_block_io_sync_pending(). */
+static int test_deferred_sync_byte_identical(void)
+{
+    int failures = 0;
+    char dir_immediate[256], dir_deferred[256];
+    make_deferred_sync_dirs(dir_immediate, sizeof(dir_immediate),
+                            dir_deferred, sizeof(dir_deferred));
 
     TEST("deferred_sync: byte-identical file + pending set + readback") {
         /* Immediate mode (default). */
@@ -894,8 +912,7 @@ static int test_deferred_sync_byte_identical(void)
         unsigned char *bi = NULL, *bd = NULL;
         long ni = slurp_file(path_imm, &bi);
         long nd = slurp_file(path_def, &bd);
-        bool identical = (ni > 0 && ni == nd && bi && bd &&
-                          memcmp(bi, bd, (size_t)ni) == 0);
+        bool identical = slurped_files_identical(ni, nd, bi, bd);
         free(bi); free(bd);
         if (!identical) {
             printf("FAIL (files differ imm=%ld def=%ld)\n", ni, nd);
@@ -949,7 +966,8 @@ static int test_scoped_read_fd_cache(void)
         if (pa.nFile != pb.nFile) {
             printf("FAIL (blocks not colocated file a=%d b=%d)\n",
                    pa.nFile, pb.nFile);
-            failures++; goto _test_next;
+            failures++;
+            goto _test_next;
         }
 
         disk_block_io_read_fd_cache_enter();
@@ -968,7 +986,8 @@ static int test_scoped_read_fd_cache(void)
         disk_block_io_read_fd_cache_exit();
         if (!ok) {
             printf("FAIL (interleaved cached reads returned wrong block)\n");
-            failures++; goto _test_next;
+            failures++;
+            goto _test_next;
         }
 
         /* After exit the cache is off and its fd closed: a normal read works. */
