@@ -76,7 +76,6 @@ static int test_validate_hooks_fire_and_halt(void)
     }
 
     {   printf("before_validate halt stops validation... ");
-        reset();
         struct ar_callbacks cb; ar_callbacks_init(&cb);
         ar_register_before_validate(&cb, hook_reject);
         bool ok = !ar_run_before_validate(&cb, NULL);
@@ -210,11 +209,6 @@ static void install_key_saved_observers(void)
     event_observe(EV_SAPLING_KEY_SAVED, on_sapling_key_saved, NULL);
 }
 
-/* wallet_sqlite_open / wallet_sqlite_write_key are the deprecated legacy
- * single-writer entry points this spec deliberately covers, so silence the
- * deprecation warning for these two functions without changing any call. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 static int test_wallet_sqlite_emits_wallet_key_saved(void)
 {
     int failures = 0;
@@ -248,11 +242,7 @@ static int test_wallet_sqlite_emits_wallet_key_saved(void)
     if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     return failures;
 }
-#pragma GCC diagnostic pop
 
-/* Same legacy wallet_sqlite entry points as above. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 static int test_wallet_sqlite_emits_sapling_key_saved(void)
 {
     int failures = 0;
@@ -286,7 +276,6 @@ static int test_wallet_sqlite_emits_sapling_key_saved(void)
     if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     return failures;
 }
-#pragma GCC diagnostic pop
 
 int spec_data_hooks(void)
 {
