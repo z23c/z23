@@ -2160,9 +2160,6 @@ tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
 tests/harness/src/test_telemetry_network.c:check_meaning_rows:23
 tests/harness/src/test_telemetry_network.c:check_one_command:22
 tests/harness/src/test_telemetry_ontology.c:check_table_shape:21
-tests/harness/src/test_telemetry_render.c:check_document_shape_is_complete:17
-tests/harness/src/test_telemetry_render.c:check_registry:16
-tests/harness/src/test_telemetry_render.c:check_reply_fitting_steps_down:16
 tests/harness/src/test_telemetry_rollup.c:check_domain_rows:25
 tests/harness/src/test_telemetry_rollup.c:check_registries_agree:19
 tests/harness/src/test_telemetry_sync.c:check_table_is_annotated:23

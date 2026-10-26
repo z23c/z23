@@ -71,6 +71,15 @@ static const struct json_value *dig3(const struct json_value *o,
 
 /* ── the registry ────────────────────────────────────────────────────── */
 
+/* A well-formed schema row carries every descriptive field and a nonzero
+ * count of groups, leaves and snapshot bytes. */
+static bool domain_schema_shape_ok(const struct telemetry_domain_schema *s)
+{
+    return s->schema_id && s->schema_id[0] && s->desc && s->desc[0] &&
+           s->group_count != 0 && s->leaf_count != 0 &&
+           s->snapshot_size != 0;
+}
+
 static int check_registry(void)
 {
     int failures = 0;
@@ -91,8 +100,7 @@ static int check_registry(void)
             bad_order++;
         if (telemetry_domain_find(s->domain) != s)
             bad_roundtrip++;
-        if (!s->schema_id || !s->schema_id[0] || !s->desc || !s->desc[0] ||
-            s->group_count == 0 || s->leaf_count == 0 || s->snapshot_size == 0)
+        if (!domain_schema_shape_ok(s))
             bad_shape++;
     }
     TR_CHECK("[render] domains appear in telemetry_domains.def order",
@@ -420,26 +428,19 @@ static size_t tr_size_at(enum telemetry_view v, int *failed)
     return n;
 }
 
-static int check_reply_fitting_steps_down(void)
+/* The two outcomes when some view fits the frame: a roomy frame ships the
+ * view asked for, and a frame between two tiers steps down instead of
+ * overflowing. */
+static int check_reply_fit_ships_or_steps_down(
+    const struct tr_fake_snapshot *snap, size_t full_sz, size_t summary_sz)
 {
     int failures = 0;
-    int failed = 0;
-    size_t full_sz = tr_size_at(TLV_FULL, &failed);
-    size_t summary_sz = tr_size_at(TLV_SUMMARY, &failed);
-    TR_CHECK("[reply] the probe rendered both tiers", failed == 0);
-    TR_CHECK("[reply] full is larger than summary, so there is a step to take",
-             full_sz > summary_sz);
-
-    struct tr_fake_snapshot snap = {0};
-    TELEMETRY_SET_I64(&snap, a, 1, TELEMETRY_SRC_IN_PROCESS);
-    TELEMETRY_SET_I64(&snap, b, 2, TELEMETRY_SRC_IN_PROCESS);
-    TELEMETRY_SET_I64(&snap, c, 3, TELEMETRY_SRC_IN_PROCESS);
 
     /* Roomy frame: no downgrade, and it does not render twice to find out. */
     struct json_value d1;
     json_init(&d1);
     struct telemetry_reply_fit f1;
-    bool r1 = telemetry_reply_render_fitting(&k_fake_schema, &snap, TLV_FULL,
+    bool r1 = telemetry_reply_render_fitting(&k_fake_schema, snap, TLV_FULL,
                                              full_sz + 1024, &d1, &f1);
     TR_CHECK("[reply] a document that fits is shipped at the view asked for",
              r1 && f1.rendered && f1.fits && f1.view == TLV_FULL &&
@@ -450,12 +451,22 @@ static int check_reply_fitting_steps_down(void)
     struct json_value d2;
     json_init(&d2);
     struct telemetry_reply_fit f2;
-    bool r2 = telemetry_reply_render_fitting(&k_fake_schema, &snap, TLV_FULL,
+    bool r2 = telemetry_reply_render_fitting(&k_fake_schema, snap, TLV_FULL,
                                              summary_sz, &d2, &f2);
     TR_CHECK("[reply] a document that does not fit steps down to one that does",
              r2 && f2.rendered && f2.fits && f2.view == TLV_SUMMARY &&
              f2.bytes <= summary_sz && f2.attempts > 1);
     json_free(&d2);
+    return failures;
+}
+
+/* The bottom of the tier ladder: a frame nothing fits is measured and
+ * reported rather than claimed to fit, and a request already at summary
+ * starts there. */
+static int check_reply_fit_holds_the_summary_floor(
+    const struct tr_fake_snapshot *snap, size_t summary_sz)
+{
+    int failures = 0;
 
     /* The case the per-controller copies got wrong: nothing fits at all. The
      * old code returned the summary view and reported success, so the caller
@@ -464,7 +475,7 @@ static int check_reply_fitting_steps_down(void)
     struct json_value d3;
     json_init(&d3);
     struct telemetry_reply_fit f3;
-    bool r3 = telemetry_reply_render_fitting(&k_fake_schema, &snap, TLV_FULL,
+    bool r3 = telemetry_reply_render_fitting(&k_fake_schema, snap, TLV_FULL,
                                              0, &d3, &f3);
     TR_CHECK("[reply] when even the smallest view overflows, the measurement "
              "succeeds and says so rather than claiming a fit",
@@ -480,11 +491,31 @@ static int check_reply_fitting_steps_down(void)
     struct json_value d4;
     json_init(&d4);
     struct telemetry_reply_fit f4;
-    (void)telemetry_reply_render_fitting(&k_fake_schema, &snap, TLV_SUMMARY, 0,
+    (void)telemetry_reply_render_fitting(&k_fake_schema, snap, TLV_SUMMARY, 0,
                                          &d4, &f4);
     TR_CHECK("[reply] a requested summary starts at summary, never above it",
              f4.attempts == 1 && f4.view == TLV_SUMMARY);
     json_free(&d4);
+    return failures;
+}
+
+static int check_reply_fitting_steps_down(void)
+{
+    int failures = 0;
+    int failed = 0;
+    size_t full_sz = tr_size_at(TLV_FULL, &failed);
+    size_t summary_sz = tr_size_at(TLV_SUMMARY, &failed);
+    TR_CHECK("[reply] the probe rendered both tiers", failed == 0);
+    TR_CHECK("[reply] full is larger than summary, so there is a step to take",
+             full_sz > summary_sz);
+
+    struct tr_fake_snapshot snap = {0};
+    TELEMETRY_SET_I64(&snap, a, 1, TELEMETRY_SRC_IN_PROCESS);
+    TELEMETRY_SET_I64(&snap, b, 2, TELEMETRY_SRC_IN_PROCESS);
+    TELEMETRY_SET_I64(&snap, c, 3, TELEMETRY_SRC_IN_PROCESS);
+
+    failures += check_reply_fit_ships_or_steps_down(&snap, full_sz, summary_sz);
+    failures += check_reply_fit_holds_the_summary_floor(&snap, summary_sz);
     return failures;
 }
 
@@ -766,6 +797,22 @@ static int check_out_of_bounds_table_is_refused(void)
 
 /* ── the document is complete, or it is a failure ────────────────────── */
 
+/* Counts the keys of `keys` absent from the rendered document: top-level
+ * keys when `section` is NULL, keys inside that section otherwise. */
+static int count_missing_doc_keys(const struct json_value *out,
+                                  const char *section,
+                                  const char *const *keys, size_t n)
+{
+    int missing = 0;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *v =
+            section ? dig2(out, section, keys[i]) : json_get(out, keys[i]);
+        if (!v)
+            missing++;
+    }
+    return missing;
+}
+
 /* The json layer has no injectable allocation failure, so the OOM branch is
  * unreachable from a test. What IS reachable — and what actually regresses —
  * is a refactor that drops a section, so this walks every domain at every view
@@ -809,18 +856,17 @@ static int check_document_shape_is_complete(void)
                 json_free(&out);
                 continue;
             }
-            for (size_t i = 0; i < sizeof k_top / sizeof k_top[0]; i++)
-                if (!json_get(&out, k_top[i]))
-                    missing_top++;
-            for (size_t i = 0; i < sizeof k_completeness / sizeof k_completeness[0]; i++)
-                if (!dig2(&out, "completeness", k_completeness[i]))
-                    missing_sub++;
-            for (size_t i = 0; i < sizeof k_freshness / sizeof k_freshness[0]; i++)
-                if (!dig2(&out, "freshness", k_freshness[i]))
-                    missing_sub++;
-            for (size_t i = 0; i < sizeof k_health / sizeof k_health[0]; i++)
-                if (!dig2(&out, "health", k_health[i]))
-                    missing_sub++;
+            missing_top += count_missing_doc_keys(
+                &out, NULL, k_top, sizeof k_top / sizeof k_top[0]);
+            missing_sub += count_missing_doc_keys(
+                &out, "completeness", k_completeness,
+                sizeof k_completeness / sizeof k_completeness[0]);
+            missing_sub += count_missing_doc_keys(
+                &out, "freshness", k_freshness,
+                sizeof k_freshness / sizeof k_freshness[0]);
+            missing_sub += count_missing_doc_keys(
+                &out, "health", k_health,
+                sizeof k_health / sizeof k_health[0]);
             /* health.unhealthy is the one whose absence would read as
              * "nothing is wrong", so it must be a real ARRAY, not merely a
              * present key. */
