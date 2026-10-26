@@ -1677,7 +1677,6 @@ tests/harness/src/test_directory_watcher.c:directory_watcher_filtered_probe:32
 tests/harness/src/test_disk_block_io.c:test_deferred_sync_byte_identical:18
 tests/harness/src/test_domain_consensus_check_block.c:test_domain_consensus_check_block:39
 tests/harness/src/test_domain_consensus_coinbase.c:test_domain_consensus_coinbase:53
-tests/harness/src/test_domain_consensus_coins_math.c:test_domain_consensus_coins_math:28
 tests/harness/src/test_domain_consensus_header_accept.c:test_domain_consensus_header_accept:55
 tests/harness/src/test_domain_consensus_sapling_structural.c:test_domain_consensus_sapling_structural:27
 tests/harness/src/test_domain_consensus_tx_structural.c:test_domain_consensus_tx_structural:51

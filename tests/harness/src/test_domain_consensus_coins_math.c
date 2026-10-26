@@ -85,11 +85,10 @@ static void set_p2pk_compressed(struct script *s)
     s->size = 35;
 }
 
-int test_domain_consensus_coins_math(void)
+/* is_pruned across null/empty/all-null/live coins, plus wrapper parity. */
+static int dcm_check_is_pruned(void)
 {
     int failures = 0;
-
-    /* ──────────────────── coins_math_is_pruned ──────────────────── */
 
     /* NULL coins is pruned (defensive). */
     DCM_CHECK("is_pruned(NULL) -> true", coins_math_is_pruned(NULL));
@@ -121,7 +120,13 @@ int test_domain_consensus_coins_math(void)
         coins_free(&c);
     }
 
-    /* ──────────────────── coins_math_is_available ─────────────────── */
+    return failures;
+}
+
+/* is_available null, out-of-range and spent contracts, plus wrapper parity. */
+static int dcm_check_is_available(void)
+{
+    int failures = 0;
 
     {
         struct coins c; mkcoins(&c, 3, 1000);
@@ -143,7 +148,13 @@ int test_domain_consensus_coins_math(void)
         coins_free(&c);
     }
 
-    /* ──────────────────── coins_math_spend ────────────────────────── */
+    return failures;
+}
+
+/* spend null/double-spend/out-of-range contracts; num_vout not trimmed. */
+static int dcm_check_spend(void)
+{
+    int failures = 0;
 
     /* NULL -> false. */
     DCM_CHECK("spend(NULL,0) -> false", !coins_math_spend(NULL, 0));
@@ -164,7 +175,13 @@ int test_domain_consensus_coins_math(void)
         coins_free(&c);
     }
 
-    /* ──────────────────── coins_math_cleanup ─────────────────────── */
+    return failures;
+}
+
+/* cleanup trims trailing null vouts but preserves interior ones. */
+static int dcm_check_cleanup(void)
+{
+    int failures = 0;
 
     DCM_CHECK("cleanup(NULL) is a no-op", (coins_math_cleanup(NULL), true));
 
@@ -184,7 +201,13 @@ int test_domain_consensus_coins_math(void)
         coins_free(&c);
     }
 
-    /* ──────────────────── coins_math_capture_undo ─────────────────── */
+    return failures;
+}
+
+/* capture_undo null/OOB/spent contracts, then partial- and final-spend. */
+static int dcm_check_capture_undo(void)
+{
+    int failures = 0;
 
     /* Null preconditions. */
     {
@@ -261,7 +284,13 @@ int test_domain_consensus_coins_math(void)
         coins_free(&c);
     }
 
-    /* ──────────────────── amount compress/decompress ──────────────── */
+    return failures;
+}
+
+/* compress/decompress_amount corpus roundtrip and sealed edge values. */
+static int dcm_check_amount_compression(void)
+{
+    int failures = 0;
 
     /* Roundtrip across a handpicked corpus including the boundary cases
      * of the variable-base-10 codec. */
@@ -304,7 +333,13 @@ int test_domain_consensus_coins_math(void)
                   coins_math_decompress_amount(z) == 100000000ULL);
     }
 
-    /* ──────────────────── script compress/decompress ──────────────── */
+    return failures;
+}
+
+/* P2PKH compress/decompress roundtrip and wrapper parity. */
+static int dcm_check_p2pkh_roundtrip(void)
+{
+    int failures = 0;
 
     /* P2PKH roundtrip. */
     {
@@ -328,6 +363,14 @@ int test_domain_consensus_coins_math(void)
                   w_ok && wlen == blen && memcmp(wbuf, buf, blen) == 0);
     }
 
+    return failures;
+}
+
+/* P2SH compress/decompress roundtrip. */
+static int dcm_check_p2sh_roundtrip(void)
+{
+    int failures = 0;
+
     /* P2SH roundtrip. */
     {
         struct script s; script_init(&s); set_p2sh(&s);
@@ -344,6 +387,14 @@ int test_domain_consensus_coins_math(void)
                   memcmp(s2.data, s.data, s.size) == 0);
     }
 
+    return failures;
+}
+
+/* P2PK (compressed-key) compress/decompress roundtrip. */
+static int dcm_check_p2pk_compressed_roundtrip(void)
+{
+    int failures = 0;
+
     /* P2PK compressed roundtrip. */
     {
         struct script s; script_init(&s); set_p2pk_compressed(&s);
@@ -359,6 +410,14 @@ int test_domain_consensus_coins_math(void)
                   d_ok && s2.size == s.size &&
                   memcmp(s2.data, s.data, s.size) == 0);
     }
+
+    return failures;
+}
+
+/* Unrecognised script shape and NULL arguments must fail closed. */
+static int dcm_check_script_compress_rejects(void)
+{
+    int failures = 0;
 
     /* Unrecognised shape -> compress returns false (caller falls back). */
     {
@@ -382,7 +441,13 @@ int test_domain_consensus_coins_math(void)
                   !coins_math_script_compress(&s, buf, NULL));
     }
 
-    /* ──────────────────── compress_special_size lookup ────────────── */
+    return failures;
+}
+
+/* compress_special_size lookup is total and matches the wrapper. */
+static int dcm_check_special_size_lookup(void)
+{
+    int failures = 0;
 
     DCM_CHECK("special_size(0)==20",
               coins_math_script_compress_special_size(0) == 20);
@@ -400,6 +465,48 @@ int test_domain_consensus_coins_math(void)
     DCM_CHECK("special_size wrapper matches",
               script_compress_special_size(2) ==
               coins_math_script_compress_special_size(2));
+
+    return failures;
+}
+
+int test_domain_consensus_coins_math(void)
+{
+    int failures = 0;
+
+    /* ──────────────────── coins_math_is_pruned ──────────────────── */
+
+    failures += dcm_check_is_pruned();
+
+    /* ──────────────────── coins_math_is_available ─────────────────── */
+
+    failures += dcm_check_is_available();
+
+    /* ──────────────────── coins_math_spend ────────────────────────── */
+
+    failures += dcm_check_spend();
+
+    /* ──────────────────── coins_math_cleanup ─────────────────────── */
+
+    failures += dcm_check_cleanup();
+
+    /* ──────────────────── coins_math_capture_undo ─────────────────── */
+
+    failures += dcm_check_capture_undo();
+
+    /* ──────────────────── amount compress/decompress ──────────────── */
+
+    failures += dcm_check_amount_compression();
+
+    /* ──────────────────── script compress/decompress ──────────────── */
+
+    failures += dcm_check_p2pkh_roundtrip();
+    failures += dcm_check_p2sh_roundtrip();
+    failures += dcm_check_p2pk_compressed_roundtrip();
+    failures += dcm_check_script_compress_rejects();
+
+    /* ──────────────────── compress_special_size lookup ────────────── */
+
+    failures += dcm_check_special_size_lookup();
 
     return failures;
 }
