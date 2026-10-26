@@ -74,6 +74,53 @@ static struct zcl_result znic_build_script(
         ? ZCL_OK : ZCL_ERR(-2, "ZNAM OP_RETURN does not satisfy protocol limits");
 }
 
+static bool znic_prepare_context_complete(
+    const struct wallet_rpc_context *ctx,
+    const struct znam_intent_request *request, const uint8_t *raw_tx,
+    const size_t *raw_tx_len, const uint8_t *txid_out,
+    const int64_t *actual_fee_zat, const struct vault_intent_input *inputs,
+    const size_t *input_count, int64_t maximum_fee_zat)
+{
+    const void *const required[] = {
+        ctx, request, raw_tx, raw_tx_len, txid_out, actual_fee_zat, inputs,
+        input_count, ctx ? ctx->wallet : NULL, ctx ? ctx->node_db : NULL,
+    };
+    bool complete = maximum_fee_zat > 0;
+    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++)
+        complete = complete && required[i] != NULL;
+    return complete;
+}
+
+static struct zcl_result znic_check_name_registration(
+    enum znam_intent_operation operation, bool found)
+{
+    if (operation == ZNAM_INTENT_REGISTER && found)
+        return ZCL_ERR(-4, "ZNAM name is already registered");
+    if (operation != ZNAM_INTENT_REGISTER && !found)
+        return ZCL_ERR(-5, "ZNAM name is not registered");
+    return ZCL_OK;
+}
+
+static struct zcl_result znic_build_base_tx(
+    struct wallet_rpc_context *ctx, const struct znam_intent_request *request,
+    const struct znam_entry *existing, struct wallet_tx *wtx, int64_t *fee,
+    const char **why)
+{
+    if (request->operation == ZNAM_INTENT_REGISTER ||
+        request->operation == ZNAM_INTENT_RENEW)
+        return zslp_command_build_genesis_base_tx(ctx->wallet, wtx, fee, why);
+    return zslp_command_build_owner_base_tx(
+        ctx->wallet, existing->owner_address, wtx, fee, why);
+}
+
+static bool znic_fee_within_input_contract(
+    const struct wallet_tx *wtx, int64_t fee, int64_t maximum_fee_zat,
+    size_t input_capacity)
+{
+    return fee >= 0 && fee <= maximum_fee_zat && wtx->tx.num_vin != 0 &&
+           wtx->tx.num_vin <= input_capacity;
+}
+
 static struct zcl_result znic_prepare(
     void *opaque, const struct znam_intent_request *request,
     int64_t maximum_fee_zat, uint8_t *raw_tx, size_t raw_capacity,
@@ -82,31 +129,24 @@ static struct zcl_result znic_prepare(
     size_t *input_count)
 {
     struct wallet_rpc_context *ctx = opaque;
-    if (!ctx || !ctx->wallet || !ctx->node_db || !request || !raw_tx ||
-        !raw_tx_len || !txid_out || !actual_fee_zat || !inputs ||
-        !input_count || maximum_fee_zat <= 0)
+    if (!znic_prepare_context_complete(ctx, request, raw_tx, raw_tx_len,
+                                       txid_out, actual_fee_zat, inputs,
+                                       input_count, maximum_fee_zat))
         return ZCL_ERR(-3, "ZNAM wallet prepare context is incomplete");
     struct znam_entry existing;
     bool found = db_znam_find(ctx->node_db, request->name, &existing);
-    if (request->operation == ZNAM_INTENT_REGISTER && found)
-        return ZCL_ERR(-4, "ZNAM name is already registered");
-    if (request->operation != ZNAM_INTENT_REGISTER && !found)
-        return ZCL_ERR(-5, "ZNAM name is not registered");
+    struct zcl_result registration =
+        znic_check_name_registration(request->operation, found);
+    if (!registration.ok)
+        return registration;
     uint8_t script[512];
     size_t script_len = 0;
     ZCL_CHECK(znic_build_script(request, script, &script_len));
     struct wallet_tx wtx; memset(&wtx, 0, sizeof(wtx));
     int64_t fee = 0;
     const char *why = NULL;
-    struct zcl_result built;
-    if (request->operation == ZNAM_INTENT_REGISTER ||
-        request->operation == ZNAM_INTENT_RENEW) {
-        built = zslp_command_build_genesis_base_tx(
-            ctx->wallet, &wtx, &fee, &why);
-    } else {
-        built = zslp_command_build_owner_base_tx(
-            ctx->wallet, existing.owner_address, &wtx, &fee, &why);
-    }
+    struct zcl_result built = znic_build_base_tx(
+        ctx, request, &existing, &wtx, &fee, &why);
     if (!built.ok)
         return ZCL_ERR(-6, "ZNAM funding/owner input build failed: %s",
                        why ? why : built.message);
@@ -117,8 +157,8 @@ static struct zcl_result znic_prepare(
         return ZCL_ERR(-7, "ZNAM exact transaction signing failed: %s",
                        prepared.message);
     }
-    if (fee < 0 || fee > maximum_fee_zat || wtx.tx.num_vin == 0 ||
-        wtx.tx.num_vin > input_capacity) {
+    if (!znic_fee_within_input_contract(&wtx, fee, maximum_fee_zat,
+                                        input_capacity)) {
         transaction_free(&wtx.tx);
         return ZCL_ERR(-8, "ZNAM transaction exceeds fee or input contract");
     }
@@ -253,6 +293,60 @@ static enum znam_intent_operation znic_operation(const char *operation)
     return 0;
 }
 
+static const struct json_value *znic_intent_first_param(
+    const struct json_value *params)
+{
+    return params && json_size(params) ? json_at(params, 0) : NULL;
+}
+
+static bool znic_scope_is_valid(const char *scope)
+{
+    static const char *const scopes[] = {"dev", "prod"};
+    const size_t count = sizeof(scopes) / sizeof(scopes[0]);
+    if (scope == NULL)
+        return false;
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(scope, scopes[i]) == 0)
+            return true;
+    return false;
+}
+
+static bool znic_plan_id_is_valid(const char *plan_hex, uint8_t plan_id[32])
+{
+    size_t hex_len = plan_hex ? strlen(plan_hex) : 0;
+    bool well_formed = hex_len == 64 && IsHex(plan_hex);
+    return well_formed && ParseHex(plan_hex, plan_id, 32) == 32;
+}
+
+static bool znic_plan_fields_within_bounds(
+    const char *name, const char *value, const char *owner, const char *key,
+    const char *idempotency)
+{
+    return name && idempotency && strlen(name) <= ZNAM_INTENT_NAME_MAX &&
+           strlen(idempotency) <= VAULT_INTENT_IDEMPOTENCY_MAX &&
+           (!value || strlen(value) <= ZNAM_INTENT_VALUE_MAX) &&
+           (!owner || strlen(owner) <= ZNAM_INTENT_OWNER_MAX) &&
+           (!key || strlen(key) <= ZNAM_INTENT_KEY_MAX);
+}
+
+static void znic_fill_plan_request(
+    struct znam_intent_request *request, const char *scope,
+    const char *operation, const char *type, const char *name,
+    const char *value, const char *owner, const char *key,
+    const char *idempotency)
+{
+    snprintf(request->wallet_scope, sizeof(request->wallet_scope), "%s", scope);
+    request->operation = znic_operation(operation);
+    snprintf(request->name, sizeof(request->name), "%s", name);
+    request->target_type = type ? znam_type_from_name(type) : 0;
+    snprintf(request->value, sizeof(request->value), "%s", value ? value : "");
+    snprintf(request->new_owner, sizeof(request->new_owner), "%s",
+             owner ? owner : "");
+    snprintf(request->key, sizeof(request->key), "%s", key ? key : "");
+    snprintf(request->idempotency_key, sizeof(request->idempotency_key),
+             "%s", idempotency);
+}
+
 static bool rpc_znam_intent(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -262,15 +356,14 @@ static bool rpc_znam_intent(const struct json_value *params, bool help,
             "znam_intent commit {wallet_scope,plan_id,confirm:true}\n");
         return true;
     }
-    const struct json_value *input = params && json_size(params)
-        ? json_at(params, 0) : NULL;
+    const struct json_value *input = znic_intent_first_param(params);
     if (!input || input->type != JSON_OBJ) {
         json_set_str(result, "znam_intent requires one object");
         return false;
     }
     const char *scope = json_get_str(json_get(input, "wallet_scope"));
     bool confirm = json_get_bool_or(input, "confirm", false);
-    if (!scope || (strcmp(scope, "dev") != 0 && strcmp(scope, "prod") != 0)) {
+    if (!znic_scope_is_valid(scope)) {
         json_set_str(result, "znam_intent requires wallet_scope=dev|prod");
         return false;
     }
@@ -282,8 +375,7 @@ static bool rpc_znam_intent(const struct json_value *params, bool help,
     if (confirm) {
         const char *plan_hex = json_get_str(json_get(input, "plan_id"));
         uint8_t plan_id[32];
-        if (!plan_hex || strlen(plan_hex) != 64 || !IsHex(plan_hex) ||
-            ParseHex(plan_hex, plan_id, sizeof(plan_id)) != 32) {
+        if (!znic_plan_id_is_valid(plan_hex, plan_id)) {
             json_set_str(result, "commit requires a 64-hex plan_id");
             return false;
         }
@@ -299,24 +391,13 @@ static bool rpc_znam_intent(const struct json_value *params, bool help,
         const char *key = json_get_str(json_get(input, "key"));
         const char *idempotency =
             json_get_str(json_get(input, "idempotency_key"));
-        if (!name || !idempotency || strlen(name) > ZNAM_INTENT_NAME_MAX ||
-            strlen(idempotency) > VAULT_INTENT_IDEMPOTENCY_MAX ||
-            (value && strlen(value) > ZNAM_INTENT_VALUE_MAX) ||
-            (owner && strlen(owner) > ZNAM_INTENT_OWNER_MAX) ||
-            (key && strlen(key) > ZNAM_INTENT_KEY_MAX)) {
+        if (!znic_plan_fields_within_bounds(name, value, owner, key,
+                                            idempotency)) {
             json_set_str(result, "ZNAM plan input is missing or exceeds bounds");
             return false;
         }
-        snprintf(request.wallet_scope, sizeof(request.wallet_scope), "%s", scope);
-        request.operation = znic_operation(operation);
-        snprintf(request.name, sizeof(request.name), "%s", name);
-        request.target_type = type ? znam_type_from_name(type) : 0;
-        snprintf(request.value, sizeof(request.value), "%s", value ? value : "");
-        snprintf(request.new_owner, sizeof(request.new_owner), "%s",
-                 owner ? owner : "");
-        snprintf(request.key, sizeof(request.key), "%s", key ? key : "");
-        snprintf(request.idempotency_key, sizeof(request.idempotency_key),
-                 "%s", idempotency);
+        znic_fill_plan_request(&request, scope, operation, type, name, value,
+                               owner, key, idempotency);
         outcome = znam_transaction_intent_plan(&runtime, &request, &intent);
     }
     if (!outcome.ok) {
