@@ -157,13 +157,17 @@ static bool cross_check_against_legacy(const struct block *b,
     return true;
 }
 
-int test_domain_consensus_check_block(void)
+/* Don't free txs[0].vtx via block_free — caller owns the array. */
+static void dcb_free_txs(struct transaction *txs, size_t n)
+{
+    for (size_t i = 0; i < n; i++) transaction_free(&txs[i]);
+}
+
+/* ---- null-arg contracts ---- */
+static int dcb_check_null_block_args(void)
 {
     int failures = 0;
-    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
-    int  dos;
 
-    /* ---- null-arg contracts ---- */
     {
         struct zcl_result r =
             domain_consensus_check_block_merkle_root(NULL, NULL, 0, NULL);
@@ -182,6 +186,16 @@ int test_domain_consensus_check_block(void)
         DCB_CHECK("sigops: null block -> ERR_NULL_ARG",
                   !r.ok && r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_NULL_ARG);
     }
+
+    return failures;
+}
+
+/* Reject paths through domain_consensus_check_block_size_and_coinbase(). */
+static int dcb_check_size_and_coinbase_rejects(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
 
     /* ---- zero-txn block (bad-blk-length) ---- */
     {
@@ -219,8 +233,7 @@ int test_domain_consensus_check_block(void)
                   dos == 100);
         DCB_CHECK("legacy parity: bad-cb-missing dos=100",
                   cross_check_against_legacy(&b, "bad-cb-missing", 100, false));
-        /* Don't free txs[0].vtx via block_free — caller owns the array. */
-        for (size_t i = 0; i < 1; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 1);
     }
 
     /* ---- bad-cb-multiple ---- */
@@ -241,8 +254,18 @@ int test_domain_consensus_check_block(void)
                   dos == 100);
         DCB_CHECK("legacy parity: bad-cb-multiple dos=100",
                   cross_check_against_legacy(&b, "bad-cb-multiple", 100, false));
-        for (size_t i = 0; i < 2; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 2);
     }
+
+    return failures;
+}
+
+/* Reject paths through domain_consensus_check_block_merkle_root(). */
+static int dcb_check_merkle_root_rejects(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
 
     /* ---- bad-txnmrklroot (header merkle != computed) ---- */
     {
@@ -264,7 +287,7 @@ int test_domain_consensus_check_block(void)
                   dos == 100);
         DCB_CHECK("legacy parity: bad-txnmrklroot dos=100",
                   cross_check_against_legacy(&b, "bad-txnmrklroot", 100, false));
-        for (size_t i = 0; i < 2; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 2);
     }
 
     /* ---- bad-txns-duplicate (CVE-2012-2459) ---------
@@ -290,16 +313,27 @@ int test_domain_consensus_check_block(void)
                   dos == 100);
         DCB_CHECK("legacy parity: bad-txns-duplicate dos=100",
                   cross_check_against_legacy(&b, "bad-txns-duplicate", 100, false));
-        for (size_t i = 0; i < 2; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 2);
     }
 
-    /* ---- normal valid block: structural checks all pass ---- */
+    return failures;
+}
+
+/* ---- normal valid block: structural checks all pass ---- */
+static int dcb_check_valid_block_accepts(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+
     {
         struct transaction txs[2];
         coinbase_tx(&txs[0], 0x40);
         noncoinbase_tx(&txs[1], 0x41);
         struct block b;
         build_block(&b, txs, 2);
+        /* Sentinel as in the reject cases: the OK path must clear it. */
+        reason[0] = '\xff'; dos = -1;
 
         /* merkle ok */
         struct zcl_result rm =
@@ -326,10 +360,17 @@ int test_domain_consensus_check_block(void)
          * wrapper also runs per-tx check_transaction, which rejects the
          * synthetic coinbase (bad-cb-length, owned by tx_structural). */
 
-        for (size_t i = 0; i < 2; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 2);
     }
 
-    /* ---- out_reject_reason / out_dos may be NULL ---- */
+    return failures;
+}
+
+/* ---- out_reject_reason / out_dos may be NULL ---- */
+static int dcb_check_null_out_buffers(void)
+{
+    int failures = 0;
+
     {
         struct block b; block_init(&b);
         b.num_vtx = 0;
@@ -342,13 +383,22 @@ int test_domain_consensus_check_block(void)
                   r.code == DOMAIN_CONSENSUS_CHECK_BLOCK_ERR_BAD_BLK_LENGTH);
     }
 
-    /* ---- L1 LOCK-IN: no 2 MB serialized block-size cap ----------------
-     * (docs/work/parity-audit-round2-findings.md, L1.)
-     * domain_consensus_check_block_size_and_coinbase() bounds only tx-COUNT
-     * (num_vtx <= 2,000,000), while zclassicd rejects serialized size >
-     * GENEROUS_BLOCK_SIZE_LIMIT with "bad-blk-length" (main.cpp:4317). This
-     * pins the current behavior: a >2,000,000-byte block with num_vtx == 2
-     * PASSES. The assertion flips when a byte-size clause lands. */
+    return failures;
+}
+
+/* ---- L1 LOCK-IN: no 2 MB serialized block-size cap ----------------
+ * (docs/work/parity-audit-round2-findings.md, L1.)
+ * domain_consensus_check_block_size_and_coinbase() bounds only tx-COUNT
+ * (num_vtx <= 2,000,000), while zclassicd rejects serialized size >
+ * GENEROUS_BLOCK_SIZE_LIMIT with "bad-blk-length" (main.cpp:4317). This
+ * pins the current behavior: a >2,000,000-byte block with num_vtx == 2
+ * PASSES. The assertion flips when a byte-size clause lands. */
+static int dcb_check_oversize_block_accepted(void)
+{
+    int failures = 0;
+    char reason[DOMAIN_CHECK_BLOCK_REASON_MAX];
+    int  dos;
+
     {
         /* One non-coinbase tx with 220 full-size (MAX_SCRIPT_SIZE) output
          * scripts serializes to ~2.2 MB, over the 2 MB band. */
@@ -393,33 +443,52 @@ int test_domain_consensus_check_block(void)
                   "(no serialized-size cap)",
                   r_sz.ok && reason[0] == '\0' && dos == 0);
 
-        for (size_t i = 0; i < 2; i++) transaction_free(&txs[i]);
+        dcb_free_txs(txs, 2);
     }
 
-    /* ---- CHECKDATASIG counts toward the block sigop limit (zclassicd parity) ----
-     * OP_CHECKDATASIG/OP_CHECKDATASIGVERIFY count toward MAX_BLOCK_SIGOPS.
-     * The limit is strict '>': exactly 20000 ops is accepted, 20001 rejected. */
-    {
-        char reason[64]; int dos;
+    return failures;
+}
 
-        struct transaction at[1];
-        checkdatasig_tx(&at[0], 0x70, DOMAIN_MAX_BLOCK_SIGOPS_TEST);
-        struct block ba; build_block(&ba, at, 1);
-        struct zcl_result r_at = domain_consensus_check_block_sigops(
-            &ba, reason, sizeof(reason), &dos);
-        DCB_CHECK("CHECKDATASIG == 20000 sigops: OK (at the limit)",
-                  r_at.ok && dos == 0);
-        transaction_free(&at[0]);
+/* ---- CHECKDATASIG counts toward the block sigop limit (zclassicd parity) ----
+ * OP_CHECKDATASIG/OP_CHECKDATASIGVERIFY count toward MAX_BLOCK_SIGOPS.
+ * The limit is strict '>': exactly 20000 ops is accepted, 20001 rejected. */
+static int dcb_check_checkdatasig_sigop_limit(void)
+{
+    int failures = 0;
+    char reason[64]; int dos;
 
-        struct transaction over[1];
-        checkdatasig_tx(&over[0], 0x71, DOMAIN_MAX_BLOCK_SIGOPS_TEST + 1);
-        struct block bo; build_block(&bo, over, 1);
-        struct zcl_result r_over = domain_consensus_check_block_sigops(
-            &bo, reason, sizeof(reason), &dos);
-        DCB_CHECK("CHECKDATASIG == 20001 sigops: bad-blk-sigops (counted, was 0 pre-fix)",
-                  !r_over.ok && strcmp(reason, "bad-blk-sigops") == 0 && dos == 100);
-        transaction_free(&over[0]);
-    }
+    struct transaction at[1];
+    checkdatasig_tx(&at[0], 0x70, DOMAIN_MAX_BLOCK_SIGOPS_TEST);
+    struct block ba; build_block(&ba, at, 1);
+    struct zcl_result r_at = domain_consensus_check_block_sigops(
+        &ba, reason, sizeof(reason), &dos);
+    DCB_CHECK("CHECKDATASIG == 20000 sigops: OK (at the limit)",
+              r_at.ok && dos == 0);
+    transaction_free(&at[0]);
+
+    struct transaction over[1];
+    checkdatasig_tx(&over[0], 0x71, DOMAIN_MAX_BLOCK_SIGOPS_TEST + 1);
+    struct block bo; build_block(&bo, over, 1);
+    struct zcl_result r_over = domain_consensus_check_block_sigops(
+        &bo, reason, sizeof(reason), &dos);
+    DCB_CHECK("CHECKDATASIG == 20001 sigops: bad-blk-sigops (counted, was 0 pre-fix)",
+              !r_over.ok && strcmp(reason, "bad-blk-sigops") == 0 && dos == 100);
+    transaction_free(&over[0]);
+
+    return failures;
+}
+
+int test_domain_consensus_check_block(void)
+{
+    int failures = 0;
+
+    failures += dcb_check_null_block_args();
+    failures += dcb_check_size_and_coinbase_rejects();
+    failures += dcb_check_merkle_root_rejects();
+    failures += dcb_check_valid_block_accepts();
+    failures += dcb_check_null_out_buffers();
+    failures += dcb_check_oversize_block_accepted();
+    failures += dcb_check_checkdatasig_sigop_limit();
 
     return failures;
 }
