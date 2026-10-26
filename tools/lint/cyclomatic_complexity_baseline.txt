@@ -2046,7 +2046,6 @@ tools/command/cli_render.c:zcl_cli_render_brief:23
 tools/command/cli_render.c:zcl_cli_render_doc:40
 tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/command/native_code_change_plan_command.c:zcl_native_handle_code_change_plan:36
-tools/command/native_code_context_command.c:zcl_native_handle_code_context_map:63
 tools/command/native_code_coverage_command.c:zcl_native_handle_code_coverage:16
 tools/command/native_code_relations_command.c:zcl_native_handle_code_relations:34
 tools/command/native_dev_activation_command.c:dac_authority_available:17
