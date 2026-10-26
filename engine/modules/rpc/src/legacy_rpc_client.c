@@ -38,6 +38,47 @@
 
 /* ── zclassic.conf parser ──────────────────────────────────────── */
 
+/* Advances past leading spaces and tabs. */
+static char *lrc_skip_spaces_tabs(char *p)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+/* Nuls trailing spaces and tabs off the key, back toward its start. */
+static void lrc_trim_key_tail(char *key, char *kend)
+{
+    while (kend > key && (*kend == ' ' || *kend == '\t')) *kend-- = '\0';
+}
+
+/* Nuls trailing newline, CR, space and tab bytes off the value. */
+static void lrc_trim_val_tail(char *val)
+{
+    char *vend = val + strlen(val);
+    while (vend > val && (vend[-1] == '\n' || vend[-1] == '\r' ||
+                          vend[-1] == ' '  || vend[-1] == '\t'))
+        *--vend = '\0';
+}
+
+/* Applies one trimmed key/value pair to the caller's outputs. */
+static void lrc_apply_conf_pair(const char *key, const char *val,
+                                char *out_user, size_t user_sz,
+                                char *out_pass, size_t pass_sz,
+                                int *out_port,
+                                bool *got_user, bool *got_pass)
+{
+    if (strcmp(key, "rpcuser") == 0) {
+        snprintf(out_user, user_sz, "%s", val);
+        *got_user = true;
+    } else if (strcmp(key, "rpcpassword") == 0) {
+        snprintf(out_pass, pass_sz, "%s", val);
+        *got_pass = true;
+    } else if (strcmp(key, "rpcport") == 0 && out_port) {
+        int n = atoi(val);
+        if (n > 0 && n < 65536) *out_port = n;
+    }
+}
+
 static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz,
                                          char *out_pass, size_t pass_sz,
                                          int *out_port)
@@ -46,8 +87,7 @@ static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz
     char line[512];
     bool got_user = false, got_pass = false;
     while (fgets(line, sizeof(line), f)) {
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
+        char *p = lrc_skip_spaces_tabs(line);
         if (*p == '#' || *p == ';' || *p == '\n' || *p == '\0') continue;
 
         char *eq = strchr(p, '=');
@@ -55,24 +95,12 @@ static bool legacy_rpc_parse_conf_stream(FILE *f, char *out_user, size_t user_sz
         *eq = '\0';
         char *key = p;
         char *val = eq + 1;
-        char *kend = eq - 1;
-        while (kend > key && (*kend == ' ' || *kend == '\t')) *kend-- = '\0';
-        while (*val == ' ' || *val == '\t') val++;
-        char *vend = val + strlen(val);
-        while (vend > val && (vend[-1] == '\n' || vend[-1] == '\r' ||
-                              vend[-1] == ' '  || vend[-1] == '\t'))
-            *--vend = '\0';
+        lrc_trim_key_tail(key, eq - 1);
+        val = lrc_skip_spaces_tabs(val);
+        lrc_trim_val_tail(val);
 
-        if (strcmp(key, "rpcuser") == 0) {
-            snprintf(out_user, user_sz, "%s", val);
-            got_user = true;
-        } else if (strcmp(key, "rpcpassword") == 0) {
-            snprintf(out_pass, pass_sz, "%s", val);
-            got_pass = true;
-        } else if (strcmp(key, "rpcport") == 0 && out_port) {
-            int n = atoi(val);
-            if (n > 0 && n < 65536) *out_port = n;
-        }
+        lrc_apply_conf_pair(key, val, out_user, user_sz, out_pass, pass_sz,
+                            out_port, &got_user, &got_pass);
     }
     fclose(f);
     memory_cleanse(line, sizeof(line));
@@ -137,22 +165,34 @@ bool legacy_rpc_parse_conf(char *out_user, size_t user_sz,
                                       pass_sz, out_port);
 }
 
+/* True when a credential slot is absent or holds an empty string. */
+static bool lrc_cred_missing(const char *cred, size_t cred_sz)
+{
+    return !cred || cred_sz == 0 || cred[0] == '\0';
+}
+
+/* Copies a parsed conf credential into a caller slot that needs it. */
+static void lrc_copy_conf_cred(bool need, char *dst, size_t dst_sz,
+                               const char *src)
+{
+    if (need && dst && dst_sz)
+        snprintf(dst, dst_sz, "%s", src);
+}
+
 bool legacy_rpc_fill_missing_creds(char *user, size_t user_sz,
                                    char *pass, size_t pass_sz,
                                    int *port, bool port_is_explicit)
 {
-    bool need_user = !user || user_sz == 0 || user[0] == '\0';
-    bool need_pass = !pass || pass_sz == 0 || pass[0] == '\0';
+    bool need_user = lrc_cred_missing(user, user_sz);
+    bool need_pass = lrc_cred_missing(pass, pass_sz);
     if (!need_user && !need_pass)
         return true;
 
     int conf_port = port ? *port : 0;
     char u[64] = {0}, p[128] = {0};
     if (legacy_rpc_parse_conf(u, sizeof(u), p, sizeof(p), &conf_port)) {
-        if (need_user && user && user_sz)
-            snprintf(user, user_sz, "%s", u);
-        if (need_pass && pass && pass_sz)
-            snprintf(pass, pass_sz, "%s", p);
+        lrc_copy_conf_cred(need_user, user, user_sz, u);
+        lrc_copy_conf_cred(need_pass, pass, pass_sz, p);
         if (port && !port_is_explicit)
             *port = conf_port;
     }
@@ -241,20 +281,21 @@ static bool lrc_dial_target(const char *host, int port,
     return true;
 }
 
-bool legacy_rpc_call_with_timeout(const char *host, int port,
-                                  const char *user, const char *pass,
-                                  const char *body_json,
-                                  uint32_t timeout_ms,
-                                  char **out_resp,
-                                  char *err, size_t err_sz)
+/* Validates the wire-call arguments; the caller reports "bad args". */
+static bool lrc_call_args_valid(const char *host, int port,
+                                const char *body_json, char **out_resp,
+                                uint32_t timeout_ms)
 {
-    if (out_resp) *out_resp = NULL;
-    if (!host || port < 1 || port > UINT16_MAX || !body_json || !out_resp ||
-        timeout_ms == 0 || timeout_ms > LRC_TIMEOUT_MAX_MS) {
-        if (err && err_sz) snprintf(err, err_sz, "bad args");
-        return false;
-    }
+    return host && port >= 1 && port <= UINT16_MAX && body_json && out_resp &&
+           timeout_ms != 0 && timeout_ms <= LRC_TIMEOUT_MAX_MS;
+}
 
+/* Opens the socket, applies both timeouts and connects to the checked
+ * target. Returns PLATFORM_SOCKET_INVALID, with err written, on failure. */
+static platform_socket_t lrc_connect_socket(const char *host, int port,
+                                            uint32_t timeout_ms,
+                                            char *err, size_t err_sz)
+{
     platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
                                                    true, false);
     if (sock == PLATFORM_SOCKET_INVALID) {
@@ -262,7 +303,7 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
         snprintf(err, err_sz, "socket: %s",
                  platform_socket_error_string(platform_socket_last_error(),
                                               detail, sizeof(detail)));
-        return false;
+        return PLATFORM_SOCKET_INVALID;
     }
     (void)platform_socket_set_receive_timeout(sock, timeout_ms);
     (void)platform_socket_set_send_timeout(sock, timeout_ms);
@@ -270,7 +311,7 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
     struct sockaddr_in sa;
     if (!lrc_dial_target(host, port, &sa, err, err_sz)) {
         platform_socket_close(sock);
-        return false;
+        return PLATFORM_SOCKET_INVALID;
     }
     if (platform_socket_connect(sock, (struct sockaddr *)&sa,
                                 sizeof(sa)) != 0) {
@@ -280,9 +321,17 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
                  platform_socket_error_string(platform_socket_last_error(),
                                               detail, sizeof(detail)));
         platform_socket_close(sock);
-        return false;
+        return PLATFORM_SOCKET_INVALID;
     }
+    return sock;
+}
 
+/* Builds and sends the Basic-authenticated POST request; on failure the
+ * socket is closed and err written. */
+static bool lrc_send_request(platform_socket_t sock, const char *host,
+                             int port, const char *user, const char *pass,
+                             const char *body_json, char *err, size_t err_sz)
+{
     char userpass[256];
     snprintf(userpass, sizeof(userpass), "%s:%s",
              user ? user : "", pass ? pass : "");
@@ -324,7 +373,14 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
         lrc_free_req(req, req_cap); platform_socket_close(sock); return false;
     }
     lrc_free_req(req, req_cap);
+    return true;
+}
 
+/* Reads the response, growing the buffer up to LRC_RESP_MAX, and closes
+ * the socket. On success *out_resp owns the NUL-terminated body. */
+static bool lrc_receive_response(platform_socket_t sock, char **out_resp,
+                                 char *err, size_t err_sz)
+{
     size_t cap = 64 << 10;
     size_t total = 0;
     char *buf = zcl_malloc(cap, "lrc_resp");
@@ -371,6 +427,30 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
 
     *out_resp = buf;
     return true;
+}
+
+bool legacy_rpc_call_with_timeout(const char *host, int port,
+                                  const char *user, const char *pass,
+                                  const char *body_json,
+                                  uint32_t timeout_ms,
+                                  char **out_resp,
+                                  char *err, size_t err_sz)
+{
+    if (out_resp) *out_resp = NULL;
+    if (!lrc_call_args_valid(host, port, body_json, out_resp, timeout_ms)) {
+        if (err && err_sz) snprintf(err, err_sz, "bad args");
+        return false;
+    }
+
+    platform_socket_t sock = lrc_connect_socket(host, port, timeout_ms,
+                                                err, err_sz);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        return false;
+
+    if (!lrc_send_request(sock, host, port, user, pass, body_json,
+                          err, err_sz))
+        return false;
+    return lrc_receive_response(sock, out_resp, err, err_sz);
 }
 
 /* ── HTTP body locator ─────────────────────────────────────────── */
@@ -493,6 +573,51 @@ bool legacy_rpc_parse_result_string(const char *raw,
     return true;
 }
 
+/* The .error.message text of an array item, or the fallback when the
+ * item carries no readable rpc error. */
+static const char *lrc_item_error_text(const struct json_value *item)
+{
+    const struct json_value *jerr = json_get(item, "error");
+    const char *msg = "no string result";
+    if (jerr && jerr->type == JSON_OBJ) {
+        const struct json_value *m = json_get(jerr, "message");
+        if (m && m->type == JSON_STR) msg = json_get_str(m);
+    }
+    return msg;
+}
+
+/* Copies element i's .result string into its caller slot. Returns false,
+ * with err written, when the element is not an object with a string
+ * result or the string does not fit the slot. */
+static bool lrc_copy_result_slot(struct json_value *arr, int i,
+                                 char *out_strs, size_t slot_sz,
+                                 char *err, size_t err_sz)
+{
+    const struct json_value *item = json_at(arr, (size_t)i);
+    if (!item || item->type != JSON_OBJ) {
+        lrc_set_error(err, err_sz, "item[%d] not an object", i);
+        return false;
+    }
+    const struct json_value *r = json_get(item, "result");
+    if (!r || r->type != JSON_STR) {
+        lrc_set_error(err, err_sz, "item[%d] rpc error: %s", i,
+                      lrc_item_error_text(item));
+        return false;
+    }
+
+    const char *s = json_get_str(r);
+    size_t slen = s ? strlen(s) : 0;
+    if (slen + 1 > slot_sz) {
+        lrc_set_error(err, err_sz, "item[%d] string too long (%zu > %zu)",
+                      i, slen, slot_sz);
+        return false;
+    }
+    char *dst = out_strs + (size_t)i * slot_sz;
+    memcpy(dst, s ? s : "", slen);
+    dst[slen] = '\0';
+    return true;
+}
+
 bool legacy_rpc_parse_result_string_array(const char *raw,
                                           int expected,
                                           char *out_strs,
@@ -519,36 +644,10 @@ bool legacy_rpc_parse_result_string_array(const char *raw,
     }
 
     for (int i = 0; i < expected; i++) {
-        const struct json_value *item = json_at(&v, (size_t)i);
-        if (!item || item->type != JSON_OBJ) {
-            lrc_set_error(err, err_sz, "item[%d] not an object", i);
+        if (!lrc_copy_result_slot(&v, i, out_strs, slot_sz, err, err_sz)) {
             json_free(&v);
             return false;
         }
-        const struct json_value *r = json_get(item, "result");
-        if (!r || r->type != JSON_STR) {
-            const struct json_value *jerr = json_get(item, "error");
-            const char *msg = "no string result";
-            if (jerr && jerr->type == JSON_OBJ) {
-                const struct json_value *m = json_get(jerr, "message");
-                if (m && m->type == JSON_STR) msg = json_get_str(m);
-            }
-            lrc_set_error(err, err_sz, "item[%d] rpc error: %s", i, msg);
-            json_free(&v);
-            return false;
-        }
-
-        const char *s = json_get_str(r);
-        size_t slen = s ? strlen(s) : 0;
-        if (slen + 1 > slot_sz) {
-            lrc_set_error(err, err_sz, "item[%d] string too long (%zu > %zu)",
-                          i, slen, slot_sz);
-            json_free(&v);
-            return false;
-        }
-        char *dst = out_strs + (size_t)i * slot_sz;
-        memcpy(dst, s ? s : "", slen);
-        dst[slen] = '\0';
     }
 
     json_free(&v);
