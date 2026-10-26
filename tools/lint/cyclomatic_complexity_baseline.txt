@@ -2269,8 +2269,6 @@ tests/harness/src/test_simnet_wallet_import_backup.c:part1_import_rescan_spend:5
 tests/harness/src/test_simnet_wire_ibd.c:swi_run_malformed_body:18
 tests/harness/src/test_simnet_zmsg_onchain.c:test_simnet_zmsg_onchain:33
 tests/harness/src/test_site_routes.c:test_site_routes:79
-tests/harness/src/test_slo_ledger_summary.c:degraded_window_math_is_exact:18
-tests/harness/src/test_slo_ledger_summary.c:native_default_invocation_is_bounded:18
 tests/harness/src/test_slp.c:test_slp:176
 tests/harness/src/test_snapshot_apply_coins_kv.c:test_snapshot_apply_coins_kv:27
 tests/harness/src/test_snapshot_negotiation_stalled_condition.c:test_snapshot_negotiation_stalled_condition:26

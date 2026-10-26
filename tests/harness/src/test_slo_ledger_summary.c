@@ -98,6 +98,42 @@ static bool strict_primitives_reject_suffixes(void)
                                            sizeof(bad_suffix) - 1);
 }
 
+static bool ops_slo_default_invocation_runs(const struct zcl_command_registry *reg,
+                                            const struct zcl_command_spec *spec,
+                                            char *output, size_t output_cap,
+                                            enum zcl_command_exit *exit_code,
+                                            size_t *n)
+{
+    struct zcl_command_context ctx = {
+        .registry = reg,
+        .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+    };
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_int(&input, "window_hours", 24);
+    char why[128];
+    ok = ok && spec && zcl_command_registry_input_validate(
+        spec, &input, why, sizeof(why));
+    *n = ok ? zcl_command_registry_execute_json(
+        reg, spec, &ctx, &input, true, "ops.slo", "normal", 0, 0, NULL,
+        output, output_cap, exit_code) : 0;
+    json_free(&input);
+    return ok;
+}
+
+static bool ops_slo_data_has_schema_and_two_summaries(
+    const struct json_value *data)
+{
+    const struct json_value *summaries = data ?
+        json_get(data, "summaries") : NULL;
+    return data &&
+         strcmp(json_get_str(json_get(data, "schema")),
+                "zcl.slo_evidence.v1") == 0 &&
+         summaries && json_size(summaries) == 2;
+}
+
 static bool native_default_invocation_is_bounded(void)
 {
     char dir[64], path[128];
@@ -111,25 +147,11 @@ static bool native_default_invocation_is_bounded(void)
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const struct zcl_command_spec *spec =
         zcl_command_registry_find(reg, "ops.slo", NULL);
-    struct zcl_command_context ctx = {
-        .registry = reg,
-        .granted_capabilities = ~(uint64_t)0,
-        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
-    };
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    bool ok = json_push_kv_int(&input, "window_hours", 24);
-    char why[128];
-    ok = ok && spec && zcl_command_registry_input_validate(
-        spec, &input, why, sizeof(why));
-
     char output[ZCL_COMMAND_LIST_BUDGET + 1];
     enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-    size_t n = ok ? zcl_command_registry_execute_json(
-        reg, spec, &ctx, &input, true, "ops.slo", "normal", 0, 0, NULL,
-        output, sizeof(output), &exit_code) : 0;
-    json_free(&input);
+    size_t n = 0;
+    bool ok = ops_slo_default_invocation_runs(reg, spec, output,
+        sizeof(output), &exit_code, &n);
     unsetenv("ZCL_SLO_LEDGER_DIR");
     rmdir(dir);
 
@@ -140,14 +162,33 @@ static bool native_default_invocation_is_bounded(void)
          exit_code == ZCL_COMMAND_EXIT_OK && json_read(&result, output, n) &&
          json_get_bool(json_get(&result, "ok"));
     const struct json_value *data = ok ? json_get(&result, "data") : NULL;
-    const struct json_value *summaries = data ?
-        json_get(data, "summaries") : NULL;
-    ok = ok && data &&
-         strcmp(json_get_str(json_get(data, "schema")),
-                "zcl.slo_evidence.v1") == 0 &&
-         summaries && json_size(summaries) == 2;
+    ok = ok && ops_slo_data_has_schema_and_two_summaries(data);
     json_free(&result);
     return ok;
+}
+
+static bool write_degraded_window_samples(FILE *file, int64_t base)
+{
+    bool wrote = true;
+    for (int i = 0; i <= 24; i++) {
+        bool reachable = i < 10 || i > 14;
+        const char *gap = i == 20 ? "5" : (reachable ? "0" : "null");
+        wrote = wrote && write_sample(file, base + (int64_t)i * 3600,
+                                      reachable, gap);
+    }
+    return wrote;
+}
+
+static bool degraded_row_matches_contract(const struct json_value *row)
+{
+    return row &&
+         json_get_bool(json_get(row, "window_complete")) &&
+         json_get_int(json_get(row, "probe_count")) == 25 &&
+         json_get_int(json_get(row, "reachable_count")) == 20 &&
+         json_get_int(json_get(row, "max_gap_vs_oracle")) == 5 &&
+         json_get_int(json_get(row, "longest_unreachable_run_probes")) == 5 &&
+         json_get_int(json_get(row, "longest_unreachable_run_sec")) == 14400 &&
+         strcmp(json_get_str(json_get(row, "verdict")), "DEGRADED") == 0;
 }
 
 static bool degraded_window_math_is_exact(void)
@@ -161,13 +202,7 @@ static bool degraded_window_math_is_exact(void)
         return false;
     }
     const int64_t base = 1700000000;
-    bool wrote = true;
-    for (int i = 0; i <= 24; i++) {
-        bool reachable = i < 10 || i > 14;
-        const char *gap = i == 20 ? "5" : (reachable ? "0" : "null");
-        wrote = wrote && write_sample(file, base + (int64_t)i * 3600,
-                                      reachable, gap);
-    }
+    bool wrote = write_degraded_window_samples(file, base);
     bool closed = fclose(file) == 0;
 
     struct json_value report;
@@ -175,14 +210,7 @@ static bool degraded_window_math_is_exact(void)
     bool ok = wrote && closed && slo_ledger_summary_render_path(
         path, "canonical", 24, base + 24 * 3600 + 30, &report);
     const struct json_value *row = ok ? summary_for(&report, "canonical") : NULL;
-    ok = row &&
-         json_get_bool(json_get(row, "window_complete")) &&
-         json_get_int(json_get(row, "probe_count")) == 25 &&
-         json_get_int(json_get(row, "reachable_count")) == 20 &&
-         json_get_int(json_get(row, "max_gap_vs_oracle")) == 5 &&
-         json_get_int(json_get(row, "longest_unreachable_run_probes")) == 5 &&
-         json_get_int(json_get(row, "longest_unreachable_run_sec")) == 14400 &&
-         strcmp(json_get_str(json_get(row, "verdict")), "DEGRADED") == 0;
+    ok = degraded_row_matches_contract(row);
     json_free(&report);
     unlink(path);
     rmdir(dir);
