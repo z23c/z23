@@ -269,52 +269,121 @@ bool utxo_apply_check_and_insert_anchors_full_replay(
     return check_and_insert_anchors(db, blk, height, summary, true);
 }
 
+enum bind_guard_cursor_scan {
+    BIND_GUARD_CURSOR_READ_FAILED,
+    BIND_GUARD_CURSORS_INCOMPLETE,
+    BIND_GUARD_CURSORS_COMPLETE,
+};
+
+static enum bind_guard_cursor_scan bind_guard_scan_activation_cursors(
+    sqlite3 *db, int *failed_pool)
+{
+    for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
+        int64_t cur = -1;
+        bool found = false;
+        *failed_pool = pool;
+        if (!anchor_kv_activation_cursor(db, pool, &cur, &found))
+            return BIND_GUARD_CURSOR_READ_FAILED;
+        if (!found || cur != 0)
+            return BIND_GUARD_CURSORS_INCOMPLETE;
+    }
+    return BIND_GUARD_CURSORS_COMPLETE;
+}
+
+enum bind_guard_coins_result {
+    BIND_GUARD_COINS_DERIVE_FAILED,
+    BIND_GUARD_COINS_NO_AUTHORITY,
+    BIND_GUARD_COINS_AUTHORITY_PRESENT,
+};
+
+static enum bind_guard_coins_result bind_guard_derive_coins_authority(
+    sqlite3 *db, int32_t *coins_h)
+{
+    uint8_t cb_hash[32];
+    bool cb_hash_found = false, cb_found = false;
+    if (!reducer_frontier_derive_coins_best(db, coins_h, cb_hash,
+                                            &cb_hash_found, &cb_found))
+        return BIND_GUARD_COINS_DERIVE_FAILED;
+    if (!cb_found || *coins_h < 0)
+        return BIND_GUARD_COINS_NO_AUTHORITY;
+    return BIND_GUARD_COINS_AUTHORITY_PRESENT;
+}
+
+enum bind_guard_frontier_result {
+    BIND_GUARD_FRONTIER_READ_FAILED,
+    BIND_GUARD_FRONTIER_UNUSABLE,
+    BIND_GUARD_FRONTIER_BELOW_TIP,
+};
+
+static enum bind_guard_frontier_result bind_guard_sapling_frontier_status(
+    sqlite3 *db, int32_t coins_h, struct uint256 *root_out,
+    int64_t *height_out)
+{
+    struct incremental_merkle_tree tree;
+    enum anchor_kv_lookup_result lr = anchor_kv_latest_tree(
+        db, ANCHOR_POOL_SAPLING, &tree, root_out, height_out);
+    if (lr == ANCHOR_KV_ERROR)
+        return BIND_GUARD_FRONTIER_READ_FAILED;
+    /* the incomplete cases are owned by positive cursors */
+    if (lr != ANCHOR_KV_FOUND)
+        return BIND_GUARD_FRONTIER_UNUSABLE;
+    /* frontier at/past the resume anchor — consistent */
+    if (*height_out >= (int64_t)coins_h)
+        return BIND_GUARD_FRONTIER_UNUSABLE;
+    return BIND_GUARD_FRONTIER_BELOW_TIP;
+}
+
+static void bind_guard_set_height_outputs(int64_t *frontier_h_out,
+                                          int32_t *coins_h_out,
+                                          int64_t frontier_h, int32_t coins_h)
+{
+    if (frontier_h_out)
+        *frontier_h_out = frontier_h;
+    if (coins_h_out)
+        *coins_h_out = coins_h;
+}
+
 bool utxo_apply_anchor_bind_mismatch(sqlite3 *db, struct node_db *ndb,
                                      int64_t *frontier_h_out,
                                      int32_t *coins_h_out)
 {
-    if (frontier_h_out) *frontier_h_out = -1;
-    if (coins_h_out) *coins_h_out = -1;
+    bind_guard_set_height_outputs(frontier_h_out, coins_h_out, -1, -1);
     if (!db || !ndb)
         return false;  /* no evidence channel — pure detection stays off */
 
     /* Only a COMPLETE-history claim (both cursors present and 0) can be
      * height-mismatched; a positive cursor is the safe wedge the backfill
      * blocker already names. */
-    for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
-        int64_t cur = -1;
-        bool found = false;
-        if (!anchor_kv_activation_cursor(db, pool, &cur, &found))
-            LOG_RETURN(false, ANCHOR_STAGE_SUBSYS,
-                       "[utxo_apply] bind guard: cursor read failed pool=%d",
-                       pool);
-        if (!found || cur != 0)
-            return false;
-    }
+    int failed_pool = ANCHOR_POOL_SPROUT;
+    enum bind_guard_cursor_scan scan = bind_guard_scan_activation_cursors(
+        db, &failed_pool);
+    if (scan == BIND_GUARD_CURSOR_READ_FAILED)
+        LOG_RETURN(false, ANCHOR_STAGE_SUBSYS,
+                   "[utxo_apply] bind guard: cursor read failed pool=%d",
+                   failed_pool);
+    if (scan != BIND_GUARD_CURSORS_COMPLETE)
+        return false;
 
     int32_t coins_h = -1;
-    uint8_t cb_hash[32];
-    bool cb_hash_found = false, cb_found = false;
-    if (!reducer_frontier_derive_coins_best(db, &coins_h, cb_hash,
-                                            &cb_hash_found, &cb_found))
+    enum bind_guard_coins_result coins = bind_guard_derive_coins_authority(
+        db, &coins_h);
+    if (coins == BIND_GUARD_COINS_DERIVE_FAILED)
         LOG_RETURN(false, ANCHOR_STAGE_SUBSYS,
                    "[utxo_apply] bind guard: coins-best derive failed");
-    if (!cb_found || coins_h < 0)
+    if (coins != BIND_GUARD_COINS_AUTHORITY_PRESENT)
         return false;  /* no coins authority — nothing to mismatch against */
 
-    struct incremental_merkle_tree tree;
     struct uint256 frontier_root;
     int64_t frontier_h = -1;
-    enum anchor_kv_lookup_result lr = anchor_kv_latest_tree(
-        db, ANCHOR_POOL_SAPLING, &tree, &frontier_root, &frontier_h);
-    if (lr == ANCHOR_KV_ERROR)
+    enum bind_guard_frontier_result frontier =
+        bind_guard_sapling_frontier_status(db, coins_h, &frontier_root,
+                                           &frontier_h);
+    if (frontier == BIND_GUARD_FRONTIER_READ_FAILED)
         LOG_RETURN(false, ANCHOR_STAGE_SUBSYS,
                    "[utxo_apply] bind guard: latest Sapling frontier read "
                    "failed");
-    if (lr != ANCHOR_KV_FOUND)
-        return false;  /* the incomplete cases are owned by positive cursors */
-    if (frontier_h >= (int64_t)coins_h)
-        return false;  /* frontier at/past the resume anchor — consistent */
+    if (frontier != BIND_GUARD_FRONTIER_BELOW_TIP)
+        return false;
 
     /* The frontier the fold would append to predates the resume anchor. That
      * is consistent ONLY when no Sapling-output block sits in
@@ -331,8 +400,8 @@ bool utxo_apply_anchor_bind_mismatch(sqlite3 *db, struct node_db *ndb,
     if (memcmp(frontier_root.data, blk.sapling_root, 32) == 0)
         return false;  /* commitment-free tail — the frontier is still valid */
 
-    if (frontier_h_out) *frontier_h_out = frontier_h;
-    if (coins_h_out) *coins_h_out = coins_h;
+    bind_guard_set_height_outputs(frontier_h_out, coins_h_out, frontier_h,
+                                  coins_h);
     return true;
 }
 
