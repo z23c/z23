@@ -679,7 +679,7 @@ static void r1cs_print_row_difference(
 #define rb (*reference_b)
 #define rc (*reference_c)
 #define ref (*reference_file)
-static void r1cs_hash_and_compare_rows(
+static bool r1cs_hash_and_compare_rows(
     struct constraint_system *system_storage, uint8_t *rows, size_t n_rows,
     FILE **reference_file, size_t ref_rows, uint8_t *ref_rowh,
     struct ctbuf *native_a, struct ctbuf *native_b, struct ctbuf *native_c,
@@ -688,6 +688,7 @@ static void r1cs_hash_and_compare_rows(
     const struct spend_section_shape *sections, size_t nsec, int *failure_count)
 {
     size_t diffs = 0, first_diff = 0;
+    size_t reference_rows_read = 0;
     bool have_first_diff = false;
     for (size_t i = 0; i < n_rows; i++) {
         const struct r1cs_constraint *k = &cs.constraints[i];
@@ -704,6 +705,7 @@ static void r1cs_hash_and_compare_rows(
                 fclose(ref);
                 ref = NULL;
             } else {
+                reference_rows_read++;
                 if (ref_rowh)
                     row_hash(ref_rowh + i * 32, &ra, &rb, &rc);
                 if (!ct_equal(&na, &ra) || !ct_equal(&nb, &rb)
@@ -732,6 +734,7 @@ static void r1cs_hash_and_compare_rows(
         fclose(ref);
         ref = NULL;
     }
+    return reference_rows_read >= R1CS_PREFIX_CONSTRAINTS;
 }
 #undef ref
 #undef rc
@@ -966,10 +969,15 @@ int test_groth16_r1cs_oracle(void)
                    "diff only\n");
     }
 
-    r1cs_hash_and_compare_rows(&cs, rows, n_rows, &ref, ref_rows, ref_rowh,
+    bool reference_complete = r1cs_hash_and_compare_rows(
+        &cs, rows, n_rows, &ref, ref_rows, ref_rowh,
         &na, &nb, &nc, &ra, &rb, &rc, &scratch, &scratch_cap,
         sections, nsec, &failures);
 
+    if (!reference_complete) {
+        free(ref_rowh);
+        ref_rowh = NULL;
+    }
     r1cs_print_reference_hashes(&ref_rowh);
 
     r1cs_check_section_hashes(rows, n_rows, &failures);
