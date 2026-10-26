@@ -128,6 +128,32 @@ size_t api_serve_downloadstats(uint8_t *response, size_t response_max)
     json_free(&body);
     return n;
 }
+/* Compose the public warning-reasons string: the health snapshot's own
+ * reasons plus the typed blocker id, joined by a comma when both exist. */
+static void api_health_format_public_warning_reasons(
+    const struct node_health_snapshot *health,
+    const struct blocker_snapshot *warning_blocker,
+    char *reasons,
+    size_t reasons_size)
+{
+    snprintf(reasons, reasons_size, "%s%s%s", health->warning_reasons,
+             health->warning_reasons[0] && warning_blocker ? "," : "",
+             warning_blocker ? warning_blocker->id : "");
+}
+
+/* Derive the public serving and healthy flags from the health snapshot,
+ * the authority blocker, and the agent security posture. */
+static void api_health_public_serving_flags(
+    const struct node_health_snapshot *health,
+    struct agent_security_posture *posture,
+    const struct blocker_snapshot *authority_blocker,
+    bool *public_serving,
+    bool *public_healthy)
+{
+    *public_serving = health->serving && !authority_blocker &&
+        agent_security_posture_allows_public_serving(posture);
+    *public_healthy = health->healthy && *public_serving;
+}
 /* Health check — lightweight, machine-readable */
 size_t api_serve_health(uint8_t *response, size_t response_max)
 {
@@ -149,13 +175,13 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
         (warning_blocker ? 1u : 0u);
     char public_warning_reasons[sizeof(health.warning_reasons) +
                                 BLOCKER_ID_MAX + 2] = {0};
-    snprintf(public_warning_reasons, sizeof(public_warning_reasons),
-             "%s%s%s", health.warning_reasons,
-             health.warning_reasons[0] && warning_blocker ? "," : "",
-             warning_blocker ? warning_blocker->id : "");
-    bool public_serving = health.serving && !authority_blocker &&
-        agent_security_posture_allows_public_serving(&posture);
-    bool public_healthy = health.healthy && public_serving;
+    api_health_format_public_warning_reasons(&health, warning_blocker,
+                                             public_warning_reasons,
+                                             sizeof(public_warning_reasons));
+    bool public_serving;
+    bool public_healthy;
+    api_health_public_serving_flags(&health, &posture, authority_blocker,
+                                    &public_serving, &public_healthy);
 
     struct json_value body;
     json_init(&body);
@@ -364,6 +390,72 @@ size_t api_serve_node_mmb(uint8_t *response, size_t response_max)
     return n;
 }
 
+/* Chain tip info: read tip/header heights, tip time, and hex hashes from
+ * the active chain into the caller's buffers. */
+static void api_node_status_read_chain_tip(struct main_state *ms,
+                                           int *tip_height,
+                                           int *header_height,
+                                           int64_t *tip_time,
+                                           char *tip_hash_hex,
+                                           char *sapling_root_hex,
+                                           char *best_header_hex)
+{
+    if (!ms)
+        return;
+    *tip_height = reducer_frontier_provable_tip_cached();
+    const struct block_index *tip =
+        active_chain_at(&ms->chain_active, *tip_height);
+    if (tip) {
+        *tip_time = (int64_t)tip->nTime;
+        if (tip->phashBlock) {
+            uint256_get_hex(tip->phashBlock, tip_hash_hex);
+        }
+        uint256_get_hex(&tip->hashFinalSaplingRoot, sapling_root_hex);
+    }
+    if (ms->pindex_best_header) {
+        *header_height = ms->pindex_best_header->nHeight;
+        if (ms->pindex_best_header->phashBlock)
+            uint256_get_hex(ms->pindex_best_header->phashBlock,
+                            best_header_hex);
+    }
+}
+
+/* Read current sapling tree from node_state (authoritative source,
+ * updated by sync_controller on every block connection). */
+static void api_node_status_read_sapling_tree(size_t *sapling_tree_size,
+                                              char *sapling_tree_root_hex)
+{
+    struct node_db *ndb = g_api_ctx.node_db ?
+        g_api_ctx.node_db : app_runtime_node_db();
+    if (ndb && ndb->db) {
+        uint8_t tree_buf[8192];
+        size_t tree_len = 0;
+        if (node_db_state_get(ndb, "sapling_tree",
+                tree_buf, sizeof(tree_buf), &tree_len)
+            && tree_len > 0) {
+            struct incremental_merkle_tree api_tree;
+            sapling_tree_init(&api_tree);
+            struct byte_stream tbs;
+            stream_init_from_data(&tbs, tree_buf, tree_len);
+            if (incremental_tree_deserialize(&api_tree, &tbs)) {
+                *sapling_tree_size = incremental_tree_size(&api_tree);
+                if (*sapling_tree_size > 0) {
+                    struct uint256 tree_root;
+                    incremental_tree_root(&api_tree, &tree_root);
+                    uint256_get_hex(&tree_root,
+                                    sapling_tree_root_hex);
+                }
+            }
+        }
+    }
+}
+
+/* Hex buffers that were never filled in still hold their "null" sentinel;
+ * map that sentinel to a JSON null. */
+static const char *api_node_status_hex_or_null(const char *hex)
+{
+    return strcmp(hex, "null") == 0 ? NULL : hex;
+}
 /* Route: /api/node/status — comprehensive one-stop diagnostics */
 size_t api_serve_node_status(uint8_t *response, size_t response_max)
 {
@@ -396,53 +488,14 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     int64_t tip_time = 0;
     size_t sapling_tree_size = 0;
 
-    struct main_state *ms = g_api_ctx.main_state;
-    if (ms) {
-        tip_height = reducer_frontier_provable_tip_cached();
-        const struct block_index *tip =
-            active_chain_at(&ms->chain_active, tip_height);
-        if (tip) {
-            tip_time = (int64_t)tip->nTime;
-            if (tip->phashBlock) {
-                uint256_get_hex(tip->phashBlock, tip_hash_hex);
-            }
-            uint256_get_hex(&tip->hashFinalSaplingRoot, sapling_root_hex);
-        }
-        if (ms->pindex_best_header) {
-            header_height = ms->pindex_best_header->nHeight;
-            if (ms->pindex_best_header->phashBlock)
-                uint256_get_hex(ms->pindex_best_header->phashBlock,
-                                best_header_hex);
-        }
-    }
-    /* Read current sapling tree from node_state (authoritative source,
-     * updated by sync_controller on every block connection). */
+    api_node_status_read_chain_tip(g_api_ctx.main_state, &tip_height,
+                                   &header_height, &tip_time,
+                                   tip_hash_hex, sapling_root_hex,
+                                   best_header_hex);
+
     char sapling_tree_root_hex[65] = "null";
-    {
-        struct node_db *ndb = g_api_ctx.node_db ?
-            g_api_ctx.node_db : app_runtime_node_db();
-        if (ndb && ndb->db) {
-            uint8_t tree_buf[8192];
-            size_t tree_len = 0;
-            if (node_db_state_get(ndb, "sapling_tree",
-                    tree_buf, sizeof(tree_buf), &tree_len)
-                && tree_len > 0) {
-                struct incremental_merkle_tree api_tree;
-                sapling_tree_init(&api_tree);
-                struct byte_stream tbs;
-                stream_init_from_data(&tbs, tree_buf, tree_len);
-                if (incremental_tree_deserialize(&api_tree, &tbs)) {
-                    sapling_tree_size = incremental_tree_size(&api_tree);
-                    if (sapling_tree_size > 0) {
-                        struct uint256 tree_root;
-                        incremental_tree_root(&api_tree, &tree_root);
-                        uint256_get_hex(&tree_root,
-                                        sapling_tree_root_hex);
-                    }
-                }
-            }
-        }
-    }
+    api_node_status_read_sapling_tree(&sapling_tree_size,
+                                      sapling_tree_root_hex);
 
     /* Download stats — read off the health snapshot already collected
      * above instead of re-fetching from the download manager. */
@@ -471,13 +524,11 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_set_object(&chain);
     json_push_kv_int(&chain, "tip_height", tip_height);
     api_json_push_kv_nullable_str(&chain, "tip_hash",
-                                  strcmp(tip_hash_hex, "null") == 0
-                                      ? NULL : tip_hash_hex);
+                                  api_node_status_hex_or_null(tip_hash_hex));
     json_push_kv_int(&chain, "tip_time", tip_time);
     json_push_kv_int(&chain, "header_height", header_height);
     api_json_push_kv_nullable_str(&chain, "best_header_hash",
-                                  strcmp(best_header_hex, "null") == 0
-                                      ? NULL : best_header_hex);
+                                  api_node_status_hex_or_null(best_header_hex));
     json_push_kv_int(&chain, "peer_best_height", health.peer_best_height);
     json_push_kv_int(&chain, "tip_lag", health.tip_lag);
     json_push_kv_int(&chain, "blocks_behind",
@@ -491,11 +542,9 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_set_object(&sapling);
     json_push_kv_int(&sapling, "tree_size", (int64_t)sapling_tree_size);
     api_json_push_kv_nullable_str(&sapling, "tree_root",
-                                  strcmp(sapling_tree_root_hex, "null") == 0
-                                      ? NULL : sapling_tree_root_hex);
+                                  api_node_status_hex_or_null(sapling_tree_root_hex));
     api_json_push_kv_nullable_str(&sapling, "header_root",
-                                  strcmp(sapling_root_hex, "null") == 0
-                                      ? NULL : sapling_root_hex);
+                                  api_node_status_hex_or_null(sapling_root_hex));
     json_push_kv_bool(&sapling, "roots_match",
                       sapling_tree_size > 0 &&
                       strcmp(sapling_tree_root_hex, sapling_root_hex) == 0);

@@ -1013,8 +1013,6 @@ engine/controllers/src/api_controller.c:api_cache_refresh_thread:36
 engine/controllers/src/api_controller_app_protocols.c:api_app_protocol_push_openapi_extensions:40
 engine/controllers/src/api_controller_events.c:api_serve_events:18
 engine/controllers/src/api_controller_index.c:api_openapi_operation_json:28
-engine/controllers/src/api_controller_node.c:api_serve_health:17
-engine/controllers/src/api_controller_node.c:api_serve_node_status:26
 engine/controllers/src/api_controller_query_filter_contracts.c:api_query_filter_contract_valid:32
 engine/controllers/src/api_controller_query_filter_contracts.c:api_query_filter_validate:21
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_dispatch:42
