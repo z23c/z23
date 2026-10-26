@@ -37,7 +37,7 @@
  *
  * remedy():
  *   1. process_block_invalidate(stale target) — marks it BLOCK_FAILED_VALID
- *      +disconnects/reorgs via the validated path so find_most_work_chain
+ *      + disconnects/reorgs via the validated path so find_most_work_chain
  *      stops selecting it.
  *   2. rebuild_recent(from ~tip-2) — fetch+connect the canonical chain's
  *      recent bodies from zclassicd through the normal validated accept
@@ -163,8 +163,8 @@ static _Atomic int g_test_invalidate_calls;
 static _Atomic int g_test_rebuild_calls;
 static _Atomic int g_test_queue_body_calls;
 static _Atomic int64_t g_test_last_invalidate_height = -1;
-static _Atomic int64_t g_test_last_rebuild_from = -1;
-static _Atomic int64_t g_test_last_queue_body_height = -1;
+static _Atomic int g_test_last_rebuild_from = -1;
+static _Atomic int g_test_last_queue_body_height = -1;
 #endif
 
 static struct main_state *ms_or_null(void)
