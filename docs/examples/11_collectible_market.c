@@ -358,10 +358,6 @@ static bool build_htlc_deed_spend(struct transaction *tx,
     return true;
 }
 
-/* [1/6] Mint the three one-of-one deeds: one ZSLP GENESIS per collectible,
- * each document_hash-bound to distinct "artwork" bytes, then independently
- * re-parsed and looked up in the projection to prove the binding is
- * on-chain. Fills deed_token_id/deed_holder_txid for the sale paths. */
 static void mint_collectible_deeds(struct simnet *sim, struct node_db *db,
                                    const struct script *seller_script,
                                    struct uint256 deed_token_id[3],
@@ -434,9 +430,6 @@ static void mint_collectible_deeds(struct simnet *sim, struct node_db *db,
     }
 }
 
-/* [2/6] Claim the storefront: ZNAM REGISTER plus a SET_TEXT "onion" record
- * pointing at the (illustrative) storefront address, each indexed and read
- * back out of the projection. */
 static void claim_storefront(struct simnet *sim, struct node_db *db)
 {
     printf("\n[2/6] claiming a permanent on-chain storefront identity "
@@ -515,8 +508,6 @@ static void claim_storefront(struct simnet *sim, struct node_db *db)
           "service)\n", text_height, gallery_name, onion_out);
 }
 
-/* [3/6] Sale path A: the buyer's plain payment and deed #1's SLP SEND land
- * in the SAME block; provenance then reads GENESIS -> SEND. */
 static void sell_deed_direct(struct simnet *sim, struct node_db *db,
                              const struct script *seller_script,
                              const struct script *direct_script,
@@ -603,9 +594,6 @@ static void sell_deed_direct(struct simnet *sim, struct node_db *db,
     transaction_free(&send_tx1);
 }
 
-/* [4/6] Sale path B, leg 1: deed #2 is locked behind an HTLC and the
- * collector redeems it by revealing the secret, continuing the token's
- * provenance straight through the contract. */
 static void sell_deed_via_escrow(struct simnet *sim, struct node_db *db,
                                  const uint8_t collector_pkh[20],
                                  const uint8_t seller_pkh[20],
@@ -697,9 +685,6 @@ static void sell_deed_via_escrow(struct simnet *sim, struct node_db *db,
     transaction_free(&redeem_tx2);
 }
 
-/* [5/6] Sale path B, leg 2: deed #3's escrow listing never completes — the
- * pre-locktime refund is rejected as non-final, then after the CLTV timeout
- * the seller refunds the deed back to themselves. */
 static void refund_deed_after_timeout(struct simnet *sim, struct node_db *db,
                                       const uint8_t seller_pkh[20],
                                       const struct script *seller_script,
