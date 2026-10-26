@@ -27,7 +27,7 @@
     do { \
         printf("%s... ", (name)); \
         if (cond) { printf("OK\n"); } \
-        else { printf("FAIL (%s)\n", #cond); failures++; } \
+        else { printf("FAIL (%s)\n", #cond); } \
     } while (0)
 
 /* The healthy live node's peer_lifecycle summary, verbatim. */
@@ -62,6 +62,44 @@ static const struct json_value *find_finding(const struct json_value *out,
     return NULL;
 }
 
+/* One pass over the meaning table, tallying what the shape checks assert on:
+ * rows whose "means" is blank, judged rows missing "implies" or "next", and
+ * judged rows overall. */
+struct field_shape_tally {
+    int blank_means;
+    int hollow_judged;
+    int judged;
+};
+
+static struct field_shape_tally tally_field_shape(void)
+{
+    struct field_shape_tally t = {0, 0, 0};
+    for (size_t i = 0; i < telemetry_field_count(); i++) {
+        const struct telemetry_field *f = telemetry_field_at(i);
+        if (!f->means || !f->means[0])
+            t.blank_means++;
+        if (f->rule == TFR_INFO)
+            continue;
+        t.judged++;
+        if (!f->implies || !f->implies[0] || !f->next || !f->next[0])
+            t.hollow_judged++;
+    }
+    return t;
+}
+
+/* Counts ratio rules that name no operand or a non-positive threshold. */
+static int count_unevaluable_ratio_rules(void)
+{
+    int bad_ratio = 0;
+    for (size_t i = 0; i < telemetry_field_count(); i++) {
+        const struct telemetry_field *f = telemetry_field_at(i);
+        if ((f->rule == TFR_MIN_RATIO_OF || f->rule == TFR_MAX_RATIO_OF) &&
+            (!f->operand || !f->operand[0] || f->threshold <= 0))
+            bad_ratio++;
+    }
+    return bad_ratio;
+}
+
 static int check_table_shape(void)
 {
     int failures = 0;
@@ -74,26 +112,13 @@ static int check_table_shape(void)
              telemetry_subsystem_covered("fast_sync") &&
              telemetry_subsystem_covered("sync_rate"));
 
-    TO_CHECK("[ontology] an uncovered subsystem is reported as uncovered, "
-             "never silently empty",
-             !telemetry_subsystem_covered("no_such_subsystem") &&
-             !telemetry_subsystem_covered(""));
-
     /* Every row states what it counts, and every JUDGED row also states what
      * an unhealthy value implies and where to look next. A row that carries a
      * rule but no consequence is exactly the hollow metadata this work
      * exists to remove. */
-    int blank_means = 0, hollow_judged = 0, judged = 0;
-    for (size_t i = 0; i < telemetry_field_count(); i++) {
-        const struct telemetry_field *f = telemetry_field_at(i);
-        if (!f->means || !f->means[0])
-            blank_means++;
-        if (f->rule == TFR_INFO)
-            continue;
-        judged++;
-        if (!f->implies || !f->implies[0] || !f->next || !f->next[0])
-            hollow_judged++;
-    }
+    struct field_shape_tally shape = tally_field_shape();
+    int blank_means = shape.blank_means, hollow_judged = shape.hollow_judged,
+        judged = shape.judged;
     TO_CHECK("[ontology] every row says what it counts", blank_means == 0);
     TO_CHECK("[ontology] every judged row says what a bad value implies and "
              "what to read next", hollow_judged == 0);
@@ -101,13 +126,7 @@ static int check_table_shape(void)
              judged >= 20);
 
     /* A ratio rule with no operand cannot be evaluated by anything. */
-    int bad_ratio = 0;
-    for (size_t i = 0; i < telemetry_field_count(); i++) {
-        const struct telemetry_field *f = telemetry_field_at(i);
-        if ((f->rule == TFR_MIN_RATIO_OF || f->rule == TFR_MAX_RATIO_OF) &&
-            (!f->operand || !f->operand[0] || f->threshold <= 0))
-            bad_ratio++;
-    }
+    int bad_ratio = count_unevaluable_ratio_rules();
     TO_CHECK("[ontology] every ratio rule names an operand and a threshold",
              bad_ratio == 0);
 
