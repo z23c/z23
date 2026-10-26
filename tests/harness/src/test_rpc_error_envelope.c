@@ -86,7 +86,7 @@ static int rpc_secret_retirement_cases(void)
     return failures;
 }
 
-int test_rpc_error_envelope(void)
+static int rpc_err_env_basic_shape(void)
 {
     int failures = 0;
 
@@ -107,6 +107,12 @@ int test_rpc_error_envelope(void)
         json_free(&err);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_full_with_method(void)
+{
+    int failures = 0;
 
     /* ── json_rpc_error_full: {code, message, method} ────────── */
 
@@ -124,6 +130,12 @@ int test_rpc_error_envelope(void)
         json_free(&err);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_full_null_method(void)
+{
+    int failures = 0;
 
     printf("rpc_error_full with NULL method omits field... ");
     {
@@ -136,6 +148,38 @@ int test_rpc_error_envelope(void)
         json_free(&err);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static bool rpc_err_env_response_method_object(const struct json_value *err,
+                                               bool ok)
+{
+    ok = ok && json_get_int(json_get(err, "code")) == -32601;
+    const struct json_value *m = json_get(err, "message");
+    ok = ok && m && strcmp(json_get_str(m), "Method not found") == 0;
+    const struct json_value *mt = json_get(err, "method");
+    ok = ok && mt && strcmp(json_get_str(mt), "getinfo") == 0;
+    return ok;
+}
+
+static bool rpc_err_env_response_top_fields(const struct json_value *v,
+                                            bool ok)
+{
+    const struct json_value *res = json_get(v, "result");
+    const struct json_value *err = json_get(v, "error");
+    const struct json_value *id = json_get(v, "id");
+    ok = ok && res && res->type == JSON_NULL;
+    ok = ok && err && err->type == JSON_OBJ;
+    ok = ok && id && json_get_int(id) == 1;
+    if (err && err->type == JSON_OBJ) {
+        ok = rpc_err_env_response_method_object(err, ok);
+    }
+    return ok;
+}
+
+static int rpc_err_env_response_with_method(void)
+{
+    int failures = 0;
 
     /* ── json_rpc_error_response: full string output ──────────── */
 
@@ -149,23 +193,17 @@ int test_rpc_error_envelope(void)
         struct json_value v;
         ok = ok && json_read(&v, buf, n);
         if (ok) {
-            const struct json_value *res = json_get(&v, "result");
-            const struct json_value *err = json_get(&v, "error");
-            const struct json_value *id = json_get(&v, "id");
-            ok = ok && res && res->type == JSON_NULL;
-            ok = ok && err && err->type == JSON_OBJ;
-            ok = ok && id && json_get_int(id) == 1;
-            if (err && err->type == JSON_OBJ) {
-                ok = ok && json_get_int(json_get(err, "code")) == -32601;
-                const struct json_value *m = json_get(err, "message");
-                ok = ok && m && strcmp(json_get_str(m), "Method not found") == 0;
-                const struct json_value *mt = json_get(err, "method");
-                ok = ok && mt && strcmp(json_get_str(mt), "getinfo") == 0;
-            }
+            ok = rpc_err_env_response_top_fields(&v, ok);
         }
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_response_without_method(void)
+{
+    int failures = 0;
 
     printf("error_response without method omits method field... ");
     {
@@ -188,6 +226,12 @@ int test_rpc_error_envelope(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_response_string_id(void)
+{
+    int failures = 0;
 
     printf("error_response with string id... ");
     {
@@ -205,6 +249,12 @@ int test_rpc_error_envelope(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_code_constants(void)
+{
+    int failures = 0;
 
     /* ── Error code constants ─────────────────────────────────── */
 
@@ -217,6 +267,12 @@ int test_rpc_error_envelope(void)
         ok = ok && (RPC_INTERNAL_ERROR == -32603);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_ban_has_code_message(void)
+{
+    int failures = 0;
 
     /* ── All pre-dispatch error shapes ─────────────────────────── */
 
@@ -237,6 +293,12 @@ int test_rpc_error_envelope(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_rate_limit_code(void)
+{
+    int failures = 0;
 
     printf("rate limit error: has code + message... ");
     {
@@ -253,6 +315,12 @@ int test_rpc_error_envelope(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_warmup_includes_method(void)
+{
+    int failures = 0;
 
     printf("warmup error: includes method field... ");
     {
@@ -266,6 +334,12 @@ int test_rpc_error_envelope(void)
         json_free(&err);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_not_found_includes_method(void)
+{
+    int failures = 0;
 
     printf("method-not-found error: includes method field... ");
     {
@@ -278,6 +352,12 @@ int test_rpc_error_envelope(void)
         json_free(&err);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_oom_includes_method(void)
+{
+    int failures = 0;
 
     printf("OOM error: includes method when available... ");
     {
@@ -297,6 +377,12 @@ int test_rpc_error_envelope(void)
         json_free(&v);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_response_small_buffer(void)
+{
+    int failures = 0;
 
     /* ── Buffer edge cases ────────────────────────────────────── */
 
@@ -309,6 +395,12 @@ int test_rpc_error_envelope(void)
         bool ok = n <= sizeof(buf) - 1;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_response_zero_buffer(void)
+{
+    int failures = 0;
 
     printf("error_response zero buffer returns 0... ");
     {
@@ -316,6 +408,54 @@ int test_rpc_error_envelope(void)
         bool ok = (n == 0);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static bool rpc_err_env_build_long_string_array(struct json_value *result)
+{
+        /* Build a result array of long strings whose serialized form
+         * comfortably exceeds the old 4 MiB fixed buffer. 1200 entries
+         * of ~4 KiB each ≈ 4.9 MiB of body. */
+    json_init(result);
+    json_set_array(result);
+
+    char chunk[4096];
+    memset(chunk, 'a', sizeof(chunk) - 1);
+    chunk[sizeof(chunk) - 1] = '\0';
+
+    bool built = true;
+    for (int i = 0; i < 1200 && built; i++) {
+        struct json_value s;
+        json_init(&s);
+        json_set_str(&s, chunk);
+        built = json_push_back(result, &s);
+        json_free(&s);
+    }
+    return built;
+}
+
+static bool rpc_err_env_oversized_round_trip(char *buf, size_t len, bool ok)
+{
+        /* The whole body must be present and re-parse cleanly — a real
+         * OOB/partial send would not round-trip. Allocation is len+1 so
+         * buf[len] is a valid index for the terminating NUL. */
+    ok = ok && buf[len] == '\0';
+    struct json_value parsed;
+    json_init(&parsed);
+    bool rt = json_read(&parsed, buf, len);
+    ok = ok && rt;
+    if (rt) {
+        const struct json_value *res = json_get(&parsed, "result");
+        ok = ok && res && res->type == JSON_ARR
+                && json_size(res) == 1200;
+    }
+    json_free(&parsed);
+    return ok;
+}
+
+static int rpc_err_env_oversized_response(void)
+{
+    int failures = 0;
 
     /* ── Response serialization: >4 MiB responses ──────────────────
      *
@@ -326,25 +466,8 @@ int test_rpc_error_envelope(void)
 
     printf(">4MiB response is fully sized, never OOB... ");
     {
-        /* Build a result array of long strings whose serialized form
-         * comfortably exceeds the old 4 MiB fixed buffer. 1200 entries
-         * of ~4 KiB each ≈ 4.9 MiB of body. */
         struct json_value result;
-        json_init(&result);
-        json_set_array(&result);
-
-        char chunk[4096];
-        memset(chunk, 'a', sizeof(chunk) - 1);
-        chunk[sizeof(chunk) - 1] = '\0';
-
-        bool built = true;
-        for (int i = 0; i < 1200 && built; i++) {
-            struct json_value s;
-            json_init(&s);
-            json_set_str(&s, chunk);
-            built = json_push_back(&result, &s);
-            json_free(&s);
-        }
+        bool built = rpc_err_env_build_long_string_array(&result);
 
         struct json_value id;
         json_init(&id);
@@ -369,22 +492,8 @@ int test_rpc_error_envelope(void)
          * the buffer must be a real, separately-sized allocation — never
          * a 4 MiB buffer with an over-large length. */
         ok = ok && buf != NULL && len == required;
-        /* The whole body must be present and re-parse cleanly — a real
-         * OOB/partial send would not round-trip. Allocation is len+1 so
-         * buf[len] is a valid index for the terminating NUL. */
-        if (ok) {
-            ok = ok && buf[len] == '\0';
-            struct json_value parsed;
-            json_init(&parsed);
-            bool rt = json_read(&parsed, buf, len);
-            ok = ok && rt;
-            if (rt) {
-                const struct json_value *res = json_get(&parsed, "result");
-                ok = ok && res && res->type == JSON_ARR
-                        && json_size(res) == 1200;
-            }
-            json_free(&parsed);
-        }
+        if (ok)
+            ok = rpc_err_env_oversized_round_trip(buf, len, ok);
 
         free(buf);
         json_free(&response);
@@ -392,6 +501,12 @@ int test_rpc_error_envelope(void)
         json_free(&id);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int rpc_err_env_small_response_exact(void)
+{
+    int failures = 0;
 
     printf("small response serializes exactly (no over-send)... ");
     {
@@ -428,8 +543,12 @@ int test_rpc_error_envelope(void)
         json_free(&id);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    failures += rpc_secret_retirement_cases();
+static int rpc_err_env_serialize_null_args(void)
+{
+    int failures = 0;
 
     printf("serialize_response NULL args fail safely... ");
     {
@@ -441,6 +560,31 @@ int test_rpc_error_envelope(void)
         ok = ok && rpc_http_test_serialize_response(NULL, NULL, NULL) == false;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_rpc_error_envelope(void)
+{
+    int failures = 0;
+
+    failures += rpc_err_env_basic_shape();
+    failures += rpc_err_env_full_with_method();
+    failures += rpc_err_env_full_null_method();
+    failures += rpc_err_env_response_with_method();
+    failures += rpc_err_env_response_without_method();
+    failures += rpc_err_env_response_string_id();
+    failures += rpc_err_env_code_constants();
+    failures += rpc_err_env_ban_has_code_message();
+    failures += rpc_err_env_rate_limit_code();
+    failures += rpc_err_env_warmup_includes_method();
+    failures += rpc_err_env_not_found_includes_method();
+    failures += rpc_err_env_oom_includes_method();
+    failures += rpc_err_env_response_small_buffer();
+    failures += rpc_err_env_response_zero_buffer();
+    failures += rpc_err_env_oversized_response();
+    failures += rpc_err_env_small_response_exact();
+    failures += rpc_secret_retirement_cases();
+    failures += rpc_err_env_serialize_null_args();
 
     printf("\n%d rpc error envelope tests, %d failed\n",
            22, failures);
