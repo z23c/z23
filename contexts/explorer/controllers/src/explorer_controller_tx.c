@@ -353,12 +353,13 @@ static struct explorer_tx_in_row *tx_build_in_rows(struct transaction *tx,
     return in_rows;
 }
 
-static int64_t tx_fill_out_row(struct explorer_tx_out_row *o, size_t i,
-                               struct transaction *tx)
+static void tx_fill_out_row(struct explorer_tx_out_row *o, size_t i,
+                            struct transaction *tx, int64_t *total_out)
 {
     memset(o, 0, sizeof(*o));
     o->index = i;
     zcl_format_zcl(o->value, sizeof(o->value), tx->vout[i].value);
+    *total_out += tx->vout[i].value;
     o->script_size = tx->vout[i].script_pub_key.size;
 
     /* Try to extract destination address */
@@ -375,7 +376,6 @@ static int64_t tx_fill_out_row(struct explorer_tx_out_row *o, size_t i,
     o->kind = tx_io_classify(is_op_return, addr_str);
     if (o->kind == EXPLORER_TX_IO_ADDRESS)
         snprintf(o->addr, sizeof(o->addr), "%s", addr_str);
-    return tx->vout[i].value;
 }
 
 static struct explorer_tx_out_row *tx_build_out_rows(struct transaction *tx,
@@ -387,7 +387,7 @@ static struct explorer_tx_out_row *tx_build_out_rows(struct transaction *tx,
     if (tx->num_vout > 0 && !out_rows)
         return NULL;
     for (size_t i = 0; i < tx->num_vout; i++)
-        *total_out += tx_fill_out_row(&out_rows[i], i, tx);
+        tx_fill_out_row(&out_rows[i], i, tx, total_out);
     return out_rows;
 }
 
