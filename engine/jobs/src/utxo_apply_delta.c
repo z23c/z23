@@ -220,6 +220,473 @@ static void lookup_fail(struct delta_summary *s, const char *kind,
     s->ok = false; s->status = "internal_error"; s->failure_kind = kind;
 }
 
+enum {
+    UTXO_DELTA_STEP_OK = 0,
+    UTXO_DELTA_STEP_FAIL = 1,
+    UTXO_DELTA_STEP_INDEX = 2,
+    UTXO_DELTA_STEP_COUNT_ONLY = 3
+};
+
+static void utxo_delta_count_tx_caps(const struct block *blk,
+                                    size_t *spend_cap, size_t *add_cap)
+{
+    *spend_cap = 0;
+    *add_cap = 0;
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        if (!transaction_is_coinbase(tx))
+            *spend_cap += tx->num_vin;
+        *add_cap += tx->num_vout;
+    }
+}
+
+static bool utxo_delta_alloc_entry_arrays(size_t spend_cap, size_t add_cap,
+                                          struct delta_entry **spent_out,
+                                          struct delta_entry **added_out)
+{
+    struct delta_entry *spent = spend_cap
+        ? zcl_calloc(spend_cap, sizeof(*spent), "utxo_apply_spent")
+        : NULL;
+    struct delta_entry *added = add_cap
+        ? zcl_calloc(add_cap, sizeof(*added), "utxo_apply_added")
+        : NULL;
+    *spent_out = spent;
+    *added_out = added;
+    return !((spend_cap && !spent) || (add_cap && !added));
+}
+
+static int utxo_delta_reject_bad_value(struct delta_summary *out,
+                                       int64_t value, const char *kind,
+                                       const struct uint256 *txid,
+                                       uint32_t vout)
+{
+    if (value < 0 || value > MAX_MONEY_ZAT) {
+        delta_fail(out, "value_overflow", kind, txid, vout);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_reject_immature_coinbase(
+    struct delta_summary *out, uint32_t block_height,
+    const struct uint256 *txid, uint32_t vout,
+    uint32_t restore_height, bool restore_coinbase,
+    bool *tx_spends_coinbase)
+{
+    if (restore_coinbase)
+        *tx_spends_coinbase = true;
+    /* Coinbase maturity (DEFAULT-OFF, -enforce-coinbase-maturity).
+     * zclassicd CheckTxInputs (main.cpp:2056-2060) rejects a spend
+     * of a coinbase output younger than COINBASE_MATURITY (100):
+     * nSpendHeight - coins->nHeight < COINBASE_MATURITY. Here
+     * block_height is the spending block's height (== nSpendHeight)
+     * and restore_height is the spent coin's creation height
+     * (== coins->nHeight). Gated default-off: until enabled, the
+     * fold does NOT reject. Enabling it
+     * requires a full-history replay confirming ZERO false-rejects
+     * first (see the g_enforce_coinbase_maturity contract above and
+     * the h=478544 doctrine). Guard against an underflow if a
+     * malformed pre-image ever reports a creation height above the
+     * spending height (treat as immature, never wrap to a huge
+     * unsigned depth). */
+    if (atomic_load_explicit(&g_enforce_coinbase_maturity,
+                             memory_order_relaxed) &&
+        restore_coinbase &&
+        (block_height < restore_height ||
+         block_height - restore_height < COINBASE_MATURITY)) {
+        /* REPLAY GATE: in count-and-continue mode (env-gated
+         * ZCL_REPLAY_COUNT_ONLY), do NOT flip ok / halt the
+         * frontier. LOG + COUNT this fire and mark the block
+         * count_only_d2_skip so the stage authors NO coins for it
+         * and continues (strictly read/log/continue). The fold
+         * must reach genesis->tip to count ALL offenders, not just
+         * the first — but the offending block's coins are NEVER
+         * authored. When the env is unset replay_count_only_active()
+         * is false and this branch is never entered, so the
+         * normal delta_fail reject below runs as it does today. */
+        if (replay_count_only_active()) {
+            replay_count_only_note_d2_fire(block_height, txid, vout);
+            out->count_only_d2_skip = true;
+            /* Read/log/continue: discard the partially-built delta
+             * (the block is not authored) and return ok=true so the
+             * stage skips authoring without taking the reject/halt
+             * path. */
+            return UTXO_DELTA_STEP_COUNT_ONLY;
+        }
+        delta_fail(out, "coinbase_immature",
+                   "bad-txns-premature-spend-of-coinbase",
+                   txid, vout);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_own_restore_script(struct delta_entry *se,
+                                        const uint8_t *restore_script,
+                                        uint32_t restore_script_len,
+                                        struct delta_summary *out)
+{
+    /* Own a copy of the restore script: the lookup buffer is
+     * stack-scoped and the intra-block add aliases the live
+     * block, both gone by disconnect time. */
+    if (restore_script && restore_script_len) {
+        /* A UTXO scriptPubKey is consensus-bounded to
+         * MAX_SCRIPT_SIZE (== UTXO_APPLY_SCRIPT_MAX), the exact
+         * size of the stack lookup buffer restore_script points
+         * into. Reject rather than over-read that fixed buffer
+         * (or persist a truncated script that would corrupt the
+         * restored coin) if a lookup provider ever violates the
+         * contract. Unreachable with valid chain data. */
+        if (restore_script_len > UTXO_APPLY_SCRIPT_MAX) {
+            out->ok = false;
+            out->status = "internal_error";
+            out->failure_kind = "script_too_large";
+            return UTXO_DELTA_STEP_FAIL;
+        }
+        se->script_owned =
+            zcl_malloc(restore_script_len, "utxo_apply_restore_sc");
+        if (!se->script_owned) {
+            out->ok = false;
+            out->status = "internal_error";
+            out->failure_kind = "alloc";
+            return UTXO_DELTA_STEP_FAIL;
+        }
+        memcpy(se->script_owned, restore_script, restore_script_len);
+        se->script = se->script_owned;
+        se->script_len = restore_script_len;
+    } else {
+        se->script = NULL;
+        se->script_len = 0;
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_fold_one_spend(const struct outpoint *op,
+                                    uint32_t block_height,
+                                    utxo_apply_lookup_fn lookup,
+                                    void *lookup_user,
+                                    struct delta_summary *out,
+                                    struct added_index *add_idx,
+                                    int64_t *tx_input_value,
+                                    bool *tx_spends_coinbase)
+{
+    int64_t value = 0;
+    /* Full restore pre-image for the spent coin. */
+    uint32_t restore_height = 0;
+    bool restore_coinbase = false;
+    const uint8_t *restore_script = NULL;
+    uint32_t restore_script_len = 0;
+    /* Declared at the per-input scope (not inside the !found block
+     * below) so its lifetime spans the script copy further down:
+     * restore_script may alias lk's embedded buffer, which is
+     * memcpy'd into se->script_owned after that block has closed. */
+    struct utxo_apply_lookup lk;
+    const struct delta_entry *intra = NULL;
+    bool found = added_index_lookup(add_idx, out->added, &op->hash,
+                                    op->n, &intra);
+    if (found && intra) {
+        /* Created earlier in THIS block: its pre-image is the
+         * added entry we just recorded (height = this block). */
+        value = intra->value;
+        restore_height = block_height;
+        restore_coinbase = intra->is_coinbase;
+        restore_script = intra->script;
+        restore_script_len = intra->script_len;
+    }
+    if (!found) {
+        memset(&lk, 0, sizeof(lk));
+        if (lookup && !lookup(&op->hash, op->n, &lk, lookup_user)) {
+            lookup_fail(out, "lookup_spend", block_height,
+                        &op->hash, op->n);
+            return UTXO_DELTA_STEP_FAIL;
+        }
+        found = lk.found;
+        value = lk.value;
+        restore_height = lk.height;
+        restore_coinbase = lk.is_coinbase;
+        restore_script = lk.script_len ? lk.script : NULL;
+        restore_script_len = lk.script_len;
+    }
+    if (!found) {
+        delta_fail(out, "spend_unknown_utxo",
+                   "spend_unknown_utxo", &op->hash, op->n);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    int st = utxo_delta_reject_bad_value(out, value, "input_value",
+                                        &op->hash, op->n);
+    if (st != UTXO_DELTA_STEP_OK)
+        return st;
+    struct delta_entry *se = &out->spent[out->spent_count];
+    se->txid = op->hash;
+    se->vout = op->n;
+    se->value = value;
+    se->height = restore_height;
+    se->is_coinbase = restore_coinbase;
+    st = utxo_delta_reject_immature_coinbase(out, block_height, &op->hash,
+                                            op->n, restore_height,
+                                            restore_coinbase,
+                                            tx_spends_coinbase);
+    if (st != UTXO_DELTA_STEP_OK)
+        return st;
+    st = utxo_delta_own_restore_script(se, restore_script,
+                                      restore_script_len, out);
+    if (st != UTXO_DELTA_STEP_OK)
+        return st;
+    out->spent_count++;
+    out->total_value_delta -= value;
+    *tx_input_value += value;
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_fold_one_output(const struct transaction *tx,
+                                     size_t vo, uint32_t block_height,
+                                     utxo_apply_lookup_fn lookup,
+                                     void *lookup_user,
+                                     struct delta_summary *out,
+                                     struct added_index *add_idx,
+                                     size_t *index_fail_entry)
+{
+    const struct tx_out *txo = &tx->vout[vo];
+    if (tx_out_is_null(txo))
+        return UTXO_DELTA_STEP_OK;
+    /* Provably-unspendable outputs (OP_RETURN, or a scriptPubKey over
+     * MAX_SCRIPT_SIZE) NEVER enter the UTXO set in zclassicd — Bitcoin
+     * Core's AddCoin() skips IsUnspendable() (the SAME predicate
+     * coins.c:86 applies on the seed path). Skip them here too, on the
+     * LIVE fold, so coins_kv (count + coins_kv_commitment) matches
+     * zclassicd exactly. Their value is still created-then-burned, but
+     * that is accounted for OUTSIDE total_value_delta: the no-inflation
+     * value-balance check below (line ~342) and the coinbase subsidy
+     * ceiling use transaction_get_value_out(), which sums EVERY output
+     * including OP_RETURN (transaction.c:186) — so excluding the burned
+     * value from the UTXO-set delta does NOT relax value-balance.
+     * total_value_delta is the UTXO-SET delta (no SELECT reader; it is
+     * an audit column + a MoneyRange sanity bound only — grep confirms),
+     * so the burned value MUST be excluded from it to stay consistent
+     * with added_count and the coins it represents. */
+    if (script_is_unspendable(&txo->script_pub_key))
+        return UTXO_DELTA_STEP_OK;
+    int st = utxo_delta_reject_bad_value(out, txo->value, "output_value",
+                                        &tx->hash, (uint32_t)vo);
+    if (st != UTXO_DELTA_STEP_OK)
+        return st;
+    if (added_index_lookup(add_idx, out->added, &tx->hash, (uint32_t)vo,
+                           NULL)) {
+        delta_fail(out, "utxo_collision", "duplicate_output",
+                   &tx->hash, (uint32_t)vo);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    struct utxo_apply_lookup lk;
+    memset(&lk, 0, sizeof(lk));
+    if (lookup && !lookup(&tx->hash, (uint32_t)vo, &lk, lookup_user)) {
+        lookup_fail(out, "lookup_output", block_height,
+                    &tx->hash, (uint32_t)vo);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    if (lk.found) {
+        delta_fail(out, "utxo_collision", "utxo_collision",
+                   &tx->hash, (uint32_t)vo);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    size_t add_i = out->added_count;
+    out->added[add_i].txid = tx->hash;
+    out->added[add_i].vout = (uint32_t)vo;
+    out->added[add_i].value = txo->value;
+    out->added[add_i].script = txo->script_pub_key.data;
+    out->added[add_i].script_len =
+        (uint32_t)txo->script_pub_key.size;
+    out->added[add_i].is_coinbase = transaction_is_coinbase(tx);
+    if (!added_index_insert(add_idx, out->added, add_i)) {
+        *index_fail_entry = add_i;
+        return UTXO_DELTA_STEP_INDEX;
+    }
+    out->added_count++;
+    out->total_value_delta += txo->value;
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_apply_tx_fee(const struct transaction *tx,
+                                  bool tx_spends_coinbase,
+                                  int64_t tx_input_value,
+                                  int64_t *fees_total,
+                                  struct delta_summary *out)
+{
+    /* Coinbase outputs may be spent ONLY to shielded outputs.
+     * zclassicd's Consensus::CheckTxInputs (zclassic-cpp/src/main.cpp
+     * :2062-2070) rejects bad-txns-coinbase-spend-has-transparent-outputs
+     * when a tx spends a coinbase output and has any transparent output,
+     * gated by fCoinbaseEnforcedProtectionEnabled (always true on a
+     * normal node) AND the per-chain fCoinbaseMustBeProtected (true on
+     * mainnet/testnet, false on regtest). connect_block.c is dead
+     * (boot-reindex only), so the reducer is the live connect path and
+     * the rule must fire here. History-safe: zclassicd already rejected
+     * any such tx, so no block on the immutable chain violates it. */
+    if (tx_spends_coinbase && tx->num_vout != 0 &&
+        chain_params_get()->consensus.fCoinbaseMustBeProtected) {
+        delta_fail(out, "coinbase_protect",
+                   "bad-txns-coinbase-spend-has-transparent-outputs",
+                   &tx->hash, 0);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    /* Full Zcash money rule. The canonical check (connect_block.c
+     * value_in<value_out -> "bad-txns-in-belowout") has NO production
+     * caller, so this is the ONLY no-inflation guard on the reducer
+     * path a connected block takes — it must be correct, not dropped.
+     *   value_in  = transparent_in + max(0, value_balance) + Σ vpub_new
+     *   value_out = transparent_out + max(0,-value_balance) + Σ vpub_old
+     * A transparent-only test (tx_output_value > tx_input_value)
+     * would false-reject a legitimate shielded->transparent unshield,
+     * where value_balance>0 funds transparent outputs so transparent_out
+     * can exceed transparent_in. The two helpers
+     * already MoneyRange-guard every partial sum and return -1 on
+     * overflow. */
+    int64_t sh_in = transaction_get_shielded_value_in(tx);
+    int64_t value_out_full = transaction_get_value_out(tx);
+    if (sh_in < 0 || value_out_full < 0 ||
+        sh_in > MAX_MONEY_ZAT - tx_input_value) {
+        delta_fail(out, "value_overflow", "inputvalues_outofrange",
+                   &tx->hash, 0);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    int64_t value_in_full = tx_input_value + sh_in;
+    if (value_in_full < value_out_full) {
+        delta_fail(out, "value_overflow", "outputs_exceed_inputs",
+                   &tx->hash, 0);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    /* Accumulate this tx's fee for the coinbase ceiling. tx_fee >= 0
+     * by the check above, and value_in_full is already
+     * MoneyRange-capped, so only the RUNNING TOTAL can leave range —
+     * the exact guard connect_block.c:479 applies
+     * (bad-txns-fee-outofrange). */
+    int64_t tx_fee = value_in_full - value_out_full;
+    if (tx_fee > MAX_MONEY_ZAT - *fees_total) {
+        delta_fail(out, "value_overflow", "fee_outofrange",
+                   &tx->hash, 0);
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    *fees_total += tx_fee;
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_fold_one_tx(const struct transaction *tx,
+                                 uint32_t block_height,
+                                 utxo_apply_lookup_fn lookup,
+                                 void *lookup_user,
+                                 struct delta_summary *out,
+                                 struct added_index *add_idx,
+                                 int64_t *fees_total,
+                                 size_t *index_fail_entry)
+{
+    int64_t tx_input_value = 0;
+    bool tx_spends_coinbase = false;
+
+    if (!transaction_is_coinbase(tx)) {
+        for (size_t vi = 0; vi < tx->num_vin; vi++) {
+            int st = utxo_delta_fold_one_spend(&tx->vin[vi].prevout,
+                                              block_height, lookup,
+                                              lookup_user, out, add_idx,
+                                              &tx_input_value,
+                                              &tx_spends_coinbase);
+            if (st != UTXO_DELTA_STEP_OK)
+                return st;
+        }
+    }
+
+    for (size_t vo = 0; vo < tx->num_vout; vo++) {
+        int st = utxo_delta_fold_one_output(tx, vo, block_height, lookup,
+                                           lookup_user, out, add_idx,
+                                           index_fail_entry);
+        if (st != UTXO_DELTA_STEP_OK)
+            return st;
+    }
+
+    if (!transaction_is_coinbase(tx))
+        return utxo_delta_apply_tx_fee(tx, tx_spends_coinbase,
+                                      tx_input_value, fees_total, out);
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_fold_transactions(const struct block *blk,
+                                       uint32_t block_height,
+                                       utxo_apply_lookup_fn lookup,
+                                       void *lookup_user,
+                                       struct delta_summary *out,
+                                       struct added_index *add_idx,
+                                       int64_t *fees_total,
+                                       size_t *index_fail_entry)
+{
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        int st = utxo_delta_fold_one_tx(&blk->vtx[ti], block_height,
+                                       lookup, lookup_user, out, add_idx,
+                                       fees_total, index_fail_entry);
+        if (st != UTXO_DELTA_STEP_OK)
+            return st;
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_check_coinbase_subsidy(const struct block *blk,
+                                            uint32_t block_height,
+                                            int64_t fees_total,
+                                            struct delta_summary *out)
+{
+    /* Coinbase subsidy ceiling — the inflation cap. zclassicd ConnectBlock
+     * (main.cpp:2695-2700): blockReward = nFees + GetBlockSubsidy(height);
+     * a coinbase minting MORE than that is "bad-cb-amount". The canonical C
+     * port (connect_block.c:655-668) is dead (boot-reindex only), so the
+     * reducer path a connected block takes must enforce it here — without it
+     * a miner could mint arbitrary coins. THE genesis block already returned
+     * above (the hash-keyed early-exit), exactly as zclassicd's genesis
+     * early-exit (main.cpp:2515-2527) returns before any tx/reward checks; the
+     * block_height > 0 guard kept here is belt-and-suspenders for a height-0
+     * coinbase (the subsidy ramp yields a 0 ceiling at height 0, which the
+     * genesis coinbase is exempt from). Status is "bad_cb_amount", deliberately
+     * NOT "value_overflow": the repair machinery keys on "value_overflow" as
+     * a repairable-hole class (utxo_apply_delta_repair.c,
+     * stage_repair_reducer_frontier_coin.c) and must never treat inflation
+     * as repairable. */
+    if (block_height > 0 && blk->num_vtx > 0 &&
+        transaction_is_coinbase(&blk->vtx[0])) {
+        int64_t subsidy = get_block_subsidy((int)block_height,
+                                            &chain_params_get()->consensus);
+        if (fees_total > INT64_MAX - subsidy) {
+            delta_fail(out, "bad_cb_amount", "bad-cb-reward-overflow",
+                       &blk->vtx[0].hash, 0);
+            return UTXO_DELTA_STEP_FAIL;
+        }
+        /* transaction_get_value_out returns -1 on a MoneyRange violation;
+         * comparing -1 against the reward would FALSE-PASS, so a negative
+         * sentinel must reject explicitly. */
+        int64_t cb_out = transaction_get_value_out(&blk->vtx[0]);
+        if (cb_out < 0 || cb_out > fees_total + subsidy) {
+            delta_fail(out, "bad_cb_amount", "bad-cb-amount",
+                       &blk->vtx[0].hash, 0);
+            return UTXO_DELTA_STEP_FAIL;
+        }
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static int utxo_delta_reject_total_out_of_range(struct delta_summary *out)
+{
+    if (out->total_value_delta > MAX_MONEY_ZAT ||
+        out->total_value_delta < -MAX_MONEY_ZAT) {
+        out->ok = false;
+        out->status = "value_overflow";
+        out->failure_kind = "total_value_delta";
+        return UTXO_DELTA_STEP_FAIL;
+    }
+    return UTXO_DELTA_STEP_OK;
+}
+
+static void utxo_delta_release_partial(struct added_index *add_idx,
+                                      struct delta_summary *out)
+{
+    added_index_free(add_idx);
+    free_delta(out);
+}
+
 void utxo_apply_compute_block_delta(const struct block *blk,
                                     uint32_t block_height,
                                     utxo_apply_lookup_fn lookup,
@@ -255,20 +722,11 @@ void utxo_apply_compute_block_delta(const struct block *blk,
         return;
 
     size_t spend_cap = 0, add_cap = 0;
-    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        if (!transaction_is_coinbase(tx))
-            spend_cap += tx->num_vin;
-        add_cap += tx->num_vout;
-    }
+    utxo_delta_count_tx_caps(blk, &spend_cap, &add_cap);
 
-    struct delta_entry *spent = spend_cap
-        ? zcl_calloc(spend_cap, sizeof(*spent), "utxo_apply_spent")
-        : NULL;
-    struct delta_entry *added = add_cap
-        ? zcl_calloc(add_cap, sizeof(*added), "utxo_apply_added")
-        : NULL;
-    if ((spend_cap && !spent) || (add_cap && !added)) {
+    struct delta_entry *spent = NULL;
+    struct delta_entry *added = NULL;
+    if (!utxo_delta_alloc_entry_arrays(spend_cap, add_cap, &spent, &added)) {
         out->ok = false;
         out->status = "internal_error";
         out->failure_kind = "alloc";
@@ -290,341 +748,53 @@ void utxo_apply_compute_block_delta(const struct block *blk,
         free_delta(out);
         return;
     }
-#define UTXO_DELTA_FAIL_AND_RETURN() do { \
-        added_index_free(&add_idx); \
-        free_delta(out); \
-        return; \
-    } while (0)
-
     /* Running fee total for the end-of-block coinbase subsidy ceiling below
      * (zclassicd's nFees accumulator, main.cpp:2695). */
     int64_t fees_total = 0;
-
-    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        int64_t tx_input_value = 0;
-        bool tx_spends_coinbase = false;
-
-        if (!transaction_is_coinbase(tx)) {
-            for (size_t vi = 0; vi < tx->num_vin; vi++) {
-                const struct outpoint *op = &tx->vin[vi].prevout;
-                int64_t value = 0;
-                /* Full restore pre-image for the spent coin. */
-                uint32_t restore_height = 0;
-                bool restore_coinbase = false;
-                const uint8_t *restore_script = NULL;
-                uint32_t restore_script_len = 0;
-                /* Declared at the per-input scope (not inside the !found block
-                 * below) so its lifetime spans the script copy further down:
-                 * restore_script may alias lk's embedded buffer, which is
-                 * memcpy'd into se->script_owned after that block has closed. */
-                struct utxo_apply_lookup lk;
-                const struct delta_entry *intra = NULL;
-                bool found = added_index_lookup(&add_idx, added, &op->hash,
-                                                op->n, &intra);
-                if (found && intra) {
-                    /* Created earlier in THIS block: its pre-image is the
-                     * added entry we just recorded (height = this block). */
-                    value = intra->value;
-                    restore_height = block_height;
-                    restore_coinbase = intra->is_coinbase;
-                    restore_script = intra->script;
-                    restore_script_len = intra->script_len;
-                }
-                if (!found) {
-                    memset(&lk, 0, sizeof(lk));
-                    if (lookup && !lookup(&op->hash, op->n, &lk, lookup_user)) {
-                        lookup_fail(out, "lookup_spend", block_height,
-                                    &op->hash, op->n);
-                        UTXO_DELTA_FAIL_AND_RETURN();
-                    }
-                    found = lk.found;
-                    value = lk.value;
-                    restore_height = lk.height;
-                    restore_coinbase = lk.is_coinbase;
-                    restore_script = lk.script_len ? lk.script : NULL;
-                    restore_script_len = lk.script_len;
-                }
-                if (!found) {
-                    delta_fail(out, "spend_unknown_utxo",
-                               "spend_unknown_utxo", &op->hash, op->n);
-                    UTXO_DELTA_FAIL_AND_RETURN();
-                }
-                if (value < 0 || value > MAX_MONEY_ZAT) {
-                    delta_fail(out, "value_overflow",
-                               "input_value", &op->hash, op->n);
-                    UTXO_DELTA_FAIL_AND_RETURN();
-                }
-                struct delta_entry *se = &spent[out->spent_count];
-                se->txid = op->hash;
-                se->vout = op->n;
-                se->value = value;
-                se->height = restore_height;
-                se->is_coinbase = restore_coinbase;
-                if (restore_coinbase)
-                    tx_spends_coinbase = true;
-                /* Coinbase maturity (DEFAULT-OFF, -enforce-coinbase-maturity).
-                 * zclassicd CheckTxInputs (main.cpp:2056-2060) rejects a spend
-                 * of a coinbase output younger than COINBASE_MATURITY (100):
-                 * nSpendHeight - coins->nHeight < COINBASE_MATURITY. Here
-                 * block_height is the spending block's height (== nSpendHeight)
-                 * and restore_height is the spent coin's creation height
-                 * (== coins->nHeight). Gated default-off: until enabled, the
-                 * fold does NOT reject. Enabling it
-                 * requires a full-history replay confirming ZERO false-rejects
-                 * first (see the g_enforce_coinbase_maturity contract above and
-                 * the h=478544 doctrine). Guard against an underflow if a
-                 * malformed pre-image ever reports a creation height above the
-                 * spending height (treat as immature, never wrap to a huge
-                 * unsigned depth). */
-                if (atomic_load_explicit(&g_enforce_coinbase_maturity,
-                                         memory_order_relaxed) &&
-                    restore_coinbase &&
-                    (block_height < restore_height ||
-                     block_height - restore_height < COINBASE_MATURITY)) {
-                    /* REPLAY GATE: in count-and-continue mode (env-gated
-                     * ZCL_REPLAY_COUNT_ONLY), do NOT flip ok / halt the
-                     * frontier. LOG + COUNT this fire and mark the block
-                     * count_only_d2_skip so the stage authors NO coins for it
-                     * and continues (strictly read/log/continue). The fold
-                     * must reach genesis->tip to count ALL offenders, not just
-                     * the first — but the offending block's coins are NEVER
-                     * authored. When the env is unset replay_count_only_active()
-                     * is false and this branch is never entered, so the
-                     * normal delta_fail reject below runs as it does today. */
-                    if (replay_count_only_active()) {
-                        replay_count_only_note_d2_fire(block_height, &op->hash,
-                                                       op->n);
-                        out->count_only_d2_skip = true;
-                        /* Read/log/continue: discard the partially-built delta
-                         * (the block is not authored) and return ok=true so the
-                         * stage skips authoring without taking the reject/halt
-                         * path. */
-                        added_index_free(&add_idx);
-                        free_delta(out);
-                        out->ok = true;
-                        out->status = "verified";
-                        out->failure_kind = NULL;
-                        out->spent = NULL;
-                        out->added = NULL;
-                        out->spent_count = 0;
-                        out->added_count = 0;
-                        out->total_value_delta = 0;
-                        return;
-                    }
-                    delta_fail(out, "coinbase_immature",
-                               "bad-txns-premature-spend-of-coinbase",
-                               &op->hash, op->n);
-                    UTXO_DELTA_FAIL_AND_RETURN();
-                }
-                /* Own a copy of the restore script: the lookup buffer is
-                 * stack-scoped and the intra-block add aliases the live
-                 * block, both gone by disconnect time. */
-                if (restore_script && restore_script_len) {
-                    /* A UTXO scriptPubKey is consensus-bounded to
-                     * MAX_SCRIPT_SIZE (== UTXO_APPLY_SCRIPT_MAX), the exact
-                     * size of the stack lookup buffer restore_script points
-                     * into. Reject rather than over-read that fixed buffer
-                     * (or persist a truncated script that would corrupt the
-                     * restored coin) if a lookup provider ever violates the
-                     * contract. Unreachable with valid chain data. */
-                    if (restore_script_len > UTXO_APPLY_SCRIPT_MAX) {
-                        out->ok = false;
-                        out->status = "internal_error";
-                        out->failure_kind = "script_too_large";
-                        UTXO_DELTA_FAIL_AND_RETURN();
-                    }
-                    se->script_owned =
-                        zcl_malloc(restore_script_len, "utxo_apply_restore_sc");
-                    if (!se->script_owned) {
-                        out->ok = false;
-                        out->status = "internal_error";
-                        out->failure_kind = "alloc";
-                        UTXO_DELTA_FAIL_AND_RETURN();
-                    }
-                    memcpy(se->script_owned, restore_script, restore_script_len);
-                    se->script = se->script_owned;
-                    se->script_len = restore_script_len;
-                } else {
-                    se->script = NULL;
-                    se->script_len = 0;
-                }
-                out->spent_count++;
-                out->total_value_delta -= value;
-                tx_input_value += value;
-            }
-        }
-
-        for (size_t vo = 0; vo < tx->num_vout; vo++) {
-            const struct tx_out *txo = &tx->vout[vo];
-            if (tx_out_is_null(txo))
-                continue;
-            /* Provably-unspendable outputs (OP_RETURN, or a scriptPubKey over
-             * MAX_SCRIPT_SIZE) NEVER enter the UTXO set in zclassicd — Bitcoin
-             * Core's AddCoin() skips IsUnspendable() (the SAME predicate
-             * coins.c:86 applies on the seed path). Skip them here too, on the
-             * LIVE fold, so coins_kv (count + coins_kv_commitment) matches
-             * zclassicd exactly. Their value is still created-then-burned, but
-             * that is accounted for OUTSIDE total_value_delta: the no-inflation
-             * value-balance check below (line ~342) and the coinbase subsidy
-             * ceiling use transaction_get_value_out(), which sums EVERY output
-             * including OP_RETURN (transaction.c:186) — so excluding the burned
-             * value from the UTXO-set delta does NOT relax value-balance.
-             * total_value_delta is the UTXO-SET delta (no SELECT reader; it is
-             * an audit column + a MoneyRange sanity bound only — grep confirms),
-             * so the burned value MUST be excluded from it to stay consistent
-             * with added_count and the coins it represents. */
-            if (script_is_unspendable(&txo->script_pub_key))
-                continue;
-            if (txo->value < 0 || txo->value > MAX_MONEY_ZAT) {
-                delta_fail(out, "value_overflow", "output_value",
-                           &tx->hash, (uint32_t)vo);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            if (added_index_lookup(&add_idx, added, &tx->hash, (uint32_t)vo,
-                                   NULL)) {
-                delta_fail(out, "utxo_collision", "duplicate_output",
-                           &tx->hash, (uint32_t)vo);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            struct utxo_apply_lookup lk;
-            memset(&lk, 0, sizeof(lk));
-            if (lookup && !lookup(&tx->hash, (uint32_t)vo, &lk, lookup_user)) {
-                lookup_fail(out, "lookup_output", block_height,
-                            &tx->hash, (uint32_t)vo);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            if (lk.found) {
-                delta_fail(out, "utxo_collision", "utxo_collision",
-                           &tx->hash, (uint32_t)vo);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            size_t add_i = out->added_count;
-            added[add_i].txid = tx->hash;
-            added[add_i].vout = (uint32_t)vo;
-            added[add_i].value = txo->value;
-            added[add_i].script = txo->script_pub_key.data;
-            added[add_i].script_len =
-                (uint32_t)txo->script_pub_key.size;
-            added[add_i].is_coinbase = transaction_is_coinbase(tx);
-            if (!added_index_insert(&add_idx, added, add_i)) {
-                LOG_WARN("utxo_apply",
-                         "[utxo_apply] added-output index insert failed "
-                         "height=%u entry=%zu", block_height, add_i);
-                out->ok = false;
-                out->status = "internal_error";
-                out->failure_kind = "added_index";
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            out->added_count++;
-            out->total_value_delta += txo->value;
-        }
-
-        if (!transaction_is_coinbase(tx)) {
-            /* Coinbase outputs may be spent ONLY to shielded outputs.
-             * zclassicd's Consensus::CheckTxInputs (zclassic-cpp/src/main.cpp
-             * :2062-2070) rejects bad-txns-coinbase-spend-has-transparent-outputs
-             * when a tx spends a coinbase output and has any transparent output,
-             * gated by fCoinbaseEnforcedProtectionEnabled (always true on a
-             * normal node) AND the per-chain fCoinbaseMustBeProtected (true on
-             * mainnet/testnet, false on regtest). connect_block.c is dead
-             * (boot-reindex only), so the reducer is the live connect path and
-             * the rule must fire here. History-safe: zclassicd already rejected
-             * any such tx, so no block on the immutable chain violates it. */
-            if (tx_spends_coinbase && tx->num_vout != 0 &&
-                chain_params_get()->consensus.fCoinbaseMustBeProtected) {
-                delta_fail(out, "coinbase_protect",
-                           "bad-txns-coinbase-spend-has-transparent-outputs",
-                           &tx->hash, 0);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            /* Full Zcash money rule. The canonical check (connect_block.c
-             * value_in<value_out -> "bad-txns-in-belowout") has NO production
-             * caller, so this is the ONLY no-inflation guard on the reducer
-             * path a connected block takes — it must be correct, not dropped.
-             *   value_in  = transparent_in + max(0, value_balance) + Σ vpub_new
-             *   value_out = transparent_out + max(0,-value_balance) + Σ vpub_old
-             * A transparent-only test (tx_output_value > tx_input_value)
-             * would false-reject a legitimate shielded->transparent unshield,
-             * where value_balance>0 funds transparent outputs so transparent_out
-             * can exceed transparent_in. The two helpers
-             * already MoneyRange-guard every partial sum and return -1 on
-             * overflow. */
-            int64_t sh_in = transaction_get_shielded_value_in(tx);
-            int64_t value_out_full = transaction_get_value_out(tx);
-            if (sh_in < 0 || value_out_full < 0 ||
-                sh_in > MAX_MONEY_ZAT - tx_input_value) {
-                delta_fail(out, "value_overflow", "inputvalues_outofrange",
-                           &tx->hash, 0);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            int64_t value_in_full = tx_input_value + sh_in;
-            if (value_in_full < value_out_full) {
-                delta_fail(out, "value_overflow", "outputs_exceed_inputs",
-                           &tx->hash, 0);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            /* Accumulate this tx's fee for the coinbase ceiling. tx_fee >= 0
-             * by the check above, and value_in_full is already
-             * MoneyRange-capped, so only the RUNNING TOTAL can leave range —
-             * the exact guard connect_block.c:479 applies
-             * (bad-txns-fee-outofrange). */
-            int64_t tx_fee = value_in_full - value_out_full;
-            if (tx_fee > MAX_MONEY_ZAT - fees_total) {
-                delta_fail(out, "value_overflow", "fee_outofrange",
-                           &tx->hash, 0);
-                UTXO_DELTA_FAIL_AND_RETURN();
-            }
-            fees_total += tx_fee;
-        }
-    }
-
-    /* Coinbase subsidy ceiling — the inflation cap. zclassicd ConnectBlock
-     * (main.cpp:2695-2700): blockReward = nFees + GetBlockSubsidy(height);
-     * a coinbase minting MORE than that is "bad-cb-amount". The canonical C
-     * port (connect_block.c:655-668) is dead (boot-reindex only), so the
-     * reducer path a connected block takes must enforce it here — without it
-     * a miner could mint arbitrary coins. THE genesis block already returned
-     * above (the hash-keyed early-exit), exactly as zclassicd's genesis
-     * early-exit (main.cpp:2515-2527) returns before any tx/reward checks; the
-     * block_height > 0 guard kept here is belt-and-suspenders for a height-0
-     * coinbase (the subsidy ramp yields a 0 ceiling at height 0, which the
-     * genesis coinbase is exempt from). Status is "bad_cb_amount", deliberately
-     * NOT "value_overflow": the repair machinery keys on "value_overflow" as
-     * a repairable-hole class (utxo_apply_delta_repair.c,
-     * stage_repair_reducer_frontier_coin.c) and must never treat inflation
-     * as repairable. */
-    if (block_height > 0 && blk->num_vtx > 0 &&
-        transaction_is_coinbase(&blk->vtx[0])) {
-        int64_t subsidy = get_block_subsidy((int)block_height,
-                                            &chain_params_get()->consensus);
-        if (fees_total > INT64_MAX - subsidy) {
-            delta_fail(out, "bad_cb_amount", "bad-cb-reward-overflow",
-                       &blk->vtx[0].hash, 0);
-            UTXO_DELTA_FAIL_AND_RETURN();
-        }
-        /* transaction_get_value_out returns -1 on a MoneyRange violation;
-         * comparing -1 against the reward would FALSE-PASS, so a negative
-         * sentinel must reject explicitly. */
-        int64_t cb_out = transaction_get_value_out(&blk->vtx[0]);
-        if (cb_out < 0 || cb_out > fees_total + subsidy) {
-            delta_fail(out, "bad_cb_amount", "bad-cb-amount",
-                       &blk->vtx[0].hash, 0);
-            UTXO_DELTA_FAIL_AND_RETURN();
-        }
-    }
-
-    if (out->total_value_delta > MAX_MONEY_ZAT ||
-        out->total_value_delta < -MAX_MONEY_ZAT) {
+    size_t index_fail_entry = 0;
+    int st = utxo_delta_fold_transactions(blk, block_height, lookup,
+                                         lookup_user, out, &add_idx,
+                                         &fees_total, &index_fail_entry);
+    if (st == UTXO_DELTA_STEP_INDEX) {
+        LOG_WARN("utxo_apply",
+                 "[utxo_apply] added-output index insert failed "
+                 "height=%u entry=%zu", block_height, index_fail_entry);
         out->ok = false;
-        out->status = "value_overflow";
-        out->failure_kind = "total_value_delta";
-        UTXO_DELTA_FAIL_AND_RETURN();
+        out->status = "internal_error";
+        out->failure_kind = "added_index";
+        utxo_delta_release_partial(&add_idx, out);
+        return;
+    }
+    if (st == UTXO_DELTA_STEP_COUNT_ONLY) {
+        utxo_delta_release_partial(&add_idx, out);
+        out->ok = true;
+        out->status = "verified";
+        out->failure_kind = NULL;
+        out->spent = NULL;
+        out->added = NULL;
+        out->spent_count = 0;
+        out->added_count = 0;
+        out->total_value_delta = 0;
+        return;
+    }
+    if (st != UTXO_DELTA_STEP_OK) {
+        utxo_delta_release_partial(&add_idx, out);
+        return;
+    }
+
+    if (utxo_delta_check_coinbase_subsidy(blk, block_height, fees_total,
+                                         out) != UTXO_DELTA_STEP_OK) {
+        utxo_delta_release_partial(&add_idx, out);
+        return;
+    }
+
+    if (utxo_delta_reject_total_out_of_range(out) != UTXO_DELTA_STEP_OK) {
+        utxo_delta_release_partial(&add_idx, out);
+        return;
     }
 
     /* Success: out->spent/out->added own the arrays (see header). */
     added_index_free(&add_idx);
-#undef UTXO_DELTA_FAIL_AND_RETURN
 }
 
 /* ── Schema ────────────────────────────────────────────────────────── */
