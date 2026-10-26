@@ -20,7 +20,7 @@ static bool admission_zero(const uint8_t *bytes, size_t count)
     return !zcl_bytes_any_set(bytes, count);
 }
 
-const char *vcs_zcode_family_admission_error_string(
+static const char *admission_error_string_field(
     enum vcs_zcode_family_admission_error error)
 {
     switch (error) {
@@ -33,13 +33,31 @@ const char *vcs_zcode_family_admission_error_string(
     case VCS_ZCODE_FAMILY_ADMISSION_ENUM: return "closed-enum";
     case VCS_ZCODE_FAMILY_ADMISSION_ROOT: return "root";
     case VCS_ZCODE_FAMILY_ADMISSION_TIME: return "chain-time";
+    default: return NULL;
+    }
+}
+
+static const char *admission_error_string_record(
+    enum vcs_zcode_family_admission_error error)
+{
+    switch (error) {
     case VCS_ZCODE_FAMILY_ADMISSION_SIGNATURE: return "signature";
     case VCS_ZCODE_FAMILY_ADMISSION_ORDER: return "canonical-order";
     case VCS_ZCODE_FAMILY_ADMISSION_CHAIN: return "admission-chain";
     case VCS_ZCODE_FAMILY_ADMISSION_LIMIT: return "capacity";
     case VCS_ZCODE_FAMILY_ADMISSION_NOMEM: return "allocation";
     case VCS_ZCODE_FAMILY_ADMISSION_OVERFLOW: return "generation-overflow";
+    default: return NULL;
     }
+}
+
+const char *vcs_zcode_family_admission_error_string(
+    enum vcs_zcode_family_admission_error error)
+{
+    const char *text = admission_error_string_field(error);
+    if (text) return text;
+    text = admission_error_string_record(error);
+    if (text) return text;
     return "unknown-family-admission-error";
 }
 
@@ -49,25 +67,31 @@ static bool admission_pass_state(uint16_t state)
            state <= VCS_ZCODE_ADMISSION_RESILIENT_PASS;
 }
 
-static enum vcs_zcode_family_admission_error admission_shape(
-    const struct vcs_zcode_commons_admission_v1 *admission,
-    bool require_signature)
+static enum vcs_zcode_family_admission_error admission_check_enums(
+    const struct vcs_zcode_commons_admission_v1 *admission)
 {
-    if (!admission) return VCS_ZCODE_FAMILY_ADMISSION_NULL;
-    if (admission->schema_version != 1)
-        return VCS_ZCODE_FAMILY_ADMISSION_VERSION;
-    if (admission->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
-        return VCS_ZCODE_FAMILY_ADMISSION_FLAGS;
     if (admission->state > VCS_ZCODE_ADMISSION_REORGED ||
         admission->tier > VCS_ZCODE_MODERATION_TIER_RESILIENT_PASS ||
         admission->coverage_complete > 1 ||
         admission->closure_complete > 1 || admission->reserved != 0)
         return VCS_ZCODE_FAMILY_ADMISSION_ENUM;
+    return VCS_ZCODE_FAMILY_ADMISSION_OK;
+}
+
+static enum vcs_zcode_family_admission_error admission_check_time(
+    const struct vcs_zcode_commons_admission_v1 *admission)
+{
     if (!admission->sequence || !admission->decided_height ||
         admission->decided_mtp <= 0 ||
         admission->expires_height < admission->decided_height ||
         admission->expires_mtp < admission->decided_mtp)
         return VCS_ZCODE_FAMILY_ADMISSION_TIME;
+    return VCS_ZCODE_FAMILY_ADMISSION_OK;
+}
+
+static enum vcs_zcode_family_admission_error admission_check_roots(
+    const struct vcs_zcode_commons_admission_v1 *admission)
+{
     if (!zcl_bytes_any_set(admission->content_root, 32) ||
         !zcl_bytes_any_set(admission->dependency_closure_root, 32) ||
         !zcl_bytes_any_set(admission->family_policy_root, 32) ||
@@ -76,6 +100,12 @@ static enum vcs_zcode_family_admission_error admission_shape(
         !zcl_bytes_any_set(admission->evidence_root, 32) ||
         !zcl_bytes_any_set(admission->signer_pubkey, 32))
         return VCS_ZCODE_FAMILY_ADMISSION_ROOT;
+    return VCS_ZCODE_FAMILY_ADMISSION_OK;
+}
+
+static enum vcs_zcode_family_admission_error admission_check_chain(
+    const struct vcs_zcode_commons_admission_v1 *admission)
+{
     if ((admission->sequence == 1 &&
          !admission_zero(admission->predecessor_admission_root, 32)) ||
         (admission->sequence > 1 &&
@@ -88,6 +118,27 @@ static enum vcs_zcode_family_admission_error admission_shape(
             !admission->closure_complete)
             return VCS_ZCODE_FAMILY_ADMISSION_CHAIN;
     }
+    return VCS_ZCODE_FAMILY_ADMISSION_OK;
+}
+
+static enum vcs_zcode_family_admission_error admission_shape(
+    const struct vcs_zcode_commons_admission_v1 *admission,
+    bool require_signature)
+{
+    enum vcs_zcode_family_admission_error error;
+    if (!admission) return VCS_ZCODE_FAMILY_ADMISSION_NULL;
+    if (admission->schema_version != 1)
+        return VCS_ZCODE_FAMILY_ADMISSION_VERSION;
+    if (admission->flags != VCS_ZCODE_COMMONS_REQUIRED_FLAGS)
+        return VCS_ZCODE_FAMILY_ADMISSION_FLAGS;
+    error = admission_check_enums(admission);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) return error;
+    error = admission_check_time(admission);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) return error;
+    error = admission_check_roots(admission);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) return error;
+    error = admission_check_chain(admission);
+    if (error != VCS_ZCODE_FAMILY_ADMISSION_OK) return error;
     if (require_signature &&
         !zcl_bytes_any_set(admission->signature, 64))
         return VCS_ZCODE_FAMILY_ADMISSION_SIGNATURE;
