@@ -28,30 +28,33 @@ static const uint8_t build_receipt_domain[] =
 
 const char *vcs_package_build_error_string(enum vcs_package_build_error error)
 {
-    switch (error) {
-    case VCS_PACKAGE_BUILD_OK: return "ok";
-    case VCS_PACKAGE_BUILD_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_BUILD_ERR_ALLOC: return "allocation-failure";
-    case VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION: return "schema-version";
-    case VCS_PACKAGE_BUILD_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_PACKAGE_BUILD_ERR_WIRE_OVERSIZE: return "wire-oversize";
-    case VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED: return "wire-truncated";
-    case VCS_PACKAGE_BUILD_ERR_WIRE_TRAILING: return "wire-trailing";
-    case VCS_PACKAGE_BUILD_ERR_ROOT: return "all-zero-root";
-    case VCS_PACKAGE_BUILD_ERR_DEP_ORDER: return "dep-roots-not-canonical";
-    case VCS_PACKAGE_BUILD_ERR_DEP_COUNT: return "dep-count-bound";
-    case VCS_PACKAGE_BUILD_ERR_COMPILER: return "compiler-identity";
-    case VCS_PACKAGE_BUILD_ERR_FLAGS: return "compiler-flags";
-    case VCS_PACKAGE_BUILD_ERR_RESULT: return "result-class";
-    case VCS_PACKAGE_BUILD_ERR_ISOLATION: return "isolation-level";
-    case VCS_PACKAGE_BUILD_ERR_TEST_STATE: return "test-state-inconsistent";
-    case VCS_PACKAGE_BUILD_ERR_OUTPUT_PATH: return "output-path-grammar";
-    case VCS_PACKAGE_BUILD_ERR_OUTPUT_ORDER: return "outputs-not-canonical";
-    case VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT: return "output-count-bound";
-    case VCS_PACKAGE_BUILD_ERR_OUTPUT_EMPTY: return "passing-build-no-outputs";
-    case VCS_PACKAGE_BUILD_ERR_CAPSULE: return "toolchain-capsule";
-    }
-    return "unknown-error";
+    static const char *const names[VCS_PACKAGE_BUILD_ERR_CAPSULE + 1u] = {
+        [VCS_PACKAGE_BUILD_OK] = "ok",
+        [VCS_PACKAGE_BUILD_ERR_NULL] = "null-argument",
+        [VCS_PACKAGE_BUILD_ERR_ALLOC] = "allocation-failure",
+        [VCS_PACKAGE_BUILD_ERR_SCHEMA_VERSION] = "schema-version",
+        [VCS_PACKAGE_BUILD_ERR_WIRE_MAGIC] = "wire-magic",
+        [VCS_PACKAGE_BUILD_ERR_WIRE_OVERSIZE] = "wire-oversize",
+        [VCS_PACKAGE_BUILD_ERR_WIRE_TRUNCATED] = "wire-truncated",
+        [VCS_PACKAGE_BUILD_ERR_WIRE_TRAILING] = "wire-trailing",
+        [VCS_PACKAGE_BUILD_ERR_ROOT] = "all-zero-root",
+        [VCS_PACKAGE_BUILD_ERR_DEP_ORDER] = "dep-roots-not-canonical",
+        [VCS_PACKAGE_BUILD_ERR_DEP_COUNT] = "dep-count-bound",
+        [VCS_PACKAGE_BUILD_ERR_COMPILER] = "compiler-identity",
+        [VCS_PACKAGE_BUILD_ERR_FLAGS] = "compiler-flags",
+        [VCS_PACKAGE_BUILD_ERR_RESULT] = "result-class",
+        [VCS_PACKAGE_BUILD_ERR_ISOLATION] = "isolation-level",
+        [VCS_PACKAGE_BUILD_ERR_TEST_STATE] = "test-state-inconsistent",
+        [VCS_PACKAGE_BUILD_ERR_OUTPUT_PATH] = "output-path-grammar",
+        [VCS_PACKAGE_BUILD_ERR_OUTPUT_ORDER] = "outputs-not-canonical",
+        [VCS_PACKAGE_BUILD_ERR_OUTPUT_COUNT] = "output-count-bound",
+        [VCS_PACKAGE_BUILD_ERR_OUTPUT_EMPTY] = "passing-build-no-outputs",
+        [VCS_PACKAGE_BUILD_ERR_CAPSULE] = "toolchain-capsule",
+    };
+    const unsigned value = (unsigned)error;
+    if (value >= sizeof(names) / sizeof(names[0])) return "unknown-error";
+    const char *name = names[value];
+    return name ? name : "unknown-error";
 }
 
 const char *vcs_package_build_result_string(enum vcs_package_build_result r)

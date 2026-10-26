@@ -678,6 +678,39 @@ static int t_deps_rules(void)
     return failures;
 }
 
+static int t_package_build_error_strings(void)
+{
+    static const char *const expected[] = {
+        "ok", "null-argument", "allocation-failure", "schema-version",
+        "wire-magic", "wire-oversize", "wire-truncated", "wire-trailing",
+        "all-zero-root", "dep-roots-not-canonical", "dep-count-bound",
+        "compiler-identity", "compiler-flags", "result-class",
+        "isolation-level", "test-state-inconsistent", "output-path-grammar",
+        "outputs-not-canonical", "output-count-bound",
+        "passing-build-no-outputs", "toolchain-capsule",
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        const char *actual = vcs_package_build_error_string(
+            (enum vcs_package_build_error)i);
+        if (strcmp(actual, expected[i]) != 0) {
+            fprintf(stderr, "zcode_add: build error %zu was %s, expected %s\n",
+                    i, actual, expected[i]);
+            ++failures;
+        }
+    }
+    ZA_CHECK("negative build error maps to unknown",
+             strcmp(vcs_package_build_error_string(
+                        (enum vcs_package_build_error)-1),
+                    "unknown-error") == 0);
+    ZA_CHECK("out-of-range build error maps to unknown",
+             strcmp(vcs_package_build_error_string(
+                        (enum vcs_package_build_error)(
+                            VCS_PACKAGE_BUILD_ERR_CAPSULE + 1)),
+                    "unknown-error") == 0);
+    return failures;
+}
+
 /* ── 2. generation log, name split, plan expiry ─────────────────────── */
 
 static int t_generations(void)
@@ -3872,6 +3905,7 @@ int test_zcode_add(void)
     int failures = 0;
     failures += t_deps_error_strings();
     failures += t_worker_literal_path();
+    failures += t_package_build_error_strings();
     failures += t_deps_rules();
     failures += t_generations();
     failures += t_release_selection();
