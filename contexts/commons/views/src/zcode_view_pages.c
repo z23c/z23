@@ -335,23 +335,19 @@ size_t zcode_view_package(const struct zcode_view_package_input *in,
 
 /* ── /zcode/publisher/<pubkey> ────────────────────────────────────── */
 
-size_t zcode_view_publisher(const struct zcode_view_publisher_input *in,
-                            uint8_t *resp, size_t max)
+static size_t zcode_emit_publisher_profile_card(char *buf, size_t max,
+                                                const struct vcs_zcode_contributor *c)
 {
-    char body[40960];
     size_t off = 0;
-    const struct vcs_zcode_contributor *c = in->contributor;
-    int n = zcode_body_start(body, sizeof(body), "ZCODE Publisher");
-    if (n > 0) off = (size_t)n;
-
     char safe_name[160], safe_semver[80], safe_license[48];
     char safe_reward[160], safe_znam[80];
+    int n;
     html_escape(safe_name, sizeof(safe_name), c->latest_name);
     html_escape(safe_semver, sizeof(safe_semver), c->latest_semver);
     html_escape(safe_license, sizeof(safe_license), c->latest_license);
     html_escape(safe_reward, sizeof(safe_reward), c->reward_address);
 
-    n = snprintf(body + off, sizeof(body) - off,
+    n = snprintf(buf + off, max - off,
         "<h1>Publisher <span class='mono'>%.16s&hellip;</span></h1>"
         "<div class='card'><h2>Contributor profile</h2>"
         "<div class='kv'><b>publisher key</b>"
@@ -365,27 +361,33 @@ size_t zcode_view_publisher(const struct zcode_view_publisher_input *in,
         safe_name, safe_semver, safe_license);
     if (n > 0) off += (size_t)n;
     if (c->reward_address[0]) {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<div class='kv'><b>reward address</b>"
             "<span class='val mono'>%s</span></div>", safe_reward);
         if (n > 0) off += (size_t)n;
     }
     if (c->has_znam_pointer) {
         html_escape(safe_znam, sizeof(safe_znam), c->znam_pointer);
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<div class='kv'><b>znam pointer</b>"
             "<span class='val mono'>%s</span></div>", safe_znam);
         if (n > 0) off += (size_t)n;
     }
-    n = snprintf(body + off, sizeof(body) - off, "</div>");
+    n = snprintf(buf + off, max - off, "</div>");
     if (n > 0) off += (size_t)n;
+    return off;
+}
 
+static size_t zcode_emit_publisher_score_card(char *buf, size_t max,
+                                              const struct zcode_view_publisher_input *in)
+{
+    size_t off = 0;
     /* ZCODE Score + rank: earned score, never a token balance. */
-    n = snprintf(body + off, sizeof(body) - off,
+    int n = snprintf(buf + off, max - off,
         "<div class='card'><h2>ZCODE Score</h2>");
     if (n > 0) off += (size_t)n;
     if (in->totals) {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<div class='kv'><b>earned score (settled)</b>"
             "<span class='val'>%llu</span></div>"
             "<div class='kv'><b>simulated token rewards received</b>"
@@ -399,45 +401,55 @@ size_t zcode_view_publisher(const struct zcode_view_publisher_input *in,
             in->totals->settled_entries, in->totals->queued_entries);
         if (n > 0) off += (size_t)n;
     } else {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<p>No reward ledger on this node; no settled score yet.</p>");
         if (n > 0) off += (size_t)n;
     }
     if (in->rank) {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<div class='kv'><b>all-time rank</b>"
             "<span class='val'>#%llu</span></div>",
             (unsigned long long)in->rank->rank);
         if (n > 0) off += (size_t)n;
     }
-    n = snprintf(body + off, sizeof(body) - off,
+    n = snprintf(buf + off, max - off,
         "<p class='meta'>Rankings use earned score only &mdash; a "
         "transferred or purchased balance can never move them (balances "
         "do not exist in the v1 simulation).</p></div>");
     if (n > 0) off += (size_t)n;
+    return off;
+}
 
-    /* Earned badges. */
-    n = snprintf(body + off, sizeof(body) - off,
-        "<div class='card'><h2>Badges</h2>");
-    if (n > 0) off += (size_t)n;
+static size_t zcode_emit_publisher_badge_rows(char *buf, size_t max,
+                                              const struct zcode_view_publisher_input *in)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < in->badges_shown && off < max - 512; i++) {
+        const struct vcs_badge *b = &in->badges[i];
+        int n = snprintf(buf + off, max - off,
+            "<div class='kv'><b>%s</b><span class='val'>sequence "
+            "%llu</span></div>",
+            vcs_badge_type_string((enum vcs_badge_type)b->type),
+            (unsigned long long)b->sequence);
+        if (n > 0) off += (size_t)n;
+    }
+    return off;
+}
+
+static size_t zcode_emit_publisher_badge_list(char *buf, size_t max,
+                                              const struct zcode_view_publisher_input *in)
+{
+    size_t off = 0;
+    int n;
     if (in->badges_shown > 0) {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<p>%zu earned badge%s%s.</p>", in->badges_total,
             in->badges_total == 1 ? "" : "s",
             in->badge_policy ? "" : " (no badge policy lens configured)");
         if (n > 0) off += (size_t)n;
-        for (size_t i = 0; i < in->badges_shown && off < sizeof(body) - 512;
-             i++) {
-            const struct vcs_badge *b = &in->badges[i];
-            n = snprintf(body + off, sizeof(body) - off,
-                "<div class='kv'><b>%s</b><span class='val'>sequence "
-                "%llu</span></div>",
-                vcs_badge_type_string((enum vcs_badge_type)b->type),
-                (unsigned long long)b->sequence);
-            if (n > 0) off += (size_t)n;
-        }
+        off += zcode_emit_publisher_badge_rows(buf + off, max - off, in);
         if (in->badges_total > in->badges_shown) {
-            n = snprintf(body + off, sizeof(body) - off,
+            n = snprintf(buf + off, max - off,
                 "<p class='meta'>%zu more badge%s not shown (page cap %u)."
                 "</p>", in->badges_total - in->badges_shown,
                 in->badges_total - in->badges_shown == 1 ? "" : "s",
@@ -445,41 +457,77 @@ size_t zcode_view_publisher(const struct zcode_view_publisher_input *in,
             if (n > 0) off += (size_t)n;
         }
     } else {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<p>No earned badges%s.</p>",
             in->badge_policy ? "" : " (no badge policy lens configured)");
         if (n > 0) off += (size_t)n;
     }
-    n = snprintf(body + off, sizeof(body) - off, "</div>");
-    if (n > 0) off += (size_t)n;
+    return off;
+}
 
+static size_t zcode_emit_publisher_badges_card(char *buf, size_t max,
+                                               const struct zcode_view_publisher_input *in)
+{
+    size_t off = 0;
+    /* Earned badges. */
+    int n = snprintf(buf + off, max - off,
+        "<div class='card'><h2>Badges</h2>");
+    if (n > 0) off += (size_t)n;
+    off += zcode_emit_publisher_badge_list(buf + off, max - off, in);
+    n = snprintf(buf + off, max - off, "</div>");
+    if (n > 0) off += (size_t)n;
+    return off;
+}
+
+static size_t zcode_emit_publisher_packages_card(char *buf, size_t max,
+                                                 const struct zcode_view_publisher_input *in)
+{
+    size_t off = 0;
     /* The publisher's packages. */
-    n = snprintf(body + off, sizeof(body) - off,
+    int n = snprintf(buf + off, max - off,
         "<div class='card'><h2>Packages</h2>");
     if (n > 0) off += (size_t)n;
-    for (size_t i = 0; i < in->packages_shown && off < sizeof(body) - 1024;
-         i++) {
+    for (size_t i = 0; i < in->packages_shown && off < max - 1024; i++) {
         const struct vcs_package_index_entry *e = in->packages[i];
         char safe_pname[160], safe_psemver[80];
         html_escape(safe_pname, sizeof(safe_pname), e->name);
         html_escape(safe_psemver, sizeof(safe_psemver), e->semver);
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<div class='kv'><b><a href='/zcode/package/%s'>%s</a></b>"
             "<span class='val mono'>%s</span></div>",
             e->package_root_hex, safe_pname, safe_psemver);
         if (n > 0) off += (size_t)n;
     }
     if (in->packages_total > in->packages_shown) {
-        n = snprintf(body + off, sizeof(body) - off,
+        n = snprintf(buf + off, max - off,
             "<p class='meta'>%zu more release%s not shown (page cap %u)."
             "</p>", in->packages_total - in->packages_shown,
             in->packages_total - in->packages_shown == 1 ? "" : "s",
             ZCODE_VIEW_MAX_ROWS);
         if (n > 0) off += (size_t)n;
     }
-    n = snprintf(body + off, sizeof(body) - off,
+    n = snprintf(buf + off, max - off,
         "</div><p><a href='/zcode/packages'>&larr; all packages</a></p>");
     if (n > 0) off += (size_t)n;
+    return off;
+}
+
+size_t zcode_view_publisher(const struct zcode_view_publisher_input *in,
+                            uint8_t *resp, size_t max)
+{
+    char body[40960];
+    size_t off = 0;
+    int n = zcode_body_start(body, sizeof(body), "ZCODE Publisher");
+    if (n > 0) off = (size_t)n;
+
+    off += zcode_emit_publisher_profile_card(body + off, sizeof(body) - off,
+                                             in->contributor);
+    off += zcode_emit_publisher_score_card(body + off, sizeof(body) - off,
+                                           in);
+    off += zcode_emit_publisher_badges_card(body + off, sizeof(body) - off,
+                                            in);
+    off += zcode_emit_publisher_packages_card(body + off, sizeof(body) - off,
+                                              in);
 
     n = zcode_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
@@ -515,6 +563,66 @@ size_t zcode_view_leaderboard_index(uint8_t *resp, size_t max)
     return zcode_html_response(body, off, resp, max);
 }
 
+static void zcode_format_rank_window_desc(char *desc, size_t cap,
+                                          enum vcs_rank_period period,
+                                          const struct vcs_rank_window *window)
+{
+    if (window->bounded) {
+        if (period == VCS_RANK_PERIOD_DAILY)
+            snprintf(desc, cap, "%lld-%02u-%02u",
+                     (long long)window->year, window->month,
+                     window->day_of_month);
+        else if (period == VCS_RANK_PERIOD_WEEKLY)
+            snprintf(desc, cap, "ISO %lld-W%02u",
+                     (long long)window->iso_year, window->iso_week);
+        else if (period == VCS_RANK_PERIOD_MONTHLY)
+            snprintf(desc, cap, "%lld-%02u",
+                     (long long)window->year, window->month);
+    }
+}
+
+static size_t zcode_emit_leaderboard_table(char *buf, size_t max,
+                                           const struct vcs_rank_entry *rows,
+                                           size_t shown, size_t total)
+{
+    size_t off = 0;
+    int n;
+    if (shown > 0) {
+        n = snprintf(buf + off, max - off,
+            "<table><thead><tr><th>rank</th><th>contributor</th>"
+            "<th>earned score</th><th>simulated token rewards</th></tr>"
+            "</thead><tbody>");
+        if (n > 0) off += (size_t)n;
+        for (size_t i = 0; i < shown && off < max - 512; i++) {
+            char pub_hex[67];
+            zcl_hex_encode(rows[i].contributor, 33, pub_hex);
+            n = snprintf(buf + off, max - off,
+                "<tr><td>#%llu</td>"
+                "<td class='mono'><a href='/zcode/publisher/%s'>%.16s"
+                "&hellip;</a></td><td>%llu</td><td>%llu</td></tr>",
+                (unsigned long long)rows[i].rank, pub_hex, pub_hex,
+                (unsigned long long)rows[i].earned_score,
+                (unsigned long long)rows[i].token_rewards_received);
+            if (n > 0) off += (size_t)n;
+        }
+        n = snprintf(buf + off, max - off, "</tbody></table>");
+        if (n > 0) off += (size_t)n;
+        if (total > shown) {
+            n = snprintf(buf + off, max - off,
+                "<p class='meta'>%zu more contributor%s not shown (page "
+                "cap %u).</p>", total - shown,
+                total - shown == 1 ? "" : "s", VCS_RANK_MAX_PAGE_ROWS);
+            if (n > 0) off += (size_t)n;
+        }
+    } else {
+        n = snprintf(buf + off, max - off,
+            "<p>No settled score facts in this window yet &mdash; an "
+            "empty window renders empty, never padded.</p>");
+        if (n > 0) off += (size_t)n;
+    }
+    return off;
+}
+
 size_t zcode_view_leaderboard(enum vcs_rank_period period,
                               const struct vcs_rank_window *window,
                               const struct vcs_rank_entry *rows,
@@ -529,18 +637,8 @@ size_t zcode_view_leaderboard(enum vcs_rank_period period,
     if (n > 0) off = (size_t)n;
 
     char window_desc[96] = "all time";
-    if (window->bounded) {
-        if (period == VCS_RANK_PERIOD_DAILY)
-            snprintf(window_desc, sizeof(window_desc), "%lld-%02u-%02u",
-                     (long long)window->year, window->month,
-                     window->day_of_month);
-        else if (period == VCS_RANK_PERIOD_WEEKLY)
-            snprintf(window_desc, sizeof(window_desc), "ISO %lld-W%02u",
-                     (long long)window->iso_year, window->iso_week);
-        else if (period == VCS_RANK_PERIOD_MONTHLY)
-            snprintf(window_desc, sizeof(window_desc), "%lld-%02u",
-                     (long long)window->year, window->month);
-    }
+    zcode_format_rank_window_desc(window_desc, sizeof(window_desc),
+                                  period, window);
 
     n = snprintf(body + off, sizeof(body) - off,
         "<h1>ZCODE Rankings &mdash; %s</h1>"
@@ -552,39 +650,8 @@ size_t zcode_view_leaderboard(enum vcs_rank_period period,
         contributors_truncated ? " (contributor cap reached)" : "");
     if (n > 0) off += (size_t)n;
 
-    if (shown > 0) {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<table><thead><tr><th>rank</th><th>contributor</th>"
-            "<th>earned score</th><th>simulated token rewards</th></tr>"
-            "</thead><tbody>");
-        if (n > 0) off += (size_t)n;
-        for (size_t i = 0; i < shown && off < sizeof(body) - 512; i++) {
-            char pub_hex[67];
-            zcl_hex_encode(rows[i].contributor, 33, pub_hex);
-            n = snprintf(body + off, sizeof(body) - off,
-                "<tr><td>#%llu</td>"
-                "<td class='mono'><a href='/zcode/publisher/%s'>%.16s"
-                "&hellip;</a></td><td>%llu</td><td>%llu</td></tr>",
-                (unsigned long long)rows[i].rank, pub_hex, pub_hex,
-                (unsigned long long)rows[i].earned_score,
-                (unsigned long long)rows[i].token_rewards_received);
-            if (n > 0) off += (size_t)n;
-        }
-        n = snprintf(body + off, sizeof(body) - off, "</tbody></table>");
-        if (n > 0) off += (size_t)n;
-        if (total > shown) {
-            n = snprintf(body + off, sizeof(body) - off,
-                "<p class='meta'>%zu more contributor%s not shown (page "
-                "cap %u).</p>", total - shown,
-                total - shown == 1 ? "" : "s", VCS_RANK_MAX_PAGE_ROWS);
-            if (n > 0) off += (size_t)n;
-        }
-    } else {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<p>No settled score facts in this window yet &mdash; an "
-            "empty window renders empty, never padded.</p>");
-        if (n > 0) off += (size_t)n;
-    }
+    off += zcode_emit_leaderboard_table(body + off, sizeof(body) - off,
+                                        rows, shown, total);
     n = snprintf(body + off, sizeof(body) - off,
         "<p><a href='/zcode/leaderboard'>&larr; all periods</a></p>");
     if (n > 0) off += (size_t)n;
@@ -595,6 +662,66 @@ size_t zcode_view_leaderboard(enum vcs_rank_period period,
 }
 
 /* ── /zcode/badges ────────────────────────────────────────────────── */
+
+static size_t zcode_emit_badge_rows(char *buf, size_t max,
+                                    const struct vcs_badge *badges,
+                                    size_t shown)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < shown && off < max - 640; i++) {
+        const struct vcs_badge *b = &badges[i];
+        char recip_hex[2 * VCS_PACKAGE_BADGE_PUBKEY_BYTES + 1];
+        zcl_hex_encode(b->recipient, VCS_PACKAGE_BADGE_PUBKEY_BYTES,
+                  recip_hex);
+        char period_desc[64];
+        if (vcs_badge_is_non_periodic(b))
+            snprintf(period_desc, sizeof(period_desc), "non-periodic");
+        else
+            snprintf(period_desc, sizeof(period_desc), "%lld..%lld",
+                     (long long)b->period_first_day,
+                     (long long)b->period_last_day);
+        int n = snprintf(buf + off, max - off,
+            "<tr><td>%s</td>"
+            "<td class='mono'><a href='/zcode/publisher/%s'>%.16s"
+            "&hellip;</a></td><td class='mono'>%s</td><td>%llu</td>"
+            "</tr>",
+            vcs_badge_type_string((enum vcs_badge_type)b->type),
+            recip_hex, recip_hex, period_desc,
+            (unsigned long long)b->sequence);
+        if (n > 0) off += (size_t)n;
+    }
+    return off;
+}
+
+static size_t zcode_emit_badge_table(char *buf, size_t max,
+                                     const struct vcs_badge *badges,
+                                     size_t shown, size_t total)
+{
+    size_t off = 0;
+    int n;
+    if (shown > 0) {
+        n = snprintf(buf + off, max - off,
+            "<table><thead><tr><th>badge</th><th>recipient</th>"
+            "<th>period (civil days)</th><th>sequence</th></tr></thead>"
+            "<tbody>");
+        if (n > 0) off += (size_t)n;
+        off += zcode_emit_badge_rows(buf + off, max - off, badges, shown);
+        n = snprintf(buf + off, max - off, "</tbody></table>");
+        if (n > 0) off += (size_t)n;
+        if (total > shown) {
+            n = snprintf(buf + off, max - off,
+                "<p class='meta'>%zu more badge%s not shown (page cap "
+                "%u).</p>", total - shown,
+                total - shown == 1 ? "" : "s", ZCODE_VIEW_MAX_BADGES);
+            if (n > 0) off += (size_t)n;
+        }
+    } else {
+        n = snprintf(buf + off, max - off,
+            "<p>No badges earned yet.</p>");
+        if (n > 0) off += (size_t)n;
+    }
+    return off;
+}
 
 size_t zcode_view_badges(const struct vcs_badge *badges, size_t shown,
                          size_t total, bool recognized_lens,
@@ -620,48 +747,8 @@ size_t zcode_view_badges(const struct vcs_badge *badges, size_t shown,
         truncated ? " (scan cap reached)" : "");
     if (n > 0) off += (size_t)n;
 
-    if (shown > 0) {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<table><thead><tr><th>badge</th><th>recipient</th>"
-            "<th>period (civil days)</th><th>sequence</th></tr></thead>"
-            "<tbody>");
-        if (n > 0) off += (size_t)n;
-        for (size_t i = 0; i < shown && off < sizeof(body) - 640; i++) {
-            const struct vcs_badge *b = &badges[i];
-            char recip_hex[2 * VCS_PACKAGE_BADGE_PUBKEY_BYTES + 1];
-            zcl_hex_encode(b->recipient, VCS_PACKAGE_BADGE_PUBKEY_BYTES,
-                      recip_hex);
-            char period_desc[64];
-            if (vcs_badge_is_non_periodic(b))
-                snprintf(period_desc, sizeof(period_desc), "non-periodic");
-            else
-                snprintf(period_desc, sizeof(period_desc), "%lld..%lld",
-                         (long long)b->period_first_day,
-                         (long long)b->period_last_day);
-            n = snprintf(body + off, sizeof(body) - off,
-                "<tr><td>%s</td>"
-                "<td class='mono'><a href='/zcode/publisher/%s'>%.16s"
-                "&hellip;</a></td><td class='mono'>%s</td><td>%llu</td>"
-                "</tr>",
-                vcs_badge_type_string((enum vcs_badge_type)b->type),
-                recip_hex, recip_hex, period_desc,
-                (unsigned long long)b->sequence);
-            if (n > 0) off += (size_t)n;
-        }
-        n = snprintf(body + off, sizeof(body) - off, "</tbody></table>");
-        if (n > 0) off += (size_t)n;
-        if (total > shown) {
-            n = snprintf(body + off, sizeof(body) - off,
-                "<p class='meta'>%zu more badge%s not shown (page cap "
-                "%u).</p>", total - shown,
-                total - shown == 1 ? "" : "s", ZCODE_VIEW_MAX_BADGES);
-            if (n > 0) off += (size_t)n;
-        }
-    } else {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<p>No badges earned yet.</p>");
-        if (n > 0) off += (size_t)n;
-    }
+    off += zcode_emit_badge_table(body + off, sizeof(body) - off,
+                                  badges, shown, total);
     n = snprintf(body + off, sizeof(body) - off,
         "<p><a href='/zcode'>&larr; ZCODE Library</a></p>");
     if (n > 0) off += (size_t)n;
