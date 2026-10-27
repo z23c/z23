@@ -4,6 +4,66 @@
 
 static bool is_cont(unsigned char b) { return (b & 0xC0u) == 0x80u; }
 
+/* Sequence length and the legal range for the second byte, which is
+ * where the overlong / surrogate / >U+10FFFF exclusions live. */
+static const struct {
+  unsigned char first, last;
+  size_t n;
+  unsigned char lo, hi;
+} lead_rules[] = {
+    {0xC2u, 0xDFu, 2, 0x80u, 0xBFu},
+    {0xE0u, 0xE0u, 3, 0xA0u, 0xBFu}, /* exclude overlong */
+    {0xEDu, 0xEDu, 3, 0x80u, 0x9Fu}, /* exclude UTF-16 surrogates */
+    {0xE1u, 0xEFu, 3, 0x80u, 0xBFu},
+    {0xF0u, 0xF0u, 4, 0x90u, 0xBFu}, /* exclude overlong */
+    {0xF4u, 0xF4u, 4, 0x80u, 0x8Fu}, /* exclude above U+10FFFF */
+    {0xF1u, 0xF3u, 4, 0x80u, 0xBFu},
+};
+
+/* Look up a multi-byte lead byte's sequence length and second-byte range;
+ * returns false for bytes that cannot start a sequence. */
+static bool classify_lead_byte(unsigned char b0, size_t *n, unsigned char *lo,
+                               unsigned char *hi) {
+  for (size_t i = 0; i < sizeof(lead_rules) / sizeof(lead_rules[0]); i++) {
+    if (b0 >= lead_rules[i].first && b0 <= lead_rules[i].last) {
+      *n = lead_rules[i].n;
+      *lo = lead_rules[i].lo;
+      *hi = lead_rules[i].hi;
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Check the second byte's legal range and the remaining continuation
+ * bytes of a multi-byte sequence. */
+static zutf8_status check_tail_bytes(const char *str, size_t n,
+                                     unsigned char b1, unsigned char lo,
+                                     unsigned char hi) {
+  if (b1 < lo || b1 > hi)
+    return ZUTF8_INVALID;
+  for (size_t i = 2; i < n; i++) {
+    if (!is_cont((unsigned char)str[i]))
+      return ZUTF8_INVALID;
+  }
+  return ZUTF8_OK;
+}
+
+/* Assemble the code point from a validated sequence's payload bytes. */
+static uint32_t decode_code_point(unsigned char b0, unsigned char b1,
+                                  const char *str, size_t n) {
+  switch (n) {
+  case 2:
+    return ((uint32_t)(b0 & 0x1Fu) << 6) | (uint32_t)(b1 & 0x3Fu);
+  case 3:
+    return ((uint32_t)(b0 & 0x0Fu) << 12) | ((uint32_t)(b1 & 0x3Fu) << 6) |
+           (uint32_t)(str[2] & 0x3Fu);
+  default:
+    return ((uint32_t)(b0 & 0x07u) << 18) | ((uint32_t)(b1 & 0x3Fu) << 12) |
+           ((uint32_t)(str[2] & 0x3Fu) << 6) | (uint32_t)(str[3] & 0x3Fu);
+  }
+}
+
 zutf8_status zutf8_decode_n(const char *str, size_t len, uint32_t *cp_out,
                             size_t *consumed_out) {
   if (consumed_out)
@@ -21,67 +81,18 @@ zutf8_status zutf8_decode_n(const char *str, size_t len, uint32_t *cp_out,
     return ZUTF8_OK;
   }
 
-  /* Sequence length and the legal range for the second byte, which is
-   * where the overlong / surrogate / >U+10FFFF exclusions live. */
   size_t n;
   unsigned char lo, hi;
-  if (b0 >= 0xC2u && b0 <= 0xDFu) {
-    n = 2;
-    lo = 0x80u;
-    hi = 0xBFu;
-  } else if (b0 == 0xE0u) {
-    n = 3;
-    lo = 0xA0u; /* exclude overlong */
-    hi = 0xBFu;
-  } else if (b0 == 0xEDu) {
-    n = 3;
-    lo = 0x80u;
-    hi = 0x9Fu; /* exclude UTF-16 surrogates */
-  } else if (b0 >= 0xE1u && b0 <= 0xEFu) {
-    n = 3;
-    lo = 0x80u;
-    hi = 0xBFu;
-  } else if (b0 == 0xF0u) {
-    n = 4;
-    lo = 0x90u; /* exclude overlong */
-    hi = 0xBFu;
-  } else if (b0 == 0xF4u) {
-    n = 4;
-    lo = 0x80u;
-    hi = 0x8Fu; /* exclude above U+10FFFF */
-  } else if (b0 >= 0xF1u && b0 <= 0xF3u) {
-    n = 4;
-    lo = 0x80u;
-    hi = 0xBFu;
-  } else {
+  if (!classify_lead_byte(b0, &n, &lo, &hi))
     return ZUTF8_INVALID; /* 0x80..0xC1, 0xF5..0xFF */
-  }
 
   if (len < n)
     return ZUTF8_TRUNCATED;
   const unsigned char b1 = (unsigned char)str[1];
-  if (b1 < lo || b1 > hi)
+  if (check_tail_bytes(str, n, b1, lo, hi) != ZUTF8_OK)
     return ZUTF8_INVALID;
-  for (size_t i = 2; i < n; i++) {
-    if (!is_cont((unsigned char)str[i]))
-      return ZUTF8_INVALID;
-  }
 
-  uint32_t cp;
-  switch (n) {
-  case 2:
-    cp = ((uint32_t)(b0 & 0x1Fu) << 6) | (uint32_t)(b1 & 0x3Fu);
-    break;
-  case 3:
-    cp = ((uint32_t)(b0 & 0x0Fu) << 12) | ((uint32_t)(b1 & 0x3Fu) << 6) |
-         (uint32_t)(str[2] & 0x3Fu);
-    break;
-  default:
-    cp = ((uint32_t)(b0 & 0x07u) << 18) | ((uint32_t)(b1 & 0x3Fu) << 12) |
-         ((uint32_t)(str[2] & 0x3Fu) << 6) | (uint32_t)(str[3] & 0x3Fu);
-    break;
-  }
-  *cp_out = cp;
+  *cp_out = decode_code_point(b0, b1, str, n);
   if (consumed_out)
     *consumed_out = n;
   return ZUTF8_OK;

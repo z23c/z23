@@ -298,7 +298,6 @@ contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
 contexts/commons/packages/ztrie/tests/test_ztrie.c:test_stress_vs_model:16
 contexts/commons/packages/zu256/app/main.c:main:20
 contexts/commons/packages/zutf16/src/zutf16.c:zutf16_decode_cp:19
-contexts/commons/packages/zutf8/src/zutf8.c:zutf8_decode_n:25
 contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
 contexts/commons/packages/zxml/app/main.c:main:24
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
