@@ -809,6 +809,44 @@ static void r1cs_check_section_hashes(
     }
 }
 
+static bool r1cs_swap_first_distinct_row(uint8_t *rows, size_t n_rows)
+{
+    if (!rows || n_rows < 2)
+        return false;
+    /* Two rows that genuinely differ, so the swap is observable. */
+    size_t j = 1;
+    while (j < n_rows && memcmp(rows, rows + j * 32, 32) == 0)
+        j++;
+    if (j == n_rows)
+        return false;
+    uint8_t tmp[32];
+    memcpy(tmp, rows, 32);
+    memcpy(rows, rows + j * 32, 32);
+    memcpy(rows + j * 32, tmp, 32);
+    return true;
+}
+
+static void r1cs_check_reorder_edge_cases(int *failure_count)
+{
+    uint8_t rows[3 * 32] = {0};
+    const uint8_t unchanged[3 * 32] = {0};
+    R1CS_CHECK("reorder refuses zero rows without mutation",
+        !r1cs_swap_first_distinct_row(rows, 0) &&
+        memcmp(rows, unchanged, sizeof(rows)) == 0);
+    R1CS_CHECK("reorder refuses one row without mutation",
+        !r1cs_swap_first_distinct_row(rows, 1) &&
+        memcmp(rows, unchanged, sizeof(rows)) == 0);
+    R1CS_CHECK("reorder refuses all-equal rows without mutation",
+        !r1cs_swap_first_distinct_row(rows, 3) &&
+        memcmp(rows, unchanged, sizeof(rows)) == 0);
+    rows[32] = 1;
+    rows[64] = 2;
+    const uint8_t swapped[3 * 32] = {[0] = 1, [64] = 2};
+    R1CS_CHECK("reorder swaps the first distinct pair and preserves other rows",
+        r1cs_swap_first_distinct_row(rows, 3) &&
+        memcmp(rows, swapped, sizeof(rows)) == 0);
+}
+
 static void r1cs_check_reordered_constraints(
     const uint8_t *rows, size_t n_rows, const uint8_t all[32], int *failure_count)
 {
@@ -819,23 +857,16 @@ static void r1cs_check_reordered_constraints(
         size_t located = SIZE_MAX;
         if (mut) {
             memcpy(mut, rows, n_rows * 32);
-            /* Two rows that genuinely differ, so the swap is observable. */
-            size_t i = 0, j = 1;
-            while (j < n_rows
-                   && memcmp(rows + i * 32, rows + j * 32, 32) == 0)
-                j++;
-            uint8_t tmp[32];
-            memcpy(tmp, mut + i * 32, 32);
-            memcpy(mut + i * 32, mut + j * 32, 32);
-            memcpy(mut + j * 32, tmp, 32);
-            uint8_t h[32];
-            transcript_hash_of(h, mut, n_rows);
-            caught = memcmp(h, all, 32) != 0;
-            for (size_t r = 0; r < n_rows; r++)
-                if (memcmp(mut + r * 32, rows + r * 32, 32) != 0) {
-                    located = r;
-                    break;
-                }
+            if (r1cs_swap_first_distinct_row(mut, n_rows)) {
+                uint8_t h[32];
+                transcript_hash_of(h, mut, n_rows);
+                caught = memcmp(h, all, 32) != 0;
+                for (size_t r = 0; r < n_rows; r++)
+                    if (memcmp(mut + r * 32, rows + r * 32, 32) != 0) {
+                        located = r;
+                        break;
+                    }
+            }
             free(mut);
         }
         R1CS_CHECK("4/5 two reordered constraints is CAUGHT", caught);
@@ -903,6 +934,8 @@ int test_groth16_r1cs_oracle(void)
     int failures = 0;
     printf("\n=== groth16_r1cs_oracle: canonical R1CS transcript parity "
            "(SPEND sections 1-28) ===\n");
+
+    r1cs_check_reorder_edge_cases(&failures);
 
     struct sapling_spend_witness wit;
     struct sapling_spend_inputs pub;
