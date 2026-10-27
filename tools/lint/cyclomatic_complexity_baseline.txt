@@ -324,7 +324,6 @@ contexts/commons/packages/zu256/app/main.c:main:20
 contexts/commons/packages/zutf16/src/zutf16.c:zutf16_decode_cp:19
 contexts/commons/packages/zutf8/src/zutf8.c:zutf8_decode_n:25
 contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
-contexts/commons/packages/zwrap/src/zwrap.c:zwrap:23
 contexts/commons/packages/zxml/app/main.c:main:24
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_materialize_package:28
