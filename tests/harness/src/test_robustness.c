@@ -59,10 +59,10 @@ static uint16_t reserve_test_port(void)
     return port;
 }
 
-int test_robustness(void)
+/* Store handler: NULL inputs and out-of-range product IDs. */
+static int check_store_null_and_product_inputs(void)
 {
     int failures = 0;
-    setup_robustness_datadir();
 
     /* ── Store: null/empty input handling ───────────────────── */
 
@@ -103,6 +103,14 @@ int test_robustness(void)
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
 
+    return failures;
+}
+
+/* Store handler: unknown order IDs and unknown request paths. */
+static int check_store_order_and_unknown_paths(void)
+{
+    int failures = 0;
+
     printf("robust: store invalid order ID returns 404... ");
     {
         uint8_t resp[4096];
@@ -125,6 +133,14 @@ int test_robustness(void)
         if (ok) printf("OK (n=%zu)\n", n);
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+
+    return failures;
+}
+
+/* Store handler must not reflect XSS payloads in responses. */
+static int check_store_xss_prevention(void)
+{
+    int failures = 0;
 
     /* ── Store: XSS prevention ─────────────────────────────── */
 
@@ -154,6 +170,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+
+    return failures;
+}
+
+/* fast_sync_verify_pow must reject NULL, stale and future proofs. */
+static int check_fast_sync_pow_validation(void)
+{
+    int failures = 0;
 
     /* ── Fast sync: PoW verification ──────────────────────── */
 
@@ -193,6 +217,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Fast sync rate limiter first request and snapshot offer edge cases. */
+static int check_fast_sync_rate_and_snapshot_offers(void)
+{
+    int failures = 0;
+
     /* ── Fast sync: rate limiter ─────────────────────────── */
 
     printf("robust: rate limiter allows initial request... ");
@@ -222,6 +254,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* rpc_http start/stop cycle must be repeatable in one process. */
+static int check_rpc_http_lifecycle(void)
+{
+    int failures = 0;
+
     /* ── RPC HTTP lifecycle ─────────────────────────────── */
 
     printf("robust: rpc_http start/stop is repeatable... ");
@@ -237,6 +277,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Byte stream readers: bounds checks and compact_size parsing. */
+static int check_byte_stream_bounds(void)
+{
+    int failures = 0;
 
     /* ── Byte stream: bounds checking ────────────────────── */
 
@@ -297,6 +345,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* msg_header_get_command must extract NUL-padded command names. */
+static int check_msg_header_command(void)
+{
+    int failures = 0;
+
     /* ── P2P message: header handling ────────────────────── */
 
     printf("robust: zeroed msg_header command empty... ");
@@ -321,6 +377,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got '%s')\n", cmd); failures++; }
     }
+
+    return failures;
+}
+
+/* html_escape checks for tags, ampersand, quotes, NULL and empty input. */
+static int check_html_escaping(void)
+{
+    int failures = 0;
 
     /* ── HTML escaping ───────────────────────────────────── */
 
@@ -370,6 +434,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* check_transaction must reject empty and negative-value transactions. */
+static int check_transaction_validation(void)
+{
+    int failures = 0;
+
     /* ── Validation: transaction checks ──────────────────── */
 
     printf("robust: empty tx rejected by check_transaction... ");
@@ -400,6 +472,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* inv_item serialize/deserialize roundtrip and truncated input. */
+static int check_inv_item_serialization(void)
+{
+    int failures = 0;
 
     /* ── Inv item serialization ──────────────────────────── */
 
@@ -434,6 +514,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* base58check decode rejections and uint256 equality edge cases. */
+static int check_base58_and_uint256_validation(void)
+{
+    int failures = 0;
 
     /* ── Base58 validation ───────────────────────────────── */
 
@@ -477,6 +565,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Block and tx duplicate-detection ring buffers must remember marked hashes. */
+static int check_dedup_ring_buffers(void)
+{
+    int failures = 0;
+
     /* ── Duplicate detection ring buffers ────────────────── */
 
     printf("robust: block dedup ring buffer... ");
@@ -508,6 +604,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Protocol message size cap: constant value and oversized-header rejection. */
+static int check_message_size_limits(void)
+{
+    int failures = 0;
 
     /* ── P2P message size limit ──────────────────────────── */
     printf("robust: MAX_PROTOCOL_MESSAGE_LENGTH is 2MB... ");
@@ -547,6 +651,14 @@ int test_robustness(void)
         /* Clean up any allocated recv_msgs */
         free(fake_node.recv_msgs);
     }
+
+    return failures;
+}
+
+/* zslp_create_token must reject invalid token params and accept a valid one. */
+static int check_zslp_token_validation(void)
+{
+    int failures = 0;
 
     /* ── ZSLP ticker validation ──────────────────────────── */
     printf("robust: ZSLP rejects empty ticker... ");
@@ -593,6 +705,14 @@ int test_robustness(void)
         else { printf("FAIL (rejected valid)\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Fast sync rate limiter: per-IP chunk budget and independence. */
+static int check_rate_limiter_enforcement(void)
+{
+    int failures = 0;
+
     /* ── Rate limiter enforcement ────────────────────────── */
     printf("robust: rate limiter enforces 5000 chunk limit... ");
     {
@@ -637,6 +757,14 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* node_db sync batch size clamping, flush no-ops and NULL safety. */
+static int check_sync_batch_config(void)
+{
+    int failures = 0;
 
     /* ── SQLite batch sync state machine ────────────────── */
     printf("robust: batch sync default is per-block... ");
@@ -690,6 +818,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* System RAM reporting and the OOM-warning estimate for the block index. */
+static int check_system_memory_estimates(void)
+{
+    int failures = 0;
+
     printf("robust: get_system_ram returns reasonable value... ");
     {
         uint64_t ram = 0;
@@ -713,6 +849,14 @@ int test_robustness(void)
         if (would_warn) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* PID liveness checks used by stale/live pidfile lock detection. */
+static int check_pid_lock_detection(void)
+{
+    int failures = 0;
 
     printf("robust: stale PID lock detection (dead PID)... ");
     {
@@ -748,6 +892,15 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Clean/unclean shutdown detection via marker and WAL files, plus the
+ * crash recovery event. */
+static int check_shutdown_marker_detection(void)
+{
+    int failures = 0;
 
     printf("robust: unclean shutdown detection (WAL exists, no marker)... ");
     {
@@ -797,6 +950,14 @@ int test_robustness(void)
         printf("OK\n");
     }
 
+    return failures;
+}
+
+/* A pidfile holding our own PID must read back as a live process. */
+static int check_running_pid_lock_detection(void)
+{
+    int failures = 0;
+
     printf("robust: PID lock rejects already-running process... ");
     {
         /* Write our own PID to a lock file, then verify kill(pid,0)
@@ -824,6 +985,14 @@ int test_robustness(void)
         else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* zcl_malloc must survive a zero-size request and serve a small one. */
+static int check_alloc_failure_safety(void)
+{
+    int failures = 0;
+
     printf("robust: OOM protection logs on alloc failure simulation... ");
     {
         /* zcl_malloc with size 0 should return NULL without crashing,
@@ -837,6 +1006,37 @@ int test_robustness(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_robustness(void)
+{
+    int failures = 0;
+    setup_robustness_datadir();
+
+    failures += check_store_null_and_product_inputs();
+    failures += check_store_order_and_unknown_paths();
+    failures += check_store_xss_prevention();
+    failures += check_fast_sync_pow_validation();
+    failures += check_fast_sync_rate_and_snapshot_offers();
+    failures += check_rpc_http_lifecycle();
+    failures += check_byte_stream_bounds();
+    failures += check_msg_header_command();
+    failures += check_html_escaping();
+    failures += check_transaction_validation();
+    failures += check_inv_item_serialization();
+    failures += check_base58_and_uint256_validation();
+    failures += check_dedup_ring_buffers();
+    failures += check_message_size_limits();
+    failures += check_zslp_token_validation();
+    failures += check_rate_limiter_enforcement();
+    failures += check_sync_batch_config();
+    failures += check_system_memory_estimates();
+    failures += check_pid_lock_detection();
+    failures += check_shutdown_marker_detection();
+    failures += check_running_pid_lock_detection();
+    failures += check_alloc_failure_safety();
 
     cleanup_robustness_datadir();
     return failures;

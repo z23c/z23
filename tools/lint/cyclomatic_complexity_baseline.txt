@@ -675,7 +675,6 @@ tests/harness/src/test_reducer_frontier_reconcile_light.c:test_reducer_frontier_
 tests/harness/src/test_reducer_reconcile_witness.c:test_reducer_reconcile_witness:62
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
-tests/harness/src/test_robustness.c:test_robustness:104
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:46
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
 tests/harness/src/test_sapling_ckpt_persist.c:test_sapling_ckpt_persist:95
