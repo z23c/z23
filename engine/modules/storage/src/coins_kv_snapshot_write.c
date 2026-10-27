@@ -83,9 +83,11 @@ static enum snap_row_status snapshot_emit_record(FILE *out,
 
 /* Stream ONE stepped coins row: re-read its columns, skip it when it has no
  * canonical 32-byte txid, size the inline/heap record buffer for its script,
- * then emit the record.  Always reports the row's effective script length in
- * *eff_slen_out (the OOM log needs it) and, on SNAP_ROW_WRITTEN, its value in
- * *value_out.  The heap record buffer (if any) is handed back in *heap_out and
+ * then emit the record.  Once the row has a canonical txid (every status but
+ * SNAP_ROW_SKIPPED) it reports the effective script length in *eff_slen_out
+ * (the OOM log needs it; it is left untouched for a skipped row) and, on
+ * SNAP_ROW_WRITTEN, its value in *value_out.  The heap record buffer (if any)
+ * is handed back in *heap_out once allocated (never on SNAP_ROW_OOM) and
  * stays owned by the caller, who frees it after logging a failure.  Returns the
  * row status; the caller logs the failures. */
 static enum snap_row_status snapshot_stream_row(FILE *out,
@@ -131,9 +133,11 @@ static enum snap_row_status snapshot_stream_row(FILE *out,
 }
 
 /* Publish a completed snapshot's results through the caller's optional
- * out-params: the body SHA3 (only when both sha3 sides are given — the
- * streaming body has no final digest yet) plus the count/total_supply
- * totals.  Nothing is written unless the body completed (`ok`). */
+ * out-params: the body SHA3 is copied only when out_sha3 is non-NULL (the
+ * caller then must pass a non-NULL body_sha3; the streaming body has no final
+ * digest yet and passes NULL for both), plus the count/total_supply
+ * totals, each only when its pointer is non-NULL.  Nothing is written unless
+ * the body completed (`ok`). */
 static void snapshot_publish_results(bool ok, const uint8_t *body_sha3,
                                      uint64_t count, int64_t total_supply,
                                      uint8_t out_sha3[32], uint64_t *out_count,
