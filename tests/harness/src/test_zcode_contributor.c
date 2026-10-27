@@ -442,28 +442,38 @@ static bool zc4_show_latest_ok(const struct json_value *data)
            rzp && strcmp(rzp, "jsonlite") == 0;
 }
 
-static bool zc4_show_profile_ok(const struct json_value *zp)
+static bool zc4_show_profile_ok(const struct json_value *zp,
+                                const char *zp_name, const char *zp_display)
 {
-    const char *zp_name = zp ? json_get_str(json_get(zp, "name")) : NULL;
-    const char *zp_display =
-        zp ? json_get_str(json_get(zp, "display_name")) : NULL;
     return zp && json_get_bool(json_get(zp, "found")) &&
            json_get_int(json_get(zp, "claimant_names")) == 1 &&
            zp_name && strcmp(zp_name, "rhett") == 0 &&
            zp_display && strcmp(zp_display, "Rhett") == 0;
 }
 
-static bool zc4_show_binding_ok(const struct json_value *zp,
+static bool zc4_show_binding_ok(const struct json_value *binding,
+                                const char *b_owner, const char *b_expected,
                                 const char *owner_a)
 {
-    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
-    const char *b_owner =
-        binding ? json_get_str(json_get(binding, "owner_address")) : NULL;
-    const char *b_expected =
-        binding ? json_get_str(json_get(binding, "expected_owner")) : NULL;
     return binding && json_get_bool(json_get(binding, "bound")) &&
            b_owner && b_expected && strcmp(b_owner, b_expected) == 0 &&
            strcmp(b_owner, owner_a) == 0;
+}
+
+static int zc4_show_setup(const char *dd, const char *pk_a,
+                          const char *owner_a)
+{
+    int failures = 0;
+    ZC4_CHECK("show: two releases commit",
+              zc4_commit_one(dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 1,
+                             NULL, NULL) &&
+              zc4_commit_one(dd, 0xaa, 2u, "rhett/json-lite", "Apache-2.0",
+                             2, "jsonlite", NULL));
+    ZC4_CHECK("show: publisher profile seeded (bound)",
+              zc4_seed(dd, "rhett", owner_a, ZNAM_TYPE_ONION,
+                       "rhettzcode.onion", ZCODE_POINTER_KIND_PUBLISHER,
+                       pk_a, "Rhett", NULL));
+    return failures;
 }
 
 /* ── 1: contributor show ────────────────────────────────────────────── */
@@ -479,15 +489,7 @@ static int t_show(void)
     ZC4_CHECK("show: fixtures",
               zc4_pubkey_hex(0xaa, pk_a) && zc4_pubkey_hex(0xcc, pk_c) &&
               zc4_p2pkh_of_seed(0xaa, owner_a, sizeof(owner_a)));
-    ZC4_CHECK("show: two releases commit",
-              zc4_commit_one(dd, 0xaa, 1u, "rhett/ring-buffer", "MIT", 1,
-                             NULL, NULL) &&
-              zc4_commit_one(dd, 0xaa, 2u, "rhett/json-lite", "Apache-2.0",
-                             2, "jsonlite", NULL));
-    ZC4_CHECK("show: publisher profile seeded (bound)",
-              zc4_seed(dd, "rhett", owner_a, ZNAM_TYPE_ONION,
-                       "rhettzcode.onion", ZCODE_POINTER_KIND_PUBLISHER,
-                       pk_a, "Rhett", NULL));
+    failures += zc4_show_setup(dd, pk_a, owner_a);
 
     struct zc4_cmd c;
     zc4_show(&c, dd, pk_a);
@@ -495,8 +497,17 @@ static int t_show(void)
     ZC4_CHECK("show: latest release + its znam pointer",
               zc4_show_latest_ok(&c.reply.data));
     const struct json_value *zp = json_get(&c.reply.data, "znam_profile");
+    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
+    const char *zp_name = zp ? json_get_str(json_get(zp, "name")) : NULL;
+    const char *zp_display =
+        zp ? json_get_str(json_get(zp, "display_name")) : NULL;
+    const char *b_owner =
+        binding ? json_get_str(json_get(binding, "owner_address")) : NULL;
+    const char *b_expected =
+        binding ? json_get_str(json_get(binding, "expected_owner")) : NULL;
     ZC4_CHECK("show: bound profile with binding proof",
-              zc4_show_profile_ok(zp) && zc4_show_binding_ok(zp, owner_a));
+              zc4_show_profile_ok(zp, zp_name, zp_display) &&
+              zc4_show_binding_ok(binding, b_owner, b_expected, owner_a));
     const struct json_value *roots = json_get(&c.reply.data, "package_roots");
     ZC4_CHECK("show: package roots page",
               roots && json_size(roots) == 2 &&
@@ -581,27 +592,21 @@ static int t_packages(void)
 
 static bool zc4_resolve_separated_ok(const struct zc4_cmd *c,
                                      const struct json_value *zp,
-                                     const struct json_value *zi)
+                                     const struct json_value *zi,
+                                     const char *id_src, const char *p_src)
 {
-    const char *id_src = zi ? json_get_str(json_get(zi, "source")) : NULL;
-    const char *p_src = zp ? json_get_str(json_get(zp, "source")) : NULL;
     return c->reply.status == ZCL_COMMAND_STATUS_PASSED && zp && zi &&
            p_src && strcmp(p_src, "znam-record") == 0 &&
            id_src && strcmp(id_src, "signed-release") == 0 &&
            json_get_str(json_get(&c->reply.data, "identity_note"));
 }
 
-static bool zc4_resolve_binding_ok(const struct json_value *zp,
-                                   const struct json_value *zi,
+static bool zc4_resolve_binding_ok(const struct json_value *zi,
+                                   const struct json_value *binding,
+                                   const char *claimed, const char *id_pub,
+                                   const char *id_root,
                                    const char *pk_a, const char *root1)
 {
-    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
-    const char *claimed =
-        zp ? json_get_str(json_get(zp, "claimed_package_root")) : NULL;
-    const char *id_pub =
-        zi ? json_get_str(json_get(zi, "publisher")) : NULL;
-    const char *id_root =
-        zi ? json_get_str(json_get(zi, "package_root")) : NULL;
     return binding && json_get_bool(json_get(binding, "bound")) &&
            claimed && strcmp(claimed, root1) == 0 &&
            id_pub && strcmp(id_pub, pk_a) == 0 &&
@@ -637,10 +642,20 @@ static int t_resolve(void)
     zc4_resolve(&c, dd, "ringbuffer");
     const struct json_value *zp = json_get(&c.reply.data, "pointer");
     const struct json_value *zi = json_get(&c.reply.data, "identity");
+    const struct json_value *binding = zp ? json_get(zp, "binding") : NULL;
+    const char *claimed =
+        zp ? json_get_str(json_get(zp, "claimed_package_root")) : NULL;
+    const char *id_pub =
+        zi ? json_get_str(json_get(zi, "publisher")) : NULL;
+    const char *id_root =
+        zi ? json_get_str(json_get(zi, "package_root")) : NULL;
+    const char *id_src = zi ? json_get_str(json_get(zi, "source")) : NULL;
+    const char *p_src = zp ? json_get_str(json_get(zp, "source")) : NULL;
     ZC4_CHECK("resolve: pointer and identity separated",
-              zc4_resolve_separated_ok(&c, zp, zi));
+              zc4_resolve_separated_ok(&c, zp, zi, id_src, p_src));
     ZC4_CHECK("resolve: binding proof and root match",
-              zc4_resolve_binding_ok(zp, zi, pk_a, root1));
+              zc4_resolve_binding_ok(zi, binding, claimed, id_pub, id_root,
+                                     pk_a, root1));
     zc4_cmd_free(&c);
 
     zc4_resolve(&c, dd, "nosuch");
