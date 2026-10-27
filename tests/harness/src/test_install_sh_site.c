@@ -258,7 +258,13 @@ static bool ish_log_is_exact(const char *log, const char *d, const char *pin)
         return false;
     snprintf(want + n, sizeof(want) - (size_t)n,
              "-C %s/src setup\n-C %s/src -j%ld z23\n", d, d, jobs);
-    return strcmp(log, want) == 0;
+    /* The size check makes it byte-exact: a NUL or any byte past the end
+     * of what strcmp sees changes the file size. */
+    char p[640];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/src/build/install.log", d);
+    return stat(p, &st) == 0 && (size_t)st.st_size == strlen(want) &&
+           strcmp(log, want) == 0;
 }
 
 /* One successful run with the pin line set to pin ("" = build main). No
