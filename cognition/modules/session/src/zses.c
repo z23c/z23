@@ -81,15 +81,16 @@ static void zses_set_refuse(enum zses_refuse *refuse, enum zses_refuse code)
         *refuse = code;
 }
 
-static const char *zses_posture_or_onion(const char *posture)
-{
-    return (posture && posture[0]) ? posture : "onion";
-}
-
 static const char *zses_clearnet_or_onion(const char *clearnet,
                                           const char *onion)
 {
     return (clearnet && clearnet[0]) ? clearnet : onion;
+}
+
+static enum zses_refuse *zses_refuse_slot(enum zses_refuse *refuse,
+                                          enum zses_refuse *ignored)
+{
+    return refuse ? refuse : ignored;
 }
 
 bool zses_pick_endpoint(const char *posture, const char *onion,
@@ -97,14 +98,13 @@ bool zses_pick_endpoint(const char *posture, const char *onion,
                         enum zses_refuse *refuse)
 {
     enum zses_refuse ignored;
-    if (!refuse)
-        refuse = &ignored;
+    refuse = zses_refuse_slot(refuse, &ignored);
     *refuse = ZSES_REFUSE_BAD_ENDPOINT;
     if (!out || out_cap < 2)
         LOG_FAIL("zses", "pick_endpoint: out buffer missing");
     out[0] = '\0';
     *refuse = ZSES_OK;
-    const char *p = zses_posture_or_onion(posture);
+    const char *p = (posture && posture[0]) ? posture : "onion";
     if (strcmp(p, "none") == 0) {
         zses_set_refuse(refuse, ZSES_REFUSE_NO_ONION);
         LOG_FAIL("zses", "pick_endpoint: posture=none publishes nothing");
