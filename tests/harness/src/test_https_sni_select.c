@@ -208,7 +208,9 @@ done:
 /* GET `url` over the live listener; copies the response (headers+body) into
  * `out`. Used to pin that GET / is the explorer redirect until a
  * public-install tree is named, and the shim once it is. */
-static bool http_get(const char *url, char *out, size_t out_len)
+/* GET url with an optional User-Agent header (NULL sends none). */
+static bool http_get_ua(const char *url, const char *ua, char *out,
+                        size_t out_len)
 {
     const int port = atomic_load(&g_port);
     SSL_CTX *ctx = NULL;
@@ -241,8 +243,9 @@ static bool http_get(const char *url, char *out, size_t out_len)
         goto fail;
     }
     n = snprintf(req, sizeof(req),
-                 "GET %s HTTP/1.1\r\nHost: origin.example\r\n"
-                 "Connection: close\r\n\r\n", url);
+                 "GET %s HTTP/1.1\r\nHost: origin.example\r\n%s%s%s"
+                 "Connection: close\r\n\r\n", url, ua ? "User-Agent: " : "",
+                 ua ? ua : "", ua ? "\r\n" : "");
     if (n <= 0 || SSL_write(ssl, req, n) != n)
         goto fail;
     while (got + 1 < out_len) {
@@ -265,6 +268,11 @@ fail:
     if (fd != PLATFORM_SOCKET_INVALID)
         platform_socket_close(fd);
     return false;
+}
+
+static bool http_get(const char *url, char *out, size_t out_len)
+{
+    return http_get_ua(url, NULL, out, out_len);
 }
 
 /* Which certificate a plain browser-shaped client is served for `sni`. */
@@ -430,6 +438,19 @@ int test_https_sni_select(void)
         SN_CHECK("GET /explorer is not captured by the install tree",
                  http_get("/explorer", resp, sizeof(resp)) &&
                  strstr(resp, "echo z23-install") == NULL);
+        /* -site-home= answers a browser's GET / ahead of the install
+         * tree; a piped curl still gets the tree's install.sh. */
+        https_server_set_front_paths("/wiki/home", NULL);
+        SN_CHECK("with -site-home set, a browser GET / redirects there",
+                 http_get("/", resp, sizeof(resp)) &&
+                 strstr(resp, "HTTP/1.1 302 Found") != NULL &&
+                 strstr(resp, "Location: /wiki/home\r\n") != NULL &&
+                 strstr(resp, "echo z23-install") == NULL);
+        SN_CHECK("with -site-home set, curl's GET / still gets the shim",
+                 http_get_ua("/", "curl/8.5.0", resp, sizeof(resp)) &&
+                 strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+                 strstr(resp, "echo z23-install") != NULL);
+        https_server_set_front_paths(NULL, NULL);
         https_server_set_public_install_root(NULL);
         SN_CHECK("clearing the install root restores the explorer redirect",
                  http_get("/", resp, sizeof(resp)) &&
