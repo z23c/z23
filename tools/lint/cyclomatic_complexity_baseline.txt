@@ -57,7 +57,6 @@ contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_parse_meta:39
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_parse:24
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_resolve:18
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_serialize:19
-contexts/commons/modules/vcs/src/package_eligible.c:vcs_reward_eligibility_evaluate:26
 contexts/commons/modules/vcs/src/package_install.c:vcs_package_install_error_string:16
 contexts/commons/modules/vcs/src/package_install.c:vcs_package_name_split:17
 contexts/commons/modules/vcs/src/package_install.c:vcs_package_plan_parse:17

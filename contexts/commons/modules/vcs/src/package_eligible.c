@@ -40,6 +40,84 @@ static void gate_row(struct vcs_reward_eligibility *out, size_t *failed,
         (*failed)++;
 }
 
+/* Fills the package-root gate's detail text and returns whether that
+ * gate passed. */
+static bool evaluate_package_root_gate(
+    const struct vcs_reward_eligibility_input *in, char *detail,
+    size_t detail_size)
+{
+    bool passed = in->manifest_parsed && in->root_matches &&
+                  in->chunks_checked &&
+                  in->chunks_verified == in->chunks_total;
+    if (!in->manifest_parsed)
+        snprintf(detail, detail_size, "manifest wire does not parse");
+    else if (!in->root_matches)
+        snprintf(detail, detail_size,
+                 "manifest root != envelope package_root");
+    else if (!in->chunks_checked)
+        snprintf(detail, detail_size, "CAS chunks not consulted");
+    else if (in->chunks_verified != in->chunks_total)
+        snprintf(detail, detail_size, "%u of %u committed chunks verified",
+                 in->chunks_verified, in->chunks_total);
+    else
+        snprintf(detail, detail_size, "all %u committed chunks verified",
+                 in->chunks_total);
+    return passed;
+}
+
+/* Records the gcc and clang build gates and the tests gate, each
+ * subsumed by a recorded bit-identical reproduction when one exists. */
+static void evaluate_build_and_test_gates(
+    const struct vcs_reward_eligibility_input *in,
+    struct vcs_reward_eligibility *out, size_t *failed)
+{
+    char detail[VCS_REWARD_GATE_DETAIL_MAX];
+    const struct {
+        enum vcs_reward_gate gate;
+        bool pass;
+        const char *name;
+    } build_gates[] = {
+        { VCS_REWARD_GATE_GCC_BUILD, in->gcc_pass, "gcc" },
+        { VCS_REWARD_GATE_CLANG_BUILD, in->clang_pass, "clang" },
+    };
+    for (size_t i = 0; i < sizeof(build_gates) / sizeof(build_gates[0]);
+         i++) {
+        if (in->reproduction_verified) {
+            gate_row(out, failed, build_gates[i].gate, true,
+                     "subsumed by the recorded bit-identical "
+                     "reproduction (the reproduced installable "
+                     "receipt is the build evidence; quorum is the "
+                     "fast path)");
+            continue;
+        }
+        bool passed = in->quorum_verified && build_gates[i].pass;
+        if (!in->quorum_verified)
+            snprintf(detail, sizeof(detail), "no verified quorum");
+        else if (!build_gates[i].pass)
+            snprintf(detail, sizeof(detail),
+                     "%s outcome not PASS in the counted quorum "
+                     "attestations", build_gates[i].name);
+        else
+            snprintf(detail, sizeof(detail),
+                     "%s outcome PASS in the counted quorum "
+                     "attestations", build_gates[i].name);
+        gate_row(out, failed, build_gates[i].gate, passed, detail);
+    }
+    if (in->reproduction_verified) {
+        gate_row(out, failed, VCS_REWARD_GATE_TESTS_PASS, true,
+                 "subsumed by the recorded bit-identical reproduction "
+                 "of an installable receipt (build+test pass is what "
+                 "makes a receipt installable)");
+    } else {
+        bool tests = in->quorum_verified && in->tests_pass;
+        gate_row(out, failed, VCS_REWARD_GATE_TESTS_PASS, tests,
+                 !in->quorum_verified
+                     ? "no verified quorum"
+                     : tests ? "quorum class is test-pass"
+                             : "quorum class is not test-pass");
+    }
+}
+
 void vcs_reward_eligibility_evaluate(
     const struct vcs_reward_eligibility_input *in,
     struct vcs_reward_eligibility *out)
@@ -62,24 +140,8 @@ void vcs_reward_eligibility_evaluate(
 
     /* 1. package-root-verifies. */
     {
-        bool passed = in->manifest_parsed && in->root_matches &&
-                      in->chunks_checked &&
-                      in->chunks_verified == in->chunks_total;
-        if (!in->manifest_parsed)
-            snprintf(detail, sizeof(detail),
-                     "manifest wire does not parse");
-        else if (!in->root_matches)
-            snprintf(detail, sizeof(detail),
-                     "manifest root != envelope package_root");
-        else if (!in->chunks_checked)
-            snprintf(detail, sizeof(detail), "CAS chunks not consulted");
-        else if (in->chunks_verified != in->chunks_total)
-            snprintf(detail, sizeof(detail),
-                     "%u of %u committed chunks verified",
-                     in->chunks_verified, in->chunks_total);
-        else
-            snprintf(detail, sizeof(detail),
-                     "all %u committed chunks verified", in->chunks_total);
+        bool passed =
+            evaluate_package_root_gate(in, detail, sizeof(detail));
         gate_row(out, &failed, VCS_REWARD_GATE_PACKAGE_ROOT, passed,
                  detail);
     }
@@ -109,52 +171,7 @@ void vcs_reward_eligibility_evaluate(
      * bit-identical reproduction (an installable reproduced receipt IS
      * the build-and-test evidence); the counted quorum attestations are
      * the latency fast path read otherwise. */
-    {
-        const struct {
-            enum vcs_reward_gate gate;
-            bool pass;
-            const char *name;
-        } build_gates[] = {
-            { VCS_REWARD_GATE_GCC_BUILD, in->gcc_pass, "gcc" },
-            { VCS_REWARD_GATE_CLANG_BUILD, in->clang_pass, "clang" },
-        };
-        for (size_t i = 0; i < sizeof(build_gates) / sizeof(build_gates[0]);
-             i++) {
-            if (in->reproduction_verified) {
-                gate_row(out, &failed, build_gates[i].gate, true,
-                         "subsumed by the recorded bit-identical "
-                         "reproduction (the reproduced installable "
-                         "receipt is the build evidence; quorum is the "
-                         "fast path)");
-                continue;
-            }
-            bool passed = in->quorum_verified && build_gates[i].pass;
-            if (!in->quorum_verified)
-                snprintf(detail, sizeof(detail), "no verified quorum");
-            else if (!build_gates[i].pass)
-                snprintf(detail, sizeof(detail),
-                         "%s outcome not PASS in the counted quorum "
-                         "attestations", build_gates[i].name);
-            else
-                snprintf(detail, sizeof(detail),
-                         "%s outcome PASS in the counted quorum "
-                         "attestations", build_gates[i].name);
-            gate_row(out, &failed, build_gates[i].gate, passed, detail);
-        }
-        if (in->reproduction_verified) {
-            gate_row(out, &failed, VCS_REWARD_GATE_TESTS_PASS, true,
-                     "subsumed by the recorded bit-identical reproduction "
-                     "of an installable receipt (build+test pass is what "
-                     "makes a receipt installable)");
-        } else {
-            bool tests = in->quorum_verified && in->tests_pass;
-            gate_row(out, &failed, VCS_REWARD_GATE_TESTS_PASS, tests,
-                     !in->quorum_verified
-                         ? "no verified quorum"
-                         : tests ? "quorum class is test-pass"
-                                 : "quorum class is not test-pass");
-        }
-    }
+    evaluate_build_and_test_gates(in, out, &failed);
 
     /* 8. verifier-quorum: satisfied outright by the headline signal; the
      * 2-of-N approved-signer quorum is the latency optimization over it. */
