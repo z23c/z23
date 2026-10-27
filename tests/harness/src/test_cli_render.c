@@ -550,6 +550,7 @@ static int test_guide_tree_render(void)
             "\"joined\":false,"
             "\"swarm_member\":true,"
             "\"wrote_flags\":\"packagehost=1 buildworker=1\","
+            "\"config_file\":\"./test-tmp/join-ux/z23.conf\","
             "\"datadir\":\"./test-tmp/join-ux\","
             "\"restart_command\":\"systemctl --user restart z23-node\"}}";
         struct zcl_cli_render_env e = cr_env(80, false);
@@ -566,6 +567,13 @@ static int test_guide_tree_render(void)
         ASSERT(strstr(out, "systemctl --user restart z23-node") != NULL);
         ASSERT(strstr(out, "z23 zcode package offered") != NULL);
         ASSERT(strstr(out, "-datadir=./test-tmp/join-ux") != NULL);
+        /* A newcomer sees the file written, the cost, a by-hand restart
+         * beside the service one, and the undo. */
+        ASSERT(strstr(out, "./test-tmp/join-ux/z23.conf") != NULL);
+        ASSERT(strstr(out, "(disk, CPU)") != NULL);
+        ASSERT(strstr(out, "Ctrl-C, then run z23 again") != NULL);
+        ASSERT(strstr(out, "delete those lines from the file") != NULL);
+        ASSERT(strstr(out, "\xE2\x80\xA6") == NULL); /* nothing truncated */
         ASSERT(strstr(out, "\"joined\"") == NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL);
         ASSERT(cr_max_line_width(out) <= 80);
