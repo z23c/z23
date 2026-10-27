@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zdogfight/zdogfight",
-      "root": "3d6cf239c02e35cde65f053503690e8ff5037dd09de2bebaa7ac64cc91b09f91",
+      "root": "ad633bae71a59f1e79b6c686346f16669a5eeaa3ef31bf146f9e514f9dc1cdaa",
       "semver": "0.1.0"
     },
     {

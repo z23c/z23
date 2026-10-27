@@ -44,12 +44,12 @@
     },
     {
       "name": "zjson/zjson",
-      "root": "75e03dc982b59e27ce7f91405dba195a296143c4f5ab523a5cf58309dab18b6b",
+      "root": "18335d4eccd4d7adc6f8ed1ede781ec4b3ea290aa72ee84582fd020d5b3a3f2b",
       "semver": "0.1.0"
     },
     {
       "name": "zjsonp/zjsonp",
-      "root": "e8bb97704eeea0d605ecee32057b8158e29cd96e138d29fdcd72cb1dd86364e7",
+      "root": "7bc877009f11e61260d97dc77cfc2a571f988f452534b3a38235d87c9129c502",
       "semver": "0.1.0"
     },
     {
