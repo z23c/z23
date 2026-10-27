@@ -82,6 +82,23 @@ static bool cr_has_esc(const char *out)
     return strchr(out, '\033') != NULL;
 }
 
+/* Joins wrapped prose back into one line per key, in place: a continuation
+ * line of a 7-wide key starts with 11 spaces (2 + 7 + 2). */
+static void cr_unwrap_kv7(char *s)
+{
+    static const char cont[] = "\n           ";
+    char *w = s;
+    for (const char *r = s; *r;) {
+        if (strncmp(r, cont, sizeof(cont) - 1) == 0) {
+            *w++ = ' ';
+            r += sizeof(cont) - 1;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+
 /* Strip ANSI CSI sequences (ESC '[' ... final-letter) in place. */
 static void cr_strip_ansi(char *s)
 {
@@ -607,12 +624,28 @@ static int test_guide_tree_render(void)
         ASSERT(strstr(out, "\xE2\x80\xA6") == NULL);
         ASSERT(cr_recover_command(out, "  file     ", file, sizeof(file)));
         ASSERT(strcmp(file, conf) == 0);
-        /* Single words, since prose wraps at 40: no CPU claim, and why. */
-        ASSERT(strstr(out, "compiler,") != NULL && strstr(out, "none") != NULL);
+        char cmd[256];
+        ASSERT(cr_recover_command(out, "  service  ", cmd, sizeof(cmd)));
+        ASSERT(strcmp(cmd, "systemctl --user restart z23-node") == 0);
+        ASSERT(cr_recover_command(out, "  then     ", cmd, sizeof(cmd)));
+        ASSERT(strcmp(cmd, "z23 zcode package offered "
+                           "-datadir=./test-tmp/join-ux") == 0);
+        /* Every prose line survives wrapping whole, word for word. */
+        cr_unwrap_kv7(out);
+        ASSERT(strstr(out, "  do       this node will host C23 packages "
+                           "after restart\n") != NULL);
+        ASSERT(strstr(out, "  means    it stores and serves C23 packages "
+                           "for others (disk); no C23 compiler, so it "
+                           "builds none\n") != NULL);
+        ASSERT(strstr(out, "  wrote    packagehost=1 buildworker=0\n")
+               != NULL);
+        ASSERT(strstr(out, "  now      this process has not loaded those "
+                           "flags yet\n") != NULL);
+        ASSERT(strstr(out, "  next     restart the node: Ctrl-C, then run "
+                           "z23 again\n") != NULL);
+        ASSERT(strstr(out, "  stop     set packagehost=0 buildworker=0 in "
+                           "the file, then restart\n") != NULL);
         ASSERT(strstr(out, "CPU") == NULL);
-        /* Wrapped prose keeps every word: "Ctrl-C," and "again" survive. */
-        ASSERT(strstr(out, "Ctrl-C,") != NULL && strstr(out, "again") != NULL);
-        ASSERT(strstr(out, "restart") != NULL);
         PASS();
     }
     TEST("offered renders two reconstructable commands at narrow width") {
