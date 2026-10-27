@@ -61,16 +61,46 @@ static bool temp_directory_base(char *out, size_t cap)
 }
 #endif
 
+/* Clear the output path up front, then validate the prefix and the buffer. */
+static bool temp_directory_arguments_valid(const char *name_prefix,
+                                           char *out_path, size_t out_cap)
+{
+    if (out_path && out_cap) out_path[0] = '\0';
+    if (!name_prefix || !name_prefix[0] || !out_path || out_cap == 0)
+        return false;
+    if (strlen(name_prefix) > PLATFORM_TEMP_PREFIX_MAX ||
+        strchr(name_prefix, '/') || strchr(name_prefix, '\\'))
+        return false;
+    return true;
+}
+
+/* Trim trailing '/' and '\\' characters off the base path in place. */
+static size_t temp_directory_trim_separators(char *base, size_t base_len)
+{
+    while (base_len > 1 &&
+           (base[base_len - 1] == '/' || base[base_len - 1] == '\\'))
+        base[--base_len] = '\0';
+    return base_len;
+}
+
+/* Copy the created path out, or undo the create when it does not fit. */
+static bool temp_directory_publish_path(char *out_path, size_t out_cap,
+                                        const char *candidate)
+{
+    int copied = snprintf(out_path, out_cap, "%s", candidate);
+    if (copied > 0 && (size_t)copied < out_cap) return true;
+    /* The caller's buffer cannot hold the path we just created, so
+     * it could never remove it. Remove it here and fail. */
+    (void)platform_private_directory_remove_empty(candidate);
+    out_path[0] = '\0';
+    errno = ENAMETOOLONG;
+    return false;
+}
+
 bool platform_temp_directory_create(const char *name_prefix, char *out_path,
                                     size_t out_cap)
 {
-    if (out_path && out_cap) out_path[0] = '\0';
-    if (!name_prefix || !name_prefix[0] || !out_path || out_cap == 0) {
-        errno = EINVAL;
-        return false;
-    }
-    if (strlen(name_prefix) > PLATFORM_TEMP_PREFIX_MAX ||
-        strchr(name_prefix, '/') || strchr(name_prefix, '\\')) {
+    if (!temp_directory_arguments_valid(name_prefix, out_path, out_cap)) {
         errno = EINVAL;
         return false;
     }
@@ -79,10 +109,7 @@ bool platform_temp_directory_create(const char *name_prefix, char *out_path,
         errno = ENOENT;
         return false;
     }
-    size_t base_len = strlen(base);
-    while (base_len > 1 &&
-           (base[base_len - 1] == '/' || base[base_len - 1] == '\\'))
-        base[--base_len] = '\0';
+    size_t base_len = temp_directory_trim_separators(base, strlen(base));
     if (base_len == 0) {
         errno = ENOENT;
         return false;
@@ -111,16 +138,9 @@ bool platform_temp_directory_create(const char *name_prefix, char *out_path,
             return false;
         }
         errno = 0;
-        if (platform_private_directory_create(candidate)) {
-            int copied = snprintf(out_path, out_cap, "%s", candidate);
-            if (copied > 0 && (size_t)copied < out_cap) return true;
-            /* The caller's buffer cannot hold the path we just created, so
-             * it could never remove it. Remove it here and fail. */
-            (void)platform_private_directory_remove_empty(candidate);
-            out_path[0] = '\0';
-            errno = ENAMETOOLONG;
-            return false;
-        }
+        if (platform_private_directory_create(candidate))
+            return temp_directory_publish_path(out_path, out_cap,
+                                               candidate);
         /* Only a name collision is retryable. A permission or IO failure is
          * reported as-is rather than burned through 64 identical attempts. */
         if (errno != EEXIST) return false;
