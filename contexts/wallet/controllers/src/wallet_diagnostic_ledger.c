@@ -157,34 +157,39 @@ static void sum_ledger_event_flows(const struct db_wallet_utxo *all_utxos,
 
 /* Classify the transaction type */
 /* Each row mirrors one branch of the original if-chain, in the same
- * order; the first row whose required pool bits match wins. Bits:
- * 8 = t_debit, 4 = t_credit, 2 = z_debit, 1 = z_credit; a NULL type
- * means "send" when from_me, "receive" else. */
+ * order; the first row whose conditions match wins. Bits:
+ * 8 = t_debit, 4 = t_credit, 2 = z_debit, 1 = z_credit. A row needs
+ * every `pos` bit to be > 0 and every `zero` bit to be exactly == 0,
+ * so a negative flow satisfies neither, as in the original chain. A
+ * NULL type means "send" when from_me, "receive" else. */
 static const char *ledger_event_type(int64_t t_debit, int64_t t_credit,
                                      int64_t z_debit, int64_t z_credit,
                                      bool from_me)
 {
     static const struct {
-        unsigned mask;
-        unsigned match;
+        unsigned pos;
+        unsigned zero;
         const char *type;
     } rows[] = {
-        { 15u, 8u | 1u, "shield" },     /* t → z (pure shielding) */
-        { 13u, 13u, "shield" },         /* t → z with change */
-        { 7u, 6u, "unshield" },         /* z → t */
-        { 7u, 7u, "unshield" },         /* z → t with z-change */
-        { 15u, 3u, "z_transfer" },      /* z → z */
-        { 15u, 2u, "z_send" },          /* z → external */
-        { 15u, 12u, NULL },             /* send/receive, by from_me */
-        { 15u, 4u, "receive" },         /* external → t */
-        { 15u, 1u, "z_receive" },       /* external → z */
-        { 15u, 8u, "send" },            /* t → external */
+        { 9u, 6u, "shield" },           /* t → z (pure shielding) */
+        { 13u, 0u, "shield" },          /* t → z with change */
+        { 6u, 1u, "unshield" },         /* z → t */
+        { 7u, 0u, "unshield" },         /* z → t with z-change */
+        { 3u, 12u, "z_transfer" },      /* z → z */
+        { 2u, 13u, "z_send" },          /* z → external */
+        { 12u, 3u, NULL },              /* send/receive, by from_me */
+        { 4u, 11u, "receive" },         /* external → t */
+        { 1u, 14u, "z_receive" },       /* external → z */
+        { 8u, 7u, "send" },             /* t → external */
     };
-    unsigned pools = (t_debit > 0 ? 8u : 0u) | (t_credit > 0 ? 4u : 0u)
-                   | (z_debit > 0 ? 2u : 0u) | (z_credit > 0 ? 1u : 0u);
+    unsigned pos = (t_debit > 0 ? 8u : 0u) | (t_credit > 0 ? 4u : 0u)
+                 | (z_debit > 0 ? 2u : 0u) | (z_credit > 0 ? 1u : 0u);
+    unsigned zero = (t_debit == 0 ? 8u : 0u) | (t_credit == 0 ? 4u : 0u)
+                  | (z_debit == 0 ? 2u : 0u) | (z_credit == 0 ? 1u : 0u);
 
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        if ((pools & rows[i].mask) == rows[i].match) {
+        if ((pos & rows[i].pos) == rows[i].pos &&
+            (zero & rows[i].zero) == rows[i].zero) {
             if (rows[i].type != NULL)
                 return rows[i].type;
             return from_me ? "send" : "receive";
