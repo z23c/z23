@@ -354,489 +354,591 @@ static int case_cursor_width(void)
     return failures;
 }
 
-int test_stage_repair(void)
+static int case_ok1_at_frontier_refuses_rewind(void)
 {
-    printf("\n=== stage_repair poison-rewind safety guard tests ===\n");
     int failures = 0;
-    failures += case_cursor_width();
-
     /* --- Guard 1: ok=1 row AT the frontier refuses the whole rewind. ---
      * This is the regression guard: a finalized (ok=1) row at/above the
      * frontier means the public tip is anchored there; the rewind must
      * refuse so the Tier-2 floor is never disturbed. */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("ok1_at_frontier", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_downstream_poison(db, 2);
-        /* Poison the height we want to rewind (2), but plant a finalized
-         * ok=1 row exactly AT the frontier (height 2). */
-        ok = ok && exec_sql(db,
-            "INSERT OR REPLACE INTO tip_finalize_log(height,status,ok) "
-            "VALUES(2,'finalized',1)");
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("ok1_at_frontier", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_downstream_poison(db, 2);
+    /* Poison the height we want to rewind (2), but plant a finalized
+     * ok=1 row exactly AT the frontier (height 2). */
+    ok = ok && exec_sql(db,
+        "INSERT OR REPLACE INTO tip_finalize_log(height,status,ok) "
+        "VALUES(2,'finalized',1)");
 
-        struct stage_repair_header_solution_result res;
-        /* frontier = active_tip+1 = 2 */
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
+    struct stage_repair_header_solution_result res;
+    /* frontier = active_tip+1 = 2 */
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
 
-        ok = ok && rv == false;            /* refused */
-        /* Nothing was deleted: the poisoned rows survive the refusal. */
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "tip_finalize_log", 2);
-        ok = ok && res.repaired == false;
-        /* Cursors untouched. */
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        STR_CHECK("ok=1 row at frontier refuses the destructive rewind", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == false;            /* refused */
+    /* Nothing was deleted: the poisoned rows survive the refusal. */
+    ok = ok && row_exists(db, "body_fetch_log", 2);
+    ok = ok && row_exists(db, "validate_headers_log", 2);
+    ok = ok && row_exists(db, "tip_finalize_log", 2);
+    ok = ok && res.repaired == false;
+    /* Cursors untouched. */
+    ok = ok && cursor_for(db, "body_fetch") == 5;
+    STR_CHECK("ok=1 row at frontier refuses the destructive rewind", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_ok1_above_frontier_refuses_rewind(void)
+{
+    int failures = 0;
     /* --- Guard 1b: ok=1 row ABOVE the frontier also refuses. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("ok1_above_frontier", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_downstream_poison(db, 2);
-        /* Finalized ok=1 row strictly ABOVE the frontier (height 4 > 2). */
-        ok = ok && exec_sql(db,
-            "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
-            "VALUES(4,'applied',1)");
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("ok1_above_frontier", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_downstream_poison(db, 2);
+    /* Finalized ok=1 row strictly ABOVE the frontier (height 4 > 2). */
+    ok = ok && exec_sql(db,
+        "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
+        "VALUES(4,'applied',1)");
 
-        struct stage_repair_header_solution_result res;
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
+    struct stage_repair_header_solution_result res;
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
 
-        ok = ok && rv == false;
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        ok = ok && res.repaired == false;
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        STR_CHECK("ok=1 row above frontier refuses the destructive rewind", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == false;
+    ok = ok && row_exists(db, "body_fetch_log", 2);
+    ok = ok && res.repaired == false;
+    ok = ok && cursor_for(db, "body_fetch") == 5;
+    STR_CHECK("ok=1 row above frontier refuses the destructive rewind", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_non_frontier_rewind_refused(void)
+{
+    int failures = 0;
     /* --- Guard 2: non-frontier rewind (height != active_tip+1) refused. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("non_frontier", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_downstream_poison(db, 2);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("non_frontier", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_downstream_poison(db, 2);
 
-        struct stage_repair_header_solution_result res;
-        /* height=2 but active_tip=10 => frontier should be 11, not 2. */
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 10, &res);
+    struct stage_repair_header_solution_result res;
+    /* height=2 but active_tip=10 => frontier should be 11, not 2. */
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 10, &res);
 
-        ok = ok && rv == false;
-        /* Refused before any mutation: rows and cursors intact. */
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        ok = ok && res.repaired == false;
-        STR_CHECK("non-frontier rewind is refused", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == false;
+    /* Refused before any mutation: rows and cursors intact. */
+    ok = ok && row_exists(db, "body_fetch_log", 2);
+    ok = ok && cursor_for(db, "body_fetch") == 5;
+    ok = ok && res.repaired == false;
+    STR_CHECK("non-frontier rewind is refused", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_poison_none_frontier_is_noop(void)
+{
+    int failures = 0;
     /* --- Guard 3: POISON_NONE is a safe no-op (returns true, repaired=false).
      * A clean frontier with no poison shape must not delete anything. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("poison_none", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        /* No poison rows seeded at the frontier height 2. */
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("poison_none", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    /* No poison rows seeded at the frontier height 2. */
 
-        struct stage_repair_header_solution_result res;
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
+    struct stage_repair_header_solution_result res;
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
 
-        ok = ok && rv == true;             /* no-op succeeds */
-        ok = ok && res.repaired == false;
-        ok = ok && res.mode == STAGE_REPAIR_POISON_NONE;
-        /* Cursors untouched by the no-op. */
-        ok = ok && cursor_for(db, "body_fetch") == 5;
-        STR_CHECK("POISON_NONE frontier is a safe no-op", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == true;             /* no-op succeeds */
+    ok = ok && res.repaired == false;
+    ok = ok && res.mode == STAGE_REPAIR_POISON_NONE;
+    /* Cursors untouched by the no-op. */
+    ok = ok && cursor_for(db, "body_fetch") == 5;
+    STR_CHECK("POISON_NONE frontier is a safe no-op", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+/* Check the post-state of the clean downstream-stale rewind: the result
+ * flags, the rows deleted versus preserved, and the rewound cursors. */
+static bool downstream_rewind_state_matches(
+    sqlite3 *db, bool rv, struct stage_repair_header_solution_result *res)
+{
+    return rv &&
+           res->repaired &&
+           res->mode == STAGE_REPAIR_POISON_DOWNSTREAM_STALE &&
+           /* Downstream rows deleted; validate row (ok=1) preserved. */
+           !row_exists(db, "body_fetch_log", 2) &&
+           row_exists(db, "validate_headers_log", 2) &&
+           /* tip_finalize_log ok=0 row MUST survive (deletion banned). */
+           row_exists(db, "tip_finalize_log", 2) &&
+           /* Downstream cursors rewound to the frontier. */
+           cursor_for(db, "body_fetch") == 2 &&
+           cursor_for(db, "tip_finalize") == 2 &&
+           /* validate_headers cursor untouched on a downstream rewind. */
+           cursor_for(db, "validate_headers") == 5;
+}
+
+static int case_downstream_rewind_succeeds(void)
+{
+    int failures = 0;
     /* --- Sanity: a clean DOWNSTREAM_STALE rewind (no ok=1 at/above frontier)
      * succeeds, deletes the downstream poison rows, rewinds the cursors, and
      * preserves the (ok=0) tip_finalize_log row (doctrine forbids deleting
      * tip_finalize_log rows). This proves the guards above reject the
      * dangerous case rather than the whole code path. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("downstream_rewind", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_downstream_poison(db, 2);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("downstream_rewind", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_downstream_poison(db, 2);
 
-        struct stage_repair_header_solution_result res;
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
+    struct stage_repair_header_solution_result res;
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
 
-        ok = ok && rv == true;
-        ok = ok && res.repaired == true;
-        ok = ok && res.mode == STAGE_REPAIR_POISON_DOWNSTREAM_STALE;
-        /* Downstream rows deleted; validate row (ok=1) preserved. */
-        ok = ok && !row_exists(db, "body_fetch_log", 2);
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        /* tip_finalize_log ok=0 row MUST survive (deletion banned). */
-        ok = ok && row_exists(db, "tip_finalize_log", 2);
-        /* Downstream cursors rewound to the frontier. */
-        ok = ok && cursor_for(db, "body_fetch") == 2;
-        ok = ok && cursor_for(db, "tip_finalize") == 2;
-        /* validate_headers cursor untouched on a downstream rewind. */
-        ok = ok && cursor_for(db, "validate_headers") == 5;
-        STR_CHECK("downstream rewind deletes downstream, keeps tip_finalize_log",
-                  ok);
-        teardown_case(dir);
-    }
+    ok = ok && downstream_rewind_state_matches(db, rv, &res);
+    STR_CHECK("downstream rewind deletes downstream, keeps tip_finalize_log",
+              ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_validate_hash_mismatch_is_repairable(void)
+{
+    int failures = 0;
     /* --- Classifier: source-hash mismatch is repairable; invalid is not. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("validate_source_mismatch", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_validate_poison(
-            db, 2, "'header-source-hash-mismatch'");
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("validate_source_mismatch", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_validate_poison(
+        db, 2, "'header-source-hash-mismatch'");
 
-        ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
-                   STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
+    ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
+               STAGE_REPAIR_POISON_VALIDATE_HASH_MISMATCH;
 
-        struct stage_repair_header_solution_result res;
-        bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
-        ok = ok && rv == true;
-        ok = ok && res.repaired == false;
-        ok = ok && row_exists(db, "validate_headers_log", 2);
-        ok = ok && row_exists(db, "body_fetch_log", 2);
-        STR_CHECK("header-source hash mismatch is non-destructive repairable "
-                  "validate poison",
-                  ok);
-        teardown_case(dir);
-    }
+    struct stage_repair_header_solution_result res;
+    bool rv = stage_repair_header_solution_poison_rewind(db, 2, 1, &res);
+    ok = ok && rv == true;
+    ok = ok && res.repaired == false;
+    ok = ok && row_exists(db, "validate_headers_log", 2);
+    ok = ok && row_exists(db, "body_fetch_log", 2);
+    STR_CHECK("header-source hash mismatch is non-destructive repairable "
+              "validate poison",
+              ok);
+    teardown_case(dir);
+    return failures;
+}
 
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("validate_invalid_solution", dir, sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        ok = ok && seed_validate_poison(db, 2, "'invalid-solution'");
+static int case_validate_invalid_solution_not_repairable(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("validate_invalid_solution", dir, sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    ok = ok && seed_validate_poison(db, 2, "'invalid-solution'");
 
-        ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
-                   STAGE_REPAIR_POISON_NONE;
-        STR_CHECK("invalid validate failure stays non-repairable", ok);
-        teardown_case(dir);
-    }
+    ok = ok && stage_repair_header_solution_poison_mode(db, 2) ==
+               STAGE_REPAIR_POISON_NONE;
+    STR_CHECK("invalid validate failure stays non-repairable", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+/* Compare the loaded header's persisted fields against the saved original. */
+static bool loaded_header_fields_match(struct block_header *loaded,
+                                       struct block_header *h)
+{
+    return loaded->nVersion == h->nVersion &&
+           loaded->nTime == h->nTime &&
+           loaded->nBits == h->nBits &&
+           loaded->nSolutionSize == h->nSolutionSize &&
+           memcmp(loaded->nSolution, h->nSolution, h->nSolutionSize) == 0 &&
+           uint256_eq(&loaded->hashPrevBlock, &h->hashPrevBlock) &&
+           uint256_eq(&loaded->hashMerkleRoot, &h->hashMerkleRoot);
+}
+
+static int case_header_roundtrip(void)
+{
+    int failures = 0;
     /* --- Guard 4: header save/load round-trip. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("header_roundtrip", dir, sizeof(dir), &db);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("header_roundtrip", dir, sizeof(dir), &db);
 
-        struct block_header h;
-        make_header(&h, 100);
-        struct uint256 hash;
-        block_header_get_hash(&h, &hash);
+    struct block_header h;
+    make_header(&h, 100);
+    struct uint256 hash;
+    block_header_get_hash(&h, &hash);
 
-        ok = ok && stage_repair_header_solution_save(db, 100, &hash, &h);
+    ok = ok && stage_repair_header_solution_save(db, 100, &hash, &h);
 
-        struct block_header loaded;
-        ok = ok && stage_repair_header_solution_load(db, 100, &hash, &loaded);
-        ok = ok && loaded.nVersion == h.nVersion;
-        ok = ok && loaded.nTime == h.nTime;
-        ok = ok && loaded.nBits == h.nBits;
-        ok = ok && loaded.nSolutionSize == h.nSolutionSize;
-        ok = ok && memcmp(loaded.nSolution, h.nSolution, h.nSolutionSize) == 0;
-        ok = ok && uint256_eq(&loaded.hashPrevBlock, &h.hashPrevBlock);
-        ok = ok && uint256_eq(&loaded.hashMerkleRoot, &h.hashMerkleRoot);
-        /* The loaded header must hash to the stored hash. */
-        struct uint256 rehash;
-        block_header_get_hash(&loaded, &rehash);
-        ok = ok && uint256_eq(&rehash, &hash);
-        ok = ok && stage_repair_header_solution_available(db, 100, NULL);
-        STR_CHECK("header solution save/load round-trips", ok);
-        teardown_case(dir);
-    }
+    struct block_header loaded;
+    ok = ok && stage_repair_header_solution_load(db, 100, &hash, &loaded);
+    ok = ok && loaded_header_fields_match(&loaded, &h);
+    /* The loaded header must hash to the stored hash. */
+    struct uint256 rehash;
+    block_header_get_hash(&loaded, &rehash);
+    ok = ok && uint256_eq(&rehash, &hash);
+    ok = ok && stage_repair_header_solution_available(db, 100, NULL);
+    STR_CHECK("header solution save/load round-trips", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_save_refuses_hash_mismatch(void)
+{
+    int failures = 0;
     /* --- Guard 5a: save refuses a hash that does not match the header. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("hash_mismatch", dir, sizeof(dir), &db);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("hash_mismatch", dir, sizeof(dir), &db);
 
-        struct block_header h;
-        make_header(&h, 200);
-        struct uint256 wrong;
-        memset(&wrong, 0, sizeof(wrong));
-        wrong.data[0] = 0xFF;   /* deliberately not block_header_get_hash(h) */
+    struct block_header h;
+    make_header(&h, 200);
+    struct uint256 wrong;
+    memset(&wrong, 0, sizeof(wrong));
+    wrong.data[0] = 0xFF;   /* deliberately not block_header_get_hash(h) */
 
-        bool rv = stage_repair_header_solution_save(db, 200, &wrong, &h);
-        ok = ok && rv == false;                 /* refused */
-        /* Nothing persisted, so it is not available. */
-        ok = ok && !stage_repair_header_solution_available(db, 200, NULL);
-        STR_CHECK("save refuses a hash that mismatches the header bytes", ok);
-        teardown_case(dir);
-    }
+    bool rv = stage_repair_header_solution_save(db, 200, &wrong, &h);
+    ok = ok && rv == false;                 /* refused */
+    /* Nothing persisted, so it is not available. */
+    ok = ok && !stage_repair_header_solution_available(db, 200, NULL);
+    STR_CHECK("save refuses a hash that mismatches the header bytes", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_save_refuses_oversized_solution(void)
+{
+    int failures = 0;
     /* --- Guard 5b: save refuses an oversized solution (> MAX_SOLUTION_SIZE
      * via nSolutionSize past the backing array). --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("oversized_solution", dir, sizeof(dir), &db);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("oversized_solution", dir, sizeof(dir), &db);
 
-        struct block_header h;
-        make_header(&h, 300);
-        struct uint256 hash;
-        block_header_get_hash(&h, &hash);
-        /* Claim a solution length larger than the backing buffer. */
-        h.nSolutionSize = sizeof(h.nSolution) + 1;
+    struct block_header h;
+    make_header(&h, 300);
+    struct uint256 hash;
+    block_header_get_hash(&h, &hash);
+    /* Claim a solution length larger than the backing buffer. */
+    h.nSolutionSize = sizeof(h.nSolution) + 1;
 
-        bool rv = stage_repair_header_solution_save(db, 300, &hash, &h);
-        ok = ok && rv == false;                 /* refused */
-        ok = ok && !stage_repair_header_solution_available(db, 300, NULL);
-        STR_CHECK("save refuses an oversized solution", ok);
-        teardown_case(dir);
-    }
+    bool rv = stage_repair_header_solution_save(db, 300, &hash, &h);
+    ok = ok && rv == false;                 /* refused */
+    ok = ok && !stage_repair_header_solution_available(db, 300, NULL);
+    STR_CHECK("save refuses an oversized solution", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_save_refuses_zero_solution(void)
+{
+    int failures = 0;
     /* --- Guard 5c: save refuses a zero-length solution. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("zero_solution", dir, sizeof(dir), &db);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("zero_solution", dir, sizeof(dir), &db);
 
-        struct block_header h;
-        make_header(&h, 400);
-        struct uint256 hash;
-        block_header_get_hash(&h, &hash);
-        h.nSolutionSize = 0;
+    struct block_header h;
+    make_header(&h, 400);
+    struct uint256 hash;
+    block_header_get_hash(&h, &hash);
+    h.nSolutionSize = 0;
 
-        bool rv = stage_repair_header_solution_save(db, 400, &hash, &h);
-        ok = ok && rv == false;
-        STR_CHECK("save refuses a zero-length solution", ok);
-        teardown_case(dir);
-    }
+    bool rv = stage_repair_header_solution_save(db, 400, &hash, &h);
+    ok = ok && rv == false;
+    STR_CHECK("save refuses a zero-length solution", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_load_rejects_expected_hash_mismatch(void)
+{
+    int failures = 0;
     /* --- Load round-trip rejection: a stored row whose expected_hash differs
      * is rejected by load. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("load_expected_mismatch", dir, sizeof(dir), &db);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("load_expected_mismatch", dir, sizeof(dir), &db);
 
-        struct block_header h;
-        make_header(&h, 500);
-        struct uint256 hash;
-        block_header_get_hash(&h, &hash);
-        ok = ok && stage_repair_header_solution_save(db, 500, &hash, &h);
+    struct block_header h;
+    make_header(&h, 500);
+    struct uint256 hash;
+    block_header_get_hash(&h, &hash);
+    ok = ok && stage_repair_header_solution_save(db, 500, &hash, &h);
 
-        struct uint256 expected_wrong;
-        memset(&expected_wrong, 0, sizeof(expected_wrong));
-        expected_wrong.data[0] = 0xEE;
-        struct block_header loaded;
-        bool rv = stage_repair_header_solution_load(db, 500, &expected_wrong,
-                                                    &loaded);
-        ok = ok && rv == false;                 /* expected-hash guard rejects */
-        /* But loading with the correct expected hash succeeds. */
-        ok = ok && stage_repair_header_solution_load(db, 500, &hash, &loaded);
-        STR_CHECK("load rejects a mismatched expected hash", ok);
-        teardown_case(dir);
-    }
-
-    /* === proof_validate internal_error symmetry (self-verified-tip-plan
-     * Act 1) ===
-     *
-     * The script path already re-derives a transient script_validate
-     * internal_error instead of trusting it as a terminal ok=0. These pin the
-     * PROOF-stage twin: a transient proof_validate internal_error at a height
-     * where script PASSED must also be re-derived, never frozen as "invalid"
-     * (the inverse Law-7 lie). The witness: after the one-shot rewind the
-     * proof_validate_log row at the hole is DELETED (so proof_validate
-     * re-derives it with a fresh validated_at on the next step), the proof
-     * cursor is rewound to the hole, and a second pass is a one-shot no-op. */
+    struct uint256 expected_wrong;
+    memset(&expected_wrong, 0, sizeof(expected_wrong));
+    expected_wrong.data[0] = 0xEE;
+    struct block_header loaded;
+    bool rv = stage_repair_header_solution_load(db, 500, &expected_wrong,
+                                                &loaded);
+    ok = ok && rv == false;                 /* expected-hash guard rejects */
+    /* But loading with the correct expected hash succeeds. */
+    ok = ok && stage_repair_header_solution_load(db, 500, &hash, &loaded);
+    STR_CHECK("load rejects a mismatched expected hash", ok);
+    teardown_case(dir);
+    return failures;
+}
 
 #ifdef ZCL_TESTING
+
+/* Seed the cursors shared by the proof-internal-error witnesses: script and
+ * proof at 5, utxo and tip pinned at the hole (3). */
+static bool seed_proof_rewind_cursors(sqlite3 *db)
+{
+    return set_one_cursor(db, "script_validate", 5) &&
+           set_one_cursor(db, "proof_validate", 5) &&
+           set_one_cursor(db, "utxo_apply", 3) &&
+           set_one_cursor(db, "tip_finalize", 3);
+}
+
+/* Check the Witness A post-state: the call succeeded and reported the hole at
+ * 3, the transient verdict rows are gone, the passed script rows survive, and
+ * the proof/tip cursors sit at the hole. */
+static bool proof_rewind_rederived_state(sqlite3 *db, bool rv, bool repaired,
+                                         int height)
+{
+    bool ok = rv && repaired && height == 3;
+    /* The "could not determine validity" verdict is GONE — proof_validate
+     * will re-derive it (a fresh row, not the frozen ok=0). This is the
+     * Law-7 witness: a transient is never persisted as terminal. */
+    ok = ok && !row_exists(db, "proof_validate_log", 3);
+    ok = ok && !row_exists(db, "proof_validate_log", 4);
+    /* script verdicts are untouched (they passed; the proof twin must NOT
+     * re-run script). */
+    ok = ok && row_exists(db, "script_validate_log", 3);
+    ok = ok && row_exists(db, "script_validate_log", 4);
+    /* cursors rewound to the hole so the forward stages replay it. */
+    ok = ok && cursor_for(db, "proof_validate") == 3;
+    ok = ok && cursor_for(db, "tip_finalize") == 3;
+    /* script cursor untouched. */
+    ok = ok && cursor_for(db, "script_validate") == 5;
+    return ok;
+}
+
+/* === proof_validate internal_error symmetry (self-verified-tip-plan
+ * Act 1) ===
+ *
+ * The script path already re-derives a transient script_validate
+ * internal_error instead of trusting it as a terminal ok=0. These pin the
+ * PROOF-stage twin: a transient proof_validate internal_error at a height
+ * where script PASSED must also be re-derived, never frozen as "invalid"
+ * (the inverse Law-7 lie). The witness: after the one-shot rewind the
+ * proof_validate_log row at the hole is DELETED (so proof_validate
+ * re-derives it with a fresh validated_at on the next step), the proof
+ * cursor is rewound to the hole, and a second pass is a one-shot no-op. */
+
+static int case_proof_internal_error_re_derived(void)
+{
+    int failures = 0;
     /* --- Witness A: a transient proof internal_error (script ok=1) is
      * re-derived: the verdict row is dropped and the proof cursor rewinds. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("proof_internal_error", dir, sizeof(dir), &db);
-        /* script/proof advanced to cursor 5; utxo pinned at the hole (3) — a
-         * transient proof internal_error leaves utxo_apply stuck there, so no
-         * coins rewind is exercised (rewind_coins == false). */
-        ok = ok && set_one_cursor(db, "script_validate", 5);
-        ok = ok && set_one_cursor(db, "proof_validate", 5);
-        ok = ok && set_one_cursor(db, "utxo_apply", 3);
-        ok = ok && set_one_cursor(db, "tip_finalize", 3);
-        /* script PASSED at h=3 and h=4; proof recorded a transient
-         * internal_error at h=3 (ok=0) and verified h=4. */
-        ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
-        ok = ok && put_log(db, "script_validate_log", 4, "verified", 1);
-        ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
-        ok = ok && put_log(db, "proof_validate_log", 4, "verified", 1);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("proof_internal_error", dir, sizeof(dir), &db);
+    /* script/proof advanced to cursor 5; utxo pinned at the hole (3) — a
+     * transient proof internal_error leaves utxo_apply stuck there, so no
+     * coins rewind is exercised (rewind_coins == false). */
+    ok = ok && seed_proof_rewind_cursors(db);
+    /* script PASSED at h=3 and h=4; proof recorded a transient
+     * internal_error at h=3 (ok=0) and verified h=4. */
+    ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
+    ok = ok && put_log(db, "script_validate_log", 4, "verified", 1);
+    ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
+    ok = ok && put_log(db, "proof_validate_log", 4, "verified", 1);
 
-        bool repaired = false;
-        int height = -1;
-        bool rv = stage_repair_proof_internal_error_rewind_for_testing(
-            db, &repaired, &height);
+    bool repaired = false;
+    int height = -1;
+    bool rv = stage_repair_proof_internal_error_rewind_for_testing(
+        db, &repaired, &height);
 
-        ok = ok && rv == true;
-        ok = ok && repaired == true;
-        ok = ok && height == 3;
-        /* The "could not determine validity" verdict is GONE — proof_validate
-         * will re-derive it (a fresh row, not the frozen ok=0). This is the
-         * Law-7 witness: a transient is never persisted as terminal. */
-        ok = ok && !row_exists(db, "proof_validate_log", 3);
-        ok = ok && !row_exists(db, "proof_validate_log", 4);
-        /* script verdicts are untouched (they passed; the proof twin must NOT
-         * re-run script). */
-        ok = ok && row_exists(db, "script_validate_log", 3);
-        ok = ok && row_exists(db, "script_validate_log", 4);
-        /* cursors rewound to the hole so the forward stages replay it. */
-        ok = ok && cursor_for(db, "proof_validate") == 3;
-        ok = ok && cursor_for(db, "tip_finalize") == 3;
-        /* script cursor untouched. */
-        ok = ok && cursor_for(db, "script_validate") == 5;
-        STR_CHECK("transient proof internal_error is re-derived, not frozen",
-                  ok);
-        teardown_case(dir);
-    }
+    ok = ok && proof_rewind_rederived_state(db, rv, repaired, height);
+    STR_CHECK("transient proof internal_error is re-derived, not frozen",
+              ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_proof_invalid_stays_terminal(void)
+{
+    int failures = 0;
     /* --- Witness B: a genuine proof_invalid (consensus reject) stays
      * terminal — the symmetry must not erase real verdicts. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("proof_invalid_terminal", dir, sizeof(dir), &db);
-        ok = ok && set_one_cursor(db, "script_validate", 5);
-        ok = ok && set_one_cursor(db, "proof_validate", 5);
-        ok = ok && set_one_cursor(db, "utxo_apply", 3);
-        ok = ok && set_one_cursor(db, "tip_finalize", 3);
-        ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
-        /* A real consensus reject, NOT a transient. */
-        ok = ok && put_log(db, "proof_validate_log", 3, "proof_invalid", 0);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("proof_invalid_terminal", dir, sizeof(dir), &db);
+    ok = ok && seed_proof_rewind_cursors(db);
+    ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
+    /* A real consensus reject, NOT a transient. */
+    ok = ok && put_log(db, "proof_validate_log", 3, "proof_invalid", 0);
 
-        bool repaired = false;
-        int height = -1;
-        bool rv = stage_repair_proof_internal_error_rewind_for_testing(
-            db, &repaired, &height);
+    bool repaired = false;
+    int height = -1;
+    bool rv = stage_repair_proof_internal_error_rewind_for_testing(
+        db, &repaired, &height);
 
-        ok = ok && rv == true;
-        ok = ok && repaired == false;       /* no transient hole found */
-        /* The genuine reject row survives; cursor unchanged. */
-        ok = ok && row_exists(db, "proof_validate_log", 3);
-        ok = ok && cursor_for(db, "proof_validate") == 5;
-        STR_CHECK("genuine proof_invalid stays terminal (not erased)", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == true;
+    ok = ok && repaired == false;       /* no transient hole found */
+    /* The genuine reject row survives; cursor unchanged. */
+    ok = ok && row_exists(db, "proof_validate_log", 3);
+    ok = ok && cursor_for(db, "proof_validate") == 5;
+    STR_CHECK("genuine proof_invalid stays terminal (not erased)", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_proof_script_codomain(void)
+{
+    int failures = 0;
     /* --- Witness C: a proof internal_error at a height where SCRIPT also
      * failed is the script path's domain — the proof twin leaves it alone. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("proof_script_codomain", dir, sizeof(dir), &db);
-        ok = ok && set_one_cursor(db, "script_validate", 5);
-        ok = ok && set_one_cursor(db, "proof_validate", 5);
-        ok = ok && set_one_cursor(db, "utxo_apply", 3);
-        ok = ok && set_one_cursor(db, "tip_finalize", 3);
-        /* script FAILED at h=3 (its own rewind owns this height). */
-        ok = ok && put_log(db, "script_validate_log", 3, "internal_error", 0);
-        ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("proof_script_codomain", dir, sizeof(dir), &db);
+    ok = ok && seed_proof_rewind_cursors(db);
+    /* script FAILED at h=3 (its own rewind owns this height). */
+    ok = ok && put_log(db, "script_validate_log", 3, "internal_error", 0);
+    ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
 
-        bool repaired = false;
-        int height = -1;
-        bool rv = stage_repair_proof_internal_error_rewind_for_testing(
-            db, &repaired, &height);
+    bool repaired = false;
+    int height = -1;
+    bool rv = stage_repair_proof_internal_error_rewind_for_testing(
+        db, &repaired, &height);
 
-        ok = ok && rv == true;
-        ok = ok && repaired == false;       /* script owns the hole */
-        ok = ok && row_exists(db, "proof_validate_log", 3);
-        ok = ok && cursor_for(db, "proof_validate") == 5;
-        STR_CHECK("proof+script co-failure is left to the script rewind", ok);
-        teardown_case(dir);
-    }
+    ok = ok && rv == true;
+    ok = ok && repaired == false;       /* script owns the hole */
+    ok = ok && row_exists(db, "proof_validate_log", 3);
+    ok = ok && cursor_for(db, "proof_validate") == 5;
+    STR_CHECK("proof+script co-failure is left to the script rewind", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+/* Re-inject the same transient hole: the proof cursor re-advances to 5 and
+ * proof re-records an internal_error at height 3. */
+static bool reinject_transient_proof_hole(sqlite3 *db)
+{
+    return set_one_cursor(db, "proof_validate", 5) &&
+           put_log(db, "proof_validate_log", 3, "internal_error", 0);
+}
+
+/* Check the Witness D second pass: no rewind happened, so the re-injected
+ * row survives and the proof cursor stays at 5. */
+static bool proof_second_pass_left_hole_intact(sqlite3 *db, bool repaired2)
+{
+    return repaired2 == false &&
+           row_exists(db, "proof_validate_log", 3) &&
+           cursor_for(db, "proof_validate") == 5;
+}
+
+static int case_proof_oneshot_marker_bounds_retry(void)
+{
+    int failures = 0;
     /* --- Witness D: the one-shot marker bounds the retry. Re-inject the SAME
      * transient hole after a rewind; the second pass must NOT rewind again
      * (otherwise a persistently-failing transient loops forever). --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("proof_oneshot_marker", dir, sizeof(dir), &db);
-        ok = ok && set_one_cursor(db, "script_validate", 5);
-        ok = ok && set_one_cursor(db, "proof_validate", 5);
-        ok = ok && set_one_cursor(db, "utxo_apply", 3);
-        ok = ok && set_one_cursor(db, "tip_finalize", 3);
-        ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
-        ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("proof_oneshot_marker", dir, sizeof(dir), &db);
+    ok = ok && seed_proof_rewind_cursors(db);
+    ok = ok && put_log(db, "script_validate_log", 3, "verified", 1);
+    ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
 
-        bool repaired1 = false;
-        int height1 = -1;
-        ok = ok && stage_repair_proof_internal_error_rewind_for_testing(
-                       db, &repaired1, &height1);
-        ok = ok && repaired1 == true && height1 == 3;
+    bool repaired1 = false;
+    int height1 = -1;
+    ok = ok && stage_repair_proof_internal_error_rewind_for_testing(
+                   db, &repaired1, &height1);
+    ok = ok && repaired1 == true && height1 == 3;
 
-        /* Simulate the transient re-reproducing: proof re-records the same
-         * internal_error and the cursor re-advances. */
-        ok = ok && set_one_cursor(db, "proof_validate", 5);
-        ok = ok && put_log(db, "proof_validate_log", 3, "internal_error", 0);
+    /* Simulate the transient re-reproducing: proof re-records the same
+     * internal_error and the cursor re-advances. */
+    ok = ok && reinject_transient_proof_hole(db);
 
-        bool repaired2 = false;
-        int height2 = -1;
-        ok = ok && stage_repair_proof_internal_error_rewind_for_testing(
-                       db, &repaired2, &height2);
-        /* Second pass is a marker-bounded no-op: the row survives, the cursor
-         * is not rewound a second time. The still-present internal_error
-         * surfaces as a named marker-seen refusal, never a silent loop. */
-        ok = ok && repaired2 == false;
-        ok = ok && row_exists(db, "proof_validate_log", 3);
-        ok = ok && cursor_for(db, "proof_validate") == 5;
-        STR_CHECK("one-shot marker bounds the proof rewind to one attempt", ok);
-        teardown_case(dir);
-    }
+    bool repaired2 = false;
+    int height2 = -1;
+    ok = ok && stage_repair_proof_internal_error_rewind_for_testing(
+                   db, &repaired2, &height2);
+    /* Second pass is a marker-bounded no-op: the row survives, the cursor
+     * is not rewound a second time. The still-present internal_error
+     * surfaces as a named marker-seen refusal, never a silent loop. */
+    ok = ok && proof_second_pass_left_hole_intact(db, repaired2);
+    STR_CHECK("one-shot marker bounds the proof rewind to one attempt", ok);
+    teardown_case(dir);
+    return failures;
+}
 
+static int case_trusted_base_transition_never_rewound(void)
+{
+    int failures = 0;
     /* A completed first transition above a durable trusted base must survive
      * L1 reconcile. Rewinding 19->18 here would replace the anchor row with a
      * finalized transition row and then strand the next retry on a hash
      * mismatch — the fresh bundle-install wedge reproduced by C3. */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("trusted_base_transition", dir, sizeof(dir),
-                             &db);
-        ok = ok && seed_cursors(db, 19, 19) &&
-             exec_sql(db,
-                "ALTER TABLE tip_finalize_log ADD COLUMN tip_hash BLOB;") &&
-             exec_sql(db,
-                "INSERT OR REPLACE INTO tip_finalize_log"
-                "(height,status,ok,tip_hash) VALUES"
-                "(18,'finalized',1,"
-                "X'0100000000000000000000000000000000000000000000000000000000000000');"
-                "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
-                "('reducer_trusted_base_height',X'1200000000000000');"
-                "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
-                "('reducer_trusted_base_hash',zeroblob(32));");
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("trusted_base_transition", dir, sizeof(dir),
+                         &db);
+    ok = ok && seed_cursors(db, 19, 19) &&
+         exec_sql(db,
+            "ALTER TABLE tip_finalize_log ADD COLUMN tip_hash BLOB;") &&
+         exec_sql(db,
+            "INSERT OR REPLACE INTO tip_finalize_log"
+            "(height,status,ok,tip_hash) VALUES"
+            "(18,'finalized',1,"
+            "X'0100000000000000000000000000000000000000000000000000000000000000');"
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+            "('reducer_trusted_base_height',X'1200000000000000');"
+            "INSERT OR REPLACE INTO progress_meta(key,value) VALUES"
+            "('reducer_trusted_base_hash',zeroblob(32));");
 
-        struct stage_reducer_frontier_reconcile_result out;
-        memset(&out, 0, sizeof(out));
-        out.hstar = 18;
-        out.tip_finalize_cursor_before = 19;
-        out.coins_applied_found = true;
-        out.coins_applied_height = 19;
-        bool rv =
-            stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-                db, true, &out);
-        ok = ok && rv && !out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 19 &&
-             cursor_for(db, "tip_finalize") == 19;
-        STR_CHECK("trusted-base completed transition is never rewound", ok);
-        teardown_case(dir);
-    }
+    struct stage_reducer_frontier_reconcile_result out;
+    memset(&out, 0, sizeof(out));
+    out.hstar = 18;
+    out.tip_finalize_cursor_before = 19;
+    out.coins_applied_found = true;
+    out.coins_applied_height = 19;
+    bool rv =
+        stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
+            db, true, &out);
+    ok = ok && rv && !out.clamped_tip_finalize &&
+         out.tip_finalize_cursor_after == 19 &&
+         cursor_for(db, "tip_finalize") == 19;
+    STR_CHECK("trusted-base completed transition is never rewound", ok);
+    teardown_case(dir);
+    return failures;
+}
 
-    failures += case_boot_clamp_trusted_base();
+/* One apply-mode churn ask: reconcile at (hstar, cursor_before), then fold
+ * rv, the clamp outcome, the cursor after, the db cursor and the churn
+ * blocker state into prior_ok. */
+static bool churn_ask_matches(bool prior_ok, sqlite3 *db, int hstar,
+                              int cursor_before, bool expect_clamped,
+                              int expect_after, int expect_db_cursor,
+                              bool expect_blocker)
+{
+    struct stage_reducer_frontier_reconcile_result out;
+    memset(&out, 0, sizeof(out));
+    out.hstar = hstar;
+    out.tip_finalize_cursor_before = cursor_before;
+    bool rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
+        db, true, &out);
+    return prior_ok && rv && out.clamped_tip_finalize == expect_clamped &&
+           out.tip_finalize_cursor_after == expect_after &&
+           cursor_for(db, "tip_finalize") == expect_db_cursor &&
+           blocker_exists("tip_finalize.rewind_churn") == expect_blocker;
+}
 
+static int case_tip_finalize_rewind_churn(void)
+{
+    int failures = 0;
     /* === tip_finalize rewind-churn refusal (defence-in-depth
      * under the coins-frontier clamp) ===
      *
@@ -848,175 +950,127 @@ int test_stage_repair(void)
      * 3 asks must rewind normally, the 4th must refuse and name the
      * "tip_finalize.rewind_churn" blocker instead, and an H* advance must
      * reset the memo (and clear the blocker) so progress resumes. */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("tip_finalize_rewind_churn", dir, sizeof(dir),
-                             &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        blocker_module_init();
-        blocker_clear("tip_finalize.rewind_churn");
-        stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("tip_finalize_rewind_churn", dir, sizeof(dir),
+                         &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    blocker_module_init();
+    blocker_clear("tip_finalize.rewind_churn");
+    stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
 
-        /* hstar pinned at 18 the whole time; the cursor is fixed at 25 (>
-         * hstar+1), so every pass is asked to rewind to hstar+1=19
-         * (simulating something else re-advancing the served cursor back to
-         * 25 between reconcile ticks — the exact live shape). */
-        struct stage_reducer_frontier_reconcile_result out;
-        bool rv;
+    /* hstar pinned at 18 the whole time; the cursor is fixed at 25 (>
+     * hstar+1), so every pass is asked to rewind to hstar+1=19
+     * (simulating something else re-advancing the served cursor back to
+     * 25 between reconcile ticks — the exact live shape). */
+    ok = churn_ask_matches(ok, db, 18, 25, true, 19, 19, false);
+    STR_CHECK("rewind-churn: 1st rewind applies normally", ok);
 
-        memset(&out, 0, sizeof(out));
-        out.hstar = 18;
-        out.tip_finalize_cursor_before = 25;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 19 &&
-             cursor_for(db, "tip_finalize") == 19 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: 1st rewind applies normally", ok);
+    ok = churn_ask_matches(ok, db, 18, 25, true, 19, 19, false);
+    STR_CHECK("rewind-churn: 2nd rewind applies normally", ok);
 
-        memset(&out, 0, sizeof(out));
-        out.hstar = 18;
-        out.tip_finalize_cursor_before = 25;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 19 &&
-             cursor_for(db, "tip_finalize") == 19 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: 2nd rewind applies normally", ok);
+    ok = churn_ask_matches(ok, db, 18, 25, true, 19, 19, false);
+    STR_CHECK("rewind-churn: 3rd rewind applies normally", ok);
 
-        memset(&out, 0, sizeof(out));
-        out.hstar = 18;
-        out.tip_finalize_cursor_before = 25;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 19 &&
-             cursor_for(db, "tip_finalize") == 19 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: 3rd rewind applies normally", ok);
+    /* 4th ask at the SAME target height with the SAME flat hstar must
+     * be refused: no further write, the cursor stays at 19 (from the
+     * 3rd apply), and the typed blocker is named. */
+    ok = churn_ask_matches(ok, db, 18, 25, false, 25, 19, true);
+    STR_CHECK("rewind-churn: 4th consecutive ask is refused and names "
+              "the blocker",
+              ok);
 
-        /* 4th ask at the SAME target height with the SAME flat hstar must
-         * be refused: no further write, the cursor stays at 19 (from the
-         * 3rd apply), and the typed blocker is named. */
-        memset(&out, 0, sizeof(out));
-        out.hstar = 18;
-        out.tip_finalize_cursor_before = 25;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && !out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 25 &&
-             cursor_for(db, "tip_finalize") == 19 &&
-             blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: 4th consecutive ask is refused and names "
-                  "the blocker",
-                  ok);
+    /* H* advancing to 19 (still pinned relative to the fixed cursor 25)
+     * changes the clamp target from 19 to hstar+1=20 — a different
+     * target height, so the streak is fresh: the rewind is allowed
+     * again (proving progress resumes) and the stale blocker clears. */
+    ok = churn_ask_matches(ok, db, 19, 25, true, 20, 20, false);
+    STR_CHECK("rewind-churn: an H* advance resets the memo and clears "
+              "the blocker",
+              ok);
 
-        /* H* advancing to 19 (still pinned relative to the fixed cursor 25)
-         * changes the clamp target from 19 to hstar+1=20 — a different
-         * target height, so the streak is fresh: the rewind is allowed
-         * again (proving progress resumes) and the stale blocker clears. */
-        memset(&out, 0, sizeof(out));
-        out.hstar = 19;
-        out.tip_finalize_cursor_before = 25;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 20 &&
-             cursor_for(db, "tip_finalize") == 20 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: an H* advance resets the memo and clears "
-                  "the blocker",
-                  ok);
+    /* A wholly independent fresh pin (hstar=20, cursor fixed at 30,
+     * target=21) churns the same way: 3 rewinds apply, the 4th is
+     * refused again — the guard re-arms per-streak, it does not
+     * permanently latch after firing once. */
+    ok = churn_ask_matches(ok, db, 20, 30, true, 21, 21, false);
+    ok = churn_ask_matches(ok, db, 20, 30, true, 21, 21, false);
+    ok = churn_ask_matches(ok, db, 20, 30, true, 21, 21, false);
+    ok = churn_ask_matches(ok, db, 20, 30, false, 30, 21, true);
+    STR_CHECK("rewind-churn: a fresh pin re-arms the same 3-strike "
+              "refusal",
+              ok);
 
-        /* A wholly independent fresh pin (hstar=20, cursor fixed at 30,
-         * target=21) churns the same way: 3 rewinds apply, the 4th is
-         * refused again — the guard re-arms per-streak, it does not
-         * permanently latch after firing once. */
-        memset(&out, 0, sizeof(out));
-        out.hstar = 20;
-        out.tip_finalize_cursor_before = 30;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 21 &&
-             cursor_for(db, "tip_finalize") == 21 &&
-             !blocker_exists("tip_finalize.rewind_churn");
+    blocker_clear("tip_finalize.rewind_churn");
+    stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
+    teardown_case(dir);
+    return failures;
+}
 
-        memset(&out, 0, sizeof(out));
-        out.hstar = 20;
-        out.tip_finalize_cursor_before = 30;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 21 &&
-             cursor_for(db, "tip_finalize") == 21 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-
-        memset(&out, 0, sizeof(out));
-        out.hstar = 20;
-        out.tip_finalize_cursor_before = 30;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 21 &&
-             cursor_for(db, "tip_finalize") == 21 &&
-             !blocker_exists("tip_finalize.rewind_churn");
-
-        memset(&out, 0, sizeof(out));
-        out.hstar = 20;
-        out.tip_finalize_cursor_before = 30;
-        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-            db, true, &out);
-        ok = ok && rv && !out.clamped_tip_finalize &&
-             out.tip_finalize_cursor_after == 30 &&
-             cursor_for(db, "tip_finalize") == 21 &&
-             blocker_exists("tip_finalize.rewind_churn");
-        STR_CHECK("rewind-churn: a fresh pin re-arms the same 3-strike "
-                  "refusal",
-                  ok);
-
-        blocker_clear("tip_finalize.rewind_churn");
-        stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
-        teardown_case(dir);
-    }
-
+static int case_tip_finalize_rewind_churn_dryrun(void)
+{
+    int failures = 0;
     /* --- A dry-run (apply=false) never engages the churn gate: it never
      * writes, so it must never refuse or count toward the streak, no matter
      * how many times it is polled at the same pinned height. --- */
-    {
-        char dir[256];
-        sqlite3 *db = NULL;
-        bool ok = setup_case("tip_finalize_rewind_churn_dryrun", dir,
-                             sizeof(dir), &db);
-        ok = ok && seed_cursors(db, 5, 5);
-        blocker_module_init();
-        blocker_clear("tip_finalize.rewind_churn");
-        stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool ok = setup_case("tip_finalize_rewind_churn_dryrun", dir,
+                         sizeof(dir), &db);
+    ok = ok && seed_cursors(db, 5, 5);
+    blocker_module_init();
+    blocker_clear("tip_finalize.rewind_churn");
+    stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
 
-        struct stage_reducer_frontier_reconcile_result out;
-        bool rv = true;
-        for (int i = 0; i < 6 && ok; i++) {
-            memset(&out, 0, sizeof(out));
-            out.hstar = 18;
-            out.tip_finalize_cursor_before = 20;
-            rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
-                db, false, &out);
-            ok = ok && rv && out.clamped_tip_finalize &&
-                 out.tip_finalize_cursor_after == 19 &&
-                 !blocker_exists("tip_finalize.rewind_churn");
-        }
-        /* The cursor itself was never written by a dry-run. */
-        ok = ok && cursor_for(db, "tip_finalize") == 5;
-        STR_CHECK("rewind-churn: a dry-run never engages the gate", ok);
-
-        blocker_clear("tip_finalize.rewind_churn");
-        stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
-        teardown_case(dir);
+    struct stage_reducer_frontier_reconcile_result out;
+    bool rv = true;
+    for (int i = 0; i < 6 && ok; i++) {
+        memset(&out, 0, sizeof(out));
+        out.hstar = 18;
+        out.tip_finalize_cursor_before = 20;
+        rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
+            db, false, &out);
+        ok = ok && rv && out.clamped_tip_finalize &&
+             out.tip_finalize_cursor_after == 19 &&
+             !blocker_exists("tip_finalize.rewind_churn");
     }
+    /* The cursor itself was never written by a dry-run. */
+    ok = ok && cursor_for(db, "tip_finalize") == 5;
+    STR_CHECK("rewind-churn: a dry-run never engages the gate", ok);
+
+    blocker_clear("tip_finalize.rewind_churn");
+    stage_reducer_frontier_reset_rewind_churn_memo_for_testing();
+    teardown_case(dir);
+    return failures;
+}
 #endif /* ZCL_TESTING */
 
+int test_stage_repair(void)
+{
+    printf("\n=== stage_repair poison-rewind safety guard tests ===\n");
+    int failures = 0;
+    failures += case_cursor_width();
+    failures += case_ok1_at_frontier_refuses_rewind();
+    failures += case_ok1_above_frontier_refuses_rewind();
+    failures += case_non_frontier_rewind_refused();
+    failures += case_poison_none_frontier_is_noop();
+    failures += case_downstream_rewind_succeeds();
+    failures += case_validate_hash_mismatch_is_repairable();
+    failures += case_validate_invalid_solution_not_repairable();
+    failures += case_header_roundtrip();
+    failures += case_save_refuses_hash_mismatch();
+    failures += case_save_refuses_oversized_solution();
+    failures += case_save_refuses_zero_solution();
+    failures += case_load_rejects_expected_hash_mismatch();
+#ifdef ZCL_TESTING
+    failures += case_proof_internal_error_re_derived();
+    failures += case_proof_invalid_stays_terminal();
+    failures += case_proof_script_codomain();
+    failures += case_proof_oneshot_marker_bounds_retry();
+    failures += case_trusted_base_transition_never_rewound();
+    failures += case_boot_clamp_trusted_base();
+    failures += case_tip_finalize_rewind_churn();
+    failures += case_tip_finalize_rewind_churn_dryrun();
+#endif /* ZCL_TESTING */
     return failures;
 }
