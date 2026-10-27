@@ -64,17 +64,36 @@ size_t zpath_join(char *dst, size_t cap, const char *a, const char *b) {
 
 #define ZPATH__MAX_COMP ((ZPATH_MAX / 2u) + 2u)
 
-size_t zpath_normalize(char *dst, size_t cap, const char *path) {
-  size_t n = zpath__len(path);
-  unsigned short starts[ZPATH__MAX_COMP], lens[ZPATH__MAX_COMP];
-  size_t ncomp = 0, i;
-  int absolute;
-  char tmp[ZPATH_MAX + 2u];
-  size_t out = 0;
-  if (n == SIZE_MAX) return SIZE_MAX;
-  if (n == 0) return zpath__emit(dst, cap, ".", 1);
-  absolute = path[0] == '/';
-  i = 0;
+/* True when the component path[s..e) is exactly "..". */
+static int zpath__comp_is_dotdot(const char *path, size_t s, size_t e) {
+  return e - s == 2 && path[s] == '.' && path[s + 1] == '.';
+}
+
+/* Resolve one ".." at path[s]: pop the previous real component, drop it at
+   the root, or keep it. Returns the updated component count. */
+static size_t zpath__resolve_dotdot(const char *path, size_t s, int absolute,
+                                    unsigned short *starts,
+                                    unsigned short *lens, size_t ncomp) {
+  if (ncomp > 0 &&
+      !zpath__comp_is_dotdot(path, starts[ncomp - 1],
+                             starts[ncomp - 1] + lens[ncomp - 1])) {
+    return ncomp - 1; /* pop the previous real component */
+  }
+  if (absolute) {
+    /* ".." at the root stays at the root: drop it */
+    return ncomp;
+  }
+  starts[ncomp] = (unsigned short)s;
+  lens[ncomp] = 2;
+  return ncomp + 1;
+}
+
+/* Split path[0..n) into components in starts/lens, dropping "." and
+   resolving "..". Returns the component count. */
+static size_t zpath__scan_components(const char *path, size_t n, int absolute,
+                                     unsigned short *starts,
+                                     unsigned short *lens) {
+  size_t ncomp = 0, i = 0;
   while (i < n) {
     size_t s, e;
     while (i < n && path[i] == '/') i++;
@@ -83,24 +102,25 @@ size_t zpath_normalize(char *dst, size_t cap, const char *path) {
     while (i < n && path[i] != '/') i++;
     e = i;
     if (e - s == 1 && path[s] == '.') continue;
-    if (e - s == 2 && path[s] == '.' && path[s + 1] == '.') {
-      if (ncomp > 0 &&
-          !(lens[ncomp - 1] == 2 && path[starts[ncomp - 1]] == '.' &&
-            path[starts[ncomp - 1] + 1] == '.')) {
-        ncomp--; /* pop the previous real component */
-      } else if (absolute) {
-        /* ".." at the root stays at the root: drop it */
-      } else {
-        starts[ncomp] = (unsigned short)s;
-        lens[ncomp] = 2;
-        ncomp++;
-      }
+    if (zpath__comp_is_dotdot(path, s, e)) {
+      ncomp = zpath__resolve_dotdot(path, s, absolute, starts, lens, ncomp);
       continue;
     }
     starts[ncomp] = (unsigned short)s;
     lens[ncomp] = (unsigned short)(e - s);
     ncomp++;
   }
+  return ncomp;
+}
+
+/* Join the components into tmp, '/'-separated and rooted when absolute; an
+   empty result becomes ".". Returns the length written. */
+static size_t zpath__build_normalized(char *tmp, const char *path,
+                                      int absolute,
+                                      const unsigned short *starts,
+                                      const unsigned short *lens,
+                                      size_t ncomp) {
+  size_t out = 0, i;
   if (absolute) tmp[out++] = '/';
   for (i = 0; i < ncomp; i++) {
     if (i > 0) tmp[out++] = '/';
@@ -111,6 +131,20 @@ size_t zpath_normalize(char *dst, size_t cap, const char *path) {
     tmp[0] = '.';
     out = 1;
   }
+  return out;
+}
+
+size_t zpath_normalize(char *dst, size_t cap, const char *path) {
+  size_t n = zpath__len(path);
+  unsigned short starts[ZPATH__MAX_COMP], lens[ZPATH__MAX_COMP];
+  size_t ncomp = 0, out = 0;
+  int absolute;
+  char tmp[ZPATH_MAX + 2u];
+  if (n == SIZE_MAX) return SIZE_MAX;
+  if (n == 0) return zpath__emit(dst, cap, ".", 1);
+  absolute = path[0] == '/';
+  ncomp = zpath__scan_components(path, n, absolute, starts, lens);
+  out = zpath__build_normalized(tmp, path, absolute, starts, lens, ncomp);
   return zpath__emit(dst, cap, tmp, out);
 }
 

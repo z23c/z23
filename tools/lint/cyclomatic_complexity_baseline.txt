@@ -204,7 +204,6 @@ contexts/commons/packages/zotpcli/src/zotpcli.c:rec_next:16
 contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_b32_decode_secret:19
 contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_otpauth_format:16
 contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_store_decode:20
-contexts/commons/packages/zpath/src/zpath.c:zpath_normalize:23
 contexts/commons/packages/zpct/src/zpct.c:zpct__in_set:26
 contexts/commons/packages/zpct/src/zpct.c:zpct_encode:19
 contexts/commons/packages/zpem/src/zpem.c:zpem_parse:29
