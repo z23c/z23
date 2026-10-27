@@ -219,27 +219,40 @@ static int ish_run_script(const char *d, const char *body, bool fail,
     return rc;
 }
 
-/* The echo stubs print their arguments: "clone https://..." for the git
- * clone and "-C <d>/src setup" for the first make. */
-#define ISH_GIT_NOISE "clone https://"
-#define ISH_MAKE_NOISE "/src setup"
+/* Occurrences of needle in hay. */
+static size_t ish_count(const char *hay, const char *needle)
+{
+    size_t n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p++)
+        n++;
+    return n;
+}
 
+/* The echo stubs print their arguments: "clone https://..." for the clone,
+ * and "-C <d>/src ..." for every other git and make call (checkout, pull,
+ * make setup, make z23). No terminal line the script prints has "-C ". */
 static int ish_real_ok(const char *d, const char *body)
 {
     int failures = 0;
     static char out[8192], err[8192], log[8192];
+    char dash_c[600], setup[640], build[640], checkout[640];
+    snprintf(dash_c, sizeof(dash_c), "-C %s/src ", d);
+    snprintf(setup, sizeof(setup), "%ssetup", dash_c);
+    snprintf(build, sizeof(build), "%s-j", dash_c);
+    snprintf(checkout, sizeof(checkout), "%scheckout", dash_c);
     int rc = ish_run_script(d, body, false, out, err, log, sizeof(out));
     ISH_CHECK("real run: success exits 0 with the summary on stdout",
               rc == 0 && strstr(out, "Binary:  ") != NULL &&
                   strstr(out, "https://z23.sh/start") != NULL);
-    ISH_CHECK("real run: git and make output stays off the terminal",
-              strstr(out, ISH_GIT_NOISE) == NULL &&
-                  strstr(err, ISH_GIT_NOISE) == NULL &&
-                  strstr(out, ISH_MAKE_NOISE) == NULL &&
-                  strstr(err, ISH_MAKE_NOISE) == NULL);
-    ISH_CHECK("real run: git and make output lands in build/install.log",
-              strstr(log, ISH_GIT_NOISE) != NULL &&
-                  strstr(log, ISH_MAKE_NOISE) != NULL);
+    ISH_CHECK("real run: no git or make output reaches the terminal",
+              strstr(out, "clone https://") == NULL &&
+                  strstr(err, "clone https://") == NULL &&
+                  strstr(out, "-C ") == NULL && strstr(err, "-C ") == NULL);
+    ISH_CHECK("real run: every git and make call lands in build/install.log",
+              strstr(log, "clone https://") != NULL &&
+                  strstr(log, checkout) != NULL &&
+                  strstr(log, setup) != NULL && strstr(log, build) != NULL &&
+                  ish_count(log, dash_c) >= 3);
     return failures;
 }
 
