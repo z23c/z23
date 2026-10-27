@@ -120,7 +120,7 @@ static const int decode64_table[256] = {
     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
     -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
 };
 
 size_t DecodeBase64(const char *p, unsigned char *out, size_t out_size, bool *invalid)
@@ -396,6 +396,111 @@ static bool process_mantissa_digit(char ch, int64_t *mantissa, int *mantissa_tze
     return true;
 }
 
+/* Consumes a run of decimal digits into the mantissa; false on overflow. */
+static bool consume_mantissa_digits(const char *val, int *ptr, int end,
+                                    int64_t *mantissa, int *mantissa_tzeros)
+{
+    while (*ptr < end && val[*ptr] >= '0' && val[*ptr] <= '9') {
+        bool digit_ok = process_mantissa_digit(val[*ptr], mantissa, mantissa_tzeros);
+        if (!digit_ok)
+            return digit_ok;
+        ++(*ptr);
+    }
+    return true;
+}
+
+/* Parses the optional sign and the integer digits; false on syntax error or
+ * mantissa overflow. */
+static bool parse_fixed_point_int_part(const char *val, int *ptr, int end,
+                                       int64_t *mantissa, int *mantissa_tzeros,
+                                       bool *mantissa_sign)
+{
+    if (*ptr < end && val[*ptr] == '-') {
+        *mantissa_sign = true;
+        ++(*ptr);
+    }
+    if (*ptr < end) {
+        if (val[*ptr] == '0') {
+            ++(*ptr);
+        } else if (val[*ptr] >= '1' && val[*ptr] <= '9') {
+            return consume_mantissa_digits(val, ptr, end, mantissa, mantissa_tzeros);
+        } else return false;
+    } else return false;
+    return true;
+}
+
+/* Parses the fraction after a '.', counting its digits in *point_ofs; true
+ * when no '.' is present. */
+static bool parse_fixed_point_fraction(const char *val, int *ptr, int end,
+                                       int64_t *mantissa, int *mantissa_tzeros,
+                                       int *point_ofs)
+{
+    if (*ptr < end && val[*ptr] == '.') {
+        ++(*ptr);
+        if (*ptr < end && val[*ptr] >= '0' && val[*ptr] <= '9') {
+            int start = *ptr;
+            bool digits_ok = consume_mantissa_digits(val, ptr, end, mantissa, mantissa_tzeros);
+            if (digits_ok)
+                *point_ofs += *ptr - start;
+            return digits_ok;
+        } else return false;
+    }
+    return true;
+}
+
+/* Consumes an optional '+' or '-' exponent sign, flagging '-'. */
+static void consume_exponent_sign(const char *val, int *ptr, int end,
+                                  bool *exponent_sign)
+{
+    if (*ptr < end && val[*ptr] == '+')
+        ++(*ptr);
+    else if (*ptr < end && val[*ptr] == '-') {
+        *exponent_sign = true;
+        ++(*ptr);
+    }
+}
+
+/* Reads exponent digits, rejecting values too large to scale. */
+static bool consume_exponent_digits(const char *val, int *ptr, int end,
+                                    int64_t *exponent)
+{
+    while (*ptr < end && val[*ptr] >= '0' && val[*ptr] <= '9') {
+        if (*exponent > (UPPER_BOUND / 10LL))
+            return false;
+        *exponent = *exponent * 10 + val[*ptr] - '0';
+        ++(*ptr);
+    }
+    return true;
+}
+
+/* Parses the optional 'e'/'E' exponent and its sign; false on syntax error
+ * or exponent overflow. */
+static bool parse_fixed_point_exponent(const char *val, int *ptr, int end,
+                                       int64_t *exponent, bool *exponent_sign)
+{
+    if (*ptr < end && (val[*ptr] == 'e' || val[*ptr] == 'E')) {
+        ++(*ptr);
+        consume_exponent_sign(val, ptr, end, exponent_sign);
+        if (*ptr < end && val[*ptr] >= '0' && val[*ptr] <= '9')
+            return consume_exponent_digits(val, ptr, end, exponent);
+        else return false;
+    }
+    return true;
+}
+
+/* Multiplies the mantissa by 10^exponent and enforces the final range. */
+static bool scale_mantissa_to_range(int64_t *mantissa, int64_t exponent)
+{
+    for (int i = 0; i < exponent; ++i) {
+        if (*mantissa > (UPPER_BOUND / 10LL) || *mantissa < -(UPPER_BOUND / 10LL))
+            return false;
+        *mantissa *= 10;
+    }
+    if (*mantissa > UPPER_BOUND || *mantissa < -UPPER_BOUND)
+        return false;
+    return true;
+}
+
 bool ParseFixedPoint(const char *val, int decimals, int64_t *amount_out)
 {
     int64_t mantissa = 0;
@@ -407,51 +512,15 @@ bool ParseFixedPoint(const char *val, int decimals, int64_t *amount_out)
     int end = (int)strlen(val);
     int point_ofs = 0;
 
-    if (ptr < end && val[ptr] == '-') {
-        mantissa_sign = true;
-        ++ptr;
-    }
-    if (ptr < end) {
-        if (val[ptr] == '0') {
-            ++ptr;
-        } else if (val[ptr] >= '1' && val[ptr] <= '9') {
-            while (ptr < end && val[ptr] >= '0' && val[ptr] <= '9') {
-                if (!process_mantissa_digit(val[ptr], &mantissa, &mantissa_tzeros))
-                    return false;
-                ++ptr;
-            }
-        } else return false;
-    } else return false;
+    if (!parse_fixed_point_int_part(val, &ptr, end, &mantissa, &mantissa_tzeros, &mantissa_sign))
+        return false;
 
-    if (ptr < end && val[ptr] == '.') {
-        ++ptr;
-        if (ptr < end && val[ptr] >= '0' && val[ptr] <= '9') {
-            while (ptr < end && val[ptr] >= '0' && val[ptr] <= '9') {
-                if (!process_mantissa_digit(val[ptr], &mantissa, &mantissa_tzeros))
-                    return false;
-                ++ptr;
-                ++point_ofs;
-            }
-        } else return false;
-    }
+    if (!parse_fixed_point_fraction(val, &ptr, end, &mantissa, &mantissa_tzeros, &point_ofs))
+        return false;
 
-    if (ptr < end && (val[ptr] == 'e' || val[ptr] == 'E')) {
-        ++ptr;
-        if (ptr < end && val[ptr] == '+')
-            ++ptr;
-        else if (ptr < end && val[ptr] == '-') {
-            exponent_sign = true;
-            ++ptr;
-        }
-        if (ptr < end && val[ptr] >= '0' && val[ptr] <= '9') {
-            while (ptr < end && val[ptr] >= '0' && val[ptr] <= '9') {
-                if (exponent > (UPPER_BOUND / 10LL))
-                    return false;
-                exponent = exponent * 10 + val[ptr] - '0';
-                ++ptr;
-            }
-        } else return false;
-    }
+    if (!parse_fixed_point_exponent(val, &ptr, end, &exponent, &exponent_sign))
+        return false;
+
     if (ptr != end)
         return false;
 
@@ -468,12 +537,7 @@ bool ParseFixedPoint(const char *val, int decimals, int64_t *amount_out)
     if (exponent >= 18)
         return false;
 
-    for (int i = 0; i < exponent; ++i) {
-        if (mantissa > (UPPER_BOUND / 10LL) || mantissa < -(UPPER_BOUND / 10LL))
-            return false;
-        mantissa *= 10;
-    }
-    if (mantissa > UPPER_BOUND || mantissa < -UPPER_BOUND)
+    if (!scale_mantissa_to_range(&mantissa, exponent))
         return false;
 
     if (amount_out)
