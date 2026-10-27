@@ -118,6 +118,39 @@ static bool slots_grow(zintern *p)
     return true;
 }
 
+/* true when the pool is NULL or bytes is NULL with a nonzero length */
+static bool put_args_invalid(const zintern *p, const void *bytes, size_t len)
+{
+    return !p || (!bytes && len > 0);
+}
+
+/* true when the slot table exists, growing it if this is its first use */
+static bool slots_ready(zintern *p)
+{
+    return p->slots_cap != 0 || slots_grow(p);
+}
+
+/* grow the id->(off,len) table when it is full; -1 on allocation failure */
+static int table_grow_if_full(zintern *p)
+{
+    if (p->count != p->tab_cap) return 0;
+    uint32_t ncap = p->tab_cap ? p->tab_cap * 2 : 64;
+    size_t *no = xalloc(p, (size_t)ncap * sizeof *no);
+    if (!no) return -1;
+    uint32_t *nl = xalloc(p, (size_t)ncap * sizeof *nl);
+    if (!nl) { xfree(p, no); return -1; }
+    if (p->offs) {
+        memcpy(no, p->offs, (size_t)p->count * sizeof *no);
+        memcpy(nl, p->lens, (size_t)p->count * sizeof *nl);
+    }
+    xfree(p, p->offs);
+    xfree(p, p->lens);
+    p->offs = no;
+    p->lens = nl;
+    p->tab_cap = ncap;
+    return 0;
+}
+
 zintern *zintern_create(zintern_alloc alloc)
 {
     zintern proto;
@@ -150,10 +183,10 @@ uint32_t zintern_count(const zintern *p)
 
 uint32_t zintern_put(zintern *p, const void *bytes, size_t len)
 {
-    if (!p || (!bytes && len > 0)) return UINT32_MAX;
+    if (put_args_invalid(p, bytes, len)) return UINT32_MAX;
     if (p->count == UINT32_MAX) return UINT32_MAX;
 
-    if (p->slots_cap == 0 && !slots_grow(p)) return UINT32_MAX;
+    if (!slots_ready(p)) return UINT32_MAX;
     uint64_t h = fnv1a(bytes ? bytes : "", len);
     bool found;
     uint32_t s = slot_find(p, bytes, len, h, &found);
@@ -166,22 +199,7 @@ uint32_t zintern_put(zintern *p, const void *bytes, size_t len)
         if (found) return p->slots[s] - 1;
     }
 
-    if (p->count == p->tab_cap) {
-        uint32_t ncap = p->tab_cap ? p->tab_cap * 2 : 64;
-        size_t *no = xalloc(p, (size_t)ncap * sizeof *no);
-        if (!no) return UINT32_MAX;
-        uint32_t *nl = xalloc(p, (size_t)ncap * sizeof *nl);
-        if (!nl) { xfree(p, no); return UINT32_MAX; }
-        if (p->offs) {
-            memcpy(no, p->offs, (size_t)p->count * sizeof *no);
-            memcpy(nl, p->lens, (size_t)p->count * sizeof *nl);
-        }
-        xfree(p, p->offs);
-        xfree(p, p->lens);
-        p->offs = no;
-        p->lens = nl;
-        p->tab_cap = ncap;
-    }
+    if (table_grow_if_full(p) != 0) return UINT32_MAX;
 
     size_t off;
     if (!arena_append(p, bytes, len, &off)) return UINT32_MAX;
