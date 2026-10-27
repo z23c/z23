@@ -354,7 +354,7 @@ static bool tier1b_datadir(char *out, size_t cap)
 
 /* Locate the co-located zclassicd chainstate under $HOME (the same path the
  * legacy import uses).  False when HOME is unset, the path does not fit, or
- * the directory is absent. */
+ * the path does not exist (existence only; not checked to be a directory). */
 static bool tier1b_chainstate_path(char *cs_path, size_t cap)
 {
     const char *home = getenv("HOME");
