@@ -225,7 +225,6 @@ contexts/commons/packages/zre/src/zre.c:parse_escape:19
 contexts/commons/packages/zre/src/zre.c:parse_repeat:22
 contexts/commons/packages/zre/src/zre.c:zre_compile:25
 contexts/commons/packages/zre/src/zre.c:zre_match:32
-contexts/commons/packages/zre/tests/test_zre.c:test_groups_captures:21
 contexts/commons/packages/zring/app/main.c:main:18
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/zslug/src/zslug.c:utf8_decode:24

@@ -216,7 +216,7 @@ static void test_anchors(void) {
   NM("a$b", "xa$b");
 }
 
-static void test_groups_captures(void) {
+static void check_two_group_capture_spans(void) {
   zre_prog *p = compile("^(a+)(b+)$");
   CHECK(p != NULL);
   CHECK(zre_groups(p) == 2);
@@ -240,8 +240,11 @@ static void test_groups_captures(void) {
     CHECK(caps[2].start == 1 && caps[2].end == 2);
     zre_free(p);
   }
+}
+
+static void check_nested_and_empty_group_captures(void) {
   /* Nested and empty groups. */
-  p = compile("^((a)(b))$");
+  zre_prog *p = compile("^((a)(b))$");
   CHECK(p != NULL);
   CHECK(zre_groups(p) == 3);
   if (p) {
@@ -260,8 +263,11 @@ static void test_groups_captures(void) {
     CHECK(caps[1].start == 0 && caps[1].end == 0);
     zre_free(p);
   }
+}
+
+static void check_group_slots_and_caps_truncation(void) {
   /* Non-capturing groups don't consume slots. */
-  p = compile("(?:ab)+(c)");
+  zre_prog *p = compile("(?:ab)+(c)");
   CHECK(p != NULL);
   CHECK(zre_groups(p) == 1);
   if (p) {
@@ -281,6 +287,12 @@ static void test_groups_captures(void) {
     CHECK(caps[1].start == 0 && caps[1].end == 1);
     zre_free(p);
   }
+}
+
+static void test_groups_captures(void) {
+  check_two_group_capture_spans();
+  check_nested_and_empty_group_captures();
+  check_group_slots_and_caps_truncation();
 }
 
 static void test_alternation(void) {
