@@ -289,6 +289,90 @@ static bool walk_dir_windows(struct walk_ctx *w, HANDLE directory,
 }
 
 #else
+static bool walk_dir(struct walk_ctx *w, const char *rel);
+
+/* Collect an open directory's entry names, skipping "." and "..". */
+static bool walk_read_dir_names(DIR *d, char ***names, size_t *ncount)
+{
+    size_t ncap = 0;
+    struct dirent *de;
+    bool ok = true;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+            continue;
+        if (*ncount == ncap) {
+            size_t ncap2 = ncap ? ncap * 2 : 64;
+            char **nn = zcl_realloc(*names, ncap2 * sizeof(*nn), "vcs_walk_names");
+            if (!nn) { ok = false; break; }
+            *names = nn;
+            ncap = ncap2;
+        }
+        (*names)[*ncount] = zcl_strdup(de->d_name, "vcs_walk_name");
+        if (!(*names)[*ncount]) { ok = false; break; }
+        (*ncount)++;
+    }
+    return ok;
+}
+
+static void walk_sort_names(char **names, size_t ncount)
+{
+    /* deterministic order */
+    for (size_t i = 0; i + 1 < ncount; i++)
+        for (size_t j = i + 1; j < ncount; j++)
+            if (strcmp(names[i], names[j]) > 0) {
+                char *t = names[i]; names[i] = names[j]; names[j] = t;
+            }
+}
+
+/* Free ncount names and the array holding them. */
+static void walk_free_names(char **names, size_t ncount)
+{
+    for (size_t i = 0; i < ncount; i++) free(names[i]);
+    free(names);
+}
+
+/* Visit one child name; false only when a recursive descent failed. */
+static bool walk_visit_child(struct walk_ctx *w, const char *rel,
+                             const char *name)
+{
+    char childrel[4096];
+    int cn;
+    if (rel[0])
+        cn = snprintf(childrel, sizeof(childrel), "%s/%s", rel, name);
+    else
+        cn = snprintf(childrel, sizeof(childrel), "%s", name);
+    if (cn <= 0 || (size_t)cn >= sizeof(childrel))
+        return true;  /* skip pathological over-long names */
+
+    if (vcs_path_ignored(childrel))
+        return true;
+
+    char childfull[4096];
+    int cfn = snprintf(childfull, sizeof(childfull), "%s/%s",
+                       w->repo_root, childrel);
+    if (cfn <= 0 || (size_t)cfn >= sizeof(childfull))
+        return true;
+
+    struct stat st;
+    if (lstat(childfull, &st) != 0)
+        return true;  /* vanished mid-walk; skip */
+
+    if (S_ISDIR(st.st_mode)) {
+        return walk_dir(w, childrel);
+    } else if (S_ISREG(st.st_mode)) {
+        int64_t mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000 +
+                           st.st_mtim.tv_nsec;
+        int64_t ctime_ns = (int64_t)st.st_ctim.tv_sec * 1000000000 +
+                           st.st_ctim.tv_nsec;
+        if (!w->cb(childrel, (uint32_t)st.st_mode, (uint64_t)st.st_size,
+                   mtime_ns, ctime_ns, w->user)) {
+            w->aborted = true;
+        }
+    }
+    /* symlinks / fifos / sockets: not tracked in v1 */
+    return true;
+}
+
 /* Recurse into <repo_root>/<rel> (rel="" for the root). */
 static bool walk_dir(struct walk_ctx *w, const char *rel)
 {
@@ -307,78 +391,22 @@ static bool walk_dir(struct walk_ctx *w, const char *rel)
 
     /* Collect names first (sorted) so the walk order is deterministic. */
     char **names = NULL;
-    size_t ncount = 0, ncap = 0;
-    struct dirent *de;
-    bool ok = true;
-    while ((de = readdir(d)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
-            continue;
-        if (ncount == ncap) {
-            size_t ncap2 = ncap ? ncap * 2 : 64;
-            char **nn = zcl_realloc(names, ncap2 * sizeof(*nn), "vcs_walk_names");
-            if (!nn) { ok = false; break; }
-            names = nn;
-            ncap = ncap2;
-        }
-        names[ncount] = zcl_strdup(de->d_name, "vcs_walk_name");
-        if (!names[ncount]) { ok = false; break; }
-        ncount++;
-    }
+    size_t ncount = 0;
+    bool ok = walk_read_dir_names(d, &names, &ncount);
     closedir(d);
     if (!ok) {
-        for (size_t i = 0; i < ncount; i++) free(names[i]);
-        free(names);
+        walk_free_names(names, ncount);
         LOG_FAIL("vcs", "readdir alloc failed");
     }
 
-    /* deterministic order */
-    for (size_t i = 0; i + 1 < ncount; i++)
-        for (size_t j = i + 1; j < ncount; j++)
-            if (strcmp(names[i], names[j]) > 0) {
-                char *t = names[i]; names[i] = names[j]; names[j] = t;
-            }
+    walk_sort_names(names, ncount);
 
     for (size_t i = 0; i < ncount && ok && !w->aborted; i++) {
-        char childrel[4096];
-        int cn;
-        if (rel[0])
-            cn = snprintf(childrel, sizeof(childrel), "%s/%s", rel, names[i]);
-        else
-            cn = snprintf(childrel, sizeof(childrel), "%s", names[i]);
-        if (cn <= 0 || (size_t)cn >= sizeof(childrel))
-            continue;  /* skip pathological over-long names */
-
-        if (vcs_path_ignored(childrel))
-            continue;
-
-        char childfull[4096];
-        int cfn = snprintf(childfull, sizeof(childfull), "%s/%s",
-                           w->repo_root, childrel);
-        if (cfn <= 0 || (size_t)cfn >= sizeof(childfull))
-            continue;
-
-        struct stat st;
-        if (lstat(childfull, &st) != 0)
-            continue;  /* vanished mid-walk; skip */
-
-        if (S_ISDIR(st.st_mode)) {
-            if (!walk_dir(w, childrel))
-                ok = false;
-        } else if (S_ISREG(st.st_mode)) {
-            int64_t mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000 +
-                               st.st_mtim.tv_nsec;
-            int64_t ctime_ns = (int64_t)st.st_ctim.tv_sec * 1000000000 +
-                               st.st_ctim.tv_nsec;
-            if (!w->cb(childrel, (uint32_t)st.st_mode, (uint64_t)st.st_size,
-                       mtime_ns, ctime_ns, w->user)) {
-                w->aborted = true;
-            }
-        }
-        /* symlinks / fifos / sockets: not tracked in v1 */
+        if (!walk_visit_child(w, rel, names[i]))
+            ok = false;
     }
 
-    for (size_t i = 0; i < ncount; i++) free(names[i]);
-    free(names);
+    walk_free_names(names, ncount);
     return ok;
 }
 #endif
