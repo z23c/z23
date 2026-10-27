@@ -1238,6 +1238,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_code_fetch_command.c", CAP_NONE, "th
 ZCL_MODULE_CAPABILITY("tools/command/native_code_emitter_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_activation_command.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_canary_sentinel.c", CAP_FS_READ|CAP_FS_WRITE, "validates owned canary files and directory metadata through retained descriptors; writes, fsyncs, renames and unlinks fixed sentinel, marker and staged leaves without whole-system sync")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "native handlers for the registry-owned `dev` tree: launches build/test child processes on the operator's behalf")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_hotswap.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_index_identity.c", CAP_FS_READ|CAP_FS_WRITE, "hashes a source file's already-ingested byte prefix to verify a cursor before trusting it (fopen/fread); the write class comes with the sqlite3 handle its cursor read/write functions bind against, opened by the caller")

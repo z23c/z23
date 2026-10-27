@@ -102,3 +102,30 @@ health. macOS runtime qualification was not run. The existing POSIX canary
 remains unsupported on Windows; its native command explicitly refuses there.
 This note was updated after the focused run. Full lint and native exact
 candidate proof remain pending; no live deployment was performed.
+
+## Capability declaration correction
+
+The first default native intake refused capability closure. Its full checker
+output identified two blocking undeclared reaches: the new handler used
+`CAP_FS_READ` and `CAP_FS_WRITE` without a module declaration. An exact
+`CAP_FS_READ|CAP_FS_WRITE` row was added to the existing declaration file;
+handler and test bytes were unchanged.
+
+The read-only checker loads this declaration file directly. After the repair
+it exited 0: 2,754 objects scanned, zero unclassified, undeclared,
+overdeclared, missing-source-row or raw-syscall violations. Two declared-but-
+unobserved rows remain at the existing coverage baseline, and twenty compiled-out
+capability observations remain unobserved. This is not cross-platform proof.
+The repaired declaration file blob was
+`c7826820d164218abb5725559fa247b82d825804`.
+
+The leading failure excerpt also mentioned one foreign object. That object
+is the current `DEV_PACKAGE_VERIFY_GUI_STUB_OBJ` alias built from
+`contexts/wallet/views/src/wallet_gui.c` with GUI macros explicitly undefined.
+Its Makefile recipe, dependency file and DWARF source name agree. The
+checker's filename-based source mapping does not recognize the alias; its
+foreign count is informational and is not part of the blocking violation sum.
+The object was retained, with no cleanup or gate waiver. The two missing
+capability declarations caused the refusal.
+
+The repaired checker log SHA-256 was `7a98c1630b87ed64c823c983b2d205e527b10740c05ebdfa6f60946dd83e075a`.
