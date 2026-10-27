@@ -240,7 +240,6 @@ contexts/commons/packages/zdiff/src/zdiff.c:zdiff_run:33
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zdogfight/src/zdogfight.c:plane_update:20
-contexts/commons/packages/zdogfight/tests/test_zdogfight.c:obs_eq:24
 contexts/commons/packages/zdogfight/tests/test_zdogfight.c:test_bounds_and_wrap:30
 contexts/commons/packages/zdogview/app/main.c:main:19
 contexts/commons/packages/zdogview/src/zdogview.c:zdogview_verify:22

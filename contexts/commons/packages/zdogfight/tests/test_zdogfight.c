@@ -452,19 +452,40 @@ static void test_match_end_draw(void)
 /* 8. Wire round-trips                                                 */
 /* ------------------------------------------------------------------ */
 
-static int obs_eq(const zdog_obs *a, const zdog_obs *b)
+/* Match-frame fields (tick, self index, plane count) plus own
+ * position and yaw. */
+static int obs_header_pose_eq(const zdog_obs *a, const zdog_obs *b)
 {
     return a->tick == b->tick && a->self_index == b->self_index &&
            a->num_planes == b->num_planes && a->x == b->x && a->y == b->y &&
-           a->z == b->z && a->yaw == b->yaw && a->pitch == b->pitch &&
-           a->roll == b->roll && a->speed == b->speed &&
-           a->health == b->health && a->team == b->team &&
-           a->score_red == b->score_red && a->score_blue == b->score_blue &&
-           a->ticks_left == b->ticks_left &&
-           a->enemy_valid == b->enemy_valid && a->rel_x == b->rel_x &&
+           a->z == b->z && a->yaw == b->yaw;
+}
+
+/* Own attitude, speed, health and team plus the match scores and
+ * clock. */
+static int obs_status_eq(const zdog_obs *a, const zdog_obs *b)
+{
+    return a->pitch == b->pitch && a->roll == b->roll &&
+           a->speed == b->speed && a->health == b->health &&
+           a->team == b->team && a->score_red == b->score_red &&
+           a->score_blue == b->score_blue &&
+           a->ticks_left == b->ticks_left;
+}
+
+/* Enemy-observation fields: validity, relative position, distance,
+ * velocity and health. */
+static int obs_enemy_eq(const zdog_obs *a, const zdog_obs *b)
+{
+    return a->enemy_valid == b->enemy_valid && a->rel_x == b->rel_x &&
            a->rel_y == b->rel_y && a->rel_z == b->rel_z &&
            a->dist == b->dist && a->evx == b->evx && a->evy == b->evy &&
            a->evz == b->evz && a->ehealth == b->ehealth;
+}
+
+static int obs_eq(const zdog_obs *a, const zdog_obs *b)
+{
+    return obs_header_pose_eq(a, b) && obs_status_eq(a, b) &&
+           obs_enemy_eq(a, b);
 }
 
 static void test_wire_roundtrip(void)
