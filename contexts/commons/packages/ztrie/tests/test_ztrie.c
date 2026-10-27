@@ -256,6 +256,36 @@ static uint64_t rng_next(void)
     return rng_state;
 }
 
+/* Pick a random key, register it in the model when it is new, and return
+   its slot; the key length is stored in *len_out. */
+static size_t stress_model_slot(char keys[][8], int values[512],
+                                size_t *nkeys, size_t *len_out)
+{
+    char cand[8];
+    size_t len = (size_t)(rng_next() % 7) + 1;
+    for (size_t i = 0; i < len; i++)
+        cand[i] = (char)('a' + rng_next() % 26);
+    cand[len] = '\0';
+    size_t slot = *nkeys;
+    for (size_t i = 0; i < *nkeys; i++)
+        if (strcmp(keys[i], cand) == 0) { slot = i; break; }
+    if (slot == *nkeys) {
+        memcpy(keys[*nkeys], cand, len + 1);
+        values[*nkeys] = (int)*nkeys;
+        (*nkeys)++;
+    }
+    *len_out = len;
+    return slot;
+}
+
+/* Count how many model slots are currently marked present. */
+static size_t stress_count_present(const bool *present, size_t nkeys)
+{
+    size_t expect = 0;
+    for (size_t i = 0; i < nkeys; i++) if (present[i]) expect++;
+    return expect;
+}
+
 static void test_stress_vs_model(void)
 {
     /* Random put/get/erase against a sorted-array model. */
@@ -272,19 +302,8 @@ static void test_stress_vs_model(void)
         if (kind == 0 && nkeys < 512) {
             /* insert a fresh random key; reuse the slot if the same
                string was seen before so the model keys stay unique */
-            char cand[8];
-            size_t len = (size_t)(rng_next() % 7) + 1;
-            for (size_t i = 0; i < len; i++)
-                cand[i] = (char)('a' + rng_next() % 26);
-            cand[len] = '\0';
-            size_t slot = nkeys;
-            for (size_t i = 0; i < nkeys; i++)
-                if (strcmp(keys[i], cand) == 0) { slot = i; break; }
-            if (slot == nkeys) {
-                memcpy(keys[nkeys], cand, len + 1);
-                values[nkeys] = (int)nkeys;
-                nkeys++;
-            }
+            size_t len = 0;
+            size_t slot = stress_model_slot(keys, values, &nkeys, &len);
             bool was = present[slot];
             void *old = NULL;
             CHECK(ztrie_put(t, keys[slot], len, &values[slot], &old));
@@ -308,8 +327,7 @@ static void test_stress_vs_model(void)
         }
 
         /* len agrees with model */
-        size_t expect = 0;
-        for (size_t i = 0; i < nkeys; i++) if (present[i]) expect++;
+        size_t expect = stress_count_present(present, nkeys);
         CHECK(ztrie_len(t) == expect);
     }
 

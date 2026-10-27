@@ -231,7 +231,6 @@ contexts/commons/packages/ztemplate/tests/test_ztemplate.c:ref_render:17
 contexts/commons/packages/ztime/src/ztime.c:ztime_parse_n:43
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
-contexts/commons/packages/ztrie/tests/test_ztrie.c:test_stress_vs_model:16
 contexts/commons/packages/zu256/app/main.c:main:20
 contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
 contexts/commons/packages/zxml/app/main.c:main:24
