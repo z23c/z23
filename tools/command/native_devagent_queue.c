@@ -3113,9 +3113,9 @@ static void dvq_next_harness_argv(const struct dvq_row *pick,
                                   const char *harness, const char *taskpath,
                                   const char *wt, const char *st,
                                   const char *tmo, const char *gtmo,
+                                  char *group, size_t gcap,
                                   const char **hargv)
 {
-    char group[96];
     int n = 0;
     hargv[n++] = harness;
     n = dvq_engine_args(pick, model, hargv, n);
@@ -3125,9 +3125,9 @@ static void dvq_next_harness_argv(const struct dvq_row *pick,
         hargv[n++] = "--no-group";
     } else {
         if (pick->group[0])
-            (void)snprintf(group, sizeof(group), "%s", pick->group);
+            (void)snprintf(group, gcap, "%s", pick->group);
         else
-            (void)snprintf(group, sizeof(group), "devagent_%s", pick->name);
+            (void)snprintf(group, gcap, "devagent_%s", pick->name);
         hargv[n++] = "--group";
         hargv[n++] = group;
     }
@@ -3256,7 +3256,7 @@ static void dvq_next(const struct zcl_command_request *req,
     char qpath[4096 + 32], poolpath[4096 + 32];
     char wt[4096], st[4096 + 64], taskpath[4096 + 64];
     char runout[4096 + 64], lockpath[4096 + 16];
-    char harness[4096], model[160], unit[160];
+    char harness[4096], model[160], group[96], unit[160];
     char zbenv[4096 + 64];
     char psetenv[8192 + 32];
     const char *tmo = "1200", *gtmo = "2400";
@@ -3330,7 +3330,7 @@ static void dvq_next(const struct zcl_command_request *req,
                                sizeof(harness)))
         return;
     dvq_next_harness_argv(&pick, model, doc, harness, taskpath, wt, st, tmo,
-                          gtmo, hargv);
+                          gtmo, group, sizeof(group), hargv);
     have_zbin = dvq_next_zbin_env(wt, zbenv, sizeof(zbenv));
     zr = dvq_next_spawn(hargv, have_zbin, zbenv, unit, wt, runout, lockpath,
                         psetenv, &wtfd);
