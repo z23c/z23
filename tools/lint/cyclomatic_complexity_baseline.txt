@@ -251,9 +251,6 @@ contexts/commons/packages/zdogview/tests/test_zdogview.c:main:17
 contexts/commons/packages/zescape/src/zescape.c:zescape_unescape:30
 contexts/commons/packages/zhtml/src/zhtml.c:zhtml__entity:26
 contexts/commons/packages/zhuman/app/main.c:main:17
-contexts/commons/packages/zhuman/src/zhuman.c:zhuman_format_duration:20
-contexts/commons/packages/zhuman/src/zhuman.c:zhuman_parse_bytes:17
-contexts/commons/packages/zhuman/src/zhuman.c:zhuman_parse_duration:32
 contexts/commons/packages/zintern/src/zintern.c:zintern_put:18
 contexts/commons/packages/zjson/tests/test_zjson.c:balanced:17
 contexts/commons/packages/zjsonp/src/zjsonp.c:scan_number:30

@@ -74,6 +74,32 @@ static zhuman_err scaled_bytes(uint64_t whole, uint64_t frac,
     return ZHUMAN_OK;
 }
 
+/* Parses leading decimal digits into *out, advancing *str past them. */
+static zhuman_err parse_decimal_digits(const char **str, uint64_t *out)
+{
+    uint64_t value = 0;
+    while (**str >= '0' && **str <= '9') {
+        uint64_t digit = (uint64_t)(**str - '0');
+        if (value > (UINT64_MAX - digit) / 10) return ZHUMAN_ERR_OVERFLOW;
+        value = value * 10 + digit;
+        (*str)++;
+    }
+    *out = value;
+    return ZHUMAN_OK;
+}
+
+/* Parses the optional single fractional digit after '.'. */
+static zhuman_err parse_tenth_digit(const char **str, uint64_t *frac)
+{
+    if (**str != '.') return ZHUMAN_OK;
+    (*str)++;
+    if (!(**str >= '0' && **str <= '9')) return ZHUMAN_ERR_FORMAT;
+    *frac = (uint64_t)(**str - '0');
+    (*str)++;
+    if (**str >= '0' && **str <= '9') return ZHUMAN_ERR_FORMAT; /* >1 dp */
+    return ZHUMAN_OK;
+}
+
 zhuman_err zhuman_parse_bytes(const char *str, uint64_t *out)
 {
     if (!str || !out) return ZHUMAN_ERR_NULL;
@@ -82,25 +108,15 @@ zhuman_err zhuman_parse_bytes(const char *str, uint64_t *out)
 
     /* Parse integer part. */
     uint64_t whole = 0;
-    int digits = 0;
-    while (*str >= '0' && *str <= '9') {
-        uint64_t digit = (uint64_t)(*str - '0');
-        if (whole > (UINT64_MAX - digit) / 10) return ZHUMAN_ERR_OVERFLOW;
-        whole = whole * 10 + digit;
-        str++;
-        digits++;
-    }
-    if (!digits) return ZHUMAN_ERR_FORMAT;
+    const char *start = str;
+    zhuman_err err = parse_decimal_digits(&str, &whole);
+    if (err != ZHUMAN_OK) return err;
+    if (str == start) return ZHUMAN_ERR_FORMAT;
 
     /* Optional single fractional digit. */
     uint64_t frac = 0; /* tenths */
-    if (*str == '.') {
-        str++;
-        if (!(*str >= '0' && *str <= '9')) return ZHUMAN_ERR_FORMAT;
-        frac = (uint64_t)(*str - '0');
-        str++;
-        if (*str >= '0' && *str <= '9') return ZHUMAN_ERR_FORMAT; /* >1 dp */
-    }
+    err = parse_tenth_digit(&str, &frac);
+    if (err != ZHUMAN_OK) return err;
     while (*str == ' ') str++;
 
     static const struct { const char *name; uint64_t mult; } UNITS[] = {
@@ -124,6 +140,38 @@ zhuman_err zhuman_parse_bytes(const char *str, uint64_t *out)
 
 /* --- Durations ------------------------------------------------------- */
 
+/* Appends one whole-unit field for a nonzero value. */
+static zhuman_err append_duration_unit(char *out, size_t cap, size_t *off,
+                                       uint64_t value, const char *fmt)
+{
+    if (value == 0) return ZHUMAN_OK;
+    int n = snprintf(out + *off, cap - *off, fmt, (unsigned long long)value);
+    if (n < 0 || (size_t)n >= cap - *off) return ZHUMAN_ERR_SMALL;
+    *off += (size_t)n;
+    return ZHUMAN_OK;
+}
+
+/* Appends the final seconds field, dropping the trailing space when it is
+ * skipped. */
+static zhuman_err append_duration_seconds(char *out, size_t cap, size_t *off,
+                                          uint64_t s, uint64_t rem)
+{
+    if (s == 0 && rem == 0 && *off > 0) {
+        (*off)--; /* drop trailing space */
+        return ZHUMAN_OK;
+    }
+    int n;
+    if (rem > 0)
+        n = snprintf(out + *off, cap - *off, "%llu.%03llus",
+                     (unsigned long long)s, (unsigned long long)rem);
+    else
+        n = snprintf(out + *off, cap - *off, "%llus",
+                     (unsigned long long)s);
+    if (n < 0 || (size_t)n >= cap - *off) return ZHUMAN_ERR_SMALL;
+    *off += (size_t)n;
+    return ZHUMAN_OK;
+}
+
 zhuman_err zhuman_format_duration(uint64_t ms, char *out, size_t cap)
 {
     if (!out || cap == 0) return ZHUMAN_ERR_NULL;
@@ -139,36 +187,104 @@ zhuman_err zhuman_format_duration(uint64_t ms, char *out, size_t cap)
     uint64_t s = ms / 1000;     uint64_t rem = ms % 1000;
 
     size_t off = 0;
-    int n = 0;
-    if (d > 0) {
-        n = snprintf(out + off, cap - off, "%llud ", (unsigned long long)d);
-        if (n < 0 || (size_t)n >= cap - off) return ZHUMAN_ERR_SMALL;
-        off += (size_t)n;
-    }
-    if (h > 0) {
-        n = snprintf(out + off, cap - off, "%lluh ", (unsigned long long)h);
-        if (n < 0 || (size_t)n >= cap - off) return ZHUMAN_ERR_SMALL;
-        off += (size_t)n;
-    }
-    if (m > 0) {
-        n = snprintf(out + off, cap - off, "%llum ", (unsigned long long)m);
-        if (n < 0 || (size_t)n >= cap - off) return ZHUMAN_ERR_SMALL;
-        off += (size_t)n;
-    }
-    if (s > 0 || rem > 0 || off == 0) {
-        if (rem > 0)
-            n = snprintf(out + off, cap - off, "%llu.%03llus",
-                         (unsigned long long)s, (unsigned long long)rem);
-        else
-            n = snprintf(out + off, cap - off, "%llus",
-                         (unsigned long long)s);
-        if (n < 0 || (size_t)n >= cap - off) return ZHUMAN_ERR_SMALL;
-        off += (size_t)n;
-    } else {
-        off--; /* drop trailing space */
-    }
+    zhuman_err err = append_duration_unit(out, cap, &off, d, "%llud ");
+    if (err != ZHUMAN_OK) return err;
+    err = append_duration_unit(out, cap, &off, h, "%lluh ");
+    if (err != ZHUMAN_OK) return err;
+    err = append_duration_unit(out, cap, &off, m, "%llum ");
+    if (err != ZHUMAN_OK) return err;
+    err = append_duration_seconds(out, cap, &off, s, rem);
+    if (err != ZHUMAN_OK) return err;
     out[off] = '\0';
     return ZHUMAN_OK;
+}
+
+/* Matches one unit suffix, advancing *str past it. */
+static zhuman_err parse_duration_unit(const char **str, uint64_t *mult,
+                                      unsigned *bit)
+{
+    static const struct { const char *suffix; uint64_t mult; unsigned bit; }
+        UNITS[] = {
+        {"ms", 1,        4},
+        {"d",  86400000, 0},
+        {"h",  3600000,  1},
+        {"m",  60000,    2},
+        {"s",  1000,     3},
+    };
+    for (size_t i = 0; i < sizeof UNITS / sizeof UNITS[0]; i++) {
+        size_t len = strlen(UNITS[i].suffix);
+        if (strncmp(*str, UNITS[i].suffix, len) == 0) {
+            *mult = UNITS[i].mult;
+            *bit = UNITS[i].bit;
+            *str += len;
+            return ZHUMAN_OK;
+        }
+    }
+    return ZHUMAN_ERR_FORMAT;
+}
+
+/* Parses an optional '.' fraction into milliseconds, setting *has_fraction. */
+static zhuman_err parse_fraction_ms(const char **str, uint64_t *frac_ms,
+                                    bool *has_fraction)
+{
+    *frac_ms = 0;
+    *has_fraction = false;
+    if (**str != '.') return ZHUMAN_OK;
+    *has_fraction = true;
+    (*str)++;
+    if (!(**str >= '0' && **str <= '9')) return ZHUMAN_ERR_FORMAT;
+    uint64_t place = 100; /* first digit is tenths of a second */
+    while (**str >= '0' && **str <= '9') {
+        if (place > 0) {
+            *frac_ms += (uint64_t)(**str - '0') * place;
+            place /= 10;
+        }
+        (*str)++;
+    }
+    return ZHUMAN_OK;
+}
+
+/* Checks unit rules and adds one component to the running totals. */
+static zhuman_err add_duration_component(uint64_t val, uint64_t frac_ms,
+                                         uint64_t mult, unsigned bit,
+                                         bool has_fraction, unsigned *seen,
+                                         uint64_t *total)
+{
+    if (has_fraction && bit != 3) return ZHUMAN_ERR_FORMAT; /* "1.5m" rejected */
+    if (*seen & (1u << bit)) return ZHUMAN_ERR_FORMAT;  /* repeated unit */
+    *seen |= 1u << bit;
+
+    if (val > (UINT64_MAX - frac_ms) / mult) return ZHUMAN_ERR_OVERFLOW;
+    uint64_t part = val * mult + frac_ms;
+    if (*total > UINT64_MAX - part) return ZHUMAN_ERR_OVERFLOW;
+    *total += part;
+    return ZHUMAN_OK;
+}
+
+/* Parses one value and unit, then adds it to the totals. */
+static zhuman_err parse_duration_component(const char **str, unsigned *seen,
+                                           uint64_t *total)
+{
+    if (!(**str >= '0' && **str <= '9')) return ZHUMAN_ERR_FORMAT;
+
+    uint64_t val = 0;
+    zhuman_err err = parse_decimal_digits(str, &val);
+    if (err != ZHUMAN_OK) return err;
+
+    /* Optional fraction, only meaningful before 's'. */
+    uint64_t frac_ms = 0;
+    bool has_fraction = false;
+    err = parse_fraction_ms(str, &frac_ms, &has_fraction);
+    if (err != ZHUMAN_OK) return err;
+
+    uint64_t mult;
+    unsigned bit;
+    while (**str == ' ') (*str)++; /* allow "0 ms" */
+    err = parse_duration_unit(str, &mult, &bit);
+    if (err != ZHUMAN_OK) return err;
+
+    return add_duration_component(val, frac_ms, mult, bit, has_fraction,
+                                  seen, total);
 }
 
 zhuman_err zhuman_parse_duration(const char *str, uint64_t *out_ms)
@@ -184,56 +300,8 @@ zhuman_err zhuman_parse_duration(const char *str, uint64_t *out_ms)
     while (*str) {
         while (*str == ' ') str++;
         if (!*str) break;
-        if (!(*str >= '0' && *str <= '9')) return ZHUMAN_ERR_FORMAT;
-
-        uint64_t val = 0;
-        while (*str >= '0' && *str <= '9') {
-            uint64_t digit = (uint64_t)(*str - '0');
-            if (val > (UINT64_MAX - digit) / 10) return ZHUMAN_ERR_OVERFLOW;
-            val = val * 10 + digit;
-            str++;
-        }
-        /* Optional fraction, only meaningful before 's'. */
-        uint64_t frac_ms = 0;
-        bool has_fraction = false;
-        if (*str == '.') {
-            has_fraction = true;
-            str++;
-            if (!(*str >= '0' && *str <= '9')) return ZHUMAN_ERR_FORMAT;
-            uint64_t place = 100; /* first digit is tenths of a second */
-            while (*str >= '0' && *str <= '9') {
-                if (place > 0) {
-                    frac_ms += (uint64_t)(*str - '0') * place;
-                    place /= 10;
-                }
-                str++;
-            }
-        }
-
-        uint64_t mult;
-        unsigned bit;
-        while (*str == ' ') str++; /* allow "0 ms" */
-        if (str[0] == 'm' && str[1] == 's') {
-            mult = 1; bit = 4; str += 2;
-        } else if (str[0] == 'd') {
-            mult = 86400000; bit = 0; str++;
-        } else if (str[0] == 'h') {
-            mult = 3600000; bit = 1; str++;
-        } else if (str[0] == 'm') {
-            mult = 60000; bit = 2; str++;
-        } else if (str[0] == 's') {
-            mult = 1000; bit = 3; str++;
-        } else {
-            return ZHUMAN_ERR_FORMAT;
-        }
-        if (has_fraction && bit != 3) return ZHUMAN_ERR_FORMAT; /* "1.5m" rejected */
-        if (seen & (1u << bit)) return ZHUMAN_ERR_FORMAT;  /* repeated unit */
-        seen |= 1u << bit;
-
-        if (val > (UINT64_MAX - frac_ms) / mult) return ZHUMAN_ERR_OVERFLOW;
-        uint64_t part = val * mult + frac_ms;
-        if (total > UINT64_MAX - part) return ZHUMAN_ERR_OVERFLOW;
-        total += part;
+        zhuman_err err = parse_duration_component(&str, &seen, &total);
+        if (err != ZHUMAN_OK) return err;
         components++;
     }
     if (components == 0) return ZHUMAN_ERR_FORMAT;
