@@ -1,23 +1,14 @@
 #!/bin/sh
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# install_from_source.sh — the source-build installer served at
-# /install.sh (core/modules/net/include/net/site_routes.def), so
-# `curl -fsSL https://<site>/install.sh | sh` builds a Z23 node from
-# source and downloads NO BINARY: it clones the source tree over git and
-# compiles it locally with the toolchain already on this machine.
+# install_from_source.sh — the source-build installer served at /install.sh
+# (core/modules/net/include/net/site_routes.def): `curl -fsSL
+# https://<site>/install.sh | sh` clones the source over git and compiles it
+# with this machine's toolchain. It downloads NO BINARY and never touches the
+# digest-pinned binary bootstrap (install.sh + tools/install/z23_bootstrap.c).
 #
-# This is a SEPARATE, simpler front door from the digest-verified binary
-# bootstrap (platform/packaging/install/install.sh + tools/install/z23_bootstrap.c). That
-# chain fetches one prebuilt binary after checking its SHA-256 against a
-# pin baked into the release, and stays unpublished until its signing
-# gate is met (docs/work/BOOTSTRAP_PLAN.md:299-309). Nothing here reads
-# that pin or touches that chain.
-#
-# POSIX /bin/sh only: no bash-isms, and this script never reads its own
-# stdin (it is meant to run piped from curl, and consuming that pipe
-# would eat the rest of the script). It never refers to $0 either, since
-# a piped script has no reliable name.
+# POSIX /bin/sh only. It never reads its own stdin (it runs piped from curl,
+# so that would eat the script) and never names $0 (a pipe has no name).
 
 set -euf
 
