@@ -246,15 +246,26 @@ static enum metaverse_grant_verdict action_value_verdict(
     return METAVERSE_GRANT_OK;
 }
 
-enum metaverse_grant_verdict metaverse_grant_check(
+/* The argument verdict asked before an action check: NULL grant or request,
+ * malformed grant, unknown action. */
+static enum metaverse_grant_verdict action_args_verdict(
     const struct metaverse_grant *g,
-    const struct metaverse_grant *const *ancestors, size_t ancestor_count,
     const struct metaverse_action_request *req)
 {
     if (!g || !req) return METAVERSE_GRANT_BAD_ARGS;
     if (!metaverse_grant_well_formed(g)) return METAVERSE_GRANT_MALFORMED;
     if (!metaverse_action_valid(req->action))
         return METAVERSE_GRANT_BAD_ARGS;
+    return METAVERSE_GRANT_OK;
+}
+
+enum metaverse_grant_verdict metaverse_grant_check(
+    const struct metaverse_grant *g,
+    const struct metaverse_grant *const *ancestors, size_t ancestor_count,
+    const struct metaverse_action_request *req)
+{
+    enum metaverse_grant_verdict av = action_args_verdict(g, req);
+    if (av != METAVERSE_GRANT_OK) return av;
 
     /* An absent property is legal ONLY for an action whose row says so
      * (REVOKE names a grant, not a property). For every other action a
