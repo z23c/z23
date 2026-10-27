@@ -126,6 +126,96 @@ static bool accepted_lane_context_equal(
         memcmp(a->signer_pubkey, b->signer_pubkey, 32) == 0;
 }
 
+/* Parse the PROVEN wire once without verifying its signature; check it
+ * hashes back to the accepted-work root and names the PROVEN lane. */
+static bool accepted_proven_wire_matches_root(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    struct vcs_zcode_accepted_work_v1 *work)
+{
+    uint8_t *wire = NULL, checked[32];
+    size_t len = 0;
+    bool ok = vcs_object_load_raw_bounded(
+            workspace, accepted_work_root, VCS_ZCODE_LANE_WIRE_BYTES,
+            &wire, &len) == 0 &&
+        vcs_zcode_lane_receipt_parse(wire, len, &work->proven) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_lane_receipt_id(&work->proven, checked) ==
+            VCS_ZCODE_DEV_OK &&
+        memcmp(accepted_work_root, checked, 32) == 0 &&
+        work->proven.lane == VCS_ZCODE_LANE_PROVEN;
+    free(wire);
+    return ok;
+}
+
+/* Load the task, candidate and policy objects and cross-check the
+ * candidate against the task. */
+static bool accepted_context_objects_valid(
+    const char *workspace, int64_t now_unix,
+    struct vcs_zcode_accepted_work_v1 *work)
+{
+    bool ok = accepted_load_task(
+            workspace, work->task_root, now_unix, &work->task) &&
+        accepted_load_candidate(
+            workspace, work->candidate_root, &work->candidate) &&
+        accepted_load_policy(
+            workspace, work->proof_policy_root, &work->policy) &&
+        vcs_zcode_candidate_validate_for_task(
+            &work->task, &work->candidate, now_unix) == VCS_ZCODE_DEV_OK;
+    return ok;
+}
+
+/* Reload the PROVEN lane with the pinned signer and validate it against
+ * the accepted context. */
+static bool accepted_proven_lane_verified(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    const uint8_t expected_signer[32],
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    struct vcs_zcode_lane_receipt_v1 *proven)
+{
+    bool ok = accepted_load_lane(
+            workspace, accepted_work_root, expected_signer, proven) &&
+        vcs_zcode_lane_receipt_validate_for_candidate(
+            proven, task, candidate, policy) == VCS_ZCODE_DEV_OK;
+    return ok;
+}
+
+/* Load and verify the next lane receipt in the chain, checking its tag,
+ * context and timestamp order against prev. */
+static bool accepted_chain_lane_valid(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t expected_signer[32], int expected_lane,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const struct vcs_zcode_lane_receipt_v1 *prev,
+    struct vcs_zcode_lane_receipt_v1 *out)
+{
+    bool ok = accepted_load_lane(workspace, root, expected_signer, out) &&
+        out->lane == expected_lane &&
+        vcs_zcode_lane_receipt_validate_for_candidate(
+            out, task, candidate, policy) == VCS_ZCODE_DEV_OK &&
+        accepted_lane_context_equal(prev, out) &&
+        out->created_unix <= prev->created_unix;
+    return ok;
+}
+
+/* Validate the proof sets named by the candidate lane and the PROVEN lane. */
+static bool accepted_lane_proof_sets_valid(
+    const char *workspace,
+    const struct vcs_zcode_lane_receipt_v1 *candidate_lane,
+    const struct vcs_zcode_lane_receipt_v1 *proven,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate)
+{
+    bool ok = accepted_proof_set_valid(
+            workspace, candidate_lane->proof_set_root, task, candidate) &&
+        accepted_proof_set_valid(
+            workspace, proven->proof_set_root, task, candidate);
+    return ok;
+}
+
 bool vcs_zcode_accepted_work_resolve(
     const char *workspace, const uint8_t accepted_work_root[32],
     int64_t now_unix, struct vcs_zcode_accepted_work_v1 *out)
@@ -138,72 +228,39 @@ bool vcs_zcode_accepted_work_resolve(
     /* The PROVEN wire names the immutable context. Load it once without
      * trusting its signature so the expected signer can be derived from the
      * candidate object, then reload it through the pinned verification path. */
-    uint8_t *wire = NULL, checked[32];
-    size_t len = 0;
-    bool ok = vcs_object_load_raw_bounded(
-            workspace, accepted_work_root, VCS_ZCODE_LANE_WIRE_BYTES,
-            &wire, &len) == 0 &&
-        vcs_zcode_lane_receipt_parse(wire, len, &work.proven) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_lane_receipt_id(&work.proven, checked) ==
-            VCS_ZCODE_DEV_OK &&
-        memcmp(accepted_work_root, checked, 32) == 0 &&
-        work.proven.lane == VCS_ZCODE_LANE_PROVEN;
-    free(wire);
-    if (!ok) return false;
+    if (!accepted_proven_wire_matches_root(
+            workspace, accepted_work_root, &work))
+        return false;
 
     memcpy(work.task_root, work.proven.task_root, 32);
     memcpy(work.candidate_root, work.proven.candidate_root, 32);
     memcpy(work.proof_policy_root, work.proven.proof_policy_root, 32);
     memcpy(work.proof_set_root, work.proven.proof_set_root, 32);
     memcpy(work.accepted_work_root, accepted_work_root, 32);
-    if (!accepted_load_task(
-            workspace, work.task_root, now_unix, &work.task) ||
-        !accepted_load_candidate(
-            workspace, work.candidate_root, &work.candidate) ||
-        !accepted_load_policy(
-            workspace, work.proof_policy_root, &work.policy) ||
-        vcs_zcode_candidate_validate_for_task(
-            &work.task, &work.candidate, now_unix) != VCS_ZCODE_DEV_OK)
+    if (!accepted_context_objects_valid(workspace, now_unix, &work))
         return false;
     memcpy(work.expected_signer, work.candidate.author_pubkey, 32);
-    if (!accepted_load_lane(
+    if (!accepted_proven_lane_verified(
             workspace, accepted_work_root, work.expected_signer,
-            &work.proven) ||
-        vcs_zcode_lane_receipt_validate_for_candidate(
-            &work.proven, &work.task, &work.candidate, &work.policy) !=
-            VCS_ZCODE_DEV_OK)
+            &work.task, &work.candidate, &work.policy, &work.proven))
         return false;
 
     memcpy(work.candidate_lane_root,
            work.proven.prior_receipt_root, 32);
-    if (!accepted_load_lane(
+    if (!accepted_chain_lane_valid(
             workspace, work.candidate_lane_root, work.expected_signer,
-            &work.candidate_lane) ||
-        work.candidate_lane.lane != VCS_ZCODE_LANE_CANDIDATE ||
-        vcs_zcode_lane_receipt_validate_for_candidate(
-            &work.candidate_lane, &work.task, &work.candidate,
-            &work.policy) != VCS_ZCODE_DEV_OK ||
-        !accepted_lane_context_equal(&work.proven, &work.candidate_lane) ||
-        work.candidate_lane.created_unix > work.proven.created_unix)
+            VCS_ZCODE_LANE_CANDIDATE, &work.task, &work.candidate,
+            &work.policy, &work.proven, &work.candidate_lane))
         return false;
 
     memcpy(work.frontier_root,
            work.candidate_lane.prior_receipt_root, 32);
-    if (!accepted_load_lane(
+    if (!accepted_chain_lane_valid(
             workspace, work.frontier_root, work.expected_signer,
-            &work.frontier) ||
-        work.frontier.lane != VCS_ZCODE_LANE_FRONTIER ||
-        vcs_zcode_lane_receipt_validate_for_candidate(
-            &work.frontier, &work.task, &work.candidate, &work.policy) !=
-            VCS_ZCODE_DEV_OK ||
-        !accepted_lane_context_equal(&work.candidate_lane, &work.frontier) ||
-        work.frontier.created_unix > work.candidate_lane.created_unix ||
-        !accepted_proof_set_valid(
-            workspace, work.candidate_lane.proof_set_root,
-            &work.task, &work.candidate) ||
-        !accepted_proof_set_valid(
-            workspace, work.proven.proof_set_root,
+            VCS_ZCODE_LANE_FRONTIER, &work.task, &work.candidate,
+            &work.policy, &work.candidate_lane, &work.frontier) ||
+        !accepted_lane_proof_sets_valid(
+            workspace, &work.candidate_lane, &work.proven,
             &work.task, &work.candidate))
         return false;
 
