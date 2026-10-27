@@ -56,6 +56,10 @@ static void *projection_writer_thread(void *arg)
             atomic_fetch_add(&st->reader_failures, 1);
             break;
         }
+        if (i == 0 || (i + 1) % 10 == 0) {
+            printf("projection_mvcc: committed=%d/1000\n", i + 1);
+            fflush(stdout);
+        }
         struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
         nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
@@ -232,6 +236,9 @@ static int check_projection_mvcc_under_load(void)
         failures++; printf("FAIL (seed)\n"); goto load_cleanup;
     }
 
+    printf("projection_mvcc: phase=seeded\n");
+    fflush(stdout);
+
     struct projection_load_state st = { .db_path = path };
     atomic_init(&st.writer_done, false);
     atomic_init(&st.reader_count, 0);
@@ -248,9 +255,21 @@ static int check_projection_mvcc_under_load(void)
         failures++; printf("FAIL (pthread_create)\n"); goto load_cleanup;
     }
 
-    pthread_join(writer, NULL);
-    for (int i = 0; i < 4; i++)
-        pthread_join(readers[i], NULL);
+    printf("projection_mvcc: phase=workers_created writer=1 readers=4\n");
+    fflush(stdout);
+    if (pthread_join(writer, NULL) == 0) {
+        printf("projection_mvcc: phase=writer_joined\n");
+        fflush(stdout);
+    }
+    bool readers_joined = true;
+    for (int i = 0; i < 4; i++) {
+        if (pthread_join(readers[i], NULL) != 0)
+            readers_joined = false;
+    }
+    if (readers_joined) {
+        printf("projection_mvcc: phase=readers_joined\n");
+        fflush(stdout);
+    }
 
     int64_t final_h = query_height_readonly(path);
 
