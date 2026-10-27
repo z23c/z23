@@ -253,8 +253,9 @@ static void at_note_oldest_age(struct at_grants *g,
     }
 }
 
-static void at_note_permille(struct at_grants *g,
-                             const struct db_agent_session *r, int64_t spent)
+static void at_note_window_used_permille(struct at_grants *g,
+                                         const struct db_agent_session *r,
+                                         int64_t spent)
 {
     if (r->max_per_window_zat > 0) {
         int64_t pm = (spent / r->max_per_window_zat) * 1000 +
@@ -296,7 +297,7 @@ static void at_scan(const struct db_agent_session *rows, int n, int64_t now,
         g->spent_total += spent;
         if (spent > 0)
             g->with_spend++;
-        at_note_permille(g, r, spent);
+        at_note_window_used_permille(g, r, spent);
     }
 }
 
