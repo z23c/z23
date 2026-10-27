@@ -25,6 +25,7 @@
 #include "config/boot_snapshot_import.h"
 #include "config/boot_snapshot_install.h"
 #include "config/boot_stale_locks.h"
+#include "config/boot_first_run_banner.h"
 #include "config/boot_wallet_phrase.h"
 #include "boot_timing_marks_internal.h"
 #include "support/cleanse.h"
@@ -373,8 +374,7 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
     }
     g_datadir = ctx->datadir;
     g_blog_datadir = ctx->datadir;
-    if (!datadir_existed)
-        printf("Created data directory: %s\n", ctx->datadir);
+    boot_first_run_banner_print(ctx, datadir_existed); /* tty only */
     /* Now that the datadir is known, point the crash handler at a durable,
      * fsync'd crash log there. Until this call a crash still lands on stderr;
      * after it, the backtrace also survives in $datadir/crash_log.txt

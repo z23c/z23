@@ -28,6 +28,7 @@
 
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_bundle_fetch.h"
+#include "config/boot_first_run_banner.h"
 #include "config/bundle_fetch_seeds.h"          /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
@@ -83,6 +84,36 @@ static void bbf_directory_json(char *out, size_t cap)
     size_t an = rom_seed_directory_json(arts, sizeof(arts));
     const char *body = (an > 0) ? arts : "[]";
     snprintf(out, cap, "{\"count\":0,\"artifacts\":%s}", body);
+}
+
+/* ── First-run banner text (pure builder) ───────────────────────────────── */
+
+static int case_first_run_banner(void)
+{
+    int failures = 0;
+    TEST("boot_first_run_banner: tty text with/without fetch, empty off a tty") {
+        char b[1024];
+        size_t n = boot_first_run_banner_text(b, sizeof(b), "/d", true,
+                                              513000000u, true);
+        ASSERT(n == strlen(b));
+        ASSERT_STR_EQ(b,
+            "Z23 node starting (data in /d).\n"
+            "First run: downloading a ~513 MB checkpoint so you do not replay "
+            "the whole chain.\n"
+            "Leave this running; in another terminal run: z23 status\n"
+            "Stop with Ctrl-C. Guide: https://z23.sh/start\n");
+        n = boot_first_run_banner_text(b, sizeof(b), "/d", true, 0, true);
+        ASSERT(n > 0 && strstr(b, "downloading a checkpoint so") != NULL);
+        ASSERT(strstr(b, "MB") == NULL);
+        n = boot_first_run_banner_text(b, sizeof(b), "/d", false, 513000000u,
+                                       true);
+        ASSERT(n > 0 && strstr(b, "downloading") == NULL);
+        ASSERT(strstr(b, "z23 status") != NULL);
+        n = boot_first_run_banner_text(b, sizeof(b), "/d", true, 1, false);
+        ASSERT(n == 0 && b[0] == '\0');
+        ASSERT(boot_first_run_banner_text(b, 8, "/d", true, 0, true) == 0);
+    } _test_next:;
+    return failures;
 }
 
 /* ── (a) Gate ───────────────────────────────────────────────────────────── */
@@ -1705,6 +1736,7 @@ int test_boot_bundle_fetch(void)
     failures += case_peer_seed_offer_filter();
     failures += case_peer_seed_e2e_and_verification();
     failures += case_peer_seed_stall_is_bounded();
+    failures += case_first_run_banner();
     failures += case_gate();
     failures += case_network_gate();
     failures += case_pick();
