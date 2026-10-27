@@ -720,7 +720,10 @@ static int t_listunspent_frees_filtered_rows(void)
     wallet_rpc_context_set_node_db(NULL);
     node_db_close(&ndb);
     main_state_free(&ms); wallet_free(wallet); free(wallet);
-    (void)test_rm_rf_recursive(datadir);
+    if (test_rm_rf_recursive(datadir) != 0) {
+        printf("(fixture datadir %s not removed) ", datadir);
+        ok = false;
+    }
     if (ok && no_leak) { printf("OK\n"); return 0; }
     printf("FAIL\n");
     return 1;
