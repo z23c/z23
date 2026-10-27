@@ -1005,7 +1005,6 @@ platform/modules/platform/src/positioned_file.c:platform_positioned_file_is_priv
 platform/modules/platform/src/positioned_file.c:platform_positioned_file_open_beneath:41
 platform/modules/platform/src/positioned_file.c:platform_positioned_file_open_beneath#2:19
 platform/modules/platform/src/private_acl_internal.c:validate_for_user:25
-platform/modules/platform/src/private_destination.c:platform_private_destination_resolve:23
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber:22
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber#2:17
 platform/modules/platform/src/private_file.c:platform_private_path_resolve:49
