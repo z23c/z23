@@ -852,8 +852,9 @@ enum zswap_ceremony_error zswap_ceremony_sign_input_p2pkh(
     return ZSWAP_CEREMONY_OK;
 }
 
-/* Check the ad is live and the accept and seller terms name it and are
- * valid; returns the ad's quote root through quote_root. */
+/* Check the ad is live, the accept names the ad (quote root) and the
+ * accept and seller terms are valid; returns the ad's quote root through
+ * quote_root. */
 static enum zswap_ceremony_error zswap_ceremony_seller_check_request(
     const struct zswap_quote_v1 *ad,
     const struct zswap_accept_v1 *accept,
