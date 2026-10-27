@@ -1499,6 +1499,19 @@ static void fl_box_close_if_open(struct fl_box *b, bool is_open)
         fl_box_close(b);
 }
 
+static void fl_free_peer_nodes(struct p2p_node *asker,
+                               struct p2p_node *answerer,
+                               struct send_segment *ask_queue,
+                               struct send_segment *answer_queue)
+{
+    if (asker)
+        p2p_node_free(asker);
+    if (answerer)
+        p2p_node_free(answerer);
+    free(ask_queue);
+    free(answer_queue);
+}
+
 int test_fleet_ledger(void)
 {
     int failures = 0;
@@ -1703,7 +1716,11 @@ int test_fleet_ledger(void)
 
     failures += fl_host_uptime_test(sample_dd);
 
-    failures += fl_vitals_sample_cases(sample_dd, sample_box, sample_signer);
+    int vitals_failed = fl_vitals_sample_cases(sample_dd, sample_box,
+                                               sample_signer);
+    failures += vitals_failed;
+    if (vitals_failed)
+        goto _test_next;
 
     TEST("fleet experiment predict/result CLI leaves persist story and "
          "executor, and export prints exp.sh's 22-column TSV with its own "
@@ -1829,9 +1846,15 @@ int test_fleet_ledger(void)
         PASS();
     }
 
-    failures += fl_experiment_cases(root, &ex, &ex_open);
+    int experiment_failed = fl_experiment_cases(root, &ex, &ex_open);
+    failures += experiment_failed;
+    if (experiment_failed)
+        goto _test_next;
 
-    failures += fl_tamper_cases(root, &ta, &ta_open);
+    int tamper_failed = fl_tamper_cases(root, &ta, &ta_open);
+    failures += tamper_failed;
+    if (tamper_failed)
+        goto _test_next;
 
     TEST("fleet ledger: a peer's rows replicate, the same bytes again are a "
          "no-op, and a forged row refuses the batch whole") {
@@ -2338,12 +2361,7 @@ _test_next:
     app_runtime_set_current(NULL);
     mesh_loop_free_queue(asker, ask_queue);
     mesh_loop_free_queue(answerer, answer_queue);
-    if (asker)
-        p2p_node_free(asker);
-    if (answerer)
-        p2p_node_free(answerer);
-    free(ask_queue);
-    free(answer_queue);
+    fl_free_peer_nodes(asker, answerer, ask_queue, answer_queue);
     if (nm.nodes) {
         zcl_mutex_destroy(&nm.cs_nodes);
         zcl_mutex_destroy(&nm.cs_last_node_id);
