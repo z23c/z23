@@ -294,9 +294,9 @@ static void agent_broker_commit_reply(struct agent_broker_session *s,
 }
 #endif
 
-static bool agent_broker_request_missing(const struct agent_broker_session *s,
-                                         const struct mvap_request *req,
-                                         const struct mvap_response *out)
+static bool agent_broker_has_null_arg(const struct agent_broker_session *s,
+                                      const struct mvap_request *req,
+                                      const struct mvap_response *out)
 {
     return !s || !req || !out;
 }
@@ -305,7 +305,7 @@ void agent_broker_handle(struct agent_broker_session *s,
                          const struct mvap_request *req,
                          struct mvap_response *out)
 {
-    if (agent_broker_request_missing(s, req, out))
+    if (agent_broker_has_null_arg(s, req, out))
         return;
 
     s->requests_served++;
