@@ -246,7 +246,7 @@ static bool http_get_ua(const char *url, const char *ua, char *out,
                  "GET %s HTTP/1.1\r\nHost: origin.example\r\n%s%s%s"
                  "Connection: close\r\n\r\n", url, ua ? "User-Agent: " : "",
                  ua ? ua : "", ua ? "\r\n" : "");
-    if (n <= 0 || SSL_write(ssl, req, n) != n)
+    if (n <= 0 || (size_t)n >= sizeof(req) || SSL_write(ssl, req, n) != n)
         goto fail;
     while (got + 1 < out_len) {
         int r = SSL_read(ssl, out + got, (int)(out_len - got - 1));
