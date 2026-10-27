@@ -424,6 +424,22 @@ static int dps_run(const char *cwd, const char *const argv[],
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+/* Read one 40-character revision line from dir/name into out (65 bytes). */
+static bool dps_read_rev_file(const char *dir, const char *name, char *out)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = fgets(out, 65, f) != NULL;
+    (void)fclose(f);
+    size_t len = ok ? strlen(out) : 0;
+    while (len && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = 0;
+    return ok && len == 40;
+}
+
 /* Build a two-commit repository whose HEAD and HEAD~1 are the pair the hook
  * admits, so admit_pair() reaches its receipt read. */
 static bool dps_git_rig(const char *dir, char *local, char *base)
@@ -443,19 +459,9 @@ static bool dps_git_rig(const char *dir, char *local, char *base)
     if (n <= 0 || (size_t)n >= sizeof(cmd) || system(cmd) != 0)
         return false;
     for (int which = 0; which < 2; which++) {
-        char path[PATH_MAX];
         char *out = which ? base : local;
-        n = snprintf(path, sizeof(path), "%s/%s", dir,
-                     which ? "base.txt" : "head.txt");
-        if (n <= 0 || (size_t)n >= sizeof(path)) return false;
-        FILE *f = fopen(path, "r");
-        if (!f) return false;
-        bool ok = fgets(out, 65, f) != NULL;
-        (void)fclose(f);
-        size_t len = ok ? strlen(out) : 0;
-        while (len && (out[len - 1] == '\n' || out[len - 1] == '\r'))
-            out[--len] = 0;
-        if (!ok || len != 40) return false;
+        if (!dps_read_rev_file(dir, which ? "base.txt" : "head.txt", out))
+            return false;
     }
     return true;
 }

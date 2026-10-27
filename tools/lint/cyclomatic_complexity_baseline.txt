@@ -1212,7 +1212,6 @@ tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:59
 tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:79
 tests/harness/src/test_dev_platform.c:run_resident_restart_fixture:184
-tests/harness/src/test_dev_proof_signer.c:dps_git_rig:16
 tests/harness/src/test_devagent_mail.c:test_devagent_mail:36
 tests/harness/src/test_devagent_queue.c:test_devagent_queue:28
 tests/harness/src/test_disk_block_io.c:test_deferred_sync_byte_identical:18
