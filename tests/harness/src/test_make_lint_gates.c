@@ -1055,6 +1055,32 @@ static int lint_sandbox_build(const char *real_root, const char *sb_root)
     return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
 }
 
+/* Length of the sandbox-kind tag at the start of kind (".lint_sb_" or
+ * ".lint_meta_"), or 0 when the entry is not a sandbox base of ours. */
+static size_t lint_stale_kind_len(const char *kind)
+{
+    if (strncmp(kind, ".lint_sb_", 9) == 0) return 9;
+    if (strncmp(kind, ".lint_meta_", 11) == 0) return 11;
+    return 0;
+}
+
+/* True when pidstr names a process that is GONE, so its base is stale. */
+static bool lint_stale_owner_is_dead(const char *pidstr)
+{
+    /* Exactly what lint_run_shard and the metadata test write: decimal
+     * digits only (no sign or blank strtol would take), within int. */
+    size_t ndig = strspn(pidstr, "0123456789");
+    if (ndig == 0 || ndig > 10 || pidstr[ndig] != '\0') return false;
+    long long owner_pid = strtoll(pidstr, NULL, 10);
+    if (owner_pid <= 0 || owner_pid > INT_MAX) return false;
+    /* Alive — or alive but owned by another user (EPERM) — leave it be.
+     * A copy child orphaned by a kill may still write for a few seconds
+     * after its owner is gone; whatever it recreates past this purge has
+     * the same dead owner and goes on the next run. */
+    errno = 0;
+    return kill((pid_t)owner_pid, 0) != 0 && errno == ESRCH;
+}
+
 /* Remove sandbox bases leaked by a killed run: shard bases (.lint_sb_) and
  * the metadata test's base (.lint_meta_), each a full tree copy. Only bases
  * whose owning process is GONE are reaped (shards run concurrently). Called
@@ -1077,24 +1103,9 @@ static void lint_purge_stale_sandboxes(const char *real_root)
     while ((e = readdir(d)) != NULL) {
         if (strncmp(e->d_name, base, blen) != 0) continue;
         const char *kind = e->d_name + blen;
-        size_t klen = strncmp(kind, ".lint_sb_", 9) == 0     ? 9
-                      : strncmp(kind, ".lint_meta_", 11) == 0 ? 11
-                                                              : 0;
+        size_t klen = lint_stale_kind_len(kind);
         if (klen == 0) continue;
-
-        /* Exactly what lint_run_shard and the metadata test write: decimal
-         * digits only (no sign or blank strtol would take), within int. */
-        const char *pidstr = kind + klen;
-        size_t ndig = strspn(pidstr, "0123456789");
-        if (ndig == 0 || ndig > 10 || pidstr[ndig] != '\0') continue;
-        long long owner_pid = strtoll(pidstr, NULL, 10);
-        if (owner_pid <= 0 || owner_pid > INT_MAX) continue;
-        /* Alive — or alive but owned by another user (EPERM) — leave it be.
-         * A copy child orphaned by a kill may still write for a few seconds
-         * after its owner is gone; whatever it recreates past this purge has
-         * the same dead owner and goes on the next run. */
-        errno = 0;
-        if (kill((pid_t)owner_pid, 0) == 0 || errno != ESRCH) continue;
+        if (!lint_stale_owner_is_dead(kind + klen)) continue;
 
         char victim[PATH_MAX];
         if (snprintf(victim, sizeof(victim), "%s/%s", parent, e->d_name) <
