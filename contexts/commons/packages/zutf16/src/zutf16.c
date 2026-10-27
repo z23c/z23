@@ -3,30 +3,30 @@
 
 #include <string.h>
 
-size_t zutf16_decode_cp(const void *src, size_t n, uint32_t *cp) {
-  const unsigned char *p = src;
-  uint32_t v;
-  size_t need, i;
-  if (p == NULL || cp == NULL) return 0;
-  if (n == 0) return SIZE_MAX;
-  if (p[0] < 0x80) {
-    *cp = p[0];
-    return 1;
+/* Store a lead byte's payload bits in *vp and return its sequence length:
+ * 2 below 0xE0, 3 below 0xF0, 4 below 0xF5, else 0 (invalid lead). */
+static size_t zutf16__classify_lead(unsigned char b, uint32_t *vp) {
+  if (b < 0xE0) {
+    *vp = b & 0x1F;
+    return 2;
   }
-  if (p[0] < 0xC2) return 0; /* continuation or overlong lead */
-  if (p[0] < 0xE0) {
-    v = p[0] & 0x1F;
-    need = 2;
-  } else if (p[0] < 0xF0) {
-    v = p[0] & 0x0F;
-    need = 3;
-  } else if (p[0] < 0xF5) {
-    v = p[0] & 0x07;
-    need = 4;
-  } else {
-    return 0;
+  if (b < 0xF0) {
+    *vp = b & 0x0F;
+    return 3;
   }
-  if (n < need) return SIZE_MAX;
+  if (b < 0xF5) {
+    *vp = b & 0x07;
+    return 4;
+  }
+  return 0;
+}
+
+/* Fold continuation bytes 1..need-1 at p into *vp, then reject overlong,
+ * surrogate and out-of-range values; returns need, or 0 if invalid. */
+static size_t zutf16__decode_tail(const unsigned char *p, size_t need,
+                                  uint32_t *vp) {
+  uint32_t v = *vp;
+  size_t i;
   for (i = 1; i < need; i++) {
     if ((p[i] & 0xC0) != 0x80) return 0;
     v = (v << 6) | (uint32_t)(p[i] & 0x3F);
@@ -36,6 +36,26 @@ size_t zutf16_decode_cp(const void *src, size_t n, uint32_t *cp) {
   if (need == 4 && v < 0x10000) return 0;
   if (v >= 0xD800 && v <= 0xDFFF) return 0;
   if (v > 0x10FFFF) return 0;
+  *vp = v;
+  return need;
+}
+
+size_t zutf16_decode_cp(const void *src, size_t n, uint32_t *cp) {
+  const unsigned char *p = src;
+  uint32_t v;
+  size_t need;
+  if (p == NULL || cp == NULL) return 0;
+  if (n == 0) return SIZE_MAX;
+  if (p[0] < 0x80) {
+    *cp = p[0];
+    return 1;
+  }
+  if (p[0] < 0xC2) return 0; /* continuation or overlong lead */
+  need = zutf16__classify_lead(p[0], &v);
+  if (need == 0) return 0;
+  if (n < need) return SIZE_MAX;
+  need = zutf16__decode_tail(p, need, &v);
+  if (need == 0) return 0;
   *cp = v;
   return need;
 }
