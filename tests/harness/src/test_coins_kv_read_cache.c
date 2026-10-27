@@ -109,8 +109,8 @@ static int ckr_populate_coins_kv(sqlite3 *db, struct coins_kv_add_row *rows)
     return failures;
 }
 
-/* Stage the lifetime probe: write one coin whose script buffer the caller
- * frees mid-transaction, then allocator-churn and COMMIT. */
+/* Stage the lifetime probe: write one coin from a heap script buffer, free
+ * that buffer inside this helper, then allocator-churn and COMMIT. */
 static void ckr_stage_lifetime_write(sqlite3 *db, uint8_t lifetime_txid[32],
                                      uint8_t *lifetime_expect,
                                      size_t lifetime_expect_len,
