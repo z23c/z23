@@ -2177,6 +2177,8 @@ Z23_FLAG("ZCL_SHIP_CRASH_SAMPLES", "env_build", "3", "-",
           "undocumented; first use tools/ship.sh:auto")
 Z23_FLAG("ZCL_SHIP_HOSTS", "env_build", "-", "-",
           "first use tools/ship.sh:auto; documented at docs/dev/BUILD.md:786: ZCL_SHIP_HOSTS='user@host-a user@host-b user@host-c' make ship")
+Z23_FLAG("ZCL_SHIP_NODE_UNIT", "env_build", "z23-node.service", "-",
+          "first use tools/ship.sh:auto; explicit remote service binding: z23-node.service or zclassic23.service")
 Z23_FLAG("ZCL_SHIP_LOCAL_POLL_SECONDS", "env_build", "10", "-",
           "undocumented; first use tools/ship.sh:auto")
 Z23_FLAG("ZCL_SHIP_PROOF_SERVER", "env_build", "-", "-",
@@ -2197,18 +2199,8 @@ Z23_FLAG("ZCL_SHIP_RPC_BUDGETS", "env_build", "-", "-",
           "undocumented; first use tools/ship.sh:auto")
 Z23_FLAG("ZCL_SHIP_STAGE_JOBS", "env_build", "4", "-",
           "undocumented; first use tools/ship.sh:auto")
-Z23_FLAG("ZCL_SHIP_TEST_FAIL_ALWAYS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
-Z23_FLAG("ZCL_SHIP_TEST_FAIL_MARKER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
-Z23_FLAG("ZCL_SHIP_TEST_FAIL_ONCE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
-Z23_FLAG("ZCL_SHIP_TEST_OLD", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
 Z23_FLAG("ZCL_SHIP_TEST_PIDFILE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
-Z23_FLAG("ZCL_SHIP_TEST_SOURCE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_ship_remote_transaction.sh:auto")
+          "undocumented; first use tools/ship_selftest.sh:auto")
 Z23_FLAG("ZCL_SHIP_TEST_STATEFILE", "env_build", "-", "-",
           "undocumented; first use tools/ship_selftest.sh:auto")
 Z23_FLAG("ZCL_SHIP_UNKNOWN_SAMPLES", "env_build", "5", "-",
