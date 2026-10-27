@@ -97,7 +97,7 @@ static int ish_script_steps(const char *body)
                   strstr(body, "run git -C \"$SRC\" fetch origin") != NULL &&
                   strstr(body, "run git -C \"$SRC\" checkout \"$Z23_PIN\"") != NULL &&
                   strstr(body, "No commit pin was served") != NULL &&
-                  strstr(body, "say \"3/4 Building (about 10 minutes") != NULL &&
+                  strstr(body, "say \"3/4 Building (several minutes") != NULL &&
                   strstr(body, "say \"4/4 Done\"") != NULL);
     return failures;
 }

@@ -107,7 +107,7 @@ rm -f "$LOG"
 LOG="$SRC/build/install.log"
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
-say "3/4 Building (about 10 minutes the first time; full output: $LOG)..."
+say "3/4 Building (several minutes the first time; full output: $LOG)..."
 run env CC="$cc_ok" make -C "$SRC" setup
 run env CC="$cc_ok" make -C "$SRC" -j"$jobs" z23
 

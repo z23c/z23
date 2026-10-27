@@ -46,15 +46,15 @@ static const char INSTALL_FROM_SOURCE_SH_1[] =
     "RC\" checkout main\n    run git -C \"$SRC\" pull --ff-only origin main\nfi\n\nmkdir -p \"$SRC/bui"
     "ld\" || die \"cannot create $SRC/build\"\ncat \"$LOG\" >>\"$SRC/build/install.log\"\nrm -f \"$LOG"
     "\"\nLOG=\"$SRC/build/install.log\"\n\njobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)\nsa"
-    "y \"3/4 Building (about 10 minutes the first time; full output: $LOG)...\"\nrun env CC=\"$cc_ok\""
-    " make -C \"$SRC\" setup\nrun env CC=\"$cc_ok\" make -C \"$SRC\" -j\"$jobs\" z23\n\nsay \"4/4 Done"
-    "\"\necho \"\"\necho \"Source:  $SRC\"\necho \"Binary:  $SRC/build/bin/z23\"\necho \"Start:   (cd "
-    "\\\"$SRC\\\" && build/bin/z23)\"\necho \"Check:   (cd \\\"$SRC\\\" && build/bin/z23 status)   # i"
-    "n a second terminal\"\necho \"Log:     $LOG\"\necho \"Next steps: https://z23.sh/start\"\necho \""
-    "Want to contribute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room contrib (h"
-    "ttps://z23.sh/start).\"\n";
+    "y \"3/4 Building (several minutes the first time; full output: $LOG)...\"\nrun env CC=\"$cc_ok\" "
+    "make -C \"$SRC\" setup\nrun env CC=\"$cc_ok\" make -C \"$SRC\" -j\"$jobs\" z23\n\nsay \"4/4 Done\""
+    "\necho \"\"\necho \"Source:  $SRC\"\necho \"Binary:  $SRC/build/bin/z23\"\necho \"Start:   (cd \\"
+    "\"$SRC\\\" && build/bin/z23)\"\necho \"Check:   (cd \\\"$SRC\\\" && build/bin/z23 status)   # in "
+    "a second terminal\"\necho \"Log:     $LOG\"\necho \"Next steps: https://z23.sh/start\"\necho \"Wa"
+    "nt to contribute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room contrib (htt"
+    "ps://z23.sh/start).\"\n";
 
-static char _INSTALL_FROM_SOURCE_SH_buf[4181];
+static char _INSTALL_FROM_SOURCE_SH_buf[4180];
 __attribute__((unused))
 static const char *INSTALL_FROM_SOURCE_SH_get(void) {
     size_t off = 0;
