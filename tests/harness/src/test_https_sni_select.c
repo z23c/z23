@@ -205,10 +205,35 @@ done:
     return ok;
 }
 
-/* GET `url` over the live listener; copies the response (headers+body) into
- * `out`. Used to pin that GET / is the explorer redirect until a
- * public-install tree is named, and the shim once it is. */
-/* GET url with an optional User-Agent header (NULL sends none). */
+/* Send "GET url" with an optional User-Agent header (NULL sends none);
+ * false when the request does not fit or the write falls short. */
+static bool http_send_get(SSL *ssl, const char *url, const char *ua)
+{
+    char req[256];
+    int n = snprintf(req, sizeof(req),
+                     "GET %s HTTP/1.1\r\nHost: origin.example\r\n%s%s%s"
+                     "Connection: close\r\n\r\n", url,
+                     ua ? "User-Agent: " : "", ua ? ua : "", ua ? "\r\n" : "");
+    return n > 0 && (size_t)n < sizeof(req) && SSL_write(ssl, req, n) == n;
+}
+
+/* Read the whole response into out (NUL-terminated); returns its length. */
+static size_t http_read_all(SSL *ssl, char *out, size_t out_len)
+{
+    size_t got = 0;
+    while (got + 1 < out_len) {
+        int r = SSL_read(ssl, out + got, (int)(out_len - got - 1));
+        if (r <= 0)
+            break;
+        got += (size_t)r;
+    }
+    out[got] = '\0';
+    return got;
+}
+
+/* GET `url` over the live listener, with an optional User-Agent; copies the
+ * response (headers+body) into `out`. Used to pin that GET / is the explorer
+ * redirect until a public-install tree is named, and the shim once it is. */
 static bool http_get_ua(const char *url, const char *ua, char *out,
                         size_t out_len)
 {
@@ -217,8 +242,6 @@ static bool http_get_ua(const char *url, const char *ua, char *out,
     SSL *ssl = NULL;
     platform_socket_t fd = PLATFORM_SOCKET_INVALID;
     struct sockaddr_in addr;
-    char req[256];
-    int n;
     size_t got = 0;
 
     if (port <= 0 || !url || !out || out_len == 0)
@@ -242,19 +265,9 @@ static bool http_get_ua(const char *url, const char *ua, char *out,
         ERR_clear_error();
         goto fail;
     }
-    n = snprintf(req, sizeof(req),
-                 "GET %s HTTP/1.1\r\nHost: origin.example\r\n%s%s%s"
-                 "Connection: close\r\n\r\n", url, ua ? "User-Agent: " : "",
-                 ua ? ua : "", ua ? "\r\n" : "");
-    if (n <= 0 || (size_t)n >= sizeof(req) || SSL_write(ssl, req, n) != n)
+    if (!http_send_get(ssl, url, ua))
         goto fail;
-    while (got + 1 < out_len) {
-        int r = SSL_read(ssl, out + got, (int)(out_len - got - 1));
-        if (r <= 0)
-            break;
-        got += (size_t)r;
-    }
-    out[got] = '\0';
+    got = http_read_all(ssl, out, out_len);
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ctx);
@@ -273,6 +286,26 @@ fail:
 static bool http_get(const char *url, char *out, size_t out_len)
 {
     return http_get_ua(url, NULL, out, out_len);
+}
+
+/* With a public-install tree in place, -site-home= answers a browser's
+ * GET / ahead of it; a piped curl still gets the tree's install.sh. */
+static int sn_site_home_first(void)
+{
+    int failures = 0;
+    char resp[1024];
+    https_server_set_front_paths("/wiki/home", NULL);
+    SN_CHECK("with -site-home set, a browser GET / redirects there",
+             http_get("/", resp, sizeof(resp)) &&
+             strstr(resp, "HTTP/1.1 302 Found") != NULL &&
+             strstr(resp, "Location: /wiki/home\r\n") != NULL &&
+             strstr(resp, "echo z23-install") == NULL);
+    SN_CHECK("with -site-home set, curl's GET / still gets the shim",
+             http_get_ua("/", "curl/8.5.0", resp, sizeof(resp)) &&
+             strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+             strstr(resp, "echo z23-install") != NULL);
+    https_server_set_front_paths(NULL, NULL);
+    return failures;
 }
 
 /* Which certificate a plain browser-shaped client is served for `sni`. */
@@ -438,19 +471,7 @@ int test_https_sni_select(void)
         SN_CHECK("GET /explorer is not captured by the install tree",
                  http_get("/explorer", resp, sizeof(resp)) &&
                  strstr(resp, "echo z23-install") == NULL);
-        /* -site-home= answers a browser's GET / ahead of the install
-         * tree; a piped curl still gets the tree's install.sh. */
-        https_server_set_front_paths("/wiki/home", NULL);
-        SN_CHECK("with -site-home set, a browser GET / redirects there",
-                 http_get("/", resp, sizeof(resp)) &&
-                 strstr(resp, "HTTP/1.1 302 Found") != NULL &&
-                 strstr(resp, "Location: /wiki/home\r\n") != NULL &&
-                 strstr(resp, "echo z23-install") == NULL);
-        SN_CHECK("with -site-home set, curl's GET / still gets the shim",
-                 http_get_ua("/", "curl/8.5.0", resp, sizeof(resp)) &&
-                 strstr(resp, "HTTP/1.1 200 OK") != NULL &&
-                 strstr(resp, "echo z23-install") != NULL);
-        https_server_set_front_paths(NULL, NULL);
+        failures += sn_site_home_first();
         https_server_set_public_install_root(NULL);
         SN_CHECK("clearing the install root restores the explorer redirect",
                  http_get("/", resp, sizeof(resp)) &&

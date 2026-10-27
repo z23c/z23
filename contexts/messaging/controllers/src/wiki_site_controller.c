@@ -175,12 +175,21 @@ static size_t ws_error_txt(const char *status, bool head_only, uint8_t *resp,
                       head_only, resp, max);
 }
 
+/* Plain text for a "<slug>.txt" request (the parser marks it before it
+ * validates the slug), else the HTML or JSON error with this json flag. */
+static size_t ws_request_error(const struct ws_request *rq, const char *status,
+                               const char *what, bool json, bool head_only,
+                               uint8_t *resp, size_t max)
+{
+    return rq->txt ? ws_error_txt(status, head_only, resp, max)
+                   : ws_error(status, what, json, head_only, resp, max);
+}
+
 static size_t ws_page_error(const struct ws_request *rq, const char *status,
                             const char *what, bool head_only, uint8_t *resp,
                             size_t max)
 {
-    return rq->txt ? ws_error_txt(status, head_only, resp, max)
-                   : ws_error(status, what, rq->json, head_only, resp, max);
+    return ws_request_error(rq, status, what, rq->json, head_only, resp, max);
 }
 
 /* ── small helpers ────────────────────────────────────────────────── */
@@ -840,20 +849,14 @@ size_t wiki_site_handle_request(const char *method, const char *path,
     if (rq.route == WS_NOT_WIKI)
         return 0;
     bool head_only = strcmp(method, "HEAD") == 0;
-    /* A "<slug>.txt" request gets every error as plain text too (the
-     * parser marks it before it validates the slug). */
     if (!head_only && strcmp(method, "GET") != 0)
-        return rq.txt ? ws_error_txt("405 Method Not Allowed", false,
-                                     response, response_max)
-                      : ws_error("405 Method Not Allowed",
-                                 "method_not_allowed", false, false,
-                                 response, response_max);
+        return ws_request_error(&rq, "405 Method Not Allowed",
+                                "method_not_allowed", false, false, response,
+                                response_max);
     /* The slug is validated by now: a bad one never reaches the database. */
     if (rq.route == WS_BAD)
-        return rq.txt ? ws_error_txt("404 Not Found", head_only, response,
-                                     response_max)
-                      : ws_error("404 Not Found", "not_found", false,
-                                 head_only, response, response_max);
+        return ws_request_error(&rq, "404 Not Found", "not_found", false,
+                                head_only, response, response_max);
     struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !ndb->open)
         return ws_page_error(&rq, "503 Service Unavailable",
