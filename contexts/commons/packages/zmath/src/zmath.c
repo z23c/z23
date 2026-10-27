@@ -42,6 +42,19 @@ bool zmath_sub_i64(int64_t a, int64_t b, int64_t *out)
     return true;
 }
 
+/* Return false when the sign-quadrant checks show a*b overflows limit. */
+static bool zmath_mul_i64_fits_limit(int64_t a, int64_t b, int64_t limit)
+{
+    if (a > 0) {
+        if (b > 0) { if (a > limit / b) return false; }
+        else       { if (b < limit / a) return false; }
+    } else {
+        if (b > 0) { if (a < limit / b) return false; }
+        else       { if (a < limit / b) return false; }
+    }
+    return true;
+}
+
 bool zmath_mul_i64(int64_t a, int64_t b, int64_t *out)
 {
     if (!out) return false;
@@ -58,13 +71,7 @@ bool zmath_mul_i64(int64_t a, int64_t b, int64_t *out)
     }
     /* |a*b| <= INT64_MAX for same sign, <= -INT64_MIN otherwise. */
     int64_t limit = ((a < 0) == (b < 0)) ? INT64_MAX : INT64_MIN;
-    if (a > 0) {
-        if (b > 0) { if (a > limit / b) return false; }
-        else       { if (b < limit / a) return false; }
-    } else {
-        if (b > 0) { if (a < limit / b) return false; }
-        else       { if (a < limit / b) return false; }
-    }
+    if (!zmath_mul_i64_fits_limit(a, b, limit)) return false;
     *out = a * b;
     return true;
 }
