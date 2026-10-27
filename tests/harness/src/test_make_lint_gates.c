@@ -1525,16 +1525,17 @@ static int t_purge_reaps_dead_owner_copies(void)
                         fixture, (int)getpid()) < (int)sizeof(sb_base));
         ASSERT(snprintf(sb_root, sizeof(sb_root), "%s/w0", sb_base) <
                (int)sizeof(sb_root));
-        /* A base nobody may write into: making w0 inside it fails. */
-        ASSERT(mkdir(sb_base, 0500) == 0);
+        /* A base that is a plain file: making w0 inside it fails for any
+         * user, root included. */
+        FILE *f = fopen(sb_base, "w");
+        ASSERT(f != NULL);
+        ASSERT(fclose(f) == 0);
         int built = 0;
         int removed = lint_meta_copy_once(fixture, sb_base, sb_root, &built);
         struct stat st;
         bool left = stat(sb_base, &st) == 0;
-        if (left) (void)chmod(sb_base, 0700);
         ASSERT(test_rm_rf_recursive(fixture) == 0);
-        if (geteuid() != 0)   /* root ignores the mode, so the build works */
-            ASSERT(built != 0);
+        ASSERT(built != 0);
         ASSERT(removed == 0);
         ASSERT(!left);
         PASS();
