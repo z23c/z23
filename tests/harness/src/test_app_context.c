@@ -802,10 +802,15 @@ static int app_context_check_profile_surfaces(void)
 
 /* ── --help is a short "Start here" block; --help-all is the full list ── */
 
-/* Run fn(prog) with stdout redirected to an unnamed temp file and return
- * the captured text (malloc'd, NUL-terminated), or NULL. */
-static char *appctx_capture_stdout(void (*fn)(const char *), size_t *len_out)
+/* Parse the node flags `z23 <flag>` with stdout redirected to an unnamed
+ * temp file; *rc_out is the parser's exit code. Returns the captured text
+ * (malloc'd, NUL-terminated), or NULL when capture or the restore failed. */
+static char *appctx_capture_help(const char *flag, size_t *len_out,
+                                 int *rc_out)
 {
+    char *argv[] = { "z23", (char *)flag };
+    struct app_context ctx;
+    bool show_metrics = false;
     FILE *tmp = tmpfile();
     if (!tmp)
         return NULL;
@@ -817,10 +822,17 @@ static char *appctx_capture_stdout(void (*fn)(const char *), size_t *len_out)
         fclose(tmp);
         return NULL;
     }
-    fn("z23");
+    app_context_defaults(&ctx);
+    *rc_out = args_parse_node_options(2, argv, &ctx, &show_metrics);
     fflush(stdout);
-    dup2(saved, STDOUT_FILENO);
+    bool restored = dup2(saved, STDOUT_FILENO) >= 0;
     close(saved);
+    if (!restored) {
+        fclose(tmp);
+        fprintf(stderr, "app_context: could not restore stdout after %s\n",
+                flag);
+        return NULL;
+    }
     long n = ftell(tmp);
     char *buf = n >= 0 ? calloc((size_t)n + 1, 1) : NULL;
     if (buf) {
@@ -845,9 +857,12 @@ static int test_help_start_here_block(void)
 {
     int failures = 0;
     size_t short_len = 0, all_len = 0;
-    char *shortb = appctx_capture_stdout(print_usage, &short_len);
-    char *allb = appctx_capture_stdout(print_usage_all, &all_len);
+    int short_rc = -1, all_rc = -1;
+    char *shortb = appctx_capture_help("--help", &short_len, &short_rc);
+    char *allb = appctx_capture_help("--help-all", &all_len, &all_rc);
     APPCTX_CHECK("help captured", shortb && allb);
+    APPCTX_CHECK("--help and --help-all exit 0 from the flag parser",
+                 short_rc == 0 && all_rc == 0);
     if (!shortb || !allb) {
         free(shortb);
         free(allb);
