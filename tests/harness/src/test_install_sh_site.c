@@ -91,16 +91,31 @@ static int ish_script_steps(const char *body)
                                    "    echo \"install_from_source: $*\" >&2\n"
                                    "}\n") != NULL);
     ISH_CHECK("the script reports each step",
-              body && strstr(body, "say \"checking tools") != NULL &&
-                  strstr(body, "say \"cloning ") != NULL &&
-                  strstr(body, "say \"updating existing clone") != NULL &&
-                  strstr(body, "say \"checking out pinned commit $Z23_PIN") != NULL &&
-                  strstr(body, "say \"no commit pin was served") != NULL &&
-                  strstr(body, "say \"building with $jobs jobs") != NULL &&
-                  strstr(body, "say \"done\"") != NULL);
-    ISH_CHECK("the script ends with the contributor pointer after Built",
-              body && strstr(body, "echo \"Built. Next:") != NULL &&
-                  strstr(strstr(body, "echo \"Built. Next:"),
+              body && strstr(body, "say \"1/4 Checking tools") != NULL &&
+                  strstr(body, "say \"2/4 Getting the source into $SRC") != NULL &&
+                  strstr(body, "run git clone \"$REPO_URL\" \"$SRC\"") != NULL &&
+                  strstr(body, "run git -C \"$SRC\" fetch origin") != NULL &&
+                  strstr(body, "run git -C \"$SRC\" checkout \"$Z23_PIN\"") != NULL &&
+                  strstr(body, "No commit pin was served") != NULL &&
+                  strstr(body, "say \"3/4 Building (about 10 minutes") != NULL &&
+                  strstr(body, "say \"4/4 Done\"") != NULL);
+    return failures;
+}
+
+static int ish_script_log_and_summary(const char *body)
+{
+    int failures = 0;
+    ISH_CHECK("build output goes to a named log, tail shown on failure",
+              body && strstr(body, "LOG=\"$SRC/build/install.log\"") != NULL &&
+                  strstr(body, "| tail -n 20 >&2") != NULL &&
+                  strstr(body, "make -C \"$SRC\" -j\"$jobs\" z23") != NULL);
+    ISH_CHECK("the script ends with the summary and contributor pointer",
+              body && strstr(body, "echo \"Source:  $SRC\"") != NULL &&
+                  strstr(body, "echo \"Binary:  $SRC/build/bin/z23\"") != NULL &&
+                  strstr(body, "Start:   (cd") != NULL &&
+                  strstr(body, "build/bin/z23 status") != NULL &&
+                  strstr(body, "echo \"Next steps: https://z23.sh/start\"") != NULL &&
+                  strstr(strstr(body, "echo \"Next steps:"),
                          "Want to contribute? Read $SRC/.github/"
                          "CONTRIBUTING.md, then post a claim in board room "
                          "contrib (https://z23.sh/start).") != NULL);
@@ -140,6 +155,7 @@ int test_install_sh_site(void)
     ISH_CHECK("the Z23_PIN= assignment line survived substitution",
               body && strstr(body, "Z23_PIN=\"") != NULL);
     failures += ish_script_steps(body);
+    failures += ish_script_log_and_summary(body);
 
     /* HEAD: same headers, no body. */
     size_t head_n = install_sh_handle_request("HEAD", "/install.sh", NULL, 0,

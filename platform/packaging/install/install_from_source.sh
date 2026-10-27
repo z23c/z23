@@ -41,7 +41,22 @@ need() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
-say "checking tools (git, make, a C23 compiler)"
+# All git and build output goes to a log file, not the terminal. Until
+# the clone exists it is a temp file; it then moves to $SRC/build/install.log.
+# A failed step shows the last 20 lines of it and exits non-zero.
+LOG=$(mktemp "${TMPDIR:-/tmp}/z23-install.XXXXXX") ||
+    die "cannot create a temporary log file"
+
+run() {
+    "$@" >>"$LOG" 2>&1 || {
+        say "FAILED: $*"
+        say "last 20 lines of $LOG:"
+        tr '\r' '\n' <"$LOG" | tail -n 20 >&2
+        exit 1
+    }
+}
+
+say "1/4 Checking tools (git, make, a C23 compiler)..."
 need git
 need make
 
@@ -62,6 +77,7 @@ rm -rf "$probe"
 [ -n "$cc_ok" ] ||
     die "missing required command: a C compiler (cc, gcc, or clang) accepting -std=c23"
 
+say "2/4 Getting the source into $SRC..."
 if [ -d "$SRC" ]; then
     [ -d "$SRC/.git" ] ||
         die "$SRC exists and is not a z23 git clone; set Z23_SRC to pick another path"
@@ -72,32 +88,35 @@ if [ -d "$SRC" ]; then
         die "$SRC is a git clone of '$url', not $REPO_URL; set Z23_SRC to pick another path"
         ;;
     esac
-    say "updating existing clone in $SRC"
-    git -C "$SRC" fetch origin
+    run git -C "$SRC" fetch origin
 else
-    say "cloning $REPO_URL into $SRC"
-    git clone "$REPO_URL" "$SRC"
+    run git clone "$REPO_URL" "$SRC"
 fi
 
 if [ -n "$Z23_PIN" ]; then
-    say "checking out pinned commit $Z23_PIN"
-    git -C "$SRC" checkout "$Z23_PIN"
+    run git -C "$SRC" checkout "$Z23_PIN"
 else
-    say "no commit pin was served; building main instead"
-    git -C "$SRC" checkout main
-    git -C "$SRC" pull --ff-only origin main
+    # No commit pin was served: build main instead.
+    run git -C "$SRC" checkout main
+    run git -C "$SRC" pull --ff-only origin main
 fi
 
+mkdir -p "$SRC/build" || die "cannot create $SRC/build"
+cat "$LOG" >>"$SRC/build/install.log"
+rm -f "$LOG"
+LOG="$SRC/build/install.log"
+
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
-say "building with $jobs jobs (this takes a while)"
+say "3/4 Building (about 10 minutes the first time; full output: $LOG)..."
+run env CC="$cc_ok" make -C "$SRC" setup
+run env CC="$cc_ok" make -C "$SRC" -j"$jobs" z23
 
-(
-    cd "$SRC"
-    CC="$cc_ok" make setup
-    CC="$cc_ok" make -j"$jobs" z23
-)
-
-say "done"
-echo "Built. Next: (cd \"$SRC\" && build/bin/z23) to start your node, then (cd \"$SRC\" && build/bin/z23 join) to join the C23 software commons."
-
+say "4/4 Done"
+echo ""
+echo "Source:  $SRC"
+echo "Binary:  $SRC/build/bin/z23"
+echo "Start:   (cd \"$SRC\" && build/bin/z23)"
+echo "Check:   (cd \"$SRC\" && build/bin/z23 status)   # in a second terminal"
+echo "Log:     $LOG"
+echo "Next steps: https://z23.sh/start"
 echo "Want to contribute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room contrib (https://z23.sh/start)."
