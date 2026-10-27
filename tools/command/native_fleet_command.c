@@ -932,8 +932,9 @@ static bool fleet_experiment_task_id(struct zcl_command_reply *reply,
     return true;
 }
 
-/* An optional integer measurement: added as a pair when passed, refused by
- * name when passed but not representable, and absent otherwise. */
+/* An optional integer measurement: added as a pair when passed as an integer,
+ * absent when missing or not an integer, and refused with the generic
+ * ledger_argument reason when the pair cannot be stored. */
 static bool fleet_count_pair(struct zcl_command_reply *reply,
                              const struct json_value *input, const char *field,
                              uint8_t key, struct zcl_fleet_pair *pairs,
