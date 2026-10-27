@@ -249,8 +249,6 @@ contexts/commons/packages/zdogview/src/zdogview.c:zdogview_verify:22
 contexts/commons/packages/zdogview/src/zdogview.c:zv_tri:23
 contexts/commons/packages/zdogview/tests/test_zdogview.c:main:17
 contexts/commons/packages/zescape/src/zescape.c:zescape_unescape:30
-contexts/commons/packages/zglob/src/zglob.c:class_match:19
-contexts/commons/packages/zglob/src/zglob.c:zglob_match_n:18
 contexts/commons/packages/zhtml/src/zhtml.c:zhtml__entity:26
 contexts/commons/packages/zhuman/app/main.c:main:17
 contexts/commons/packages/zhuman/src/zhuman.c:zhuman_format_duration:20
