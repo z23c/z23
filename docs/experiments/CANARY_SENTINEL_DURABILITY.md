@@ -129,3 +129,48 @@ The object was retained, with no cleanup or gate waiver. The two missing
 capability declarations caused the refusal.
 
 The repaired checker log SHA-256 was `7a98c1630b87ed64c823c983b2d205e527b10740c05ebdfa6f60946dd83e075a`.
+
+## Canonical proof and accessor consolidation
+
+The corrected intake queued candidate `fd68a7e54e21410b9daeed90111d32359fde8cf5`.
+Its native proof assembled `b7b8305becdbde2d69276227d8635493b899aaf0` on
+`4ec8326118b381d4f1a5c35b937532ac62b2603a` and failed lint before test proof.
+The retained gate bodies reported a missing purpose comment in the new handler
+and 1,849 duplicate candidates against the fixed maximum of 1,848. The
+intake had invoked the purpose checker in its default WARN mode; the canonical
+Makefile target enforced RATCHET. Intake acceptance did not establish canonical
+lint acceptance.
+
+A fresh native inventory reproduction at the exact assembled source confirmed
+1,849 candidates. It identified the new `canary_string` accessor as identical
+to four existing static accessors. The repair deletes it and composes the
+existing null-safe JSON accessors. An explicit directory type check preserves
+missing or nonstring directory rejection during input validation; an empty
+string retains the existing persistence refusal. Integer and string timestamp
+validation and the existing fault assertions remain unchanged. A purpose line
+was added inside the first copyright comment block.
+
+On 2026-10-27, the repaired source based on `fd68a7e54e21410b9daeed90111d32359fde8cf5`
+produced 1,847 duplicate candidates, below the unchanged 1,848 floor. This
+absolute result qualifies the repaired source; the difference from the earlier
+assembled source is not attributed wholly to accessor removal because their
+bases differ. The structural batch generated the inventory twice: a subsequent
+canonical KPI target regenerated its phony inventory prerequisite. Both scans
+used the same pinned source and reported the same count. The retained final
+inventory SHA-256 was `786c5fd50ae5480c9853d8d35f4f9890da4398d2732d79abd88f27de163bbb43`.
+The canonical KPI checker passed all nine metrics, the purpose checker reported
+zero RATCHET violations, and complexity, file-size and staged diff checks passed.
+The structural log SHA-256 was `9cddf1cd2ba94966987360be3e2f746edda8d942f21d5403ba934d241b511cd1`.
+
+The registered `replay_canary_verdict` focused run then passed one group with
+zero failures, skips, unobserved groups or flaky retries. Reported group wall
+time was 46.7 seconds; the phase receipt recorded 46,650 ms in the test body
+and 0 ms startup. The new direct-handler and real-CLI directory validation
+regression explicitly passed. The compiler, CPU and platform were the Linux
+configuration recorded above. Handler blob `3e3f72d71582fe104ff18fe66fd018bb490a6111`
+and test blob `9eee90bb21052d47054fd0bcf3ebceacbea4ebd4` remained unchanged
+through qualification. The focused log SHA-256 was
+`db2b249ed7c2e32b54bbddc99ebdcd7a0c7e7118dbbadc1d079350a72c3f8010`.
+Earlier failures remain evidence; these results establish neither their timing
+cause nor a performance improvement. Native exact candidate proof remains
+pending, and no production activation or additional platform runtime was tested.

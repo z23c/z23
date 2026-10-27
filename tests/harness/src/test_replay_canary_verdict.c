@@ -1874,6 +1874,43 @@ static int test_canary_frontdoor_timestamp_types(void)
     return failures;
 }
 
+static int test_canary_directory_validation_contract(void)
+{
+    int failures = 0;
+    TEST("replay-canary: missing and nonstring directory reject input; empty directory refuses persistence") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char tool[PATH_MAX];
+        snprintf(tool, sizeof(tool), "%s/build/bin/z23-dev", root);
+        const char *directories[] = { "", ",\"directory\":7", ",\"directory\":\"\"" };
+        const char *codes[] = { "CANARY_SENTINEL_INPUT", "CANARY_SENTINEL_INPUT", "CANARY_SENTINEL_DURABILITY" };
+        for (size_t i = 0; i < sizeof(directories) / sizeof(*directories); ++i) {
+            char request_text[512];
+            snprintf(request_text, sizeof(request_text),
+                "{\"action\":\"reset\",\"from\":\"genesis\",\"started_ts\":\"123\",\"staged\":\"replay_canary_genesis.json.tmp.1\"%s}", directories[i]);
+            struct json_value input;
+            json_init(&input);
+            ASSERT(json_read(&input, request_text, strlen(request_text)));
+            struct zcl_command_request request = { .input = &input };
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.dev_canary_sentinel.v1");
+            zcl_native_handle_dev_canary_sentinel(&request, &reply);
+            ASSERT_EQ(reply.exit_code, i == 2 ? ZCL_COMMAND_EXIT_FAILED : ZCL_COMMAND_EXIT_INVALID);
+            ASSERT(strcmp(reply.error.code, codes[i]) == 0);
+            ASSERT(!reply.error.mutated);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+            char flag[sizeof(request_text) + 16], output[4096];
+            snprintf(flag, sizeof(flag), "--input=%s", request_text);
+            const char *argv[] = { tool, "dev", "test", "canary_sentinel", flag, NULL };
+            ASSERT_EQ(zcl_spawn_capture(argv, output, sizeof(output), 30000), 2);
+            ASSERT(strstr(output, i == 0 ? codes[i] : "INVALID_INPUT") != NULL);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_replay_canary_verdict_platform_arm(void)
 {
     int failures = 0;
@@ -1881,6 +1918,7 @@ static int test_replay_canary_verdict_platform_arm(void)
     failures += test_canary_script_preserves_read_permissions();
     failures += test_canary_wrapper_rejects_failed_persistence();
     failures += test_canary_frontdoor_timestamp_types();
+    failures += test_canary_directory_validation_contract();
     failures += test_native_canary_durability();
     failures += test_canary_does_not_flush_unrelated_filesystems();
     failures += test_pass_writes_pass_sentinel();

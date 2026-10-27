@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: checked canary sentinel reset and publication with retained directory ownership and file durability.
+ */
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -52,12 +54,6 @@ static bool canary_injected(const char *phase)
 }
 #endif
 
-static const char *canary_string(const struct json_value *input, const char *key)
-{
-    const struct json_value *v = input ? json_get(input, key) : NULL;
-    return v && v->type == JSON_STR ? json_get_str(v) : NULL;
-}
-
 static const char *canary_started_ts(const struct json_value *input, char out[24])
 {
     const struct json_value *v = input ? json_get(input, "started_ts") : NULL;
@@ -65,7 +61,7 @@ static const char *canary_started_ts(const struct json_value *input, char out[24
         (void)snprintf(out, 24, "%lld", (long long)json_get_int(v));
         return out;
     }
-    return canary_string(input, "started_ts");
+    return json_get_str(json_get(input, "started_ts"));
 }
 
 static bool canary_decimal(const char *text)
@@ -280,12 +276,13 @@ static bool canary_input_read(const struct json_value *input,
                               struct canary_input *out)
 {
     *out = (struct canary_input){0};
-    out->action = canary_string(input, "action");
-    out->path = canary_string(input, "directory");
+    out->action = json_get_str(json_get(input, "action"));
+    out->path = json_get_str(json_get(input, "directory"));
     out->timestamp = canary_started_ts(input, out->timestamp_storage);
-    out->stage = canary_string(input, "staged");
-    const char *from = canary_string(input, "from");
-    if (!out->action || !out->path || !canary_track(from))
+    out->stage = json_get_str(json_get(input, "staged"));
+    const char *from = json_get_str(json_get(input, "from"));
+    const struct json_value *directory = json_get(input, "directory");
+    if (!directory || directory->type != JSON_STR || !canary_track(from))
         return false;
     out->reset = strcmp(out->action, "reset") == 0;
     if (!out->reset && strcmp(out->action, "publish") != 0)
