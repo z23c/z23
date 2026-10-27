@@ -26,10 +26,36 @@ demonstrated. This change does not claim a demonstrated cryptographic mismatch
 or a production-crypto repair; it guards an optional test-reference read.
 
 The existing `groth16_selfverify` registered group calls the spend parity
-oracle, whose corpus contains six witnesses. It is the focused regression
-check for this change and exercises the actual caller. No mirror test or new
-instrumentation is added. A passing group does not turn the analyzer result
-into detection evidence.
+oracle, whose corpus contains six witnesses. The representation helper now
+receives a null reference pointer whenever the reference is unavailable;
+available references retain their original pointer. The actual caller must
+complete those cases without accessing the absent reference.
+
+The guarded caller passed the registered group on 2026-10-27 with all six
+witnesses: one cold group, zero failures, skips, unobserved environment checks
+or load-flaky results. The reported test body took 44.748 seconds; this is not
+a performance comparison.
+
+A temporary mutant removed only `have_nk_ref &&` from the expected reference-bit
+expression. The same registered group then failed with SIGSEGV at address zero
+in `groth16_spend_parity_oracle`, after corpus[1] reported its reference absent.
+Make exited 2; one group failed with zero skips or load-flaky results. The
+guarded source was restored and its exact blob verified after the experiment.
+
+This demonstrates guard-removal detection with the null-reference caller on
+the tested build. It does not establish a wrong cryptographic verdict or
+change the earlier analyzer NOTDETECTED result.
+
+Source parent for this follow-up:
+`2aaad2e234cdfcef77269d4c581876d6b7614f50`.
+Guarded source blob: `4fcced4009d8e8b89694dd27c0e657ae9c60af08`.
+
+Evidence SHA256:
+
+- Guarded group log:
+  `a340016c8fe8f776f0136cc12875962cc90bbc0a821dc9734f7b4aa5b000e1c8`.
+- Guard-removal group log:
+  `7c9b39d6e308e0edb4c48d65f676ad0a871120eff237167550123d7504399722`.
 
 <!-- claim: symbol-present groth16_spend_parity_oracle tests/harness/src/test_groth16_selfverify.c -->
 <!-- claim: symbol-present CORPUS_N tests/harness/src/groth16_spend_parity.c -->

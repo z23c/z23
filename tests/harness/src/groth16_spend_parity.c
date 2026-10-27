@@ -730,7 +730,7 @@ int groth16_spend_parity_oracle(void)
             &cm_api, cm_api_ok, &flagged, &label, &failures);
 
         parity_check_compressed_key_representation(c, &pw, &cs, &probe,
-            &nk_ref, have_nk_ref, &flagged, &label, &failures);
+            have_nk_ref ? &nk_ref : NULL, have_nk_ref, &flagged, &label, &failures);
 
         parity_check_honest_witness_satisfaction(c, &cs, &flagged, &label, &failures);
 
