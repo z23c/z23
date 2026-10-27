@@ -70,27 +70,43 @@ znetstring_err znetstring_parse(const char *buf, size_t n, znetstring *out)
     return ZNETSTRING_OK;
 }
 
+/* Scan the length field's digits, advancing *i; false if there are too many. */
+static bool scan_length_digits(const char *buf, size_t n, size_t *i,
+                               uint64_t *len, size_t *digits)
+{
+    while (*i < n && buf[*i] >= '0' && buf[*i] <= '9') {
+        if (*digits == ZNETSTRING_MAX_DIGITS) return false;
+        *len = *len * 10 + (uint64_t)(buf[*i] - '0');
+        (*digits)++;
+        (*i)++;
+    }
+    return true;
+}
+
+/* True when buf[i..n) is a prefix of len payload bytes plus the comma. */
+static bool payload_prefix_completable(const char *buf, size_t n, size_t i,
+                                       uint64_t len)
+{
+    /* Any remaining prefix of payload+comma is completable. */
+    if (n - i > len + 1) return false; /* more bytes than the netstring needs */
+    if (n - i == len + 1 && buf[n - 1] != ',') return false;
+    return true;
+}
+
 int znetstring_prefix(const char *buf, size_t n)
 {
     if (!buf || n == 0) return 0;
     size_t i = 0;
     uint64_t len = 0;
     size_t digits = 0;
-    while (i < n && buf[i] >= '0' && buf[i] <= '9') {
-        if (digits == ZNETSTRING_MAX_DIGITS) return 0;
-        len = len * 10 + (uint64_t)(buf[i] - '0');
-        digits++;
-        i++;
-    }
+    if (!scan_length_digits(buf, n, &i, &len, &digits)) return 0;
     if (digits == 0) return 0;
     if (digits > 1 && buf[0] == '0') return 0;
     if (len > ZNETSTRING_MAX) return 0;
     if (i == n) return 1; /* length field complete, ':' not yet read */
     if (buf[i] != ':') return 0;
     i++;
-    /* Any remaining prefix of payload+comma is completable. */
-    if (n - i > len + 1) return 0; /* more bytes than the netstring needs */
-    if (n - i == len + 1 && buf[n - 1] != ',') return 0;
+    if (!payload_prefix_completable(buf, n, i, len)) return 0;
     return 1;
 }
 
