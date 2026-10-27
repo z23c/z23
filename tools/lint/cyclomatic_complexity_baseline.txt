@@ -1188,12 +1188,6 @@ tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tes
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_receipt_version:23
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_source:24
 tests/harness/src/test_consensus_state_snapshot_export.c:test_consensus_state_snapshot_export_platform_arm:186
-tests/harness/src/test_consensus_state_snapshot_install.c:active_is:17
-tests/harness/src/test_consensus_state_snapshot_install.c:boot_install_gate_alias_tests:18
-tests/harness/src/test_consensus_state_snapshot_install.c:candidate_progress_parity:39
-tests/harness/src/test_consensus_state_snapshot_install.c:install_verify_receipt_tests:31
-tests/harness/src/test_consensus_state_snapshot_install.c:test_consensus_state_snapshot_install_platform_arm:445
-tests/harness/src/test_consensus_state_snapshot_install.c:write_bundle:78
 tests/harness/src/test_cookie_rotation.c:test_cookie_rotation:55
 tests/harness/src/test_core.c:test_core:60
 tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23

@@ -91,6 +91,38 @@ struct csi_fixture {
     uint8_t proof[32], source[32], artifact[32];
 };
 
+static int csi_boot_gate_alias_checks(bool setup, const char *dot_alias,
+                                      const char *symlink_alias,
+                                      const char *canonical,
+                                      const char *copy_dir)
+{
+    int failures = 0;
+    bool is_canonical = false;
+    CSI_CHECK("boot gate: $HOME/./ canonical alias refuses without owner gate",
+              setup &&
+              !boot_install_consensus_bundle_gate_allows_for_test(
+                  dot_alias, NULL, &is_canonical) && is_canonical);
+    is_canonical = false;
+    CSI_CHECK("boot gate: symlink alias refuses without owner gate",
+              setup &&
+              !boot_install_consensus_bundle_gate_allows_for_test(
+                  symlink_alias, NULL, &is_canonical) && is_canonical);
+    is_canonical = false;
+    CSI_CHECK("boot gate: non-exact canonical authorization refuses",
+              setup &&
+              !boot_install_consensus_bundle_gate_allows_for_test(
+                  canonical, "0", &is_canonical) && is_canonical);
+    is_canonical = false;
+    CSI_CHECK("boot gate: exact canonical authorization admits canonical lane",
+              setup && boot_install_consensus_bundle_gate_allows_for_test(
+                  canonical, "1", &is_canonical) && is_canonical);
+    is_canonical = true;
+    CSI_CHECK("boot gate: distinct directory remains copy-proof",
+              setup && boot_install_consensus_bundle_gate_allows_for_test(
+                  copy_dir, NULL, &is_canonical) && !is_canonical);
+    return failures;
+}
+
 static int boot_install_gate_alias_tests(const char *root)
 {
     int failures = 0;
@@ -116,29 +148,8 @@ static int boot_install_gate_alias_tests(const char *root)
                  setenv("HOME", home, 1) == 0;
     CSI_CHECK("boot gate: alias fixtures initialize", setup);
 
-    bool is_canonical = false;
-    CSI_CHECK("boot gate: $HOME/./ canonical alias refuses without owner gate",
-              setup &&
-              !boot_install_consensus_bundle_gate_allows_for_test(
-                  dot_alias, NULL, &is_canonical) && is_canonical);
-    is_canonical = false;
-    CSI_CHECK("boot gate: symlink alias refuses without owner gate",
-              setup &&
-              !boot_install_consensus_bundle_gate_allows_for_test(
-                  symlink_alias, NULL, &is_canonical) && is_canonical);
-    is_canonical = false;
-    CSI_CHECK("boot gate: non-exact canonical authorization refuses",
-              setup &&
-              !boot_install_consensus_bundle_gate_allows_for_test(
-                  canonical, "0", &is_canonical) && is_canonical);
-    is_canonical = false;
-    CSI_CHECK("boot gate: exact canonical authorization admits canonical lane",
-              setup && boot_install_consensus_bundle_gate_allows_for_test(
-                  canonical, "1", &is_canonical) && is_canonical);
-    is_canonical = true;
-    CSI_CHECK("boot gate: distinct directory remains copy-proof",
-              setup && boot_install_consensus_bundle_gate_allows_for_test(
-                  copy_dir, NULL, &is_canonical) && !is_canonical);
+    failures += csi_boot_gate_alias_checks(setup, dot_alias, symlink_alias,
+                                           canonical, copy_dir);
 
     if (old_home_set)
         (void)setenv("HOME", old_home_copy, 1);
@@ -639,7 +650,8 @@ static bool exec_ok(sqlite3 *db, const char *sql)
     return ok;
 }
 
-static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
+static void write_bundle_prepare_fixture(struct csi_fixture *f,
+                                         enum csi_fault fault)
 {
     chmod(f->path, 0600); unlink(f->path);
     if (fault == CSI_EMPTY_UTXO)
@@ -659,6 +671,11 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
         f->anchors[0].root[0] ^= 1;
         fixture_component_digests(f); /* digest matches the bad declared root */
     }
+}
+
+static void write_bundle_apply_digest_faults(struct csi_fixture *f,
+                                             enum csi_fault fault)
+{
     if (fault == CSI_CORRUPT_NONTIP_ANCHOR_TREE) {
         /* Trailing garbage on the NON-tip sprout row (anchors[0], height h-1):
          * a well-formed tree followed by a stray byte, so deserialize succeeds
@@ -704,45 +721,12 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
         memcpy(f->source, f->receipt.receipt_digest, 32);
     }
     fixture_artifact_digest(f);
+}
 
-    sqlite3 *db = NULL;
-    bool ok = sqlite3_open(f->path, &db) == SQLITE_OK && exec_ok(db,
-        "CREATE TABLE bundle_meta("
-        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
-        "schema TEXT NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,"
-        "history_complete INTEGER NOT NULL,source_clean INTEGER NOT NULL,"
-        "validation_profile INTEGER NOT NULL,activation_boundary INTEGER NOT NULL,"
-        "utxo_root BLOB NOT NULL,utxo_count INTEGER NOT NULL,"
-        "total_supply INTEGER NOT NULL,anchor_digest BLOB NOT NULL,"
-        "anchor_count INTEGER NOT NULL,sprout_frontier_root BLOB NOT NULL,"
-        "sprout_frontier_height INTEGER NOT NULL,"
-        "sapling_frontier_root BLOB NOT NULL,"
-        "sapling_frontier_height INTEGER NOT NULL,"
-        "nullifier_digest BLOB NOT NULL,nullifier_count INTEGER NOT NULL,"
-        "sprout_source_cursor INTEGER NOT NULL,"
-        "sapling_source_cursor INTEGER NOT NULL,"
-        "nullifier_source_cursor INTEGER NOT NULL,"
-        "source_fold_cursor INTEGER NOT NULL,"
-        "proof_manifest_digest BLOB NOT NULL,source_digest BLOB NOT NULL,"
-        "artifact_digest BLOB NOT NULL);"
-        "CREATE TABLE source_receipt("
-        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema TEXT NOT NULL,"
-        "source_epoch_digest BLOB NOT NULL,source_tree_root BLOB NOT NULL,"
-        "running_binary_digest BLOB NOT NULL,toolchain_digest BLOB NOT NULL,"
-        "build_inputs_digest BLOB NOT NULL,chain_corpus_digest BLOB NOT NULL,"
-        "source_clean INTEGER NOT NULL,validation_profile INTEGER NOT NULL,"
-        "producer_commit TEXT NOT NULL,fold_cursor INTEGER NOT NULL,"
-        "receipt_digest BLOB NOT NULL);"
-        "CREATE TABLE bundle_proof("
-        "ordinal INTEGER PRIMARY KEY,component TEXT NOT NULL UNIQUE,"
-        "cursor INTEGER NOT NULL,first_height INTEGER NOT NULL,"
-        "last_height INTEGER NOT NULL,row_count INTEGER NOT NULL,"
-        "hash_bound_count INTEGER NOT NULL,component_digest BLOB NOT NULL);"
-        "CREATE TABLE coins("
-        "txid BLOB NOT NULL,vout INTEGER NOT NULL,value INTEGER NOT NULL,"
-        "script BLOB NOT NULL,height INTEGER NOT NULL,is_coinbase INTEGER NOT NULL,"
-        "PRIMARY KEY(txid,vout)) WITHOUT ROWID;"
-        );
+static bool write_bundle_create_anchor_nullifier_tables(sqlite3 *db,
+                                                        enum csi_fault fault,
+                                                        bool ok)
+{
     if (ok)
         ok = exec_ok(db,
             fault == CSI_DUPLICATE_NONFRONTIER_ANCHOR_HEIGHT
@@ -763,6 +747,12 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     if (ok && (fault == CSI_TEXT_ANCHOR_POOL ||
                fault == CSI_TEXT_NF_POOL))
         ok = exec_ok(db, "PRAGMA ignore_check_constraints=ON");
+    return ok;
+}
+
+static bool write_bundle_insert_coins(sqlite3 *db, struct csi_fixture *f,
+                                      enum csi_fault fault, bool ok)
+{
     sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO coins VALUES(?,?,?,?,?,?)", -1, &st, NULL) == SQLITE_OK;
@@ -792,6 +782,14 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     if (st)
         sqlite3_finalize(st);
     st = NULL;
+    return ok;
+}
+
+static bool write_bundle_insert_source_receipt(sqlite3 *db,
+                                               struct csi_fixture *f,
+                                               enum csi_fault fault, bool ok)
+{
+    sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO source_receipt VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)",
         -1,&st,NULL)==SQLITE_OK;
@@ -829,6 +827,13 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     }
     if (st) sqlite3_finalize(st);
     st = NULL;
+    return ok;
+}
+
+static bool write_bundle_insert_proof_rows(sqlite3 *db, struct csi_fixture *f,
+                                           enum csi_fault fault, bool ok)
+{
+    sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO bundle_proof VALUES(?,?,?,?,?,?,?,?)",
         -1,&st,NULL)==SQLITE_OK;
@@ -854,6 +859,13 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     }
     if (st) sqlite3_finalize(st);
     st = NULL;
+    return ok;
+}
+
+static bool write_bundle_insert_anchor_rows(sqlite3 *db, struct csi_fixture *f,
+                                            enum csi_fault fault, bool ok)
+{
+    sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO anchors VALUES(?,?,?,?)", -1, &st, NULL) == SQLITE_OK;
     for (size_t i = 0; ok && i < f->anchor_count; i++) {
@@ -874,6 +886,14 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     if (st)
         sqlite3_finalize(st);
     st = NULL;
+    return ok;
+}
+
+static bool write_bundle_insert_nullifier_rows(sqlite3 *db,
+                                               struct csi_fixture *f,
+                                               enum csi_fault fault, bool ok)
+{
+    sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO nullifiers VALUES(?,?,?)", -1, &st, NULL) == SQLITE_OK;
     for (size_t i = 0; ok && i < 2; i++) {
@@ -892,6 +912,13 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     if (st)
         sqlite3_finalize(st);
     st = NULL;
+    return ok;
+}
+
+static bool write_bundle_insert_meta_row(sqlite3 *db, struct csi_fixture *f,
+                                         enum csi_fault fault, bool ok)
+{
+    sqlite3_stmt *st = NULL;
     if (ok) ok = sqlite3_prepare_v2(db,
         "INSERT INTO bundle_meta VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         -1,&st,NULL)==SQLITE_OK;
@@ -932,6 +959,59 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
         ok = sqlite3_step(st)==SQLITE_DONE; // raw-sql-ok:test-fixture-seeding
     }
     if (st) sqlite3_finalize(st);
+    return ok;
+}
+
+static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
+{
+    write_bundle_prepare_fixture(f, fault);
+    write_bundle_apply_digest_faults(f, fault);
+
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(f->path, &db) == SQLITE_OK && exec_ok(db,
+        "CREATE TABLE bundle_meta("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+        "schema TEXT NOT NULL,height INTEGER NOT NULL,block_hash BLOB NOT NULL,"
+        "history_complete INTEGER NOT NULL,source_clean INTEGER NOT NULL,"
+        "validation_profile INTEGER NOT NULL,activation_boundary INTEGER NOT NULL,"
+        "utxo_root BLOB NOT NULL,utxo_count INTEGER NOT NULL,"
+        "total_supply INTEGER NOT NULL,anchor_digest BLOB NOT NULL,"
+        "anchor_count INTEGER NOT NULL,sprout_frontier_root BLOB NOT NULL,"
+        "sprout_frontier_height INTEGER NOT NULL,"
+        "sapling_frontier_root BLOB NOT NULL,"
+        "sapling_frontier_height INTEGER NOT NULL,"
+        "nullifier_digest BLOB NOT NULL,nullifier_count INTEGER NOT NULL,"
+        "sprout_source_cursor INTEGER NOT NULL,"
+        "sapling_source_cursor INTEGER NOT NULL,"
+        "nullifier_source_cursor INTEGER NOT NULL,"
+        "source_fold_cursor INTEGER NOT NULL,"
+        "proof_manifest_digest BLOB NOT NULL,source_digest BLOB NOT NULL,"
+        "artifact_digest BLOB NOT NULL);"
+        "CREATE TABLE source_receipt("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema TEXT NOT NULL,"
+        "source_epoch_digest BLOB NOT NULL,source_tree_root BLOB NOT NULL,"
+        "running_binary_digest BLOB NOT NULL,toolchain_digest BLOB NOT NULL,"
+        "build_inputs_digest BLOB NOT NULL,chain_corpus_digest BLOB NOT NULL,"
+        "source_clean INTEGER NOT NULL,validation_profile INTEGER NOT NULL,"
+        "producer_commit TEXT NOT NULL,fold_cursor INTEGER NOT NULL,"
+        "receipt_digest BLOB NOT NULL);"
+        "CREATE TABLE bundle_proof("
+        "ordinal INTEGER PRIMARY KEY,component TEXT NOT NULL UNIQUE,"
+        "cursor INTEGER NOT NULL,first_height INTEGER NOT NULL,"
+        "last_height INTEGER NOT NULL,row_count INTEGER NOT NULL,"
+        "hash_bound_count INTEGER NOT NULL,component_digest BLOB NOT NULL);"
+        "CREATE TABLE coins("
+        "txid BLOB NOT NULL,vout INTEGER NOT NULL,value INTEGER NOT NULL,"
+        "script BLOB NOT NULL,height INTEGER NOT NULL,is_coinbase INTEGER NOT NULL,"
+        "PRIMARY KEY(txid,vout)) WITHOUT ROWID;"
+        );
+    ok = write_bundle_create_anchor_nullifier_tables(db, fault, ok);
+    ok = write_bundle_insert_coins(db, f, fault, ok);
+    ok = write_bundle_insert_source_receipt(db, f, fault, ok);
+    ok = write_bundle_insert_proof_rows(db, f, fault, ok);
+    ok = write_bundle_insert_anchor_rows(db, f, fault, ok);
+    ok = write_bundle_insert_nullifier_rows(db, f, fault, ok);
+    ok = write_bundle_insert_meta_row(db, f, fault, ok);
     if (ok && fault == CSI_EXTRA_SCHEMA_OBJECT)
         ok = exec_ok(db, "CREATE TABLE unexpected(payload BLOB)");
     if (ok && fault == CSI_EXTRA_SCHEMA_COLUMN)
@@ -941,13 +1021,8 @@ static bool write_bundle(struct csi_fixture *f, enum csi_fault fault)
     return ok && chmod(f->path, 0400) == 0;
 }
 
-static bool active_is(sqlite3 *db, const struct csi_fixture *f)
+static bool csi_active_is_rows_match(sqlite3 *db, const struct csi_fixture *f)
 {
-    uint8_t root[32]; int64_t txs=0,outs=0,supply=0;
-    if (coins_kv_count(db)!=2 || coins_kv_commitment(db,root)!=0 ||
-        memcmp(root,f->utxo_root,32)!=0 ||
-        !coins_kv_setinfo(db,&txs,&outs,&supply) || supply!=f->supply)
-        return false;
     for(int pool=0;pool<=1;pool++) {
         struct uint256 ar; memcpy(ar.data,f->anchors[pool].root,32);
         int64_t h=-1,c=-1; bool found=false,nff=false;
@@ -958,6 +1033,16 @@ static bool active_is(sqlite3 *db, const struct csi_fixture *f)
     }
     int64_t nc=-1; bool ncf=false;
     return nullifier_kv_activation_cursor(db,&nc,&ncf)&&ncf&&nc==f->boundary;
+}
+
+static bool active_is(sqlite3 *db, const struct csi_fixture *f)
+{
+    uint8_t root[32]; int64_t txs=0,outs=0,supply=0;
+    if (coins_kv_count(db)!=2 || coins_kv_commitment(db,root)!=0 ||
+        memcmp(root,f->utxo_root,32)!=0 ||
+        !coins_kv_setinfo(db,&txs,&outs,&supply) || supply!=f->supply)
+        return false;
+    return csi_active_is_rows_match(db, f);
 }
 
 static bool seed_active(sqlite3 *db, const struct csi_fixture *f)
@@ -1251,21 +1336,54 @@ static bool candidate_query_blob32(sqlite3 *db, const char *sql,
     return ok;
 }
 
-static bool candidate_progress_parity(
+static bool csi_candidate_meta_matches(
+    sqlite3 *db,const struct csi_fixture *f,const uint8_t admission[32],
+    bool ok)
+{
+    sqlite3_stmt *stmt=NULL;
+    if(ok) ok=sqlite3_prepare_v2(db,
+        "SELECT schema,artifact_digest,admission_receipt_digest "
+        "FROM consensus_state_candidate_meta WHERE singleton=1",
+        -1,&stmt,NULL)==SQLITE_OK&&
+        sqlite3_step(stmt)==SQLITE_ROW; // raw-sql-ok:test-read-only-assertion
+    if(ok) {
+        const char *schema=(const char *)sqlite3_column_text(stmt,0);
+        const void *artifact=sqlite3_column_blob(stmt,1);
+        const void *receipt=sqlite3_column_blob(stmt,2);
+        ok=schema&&strcmp(schema,CONSENSUS_STATE_CANDIDATE_SCHEMA)==0&&
+           artifact&&receipt&&sqlite3_column_bytes(stmt,1)==32&&
+           sqlite3_column_bytes(stmt,2)==32&&
+           memcmp(artifact,f->artifact,32)==0&&memcmp(receipt,admission,32)==0;
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool csi_candidate_source_receipt_matches(
     sqlite3 *db,const struct csi_fixture *f,const uint8_t admission[32])
 {
-    int32_t applied=-1; bool found=false;
-    if(!coins_kv_get_applied_height(db,&applied,&found)||!found||
-       applied!=f->height+1||!coins_kv_contains_refold_marker(db))
-        return false;
-    for(int pool=0;pool<=1;pool++) {
-        int64_t cursor=-1; bool cursor_found=false;
-        if(!anchor_kv_activation_cursor(db,pool,&cursor,&cursor_found)||
-           !cursor_found||cursor!=0) return false;
+    sqlite3_stmt *stmt=NULL;
+    bool ok=sqlite3_prepare_v2(db,
+        "SELECT schema,receipt_digest FROM consensus_state_source_receipt "
+        "WHERE singleton=1",-1,&stmt,NULL)==SQLITE_OK&&
+        sqlite3_step(stmt)==SQLITE_ROW; // raw-sql-ok:test-read-only-assertion
+    if(ok) {
+        const char *schema=(const char *)sqlite3_column_text(stmt,0);
+        const void *digest=sqlite3_column_blob(stmt,1);
+        const char *expected_schema = consensus_state_source_receipt_schema(
+            f->receipt.schema_version);
+        ok=schema&&expected_schema&&strcmp(schema,expected_schema)==0&&
+           digest&&sqlite3_column_bytes(stmt,1)==32&&
+           memcmp(digest,f->receipt.receipt_digest,32)==0;
     }
-    int64_t cursor=-1; bool cursor_found=false;
-    if(!nullifier_kv_activation_cursor(db,&cursor,&cursor_found)||
-       !cursor_found||cursor!=0) return false;
+    if(stmt) sqlite3_finalize(stmt);
+    stmt=NULL;
+    return csi_candidate_meta_matches(db,f,admission,ok);
+}
+
+static bool csi_candidate_stage_logs_match(
+    sqlite3 *db,const struct csi_fixture *f,const uint8_t admission[32])
+{
     int64_t count=-1;
     char sql[256];
     snprintf(sql,sizeof(sql),
@@ -1284,38 +1402,25 @@ static bool candidate_progress_parity(
         "SELECT count(*) FROM tip_finalize_log WHERE height=%d AND "
         "status='anchor' AND ok=1 AND tip_hash IS NOT NULL",f->height);
     if(!candidate_query_i64(db,sql,&count)||count!=1) return false;
-    sqlite3_stmt *stmt=NULL;
-    bool ok=sqlite3_prepare_v2(db,
-        "SELECT schema,receipt_digest FROM consensus_state_source_receipt "
-        "WHERE singleton=1",-1,&stmt,NULL)==SQLITE_OK&&
-        sqlite3_step(stmt)==SQLITE_ROW; // raw-sql-ok:test-read-only-assertion
-    if(ok) {
-        const char *schema=(const char *)sqlite3_column_text(stmt,0);
-        const void *digest=sqlite3_column_blob(stmt,1);
-        const char *expected_schema = consensus_state_source_receipt_schema(
-            f->receipt.schema_version);
-        ok=schema&&expected_schema&&strcmp(schema,expected_schema)==0&&
-           digest&&sqlite3_column_bytes(stmt,1)==32&&
-           memcmp(digest,f->receipt.receipt_digest,32)==0;
+    return csi_candidate_source_receipt_matches(db,f,admission);
+}
+
+static bool candidate_progress_parity(
+    sqlite3 *db,const struct csi_fixture *f,const uint8_t admission[32])
+{
+    int32_t applied=-1; bool found=false;
+    if(!coins_kv_get_applied_height(db,&applied,&found)||!found||
+       applied!=f->height+1||!coins_kv_contains_refold_marker(db))
+        return false;
+    for(int pool=0;pool<=1;pool++) {
+        int64_t cursor=-1; bool cursor_found=false;
+        if(!anchor_kv_activation_cursor(db,pool,&cursor,&cursor_found)||
+           !cursor_found||cursor!=0) return false;
     }
-    if(stmt) sqlite3_finalize(stmt);
-    stmt=NULL;
-    if(ok) ok=sqlite3_prepare_v2(db,
-        "SELECT schema,artifact_digest,admission_receipt_digest "
-        "FROM consensus_state_candidate_meta WHERE singleton=1",
-        -1,&stmt,NULL)==SQLITE_OK&&
-        sqlite3_step(stmt)==SQLITE_ROW; // raw-sql-ok:test-read-only-assertion
-    if(ok) {
-        const char *schema=(const char *)sqlite3_column_text(stmt,0);
-        const void *artifact=sqlite3_column_blob(stmt,1);
-        const void *receipt=sqlite3_column_blob(stmt,2);
-        ok=schema&&strcmp(schema,CONSENSUS_STATE_CANDIDATE_SCHEMA)==0&&
-           artifact&&receipt&&sqlite3_column_bytes(stmt,1)==32&&
-           sqlite3_column_bytes(stmt,2)==32&&
-           memcmp(artifact,f->artifact,32)==0&&memcmp(receipt,admission,32)==0;
-    }
-    if(stmt) sqlite3_finalize(stmt);
-    return ok;
+    int64_t cursor=-1; bool cursor_found=false;
+    if(!nullifier_kv_activation_cursor(db,&cursor,&cursor_found)||
+       !cursor_found||cursor!=0) return false;
+    return csi_candidate_stage_logs_match(db,f,admission);
 }
 
 /* Lower the compiled SHA3-checkpoint finality floor so the H*-climb leg below
@@ -1990,6 +2095,166 @@ static bool stale_generation_metadata_absent(sqlite3 *db)
 #define IVR_EPOCH_B_SOURCE_ID \
     "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22"
 
+static int csi_ivr_initial_and_honored_opens(struct csi_fixture *f, int dfd)
+{
+    int failures = 0;
+    uint64_t calls;
+
+    /* (1) No receipt yet: full deep scan runs, and a receipt is stored. */
+    struct consensus_state_artifact_evidence *ev1 = NULL;
+    struct zcl_result r1 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev1);
+    CSI_CHECK("ivr: first open admits", r1.ok && ev1 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: first open ran the deep scan", calls == 1);
+    struct consensus_state_bundle_manifest m1, m2;
+    memset(&m1, 0, sizeof(m1));
+    CSI_CHECK("ivr: first open manifest matches the fixture",
+              ev1 != NULL &&
+              consensus_state_artifact_evidence_manifest_copy(ev1, &m1) &&
+              m1.height == f->height &&
+              memcmp(m1.block_hash, f->block_hash, 32) == 0);
+    if (ev1)
+        consensus_state_artifact_evidence_free(ev1);
+
+    /* (2) Exact same bundle bytes + exact same verifier epoch: the receipt
+     * is honored and the deep scan is NOT re-entered, but the returned
+     * manifest is still byte-identical to the fully-verified one. */
+    struct consensus_state_artifact_evidence *ev2 = NULL;
+    struct zcl_result r2 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev2);
+    CSI_CHECK("ivr: second open admits", r2.ok && ev2 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: second open honored the receipt (deep scan NOT "
+              "re-entered)", calls == 1);
+    memset(&m2, 0, sizeof(m2));
+    CSI_CHECK("ivr: receipt-honored open returns the identical manifest",
+              ev2 != NULL &&
+              consensus_state_artifact_evidence_manifest_copy(ev2, &m2) &&
+              memcmp(&m2, &m1, sizeof(m1)) == 0);
+    if (ev2)
+        consensus_state_artifact_evidence_free(ev2);
+    return failures;
+}
+
+static int csi_ivr_epoch_and_slot_opens(struct csi_fixture *f,
+                                        struct csi_fixture *other, int dfd)
+{
+    int failures = 0;
+    uint64_t calls;
+
+    /* (3) A different verifying-binary build epoch is a different receipt
+     * key: NOT honored, deep scan runs again. */
+    consensus_state_producer_receipt_test_set_identity(IVR_EPOCH_B_SOURCE_ID,
+                                                        true);
+    struct consensus_state_artifact_evidence *ev3 = NULL;
+    struct zcl_result r3 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev3);
+    CSI_CHECK("ivr: different verifier epoch admits", r3.ok && ev3 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: different verifier epoch re-ran the deep scan",
+              calls == 2);
+    if (ev3)
+        consensus_state_artifact_evidence_free(ev3);
+
+    /* (4) Back to epoch A, but a DIFFERENT bundle file: the on-disk receipt
+     * (still keyed to `f`'s content from step 1/2) is NOT honored for
+     * `other`, and the deep scan runs again; `other`'s own receipt then
+     * overwrites the single-slot store. */
+    consensus_state_producer_receipt_test_set_identity(IVR_EPOCH_A_SOURCE_ID,
+                                                        true);
+    struct consensus_state_artifact_evidence *ev4 = NULL;
+    struct zcl_result r4 =
+        consensus_state_artifact_evidence_open(other->path, dfd, &ev4);
+    CSI_CHECK("ivr: different bundle admits", r4.ok && ev4 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: different bundle content re-ran the deep scan",
+              calls == 3);
+    if (ev4)
+        consensus_state_artifact_evidence_free(ev4);
+
+    /* (5) Re-opening the ORIGINAL bundle now finds `other`'s receipt in the
+     * single slot instead: a different bundle hash is NOT a match, so the
+     * deep scan correctly runs once more (never a false-positive honor). */
+    struct consensus_state_artifact_evidence *ev5 = NULL;
+    struct zcl_result r5 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev5);
+    CSI_CHECK("ivr: reopening original bundle after slot reuse admits",
+              r5.ok && ev5 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: reused-slot receipt was not mistakenly honored",
+              calls == 4);
+    if (ev5)
+        consensus_state_artifact_evidence_free(ev5);
+    return failures;
+}
+
+static int csi_ivr_corrupt_store_and_no_datadir_opens(struct csi_fixture *f,
+                                                      int dfd)
+{
+    int failures = 0;
+    uint64_t calls;
+
+    /* (6) The receipt now belongs to `f` again; confirm it re-honors. */
+    struct consensus_state_artifact_evidence *ev6 = NULL;
+    struct zcl_result r6 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev6);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: receipt re-honored once the slot returns to f",
+              r6.ok && ev6 != NULL && calls == 4);
+    if (ev6)
+        consensus_state_artifact_evidence_free(ev6);
+
+    /* (7) A corrupt receipt store fails soft to a full verify, and a fresh
+     * valid receipt is written over it. */
+    if (dfd >= 0) {
+        int cfd = openat(dfd, CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
+                         O_WRONLY | O_TRUNC | O_CLOEXEC);
+        CSI_CHECK("ivr: receipt corruption fixture opens", cfd >= 0);
+        if (cfd >= 0) {
+            uint8_t garbage[16];
+            memset(garbage, 0xAB, sizeof(garbage));
+            CSI_CHECK("ivr: receipt corruption fixture writes",
+                      write(cfd, garbage, sizeof(garbage)) ==
+                          (ssize_t)sizeof(garbage));
+            (void)close(cfd);
+        }
+    }
+    struct consensus_state_artifact_evidence *ev7 = NULL;
+    struct zcl_result r7 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev7);
+    CSI_CHECK("ivr: corrupt receipt store admits (fail-soft)",
+              r7.ok && ev7 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: corrupt receipt store fell back to a full verify",
+              calls == 5);
+    if (ev7)
+        consensus_state_artifact_evidence_free(ev7);
+
+    /* (8) The just-repaired receipt IS honored on the very next open. */
+    struct consensus_state_artifact_evidence *ev8 = NULL;
+    struct zcl_result r8 =
+        consensus_state_artifact_evidence_open(f->path, dfd, &ev8);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: repaired receipt is honored", r8.ok && ev8 != NULL &&
+                                                       calls == 5);
+    if (ev8)
+        consensus_state_artifact_evidence_free(ev8);
+
+    /* (9) No datadir capability (-1): always the full verify, receipt or
+     * not — admission must still succeed. */
+    struct consensus_state_artifact_evidence *ev9 = NULL;
+    struct zcl_result r9 =
+        consensus_state_artifact_evidence_open(f->path, -1, &ev9);
+    CSI_CHECK("ivr: no datadir capability admits", r9.ok && ev9 != NULL);
+    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
+    CSI_CHECK("ivr: no datadir capability never honors a receipt",
+              calls == 6);
+    if (ev9)
+        consensus_state_artifact_evidence_free(ev9);
+    return failures;
+}
+
 /* install-verify receipt: after a successful content verify, a
  * byte-identical bundle admitted again under the exact same verifying-binary
  * build epoch must skip the O(bundle-size) deep scan (asserted via the
@@ -2021,144 +2286,10 @@ static int install_verify_receipt_tests(const char *root)
     consensus_state_producer_receipt_test_set_identity(IVR_EPOCH_A_SOURCE_ID,
                                                         true);
     consensus_state_bundle_validate_deep_scan_calls_reset_for_test();
-    uint64_t calls;
 
-    /* (1) No receipt yet: full deep scan runs, and a receipt is stored. */
-    struct consensus_state_artifact_evidence *ev1 = NULL;
-    struct zcl_result r1 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev1);
-    CSI_CHECK("ivr: first open admits", r1.ok && ev1 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: first open ran the deep scan", calls == 1);
-    struct consensus_state_bundle_manifest m1, m2;
-    memset(&m1, 0, sizeof(m1));
-    CSI_CHECK("ivr: first open manifest matches the fixture",
-              ev1 != NULL &&
-              consensus_state_artifact_evidence_manifest_copy(ev1, &m1) &&
-              m1.height == f.height &&
-              memcmp(m1.block_hash, f.block_hash, 32) == 0);
-    if (ev1)
-        consensus_state_artifact_evidence_free(ev1);
-
-    /* (2) Exact same bundle bytes + exact same verifier epoch: the receipt
-     * is honored and the deep scan is NOT re-entered, but the returned
-     * manifest is still byte-identical to the fully-verified one. */
-    struct consensus_state_artifact_evidence *ev2 = NULL;
-    struct zcl_result r2 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev2);
-    CSI_CHECK("ivr: second open admits", r2.ok && ev2 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: second open honored the receipt (deep scan NOT "
-              "re-entered)", calls == 1);
-    memset(&m2, 0, sizeof(m2));
-    CSI_CHECK("ivr: receipt-honored open returns the identical manifest",
-              ev2 != NULL &&
-              consensus_state_artifact_evidence_manifest_copy(ev2, &m2) &&
-              memcmp(&m2, &m1, sizeof(m1)) == 0);
-    if (ev2)
-        consensus_state_artifact_evidence_free(ev2);
-
-    /* (3) A different verifying-binary build epoch is a different receipt
-     * key: NOT honored, deep scan runs again. */
-    consensus_state_producer_receipt_test_set_identity(IVR_EPOCH_B_SOURCE_ID,
-                                                        true);
-    struct consensus_state_artifact_evidence *ev3 = NULL;
-    struct zcl_result r3 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev3);
-    CSI_CHECK("ivr: different verifier epoch admits", r3.ok && ev3 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: different verifier epoch re-ran the deep scan",
-              calls == 2);
-    if (ev3)
-        consensus_state_artifact_evidence_free(ev3);
-
-    /* (4) Back to epoch A, but a DIFFERENT bundle file: the on-disk receipt
-     * (still keyed to `f`'s content from step 1/2) is NOT honored for
-     * `other`, and the deep scan runs again; `other`'s own receipt then
-     * overwrites the single-slot store. */
-    consensus_state_producer_receipt_test_set_identity(IVR_EPOCH_A_SOURCE_ID,
-                                                        true);
-    struct consensus_state_artifact_evidence *ev4 = NULL;
-    struct zcl_result r4 =
-        consensus_state_artifact_evidence_open(other.path, dfd, &ev4);
-    CSI_CHECK("ivr: different bundle admits", r4.ok && ev4 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: different bundle content re-ran the deep scan",
-              calls == 3);
-    if (ev4)
-        consensus_state_artifact_evidence_free(ev4);
-
-    /* (5) Re-opening the ORIGINAL bundle now finds `other`'s receipt in the
-     * single slot instead: a different bundle hash is NOT a match, so the
-     * deep scan correctly runs once more (never a false-positive honor). */
-    struct consensus_state_artifact_evidence *ev5 = NULL;
-    struct zcl_result r5 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev5);
-    CSI_CHECK("ivr: reopening original bundle after slot reuse admits",
-              r5.ok && ev5 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: reused-slot receipt was not mistakenly honored",
-              calls == 4);
-    if (ev5)
-        consensus_state_artifact_evidence_free(ev5);
-
-    /* (6) The receipt now belongs to `f` again; confirm it re-honors. */
-    struct consensus_state_artifact_evidence *ev6 = NULL;
-    struct zcl_result r6 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev6);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: receipt re-honored once the slot returns to f",
-              r6.ok && ev6 != NULL && calls == 4);
-    if (ev6)
-        consensus_state_artifact_evidence_free(ev6);
-
-    /* (7) A corrupt receipt store fails soft to a full verify, and a fresh
-     * valid receipt is written over it. */
-    if (dfd >= 0) {
-        int cfd = openat(dfd, CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
-                         O_WRONLY | O_TRUNC | O_CLOEXEC);
-        CSI_CHECK("ivr: receipt corruption fixture opens", cfd >= 0);
-        if (cfd >= 0) {
-            uint8_t garbage[16];
-            memset(garbage, 0xAB, sizeof(garbage));
-            CSI_CHECK("ivr: receipt corruption fixture writes",
-                      write(cfd, garbage, sizeof(garbage)) ==
-                          (ssize_t)sizeof(garbage));
-            (void)close(cfd);
-        }
-    }
-    struct consensus_state_artifact_evidence *ev7 = NULL;
-    struct zcl_result r7 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev7);
-    CSI_CHECK("ivr: corrupt receipt store admits (fail-soft)",
-              r7.ok && ev7 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: corrupt receipt store fell back to a full verify",
-              calls == 5);
-    if (ev7)
-        consensus_state_artifact_evidence_free(ev7);
-
-    /* (8) The just-repaired receipt IS honored on the very next open. */
-    struct consensus_state_artifact_evidence *ev8 = NULL;
-    struct zcl_result r8 =
-        consensus_state_artifact_evidence_open(f.path, dfd, &ev8);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: repaired receipt is honored", r8.ok && ev8 != NULL &&
-                                                       calls == 5);
-    if (ev8)
-        consensus_state_artifact_evidence_free(ev8);
-
-    /* (9) No datadir capability (-1): always the full verify, receipt or
-     * not — admission must still succeed. */
-    struct consensus_state_artifact_evidence *ev9 = NULL;
-    struct zcl_result r9 =
-        consensus_state_artifact_evidence_open(f.path, -1, &ev9);
-    CSI_CHECK("ivr: no datadir capability admits", r9.ok && ev9 != NULL);
-    calls = consensus_state_bundle_validate_deep_scan_calls_for_test();
-    CSI_CHECK("ivr: no datadir capability never honors a receipt",
-              calls == 6);
-    if (ev9)
-        consensus_state_artifact_evidence_free(ev9);
+    failures += csi_ivr_initial_and_honored_opens(&f, dfd);
+    failures += csi_ivr_epoch_and_slot_opens(&f, &other, dfd);
+    failures += csi_ivr_corrupt_store_and_no_datadir_opens(&f, dfd);
 
     consensus_state_producer_receipt_test_set_identity(NULL, false);
     if (dfd >= 0)
@@ -3484,54 +3615,54 @@ static int artifact_pinned_substitution_tests(const char *root)
 #include "utxo_copy_compare_selftests.h"
 #include "utxo_compare_command_selftests.h"
 
-static int test_consensus_state_snapshot_install_platform_arm(void)
-{
-    printf("\n=== consensus_state_snapshot_install ===\n");
-    int failures=0; char dir[256];
-    csi_make_tmpdir(dir, sizeof(dir));
-    failures += boot_install_gate_alias_tests(dir);
-    failures += boot_install_utxo_mirror_reset_tests(dir);
-    sqlite3 *db=NULL;
-    CSI_CHECK("active DB opens",sqlite3_open(":memory:",&db)==SQLITE_OK);
-    CSI_CHECK("shared bundle codec pinned SHA3 vectors",bundle_codec_kat());
-    struct csi_fixture a,b,inc;
-    bool fixtures=fixture_init(&a,dir,"a",0x10,40,true)&&
-                  fixture_init(&b,dir,"b",0x80,60,true)&&
-                  fixture_init(&inc,dir,"inc",0x40,80,false);
-    CSI_CHECK("fixtures build",fixtures);
-    CSI_CHECK("generation A active canary seeds",seed_active(db,&a));
-    CSI_CHECK("generation A coherent",active_is(db,&a));
+struct csi_install_scene {
+    sqlite3 *db;
+    char dir[256];
+    struct csi_fixture a, b, inc;
+    struct consensus_state_artifact_evidence *artifact;
+    struct zcl_result artifact_opened;
+    struct consensus_state_bundle_manifest admitted_manifest;
+    int candidate_dirfd;
+    uint8_t candidate_admission[32];
+    struct candidate_sidecar_hook sidecar_hook;
+    struct candidate_retained_writer_hook retained_writer;
+    char candidate_path[512];
+    struct stat candidate_stat;
+};
 
-    CSI_CHECK("generation B bundle writes",write_bundle(&b,CSI_VALID));
-    char sidecar[sizeof(b.path) + 16];
-    snprintf(sidecar,sizeof(sidecar),"%s-wal",b.path);
+static int csi_install_refusal_and_fault_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    CSI_CHECK("generation B bundle writes",write_bundle(&s->b,CSI_VALID));
+    char sidecar[sizeof(s->b.path) + 16];
+    snprintf(sidecar,sizeof(sidecar),"%s-wal",s->b.path);
     FILE *sidecar_file=fopen(sidecar,"wb");
     CSI_CHECK("unfinished bundle sidecar fixture writes",sidecar_file!=NULL);
     if(sidecar_file) fclose(sidecar_file);
     CSI_CHECK("unfinished bundle sidecar is refused",
-              install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
+              install(s->db,&s->b,CONSENSUS_INSTALL_FAIL_NONE,
                       CONSENSUS_INSTALL_REFUSED));
-    CSI_CHECK("sidecar refusal preserves generation A",active_is(db,&a));
+    CSI_CHECK("sidecar refusal preserves generation A",active_is(s->db,&s->a));
     unlink(sidecar);
     for(int fp=CONSENSUS_INSTALL_FAIL_AFTER_BUNDLE_OPEN;
         fp<=CONSENSUS_INSTALL_FAIL_AFTER_BUNDLE_VALIDATE;fp++) {
         char label[112]; snprintf(label,sizeof(label),"failpoint %d refuses",fp);
-        CSI_CHECK(label,install(db,&b,(enum consensus_state_install_failpoint)fp,
+        CSI_CHECK(label,install(s->db,&s->b,(enum consensus_state_install_failpoint)fp,
                                 CONSENSUS_INSTALL_INJECTED_FAILURE));
         snprintf(label,sizeof(label),"failpoint %d preserves A",fp);
-        CSI_CHECK(label,active_is(db,&a));
+        CSI_CHECK(label,active_is(s->db,&s->a));
     }
-    b.height++;
+    s->b.height++;
     CSI_CHECK("wrong caller height assertion is refused",
-              install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
+              install(s->db,&s->b,CONSENSUS_INSTALL_FAIL_NONE,
                       CONSENSUS_INSTALL_REFUSED));
-    b.height--;
-    b.block_hash[0]^=1;
+    s->b.height--;
+    s->b.block_hash[0]^=1;
     CSI_CHECK("wrong caller hash assertion is refused",
-              install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
+              install(s->db,&s->b,CONSENSUS_INSTALL_FAIL_NONE,
                       CONSENSUS_INSTALL_REFUSED));
-    b.block_hash[0]^=1;
-    CSI_CHECK("caller assertion refusals preserve generation A",active_is(db,&a));
+    s->b.block_hash[0]^=1;
+    CSI_CHECK("caller assertion refusals preserve generation A",active_is(s->db,&s->a));
 
     enum csi_fault faults[]={CSI_WRONG_UTXO_ROOT,CSI_WRONG_SUPPLY,
         CSI_WRONG_ANCHOR_DIGEST,CSI_WRONG_NF_DIGEST,CSI_BAD_TREE_ROOT,
@@ -3546,13 +3677,13 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
         CSI_DUPLICATE_NONFRONTIER_ANCHOR_HEIGHT,
         CSI_CORRUPT_NONTIP_ANCHOR_TREE,CSI_CORRUPT_TIP_ANCHOR_TREE};
     for(size_t i=0;i<sizeof(faults)/sizeof(faults[0]);i++) {
-        CSI_CHECK("malformed bundle writes",write_bundle(&b,faults[i]));
-        CSI_CHECK("malformed bundle refused",install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
+        CSI_CHECK("malformed bundle writes",write_bundle(&s->b,faults[i]));
+        CSI_CHECK("malformed bundle refused",install(s->db,&s->b,CONSENSUS_INSTALL_FAIL_NONE,
                                                       CONSENSUS_INSTALL_REFUSED));
-        CSI_CHECK("malformed bundle publishes nothing",active_is(db,&a));
+        CSI_CHECK("malformed bundle publishes nothing",active_is(s->db,&s->a));
         /* Reinitialize mutated in-memory metadata/tree roots for next case. */
-        fixture_free(&b);
-        CSI_CHECK("candidate fixture reinitialized",fixture_init(&b,dir,"b",0x80,60,true));
+        fixture_free(&s->b);
+        CSI_CHECK("candidate fixture reinitialized",fixture_init(&s->b,s->dir,"b",0x80,60,true));
     }
 
      /* D1 tip-frontier-only anchor verification:
@@ -3563,61 +3694,70 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
       *     rows are covered by the whole-file digest and the anchor_digest.
       * A valid multi-height bundle with a non-tip row is still admitted. */
     CSI_CHECK("D1: valid multiheight-anchor bundle writes",
-              write_bundle(&b, CSI_MULTIHEIGHT_VALID));
+              write_bundle(&s->b, CSI_MULTIHEIGHT_VALID));
     struct consensus_state_artifact_evidence *d1_ev = NULL;
     struct zcl_result d1_open =
-        consensus_state_artifact_evidence_open(b.path, -1, &d1_ev);
+        consensus_state_artifact_evidence_open(s->b.path, -1, &d1_ev);
     CSI_CHECK("D1: valid multiheight bundle admitted (non-tip rows accepted, "
               "tip Pedersen verified)", d1_open.ok && d1_ev != NULL);
     if (d1_ev)
         consensus_state_artifact_evidence_free(d1_ev);
-    fixture_free(&b);
+    fixture_free(&s->b);
     CSI_CHECK("D1: fixture reinit after positive control",
-              fixture_init(&b,dir,"b",0x80,60,true));
+              fixture_init(&s->b,s->dir,"b",0x80,60,true));
+    return failures;
+}
 
+static int csi_final_bundle_evidence_cases(struct csi_install_scene *s)
+{
+    int failures=0;
     /* Empty scripts are consensus-valid.  Keep one as a true zero-length
      * SQLite BLOB through admission, candidate copy, and activation. */
-    b.coins[1].script_len = 0;
-    CSI_CHECK("generation B final bundle writes",write_bundle(&b,CSI_VALID));
-    failures += artifact_checked_close_tests(b.path);
-    failures += csi_compare_cases(dir, &b);
-    failures += csi_compare_command_cases(dir, &b);
-    struct consensus_state_artifact_evidence *artifact = NULL;
-    struct zcl_result artifact_opened =
-        consensus_state_artifact_evidence_open(b.path, -1, &artifact);
+    s->b.coins[1].script_len = 0;
+    CSI_CHECK("generation B final bundle writes",write_bundle(&s->b,CSI_VALID));
+    failures += artifact_checked_close_tests(s->b.path);
+    failures += csi_compare_cases(s->dir, &s->b);
+    failures += csi_compare_command_cases(s->dir, &s->b);
+    s->artifact = NULL;
+    s->artifact_opened =
+        consensus_state_artifact_evidence_open(s->b.path, -1, &s->artifact);
     CSI_CHECK("valid artifact creates opaque evidence",
-              artifact_opened.ok && artifact != NULL);
-    struct consensus_state_bundle_manifest admitted_manifest;
+              s->artifact_opened.ok && s->artifact != NULL);
     uint8_t admitted_digest[32];
     CSI_CHECK("opaque evidence exposes only validated manifest copy",
               consensus_state_artifact_evidence_manifest_copy(
-                  artifact, &admitted_manifest) &&
-              admitted_manifest.height == b.height &&
-              memcmp(admitted_manifest.block_hash, b.block_hash, 32) == 0);
+                  s->artifact, &s->admitted_manifest) &&
+              s->admitted_manifest.height == s->b.height &&
+              memcmp(s->admitted_manifest.block_hash, s->b.block_hash, 32) == 0);
     CSI_CHECK("opaque evidence digest is the admitted artifact digest",
               consensus_state_artifact_evidence_digest(
-                  artifact, admitted_digest) &&
-              memcmp(admitted_digest, b.artifact, 32) == 0);
+                  s->artifact, admitted_digest) &&
+              memcmp(admitted_digest, s->b.artifact, 32) == 0);
+    return failures;
+}
 
-    failures += artifact_pinned_substitution_tests(dir);
-    failures += artifact_coin_iterator_tests(artifact);
-    failures += artifact_coin_interruption_tests(artifact);
+static int csi_artifact_rename_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    failures += artifact_pinned_substitution_tests(s->dir);
+    failures += artifact_coin_iterator_tests(s->artifact);
+    failures += artifact_coin_interruption_tests(s->artifact);
     struct consensus_state_artifact_coins *changed_iterator = NULL;
     bool changed_iterator_open = consensus_state_artifact_coins_begin(
-        artifact, &changed_iterator);
+        s->artifact, &changed_iterator);
     CSI_CHECK("changed-object iterator begins before replacement",
               changed_iterator_open);
 
-    char moved_path[sizeof(b.path) + 16];
-    snprintf(moved_path, sizeof(moved_path), "%s-moved", b.path);
+    char moved_path[sizeof(s->b.path) + 16];
+    snprintf(moved_path, sizeof(moved_path), "%s-moved", s->b.path);
     unlink(moved_path);
     /* Some supported filesystems expose second-granularity ctime. Cross one
      * complete tick so the metadata-receipt assertion is deterministic even
      * when admission and rename otherwise land in the same timestamp. */
     sleep(1);
     CSI_CHECK("admitted artifact can be renamed after descriptor pin",
-              rename(b.path, moved_path) == 0);
-    FILE *replacement = fopen(b.path, "wb");
+              rename(s->b.path, moved_path) == 0);
+    FILE *replacement = fopen(s->b.path, "wb");
     CSI_CHECK("path replacement fixture writes", replacement != NULL);
     if (replacement) {
         fputs("not the admitted artifact", replacement);
@@ -3625,49 +3765,46 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
     }
     CSI_CHECK("inode rename invalidates admitted metadata receipt",
               !consensus_state_artifact_evidence_manifest_copy(
-                  artifact, &admitted_manifest));
+                  s->artifact, &s->admitted_manifest));
     failures += artifact_coin_changed_object_test(
         changed_iterator_open, changed_iterator);
-    consensus_state_artifact_evidence_free(artifact);
-    artifact = NULL;
-    unlink(b.path);
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact = NULL;
+    unlink(s->b.path);
     CSI_CHECK("fixture restores admitted artifact path",
-              rename(moved_path, b.path) == 0);
+              rename(moved_path, s->b.path) == 0);
+    return failures;
+}
 
-    char symlink_path[sizeof(b.path) + 16];
-    snprintf(symlink_path, sizeof(symlink_path), "%s-link", b.path);
+static int csi_artifact_symlink_writable_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    char symlink_path[sizeof(s->b.path) + 16];
+    snprintf(symlink_path, sizeof(symlink_path), "%s-link", s->b.path);
     unlink(symlink_path);
     CSI_CHECK("bundle symlink fixture writes",
-              symlink(b.path, symlink_path) == 0);
-    artifact_opened = consensus_state_artifact_evidence_open(symlink_path, -1, &artifact);
+              symlink(s->b.path, symlink_path) == 0);
+    s->artifact_opened = consensus_state_artifact_evidence_open(symlink_path, -1, &s->artifact);
     CSI_CHECK("symlink artifact admission refuses",
-              !artifact_opened.ok && artifact == NULL);
+              !s->artifact_opened.ok && s->artifact == NULL);
     unlink(symlink_path);
     CSI_CHECK("writable artifact fixture enables owner write",
-              chmod(b.path, 0600) == 0);
-    artifact_opened = consensus_state_artifact_evidence_open(b.path, -1, &artifact);
+              chmod(s->b.path, 0600) == 0);
+    s->artifact_opened = consensus_state_artifact_evidence_open(s->b.path, -1, &s->artifact);
     CSI_CHECK("writable artifact admission refuses",
-              !artifact_opened.ok && artifact == NULL);
+              !s->artifact_opened.ok && s->artifact == NULL);
     CSI_CHECK("artifact fixture returns immutable",
-              chmod(b.path, 0400) == 0);
+              chmod(s->b.path, 0400) == 0);
+    return failures;
+}
 
-    /* A retained writer can restore bytes and mtime after a temporary rewrite,
-     * but Linux advances ctime. Admission must bind ctime so that semantic
-     * reads cannot be detached from the final byte image this way. */
-    int retained_fd = -1;
-    bool retained_ready = chmod(b.path, 0600) == 0;
-    if (retained_ready)
-        retained_fd = open(b.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    if (retained_fd < 0 || chmod(b.path, 0400) != 0)
-        retained_ready = false;
-    artifact_opened = retained_ready
-        ? consensus_state_artifact_evidence_open(b.path, -1, &artifact)
-        : ZCL_ERR(-1, "retained writer fixture setup failed");
-    CSI_CHECK("retained-writer fixture admits stable original",
-              artifact_opened.ok && artifact != NULL);
+static int csi_retained_writer_restore_cases(struct csi_install_scene *s,
+                                             int retained_fd)
+{
+    int failures=0;
     struct stat retained_before;
     uint8_t original_byte = 0;
-    bool restored = artifact && retained_fd >= 0 &&
+    bool restored = s->artifact && retained_fd >= 0 &&
         fstat(retained_fd, &retained_before) == 0 &&
         pread(retained_fd, &original_byte, 1, 100) == 1;
     uint8_t temporary_byte = (uint8_t)(original_byte ^ 1u);
@@ -3682,28 +3819,54 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
     if (restored)
         restored = futimens(retained_fd, restore_times) == 0;
     CSI_CHECK("retained writer restores exact bytes and mtime", restored);
+    return failures;
+}
+
+static int csi_retained_writer_receipt_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    /* A retained writer can restore bytes and mtime after a temporary rewrite,
+     * but Linux advances ctime. Admission must bind ctime so that semantic
+     * reads cannot be detached from the final byte image this way. */
+    int retained_fd = -1;
+    bool retained_ready = chmod(s->b.path, 0600) == 0;
+    if (retained_ready)
+        retained_fd = open(s->b.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (retained_fd < 0 || chmod(s->b.path, 0400) != 0)
+        retained_ready = false;
+    s->artifact_opened = retained_ready
+        ? consensus_state_artifact_evidence_open(s->b.path, -1, &s->artifact)
+        : ZCL_ERR(-1, "retained writer fixture setup failed");
+    CSI_CHECK("retained-writer fixture admits stable original",
+              s->artifact_opened.ok && s->artifact != NULL);
+    failures += csi_retained_writer_restore_cases(s, retained_fd);
     CSI_CHECK("ctime still invalidates restored retained-writer receipt",
-              artifact &&
-              !consensus_state_artifact_evidence_revalidate(artifact));
-    consensus_state_artifact_evidence_free(artifact);
-    artifact = NULL;
+              s->artifact &&
+              !consensus_state_artifact_evidence_revalidate(s->artifact));
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact = NULL;
     if (retained_fd >= 0)
         close(retained_fd);
     CSI_CHECK("valid artifact restores after retained-writer test",
-              write_bundle(&b, CSI_VALID));
+              write_bundle(&s->b, CSI_VALID));
+    return failures;
+}
 
-    artifact_opened = consensus_state_artifact_evidence_open(b.path, -1, &artifact);
+static int csi_artifact_mutation_receipt_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    s->artifact_opened = consensus_state_artifact_evidence_open(s->b.path, -1, &s->artifact);
     CSI_CHECK("mutation fixture admits original artifact",
-              artifact_opened.ok && artifact != NULL);
+              s->artifact_opened.ok && s->artifact != NULL);
     uint8_t receipt_digest[32];
     CSI_CHECK("validation receipt binds full file and local identity",
               consensus_state_artifact_evidence_receipt_digest(
-                  artifact, receipt_digest));
+                  s->artifact, receipt_digest));
     int mutate_fd = -1;
     uint8_t changed_byte = 0;
-    bool mutated = chmod(b.path, 0600) == 0;
+    bool mutated = chmod(s->b.path, 0600) == 0;
     if (mutated)
-        mutate_fd = open(b.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        mutate_fd = open(s->b.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
     if (mutate_fd < 0 || pread(mutate_fd, &changed_byte, 1, 100) != 1)
         mutated = false;
     changed_byte ^= 1u;
@@ -3712,133 +3875,112 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
         mutated = false;
     if (mutate_fd >= 0)
         close(mutate_fd);
-    if (chmod(b.path, 0400) != 0)
+    if (chmod(s->b.path, 0400) != 0)
         mutated = false;
     CSI_CHECK("post-validation mutation fixture writes", mutated);
     CSI_CHECK("complete-file mutation makes receipt stale",
-              !consensus_state_artifact_evidence_revalidate(artifact) &&
+              !consensus_state_artifact_evidence_revalidate(s->artifact) &&
               !consensus_state_artifact_evidence_receipt_digest(
-                  artifact, receipt_digest));
-    consensus_state_artifact_evidence_free(artifact);
-    artifact = NULL;
+                  s->artifact, receipt_digest));
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact = NULL;
     CSI_CHECK("valid artifact restores after mutation test",
-              write_bundle(&b, CSI_VALID));
+              write_bundle(&s->b, CSI_VALID));
+    return failures;
+}
 
-    failures += csi_sync_benchmark_install_case(db, &a, &b);
-
-    int candidate_dirfd=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-    CSI_CHECK("candidate output directory capability opens",candidate_dirfd>=0);
-    artifact_opened=consensus_state_artifact_evidence_open(b.path, -1, &artifact);
-    CSI_CHECK("candidate source admits immutable complete artifact",
-              artifact_opened.ok&&artifact!=NULL);
-    uint8_t candidate_admission[32];
-    CSI_CHECK("candidate source admission receipt is available",
-              consensus_state_artifact_evidence_receipt_digest(
-                  artifact,candidate_admission));
-#if defined(__APPLE__)
-    (void)digest_nonzero;
-    (void)candidate_file_digest;
-    (void)candidate_create_sidecar;
-    (void)candidate_retain_staging_writer;
-    (void)candidate_build_thread;
-    (void)candidate_progress_parity;
-    struct consensus_state_candidate_result unavailable_candidate;
-    CSI_CHECK("Darwin candidate staging refuses without O_TMPFILE authority",
-              !candidate_build(artifact,candidate_dirfd,
-                               "candidate.progress.kv",
-                               CONSENSUS_CANDIDATE_FAIL_NONE,
-                               &unavailable_candidate)&&
-              unavailable_candidate.status==
-                  CONSENSUS_CANDIDATE_OUTPUT_ERROR&&
-              strstr(unavailable_candidate.reason,
-                     "staging open failed")!=NULL&&
-              candidate_output_absent(candidate_dirfd,
-                                      "candidate.progress.kv")&&
-              candidate_staging_count(dir)==0);
-    CSI_CHECK("Darwin candidate refusal preserves active generation",
-              active_is(db,&a));
-    consensus_state_artifact_evidence_free(artifact);
-    artifact=NULL;
-    if(candidate_dirfd>=0) close(candidate_dirfd);
-#else
+#if !defined(__APPLE__)
+static int csi_candidate_name_and_failpoint_cases(struct csi_install_scene *s)
+{
+    int failures=0;
     struct consensus_state_candidate_result reserved;
     CSI_CHECK("candidate API cannot name the active progress store",
-              !candidate_build(artifact,candidate_dirfd,"progress.kv",
+              !candidate_build(s->artifact,s->candidate_dirfd,"progress.kv",
                                CONSENSUS_CANDIDATE_FAIL_NONE,&reserved)&&
               reserved.status==CONSENSUS_CANDIDATE_REFUSED&&
-              candidate_output_absent(candidate_dirfd,"progress.kv"));
+              candidate_output_absent(s->candidate_dirfd,"progress.kv"));
     CSI_CHECK("candidate active-store family refusal is case-independent",
-              !candidate_build(artifact,candidate_dirfd,"Progress.KV.next",
+              !candidate_build(s->artifact,s->candidate_dirfd,"Progress.KV.next",
                                CONSENSUS_CANDIDATE_FAIL_NONE,&reserved)&&
               reserved.status==CONSENSUS_CANDIDATE_REFUSED&&
-              candidate_output_absent(candidate_dirfd,"Progress.KV.next"));
+              candidate_output_absent(s->candidate_dirfd,"Progress.KV.next"));
     struct consensus_state_candidate_result short_name;
     CSI_CHECK("candidate short normalized name is handled safely",
-              candidate_build(artifact,candidate_dirfd,"x",
+              candidate_build(s->artifact,s->candidate_dirfd,"x",
                               CONSENSUS_CANDIDATE_FAIL_NONE,&short_name)&&
               short_name.status==CONSENSUS_CANDIDATE_VERIFIED_CONTAINED);
     CSI_CHECK("candidate short-name fixture removes",
-              unlinkat(candidate_dirfd,"x",0)==0);
+              unlinkat(s->candidate_dirfd,"x",0)==0);
     for(int fp=CONSENSUS_CANDIDATE_FAIL_AFTER_STAGING_OPEN;
         fp<=CONSENSUS_CANDIDATE_FAIL_AFTER_REOPEN;fp++) {
         char name[64],label[128];
         snprintf(name,sizeof(name),"failed-%d.progress.kv",fp);
         struct consensus_state_candidate_result failed;
         bool built=candidate_build(
-            artifact,candidate_dirfd,name,
+            s->artifact,s->candidate_dirfd,name,
             (enum consensus_state_candidate_failpoint)fp,&failed);
         snprintf(label,sizeof(label),"candidate failpoint %d is injected",fp);
         CSI_CHECK(label,!built&&
             failed.status==CONSENSUS_CANDIDATE_INJECTED_FAILURE);
         snprintf(label,sizeof(label),"candidate failpoint %d has no final",fp);
-        CSI_CHECK(label,candidate_output_absent(candidate_dirfd,name));
+        CSI_CHECK(label,candidate_output_absent(s->candidate_dirfd,name));
         snprintf(label,sizeof(label),"candidate failpoint %d cleans staging",fp);
-        CSI_CHECK(label,candidate_staging_count(dir)==0);
+        CSI_CHECK(label,candidate_staging_count(s->dir)==0);
         snprintf(label,sizeof(label),"candidate failpoint %d preserves active",fp);
-        CSI_CHECK(label,active_is(db,&a));
+        CSI_CHECK(label,active_is(s->db,&s->a));
     }
-    struct candidate_sidecar_hook sidecar_hook={
-        .dirfd=candidate_dirfd,
+    s->sidecar_hook=(struct candidate_sidecar_hook){
+        .dirfd=s->candidate_dirfd,
         .name="raced.progress.kv-wal",
     };
     consensus_state_snapshot_candidate_test_set_before_link_hook(
-        candidate_create_sidecar,&sidecar_hook);
+        candidate_create_sidecar,&s->sidecar_hook);
     struct consensus_state_candidate_result sidecar_race;
     CSI_CHECK("candidate late sidecar race refuses publication",
-              !candidate_build(artifact,candidate_dirfd,"raced.progress.kv",
+              !candidate_build(s->artifact,s->candidate_dirfd,"raced.progress.kv",
                                CONSENSUS_CANDIDATE_FAIL_NONE,&sidecar_race)&&
               sidecar_race.status==CONSENSUS_CANDIDATE_OUTPUT_ERROR&&
-              sidecar_hook.created&&
-              candidate_output_absent(candidate_dirfd,"raced.progress.kv"));
+              s->sidecar_hook.created&&
+              candidate_output_absent(s->candidate_dirfd,"raced.progress.kv"));
     CSI_CHECK("candidate sidecar race preserves active generation",
-              active_is(db,&a));
+              active_is(s->db,&s->a));
     CSI_CHECK("candidate sidecar race fixture removes",
-              unlinkat(candidate_dirfd,sidecar_hook.name,0)==0);
+              unlinkat(s->candidate_dirfd,s->sidecar_hook.name,0)==0);
+    return failures;
+}
 
-    struct candidate_retained_writer_hook retained_writer={
-        .dirfd=candidate_dirfd,
+static int csi_candidate_retained_writer_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    s->retained_writer=(struct candidate_retained_writer_hook){
+        .dirfd=s->candidate_dirfd,
         .writer_fd=-1,
     };
     consensus_state_snapshot_export_test_set_after_staging_create_hook(
-        candidate_retain_staging_writer,&retained_writer);
+        candidate_retain_staging_writer,&s->retained_writer);
     struct consensus_state_candidate_result retained_writer_result;
     CSI_CHECK("candidate retained writable descriptor refuses publication",
-              !candidate_build(artifact,candidate_dirfd,
+              !candidate_build(s->artifact,s->candidate_dirfd,
                                "retained-writer.progress.kv",
                                CONSENSUS_CANDIDATE_FAIL_NONE,
                                &retained_writer_result)&&
               retained_writer_result.status==
                   CONSENSUS_CANDIDATE_OUTPUT_ERROR&&
-              retained_writer.ran&&retained_writer.writer_fd>=0&&
-              candidate_output_absent(candidate_dirfd,
+              s->retained_writer.ran&&s->retained_writer.writer_fd>=0&&
+              candidate_output_absent(s->candidate_dirfd,
                                       "retained-writer.progress.kv")&&
-              candidate_staging_count(dir)==0);
-    if(retained_writer.writer_fd>=0) close(retained_writer.writer_fd);
+              candidate_staging_count(s->dir)==0);
+    if(s->retained_writer.writer_fd>=0) close(s->retained_writer.writer_fd);
+    return failures;
+}
 
+static int csi_candidate_concurrent_build_cases(struct csi_install_scene *s)
+{
+    int failures=0;
     struct candidate_thread_fixture concurrent[2]={
-        {.artifact=artifact,.dirfd=candidate_dirfd,
+        {.artifact=s->artifact,.dirfd=s->candidate_dirfd,
          .name="concurrent-a.progress.kv"},
-        {.artifact=artifact,.dirfd=candidate_dirfd,
+        {.artifact=s->artifact,.dirfd=s->candidate_dirfd,
          .name="concurrent-b.progress.kv"},
     };
     pthread_t candidate_threads[2];
@@ -3858,15 +4000,20 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
               concurrent[1].result.status==
                   CONSENSUS_CANDIDATE_VERIFIED_CONTAINED);
     CSI_CHECK("concurrent candidates publish complete immutable files",
-              !candidate_output_absent(candidate_dirfd,concurrent[0].name)&&
-              !candidate_output_absent(candidate_dirfd,concurrent[1].name)&&
-              candidate_staging_count(dir)==0);
-    (void)unlinkat(candidate_dirfd,concurrent[0].name,0);
-    (void)unlinkat(candidate_dirfd,concurrent[1].name,0);
+              !candidate_output_absent(s->candidate_dirfd,concurrent[0].name)&&
+              !candidate_output_absent(s->candidate_dirfd,concurrent[1].name)&&
+              candidate_staging_count(s->dir)==0);
+    (void)unlinkat(s->candidate_dirfd,concurrent[0].name,0);
+    (void)unlinkat(s->candidate_dirfd,concurrent[1].name,0);
+    return failures;
+}
 
+static int csi_candidate_publication_cases(struct csi_install_scene *s)
+{
+    int failures=0;
     struct consensus_state_candidate_result candidate_result;
     CSI_CHECK("complete evidence builds contained candidate generation",
-              candidate_build(artifact,candidate_dirfd,"candidate.progress.kv",
+              candidate_build(s->artifact,s->candidate_dirfd,"candidate.progress.kv",
                               CONSENSUS_CANDIDATE_FAIL_NONE,
                               &candidate_result)&&
               candidate_result.status==
@@ -3874,37 +4021,42 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
               candidate_result.source_clean&&
               candidate_result.validation_profile==
                   CONSENSUS_STATE_VALIDATION_FULL&&
-              candidate_result.height==b.height&&
+              candidate_result.height==s->b.height&&
               candidate_result.utxo_count==2&&
               candidate_result.anchor_count==2&&
               candidate_result.nullifier_count==2&&
-              memcmp(candidate_result.artifact_digest,b.artifact,32)==0&&
+              memcmp(candidate_result.artifact_digest,s->b.artifact,32)==0&&
               digest_nonzero(candidate_result.candidate_file_digest));
     CSI_CHECK("successful candidate leaves no private staging",
-              candidate_staging_count(dir)==0);
-    char candidate_path[512];
-    snprintf(candidate_path,sizeof(candidate_path),"%s/%s",dir,
+              candidate_staging_count(s->dir)==0);
+    snprintf(s->candidate_path,sizeof(s->candidate_path),"%s/%s",s->dir,
              "candidate.progress.kv");
-    struct stat candidate_stat;
     CSI_CHECK("candidate output is immutable regular file",
-              lstat(candidate_path,&candidate_stat)==0&&
-              S_ISREG(candidate_stat.st_mode)&&
-              (candidate_stat.st_mode&(S_IWUSR|S_IWGRP|S_IWOTH))==0);
+              lstat(s->candidate_path,&s->candidate_stat)==0&&
+              S_ISREG(s->candidate_stat.st_mode)&&
+              (s->candidate_stat.st_mode&(S_IWUSR|S_IWGRP|S_IWOTH))==0);
     uint8_t candidate_disk_digest[32];
     CSI_CHECK("candidate result binds exact final file bytes",
-              candidate_file_digest(candidate_path,candidate_disk_digest)&&
+              candidate_file_digest(s->candidate_path,candidate_disk_digest)&&
               memcmp(candidate_disk_digest,
                      candidate_result.candidate_file_digest,32)==0);
+    return failures;
+}
+
+static int csi_candidate_readback_and_collision_cases(
+    struct csi_install_scene *s)
+{
+    int failures=0;
     sqlite3 *candidate_db=NULL;
     CSI_CHECK("candidate independently opens read-only",
-              sqlite3_open_v2(candidate_path,&candidate_db,
+              sqlite3_open_v2(s->candidate_path,&candidate_db,
                               SQLITE_OPEN_READONLY|SQLITE_OPEN_NOMUTEX,
                               NULL)==SQLITE_OK);
     CSI_CHECK("candidate complete components equal admitted bundle",
-              candidate_db&&active_is(candidate_db,&b));
+              candidate_db&&active_is(candidate_db,&s->b));
     CSI_CHECK("candidate cursors, logs, base, and provenance are exact",
               candidate_db&&candidate_progress_parity(
-                  candidate_db,&b,candidate_admission));
+                  candidate_db,&s->b,s->candidate_admission));
     int64_t candidate_empty_scripts = -1;
     CSI_CHECK("candidate preserves empty script as zero-length BLOB",
               candidate_db&&candidate_query_i64(
@@ -3915,67 +4067,1099 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
     if(candidate_db) sqlite3_close(candidate_db);
     struct consensus_state_candidate_result collision;
     CSI_CHECK("candidate final name collision refuses no-replace",
-              !candidate_build(artifact,candidate_dirfd,"candidate.progress.kv",
+              !candidate_build(s->artifact,s->candidate_dirfd,"candidate.progress.kv",
                                CONSENSUS_CANDIDATE_FAIL_NONE,&collision)&&
               collision.status==CONSENSUS_CANDIDATE_REFUSED);
     struct stat candidate_after_collision;
     CSI_CHECK("candidate collision preserves exact published inode",
-              lstat(candidate_path,&candidate_after_collision)==0&&
-              candidate_after_collision.st_dev==candidate_stat.st_dev&&
-              candidate_after_collision.st_ino==candidate_stat.st_ino&&
-              candidate_after_collision.st_size==candidate_stat.st_size);
+              lstat(s->candidate_path,&candidate_after_collision)==0&&
+              candidate_after_collision.st_dev==s->candidate_stat.st_dev&&
+              candidate_after_collision.st_ino==s->candidate_stat.st_ino&&
+              candidate_after_collision.st_size==s->candidate_stat.st_size);
     char active_candidate_path[512];
-    snprintf(active_candidate_path,sizeof(active_candidate_path),"%s/%s",dir,
+    snprintf(active_candidate_path,sizeof(active_candidate_path),"%s/%s",s->dir,
              "progress.kv");
     CSI_CHECK("contained candidate can be moved only for boot refusal test",
-              rename(candidate_path,active_candidate_path)==0&&
+              rename(s->candidate_path,active_candidate_path)==0&&
               chmod(active_candidate_path,0600)==0);
     CSI_CHECK("progress store refuses admission-only candidate authority",
-              !progress_store_open(dir)&&progress_store_db()==NULL);
+              !progress_store_open(s->dir)&&progress_store_db()==NULL);
     CSI_CHECK("contained candidate restores after boot refusal test",
               chmod(active_candidate_path,0400)==0&&
-              rename(active_candidate_path,candidate_path)==0);
+              rename(active_candidate_path,s->candidate_path)==0);
     CSI_CHECK("candidate construction never mutates active generation",
-              active_is(db,&a));
-    consensus_state_artifact_evidence_free(artifact);
-    artifact=NULL;
-    unlink(candidate_path);
-    if(candidate_dirfd>=0) close(candidate_dirfd);
+              active_is(s->db,&s->a));
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact=NULL;
+    unlink(s->candidate_path);
+    if(s->candidate_dirfd>=0) close(s->candidate_dirfd);
+    return failures;
+}
 #endif
 
-    b.anchors[0].height = b.height - 1;
-    b.anchors[1].height = b.height - 1;
+static int csi_candidate_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    s->candidate_dirfd=open(s->dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    CSI_CHECK("candidate output directory capability opens",s->candidate_dirfd>=0);
+    s->artifact_opened=consensus_state_artifact_evidence_open(s->b.path, -1, &s->artifact);
+    CSI_CHECK("candidate source admits immutable complete artifact",
+              s->artifact_opened.ok&&s->artifact!=NULL);
+    CSI_CHECK("candidate source admission receipt is available",
+              consensus_state_artifact_evidence_receipt_digest(
+                  s->artifact,s->candidate_admission));
+#if defined(__APPLE__)
+    (void)digest_nonzero;
+    (void)candidate_file_digest;
+    (void)candidate_create_sidecar;
+    (void)candidate_retain_staging_writer;
+    (void)candidate_build_thread;
+    (void)candidate_progress_parity;
+    struct consensus_state_candidate_result unavailable_candidate;
+    CSI_CHECK("Darwin candidate staging refuses without O_TMPFILE authority",
+              !candidate_build(s->artifact,s->candidate_dirfd,
+                               "candidate.progress.kv",
+                               CONSENSUS_CANDIDATE_FAIL_NONE,
+                               &unavailable_candidate)&&
+              unavailable_candidate.status==
+                  CONSENSUS_CANDIDATE_OUTPUT_ERROR&&
+              strstr(unavailable_candidate.reason,
+                     "staging open failed")!=NULL&&
+              candidate_output_absent(s->candidate_dirfd,
+                                      "candidate.progress.kv")&&
+              candidate_staging_count(s->dir)==0);
+    CSI_CHECK("Darwin candidate refusal preserves active generation",
+              active_is(s->db,&s->a));
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact=NULL;
+    if(s->candidate_dirfd>=0) close(s->candidate_dirfd);
+#else
+    failures += csi_candidate_name_and_failpoint_cases(s);
+    failures += csi_candidate_retained_writer_cases(s);
+    failures += csi_candidate_concurrent_build_cases(s);
+    failures += csi_candidate_publication_cases(s);
+    failures += csi_candidate_readback_and_collision_cases(s);
+#endif
+    return failures;
+}
+
+static int csi_unchanged_frontier_incomplete_cases(struct csi_install_scene *s)
+{
+    int failures=0;
+    s->b.anchors[0].height = s->b.height - 1;
+    s->b.anchors[1].height = s->b.height - 1;
     CSI_CHECK("unchanged-frontier bundle writes with latest roots below H",
-              write_bundle(&b,CSI_VALID));
+              write_bundle(&s->b,CSI_VALID));
     CSI_CHECK("latest roots below H validate without fabricating anchor rows",
-              install(db,&b,CONSENSUS_INSTALL_FAIL_NONE,
+              install(s->db,&s->b,CONSENSUS_INSTALL_FAIL_NONE,
                       CONSENSUS_INSTALL_VERIFIED_CONTAINED));
     CSI_CHECK("contained older-frontier claim preserves generation A",
-              active_is(db,&a));
-    CSI_CHECK("incomplete bundle writes",write_bundle(&inc,CSI_VALID));
+              active_is(s->db,&s->a));
+    CSI_CHECK("incomplete bundle writes",write_bundle(&s->inc,CSI_VALID));
     CSI_CHECK("valid incomplete bundle is verified but contained",
-              install(db,&inc,CONSENSUS_INSTALL_FAIL_NONE,
+              install(s->db,&s->inc,CONSENSUS_INSTALL_FAIL_NONE,
                       CONSENSUS_INSTALL_VERIFIED_CONTAINED));
-    CSI_CHECK("contained incomplete bundle preserves generation A",active_is(db,&a));
-    int incomplete_dirfd=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-    artifact_opened=consensus_state_artifact_evidence_open(inc.path, -1, &artifact);
+    CSI_CHECK("contained incomplete bundle preserves generation A",active_is(s->db,&s->a));
+    int incomplete_dirfd=open(s->dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+    s->artifact_opened=consensus_state_artifact_evidence_open(s->inc.path, -1, &s->artifact);
     CSI_CHECK("incomplete artifact can be admitted for contained inspection",
-              artifact_opened.ok&&artifact!=NULL&&incomplete_dirfd>=0);
+              s->artifact_opened.ok&&s->artifact!=NULL&&incomplete_dirfd>=0);
     struct consensus_state_candidate_result incomplete_candidate;
     CSI_CHECK("incomplete shielded history cannot become a candidate",
-              !candidate_build(artifact,incomplete_dirfd,
+              !candidate_build(s->artifact,incomplete_dirfd,
                                "incomplete.progress.kv",
                                CONSENSUS_CANDIDATE_FAIL_NONE,
                                &incomplete_candidate)&&
               incomplete_candidate.status==CONSENSUS_CANDIDATE_REFUSED&&
               candidate_output_absent(incomplete_dirfd,
                                       "incomplete.progress.kv")&&
-              candidate_staging_count(dir)==0);
+              candidate_staging_count(s->dir)==0);
     CSI_CHECK("incomplete candidate refusal preserves generation A",
-              active_is(db,&a));
-    consensus_state_artifact_evidence_free(artifact);
-    artifact=NULL;
+              active_is(s->db,&s->a));
+    consensus_state_artifact_evidence_free(s->artifact);
+    s->artifact=NULL;
     if(incomplete_dirfd>=0) close(incomplete_dirfd);
+    return failures;
+}
+
+struct csi_activate_scene {
+    struct csi_fixture *b;
+    const char *dir;
+    char active_dir[320];
+    sqlite3 *pdb;
+    int active_dir_fd;
+    struct incremental_merkle_tree gate_tree;
+    struct uint256 gate_root;
+    int64_t gate_h;
+    struct consensus_state_activate_request areq;
+    struct consensus_state_activate_result ares;
+    struct consensus_state_artifact_evidence *ev;
+    struct zcl_result evr;
+    struct consensus_state_publication_cas_inputs cin;
+    struct consensus_state_publication_decision_record dec;
+    struct consensus_state_publication_decision_record active_decision;
+};
+
+static int csi_activate_open_store(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* Restore b's anchor heights so anchor height == block height holds
+     * for active_is below. */
+    s->b->anchors[0].height = s->b->height;
+    s->b->anchors[1].height = s->b->height;
+    snprintf(s->active_dir, sizeof(s->active_dir), "%s/activate", s->dir);
+    CSI_CHECK("activate: datadir", mkdir(s->active_dir, 0700) == 0);
+    CSI_CHECK("activate: live progress store opens",
+              progress_store_open(s->active_dir));
+    s->pdb = progress_store_db();
+    s->active_dir_fd = open(s->active_dir,
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    reducer_frontier_test_set_compiled_anchor(0);
+    return failures;
+}
+
+static int csi_activate_seed_wedged_store(struct csi_activate_scene *s)
+{
+    int failures=0;
+    uint8_t borrowed_txid[32];
+    memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
+    const uint8_t borrowed_script[] = {0x51};
+    CSI_CHECK("activate: wedged store seeds (borrowed coin, empty anchors, "
+              "positive activation cursor)",
+              s->pdb && coins_kv_ensure_schema(s->pdb) &&
+              progress_meta_table_ensure(s->pdb) &&
+              anchor_kv_ensure_schema(s->pdb) &&
+              nullifier_kv_ensure_schema(s->pdb) &&
+              anchor_kv_initialize_history(s->pdb, s->b->height) &&
+              nullifier_kv_initialize_history(s->pdb, s->b->height) &&
+              coins_kv_add(s->pdb, borrowed_txid, 0, 4242, s->b->height, false,
+                           borrowed_script, sizeof(borrowed_script)));
+    return failures;
+}
+
+static int csi_activate_seed_stale_metadata(struct csi_activate_scene *s)
+{
+    int failures=0;
+    const char replay_value[] = "60";
+    uint8_t backfill_binding[32];
+    memset(backfill_binding, 0x7b, sizeof(backfill_binding));
+    const uint8_t refold_target[4] = {
+        (uint8_t)(s->b->height & 0xff),
+        (uint8_t)((s->b->height >> 8) & 0xff),
+        (uint8_t)((s->b->height >> 16) & 0xff),
+        (uint8_t)((s->b->height >> 24) & 0xff),
+    };
+    const uint8_t one = 1;
+    CSI_CHECK("activate: wedge carries stale recovery and generation metadata",
+              progress_meta_set(s->pdb, SHIELDED_REPLAY_TARGET_KEY,
+                                replay_value, sizeof(replay_value) - 1) &&
+              progress_meta_set(s->pdb, SHIELDED_REPLAY_NEXT_KEY,
+                                replay_value, sizeof(replay_value) - 1) &&
+              progress_meta_set(s->pdb, SHIELDED_REPLAY_SPROUT_STARTED_KEY,
+                                "1", 1) &&
+              progress_meta_set(s->pdb, SHIELDED_REPLAY_SAPLING_STARTED_KEY,
+                                "1", 1) &&
+              progress_meta_set(s->pdb, NULLIFIER_BACKFILL_RESUME_KEY,
+                                replay_value, sizeof(replay_value) - 1) &&
+              progress_meta_set(s->pdb, NULLIFIER_BACKFILL_CHAIN_KEY,
+                                backfill_binding,
+                                sizeof(backfill_binding)) &&
+              progress_meta_set(s->pdb, REFOLD_IN_PROGRESS_KEY, &one, 1) &&
+              progress_meta_set(s->pdb, REFOLD_FROM_ANCHOR_KEY, &one, 1) &&
+              progress_meta_set(s->pdb, REFOLD_FROM_ANCHOR_TARGET_KEY,
+                                refold_target, sizeof(refold_target)) &&
+              refold_progress_refresh(s->pdb) && refold_in_progress() &&
+              refold_from_anchor_active() &&
+              hs_seed_current_frontier(s->pdb, s->b->height, s->b->block_hash) &&
+              seed_stale_generation_metadata(s->pdb) &&
+              stale_generation_metadata_present(s->pdb));
+    return failures;
+}
+
+static int csi_activate_init_request(struct csi_activate_scene *s)
+{
+    int failures=0;
+    s->gate_h = -1;
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: pre-install sapling gate is HISTORY_INCOMPLETE "
+              "(the wedge)",
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) ==
+                  ANCHOR_KV_HISTORY_INCOMPLETE);
+
+    memset(&s->areq, 0, sizeof(s->areq));
+    s->areq.expected_height = s->b->height;
+    memcpy(s->areq.expected_block_hash, s->b->block_hash, 32);
+    s->areq.datadir_fd = s->active_dir_fd;
+    s->areq.datadir_display = s->active_dir;
+
+    /* Production is fail-closed even in this test binary: containment is
+     * proven at (ii-b) below against a fully ADMIT-worthy bundle. Enable
+     * the seam only for the hermetic transaction exercises. */
+    s->areq.bundle_path = s->b->path;
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        true);
+    return failures;
+}
+
+static int csi_activate_tampered_bundle_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (i) Negative — a tampered (bad UTXO root) bundle must refuse. */
+    CSI_CHECK("activate: tampered bundle writes",
+              write_bundle(s->b, CSI_WRONG_UTXO_ROOT));
+    s->areq.bundle_path = s->b->path;
+    CSI_CHECK("activate: tampered bundle refuses with a typed reason",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+              !s->ares.activated &&
+              s->ares.status != CONSENSUS_INSTALL_ACTIVATED &&
+              s->ares.reason[0] != '\0');
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: tampered refusal leaves the store wedged/intact",
+              coins_kv_count(s->pdb) == 1 &&
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) ==
+                  ANCHOR_KV_HISTORY_INCOMPLETE);
+    return failures;
+}
+
+static int csi_activate_cas_gate_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (ii) Negative — a non-ADMIT publication-CAS decision gates out the
+     * install. Build cas_decide inputs from the validated artifact; a
+     * durable frontier BEHIND the bundle height yields REFUSED. */
+    CSI_CHECK("activate: valid complete bundle restored",
+              write_bundle(s->b, CSI_VALID));
+    CSI_CHECK("activate: valid bundle without an ADMIT receipt refuses",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+              strstr(s->ares.reason, "exact CAS-admitted") != NULL &&
+              coins_kv_count(s->pdb) == 1);
+    s->ev = NULL;
+    s->evr =
+        consensus_state_artifact_evidence_open(s->b->path, -1, &s->ev);
+    memset(&s->cin, 0, sizeof(s->cin));
+    bool cin_ok = s->evr.ok && s->ev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ev, &s->cin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ev, s->cin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ev, s->cin.artifact_receipt_digest);
+    s->cin.chain_evidence_present = true;
+    s->cin.chain_bound_to_artifact = true;
+    memset(s->cin.chain_evidence_digest, 0xa5, 32);
+    s->cin.source_receipt_present = true;
+    s->cin.source_receipt = s->b->receipt;
+    s->cin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
+    s->cin.frontier_known = true;
+    memcpy(s->cin.frontier_hash, s->b->block_hash, 32);
+    memset(&s->active_decision, 0, sizeof(s->active_decision));
+    s->cin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    CSI_CHECK("activate: complete bundle + bound evidence CAS-decides ADMIT",
+              cin_ok && s->dec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
+        s->active_decision = s->dec;
+        memcpy(s->areq.expected_artifact_receipt_digest,
+               s->dec.artifact_receipt_digest, 32);
+        s->areq.publication_decision = &s->active_decision;
+    }
+    s->cin.frontier_height = s->b->height - 1;
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    bool refused = s->dec.decision != CONSENSUS_PUBLICATION_ADMIT &&
+                   s->dec.refusal ==
+                       CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND;
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) /* gate: never reached */
+        (void)consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares);
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: non-ADMIT CAS gates out the install (store "
+              "untouched, still wedged)",
+              refused && coins_kv_count(s->pdb) == 1 &&
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) ==
+                  ANCHOR_KV_HISTORY_INCOMPLETE);
+    return failures;
+}
+
+static int csi_activate_path_replacement_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* Replace the admitted pathname with a fresh, independently valid
+     * inode carrying the same logical bundle and height/hash. The old CAS
+     * receipt must not authorize it. */
+    struct stat admitted_path_stat, replacement_path_stat;
+    bool admitted_stat_ok = lstat(s->b->path, &admitted_path_stat) == 0;
+    CSI_CHECK("activate: same-height/hash pathname replacement writes",
+              admitted_stat_ok && write_bundle(s->b, CSI_VALID) &&
+              lstat(s->b->path, &replacement_path_stat) == 0 &&
+              (replacement_path_stat.st_dev != admitted_path_stat.st_dev ||
+               replacement_path_stat.st_ino != admitted_path_stat.st_ino));
+    CSI_CHECK("activate: stale ADMIT receipt refuses pathname replacement",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+              strstr(s->ares.reason, "exact CAS-admitted") != NULL &&
+              coins_kv_count(s->pdb) == 1);
+    if (s->ev)
+        consensus_state_artifact_evidence_free(s->ev);
+    return failures;
+}
+
+static int csi_activate_source_mutation_cases(struct csi_activate_scene *s,
+                                              int retained_writer_fd)
+{
+    int failures=0;
+    struct activate_retained_writer_hook mutate_hook = {
+        .writer_fd = retained_writer_fd,
+    };
+    consensus_state_snapshot_install_activate_test_set_after_stream_hook(
+        activate_mutate_retained_writer, &mutate_hook);
+    bool mutation_refused =
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares);
+    consensus_state_snapshot_install_activate_test_set_after_stream_hook(
+        NULL, NULL);
+    CSI_CHECK("activate: post-stream source mutation rolls back before COMMIT",
+              mutation_refused && mutate_hook.ran && mutate_hook.mutated &&
+              strstr(s->ares.reason,
+                     "artifact evidence changed during activation stream") !=
+                  NULL &&
+              coins_kv_count(s->pdb) == 1);
+    if (retained_writer_fd >= 0)
+        (void)close(retained_writer_fd);
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_retained_writer_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* A retained writable descriptor can still alter a mode-0400 inode.
+     * Mutate after the stream but before COMMIT and prove the final source
+     * revalidation rolls the live transaction back. */
+    int retained_writer_fd = -1;
+    bool writer_ready = chmod(s->b->path, 0600) == 0 &&
+                        (retained_writer_fd =
+                             open(s->b->path, O_RDWR | O_CLOEXEC)) >= 0 &&
+                        chmod(s->b->path, 0400) == 0;
+    CSI_CHECK("activate: retained writer fixture opens before admission",
+              writer_ready);
+    s->ev = NULL;
+    s->evr = consensus_state_artifact_evidence_open(s->b->path, -1, &s->ev);
+    bool replacement_cin_ok = s->evr.ok && s->ev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ev, &s->cin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ev, s->cin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ev, s->cin.artifact_receipt_digest);
+    s->cin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    CSI_CHECK("activate: replacement receives a fresh exact ADMIT receipt",
+              replacement_cin_ok &&
+              s->dec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
+        s->active_decision = s->dec;
+        memcpy(s->areq.expected_artifact_receipt_digest,
+               s->dec.artifact_receipt_digest, 32);
+        s->areq.publication_decision = &s->active_decision;
+    }
+    if (s->ev)
+        consensus_state_artifact_evidence_free(s->ev);
+    failures += csi_activate_source_mutation_cases(s, retained_writer_fd);
+    return failures;
+}
+
+static int csi_activate_transient_restore_cases(struct csi_activate_scene *s,
+                                                int transient_writer_fd)
+{
+    int failures=0;
+    struct activate_transient_restore_hook transient_hook = {
+        .writer_fd = transient_writer_fd,
+        .progress_db = s->pdb,
+    };
+    consensus_state_snapshot_install_activate_test_set_after_stream_hook(
+        activate_transient_restore_and_corrupt_destination,
+        &transient_hook);
+    bool transient_refused =
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares);
+    consensus_state_snapshot_install_activate_test_set_after_stream_hook(
+        NULL, NULL);
+    CSI_CHECK("activate: transient source restore cannot hide bad "
+              "destination state",
+              transient_refused && transient_hook.ran &&
+              transient_hook.source_mutated &&
+              transient_hook.source_restored &&
+              transient_hook.destination_mutated &&
+              strstr(s->ares.reason,
+                     "installed destination failed nullifier digest") !=
+                  NULL &&
+              coins_kv_count(s->pdb) == 1);
+    if (transient_writer_fd >= 0)
+        (void)close(transient_writer_fd);
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_transient_writer_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* The mutated inode needs a new valid artifact; retain a writer before
+     * the next admission. */
+    CSI_CHECK("activate: valid artifact restored after source mutation",
+              write_bundle(s->b, CSI_VALID));
+    int transient_writer_fd = -1;
+    bool transient_writer_ready = chmod(s->b->path, 0600) == 0 &&
+        (transient_writer_fd = open(s->b->path, O_RDWR | O_CLOEXEC)) >= 0 &&
+        chmod(s->b->path, 0400) == 0;
+    CSI_CHECK("activate: transient writer fixture opens before admission",
+              transient_writer_ready);
+    s->ev = NULL;
+    s->evr = consensus_state_artifact_evidence_open(s->b->path, -1, &s->ev);
+    bool transient_cin_ok = s->evr.ok && s->ev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ev, &s->cin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ev, s->cin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ev, s->cin.artifact_receipt_digest);
+    s->cin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    CSI_CHECK("activate: transient fixture receives exact ADMIT receipt",
+              transient_cin_ok &&
+              s->dec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
+        s->active_decision = s->dec;
+        memcpy(s->areq.expected_artifact_receipt_digest,
+               s->dec.artifact_receipt_digest, 32);
+        s->areq.publication_decision = &s->active_decision;
+    }
+    if (s->ev)
+        consensus_state_artifact_evidence_free(s->ev);
+    failures += csi_activate_transient_restore_cases(s, transient_writer_fd);
+    return failures;
+}
+
+static int csi_activate_final_admit_wrong_dir_cases(
+    struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* Restored bytes remain semantically valid, but the exact CAS receipt
+     * is metadata-bound, so positive activation requires re-admission. */
+    s->ev = NULL;
+    s->evr = consensus_state_artifact_evidence_open(s->b->path, -1, &s->ev);
+    bool final_cin_ok = s->evr.ok && s->ev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ev, &s->cin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ev, s->cin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ev, s->cin.artifact_receipt_digest);
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    CSI_CHECK("activate: transient-restored artifact receives final ADMIT "
+              "receipt",
+              final_cin_ok &&
+              s->dec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
+        s->active_decision = s->dec;
+        memcpy(s->areq.expected_artifact_receipt_digest,
+               s->dec.artifact_receipt_digest, 32);
+        s->areq.publication_decision = &s->active_decision;
+    }
+    if (s->ev)
+        consensus_state_artifact_evidence_free(s->ev);
+
+    /* The classified directory capability is part of activation
+     * authority; a same-process handle for another directory must refuse
+     * before backup or mutation. */
+    int wrong_dir_fd = open(s->dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int admitted_dir_fd = s->areq.datadir_fd;
+    s->areq.datadir_fd = wrong_dir_fd;
+    CSI_CHECK("activate: mismatched datadir capability refuses",
+              wrong_dir_fd >= 0 &&
+              !consensus_state_snapshot_install_activate(
+                  s->pdb, &s->areq, &s->ares) &&
+              strstr(s->ares.reason, "classified datadir capability") !=
+                  NULL &&
+              coins_kv_count(s->pdb) == 1);
+    s->areq.datadir_fd = admitted_dir_fd;
+    if (wrong_dir_fd >= 0)
+        (void)close(wrong_dir_fd);
+    return failures;
+}
+
+static int csi_activate_boundary_race_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* A writer outside the process discipline can commit in the narrow
+     * VACUUM-to-BEGIN boundary. The same singleton connection's
+     * data_version fence must catch it before any cutover write, while the
+     * prior-generation image remains the state from before that commit. */
+    char progress_path[384];
+    /* A4: the live kernel singleton is consensus.db; the boundary writer
+     * must commit to the SAME file so its data_version bump is fenced. */
+    snprintf(progress_path, sizeof(progress_path), "%s/consensus.db",
+             s->active_dir);
+    sqlite3 *boundary_writer = NULL;
+    struct activate_boundary_commit_hook boundary_hook = {
+        .writer = NULL,
+    };
+    bool boundary_open = sqlite3_open_v2(
+        progress_path, &boundary_writer,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) == SQLITE_OK;
+    boundary_hook.writer = boundary_writer;
+    consensus_state_snapshot_install_activate_test_set_after_backup_hook(
+        activate_commit_between_backup_and_begin, &boundary_hook);
+    bool boundary_refused =
+        !consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares);
+    consensus_state_snapshot_install_activate_test_set_after_backup_hook(
+        NULL, NULL);
+    if (boundary_writer)
+        sqlite3_close(boundary_writer);
+    sqlite3 *boundary_prior = NULL;
+    bool boundary_prior_ok = s->ares.prior_generation_path[0] != '\0' &&
+        sqlite3_open_v2(s->ares.prior_generation_path, &boundary_prior,
+                        SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        boundary_prior;
+    CSI_CHECK("activate: commit between backup and BEGIN is fenced before "
+              "cutover",
+              boundary_open && boundary_refused && boundary_hook.ran &&
+              boundary_hook.committed &&
+              strstr(s->ares.reason,
+                     "changed between prior-generation backup") != NULL &&
+              hs_meta_present(s->pdb, "activate_boundary_race") &&
+              boundary_prior_ok &&
+              hs_meta_absent(boundary_prior, "activate_boundary_race"));
+    if (boundary_prior)
+        sqlite3_close(boundary_prior);
+    CSI_CHECK("activate: boundary-race fixture cleans live marker",
+              progress_meta_delete(s->pdb, "activate_boundary_race"));
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_frontier_change_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* A valid ADMIT is still a compare-and-swap: changing only the live
+     * durable tip hash after the decision must refuse inside the locked
+     * cutover transaction. */
+    uint8_t changed_frontier_hash[32];
+    memcpy(changed_frontier_hash, s->b->block_hash, 32);
+    changed_frontier_hash[0] ^= 0x5a;
+    bool changed_frontier = hs_put_anchor_hash(
+        s->pdb, s->b->height, changed_frontier_hash);
+    CSI_CHECK("activate: frontier change after ADMIT refuses atomically",
+              changed_frontier &&
+              !consensus_state_snapshot_install_activate(
+                  s->pdb, &s->areq, &s->ares) &&
+              strstr(s->ares.reason,
+                     "ADMIT frontier changed before activation") != NULL &&
+              coins_kv_count(s->pdb) == 1);
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    CSI_CHECK("activate: fixture frontier restores after stale-ADMIT test",
+              hs_put_anchor_hash(s->pdb, s->b->height, s->b->block_hash));
+    return failures;
+}
+
+static int csi_activate_failed_cutover_rollback_cases(
+    struct csi_activate_scene *s, bool seed_failed,
+    uint64_t generation_before_failed_cutover)
+{
+    int failures=0;
+    CSI_CHECK("activate: failed cutover restores generation-bound metadata",
+              seed_failed && stale_generation_metadata_present(s->pdb));
+    uint64_t generation_after_failed_cutover = UINT64_MAX;
+    CSI_CHECK("activate: failed cutover rolls authority generation back",
+              coins_kv_get_authority_generation(
+                  s->pdb, &generation_after_failed_cutover) &&
+              generation_after_failed_cutover ==
+                  generation_before_failed_cutover);
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_failed_seed_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* A seed-boundary failure after streaming rolls everything back to
+     * the pre-install generation. */
+    uint64_t generation_before_failed_cutover = 0;
+    CSI_CHECK("activate: failed-cutover generation baseline reads",
+              coins_kv_get_authority_generation(
+                  s->pdb, &generation_before_failed_cutover));
+    consensus_state_snapshot_install_activate_test_fail_seed_once();
+    bool seed_failed = !consensus_state_snapshot_install_activate(
+        s->pdb, &s->areq, &s->ares);
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: forced in-tx seed failure restores whole wedge",
+              seed_failed &&
+              s->ares.status == CONSENSUS_INSTALL_INJECTED_FAILURE &&
+              coins_kv_count(s->pdb) == 1 &&
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) ==
+                  ANCHOR_KV_HISTORY_INCOMPLETE &&
+              hs_meta_present(s->pdb, SHIELDED_REPLAY_TARGET_KEY) &&
+              hs_meta_present(s->pdb, SHIELDED_REPLAY_NEXT_KEY) &&
+              hs_meta_present(s->pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
+              hs_meta_present(s->pdb, NULLIFIER_BACKFILL_CHAIN_KEY) &&
+              hs_meta_present(s->pdb, REFOLD_IN_PROGRESS_KEY) &&
+              hs_meta_present(s->pdb, REFOLD_FROM_ANCHOR_KEY) &&
+              hs_meta_present(s->pdb, REFOLD_FROM_ANCHOR_TARGET_KEY) &&
+              refold_in_progress() && refold_from_anchor_active());
+    failures += csi_activate_failed_cutover_rollback_cases(
+        s, seed_failed, generation_before_failed_cutover);
+    return failures;
+}
+
+static int csi_activate_post_seed_failure_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* The seed itself writes tip/UTXO anchor rows and trusted-base metadata.
+     * Fail immediately afterward and prove those writes were enrolled in
+     * the same rollback, not committed as a partial new generation. */
+    consensus_state_snapshot_install_activate_test_fail_after_seed_once();
+    bool post_seed_failed = !consensus_state_snapshot_install_activate(
+        s->pdb, &s->areq, &s->ares);
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: post-seed failure rolls back seed and whole cutover",
+              post_seed_failed &&
+              s->ares.status == CONSENSUS_INSTALL_INJECTED_FAILURE &&
+              strstr(s->ares.reason, "post-seed cutover") != NULL &&
+              coins_kv_count(s->pdb) == 1 &&
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) ==
+                  ANCHOR_KV_HISTORY_INCOMPLETE &&
+              hs_meta_present(s->pdb, SHIELDED_REPLAY_TARGET_KEY) &&
+              hs_meta_present(s->pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
+              hs_meta_present(s->pdb, REFOLD_IN_PROGRESS_KEY) &&
+              stale_generation_metadata_present(s->pdb));
+    if (s->ares.prior_generation_path[0])
+        (void)unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_atomic_install_cases(
+    struct csi_activate_scene *s, uint64_t generation_before_activation,
+    struct uss_header *stale_snapshot_header,
+    uint8_t stale_snapshot_artifact[32])
+{
+    int failures=0;
+    CSI_CHECK("activate: complete bundle installs atomically",
+              consensus_state_snapshot_install_activate(s->pdb, &s->areq, &s->ares) &&
+              s->ares.activated &&
+              s->ares.status == CONSENSUS_INSTALL_ACTIVATED &&
+              s->ares.height == s->b->height && s->ares.utxo_count == 2 &&
+              s->ares.anchor_count == 2 && s->ares.nullifier_count == 2 &&
+              s->ares.hstar == s->b->height &&
+              s->ares.coins_applied_height == s->b->height + 1);
+    uint64_t generation_after_activation = 0;
+    CSI_CHECK("activate: successful cutover advances authority generation once",
+              coins_kv_get_authority_generation(
+                  s->pdb, &generation_after_activation) &&
+              generation_before_activation != UINT64_MAX &&
+              generation_after_activation ==
+                  generation_before_activation + 1u);
+    int32_t stale_snapshot_applied = -1;
+    bool stale_snapshot_pending = true;
+    bool stale_snapshot_matches = false;
+    bool stale_snapshot_frontier = true;
+    CSI_CHECK("activate: replacing coins authority invalidates prior snapshot receipt",
+              !boot_snapshot_install_resume_allowed(
+                  s->pdb, stale_snapshot_header, stale_snapshot_artifact,
+                  &stale_snapshot_applied, &stale_snapshot_pending,
+                  &stale_snapshot_matches, &stale_snapshot_frontier) &&
+              !stale_snapshot_pending && stale_snapshot_matches &&
+              !stale_snapshot_frontier);
+    CSI_CHECK("activate: installed coins/anchors/nullifiers match the bundle "
+              "with COMPLETE (cursor 0) history",
+              active_is(s->pdb, s->b));
+    return failures;
+}
+
+static int csi_activate_contained_and_prior_receipt_cases(
+    struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (ii-b) Negative — WITHOUT independent-replay authority the ADMIT-worthy
+     * bundle stays CONTAINED and writes NOTHING (the production posture: the
+     * bundle's self-asserted digests do not authenticate its contents). */
+    s->areq.bundle_path = s->b->path;
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
+    sqlite3_int64 contained_changes = sqlite3_total_changes64(s->pdb);
+    int contained_backups = prior_generation_count(s->active_dir);
+    struct consensus_state_activate_result ares_contained;
+    CSI_CHECK("activate: no replay receipt keeps the install VERIFIED_"
+              "CONTAINED (nothing written, still wedged)",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &ares_contained) &&
+              !ares_contained.activated &&
+              ares_contained.status ==
+                  CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              ares_contained.prior_generation_path[0] == '\0' &&
+              strstr(ares_contained.reason,
+                     "independent replay-derived receipt") != NULL &&
+              sqlite3_total_changes64(s->pdb) == contained_changes &&
+              prior_generation_count(s->active_dir) == contained_backups &&
+              coins_kv_count(s->pdb) == 1);
+
+    /* (iii) Positive — ADMIT path with authority granted (the ZCL_TESTING
+     * hook stands in for a valid replay receipt): install atomically. */
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        true);
+    uint64_t generation_before_activation = 0;
+    uint8_t stale_snapshot_artifact[32] = {0x6d};
+    struct uss_header stale_snapshot_header = {
+        .version = 2,
+        .height = (uint32_t)s->b->height,
+        .count = s->b->coin_count,
+    };
+    CSI_CHECK("activate: prior snapshot receipt binds current coins generation",
+              coins_kv_get_authority_generation(
+                  s->pdb, &generation_before_activation) &&
+              boot_snapshot_install_marker_begin(
+                  s->pdb, &stale_snapshot_header, stale_snapshot_artifact) &&
+              boot_snapshot_install_marker_complete(
+                  s->pdb, stale_snapshot_artifact, true));
+    failures += csi_activate_atomic_install_cases(
+        s, generation_before_activation, &stale_snapshot_header,
+        stale_snapshot_artifact);
+    return failures;
+}
+
+static int csi_activate_prefix_proof_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    int64_t retained_prefix_base = -1;
+    int64_t retained_prefix_components = -1;
+    uint8_t retained_prefix_hash[32] = {0};
+    uint8_t retained_prefix_proof[32] = {0};
+    uint8_t retained_prefix_source[32] = {0};
+    uint8_t retained_prefix_artifact[32] = {0};
+    CSI_CHECK("activate: admitted genesis prefix proof survives as evidence "
+              "distinct from foreign producer authority",
+              candidate_query_i64(
+                  s->pdb,
+                  "SELECT height FROM "
+                  "consensus_state_proof_prefix_base WHERE singleton=1",
+                  &retained_prefix_base) &&
+              retained_prefix_base == s->b->height &&
+              candidate_query_i64(
+                  s->pdb,
+                  "SELECT count(*) FROM "
+                  "consensus_state_proof_prefix_component",
+                  &retained_prefix_components) &&
+              retained_prefix_components == 8 &&
+              candidate_query_blob32(
+                  s->pdb,
+                  "SELECT block_hash FROM "
+                  "consensus_state_proof_prefix_base WHERE singleton=1",
+                  retained_prefix_hash) &&
+              candidate_query_blob32(
+                  s->pdb,
+                  "SELECT proof_manifest_digest FROM "
+                  "consensus_state_proof_prefix_base WHERE singleton=1",
+                  retained_prefix_proof) &&
+              candidate_query_blob32(
+                  s->pdb,
+                  "SELECT source_digest FROM "
+                  "consensus_state_proof_prefix_base WHERE singleton=1",
+                  retained_prefix_source) &&
+              candidate_query_blob32(
+                  s->pdb,
+                  "SELECT artifact_digest FROM "
+                  "consensus_state_proof_prefix_base WHERE singleton=1",
+                  retained_prefix_artifact) &&
+              memcmp(retained_prefix_hash, s->b->block_hash, 32) == 0 &&
+              memcmp(retained_prefix_proof, s->b->proof, 32) == 0 &&
+              memcmp(retained_prefix_source, s->b->source, 32) == 0 &&
+              memcmp(retained_prefix_artifact, s->b->artifact, 32) == 0);
+    int64_t activated_empty_scripts = -1;
+    CSI_CHECK("activate: preserves empty script as zero-length BLOB",
+              candidate_query_i64(
+                  s->pdb,
+                  "SELECT count(*) FROM coins WHERE "
+                  "typeof(script)='blob' AND length(script)=0",
+                  &activated_empty_scripts) &&
+              activated_empty_scripts == 1);
+    return failures;
+}
+
+static int csi_activate_replay_receipt_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (iii-b) Independent replay receipt: the offline verifier re-derives
+     * every component digest from this datadir's own tables (not the
+     * bundle) and, on a full match, persists the receipt that authorizes
+     * ACTIVATE with the ZCL_TESTING hook off. */
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
+    {
+        struct consensus_state_replay_result vres;
+        /* A tampered bundle cannot even be admitted, so no receipt is made. */
+        CSI_CHECK("replay: verifier persists no receipt for a tampered bundle",
+                  write_bundle(s->b, CSI_WRONG_UTXO_ROOT) &&
+                  !consensus_state_replay_verify_and_write_receipt(
+                      s->pdb, s->b->path, s->active_dir, &vres) &&
+                  !vres.verified);
+        CSI_CHECK("replay: valid bundle restored", write_bundle(s->b, CSI_VALID));
+        CSI_CHECK("replay: verifier re-derives from the datadir's own tables "
+                  "and writes a receipt",
+                  consensus_state_replay_verify_and_write_receipt(
+                      s->pdb, s->b->path, s->active_dir, &vres) &&
+                  vres.verified && vres.height == s->b->height &&
+                  vres.utxo_count == 2 && vres.anchor_count == 2 &&
+                  vres.nullifier_count == 2);
+
+        struct consensus_state_artifact_evidence *rev = NULL;
+        struct consensus_state_bundle_manifest rman = {0};
+        uint8_t rfile[32] = {0};
+        struct zcl_result ro =
+            consensus_state_artifact_evidence_open(s->b->path, -1, &rev);
+        bool rgot = ro.ok && rev &&
+            consensus_state_artifact_evidence_manifest_copy(rev, &rman) &&
+            consensus_state_artifact_evidence_file_digest(rev, rfile);
+        CSI_CHECK("replay: receipt authorizes THIS exact bundle + anchor",
+                  rgot &&
+                  consensus_state_replay_receipt_authority_available(
+                      &rman, rfile, s->active_dir_fd));
+        uint8_t wrong_file[32];
+        memcpy(wrong_file, rfile, 32);
+        wrong_file[0] ^= 0xff;
+        CSI_CHECK("replay: receipt refuses a foreign bundle-file digest",
+                  rgot &&
+                  !consensus_state_replay_receipt_authority_available(
+                      &rman, wrong_file, s->active_dir_fd));
+        struct consensus_state_bundle_manifest wrong_man = rman;
+        wrong_man.utxo_root[0] ^= 0xff;
+        CSI_CHECK("replay: receipt refuses a foreign component digest",
+                  rgot &&
+                  !consensus_state_replay_receipt_authority_available(
+                      &wrong_man, rfile, s->active_dir_fd));
+        if (rev)
+            consensus_state_artifact_evidence_free(rev);
+    }
+    return failures;
+}
+
+static int csi_activate_wedge_cured_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    sapling_tree_init(&s->gate_tree);
+    CSI_CHECK("activate: post-install sapling gate is FOUND (wedge cured)",
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &s->gate_tree,
+                                    &s->gate_root, &s->gate_h) == ANCHOR_KV_FOUND);
+    /* Reducer cursors forced to the anchor so the fold resumes there. */
+    int64_t applied_cursor = -1, tip_cursor = -1;
+    CSI_CHECK("activate: reducer stage cursors forced to the anchor frontier "
+              "(upstream=anchor+1, tip_finalize=anchor)",
+              candidate_query_i64(s->pdb,
+                  "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
+                  &applied_cursor) && applied_cursor == s->b->height + 1 &&
+              candidate_query_i64(s->pdb,
+                  "SELECT cursor FROM stage_cursor WHERE name='tip_finalize'",
+                  &tip_cursor) && tip_cursor == s->b->height);
+    int32_t applied = -1;
+    bool afound = false;
+    CSI_CHECK("activate: coins_applied_height == anchor+1 (fold resume point)",
+              coins_kv_get_applied_height(s->pdb, &applied, &afound) && afound &&
+              applied == s->b->height + 1 &&
+              s->ares.coins_applied_height == s->b->height + 1);
+    CSI_CHECK("activate: self-folded (checkpoint-bound) provenance marker set",
+              coins_kv_contains_refold_marker(s->pdb));
+    return failures;
+}
+
+static int csi_activate_stale_state_purged_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    CSI_CHECK("activate: stale shielded recovery sessions removed",
+              hs_meta_absent(s->pdb, SHIELDED_REPLAY_TARGET_KEY) &&
+              hs_meta_absent(s->pdb, SHIELDED_REPLAY_NEXT_KEY) &&
+              hs_meta_absent(s->pdb,
+                             SHIELDED_REPLAY_SPROUT_STARTED_KEY) &&
+              hs_meta_absent(s->pdb,
+                             SHIELDED_REPLAY_SAPLING_STARTED_KEY) &&
+              hs_meta_absent(s->pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
+              hs_meta_absent(s->pdb, NULLIFIER_BACKFILL_CHAIN_KEY) &&
+              hs_meta_absent(s->pdb, REFOLD_IN_PROGRESS_KEY) &&
+              hs_meta_absent(s->pdb, REFOLD_FROM_ANCHOR_KEY) &&
+              hs_meta_absent(s->pdb, REFOLD_FROM_ANCHOR_TARGET_KEY) &&
+              !refold_in_progress() && !refold_from_anchor_active());
+    CSI_CHECK("activate: stale producer/epoch/repair authority is purged",
+              stale_generation_metadata_absent(s->pdb));
+    /* The installed coins projection is locally authoritative. Re-export
+     * still requires a new full local proof walk + producer receipt; the
+     * consumer must never inherit producer provenance from the bundle. */
+    int32_t proven_applied = -1;
+    CSI_CHECK("activate: installed coins projection is proven authority",
+              coins_kv_is_proven_authority(s->pdb, &proven_applied) &&
+              proven_applied == s->b->height + 1);
+    return failures;
+}
+
+static int csi_activate_frontier_schema_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (vi) H*-climb: after install H* sits at the anchor; folding three
+     * consistent heights over stage evidence makes
+     * reducer_frontier_compute_hstar climb past it. The compiled finality
+     * floor is lowered for the fixture and restored after. */
+    /* Production ACTIVATE runs before the reducer stages initialize on a
+     * genuinely fresh boot. Prove it, rather than test scaffolding,
+     * materialized every H*-authoritative log schema. */
+    bool frontier_schema_present = true;
+    static const char *const frontier_tables[] = {
+        "validate_headers_log", "script_validate_log",
+        "body_persist_log", "proof_validate_log", "utxo_apply_log",
+        "tip_finalize_log",
+    };
+    for (size_t i = 0;
+         i < sizeof(frontier_tables) / sizeof(frontier_tables[0]); i++) {
+        char sql[160];
+        int64_t table_count = 0;
+        snprintf(sql, sizeof(sql),
+                 "SELECT count(*) FROM sqlite_master WHERE type='table' "
+                 "AND name='%s'", frontier_tables[i]);
+        frontier_schema_present = frontier_schema_present &&
+                                  candidate_query_i64(s->pdb, sql,
+                                                      &table_count) &&
+                                  table_count == 1;
+    }
+    CSI_CHECK("activate: production materializes every H* log schema",
+              frontier_schema_present);
+    return failures;
+}
+
+static int csi_activate_hstar_climb_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    int32_t hstar_base = -1, served_base = -1;
+    progress_store_tx_lock();
+    bool base_ok = reducer_frontier_compute_hstar(s->pdb, &hstar_base,
+                                                  &served_base);
+    progress_store_tx_unlock();
+    CSI_CHECK("activate: H* rests AT the anchor before any forward fold "
+              "(the wedge floor)",
+              base_ok && hstar_base == s->b->height);
+
+    bool folded = true;
+    for (int32_t h = s->b->height + 1; h <= s->b->height + 3; h++)
+        folded = folded && hs_put_forward_height(s->pdb, h);
+    CSI_CHECK("activate: three consistent heights fold forward", folded);
+    /* Advance the reducer cursors past the folded tip (upstream count the
+     * NEXT height; tip_finalize uses the served-tip frame). */
+    bool cursors = hs_set_cursor(s->pdb, "validate_headers", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "body_fetch", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "body_persist", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "script_validate", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "proof_validate", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "utxo_apply", s->b->height + 4) &&
+                   hs_set_cursor(s->pdb, "tip_finalize", s->b->height + 3);
+    CSI_CHECK("activate: reducer cursors advance past the folded tip",
+              cursors);
+    int32_t hstar_climb = -1, served_climb = -1;
+    progress_store_tx_lock();
+    bool climb_ok = reducer_frontier_compute_hstar(s->pdb, &hstar_climb,
+                                                   &served_climb);
+    progress_store_tx_unlock();
+    CSI_CHECK("activate: H* CLIMBS past the wedge over folded bodies "
+              "(cure enables forward progress, not just forced cursors)",
+              climb_ok && hstar_climb == s->b->height + 3 &&
+              hstar_climb > hstar_base && served_climb == s->b->height + 3);
+    return failures;
+}
+
+static int csi_activate_prior_generation_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* Physically restorable prior generation. */
+    sqlite3 *prior = NULL;
+    CSI_CHECK("activate: restorable prior generation is a valid standalone "
+              "store",
+              s->ares.prior_generation_path[0] != '\0' &&
+              sqlite3_open_v2(s->ares.prior_generation_path, &prior,
+                              SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+              prior);
+    CSI_CHECK("activate: success reason retains the exact prior-generation "
+              "path",
+              s->ares.prior_generation_path[0] != '\0' &&
+              strstr(s->ares.reason, s->ares.prior_generation_path) != NULL);
+    CSI_CHECK("activate: prior generation is the protected pre-install "
+              "wedge, not post-cutover state",
+              prior && coins_kv_count(prior) == 1 &&
+              hs_meta_present(prior, SHIELDED_REPLAY_TARGET_KEY) &&
+              hs_meta_present(prior, NULLIFIER_BACKFILL_RESUME_KEY) &&
+              hs_meta_present(prior, REFOLD_IN_PROGRESS_KEY) &&
+              stale_generation_metadata_present(prior));
+    if (prior)
+        sqlite3_close(prior);
+    if (s->ares.prior_generation_path[0])
+        unlink(s->ares.prior_generation_path);
+    return failures;
+}
+
+static int csi_activate_replay_authority_cases(struct csi_activate_scene *s)
+{
+    int failures=0;
+    /* (vii) The real replay receipt written above lifts the production
+     * containment with the ZCL_TESTING hook OFF: activate consults the
+     * on-disk receipt, finds it binds THIS bundle, and installs. The
+     * (iii-b) rewrite replaced the bundle inode, so the CAS descriptor
+     * binding correctly demands a fresh exact ADMIT first. */
+    s->ev = NULL;
+    s->evr = consensus_state_artifact_evidence_open(s->b->path, -1, &s->ev);
+    bool auth_cin_ok = s->evr.ok && s->ev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ev, &s->cin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ev, s->cin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ev, s->cin.artifact_receipt_digest);
+    /* The store folded 3 heights past the anchor above; the CAS fence
+     * demands the decision record the LIVE frontier, resolved exactly the
+     * way activate captures it (durable-tip convention included). */
+    int32_t live_frontier_h = -1;
+    uint8_t live_frontier_hash[32] = {0};
+    CSI_CHECK("activate: live frontier resolves for the fresh ADMIT",
+              tip_finalize_stage_resolve_durable_tip(s->pdb, &live_frontier_h,
+                                                     live_frontier_hash) &&
+              live_frontier_h == s->b->height + 3);
+    s->cin.frontier_height = live_frontier_h;
+    memcpy(s->cin.frontier_hash, live_frontier_hash, 32);
+    consensus_state_publication_cas_decide(&s->cin, &s->dec);
+    CSI_CHECK("activate: replay-authority bundle receives a fresh exact "
+              "ADMIT receipt",
+              auth_cin_ok && s->dec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    if (s->dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
+        s->active_decision = s->dec;
+        memcpy(s->areq.expected_artifact_receipt_digest,
+               s->dec.artifact_receipt_digest, 32);
+        s->areq.publication_decision = &s->active_decision;
+    }
+    if (s->ev)
+        consensus_state_artifact_evidence_free(s->ev);
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
+    struct consensus_state_activate_result ares_auth;
+    CSI_CHECK("activate: a valid on-disk replay receipt lifts the production "
+              "containment (real authority, no test hook)",
+              consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                        &ares_auth) &&
+              ares_auth.activated &&
+              ares_auth.status == CONSENSUS_INSTALL_ACTIVATED &&
+              active_is(s->pdb, s->b));
+    if (ares_auth.prior_generation_path[0])
+        unlink(ares_auth.prior_generation_path);
+
+    failures += installed_marker_reopen_tests(s->active_dir, s->b);
+
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (s->active_dir_fd >= 0)
+        (void)close(s->active_dir_fd);
+    progress_store_close();
+    test_cleanup_tmpdir(s->active_dir);
+    return failures;
+}
 
      /* A3/A2/D3: ACTIVATE-mode install into a live progress store seeded into
       * the anchor_backfill_gap wedge: (i) a tampered bundle refuses and leaves
@@ -3983,818 +5167,254 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
       * install out; (iii) an ADMIT bundle installs atomically, cures the wedge
       * and forces the reducer cursors to the anchor; (iv) a restorable prior
       * generation is captured. */
-    {
-        /* Restore b's anchor heights so anchor height == block height holds
-         * for active_is below. */
-        b.anchors[0].height = b.height;
-        b.anchors[1].height = b.height;
-        char active_dir[320];
-        snprintf(active_dir, sizeof(active_dir), "%s/activate", dir);
-        CSI_CHECK("activate: datadir", mkdir(active_dir, 0700) == 0);
-        CSI_CHECK("activate: live progress store opens",
-                  progress_store_open(active_dir));
-        sqlite3 *pdb = progress_store_db();
-        int active_dir_fd = open(active_dir,
-                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        reducer_frontier_test_set_compiled_anchor(0);
+static int csi_activate_cases(struct csi_fixture *b, const char *dir)
+{
+    int failures=0;
+    struct csi_activate_scene scene;
+    struct csi_activate_scene *s = &scene;
+    s->b = b;
+    s->dir = dir;
+    failures += csi_activate_open_store(s);
+    failures += csi_activate_seed_wedged_store(s);
+    failures += csi_activate_seed_stale_metadata(s);
+    failures += csi_activate_init_request(s);
+    failures += csi_activate_tampered_bundle_cases(s);
+    failures += csi_activate_cas_gate_cases(s);
+    failures += csi_activate_path_replacement_cases(s);
+    failures += csi_activate_retained_writer_cases(s);
+    failures += csi_activate_transient_writer_cases(s);
+    failures += csi_activate_final_admit_wrong_dir_cases(s);
+    failures += csi_activate_boundary_race_cases(s);
+    failures += csi_activate_frontier_change_cases(s);
+    failures += csi_activate_failed_seed_cases(s);
+    failures += csi_activate_post_seed_failure_cases(s);
+    failures += csi_activate_contained_and_prior_receipt_cases(s);
+    failures += csi_activate_prefix_proof_cases(s);
+    failures += csi_activate_replay_receipt_cases(s);
+    failures += csi_activate_wedge_cured_cases(s);
+    failures += csi_activate_stale_state_purged_cases(s);
+    failures += csi_activate_frontier_schema_cases(s);
+    failures += csi_activate_hstar_climb_cases(s);
+    failures += csi_activate_prior_generation_cases(s);
+    failures += csi_activate_replay_authority_cases(s);
+    return failures;
+}
 
-        uint8_t borrowed_txid[32];
-        memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
-        const uint8_t borrowed_script[] = {0x51};
-        CSI_CHECK("activate: wedged store seeds (borrowed coin, empty anchors, "
-                  "positive activation cursor)",
-                  pdb && coins_kv_ensure_schema(pdb) &&
-                  progress_meta_table_ensure(pdb) &&
-                  anchor_kv_ensure_schema(pdb) &&
-                  nullifier_kv_ensure_schema(pdb) &&
-                  anchor_kv_initialize_history(pdb, b.height) &&
-                  nullifier_kv_initialize_history(pdb, b.height) &&
-                  coins_kv_add(pdb, borrowed_txid, 0, 4242, b.height, false,
-                               borrowed_script, sizeof(borrowed_script)));
-        const char replay_value[] = "60";
-        uint8_t backfill_binding[32];
-        memset(backfill_binding, 0x7b, sizeof(backfill_binding));
-        const uint8_t refold_target[4] = {
-            (uint8_t)(b.height & 0xff),
-            (uint8_t)((b.height >> 8) & 0xff),
-            (uint8_t)((b.height >> 16) & 0xff),
-            (uint8_t)((b.height >> 24) & 0xff),
-        };
-        const uint8_t one = 1;
-        CSI_CHECK("activate: wedge carries stale recovery and generation metadata",
-                  progress_meta_set(pdb, SHIELDED_REPLAY_TARGET_KEY,
-                                    replay_value, sizeof(replay_value) - 1) &&
-                  progress_meta_set(pdb, SHIELDED_REPLAY_NEXT_KEY,
-                                    replay_value, sizeof(replay_value) - 1) &&
-                  progress_meta_set(pdb, SHIELDED_REPLAY_SPROUT_STARTED_KEY,
-                                    "1", 1) &&
-                  progress_meta_set(pdb, SHIELDED_REPLAY_SAPLING_STARTED_KEY,
-                                    "1", 1) &&
-                  progress_meta_set(pdb, NULLIFIER_BACKFILL_RESUME_KEY,
-                                    replay_value, sizeof(replay_value) - 1) &&
-                  progress_meta_set(pdb, NULLIFIER_BACKFILL_CHAIN_KEY,
-                                    backfill_binding,
-                                    sizeof(backfill_binding)) &&
-                  progress_meta_set(pdb, REFOLD_IN_PROGRESS_KEY, &one, 1) &&
-                  progress_meta_set(pdb, REFOLD_FROM_ANCHOR_KEY, &one, 1) &&
-                  progress_meta_set(pdb, REFOLD_FROM_ANCHOR_TARGET_KEY,
-                                    refold_target, sizeof(refold_target)) &&
-                  refold_progress_refresh(pdb) && refold_in_progress() &&
-                  refold_from_anchor_active() &&
-                  hs_seed_current_frontier(pdb, b.height, b.block_hash) &&
-                  seed_stale_generation_metadata(pdb) &&
-                  stale_generation_metadata_present(pdb));
-        struct incremental_merkle_tree gate_tree;
-        struct uint256 gate_root;
-        int64_t gate_h = -1;
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: pre-install sapling gate is HISTORY_INCOMPLETE "
-                  "(the wedge)",
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) ==
-                      ANCHOR_KV_HISTORY_INCOMPLETE);
+struct csi_checkpoint_content_scene {
+    struct csi_fixture *b;
+    const char *dir;
+    char cc_dir[320];
+    sqlite3 *pdb;
+    int cc_dir_fd;
+    struct consensus_state_activate_request areq;
+    struct consensus_state_artifact_evidence *ccev;
+    struct zcl_result ccevr;
+    struct consensus_state_publication_cas_inputs ccin;
+    struct consensus_state_publication_decision_record ccdec;
+    struct consensus_state_publication_decision_record cc_decision;
+    struct sha3_utxo_checkpoint cc_cp;
+    struct consensus_state_activate_result cc_ares;
+};
 
-        struct consensus_state_activate_request areq;
-        memset(&areq, 0, sizeof(areq));
-        areq.expected_height = b.height;
-        memcpy(areq.expected_block_hash, b.block_hash, 32);
-        areq.datadir_fd = active_dir_fd;
-        areq.datadir_display = active_dir;
-        struct consensus_state_activate_result ares;
+static int csi_checkpoint_content_open_and_seed(
+    struct csi_checkpoint_content_scene *s)
+{
+    int failures=0;
+    s->b->anchors[0].height = s->b->height;
+    s->b->anchors[1].height = s->b->height;
+    snprintf(s->cc_dir, sizeof(s->cc_dir), "%s/ckpt-content", s->dir);
+    CSI_CHECK("checkpoint-content: datadir", mkdir(s->cc_dir, 0700) == 0);
+    CSI_CHECK("checkpoint-content: live progress store opens",
+              progress_store_open(s->cc_dir));
+    s->pdb = progress_store_db();
+    s->cc_dir_fd = open(s->cc_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    reducer_frontier_test_set_compiled_anchor(0);
 
-        /* Production is fail-closed even in this test binary: containment is
-         * proven at (ii-b) below against a fully ADMIT-worthy bundle. Enable
-         * the seam only for the hermetic transaction exercises. */
-        areq.bundle_path = b.path;
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            true);
+    uint8_t borrowed_txid[32];
+    memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
+    const uint8_t borrowed_script[] = {0x51};
+    CSI_CHECK("checkpoint-content: wedged store seeds (borrowed coin, empty "
+              "anchors, positive activation cursor)",
+              s->pdb && coins_kv_ensure_schema(s->pdb) &&
+              progress_meta_table_ensure(s->pdb) &&
+              anchor_kv_ensure_schema(s->pdb) &&
+              nullifier_kv_ensure_schema(s->pdb) &&
+              anchor_kv_initialize_history(s->pdb, s->b->height) &&
+              nullifier_kv_initialize_history(s->pdb, s->b->height) &&
+              coins_kv_add(s->pdb, borrowed_txid, 0, 4242, s->b->height, false,
+                           borrowed_script, sizeof(borrowed_script)) &&
+              hs_seed_current_frontier(s->pdb, s->b->height, s->b->block_hash));
 
-        /* (i) Negative — a tampered (bad UTXO root) bundle must refuse. */
-        CSI_CHECK("activate: tampered bundle writes",
-                  write_bundle(&b, CSI_WRONG_UTXO_ROOT));
-        areq.bundle_path = b.path;
-        CSI_CHECK("activate: tampered bundle refuses with a typed reason",
-                  !consensus_state_snapshot_install_activate(pdb, &areq, &ares) &&
-                  !ares.activated &&
-                  ares.status != CONSENSUS_INSTALL_ACTIVATED &&
-                  ares.reason[0] != '\0');
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: tampered refusal leaves the store wedged/intact",
-                  coins_kv_count(pdb) == 1 &&
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) ==
-                      ANCHOR_KV_HISTORY_INCOMPLETE);
+    CSI_CHECK("checkpoint-content: valid complete bundle writes",
+              write_bundle(s->b, CSI_VALID));
+    return failures;
+}
 
-        /* (ii) Negative — a non-ADMIT publication-CAS decision gates out the
-         * install. Build cas_decide inputs from the validated artifact; a
-         * durable frontier BEHIND the bundle height yields REFUSED. */
-        CSI_CHECK("activate: valid complete bundle restored",
-                  write_bundle(&b, CSI_VALID));
-        CSI_CHECK("activate: valid bundle without an ADMIT receipt refuses",
-                  !consensus_state_snapshot_install_activate(pdb, &areq, &ares) &&
-                  strstr(ares.reason, "exact CAS-admitted") != NULL &&
-                  coins_kv_count(pdb) == 1);
-        struct consensus_state_artifact_evidence *ev = NULL;
-        struct zcl_result evr =
-            consensus_state_artifact_evidence_open(b.path, -1, &ev);
-        struct consensus_state_publication_cas_inputs cin;
-        memset(&cin, 0, sizeof(cin));
-        bool cin_ok = evr.ok && ev &&
-            consensus_state_artifact_evidence_manifest_copy(ev, &cin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ev, cin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ev, cin.artifact_receipt_digest);
-        cin.chain_evidence_present = true;
-        cin.chain_bound_to_artifact = true;
-        memset(cin.chain_evidence_digest, 0xa5, 32);
-        cin.source_receipt_present = true;
-        cin.source_receipt = b.receipt;
-        cin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
-        cin.frontier_known = true;
-        memcpy(cin.frontier_hash, b.block_hash, 32);
-        struct consensus_state_publication_decision_record dec;
-        struct consensus_state_publication_decision_record active_decision;
-        memset(&active_decision, 0, sizeof(active_decision));
-        cin.frontier_height = b.height;
-        consensus_state_publication_cas_decide(&cin, &dec);
-        CSI_CHECK("activate: complete bundle + bound evidence CAS-decides ADMIT",
-                  cin_ok && dec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
-            active_decision = dec;
-            memcpy(areq.expected_artifact_receipt_digest,
-                   dec.artifact_receipt_digest, 32);
-            areq.publication_decision = &active_decision;
-        }
-        cin.frontier_height = b.height - 1;
-        consensus_state_publication_cas_decide(&cin, &dec);
-        bool refused = dec.decision != CONSENSUS_PUBLICATION_ADMIT &&
-                       dec.refusal ==
-                           CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND;
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) /* gate: never reached */
-            (void)consensus_state_snapshot_install_activate(pdb, &areq, &ares);
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: non-ADMIT CAS gates out the install (store "
-                  "untouched, still wedged)",
-                  refused && coins_kv_count(pdb) == 1 &&
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) ==
-                      ANCHOR_KV_HISTORY_INCOMPLETE);
+static int csi_checkpoint_content_admit_decision(
+    struct csi_checkpoint_content_scene *s)
+{
+    int failures=0;
+    /* Build the ADMIT decision + exact receipt binding activate requires,
+     * exactly as the boot adapter would. */
+    memset(&s->areq, 0, sizeof(s->areq));
+    s->areq.bundle_path = s->b->path;
+    s->areq.expected_height = s->b->height;
+    memcpy(s->areq.expected_block_hash, s->b->block_hash, 32);
+    s->areq.datadir_fd = s->cc_dir_fd;
+    s->areq.datadir_display = s->cc_dir;
 
-        /* Replace the admitted pathname with a fresh, independently valid
-         * inode carrying the same logical bundle and height/hash. The old CAS
-         * receipt must not authorize it. */
-        struct stat admitted_path_stat, replacement_path_stat;
-        bool admitted_stat_ok = lstat(b.path, &admitted_path_stat) == 0;
-        CSI_CHECK("activate: same-height/hash pathname replacement writes",
-                  admitted_stat_ok && write_bundle(&b, CSI_VALID) &&
-                  lstat(b.path, &replacement_path_stat) == 0 &&
-                  (replacement_path_stat.st_dev != admitted_path_stat.st_dev ||
-                   replacement_path_stat.st_ino != admitted_path_stat.st_ino));
-        CSI_CHECK("activate: stale ADMIT receipt refuses pathname replacement",
-                  !consensus_state_snapshot_install_activate(pdb, &areq, &ares) &&
-                  strstr(ares.reason, "exact CAS-admitted") != NULL &&
-                  coins_kv_count(pdb) == 1);
-        if (ev)
-            consensus_state_artifact_evidence_free(ev);
+    s->ccev = NULL;
+    s->ccevr =
+        consensus_state_artifact_evidence_open(s->b->path, -1, &s->ccev);
+    memset(&s->ccin, 0, sizeof(s->ccin));
+    bool ccin_ok = s->ccevr.ok && s->ccev &&
+        consensus_state_artifact_evidence_manifest_copy(s->ccev,
+                                                        &s->ccin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->ccev, s->ccin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->ccev, s->ccin.artifact_receipt_digest);
+    s->ccin.chain_evidence_present = true;
+    s->ccin.chain_bound_to_artifact = true;
+    memset(s->ccin.chain_evidence_digest, 0xa5, 32);
+    s->ccin.source_receipt_present = true;
+    s->ccin.source_receipt = s->b->receipt;
+    s->ccin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
+    s->ccin.frontier_known = true;
+    memcpy(s->ccin.frontier_hash, s->b->block_hash, 32);
+    s->ccin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->ccin, &s->ccdec);
+    memset(&s->cc_decision, 0, sizeof(s->cc_decision));
+    CSI_CHECK("checkpoint-content: complete bundle CAS-decides ADMIT",
+              ccin_ok && s->ccdec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    s->cc_decision = s->ccdec;
+    memcpy(s->areq.expected_artifact_receipt_digest,
+           s->ccdec.artifact_receipt_digest, 32);
+    s->areq.publication_decision = &s->cc_decision;
+    if (s->ccev)
+        consensus_state_artifact_evidence_free(s->ccev);
+    return failures;
+}
 
-        /* A retained writable descriptor can still alter a mode-0400 inode.
-         * Mutate after the stream but before COMMIT and prove the final source
-         * revalidation rolls the live transaction back. */
-        int retained_writer_fd = -1;
-        bool writer_ready = chmod(b.path, 0600) == 0 &&
-                            (retained_writer_fd =
-                                 open(b.path, O_RDWR | O_CLOEXEC)) >= 0 &&
-                            chmod(b.path, 0400) == 0;
-        CSI_CHECK("activate: retained writer fixture opens before admission",
-                  writer_ready);
-        ev = NULL;
-        evr = consensus_state_artifact_evidence_open(b.path, -1, &ev);
-        bool replacement_cin_ok = evr.ok && ev &&
-            consensus_state_artifact_evidence_manifest_copy(ev, &cin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ev, cin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ev, cin.artifact_receipt_digest);
-        cin.frontier_height = b.height;
-        consensus_state_publication_cas_decide(&cin, &dec);
-        CSI_CHECK("activate: replacement receives a fresh exact ADMIT receipt",
-                  replacement_cin_ok &&
-                  dec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
-            active_decision = dec;
-            memcpy(areq.expected_artifact_receipt_digest,
-                   dec.artifact_receipt_digest, 32);
-            areq.publication_decision = &active_decision;
-        }
-        if (ev)
-            consensus_state_artifact_evidence_free(ev);
+static int csi_checkpoint_content_refusal_cases(
+    struct csi_checkpoint_content_scene *s)
+{
+    int failures=0;
+    /* The compiled SHA3 UTXO checkpoint the bundle's own coins reproduce by
+     * construction (the fixture folds these two coins into b.utxo_root). */
+    memset(&s->cc_cp, 0, sizeof(s->cc_cp));
+    s->cc_cp.height = s->b->height;
+    memcpy(s->cc_cp.block_hash, s->b->block_hash, 32);
+    s->cc_cp.utxo_count = s->b->coin_count;
+    s->cc_cp.total_supply = s->b->supply;
+    memcpy(s->cc_cp.sha3_hash, s->b->utxo_root, 32);
+    checkpoints_set_sha3_override_for_test(&s->cc_cp);
 
-        struct activate_retained_writer_hook mutate_hook = {
-            .writer_fd = retained_writer_fd,
-        };
-        consensus_state_snapshot_install_activate_test_set_after_stream_hook(
-            activate_mutate_retained_writer, &mutate_hook);
-        bool mutation_refused =
-            !consensus_state_snapshot_install_activate(pdb, &areq, &ares);
-        consensus_state_snapshot_install_activate_test_set_after_stream_hook(
-            NULL, NULL);
-        CSI_CHECK("activate: post-stream source mutation rolls back before COMMIT",
-                  mutation_refused && mutate_hook.ran && mutate_hook.mutated &&
-                  strstr(ares.reason,
-                         "artifact evidence changed during activation stream") !=
-                      NULL &&
-                  coins_kv_count(pdb) == 1);
-        if (retained_writer_fd >= 0)
-            (void)close(retained_writer_fd);
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
+    /* No independent replay receipt exists on this datadir: checkpoint-
+     * content is the ONLY authority that can lift containment here. */
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
 
-        /* The mutated inode needs a new valid artifact; retain a writer before
-         * the next admission. */
-        CSI_CHECK("activate: valid artifact restored after source mutation",
-                  write_bundle(&b, CSI_VALID));
-        int transient_writer_fd = -1;
-        bool transient_writer_ready = chmod(b.path, 0600) == 0 &&
-            (transient_writer_fd = open(b.path, O_RDWR | O_CLOEXEC)) >= 0 &&
-            chmod(b.path, 0400) == 0;
-        CSI_CHECK("activate: transient writer fixture opens before admission",
-                  transient_writer_ready);
-        ev = NULL;
-        evr = consensus_state_artifact_evidence_open(b.path, -1, &ev);
-        bool transient_cin_ok = evr.ok && ev &&
-            consensus_state_artifact_evidence_manifest_copy(ev, &cin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ev, cin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ev, cin.artifact_receipt_digest);
-        cin.frontier_height = b.height;
-        consensus_state_publication_cas_decide(&cin, &dec);
-        CSI_CHECK("activate: transient fixture receives exact ADMIT receipt",
-                  transient_cin_ok &&
-                  dec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
-            active_decision = dec;
-            memcpy(areq.expected_artifact_receipt_digest,
-                   dec.artifact_receipt_digest, 32);
-            areq.publication_decision = &active_decision;
-        }
-        if (ev)
-            consensus_state_artifact_evidence_free(ev);
+    /* (i) NEGATIVE — no validated-header Sapling root: the coins match the
+     * checkpoint but the shielded tip is not PoW-bound, so CONTAINED. */
+    s->areq.checkpoint_sapling_root_from_validated_header = false;
+    memset(s->areq.checkpoint_sapling_root, 0, 32);
+    CSI_CHECK("checkpoint-content: no validated-header root stays CONTAINED "
+              "(nothing written)",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->cc_ares) &&
+              !s->cc_ares.activated &&
+              s->cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              strstr(s->cc_ares.reason, "validated-header") != NULL &&
+              s->cc_ares.prior_generation_path[0] == '\0' &&
+              coins_kv_count(s->pdb) == 1);
 
-        struct activate_transient_restore_hook transient_hook = {
-            .writer_fd = transient_writer_fd,
-            .progress_db = pdb,
-        };
-        consensus_state_snapshot_install_activate_test_set_after_stream_hook(
-            activate_transient_restore_and_corrupt_destination,
-            &transient_hook);
-        bool transient_refused =
-            !consensus_state_snapshot_install_activate(pdb, &areq, &ares);
-        consensus_state_snapshot_install_activate_test_set_after_stream_hook(
-            NULL, NULL);
-        CSI_CHECK("activate: transient source restore cannot hide bad "
-                  "destination state",
-                  transient_refused && transient_hook.ran &&
-                  transient_hook.source_mutated &&
-                  transient_hook.source_restored &&
-                  transient_hook.destination_mutated &&
-                  strstr(ares.reason,
-                         "installed destination failed nullifier digest") !=
-                      NULL &&
-                  coins_kv_count(pdb) == 1);
-        if (transient_writer_fd >= 0)
-            (void)close(transient_writer_fd);
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
+    /* (ii) NEGATIVE — a Sapling root that does not match the bundle's
+     * frontier: never activate on a header-inconsistent root. CONTAINED. */
+    s->areq.checkpoint_sapling_root_from_validated_header = true;
+    memcpy(s->areq.checkpoint_sapling_root,
+           s->b->frontier_root[ANCHOR_POOL_SAPLING], 32);
+    s->areq.checkpoint_sapling_root[7] ^= 0xff;
+    CSI_CHECK("checkpoint-content: wrong Sapling root stays CONTAINED",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->cc_ares) &&
+              !s->cc_ares.activated &&
+              s->cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              strstr(s->cc_ares.reason, "validated-header") != NULL &&
+              coins_kv_count(s->pdb) == 1);
+    return failures;
+}
 
-        /* Restored bytes remain semantically valid, but the exact CAS receipt
-         * is metadata-bound, so positive activation requires re-admission. */
-        ev = NULL;
-        evr = consensus_state_artifact_evidence_open(b.path, -1, &ev);
-        bool final_cin_ok = evr.ok && ev &&
-            consensus_state_artifact_evidence_manifest_copy(ev, &cin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ev, cin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ev, cin.artifact_receipt_digest);
-        consensus_state_publication_cas_decide(&cin, &dec);
-        CSI_CHECK("activate: transient-restored artifact receives final ADMIT "
-                  "receipt",
-                  final_cin_ok &&
-                  dec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
-            active_decision = dec;
-            memcpy(areq.expected_artifact_receipt_digest,
-                   dec.artifact_receipt_digest, 32);
-            areq.publication_decision = &active_decision;
-        }
-        if (ev)
-            consensus_state_artifact_evidence_free(ev);
-
-        /* The classified directory capability is part of activation
-         * authority; a same-process handle for another directory must refuse
-         * before backup or mutation. */
-        int wrong_dir_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        int admitted_dir_fd = areq.datadir_fd;
-        areq.datadir_fd = wrong_dir_fd;
-        CSI_CHECK("activate: mismatched datadir capability refuses",
-                  wrong_dir_fd >= 0 &&
-                  !consensus_state_snapshot_install_activate(
-                      pdb, &areq, &ares) &&
-                  strstr(ares.reason, "classified datadir capability") !=
-                      NULL &&
-                  coins_kv_count(pdb) == 1);
-        areq.datadir_fd = admitted_dir_fd;
-        if (wrong_dir_fd >= 0)
-            (void)close(wrong_dir_fd);
-
-        /* A writer outside the process discipline can commit in the narrow
-         * VACUUM-to-BEGIN boundary. The same singleton connection's
-         * data_version fence must catch it before any cutover write, while the
-         * prior-generation image remains the state from before that commit. */
-        char progress_path[384];
-        /* A4: the live kernel singleton is consensus.db; the boundary writer
-         * must commit to the SAME file so its data_version bump is fenced. */
-        snprintf(progress_path, sizeof(progress_path), "%s/consensus.db",
-                 active_dir);
-        sqlite3 *boundary_writer = NULL;
-        struct activate_boundary_commit_hook boundary_hook = {
-            .writer = NULL,
-        };
-        bool boundary_open = sqlite3_open_v2(
-            progress_path, &boundary_writer,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) == SQLITE_OK;
-        boundary_hook.writer = boundary_writer;
-        consensus_state_snapshot_install_activate_test_set_after_backup_hook(
-            activate_commit_between_backup_and_begin, &boundary_hook);
-        bool boundary_refused =
-            !consensus_state_snapshot_install_activate(pdb, &areq, &ares);
-        consensus_state_snapshot_install_activate_test_set_after_backup_hook(
-            NULL, NULL);
-        if (boundary_writer)
-            sqlite3_close(boundary_writer);
-        sqlite3 *boundary_prior = NULL;
-        bool boundary_prior_ok = ares.prior_generation_path[0] != '\0' &&
-            sqlite3_open_v2(ares.prior_generation_path, &boundary_prior,
-                            SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
-            boundary_prior;
-        CSI_CHECK("activate: commit between backup and BEGIN is fenced before "
-                  "cutover",
-                  boundary_open && boundary_refused && boundary_hook.ran &&
-                  boundary_hook.committed &&
-                  strstr(ares.reason,
-                         "changed between prior-generation backup") != NULL &&
-                  hs_meta_present(pdb, "activate_boundary_race") &&
-                  boundary_prior_ok &&
-                  hs_meta_absent(boundary_prior, "activate_boundary_race"));
-        if (boundary_prior)
-            sqlite3_close(boundary_prior);
-        CSI_CHECK("activate: boundary-race fixture cleans live marker",
-                  progress_meta_delete(pdb, "activate_boundary_race"));
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
-
-        /* A valid ADMIT is still a compare-and-swap: changing only the live
-         * durable tip hash after the decision must refuse inside the locked
-         * cutover transaction. */
-        uint8_t changed_frontier_hash[32];
-        memcpy(changed_frontier_hash, b.block_hash, 32);
-        changed_frontier_hash[0] ^= 0x5a;
-        bool changed_frontier = hs_put_anchor_hash(
-            pdb, b.height, changed_frontier_hash);
-        CSI_CHECK("activate: frontier change after ADMIT refuses atomically",
-                  changed_frontier &&
-                  !consensus_state_snapshot_install_activate(
-                      pdb, &areq, &ares) &&
-                  strstr(ares.reason,
-                         "ADMIT frontier changed before activation") != NULL &&
-                  coins_kv_count(pdb) == 1);
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
-        CSI_CHECK("activate: fixture frontier restores after stale-ADMIT test",
-                  hs_put_anchor_hash(pdb, b.height, b.block_hash));
-
-        /* A seed-boundary failure after streaming rolls everything back to
-         * the pre-install generation. */
-        uint64_t generation_before_failed_cutover = 0;
-        CSI_CHECK("activate: failed-cutover generation baseline reads",
-                  coins_kv_get_authority_generation(
-                      pdb, &generation_before_failed_cutover));
-        consensus_state_snapshot_install_activate_test_fail_seed_once();
-        bool seed_failed = !consensus_state_snapshot_install_activate(
-            pdb, &areq, &ares);
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: forced in-tx seed failure restores whole wedge",
-                  seed_failed &&
-                  ares.status == CONSENSUS_INSTALL_INJECTED_FAILURE &&
-                  coins_kv_count(pdb) == 1 &&
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) ==
-                      ANCHOR_KV_HISTORY_INCOMPLETE &&
-                  hs_meta_present(pdb, SHIELDED_REPLAY_TARGET_KEY) &&
-                  hs_meta_present(pdb, SHIELDED_REPLAY_NEXT_KEY) &&
-                  hs_meta_present(pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
-                  hs_meta_present(pdb, NULLIFIER_BACKFILL_CHAIN_KEY) &&
-                  hs_meta_present(pdb, REFOLD_IN_PROGRESS_KEY) &&
-                  hs_meta_present(pdb, REFOLD_FROM_ANCHOR_KEY) &&
-                  hs_meta_present(pdb, REFOLD_FROM_ANCHOR_TARGET_KEY) &&
-                  refold_in_progress() && refold_from_anchor_active());
-        CSI_CHECK("activate: failed cutover restores generation-bound metadata",
-                  seed_failed && stale_generation_metadata_present(pdb));
-        uint64_t generation_after_failed_cutover = UINT64_MAX;
-        CSI_CHECK("activate: failed cutover rolls authority generation back",
-                  coins_kv_get_authority_generation(
-                      pdb, &generation_after_failed_cutover) &&
-                  generation_after_failed_cutover ==
-                      generation_before_failed_cutover);
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
-
-        /* The seed itself writes tip/UTXO anchor rows and trusted-base metadata.
-         * Fail immediately afterward and prove those writes were enrolled in
-         * the same rollback, not committed as a partial new generation. */
-        consensus_state_snapshot_install_activate_test_fail_after_seed_once();
-        bool post_seed_failed = !consensus_state_snapshot_install_activate(
-            pdb, &areq, &ares);
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: post-seed failure rolls back seed and whole cutover",
-                  post_seed_failed &&
-                  ares.status == CONSENSUS_INSTALL_INJECTED_FAILURE &&
-                  strstr(ares.reason, "post-seed cutover") != NULL &&
-                  coins_kv_count(pdb) == 1 &&
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) ==
-                      ANCHOR_KV_HISTORY_INCOMPLETE &&
-                  hs_meta_present(pdb, SHIELDED_REPLAY_TARGET_KEY) &&
-                  hs_meta_present(pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
-                  hs_meta_present(pdb, REFOLD_IN_PROGRESS_KEY) &&
-                  stale_generation_metadata_present(pdb));
-        if (ares.prior_generation_path[0])
-            (void)unlink(ares.prior_generation_path);
-
-        /* (ii-b) Negative — WITHOUT independent-replay authority the ADMIT-worthy
-         * bundle stays CONTAINED and writes NOTHING (the production posture: the
-         * bundle's self-asserted digests do not authenticate its contents). */
-        areq.bundle_path = b.path;
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        sqlite3_int64 contained_changes = sqlite3_total_changes64(pdb);
-        int contained_backups = prior_generation_count(active_dir);
-        struct consensus_state_activate_result ares_contained;
-        CSI_CHECK("activate: no replay receipt keeps the install VERIFIED_"
-                  "CONTAINED (nothing written, still wedged)",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &ares_contained) &&
-                  !ares_contained.activated &&
-                  ares_contained.status ==
-                      CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  ares_contained.prior_generation_path[0] == '\0' &&
-                  strstr(ares_contained.reason,
-                         "independent replay-derived receipt") != NULL &&
-                  sqlite3_total_changes64(pdb) == contained_changes &&
-                  prior_generation_count(active_dir) == contained_backups &&
-                  coins_kv_count(pdb) == 1);
-
-        /* (iii) Positive — ADMIT path with authority granted (the ZCL_TESTING
-         * hook stands in for a valid replay receipt): install atomically. */
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            true);
-        uint64_t generation_before_activation = 0;
-        uint8_t stale_snapshot_artifact[32] = {0x6d};
-        struct uss_header stale_snapshot_header = {
-            .version = 2,
-            .height = (uint32_t)b.height,
-            .count = b.coin_count,
-        };
-        CSI_CHECK("activate: prior snapshot receipt binds current coins generation",
-                  coins_kv_get_authority_generation(
-                      pdb, &generation_before_activation) &&
-                  boot_snapshot_install_marker_begin(
-                      pdb, &stale_snapshot_header, stale_snapshot_artifact) &&
-                  boot_snapshot_install_marker_complete(
-                      pdb, stale_snapshot_artifact, true));
-        CSI_CHECK("activate: complete bundle installs atomically",
-                  consensus_state_snapshot_install_activate(pdb, &areq, &ares) &&
-                  ares.activated &&
-                  ares.status == CONSENSUS_INSTALL_ACTIVATED &&
-                  ares.height == b.height && ares.utxo_count == 2 &&
-                  ares.anchor_count == 2 && ares.nullifier_count == 2 &&
-                  ares.hstar == b.height &&
-                  ares.coins_applied_height == b.height + 1);
-        uint64_t generation_after_activation = 0;
-        CSI_CHECK("activate: successful cutover advances authority generation once",
-                  coins_kv_get_authority_generation(
-                      pdb, &generation_after_activation) &&
-                  generation_before_activation != UINT64_MAX &&
-                  generation_after_activation ==
-                      generation_before_activation + 1u);
-        int32_t stale_snapshot_applied = -1;
-        bool stale_snapshot_pending = true;
-        bool stale_snapshot_matches = false;
-        bool stale_snapshot_frontier = true;
-        CSI_CHECK("activate: replacing coins authority invalidates prior snapshot receipt",
-                  !boot_snapshot_install_resume_allowed(
-                      pdb, &stale_snapshot_header, stale_snapshot_artifact,
-                      &stale_snapshot_applied, &stale_snapshot_pending,
-                      &stale_snapshot_matches, &stale_snapshot_frontier) &&
-                  !stale_snapshot_pending && stale_snapshot_matches &&
-                  !stale_snapshot_frontier);
-        CSI_CHECK("activate: installed coins/anchors/nullifiers match the bundle "
-                  "with COMPLETE (cursor 0) history",
-                  active_is(pdb, &b));
-        int64_t retained_prefix_base = -1;
-        int64_t retained_prefix_components = -1;
-        uint8_t retained_prefix_hash[32] = {0};
-        uint8_t retained_prefix_proof[32] = {0};
-        uint8_t retained_prefix_source[32] = {0};
-        uint8_t retained_prefix_artifact[32] = {0};
-        CSI_CHECK("activate: admitted genesis prefix proof survives as evidence "
-                  "distinct from foreign producer authority",
-                  candidate_query_i64(
-                      pdb,
-                      "SELECT height FROM "
-                      "consensus_state_proof_prefix_base WHERE singleton=1",
-                      &retained_prefix_base) &&
-                  retained_prefix_base == b.height &&
-                  candidate_query_i64(
-                      pdb,
-                      "SELECT count(*) FROM "
-                      "consensus_state_proof_prefix_component",
-                      &retained_prefix_components) &&
-                  retained_prefix_components == 8 &&
-                  candidate_query_blob32(
-                      pdb,
-                      "SELECT block_hash FROM "
-                      "consensus_state_proof_prefix_base WHERE singleton=1",
-                      retained_prefix_hash) &&
-                  candidate_query_blob32(
-                      pdb,
-                      "SELECT proof_manifest_digest FROM "
-                      "consensus_state_proof_prefix_base WHERE singleton=1",
-                      retained_prefix_proof) &&
-                  candidate_query_blob32(
-                      pdb,
-                      "SELECT source_digest FROM "
-                      "consensus_state_proof_prefix_base WHERE singleton=1",
-                      retained_prefix_source) &&
-                  candidate_query_blob32(
-                      pdb,
-                      "SELECT artifact_digest FROM "
-                      "consensus_state_proof_prefix_base WHERE singleton=1",
-                      retained_prefix_artifact) &&
-                  memcmp(retained_prefix_hash, b.block_hash, 32) == 0 &&
-                  memcmp(retained_prefix_proof, b.proof, 32) == 0 &&
-                  memcmp(retained_prefix_source, b.source, 32) == 0 &&
-                  memcmp(retained_prefix_artifact, b.artifact, 32) == 0);
-        int64_t activated_empty_scripts = -1;
-        CSI_CHECK("activate: preserves empty script as zero-length BLOB",
-                  candidate_query_i64(
-                      pdb,
-                      "SELECT count(*) FROM coins WHERE "
-                      "typeof(script)='blob' AND length(script)=0",
-                      &activated_empty_scripts) &&
-                  activated_empty_scripts == 1);
-
-        /* (iii-b) Independent replay receipt: the offline verifier re-derives
-         * every component digest from this datadir's own tables (not the
-         * bundle) and, on a full match, persists the receipt that authorizes
-         * ACTIVATE with the ZCL_TESTING hook off. */
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        {
-            struct consensus_state_replay_result vres;
-            /* A tampered bundle cannot even be admitted, so no receipt is made. */
-            CSI_CHECK("replay: verifier persists no receipt for a tampered bundle",
-                      write_bundle(&b, CSI_WRONG_UTXO_ROOT) &&
-                      !consensus_state_replay_verify_and_write_receipt(
-                          pdb, b.path, active_dir, &vres) &&
-                      !vres.verified);
-            CSI_CHECK("replay: valid bundle restored", write_bundle(&b, CSI_VALID));
-            CSI_CHECK("replay: verifier re-derives from the datadir's own tables "
-                      "and writes a receipt",
-                      consensus_state_replay_verify_and_write_receipt(
-                          pdb, b.path, active_dir, &vres) &&
-                      vres.verified && vres.height == b.height &&
-                      vres.utxo_count == 2 && vres.anchor_count == 2 &&
-                      vres.nullifier_count == 2);
-
-            struct consensus_state_artifact_evidence *rev = NULL;
-            struct consensus_state_bundle_manifest rman = {0};
-            uint8_t rfile[32] = {0};
-            struct zcl_result ro =
-                consensus_state_artifact_evidence_open(b.path, -1, &rev);
-            bool rgot = ro.ok && rev &&
-                consensus_state_artifact_evidence_manifest_copy(rev, &rman) &&
-                consensus_state_artifact_evidence_file_digest(rev, rfile);
-            CSI_CHECK("replay: receipt authorizes THIS exact bundle + anchor",
-                      rgot &&
-                      consensus_state_replay_receipt_authority_available(
-                          &rman, rfile, active_dir_fd));
-            uint8_t wrong_file[32];
-            memcpy(wrong_file, rfile, 32);
-            wrong_file[0] ^= 0xff;
-            CSI_CHECK("replay: receipt refuses a foreign bundle-file digest",
-                      rgot &&
-                      !consensus_state_replay_receipt_authority_available(
-                          &rman, wrong_file, active_dir_fd));
-            struct consensus_state_bundle_manifest wrong_man = rman;
-            wrong_man.utxo_root[0] ^= 0xff;
-            CSI_CHECK("replay: receipt refuses a foreign component digest",
-                      rgot &&
-                      !consensus_state_replay_receipt_authority_available(
-                          &wrong_man, rfile, active_dir_fd));
-            if (rev)
-                consensus_state_artifact_evidence_free(rev);
-        }
-
-        sapling_tree_init(&gate_tree);
-        CSI_CHECK("activate: post-install sapling gate is FOUND (wedge cured)",
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &gate_tree,
-                                        &gate_root, &gate_h) == ANCHOR_KV_FOUND);
-        /* Reducer cursors forced to the anchor so the fold resumes there. */
-        int64_t applied_cursor = -1, tip_cursor = -1;
-        CSI_CHECK("activate: reducer stage cursors forced to the anchor frontier "
-                  "(upstream=anchor+1, tip_finalize=anchor)",
-                  candidate_query_i64(pdb,
-                      "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-                      &applied_cursor) && applied_cursor == b.height + 1 &&
-                  candidate_query_i64(pdb,
-                      "SELECT cursor FROM stage_cursor WHERE name='tip_finalize'",
-                      &tip_cursor) && tip_cursor == b.height);
-        int32_t applied = -1;
-        bool afound = false;
-        CSI_CHECK("activate: coins_applied_height == anchor+1 (fold resume point)",
-                  coins_kv_get_applied_height(pdb, &applied, &afound) && afound &&
-                  applied == b.height + 1 &&
-                  ares.coins_applied_height == b.height + 1);
-        CSI_CHECK("activate: self-folded (checkpoint-bound) provenance marker set",
-                  coins_kv_contains_refold_marker(pdb));
-        CSI_CHECK("activate: stale shielded recovery sessions removed",
-                  hs_meta_absent(pdb, SHIELDED_REPLAY_TARGET_KEY) &&
-                  hs_meta_absent(pdb, SHIELDED_REPLAY_NEXT_KEY) &&
-                  hs_meta_absent(pdb,
-                                 SHIELDED_REPLAY_SPROUT_STARTED_KEY) &&
-                  hs_meta_absent(pdb,
-                                 SHIELDED_REPLAY_SAPLING_STARTED_KEY) &&
-                  hs_meta_absent(pdb, NULLIFIER_BACKFILL_RESUME_KEY) &&
-                  hs_meta_absent(pdb, NULLIFIER_BACKFILL_CHAIN_KEY) &&
-                  hs_meta_absent(pdb, REFOLD_IN_PROGRESS_KEY) &&
-                  hs_meta_absent(pdb, REFOLD_FROM_ANCHOR_KEY) &&
-                  hs_meta_absent(pdb, REFOLD_FROM_ANCHOR_TARGET_KEY) &&
-                  !refold_in_progress() && !refold_from_anchor_active());
-        CSI_CHECK("activate: stale producer/epoch/repair authority is purged",
-                  stale_generation_metadata_absent(pdb));
-        /* The installed coins projection is locally authoritative. Re-export
-         * still requires a new full local proof walk + producer receipt; the
-         * consumer must never inherit producer provenance from the bundle. */
-        int32_t proven_applied = -1;
-        CSI_CHECK("activate: installed coins projection is proven authority",
-                  coins_kv_is_proven_authority(pdb, &proven_applied) &&
-                  proven_applied == b.height + 1);
-
-        /* (vi) H*-climb: after install H* sits at the anchor; folding three
-         * consistent heights over stage evidence makes
-         * reducer_frontier_compute_hstar climb past it. The compiled finality
-         * floor is lowered for the fixture and restored after. */
-        /* Production ACTIVATE runs before the reducer stages initialize on a
-         * genuinely fresh boot. Prove it, rather than test scaffolding,
-         * materialized every H*-authoritative log schema. */
-        bool frontier_schema_present = true;
-        static const char *const frontier_tables[] = {
-            "validate_headers_log", "script_validate_log",
-            "body_persist_log", "proof_validate_log", "utxo_apply_log",
-            "tip_finalize_log",
-        };
-        for (size_t i = 0;
-             i < sizeof(frontier_tables) / sizeof(frontier_tables[0]); i++) {
-            char sql[160];
-            int64_t table_count = 0;
-            snprintf(sql, sizeof(sql),
-                     "SELECT count(*) FROM sqlite_master WHERE type='table' "
-                     "AND name='%s'", frontier_tables[i]);
-            frontier_schema_present = frontier_schema_present &&
-                                      candidate_query_i64(pdb, sql,
-                                                          &table_count) &&
-                                      table_count == 1;
-        }
-        CSI_CHECK("activate: production materializes every H* log schema",
-                  frontier_schema_present);
-        int32_t hstar_base = -1, served_base = -1;
-        progress_store_tx_lock();
-        bool base_ok = reducer_frontier_compute_hstar(pdb, &hstar_base,
-                                                      &served_base);
-        progress_store_tx_unlock();
-        CSI_CHECK("activate: H* rests AT the anchor before any forward fold "
-                  "(the wedge floor)",
-                  base_ok && hstar_base == b.height);
-
-        bool folded = true;
-        for (int32_t h = b.height + 1; h <= b.height + 3; h++)
-            folded = folded && hs_put_forward_height(pdb, h);
-        CSI_CHECK("activate: three consistent heights fold forward", folded);
-        /* Advance the reducer cursors past the folded tip (upstream count the
-         * NEXT height; tip_finalize uses the served-tip frame). */
-        bool cursors = hs_set_cursor(pdb, "validate_headers", b.height + 4) &&
-                       hs_set_cursor(pdb, "body_fetch", b.height + 4) &&
-                       hs_set_cursor(pdb, "body_persist", b.height + 4) &&
-                       hs_set_cursor(pdb, "script_validate", b.height + 4) &&
-                       hs_set_cursor(pdb, "proof_validate", b.height + 4) &&
-                       hs_set_cursor(pdb, "utxo_apply", b.height + 4) &&
-                       hs_set_cursor(pdb, "tip_finalize", b.height + 3);
-        CSI_CHECK("activate: reducer cursors advance past the folded tip",
-                  cursors);
-        int32_t hstar_climb = -1, served_climb = -1;
-        progress_store_tx_lock();
-        bool climb_ok = reducer_frontier_compute_hstar(pdb, &hstar_climb,
-                                                       &served_climb);
-        progress_store_tx_unlock();
-        CSI_CHECK("activate: H* CLIMBS past the wedge over folded bodies "
-                  "(cure enables forward progress, not just forced cursors)",
-                  climb_ok && hstar_climb == b.height + 3 &&
-                  hstar_climb > hstar_base && served_climb == b.height + 3);
-
-        /* Physically restorable prior generation. */
-        sqlite3 *prior = NULL;
-        CSI_CHECK("activate: restorable prior generation is a valid standalone "
-                  "store",
-                  ares.prior_generation_path[0] != '\0' &&
-                  sqlite3_open_v2(ares.prior_generation_path, &prior,
-                                  SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
-                  prior);
-        CSI_CHECK("activate: success reason retains the exact prior-generation "
-                  "path",
-                  ares.prior_generation_path[0] != '\0' &&
-                  strstr(ares.reason, ares.prior_generation_path) != NULL);
-        CSI_CHECK("activate: prior generation is the protected pre-install "
-                  "wedge, not post-cutover state",
-                  prior && coins_kv_count(prior) == 1 &&
-                  hs_meta_present(prior, SHIELDED_REPLAY_TARGET_KEY) &&
-                  hs_meta_present(prior, NULLIFIER_BACKFILL_RESUME_KEY) &&
-                  hs_meta_present(prior, REFOLD_IN_PROGRESS_KEY) &&
-                  stale_generation_metadata_present(prior));
-        if (prior)
-            sqlite3_close(prior);
-        if (ares.prior_generation_path[0])
-            unlink(ares.prior_generation_path);
-
-        /* (vii) The real replay receipt written above lifts the production
-         * containment with the ZCL_TESTING hook OFF: activate consults the
-         * on-disk receipt, finds it binds THIS bundle, and installs. The
-         * (iii-b) rewrite replaced the bundle inode, so the CAS descriptor
-         * binding correctly demands a fresh exact ADMIT first. */
-        ev = NULL;
-        evr = consensus_state_artifact_evidence_open(b.path, -1, &ev);
-        bool auth_cin_ok = evr.ok && ev &&
-            consensus_state_artifact_evidence_manifest_copy(ev, &cin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ev, cin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ev, cin.artifact_receipt_digest);
-        /* The store folded 3 heights past the anchor above; the CAS fence
-         * demands the decision record the LIVE frontier, resolved exactly the
-         * way activate captures it (durable-tip convention included). */
-        int32_t live_frontier_h = -1;
-        uint8_t live_frontier_hash[32] = {0};
-        CSI_CHECK("activate: live frontier resolves for the fresh ADMIT",
-                  tip_finalize_stage_resolve_durable_tip(pdb, &live_frontier_h,
-                                                         live_frontier_hash) &&
-                  live_frontier_h == b.height + 3);
-        cin.frontier_height = live_frontier_h;
-        memcpy(cin.frontier_hash, live_frontier_hash, 32);
-        consensus_state_publication_cas_decide(&cin, &dec);
-        CSI_CHECK("activate: replay-authority bundle receives a fresh exact "
-                  "ADMIT receipt",
-                  auth_cin_ok && dec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        if (dec.decision == CONSENSUS_PUBLICATION_ADMIT) {
-            active_decision = dec;
-            memcpy(areq.expected_artifact_receipt_digest,
-                   dec.artifact_receipt_digest, 32);
-            areq.publication_decision = &active_decision;
-        }
-        if (ev)
-            consensus_state_artifact_evidence_free(ev);
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        struct consensus_state_activate_result ares_auth;
-        CSI_CHECK("activate: a valid on-disk replay receipt lifts the production "
-                  "containment (real authority, no test hook)",
-                  consensus_state_snapshot_install_activate(pdb, &areq,
-                                                            &ares_auth) &&
-                  ares_auth.activated &&
-                  ares_auth.status == CONSENSUS_INSTALL_ACTIVATED &&
-                  active_is(pdb, &b));
-        if (ares_auth.prior_generation_path[0])
-            unlink(ares_auth.prior_generation_path);
-
-        failures += installed_marker_reopen_tests(active_dir, &b);
-
-        reducer_frontier_test_set_compiled_anchor(-1);
-        if (active_dir_fd >= 0)
-            (void)close(active_dir_fd);
-        progress_store_close();
-        test_cleanup_tmpdir(active_dir);
+static int csi_checkpoint_content_mutation_cases(
+    struct csi_checkpoint_content_scene *s)
+{
+    int failures=0;
+    /* (iii) NEGATIVE — a single-coin mutation flips the compiled checkpoint
+     * SHA3, so the bundle's coins no longer reproduce it: no authority. */
+    struct sha3_256_ctx cc_mut_ctx;
+    sha3_256_init(&cc_mut_ctx);
+    for (size_t i = 0; i < s->b->coin_count; i++) {
+        const struct csi_coin *coin = &s->b->coins[i];
+        utxo_commitment_sha3_write_record(
+            &cc_mut_ctx, coin->txid, coin->vout,
+            coin->value + (i == 0 ? 1 : 0), coin->script,
+            coin->script_len, (uint32_t)coin->height,
+            coin->coinbase ? 1 : 0);
     }
+    struct sha3_utxo_checkpoint cc_mut = s->cc_cp;
+    sha3_256_finalize(&cc_mut_ctx, cc_mut.sha3_hash);
+    checkpoints_set_sha3_override_for_test(&cc_mut);
+    s->areq.checkpoint_sapling_root_from_validated_header = true;
+    memcpy(s->areq.checkpoint_sapling_root,
+           s->b->frontier_root[ANCHOR_POOL_SAPLING], 32);
+    CSI_CHECK("checkpoint-content: single-coin mutation refuses (coins miss "
+              "the compiled SHA3)",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->cc_ares) &&
+              !s->cc_ares.activated &&
+              s->cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              strstr(s->cc_ares.reason, "checkpoint-content") != NULL &&
+              coins_kv_count(s->pdb) == 1);
+    checkpoints_set_sha3_override_for_test(&s->cc_cp);
+    return failures;
+}
+
+static int csi_checkpoint_content_activation_cases(
+    struct csi_checkpoint_content_scene *s)
+{
+    int failures=0;
+    /* (iv) POSITIVE — coins reproduce the compiled checkpoint AND the
+     * Sapling frontier Pedersen-roots to the validated-header root:
+     * ACTIVATE via checkpoint-content with NO receipt, naming the authority. */
+    s->areq.checkpoint_sapling_root_from_validated_header = true;
+    memcpy(s->areq.checkpoint_sapling_root,
+           s->b->frontier_root[ANCHOR_POOL_SAPLING], 32);
+    CSI_CHECK("checkpoint-content: content match + header root activates "
+              "with NO receipt",
+              consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                        &s->cc_ares) &&
+              s->cc_ares.activated &&
+              s->cc_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
+              s->cc_ares.height == s->b->height && s->cc_ares.utxo_count == 2 &&
+              s->cc_ares.anchor_count == 2 && s->cc_ares.nullifier_count == 2 &&
+              s->cc_ares.hstar == s->b->height &&
+              s->cc_ares.coins_applied_height == s->b->height + 1 &&
+              strstr(s->cc_ares.reason,
+                     "authority=checkpoint_content") != NULL);
+    CSI_CHECK("checkpoint-content: installed coins/anchors/nullifiers match "
+              "the bundle with COMPLETE (cursor 0) history",
+              active_is(s->pdb, s->b));
+    if (s->cc_ares.prior_generation_path[0])
+        (void)unlink(s->cc_ares.prior_generation_path);
+
+    checkpoints_reset_sha3_override_for_test();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (s->cc_dir_fd >= 0)
+        (void)close(s->cc_dir_fd);
+    progress_store_close();
+    test_cleanup_tmpdir(s->cc_dir);
+    return failures;
+}
 
     /* ── CHECKPOINT_CONTENT ACTIVATE authority ─────────────────────────────
      * The second, additive activation authority. A bundle whose coins reproduce
@@ -4805,184 +5425,235 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
      * fold-process attestation. Prove: no validated-header root CONTAINS; a
      * wrong Sapling root CONTAINS; a single-coin mutation refuses; the
      * header-bound content match activates and NAMES the authority. */
-    {
-        b.anchors[0].height = b.height;
-        b.anchors[1].height = b.height;
-        char cc_dir[320];
-        snprintf(cc_dir, sizeof(cc_dir), "%s/ckpt-content", dir);
-        CSI_CHECK("checkpoint-content: datadir", mkdir(cc_dir, 0700) == 0);
-        CSI_CHECK("checkpoint-content: live progress store opens",
-                  progress_store_open(cc_dir));
-        sqlite3 *pdb = progress_store_db();
-        int cc_dir_fd = open(cc_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        reducer_frontier_test_set_compiled_anchor(0);
+static int csi_checkpoint_content_cases(struct csi_fixture *b, const char *dir)
+{
+    int failures=0;
+    struct csi_checkpoint_content_scene scene;
+    struct csi_checkpoint_content_scene *s = &scene;
+    s->b = b;
+    s->dir = dir;
+    failures += csi_checkpoint_content_open_and_seed(s);
+    failures += csi_checkpoint_content_admit_decision(s);
+    failures += csi_checkpoint_content_refusal_cases(s);
+    failures += csi_checkpoint_content_mutation_cases(s);
+    failures += csi_checkpoint_content_activation_cases(s);
+    return failures;
+}
 
-        uint8_t borrowed_txid[32];
-        memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
-        const uint8_t borrowed_script[] = {0x51};
-        CSI_CHECK("checkpoint-content: wedged store seeds (borrowed coin, empty "
-                  "anchors, positive activation cursor)",
-                  pdb && coins_kv_ensure_schema(pdb) &&
-                  progress_meta_table_ensure(pdb) &&
-                  anchor_kv_ensure_schema(pdb) &&
-                  nullifier_kv_ensure_schema(pdb) &&
-                  anchor_kv_initialize_history(pdb, b.height) &&
-                  nullifier_kv_initialize_history(pdb, b.height) &&
-                  coins_kv_add(pdb, borrowed_txid, 0, 4242, b.height, false,
-                               borrowed_script, sizeof(borrowed_script)) &&
-                  hs_seed_current_frontier(pdb, b.height, b.block_hash));
+struct csi_assisted_scene {
+    struct csi_fixture *b;
+    const char *dir;
+    char as_dir[320];
+    sqlite3 *pdb;
+    int as_dir_fd;
+    struct consensus_state_activate_request areq;
+    struct consensus_state_artifact_evidence *asev;
+    struct zcl_result asevr;
+    struct consensus_state_publication_cas_inputs asin;
+    struct consensus_state_publication_decision_record asdec;
+    struct consensus_state_publication_decision_record as_decision;
+    struct sha3_utxo_checkpoint as_cp;
+    struct consensus_state_activate_result as_ares;
+};
 
-        CSI_CHECK("checkpoint-content: valid complete bundle writes",
-                  write_bundle(&b, CSI_VALID));
+static int csi_assisted_open_and_seed(struct csi_assisted_scene *s)
+{
+    int failures=0;
+    s->b->anchors[0].height = s->b->height;
+    s->b->anchors[1].height = s->b->height;
+    snprintf(s->as_dir, sizeof(s->as_dir), "%s/assisted", s->dir);
+    CSI_CHECK("assisted: datadir", mkdir(s->as_dir, 0700) == 0);
+    CSI_CHECK("assisted: live progress store opens",
+              progress_store_open(s->as_dir));
+    s->pdb = progress_store_db();
+    s->as_dir_fd = open(s->as_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    reducer_frontier_test_set_compiled_anchor(0);
 
-        /* Build the ADMIT decision + exact receipt binding activate requires,
-         * exactly as the boot adapter would. */
-        struct consensus_state_activate_request areq;
-        memset(&areq, 0, sizeof(areq));
-        areq.bundle_path = b.path;
-        areq.expected_height = b.height;
-        memcpy(areq.expected_block_hash, b.block_hash, 32);
-        areq.datadir_fd = cc_dir_fd;
-        areq.datadir_display = cc_dir;
+    uint8_t borrowed_txid[32];
+    memset(borrowed_txid, 0x5b, sizeof(borrowed_txid));
+    const uint8_t borrowed_script[] = {0x51};
+    CSI_CHECK("assisted: wedged store seeds (borrowed coin, empty anchors)",
+              s->pdb && coins_kv_ensure_schema(s->pdb) &&
+              progress_meta_table_ensure(s->pdb) &&
+              anchor_kv_ensure_schema(s->pdb) &&
+              nullifier_kv_ensure_schema(s->pdb) &&
+              anchor_kv_initialize_history(s->pdb, s->b->height) &&
+              nullifier_kv_initialize_history(s->pdb, s->b->height) &&
+              coins_kv_add(s->pdb, borrowed_txid, 0, 4242, s->b->height, false,
+                           borrowed_script, sizeof(borrowed_script)) &&
+              hs_seed_current_frontier(s->pdb, s->b->height, s->b->block_hash));
 
-        struct consensus_state_artifact_evidence *ccev = NULL;
-        struct zcl_result ccevr =
-            consensus_state_artifact_evidence_open(b.path, -1, &ccev);
-        struct consensus_state_publication_cas_inputs ccin;
-        memset(&ccin, 0, sizeof(ccin));
-        bool ccin_ok = ccevr.ok && ccev &&
-            consensus_state_artifact_evidence_manifest_copy(ccev,
-                                                            &ccin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                ccev, ccin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                ccev, ccin.artifact_receipt_digest);
-        ccin.chain_evidence_present = true;
-        ccin.chain_bound_to_artifact = true;
-        memset(ccin.chain_evidence_digest, 0xa5, 32);
-        ccin.source_receipt_present = true;
-        ccin.source_receipt = b.receipt;
-        ccin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
-        ccin.frontier_known = true;
-        memcpy(ccin.frontier_hash, b.block_hash, 32);
-        ccin.frontier_height = b.height;
-        struct consensus_state_publication_decision_record ccdec;
-        consensus_state_publication_cas_decide(&ccin, &ccdec);
-        struct consensus_state_publication_decision_record cc_decision;
-        memset(&cc_decision, 0, sizeof(cc_decision));
-        CSI_CHECK("checkpoint-content: complete bundle CAS-decides ADMIT",
-                  ccin_ok && ccdec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        cc_decision = ccdec;
-        memcpy(areq.expected_artifact_receipt_digest,
-               ccdec.artifact_receipt_digest, 32);
-        areq.publication_decision = &cc_decision;
-        if (ccev)
-            consensus_state_artifact_evidence_free(ccev);
+    CSI_CHECK("assisted: valid complete bundle writes",
+              write_bundle(s->b, CSI_VALID));
+    return failures;
+}
 
-        /* The compiled SHA3 UTXO checkpoint the bundle's own coins reproduce by
-         * construction (the fixture folds these two coins into b.utxo_root). */
-        struct sha3_utxo_checkpoint cc_cp;
-        memset(&cc_cp, 0, sizeof(cc_cp));
-        cc_cp.height = b.height;
-        memcpy(cc_cp.block_hash, b.block_hash, 32);
-        cc_cp.utxo_count = b.coin_count;
-        cc_cp.total_supply = b.supply;
-        memcpy(cc_cp.sha3_hash, b.utxo_root, 32);
-        checkpoints_set_sha3_override_for_test(&cc_cp);
+static int csi_assisted_admit_decision(struct csi_assisted_scene *s)
+{
+    int failures=0;
+    memset(&s->areq, 0, sizeof(s->areq));
+    s->areq.bundle_path = s->b->path;
+    s->areq.expected_height = s->b->height;
+    memcpy(s->areq.expected_block_hash, s->b->block_hash, 32);
+    s->areq.datadir_fd = s->as_dir_fd;
+    s->areq.datadir_display = s->as_dir;
 
-        /* No independent replay receipt exists on this datadir: checkpoint-
-         * content is the ONLY authority that can lift containment here. */
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        struct consensus_state_activate_result cc_ares;
+    s->asev = NULL;
+    s->asevr =
+        consensus_state_artifact_evidence_open(s->b->path, -1, &s->asev);
+    memset(&s->asin, 0, sizeof(s->asin));
+    bool asin_ok = s->asevr.ok && s->asev &&
+        consensus_state_artifact_evidence_manifest_copy(s->asev,
+                                                        &s->asin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->asev, s->asin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->asev, s->asin.artifact_receipt_digest);
+    s->asin.chain_evidence_present = true;
+    s->asin.chain_bound_to_artifact = true;
+    memset(s->asin.chain_evidence_digest, 0xa5, 32);
+    s->asin.source_receipt_present = true;
+    s->asin.source_receipt = s->b->receipt;
+    s->asin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
+    s->asin.frontier_known = true;
+    memcpy(s->asin.frontier_hash, s->b->block_hash, 32);
+    s->asin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->asin, &s->asdec);
+    memset(&s->as_decision, 0, sizeof(s->as_decision));
+    CSI_CHECK("assisted: complete bundle CAS-decides ADMIT",
+              asin_ok && s->asdec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    s->as_decision = s->asdec;
+    memcpy(s->areq.expected_artifact_receipt_digest,
+           s->asdec.artifact_receipt_digest, 32);
+    s->areq.publication_decision = &s->as_decision;
+    if (s->asev)
+        consensus_state_artifact_evidence_free(s->asev);
+    return failures;
+}
 
-        /* (i) NEGATIVE — no validated-header Sapling root: the coins match the
-         * checkpoint but the shielded tip is not PoW-bound, so CONTAINED. */
-        areq.checkpoint_sapling_root_from_validated_header = false;
-        memset(areq.checkpoint_sapling_root, 0, 32);
-        CSI_CHECK("checkpoint-content: no validated-header root stays CONTAINED "
-                  "(nothing written)",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &cc_ares) &&
-                  !cc_ares.activated &&
-                  cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  strstr(cc_ares.reason, "validated-header") != NULL &&
-                  cc_ares.prior_generation_path[0] == '\0' &&
-                  coins_kv_count(pdb) == 1);
+static int csi_assisted_refusal_cases(struct csi_assisted_scene *s)
+{
+    int failures=0;
+    /* A compiled SHA3 checkpoint strictly BELOW the bundle height: the bundle
+     * is ABOVE it (assisted's promotion anchor). The bundle's own coins do
+     * NOT reproduce it (fresher, unbound content), so checkpoint-content /
+     * checkpoint-rom never fire — only the assisted authority can lift
+     * containment here. */
+    memset(&s->as_cp, 0, sizeof(s->as_cp));
+    s->as_cp.height = s->b->height - 1;
+    memset(s->as_cp.block_hash, 0xc7, 32);
+    s->as_cp.utxo_count = 999;
+    memset(s->as_cp.sha3_hash, 0xc8, 32);
+    checkpoints_set_sha3_override_for_test(&s->as_cp);
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
 
-        /* (ii) NEGATIVE — a Sapling root that does not match the bundle's
-         * frontier: never activate on a header-inconsistent root. CONTAINED. */
-        areq.checkpoint_sapling_root_from_validated_header = true;
-        memcpy(areq.checkpoint_sapling_root,
-               b.frontier_root[ANCHOR_POOL_SAPLING], 32);
-        areq.checkpoint_sapling_root[7] ^= 0xff;
-        CSI_CHECK("checkpoint-content: wrong Sapling root stays CONTAINED",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &cc_ares) &&
-                  !cc_ares.activated &&
-                  cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  strstr(cc_ares.reason, "validated-header") != NULL &&
-                  coins_kv_count(pdb) == 1);
+    /* (i) NEGATIVE — assisted_tier NOT requested (no opt-in): an above-
+     * checkpoint bundle with no sovereign authority stays CONTAINED. */
+    s->areq.assisted_tier = false;
+    CSI_CHECK("assisted: opt-in OFF stays CONTAINED (nothing written)",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->as_ares) &&
+              !s->as_ares.activated &&
+              s->as_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              coins_kv_count(s->pdb) == 1);
 
-        /* (iii) NEGATIVE — a single-coin mutation flips the compiled checkpoint
-         * SHA3, so the bundle's coins no longer reproduce it: no authority. */
-        struct sha3_256_ctx cc_mut_ctx;
-        sha3_256_init(&cc_mut_ctx);
-        for (size_t i = 0; i < b.coin_count; i++) {
-            const struct csi_coin *coin = &b.coins[i];
-            utxo_commitment_sha3_write_record(
-                &cc_mut_ctx, coin->txid, coin->vout,
-                coin->value + (i == 0 ? 1 : 0), coin->script,
-                coin->script_len, (uint32_t)coin->height,
-                coin->coinbase ? 1 : 0);
-        }
-        struct sha3_utxo_checkpoint cc_mut = cc_cp;
-        sha3_256_finalize(&cc_mut_ctx, cc_mut.sha3_hash);
-        checkpoints_set_sha3_override_for_test(&cc_mut);
-        areq.checkpoint_sapling_root_from_validated_header = true;
-        memcpy(areq.checkpoint_sapling_root,
-               b.frontier_root[ANCHOR_POOL_SAPLING], 32);
-        CSI_CHECK("checkpoint-content: single-coin mutation refuses (coins miss "
-                  "the compiled SHA3)",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &cc_ares) &&
-                  !cc_ares.activated &&
-                  cc_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  strstr(cc_ares.reason, "checkpoint-content") != NULL &&
-                  coins_kv_count(pdb) == 1);
-        checkpoints_set_sha3_override_for_test(&cc_cp);
+    /* (ii) NEGATIVE — assisted_tier requested but the shielded tip is not
+     * bound to a validated-header root: never activate on an unverifiable
+     * root. CONTAINED. */
+    s->areq.assisted_tier = true;
+    s->areq.assisted_sapling_root_from_validated_header = false;
+    memset(s->areq.assisted_sapling_root, 0, 32);
+    CSI_CHECK("assisted: no validated-header sapling root stays CONTAINED",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->as_ares) &&
+              !s->as_ares.activated &&
+              s->as_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              coins_kv_count(s->pdb) == 1);
+    return failures;
+}
 
-        /* (iv) POSITIVE — coins reproduce the compiled checkpoint AND the
-         * Sapling frontier Pedersen-roots to the validated-header root:
-         * ACTIVATE via checkpoint-content with NO receipt, naming the authority. */
-        areq.checkpoint_sapling_root_from_validated_header = true;
-        memcpy(areq.checkpoint_sapling_root,
-               b.frontier_root[ANCHOR_POOL_SAPLING], 32);
-        CSI_CHECK("checkpoint-content: content match + header root activates "
-                  "with NO receipt",
-                  consensus_state_snapshot_install_activate(pdb, &areq,
-                                                            &cc_ares) &&
-                  cc_ares.activated &&
-                  cc_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
-                  cc_ares.height == b.height && cc_ares.utxo_count == 2 &&
-                  cc_ares.anchor_count == 2 && cc_ares.nullifier_count == 2 &&
-                  cc_ares.hstar == b.height &&
-                  cc_ares.coins_applied_height == b.height + 1 &&
-                  strstr(cc_ares.reason,
-                         "authority=checkpoint_content") != NULL);
-        CSI_CHECK("checkpoint-content: installed coins/anchors/nullifiers match "
-                  "the bundle with COMPLETE (cursor 0) history",
-                  active_is(pdb, &b));
-        if (cc_ares.prior_generation_path[0])
-            (void)unlink(cc_ares.prior_generation_path);
+static int csi_assisted_activation_cases(struct csi_assisted_scene *s)
+{
+    int failures=0;
+    /* (iii) POSITIVE — assisted_tier + the bundle-height header Sapling root:
+     * ACTIVATE via the assisted authority, naming it. */
+    s->areq.assisted_sapling_root_from_validated_header = true;
+    memcpy(s->areq.assisted_sapling_root,
+           s->b->frontier_root[ANCHOR_POOL_SAPLING], 32);
+    CSI_CHECK("assisted: above-checkpoint bundle + header root activates",
+              consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                        &s->as_ares) &&
+              s->as_ares.activated &&
+              s->as_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
+              s->as_ares.height == s->b->height && s->as_ares.utxo_count == 2 &&
+              s->as_ares.anchor_count == 2 && s->as_ares.nullifier_count == 2 &&
+              s->as_ares.hstar == s->b->height &&
+              s->as_ares.coins_applied_height == s->b->height + 1 &&
+              strstr(s->as_ares.reason, "authority=assisted") != NULL);
+    CSI_CHECK("assisted: installed state matches the bundle (COMPLETE "
+              "cursor-0 history — the wedge-immune atomic path)",
+              active_is(s->pdb, s->b));
+    return failures;
+}
 
-        checkpoints_reset_sha3_override_for_test();
-        reducer_frontier_test_set_compiled_anchor(-1);
-        if (cc_dir_fd >= 0)
-            (void)close(cc_dir_fd);
-        progress_store_close();
-        test_cleanup_tmpdir(cc_dir);
-    }
+static int csi_assisted_tier_and_seam_cases(struct csi_assisted_scene *s)
+{
+    int failures=0;
+    /* Tier boundary: migration-complete SET, self_folded ABSENT. */
+    CSI_CHECK("assisted: migration-complete marker SET (operational tier)",
+              hs_meta_present(s->pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
+    CSI_CHECK("assisted: self_folded marker WITHHELD (not sovereign)",
+              hs_meta_absent(s->pdb, COINS_KV_SELF_FOLDED_KEY) &&
+              !coins_kv_contains_refold_marker(s->pdb));
+    char sd_reason[128];
+    CSI_CHECK("assisted: coins_kv_tip_is_self_derived is FALSE (borrowed)",
+              !coins_kv_tip_is_self_derived(s->pdb, s->b->height, sd_reason,
+                                            sizeof(sd_reason)));
+
+    /* Promotion seam: bundle height + the three manifest commitments. */
+    int32_t seam_h = -1;
+    uint8_t seam_utxo[32], seam_anchor[32], seam_nf[32];
+    bool seam_found = false;
+    CSI_CHECK("assisted: promotion seam recorded (height + 3 commitments)",
+              consensus_state_install_read_assisted_seam(
+                  s->pdb, &seam_h, seam_utxo, seam_anchor, seam_nf,
+                  &seam_found) &&
+              seam_found && seam_h == s->b->height &&
+              memcmp(seam_utxo, s->b->utxo_root, 32) == 0 &&
+              memcmp(seam_anchor, s->b->anchor_digest, 32) == 0 &&
+              memcmp(seam_nf, s->b->nf_digest, 32) == 0);
+
+    /* Wedge-immunity: the borrowed install cured the sapling gate and forced
+     * the cursors, exactly like a sovereign install. */
+    struct incremental_merkle_tree as_gate_tree;
+    struct uint256 as_gate_root;
+    int64_t as_gate_h = -1;
+    sapling_tree_init(&as_gate_tree);
+    CSI_CHECK("assisted: post-install sapling gate is FOUND (no wedge)",
+              anchor_kv_latest_tree(s->pdb, ANCHOR_POOL_SAPLING, &as_gate_tree,
+                                    &as_gate_root, &as_gate_h) ==
+                  ANCHOR_KV_FOUND);
+    int64_t as_applied_cursor = -1, as_tip_cursor = -1;
+    CSI_CHECK("assisted: reducer cursors forced to the anchor frontier",
+              candidate_query_i64(s->pdb,
+                  "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
+                  &as_applied_cursor) &&
+              as_applied_cursor == s->b->height + 1 &&
+              candidate_query_i64(s->pdb,
+                  "SELECT cursor FROM stage_cursor WHERE name='tip_finalize'",
+                  &as_tip_cursor) && as_tip_cursor == s->b->height);
+
+    if (s->as_ares.prior_generation_path[0])
+        (void)unlink(s->as_ares.prior_generation_path);
+    checkpoints_reset_sha3_override_for_test();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (s->as_dir_fd >= 0)
+        (void)close(s->as_dir_fd);
+    progress_store_close();
+    test_cleanup_tmpdir(s->as_dir);
+    return failures;
+}
 
     /* ── ASSISTED ABOVE-checkpoint ACTIVATE authority (the RELEASE_ASSISTED
      *    tier, full-install integration) ───────────────────────────────────
@@ -4994,188 +5665,181 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
      * coins_kv_tip_is_self_derived false; the seam records the bundle height +
      * the three manifest commitments; wedge-immunity (post-install sapling gate
      * FOUND, cursors forced); and the assisted opt-in gates it. */
-    {
-        b.anchors[0].height = b.height;
-        b.anchors[1].height = b.height;
-        char as_dir[320];
-        snprintf(as_dir, sizeof(as_dir), "%s/assisted", dir);
-        CSI_CHECK("assisted: datadir", mkdir(as_dir, 0700) == 0);
-        CSI_CHECK("assisted: live progress store opens",
-                  progress_store_open(as_dir));
-        sqlite3 *pdb = progress_store_db();
-        int as_dir_fd = open(as_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        reducer_frontier_test_set_compiled_anchor(0);
+static int csi_assisted_cases(struct csi_fixture *b, const char *dir)
+{
+    int failures=0;
+    struct csi_assisted_scene scene;
+    struct csi_assisted_scene *s = &scene;
+    s->b = b;
+    s->dir = dir;
+    failures += csi_assisted_open_and_seed(s);
+    failures += csi_assisted_admit_decision(s);
+    failures += csi_assisted_refusal_cases(s);
+    failures += csi_assisted_activation_cases(s);
+    failures += csi_assisted_tier_and_seam_cases(s);
+    return failures;
+}
 
-        uint8_t borrowed_txid[32];
-        memset(borrowed_txid, 0x5b, sizeof(borrowed_txid));
-        const uint8_t borrowed_script[] = {0x51};
-        CSI_CHECK("assisted: wedged store seeds (borrowed coin, empty anchors)",
-                  pdb && coins_kv_ensure_schema(pdb) &&
-                  progress_meta_table_ensure(pdb) &&
-                  anchor_kv_ensure_schema(pdb) &&
-                  nullifier_kv_ensure_schema(pdb) &&
-                  anchor_kv_initialize_history(pdb, b.height) &&
-                  nullifier_kv_initialize_history(pdb, b.height) &&
-                  coins_kv_add(pdb, borrowed_txid, 0, 4242, b.height, false,
-                               borrowed_script, sizeof(borrowed_script)) &&
-                  hs_seed_current_frontier(pdb, b.height, b.block_hash));
+struct csi_checkpoint_rom_scene {
+    struct csi_fixture *b;
+    const char *dir;
+    char rom_dir[320];
+    sqlite3 *pdb;
+    int rom_dir_fd;
+    struct consensus_state_activate_request areq;
+    struct consensus_state_artifact_evidence *rev;
+    struct zcl_result revr;
+    struct consensus_state_publication_cas_inputs rin;
+    struct consensus_state_publication_decision_record rdec;
+    struct consensus_state_publication_decision_record rom_decision;
+    struct consensus_state_activate_result rom_ares;
+    struct rom_state_checkpoint rom;
+};
 
-        CSI_CHECK("assisted: valid complete bundle writes",
-                  write_bundle(&b, CSI_VALID));
+static int csi_checkpoint_rom_open_and_seed(struct csi_checkpoint_rom_scene *s)
+{
+    int failures=0;
+    s->b->anchors[0].height = s->b->height;
+    s->b->anchors[1].height = s->b->height;
+    snprintf(s->rom_dir, sizeof(s->rom_dir), "%s/ckpt-rom", s->dir);
+    CSI_CHECK("checkpoint-rom: datadir", mkdir(s->rom_dir, 0700) == 0);
+    CSI_CHECK("checkpoint-rom: live progress store opens",
+              progress_store_open(s->rom_dir));
+    s->pdb = progress_store_db();
+    s->rom_dir_fd = open(s->rom_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    reducer_frontier_test_set_compiled_anchor(0);
 
-        struct consensus_state_activate_request areq;
-        memset(&areq, 0, sizeof(areq));
-        areq.bundle_path = b.path;
-        areq.expected_height = b.height;
-        memcpy(areq.expected_block_hash, b.block_hash, 32);
-        areq.datadir_fd = as_dir_fd;
-        areq.datadir_display = as_dir;
+    uint8_t borrowed_txid[32];
+    memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
+    const uint8_t borrowed_script[] = {0x51};
+    CSI_CHECK("checkpoint-rom: wedged store seeds (borrowed coin, empty "
+              "anchors, positive activation cursor)",
+              s->pdb && coins_kv_ensure_schema(s->pdb) &&
+              progress_meta_table_ensure(s->pdb) &&
+              anchor_kv_ensure_schema(s->pdb) &&
+              nullifier_kv_ensure_schema(s->pdb) &&
+              anchor_kv_initialize_history(s->pdb, s->b->height) &&
+              nullifier_kv_initialize_history(s->pdb, s->b->height) &&
+              coins_kv_add(s->pdb, borrowed_txid, 0, 4242, s->b->height, false,
+                           borrowed_script, sizeof(borrowed_script)) &&
+              hs_seed_current_frontier(s->pdb, s->b->height, s->b->block_hash));
 
-        struct consensus_state_artifact_evidence *asev = NULL;
-        struct zcl_result asevr =
-            consensus_state_artifact_evidence_open(b.path, -1, &asev);
-        struct consensus_state_publication_cas_inputs asin;
-        memset(&asin, 0, sizeof(asin));
-        bool asin_ok = asevr.ok && asev &&
-            consensus_state_artifact_evidence_manifest_copy(asev,
-                                                            &asin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                asev, asin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                asev, asin.artifact_receipt_digest);
-        asin.chain_evidence_present = true;
-        asin.chain_bound_to_artifact = true;
-        memset(asin.chain_evidence_digest, 0xa5, 32);
-        asin.source_receipt_present = true;
-        asin.source_receipt = b.receipt;
-        asin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
-        asin.frontier_known = true;
-        memcpy(asin.frontier_hash, b.block_hash, 32);
-        asin.frontier_height = b.height;
-        struct consensus_state_publication_decision_record asdec;
-        consensus_state_publication_cas_decide(&asin, &asdec);
-        struct consensus_state_publication_decision_record as_decision;
-        memset(&as_decision, 0, sizeof(as_decision));
-        CSI_CHECK("assisted: complete bundle CAS-decides ADMIT",
-                  asin_ok && asdec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        as_decision = asdec;
-        memcpy(areq.expected_artifact_receipt_digest,
-               asdec.artifact_receipt_digest, 32);
-        areq.publication_decision = &as_decision;
-        if (asev)
-            consensus_state_artifact_evidence_free(asev);
+    CSI_CHECK("checkpoint-rom: valid complete bundle writes",
+              write_bundle(s->b, CSI_VALID));
+    return failures;
+}
 
-        /* A compiled SHA3 checkpoint strictly BELOW the bundle height: the bundle
-         * is ABOVE it (assisted's promotion anchor). The bundle's own coins do
-         * NOT reproduce it (fresher, unbound content), so checkpoint-content /
-         * checkpoint-rom never fire — only the assisted authority can lift
-         * containment here. */
-        struct sha3_utxo_checkpoint as_cp;
-        memset(&as_cp, 0, sizeof(as_cp));
-        as_cp.height = b.height - 1;
-        memset(as_cp.block_hash, 0xc7, 32);
-        as_cp.utxo_count = 999;
-        memset(as_cp.sha3_hash, 0xc8, 32);
-        checkpoints_set_sha3_override_for_test(&as_cp);
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        struct consensus_state_activate_result as_ares;
+static int csi_checkpoint_rom_admit_decision(struct csi_checkpoint_rom_scene *s)
+{
+    int failures=0;
+    /* Build the ADMIT decision + exact receipt binding activate requires,
+     * exactly as the boot adapter would. */
+    memset(&s->areq, 0, sizeof(s->areq));
+    s->areq.bundle_path = s->b->path;
+    s->areq.expected_height = s->b->height;
+    memcpy(s->areq.expected_block_hash, s->b->block_hash, 32);
+    s->areq.datadir_fd = s->rom_dir_fd;
+    s->areq.datadir_display = s->rom_dir;
 
-        /* (i) NEGATIVE — assisted_tier NOT requested (no opt-in): an above-
-         * checkpoint bundle with no sovereign authority stays CONTAINED. */
-        areq.assisted_tier = false;
-        CSI_CHECK("assisted: opt-in OFF stays CONTAINED (nothing written)",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &as_ares) &&
-                  !as_ares.activated &&
-                  as_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  coins_kv_count(pdb) == 1);
+    s->rev = NULL;
+    s->revr =
+        consensus_state_artifact_evidence_open(s->b->path, -1, &s->rev);
+    memset(&s->rin, 0, sizeof(s->rin));
+    bool rin_ok = s->revr.ok && s->rev &&
+        consensus_state_artifact_evidence_manifest_copy(s->rev, &s->rin.manifest) &&
+        consensus_state_artifact_evidence_digest(
+            s->rev, s->rin.artifact_logical_digest) &&
+        consensus_state_artifact_evidence_receipt_digest(
+            s->rev, s->rin.artifact_receipt_digest);
+    s->rin.chain_evidence_present = true;
+    s->rin.chain_bound_to_artifact = true;
+    memset(s->rin.chain_evidence_digest, 0xa5, 32);
+    s->rin.source_receipt_present = true;
+    s->rin.source_receipt = s->b->receipt;
+    s->rin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
+    s->rin.frontier_known = true;
+    memcpy(s->rin.frontier_hash, s->b->block_hash, 32);
+    s->rin.frontier_height = s->b->height;
+    consensus_state_publication_cas_decide(&s->rin, &s->rdec);
+    memset(&s->rom_decision, 0, sizeof(s->rom_decision));
+    CSI_CHECK("checkpoint-rom: complete bundle CAS-decides ADMIT",
+              rin_ok && s->rdec.decision == CONSENSUS_PUBLICATION_ADMIT);
+    s->rom_decision = s->rdec;
+    memcpy(s->areq.expected_artifact_receipt_digest,
+           s->rdec.artifact_receipt_digest, 32);
+    s->areq.publication_decision = &s->rom_decision;
+    if (s->rev)
+        consensus_state_artifact_evidence_free(s->rev);
+    return failures;
+}
 
-        /* (ii) NEGATIVE — assisted_tier requested but the shielded tip is not
-         * bound to a validated-header root: never activate on an unverifiable
-         * root. CONTAINED. */
-        areq.assisted_tier = true;
-        areq.assisted_sapling_root_from_validated_header = false;
-        memset(areq.assisted_sapling_root, 0, 32);
-        CSI_CHECK("assisted: no validated-header sapling root stays CONTAINED",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &as_ares) &&
-                  !as_ares.activated &&
-                  as_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  coins_kv_count(pdb) == 1);
+static int csi_checkpoint_rom_unmatched_keystone_cases(
+    struct csi_checkpoint_rom_scene *s)
+{
+    int failures=0;
+    /* CHECKPOINT_ROM is header-independent: no validated-header Sapling root,
+     * no SHA3 override, and the ZCL_TESTING replay hook is OFF — the compiled
+     * keystone is the ONLY authority that can lift containment here. */
+    consensus_state_snapshot_install_activate_test_set_independent_authority(
+        false);
 
-        /* (iii) POSITIVE — assisted_tier + the bundle-height header Sapling root:
-         * ACTIVATE via the assisted authority, naming it. */
-        areq.assisted_sapling_root_from_validated_header = true;
-        memcpy(areq.assisted_sapling_root,
-               b.frontier_root[ANCHOR_POOL_SAPLING], 32);
-        CSI_CHECK("assisted: above-checkpoint bundle + header root activates",
-                  consensus_state_snapshot_install_activate(pdb, &areq,
-                                                            &as_ares) &&
-                  as_ares.activated &&
-                  as_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
-                  as_ares.height == b.height && as_ares.utxo_count == 2 &&
-                  as_ares.anchor_count == 2 && as_ares.nullifier_count == 2 &&
-                  as_ares.hstar == b.height &&
-                  as_ares.coins_applied_height == b.height + 1 &&
-                  strstr(as_ares.reason, "authority=assisted") != NULL);
-        CSI_CHECK("assisted: installed state matches the bundle (COMPLETE "
-                  "cursor-0 history — the wedge-immune atomic path)",
-                  active_is(pdb, &b));
+    /* (i) NEGATIVE — with NO matching keystone at the bundle height (the
+     * compiled production keystone is inert at this small fixture height),
+     * the ADMIT-worthy bundle resolves NO ignition authority and stays
+     * VERIFIED_CONTAINED, writing nothing. This is precisely the fail-closed
+     * posture the ignition whitelist enforces for an unmatched bundle. */
+    checkpoints_reset_rom_state_override_for_test();
+    sqlite3_int64 rom_contained_changes = sqlite3_total_changes64(s->pdb);
+    int rom_contained_backups = prior_generation_count(s->rom_dir);
+    CSI_CHECK("checkpoint-rom: no matching keystone stays CONTAINED (nothing "
+              "written)",
+              !consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                         &s->rom_ares) &&
+              !s->rom_ares.activated &&
+              s->rom_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
+              s->rom_ares.prior_generation_path[0] == '\0' &&
+              sqlite3_total_changes64(s->pdb) == rom_contained_changes &&
+              prior_generation_count(s->rom_dir) == rom_contained_backups &&
+              coins_kv_count(s->pdb) == 1);
+    return failures;
+}
 
-        /* Tier boundary: migration-complete SET, self_folded ABSENT. */
-        CSI_CHECK("assisted: migration-complete marker SET (operational tier)",
-                  hs_meta_present(pdb, COINS_KV_MIGRATION_COMPLETE_KEY));
-        CSI_CHECK("assisted: self_folded marker WITHHELD (not sovereign)",
-                  hs_meta_absent(pdb, COINS_KV_SELF_FOLDED_KEY) &&
-                  !coins_kv_contains_refold_marker(pdb));
-        char sd_reason[128];
-        CSI_CHECK("assisted: coins_kv_tip_is_self_derived is FALSE (borrowed)",
-                  !coins_kv_tip_is_self_derived(pdb, b.height, sd_reason,
-                                                sizeof(sd_reason)));
+static int csi_checkpoint_rom_activation_cases(
+    struct csi_checkpoint_rom_scene *s)
+{
+    int failures=0;
+    /* (ii) POSITIVE — a keystone reproducing the bundle byte-for-byte at the
+     * checkpoint height lifts containment via CHECKPOINT_ROM with NO header
+     * and NO receipt: the atomic install proceeds, commits, cures the wedge,
+     * and names the authority. */
+    rom_keystone_from_fixture(s->b, &s->rom);
+    checkpoints_set_rom_state_override_for_test(&s->rom);
+    CSI_CHECK("checkpoint-rom: full component match activates with NO "
+              "receipt/header (authority=checkpoint_rom)",
+              consensus_state_snapshot_install_activate(s->pdb, &s->areq,
+                                                        &s->rom_ares) &&
+              s->rom_ares.activated &&
+              s->rom_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
+              s->rom_ares.height == s->b->height && s->rom_ares.utxo_count == 2 &&
+              s->rom_ares.anchor_count == 2 && s->rom_ares.nullifier_count == 2 &&
+              s->rom_ares.hstar == s->b->height &&
+              s->rom_ares.coins_applied_height == s->b->height + 1 &&
+              strstr(s->rom_ares.reason,
+                     "authority=checkpoint_rom") != NULL);
+    CSI_CHECK("checkpoint-rom: installed coins/anchors/nullifiers match the "
+              "bundle with COMPLETE (cursor 0) history",
+              active_is(s->pdb, s->b));
+    if (s->rom_ares.prior_generation_path[0])
+        (void)unlink(s->rom_ares.prior_generation_path);
 
-        /* Promotion seam: bundle height + the three manifest commitments. */
-        int32_t seam_h = -1;
-        uint8_t seam_utxo[32], seam_anchor[32], seam_nf[32];
-        bool seam_found = false;
-        CSI_CHECK("assisted: promotion seam recorded (height + 3 commitments)",
-                  consensus_state_install_read_assisted_seam(
-                      pdb, &seam_h, seam_utxo, seam_anchor, seam_nf,
-                      &seam_found) &&
-                  seam_found && seam_h == b.height &&
-                  memcmp(seam_utxo, b.utxo_root, 32) == 0 &&
-                  memcmp(seam_anchor, b.anchor_digest, 32) == 0 &&
-                  memcmp(seam_nf, b.nf_digest, 32) == 0);
-
-        /* Wedge-immunity: the borrowed install cured the sapling gate and forced
-         * the cursors, exactly like a sovereign install. */
-        struct incremental_merkle_tree as_gate_tree;
-        struct uint256 as_gate_root;
-        int64_t as_gate_h = -1;
-        sapling_tree_init(&as_gate_tree);
-        CSI_CHECK("assisted: post-install sapling gate is FOUND (no wedge)",
-                  anchor_kv_latest_tree(pdb, ANCHOR_POOL_SAPLING, &as_gate_tree,
-                                        &as_gate_root, &as_gate_h) ==
-                      ANCHOR_KV_FOUND);
-        int64_t as_applied_cursor = -1, as_tip_cursor = -1;
-        CSI_CHECK("assisted: reducer cursors forced to the anchor frontier",
-                  candidate_query_i64(pdb,
-                      "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-                      &as_applied_cursor) &&
-                  as_applied_cursor == b.height + 1 &&
-                  candidate_query_i64(pdb,
-                      "SELECT cursor FROM stage_cursor WHERE name='tip_finalize'",
-                      &as_tip_cursor) && as_tip_cursor == b.height);
-
-        if (as_ares.prior_generation_path[0])
-            (void)unlink(as_ares.prior_generation_path);
-        checkpoints_reset_sha3_override_for_test();
-        reducer_frontier_test_set_compiled_anchor(-1);
-        if (as_dir_fd >= 0)
-            (void)close(as_dir_fd);
-        progress_store_close();
-        test_cleanup_tmpdir(as_dir);
-    }
+    checkpoints_reset_rom_state_override_for_test();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    if (s->rom_dir_fd >= 0)
+        (void)close(s->rom_dir_fd);
+    progress_store_close();
+    test_cleanup_tmpdir(s->rom_dir);
+    return failures;
+}
 
     /* ── CHECKPOINT_ROM ACTIVATE authority (full-install integration) ───────
      * The SOVEREIGN, header-independent ignition path: a bundle whose manifest
@@ -5191,147 +5855,61 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
      *   (ii) a keystone reproducing the bundle byte-for-byte at the checkpoint
      *        height -> the atomic install PROCEEDS, commits, and NAMES
      *        authority=checkpoint_rom. */
-    {
-        b.anchors[0].height = b.height;
-        b.anchors[1].height = b.height;
-        char rom_dir[320];
-        snprintf(rom_dir, sizeof(rom_dir), "%s/ckpt-rom", dir);
-        CSI_CHECK("checkpoint-rom: datadir", mkdir(rom_dir, 0700) == 0);
-        CSI_CHECK("checkpoint-rom: live progress store opens",
-                  progress_store_open(rom_dir));
-        sqlite3 *pdb = progress_store_db();
-        int rom_dir_fd = open(rom_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        reducer_frontier_test_set_compiled_anchor(0);
+static int csi_checkpoint_rom_cases(struct csi_fixture *b, const char *dir)
+{
+    int failures=0;
+    struct csi_checkpoint_rom_scene scene;
+    struct csi_checkpoint_rom_scene *s = &scene;
+    s->b = b;
+    s->dir = dir;
+    failures += csi_checkpoint_rom_open_and_seed(s);
+    failures += csi_checkpoint_rom_admit_decision(s);
+    failures += csi_checkpoint_rom_unmatched_keystone_cases(s);
+    failures += csi_checkpoint_rom_activation_cases(s);
+    return failures;
+}
 
-        uint8_t borrowed_txid[32];
-        memset(borrowed_txid, 0x5a, sizeof(borrowed_txid));
-        const uint8_t borrowed_script[] = {0x51};
-        CSI_CHECK("checkpoint-rom: wedged store seeds (borrowed coin, empty "
-                  "anchors, positive activation cursor)",
-                  pdb && coins_kv_ensure_schema(pdb) &&
-                  progress_meta_table_ensure(pdb) &&
-                  anchor_kv_ensure_schema(pdb) &&
-                  nullifier_kv_ensure_schema(pdb) &&
-                  anchor_kv_initialize_history(pdb, b.height) &&
-                  nullifier_kv_initialize_history(pdb, b.height) &&
-                  coins_kv_add(pdb, borrowed_txid, 0, 4242, b.height, false,
-                               borrowed_script, sizeof(borrowed_script)) &&
-                  hs_seed_current_frontier(pdb, b.height, b.block_hash));
+static int test_consensus_state_snapshot_install_platform_arm(void)
+{
+    printf("\n=== consensus_state_snapshot_install ===\n");
+    int failures=0;
+    struct csi_install_scene scene;
+    struct csi_install_scene *s = &scene;
+    csi_make_tmpdir(s->dir, sizeof(s->dir));
+    failures += boot_install_gate_alias_tests(s->dir);
+    failures += boot_install_utxo_mirror_reset_tests(s->dir);
+    s->db=NULL;
+    CSI_CHECK("active DB opens",sqlite3_open(":memory:",&s->db)==SQLITE_OK);
+    CSI_CHECK("shared bundle codec pinned SHA3 vectors",bundle_codec_kat());
+    bool fixtures=fixture_init(&s->a,s->dir,"a",0x10,40,true)&&
+                  fixture_init(&s->b,s->dir,"b",0x80,60,true)&&
+                  fixture_init(&s->inc,s->dir,"inc",0x40,80,false);
+    CSI_CHECK("fixtures build",fixtures);
+    CSI_CHECK("generation A active canary seeds",seed_active(s->db,&s->a));
+    CSI_CHECK("generation A coherent",active_is(s->db,&s->a));
+    failures += csi_install_refusal_and_fault_cases(s);
+    failures += csi_final_bundle_evidence_cases(s);
+    failures += csi_artifact_rename_cases(s);
+    failures += csi_artifact_symlink_writable_cases(s);
+    failures += csi_retained_writer_receipt_cases(s);
+    failures += csi_artifact_mutation_receipt_cases(s);
+    failures += csi_sync_benchmark_install_case(s->db, &s->a, &s->b);
+    failures += csi_candidate_cases(s);
+    failures += csi_unchanged_frontier_incomplete_cases(s);
+    failures += csi_activate_cases(&s->b, s->dir);
+    failures += csi_checkpoint_content_cases(&s->b, s->dir);
+    failures += csi_assisted_cases(&s->b, s->dir);
+    failures += csi_checkpoint_rom_cases(&s->b, s->dir);
 
-        CSI_CHECK("checkpoint-rom: valid complete bundle writes",
-                  write_bundle(&b, CSI_VALID));
+    failures += install_verify_receipt_tests(s->dir);
+    failures += rom_keystone_binding_tests(s->dir);
+    failures += rom_rung_binding_tests(s->dir);
+    failures += rom_rung_activate_tests(s->dir);
 
-        /* Build the ADMIT decision + exact receipt binding activate requires,
-         * exactly as the boot adapter would. */
-        struct consensus_state_activate_request areq;
-        memset(&areq, 0, sizeof(areq));
-        areq.bundle_path = b.path;
-        areq.expected_height = b.height;
-        memcpy(areq.expected_block_hash, b.block_hash, 32);
-        areq.datadir_fd = rom_dir_fd;
-        areq.datadir_display = rom_dir;
-
-        struct consensus_state_artifact_evidence *rev = NULL;
-        struct zcl_result revr =
-            consensus_state_artifact_evidence_open(b.path, -1, &rev);
-        struct consensus_state_publication_cas_inputs rin;
-        memset(&rin, 0, sizeof(rin));
-        bool rin_ok = revr.ok && rev &&
-            consensus_state_artifact_evidence_manifest_copy(rev, &rin.manifest) &&
-            consensus_state_artifact_evidence_digest(
-                rev, rin.artifact_logical_digest) &&
-            consensus_state_artifact_evidence_receipt_digest(
-                rev, rin.artifact_receipt_digest);
-        rin.chain_evidence_present = true;
-        rin.chain_bound_to_artifact = true;
-        memset(rin.chain_evidence_digest, 0xa5, 32);
-        rin.source_receipt_present = true;
-        rin.source_receipt = b.receipt;
-        rin.target_lane = CONSENSUS_STATE_TARGET_LANE_COPY_PROOF;
-        rin.frontier_known = true;
-        memcpy(rin.frontier_hash, b.block_hash, 32);
-        rin.frontier_height = b.height;
-        struct consensus_state_publication_decision_record rdec;
-        consensus_state_publication_cas_decide(&rin, &rdec);
-        struct consensus_state_publication_decision_record rom_decision;
-        memset(&rom_decision, 0, sizeof(rom_decision));
-        CSI_CHECK("checkpoint-rom: complete bundle CAS-decides ADMIT",
-                  rin_ok && rdec.decision == CONSENSUS_PUBLICATION_ADMIT);
-        rom_decision = rdec;
-        memcpy(areq.expected_artifact_receipt_digest,
-               rdec.artifact_receipt_digest, 32);
-        areq.publication_decision = &rom_decision;
-        if (rev)
-            consensus_state_artifact_evidence_free(rev);
-
-        /* CHECKPOINT_ROM is header-independent: no validated-header Sapling root,
-         * no SHA3 override, and the ZCL_TESTING replay hook is OFF — the compiled
-         * keystone is the ONLY authority that can lift containment here. */
-        consensus_state_snapshot_install_activate_test_set_independent_authority(
-            false);
-        struct consensus_state_activate_result rom_ares;
-
-        /* (i) NEGATIVE — with NO matching keystone at the bundle height (the
-         * compiled production keystone is inert at this small fixture height),
-         * the ADMIT-worthy bundle resolves NO ignition authority and stays
-         * VERIFIED_CONTAINED, writing nothing. This is precisely the fail-closed
-         * posture the ignition whitelist enforces for an unmatched bundle. */
-        checkpoints_reset_rom_state_override_for_test();
-        sqlite3_int64 rom_contained_changes = sqlite3_total_changes64(pdb);
-        int rom_contained_backups = prior_generation_count(rom_dir);
-        CSI_CHECK("checkpoint-rom: no matching keystone stays CONTAINED (nothing "
-                  "written)",
-                  !consensus_state_snapshot_install_activate(pdb, &areq,
-                                                             &rom_ares) &&
-                  !rom_ares.activated &&
-                  rom_ares.status == CONSENSUS_INSTALL_VERIFIED_CONTAINED &&
-                  rom_ares.prior_generation_path[0] == '\0' &&
-                  sqlite3_total_changes64(pdb) == rom_contained_changes &&
-                  prior_generation_count(rom_dir) == rom_contained_backups &&
-                  coins_kv_count(pdb) == 1);
-
-        /* (ii) POSITIVE — a keystone reproducing the bundle byte-for-byte at the
-         * checkpoint height lifts containment via CHECKPOINT_ROM with NO header
-         * and NO receipt: the atomic install proceeds, commits, cures the wedge,
-         * and names the authority. */
-        struct rom_state_checkpoint rom;
-        rom_keystone_from_fixture(&b, &rom);
-        checkpoints_set_rom_state_override_for_test(&rom);
-        CSI_CHECK("checkpoint-rom: full component match activates with NO "
-                  "receipt/header (authority=checkpoint_rom)",
-                  consensus_state_snapshot_install_activate(pdb, &areq,
-                                                            &rom_ares) &&
-                  rom_ares.activated &&
-                  rom_ares.status == CONSENSUS_INSTALL_ACTIVATED &&
-                  rom_ares.height == b.height && rom_ares.utxo_count == 2 &&
-                  rom_ares.anchor_count == 2 && rom_ares.nullifier_count == 2 &&
-                  rom_ares.hstar == b.height &&
-                  rom_ares.coins_applied_height == b.height + 1 &&
-                  strstr(rom_ares.reason,
-                         "authority=checkpoint_rom") != NULL);
-        CSI_CHECK("checkpoint-rom: installed coins/anchors/nullifiers match the "
-                  "bundle with COMPLETE (cursor 0) history",
-                  active_is(pdb, &b));
-        if (rom_ares.prior_generation_path[0])
-            (void)unlink(rom_ares.prior_generation_path);
-
-        checkpoints_reset_rom_state_override_for_test();
-        reducer_frontier_test_set_compiled_anchor(-1);
-        if (rom_dir_fd >= 0)
-            (void)close(rom_dir_fd);
-        progress_store_close();
-        test_cleanup_tmpdir(rom_dir);
-    }
-
-    failures += install_verify_receipt_tests(dir);
-    failures += rom_keystone_binding_tests(dir);
-    failures += rom_rung_binding_tests(dir);
-    failures += rom_rung_activate_tests(dir);
-
-    fixture_free(&a); fixture_free(&b); fixture_free(&inc);
-    if (db)
-        sqlite3_close(db);
-    test_cleanup_tmpdir(dir);
+    fixture_free(&s->a); fixture_free(&s->b); fixture_free(&s->inc);
+    if (s->db)
+        sqlite3_close(s->db);
+    test_cleanup_tmpdir(s->dir);
     printf("=== consensus_state_snapshot_install: %d failure(s) ===\n",failures);
     return failures;
 }
