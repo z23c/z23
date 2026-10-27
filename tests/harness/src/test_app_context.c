@@ -824,13 +824,13 @@ static char *appctx_capture_help(const char *flag, size_t *len_out,
     }
     app_context_defaults(&ctx);
     *rc_out = args_parse_node_options(2, argv, &ctx, &show_metrics);
-    fflush(stdout);
+    bool flushed = fflush(stdout) == 0;
     bool restored = dup2(saved, STDOUT_FILENO) >= 0;
     close(saved);
-    if (!restored) {
+    if (!flushed || !restored) {
         fclose(tmp);
-        fprintf(stderr, "app_context: could not restore stdout after %s\n",
-                flag);
+        fprintf(stderr, "app_context: could not %s stdout after %s\n",
+                flushed ? "restore" : "flush", flag);
         return NULL;
     }
     long n = ftell(tmp);
@@ -838,8 +838,14 @@ static char *appctx_capture_help(const char *flag, size_t *len_out,
     if (buf) {
         rewind(tmp);
         size_t got = fread(buf, 1, (size_t)n, tmp);
-        buf[got] = '\0';
-        *len_out = got;
+        if (got != (size_t)n || ferror(tmp)) {
+            fprintf(stderr, "app_context: short read of %s output\n", flag);
+            free(buf);
+            buf = NULL;
+        } else {
+            buf[got] = '\0';
+            *len_out = got;
+        }
     }
     fclose(tmp);
     return buf;
