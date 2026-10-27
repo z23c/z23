@@ -3,11 +3,7 @@
  *          runs locally before `dev land submit` queues it or `dev land send`
  *          bundles it. See native_dev_land_precheck.h for the contract.
  *
- * The gates run as `build/bin/z23-lint <gate>` with the lane worktree as cwd.
- * Gate diagnostics go to stderr, which the cwd-scoped spawn capture discards,
- * so each child is a `sh -c 'cd "$1" && exec "$@" 2>&1'` trampoline whose
- * every operand is a positional parameter: nothing a caller supplies is ever
- * parsed as shell text. The trampoline needs no other shell feature.
+ * Core gates run directly; file-purpose uses the canonical runner command.
  */
 
 #include "command/native_dev_land_precheck.h"
@@ -45,6 +41,11 @@ static const char *const k_pc_core[] = {
 #if defined(ZCL_TESTING)
 static bool g_pc_force;
 static _Thread_local int64_t g_pc_now;
+static _Thread_local int64_t g_pc_budget_ms;
+void zcl_dev_land_precheck_test_budget(int64_t budget_ms)
+{
+    g_pc_budget_ms = budget_ms > 0 ? budget_ms : 0;
+}
 void zcl_dev_land_precheck_test_now(int64_t now_s)
 {
     g_pc_now = now_s > 0 ? now_s : 0;
@@ -522,6 +523,65 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
     pc_fail(reply, r->leaf, "PRECHECK_FAILED", msg, ev[0] ? ev : gate);
 }
 
+/* Resolve only the mode-sensitive gate through the canonical runner table.
+ * Discovery, syntax validation and execution consume the same deadline. */
+static int pc_canonical_capture(struct pc_run *r, const char *const argv[],
+                                char *out, size_t cap)
+{
+    int64_t left = r->deadline - platform_time_monotonic_ms();
+    bool timed_out = false;
+    if (left <= 0)
+        return -1;
+    out[0] = '\0';
+    int rc = zcl_spawn_capture_observed(argv, out, cap, (int)left, &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+static bool pc_command_shape(char *command, size_t cap)
+{
+    size_t n = strlen(command);
+    if (n == 0 || n >= cap - 1)
+        return false;
+    if (command[n - 1] == '\n')
+        command[--n] = '\0';
+    if (n == 0)
+        return false;
+    bool nonspace = false;
+    for (size_t i = 0; i < n; i++) {
+        nonspace = nonspace || command[i] != 32;
+        if ((unsigned char)command[i] < 32 || command[i] == 127)
+            return false;
+    }
+    return nonspace;
+}
+
+/* -2 distinguishes unavailable/malformed metadata from a gate's UNPROVEN. */
+static int pc_file_purpose_run(struct pc_run *r)
+{
+    char command[4096];
+    const char *reader[] = {"sh", "-c",
+        "cd \"$1\" || exit 126; exec bash tools/lint/run_lint.sh --print-command check-file-purpose 2>&1",
+        "sh", r->wt, NULL};
+    int rc = pc_canonical_capture(r, reader, command, sizeof(command));
+    if (rc < 0)
+        return -1;
+    if (rc != 0 || !pc_command_shape(command, sizeof(command))) {
+        (void)snprintf(r->out, PC_OUT_CAP,
+                       "canonical file-purpose command unavailable or malformed");
+        return -2;
+    }
+    const char *syntax[] = {"sh", "-n", "-c", command, NULL};
+    rc = pc_canonical_capture(r, syntax, r->out, PC_OUT_CAP);
+    if (rc < 0)
+        return -1;
+    if (rc != 0)
+        return -2;
+    const char *run[] = {"sh", "-c",
+        "cd \"$1\" || exit 126; ZCL_LINT_PRODUCTION_SCAN=1 sh -c \"$2\" 2>&1",
+        "sh", r->wt, command, NULL};
+    return pc_canonical_capture(r, run, r->out, PC_OUT_CAP);
+}
+
 static bool pc_gates_run(struct pc_run *r,
                          const struct zcl_land_precheck_gates *g,
                          struct zcl_command_reply *reply)
@@ -547,8 +607,15 @@ static bool pc_gates_run(struct pc_run *r,
             r->skipped[r->nskipped++] = g->name[i];
             continue;
         }
-        rc = ship ? pc_ship_run(r)
+        bool canonical = strcmp(g->name[i], "check-file-purpose") == 0;
+        rc = canonical ? pc_file_purpose_run(r) : ship ? pc_ship_run(r)
                   : pc_run(r->wt, r->bin, g->name[i], r->deadline, r->out, PC_OUT_CAP);
+        if (canonical && rc == -2) {
+            pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
+                    "canonical file-purpose command could not be resolved safely",
+                    r->out);
+            return false;
+        }
         if (!ship && rc == PC_EXIT_UNPROVEN) {
             pc_note_unproven(r, g->name[i]);
             continue;
@@ -641,7 +708,12 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
-    r->deadline = platform_time_monotonic_ms() + ZCL_LAND_PRECHECK_BUDGET_MS;
+    int64_t budget_ms = ZCL_LAND_PRECHECK_BUDGET_MS;
+#if defined(ZCL_TESTING)
+    if (g_pc_budget_ms > 0)
+        budget_ms = g_pc_budget_ms;
+#endif
+    r->deadline = platform_time_monotonic_ms() + budget_ms;
     if (ledger[0]) pc_history_learn(r, dir, g);
     else pc_history_unproven(r, "land state unavailable");
     ok = pc_gates_run(r, g, reply);

@@ -13,6 +13,207 @@
 #if !defined(_WIN32)
 
 
+/* The actual checker stays a real child; only unrelated core gates use the
+ * existing fixture's checker. The canonical table is copied unchanged. */
+static bool dlx_pc_select_purpose(void)
+{
+    char row[1024];
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1,
+               "check-file-purpose failed");
+    return dlx_pc_outcomes(row);
+}
+
+static bool dlx_pc_purpose_refusal(const struct dlx_call *c)
+{
+    return strcmp(dlx_err_code(c), "PRECHECK_FAILED") == 0 &&
+        strcmp(dlx_str(c, "gate"), "check-file-purpose") == 0;
+}
+
+static bool dlx_pc_build_sentinel(const struct dlx_rig *rig)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof(path), "%s/Makefile", rig->clone);
+    return dlx_write(path, "%:\n\t@touch build/unexpected-build\n");
+}
+
+static bool dlx_pc_no_build(const struct dlx_rig *rig)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof(path), "%s/build/unexpected-build", rig->clone);
+    return !dlx_file_exists(path);
+}
+
+static bool dlx_pc_mode_setup(struct dlx_rig *rig)
+{
+    char cwd[4096], source[8192], target[1400], reader[65536];
+    size_t len;
+    if (!getcwd(cwd, sizeof(cwd)) ||
+        snprintf(source, sizeof(source), "%s/tools/lint/run_lint.sh", cwd) >= (int)sizeof(source) ||
+        !dlx_slurp(source, reader, sizeof(reader), &len) ||
+        !dlx_pc_rig(rig, "precheck_canonical", true,
+                    "check-core-seal\ncheck-file-purpose\n"))
+        return false;
+    if (!dlx_pc_select_purpose())
+        return false;
+    reader[len] = 0;
+    (void)snprintf(target, sizeof(target), "%s/tools/lint", rig->clone);
+    if (!dlx_mkdir_p(target))
+        return false;
+    (void)snprintf(target, sizeof(target), "%s/tools/lint/run_lint.sh", rig->clone);
+    if (!dlx_write(target, reader))
+        return false;
+    (void)snprintf(source, sizeof(source), "%s/build/bin/z23-lint", cwd);
+    (void)snprintf(target, sizeof(target), "%s/build/bin/real-lint", rig->clone);
+    return symlink(source, target) == 0 &&
+        dlx_write_dep(rig->clone, "tools/probe.c", "int probe;\n");
+}
+
+static bool dlx_pc_repaired_control(const struct dlx_rig *rig)
+{
+    struct dlx_call c;
+    if (!dlx_write_dep(rig->clone, "tools/probe.c",
+                       "/* purpose: Isolated precheck fixture. */\nint probe;\n"))
+        return false;
+    dlx_pc_submit(&c, rig, NULL, NULL);
+    bool ok = dlx_run(&c) && dlx_ok(&c) && dlx_queue_has_one() &&
+        dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-file-purpose") &&
+        strcmp(getenv("ZCL_LINT_MODE"), "WARN") == 0 && dlx_pc_no_build(rig);
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_pc_canonical_mode_inner(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400], out[4096];
+    if (!dlx_pc_mode_setup(&rig))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig.clone);
+    if (!dlx_write(path, "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "if [ \"$1\" = check-file-purpose ]; then\n"
+        "  exec ./build/bin/real-lint \"$@\"\nfi\n"
+        "exit 0\n"))
+        return false;
+    if (!dlx_pc_build_sentinel(&rig))
+        return false;
+    setenv("ZCL_FILE_PURPOSE_ROOT", rig.clone, 1);
+    setenv("ZCL_LINT_MODE", "WARN", 1);
+    const char *raw[] = {"sh", "-c", "cd \"$1\" && exec build/bin/z23-lint check-file-purpose",
+                         "sh", rig.clone, NULL};
+    bool ok = zcl_spawn_capture(raw, out, sizeof(out), 30000) == 0;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && !dlx_ok(&c) && dlx_queue_empty() && dlx_pc_purpose_refusal(&c) && ok;
+    dlx_end(&c);
+    ok = dlx_pc_repaired_control(&rig) && ok;
+    unsetenv("ZCL_FILE_PURPOSE_ROOT");
+    unsetenv("ZCL_LINT_MODE");
+    dlx_restore();
+    return ok;
+}
+
+static void dlx_pc_restore_env(const char *name, char *saved)
+{
+    if (saved)
+        (void)setenv(name, saved, 1);
+    else
+        (void)unsetenv(name);
+    free(saved);
+}
+
+static bool dlx_pc_canonical_mode(void)
+{
+    const char *root = getenv("ZCL_FILE_PURPOSE_ROOT");
+    const char *mode = getenv("ZCL_LINT_MODE");
+    char *saved_root = root ? strdup(root) : NULL;
+    char *saved_mode = mode ? strdup(mode) : NULL;
+    bool saved = (!root || saved_root) && (!mode || saved_mode);
+    bool ok = saved && dlx_pc_canonical_mode_inner();
+    if (saved) {
+        dlx_pc_restore_env("ZCL_FILE_PURPOSE_ROOT", saved_root);
+        dlx_pc_restore_env("ZCL_LINT_MODE", saved_mode);
+    } else {
+        free(saved_root);
+        free(saved_mode);
+    }
+    return ok;
+}
+
+static bool dlx_pc_bad_metadata_one(const char *body)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400];
+    if (!dlx_pc_rig(&rig, "precheck_metadata", true, "check-file-purpose\n"))
+        return false;
+    if (!dlx_pc_select_purpose())
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint", rig.clone);
+    if (!dlx_mkdir_p(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint/run_lint.sh", rig.clone);
+    if (!dlx_pc_build_sentinel(&rig))
+        return false;
+    if (body && !dlx_write(path, body))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ok = dlx_run(&c) && !dlx_ok(&c) && dlx_queue_empty() &&
+        !dlx_pc_ran(&rig, "check-file-purpose") && dlx_pc_no_build(&rig) &&
+        strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE") == 0;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_bad_metadata(void)
+{
+    return dlx_pc_bad_metadata_one(NULL) &&
+        dlx_pc_bad_metadata_one("exit 1\n") &&
+        dlx_pc_bad_metadata_one("exit 0\n") &&
+        dlx_pc_bad_metadata_one("printf 'if\\n'\n") &&
+        dlx_pc_bad_metadata_one("printf 'echo ok\\necho hidden\\n'\n") &&
+        dlx_pc_bad_metadata_one(
+            "printf '%05000d' 0\n");
+}
+
+static bool dlx_pc_deadline_one(bool reader_only)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char path[1400];
+    if (!dlx_pc_rig(&rig, "precheck_deadline", true, "check-file-purpose\n"))
+        return false;
+    if (!dlx_pc_select_purpose())
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint", rig.clone);
+    if (!dlx_mkdir_p(path))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/tools/lint/run_lint.sh", rig.clone);
+    const char *body = reader_only
+        ? "touch build/deadline-reader-started\nsleep 6\nprintf 'touch build/deadline-completed\\n'\n"
+        : "touch build/deadline-reader-started\nsleep 2\nprintf 'touch build/deadline-command-started; sleep 4; touch build/deadline-completed\\n'\n";
+    if (!dlx_write(path, body))
+        return false;
+    zcl_dev_land_precheck_test_budget(5000);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    zcl_dev_land_precheck_test_budget(0);
+    bool ok = ran && !dlx_ok(&c) && dlx_queue_empty() &&
+        strcmp(c.reply.error.code, "PRECHECK_TIMEOUT") == 0;
+    (void)snprintf(path, sizeof(path), "%s/build/deadline-reader-started", rig.clone);
+    ok = dlx_file_exists(path) && ok;
+    if (!reader_only) {
+        (void)snprintf(path, sizeof(path), "%s/build/deadline-command-started", rig.clone);
+        ok = dlx_file_exists(path) && ok;
+    }
+    (void)snprintf(path, sizeof(path), "%s/build/deadline-completed", rig.clone);
+    ok = !dlx_file_exists(path) && ok;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_unknown_gate_skipped(void)
 {
     struct dlx_rig rig;
@@ -220,9 +421,29 @@ _test_next:;
     return failures;
 }
 
+static int dlx_pc_mode_cases(void)
+{
+    int failures = 0;
+    TEST("land: canonical reader and execution share the remaining deadline") {
+        ASSERT(dlx_pc_deadline_one(true));
+        ASSERT(dlx_pc_deadline_one(false));
+        PASS();
+    }
+    TEST("land: canonical file-purpose rejects WARN false success and accepts repair") {
+        ASSERT(dlx_pc_canonical_mode());
+        PASS();
+    }
+    TEST("land: missing or malformed canonical metadata refuses without queueing") {
+        ASSERT(dlx_pc_bad_metadata());
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int dlx_case_precheck(void)
 {
-    int failures = dlx_case_history_precheck();
+    int failures = dlx_case_history_precheck() + dlx_pc_mode_cases();
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
         PASS();

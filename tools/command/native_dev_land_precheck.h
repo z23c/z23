@@ -68,6 +68,8 @@ bool zcl_dev_land_precheck(const char *leaf, const char *wt,
 void zcl_dev_land_precheck_test_force(bool on);
 /* Override precheck ledger/history window time only; nonpositive restores real time. */
 void zcl_dev_land_precheck_test_now(int64_t now_s);
+/* Override the thread-local test budget; nonpositive restores production. */
+void zcl_dev_land_precheck_test_budget(int64_t budget_ms);
 #endif
 
 #endif
