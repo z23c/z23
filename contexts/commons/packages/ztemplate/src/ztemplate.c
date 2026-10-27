@@ -56,65 +56,106 @@ static bool template_input_valid(const char *text, size_t len)
     return (text || len == 0) && len != SIZE_MAX;
 }
 
-ztemplate *ztemplate_parse(const char *text, size_t text_len,
-                           size_t *err_pos)
+/* allocate a template that owns a copy of text[0..text_len); NULL on failure */
+static ztemplate *template_with_text(const char *text, size_t text_len)
 {
-    if (!template_input_valid(text, text_len)) return NULL;
     ztemplate *tp = calloc(1, sizeof *tp);
     if (!tp) return NULL;
     tp->text = malloc(text_len + 1);
     if (!tp->text) { free(tp); return NULL; }
     if (text_len) memcpy(tp->text, text, text_len);
     tp->text[text_len] = '\0';
+    return tp;
+}
+
+/* find closing }} */
+static size_t find_tag_close(const char *text, size_t text_len, size_t close)
+{
+    while (close + 1 < text_len &&
+           !(text[close] == '}' && text[close + 1] == '}'))
+        close++;
+    return close;
+}
+
+/* trim whitespace */
+static void trim_tag_bounds(const char *text, size_t *nb, size_t *ne)
+{
+    while (*nb < *ne && (text[*nb] == ' ' || text[*nb] == '\t'))
+        (*nb)++;
+    while (*ne > *nb && (text[*ne - 1] == ' ' || text[*ne - 1] == '\t'))
+        (*ne)--;
+}
+
+/* first offset in [nb, ne) holding a non-name char, or ne if there is none */
+static size_t find_bad_name_char(const char *text, size_t nb, size_t ne)
+{
+    for (size_t i = nb; i < ne; i++)
+        if (!is_name_char(text[i])) return i;
+    return ne;
+}
+
+/* outcome of handling one {{...}} tag */
+typedef enum {
+    TAG_CONSUMED,      /* tag consumed; *p and *lit_start moved past it */
+    TAG_UNTERMINATED,  /* no closing }} found */
+    TAG_EMPTY,         /* nothing left after trimming */
+    TAG_BAD_NAME_CHAR, /* non-name character inside the tag */
+    TAG_PUSH_FAIL      /* segment push failed */
+} tag_outcome;
+
+/* parse the {{...}} tag at *p; on TAG_CONSUMED *p and *lit_start move past it */
+static tag_outcome parse_tag(ztemplate *tp, size_t text_len, size_t *p,
+                             size_t *lit_start, size_t *err_pos)
+{
+    const char *t = tp->text;
+    size_t start = *p;
+    size_t close = find_tag_close(t, text_len, start + 2);
+    if (close + 1 >= text_len) {
+        if (err_pos) *err_pos = start;
+        return TAG_UNTERMINATED; /* unterminated tag */
+    }
+    /* flush preceding literal */
+    if (!seg_push(tp, SEG_LITERAL, *lit_start, start - *lit_start))
+        return TAG_PUSH_FAIL;
+    size_t nb = start + 2, ne = close;
+    /* comment? */
+    if (nb < ne && t[nb] == '!') {
+        *p = close + 2;
+        *lit_start = *p;
+        return TAG_CONSUMED;
+    }
+    trim_tag_bounds(t, &nb, &ne);
+    if (nb == ne) {
+        if (err_pos) *err_pos = start;
+        return TAG_EMPTY; /* empty tag */
+    }
+    size_t bad = find_bad_name_char(t, nb, ne);
+    if (bad != ne) {
+        if (err_pos) *err_pos = bad;
+        return TAG_BAD_NAME_CHAR;
+    }
+    if (!seg_push(tp, SEG_VAR, nb, ne - nb))
+        return TAG_PUSH_FAIL;
+    *p = close + 2;
+    *lit_start = *p;
+    return TAG_CONSUMED;
+}
+
+ztemplate *ztemplate_parse(const char *text, size_t text_len,
+                           size_t *err_pos)
+{
+    if (!template_input_valid(text, text_len)) return NULL;
+    ztemplate *tp = template_with_text(text, text_len);
+    if (!tp) return NULL;
 
     size_t p = 0, lit_start = 0;
     while (p < text_len) {
         if (tp->text[p] == '{' && p + 1 < text_len && tp->text[p + 1] == '{') {
-            /* find closing }} */
-            size_t close = p + 2;
-            while (close + 1 < text_len &&
-                   !(tp->text[close] == '}' && tp->text[close + 1] == '}'))
-                close++;
-            if (close + 1 >= text_len) {
-                if (err_pos) *err_pos = p;
-                ztemplate_free(tp);
-                return NULL; /* unterminated tag */
-            }
-            /* flush preceding literal */
-            if (!seg_push(tp, SEG_LITERAL, lit_start, p - lit_start)) {
+            tag_outcome r = parse_tag(tp, text_len, &p, &lit_start, err_pos);
+            if (r != TAG_CONSUMED) {
                 ztemplate_free(tp);
                 return NULL;
             }
-            size_t nb = p + 2, ne = close;
-            /* comment? */
-            if (nb < ne && tp->text[nb] == '!') {
-                p = close + 2;
-                lit_start = p;
-                continue;
-            }
-            /* trim whitespace */
-            while (nb < ne && (tp->text[nb] == ' ' || tp->text[nb] == '\t'))
-                nb++;
-            while (ne > nb && (tp->text[ne - 1] == ' ' || tp->text[ne - 1] == '\t'))
-                ne--;
-            if (nb == ne) {
-                if (err_pos) *err_pos = p;
-                ztemplate_free(tp);
-                return NULL; /* empty tag */
-            }
-            for (size_t i = nb; i < ne; i++) {
-                if (!is_name_char(tp->text[i])) {
-                    if (err_pos) *err_pos = i;
-                    ztemplate_free(tp);
-                    return NULL;
-                }
-            }
-            if (!seg_push(tp, SEG_VAR, nb, ne - nb)) {
-                ztemplate_free(tp);
-                return NULL;
-            }
-            p = close + 2;
-            lit_start = p;
         } else {
             p++;
         }
