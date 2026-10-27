@@ -14,6 +14,20 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* Failed preparation output is bounded and delivered synchronously. The sink
+ * must copy bytes it retains; no new log authority is created here. */
+typedef void (*zcl_land_prepare_sink)(void *context, const char *text);
+bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
+    size_t cap, zcl_land_prepare_sink sink, void *context);
+bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
+    size_t cap, zcl_land_prepare_sink sink, void *context);
+#ifdef ZCL_TESTING
+int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
+    int timeout_ms, bool allocation_failure, zcl_land_prepare_sink sink,
+    void *context, char *why, size_t why_cap);
+void zcl_dev_land_prepare_log_for_test(void *path, const char *text);
+#endif
+
 /* Prepare the native Make restart plan after all landing inputs are ready.
  * Re-run its FORCE target even when a plan exists: earlier preparation may
  * have changed source metadata. Uses the bounded real Make adapter; false

@@ -6775,6 +6775,23 @@ static bool dl_wt_hooks_refresh(const struct dl_dirs *d,
 }
 #endif
 
+#if !defined(_WIN32)
+static void dl_prepare_log(void *context, const char *text)
+{
+    dl_log(context, text);
+}
+
+#ifdef ZCL_TESTING
+void zcl_dev_land_prepare_log_for_test(void *path, const char *text)
+{
+    struct dl_row row = {0};
+    (void)snprintf(row.log_path, sizeof(row.log_path), "%s", (const char *)path);
+    dl_prepare_log(&row, text);
+}
+#endif
+
+#endif
+
 bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
@@ -6809,9 +6826,9 @@ bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
             return false;
     }
-    if (!stubbed && !zcl_dev_land_proof_tools_prepare(d->wt, why, why_cap))
+    if (!stubbed && !zcl_dev_land_proof_tools_prepare_observed(d->wt, why, why_cap, dl_prepare_log, (void *)r))
         return false;
-    if (!stubbed && !zcl_dev_land_restart_plan_prepare(d->wt, why, why_cap))
+    if (!stubbed && !zcl_dev_land_restart_plan_prepare_observed(d->wt, why, why_cap, dl_prepare_log, (void *)r))
         return false;
     return true;
 #endif

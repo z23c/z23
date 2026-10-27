@@ -17,6 +17,7 @@
 
 #include "base/safe_alloc.h"
 #include "platform/logical_cpu.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -63,39 +64,42 @@ static void dlp_first_actionable(const char *text, char *out, size_t cap)
     free(copy);
 }
 
-/* Run `make -s -C wt target` with merged stdout+stderr captured. Returns the
- * child's exit status, or -1 on a launch failure. On a nonzero return `why`
- * names the first actionable line, or failing that the target. Every make
- * start re-parses the whole Makefile, so callers name one goal. */
-static int dlp_make(const char *wt, const char *target, char *why,
-                    size_t why_cap)
+/* The sink is synchronous; captured bytes remain owned by this adapter. */
+static void dlp_report(zcl_land_prepare_sink sink, void *context,
+    const char *target, int rc, bool timed_out, int64_t elapsed_ms,
+    const char *bytes)
 {
-    char jobs[16];
-    const char *argv[8];
-    size_t n = 0;
-    char *buf;
-    int rc;
-    bool timed_out = false;
-    if (!platform_build_jobs_arg(jobs)) {
-        (void)snprintf(why, why_cap,
-                       "landing build job count unavailable (ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal)");
-        return -1;
-    }
-    argv[n++] = "make";
-    argv[n++] = jobs;
-    argv[n++] = "-s";
-    argv[n++] = "-C";
-    argv[n++] = wt;
-    argv[n++] = target;
-    argv[n] = NULL;
-    buf = (char *)zcl_malloc(DLP_MAKE_CAP, "dev.land.prepare.make");
+    if (!sink) return;
+    size_t length = strlen(bytes);
+    char header[256];
+    (void)snprintf(header, sizeof(header),
+        "\nzcl.dev_land.prepare.v1 target=%s rc=%d timed_out=%d elapsed_ms=%lld captured_bytes=%zu possibly_truncated=%d\n--- preparation output begin ---\n",
+        target, rc, timed_out ? 1 : 0, (long long)elapsed_ms, length,
+        length == DLP_MAKE_CAP - 1 ? 1 : 0);
+    sink(context, header);
+    sink(context, bytes);
+    sink(context, "\n--- preparation output end ---\n");
+}
+
+/* Run the native target without changing its existing timeout or triage. */
+static int dlp_make_run(const char *const argv[], const char *target,
+    int timeout_ms, bool allocation_failure, zcl_land_prepare_sink sink,
+    void *context, char *why, size_t why_cap)
+{
+    char *buf = allocation_failure ? NULL :
+        (char *)zcl_malloc(DLP_MAKE_CAP, "dev.land.prepare.make");
     if (!buf) {
         (void)snprintf(why, why_cap, "out of memory running make %s", target);
+        dlp_report(sink, context, target, -1, false, 0, why);
         return -1;
     }
-    rc = zcl_spawn_capture_merged_observed(argv, buf, DLP_MAKE_CAP,
-                                           DLP_MAKE_TIMEOUT_MS, &timed_out);
+    bool timed_out = false;
+    int64_t started = platform_time_monotonic_ms();
+    int rc = zcl_spawn_capture_merged_observed(argv, buf, DLP_MAKE_CAP,
+                                               timeout_ms, &timed_out);
+    int64_t elapsed = platform_time_monotonic_ms() - started;
     if (rc != 0) {
+        dlp_report(sink, context, target, rc, timed_out, elapsed, buf);
         dlp_first_actionable(buf, why, why_cap);
         if (!why[0])
             (void)snprintf(why, why_cap, "make %s failed%s", target,
@@ -105,8 +109,35 @@ static int dlp_make(const char *wt, const char *target, char *why,
     return rc;
 }
 
-bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
-                                       size_t why_cap)
+static int dlp_make(const char *wt, const char *target, int timeout_ms,
+    bool allocation_failure, zcl_land_prepare_sink sink, void *context,
+    char *why, size_t why_cap)
+{
+    char jobs[16];
+    if (!platform_build_jobs_arg(jobs)) {
+        (void)snprintf(why, why_cap,
+                       "landing build job count unavailable (ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal)");
+        dlp_report(sink, context, target, -1, false, 0, why);
+        return -1;
+    }
+    const char *argv[] = { "make", jobs, "-s", "-C", wt, target, NULL };
+    return dlp_make_run(argv, target, timeout_ms, allocation_failure, sink,
+                        context, why, why_cap);
+}
+
+#ifdef ZCL_TESTING
+int zcl_dev_land_prepare_make_for_test(const char *wt, const char *target,
+    int timeout_ms, bool allocation_failure, zcl_land_prepare_sink sink,
+    void *context, char *why, size_t why_cap)
+{
+    why[0] = '\0';
+    return dlp_make(wt, target, timeout_ms, allocation_failure, sink, context,
+                    why, why_cap);
+}
+#endif
+
+bool zcl_dev_land_restart_plan_prepare_observed(const char *wt, char *why,
+                                       size_t why_cap, zcl_land_prepare_sink sink, void *context)
 {
     char path[4096 + 32];
     struct stat st;
@@ -121,7 +152,7 @@ bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why,
      * runs. Mere existence says nothing about the
      * plan's BASE_GENERATION. The native target's FORCE prerequisite seals
      * this checkout after every preparation stage has finished. */
-    if (dlp_make(wt, "build/dev-loop/restart.env", why, why_cap) != 0)
+    if (dlp_make(wt, "build/dev-loop/restart.env", DLP_MAKE_TIMEOUT_MS, false, sink, context, why, why_cap) != 0)
         return false;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
         (void)snprintf(why, why_cap, "landing restart plan not produced by make");
@@ -155,8 +186,8 @@ static bool dlp_proof_tool_present(const char *wt, const char *tool,
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why,
-                                      size_t why_cap)
+bool zcl_dev_land_proof_tools_prepare_observed(const char *wt, char *why,
+                                      size_t why_cap, zcl_land_prepare_sink sink, void *context)
 {
     size_t missing = 0, i;
     if (!wt || !why || why_cap == 0) return false;
@@ -172,7 +203,7 @@ bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why,
     }
     if (!missing)
         return true;
-    if (dlp_make(wt, "docs-proof-tools", why, why_cap) != 0)
+    if (dlp_make(wt, "docs-proof-tools", DLP_MAKE_TIMEOUT_MS, false, sink, context, why, why_cap) != 0)
         return false;
     for (i = 0; i < sizeof(DLP_PROOF_TOOLS) / sizeof(DLP_PROOF_TOOLS[0]);
          i++) {
@@ -188,3 +219,12 @@ bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why,
     return true;
 }
 
+bool zcl_dev_land_restart_plan_prepare(const char *wt, char *why, size_t cap)
+{
+    return zcl_dev_land_restart_plan_prepare_observed(wt, why, cap, NULL, NULL);
+}
+
+bool zcl_dev_land_proof_tools_prepare(const char *wt, char *why, size_t cap)
+{
+    return zcl_dev_land_proof_tools_prepare_observed(wt, why, cap, NULL, NULL);
+}

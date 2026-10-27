@@ -167,10 +167,84 @@ int test_dev_land_proof_tools_preparation(void)
     return failures;
 }
 
+static bool dlx_prepare_log_contains(const char *path, const char *text)
+{
+    size_t len;
+    char *body = calloc(270000, 1);
+    if (!body) return false;
+    bool ok = dlx_slurp(path, body, 269999, &len) && strstr(body, text) != NULL;
+    free(body);
+    return ok;
+}
+
+static int dlx_prepare_failed_output(void)
+{
+    int failures = 0;
+    TEST("land: failed preparation appends child output to the attempt log") {
+        char root[1024], log[1200], why[512];
+        test_make_tmpdir(root, sizeof(root), "dev_land", "prepare_output");
+        snprintf(log, sizeof(log), "%s/attempt.log", root);
+        ASSERT(dlx_write_dep(root, "Makefile",
+            "broken:\n\t@printf stdout-marker\n\t@printf stderr-marker >&2\n\t@exit 7\n"));
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "broken", 10000,
+            false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
+        ASSERT(dlx_prepare_log_contains(log, "target=broken rc="));
+        ASSERT(dlx_prepare_log_contains(log, "timed_out=0 elapsed_ms="));
+        ASSERT(dlx_prepare_log_contains(log, "possibly_truncated=0"));
+        ASSERT(dlx_prepare_log_contains(log, "stdout-markerstderr-marker"));
+        ASSERT(dlx_prepare_log_contains(log, "\n--- preparation output end ---\n"));
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "allocation", 10000,
+            true, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) == -1);
+        ASSERT(dlx_prepare_log_contains(log, "target=allocation rc=-1"));
+        ASSERT(dlx_prepare_log_contains(log, "out of memory running make allocation"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dlx_prepare_large_input(const char *root)
+{
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/large.txt", root);
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t i = 0; i < 300000; i++)
+        if (fputc('x', f) == EOF) { ok = false; break; }
+    return fclose(f) == 0 && ok;
+}
+
+static int dlx_prepare_bounded_output(void)
+{
+    int failures = 0;
+    TEST("land: preparation reports saturated capture and real-child timeout") {
+        char root[1024], log[1200], why[512];
+        test_make_tmpdir(root, sizeof(root), "dev_land", "prepare_bound");
+        snprintf(log, sizeof(log), "%s/attempt.log", root);
+        ASSERT(dlx_prepare_large_input(root));
+        ASSERT(dlx_write_dep(root, "Makefile",
+            "large:\n\t@cat large.txt\n\t@exit 1\n"
+            "slow:\n\t@printf before-timeout\n\t@sleep 20\n"));
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "large", 10000,
+            false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
+        ASSERT(dlx_prepare_log_contains(log, "captured_bytes=262143 possibly_truncated=1"));
+        ASSERT(unlink(log) == 0);
+        ASSERT(zcl_dev_land_prepare_make_for_test(root, "slow", 5000,
+            false, zcl_dev_land_prepare_log_for_test, log, why, sizeof(why)) != 0);
+        ASSERT(dlx_prepare_log_contains(log, "timed_out=1"));
+        ASSERT(dlx_prepare_log_contains(log, "before-timeout"));
+        ASSERT(strstr(why, "timed out"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Exercise the actual preparation adapter with an existing stale plan. */
 int test_dev_land_final_plan_preparation(void)
 {
     int failures = 0;
+    failures += dlx_prepare_failed_output();
+    failures += dlx_prepare_bounded_output();
     TEST("land: final preparation refreshes an existing plan and preserves make failures") {
         char root[1024], path[1200], body[128], why[512];
         size_t len = 0;
