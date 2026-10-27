@@ -695,10 +695,14 @@ static int t_listunspent_frees_filtered_rows(void)
     wallet_init(wallet);
     struct main_state ms;
     build_unresolved_tip_state(&ms, 10);
-    struct node_db ndb;
     char datadir[PATH_MAX];
-    bool ok = test_mkdtemp(datadir, sizeof(datadir), "rpc_safety_lu") &&
-              node_db_open(&ndb, ":memory:") && lu_seed_rows(&ndb);
+    if (!test_mkdtemp(datadir, sizeof(datadir), "rpc_safety_lu")) {
+        printf("FAIL (fixture datadir)\n");
+        main_state_free(&ms); wallet_free(wallet); free(wallet);
+        return 1;
+    }
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:") && lu_seed_rows(&ndb);
     struct rpc_table tbl;
     rpc_table_init(&tbl);
     wallet_rpc_context_set_base(wallet, &ms, datadir, NULL, NULL, NULL);
@@ -716,6 +720,7 @@ static int t_listunspent_frees_filtered_rows(void)
     wallet_rpc_context_set_node_db(NULL);
     node_db_close(&ndb);
     main_state_free(&ms); wallet_free(wallet); free(wallet);
+    (void)test_rm_rf_recursive(datadir);
     if (ok && no_leak) { printf("OK\n"); return 0; }
     printf("FAIL\n");
     return 1;
