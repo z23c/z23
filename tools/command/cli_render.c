@@ -351,6 +351,33 @@ static void emit_kv_command(struct buf *b,
                       value ? strlen(value) : 0);
 }
 
+/* emit_kv for ASCII prose that must never be cut: wraps at spaces (a word
+ * longer than the room splits), continuation lines indented under it. */
+static void emit_kv_wrap(struct buf *b, const struct zcl_cli_render_env *e,
+                         size_t kw, const char *key, const char *value)
+{
+    char line[512];
+    size_t room = (size_t)e->width > kw + 4 ? (size_t)e->width - kw - 4 : 1;
+    if (room > sizeof(line) - 1)
+        room = sizeof(line) - 1;
+    const char *s = value ? value : "";
+    do {
+        size_t take = strlen(s);
+        if (take > room) {
+            take = room;
+            while (take > 0 && s[take] != ' ')
+                take--;
+            if (take == 0)
+                take = room;
+        }
+        snprintf(line, sizeof(line), "%.*s", (int)take, s);
+        emit_kv(b, e, kw, key, line);
+        key = "";
+        for (s += take; *s == ' '; s++)
+            ;
+    } while (*s);
+}
+
 /* One non-final header cell: truncated to the 64-byte buffer, padded to the
  * column width, bold. */
 static void emit_table_header_cell(struct buf *b,
@@ -1130,8 +1157,9 @@ static bool tree_render_leaf(const char *command_path)
 /* `z23 join` is the first command a stranger runs after install. The
  * canonical JSON keeps `joined` as this process's flags (often false);
  * the TTY recipe names what was written where, what it costs, how to
- * restart (by hand or as a service) and how to undo it, instead of
- * dumping a wall of keys that reads like failure. */
+ * restart (by hand or as a service) and how to stop again, instead of
+ * dumping a wall of keys that reads like failure. Nothing is truncated:
+ * prose wraps, the path and commands continue copyably. */
 static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
                               const struct json_value *root)
 {
@@ -1140,20 +1168,27 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
     const struct json_value *data = json_get(root, "data");
     bool swarm = json_get_bool(json_get(data, "swarm_member"));
     bool process_joined = json_get_bool(json_get(data, "joined"));
-    emit_kv(b, e, 7, "do",
-            swarm ? "this node will host C23 packages after restart"
-                  : "package hosting was not written");
+    emit_kv_wrap(b, e, 7, "do",
+                 swarm ? "this node will host C23 packages after restart"
+                       : "package hosting was not written");
+    /* buildworker=1 is written only when a C23 compiler was found. */
     if (swarm)
-        emit_kv(b, e, 7, "means",
-                "it stores, serves and builds C23 packages for others "
-                "(disk, CPU)");
-    emit_kv(b, e, 7, "wrote", json_get_str(json_get(data, "wrote_flags")));
-    emit_kv(b, e, 7, "file", json_get_str(json_get(data, "config_file")));
-    emit_kv(b, e, 7, "now",
-            process_joined
-                ? "this process already has the join flags"
-                : "this process has not loaded those flags yet");
-    emit_kv(b, e, 7, "next", "restart the node: Ctrl-C, then run z23 again");
+        emit_kv_wrap(b, e, 7, "means",
+                     json_get_bool(json_get(data, "config_build_worker"))
+                         ? "it stores, serves and builds C23 packages for "
+                           "others (disk, CPU)"
+                         : "it stores and serves C23 packages for others "
+                           "(disk); no C23 compiler, so it builds none");
+    emit_kv_wrap(b, e, 7, "wrote",
+                 json_get_str(json_get(data, "wrote_flags")));
+    emit_kv_command(b, e, 7, "file",
+                    json_get_str(json_get(data, "config_file")));
+    emit_kv_wrap(b, e, 7, "now",
+                 process_joined
+                     ? "this process already has the join flags"
+                     : "this process has not loaded those flags yet");
+    emit_kv_wrap(b, e, 7, "next",
+                 "restart the node: Ctrl-C, then run z23 again");
     emit_kv_command(b, e, 7, "service",
                     json_get_str(json_get(data, "restart_command")));
     {
@@ -1168,8 +1203,9 @@ static void render_zcode_join(struct buf *b, const struct zcl_cli_render_env *e,
         emit_kv_command(b, e, 7, "then", then);
     }
     if (swarm)
-        emit_kv(b, e, 7, "undo",
-                "delete those lines from the file, then restart");
+        emit_kv_wrap(b, e, 7, "stop",
+                     "set packagehost=0 buildworker=0 in the file, then "
+                     "restart");
 }
 
 /* Join's typed next command. A one-shot CLI has no engine, so the JSON

@@ -550,6 +550,7 @@ static int test_guide_tree_render(void)
             "\"joined\":false,"
             "\"swarm_member\":true,"
             "\"wrote_flags\":\"packagehost=1 buildworker=1\","
+            "\"config_build_worker\":true,"
             "\"config_file\":\"./test-tmp/join-ux/z23.conf\","
             "\"datadir\":\"./test-tmp/join-ux\","
             "\"restart_command\":\"systemctl --user restart z23-node\"}}";
@@ -568,11 +569,12 @@ static int test_guide_tree_render(void)
         ASSERT(strstr(out, "z23 zcode package offered") != NULL);
         ASSERT(strstr(out, "-datadir=./test-tmp/join-ux") != NULL);
         /* A newcomer sees the file written, the cost, a by-hand restart
-         * beside the service one, and the undo. */
+         * beside the service one, and how to stop. */
         ASSERT(strstr(out, "./test-tmp/join-ux/z23.conf") != NULL);
         ASSERT(strstr(out, "(disk, CPU)") != NULL);
         ASSERT(strstr(out, "Ctrl-C, then run z23 again") != NULL);
-        ASSERT(strstr(out, "delete those lines from the file") != NULL);
+        ASSERT(strstr(out, "set packagehost=0 buildworker=0 in the file")
+               != NULL);
         ASSERT(strstr(out, "\xE2\x80\xA6") == NULL); /* nothing truncated */
         ASSERT(strstr(out, "\"joined\"") == NULL);
         ASSERT(strstr(out, "\"schema\"") == NULL);
@@ -582,6 +584,35 @@ static int test_guide_tree_render(void)
         ASSERT(n > 0);
         ASSERT(strstr(out, "this node will host C23 packages after restart")
                != NULL);
+        PASS();
+    }
+    TEST("join at 40 columns cuts nothing; no compiler means no builds") {
+        static const char conf[] =
+            "./test-tmp/join-ux-a-long-datadir-0123456789abcdef/z23.conf";
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"zcode.node.join\","
+            "\"ok\":true,\"status\":\"passed\",\"data\":{"
+            "\"joined\":false,\"swarm_member\":true,"
+            "\"wrote_flags\":\"packagehost=1 buildworker=0\","
+            "\"config_build_worker\":false,"
+            "\"config_file\":\"./test-tmp/join-ux-a-long-datadir-"
+            "0123456789abcdef/z23.conf\","
+            "\"datadir\":\"./test-tmp/join-ux\","
+            "\"restart_command\":\"systemctl --user restart z23-node\"}}";
+        struct zcl_cli_render_env e = cr_env(40, false);
+        char out[8192], file[256];
+        ASSERT(zcl_cli_render_doc(doc, strlen(doc), "zcode.node.join", &e,
+                                  out, sizeof(out)) > 0);
+        ASSERT(cr_max_line_width(out) <= 40);
+        ASSERT(strstr(out, "\xE2\x80\xA6") == NULL);
+        ASSERT(cr_recover_command(out, "  file     ", file, sizeof(file)));
+        ASSERT(strcmp(file, conf) == 0);
+        /* Single words, since prose wraps at 40: no CPU claim, and why. */
+        ASSERT(strstr(out, "compiler,") != NULL && strstr(out, "none") != NULL);
+        ASSERT(strstr(out, "CPU") == NULL);
+        /* Wrapped prose keeps every word: "Ctrl-C," and "again" survive. */
+        ASSERT(strstr(out, "Ctrl-C,") != NULL && strstr(out, "again") != NULL);
+        ASSERT(strstr(out, "restart") != NULL);
         PASS();
     }
     TEST("offered renders two reconstructable commands at narrow width") {
