@@ -228,19 +228,54 @@ static size_t ish_count(const char *hay, const char *needle)
     return n;
 }
 
+/* body with its Z23_PIN="..." value replaced by pin, in out; NULL when the
+ * body has no pin line or the result does not fit. */
+static const char *ish_with_pin(const char *body, const char *pin, char *out,
+                                size_t cap)
+{
+    static const char key[] = "Z23_PIN=\"";
+    const char *v = body ? strstr(body, key) : NULL;
+    const char *q = v ? strchr(v + sizeof(key) - 1, '"') : NULL;
+    if (!q)
+        return NULL;
+    int n = snprintf(out, cap, "%.*s%s%s",
+                     (int)(v + sizeof(key) - 1 - body), body, pin, q);
+    return n > 0 && (size_t)n < cap ? out : NULL;
+}
+
 /* The echo stubs print their arguments: "clone https://..." for the clone,
- * and "-C <d>/src ..." for every other git and make call (checkout, pull,
- * make setup, make z23). No terminal line the script prints has "-C ". */
-static int ish_real_ok(const char *d, const char *body)
+ * and "-C <d>/src ..." for every other git and make call. The log must
+ * hold exactly the calls this pin takes: checkout <pin>, or checkout main
+ * and pull; then make setup and make z23. */
+static bool ish_log_has_every_call(const char *log, const char *d,
+                                   const char *pin)
+{
+    bool pinned = pin[0] != '\0';
+    char dash_c[600], want[4][700];
+    snprintf(dash_c, sizeof(dash_c), "-C %s/src ", d);
+    snprintf(want[0], sizeof(want[0]), "%scheckout %s", dash_c,
+             pinned ? pin : "main");
+    snprintf(want[1], sizeof(want[1]), "%spull --ff-only origin main", dash_c);
+    snprintf(want[2], sizeof(want[2]), "%ssetup", dash_c);
+    snprintf(want[3], sizeof(want[3]), "%s-j", dash_c);
+    bool pulled = strstr(log, want[1]) != NULL;
+    return strstr(log, "clone https://") != NULL &&
+           strstr(log, want[0]) != NULL && pulled == !pinned &&
+           strstr(log, want[2]) != NULL && strstr(log, want[3]) != NULL &&
+           ish_count(log, dash_c) == (pinned ? 3u : 4u);
+}
+
+/* One successful run with the pin line set to pin ("" = build main). No
+ * terminal line the script prints has "-C ". */
+static int ish_real_ok(const char *d, const char *body, const char *pin)
 {
     int failures = 0;
-    static char out[8192], err[8192], log[8192];
-    char dash_c[600], setup[640], build[640], checkout[640];
-    snprintf(dash_c, sizeof(dash_c), "-C %s/src ", d);
-    snprintf(setup, sizeof(setup), "%ssetup", dash_c);
-    snprintf(build, sizeof(build), "%s-j", dash_c);
-    snprintf(checkout, sizeof(checkout), "%scheckout", dash_c);
-    int rc = ish_run_script(d, body, false, out, err, log, sizeof(out));
+    static char script[ISH_BUF], out[8192], err[8192], log[8192];
+    if (!ish_with_pin(body, pin, script, sizeof(script))) {
+        ISH_CHECK("real run: the pin line can be set", false);
+        return failures;
+    }
+    int rc = ish_run_script(d, script, false, out, err, log, sizeof(out));
     ISH_CHECK("real run: success exits 0 with the summary on stdout",
               rc == 0 && strstr(out, "Binary:  ") != NULL &&
                   strstr(out, "https://z23.sh/start") != NULL);
@@ -248,11 +283,11 @@ static int ish_real_ok(const char *d, const char *body)
               strstr(out, "clone https://") == NULL &&
                   strstr(err, "clone https://") == NULL &&
                   strstr(out, "-C ") == NULL && strstr(err, "-C ") == NULL);
-    ISH_CHECK("real run: every git and make call lands in build/install.log",
-              strstr(log, "clone https://") != NULL &&
-                  strstr(log, checkout) != NULL &&
-                  strstr(log, setup) != NULL && strstr(log, build) != NULL &&
-                  ish_count(log, dash_c) >= 3);
+    ISH_CHECK(pin[0] ? "real run (pinned): exactly checkout, setup and build "
+                       "land in build/install.log"
+                     : "real run (main): exactly checkout, pull, setup and "
+                       "build land in build/install.log",
+              ish_log_has_every_call(log, d, pin));
     return failures;
 }
 
@@ -281,10 +316,14 @@ static int ish_script_real_run(const char *body)
         ISH_CHECK("real-run fixture directory", false);
         return failures;
     }
-    failures += ish_real_ok(d, body);
     char src[600];
     snprintf(src, sizeof(src), "%s/src", d);
-    test_rm_rf(src); /* the failure run must clone afresh */
+    /* Both pin branches, whichever one the served body takes; each run
+     * clones afresh. */
+    failures += ish_real_ok(d, body, "");
+    test_rm_rf(src);
+    failures += ish_real_ok(d, body, "0123abcd");
+    test_rm_rf(src);
     failures += ish_real_fail(d, body);
     test_rm_rf(d);
     return failures;
