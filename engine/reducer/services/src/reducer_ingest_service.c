@@ -116,6 +116,28 @@ static bool reducer_height_is_contested(struct main_state *ms, int height)
     return entries > 1 && any_have_data;
 }
 
+static void reducer_format_not_finalized_debug(sqlite3 *pdb, int height,
+                                               char *debug, size_t debug_size)
+{
+    uint64_t tf_cursor = pdb ? stage_cursor_persisted(
+        pdb, "tip_finalize", "reducer") : tip_finalize_stage_cursor();
+    uint64_t ua_cursor = pdb ? stage_cursor_persisted(
+        pdb, "utxo_apply", "reducer") : 0;
+    int64_t tf_published = tip_finalize_stage_last_height();
+    bool ua_ok = utxo_apply_stage_succeeded_at(height);
+    uint8_t witness_hash[32];
+    bool tf_hash_witness = pdb &&
+        tip_finalize_stage_block_hash_at(pdb, height, witness_hash);
+    const char *tf_blocked = tip_finalize_stage_last_blocked_reason();
+    snprintf(debug, debug_size,
+             "h=%d tf_cursor=%llu tf_published=%lld ua_cursor=%llu "
+             "ua_ok=%d tf_hash_witness=%d tf_blocked=%s",
+             height, (unsigned long long)tf_cursor,
+             (long long)tf_published, (unsigned long long)ua_cursor,
+             ua_ok ? 1 : 0, tf_hash_witness ? 1 : 0,
+             tf_blocked && tf_blocked[0] ? tf_blocked : "none");
+}
+
 /* Map freshly-written stage log rows for `height`/`hash` into `out`. */
 static bool reducer_read_back_verdict(struct main_state *ms,
                                       int height,
@@ -161,24 +183,8 @@ static bool reducer_read_back_verdict(struct main_state *ms,
         return true; /* out left MODE_VALID by the caller's init */
     }
 
-    uint64_t tf_cursor = pdb ? stage_cursor_persisted(
-        pdb, "tip_finalize", "reducer") : tip_finalize_stage_cursor();
-    uint64_t ua_cursor = pdb ? stage_cursor_persisted(
-        pdb, "utxo_apply", "reducer") : 0;
-    int64_t tf_published = tip_finalize_stage_last_height();
-    bool ua_ok = utxo_apply_stage_succeeded_at(height);
-    uint8_t witness_hash[32];
-    bool tf_hash_witness = pdb &&
-        tip_finalize_stage_block_hash_at(pdb, height, witness_hash);
-    const char *tf_blocked = tip_finalize_stage_last_blocked_reason();
     char debug[MAX_REJECT_REASON];
-    snprintf(debug, sizeof(debug),
-             "h=%d tf_cursor=%llu tf_published=%lld ua_cursor=%llu "
-             "ua_ok=%d tf_hash_witness=%d tf_blocked=%s",
-             height, (unsigned long long)tf_cursor,
-             (long long)tf_published, (unsigned long long)ua_cursor,
-             ua_ok ? 1 : 0, tf_hash_witness ? 1 : 0,
-             tf_blocked && tf_blocked[0] ? tf_blocked : "none");
+    reducer_format_not_finalized_debug(pdb, height, debug, sizeof(debug));
     validation_state_invalid(out, false, REJECT_INVALID,
                              "block-not-finalized-by-reducer", debug);
     return false;
@@ -230,6 +236,35 @@ static bool reducer_pending_body_is_accepted(
     return true;
 }
 
+static bool reducer_body_persist_args_valid(
+        const struct chain_activation_controller *ctl,
+        const struct uint256 *block_hash,
+        const struct block *pblock)
+{
+    return ctl && ctl->ms && block_hash && pblock;
+}
+
+static void reducer_stamp_ntx_from_body(struct block_index *bi,
+                                        const struct block *pblock)
+{
+    if (bi->nTx == 0 && pblock->num_vtx > 0)
+        bi->nTx = (unsigned int)pblock->num_vtx;
+}
+
+static bool reducer_body_runtime_wired(
+        const struct chain_activation_controller *ctl)
+{
+    return ctl->datadir && ctl->datadir[0] && ctl->params;
+}
+
+static const char *reducer_body_persist_dir(
+        const struct chain_activation_controller *ctl,
+        char *persist_dir, size_t persist_dir_size)
+{
+    GetDataDir(true, persist_dir, persist_dir_size);
+    return persist_dir[0] ? persist_dir : ctl->datadir;
+}
+
 static bool reducer_persist_ingested_body_locked(
         struct chain_activation_controller *ctl,
         const struct uint256 *block_hash,
@@ -237,7 +272,7 @@ static bool reducer_persist_ingested_body_locked(
         struct validation_state *out,
         bool honor_header_reject)
 {
-    if (!ctl || !ctl->ms || !block_hash || !pblock) {
+    if (!reducer_body_persist_args_valid(ctl, block_hash, pblock)) {
         LOG_WARN("reducer", "body persist invalid args ctl=%p ms=%p hash=%p block=%p",
                  (void *)ctl, ctl ? (void *)ctl->ms : NULL,
                  (const void *)block_hash, (void *)pblock);
@@ -262,8 +297,7 @@ static bool reducer_persist_ingested_body_locked(
      * this block — the restart-loses-the-connected-extent class. Set
      * even on the HAVE_DATA early-return below so a later stage's emit
      * carries it. */
-    if (bi->nTx == 0 && pblock->num_vtx > 0)
-        bi->nTx = (unsigned int)pblock->num_vtx;
+    reducer_stamp_ntx_from_body(bi, pblock);
 
     if (bi->nStatus & BLOCK_HAVE_DATA)
         return true;
@@ -276,7 +310,7 @@ static bool reducer_persist_ingested_body_locked(
         reducer_header_rejected_at(ctl->ms, bi->nHeight, out))
         return false;
 
-    if (!ctl->datadir || !ctl->datadir[0] || !ctl->params) {
+    if (!reducer_body_runtime_wired(ctl)) {
         LOG_WARN("reducer", "body persist missing runtime wiring h=%d datadir=%p params=%p",
                  bi->nHeight, (const void *)ctl->datadir,
                  (const void *)ctl->params);
@@ -294,8 +328,8 @@ static bool reducer_persist_ingested_body_locked(
      * this is byte-identical there. This is exactly why mainnet sync works but
      * regtest `generate` mined nothing. */
     char persist_dir[2048];
-    GetDataDir(true, persist_dir, sizeof(persist_dir));
-    const char *bdir = persist_dir[0] ? persist_dir : ctl->datadir;
+    const char *bdir = reducer_body_persist_dir(ctl, persist_dir,
+                                                sizeof(persist_dir));
 
     struct disk_block_pos pos;
     disk_block_pos_init(&pos);
@@ -518,6 +552,138 @@ uint64_t reducer_ingest_seed_anchor_reseed_failure_count(void)
     return atomic_load(&g_seed_anchor_reseed_failures);
 }
 
+static void reducer_seed_anchors_for_ingest_tip(
+        struct chain_activation_controller *ctl)
+{
+    /* Runtime re-seed ONLY when the finalize cursor is genuinely BEHIND the
+     * served tip's own transition (cursor < T, e.g. after a repair clamp).
+     * cursor == T is the healthy steady state — the T→T+1 transition is the
+     * stage's own pending work — a `< T+1` gate would re-seed it on
+     * EVERY at-tip ingest, stamping the cursor to T+1 and skipping the
+     * pending transition: each new block could then only publish when ITS
+     * successor arrived (the served-tip-trails-by-one defect). */
+    struct block_index *anchor_tip = active_chain_tip(&ctl->ms->chain_active);
+    if (anchor_tip && anchor_tip->phashBlock &&
+        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight)
+        reducer_ingest_try_seed_anchor(anchor_tip->nHeight,
+                                       anchor_tip->phashBlock->data,
+                                       "runtime-reseed-cursor-behind-tip");
+
+    /* Regtest on-demand bootstrap: a FRESH genesis-only node (no import /
+     * snapshot / reindex ever ran tip_finalize_stage_seed_anchor) has no
+     * genesis anchor row, so the staged cursors are stuck at 0 and the first
+     * `generate` records no utxo_apply row (utx=-1) -> tip never finalizes
+     * ("block-not-finalized-by-reducer"). Import/snapshot/reindex paths all
+     * seed genesis; for a fresh on-demand node nothing does. The runtime
+     * re-seed above cannot reach this case (tip at genesis => nHeight 0 =>
+     * `cursor < 0` is always false). Seed the genesis anchor ONCE, exactly as
+     * the passing `generate 1` model in test_reducer_step_drain_harness.c does.
+     * Gated on fMineBlocksOnDemand so it is a no-op on main/testnet (the bool is
+     * the FIRST condition; byte-identical there). Doubly inert off-regtest: it
+     * only fires for a node whose tip IS genesis with an unseeded cursor, a
+     * state a synced node is never in. Idempotent: seed_anchor is INSERT-OR-
+     * IGNORE and runs the full seed_integrity_gate; the nHeight==0 && cursor==0
+     * guard self-disables after the first block. */
+    if (ctl->params && ctl->params->fMineBlocksOnDemand &&
+        anchor_tip && anchor_tip->phashBlock &&
+        anchor_tip->nHeight == 0 &&
+        tip_finalize_stage_cursor() == 0)
+        reducer_ingest_try_seed_anchor(0, anchor_tip->phashBlock->data,
+                                       "regtest-genesis-seed");
+}
+
+static void reducer_drain_header_prefix(void)
+{
+    /* Body-INDEPENDENT prefix drain: run ONLY header_admit + validate_headers
+     * to convergence so the block_index is created and the header is validated
+     * BEFORE the body is persisted below. Draining the full pipeline here
+     * (while the body is still absent) made the body-dependent stages record a
+     * permanent failure row for this height — body_fetch turns a transient
+     * validate_headers verdict into "skipped_invalid" and advances its cursor,
+     * and the forward-only cursor never re-processes the height in the second
+     * drain (where the body IS present), so the stale ok=0 propagated downstream
+     * as upstream_failed and the block was rejected. Bounds match
+     * reducer_drain_to_convergence (4096 rounds, 100/stage). K3 lever: the
+     * per-stage batch is the derived value when -derive-drain-batch is on,
+     * else the literal 100 (default). */
+    const int _hdr_batch = hw_profile_drain_batch_effective(100);
+    for (int _r = 0; _r < 4096; _r++) {
+        int _adv = header_admit_stage_drain(_hdr_batch) +
+                   validate_headers_stage_drain(_hdr_batch);
+        if (_adv == 0)
+            break;
+    }
+}
+
+static void reducer_extend_window_to_best_header(
+        struct chain_activation_controller *ctl)
+{
+    /* Extend the visible active-chain window along the contiguous have-data
+     * frontier before draining the body-dependent stages, so body_fetch /
+     * body_persist / script_validate can see active_chain_at(cursor+1) as the
+     * just-persisted body lands. (See chain_activation_service.c for the full
+     * rationale: the blocks-less snapshot boot retracts the window to the seed
+     * and nothing else widens it inside this drive.) No-op when there is no gap;
+     * takes only the active-chain + block-map rwlocks; inside reducer_drive. */
+    if (ctl->ms->pindex_best_header)
+        (void)active_chain_extend_window_have_data(
+            &ctl->ms->chain_active, &ctl->ms->map_block_index,
+            ctl->ms->pindex_best_header, ctl->ms->pindex_best_header->nHeight);
+}
+
+static void reducer_publish_on_demand_tip(
+        struct chain_activation_controller *ctl,
+        const struct block_index *ingested,
+        const struct uint256 *block_hash)
+{
+    /* Regtest on-demand mining (fMineBlocksOnDemand) has no successor header to
+     * drive tip_finalize's one-block lookahead, so a self-mined block would
+     * never finalize and `generate` would loop forever re-mining the same block
+     * (the tip never leaves genesis). Publish the just-mined, fully-validated
+     * at-tip block as the authoritative tip via the documented trusted-tip
+     * primitive. set_authoritative_tip routes through anchor_cursor_to_authority
+     * (monotonic guard: cannot lower the finalize cursor) and writes the own-hash
+     * anchor row reducer_read_back_verdict reads. Gated on fMineBlocksOnDemand
+     * (true ONLY for regtest; false on main/testnet, core/modules/chain/src/chainparams.c
+     * — so byte-identical on a real network) AND on the same consensus witness
+     * reducer_pending_body_is_accepted trusts (HAVE_DATA && !FAILED && utxo_apply
+     * succeeded). Inlined, not the helper, so it never validation_state_init's
+     * the caller's `out`. Under the held mutex. */
+    if (ctl->params && ctl->params->fMineBlocksOnDemand && ingested &&
+        (ingested->nStatus & BLOCK_HAVE_DATA) &&
+        !(ingested->nStatus & BLOCK_FAILED_MASK) &&
+        utxo_apply_stage_succeeded_at(ingested->nHeight)) {
+        tip_finalize_stage_set_authoritative_tip(ingested->nHeight,
+                                                 block_hash->data);
+    }
+}
+
+static void reducer_format_on_demand_reject_line(int target_h, char *line,
+                                                 size_t line_size)
+{
+    sqlite3 *pdb = progress_store_db();
+    static const char *const tbl[7] = {
+        "validate_headers_log", "body_fetch_log", "body_persist_log",
+        "script_validate_log", "proof_validate_log", "utxo_apply_log",
+        "tip_finalize_log" };
+    int n = snprintf(line, line_size,
+                     "[ondemand-reject] h=%d:", target_h);
+    for (int i = 0; i < 7 && pdb && n < (int)line_size; i++) {
+        sqlite3_stmt *st = NULL;
+        char q[96];
+        snprintf(q, sizeof(q), "SELECT ok FROM %s WHERE height=?", tbl[i]);
+        int ok = -1;
+        if (sqlite3_prepare_v2(pdb, q, -1, &st, NULL) == SQLITE_OK) {  // raw-sql-ok:regtest-diag
+            sqlite3_bind_int(st, 1, target_h);
+            if (sqlite3_step(st) == SQLITE_ROW)  // raw-sql-ok:regtest-diag
+                ok = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+        }
+        n += snprintf(line + n, line_size - (size_t)n, " %.3s=%d",
+                      tbl[i], ok);
+    }
+}
+
 bool reducer_ingest_block(struct chain_activation_controller *ctl,
                           struct block *pblock,
                           enum reducer_source source,
@@ -578,61 +744,9 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
     reducer_drive_enter();
     reducer_enter_batched_body_sync();
     (void)force; /* relay pre-filter gating lives in the admit producer */
-    /* Runtime re-seed ONLY when the finalize cursor is genuinely BEHIND the
-     * served tip's own transition (cursor < T, e.g. after a repair clamp).
-     * cursor == T is the healthy steady state — the T→T+1 transition is the
-     * stage's own pending work — a `< T+1` gate would re-seed it on
-     * EVERY at-tip ingest, stamping the cursor to T+1 and skipping the
-     * pending transition: each new block could then only publish when ITS
-     * successor arrived (the served-tip-trails-by-one defect). */
-    struct block_index *anchor_tip = active_chain_tip(&ctl->ms->chain_active);
-    if (anchor_tip && anchor_tip->phashBlock &&
-        tip_finalize_stage_cursor() < (uint64_t)anchor_tip->nHeight)
-        reducer_ingest_try_seed_anchor(anchor_tip->nHeight,
-                                       anchor_tip->phashBlock->data,
-                                       "runtime-reseed-cursor-behind-tip");
+    reducer_seed_anchors_for_ingest_tip(ctl);
 
-    /* Regtest on-demand bootstrap: a FRESH genesis-only node (no import /
-     * snapshot / reindex ever ran tip_finalize_stage_seed_anchor) has no
-     * genesis anchor row, so the staged cursors are stuck at 0 and the first
-     * `generate` records no utxo_apply row (utx=-1) -> tip never finalizes
-     * ("block-not-finalized-by-reducer"). Import/snapshot/reindex paths all
-     * seed genesis; for a fresh on-demand node nothing does. The runtime
-     * re-seed above cannot reach this case (tip at genesis => nHeight 0 =>
-     * `cursor < 0` is always false). Seed the genesis anchor ONCE, exactly as
-     * the passing `generate 1` model in test_reducer_step_drain_harness.c does.
-     * Gated on fMineBlocksOnDemand so it is a no-op on main/testnet (the bool is
-     * the FIRST condition; byte-identical there). Doubly inert off-regtest: it
-     * only fires for a node whose tip IS genesis with an unseeded cursor, a
-     * state a synced node is never in. Idempotent: seed_anchor is INSERT-OR-
-     * IGNORE and runs the full seed_integrity_gate; the nHeight==0 && cursor==0
-     * guard self-disables after the first block. */
-    if (ctl->params && ctl->params->fMineBlocksOnDemand &&
-        anchor_tip && anchor_tip->phashBlock &&
-        anchor_tip->nHeight == 0 &&
-        tip_finalize_stage_cursor() == 0)
-        reducer_ingest_try_seed_anchor(0, anchor_tip->phashBlock->data,
-                                       "regtest-genesis-seed");
-
-    /* Body-INDEPENDENT prefix drain: run ONLY header_admit + validate_headers
-     * to convergence so the block_index is created and the header is validated
-     * BEFORE the body is persisted below. Draining the full pipeline here
-     * (while the body is still absent) made the body-dependent stages record a
-     * permanent failure row for this height — body_fetch turns a transient
-     * validate_headers verdict into "skipped_invalid" and advances its cursor,
-     * and the forward-only cursor never re-processes the height in the second
-     * drain (where the body IS present), so the stale ok=0 propagated downstream
-     * as upstream_failed and the block was rejected. Bounds match
-     * reducer_drain_to_convergence (4096 rounds, 100/stage). K3 lever: the
-     * per-stage batch is the derived value when -derive-drain-batch is on,
-     * else the literal 100 (default). */
-    const int _hdr_batch = hw_profile_drain_batch_effective(100);
-    for (int _r = 0; _r < 4096; _r++) {
-        int _adv = header_admit_stage_drain(_hdr_batch) +
-                   validate_headers_stage_drain(_hdr_batch);
-        if (_adv == 0)
-            break;
-    }
+    reducer_drain_header_prefix();
     if (!reducer_persist_ingested_body_locked(ctl, &block_hash, pblock, out,
                                               true)) {
         reducer_exit_batched_body_sync();
@@ -640,17 +754,7 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
         zcl_mutex_unlock(&ctl->mutex);
         return false;
     }
-    /* Extend the visible active-chain window along the contiguous have-data
-     * frontier before draining the body-dependent stages, so body_fetch /
-     * body_persist / script_validate can see active_chain_at(cursor+1) as the
-     * just-persisted body lands. (See chain_activation_service.c for the full
-     * rationale: the blocks-less snapshot boot retracts the window to the seed
-     * and nothing else widens it inside this drive.) No-op when there is no gap;
-     * takes only the active-chain + block-map rwlocks; inside reducer_drive. */
-    if (ctl->ms->pindex_best_header)
-        (void)active_chain_extend_window_have_data(
-            &ctl->ms->chain_active, &ctl->ms->map_block_index,
-            ctl->ms->pindex_best_header, ctl->ms->pindex_best_header->nHeight);
+    reducer_extend_window_to_best_header(ctl);
     /* Full drain now that BLOCK_HAVE_DATA is set: body_fetch .. tip_finalize
      * each process this height exactly once, with the body present. */
     (void)reducer_drain_to_convergence();
@@ -658,26 +762,7 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
     struct block_index *ingested =
         block_map_find(&ctl->ms->map_block_index, &block_hash);
 
-    /* Regtest on-demand mining (fMineBlocksOnDemand) has no successor header to
-     * drive tip_finalize's one-block lookahead, so a self-mined block would
-     * never finalize and `generate` would loop forever re-mining the same block
-     * (the tip never leaves genesis). Publish the just-mined, fully-validated
-     * at-tip block as the authoritative tip via the documented trusted-tip
-     * primitive. set_authoritative_tip routes through anchor_cursor_to_authority
-     * (monotonic guard: cannot lower the finalize cursor) and writes the own-hash
-     * anchor row reducer_read_back_verdict reads. Gated on fMineBlocksOnDemand
-     * (true ONLY for regtest; false on main/testnet, core/modules/chain/src/chainparams.c
-     * — so byte-identical on a real network) AND on the same consensus witness
-     * reducer_pending_body_is_accepted trusts (HAVE_DATA && !FAILED && utxo_apply
-     * succeeded). Inlined, not the helper, so it never validation_state_init's
-     * the caller's `out`. Under the held mutex. */
-    if (ctl->params && ctl->params->fMineBlocksOnDemand && ingested &&
-        (ingested->nStatus & BLOCK_HAVE_DATA) &&
-        !(ingested->nStatus & BLOCK_FAILED_MASK) &&
-        utxo_apply_stage_succeeded_at(ingested->nHeight)) {
-        tip_finalize_stage_set_authoritative_tip(ingested->nHeight,
-                                                 block_hash.data);
-    }
+    reducer_publish_on_demand_tip(ctl, ingested, &block_hash);
 
     /* Prefer the just-ingested height for the read-back. The active tip may
      * still be one block behind while tip_finalize waits for lookahead, but
@@ -703,28 +788,8 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
      * stage in the synchronous drive recorded the failure. Gated on
      * fMineBlocksOnDemand — regtest only, zero cost on a live network. */
     if (ctl->params && ctl->params->fMineBlocksOnDemand) {
-        sqlite3 *pdb = progress_store_db();
-        static const char *const tbl[7] = {
-            "validate_headers_log", "body_fetch_log", "body_persist_log",
-            "script_validate_log", "proof_validate_log", "utxo_apply_log",
-            "tip_finalize_log" };
         char line[512];
-        int n = snprintf(line, sizeof(line),
-                         "[ondemand-reject] h=%d:", target_h);
-        for (int i = 0; i < 7 && pdb && n < (int)sizeof(line); i++) {
-            sqlite3_stmt *st = NULL;
-            char q[96];
-            snprintf(q, sizeof(q), "SELECT ok FROM %s WHERE height=?", tbl[i]);
-            int ok = -1;
-            if (sqlite3_prepare_v2(pdb, q, -1, &st, NULL) == SQLITE_OK) {  // raw-sql-ok:regtest-diag
-                sqlite3_bind_int(st, 1, target_h);
-                if (sqlite3_step(st) == SQLITE_ROW)  // raw-sql-ok:regtest-diag
-                    ok = sqlite3_column_int(st, 0);
-                sqlite3_finalize(st);
-            }
-            n += snprintf(line + n, sizeof(line) - (size_t)n, " %.3s=%d",
-                          tbl[i], ok);
-        }
+        reducer_format_on_demand_reject_line(target_h, line, sizeof(line));
         LOG_INFO("reducer", "%s", line);
     }
 

@@ -922,9 +922,6 @@ engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:stage_reducer_fro
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_batch_tx:23
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_eval_p:19
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_log_ok_hash_at:18
-engine/reducer/services/src/reducer_ingest_service.c:reducer_ingest_block:38
-engine/reducer/services/src/reducer_ingest_service.c:reducer_persist_ingested_body_locked:19
-engine/reducer/services/src/reducer_ingest_service.c:reducer_read_back_verdict:16
 engine/services/src/agents_telemetry_fill.c:at_scan:23
 engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:30
 engine/services/src/bg_validation_service.c:bg_validation_thread:24
