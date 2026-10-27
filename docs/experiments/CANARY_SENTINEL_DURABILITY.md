@@ -174,3 +174,27 @@ through qualification. The focused log SHA-256 was
 Earlier failures remain evidence; these results establish neither their timing
 cause nor a performance improvement. Native exact candidate proof remains
 pending, and no production activation or additional platform runtime was tested.
+
+## Privileged-transition disposition
+
+The successor candidate `dbf84f293bb54223f9d3720fd8e393ac65ef8644` was admitted
+as native queue row 1280. Its lint proof reported that the new owner-mutating
+`dev.test.canary_sentinel` leaf lacked a Law-7 disposition. The rule requires
+an explicit review of every such leaf: privileged artifact installation must
+bind an authority receipt; operations that install no privileged artifact must
+record a factual exemption.
+The final shard-07 real-tree checker assertion reported the same missing
+disposition; it is a second observation of this policy omission, not a
+separate canary runtime defect.
+
+The canary command resets or publishes fixed replay-verdict evidence and its
+marker in a validated owner directory. It installs no privileged artifact and
+changes no running binary or canonical node. Its disposition therefore records
+that limited effect; it neither bypasses authority-receipt verification for an
+installation nor grants new execution or deployment authority. Handler and test
+bytes are unchanged. The canonical `check-privileged-transition-receipt`
+gate passed on 2026-10-27: all 150 owner-mutating leaves were dispositioned
+(1 receipt, 149 exempt). Full donor byte, metadata and absence manifests
+matched before and after the admitted check; no donor rebuild was needed.
+
+Canonical gate log SHA-256: `c3d098945efe9d8d70fdf4332be53397b16503f797ad0787bc646c01782b33f4`.

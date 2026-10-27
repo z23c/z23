@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
 # check_privileged_transition_receipt.sh baseline — Law-7 dispositions.
 #
 # Every native command leaf whose spec is ZCL_COMMAND_AUTH_OWNER AND effect
@@ -215,3 +216,5 @@ plugin.attest exempt: writes one attestation record for an image the caller buil
 plugin.publish exempt: copies one verified plugin generation into this datadir's package store as a content-addressed root with a signed release; it installs no artifact, changes no running binary, and grants no authority, so there is no artifact digest or binary anchor for an authority_receipt to bind
 plugin.fetch exempt: authority is the publisher signature checked against the owner's publisher key file and the executable SHA3-512 checked against the signed manifest, on top of root identity, completeness and downgrade checks; it stores a new generation through plugin install and never changes current, last-good, a running binary or node daemon state
 plugin.fetch_remote exempt: asks the node running on this datadir over its local cookie-authenticated RPC to run the same plugin fetch verification (publisher signature against the owner publisher_keys, SHA3-512 against the signed manifest, root, completeness, downgrade and size checks); it stores a new generation only and never changes current, last-good or a running binary
+
+dev.test.canary_sentinel exempt: durably resets or publishes fixed replay-canary verdict evidence in a validated owner directory; installs no privileged artifact and changes no running binary or canonical node
