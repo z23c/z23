@@ -108,16 +108,9 @@ static int spawn_shot(zdog_match *m, const zdog_plane *p, unsigned idx,
     return 1;
 }
 
-static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
+/* Roll and yaw update for one tick. */
+static void plane_update_roll_yaw(zdog_plane *p, const zdog_ctl *c)
 {
-    zdog_plane *p = &m->planes[idx];
-
-    if (!p->alive) {
-        if (p->respawn_in > 0 && --p->respawn_in == 0)
-            respawn(m, p);
-        return;
-    }
-
     /* Bank-to-turn: actual roll approaches the target at 360 deg/s. */
     int32_t target_roll = clamp_q15(c->roll);
     int32_t dr = target_roll - p->roll;
@@ -134,7 +127,11 @@ static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
 
     p->yaw = (uint16_t)(p->yaw +
                         (int32_t)ZDOG_YAW_RATE_BRAD * sroll / Q15_ONE / 60);
+}
 
+/* Pitch update for one tick. */
+static void plane_update_pitch(zdog_plane *p, const zdog_ctl *c)
+{
     /* Pitch rate 100 deg/s at full stick, clamped to +/-60 deg. */
     int32_t pd = clamp_q15(c->pitch) * ZDOG_PITCH_RATE_BRAD / Q15_ONE / 60;
     int32_t sp = p->pitch <= 32767u ? p->pitch
@@ -146,7 +143,11 @@ static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
     else if (sp < -ZDOG_PITCH_MAX_BRAD)
         sp = -ZDOG_PITCH_MAX_BRAD;
     p->pitch = (uint16_t)sp;
+}
 
+/* Speed update for one tick. */
+static void plane_update_speed(zdog_plane *p, const zdog_ctl *c)
+{
     /* Speed approaches the throttle target at 36,000 mm/s per second. */
     int32_t thr = clamp_q15(c->throttle);
 
@@ -165,11 +166,12 @@ static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
         if (p->speed < target_speed)
             p->speed = target_speed;
     }
+}
 
-    /* Move along the forward vector. */
-    int16_t fx, fy, fz;
-
-    forward_vec(p, &fx, &fy, &fz);
+/* Move one tick along the given forward vector and clamp y to the
+ * world band, zeroing pitch at the band edges. */
+static void plane_move(zdog_plane *p, int16_t fx, int16_t fy, int16_t fz)
+{
     p->x = wrap_xz(p->x + zdog_floor_q15((int64_t)fx * p->speed) / 60);
     p->y += zdog_floor_q15((int64_t)fy * p->speed) / 60;
     p->z = wrap_xz(p->z + zdog_floor_q15((int64_t)fz * p->speed) / 60);
@@ -180,13 +182,41 @@ static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
         p->y = ZDOG_Y_MIN;
         p->pitch = 0;
     }
+}
 
+/* Gun update for one tick. */
+static void plane_fire_gun(zdog_match *m, unsigned idx, zdog_plane *p,
+                           const zdog_ctl *c, int16_t fx, int16_t fy,
+                           int16_t fz)
+{
     /* Gun: only a successful spawn starts the cooldown. */
     if (p->fire_cd > 0)
         p->fire_cd--;
     if (c->fire && p->fire_cd == 0 &&
         spawn_shot(m, p, idx, fx, fy, fz))
         p->fire_cd = ZDOG_FIRE_CD;
+}
+
+static void plane_update(zdog_match *m, unsigned idx, const zdog_ctl *c)
+{
+    zdog_plane *p = &m->planes[idx];
+
+    if (!p->alive) {
+        if (p->respawn_in > 0 && --p->respawn_in == 0)
+            respawn(m, p);
+        return;
+    }
+
+    plane_update_roll_yaw(p, c);
+    plane_update_pitch(p, c);
+    plane_update_speed(p, c);
+
+    /* Move along the forward vector. */
+    int16_t fx, fy, fz;
+
+    forward_vec(p, &fx, &fy, &fz);
+    plane_move(p, fx, fy, fz);
+    plane_fire_gun(m, idx, p, c, fx, fy, fz);
 }
 
 static void shot_update(zdog_match *m, zdog_shot *s)
