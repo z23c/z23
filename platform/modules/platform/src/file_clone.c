@@ -34,6 +34,68 @@ static bool same_file(const struct stat *a, const struct stat *b)
 {
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
 }
+
+/* Returns the inspection refusal reason and its error code, or NULL. */
+static const char *descriptor_inspection_refusal(int source_fd,
+                                                 int destination_fd,
+                                                 struct stat *source,
+                                                 struct stat *destination,
+                                                 int *error)
+{
+    if (source_fd < 0 || destination_fd < 0) {
+        *error = 0;
+        return "invalid descriptor";
+    }
+    if (fstat(source_fd, source) != 0 ||
+        fstat(destination_fd, destination) != 0) {
+        *error = errno;
+        return "descriptor inspection failed";
+    }
+    return NULL;
+}
+
+/* Returns which pre-clone rule refuses the request, or NULL if none. */
+static const char *clone_request_refusal(int source_flags,
+                                         int destination_flags,
+                                         const struct stat *source,
+                                         const struct stat *destination)
+{
+#if defined(O_PATH)
+    if ((source_flags & O_PATH) != 0 || (destination_flags & O_PATH) != 0)
+        return "O_PATH descriptor refused";
+#endif
+    if ((source_flags & O_ACCMODE) == O_WRONLY ||
+        (destination_flags & O_ACCMODE) == O_RDONLY ||
+        (destination_flags & O_APPEND) != 0)
+        return "descriptor access mode refused";
+    if (!S_ISREG(source->st_mode) ||
+        !S_ISREG(destination->st_mode) ||
+        destination->st_size != 0 ||
+        destination->st_nlink > 1 ||
+        same_file(source, destination))
+        return "descriptor shape refused";
+    return NULL;
+}
+
+/* Re-stats both descriptors after the clone; true when both calls succeed. */
+static bool restat_cloned_descriptors(int source_fd, int destination_fd,
+                                      struct stat *source,
+                                      struct stat *destination)
+{
+    return fstat(source_fd, source) == 0 &&
+           fstat(destination_fd, destination) == 0;
+}
+
+/* True when the cloned files fail the post-clone shape rules. */
+static bool cloned_shape_refused(const struct stat *source,
+                                 const struct stat *destination)
+{
+    return !S_ISREG(source->st_mode) ||
+           !S_ISREG(destination->st_mode) ||
+           destination->st_nlink > 1 ||
+           same_file(source, destination) ||
+           source->st_size != destination->st_size;
+}
 #endif
 
 enum platform_file_clone_result platform_file_clone_fd(int source_fd,
@@ -41,11 +103,12 @@ enum platform_file_clone_result platform_file_clone_fd(int source_fd,
 {
 #if defined(__linux__)
     struct stat source_before, destination_before;
-    if (source_fd < 0 || destination_fd < 0)
-        return clone_refused("invalid descriptor", 0);
-    if (fstat(source_fd, &source_before) != 0 ||
-        fstat(destination_fd, &destination_before) != 0)
-        return clone_refused("descriptor inspection failed", errno);
+    int inspection_error = 0;
+    const char *inspection_refusal = descriptor_inspection_refusal(
+        source_fd, destination_fd, &source_before, &destination_before,
+        &inspection_error);
+    if (inspection_refusal != NULL)
+        return clone_refused(inspection_refusal, inspection_error);
     int source_flags = fcntl(source_fd, F_GETFL);
     if (source_flags < 0)
         return clone_refused("source descriptor flags unavailable", errno);
@@ -53,20 +116,10 @@ enum platform_file_clone_result platform_file_clone_fd(int source_fd,
     if (destination_flags < 0)
         return clone_refused("destination descriptor flags unavailable",
                              errno);
-#if defined(O_PATH)
-    if ((source_flags & O_PATH) != 0 || (destination_flags & O_PATH) != 0)
-        return clone_refused("O_PATH descriptor refused", 0);
-#endif
-    if ((source_flags & O_ACCMODE) == O_WRONLY ||
-        (destination_flags & O_ACCMODE) == O_RDONLY ||
-        (destination_flags & O_APPEND) != 0)
-        return clone_refused("descriptor access mode refused", 0);
-    if (!S_ISREG(source_before.st_mode) ||
-        !S_ISREG(destination_before.st_mode) ||
-        destination_before.st_size != 0 ||
-        destination_before.st_nlink > 1 ||
-        same_file(&source_before, &destination_before))
-        return clone_refused("descriptor shape refused", 0);
+    const char *request_refusal = clone_request_refusal(
+        source_flags, destination_flags, &source_before, &destination_before);
+    if (request_refusal != NULL)
+        return clone_refused(request_refusal, 0);
 
     if (ioctl(destination_fd, FICLONE, source_fd) != 0) {
         int error = errno;
@@ -81,14 +134,10 @@ enum platform_file_clone_result platform_file_clone_fd(int source_fd,
     }
 
     struct stat source_after, destination_after;
-    if (fstat(source_fd, &source_after) != 0 ||
-        fstat(destination_fd, &destination_after) != 0)
+    if (!restat_cloned_descriptors(source_fd, destination_fd, &source_after,
+                                   &destination_after))
         return clone_refused("cloned file inspection failed", errno);
-    if (!S_ISREG(source_after.st_mode) ||
-        !S_ISREG(destination_after.st_mode) ||
-        destination_after.st_nlink > 1 ||
-        same_file(&source_after, &destination_after) ||
-        source_after.st_size != destination_after.st_size)
+    if (cloned_shape_refused(&source_after, &destination_after))
         return clone_refused("cloned file shape refused", 0);
     return PLATFORM_FILE_CLONE_CLONED;
 #else
