@@ -658,19 +658,18 @@ static bool collect_wal_numbers(const char *dir, const struct ldb_version *v,
     return true;
 }
 
-static int cmp_log_number_asc(const void *a, const void *b)
-{
-    uint64_t na = *(const uint64_t *)a, nb = *(const uint64_t *)b;
-    if (na != nb)
-        return na < nb ? -1 : 1;
-    return 0;
-}
-
 /* Ascending file number = ascending sequence. */
 static void sort_log_numbers(uint64_t *logs, size_t nlogs)
 {
-    if (nlogs > 1)
-        qsort(logs, nlogs, sizeof(logs[0]), cmp_log_number_asc);
+    for (size_t i = 1; i < nlogs; i++) {
+        uint64_t key = logs[i];
+        size_t j = i;
+        while (j > 0 && logs[j - 1] > key) {
+            logs[j] = logs[j - 1];
+            j--;
+        }
+        logs[j] = key;
+    }
 }
 
 bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
