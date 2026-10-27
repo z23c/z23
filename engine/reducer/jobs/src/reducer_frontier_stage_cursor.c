@@ -204,7 +204,8 @@ static bool stage_cursor_memo_hit_healed(sqlite3 *progress_db, const char *name,
 }
 
 /* Derives the FORWARD-EXTEND starting floor from a veto-free prior memo entry;
- * returns whether *delta_floor was set. */
+ * *delta_floor is always written (0 by default), and the return value says
+ * whether a valid floor was derived from the memo. */
 static bool stage_cursor_delta_floor_from_memo(
     const struct stage_derived_memo_slot *hit, const char *name, int64_t raw,
     int32_t *delta_floor)
