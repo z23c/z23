@@ -80,6 +80,37 @@ static bool has_dns_san(X509 *cert, const char *want)
     return found;
 }
 
+/* Give the authority and the leaf their validity window. */
+static bool acme_selfsigned_test_set_validity(X509 *ca, X509 *leaf)
+{
+    if (!X509_gmtime_adj(X509_getm_notBefore(ca), -3600) ||
+        !X509_gmtime_adj(X509_getm_notAfter(ca), 86400) ||
+        !X509_gmtime_adj(X509_getm_notBefore(leaf), -3600) ||
+        !X509_gmtime_adj(X509_getm_notAfter(leaf), 86400))
+        return false;
+    return true;
+}
+
+/* Name the throwaway authority and the leaf it issues. */
+static bool acme_selfsigned_test_name_authority_and_leaf(X509 *ca, X509 *leaf)
+{
+    if (X509_NAME_add_entry_by_txt(X509_get_subject_name(ca), "CN",
+                                   MBSTRING_ASC,
+                                   (const unsigned char *)"test-authority", -1,
+                                   -1, 0) != 1)
+        return false;
+    if (X509_set_issuer_name(ca, X509_get_subject_name(ca)) != 1)
+        return false;
+    if (X509_NAME_add_entry_by_txt(X509_get_subject_name(leaf), "CN",
+                                   MBSTRING_ASC,
+                                   (const unsigned char *)"leaf.example.org",
+                                   -1, -1, 0) != 1)
+        return false;
+    if (X509_set_issuer_name(leaf, X509_get_subject_name(ca)) != 1)
+        return false;
+    return true;
+}
+
 /* A throwaway certificate authority, so "issued by someone else" can be
  * asserted against a certificate that really was. */
 static X509 *sign_leaf_with_a_different_issuer(void)
@@ -94,27 +125,12 @@ static X509 *sign_leaf_with_a_different_issuer(void)
         goto done;
     if (X509_set_version(ca, 2) != 1 || X509_set_version(leaf, 2) != 1)
         goto done;
-    if (!X509_gmtime_adj(X509_getm_notBefore(ca), -3600) ||
-        !X509_gmtime_adj(X509_getm_notAfter(ca), 86400) ||
-        !X509_gmtime_adj(X509_getm_notBefore(leaf), -3600) ||
-        !X509_gmtime_adj(X509_getm_notAfter(leaf), 86400))
+    if (!acme_selfsigned_test_set_validity(ca, leaf))
         goto done;
     if (X509_set_pubkey(ca, ca_key) != 1 ||
         X509_set_pubkey(leaf, leaf_key) != 1)
         goto done;
-    if (X509_NAME_add_entry_by_txt(X509_get_subject_name(ca), "CN",
-                                   MBSTRING_ASC,
-                                   (const unsigned char *)"test-authority", -1,
-                                   -1, 0) != 1)
-        goto done;
-    if (X509_set_issuer_name(ca, X509_get_subject_name(ca)) != 1)
-        goto done;
-    if (X509_NAME_add_entry_by_txt(X509_get_subject_name(leaf), "CN",
-                                   MBSTRING_ASC,
-                                   (const unsigned char *)"leaf.example.org",
-                                   -1, -1, 0) != 1)
-        goto done;
-    if (X509_set_issuer_name(leaf, X509_get_subject_name(ca)) != 1)
+    if (!acme_selfsigned_test_name_authority_and_leaf(ca, leaf))
         goto done;
     ok = X509_sign(ca, ca_key, EVP_sha256()) != 0 &&
          X509_sign(leaf, ca_key, EVP_sha256()) != 0;
@@ -156,11 +172,11 @@ static void write_text(const char *path, const char *text)
     fclose(f);
 }
 
-int test_acme_selfsigned(void)
+/* The name: which strings count as an LDH name. */
+static int acme_selfsigned_test_ldh_names(void)
 {
     int failures = 0;
 
-    /* ── the name ──────────────────────────────────────────────────── */
     {
         char long_label[80];
         memset(long_label, 'a', 64);
@@ -186,7 +202,15 @@ int test_acme_selfsigned(void)
         AS_CHECK("no name at all is refused", !acme_domain_is_ldh(NULL));
     }
 
-    /* ── the certificate the builder makes ─────────────────────────── */
+    return failures;
+}
+
+/* The certificate the builder makes, read back from its DER form. */
+static int acme_selfsigned_test_built_certificate(X509 **cert_out,
+                                                  EVP_PKEY **key_out,
+                                                  X509 **wire_out)
+{
+    int failures = 0;
     X509 *cert = NULL;
     EVP_PKEY *key = NULL;
     X509 *wire = NULL;
@@ -221,7 +245,16 @@ int test_acme_selfsigned(void)
         }
     }
 
-    /* ── the other direction: a certificate someone else issued ────── */
+    *cert_out = cert;
+    *key_out = key;
+    *wire_out = wire;
+    return failures;
+}
+
+/* The other direction: a certificate someone else issued. */
+static int acme_selfsigned_test_foreign_issuer(void)
+{
+    int failures = 0;
     {
         X509 *leaf = sign_leaf_with_a_different_issuer();
         AS_CHECK("a leaf signed by an authority builds", leaf != NULL);
@@ -234,7 +267,13 @@ int test_acme_selfsigned(void)
                  !acme_certificate_is_self_issued(NULL));
     }
 
-    /* ── what the builder refuses ──────────────────────────────────── */
+    return failures;
+}
+
+/* What the builder refuses. */
+static int acme_selfsigned_test_builder_refusals(void)
+{
+    int failures = 0;
     {
         X509 *c = NULL;
         EVP_PKEY *k = NULL;
@@ -254,15 +293,14 @@ int test_acme_selfsigned(void)
                  !acme_selfsigned_build(&no_life, &c, &k) && !c && !k);
     }
 
-    /* ── the pair on disk ──────────────────────────────────────────── */
-    {
-        char dir[512];
-        char cert_path[640], key_path[640], junk_path[640], missing[700];
-        test_make_tmpdir(dir, sizeof(dir), "acme_selfsigned", "pair");
-        snprintf(cert_path, sizeof(cert_path), "%s/placeholder.pem", dir);
-        snprintf(key_path, sizeof(key_path), "%s/placeholder-key.pem", dir);
-        snprintf(junk_path, sizeof(junk_path), "%s/junk.pem", dir);
-        snprintf(missing, sizeof(missing), "%s/no-such-dir/c.pem", dir);
+    return failures;
+}
+
+/* The pair on disk: write, modes and ensure leaving a good pair alone. */
+static int acme_selfsigned_test_pair_written(const char *cert_path,
+                                             const char *key_path)
+{
+    int failures = 0;
 
         AS_CHECK("an absent file is not reported as self-issued",
                  !acme_certificate_file_is_self_issued(cert_path));
@@ -288,7 +326,16 @@ int test_acme_selfsigned(void)
                                         "node.example.org") &&
                  file_inode(cert_path, &after) && before == after);
 
-        previous_mask = umask(0077);
+    return failures;
+}
+
+/* The pair written under a restrictive caller mask. */
+static int acme_selfsigned_test_pair_under_private_mask(const char *cert_path,
+                                                        const char *key_path)
+{
+    int failures = 0;
+
+    mode_t previous_mask = umask(0077);
         bool private_pair_written = acme_selfsigned_write(
             cert_path, key_path, "node.example.org");
         (void)umask(previous_mask);
@@ -297,6 +344,17 @@ int test_acme_selfsigned(void)
                  file_mode_is(cert_path, 0600));
         AS_CHECK("the private key remains 0600 under a restrictive mask",
                  file_mode_is(key_path, 0600));
+
+    return failures;
+}
+
+/* Files that are junk, or a pair that does not match, are replaced. */
+static int acme_selfsigned_test_ensure_replaces(const char *dir,
+                                                const char *cert_path,
+                                                const char *key_path,
+                                                const char *junk_path)
+{
+    int failures = 0;
 
         write_text(junk_path, "this is not a certificate\n");
         AS_CHECK("a file that is not a certificate is not self-issued",
@@ -338,6 +396,16 @@ int test_acme_selfsigned(void)
                      mismatched != repaired);
         }
 
+    return failures;
+}
+
+/* A pair that cannot be written is refused, and a missing name is legal. */
+static int acme_selfsigned_test_write_refusals(const char *cert_path,
+                                               const char *key_path,
+                                               const char *missing)
+{
+    int failures = 0;
+
         AS_CHECK("a pair that cannot be written is refused, not faked",
                  !acme_selfsigned_write(missing, key_path, "node.example.org"));
         AS_CHECK("and ensure reports that failure rather than claiming a pair",
@@ -350,8 +418,57 @@ int test_acme_selfsigned(void)
                  acme_selfsigned_write(cert_path, key_path, NULL) &&
                  acme_certificate_file_is_self_issued(cert_path));
 
+    return failures;
+}
+
+static int acme_selfsigned_test_disk_pair(void)
+{
+    int failures = 0;
+
+    {
+        char dir[512];
+        char cert_path[640], key_path[640], junk_path[640], missing[700];
+        test_make_tmpdir(dir, sizeof(dir), "acme_selfsigned", "pair");
+        snprintf(cert_path, sizeof(cert_path), "%s/placeholder.pem", dir);
+        snprintf(key_path, sizeof(key_path), "%s/placeholder-key.pem", dir);
+        snprintf(junk_path, sizeof(junk_path), "%s/junk.pem", dir);
+        snprintf(missing, sizeof(missing), "%s/no-such-dir/c.pem", dir);
+
+        failures += acme_selfsigned_test_pair_written(cert_path, key_path);
+        failures += acme_selfsigned_test_pair_under_private_mask(cert_path,
+                                                                 key_path);
+        failures += acme_selfsigned_test_ensure_replaces(dir, cert_path,
+                                                         key_path, junk_path);
+        failures += acme_selfsigned_test_write_refusals(cert_path, key_path,
+                                                        missing);
+
         test_rm_rf(dir);
     }
+
+    return failures;
+}
+
+int test_acme_selfsigned(void)
+{
+    int failures = 0;
+
+    /* ── the name ──────────────────────────────────────────────────── */
+    failures += acme_selfsigned_test_ldh_names();
+
+    /* ── the certificate the builder makes ─────────────────────────── */
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    X509 *wire = NULL;
+    failures += acme_selfsigned_test_built_certificate(&cert, &key, &wire);
+
+    /* ── the other direction: a certificate someone else issued ────── */
+    failures += acme_selfsigned_test_foreign_issuer();
+
+    /* ── what the builder refuses ──────────────────────────────────── */
+    failures += acme_selfsigned_test_builder_refusals();
+
+    /* ── the pair on disk ──────────────────────────────────────────── */
+    failures += acme_selfsigned_test_disk_pair();
 
     X509_free(wire);
     X509_free(cert);
