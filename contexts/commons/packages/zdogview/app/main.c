@@ -102,6 +102,79 @@ static const char *winner_name(uint8_t w)
     }
 }
 
+/* Parse the options that follow the replay path; print the message, set
+ * *exit_status and return false when the CLI should exit right away. */
+static bool zv_parse_options(int argc, char **argv, const char **out_path,
+                             bool *have_tick, uint64_t *tick, int *exit_status)
+{
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--out") == 0) {
+            if (i + 1 >= argc) {
+                zv_err("missing value for", "--out");
+                *exit_status = ZDOGVIEW_BAD_ARG;
+                return false;
+            }
+            *out_path = argv[++i];
+        } else if (strcmp(argv[i], "--tick") == 0) {
+            if (i + 1 >= argc) {
+                zv_err("missing value for", "--tick");
+                *exit_status = ZDOGVIEW_BAD_ARG;
+                return false;
+            }
+            char *end = NULL;
+            *tick = strtoull(argv[++i], &end, 10);
+            if (!end || *end) {
+                zv_err("--tick needs a non-negative integer", argv[i]);
+                *exit_status = ZDOGVIEW_BAD_ARG;
+                return false;
+            }
+            *have_tick = true;
+        } else if (strcmp(argv[i], "--help") == 0) {
+            usage(stdout);
+            *exit_status = 0;
+            return false;
+        } else {
+            zv_err("unknown argument", argv[i]);
+            usage(stderr);
+            *exit_status = ZDOGVIEW_BAD_ARG;
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Seek the verified replay to the frame being rendered, write the PPM to
+ * out_path, free buf and return the exit status. */
+static int zv_render_replay_frame(const char *replay, uint8_t *buf, size_t len,
+                                  zdogview_verified *v, const char *out_path,
+                                  bool have_tick, uint64_t tick)
+{
+    if (!out_path) {
+        zv_err("missing required argument", "--out");
+        free(buf);
+        return ZDOGVIEW_BAD_ARG;
+    }
+    zdog_match m;
+    const uint64_t at = have_tick ? tick : v->recorded_ticks;
+    const int src = zdogview_seek(buf, len, v, at, &m);
+    if (src != ZDOGVIEW_OK) {
+        zv_err("seek failed", replay);
+        free(buf);
+        return src;
+    }
+    zdogview_frame *fr = malloc(sizeof(*fr));
+    if (!fr) {
+        zv_err("malloc failed for frame", out_path);
+        free(buf);
+        return ZDOGVIEW_FAIL;
+    }
+    zdogview_render_scene(&m, v->seed, v->kills, v->num_kills, fr);
+    const int wrc = write_ppm(out_path, fr);
+    free(fr);
+    free(buf);
+    return wrc;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -113,35 +186,11 @@ int main(int argc, char **argv)
     const char *out_path = NULL;
     bool have_tick = false;
     uint64_t tick = 0;
+    int exit_status = 0;
 
-    for (int i = 3; i < argc; i++) {
-        if (strcmp(argv[i], "--out") == 0) {
-            if (i + 1 >= argc) {
-                zv_err("missing value for", "--out");
-                return ZDOGVIEW_BAD_ARG;
-            }
-            out_path = argv[++i];
-        } else if (strcmp(argv[i], "--tick") == 0) {
-            if (i + 1 >= argc) {
-                zv_err("missing value for", "--tick");
-                return ZDOGVIEW_BAD_ARG;
-            }
-            char *end = NULL;
-            tick = strtoull(argv[++i], &end, 10);
-            if (!end || *end) {
-                zv_err("--tick needs a non-negative integer", argv[i]);
-                return ZDOGVIEW_BAD_ARG;
-            }
-            have_tick = true;
-        } else if (strcmp(argv[i], "--help") == 0) {
-            usage(stdout);
-            return 0;
-        } else {
-            zv_err("unknown argument", argv[i]);
-            usage(stderr);
-            return ZDOGVIEW_BAD_ARG;
-        }
-    }
+    if (!zv_parse_options(argc, argv, &out_path, &have_tick, &tick,
+                          &exit_status))
+        return exit_status;
 
     size_t len = 0;
     uint8_t *buf = read_all(replay, &len);
@@ -166,32 +215,9 @@ int main(int argc, char **argv)
         free(buf);
         return ZDOGVIEW_OK;
     }
-    if (strcmp(cmd, "render") == 0) {
-        if (!out_path) {
-            zv_err("missing required argument", "--out");
-            free(buf);
-            return ZDOGVIEW_BAD_ARG;
-        }
-        zdog_match m;
-        const uint64_t at = have_tick ? tick : v.recorded_ticks;
-        const int src = zdogview_seek(buf, len, &v, at, &m);
-        if (src != ZDOGVIEW_OK) {
-            zv_err("seek failed", replay);
-            free(buf);
-            return src;
-        }
-        zdogview_frame *fr = malloc(sizeof(*fr));
-        if (!fr) {
-            zv_err("malloc failed for frame", out_path);
-            free(buf);
-            return ZDOGVIEW_FAIL;
-        }
-        zdogview_render_scene(&m, v.seed, v.kills, v.num_kills, fr);
-        const int wrc = write_ppm(out_path, fr);
-        free(fr);
-        free(buf);
-        return wrc;
-    }
+    if (strcmp(cmd, "render") == 0)
+        return zv_render_replay_frame(replay, buf, len, &v, out_path,
+                                      have_tick, tick);
 
     zv_err("unknown command (verify|render)", cmd);
     usage(stderr);
