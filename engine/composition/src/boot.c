@@ -374,7 +374,7 @@ static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
     }
     g_datadir = ctx->datadir;
     g_blog_datadir = ctx->datadir;
-    boot_first_run_banner_print(ctx, datadir_existed); /* tty only */
+    boot_first_run_banner_print(ctx, datadir_existed); /* banner: tty only */
     /* Now that the datadir is known, point the crash handler at a durable,
      * fsync'd crash log there. Until this call a crash still lands on stderr;
      * after it, the backtrace also survives in $datadir/crash_log.txt

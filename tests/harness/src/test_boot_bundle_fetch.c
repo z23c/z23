@@ -91,27 +91,22 @@ static void bbf_directory_json(char *out, size_t cap)
 static int case_first_run_banner(void)
 {
     int failures = 0;
-    TEST("boot_first_run_banner: tty text with/without fetch, empty off a tty") {
+    TEST("boot_first_run_banner: tty text on a first and a later run, empty off a tty") {
         char b[1024];
-        size_t n = boot_first_run_banner_text(b, sizeof(b), "/d", true,
-                                              513000000u, true);
+        size_t n = boot_first_run_banner_text(b, sizeof(b), "/d", true, true);
         ASSERT(n == strlen(b));
         ASSERT_STR_EQ(b,
             "Z23 node starting (data in /d).\n"
-            "First run: downloading a ~513 MB checkpoint so you do not replay "
-            "the whole chain.\n"
+            "First run: the first sync takes a while; z23 status shows how "
+            "far it is.\n"
             "Leave this running; in another terminal run: z23 status\n"
             "Stop with Ctrl-C. Guide: https://z23.sh/start\n");
-        n = boot_first_run_banner_text(b, sizeof(b), "/d", true, 0, true);
-        ASSERT(n > 0 && strstr(b, "downloading a checkpoint so") != NULL);
-        ASSERT(strstr(b, "MB") == NULL);
-        n = boot_first_run_banner_text(b, sizeof(b), "/d", false, 513000000u,
-                                       true);
-        ASSERT(n > 0 && strstr(b, "downloading") == NULL);
+        n = boot_first_run_banner_text(b, sizeof(b), "/d", false, true);
+        ASSERT(n > 0 && strstr(b, "First run") == NULL);
         ASSERT(strstr(b, "z23 status") != NULL);
-        n = boot_first_run_banner_text(b, sizeof(b), "/d", true, 1, false);
+        n = boot_first_run_banner_text(b, sizeof(b), "/d", true, false);
         ASSERT(n == 0 && b[0] == '\0');
-        ASSERT(boot_first_run_banner_text(b, 8, "/d", true, 0, true) == 0);
+        ASSERT(boot_first_run_banner_text(b, 8, "/d", true, true) == 0);
     } _test_next:;
     return failures;
 }
