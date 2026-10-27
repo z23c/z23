@@ -131,23 +131,17 @@ static bool decode_input_valid(const char *alpha, bool padding_required,
   return decode_symbols_valid(alpha, in, body, rem);
 }
 
-static bool decode_with(const char *alpha, bool padding_required,
-                        const char *in, size_t len, uint8_t *out,
-                        size_t cap, size_t *out_len) {
-  if (out_len)
-    *out_len = 0;
-  if (!out || !out_len)
-    return false;
-  if (len && !decode_input_valid(alpha, padding_required, in, len, cap))
-    return false;
-  uint8_t tab[256];
-  build_table(alpha, tab);
-
-  /* For the padded (standard) form the input length must be a multiple
-   * of four; for the URL-safe form trailing padding is optional. */
+/* Count the trailing '=' padding characters of the input. */
+static size_t decode_count_padding(const char *in, size_t len) {
   size_t pad = 0;
   while (pad < len && in[len - 1u - pad] == '=')
     pad++;
+  return pad;
+}
+
+/* Pad-count and group-length rules for the chosen strictness. */
+static bool decode_group_shape_ok(bool padding_required, size_t len,
+                                  size_t pad) {
   if (pad > 2u)
     return false;
   if (padding_required) {
@@ -156,10 +150,15 @@ static bool decode_with(const char *alpha, bool padding_required,
   } else if (pad && len % 4u != 0) {
     return false; /* padded but not a full group */
   }
-  size_t body = len - pad;
-  if (!padding_required && body % 4u == 1u)
+  if (!padding_required && (len - pad) % 4u == 1u)
     return false; /* one leftover sextet can never be canonical */
+  return true;
+}
 
+/* Stream-decode the body sextets into out; *written gets the byte count. */
+static bool decode_body_stream(const uint8_t tab[256], const char *in,
+                               size_t body, uint8_t *out, size_t cap,
+                               size_t *written) {
   size_t o = 0;
   uint32_t acc = 0;
   unsigned bits = 0;
@@ -181,13 +180,42 @@ static bool decode_with(const char *alpha, bool padding_required,
    * group (2 chars -> 4 bits, 3 chars -> 2 bits, none for full groups). */
   if (bits && (acc & ((1u << bits) - 1u)) != 0)
     return false;
-  if (padding_required) {
-    /* Canonical padding: the pad count must match the leftover shape. */
-    size_t rem = body % 4u;
-    if ((rem == 2u && pad != 2u) || (rem == 3u && pad != 1u) ||
-        (rem == 0u && pad != 0u) || rem == 1u)
-      return false;
-  }
+  *written = o;
+  return true;
+}
+
+/* Canonical padding: the pad count must match the leftover shape. */
+static bool decode_pad_canonical(size_t body, size_t pad) {
+  size_t rem = body % 4u;
+  if ((rem == 2u && pad != 2u) || (rem == 3u && pad != 1u) ||
+      (rem == 0u && pad != 0u) || rem == 1u)
+    return false;
+  return true;
+}
+
+static bool decode_with(const char *alpha, bool padding_required,
+                        const char *in, size_t len, uint8_t *out,
+                        size_t cap, size_t *out_len) {
+  if (out_len)
+    *out_len = 0;
+  if (!out || !out_len)
+    return false;
+  if (len && !decode_input_valid(alpha, padding_required, in, len, cap))
+    return false;
+  uint8_t tab[256];
+  build_table(alpha, tab);
+
+  /* For the padded (standard) form the input length must be a multiple
+   * of four; for the URL-safe form trailing padding is optional. */
+  size_t pad = decode_count_padding(in, len);
+  if (!decode_group_shape_ok(padding_required, len, pad))
+    return false;
+  size_t body = len - pad;
+  size_t o = 0;
+  if (!decode_body_stream(tab, in, body, out, cap, &o))
+    return false;
+  if (padding_required && !decode_pad_canonical(body, pad))
+    return false;
   *out_len = o;
   return true;
 }
