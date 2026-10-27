@@ -117,6 +117,56 @@ static enum platform_watcher_store_result read_record(
     return PLATFORM_WATCHER_STORE_OK;
 }
 
+/* Check the stored record, when expected is set, still matches it. */
+static enum platform_watcher_store_result verify_expected_identity(
+    struct platform_watcher_store *store, const char *leaf,
+    const struct platform_watcher_record_identity *expected)
+{
+    if (!expected) return PLATFORM_WATCHER_STORE_OK;
+    struct platform_directory_child child;
+    platform_directory_child_init(&child);
+    if (!platform_directory_child_open(&store->directory, leaf, &child))
+        return PLATFORM_WATCHER_STORE_MISSING;
+    struct platform_directory_child_info info;
+    bool matches = platform_directory_child_info(&child, &info) &&
+                   info.current_user_only && identity_equal(&info, expected);
+    platform_directory_child_close(&child);
+    if (!matches) return PLATFORM_WATCHER_STORE_REFUSED;
+    return PLATFORM_WATCHER_STORE_OK;
+}
+
+/* Write the record bytes to a new staging file and swap it into place. */
+static bool write_staged_record(struct platform_watcher_store *store,
+                                struct platform_directory_child *staged,
+                                const char *staging, const char *leaf,
+                                const void *bytes, size_t length)
+{
+    return platform_directory_child_create(&store->directory, staging, staged) &&
+           platform_directory_child_write_exact(staged, bytes, length, 0) &&
+           platform_directory_child_truncate(staged, length) &&
+           platform_directory_child_flush(staged) &&
+           platform_directory_child_replace(&store->directory, staged, leaf,
+                                             false);
+}
+
+/* Reopen the published record and report the identity now on disk. */
+static enum platform_watcher_store_result observe_published_identity(
+    struct platform_watcher_store *store, const char *leaf,
+    struct platform_watcher_record_identity *published)
+{
+    struct platform_directory_child child;
+    struct platform_directory_child_info info;
+    platform_directory_child_init(&child);
+    bool observed = platform_directory_child_open(&store->directory, leaf,
+                                                  &child) &&
+                    platform_directory_child_info(&child, &info) &&
+                    info.current_user_only;
+    platform_directory_child_close(&child);
+    if (!observed) return PLATFORM_WATCHER_STORE_REFUSED;
+    identity_from_info(&info, published);
+    return PLATFORM_WATCHER_STORE_OK;
+}
+
 enum platform_watcher_store_result platform_watcher_store_publish(
     struct platform_watcher_store *store, const char *leaf,
     const void *bytes, size_t length,
@@ -125,17 +175,9 @@ enum platform_watcher_store_result platform_watcher_store_publish(
 {
     if (!store || !store->owns || !leaf || !leaf[0] || (!bytes && length))
         return PLATFORM_WATCHER_STORE_INVALID;
-    if (expected) {
-        struct platform_directory_child child;
-        platform_directory_child_init(&child);
-        if (!platform_directory_child_open(&store->directory, leaf, &child))
-            return PLATFORM_WATCHER_STORE_MISSING;
-        struct platform_directory_child_info info;
-        bool matches = platform_directory_child_info(&child, &info) &&
-                       info.current_user_only && identity_equal(&info, expected);
-        platform_directory_child_close(&child);
-        if (!matches) return PLATFORM_WATCHER_STORE_REFUSED;
-    }
+    enum platform_watcher_store_result existing =
+        verify_expected_identity(store, leaf, expected);
+    if (existing != PLATFORM_WATCHER_STORE_OK) return existing;
     uint8_t random[16]; char staging[96];
     if (!rng_fill(random, sizeof(random))) return PLATFORM_WATCHER_STORE_IO;
     int n = snprintf(staging, sizeof(staging), ".watcher-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x.tmp",
@@ -144,28 +186,13 @@ enum platform_watcher_store_result platform_watcher_store_publish(
     struct platform_directory_child staged;
     platform_directory_child_init(&staged);
     bool ok = n > 0 && n < (int)sizeof(staging) &&
-              platform_directory_child_create(&store->directory, staging, &staged) &&
-              platform_directory_child_write_exact(&staged, bytes, length, 0) &&
-              platform_directory_child_truncate(&staged, length) &&
-              platform_directory_child_flush(&staged) &&
-              platform_directory_child_replace(&store->directory, &staged,
-                                                leaf, false);
+              write_staged_record(store, &staged, staging, leaf, bytes, length);
     platform_directory_child_close(&staged);
     if (!ok) {
         (void)platform_directory_child_unlink(&store->directory, staging, true);
         return PLATFORM_WATCHER_STORE_IO;
     }
-    struct platform_directory_child child;
-    struct platform_directory_child_info info;
-    platform_directory_child_init(&child);
-    bool observed = platform_directory_child_open(&store->directory, leaf,
-                                                   &child) &&
-                    platform_directory_child_info(&child, &info) &&
-                    info.current_user_only;
-    platform_directory_child_close(&child);
-    if (!observed) return PLATFORM_WATCHER_STORE_REFUSED;
-    identity_from_info(&info, published);
-    return PLATFORM_WATCHER_STORE_OK;
+    return observe_published_identity(store, leaf, published);
 }
 
 enum platform_watcher_store_result platform_watcher_store_read_while_busy(
