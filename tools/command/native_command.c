@@ -3537,28 +3537,6 @@ void zcl_native_status_journey_render(const struct json_value *d, char *buf,
     (void)snprintf(buf, cap, "%s", line);
 }
 
-/* A person-readable first line for the one case the machine line cannot
- * explain by itself: no node answered. Returns true and fills `buf` when the
- * journey blocker is STATUS_SOURCE_UNAVAILABLE and nothing listens on the
- * RPC port (`node_listening` false; a running node with a degraded status
- * source reports the same blocker), false (buf untouched) otherwise.
- * `datadir` is the datadir the client looked in. */
-bool zcl_native_status_journey_headline(const struct json_value *d,
-                                       const char *datadir,
-                                       bool node_listening, char *buf,
-                                       size_t cap)
-{
-    const char *blocker = nc_journey_blocker_field(d);
-    if (!buf || cap == 0 || node_listening || !blocker ||
-        strcmp(blocker, "STATUS_SOURCE_UNAVAILABLE") != 0)
-        return false;
-    (void)snprintf(buf, cap,
-                   "No node is running here (datadir %.200s). "
-                   "Start it with: z23",
-                   datadir && datadir[0] ? datadir : "unknown");
-    return true;
-}
-
 /* Pick one short, deterministic next step from the same brief body: a named
  * blocker outranks "still behind" outranks the native health leaf. Never
  * allocates. */
@@ -3857,22 +3835,6 @@ size_t zcl_native_render_unknown_command(
         nc_render_did_you_mean(matches, out, out_cap, &len);
     json_free(&doc);
     return len;
-}
-
-/* On a human terminal only (pipes keep the frozen one-line contract), print
- * the no-node plain-language line ahead of the machine line. Whether a node
- * runs is asked of the RPC port itself, not inferred from a cookie file. */
-static void nc_print_status_headline(const char *path,
-                                     const struct json_value *data)
-{
-    char headline[320];
-    if (strcmp(path, "status") != 0 || !nc_human())
-        return;
-    bool listening = node_rpc_port_listening(node_rpc_client_port(), 250);
-    if (zcl_native_status_journey_headline(data, node_rpc_client_datadir(),
-                                           listening, headline,
-                                           sizeof(headline)))
-        printf("%s\n", headline);
 }
 
 /* Render the prose text for a prose leaf into `buf`. Returns true if a text
@@ -5187,7 +5149,6 @@ static bool nc_main_render_prose(const struct zcl_command_spec *spec,
                 zcl_cli_render_brief(text, nc_render_env(), colored,
                                      sizeof(colored)) > 0)
                 emit = colored;
-            nc_print_status_headline(spec->path, data);
             printf("%s\n", emit);
             /* The next: line prints by default on a human terminal
              * (nc_human); pipes keep the frozen one-line contract

@@ -982,47 +982,6 @@ static int test_brief_status_unknown_fields_render_unknown(void)
     return failures;
 }
 
-static int test_status_no_node_headline(void)
-{
-    int failures = 0;
-    struct json_value d;
-    json_init(&d);
-    json_set_object(&d);
-    json_push_kv_str(&d, "primary_blocker", "STATUS_SOURCE_UNAVAILABLE");
-    json_push_kv_str(&d, "next_action", "z23 core status brief");
-    char buf[320];
-    bool had = zcl_native_status_journey_headline(&d, "/srv/z23-data", false,
-                                                  buf, sizeof(buf));
-    TEST("no-node status gets a plain first line naming the datadir") {
-        ASSERT(had);
-        ASSERT(strncmp(buf, "No node is running here (datadir /srv/z23-data)",
-                       47) == 0);
-        ASSERT(strstr(buf, "Start it with: z23") != NULL);
-        ASSERT(strchr(buf, '\n') == NULL);
-        PASS();
-    }
-    buf[0] = '\0';
-    TEST("a listening node with a degraded status source is not called absent") {
-        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", true,
-                                                   buf, sizeof(buf)));
-        ASSERT(buf[0] == '\0');
-        PASS();
-    }
-    json_free(&d);
-    json_init(&d);
-    json_set_object(&d);
-    json_push_kv_str(&d, "primary_blocker", "none");
-    buf[0] = '\0';
-    TEST("a running node gets no headline") {
-        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", false,
-                                                   buf, sizeof(buf)));
-        ASSERT(buf[0] == '\0');
-        PASS();
-    } _test_next:;
-    json_free(&d);
-    return failures;
-}
-
 static int test_money_journey_status_one_line_contract(void)
 {
     int failures = 0;
@@ -1279,7 +1238,6 @@ int test_operator_ux(void)
     failures += test_brief_status_registry_fields_agree();
     failures += test_brief_status_unknown_fields_render_unknown();
     failures += test_money_journey_status_one_line_contract();
-    failures += test_status_no_node_headline();
     failures += test_next_command_prioritizes_blocker_over_gap();
     failures += test_field_selection_selects_requested_fields();
     failures += test_field_selection_unknown_field_is_typed_error();

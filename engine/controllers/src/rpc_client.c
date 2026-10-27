@@ -452,11 +452,6 @@ const char *node_rpc_client_datadir(void)
     return g_datadir;
 }
 
-int node_rpc_client_port(void)
-{
-    return g_port;
-}
-
 bool node_rpc_port_listening(int rpc_port, long connect_ms)
 {
     if (rpc_port < 1 || rpc_port > 65535)
