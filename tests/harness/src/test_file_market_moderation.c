@@ -318,6 +318,7 @@ static int mmt_vf_setup(void)
 
         /* The signed wire BEFORE any local mark — the reference for the
          * wire-untouched invariant. */
+        wire_b_len = 0;
         ASSERT(file_offer_auth_encode_into(&offer_b, wire_b_before,
                                            sizeof(wire_b_before),
                                            &wire_b_len) == FILE_OFFER_AUTH_OK);
