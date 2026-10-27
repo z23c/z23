@@ -354,103 +354,198 @@ static enum sticky_rung lc_drive_to_deepest(int64_t t0, int64_t *last_now,
     return r;
 }
 
-static bool lc_seed_anchor_base(sqlite3 *db)
+static int lc_s1_fold(int failures, const char *dir, int32_t TARGET,
+                      int32_t STEP)
 {
-    return db && lc_ensure_schema(db) && lc_seed_coins(db, 50) &&
-           lc_seed_seal(db, 0);
-}
+    LC_CHECK("S1: progress store opens on scratch datadir",
+             progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    LC_CHECK("S1: schema + L1 anchor-base coins + seal seeded",
+             db && lc_ensure_schema(db) && lc_seed_coins(db, 50) &&
+             lc_seed_seal(db, 0));
 
-static bool lc_fold_stalled(sqlite3 *db, int32_t f, int32_t h,
-                            int32_t prev_hstar, int64_t coins_floor)
-{
-    return h != f || h <= prev_hstar || lc_coins_count(db) < coins_floor;
-}
+    int64_t coins_floor = lc_coins_count(db);
+    LC_CHECK("S1: anchor-base coin set is non-empty (wipe-guard witness)",
+             coins_floor == 50);
 
-static bool lc_fold_reached(bool climbed, int32_t h, int32_t tip)
-{
-    return climbed && h == tip;
-}
-
-static bool lc_kill_survived(sqlite3 *db, int32_t pre, int32_t post,
-                             int64_t coins, int32_t tip)
-{
-    return post == pre && post == tip && lc_coins_count(db) == coins;
-}
-
-static bool lc_rederive_run(bool set_coins, sqlite3 *db, int32_t hole,
-                            struct stage_rederive_range_result *rr)
-{
-    return set_coins && stage_rederive_range(db, NULL, hole, hole, rr) &&
-           rr->ok;
-}
-
-static bool lc_rederive_rewound(bool rederive_ok,
-                                const struct stage_rederive_range_result *rr)
-{
-    return rederive_ok && rr->rewound && rr->coins_rewound;
-}
-
-static bool lc_rewind_holds_coins(sqlite3 *db, int32_t hstar,
-                                  int32_t hstar_floor, int64_t coins)
-{
-    return hstar == hstar_floor && lc_coins_count(db) == coins;
-}
-
-static bool lc_refold_restored(sqlite3 *db, bool refold_ok, int32_t hstar,
-                               int32_t tip, int64_t coins)
-{
-    return refold_ok && hstar == tip && lc_coins_count(db) == coins;
-}
-
-static bool lc_combo_capped(bool named, int32_t hstar, int32_t tip)
-{
-    return named && hstar >= 0 && hstar < tip;
-}
-
-static bool lc_combo_healed(sqlite3 *db, int32_t tip, int64_t coins)
-{
-    return lc_fold_to(db, tip) && lc_hstar(db) == tip &&
-           lc_coins_count(db) == coins;
-}
-
-static bool lc_seed_fold_fixture(sqlite3 *db, size_t coins, int32_t fold_to)
-{
-    return db && lc_ensure_schema(db) && lc_seed_coins(db, coins) &&
-           lc_fold_to(db, fold_to);
-}
-
-static bool lc_march_bounded(enum sticky_rung deep, int dispatches,
-                             bool saw_count)
-{
-    return deep == STICKY_RUNG_REFOLD_FROM_ANCHOR && dispatches <= 60 &&
-           !saw_count;
-}
-
-static void lc_drive_skewed_clock(int64_t t0, int64_t last_now,
-                                  bool *saw_count, bool *skew_valid,
-                                  int *skew_dispatches)
-{
-    for (int i = 0; i < 40; i++) {
-        int64_t now = (i % 2 == 0) ? (t0 - 100000 - (int64_t)i)
-                                   : (last_now + (int64_t)i * 4000);
-        enum sticky_rung r = sticky_escalator_test_drive(0, now);
-        (*skew_dispatches)++;
-        if (r == STICKY_RUNG_COUNT)
-            *saw_count = true;
-        if (r >= STICKY_RUNG_COUNT)
-            *skew_valid = false;
+    /* Fold forward in steps; H* must CLIMB monotonically to each frontier. */
+    int32_t prev_hstar = lc_hstar(db);
+    LC_CHECK("S1: fresh anchor base sits at H*=0", prev_hstar == 0);
+    bool climbs_monotonic = true;
+    for (int32_t f = STEP; f <= TARGET; f += STEP) {
+        if (!lc_fold_to(db, f)) {
+            climbs_monotonic = false;
+            break;
+        }
+        int32_t h = lc_hstar(db);
+        if (h != f || h <= prev_hstar || lc_coins_count(db) < coins_floor) {
+            climbs_monotonic = false;
+            printf("[lifecycle] fold stall: frontier=%d H*=%d prev=%d\n",
+                   f, h, prev_hstar);
+            break;
+        }
+        prev_hstar = h;
     }
+    LC_CHECK("S1: fold climbs H* monotonically to the target tip",
+             climbs_monotonic && prev_hstar == TARGET);
+    return failures;
 }
 
-static bool lc_skew_contained(bool saw_count, bool skew_valid,
-                              int skew_dispatches)
+static int lc_s1_kill_hole_combo(int failures, const char *dir,
+                                 int32_t TARGET)
 {
-    return !saw_count && skew_valid && skew_dispatches == 40;
+    sqlite3 *db = progress_store_db();
+    /* Fault 1 — kill -9 mid-fold: abrupt close + reopen; nothing lost. */
+    int64_t coins_before = lc_coins_count(db);
+    int32_t hstar_pre_kill = lc_hstar(db);
+    progress_store_close();
+    LC_CHECK("S1/kill: store reopens after abrupt close",
+             progress_store_open(dir));
+    db = progress_store_db();
+    int32_t hstar_post_kill = lc_hstar(db);
+    LC_CHECK("S1/kill: H* survives identically, no coin wipe",
+             hstar_post_kill == hstar_pre_kill &&
+             hstar_post_kill == TARGET &&
+             lc_coins_count(db) == coins_before);
+    LC_CHECK("S1/kill: not a silent idle (at tip == acceptable state a)",
+             lc_hstar(db) == TARGET);
+    LC_CHECK("S1/kill: seal ring intact across the kill",
+             lc_seal_intact(db, 0));
+
+    /* Fault 2 — a rowless script+proof hole below the cursors: the fold
+     * caps at the hole, the re-derive primitive rewinds, the re-fold lifts
+     * H* back to tip. State (a) reached; no wipe; bounded. */
+    const int32_t HOLE = 120;
+    LC_CHECK("S1/hole: punch a rowless script+proof hole below the cursor",
+             lc_exec(db,
+                "DELETE FROM script_validate_log WHERE height=120;"
+                "DELETE FROM proof_validate_log WHERE height=120;"));
+    int32_t hstar_holed = lc_hstar(db);
+    LC_CHECK("S1/hole: H* caps one below the rowless hole (not silent)",
+             hstar_holed == HOLE - 1);
+    /* Seed the coin frontier so the re-derive primitive can LCC-rewind. */
+    progress_store_tx_lock();
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+    bool set_coins = coins_kv_set_applied_height_in_tx(db, TARGET + 1);
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+    progress_store_tx_unlock();
+    struct stage_rederive_range_result rr;
+    bool rederive_ok = set_coins &&
+                       stage_rederive_range(db, NULL, HOLE, HOLE, &rr) &&
+                       rr.ok;
+    LC_CHECK("S1/hole: universal re-derive rewinds to the hole (a re-derive "
+             "PATH, not a wipe)",
+             rederive_ok && rr.rewound && rr.coins_rewound);
+    int32_t hstar_rewound = lc_hstar(db);
+    LC_CHECK("S1/hole: H* dips to the rewound floor, coins NOT wiped",
+             hstar_rewound == HOLE - 1 && lc_coins_count(db) == coins_before);
+    /* Re-fold the rewound span: H* climbs back to the target tip. */
+    progress_store_tx_lock();
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+    coins_kv_set_applied_height_in_tx(db, TARGET + 1);
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+    progress_store_tx_unlock();
+    bool refold_ok = lc_fold_to(db, TARGET);
+    int32_t hstar_recovered = lc_hstar(db);
+    LC_CHECK("S1/hole: re-fold lifts H* back to tip (state a: reached tip)",
+             refold_ok && hstar_recovered == TARGET &&
+             lc_coins_count(db) == coins_before);
+
+    /* Combination — fault 1 THEN fault 2 stacked before any drive: kill,
+     * reopen, punch a fresh hole; the same two-state contract holds. */
+    progress_store_close();
+    LC_CHECK("S1/combo: reopen after stacked kill", progress_store_open(dir));
+    db = progress_store_db();
+    LC_CHECK("S1/combo: punch a second rowless hole after the kill",
+             lc_exec(db,
+                "DELETE FROM script_validate_log WHERE height=200;"
+                "DELETE FROM proof_validate_log WHERE height=200;"));
+    int32_t combo_hstar = lc_hstar(db);
+    bool combo_named = combo_hstar == 199;  /* capped at a KNOWN height */
+    LC_CHECK("S1/combo: stacked faults cap H* at a known height (never "
+             "silent, never below the anchor)",
+             combo_named && combo_hstar >= 0 && combo_hstar < TARGET);
+    bool combo_healed = lc_fold_to(db, TARGET) && lc_hstar(db) == TARGET &&
+                        lc_coins_count(db) == coins_before;
+    LC_CHECK("S1/combo: converges back to tip with no coin wipe",
+             combo_healed);
+
+    progress_store_close();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
-static bool lc_run_gtip_bounded(struct chaos_fault_result *r, bool *ok,
-                                int *out_crashed_sig)
+static int lc_s1_lifecycle(int failures)
 {
+    const int32_t TARGET = 240;   /* a few hundred synthetic blocks */
+    const int32_t STEP = 40;
+
+    char dir[256];
+    mkdir("./test-tmp", 0755);
+    test_fmt_tmpdir(dir, sizeof(dir), "lifecycle_soak", "main");
+    mkdir(dir, 0755);
+    progress_store_close();
+    reducer_frontier_test_set_compiled_anchor(0);
+
+    failures = lc_s1_fold(failures, dir, TARGET, STEP);
+    return lc_s1_kill_hole_combo(failures, dir, TARGET);
+}
+
+static int lc_s2_injectors(int failures)
+{
+    struct {
+        const char *name;
+        bool (*fn)(struct chaos_fault_result *);
+    } matrix[] = {
+        { "kill/restart mid-fold", chaos_fault_kill_restart_mid_fold },
+        { "corrupt sealed segment", chaos_fault_corrupt_sealed_segment },
+        { "freeze reducer drive", chaos_fault_freeze_reducer_drive },
+        { "stall single stage", chaos_fault_stall_single_stage },
+        { "kill/restart mid-recovery",
+          chaos_fault_kill_restart_mid_recovery },
+        { "torn progress.kv WAL", chaos_fault_torn_progress_wal },
+        { "disk-full pause", chaos_fault_disk_full_pause },
+        { "HAVE_DATA cleared hole", chaos_fault_cleared_have_data_hole },
+    };
+    size_t n = sizeof(matrix) / sizeof(matrix[0]);
+    for (size_t i = 0; i < n; i++) {
+        struct chaos_fault_result r;
+        memset(&r, 0, sizeof(r));
+        int crashed_sig = 0;
+        bool completed = cg_run(matrix[i].fn, &r, &crashed_sig);
+        char label[160];
+
+        snprintf(label, sizeof(label), "S2[%s]: no crash/SIGSEGV",
+                 matrix[i].name);
+        LC_CHECK(label, completed && crashed_sig == 0);
+        if (!completed)
+            continue;  /* a crash is the forbidden outcome; skip the rest */
+
+        printf("  note: %s\n", r.note);
+        snprintf(label, sizeof(label),
+                 "S2[%s]: harness built + never pages a recoverable cause",
+                 matrix[i].name);
+        LC_CHECK(label, r.ok && !r.operator_paged);
+
+        /* Two-state contract: state (a) recovered/advancing, OR state (b)
+         * a named terminal blocker. Every injector here is a recoverable
+         * class, so (a) is required — a false `recovered` is the SILENT /
+         * unbounded / wipe failure the matrix forbids. */
+        snprintf(label, sizeof(label),
+                 "S2[%s]: reaches state (a) — recovered/advancing",
+                 matrix[i].name);
+        LC_CHECK(label, r.recovered);
+    }
+
+    /* The G-TIP Pillar-0 injector: a BOUNDED gap is an unconditional
+     * regression floor; the over-cap scale is a known-open limit (SKIP,
+     * never fail; flips to a hard gate when the fix lands, as in
+     * test_always_sync_chaos). */
+    struct chaos_fault_result r;
+    memset(&r, 0, sizeof(r));
+    int crashed_sig = 0;
+    bool ok = false;
     /* wrap the bounded-gap call in the crash guard too. */
     struct sigaction sa, o1, o2, o3, o4;
     memset(&sa, 0, sizeof(sa));
@@ -464,7 +559,7 @@ static bool lc_run_gtip_bounded(struct chaos_fault_result *r, bool *ok,
     g_cg_sig = 0;
     bool completed;
     if (sigsetjmp(g_cg_jmp, 1) == 0) {
-        *ok = chaos_fault_empty_active_chain_window(200, r);
+        ok = chaos_fault_empty_active_chain_window(200, &r);
         completed = true;
     } else {
         completed = false;
@@ -473,14 +568,84 @@ static bool lc_run_gtip_bounded(struct chaos_fault_result *r, bool *ok,
     sigaction(SIGABRT, &o2, NULL);
     sigaction(SIGBUS, &o3, NULL);
     sigaction(SIGFPE, &o4, NULL);
-    *out_crashed_sig = (int)g_cg_sig;
-    return completed;
+    crashed_sig = (int)g_cg_sig;
+    printf("  note: %s\n", r.note);
+    LC_CHECK("S2[gtip bounded]: no crash", completed && crashed_sig == 0);
+    LC_CHECK("S2[gtip bounded]: repair installs tip + H* climbs (never "
+             "pages)",
+             ok && r.ok && r.recovered && !r.operator_paged &&
+             r.hstar_after == 200);
+    return failures;
 }
 
-static bool lc_gtip_repair_ok(bool ok, const struct chaos_fault_result *r)
+static int lc_s3_clock(int failures)
 {
-    return ok && r->ok && r->recovered && !r->operator_paged &&
-           r->hstar_after == 200;
+    char dir[256];
+    mkdir("./test-tmp", 0755);
+    test_fmt_tmpdir(dir, sizeof(dir), "lifecycle_clock", "main");
+    mkdir(dir, 0755);
+    progress_store_close();
+    reducer_frontier_test_set_compiled_anchor(0);
+    LC_CHECK("S3/clock: scratch store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    LC_CHECK("S3/clock: clean fold fixture seeded",
+             db && lc_ensure_schema(db) && lc_seed_coins(db, 8) &&
+             lc_fold_to(db, 6));
+
+    struct main_state ms;
+    main_state_init(&ms);
+    sync_monitor_set_context(NULL, NULL, &ms);
+    sticky_escalator_test_reset();
+    sticky_escalator_set_datadir(dir);
+    sticky_escalator_test_set_suppress_refold_restart(true);
+    sticky_escalator_test_set_refold_artifact_available(0);
+    stage_reducer_frontier_reset_detect_memo_for_testing();
+
+    sticky_escalator_note_stall("lifecycle_clock_skew");
+    int64_t t0 = (int64_t)platform_time_wall_time_t();
+    LC_CHECK("S3/clock: ladder arms on the stall",
+             sticky_escalator_test_armed());
+
+    /* Forward march to the deepest rung — bounded, no COUNT sentinel. */
+    int dispatches = 0;
+    int64_t last_now = 0;
+    bool saw_count = false;
+    enum sticky_rung deep =
+        lc_drive_to_deepest(t0, &last_now, &dispatches, &saw_count);
+    LC_CHECK("S3/clock: forward march reaches the deepest rung, bounded, "
+             "no COUNT sentinel",
+             deep == STICKY_RUNG_REFOLD_FROM_ANCHOR && dispatches <= 60 &&
+             !saw_count);
+
+    /* Now oscillate the clock hard (far backward, then re-forward). Each
+     * dispatch must remain a valid rung (< COUNT), never crash, and the
+     * ladder must stay armed. */
+    int skew_dispatches = 0;
+    bool skew_valid = true;
+    for (int i = 0; i < 40; i++) {
+        int64_t now = (i % 2 == 0) ? (t0 - 100000 - (int64_t)i)
+                                   : (last_now + (int64_t)i * 4000);
+        enum sticky_rung r = sticky_escalator_test_drive(0, now);
+        skew_dispatches++;
+        if (r == STICKY_RUNG_COUNT)
+            saw_count = true;
+        if (r >= STICKY_RUNG_COUNT)
+            skew_valid = false;
+    }
+    LC_CHECK("S3/clock: a non-monotonic clock never emits COUNT nor an "
+             "invalid rung (bounded dispatch)",
+             !saw_count && skew_valid && skew_dispatches == 40);
+    LC_CHECK("S3/clock: ladder stays armed through the skew "
+             "(auto-terminating, no crash-loop)",
+             sticky_escalator_test_armed());
+
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sticky_escalator_test_reset();
+    main_state_free(&ms);
+    progress_store_close();
+    reducer_frontier_test_set_compiled_anchor(-1);
+    test_cleanup_tmpdir(dir);
+    return failures;
 }
 
 static int test_always_sync_lifecycle_platform_arm(void);
@@ -493,190 +658,12 @@ static int test_always_sync_lifecycle_platform_arm(void)
 
     /* ══ SECTION 1 — forward-fold soak: anchor base → target tip, faults
      * injected inline, two-state + forbidden guards asserted after each. ══ */
-    {
-        const int32_t TARGET = 240;   /* a few hundred synthetic blocks */
-        const int32_t STEP = 40;
-
-        char dir[256];
-        mkdir("./test-tmp", 0755);
-        test_fmt_tmpdir(dir, sizeof(dir), "lifecycle_soak", "main");
-        mkdir(dir, 0755);
-        progress_store_close();
-        reducer_frontier_test_set_compiled_anchor(0);
-
-        LC_CHECK("S1: progress store opens on scratch datadir",
-                 progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        LC_CHECK("S1: schema + L1 anchor-base coins + seal seeded",
-                 lc_seed_anchor_base(db));
-
-        int64_t coins_floor = lc_coins_count(db);
-        LC_CHECK("S1: anchor-base coin set is non-empty (wipe-guard witness)",
-                 coins_floor == 50);
-
-        /* Fold forward in steps; H* must CLIMB monotonically to each frontier. */
-        int32_t prev_hstar = lc_hstar(db);
-        LC_CHECK("S1: fresh anchor base sits at H*=0", prev_hstar == 0);
-        bool climbs_monotonic = true;
-        for (int32_t f = STEP; f <= TARGET; f += STEP) {
-            if (!lc_fold_to(db, f)) {
-                climbs_monotonic = false;
-                break;
-            }
-            int32_t h = lc_hstar(db);
-            if (lc_fold_stalled(db, f, h, prev_hstar, coins_floor)) {
-                climbs_monotonic = false;
-                printf("[lifecycle] fold stall: frontier=%d H*=%d prev=%d\n",
-                       f, h, prev_hstar);
-                break;
-            }
-            prev_hstar = h;
-        }
-        LC_CHECK("S1: fold climbs H* monotonically to the target tip",
-                 lc_fold_reached(climbs_monotonic, prev_hstar, TARGET));
-
-        /* Fault 1 — kill -9 mid-fold: abrupt close + reopen; nothing lost. */
-        int64_t coins_before = lc_coins_count(db);
-        int32_t hstar_pre_kill = lc_hstar(db);
-        progress_store_close();
-        LC_CHECK("S1/kill: store reopens after abrupt close",
-                 progress_store_open(dir));
-        db = progress_store_db();
-        int32_t hstar_post_kill = lc_hstar(db);
-        LC_CHECK("S1/kill: H* survives identically, no coin wipe",
-                 lc_kill_survived(db, hstar_pre_kill, hstar_post_kill,
-                                  coins_before, TARGET));
-        LC_CHECK("S1/kill: not a silent idle (at tip == acceptable state a)",
-                 lc_hstar(db) == TARGET);
-        LC_CHECK("S1/kill: seal ring intact across the kill",
-                 lc_seal_intact(db, 0));
-
-        /* Fault 2 — a rowless script+proof hole below the cursors: the fold
-         * caps at the hole, the re-derive primitive rewinds, the re-fold lifts
-         * H* back to tip. State (a) reached; no wipe; bounded. */
-        const int32_t HOLE = 120;
-        LC_CHECK("S1/hole: punch a rowless script+proof hole below the cursor",
-                 lc_exec(db,
-                    "DELETE FROM script_validate_log WHERE height=120;"
-                    "DELETE FROM proof_validate_log WHERE height=120;"));
-        int32_t hstar_holed = lc_hstar(db);
-        LC_CHECK("S1/hole: H* caps one below the rowless hole (not silent)",
-                 hstar_holed == HOLE - 1);
-        /* Seed the coin frontier so the re-derive primitive can LCC-rewind. */
-        progress_store_tx_lock();
-        sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
-        bool set_coins = coins_kv_set_applied_height_in_tx(db, TARGET + 1);
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
-        progress_store_tx_unlock();
-        struct stage_rederive_range_result rr;
-        bool rederive_ok = lc_rederive_run(set_coins, db, HOLE, &rr);
-        LC_CHECK("S1/hole: universal re-derive rewinds to the hole (a re-derive "
-                 "PATH, not a wipe)",
-                 lc_rederive_rewound(rederive_ok, &rr));
-        int32_t hstar_rewound = lc_hstar(db);
-        LC_CHECK("S1/hole: H* dips to the rewound floor, coins NOT wiped",
-                 lc_rewind_holds_coins(db, hstar_rewound, HOLE - 1,
-                                       coins_before));
-        /* Re-fold the rewound span: H* climbs back to the target tip. */
-        progress_store_tx_lock();
-        sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
-        coins_kv_set_applied_height_in_tx(db, TARGET + 1);
-        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
-        progress_store_tx_unlock();
-        bool refold_ok = lc_fold_to(db, TARGET);
-        int32_t hstar_recovered = lc_hstar(db);
-        LC_CHECK("S1/hole: re-fold lifts H* back to tip (state a: reached tip)",
-                 lc_refold_restored(db, refold_ok, hstar_recovered, TARGET,
-                                    coins_before));
-
-        /* Combination — fault 1 THEN fault 2 stacked before any drive: kill,
-         * reopen, punch a fresh hole; the same two-state contract holds. */
-        progress_store_close();
-        LC_CHECK("S1/combo: reopen after stacked kill", progress_store_open(dir));
-        db = progress_store_db();
-        LC_CHECK("S1/combo: punch a second rowless hole after the kill",
-                 lc_exec(db,
-                    "DELETE FROM script_validate_log WHERE height=200;"
-                    "DELETE FROM proof_validate_log WHERE height=200;"));
-        int32_t combo_hstar = lc_hstar(db);
-        bool combo_named = combo_hstar == 199;  /* capped at a KNOWN height */
-        LC_CHECK("S1/combo: stacked faults cap H* at a known height (never "
-                 "silent, never below the anchor)",
-                 lc_combo_capped(combo_named, combo_hstar, TARGET));
-        bool combo_healed = lc_combo_healed(db, TARGET, coins_before);
-        LC_CHECK("S1/combo: converges back to tip with no coin wipe",
-                 combo_healed);
-
-        progress_store_close();
-        reducer_frontier_test_set_compiled_anchor(-1);
-        test_cleanup_tmpdir(dir);
-    }
+    failures = lc_s1_lifecycle(failures);
 
     /* ══ SECTION 2 — the full sim/simnet_chaos injector matrix under the
      * two-state contract + the crash guard + never-page. Each injector builds
      * and tears down its own throwaway fixture and drives real oracles. ══ */
-    {
-        struct {
-            const char *name;
-            bool (*fn)(struct chaos_fault_result *);
-        } matrix[] = {
-            { "kill/restart mid-fold", chaos_fault_kill_restart_mid_fold },
-            { "corrupt sealed segment", chaos_fault_corrupt_sealed_segment },
-            { "freeze reducer drive", chaos_fault_freeze_reducer_drive },
-            { "stall single stage", chaos_fault_stall_single_stage },
-            { "kill/restart mid-recovery",
-              chaos_fault_kill_restart_mid_recovery },
-            { "torn progress.kv WAL", chaos_fault_torn_progress_wal },
-            { "disk-full pause", chaos_fault_disk_full_pause },
-            { "HAVE_DATA cleared hole", chaos_fault_cleared_have_data_hole },
-        };
-        size_t n = sizeof(matrix) / sizeof(matrix[0]);
-        for (size_t i = 0; i < n; i++) {
-            struct chaos_fault_result r;
-            memset(&r, 0, sizeof(r));
-            int crashed_sig = 0;
-            bool completed = cg_run(matrix[i].fn, &r, &crashed_sig);
-            char label[160];
-
-            snprintf(label, sizeof(label), "S2[%s]: no crash/SIGSEGV",
-                     matrix[i].name);
-            LC_CHECK(label, completed && crashed_sig == 0);
-            if (!completed)
-                continue;  /* a crash is the forbidden outcome; skip the rest */
-
-            printf("  note: %s\n", r.note);
-            snprintf(label, sizeof(label),
-                     "S2[%s]: harness built + never pages a recoverable cause",
-                     matrix[i].name);
-            LC_CHECK(label, r.ok && !r.operator_paged);
-
-            /* Two-state contract: state (a) recovered/advancing, OR state (b)
-             * a named terminal blocker. Every injector here is a recoverable
-             * class, so (a) is required — a false `recovered` is the SILENT /
-             * unbounded / wipe failure the matrix forbids. */
-            snprintf(label, sizeof(label),
-                     "S2[%s]: reaches state (a) — recovered/advancing",
-                     matrix[i].name);
-            LC_CHECK(label, r.recovered);
-        }
-
-        /* The G-TIP Pillar-0 injector: a BOUNDED gap is an unconditional
-         * regression floor; the over-cap scale is a known-open limit (SKIP,
-         * never fail; flips to a hard gate when the fix lands, as in
-         * test_always_sync_chaos). */
-        {
-            struct chaos_fault_result r;
-            memset(&r, 0, sizeof(r));
-            int crashed_sig = 0;
-            bool ok = false;
-            bool completed = lc_run_gtip_bounded(&r, &ok, &crashed_sig);
-            printf("  note: %s\n", r.note);
-            LC_CHECK("S2[gtip bounded]: no crash", completed && crashed_sig == 0);
-            LC_CHECK("S2[gtip bounded]: repair installs tip + H* climbs (never "
-                     "pages)",
-                     lc_gtip_repair_ok(ok, &r));
-        }
-    }
+    failures = lc_s2_injectors(failures);
 
     /* ══ SECTION 3 — the two faults whose oracles live under app/services
      * (kept out of engine/modules/sim by the layering gate): a non-monotonic clock and a
@@ -690,63 +677,7 @@ static int test_always_sync_lifecycle_platform_arm(void)
      * fail-forwards through immediately-failing rungs — the invariant proven
      * here is that a skewed clock cannot break that termination, not that a
      * backward jump freezes it. */
-    {
-        char dir[256];
-        mkdir("./test-tmp", 0755);
-        test_fmt_tmpdir(dir, sizeof(dir), "lifecycle_clock", "main");
-        mkdir(dir, 0755);
-        progress_store_close();
-        reducer_frontier_test_set_compiled_anchor(0);
-        LC_CHECK("S3/clock: scratch store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        LC_CHECK("S3/clock: clean fold fixture seeded",
-                 lc_seed_fold_fixture(db, 8, 6));
-
-        struct main_state ms;
-        main_state_init(&ms);
-        sync_monitor_set_context(NULL, NULL, &ms);
-        sticky_escalator_test_reset();
-        sticky_escalator_set_datadir(dir);
-        sticky_escalator_test_set_suppress_refold_restart(true);
-        sticky_escalator_test_set_refold_artifact_available(0);
-        stage_reducer_frontier_reset_detect_memo_for_testing();
-
-        sticky_escalator_note_stall("lifecycle_clock_skew");
-        int64_t t0 = (int64_t)platform_time_wall_time_t();
-        LC_CHECK("S3/clock: ladder arms on the stall",
-                 sticky_escalator_test_armed());
-
-        /* Forward march to the deepest rung — bounded, no COUNT sentinel. */
-        int dispatches = 0;
-        int64_t last_now = 0;
-        bool saw_count = false;
-        enum sticky_rung deep =
-            lc_drive_to_deepest(t0, &last_now, &dispatches, &saw_count);
-        LC_CHECK("S3/clock: forward march reaches the deepest rung, bounded, "
-                 "no COUNT sentinel",
-                 lc_march_bounded(deep, dispatches, saw_count));
-
-        /* Now oscillate the clock hard (far backward, then re-forward). Each
-         * dispatch must remain a valid rung (< COUNT), never crash, and the
-         * ladder must stay armed. */
-        int skew_dispatches = 0;
-        bool skew_valid = true;
-        lc_drive_skewed_clock(t0, last_now, &saw_count, &skew_valid,
-                              &skew_dispatches);
-        LC_CHECK("S3/clock: a non-monotonic clock never emits COUNT nor an "
-                 "invalid rung (bounded dispatch)",
-                 lc_skew_contained(saw_count, skew_valid, skew_dispatches));
-        LC_CHECK("S3/clock: ladder stays armed through the skew "
-                 "(auto-terminating, no crash-loop)",
-                 sticky_escalator_test_armed());
-
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sticky_escalator_test_reset();
-        main_state_free(&ms);
-        progress_store_close();
-        reducer_frontier_test_set_compiled_anchor(-1);
-        test_cleanup_tmpdir(dir);
-    }
+    failures = lc_s3_clock(failures);
 
     /* Fault — PEER-FLOOR BREACH: the real block-source decision must NAME the
      * peer-floor breach (recover via a non-P2P source = the remedy) when
@@ -778,6 +709,7 @@ static int test_always_sync_lifecycle_platform_arm(void)
                  "(state a: advancing)",
                  !recover_healthy && healthy.sources[BSP_SOURCE_P2P].healthy);
     }
+
 
     if (failures == 0)
         printf("=== always_sync_lifecycle: ALL PASS ===\n\n");
