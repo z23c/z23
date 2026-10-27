@@ -640,7 +640,6 @@ static int test_mail_paging(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -773,7 +772,6 @@ static int test_mail_brief_drain(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -956,7 +954,6 @@ static int test_mail_ref_filter_and_agent_resume(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1114,7 +1111,6 @@ static int test_mail_cwd_invariance(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 #endif /* !defined(_WIN32) */
@@ -1177,7 +1173,6 @@ static int test_mail_board_fields(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -2134,41 +2129,31 @@ _test_next:;
 }
 #endif /* !defined(_WIN32) */
 
-/* The first group, in original order. A failure ends the run here, as it
- * did when every test shared one function. */
+/* The first group, in original order. Every call runs even after a failure,
+ * as the original calls did. */
 static int test_mail_front_half(void)
 {
     int failures = 0;
 
     failures += test_mail_independent_cursor();
-    if (failures) return failures;
     failures += test_mail_exact_locator();
-    if (failures) return failures;
     failures += test_mail_exact_maximum();
-    if (failures) return failures;
     failures += test_mail_exact_malformed();
-    if (failures) return failures;
     failures += test_mail_exact_nul();
-    if (failures) return failures;
     failures += test_mail_prefix_cursor();
-    if (failures) return failures;
     failures += test_mail_paging();
-    if (failures) return failures;
     failures += test_mail_brief_drain();
-    if (failures) return failures;
     failures += test_mail_ref_filter_and_agent_resume();
-    if (failures) return failures;
     failures += test_mail_stored_cursor();
-    if (failures) return failures;
     failures += test_mail_board_fields();
-    if (failures) return failures;
 #if !defined(_WIN32)
     failures += test_mail_cwd_invariance();
 #endif
     return failures;
 }
 
-/* The second group, in original order, with the same first-failure stop. */
+/* The second group, in original order. A failed test ends this group, as its
+ * jump to the end of the original function did. */
 static int test_mail_back_half(void)
 {
     int failures = 0;
@@ -2197,8 +2182,7 @@ int test_devagent_mail(void)
     int failures = 0;
 
     failures += test_mail_front_half();
-    if (failures == 0)
-        failures += test_mail_back_half();
+    failures += test_mail_back_half();
 
     dvx_restore();
     if (failures == 0)
