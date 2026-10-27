@@ -32,6 +32,41 @@ static struct uint256 ck_txid(uint8_t tag)
     return t;
 }
 
+/* Seed the clean four-coin anchor set (all at/below `a_fix`); true only when
+ * every add lands. */
+static bool ck_anchor_seed_clean_set(sqlite3 *db, const struct uint256 *a,
+                                     const struct uint256 *b,
+                                     const struct uint256 *c, int32_t a_fix,
+                                     const uint8_t *sc_a, size_t sc_a_len,
+                                     const uint8_t *sc_b, size_t sc_b_len)
+{
+    return coins_kv_add(db, a->data, 0, 5000, a_fix, true,  sc_a, sc_a_len)
+        && coins_kv_add(db, a->data, 1, 6000, a_fix, true,  sc_b, sc_b_len)
+        && coins_kv_add(db, b->data, 0, 7000, a_fix - 1, false, sc_a, sc_a_len)
+        && coins_kv_add(db, c->data, 0, 8000, a_fix - 2, false, NULL, 0);
+}
+
+/* Spend outpoint 0 of `txid` and re-add it with the given fields; true only
+ * when both writes land. */
+static bool ck_anchor_spend_readd(sqlite3 *db, const struct uint256 *txid,
+                                  int64_t value, int32_t height,
+                                  const uint8_t *script, size_t script_len)
+{
+    return coins_kv_spend(db, txid->data, 0) &&
+           coins_kv_add(db, txid->data, 0, value, height, false,
+                        script, script_len);
+}
+
+/* The anchor-proof predicate: the root equals the checkpoint hash and the
+ * live coin count equals the checkpoint count. */
+static bool ck_anchor_proven(const uint8_t root[32],
+                             const struct sha3_utxo_checkpoint *cpp,
+                             sqlite3 *db)
+{
+    return memcmp(root, cpp->sha3_hash, 32) == 0 &&
+           coins_kv_count(db) == (int64_t)cpp->utxo_count;
+}
+
 /* ── anchor-coin byte-flip detected by the SHA3 UTXO commitment ──
  *
  * Flipping the value or scriptPubKey of one coin at/below the anchor is not
@@ -59,11 +94,8 @@ static int ck_case_anchor_coin_byte_flip(void)
     struct uint256 a = ck_txid(0x11), b = ck_txid(0x22), c = ck_txid(0x33);
     uint8_t sc_a[4] = {0xA0, 0xA1, 0xA2, 0xA3};
     uint8_t sc_b[2] = {0xB0, 0xB1};
-    bool seeded =
-        coins_kv_add(db, a.data, 0, 5000, a_fix, true,  sc_a, sizeof(sc_a))
-        && coins_kv_add(db, a.data, 1, 6000, a_fix, true,  sc_b, sizeof(sc_b))
-        && coins_kv_add(db, b.data, 0, 7000, a_fix - 1, false, sc_a, sizeof(sc_a))
-        && coins_kv_add(db, c.data, 0, 8000, a_fix - 2, false, NULL, 0);
+    bool seeded = ck_anchor_seed_clean_set(db, &a, &b, &c, a_fix, sc_a,
+                                           sizeof(sc_a), sc_b, sizeof(sc_b));
     CK_CHECK("anchor-flip: clean anchor set seeded", seeded);
 
     /* The clean set IS the trusted anchor: its commitment + count become the
@@ -90,29 +122,24 @@ static int ck_case_anchor_coin_byte_flip(void)
         uint8_t root_now[32] = {0};
         bool now_ok = coins_kv_commitment(db, root_now) == 0;
         CK_CHECK("anchor-flip: A clean == checkpoint",
-                 now_ok && memcmp(root_now, cpp->sha3_hash, 32) == 0 &&
-                 coins_kv_count(db) == (int64_t)cpp->utxo_count);
+                 now_ok && ck_anchor_proven(root_now, cpp, db));
 
         /* B. VALUE byte-flip on one coin at the anchor -> anchor proof REFUSED.
          * Spend + re-add with a flipped value (same primitives the live mutation
          * uses). */
-        bool flipped = coins_kv_spend(db, b.data, 0) &&
-                       coins_kv_add(db, b.data, 0, 7001, a_fix - 1, false,
-                                    sc_a, sizeof(sc_a));
+        bool flipped = ck_anchor_spend_readd(db, &b, 7001, a_fix - 1,
+                                             sc_a, sizeof(sc_a));
         uint8_t root_flipped[32] = {0};
         bool flip_root_ok = coins_kv_commitment(db, root_flipped) == 0;
-        bool anchor_proven =
-            (memcmp(root_flipped, cpp->sha3_hash, 32) == 0) &&
-            (coins_kv_count(db) == (int64_t)cpp->utxo_count);
+        bool anchor_proven = ck_anchor_proven(root_flipped, cpp, db);
         CK_CHECK("anchor-flip: B value flip FAILS the SHA3 gate",
                  flipped && flip_root_ok &&
                  memcmp(root_flipped, cpp->sha3_hash, 32) != 0 &&
                  !anchor_proven);
 
         /* Restore the clean value before the script sub-case. */
-        bool restored = coins_kv_spend(db, b.data, 0) &&
-                        coins_kv_add(db, b.data, 0, 7000, a_fix - 1, false,
-                                     sc_a, sizeof(sc_a));
+        bool restored = ck_anchor_spend_readd(db, &b, 7000, a_fix - 1,
+                                              sc_a, sizeof(sc_a));
         uint8_t root_restored[32] = {0};
         CK_CHECK("anchor-flip: restore clean value",
                  restored && coins_kv_commitment(db, root_restored) == 0 &&
@@ -121,9 +148,8 @@ static int ck_case_anchor_coin_byte_flip(void)
         /* C. scriptPubKey byte-flip (same length, one byte changed) -> also
          * REFUSED. */
         uint8_t sc_a_mut[4] = {0xA0, 0xA1, 0xA2, 0xFF};  /* last byte changed */
-        bool spk_flipped = coins_kv_spend(db, b.data, 0) &&
-                           coins_kv_add(db, b.data, 0, 7000, a_fix - 1, false,
-                                        sc_a_mut, sizeof(sc_a_mut));
+        bool spk_flipped = ck_anchor_spend_readd(db, &b, 7000, a_fix - 1,
+                                                 sc_a_mut, sizeof(sc_a_mut));
         uint8_t root_spk[32] = {0};
         CK_CHECK("anchor-flip: C script flip FAILS the SHA3 gate",
                  spk_flipped && coins_kv_commitment(db, root_spk) == 0 &&
@@ -172,6 +198,17 @@ static bool ck_write_utxos_source(const char *path, int32_t top_h,
                             NULL, NULL, NULL) == SQLITE_OK;
     sqlite3_close(src);
     return ok;
+}
+
+/* Ensure the destination schema, seed `db` from the `src` node-db file, and
+ * report whether exactly `expected` coins landed with the migration stamp
+ * present. */
+static bool ck_seed_lands_with_count_and_stamp(sqlite3 *db, const char *src,
+                                               int64_t expected)
+{
+    bool ok = db && coins_kv_ensure_schema(db) &&
+              coins_kv_seed_from_node_db(db, src);
+    return ok && coins_kv_count(db) == expected && ck_stamp_present(db);
 }
 
 /* ── Bootstrap-seed checkpoint-content gate ──
@@ -284,10 +321,8 @@ static int ck_case_seed_checkpoint_gate(void)
             test_make_tmpdir(d1, sizeof(d1), "coins_kv_ckpt_seed_match", "main");
             CK_CHECK("ckpt-seed: dest opens (match)", progress_store_open(d1));
             sqlite3 *db = progress_store_db();
-            bool ok = db && coins_kv_ensure_schema(db) &&
-                      coins_kv_seed_from_node_db(db, src_match);
             CK_CHECK("ckpt-seed: matching seed passes the gate + stamps",
-                     ok && coins_kv_count(db) == count && ck_stamp_present(db));
+                     ck_seed_lands_with_count_and_stamp(db, src_match, count));
             progress_store_close();
             test_cleanup_tmpdir(d1);
         }
@@ -299,10 +334,8 @@ static int ck_case_seed_checkpoint_gate(void)
             test_make_tmpdir(d2, sizeof(d2), "coins_kv_ckpt_seed_other", "main");
             CK_CHECK("ckpt-seed: dest opens (non-checkpoint)", progress_store_open(d2));
             sqlite3 *db = progress_store_db();
-            bool ok = db && coins_kv_ensure_schema(db) &&
-                      coins_kv_seed_from_node_db(db, src_other);
             CK_CHECK("ckpt-seed: non-checkpoint seed is invisible (passes)",
-                     ok && coins_kv_count(db) == count_other && ck_stamp_present(db));
+                     ck_seed_lands_with_count_and_stamp(db, src_other, count_other));
             progress_store_close();
             test_cleanup_tmpdir(d2);
         }
@@ -312,6 +345,23 @@ static int ck_case_seed_checkpoint_gate(void)
     }
 
     return failures;
+}
+
+/* Exact-field check on a get_coins read of the t1 fixture: at least two
+ * outputs, coinbase, height 100, values 5000/6000 and both scripts equal to
+ * sc0/sc1. */
+static bool ck_get_coins_t1_fields_exact(const struct coins *c,
+                                         const unsigned char *sc0,
+                                         size_t sc0_len,
+                                         const unsigned char *sc1,
+                                         size_t sc1_len)
+{
+    return c->num_vout >= 2 && c->is_coinbase && c->height == 100
+        && c->vout[0].value == 5000 && c->vout[1].value == 6000
+        && c->vout[0].script_pub_key.size == sc0_len
+        && memcmp(c->vout[0].script_pub_key.data, sc0, sc0_len) == 0
+        && c->vout[1].script_pub_key.size == sc1_len
+        && memcmp(c->vout[1].script_pub_key.data, sc1, sc1_len) == 0;
 }
 
 int test_coins_kv(void);
@@ -376,13 +426,9 @@ int test_coins_kv(void)
     /* Round-trip via get_coins: values, scripts, height, is_coinbase exact. */
     {
         struct coins c;
-        bool got = coins_kv_get_coins(db, t1.data, &c);
-        bool ok = got && c.num_vout >= 2 && c.is_coinbase && c.height == 100
-            && c.vout[0].value == 5000 && c.vout[1].value == 6000
-            && c.vout[0].script_pub_key.size == sizeof(sc0)
-            && memcmp(c.vout[0].script_pub_key.data, sc0, sizeof(sc0)) == 0
-            && c.vout[1].script_pub_key.size == sizeof(sc1)
-            && memcmp(c.vout[1].script_pub_key.data, sc1, sizeof(sc1)) == 0;
+        bool ok = coins_kv_get_coins(db, t1.data, &c) &&
+                  ck_get_coins_t1_fields_exact(&c, sc0, sizeof(sc0),
+                                               sc1, sizeof(sc1));
         CK_CHECK("get_coins round-trip", ok);
         coins_free(&c);
     }

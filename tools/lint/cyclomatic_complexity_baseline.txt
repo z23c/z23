@@ -968,9 +968,6 @@ tests/harness/src/test_codeindex_incremental.c:cin_capture:21
 tests/harness/src/test_codeindex_incremental.c:test_codeindex_incremental:26
 tests/harness/src/test_codeindex_projection.c:test_codeindex_projection_integrity:46
 tests/harness/src/test_coins_applied_frontier.c:test_coins_applied_frontier:44
-tests/harness/src/test_coins_kv.c:ck_case_anchor_coin_byte_flip:19
-tests/harness/src/test_coins_kv.c:ck_case_seed_checkpoint_gate:17
-tests/harness/src/test_coins_kv.c:test_coins_kv:18
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
 tests/harness/src/test_consensus_parity.c:test_consensus_parity:18
