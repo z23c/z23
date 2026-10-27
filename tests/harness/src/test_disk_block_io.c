@@ -838,7 +838,9 @@ static void make_deferred_sync_dirs(char *dir_immediate, size_t imm_len,
     }
 }
 
-/* True when both slurps succeeded with equal lengths and identical bytes. */
+/* True when both slurps succeeded, the immediate file is non-empty, and both
+ * files have equal lengths and identical bytes. An empty file is never
+ * identical. */
 static bool slurped_files_identical(long ni, long nd,
                                     const unsigned char *bi,
                                     const unsigned char *bd)
