@@ -1150,14 +1150,6 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
     return true;
 }
 
-static bool plan_closure_args_invalid(const struct zcl_devloop_plan *plan,
-                                      const char *const *files,
-                                      size_t file_count)
-{
-    return !plan || (file_count > 0 && !files) ||
-        file_count > ZCL_DEVLOOP_MAX_FILES;
-}
-
 static void plan_count_closure_dims(const char *const *files,
                                     size_t file_count,
                                     size_t *semantic_count,
@@ -1269,7 +1261,7 @@ static bool plan_add_closure(const char *repo_root,
                              const char *const *files, size_t file_count,
                              struct zcl_devloop_plan *plan, bool snapshot)
 {
-    if (plan_closure_args_invalid(plan, files, file_count))
+    if (plan_files_args_invalid(plan, files, file_count))
         return false;
 
     plan->closure_attempted = true;
