@@ -69,6 +69,35 @@ static bool parse_identifiers(const char *str, size_t start, size_t end,
   return true;
 }
 
+/* True when pos is within len and str[pos] holds c. */
+static bool at_char(const char *str, size_t len, size_t pos, char c) {
+  return pos < len && str[pos] == c;
+}
+
+/* Return pos advanced up to the next '+' or len, whichever comes first. */
+static size_t skip_to_plus(const char *str, size_t len, size_t pos) {
+  while (pos < len && str[pos] != '+')
+    pos++;
+  return pos;
+}
+
+/* Parse the "major.minor.patch" core, advancing *pos past it.
+ * Returns 0 on success, -1 when a field or separator is invalid. */
+static int parse_core(const char *str, size_t len, size_t *pos,
+                      zsemver *out) {
+  uint64_t *fields[] = {&out->major, &out->minor, &out->patch};
+  for (size_t i = 0; i < 3; i++) {
+    if (!parse_number(str, len, pos, fields[i]))
+      return -1;
+    if (i < 2) {
+      if (*pos >= len || str[*pos] != '.')
+        return -1;
+      (*pos)++;
+    }
+  }
+  return 0;
+}
+
 bool zsemver_parse_n(const char *str, size_t len, zsemver *out) {
   if (!out)
     return false;
@@ -77,29 +106,18 @@ bool zsemver_parse_n(const char *str, size_t len, zsemver *out) {
     goto fail;
 
   size_t pos = 0;
-  if (!parse_number(str, len, &pos, &out->major))
-    goto fail;
-  if (pos >= len || str[pos] != '.')
-    goto fail;
-  pos++;
-  if (!parse_number(str, len, &pos, &out->minor))
-    goto fail;
-  if (pos >= len || str[pos] != '.')
-    goto fail;
-  pos++;
-  if (!parse_number(str, len, &pos, &out->patch))
+  if (parse_core(str, len, &pos, out) != 0)
     goto fail;
 
-  if (pos < len && str[pos] == '-') {
+  if (at_char(str, len, pos, '-')) {
     size_t pre_start = ++pos;
-    while (pos < len && str[pos] != '+')
-      pos++;
+    pos = skip_to_plus(str, len, pos);
     if (!parse_identifiers(str, pre_start, pos, true))
       goto fail;
     out->prerelease = str + pre_start;
     out->prerelease_len = pos - pre_start;
   }
-  if (pos < len && str[pos] == '+') {
+  if (at_char(str, len, pos, '+')) {
     size_t build_start = ++pos;
     if (!parse_identifiers(str, build_start, len, false))
       goto fail;
@@ -124,22 +142,34 @@ static int cmp_u64(uint64_t a, uint64_t b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/* True when every character of the identifier is a digit. */
+static bool is_numeric_identifier(const char *s, size_t len) {
+  bool numeric = true;
+  for (size_t i = 0; i < len; i++)
+    if (!is_digit(s[i])) {
+      numeric = false;
+      break;
+    }
+  return numeric;
+}
+
+/* Compare two alphanumeric identifiers byte-wise, then by length. */
+static int cmp_alnum_identifiers(const char *a, size_t a_len, const char *b,
+                                 size_t b_len) {
+  size_t n = a_len < b_len ? a_len : b_len;
+  int c = memcmp(a, b, n);
+  if (c != 0)
+    return c < 0 ? -1 : 1;
+  return cmp_u64(a_len, b_len);
+}
+
 /* Compare one prerelease identifier pair. Numeric identifiers rank below
  * alphanumeric ones; two numeric identifiers compare by value; two
  * alphanumeric identifiers compare ASCII-lexically. */
 static int cmp_identifier(const char *a, size_t a_len, const char *b,
                           size_t b_len) {
-  bool a_num = true, b_num = true;
-  for (size_t i = 0; i < a_len; i++)
-    if (!is_digit(a[i])) {
-      a_num = false;
-      break;
-    }
-  for (size_t i = 0; i < b_len; i++)
-    if (!is_digit(b[i])) {
-      b_num = false;
-      break;
-    }
+  bool a_num = is_numeric_identifier(a, a_len);
+  bool b_num = is_numeric_identifier(b, b_len);
   if (a_num && b_num) {
     /* Identifier lengths are bounded by valid input, and numeric
      * identifiers have no leading zeros, so value comparison via length
@@ -150,11 +180,7 @@ static int cmp_identifier(const char *a, size_t a_len, const char *b,
   }
   if (a_num != b_num)
     return a_num ? -1 : 1;
-  size_t n = a_len < b_len ? a_len : b_len;
-  int c = memcmp(a, b, n);
-  if (c != 0)
-    return c < 0 ? -1 : 1;
-  return cmp_u64(a_len, b_len);
+  return cmp_alnum_identifiers(a, a_len, b, b_len);
 }
 
 static int cmp_prerelease(const zsemver *a, const zsemver *b) {
