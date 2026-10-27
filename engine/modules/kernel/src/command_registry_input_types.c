@@ -792,6 +792,26 @@ static bool cr_match_lab_or_ints(const char *path, const char *key,
            cr_match_leaf_ints(path, key, value, type_ok);
 }
 
+/* Only the canary lifecycle accepts either CLI integers or structured decimal strings. */
+static bool cr_match_canary_started_ts(const char *path, const char *key,
+    const struct json_value *value, bool *type_ok)
+{
+    if (strcmp(path, "dev.test.canary_sentinel") != 0 || strcmp(key, "started_ts") != 0)
+        return false;
+    if (value->type == JSON_INT) {
+        *type_ok = cr_int_range(value, 0, INT64_MAX);
+        return true;
+    }
+    *type_ok = cr_nonempty_str(value, 20);
+    if (*type_ok) {
+        const char *text = json_get_str(value);
+        for (size_t i = 0; text[i]; ++i)
+            if (text[i] < '0' || text[i] > '9')
+                *type_ok = false;
+    }
+    return true;
+}
+
 static bool cr_match_path_special(const struct zcl_command_spec *spec,
                                   const char *key,
                                   const struct json_value *value,
@@ -820,9 +840,8 @@ static bool cr_match_path_special(const struct zcl_command_spec *spec,
         *type_ok = cr_int_range(value, 1, INT64_MAX);
         return true;
     }
-    if (cr_match_lab_or_ints(path, key, value, type_ok))
-        return true;
-    return false;
+    return cr_match_lab_or_ints(path, key, value, type_ok) ||
+           cr_match_canary_started_ts(path, key, value, type_ok);
 }
 
 /* `line` is TWO unrelated inputs that happen to share a name, and this table

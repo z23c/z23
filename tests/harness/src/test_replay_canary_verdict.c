@@ -18,7 +18,13 @@
  * Every run uses a private fixture dir and verdict dir under /tmp, so the
  * live node, datadir and real verdict dir are never touched. */
 
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
 #include "test/test_core.h"
+#include "command/native_command.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 #include "crypto/sha256.h"
 #include "platform/os_proc.h"
 #include "platform/time_compat.h"
@@ -1508,9 +1514,375 @@ static int test_mvp_canary_freshness(void)
     return failures;
 }
 
+static int canary_native_persist(const char *directory, const char *action,
+                                  const char *fault, bool *unknown)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "action", action);
+    (void)json_push_kv_str(&input, "directory", directory);
+    (void)json_push_kv_str(&input, "from", "genesis");
+    (void)json_push_kv_str(&input, "started_ts", "123");
+    (void)json_push_kv_str(&input, "staged", "replay_canary_genesis.json.tmp.1");
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.dev_canary_sentinel.v1");
+    zcl_native_canary_sentinel_fail_for_test(fault);
+    zcl_native_handle_dev_canary_sentinel(&request, &reply);
+    int result = reply.exit_code;
+    if (unknown)
+        *unknown = strstr(reply.error.message, "durability is unknown") != NULL && reply.error.mutated;
+    zcl_native_canary_sentinel_fail_for_test(NULL);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return result;
+}
+
+static int test_native_canary_durability(void)
+{
+    int failures = 0;
+    TEST("replay-canary: native reset/publish use checked file and directory durability") {
+        char directory[PATH_MAX], sentinel[PATH_MAX], marker[PATH_MAX];
+        test_make_tmpdir(directory, sizeof(directory), "canary_native", "durability");
+        char absolute[PATH_MAX];
+        ASSERT(realpath(directory, absolute) != NULL);
+        snprintf(directory, sizeof(directory), "%s", absolute);
+        ASSERT(chmod(directory, 0755) == 0);
+        snprintf(sentinel, sizeof(sentinel), "%s/replay_canary_genesis.json", directory);
+        snprintf(marker, sizeof(marker), "%s/.run_started_genesis", directory);
+        char public_stage[PATH_MAX];
+        snprintf(public_stage, sizeof(public_stage), "%s/replay_canary_genesis.json.tmp.1", directory);
+        write_file(directory, ".run_started_genesis", "old legacy marker\n");
+        ASSERT(chmod(marker, 0664) == 0);
+        const char *faults[] = { "write", "file_flush", "rename", "dir_flush" };
+        for (size_t i = 0; i < sizeof(faults) / sizeof(*faults); ++i) {
+            write_file(directory, "replay_canary_genesis.json", "{\"verdict\":\"PASS\"}\n");
+            ASSERT(chmod(sentinel, 0664) == 0);
+            bool unknown = false;
+            ASSERT_EQ(canary_native_persist(directory, "reset", faults[i], &unknown),
+                      ZCL_COMMAND_EXIT_FAILED);
+            ASSERT(access(sentinel, F_OK) != 0);
+            ASSERT_EQ(unknown, strcmp(faults[i], "dir_flush") == 0);
+        }
+        write_file(directory, "replay_canary_genesis.json", "{\"verdict\":\"PASS\"}\n");
+        bool unlink_unknown = false;
+        ASSERT_EQ(canary_native_persist(directory, "reset", "unlink_dir_flush", &unlink_unknown),
+                  ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(unlink_unknown);
+        ASSERT(access(sentinel, F_OK) != 0);
+        write_file(directory, "replay_canary_genesis.json.tmp.1", "stale own stage\n");
+        write_file(directory, "replay_canary_genesis.json.tmp.2", "another writer's stage\n");
+        ASSERT_EQ(canary_native_persist(directory, "reset", NULL, NULL), 0);
+        char retained[PATH_MAX];
+        snprintf(retained, sizeof(retained), "%s/replay_canary_genesis.json.tmp.2", directory);
+        ASSERT(access(retained, F_OK) == 0);
+        char body[128];
+        ASSERT(read_file(marker, body, sizeof(body)));
+        ASSERT(strcmp(body, "123\n") == 0);
+        write_file(directory, "replay_canary_genesis.json.tmp.1", "{\"verdict\":\"PASS\"}\n");
+        ASSERT(chmod(public_stage, 0664) == 0);
+        ASSERT_EQ(canary_native_persist(directory, "publish", NULL, NULL),
+                  ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(access(sentinel, F_OK) != 0);
+        for (size_t i = 1; i < sizeof(faults) / sizeof(*faults); ++i) {
+            write_file(directory, "replay_canary_genesis.json.tmp.1", "{\"verdict\":\"PASS\"}\n");
+            ASSERT(chmod(public_stage, 0644) == 0);
+            bool unknown = false;
+            ASSERT_EQ(canary_native_persist(directory, "publish", faults[i], &unknown),
+                      ZCL_COMMAND_EXIT_FAILED);
+            ASSERT(access(sentinel, F_OK) != 0);
+            ASSERT_EQ(unknown, strcmp(faults[i], "dir_flush") == 0);
+        }
+        write_file(directory, "replay_canary_genesis.json.tmp.1", "{\"verdict\":\"PASS\"}\n");
+        ASSERT(chmod(public_stage, 0644) == 0);
+        ASSERT_EQ(canary_native_persist(directory, "publish", NULL, NULL), 0);
+        ASSERT(read_file(sentinel, body, sizeof(body)));
+        ASSERT(strcmp(body, "{\"verdict\":\"PASS\"}\n") == 0);
+        ASSERT_EQ(canary_native_persist(directory, "reset", NULL, NULL), 0);
+        ASSERT(access(sentinel, F_OK) != 0);
+        char staged[PATH_MAX];
+        snprintf(staged, sizeof(staged), "%s/replay_canary_genesis.json.tmp.1", directory);
+        ASSERT(symlink(marker, staged) == 0);
+        ASSERT_EQ(canary_native_persist(directory, "publish", NULL, NULL),
+                  ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(read_file(marker, body, sizeof(body)));
+        ASSERT(strcmp(body, "123\n") == 0);
+        ASSERT(unlink(staged) == 0);
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_canary_does_not_flush_unrelated_filesystems(void)
+{
+    int failures = 0;
+    TEST("replay-canary: absent oracle never calls the global sync utility") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char directory[PATH_MAX], verdict[PATH_MAX], spy[PATH_MAX], calls[PATH_MAX];
+        test_make_tmpdir(directory, sizeof(directory), "canary_sync", "spy");
+        snprintf(verdict, sizeof(verdict), "%s/verdict", directory);
+        snprintf(spy, sizeof(spy), "%s/sync", directory);
+        snprintf(calls, sizeof(calls), "%s/calls", directory);
+        ASSERT(chmod(directory, 0755) == 0);
+        ASSERT(mkdir(verdict, 0755) == 0);
+        char script[PATH_MAX + 96];
+        snprintf(script, sizeof(script), "#!/bin/sh\nprintf called >> '%s'\nexit 97\n", calls);
+        write_file(directory, "sync", script);
+        ASSERT(chmod(spy, 0755) == 0);
+        char cmd[PATH_MAX * 5];
+        snprintf(cmd, sizeof(cmd),
+            "cd '%s' && PATH='%s:/usr/bin:/bin' ZCL_CANARY_VERDICT_DIR=verdict "
+            "bash '%s/%s' --from=genesis --zclassicd-rpc=1 --zclassicd-p2p=1 >/dev/null 2>&1",
+            directory, directory, root, CANARY_REL);
+        int rc = system(cmd);
+        ASSERT(rc != -1 && WIFEXITED(rc));
+        ASSERT_EQ(WEXITSTATUS(rc), 2);
+        ASSERT(access(calls, F_OK) != 0);
+        char sentinel[PATH_MAX], body[2048];
+        snprintf(sentinel, sizeof(sentinel), "%s/replay_canary_genesis.json", verdict);
+        ASSERT(read_file(sentinel, body, sizeof(body)));
+        ASSERT(strstr(body, "\"verdict\":\"BLOCKED\"") != NULL);
+        ASSERT(strstr(body, "\"reason\":\"oracle_rpc_unreachable\"") != NULL);
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_canary_native_refusal_stops_script(void)
+{
+    int failures = 0;
+    TEST("replay-canary: native reset or publication refusal cannot emit PASS") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char directory[PATH_MAX], verdict[PATH_MAX], identity[PATH_MAX];
+        char wrapper[PATH_MAX], output[PATH_MAX], sentinel[PATH_MAX];
+        test_make_tmpdir(directory, sizeof(directory), "canary_native_refusal", "script");
+        snprintf(verdict, sizeof(verdict), "%s/verdict", directory);
+        snprintf(wrapper, sizeof(wrapper), "%s/refuse", directory);
+        snprintf(output, sizeof(output), "%s/output", directory);
+        snprintf(sentinel, sizeof(sentinel), "%s/replay_canary_anchor.json", verdict);
+        ASSERT(mkdir(verdict, 0755) == 0);
+        seed_fixtures(directory, "pass");
+        ASSERT(write_identity_fixture_binary(directory, identity, sizeof(identity)));
+        write_file(directory, "refuse",
+            "#!/bin/sh\n"
+            "action=\nfor arg in \"$@\"; do case $arg in --action=*) action=${arg#*=};; esac; done\n"
+            "if [ \"$action\" = \"$CANARY_REFUSE_ACTION\" ]; then\n"
+            "  if [ \"$action\" = reset ]; then \"$CANARY_REAL_DEV\" \"$@\" || exit 98; fi\n"
+            "  exit 97\nfi\nexec \"$CANARY_REAL_DEV\" \"$@\"\n");
+        ASSERT(chmod(wrapper, 0755) == 0);
+        const char *actions[] = { "reset", "publish" };
+        for (size_t i = 0; i < sizeof(actions) / sizeof(*actions); ++i) {
+            write_file(verdict, "replay_canary_anchor.json", "{\"verdict\":\"PASS\",\"ts\":1}\n");
+            char cmd[PATH_MAX * 8];
+            snprintf(cmd, sizeof(cmd),
+                "Z23_TEST_NODE_BIN='%s' CANARY_REAL_DEV='%s/build/bin/z23-dev' "
+                "CANARY_REFUSE_ACTION='%s' ZCL_CANARY_SELFTEST_DIR='%s' "
+                "ZCL_CANARY_VERDICT_DIR='%s' ZCL_CANARY_SELFTEST_NODE_BIN='%s' "
+                "bash '%s/%s' --from=anchor --self-test=pass >'%s' 2>&1",
+                wrapper, root, actions[i], directory, verdict, identity, root, CANARY_REL, output);
+            int rc = system(cmd);
+            ASSERT(rc != -1 && WIFEXITED(rc));
+            ASSERT_EQ(WEXITSTATUS(rc), 2);
+            ASSERT(access(sentinel, F_OK) != 0);
+            char body[4096] = {0};
+            (void)read_file(output, body, sizeof(body));
+            ASSERT(strstr(body, "VERDICT=PASS") == NULL);
+        }
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_canary_script_preserves_read_permissions(void)
+{
+    int failures = 0;
+    TEST("replay-canary: actual script preserves normal and restrictive caller umasks") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char directory[PATH_MAX], verdict[PATH_MAX], identity[PATH_MAX];
+        char sentinel[PATH_MAX], marker[PATH_MAX];
+        test_make_tmpdir(directory, sizeof(directory), "canary_modes", "script");
+        snprintf(verdict, sizeof(verdict), "%s/verdict", directory);
+        snprintf(sentinel, sizeof(sentinel), "%s/replay_canary_anchor.json", verdict);
+        snprintf(marker, sizeof(marker), "%s/.run_started_anchor", verdict);
+        ASSERT(mkdir(verdict, 0755) == 0);
+        seed_fixtures(directory, "pass");
+        ASSERT(write_identity_fixture_binary(directory, identity, sizeof(identity)));
+        const char *masks[] = { "022", "077", "002" };
+        const mode_t modes[] = { 0644, 0600, 0644 };
+        for (size_t i = 0; i < sizeof(modes) / sizeof(*modes); ++i) {
+            char command[PATH_MAX * 5];
+            snprintf(command, sizeof(command),
+                "umask %s; ZCL_CANARY_SELFTEST_DIR='%s' ZCL_CANARY_VERDICT_DIR='%s' "
+                "ZCL_CANARY_SELFTEST_NODE_BIN='%s' bash '%s/%s' --from=anchor --self-test=pass >/dev/null 2>&1",
+                masks[i], directory, verdict, identity, root, CANARY_REL);
+            int rc = system(command);
+            ASSERT(rc != -1 && WIFEXITED(rc));
+            ASSERT_EQ(WEXITSTATUS(rc), 0);
+            struct stat status;
+            ASSERT(stat(sentinel, &status) == 0);
+            ASSERT_EQ(status.st_mode & 0777, modes[i]);
+            ASSERT(stat(marker, &status) == 0);
+            ASSERT_EQ(status.st_mode & 0777, modes[i]);
+        }
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Copy the actual two wrapper recipes; their daemon prerequisites become
+ * inert fixture targets, so this proof can never build or launch a node. */
+static bool canary_close_wrapper_streams(FILE *in, FILE *out, bool ok)
+{
+    if (ferror(in)) ok = false;
+    if (fclose(in) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    return ok;
+}
+
+static bool canary_copy_make_wrappers(const char *root, const char *directory)
+{
+    char source[PATH_MAX], destination[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/Makefile", root);
+    snprintf(destination, sizeof(destination), "%s/Makefile", directory);
+    FILE *in = fopen(source, "r");
+    FILE *out = fopen(destination, "w");
+    if (!in || !out) {
+        if (in) fclose(in);
+        if (out) fclose(out);
+        return false;
+    }
+    bool ok = fputs("Z23_DEV_BIN :=\nzclassic23 zcl-rpc:\n\t@:\n", out) >= 0;
+    char line[8192];
+    bool copying = false;
+    unsigned found = 0;
+    while (fgets(line, sizeof(line), in)) {
+        bool target = strncmp(line, "replay-canary-anchor:", 21) == 0 ||
+                      strncmp(line, "replay-canary-genesis:", 22) == 0;
+        if (copying && line[0] != '\t') copying = false;
+        if (target) { copying = true; ++found; }
+        if (copying && fputs(line, out) < 0) ok = false;
+    }
+    return canary_close_wrapper_streams(in, out, ok) && found == 2;
+}
+
+static int test_canary_wrapper_rejects_failed_persistence(void)
+{
+    int failures = 0;
+    TEST("replay-canary: real wrappers reject failed harness plus fresh PASS") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char directory[PATH_MAX], tools[PATH_MAX], scripts[PATH_MAX], verdict[PATH_MAX];
+        test_make_tmpdir(directory, sizeof(directory), "canary_wrapper", "receipt");
+        snprintf(tools, sizeof(tools), "%s/tools", directory);
+        snprintf(scripts, sizeof(scripts), "%s/tools/scripts", directory);
+        snprintf(verdict, sizeof(verdict), "%s/verdict", directory);
+        ASSERT(mkdir(tools, 0755) == 0);
+        ASSERT(mkdir(scripts, 0755) == 0);
+        ASSERT(mkdir(verdict, 0755) == 0);
+        ASSERT(canary_copy_make_wrappers(root, directory));
+        const char *tracks[] = { "anchor", "genesis" };
+        const char *modes[] = { "fail-pass", "zero-empty", "zero-pass" };
+        for (size_t t = 0; t < sizeof(tracks) / sizeof(*tracks); ++t) {
+            for (size_t m = 0; m < sizeof(modes) / sizeof(*modes); ++m) {
+                write_file(scripts, "replay_canary.sh",
+                    "#!/bin/sh\nfrom=${1#--from=}\nf=$ZCL_CANARY_VERDICT_DIR/replay_canary_$from.json\n"
+                    "rm -f \"$f\"\n"
+                    "if [ \"$CANARY_WRAPPER_CASE\" != zero-empty ]; then\n"
+                    " printf '{\"verdict\":\"PASS\"}\\n' > \"$f\"\n"
+                    /* Controlled future mtime separates freshness from exit status. */
+                    " touch -t 209901010000 \"$f\" || exit 99\nfi\n"
+                    "[ \"$CANARY_WRAPPER_CASE\" != fail-pass ] || exit 7\nexit 0\n");
+                char command[PATH_MAX * 4];
+                snprintf(command, sizeof(command),
+                    "HOME='%s' ZCL_CANARY_VERDICT_DIR='%s' CANARY_WRAPPER_CASE='%s' "
+                    "make -s -C '%s' replay-canary-%s >/dev/null 2>&1",
+                    directory, verdict, modes[m], directory, tracks[t]);
+                int rc = system(command);
+                ASSERT(rc != -1 && WIFEXITED(rc));
+                ASSERT_EQ(WEXITSTATUS(rc) == 0, m == 2);
+            }
+        }
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_canary_frontdoor_timestamp_types(void)
+{
+    int failures = 0;
+    TEST("replay-canary: real CLI accepts integer/string timestamps and rejects invalid types") {
+        const char *root = repo_root();
+        ASSERT(root != NULL);
+        char relative[PATH_MAX], directory[PATH_MAX], tool[PATH_MAX];
+        test_make_tmpdir(relative, sizeof(relative), "canary_cli_types", "native");
+        ASSERT(realpath(relative, directory) != NULL);
+        snprintf(tool, sizeof(tool), "%s/build/bin/z23-dev", root);
+        char dir_flag[PATH_MAX + 16];
+        snprintf(dir_flag, sizeof(dir_flag), "--directory=%s", directory);
+        const char *values[] = { "0", "9223372036854775807", "-1", "1.5", "true", "9223372036854775808" };
+        const int wanted[] = { 0, 0, 2, 2, 2, 2 };
+        for (size_t i = 0; i < sizeof(values) / sizeof(*values); ++i) {
+            char timestamp[64], output[4096];
+            snprintf(timestamp, sizeof(timestamp), "--started_ts=%s", values[i]);
+            const char *argv[] = { tool, "dev", "test", "canary_sentinel",
+                "--action=reset", dir_flag, "--from=genesis", timestamp,
+                "--staged=replay_canary_genesis.json.tmp.1", NULL };
+            ASSERT_EQ(zcl_spawn_capture(argv, output, sizeof(output), 30000), wanted[i]);
+        }
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "action", "reset");
+        (void)json_push_kv_str(&input, "directory", directory);
+        (void)json_push_kv_str(&input, "from", "genesis");
+        (void)json_push_kv_str(&input, "started_ts", "123");
+        (void)json_push_kv_str(&input, "staged", "replay_canary_genesis.json.tmp.1");
+        char request[PATH_MAX + 256], flag[PATH_MAX + 272], output[4096];
+        ASSERT(json_write(&input, request, sizeof(request)) < sizeof(request));
+        json_free(&input);
+        snprintf(flag, sizeof(flag), "--input=%s", request);
+        const char *argv[] = { tool, "dev", "test", "canary_sentinel", flag, NULL };
+        ASSERT_EQ(zcl_spawn_capture(argv, output, sizeof(output), 30000), 0);
+        char marker[PATH_MAX], body[64];
+        snprintf(marker, sizeof(marker), "%s/.run_started_genesis", directory);
+        ASSERT(read_file(marker, body, sizeof(body)));
+        ASSERT(strcmp(body, "123\n") == 0);
+        char cleanup[PATH_MAX + 32];
+        snprintf(cleanup, sizeof(cleanup), "rm -rf '%s'", directory);
+        ASSERT_EQ(system(cleanup), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_replay_canary_verdict_platform_arm(void)
 {
     int failures = 0;
+    failures += test_canary_native_refusal_stops_script();
+    failures += test_canary_script_preserves_read_permissions();
+    failures += test_canary_wrapper_rejects_failed_persistence();
+    failures += test_canary_frontdoor_timestamp_types();
+    failures += test_native_canary_durability();
+    failures += test_canary_does_not_flush_unrelated_filesystems();
     failures += test_pass_writes_pass_sentinel();
     failures += test_mvp_canary_freshness();
     failures += test_source_guard_mvp_binds_c3_stopwatch_to_running_binary();

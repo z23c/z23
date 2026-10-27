@@ -25,6 +25,8 @@ bool zcl_native_command_is_root(const char *word);
 const char *zcl_native_source_root(const struct zcl_command_request *request);
 
 #ifdef ZCL_TESTING
+/* One-shot failure seam for the real canary persistence handler. */
+void zcl_native_canary_sentinel_fail_for_test(const char *phase);
 /* Drive the production event-option parser without a separate dev binary.
  * Invalid options print the same error envelope as the streaming CLI and
  * return INVALID; valid options return OK without starting a stream. */

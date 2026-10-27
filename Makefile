@@ -9817,7 +9817,7 @@ soak-ci: soak_runner zclassic23 zcl-rpc
 # loud and a STALE PASS left by a previous successful run can never be read
 # as this run's proof — never exit-0-as-proof, never stale-file-as-proof.
 .PHONY: replay-canary-anchor
-replay-canary-anchor: zclassic23 zcl-rpc
+replay-canary-anchor: zclassic23 zcl-rpc $(Z23_DEV_BIN)
 	@bash -c 'set -uo pipefail; \
 	 vd="$${ZCL_CANARY_VERDICT_DIR:-$$HOME/.local/state/zclassic23-canary}"; \
 	 scratch="$$HOME/.local/state/zclassic23-canary/scratch"; \
@@ -9826,7 +9826,7 @@ replay-canary-anchor: zclassic23 zcl-rpc
 	 marker="$$vd/.guard_started_anchor"; rm -f "$$marker"; : > "$$marker"; \
 	 set +e; bash tools/scripts/replay_canary.sh --from=anchor; rc=$$?; set -e; \
 	 f="$$vd/replay_canary_anchor.json"; \
-	 if [ ! -f "$$f" ] || [ ! "$$f" -nt "$$marker" ] || ! grep -q "\"verdict\":\"PASS\"" "$$f"; then \
+	 if [ "$$rc" -ne 0 ] || [ ! -f "$$f" ] || [ ! "$$f" -nt "$$marker" ] || ! grep -q "\"verdict\":\"PASS\"" "$$f"; then \
 	     echo "replay-canary-anchor: FAIL (no FRESH PASS sentinel at $$f; harness rc=$$rc)"; \
 	     [ -f "$$f" ] && cat "$$f"; \
 	     rm -f "$$marker"; exit 1; \
@@ -9835,7 +9835,7 @@ replay-canary-anchor: zclassic23 zcl-rpc
 	 echo "replay-canary-anchor: PASS (fresh sentinel verdict=PASS)"'
 
 .PHONY: replay-canary-genesis
-replay-canary-genesis: zclassic23 zcl-rpc
+replay-canary-genesis: zclassic23 zcl-rpc $(Z23_DEV_BIN)
 	@bash -c 'set -uo pipefail; \
 	 vd="$${ZCL_CANARY_VERDICT_DIR:-$$HOME/.local/state/zclassic23-canary}"; \
 	 scratch="$$HOME/.local/state/zclassic23-canary/scratch"; \
@@ -9844,7 +9844,7 @@ replay-canary-genesis: zclassic23 zcl-rpc
 	 marker="$$vd/.guard_started_genesis"; rm -f "$$marker"; : > "$$marker"; \
 	 set +e; bash tools/scripts/replay_canary.sh --from=genesis; rc=$$?; set -e; \
 	 f="$$vd/replay_canary_genesis.json"; \
-	 if [ ! -f "$$f" ] || [ ! "$$f" -nt "$$marker" ] || ! grep -q "\"verdict\":\"PASS\"" "$$f"; then \
+	 if [ "$$rc" -ne 0 ] || [ ! -f "$$f" ] || [ ! "$$f" -nt "$$marker" ] || ! grep -q "\"verdict\":\"PASS\"" "$$f"; then \
 	     echo "replay-canary-genesis: FAIL (no FRESH PASS sentinel at $$f; harness rc=$$rc)"; \
 	     [ -f "$$f" ] && cat "$$f"; \
 	     rm -f "$$marker"; exit 1; \

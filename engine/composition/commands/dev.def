@@ -1014,6 +1014,24 @@ ZCL_COMMAND_DEV_READ(
     "the simulation runner requires the dev-only process executor",
     "z23-dev dev test sim")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.test.canary_sentinel", "dev.test", "",
+    "Persist the replay canary's reset marker or verdict",
+    "Durably resets a fixed canary sentinel and start marker, or flushes and "
+    "atomically publishes its staged verdict. Uses retained file and directory "
+    "handles, never a whole-system sync. Failure after rename reports unknown "
+    "durability and invalidates verdict evidence best-effort. Starts no node.", 0,
+    "test,canary,sentinel,durability", "zcl.dev_canary_sentinel_input.v1",
+    "zcl.dev_canary_sentinel.v1", "action,directory,from,started_ts,staged", "",
+    "z23-dev dev test canary_sentinel --action=reset --directory=/tmp/canary --from=anchor --started_ts=1 --staged=replay_canary_anchor.json.tmp.1",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_canary_sentinel,
+    "canary persistence requires the development binary",
+    "z23-dev dev test canary_sentinel")
+
 ZCL_COMMAND_PLANNED_READ(
     "dev.test.replay", "dev.test", "", "Replay one deterministic failure seed",
     "Will replay one deterministic failure seed and report pass/fail; "

@@ -149,8 +149,10 @@ export ZCL_RPC_TIMEOUT_MS="${ZCL_RPC_TIMEOUT_MS:-120000}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+CANARY_DEV_BIN="${Z23_TEST_NODE_BIN:-$REPO_ROOT/build/bin/z23-dev}"
 VERDICT_DIR="${ZCL_CANARY_VERDICT_DIR:-${HOME:-/root}/.local/state/zclassic23-canary}"
-mkdir -p "$VERDICT_DIR"
+(umask go-w; mkdir -p "$VERDICT_DIR") || exit 2
+case "$VERDICT_DIR" in /*) ;; *) VERDICT_DIR="$(pwd -P)/$VERDICT_DIR" ;; esac
 
 # Verdict identity is captured ONCE from the exact immutable executable used
 # by this run. It is never re-read from build/bin at verdict time: that path
@@ -207,12 +209,18 @@ freeze_live_binaries() {
     ISO_RPC_BIN="$rpc_frozen"
 }
 
-# START_TS is fixed at the very top of the process so reset_verdict,
-# write_verdict, and the elapsed band all share one run-start epoch.
+# Capture one epoch before reset; verdict timestamps share it.
 START_TS="$(date +%s)"; STARTED_TS="$START_TS"; ELAPSED=0
 
 # ── Sentinel path (one place, used by reset + write) ───────────────
 sentinel_path() { printf '%s/replay_canary_%s.json' "$VERDICT_DIR" "$FROM"; }
+
+canary_persist() {
+    local output
+    if output="$("$CANARY_DEV_BIN" dev test canary_sentinel --budget-bytes=4096 "$@" 2>&1)"; then return 0; fi
+    printf '%s\n' "${output:0:4096}" >&2
+    exit 2
+}
 
 # ── Sentinel reset (FIRST thing every run does) ────────────────────
 # Remove ANY prior sentinel before the run does any work. This is the
@@ -225,11 +233,12 @@ sentinel_path() { printf '%s/replay_canary_%s.json' "$VERDICT_DIR" "$FROM"; }
 # live-node Condition) can band-check the sentinel's freshness against the
 # run it is judging — a stale sentinel that somehow survives is still read
 # as not-fresh => FAIL.
+
 reset_verdict() {
-    local f; f="$(sentinel_path)"
-    rm -f "$f" "$f".tmp.* 2>/dev/null || true
-    printf '%s\n' "$STARTED_TS" > "$VERDICT_DIR/.run_started_${FROM}" 2>/dev/null || true
-    sync 2>/dev/null || true
+    canary_persist --action=reset \
+        --directory="$VERDICT_DIR" --from="$FROM" \
+        --started_ts="$STARTED_TS" \
+        --staged="replay_canary_${FROM}.json.tmp.$$"
 }
 
 # ── Sentinel writer (atomic: tmp + fsync + rename) ─────────────────
@@ -243,38 +252,37 @@ write_verdict() {
     local f; f="$(sentinel_path)"
     local tmp="$f.tmp.$$"
     local now; now="$(date +%s)"
+    ( umask go-w
+    set -C
     {
         printf '{"verdict":"%s","from":"%s","ts":%s,"started_ts":%s,' \
-            "$verdict" "$FROM" "$now" "${STARTED_TS:-$now}"
+            "$verdict" "$FROM" "$now" "${STARTED_TS:-$now}" || exit 2
         printf '"source_id_sha256":"%s","artifact_sha256":"%s",' \
             "${CANARY_SOURCE_ID_SHA256:-unknown}" \
-            "${CANARY_ARTIFACT_SHA256:-unknown}"
-        printf '"build_commit":"%s",' "${CANARY_BUILD_COMMIT:-unknown}"
+            "${CANARY_ARTIFACT_SHA256:-unknown}" || exit 2
+        printf '"build_commit":"%s",' "${CANARY_BUILD_COMMIT:-unknown}" || exit 2
         printf '"tip":%s,"verified_height":%s,"bg_state":"%s",' \
-            "${R_TIP:-0}" "${R_VERIFIED:-0}" "${R_BGSTATE:-unknown}"
+            "${R_TIP:-0}" "${R_VERIFIED:-0}" "${R_BGSTATE:-unknown}" || exit 2
         printf '"last_state":"%s","verification_incomplete":"%s",' \
-            "${R_LAST_STATE:-}" "${R_INCOMPLETE:-unknown}"
+            "${R_LAST_STATE:-}" "${R_INCOMPLETE:-unknown}" || exit 2
         printf '"consensus_rejects":%s,"local_sha3":"%s","expected_sha3":"%s",' \
-            "${R_REJECTS:-0}" "${R_LOCAL_SHA3:-}" "$EXPECTED_SHA3"
+            "${R_REJECTS:-0}" "${R_LOCAL_SHA3:-}" "$EXPECTED_SHA3" || exit 2
         printf '"legacy_sha3":"%s","exact_tier":"%s",' \
-            "${R_LEGACY_SHA3:-}" "${R_EXACT_TIER:-not_run}"
+            "${R_LEGACY_SHA3:-}" "${R_EXACT_TIER:-not_run}" || exit 2
         printf '"params_dir_empty":%s,' \
             "$([ -n "${ISO_PARAMS_DIR:-}" ] && \
                  [ -d "$ISO_PARAMS_DIR" ] && \
                  [ -z "$(find "$ISO_PARAMS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ] && \
-                 printf true || printf false)"
+                 printf true || printf false)" || exit 2
         printf '"txouts":%s,"zd_txouts":%s,"supply":"%s","zd_supply":"%s",' \
-            "${R_TXOUTS:-0}" "${R_ZD_TXOUTS:-0}" "${R_SUPPLY:-}" "${R_ZD_SUPPLY:-}"
+            "${R_TXOUTS:-0}" "${R_ZD_TXOUTS:-0}" "${R_SUPPLY:-}" "${R_ZD_SUPPLY:-}" || exit 2
         printf '"reason":"%s","elapsed_sec":%s}\n' \
-            "$reason" "${ELAPSED:-0}"
+            "$reason" "${ELAPSED:-0}" || exit 2
     } > "$tmp"
-    # fsync the file contents, then atomically rename into place, then
-    # fsync the directory so the rename is durable. `sync` flushes the
-    # whole fs; a targeted fdatasync would be tighter but `sync` keeps
-    # this dependency-free (no python, no helper binary — roadmap rule).
-    sync
-    mv -f "$tmp" "$f"
-    sync
+    ) || { echo "replay-canary: staged verdict write refused" >&2; exit 2; }
+    canary_persist --action=publish \
+        --directory="$VERDICT_DIR" --from="$FROM" \
+        --staged="${tmp##*/}"
 }
 
 # ── Single-line operator-greppable verdict + page ──────────────────
