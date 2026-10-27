@@ -50,6 +50,8 @@ KEY_INPUT_FILES=(
     "$SELF_DIR/process-start-token.sh"
     "$SELF_DIR/source-identity.sh"
     "$DEPFILE_SCOPE_SELFTEST"
+    "$SELF_DIR/make_depfile_scope_selftest.c"
+    "$SELF_DIR/make_depfile_scope_process.h"
     "$ROOT/Makefile"
 )
 

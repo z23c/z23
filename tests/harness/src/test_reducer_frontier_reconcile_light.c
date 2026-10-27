@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "test/test_core.h"
+#include "platform/time_compat.h"
 
 #include "bloom/merkle.h"
 #include "conditions/reducer_frontier_reconcile_light.h"
@@ -67,6 +68,74 @@ bool stage_reducer_frontier_try_label_splice_rebind(
 enum condition_remedy_result
 reducer_frontier_reconcile_light_test_remedy_outcome(
     const struct stage_reducer_frontier_reconcile_result *rr);
+
+/* Real replay acquisition boundary, with a five-second holder backstop. */
+void reducer_frontier_replay_set_main_hook_for_testing(
+    void (*hook)(void *), void *ctx);
+
+struct rfrl_main_cycle {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool attempted;
+    struct main_state *ms;
+    sqlite3 *db;
+    bool ok;
+    struct stage_reducer_frontier_reconcile_result result;
+};
+
+static void rfrl_main_attempt(void *arg)
+{
+    struct rfrl_main_cycle *cycle = arg;
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->attempted = true;
+    pthread_cond_signal(&cycle->cond);
+    pthread_mutex_unlock(&cycle->mutex);
+}
+
+static bool rfrl_wait_attempt(struct rfrl_main_cycle *cycle)
+{
+    struct timespec until;
+    platform_time_realtime_timespec(&until);
+    until.tv_sec += 5;
+    pthread_mutex_lock(&cycle->mutex);
+    int rc = 0;
+    while (!cycle->attempted && rc == 0)
+        rc = pthread_cond_timedwait(&cycle->cond, &cycle->mutex, &until);
+    bool attempted = cycle->attempted;
+    pthread_mutex_unlock(&cycle->mutex);
+    return attempted;
+}
+
+static void *rfrl_replay_worker(void *arg)
+{
+    struct rfrl_main_cycle *cycle = arg;
+    cycle->ok = stage_reducer_frontier_reconcile_light(
+        cycle->db, cycle->ms, &cycle->result);
+    return NULL;
+}
+
+static bool rfrl_run_main_cycle(struct rfrl_main_cycle *cycle)
+{
+    pthread_mutex_init(&cycle->mutex, NULL);
+    pthread_cond_init(&cycle->cond, NULL);
+    zcl_mutex_lock(&cycle->ms->cs_main);
+    reducer_frontier_replay_set_main_hook_for_testing(
+        rfrl_main_attempt, cycle);
+    pthread_t worker;
+    bool started = pthread_create(&worker, NULL, rfrl_replay_worker, cycle) == 0;
+    bool reached = started && rfrl_wait_attempt(cycle);
+    bool progress_free = reached && progress_store_tx_trylock();
+    if (progress_free)
+        progress_store_tx_unlock();
+    /* Release even when a baseline/timeout fails, before joining the worker. */
+    zcl_mutex_unlock(&cycle->ms->cs_main);
+    if (started)
+        pthread_join(worker, NULL);
+    reducer_frontier_replay_set_main_hook_for_testing(NULL, NULL);
+    pthread_cond_destroy(&cycle->cond);
+    pthread_mutex_destroy(&cycle->mutex);
+    return started && reached && progress_free && cycle->ok;
+}
 
 struct rfrl_fixture {
     char dir[256];
@@ -1531,8 +1600,10 @@ int test_reducer_frontier_reconcile_light(void)
                    cursor_value(db, "utxo_apply") == A + 2);
 
         struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("readable stale-script: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+        struct rfrl_main_cycle cycle = {.ms = &fx.ms, .db = db};
+        RFRL_CHECK("readable stale-script: main waiter leaves progress available",
+                   rfrl_run_main_cycle(&cycle));
+        rr = cycle.result;
         RFRL_CHECK("readable stale-script: production replay rewinds rows",
                    rr.stale_script_repair_attempted &&
                    rr.stale_script_repaired &&

@@ -35,6 +35,9 @@ bool catalog_coverage_dump_state_json(struct json_value *out, const char *key);
 #ifdef ZCL_TESTING
 struct catalog_index_status;
 void catalog_lag_exceeded_test_reset(void);
+/* Exercise the real live observation under isolated-store contention. */
+bool catalog_lag_exceeded_test_detect_live(void);
+bool catalog_lag_exceeded_test_witness_live(void);
 /* Drive the sustain evaluator with an injected snapshot (bypasses the live
  * catalog read). Returns what detect() would return for this pass. */
 bool catalog_lag_exceeded_test_feed(const struct catalog_index_status *rows,

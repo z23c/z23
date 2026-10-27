@@ -383,6 +383,8 @@ static bool write_buf_dest(struct buf *b, const char *dest, mode_t mode)
 static bool orchestration_env(const char *entry)
 {
     static const char *const names[] = {
+        /* Parent lint's read-only CFLAGS-query receipt, never a compiler input. */
+        "ZCL_CAP_CLOSURE_SOURCE_RECORD=",
         "BUILD_SOURCE_RECORD=", "BUILD_COMPILER_ID=", "BUILD_SYSTEM_ID=",
         "BUILD_EPOCH_KEEP=", "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=",
         "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS=", "PWD=",

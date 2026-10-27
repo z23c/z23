@@ -364,8 +364,9 @@ static enum catalog_coverage cc_coverage(int64_t cursor, int64_t floor,
     return CATALOG_COVERAGE_PARTIAL;
 }
 
-size_t catalog_completeness_snapshot(struct catalog_index_status *out,
-                                     size_t max, int64_t target_height)
+static size_t cc_snapshot_rows(struct catalog_index_status *out, size_t max,
+                               int64_t target_height, int64_t seed_floor,
+                               const int64_t progress_cursors[3])
 {
     if (!out || max == 0) {
         LOG_WARN("catalog_completeness",
@@ -373,8 +374,6 @@ size_t catalog_completeness_snapshot(struct catalog_index_status *out,
                  (void *)out, max);
         return 0;
     }
-
-    const int64_t seed_floor = cc_seed_floor();
 
     size_t n = CATALOG_INDEX_COUNT < max ? CATALOG_INDEX_COUNT : max;
     for (size_t i = 0; i < n; i++) {
@@ -387,7 +386,15 @@ size_t catalog_completeness_snapshot(struct catalog_index_status *out,
         row->target = target_height;
         row->coverage = (int)CATALOG_COVERAGE_UNKNOWN;
 
-        int64_t cursor = e->get_cursor();
+        int64_t cursor;
+        if (e->get_cursor == cc_get_sprout_anchor_cursor)
+            cursor = progress_cursors[0];
+        else if (e->get_cursor == cc_get_sapling_anchor_cursor)
+            cursor = progress_cursors[1];
+        else if (e->get_cursor == cc_get_nullifier_cursor)
+            cursor = progress_cursors[2];
+        else
+            cursor = e->get_cursor();
         if (cursor == CATALOG_CURSOR_UNAVAILABLE) {
             row->enabled = false;
             row->cursor = 0;
@@ -410,6 +417,41 @@ size_t catalog_completeness_snapshot(struct catalog_index_status *out,
         row->coverage = (int)cc_coverage(cursor, row->floor, target_height);
     }
     return n;
+}
+
+bool catalog_completeness_snapshot_try(struct catalog_index_status *out,
+                                        size_t max, int64_t target_height,
+                                        size_t *count)
+{
+    if (!count || !out || max == 0) {
+        LOG_WARN("catalog_completeness", "snapshot_try: output and capacity required");
+        if (count) *count = 0;
+        return false;
+    }
+    *count = 0;
+    /* Capture only this store's values under its recursive transaction lock.
+     * Never carry it into node/projection accessors: those have their own
+     * lock order. Busy is missing evidence, never an empty/complete catalog. */
+    if (!progress_store_tx_trylock()) {
+        /* raw-return-ok:expected-contention-is-an-unavailable-observation */
+        return false;
+    }
+    int64_t seed_floor = cc_seed_floor();
+    int64_t cursors[3] = {
+        cc_get_sprout_anchor_cursor(), cc_get_sapling_anchor_cursor(),
+        cc_get_nullifier_cursor()
+    };
+    progress_store_tx_unlock();
+    *count = cc_snapshot_rows(out, max, target_height, seed_floor, cursors);
+    return true;
+}
+
+size_t catalog_completeness_snapshot(struct catalog_index_status *out,
+                                     size_t max, int64_t target_height)
+{
+    size_t count = 0;
+    (void)catalog_completeness_snapshot_try(out, max, target_height, &count);
+    return count;
 }
 
 int64_t catalog_completeness_worst_lag(const struct catalog_index_status *rows,

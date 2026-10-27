@@ -159,7 +159,7 @@ static int dtt_join_dumper(void)
     return rc;
 }
 
-static int dtt_nomutex_rejected(void)
+static int dtt_nomutex_unknown(void)
 {
     int failures = 0;
     sqlite3 *db = NULL;
@@ -172,8 +172,18 @@ static int dtt_nomutex_rejected(void)
     bool present = false;
     for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++)
         if (g_entries[i].db == db) present = true;
-    dtt_check("NOMUTEX is not registered", !present, &failures);
+    dtt_check("NOMUTEX retains owner", present, &failures);
     dtt_check("NOMUTEX dumper cleanup", dtt_join_dumper() == 0, &failures);
+    publish_snapshot();
+    struct json_value snap;
+    json_init(&snap);
+    dtt_dump(&snap, NULL);
+    const struct json_value *entry = json_at(json_get(&snap, "connections"), 0);
+    dtt_check("NOMUTEX observation unavailable",
+        !json_get_bool(json_get(entry, "observation_available")) &&
+        json_get_int(json_get(entry, "busy_stmts")) == -1 &&
+        json_get(&snap, "open_txn_holders") == NULL, &failures);
+    json_free(&snap);
     dtt_unregister(db);
     dtt_check("NOMUTEX fixture closes", sqlite3_close(db) == SQLITE_OK, &failures);
     return failures;
@@ -247,11 +257,160 @@ static int dtt_fullmutex_inspection(void)
     return failures;
 }
 
+/* Exercise the actual private collector, retaining upstream's three statement
+ * boundaries and concurrent finalizer test above. */
+static int dtt_unseeded(void)
+{
+    int failures = 0;
+    struct json_value snapshot;
+    json_init(&snapshot);
+    dtt_dump(&snapshot, NULL);
+    dtt_check("unseeded snapshot is unavailable",
+        !json_get_bool(json_get(&snapshot, "observation_complete")) &&
+        json_get(&snapshot, "open_txn_holders") == NULL, &failures);
+    json_free(&snapshot);
+    return failures;
+}
+
+struct dtt_contention {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    sqlite3 *db;
+    bool held, release, scanned;
+};
+
+static void *dtt_hold_connection(void *arg)
+{
+    struct dtt_contention *race = arg;
+    sqlite3_mutex *mutex = sqlite3_db_mutex(race->db);
+    sqlite3_mutex_enter(mutex);
+    pthread_mutex_lock(&race->mutex);
+    race->held = true;
+    pthread_cond_broadcast(&race->changed);
+    while (!race->release)
+        pthread_cond_wait(&race->changed, &race->mutex);
+    pthread_mutex_unlock(&race->mutex);
+    sqlite3_mutex_leave(mutex);
+    return NULL;
+}
+
+static void *dtt_collect_held(void *arg)
+{
+    struct dtt_contention *race = arg;
+    publish_snapshot();
+    pthread_mutex_lock(&race->mutex);
+    race->scanned = true;
+    pthread_cond_broadcast(&race->changed);
+    pthread_mutex_unlock(&race->mutex);
+    return NULL;
+}
+
+static void dtt_busy_snapshot(int *failures)
+{
+    struct json_value snapshot;
+    json_init(&snapshot);
+    dtt_dump(&snapshot, NULL);
+    const struct json_value *entry = json_at(json_get(&snapshot, "connections"), 0);
+    const char *owner = json_get_str(json_get(entry, "owner"));
+    const char *state = json_get_str(json_get(entry, "txn_state"));
+    dtt_check("busy owner is explicitly unknown",
+        owner && state && strcmp(owner, "busy-owner") == 0 &&
+        strcmp(state, "UNKNOWN") == 0 &&
+        !json_get_bool(json_get(entry, "observation_available")) &&
+        json_get_int(json_get(entry, "busy_stmts")) == -1 &&
+        json_get(entry, "holds_open_txn") == NULL &&
+        json_get(&snapshot, "open_txn_holders") == NULL, failures);
+    json_free(&snapshot);
+}
+
+static int dtt_nonblocking_unknown(void)
+{
+    int failures = 0;
+    struct dtt_contention race = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER
+    };
+    int rc = sqlite3_open_v2(":memory:", &race.db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+    dtt_check("contention fixture opens", rc == SQLITE_OK && race.db, &failures);
+    if (rc != SQLITE_OK || !race.db) {
+        sqlite3_close(race.db);
+        return failures;
+    }
+    /* Stop the real dumper before manual scans; retain actual registration. */
+    pthread_mutex_lock(&dtt_control);
+    dtt.sleeps = ZCL_DB_TXN_TRACE_DUMP_SECS + 1;
+    pthread_mutex_unlock(&dtt_control);
+    dtt_register(race.db, "busy-owner");
+    dtt_check("contention dumper joined", dtt_join_dumper() == 0, &failures);
+    pthread_t holder, collector;
+    bool held = pthread_create(&holder, NULL, dtt_hold_connection, &race) == 0;
+    dtt_check("connection holder starts", held, &failures);
+    if (held) {
+        pthread_mutex_lock(&race.mutex);
+        while (!race.held) pthread_cond_wait(&race.changed, &race.mutex);
+        pthread_mutex_unlock(&race.mutex);
+        bool collecting = pthread_create(&collector, NULL, dtt_collect_held, &race) == 0;
+        dtt_check("collector starts", collecting, &failures);
+        pthread_mutex_lock(&race.mutex);
+        struct timespec deadline;
+        timespec_get(&deadline, TIME_UTC);
+        deadline.tv_sec += 2;
+        while (collecting && !race.scanned) {
+            if (pthread_cond_timedwait(&race.changed, &race.mutex, &deadline) != 0)
+                break;
+        }
+        bool nonblocking = race.scanned;
+        pthread_mutex_unlock(&race.mutex);
+        dtt_check("collector finishes while connection remains held", nonblocking, &failures);
+        if (nonblocking)
+            dtt_busy_snapshot(&failures);
+        pthread_mutex_lock(&race.mutex);
+        race.release = true;
+        pthread_cond_broadcast(&race.changed);
+        pthread_mutex_unlock(&race.mutex);
+        pthread_join(holder, NULL);
+        if (collecting) pthread_join(collector, NULL);
+    }
+    publish_snapshot();
+    struct json_value recovered;
+    json_init(&recovered);
+    dtt_dump(&recovered, NULL);
+    dtt_check("observation recovers after release",
+        json_get_bool(json_get(&recovered, "observation_complete")) &&
+        json_get(&recovered, "open_txn_holders") != NULL, &failures);
+    json_free(&recovered);
+    dtt_unregister(race.db);
+    dtt_check("contention fixture closes", sqlite3_close(race.db) == SQLITE_OK, &failures);
+    pthread_cond_destroy(&race.changed);
+    pthread_mutex_destroy(&race.mutex);
+    return failures;
+}
+
+static int dtt_torn_unknown(void)
+{
+    int failures = 0;
+    zcl_snapshot_publish_begin(&g_snap_env);
+    struct json_value snapshot;
+    json_init(&snapshot);
+    dtt_dump(&snapshot, NULL);
+    dtt_check("torn snapshot withholds payload and aggregate",
+        !json_get_bool(json_get(&snapshot, "observation_complete")) &&
+        json_get_int(json_get(&snapshot, "connection_count")) == 0 &&
+        json_get(&snapshot, "open_txn_holders") == NULL, &failures);
+    json_free(&snapshot);
+    zcl_snapshot_publish_end(&g_snap_env, 0);
+    return failures;
+}
 int test_db_txn_trace(void);
 int test_db_txn_trace(void)
 {
     atomic_store(&g_enabled_cache, 1);
-    int failures = dtt_nomutex_rejected();
+    int failures = dtt_unseeded();
+    failures += dtt_nomutex_unknown();
     failures += dtt_fullmutex_inspection();
+    dtt.db = NULL;
+    failures += dtt_nonblocking_unknown();
+    failures += dtt_torn_unknown();
     return failures;
 }

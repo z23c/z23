@@ -35,16 +35,15 @@ struct txn_trace_entry {
 static struct txn_trace_entry g_entries[ZCL_DB_TXN_TRACE_MAX_CONNS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* The registry lock pins registered handles until inspection finishes.
- * The dumper also holds each connection’s SQLite mutex across transaction
- * inspection and every use of borrowed statement/SQL pointers. It publishes
- * a seqlock snapshot under g_lock; db_txn_trace_dump_state_json (on the RPC
- * thread) reads that snapshot without touching a live SQLite handle
- * (Program O4d). */
+/* Seqlock-published snapshot of every registered connection's transaction
+ * state (Program O4d). The background collector holds the registry lock to
+ * pin each handle and tries its connection mutex before reading live state.
+ * It publishes under g_lock; db_txn_trace_dump_state_json (on the RPC thread)
+ * reads it lock-free and NEVER touches a live sqlite handle. */
 struct txn_snap_entry {
-    _Atomic int txn_state;    /* SQLITE_TXN_NONE / READ / WRITE */
-    _Atomic int busy_stmts;   /* un-reset cursors pinning the snapshot */
-    char        label[48];    /* written between publish_begin/_end */
+    _Atomic int txn_state;    /* -1 unknown, or SQLITE_TXN_NONE / READ / WRITE */
+    _Atomic int busy_stmts;   /* -1 unknown, otherwise un-reset cursors */
+    _Atomic char label[48];   /* seqlock payload must also be race-free */
 };
 static struct zcl_snapshot_env g_snap_env = ZCL_SNAPSHOT_ENV_INIT;
 static _Atomic int g_snap_count;
@@ -74,7 +73,7 @@ static const char *txn_state_name(int st)
     case SQLITE_TXN_NONE:  return "NONE";
     case SQLITE_TXN_READ:  return "READ";
     case SQLITE_TXN_WRITE: return "WRITE";
-    default:               return "?";
+    default:               return "UNKNOWN";
     }
 }
 
@@ -109,8 +108,6 @@ static int trace_cb(unsigned type, void *ctx, void *p, void *x)
     const char *sql = (const char *)x;
     if (!is_txn_control_sql(sql))
         return 0;
-    /* SQLite holds the connection mutex here. Registry-entry mutations take
-     * that same mutex; this callback must never acquire g_lock. */
     const struct txn_trace_entry *e = (const struct txn_trace_entry *)ctx;
     fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
             "[db-txn-trace] STMT owner=%s db=%p tid=%lu sql=\"%s\"\n",
@@ -118,6 +115,69 @@ static int trace_cb(unsigned type, void *ctx, void *p, void *x)
             (unsigned long)pthread_self(), sql ? sql : "(null)");
     fflush(stderr);
     return 0;
+}
+
+/* g_lock pins the handle until unregister. A trylock, never a blocking
+ * registry -> SQLite acquisition, protects the ENTIRE statement lifetime.
+ * Register/unregister take SQLite -> registry to protect callback context. */
+static void observe_connection(struct txn_trace_entry *entry, int *state,
+                                int *busy)
+{
+    sqlite3 *db = entry->db;
+    sqlite3_mutex *mutex = sqlite3_db_mutex(db);
+    *state = -1;
+    *busy = -1;
+    if (!mutex || sqlite3_mutex_try(mutex) != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace] STATE owner=%s db=%p unavailable=%s\n",
+                entry->label, (void *)db,
+                mutex ? "connection_busy" : "no_connection_mutex");
+        return;
+    }
+    *state = sqlite3_txn_state(db, NULL);
+    *busy = *state < SQLITE_TXN_NONE ? -1 : 0;
+    fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+            "[db-txn-trace] STATE owner=%s db=%p txn=%s autocommit=%d%s\n",
+            entry->label, (void *)db, txn_state_name(*state),
+            sqlite3_get_autocommit(db), *state == SQLITE_TXN_WRITE
+                ? "  <-- HOLDS WRITE LOCK (candidate holder)" : "");
+    if (*state > SQLITE_TXN_NONE) {
+        sqlite3_stmt *stmt = NULL;
+        while ((stmt = sqlite3_next_stmt(db, stmt)) != NULL) {
+            if (!sqlite3_stmt_busy(stmt))
+                continue;
+            ++*busy;
+            const char *sql = sqlite3_sql(stmt);
+            fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                    "[db-txn-trace]   BUSY-STMT owner=%s db=%p "
+                    "stmt=%p sql=\"%s\"\n", entry->label, (void *)db,
+                    (void *)stmt, sql ? sql : "(null)");
+        }
+    }
+    sqlite3_mutex_leave(mutex);
+}
+
+static void publish_snapshot(void)
+{
+    pthread_mutex_lock(&g_lock);
+    zcl_snapshot_publish_begin(&g_snap_env);
+    int count = 0;
+    for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
+        if (!g_entries[i].db)
+            continue;
+        int state, busy;
+        observe_connection(&g_entries[i], &state, &busy);
+        atomic_store_explicit(&g_snap[count].txn_state, state, memory_order_relaxed);
+        atomic_store_explicit(&g_snap[count].busy_stmts, busy, memory_order_relaxed);
+        for (size_t j = 0; j < sizeof(g_snap[count].label); j++)
+            atomic_store_explicit(&g_snap[count].label[j], g_entries[i].label[j],
+                                  memory_order_relaxed);
+        count++;
+    }
+    atomic_store_explicit(&g_snap_count, count, memory_order_relaxed);
+    zcl_snapshot_publish_end(&g_snap_env, count);
+    pthread_mutex_unlock(&g_lock);
+    fflush(stderr);
 }
 
 static void *dumper_main(void *arg)
@@ -129,67 +189,8 @@ static void *dumper_main(void *arg)
             struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
             nanosleep(&ts, NULL);
         }
-        if (atomic_load(&g_dumper_stop))
-            break;
-
-        pthread_mutex_lock(&g_lock);
-        /* Publish a coherent snapshot under the registry lifetime lock.
-         * Each connection mutex below also pins its statements until the
-         * scan and diagnostic output finish. */
-        zcl_snapshot_publish_begin(&g_snap_env);
-        int snap_n = 0;
-        for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
-            sqlite3 *db = g_entries[i].db;
-            if (!db)
-                continue;
-            sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
-            sqlite3_mutex_enter(db_mutex);
-            int st = sqlite3_txn_state(db, NULL);
-            /* Loud when a connection is holding a transaction open; quiet
-             * (but still logged) when NONE so the timeline shows liveness. */
-            fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-                    "[db-txn-trace] STATE owner=%s db=%p txn=%s autocommit=%d%s\n",
-                    g_entries[i].label, (void *)db, txn_state_name(st),
-                    sqlite3_get_autocommit(db),
-                    st == SQLITE_TXN_WRITE
-                        ? "  <-- HOLDS WRITE LOCK (candidate holder)" : "");
-            /* When a connection is holding a txn open, name the culprit: any
-             * prepared statement that has been stepped but not reset keeps an
-             * implicit read (or write) transaction alive on the connection and
-             * pins the WAL snapshot -> every later write on THIS handle (and,
-             * since wallet/state_set share it, on every subsystem) returns
-             * SQLITE_BUSY_SNAPSHOT ("database is locked"). sqlite3_stmt_busy()
-             * flags exactly those un-reset cursors. */
-            int busy_count = 0;
-            if (st != SQLITE_TXN_NONE) {
-                sqlite3_stmt *s = NULL;
-                while ((s = sqlite3_next_stmt(db, s)) != NULL) {
-                    if (sqlite3_stmt_busy(s)) {
-                        busy_count++;
-                        const char *sql = sqlite3_sql(s);
-                        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-                                "[db-txn-trace]   BUSY-STMT owner=%s db=%p "
-                                "stmt=%p sql=\"%s\"\n",
-                                g_entries[i].label, (void *)db, (void *)s,
-                                sql ? sql : "(null)");
-                    }
-                }
-            }
-            sqlite3_mutex_leave(db_mutex);
-            if (snap_n < ZCL_DB_TXN_TRACE_MAX_CONNS) {
-                atomic_store_explicit(&g_snap[snap_n].txn_state, st,
-                                      memory_order_relaxed);
-                atomic_store_explicit(&g_snap[snap_n].busy_stmts, busy_count,
-                                      memory_order_relaxed);
-                snprintf(g_snap[snap_n].label, sizeof(g_snap[snap_n].label),
-                         "%s", g_entries[i].label);
-                snap_n++;
-            }
-        }
-        atomic_store_explicit(&g_snap_count, snap_n, memory_order_relaxed);
-        zcl_snapshot_publish_end(&g_snap_env, snap_n);
-        pthread_mutex_unlock(&g_lock);
-        fflush(stderr);
+        if (!atomic_load(&g_dumper_stop))
+            publish_snapshot();
     }
     return NULL;
 }
@@ -219,16 +220,9 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
 {
     if (!db || !zcl_db_txn_trace_enabled())
         return;
-    sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
-    if (!db_mutex) {
-        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
-                "[db-txn-trace] registration refused owner=%s db=%p: "
-                "connection mutex unavailable\n",
-                label ? label : "?", (void *)db);
-        fflush(stderr);
-        return;
-    }
 
+    sqlite3_mutex *mutex = sqlite3_db_mutex(db);
+    sqlite3_mutex_enter(mutex);
     pthread_mutex_lock(&g_lock);
 
     /* Re-label an existing registration or claim a free slot. */
@@ -239,6 +233,7 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
     }
     if (slot < 0) {
         pthread_mutex_unlock(&g_lock);
+        sqlite3_mutex_leave(mutex);
         fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
                 "[db-txn-trace] registry full; %s not tracked\n",
                 label ? label : "?");
@@ -246,14 +241,17 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
         return;
     }
 
-    sqlite3_mutex_enter(db_mutex);
     g_entries[slot].db = db;
     snprintf(g_entries[slot].label, sizeof(g_entries[slot].label), "%s",
              label ? label : "unnamed");
 
     /* ctx is the stable registry-entry address (fixed array). */
-    sqlite3_trace_v2(db, SQLITE_TRACE_STMT, trace_cb, &g_entries[slot]);
-    sqlite3_mutex_leave(db_mutex);
+    if (mutex)
+        sqlite3_trace_v2(db, SQLITE_TRACE_STMT, trace_cb, &g_entries[slot]);
+    else
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace] owner=%s: no connection mutex; "
+                "callback disabled, observations unknown\n", g_entries[slot].label);
 
     ensure_dumper_started_locked();
 
@@ -263,6 +261,7 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
     fflush(stderr);
 
     pthread_mutex_unlock(&g_lock);
+    sqlite3_mutex_leave(mutex);
 }
 
 void zcl_db_txn_trace_unregister(sqlite3 *db)
@@ -270,11 +269,11 @@ void zcl_db_txn_trace_unregister(sqlite3 *db)
     if (!db || !zcl_db_txn_trace_enabled())
         return;
 
+    sqlite3_mutex *mutex = sqlite3_db_mutex(db);
+    sqlite3_mutex_enter(mutex);
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
         if (g_entries[i].db == db) {
-            sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
-            sqlite3_mutex_enter(db_mutex);
             fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
                     "[db-txn-trace] unregistered owner=%s db=%p\n",
                     g_entries[i].label, (void *)db);
@@ -283,12 +282,55 @@ void zcl_db_txn_trace_unregister(sqlite3 *db)
             g_entries[i].label[0] = '\0';
             /* Detach the trace so a soon-to-be-closed handle stops calling
              * back into a stale ctx pointer. */
-            sqlite3_trace_v2(db, 0, NULL, NULL);
-            sqlite3_mutex_leave(db_mutex);
+            if (mutex)
+                sqlite3_trace_v2(db, 0, NULL, NULL);
             break;
         }
     }
     pthread_mutex_unlock(&g_lock);
+    sqlite3_mutex_leave(mutex);
+}
+
+struct txn_snap_local {
+    int txn_state;
+    int busy;
+    char label[48];
+};
+
+static void emit_connections(struct json_value *out,
+                              const struct txn_snap_local *local,
+                              int count, bool torn, bool initialized)
+{
+    int holders = 0, unavailable = 0;
+    struct json_value conns;
+    json_init(&conns);
+    json_set_array(&conns);
+    for (int i = 0; i < count; i++) {
+        bool available = local[i].txn_state >= SQLITE_TXN_NONE;
+        bool holds = available && local[i].txn_state != SQLITE_TXN_NONE;
+        if (!available) unavailable++;
+        if (holds)
+            holders++;
+        struct json_value e;
+        json_init(&e);
+        json_set_object(&e);
+        json_push_kv_str(&e, "owner", local[i].label);
+        json_push_kv_str(&e, "txn_state", txn_state_name(local[i].txn_state));
+        json_push_kv_bool(&e, "observation_available", available);
+        json_push_kv_int(&e, "busy_stmts", (int64_t)local[i].busy);
+        if (available)
+            json_push_kv_bool(&e, "holds_open_txn", holds);
+        json_push_back(&conns, &e);
+        json_free(&e);
+    }
+    json_push_kv_int(out, "connection_count", (int64_t)count);
+    bool complete = unavailable == 0 && !torn && initialized;
+    json_push_kv_bool(out, "observation_complete", complete);
+    json_push_kv_int(out, "unavailable_connections", unavailable);
+    if (complete)
+        json_push_kv_int(out, "open_txn_holders", (int64_t)holders);
+    json_push_kv(out, "connections", &conns);
+    json_free(&conns);
 }
 
 bool db_txn_trace_dump_state_json(struct json_value *out, const char *key)
@@ -308,19 +350,17 @@ bool db_txn_trace_dump_state_json(struct json_value *out, const char *key)
 
     /* Lock-free seqlock read of the background thread's published snapshot.
      * This NEVER calls sqlite3_txn_state / sqlite3_next_stmt on a live handle
-     * from the RPC thread. The background dumper takes both registry and
-     * connection mutexes while inspecting handles, then publishes here. */
-    struct txn_snap_local {
-        int  txn_state;
-        int  busy;
-        char label[48];
-    } local[ZCL_DB_TXN_TRACE_MAX_CONNS];
+     * from the RPC thread — only the background dumper does that, under g_lock,
+     * and publishes the result here. */
+    struct txn_snap_local local[ZCL_DB_TXN_TRACE_MAX_CONNS];
     int count = 0;
+    bool initialized = false;
     bool torn = true;
     for (int attempt = 0; attempt < ZCL_SNAPSHOT_READ_MAX_RETRIES; attempt++) {
         uint64_t seq;
         if (!zcl_snapshot_read_try(&g_snap_env, &seq))
             continue;
+        initialized = atomic_load_explicit(&g_snap_env.generation, memory_order_relaxed) != 0;
         int n = atomic_load_explicit(&g_snap_count, memory_order_relaxed);
         if (n < 0)
             n = 0;
@@ -331,7 +371,9 @@ bool db_txn_trace_dump_state_json(struct json_value *out, const char *key)
                                                       memory_order_relaxed);
             local[i].busy = atomic_load_explicit(&g_snap[i].busy_stmts,
                                                  memory_order_relaxed);
-            memcpy(local[i].label, g_snap[i].label, sizeof(local[i].label));
+            for (size_t j = 0; j < sizeof(local[i].label); j++)
+                local[i].label[j] = atomic_load_explicit(&g_snap[i].label[j],
+                                                        memory_order_relaxed);
             local[i].label[sizeof(local[i].label) - 1] = '\0';
         }
         count = n;
@@ -340,31 +382,12 @@ bool db_txn_trace_dump_state_json(struct json_value *out, const char *key)
             break;
         }
     }
-    if (torn)
+    if (torn) {
         zcl_snapshot_note_torn(&g_snap_env);
-
-    int holders = 0;
-    struct json_value conns;
-    json_init(&conns);
-    json_set_array(&conns);
-    for (int i = 0; i < count; i++) {
-        bool holds = local[i].txn_state != SQLITE_TXN_NONE;
-        if (holds)
-            holders++;
-        struct json_value e;
-        json_init(&e);
-        json_set_object(&e);
-        json_push_kv_str(&e, "owner", local[i].label);
-        json_push_kv_str(&e, "txn_state", txn_state_name(local[i].txn_state));
-        json_push_kv_int(&e, "busy_stmts", (int64_t)local[i].busy);
-        json_push_kv_bool(&e, "holds_open_txn", holds);
-        json_push_back(&conns, &e);
-        json_free(&e);
+        count = 0; /* Do not expose payload bytes from a failed read. */
     }
-    json_push_kv_int(out, "connection_count", (int64_t)count);
-    json_push_kv_int(out, "open_txn_holders", (int64_t)holders);
-    json_push_kv(out, "connections", &conns);
-    json_free(&conns);
+
+    emit_connections(out, local, count, torn, initialized);
 
     struct json_value snap;
     json_init(&snap);

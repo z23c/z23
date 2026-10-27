@@ -17,8 +17,14 @@
 #include "test/test_core.h"
 
 #include "conditions/catalog_lag_exceeded.h"
+#include "controllers/diagnostics_internal.h"
 #include "framework/condition.h"
 #include "storage/catalog_completeness.h"
+#include "storage/progress_store.h"
+#include "json/json.h"
+#include <pthread.h>
+#include <errno.h>
+#include <time.h>
 #include "util/blocker.h"
 
 #include <stdio.h>
@@ -42,6 +48,105 @@ static struct catalog_index_status cl_row(const char *name, int64_t cursor,
     r.lag = lag;
     r.enabled = enabled;
     return r;
+}
+
+struct cl_lock_holder {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int state;
+};
+
+static void *cl_hold_progress_lock(void *arg)
+{
+    struct cl_lock_holder *h = arg;
+    progress_store_tx_lock();
+    pthread_mutex_lock(&h->mutex);
+    h->state = 1;
+    pthread_cond_signal(&h->cond);
+    struct timespec deadline;
+    timespec_get(&deadline, TIME_UTC);
+    deadline.tv_sec += 2;
+    while (h->state == 1) {
+        if (pthread_cond_timedwait(&h->cond, &h->mutex, &deadline) == ETIMEDOUT) {
+            h->state = 3; /* regression escape: release, then fail the assertion */
+            break;
+        }
+    }
+    pthread_mutex_unlock(&h->mutex);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
+static int cl_test_progress_contention(const struct catalog_index_status *rows,
+                                        size_t row_count)
+{
+    int failures = 0;
+    /* Another thread retains the recursive progress mutex until every busy
+     * observation returns. This proves yielding rather than eventual release. */
+    {
+        struct cl_lock_holder h = {
+            PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0
+        };
+        pthread_t thread;
+        int rc = pthread_create(&thread, NULL, cl_hold_progress_lock, &h);
+        CL_CHECK("contention helper starts", rc == 0);
+        if (rc == 0) {
+            pthread_mutex_lock(&h.mutex);
+            while (h.state == 0)
+                pthread_cond_wait(&h.cond, &h.mutex);
+            pthread_mutex_unlock(&h.mutex);
+            struct catalog_index_status busy_rows[CATALOG_COMPLETENESS_MAX_INDEXES];
+            size_t n = 99;
+            CL_CHECK("snapshot explicitly unavailable under contention",
+                     !catalog_completeness_snapshot_try(busy_rows,
+                         CATALOG_COMPLETENESS_MAX_INDEXES, 5000, &n) && n == 0);
+            CL_CHECK("live detect yields", !catalog_lag_exceeded_test_detect_live());
+            CL_CHECK("busy detect preserves armed sustain",
+                     catalog_lag_exceeded_test_feed(rows, row_count));
+            CL_CHECK("live witness yields", !catalog_lag_exceeded_test_witness_live());
+            CL_CHECK("busy witness preserves pending blocker",
+                     blocker_exists("catalog.txindex.lag_exceeded"));
+            struct json_value out;
+            json_init(&out);
+            CL_CHECK("coverage diagnostic returns while lock remains held",
+                     catalog_coverage_dump_state_json(&out, NULL));
+            const struct json_value *status = json_get(&out, "snapshot_status");
+            CL_CHECK("coverage diagnostic names busy observation",
+                     status && json_get_str(status) && strcmp(json_get_str(status), "progress_store_busy") == 0);
+            CL_CHECK("busy observation never claims complete coverage",
+                     json_get(&out, "complete_coverage_count") == NULL);
+            json_free(&out);
+            json_init(&out);
+            CL_CHECK("omniscience returns while progress lock remains held",
+                     omniscience_dump_state_json(&out, NULL));
+            status = json_get(&out, "snapshot_status");
+            CL_CHECK("omniscience reports explicit busy snapshot",
+                     status && json_get_str(status) &&
+                     strcmp(json_get_str(status), "progress_store_busy") == 0);
+            const struct json_value *verdict = json_get(&out, "verdict");
+            CL_CHECK("omniscience busy verdict is unknown",
+                     verdict && json_get_str(verdict) &&
+                     strcmp(json_get_str(verdict), "unknown: progress store busy") == 0);
+            CL_CHECK("omniscience omits completeness claims when busy",
+                     json_get(&out, "indexes") == NULL &&
+                     json_get(&out, "worst_lag") == NULL);
+            json_free(&out);
+
+            pthread_mutex_lock(&h.mutex);
+            CL_CHECK("all observations returned before holder released", h.state == 1);
+            h.state = 2;
+            pthread_cond_signal(&h.cond);
+            pthread_mutex_unlock(&h.mutex);
+            pthread_join(thread, NULL);
+            CL_CHECK("snapshot recovers after release",
+                     catalog_completeness_snapshot_try(busy_rows,
+                         CATALOG_COMPLETENESS_MAX_INDEXES, 5000, &n) && n > 0);
+        }
+        pthread_cond_destroy(&h.cond);
+        pthread_mutex_destroy(&h.mutex);
+    }
+
+    return failures;
 }
 
 int test_catalog_lag_exceeded(void)
@@ -81,6 +186,8 @@ int test_catalog_lag_exceeded(void)
                  BLOCKER_DEPENDENCY);
     CL_CHECK("remedy call counted once",
              catalog_lag_exceeded_test_remedy_calls() == 1);
+
+    failures += cl_test_progress_contention(rows, 2);
 
     /* A NOT-over pass re-arms (resets the sustain). */
     {

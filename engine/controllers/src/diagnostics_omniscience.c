@@ -140,6 +140,16 @@ bool omniscience_dump_state_json(struct json_value *out, const char *key)
     size_t n = catalog_completeness_snapshot(rows, CATALOG_COMPLETENESS_MAX_INDEXES,
                                              hstar);
     json_push_kv_int(out, "target_hstar", hstar);
+    if (n == 0) {
+        json_push_kv_bool(out, "snapshot_complete", false);
+        json_push_kv_str(out, "snapshot_status", "progress_store_busy");
+        json_push_kv_bool(out, "retryable", true);
+        json_push_kv_str(out, "verdict", "unknown: progress store busy");
+        diag_push_health(out, false, "unknown: progress store busy");
+        return true;
+    }
+    json_push_kv_bool(out, "snapshot_complete", true);
+    json_push_kv_str(out, "snapshot_status", "available");
 
     struct json_value indexes;
     json_init(&indexes);

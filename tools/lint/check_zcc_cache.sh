@@ -91,13 +91,13 @@ build()
 last_disposition() { tail -1 "$LOG" | awk '{print $1}'; }
 
 # 1. cold: a miss that compiles for real.
-a="$(build cold)" || exit 1
+a="$(ZCL_CAP_CLOSURE_SOURCE_RECORD=before build cold)" || exit 1
 [ "$(last_disposition)" = MISS ] || fail "a cold build was not a MISS"
 [ "$("$WORK/prog")" = 42 ] || fail "the cold build did not behave correctly"
 
-# 2. nothing changed: the level-1 probe must serve identical bytes.
-b="$(build warm)" || exit 1
-[ "$(last_disposition)" = HIT ] || fail "an unchanged rebuild was not a HIT"
+# 2. Only the parent lint source receipt changed: serve identical cached bytes.
+b="$(ZCL_CAP_CLOSURE_SOURCE_RECORD=after build warm)" || exit 1
+[ "$(last_disposition)" = HIT ] || fail "a changed parent lint source receipt prevented a HIT"
 [ "$a" = "$b" ] || fail "a cache hit produced different bytes than the compile"
 
 # 3. the warning must be replayed, or a hit silently hides diagnostics.
@@ -700,7 +700,8 @@ HDR
 [ "$("$WORK/search")" = 2 ] ||
     fail "new earlier header did not change executed behavior"
 
-# Named libraries without -L are keyed by replaying the compiler search (libm.so is a ld script).
+# Linux keys named libraries without -L by replaying compiler search. Other
+# platforms deliberately bypass: their default linker search is not modeled.
 printf '#include <math.h>\n#include <stdio.h>\nint main(void){volatile double v=81.0;printf("%%.0f\\n",sqrt(v));return 7;}\n' > "$WORK/named.c"
 NLF="$WORK/nlfake"; mkdir -p "$NLF" "$WORK/nl.a" "$WORK/nl.b"; cp "$WORK/named.c" "$WORK/nl.a/"; cp "$WORK/named.c" "$WORK/nl.b/"
 nl_cc() { # nl_cc DIR CC SRC LIB OUT [flags...]: PWD follows the directory.
@@ -708,16 +709,25 @@ nl_cc() { # nl_cc DIR CC SRC LIB OUT [flags...]: PWD follows the directory.
     (cd "$d" && PWD="$d" ZCC_DIR="${NL_DIR:-$ZCC_DIR}" "$ZCC" $c -std=c23 -O1 -ffile-prefix-map="$d=/zcl" "$s" "$l" -o "$o" "$@") 2>/dev/null
 }
 nl_is() { [ "$(last_disposition)" = "$1" ] || fail "named library: $2 (wanted $1)"; }
-nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/named.a" || fail "named library: compile failed"; nl_is MISS "-lm without -L was not keyed"
+case "$(uname -s)" in
+    Linux) nl_cold=MISS; nl_warm=HIT; nl_error=UNKEY ;;
+    *) nl_cold=BYPASS; nl_warm=BYPASS; nl_error=BYPASS ;;
+esac
+nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/named.a" || fail "named library: compile failed"; nl_is "$nl_cold" "unexpected default-search disposition"
 [ "$("$WORK/named.a" || echo "rc=$?")" = "$(printf '9\nrc=7')" ] || fail "named library: program behavior changed"
-nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/named.b" || fail "named library: second compile failed"; nl_is HIT "a second worktree directory did not hit"
-cmp -s "$WORK/named.a" "$WORK/named.b" || fail "named library: the hit is not byte-identical"
-nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/n.lto.a" -flto=auto; nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/n.lto.b" -flto=auto; nl_is MISS "an -flto link crossed directories"
+nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/named.b" || fail "named library: second compile failed"; nl_is "$nl_warm" "unexpected repeated default-search disposition"
+[ "$("$WORK/named.b" || echo "rc=$?")" = "$(printf '9\nrc=7')" ] || fail "named library: repeated program behavior changed"
+if [ "$nl_warm" = HIT ]; then
+    cmp -s "$WORK/named.a" "$WORK/named.b" || fail "named library: the hit is not byte-identical"
+fi
+nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/n.lto.a" -flto=auto; nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/n.lto.b" -flto=auto; nl_is "$nl_cold" "unexpected -flto default-search disposition"
 printf '#error ZCC_NAMED_LIBRARY_DIAGNOSTIC\n' > "$WORK/named-error.c"
 cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" >"$WORK/named-direct.out" 2>&1 && fail "named library: error fixture compiled"
 ZCC_DIR="$WORK/cache-unkey" "$ZCC" cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" >"$WORK/named-cached.out" 2>&1 && fail "named library: error status lost"
 cmp -s "$WORK/named-direct.out" "$WORK/named-cached.out" || fail "named library: compiler diagnostics changed"
-nl_is UNKEY "a compile error was not left to the compiler"
+nl_is "$nl_error" "a compile error was not left to the compiler"
+# Compiler-search replay and GNU linker scripts are Linux-specific.
+if [ "$(uname -s)" = Linux ]; then
 # A fake compiler with a private search path: changed library bytes MISS, a bad script is not served.
 cat > "$WORK/nlcc" <<WRAPPER
 #!/usr/bin/env bash
@@ -734,6 +744,7 @@ printf '/* GNU ld script */\nGROUP ( %s/libzv.a )\n' "$NLF" > "$NLF/libzs.so"; n
 nl_fake 7 && nl_fb -lzs; nl_is MISS "a changed script target was served"
 printf '/* GNU ld script */\nGROUP ( %s/missing.a )\n' "$NLF" > "$NLF/libzg.so"; NL_DIR="$WORK/cache-unkey" nl_fb -lzg || true
 nl_is UNKEY "a script naming a missing file was keyed"
+fi
 
 # A -L appearing after -l, separated or joined, still permits archive reuse.
 cat > "$WORK/named-lib.c" <<'SRC'

@@ -469,6 +469,22 @@ static bool adv_utxo_count(int height_after, int64_t *out_count, void *user)
     return true;
 }
 
+/* These synthetic states own only an active chain and cs_main. Match the
+ * production recursive mutex contract: stage entry and index production may
+ * acquire main recursively even in a single-threaded fixture. */
+static void rf_main_init(struct main_state *ms)
+{
+    memset(ms, 0, sizeof(*ms));
+    zcl_mutex_init(&ms->cs_main);
+    active_chain_init(&ms->chain_active);
+}
+
+static void rf_main_free(struct main_state *ms)
+{
+    active_chain_free(&ms->chain_active);
+    zcl_mutex_destroy(&ms->cs_main);
+}
+
 /* ── per-stage fuzz drivers ───────────────────────────────────────────── */
 
 /* HEADER_ADMIT — reads the live active chain only. Adversary: corrupt the
@@ -480,12 +496,11 @@ static void fuzz_header_admit(uint64_t *rng, int iter)
     if (!progress_store_open(dir)) { test_cleanup_tmpdir(dir); return; }
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    rf_main_init(&ms);
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, false)) {
-        active_chain_free(&ms.chain_active);
+        rf_main_free(&ms);
         progress_store_close(); test_cleanup_tmpdir(dir); return;
     }
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
@@ -502,7 +517,7 @@ static void fuzz_header_admit(uint64_t *rng, int iter)
         header_admit_stage_shutdown();
     }
 
-    active_chain_free(&ms.chain_active);
+    rf_main_free(&ms);
     synth_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -518,12 +533,11 @@ static void fuzz_validate_headers(uint64_t *rng, int iter)
     if (!progress_store_open(dir)) { test_cleanup_tmpdir(dir); return; }
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    rf_main_init(&ms);
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, false)) {
-        active_chain_free(&ms.chain_active);
+        rf_main_free(&ms);
         progress_store_close(); test_cleanup_tmpdir(dir); return;
     }
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
@@ -552,7 +566,7 @@ static void fuzz_validate_headers(uint64_t *rng, int iter)
     validate_headers_stage_shutdown();
     if (ha_ok) header_admit_stage_shutdown();
 
-    active_chain_free(&ms.chain_active);
+    rf_main_free(&ms);
     synth_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -568,12 +582,11 @@ static void fuzz_body_fetch(uint64_t *rng, int iter)
     if (!progress_store_open(dir)) { test_cleanup_tmpdir(dir); return; }
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    rf_main_init(&ms);
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, false)) {
-        active_chain_free(&ms.chain_active);
+        rf_main_free(&ms);
         progress_store_close(); test_cleanup_tmpdir(dir); return;
     }
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
@@ -597,7 +610,7 @@ static void fuzz_body_fetch(uint64_t *rng, int iter)
         body_fetch_stage_shutdown();
     }
 
-    active_chain_free(&ms.chain_active);
+    rf_main_free(&ms);
     synth_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -646,12 +659,11 @@ static void fuzz_downstream(uint64_t *rng, int iter, const struct down_spec *sp)
     if (!progress_store_open(dir)) { test_cleanup_tmpdir(dir); return; }
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    rf_main_init(&ms);
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, true)) {     /* bodies: stages read them */
-        active_chain_free(&ms.chain_active);
+        rf_main_free(&ms);
         progress_store_close(); test_cleanup_tmpdir(dir); return;
     }
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
@@ -672,7 +684,7 @@ static void fuzz_downstream(uint64_t *rng, int iter, const struct down_spec *sp)
         sp->shutdown();   /* idempotent; clears any partial wiring */
     }
 
-    active_chain_free(&ms.chain_active);
+    rf_main_free(&ms);
     synth_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -693,12 +705,11 @@ static void fuzz_tip_finalize(uint64_t *rng, int iter)
     if (!progress_store_open(dir)) { test_cleanup_tmpdir(dir); return; }
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    rf_main_init(&ms);
     int n = sm_range(rng, 1, 12);
     struct synth sc;
     if (!synth_build(&sc, n, false)) {
-        active_chain_free(&ms.chain_active);
+        rf_main_free(&ms);
         progress_store_close(); test_cleanup_tmpdir(dir); return;
     }
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
@@ -726,7 +737,7 @@ static void fuzz_tip_finalize(uint64_t *rng, int iter)
         tip_finalize_stage_shutdown();
     }
 
-    active_chain_free(&ms.chain_active);
+    rf_main_free(&ms);
     synth_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

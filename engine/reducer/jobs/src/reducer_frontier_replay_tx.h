@@ -18,6 +18,15 @@ struct script_validate_dry_run_report;
 struct sqlite3;
 struct uint256;
 
+/* Internal outer acquisition: main before any progress lock/BEGIN. Callers
+ * already owning progress must already own this same recursive main mutex.
+ * Dry-run/TX1 below inherit that ownership; they must not acquire main late. */
+void reducer_frontier_replay_lock_main(struct main_state *ms);
+#ifdef ZCL_TESTING
+void reducer_frontier_replay_set_main_hook_for_testing(
+    void (*hook)(void *), void *ctx);
+#endif
+
 bool reducer_frontier_replay_delete_log_range(struct sqlite3 *db,
                                               const char *table,
                                               int first_h,
@@ -37,6 +46,8 @@ bool reducer_frontier_replay_script_ok_at_unlocked(struct sqlite3 *db,
                                                    int height,
                                                    int *out_ok);
 
+/* Caller owns ms->cs_main before progress; both remain owned throughout
+ * dry-run rollback or the authoritative TX1 commit, respectively. */
 bool reducer_frontier_replay_dry_run_stale_script(
     struct sqlite3 *db,
     struct main_state *ms,
@@ -67,7 +78,8 @@ bool reducer_frontier_replay_stale_proof_tx(struct sqlite3 *db,
                                             const struct uint256 *block_hash);
 
 /* Wave A2 (D4) TX2: the created_outputs backfill of the stale-script reorg
- * unwind, on the projection_store handle + projection tx lock. Runs STRICTLY
+ * unwind, on the kernel handle + progress tx lock. Owns main before progress.
+ * Runs STRICTLY
  * AFTER the kernel TX1 has committed and the caller has released the kernel
  * progress lock (LOCK ORDER LAW) — never nested inside it. Best-effort: a
  * failure is logged and returns false; the forward re-fold (body_persist)

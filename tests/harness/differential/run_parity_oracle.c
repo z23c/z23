@@ -213,7 +213,16 @@ static int po_make_paths(struct po_paths *p, const char *mode)
 static void po_compile_argv(struct po_argvec *a, const struct po_paths *p, const char *out, bool counted)
 {
     static const char *const flags[] = {
-        "cc", "-std=c23", "-O2", "-march=x86-64-v3", "-DZCL_TESTING",
+        "cc", "-std=c23", "-O2",
+#if !defined(__APPLE__) && (defined(__x86_64__) || defined(_M_X64))
+        /* Match the shipped x86 baseline; Darwin uses its portable target. */
+        "-march=x86-64-v3",
+#endif
+        "-DZCL_TESTING",
+#if defined(__APPLE__)
+        /* Permit only the corpus header's explicitly optional weak import. */
+        "-Wl,-U,_bls12_381_pairing_candidate",
+#endif
         "-D_POSIX_C_SOURCE=200809L", "-D_DEFAULT_SOURCE"};
     for (size_t i = 0; i < sizeof flags / sizeof *flags; i++) po_push(a, flags[i]);
     po_push(a, p->inc_here);

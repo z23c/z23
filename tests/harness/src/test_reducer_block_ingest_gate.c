@@ -71,6 +71,8 @@
 #include "validation/accept_block_header.h"
 #include "validation/main_state.h"
 
+#include "platform/time_compat.h"
+#include <pthread.h>
 #include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
@@ -266,6 +268,71 @@ static int rbi_context_valid_twin(struct chain_activation_controller *ctl,
     return failures;
 }
 
+void reducer_ingest_set_context_main_hook_for_testing(
+    void (*hook)(void *), void *ctx);
+
+struct rbi_main_cycle {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    struct chain_activation_controller *ctl;
+    struct block *candidate;
+    struct validation_state *verdict;
+    int route;
+    bool attempted, accepted;
+};
+
+static void rbi_observe_main_attempt(void *arg)
+{
+    struct rbi_main_cycle *cycle = arg;
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->attempted = true;
+    pthread_cond_broadcast(&cycle->changed);
+    pthread_mutex_unlock(&cycle->mutex);
+}
+
+static void *rbi_contended_worker(void *arg)
+{
+    struct rbi_main_cycle *cycle = arg;
+    cycle->accepted = cycle->route == 2
+        ? reducer_stage_p2p_block_for_catchup(cycle->ctl, cycle->candidate, cycle->verdict)
+        : reducer_ingest_block(cycle->ctl, cycle->candidate,
+            cycle->route ? REDUCER_SRC_SUBMIT : REDUCER_SRC_MINED, true, cycle->verdict);
+    return NULL;
+}
+
+static bool rbi_intake_main_order(struct chain_activation_controller *ctl,
+    struct block *candidate, int route, struct validation_state *verdict,
+    bool *ordered)
+{
+    struct rbi_main_cycle cycle = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER,
+        .ctl = ctl, .candidate = candidate, .route = route, .verdict = verdict
+    };
+    validation_state_init(verdict);
+    zcl_mutex_lock(&ctl->ms->cs_main);
+    reducer_ingest_set_context_main_hook_for_testing(rbi_observe_main_attempt, &cycle);
+    pthread_t worker;
+    bool started = pthread_create(&worker, NULL, rbi_contended_worker, &cycle) == 0;
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec += 5;
+    pthread_mutex_lock(&cycle.mutex);
+    int rc = 0;
+    while (started && !cycle.attempted && rc == 0)
+        rc = pthread_cond_timedwait(&cycle.changed, &cycle.mutex, &deadline);
+    bool attempted = cycle.attempted;
+    pthread_mutex_unlock(&cycle.mutex);
+    bool progress_free = attempted && progress_store_tx_trylock();
+    if (progress_free) progress_store_tx_unlock();
+    zcl_mutex_unlock(&ctl->ms->cs_main);
+    if (started) pthread_join(worker, NULL);
+    reducer_ingest_set_context_main_hook_for_testing(NULL, NULL);
+    pthread_cond_destroy(&cycle.changed);
+    pthread_mutex_destroy(&cycle.mutex);
+    *ordered = started && attempted && progress_free;
+    return cycle.accepted;
+}
+
 static int rbi_context_intake_case(void)
 {
     int failures = 0;
@@ -314,8 +381,9 @@ static int rbi_context_intake_case(void)
             int writes = sqlite3_total_changes(progress_store_db());
             size_t entries = ms.map_block_index.size;
             uint64_t cursor = header_admit_stage_cursor();
-            bool accepted = route == 2 ? reducer_stage_p2p_block_for_catchup(&ctl, &candidate, &verdict) :
-                reducer_ingest_block(&ctl, &candidate, route ? REDUCER_SRC_SUBMIT : REDUCER_SRC_MINED, true, &verdict);
+            bool ordered = false;
+            bool accepted = rbi_intake_main_order(&ctl, &candidate, route, &verdict, &ordered);
+            RBI_CHECK("context: intake main waiter leaves progress available", ordered);
             RBI_CHECK("context: all intake routes reject equal MTP before mutation",
                 !accepted && strcmp(verdict.reject_reason, "time-too-old") == 0 &&
                 sqlite3_total_changes(progress_store_db()) == writes && ms.map_block_index.size == entries &&

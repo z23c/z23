@@ -619,6 +619,43 @@ static int test_fleet_board_corrupt_reads(void)
     return failures;
 }
 
+extern void (*db_fleet_board_inventory_row_for_testing)(sqlite3_stmt *, int);
+static bool fb_inventory_excess;
+static int fb_inventory_injected;
+static int fb_inventory_injection_rc;
+
+static void fb_inventory_interrupt(sqlite3_stmt *s, int count)
+{
+    if (fb_inventory_injected || count != (fb_inventory_excess ? 0 : 1))
+        return;
+    fb_inventory_injected++;
+    fb_inventory_injection_rc = sqlite3_reset(s);
+    if (fb_inventory_injection_rc == SQLITE_OK)
+        fb_inventory_injection_rc = sqlite3_bind_int(
+            s, sqlite3_bind_parameter_count(s), fb_inventory_excess ? 3 : 1);
+}
+
+/* Larger physical backing makes the old bug fail safely at the canaries. */
+static bool fb_inventory_interrupted_page(struct node_db *db, bool excess)
+{
+    uint8_t ids[4][32];
+    memset(ids, 0xa5, sizeof(ids));
+    int64_t cursor = 999;
+    fb_inventory_excess = excess;
+    fb_inventory_injected = 0;
+    fb_inventory_injection_rc = SQLITE_ERROR;
+    db_fleet_board_inventory_row_for_testing = fb_inventory_interrupt;
+    int result = db_fleet_board_ids_before(db, 800, 0, true, ids, 2, &cursor);
+    db_fleet_board_inventory_row_for_testing = NULL;
+    uint8_t cleared[2][32] = {{0}};
+    uint8_t guard[2][32];
+    memset(guard, 0xa5, sizeof(guard));
+    return result == -1 && cursor == 0 && fb_inventory_injected == 1 &&
+           fb_inventory_injection_rc == SQLITE_OK &&
+           memcmp(ids, cleared, sizeof(cleared)) == 0 &&
+           memcmp(ids + 2, guard, sizeof(guard)) == 0;
+}
+
 static int test_fleet_board_inventory_pages(void)
 {
     int failures = 0;
@@ -639,6 +676,9 @@ static int test_fleet_board_inventory_pages(void)
             if (i < 2)
                 memcpy(oldest[i], post.id, 32);
         }
+
+        ASSERT(fb_inventory_interrupted_page(&db, false));
+        ASSERT(fb_inventory_interrupted_page(&db, true));
 
         uint8_t ids[FLEET_BOARD_FRAME_IDS_MAX][32];
         int64_t cursor = 0;

@@ -336,7 +336,7 @@ static bool reducer_frontier_replay_stale_script_hole_is_unactionable(
  * (STEP 3) — there is NO write-once marker; the rewind + STEP-1's dry==real
  * guarantee make each pass end as progress (rewind/rewrite) XOR named
  * escalation. */
-bool maybe_replay_stale_script_via(
+static bool replay_stale_script_with_main_locked(
     sqlite3 *db,
     struct main_state *ms,
     bool apply,
@@ -500,6 +500,22 @@ bool maybe_replay_stale_script_via(
              "(hole h=%d; co %d..%d)", replay_first, height, replay_first,
              backfill_top);
     return true;
+}
+
+/* Own main before the snapshot/TX1 progress scope, including recursive checked
+ * body reads. Keep TX1 and best-effort TX2 separate, with their existing progress
+ * unlock gap. Do not widen this ownership over the dispatch/creator ladder. */
+bool maybe_replay_stale_script_via(
+    sqlite3 *db, struct main_state *ms, bool apply,
+    struct stage_reducer_frontier_reconcile_result *out,
+    stale_script_detector_fn detect, bool rewind_headers)
+{
+    reducer_frontier_replay_lock_main(ms);
+    bool ok = replay_stale_script_with_main_locked(
+        db, ms, apply, out, detect, rewind_headers);
+    if (ms)
+        zcl_mutex_unlock(&ms->cs_main);
+    return ok;
 }
 
 /* ok=0 status hole (internal_error / prevout_unresolved / block_decode_failed):

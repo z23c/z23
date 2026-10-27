@@ -422,6 +422,11 @@ static int vh_setup(const char *tag, int n, vh_validator_fn fn, void *user,
                      struct main_state *ms,
                      struct synth_chain_vh *sc)
 {
+    /* Establish teardown-safe ownership before any partial setup return. */
+    memset(ms, 0, sizeof(*ms));
+    zcl_mutex_init(&ms->cs_main);
+    active_chain_init(&ms->chain_active);
+    memset(sc, 0, sizeof(*sc));
     test_fmt_tmpdir(dir_out, dir_out_size, "validate_headers", tag);
     mkdir_p_vh(dir_out);
     /* Pin the datadir: validate_headers_stage_init caches GetDataDir(), which
@@ -429,8 +434,6 @@ static int vh_setup(const char *tag, int n, vh_validator_fn fn, void *user,
     if (!SetDataDir(dir_out)) return 5;
     if (!progress_store_open(dir_out)) return 1;
 
-    memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
     if (!synth_chain_vh_build(sc, n)) return 2;
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
 
@@ -446,6 +449,7 @@ static void vh_teardown(const char *dir, struct main_state *ms,
     validate_headers_stage_shutdown();
     header_admit_stage_shutdown();
     active_chain_free(&ms->chain_active);
+    zcl_mutex_destroy(&ms->cs_main);
     synth_chain_vh_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

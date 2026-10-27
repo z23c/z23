@@ -17,9 +17,8 @@
  *     non-NONE (WRITE/READ) transaction while otherwise idle — i.e. the
  *     never-committed lock holder that starves every other node.db writer.
  *
- * Register/unregister are no-ops when the env flag is unset. An enabled
- * diagnostic scan can wait behind other SQLite work; it has no fixed
- * completion latency. */
+ * Register/unregister are no-ops when the env flag is unset. A scan never
+ * waits for a connection mutex: busy connections remain explicitly unknown. */
 
 #ifndef ZCL_UTIL_DB_TXN_TRACE_H
 #define ZCL_UTIL_DB_TXN_TRACE_H
@@ -34,11 +33,10 @@ extern "C" {
 /* True iff ZCL_DB_TXN_TRACE=1 was set at process start. */
 bool zcl_db_txn_trace_enabled(void);
 
-/* Registry operations take the registry mutex before the SQLite connection
- * mutex. Do not call register or unregister from a SQLite callback or while
- * holding the connection mutex. Keep db valid until the operation returns.
- * Connections without a SQLite mutex are refused with an explicit diagnostic
- * and are not registered. */
+/* Registry operations take the SQLite connection mutex before the registry
+ * mutex; the collector only tries connection ownership under the registry.
+ * Keep db valid until the operation returns. Mutex-free connections retain
+ * UNKNOWN observations without installing a cross-thread callback. */
 /* Register a node.db connection under a human owner label (e.g. "node_db:main",
  * "node_db:private", "coins_view"). Installs the statement trace and starts the
  * background txn-state dumper on first use. No-op when tracing is disabled or
@@ -53,7 +51,9 @@ void zcl_db_txn_trace_unregister(sqlite3 *db);
  * live sqlite handle from the caller's (RPC) thread — the per-connection
  * txn_state / busy-statement scan runs only on the background dumper thread and
  * is read here from a seqlock-published snapshot block. Emits {enabled:false}
- * when ZCL_DB_TXN_TRACE was not set at process start. */
+ * when ZCL_DB_TXN_TRACE was not set at process start. Busy or mutex-free
+ * observations retain UNKNOWN state and busy_stmts=-1. Unseeded, torn or
+ * incomplete snapshots omit the open_txn_holders aggregate. */
 struct json_value;
 bool db_txn_trace_dump_state_json(struct json_value *out, const char *key);
 

@@ -409,18 +409,40 @@ static bool reducer_push_header_admit(struct block *pblock,
 
 static _Atomic uint64_t g_catchup_known_header_bypass_total;
 
-/* Context is read under progress-store then cs_main, before ctl->mutex/drain.
+#ifdef ZCL_TESTING
+static void (*g_context_main_hook)(void *);
+static void *g_context_main_hook_ctx;
+void reducer_ingest_set_context_main_hook_for_testing(
+    void (*hook)(void *), void *ctx);
+void reducer_ingest_set_context_main_hook_for_testing(
+    void (*hook)(void *), void *ctx)
+{
+    g_context_main_hook = hook;
+    g_context_main_hook_ctx = ctx;
+}
+#endif
+
+static void reducer_context_lock_main(struct main_state *ms)
+{
+#ifdef ZCL_TESTING
+    if (g_context_main_hook)
+        g_context_main_hook(g_context_main_hook_ctx);
+#endif
+    zcl_mutex_lock(&ms->cs_main);
+}
+
+/* Context is read under cs_main then progress-store, before ctl->mutex/drain.
  * Missing parents keep the existing staging/drain path and are rechecked there. */
 static bool reducer_gate_header_context(struct chain_activation_controller *ctl,
     struct block *block, struct validation_state *out)
 {
     bool parent_known = false;
+    reducer_context_lock_main(ctl->ms);
     progress_store_tx_lock();
-    zcl_mutex_lock(&ctl->ms->cs_main);
     bool ok = header_admit_check_contextual_locked(ctl->ms, ctl->params,
         &block->header, out, &parent_known);
-    zcl_mutex_unlock(&ctl->ms->cs_main);
     progress_store_tx_unlock();
+    zcl_mutex_unlock(&ctl->ms->cs_main);
     return ok;
 }
 

@@ -1233,6 +1233,18 @@ int db_fleet_board_wiki_list(struct node_db *ndb,
     return db_fleet_board_wiki_list_after(ndb, "", out, max, NULL, NULL);
 }
 
+#ifdef ZCL_TESTING
+/* Only invoked between SQLite calls, never from a reentrant step callback. */
+void (*db_fleet_board_inventory_row_for_testing)(sqlite3_stmt *, int) = NULL;
+#endif
+
+static bool fleet_board_inventory_row_valid(sqlite3_stmt *s,
+    struct db_fleet_board_post *row, size_t count, size_t max, int64_t previous)
+{
+    return count < max && fleet_board_row_read(s, row) && row->seq > 0 &&
+           (previous == 0 || row->seq < previous);
+}
+
 int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
                               int64_t before_seq, bool public_only,
                               uint8_t (*ids)[32], size_t max,
@@ -1257,9 +1269,14 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
     qb_limit(&q, (int64_t)max);
     sqlite3_stmt *s = NULL;
     int count = 0;
+    int64_t previous_seq = before_seq;
     if (!QB_PREPARE(ndb, &q, s))
         return -1;
     for (;;) {
+#ifdef ZCL_TESTING
+        if (db_fleet_board_inventory_row_for_testing)
+            db_fleet_board_inventory_row_for_testing(s, count);
+#endif
         if (!AR_STEP_ROW(s)) {
             /* reset returns the preceding statement's error, so clean EOF
              * remains distinguishable from a failed read through AR. */
@@ -1267,21 +1284,16 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
                 break;
             LOG_WARN("fleet.board", "inventory page read failed: %s",
                      sqlite3_errmsg(ndb->db));
-            sqlite3_finalize(s);
-            memset(ids, 0, max * sizeof(ids[0]));
-            if (last_seq_out)
-                *last_seq_out = 0;
-            return -1;
+            goto failed;
         }
         struct db_fleet_board_post row;
         memset(&row, 0, sizeof(row));
-        if (!fleet_board_row_read(s, &row)) {
-            sqlite3_finalize(s);
-            memset(ids, 0, max * sizeof(ids[0]));
-            if (last_seq_out)
-                *last_seq_out = 0;
-            return -1;
+        if (!fleet_board_inventory_row_valid(
+                s, &row, (size_t)count, max, previous_seq)) {
+            LOG_WARN("fleet.board", "inventory page exceeded bounds or order");
+            goto failed;
         }
+        previous_seq = row.seq;
         memcpy(ids[count], row.post.id, 32);
         if (last_seq_out)
             *last_seq_out = row.seq;
@@ -1289,6 +1301,13 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
     }
     sqlite3_finalize(s);
     return count;
+
+failed:
+    sqlite3_finalize(s);
+    memset(ids, 0, max * sizeof(ids[0]));
+    if (last_seq_out)
+        *last_seq_out = 0;
+    return -1;
 }
 
 int db_fleet_board_recent_ids(struct node_db *ndb, int64_t now,

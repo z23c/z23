@@ -122,7 +122,8 @@ bool catalog_index_emptiness_is_meaningful(
 /* Fill out[0 .. min(registered_count, max)) with one row per registered
  * index, each cursor read LIVE via its accessor and compared against
  * target_height. Returns the number of rows written (0 if out is NULL or
- * max is 0 — logged, never a crash).
+ * max is 0 — logged, never a crash; also 0 while progress-store observation
+ * is busy). Use snapshot_try to distinguish unavailable observations.
  *
  * Pure read: touches no store's write path, allocates nothing (out is
  * caller-owned), and is safe to call before boot completes or with a
@@ -130,6 +131,14 @@ bool catalog_index_emptiness_is_meaningful(
  * enabled=false instead of dereferencing an unready singleton. */
 size_t catalog_completeness_snapshot(struct catalog_index_status *out,
                                      size_t max, int64_t target_height);
+
+/* Non-blocking observation of the progress store. False means unavailable
+ * (including contention), *count=0; callers must preserve prior condition
+ * evidence and report an unknown snapshot. Releases the progress lock before
+ * reading node/projection stores. Their own read contracts still apply. */
+bool catalog_completeness_snapshot_try(struct catalog_index_status *out,
+                                        size_t max, int64_t target_height,
+                                        size_t *count);
 
 /* The largest lag among ENABLED rows in `rows[0..n)` (disabled rows carry
  * no lag signal and are skipped — an opted-out address_index is not

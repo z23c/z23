@@ -49,6 +49,30 @@ static int64_t db_now_ms(void)
     return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
+/* These are boundary timings, not a claim that SQLite performed WAL replay
+ * in a particular call. Keep them boot-only and do not install a progress
+ * handler: observation must not change SQL deadlines or interrupt behavior. */
+static void db_boot_timing(bool boot, const char *phase, int64_t started,
+                            const char *attempt, const char *result)
+{
+    if (boot)
+        printf("[boot]   %-28s %lldms (attempt=%s result=%s)\n", phase,
+               (long long)(db_now_ms() - started), attempt, result);
+}
+
+static struct node_db_schema_preflight db_boot_schema_preflight(
+    const char *path, bool boot_ceremony, const char *phase)
+{
+    int64_t started = boot_ceremony ? db_now_ms() : 0;
+    struct node_db_schema_preflight preflight =
+        node_db_schema_preflight_existing(path);
+    db_boot_timing(boot_ceremony, phase, started, "initial",
+                   preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER ||
+                   preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN
+                       ? "refused" : "ok");
+    return preflight;
+}
+
 static void node_db_state_init(struct node_db *ndb)
 {
     if (!ndb)
@@ -510,18 +534,25 @@ static void db_quarantine_files(const char *path)
     db_quarantine_one(shm, suffix);
 }
 
-static bool db_open_raw(sqlite3 **db_out, const char *path)
+static bool db_open_raw(sqlite3 **db_out, const char *path,
+                         bool boot_ceremony, const char *attempt)
 {
+    int64_t started = boot_ceremony ? db_now_ms() : 0;
     int rc = sqlite3_open_v2(path, db_out,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
         NULL);
+    db_boot_timing(boot_ceremony, "sqlite.raw_open", started, attempt,
+                   rc == SQLITE_OK ? "ok" : "failed");
     if (rc != SQLITE_OK) {
         LOG_WARN("db", "db: cannot open %s: %s", path, sqlite3_errmsg(*db_out));
         sqlite3_close(*db_out);
         *db_out = NULL;
         return false;
     }
+    started = boot_ceremony ? db_now_ms() : 0;
     db_set_pragmas(*db_out);
+    /* db_set_pragmas has no result contract; do not invent success here. */
+    db_boot_timing(boot_ceremony, "sqlite.pragmas", started, attempt, "returned");
     return true;
 }
 
@@ -629,7 +660,7 @@ static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
                             boot_ceremony ? DB_LIFETIME_BACKING_OWNER
                                           : DB_LIFETIME_HANDLE_OWNER,
                             ndb->lifetime_generation);
-    bool opened = db_open_raw(&ndb->db, path);
+    bool opened = db_open_raw(&ndb->db, path, boot_ceremony, "recovery");
     ndb->lifetime_generation = db_lifetime_scope_generation();
     db_lifetime_scope_leave(&scope);
     return opened;
@@ -639,17 +670,24 @@ static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
  * failure was SQLite naming the STORE malformed rather than a schema
  * regression — only that verdict earns the repair above. */
 static bool db_build_schema(struct node_db *ndb, bool boot_ceremony,
-                            bool *corrupt_out)
+                            bool *corrupt_out, const char *attempt)
 {
     *corrupt_out = false;
-    if (!create_schema(ndb)) {
+    int64_t started = boot_ceremony ? db_now_ms() : 0;
+    bool schema_ok = create_schema(ndb);
+    db_boot_timing(boot_ceremony, "sqlite.create_schema", started, attempt,
+                   schema_ok ? "ok" : "failed");
+    if (!schema_ok) {
         *corrupt_out = db_error_is_corruption(ndb->db);
         return false;
     }
     ndb->open = true; /* node_db_migrate uses node_db_state_* helpers. */
     /* Runtime reopen is already at current schema — suppress the banner. */
     ndb->suppress_migrate_banner = !boot_ceremony;
+    started = boot_ceremony ? db_now_ms() : 0;
     int migrated = node_db_migrate(ndb, NULL);
+    db_boot_timing(boot_ceremony, "sqlite.migrate", started, attempt,
+                   migrated >= 0 ? "ok" : "failed");
     ndb->suppress_migrate_banner = false;
     ndb->open = false;
     if (migrated < 0) {
@@ -667,17 +705,17 @@ static bool db_build_schema(struct node_db *ndb, bool boot_ceremony,
  * The repair is attempted exactly once — the rebuilt store is empty, so a
  * second failure means the fault was never the old file. */
 static bool db_build_schema_with_repair(struct node_db *ndb, const char *path,
-                                        bool boot_ceremony)
+                                        bool boot_ceremony, const char *attempt)
 {
     bool corrupt = false;
-    if (db_build_schema(ndb, boot_ceremony, &corrupt))
+    if (db_build_schema(ndb, boot_ceremony, &corrupt, attempt))
         return true;
     if (!corrupt || !boot_ceremony)
         return false;
     LOG_WARN("db", "db: %s is malformed (schema build); quarantining the "
              "family and rebuilding fresh SQLite state", path);
     return db_quarantine_and_reopen(ndb, path, boot_ceremony) &&
-           db_build_schema(ndb, boot_ceremony, &corrupt);
+           db_build_schema(ndb, boot_ceremony, &corrupt, "recovery");
 }
 
 /* Shared open path. boot_ceremony=true is the one-time boot open (quick_check +
@@ -698,7 +736,7 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
      * parent directory.  The identical check below remains after lease
      * acquisition to close the inspect-to-open race. */
     struct node_db_schema_preflight prelease_preflight =
-        node_db_schema_preflight_existing(path);
+        db_boot_schema_preflight(path, boot_ceremony, "sqlite.preflight_prelease");
     if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
         node_db_log_newer_schema_refusal((int)prelease_preflight.version,
                                          (int)prelease_preflight.floor);
@@ -732,7 +770,7 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
      * from fresh: a malformed/missing/contradictory marker on an existing
      * store must never be interpreted as schema 0 and migrated in place. */
     struct node_db_schema_preflight preflight =
-        node_db_schema_preflight_existing(path);
+        db_boot_schema_preflight(path, boot_ceremony, "sqlite.preflight_postlease");
     if (preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
         node_db_log_newer_schema_refusal((int)preflight.version,
                                          (int)preflight.floor);
@@ -749,11 +787,12 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
         boot_ceremony ? DB_LIFETIME_BACKING_OWNER
                       : DB_LIFETIME_HANDLE_OWNER,
         0);
-    bool raw_opened = db_open_raw(&ndb->db, path);
+    bool raw_opened = db_open_raw(&ndb->db, path, boot_ceremony, "initial");
     ndb->lifetime_generation = db_lifetime_scope_generation();
     db_lifetime_scope_leave(&open_scope);
     if (!raw_opened)
         return node_db_open_abort(ndb);
+    const char *schema_attempt = "initial";
     if (boot_ceremony) {
         /* Skip-probe: true = verified-clean skip or unclean/unverified
          * deferral (probe logs which). False = run blocking PRAGMA. */
@@ -769,11 +808,12 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
                          path);
                 if (!db_quarantine_and_reopen(ndb, path, boot_ceremony))
                     return node_db_open_abort(ndb);
+                schema_attempt = "recovery";
             }
         }
     }
 
-    if (!db_build_schema_with_repair(ndb, path, boot_ceremony))
+    if (!db_build_schema_with_repair(ndb, path, boot_ceremony, schema_attempt))
         return node_db_open_abort(ndb);
     /* Crash recovery: staged snapshot rows are never authoritative across
      * process lifetimes. BOOT-only (a reopen must not re-run it every cycle). */

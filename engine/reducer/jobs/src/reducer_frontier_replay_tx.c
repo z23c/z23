@@ -482,7 +482,7 @@ bool reducer_frontier_replay_stale_script_tx(
     return true;
 }
 
-bool reducer_frontier_replay_backfill_created_outputs_projection(
+static bool replay_backfill_created_outputs_with_main_locked(
     struct main_state *ms, int replay_first, int backfill_top)
 {
     if (backfill_top < replay_first)
@@ -528,6 +528,44 @@ bool reducer_frontier_replay_backfill_created_outputs_projection(
     rf_replay_record_projection_commit();
     progress_store_tx_unlock();
     return true;
+}
+
+#ifdef ZCL_TESTING
+static void (*g_replay_main_hook)(void *);
+static void *g_replay_main_hook_ctx;
+
+void reducer_frontier_replay_set_main_hook_for_testing(
+    void (*hook)(void *), void *ctx)
+{
+    g_replay_main_hook = hook;
+    g_replay_main_hook_ctx = ctx;
+}
+#endif
+
+/* Observation is immediately before the real acquisition, never a replacement
+ * for it. Test owners install/clear only while no replay worker is running. */
+void reducer_frontier_replay_lock_main(struct main_state *ms)
+{
+    if (!ms)
+        return;
+#ifdef ZCL_TESTING
+    if (g_replay_main_hook)
+        g_replay_main_hook(g_replay_main_hook_ctx);
+#endif
+    zcl_mutex_lock(&ms->cs_main);
+}
+
+bool reducer_frontier_replay_backfill_created_outputs_projection(
+    struct main_state *ms, int replay_first, int backfill_top)
+{
+    if (backfill_top < replay_first)
+        return true;
+    reducer_frontier_replay_lock_main(ms);
+    bool ok = replay_backfill_created_outputs_with_main_locked(
+        ms, replay_first, backfill_top);
+    if (ms)
+        zcl_mutex_unlock(&ms->cs_main);
+    return ok;
 }
 
 /* Proof-repair rewind chain: coin inverse deltas, proof log delete, cursor

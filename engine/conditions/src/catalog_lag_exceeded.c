@@ -128,6 +128,7 @@ static bool detect_catalog_lag_exceeded(void)
 {
     struct catalog_index_status rows[CATALOG_COMPLETENESS_MAX_INDEXES];
     size_t n = snapshot_live(rows, CATALOG_COMPLETENESS_MAX_INDEXES);
+    if (n == 0) return false; /* unavailable observation: retain sustain */
     return eval_over(rows, n);
 }
 
@@ -207,6 +208,7 @@ static bool witness_catalog_lag_exceeded(int64_t target_at_detect)
     struct catalog_index_status rows[CATALOG_COMPLETENESS_MAX_INDEXES];
     size_t n = catalog_completeness_snapshot(
         rows, CATALOG_COMPLETENESS_MAX_INDEXES, hstar);
+    if (n == 0) return false; /* no witness: preserve the existing blocker */
     int64_t cursor_now = -1;
     for (size_t i = 0; i < n; i++) {
         if (rows[i].name && strcmp(rows[i].name, name) == 0) {
@@ -282,6 +284,14 @@ bool catalog_coverage_dump_state_json(struct json_value *out, const char *key)
     size_t n = catalog_completeness_snapshot(rows, CATALOG_COMPLETENESS_MAX_INDEXES,
                                              hstar);
 
+    if (n == 0) {
+        json_push_kv_bool(out, "snapshot_complete", false);
+        json_push_kv_str(out, "snapshot_status", "progress_store_busy");
+        json_push_kv_bool(out, "retryable", true);
+        return true;
+    }
+    json_push_kv_bool(out, "snapshot_complete", true);
+    json_push_kv_str(out, "snapshot_status", "available");
     json_push_kv_int(out, "target_height", hstar);
     json_push_kv_int(out, "index_count", (int64_t)n);
 
@@ -336,6 +346,17 @@ void catalog_lag_exceeded_test_reset(void)
     atomic_store(&g_armed_name, NULL);
     atomic_store(&g_armed_cursor, 0);
     atomic_store(&g_test_remedy_calls, 0);
+}
+
+/* Exercise the real observation paths under fixture contention. */
+bool catalog_lag_exceeded_test_detect_live(void)
+{
+    return detect_catalog_lag_exceeded();
+}
+
+bool catalog_lag_exceeded_test_witness_live(void)
+{
+    return witness_catalog_lag_exceeded(0);
 }
 
 bool catalog_lag_exceeded_test_feed(const struct catalog_index_status *rows,

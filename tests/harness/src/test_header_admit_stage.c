@@ -37,6 +37,8 @@
 
 #include "../../../engine/jobs/src/header_admit_forward_rewind.h"
 
+#include "platform/time_compat.h"
+#include <pthread.h>
 #include <errno.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -352,6 +354,7 @@ static int ha_drain_five_block_chain_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
 
     struct synth_chain sc;
@@ -393,6 +396,7 @@ static int ha_drain_five_block_chain_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -410,6 +414,7 @@ static int ha_replay_reopen_case(void)
     HA_CHECK("replay: store opens", progress_store_open(dir));
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 3);
@@ -440,6 +445,7 @@ static int ha_replay_reopen_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -457,6 +463,7 @@ static int ha_missing_pprev_blocked_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 3);
@@ -477,6 +484,7 @@ static int ha_missing_pprev_blocked_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -494,6 +502,7 @@ static int ha_authoritative_hook_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 2);
@@ -512,6 +521,7 @@ static int ha_authoritative_hook_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -636,6 +646,7 @@ static int ha_dump_state_json_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 2);
@@ -661,6 +672,7 @@ static int ha_dump_state_json_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -692,6 +704,7 @@ static int ha_reorg_self_heal_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
@@ -726,6 +739,7 @@ static int ha_reorg_self_heal_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -762,6 +776,7 @@ static int ha_forward_fork_heal_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
@@ -818,6 +833,7 @@ static int ha_forward_fork_heal_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -837,6 +853,7 @@ static int ha_fork_parent_guard_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
@@ -886,6 +903,7 @@ static int ha_fork_parent_guard_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -904,6 +922,7 @@ static int ha_prior_hash_guard_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
@@ -936,6 +955,7 @@ static int ha_prior_hash_guard_case(void)
 
     header_admit_stage_shutdown();
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -955,6 +975,7 @@ static int ha_trusted_base_parent_case(void)
 
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     atomic_store(&ms.chain_active.height, 10);
 
@@ -987,6 +1008,87 @@ static int ha_trusted_base_parent_case(void)
              !header_admit_forward_replay_parent_ok(db, &ms, &child, 11));
 
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+struct ha_main_cycle {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    bool attempted, drain;
+    int result;
+};
+
+static void ha_observe_main_attempt(void *arg)
+{
+    struct ha_main_cycle *cycle = arg;
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->attempted = true;
+    pthread_cond_broadcast(&cycle->changed);
+    pthread_mutex_unlock(&cycle->mutex);
+}
+
+static void *ha_contended_worker(void *arg)
+{
+    struct ha_main_cycle *cycle = arg;
+    cycle->result = cycle->drain ? header_admit_stage_drain(4)
+                                : (int)header_admit_stage_step_once();
+    return NULL;
+}
+
+static bool ha_main_waiter_leaves_progress(struct main_state *ms, bool drain)
+{
+    struct ha_main_cycle cycle = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .changed = PTHREAD_COND_INITIALIZER, .drain = drain
+    };
+    zcl_mutex_lock(&ms->cs_main);
+    header_admit_stage_set_main_hook_for_testing(ha_observe_main_attempt, &cycle);
+    pthread_t worker;
+    bool started = pthread_create(&worker, NULL, ha_contended_worker, &cycle) == 0;
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec += 5;
+    pthread_mutex_lock(&cycle.mutex);
+    int rc = 0;
+    while (started && !cycle.attempted && rc == 0)
+        rc = pthread_cond_timedwait(&cycle.changed, &cycle.mutex, &deadline);
+    bool attempted = cycle.attempted;
+    pthread_mutex_unlock(&cycle.mutex);
+    bool progress_free = attempted && progress_store_tx_trylock();
+    if (progress_free) progress_store_tx_unlock();
+    /* Release every holder before joining, including on baseline failure. */
+    zcl_mutex_unlock(&ms->cs_main);
+    if (started) pthread_join(worker, NULL);
+    header_admit_stage_set_main_hook_for_testing(NULL, NULL);
+    pthread_cond_destroy(&cycle.changed);
+    pthread_mutex_destroy(&cycle.mutex);
+    return started && attempted && progress_free &&
+        cycle.result == (drain ? 0 : (int)JOB_IDLE);
+}
+
+static int ha_outer_main_order_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "header_admit", "outer_main_order");
+    bool opened = progress_store_open(dir);
+    HA_CHECK("main order: isolated store opens", opened);
+    if (!opened) { test_cleanup_tmpdir(dir); return failures; }
+    struct main_state ms;
+    main_state_init(&ms);
+    bool bound = header_admit_stage_init(&ms);
+    HA_CHECK("main order: stage binds", bound);
+    if (bound) {
+        HA_CHECK("standalone step main waiter leaves progress available",
+            ha_main_waiter_leaves_progress(&ms, false));
+        HA_CHECK("batch drain main waiter leaves progress available",
+            ha_main_waiter_leaves_progress(&ms, true));
+    }
+    header_admit_stage_shutdown();
+    main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return failures;
@@ -998,6 +1100,7 @@ int test_header_admit_stage(void)
     int failures = 0;
 
     blocker_module_init();
+    failures += ha_outer_main_order_case();
     failures += ha_deferred_context_case();
 
     failures += ha_drain_five_block_chain_case();

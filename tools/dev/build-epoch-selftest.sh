@@ -85,6 +85,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 # the production no-symlink path contract through the physical temp path.
 WORK="$(cd "$WORK" && pwd -P)"
 CHILD_PIDS=()
+IDENTITY_PAIR_PIDS=()
 SELFTEST_WATCHDOG_PID=""
 
 cleanup()
@@ -95,10 +96,10 @@ cleanup()
     if [ -n "$SELFTEST_WATCHDOG_PID" ]; then
         kill "$SELFTEST_WATCHDOG_PID" 2>/dev/null || true
     fi
-    for pid in "${CHILD_PIDS[@]}"; do
+    for pid in "${CHILD_PIDS[@]}" "${IDENTITY_PAIR_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
-    for pid in "${CHILD_PIDS[@]}"; do
+    for pid in "${CHILD_PIDS[@]}" "${IDENTITY_PAIR_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
     rm -rf "$WORK"
@@ -227,8 +228,9 @@ build_candidate()
     printf '#include <stdio.h>\nint main(void) { puts("%s"); return 0; }\n' \
         "$payload" > "$source"
     temporary="$(mktemp "$WORK/objects/epochs/$epoch/fixture.XXXXXX")"
-    # The fixture intentionally uses the same compiler command fingerprinted
-    # by the key tool.  Whitespace-only CC wrappers match Make's CC contract.
+    # Payloads use the selected real compiler. Session state-machine fixtures
+    # separately bind their bounded query driver; neither stands for a proof
+    # that these payloads were produced by that query driver.
     read -r -a cc_argv <<< "$CC_COMMAND"
     "${cc_argv[@]}" -std=c23 -O2 -Wall -Wextra -Werror \
         -o "$temporary" "$source"
@@ -312,6 +314,51 @@ if z23_build_epoch_open_fd_matches_path "$IDENTITY_PATH" 9 "$HOST_SYSTEM"; then
 fi
 exec 9<&-
 
+# Only immutable observations may share this pair. Every key invocation owns
+# private scratch; mutations and back-to-back determinism checks stay serial.
+compiler_id_at()
+{
+    local cwd="$1" cc="$2" cxx="$3" scope="$4"
+    shift 4
+    cd "$cwd" || return 1
+    exec env "$@" "$KEY_TOOL" compiler-id "$cc" "$cxx" "$scope"
+}
+compiler_id_pair()
+{
+    local failed=0 i
+    local -a left_env=() right_env=()
+    if [ "$#" -eq 10 ]; then
+        left_env=("SDKROOT=${9}")
+        right_env=("SDKROOT=${10}")
+    elif [ "$#" -ne 8 ]; then
+        fail 'invalid immutable compiler identity pair'
+    fi
+    [ "${#IDENTITY_PAIR_PIDS[@]}" -eq 0 ] || fail 'identity pair already active'
+    compiler_id_at "$1" "$2" "$3" "$4" "${left_env[@]}" \
+        > "$WORK/identity-pair-one.out" 2> "$WORK/identity-pair-one.err" &
+    IDENTITY_PAIR_PIDS+=("$!")
+    compiler_id_at "$5" "$6" "$7" "$8" "${right_env[@]}" \
+        > "$WORK/identity-pair-two.out" 2> "$WORK/identity-pair-two.err" &
+    IDENTITY_PAIR_PIDS+=("$!")
+    # Reap both children even when one fails; never leave work behind a refusal.
+    for i in "${!IDENTITY_PAIR_PIDS[@]}"; do
+        if ! wait "${IDENTITY_PAIR_PIDS[$i]}"; then
+            failed=1
+        fi
+        unset "IDENTITY_PAIR_PIDS[$i]"
+    done
+    IDENTITY_PAIR_PIDS=()
+    if [ "$failed" -ne 0 ]; then
+        cat "$WORK/identity-pair-one.err" "$WORK/identity-pair-two.err" >&2
+        fail 'immutable compiler identity pair failed'
+    fi
+    PAIR_ONE_ID="$(cat "$WORK/identity-pair-one.out")"
+    PAIR_TWO_ID="$(cat "$WORK/identity-pair-two.out")"
+    [[ "$PAIR_ONE_ID" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$PAIR_TWO_ID" =~ ^[0-9a-f]{64}$ ]] ||
+        fail 'immutable compiler identity pair returned an invalid fingerprint'
+}
+
 phase compiler-id-and-env-sensitivity
 COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")" ||
     fail 'compiler fingerprint failed'
@@ -321,33 +368,29 @@ COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")" ||
 # A relative wrapper locator is an intentional input, not probe noise; make
 # its locator absolute before this comparison without changing its bytes.
 phase compiler-id-checkout-portability
-read -r -a portable_cc_argv <<< "$CC_COMMAND"
-for ((i = 0; i < ${#portable_cc_argv[@]}; i++)); do
-    case "${portable_cc_argv[i]}" in -*) continue ;; esac
-    resolved="$(command -v -- "${portable_cc_argv[i]}" 2>/dev/null || true)"
-    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
-        portable_cc_argv[i]="$(readlink -f -- "$resolved")"
-    fi
-done
-printf -v PORTABLE_CC_COMMAND '%s ' "${portable_cc_argv[@]}"
-PORTABLE_CC_COMMAND="${PORTABLE_CC_COMMAND% }"
-# Same absolute-argv resolution for the C++ side, so a relative `g++` locator
-# is an intentional input on both sides of the pair.
-read -r -a portable_cxx_argv <<< "$CXX_COMMAND"
-for ((i = 0; i < ${#portable_cxx_argv[@]}; i++)); do
-    case "${portable_cxx_argv[i]}" in -*) continue ;; esac
-    resolved="$(command -v -- "${portable_cxx_argv[i]}" 2>/dev/null || true)"
-    if [ -n "$resolved" ] && [ -f "$resolved" ]; then
-        portable_cxx_argv[i]="$(readlink -f -- "$resolved")"
-    fi
-done
-printf -v PORTABLE_CXX_COMMAND '%s ' "${portable_cxx_argv[@]}"
-PORTABLE_CXX_COMMAND="${PORTABLE_CXX_COMMAND% }"
+absolute_driver_command()
+{
+    local command="$1" i resolved
+    local -a argv
+    read -r -a argv <<< "$command" || return
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+        case "${argv[i]}" in -*) continue ;; esac
+        resolved="$(command -v -- "${argv[i]}" 2>/dev/null || true)"
+        if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+            argv[i]="$(readlink -f -- "$resolved")" || return
+        fi
+    done
+    printf -v command '%s ' "${argv[@]}"
+    printf '%s\n' "${command% }"
+}
+PORTABLE_CC_COMMAND="$(absolute_driver_command "$CC_COMMAND")"
+PORTABLE_CXX_COMMAND="$(absolute_driver_command "$CXX_COMMAND")"
+read -r -a portable_cc_argv <<< "$PORTABLE_CC_COMMAND"
 mkdir -p "$WORK/probe-one" "$WORK/probe with spaces" "$WORK/sdk-one" "$WORK/sdk-two"
-CWD_COMPILER_ID="$(cd "$WORK/probe-one" &&
-    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT")"
-SPACE_COMPILER_ID="$(cd "$WORK/probe with spaces" &&
-    "$KEY_TOOL" compiler-id "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT")"
+compiler_id_pair "$WORK/probe-one" "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT" \
+    "$WORK/probe with spaces" "$PORTABLE_CC_COMMAND" "$PORTABLE_CXX_COMMAND" "$ROOT"
+CWD_COMPILER_ID="$PAIR_ONE_ID"
+SPACE_COMPILER_ID="$PAIR_TWO_ID"
 [ "$CWD_COMPILER_ID" = "$SPACE_COMPILER_ID" ] ||
     fail 'incidental C/C++ compilation directories changed compiler identity'
 ARGV_COMPILER_ID="$(cd "$WORK/probe-one" &&
@@ -363,10 +406,10 @@ case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
             "-fdebug-compilation-dir=$WORK/probe-one -fcoverage-compilation-dir=$WORK/probe-one" \
             "-Xclang -fdebug-compilation-dir -Xclang $WORK/probe-one -Xclang -fcoverage-compilation-dir=$WORK/probe-one"; do
             explicit_cc="$PORTABLE_CC_COMMAND $explicit_dirs"
-            EXPLICIT_ONE_ID="$(cd "$WORK/probe-one" &&
-                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT")"
-            EXPLICIT_TWO_ID="$(cd "$WORK/probe with spaces" &&
-                "$KEY_TOOL" compiler-id "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT")"
+            compiler_id_pair "$WORK/probe-one" "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT" \
+                "$WORK/probe with spaces" "$explicit_cc" "$PORTABLE_CXX_COMMAND" "$ROOT"
+            EXPLICIT_ONE_ID="$PAIR_ONE_ID"
+            EXPLICIT_TWO_ID="$PAIR_TWO_ID"
             [ "$EXPLICIT_ONE_ID" = "$EXPLICIT_TWO_ID" ] ||
                 fail 'identical explicit Clang directories changed identity across cwd'
             [ "$EXPLICIT_ONE_ID" != "$CWD_COMPILER_ID" ] ||
@@ -374,10 +417,10 @@ case "$("${portable_cc_argv[@]}" --version 2>/dev/null)" in
         done
         ;;
 esac
-SDK_ONE_ID="$(SDKROOT="$WORK/sdk-one" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
-SDK_TWO_ID="$(SDKROOT="$WORK/sdk-two" \
-    "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
+compiler_id_pair "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" \
+    "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" "$WORK/sdk-one" "$WORK/sdk-two"
+SDK_ONE_ID="$PAIR_ONE_ID"
+SDK_TWO_ID="$PAIR_TWO_ID"
 [ "$SDK_ONE_ID" != "$SDK_TWO_ID" ] ||
     fail 'SDK selection disappeared during directory normalization'
 
@@ -395,8 +438,10 @@ ln -sfn -- "$ROOT" "$WORK/scope-link/tree"
 ln -sfn -- "$WORK" "$WORK/scope-link/aliased"
 [ -L "$WORK/scope-link/tree" ] && [ -L "$WORK/scope-link/aliased" ] ||
     fail 'scope aliases must be real symbolic links'
-TREE_DIRECT_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT")"
-TREE_ALIAS_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$WORK/scope-link/tree")"
+compiler_id_pair "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$ROOT" \
+    "$ROOT" "$CC_COMMAND" "$CXX_COMMAND" "$WORK/scope-link/tree"
+TREE_DIRECT_ID="$PAIR_ONE_ID"
+TREE_ALIAS_ID="$PAIR_TWO_ID"
 [ "$TREE_DIRECT_ID" = "$TREE_ALIAS_ID" ] ||
     fail 'same tree keyed differently through an aliased scope root'
 TREE_SLASH_ID="$("$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" "$ROOT/")"
@@ -411,8 +456,10 @@ SCOPE_CXX_WRAPPER="$WORK/w/scope-cxx"
 printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CC_COMMAND" > "$SCOPE_CC_WRAPPER"
 printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$CXX_COMMAND" > "$SCOPE_CXX_WRAPPER"
 chmod +x "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER"
-SCOPE_DIRECT_ID="$("$KEY_TOOL" compiler-id "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK")"
-SCOPE_ALIAS_ID="$("$KEY_TOOL" compiler-id "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK/scope-link/aliased")"
+compiler_id_pair "$ROOT" "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK" \
+    "$ROOT" "$SCOPE_CC_WRAPPER" "$SCOPE_CXX_WRAPPER" "$WORK/scope-link/aliased"
+SCOPE_DIRECT_ID="$PAIR_ONE_ID"
+SCOPE_ALIAS_ID="$PAIR_TWO_ID"
 [ "$SCOPE_DIRECT_ID" = "$SCOPE_ALIAS_ID" ] ||
     fail 'in-scope wrapper keyed differently through an aliased scope root'
 if "$KEY_TOOL" compiler-id "$CC_COMMAND" "$CXX_COMMAND" >/dev/null 2>&1; then
@@ -731,6 +778,9 @@ set_state()
     printf '%s %s %s\n' "$1" 1 "$2" > "$STATE"
 }
 
+SESSION_CC_COMMAND="$CC_COMMAND"
+SESSION_CXX_COMMAND="$CXX_COMMAND"
+
 phase session-lifecycle
 # Every Make invocation re-acquires its session (the lease is an order-only
 # FORCE prerequisite), so the shared stable-epoch session stamp always names
@@ -746,7 +796,7 @@ start_session()
     STATE_FILE="$STATE" "$SESSION_TOOL" acquire "$SESSION_MAIN" "$lease" \
         "$root" "$WORK/candidates" 5 "$source_id" 1 "$mutation" \
         "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
-        "$LINK_FLAGS" "$CC_COMMAND" "$CXX_COMMAND" "$$" "$VERIFY" \
+        "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$$" "$VERIFY" \
         >/dev/null || fail 'session acquire failed before candidate publication'
     [ -d "$WORK/candidates/epochs/$EPOCH_MAIN" ] ||
         fail 'session published a dangling candidate epoch pointer'
@@ -764,7 +814,7 @@ finish_session()
     STATE_FILE="$STATE" "$SESSION_TOOL" verify "$SESSION_MAIN" "$lease" \
         "$root" "$WORK/candidates" 5 "$source_id" 1 "$mutation" \
         "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
-        "$LINK_FLAGS" "$CC_COMMAND" "$CXX_COMMAND" "$$" "$VERIFY" \
+        "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$$" "$VERIFY" \
         >/dev/null
 }
 
@@ -791,6 +841,193 @@ compile_graph_object()
     finish_session "$source_id" "$mutation"
     printf '%s\n' "$object"
 }
+
+# Retain one complete real-tool session integration before bounding repeated
+# state-machine checks. Payload compilation below continues using the real CC.
+phase real-session-smoke
+start_session "$SOURCE_A" "$MUTATION_A1" >/dev/null
+finish_session "$SOURCE_A" "$MUTATION_A1"
+REAL_COMPILER_ID="$COMPILER_ID"
+
+phase bounded-session-fixtures
+SHIM_DIR="$WORK/degraded-probe"
+SHIM_ROOT="$SHIM_DIR/root"
+SHIM_CC="$SHIM_DIR/bin/cc"
+SHIM_TMP="$SHIM_DIR/tmp"
+mkdir -p "$SHIM_DIR/bin" "$SHIM_TMP" \
+    "$SHIM_ROOT/include" "$SHIM_ROOT/programs" "$SHIM_ROOT/libraries"
+printf '#define SHIMCC_HEADER 1\n' > "$SHIM_ROOT/include/shim.h"
+printf 'fixture linker\n' > "$SHIM_ROOT/programs/ld"
+chmod +x "$SHIM_ROOT/programs/ld"
+cat > "$SHIM_CC" <<'SHIM_EOF'
+#!/bin/sh
+# Hermetic compiler-driver fixture for the degraded-probe regression. Its
+# knobs stay OUT of the ZCL_ namespace on purpose: they are a private protocol
+# between this fixture and the assertions below, not project flags, and
+# engine/composition/flags.def is the closed catalog of ZCL_ names.
+#   SHIMCC_ROOT         directory this driver reports as its search space
+#   SHIMCC_VERSION_TAG  --version payload (a real toolchain change)
+#   SHIMCC_FLAKE_ALWAYS every verbose preprocessing probe fails
+#   SHIMCC_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
+#   SHIMCC_NO_SEARCH    verbose probe succeeds but reports no search roots
+#   SHIMCC_VERSION_TALLY     path one line is appended to per --version probe
+#   SHIMCC_VERSION_COUNTDOWN path holding N: the next N --version probes
+#                            answer as toolchain 2, every later one as 1
+set -u
+verbose=0
+preprocess=0
+for arg in "$@"; do
+    case "$arg" in
+        --version)
+            if [ -n "${SHIMCC_VERSION_TALLY:-}" ]; then
+                printf 'version\n' >> "$SHIMCC_VERSION_TALLY"
+            fi
+            if [ -n "${SHIMCC_VERSION_COUNTDOWN:-}" ]; then
+                left=$(cat "$SHIMCC_VERSION_COUNTDOWN" 2>/dev/null || echo 0)
+                if [ "$left" -gt 0 ]; then
+                    printf '%s\n' "$((left - 1))" > "$SHIMCC_VERSION_COUNTDOWN"
+                    printf 'zcl-shim-cc 2\n'
+                    exit 0
+                fi
+                printf 'zcl-shim-cc 1\n'
+                exit 0
+            fi
+            if [ -n "${SHIMCC_VERSION_COUNTER:-}" ]; then
+                count=$(cat "$SHIMCC_VERSION_COUNTER" 2>/dev/null || echo 0)
+                count=$((count + 1))
+                printf '%s\n' "$count" > "$SHIMCC_VERSION_COUNTER"
+                printf 'zcl-shim-cc unstable-%s\n' "$count"
+                exit 0
+            fi
+            printf 'zcl-shim-cc %s\n' "${SHIMCC_VERSION_TAG:-1}"
+            exit 0 ;;
+        -dumpmachine) printf 'x86_64-zcl-shim-linux\n'; exit 0 ;;
+        -dumpversion|-dumpfullversion) printf '23.0.0\n'; exit 0 ;;
+        -print-search-dirs)
+            printf 'install: %s/\n' "$SHIMCC_ROOT"
+            printf 'programs: =%s/programs\n' "$SHIMCC_ROOT"
+            printf 'libraries: =%s/libraries\n' "$SHIMCC_ROOT"
+            exit 0 ;;
+        -print-prog-name=*)
+            printf '%s/programs/%s\n' "$SHIMCC_ROOT" "${arg#-print-prog-name=}"
+            exit 0 ;;
+        -print-file-name=*)
+            printf '%s/libraries/%s\n' "$SHIMCC_ROOT" "${arg#-print-file-name=}"
+            exit 0 ;;
+        -v) verbose=1 ;;
+        -E) preprocess=1 ;;
+    esac
+done
+if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
+    if [ -n "${SHIMCC_FLAKE_ONCE:-}" ] && [ -e "$SHIMCC_FLAKE_ONCE" ]; then
+        rm -f -- "$SHIMCC_FLAKE_ONCE"
+        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
+        exit 1
+    fi
+    if [ -n "${SHIMCC_FLAKE_ALWAYS:-}" ]; then
+        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
+        exit 1
+    fi
+    printf 'Using built-in specs.\n' >&2
+    if [ -z "${SHIMCC_NO_SEARCH:-}" ]; then
+        eol='\n'
+        [ -z "${SHIMCC_CRLF:-}" ] || eol='\r\n'
+        printf '#include <...> search starts here:%b' "$eol" >&2
+        printf ' %s/include%b' "$SHIMCC_ROOT" "$eol" >&2
+        printf 'End of search list.%b' "$eol" >&2
+    fi
+    exit 0
+fi
+printf '#define SHIMCC_CC 1\n'
+exit 0
+SHIM_EOF
+chmod +x "$SHIM_CC"
+export SHIMCC_ROOT="$SHIM_ROOT"
+
+# build-epoch-key.sh binds ld/ld.lld/mold through the caller's $PATH and
+# sweeps every ld*-named file on it into the fingerprint, so the host's real
+# linkers would otherwise enter this fixture's identity and the phase would
+# not be the host-independent guard its comment claims. Derive every
+# fingerprint below through a PATH holding the fixture's own programs plus a
+# mirror of the host utilities the epoch scripts run, with every
+# linker-shaped (ld*) name left out: the only linker reachable from here is
+# then the fixture's own, on any machine.
+SHIM_PATH_DIR="$SHIM_DIR/path"
+mkdir -p "$SHIM_PATH_DIR"
+# Mirror EXACTLY the utilities the epoch scripts run, each resolved by name
+# through the caller's $PATH. The earlier sweep -- `find` over every $PATH
+# entry, piped into xargs -- ran under `set -euo pipefail`: one unreadable or
+# vanished directory on $PATH made the pipeline exit non-zero and killed the
+# whole selftest with no message at all, and a sweep also admits whatever else
+# happens to sit on this host's $PATH. A bounded list cannot do either, and it
+# subsumes the `ld*` exclusion the sweep needed: the only linker reachable
+# from this PATH is the fixture's own, on any machine.
+#
+# A utility missing from the mirror would surface as an unexplained fixture
+# refusal several assertions later; name it here instead.
+shim_tools=(
+    bash sh env
+    awk sed grep sort uniq tr cut head tail wc cat cmp comm diff od
+    find xargs readlink dirname basename stat
+    mktemp mkdir rmdir rm mv cp ln chmod touch
+    sha256sum date sleep flock uname
+)
+# Darwin's epoch scripts identify the live Make owner through ps(1) ancestry
+# and hash the process start record through shasum(1); Linux and MSYS read
+# procfs for both and never exec either tool. Mirror the pair only where the
+# scripts reach for them, or every Darwin acquire below fails closed with
+# "could not identify live Make owner process; ancestry=unavailable" -- the
+# unexplained fixture refusal the mirror list exists to prevent.
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    shim_tools+=(ps shasum)
+fi
+for shim_tool in "${shim_tools[@]}"; do
+    shim_tool_path="$(command -v -- "$shim_tool" 2>/dev/null || printf '')"
+    [ -n "$shim_tool_path" ] ||
+        fail "fixture PATH mirror is missing $shim_tool: not on \$PATH"
+    ln -sf -- "$shim_tool_path" "$SHIM_PATH_DIR/$shim_tool"
+    [ -x "$SHIM_PATH_DIR/$shim_tool" ] ||
+        fail "fixture PATH mirror is missing $shim_tool"
+done
+SHIM_PATH="$SHIM_ROOT/programs:$SHIM_PATH_DIR"
+
+# Every shim derivation and session below uses the same hermetic include
+# environment. An inherited include path or SDKROOT is a second, valid root
+# authority: it makes the deliberately empty driver look healthy and moves
+# the session's recheck away from the fixture's expected fingerprint.
+shim_env()
+{
+    env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH \
+        -u COMPILER_PATH -u LIBRARY_PATH -u SDKROOT \
+        PATH="$SHIM_PATH" "$@"
+}
+shim_compiler_id()
+{
+    shim_env "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" "$ROOT"
+}
+
+# Sessions and publishers still execute their real helpers and derive a fresh
+# identity each time, over the bounded driver's actual fixture inputs. Only
+# their environment changes; every authority argument and refusal is retained.
+REAL_SESSION_TOOL="$SESSION_TOOL"
+REAL_PUBLISH_TOOL="$PUBLISH_TOOL"
+for fixture_tool in session publish; do
+    case "$fixture_tool" in
+        session) real_tool="$REAL_SESSION_TOOL" ;;
+        publish) real_tool="$REAL_PUBLISH_TOOL" ;;
+    esac
+    printf '#!/usr/bin/env bash\nexec env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u COMPILER_PATH -u LIBRARY_PATH -u SDKROOT PATH=%q %q "$@"\n' \
+        "$SHIM_PATH" "$real_tool" > "$WORK/bounded-$fixture_tool"
+    chmod +x "$WORK/bounded-$fixture_tool"
+done
+SESSION_TOOL="$WORK/bounded-session"
+PUBLISH_TOOL="$WORK/bounded-publish"
+export SESSION_CC_COMMAND="$SHIM_CC" SESSION_CXX_COMMAND="$SHIM_CC"
+COMPILER_ID="$(shim_compiler_id)" || fail 'session fixture fingerprint failed'
+EPOCH_MAIN="$(epoch_key "$COMPILER_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$BSYS_REAL")"
+EPOCH_ALT="$(epoch_key "$COMPILER_ID" "$PROFILE" '-std=c23 -O3 -Wall' "$LINK_FLAGS" "$BSYS_REAL")"
+SESSION_MAIN="$WORK/sessions/epochs/$EPOCH_MAIN/.build-session"
+SESSION_EPOCH_ROOT="$WORK/sessions/epochs/$EPOCH_MAIN"
 
 phase incremental-rebuild-namespace
 # The stable-epoch contract: sequential source states A -> B -> A all reuse
@@ -859,16 +1096,20 @@ chmod +x "$COMPILER_WRAPPER"
 COMPILER_BLOCK_ONCE="$WORK/compiler-block-once"
 COMPILER_BLOCK_MARKER="$WORK/compiler-blocked"
 COMPILER_BLOCK_RELEASE="$WORK/compiler-release"
-start_session "$SOURCE_A" "$MUTATION_A2" >/dev/null
+concurrent_compile()
+{
     REAL_CC_COMMAND="$CC_COMMAND" \
     COMPILER_BLOCK_ONCE="$COMPILER_BLOCK_ONCE" \
     COMPILER_BLOCK_MARKER="$COMPILER_BLOCK_MARKER" \
     COMPILER_BLOCK_RELEASE="$COMPILER_BLOCK_RELEASE" \
     COMPILER_BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
-    "$OBJECT_TOOL" dep "$CONCURRENT_OBJECT" "$CONCURRENT_SOURCE" \
+    exec "$OBJECT_TOOL" dep "$CONCURRENT_OBJECT" "$CONCURRENT_SOURCE" \
         "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
         "$SESSION_MAIN" -- \
-        "$COMPILER_WRAPPER" -std=c23 -O2 -Wall -Wextra -Werror &
+        "$COMPILER_WRAPPER" -std=c23 -O2 -Wall -Wextra -Werror
+}
+start_session "$SOURCE_A" "$MUTATION_A2" >/dev/null
+concurrent_compile &
 OBJECT_PID_1=$!
 CHILD_PIDS+=("$OBJECT_PID_1")
 # Wait for the wrapper to REACH its rendezvous, guarded by the child being
@@ -891,15 +1132,7 @@ while [ ! -e "$COMPILER_BLOCK_MARKER" ]; do
     sleep 0.01
 done
 [ -e "$COMPILER_BLOCK_MARKER" ] || fail 'first object compiler did not block'
-REAL_CC_COMMAND="$CC_COMMAND" \
-    COMPILER_BLOCK_ONCE="$COMPILER_BLOCK_ONCE" \
-    COMPILER_BLOCK_MARKER="$COMPILER_BLOCK_MARKER" \
-    COMPILER_BLOCK_RELEASE="$COMPILER_BLOCK_RELEASE" \
-    COMPILER_BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
-    "$OBJECT_TOOL" dep "$CONCURRENT_OBJECT" "$CONCURRENT_SOURCE" \
-        "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
-        "$SESSION_MAIN" -- \
-        "$COMPILER_WRAPPER" -std=c23 -O2 -Wall -Wextra -Werror &
+concurrent_compile &
 OBJECT_PID_2=$!
 CHILD_PIDS+=("$OBJECT_PID_2")
 set +e
@@ -982,7 +1215,7 @@ STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
     "$GC_ROOT/epochs/$EPOCH_MAIN/.leases/current" \
     "$GC_ROOT" "$GC_CANDIDATES" 1 "$SOURCE_A" 1 "$MUTATION_A2" \
     "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
-    "$LINK_FLAGS" "$CC_COMMAND" "$CXX_COMMAND" "$$" "$VERIFY" >/dev/null
+    "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$$" "$VERIFY" >/dev/null
 [ -d "$GC_ROOT/epochs/$GC_LIVE" ] &&
 [ -d "$GC_CANDIDATES/epochs/$GC_LIVE" ] ||
     fail 'epoch GC removed a live leased epoch'
@@ -1013,8 +1246,8 @@ STATE_FILE="$STATE" "$SESSION_TOOL" recover \
     "$QUARANTINE_SESSION" "$QUARANTINE_LEASE" \
     "$QUARANTINE_ROOT" "$QUARANTINE_CANDIDATES" 2 \
     "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
-    "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
-    "$CXX_COMMAND" "$$" "$VERIFY" >/dev/null
+    "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$SESSION_CC_COMMAND" \
+    "$SESSION_CXX_COMMAND" "$$" "$VERIFY" >/dev/null
 [ ! -e "$QUARANTINE_EPOCH_DIR/poisoned.o" ] &&
 [ ! -e "$QUARANTINE_CANDIDATE_DIR/stale" ] &&
 [ ! -e "$QUARANTINE_EPOCH_DIR/.unverified" ] ||
@@ -1093,7 +1326,10 @@ set -euo pipefail
 [ -x "$Z23_EPOCH_FIXTURE_VERIFY_TOOL" ] || exit 2
 printf '%s\n' "$1" >> "$Z23_EPOCH_FIXTURE_SESSION_CALLS"
 export STATE_FILE="$Z23_EPOCH_FIXTURE_STATE"
-exec "$Z23_EPOCH_REAL_SESSION_TOOL" "$@" \
+args=("$@")
+args[14]="$SESSION_CC_COMMAND"
+args[15]="$SESSION_CXX_COMMAND"
+exec "$Z23_EPOCH_REAL_SESSION_TOOL" "${args[@]}" \
     "$Z23_EPOCH_FIXTURE_VERIFY_TOOL"
 SESSION_WRAPPER_EOF
 chmod +x "$MAKE_RECOVERY_SESSION_TOOL"
@@ -1277,8 +1513,8 @@ expect_generation_symlink_refused()
     if STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
         "$session" "$lease" "$object_root" "$candidate_root" 2 \
         "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
-        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
-        "$CXX_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
+        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$SESSION_CC_COMMAND" \
+        "$SESSION_CXX_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
         fail "symlinked $surface epoch generation was accepted"
     fi
     grep -Fq "$surface epoch generation is not a regular directory" "$log" ||
@@ -1307,8 +1543,8 @@ expect_verify_root_symlink_refused()
     if STATE_FILE="$STATE" "$SESSION_TOOL" verify \
         "$session" "$lease" "$object_root" - 2 \
         "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" \
-        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" \
-        "$CXX_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
+        "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$SESSION_CC_COMMAND" \
+        "$SESSION_CXX_COMMAND" "$$" "$VERIFY" >"$log" 2>&1; then
         fail 'symlinked verify object root was accepted'
     fi
     grep -Fq 'object root is not a regular directory' "$log" ||
@@ -1325,7 +1561,7 @@ publish()
 {
     STATE_FILE="$STATE" "$PUBLISH_TOOL" "$1" "$STABLE" "$5" "$2" 1 "$3" "$4" \
         "$COMPILER_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" \
-        "$CC_COMMAND" "$CXX_COMMAND" "$VERIFY" \
+        "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$VERIFY" \
         >/dev/null
 }
 
@@ -1359,7 +1595,7 @@ STATE_FILE="$STATE" BLOCK_SOURCE="$SOURCE_A" \
     BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
     "$PUBLISH_TOOL" "$CANDIDATE_A2" "$STABLE" "$SESSION_MAIN" "$SOURCE_A" 1 \
         "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" "$PROFILE" \
-        "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" "$CXX_COMMAND" \
+        "$COMPILE_FLAGS" "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" \
         "$VERIFY" > /dev/null 2> "$STALE_LOG" &
 STALE_PID=$!
 CHILD_PIDS+=("$STALE_PID")
@@ -1385,7 +1621,7 @@ fi
     STATE_FILE="$STATE" "$PUBLISH_TOOL" "$CANDIDATE_B2" "$STABLE" \
         "$SESSION_B" "$SOURCE_B" 1 "$MUTATION_B" "$EPOCH_MAIN" \
         "$COMPILER_ID" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" \
-        "$CC_COMMAND" "$CXX_COMMAND" "$VERIFY" >/dev/null
+        "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$VERIFY" >/dev/null
 ) &
 CURRENT_PID=$!
 CHILD_PIDS+=("$CURRENT_PID")
@@ -1443,164 +1679,9 @@ phase compiler-id-degraded-probe-refused
 #      compiler that never reads it, and must still move a ccache-wrapped one.
 # The fixture driver answers every compiler-id probe itself: no real compile,
 # no /usr inventory, everything it reports under $WORK, well under a second of
-# wall -- and, through the PATH mirror built below, no host linker reaches the
+# wall -- and, through the existing PATH mirror, no host linker reaches the
 # fingerprint either.
-SHIM_DIR="$WORK/degraded-probe"
-SHIM_ROOT="$SHIM_DIR/root"
-SHIM_CC="$SHIM_DIR/bin/cc"
-SHIM_TMP="$SHIM_DIR/tmp"
-mkdir -p "$SHIM_DIR/bin" "$SHIM_TMP" \
-    "$SHIM_ROOT/include" "$SHIM_ROOT/programs" "$SHIM_ROOT/libraries"
-printf '#define SHIMCC_HEADER 1\n' > "$SHIM_ROOT/include/shim.h"
-printf 'fixture linker\n' > "$SHIM_ROOT/programs/ld"
-chmod +x "$SHIM_ROOT/programs/ld"
-cat > "$SHIM_CC" <<'SHIM_EOF'
-#!/bin/sh
-# Hermetic compiler-driver fixture for the degraded-probe regression. Its
-# knobs stay OUT of the ZCL_ namespace on purpose: they are a private protocol
-# between this fixture and the assertions below, not project flags, and
-# engine/composition/flags.def is the closed catalog of ZCL_ names.
-#   SHIMCC_ROOT         directory this driver reports as its search space
-#   SHIMCC_VERSION_TAG  --version payload (a real toolchain change)
-#   SHIMCC_FLAKE_ALWAYS every verbose preprocessing probe fails
-#   SHIMCC_FLAKE_ONCE   sentinel path: the first verbose probe fails, once
-#   SHIMCC_NO_SEARCH    verbose probe succeeds but reports no search roots
-#   SHIMCC_VERSION_TALLY     path one line is appended to per --version probe
-#   SHIMCC_VERSION_COUNTDOWN path holding N: the next N --version probes
-#                            answer as toolchain 2, every later one as 1
-set -u
-verbose=0
-preprocess=0
-for arg in "$@"; do
-    case "$arg" in
-        --version)
-            if [ -n "${SHIMCC_VERSION_TALLY:-}" ]; then
-                printf 'version\n' >> "$SHIMCC_VERSION_TALLY"
-            fi
-            if [ -n "${SHIMCC_VERSION_COUNTDOWN:-}" ]; then
-                left=$(cat "$SHIMCC_VERSION_COUNTDOWN" 2>/dev/null || echo 0)
-                if [ "$left" -gt 0 ]; then
-                    printf '%s\n' "$((left - 1))" > "$SHIMCC_VERSION_COUNTDOWN"
-                    printf 'zcl-shim-cc 2\n'
-                    exit 0
-                fi
-                printf 'zcl-shim-cc 1\n'
-                exit 0
-            fi
-            if [ -n "${SHIMCC_VERSION_COUNTER:-}" ]; then
-                count=$(cat "$SHIMCC_VERSION_COUNTER" 2>/dev/null || echo 0)
-                count=$((count + 1))
-                printf '%s\n' "$count" > "$SHIMCC_VERSION_COUNTER"
-                printf 'zcl-shim-cc unstable-%s\n' "$count"
-                exit 0
-            fi
-            printf 'zcl-shim-cc %s\n' "${SHIMCC_VERSION_TAG:-1}"
-            exit 0 ;;
-        -dumpmachine) printf 'x86_64-zcl-shim-linux\n'; exit 0 ;;
-        -dumpversion|-dumpfullversion) printf '23.0.0\n'; exit 0 ;;
-        -print-search-dirs)
-            printf 'install: %s/\n' "$SHIMCC_ROOT"
-            printf 'programs: =%s/programs\n' "$SHIMCC_ROOT"
-            printf 'libraries: =%s/libraries\n' "$SHIMCC_ROOT"
-            exit 0 ;;
-        -print-prog-name=*)
-            printf '%s/programs/%s\n' "$SHIMCC_ROOT" "${arg#-print-prog-name=}"
-            exit 0 ;;
-        -print-file-name=*)
-            printf '%s/libraries/%s\n' "$SHIMCC_ROOT" "${arg#-print-file-name=}"
-            exit 0 ;;
-        -v) verbose=1 ;;
-        -E) preprocess=1 ;;
-    esac
-done
-if [ "$verbose" = 1 ] && [ "$preprocess" = 1 ]; then
-    if [ -n "${SHIMCC_FLAKE_ONCE:-}" ] && [ -e "$SHIMCC_FLAKE_ONCE" ]; then
-        rm -f -- "$SHIMCC_FLAKE_ONCE"
-        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
-        exit 1
-    fi
-    if [ -n "${SHIMCC_FLAKE_ALWAYS:-}" ]; then
-        printf 'cc: fatal error: cannot execute cc1: Resource temporarily unavailable\n' >&2
-        exit 1
-    fi
-    printf 'Using built-in specs.\n' >&2
-    if [ -z "${SHIMCC_NO_SEARCH:-}" ]; then
-        eol='\n'
-        [ -z "${SHIMCC_CRLF:-}" ] || eol='\r\n'
-        printf '#include <...> search starts here:%b' "$eol" >&2
-        printf ' %s/include%b' "$SHIMCC_ROOT" "$eol" >&2
-        printf 'End of search list.%b' "$eol" >&2
-    fi
-    exit 0
-fi
-printf '#define SHIMCC_CC 1\n'
-exit 0
-SHIM_EOF
-chmod +x "$SHIM_CC"
-export SHIMCC_ROOT="$SHIM_ROOT"
-
-# build-epoch-key.sh binds ld/ld.lld/mold through the caller's $PATH and
-# sweeps every ld*-named file on it into the fingerprint, so the host's real
-# linkers would otherwise enter this fixture's identity and the phase would
-# not be the host-independent guard its comment claims. Derive every
-# fingerprint below through a PATH holding the fixture's own programs plus a
-# mirror of the host utilities the epoch scripts run, with every
-# linker-shaped (ld*) name left out: the only linker reachable from here is
-# then the fixture's own, on any machine.
-SHIM_PATH_DIR="$SHIM_DIR/path"
-mkdir -p "$SHIM_PATH_DIR"
-# Mirror EXACTLY the utilities the epoch scripts run, each resolved by name
-# through the caller's $PATH. The earlier sweep -- `find` over every $PATH
-# entry, piped into xargs -- ran under `set -euo pipefail`: one unreadable or
-# vanished directory on $PATH made the pipeline exit non-zero and killed the
-# whole selftest with no message at all, and a sweep also admits whatever else
-# happens to sit on this host's $PATH. A bounded list cannot do either, and it
-# subsumes the `ld*` exclusion the sweep needed: the only linker reachable
-# from this PATH is the fixture's own, on any machine.
-#
-# A utility missing from the mirror would surface as an unexplained fixture
-# refusal several assertions later; name it here instead.
-shim_tools=(
-    bash sh env
-    awk sed grep sort uniq tr cut head tail wc cat cmp comm diff od
-    find xargs readlink dirname basename stat
-    mktemp mkdir rmdir rm mv cp ln chmod touch
-    sha256sum date sleep flock uname
-)
-# Darwin's epoch scripts identify the live Make owner through ps(1) ancestry
-# and hash the process start record through shasum(1); Linux and MSYS read
-# procfs for both and never exec either tool. Mirror the pair only where the
-# scripts reach for them, or every Darwin acquire below fails closed with
-# "could not identify live Make owner process; ancestry=unavailable" -- the
-# unexplained fixture refusal the mirror list exists to prevent.
-if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    shim_tools+=(ps shasum)
-fi
-for shim_tool in "${shim_tools[@]}"; do
-    shim_tool_path="$(command -v -- "$shim_tool" 2>/dev/null || printf '')"
-    [ -n "$shim_tool_path" ] ||
-        fail "fixture PATH mirror is missing $shim_tool: not on \$PATH"
-    ln -sf -- "$shim_tool_path" "$SHIM_PATH_DIR/$shim_tool"
-    [ -x "$SHIM_PATH_DIR/$shim_tool" ] ||
-        fail "fixture PATH mirror is missing $shim_tool"
-done
-SHIM_PATH="$SHIM_ROOT/programs:$SHIM_PATH_DIR"
-
-# Every shim derivation and session below uses the same hermetic include
-# environment. An inherited include path or SDKROOT is a second, valid root
-# authority: it makes the deliberately empty driver look healthy and moves
-# the session's recheck away from the fixture's expected fingerprint.
-shim_env()
-{
-    env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH \
-        -u COMPILER_PATH -u LIBRARY_PATH -u SDKROOT \
-        PATH="$SHIM_PATH" "$@"
-}
-shim_compiler_id()
-{
-    shim_env "$@" "$KEY_TOOL" compiler-id "$SHIM_CC" "$SHIM_CC" "$ROOT"
-}
-
+# The bounded driver and environment were initialized for session fixtures.
 # A4: the whole contract in two lines -- a fingerprint that cannot observe all
 # of its inputs must never hash a short preimage, so two derivations of one
 # unchanged toolchain are byte-identical.
@@ -1785,7 +1866,7 @@ chmod +x "$SHIM_CCACHE_WRAPPER"
 # nothing else.
 shim_home_compiler_id()
 {
-    env -u CCACHE_CONFIGPATH -u CCACHE_DIR -u SCCACHE_CONF \
+    shim_env env -u CCACHE_CONFIGPATH -u CCACHE_DIR -u SCCACHE_CONF \
         PATH="$SHIM_PATH" HOME="$SHIM_HOME" \
         "$KEY_TOOL" compiler-id "$1" "$1" "$ROOT"
 }
@@ -1842,7 +1923,7 @@ cache_env_compiler_id()
     for name in $(compgen -e); do
         case "$name" in CCACHE_*|SCCACHE_*) clear+=(-u "$name") ;; esac
     done
-    env "${clear[@]}" PATH="$SHIM_PATH" HOME="$SHIM_HOME" "$@" \
+    shim_env env "${clear[@]}" HOME="$SHIM_HOME" "$@" \
         "$KEY_TOOL" compiler-id "$cc" "$cc" "$SHIM_SCOPE"
 }
 
@@ -1896,4 +1977,4 @@ phase vendor-inputs-unchanged
 vendor_inputs_unchanged
 
 printf 'build-epoch-selftest: PASS toolchain_keyed=true stable_namespace=true source_bound_publish=true concurrent_publish=true late_marker_refusal=true make_recovery=true warm_no_rewrite=true degraded_probe_refused=true flake_retried=true wrapper_config_scoped=true cache_env_scoped=true compiler_id=%s\n' \
-    "$COMPILER_ID"
+    "$REAL_COMPILER_ID"

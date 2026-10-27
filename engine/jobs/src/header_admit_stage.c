@@ -631,7 +631,7 @@ bool header_admit_stage_init(struct main_state *ms)
     return true;
 }
 
-job_result_t header_admit_stage_step_once(void)
+static job_result_t header_admit_owned_stage_step_once(void)
 {
     if (!g_stage) return JOB_IDLE;
     sqlite3 *db = progress_store_db();
@@ -655,7 +655,53 @@ job_result_t header_admit_stage_step_once(void)
     return r;
 }
 
-STAGE_DRAIN_IMPL(header_admit)
+#ifdef ZCL_TESTING
+static void (*g_main_lock_hook)(void *);
+static void *g_main_lock_hook_ctx;
+
+void header_admit_stage_set_main_hook_for_testing(
+    void (*hook)(void *), void *ctx)
+{
+    g_main_lock_hook = hook;
+    g_main_lock_hook_ctx = ctx;
+}
+#endif
+
+/* Observe immediately before real ownership, never instead of ownership. */
+static void header_admit_stage_lock_main(struct main_state *ms)
+{
+#ifdef ZCL_TESTING
+    if (g_main_lock_hook)
+        g_main_lock_hook(g_main_lock_hook_ctx);
+#endif
+    zcl_mutex_lock(&ms->cs_main);
+}
+
+job_result_t header_admit_stage_step_once(void)
+{
+    struct main_state *ms = g_ms;
+    if (!ms || !g_stage) return JOB_IDLE;
+    header_admit_stage_lock_main(ms);
+    job_result_t result = header_admit_owned_stage_step_once();
+    zcl_mutex_unlock(&ms->cs_main);
+    return result;
+}
+
+/* Keep the shared batch implementation private; its prior static declaration
+ * gives the generated definition internal linkage. The public wrapper owns
+ * main before the macro can acquire progress for batch creation. */
+static int header_admit_owned_stage_drain(int max_steps);
+STAGE_DRAIN_IMPL(header_admit_owned)
+
+int header_admit_stage_drain(int max_steps)
+{
+    struct main_state *ms = g_ms;
+    if (max_steps <= 0 || !ms || !g_stage) return 0;
+    header_admit_stage_lock_main(ms);
+    int advanced = header_admit_owned_stage_drain(max_steps);
+    zcl_mutex_unlock(&ms->cs_main);
+    return advanced;
+}
 
 void header_admit_stage_shutdown(void)
 {

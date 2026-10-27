@@ -996,6 +996,7 @@ DEVLOOP_INCLUDES = -Itools/dev
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
 DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+	tools/dev/make_depfile_scope_selftest.c \
 	tools/dev/native_tunnel_export.c \
 	tools/dev/mutation_campaign.c \
 	tools/dev/source_identity_batch.c \
@@ -3718,6 +3719,10 @@ SITE_CSS_SRC = contexts/explorer/views/src/site.css
 INSTALL_SH_GEN = contexts/commons/views/include/views/install_script_gen.h
 INSTALL_SH_SRC = platform/packaging/install/install_from_source.sh
 VIEW_GEN_HEADERS = $(VIEW_GEN_HEADERS_EARLY)
+# The tunnel binding stays in bootstrapping and source capture above. Its
+# standalone consumer has an explicit dependency; unrelated objects must not
+# rebuild when the exported tunnel closure changes.
+OBJECT_GEN_HEADERS = $(filter-out tools/dev/native_tunnel_export_binding.h,$(VIEW_GEN_HEADERS))
 
 $(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c \
 		platform/modules/platform/src/path_replace.c
@@ -5656,11 +5661,11 @@ WALLET_GUI_SO := $(BIN_DIR)/libz23walletgui.so
 WALLET_GUI_PIC_DIR := $(BUILD_DIR)/wallet-gui
 WALLET_GUI_PIC_CFLAGS = $(filter-out -fPIE,$(DEV_COMPILE_CFLAGS)) -fPIC
 
-$(WALLET_GUI_PIC_DIR)/wallet_gui.o: contexts/wallet/views/src/wallet_gui.c $(VIEW_GEN_HEADERS)
+$(WALLET_GUI_PIC_DIR)/wallet_gui.o: contexts/wallet/views/src/wallet_gui.c $(OBJECT_GEN_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(WALLET_GUI_PIC_CFLAGS) -c -o $@ $<
 
-$(WALLET_GUI_PIC_DIR)/wallet_gui_bot.o: contexts/wallet/views/src/wallet_gui_bot.c $(VIEW_GEN_HEADERS)
+$(WALLET_GUI_PIC_DIR)/wallet_gui_bot.o: contexts/wallet/views/src/wallet_gui_bot.c $(OBJECT_GEN_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(WALLET_GUI_PIC_CFLAGS) -c -o $@ $<
 
@@ -10855,7 +10860,7 @@ fuzz_overlay: $(BIN_DIR)/fuzz_overlay
 # One object per TU, shared by every harness. -MD -MP writes the
 # per-object depfile imported above; that is what makes a header edit
 # invalidate exactly the objects that read it.
-$(FUZZ_OBJ_DIR)/%.o: %.c $(TMPL_GEN) $(VIEW_GEN_HEADERS) | check-fuzz-toolchain
+$(FUZZ_OBJ_DIR)/%.o: %.c $(TMPL_GEN) $(OBJECT_GEN_HEADERS) | check-fuzz-toolchain
 	@mkdir -p $(dir $@)
 	@$(FUZZ_CC) $(FUZZ_CFLAGS) -MD -MP -c -o $@ $<
 
@@ -11142,15 +11147,21 @@ $(PARITY_ORACLE_SELFTEST_BIN): $(PARITY_ORACLE_DIR)/run_parity_oracle_selftest.c
 
 
 PARITY_ORACLE_DIRECT_BIN = $(BIN_DIR)/parity-oracle-direct
+# Darwin requires per-name permission for this explicitly optional weak import.
+# Keep every other undefined verifier symbol a link error.
+ifeq ($(ZCL_HOST_OS),Darwin)
+PARITY_ORACLE_OPTIONAL_LDFLAGS = -Wl,-U,_bls12_381_pairing_candidate
+endif
 PARITY_ORACLE_INCS = core/modules/sapling/include core/modules/crypto/include platform/modules/util/include platform/modules/base/include
 PARITY_ORACLE_SRCS = core/modules/sapling/src/bls12_381.c core/modules/sapling/src/fr_avx512.c core/modules/crypto/src/blake2b.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
-# Same flags, include dirs and sources as the run-parity-oracle driver compiles.
+# Match the driver sources and includes; use the shipped target architecture
+# policy (Darwin portable, Linux/Windows x86-64-v3 unless native is requested).
 # Rebuilt on every use, so it never runs stale: its sources include headers
 # from include/ and src/ trees, and hand-kept or generated dependency lists
 # each missed a case in review (10-27).
 $(PARITY_ORACLE_DIRECT_BIN): FORCE
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -march=x86-64-v3 -DZCL_TESTING -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -I$(PARITY_ORACLE_DIR) $(addprefix -I,$(PARITY_ORACLE_INCS)) $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(PARITY_ORACLE_SRCS) -o $@
+	$(CC) -std=c23 -O2 $(ZCL_ARCH_CFLAGS) -DZCL_TESTING -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -I$(PARITY_ORACLE_DIR) $(addprefix -I,$(PARITY_ORACLE_INCS)) $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(PARITY_ORACLE_SRCS) $(PARITY_ORACLE_OPTIONAL_LDFLAGS) -o $@
 
 .PHONY: run-parity-oracle-selftest
 run-parity-oracle-selftest: $(PARITY_ORACLE_BIN) $(PARITY_ORACLE_SELFTEST_BIN) $(PARITY_ORACLE_DIRECT_BIN)
@@ -11199,7 +11210,7 @@ ci-sync-smoke: zclassic23
 
 BUILD_ONLY_OBJECT_CFLAGS = $(BUILD_ONLY_CFLAGS)
 $(OBJ_DIR)/platform/modules/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
-$(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BUILD_ONLY_LEASE)
+$(OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BUILD_ONLY_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(BUILD_ONLY_SESSION)" -- \
@@ -11225,7 +11236,7 @@ $(NODE_C23_OBJ_DIR)/core/modules/net/src/https_server_install.o: NODE_C23_OBJECT
 endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
-$(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(NODE_C23_LEASE)
+$(NODE_C23_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(NODE_C23_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(NODE_C23_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(NODE_C23_SESSION)" -- \
@@ -11247,7 +11258,7 @@ DEV_COMPILE_CFLAGS = $(DEV_RESTART_CFLAGS)
 $(foreach d,$(DEV_HOT_SRC_DIRS),$(DEV_OBJ_DIR)/$(d)/%.o $(CLANG_FACTS_OUT_DIR)/$(d)/%.zsm $(CLANG_FACTS_OUT_DIR)/$(d)/%.argv): DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 
 $(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
+$(DEV_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
@@ -11320,7 +11331,7 @@ $(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_FAST_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
+$(TEST_FAST_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_SESSION)" -- \
@@ -11343,7 +11354,7 @@ $(TEST_REL_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_REL_OBJECT_CFLAGS 
   $(ARENA_VIEW_INCLUDES)
 $(TEST_REL_OBJ_DIR)/tests/harness/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)
-$(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_REL_LEASE)
+$(TEST_REL_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_REL_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_SESSION)" -- \
@@ -11366,7 +11377,7 @@ $(TEST_ASAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_ASAN_PROFILE),TEST_ASAN_EPOCH_COMPILE_FLAGS)
 $(TEST_ASAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_ASAN_LEASE)
+$(TEST_ASAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_ASAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_ASAN_SESSION)" -- \
@@ -11381,7 +11392,7 @@ DEV_ASAN_OBJECT_CFLAGS = $(DEV_ASAN_CFLAGS)
 DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(DEV_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): DEV_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
 $(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_ASAN_LEASE)
+$(DEV_ASAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_ASAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_ASAN_SESSION)" -- \
@@ -11397,7 +11408,7 @@ TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
 $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_TSAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_TSAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_TSAN_LEASE)
+$(TEST_TSAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_TSAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_TSAN_SESSION)" -- \
@@ -11410,7 +11421,7 @@ $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY
 # hot-path split — sanitizer fidelity over optimizer-sensitivity coverage).
 DEV_TSAN_OBJECT_CFLAGS = $(DEV_TSAN_CFLAGS)
 $(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_TSAN_LEASE)
+$(DEV_TSAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_TSAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_TSAN_SESSION)" -- \
@@ -12720,7 +12731,7 @@ COV_OBJECT_CFLAGS = $(COV_CFLAGS) -Wno-deprecated-declarations
 $(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(COV_BUILD_DIR)/tests/harness/src/test_arena_view.o: COV_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(COV_BUILD_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(COV_LEASE)
+$(COV_BUILD_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(COV_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) coverage "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(COV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(COV_SESSION)" -- \
@@ -15215,6 +15226,13 @@ check-%: export ZCL_LINT_PRODUCTION_SCAN := 1
 # on every input those probes read; a cache hit skips the ~15s of real `cc`
 # compiles / `make -n` dry runs and reproduces the identical verdict, an
 # input change is a cache MISS that reruns both probes for real.
+# The shim requests this exact standalone target in private scratch; it never
+# recurses through check-build-epoch-integrity while compiling the fixture.
+$(BIN_DIR)/make-depfile-scope-selftest: tools/dev/make_depfile_scope_selftest.c \
+        tools/dev/make_depfile_scope_process.h
+	@mkdir -p "$(dir $@)"
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o "$@" tools/dev/make_depfile_scope_selftest.c
+
 check-build-epoch-integrity:
 	@echo "══ LINT: toolchain-keyed compile epochs + atomic publication ══"
 	@tools/dev/build-epoch-integrity-cached.sh
@@ -16583,4 +16601,3 @@ wiki-runtime-compile-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
 	  tools/dev/wiki_runtime.c tools/dev/wiki_runtime_main.c
 	@$(CC) $(TEST_FAST_CFLAGS) -Wno-deprecated-declarations -fsyntax-only \
 	  tools/dev/wiki_runtime.c tests/harness/src/test_wiki_runtime.c
-

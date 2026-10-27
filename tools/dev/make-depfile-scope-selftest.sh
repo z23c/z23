@@ -1,247 +1,26 @@
-#!/usr/bin/env bash
-# Copyright 2026 Rhett Creighton - Apache License 2.0
-# Prove single-goal depfile narrowing retains header invalidation and that every
-# ambiguous invocation falls back to all compile profiles.
-#
-# node-c23 is the SHIPPED CONSENSUS BINARY's profile. Its objects are compiled
-# per-TU, so header invalidation for it rides `-include $(NODE_C23_OBJS:.o=.d)`
-# exactly like every other profile — and losing that include is silent: the .d
-# files are still WRITTEN by -MD, every build still succeeds, and the only
-# symptom is a node binary that quietly does not contain a header edit. That is
-# the one staleness in this repository that reaches consensus, so it is probed
-# here rather than left to a human remembering to check it.
-
-set -euo pipefail
-
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SELF_DIR/../.." && pwd)"
+#!/bin/sh
+# Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
+# Build and run the native real-Makefile depfile fixture in disposable scratch.
+set -eu
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-depfile-scope.XXXXXX")"
-ZERO=0000000000000000000000000000000000000000000000000000000000000000
-SOURCE_RECORD="$ZERO 1 $ZERO"
-
+child=
 cleanup()
 {
+    if [ -n "$child" ]; then
+        kill "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+    fi
     rm -rf -- "$WORK"
 }
-trap cleanup EXIT HUP INT TERM
-
-fail()
-{
-    printf 'make-depfile-scope-selftest: FAIL: %s\n' "$*" >&2
-    exit 1
-}
-
-profiles=(build-only dev test-fast test-strict node-c23)
-for profile in "${profiles[@]}"; do
-    object="$WORK/$profile.o"
-    header="$WORK/$profile.h"
-    depfile="$WORK/$profile.d"
-    : > "$object"
-    : > "$header"
-    printf '%s: %s\n' "$object" "$header" > "$depfile"
-    touch -t 202001010000 -- "$object" "$depfile"
-    touch -t 202101010000 -- "$header"
-done
-for ready in dev.complete test-fast.candidate test-fast.rsp \
-        test-strict.candidate test-strict.rsp node-c23.rsp; do
-    : > "$WORK/$ready"
-    touch -t 202201010000 -- "$WORK/$ready"
-done
-
-# Include the real Makefile so the test exercises its selection logic rather
-# than a copied model.  Every profile object is an explicit prerequisite of the
-# probe goals, but only a loaded .d file makes that existing object stale.  A
-# printed rebuild marker therefore proves a newer header was observed.
-PROBE_MK="$WORK/probe.mk"
-{
-    printf 'include %s/Makefile\n' "$ROOT"
-    for profile in "${profiles[@]}"; do
-        printf '%s/%s.o:\n\t@echo ZCL_DEP_REBUILD=%s\n' \
-            "$WORK" "$profile" "$profile"
-    done
-    printf 'ZCL_DEP_PROBE_OBJECTS := '
-    for profile in "${profiles[@]}"; do
-        printf '%s/%s.o ' "$WORK" "$profile"
-    done
-    printf '\n'
-    printf 'fast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n'
-    # These recipes normally invoke a recursive Make even under -n. Replace
-    # only their actions; retain the real graph selection and prerequisites.
-    printf 't-hotswap hotswap-test-so: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n'
-    printf 'zclassic23 z23 z23-package-verify: $(ZCL_DEP_PROBE_OBJECTS)\n'
-    printf 'zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n'
-    printf '\t@:\n'
-    printf '.DEFAULT_GOAL := zcl-depfile-default\n'
-} > "$PROBE_MK"
-
-# The 15 probes below each read the same read-only PROBE_MK/Makefile and each
-# write to their own $WORK/*.out file under -n (dry-run: make only prints what
-# it would do, so no probe ever creates or mutates a file). That makes them
-# provably independent of one another, so run_probe launches each in the
-# background against its own scratch subdirectory and wait_probes blocks on
-# every recorded PID individually (never a bare `wait`), failing loudly and
-# printing every failing probe's own output if any of them reports non-zero.
-PROBE_PIDS=()
-PROBE_OUTPUTS=()
-PROBE_GOALS=()
-
-run_probe()
-{
-    local output="$1" scratch
-    shift
-    scratch="${output%.out}.scratch"
-    mkdir -p "$scratch"
-    (
-        cd "$ROOT"
-        make -f "$PROBE_MK" --no-print-directory -n \
-            ZCL_STANDALONE_CLEAN=1 \
-            BUILD_SOURCE_RECORD="$SOURCE_RECORD" \
-            BUILD_DIR="$scratch/build" \
-            BIN_DIR="$scratch/build/bin" \
-            VIEW_GEN_HEADERS= VIEW_GEN_HEADERS_EARLY= \
-            VENDOR_LIBS= \
-            ALL_OBJS="$WORK/build-only.o" \
-            DEV_OBJS="$WORK/dev.o" \
-            DEV_OBJ_COMPLETE="$WORK/dev.complete" \
-            TEST_PARALLEL_FAST_OBJS="$WORK/test-fast.o" \
-            TEST_PARALLEL_FAST_CANDIDATE="$WORK/test-fast.candidate" \
-            TEST_PARALLEL_FAST_LINK_RSP="$WORK/test-fast.rsp" \
-            TEST_PARALLEL_REL_OBJS="$WORK/test-strict.o" \
-            TEST_PARALLEL_REL_CANDIDATE="$WORK/test-strict.candidate" \
-            TEST_PARALLEL_REL_LINK_RSP="$WORK/test-strict.rsp" \
-            NODE_C23_OBJS="$WORK/node-c23.o" \
-            NODE_C23_PACKAGE_VERIFY_OBJ="$WORK/node-c23.o" \
-            NODE_C23_LINK_RSP="$WORK/node-c23.rsp" \
-            "$@"
-    ) > "$output" 2>&1 &
-    PROBE_PIDS+=("$!")
-    PROBE_OUTPUTS+=("$output")
-    PROBE_GOALS+=("${*:-default goal}")
-}
-
-wait_probes()
-{
-    local i pid failed=0
-    for i in "${!PROBE_PIDS[@]}"; do
-        pid="${PROBE_PIDS[$i]}"
-        if ! wait "$pid"; then
-            sed -n '1,120p' "${PROBE_OUTPUTS[$i]}" >&2
-            printf 'make-depfile-scope-selftest: FAIL: Make probe failed: %s\n' \
-                "${PROBE_GOALS[$i]}" >&2
-            failed=1
-        fi
-    done
-    PROBE_PIDS=()
-    PROBE_OUTPUTS=()
-    PROBE_GOALS=()
-    [ "$failed" -eq 0 ] || exit 1
-}
-
-assert_exact_profiles()
-{
-    local output="$1" expected="$2" profile present should
-    for profile in "${profiles[@]}"; do
-        present=0
-        grep -Fq "ZCL_DEP_REBUILD=$profile" "$output" && present=1
-        should=0
-        case " $expected " in *" $profile "*) should=1 ;; esac
-        [ "$present" -eq "$should" ] || {
-            sed -n '1,160p' "$output" >&2
-            fail "profile=$profile present=$present expected=$should ($expected)"
-        }
-    done
-}
-
-# Every probe below reads the same read-only PROBE_MK/Makefile and writes to
-# its own scratch subdirectory and its own $WORK/*.out file (see run_probe's
-# comment above), so all 15 launch concurrently; wait_probes then blocks on
-# each one's own PID and checks its own rc before any assert_exact_profiles
-# call runs, so a probe's own Make failure is still caught exactly where it
-# happened, just as loudly as when these ran one at a time.
-run_probe "$WORK/dev.out" fast-compile
-run_probe "$WORK/build.out" build-only
-# t / t-fast now validate ONLY= at Makefile PARSE time (see the ONLY_REQUIRED_GOALS
-# block in the Makefile), so naming either as a probe goal without one is a
-# parse error before any depfile logic is reached. ONLY= is a command-line
-# VARIABLE, not a goal, so it does not enter MAKECMDGOALS and cannot change
-# which depfile scope is selected — which is the only thing these two probes
-# measure. Any registered group name works; boot_phase is small and stable.
-run_probe "$WORK/fast.out" t-fast ONLY=boot_phase
-run_probe "$WORK/strict.out" t ONLY=boot_phase
-run_probe "$WORK/failure-id.out" dev-failure-execution-id
-
-# Module recipes compile directly and never consume the linked harness's
-# object graph. A newer unrelated header must not schedule object rebuilds.
-run_probe "$WORK/hot-loop.out" t-hotswap ONLY=boot_phase
-run_probe "$WORK/hot-module.out" hotswap-test-so
-run_probe "$WORK/hot-both.out" t-hotswap hotswap-test-so ONLY=boot_phase
-run_probe "$WORK/hot-mixed.out" t-hotswap t-fast ONLY=boot_phase
-
-# The shipped node binary, under both spellings of its goal. Narrowing to
-# node-c23 alone is the point: a missing exact-goal branch would silently widen
-# this to every profile, and a missing -include would silently empty it.
-run_probe "$WORK/node.out" zclassic23
-run_probe "$WORK/node-alias.out" z23
-run_probe "$WORK/verifier.out" z23-package-verify
-
-# Two goals and an unknown explicit goal are ambiguous. They must import every
-# depfile, so every newer header schedules a rebuild. No explicit goal is the
-# exact spelling of `.DEFAULT_GOAL := z23`, so it remains node-c23 scoped.
-run_probe "$WORK/mixed.out" fast-compile build-only
-run_probe "$WORK/unknown.out" zcl-depfile-unknown
-run_probe "$WORK/default.out"
-
-wait_probes
-
-assert_exact_profiles "$WORK/dev.out" dev
-assert_exact_profiles "$WORK/build.out" build-only
-assert_exact_profiles "$WORK/fast.out" test-fast
-assert_exact_profiles "$WORK/strict.out" test-strict
-assert_exact_profiles "$WORK/failure-id.out" ""
-assert_exact_profiles "$WORK/hot-loop.out" ""
-assert_exact_profiles "$WORK/hot-module.out" ""
-assert_exact_profiles "$WORK/hot-both.out" ""
-assert_exact_profiles "$WORK/hot-mixed.out" "build-only dev test-fast test-strict node-c23"
-assert_exact_profiles "$WORK/node.out" node-c23
-assert_exact_profiles "$WORK/node-alias.out" node-c23
-assert_exact_profiles "$WORK/verifier.out" node-c23
-assert_exact_profiles "$WORK/mixed.out" "build-only dev test-fast test-strict node-c23"
-assert_exact_profiles "$WORK/unknown.out" "build-only dev test-fast test-strict node-c23"
-assert_exact_profiles "$WORK/default.out" node-c23
-
-# A goal that compiles objects of a profile must import that profile's
-# depfiles.  The lint umbrellas and ff build the dev node (and ff the fast test
-# objects) yet had an EMPTY depfile selection, so a header change left their
-# objects fresh and `make lint` relinked stale objects ("undefined symbol").
-# Compare the final ZCL_EPOCH_PROFILES and ZCL_DEPFILE_PROFILES values the
-# real Makefile computes for each goal: every epoch profile must be imported.
-consistency_goals=(lint lint-preflight ff dev-bin
-    dev-proof-bundle fast-compile dev-build-only dev-package-verifier)
-consistency_pids=()
-for goal in "${consistency_goals[@]}"; do
-    (
-        cd "$ROOT"
-        make -pn --no-print-directory "$goal" 2>/dev/null |
-            awk -v g="$goal" '
-                /^ZCL_EPOCH_PROFILES :?= ?/ { e = $0; sub(/^[^=]*= ?/, "", e) }
-                /^ZCL_DEPFILE_PROFILES :?= ?/ { d = $0; sub(/^[^=]*= ?/, "", d) }
-                END { printf "%s|%s|%s\n", g, e, d }'
-    ) > "$WORK/consistency.$goal" &
-    consistency_pids+=("$!")
-done
-for pid in "${consistency_pids[@]}"; do
-    wait "$pid" || true
-done
-for goal in "${consistency_goals[@]}"; do
-    IFS='|' read -r _ epoch_profiles depfile_profiles < "$WORK/consistency.$goal"
-    [ -n "$epoch_profiles" ] || fail "cannot read epoch profiles for goal $goal"
-    for profile in $epoch_profiles; do
-        case " $depfile_profiles " in
-            *" $profile "*) ;;
-            *) fail "goal $goal builds $profile objects (epoch: $epoch_profiles) but imports depfiles only for: ${depfile_profiles:-nothing}" ;;
-        esac
-    done
-done
-
-printf '%s\n' \
-    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true epoch_depfile_consistent=true'
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+make -C "$ROOT" --no-print-directory ZCL_STANDALONE_CLEAN=1 \
+    BIN_DIR="$WORK/bin" "$WORK/bin/make-depfile-scope-selftest" &
+child=$!
+wait "$child"
+child=
+"$WORK/bin/make-depfile-scope-selftest" "$ROOT" "$WORK" &
+child=$!
+wait "$child"
+child=

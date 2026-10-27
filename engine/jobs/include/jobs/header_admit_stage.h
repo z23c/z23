@@ -59,7 +59,7 @@ struct chain_params;
 struct block_header;
 struct validation_state;
 
-/* Caller owns progress-store lock, then ms->cs_main. Applies the existing
+/* Caller owns ms->cs_main before the progress-store lock. Applies the existing
  * contextual predicate and sparse/IBD policy to the exact named parent.
  * Unknown parent returns true with parent_known=false: defer, never invalidate. */
 bool header_admit_check_contextual_locked(struct main_state *ms,
@@ -76,12 +76,15 @@ bool header_admit_check_contextual_locked(struct main_state *ms,
  * `progress_store_open` to have succeeded first. */
 bool header_admit_stage_init(struct main_state *ms);
 
-/* Run one stage step. Returns the stage result code. Safe to call before
- * init (returns JOB_IDLE). */
+/* Run one stage step. Owns cs_main before acquiring progress-store. Do not
+ * enter while holding progress-store unless cs_main is already owned.
+ * Returns the stage result code; before init returns JOB_IDLE. */
 job_result_t header_admit_stage_step_once(void);
 
-/* Drain up to `max_steps` consecutive ADVANCE steps. Stops early on
- * IDLE, BLOCKED, or ERROR. Returns the count of ADVANCED steps. */
+/* Drain up to `max_steps` consecutive ADVANCE steps. Owns cs_main before
+ * the initial progress-store batch lock. Do not enter while holding
+ * progress-store unless cs_main is already owned. Stops early on IDLE,
+ * BLOCKED, or ERROR; returns the count of ADVANCED steps. */
 int header_admit_stage_drain(int max_steps);
 
 /* Disarm + free. Idempotent. */
@@ -110,6 +113,9 @@ bool header_admit_stage_dump_state_json(struct json_value *out,
                                          const char *key);
 
 #ifdef ZCL_TESTING
+/* Install only before starting workers; clear only after all joins. */
+void header_admit_stage_set_main_hook_for_testing(
+    void (*hook)(void *), void *ctx);
 typedef bool (*header_admit_authoritative_hook)(
     struct main_state *ms,
     struct block_index *bi,

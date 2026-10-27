@@ -20,6 +20,7 @@
 #ifndef ZCL_TEST_PAIRING_CORPUS_H
 #define ZCL_TEST_PAIRING_CORPUS_H
 
+#include "base/compiler.h"
 #include "sapling/bls12_381.h"
 
 #include <stdbool.h>
@@ -44,7 +45,7 @@
  * that quietly compares an implementation to itself is worse than no harness:
  * it manufactures confidence for a change nobody checked.
  */
-__attribute__((weak)) void bls12_381_pairing_candidate(
+ZCL_WEAK_IMPORT void bls12_381_pairing_candidate(
     struct fp12 *out, const struct g1_point *p, const struct g2_point *q);
 
 static inline bool pc_have_candidate(void)
