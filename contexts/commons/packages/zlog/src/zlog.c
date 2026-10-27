@@ -30,6 +30,48 @@ zlog_level zlog_level_parse(const char *s)
     return ZLOG_OFF;
 }
 
+/* Append the level name, truncated to fit the line, advancing the cursor. */
+static void zlog_append_level_name(char *line, size_t *o, zlog_level level)
+{
+    const char *name = zlog_level_name(level);
+    size_t nl = strlen(name);
+    if (nl > ZLOG_LINE_CAP - 2) nl = ZLOG_LINE_CAP - 2;
+    memcpy(line + *o, name, nl);
+    *o += nl;
+}
+
+/* Append a separating space when the line still has room, advancing the cursor. */
+static void zlog_append_space(char *line, size_t *o)
+{
+    if (*o + 1 < ZLOG_LINE_CAP - 1) line[(*o)++] = ' ';
+}
+
+/* Append a separating space and the sink's tag when one is configured, truncated to fit. */
+static void zlog_append_tag(char *line, size_t *o, const zlog_sink *sink)
+{
+    if (sink->include_tag && sink->tag && sink->tag[0]) {
+        size_t tl = strlen(sink->tag);
+        zlog_append_space(line, o);
+        if (tl > ZLOG_LINE_CAP - *o - 2) tl = ZLOG_LINE_CAP - *o - 2;
+        memcpy(line + *o, sink->tag, tl);
+        *o += tl;
+    }
+}
+
+/* Append a separating space, then the message if present, then the newline and terminator. */
+static void zlog_append_message(char *line, size_t *o, const char *message)
+{
+    zlog_append_space(line, o);
+    if (message) {
+        size_t ml = strlen(message);
+        if (ml > ZLOG_LINE_CAP - *o - 2) ml = ZLOG_LINE_CAP - *o - 2;
+        memcpy(line + *o, message, ml);
+        *o += ml;
+    }
+    line[(*o)++] = '\n';
+    line[*o] = '\0';
+}
+
 bool zlog_write(const zlog_sink *sink, zlog_level level, const char *message)
 {
     if (!sink) return false;
@@ -41,30 +83,9 @@ bool zlog_write(const zlog_sink *sink, zlog_level level, const char *message)
     char line[ZLOG_LINE_CAP];
     size_t o = 0;
 
-    const char *name = zlog_level_name(level);
-    size_t nl = strlen(name);
-    if (nl > sizeof line - 2) nl = sizeof line - 2;
-    memcpy(line + o, name, nl);
-    o += nl;
-
-    if (sink->include_tag && sink->tag && sink->tag[0]) {
-        size_t tl = strlen(sink->tag);
-        if (o + 1 < sizeof line - 1) line[o++] = ' ';
-        if (tl > sizeof line - o - 2) tl = sizeof line - o - 2;
-        memcpy(line + o, sink->tag, tl);
-        o += tl;
-    }
-
-    if (o + 1 < sizeof line - 1) line[o++] = ' ';
-
-    if (message) {
-        size_t ml = strlen(message);
-        if (ml > sizeof line - o - 2) ml = sizeof line - o - 2;
-        memcpy(line + o, message, ml);
-        o += ml;
-    }
-    line[o++] = '\n';
-    line[o] = '\0';
+    zlog_append_level_name(line, &o, level);
+    zlog_append_tag(line, &o, sink);
+    zlog_append_message(line, &o, message);
 
     sink->emit(sink->ctx, line);
     return true;
