@@ -25,6 +25,7 @@ extract() {
         copying { print }
     ' "$ROOT/tools/ship.sh" > "$dst"
 }
+extract "<<'REMOTE_BINDING_CHECK'" REMOTE_BINDING_CHECK "$tmp/binding-check.sh"
 extract "<<'REMOTE_RELEASE_CHECK'" REMOTE_RELEASE_CHECK "$tmp/release-check.sh"
 extract "<<'REMOTE_SCRIPT'" REMOTE_SCRIPT "$tmp/activate.part"
 extract "<<'ROLLBACK_SCRIPT'" ROLLBACK_SCRIPT "$tmp/rollback.part"
@@ -53,13 +54,38 @@ manifest_sha="$(sha256sum < "$manifest" | awk '{print $1}')"
 home="$tmp/home"
 release="$home/.local/lib/z23/releases/$manifest_sha"
 incoming="${release}.incoming.test-run"
-dropin="$home/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
+node_unit=z23-node.service
+dropin="$home/.config/systemd/user/${node_unit}.d/zzzzz-z23-ship-release.conf"
 mkdir -p "$tmp/mockbin" "$(dirname "$dropin")" "$(dirname "$release")"
 
 cat > "$tmp/mockbin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$1" != --user ] || shift
+unit=""
+for arg in "$@"; do
+    case "$arg" in z23-node|z23-node.service) unit=z23-node.service ;; zclassic23.service) unit=zclassic23.service ;; esac
+done
+selected_unit="${ZCL_SHIP_TEST_UNIT:-z23-node.service}"
+if [ "$1" = show ]; then
+    property=""
+    for arg in "$@"; do
+        case "$arg" in LoadState|ActiveState) property="$arg" ;; esac
+    done
+    if [ "$property" = LoadState ]; then
+        if [ "${ZCL_SHIP_TEST_BINDING:-}" = both ] || { [ "$unit" = "$selected_unit" ] && [ "${ZCL_SHIP_TEST_BINDING:-}" != missing ]; }; then echo loaded; else echo not-found; fi
+        exit 0
+    fi
+    if [ "$property" = ActiveState ] && [ "${*: -1}" = --value ]; then
+        if [ "${ZCL_SHIP_TEST_BINDING:-}" = both ] || { [ "$unit" = "$selected_unit" ] && [ "${ZCL_SHIP_TEST_BINDING:-}" != missing ]; }; then echo active; else echo inactive; fi
+        exit 0
+    fi
+fi
+if [ "$1" = restart ]; then
+    [ "$unit" = "$selected_unit" ] || { echo 'wrong service restarted' >&2; exit 2; }
+    printf '%s\n' "$unit" >> "$ZCL_SHIP_TEST_PIDFILE.restarts"
+fi
+if [ "$1" = show ] && [ "$unit" != "$selected_unit" ]; then exit 2; fi
 case "$1" in
 show)
     # The observer asks for the unit's ActiveState/SubState/NRestarts as well
@@ -75,7 +101,7 @@ show)
             exit 0 ;;
         ExecStart)
             selected_exec="$ZCL_SHIP_TEST_OLD"
-            for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
+            for conf in "$HOME/.config/systemd/user/${selected_unit}.d/"*.conf; do
                 [ -f "$conf" ] || continue
                 pinned="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$conf" | tail -1)"
                 [ -z "$pinned" ] || selected_exec="$pinned"
@@ -85,7 +111,7 @@ show)
             exit 0 ;;
         DropInPaths)
             paths=""
-            for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
+            for conf in "$HOME/.config/systemd/user/${selected_unit}.d/"*.conf; do
                 [ -f "$conf" ] || continue
                 paths="${paths:+$paths }$conf"
             done
@@ -114,7 +140,7 @@ restart)
     target="$ZCL_SHIP_TEST_OLD"
     # Model systemd's lexical drop-in precedence. The legacy zzzz selector
     # loses to ship's zzzzz selector; the last effective ExecStart wins.
-    for conf in "$HOME/.config/systemd/user/z23-node.service.d/"*.conf; do
+    for conf in "$HOME/.config/systemd/user/${selected_unit}.d/"*.conf; do
         [ -f "$conf" ] || continue
         selected="$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$conf" | tail -1)"
         [ -z "$selected" ] || target="$selected"
@@ -162,12 +188,13 @@ stage_release() {
 invoke_activate() {
     HOME="$home" PATH="$tmp/mockbin:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_OLD="$tmp/old" \
+    ZCL_SHIP_TEST_UNIT="$node_unit" \
     ZCL_SHIP_TEST_SOURCE="$source_id" \
     ZCL_SHIP_TEST_FAIL_MARKER="$tmp/fail.marker" \
     ZCL_SHIP_TEST_FAIL_ONCE="${1:-}" ZCL_SHIP_TEST_FAIL_ALWAYS="${2:-}" \
         bash "$tmp/activate.sh" "$tmp/old" "$release" "$manifest_sha" \
         "$new_sha" "$source_id" candidate-commit "$new_sha" "$new_sha" \
-        test-run 20 6 20 6 2 2 "2 4 6"
+        test-run 20 6 20 6 2 2 "2 4 6" 0 "$node_unit"
 }
 
 reset_fixture() {
@@ -302,8 +329,9 @@ grep -Fq "ExecStart=\"$release/z23\"" "$dropin"
 # Rollback changes only the selected path; immutable release bytes remain.
 HOME="$home" PATH="$tmp/mockbin:$PATH" \
 ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_OLD="$tmp/old" \
+ZCL_SHIP_TEST_UNIT="$node_unit" \
 ZCL_SHIP_TEST_SOURCE="$source_id" \
-    bash "$tmp/rollback.sh" "$tmp/old" test-run "$old_sha" 20 6 2 2 "2 4 6" >/dev/null
+    bash "$tmp/rollback.sh" "$tmp/old" test-run "$old_sha" 20 6 2 2 "2 4 6" "$node_unit" >/dev/null
 grep -qx 'prior ship selection' "$dropin"
 live_pid="$(cat "$pidfile")"
 [ "$(live_exe_sha "$live_pid")" = "$old_sha" ]
@@ -315,11 +343,12 @@ reset_fixture
 invoke_activate >/dev/null
 if HOME="$home" PATH="$tmp/mockbin:$PATH" \
     ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_OLD="$tmp/old" \
+    ZCL_SHIP_TEST_UNIT="$node_unit" \
     ZCL_SHIP_TEST_SOURCE="$source_id" \
     ZCL_SHIP_TEST_FAIL_MARKER="$tmp/fail.marker" \
     ZCL_SHIP_TEST_FAIL_ONCE="" ZCL_SHIP_TEST_FAIL_ALWAYS=restart \
         bash "$tmp/rollback.sh" "$tmp/old" test-run "$old_sha" \
-        20 6 2 2 "2 4 6" >/dev/null 2>&1; then
+        20 6 2 2 "2 4 6" "$node_unit" >/dev/null 2>&1; then
     echo "check_ship_remote_transaction: fallback restart failure passed" >&2
     exit 1
 fi
@@ -330,4 +359,48 @@ tor_line="$(grep -n 'ship_candidate_has_real_tor "$CANDIDATE"' "$ROOT/tools/ship
 deploy_line="$(grep -n '^deploy_remote()' "$ROOT/tools/ship.sh" | cut -d: -f1)"
 [ "$tor_line" -lt "$deploy_line" ]
 
+# The same real transaction selects only the explicitly bound legacy service.
+default_dropin_sha="$(sha256sum < "$dropin" | awk '{print $1}')"
+default_dropin="$dropin"
+node_unit=zclassic23.service
+: > "$pidfile.restarts"
+dropin="$home/.config/systemd/user/${node_unit}.d/zzzzz-z23-ship-release.conf"
+mkdir -p "$(dirname "$dropin")"
+for fault in reload restart; do
+    reset_fixture
+    if invoke_activate "$fault" >/dev/null 2>&1; then
+        echo "check_ship_remote_transaction: legacy survived $fault fault" >&2; exit 1
+    fi
+    assert_old_selected
+done
+reset_fixture
+invoke_activate >/dev/null
+[ "$(live_exe_sha "$(cat "$pidfile")")" = "$new_sha" ]
+grep -Fq "ExecStart=\"$release/z23\" \"-fixture-node\"" "$dropin"
+# Restart logs name exactly the selected service; the other service is read-only.
+[ -s "$pidfile.restarts" ]
+! grep -vxF "$node_unit" "$pidfile.restarts"
+
+[ "$(sha256sum < "$default_dropin" | awk '{print $1}')" = "$default_dropin_sha" ]
+# Run the exact production pre-transfer check against the same service fixture.
+invoke_binding() {
+    HOME="$home" PATH="$tmp/mockbin:$PATH" \
+    ZCL_SHIP_TEST_UNIT="$node_unit" ZCL_SHIP_TEST_BINDING="${1:-}" \
+    ZCL_SHIP_TEST_PIDFILE="$pidfile" ZCL_SHIP_TEST_OLD="$tmp/old" \
+        bash "$tmp/binding-check.sh" "$node_unit"
+}
+invoke_binding
+for binding_fault in both missing; do
+    before_pid="$(cat "$pidfile")"
+    before_restarts="$(wc -l < "$pidfile.restarts")"
+    if invoke_binding "$binding_fault" >/dev/null 2>&1; then
+        echo "check_ship_remote_transaction: $binding_fault binding passed" >&2; exit 1
+    fi
+    [ "$(cat "$pidfile")" = "$before_pid" ]
+    [ "$(wc -l < "$pidfile.restarts")" = "$before_restarts" ]
+done
+# The all-host binding barrier precedes the sole remote staging dispatcher.
+binding_line="$(grep -n 'ship_remote_binding_check "$host" ||' "$ROOT/tools/ship.sh" | cut -d: -f1)"
+stage_line="$(grep -n 'ship_remote_rollout stage_remote deploy_remote' "$ROOT/tools/ship.sh" | cut -d: -f1)"
+[ "$binding_line" -lt "$stage_line" ]
 echo "check_ship_remote_transaction: PASS (Tor gate precedes transfer; immutable mismatch, lock, partial stage, reload/restart, precedence, shadowed-ExecStart refusal, and rollback paths proved)"

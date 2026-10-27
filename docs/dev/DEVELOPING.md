@@ -1923,6 +1923,19 @@ and rollback verification. A source identity or environment variable alone
 grants no activation authority. See [`RUNBOOK.md`](../RUNBOOK.md) and the current
 command schema before any authorized deployment work.
 
+For remote immutable shipping, `tools/ship.sh --targets=remote` binds the
+remote transaction to `z23-node.service` by default. Set `ZCL_SHIP_NODE_UNIT`
+to `zclassic23.service` only when that is the existing canonical service.
+These are the two accepted names. Before release transfer, every target must
+have the selected service loaded and active with a running executable, and
+the other service must be absent, inactive or failed. An unresolved or active
+second service is refused. The binding remains fixed through observation,
+activation, rollback and cleanup; shipping does not rename a service or
+supply new node arguments. Existing schema, source, artifact and process
+qualification still apply. This option does not change local `make deploy`
+or qualify a native planner's dry-run as an activation proof.
+<!-- claim: symbol-present ZCL_SHIP_NODE_UNIT tools/ship.sh # explicit remote service binding -->
+
 ### Submit from another machine
 
 A host with no worktree on the queue host (a Mac or Windows machine) never

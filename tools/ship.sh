@@ -40,6 +40,7 @@
 # Environment:
 #   ZCL_SHIP_HOSTS    SSH destinations, space separated (operator-local)
 #   ZCL_SHIP_REMOTE   compatibility fallback for one remote host
+#   ZCL_SHIP_NODE_UNIT  remote service: z23-node.service (default) or zclassic23.service
 #   ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1
 #                     deploy even though the candidate changes persistent-schema
 #                     code. A change is NODE_DB_SCHEMA_LATEST differing from the
@@ -155,6 +156,8 @@ ship_one_way_schema_decision() {
 # shellcheck source=tools/scripts/tor_provenance_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_provenance_lib.sh"  # zcl_tor_provenance_bin, zcl_tor_provenance_ensure_bin
 
+# Remote activation binds one explicitly named canonical service only.
+readonly REMOTE_NODE_UNIT="${ZCL_SHIP_NODE_UNIT:-z23-node.service}"
 REMOTE_HOSTS_RAW="${ZCL_SHIP_HOSTS:-${ZCL_SHIP_REMOTE:-}}"
 PROOF_SERVER="${ZCL_SHIP_PROOF_SERVER:-}"
 REMOTE_HOSTS=()
@@ -1687,6 +1690,46 @@ deploy_local() {
     return "$rc"
 }
 
+# Resolve every remote service before any release transfer. The unit name is
+# explicit and frozen for the run; never migrate or select another service.
+ship_remote_binding_check() {
+    ssh "${SSH_OPTS[@]}" "$1" bash -s -- "$REMOTE_NODE_UNIT" <<'REMOTE_BINDING_CHECK'
+set -eu
+node_unit="$1"
+case "$node_unit" in
+    z23-node.service) other_unit=zclassic23.service ;;
+    zclassic23.service) other_unit=z23-node.service ;;
+    *) echo "remote: unsupported node service" >&2; exit 2 ;;
+esac
+[ "$(systemctl --user show "$node_unit" -p LoadState --value)" = loaded ] &&
+[ "$(systemctl --user show "$node_unit" -p ActiveState --value)" = active ] || {
+    echo "remote: selected node service is not loaded and active" >&2; exit 1;
+}
+other_load="$(systemctl --user show "$other_unit" -p LoadState --value)" || exit 1
+case "$other_load" in
+    not-found) other_state=inactive ;;
+    loaded)
+        other_state="$(systemctl --user show "$other_unit" -p ActiveState --value)" || {
+            echo "remote: could not determine other node service state" >&2; exit 1;
+        }
+        ;;
+    *) echo "remote: other node service is unresolved" >&2; exit 1 ;;
+esac
+case "$other_state" in
+    inactive|failed) ;;
+    *) echo "remote: other node service is active or unresolved" >&2; exit 1 ;;
+esac
+pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
+case "$pid" in ''|*[!0-9]*|0) echo "remote: invalid selected node PID" >&2; exit 1 ;; esac
+if [ -e "/proc/$pid/exe" ]; then
+    exe="$(readlink -f "/proc/$pid/exe")"
+else
+    exe="$(ps -ww -o comm= -p "$pid")"
+fi
+case "$exe" in /*) [ -f "$exe" ] && [ -x "$exe" ] ;; *) exit 1 ;; esac
+REMOTE_BINDING_CHECK
+}
+
 # Copy and verify an immutable release without changing systemd state or the
 # running process.  Every remote passes this function before deploy_remote is
 # called for any remote, so transfer, capacity, or digest failures have no
@@ -1821,7 +1864,7 @@ ship_note_rollout_unverified() {
     SHIP_ROLLOUT_HOST="$note_host"
     SHIP_ROLLOUT_WINDOW="$note_window"
     if [ -z "$note_line" ]; then
-        SHIP_OBS_UNIT=z23-node
+        SHIP_OBS_UNIT="$REMOTE_NODE_UNIT"
         SHIP_OBS_SHA="$ARTIFACT_SHA"
         SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
         SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -1833,11 +1876,12 @@ ship_note_rollout_unverified() {
 }
 
 deploy_remote() {
+    local node_unit="$REMOTE_NODE_UNIT"
     local host="$1" svc_bin prev_sha prior_commit run_id release_root node_incoming release_state
     step "Deploy → $host"
     svc_bin="$(ssh "${SSH_OPTS[@]}" "$host" \
-        'set -eu
-         pid="$(systemctl --user show z23-node -p MainPID --value)"
+        "node_unit=$REMOTE_NODE_UNIT; "'set -eu
+         pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
          case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
          if [ -e "/proc/$pid/exe" ]; then
              readlink -f "/proc/$pid/exe"
@@ -1863,8 +1907,8 @@ REMOTE_HASH
     # A process rollback after a forward schema migration is not recovery.
     # Prove that the persistent-schema implementation is byte-equivalent
     # between the running release and this candidate before any transfer.
-    prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" '
-        pid="$(systemctl --user show z23-node -p MainPID --value)" || exit 1
+    prior_commit="$(ssh "${SSH_OPTS[@]}" "$host" "node_unit=$REMOTE_NODE_UNIT; "'
+        pid="$(systemctl --user show "$node_unit" -p MainPID --value)" || exit 1
         if [ -r "/proc/$pid/environ" ]; then
             tr "\0" "\n" < "/proc/$pid/environ" |
                 sed -n "s/^ZCL_AGENT_EXPECT_BUILD_COMMIT=//p"
@@ -1943,7 +1987,7 @@ REMOTE_RELEASE_CHECK
     # rerun from continuing to later hosts.
     if [ "$svc_bin" = "$release_root/z23" ]; then
         local current_line current_rc=0
-        SHIP_OBS_UNIT=z23-node
+        SHIP_OBS_UNIT="$REMOTE_NODE_UNIT"
         SHIP_OBS_SHA="$ARTIFACT_SHA"
         SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
         SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -1997,16 +2041,18 @@ crash_samples="${14}"; unknown_samples="${15}"; rpc_budgets="${16}"
 # binary cannot read the migrated database, so restoring it is the unsafe act
 # -- this run must fail loudly rather than "recover" into that state.
 one_way_schema="${17:-0}"
+node_unit="${18:-z23-node.service}"
+case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
 # The two subjects this script judges, each wrapped to ship_await's
 # one-argument observer seam. Same observables, same classifier, same words as
 # the local side uses.
-observe_candidate() { ship_observe z23-node "$want_sha" "$want_src" "$want_commit" "$1"; }
-observe_restore()   { ship_observe z23-node "$prior_sha" "" "" "$1"; }
+observe_candidate() { ship_observe "$node_unit" "$want_sha" "$want_src" "$want_commit" "$1"; }
+observe_restore()   { ship_observe "$node_unit" "$prior_sha" "" "" "$1"; }
 worker_v="$release_root/z23-package-verify"
 worker_v_legacy="$release_root/zclassic23-package-verify"
 worker_d="$release_root/z23-package-verify-dev"
 worker_d_legacy="$release_root/zclassic23-package-verify-dev"
-dropin_dir="$HOME/.config/systemd/user/z23-node.service.d"
+dropin_dir="$HOME/.config/systemd/user/${node_unit}.d"
 dropin="$dropin_dir/zzzzz-z23-ship-release.conf"
 rollback_dropin="${dropin}.ship.rollback.${run_id}"
 dropin_absent="${dropin}.ship.absent.${run_id}"
@@ -2039,7 +2085,7 @@ restore_prior() {
     # Do not wait for Type=notify startup here: ship_await below is the
     # progress-aware authority. A synchronous restart can block for tens of
     # minutes on a spinning-disk datadir before that observer even starts.
-    systemctl --user restart --no-block z23-node || return 1
+    systemctl --user restart --no-block "$node_unit" || return 1
 
     SHIP_AWAIT_WINDOW="$rollback_window"
     SHIP_AWAIT_SILENCE="$rollback_silence"
@@ -2114,7 +2160,7 @@ chmod 555 "$release_root"
     echo "remote: immutable release verification failed" >&2; exit 1;
 }
 
-pid="$(systemctl --user show z23-node -p MainPID --value)"
+pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
 prior_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$pid")")"
 # Linux keeps exact argv boundaries (/proc cmdline is NUL-separated); hosts
@@ -2173,8 +2219,8 @@ systemctl --user daemon-reload
 # reporting sha != want for the whole window — which reads as a slow box, not
 # as a pinned one. Refuse here instead, naming the file that wins.
 guard_exec="$(ship_exec_path_from_show_text \
-    "$(systemctl --user show z23-node -p ExecStart --value 2>/dev/null || true)")"
-guard_dropins="$(systemctl --user show z23-node -p DropInPaths --value 2>/dev/null || true)"
+    "$(systemctl --user show "$node_unit" -p ExecStart --value 2>/dev/null || true)")"
+guard_dropins="$(systemctl --user show "$node_unit" -p DropInPaths --value 2>/dev/null || true)"
 if ! guard_text="$(ship_exec_guard_check "$release_root/z23" "$guard_exec" \
         "$dropin" "$guard_dropins")"; then
     printf 'remote: %s\n' "$guard_text" >&2
@@ -2190,7 +2236,7 @@ fi
 # Queue the restart and immediately enter the progress-aware observer below.
 # Waiting synchronously defeats the slow-box verdict because Type=notify does
 # not return until the whole cold datadir startup has completed.
-systemctl --user restart --no-block z23-node
+systemctl --user restart --no-block "$node_unit"
 
 # The rollback stays armed until the candidate proves exact bytes, the expected
 # identity, and answering RPC. A successful `systemctl restart` only proves
@@ -2236,7 +2282,7 @@ REMOTE_SCRIPT
         "$SHIP_REMOTE_WINDOW" "$SHIP_REMOTE_SILENCE" \
         "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
         "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
-        "$one_way_schema" \
+        "$one_way_schema" "$REMOTE_NODE_UNIT" \
         || activate_rc=$?
 
     # The remote reached a verdict with the same classifier the local side is
@@ -2276,7 +2322,7 @@ REMOTE_SCRIPT
     # process proven still (WEDGED) or one that will not stay up (CRASHED) may
     # authorise it; a box that is visibly working keeps its candidate.
     local running_sha rollback_rc qual_rc=0
-    SHIP_OBS_UNIT=z23-node
+    SHIP_OBS_UNIT="$REMOTE_NODE_UNIT"
     SHIP_OBS_SHA="$ARTIFACT_SHA"
     SHIP_OBS_SRC="${CAND_SOURCE_ID:-}"
     SHIP_OBS_COMMIT="${DEPLOY_COMMIT:-}"
@@ -2326,12 +2372,14 @@ prior_sha="$3"
 # tools/scripts/ship_progress_lib.sh is prepended to this script on stdin: the
 # target box has no checkout, so the code that reaches the verdict has to
 # travel with the question.
+node_unit="${9:-z23-node.service}"
+case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
 rollback_window="$4"; rollback_silence="$5"
 crash_samples="$6"; unknown_samples="$7"; rpc_budgets="$8"
 # Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
 # below, before the only call.
-observe_restore() { ship_observe z23-node "$prior_sha" "" "" "$1"; }
-dropin="$HOME/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
+observe_restore() { ship_observe "$node_unit" "$prior_sha" "" "" "$1"; }
+dropin="$HOME/.config/systemd/user/${node_unit}.d/zzzzz-z23-ship-release.conf"
 if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${run_id}" ]; then
     if [ -f "${dropin}.ship.rollback.${run_id}" ]; then
         install -m 644 "${dropin}.ship.rollback.${run_id}" "$dropin"
@@ -2342,7 +2390,7 @@ if [ -f "${dropin}.ship.rollback.${run_id}" ] || [ -f "${dropin}.ship.absent.${r
         echo "remote: CRITICAL — rollback daemon-reload failed" >&2
         exit 1
     fi
-    if ! systemctl --user restart --no-block z23-node; then
+    if ! systemctl --user restart --no-block "$node_unit"; then
         echo "remote: CRITICAL — rollback restart request failed" >&2
         exit 1
     fi
@@ -2370,7 +2418,7 @@ exit 1
 ROLLBACK_SCRIPT
         } | ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$svc_bin" "$run_id" "$prev_sha" \
             "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
-            "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
+            "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" "$REMOTE_NODE_UNIT" \
             || rollback_rc=$?
         if [ "$rollback_rc" -eq 0 ]; then
             die "remote deploy failed; rollback process-qualified"
@@ -2407,12 +2455,14 @@ ROLLBACK_SCRIPT
 
     # Qualification and any proof recording are complete; the run-addressed
     # rollback set is no longer an authority and must not accumulate forever.
-    ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$run_id" <<'REMOTE_CLEANUP' || \
+    ssh "${SSH_OPTS[@]}" "$host" bash -s -- "$run_id" "$REMOTE_NODE_UNIT" <<'REMOTE_CLEANUP' || \
         say "WARNING: $host retained the qualified run's rollback files"
 set -eu
 run_id="$1"
+node_unit="$2"
+case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
 case "$run_id" in ''|*[!A-Za-z0-9.-]*) exit 2 ;; esac
-dropin="$HOME/.config/systemd/user/z23-node.service.d/zzzzz-z23-ship-release.conf"
+dropin="$HOME/.config/systemd/user/${node_unit}.d/zzzzz-z23-ship-release.conf"
 rm -f \
     "${dropin}.ship.rollback.${run_id}" "${dropin}.ship.absent.${run_id}"
 REMOTE_CLEANUP
@@ -2438,6 +2488,15 @@ for target in $TARGETS; do
             esac
             ;;
         remote)
+            case "$REMOTE_NODE_UNIT" in
+                z23-node.service|zclassic23.service) ;;
+                *) die "unsupported ZCL_SHIP_NODE_UNIT" ;;
+            esac
+            if [ "$DRY_RUN" -eq 0 ]; then
+                for host in "${DEPLOY_HOSTS[@]}"; do
+                    ship_remote_binding_check "$host" || die "remote service binding refused before transfer"
+                done
+            fi
             step "Stage remote fleet"
             rollout_rc=0
             ship_remote_rollout stage_remote deploy_remote \
@@ -2476,8 +2535,8 @@ for target in $TARGETS; do
                 "$(printf '%s' "$s" | grep -oE 'sync=[a-z_]+' | cut -d= -f2)" ;;
         remote)
             for host in "${DEPLOY_HOSTS[@]}"; do
-                s="$(ssh "${SSH_OPTS[@]}" "$host" '
-                    pid="$(systemctl --user show z23-node -p MainPID --value)"
+                s="$(ssh "${SSH_OPTS[@]}" "$host" "node_unit=$REMOTE_NODE_UNIT; "'
+                    pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
                     case "$pid" in ""|*[!0-9]*|0) exit 1 ;; esac
                     if [ -e "/proc/$pid/exe" ]; then
                         exe="/proc/$pid/exe"
