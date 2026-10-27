@@ -3539,14 +3539,17 @@ void zcl_native_status_journey_render(const struct json_value *d, char *buf,
 
 /* A person-readable first line for the one case the machine line cannot
  * explain by itself: no node answered. Returns true and fills `buf` when the
- * journey blocker is STATUS_SOURCE_UNAVAILABLE, false (buf untouched) for
- * every other status. `datadir` is the datadir the client looked in. */
+ * journey blocker is STATUS_SOURCE_UNAVAILABLE and nothing listens on the
+ * RPC port (`node_listening` false; a running node with a degraded status
+ * source reports the same blocker), false (buf untouched) otherwise.
+ * `datadir` is the datadir the client looked in. */
 bool zcl_native_status_journey_headline(const struct json_value *d,
-                                       const char *datadir, char *buf,
+                                       const char *datadir,
+                                       bool node_listening, char *buf,
                                        size_t cap)
 {
     const char *blocker = nc_journey_blocker_field(d);
-    if (!buf || cap == 0 || !blocker ||
+    if (!buf || cap == 0 || node_listening || !blocker ||
         strcmp(blocker, "STATUS_SOURCE_UNAVAILABLE") != 0)
         return false;
     (void)snprintf(buf, cap,
@@ -3856,16 +3859,19 @@ size_t zcl_native_render_unknown_command(
     return len;
 }
 
-/* Print the no-node plain-language line ahead of the frozen machine line.
- * Only with no RPC cookie in the datadir: a running node whose status source
- * is degraded reports the same blocker and must not be told it is absent. */
+/* On a human terminal only (pipes keep the frozen one-line contract), print
+ * the no-node plain-language line ahead of the machine line. Whether a node
+ * runs is asked of the RPC port itself, not inferred from a cookie file. */
 static void nc_print_status_headline(const char *path,
                                      const struct json_value *data)
 {
     char headline[320];
-    if (strcmp(path, "status") == 0 && !node_rpc_client_cookie_present() &&
-        zcl_native_status_journey_headline(data, node_rpc_client_datadir(),
-                                           headline, sizeof(headline)))
+    if (strcmp(path, "status") != 0 || !nc_human())
+        return;
+    bool listening = node_rpc_port_listening(node_rpc_client_port(), 250);
+    if (zcl_native_status_journey_headline(data, node_rpc_client_datadir(),
+                                           listening, headline,
+                                           sizeof(headline)))
         printf("%s\n", headline);
 }
 

@@ -1085,7 +1085,8 @@ void zcl_native_status_brief_render(const struct json_value *data, char *buf,
 void zcl_native_status_journey_render(const struct json_value *data,
                                       char *buf, size_t cap);
 bool zcl_native_status_journey_headline(const struct json_value *data,
-                                       const char *datadir, char *buf,
+                                       const char *datadir,
+                                       bool node_listening, char *buf,
                                        size_t cap);
 
 /* Pick one short, deterministic next-step command from the same brief body

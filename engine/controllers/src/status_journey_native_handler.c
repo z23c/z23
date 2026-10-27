@@ -435,11 +435,7 @@ char *zcl_native_status_journey_body(const struct json_value *args,
 {
     (void)args;
     struct zcl_native_body_err brief_err = {0};
-    /* No cookie means no node was started in this datadir: skip the brief
-     * probe so a first-run user does not see its ERROR log line before the
-     * plain "no node is running" answer. */
-    char *brief_raw = node_rpc_client_cookie_present()
-        ? zcl_native_status_brief_body(NULL, &brief_err) : NULL;
+    char *brief_raw = zcl_native_status_brief_body(NULL, &brief_err);
     char *money_raw = node_rpc_call_deadline(
         "agentsession", "[\"custody_current\",{}]",
         JOURNEY_RPC_CONNECT_MS, JOURNEY_RPC_TOTAL_MS);

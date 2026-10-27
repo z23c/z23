@@ -27,9 +27,8 @@ bool node_rpc_client_read_file(const char *path, void *buf, size_t cap,
  * the client; callers must not free or modify it. */
 const char *node_rpc_client_datadir(void);
 
-/* True when the selected datadir holds a readable RPC auth cookie, i.e. a
- * node has plausibly been started there. No network I/O, no logging. */
-bool node_rpc_client_cookie_present(void);
+/* The RPC port node_rpc_client_init selected (for node_rpc_port_listening). */
+int node_rpc_client_port(void);
 
 /* Invoke a JSON-RPC method on the local node.
  * params_json may be NULL (sends []) or a JSON array string.

@@ -991,8 +991,8 @@ static int test_status_no_node_headline(void)
     json_push_kv_str(&d, "primary_blocker", "STATUS_SOURCE_UNAVAILABLE");
     json_push_kv_str(&d, "next_action", "z23 core status brief");
     char buf[320];
-    bool had = zcl_native_status_journey_headline(&d, "/srv/z23-data", buf,
-                                                  sizeof(buf));
+    bool had = zcl_native_status_journey_headline(&d, "/srv/z23-data", false,
+                                                  buf, sizeof(buf));
     TEST("no-node status gets a plain first line naming the datadir") {
         ASSERT(had);
         ASSERT(strncmp(buf, "No node is running here (datadir /srv/z23-data)",
@@ -1001,14 +1001,21 @@ static int test_status_no_node_headline(void)
         ASSERT(strchr(buf, '\n') == NULL);
         PASS();
     }
+    buf[0] = '\0';
+    TEST("a listening node with a degraded status source is not called absent") {
+        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", true,
+                                                   buf, sizeof(buf)));
+        ASSERT(buf[0] == '\0');
+        PASS();
+    }
     json_free(&d);
     json_init(&d);
     json_set_object(&d);
     json_push_kv_str(&d, "primary_blocker", "none");
     buf[0] = '\0';
     TEST("a running node gets no headline") {
-        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", buf,
-                                                   sizeof(buf)));
+        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", false,
+                                                   buf, sizeof(buf)));
         ASSERT(buf[0] == '\0');
         PASS();
     } _test_next:;
