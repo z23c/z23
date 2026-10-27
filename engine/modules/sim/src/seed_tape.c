@@ -519,18 +519,18 @@ int seed_tape_save(const seed_tape_t *tape, const char *path)
  * fields; returns 0 if those pass, else -1 (stderr messages keep
  * seed_tape_load_from_memory's name). The RNG state and action records
  * are checked by the caller. */
-static int tape_check_header(const uint8_t *buf, size_t fsize)
+static int tape_check_header(const uint8_t *buf, size_t fsize, const char *fn)
 {
     /* Minimum: header (32) + rng state (32) + action_count (8) + crc (4) = 76. */
     if (fsize < TAPE_HEADER_SIZE + 32 + 8 + 4) {
         fprintf(stderr,
             "[sim.seed_tape] %s: buffer too small (%zu bytes)\n",
-            "seed_tape_load_from_memory", fsize);
+            fn, fsize);
         return -1;
     }
     if (fsize > (1u << 30)) {  /* 1 GiB sanity cap. */
         fprintf(stderr, "[sim.seed_tape] %s: buffer too large (%zu)\n",
-            "seed_tape_load_from_memory", fsize);
+            fn, fsize);
         return -1;
     }
 
@@ -540,14 +540,14 @@ static int tape_check_header(const uint8_t *buf, size_t fsize)
     if (stored_crc != calc_crc) {
         fprintf(stderr,
             "[sim.seed_tape] %s: CRC32C mismatch (stored=0x%08x calc=0x%08x)\n",
-            "seed_tape_load_from_memory", stored_crc, calc_crc);
+            fn, stored_crc, calc_crc);
         return -1;
     }
 
     /* Header. */
     if (memcmp(buf, TAPE_MAGIC, 8) != 0) {
         fprintf(stderr, "[sim.seed_tape] %s: bad magic\n",
-            "seed_tape_load_from_memory");
+            fn);
         return -1;
     }
     uint8_t ver = buf[8];
@@ -555,13 +555,13 @@ static int tape_check_header(const uint8_t *buf, size_t fsize)
     if (ver != TAPE_VERSION) {
         fprintf(stderr,
             "[sim.seed_tape] %s: version mismatch (file=%u expected=%u)\n",
-            "seed_tape_load_from_memory", ver, TAPE_VERSION);
+            fn, ver, TAPE_VERSION);
         return -1;
     }
     if (flags != TAPE_FLAGS_NONE) {
         fprintf(stderr,
             "[sim.seed_tape] %s: unsupported flags=0x%02x\n",
-            "seed_tape_load_from_memory", flags);
+            fn, flags);
         return -1;
     }
     /* uint64_t seed_slot = get_u64_le(buf + 16); */  /* informational */
@@ -589,14 +589,14 @@ static int tape_restore_rng_state(seed_tape_t *t, const uint8_t *buf, size_t *of
  * seed_tape_load_from_memory's name). */
 static int tape_read_inject_record(seed_tape_t *t, const uint8_t *buf,
                                    size_t fsize, size_t *off,
-                                   struct tape_action *a)
+                                   struct tape_action *a, const char *fn)
 {
     if (*off + 5 > fsize - 4) {
         free(a);
         seed_tape_close(t);
         fprintf(stderr,
             "[sim.seed_tape] %s: truncated INJECT hdr\n",
-            "seed_tape_load_from_memory");
+            fn);
         return -1;
     }
     a->type = buf[(*off)++];
@@ -609,7 +609,7 @@ static int tape_read_inject_record(seed_tape_t *t, const uint8_t *buf,
         seed_tape_close(t);
         fprintf(stderr,
             "[sim.seed_tape] %s: bad INJECT payload_len=%u\n",
-            "seed_tape_load_from_memory", bad_len);
+            fn, bad_len);
         return -1;
     }
     if (a->payload_len) {
@@ -630,7 +630,8 @@ static int tape_read_inject_record(seed_tape_t *t, const uint8_t *buf,
  * after closing the tape (stderr messages keep seed_tape_load_from_memory's
  * name). */
 static int tape_read_action_records(seed_tape_t *t, const uint8_t *buf,
-                                    size_t fsize, uint64_t n, size_t off)
+                                    size_t fsize, uint64_t n, size_t off,
+                                    const char *fn)
 {
     /* Reconstruct the action list. Track stat counters so introspection
      * matches what was recorded. */
@@ -639,7 +640,7 @@ static int tape_read_action_records(seed_tape_t *t, const uint8_t *buf,
             seed_tape_close(t);
             fprintf(stderr,
                 "[sim.seed_tape] %s: truncated record %llu\n",
-                "seed_tape_load_from_memory", (unsigned long long)i);
+                fn, (unsigned long long)i);
             return -1;
         }
         uint8_t kind = buf[off++];
@@ -657,21 +658,21 @@ static int tape_read_action_records(seed_tape_t *t, const uint8_t *buf,
                 seed_tape_close(t);
                 fprintf(stderr,
                     "[sim.seed_tape] %s: truncated ADVANCE\n",
-                    "seed_tape_load_from_memory");
+                    fn);
                 return -1;
             }
             a->delta_us = get_i64_le(buf + off);
             off += 8;
             t->advance_count++;
         } else if (kind == TAPE_ACTION_INJECT) {
-            if (tape_read_inject_record(t, buf, fsize, &off, a) != 0)
+            if (tape_read_inject_record(t, buf, fsize, &off, a, fn) != 0)
                 return -1;
         } else {
             free(a);
             seed_tape_close(t);
             fprintf(stderr,
                 "[sim.seed_tape] %s: unknown action kind=%u\n",
-                "seed_tape_load_from_memory", kind);
+                fn, kind);
             return -1;
         }
 
@@ -691,7 +692,7 @@ seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
 
     const uint8_t *buf = (const uint8_t *)data;
     size_t fsize = len;
-    if (tape_check_header(buf, fsize) != 0) return NULL;
+    if (tape_check_header(buf, fsize, __func__) != 0) return NULL;
     int64_t wall_start = get_i64_le(buf + 24);
 
     /* Open a fresh tape (replay mode flipped on below). seed
@@ -717,7 +718,7 @@ seed_tape_t *seed_tape_load_from_memory(const void *data, size_t len)
         return NULL;
     }
 
-    if (tape_read_action_records(t, buf, fsize, n, off) != 0) return NULL;
+    if (tape_read_action_records(t, buf, fsize, n, off, __func__) != 0) return NULL;
 
     t->action_count = n;
     t->replay_cursor = t->head;
