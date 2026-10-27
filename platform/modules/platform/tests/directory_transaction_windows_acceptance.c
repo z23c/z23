@@ -598,31 +598,42 @@ static int fixture_cleanup(struct directory_fixture *f, int result)
     return 0;
 }
 
+/* Contender child mode: report the directory open and lock attempt via exit code. */
+static int lock_contender_exit_code(const char *root)
+{
+    struct platform_directory_transaction child_directory;
+    struct platform_directory_lock child_lock;
+    platform_directory_transaction_init(&child_directory);
+    platform_directory_lock_init(&child_lock);
+    if (!platform_directory_transaction_open(&child_directory, root))
+        return 4;
+    enum platform_directory_result acquired =
+        platform_directory_lock_acquire(&child_directory, "state.lock", false,
+            PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &child_lock);
+    platform_directory_lock_release(&child_lock);
+    platform_directory_transaction_close(&child_directory);
+    return acquired == PLATFORM_DIRECTORY_OK ? 0 : 10 + (int)acquired;
+}
+
+/* Compose the fixture's unique root_wide/root paths under the process temp directory. */
+static bool fixture_compose_root_paths(struct directory_fixture *f)
+{
+    wchar_t temp[MAX_PATH];
+    return GetTempPathW(MAX_PATH, temp) &&
+           swprintf(f->root_wide, MAX_PATH, L"%lsz23-dtxn-%lu-%llu", temp,
+                    (unsigned long)GetCurrentProcessId(),
+                    (unsigned long long)GetTickCount64()) > 0 &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, f->root_wide, -1,
+                               f->root, sizeof(f->root), NULL, NULL) > 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc == 3 && strcmp(argv[1], "--lock-child") == 0) {
-        struct platform_directory_transaction child_directory;
-        struct platform_directory_lock child_lock;
-        platform_directory_transaction_init(&child_directory);
-        platform_directory_lock_init(&child_lock);
-        if (!platform_directory_transaction_open(&child_directory, argv[2]))
-            return 4;
-        enum platform_directory_result acquired =
-            platform_directory_lock_acquire(&child_directory, "state.lock", false,
-                PLATFORM_DIRECTORY_LOCK_EXCLUSIVE, &child_lock);
-        platform_directory_lock_release(&child_lock);
-        platform_directory_transaction_close(&child_directory);
-        return acquired == PLATFORM_DIRECTORY_OK ? 0 : 10 + (int)acquired;
-    }
+    if (argc == 3 && strcmp(argv[1], "--lock-child") == 0)
+        return lock_contender_exit_code(argv[2]);
     struct directory_fixture storage = { 0 };
     struct directory_fixture *f = &storage;
-    wchar_t temp[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(f->root_wide, MAX_PATH, L"%lsz23-dtxn-%lu-%llu", temp,
-                 (unsigned long)GetCurrentProcessId(),
-                 (unsigned long long)GetTickCount64()) <= 0 ||
-        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, f->root_wide, -1,
-                            f->root, sizeof(f->root), NULL, NULL) <= 0)
+    if (!fixture_compose_root_paths(f))
         return fail("private root create");
     if (!platform_private_directory_create(f->root)) {
         fputs("directory_transaction_acceptance: REFUSE: runtime cannot prove "
