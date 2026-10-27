@@ -80,6 +80,11 @@ enum boot_zcode_dht_frame_verdict boot_zcode_dht_frame_classify(
       {VCS_ZCODE_DHT_REJECT_UNAUTHORIZED, BOOT_FRAME_DECODE_DETERMINISTIC},
       {VCS_ZCODE_DHT_REJECT_BACKPRESSURE, BOOT_FRAME_DECODE_DETERMINISTIC},
   };
+  /* Keeps the original exhaustive-switch guarantee: adding a reject reason
+   * without a row here fails the build instead of being silently scored. */
+  static_assert(sizeof k_verdict_by_reason / sizeof k_verdict_by_reason[0] ==
+                    VCS_ZCODE_DHT_REJECT_COUNT,
+                "classify every vcs_zcode_dht_reject_reason explicitly");
   for (unsigned i = 0;
        i < sizeof k_verdict_by_reason / sizeof k_verdict_by_reason[0]; ++i) {
     if (k_verdict_by_reason[i].reason == reason)
