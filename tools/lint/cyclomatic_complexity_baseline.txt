@@ -1204,8 +1204,6 @@ tests/harness/src/test_tip_finalize_stage.c:test_tip_finalize_stage:158
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_defers_while_tx_open:21
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_inside_caller_transaction:19
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_rebuild_folds_forward_from_saved_height:24
-tests/harness/src/test_utxo_activation_paused.c:seed_reducer_frontier_owner_rows:22
-tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
 tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
