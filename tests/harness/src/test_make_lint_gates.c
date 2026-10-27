@@ -1055,9 +1055,10 @@ static int lint_sandbox_build(const char *real_root, const char *sb_root)
     return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
 }
 
-/* Remove sandbox bases leaked by a killed run. Only bases whose owning process
- * is GONE are reaped (shards run concurrently). Called from the exclusive
- * lane, which runs before any shard starts. */
+/* Remove sandbox bases leaked by a killed run: shard bases (.lint_sb_) and
+ * the metadata test's base (.lint_meta_), each a full tree copy. Only bases
+ * whose owning process is GONE are reaped (shards run concurrently). Called
+ * from the exclusive lane, which runs before any shard starts. */
 static void lint_purge_stale_sandboxes(const char *real_root)
 {
     char tmp[PATH_MAX];
@@ -1068,20 +1069,20 @@ static void lint_purge_stale_sandboxes(const char *real_root)
     *slash = '\0';
     const char *parent = tmp;
     const char *base = slash + 1;
-
-    char prefix[PATH_MAX];
-    if (snprintf(prefix, sizeof(prefix), "%s.lint_sb_", base) >=
-        (int)sizeof(prefix))
-        return;
-    size_t plen = strlen(prefix);
+    size_t blen = strlen(base);
 
     DIR *d = opendir(parent);
     if (!d) return;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, prefix, plen) != 0) continue;
+        if (strncmp(e->d_name, base, blen) != 0) continue;
+        const char *kind = e->d_name + blen;
+        size_t klen = strncmp(kind, ".lint_sb_", 9) == 0     ? 9
+                      : strncmp(kind, ".lint_meta_", 11) == 0 ? 11
+                                                              : 0;
+        if (klen == 0) continue;
 
-        const char *pidstr = e->d_name + plen;
+        const char *pidstr = kind + klen;
         char *end = NULL;
         long owner_pid = strtol(pidstr, &end, 10);
         if (end == pidstr || !end || *end != '\0' || owner_pid <= 0) continue;
@@ -1419,8 +1420,12 @@ static int t_sandbox_preserves_live_source_metadata(void)
         ASSERT(snprintf(sb_root, sizeof(sb_root), "%s/w0", sb_base) <
                (int)sizeof(sb_root));
         ASSERT(stat(makefile, &before) == 0);
-        ASSERT(lint_sandbox_build(real_root, sb_root) == 0);
-        ASSERT(test_rm_rf_recursive(sb_base) == 0);
+        /* Remove the copy before asserting on the build, so a failed build
+         * never leaves a tree-sized copy beside the worktree. */
+        int built = lint_sandbox_build(real_root, sb_root);
+        int removed = test_rm_rf_recursive(sb_base);
+        ASSERT(built == 0);
+        ASSERT(removed == 0);
         ASSERT(stat(makefile, &after) == 0);
         ASSERT(before.st_dev == after.st_dev);
         ASSERT(before.st_ino == after.st_ino);
@@ -1435,6 +1440,66 @@ static int t_sandbox_preserves_live_source_metadata(void)
     return failures;
 }
 
+/* Make `<dir>/<name>` with one file inside, so a reap must recurse. */
+static int lint_plant_copy(const char *dir, const char *name)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path) ||
+        mkdir(path, 0700) != 0)
+        return -1;
+    if (snprintf(path, sizeof(path), "%s/%s/Makefile", dir, name) >=
+        (int)sizeof(path))
+        return -1;
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    return fclose(f);
+}
+
+static bool lint_copy_exists(const char *dir, const char *name)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    return snprintf(path, sizeof(path), "%s/%s", dir, name) < (int)sizeof(path) &&
+           stat(path, &st) == 0;
+}
+
+static int t_purge_reaps_dead_owner_copies(void)
+{
+    int failures = 0;
+    TEST("[lint-gate] purge reaps both sandbox kinds of a dead owner only") {
+        char fixture[PATH_MAX] = {0};
+        char root[PATH_MAX];
+        char live_sb[64];
+        char live_meta[64];
+        test_make_tmpdir(fixture, sizeof(fixture), "lint_purge", "reap");
+        ASSERT(snprintf(root, sizeof(root), "%s/tree", fixture) <
+               (int)sizeof(root));
+        ASSERT(snprintf(live_sb, sizeof(live_sb), "tree.lint_sb_%d",
+                        (int)getpid()) < (int)sizeof(live_sb));
+        ASSERT(snprintf(live_meta, sizeof(live_meta), "tree.lint_meta_%d",
+                        (int)getpid()) < (int)sizeof(live_meta));
+        /* 2147483647 is above any pid_max, so its owner is gone. */
+        ASSERT(lint_plant_copy(fixture, "tree") == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_sb_2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_meta_2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, live_sb) == 0);
+        ASSERT(lint_plant_copy(fixture, live_meta) == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_meta_x") == 0);
+        ASSERT(lint_plant_copy(fixture, "other.lint_meta_2147483647") == 0);
+        lint_purge_stale_sandboxes(root);
+        ASSERT(!lint_copy_exists(fixture, "tree.lint_sb_2147483647"));
+        ASSERT(!lint_copy_exists(fixture, "tree.lint_meta_2147483647"));
+        ASSERT(lint_copy_exists(fixture, "tree"));
+        ASSERT(lint_copy_exists(fixture, live_sb));
+        ASSERT(lint_copy_exists(fixture, live_meta));
+        ASSERT(lint_copy_exists(fixture, "tree.lint_meta_x"));
+        ASSERT(lint_copy_exists(fixture, "other.lint_meta_2147483647"));
+        ASSERT(test_rm_rf_recursive(fixture) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_make_lint_gates_partition(void)
 {
     printf("\n=== make_lint_gates partition tests ===\n");
@@ -1443,6 +1508,7 @@ int test_make_lint_gates_partition(void)
     failures += t_partition_shards_all_carry_work();
     failures += t_partition_only_base_group_is_exclusive();
     failures += t_sandbox_preserves_live_source_metadata();
+    failures += t_purge_reaps_dead_owner_copies();
     return failures;
 }
 
