@@ -226,6 +226,18 @@ bool repair_marker_forget(sqlite3 *db, const char *kind, int64_t height,
     return true;
 }
 
+/* Record the row's stored payload size in *payload_len and copy as much of
+ * the blob as payload_cap allows into payload_out, when payload_out is given. */
+static void copy_row_payload_out(const void *blob, int n, void *payload_out,
+                                 size_t payload_cap, size_t *payload_len)
+{
+    if (payload_len) *payload_len = (size_t)(n < 0 ? 0 : n);
+    if (payload_out && payload_cap > 0 && n > 0) {
+        size_t copy = (size_t)n < payload_cap ? (size_t)n : payload_cap;
+        if (blob && copy > 0) memcpy(payload_out, blob, copy);
+    }
+}
+
 bool repair_marker_have(sqlite3 *db, const char *kind, int64_t height,
                         const uint8_t hash32[32], bool *out_have,
                         void *payload_out, size_t payload_cap,
@@ -255,11 +267,7 @@ bool repair_marker_have(sqlite3 *db, const char *kind, int64_t height,
         *out_have = true;
         int n = sqlite3_column_bytes(st, 0);
         const void *blob = sqlite3_column_blob(st, 0);
-        if (payload_len) *payload_len = (size_t)(n < 0 ? 0 : n);
-        if (payload_out && payload_cap > 0 && n > 0) {
-            size_t copy = (size_t)n < payload_cap ? (size_t)n : payload_cap;
-            if (blob && copy > 0) memcpy(payload_out, blob, copy);
-        }
+        copy_row_payload_out(blob, n, payload_out, payload_cap, payload_len);
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }
@@ -389,6 +397,48 @@ static bool prefix_is_migratable(const char *prefix, size_t plen)
     return false;
 }
 
+/* The 64-hex hash tail after the key's last '.', or NULL when the key has no
+ * '.' or the tail is not exactly 64 hex characters. */
+static const char *legacy_hash_tail(const char *key, size_t len)
+{
+    /* Last '.' -> the 64-hex hash tail. */
+    const char *dot2 = strrchr(key, '.');
+    if (!dot2)
+        return NULL;
+    const char *hash_hex = dot2 + 1;
+    size_t hash_len = len - (size_t)(hash_hex - key);
+    if (hash_len != 64 || !all_hex(hash_hex, 64))
+        return NULL;
+    return hash_hex;
+}
+
+/* The last '.' before dot2, or NULL when there is none or it sits at key
+ * itself (empty prefix). */
+static const char *legacy_height_dot(const char *key, const char *dot2)
+{
+    /* '.' before that -> the height segment. */
+    const char *dot1 = NULL;
+    for (const char *p = dot2 - 1; p >= key; p--) {
+        if (*p == '.') { dot1 = p; break; }
+        if (p == key) break;
+    }
+    if (!dot1 || dot1 == key)
+        return NULL;
+    return dot1;
+}
+
+/* Parse the height segment [h_str, h_str + h_len) as int64; returns false
+ * when it does not fit the scratch buffer or is not a valid number. */
+static bool parse_legacy_height(const char *h_str, size_t h_len, int64_t *out)
+{
+    char hbuf[24];
+    if (h_len >= sizeof(hbuf))
+        return false;
+    memcpy(hbuf, h_str, h_len);
+    hbuf[h_len] = '\0';
+    return zcl_parse_i64(hbuf, out);
+}
+
 /* Parse a legacy per-(height,hash) key "<prefix>.<height>.<64hex>". On a match
  * copies the prefix into out_kind (<= out_cap-1 chars), sets *out_height and
  * out_hash32 (reconstructed via uint256_set_hex — the exact inverse of the
@@ -401,21 +451,12 @@ static bool parse_legacy_hh_key(const char *key, char *out_kind, size_t out_cap,
     size_t len = strlen(key);
     if (len < 1 + 1 + 64 + 1)  /* p.h.hash needs at least this */
         return false;
-    /* Last '.' -> the 64-hex hash tail. */
-    const char *dot2 = strrchr(key, '.');
-    if (!dot2)
+    const char *hash_hex = legacy_hash_tail(key, len);
+    if (!hash_hex)
         return false;
-    const char *hash_hex = dot2 + 1;
-    size_t hash_len = len - (size_t)(hash_hex - key);
-    if (hash_len != 64 || !all_hex(hash_hex, 64))
-        return false;
-    /* '.' before that -> the height segment. */
-    const char *dot1 = NULL;
-    for (const char *p = dot2 - 1; p >= key; p--) {
-        if (*p == '.') { dot1 = p; break; }
-        if (p == key) break;
-    }
-    if (!dot1 || dot1 == key)
+    const char *dot2 = hash_hex - 1;
+    const char *dot1 = legacy_height_dot(key, dot2);
+    if (!dot1)
         return false;
     const char *h_str = dot1 + 1;
     size_t h_len = (size_t)(dot2 - h_str);
@@ -427,13 +468,8 @@ static bool parse_legacy_hh_key(const char *key, char *out_kind, size_t out_cap,
     if (!prefix_is_migratable(key, plen))
         return false;
 
-    char hbuf[24];
     int64_t hv = 0;
-    if (h_len >= sizeof(hbuf))
-        return false;
-    memcpy(hbuf, h_str, h_len);
-    hbuf[h_len] = '\0';
-    if (!zcl_parse_i64(hbuf, &hv))
+    if (!parse_legacy_height(h_str, h_len, &hv))
         return false;
 
     struct uint256 u;
@@ -521,6 +557,38 @@ static int migrate_gather_chunk(sqlite3 *db, struct legacy_marker *buf)
     return n;
 }
 
+/* Insert each gathered marker into repair_marker and delete its legacy
+ * progress_meta row. Returns 0, or -1 on the first statement that fails. */
+static int migrate_apply_chunk(sqlite3 *db, struct legacy_marker *buf, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (!repair_marker_note_stmt(db, buf[i].kind, buf[i].height,
+                                     buf[i].hash, buf[i].payload,
+                                     buf[i].payload_len))
+            return -1;
+        sqlite3_stmt *del = NULL;
+        if (sqlite3_prepare_v2(db,
+                "DELETE FROM progress_meta WHERE key=?",
+                -1, &del, NULL) != SQLITE_OK)
+            return -1;
+        sqlite3_bind_text(del, 1, buf[i].oldkey, -1, SQLITE_TRANSIENT);
+        int drc = sqlite3_step(del);  // raw-sql-ok:kernel-primitive
+        sqlite3_finalize(del);
+        if (drc != SQLITE_DONE)
+            return -1;
+    }
+    return 0;
+}
+
+/* End a failed chunk: roll back, free its gathered payloads and drop the
+ * progress_store lock. */
+static void migrate_abort_chunk(sqlite3 *db, struct legacy_marker *buf, int n)
+{
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    free_chunk(buf, (size_t)n);
+    progress_store_tx_unlock();
+}
+
 bool repair_marker_migrate_from_progress_meta(sqlite3 *db)
 {
     if (!db)
@@ -552,38 +620,18 @@ bool repair_marker_migrate_from_progress_meta(sqlite3 *db)
             ok = false;
             break;
         }
-        bool chunk_ok = true;
-        for (int i = 0; i < n && chunk_ok; i++) {
-            if (!repair_marker_note_stmt(db, buf[i].kind, buf[i].height,
-                                         buf[i].hash, buf[i].payload,
-                                         buf[i].payload_len)) {
-                chunk_ok = false;
-                break;
-            }
-            sqlite3_stmt *del = NULL;
-            if (sqlite3_prepare_v2(db,
-                    "DELETE FROM progress_meta WHERE key=?",
-                    -1, &del, NULL) != SQLITE_OK) {
-                chunk_ok = false;
-                break;
-            }
-            sqlite3_bind_text(del, 1, buf[i].oldkey, -1, SQLITE_TRANSIENT);
-            int drc = sqlite3_step(del);  // raw-sql-ok:kernel-primitive
-            sqlite3_finalize(del);
-            if (drc != SQLITE_DONE)
-                chunk_ok = false;
-        }
+        bool chunk_ok = migrate_apply_chunk(db, buf, n) == 0;
         if (chunk_ok &&
             sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
             LOG_WARN("repair_marker", "[repair_marker] migrate COMMIT failed: %s",
                      sqlite3_errmsg(db));
             chunk_ok = false;
         }
-        if (!chunk_ok)
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        free_chunk(buf, (size_t)n);
-        progress_store_tx_unlock();
-        if (!chunk_ok) {
+        if (chunk_ok) {
+            free_chunk(buf, (size_t)n);
+            progress_store_tx_unlock();
+        } else {
+            migrate_abort_chunk(db, buf, n);
             ok = false;
             break;
         }
