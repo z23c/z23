@@ -696,10 +696,11 @@ enum cseg_status chain_segment_manifest_rebuild(const char *dir,
     return st;
 }
 
-/* Read the whole already-opened manifest through a stable-read window: the
- * file is snapshotted, read, and snapshotted again, and must describe the
- * same bytes both times. Closes *file on every path; on success *out_buf
- * (caller frees) holds *out_size validated bytes. */
+/* Helper for load_manifest: snapshot the already-opened manifest, read all of
+ * it, and snapshot again. Succeeds only when the read was complete and the two
+ * snapshots match. Does not validate the contents (the caller checks the
+ * header and size). Closes *file on every path; on success *out_buf (caller
+ * frees) holds *out_size bytes. */
 static enum cseg_status manifest_read_stable(struct platform_positioned_file *file,
                                              const char *path,
                                              uint8_t **out_buf, size_t *out_size,
