@@ -75,6 +75,44 @@ static size_t record_match(uint8_t *buf, size_t cap, uint64_t seed,
     return off + ZDOG_STATE_WIRE_MAX;
 }
 
+/* Count sky-coloured pixels in `f` into *sky, the rest into *painted. */
+static void count_sky_and_painted(const zdogview_frame *f, unsigned *sky,
+                                  unsigned *painted)
+{
+    *sky = 0;
+    *painted = 0;
+    for (unsigned i = 0; i < sizeof(f->rgb); i += 3u) {
+        if (f->rgb[i] == 8 && f->rgb[i + 1u] == 11 && f->rgb[i + 2u] == 18)
+            (*sky)++;
+        else
+            (*painted)++;
+    }
+}
+
+/* Count pixels in `f` matching either of the two city colours. */
+static unsigned count_city_pixels(const zdogview_frame *f)
+{
+    unsigned city = 0;
+    for (unsigned i = 0; i < sizeof(f->rgb); i += 3u) {
+        if (f->rgb[i] == 27 && f->rgb[i + 1u] == 32 && f->rgb[i + 2u] == 44)
+            city++;
+        if (f->rgb[i] == 34 && f->rgb[i + 1u] == 42 && f->rgb[i + 2u] == 58)
+            city++;
+    }
+    return city;
+}
+
+/* Count pixels in `rgb` that are not the sky colour. */
+static unsigned count_non_sky_pixels(const uint8_t *rgb, size_t len)
+{
+    unsigned painted = 0;
+    for (unsigned i = 0; i < len; i += 3u) {
+        if (rgb[i] != 8 || rgb[i + 1u] != 11 || rgb[i + 2u] != 18)
+            painted++;
+    }
+    return painted;
+}
+
 int main(void)
 {
     static uint8_t replay[1200000];
@@ -113,13 +151,8 @@ int main(void)
     zdogview_render(&m, &b);
     CHECK(memcmp(a.rgb, b.rgb, sizeof(a.rgb)) == 0);
 
-    unsigned painted = 0, sky = 0;
-    for (unsigned i = 0; i < sizeof(a.rgb); i += 3u) {
-        if (a.rgb[i] == 8 && a.rgb[i + 1u] == 11 && a.rgb[i + 2u] == 18)
-            sky++;
-        else
-            painted++;
-    }
+    unsigned painted, sky;
+    count_sky_and_painted(&a, &sky, &painted);
     CHECK(painted > 100);
     CHECK(sky > 100);
 
@@ -133,13 +166,7 @@ int main(void)
     zdogview_render_scene(&m, v.seed ^ 1u, v.kills, v.num_kills, &s3);
     CHECK(memcmp(s1.rgb, s3.rgb, sizeof(s1.rgb)) != 0);
     CHECK(zdog_state_checksum(&m) == checksum);
-    unsigned scene_city = 0;
-    for (unsigned i = 0; i < sizeof(s1.rgb); i += 3u) {
-        if (s1.rgb[i] == 27 && s1.rgb[i + 1u] == 32 && s1.rgb[i + 2u] == 44)
-            scene_city++;
-        if (s1.rgb[i] == 34 && s1.rgb[i + 1u] == 42 && s1.rgb[i + 2u] == 58)
-            scene_city++;
-    }
+    const unsigned scene_city = count_city_pixels(&s1);
     CHECK(scene_city > 10);
 
     CHECK(zdogview_render_rgb(&m, v.seed, v.kills, v.num_kills, NULL, 1280u,
@@ -154,11 +181,7 @@ int main(void)
                               720u) == ZDOGVIEW_OK);
     CHECK(memcmp(hd1, hd2, sizeof(hd1)) == 0);
     CHECK(zdog_state_checksum(&m) == checksum);
-    unsigned hd_painted = 0;
-    for (unsigned i = 0; i < sizeof(hd1); i += 3u) {
-        if (hd1[i] != 8 || hd1[i + 1u] != 11 || hd1[i + 2u] != 18)
-            hd_painted++;
-    }
+    const unsigned hd_painted = count_non_sky_pixels(hd1, sizeof(hd1));
     CHECK(hd_painted > 1000);
 
     if (fails) {
