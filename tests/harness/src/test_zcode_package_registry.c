@@ -478,15 +478,10 @@ static bool registry_dogfood_build_argv(
     return ok;
 }
 
-static bool registry_dogfood_repository_receipt(
-    const struct registry_dogfood_run *run,
-    struct vcs_package_build_receipt *repository)
+static int registry_dogfood_report_path(
+    const struct registry_dogfood_run *run, char *out, size_t cap)
 {
-    char candidate_report[PATH_MAX];
-    int cn = snprintf(candidate_report, sizeof(candidate_report),
-                      "%s/build-report", run->emit_dir);
-    return cn > 0 && (size_t)cn < sizeof(candidate_report) &&
-           registry_read_receipt_path(candidate_report, repository);
+    return snprintf(out, cap, "%s/build-report", run->emit_dir);
 }
 
 static bool registry_dogfood_compare_reproduction(
@@ -541,8 +536,12 @@ static bool registry_dogfood_consumer(
         ok = false;
     }
     struct vcs_package_build_receipt repository;
+    char candidate_report[PATH_MAX];
+    int cn = registry_dogfood_report_path(&run, candidate_report,
+                                          sizeof(candidate_report));
     if (ok)
-        ok = registry_dogfood_repository_receipt(&run, &repository);
+        ok = cn > 0 && (size_t)cn < sizeof(candidate_report) &&
+             registry_read_receipt_path(candidate_report, &repository);
     struct vcs_reproduce_verdict verdict;
     if (ok) {
         ok = registry_dogfood_compare_reproduction(&repository, &decentralized,
