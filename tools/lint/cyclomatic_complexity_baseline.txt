@@ -1204,7 +1204,6 @@ tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_defe
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_persist_pair_inside_caller_transaction:19
 tests/harness/src/test_unclean_shutdown_advance.c:test_sapling_rebuild_folds_forward_from_saved_height:24
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
-tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
 tests/harness/src/test_wallet_backup.c:t_force_now_encrypted:27
 tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
