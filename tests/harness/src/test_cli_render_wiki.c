@@ -89,6 +89,57 @@ static int test_wiki_node_refusals(void)
     return failures;
 }
 
+static int test_wiki_continuations(void)
+{
+    int failures = 0;
+    TEST("node shows next_after; page hints keep long paths; oversized page falls back") {
+        struct zcl_cli_render_env e = wk_env(true, 80);
+        struct json_value root;
+        char out[8192];
+        const char *node =
+            "{\"data_schema\":\"zcl.wiki_node.v1\",\"data\":{\"path\":\"adr\","
+            "\"title\":\"ADR\",\"children\":[],\"next_after\":24}}";
+        ASSERT(json_read(&root, node, strlen(node)));
+        ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "more: z23 wiki adr --after=24\n") != NULL);
+        ASSERT(strstr(out, "pipe to JSON") == NULL);
+        json_free(&root);
+
+        /* A 500-byte page path survives intact in the hint. */
+        static char path[501], doc[2048], want[700];
+        memset(path, 'p', 500);
+        snprintf(doc, sizeof(doc),
+                 "{\"data_schema\":\"zcl.wiki_page.v1\",\"data\":{\"path\":\"%s\","
+                 "\"title\":\"T\",\"text\":\"body\",\"next_offset\":123456}}", path);
+        ASSERT(json_read(&root, doc, strlen(doc)));
+        ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) > 0);
+        snprintf(want, sizeof(want), "%s --offset=123456\n", path);
+        ASSERT(strstr(out, want) != NULL);
+        json_free(&root);
+
+        /* The final chunk (null next_offset) has no hint. */
+        const char *last =
+            "{\"data_schema\":\"zcl.wiki_page.v1\",\"data\":{\"path\":\"a.md\","
+            "\"title\":\"T\",\"text\":\"end\",\"next_offset\":null}}";
+        ASSERT(json_read(&root, last, strlen(last)));
+        ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "more:") == NULL && strstr(out, "end\n") != NULL);
+        json_free(&root);
+
+        /* Text that does not fit is never cut: fall back to JSON (0). */
+        static char big[9000], bdoc[9300];
+        memset(big, 'x', sizeof(big) - 1);
+        snprintf(bdoc, sizeof(bdoc),
+                 "{\"data_schema\":\"zcl.wiki_page.v1\",\"data\":{\"path\":\"a.md\","
+                 "\"title\":\"T\",\"text\":\"%s\",\"next_offset\":9000}}", big);
+        ASSERT(json_read(&root, bdoc, strlen(bdoc)));
+        ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) == 0);
+        json_free(&root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_wiki_page_and_doc_dispatch(void)
 {
     int failures = 0;
@@ -144,6 +195,23 @@ static void wk_strip_timing(char *s)
     }
 }
 
+struct wk_case {
+    const char *cmd;
+    const char *prefix;
+};
+
+static const struct wk_case WK_CASES[] = {
+    { WK_BIN " wiki",
+      "{\"schema\":\"zcl.result.v1\",\"command\":\"discover.wiki\"" },
+    { WK_BIN " wiki adr", "{\"schema\":\"zcl.result.v1\"" },
+    { WK_BIN " discover help", "{\"schema\":\"zcl.command_menu.v1\"" },
+    { WK_BIN " discover read PARAMS.md --bytes=200",
+      "{\"schema\":\"zcl.result.v1\",\"command\":\"discover.read\"" },
+};
+#define WK_NCASES (sizeof(WK_CASES) / sizeof(WK_CASES[0]))
+
+/* Both commands run without a trailing pipe so wk_run returns the binary's
+ * own exit status (pclose of the shell running it). */
 static int wk_pipe_same(const char *cmd_a, const char *cmd_b, const char *prefix)
 {
     static char a[262144], b[262144];
@@ -157,19 +225,30 @@ static int wk_pipe_same(const char *cmd_a, const char *cmd_b, const char *prefix
 static int test_pipe_contract(void)
 {
     int failures = 0;
-    TEST("piped wiki / discover help stay canonical JSON (human opt-out, --json)") {
-        ASSERT(wk_pipe_same(
-            WK_BIN " wiki 2>&1 | cat",
-            "ZCL_HUMAN=0 " WK_BIN " wiki --json 2>&1 | cat",
-            "{\"schema\":\"zcl.result.v1\",\"command\":\"discover.wiki\""));
-        ASSERT(wk_pipe_same(
-            WK_BIN " wiki adr 2>&1 | cat",
-            "ZCL_HUMAN=0 " WK_BIN " wiki adr 2>&1 | cat",
-            "{\"schema\":\"zcl.result.v1\""));
-        ASSERT(wk_pipe_same(
-            WK_BIN " discover help 2>&1 | cat",
-            "ZCL_HUMAN=0 " WK_BIN " discover help --json 2>&1 | cat",
-            "{\"schema\":\"zcl.command_menu.v1\""));
+    TEST("piped wiki, wiki adr, discover help, discover read: ZCL_HUMAN=0 is canonical JSON") {
+        for (size_t i = 0; i < WK_NCASES; i++) {
+            char off[512];
+            snprintf(off, sizeof(off), "ZCL_HUMAN=0 %s 2>&1", WK_CASES[i].cmd);
+            char plain[512];
+            snprintf(plain, sizeof(plain), "%s 2>&1", WK_CASES[i].cmd);
+            ASSERT(wk_pipe_same(plain, off, WK_CASES[i].prefix));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_json_overrides_forced_human(void)
+{
+    int failures = 0;
+    TEST("ZCL_HUMAN=1 with --json still prints canonical JSON") {
+        for (size_t i = 0; i < WK_NCASES; i++) {
+            char plain[512], forced[512];
+            snprintf(plain, sizeof(plain), "%s 2>&1", WK_CASES[i].cmd);
+            snprintf(forced, sizeof(forced), "ZCL_HUMAN=1 %s --json 2>&1",
+                     WK_CASES[i].cmd);
+            ASSERT(wk_pipe_same(plain, forced, WK_CASES[i].prefix));
+        }
         PASS();
     } _test_next:;
     return failures;
@@ -195,9 +274,11 @@ int cli_render_wiki_cases(void)
     int failures = 0;
     failures += test_wiki_node_unit();
     failures += test_wiki_node_refusals();
+    failures += test_wiki_continuations();
     failures += test_wiki_page_and_doc_dispatch();
     if (access(WK_BIN, X_OK) == 0)
-        failures += test_pipe_contract() + test_forced_human();
+        failures += test_pipe_contract() + test_json_overrides_forced_human() +
+                    test_forced_human();
     else
         printf("cli_render_wiki: %s missing - SKIP contract half\n", WK_BIN);
     printf("=== cli_render_wiki: %d failures ===\n", failures);

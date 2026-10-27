@@ -11,6 +11,7 @@
 #include "command/cli_render.h"
 #include "json/json.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,6 +39,24 @@ static void w_puts(struct wbuf *b, const char *s)
 {
     if (s)
         w_putn(b, s, strlen(s));
+}
+
+/* Formatted append straight into the output; anything that does not fit
+ * marks overflow so the caller falls back to the canonical JSON. */
+static void w_printf(struct wbuf *b, const char *fmt, ...)
+{
+    if (b->overflow)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b->p + b->len, b->cap - b->len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= b->cap - b->len) {
+        b->overflow = true;
+        b->p[b->len] = '\0';
+        return;
+    }
+    b->len += (size_t)n;
 }
 
 /* Longest prefix of s that fits `room` bytes without splitting UTF-8. */
@@ -85,29 +104,29 @@ static size_t w_slug_width(const struct json_value *kids, size_t rows,
 static void w_row(struct wbuf *b, const char *slug, const char *title,
                   size_t sw, size_t width)
 {
-    char line[512];
     size_t sn = w_fit(slug, sw);
-    int n = snprintf(line, sizeof(line), "  %.*s%*s  ", (int)sn, slug,
-                     (int)(sw - sn), "");
-    size_t used = n > 0 ? (size_t)n : 0;
+    size_t used = 2 + sw + 2;
     size_t room = width > used ? width - used : 1;
-    size_t tn = w_fit(title, room);
-    w_putn(b, line, used);
-    w_putn(b, title, tn);
-    w_puts(b, "\n");
+    w_printf(b, "  %.*s%*s  %.*s\n", (int)sn, slug, (int)(sw - sn), "",
+             (int)w_fit(title, room), title);
 }
 
-static void w_next_hint(struct wbuf *b, const struct json_value *data)
+/* Continuation for the next window of children (the producer's real
+ * `next_after` field), plus the first suggested follow-up. */
+static void w_node_hints(struct wbuf *b, const struct json_value *data)
 {
+    const struct json_value *after = json_get(data, "next_after");
+    const char *path = json_get_str(json_get(data, "path"));
     const struct json_value *next = json_get(data, "next");
     const char *first = next && next->type == JSON_ARR && next->num_children
                             ? json_get_str(json_at(next, 0))
                             : NULL;
-    if (first && first[0]) {
-        w_puts(b, "\nnext: ");
-        w_puts(b, first);
-        w_puts(b, "\n");
-    }
+    if (after && after->type == JSON_INT)
+        w_printf(b, "\nmore: z23 wiki%s%s --after=%lld\n",
+                 path && path[0] ? " " : "", path ? path : "",
+                 (long long)json_get_int(after));
+    if (first && first[0])
+        w_printf(b, "%snext: %s\n", after ? "" : "\n", first);
 }
 
 static void w_node(struct wbuf *b, const struct zcl_cli_render_env *e,
@@ -126,15 +145,15 @@ static void w_node(struct wbuf *b, const struct zcl_cli_render_env *e,
         const char *title = json_get_str(json_get(k, "title"));
         w_row(b, slug ? slug : "?", title ? title : "", sw, width);
     }
-    if (n > rows) {
-        char more[96];
-        snprintf(more, sizeof(more), "... (%zu more, pipe to JSON for full)\n",
+    if (n > rows)
+        w_printf(b, "... (%zu more in this window; add --json to see them)\n",
                  n - rows);
-        w_puts(b, more);
-    }
-    w_next_hint(b, data);
+    w_node_hints(b, data);
 }
 
+/* A page is shown whole or not at all: text that does not fit the human
+ * buffer returns 0 so the caller prints the canonical JSON (which carries
+ * the text and next_offset exactly). Never a silent cut. */
 static void w_page(struct wbuf *b, const struct zcl_cli_render_env *e,
                    const struct json_value *data)
 {
@@ -143,17 +162,11 @@ static void w_page(struct wbuf *b, const struct zcl_cli_render_env *e,
     const char *path = json_get_str(json_get(data, "path"));
     w_header(b, e, data);
     w_puts(b, "\n");
-    if (text) {
-        size_t room = b->cap > b->len + 256 ? b->cap - b->len - 256 : 0;
-        w_putn(b, text, w_fit(text, room));
-        w_puts(b, "\n");
-    }
-    if (noff && noff->type == JSON_INT) {
-        char hint[512];
-        snprintf(hint, sizeof(hint), "\nmore: z23 discover read %s --offset=%lld\n",
+    if (text)
+        w_printf(b, "%s\n", text);
+    if (noff && noff->type == JSON_INT)
+        w_printf(b, "\nmore: z23 discover read %s --offset=%lld\n",
                  path ? path : "<page>", (long long)json_get_int(noff));
-        w_puts(b, hint);
-    }
 }
 
 size_t zcl_cli_render_wiki(const struct json_value *root,
