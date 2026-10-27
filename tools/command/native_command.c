@@ -3856,12 +3856,14 @@ size_t zcl_native_render_unknown_command(
     return len;
 }
 
-/* Print the no-node plain-language line ahead of the frozen machine line. */
+/* Print the no-node plain-language line ahead of the frozen machine line.
+ * Only with no RPC cookie in the datadir: a running node whose status source
+ * is degraded reports the same blocker and must not be told it is absent. */
 static void nc_print_status_headline(const char *path,
                                      const struct json_value *data)
 {
     char headline[320];
-    if (strcmp(path, "status") == 0 &&
+    if (strcmp(path, "status") == 0 && !node_rpc_client_cookie_present() &&
         zcl_native_status_journey_headline(data, node_rpc_client_datadir(),
                                            headline, sizeof(headline)))
         printf("%s\n", headline);

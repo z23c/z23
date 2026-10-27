@@ -40,7 +40,7 @@ void print_usage(const char *prog)
     printf("  %s                    Run the node (then Ctrl-C to stop it)\n", prog);
     printf("  %s status             How the node is doing, and what to do next\n", prog);
     printf("  %s wiki               Read the built-in guides\n", prog);
-    printf("  %s card               Your node card\n", prog);
+    printf("  %s card               Starter tasks you can pick\n", prog);
     printf("  %s discover help      Find every command by task\n", prog);
     printf("  %s --help-all         Every command and node option\n", prog);
 }
