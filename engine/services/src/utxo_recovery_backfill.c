@@ -37,7 +37,8 @@
 #define SHIELDED_BACKFILL_SCAN_BATCH 50000
 
 /* Outcome codes for backfill_walk_value_range: a non-negative result is the
- * highest height proven durable; negatives say why the walk stopped early. */
+ * highest height resolved (the caller persists it as the cursor);
+ * negatives say why the walk stopped early. */
 enum backfill_walk_status {
     BACKFILL_WALK_ABORTED = -1,       /* batch flush failed; *abort_op names it */
     BACKFILL_WALK_BEGIN_FAILED = -2,  /* BEGIN for the next batch failed */
@@ -286,8 +287,9 @@ static int backfill_final_reached_height(int h, int cursor_committed)
     return reached;
 }
 
-/* Walk (start, tip] on the active chain, deriving and persisting each
- * block's shielded values. Returns the highest height proven durable,
+/* Walk [start, tip] on the active chain, deriving and writing each
+ * block's shielded values. Returns the highest height resolved (not yet
+ * durable beyond the last committed batch; the caller persists it),
  * BACKFILL_WALK_CLEANED after a failed row write (already rolled back and
  * finalized), BACKFILL_WALK_ABORTED after a failed batch flush (*abort_op
  * names the operation for backfill_abort_write), or BACKFILL_WALK_BEGIN_FAILED when the BEGIN
