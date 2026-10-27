@@ -73,10 +73,53 @@ static uint32_t zhtml__numeric_digit(uint32_t cp, unsigned radix, unsigned digit
   return cp * radix + digit;
 }
 
-/* Parse one entity starting at p[*i] == '&'. On success emits and
- * advances *i past the ';'. Returns SIZE_MAX on malformed input. */
-static size_t zhtml__entity(char *dst, size_t cap, size_t len,
-                            const unsigned char *p, size_t n, size_t *i) {
+/* Accumulate the digit run starting at p[j], radix 16 when hex else 10.
+ * On success returns the codepoint and sets *endp to the index that ended
+ * the scan; returns UINT32_MAX on overflow or a run longer than ZHTML_MAX
+ * digits. */
+static uint32_t zhtml__scan_digits(const unsigned char *p, size_t n,
+                                   size_t j, int hex, size_t *endp) {
+  uint32_t cp = 0;
+  size_t digits = 0, k;
+  for (k = j; k < n; k++) {
+    int v = hex ? zhtml__hexval(p[k])
+                : (p[k] >= '0' && p[k] <= '9' ? p[k] - '0' : -1);
+    if (v < 0) break;
+    cp = zhtml__numeric_digit(cp, hex ? 16u : 10u, (unsigned)v);
+    if (cp == UINT32_MAX) return UINT32_MAX;
+    digits++;
+    if (digits > ZHTML_MAX) return UINT32_MAX;
+  }
+  *endp = k;
+  return cp;
+}
+
+/* Parse the numeric reference whose '#' sits at p[*i + 1]. On success
+ * emits and advances *i past the ';'. Returns SIZE_MAX on malformed
+ * input. */
+static size_t zhtml__numeric_entity(char *dst, size_t cap, size_t len,
+                                    const unsigned char *p, size_t n,
+                                    size_t *i) {
+  uint32_t cp;
+  size_t j = *i + 2, k;
+  int hex = 0;
+  if (j < n && (p[j] == 'x' || p[j] == 'X')) {
+    hex = 1;
+    j++;
+  }
+  cp = zhtml__scan_digits(p, n, j, hex, &k);
+  if (cp == UINT32_MAX) return SIZE_MAX;
+  if (k == j || k >= n || p[k] != ';') return SIZE_MAX;
+  *i = k + 1;
+  return zhtml__emit_cp(dst, cap, len, cp);
+}
+
+/* Parse the named reference that starts after the '&' at p[*i]. On
+ * success emits and advances *i past the ';'. Returns SIZE_MAX on
+ * malformed input. */
+static size_t zhtml__named_entity(char *dst, size_t cap, size_t len,
+                                  const unsigned char *p, size_t n,
+                                  size_t *i) {
   size_t j = *i + 1, k;
   static const struct {
     const char *name;
@@ -85,28 +128,6 @@ static size_t zhtml__entity(char *dst, size_t cap, size_t len,
       {"amp", '&'}, {"lt", '<'}, {"gt", '>'}, {"quot", '"'},
       {"apos", '\''},
   };
-  if (j < n && p[j] == '#') {
-    uint32_t cp = 0;
-    int hex = 0;
-    size_t digits = 0;
-    j++;
-    if (j < n && (p[j] == 'x' || p[j] == 'X')) {
-      hex = 1;
-      j++;
-    }
-    for (k = j; k < n; k++) {
-      int v = hex ? zhtml__hexval(p[k])
-                  : (p[k] >= '0' && p[k] <= '9' ? p[k] - '0' : -1);
-      if (v < 0) break;
-      cp = zhtml__numeric_digit(cp, hex ? 16u : 10u, (unsigned)v);
-      if (cp == UINT32_MAX) return SIZE_MAX;
-      digits++;
-      if (digits > ZHTML_MAX) return SIZE_MAX;
-    }
-    if (digits == 0 || k >= n || p[k] != ';') return SIZE_MAX;
-    *i = k + 1;
-    return zhtml__emit_cp(dst, cap, len, cp);
-  }
   /* Named. */
   for (k = j; k < n && k - j < 5; k++)
     if (p[k] == ';') break;
@@ -120,6 +141,16 @@ static size_t zhtml__entity(char *dst, size_t cap, size_t len,
     }
   }
   return SIZE_MAX;
+}
+
+/* Parse one entity starting at p[*i] == '&'. On success emits and
+ * advances *i past the ';'. Returns SIZE_MAX on malformed input. */
+static size_t zhtml__entity(char *dst, size_t cap, size_t len,
+                            const unsigned char *p, size_t n, size_t *i) {
+  size_t j = *i + 1;
+  if (j < n && p[j] == '#')
+    return zhtml__numeric_entity(dst, cap, len, p, n, i);
+  return zhtml__named_entity(dst, cap, len, p, n, i);
 }
 
 size_t zhtml_unescape(char *dst, size_t cap, const void *src, size_t n) {
