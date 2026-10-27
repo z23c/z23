@@ -60,24 +60,33 @@ static void test_checked_u64(void)
     CHECK(!zmath_add_size(1, 1, NULL));
 }
 
-static void test_checked_i64(void)
+/* Checked int64_t addition: sums, extremes, and overflow refusals. */
+static int64_t checked_i64_add_cases(int64_t v)
 {
-    int64_t v = 12345;
-
     CHECK(zmath_add_i64(1, 2, &v) && v == 3);
     CHECK(zmath_add_i64(-1, -2, &v) && v == -3);
     CHECK(zmath_add_i64(INT64_MAX, 0, &v) && v == INT64_MAX);
     CHECK(zmath_add_i64(INT64_MIN, 0, &v) && v == INT64_MIN);
     CHECK(!zmath_add_i64(INT64_MAX, 1, &v) && v == INT64_MIN);
     CHECK(!zmath_add_i64(INT64_MIN, -1, &v));
+    return v;
+}
 
+/* Checked int64_t subtraction: differences, extremes, and overflow refusals. */
+static int64_t checked_i64_sub_cases(int64_t v)
+{
     CHECK(zmath_sub_i64(1, 2, &v) && v == -1);
     CHECK(zmath_sub_i64(INT64_MIN, 0, &v) && v == INT64_MIN);
     CHECK(!zmath_sub_i64(INT64_MIN, 1, &v));
     CHECK(!zmath_sub_i64(INT64_MAX, -1, &v));
     CHECK(zmath_sub_i64(INT64_MAX, INT64_MAX, &v) && v == 0);
     CHECK(zmath_sub_i64(INT64_MIN, INT64_MIN, &v) && v == 0);
+    return v;
+}
 
+/* Checked int64_t multiplication: products, extremes, and overflow refusals. */
+static int64_t checked_i64_mul_cases(int64_t v)
+{
     CHECK(zmath_mul_i64(3, 4, &v) && v == 12);
     CHECK(zmath_mul_i64(-3, 4, &v) && v == -12);
     CHECK(zmath_mul_i64(-3, -4, &v) && v == 12);
@@ -95,6 +104,16 @@ static void test_checked_i64(void)
     CHECK(zmath_mul_i64(1ll << 31, 1ll << 31, &v) && v == (1ll << 62));
     CHECK(zmath_mul_i64(-4611686018427387904ll, -2, &v) == false); /* 2^63 */
     CHECK(zmath_mul_i64(-4611686018427387903ll, -2, &v) && v == 9223372036854775806ll);
+    return v;
+}
+
+static void test_checked_i64(void)
+{
+    int64_t v = 12345;
+
+    v = checked_i64_add_cases(v);
+    v = checked_i64_sub_cases(v);
+    v = checked_i64_mul_cases(v);
 
     CHECK(!zmath_add_i64(1, 1, NULL));
     CHECK(!zmath_sub_i64(1, 1, NULL));
