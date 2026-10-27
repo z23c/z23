@@ -1397,10 +1397,6 @@ static bool syncdiag_connman_wired_addnode(
 static bool syncdiag_connman_wired_socket(
     bool ok, const struct json_value *cm_result2)
 {
-    /* reactor + message_cycle + floor + addrman_summary + dial_outcomes
-     * sections are all present (rollups of existing owners — never
-     * absent just because the node is idle). The discovered-peer section
-     * must explicitly name the shared scheduler and handshake gate. */
     ok = ok && json_get(cm_result2, "reactor") != NULL;
     const struct json_value *socket_buffers = json_get(
         cm_result2, "socket_buffers");
@@ -1453,6 +1449,10 @@ static bool syncdiag_connman_wired_check(bool ok)
     ok = ok && connman_diag_dump_state_json(&cm_result2, NULL);
     ok = syncdiag_connman_wired_outbound(ok, &cm_result2);
     ok = syncdiag_connman_wired_addnode(ok, &cm_result2);
+    /* reactor + message_cycle + floor + addrman_summary + dial_outcomes
+     * sections are all present (rollups of existing owners — never
+     * absent just because the node is idle). The discovered-peer section
+     * must explicitly name the shared scheduler and handshake gate. */
     ok = syncdiag_connman_wired_socket(ok, &cm_result2);
     ok = syncdiag_connman_wired_summary(ok, &cm_result2);
     ok = syncdiag_connman_wired_zdb(ok, &cm_result2);
