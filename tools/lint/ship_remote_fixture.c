@@ -1,5 +1,6 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* Isolated process and filesystem adapter for the actual remote ship programs. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Isolated process and filesystem fixtures for the literal remote ship programs.
+ */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>

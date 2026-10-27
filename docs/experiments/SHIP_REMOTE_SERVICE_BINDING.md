@@ -117,3 +117,12 @@ This qualifies the portable revision on the observed Linux host only.
 Darwin compilation and runtime remain NOTRUN; portable source review does
 not replace that observation. No live activation, production health, full
 candidate qualification or performance improvement is established here.
+
+## File-purpose metadata correction
+
+The file-purpose gate rejected the helper because its initial comment did
+not provide a derivable purpose. An explicit purpose comment corrects that
+metadata without changing the executable body. The runtime observations above
+remain scoped to their recorded source blobs. The enforced file-purpose
+gate passed in RATCHET mode with zero new violations. Full native candidate
+proof remains pending.
