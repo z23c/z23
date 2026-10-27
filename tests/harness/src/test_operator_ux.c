@@ -1014,6 +1014,12 @@ static int test_status_no_node_headline(void)
         ASSERT(buf[0] == '\0');
         PASS();
     }
+    TEST("a headline that would cut the datadir short is not printed") {
+        char small[48];
+        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", 8232,
+                                                  false, small, sizeof(small)));
+        PASS();
+    }
     json_free(&d);
     json_init(&d);
     json_set_object(&d);
@@ -1036,25 +1042,29 @@ static char *ux_rpc_unavailable(const char *method, const char *params_json)
     return NULL;
 }
 
-/* A loopback port that was just free: bind port 0, read it, close. */
-static int ux_closed_loopback_port(void)
+/* Bind a loopback port and keep it held for the whole test, so no other
+ * process can take it: bound but not listening refuses every connect (no
+ * node answers); listening accepts one. Returns the port, 0 on failure. */
+static int ux_hold_loopback_port(bool listening, int *fd_out)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET};
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t len = sizeof(a);
     int port = 0;
+    *fd_out = fd;
     if (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0 &&
+        (!listening || listen(fd, 1) == 0) &&
         getsockname(fd, (struct sockaddr *)&a, &len) == 0)
         port = ntohs(a.sin_port);
-    if (fd >= 0)
-        close(fd);
     return port;
 }
 
-/* Run the real `status` CLI dispatch with stdout redirected to a file. */
+/* Run the real `status` CLI dispatch (args as typed after it) with stdout
+ * redirected to a file. False when capture, restore or the read failed. */
 static bool ux_status_cli_capture(const char *human, int port,
-                                  const char *datadir, char *out, size_t cap)
+                                  const char *const *args, int nargs,
+                                  char *out, size_t cap)
 {
     FILE *tmp = tmpfile();
     if (!tmp)
@@ -1067,10 +1077,10 @@ static bool ux_status_cli_capture(const char *human, int port,
     int saved = dup(fileno(stdout));
     bool ok = saved >= 0 && dup2(fileno(tmp), fileno(stdout)) >= 0;
     if (ok) {
-        (void)zcl_native_command_main("status", NULL, 0, datadir, port,
-                                      CHAIN_MAIN, true);
-        fflush(stdout);
-        dup2(saved, fileno(stdout));
+        (void)zcl_native_command_main("status", args, nargs, "/srv/z23-data",
+                                      port, CHAIN_MAIN, true);
+        ok = fflush(stdout) == 0;
+        ok = dup2(saved, fileno(stdout)) >= 0 && ok;
     }
     if (saved >= 0)
         close(saved);
@@ -1078,9 +1088,13 @@ static bool ux_status_cli_capture(const char *human, int port,
     unsetenv("ZCL_HUMAN");
     unsetenv("NO_COLOR");
     zcl_native_render_reset_for_test();
-    rewind(tmp);
-    size_t n = ok ? fread(out, 1, cap - 1, tmp) : 0;
-    out[n] = '\0';
+    long len = ok ? ftell(tmp) : -1;
+    ok = ok && len >= 0 && (size_t)len < cap;
+    if (ok) {
+        rewind(tmp);
+        ok = fread(out, 1, (size_t)len, tmp) == (size_t)len && !ferror(tmp);
+    }
+    out[ok ? (size_t)len : 0] = '\0';
     fclose(tmp);
     return ok;
 }
@@ -1088,16 +1102,19 @@ static bool ux_status_cli_capture(const char *human, int port,
 static int test_status_cli_no_node_headline(void)
 {
     int failures = 0;
-    char piped[1024] = {0}, human[1024] = {0};
-    int port = ux_closed_loopback_port();
-    const char *dir = "/srv/z23-data";
+    char piped[1024] = {0}, human[1024] = {0}, out[4096] = {0};
+    int closed_fd = -1, open_fd = -1;
+    int closed_port = ux_hold_loopback_port(false, &closed_fd);
+    int listen_port = ux_hold_loopback_port(true, &open_fd);
+    const char *json_args[] = { "--format=json" };
     char want[256];
     (void)snprintf(want, sizeof(want),
-                   "No node answered on 127.0.0.1:%d (datadir %s). "
-                   "Start one with: z23\n", port, dir);
+                   "No node answered on 127.0.0.1:%d (datadir /srv/z23-data). "
+                   "Start one with: z23\n", closed_port);
     TEST("status CLI piped prints exactly the one machine line") {
-        ASSERT(port > 0);
-        ASSERT(ux_status_cli_capture("0", port, dir, piped, sizeof(piped)));
+        ASSERT(closed_port > 0 && listen_port > 0);
+        ASSERT(ux_status_cli_capture("0", closed_port, NULL, 0, piped,
+                                     sizeof(piped)));
         ASSERT(piped[0] != '\0');
         ASSERT(strstr(piped, "No node") == NULL);
         char *nl = strchr(piped, '\n');
@@ -1105,7 +1122,8 @@ static int test_status_cli_no_node_headline(void)
         PASS();
     }
     TEST("status CLI on a terminal leads with the plain sentence") {
-        ASSERT(ux_status_cli_capture("1", port, dir, human, sizeof(human)));
+        ASSERT(ux_status_cli_capture("1", closed_port, NULL, 0, human,
+                                     sizeof(human)));
         ASSERT(strncmp(human, want, strlen(want)) == 0);
         const char *line2 = human + strlen(want);
         /* The terminal render of the brief trims trailing text, so compare
@@ -1115,7 +1133,24 @@ static int test_status_cli_no_node_headline(void)
         ASSERT(strstr(line2, "blocker=STATUS_SOURCE_UNAVAILABLE") != NULL);
         ASSERT(strstr(line2, "\nnext: ") != NULL);
         PASS();
+    }
+    TEST("status CLI on a terminal says nothing when the RPC port listens") {
+        ASSERT(ux_status_cli_capture("1", listen_port, NULL, 0, out, sizeof(out)));
+        ASSERT(strncmp(out, "node=blocked synced=no ", 23) == 0);
+        ASSERT(strstr(out, "No node") == NULL);
+        PASS();
+    }
+    TEST("status CLI --format=json on a terminal stays the JSON document") {
+        ASSERT(ux_status_cli_capture("1", closed_port, json_args, 1, out,
+                                     sizeof(out)));
+        ASSERT(out[0] == '{');
+        ASSERT(strstr(out, "No node") == NULL);
+        PASS();
     } _test_next:;
+    if (closed_fd >= 0)
+        close(closed_fd);
+    if (open_fd >= 0)
+        close(open_fd);
     return failures;
 }
 

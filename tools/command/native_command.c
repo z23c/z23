@@ -3541,7 +3541,8 @@ void zcl_native_status_journey_render(const struct json_value *d, char *buf,
  * explain by itself: no node answered. Returns true and fills `buf` when the
  * journey blocker is STATUS_SOURCE_UNAVAILABLE and nothing listens on the
  * RPC port (`node_listening` false; a running node with a degraded status
- * source reports the same blocker), false (buf untouched) otherwise.
+ * source reports the same blocker), false otherwise; also false when the
+ * whole line does not fit `cap`, so a datadir is never shown cut short.
  * `port` and `datadir` are what the client tried. */
 bool zcl_native_status_journey_headline(const struct json_value *d,
                                        const char *datadir,
@@ -3552,11 +3553,11 @@ bool zcl_native_status_journey_headline(const struct json_value *d,
     if (!buf || cap == 0 || node_listening || !blocker ||
         strcmp(blocker, "STATUS_SOURCE_UNAVAILABLE") != 0)
         return false;
-    (void)snprintf(buf, cap,
-                   "No node answered on 127.0.0.1:%d (datadir %.200s). "
-                   "Start one with: z23",
-                   port, datadir && datadir[0] ? datadir : "unknown");
-    return true;
+    int n = snprintf(buf, cap,
+                     "No node answered on 127.0.0.1:%d (datadir %s). "
+                     "Start one with: z23",
+                     port, datadir && datadir[0] ? datadir : "unknown");
+    return n > 0 && (size_t)n < cap;
 }
 
 /* Pick one short, deterministic next step from the same brief body: a named
@@ -3875,7 +3876,8 @@ void zcl_native_render_reset_for_test(void)
 static void nc_print_status_headline(const char *path,
                                      const struct json_value *data)
 {
-    char headline[320];
+    /* Room for the sentence plus the client's whole datadir (512 bytes). */
+    char headline[640];
     if (strcmp(path, "status") != 0 || !nc_human())
         return;
     int port = node_rpc_client_port();
