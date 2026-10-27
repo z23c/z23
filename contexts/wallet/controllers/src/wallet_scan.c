@@ -212,8 +212,10 @@ static int wallet_scan_count_block_files(const char *datadir,
 }
 
 /* OS-S2 #4: load the Pass-1 file-match cache. True iff a usable cache was
- * loaded into `cache` (same keyset, tip not lower); false leaves `cache`
- * zeroed so every file falls through to a re-scan. */
+ * loaded into `cache` (same keyset, tip not lower); false means every file
+ * falls through to a re-scan (`cache` is zeroed first, but a failed or short
+ * node_db_state_get may still have partly filled it, so callers must not read
+ * it when this returns false). */
 static bool wallet_scan_load_filecache(struct node_db *ndb,
                                        uint64_t keyset_fp, int tip_height,
                                        struct wscan_filecache *cache)
@@ -249,48 +251,53 @@ static int wallet_scan_apply_filecache(const struct wscan_filecache *cache,
     return reused;
 }
 
-/* PASS 1 worker: parallel raw byte scan of the files flagged in need_scan,
- * up to 8 threads at a time. Returns 0 on success or the pthread_create
- * error code (after joining every launched thread) so the caller can log. */
-static int wallet_scan_pass1_run(const char *datadir, int num_files,
-                                 const struct scan_addr_ht *aht,
-                                 const bool *need_scan, bool *file_has_match)
+/* PASS 1 batch launch: start a scan thread for each flagged file of one
+ * batch of up to 8. Returns 0 on success or the pthread_create error code,
+ * without joining, so the caller can log before it joins. */
+static int wallet_scan_pass1_launch(const char *datadir, int base, int n,
+                                    const struct scan_addr_ht *aht,
+                                    const bool *need_scan,
+                                    struct scan_thread_arg *args,
+                                    pthread_t *threads, bool *launched)
 {
-    int batch = 8;
-
-    for (int base = 0; base < num_files; base += batch) {
-        int n = num_files - base;
-        if (n > batch) n = batch;
-
-        struct scan_thread_arg args[8];
-        pthread_t threads[8];
-        bool launched[8] = { false };
-
-        for (int i = 0; i < n; i++) {
-            if (!need_scan[base + i])
-                continue;
-            args[i].datadir = datadir;
-            args[i].file_num = base + i;
-            args[i].ht = aht;
-            args[i].result = false;
-            /* raw-pthread-ok: short-burst-joined-immediately */
-            int rc = pthread_create(&threads[i], NULL,
-                                    scan_file_thread, &args[i]);
-            if (rc != 0) {
-                for (int j = 0; j < n; j++)
-                    if (launched[j]) pthread_join(threads[j], NULL);
-                return rc;
-            }
-            launched[i] = true;
-        }
-        for (int i = 0; i < n; i++) {
-            if (!launched[i])
-                continue;
-            pthread_join(threads[i], NULL);
-            file_has_match[base + i] = args[i].result;
-        }
+    for (int i = 0; i < n; i++) {
+        if (!need_scan[base + i])
+            continue;
+        args[i].datadir = datadir;
+        args[i].file_num = base + i;
+        args[i].ht = aht;
+        args[i].result = false;
+        /* raw-pthread-ok: short-burst-joined-immediately */
+        int rc = pthread_create(&threads[i], NULL,
+                                scan_file_thread, &args[i]);
+        if (rc != 0)
+            return rc;
+        launched[i] = true;
     }
     return 0;
+}
+
+/* Join every thread of the batch that was launched. */
+static void wallet_scan_pass1_join_launched(int n, pthread_t *threads,
+                                            const bool *launched)
+{
+    for (int j = 0; j < n; j++)
+        if (launched[j]) pthread_join(threads[j], NULL);
+}
+
+/* Join each launched thread of the batch and record its match result. */
+static void wallet_scan_pass1_collect(int base, int n,
+                                      const struct scan_thread_arg *args,
+                                      pthread_t *threads,
+                                      const bool *launched,
+                                      bool *file_has_match)
+{
+    for (int i = 0; i < n; i++) {
+        if (!launched[i])
+            continue;
+        pthread_join(threads[i], NULL);
+        file_has_match[base + i] = args[i].result;
+    }
 }
 
 /* Persist the refreshed cache for the next boot. Returns the
@@ -420,13 +427,27 @@ int wallet_scan_blocks(struct node_db *ndb,
            "scanning %d\n", reused, num_files, num_files - reused);
     fflush(stdout);
 
-    if (wallet_scan_pass1_run(datadir, num_files, &aht, need_scan,
-                              file_has_match) != 0) {
-        LOG_WARN("wallet_scan", "wallet_scan: failed to start pass-1 scan thread");
-        scan_aht_free(&aht);
-        free(file_has_match);
-        free(need_scan);
-        return -1; // raw-return-ok:logged-above
+    int batch = 8;
+
+    for (int base = 0; base < num_files; base += batch) {
+        int n = num_files - base;
+        if (n > batch) n = batch;
+
+        struct scan_thread_arg args[8];
+        pthread_t threads[8];
+        bool launched[8] = { false };
+
+        if (wallet_scan_pass1_launch(datadir, base, n, &aht, need_scan,
+                                     args, threads, launched) != 0) {
+            LOG_WARN("wallet_scan", "wallet_scan: failed to start pass-1 scan thread");
+            wallet_scan_pass1_join_launched(n, threads, launched);
+            scan_aht_free(&aht);
+            free(file_has_match);
+            free(need_scan);
+            return -1; // raw-return-ok:logged-above
+        }
+        wallet_scan_pass1_collect(base, n, args, threads, launched,
+                                  file_has_match);
     }
 
     /* Persist the refreshed cache for the next boot. */
