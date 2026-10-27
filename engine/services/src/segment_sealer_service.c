@@ -113,11 +113,16 @@ static bool seal_body_read(void *user, uint32_t height,
     return copy != NULL;
 }
 
-/* Writes "<what>: <detail>" into the caller's err buffer when one was given. */
-static void seal_next_set_err(char *err, size_t errlen,
-                              const char *what, const char *detail)
+/* Writes the store-open error into the caller's err buffer when one was given. */
+static void seal_next_store_open_err(char *err, size_t errlen, const char *oerr)
 {
-    if (err && errlen) snprintf(err, errlen, "%s: %s", what, detail);
+    if (err && errlen) snprintf(err, errlen, "store open: %s", oerr);
+}
+
+/* Writes the mkdir error into the caller's err buffer when one was given. */
+static void seal_next_mkdir_err(char *err, size_t errlen, const char *msg)
+{
+    if (err && errlen) snprintf(err, errlen, "mkdir: %s", msg);
 }
 
 /* ── Pure single-seal primitive (no service state) ──────────────────────────
@@ -142,7 +147,7 @@ int segment_sealer_seal_next(const char *dir, uint32_t frontier_incl,
     if (ost != CSEG_OK) {
         LOG_WARN("segment_sealer", "[segment_sealer] store open %s: %s (%s)",
                  dir, cseg_status_str(ost), oerr);
-        seal_next_set_err(err, errlen, "store open", oerr);
+        seal_next_store_open_err(err, errlen, oerr);
         return -1; // raw-return-ok:logged-warn-above; caller records last_status
     }
 
@@ -156,7 +161,7 @@ int segment_sealer_seal_next(const char *dir, uint32_t frontier_incl,
     if (!mk.ok) {
         LOG_WARN("segment_sealer", "[segment_sealer] mkdir %s: %s",
                  dir, mk.message);
-        seal_next_set_err(err, errlen, "mkdir", mk.message);
+        seal_next_mkdir_err(err, errlen, mk.message);
         return -1; // raw-return-ok:logged-warn-above; caller records last_status
     }
 
