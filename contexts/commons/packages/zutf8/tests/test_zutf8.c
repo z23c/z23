@@ -59,9 +59,9 @@ static int cli_fflush(FILE *stream) {
 #undef ZUTF8_CLI_STDOUT
 #undef ZUTF8_CLI_STDERR
 #undef ZUTF8_CLI_PRINTF
+#undef ZUTF8_CLI_FCLOSE
 #undef ZUTF8_CLI_FERROR
 #undef ZUTF8_CLI_FFLUSH
-#undef ZUTF8_CLI_FCLOSE
 /* CHECK diagnostics keep using the actual runner stream. */
 
 static int failures = 0;
@@ -173,7 +173,8 @@ static void test_decode_status(void) {
   }
 }
 
-static void test_encode_kats(void) {
+/* ASCII and two-byte acceptance KATs for zutf8_encode. */
+static void test_encode_kats_short(void) {
   char out[4];
   CHECK(zutf8_encode(0x41, out) == 1 && out[0] == 'A');
   CHECK(zutf8_encode(0x7F, out) == 1 && (unsigned char)out[0] == 0x7F);
@@ -181,26 +182,54 @@ static void test_encode_kats(void) {
         (unsigned char)out[1] == 0x80);
   CHECK(zutf8_encode(0x7FF, out) == 2 && (unsigned char)out[0] == 0xDF &&
         (unsigned char)out[1] == 0xBF);
+}
+
+/* Three-byte acceptance KATs for zutf8_encode. */
+static void test_encode_kats_three_byte(void) {
+  char out[4];
   CHECK(zutf8_encode(0x800, out) == 3 && (unsigned char)out[0] == 0xE0 &&
         (unsigned char)out[1] == 0xA0 && (unsigned char)out[2] == 0x80);
   CHECK(zutf8_encode(0x20AC, out) == 3 && (unsigned char)out[0] == 0xE2 &&
         (unsigned char)out[1] == 0x82 && (unsigned char)out[2] == 0xAC);
   CHECK(zutf8_encode(0xFFFF, out) == 3 && (unsigned char)out[0] == 0xEF &&
         (unsigned char)out[1] == 0xBF && (unsigned char)out[2] == 0xBF);
+}
+
+/* Four-byte acceptance KATs for zutf8_encode. */
+static void test_encode_kats_four_byte(void) {
+  char out[4];
   CHECK(zutf8_encode(0x10000, out) == 4 && (unsigned char)out[0] == 0xF0 &&
         (unsigned char)out[1] == 0x90);
   CHECK(zutf8_encode(0x10FFFF, out) == 4 && (unsigned char)out[0] == 0xF4 &&
         (unsigned char)out[1] == 0x8F && (unsigned char)out[2] == 0xBF &&
         (unsigned char)out[3] == 0xBF);
+}
+
+/* Rejection KATs for zutf8_encode. */
+static void test_encode_kats_rejections(void) {
+  char out[4];
   /* Rejections: surrogates and above the ceiling. */
   CHECK(zutf8_encode(0xD800, out) == 0);
   CHECK(zutf8_encode(0xDFFF, out) == 0);
   CHECK(zutf8_encode(0x110000, out) == 0);
   CHECK(zutf8_encode(UINT32_MAX, out) == 0);
+}
+
+/* NULL-out sizing and embedded-NUL KATs for zutf8_encode. */
+static void test_encode_kats_null_and_nul(void) {
+  char out[4];
   /* NULL out measures only. */
   CHECK(zutf8_encode(0x20AC, NULL) == 3);
   /* Embedded NUL encodes as one byte. */
   CHECK(zutf8_encode(0, out) == 1 && out[0] == 0);
+}
+
+static void test_encode_kats(void) {
+  test_encode_kats_short();
+  test_encode_kats_three_byte();
+  test_encode_kats_four_byte();
+  test_encode_kats_rejections();
+  test_encode_kats_null_and_nul();
 }
 
 static void test_round_trip_sweep(void) {
