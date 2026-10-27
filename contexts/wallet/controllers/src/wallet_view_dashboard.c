@@ -9,7 +9,6 @@
 
 /* ── Dashboard (/wallet) ────────────────────────────────────── */
 
-/* Loading page shown when the wallet database cannot be opened */
 static size_t render_loading_page(uint8_t *r, size_t max) {
     size_t off = wv_emit_header(r, max, "Z23 Wallet", "/wallet");
     off += template_render(TMPL_LOADING, NULL, 0,
@@ -81,7 +80,6 @@ static int privacy_percent(int64_t shielded, int64_t total_balance) {
     return 0;
 }
 
-/* Color for the privacy meter at a given percentage */
 static const char *privacy_meter_color(int pct) {
     return pct == 100 ? "#34d399" :
            pct >= 50  ? "#a78bfa" :
