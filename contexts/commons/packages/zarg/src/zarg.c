@@ -48,22 +48,34 @@ static int zarg__short_name_ok(char c) {
   return c >= 33 && c <= 126;
 }
 
+/* Nonzero if a spec entry's short/long names or type field are invalid. */
+static int zarg__opt_invalid(const zarg_opt *o) {
+  if (o->short_name == 0 && o->long_name == NULL) return 1;
+  if (!zarg__short_name_ok(o->short_name)) return 1;
+  if (o->long_name != NULL && !zarg__long_name_ok(o->long_name)) return 1;
+  if (o->type < ZARG_BOOL || o->type > ZARG_F64) return 1;
+  return 0;
+}
+
+/* Nonzero if entry i's long name equals a later entry's long name. */
+static int zarg__long_name_dup(const zarg_opt *spec, size_t n, size_t i) {
+  const zarg_opt *o = &spec[i];
+  size_t j;
+  for (j = i + 1; j < n; j++) {
+    if (o->long_name != NULL && spec[j].long_name != NULL &&
+        strcmp(o->long_name, spec[j].long_name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 static zarg_err zarg__spec_validate(const zarg_opt *spec, size_t n) {
-  size_t i, j;
+  size_t i;
   if (spec == NULL && n != 0) return ZARG_ERR_ARG;
   if (n > ZARG_MAX_SPEC) return ZARG_ERR_RANGE;
   for (i = 0; i < n; i++) {
-    const zarg_opt *o = &spec[i];
-    if (o->short_name == 0 && o->long_name == NULL) return ZARG_ERR_USAGE;
-    if (!zarg__short_name_ok(o->short_name)) return ZARG_ERR_USAGE;
-    if (o->long_name != NULL && !zarg__long_name_ok(o->long_name))
-      return ZARG_ERR_USAGE;
-    if (o->type < ZARG_BOOL || o->type > ZARG_F64) return ZARG_ERR_USAGE;
-    for (j = i + 1; j < n; j++) {
-      if (o->long_name != NULL && spec[j].long_name != NULL &&
-          strcmp(o->long_name, spec[j].long_name) == 0)
-        return ZARG_ERR_USAGE;
-    }
+    if (zarg__opt_invalid(&spec[i])) return ZARG_ERR_USAGE;
+    if (zarg__long_name_dup(spec, n, i)) return ZARG_ERR_USAGE;
   }
   return ZARG_OK;
 }
@@ -273,6 +285,50 @@ zarg_err zarg_next(zarg_parser *p, zarg_item *it) {
   return ZARG_OK;
 }
 
+/* Append s to buf, counting every byte even when it does not fit. */
+static void zarg__put(char *buf, size_t cap, size_t *len, const char *s) {
+  while (*s != '\0') {
+    if (buf != NULL && *len + 1 < cap) buf[*len] = *s;
+    (*len)++;
+    s++;
+  }
+}
+
+/* Append one character, counting it even when it does not fit. */
+static void zarg__putc(char *buf, size_t cap, size_t *len, char c) {
+  if (buf != NULL && *len + 1 < cap) buf[*len] = c;
+  (*len)++;
+}
+
+/* Append one spec entry's usage line: names, value placeholder, help. */
+static void zarg__put_opt(char *buf, size_t cap, size_t *len,
+                          const zarg_opt *o) {
+  zarg__put(buf, cap, len, "  ");
+  if (o->short_name != 0) {
+    zarg__putc(buf, cap, len, '-');
+    zarg__putc(buf, cap, len, o->short_name);
+    if (o->long_name != NULL) zarg__put(buf, cap, len, ", ");
+  } else {
+    zarg__put(buf, cap, len, "    ");
+  }
+  if (o->long_name != NULL) {
+    zarg__put(buf, cap, len, "--");
+    zarg__put(buf, cap, len, o->long_name);
+  }
+  switch (o->type) {
+  case ZARG_STR: zarg__put(buf, cap, len, " <str>"); break;
+  case ZARG_I64: zarg__put(buf, cap, len, " <int>"); break;
+  case ZARG_U64: zarg__put(buf, cap, len, " <uint>"); break;
+  case ZARG_F64: zarg__put(buf, cap, len, " <float>"); break;
+  case ZARG_BOOL: break;
+  }
+  if (o->help != NULL) {
+    zarg__put(buf, cap, len, "\t");
+    zarg__put(buf, cap, len, o->help);
+  }
+  zarg__putc(buf, cap, len, '\n');
+}
+
 size_t zarg_usage(const zarg_opt *spec, size_t spec_count, const char *prog,
                   char *buf, size_t cap) {
   /* Append-with-measure writer; never writes past cap, always NULs. */
@@ -282,54 +338,13 @@ size_t zarg_usage(const zarg_opt *spec, size_t spec_count, const char *prog,
     if (buf != NULL && cap > 0) buf[0] = '\0';
     return 0;
   }
-#define ZARG__PUT(s)                                                    \
-  do {                                                                  \
-    const char *zarg__s = (s);                                          \
-    while (*zarg__s != '\0') {                                          \
-      if (buf != NULL && len + 1 < cap) buf[len] = *zarg__s;            \
-      len++;                                                            \
-      zarg__s++;                                                        \
-    }                                                                   \
-  } while (0)
-#define ZARG__PUTC(c)                                                   \
-  do {                                                                  \
-    if (buf != NULL && len + 1 < cap) buf[len] = (c);                   \
-    len++;                                                              \
-  } while (0)
   if (prog != NULL) {
-    ZARG__PUT("usage: ");
-    ZARG__PUT(prog);
-    ZARG__PUT(" [options]\n");
+    zarg__put(buf, cap, &len, "usage: ");
+    zarg__put(buf, cap, &len, prog);
+    zarg__put(buf, cap, &len, " [options]\n");
   }
-  for (i = 0; i < spec_count; i++) {
-    const zarg_opt *o = &spec[i];
-    ZARG__PUT("  ");
-    if (o->short_name != 0) {
-      ZARG__PUTC('-');
-      ZARG__PUTC(o->short_name);
-      if (o->long_name != NULL) ZARG__PUT(", ");
-    } else {
-      ZARG__PUT("    ");
-    }
-    if (o->long_name != NULL) {
-      ZARG__PUT("--");
-      ZARG__PUT(o->long_name);
-    }
-    switch (o->type) {
-    case ZARG_STR: ZARG__PUT(" <str>"); break;
-    case ZARG_I64: ZARG__PUT(" <int>"); break;
-    case ZARG_U64: ZARG__PUT(" <uint>"); break;
-    case ZARG_F64: ZARG__PUT(" <float>"); break;
-    case ZARG_BOOL: break;
-    }
-    if (o->help != NULL) {
-      ZARG__PUT("\t");
-      ZARG__PUT(o->help);
-    }
-    ZARG__PUTC('\n');
-  }
+  for (i = 0; i < spec_count; i++)
+    zarg__put_opt(buf, cap, &len, &spec[i]);
   if (buf != NULL && cap > 0) buf[len < cap ? len : cap - 1] = '\0';
-#undef ZARG__PUT
-#undef ZARG__PUTC
   return len;
 }
