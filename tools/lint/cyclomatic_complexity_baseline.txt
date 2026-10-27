@@ -694,7 +694,6 @@ platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/platform/src/os_binary_slots.c:os_binary_slots_prepare_launch#2:25
 platform/modules/platform/src/os_binary_slots.c:read_streak_at:21
 platform/modules/platform/src/os_binary_slots.c:store_streak_at:18
-platform/modules/platform/src/private_acl_internal.c:validate_for_user:25
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:38
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read#2:24
 platform/modules/platform/src/safe_root_read.c:relative_path_valid:19

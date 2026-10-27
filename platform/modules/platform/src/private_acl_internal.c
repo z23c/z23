@@ -68,6 +68,65 @@ PSECURITY_DESCRIPTOR platform_private_acl_descriptor(
     return acl ? acl->descriptor : NULL;
 }
 
+/* True when the handle is open, user_sid is present, and the file the
+ * handle refers to is of the expected kind and not a reparse point. */
+static bool handle_and_file_kind_valid(HANDLE handle, PSID user_sid,
+                                       bool expect_directory)
+{
+    BY_HANDLE_FILE_INFORMATION file_info = {0};
+    return handle != INVALID_HANDLE_VALUE && user_sid &&
+           GetFileInformationByHandle(handle, &file_info) &&
+           ((file_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ==
+               expect_directory &&
+           (file_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+/* Queries the handle's owner and DACL; true only when the query succeeds,
+ * the owner SID is exactly user_sid, and a DACL is present. */
+static bool owner_and_dacl_match_user(HANDLE handle, PSID user_sid,
+                                      PSID *owner, PACL *dacl,
+                                      PSECURITY_DESCRIPTOR *descriptor)
+{
+    return GetSecurityInfo(handle, SE_FILE_OBJECT,
+                           OWNER_SECURITY_INFORMATION |
+                               DACL_SECURITY_INFORMATION,
+                           owner, NULL, dacl, NULL,
+                           descriptor) == ERROR_SUCCESS &&
+           *owner && EqualSid(*owner, user_sid) && *dacl;
+}
+
+/* True when the descriptor reports a protected DACL holding exactly two
+ * ACEs; outputs the ACL size information for the caller's scan. */
+static bool dacl_protected_with_two_aces(PSECURITY_DESCRIPTOR descriptor,
+                                         PACL dacl,
+                                         ACL_SIZE_INFORMATION *acl_info)
+{
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    return GetSecurityDescriptorControl(descriptor, &control, &revision) &&
+           (control & SE_DACL_PROTECTED) != 0 &&
+           GetAclInformation(dacl, acl_info, sizeof(*acl_info),
+                             AclSizeInformation) &&
+           acl_info->AceCount == 2;
+}
+
+/* True when one DACL ACE is a non-inherited allow entry granting
+ * FILE_ALL_ACCESS to user_sid or the SYSTEM SID; reports the grantee or
+ * grantees it matched. */
+static bool ace_grants_full_access(void *raw, PSID user_sid, PSID system_sid,
+                                   bool *is_user, bool *is_system)
+{
+    ACE_HEADER *header = raw;
+    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE ||
+        (header->AceFlags & INHERITED_ACE) != 0) return false;
+    ACCESS_ALLOWED_ACE *ace = raw;
+    PSID sid = &ace->SidStart;
+    *is_user = EqualSid(sid, user_sid) != 0;
+    *is_system = EqualSid(sid, system_sid) != 0;
+    return (*is_user || *is_system) &&
+           (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+}
+
 static bool validate_for_user(HANDLE handle, PSID user_sid,
                               bool expect_directory)
 {
@@ -76,44 +135,21 @@ static bool validate_for_user(HANDLE handle, PSID user_sid,
     PSID owner = NULL;
     PACL dacl = NULL;
     PSECURITY_DESCRIPTOR descriptor = NULL;
-    BY_HANDLE_FILE_INFORMATION file_info = {0};
-    bool ok = handle != INVALID_HANDLE_VALUE && user_sid &&
-              GetFileInformationByHandle(handle, &file_info) &&
-              ((file_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ==
-                  expect_directory &&
-              (file_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
+    ACL_SIZE_INFORMATION acl_info = {0};
+    bool ok = handle_and_file_kind_valid(handle, user_sid,
+                                         expect_directory) &&
               CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,
                                  &system_size) &&
-              GetSecurityInfo(handle, SE_FILE_OBJECT,
-                              OWNER_SECURITY_INFORMATION |
-                                  DACL_SECURITY_INFORMATION,
-                              &owner, NULL, &dacl, NULL,
-                              &descriptor) == ERROR_SUCCESS &&
-              owner && EqualSid(owner, user_sid) && dacl;
-    SECURITY_DESCRIPTOR_CONTROL control = 0;
-    DWORD revision = 0;
-    ok = ok && GetSecurityDescriptorControl(descriptor, &control, &revision) &&
-         (control & SE_DACL_PROTECTED) != 0;
-    ACL_SIZE_INFORMATION acl_info = {0};
-    ok = ok && GetAclInformation(dacl, &acl_info, sizeof(acl_info),
-                                 AclSizeInformation) &&
-         acl_info.AceCount == 2;
+              owner_and_dacl_match_user(handle, user_sid, &owner, &dacl,
+                                        &descriptor) &&
+              dacl_protected_with_two_aces(descriptor, dacl, &acl_info);
     bool user_allowed = false, system_allowed = false;
     for (DWORD i = 0; ok && i < acl_info.AceCount; ++i) {
         void *raw = NULL;
-        if (!GetAce(dacl, i, &raw)) { ok = false; break; }
-        ACE_HEADER *header = raw;
-        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE ||
-            (header->AceFlags & INHERITED_ACE) != 0) {
-            ok = false;
-            break;
-        }
-        ACCESS_ALLOWED_ACE *ace = raw;
-        PSID sid = &ace->SidStart;
-        bool is_user = EqualSid(sid, user_sid) != 0;
-        bool is_system = EqualSid(sid, system_buffer) != 0;
-        if ((!is_user && !is_system) ||
-            (ace->Mask & FILE_ALL_ACCESS) != FILE_ALL_ACCESS) {
+        bool is_user = false, is_system = false;
+        if (!GetAce(dacl, i, &raw) ||
+            !ace_grants_full_access(raw, user_sid, system_buffer,
+                                    &is_user, &is_system)) {
             ok = false;
             break;
         }
