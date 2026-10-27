@@ -535,6 +535,59 @@ static int fc_case_init_publishes_capped_cursor(void)
     return failures;
 }
 
+static bool fc_seed_utxo_prepare_statements(sqlite3 *db,
+                                            sqlite3_stmt **header,
+                                            sqlite3_stmt **validate,
+                                            sqlite3_stmt **script,
+                                            sqlite3_stmt **proof,
+                                            sqlite3_stmt **utxo,
+                                            sqlite3_stmt **delta)
+{
+    return
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO header_admit_log"
+            "(height,hash,parent_hash,admitted_at) VALUES(?,?,?,1)",
+            -1, header, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO validate_headers_log"
+            "(height,hash,ok,fail_reason,validated_at)"
+            " VALUES(?,?,1,NULL,1)",
+            -1, validate, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO script_validate_log"
+            "(height,status,ok,block_hash) VALUES(?,'verified',1,?)",
+            -1, script, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO proof_validate_log"
+            "(height,status,ok,block_hash) VALUES(?,'verified',1,?)",
+            -1, proof, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO utxo_apply_log"
+            "(height,status,ok,spent_count,added_count,"
+            " total_value_delta,applied_at)"
+            " VALUES(?,'verified',1,1,2,1,1)",
+            -1, utxo, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db,
+            "INSERT OR REPLACE INTO utxo_apply_delta"
+            "(height,branch_hash,spent_blob,added_blob) VALUES(?,?,X'',X'')",
+            -1, delta, NULL) == SQLITE_OK;
+}
+
+static bool fc_seed_utxo_step_statements(sqlite3_stmt *header,
+                                         sqlite3_stmt *validate,
+                                         sqlite3_stmt *script,
+                                         sqlite3_stmt *proof,
+                                         sqlite3_stmt *utxo,
+                                         sqlite3_stmt *delta)
+{
+    return sqlite3_step(header) == SQLITE_DONE &&
+           sqlite3_step(validate) == SQLITE_DONE &&
+           sqlite3_step(script) == SQLITE_DONE &&
+           sqlite3_step(proof) == SQLITE_DONE &&
+           sqlite3_step(utxo) == SQLITE_DONE &&
+           sqlite3_step(delta) == SQLITE_DONE;
+}
+
 static bool fc_seed_utxo_apply(sqlite3 *db, const struct fc_chain *sc,
                                int rows)
 {
@@ -556,34 +609,9 @@ static bool fc_seed_utxo_apply(sqlite3 *db, const struct fc_chain *sc,
     sqlite3_stmt *proof = NULL;
     sqlite3_stmt *utxo = NULL;
     sqlite3_stmt *delta = NULL;
-    bool prepared =
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO header_admit_log"
-            "(height,hash,parent_hash,admitted_at) VALUES(?,?,?,1)",
-            -1, &header, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO validate_headers_log"
-            "(height,hash,ok,fail_reason,validated_at)"
-            " VALUES(?,?,1,NULL,1)",
-            -1, &validate, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO script_validate_log"
-            "(height,status,ok,block_hash) VALUES(?,'verified',1,?)",
-            -1, &script, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO proof_validate_log"
-            "(height,status,ok,block_hash) VALUES(?,'verified',1,?)",
-            -1, &proof, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO utxo_apply_log"
-            "(height,status,ok,spent_count,added_count,"
-            " total_value_delta,applied_at)"
-            " VALUES(?,'verified',1,1,2,1,1)",
-            -1, &utxo, NULL) == SQLITE_OK &&
-        sqlite3_prepare_v2(db,
-            "INSERT OR REPLACE INTO utxo_apply_delta"
-            "(height,branch_hash,spent_blob,added_blob) VALUES(?,?,X'',X'')",
-            -1, &delta, NULL) == SQLITE_OK;
+    bool prepared = fc_seed_utxo_prepare_statements(db, &header, &validate,
+                                                    &script, &proof, &utxo,
+                                                    &delta);
     if (!prepared) {
         sqlite3_finalize(header);
         sqlite3_finalize(validate);
@@ -612,12 +640,8 @@ static bool fc_seed_utxo_apply(sqlite3 *db, const struct fc_chain *sc,
         sqlite3_bind_int(utxo, 1, h);
         sqlite3_bind_int(delta, 1, h);
         sqlite3_bind_blob(delta, 2, sc->hashes[h].data, 32, SQLITE_STATIC);
-        ok = sqlite3_step(header) == SQLITE_DONE &&
-             sqlite3_step(validate) == SQLITE_DONE &&
-             sqlite3_step(script) == SQLITE_DONE &&
-             sqlite3_step(proof) == SQLITE_DONE &&
-             sqlite3_step(utxo) == SQLITE_DONE &&
-             sqlite3_step(delta) == SQLITE_DONE;
+        ok = fc_seed_utxo_step_statements(header, validate, script, proof,
+                                          utxo, delta);
         sqlite3_reset(header);
         sqlite3_clear_bindings(header);
         sqlite3_reset(validate);

@@ -1189,7 +1189,6 @@ tests/harness/src/test_simnet_txkit.c:txk_build_multisig_spend:18
 tests/harness/src/test_soak_attestation.c:test_sync_benchmark_receipt_wellformed:27
 tests/harness/src/test_sprout_groth16_kat.c:test_sprout_groth16_kat:26
 tests/harness/src/test_sprout_phgr13_kat.c:test_sprout_phgr13_kat:28
-tests/harness/src/test_stage_anchor_frontier_cap.c:fc_seed_utxo_apply:23
 tests/harness/src/test_stage_crash_sweep.c:scs_cycle:21
 tests/harness/src/test_stage_crash_sweep.c:scs_setup:25
 tests/harness/src/test_stage_rederive_range.c:test_stage_rederive_range:43
