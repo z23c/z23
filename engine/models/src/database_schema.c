@@ -10,6 +10,8 @@
 
 #include "models/database.h"
 #include "models/database_internal.h"
+#include "platform/time_compat.h"
+#include "util/log_macros.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -396,7 +398,15 @@ bool create_schema(struct node_db *ndb)
     for (int i = 0; SCHEMA[i] != NULL; i++) {
         char buf[48];
         snprintf(buf, sizeof(buf), "schema[%d]", i);
-        if (db_exec_checked(ndb->db, SCHEMA[i], buf) != SQLITE_OK)
+        int64_t started = platform_time_monotonic_ms();
+        int rc = db_exec_checked(ndb->db, SCHEMA[i], buf);
+        int64_t elapsed = platform_time_monotonic_ms() - started;
+        /* Zero-based ordinal maps directly to SCHEMA[] without logging SQL.
+         * Keep fast idempotent boot statements quiet. */
+        if (elapsed >= 1000)
+            LOG_INFO("db", "schema[%d] slow statement elapsed_ms=%lld rc=%d",
+                     i, (long long)elapsed, rc);
+        if (rc != SQLITE_OK)
             return false;
     }
     return true;
