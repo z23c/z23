@@ -295,6 +295,32 @@ static int test_menu_render(void)
         ASSERT(cr_max_line_width(out) <= 80);
         /* No row cap needed at 6 rows → no footer. */
         ASSERT(strstr(out, "more, pipe to JSON") == NULL);
+        /* A branch menu needs no "open a branch" hint. */
+        ASSERT(strstr(out, "branch: ") == NULL);
+        PASS();
+    }
+    TEST("root menu shows how to open a branch, using one it lists") {
+        static const char root[] =
+            "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"root\","
+            "\"summary\":\"Z23\",\"children\":["
+            "{\"path\":\"status\",\"summary\":\"s\",\"risk\":\"read\","
+            "\"availability\":\"ready\"},"
+            "{\"path\":\"core\",\"summary\":\"c\",\"risk\":\"read\","
+            "\"availability\":\"ready\"}]}";
+        static const char no_core[] =
+            "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"root\","
+            "\"summary\":\"Z23\",\"children\":["
+            "{\"path\":\"lab\",\"summary\":\"l\",\"risk\":\"read\","
+            "\"availability\":\"ready\"}]}";
+        struct zcl_cli_render_env e = cr_env(40, false);
+        char out[4096];
+        ASSERT(zcl_cli_render_doc(root, strlen(root), "discover.help", &e,
+                                  out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "branch: z23 discover help core\n") != NULL);
+        ASSERT(cr_max_line_width(out) <= 40);
+        ASSERT(zcl_cli_render_doc(no_core, strlen(no_core), "discover.help",
+                                  &e, out, sizeof(out)) > 0);
+        ASSERT(strstr(out, "branch: z23 discover help lab\n") != NULL);
         PASS();
     } _test_next:;
     return failures;
