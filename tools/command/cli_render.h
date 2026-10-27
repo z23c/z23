@@ -26,6 +26,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct json_value;
+
 struct zcl_cli_render_env {
     bool human;      /* render for a human at all */
     bool ansi;       /* ANSI emphasis allowed (bold/dim/red/green/yellow) */
@@ -69,5 +71,13 @@ size_t zcl_cli_render_brief(const char *line,
  * returns bytes written, 0 for machine output or a buffer too small. */
 size_t zcl_cli_render_start_hint(const struct zcl_cli_render_env *env,
                                  char *out, size_t cap);
+
+/* Render zcl.wiki_node.v1 (z23 wiki) or zcl.wiki_page.v1 (discover read)
+ * for a human: one `slug  title` line per child, or the page text. Takes the
+ * parsed canonical result envelope. Returns bytes written, 0 when the shape
+ * is not recognized or does not fit (caller prints the canonical JSON). */
+size_t zcl_cli_render_wiki(const struct json_value *root,
+                           const struct zcl_cli_render_env *env, char *out,
+                           size_t cap);
 
 #endif /* ZCL_CLI_RENDER_H */

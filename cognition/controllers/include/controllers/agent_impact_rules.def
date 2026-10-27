@@ -934,7 +934,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_native_api_contract.c", "native_api_co
  * main_cli_modes.c are also covered by the tools/command glob and the
  * operator_ux rule above; this row exists so the renderer/test file pair
  * maps to the cli_render group directly. */
-AGENT_IMPACT_RULE("tools/command/cli_render.c|tools/command/cli_render.h|tests/harness/src/test_cli_render.c|tests/harness/src/test_cli_render_bounds.c", "cli_render operator_ux command_registry_catalog cli_auth_robust make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/cli_render.c|tools/command/cli_render.h|tools/command/cli_render_wiki.c|tests/harness/src/test_cli_render.c|tests/harness/src/test_cli_render_bounds.c|tests/harness/src/test_cli_render_wiki.c", "cli_render operator_ux command_registry_catalog cli_auth_robust make_lint_gates")
 
 /* Multi-user-server identity overlay (principals + auth + authority ceiling). */
 AGENT_IMPACT_RULE("engine/models/src/principal.c|engine/models/include/models/principal.h|engine/models/src/auth_challenge.c|engine/models/include/models/auth_challenge.h", "principal_authz auth_login command_authority models make_lint_gates")

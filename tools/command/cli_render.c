@@ -1375,6 +1375,23 @@ static void render_data_tree(struct buf *b,
 
 /* ── entry points ──────────────────────────────────────────────────── */
 
+/* code.guide has its own layout; the wiki shapes are recognized by their
+ * data_schema. False means "not mine" so the caller falls through. */
+static bool render_guide_or_wiki(struct buf *b,
+                                 const struct zcl_cli_render_env *e,
+                                 const struct json_value *root,
+                                 const char *command_path)
+{
+    if (command_path && strcmp(command_path, "code.guide") == 0) {
+        render_code_guide(b, e, root);
+        return true;
+    }
+    if (b->overflow || b->len > 0)
+        return false;
+    b->len = zcl_cli_render_wiki(root, e, b->p, b->cap);
+    return b->len > 0;
+}
+
 size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
                           const char *command_path,
                           const struct zcl_cli_render_env *env,
@@ -1408,9 +1425,8 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
         const struct json_value *okv = json_get(&root, "ok");
         if (okv && okv->type == JSON_BOOL && !json_get_bool(okv))
             render_error(&b, env, &root);
-        else if (command_path &&
-                 strcmp(command_path, "code.guide") == 0)
-            render_code_guide(&b, env, &root);
+        else if (render_guide_or_wiki(&b, env, &root, command_path))
+            ;
         else if (command_path &&
                  (strcmp(command_path, "zcode.node.join") == 0 ||
                   strcmp(command_path, "join") == 0))

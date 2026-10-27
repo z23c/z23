@@ -975,6 +975,7 @@ static int test_next_input_cleanup(const char *name, const char *input)
 int test_cli_render(void)
 {
     int failures = cli_render_bounds_cases();
+    failures += cli_render_wiki_cases();
     failures += test_next_input_cleanup(
         "next action: absent input initializes storage before cleanup", NULL);
     failures += test_next_input_cleanup(
