@@ -761,8 +761,6 @@ static bool csi_synth_same_set(const struct csi_verdict *v, size_t n)
 
 static void csi_synth_check_trap(struct ci_merkle *m)
 {
-    /* The two candidate ordering rules disagree for this fixture, so the
-     * agreement above is not order-insensitivity. */
     struct ci_merkle_proof *p = ci_merkle_proof_alloc();
     if (p) {
         struct zcl_sha3_digest d;
@@ -874,6 +872,8 @@ static void csi_synthetic_tree(void)
     CSI_CHECK("the whole-tree roots are byte-identical",
               rf && memcmp(seal.tree, croot.digest.bytes, HSZ) == 0);
 
+    /* The two candidate ordering rules disagree for this fixture, so the
+     * agreement above is not order-insensitivity. */
     csi_synth_check_trap(m);
 
     ci_merkle_free(m);
