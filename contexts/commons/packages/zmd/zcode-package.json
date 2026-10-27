@@ -8,12 +8,12 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "919dbf06324e183109de23ba47758c0ec7a3fe6a406f59de5b48a771964fb68d",
+      "root": "90b5f8be68870258a747691ca8d469be54538804061d1432eb9a9c88766536af",
       "name": "zutf8/zutf8",
       "semver": "0.1.0"
     },
     {
-      "root": "0307b457a306eb9e8415e492b05883597d17df6b8b988e4ba53089003cae3abf",
+      "root": "8e88a385c756919af6d942d1953809e0c2b5022628793842adc92753539f575d",
       "name": "zhtml/zhtml",
       "semver": "0.1.0"
     }

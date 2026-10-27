@@ -4,10 +4,10 @@
  * runner. The key is a deterministic public alpha fixture identity, never an
  * owner or stable-release key. */
 ZCODE_PACKAGE("zclassic23/commons-demo", "contexts/commons/modules/commons_demo", 18,
-    "cdf30f971cce450d0715d60bf711da7a98a9b42f4801c4ae7110dfc38d52c934",
-    "becf190d9f8f992e13eef0191444ccfd427bd56b3aaaaf2be2c4ff576bd48c2d",
+    "19cc9cd9d9ede39953473afca57be8ee862d882abaaa9f77198078702f7cbfc8",
+    "cca3170c0883cb3ee3f5653137dceddb300e55f91379dfcc0e8e73a43be5d43c",
     "8c59ac8051fc8cc00756930ea2104079bd5fc3d15eb825d679892ebec8b275ac",
-    "2071e087d52195fe90b4115fe86083221396efb9ab811f46b8ddc488f4c371b9",
+    "6b8dc8c76e7c12d478392b5df8401a6bd374241ea5da0152e5be2808224e3295",
     "772140125030b70046d385ad60301af90ab5acac86160d58b7612cf075c8f4ed",
     "021492bc6a132ac91cb8b9f57d2b809dd2bdb8e1a294d3edbb6c6f7fc03bf11cac",
-    "62008fcc5800c4ca47623d6f17d289a052ab2caf12bdd5ef108f6b5d434b99204e69df2b3230dc3f6b828e627a1e3faba69b52acf37e7eefd9b38e19e11c3174")
+    "09a8602d962905419ed130bf17bbae298876a243f71c1dc4df4b658a4bf1d5a115c56d45ffcf6cd374bb371b95b15359fac464c9c7ffe65b37651defe7d19a70")
