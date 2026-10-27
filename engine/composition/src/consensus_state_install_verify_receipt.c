@@ -132,17 +132,15 @@ enum {
 };
 
 /* Opens the receipt under dir_fd, reads up to the wire buffer size and
- * closes it. *out_open_err carries errno when IVR_READ_OPEN_FAILED is
+ * closes it. errno is left as set by openat when IVR_READ_OPEN_FAILED is
  * returned; *out_off always carries the bytes read otherwise. */
 static int read_receipt_wire(int dir_fd, uint8_t wire[IVR_WIRE_SIZE + 1],
-                             size_t *out_off, int *out_open_err)
+                             size_t *out_off)
 {
     int fd = openat(dir_fd, CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME,
                     O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        *out_open_err = errno;
+    if (fd < 0)
         return IVR_READ_OPEN_FAILED;
-    }
     size_t off = 0;
     bool read_ok = true;
     while (off < IVR_WIRE_SIZE + 1) {
@@ -218,16 +216,15 @@ bool consensus_state_install_verify_receipt_lookup(
 
     uint8_t wire[IVR_WIRE_SIZE + 1];
     size_t off = 0;
-    int open_err = 0;
-    int read_status = read_receipt_wire(dir_fd, wire, &off, &open_err);
+    int read_status = read_receipt_wire(dir_fd, wire, &off);
     if (read_status == IVR_READ_OPEN_FAILED) {
         /* ENOENT is the ordinary "never verified this datadir before" case
          * and is not worth logging; anything else (permissions, etc.) is
          * still fail-soft to a full verify, logged once for visibility. */
-        if (open_err != ENOENT)
+        if (errno != ENOENT)
             LOG_WARN(IVR_SUBSYS,
                      "receipt open failed (falling back to full verify): %s",
-                     strerror(open_err));
+                     strerror(errno));
         return false; /* raw-return-ok:no-receipt-fail-soft */
     }
     if (read_status == IVR_READ_MALFORMED) {
@@ -275,9 +272,9 @@ enum {
 
 /* Creates the O_EXCL temp receipt next to the final name, retrying the
  * nonce suffix on EEXIST. On IVR_TEMP_OK, *out_fd holds the open fd and tmp
- * the chosen name; *out_err carries errno on IVR_TEMP_OPEN_FAILED. */
+ * the chosen name; errno is kept for IVR_TEMP_OPEN_FAILED. */
 static int create_receipt_temp(int dir_fd, char *tmp, size_t tmp_size,
-                               int *out_fd, int *out_err)
+                               int *out_fd)
 {
     for (unsigned attempt = 0; attempt < 64; attempt++) {
         uint64_t nonce = atomic_fetch_add_explicit(&g_temp_nonce, 1,
@@ -294,66 +291,20 @@ static int create_receipt_temp(int dir_fd, char *tmp, size_t tmp_size,
             *out_fd = fd;
             return IVR_TEMP_OK;
         }
-        if (errno != EEXIST) {
-            *out_err = errno;
+        if (errno != EEXIST)
             return IVR_TEMP_OPEN_FAILED;
-        }
     }
     return IVR_TEMP_EXHAUSTED;
 }
 
-/* Outcome of publish_receipt(). Each failure step is a flag with the errno
- * captured at the failing call, so the caller can log every message itself;
- * a short write raises no flag and only turns ok false, as it is not
- * logged. */
-struct ivr_publish_outcome {
-    bool ok;
-    bool sync_failed;
-    int sync_err;
-    bool close_failed;
-    int close_err;
-    bool rename_failed;
-    int rename_err;
-    bool dir_fsync_failed;
-    int dir_fsync_err;
-};
-
-/* Writes wire to the temp fd, syncs, closes, renames into place and syncs
- * the directory; unlinks the temp when the rename never happened. */
-static struct ivr_publish_outcome publish_receipt(
-    int dir_fd, const char *tmp, int fd, const uint8_t wire[IVR_WIRE_SIZE])
+/* Removes the temp receipt when nothing was renamed into place. */
+static void discard_unrenamed_temp(int dir_fd, const char *tmp, bool ok,
+                                   bool renamed)
 {
-    struct ivr_publish_outcome o = {0};
-    bool ok = write_all(fd, wire, IVR_WIRE_SIZE);
-    if (ok && platform_data_sync(fd) != 0) {
-        ok = false;
-        o.sync_failed = true;
-        o.sync_err = errno;
-    }
-    if (close(fd) != 0) {
-        ok = false;
-        o.close_failed = true;
-        o.close_err = errno;
-    }
-    bool renamed = false;
-    if (ok && renameat(dir_fd, tmp, dir_fd,
-                       CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME) != 0) {
-        ok = false;
-        o.rename_failed = true;
-        o.rename_err = errno;
-    } else if (ok) {
-        renamed = true;
-    }
-    if (ok && fsync(dir_fd) != 0) {
-        o.dir_fsync_failed = true;
-        o.dir_fsync_err = errno;
-    }
     if (!ok && !renamed) {
         (void)unlinkat(dir_fd, tmp, 0);
         (void)fsync(dir_fd);
     }
-    o.ok = ok;
-    return o;
 }
 #endif
 
@@ -374,37 +325,45 @@ void consensus_state_install_verify_receipt_store(
 
     char tmp[128];
     int fd = -1;
-    int temp_err = 0;
-    int temp_status = create_receipt_temp(dir_fd, tmp, sizeof(tmp), &fd,
-                                          &temp_err);
+    int temp_status = create_receipt_temp(dir_fd, tmp, sizeof(tmp), &fd);
     if (temp_status == IVR_TEMP_NAME_OVERFLOW) {
         LOG_WARN(IVR_SUBSYS, "receipt store: temp name overflow");
         return;
     }
     if (temp_status == IVR_TEMP_OPEN_FAILED) {
         LOG_WARN(IVR_SUBSYS, "receipt store: openat temp failed: %s",
-                 strerror(temp_err));
+                 strerror(errno));
         return;
     }
     if (temp_status == IVR_TEMP_EXHAUSTED) {
         LOG_WARN(IVR_SUBSYS, "receipt store: could not allocate a temp name");
         return;
     }
-    struct ivr_publish_outcome outcome = publish_receipt(dir_fd, tmp, fd,
-                                                         wire);
-    if (outcome.sync_failed)
+    bool ok = write_all(fd, wire, sizeof(wire));
+    if (ok && platform_data_sync(fd) != 0) {
+        ok = false;
         LOG_WARN(IVR_SUBSYS, "receipt store: data sync failed: %s",
-                 strerror(outcome.sync_err));
-    if (outcome.close_failed)
+                 strerror(errno));
+    }
+    if (close(fd) != 0) {
+        ok = false;
         LOG_WARN(IVR_SUBSYS, "receipt store: close failed: %s",
-                 strerror(outcome.close_err));
-    if (outcome.rename_failed)
+                 strerror(errno));
+    }
+    bool renamed = false;
+    if (ok && renameat(dir_fd, tmp, dir_fd,
+                       CONSENSUS_STATE_INSTALL_VERIFY_RECEIPT_NAME) != 0) {
+        ok = false;
         LOG_WARN(IVR_SUBSYS, "receipt store: renameat into place failed: %s",
-                 strerror(outcome.rename_err));
-    if (outcome.dir_fsync_failed)
+                 strerror(errno));
+    } else if (ok) {
+        renamed = true;
+    }
+    if (ok && fsync(dir_fd) != 0)
         LOG_WARN(IVR_SUBSYS, "receipt store: directory fsync failed: %s",
-                 strerror(outcome.dir_fsync_err));
-    if (outcome.ok)
+                 strerror(errno));
+    discard_unrenamed_temp(dir_fd, tmp, ok, renamed);
+    if (ok)
         LOG_INFO(IVR_SUBSYS,
                  "content-verify receipt persisted; a byte-identical bundle "
                  "under this exact binary will skip the deep content scan");
