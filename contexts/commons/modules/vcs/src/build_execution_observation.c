@@ -20,29 +20,50 @@ static void obs_hash_text(struct sha3_256_ctx *sha, const char *text)
     if (len) sha3_256_write(sha, (const uint8_t *)text, (size_t)len);
 }
 
-bool vcs_build_execution_observation_v1_valid(
+/* True when schema_version, flags or exit_status is invalid. */
+static bool obs_header_fields_invalid(
     const struct vcs_build_execution_observation_v1 *o)
 {
-    if (!o || o->schema_version != VCS_BUILD_EXECUTION_OBSERVATION_VERSION ||
+    return o->schema_version != VCS_BUILD_EXECUTION_OBSERVATION_VERSION ||
         (o->flags & VCS_BUILD_OBS_REQUIRED_FLAGS) !=
             VCS_BUILD_OBS_REQUIRED_FLAGS ||
         (o->flags & ~VCS_BUILD_OBS_REQUIRED_FLAGS) != 0 ||
-        o->exit_status < 0 || o->exit_status > 255 ||
-        !zcl_bytes_any_set(o->action_root, 32) ||
-        !zcl_bytes_any_set(o->action_input_root, 32) ||
-        !zcl_bytes_any_set(o->observed_input_bytes_root, 32) ||
-        !zcl_bytes_any_set(o->artifact_root, 32) ||
-        !zcl_bytes_any_set(o->output_bytes_root, 32) ||
-        !zcl_bytes_any_set(o->toolchain_root, 32) || !zcl_bytes_any_set(o->flags_root, 32) ||
-        !zcl_bytes_any_set(o->environment_root, 32) ||
-        !zcl_bytes_any_set(o->declared_reads_root, 32) ||
-        !zcl_bytes_any_set(o->observed_reads_root, 32) ||
-        !zcl_bytes_any_set(o->declared_writes_root, 32) ||
-        !zcl_bytes_any_set(o->observed_writes_root, 32) ||
-        o->cpu_seconds_limit == 0 || o->memory_bytes_limit == 0 ||
+        o->exit_status < 0 || o->exit_status > 255;
+}
+
+/* True when any of the 12 hash-root fields is all zero. */
+static bool obs_roots_any_unset(
+    const struct vcs_build_execution_observation_v1 *o)
+{
+    const uint8_t *roots[] = {
+        o->action_root, o->action_input_root,
+        o->observed_input_bytes_root, o->artifact_root,
+        o->output_bytes_root, o->toolchain_root, o->flags_root,
+        o->environment_root, o->declared_reads_root,
+        o->observed_reads_root, o->declared_writes_root,
+        o->observed_writes_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        if (!zcl_bytes_any_set(roots[i], 32)) return true;
+    }
+    return false;
+}
+
+/* True when any of the seven limit fields is zero. */
+static bool obs_limits_any_zero(
+    const struct vcs_build_execution_observation_v1 *o)
+{
+    return o->cpu_seconds_limit == 0 || o->memory_bytes_limit == 0 ||
         o->process_limit == 0 || o->file_limit == 0 ||
         o->file_bytes_limit == 0 || o->output_bytes_limit == 0 ||
-        o->wall_millis_limit == 0)
+        o->wall_millis_limit == 0;
+}
+
+bool vcs_build_execution_observation_v1_valid(
+    const struct vcs_build_execution_observation_v1 *o)
+{
+    if (!o || obs_header_fields_invalid(o) || obs_roots_any_unset(o) ||
+        obs_limits_any_zero(o))
         return false;
     return memcmp(o->declared_reads_root, o->observed_reads_root, 32) == 0;
 }
