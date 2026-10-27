@@ -23,7 +23,13 @@
 #include "platform/time_compat.h"
 #include "json/json.h"
 
+#include "controllers/rpc_client.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -982,6 +988,137 @@ static int test_brief_status_unknown_fields_render_unknown(void)
     return failures;
 }
 
+static int test_status_no_node_headline(void)
+{
+    int failures = 0;
+    struct json_value d;
+    json_init(&d);
+    json_set_object(&d);
+    json_push_kv_str(&d, "primary_blocker", "STATUS_SOURCE_UNAVAILABLE");
+    json_push_kv_str(&d, "next_action", "z23 core status brief");
+    char buf[320];
+    bool had = zcl_native_status_journey_headline(&d, "/srv/z23-data", 8232, false,
+                                                  buf, sizeof(buf));
+    TEST("no-node status gets a plain first line naming the datadir") {
+        ASSERT(had);
+        ASSERT_STR_EQ(buf, "No node answered on 127.0.0.1:8232 "
+                       "(datadir /srv/z23-data). Start one with: z23");
+        ASSERT(strstr(buf, "Start one with: z23") != NULL);
+        ASSERT(strchr(buf, '\n') == NULL);
+        PASS();
+    }
+    buf[0] = '\0';
+    TEST("a listening node with a degraded status source is not called absent") {
+        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", 8232, true,
+                                                  buf, sizeof(buf)));
+        ASSERT(buf[0] == '\0');
+        PASS();
+    }
+    json_free(&d);
+    json_init(&d);
+    json_set_object(&d);
+    json_push_kv_str(&d, "primary_blocker", "none");
+    buf[0] = '\0';
+    TEST("a running node gets no headline") {
+        ASSERT(!zcl_native_status_journey_headline(&d, "/srv/z23-data", 8232, false,
+                                                  buf, sizeof(buf)));
+        ASSERT(buf[0] == '\0');
+        PASS();
+    } _test_next:;
+    json_free(&d);
+    return failures;
+}
+
+static char *ux_rpc_unavailable(const char *method, const char *params_json)
+{
+    (void)method;
+    (void)params_json;
+    return NULL;
+}
+
+/* A loopback port that was just free: bind port 0, read it, close. */
+static int ux_closed_loopback_port(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET};
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(a);
+    int port = 0;
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof(a)) == 0 &&
+        getsockname(fd, (struct sockaddr *)&a, &len) == 0)
+        port = ntohs(a.sin_port);
+    if (fd >= 0)
+        close(fd);
+    return port;
+}
+
+/* Run the real `status` CLI dispatch with stdout redirected to a file. */
+static bool ux_status_cli_capture(const char *human, int port,
+                                  const char *datadir, char *out, size_t cap)
+{
+    FILE *tmp = tmpfile();
+    if (!tmp)
+        return false;
+    setenv("ZCL_HUMAN", human, 1);
+    setenv("NO_COLOR", "1", 1);
+    zcl_native_render_reset_for_test();
+    node_rpc_client_set_test_hook(ux_rpc_unavailable);
+    fflush(stdout);
+    int saved = dup(fileno(stdout));
+    bool ok = saved >= 0 && dup2(fileno(tmp), fileno(stdout)) >= 0;
+    if (ok) {
+        (void)zcl_native_command_main("status", NULL, 0, datadir, port,
+                                      CHAIN_MAIN, true);
+        fflush(stdout);
+        dup2(saved, fileno(stdout));
+    }
+    if (saved >= 0)
+        close(saved);
+    node_rpc_client_set_test_hook(NULL);
+    unsetenv("ZCL_HUMAN");
+    unsetenv("NO_COLOR");
+    zcl_native_render_reset_for_test();
+    rewind(tmp);
+    size_t n = ok ? fread(out, 1, cap - 1, tmp) : 0;
+    out[n] = '\0';
+    fclose(tmp);
+    return ok;
+}
+
+static int test_status_cli_no_node_headline(void)
+{
+    int failures = 0;
+    char piped[1024] = {0}, human[1024] = {0};
+    int port = ux_closed_loopback_port();
+    const char *dir = "/srv/z23-data";
+    char want[256];
+    (void)snprintf(want, sizeof(want),
+                   "No node answered on 127.0.0.1:%d (datadir %s). "
+                   "Start one with: z23\n", port, dir);
+    TEST("status CLI piped prints exactly the one machine line") {
+        ASSERT(port > 0);
+        ASSERT(ux_status_cli_capture("0", port, dir, piped, sizeof(piped)));
+        ASSERT(piped[0] != '\0');
+        ASSERT(strstr(piped, "No node") == NULL);
+        char *nl = strchr(piped, '\n');
+        ASSERT(nl != NULL && nl[1] == '\0');
+        PASS();
+    }
+    TEST("status CLI on a terminal leads with the plain sentence") {
+        ASSERT(ux_status_cli_capture("1", port, dir, human, sizeof(human)));
+        ASSERT(strncmp(human, want, strlen(want)) == 0);
+        const char *line2 = human + strlen(want);
+        /* The terminal render of the brief trims trailing text, so compare
+         * the stable head and the blocker, not the whole piped line. */
+        ASSERT(strncmp(line2, "node=blocked synced=no ", 23) == 0);
+        ASSERT(strncmp(line2, piped, 80) == 0);
+        ASSERT(strstr(line2, "blocker=STATUS_SOURCE_UNAVAILABLE") != NULL);
+        ASSERT(strstr(line2, "\nnext: ") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_money_journey_status_one_line_contract(void)
 {
     int failures = 0;
@@ -1238,6 +1375,8 @@ int test_operator_ux(void)
     failures += test_brief_status_registry_fields_agree();
     failures += test_brief_status_unknown_fields_render_unknown();
     failures += test_money_journey_status_one_line_contract();
+    failures += test_status_no_node_headline();
+    failures += test_status_cli_no_node_headline();
     failures += test_next_command_prioritizes_blocker_over_gap();
     failures += test_field_selection_selects_requested_fields();
     failures += test_field_selection_unknown_field_is_typed_error();

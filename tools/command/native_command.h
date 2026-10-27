@@ -1084,6 +1084,13 @@ void zcl_native_status_brief_render(const struct json_value *data, char *buf,
                                     size_t cap);
 void zcl_native_status_journey_render(const struct json_value *data,
                                       char *buf, size_t cap);
+bool zcl_native_status_journey_headline(const struct json_value *data,
+                                       const char *datadir,
+                                       int port, bool node_listening, char *buf,
+                                       size_t cap);
+#ifdef ZCL_TESTING
+void zcl_native_render_reset_for_test(void);
+#endif
 
 /* Pick one short, deterministic next-step command from the same brief body
  * (dominant blocker present -> explain it; still behind -> explain sync;
