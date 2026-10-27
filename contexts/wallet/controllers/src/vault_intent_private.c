@@ -382,8 +382,7 @@ static bool vip_decode_effect(struct byte_stream *s, struct vip_effect *e)
     uint8_t to_len = 0, memo_kind = 0;
     bool ok = vip_decode_effect_recipient(s, e, &to_len) &&
         vip_decode_effect_memo(s, e, &memo_kind);
-    if (to_len <= VIP_ADDR_MAX)
-        e->to[to_len] = '\0';
+    e->to[to_len] = '\0';
     e->memo_kind = (enum vip_memo_kind)memo_kind;
     return ok && vip_effect_memo_consistent(e);
 }
@@ -396,8 +395,7 @@ static bool vip_decode(const uint8_t *raw, size_t len, struct vip_payload *p)
     uint8_t route = 0, from_len = 0, count = 0;
     bool ok = vip_decode_route(&s, &route) &&
         vip_decode_header(&s, p, &from_len, &count);
-    if (from_len <= VIP_ADDR_MAX)
-        p->from[from_len] = '\0';
+    p->from[from_len] = '\0';
     p->route = (enum vault_intent_route)route;
     p->effects_len = count;
     for (size_t i = 0; ok && i < p->effects_len; i++)
