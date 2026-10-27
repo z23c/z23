@@ -16,8 +16,12 @@
 #include "net/https_server.h"
 #include "views/install_sh_view.h"
 
+#include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define ISH_BUF (64 * 1024)
 
@@ -90,17 +94,166 @@ static int ish_script_steps(const char *body)
               body && strstr(body, "say() {\n"
                                    "    echo \"install_from_source: $*\" >&2\n"
                                    "}\n") != NULL);
-    ISH_CHECK("the script reports each step",
-              body && strstr(body, "say \"1/4 Checking tools") != NULL &&
-                  strstr(body, "say \"2/4 Getting the source into $SRC") != NULL &&
-                  strstr(body, "run git clone \"$REPO_URL\" \"$SRC\"") != NULL &&
-                  strstr(body, "run git -C \"$SRC\" fetch origin") != NULL &&
-                  strstr(body, "run git -C \"$SRC\" checkout \"$Z23_PIN\"") != NULL &&
-                  strstr(body, "No commit pin was served") != NULL &&
-                  strstr(body, "say \"3/4 Building (several minutes") != NULL &&
-                  strstr(body, "say \"4/4 Done\"") != NULL);
+    /* Old "say \"checking tools\"" -> the numbered step 1 line. */
+    ISH_CHECK("the script reports the tool check (step 1/4)",
+              body && strstr(body, "say \"1/4 Checking tools") != NULL);
+    /* Old "say \"cloning \"" -> the fresh-clone step 2 line + its command. */
+    ISH_CHECK("the script reports a fresh clone (step 2/4)",
+              body && strstr(body, "say \"2/4 Getting the source: cloning "
+                                   "$REPO_URL into $SRC") != NULL &&
+                  strstr(body, "run git clone \"$REPO_URL\" \"$SRC\"") != NULL);
+    /* Old "say \"updating existing clone\"" -> existing-checkout step 2. */
+    ISH_CHECK("the script reports updating an existing clone (step 2/4)",
+              body && strstr(body, "say \"2/4 Getting the source: updating "
+                                   "the existing clone in $SRC") != NULL &&
+                  strstr(body, "run git -C \"$SRC\" fetch origin") != NULL);
+    /* Old "say \"checking out pinned commit $Z23_PIN\"" -> log line + cmd. */
+    ISH_CHECK("the script records the pinned-commit checkout",
+              body && strstr(body, "echo \"checking out pinned commit "
+                                   "$Z23_PIN\" >>\"$LOG\"") != NULL &&
+                  strstr(body, "run git -C \"$SRC\" checkout \"$Z23_PIN\"") != NULL);
+    /* Old "say \"no commit pin was served\"" -> log line + main checkout. */
+    ISH_CHECK("the script records the no-pin main fallback",
+              body && strstr(body, "echo \"no commit pin was served; building "
+                                   "main instead\" >>\"$LOG\"") != NULL &&
+                  strstr(body, "run git -C \"$SRC\" checkout main") != NULL);
+    /* Old "say \"building with $jobs jobs\"" -> step 3 line + make -j. */
+    ISH_CHECK("the script reports the build (step 3/4)",
+              body && strstr(body, "say \"3/4 Building (several minutes") != NULL &&
+                  strstr(body, "make -C \"$SRC\" -j\"$jobs\" z23") != NULL);
+    /* Old "say \"done\"" -> step 4. */
+    ISH_CHECK("the script reports done (step 4/4)",
+              body && strstr(body, "say \"4/4 Done\"") != NULL);
     return failures;
 }
+
+#ifndef _WIN32
+static bool ish_write(const char *path, const char *text, bool exec)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(text, f) >= 0;
+    ok = fclose(f) == 0 && ok;
+    return ok && (!exec || chmod(path, 0700) == 0);
+}
+
+static bool ish_slurp(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return true;
+}
+
+static bool ish_stage(const char *d, const char *body)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/bin", d);
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) return false;
+    snprintf(p, sizeof(p), "%s/tmp", d);
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) return false;
+    snprintf(p, sizeof(p), "%s/inst.sh", d);
+    if (!ish_write(p, body, false)) return false;
+    snprintf(p, sizeof(p), "%s/bin/git", d);
+    if (!ish_write(p, "#!/bin/sh\necho NOISE-git \"$@\"\n"
+                      "[ \"${GITFAIL:-}\" = 1 ] && { echo git-exploded; exit 1; }\n"
+                      "[ \"$1\" = clone ] && mkdir -p \"$3/.git\"\n"
+                      "exit 0\n", true)) return false;
+    snprintf(p, sizeof(p), "%s/bin/make", d);
+    if (!ish_write(p, "#!/bin/sh\necho NOISE-make \"$@\"\n", true)) return false;
+    snprintf(p, sizeof(p), "%s/bin/cc", d);
+    return ish_write(p, "#!/bin/sh\nexit 0\n", true);
+}
+
+/* Run the served script for real with stub git/make/cc first on PATH. The
+ * git stub prints NOISE-git; with fail it also prints git-exploded and
+ * exits 1. Returns the system() status; out/err/log capture stdout, stderr
+ * and build/install.log. */
+static int ish_run_script(const char *d, const char *body, bool fail,
+                          char *out, char *err, char *log, size_t cap)
+{
+    char p[1024], cmd[4096];
+    if (!ish_stage(d, body)) return -1;
+    snprintf(cmd, sizeof(cmd),
+             "cd \"%s\" && env -i PATH=\"%s/bin:/usr/bin:/bin\" HOME=\"%s\" "
+             "TMPDIR=\"%s/tmp\" Z23_SRC=\"%s/src\" GITFAIL=%d "
+             "sh \"%s/inst.sh\" </dev/null >\"%s/out\" 2>\"%s/err\"",
+             d, d, d, d, d, fail ? 1 : 0, d, d, d);
+    int rc = system(cmd);
+    snprintf(p, sizeof(p), "%s/out", d);
+    if (!ish_slurp(p, out, cap)) return -1;
+    snprintf(p, sizeof(p), "%s/err", d);
+    if (!ish_slurp(p, err, cap)) return -1;
+    snprintf(p, sizeof(p), "%s/src/build/install.log", d);
+    log[0] = '\0';
+    (void)ish_slurp(p, log, cap);
+    return rc;
+}
+
+static void ish_real_clean(const char *d)
+{
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s/src\" \"%s/out\" \"%s/err\"", d, d, d);
+    (void)system(cmd);
+}
+
+static int ish_real_ok(const char *d, const char *body)
+{
+    int failures = 0;
+    static char out[8192], err[8192], log[8192];
+    int rc = ish_run_script(d, body, false, out, err, log, sizeof(out));
+    ISH_CHECK("real run: success exits 0 with the summary on stdout",
+              rc == 0 && strstr(out, "Binary:  ") != NULL &&
+                  strstr(out, "https://z23.sh/start") != NULL);
+    ISH_CHECK("real run: git and make output stays off the terminal",
+              strstr(out, "NOISE-") == NULL && strstr(err, "NOISE-") == NULL);
+    ISH_CHECK("real run: git and make output lands in build/install.log",
+              strstr(log, "NOISE-git") != NULL &&
+                  strstr(log, "NOISE-make") != NULL);
+    return failures;
+}
+
+static int ish_real_fail(const char *d, const char *body)
+{
+    int failures = 0;
+    char cmd[640];
+    static char out[8192], err[8192], log[8192];
+    int rc = ish_run_script(d, body, true, out, err, log, sizeof(out));
+    ISH_CHECK("real run: a failing step exits non-zero",
+              rc != 0 && strstr(out, "Binary:  ") == NULL);
+    ISH_CHECK("real run: failure prints FAILED and the log tail",
+              strstr(err, "FAILED: git clone") != NULL &&
+                  strstr(err, "last 20 lines") != NULL &&
+                  strstr(err, "git-exploded") != NULL);
+    snprintf(cmd, sizeof(cmd), "ls \"%s/tmp\" | grep -q z23-install", d);
+    ISH_CHECK("real run: a pre-clone failure leaves no temp log behind",
+              system(cmd) != 0);
+    return failures;
+}
+
+static int ish_script_real_run(const char *body)
+{
+    int failures = 0;
+    char d[512];
+    if (!body || !test_mkdtemp(d, sizeof(d), "install_sh_run")) {
+        ISH_CHECK("real-run fixture directory", false);
+        return failures;
+    }
+    failures += ish_real_ok(d, body);
+    ish_real_clean(d);
+    failures += ish_real_fail(d, body);
+    test_rm_rf(d);
+    return failures;
+}
+#else
+static int ish_script_real_run(const char *body)
+{
+    (void)body;
+    return 0;
+}
+#endif
 
 static int ish_script_log_and_summary(const char *body)
 {
@@ -156,6 +309,7 @@ int test_install_sh_site(void)
               body && strstr(body, "Z23_PIN=\"") != NULL);
     failures += ish_script_steps(body);
     failures += ish_script_log_and_summary(body);
+    failures += ish_script_real_run(body);
 
     /* HEAD: same headers, no body. */
     size_t head_n = install_sh_handle_request("HEAD", "/install.sh", NULL, 0,

@@ -44,14 +44,18 @@ need() {
 # All git and build output goes to a log file, not the terminal. Until
 # the clone exists it is a temp file; it then moves to $SRC/build/install.log.
 # A failed step shows the last 20 lines of it and exits non-zero.
-LOG=$(mktemp "${TMPDIR:-/tmp}/z23-install.XXXXXX") ||
+TMPLOG=$(mktemp "${TMPDIR:-/tmp}/z23-install.XXXXXX") ||
     die "cannot create a temporary log file"
+LOG="$TMPLOG"
+# The temp log never outlives the script, on success or on any failure.
+trap 'rm -f "$TMPLOG"' EXIT
 
 run() {
     "$@" >>"$LOG" 2>&1 || {
         say "FAILED: $*"
-        say "last 20 lines of $LOG:"
+        say "last 20 lines of the log:"
         tr '\r' '\n' <"$LOG" | tail -n 20 >&2
+        [ "$LOG" = "$TMPLOG" ] || say "full log: $LOG"
         exit 1
     }
 }
@@ -77,7 +81,6 @@ rm -rf "$probe"
 [ -n "$cc_ok" ] ||
     die "missing required command: a C compiler (cc, gcc, or clang) accepting -std=c23"
 
-say "2/4 Getting the source into $SRC..."
 if [ -d "$SRC" ]; then
     [ -d "$SRC/.git" ] ||
         die "$SRC exists and is not a z23 git clone; set Z23_SRC to pick another path"
@@ -88,22 +91,25 @@ if [ -d "$SRC" ]; then
         die "$SRC is a git clone of '$url', not $REPO_URL; set Z23_SRC to pick another path"
         ;;
     esac
+    say "2/4 Getting the source: updating the existing clone in $SRC..."
     run git -C "$SRC" fetch origin
 else
+    say "2/4 Getting the source: cloning $REPO_URL into $SRC..."
     run git clone "$REPO_URL" "$SRC"
 fi
 
 if [ -n "$Z23_PIN" ]; then
+    echo "checking out pinned commit $Z23_PIN" >>"$LOG"
     run git -C "$SRC" checkout "$Z23_PIN"
 else
-    # No commit pin was served: build main instead.
+    echo "no commit pin was served; building main instead" >>"$LOG"
     run git -C "$SRC" checkout main
     run git -C "$SRC" pull --ff-only origin main
 fi
 
 mkdir -p "$SRC/build" || die "cannot create $SRC/build"
 cat "$LOG" >>"$SRC/build/install.log"
-rm -f "$LOG"
+rm -f "$TMPLOG"
 LOG="$SRC/build/install.log"
 
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
