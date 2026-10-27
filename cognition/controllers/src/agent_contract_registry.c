@@ -286,19 +286,22 @@ static void agent_push_str(struct json_value *arr, const char *s)
 
 static const char *agent_native_usage_tail(const char *native_command)
 {
-    const char *prefix = "zclassic23";
-    size_t prefix_len = strlen(prefix);
+    static const char *const prefixes[] = {"zclassic23", "z23"};
     if (!native_command)
         return "";
-    if (strncmp(native_command, prefix, prefix_len) != 0)
-        return native_command;
-    if (native_command[prefix_len] != '\0' &&
-        native_command[prefix_len] != ' ')
-        return native_command;
-    const char *tail = native_command + prefix_len;
-    while (*tail == ' ')
-        tail++;
-    return tail;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        size_t prefix_len = strlen(prefixes[i]);
+        if (strncmp(native_command, prefixes[i], prefix_len) != 0)
+            continue;
+        if (native_command[prefix_len] != '\0' &&
+            native_command[prefix_len] != ' ')
+            continue;
+        const char *tail = native_command + prefix_len;
+        while (*tail == ' ')
+            tail++;
+        return tail;
+    }
+    return native_command;
 }
 
 void agent_print_native_usage(FILE *out, const char *prog)

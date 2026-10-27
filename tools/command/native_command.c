@@ -3537,6 +3537,25 @@ void zcl_native_status_journey_render(const struct json_value *d, char *buf,
     (void)snprintf(buf, cap, "%s", line);
 }
 
+/* A person-readable first line for the one case the machine line cannot
+ * explain by itself: no node answered. Returns true and fills `buf` when the
+ * journey blocker is STATUS_SOURCE_UNAVAILABLE, false (buf untouched) for
+ * every other status. `datadir` is the datadir the client looked in. */
+bool zcl_native_status_journey_headline(const struct json_value *d,
+                                       const char *datadir, char *buf,
+                                       size_t cap)
+{
+    const char *blocker = nc_journey_blocker_field(d);
+    if (!buf || cap == 0 || !blocker ||
+        strcmp(blocker, "STATUS_SOURCE_UNAVAILABLE") != 0)
+        return false;
+    (void)snprintf(buf, cap,
+                   "No node is running here (datadir %.200s). "
+                   "Start it with: z23",
+                   datadir && datadir[0] ? datadir : "unknown");
+    return true;
+}
+
 /* Pick one short, deterministic next step from the same brief body: a named
  * blocker outranks "still behind" outranks the native health leaf. Never
  * allocates. */
@@ -3835,6 +3854,17 @@ size_t zcl_native_render_unknown_command(
         nc_render_did_you_mean(matches, out, out_cap, &len);
     json_free(&doc);
     return len;
+}
+
+/* Print the no-node plain-language line ahead of the frozen machine line. */
+static void nc_print_status_headline(const char *path,
+                                     const struct json_value *data)
+{
+    char headline[320];
+    if (strcmp(path, "status") == 0 &&
+        zcl_native_status_journey_headline(data, node_rpc_client_datadir(),
+                                           headline, sizeof(headline)))
+        printf("%s\n", headline);
 }
 
 /* Render the prose text for a prose leaf into `buf`. Returns true if a text
@@ -5149,6 +5179,7 @@ static bool nc_main_render_prose(const struct zcl_command_spec *spec,
                 zcl_cli_render_brief(text, nc_render_env(), colored,
                                      sizeof(colored)) > 0)
                 emit = colored;
+            nc_print_status_headline(spec->path, data);
             printf("%s\n", emit);
             /* The next: line prints by default on a human terminal
              * (nc_human); pipes keep the frozen one-line contract

@@ -54,7 +54,8 @@ git clone --recurse-submodules https://github.com/z23c/z23.git
 cd z23
 make doctor                                 # what this machine still needs
 make -j"$(getconf _NPROCESSORS_ONLN)" z23   # builds build/bin/z23
-build/bin/z23 status                        # how the node is doing, and what to do next
+build/bin/z23                               # start the node (leave it running)
+build/bin/z23 status                        # in a second terminal: how it is doing, and what to do next
 ```
 
 You need gcc 14+ (or clang with `-std=c23`) and GNU make. The first build

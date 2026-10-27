@@ -98,6 +98,7 @@ bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
 
 /* The -help / --help usage text. */
 void print_usage(const char *prog);
+void print_usage_all(const char *prog);
 
 /* Apply -loglevel=<all|info|warn|error|fatal|off> if present (default: no
  * change). An unrecognized value warns, never aborts. */

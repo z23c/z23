@@ -452,6 +452,14 @@ const char *node_rpc_client_datadir(void)
     return g_datadir;
 }
 
+bool node_rpc_client_cookie_present(void)
+{
+    char cookie[256];
+    bool ok = g_datadir[0] && read_cookie_at(g_datadir, cookie, sizeof(cookie));
+    memset(cookie, 0, sizeof(cookie));
+    return ok;
+}
+
 bool node_rpc_port_listening(int rpc_port, long connect_ms)
 {
     if (rpc_port < 1 || rpc_port > 65535)

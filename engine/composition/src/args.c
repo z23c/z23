@@ -36,6 +36,17 @@
 
 void print_usage(const char *prog)
 {
+    printf("Start here:\n");
+    printf("  %s                    Run the node (then Ctrl-C to stop it)\n", prog);
+    printf("  %s status             How the node is doing, and what to do next\n", prog);
+    printf("  %s wiki               Read the built-in guides\n", prog);
+    printf("  %s card               Your node card\n", prog);
+    printf("  %s discover help      Find every command by task\n", prog);
+    printf("  %s --help-all         Every command and node option\n", prog);
+}
+
+void print_usage_all(const char *prog)
+{
     printf("Usage:\n");
     printf("  %s [node options]          Run full node\n", prog);
     printf("\nAgent/operator API commands (from agent_contracts.def):\n");
@@ -1103,6 +1114,9 @@ static int args_arm_gui_help_version(const char *arg,
         /* Opt-in to the WebKit wallet GUI. Consumed earlier (the GUI
          * launch returns before node mode); recognized here so it is
          * an intentional flag, not silently dropped node-mode noise. */
+    }
+    else if (strcmp(arg, "--help-all") == 0 || strcmp(arg, "-help-all") == 0) {
+        print_usage_all(st->argv[0]); return 0;
     }
     else if (strcmp(arg, "-help") == 0 || strcmp(arg, "--help") == 0 ||
              strcmp(arg, "-h") == 0 || strcmp(arg, "-?") == 0) {

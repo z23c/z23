@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define APPCTX_CHECK(name, expr) do {                                  \
     printf("app_context: %s... ", (name));                            \
@@ -799,6 +800,80 @@ static int app_context_check_profile_surfaces(void)
     return failures;
 }
 
+/* ── --help is a short "Start here" block; --help-all is the full list ── */
+
+/* Run fn(prog) with stdout redirected to an unnamed temp file and return
+ * the captured text (malloc'd, NUL-terminated), or NULL. */
+static char *appctx_capture_stdout(void (*fn)(const char *), size_t *len_out)
+{
+    FILE *tmp = tmpfile();
+    if (!tmp)
+        return NULL;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0 || dup2(fileno(tmp), STDOUT_FILENO) < 0) {
+        if (saved >= 0)
+            close(saved);
+        fclose(tmp);
+        return NULL;
+    }
+    fn("z23");
+    fflush(stdout);
+    dup2(saved, STDOUT_FILENO);
+    close(saved);
+    long n = ftell(tmp);
+    char *buf = n >= 0 ? calloc((size_t)n + 1, 1) : NULL;
+    if (buf) {
+        rewind(tmp);
+        size_t got = fread(buf, 1, (size_t)n, tmp);
+        buf[got] = '\0';
+        *len_out = got;
+    }
+    fclose(tmp);
+    return buf;
+}
+
+static size_t appctx_count_lines(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+        n += *s == '\n';
+    return n;
+}
+
+static int test_help_start_here_block(void)
+{
+    int failures = 0;
+    size_t short_len = 0, all_len = 0;
+    char *shortb = appctx_capture_stdout(print_usage, &short_len);
+    char *allb = appctx_capture_stdout(print_usage_all, &all_len);
+    APPCTX_CHECK("help captured", shortb && allb);
+    if (!shortb || !allb) {
+        free(shortb);
+        free(allb);
+        return failures;
+    }
+    APPCTX_CHECK("--help starts with the Start here block",
+                 strncmp(shortb, "Start here:\n", 12) == 0);
+    APPCTX_CHECK("--help block is at most 8 lines",
+                 appctx_count_lines(shortb) <= 8);
+    APPCTX_CHECK("--help names status, wiki, card, discover help, --help-all",
+                 strstr(shortb, "z23 status") && strstr(shortb, "z23 wiki") &&
+                 strstr(shortb, "z23 card") &&
+                 strstr(shortb, "z23 discover help") &&
+                 strstr(shortb, "--help-all"));
+    APPCTX_CHECK("--help-all keeps the full command list and node options",
+                 strstr(allb, "Agent/operator API commands") &&
+                 strstr(allb, "-datadir=<dir>") &&
+                 appctx_count_lines(allb) > 100);
+    APPCTX_CHECK("no doubled z23 prefix on any help entry",
+                 strstr(allb, "z23 z23") == NULL &&
+                 strstr(allb, "z23 zclassic23") == NULL);
+    free(shortb);
+    free(allb);
+    return failures;
+}
+
 int test_app_context(void)
 {
     int failures = 0;
@@ -812,6 +887,7 @@ int test_app_context(void)
     failures += app_context_check_profile_surfaces();
     failures += test_app_context_tor_policy();
     failures += test_nonmainnet_legacy_import_default();
+    failures += test_help_start_here_block();
     failures += test_onlynet_onion_args();
     failures += test_onlynet_onion_dial_and_seed_walk();
     failures += test_observation_switch();
