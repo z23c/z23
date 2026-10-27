@@ -627,7 +627,6 @@ tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21
 tests/harness/src/test_blog.c:test_blog:60
 tests/harness/src/test_blog.c:test_blog_publication_slice:24
-tests/harness/src/test_body_fetch_stage.c:test_body_fetch_stage_platform_arm:56
 tests/harness/src/test_build_fabric.c:test_bf_confined_worker:28
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
 tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
