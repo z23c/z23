@@ -8,7 +8,7 @@
   "source_dir": "src",
   "dependencies": [
     {
-      "root": "af83b6a944a42d26ad7af42e18ec0d67119bfda96c539baca0091a6a1d76b6b6",
+      "root": "919dbf06324e183109de23ba47758c0ec7a3fe6a406f59de5b48a771964fb68d",
       "name": "zutf8/zutf8",
       "semver": "0.1.0"
     }
