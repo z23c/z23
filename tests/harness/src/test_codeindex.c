@@ -1192,7 +1192,8 @@ static bool test_codeindex_platform_arm_indexed_match(struct codeindex *ci,
     return indexed_same;
 }
 
-static int test_codeindex_platform_arm_indexed_loops(bool indexed_same,
+static int test_codeindex_platform_arm_indexed_ranking_compare(
+    bool indexed_same,
     struct zcode_goal_selection *selected,
     struct zcode_goal_selection *selected_indexed)
 {
@@ -2563,8 +2564,8 @@ static int test_codeindex_platform_arm(void)
     failures += test_codeindex_platform_arm_goal_ranking(&selected);
     bool indexed_same = test_codeindex_platform_arm_indexed_match(ci,
         &selected, &selected_indexed);
-    failures += test_codeindex_platform_arm_indexed_loops(indexed_same,
-        &selected, &selected_indexed);
+    failures += test_codeindex_platform_arm_indexed_ranking_compare(
+        indexed_same, &selected, &selected_indexed);
     failures += test_codeindex_platform_arm_goal_repeat(&selected,
         &selected_again);
     failures += test_codeindex_platform_arm_goal_saturation(&selected);
