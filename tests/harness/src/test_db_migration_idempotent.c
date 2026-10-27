@@ -238,20 +238,15 @@ static bool db_mig_snapshot_family(const char *dbpath,
     return true;
 }
 
-/* True when both fields of two timespecs are equal. */
-static bool db_mig_timespec_same(const struct timespec *x,
-                                 const struct timespec *y)
-{
-    return x->tv_sec == y->tv_sec && x->tv_nsec == y->tv_nsec;
-}
-
 /* True when two snapshots' entry counts and directory timestamps match. */
 static bool db_mig_family_meta_same(const struct db_mig_family_snapshot *a,
                                     const struct db_mig_family_snapshot *b)
 {
     return a->count == b->count &&
-           db_mig_timespec_same(&a->dir_mtime, &b->dir_mtime) &&
-           db_mig_timespec_same(&a->dir_ctime, &b->dir_ctime);
+           a->dir_mtime.tv_sec == b->dir_mtime.tv_sec &&
+           a->dir_mtime.tv_nsec == b->dir_mtime.tv_nsec &&
+           a->dir_ctime.tv_sec == b->dir_ctime.tv_sec &&
+           a->dir_ctime.tv_nsec == b->dir_ctime.tv_nsec;
 }
 
 /* True when two family entries match in name, size, mode, timestamps and
@@ -261,8 +256,10 @@ static bool db_mig_family_file_same(const struct db_mig_family_file *fa,
 {
     return strcmp(fa->name, fb->name) == 0 && fa->size == fb->size &&
            fa->mode == fb->mode &&
-           db_mig_timespec_same(&fa->mtime, &fb->mtime) &&
-           db_mig_timespec_same(&fa->ctime, &fb->ctime) &&
+           fa->mtime.tv_sec == fb->mtime.tv_sec &&
+           fa->mtime.tv_nsec == fb->mtime.tv_nsec &&
+           fa->ctime.tv_sec == fb->ctime.tv_sec &&
+           fa->ctime.tv_nsec == fb->ctime.tv_nsec &&
            memcmp(fa->sha3, fb->sha3, sizeof(fa->sha3)) == 0;
 }
 
