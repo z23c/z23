@@ -144,9 +144,10 @@ static int socket_completion_cases(platform_socket_t socket_handle)
 #endif
     return 0;
 }
-int main(void)
+
+/* Check IPv4 loopback parse and format behaviour; returns 0 or the failure code. */
+static int verify_loopback_parse(void)
 {
-    if (!platform_socket_runtime_init()) return 1;
     struct in_addr address;
     const unsigned char loopback[4] = {127, 0, 0, 1};
     if (platform_socket_parse_address(AF_INET, "127.0.0.1", &address) != 1 ||
@@ -165,6 +166,12 @@ int main(void)
     if (platform_socket_format_address(AF_INET, &address, too_small,
                                        sizeof(too_small)))
         return 9;
+    return 0;
+}
+
+/* Resolve the loopback name and require the single mapped address; 0 or 11. */
+static int verify_loopback_resolve(void)
+{
     uint8_t resolved[2][16];
     size_t resolved_count = 0;
     const uint8_t mapped_loopback[16] = {
@@ -174,18 +181,32 @@ int main(void)
         resolved_count != 1 ||
         memcmp(resolved[0], mapped_loopback, sizeof(mapped_loopback)) != 0)
         return 11;
+    return 0;
+}
+
+/* Open the acceptance stream socket with short timeouts; returns 0, 4 or 5,
+ * with the handle in *out on 0. */
+static int open_timeout_socket(platform_socket_t *out)
+{
     platform_socket_t socket_handle = platform_socket_open(
         AF_INET, SOCK_STREAM, 0, true, false);
-    if (socket_handle == PLATFORM_SOCKET_INVALID) return 4;
+    *out = socket_handle;
+    if (socket_handle == PLATFORM_SOCKET_INVALID)
+        return 4;
     if (platform_socket_set_receive_timeout(socket_handle, 250) != 0 ||
         platform_socket_set_send_timeout(socket_handle, 250) != 0) {
         platform_socket_close(socket_handle);
+        *out = PLATFORM_SOCKET_INVALID;
         return 5;
     }
-#if defined(_WIN32)
-    if (!platform_socket_error_refused(WSAECONNREFUSED)) return 7;
-#else
-    if (!platform_socket_error_refused(ECONNREFUSED)) return 7;
+    return 0;
+}
+
+#if !defined(_WIN32)
+/* Ensure the soft descriptor limit exceeds FD_SETSIZE, then probe a high
+ * handle; returns 0, 8 or 9. */
+static int verify_high_descriptor_limits(platform_socket_t socket_handle)
+{
     struct rlimit descriptors;
     if (getrlimit(RLIMIT_NOFILE, &descriptors) != 0) return 8;
     if (descriptors.rlim_cur <= FD_SETSIZE) {
@@ -198,6 +219,25 @@ int main(void)
     if (high < FD_SETSIZE || platform_socket_wait_writable(high, 0) < 0 ||
         platform_socket_wait_readable(high, 0) < 0 || close(high) != 0)
         return 9;
+    return 0;
+}
+#endif
+int main(void)
+{
+    if (!platform_socket_runtime_init()) return 1;
+    int parse_status = verify_loopback_parse();
+    if (parse_status != 0) return parse_status;
+    int resolve_status = verify_loopback_resolve();
+    if (resolve_status != 0) return resolve_status;
+    platform_socket_t socket_handle;
+    int open_status = open_timeout_socket(&socket_handle);
+    if (open_status != 0) return open_status;
+#if defined(_WIN32)
+    if (!platform_socket_error_refused(WSAECONNREFUSED)) return 7;
+#else
+    if (!platform_socket_error_refused(ECONNREFUSED)) return 7;
+    int high_status = verify_high_descriptor_limits(socket_handle);
+    if (high_status != 0) return high_status;
 #endif
     int completion = socket_completion_cases(socket_handle);
     if (completion != 0) return completion;
