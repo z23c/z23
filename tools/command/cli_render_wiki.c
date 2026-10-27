@@ -116,14 +116,14 @@ static void w_row(struct wbuf *b, const char *slug, const char *title,
 static void w_node_hints(struct wbuf *b, const struct json_value *data)
 {
     const struct json_value *after = json_get(data, "next_after");
-    const char *path = json_get_str(json_get(data, "path"));
     const struct json_value *next = json_get(data, "next");
     const char *first = next && next->type == JSON_ARR && next->num_children
                             ? json_get_str(json_at(next, 0))
                             : NULL;
+    /* The renderer never sees the flags the command was typed with
+     * (--docsdir, --codedir, ...), so the hint names only what to add. */
     if (after && after->type == JSON_INT)
-        w_printf(b, "\nmore: z23 wiki%s%s --after=%lld\n",
-                 path && path[0] ? " " : "", path ? path : "",
+        w_printf(b, "\nmore: run the same command with --after=%lld\n",
                  (long long)json_get_int(after));
     if (first && first[0])
         w_printf(b, "%snext: %s\n", after ? "" : "\n", first);
@@ -159,14 +159,13 @@ static void w_page(struct wbuf *b, const struct zcl_cli_render_env *e,
 {
     const char *text = json_get_str(json_get(data, "text"));
     const struct json_value *noff = json_get(data, "next_offset");
-    const char *path = json_get_str(json_get(data, "path"));
     w_header(b, e, data);
     w_puts(b, "\n");
     if (text)
         w_printf(b, "%s\n", text);
     if (noff && noff->type == JSON_INT)
-        w_printf(b, "\nmore: z23 discover read %s --offset=%lld\n",
-                 path ? path : "<page>", (long long)json_get_int(noff));
+        w_printf(b, "\nmore: run the same command with --offset=%lld\n",
+                 (long long)json_get_int(noff));
 }
 
 size_t zcl_cli_render_wiki(const struct json_value *root,

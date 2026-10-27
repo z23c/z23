@@ -101,20 +101,21 @@ static int test_wiki_continuations(void)
             "\"title\":\"ADR\",\"children\":[],\"next_after\":24}}";
         ASSERT(json_read(&root, node, strlen(node)));
         ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) > 0);
-        ASSERT(strstr(out, "more: z23 wiki adr --after=24\n") != NULL);
+        ASSERT(strstr(out, "more: run the same command with --after=24\n")
+               != NULL);
         ASSERT(strstr(out, "pipe to JSON") == NULL);
         json_free(&root);
 
-        /* A 500-byte page path survives intact in the hint. */
-        static char path[501], doc[2048], want[700];
+        /* A 500-byte page path does not clip the continuation hint. */
+        static char path[501], doc[2048];
         memset(path, 'p', 500);
         snprintf(doc, sizeof(doc),
                  "{\"data_schema\":\"zcl.wiki_page.v1\",\"data\":{\"path\":\"%s\","
                  "\"title\":\"T\",\"text\":\"body\",\"next_offset\":123456}}", path);
         ASSERT(json_read(&root, doc, strlen(doc)));
         ASSERT(zcl_cli_render_wiki(&root, &e, out, sizeof(out)) > 0);
-        snprintf(want, sizeof(want), "%s --offset=123456\n", path);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT(strstr(out, "more: run the same command with --offset=123456\n")
+               != NULL);
         json_free(&root);
 
         /* The final chunk (null next_offset) has no hint. */
@@ -150,7 +151,7 @@ static int test_wiki_page_and_doc_dispatch(void)
                                       "discover.read", &e, out, sizeof(out));
         ASSERT(n > 0);
         ASSERT(strstr(out, "Body text.") != NULL);
-        ASSERT(strstr(out, "more: z23 discover read PARAMS.md --offset=4096")
+        ASSERT(strstr(out, "more: run the same command with --offset=4096")
                != NULL);
         n = zcl_cli_render_doc(WIKI_NODE, strlen(WIKI_NODE), "discover.wiki",
                                &e, out, sizeof(out));
