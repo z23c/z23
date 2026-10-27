@@ -441,6 +441,29 @@ static int reducer_drain_all_stages(int max_steps_per_stage,
     return total;
 }
 
+/* Feed every stage's reported advance and own-cursor movement for the round
+ * just drained to the spin observer. */
+static void reducer_drain_observe_stage_spins(const int *adv_per_stage,
+                                              const uint64_t *cur_before,
+                                              int spin_k)
+{
+    /* Advance-or-blocker contract: reconcile each stage's REPORTED advance
+     * against its own cursor movement. A stage that reports advances while
+     * its cursor stays frozen for K consecutive rounds is named as a
+     * "stage_spin_<name>" blocker (observational — this never breaks the
+     * drain; the drive-age watchdog and the round budget own termination).
+     * The per-stage own-cursor predicate is robust to the legitimate
+     * feed-downstream case: a stage that reports advance moves its OWN
+     * cursor (stage-runner contract), so reporting advance while a
+     * DOWNSTREAM cursor moves instead cannot mislabel it. */
+    for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
+        uint64_t cur_after = g_drain_stages[i].cursor();
+        reducer_drain_spin_observe(i, g_drain_stages[i].name,
+                                   adv_per_stage[i], cur_before[i],
+                                   cur_after, spin_k);
+    }
+}
+
 /* Shared drain core. `budget_us <= 0` means NO latency budget: keep draining
  * until convergence (a no-advance pass) or the round hard cap, whichever first.
  * The supervisor/FSM path passes a 2s budget so it yields its 2s stage ticks.
@@ -502,21 +525,7 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
         total += adv;
         last_adv = adv;
 
-        /* Advance-or-blocker contract: reconcile each stage's REPORTED advance
-         * against its own cursor movement. A stage that reports advances while
-         * its cursor stays frozen for K consecutive rounds is named as a
-         * "stage_spin_<name>" blocker (observational — this never breaks the
-         * drain; the drive-age watchdog and the round budget own termination).
-         * The per-stage own-cursor predicate is robust to the legitimate
-         * feed-downstream case: a stage that reports advance moves its OWN
-         * cursor (stage-runner contract), so reporting advance while a
-         * DOWNSTREAM cursor moves instead cannot mislabel it. */
-        for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
-            uint64_t cur_after = g_drain_stages[i].cursor();
-            reducer_drain_spin_observe(i, g_drain_stages[i].name,
-                                       adv_per_stage[i], cur_before[i],
-                                       cur_after, spin_k);
-        }
+        reducer_drain_observe_stage_spins(adv_per_stage, cur_before, spin_k);
 
         if (adv == 0) {
             exit_reason = DRAIN_EXIT_CONVERGED;
