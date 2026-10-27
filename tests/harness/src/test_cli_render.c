@@ -767,6 +767,28 @@ static int test_brief_render(void)
     return failures;
 }
 
+static int test_brief_spaced_value(void)
+{
+    int failures = 0;
+    TEST("brief line: a value with spaces (next_action) survives whole") {
+        const char *line =
+            "sync=unknown blocker=STATUS_SOURCE_UNAVAILABLE "
+            "next_action=z23 core status brief";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[1024];
+        size_t n = zcl_cli_render_brief(line, &e, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strcmp(out, line) == 0);
+        e = cr_env(80, true);
+        n = zcl_cli_render_brief(line, &e, out, sizeof(out));
+        ASSERT(n > 0);
+        cr_strip_ansi(out);
+        ASSERT(strcmp(out, line) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── unit: bare-z23 first-steps line ───────────────────────────────── */
 
 static int test_start_hint(void)
@@ -1068,6 +1090,7 @@ int test_cli_render(void)
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
     failures += test_brief_render();
+    failures += test_brief_spaced_value();
     failures += test_start_hint();
 
     const char *stale = NULL;

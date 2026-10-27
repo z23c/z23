@@ -1502,6 +1502,17 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
     return b.len;
 }
 
+/* A value runs to the space before the next key=; spaces stay inside it. */
+static const char *brief_val_end(const char *s)
+{
+    for (size_t k; *s; s++)
+        if (*s == ' ' && (k = strspn(s + 1, "abcdefghijklmnopqrstuvwxyz_"
+                                            "0123456789")) > 0 &&
+            s[1 + k] == '=')
+            break;
+    return s;
+}
+
 size_t zcl_cli_render_brief(const char *line,
                             const struct zcl_cli_render_env *env,
                             char *out, size_t cap)
@@ -1510,29 +1521,20 @@ size_t zcl_cli_render_brief(const char *line,
         return 0;
     struct buf b = { .p = out, .cap = cap, .len = 0, .overflow = false };
     out[0] = '\0';
-
     const char *p = line;
     while (*p) {
         while (*p == ' ')
             p++;
-        if (!*p)
-            break;
-        const char *eq = strchr(p, '=');
+        const char *eq = *p ? strchr(p, '=') : NULL;
         if (!eq)
             break;
-        const char *end = strchr(eq, ' ');
-        if (!end)
-            end = p + strlen(p);
+        const char *end = brief_val_end(eq);
         char key[48], val[96];
-        size_t kl = (size_t)(eq - p);
-        size_t vl = (size_t)(end - eq - 1);
-        if (kl >= sizeof(key) || vl >= sizeof(val))
+        if ((size_t)(eq - p) >= sizeof(key) ||
+            (size_t)(end - eq - 1) >= sizeof(val))
             break;
-        memcpy(key, p, kl);
-        key[kl] = '\0';
-        memcpy(val, eq + 1, vl);
-        val[vl] = '\0';
-
+        snprintf(key, sizeof(key), "%.*s", (int)(eq - p), p);
+        snprintf(val, sizeof(val), "%.*s", (int)(end - eq - 1), eq + 1);
         ansi_dim(&b, env, key);
         buf_putc(&b, '=');
         int color = 0;
@@ -1549,9 +1551,7 @@ size_t zcl_cli_render_brief(const char *line,
             buf_putc(&b, ' ');
         p = *end ? end + 1 : end;
     }
-    if (b.overflow || b.len == 0)
-        return 0;
-    return b.len;
+    return b.overflow ? 0 : b.len;
 }
 
 size_t zcl_cli_render_start_hint(const struct zcl_cli_render_env *env,
