@@ -352,8 +352,8 @@ static int ish_script_log_and_summary(const char *body)
                   strstr(body, "build/bin/z23 status") != NULL &&
                   strstr(body, "echo \"Next steps: https://z23.sh/start\"") != NULL &&
                   strstr(strstr(body, "echo \"Next steps:"),
-                         "Want to contribute? Read $SRC/.github/"
-                         "CONTRIBUTING.md, then post a claim in board room "
+                         "Want to contribute? Read .github/CONTRIBUTING.md "
+                         "in $SRC, then post a claim in board room "
                          "contrib (https://z23.sh/start).") != NULL);
 
     return failures;

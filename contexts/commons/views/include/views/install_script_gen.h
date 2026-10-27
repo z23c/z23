@@ -55,10 +55,10 @@ static const char INSTALL_FROM_SOURCE_SH_1[] =
     "echo \"Source:  $SRC\"\necho \"Binary:  $SRC/build/bin/z23\"\necho \"Start:   (cd \\\"$SRC\\\" &&"
     " build/bin/z23)\"\necho \"Check:   (cd \\\"$SRC\\\" && build/bin/z23 status)   # in a second term"
     "inal\"\necho \"Log:     $LOG\"\necho \"Next steps: https://z23.sh/start\"\necho \"Want to contrib"
-    "ute? Read $SRC/.github/CONTRIBUTING.md, then post a claim in board room contrib (https://z23.sh/s"
-    "tart).\"\n";
+    "ute? Read .github/CONTRIBUTING.md in $SRC, then post a claim in board room contrib (https://z23.s"
+    "h/start).\"\n";
 
-static char _INSTALL_FROM_SOURCE_SH_buf[4526];
+static char _INSTALL_FROM_SOURCE_SH_buf[4529];
 __attribute__((unused))
 static const char *INSTALL_FROM_SOURCE_SH_get(void) {
     size_t off = 0;
