@@ -3116,9 +3116,14 @@ skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)
 # UNINITIALIZED does not help and actively breaks the build: source capture
 # refuses with "nonempty uninitialized gitlink would omit bytes: vendor/tor",
 # because bytes would enter the compile that the source identity cannot
-# account for. It is right to refuse. So initialize the submodule FIRST (its
-# objects are already in the shared git dir, so this is offline and takes
-# about six seconds), and copy the archives only into an initialized one.
+# account for. It is right to refuse. So initialize the submodule FIRST, and
+# copy the archives only into an initialized one. A worktree clones its own
+# submodule, so the clone borrows the primary checkout's Tor objects
+# (--reference): it fetches only refs instead of the ~90 MB history, and the
+# pack is not copied once per worktree. A lane borrows only objects the
+# primary's submodule refs reach, which gc never prunes; deleting the
+# primary's .git/modules/vendor/tor would break lanes primed this way. With
+# no such directory the plain clone runs instead.
 worktree-prime:
 	@set -eu; \
 	src="$(SRC)"; \
@@ -3158,7 +3163,8 @@ worktree-prime:
 	  -*) echo "worktree-prime: initializing the vendor/tor submodule (a worktree does"; \
 	      echo "                not inherit one, and without it the link picks the Tor"; \
 	      echo "                STUB and the candidate cannot be shipped)"; \
-	      git submodule update --init vendor/tor >/dev/null 2>&1 \
+	      git submodule update --init --reference "$$(git rev-parse --path-format=absolute --git-common-dir)/modules/vendor/tor" vendor/tor >/dev/null 2>&1 \
+	        || git submodule update --init vendor/tor >/dev/null 2>&1 \
 	        || echo "worktree-prime: WARNING - vendor/tor init failed; this worktree links the Tor STUB" >&2 ;; \
 	esac; \
 	if [ ! -f vendor/tor/Makefile ] && [ -f "$$src/vendor/tor/Makefile" ] \
