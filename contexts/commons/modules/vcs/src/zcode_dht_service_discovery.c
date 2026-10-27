@@ -148,7 +148,8 @@ static bool discovery_responsible_set_covered(
   return false;
 }
 
-static void discovery_drive_children(
+/* Poll in-flight child operations and fold their results into the discovery. */
+static void discovery_poll_child_operations(
     struct vcs_zcode_dht_service *service,
     struct service_record_discovery *discovery,
     struct vcs_zcode_dht_time now)
@@ -187,21 +188,15 @@ static void discovery_drive_children(
     if (discovery->active_children)
       discovery->active_children--;
   }
+}
 
-  if (discovery->record_count >=
-      VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS) {
-    discovery_cancel_children(service, discovery);
-    discovery->truncated = true;
-    discovery->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
-    return;
-  }
-
-  if (discovery_responsible_set_covered(discovery)) {
-    discovery_cancel_children(service, discovery);
-    discovery->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
-    return;
-  }
-
+/* Drive unstarted nodes while below the ALPHA and success targets,
+ * starting child page queries where possible. */
+static void discovery_launch_child_queries(
+    struct vcs_zcode_dht_service *service,
+    struct service_record_discovery *discovery,
+    struct vcs_zcode_dht_time now)
+{
   while (discovery->active_children < VCS_ZCODE_DHT_ALPHA &&
          discovery->successful_nodes < discovery->target_successes) {
     uint32_t at = discovery->node_count;
@@ -238,6 +233,30 @@ static void discovery_drive_children(
     if (discovery->node_page_offsets[at] == 0)
       discovery->nodes_queried++;
   }
+}
+
+static void discovery_drive_children(
+    struct vcs_zcode_dht_service *service,
+    struct service_record_discovery *discovery,
+    struct vcs_zcode_dht_time now)
+{
+  discovery_poll_child_operations(service, discovery, now);
+
+  if (discovery->record_count >=
+      VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS) {
+    discovery_cancel_children(service, discovery);
+    discovery->truncated = true;
+    discovery->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    return;
+  }
+
+  if (discovery_responsible_set_covered(discovery)) {
+    discovery_cancel_children(service, discovery);
+    discovery->state = VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE;
+    return;
+  }
+
+  discovery_launch_child_queries(service, discovery, now);
   bool all_complete = true;
   for (uint32_t i = 0; i < discovery->node_count; i++)
     all_complete &= discovery->node_complete[i];
