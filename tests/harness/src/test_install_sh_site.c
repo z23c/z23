@@ -22,6 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <dirent.h>
+#include <unistd.h>
+#endif
 
 #define ISH_BUF (64 * 1024)
 
@@ -128,13 +132,45 @@ static int ish_script_steps(const char *body)
 }
 
 #ifndef _WIN32
-static bool ish_write(const char *path, const char *text, bool exec)
+static bool ish_write(const char *path, const char *text)
 {
     FILE *f = fopen(path, "w");
     if (!f) return false;
     bool ok = fputs(text, f) >= 0;
-    ok = fclose(f) == 0 && ok;
-    return ok && (!exec || chmod(path, 0700) == 0);
+    return fclose(f) == 0 && ok;
+}
+
+/* A stub tool is a symlink to a system binary, so the test adds no shell:
+ * git and make are echo (their arguments become log noise), cc is true,
+ * and a failing git is ls (it cannot find "clone", says so, exits 2). */
+static bool ish_link(const char *d, const char *tool, const char *target)
+{
+    static const char *const dirs[] = { "/bin", "/usr/bin" };
+    char t[64], p[1024];
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        snprintf(t, sizeof(t), "%s/%s", dirs[i], target);
+        if (access(t, X_OK) != 0)
+            continue;
+        snprintf(p, sizeof(p), "%s/bin/%s", d, tool);
+        (void)unlink(p);
+        return symlink(t, p) == 0;
+    }
+    return false;
+}
+
+/* Fails closed: an unreadable TMPDIR counts as a leaked temp log. */
+static bool ish_tmp_clean(const char *d)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/tmp", d);
+    DIR *dir = opendir(p);
+    if (!dir) return false;
+    bool clean = true;
+    for (struct dirent *e; (e = readdir(dir)) != NULL;)
+        if (strncmp(e->d_name, "z23-install.", 12) == 0)
+            clean = false;
+    closedir(dir);
+    return clean;
 }
 
 static bool ish_slurp(const char *path, char *buf, size_t cap)
@@ -147,7 +183,7 @@ static bool ish_slurp(const char *path, char *buf, size_t cap)
     return true;
 }
 
-static bool ish_stage(const char *d, const char *body)
+static bool ish_stage(const char *d, const char *body, bool fail)
 {
     char p[1024];
     snprintf(p, sizeof(p), "%s/bin", d);
@@ -155,32 +191,23 @@ static bool ish_stage(const char *d, const char *body)
     snprintf(p, sizeof(p), "%s/tmp", d);
     if (mkdir(p, 0700) != 0 && errno != EEXIST) return false;
     snprintf(p, sizeof(p), "%s/inst.sh", d);
-    if (!ish_write(p, body, false)) return false;
-    snprintf(p, sizeof(p), "%s/bin/git", d);
-    if (!ish_write(p, "#!/bin/sh\necho NOISE-git \"$@\"\n"
-                      "[ \"${GITFAIL:-}\" = 1 ] && { echo git-exploded; exit 1; }\n"
-                      "[ \"$1\" = clone ] && mkdir -p \"$3/.git\"\n"
-                      "exit 0\n", true)) return false;
-    snprintf(p, sizeof(p), "%s/bin/make", d);
-    if (!ish_write(p, "#!/bin/sh\necho NOISE-make \"$@\"\n", true)) return false;
-    snprintf(p, sizeof(p), "%s/bin/cc", d);
-    return ish_write(p, "#!/bin/sh\nexit 0\n", true);
+    return ish_write(p, body) && ish_link(d, "git", fail ? "ls" : "echo") &&
+           ish_link(d, "make", "echo") && ish_link(d, "cc", "true");
 }
 
-/* Run the served script for real with stub git/make/cc first on PATH. The
- * git stub prints NOISE-git; with fail it also prints git-exploded and
- * exits 1. Returns the system() status; out/err/log capture stdout, stderr
- * and build/install.log. */
+/* Run the served script for real with stub git/make/cc first on PATH (see
+ * ish_link; fail makes git fail). Returns the system() status; out/err/log
+ * capture stdout, stderr and build/install.log. */
 static int ish_run_script(const char *d, const char *body, bool fail,
                           char *out, char *err, char *log, size_t cap)
 {
     char p[1024], cmd[4096];
-    if (!ish_stage(d, body)) return -1;
+    if (!ish_stage(d, body, fail)) return -1;
     snprintf(cmd, sizeof(cmd),
              "cd \"%s\" && env -i PATH=\"%s/bin:/usr/bin:/bin\" HOME=\"%s\" "
-             "TMPDIR=\"%s/tmp\" Z23_SRC=\"%s/src\" GITFAIL=%d "
+             "TMPDIR=\"%s/tmp\" Z23_SRC=\"%s/src\" "
              "sh \"%s/inst.sh\" </dev/null >\"%s/out\" 2>\"%s/err\"",
-             d, d, d, d, d, fail ? 1 : 0, d, d, d);
+             d, d, d, d, d, d, d, d);
     int rc = system(cmd);
     snprintf(p, sizeof(p), "%s/out", d);
     if (!ish_slurp(p, out, cap)) return -1;
@@ -192,12 +219,10 @@ static int ish_run_script(const char *d, const char *body, bool fail,
     return rc;
 }
 
-static void ish_real_clean(const char *d)
-{
-    char cmd[640];
-    snprintf(cmd, sizeof(cmd), "rm -rf \"%s/src\" \"%s/out\" \"%s/err\"", d, d, d);
-    (void)system(cmd);
-}
+/* The echo stubs print their arguments: "clone https://..." for the git
+ * clone and "-C <d>/src setup" for the first make. */
+#define ISH_GIT_NOISE "clone https://"
+#define ISH_MAKE_NOISE "/src setup"
 
 static int ish_real_ok(const char *d, const char *body)
 {
@@ -208,28 +233,30 @@ static int ish_real_ok(const char *d, const char *body)
               rc == 0 && strstr(out, "Binary:  ") != NULL &&
                   strstr(out, "https://z23.sh/start") != NULL);
     ISH_CHECK("real run: git and make output stays off the terminal",
-              strstr(out, "NOISE-") == NULL && strstr(err, "NOISE-") == NULL);
+              strstr(out, ISH_GIT_NOISE) == NULL &&
+                  strstr(err, ISH_GIT_NOISE) == NULL &&
+                  strstr(out, ISH_MAKE_NOISE) == NULL &&
+                  strstr(err, ISH_MAKE_NOISE) == NULL);
     ISH_CHECK("real run: git and make output lands in build/install.log",
-              strstr(log, "NOISE-git") != NULL &&
-                  strstr(log, "NOISE-make") != NULL);
+              strstr(log, ISH_GIT_NOISE) != NULL &&
+                  strstr(log, ISH_MAKE_NOISE) != NULL);
     return failures;
 }
 
 static int ish_real_fail(const char *d, const char *body)
 {
     int failures = 0;
-    char cmd[640];
     static char out[8192], err[8192], log[8192];
     int rc = ish_run_script(d, body, true, out, err, log, sizeof(out));
     ISH_CHECK("real run: a failing step exits non-zero",
               rc != 0 && strstr(out, "Binary:  ") == NULL);
+    /* The tail carries ls's own complaint about the missing "clone". */
     ISH_CHECK("real run: failure prints FAILED and the log tail",
               strstr(err, "FAILED: git clone") != NULL &&
                   strstr(err, "last 20 lines") != NULL &&
-                  strstr(err, "git-exploded") != NULL);
-    snprintf(cmd, sizeof(cmd), "ls \"%s/tmp\" | grep -q z23-install", d);
+                  strstr(err, "No such file or directory") != NULL);
     ISH_CHECK("real run: a pre-clone failure leaves no temp log behind",
-              system(cmd) != 0);
+              ish_tmp_clean(d));
     return failures;
 }
 
@@ -242,7 +269,9 @@ static int ish_script_real_run(const char *body)
         return failures;
     }
     failures += ish_real_ok(d, body);
-    ish_real_clean(d);
+    char src[600];
+    snprintf(src, sizeof(src), "%s/src", d);
+    test_rm_rf(src); /* the failure run must clone afresh */
     failures += ish_real_fail(d, body);
     test_rm_rf(d);
     return failures;
