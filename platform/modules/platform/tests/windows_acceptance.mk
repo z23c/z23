@@ -121,6 +121,7 @@ ZCL_WINDOWS_ACCEPTANCE_bundle_exporter_refusal_FLAGS := -DZCL_TESTING
 ZCL_WINDOWS_ACCEPTANCE_cli_render_env_SOURCES := \
 	platform/modules/platform/tests/cli_render_env_windows_acceptance.c \
 	tools/command/cli_render.c \
+	tools/command/cli_render_wiki.c \
 	platform/modules/json/src/json.c \
 	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c
