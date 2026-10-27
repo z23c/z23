@@ -40,7 +40,9 @@ build/bin/z23                                 # terminal 1: runs the node in the
 ```
 
 If you would rather not clone by hand, the public node serves the same steps
-as a script: `curl -fsSL https://z23.sh/install.sh | sh` (see [Build](#build)).
+as a script: `curl -fsSL https://z23.sh/install.sh | sh` clones into `~/z23`
+(set `Z23_SRC` to pick another path) and builds; then start the node with
+`cd ~/z23 && build/bin/z23` (see [Build](#build)).
 
 In a second terminal, from the same checkout:
 
@@ -58,7 +60,7 @@ as a service under [Running as a durable service](#running-as-a-durable-service)
 | What | Where |
 |---|---|
 | Data directory (chain, wallet, node state) | `~/.zclassic-c23` (override with `-datadir=<dir>`) |
-| Node log | `~/.zclassic-c23/node.log` (`build/bin/z23 ops logs` shows recent lines) |
+| Node log | the terminal, when you run `build/bin/z23` in the foreground; `~/.zclassic-c23/node.log` under the systemd unit (`build/bin/z23 ops logs` searches that file) |
 | Node settings file | `~/.zclassic-c23/z23.conf` (inside the data directory; command-line flags win over it) |
 | Onion seeds (one `.onion` directory node per line) | `~/.config/zclassic23/onion-seeds` |
 | Service environment file | `~/.config/zclassic23/env` (optional; read by the systemd unit) |
