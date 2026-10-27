@@ -831,6 +831,12 @@ bool zcl_dev_proof_test_original_plan_prepare(const char *root,
                                               const char *local,
                                               const char *log_path,
                                               char *why, size_t why_len);
+#if defined(ZCL_TESTING)
+/* Actual root-entry cleanliness guard, without preparation or proof execution. */
+bool zcl_dev_proof_test_worktree_root_entry(
+    const char *root, const char *local, const char *log_directory,
+    char *why, size_t why_len);
+#endif
 /* Seam for the lint-target split: true when a recorded target list is the
  * whole gate set rather than the fast subset. */
 bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);

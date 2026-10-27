@@ -1874,8 +1874,72 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
     return true;
 }
 
+static bool worktree_status_path(const struct proof_paths *paths,
+                                  const char *existing_log, char out[PATH_MAX])
+{
+    if (paths)
+        return paths->logs[0] && snprintf(out, PATH_MAX, "%s/worktree-status.log", paths->logs) < PATH_MAX;
+    if (!existing_log || strlen(existing_log) >= PATH_MAX)
+        return false;
+    memcpy(out, existing_log, strlen(existing_log) + 1);
+    char *leaf = strrchr(out, '/');
+    if (!leaf)
+        return false;
+    *leaf = '\0';
+    size_t used = strlen(out);
+    return snprintf(out + used, PATH_MAX - used, "/worktree-status.log") <
+        (int)(PATH_MAX - used);
+}
+
+/* A refusal retains the original bounded capture only in the private attempt. */
+static bool worktree_status_record(const struct proof_paths *paths,
+                                    const char *existing_log, const char *phase,
+                                    bool include_untracked, bool capture_ok,
+                                    const struct zcl_devloop_process_result *result)
+{
+    char path[PATH_MAX], header[512];
+    static const char end[] = "\n--- git status output end ---\n";
+    const size_t cap = sizeof(result->output);
+    const size_t bytes = result->output_len < cap ? result->output_len : cap;
+    if (!worktree_status_path(paths, existing_log, path))
+        return false;
+    int n = snprintf(header, sizeof(header),
+        "phase=%s include_untracked=%d capture_ok=%d rc=%d signal=%d "
+        "timed_out=%d cancelled=%d elapsed_ms=%lld output_len=%zu "
+        "captured_bytes=%zu output_truncated=%d capacity_saturated=%d capacity=%zu\n"
+        "--- git status output begin ---\n",
+        phase, include_untracked, capture_ok, result->exit_code, result->term_signal,
+        result->timed_out, result->cancelled, (long long)result->elapsed_ms,
+        result->output_len, bytes, result->output_truncated,
+        result->output_len >= cap - 1, cap);
+    if (n < 0 || (size_t)n >= sizeof(header))
+        return false;
+    const size_t size = (size_t)n + bytes + sizeof(end) - 1;
+    char *body = zcl_malloc(size, "proof worktree status diagnostic");
+    if (!body)
+        return false;
+    memcpy(body, header, (size_t)n);
+    memcpy(body + n, result->output, bytes);
+    memcpy(body + n + bytes, end, sizeof(end) - 1);
+    bool ok = write_atomic(path, body, size, 0600);
+    free(body);
+    return ok;
+}
+
+static void worktree_status_note(const struct proof_paths *paths,
+                                  const char *existing_log, const char *phase,
+                                  bool include_untracked, bool capture_ok,
+                                  const struct zcl_devloop_process_result *result)
+{
+    if (!worktree_status_record(paths, existing_log, phase, include_untracked,
+                                capture_ok, result))
+        fprintf(stderr, "[devproof] private worktree status diagnostic unavailable\n");
+}
+
 static bool worktree_exact(const char *root, const char *local,
-                           bool include_untracked, char *why, size_t why_len)
+                           bool include_untracked, const struct proof_paths *paths,
+                           const char *phase, const char *existing_log,
+                           char *why, size_t why_len)
 {
     char head[65], status[ZCL_DEVLOOP_OUTPUT_MAX];
     struct zcl_devloop_process_result head_result = {0};
@@ -1903,14 +1967,39 @@ static bool worktree_exact(const char *root, const char *local,
                               sizeof(status), &status_result)) {
         git_capture_why("worktree_status_capture", &status_result,
                         sizeof(status), why, why_len);
+        worktree_status_note(paths, existing_log, phase, include_untracked,
+                              false, &status_result);
         return false;
     }
     if (status[0]) {
         proof_why(why, why_len, "worktree_not_clean");
+        worktree_status_note(paths, existing_log, phase, include_untracked,
+                              true, &status_result);
         return false;
     }
     return true;
 }
+
+static bool worktree_root_entry(const struct proof_paths *paths,
+                                 const char *root, const char *local,
+                                 char *why, size_t why_len)
+{
+    return worktree_exact(root, local, true, paths, "root_entry", NULL,
+                           why, why_len);
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_worktree_root_entry(
+    const char *root, const char *local, const char *log_directory,
+    char *why, size_t why_len)
+{
+    struct proof_paths paths = {0};
+    if (!log_directory || snprintf(paths.logs, sizeof(paths.logs), "%s",
+                                    log_directory) >= (int)sizeof(paths.logs))
+        return false;
+    return worktree_root_entry(&paths, root, local, why, why_len);
+}
+#endif
 
 static bool dependency_parent_ensure(const char *path)
 {
@@ -6411,7 +6500,7 @@ static bool generation_prepare(const struct proof_paths *paths,
     dp_generation_stage_note(paths, "generation_dependencies_us",
                              stage_started_us);
     stage_started_us = platform_time_monotonic_us();
-    if (!worktree_exact(generation, local, false, why, why_len)) {
+    if (!worktree_exact(generation, local, false, paths, "generation_prepare", NULL, why, why_len)) {
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
@@ -8955,7 +9044,7 @@ bool zcl_dev_proof_test_worker_plan(const char *submit, const char *generation,
 static bool dp_worker_seal_source(struct dp_worker *w, char *why,
                                   size_t why_len)
 {
-    if (!worktree_exact(w->paths->root, w->local, true, why, why_len))
+    if (!worktree_exact(w->paths->root, w->local, true, w->paths, "source_recheck", NULL, why, why_len))
         return false;
     proof_phase_mark(w->phases, "worktree_exact_recheck");
     if (!zcl_dev_source_identity_capture(w->generation, &w->source_before, why,
@@ -10658,7 +10747,7 @@ static bool dp_worker_publish(struct dp_worker *w, int64_t started_us,
                               char *why, size_t why_len)
 {
     struct dev_source_record source_after = {0};
-    if (!worktree_exact(w->generation, w->local, false, why, why_len))
+    if (!worktree_exact(w->generation, w->local, false, w->paths, "generation_publish", NULL, why, why_len))
         return false;
     if (!zcl_dev_source_cas_capture(w->generation, &source_after) ||
         !source_after.cas_present) {
@@ -10779,7 +10868,7 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
     }
     dp_stage_timing_note(paths, "original_make_ms", stage_us);
     stage_us = platform_time_monotonic_us();
-    if (!worktree_exact(root, local, true, why, why_len)) return false;
+    if (!worktree_exact(root, local, true, paths, "original_plan_prepare", log_path, why, why_len)) return false;
     uint8_t flags[32], graph[32];
     struct dev_source_record plan_source = {0};
     if (!proof_plan_roots(root, flags, graph, plan_source.mutation_id,
@@ -11167,7 +11256,7 @@ static bool proof_worker(const struct proof_paths *paths,
     proof_phase_begin(&phases, paths);
     if (paths->phases[0]) (void)remove(paths->phases);
     proof_queue_wait_note(paths, queue_lock_wait_ms);
-    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
+    if (!worktree_root_entry(paths, paths->root, local, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
     char prepare_log[PATH_MAX];
     if (snprintf(prepare_log, sizeof(prepare_log), "%s/original-plan.log",

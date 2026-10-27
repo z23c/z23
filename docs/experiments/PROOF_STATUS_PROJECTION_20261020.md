@@ -136,3 +136,92 @@ proof process starts. Queuing this diagnostic source cannot update an older
 running driver. Its new output retention becomes available only after a
 reviewed, landed build containing it is adopted and a fresh driver uses that
 build. No installed driver was replaced or restarted for this experiment.
+
+## Private worktree-status refusal evidence
+
+A later proof refusal reported worktree_not_clean without retaining the
+actual captured porcelain status. The specific dirty path in that historical
+attempt remains UNKNOWN.
+
+The common cleanliness guard now retains its existing bounded Git status
+capture only when status capture fails or reports a dirty tree. The private
+attempt artifact is worktree-status.log, written atomically with mode 0600.
+It records the calling phase, untracked-file policy, observed exit status,
+signal, timeout, elapsed time, reported and retained output lengths,
+truncation and conservative capacity saturation. Delimiters bound the raw
+captured status. The capture capacity remains 65536 bytes; the existing
+process capture retains a bounded tail and may begin within a row. No second
+Git invocation or public raw-status dump is introduced.
+
+<!-- claim: symbol-present worktree_status_record tools/dev/dev_proof.c -->
+
+The five production contexts are root entry, generation preparation, source
+recheck, generation publication and original-plan preparation. The initial
+root-entry helper is also reached by a test-only wrapper, without invoking
+Make. Existing refusal tokens, guard order and Git deadlines are unchanged.
+A diagnostic write failure cannot accept a dirty tree.
+
+The isolated fixtures use real Git for a tracked modification,
+untracked input, clean source and the ignored vendor/.build.lock artifact.
+A real set of long untracked names exercises the existing saturated-capture
+refusal and bounded diagnostic. An invalid log destination exercises dirty
+refusal despite diagnostic failure. The isolated qualification below covers
+these cases; this section does not identify the historical dirty path or
+establish a new full native candidate proof.
+
+The first isolated qualification passed the new clean, ignored, tracked,
+untracked and diagnostic-write-failure checks. Its saturation fixture failed
+in both runner attempts because it expected a complete porcelain row
+immediately after the output delimiter. The existing process capture retains
+a tail, which can begin within a row. The fixture now checks the delimiter
+and an intact retained porcelain row separately while preserving the exact
+truncation refusal, privacy, capacity and end-delimiter assertions. Production
+capture and refusal behavior were unchanged by this fixture correction.
+
+On 2026-10-27 the repaired registered route ran under normal admission and
+idle I/O priority:
+
+~~~sh
+DEVBUILD_CLASS=normal devbuild --wait ionice -c3 make -j28 t-fast ONLY=impact_composition
+~~~
+
+One cold group ran with zero failures, skips, unobserved checks or load-flaky
+results. All three new root-entry cases passed: clean/ignored/tracked status,
+untracked status with diagnostic-write refusal, and real saturated output
+including the final generated row. Existing original-plan refusal cases
+also verified their phase tags. The common root-entry helper executes the
+same actual Git guard used at proof entry; no Make invocation is added to
+that helper.
+
+The tested source baseline was
+41511e022901f60109beb5ef6438a730e159ed1e. Exact code identities were:
+
+~~~text
+tools/dev/dev_proof.c
+979c3e571a907069966b2fc2e7adb0fb8b3d841f
+tools/dev/dev_proof.h
+f9fd9f918d855c2fb3e5730fbcb7caeba310aef0
+tests/harness/src/test_impact_composition.c
+afec331f265331c2678cad2c82cc552d9890f0b8
+~~~
+
+The focused log SHA-256 was
+88d1397450abad91f497c9bfe15a46e638f8d9e8787f2b2f9c98abea82ece6e6.
+The runner reported one millisecond startup and 224467 milliseconds for the
+complete group body, rather than an isolated status case. The repaired
+admitted batch, including relevant complexity/file-size checks and build,
+recorded zero queue wait, 326 seconds runtime, 1817 MiB peak memory and
+98 CPU seconds. The unchanged clock-policy receipts were reused; production
+code did not change during the fixture correction. No baseline, exception or
+deadline was relaxed.
+
+The compiler was GCC 14.2.0, Ubuntu package 14.2.0-4ubuntu2~24.04.1, on an
+AMD Ryzen 9 7950X3D 16-Core Processor. Four source/document hashes matched
+before and after the run. These are isolated Linux fixture observations;
+other platforms were not run and no speedup is established.
+
+The original dirty path remains UNKNOWN. Historical failed captures and the
+fixture correction are retained separately from the passing qualification.
+Full native exact-candidate proof remains pending. A queued source change
+does not update an already running proof driver; the diagnostic requires a
+reviewed build containing it before it can report a future live refusal.

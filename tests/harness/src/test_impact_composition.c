@@ -8161,6 +8161,99 @@ static bool ic_original_plan_recovers_fixtures(
 }
 #endif
 
+static bool ic_worktree_diagnostic_read(
+    const char *root, char *text, size_t cap, size_t *size)
+{
+    char path[4096];
+    struct stat st;
+    return snprintf(path, sizeof(path), "%s/build/worktree-status.log", root) <
+        (int)sizeof(path) && stat(path, &st) == 0 &&
+        (st.st_mode & 0777) == 0600 &&
+        ic_failure_record_read(path, text, cap, size);
+}
+
+static int ic_worktree_root_diagnostics(const char *root, const char *local)
+{
+    int failures = 0;
+    char logs[4096], path[4096], why[256], saved[256];
+    char text[ZCL_DEVLOOP_OUTPUT_MAX + 1024];
+    size_t size = 0, saved_size = 0;
+    TEST("proof root guard: clean and ignored inputs emit no diagnostic; actual dirty status stays private") {
+        ASSERT(snprintf(logs, sizeof(logs), "%s/build", root) < (int)sizeof(logs));
+        ASSERT(snprintf(path, sizeof(path), "%s/build/worktree-status.log", root) <
+               (int)sizeof(path));
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(zcl_dev_proof_test_worktree_root_entry(root, local, logs, why, sizeof(why)));
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(ic_write(root, "vendor/.build.lock", ""));
+        ASSERT(zcl_dev_proof_test_worktree_root_entry(root, local, logs, why, sizeof(why)));
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(path, sizeof(path), "%s/sample.c", root) < (int)sizeof(path));
+        ASSERT(ic_failure_record_read(path, saved, sizeof(saved), &saved_size));
+        ASSERT(ic_write(root, "sample.c", "int dirty_status_fixture;\n"));
+        ASSERT(!zcl_dev_proof_test_worktree_root_entry(root, local, logs, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "worktree_not_clean");
+        ASSERT(ic_worktree_diagnostic_read(root, text, sizeof(text), &size));
+        ASSERT(strstr(text, "phase=root_entry include_untracked=1 capture_ok=1 rc=0 signal=0") != NULL);
+        ASSERT(strstr(text, "output_truncated=0 capacity_saturated=0") != NULL);
+        ASSERT(strstr(text, "--- git status output begin ---\n M sample.c\n") != NULL);
+        ASSERT(strstr(text, "--- git status output end ---\n") != NULL);
+        ASSERT(ic_write(root, "sample.c", saved));
+        PASS();
+    }
+    TEST("proof root guard: untracked status is retained and log failure cannot accept dirty source") {
+        ASSERT(ic_write(root, "proof-status-untracked.c", "fixture\n"));
+        ASSERT(!zcl_dev_proof_test_worktree_root_entry(root, local, logs, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "worktree_not_clean");
+        ASSERT(ic_worktree_diagnostic_read(root, text, sizeof(text), &size));
+        ASSERT(strstr(text, "?? proof-status-untracked.c\n") != NULL);
+        ASSERT(snprintf(path, sizeof(path), "%s/sample.c", root) < (int)sizeof(path));
+        ASSERT(!zcl_dev_proof_test_worktree_root_entry(root, local, path, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "worktree_not_clean");
+        ASSERT(snprintf(path, sizeof(path), "%s/proof-status-untracked.c", root) <
+               (int)sizeof(path));
+        ASSERT(unlink(path) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ic_worktree_status_saturation(const char *root, const char *local)
+{
+    int failures = 0;
+    char logs[4096], path[4096], name[224], why[256];
+    char text[ZCL_DEVLOOP_OUTPUT_MAX + 1024];
+    size_t size = 0;
+    TEST("proof root guard: real saturated Git output remains refused and bounded in its private log") {
+        ASSERT(snprintf(logs, sizeof(logs), "%s/build", root) < (int)sizeof(logs));
+        for (size_t i = 0; i < 400; i++) {
+            ASSERT(snprintf(name, sizeof(name), "status-%03zu-%0180zu.c", i, i) <
+                   (int)sizeof(name));
+            ASSERT(ic_write(root, name, ""));
+        }
+        ASSERT(!zcl_dev_proof_test_worktree_root_entry(root, local, logs, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "worktree_status_capture_truncated");
+        ASSERT(ic_worktree_diagnostic_read(root, text, sizeof(text), &size));
+        ASSERT(size <= ZCL_DEVLOOP_OUTPUT_MAX + 1024);
+        ASSERT(strstr(text, "phase=root_entry include_untracked=1 capture_ok=0") != NULL);
+        ASSERT(strstr(text, "output_truncated=1 capacity_saturated=1") != NULL);
+        /* The existing capture is a tail and may begin within a row. */
+        ASSERT(strstr(text, "--- git status output begin ---\n") != NULL);
+        ASSERT(strstr(text, "\n?? status-") != NULL);
+        char final_row[256];
+        ASSERT(snprintf(final_row, sizeof(final_row), "\n?? %s\n", name) < (int)sizeof(final_row));
+        ASSERT(strstr(text, final_row) != NULL);
+        ASSERT(strstr(text, "--- git status output end ---\n") != NULL);
+        for (size_t i = 0; i < 400; i++) {
+            ASSERT(snprintf(path, sizeof(path), "%s/status-%03zu-%0180zu.c", root, i, i) <
+                   (int)sizeof(path));
+            ASSERT(unlink(path) == 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pw_original_plan_refreshes_before_sealing(void)
 {
     int failures = 0;
@@ -8180,6 +8273,8 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(snprintf(log, sizeof(log), "%s/build/prepare.log", root) <
                (int)sizeof(log));
         ASSERT(ic_preflight_cases(root, local, log) == 0);
+        ASSERT(ic_worktree_root_diagnostics(root, local) == 0);
+        ASSERT(ic_worktree_status_saturation(root, local) == 0);
         /* A successful no-op cannot claim that the old commit's plan is
          * current. The actual source-identity verifier must reject it. */
         ASSERT(ic_write(root, "build/no-op", "1\n"));
@@ -8214,6 +8309,9 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
             ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log,
                                                              why, sizeof(why)));
             ASSERT_STR_EQ(why, "worktree_not_clean");
+            char status_note[2048]; size_t status_size = 0;
+            ASSERT(ic_worktree_diagnostic_read(root, status_note, sizeof(status_note), &status_size));
+            ASSERT(strstr(status_note, "phase=original_plan_prepare include_untracked=1") != NULL);
             ASSERT(snprintf(marker, sizeof(marker), "%s/%s", root, negatives[i]) <
                    (int)sizeof(marker));
             ASSERT(unlink(marker) == 0);
