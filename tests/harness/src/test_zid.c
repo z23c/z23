@@ -384,7 +384,8 @@ static bool test_zid_domain_zcode_untouched(struct node_db *ndb,
            zid_domain_leaf_count(ndb, "zcode") == 3;
 }
 
-static bool test_zid_domain_zdesc_own(struct node_db *ndb, uint8_t *droot)
+static bool test_zid_domain_zdesc_root_leaves_anchor(struct node_db *ndb,
+                                                     uint8_t *droot)
 {
     struct zid_domain b;
     /* zdesc carries its own root, leaves and anchor */
@@ -425,7 +426,7 @@ static int test_zid_domain_coexist(struct node_db *ndb, uint8_t *seed,
 
         bool ok = test_zid_domain_write_zdesc(ndb, dl, droot, txid, now) &&
                   test_zid_domain_zcode_untouched(ndb, root3) &&
-                  test_zid_domain_zdesc_own(ndb, droot) &&
+                  test_zid_domain_zdesc_root_leaves_anchor(ndb, droot) &&
                   test_zid_domain_digest_scope(ndb, desc);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -1416,26 +1417,6 @@ static int test_zid_hybrid(void)
     zh_part_container();
     zh_part_versions();
     return zh.failures;
-}
-
-static int test_zid_doc_round_trip(struct zid_doc doc, uint8_t *wire,
-                                   size_t wire_len, const uint8_t *body,
-                                   size_t body_len, uint64_t now)
-{
-    int failures = 0;
-    struct zid_doc back;
-
-    printf("zid sign→encode→decode→verify round-trip... ");
-    if (zid_doc_decode(&back, wire, wire_len) &&
-        back.body_len == body_len &&
-        memcmp(back.body, body, body_len) == 0 &&
-        back.seq == 1 && back.expiry == now + 3600 &&
-        memcmp(back.master_pubkey, doc.master_pubkey, 32) == 0 &&
-        zid_doc_verify(&back, now))
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-
-    return failures;
 }
 
 static int test_zid_doc_tamper(struct zid_doc doc, uint64_t now)
@@ -2667,6 +2648,8 @@ static int test_zid_anchor_over_cap(uint8_t *anchor_key_a)
     return failures;
 }
 
+static int test_zid_tree_peak_count(uint8_t (*leaves)[32]);
+
 int test_zid(void)
 {
     int failures = 0;
@@ -2717,8 +2700,16 @@ int test_zid(void)
         printf("OK\n");
     else { printf("FAIL (len=%zu)\n", wire_len); failures++; }
 
-    failures += test_zid_doc_round_trip(doc, wire, wire_len, body,
-                                        sizeof(body) - 1, now);
+    struct zid_doc back;
+    printf("zid sign→encode→decode→verify round-trip... ");
+    if (zid_doc_decode(&back, wire, wire_len) &&
+        back.body_len == sizeof(body) - 1 &&
+        memcmp(back.body, body, sizeof(body) - 1) == 0 &&
+        back.seq == 1 && back.expiry == now + 3600 &&
+        memcmp(back.master_pubkey, doc.master_pubkey, 32) == 0 &&
+        zid_doc_verify(&back, now))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     failures += test_zid_doc_tamper(doc, now);
 
@@ -2752,20 +2743,7 @@ int test_zid(void)
 
     failures += test_zid_tree_negatives(leaves, leaves_b);
 
-    printf("zid_tree: peak count == popcount(num_leaves)... ");
-    {
-        bool ok = true;
-        for (uint64_t n = 1; n <= 23 && ok; n++) {
-            struct zid_tree t;
-            zid_tree_init(&t);
-            for (uint64_t i = 0; i < n; i++)
-                zid_tree_append(&t, leaves[i % ZID_TEST_MAX_LEAVES]);
-            if (t.num_peaks != (uint32_t)__builtin_popcountll(n))
-                ok = false;
-        }
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_zid_tree_peak_count(leaves);
 
     failures += test_zid_proof_round_trip(leaves);
 
@@ -2833,5 +2811,27 @@ int test_zid(void)
     failures += test_zid_hybrid();
 
     printf("=== ZID: %d failure(s) ===\n", failures);
+    return failures;
+}
+
+static int test_zid_tree_peak_count(uint8_t (*leaves)[32])
+{
+    int failures = 0;
+
+    printf("zid_tree: peak count == popcount(num_leaves)... ");
+    {
+        bool ok = true;
+        for (uint64_t n = 1; n <= 23 && ok; n++) {
+            struct zid_tree t;
+            zid_tree_init(&t);
+            for (uint64_t i = 0; i < n; i++)
+                zid_tree_append(&t, leaves[i % ZID_TEST_MAX_LEAVES]);
+            if (t.num_peaks != (uint32_t)__builtin_popcountll(n))
+                ok = false;
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     return failures;
 }
