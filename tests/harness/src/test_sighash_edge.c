@@ -127,8 +127,8 @@ static bool she_sig(const struct script *sc, const struct transaction *tx,
 
 /* Cases 1a/1b: Sprout must REJECT SIGHASH_SINGLE when nIn >= num_vout
  * (no Bitcoin uint256(1) sentinel), with or without ANYONECANPAY.
- * Builds a Sprout tx from (n_vin, n_vout) and signs input nIn with
- * raw_type. */
+ * Builds a Sprout tx from (n_vin, n_vout) and asks for the sighash of
+ * input nIn with raw_type; returns true when signature_hash REFUSES it. */
 static bool she_sprout_single_rejected(const uint8_t *p2pkh,
                                        size_t p2pkh_len,
                                        unsigned int n_vin,
@@ -144,7 +144,8 @@ static bool she_sprout_single_rejected(const uint8_t *p2pkh,
     return rejected;
 }
 
-static bool she_sprout_single_e2e_eval_false(void)
+static void she_sprout_single_e2e_verify(bool *ok_out, bool *verdict_out,
+                                         ScriptError *serr_out)
 {
     /* 1b-e2e. zclassicd parity pin — DO NOT "FIX" the reject into
      *     Bitcoin's uint256(1) sentinel. zclassicd THROWS logic_error at
@@ -202,8 +203,9 @@ static bool she_sprout_single_e2e_eval_false(void)
                                  SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY,
                                  &checker, 0, &serr);
     she_free_tx(&tx);
-    bool good = ok && !verdict && serr == SCRIPT_ERR_EVAL_FALSE;
-    return good;
+    *ok_out = ok;
+    *verdict_out = verdict;
+    *serr_out = serr;
 }
 
 /* Cases 1c/1d: the overwintered regimes (ZIP-143 / ZIP-243) do NOT
@@ -361,8 +363,9 @@ static bool she_empty_vout_sighash_all_deterministic(const uint8_t *p2pkh,
 
 /* Case 7: value_balance is committed in Sapling (ZIP-243) but NOT in
  * Overwinter (ZIP-143). */
-static bool she_value_balance_committed_in_sapling_only(
-    const uint8_t *p2pkh, size_t p2pkh_len)
+static void she_value_balance_committed_in_sapling_only(
+    const uint8_t *p2pkh, size_t p2pkh_len, bool *sapling_out,
+    bool *overwinter_out)
 {
     struct script sc; script_set(&sc, p2pkh, p2pkh_len);
 
@@ -388,7 +391,8 @@ static bool she_value_balance_committed_in_sapling_only(
     bool overwinter_insensitive = ok2 && uint256_eq(&o0, &o1);
     she_free_tx(&txo);
 
-    return sapling_sensitive && overwinter_insensitive;
+    *sapling_out = sapling_sensitive;
+    *overwinter_out = overwinter_insensitive;
 }
 
 int test_sighash_edge(void)
@@ -442,10 +446,12 @@ int test_sighash_edge(void)
      *     signature below VERIFIES, OP_CHECKSIG pushes true, and this
      *     test FAILS — implementing the sentinel forks from zclassicd. */
     {
-        bool good = she_sprout_single_e2e_eval_false();
+        bool ok, verdict;
+        ScriptError serr;
+        she_sprout_single_e2e_verify(&ok, &verdict, &serr);
         SHE_CHECK("sprout SINGLE e2e: verify_script false + EVAL_FALSE "
                   "(zclassicd parity, no uint256(1) sentinel)",
-                  good);
+                  ok && !verdict && serr == SCRIPT_ERR_EVAL_FALSE);
     }
 
     /* 1c. Sapling (ZIP-243), plain SINGLE, nIn=1 >= num_vout=1: NOT
@@ -545,10 +551,12 @@ int test_sighash_edge(void)
      *    two regimes being collapsed into one serialization.
      * ================================================================== */
     {
-        bool good = she_value_balance_committed_in_sapling_only(
-            p2pkh, sizeof(p2pkh));
+        bool sapling_sensitive, overwinter_insensitive;
+        she_value_balance_committed_in_sapling_only(
+            p2pkh, sizeof(p2pkh), &sapling_sensitive,
+            &overwinter_insensitive);
         SHE_CHECK("value_balance committed in sapling but not overwinter",
-                  good);
+                  sapling_sensitive && overwinter_insensitive);
     }
 
     return failures;
