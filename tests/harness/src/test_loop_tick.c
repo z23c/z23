@@ -32,13 +32,18 @@
 #include "test/test_core.h"
 
 #include "util/spawn.h"
+#include "platform/time_compat.h"
 
+#include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LT_CHECK(name, expr)                                                 \
@@ -94,6 +99,159 @@ static bool lt_slurp(const char *path, char *out, size_t cap)
     (void)fclose(f);
     out[n] = '\0';
     return true;
+}
+
+struct lt_slow_slot {
+    bool requested, published;
+    int64_t due_ms;
+    char log[900], result[32];
+};
+
+struct lt_slow_worker {
+    pthread_t thread;
+    atomic_bool stop;
+    bool ok;
+    const struct lt_env *env;
+    struct lt_slow_slot slots[2];
+};
+
+static bool lt_slow_error(const char *operation, const char *path)
+{
+    fprintf(stderr, "loop_tick: slow_gate operation=%s path=%s error=%s\n",
+            operation, path, strerror(errno));
+    return false;
+}
+
+static bool lt_slow_name(const char *name)
+{
+    const size_t n = strlen(name);
+    if (n <= 10 || strncmp(name, "zgate.", 6) != 0 ||
+        strcmp(name + n - 4, ".log") != 0)
+        return false;
+    for (size_t i = 6; i < n - 4; i++)
+        if (name[i] < '0' || name[i] > '9')
+            return false;
+    return true;
+}
+
+static bool lt_slow_line(FILE *f, char *out, size_t cap)
+{
+    if (!fgets(out, (int)cap, f))
+        return false;
+    const size_t n = strlen(out);
+    if (n == 0 || out[n - 1] != '\n')
+        return false;
+    out[n - 1] = '\0';
+    return true;
+}
+
+static bool lt_slow_result(const char *text)
+{
+    if (strncmp(text, "rc=", 3) != 0 || text[3] == '\0')
+        return false;
+    for (const char *p = text + 3; *p; p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    return true;
+}
+
+/* Atomic request publication prevents a partial request from being read. */
+static int lt_slow_request(struct lt_slow_worker *worker, size_t index)
+{
+    const char *kind = index == 0 ? "agent-verify" : "lint";
+    char request[900], name[64];
+    (void)snprintf(request, sizeof(request), "%s/slow-request.%s", worker->env->d, kind);
+    FILE *f = fopen(request, "rb");
+    if (!f) {
+        if (errno == ENOENT)
+            return 0;
+        (void)lt_slow_error("request-open", request);
+        return -1;
+    }
+    struct lt_slow_slot *slot = &worker->slots[index];
+    bool ok = lt_slow_line(f, name, sizeof(name)) &&
+        lt_slow_line(f, slot->result, sizeof(slot->result)) &&
+        fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0)
+        ok = false;
+    if (!ok || !lt_slow_name(name) || !lt_slow_result(slot->result)) {
+        errno = EINVAL;
+        (void)lt_slow_error("request-read", request);
+        return -1;
+    }
+    (void)snprintf(slot->log, sizeof(slot->log), "%s/%s", worker->env->d, name);
+    slot->due_ms = platform_time_monotonic_ms() + 1000;
+    slot->requested = true;
+    return 1;
+}
+
+static bool lt_slow_publish(struct lt_slow_slot *slot)
+{
+    char temp[920], text[40];
+    (void)snprintf(temp, sizeof(temp), "%s.pending", slot->log);
+    (void)snprintf(text, sizeof(text), "%s\n", slot->result);
+    if (!lt_wf(temp, text))
+        return lt_slow_error("log-write", temp);
+    if (rename(temp, slot->log) != 0)
+        return lt_slow_error("log-rename", slot->log);
+    slot->published = true;
+    return true;
+}
+
+static bool lt_slow_step(struct lt_slow_worker *worker, size_t index)
+{
+    struct lt_slow_slot *slot = &worker->slots[index];
+    if (!slot->requested && lt_slow_request(worker, index) < 0)
+        return false;
+    if (slot->requested && !slot->published &&
+        platform_time_monotonic_ms() >= slot->due_ms)
+        return lt_slow_publish(slot);
+    return true;
+}
+
+static void *lt_slow_run(void *argument)
+{
+    struct lt_slow_worker *worker = argument;
+    while (!atomic_load_explicit(&worker->stop, memory_order_acquire)) {
+        if (!lt_slow_step(worker, 0) || !lt_slow_step(worker, 1)) {
+            worker->ok = false;
+            break;
+        }
+        const struct timespec pause = { .tv_nsec = 20000000 };
+        if (nanosleep(&pause, NULL) != 0 && errno != EINTR) {
+            worker->ok = lt_slow_error("poll-sleep", worker->env->d);
+            break;
+        }
+    }
+    return NULL;
+}
+
+static bool lt_slow_start(struct lt_slow_worker *worker, const struct lt_env *env)
+{
+    *worker = (struct lt_slow_worker){ .ok = true, .env = env };
+    atomic_init(&worker->stop, false);
+    char marker[900];
+    (void)snprintf(marker, sizeof(marker), "%s/slowgate", env->d);
+    if (!lt_wf(marker, ""))
+        return lt_slow_error("marker-write", marker);
+    const int rc = pthread_create(&worker->thread, NULL, lt_slow_run, worker);
+    if (rc != 0) {
+        errno = rc;
+        return lt_slow_error("thread-create", env->d);
+    }
+    return true;
+}
+
+static bool lt_slow_stop(struct lt_slow_worker *worker)
+{
+    atomic_store_explicit(&worker->stop, true, memory_order_release);
+    const int rc = pthread_join(worker->thread, NULL);
+    if (rc != 0) {
+        errno = rc;
+        (void)lt_slow_error("thread-join", worker->env->d);
+        abort();
+    }
+    return worker->ok;
 }
 
 static bool lt_exists(const char *fmt, const char *d, const char *rel)
@@ -224,12 +382,17 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                c->rerun ? c->rerun : "0") &&
            lt_script(e, "lint", lt_lint_body(e, c->lint)) &&
            lt_script(e, "zgate",
-               "l='%s'/zgate.$$.log\n"
+               "d='%s'; l=\"$d\"/zgate.$$.log\n"
                "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
                "[ -e '%s/claim.live' ] && echo saw >> '%s/gate_saw_claim.txt'\n"
-               "if [ -e '%s/slowgate' ]; then echo \"$r\" | (sleep 1; cat > \"$l\") >/dev/null 2>&1 &\n"
+               "if [ -e \"$d/slowgate\" ]; then\n"
+               " case \"$*\" in *agent-verify*) kind=agent-verify ;; *) kind=lint ;; esac\n"
+               " req=\"$d/slow-request.$kind\"; tmp=\"$req.$$\"\n"
+               " if ! printf '%%s\\n%%s\\n' \"zgate.$$.log\" \"$r\" > \"$tmp\" || ! mv \"$tmp\" \"$req\"; then\n"
+               "  echo 'loop_tick: slow gate request publication failed' >&2; exit 1\n"
+               " fi\n"
                "else echo \"$r\" > \"$l\"; fi\necho \"log: $l\"",
-               e->d, c->gate_rc, e->d, e->d, e->d) &&
+               e->d, c->gate_rc, e->d, e->d) &&
            lt_script(e, "precheck",
                "n=$(cat '%s/pre.count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '%s/pre.count'\n"
                "echo \"$1\" >> '%s/pre.args'\n"
@@ -1111,16 +1274,27 @@ static int case_finish_claims(void)
     int failures = 0;
     struct lt_env e;
     const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
-    char out[8192] = "", slow[900];
+    char out[8192] = "";
     const bool ready = lt_setup(&e, "claim", &c, "none", "claude-haiku") &&
                        lt_make_lane(&e, "ok");
     LT_CHECK("the claim scenario fixtures are written", ready);
     if (!ready)
         return failures + 1;
-    (void)snprintf(slow, sizeof(slow), "%s/slowgate", e.d);
-    (void)lt_wf(slow, "");
+    struct lt_slow_worker worker;
+    const bool slow_ready = lt_slow_start(&worker, &e);
+    LT_CHECK("the delayed gate worker starts", slow_ready);
+    if (!slow_ready)
+        return failures + 1;
     const char *const extra[] = { "--claim-renew-s", "0", NULL };
     const int rc = lt_finish(&e, extra, out, sizeof(out));
+    LT_CHECK("the delayed gate worker stops cleanly", lt_slow_stop(&worker));
+    if (rc != 0 || strstr(out, "submitted seq=7") == NULL) {
+        size_t captured = strnlen(out, sizeof(out));
+        fprintf(stderr,
+            "loop_tick: phase=claim_finish rc=%d captured_bytes=%zu possibly_truncated=%d\n"
+            "--- claim finish output begin ---\n%.*s\n--- claim finish output end ---\n",
+            rc, captured, captured >= sizeof(out) - 1, (int)captured, out);
+    }
     LT_CHECK("a finish with a claim submits", rc == 0 && strstr(out, "submitted seq=7") != NULL);
     LT_CHECK("the claim names the lane and its changed files",
              lt_file_has(&e, "claims.txt", "dev agent claim --input={\"story\":\"fin1\",\"files\":[") &&
