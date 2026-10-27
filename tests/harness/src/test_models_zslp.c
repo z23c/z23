@@ -269,7 +269,7 @@ static int tzslp_test_balance_save(void)
     return failures;
 }
 
-/* The original token block, first run: setup and the two saves. */
+/* Contiguous run of the original token block: the find checks. */
 static bool tzslp_token_find_checks(struct node_db *ndb, bool ok,
                             struct db_zslp_token_info *token)
 {
@@ -289,7 +289,7 @@ static bool tzslp_token_find_checks(struct node_db *ndb, bool ok,
     return ok;
 }
 
-/* The original token block, last run: the list checks. */
+/* Contiguous run of the original token block: the list checks. */
 static bool tzslp_token_list_checks(struct node_db *ndb, bool ok,
                             struct db_zslp_token_info *listed)
 {
@@ -433,7 +433,7 @@ static int tzslp_test_transfer_model(void)
     return failures;
 }
 
-static int tzslp_test_key_accepts(void)
+static int tzslp_test_key_checks_first(void)
 {
     int failures = 0;
 
@@ -493,7 +493,7 @@ static int tzslp_test_key_accepts(void)
     return failures;
 }
 
-static int tzslp_test_key_rejects(void)
+static int tzslp_test_key_checks_second(void)
 {
     int failures = 0;
 
@@ -558,8 +558,8 @@ int test_model_zslp(void)
 
     /* ── token_key validator disambiguation ─────────────────── */
 
-    failures += tzslp_test_key_accepts();
-    failures += tzslp_test_key_rejects();
+    failures += tzslp_test_key_checks_first();
+    failures += tzslp_test_key_checks_second();
 
     failures += tzslp_test_display_order();
 
