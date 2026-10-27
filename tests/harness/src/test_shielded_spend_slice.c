@@ -62,10 +62,10 @@
     else { printf("FAIL\n"); failures++; }                 \
 } while (0)
 
-/* Step helpers: each computes one derivation or negative probe for a
- * single SSS_CHECK below and returns the resulting bool. All printing
- * (and the failure tally) stays in test_shielded_spend_slice, so the
- * checks, their order and their messages are exactly as before. */
+/* Pure helpers split out of test_shielded_spend_slice to keep it under the
+ * complexity cap. None of them prints or touches the failure tally; each
+ * takes one contiguous run of the original statements and is called where
+ * that run was, so the SSS_CHECK output and the order of work are unchanged. */
 
 /* Both derivations succeeded and recomputing produced identical bytes
  * (the determinism property asserted for cv and for nf). */
@@ -279,8 +279,11 @@ int test_shielded_spend_slice(void)
               memcmp(sd.nullifier.data, nf, 32) == 0);
     SSS_CHECK("spend description carries the re-randomized rk",
               memcmp(sd.rk.data, rk, 32) == 0);
-    SSS_CHECK("Groth16 zkproof is the stubbed (zeroed) placeholder",
-              sss_zkproof_is_stub_zero(&sd));
+    {
+        bool zproof_zero = sss_zkproof_is_stub_zero(&sd);
+        SSS_CHECK("Groth16 zkproof is the stubbed (zeroed) placeholder",
+                  zproof_zero);
+    }
 
     /* ── (6) VALUE-BALANCE ACCOUNTING + BINDING SIG.
      * Spend 1.00000000 ZCL, re-output 0.90000000 ZCL into one shielded
@@ -298,6 +301,7 @@ int test_shielded_spend_slice(void)
                       sapling_value_commit(OUTPUT_VALUE, rcv_out, cv_out);
     SSS_CHECK("output value commitment built", cv_out_ok);
 
+    /* bsk = rcv_spend − rcv_output (one spend, one output). */
     uint8_t bsk[32];
     uint8_t binding_sig[64];
     bool binding_ok = sss_create_binding_sig_for_balance(rcv, rcv_out,
