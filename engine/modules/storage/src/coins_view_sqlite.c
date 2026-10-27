@@ -186,7 +186,8 @@ static bool coins_rewind_args_rejected(sqlite3 *db, int64_t tip_height)
     return !db || tip_height < 0;
 }
 
-/* 0: count is in *would_wipe / *max_height and *stmt_out is finalized.
+/* 0: count is in *would_wipe / *max_height, the statement is finalized and
+ * *stmt_out is NULL.
  * -1: prepare failed (statement not open). -2: step failed and *stmt_out
  * is still open so the caller can log sqlite3_errmsg before finalize. */
 static int coins_rewind_count_above(sqlite3 *db, int64_t tip_height,
@@ -386,7 +387,8 @@ rollback:
  * usable, rows above the committed height, recompute mismatch, or anchor hash
  * unresolvable), so the caller keeps the strict FATAL — the gate is never
  * weakened. Never trusts a cursor; never deletes UTXOs. */
-/* 0 and *rows_above set from the count (0 when the step yields no row).
+/* 0 and *rows_above set from the count (left unchanged when the step yields
+ * no row).
  * -1 when the count statement cannot be prepared. */
 static int coins_reconcile_count_rows_above(sqlite3 *db, int64_t commit_h,
                                             int64_t *rows_above)
