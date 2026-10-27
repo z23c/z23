@@ -2,17 +2,34 @@
 
 # Z23 documentation map
 
+## For volunteers
+
+Start here if you want to run a node or send a change. Everything else in this
+map is for maintainers or is reference.
+
+1. [`../README.md`](../README.md) — what Z23 is, and the quick start.
+2. [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md) — build, find a card, submit, credit.
+3. [`GETTING_STARTED.md`](node/GETTING_STARTED.md) — clone to a running node, and where its files live.
+4. [Wiki start page](https://z23.sh/wiki/start) — the steps a newcomer follows, including how to submit.
+5. [`JOIN.md`](node/JOIN.md) — how a node joins the network and the software commons.
+6. [`SYNC.md`](node/SYNC.md) — getting to the chain tip faster.
+7. [`RUNBOOK.md`](RUNBOOK.md) — something looks wrong: symptom-driven fixes.
+8. [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — write, share and reproduce a C23 package.
+
+Documents marked "(maintainers)" below are for the people who run the project's
+hosts and land changes. You do not need them to contribute.
+
 Copyright 2026 Rhett Creighton. Licensed under the Apache License, Version 2.0.
 
 This is a curated map, not an inventory. The documentation hierarchy is:
 
 1. [`../README.md`](../README.md) — public product explanation.
-2. [`../AGENTS.md`](../AGENTS.md) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
-3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
-3a. [`THE_Z23_WAY.md`](THE_Z23_WAY.md) — the one standard loop for Claude, Codex and humans: lane, brief, verify, review, land.
-3b. [`START_HERE.md`](agent/START_HERE.md): the maintainer route through AGENTS.md and THE_Z23_WAY.md
+2. [`../AGENTS.md`](../AGENTS.md) (maintainers) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
+3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) (maintainers) — current ordered work.
+3a. [`THE_Z23_WAY.md`](THE_Z23_WAY.md) (maintainers) — the one standard loop for Claude, Codex and humans: lane, brief, verify, review, land.
+3b. [`START_HERE.md`](agent/START_HERE.md) (maintainers): the maintainer route through AGENTS.md and THE_Z23_WAY.md
 4. [`DEVELOPING.md`](dev/DEVELOPING.md) — detailed developer procedure.
-5. [`HANDOFF.md`](agent/HANDOFF.md) — current state of the maintainer's hosted node
+5. [`HANDOFF.md`](agent/HANDOFF.md) (maintainers) — current state of the maintainer's hosted node
    only.
 6. This page — map to specialist documentation.
 7. [`../CLAUDE.md`](../CLAUDE.md) and vendor-specific skills — thin
@@ -134,18 +151,18 @@ from a hash, signature, test, or reproduction receipt.
 ## Change the code
 
 - [`archive/README.md`](archive/README.md) — historical proposals and retired mechanisms; not current procedure.
-- [`agent/README.md`](agent/README.md) — agent and fleet documents: lanes,
+- [`agent/README.md`](agent/README.md) (maintainers) — agent and fleet documents: lanes,
   fleet guide, board, ledger, triggers, wiki, work cards, safety gates.
 - [`dev/README.md`](dev/README.md) — developer references: build and test
   loop, hot-swap, lab, plugins, services, flags, host maintenance.
 - [`node/README.md`](node/README.md) — node references: boot, sync, custody, recovery, security.
 - [`commons/README.md`](commons/README.md) — commons, metaverse, ZCODE, framework and architecture references.
 - [`quality/README.md`](quality/README.md) — simulators, chaos, benchmarks, acceptance gates and transaction labs.
-- [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md) — consolidated fleet operating
+- [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md) (maintainers) — consolidated fleet operating
   contract: storage admission, task ownership, native and guest execution,
   transport choices, timestamped JSON observations, and measured agent cost.
   It distinguishes available interfaces from unqualified integration.
-- [`../AGENTS.md`](../AGENTS.md) — durable priorities, authority boundaries,
+- [`../AGENTS.md`](../AGENTS.md) (maintainers) — durable priorities, authority boundaries,
   initial commands, and continuation behavior.
 - [`DEVELOPING.md`](dev/DEVELOPING.md) — navigation, reflex feedback, focused tests,
   integration, push, and asynchronous deep proof.
@@ -212,9 +229,9 @@ from a hash, signature, test, or reproduction receipt.
 ## Operate and recover a node
 
 - [`RUNBOOK.md`](RUNBOOK.md) — symptom-driven diagnostics and operations.
-- [`FLEET.md`](agent/FLEET.md) — fleet operator guide: machines, joining, tunnel,
+- [`FLEET.md`](agent/FLEET.md) (maintainers) — fleet operator guide: machines, joining, tunnel,
   shells, vitals, board, wiki, agents, roles and troubleshooting.
-- [`fleet-dev/README.md`](fleet-dev/README.md) — maintainer setup for the
+- [`fleet-dev/README.md`](fleet-dev/README.md) (maintainers) — maintainer setup for the
   opt-in `z23-fleet` plugin, `z23-fx` and the daily loop.
 - [`FLEET_TRIGGERS.md`](agent/FLEET_TRIGGERS.md) — the closed registry of
   reactions to local events (`z23-dev fleet triggers`).
@@ -228,9 +245,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`RELEASE_CANDIDATE_PIN.md`](node/RELEASE_CANDIDATE_PIN.md) — exact candidate
   identity.
 
-## Current maintainer state
+## Current maintainer state (maintainers)
 
-[`HANDOFF.md`](agent/HANDOFF.md) is the only document allowed to describe the current
+[`HANDOFF.md`](agent/HANDOFF.md) (maintainers) is the only document allowed to describe the current
 hosted node. It is relevant only on the maintainer host and must be checked
 against typed node status. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) is the
 current development mission; neither file redefines the durable product.

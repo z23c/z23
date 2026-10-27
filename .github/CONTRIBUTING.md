@@ -6,6 +6,10 @@ This is the one page a volunteer needs, whether you write code yourself or
 drive an AI coding agent. Nothing else is required reading before a first
 commit.
 
+Word you will see: **r1** is the maintainers' lead host. It is the machine that
+reviews, gates and lands contributions, so "r1 lands it" means a maintainer
+reviewed your change, ran the gates on that host and merged it.
+
 ## What Z23 is
 
 Z23 is one self-contained C23 program: a ZClassic full node plus a commons for
@@ -105,6 +109,11 @@ cites a rule, not beforehand. For a new test, add
 `tools/dev/test_group_catalog.def`.
 
 ## Submit
+
+The newcomer path is the steps on the wiki start page,
+<https://z23.sh/wiki/start>: it walks you from a built node to a posted
+change. The full bundle procedure below is the same path in detail and stays
+as written. r1 (defined at the top) reviews, gates and lands what you send.
 
 Send each change as one commit on top of `origin/main`, carried as a git
 bundle over the Z23 swarm. Do not push a branch: the repository's pre-push hook

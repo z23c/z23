@@ -26,6 +26,52 @@ full-node build and service lane. WSL2 means Windows Subsystem for Linux 2.
 
 ---
 
+## Quick start
+
+Linux with gcc 14+ (or clang with `-std=c23`) and GNU make. Other systems and
+the full prerequisite list are under [Build](#build).
+
+```bash
+git clone --recurse-submodules https://github.com/z23c/z23.git
+cd z23
+make doctor                                   # says what this machine still needs
+make -j4 z23                                  # first build fetches pinned sources; later builds are offline
+build/bin/z23                                 # terminal 1: runs the node in the foreground
+```
+
+If you would rather not clone by hand, the public node serves the same steps
+as a script: `curl -fsSL https://<site>/install.sh | sh` (see [Build](#build)).
+
+In a second terminal, from the same checkout:
+
+```bash
+build/bin/z23 status                          # one-line health and the next command to run
+```
+
+To stop the node: `build/bin/z23 stop` from the second terminal. The first
+sync takes a while; `build/bin/z23 core sync diagnose` says why if it stalls.
+Next: [Your one obvious next action](#your-one-obvious-next-action), or run it
+as a service under [Running as a durable service](#running-as-a-durable-service).
+
+## Where things live
+
+| What | Where |
+|---|---|
+| Data directory (chain, wallet, node state) | `~/.zclassic-c23` (override with `-datadir=<dir>`) |
+| Node log | `~/.zclassic-c23/node.log` (`build/bin/z23 ops logs` shows recent lines) |
+| Node settings file | `~/.zclassic-c23/z23.conf` (inside the data directory; command-line flags win over it) |
+| Onion seeds (one `.onion` directory node per line) | `~/.config/zclassic23/onion-seeds` |
+| Service environment file | `~/.config/zclassic23/env` (optional; read by the systemd unit) |
+| Node and command line | `build/bin/z23`: one binary is both the node and its CLI |
+| Old name | `build/bin/zclassic23`: a temporary alias of `z23` kept so old scripts keep working; use `z23` |
+| RPC and helper programs | `build/bin/zclassic-cli`, `build/bin/zcl-rpc` (need `make all`) |
+| systemd user unit | `z23-node.service` (source: `platform/deploy/z23-node.service`; installed by `platform/deploy/setup.sh`) |
+
+## Reference
+
+Everything below is reference material: full prerequisites per platform,
+build internals, production and service setup, and troubleshooting.
+
 ## Build
 
 Z23 is written in C23, the 2023 edition of the C language standard.
