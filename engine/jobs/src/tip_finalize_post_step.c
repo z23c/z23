@@ -265,7 +265,7 @@ static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
                                                 struct node_db *ndb,
                                                 const struct transaction *tx,
                                                 const struct uint256 *txid,
-                                                int height)
+                                                struct block_index *pindex_new)
 {
     zcl_mutex_lock(&wallet->cs);
     size_t notes_before = wallet->num_sapling_notes;
@@ -282,7 +282,7 @@ static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
                 (int64_t)note->value, note->rcm,
                 note->memo, 512, note->ivk,
                 note->diversifier, note->pk_d,
-                note->cm, note->nf, height);
+                note->cm, note->nf, pindex_new->nHeight);
             zmsg_ingest_onchain_note(ndb, note->memo,
                                      note->txid.data);
         }
@@ -336,7 +336,7 @@ static void tip_finalize_reconcile_wallet_body(
             if (!transaction_hash_serialized(tx, &txid))
                 continue;
             tip_finalize_wallet_sapling_outputs(wallet, ndb, tx, &txid,
-                                                pindex_new->nHeight);
+                                                pindex_new);
         }
         if (tx->num_shielded_spend > 0)
             wallet_mark_sapling_nullifiers_spent(wallet, tx);
@@ -438,11 +438,12 @@ static void tip_finalize_append_mmr(struct block_index *pindex_new)
         rpc_blockchain_mmr_append(pindex_new->phashBlock->data);
 }
 
-static bool tip_finalize_boundary_fold_allowed(int height)
+static bool tip_finalize_boundary_fold_allowed(struct block_index *pindex_new)
 {
     extern _Atomic int g_deferred_proof_validation_below_height;
     int defer_below = atomic_load(&g_deferred_proof_validation_below_height);
-    bool ibd_defer = (defer_below >= 0 && height <= defer_below);
+    bool ibd_defer = (defer_below >= 0 &&
+                      pindex_new->nHeight <= defer_below);
     /* Live catch-up: skip the O(N) boundary scan exactly like the
      * IBD-defer posture (zero-sentinel leaf). Cheap: evaluated only
      * at boundary heights; catchup_cadence_active() is two lock-free
@@ -584,7 +585,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
         uint8_t utxo_root[32] = {0};
         if (pindex_new->nHeight > 0 &&
             pindex_new->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
-            if (tip_finalize_boundary_fold_allowed(pindex_new->nHeight)) {
+            if (tip_finalize_boundary_fold_allowed(pindex_new)) {
                 sqlite3 *pdb = progress_store_db();
                 if (pdb && coins_kv_commitment(pdb, utxo_root) == 0) {
                     /* Persist before the leaf so a crash between append and
