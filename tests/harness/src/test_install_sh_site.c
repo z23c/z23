@@ -219,15 +219,6 @@ static int ish_run_script(const char *d, const char *body, bool fail,
     return rc;
 }
 
-/* Occurrences of needle in hay. */
-static size_t ish_count(const char *hay, const char *needle)
-{
-    size_t n = 0;
-    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p++)
-        n++;
-    return n;
-}
-
 /* body with its Z23_PIN="..." value replaced by pin, in out; NULL when the
  * body has no pin line or the result does not fit. */
 static const char *ish_with_pin(const char *body, const char *pin, char *out,
@@ -243,26 +234,31 @@ static const char *ish_with_pin(const char *body, const char *pin, char *out,
     return n > 0 && (size_t)n < cap ? out : NULL;
 }
 
-/* The echo stubs print their arguments: "clone https://..." for the clone,
- * and "-C <d>/src ..." for every other git and make call. The log must
- * hold exactly the calls this pin takes: checkout <pin>, or checkout main
- * and pull; then make setup and make z23. */
-static bool ish_log_has_every_call(const char *log, const char *d,
-                                   const char *pin)
+/* The echo stubs print their arguments, so build/install.log must be
+ * exactly these lines in order: the clone, the script's own pin note, then
+ * checkout <pin> (or checkout main and pull), make setup and make z23.
+ * Any extra, missing or reordered call, or another build target, differs. */
+static bool ish_log_is_exact(const char *log, const char *d, const char *pin)
 {
-    bool pinned = pin[0] != '\0';
-    char dash_c[600], want[4][700];
-    snprintf(dash_c, sizeof(dash_c), "-C %s/src ", d);
-    snprintf(want[0], sizeof(want[0]), "%scheckout %s", dash_c,
-             pinned ? pin : "main");
-    snprintf(want[1], sizeof(want[1]), "%spull --ff-only origin main", dash_c);
-    snprintf(want[2], sizeof(want[2]), "%ssetup", dash_c);
-    snprintf(want[3], sizeof(want[3]), "%s-j", dash_c);
-    bool pulled = strstr(log, want[1]) != NULL;
-    return strstr(log, "clone https://") != NULL &&
-           strstr(log, want[0]) != NULL && pulled == !pinned &&
-           strstr(log, want[2]) != NULL && strstr(log, want[3]) != NULL &&
-           ish_count(log, dash_c) == (pinned ? 3u : 4u);
+    char want[4096];
+    long jobs = sysconf(_SC_NPROCESSORS_ONLN);
+    int n = pin[0]
+        ? snprintf(want, sizeof(want),
+                   "clone https://github.com/z23c/z23.git %s/src\n"
+                   "checking out pinned commit %s\n"
+                   "-C %s/src checkout %s\n",
+                   d, pin, d, pin)
+        : snprintf(want, sizeof(want),
+                   "clone https://github.com/z23c/z23.git %s/src\n"
+                   "no commit pin was served; building main instead\n"
+                   "-C %s/src checkout main\n"
+                   "-C %s/src pull --ff-only origin main\n",
+                   d, d, d);
+    if (n < 0 || (size_t)n >= sizeof(want) || jobs < 1)
+        return false;
+    snprintf(want + n, sizeof(want) - (size_t)n,
+             "-C %s/src setup\n-C %s/src -j%ld z23\n", d, d, jobs);
+    return strcmp(log, want) == 0;
 }
 
 /* One successful run with the pin line set to pin ("" = build main). No
@@ -283,11 +279,11 @@ static int ish_real_ok(const char *d, const char *body, const char *pin)
               strstr(out, "clone https://") == NULL &&
                   strstr(err, "clone https://") == NULL &&
                   strstr(out, "-C ") == NULL && strstr(err, "-C ") == NULL);
-    ISH_CHECK(pin[0] ? "real run (pinned): exactly checkout, setup and build "
-                       "land in build/install.log"
-                     : "real run (main): exactly checkout, pull, setup and "
-                       "build land in build/install.log",
-              ish_log_has_every_call(log, d, pin));
+    ISH_CHECK(pin[0] ? "real run (pinned): build/install.log is exactly "
+                       "clone, checkout <pin>, make setup, make z23"
+                     : "real run (main): build/install.log is exactly "
+                       "clone, checkout main, pull, make setup, make z23",
+              ish_log_is_exact(log, d, pin));
     return failures;
 }
 
