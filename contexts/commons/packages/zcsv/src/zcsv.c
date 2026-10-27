@@ -54,6 +54,76 @@ static zcsv_status zcsv_end_row(zcsv_parser *p) {
   return ZCSV_OK;
 }
 
+/* Handle one byte while the parser sits at the start of a field. */
+static zcsv_status zcsv_step_field_start(zcsv_parser *p, char c) {
+  p->seen_any = true;
+  zcsv_status st = ZCSV_OK;
+  if (c == '"') {
+    p->state = ZCSV_ST_IN_QUOTED;
+  } else if (c == ',') {
+    st = zcsv_end_field(p);
+  } else if (c == '\n') {
+    st = zcsv_end_row(p);
+  } else if (c == '\r') {
+    st = zcsv_end_row(p);
+    p->after_cr = true;
+  } else {
+    st = zcsv_push(p, c);
+    p->state = ZCSV_ST_IN_PLAIN;
+  }
+  return st;
+}
+
+/* Handle one byte inside an unquoted field. */
+static zcsv_status zcsv_step_in_plain(zcsv_parser *p, char c) {
+  p->seen_any = true;
+  zcsv_status st = ZCSV_OK;
+  if (c == ',') {
+    st = zcsv_end_field(p);
+  } else if (c == '\n') {
+    st = zcsv_end_row(p);
+  } else if (c == '\r') {
+    st = zcsv_end_row(p);
+    p->after_cr = true;
+  } else if (c == '"') {
+    return ZCSV_ERR_STRAY_QUOTE;
+  } else {
+    st = zcsv_push(p, c);
+  }
+  return st;
+}
+
+/* Handle one byte inside a quoted field. */
+static zcsv_status zcsv_step_in_quoted(zcsv_parser *p, char c) {
+  p->seen_any = true;
+  zcsv_status st = ZCSV_OK;
+  if (c == '"') {
+    p->state = ZCSV_ST_AFTER_QUOTE;
+  } else {
+    st = zcsv_push(p, c); /* commas, CR, LF are data here */
+  }
+  return st;
+}
+
+/* Handle one byte just after a closing quote. */
+static zcsv_status zcsv_step_after_quote(zcsv_parser *p, char c) {
+  zcsv_status st = ZCSV_OK;
+  if (c == '"') {
+    st = zcsv_push(p, '"'); /* escaped quote */
+    p->state = ZCSV_ST_IN_QUOTED;
+  } else if (c == ',') {
+    st = zcsv_end_field(p);
+  } else if (c == '\n') {
+    st = zcsv_end_row(p);
+  } else if (c == '\r') {
+    st = zcsv_end_row(p);
+    p->after_cr = true;
+  } else {
+    return ZCSV_ERR_STRAY_QUOTE; /* e.g. "abc"x */
+  }
+  return st;
+}
+
 zcsv_status zcsv_feed(zcsv_parser *p, const char *data, size_t len) {
   for (size_t i = 0; i < len; i++) {
     char c = data[i];
@@ -68,61 +138,16 @@ zcsv_status zcsv_feed(zcsv_parser *p, const char *data, size_t len) {
     zcsv_status st = ZCSV_OK;
     switch (p->state) {
     case ZCSV_ST_FIELD_START:
-      p->seen_any = true;
-      if (c == '"') {
-        p->state = ZCSV_ST_IN_QUOTED;
-      } else if (c == ',') {
-        st = zcsv_end_field(p);
-      } else if (c == '\n') {
-        st = zcsv_end_row(p);
-      } else if (c == '\r') {
-        st = zcsv_end_row(p);
-        p->after_cr = true;
-      } else {
-        st = zcsv_push(p, c);
-        p->state = ZCSV_ST_IN_PLAIN;
-      }
+      st = zcsv_step_field_start(p, c);
       break;
-
     case ZCSV_ST_IN_PLAIN:
-      p->seen_any = true;
-      if (c == ',') {
-        st = zcsv_end_field(p);
-      } else if (c == '\n') {
-        st = zcsv_end_row(p);
-      } else if (c == '\r') {
-        st = zcsv_end_row(p);
-        p->after_cr = true;
-      } else if (c == '"') {
-        return ZCSV_ERR_STRAY_QUOTE;
-      } else {
-        st = zcsv_push(p, c);
-      }
+      st = zcsv_step_in_plain(p, c);
       break;
-
     case ZCSV_ST_IN_QUOTED:
-      p->seen_any = true;
-      if (c == '"') {
-        p->state = ZCSV_ST_AFTER_QUOTE;
-      } else {
-        st = zcsv_push(p, c); /* commas, CR, LF are data here */
-      }
+      st = zcsv_step_in_quoted(p, c);
       break;
-
     case ZCSV_ST_AFTER_QUOTE:
-      if (c == '"') {
-        st = zcsv_push(p, '"'); /* escaped quote */
-        p->state = ZCSV_ST_IN_QUOTED;
-      } else if (c == ',') {
-        st = zcsv_end_field(p);
-      } else if (c == '\n') {
-        st = zcsv_end_row(p);
-      } else if (c == '\r') {
-        st = zcsv_end_row(p);
-        p->after_cr = true;
-      } else {
-        return ZCSV_ERR_STRAY_QUOTE; /* e.g. "abc"x */
-      }
+      st = zcsv_step_after_quote(p, c);
       break;
     }
     if (st != ZCSV_OK)

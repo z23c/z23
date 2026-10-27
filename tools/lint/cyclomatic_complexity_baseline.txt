@@ -177,7 +177,6 @@ contexts/commons/packages/zbase58/src/zbase58.c:zbase58_encode:16
 contexts/commons/packages/zbits/app/main.c:main:28
 contexts/commons/packages/zcidr/src/zcidr.c:zcidr_parse_v6:32
 contexts/commons/packages/zcron/src/zcron.c:parse_field:33
-contexts/commons/packages/zcsv/src/zcsv.c:zcsv_feed:22
 contexts/commons/packages/zdiff/src/zdiff.c:zdiff_run:33
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
