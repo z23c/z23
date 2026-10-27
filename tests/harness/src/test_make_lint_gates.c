@@ -1082,11 +1082,17 @@ static void lint_purge_stale_sandboxes(const char *real_root)
                                                               : 0;
         if (klen == 0) continue;
 
+        /* Exactly what lint_run_shard and the metadata test write: decimal
+         * digits only (no sign or blank strtol would take), within int. */
         const char *pidstr = kind + klen;
-        char *end = NULL;
-        long owner_pid = strtol(pidstr, &end, 10);
-        if (end == pidstr || !end || *end != '\0' || owner_pid <= 0) continue;
-        /* Alive — or alive but owned by another user (EPERM) — leave it be. */
+        size_t ndig = strspn(pidstr, "0123456789");
+        if (ndig == 0 || ndig > 10 || pidstr[ndig] != '\0') continue;
+        long long owner_pid = strtoll(pidstr, NULL, 10);
+        if (owner_pid <= 0 || owner_pid > INT_MAX) continue;
+        /* Alive — or alive but owned by another user (EPERM) — leave it be.
+         * A copy child orphaned by a kill may still write for a few seconds
+         * after its owner is gone; whatever it recreates past this purge has
+         * the same dead owner and goes on the next run. */
         errno = 0;
         if (kill((pid_t)owner_pid, 0) == 0 || errno != ESRCH) continue;
 
@@ -1402,6 +1408,16 @@ static int t_partition_only_base_group_is_exclusive(void)
     return failures;
 }
 
+/* Build the metadata copy at `sb_root` and always remove `sb_base`, so a
+ * failed build never leaves a tree-sized copy beside the worktree. Returns
+ * the removal status; the build status goes to *built. */
+static int lint_meta_copy_once(const char *real_root, const char *sb_base,
+                               const char *sb_root, int *built)
+{
+    *built = lint_sandbox_build(real_root, sb_root);
+    return test_rm_rf_recursive(sb_base);
+}
+
 static int t_sandbox_preserves_live_source_metadata(void)
 {
     int failures = 0;
@@ -1420,12 +1436,9 @@ static int t_sandbox_preserves_live_source_metadata(void)
         ASSERT(snprintf(sb_root, sizeof(sb_root), "%s/w0", sb_base) <
                (int)sizeof(sb_root));
         ASSERT(stat(makefile, &before) == 0);
-        /* Remove the copy before asserting on the build, so a failed build
-         * never leaves a tree-sized copy beside the worktree. */
-        int built = lint_sandbox_build(real_root, sb_root);
-        int removed = test_rm_rf_recursive(sb_base);
+        int built = -1;
+        ASSERT(lint_meta_copy_once(real_root, sb_base, sb_root, &built) == 0);
         ASSERT(built == 0);
-        ASSERT(removed == 0);
         ASSERT(stat(makefile, &after) == 0);
         ASSERT(before.st_dev == after.st_dev);
         ASSERT(before.st_ino == after.st_ino);
@@ -1485,6 +1498,9 @@ static int t_purge_reaps_dead_owner_copies(void)
         ASSERT(lint_plant_copy(fixture, live_sb) == 0);
         ASSERT(lint_plant_copy(fixture, live_meta) == 0);
         ASSERT(lint_plant_copy(fixture, "tree.lint_meta_x") == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_meta_+2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_sb_ 2147483647") == 0);
+        ASSERT(lint_plant_copy(fixture, "tree.lint_meta_99999999999") == 0);
         ASSERT(lint_plant_copy(fixture, "other.lint_meta_2147483647") == 0);
         lint_purge_stale_sandboxes(root);
         ASSERT(!lint_copy_exists(fixture, "tree.lint_sb_2147483647"));
@@ -1493,8 +1509,34 @@ static int t_purge_reaps_dead_owner_copies(void)
         ASSERT(lint_copy_exists(fixture, live_sb));
         ASSERT(lint_copy_exists(fixture, live_meta));
         ASSERT(lint_copy_exists(fixture, "tree.lint_meta_x"));
+        ASSERT(lint_copy_exists(fixture, "tree.lint_meta_+2147483647"));
+        ASSERT(lint_copy_exists(fixture, "tree.lint_sb_ 2147483647"));
+        ASSERT(lint_copy_exists(fixture, "tree.lint_meta_99999999999"));
         ASSERT(lint_copy_exists(fixture, "other.lint_meta_2147483647"));
         ASSERT(test_rm_rf_recursive(fixture) == 0);
+        PASS();
+    }
+    TEST("[lint-gate] a failed metadata copy build still removes its base") {
+        char fixture[PATH_MAX] = {0};
+        char sb_base[PATH_MAX];
+        char sb_root[PATH_MAX];
+        test_make_tmpdir(fixture, sizeof(fixture), "lint_purge", "failed");
+        ASSERT(snprintf(sb_base, sizeof(sb_base), "%s/tree.lint_meta_%d",
+                        fixture, (int)getpid()) < (int)sizeof(sb_base));
+        ASSERT(snprintf(sb_root, sizeof(sb_root), "%s/w0", sb_base) <
+               (int)sizeof(sb_root));
+        /* A base nobody may write into: making w0 inside it fails. */
+        ASSERT(mkdir(sb_base, 0500) == 0);
+        int built = 0;
+        int removed = lint_meta_copy_once(fixture, sb_base, sb_root, &built);
+        struct stat st;
+        bool left = stat(sb_base, &st) == 0;
+        if (left) (void)chmod(sb_base, 0700);
+        ASSERT(test_rm_rf_recursive(fixture) == 0);
+        if (geteuid() != 0)   /* root ignores the mode, so the build works */
+            ASSERT(built != 0);
+        ASSERT(removed == 0);
+        ASSERT(!left);
         PASS();
     } _test_next:;
     return failures;
