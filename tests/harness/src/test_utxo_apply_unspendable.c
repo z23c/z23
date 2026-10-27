@@ -137,16 +137,17 @@ static bool uau_build_block(struct block *b, uint8_t tag,
     return true;
 }
 
-/* Does the delta's added[] contain an entry for the given (txid, vout)? */
-static bool uau_added_has_outpoint(const struct delta_summary *out,
-                                   const struct uint256 *txid, uint32_t vout)
+/* One pass over added[]: does it hold (txid, vout 0) and/or (txid, vout 1)? */
+static void uau_scan_outpoints(const struct delta_summary *out,
+                               const struct uint256 *txid,
+                               bool *found_normal, bool *found_opreturn)
 {
     for (size_t i = 0; i < out->added_count; i++) {
-        if (uint256_eq(&out->added[i].txid, txid) &&
-            out->added[i].vout == vout)
-            return true;
+        if (uint256_eq(&out->added[i].txid, txid)) {
+            if (out->added[i].vout == 0) *found_normal = true;
+            if (out->added[i].vout == 1) *found_opreturn = true;
+        }
     }
-    return false;
 }
 
 /* How many of the delta's added[] entries belong to the given txid. */
@@ -223,10 +224,9 @@ int test_utxo_apply_unspendable(void)
             UAU_CHECK("(a) added_count excludes OP_RETURN (== 2, not 3)",
                       out.added_count == 2);
             /* The spend's added entry is the normal output, not the OP_RETURN. */
-            bool found_normal =
-                uau_added_has_outpoint(&out, &b.vtx[1].hash, 0);
-            bool found_opreturn =
-                uau_added_has_outpoint(&out, &b.vtx[1].hash, 1);
+            bool found_normal = false, found_opreturn = false;
+            uau_scan_outpoints(&out, &b.vtx[1].hash, &found_normal,
+                               &found_opreturn);
             UAU_CHECK("(a) normal output (vout 0) present", found_normal);
             UAU_CHECK("(a) OP_RETURN output (vout 1) ABSENT", !found_opreturn);
             /* total_value_delta = coinbase 1e9 (added) + normal_val (added)
