@@ -661,10 +661,9 @@ static bool rfrl_detail_push_backfill_and_bypass(struct json_value *out)
     return ok;
 }
 
-static bool rfrl_detail_push_reconcile_fields(struct json_value *out)
+static bool rfrl_detail_push_reconcile_fields(struct json_value *out,
+                                               bool ok)
 {
-    bool ok = true;
-
     for (int i = 0; i < RFRL_RR_FIELD_N; i++) {
         int value = atomic_load(&g_last_rr_values[i]);
         if (k_rfrl_rr_fields[i].is_bool) {
@@ -697,7 +696,7 @@ bool rfrl_detail_push(struct json_value *out)
                                 rfrl_rr_phase_label(phase));
     ok = ok && json_push_kv_int(out, "last_reconcile_remedy_call",
                                 atomic_load(&g_last_rr_remedy_call));
-    ok = ok && rfrl_detail_push_reconcile_fields(out);
+    ok = rfrl_detail_push_reconcile_fields(out, ok);
     ok = ok && json_push_kv_str(
         out, "last_reconcile_coin_backfill_status_label",
         rfrl_coin_backfill_status_label(coin_status));
