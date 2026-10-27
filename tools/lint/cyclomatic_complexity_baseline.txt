@@ -228,7 +228,6 @@ contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_negotiation:49
 contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_tamper:46
 contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_txq:32
 contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_wire:47
-contexts/commons/packages/zarg/tests/test_zarg.c:test_kat:29
 contexts/commons/packages/zb32/src/zb32.c:zb32_decode:25
 contexts/commons/packages/zbase58/src/zbase58.c:zbase58_decode:18
 contexts/commons/packages/zbase58/src/zbase58.c:zbase58_encode:16

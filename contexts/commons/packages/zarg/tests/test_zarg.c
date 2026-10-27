@@ -51,7 +51,8 @@ static zarg_err parse_all(const zarg_opt *spec, size_t nspec, int argc,
 
 /* ---- KAT streams ---------------------------------------------------- */
 
-static void test_kat(void) {
+/* KAT: bundle, glued value, long=value and positionals in one stream. */
+static void test_kat_simple_bundle_stream(void) {
   zarg_item items[32];
   size_t n = 0;
 
@@ -72,6 +73,12 @@ static void test_kat(void) {
           strcmp(items[5].text, "in2") == 0);
     CHECK(items[6].kind == ZARG_ITEM_END);
   }
+}
+
+/* KAT: values taken from the next argv and "--"/"-" token handling. */
+static void test_kat_next_value_and_dash_streams(void) {
+  zarg_item items[32];
+  size_t n = 0;
 
   /* Bundle ending in a value-taking option, value from next argv. */
   {
@@ -95,6 +102,12 @@ static void test_kat(void) {
           strcmp(items[3].text, "--count=1") == 0);
     CHECK(items[3].pos_index == 3);
   }
+}
+
+/* KAT: long-option values with conversions, then empty argv and spec. */
+static void test_kat_long_value_and_empty_streams(void) {
+  zarg_item items[32];
+  size_t n = 0;
 
   /* Long option value from next argv; u64/f64 conversions. */
   {
@@ -120,6 +133,12 @@ static void test_kat(void) {
     CHECK(e == ZARG_OK && n == 3);
     CHECK(items[0].kind == ZARG_ITEM_POS && items[1].kind == ZARG_ITEM_POS);
   }
+}
+
+/* KAT: i64 extremes and a negative-zero f64. */
+static void test_kat_numeric_edge_streams(void) {
+  zarg_item items[32];
+  size_t n = 0;
 
   /* i64 extremes and negative zero. */
   {
@@ -135,6 +154,13 @@ static void test_kat(void) {
     zarg_err e = parse_all(SPEC, 7, 3, argv, items, &n, 32);
     CHECK(e == ZARG_OK && signbit(items[0].f64) != 0);
   }
+}
+
+static void test_kat(void) {
+  test_kat_simple_bundle_stream();
+  test_kat_next_value_and_dash_streams();
+  test_kat_long_value_and_empty_streams();
+  test_kat_numeric_edge_streams();
 }
 
 /* ---- conversions ----------------------------------------------------- */
