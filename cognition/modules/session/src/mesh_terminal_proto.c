@@ -45,7 +45,9 @@ static bool geometry_valid(uint16_t cols, uint16_t rows)
            rows <= MESH_TERMINAL_MAX_ROWS;
 }
 
-static const char *mesh_terminal_proto_error_frame_string(
+/* Contiguous runs of the original error switch: head holds the first
+ * run (through TIME) and returns NULL past it; tail holds the rest. */
+static const char *mesh_terminal_proto_error_head_string(
     enum mesh_terminal_proto_error error)
 {
     switch (error) {
@@ -62,7 +64,7 @@ static const char *mesh_terminal_proto_error_frame_string(
     }
 }
 
-static const char *mesh_terminal_proto_error_detail_string(
+static const char *mesh_terminal_proto_error_tail_string(
     enum mesh_terminal_proto_error error)
 {
     switch (error) {
@@ -79,10 +81,10 @@ static const char *mesh_terminal_proto_error_detail_string(
 const char *mesh_terminal_proto_error_string(
     enum mesh_terminal_proto_error error)
 {
-    const char *name = mesh_terminal_proto_error_frame_string(error);
+    const char *name = mesh_terminal_proto_error_head_string(error);
     if (name)
         return name;
-    return mesh_terminal_proto_error_detail_string(error);
+    return mesh_terminal_proto_error_tail_string(error);
 }
 
 const char *mesh_terminal_receipt_status_string(
