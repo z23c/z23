@@ -6059,19 +6059,6 @@ static bool dl_wt_vendor_tor_is_submodule(const struct dl_dirs *d,
 }
 #endif
 
-/* The vendor/tor archives dl_materialize() is about to reuse were built by
- * the SUBMITTING checkout, against whatever commit that checkout's own
- * vendor/tor working tree happened to be at — not necessarily the commit
- * the tip being proven actually pins. Nothing before this compared the
- * two, so a submitting checkout sitting on a stale or ahead vendor/tor
- * would hand the proof a libtor.a built from source that does not match
- * what the tip's gitlink names, and the proof would never know. This
- * checks the landing worktree's own pinned gitlink for the tip
- * (`<tip>:vendor/tor`, resolved through the worktree's shared object
- * database regardless of which worktree the blob table lives under)
- * against the submitting checkout's checked-out submodule HEAD, and
- * refuses by name on any mismatch or unresolved side rather than reusing
- * an archive that was never proven to belong to this tip. */
 #if !defined(_WIN32)
 static bool dl_wt_vendor_tor_fast_accept(const struct dl_dirs *d,
                                          const char *tip_pin,
@@ -6106,6 +6093,19 @@ static bool dl_wt_vendor_tor_fast_accept(const struct dl_dirs *d,
     return false;
 }
 
+/* The vendor/tor archives dl_materialize() is about to reuse were built by
+ * the SUBMITTING checkout, against whatever commit that checkout's own
+ * vendor/tor working tree happened to be at — not necessarily the commit
+ * the tip being proven actually pins. Nothing before this compared the
+ * two, so a submitting checkout sitting on a stale or ahead vendor/tor
+ * would hand the proof a libtor.a built from source that does not match
+ * what the tip's gitlink names, and the proof would never know. This
+ * checks the landing worktree's own pinned gitlink for the tip
+ * (`<tip>:vendor/tor`, resolved through the worktree's shared object
+ * database regardless of which worktree the blob table lives under)
+ * against the submitting checkout's checked-out submodule HEAD, and
+ * refuses by name on any mismatch or unresolved side rather than reusing
+ * an archive that was never proven to belong to this tip. */
 static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
                                          const struct dl_row *r, char *why,
                                          size_t why_cap)
@@ -6424,13 +6424,6 @@ static bool dl_generation_pool_scan(
 }
 #endif
 
-/* A link count is explainable only when every extra name is either the
- * submitting train's own checkout (the donor case dev land priming used
- * before this repair existed) or one of the leaf's own generation pools
- * (the case item A's fix could still leave behind from an older binary, or
- * from a race with a proof generation still materialising this same file).
- * Any name outside those roots is not this code's link, so it still
- * refuses -- fail closed, same reason string as before. */
 #if !defined(_WIN32)
 static bool dl_dependency_repair_locate(
     const struct dl_dependency_repair *repair, const char *relative,
@@ -6517,6 +6510,13 @@ static bool dl_dependency_repair_recheck(const struct stat *before,
     return true;
 }
 
+/* A link count is explainable only when every extra name is either the
+ * submitting train's own checkout (the donor case dev land priming used
+ * before this repair existed) or one of the leaf's own generation pools
+ * (the case item A's fix could still leave behind from an older binary, or
+ * from a race with a proof generation still materialising this same file).
+ * Any name outside those roots is not this code's link, so it still
+ * refuses -- fail closed, same reason string as before. */
 static bool dl_dependency_repair_one(const char *relative, uint64_t links,
                                      void *opaque)
 {
