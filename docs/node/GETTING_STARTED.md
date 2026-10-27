@@ -40,7 +40,7 @@ build/bin/z23                                 # terminal 1: runs the node in the
 ```
 
 If you would rather not clone by hand, the public node serves the same steps
-as a script: `curl -fsSL https://<site>/install.sh | sh` (see [Build](#build)).
+as a script: `curl -fsSL https://z23.sh/install.sh | sh` (see [Build](#build)).
 
 In a second terminal, from the same checkout:
 
