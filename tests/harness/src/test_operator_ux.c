@@ -1143,7 +1143,13 @@ static int test_status_cli_no_node_headline(void)
     TEST("status CLI --format=json on a terminal stays the JSON document") {
         ASSERT(ux_status_cli_capture("1", closed_port, json_args, 1, out,
                                      sizeof(out)));
-        ASSERT(out[0] == '{');
+        struct json_value doc;
+        json_init(&doc);
+        bool is_envelope = json_read(&doc, out, strlen(out)) &&
+                           doc.type == JSON_OBJ &&
+                           json_get(&doc, "data") != NULL;
+        json_free(&doc);
+        ASSERT(is_envelope);
         ASSERT(strstr(out, "No node") == NULL);
         PASS();
     } _test_next:;
