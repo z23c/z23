@@ -22,25 +22,6 @@ struct wbuf {
     bool overflow;
 };
 
-static void w_putn(struct wbuf *b, const char *s, size_t n)
-{
-    if (b->overflow)
-        return;
-    if (b->len + n >= b->cap) {
-        b->overflow = true;
-        return;
-    }
-    memcpy(b->p + b->len, s, n);
-    b->len += n;
-    b->p[b->len] = '\0';
-}
-
-static void w_puts(struct wbuf *b, const char *s)
-{
-    if (s)
-        w_putn(b, s, strlen(s));
-}
-
 /* Formatted append straight into the output; anything that does not fit
  * marks overflow so the caller falls back to the canonical JSON. */
 static void w_printf(struct wbuf *b, const char *fmt, ...)
@@ -57,6 +38,12 @@ static void w_printf(struct wbuf *b, const char *fmt, ...)
         return;
     }
     b->len += (size_t)n;
+}
+
+static void w_puts(struct wbuf *b, const char *s)
+{
+    if (s)
+        w_printf(b, "%s", s);
 }
 
 /* Longest prefix of s that fits `room` bytes without splitting UTF-8. */
