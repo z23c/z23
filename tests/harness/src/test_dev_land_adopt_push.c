@@ -563,6 +563,21 @@ static bool dlx_live_drive_busy(void)
     return ok;
 }
 
+static void dlx_adopt_drive_child(const char *path, const int ready[2],
+                                   const int release[2])
+{
+    char byte = 0;
+    (void)alarm(30);
+    close(ready[0]); close(release[1]);
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0)
+        _exit(2);
+    if (write(ready[1], "x", 1) != 1 || read(release[0], &byte, 1) != 0)
+        _exit(3);
+    close(fd);
+    _exit(0);
+}
+
 static bool dlx_adopt_drive_held(const struct dlx_adopt_fix *fx)
 {
     int ready[2], release[2], status;
@@ -575,17 +590,8 @@ static bool dlx_adopt_drive_held(const struct dlx_adopt_fix *fx)
     }
     (void)snprintf(path, sizeof(path), "%s/drive.lock", fx->landdir);
     pid_t child = fork();
-    if (child == 0) {
-        (void)alarm(30);
-        close(ready[0]); close(release[1]);
-        int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0)
-            _exit(2);
-        if (write(ready[1], "x", 1) != 1 || read(release[0], &byte, 1) != 0)
-            _exit(3);
-        close(fd);
-        _exit(0);
-    }
+    if (child == 0)
+        dlx_adopt_drive_child(path, ready, release);
     close(ready[1]); close(release[0]);
     bool ok = child > 0 && read(ready[0], &byte, 1) == 1;
     if (ok)
