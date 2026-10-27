@@ -3997,17 +3997,18 @@ static bool dl_lock_holder_pid(const char *path, int *pid_out)
 }
 
 #if defined(_WIN32)
-static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
+static enum dl_beat dl_lock_state(const char *landdir, const char *name, int *pid_out)
 {
     (void)landdir;
+    (void)name;
     if (pid_out)
         *pid_out = 0;
     return DL_BEAT_UNKNOWN;
 }
 #else
-/* Observes step.lock. Does not create it and does not keep it: status is
- * not a beat. LOCK_EX|LOCK_NB fails while a step holds the lock. */
-static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
+/* Observes a named lock. Does not create it and does not keep it: status is
+ * not a beat. LOCK_EX|LOCK_NB fails while its owner holds the lock. */
+static enum dl_beat dl_lock_state(const char *landdir, const char *name, int *pid_out)
 {
     char path[4096 + 32];
     int fd;
@@ -4015,7 +4016,7 @@ static enum dl_beat dl_beat_state(const char *landdir, int *pid_out)
     if (pid_out)
         *pid_out = 0;
     if (!landdir ||
-        snprintf(path, sizeof(path), "%s/step.lock", landdir) >=
+        snprintf(path, sizeof(path), "%s/%s", landdir, name) >=
             (int)sizeof(path))
         return DL_BEAT_UNKNOWN;
     fd = open(path, O_RDWR | O_CLOEXEC);
@@ -4365,6 +4366,27 @@ static void dl_driver_idle(enum dl_beat beat, enum dl_timer_unit timer,
                        dl_timer_word(timer));
 }
 
+/* A drive may retain queue execution while no individual step owns its lock. */
+static bool dl_driver_observed(const struct dl_dirs *d, struct dl_steer_view *s)
+{
+    int pid = 0;
+    enum dl_beat driver = dl_lock_state(d ? d->land : NULL, "drive.lock", &pid);
+    if (driver == DL_BEAT_FREE)
+        return false;
+    if (driver == DL_BEAT_HELD && pid > 0)
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "drive_active pid:%d", pid);
+    else if (driver == DL_BEAT_HELD)
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "drive_active pid:unknown");
+    else
+        (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
+                       "unknown: drive.lock unreadable");
+    (void)snprintf(s->wake, sizeof(s->wake),
+                   "observe: z23 dev land status");
+    return true;
+}
+
 static void dl_steer_compose(const struct dl_dirs *d, const struct dl_row *rows,
                              size_t nrows, int64_t now, struct dl_steer_view *s)
 {
@@ -4387,7 +4409,7 @@ static void dl_steer_compose(const struct dl_dirs *d, const struct dl_row *rows,
                    "unknown: no eligible row");
     (void)snprintf(s->incident, sizeof(s->incident), "none");
     timer = dl_timer_unit_state();
-    beat = dl_beat_state(d ? d->land : NULL, &pid);
+    beat = dl_lock_state(d ? d->land : NULL, "step.lock", &pid);
     dl_driver_idle(beat, timer, s->receiver_driver, sizeof(s->receiver_driver));
     row = dl_pick_steer(rows, nrows);
     if (!row)
@@ -4413,6 +4435,8 @@ static void dl_steer_compose(const struct dl_dirs *d, const struct dl_row *rows,
     (void)snprintf(s->owner, sizeof(s->owner), "unclaimed");
     (void)snprintf(s->lease, sizeof(s->lease), "none");
     (void)snprintf(s->wake, sizeof(s->wake), "%s", DL_WAKE_STEP);
+    if (dl_driver_observed(d, s))
+        return;
     if (beat == DL_BEAT_FREE)
         (void)snprintf(s->receiver_driver, sizeof(s->receiver_driver),
                        "no_active_drain %s", dl_timer_word(timer));

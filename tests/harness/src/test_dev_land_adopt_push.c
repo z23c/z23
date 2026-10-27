@@ -537,6 +537,67 @@ static bool dlx_adopt_push(struct dlx_adopt_fix *fx)
     return dlx_receive_once(fx);
 }
 
+static bool dlx_live_drive_status(void)
+{
+    struct dlx_call c;
+    if (!dlx_status_json(&c))
+        return false;
+    const struct json_value *s = json_get(&c.reply.data, "steer");
+    bool ok = dlx_eq_str(dlx_str(&c, "incident"), "none") &&
+        dlx_eq_str(dlx_jstr(s, "owner"), "unclaimed") &&
+        dlx_eq_str(dlx_jstr(s, "lease"), "none") &&
+        dlx_has(dlx_jstr(s, "receiver_driver"), "drive_active") &&
+        dlx_eq_str(dlx_jstr(s, "wake_command"), "observe: z23 dev land status");
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_live_drive_busy(void)
+{
+    struct dlx_call c;
+    dlx_begin(&c, "drive");
+    (void)json_push_kv_int(&c.input, "seq", 1);
+    bool ok = dlx_run(&c) && !dlx_ok(&c) &&
+        strcmp(dlx_err_code(&c), "DRIVE_BUSY") == 0;
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_adopt_drive_held(const struct dlx_adopt_fix *fx)
+{
+    int ready[2], release[2], status;
+    char path[1400], byte = 0;
+    if (pipe(ready) != 0)
+        return false;
+    if (pipe(release) != 0) {
+        close(ready[0]); close(ready[1]);
+        return false;
+    }
+    (void)snprintf(path, sizeof(path), "%s/drive.lock", fx->landdir);
+    pid_t child = fork();
+    if (child == 0) {
+        (void)alarm(30);
+        close(ready[0]); close(release[1]);
+        int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0)
+            _exit(2);
+        if (write(ready[1], "x", 1) != 1 || read(release[0], &byte, 1) != 0)
+            _exit(3);
+        close(fd);
+        _exit(0);
+    }
+    close(ready[1]); close(release[0]);
+    bool ok = child > 0 && read(ready[0], &byte, 1) == 1;
+    if (ok)
+        ok = dlx_live_drive_status() && dlx_live_drive_busy() &&
+             dlx_queue_unchanged(fx);
+    close(ready[0]); close(release[1]);
+    if (child <= 0)
+        return false;
+    bool joined = dlx_wait_child(child, &status) == child;
+    return ok && joined && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 int test_dev_land_drain_adoption(void)
 {
     int failures = 0;
@@ -548,6 +609,7 @@ int test_dev_land_drain_adoption(void)
         setenv("ZCL_LAND_DRAIN_IDLE_SEC", "0", 1);
         ASSERT(dlx_adopt_submit(&fx));
         ASSERT(dlx_adopt_while_held(&fx));
+        ASSERT(dlx_adopt_drive_held(&fx));
         ASSERT(dlx_adopt_incident(&fx));
         ASSERT(dlx_adopt_claim(&fx));
         ASSERT(dlx_adopt_push(&fx));
