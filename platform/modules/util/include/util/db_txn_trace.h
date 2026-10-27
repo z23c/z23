@@ -17,9 +17,9 @@
  *     non-NONE (WRITE/READ) transaction while otherwise idle — i.e. the
  *     never-committed lock holder that starves every other node.db writer.
  *
- * Zero cost and a no-op when the env flag is unset. Intended to be safe to
- * ship: the register/unregister calls stay compiled in, but do nothing
- * unless the operator opts in. */
+ * Register/unregister are no-ops when the env flag is unset. An enabled
+ * diagnostic scan can wait behind other SQLite work; it has no fixed
+ * completion latency. */
 
 #ifndef ZCL_UTIL_DB_TXN_TRACE_H
 #define ZCL_UTIL_DB_TXN_TRACE_H
@@ -34,6 +34,11 @@ extern "C" {
 /* True iff ZCL_DB_TXN_TRACE=1 was set at process start. */
 bool zcl_db_txn_trace_enabled(void);
 
+/* Registry operations take the registry mutex before the SQLite connection
+ * mutex. Do not call register or unregister from a SQLite callback or while
+ * holding the connection mutex. Keep db valid until the operation returns.
+ * Connections without a SQLite mutex are refused with an explicit diagnostic
+ * and are not registered. */
 /* Register a node.db connection under a human owner label (e.g. "node_db:main",
  * "node_db:private", "coins_view"). Installs the statement trace and starts the
  * background txn-state dumper on first use. No-op when tracing is disabled or

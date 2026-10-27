@@ -35,11 +35,12 @@ struct txn_trace_entry {
 static struct txn_trace_entry g_entries[ZCL_DB_TXN_TRACE_MAX_CONNS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Seqlock-published snapshot of every registered connection's transaction
- * state (Program O4d). The background dumper thread — the ONLY place it is
- * ever safe to call sqlite3_txn_state / sqlite3_next_stmt on a live handle —
- * publishes it under g_lock; db_txn_trace_dump_state_json (on the RPC thread)
- * reads it lock-free and NEVER touches a live sqlite handle. */
+/* The registry lock pins registered handles until inspection finishes.
+ * The dumper also holds each connection’s SQLite mutex across transaction
+ * inspection and every use of borrowed statement/SQL pointers. It publishes
+ * a seqlock snapshot under g_lock; db_txn_trace_dump_state_json (on the RPC
+ * thread) reads that snapshot without touching a live SQLite handle
+ * (Program O4d). */
 struct txn_snap_entry {
     _Atomic int txn_state;    /* SQLITE_TXN_NONE / READ / WRITE */
     _Atomic int busy_stmts;   /* un-reset cursors pinning the snapshot */
@@ -108,6 +109,8 @@ static int trace_cb(unsigned type, void *ctx, void *p, void *x)
     const char *sql = (const char *)x;
     if (!is_txn_control_sql(sql))
         return 0;
+    /* SQLite holds the connection mutex here. Registry-entry mutations take
+     * that same mutex; this callback must never acquire g_lock. */
     const struct txn_trace_entry *e = (const struct txn_trace_entry *)ctx;
     fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
             "[db-txn-trace] STMT owner=%s db=%p tid=%lu sql=\"%s\"\n",
@@ -130,16 +133,17 @@ static void *dumper_main(void *arg)
             break;
 
         pthread_mutex_lock(&g_lock);
-        /* Publish a coherent snapshot of every connection's txn state under the
-         * same lock the registry uses, so db_txn_trace_dump_state_json can read
-         * it lock-free from the RPC thread WITHOUT ever calling sqlite3_txn_state
-         * / sqlite3_next_stmt on a live handle (Program O4d). */
+        /* Publish a coherent snapshot under the registry lifetime lock.
+         * Each connection mutex below also pins its statements until the
+         * scan and diagnostic output finish. */
         zcl_snapshot_publish_begin(&g_snap_env);
         int snap_n = 0;
         for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
             sqlite3 *db = g_entries[i].db;
             if (!db)
                 continue;
+            sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
+            sqlite3_mutex_enter(db_mutex);
             int st = sqlite3_txn_state(db, NULL);
             /* Loud when a connection is holding a transaction open; quiet
              * (but still logged) when NONE so the timeline shows liveness. */
@@ -171,6 +175,7 @@ static void *dumper_main(void *arg)
                     }
                 }
             }
+            sqlite3_mutex_leave(db_mutex);
             if (snap_n < ZCL_DB_TXN_TRACE_MAX_CONNS) {
                 atomic_store_explicit(&g_snap[snap_n].txn_state, st,
                                       memory_order_relaxed);
@@ -214,6 +219,15 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
 {
     if (!db || !zcl_db_txn_trace_enabled())
         return;
+    sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
+    if (!db_mutex) {
+        fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
+                "[db-txn-trace] registration refused owner=%s db=%p: "
+                "connection mutex unavailable\n",
+                label ? label : "?", (void *)db);
+        fflush(stderr);
+        return;
+    }
 
     pthread_mutex_lock(&g_lock);
 
@@ -232,12 +246,14 @@ void zcl_db_txn_trace_register(sqlite3 *db, const char *label)
         return;
     }
 
+    sqlite3_mutex_enter(db_mutex);
     g_entries[slot].db = db;
     snprintf(g_entries[slot].label, sizeof(g_entries[slot].label), "%s",
              label ? label : "unnamed");
 
     /* ctx is the stable registry-entry address (fixed array). */
     sqlite3_trace_v2(db, SQLITE_TRACE_STMT, trace_cb, &g_entries[slot]);
+    sqlite3_mutex_leave(db_mutex);
 
     ensure_dumper_started_locked();
 
@@ -257,6 +273,8 @@ void zcl_db_txn_trace_unregister(sqlite3 *db)
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < ZCL_DB_TXN_TRACE_MAX_CONNS; i++) {
         if (g_entries[i].db == db) {
+            sqlite3_mutex *db_mutex = sqlite3_db_mutex(db);
+            sqlite3_mutex_enter(db_mutex);
             fprintf(stderr,  // obs-ok:opt-in-debug-tracer (ZCL_DB_TXN_TRACE=1 only)
                     "[db-txn-trace] unregistered owner=%s db=%p\n",
                     g_entries[i].label, (void *)db);
@@ -266,6 +284,7 @@ void zcl_db_txn_trace_unregister(sqlite3 *db)
             /* Detach the trace so a soon-to-be-closed handle stops calling
              * back into a stale ctx pointer. */
             sqlite3_trace_v2(db, 0, NULL, NULL);
+            sqlite3_mutex_leave(db_mutex);
             break;
         }
     }
@@ -289,8 +308,8 @@ bool db_txn_trace_dump_state_json(struct json_value *out, const char *key)
 
     /* Lock-free seqlock read of the background thread's published snapshot.
      * This NEVER calls sqlite3_txn_state / sqlite3_next_stmt on a live handle
-     * from the RPC thread — only the background dumper does that, under g_lock,
-     * and publishes the result here. */
+     * from the RPC thread. The background dumper takes both registry and
+     * connection mutexes while inspecting handles, then publishes here. */
     struct txn_snap_local {
         int  txn_state;
         int  busy;
