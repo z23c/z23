@@ -178,6 +178,30 @@ static unsigned long long rng_next(void)
     return rng_state;
 }
 
+/* Trim spaces and tabs around the tag body between *nb and *ne. */
+static void ref_trim_tag(const char *t, size_t *nb, size_t *ne)
+{
+    while (*nb < *ne && (t[*nb] == ' ' || t[*nb] == '\t')) (*nb)++;
+    while (*ne > *nb && (t[*ne - 1] == ' ' || t[*ne - 1] == '\t')) (*ne)--;
+}
+
+/* Copy the value bound to the tag name t[nb..ne), if any, into out;
+ * return the output offset after the copy. */
+static size_t ref_append_var(const struct kv *kvs, const char *t,
+                             size_t nb, size_t ne, char *out,
+                             size_t cap, size_t o)
+{
+    for (size_t i = 0; kvs[i].k; i++) {
+        if (strlen(kvs[i].k) == ne - nb &&
+            memcmp(kvs[i].k, t + nb, ne - nb) == 0) {
+            for (const char *v = kvs[i].v; *v && o + 1 < cap;)
+                out[o++] = *v++;
+            break;
+        }
+    }
+    return o;
+}
+
 /* reference renderer: left-to-right scan */
 static void ref_render(const char *t, const struct kv *kvs,
                        char *out, size_t cap)
@@ -190,16 +214,8 @@ static void ref_render(const char *t, const struct kv *kvs,
             size_t nb = p + 2, ne = (size_t)(close - t);
             size_t next = ne + 2;
             if (t[nb] == '!') { p = next; continue; }
-            while (nb < ne && (t[nb] == ' ' || t[nb] == '\t')) nb++;
-            while (ne > nb && (t[ne - 1] == ' ' || t[ne - 1] == '\t')) ne--;
-            for (size_t i = 0; kvs[i].k; i++) {
-                if (strlen(kvs[i].k) == ne - nb &&
-                    memcmp(kvs[i].k, t + nb, ne - nb) == 0) {
-                    for (const char *v = kvs[i].v; *v && o + 1 < cap;)
-                        out[o++] = *v++;
-                    break;
-                }
-            }
+            ref_trim_tag(t, &nb, &ne);
+            o = ref_append_var(kvs, t, nb, ne, out, cap, o);
             p = next;
         } else {
             if (o + 1 < cap) out[o++] = t[p];
