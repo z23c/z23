@@ -1153,9 +1153,6 @@ static int cb_happy_rerun(int failures, struct cbf *fx)
 /* Case 1: happy path — detect, multi-chunk prev-linked scan via the internal
  * scan-step (small chunks force >= 2 resumes through the persisted record),
  * terminal linkage to the hole hash, then the insert transaction. */
-/* Case 1: happy path — detect, multi-chunk prev-linked scan via the internal
- * scan-step (small chunks force >= 2 resumes through the persisted record),
- * terminal linkage to the hole hash, then the insert transaction. */
 static int cb_case_happy(void)
 {
     int failures = 0;
@@ -1296,11 +1293,18 @@ static int cb_case_spent(void)
     return failures;
 }
 
-static int cb_refusal_active_v2_markers(int failures)
+struct cb_decode_state {
+    bool active;
+    bool legacy_spent;
+    bool legacy_txindex;
+};
+
+static int cb_refusal_active_v2_markers(int failures,
+                                        struct cb_decode_state *st)
 {
-    bool active = true;
-    bool legacy_spent = true;
-    bool legacy_txindex = true;
+    bool active = st->active;
+    bool legacy_spent = st->legacy_spent;
+    bool legacy_txindex = st->legacy_txindex;
 
     CBT("marker_decode: spent:v2 is active",
         coin_backfill_refusal_marker_decode((const uint8_t *)"spent:v2", 8,
@@ -1312,14 +1316,19 @@ static int cb_refusal_active_v2_markers(int failures)
             (const uint8_t *)"txindex_miss:v2", 15, &active, &legacy_spent,
             &legacy_txindex) &&
         active && !legacy_spent && !legacy_txindex);
+
+    st->active = active;
+    st->legacy_spent = legacy_spent;
+    st->legacy_txindex = legacy_txindex;
     return failures;
 }
 
-static int cb_refusal_active_unversioned_markers(int failures)
+static int cb_refusal_active_unversioned_markers(int failures,
+                                                 struct cb_decode_state *st)
 {
-    bool active = true;
-    bool legacy_spent = true;
-    bool legacy_txindex = true;
+    bool active = st->active;
+    bool legacy_spent = st->legacy_spent;
+    bool legacy_txindex = st->legacy_txindex;
 
     CBT("marker_decode: unprovable is active",
         coin_backfill_refusal_marker_decode((const uint8_t *)"unprovable", 10,
@@ -1336,18 +1345,18 @@ static int cb_refusal_active_unversioned_markers(int failures)
                                             &active, &legacy_spent,
                                             &legacy_txindex) &&
         active && !legacy_spent && !legacy_txindex);
+
+    st->active = active;
+    st->legacy_spent = legacy_spent;
+    st->legacy_txindex = legacy_txindex;
     return failures;
 }
 
-static int cb_case_refusal_marker_decoder_contract(void)
+static int cb_refusal_legacy_markers(int failures, struct cb_decode_state *st)
 {
-    int failures = 0;
-    bool active = true;
-    bool legacy_spent = true;
-    bool legacy_txindex = true;
-
-    failures = cb_refusal_active_v2_markers(failures);
-    failures = cb_refusal_active_unversioned_markers(failures);
+    bool active = st->active;
+    bool legacy_spent = st->legacy_spent;
+    bool legacy_txindex = st->legacy_txindex;
 
     CBT("marker_decode: legacy spent is reproof-only",
         coin_backfill_refusal_marker_decode((const uint8_t *)"spent", 5,
@@ -1368,6 +1377,21 @@ static int cb_case_refusal_marker_decoder_contract(void)
         coin_backfill_refusal_marker_decode(NULL, 0, &active, &legacy_spent,
                                             &legacy_txindex) &&
         !active && !legacy_spent && !legacy_txindex);
+
+    st->active = active;
+    st->legacy_spent = legacy_spent;
+    st->legacy_txindex = legacy_txindex;
+    return failures;
+}
+
+static int cb_case_refusal_marker_decoder_contract(void)
+{
+    int failures = 0;
+    struct cb_decode_state st = { true, true, true };
+
+    failures = cb_refusal_active_v2_markers(failures, &st);
+    failures = cb_refusal_active_unversioned_markers(failures, &st);
+    failures = cb_refusal_legacy_markers(failures, &st);
 
     return failures;
 }
