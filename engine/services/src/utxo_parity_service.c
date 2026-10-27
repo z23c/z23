@@ -415,8 +415,8 @@ static void parity_coarse_block_hash_tick(
 
 /* ── Supervised tick body ──────────────────────────────────────── */
 
-/* One tick's config snapshot, read under g_parity.lock so the tick body can
- * run without holding or re-acquiring it. */
+/* One tick's config snapshot, read under g_parity.lock; the lock is released
+ * before the snapshot is returned. */
 struct parity_tick_snapshot {
     bool enabled;
     const struct utxo_reference_source *ref;
