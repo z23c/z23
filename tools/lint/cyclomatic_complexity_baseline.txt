@@ -36,7 +36,6 @@ cognition/services/src/zcode_retrieval_profile_comparison_service.c:zcode_retrie
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
-contexts/commons/modules/vcs/src/fastobj.c:vcs_fastobj_sidecar_verify:28
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21
 contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_receipt_decode:44
 contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_reproduce_compare:26
