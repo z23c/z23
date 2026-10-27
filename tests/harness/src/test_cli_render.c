@@ -299,7 +299,7 @@ static int test_menu_render(void)
         ASSERT(strstr(out, "branch: ") == NULL);
         PASS();
     }
-    TEST("root menu shows how to open a branch, using one it lists") {
+    TEST("root menu shows how to open core, only when it lists core") {
         static const char root[] =
             "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"root\","
             "\"summary\":\"Z23\",\"children\":["
@@ -307,9 +307,12 @@ static int test_menu_render(void)
             "\"availability\":\"ready\"},"
             "{\"path\":\"core\",\"summary\":\"c\",\"risk\":\"read\","
             "\"availability\":\"ready\"}]}";
+        /* A leaf listed first must never become the example. */
         static const char no_core[] =
             "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"root\","
             "\"summary\":\"Z23\",\"children\":["
+            "{\"path\":\"status\",\"summary\":\"s\",\"risk\":\"read\","
+            "\"availability\":\"ready\"},"
             "{\"path\":\"lab\",\"summary\":\"l\",\"risk\":\"read\","
             "\"availability\":\"ready\"}]}";
         struct zcl_cli_render_env e = cr_env(40, false);
@@ -320,7 +323,7 @@ static int test_menu_render(void)
         ASSERT(cr_max_line_width(out) <= 40);
         ASSERT(zcl_cli_render_doc(no_core, strlen(no_core), "discover.help",
                                   &e, out, sizeof(out)) > 0);
-        ASSERT(strstr(out, "branch: z23 discover help lab\n") != NULL);
+        ASSERT(strstr(out, "branch: ") == NULL);
         PASS();
     } _test_next:;
     return failures;

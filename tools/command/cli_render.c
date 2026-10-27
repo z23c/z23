@@ -752,21 +752,19 @@ static void next_as_shell(const struct json_value *next, char *out,
 
 /* ── per-shape renderers ───────────────────────────────────────────── */
 
-/* The root menu lists only branches; a newcomer is shown how to open one,
- * with a branch from this very menu (core when it is listed). */
+/* A newcomer is shown how to open one branch of the root menu. Menu rows
+ * do not say branch or leaf (status is a leaf), so the example is core,
+ * and only when this menu lists it. */
 static void emit_branch_hint(struct buf *b, const struct zcl_cli_render_env *e,
                              const struct json_value *children, size_t total)
 {
-    const char *eg = NULL;
     for (size_t i = 0; i < total; i++) {
         const char *p = json_get_str(json_get(json_at(children, i), "path"));
-        if (p && (!eg || strcmp(p, "core") == 0))
-            eg = p;
+        if (p && strcmp(p, "core") == 0) {
+            emit_hint_line(b, e, "branch: ", "z23 discover help core");
+            return;
+        }
     }
-    char hint[160];
-    if (eg && snprintf(hint, sizeof(hint), "z23 discover help %s", eg) <
-                  (int)sizeof(hint))
-        emit_hint_line(b, e, "branch: ", hint);
 }
 
 static void render_menu(struct buf *b, const struct zcl_cli_render_env *e,
