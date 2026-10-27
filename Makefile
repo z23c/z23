@@ -11130,15 +11130,12 @@ PARITY_ORACLE_DIRECT_BIN = $(BIN_DIR)/parity-oracle-direct
 PARITY_ORACLE_INCS = core/modules/sapling/include core/modules/crypto/include platform/modules/util/include platform/modules/base/include
 PARITY_ORACLE_SRCS = core/modules/sapling/src/bls12_381.c core/modules/sapling/src/fr_avx512.c core/modules/crypto/src/blake2b.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
 # Same flags, include dirs and sources as the run-parity-oracle driver compiles.
-# The compiler lists every header the sources include (src/ ones too) in $@.d,
-# which is replaced only after a good build; a binary without one rebuilds.
-PARITY_ORACLE_CFLAGS = -std=c23 -O2 -march=x86-64-v3 -DZCL_TESTING -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -I$(PARITY_ORACLE_DIR) $(addprefix -I,$(PARITY_ORACLE_INCS))
-$(PARITY_ORACLE_DIRECT_BIN): $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(PARITY_ORACLE_SRCS) $(if $(wildcard $(PARITY_ORACLE_DIRECT_BIN).d),,FORCE)
+# Rebuilt on every use, so it never runs stale: its sources include headers
+# from include/ and src/ trees, and hand-kept or generated dependency lists
+# each missed a case in review (10-27).
+$(PARITY_ORACLE_DIRECT_BIN): FORCE
 	@mkdir -p $(dir $@)
-	$(CC) $(PARITY_ORACLE_CFLAGS) -MM -MP -MT $@ $< $(PARITY_ORACLE_SRCS) > $@.d.tmp
-	$(CC) $(PARITY_ORACLE_CFLAGS) $< $(PARITY_ORACLE_SRCS) -o $@
-	mv -f $@.d.tmp $@.d
--include $(PARITY_ORACLE_DIRECT_BIN).d
+	$(CC) -std=c23 -O2 -march=x86-64-v3 -DZCL_TESTING -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -I$(PARITY_ORACLE_DIR) $(addprefix -I,$(PARITY_ORACLE_INCS)) $(PARITY_ORACLE_DIR)/groth16_parity_oracle.c $(PARITY_ORACLE_SRCS) -o $@
 
 .PHONY: run-parity-oracle-selftest
 run-parity-oracle-selftest: $(PARITY_ORACLE_BIN) $(PARITY_ORACLE_SELFTEST_BIN) $(PARITY_ORACLE_DIRECT_BIN)
