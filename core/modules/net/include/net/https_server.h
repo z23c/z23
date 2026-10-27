@@ -133,6 +133,11 @@ bool https_root_wants_install_script_for_testing(const char *user_agent,
  * (NULL when /start is not special). */
 const char *https_root_redirect_target_for_testing(void);
 const char *https_start_redirect_target_for_testing(const char *path);
+/* The Location the request path redirects to before it tries the
+ * public-install tree: the -site-home= path for a non-script GET /, else
+ * NULL (script_client is https_root_wants_install_script's answer). */
+const char *https_front_home_first_for_testing(const char *path,
+                                               bool script_client);
 void https_server_handle_http_for_testing(platform_socket_t fd,
                                           int64_t deadline_ms);
 bool https_server_public_install_filepath_for_testing(const char *root,

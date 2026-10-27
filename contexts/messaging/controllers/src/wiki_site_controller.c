@@ -840,17 +840,25 @@ size_t wiki_site_handle_request(const char *method, const char *path,
     if (rq.route == WS_NOT_WIKI)
         return 0;
     bool head_only = strcmp(method, "HEAD") == 0;
+    /* A "<slug>.txt" request gets every error as plain text too (the
+     * parser marks it before it validates the slug). */
     if (!head_only && strcmp(method, "GET") != 0)
-        return ws_error("405 Method Not Allowed", "method_not_allowed",
-                        false, false, response, response_max);
+        return rq.txt ? ws_error_txt("405 Method Not Allowed", false,
+                                     response, response_max)
+                      : ws_error("405 Method Not Allowed",
+                                 "method_not_allowed", false, false,
+                                 response, response_max);
     /* The slug is validated by now: a bad one never reaches the database. */
     if (rq.route == WS_BAD)
-        return ws_error("404 Not Found", "not_found", false, head_only,
-                        response, response_max);
+        return rq.txt ? ws_error_txt("404 Not Found", head_only, response,
+                                     response_max)
+                      : ws_error("404 Not Found", "not_found", false,
+                                 head_only, response, response_max);
     struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !ndb->open)
-        return ws_error("503 Service Unavailable", "wiki_unavailable",
-                        rq.json, head_only, response, response_max);
+        return ws_page_error(&rq, "503 Service Unavailable",
+                             "wiki_unavailable", head_only, response,
+                             response_max);
     size_t cap = response_max - 1024;
     if (cap > WIKI_SITE_BODY_MAX)
         cap = WIKI_SITE_BODY_MAX;

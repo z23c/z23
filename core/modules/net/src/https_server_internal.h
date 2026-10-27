@@ -40,5 +40,7 @@ bool https_server_try_public_install(struct ssl_st *ssl, const char *url);
 #define HTTPS_FRONT_PATH_MAX 256
 const char *https_front_root_target(void);
 const char *https_front_start_target(const char *path);
+const char *https_front_home_first(const char *path, bool script_client);
+void https_write_redirect(struct ssl_st *ssl, const char *location);
 
 #endif /* ZCL_NET_HTTPS_SERVER_INTERNAL_H */

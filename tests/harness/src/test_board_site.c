@@ -188,6 +188,20 @@ static int test_board_site_wiki(void)
         ASSERT(strstr(bsw_get("GET", longslug), "404 Not Found"));
         ASSERT(strstr(bsw_get("GET", "/wiki/some-page"),
                       "503 Service Unavailable"));
+        /* The .txt form answers every error in plain text. */
+        const char *txt_errors[][2] = {
+            {"GET", "/wiki/Upper.txt"}, {"GET", "/wiki/a%2fb.txt"},
+            {"GET", "/wiki/some-page.txt"}, {"POST", "/wiki/some-page.txt"},
+        };
+        const char *txt_status[] = {"404 Not Found", "404 Not Found",
+                                    "503 Service Unavailable",
+                                    "405 Method Not Allowed"};
+        for (size_t i = 0; i < 4; i++) {
+            const char *r = bsw_get(txt_errors[i][0], txt_errors[i][1]);
+            ASSERT(strstr(r, txt_status[i]));
+            ASSERT(strstr(r, "Content-Type: text/plain; charset=utf-8"));
+            ASSERT(!strstr(r, "<h1>"));
+        }
         ASSERT_EQ(wiki_site_handle_request("GET", "/wikipedia", NULL, 0,
                                            g_resp, BS_RESP_CAP, NULL), 0);
 

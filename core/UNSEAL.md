@@ -320,3 +320,7 @@ later lane flips it HARD.
 - 2026-10-26T22:05:12Z — REASON: Owner-authorized 2026-10-26 front-paths change: move the helpers from https_server.c to https_server_install.c to stay under the 1500-line file cap; no behaviour change
   old ROOT: e20033051bbd1bad0804e1251d0a746800e3b52d56b0a7682066959216539fd1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-27T00:10:19Z — REASON: Owner-authorized 2026-10-26 front-paths change, review fix: a browser GET / goes to -site-home before a public-install tree's install.sh (default unchanged when unset)
+  old ROOT: f6650cbb5da2db5d4f71da632fbd112b0fffbd5e49b9a722032392c9c15d87ba
+  by: owner unseal ritual (make core-unseal)

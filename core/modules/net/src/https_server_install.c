@@ -160,6 +160,28 @@ const char *https_front_root_target(void)
     return g_front_home[0] ? g_front_home : "/explorer";
 }
 
+/* The -site-home= Location for a browser's GET "/", checked before the
+ * public-install tree (whose install.sh owns "/" otherwise). NULL keeps
+ * that order: no -site-home=, another path, or a piped script client. */
+const char *https_front_home_first(const char *path, bool script_client)
+{
+    return (g_front_home[0] && !script_client && strcmp(path, "/") == 0)
+               ? g_front_home : NULL;
+}
+
+/* A 302 to a front path (one https_front_path_ok accepted, or a fixed
+ * default), so the Location carries no header bytes. */
+void https_write_redirect(SSL *ssl, const char *location)
+{
+    char resp[HTTPS_FRONT_PATH_MAX + 96];
+    int n = snprintf(resp, sizeof(resp),
+                     "HTTP/1.1 302 Found\r\n"
+                     "Location: %s\r\n"
+                     "Connection: close\r\n\r\n", location);
+    if (n > 0 && (size_t)n < sizeof(resp))
+        SSL_write(ssl, resp, n);
+}
+
 /* Where GET/HEAD "/start" is sent, or NULL when it is not special. */
 const char *https_front_start_target(const char *path)
 {
@@ -175,6 +197,11 @@ const char *https_root_redirect_target_for_testing(void)
 const char *https_start_redirect_target_for_testing(const char *path)
 {
     return https_front_start_target(path);
+}
+const char *https_front_home_first_for_testing(const char *path,
+                                               bool script_client)
+{
+    return https_front_home_first(path, script_client);
 }
 #endif
 

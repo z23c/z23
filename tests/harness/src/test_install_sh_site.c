@@ -36,6 +36,8 @@ static int ish_front_paths(void)
     ISH_CHECK("front paths default: root goes to /explorer",
               strcmp(https_root_redirect_target_for_testing(),
                      "/explorer") == 0);
+    ISH_CHECK("front paths default: public-install keeps GET /",
+              https_front_home_first_for_testing("/", false) == NULL);
     ISH_CHECK("front paths default: /start is not special",
               https_start_redirect_target_for_testing("/start") == NULL);
     https_server_set_front_paths("", "");
@@ -54,6 +56,19 @@ static int ish_front_paths(void)
               https_start_redirect_target_for_testing("/") == NULL);
     ISH_CHECK("script clients still want the installer with front paths set",
               https_root_wants_install_script_for_testing("curl/8.0", ""));
+    /* The request path checks site-home before the public-install tree,
+     * whose install.sh would otherwise answer a browser's GET /. */
+    bool browser = https_root_wants_install_script_for_testing(
+        "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/128.0",
+        "text/html,application/xhtml+xml");
+    bool curl = https_root_wants_install_script_for_testing("curl/8.0", "*/*");
+    const char *home_first = https_front_home_first_for_testing("/", browser);
+    ISH_CHECK("site-home answers a browser GET / before public-install",
+              !browser && home_first && strcmp(home_first, "/wiki/home") == 0);
+    ISH_CHECK("a script client's GET / still reaches public-install",
+              curl && https_front_home_first_for_testing("/", curl) == NULL);
+    ISH_CHECK("site-home leaves other paths to public-install",
+              https_front_home_first_for_testing("/install.sh", false) == NULL);
     https_server_set_front_paths("wiki", "//evil.example/x");
     ISH_CHECK("unrooted and protocol-relative paths are refused",
               strcmp(https_root_redirect_target_for_testing(),
@@ -71,13 +86,18 @@ static int ish_front_paths(void)
 static int ish_script_steps(const char *body)
 {
     int failures = 0;
-    ISH_CHECK("the script reports each step on stderr",
+    ISH_CHECK("say writes to stderr",
+              body && strstr(body, "say() {\n"
+                                   "    echo \"install_from_source: $*\" >&2\n"
+                                   "}\n") != NULL);
+    ISH_CHECK("the script reports each step",
               body && strstr(body, "say \"checking tools") != NULL &&
                   strstr(body, "say \"cloning ") != NULL &&
                   strstr(body, "say \"updating existing clone") != NULL &&
+                  strstr(body, "say \"checking out pinned commit $Z23_PIN") != NULL &&
+                  strstr(body, "say \"no commit pin was served") != NULL &&
                   strstr(body, "say \"building with $jobs jobs") != NULL &&
-                  strstr(body, "say \"done\"") != NULL &&
-                  strstr(body, ">&2") != NULL);
+                  strstr(body, "say \"done\"") != NULL);
     ISH_CHECK("the script ends with the contributor pointer after Built",
               body && strstr(body, "echo \"Built. Next:") != NULL &&
                   strstr(strstr(body, "echo \"Built. Next:"),

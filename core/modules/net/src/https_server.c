@@ -782,17 +782,6 @@ static void https_serve_root_install(SSL *ssl, const char *method)
     free(buf);
 }
 
-static void https_write_redirect(SSL *ssl, const char *location)
-{
-    char resp[HTTPS_FRONT_PATH_MAX + 96];
-    int n = snprintf(resp, sizeof(resp),
-                     "HTTP/1.1 302 Found\r\n"
-                     "Location: %s\r\n"
-                     "Connection: close\r\n\r\n", location);
-    if (n > 0 && (size_t)n < sizeof(resp))
-        SSL_write(ssl, resp, n);
-}
-
 #ifdef ZCL_TESTING
 bool https_root_wants_install_script_for_testing(const char *user_agent,
                                                  const char *accept)
@@ -855,6 +844,13 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
             "Connection: close\r\n\r\n"
             "Only GET is supported.\n";
         SSL_write(ssl, resp, (int)strlen(resp));
+        return;
+    }
+
+    const char *home_to = https_front_home_first(
+        path, https_root_wants_install_script(user_agent, accept_hdr));
+    if (home_to) {
+        https_write_redirect(ssl, home_to);
         return;
     }
 
