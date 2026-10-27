@@ -733,7 +733,6 @@ static bool health_test_stale_tip_state_ok(
     return ok;
 }
 
-/* Stale-tip snapshot: still serving with only a staleness warning. */
 static bool health_test_stale_tip_serving_ok(
     const struct node_health_snapshot *health)
 {
