@@ -2791,26 +2791,25 @@ static int t_package_swarm_file_hash_check(
     return failures;
 }
 
-static int t_package_swarm_cancel_round_trip(const uint8_t *root)
+static int t_package_swarm_cancel_round_trip(
+    struct vcs_package_swarm_message *message, uint8_t *wire, size_t wire_cap,
+    size_t *wire_len, struct vcs_package_swarm_message *parsed,
+    const uint8_t *root)
 {
     int failures = 0;
-    struct vcs_package_swarm_message message;
-    uint8_t wire[2048];
-    size_t wire_len = 0;
-    struct vcs_package_swarm_message parsed;
-    memset(&message, 0, sizeof(message));
-    message.type = VCS_PACKAGE_SWARM_CANCEL;
-    message.body.cancel.request_id = 24;
-    memcpy(message.body.cancel.package_root, root, 32);
+    memset(message, 0, sizeof(*message));
+    message->type = VCS_PACKAGE_SWARM_CANCEL;
+    message->body.cancel.request_id = 24;
+    memcpy(message->body.cancel.package_root, root, 32);
     VC_CHECK("swarm cancel round-trip",
-             vcs_package_swarm_serialize(&message, wire, sizeof(wire),
-                                         &wire_len) &&
-             vcs_package_swarm_parse(wire, wire_len, &parsed) &&
-             parsed.body.cancel.request_id == 24);
+             vcs_package_swarm_serialize(message, wire, wire_cap,
+                                         wire_len) &&
+             vcs_package_swarm_parse(wire, *wire_len, parsed) &&
+             parsed->body.cancel.request_id == 24);
 
-    message.body.cancel.request_id = 0;
+    message->body.cancel.request_id = 0;
     VC_CHECK("swarm zero request rejected",
-             vcs_package_swarm_wire_size(&message) == 0);
+             vcs_package_swarm_wire_size(message) == 0);
     return failures;
 }
 
@@ -3036,7 +3035,9 @@ static int t_package_swarm(void)
     VC_CHECK("swarm exact frame length",
              !vcs_package_swarm_parse(wire, wire_len + 1, &parsed));
 
-    failures += t_package_swarm_cancel_round_trip(root);
+    failures += t_package_swarm_cancel_round_trip(&message, wire,
+                                                  sizeof(wire), &wire_len,
+                                                  &parsed, root);
 
     vcs_package_manifest_free(&forward_two);
     vcs_package_manifest_free(&reverse_two);
