@@ -478,6 +478,26 @@ static int test_null_safety(void) {
   return 0;
 }
 
+/* Handle one byte outside strings: a quote opens a string, brackets
+ * nest; false rejects an over-depth open or an unmatched close. */
+static bool balanced_structural_byte(unsigned char c, size_t *sp,
+                                     char *stack, bool *in_str) {
+  if (c == '"')
+    *in_str = true;
+  else if (c == '{' || c == '[') {
+    if (*sp > ZJSON_MAX_DEPTH)
+      return false;
+    stack[(*sp)++] = (char)c;
+  } else if (c == '}' || c == ']') {
+    if (*sp == 0)
+      return false;
+    char o = stack[--*sp];
+    if ((o == '{') != (c == '}'))
+      return false;
+  }
+  return true;
+}
+
 /* Structural validator: balance brackets outside strings, reject raw
  * control bytes inside strings. */
 static bool balanced(const char *s, size_t n) {
@@ -497,19 +517,8 @@ static bool balanced(const char *s, size_t n) {
         return false;
       continue;
     }
-    if (c == '"')
-      in_str = true;
-    else if (c == '{' || c == '[') {
-      if (sp > ZJSON_MAX_DEPTH)
-        return false;
-      stack[sp++] = (char)c;
-    } else if (c == '}' || c == ']') {
-      if (sp == 0)
-        return false;
-      char o = stack[--sp];
-      if ((o == '{') != (c == '}'))
-        return false;
-    }
+    if (!balanced_structural_byte(c, &sp, stack, &in_str))
+      return false;
   }
   return !in_str && !esc && sp == 0;
 }

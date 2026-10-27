@@ -188,7 +188,6 @@ contexts/commons/packages/zdogview/src/zdogview.c:zdogview_verify:22
 contexts/commons/packages/zdogview/src/zdogview.c:zv_tri:23
 contexts/commons/packages/zescape/src/zescape.c:zescape_unescape:30
 contexts/commons/packages/zhuman/app/main.c:main:17
-contexts/commons/packages/zjson/tests/test_zjson.c:balanced:17
 contexts/commons/packages/zjsonp/src/zjsonp.c:scan_number:30
 contexts/commons/packages/zjsonp/src/zjsonp.c:scan_string:23
 contexts/commons/packages/zjsonp/src/zjsonp.c:zjsonp_next:40
