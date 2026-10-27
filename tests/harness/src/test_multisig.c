@@ -124,7 +124,8 @@ static bool p2sh_address_roundtrip_preserves_script_id(void)
     return ok;
 }
 
-/* Checks a keystore can add, retrieve and refuse redeem scripts. */
+/* Checks a keystore can add and retrieve a redeem script and reports an
+ * unknown script as absent. */
 static bool keystore_roundtrips_redeem_script(void)
 {
     struct basic_keystore *ks = zcl_malloc(sizeof(*ks), "test_ks");
@@ -236,15 +237,16 @@ static void append_redeem_script_to_script_sig(struct script *ss,
 
 /* Runs the consensus interpreter on the scriptSig, then checks a
  * mutated copy of it is rejected. */
-static bool p2sh_script_sig_passes_interpreter(struct script *ss,
+static bool p2sh_script_sig_passes_interpreter(bool ok,
+                                               struct script *ss,
                                                struct script *p2sh,
                                                struct sig_checker *checker)
 {
     ScriptError script_error = SCRIPT_ERR_OK;
-    bool ok = verify_script(ss, p2sh,
-                            SCRIPT_VERIFY_P2SH |
-                            SCRIPT_VERIFY_STRICTENC,
-                            checker, 0x76b809bb, &script_error);
+    ok = ok && verify_script(ss, p2sh,
+                             SCRIPT_VERIFY_P2SH |
+                             SCRIPT_VERIFY_STRICTENC,
+                             checker, 0x76b809bb, &script_error);
 
     /* A signature-byte mutation must be rejected by the same checker. */
     struct script tampered = *ss;
@@ -318,7 +320,7 @@ static bool p2sh_two_of_two_signs_valid_script_sig(void)
                         0x76b809bb, &txdata);
     struct sig_checker checker = tx_make_sig_checker(&checker_ctx);
 
-    ok = ok && p2sh_script_sig_passes_interpreter(ss, &p2sh, &checker);
+    ok = p2sh_script_sig_passes_interpreter(ok, ss, &p2sh, &checker);
 
     keystore_free(ks);
     free(ks);
@@ -368,29 +370,40 @@ static bool one_of_two_multisig_signs_with_single_key(void)
     return ok;
 }
 
-/* Builds 2-of-2 redeem scripts from two pubkey orderings and checks
- * the scripts and their script ids compare as the caller expects. */
-static bool multisig_scripts_compare_as_expected(struct pubkey *pks_a,
-                                                 struct pubkey *pks_b,
-                                                 bool expect_equal)
+/* Builds the same 2-of-2 redeem script twice and checks the scripts and
+ * their script ids are identical. */
+static bool deterministic_scripts_match(struct pubkey *pks)
 {
-    struct script s_a, s_b;
-    script_for_multisig(&s_a, 2, pks_a, 2);
-    script_for_multisig(&s_b, 2, pks_b, 2);
+    struct script s1, s2;
+    script_for_multisig(&s1, 2, pks, 2);
+    script_for_multisig(&s2, 2, pks, 2);
 
-    bool ok = (s_a.size == s_b.size);
-    if (expect_equal)
-        ok = ok && (memcmp(s_a.data, s_b.data, s_a.size) == 0);
-    else
-        ok = ok && (memcmp(s_a.data, s_b.data, s_a.size) != 0);
+    bool ok = (s1.size == s2.size) &&
+              (memcmp(s1.data, s2.data, s1.size) == 0);
 
-    struct script_id sid_a, sid_b;
-    script_id_from_script(&sid_a, &s_a);
-    script_id_from_script(&sid_b, &s_b);
-    if (expect_equal)
-        ok = ok && (memcmp(sid_a.hash.data, sid_b.hash.data, 20) == 0);
-    else
-        ok = ok && (memcmp(sid_a.hash.data, sid_b.hash.data, 20) != 0);
+    struct script_id sid1, sid2;
+    script_id_from_script(&sid1, &s1);
+    script_id_from_script(&sid2, &s2);
+    ok = ok && (memcmp(sid1.hash.data, sid2.hash.data, 20) == 0);
+    return ok;
+}
+
+/* Builds 2-of-2 redeem scripts from the two key orderings and checks the
+ * scripts and their script ids differ. */
+static bool key_order_changes_script_and_hash(struct pubkey *pks_ab,
+                                              struct pubkey *pks_ba)
+{
+    struct script s_ab, s_ba;
+    script_for_multisig(&s_ab, 2, pks_ab, 2);
+    script_for_multisig(&s_ba, 2, pks_ba, 2);
+
+    bool ok = (s_ab.size == s_ba.size) &&
+              (memcmp(s_ab.data, s_ba.data, s_ab.size) != 0);
+
+    struct script_id sid_ab, sid_ba;
+    script_id_from_script(&sid_ab, &s_ab);
+    script_id_from_script(&sid_ba, &s_ba);
+    ok = ok && (memcmp(sid_ab.hash.data, sid_ba.hash.data, 20) != 0);
     return ok;
 }
 
@@ -512,7 +525,7 @@ int test_multisig(void)
         generate_two_random_pubkeys(&p1, &p2);
 
         struct pubkey pks[2] = { p1, p2 };
-        bool ok = multisig_scripts_compare_as_expected(pks, pks, true);
+        bool ok = deterministic_scripts_match(pks);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -527,8 +540,7 @@ int test_multisig(void)
 
         struct pubkey pks_ab[2] = { p1, p2 };
         struct pubkey pks_ba[2] = { p2, p1 };
-        bool ok = multisig_scripts_compare_as_expected(pks_ab, pks_ba,
-                                                       false);
+        bool ok = key_order_changes_script_and_hash(pks_ab, pks_ba);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
