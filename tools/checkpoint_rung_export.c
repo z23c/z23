@@ -93,7 +93,7 @@ static sqlite3 *open_bundle_readonly(const char *bundle_path)
 
 /* Serialize the rung and write <out_dir>/rung-<height>.rung; returns 0, or
  * exit code 1 after printing the failure. */
-static int write_binary_artifact(struct checkpoint_rung *rung,
+static int checkpoint_rung_export_write_rung_file(struct checkpoint_rung *rung,
                                  const char *out_dir, char *bin_path,
                                  size_t bin_path_size)
 {
@@ -142,7 +142,7 @@ int main(int argc, char **argv)
 
     /* Binary artifact. */
     char bin_path[4200];
-    rc = write_binary_artifact(&rung, out_dir, bin_path, sizeof(bin_path));
+    rc = checkpoint_rung_export_write_rung_file(&rung, out_dir, bin_path, sizeof(bin_path));
     if (rc != 0)
         return rc;
 
