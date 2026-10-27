@@ -1885,7 +1885,7 @@ static int test_chain_supply_buttercup_boundary(void)
         int64_t expected = 706999LL * 1250000000LL;
         int64_t computed = zcl_total_supply_zatoshi(706999);
         if (computed == expected) printf("OK\n");
-        else { printf("FAIL (computed=%lld, expected %lld)\n", (long long)computed, (long long)expected); failures++; }
+        else { printf("FAIL (computed=%lld, expected=%lld)\n", (long long)computed, (long long)expected); failures++; }
     }
 
     printf("Supply: at Buttercup (707000)... ");
@@ -1897,7 +1897,7 @@ static int test_chain_supply_buttercup_boundary(void)
         int64_t expected = pre + post;
         int64_t computed = zcl_total_supply_zatoshi(707000);
         if (computed == expected) printf("OK\n");
-        else { printf("FAIL (computed=%lld, expected %lld)\n", (long long)computed, (long long)expected); failures++; }
+        else { printf("FAIL (computed=%lld, expected=%lld)\n", (long long)computed, (long long)expected); failures++; }
     }
 
     printf("Supply: cross-check Buttercup boundary (707000-707100)... ");
