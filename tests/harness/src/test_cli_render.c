@@ -785,6 +785,20 @@ static int test_brief_spaced_value(void)
         cr_strip_ansi(out);
         ASSERT(strcmp(out, line) == 0);
         PASS();
+    }
+    TEST("brief line: a field it cannot carry whole renders nothing") {
+        /* 0 makes the caller print the exact plain line, never a partial. */
+        char longv[256], line[320];
+        memset(longv, 'x', sizeof(longv) - 1);
+        longv[sizeof(longv) - 1] = '\0';
+        snprintf(line, sizeof(line), "sync=unknown next_action=%s blocker=none",
+                 longv);
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[1024];
+        ASSERT(zcl_cli_render_brief(line, &e, out, sizeof(out)) == 0);
+        ASSERT(zcl_cli_render_brief("no fields at all", &e, out,
+                                    sizeof(out)) == 0);
+        PASS();
     } _test_next:;
     return failures;
 }

@@ -1525,14 +1525,17 @@ size_t zcl_cli_render_brief(const char *line,
     while (*p) {
         while (*p == ' ')
             p++;
-        const char *eq = *p ? strchr(p, '=') : NULL;
-        if (!eq)
+        if (!*p)
             break;
-        const char *end = brief_val_end(eq);
+        const char *eq = strchr(p, '=');
+        const char *end = eq ? brief_val_end(eq) : NULL;
         char key[48], val[96];
-        if ((size_t)(eq - p) >= sizeof(key) ||
+        /* A field this renderer cannot carry whole (no key=, or a key or
+         * value over its buffer) yields 0: the caller prints the exact
+         * plain line instead of a partial one. */
+        if (!eq || (size_t)(eq - p) >= sizeof(key) ||
             (size_t)(end - eq - 1) >= sizeof(val))
-            break;
+            return 0;
         snprintf(key, sizeof(key), "%.*s", (int)(eq - p), p);
         snprintf(val, sizeof(val), "%.*s", (int)(end - eq - 1), eq + 1);
         ansi_dim(&b, env, key);
