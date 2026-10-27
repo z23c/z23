@@ -372,7 +372,7 @@ static int chain_restore_rebuild_disk_tiebreak(const struct block_index *cand,
     if (cand_disk && !best_disk)
         return 1;
     if (best_disk && !cand_disk)
-        return -1;
+        return -1; // raw-return-ok:tiebreak-preference-not-an-error
     return 0;
 }
 
