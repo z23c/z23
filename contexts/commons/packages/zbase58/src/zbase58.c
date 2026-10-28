@@ -28,6 +28,57 @@ int zbase58_char_value(char c)
     return p ? (int)(p - ALPHABET) : -1;
 }
 
+enum { ENCODE_WORK_BYTES = 1024 * 8, DECODE_WORK_BYTES = 1024 * 6 };
+
+/* Convert the nonzero suffix to little-endian base-58 digits. */
+static zbase58_err encode_digits(const uint8_t *bin, size_t start, size_t len,
+                                 uint8_t *digits, size_t *count)
+{
+    size_t n = 0;
+    for (size_t i = start; i < len; i++) {
+        uint32_t carry = bin[i];
+        for (size_t j = 0; j < n; j++) {
+            carry += (uint32_t)digits[j] << 8;
+            digits[j] = (uint8_t)(carry % 58);
+            carry /= 58;
+        }
+        while (carry > 0) {
+            if (n >= ENCODE_WORK_BYTES) return ZBASE58_ERR_SMALL;
+            digits[n++] = (uint8_t)(carry % 58);
+            carry /= 58;
+        }
+    }
+    *count = n;
+    return ZBASE58_OK;
+}
+
+/* Convert the non-leading suffix to little-endian base-256 bytes. */
+static zbase58_err decode_digits(const char *b58, size_t start, size_t len,
+                                 uint8_t *bytes, size_t *count, size_t *bad_pos)
+{
+    size_t n = 0;
+    for (size_t i = start; i < len; i++) {
+        int val = zbase58_char_value(b58[i]);
+        if (val < 0) {
+            if (bad_pos) *bad_pos = i;
+            return ZBASE58_ERR_BAD_CHAR;
+        }
+        uint32_t carry = (uint32_t)val;
+        for (size_t j = 0; j < n; j++) {
+            carry += (uint32_t)bytes[j] * 58;
+            bytes[j] = (uint8_t)(carry & 0xff);
+            carry >>= 8;
+        }
+        while (carry > 0) {
+            if (n >= DECODE_WORK_BYTES) return ZBASE58_ERR_SMALL;
+            bytes[n++] = (uint8_t)(carry & 0xff);
+            carry >>= 8;
+        }
+    }
+    *count = n;
+    return ZBASE58_OK;
+}
+
 zbase58_err zbase58_encode(const uint8_t *bin, size_t bin_len,
                            char *out, size_t cap, size_t *out_len)
 {
@@ -44,23 +95,12 @@ zbase58_err zbase58_encode(const uint8_t *bin, size_t bin_len,
     if (cap < 1) return ZBASE58_ERR_SMALL;
 
     /* Work on a bounded digit buffer (value per digit 0..57). */
-    uint8_t digits[1024 * 8]; /* generous stack bound */
+    uint8_t digits[ENCODE_WORK_BYTES]; /* generous stack bound */
     if (max_digits > sizeof digits) return ZBASE58_ERR_SMALL;
 
     size_t ndigits = 0;
-    for (size_t i = zeros; i < bin_len; i++) {
-        uint32_t carry = bin[i];
-        for (size_t j = 0; j < ndigits; j++) {
-            carry += (uint32_t)digits[j] << 8;
-            digits[j] = (uint8_t)(carry % 58);
-            carry /= 58;
-        }
-        while (carry > 0) {
-            if (ndigits >= sizeof digits) return ZBASE58_ERR_SMALL;
-            digits[ndigits++] = (uint8_t)(carry % 58);
-            carry /= 58;
-        }
-    }
+    zbase58_err conversion = encode_digits(bin, zeros, bin_len, digits, &ndigits);
+    if (conversion != ZBASE58_OK) return conversion;
 
     size_t need = zeros + ndigits + 1; /* leading '1's + digits + NUL */
     if (cap < need) {
@@ -89,7 +129,7 @@ zbase58_err zbase58_decode(const char *b58, size_t b58_len,
     size_t ones = 0;
     while (ones < b58_len && b58[ones] == '1') ones++;
 
-    uint8_t bytes[1024 * 6];
+    uint8_t bytes[DECODE_WORK_BYTES];
     /* Only non-leading digits use the base-conversion work buffer. */
     size_t digits = b58_len - ones;
     size_t max_bytes = (digits / 1000) * 733
@@ -98,24 +138,9 @@ zbase58_err zbase58_decode(const char *b58, size_t b58_len,
         return ZBASE58_ERR_SMALL;
 
     size_t nbytes = 0;
-    for (size_t i = ones; i < b58_len; i++) {
-        int val = zbase58_char_value(b58[i]);
-        if (val < 0) {
-            if (bad_pos) *bad_pos = i;
-            return ZBASE58_ERR_BAD_CHAR;
-        }
-        uint32_t carry = (uint32_t)val;
-        for (size_t j = 0; j < nbytes; j++) {
-            carry += (uint32_t)bytes[j] * 58;
-            bytes[j] = (uint8_t)(carry & 0xff);
-            carry >>= 8;
-        }
-        while (carry > 0) {
-            if (nbytes >= sizeof bytes) return ZBASE58_ERR_SMALL;
-            bytes[nbytes++] = (uint8_t)(carry & 0xff);
-            carry >>= 8;
-        }
-    }
+    zbase58_err conversion = decode_digits(b58, ones, b58_len, bytes, &nbytes,
+                                           bad_pos);
+    if (conversion != ZBASE58_OK) return conversion;
 
     size_t need = ones + nbytes;
     if (cap < need) return ZBASE58_ERR_SMALL;

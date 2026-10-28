@@ -112,6 +112,26 @@ static void test_errors(void)
     CHECK(zbase58_decode("7YXq9G", 6, dec, 64, NULL, NULL) == ZBASE58_ERR_NULL);
 }
 
+static void test_output_guards(void)
+{
+    const uint8_t input[] = {0, 0xff};
+    char encoded[8];
+    uint8_t decoded[8];
+    size_t n = 123, bad = 99;
+    memset(encoded, 'X', sizeof encoded);
+    CHECK(zbase58_encode(input, sizeof input, encoded, 0, &n) == ZBASE58_ERR_SMALL);
+    CHECK(n == 123 && encoded[0] == 'X');
+    CHECK(zbase58_encode(input, sizeof input, encoded, 2, &n) == ZBASE58_ERR_SMALL);
+    CHECK(n == 3 && encoded[0] == 'X');
+    n = 123;
+    memset(decoded, 0xa5, sizeof decoded);
+    CHECK(zbase58_decode("1120", 4, decoded, 0, &n, &bad) == ZBASE58_ERR_BAD_CHAR);
+    CHECK(n == 123 && bad == 3 && decoded[0] == 0xa5);
+    bad = 99;
+    CHECK(zbase58_decode("115Q", 4, decoded, 1, &n, &bad) == ZBASE58_ERR_SMALL);
+    CHECK(n == 123 && bad == 0 && decoded[0] == 0xa5);
+}
+
 static uint64_t rng_state = 0x0123456789abcdefull;
 static uint32_t rng_next(void)
 {
@@ -199,6 +219,7 @@ int main(void)
 {
     test_known_vectors();
     test_errors();
+    test_output_guards();
     test_roundtrip_fuzz();
     test_sizing_boundaries();
     test_err_str();
