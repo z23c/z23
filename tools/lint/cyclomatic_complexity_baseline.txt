@@ -27,7 +27,6 @@ contexts/commons/modules/vcs/src/package_badge_eligible.c:belig_facts_publish:16
 contexts/commons/modules/vcs/src/package_badge_eligible.c:vcs_badge_evaluate:44
 contexts/commons/modules/vcs/src/package_badge_eligible.c:vcs_badge_issue:52
 contexts/commons/modules/vcs/src/package_capsule.c:vcs_package_capsule_parse:17
-contexts/commons/modules/vcs/src/package_checkout.c:checkout_materialize:19
 contexts/commons/modules/vcs/src/package_checkout.c:vcs_package_checkout#2:29
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_deps_parse_meta:39
 contexts/commons/modules/vcs/src/package_deps.c:vcs_package_lock_parse:24

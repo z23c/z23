@@ -173,6 +173,31 @@ static bool checkout_destination_parts(const char *destination,
     return true;
 }
 
+static bool checkout_write_chunks(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    uint32_t file_index, const struct vcs_package_file *file, int fd,
+    struct vcs_package_checkout_metrics *metrics)
+{
+    bool ok = true;
+    for (uint32_t chunk_index = 0;
+         ok && chunk_index < file->chunk_count; chunk_index++) {
+        uint8_t *chunk = NULL;
+        size_t chunk_len = 0;
+        ok = vcs_package_store_get_chunk_at(
+                 store, package_root, file_index, chunk_index,
+                 &chunk, &chunk_len) == VCS_PACKAGE_STORE_OK &&
+             vcs_package_verify_chunk(file, chunk_index, chunk,
+                                      chunk_len) &&
+             checkout_write_all(fd, chunk, chunk_len);
+        if (ok && metrics) {
+            metrics->chunks++;
+            metrics->bytes += chunk_len;
+        }
+        free(chunk);
+    }
+    return ok;
+}
+
 static enum vcs_package_checkout_result checkout_materialize(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const struct vcs_package_manifest *manifest, int stage_fd,
@@ -190,23 +215,8 @@ static enum vcs_package_checkout_result checkout_materialize(
         close(parent_fd);
         if (fd < 0)
             return VCS_PACKAGE_CHECKOUT_DESTINATION;
-        bool ok = true;
-        for (uint32_t chunk_index = 0;
-             ok && chunk_index < file->chunk_count; chunk_index++) {
-            uint8_t *chunk = NULL;
-            size_t chunk_len = 0;
-            ok = vcs_package_store_get_chunk_at(
-                     store, package_root, (uint32_t)i, chunk_index,
-                     &chunk, &chunk_len) == VCS_PACKAGE_STORE_OK &&
-                 vcs_package_verify_chunk(file, chunk_index, chunk,
-                                          chunk_len) &&
-                 checkout_write_all(fd, chunk, chunk_len);
-            if (ok && metrics) {
-                metrics->chunks++;
-                metrics->bytes += chunk_len;
-            }
-            free(chunk);
-        }
+        bool ok = checkout_write_chunks(store, package_root, (uint32_t)i,
+                                        file, fd, metrics);
         mode_t mode = file->mode == VCS_PACKAGE_MODE_EXECUTABLE ? 0755 : 0644;
         enum vcs_package_checkout_result file_result = ok
             ? VCS_PACKAGE_CHECKOUT_OK : VCS_PACKAGE_CHECKOUT_CHUNK;
