@@ -46,27 +46,11 @@ static bool line_eq(const char *a_text, const zdiff_line *a,
                                     a->len) == 0;
 }
 
-zdiff_status zdiff_run(const char *old_text, const zdiff_line *old_lines,
-                       size_t old_count, const char *new_text,
-                       const zdiff_line *new_lines, size_t new_count,
-                       uint32_t *dp, size_t dp_cells, zdiff_op *ops,
-                       size_t ops_cap, size_t *ops_out) {
-  if (ops_out)
-    *ops_out = 0;
-  if ((old_count && (!old_text || !old_lines)) ||
-      (new_count && (!new_text || !new_lines)))
-    return ZDIFF_ARG;
-  size_t need = zdiff_cells(old_count, new_count);
-  if (need == 0)
-    return ZDIFF_BOUND;
-  if (!dp && dp_cells)
-    return ZDIFF_ARG;
-  if (dp_cells < need)
-    return ZDIFF_SPACE;
-  if (old_count + 1 > SIZE_MAX / (new_count + 1))
-    return ZDIFF_BOUND; /* unreachable given zdiff_cells, but total */
+static void build_lcs(const char *old_text, const zdiff_line *old_lines,
+                      size_t old_count, const char *new_text,
+                      const zdiff_line *new_lines, size_t new_count,
+                      uint32_t *dp) {
   const size_t stride = new_count + 1;
-
   /* dp[i * stride + j] = LCS length of old[i..] and new[j..]. */
   for (size_t i = old_count + 1; i-- > 0;) {
     for (size_t j = new_count + 1; j-- > 0;) {
@@ -82,15 +66,13 @@ zdiff_status zdiff_run(const char *old_text, const zdiff_line *old_lines,
       dp[i * stride + j] = best;
     }
   }
+}
 
-  size_t script_len = old_count + new_count - (size_t)dp[0];
-  if (ops_out)
-    *ops_out = script_len;
-  if (!ops && ops_cap)
-    return ZDIFF_ARG;
-  if (ops_cap < script_len)
-    return ZDIFF_SPACE;
-
+static void emit_script(const char *old_text, const zdiff_line *old_lines,
+                        size_t old_count, const char *new_text,
+                        const zdiff_line *new_lines, size_t new_count,
+                        const uint32_t *dp, zdiff_op *ops) {
+  const size_t stride = new_count + 1;
   size_t i = 0, j = 0, k = 0;
   while (i < old_count || j < new_count) {
     if (i < old_count && j < new_count &&
@@ -108,6 +90,38 @@ zdiff_status zdiff_run(const char *old_text, const zdiff_line *old_lines,
       j++;
     }
   }
+}
+
+static zdiff_status validate_input(const char *old_text, const zdiff_line *old_lines,
+                                   size_t old_count, const char *new_text,
+                                   const zdiff_line *new_lines, size_t new_count,
+                                   const uint32_t *dp, size_t dp_cells) {
+  if ((old_count && (!old_text || !old_lines)) ||
+      (new_count && (!new_text || !new_lines))) return ZDIFF_ARG;
+  size_t need = zdiff_cells(old_count, new_count);
+  if (need == 0) return ZDIFF_BOUND;
+  if (!dp && dp_cells) return ZDIFF_ARG;
+  if (dp_cells < need) return ZDIFF_SPACE;
+  if (old_count + 1 > SIZE_MAX / (new_count + 1))
+    return ZDIFF_BOUND; /* unreachable given zdiff_cells, but total */
+  return ZDIFF_OK;
+}
+
+zdiff_status zdiff_run(const char *old_text, const zdiff_line *old_lines,
+                       size_t old_count, const char *new_text,
+                       const zdiff_line *new_lines, size_t new_count,
+                       uint32_t *dp, size_t dp_cells, zdiff_op *ops,
+                       size_t ops_cap, size_t *ops_out) {
+  if (ops_out) *ops_out = 0;
+  zdiff_status status = validate_input(old_text, old_lines, old_count,
+                                       new_text, new_lines, new_count, dp, dp_cells);
+  if (status != ZDIFF_OK) return status;
+  build_lcs(old_text, old_lines, old_count, new_text, new_lines, new_count, dp);
+  size_t script_len = old_count + new_count - (size_t)dp[0];
+  if (ops_out) *ops_out = script_len;
+  if (!ops && ops_cap) return ZDIFF_ARG;
+  if (ops_cap < script_len) return ZDIFF_SPACE;
+  emit_script(old_text, old_lines, old_count, new_text, new_lines, new_count, dp, ops);
   return ZDIFF_OK;
 }
 

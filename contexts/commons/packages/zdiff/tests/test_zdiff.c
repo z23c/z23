@@ -331,7 +331,33 @@ static int test_cli_inclusive_read_bound(void) {
   return 0;
 }
 
+static int test_script_capacity_boundary(void) {
+  const char old[] = "a\nb\n", next[] = "b\na\n";
+  zdiff_line ol[2], nl[2];
+  uint32_t dp[9];
+  zdiff_op ops[3], saved[3];
+  size_t out = 99;
+  CHECK(zdiff_split(old, sizeof old - 1, ol, 2) == 2);
+  CHECK(zdiff_split(next, sizeof next - 1, nl, 2) == 2);
+  memset(ops, 0xa5, sizeof ops);
+  memcpy(saved, ops, sizeof ops);
+  CHECK(zdiff_run(old, ol, 2, next, nl, 2, dp, 9, ops, 2, &out) == ZDIFF_SPACE);
+  CHECK(out == 3 && memcmp(ops, saved, sizeof ops) == 0 && dp[0] == 1);
+  out = 99;
+  CHECK(zdiff_run(old, ol, 2, next, nl, 2, dp, 9, NULL, 1, &out) == ZDIFF_ARG);
+  CHECK(out == 3 && dp[0] == 1);
+  CHECK(zdiff_run(old, ol, 2, next, nl, 2, dp, 9, NULL, 0, &out) == ZDIFF_SPACE);
+  CHECK(out == 3);
+  CHECK(zdiff_run(old, ol, 2, next, nl, 2, dp, 9, ops, 3, &out) == ZDIFF_OK);
+  CHECK(out == 3 && ops[0].kind == ZDIFF_DEL && ops[0].old_line == 0 &&
+        ops[0].new_line == 0 && ops[1].kind == ZDIFF_KEEP &&
+        ops[1].old_line == 1 && ops[1].new_line == 0 &&
+        ops[2].kind == ZDIFF_INS && ops[2].old_line == 2 && ops[2].new_line == 1);
+  return 0;
+}
+
 int main(void) {
+  if (test_script_capacity_boundary() != 0) return 1;
   if (test_cli_inclusive_read_bound() != 0) return 1;
   struct {
     const char *name;
