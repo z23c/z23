@@ -69,23 +69,11 @@ static zwalk_type type_of(mode_t m) {
   return ZWALK_OTHER;
 }
 
-static wk_status visit_node(const char *path, int depth,
-                            const struct stat *st,
-                            const struct zwalk_opts *opts,
-                            zwalk_visit_fn visit, void *ctx) {
-  zwalk_type t = type_of(st->st_mode);
-  uint64_t size = S_ISREG(st->st_mode) ? (uint64_t)st->st_size : 0;
-  zwalk_action a = visit(ctx, path, t, depth, size);
-  if (a == ZWALK_STOP)
-    return WK_STOP;
-  if (a == ZWALK_SKIP || t != ZWALK_DIR || depth >= opts->max_depth)
-    return WK_OK;
-
-  /* Collect, sort, then visit: readdir order is unspecified. */
+static wk_status collect_names(const char *path, const struct zwalk_opts *opts,
+                               struct name_list *nl) {
   DIR *dir = opendir(path);
   if (!dir)
     return WK_ERR;
-  struct name_list nl = { NULL, 0, 0 };
   wk_status status = WK_OK;
   errno = 0;
   struct dirent *de;
@@ -94,7 +82,7 @@ static wk_status visit_node(const char *path, int depth,
       continue;
     if (opts->skip_hidden && de->d_name[0] == '.')
       continue;
-    if (!name_push(&nl, de->d_name)) {
+    if (!name_push(nl, de->d_name)) {
       status = WK_ERR;
       break;
     }
@@ -102,13 +90,24 @@ static wk_status visit_node(const char *path, int depth,
   if (errno != 0)
     status = WK_ERR; /* readdir failed mid-stream */
   closedir(dir);
-  if (status == WK_OK && nl.n > 0)
-    qsort(nl.v, nl.n, sizeof(nl.v[0]), name_cmp);
+  if (status == WK_OK && nl->n > 0)
+    qsort(nl->v, nl->n, sizeof(nl->v[0]), name_cmp);
+  return status;
+}
 
+static wk_status visit_node(const char *path, int depth, const struct stat *st,
+                            const struct zwalk_opts *opts,
+                            zwalk_visit_fn visit, void *ctx);
+
+static wk_status visit_children(const char *path, int depth,
+                                const struct zwalk_opts *opts,
+                                zwalk_visit_fn visit, void *ctx,
+                                const struct name_list *nl) {
+  wk_status status = WK_OK;
   size_t plen = strlen(path);
   bool slash = plen > 0 && path[plen - 1] == '/';
-  for (size_t i = 0; status == WK_OK && i < nl.n; i++) {
-    size_t nlen = strlen(nl.v[i]);
+  for (size_t i = 0; status == WK_OK && i < nl->n; i++) {
+    size_t nlen = strlen(nl->v[i]);
     if (plen + (slash ? 0 : 1) + nlen + 1 > PATH_MAX) {
       status = WK_ERR; /* path over the bound: fail closed */
       break;
@@ -118,7 +117,7 @@ static wk_status visit_node(const char *path, int depth,
     size_t at = plen;
     if (!slash)
       child[at++] = '/';
-    memcpy(child + at, nl.v[i], nlen + 1);
+    memcpy(child + at, nl->v[i], nlen + 1);
 
     struct stat cst;
     int rc = opts->follow_symlinks ? stat(child, &cst) : lstat(child, &cst);
@@ -128,6 +127,24 @@ static wk_status visit_node(const char *path, int depth,
     }
     status = visit_node(child, depth + 1, &cst, opts, visit, ctx);
   }
+  return status;
+}
+
+static wk_status visit_node(const char *path, int depth, const struct stat *st,
+                            const struct zwalk_opts *opts,
+                            zwalk_visit_fn visit, void *ctx) {
+  zwalk_type t = type_of(st->st_mode);
+  uint64_t size = S_ISREG(st->st_mode) ? (uint64_t)st->st_size : 0;
+  zwalk_action a = visit(ctx, path, t, depth, size);
+  if (a == ZWALK_STOP)
+    return WK_STOP;
+  if (a == ZWALK_SKIP || t != ZWALK_DIR || depth >= opts->max_depth)
+    return WK_OK;
+  /* Collect and sort before visiting: readdir order is unspecified. */
+  struct name_list nl = { NULL, 0, 0 };
+  wk_status status = collect_names(path, opts, &nl);
+  if (status == WK_OK)
+    status = visit_children(path, depth, opts, visit, ctx, &nl);
   name_list_free(&nl);
   return status;
 }

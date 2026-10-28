@@ -389,6 +389,24 @@ static void test_root_symlink_ancestor(void) {
   CHECK(nvisits == 1 && strcmp(visits[0], expected) == 0);
 }
 
+static void test_dangling_child(void) {
+  char path[512], expected[600];
+  path_to(path, sizeof path, "b-dangling");
+  symlink_rel("missing-target", "b-dangling");
+  snprintf(expected, sizeof expected, "S 1 0 %s", path);
+  nvisits = 0;
+  CHECK(zwalk(root, NULL, record, NULL));
+  CHECK(nvisits > 3 && strcmp(visits[3], expected) == 0);
+  struct zwalk_opts follow = { ZWALK_DEFAULT_MAX_DEPTH, false, true };
+  nvisits = 0;
+  CHECK(!zwalk(root, &follow, record, NULL));
+  CHECK(nvisits == 3);
+  char earlier[600];
+  snprintf(earlier, sizeof earlier, "F 1 5 %s/a.txt", root);
+  CHECK(nvisits == 3 && strcmp(visits[2], earlier) == 0);
+  CHECK(remove(path) == 0);
+}
+
 int main(void) {
   build_fixture();
   test_symlink_root_slashes();
@@ -400,6 +418,7 @@ int main(void) {
   test_follow_symlinks();
   test_prune();
   test_stop();
+  test_dangling_child();
   test_fail_closed();
   cleanup_fixture();
   if (failures) {
