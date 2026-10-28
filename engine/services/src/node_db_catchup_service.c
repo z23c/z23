@@ -250,7 +250,7 @@ static bool catchup_reopen_batch_txn(struct node_db *ndb, int h,
  * writes tx_outputs/inputs/op_returns/sapling/joinsplits/sprout_nullifiers
  * + the chained view_integrity receipt and returns the shielded value
  * accumulators), backfill blk.sprout_value/sapling_value from those
- * accumulators, THEN db_block_save — so the blocks row and the integrity
+ * accumulators, THEN db_block_save_canonical — so the blocks row and the integrity
  * receipt agree. prev_receipt carries the previous height's receipt
  * forward across the ascending catchup walk (NULL/zeros at genesis);
  * out_receipt receives this height's receipt for the next iteration.
@@ -323,8 +323,8 @@ static bool sync_block_lean(struct node_db *ndb,
     db_blk.sprout_value = sprout_val;
     db_blk.sapling_value = sapling_val;
 
-    if (!db_block_save(ndb, &db_blk))
-        LOG_FAIL("sync", "sync_block_lean: db_block_save failed at height %d",
+    if (!db_block_save_canonical(ndb, &db_blk))
+        LOG_FAIL("sync", "sync_block_lean: db_block_save_canonical failed at height %d",
                  pindex->nHeight);
 
     return true;

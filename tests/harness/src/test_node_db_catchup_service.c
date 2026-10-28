@@ -807,6 +807,165 @@ static void ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
     test_cleanup_tmpdir(fx->dirS);
 }
 
+static int ndc_fork_row_count(struct node_db *ndb, const uint8_t hash[32],
+                              const uint8_t *prev)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = prev ? "SELECT count(*) FROM blocks WHERE hash=? AND prev_hash=?"
+                           : "SELECT count(*) FROM blocks WHERE hash=?";
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_blob(stmt, 1, hash, 32, SQLITE_TRANSIENT);
+    if (prev) sqlite3_bind_blob(stmt, 2, prev, 32, SQLITE_TRANSIENT);
+    int count = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+static int ndc_fork_status(struct node_db *ndb, const uint8_t hash[32])
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT status FROM blocks WHERE hash=?",
+                           -1, &stmt, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_blob(stmt, 1, hash, 32, SQLITE_TRANSIENT);
+    int status = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+    sqlite3_finalize(stmt);
+    return status;
+}
+
+static int ndc_check_competing_fork_parent(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!node_db_open(&ndb, ":memory:")) return 1;
+    struct db_block parent = {0}, child = {0};
+    parent.hash[0] = 0x11; parent.height = 1; parent.status = 3;
+    parent.prev_hash[0] = 0x33; parent.merkle_root[0] = 0x44;
+    parent.time = 1700000123u; parent.bits = 0x2000ffffu;
+    uint8_t solution = 1; parent.solution = &solution; parent.solution_len = 1;
+    child.hash[0] = 0x22; child.height = 2; child.status = 3;
+    child.merkle_root[0] = 0x55; child.time = parent.time; child.bits = parent.bits;
+    child.solution = &solution; child.solution_len = 1;
+    memcpy(child.prev_hash, parent.hash, 32);
+    bool seeded = db_block_save(&ndb, &parent) && db_block_save(&ndb, &child);
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000123u;
+    blk.header.nBits = 0x2000ffffu;
+    blk.header.hashPrevBlock.data[0] = 0x33;
+    blk.header.hashMerkleRoot.data[0] = 0x44;
+    struct uint256 competing;
+    block_get_hash(&blk, &competing);
+    struct block_index index = {0};
+    index.nHeight = 1; index.nStatus = BLOCK_HAVE_DATA;
+    index.phashBlock = &competing;
+    int before_parent = ndc_fork_row_count(&ndb, parent.hash, NULL);
+    int before_child = ndc_fork_row_count(&ndb, child.hash, parent.hash);
+    bool trigger = sqlite3_exec(ndb.db, "CREATE TRIGGER fail_competing BEFORE INSERT ON blocks "
+        "BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END", NULL, NULL, NULL) == SQLITE_OK;
+    bool began = sqlite3_exec(ndb.db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool refused = seeded && trigger && began &&
+        !node_db_catchup_test_sync_block_lean(&ndb, &blk, &index);
+    bool rolled = sqlite3_exec(ndb.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    NDC_CHECK("insert failure rollback preserves the original fork and child",
+              refused && rolled);
+    NDC_CHECK("rollback retains parent", ndc_fork_row_count(&ndb, parent.hash, NULL) == 1);
+    NDC_CHECK("rollback restores status", ndc_fork_status(&ndb, parent.hash) == 3);
+    NDC_CHECK("rollback retains child link", ndc_fork_row_count(&ndb, child.hash, parent.hash) == 1);
+    NDC_CHECK("rollback excludes competing row", ndc_fork_row_count(&ndb, competing.data, NULL) == 0);
+    bool dropped = sqlite3_exec(ndb.db, "DROP TRIGGER fail_competing", NULL, NULL, NULL) == SQLITE_OK;
+    bool saved = dropped && node_db_catchup_test_sync_block_lean(&ndb, &blk, &index);
+    int after_parent = ndc_fork_row_count(&ndb, parent.hash, NULL);
+    int after_child = ndc_fork_row_count(&ndb, child.hash, parent.hash);
+    int after_competing = ndc_fork_row_count(&ndb, competing.data, NULL);
+    printf("fork witness: seeded=%d saved=%d before_parent=%d before_child=%d "
+           "after_parent=%d after_child=%d after_competing=%d\n",
+           seeded, saved, before_parent, before_child, after_parent,
+           after_child, after_competing);
+    NDC_CHECK("catchup preserves the existing fork parent and child",
+              seeded && saved && before_parent == 1 && before_child == 1);
+    NDC_CHECK("both fork rows remain", after_parent == 1 && after_competing == 1);
+    NDC_CHECK("child link remains", after_child == 1);
+    NDC_CHECK("old fork demoted", ndc_fork_status(&ndb, parent.hash) == BLOCK_VALID_TREE);
+    NDC_CHECK("new fork canonical", ndc_fork_status(&ndb, competing.data) >= 3);
+    bool saved_again = node_db_catchup_test_sync_block_lean(&ndb, &blk, &index);
+    NDC_CHECK("repeating catchup preserves both forks and child",
+              saved_again);
+    NDC_CHECK("repeat retains parent", ndc_fork_row_count(&ndb, parent.hash, NULL) == 1);
+    NDC_CHECK("repeat retains demotion", ndc_fork_status(&ndb, parent.hash) == BLOCK_VALID_TREE);
+    NDC_CHECK("repeat retains child link", ndc_fork_row_count(&ndb, child.hash, parent.hash) == 1);
+    NDC_CHECK("repeat retains competitor", ndc_fork_row_count(&ndb, competing.data, NULL) == 1);
+    block_free(&blk);
+    node_db_close(&ndb);
+    return failures;
+}
+
+static bool ndc_seed_service_conflict(struct node_db *ndb, struct db_block *parent,
+                                      struct db_block *child)
+{
+    static uint8_t solution = 1;
+    memset(parent, 0, sizeof(*parent));
+    memset(child, 0, sizeof(*child));
+    parent->hash[0] = 0xa1; parent->height = 1; parent->status = 3;
+    parent->prev_hash[0] = 0xa0; parent->merkle_root[0] = 0xa2;
+    parent->time = 1700000123u; parent->bits = 0x2000ffffu;
+    parent->solution = &solution; parent->solution_len = 1;
+    child->hash[0] = 0xb1; child->height = 2; child->status = 3;
+    memcpy(child->prev_hash, parent->hash, 32);
+    child->merkle_root[0] = 0xb2; child->time = parent->time;
+    child->bits = parent->bits; child->solution = &solution; child->solution_len = 1;
+    return db_block_save(ndb, parent) && db_block_save(ndb, child);
+}
+
+struct ndc_insert_failure_probe { int calls; int old_status; };
+
+static void ndc_abort_competing_insert(sqlite3_context *ctx, int argc,
+                                       sqlite3_value **argv)
+{
+    struct ndc_insert_failure_probe *probe = sqlite3_user_data(ctx);
+    probe->calls++;
+    probe->old_status = argc == 1 ? sqlite3_value_int(argv[0]) : -1;
+    sqlite3_result_error(ctx, "fixture insert failure", -1);
+}
+
+static int ndc_check_service_conflict_rollback(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct db_block parent, child;
+    struct ndc_insert_failure_probe probe = {0};
+    if (!node_db_open(&ndb, ":memory:")) return 1;
+    bool seeded = ndc_seed_service_conflict(&ndb, &parent, &child);
+    bool registered = sqlite3_create_function_v2(ndb.db, "fixture_abort", 1,
+        SQLITE_UTF8, &probe, ndc_abort_competing_insert, NULL, NULL, NULL) == SQLITE_OK;
+    bool trigger = registered && sqlite3_exec(ndb.db,
+        "CREATE TRIGGER fail_competing BEFORE INSERT ON blocks "
+        "WHEN NEW.height=1 AND NEW.hash<>X'A100000000000000000000000000000000000000000000000000000000000000' "
+        "BEGIN SELECT fixture_abort((SELECT status FROM blocks WHERE "
+        "hash=X'A100000000000000000000000000000000000000000000000000000000000000')); END",
+        NULL, NULL, NULL) == SQLITE_OK;
+    int result = seeded && trigger && fx->built
+        ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF) : -99;
+    int parent_count = ndc_fork_row_count(&ndb, parent.hash, NULL);
+    int parent_status = ndc_fork_status(&ndb, parent.hash);
+    int child_count = ndc_fork_row_count(&ndb, child.hash, parent.hash);
+    int competing_count = ndc_fork_row_count(&ndb, fx->hashes[1].data, NULL);
+    int tip = node_db_sync_get_tip_height(&ndb);
+    printf("service rollback: seeded=%d trigger=%d result=%d calls=%d demoted_status=%d parent=%d status=%d "
+           "child=%d competing=%d tip=%d\n", seeded, trigger, result, probe.calls, probe.old_status,
+           parent_count, parent_status, child_count, competing_count, tip);
+    NDC_CHECK("full catchup rolls back a failed competing insert",
+              seeded && trigger && result <= 0 && result != -99);
+    NDC_CHECK("injected failure observed demotion", probe.calls == 1 && probe.old_status == BLOCK_VALID_TREE);
+    NDC_CHECK("service rollback retains parent", parent_count == 1 && parent_status == 3);
+    NDC_CHECK("service rollback retains child", child_count == 1);
+    NDC_CHECK("service rollback excludes competitor", competing_count == 0);
+    NDC_CHECK("service rollback does not advance tip", tip < 1);
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -820,6 +979,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_valid_block_file_maps(dir, blocks, &probe);
     failures += ndc_check_tail_fold_and_sparse_prefix();
     failures += ndc_check_hashless_sync_block_lean();
+    failures += ndc_check_competing_fork_parent();
     failures += ndc_check_torn_hashless_walk();
 
     /* ── Commit cadence / BUSY_SNAPSHOT restart / abort-streak park ────
@@ -827,6 +987,7 @@ int test_node_db_catchup_service(void)
      * node.db instances against one shared fixture datadir. */
     struct ndc_fix_ctx fx = {0};
     failures += ndc_prepare_five_block_fixture(&fx);
+    failures += ndc_check_service_conflict_rollback(&fx);
     failures += ndc_check_batch_cap_two(&fx);
     failures += ndc_check_default_cap_one_commit(&fx);
     failures += ndc_check_busy_snapshot_restart(&fx);
