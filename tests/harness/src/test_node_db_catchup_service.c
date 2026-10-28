@@ -643,6 +643,121 @@ static int ndc_check_reopen_busy_never_clears(struct ndc_fix_ctx *fx)
     return failures;
 }
 
+/* Clean close/reopen only; this does not simulate a crash or power loss. */
+static bool ndc_restart_int_equal(sqlite3_stmt *a,sqlite3_stmt *b,int col)
+{
+    return sqlite3_column_type(a,col)==SQLITE_INTEGER && sqlite3_column_type(b,col)==SQLITE_INTEGER &&
+        sqlite3_column_int64(a,col)==sqlite3_column_int64(b,col);
+}
+static bool ndc_restart_blob_equal(sqlite3_stmt *a,sqlite3_stmt *b,int col)
+{
+    if(sqlite3_column_type(a,col)!=SQLITE_BLOB || sqlite3_column_type(b,col)!=SQLITE_BLOB ||
+       sqlite3_column_bytes(a,col)!=32 || sqlite3_column_bytes(b,col)!=32) return false;
+    const void *x=sqlite3_column_blob(a,col),*y=sqlite3_column_blob(b,col);
+    return x && y && !memcmp(x,y,32);
+}
+static bool ndc_restart_row_equal(sqlite3_stmt *a,sqlite3_stmt *b)
+{
+    return ndc_restart_int_equal(a,b,0) && ndc_restart_blob_equal(a,b,1) &&
+        ndc_restart_blob_equal(a,b,2) && ndc_restart_int_equal(a,b,3);
+}
+static bool ndc_restart_projection_equal(sqlite3 *a,sqlite3 *b)
+{
+    const char *sql="SELECT height,hash,prev_hash,status FROM blocks ORDER BY height,hash";
+    sqlite3_stmt *x=NULL,*y=NULL; bool ok=false; int rows=0;
+    if(sqlite3_prepare_v2(a,sql,-1,&x,NULL)!=SQLITE_OK || sqlite3_prepare_v2(b,sql,-1,&y,NULL)!=SQLITE_OK) goto done;
+    for(;;) {
+        int rx=sqlite3_step(x),ry=sqlite3_step(y);
+        if(rx==SQLITE_DONE && ry==SQLITE_DONE) { ok=rows==NDC_FIX_N; break; }
+        if(rx!=SQLITE_ROW || ry!=SQLITE_ROW || !ndc_restart_row_equal(x,y)) break;
+        rows++;
+    }
+done:
+    if(x && sqlite3_finalize(x)!=SQLITE_OK) ok=false;
+    if(y && sqlite3_finalize(y)!=SQLITE_OK) ok=false;
+    return ok;
+}
+static bool ndc_restart_prefix(sqlite3 *db)
+{
+    sqlite3_stmt *s=NULL; bool ok=false;
+    const char *sql="SELECT count(*),count(DISTINCT height),min(height),max(height) FROM blocks";
+    if(sqlite3_prepare_v2(db,sql,-1,&s,NULL)!=SQLITE_OK) goto done;
+    ok=sqlite3_step(s)==SQLITE_ROW && sqlite3_column_int(s,0)==2 && sqlite3_column_int(s,1)==2 &&
+       sqlite3_column_int(s,2)==1 && sqlite3_column_int(s,3)==2 && sqlite3_step(s)==SQLITE_DONE;
+done:
+    if(s && sqlite3_finalize(s)!=SQLITE_OK) ok=false;
+    return ok;
+}
+static int ndc_restart_check_result(struct node_db *resumed,struct node_db *fresh,int walked,int reference)
+{
+    int failures=0; uint8_t a[32],b[32];
+    bool receipts=db_view_integrity_get(resumed,NDC_FIX_N,a) && db_view_integrity_get(fresh,NDC_FIX_N,b);
+    NDC_CHECK("reopened walk resumes exactly remaining blocks",walked==NDC_FIX_N-2 && reference==NDC_FIX_N);
+    NDC_CHECK("reopened projection matches fresh parent and status",ndc_restart_projection_equal(resumed->db,fresh->db));
+    NDC_CHECK("reopened receipt matches fresh uninterrupted",receipts && !memcmp(a,b,32));
+    NDC_CHECK("reopened walk leaves active depth zero",!node_db_catchup_service_active() && node_db_catchup_test_active_depth()==0);
+    NDC_CHECK("reopened walk resets abort streak",node_db_catchup_lock_guard_test_abort_streak()==0);
+    return failures;
+}
+struct ndc_restart_ctx {
+    char dir[256],refdir[256],path[512],refpath[512];
+    struct node_db ndb,reference;
+    bool opened,ref_open;
+};
+static void ndc_restart_setup(struct ndc_restart_ctx *r)
+{
+    test_make_tmpdir(r->dir,sizeof(r->dir),"node_db_catchup","restart_durable");
+    test_make_tmpdir(r->refdir,sizeof(r->refdir),"node_db_catchup","restart_reference");
+    snprintf(r->path,sizeof(r->path),"%s/node.db",r->dir);
+    snprintf(r->refpath,sizeof(r->refpath),"%s/node.db",r->refdir);
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_test_reset_reopen();
+    node_db_catchup_lock_guard_test_set_batch_size(2);
+}
+static int ndc_restart_abort_and_reopen(struct ndc_fix_ctx *fx,struct ndc_restart_ctx *r)
+{
+    int failures=0;
+    r->opened=fx->built && node_db_open(&r->ndb,r->path);
+    node_db_catchup_test_force_reopen_busy(NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS);
+    int first=r->opened?node_db_catchup_service_run(&r->ndb,&fx->ac,NULL,fx->dirF):-99;
+    NDC_CHECK("restart fixture aborts after committed batch",first==-1 && node_db_catchup_test_reopen_attempts()==NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS);
+    NDC_CHECK("restart abort pairs active depth",!node_db_catchup_service_active() && node_db_catchup_test_active_depth()==0);
+    NDC_CHECK("restart abort records one streak",node_db_catchup_lock_guard_test_abort_streak()==1);
+    if(r->opened) { node_db_close(&r->ndb); r->opened=false; }
+    node_db_catchup_test_reset_reopen();
+    r->opened=fx->built && node_db_open(&r->ndb,r->path);
+    NDC_CHECK("reopened database retains exactly prefix two",r->opened && ndc_restart_prefix(r->ndb.db));
+    return failures;
+}
+static int ndc_restart_resume(struct ndc_fix_ctx *fx,struct ndc_restart_ctx *r)
+{
+    int failures=0;
+    int walked=r->opened?node_db_catchup_service_run(&r->ndb,&fx->ac,NULL,fx->dirF):-1;
+    NDC_CHECK("resumed success resets streak before reference",walked==NDC_FIX_N-2 && node_db_catchup_lock_guard_test_abort_streak()==0);
+    NDC_CHECK("resumed walk immediately leaves depth zero",!node_db_catchup_service_active() && node_db_catchup_test_active_depth()==0);
+    r->ref_open=fx->built && node_db_open(&r->reference,r->refpath);
+    int fresh=r->ref_open?node_db_catchup_service_run(&r->reference,&fx->ac,NULL,fx->dirF):-1;
+    if(r->opened && r->ref_open) failures+=ndc_restart_check_result(&r->ndb,&r->reference,walked,fresh);
+    else { NDC_CHECK("restart and reference databases open",false); }
+    return failures;
+}
+static void ndc_restart_cleanup(struct ndc_restart_ctx *r)
+{
+    if(r->opened) node_db_close(&r->ndb);
+    if(r->ref_open) node_db_close(&r->reference);
+    node_db_catchup_test_reset_reopen(); node_db_catchup_lock_guard_test_reset();
+    test_cleanup_tmpdir(r->dir); test_cleanup_tmpdir(r->refdir);
+}
+static int ndc_check_durable_reopen(struct ndc_fix_ctx *fx)
+{
+    struct ndc_restart_ctx r={0};
+    ndc_restart_setup(&r);
+    int failures=ndc_restart_abort_and_reopen(fx,&r);
+    failures+=ndc_restart_resume(fx,&r);
+    ndc_restart_cleanup(&r);
+    return failures;
+}
+
 static int ndc_check_maintenance_defers_while_active(struct ndc_fix_ctx *fx)
 {
     int failures = 0;
@@ -1056,6 +1171,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_busy_snapshot_restart(&fx);
     failures += ndc_check_transient_reopen_busy(&fx);
     failures += ndc_check_reopen_busy_never_clears(&fx);
+    failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
     failures += ndc_check_abort_storm_parks_worker();
     failures += ndc_append_sixth_block(&fx);
