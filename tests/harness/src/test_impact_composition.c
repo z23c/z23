@@ -14468,6 +14468,58 @@ static int test_ic_fuzz_llvm_selection_table(void)
     return failures;
 }
 
+static int test_ic_proof_umbrella_union(void)
+{
+    int failures = 0;
+    TEST("impact composition: proof folds complete umbrella across plan lists") {
+        struct zcl_devloop_plan plan = {0};
+        char selector[4096], gated[PROOF_HOST_GATED_MAX];
+        uint32_t count = 0;
+        memset(selector, 0x7f, sizeof(selector));
+        selector[sizeof(selector) - 1] = '\0';
+        for (int order = 0; order < 2; order++) {
+            memset(&plan, 0, sizeof(plan));
+            snprintf(plan.path_groups[0], ZCL_DEVLOOP_GROUP_MAX, "%s",
+                     order ? "dev_land" : "test_dev_land");
+            snprintf(plan.closure_groups[0], ZCL_DEVLOOP_GROUP_MAX, "%s",
+                     order ? "test_dev_land" : "dev_land");
+            plan.path_groups_len = plan.closure_groups_len = 1;
+            ASSERT(zcl_dev_proof_test_build_test_selector(
+                &plan, ".", selector, sizeof(selector), &count, gated, sizeof(gated)));
+            ASSERT(count == 4);
+            ASSERT_STR_EQ(selector, "test_dev_land_shard_01,test_dev_land_shard_02,"
+                                    "test_dev_land_shard_03,test_dev_land_shard_04");
+            ASSERT(!ic_selector_has(selector, "test_dev_land"));
+            ASSERT(ic_selector_has(selector, "test_dev_land_shard_01"));
+            ASSERT(ic_selector_has(selector, "test_dev_land_shard_02"));
+            ASSERT(ic_selector_has(selector, "test_dev_land_shard_03"));
+            ASSERT(ic_selector_has(selector, "test_dev_land_shard_04"));
+            ASSERT(!gated[0]);
+        }
+        memset(&plan, 0, sizeof(plan));
+        ASSERT(zcl_dev_proof_test_build_test_selector(&plan, ".", selector,
+            sizeof(selector), &count, gated, sizeof(gated)));
+        ASSERT(count == 0 && selector[0] == '\0');
+        memset(&plan, 0, sizeof(plan));
+        snprintf(plan.path_groups[0], ZCL_DEVLOOP_GROUP_MAX, "test_dev_land");
+        snprintf(plan.closure_groups[0], ZCL_DEVLOOP_GROUP_MAX, "test_dev_land_shard_01");
+        plan.path_groups_len = plan.closure_groups_len = 1;
+        ASSERT(zcl_dev_proof_test_build_test_selector(&plan, ".", selector,
+            sizeof(selector), &count, gated, sizeof(gated)));
+        ASSERT(count == 2 && ic_selector_has(selector, "test_dev_land"));
+        plan.closure_groups_len = 0;
+        ASSERT(zcl_dev_proof_test_build_test_selector(&plan, ".", selector,
+            sizeof(selector), &count, gated, sizeof(gated)));
+        ASSERT(count == 1 && ic_selector_has(selector, "test_dev_land"));
+        snprintf(plan.path_groups[0], ZCL_DEVLOOP_GROUP_MAX, "dev_platform");
+        ASSERT(zcl_dev_proof_test_build_test_selector(&plan, ".", selector,
+            sizeof(selector), &count, gated, sizeof(gated)));
+        ASSERT(ic_selector_has(selector, "test_dev_platform"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -14489,6 +14541,7 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_truncated_closure_preserves_groups();
     failures += test_ic_closure_capacity_follows_corpus();
+    failures += test_ic_proof_umbrella_union();
     failures += test_ic_large_plan_preserves_groups();
     failures += test_ic_command_latency_scope_is_precise();
     failures += test_ic_jsonq_exec_contract();

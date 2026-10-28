@@ -7323,6 +7323,38 @@ static bool dp_selector_groups(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
     return true;
 }
 
+static bool dp_selector_selected(const char *full, void *ctx)
+{
+    return dp_selector_has(ctx, full);
+}
+
+/* Fold only declared umbrellas fully represented by their selected shards. */
+static void dp_selector_fold_umbrellas(char *out, size_t *pos, uint32_t *count)
+{
+    for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+        const char *full = zcl_test_group_catalog_at(i);
+        if (!zcl_test_group_is_umbrella(full) || !dp_selector_has(out, full) ||
+            !zcl_test_group_umbrella_subsumed(full, dp_selector_selected, out))
+            continue;
+        size_t len = strlen(full);
+        char *at = out;
+        while (*at) {
+            char *end = strchr(at, ',');
+            size_t item_len = end ? (size_t)(end - at) : strlen(at);
+            if (item_len == len && memcmp(at, full, len) == 0) {
+                if (end) memmove(at, end + 1, strlen(end + 1) + 1);
+                else if (at != out) at[-1] = '\0';
+                else *at = '\0';
+                *pos = strlen(out);
+                (*count)--;
+                break;
+            }
+            if (!end) break;
+            at = end + 1;
+        }
+    }
+}
+
 /* `root` is the tree the test dimension execs in -- the proof generation, not
  * the submitting checkout -- because that is the tree whose contents decide
  * whether a host-gated group could observe anything. `gated_out` receives the
@@ -7337,6 +7369,7 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
     if (!plan || !out || out_size == 0 || !count_out || !gated_out ||
         gated_size == 0)
         return false;
+    out[0] = '\0';
     gated_out[0] = '\0';
     size_t pos = 0;
     uint32_t count = 0;
@@ -7353,6 +7386,7 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
         !dp_selector_groups(plan->closure_groups, plan->closure_groups_len,
                             out, out_size, &pos, &count))
         return false;
+    if (count) dp_selector_fold_umbrellas(out, &pos, &count);
     *count_out = count;
     return true;
 }
