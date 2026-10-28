@@ -14,6 +14,7 @@
 #include "test_group_catalog.h"
 #include "base/safe_alloc.h"
 #include "sha3/sha3.h"
+#include "util/compare.h"
 #include "util/file_io.h"
 
 #include <ctype.h>
@@ -545,15 +546,55 @@ static bool aih_referrer_hits(const char *text, const char *path,
 
 /* Byte order, not locale order: the scan result must not depend on the
  * process locale or on the filesystem's directory order. */
-static int aih_dirent_name_cmp(const struct dirent **a, const struct dirent **b)
+static bool aih_is_c_source(const char *name)
 {
-    return strcmp((*a)->d_name, (*b)->d_name);
+    size_t nlen = strlen(name);
+    return nlen >= 3 && strcmp(name + nlen - 2, ".c") == 0;
 }
 
-static int aih_dirent_is_c_source(const struct dirent *ent)
+struct aih_names { char **items; size_t count, capacity; };
+
+static void aih_names_free(struct aih_names *names)
 {
-    size_t nlen = strlen(ent->d_name);
-    return nlen >= 3 && strcmp(ent->d_name + nlen - 2, ".c") == 0;
+    for (size_t i = 0; i < names->count; i++) free(names->items[i]);
+    free(names->items);
+}
+
+static bool aih_names_add(struct aih_names *names, const char *name)
+{
+    if (names->count == names->capacity) {
+        if (names->capacity > SIZE_MAX / 2 / sizeof(*names->items)) return false;
+        size_t cap = names->capacity ? names->capacity * 2 : 32;
+        char **items = zcl_realloc(names->items, cap * sizeof(*items), "agent_impact_names");
+        if (!items) return false;
+        names->items = items;
+        names->capacity = cap;
+    }
+    char *copy = zcl_strdup(name, "agent_impact_name");
+    if (!copy) return false;
+    names->items[names->count++] = copy;
+    return true;
+}
+
+static bool aih_names_read(const char *dir, struct aih_names *names)
+{
+    DIR *dh = opendir(dir);
+    if (!dh) return false;
+    bool ok = true;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dh)) != NULL) {
+        if (aih_is_c_source(entry->d_name) && !aih_names_add(names, entry->d_name)) {
+            ok = false;
+            break;
+        }
+        errno = 0;
+    }
+    if (errno) ok = false;
+    (void)closedir(dh);
+    if (ok && names->count > 1)
+        qsort(names->items, names->count, sizeof(*names->items), zcl_cmp_cstr);
+    return ok;
 }
 
 /* Visits the directory's .c files in sorted name order. `code tests` caps the
@@ -565,11 +606,13 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
                                        struct agent_impact_acc *acc,
                                        bool *matched)
 {
-    struct dirent **names = NULL;
-    int count = scandir(dir, &names, aih_dirent_is_c_source, aih_dirent_name_cmp);
-    if (count < 0) return;
-    for (int i = 0; i < count; i++) {
-        const char *name = names[i]->d_name;
+    struct aih_names names = {0};
+    if (!aih_names_read(dir, &names)) {
+        aih_names_free(&names);
+        return;
+    }
+    for (size_t i = 0; i < names.count; i++) {
+        const char *name = names.items[i];
         char relp[512];
         (void)snprintf(relp, sizeof(relp), "%s/%s", dir, name);
         if (strcmp(relp, path) == 0)
@@ -586,9 +629,7 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
         if (hit)
             aih_merge_referrer_hit(relp, acc, matched);
     }
-    for (int i = 0; i < count; i++)
-        free(names[i]);
-    free(names);
+    aih_names_free(&names);
 }
 
 /* Scanning every tests/harness/src/ and tools/lint/lintc/ file's content is

@@ -51,6 +51,7 @@
 #include <sqlite3.h>
 #include <sys/stat.h>
 #include <utime.h>
+#include <unistd.h>
 
 #define CI_IMPACT_FIX "test-tmp/code_impact_fix"
 #define CI_CONTEXT_PAGE_EDGES 257
@@ -1921,9 +1922,58 @@ static int test_code_literal_raw_rejection_contract(void)
     return failures;
 }
 
+static bool ci_name_route_files(const char *dir)
+{
+    bool ok = ci_impact_mk_write(dir, "tests/harness/src/test_fleet_parity.c",
+                                 "const char *s = \"unique_probe\";\n") &&
+              ci_impact_mk_write(dir, "tests/harness/src/test_dev_job.c",
+                                 "const char *s = \"unique_probe\";\n") &&
+              ci_impact_mk_write(dir, "tests/harness/src/test_os_proc.txt",
+                                 "const char *s = \"unique_probe\";\n");
+#if !defined(_WIN32)
+    char link[4096];
+    int n = snprintf(link, sizeof link, "%s/tests/harness/src/test_code_impact.c", dir);
+    ok = ok && n > 0 && (size_t)n < sizeof link && symlink("test_dev_job.c", link) == 0;
+#endif
+    return ok;
+}
+
+static bool ci_name_route_fixture(void)
+{
+    char cwd[4096], dir[4096];
+    if (!getcwd(cwd, sizeof cwd) || !test_mkdtemp(dir, sizeof dir, "impact_names"))
+        return false;
+    bool ok = ci_name_route_files(dir);
+    struct agent_impact_acc acc = {0};
+    if (ok && chdir(dir) == 0) {
+        ok = agent_impact_apply_name_reference_routes("tools/command/unique_probe.c", &acc);
+        ok = chdir(cwd) == 0 && ok;
+    } else ok = false;
+#if !defined(_WIN32)
+    ok = ok && acc.groups_len == 3 && strcmp(acc.groups[0], "code_impact") == 0 &&
+         strcmp(acc.groups[1], "dev_job") == 0 && strcmp(acc.groups[2], "fleet_parity") == 0;
+#else
+    ok = ok && acc.groups_len == 2 && strcmp(acc.groups[0], "dev_job") == 0 &&
+         strcmp(acc.groups[1], "fleet_parity") == 0;
+#endif
+    test_cleanup_tmpdir(dir);
+    return ok;
+}
+
+static int test_code_name_route_order(void)
+{
+    int failures = 0;
+    TEST("code impact: reference names use byte order including symlinks") {
+        ASSERT(ci_name_route_fixture());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
+    failures += test_code_name_route_order();
     failures += test_code_literal_candidate_scan();
     failures += test_code_literal_raw_rejection_contract();
     failures += test_code_impact_rule_predicate();

@@ -4,6 +4,13 @@
 #define ZCL_UTIL_COMPARE_H
 
 #include <stdint.h>
+#include <string.h>
+
+/* qsort comparator ordering pointers to strings by bytewise strcmp. */
+static inline int zcl_cmp_cstr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
 
 /* qsort comparator ordering int64_t values ascending. Subtraction-free, so
  * extreme values never overflow. */

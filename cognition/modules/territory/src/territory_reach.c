@@ -34,6 +34,7 @@
 #include "codeindex/codeindex.h"
 #include "platform/clock.h"
 #include "sha3/sha3.h"
+#include "util/compare.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -155,14 +156,6 @@ static bool tr_strset_add(struct tr_strset *s, const char *name, bool *added)
 }
 
 /* ── sorted view (what gets stored and searched) ─────────────────────── */
-
-/* Sorting POINTERS into the finished arena (rather than offsets plus a
- * comparator global) keeps the sort context in the elements themselves; the
- * offsets are recovered afterwards by subtraction. */
-static int tr_ptr_cmp(const void *a, const void *b)
-{
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
 
 bool territory_reach_contains(const struct territory_reach_set *rs,
                               const char *symbol)
@@ -396,7 +389,9 @@ static struct territory_reach_set *tr_freeze(struct tr_strset *set)
     size_t k = 0;
     for (size_t i = 0; i < set->slots; i++)
         if (set->slot[i]) ptrs[k++] = set->blob + set->slot[i] - 1;
-    qsort(ptrs, k, sizeof(*ptrs), tr_ptr_cmp);
+    /* Sorting pointers keeps the sort context in the elements themselves;
+     * offsets are recovered afterwards by subtraction. */
+    qsort(ptrs, k, sizeof(*ptrs), zcl_cmp_cstr);
     for (size_t i = 0; i < k; i++)
         offs[i] = (uint32_t)(ptrs[i] - set->blob);
     free(ptrs);
