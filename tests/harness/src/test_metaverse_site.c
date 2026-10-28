@@ -37,9 +37,11 @@
 #include "controllers/metaverse_site_controller.h"
 
 #include "base/hex.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 #include "services/metaverse_space_service.h"
 #include "vcs/space.h"
+#include "vcs/vcs_object.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -129,6 +131,18 @@ static bool ms_commit_descriptor(const char *dd, uint8_t seed,
         return false;
     snprintf(root_hex_out, 65, "%s", committed.object_root);
     return true;
+}
+
+static bool ms_store_unrelated_object(const char *dd)
+{
+    char workspace[512];
+    int n = snprintf(workspace, sizeof(workspace), "%s/zcode", dd);
+    if (n <= 0 || (size_t)n >= sizeof(workspace))
+        return false;
+    static const uint8_t bytes[] = "unrelated inert CAS object";
+    uint8_t root[32];
+    sha3_256(bytes, sizeof(bytes) - 1u, root);
+    return vcs_object_put_addressed(workspace, root, bytes, sizeof(bytes) - 1u);
 }
 
 /* ── predicates for the checks in t_routes_and_agreement ───────────── */
@@ -259,6 +273,14 @@ static int t_routes_and_agreement(const char *dd)
     bool seeded = ms_commit_descriptor(dd, 0x41, root_hex);
     MS_CHECK("fixture: service descriptor committed", seeded);
     if (!seeded)
+        return failures + 1;
+    size_t before_len = 0;
+    const char *before = ms_get(dd, "/metaverse/space", &before_len);
+    MS_CHECK("space page before unrelated object",
+             t_space_page_ok(before, before_len));
+    bool unrelated = ms_store_unrelated_object(dd);
+    MS_CHECK("fixture: unrelated CAS object stored", unrelated);
+    if (!unrelated)
         return failures + 1;
     size_t len = 0;
 

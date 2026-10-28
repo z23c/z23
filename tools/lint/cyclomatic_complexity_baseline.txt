@@ -21,7 +21,6 @@ cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_string:16
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
-contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_error_string:35

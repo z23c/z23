@@ -204,6 +204,67 @@ static int ms_space_row_cmp(const void *a, const void *b)
     return strcmp(ra->root_hex, rb->root_hex);
 }
 
+static void ms_space_record(const char *workspace, const char *root_hex,
+                            uint64_t now, struct ms_space_scan *scan)
+{
+    struct metaverse_space_object object;
+    if (!ms_space_show(workspace, root_hex, &object))
+        return; /* some other CAS citizen, or corrupt: not a space */
+    if (object.kind == METAVERSE_SPACE_OBJECT_SERVICE_DESCRIPTOR) {
+        scan->services++;
+        return;
+    }
+    if (object.kind != METAVERSE_SPACE_OBJECT_MANIFEST)
+        return;
+    scan->manifests++;
+    if (scan->shown == METAVERSE_VIEW_MAX_SPACES) {
+        scan->truncated = true;
+        return;
+    }
+    const struct vcs_space_manifest_v1 *m = &object.as.manifest;
+    struct metaverse_view_space_row *row =
+        &scan->rows[scan->shown++];
+    memset(row, 0, sizeof(*row));
+    snprintf(row->root_hex, sizeof(row->root_hex), "%s", root_hex);
+    snprintf(row->name, sizeof(row->name), "%s", m->name);
+    zcl_hex_encode(m->delegation.doc.master_pubkey, 32,
+                   row->owner_hex);
+    row->sequence = m->sequence;
+    row->not_before = m->not_before;
+    row->expiry = m->expiry;
+    row->services = m->service_count;
+    row->objects = m->object_count;
+    row->portals = m->portal_count;
+    row->has_admission = m->has_admission;
+    /* The same activity probe metaverse.space.show runs (the
+     * chain-authorization lens stays with the typed command; the
+     * site reports the local-signature grade only). */
+    row->currently_active = vcs_space_manifest_validate_at(
+        m, m->delegation.network_genesis, now) == VCS_SPACE_OK;
+}
+
+static void ms_space_scan_shard(const char *workspace, const char *shard_name,
+                                DIR *dir, uint64_t now,
+                                struct ms_space_scan *scan)
+{
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        uint8_t lo[31];
+        if (strlen(ent->d_name) != 62 ||
+            !zcl_hex_decode_lower(ent->d_name, lo, 31))
+            continue;
+        if (scan->scanned == MS_SPACE_SCAN_MAX) {
+            scan->truncated = true;
+            break;
+        }
+        scan->scanned++;
+        char root_hex[65];
+        snprintf(root_hex, sizeof(root_hex), "%s%s", shard_name,
+                 ent->d_name);
+        ms_space_record(workspace, root_hex, now, scan);
+    }
+}
+
 /* Scan <workspace>/.zvcs/objects/<2-hex>/<62-hex>, bounded. Every
  * candidate goes through metaverse_space_show — the same read path the
  * metaverse.space.show command uses — so a wire that does not re-derive
@@ -238,55 +299,7 @@ static void ms_space_scan(const char *workspace, struct ms_space_scan *scan)
         DIR *dir = opendir(shard_path);
         if (!dir)
             continue;
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            uint8_t lo[31];
-            if (strlen(ent->d_name) != 62 ||
-                !zcl_hex_decode_lower(ent->d_name, lo, 31))
-                continue;
-            if (scan->scanned == MS_SPACE_SCAN_MAX) {
-                scan->truncated = true;
-                break;
-            }
-            scan->scanned++;
-            char root_hex[65];
-            snprintf(root_hex, sizeof(root_hex), "%s%s", shard->d_name,
-                     ent->d_name);
-            struct metaverse_space_object object;
-            if (!ms_space_show(workspace, root_hex, &object))
-                continue; /* some other CAS citizen, or corrupt: not a space */
-            if (object.kind == METAVERSE_SPACE_OBJECT_SERVICE_DESCRIPTOR) {
-                scan->services++;
-                continue;
-            }
-            if (object.kind != METAVERSE_SPACE_OBJECT_MANIFEST)
-                continue;
-            scan->manifests++;
-            if (scan->shown == METAVERSE_VIEW_MAX_SPACES) {
-                scan->truncated = true;
-                continue;
-            }
-            const struct vcs_space_manifest_v1 *m = &object.as.manifest;
-            struct metaverse_view_space_row *row =
-                &scan->rows[scan->shown++];
-            memset(row, 0, sizeof(*row));
-            snprintf(row->root_hex, sizeof(row->root_hex), "%s", root_hex);
-            snprintf(row->name, sizeof(row->name), "%s", m->name);
-            zcl_hex_encode(m->delegation.doc.master_pubkey, 32,
-                           row->owner_hex);
-            row->sequence = m->sequence;
-            row->not_before = m->not_before;
-            row->expiry = m->expiry;
-            row->services = m->service_count;
-            row->objects = m->object_count;
-            row->portals = m->portal_count;
-            row->has_admission = m->has_admission;
-            /* The same activity probe metaverse.space.show runs (the
-             * chain-authorization lens stays with the typed command; the
-             * site reports the local-signature grade only). */
-            row->currently_active = vcs_space_manifest_validate_at(
-                m, m->delegation.network_genesis, now) == VCS_SPACE_OK;
-        }
+        ms_space_scan_shard(workspace, shard->d_name, dir, now, scan);
         closedir(dir);
         if (scan->truncated && scan->scanned == MS_SPACE_SCAN_MAX)
             break;
