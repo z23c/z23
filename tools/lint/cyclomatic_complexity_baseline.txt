@@ -154,8 +154,6 @@ contexts/commons/packages/zpct/src/zpct.c:zpct_encode:19
 contexts/commons/packages/zpem/src/zpem.c:zpem_parse:29
 contexts/commons/packages/zpool/app/main.c:main:25
 contexts/commons/packages/zrand/app/main.c:main:20
-contexts/commons/packages/zrange/src/zrange.c:parse_into:16
-contexts/commons/packages/zrange/src/zrange.c:push_token:25
 contexts/commons/packages/zre/app/main.c:main:20
 contexts/commons/packages/zre/src/zre.c:addthread:16
 contexts/commons/packages/zre/src/zre.c:gen:49
