@@ -242,6 +242,11 @@ static int t_build_needs_overlap(void)
         bad = build_needs_fixture_run(repo_root(), fixture, script);
     else
         fprintf(stderr, "build-needs: fixture directory setup failed: %s\n", fixture);
+    if (bad) {
+        if (stat(fixture, &st) == 0 && S_ISDIR(st.st_mode))
+            fprintf(stderr, "build-needs: failed fixture retained: %s\n", fixture);
+        return bad;
+    }
     if (test_rm_rf_recursive(fixture) != 0) {
         fprintf(stderr, "build-needs: fixture cleanup failed: %s\n", fixture);
         bad = 1;
