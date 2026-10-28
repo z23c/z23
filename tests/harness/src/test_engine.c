@@ -6286,12 +6286,55 @@ static int case_light_card_check_kind(void)
     return failures;
 }
 
+static int case_response_error_text(void)
+{
+    static const struct {
+        const char *body;
+        size_t cap;
+        bool found;
+        const char *text;
+    } cases[] = {
+        {"{\"error\":\"plain error\"}", 64, true, "plain error"},
+        {"{\"error\":\"\"}", 64, false, ""},
+        {"{\"error\":{\"code\":\"E\",\"message\":\"bad\"}}", 64, true, "E: bad"},
+        {"{\"error\":{\"code\":\"E\"}}", 64, true, "E"},
+        {"{\"error\":{\"message\":\"bad\"}}", 64, true, "bad"},
+        {"{\"error\":{\"code\":\"\",\"message\":\"\"}}", 64, true, ": "},
+        {"{\"error\":{\"code\":3,\"message\":false}}", 64, false, ""},
+        {"{\"error\":{\"code\":3,\"message\":\"bad\"}}", 64, true, "bad"},
+        {"{\"error\":{\"code\":\"E\",\"message\":\"bad\"}}", 4, true, "E: "},
+        {"{\"error\":\"plain\"}", 1, false, ""},
+        {"{\"error\":42}", 64, false, ""},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char text[64] = "stale";
+        bool found = engine_response_error_text(cases[i].body,
+                                                strlen(cases[i].body), text,
+                                                cases[i].cap);
+        if (found != cases[i].found || strcmp(text, cases[i].text) != 0) {
+            printf("engine: error text case %zu... FAIL\n", i);
+            failures++;
+        }
+    }
+    char guard = 'x';
+    const char body[] = "{\"error\":\"bad\"}";
+    if (engine_response_error_text(body, sizeof(body) - 1, NULL, 1) ||
+        engine_response_error_text(body, sizeof(body) - 1, &guard, 0) ||
+        guard != 'x') {
+        printf("engine: error text output guards... FAIL\n");
+        failures++;
+    }
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
     failures += case_registry();
     failures += case_request();
     failures += case_hostile();
+    failures += case_response_error_text();
     failures += case_patch();
     failures += case_secret();
     failures += case_verdict();

@@ -807,6 +807,21 @@ bool engine_response_parse(const struct engine_vendor *vendor,
     return ok;
 }
 
+static bool engine_response_error_object(const struct json_value *err,
+                                         char *out, size_t out_len)
+{
+    const struct json_value *m = json_get(err, "message");
+    const struct json_value *c = json_get(err, "code");
+    const char *ms = (m && m->type == JSON_STR) ? json_get_str(m) : NULL;
+    const char *cs = (c && c->type == JSON_STR) ? json_get_str(c) : NULL;
+    if (ms || cs) {
+        (void)snprintf(out, out_len, "%s%s%s", cs ? cs : "",
+                       (cs && ms) ? ": " : "", ms ? ms : "");
+        return out[0] != '\0';
+    }
+    return false;
+}
+
 bool engine_response_error_text(const char *body, size_t len,
                                 char *out, size_t out_len)
 {
@@ -828,15 +843,7 @@ bool engine_response_error_text(const char *body, size_t len,
         (void)snprintf(out, out_len, "%s", json_get_str(err));
         found = out[0] != '\0';
     } else if (err && err->type == JSON_OBJ) {
-        const struct json_value *m = json_get(err, "message");
-        const struct json_value *c = json_get(err, "code");
-        const char *ms = (m && m->type == JSON_STR) ? json_get_str(m) : NULL;
-        const char *cs = (c && c->type == JSON_STR) ? json_get_str(c) : NULL;
-        if (ms || cs) {
-            (void)snprintf(out, out_len, "%s%s%s", cs ? cs : "",
-                           (cs && ms) ? ": " : "", ms ? ms : "");
-            found = out[0] != '\0';
-        }
+        found = engine_response_error_object(err, out, out_len);
     }
     json_free(&root);
     return found;
