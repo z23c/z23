@@ -318,82 +318,50 @@ static void dvm_push_stage(struct json_value *obj, const char *key,
     json_free(&stage);
 }
 
-void zcl_native_handle_dev_agent_mutate(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void dvm_restore_requested(const char *root, char pending_rel[512],
+                                  bool pending, struct zcl_command_reply *reply)
 {
-    if (!request || !reply)
-        return;
-    const struct json_value *input = request->input;
-    char root[PATH_MAX];
-    if (!zcl_devagent_checkout_root(NULL, root, sizeof(root))) {
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                   "NOT_IN_A_CHECKOUT", "resolve",
-                   "no Z23 checkout root above the current directory",
-                   DVM_PATH,
-                   "cd into a Z23 checkout, then rerun: z23 dev agent mutate "
-                   "--file=<path> --line=<n> --group=<name>");
-        return;
-    }
-
-    char pending_rel[512];
-    bool pending = dvm_pending_present(root, pending_rel, sizeof(pending_rel));
-
-    if (dvm_bool(input, "restore")) {
-        size_t restored = 0;
-        if (!pending) {
-            dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED,
-                       ZCL_COMMAND_EXIT_INVALID, "NO_PENDING_MUTATION",
-                       "restore",
-                       "no mutation is outstanding; this checkout's sources "
-                       "are as this command left them",
-                       DVM_PENDING_PATH,
-                       "z23 dev agent mutate --file=<path> --line=<n> "
-                       "--group=<name>");
-            return;
-        }
-        if (!dvm_pending_restore(root, pending_rel, sizeof(pending_rel),
-                                 &restored)) {
-            char msg[192];
-            (void)snprintf(msg, sizeof(msg),
-                           "could not restore %s from the pending backup",
-                           pending_rel);
-            dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED,
-                       ZCL_COMMAND_EXIT_FAILED, "RESTORE_FAILED", "restore",
-                       msg, DVM_PENDING_BYTES,
-                       "cp " DVM_PENDING_BYTES " <the file named above>, then "
-                       "rm " DVM_PENDING_PATH);
-            return;
-        }
-        (void)json_push_kv_str(&reply->data, "schema",
-                               "zcl.agent_mutation_check.v1");
-        (void)json_push_kv_str(&reply->data, "action", "restore");
-        (void)json_push_kv_str(&reply->data, "file", pending_rel);
-        (void)json_push_kv_int(&reply->data, "restored_bytes",
-                               (int64_t)restored);
-        (void)json_push_kv_bool(&reply->data, "restored", true);
-        (void)json_push_kv_str(&reply->data, "next_action",
-                               "make -j\"$(getconf _NPROCESSORS_ONLN)\" "
-                               "test_parallel");
+    size_t restored = 0;
+    if (!pending) {
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED,
+                   ZCL_COMMAND_EXIT_INVALID, "NO_PENDING_MUTATION",
+                   "restore",
+                   "no mutation is outstanding; this checkout's sources "
+                   "are as this command left them",
+                   DVM_PENDING_PATH,
+                   "z23 dev agent mutate --file=<path> --line=<n> "
+                   "--group=<name>");
         return;
     }
-
-    if (pending) {
+    if (!dvm_pending_restore(root, pending_rel, 512,
+                             &restored)) {
         char msg[192];
         (void)snprintf(msg, sizeof(msg),
-                       "%s still carries an unrestored mutation from an "
-                       "earlier run; refusing to mutate a second file",
+                       "could not restore %s from the pending backup",
                        pending_rel);
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                   "MUTATION_NOT_RESTORED", "precondition", msg,
-                   DVM_PENDING_PATH,
-                   "z23 dev agent mutate --restore=true");
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED,
+                   ZCL_COMMAND_EXIT_FAILED, "RESTORE_FAILED", "restore",
+                   msg, DVM_PENDING_BYTES,
+                   "cp " DVM_PENDING_BYTES " <the file named above>, then "
+                   "rm " DVM_PENDING_PATH);
         return;
     }
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.agent_mutation_check.v1");
+    (void)json_push_kv_str(&reply->data, "action", "restore");
+    (void)json_push_kv_str(&reply->data, "file", pending_rel);
+    (void)json_push_kv_int(&reply->data, "restored_bytes",
+                           (int64_t)restored);
+    (void)json_push_kv_bool(&reply->data, "restored", true);
+    (void)json_push_kv_str(&reply->data, "next_action",
+                           "make -j\"$(getconf _NPROCESSORS_ONLN)\" "
+                           "test_parallel");
+    return;
+}
 
-    const char *rel = dvm_str(input, "file");
-    long long line_no = dvm_int(input, "line");
-    const char *group = dvm_str(input, "group");
-
+static bool dvm_validate_selection(const char *rel, long long line_no,
+                                   const char *group, struct zcl_command_reply *reply)
+{
     if (!dvm_path_ok(rel)) {
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                    "INVALID_FILE", "validate",
@@ -403,14 +371,14 @@ void zcl_native_handle_dev_agent_mutate(
                    rel ? rel : "(absent)",
                    "z23 dev agent mutate --file=platform/modules/base/src/hex.c --line=42 "
                    "--group=hex_codec");
-        return;
+        return false;
     }
     if (line_no <= 0) {
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                    "INVALID_LINE", "validate",
                    "line must be a positive 1-based line number", rel,
                    "z23 dev agent mutate --file=<path> --line=1 --group=<name>");
-        return;
+        return false;
     }
     if (!dvm_group_ok(group)) {
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -418,88 +386,19 @@ void zcl_native_handle_dev_agent_mutate(
                    "group must name a registered test group", rel,
                    "z23 dev agent test --group=<substring>  (to find the "
                    "group that covers this file)");
-        return;
+        return false;
     }
-    char full[ZCL_TEST_GROUP_FULL_MAX];
-    bool exact = zcl_test_group_resolve_exact(group, full);
-    char selector[160];
-    (void)snprintf(selector, sizeof(selector), "--%s=%s",
-                   exact ? "exact" : "only", exact ? full : group);
+    return true;
+}
 
-    char abs[PATH_MAX];
-    if (!zcl_path_join(abs, sizeof(abs), root, rel)) {
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "INVALID_FILE", "validate", "path too long for this host",
-                   rel, "shorten the path or run from the checkout root");
-        return;
-    }
-    size_t len = 0;
-    char *original = dvm_read_file(abs, &len);
-    if (!original) {
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "FILE_UNREADABLE", "validate",
-                   "the file could not be read, or is larger than 4 MiB", rel,
-                   "z23 code map  (to find the file's exact path)");
-        return;
-    }
-
-    size_t start = 0, end = 0;
-    if (!dvm_line_span(original, len, line_no, &start, &end)) {
-        char msg[192];
-        (void)snprintf(msg, sizeof(msg), "%s has no line %lld", rel, line_no);
-        free(original);
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "LINE_OUT_OF_RANGE", "validate", msg, rel,
-                   "z23 dev agent mutate --file=<path> --line=<a line that "
-                   "exists> --group=<name>");
-        return;
-    }
-    char line[4200];
-    if (end - start >= sizeof(line)) {
-        free(original);
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "LINE_TOO_LONG", "validate",
-                   "the line is longer than this command will rewrite", rel,
-                   "pick a shorter line to mutate");
-        return;
-    }
-    memcpy(line, original + start, end - start);
-    line[end - start] = '\0';
-
-    if (dvm_line_is_comment_or_blank(line)) {
-        free(original);
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "LINE_NOT_CODE", "validate",
-                   "that line is blank or reads as comment text; one line "
-                   "alone cannot be told apart from a block-comment interior",
-                   line,
-                   "pick a line carrying a comparison (==, !=, <=, >=), a "
-                   "boolean connective (&&, ||), true/false, or an integer "
-                   "literal");
-        return;
-    }
-
-    struct zcl_devagent_mutation mutation;
-    char mutated[4200];
-    if (!zcl_devagent_mutate_line(line, &mutation, mutated, sizeof(mutated))) {
-        free(original);
-        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                   "LINE_NOT_MUTABLE", "validate",
-                   "no mutation rule applies to that line", line,
-                   "pick a line carrying a comparison (==, !=, <=, >=), a "
-                   "boolean connective (&&, ||), true/false, or an integer "
-                   "literal");
-        return;
-    }
-
-    /* ── baseline ──────────────────────────────────────────────────────────
-     * A mutation check on a red or non-executing group proves nothing, so
-     * the baseline is established BEFORE the source is touched. */
-    struct dvm_stage before;
-    memset(&before, 0, sizeof(before));
-    before.build_rc = zcl_devagent_run_make(root, "test_parallel",
+static bool dvm_baseline(const char *root, const char *rel, const char *selector,
+                         bool exact, const char *full, const char *group,
+                         char *original, struct dvm_stage *before,
+                         struct zcl_command_reply *reply)
+{
+    before->build_rc = zcl_devagent_run_make(root, "test_parallel",
                                             DVM_BUILD_TIMEOUT_MS);
-    if (before.build_rc != 0) {
+    if (before->build_rc != 0) {
         free(original);
         dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
                    "BASELINE_BUILD_FAILED", "baseline",
@@ -508,17 +407,17 @@ void zcl_native_handle_dev_agent_mutate(
                    rel,
                    "make -j\"$(getconf _NPROCESSORS_ONLN)\" test_parallel  "
                    "(fix the build first)");
-        return;
+        return false;
     }
-    before.run_rc = zcl_devagent_run_group(root, selector, DVM_TEST_TIMEOUT_MS,
-                                           &before.verdict, &before.truncated);
-    if (!dvm_stage_green(&before)) {
+    before->run_rc = zcl_devagent_run_group(root, selector, DVM_TEST_TIMEOUT_MS,
+                                           &before->verdict, &before->truncated);
+    if (!dvm_stage_green(before)) {
         char msg[192];
         (void)snprintf(msg, sizeof(msg),
                        "baseline: %s ran %lld group(s) with %lld failure(s); "
                        "a mutation check needs a green, executing baseline",
-                       selector, before.verdict.groups_ran,
-                       before.verdict.groups_failed);
+                       selector, before->verdict.groups_ran,
+                       before->verdict.groups_failed);
         free(original);
         char next[192];
         (void)snprintf(next, sizeof(next),
@@ -534,13 +433,69 @@ void zcl_native_handle_dev_agent_mutate(
             (void)zcl_command_reply_add_next(
                 reply, "dev.agent.test", next_input,
                 "run the group on its own and read what actually executed");
-        return;
+        return false;
     }
 
-    /* ── mutate ───────────────────────────────────────────────────────────
-     * The untouched bytes are on disk before the edit is written, so an
-     * interrupted run leaves a restorable checkout and the next invocation
-     * refuses until it is restored. */
+    return true;
+}
+
+static bool dvm_prepare_line(const char *rel, long long line_no, char *original,
+                             size_t len, size_t *start, size_t *end,
+                             char line[4200], struct zcl_devagent_mutation *mutation,
+                             char mutated[4200], struct zcl_command_reply *reply)
+{
+    if (!dvm_line_span(original, len, line_no, start, end)) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg), "%s has no line %lld", rel, line_no);
+        free(original);
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "LINE_OUT_OF_RANGE", "validate", msg, rel,
+                   "z23 dev agent mutate --file=<path> --line=<a line that "
+                   "exists> --group=<name>");
+        return false;
+    }
+    if (*end - *start >= 4200) {
+        free(original);
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "LINE_TOO_LONG", "validate",
+                   "the line is longer than this command will rewrite", rel,
+                   "pick a shorter line to mutate");
+        return false;
+    }
+    memcpy(line, original + *start, *end - *start);
+    line[*end - *start] = '\0';
+
+    if (dvm_line_is_comment_or_blank(line)) {
+        free(original);
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "LINE_NOT_CODE", "validate",
+                   "that line is blank or reads as comment text; one line "
+                   "alone cannot be told apart from a block-comment interior",
+                   line,
+                   "pick a line carrying a comparison (==, !=, <=, >=), a "
+                   "boolean connective (&&, ||), true/false, or an integer "
+                   "literal");
+        return false;
+    }
+
+    if (!zcl_devagent_mutate_line(line, mutation, mutated, 4200)) {
+        free(original);
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "LINE_NOT_MUTABLE", "validate",
+                   "no mutation rule applies to that line", line,
+                   "pick a line carrying a comparison (==, !=, <=, >=), a "
+                   "boolean connective (&&, ||), true/false, or an integer "
+                   "literal");
+        return false;
+    }
+
+    return true;
+}
+
+static bool dvm_write_mutation(const char *root, const char *rel, const char *abs,
+                               char *original, size_t len, size_t start, size_t end,
+                               const char *mutated, struct zcl_command_reply *reply)
+{
     if (!dvm_pending_arm(root, rel, original, len)) {
         free(original);
         dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
@@ -549,7 +504,7 @@ void zcl_native_handle_dev_agent_mutate(
                    "file this command could not put back",
                    DVM_PENDING_DIR,
                    "mkdir -p " DVM_PENDING_DIR " and rerun");
-        return;
+        return false;
     }
     size_t tail = len - end;
     size_t mutated_len = start + strlen(mutated) + tail;
@@ -560,7 +515,7 @@ void zcl_native_handle_dev_agent_mutate(
                    "MUTATE_ALLOC_FAILED", "mutate",
                    "could not build the mutated file image", rel,
                    "z23 dev agent mutate --restore=true");
-        return;
+        return false;
     }
     memcpy(rewritten, original, start);
     memcpy(rewritten + start, mutated, strlen(mutated));
@@ -592,29 +547,39 @@ void zcl_native_handle_dev_agent_mutate(
                    rel,
                    put_back ? "free disk space and rerun"
                             : "z23 dev agent mutate --restore=true");
-        return;
+        return false;
     }
 
-    struct dvm_stage after;
-    memset(&after, 0, sizeof(after));
-    after.build_rc = zcl_devagent_run_make(root, "test_parallel",
+    return true;
+}
+
+static bool dvm_run_mutated(const char *root, const char *selector,
+                            struct dvm_stage *after, const char **noticed_by)
+{
+    after->build_rc = zcl_devagent_run_make(root, "test_parallel",
                                            DVM_BUILD_TIMEOUT_MS);
-    const char *noticed_by = "nothing";
+    *noticed_by = "nothing";
     bool noticed = false;
-    if (after.build_rc != 0) {
+    if (after->build_rc != 0) {
         noticed = true;
-        noticed_by = "compiler";
+        *noticed_by = "compiler";
     } else {
-        after.run_rc = zcl_devagent_run_group(root, selector,
+        after->run_rc = zcl_devagent_run_group(root, selector,
                                               DVM_TEST_TIMEOUT_MS,
-                                              &after.verdict, &after.truncated);
-        if (after.verdict.present && after.verdict.groups_failed > 0) {
+                                              &after->verdict, &after->truncated);
+        if (after->verdict.present && after->verdict.groups_failed > 0) {
             noticed = true;
-            noticed_by = "test_group";
+            *noticed_by = "test_group";
         }
     }
 
-    /* ── restore, unconditionally ─────────────────────────────────────── */
+    return noticed;
+}
+
+static bool dvm_restore_after(const char *root, const char *rel, const char *abs,
+                              char *original, size_t len, int *rebuild_rc,
+                              struct zcl_command_reply *reply)
+{
     bool restored = dvm_write_file(abs, original, len);
     free(original);
     char marker[PATH_MAX], blob[PATH_MAX];
@@ -622,7 +587,7 @@ void zcl_native_handle_dev_agent_mutate(
         (void)unlink(marker);
     if (restored && zcl_path_join(blob, sizeof(blob), root, DVM_PENDING_BYTES))
         (void)unlink(blob);
-    int rebuild_rc = restored
+    *rebuild_rc = restored
         ? zcl_devagent_run_make(root, "test_parallel", DVM_BUILD_TIMEOUT_MS)
         : -1;
 
@@ -632,8 +597,122 @@ void zcl_native_handle_dev_agent_mutate(
                    "the mutated file could NOT be put back; the checkout is "
                    "still carrying the mutation",
                    rel, "z23 dev agent mutate --restore=true");
+        return false;
+    }
+
+    return true;
+}
+
+static bool dvm_require_no_pending(bool pending, const char *pending_rel,
+                                   struct zcl_command_reply *reply)
+{
+    if (pending) {
+        char msg[192];
+        (void)snprintf(msg, sizeof(msg),
+                       "%s still carries an unrestored mutation from an "
+                       "earlier run; refusing to mutate a second file",
+                       pending_rel);
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                   "MUTATION_NOT_RESTORED", "precondition", msg,
+                   DVM_PENDING_PATH,
+                   "z23 dev agent mutate --restore=true");
+        return false;
+    }
+
+    return true;
+}
+
+static void dvm_make_selector(char *selector, size_t size, bool exact,
+                              const char *full, const char *group)
+{
+    (void)snprintf(selector, size, "--%s=%s",
+                   exact ? "exact" : "only", exact ? full : group);
+}
+
+void zcl_native_handle_dev_agent_mutate(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const struct json_value *input = request->input;
+    char root[PATH_MAX];
+    if (!zcl_devagent_checkout_root(NULL, root, sizeof(root))) {
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                   "NOT_IN_A_CHECKOUT", "resolve",
+                   "no Z23 checkout root above the current directory",
+                   DVM_PATH,
+                   "cd into a Z23 checkout, then rerun: z23 dev agent mutate "
+                   "--file=<path> --line=<n> --group=<name>");
         return;
     }
+
+    char pending_rel[512];
+    bool pending = dvm_pending_present(root, pending_rel, sizeof(pending_rel));
+
+    if (dvm_bool(input, "restore")) {
+        dvm_restore_requested(root, pending_rel, pending, reply);
+        return;
+    }
+
+    if (!dvm_require_no_pending(pending, pending_rel, reply)) return;
+
+    const char *rel = dvm_str(input, "file");
+    long long line_no = dvm_int(input, "line");
+    const char *group = dvm_str(input, "group");
+
+    if (!dvm_validate_selection(rel, line_no, group, reply)) return;
+    char full[ZCL_TEST_GROUP_FULL_MAX];
+    bool exact = zcl_test_group_resolve_exact(group, full);
+    char selector[160];
+    dvm_make_selector(selector, sizeof(selector), exact, full, group);
+
+    char abs[PATH_MAX];
+    if (!zcl_path_join(abs, sizeof(abs), root, rel)) {
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "INVALID_FILE", "validate", "path too long for this host",
+                   rel, "shorten the path or run from the checkout root");
+        return;
+    }
+    size_t len = 0;
+    char *original = dvm_read_file(abs, &len);
+    if (!original) {
+        dvm_refuse(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                   "FILE_UNREADABLE", "validate",
+                   "the file could not be read, or is larger than 4 MiB", rel,
+                   "z23 code map  (to find the file's exact path)");
+        return;
+    }
+
+    size_t start = 0, end = 0;
+    char line[4200], mutated[4200];
+    struct zcl_devagent_mutation mutation;
+    if (!dvm_prepare_line(rel, line_no, original, len, &start, &end,
+                          line, &mutation, mutated, reply)) return;
+
+    /* ── baseline ──────────────────────────────────────────────────────────
+     * A mutation check on a red or non-executing group proves nothing, so
+     * the baseline is established BEFORE the source is touched. */
+    struct dvm_stage before;
+    memset(&before, 0, sizeof(before));
+    if (!dvm_baseline(root, rel, selector, exact, full, group,
+                      original, &before, reply)) return;
+
+    /* ── mutate ───────────────────────────────────────────────────────────
+     * The untouched bytes are on disk before the edit is written, so an
+     * interrupted run leaves a restorable checkout and the next invocation
+     * refuses until it is restored. */
+    if (!dvm_write_mutation(root, rel, abs, original, len, start, end,
+                            mutated, reply)) return;
+
+    struct dvm_stage after;
+    memset(&after, 0, sizeof(after));
+    const char *noticed_by;
+    bool noticed = dvm_run_mutated(root, selector, &after, &noticed_by);
+
+    /* ── restore, unconditionally ─────────────────────────────────────── */
+    int rebuild_rc;
+    if (!dvm_restore_after(root, rel, abs, original, len, &rebuild_rc, reply))
+        return;
 
     (void)json_push_kv_str(&reply->data, "schema",
                            "zcl.agent_mutation_check.v1");

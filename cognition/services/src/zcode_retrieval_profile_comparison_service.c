@@ -63,6 +63,59 @@ static bool rpc_policy_evaluator_frozen(
     return false;
 }
 
+static enum zcode_retrieval_profile_comparison_error rpc_validate_policy(
+    const struct zcode_retrieval_profile_comparison_request *request)
+{
+    uint8_t policy_root[32];
+    if (zcl_retrieval_comparison_policy_root(
+            request->policy, policy_root) != ZCL_RETRIEVAL_COMPARISON_OK)
+        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_POLICY;
+    if (memcmp(policy_root, request->expected_policy_root, 32u) != 0 ||
+        memcmp(policy_root,
+               request->parent_heuristic->preregistration_root, 32u) != 0 ||
+        memcmp(policy_root,
+               request->child_heuristic->preregistration_root, 32u) != 0 ||
+        !rpc_policy_evaluator_frozen(
+            request->policy, request->parent_heuristic))
+        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_BINDING;
+
+    return ZCODE_RETRIEVAL_PROFILE_COMPARISON_OK;
+}
+
+static enum zcode_retrieval_profile_comparison_error rpc_validate_binding(
+    const struct zcode_retrieval_profile_comparison_request *request,
+    struct zcode_retrieval_profile_comparison_report *result)
+{
+    if (vcs_zcode_heuristic_root(
+            request->parent_heuristic, result->parent_heuristic_root) !=
+            VCS_ZCODE_ATTENTION_OK ||
+        vcs_zcode_heuristic_root(
+            request->child_heuristic, result->child_heuristic_root) !=
+            VCS_ZCODE_ATTENTION_OK)
+        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_HEURISTIC;
+    if (request->child_heuristic->derivation !=
+            VCS_ZCODE_HEURISTIC_SPECIALIZE ||
+        vcs_zcode_heuristic_validate_derivation(
+            request->child_heuristic, request->parent_heuristic, 1u) !=
+            VCS_ZCODE_ATTENTION_OK)
+        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_LINEAGE;
+    if (!rpc_lineage_boundary_equal(request->parent_heuristic,
+                                    request->child_heuristic) ||
+        memcmp(result->parent_heuristic_root,
+               result->child_heuristic_root, 32u) == 0 ||
+        memcmp(request->parent_heuristic->task_root,
+               request->expected_task_root, 32u) != 0 ||
+        memcmp(request->child_heuristic->task_root,
+               request->expected_task_root, 32u) != 0 ||
+        memcmp(request->parent_heuristic->source_root,
+               request->expected_source_root, 32u) != 0 ||
+        memcmp(request->child_heuristic->source_root,
+               request->expected_source_root, 32u) != 0)
+        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_BINDING;
+
+    return rpc_validate_policy(request);
+}
+
 enum zcode_retrieval_profile_comparison_error
 zcode_retrieval_profile_comparison_observe(
     const struct zcode_retrieval_profile_comparison_request *request,
@@ -84,45 +137,9 @@ zcode_retrieval_profile_comparison_observe(
             return ZCODE_RETRIEVAL_PROFILE_COMPARISON_ROOT;
 
     struct zcode_retrieval_profile_comparison_report result = {0};
-    if (vcs_zcode_heuristic_root(
-            request->parent_heuristic, result.parent_heuristic_root) !=
-            VCS_ZCODE_ATTENTION_OK ||
-        vcs_zcode_heuristic_root(
-            request->child_heuristic, result.child_heuristic_root) !=
-            VCS_ZCODE_ATTENTION_OK)
-        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_HEURISTIC;
-    if (request->child_heuristic->derivation !=
-            VCS_ZCODE_HEURISTIC_SPECIALIZE ||
-        vcs_zcode_heuristic_validate_derivation(
-            request->child_heuristic, request->parent_heuristic, 1u) !=
-            VCS_ZCODE_ATTENTION_OK)
-        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_LINEAGE;
-    if (!rpc_lineage_boundary_equal(request->parent_heuristic,
-                                    request->child_heuristic) ||
-        memcmp(result.parent_heuristic_root,
-               result.child_heuristic_root, 32u) == 0 ||
-        memcmp(request->parent_heuristic->task_root,
-               request->expected_task_root, 32u) != 0 ||
-        memcmp(request->child_heuristic->task_root,
-               request->expected_task_root, 32u) != 0 ||
-        memcmp(request->parent_heuristic->source_root,
-               request->expected_source_root, 32u) != 0 ||
-        memcmp(request->child_heuristic->source_root,
-               request->expected_source_root, 32u) != 0)
-        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_BINDING;
-
-    uint8_t policy_root[32];
-    if (zcl_retrieval_comparison_policy_root(
-            request->policy, policy_root) != ZCL_RETRIEVAL_COMPARISON_OK)
-        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_POLICY;
-    if (memcmp(policy_root, request->expected_policy_root, 32u) != 0 ||
-        memcmp(policy_root,
-               request->parent_heuristic->preregistration_root, 32u) != 0 ||
-        memcmp(policy_root,
-               request->child_heuristic->preregistration_root, 32u) != 0 ||
-        !rpc_policy_evaluator_frozen(
-            request->policy, request->parent_heuristic))
-        return ZCODE_RETRIEVAL_PROFILE_COMPARISON_BINDING;
+    enum zcode_retrieval_profile_comparison_error error =
+        rpc_validate_binding(request, &result);
+    if (error != ZCODE_RETRIEVAL_PROFILE_COMPARISON_OK) return error;
 
     struct zcl_retrieval_comparison_arm_binding parent = {0}, child = {0};
     memcpy(parent.subject_root, result.parent_heuristic_root, 32u);

@@ -22,7 +22,6 @@ cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_st
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
 cognition/services/src/dev_reflex_policy_service.c:handoff_validate:24
 cognition/services/src/dev_reflex_policy_service.c:project_cycle:59
-cognition/services/src/zcode_retrieval_profile_comparison_service.c:zcode_retrieval_profile_comparison_observe:27
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
@@ -176,7 +175,7 @@ contexts/commons/packages/zpool/app/main.c:main:25
 contexts/commons/packages/zrand/app/main.c:main:20
 contexts/commons/packages/zrange/src/zrange.c:parse_into:16
 contexts/commons/packages/zrange/src/zrange.c:push_token:25
-contexts/commons/packages/zre/app/main.c:main:21
+contexts/commons/packages/zre/app/main.c:main:20
 contexts/commons/packages/zre/src/zre.c:addthread:16
 contexts/commons/packages/zre/src/zre.c:gen:49
 contexts/commons/packages/zre/src/zre.c:parse_atom:26
@@ -194,7 +193,7 @@ contexts/commons/packages/zslug/src/zslug.c:zslug_is_canonical:19
 contexts/commons/packages/ztime/src/ztime.c:ztime_parse_n:43
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
-contexts/commons/packages/zu256/app/main.c:main:20
+contexts/commons/packages/zu256/app/main.c:main:19
 contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
 contexts/commons/packages/zxml/app/main.c:main:24
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
@@ -1148,8 +1147,8 @@ tools/command/cli_render.c:render_peer_list:26
 tools/command/cli_render.c:render_spec:50
 tools/command/cli_render.c:render_statecatalog:18
 tools/command/cli_render.c:render_yardsale_guide:17
-tools/command/cli_render.c:zcl_cli_render_brief:23
-tools/command/cli_render.c:zcl_cli_render_doc:40
+tools/command/cli_render.c:zcl_cli_render_brief:22
+tools/command/cli_render.c:zcl_cli_render_doc:39
 tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/command/native_dev_command.c:dev_drive_wait_cycle:32
 tools/command/native_dev_command.c:dev_emit_loop_status:17
@@ -1172,7 +1171,6 @@ tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
 tools/command/native_devagent_mail.c:dvm_has_ipv4:17
-tools/command/native_devagent_mutate_command.c:zcl_native_handle_dev_agent_mutate:42
 tools/command/native_devagent_queue.c:dvq_compose_task:21
 tools/command/native_devagent_queue.c:dvq_model_ok:16
 tools/command/native_devagent_queue.c:dvq_next:46
