@@ -406,7 +406,7 @@ static size_t ref_znam_build_targeted(uint8_t *out, size_t out_len,
                                       uint8_t target_type,
                                       const char *target_value)
 {
-    if (!znam_validate_name(name) || !target_value) return 0;
+    if (!znam_validate_name(name) || !target_value || !target_value[0]) return 0;
     if (target_type < 1 || target_type > ZNAM_TYPE_CONTENT) return 0;
 
     size_t off = 0;
@@ -421,7 +421,7 @@ static size_t ref_znam_build_targeted(uint8_t *out, size_t out_len,
 static size_t ref_znam_build_transfer(uint8_t *out, size_t out_len,
                                       const char *name, const char *new_owner)
 {
-    if (!znam_validate_name(name) || !new_owner) return 0;
+    if (!znam_validate_name(name) || !new_owner || !new_owner[0]) return 0;
 
     size_t off = 0;
     bool ok = ref_znam_build_header(out, &off, out_len, ZNAM_CMD_TRANSFER,
