@@ -244,6 +244,26 @@ static int parse_level(const char *s)
     return -1; // raw-return-ok:sentinel for unknown token; caller rejects with a logged string error
 }
 
+static enum log_level legacy_line_level(const char *line)
+{
+    /* Legacy undated format heuristic (pre-timestamp LOG_* lines):
+     * LOG_FAIL/LOG_ERR/LOG_NULL all use stderr and prefix with [domain];
+     * we treat those as ERROR level. Boot-time printfs use explicit
+     * FATAL/WARN markers. Everything else INFO. */
+    if (strstr(line, "FATAL") || strstr(line, "PANIC") ||
+        strstr(line, "ABORT"))
+        return LL_FATAL;
+    if (strstr(line, "WARNING") || strstr(line, "WARN:") ||
+        strstr(line, "[watchdog] ESCALATION"))
+        return LL_WARN;
+    if (line[0] == '[' && strstr(line, "(): ") &&
+        (strstr(line, "GUARD FAILED") || strstr(line, "FAIL") ||
+         strstr(line, "failed") || strstr(line, "error") ||
+         strstr(line, "ERROR")))
+        return LL_ERROR;
+    return LL_INFO;
+}
+
 static enum log_level line_level(const char *line)
 {
     /* Current LOG_* format (zcl_log_emit_at, log_level.c):
@@ -262,22 +282,7 @@ static enum log_level line_level(const char *line)
         }
     }
 
-    /* Legacy undated format heuristic (pre-timestamp LOG_* lines):
-     * LOG_FAIL/LOG_ERR/LOG_NULL all use stderr and prefix with [domain];
-     * we treat those as ERROR level. Boot-time printfs use explicit
-     * FATAL/WARN markers. Everything else INFO. */
-    if (strstr(line, "FATAL") || strstr(line, "PANIC") ||
-        strstr(line, "ABORT"))
-        return LL_FATAL;
-    if (strstr(line, "WARNING") || strstr(line, "WARN:") ||
-        strstr(line, "[watchdog] ESCALATION"))
-        return LL_WARN;
-    if (line[0] == '[' && strstr(line, "(): ") &&
-        (strstr(line, "GUARD FAILED") || strstr(line, "FAIL") ||
-         strstr(line, "failed") || strstr(line, "error") ||
-         strstr(line, "ERROR")))
-        return LL_ERROR;
-    return LL_INFO;
+    return legacy_line_level(line);
 }
 
 bool diag_rpc_getnodelog(const struct json_value *params, bool help,

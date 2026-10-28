@@ -292,23 +292,38 @@ static bool check_rpc_getnodelog_write_level_log(const char *log_path)
                 ok = ok && fputs("2026-06-23T18:34:19Z WARN [net] net.c:2 g(): nlv_warn\n", fp) >= 0;
                 ok = ok && fputs("2026-06-23T18:34:20Z INFO [net] net.c:3 h(): nlv_info\n", fp) >= 0;
                 ok = ok && fputs("[net] WARN: net.c:4 old(): nlv_legacy_warn\n", fp) >= 0;
+                ok = ok && fputs("[net] old(): failed nlv_legacy_error\n", fp) >= 0;
+                ok = ok && fputs("[net] old(): WARN: FAIL nlv_warn_precedence\n", fp) >= 0;
+                ok = ok && fputs("[net] old(): PANIC WARN: nlv_fatal\n", fp) >= 0;
+                ok = ok && fputs("2026-06-23T18:34:21Z INFO [net] nlv_info FATAL\n", fp) >= 0;
+                ok = ok && fputs("2026-06-23T18:34:22Z OTHER [net] nlv_fallback ABORT\n", fp) >= 0;
                 ok = ok && fclose(fp) == 0;
             }
             return ok;
 }
 
+static bool check_rpc_getnodelog_level_lines(const struct json_value *result,
+                                              const char *const *expected,
+                                              size_t count)
+{
+    const struct json_value *lines = json_get(result, "lines");
+    if (!lines || lines->type != JSON_ARR || json_size(lines) != count)
+        return false;
+    for (size_t i = 0; i < count; i++) {
+        const char *line = json_get_str(json_at(lines, i));
+        if (!line || !strstr(line, expected[i])) return false;
+    }
+    return true;
+}
+
 static bool check_rpc_getnodelog_level_warn_lines(
     const struct json_value *result)
 {
-                const struct json_value *lines = json_get(result, "lines");
-                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 3;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_legacy_warn") != NULL;
-                ok = ok && strstr(json_get_str(json_at(lines, 1)),
-                                  "nlv_warn") != NULL;
-                ok = ok && strstr(json_get_str(json_at(lines, 2)),
-                                  "nlv_err") != NULL;
-                return ok;
+    static const char *const expected[] = {
+        "nlv_fallback", "nlv_fatal", "nlv_warn_precedence",
+        "nlv_legacy_error", "nlv_legacy_warn", "nlv_warn", "nlv_err"
+    };
+    return check_rpc_getnodelog_level_lines(result, expected, 7);
 }
 
 static bool check_rpc_getnodelog_level_warn(void)
@@ -346,11 +361,10 @@ static bool check_rpc_getnodelog_level_warn(void)
 static bool check_rpc_getnodelog_level_error_lines(
     const struct json_value *result)
 {
-                const struct json_value *lines = json_get(result, "lines");
-                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_err") != NULL;
-                return ok;
+    static const char *const expected[] = {
+        "nlv_fallback", "nlv_fatal", "nlv_legacy_error", "nlv_err"
+    };
+    return check_rpc_getnodelog_level_lines(result, expected, 4);
 }
 
 static bool check_rpc_getnodelog_level_error(void)
@@ -388,11 +402,7 @@ static bool check_rpc_getnodelog_level_error(void)
 static bool check_rpc_getnodelog_level_error_uc_lines(
     const struct json_value *result)
 {
-                const struct json_value *lines = json_get(result, "lines");
-                bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 1;
-                ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                                  "nlv_err") != NULL;
-                return ok;
+    return check_rpc_getnodelog_level_error_lines(result);
 }
 
 static bool check_rpc_getnodelog_level_error_uc(void)
@@ -424,6 +434,30 @@ static bool check_rpc_getnodelog_level_error_uc(void)
             json_free(&params);
             json_free(&result);
 
+    return ok;
+}
+
+static bool check_rpc_getnodelog_level_fatal(void)
+{
+    static const char *const expected[] = { "nlv_fallback", "nlv_fatal" };
+    struct json_value params = {0}, result = {0}, v = {0};
+    json_set_array(&params);
+    json_set_str(&v, "nlv_");
+    bool ok = json_push_back(&params, &v);
+    json_set_int(&v, 60);
+    ok = ok && json_push_back(&params, &v);
+    json_set_int(&v, 10);
+    ok = ok && json_push_back(&params, &v);
+    json_set_str(&v, "fatal");
+    ok = ok && json_push_back(&params, &v);
+    json_free(&v);
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    register_diagnostics_rpc_commands(&tbl);
+    ok = ok && rpc_table_execute(&tbl, "getnodelog", &params, &result);
+    ok = ok && check_rpc_getnodelog_level_lines(&result, expected, 2);
+    json_free(&params);
+    json_free(&result);
     return ok;
 }
 
@@ -573,17 +607,20 @@ int check_rpc_getnodelog_level_filter(void)
             diagnostics_controller_set_state(NULL, dir);
         }
 
-        /* level=warn keeps WARN+ERROR, drops INFO; reverse scan order. */
+        /* level=warn keeps WARN and above, drops INFO; reverse scan order. */
         if (ok)
             ok = check_rpc_getnodelog_level_warn();
 
-        /* level=error keeps only the ERROR line. */
+        /* level=error keeps ERROR and FATAL, including legacy lines. */
         if (ok)
             ok = check_rpc_getnodelog_level_error();
 
         /* level=ERROR (uppercase) is accepted — case-insensitive parse. */
         if (ok)
             ok = check_rpc_getnodelog_level_error_uc();
+
+        if (ok)
+            ok = check_rpc_getnodelog_level_fatal();
 
         /* Unknown level is rejected loudly (string error body), never a
          * silent fall-through to "all". */
