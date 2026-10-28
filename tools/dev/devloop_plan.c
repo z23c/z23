@@ -634,12 +634,21 @@ void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
     (void)snprintf(plan->capacity_input, sizeof(plan->capacity_input), "%s", input);
 }
 
+void zcl_devloop_capacity_set_node(struct zcl_devloop_plan *plan, const char *node)
+{
+    if (!plan || !plan->capacity_origin) return;
+    if (!node || !node[0] || strlen(node) >= sizeof(plan->capacity_node))
+        node = "";
+    (void)snprintf(plan->capacity_node, sizeof(plan->capacity_node), "%s", node);
+}
+
 void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan)
 {
     if (!plan || plan->path_universal)
         return;
     plan->capacity_origin = NULL;
     plan->capacity_cause = NULL;
+    plan->capacity_node[0] = 0;
     plan->capacity_input[0] = '\0';
 }
 
@@ -1164,9 +1173,12 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * changes is the answer's shape, not its availability: see
      * plan_go_universal(). */
     if (truncated) {
+        bool first_capacity = !plan->capacity_origin;
         zcl_devloop_capacity_note(plan, "semantic",
             cause.reason == CI_IMPACT_CAUSE_NONE ? "closure-truncated" :
             codeindex_impact_cause_label(cause.reason), "batch");
+        if (first_capacity)
+            zcl_devloop_capacity_set_node(plan, cause.node_truncated ? NULL : cause.node);
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
     }
     for (int i = 0; i < n; i++) {

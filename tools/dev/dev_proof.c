@@ -7147,6 +7147,11 @@ static void dp_write_capacity_note(FILE *f, const struct zcl_devloop_plan *plan)
                   plan->capacity_origin ? plan->capacity_origin : unknown,
                   plan->capacity_cause ? plan->capacity_cause : unknown);
     dp_log_capacity_input(f, plan->capacity_origin ? plan->capacity_input : unknown);
+    (void)fputs(" capacity_node=", f);
+    if (plan->capacity_node[0]) {
+        (void)fputs("known:", f);
+        dp_log_capacity_input(f, plan->capacity_node);
+    } else (void)fputs("unknown", f);
     (void)fputc('\n', f);
 }
 
@@ -7489,19 +7494,58 @@ static bool dp_select_scratch(const char *root, char *scratch, size_t size)
     return true;
 }
 
+/* One bounded field, escaped exactly like the capacity log. */
+static bool dp_capacity_encode(const char *input, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)input; *p; p++) {
+        bool escape = *p <= 0x20 || *p >= 0x7f || *p == '%';
+        size_t need = escape ? 3u : 1u;
+        if (n + need >= cap) return false;
+        if (escape) {
+            int written = snprintf(out + n, cap - n, "%%%02X", (unsigned)*p);
+            if (written != 3) return false;
+            n += 3u;
+        } else out[n++] = (char)*p;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+static void dp_capacity_tag(const char *node, char *encoded_node, size_t cap)
+{
+    if (!node[0] || !dp_capacity_encode(node, encoded_node, cap))
+        (void)snprintf(encoded_node, cap, "unknown");
+    else {
+        size_t len = strlen(encoded_node);
+        if (len + 6u >= cap)
+            (void)snprintf(encoded_node, cap, "unknown");
+        else {
+            memmove(encoded_node + 6, encoded_node, len + 1);
+            memcpy(encoded_node, "known:", 6);
+        }
+    }
+}
+
 /* Admit capacity provenance into the existing bounded selector detail. */
 static void dp_select_capacity_detail(struct zcl_dev_proof_range_selection *out,
                                       const struct zcl_devloop_plan *plan)
 {
     if (!plan->closure_universal || !plan->capacity_origin)
         return;
+    char encoded_node[128];
+    dp_capacity_tag(plan->capacity_node, encoded_node, sizeof(encoded_node));
     int n = snprintf(out->detail, sizeof(out->detail),
-                     "capacity_origin=%s capacity_cause=%s capacity_input=%s",
+                     "capacity_origin=%s capacity_cause=%s capacity_input=%s capacity_node=%s",
                      plan->capacity_origin, plan->capacity_cause,
-                     plan->capacity_input);
+                     plan->capacity_input, encoded_node);
+    if (n < 0 || (size_t)n >= sizeof(out->detail))
+        n = snprintf(out->detail, sizeof(out->detail),
+                     "capacity_origin=%s capacity_cause=%s capacity_input=%s capacity_node=unknown",
+                     plan->capacity_origin, plan->capacity_cause, plan->capacity_input);
     if (n < 0 || (size_t)n >= sizeof(out->detail))
         (void)snprintf(out->detail, sizeof(out->detail),
-                       "capacity_origin=%s capacity_cause=%s capacity_input=unknown",
+                       "capacity_origin=%s capacity_cause=%s capacity_input=unknown capacity_node=unknown",
                        plan->capacity_origin, plan->capacity_cause);
 }
 

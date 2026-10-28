@@ -236,6 +236,7 @@ struct zcl_devloop_plan {
     const char *capacity_origin;
     const char *capacity_cause;
     char capacity_input[256];
+    char capacity_node[128];
 
     /* ── C5: why every selected group is here ── */
     struct zcl_devloop_selection selections[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
@@ -249,6 +250,7 @@ struct zcl_devloop_plan {
 void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
                                const char *origin, const char *cause,
                                const char *input);
+void zcl_devloop_capacity_set_node(struct zcl_devloop_plan *plan, const char *node);
 void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan);
 
 /* Is this plan admissible as PROOF that a change is covered?

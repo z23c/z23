@@ -136,12 +136,15 @@ static bool fxc_plain_after_attempt(struct fxc *c,
     const char *origin = plan->capacity_origin;
     const char *cause = plan->capacity_cause;
     char input[sizeof(plan->capacity_input)];
+    char node[sizeof(plan->capacity_node)];
+    memcpy(node, plan->capacity_node, sizeof(node));
     memcpy(input, plan->capacity_input, sizeof(input));
     bool ok = fxc_plain(c, given, plan, v, reason, detail);
     if (origin) {
         plan->capacity_origin = origin;
         plan->capacity_cause = cause;
         memcpy(plan->capacity_input, input, sizeof(input));
+        memcpy(plan->capacity_node, node, sizeof(node));
     }
     return ok;
 }
@@ -220,9 +223,13 @@ static bool fxc_broadened(struct fxc *c, const struct zcl_devloop_plan *given,
         memcpy(tmp, given, sizeof(*tmp));
         ok = zcl_devloop_plan_files(paths, n, tmp) &&
              zcl_devloop_plan_add_closure(c->root, paths, n, tmp);
-        if (ok && tmp->closure_universal && tmp->capacity_origin)
+        if (ok && tmp->closure_universal && tmp->capacity_origin) {
+            bool first_capacity = !plan->capacity_origin;
             zcl_devloop_capacity_note(plan, tmp->capacity_origin,
                                       tmp->capacity_cause, tmp->capacity_input);
+            if (first_capacity)
+                zcl_devloop_capacity_set_node(plan, tmp->capacity_node);
+        }
         for (size_t k = 0; ok && k < tmp->path_groups_len; k++)
             ok = fxc_merge_group(c, plan, tmp->path_groups[k]);
         for (size_t k = 0; ok && k < tmp->closure_groups_len; k++)
