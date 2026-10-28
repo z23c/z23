@@ -89,3 +89,29 @@ Escalate only for consensus or custody risk, a destructive production action (da
 - Maintainer hosts, fleet priorities, scorecard tiers, lanes and trains, source baseline: [Maintainer hosts](docs/dev/DEVELOPING.md#maintainer-hosts), [AGENT_FLEET.md](docs/work/AGENT_FLEET.md), [FLEET_GUIDE.md](docs/agent/FLEET_GUIDE.md).
 - Ownership map: [CODEBASE_MAP.md](docs/dev/CODEBASE_MAP.md). Current work order: [FORWARD_PLAN.md#now](docs/work/FORWARD_PLAN.md#now). Docs index: [docs/README.md](docs/README.md).
 - Nested `AGENTS.md` files in `engine/`, `cognition/`, `platform/`, `apps/`, `tools/`, `tests/`, `docs/` and `vendor/` add area rules.
+
+## Z23 helper delegation
+
+For Z23 fleet development, the owner prefers `gpt-6.1-terra` with `low`
+reasoning for bounded implementation, focused tests, source investigation and
+independent review. This preference supersedes the older shared Sol helper
+default for Z23. Keep the lead's configured model for architecture, P0
+judgments, integration and final decisions. Select Terra and low explicitly
+when supported; if the collaboration tool requires `fork_turns="none"` for a
+model override, use it and provide a compact capsule with the outcome, exact
+base, owned paths, constraints, acceptance command, and requested hashes and
+receipt locations.
+
+Delegate useful independent work that reduces elapsed time or lead context;
+do not occupy slots for appearance. Reuse retained helpers and keep authors
+available for repairs. Keep one writer per component and preserve active tasks
+when model preferences change. Avoid duplicate investigations, reviews, full
+gates and polling. Runtime capacity, native ownership, host admission and
+subscription availability remain actual limits; do not assume a fixed number
+of workers. If the requested model is unavailable, disclose that fact rather
+than silently switching to paid API usage.
+
+One non-author review and the native task, claim, receipt and landing workflow
+remain required. Report the effective model when observable and use existing
+receipts for tokens, elapsed time, retries and landed outcomes. Treat missing
+measurements as unknown; do not claim savings without supporting evidence.
