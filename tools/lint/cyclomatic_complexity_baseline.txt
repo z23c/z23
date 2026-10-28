@@ -8,10 +8,6 @@
 apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
-cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23
-cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
-cognition/modules/codeindex/src/codeindex_fetch.c:fetch_open_image:18
-cognition/modules/codeindex/src/codeindex_fetch.c:fetch_verify_staged:39
 cognition/modules/ontology/src/ontology.c:contexts_bound:17
 cognition/modules/ontology/src/ontology.c:zcl_ontology_evaluate_atom_v1:43
 cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
