@@ -160,11 +160,86 @@ static int verdict_rank(const char *verdict)
     return 6; /* INVALID_EVIDENCE */
 }
 
-static bool push_summary(struct slo_scan *scan, const char *instance,
-                         unsigned hours, int64_t now, bool global_invalid,
-                         struct json_value *summaries,
-                         const char **out_verdict, const char **out_reason)
+struct slo_window_summary {
+    const char *verdict;
+    const char *reason;
+    int64_t latest, age, max_gap, best_run_sec;
+    size_t count, reachable_count, best_run;
+    bool gap_known, window_complete;
+};
+
+static void summary_update_run(struct slo_window_summary *summary,
+                               size_t run, int64_t seconds)
 {
+    if (run > summary->best_run ||
+        (run == summary->best_run && seconds > summary->best_run_sec)) {
+        summary->best_run = run;
+        summary->best_run_sec = seconds;
+    }
+}
+
+static void summary_window_samples(const struct slo_scan *scan, size_t first,
+                                   size_t end, struct slo_window_summary *summary)
+{
+    size_t run = 0;
+    int64_t run_start = 0;
+    for (size_t i = first; i < end; i++) {
+        const struct slo_sample *sample = &scan->samples[i];
+        if (sample->reachable) {
+            summary->reachable_count++;
+            if (sample->gap_known &&
+                (!summary->gap_known || sample->gap > summary->max_gap)) {
+                summary->gap_known = true;
+                summary->max_gap = sample->gap;
+            }
+            if (run > 0)
+                summary_update_run(summary, run,
+                                   scan->samples[i - 1].ts - run_start);
+            run = 0;
+        } else {
+            if (run == 0)
+                run_start = sample->ts;
+            run++;
+        }
+    }
+    if (run > 0)
+        summary_update_run(summary, run, scan->samples[end - 1].ts - run_start);
+}
+
+static void summary_grade(struct slo_window_summary *summary, bool global_invalid)
+{
+    double pct = summary->count ? 100.0 * (double)summary->reachable_count /
+                                      (double)summary->count : 0.0;
+    if (global_invalid) {
+        summary->verdict = "INVALID_EVIDENCE";
+        summary->reason = "malformed_or_capacity_exceeded";
+    } else if (summary->age < 0) {
+        summary->verdict = "CLOCK_SKEW";
+        summary->reason = "latest_sample_is_in_the_future";
+    } else if (summary->age > SLO_SUMMARY_STALE_SECONDS) {
+        summary->verdict = "STALE";
+        summary->reason = "latest_complete_sample_is_stale";
+    } else if (!summary->window_complete) {
+        summary->verdict = "INCOMPLETE_WINDOW";
+        summary->reason = "requested_window_not_covered";
+    } else if (pct < 99.0) {
+        summary->verdict = "DEGRADED";
+        summary->reason = "reachable_pct_below_99";
+    } else {
+        summary->verdict = "OK";
+        summary->reason = "nominal";
+    }
+}
+
+static struct slo_window_summary summary_compute(const struct slo_scan *scan,
+                                                  const char *instance,
+                                                  unsigned hours, int64_t now,
+                                                  bool global_invalid)
+{
+    struct slo_window_summary summary = {
+        .verdict = "NO_DATA", .reason = "no_complete_samples_for_instance",
+        .latest = -1, .age = -1,
+    };
     size_t begin = 0;
     while (begin < scan->sample_count &&
            strcmp(scan->samples[begin].instance, instance) < 0)
@@ -173,123 +248,65 @@ static bool push_summary(struct slo_scan *scan, const char *instance,
     while (end < scan->sample_count &&
            strcmp(scan->samples[end].instance, instance) == 0)
         end++;
-
-    const char *verdict = "NO_DATA";
-    const char *reason = "no_complete_samples_for_instance";
-    int64_t latest = -1;
-    int64_t age = -1;
-    int64_t cutoff = -1;
-    size_t first = end;
-    size_t count = 0;
-    size_t reachable_count = 0;
-    bool gap_known = false;
-    int64_t max_gap = 0;
-    size_t best_run = 0;
-    int64_t best_run_sec = 0;
-    bool window_complete = false;
-
     if (begin < end) {
-        latest = scan->samples[end - 1].ts;
-        cutoff = latest - (int64_t)hours * 3600;
-        first = begin;
+        summary.latest = scan->samples[end - 1].ts;
+        int64_t cutoff = summary.latest - (int64_t)hours * 3600;
+        size_t first = begin;
         while (first < end && scan->samples[first].ts < cutoff)
             first++;
-        count = end - first;
-        age = now - latest;
-        window_complete = scan->samples[begin].ts <= cutoff;
-
-        size_t run = 0;
-        int64_t run_start = 0;
-        for (size_t i = first; i < end; i++) {
-            const struct slo_sample *sample = &scan->samples[i];
-            if (sample->reachable) {
-                reachable_count++;
-                if (sample->gap_known &&
-                    (!gap_known || sample->gap > max_gap)) {
-                    gap_known = true;
-                    max_gap = sample->gap;
-                }
-                if (run > 0) {
-                    int64_t seconds = scan->samples[i - 1].ts - run_start;
-                    if (run > best_run ||
-                        (run == best_run && seconds > best_run_sec)) {
-                        best_run = run;
-                        best_run_sec = seconds;
-                    }
-                }
-                run = 0;
-            } else {
-                if (run == 0)
-                    run_start = sample->ts;
-                run++;
-            }
-        }
-        if (run > 0) {
-            int64_t seconds = scan->samples[end - 1].ts - run_start;
-            if (run > best_run ||
-                (run == best_run && seconds > best_run_sec)) {
-                best_run = run;
-                best_run_sec = seconds;
-            }
-        }
-
-        double pct = count ? 100.0 * (double)reachable_count /
-                                     (double)count : 0.0;
-        if (global_invalid) {
-            verdict = "INVALID_EVIDENCE";
-            reason = "malformed_or_capacity_exceeded";
-        } else if (age < 0) {
-            verdict = "CLOCK_SKEW";
-            reason = "latest_sample_is_in_the_future";
-        } else if (age > SLO_SUMMARY_STALE_SECONDS) {
-            verdict = "STALE";
-            reason = "latest_complete_sample_is_stale";
-        } else if (!window_complete) {
-            verdict = "INCOMPLETE_WINDOW";
-            reason = "requested_window_not_covered";
-        } else if (pct < 99.0) {
-            verdict = "DEGRADED";
-            reason = "reachable_pct_below_99";
-        } else {
-            verdict = "OK";
-            reason = "nominal";
-        }
+        summary.count = end - first;
+        summary.age = now - summary.latest;
+        summary.window_complete = scan->samples[begin].ts <= cutoff;
+        summary_window_samples(scan, first, end, &summary);
+        summary_grade(&summary, global_invalid);
     } else if (global_invalid) {
-        verdict = "INVALID_EVIDENCE";
-        reason = "malformed_or_capacity_exceeded";
+        summary.verdict = "INVALID_EVIDENCE";
+        summary.reason = "malformed_or_capacity_exceeded";
     }
+    return summary;
+}
 
+static bool summary_push_measurements(struct json_value *one, const char *instance,
+                                      unsigned hours, const struct slo_window_summary *s)
+{
+    return json_push_kv_str(one, "instance", instance) &&
+           json_push_kv_int(one, "window_hours", hours) &&
+           json_push_kv_bool(one, "window_complete", s->window_complete) &&
+           json_push_kv_int(one, "probe_count", (int64_t)s->count) &&
+           json_push_kv_int(one, "reachable_count", (int64_t)s->reachable_count) &&
+           json_push_kv_real(one, "reachable_pct",
+                             s->count ? 100.0 * (double)s->reachable_count /
+                                        (double)s->count : 0.0) &&
+           (s->gap_known ? json_push_kv_int(one, "max_gap_vs_oracle", s->max_gap)
+                         : push_null(one, "max_gap_vs_oracle")) &&
+           json_push_kv_int(one, "longest_unreachable_run_probes", (int64_t)s->best_run) &&
+           json_push_kv_int(one, "longest_unreachable_run_sec", s->best_run_sec);
+}
+
+static bool push_summary(struct slo_scan *scan, const char *instance,
+                         unsigned hours, int64_t now, bool global_invalid,
+                         struct json_value *summaries,
+                         const char **out_verdict, const char **out_reason)
+{
+    struct slo_window_summary s = summary_compute(scan, instance, hours, now,
+                                                   global_invalid);
     struct json_value one;
     json_init(&one);
     json_set_object(&one);
-    bool ok = json_push_kv_str(&one, "instance", instance) &&
-              json_push_kv_int(&one, "window_hours", hours) &&
-              json_push_kv_bool(&one, "window_complete", window_complete) &&
-              json_push_kv_int(&one, "probe_count", (int64_t)count) &&
-              json_push_kv_int(&one, "reachable_count",
-                               (int64_t)reachable_count) &&
-              json_push_kv_real(&one, "reachable_pct",
-                                count ? 100.0 * (double)reachable_count /
-                                        (double)count : 0.0) &&
-              (gap_known ? json_push_kv_int(&one, "max_gap_vs_oracle",
-                                            max_gap)
-                         : push_null(&one, "max_gap_vs_oracle")) &&
-              json_push_kv_int(&one, "longest_unreachable_run_probes",
-                               (int64_t)best_run) &&
-              json_push_kv_int(&one, "longest_unreachable_run_sec",
-                               best_run_sec) &&
-              json_push_kv_int(&one, "last_sample_ts", latest) &&
-              json_push_kv_int(&one, "last_sample_age_sec", age) &&
-              json_push_kv_str(&one, "verdict", verdict) &&
-              json_push_kv_str(&one, "reason", reason) &&
+    bool ok = summary_push_measurements(&one, instance, hours, &s) &&
+              json_push_kv_int(&one, "last_sample_ts", s.latest) &&
+              json_push_kv_int(&one, "last_sample_age_sec", s.age) &&
+              json_push_kv_str(&one, "verdict", s.verdict) &&
+              json_push_kv_str(&one, "reason", s.reason) &&
               json_push_back(summaries, &one);
     json_free(&one);
     if (!ok)
         LOG_FAIL("slo_evidence", "could not allocate instance summary JSON");
-    *out_verdict = verdict;
-    *out_reason = reason;
+    *out_verdict = s.verdict;
+    *out_reason = s.reason;
     return true;
 }
+
 
 bool slo_ledger_summary_render_path(const char *path, const char *instance,
                                     unsigned window_hours, int64_t now_unix,

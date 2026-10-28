@@ -325,6 +325,67 @@ static bool short_window_never_claims_ok(void)
     return ok;
 }
 
+static bool window_tie_and_trailing_row(const struct json_value *row)
+{
+    const struct json_value *verdict = json_get(row, "verdict");
+    const char *text = json_get_str(verdict);
+    return row && text && strcmp(text, "DEGRADED") == 0 &&
+        json_get_bool(json_get(row, "window_complete")) &&
+        json_get_int(json_get(row, "probe_count")) == 6 &&
+        json_get_int(json_get(row, "longest_unreachable_run_probes")) == 2 &&
+        json_get_int(json_get(row, "longest_unreachable_run_sec")) == 600;
+}
+
+static bool render_has_verdict(const char *path, int64_t now, const char *want)
+{
+    struct json_value report = {0};
+    bool ok = slo_ledger_summary_render_path(path, "canonical", 1, now, &report);
+    const struct json_value *row = ok ? summary_for(&report, "canonical") : NULL;
+    const char *verdict = row ? json_get_str(json_get(row, "verdict")) : NULL;
+    ok = verdict && strcmp(verdict, want) == 0;
+    json_free(&report);
+    return ok;
+}
+
+static bool write_tied_outages(FILE *file, int64_t base)
+{
+    return write_sample(file, base, true, "0") &&
+           write_sample(file, base + 100, false, "null") &&
+           write_sample(file, base + 200, false, "null") &&
+           write_sample(file, base + 300, true, "0") &&
+           write_sample(file, base + 3000, false, "null") &&
+           write_sample(file, base + 3600, false, "null");
+}
+
+static bool window_tie_and_verdict_precedence(void)
+{
+    char dir[64], path[128];
+    if (!with_fixture_path(dir, sizeof(dir), path, sizeof(path))) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) { rmdir(dir); return false; }
+    bool ok = fclose(file) == 0;
+    const int64_t base = 1700000000;
+    ok = ok && render_has_verdict(path, base, "NO_DATA");
+    file = fopen(path, "ab");
+    if (!file) { unlink(path); rmdir(dir); return false; }
+    ok = ok && write_tied_outages(file, base);
+    ok = fclose(file) == 0 && ok;
+    struct json_value report = {0};
+    ok = ok && slo_ledger_summary_render_path(path, "canonical", 1,
+                                               base + 3600, &report);
+    ok = ok && window_tie_and_trailing_row(summary_for(&report, "canonical"));
+    json_free(&report);
+    ok = ok && render_has_verdict(path, base + 3500, "CLOCK_SKEW");
+    file = fopen(path, "ab");
+    if (!file) { unlink(path); rmdir(dir); return false; }
+    ok = (fputs("{invalid}\n", file) >= 0) && ok;
+    ok = fclose(file) == 0 && ok;
+    ok = ok && render_has_verdict(path, base + 3500, "INVALID_EVIDENCE");
+    unlink(path);
+    rmdir(dir);
+    return ok;
+}
+
 static bool sample_arena_oom_is_reported(void)
 {
     struct json_value report;
@@ -367,6 +428,8 @@ int test_slo_ledger_summary(void)
               malformed_complete_row_fails_closed());
     SLO_CHECK("partial observation window cannot claim OK",
               short_window_never_claims_ok());
+    SLO_CHECK("empty, tied trailing outages and verdict precedence",
+              window_tie_and_verdict_precedence());
     SLO_CHECK("sample arena allocation failure is observable",
               sample_arena_oom_is_reported());
 
