@@ -134,7 +134,6 @@ contexts/commons/packages/zre/src/zre.c:addthread:16
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
-contexts/commons/services/src/package_lifecycle_store.c:pkgl_materialize_package:28
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_rm_rf:16
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_verify_package:28
 contexts/commons/services/src/zcode_benchmark_executor.c:exec_context_load:25

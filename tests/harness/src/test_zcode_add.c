@@ -1889,6 +1889,55 @@ static bool za_tamper_chunk(const char *zcode, const char *content)
     return ok;
 }
 
+#if !defined(_WIN32)
+/* Exercise materialization directly, before lifecycle verification can refuse. */
+static int t_materialize_chunks(void)
+{
+    int failures = 0;
+    char base[512] = {0}, zcode[600], good[600], missing[600], corrupt[600], path[800];
+    const char *content = "int materialized_fixture(void) { return 7; }\n";
+    struct za_file files[] = {{"LICENSE", ZA_LICENSE}, {"src/a.h", ZA_RING_H},
+                              {"src/b.c", content}, {"test/t.c", ZA_RING_TEST}};
+    uint8_t root[32];
+    bool ready = test_mkdtemp(base, sizeof base, "materialize_chunks") &&
+        snprintf(zcode, sizeof zcode, "%s/zcode", base) > 0 &&
+        za_publish(zcode, "fixture/materialize", "1.0.0", 1, files, 4,
+                   "src/a.h", "src/b.c", "test/t.c", "src", root);
+    struct pkgl_ctx ctx;
+    bool opened = ready && pkgl_ctx_open(&ctx, base).ok;
+    ZA_CHECK("direct materialization fixture opens", opened);
+    if (opened) {
+        snprintf(good, sizeof good, "%s/good", base);
+        snprintf(missing, sizeof missing, "%s/missing", base);
+        snprintf(corrupt, sizeof corrupt, "%s/corrupt", base);
+        struct zcl_result result = pkgl_materialize_package(&ctx, root, good);
+        snprintf(path, sizeof path, "%s/src/b.c", good);
+        uint8_t got[32], expected[32];
+        struct sha3_256_ctx hash;
+        sha3_256_init(&hash);
+        sha3_256_write(&hash, (const uint8_t *)content, strlen(content));
+        sha3_256_finalize(&hash, expected);
+        ZA_CHECK("direct materialization writes verified bytes",
+                 result.ok && za_file_sha3(path, got) && memcmp(got, expected, 32) == 0);
+        bool damaged = za_tamper_chunk(zcode, content);
+        result = pkgl_materialize_package(&ctx, root, corrupt);
+        snprintf(path, sizeof path, "%s/src/b.c", corrupt);
+        struct stat st;
+        ZA_CHECK("direct materialization refuses corrupt bytes before writing",
+                 damaged && !result.ok && strstr(result.message, "does not match its committed hash") &&
+                 stat(path, &st) == 0 && st.st_size == 0);
+        bool removed = za_remove_chunk(zcode, content);
+        result = pkgl_materialize_package(&ctx, root, missing);
+        snprintf(path, sizeof path, "%s/src/b.c", missing);
+        ZA_CHECK("direct materialization refuses missing chunk before writing",
+                 removed && !result.ok && stat(path, &st) == 0 && st.st_size == 0);
+        pkgl_ctx_close(&ctx);
+    }
+    if (base[0]) za_rm_rf(base);
+    return failures;
+}
+#endif
+
 static int t_installed_root_symlink(const char *base, const char *zcode,
                                     const char *installed_dir,
                                     int64_t now_unix)
@@ -3924,6 +3973,9 @@ int test_zcode_add(void)
     failures += za_nofollow_plain_link();
     failures += za_nofollow_trailing_sep();
     failures += za_default_rollback_incomplete_census();
+#endif
+#if !defined(_WIN32)
+    failures += t_materialize_chunks();
 #endif
     failures += t_e2e();
     failures += t_programs();
