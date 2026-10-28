@@ -603,7 +603,6 @@ engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
 engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
 engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
-engine/controllers/src/nodelog_controller.c:line_level:22
 engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
