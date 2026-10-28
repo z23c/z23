@@ -400,6 +400,10 @@ static void test_cli_sizing(void) {
 }
 
 static void test_cli_refusals(void) {
+  cli_case("16", "1", "sfoo\n", CLI_OK, 2, "", "zpool: unknown op 'sfoo\n'");
+  cli_case("16", "1", "s1\n", CLI_OK, 2, "", "zpool: unknown op 's1\n'");
+  cli_case("16", "1", "s", CLI_OK, 0, "s -> free 1/1\n", "");
+  cli_case("16", "1", "a\nsfoo\n", CLI_OK, 2, "a -> 0\n", "zpool: unknown op 'sfoo\n'");
   cli_case("16", "1", "f\n", CLI_OK, 2, "", "zpool: bad op 'f\n'");
   cli_case("16", "1", "o\n", CLI_OK, 2, "", "zpool: bad op 'o\n'");
   cli_case("16", "1", "f", CLI_OK, 2, "", "zpool: bad op 'f'");

@@ -77,6 +77,50 @@ static int finish_output(FILE *out, int result) {
   return result;
 }
 
+static bool single_op(const char *op, char kind) {
+  return op[0] == kind && (op[1] == '\n' || op[1] == '\0');
+}
+
+static int run_op(zpool *pool, const char *op) {
+  if (single_op(op, 'a')) {
+    void *b = zpool_alloc(pool);
+    if (!b) {
+      puts("a -> FULL");
+    } else {
+      size_t idx = (size_t)((unsigned char *)b - arena) /
+                   pool->block_size;
+      printf("a -> %zu\n", idx);
+    }
+  } else if (op[0] == 'f' || op[0] == 'o') {
+    unsigned long idx;
+    if (!parse_index(op + 1, pool->block_count, &idx)) {
+      fprintf(stderr, "zpool: bad op '%s'", op);
+      return 2;
+    }
+    void *b = arena + idx * pool->block_size;
+    if (op[0] == 'f')
+      printf("f %lu -> %s\n", idx, zpool_free(pool, b) ? "ok" : "rejected");
+    else
+      printf("o %lu -> %s\n", idx, zpool_owns(pool, b) ? "live" : "no");
+  } else if (single_op(op, 's')) {
+    printf("s -> free %zu/%zu\n", zpool_available(pool), pool->block_count);
+  } else if (op[0] != '#' && op[0] != '\n') {
+    fprintf(stderr, "zpool: unknown op '%s'", op);
+    return 2;
+  }
+  return 0;
+}
+
+static int replay(zpool *pool) {
+  char op[MAX_OP];
+  int bad = 0;
+  while (fgets(op, sizeof(op), stdin)) {
+    bad = run_op(pool, op);
+    if (bad) break;
+  }
+  return finish_output(stdout, finish_input(stdin, bad));
+}
+
 int main(int argc, char **argv) {
   
   if (argc != 3) {
@@ -101,40 +145,5 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  char op[MAX_OP];
-  int bad = 0;
-  while (fgets(op, sizeof(op), stdin)) {
-    if (op[0] == 'a' && (op[1] == '\n' || op[1] == '\0')) {
-      void *b = zpool_alloc(&pool);
-      if (!b) {
-        puts("a -> FULL");
-      } else {
-        size_t idx = (size_t)((unsigned char *)b - arena) /
-                     pool.block_size;
-        printf("a -> %zu\n", idx);
-      }
-    } else if (op[0] == 'f' || op[0] == 'o') {
-      unsigned long idx;
-      if (!parse_index(op + 1, pool.block_count, &idx)) {
-        fprintf(stderr, "zpool: bad op '%s'", op);
-        bad = 2;
-        break;
-      }
-      void *b = arena + idx * pool.block_size;
-      if (op[0] == 'f')
-        printf("f %lu -> %s\n", idx, zpool_free(&pool, b) ? "ok" : "rejected");
-      else
-        printf("o %lu -> %s\n", idx, zpool_owns(&pool, b) ? "live" : "no");
-    } else if (op[0] == 's') {
-      printf("s -> free %zu/%zu\n", zpool_available(&pool),
-             pool.block_count);
-    } else if (op[0] == '#' || op[0] == '\n') {
-      continue;
-    } else {
-      fprintf(stderr, "zpool: unknown op '%s'", op);
-      bad = 2;
-      break;
-    }
-  }
-  return finish_output(stdout, finish_input(stdin, bad));
+  return replay(&pool);
 }
