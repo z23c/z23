@@ -385,34 +385,11 @@ int census_read_list(census_reader *r, const struct census_filter *filter,
 
 /* ── one node ────────────────────────────────────────────────────────── */
 
-bool census_read_node(census_reader *r, const char *ip, int port,
-                      struct census_node *node,
-                      struct census_observation *obs, int obs_cap, int *obs_n,
-                      struct census_edge *edges, int edge_cap, int *edge_n)
+static void census_read_observations(census_reader *r, const struct census_node *node,
+                                     int port, struct census_observation *obs,
+                                     int obs_cap, int *obs_n)
 {
-    if (obs_n)
-        *obs_n = 0;
-    if (edge_n)
-        *edge_n = 0;
-    if (!r || !r->db || !ip || !node)
-        return false;
-
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(r->db,
-            "SELECT " CENSUS_NODE_SELECT
-            " FROM node_census WHERE ip_to_str(ip)=? AND port=?",
-            -1, &s, NULL) != SQLITE_OK)
-        LOG_FAIL(CENSUS_SUBSYS, "node prepare failed: %s",
-                 sqlite3_errmsg(r->db));
-    sqlite3_bind_text(s, 1, ip, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(s, 2, port);
-    bool found = AR_STEP_ROW_READONLY(s) == SQLITE_ROW;
-    if (found)
-        read_node_row(s, node);
-    sqlite3_finalize(s);
-    if (!found)
-        return false;
-
     /* Bounded observation history (newest first). Census observations key on
      * the same 16-byte ip blob; match via ip_to_str(). */
     if (obs && obs_cap > 0 && obs_n && r->observations_present) {
@@ -445,6 +422,13 @@ bool census_read_node(census_reader *r, const char *ip, int port,
         }
     }
 
+}
+
+static void census_read_edges(census_reader *r, const struct census_node *node,
+                              int port, struct census_edge *edges,
+                              int edge_cap, int *edge_n)
+{
+    sqlite3_stmt *s = NULL;
     /* Bounded edges referencing this endpoint (as observer or advertised).
      * topology_edges keeps ip and port as separate TEXT/INT columns. */
     if (edges && edge_cap > 0 && edge_n && r->topology_present) {
@@ -481,6 +465,38 @@ bool census_read_node(census_reader *r, const char *ip, int port,
             *edge_n = k;
         }
     }
+}
+
+bool census_read_node(census_reader *r, const char *ip, int port,
+                      struct census_node *node,
+                      struct census_observation *obs, int obs_cap, int *obs_n,
+                      struct census_edge *edges, int edge_cap, int *edge_n)
+{
+    if (obs_n)
+        *obs_n = 0;
+    if (edge_n)
+        *edge_n = 0;
+    if (!r || !r->db || !ip || !node)
+        return false;
+
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(r->db,
+            "SELECT " CENSUS_NODE_SELECT
+            " FROM node_census WHERE ip_to_str(ip)=? AND port=?",
+            -1, &s, NULL) != SQLITE_OK)
+        LOG_FAIL(CENSUS_SUBSYS, "node prepare failed: %s",
+                 sqlite3_errmsg(r->db));
+    sqlite3_bind_text(s, 1, ip, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(s, 2, port);
+    bool found = AR_STEP_ROW_READONLY(s) == SQLITE_ROW;
+    if (found)
+        read_node_row(s, node);
+    sqlite3_finalize(s);
+    if (!found)
+        return false;
+
+    census_read_observations(r, node, port, obs, obs_cap, obs_n);
+    census_read_edges(r, node, port, edges, edge_cap, edge_n);
     return true;
 }
 

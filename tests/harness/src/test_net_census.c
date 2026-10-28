@@ -347,6 +347,28 @@ static int test_census_list_and_filters(void)
 
 /* ── 3. one-node lookup ──────────────────────────────────────────────── */
 
+static bool census_node_optional_bounds(census_reader *r)
+{
+    struct census_node node;
+    struct census_observation obs[1];
+    struct census_edge edges[1];
+    int obs_n = -1, edge_n = -1;
+    bool found = census_read_node(r, "198.51.100.9", 8033, &node,
+                                  obs, 1, &obs_n, edges, 1, &edge_n);
+    bool limited = found && obs_n == 1 && edge_n == 1 &&
+                   obs[0].reported_height == 3200500 &&
+                   strcmp(edges[0].advertised, "198.51.100.9:8033") == 0 &&
+                   edges[0].times_seen == 7;
+    obs_n = edge_n = -1;
+    found = census_read_node(r, "198.51.100.9", 8033, &node,
+                             NULL, 1, &obs_n, NULL, 1, &edge_n);
+    bool null_buffers = found && obs_n == 0 && edge_n == 0;
+    obs_n = edge_n = -1;
+    found = census_read_node(r, "198.51.100.9", 8033, &node,
+                             obs, 0, &obs_n, edges, 0, &edge_n);
+    return limited && null_buffers && found && obs_n == 0 && edge_n == 0;
+}
+
 static int test_census_node_lookup(void)
 {
     int failures = 0;
@@ -376,6 +398,7 @@ static int test_census_node_lookup(void)
         /* c is advertised by two observers → 2 edges reference its endpoint. */
         ASSERT(edge_n == 2);
         ASSERT_STR_EQ(edges[0].advertised, "198.51.100.9:8033");
+        ASSERT(census_node_optional_bounds(r));
 
         /* Absent endpoint → found=false, counts zeroed. */
         bool miss = census_read_node(r, "10.0.0.1", 8033, &node,
