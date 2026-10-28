@@ -28,12 +28,16 @@
 #include <string.h>
 #include <strings.h>
 
+static bool lms_state_blocked(const struct legacy_mirror_sync_stats *s)
+{
+    return !s || !s->enabled || !s->running ||
+           s->activation_blocker_reason[0] || s->last_blocker_id[0] ||
+           s->csr_sqlite_rc != 0;
+}
+
 static const char *lms_state_name(const struct legacy_mirror_sync_stats *s)
 {
-    if (!s || !s->enabled || !s->running)
-        return "blocked";
-    if (s->activation_blocker_reason[0] || s->last_blocker_id[0] ||
-        s->csr_sqlite_rc != 0)
+    if (lms_state_blocked(s))
         return "blocked";
     if (s->lag_known &&
         s->lag_sla_breach_blocks > 0 &&
