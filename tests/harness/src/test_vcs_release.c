@@ -411,7 +411,8 @@ static int t_release_field_grammars(void)
     const char *bad_semvers[] = {
         "1.0", "1.0.0.", "v1.0.0", "1.02.0", "01.0.0", "1.0.0-",
         "1.0.0+", "1.0.0-01", "1.0.0-alpha..1", "1.0.0-a_b", "1.0.0.0",
-        "1", "", "1.0.0-+x",
+        "1", "", "1.0.0-+x", "1.0.0-alpha.01+build",
+        "1.0.0+build..1", "1.0.0-1.+build", "1.0.0+build+extra",
     };
     for (size_t i = 0; i < sizeof(bad_semvers) / sizeof(bad_semvers[0]); i++) {
         struct vcs_package_release m = r;
@@ -423,7 +424,7 @@ static int t_release_field_grammars(void)
     const char *good_semvers[] = {
         "0.0.0", "10.20.30", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-0.3.7",
         "1.0.0-x-y-z.-", "1.0.0+build.01", "1.0.0-rc.1+build.7",
-        "1.4.2",
+        "1.4.2", "1.0.0-0+001.00", "1.0.0-01a+00",
     };
     for (size_t i = 0; i < sizeof(good_semvers) / sizeof(good_semvers[0]);
          i++) {
@@ -566,6 +567,11 @@ static int t_release_wire_strictness(void)
     VR_CHECK("wire: trailing byte rejected",
              vcs_package_release_parse(bad, wire_len + 1, &rejected) ==
                  VCS_PACKAGE_RELEASE_ERR_WIRE_TRAILING);
+    for (size_t prefix = 0; prefix < wire_len; prefix++)
+        VR_CHECK("wire: every strict prefix rejected",
+                 vcs_package_release_parse(wire, prefix, &rejected) !=
+                     VCS_PACKAGE_RELEASE_OK);
+
     VR_CHECK("wire: truncation rejected",
              vcs_package_release_parse(wire, wire_len - 1, &rejected) ==
                  VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED);
@@ -600,6 +606,13 @@ static int t_release_wire_strictness(void)
     VR_CHECK("wire: bad znam flag rejected",
              vcs_package_release_parse(bad, wire_len, &rejected) ==
                  VCS_PACKAGE_RELEASE_ERR_ZNAM_FLAG);
+
+    memcpy(bad, wire, wire_len);
+    memset(bad + vr_parent_flag_offset(&r) - 32u, 0, 32);
+    bad[vr_parent_flag_offset(&r)] = 2;
+    VR_CHECK("wire: package root error precedes parent flag",
+             vcs_package_release_parse(bad, wire_len, &rejected) ==
+                 VCS_PACKAGE_RELEASE_ERR_PACKAGE_ROOT);
 
     /* Grammar is enforced at parse, not only at validate: flip the name's
      * first byte to uppercase (lengths unchanged, signature irrelevant). */

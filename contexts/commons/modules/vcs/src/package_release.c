@@ -140,6 +140,33 @@ static bool release_semver_ident(const char **pp, const char *end,
     return true;
 }
 
+static bool release_semver_suffix(const char **p, const char *end)
+{
+    /* optional "-prerelease[.prerelease...]" */
+    if (*p < end && **p == '-') {
+        (*p)++;
+        for (;;) {
+            if (!release_semver_ident(p, end, false))
+                return false;
+            if (*p >= end || **p != '.')
+                break;
+            (*p)++;
+        }
+    }
+    /* optional "+build[.build...]" — identifiers may have leading zeros. */
+    if (*p < end && **p == '+') {
+        (*p)++;
+        for (;;) {
+            if (!release_semver_ident(p, end, true))
+                return false;
+            if (*p >= end || **p != '.')
+                break;
+            (*p)++;
+        }
+    }
+    return true;
+}
+
 static bool release_semver_valid_n(const char *semver, size_t len)
 {
     if (!semver || len == 0 || len > VCS_PACKAGE_RELEASE_SEMVER_MAX)
@@ -158,28 +185,7 @@ static bool release_semver_valid_n(const char *semver, size_t len)
             p++;
         }
     }
-    /* optional "-prerelease[.prerelease...]" */
-    if (p < end && *p == '-') {
-        p++;
-        for (;;) {
-            if (!release_semver_ident(&p, end, false))
-                return false;
-            if (p >= end || *p != '.')
-                break;
-            p++;
-        }
-    }
-    /* optional "+build[.build...]" — identifiers may have leading zeros. */
-    if (p < end && *p == '+') {
-        p++;
-        for (;;) {
-            if (!release_semver_ident(&p, end, true))
-                return false;
-            if (p >= end || *p != '.')
-                break;
-            p++;
-        }
-    }
+    if (!release_semver_suffix(&p, end)) return false;
     return p == end;
 }
 
@@ -478,6 +484,46 @@ static size_t release_body_bytes(const struct vcs_package_release *release)
            2u + strlen(release->chain_id);
 }
 
+static bool release_encode_prefix(const struct vcs_package_release *release,
+                                  struct zcl_codec_writer *writer,
+                                  size_t name_len, size_t semver_len)
+{
+    bool ok = zcl_codec_write_bytes(writer, release_magic,
+                                    sizeof(release_magic)) &&
+        zcl_codec_write_u16le(writer, release->schema_version) &&
+        zcl_codec_write_u16_string(writer, release->name, name_len) &&
+        zcl_codec_write_u16_string(writer, release->semver, semver_len) &&
+        zcl_codec_write_bytes(writer, release->package_root, 32) &&
+        zcl_codec_write_u8(writer, release->has_parent ? 1u : 0u);
+    if (release->has_parent)
+        ok = ok && zcl_codec_write_bytes(writer, release->parent_root, 32);
+    return ok;
+}
+
+static bool release_encode_tail(const struct vcs_package_release *release,
+                                struct zcl_codec_writer *writer,
+                                size_t reward_len, size_t license_len, bool ok)
+{
+    ok = ok && zcl_codec_write_bytes(
+                   writer, release->publisher_pubkey,
+                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES) &&
+        zcl_codec_write_u64le(writer, release->publisher_sequence) &&
+        zcl_codec_write_u16_string(writer, release->reward_address,
+                                   reward_len) &&
+        zcl_codec_write_u16_string(writer, release->license, license_len) &&
+        zcl_codec_write_bytes(writer, release->recipe_root, 32) &&
+        zcl_codec_write_u8(writer, release->has_znam ? 1u : 0u);
+    if (release->has_znam) {
+        size_t znam_len = strlen(release->znam);
+        ok = ok && zcl_codec_write_u16_string(writer, release->znam,
+                                              znam_len);
+    }
+    size_t chain_len = strlen(release->chain_id);
+    ok = ok && zcl_codec_write_u16_string(writer, release->chain_id,
+                                          chain_len);
+    return ok;
+}
+
 /* Emit the canonical body (everything but the signature) into out, which
  * must hold release_body_bytes(release) bytes. Returns the byte count. */
 static size_t release_body_encode(const struct vcs_package_release *release,
@@ -490,32 +536,8 @@ static size_t release_body_encode(const struct vcs_package_release *release,
     size_t semver_len = strlen(release->semver);
     size_t reward_len = strlen(release->reward_address);
     size_t license_len = strlen(release->license);
-    bool ok = zcl_codec_write_bytes(&writer, release_magic,
-                                    sizeof(release_magic)) &&
-        zcl_codec_write_u16le(&writer, release->schema_version) &&
-        zcl_codec_write_u16_string(&writer, release->name, name_len) &&
-        zcl_codec_write_u16_string(&writer, release->semver, semver_len) &&
-        zcl_codec_write_bytes(&writer, release->package_root, 32) &&
-        zcl_codec_write_u8(&writer, release->has_parent ? 1u : 0u);
-    if (release->has_parent)
-        ok = ok && zcl_codec_write_bytes(&writer, release->parent_root, 32);
-    ok = ok && zcl_codec_write_bytes(
-                   &writer, release->publisher_pubkey,
-                   VCS_PACKAGE_RELEASE_PUBKEY_BYTES) &&
-        zcl_codec_write_u64le(&writer, release->publisher_sequence) &&
-        zcl_codec_write_u16_string(&writer, release->reward_address,
-                                   reward_len) &&
-        zcl_codec_write_u16_string(&writer, release->license, license_len) &&
-        zcl_codec_write_bytes(&writer, release->recipe_root, 32) &&
-        zcl_codec_write_u8(&writer, release->has_znam ? 1u : 0u);
-    if (release->has_znam) {
-        size_t znam_len = strlen(release->znam);
-        ok = ok && zcl_codec_write_u16_string(&writer, release->znam,
-                                              znam_len);
-    }
-    size_t chain_len = strlen(release->chain_id);
-    ok = ok && zcl_codec_write_u16_string(&writer, release->chain_id,
-                                          chain_len);
+    bool ok = release_encode_prefix(release, &writer, name_len, semver_len);
+    ok = release_encode_tail(release, &writer, reward_len, license_len, ok);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == capacity ? written : 0;
@@ -601,6 +623,136 @@ static enum vcs_package_release_error release_read_string(
     return VCS_PACKAGE_RELEASE_OK;
 }
 
+static enum vcs_package_release_error release_parse_roots_publisher(
+    struct zcl_codec_reader *reader, struct vcs_package_release *out)
+{
+    uint8_t parent_flag = 0;
+    if (!zcl_codec_read_bytes(reader, out->package_root, 32) ||
+        !zcl_codec_read_u8(reader, &parent_flag))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
+                   "release wire truncated at package root/parent flag");
+    if (release_root_zero(out->package_root))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PACKAGE_ROOT, "vcs.release",
+                   "release wire all-zero package root");
+    if (parent_flag > 1u)
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PARENT_FLAG, "vcs.release",
+                   "release wire parent flag %u", (unsigned)parent_flag);
+    out->has_parent = parent_flag == 1u;
+    if (out->has_parent) {
+        if (!zcl_codec_read_bytes(reader, out->parent_root, 32))
+            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED,
+                       "vcs.release",
+                       "release wire truncated at parent root");
+        if (release_root_zero(out->parent_root))
+            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PARENT_ROOT, "vcs.release",
+                       "release wire parent flagged but all-zero root");
+    }
+
+    if (!zcl_codec_read_bytes(reader, out->publisher_pubkey,
+                              VCS_PACKAGE_RELEASE_PUBKEY_BYTES) ||
+        !zcl_codec_read_u64le(reader, &out->publisher_sequence))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
+                   "release wire truncated at pubkey/sequence");
+    if (!release_pubkey_valid(out->publisher_pubkey))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PUBKEY, "vcs.release",
+                   "release wire pubkey is not a compressed curve point");
+    if (out->publisher_sequence == 0)
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_SEQUENCE, "vcs.release",
+                   "release wire publisher sequence 0");
+
+    return VCS_PACKAGE_RELEASE_OK;
+}
+
+static enum vcs_package_release_error release_parse_reward_license(
+    struct zcl_codec_reader *reader, struct vcs_package_release *out)
+{
+    enum vcs_package_release_error error = release_read_string(
+        reader, VCS_PACKAGE_RELEASE_REWARD_MAX,
+        out->reward_address, sizeof(out->reward_address), "reward address",
+        VCS_PACKAGE_RELEASE_ERR_REWARD);
+    if (error != VCS_PACKAGE_RELEASE_OK)
+        return error;
+    if (!release_reward_valid_n(out->reward_address,
+                                strlen(out->reward_address)))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_REWARD, "vcs.release",
+                   "release wire bad reward address");
+
+    error = release_read_string(
+        reader, VCS_PACKAGE_RELEASE_LICENSE_MAX, out->license,
+        sizeof(out->license), "license", VCS_PACKAGE_RELEASE_ERR_LICENSE);
+    if (error != VCS_PACKAGE_RELEASE_OK)
+        return error;
+    if (!release_license_valid_n(out->license, strlen(out->license)))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_LICENSE, "vcs.release",
+                   "release wire license not on the v1 SPDX allowlist");
+
+    return VCS_PACKAGE_RELEASE_OK;
+}
+
+static enum vcs_package_release_error release_parse_recipe_chain(
+    struct zcl_codec_reader *reader, struct vcs_package_release *out)
+{
+    enum vcs_package_release_error error;
+    uint8_t znam_flag = 0;
+    if (!zcl_codec_read_bytes(reader, out->recipe_root, 32) ||
+        !zcl_codec_read_u8(reader, &znam_flag))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
+                   "release wire truncated at recipe root/znam flag");
+    if (release_root_zero(out->recipe_root))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_RECIPE_ROOT, "vcs.release",
+                   "release wire all-zero recipe root");
+    if (znam_flag > 1u)
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM_FLAG, "vcs.release",
+                   "release wire znam flag %u", (unsigned)znam_flag);
+    out->has_znam = znam_flag == 1u;
+    if (out->has_znam) {
+        error = release_read_string(
+            reader, VCS_PACKAGE_RELEASE_ZNAM_MAX, out->znam,
+            sizeof(out->znam), "znam", VCS_PACKAGE_RELEASE_ERR_ZNAM);
+        if (error != VCS_PACKAGE_RELEASE_OK)
+            return error;
+        if (!release_name_half_valid_n(out->znam, strlen(out->znam)))
+            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM, "vcs.release",
+                       "release wire bad ZNAM pointer name");
+    }
+
+    error = release_read_string(
+        reader, VCS_PACKAGE_RELEASE_CHAIN_ID_MAX,
+        out->chain_id, sizeof(out->chain_id), "chain id",
+        VCS_PACKAGE_RELEASE_ERR_CHAIN_ID);
+    if (error != VCS_PACKAGE_RELEASE_OK)
+        return error;
+    if (!release_chain_id_valid_n(out->chain_id, strlen(out->chain_id)))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_CHAIN_ID, "vcs.release",
+                   "release wire bad chain identifier");
+
+    return VCS_PACKAGE_RELEASE_OK;
+}
+
+static enum vcs_package_release_error release_parse_name_version(
+    struct zcl_codec_reader *reader, struct vcs_package_release *out)
+{
+    enum vcs_package_release_error error = release_read_string(
+        reader, VCS_PACKAGE_RELEASE_NAME_MAX, out->name,
+        sizeof(out->name), "name", VCS_PACKAGE_RELEASE_ERR_NAME);
+    if (error != VCS_PACKAGE_RELEASE_OK)
+        return error;
+    if (!release_name_valid_n(out->name, strlen(out->name)))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_NAME, "vcs.release",
+                   "release wire bad package name");
+
+    error = release_read_string(
+        reader, VCS_PACKAGE_RELEASE_SEMVER_MAX, out->semver,
+        sizeof(out->semver), "semver", VCS_PACKAGE_RELEASE_ERR_SEMVER);
+    if (error != VCS_PACKAGE_RELEASE_OK)
+        return error;
+    if (!release_semver_valid_n(out->semver, strlen(out->semver)))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_SEMVER, "vcs.release",
+                   "release wire bad semantic version");
+
+    return VCS_PACKAGE_RELEASE_OK;
+}
+
 enum vcs_package_release_error vcs_package_release_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_package_release *out)
@@ -631,110 +783,18 @@ enum vcs_package_release_error vcs_package_release_parse(
                    "release wire schema version %u",
                    (unsigned)out->schema_version);
 
-    enum vcs_package_release_error error = release_read_string(
-        &reader, VCS_PACKAGE_RELEASE_NAME_MAX, out->name,
-        sizeof(out->name), "name", VCS_PACKAGE_RELEASE_ERR_NAME);
-    if (error != VCS_PACKAGE_RELEASE_OK)
-        return error;
-    if (!release_name_valid_n(out->name, strlen(out->name)))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_NAME, "vcs.release",
-                   "release wire bad package name");
+    enum vcs_package_release_error error =
+        release_parse_name_version(&reader, out);
+    if (error != VCS_PACKAGE_RELEASE_OK) return error;
 
-    error = release_read_string(
-        &reader, VCS_PACKAGE_RELEASE_SEMVER_MAX, out->semver,
-        sizeof(out->semver), "semver", VCS_PACKAGE_RELEASE_ERR_SEMVER);
-    if (error != VCS_PACKAGE_RELEASE_OK)
-        return error;
-    if (!release_semver_valid_n(out->semver, strlen(out->semver)))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_SEMVER, "vcs.release",
-                   "release wire bad semantic version");
+    error = release_parse_roots_publisher(&reader, out);
+    if (error != VCS_PACKAGE_RELEASE_OK) return error;
 
-    uint8_t parent_flag = 0;
-    if (!zcl_codec_read_bytes(&reader, out->package_root, 32) ||
-        !zcl_codec_read_u8(&reader, &parent_flag))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
-                   "release wire truncated at package root/parent flag");
-    if (release_root_zero(out->package_root))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PACKAGE_ROOT, "vcs.release",
-                   "release wire all-zero package root");
-    if (parent_flag > 1u)
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PARENT_FLAG, "vcs.release",
-                   "release wire parent flag %u", (unsigned)parent_flag);
-    out->has_parent = parent_flag == 1u;
-    if (out->has_parent) {
-        if (!zcl_codec_read_bytes(&reader, out->parent_root, 32))
-            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED,
-                       "vcs.release",
-                       "release wire truncated at parent root");
-        if (release_root_zero(out->parent_root))
-            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PARENT_ROOT, "vcs.release",
-                       "release wire parent flagged but all-zero root");
-    }
+    error = release_parse_reward_license(&reader, out);
+    if (error != VCS_PACKAGE_RELEASE_OK) return error;
 
-    if (!zcl_codec_read_bytes(&reader, out->publisher_pubkey,
-                              VCS_PACKAGE_RELEASE_PUBKEY_BYTES) ||
-        !zcl_codec_read_u64le(&reader, &out->publisher_sequence))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
-                   "release wire truncated at pubkey/sequence");
-    if (!release_pubkey_valid(out->publisher_pubkey))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_PUBKEY, "vcs.release",
-                   "release wire pubkey is not a compressed curve point");
-    if (out->publisher_sequence == 0)
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_SEQUENCE, "vcs.release",
-                   "release wire publisher sequence 0");
-
-    error = release_read_string(
-        &reader, VCS_PACKAGE_RELEASE_REWARD_MAX,
-        out->reward_address, sizeof(out->reward_address), "reward address",
-        VCS_PACKAGE_RELEASE_ERR_REWARD);
-    if (error != VCS_PACKAGE_RELEASE_OK)
-        return error;
-    if (!release_reward_valid_n(out->reward_address,
-                                strlen(out->reward_address)))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_REWARD, "vcs.release",
-                   "release wire bad reward address");
-
-    error = release_read_string(
-        &reader, VCS_PACKAGE_RELEASE_LICENSE_MAX, out->license,
-        sizeof(out->license), "license", VCS_PACKAGE_RELEASE_ERR_LICENSE);
-    if (error != VCS_PACKAGE_RELEASE_OK)
-        return error;
-    if (!release_license_valid_n(out->license, strlen(out->license)))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_LICENSE, "vcs.release",
-                   "release wire license not on the v1 SPDX allowlist");
-
-    uint8_t znam_flag = 0;
-    if (!zcl_codec_read_bytes(&reader, out->recipe_root, 32) ||
-        !zcl_codec_read_u8(&reader, &znam_flag))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "vcs.release",
-                   "release wire truncated at recipe root/znam flag");
-    if (release_root_zero(out->recipe_root))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_RECIPE_ROOT, "vcs.release",
-                   "release wire all-zero recipe root");
-    if (znam_flag > 1u)
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM_FLAG, "vcs.release",
-                   "release wire znam flag %u", (unsigned)znam_flag);
-    out->has_znam = znam_flag == 1u;
-    if (out->has_znam) {
-        error = release_read_string(
-            &reader, VCS_PACKAGE_RELEASE_ZNAM_MAX, out->znam,
-            sizeof(out->znam), "znam", VCS_PACKAGE_RELEASE_ERR_ZNAM);
-        if (error != VCS_PACKAGE_RELEASE_OK)
-            return error;
-        if (!release_name_half_valid_n(out->znam, strlen(out->znam)))
-            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM, "vcs.release",
-                       "release wire bad ZNAM pointer name");
-    }
-
-    error = release_read_string(
-        &reader, VCS_PACKAGE_RELEASE_CHAIN_ID_MAX,
-        out->chain_id, sizeof(out->chain_id), "chain id",
-        VCS_PACKAGE_RELEASE_ERR_CHAIN_ID);
-    if (error != VCS_PACKAGE_RELEASE_OK)
-        return error;
-    if (!release_chain_id_valid_n(out->chain_id, strlen(out->chain_id)))
-        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_CHAIN_ID, "vcs.release",
-                   "release wire bad chain identifier");
+    error = release_parse_recipe_chain(&reader, out);
+    if (error != VCS_PACKAGE_RELEASE_OK) return error;
 
     if (!zcl_codec_read_bytes(&reader, out->signature,
                               VCS_PACKAGE_RELEASE_SIGNATURE_BYTES))

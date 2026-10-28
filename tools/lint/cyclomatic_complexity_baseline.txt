@@ -38,10 +38,7 @@ contexts/commons/modules/vcs/src/package_recipe.c:vcs_package_recipe_error_strin
 contexts/commons/modules/vcs/src/package_recipe.c:vcs_package_recipe_parse:29
 contexts/commons/modules/vcs/src/package_recipe.c:vcs_package_recipe_serialize:22
 contexts/commons/modules/vcs/src/package_recipe.c:vcs_package_recipe_validate:32
-contexts/commons/modules/vcs/src/package_release.c:release_body_encode:22
-contexts/commons/modules/vcs/src/package_release.c:release_semver_valid_n:21
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_error_string:24
-contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_parse:38
 contexts/commons/modules/vcs/src/package_release.c:vcs_package_release_validate:16
 contexts/commons/modules/vcs/src/package_reward.c:reward_load_plan_dir:16
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
