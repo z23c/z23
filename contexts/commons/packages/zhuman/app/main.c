@@ -8,6 +8,8 @@
  */
 #include "zhuman/zhuman.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,20 @@ static int usage(void)
     return 2;
 }
 
+static int parse_u64(const char *s, uint64_t *out)
+{
+    const char *p = s;
+    while (isspace((unsigned char)*p)) p++;
+    if (*p == '-') return 0;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || value > UINT64_MAX)
+        return 0;
+    *out = (uint64_t)value;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) return usage();
@@ -33,9 +49,8 @@ int main(int argc, char **argv)
             si = 1;
             num = argv[3];
         }
-        char *end = NULL;
-        uint64_t v = strtoull(num, &end, 10);
-        if (!end || *end != '\0') return usage();
+        uint64_t v;
+        if (!parse_u64(num, &v)) return usage();
         char out[32];
         zhuman_err e = si ? zhuman_format_bytes_si(v, out, sizeof out)
                           : zhuman_format_bytes_iec(v, out, sizeof out);
@@ -59,9 +74,8 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(argv[1], "duration") == 0) {
-        char *end = NULL;
-        uint64_t ms = strtoull(argv[2], &end, 10);
-        if (!end || *end != '\0') return usage();
+        uint64_t ms;
+        if (!parse_u64(argv[2], &ms)) return usage();
         char out[64];
         zhuman_err e = zhuman_format_duration(ms, out, sizeof out);
         if (e != ZHUMAN_OK) {

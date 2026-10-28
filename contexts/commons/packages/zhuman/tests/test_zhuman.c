@@ -7,6 +7,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_real_stderr(void) { return stderr; }
+static FILE *cli_out, *cli_err;
+#undef stderr
+#define stderr cli_err
+#define printf(...) fprintf(cli_out, __VA_ARGS__)
+#define puts(s) (fputs((s), cli_out) == EOF ? EOF : fputc('\n', cli_out))
+#define main zhuman_cli_main
+#include "../app/main.c"
+#undef main
+#undef puts
+#undef printf
+#undef stderr
+#define stderr cli_real_stderr()
+
 #define CHECK(cond) do { \
     if (!(cond)) { \
         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
@@ -253,8 +267,62 @@ static void test_uint64_decimal_bounds(void)
     expect_parse_duration("1s 18446744073709550615ms", UINT64_MAX);
 }
 
+static bool cli_text(FILE *f, const char *expected)
+{
+    rewind(f);
+    char buf[256];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    return !ferror(f) && n == strlen(expected) && memcmp(buf, expected, n) == 0;
+}
+
+static bool cli_case(int argc, char **argv, int status, const char *out,
+                     const char *err)
+{
+    cli_out = tmpfile(); cli_err = tmpfile();
+    if (!cli_out || !cli_err) {
+        if (cli_out) fclose(cli_out);
+        if (cli_err) fclose(cli_err);
+        return false;
+    }
+    int actual = zhuman_cli_main(argc, argv);
+    bool ok = actual == status && cli_text(cli_out, out) && cli_text(cli_err, err);
+    if (fclose(cli_out) != 0) ok = false;
+    if (fclose(cli_err) != 0) ok = false;
+    return ok;
+}
+
+static void test_cli_numeric(void)
+{
+    const char *usage_text = "usage: zhuman bytes [--si] <n>\n"
+        "       zhuman parse-bytes <s>\n       zhuman duration <ms>\n"
+        "       zhuman parse-duration <s>\n";
+    char *invalid[] = {"", " ", "-1", " -0", "18446744073709551616", "1x"};
+    for (size_t mode = 0; mode < 3; mode++) {
+        for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++) {
+            char *args[] = {"zhuman", mode == 2 ? "duration" : "bytes",
+                            mode == 1 ? "--si" : invalid[i], invalid[i], NULL};
+            CHECK(cli_case(mode == 1 ? 4 : 3, args, 2, "", usage_text));
+        }
+        char expected[128], formatted[96];
+        zhuman_err e = mode == 2 ? zhuman_format_duration(UINT64_MAX, formatted, sizeof formatted)
+            : mode == 1 ? zhuman_format_bytes_si(UINT64_MAX, formatted, sizeof formatted)
+                        : zhuman_format_bytes_iec(UINT64_MAX, formatted, sizeof formatted);
+        CHECK(e == ZHUMAN_OK);
+        snprintf(expected, sizeof expected, "%s\n", formatted);
+        char *max[] = {"zhuman", mode == 2 ? "duration" : "bytes",
+                       mode == 1 ? "--si" : " +18446744073709551615",
+                       " +18446744073709551615", NULL};
+        CHECK(cli_case(mode == 1 ? 4 : 3, max, 0, expected, ""));
+        char *zero[] = {"zhuman", mode == 2 ? "duration" : "bytes",
+                        mode == 1 ? "--si" : "0", "0", NULL};
+        CHECK(cli_case(mode == 1 ? 4 : 3, zero, 0,
+                       mode == 2 ? "0 ms\n" : "0 B\n", ""));
+    }
+}
+
 int main(void)
 {
+    test_cli_numeric();
     test_format_bytes();
     test_parse_bytes();
     test_duration();

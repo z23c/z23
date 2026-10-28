@@ -24,6 +24,10 @@ zhuman_err zhuman_parse_duration(const char *str, uint64_t *out_ms);
 
 ## CLI
 
+Numeric byte and millisecond inputs accept unsigned decimal values through
+`UINT64_MAX`, with optional leading whitespace and `+`; negative and overflow
+values are rejected.
+
 ```sh
 zhuman bytes 1536             # 1.5 KiB
 zhuman bytes --si 1500        # 1.5 kB
