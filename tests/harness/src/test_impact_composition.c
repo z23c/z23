@@ -621,7 +621,7 @@ static bool ic_write_depfiles(const char *root)
 /* ── T1: a truncated closure keeps what the partial walk found ────────── */
 
 /* Two independent bounds discard evidence, and BOTH used to zero the group
- * set. This fixture fires the first: one symbol with more call sites than the
+ * set. The distinct-caller fixture fires the first: one symbol with more edges than the
  * engine's per-query fan-out batch, so codeindex_impact_closure reports
  * truncated while still returning a real, useful impacted-file set. */
 static bool ic_write_fanout_caller(const char *root)
@@ -641,6 +641,21 @@ static bool ic_write_fanout_caller(const char *root)
     for (size_t i = 0; i < calls && pos + 32 < cap; i++)
         pos += (size_t)snprintf(body + pos, cap - pos, "+tor_leaf(%d)", 1);
     (void)snprintf(body + pos, cap - pos, "; }\n");
+    bool ok = ic_write(root, "core/modules/net/src/zbigfanout.c", body);
+    free(body);
+    return ok;
+}
+
+static bool ic_write_distinct_fanout(const char *root)
+{
+    const size_t calls = 5000;
+    size_t cap = calls * 64 + 256;
+    char *body = malloc(cap);
+    if (!body) return false;
+    size_t pos = (size_t)snprintf(body, cap, "#include \"net/clp.h\"\n");
+    for (size_t i = 0; i < calls && pos + 64 < cap; i++)
+        pos += (size_t)snprintf(body + pos, cap - pos,
+                                "int zf%zu(void) { return tor_leaf(1); }\n", i);
     bool ok = ic_write(root, "core/modules/net/src/zbigfanout.c", body);
     free(body);
     return ok;
@@ -691,6 +706,41 @@ static bool ic_output_cause(struct codeindex *ci)
     return n < 0 && !truncated && cause.reason == CI_IMPACT_CAUSE_NONE;
 }
 
+static int test_ic_duplicate_caller_edges(void)
+{
+    int failures = 0;
+    const char *root = IC_FIX_ROOT "/dedup";
+    TEST("impact composition: repeated calls preserve exact closure and raw callers") {
+        TEST_DISCARD(system("rm -rf " IC_FIX_ROOT "/dedup"));
+        ASSERT(ic_write_call_pair(root));
+        ASSERT(ic_write_depfiles(root));
+        ASSERT(ic_write_fanout_caller(root));
+        struct codeindex *ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        struct ci_ref *raw = calloc(4096, sizeof(*raw));
+        ASSERT(raw != NULL);
+        ASSERT_EQ(codeindex_callers(ci, "tor_leaf", raw, 4096), 4096);
+        free(raw);
+        const char changed[1][256] = {"core/modules/net/src/tor_integration.c"};
+        char out[16][256];
+        bool truncated = false;
+        int n = codeindex_impact_closure_bounded(ci, NULL, changed, 1, 0,
+            ic_nonterminal, NULL, out, 16, &truncated, false);
+        ASSERT(n == 3 && !truncated);
+        bool origin = false, download = false, fanout = false;
+        for (int i = 0; i < n; i++) {
+            origin |= strcmp(out[i], "core/modules/net/src/tor_integration.c") == 0;
+            download |= strcmp(out[i], "core/modules/net/src/download.c") == 0;
+            fanout |= strcmp(out[i], "core/modules/net/src/zbigfanout.c") == 0;
+        }
+        ASSERT(origin && download && fanout);
+        codeindex_close(ci);
+        TEST_DISCARD(system("rm -rf " IC_FIX_ROOT "/dedup"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_truncated_closure_preserves_groups(void)
 {
     int failures = 0;
@@ -698,7 +748,7 @@ static int test_ic_truncated_closure_preserves_groups(void)
  TEST_DISCARD(system("rm -rf " IC_FIX_TRUNC));
         ASSERT(ic_write_call_pair(IC_FIX_TRUNC));
         ASSERT(ic_write_depfiles(IC_FIX_TRUNC));
-        ASSERT(ic_write_fanout_caller(IC_FIX_TRUNC));
+        ASSERT(ic_write_distinct_fanout(IC_FIX_TRUNC));
 
         const char *files[] = { "core/modules/net/src/tor_integration.c" };
         struct zcl_devloop_plan plan;
@@ -1191,7 +1241,7 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
  TEST_DISCARD(system("rm -rf " IC_FIX_TRUNC));
         ASSERT(ic_write_call_pair(IC_FIX_TRUNC));
         ASSERT(ic_write_depfiles(IC_FIX_TRUNC));
-        ASSERT(ic_write_fanout_caller(IC_FIX_TRUNC));
+        ASSERT(ic_write_distinct_fanout(IC_FIX_TRUNC));
         struct zcl_devloop_plan cut;
         ASSERT(zcl_devloop_plan_files(files, 1, &cut));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_TRUNC, files, 1, &cut));
@@ -14663,6 +14713,7 @@ int test_impact_composition(void)
     failures += test_ic_competing_fungible_proof_workers();
     failures += test_ic_worker_hard_death_containment();
 #endif
+    failures += test_ic_duplicate_caller_edges();
     failures += test_ic_truncated_closure_preserves_groups();
     failures += test_ic_closure_capacity_follows_corpus();
     failures += test_ic_proof_umbrella_union();

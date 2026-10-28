@@ -22,6 +22,8 @@
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
+#include <sqlite3.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -438,9 +440,62 @@ static int test_sc_forward_closure_all_definitions(void)
     return failures;
 }
 
+static int test_sc_caller_edge_query(void)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: edge query preserves identities and fails closed") {
+        struct ci_store *s = ci_store_open_path(":memory:");
+        ASSERT(s != NULL);
+        sqlite3 *db = ci_store_db(s);
+        ASSERT_EQ(sqlite3_exec(db,
+            "DROP TABLE refs; CREATE TABLE refs (callee_name TEXT, ref_file TEXT, ref_line INTEGER, enclosing TEXT);"
+            "INSERT INTO refs VALUES ('f','a.c',1,'run'),('f','a.c',2,'run'),"
+            "('f','a.c',3,'other'),('f','b.c',4,'run'),"
+            "('f','c.h',5,NULL),('f','c.h',6,'');",
+            NULL, NULL, NULL), SQLITE_OK);
+        struct ci_ref rows[8];
+        int n = ci_store_caller_edges(s, "f", rows, 8);
+        ASSERT_EQ(n, 4);
+        ASSERT_STR_EQ(rows[0].ref_file, "a.c");
+        ASSERT_STR_EQ(rows[0].enclosing, "run");
+        ASSERT_EQ(rows[0].ref_line, 1);
+        ASSERT_STR_EQ(rows[1].enclosing, "other");
+        ASSERT_STR_EQ(rows[2].ref_file, "b.c");
+        ASSERT_STR_EQ(rows[2].enclosing, "run");
+        ASSERT_STR_EQ(rows[3].ref_file, "c.h");
+        ASSERT_STR_EQ(rows[3].enclosing, "");
+        ASSERT_EQ(sqlite3_exec(db, "INSERT INTO refs VALUES ('g',NULL,1,''),('g','',2,NULL)",
+            NULL, NULL, NULL), SQLITE_OK);
+        ASSERT(ci_store_caller_edges(s, "g", rows, 8) < 0);
+        ASSERT_EQ(sqlite3_exec(db,
+            "INSERT INTO refs VALUES ('long',printf('%0300d',0),1,'f'),"
+            "('nul','a'||char(0)||'b',1,'f');", NULL, NULL, NULL), SQLITE_OK);
+        ASSERT(ci_store_caller_edges(s, "long", rows, 8) < 0);
+        ASSERT(ci_store_caller_edges(s, "nul", rows, 8) < 0);
+        ASSERT_EQ(sqlite3_exec(db, "INSERT INTO refs VALUES ('blob',x'6162',1,'f')", NULL, NULL, NULL), SQLITE_OK);
+        ASSERT(ci_store_caller_edges(s, "blob", rows, 8) < 0);
+        struct ci_symbol sym = {0};
+        snprintf(sym.name, sizeof(sym.name), "f");
+        snprintf(sym.def_path, sizeof(sym.def_path), "a.c");
+        sym.kind = 0x54;
+        ASSERT(ci_store_put_symbol(s, &sym));
+        ASSERT_EQ(sqlite3_exec(db, "DROP TABLE refs", NULL, NULL, NULL), SQLITE_OK);
+        ASSERT(ci_store_caller_edges(s, "f", rows, 8) < 0);
+        struct codeindex ci = { .store = s };
+        const char changed[1][256] = {"a.c"};
+        char out[8][256];
+        bool truncated = false;
+        ASSERT(codeindex_impact_closure(&ci, changed, 1, 0, out, 8, &truncated) < 0);
+        ci_store_close(s);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
+    failures += test_sc_caller_edge_query();
     struct codeindex *ci = NULL;
     TEST("codeindex_static_callers: fixture tree indexes") {
          TEST_DISCARD(system("rm -rf " SC_FIX));

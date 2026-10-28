@@ -190,6 +190,60 @@ int ci_store_find_symbols_exact(struct ci_store *s, const char *name,
     return n;
 }
 
+/* Bounded closure edges; unlike public caller queries, repeated call sites in
+ * the same file and enclosing function contribute only one edge. */
+static bool ci_edge_column(sqlite3_stmt *stmt, int col, char *out, size_t cap)
+{
+    const unsigned char *s = sqlite3_column_text(stmt, col);
+    int n = sqlite3_column_bytes(stmt, col);
+    if (!s || n < 0 || (size_t)n >= cap || strlen((const char *)s) != (size_t)n)
+        return false;
+    memcpy(out, s, (size_t)n + 1);
+    return true;
+}
+
+static bool ci_edge_read_row(sqlite3_stmt *stmt, struct ci_ref *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (sqlite3_column_int(stmt, 3) != 0 ||
+        !ci_edge_column(stmt, 0, out->ref_file, sizeof(out->ref_file)) ||
+        !ci_edge_column(stmt, 1, out->enclosing, sizeof(out->enclosing)) ||
+        !out->ref_file[0])
+        return false;
+    out->ref_line = sqlite3_column_int(stmt, 2);
+    return true;
+}
+
+int ci_store_caller_edges(struct ci_store *s, const char *callee,
+                          struct ci_ref *out, int cap)
+{
+    if (!s || !callee || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to caller_edges");
+    pthread_mutex_lock(&s->lock);
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT coalesce(ref_file,''), coalesce(enclosing,''), min(ref_line), max(typeof(ref_file) NOT IN ('text','null') OR typeof(enclosing) NOT IN ('text','null')) "
+        "FROM refs WHERE callee_name=? GROUP BY coalesce(ref_file,''), coalesce(enclosing,'') "
+        "ORDER BY coalesce(ref_file,''), min(ref_line), coalesce(enclosing,'')";
+    int rc = sqlite3_prepare_v2(s->db, sql, -1, &stmt, NULL);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_text(stmt, 1, callee, -1, SQLITE_TRANSIENT);
+    int n = 0;
+    while (rc == SQLITE_OK && n < cap) {
+        int step = sqlite3_step(stmt); // raw-sql-ok:codeindex-derived
+        if (step == SQLITE_DONE) break;
+        if (step != SQLITE_ROW) { rc = step; break; }
+        if (!ci_edge_read_row(stmt, &out[n])) {
+            rc = SQLITE_ERROR;
+            break;
+        }
+        n++;
+    }
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) rc = SQLITE_ERROR;
+    pthread_mutex_unlock(&s->lock);
+    if (rc != SQLITE_OK) LOG_ERR("codeindex", "caller edge query failed");
+    return n;
+}
+
 int ci_store_refs_by_callee(struct ci_store *s, const char *callee,
                             struct ci_ref *out, int cap)
 {

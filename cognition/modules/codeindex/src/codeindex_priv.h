@@ -182,6 +182,8 @@ int  ci_store_find_symbols(struct ci_store *s, const char *q,
                            struct ci_symbol *out, int cap);
 int  ci_store_search_text(struct ci_store *s, const char *q,
                           struct ci_search_hit *out, int cap);
+int  ci_store_caller_edges(struct ci_store *s, const char *callee,
+                           struct ci_ref *out, int cap);
 int  ci_store_refs_by_callee(struct ci_store *s, const char *callee,
                              struct ci_ref *out, int cap);
 /* Refs whose enclosing function is `enclosing` (the callee side of the call

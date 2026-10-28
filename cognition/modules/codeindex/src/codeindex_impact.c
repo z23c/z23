@@ -516,9 +516,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
         scope.name = name;
         scope.path = at + 1;
     }
-    /* The name's full ref set, filtered below for a static: the fan-out bound
-     * therefore fires exactly where the name-only walk's did. */
-    int nc = codeindex_callers(ci, name, c->refbuf, CI_CLOSURE_QUERY_BATCH);
+    /* Distinct file and enclosing edges, filtered below for a static. */
+    int nc = ci_store_caller_edges(ci->store, name, c->refbuf, CI_CLOSURE_QUERY_BATCH);
     if (nc < 0)
         LOG_FAIL("codeindex", "callers failed for %s", name);
     if (nc == CI_CLOSURE_QUERY_BATCH) {
