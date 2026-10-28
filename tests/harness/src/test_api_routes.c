@@ -366,6 +366,29 @@ static bool api_refold_status_text(const struct json_value *root)
                   "missing_verified_anchor_snapshot") == 0;
 }
 
+static bool api_refold_missing_snapshot(const struct json_value *snap)
+{
+    static const char *false_fields[] = {
+        "stat_present", "header_read", "height_match", "count_match",
+        "sha3_match", "block_hash_match", "verified"
+    };
+    if (!snap || snap->type != JSON_OBJ)
+        return false;
+    for (size_t i = 0; i < sizeof(false_fields) / sizeof(false_fields[0]); i++) {
+        const struct json_value *v = json_get(snap, false_fields[i]);
+        if (!v || v->type != JSON_BOOL || json_get_bool(v))
+            return false;
+    }
+    const struct json_value *size = json_get(snap, "stat_size");
+    const struct json_value *verification = json_get(snap, "verification");
+    const struct json_value *error = json_get(snap, "error");
+    return size && size->type == JSON_INT && json_get_int(size) == 0 &&
+        verification && verification->type == JSON_STR &&
+        strcmp(json_get_str(verification), "missing") == 0 &&
+        error && error->type == JSON_STR &&
+        strcmp(json_get_str(error), "anchor snapshot candidate is absent") == 0;
+}
+
 static int api_refold_anchor_readiness_case(uint8_t *resp, size_t cap)
 {
     printf("api: refold endpoint reports anchor readiness... ");
@@ -375,6 +398,7 @@ static int api_refold_anchor_readiness_case(uint8_t *resp, size_t cap)
     const struct json_value *commands = json_get(&root, "commands");
     ok = ok && api_refold_status_text(&root);
     ok = ok && snap && json_get(snap, "path") != NULL;
+    ok = ok && api_refold_missing_snapshot(snap);
     ok = ok && commands &&
          strcmp(json_get_str(json_get(commands, "native")), "z23 refold") == 0;
     json_free(&root);

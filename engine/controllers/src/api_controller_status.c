@@ -631,6 +631,52 @@ size_t api_serve_milestone(uint8_t *response, size_t response_max)
     return n;
 }
 
+static void api_refold_snapshot_verification(struct json_value *snap,
+                                             bool status_ok,
+                                             const struct anchor_snapshot_status *st)
+{
+    json_push_kv_bool(snap, "height_match", status_ok &&
+                      st->height_match);
+    json_push_kv_bool(snap, "count_match", status_ok &&
+                      st->count_match);
+    json_push_kv_bool(snap, "sha3_match", status_ok && st->sha3_match);
+    json_push_kv_bool(snap, "block_hash_match", status_ok &&
+                      st->block_hash_match);
+    json_push_kv_bool(snap, "verified", status_ok && st->verified);
+    json_push_kv_str(snap, "verification",
+                     status_ok ? st->verification : "status_error");
+    if (!status_ok || st->error[0])
+        json_push_kv_str(snap, "error", status_ok ? st->error
+                                                    : "status unavailable");
+}
+
+static void api_refold_snapshot_json(struct json_value *result, bool status_ok,
+                                     const struct anchor_snapshot_status *st)
+{
+    struct json_value snap;
+    json_init(&snap);
+    json_set_object(&snap);
+    json_push_kv_bool(&snap, "path_resolved", status_ok &&
+                      st->path_resolved);
+    json_push_kv_str(&snap, "source", status_ok ? st->path_source : "");
+    json_push_kv_str(&snap, "path", status_ok ? st->path : "");
+    json_push_kv_bool(&snap, "stat_present", status_ok &&
+                      st->stat_present);
+    json_push_kv_int(&snap, "stat_size",
+                     status_ok ? st->stat_size : 0);
+    json_push_kv_bool(&snap, "header_read", status_ok && st->header_read);
+    json_push_kv_int(&snap, "height", st->snapshot_height);
+    json_push_kv_int(&snap, "count", (int64_t)st->snapshot_count);
+    json_push_kv_int(&snap, "total_supply",
+                     st->snapshot_total_supply);
+    json_push_kv_str(&snap, "sha3", st->snapshot_sha3_hex);
+    json_push_kv_str(&snap, "block_hash", st->snapshot_block_hash_hex);
+    api_refold_snapshot_verification(&snap, status_ok, st);
+    json_push_kv(result, "anchor_snapshot", &snap);
+    json_free(&snap);
+
+}
+
 void api_refold_status_json(struct json_value *result)
 {
     struct anchor_snapshot_status st = {0};
@@ -673,39 +719,7 @@ void api_refold_status_json(struct json_value *result)
     json_push_kv(result, "checkpoint", &checkpoint);
     json_free(&checkpoint);
 
-    struct json_value snap;
-    json_init(&snap);
-    json_set_object(&snap);
-    json_push_kv_bool(&snap, "path_resolved", status_ok &&
-                      st.path_resolved);
-    json_push_kv_str(&snap, "source", status_ok ? st.path_source : "");
-    json_push_kv_str(&snap, "path", status_ok ? st.path : "");
-    json_push_kv_bool(&snap, "stat_present", status_ok &&
-                      st.stat_present);
-    json_push_kv_int(&snap, "stat_size",
-                     status_ok ? st.stat_size : 0);
-    json_push_kv_bool(&snap, "header_read", status_ok && st.header_read);
-    json_push_kv_int(&snap, "height", st.snapshot_height);
-    json_push_kv_int(&snap, "count", (int64_t)st.snapshot_count);
-    json_push_kv_int(&snap, "total_supply",
-                     st.snapshot_total_supply);
-    json_push_kv_str(&snap, "sha3", st.snapshot_sha3_hex);
-    json_push_kv_str(&snap, "block_hash", st.snapshot_block_hash_hex);
-    json_push_kv_bool(&snap, "height_match", status_ok &&
-                      st.height_match);
-    json_push_kv_bool(&snap, "count_match", status_ok &&
-                      st.count_match);
-    json_push_kv_bool(&snap, "sha3_match", status_ok && st.sha3_match);
-    json_push_kv_bool(&snap, "block_hash_match", status_ok &&
-                      st.block_hash_match);
-    json_push_kv_bool(&snap, "verified", status_ok && st.verified);
-    json_push_kv_str(&snap, "verification",
-                     status_ok ? st.verification : "status_error");
-    if (!status_ok || st.error[0])
-        json_push_kv_str(&snap, "error", status_ok ? st.error
-                                                    : "status unavailable");
-    json_push_kv(result, "anchor_snapshot", &snap);
-    json_free(&snap);
+    api_refold_snapshot_json(result, status_ok, &st);
 
     struct json_value commands;
     json_init(&commands);
