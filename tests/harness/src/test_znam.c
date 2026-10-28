@@ -1731,6 +1731,23 @@ static int znam_test_rpc_name_set_text(struct rpc_table *t,
     return failures;
 }
 
+static int znam_empty_target_rpcs(struct rpc_table *t)
+{
+    int failures = 0;
+    const char *methods[] = {"name_register", "name_update", "name_set_record"};
+    for (size_t i = 0; i < sizeof methods / sizeof methods[0]; i++) {
+        struct json_value result = {0};
+        const char *name = i == 0 ? "unused-empty" : "alice";
+        bool ok = call_name_rpc(t, methods[i], name, "btc", true, "", &result);
+        const char *message = json_get_str(&result);
+        bool refused = !ok && message && strcmp(message, "Failed to build OP_RETURN script") == 0;
+        printf("znam empty RPC %s... %s (ok=%d)\n", methods[i], refused ? "OK" : "FAIL", ok);
+        if (!refused) failures++;
+        json_free(&result);
+    }
+    return failures;
+}
+
 static int znam_test_rpc_write_surface(void)
 {
     int failures = 0;
@@ -1779,6 +1796,7 @@ static int znam_test_rpc_write_surface(void)
             memset(oversize_key, 'k', sizeof(oversize_key) - 1);
             oversize_key[sizeof(oversize_key) - 1] = '\0';
 
+            failures += znam_empty_target_rpcs(&t);
             failures += znam_test_rpc_name_update(&t, oversize_value);
             failures += znam_test_rpc_name_transfer(&t, oversize_owner);
 
@@ -2230,9 +2248,27 @@ static int zf_text_owner_limits(void)
 
 #undef ZF_CHECK
 
+static int znam_empty_builders(void)
+{
+    int failures = 0; uint8_t buf[512];
+    size_t lengths[] = {
+        znam_build_register(buf, sizeof buf, "alice", ZNAM_TYPE_BTC, ""),
+        znam_build_update(buf, sizeof buf, "alice", ZNAM_TYPE_BTC, ""),
+        znam_build_set_record(buf, sizeof buf, "alice", ZNAM_TYPE_BTC, ""),
+        znam_build_transfer(buf, sizeof buf, "alice", ""),
+    };
+    const char *labels[] = {"register", "update", "set_record", "transfer"};
+    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
+        printf("znam empty builder %s... %s (length=%zu)\n", labels[i], lengths[i] == 0 ? "OK" : "FAIL", lengths[i]);
+        if (lengths[i] != 0) failures++;
+    }
+    return failures;
+}
+
 int test_znam(void)
 {
     int failures = 0;
+    failures += znam_empty_builders();
     failures += zf_trailing_commands() + zf_embedded_nul() + zf_partial_fields() + zf_bounds_and_type();
     failures += zf_seeded_partial() + zf_seeded_name_and_text() + zf_text_owner_limits();
     failures += znam_addr_save_bounds();

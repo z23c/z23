@@ -98,7 +98,7 @@ bool znam_validate_name(const char *name);
  * or value. */
 
 /* REGISTER: name + primary target. Requires znam_validate_name(name),
- * non-NULL target_value, and target_type in 1..ZNAM_TYPE_CONTENT (the
+ * non-empty target_value, and target_type in 1..ZNAM_TYPE_CONTENT (the
  * full multi-coin/onion/content range the parser round-trips). */
 size_t znam_build_register(uint8_t *out, size_t out_len,
                            const char *name, uint8_t target_type,
@@ -110,7 +110,7 @@ size_t znam_build_update(uint8_t *out, size_t out_len,
                          const char *target_value);
 
 /* TRANSFER: hand ownership to new_owner. Requires a valid name and a
- * non-NULL new_owner string. */
+ * non-empty new_owner string. */
 size_t znam_build_transfer(uint8_t *out, size_t out_len,
                            const char *name, const char *new_owner);
 
@@ -119,7 +119,7 @@ size_t znam_build_renew(uint8_t *out, size_t out_len,
                         const char *name);
 
 /* SET_RECORD (ENS-inspired): set an additional address for a coin type.
- * Same constraints as REGISTER (valid name, non-NULL target_value,
+ * Same constraints as REGISTER (valid name, non-empty target_value,
  * target_type in 1..ZNAM_TYPE_CONTENT). */
 size_t znam_build_set_record(uint8_t *out, size_t out_len,
                              const char *name, uint8_t target_type,
