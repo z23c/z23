@@ -1218,9 +1218,6 @@ tools/engine_unit.c:parse_args:30
 tools/engine_unit.c:probe_cli:30
 tools/engine_unit.c:unit_ledger_row:17
 tools/engine_unit.c:write_receipt:67
-tools/fingerprint_scan.c:fp_collect_undefined:16
-tools/fingerprint_scan.c:fp_prune_group:18
-tools/fingerprint_scan.c:fp_prune_link:29
 tools/gen_utxo_root_ladder.c:main:35
 tools/gen_utxo_root_ladder.c:parse_cli:22
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26

@@ -24,6 +24,11 @@
 #include "fingerprint/fingerprint.h"
 #include "fingerprint/fp_runtime.h"
 #if defined(__linux__)
+#define main fx_scanner_fixture_main
+#include "../../../tools/fingerprint_scan.c"
+#undef main
+#endif
+#if defined(__linux__)
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -665,6 +670,103 @@ static int fx_cli_scan_fixture(void)
     return failures;
 }
 
+#define FX_PARSER_CHECK(label, condition) do { \
+    bool passed_ = (condition); \
+    printf("fingerprint parser %s... %s\n", (label), passed_ ? "OK" : "FAIL"); \
+    if (!passed_) failures++; \
+} while (0)
+
+static int fx_parser_collect(const char *dir)
+{
+    int failures = 0;
+    char path[PATH_MAX + 32], line[FP_MAX_NAME + 128];
+    char names[4][FP_MAX_NAME] = {{0}};
+    snprintf(path, sizeof path, "%s/undefined.err", dir);
+    size_t n = fp_collect_undefined(path, names, 0, 4);
+    FX_PARSER_CHECK("missing undefined file preserves count", n == 0);
+    memset(line, 'X', FP_MAX_NAME + 30);
+    line[FP_MAX_NAME + 30] = '\0';
+    char body[FP_MAX_NAME + 512];
+    snprintf(body, sizeof body, "undefined reference to 'alpha'\nundefined reference to `alpha'\nundefined reference to 9_name!\nundefined reference to !\nundefined reference to %s\n", line);
+    bool written = fx_write(dir, "undefined.err", body);
+    n = fp_collect_undefined(path, names, 0, 4);
+    FX_PARSER_CHECK("quoted duplicate digit and truncated symbols", written && n == 3 && strcmp(names[0], "alpha") == 0 && strcmp(names[1], "9_name") == 0 && strlen(names[2]) == FP_MAX_NAME - 1);
+    char capped[4][FP_MAX_NAME] = {{0}};
+    n = fp_collect_undefined(path, capped, 0, 1);
+    FX_PARSER_CHECK("undefined symbol cap", n == 1 && strcmp(capped[0], "alpha") == 0);
+    return failures;
+}
+
+static int fx_parser_group(const char *dir)
+{
+    int failures = 0;
+    struct fp_env env = {0};
+    snprintf(env.work, sizeof env.work, "%s", dir);
+    unsigned char disabled[3] = {0};
+    long n = fp_prune_group(&env, 0, NULL, 3, disabled, "");
+    FX_PARSER_CHECK("missing map refuses group", n == -1);
+    bool ok = fx_write(dir, "fp_probes_0.map", "0 10\n1 20\n2 20\n99 30\n");
+    n = fp_prune_group(&env, 0, NULL, 3, disabled, "");
+    FX_PARSER_CHECK("missing diagnostics refuses group", ok && n == -1);
+    ok = fx_write(dir, "fp_probes_0.err", "fp_probes_0.c:5: error: before\nfp_probes_0.c:20: error: tie\nfp_probes_0.c:20: error: repeated\nfp_probes_0.c:31: error: out of range\n");
+    n = fp_prune_group(&env, 0, NULL, 3, disabled, "");
+    FX_PARSER_CHECK("nearest marker ties and duplicate errors", ok && n == 1 && disabled[0] == 0 && disabled[1] == 1 && disabled[2] == 0);
+    n = fp_prune_group(&env, 0, NULL, 3, disabled, "");
+    FX_PARSER_CHECK("no newly disabled refuses group", n == -1);
+    return failures;
+}
+
+static int fx_parser_link_context(const char *dir, const char *path,
+                                  struct fp_candidate *cands, const size_t *groups,
+                                  unsigned char *disabled, unsigned char *dirty)
+{
+    int failures = 0;
+    memset(disabled, 0, 4); memset(dirty, 0, 3);
+    bool ok = fx_write(dir, "link.err", "x in function `fp_p_3'\nx in function `not_a_probe'\nundefined reference to `unowned'\n");
+    long n = fp_prune_link(path, cands, 4, disabled, groups, dirty);
+    FX_PARSER_CHECK("nonprobe clears previous context", ok && n == 0 && !disabled[3] && !dirty[2]);
+    ok = fx_write(dir, "link.err", "fp_probes_2.o: in function `fp_p_3'\nmultiple definition of `x'\n");
+    n = fp_prune_link(path, cands, 4, disabled, groups, dirty);
+    FX_PARSER_CHECK("multiple definition disables source group", ok && n == 2 && !disabled[0] && !disabled[1] && disabled[2] && disabled[3] && dirty[2]);
+    return failures;
+}
+
+static int fx_parser_link(const char *dir)
+{
+    int failures = 0;
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof path, "%s/link.err", dir);
+    struct fp_candidate cands[4] = {0};
+    snprintf(cands[0].name, sizeof cands[0].name, "same");
+    snprintf(cands[1].name, sizeof cands[1].name, "same");
+    snprintf(cands[2].name, sizeof cands[2].name, "same");
+    snprintf(cands[3].name, sizeof cands[3].name, "other");
+    cands[2].via_source = true; cands[3].via_source = true;
+    const size_t groups[4] = {0, 1, 2, 2};
+    unsigned char disabled[4] = {0}, dirty[3] = {0};
+    long n = fp_prune_link(path, cands, 4, disabled, groups, dirty);
+    FX_PARSER_CHECK("missing link diagnostics preserves state", n == 0);
+    bool ok = fx_write(dir, "link.err", "x in function `fp_p_3'\nundefined reference to `same'\n");
+    n = fp_prune_link(path, cands, 4, disabled, groups, dirty);
+    FX_PARSER_CHECK("header names take priority over probe", ok && n == 2 && disabled[0] && disabled[1] && !disabled[2] && !disabled[3] && dirty[0] && dirty[1] && !dirty[2]);
+    memset(disabled, 0, sizeof disabled); memset(dirty, 0, sizeof dirty);
+    disabled[0] = disabled[1] = 1;
+    n = fp_prune_link(path, cands, 4, disabled, groups, dirty);
+    FX_PARSER_CHECK("disabled names fall through to probe", n == 1 && disabled[3] && !disabled[2] && dirty[2]);
+    failures += fx_parser_link_context(dir, path, cands, groups, disabled, dirty);
+    return failures;
+}
+
+static int fx_parser_fixtures(void)
+{
+    char dir[PATH_MAX];
+    test_make_tmpdir(dir, sizeof dir, "fingerprint", "parsers");
+    int failures = fx_parser_collect(dir) + fx_parser_group(dir) + fx_parser_link(dir);
+    if (test_rm_rf_recursive(dir) != 0) failures++;
+    return failures;
+}
+#undef FX_PARSER_CHECK
+
 #endif
 
 int test_fingerprint(void)
@@ -672,6 +774,7 @@ int test_fingerprint(void)
     int failures = 0;
 #if defined(__linux__)
     failures += fx_cli_scan_fixture();
+    failures += fx_parser_fixtures();
 #endif
     const uint64_t shape = 0x0123456789ABCDEFull;
     uint64_t a1 = 0;

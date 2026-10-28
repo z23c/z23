@@ -248,6 +248,35 @@ static pid_t fp_compile_group(const struct fp_env *e, size_t g, const char *opt,
     return fp_spawn(argv, err, false);
 }
 
+static bool fp_group_load_map(const char *path, long *marks,
+                              unsigned long *idx, size_t *nmark)
+{
+    FILE *fh = fopen(path, "r");
+    if (fh == NULL) return false;
+    char line[2048];
+    *nmark = 0;
+    while (*nmark < FP_MAX_CANDS && fgets(line, sizeof line, fh) != NULL) {
+        unsigned long i2;
+        long l2;
+        if (sscanf(line, "%lu %ld", &i2, &l2) == 2) {
+            idx[*nmark] = i2;
+            marks[*nmark] = l2;
+            (*nmark)++;
+        }
+    }
+    fclose(fh);
+    return true;
+}
+
+static long fp_group_marker(const long *marks, size_t nmark, long ln)
+{
+    long best = -1;
+    for (size_t k = 0; k < nmark; k++)
+        if (marks[k] <= ln && (best < 0 || marks[k] > marks[(size_t)best]))
+            best = (long)k;
+    return best;
+}
+
 /* Attribute compiler errors in one group back to individual probes. Returns
  * the number newly disabled; -1 means the whole group must go (the failure
  * was in the include block, before any probe). */
@@ -255,50 +284,24 @@ static long fp_prune_group(const struct fp_env *e, size_t g,
                            const struct fp_candidate *cands, size_t n_cands,
                            unsigned char *disabled, const char *suffix)
 {
-    char err[FP_MAX_PATH * 2];
-    char map[FP_MAX_PATH * 2];
-    char line[2048];
-    FILE *fh;
+    char err[FP_MAX_PATH * 2], map[FP_MAX_PATH * 2], line[2048], tag[64];
     static long marks[FP_MAX_CANDS];
     static unsigned long idx[FP_MAX_CANDS];
     size_t nmark = 0;
     long newly = 0;
     bool any = false;
-
     snprintf(map, sizeof map, "%s/fp_probes_%zu.map", e->work, g);
-    fh = fopen(map, "r");
-    if (fh == NULL)
-        return -1;
-    while (nmark < FP_MAX_CANDS && fgets(line, sizeof line, fh) != NULL) {
-        unsigned long i2;
-        long l2;
-        if (sscanf(line, "%lu %ld", &i2, &l2) == 2) {
-            idx[nmark] = i2;
-            marks[nmark] = l2;
-            nmark++;
-        }
-    }
-    fclose(fh);
-
+    if (!fp_group_load_map(map, marks, idx, &nmark)) return -1;
     snprintf(err, sizeof err, "%s/fp_probes_%zu%s.err", e->work, g, suffix);
-    fh = fopen(err, "r");
-    if (fh == NULL)
-        return -1;
+    FILE *fh = fopen(err, "r");
+    if (fh == NULL) return -1;
+    snprintf(tag, sizeof tag, "fp_probes_%zu.c:", g);
     while (fgets(line, sizeof line, fh) != NULL) {
-        char tag[64];
-        long ln = 0;
-        const char *p;
-        size_t k;
-        long best = -1;
-        snprintf(tag, sizeof tag, "fp_probes_%zu.c:", g);
-        p = strstr(line, tag);
-        if (p == NULL || strstr(line, "error") == NULL)
-            continue;
-        ln = strtol(p + strlen(tag), NULL, 10);
+        const char *p = strstr(line, tag);
+        if (p == NULL || strstr(line, "error") == NULL) continue;
+        long ln = strtol(p + strlen(tag), NULL, 10);
         any = true;
-        for (k = 0; k < nmark; k++)
-            if (marks[k] <= ln && (best < 0 || marks[k] > marks[(size_t)best]))
-                best = (long)k;
+        long best = fp_group_marker(marks, nmark, ln);
         if (best >= 0) {
             size_t which = (size_t)idx[(size_t)best];
             if (which < n_cands && !disabled[which]) {
@@ -309,8 +312,7 @@ static long fp_prune_group(const struct fp_env *e, size_t g,
     }
     fclose(fh);
     (void)cands;
-    if (!any || newly == 0)
-        return -1;
+    if (!any || newly == 0) return -1;
     return newly;
 }
 
@@ -438,36 +440,40 @@ static bool fp_write_stubs(const struct fp_env *e, char (*names)[FP_MAX_NAME],
     return fclose(out) == 0;
 }
 
+static bool fp_undefined_name(const char *line, char name[FP_MAX_NAME])
+{
+    const char *p = strstr(line, "undefined reference to ");
+    if (p == NULL) return false;
+    p += strlen("undefined reference to ");
+    while (*p == '`' || *p == '\'' || *p == '"') p++;
+    size_t k = 0;
+    while (p[k] != '\0' && (isalnum((unsigned char)p[k]) || p[k] == '_') &&
+           k + 1u < FP_MAX_NAME) {
+        name[k] = p[k];
+        k++;
+    }
+    name[k] = '\0';
+    return k != 0;
+}
+
+static bool fp_name_seen(char (*names)[FP_MAX_NAME], size_t n, const char *name)
+{
+    for (size_t j = 0; j < n; j++)
+        if (strcmp(names[j], name) == 0) return true;
+    return false;
+}
+
 static size_t fp_collect_undefined(const char *errpath,
                                    char (*names)[FP_MAX_NAME], size_t n,
                                    size_t cap)
 {
     FILE *fh = fopen(errpath, "r");
     char line[4096];
-    if (fh == NULL)
-        return n;
+    if (fh == NULL) return n;
     while (fgets(line, sizeof line, fh) != NULL) {
-        const char *p = strstr(line, "undefined reference to ");
         char name[FP_MAX_NAME];
-        size_t k = 0;
-        size_t j;
-        bool dup = false;
-        if (p == NULL || n >= cap)
-            continue;
-        p += strlen("undefined reference to ");
-        while (*p == '`' || *p == '\'' || *p == '"') p++;
-        while (p[k] != '\0' && (isalnum((unsigned char)p[k]) || p[k] == '_') &&
-               k + 1u < sizeof name) {
-            name[k] = p[k];
-            k++;
-        }
-        name[k] = '\0';
-        if (k == 0)
-            continue;
-        for (j = 0; j < n; j++)
-            if (strcmp(names[j], name) == 0) { dup = true; break; }
-        if (dup)
-            continue;
+        if (n >= cap || !fp_undefined_name(line, name)) continue;
+        if (fp_name_seen(names, n, name)) continue;
         snprintf(names[n], FP_MAX_NAME, "%s", name);
         n++;
     }
@@ -496,90 +502,82 @@ static size_t fp_collect_undefined(const char *errpath,
  *    file to an ltrans temporary, and is the only attribution available when
  *    the missing symbol is something a source-included unit calls rather
  *    than the candidate itself. */
+struct fp_link_prune_state {
+    const struct fp_candidate *cands;
+    size_t n_cands;
+    unsigned char *disabled;
+    const size_t *gof;
+    unsigned char *dirty;
+    long newly, in_probe, in_group;
+};
+
+static void fp_link_disable(struct fp_link_prune_state *s, size_t i)
+{
+    s->disabled[i] = 1u;
+    s->dirty[s->gof[i]] = 1u;
+    s->newly++;
+}
+
+static void fp_link_multiple(struct fp_link_prune_state *s)
+{
+    for (size_t c = 0; c < s->n_cands; c++)
+        if (!s->disabled[c] && s->cands[c].via_source &&
+            s->gof[c] == (size_t)s->in_group)
+            fp_link_disable(s, c);
+}
+
+static void fp_link_context(struct fp_link_prune_state *s, const char *line,
+                            const char *p)
+{
+    const char *o = strstr(line, "fp_probes_");
+    s->in_group = o ? strtol(o + strlen("fp_probes_"), NULL, 10) : -1;
+    p += strlen("in function `");
+    s->in_probe = strncmp(p, "fp_p_", 5) == 0 ? strtol(p + 5, NULL, 10) : -1;
+}
+
+static void fp_link_undefined(struct fp_link_prune_state *s, const char *name)
+{
+    bool hit = false;
+    for (size_t c = 0; c < s->n_cands; c++)
+        if (!s->disabled[c] && !s->cands[c].via_source &&
+            strcmp(s->cands[c].name, name) == 0) {
+            fp_link_disable(s, c);
+            hit = true;
+        }
+    if (hit) return;
+    if (s->in_probe >= 0 && (size_t)s->in_probe < s->n_cands &&
+        !s->disabled[(size_t)s->in_probe])
+        fp_link_disable(s, (size_t)s->in_probe);
+}
+
 static long fp_prune_link(const char *errpath, const struct fp_candidate *cands,
                           size_t n_cands, unsigned char *disabled,
                           const size_t *gof, unsigned char *dirty)
 {
     FILE *fh = fopen(errpath, "r");
+    if (fh == NULL) return 0;
+    struct fp_link_prune_state state = {
+        .cands = cands, .n_cands = n_cands, .disabled = disabled,
+        .gof = gof, .dirty = dirty, .in_probe = -1, .in_group = -1,
+    };
     char line[4096];
-    long newly = 0;
-    long in_probe = -1;
-    long in_group = -1;
-    if (fh == NULL)
-        return 0;
     while (fgets(line, sizeof line, fh) != NULL) {
-        const char *p;
-        char name[FP_MAX_NAME];
-        size_t k = 0;
-        size_t c;
-        bool hit = false;
-
-        /* A symbol this translation unit defines twice over. The only way a
-         * probe TU can do that is by including a defining unit whose exports
-         * some other linked object also provides, so the whole GROUP goes:
-         * one probe of it cannot be singled out, and leaving it in fails the
-         * entire link rather than one candidate. Attributed from the
-         * `in function` line above it, because the "first defined here" name
-         * on the diagnostic itself is the OTHER object. */
-        if (strstr(line, "multiple definition of ") != NULL && in_group >= 0) {
-            for (c = 0; c < n_cands; c++)
-                if (!disabled[c] && cands[c].via_source &&
-                    gof[c] == (size_t)in_group) {
-                    disabled[c] = 1u;
-                    dirty[gof[c]] = 1u;
-                    newly++;
-                }
+        /* The prior referencing group owns a multiple-definition error. */
+        if (strstr(line, "multiple definition of ") != NULL && state.in_group >= 0) {
+            fp_link_multiple(&state);
             continue;
         }
-
-        p = strstr(line, "in function `");
+        const char *p = strstr(line, "in function `");
         if (p != NULL) {
-            const char *o = strstr(line, "fp_probes_");
-            in_group = (o != NULL) ? strtol(o + strlen("fp_probes_"), NULL, 10)
-                                   : -1;
-            /* A new referencing function. When it is not a probe, the
-             * attribution is CLEARED rather than left pointing at the last
-             * probe seen — a reference from inside a source-included unit
-             * belongs to nobody in particular, and silently charging it to an
-             * unrelated probe would delete a good candidate and misreport
-             * why. */
-            p += strlen("in function `");
-            in_probe = (strncmp(p, "fp_p_", 5) == 0)
-                           ? strtol(p + 5, NULL, 10) : -1;
+            /* A nonprobe function clears the previous probe attribution. */
+            fp_link_context(&state, line, p);
             continue;
         }
-        p = strstr(line, "undefined reference to ");
-        if (p == NULL)
-            continue;
-        p += strlen("undefined reference to ");
-        while (*p == '`' || *p == '\'' || *p == '"') p++;
-        while (p[k] != '\0' && (isalnum((unsigned char)p[k]) || p[k] == '_') &&
-               k + 1u < sizeof name) {
-            name[k] = p[k];
-            k++;
-        }
-        name[k] = '\0';
-        if (k == 0)
-            continue;
-        for (c = 0; c < n_cands; c++)
-            if (!disabled[c] && !cands[c].via_source &&
-                strcmp(cands[c].name, name) == 0) {
-                disabled[c] = 1u;
-                dirty[gof[c]] = 1u;
-                newly++;
-                hit = true;
-            }
-        if (hit)
-            continue;
-        if (in_probe >= 0 && (size_t)in_probe < n_cands &&
-            !disabled[(size_t)in_probe]) {
-            disabled[(size_t)in_probe] = 1u;
-            dirty[gof[(size_t)in_probe]] = 1u;
-            newly++;
-        }
+        char name[FP_MAX_NAME];
+        if (fp_undefined_name(line, name)) fp_link_undefined(&state, name);
     }
     fclose(fh);
-    return newly;
+    return state.newly;
 }
 
 /* ── result parsing ──────────────────────────────────────────────────── */
