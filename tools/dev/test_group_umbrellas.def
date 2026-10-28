@@ -19,3 +19,5 @@ ZCL_TEST_GROUP_UMBRELLA("test_zcode_swarm_net", "test_zcode_swarm_net_shard_*")
 ZCL_TEST_GROUP_UMBRELLA("test_dev_land", "test_dev_land_shard_*")
 ZCL_TEST_GROUP_UMBRELLA("test_zcode_package_dev",
                         "test_zcode_package_dev_shard_*")
+
+ZCL_TEST_GROUP_UMBRELLA("test_build_fabric", "test_build_fabric_shard_*")

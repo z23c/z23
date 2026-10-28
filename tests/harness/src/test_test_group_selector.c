@@ -1055,6 +1055,9 @@ static int test_umbrella_groups(void)
                                   NULL);
     failures += umbrella_contract("test_zcode_package_dev",
                                   "zcode_package_dev", NULL);
+    static const char *const bf_extras[] = {"test_build_fabric_attach", NULL};
+    failures += umbrella_contract("test_build_fabric", "build_fabric",
+                                  bf_extras);
     /* Legacy plan tokens also retain their historical substring matches:
      * every registered group whose id contains "dev_land". */
     static const char *const dev_land_extras[] = {

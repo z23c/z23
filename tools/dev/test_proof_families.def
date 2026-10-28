@@ -23,3 +23,5 @@ ZCL_TEST_PROOF_FAMILY("fleet_gateway", "test_fleet_gateway*")
 ZCL_TEST_PROOF_FAMILY("zcode_swarm_net", "test_zcode_swarm_net_shard_*")
 ZCL_TEST_PROOF_FAMILY("dev_land", "test_dev_land_shard_*")
 ZCL_TEST_PROOF_FAMILY("zcode_package_dev", "test_zcode_package_dev_shard_*")
+
+ZCL_TEST_PROOF_FAMILY("build_fabric", "test_build_fabric_shard_*")

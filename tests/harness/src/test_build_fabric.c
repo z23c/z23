@@ -5439,9 +5439,11 @@ static int test_bf_input_closure_root(void)
 
 int bf_proof_history_cases(void);
 int bf_proof_wiring_cases(void);
+bool bf_proof_wiring_partition_valid(void);
 
-int test_build_fabric(void)
+static int bf_original_cases(bool wiring)
 {
+    if (!bf_proof_wiring_partition_valid()) return 1;
     int failures = 0;
     failures += test_bf_production_verifier_selection();
     failures += test_bf_input_closure_root();
@@ -5459,7 +5461,7 @@ int test_build_fabric(void)
     failures += test_bf_proof_pending_publish_race();
     failures += test_bf_proof_pending_publish_missing_chunk();
     failures += bf_proof_history_cases();
-    failures += bf_proof_wiring_cases();
+    if (wiring) failures += bf_proof_wiring_cases();
     failures += test_bf_async_proof_events();
     failures += test_bf_async_timing_samples();
     failures += test_bf_async_timing_capacity();
@@ -5495,3 +5497,10 @@ int test_build_fabric(void)
     printf("=== build_fabric: %d failures ===\n", failures);
     return failures;
 }
+
+int bf_proof_wiring_shard(unsigned shard);
+int test_build_fabric(void) { return bf_original_cases(true); }
+int test_build_fabric_shard_01(void) { return bf_original_cases(false); }
+int test_build_fabric_shard_02(void) { return bf_proof_wiring_shard(1); }
+int test_build_fabric_shard_03(void) { return bf_proof_wiring_shard(2); }
+int test_build_fabric_shard_04(void) { return bf_proof_wiring_shard(3); }

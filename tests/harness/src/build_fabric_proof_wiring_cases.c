@@ -1012,24 +1012,86 @@ _test_next:
 }
 #endif
 
-int bf_proof_wiring_cases(void);
+#include "test_group_catalog.h"
 
-int bf_proof_wiring_cases(void)
-{
-    int failures = 0;
+int bf_proof_wiring_cases(void);
+int bf_proof_wiring_shard(unsigned shard);
+bool bf_proof_wiring_partition_valid(void);
+
 #if defined(__linux__)
-    failures += pw_case_crash(PW_AFTER_STAGE);
-    failures += pw_case_crash(PW_AFTER_TICKET);
-    failures += pw_case_crash(PW_AFTER_CHECKPOINT);
-    failures += pw_case_crash(PW_BEFORE_COMMIT);
-    failures += pw_case_restart_rebuild();
-    failures += pw_case_two_workers();
-    failures += pw_case_issue_cost();
-    failures += pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_STAGE);
-    failures += pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_TICKET_PUT);
-    failures += pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_FINALIZE);
-    failures += pw_case_open_fault();
-    failures += pw_case_shadow_fault();
-#endif
-    return failures;
+static int pw_stage(void) { return pw_case_crash(PW_AFTER_STAGE); }
+static int pw_ticket(void) { return pw_case_crash(PW_AFTER_TICKET); }
+static int pw_checkpoint(void) { return pw_case_crash(PW_AFTER_CHECKPOINT); }
+static int pw_commit(void) { return pw_case_crash(PW_BEFORE_COMMIT); }
+static int pw_fault_stage(void) { return pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_STAGE); }
+static int pw_fault_ticket(void) { return pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_TICKET_PUT); }
+static int pw_fault_finalize(void) { return pw_case_issue_fault(BUILD_FABRIC_PROOF_FAULT_ISSUE_FINALIZE); }
+struct pw_row { const char *name; int (*run)(void); unsigned owner; };
+#define PW_ROW(fn, shard) { #fn, fn, shard }
+static const struct pw_row pw_rows[] = {
+    PW_ROW(pw_stage, 1), PW_ROW(pw_ticket, 1), PW_ROW(pw_checkpoint, 1),
+    PW_ROW(pw_commit, 1), PW_ROW(pw_case_restart_rebuild, 1),
+    PW_ROW(pw_case_two_workers, 2), PW_ROW(pw_case_issue_cost, 2),
+    PW_ROW(pw_fault_stage, 3), PW_ROW(pw_fault_ticket, 3),
+    PW_ROW(pw_fault_finalize, 3), PW_ROW(pw_case_open_fault, 3),
+    PW_ROW(pw_case_shadow_fault, 3),
+};
+#undef PW_ROW
+static const char *const pw_original[] = {
+    "pw_stage", "pw_ticket", "pw_checkpoint", "pw_commit",
+    "pw_case_restart_rebuild", "pw_case_two_workers", "pw_case_issue_cost",
+    "pw_fault_stage", "pw_fault_ticket", "pw_fault_finalize",
+    "pw_case_open_fault", "pw_case_shadow_fault"
+};
+static size_t pw_owners(const char *name)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(pw_rows) / sizeof(pw_rows[0]); i++)
+        if (strcmp(name, pw_rows[i].name) == 0) n++;
+    return n;
 }
+static bool pw_partition_valid(void)
+{
+    unsigned counts[4] = {0};
+    if (sizeof(pw_rows) / sizeof(pw_rows[0]) != sizeof(pw_original) / sizeof(pw_original[0])) return false;
+    for (size_t i = 0; i < sizeof(pw_rows) / sizeof(pw_rows[0]); i++) {
+        if (pw_rows[i].owner < 1 || pw_rows[i].owner > 3 || !pw_rows[i].run) return false;
+        counts[pw_rows[i].owner]++;
+    }
+    for (size_t i = 0; i < sizeof(pw_original) / sizeof(pw_original[0]); i++)
+        if (pw_owners(pw_original[i]) != 1) return false;
+    return counts[1] && counts[2] && counts[3];
+}
+#endif
+static bool pw_registry_valid(void)
+{
+    const char *umbrella = "test_build_fabric";
+    if (!zcl_test_group_is_umbrella(umbrella) || zcl_test_group_umbrella_shard_count(umbrella) != 4) return false;
+    for (unsigned i = 1; i <= 4; i++) {
+        char id[ZCL_TEST_GROUP_FULL_MAX];
+        (void)snprintf(id, sizeof(id), "test_build_fabric_shard_%02u", i);
+        if (!zcl_test_group_is_umbrella_shard(umbrella, id)) return false;
+    }
+    return true;
+}
+bool bf_proof_wiring_partition_valid(void)
+{
+#if defined(__linux__)
+    return pw_registry_valid() && pw_partition_valid();
+#else
+    return pw_registry_valid();
+#endif
+}
+int bf_proof_wiring_shard(unsigned shard)
+{
+    if (shard > 3 || !bf_proof_wiring_partition_valid()) return 1;
+#if defined(__linux__)
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(pw_rows) / sizeof(pw_rows[0]); i++)
+        if (!shard || pw_rows[i].owner == shard) failures += pw_rows[i].run();
+    return failures;
+#else
+    return 0;
+#endif
+}
+int bf_proof_wiring_cases(void) { return bf_proof_wiring_shard(0); }
