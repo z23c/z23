@@ -4,6 +4,7 @@
  */
 
 #include "test/api_test_fixtures.h"
+#include "../../../engine/controllers/src/api_controller_internal.h"
 
 struct openapi_str_field {
     const struct json_value *obj;
@@ -266,9 +267,54 @@ static bool openapi_components_ok(bool ok, const struct json_value *root)
     return ok;
 }
 
+static bool openapi_extensions_case(const char *input, const char *expected)
+{
+    struct json_value contract = {0}, operation = {0};
+    char output[4096];
+    bool ok = json_read(&contract, input, strlen(input));
+    json_set_object(&operation);
+    if (ok)
+        api_app_protocol_push_openapi_extensions(&contract, &operation);
+    size_t n = json_write(&operation, output, sizeof(output));
+    ok = ok && n < sizeof(output) && strcmp(output, expected) == 0;
+    json_free(&operation);
+    json_free(&contract);
+    return ok;
+}
+
+static int openapi_extensions_mapping_test(void)
+{
+    static const char input[] =
+        "{\"layer\":\"1\",\"base_layer\":\"2\",\"application_protocol\":\"3\","
+        "\"protocol_family\":\"4\",\"source_anchor\":\"5\",\"protocol_anchor_kind\":\"6\","
+        "\"read_model\":\"7\",\"protocol_crud\":[\"r\"],\"protocol_object_types\":null,"
+        "\"protocol_ux_surfaces\":false,\"protocol_construction_status\":\"8\","
+        "\"mutation_authority\":\"9\",\"write_semantics\":\"10\",\"consensus_boundary\":\"11\","
+        "\"projection_model\":\"12\",\"reorg_model\":\"13\",\"crypto_model\":\"14\","
+        "\"transport_model\":\"15\",\"privacy_model\":\"16\",\"diagnostics_surface\":\"17\"}";
+    static const char expected[] =
+        "{\"x-zcl-layer\":\"1\",\"x-zcl-base-layer\":\"2\",\"x-zcl-application-protocol\":\"3\","
+        "\"x-zcl-protocol-family\":\"4\",\"x-zcl-source-anchor\":\"5\",\"x-zcl-protocol-anchor-kind\":\"6\","
+        "\"x-zcl-read-model\":\"7\",\"x-zcl-protocol-crud\":[\"r\"],\"x-zcl-protocol-object-types\":null,"
+        "\"x-zcl-protocol-ux-surfaces\":false,\"x-zcl-protocol-construction-status\":\"8\","
+        "\"x-zcl-mutation-authority\":\"9\",\"x-zcl-write-semantics\":\"10\",\"x-zcl-consensus-boundary\":\"11\","
+        "\"x-zcl-projection-model\":\"12\",\"x-zcl-reorg-model\":\"13\",\"x-zcl-crypto-model\":\"14\","
+        "\"x-zcl-transport-model\":\"15\",\"x-zcl-privacy-model\":\"16\",\"x-zcl-diagnostics-surface\":\"17\"}";
+    static const char sparse[] =
+        "{\"layer\":\"\",\"base_layer\":42,\"protocol_family\":false,"
+        "\"protocol_crud\":\"\",\"protocol_object_types\":{},\"privacy_model\":\"public\"}";
+    static const char sparse_expected[] =
+        "{\"x-zcl-protocol-crud\":\"\",\"x-zcl-protocol-object-types\":{},\"x-zcl-privacy-model\":\"public\"}";
+    printf("api: OpenAPI extension mapping and omission... ");
+    bool ok = openapi_extensions_case(input, expected) &&
+              openapi_extensions_case(sparse, sparse_expected);
+    if (ok) printf("OK\n"); else printf("FAIL\n");
+    return ok ? 0 : 1;
+}
+
 int api_openapi_focused_tests(void)
 {
-    int failures = 0;
+    int failures = openapi_extensions_mapping_test();
 
     printf("api: OpenAPI document is generated from route contracts... ");
     {

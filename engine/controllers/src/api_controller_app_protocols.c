@@ -453,97 +453,43 @@ void api_app_protocol_push_openapi_extensions(
     const struct json_value *contract,
     struct json_value *operation)
 {
+    static const struct {
+        const char *source;
+        const char *target;
+        bool raw;
+    } fields[] = {
+        {"layer", "x-zcl-layer", false},
+        {"base_layer", "x-zcl-base-layer", false},
+        {"application_protocol", "x-zcl-application-protocol", false},
+        {"protocol_family", "x-zcl-protocol-family", false},
+        {"source_anchor", "x-zcl-source-anchor", false},
+        {"protocol_anchor_kind", "x-zcl-protocol-anchor-kind", false},
+        {"read_model", "x-zcl-read-model", false},
+        {"protocol_crud", "x-zcl-protocol-crud", true},
+        {"protocol_object_types", "x-zcl-protocol-object-types", true},
+        {"protocol_ux_surfaces", "x-zcl-protocol-ux-surfaces", true},
+        {"protocol_construction_status", "x-zcl-protocol-construction-status", false},
+        {"mutation_authority", "x-zcl-mutation-authority", false},
+        {"write_semantics", "x-zcl-write-semantics", false},
+        {"consensus_boundary", "x-zcl-consensus-boundary", false},
+        {"projection_model", "x-zcl-projection-model", false},
+        {"reorg_model", "x-zcl-reorg-model", false},
+        {"crypto_model", "x-zcl-crypto-model", false},
+        {"transport_model", "x-zcl-transport-model", false},
+        {"privacy_model", "x-zcl-privacy-model", false},
+        {"diagnostics_surface", "x-zcl-diagnostics-surface", false},
+    };
     if (!contract || !operation)
         return;
-
-    const char *application_protocol =
-        json_get_str(json_get(contract, "application_protocol"));
-    const char *layer = json_get_str(json_get(contract, "layer"));
-    const char *base_layer = json_get_str(json_get(contract, "base_layer"));
-    const char *protocol_family =
-        json_get_str(json_get(contract, "protocol_family"));
-    const char *source_anchor =
-        json_get_str(json_get(contract, "source_anchor"));
-    const char *anchor_kind =
-        json_get_str(json_get(contract, "protocol_anchor_kind"));
-    const char *read_model =
-        json_get_str(json_get(contract, "read_model"));
-    const char *construction_status =
-        json_get_str(json_get(contract, "protocol_construction_status"));
-    const char *mutation_authority =
-        json_get_str(json_get(contract, "mutation_authority"));
-    const char *write_semantics =
-        json_get_str(json_get(contract, "write_semantics"));
-    const char *consensus_boundary =
-        json_get_str(json_get(contract, "consensus_boundary"));
-    const char *projection_model =
-        json_get_str(json_get(contract, "projection_model"));
-    const char *reorg_model =
-        json_get_str(json_get(contract, "reorg_model"));
-    const char *crypto_model =
-        json_get_str(json_get(contract, "crypto_model"));
-    const char *transport_model =
-        json_get_str(json_get(contract, "transport_model"));
-    const char *privacy_model =
-        json_get_str(json_get(contract, "privacy_model"));
-    const char *diagnostics_surface =
-        json_get_str(json_get(contract, "diagnostics_surface"));
-
-    if (layer && layer[0])
-        json_push_kv_str(operation, "x-zcl-layer", layer);
-    if (base_layer && base_layer[0])
-        json_push_kv_str(operation, "x-zcl-base-layer", base_layer);
-    if (application_protocol && application_protocol[0])
-        json_push_kv_str(operation, "x-zcl-application-protocol",
-                         application_protocol);
-    if (protocol_family && protocol_family[0])
-        json_push_kv_str(operation, "x-zcl-protocol-family",
-                         protocol_family);
-    if (source_anchor && source_anchor[0])
-        json_push_kv_str(operation, "x-zcl-source-anchor", source_anchor);
-    if (anchor_kind && anchor_kind[0])
-        json_push_kv_str(operation, "x-zcl-protocol-anchor-kind",
-                         anchor_kind);
-    if (read_model && read_model[0])
-        json_push_kv_str(operation, "x-zcl-read-model", read_model);
-    const struct json_value *crud = json_get(contract, "protocol_crud");
-    if (crud)
-        json_push_kv(operation, "x-zcl-protocol-crud", crud);
-    const struct json_value *object_types =
-        json_get(contract, "protocol_object_types");
-    if (object_types)
-        json_push_kv(operation, "x-zcl-protocol-object-types",
-                     object_types);
-    const struct json_value *ux_surfaces =
-        json_get(contract, "protocol_ux_surfaces");
-    if (ux_surfaces)
-        json_push_kv(operation, "x-zcl-protocol-ux-surfaces",
-                     ux_surfaces);
-    if (construction_status && construction_status[0])
-        json_push_kv_str(operation, "x-zcl-protocol-construction-status",
-                         construction_status);
-    if (mutation_authority && mutation_authority[0])
-        json_push_kv_str(operation, "x-zcl-mutation-authority",
-                         mutation_authority);
-    if (write_semantics && write_semantics[0])
-        json_push_kv_str(operation, "x-zcl-write-semantics",
-                         write_semantics);
-    if (consensus_boundary && consensus_boundary[0])
-        json_push_kv_str(operation, "x-zcl-consensus-boundary",
-                         consensus_boundary);
-    if (projection_model && projection_model[0])
-        json_push_kv_str(operation, "x-zcl-projection-model",
-                         projection_model);
-    if (reorg_model && reorg_model[0])
-        json_push_kv_str(operation, "x-zcl-reorg-model", reorg_model);
-    if (crypto_model && crypto_model[0])
-        json_push_kv_str(operation, "x-zcl-crypto-model", crypto_model);
-    if (transport_model && transport_model[0])
-        json_push_kv_str(operation, "x-zcl-transport-model",
-                         transport_model);
-    if (privacy_model && privacy_model[0])
-        json_push_kv_str(operation, "x-zcl-privacy-model", privacy_model);
-    if (diagnostics_surface && diagnostics_surface[0])
-        json_push_kv_str(operation, "x-zcl-diagnostics-surface",
-                         diagnostics_surface);
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        const struct json_value *value = json_get(contract, fields[i].source);
+        if (fields[i].raw) {
+            if (value)
+                json_push_kv(operation, fields[i].target, value);
+        } else {
+            const char *text = json_get_str(value);
+            if (text && text[0])
+                json_push_kv_str(operation, fields[i].target, text);
+        }
+    }
 }
