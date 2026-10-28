@@ -585,7 +585,6 @@ engine/conditions/src/have_data_unreadable.c:detect_have_data_unreadable:19
 engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
 engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verified_frontier:21
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18
-engine/controllers/src/api_controller_app_protocols.c:api_app_protocol_push_openapi_extensions:40
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_dispatch:42
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/api_controller_status.c:api_serve_node_summary:30
