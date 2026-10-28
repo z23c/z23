@@ -266,6 +266,14 @@ static void rg_replace_profile_hex(struct json_value *input, const char *hex)
             json_set_str(&input->children[i], hex);
 }
 
+static bool rg_snapshot_paths_owned(const struct zcl_native_dev_retrieval_snapshot_rank *rank)
+{
+    if (!rank->count || rank->count > ZCL_RETRIEVAL_EVAL_RANK_MAX) return false;
+    for (size_t i = 0; i < rank->count; i++)
+        if (rank->rows[i].path != rank->paths[i] || !rank->paths[i][0]) return false;
+    return true;
+}
+
 static int case_projection_binding(void)
 {
     int failures = 0;
@@ -279,6 +287,9 @@ static int case_projection_binding(void)
         temporary, sizeof(temporary), workspace, sizeof(workspace),
         &input, &snapshot, error_code, sizeof(error_code),
         error_message, sizeof(error_message), &ready);
+    RG_CHECK("snapshot ranks own their paths after reply release",
+             rc == ZCL_COMMAND_EXIT_OK && rg_snapshot_paths_owned(&snapshot.bm25) &&
+             rg_snapshot_paths_owned(&snapshot.identifier_graph));
     struct codeindex *index = NULL;
     uint8_t source_root[32] = {0}, projection_root[32] = {0};
     bool rooted = rg_projection_view_roots(
@@ -836,6 +847,23 @@ static void rg_graph_cleanup(FILE *out, struct json_value *input,
     if (temporary[0]) dir_remove_tree(temporary);
 }
 
+static int rg_graph_budget_refusal(const struct json_value *input)
+{
+    int failures = 0;
+    FILE *out = rg_text_output();
+    char code[64] = {0}, message[256] = {0};
+    int rc = out ? zcl_native_dev_retrieval_stream_jsonl(
+        input, 512u, out, code, sizeof(code), message, sizeof(message))
+        : ZCL_COMMAND_EXIT_INTERNAL;
+    printf("retrieval budget witness rc=%d code=%s bytes=%ld\n",
+           rc, code, out ? ftell(out) : -1L);
+    RG_CHECK("fitted budget refusal emits no pages",
+             out && rc == ZCL_COMMAND_EXIT_INVALID &&
+             strcmp(code, "OUTPUT_ALLOCATION_FAILED") == 0 && ftell(out) == 0);
+    if (out) fclose(out);
+    return failures;
+}
+
 static int case_graph_probe(void)
 {
     int failures = 0;
@@ -862,6 +890,7 @@ static int case_graph_probe(void)
         json_push_kv_str(&input, "expected_vcs_root", expected_hex) &&
         json_push_kv_str(&input, "task_id", "graph-probe") &&
         json_push_kv_str(&input, "query", "raretarget common");
+    if (ready) failures += rg_graph_budget_refusal(&input);
     FILE *out = rg_text_output(); char code[64] = {0}, message[256] = {0};
     int rc = ready && out ? zcl_native_dev_retrieval_stream_jsonl(
         &input, 4096u, out, code, sizeof(code), message, sizeof(message))
@@ -872,8 +901,64 @@ static int case_graph_probe(void)
     return failures;
 }
 
+static int case_stream_validation_order(void)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ready = json_push_kv_int(&input, "cursor", 1) &&
+                 json_push_kv_str(&input, "workspace", "relative");
+    FILE *out = rg_text_output();
+    char code[64] = {0}, message[256] = {0};
+    int rc = zcl_native_dev_retrieval_stream_jsonl(
+        NULL, 4096, out, code, sizeof(code), message, sizeof(message));
+    RG_CHECK("stream invalid input precedes all other checks",
+             out && rc == ZCL_COMMAND_EXIT_INVALID && strcmp(code, "INVALID_INPUT") == 0 && ftell(out) == 0);
+    rc = zcl_native_dev_retrieval_stream_jsonl(
+        &input, 4096, out, code, sizeof(code), message, sizeof(message));
+    RG_CHECK("stream cursor refusal precedes workspace refusal",
+             ready && out && rc == ZCL_COMMAND_EXIT_INVALID && strcmp(code, "INVALID_CURSOR") == 0 && ftell(out) == 0);
+    json_free(&input);
+    json_init(&input);
+    json_set_object(&input);
+    ready = json_push_kv_str(&input, "workspace", "relative");
+    rc = zcl_native_dev_retrieval_stream_jsonl(
+        &input, 4096, out, code, sizeof(code), message, sizeof(message));
+    RG_CHECK("stream workspace refusal emits no output",
+             ready && out && rc == ZCL_COMMAND_EXIT_INVALID && strcmp(code, "WORKSPACE_NOT_CANONICAL") == 0 && ftell(out) == 0);
+    if (out) fclose(out);
+    json_free(&input);
+    return failures;
+}
+
+static int case_snapshot_validation_ownership(void)
+{
+    int failures = 0;
+    struct zcl_native_dev_retrieval_snapshot snapshot, sentinel;
+    memset(&sentinel, 0xa5, sizeof(sentinel));
+    memset(&snapshot, 0xa5, sizeof(snapshot));
+    char code[64] = {0}, message[256] = {0};
+    int rc = zcl_native_dev_retrieval_snapshot_compute(
+        NULL, &snapshot, code, sizeof(code), message, sizeof(message));
+    RG_CHECK("snapshot invalid input leaves caller output untouched",
+             rc == ZCL_COMMAND_EXIT_INVALID && strcmp(code, "INVALID_INPUT") == 0 &&
+             memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ready = json_push_kv_str(&input, "workspace", "relative");
+    rc = zcl_native_dev_retrieval_snapshot_compute(
+        &input, &snapshot, code, sizeof(code), message, sizeof(message));
+    RG_CHECK("snapshot workspace refusal leaves caller output untouched",
+             ready && rc == ZCL_COMMAND_EXIT_INVALID && strcmp(code, "WORKSPACE_NOT_CANONICAL") == 0 &&
+             memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+    json_free(&input);
+    return failures;
+}
+
 int test_retrieval_generation(void)
 {
-    return case_projection_binding() + case_aba_generation_join() + case_stream_utf8() +
+    return case_stream_validation_order() + case_snapshot_validation_ownership() +
+        case_projection_binding() + case_aba_generation_join() + case_stream_utf8() +
         case_text_proof_mapping() + case_query_atom_cap() + case_graph_probe();
 }

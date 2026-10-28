@@ -1262,6 +1262,36 @@ static bool rb_snapshot_rank_copy(
     return true;
 }
 
+static bool rb_snapshot_copy(const struct rb_computation *computed,
+                             struct zcl_native_dev_retrieval_snapshot *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    int task_n = snprintf(snapshot->task_id, sizeof(snapshot->task_id), "%s",
+                          computed->task_id);
+    int query_n = snprintf(snapshot->query, sizeof(snapshot->query), "%s",
+                           computed->query);
+    bool copied = task_n > 0 && (size_t)task_n < sizeof(snapshot->task_id) &&
+        query_n > 0 && (size_t)query_n < sizeof(snapshot->query) &&
+        zcl_hex_decode_lower(computed->pre_hex, snapshot->source_root, 32u) &&
+        zcl_hex_decode_lower(computed->codeindex_hex,
+                             snapshot->codeindex_source_root, 32u) &&
+        zcl_hex_decode_lower(computed->retrieval_projection_hex,
+                             snapshot->retrieval_projection_root, 32u) &&
+        rb_snapshot_rank_copy(&computed->bm25, &snapshot->bm25) &&
+        rb_snapshot_rank_copy(&computed->identifier_graph,
+                              &snapshot->identifier_graph);
+    if (copied) {
+        char root_hex[65];
+        rb_rank_root(&computed->bm25, root_hex);
+        copied = zcl_hex_decode_lower(root_hex,
+                                      snapshot->bm25_ranking_root, 32u);
+        rb_rank_root(&computed->identifier_graph, root_hex);
+        copied = copied && zcl_hex_decode_lower(
+            root_hex, snapshot->identifier_graph_ranking_root, 32u);
+    }
+    return copied;
+}
+
 int zcl_native_dev_retrieval_snapshot_compute(
     const struct json_value *input,
     struct zcl_native_dev_retrieval_snapshot *snapshot,
@@ -1294,30 +1324,7 @@ int zcl_native_dev_retrieval_snapshot_compute(
         zcl_command_reply_free(&reply);
         return rc;
     }
-    memset(snapshot, 0, sizeof(*snapshot));
-    int task_n = snprintf(snapshot->task_id, sizeof(snapshot->task_id), "%s",
-                          computed.task_id);
-    int query_n = snprintf(snapshot->query, sizeof(snapshot->query), "%s",
-                           computed.query);
-    bool copied = task_n > 0 && (size_t)task_n < sizeof(snapshot->task_id) &&
-        query_n > 0 && (size_t)query_n < sizeof(snapshot->query) &&
-        zcl_hex_decode_lower(computed.pre_hex, snapshot->source_root, 32u) &&
-        zcl_hex_decode_lower(computed.codeindex_hex,
-                             snapshot->codeindex_source_root, 32u) &&
-        zcl_hex_decode_lower(computed.retrieval_projection_hex,
-                             snapshot->retrieval_projection_root, 32u) &&
-        rb_snapshot_rank_copy(&computed.bm25, &snapshot->bm25) &&
-        rb_snapshot_rank_copy(&computed.identifier_graph,
-                              &snapshot->identifier_graph);
-    if (copied) {
-        char root_hex[65];
-        rb_rank_root(&computed.bm25, root_hex);
-        copied = zcl_hex_decode_lower(root_hex,
-                                      snapshot->bm25_ranking_root, 32u);
-        rb_rank_root(&computed.identifier_graph, root_hex);
-        copied = copied && zcl_hex_decode_lower(
-            root_hex, snapshot->identifier_graph_ranking_root, 32u);
-    }
+    bool copied = rb_snapshot_copy(&computed, snapshot);
     zcl_command_reply_free(&reply);
     if (!copied) {
         memset(snapshot, 0, sizeof(*snapshot));
@@ -1327,6 +1334,102 @@ int zcl_native_dev_retrieval_snapshot_compute(
         return ZCL_COMMAND_EXIT_INTERNAL;
     }
     return ZCL_COMMAND_EXIT_OK;
+}
+
+static bool rb_stream_metadata(struct json_value *line, size_t page_index,
+                               int64_t elapsed_us, int64_t budget_ms)
+{
+    return page_index <= INT64_MAX &&
+        json_push_kv_str(line, "schema", "zcl.dev_retrieval_benchmark_stream_page.v3") &&
+        json_push_kv_str(line, "command", "dev.retrieval.benchmark") &&
+        json_push_kv_int(line, "page_index", (int64_t)page_index) &&
+        json_push_kv_bool(line, "shared_computation", true) &&
+        json_push_kv_int(line, "ranking_computations", 1) &&
+        json_push_kv_int(line, "ranking_elapsed_us", elapsed_us) &&
+        json_push_kv_int(line, "ranking_elapsed_ms", elapsed_us / 1000) &&
+        json_push_kv_int(line, "ranking_budget_ms", budget_ms) &&
+        json_push_kv_bool(line, "ranking_budget_exceeded", elapsed_us > budget_ms * 1000) &&
+        json_push_kv_str(line, "data_schema", "zcl.dev_retrieval_benchmark.v3");
+}
+
+static bool rb_stream_line(struct rb_stream_buffer *stream,
+                           struct zcl_command_reply *reply, size_t page_index,
+                           int64_t elapsed_us, int64_t budget_ms)
+{
+    struct json_value line;
+    json_init(&line);
+    json_set_object(&line);
+    bool ok = rb_stream_metadata(&line, page_index, elapsed_us, budget_ms) &&
+              json_push_kv(&line, "data", &reply->data);
+    char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t encoded_len = ok ? json_write(&line, encoded, sizeof(encoded)) : 0;
+    json_free(&line);
+    return encoded_len && encoded_len < sizeof(encoded) &&
+        rb_stream_append(stream, encoded, encoded_len) &&
+        rb_stream_append(stream, "\n", 1u);
+}
+
+static bool rb_stream_pages(struct zcl_command_reply *reply,
+                            const struct rb_computation *computed,
+                            size_t contract_bytes, int64_t elapsed_us,
+                            int64_t budget_ms, struct rb_stream_buffer *stream)
+{
+    size_t max_count = computed->literal.count > computed->bm25.count
+        ? computed->literal.count : computed->bm25.count;
+    if (computed->identifier_graph.count > max_count)
+        max_count = computed->identifier_graph.count;
+    size_t offset = 0, page_index = 0;
+    bool ok = true;
+    do {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        size_t page_limit = 0;
+        if (!rb_render_fitted(reply, computed, offset, contract_bytes, &page_limit)) {
+            ok = false;
+            break;
+        }
+        size_t page_span = max_count > offset ? max_count - offset : 0;
+        if (page_span > page_limit) page_span = page_limit;
+        bool has_more = offset + page_span < max_count;
+        if (!rb_stream_line(stream, reply, page_index, elapsed_us, budget_ms)) {
+            ok = false;
+            break;
+        }
+        page_index++;
+        if (!has_more) break;
+        if (page_span == 0 || offset > RB_RETAIN_ROWS - page_span) {
+            ok = false;
+            break;
+        }
+        offset += page_span;
+    } while (page_index <= RB_RETAIN_ROWS);
+    return ok && page_index != 0 && page_index <= RB_RETAIN_ROWS;
+}
+
+static int rb_stream_finish(bool ok, struct zcl_command_reply *reply,
+                            struct rb_stream_buffer *stream, FILE *out,
+                            char *error_code, size_t error_code_cap,
+                            char *error_message, size_t error_message_cap)
+{
+    int rc = ZCL_COMMAND_EXIT_OK;
+    if (!ok) {
+        const char *code = reply->error.code[0]
+            ? reply->error.code : "STREAM_RENDER_FAILED";
+        const char *message = reply->error.message[0]
+            ? reply->error.message
+            : "all retrieval pages could not be buffered";
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, code, message);
+        rc = reply->exit_code == ZCL_COMMAND_EXIT_OK
+            ? ZCL_COMMAND_EXIT_INTERNAL : reply->exit_code;
+    } else if (fwrite(stream->bytes, 1, stream->used, out) != stream->used ||
+               fflush(out) != 0) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "STREAM_WRITE_FAILED",
+                        "buffered retrieval pages could not be written");
+        rc = ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    return rc;
 }
 
 int zcl_native_dev_retrieval_stream_jsonl(
@@ -1373,83 +1476,12 @@ int zcl_native_dev_retrieval_stream_jsonl(
     int64_t elapsed_us = platform_time_monotonic_us() - started_us;
     if (elapsed_us < 0) elapsed_us = 0;
     const int64_t budget_ms = ZCL_COMMAND_LATENCY_BUDGET_PERSISTENT_MS;
-    const bool budget_exceeded = elapsed_us > budget_ms * 1000;
-    size_t max_count = computed.literal.count > computed.bm25.count
-        ? computed.literal.count : computed.bm25.count;
-    if (computed.identifier_graph.count > max_count)
-        max_count = computed.identifier_graph.count;
-    size_t offset = 0, page_index = 0;
     struct rb_stream_buffer stream = {0};
-    bool ok = true;
-    do {
-        json_free(&reply.data);
-        json_init(&reply.data);
-        size_t page_limit = 0;
-        if (!rb_render_fitted(&reply, &computed, offset, contract_bytes,
-                              &page_limit)) {
-            ok = false;
-            break;
-        }
-        size_t page_span = max_count > offset ? max_count - offset : 0;
-        if (page_span > page_limit) page_span = page_limit;
-        bool has_more = offset + page_span < max_count;
+    bool ok = rb_stream_pages(&reply, &computed, contract_bytes, elapsed_us,
+                              budget_ms, &stream);
 
-        struct json_value line;
-        json_init(&line);
-        json_set_object(&line);
-        ok = page_index <= INT64_MAX &&
-            json_push_kv_str(
-                &line, "schema",
-                "zcl.dev_retrieval_benchmark_stream_page.v3") &&
-            json_push_kv_str(&line, "command", "dev.retrieval.benchmark") &&
-            json_push_kv_int(&line, "page_index", (int64_t)page_index) &&
-            json_push_kv_bool(&line, "shared_computation", true) &&
-            json_push_kv_int(&line, "ranking_computations", 1) &&
-            json_push_kv_int(&line, "ranking_elapsed_us", elapsed_us) &&
-            json_push_kv_int(&line, "ranking_elapsed_ms", elapsed_us / 1000) &&
-            json_push_kv_int(&line, "ranking_budget_ms", budget_ms) &&
-            json_push_kv_bool(&line, "ranking_budget_exceeded",
-                              budget_exceeded) &&
-            json_push_kv_str(&line, "data_schema",
-                             "zcl.dev_retrieval_benchmark.v3") &&
-            json_push_kv(&line, "data", &reply.data);
-        char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
-        size_t encoded_len = ok
-            ? json_write(&line, encoded, sizeof(encoded)) : 0;
-        json_free(&line);
-        if (!encoded_len || encoded_len >= sizeof(encoded) ||
-            !rb_stream_append(&stream, encoded, encoded_len) ||
-            !rb_stream_append(&stream, "\n", 1u)) {
-            ok = false;
-            break;
-        }
-        page_index++;
-        if (!has_more) break;
-        if (page_span == 0 || offset > RB_RETAIN_ROWS - page_span) {
-            ok = false;
-            break;
-        }
-        offset += page_span;
-    } while (page_index <= RB_RETAIN_ROWS);
-
-    int rc = ZCL_COMMAND_EXIT_OK;
-    if (!ok || page_index == 0 || page_index > RB_RETAIN_ROWS) {
-        const char *code = reply.error.code[0]
-            ? reply.error.code : "STREAM_RENDER_FAILED";
-        const char *message = reply.error.message[0]
-            ? reply.error.message
-            : "all retrieval pages could not be buffered";
-        rb_stream_error(error_code, error_code_cap, error_message,
-                        error_message_cap, code, message);
-        rc = reply.exit_code == ZCL_COMMAND_EXIT_OK
-            ? ZCL_COMMAND_EXIT_INTERNAL : reply.exit_code;
-    } else if (fwrite(stream.bytes, 1, stream.used, out) != stream.used ||
-               fflush(out) != 0) {
-        rb_stream_error(error_code, error_code_cap, error_message,
-                        error_message_cap, "STREAM_WRITE_FAILED",
-                        "buffered retrieval pages could not be written");
-        rc = ZCL_COMMAND_EXIT_INTERNAL;
-    }
+    int rc = rb_stream_finish(ok, &reply, &stream, out, error_code,
+                              error_code_cap, error_message, error_message_cap);
     free(stream.bytes);
     zcl_command_reply_free(&reply);
     return rc;
