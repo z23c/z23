@@ -52,6 +52,10 @@
  * parse the fixture language.
  */
 
+#if defined(__linux__)
+ZCL_TEST_GROUP_BUILD_NEED("test_fingerprint", "build/bin/fpscan", "fpscan")
+#endif
+
 /* The admitted runner executes without rebuilding test-binary prerequisites.
  * Build each consumed fixture in the proof generation and bind its bytes. */
 #if defined(__linux__)

@@ -23,6 +23,11 @@
 
 #include "fingerprint/fingerprint.h"
 #include "fingerprint/fp_runtime.h"
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* ── fixtures for the fingerprint half ───────────────────────────────────
  * Two spellings of ONE behavior at different optimisation levels, plus a
@@ -525,9 +530,149 @@ static int fx_scan_fixture_tree(void)
     return failures;
 }
 
+#if defined(__linux__)
+static int fx_run_cli(char *const argv[], const char *log)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char errpath[PATH_MAX + 32];
+        snprintf(errpath, sizeof errpath, "%s.err", log);
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int errfd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0 || errfd < 0 || dup2(fd, STDOUT_FILENO) < 0 ||
+            dup2(errfd, STDERR_FILENO) < 0) _exit(125);
+        close(fd); close(errfd);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+static bool fx_log_has(const char *path, const char *text)
+{
+    char buf[32768];
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return strstr(buf, text) != NULL;
+}
+
+static bool fx_log_empty(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool empty = fgetc(f) == EOF && !ferror(f);
+    fclose(f);
+    return empty;
+}
+
+static int fx_cli_empty(const char *label, const char *path)
+{
+    bool ok = fx_log_empty(path);
+    printf("fingerprint CLI %s... %s\n", label, ok ? "OK" : "FAIL");
+    return !ok;
+}
+
+static int fx_cli_check(const char *label, int rc, int expected,
+                        const char *log, const char *text)
+{
+    char errpath[PATH_MAX + 32];
+    snprintf(errpath, sizeof errpath, "%s.err", log);
+    bool ok = rc == expected && fx_log_has(expected ? errpath : log, text);
+    printf("fingerprint CLI %s... %s (exit %d)\n", label, ok ? "OK" : "FAIL", rc);
+    return !ok;
+}
+
+static bool fx_cli_seed(const char *dir)
+{
+    return fx_write(dir, "fx.h", "#include <stdint.h>\nuint32_t fx_a(uint32_t x);\nuint32_t fx_b(uint32_t x);\n") &&
+        fx_write(dir, "fx.c", "#include \"fx.h\"\nuint32_t fx_a(uint32_t x) { return x * 3u + 1u; }\nuint32_t fx_b(uint32_t x) { return x * 3u + 1u; }\n") &&
+        fx_write(dir, "files.txt", "fx.h\nfx.c\n") && fx_write(dir, "empty.txt", "");
+}
+
+static int fx_cli_scan_fixture(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], cwd[PATH_MAX];
+    test_make_tmpdir(dir, sizeof dir, "fingerprint", "cli");
+    if (!getcwd(cwd, sizeof cwd) || !fx_cli_seed(dir)) {
+        (void)test_rm_rf_recursive(dir);
+        return 1;
+    }
+    char root[PATH_MAX + 16], work[PATH_MAX + 16], files[PATH_MAX + 24];
+    char empty[PATH_MAX + 24], archive[PATH_MAX + 24], flags[PATH_MAX * 2 + 128];
+    char source[PATH_MAX + 16], object[PATH_MAX + 16], lib[PATH_MAX + 24], log[PATH_MAX + 16];
+    snprintf(root, sizeof root, "--root=%s", dir);
+    snprintf(work, sizeof work, "--work=%s/work", dir);
+    snprintf(files, sizeof files, "--files-from=%s/files.txt", dir);
+    snprintf(empty, sizeof empty, "--files-from=%s/empty.txt", dir);
+    snprintf(archive, sizeof archive, "--archive=%s/libfixture.a", dir);
+    snprintf(flags, sizeof flags, "--cflags=-std=c23 -D_POSIX_C_SOURCE=200809L -I%s -I%s/cognition/modules/fingerprint/include", dir, cwd);
+#if defined(__clang__)
+    const char *compiler = "clang";
+#elif defined(__GNUC__)
+    const char *compiler = "gcc";
+#else
+    const char *compiler = "cc";
+#endif
+    printf("fingerprint CLI compiler: %s\n", compiler);
+    char ccarg[PATH_MAX + 16];
+    snprintf(ccarg, sizeof ccarg, "--cc=%s", compiler);
+    snprintf(source, sizeof source, "%s/fx.c", dir);
+    snprintf(object, sizeof object, "%s/fx.o", dir);
+    snprintf(lib, sizeof lib, "%s/libfixture.a", dir);
+    snprintf(log, sizeof log, "%s/output.log", dir);
+    char *bad[] = {"build/bin/fpscan", "--unknown-fixture", NULL};
+    failures += fx_cli_check("unknown argument", fx_run_cli(bad, log), 2, log, "fpscan: unknown argument \x27--unknown-fixture\x27");
+    failures += fx_cli_empty("refusal stdout empty", log);
+    char *none[] = {"build/bin/fpscan", empty, NULL};
+    failures += fx_cli_check("empty input", fx_run_cli(none, log), 2, log, "fpscan: empty source list");
+    failures += fx_cli_empty("refusal stdout empty", log);
+    char errpath[PATH_MAX + 32];
+    snprintf(errpath, sizeof errpath, "%s.err", log);
+    char *select[] = {"build/bin/fpscan", root, files, "--select-only", NULL};
+    int rc = fx_run_cli(select, log);
+    failures += fx_cli_check("selection", rc, 0, log, "CAND fx_a");
+    failures += fx_cli_check("selection second candidate", rc, 0, log, "CAND fx_b");
+    failures += fx_cli_empty("selection stderr empty", errpath);
+    char *cc[] = {(char *)compiler, "-std=c23", "-O2", "-c", source, "-o", object, NULL};
+    char *ar[] = {"ar", "rcs", lib, object, NULL};
+    bool compiled = fx_run_cli(cc, log) == 0 && fx_run_cli(ar, log) == 0;
+    printf("fingerprint CLI fixture archive... %s\n", compiled ? "OK" : "FAIL");
+    if (!compiled) failures++;
+    char missing_work[PATH_MAX + 32], bad_archive[PATH_MAX + 32];
+    snprintf(missing_work, sizeof missing_work, "--work=%s/no-parent/work", dir);
+    snprintf(bad_archive, sizeof bad_archive, "--archive=%s/missing.a", dir);
+    char *badwork[] = {"build/bin/fpscan", root, missing_work, files, NULL};
+    failures += fx_cli_check("bad work directory", fx_run_cli(badwork, log), 2, log, "fpscan: cannot create");
+    char *badcc[] = {"build/bin/fpscan", root, work, files, archive, flags, "--cc=/nonexistent/fp-cc", "--jobs=1", NULL};
+    failures += fx_cli_check("bad compiler", fx_run_cli(badcc, log), 2, log, "generated support unit did not compile");
+    char *badarchive[] = {"build/bin/fpscan", root, work, files, bad_archive, flags, ccarg, "--jobs=1", NULL};
+    failures += fx_cli_check("bad archive", fx_run_cli(badarchive, log), 2, log, "driver did not link");
+    char *scan[] = {"build/bin/fpscan", root, work, files, archive, flags, ccarg, "--jobs=1", NULL};
+    rc = compiled ? fx_run_cli(scan, log) : -1;
+    failures += fx_cli_check("full run", rc, 0, log, "fingerprintable functions     2");
+    failures += fx_cli_check("confirmation", rc, 0, log, "[CONFIRMED]");
+    failures += fx_cli_check("confirmed first", rc, 0, log, "fx_a  fx.c:2");
+    failures += fx_cli_check("confirmed second", rc, 0, log, "fx_b  fx.c:3");
+    failures += fx_cli_empty("full run stderr empty", errpath);
+    if (test_rm_rf_recursive(dir) != 0) failures++;
+    return failures;
+}
+
+#endif
+
 int test_fingerprint(void)
 {
     int failures = 0;
+#if defined(__linux__)
+    failures += fx_cli_scan_fixture();
+#endif
     const uint64_t shape = 0x0123456789ABCDEFull;
     uint64_t a1 = 0;
     uint64_t a2 = 0;

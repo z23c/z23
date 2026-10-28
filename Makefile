@@ -9331,9 +9331,10 @@ FP_PROBE_CFLAGS = $(filter-out -Werror -O3,$(BUILD_ONLY_CFLAGS)) \
     -I. -Icognition/modules/fingerprint/include
 FP_PROBE_LDFLAGS = $(LDFLAGS)
 
-.PHONY: fpscan fingerprint-scan
+.PHONY: fpscan fingerprint-scan fpscan-force
 fpscan: $(FPSCAN_BIN)
-$(FPSCAN_BIN): $(FP_SRCS) \
+fpscan-force:
+$(FPSCAN_BIN): fpscan-force $(FP_SRCS) \
     cognition/modules/fingerprint/include/fingerprint/fingerprint.h \
     cognition/modules/fingerprint/include/fingerprint/fp_runtime.h
 	@mkdir -p $(dir $@)
