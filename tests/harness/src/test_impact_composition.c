@@ -672,6 +672,9 @@ static int test_ic_truncated_closure_preserves_groups(void)
         ASSERT(strcmp(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].reason,
                       "closure-universal") == 0);
         ASSERT(plan.closure_universal);
+        ASSERT_STR_EQ(plan.capacity_origin, "semantic");
+        ASSERT_STR_EQ(plan.capacity_cause, "file-cap");
+        ASSERT_STR_EQ(plan.capacity_input, "batch");
         ASSERT(!plan.closure_truncated);
 
         /* C1, the whole point: INCOMPLETE is not EMPTY. The partial walk
@@ -1230,6 +1233,48 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
  * runner must then run the whole catalog. What stays a refusal is the case
  * where the index could not answer at all. */
 
+extern void zcl_dev_proof_test_capacity_note(FILE *, const struct zcl_devloop_plan *);
+
+static bool ic_capacity_note_is(const struct zcl_devloop_plan *plan, const char *expected)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    zcl_dev_proof_test_capacity_note(f, plan);
+    rewind(f);
+    char text[512] = {0};
+    bool ok = fgets(text, sizeof(text), f) && strcmp(text, expected) == 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int test_ic_capacity_provenance(void)
+{
+    int failures = 0;
+    TEST("impact composition: capacity origin survives propagation and resets with closure") {
+        struct zcl_devloop_plan plan = {0};
+        plan.closure_universal = true;
+        ASSERT(ic_capacity_note_is(&plan, "capacity_origin=unknown capacity_cause=unknown capacity_input=unknown\n"));
+        zcl_devloop_capacity_note(&plan, "include", "file-cap", "a b%\n");
+        zcl_devloop_capacity_note(&plan, "semantic", "group-cap", "batch");
+        ASSERT_STR_EQ(plan.capacity_origin, "include");
+        ASSERT(ic_capacity_note_is(&plan, "capacity_origin=include capacity_cause=file-cap capacity_input=a%20b%25%0A\n"));
+        zcl_devloop_capacity_reset_closure(&plan);
+        ASSERT(plan.capacity_origin == NULL && plan.capacity_input[0] == '\0');
+        char long_input[300];
+        memset(long_input, 'x', sizeof(long_input));
+        long_input[sizeof(long_input) - 1] = '\0';
+        zcl_devloop_capacity_note(&plan, "semantic", "file-cap", long_input);
+        ASSERT_STR_EQ(plan.capacity_input, "unknown");
+        zcl_devloop_capacity_reset_closure(&plan);
+        zcl_devloop_capacity_note(&plan, "path", "group-cap", "file.c");
+        plan.path_universal = true;
+        zcl_devloop_capacity_reset_closure(&plan);
+        ASSERT_STR_EQ(plan.capacity_origin, "path");
+        ASSERT_STR_EQ(plan.capacity_input, "file.c");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_capacity_bound_runs_everything(void)
 {
     int failures = 0;
@@ -1265,6 +1310,9 @@ static int test_ic_capacity_bound_runs_everything(void)
         zcl_devloop_test_plan_group_cap = 0;
         ASSERT(built);
         ASSERT(capped.closure_universal);
+        ASSERT_STR_EQ(capped.capacity_origin, "semantic");
+        ASSERT_STR_EQ(capped.capacity_cause, "group-cap");
+        ASSERT_STR_EQ(capped.capacity_input, "batch");
         ASSERT(!capped.closure_truncated);
         ASSERT(capped.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
@@ -13366,6 +13414,9 @@ static int test_ic_include_capacity_runs_everything(void)
          * with the universal closure and the plan is admissible proof. */
         ASSERT(ic_include_plan(1, &plan));
         ASSERT(plan.closure_universal);
+        ASSERT_STR_EQ(plan.capacity_origin, "include");
+        ASSERT_STR_EQ(plan.capacity_cause, "file-cap");
+        ASSERT_STR_EQ(plan.capacity_input, IC_INCCAP_DEF);
         ASSERT(!plan.closure_truncated);
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_INCLUDE].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
@@ -13397,6 +13448,12 @@ static int test_ic_include_capacity_runs_everything(void)
                            "test_semantic_facts_fuzz") == 0) ||
                    ic_guest_group_absent(zcl_test_group_catalog_at(i)) ||
                    ic_selector_has(selector, zcl_test_group_catalog_at(i)));
+
+        /* Reclosing the same plan under the normal cap replaces the old
+         * include result and must not retain its former capacity trigger. */
+        const char *again[] = { IC_INCCAP_DEF };
+        ASSERT(zcl_devloop_plan_add_closure(IC_FIX_INCCAP, again, 1, &plan));
+        ASSERT(!plan.closure_universal && plan.capacity_origin == NULL);
 
         /* (b) an untrusted graph is missing evidence: it refuses. */
         ASSERT(ic_write_include_fanout(IC_FIX_INCCAP, true));
@@ -13485,6 +13542,8 @@ static int test_ic_path_group_cap_runs_everything(void)
         ASSERT(plan.path_groups_len == ZCL_DEVLOOP_MAX_PLAN_GROUPS);
         ASSERT(plan.path_universal);
         ASSERT(plan.closure_universal);
+        ASSERT_STR_EQ(plan.capacity_origin, "path");
+        ASSERT_STR_EQ(plan.capacity_cause, "group-cap");
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_OPAQUE].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT_STR_EQ(plan.dims[ZCL_DEVLOOP_DIM_OPAQUE].reason,
@@ -14549,6 +14608,7 @@ int test_impact_composition(void)
     failures += test_ic_macro_only_header_has_dependents();
     failures += test_ic_incomplete_dimension_refuses_proof();
     failures += test_ic_capacity_bound_runs_everything();
+    failures += test_ic_capacity_provenance();
     failures += test_ic_include_capacity_runs_everything();
     failures += test_ic_path_group_cap_runs_everything();
     failures += test_ic_host_need_table_is_closed();

@@ -258,11 +258,14 @@ static bool fx_fold(struct zcl_devloop_plan *plan, struct fx_set *files)
     plan->closure_attempted = true;
     plan->closure_snapshot = false;
     plan->closure_universal = plan->path_universal;
+    zcl_devloop_capacity_reset_closure(plan);
     plan->closure_groups_len = 0;
     for (size_t k = 0; k < files->len; k++)
         if (!zcl_devloop_plan_fold_file(plan, fx_at(files, k),
-                                        ZCL_DEVLOOP_DIM_SEMANTIC))
+                                        ZCL_DEVLOOP_DIM_SEMANTIC)) {
+            zcl_devloop_capacity_note(plan, "facts", "group-cap", "batch");
             return false;
+        }
     /* Feedback only, never proof: see zcl_devloop_plan_proof_admissible(). */
     plan->dims[ZCL_DEVLOOP_DIM_SEMANTIC].status = ZCL_DEVLOOP_DIM_INCOMPLETE;
     plan->dims[ZCL_DEVLOOP_DIM_SEMANTIC].reason = "facts-narrowed";

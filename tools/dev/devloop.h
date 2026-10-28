@@ -230,6 +230,13 @@ struct zcl_devloop_plan {
      * universal. */
     bool path_universal;
 
+    /* First capacity trigger, distinct from dimensions skipped after widening.
+     * Empty origin means no recorded capacity trigger. Input is "batch" or
+     * "unknown" when no individual changed input can be attributed. */
+    const char *capacity_origin;
+    const char *capacity_cause;
+    char capacity_input[256];
+
     /* ── C5: why every selected group is here ── */
     struct zcl_devloop_selection selections[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t selections_len;
@@ -238,6 +245,11 @@ struct zcl_devloop_plan {
     /* ── C4: per-dimension completeness, indexed by enum zcl_devloop_dim ── */
     struct zcl_devloop_dim_state dims[ZCL_DEVLOOP_DIM__COUNT];
 };
+
+void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
+                               const char *origin, const char *cause,
+                               const char *input);
+void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan);
 
 /* Is this plan admissible as PROOF that a change is covered?
  *

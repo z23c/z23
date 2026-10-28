@@ -125,6 +125,27 @@ static bool fxc_plain(struct fxc *c, const struct zcl_devloop_plan *given,
     return zcl_devloop_plan_add_closure(c->root, c->files, c->nfiles, plan);
 }
 
+/* A failed narrowed/merge attempt can have hit a bound before the plain
+ * replan replaces its output. Retain that first observation across the reset. */
+static bool fxc_plain_after_attempt(struct fxc *c,
+                                    const struct zcl_devloop_plan *given,
+                                    struct zcl_devloop_plan *plan,
+                                    struct zcl_devloop_facts_verdict *v,
+                                    const char *reason, const char *detail)
+{
+    const char *origin = plan->capacity_origin;
+    const char *cause = plan->capacity_cause;
+    char input[sizeof(plan->capacity_input)];
+    memcpy(input, plan->capacity_input, sizeof(input));
+    bool ok = fxc_plain(c, given, plan, v, reason, detail);
+    if (origin) {
+        plan->capacity_origin = origin;
+        plan->capacity_cause = cause;
+        memcpy(plan->capacity_input, input, sizeof(input));
+    }
+    return ok;
+}
+
 static bool fxc_broadened(struct fxc *c, const struct zcl_devloop_plan *given,
                           struct zcl_devloop_plan *plan, bool c_path);
 
@@ -160,8 +181,10 @@ static bool fxc_merge_group(struct fxc *c, struct zcl_devloop_plan *plan,
 {
     if (fxc_has_group(plan, g))
         return true;
-    if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+    if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS) {
+        zcl_devloop_capacity_note(plan, "facts", "group-cap", "unknown");
         return false;
+    }
     (void)snprintf(plan->closure_groups[plan->closure_groups_len],
                    ZCL_DEVLOOP_GROUP_MAX, "%s", g);
     c->report->group_reason[plan->closure_groups_len++] = "tu-broadened";
@@ -197,6 +220,9 @@ static bool fxc_broadened(struct fxc *c, const struct zcl_devloop_plan *given,
         memcpy(tmp, given, sizeof(*tmp));
         ok = zcl_devloop_plan_files(paths, n, tmp) &&
              zcl_devloop_plan_add_closure(c->root, paths, n, tmp);
+        if (ok && tmp->closure_universal && tmp->capacity_origin)
+            zcl_devloop_capacity_note(plan, tmp->capacity_origin,
+                                      tmp->capacity_cause, tmp->capacity_input);
         for (size_t k = 0; ok && k < tmp->path_groups_len; k++)
             ok = fxc_merge_group(c, plan, tmp->path_groups[k]);
         for (size_t k = 0; ok && k < tmp->closure_groups_len; k++)
@@ -263,11 +289,11 @@ bool fxc_obligations(struct fxc *c, const struct zcl_devloop_plan *given,
     if (!ok) {
         const char *why = v->reason && v->reason[0] ? v->reason : "closure-error";
         memset(c->report->group_reason, 0, sizeof(c->report->group_reason));
-        return fxc_plain(c, given, plan, v, why, "the narrowed walk");
+        return fxc_plain_after_attempt(c, given, plan, v, why, "the narrowed walk");
     }
     if (!fxc_broadened(c, given, plan, false)) {
         memset(c->report->group_reason, 0, sizeof(c->report->group_reason));
-        return fxc_plain(c, given, plan, v, "group-cap", "broadened TUs");
+        return fxc_plain_after_attempt(c, given, plan, v, "group-cap", "broadened TUs");
     }
     v->narrowed = true;
     v->reason = "";
@@ -329,7 +355,7 @@ static bool fxc_c_rewalk(struct fxc *c, const struct zcl_devloop_plan *given,
     free(fold);
     if (!ok) {
         const char *why = v->reason && v->reason[0] ? v->reason : "closure-error";
-        return fxc_plain(c, given, plan, v, why, "the narrowed walk");
+        return fxc_plain_after_attempt(c, given, plan, v, why, "the narrowed walk");
     }
     v->seeds_len = 0;
     for (size_t k = 0; k < n && k < ZCL_DEVLOOP_FACTS_MAX_SEEDS; k++) {
@@ -364,7 +390,7 @@ bool fxc_c_members(struct fxc *c, const struct zcl_devloop_plan *given,
     else if (ok && (n > v->seeds_len || fxc_foreign_affected(c)))
         ok = fxc_c_rewalk(c, given, plan, v, all, n);
     if (ok && v->narrowed && !fxc_broadened(c, given, plan, true))
-        ok = fxc_plain(c, given, plan, v, "group-cap", "broadened TUs");
+        ok = fxc_plain_after_attempt(c, given, plan, v, "group-cap", "broadened TUs");
     free(all);
     return ok;
 }

@@ -7129,6 +7129,34 @@ static const char *dp_selection_reason(const struct zcl_devloop_plan *plan,
                                      : "impact-plan";
 }
 
+/* Escape whitespace, control bytes and '%' so one input stays one log field. */
+static void dp_log_capacity_input(FILE *f, const char *input)
+{
+    for (const unsigned char *p = (const unsigned char *)input; *p; p++) {
+        if (*p <= 0x20 || *p >= 0x7f || *p == '%')
+            (void)fprintf(f, "%%%02X", (unsigned)*p);
+        else
+            (void)fputc(*p, f);
+    }
+}
+
+static void dp_write_capacity_note(FILE *f, const struct zcl_devloop_plan *plan)
+{
+    const char *unknown = plan->closure_universal ? "unknown" : "none";
+    (void)fprintf(f, "capacity_origin=%s capacity_cause=%s capacity_input=",
+                  plan->capacity_origin ? plan->capacity_origin : unknown,
+                  plan->capacity_cause ? plan->capacity_cause : unknown);
+    dp_log_capacity_input(f, plan->capacity_origin ? plan->capacity_input : unknown);
+    (void)fputc('\n', f);
+}
+
+#if defined(ZCL_TESTING)
+void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *plan)
+{
+    dp_write_capacity_note(f, plan);
+}
+#endif
+
 /* Record the test-selection shape beside the dimension logs. "universal" is
  * the whole catalog, chosen because the plan's closure was capacity-bounded
  * (reason closure-universal), because its path floor outgrew the group cap
@@ -7154,6 +7182,7 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
     (void)fprintf(f, "test_selection=%s reason=%s groups_selected=%u\n",
                   universal ? "universal" : "exact", reason,
                   (unsigned)selected);
+    dp_write_capacity_note(f, plan);
     (void)fprintf(f, "host_gated=%s\n",
                   (host_gated && host_gated[0]) ? host_gated : "-");
     return fclose(f) == 0;

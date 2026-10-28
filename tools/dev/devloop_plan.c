@@ -621,6 +621,28 @@ static bool plan_add_path_group(struct zcl_devloop_plan *plan,
     return true;
 }
 
+void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
+                               const char *origin, const char *cause,
+                               const char *input)
+{
+    if (!plan || plan->capacity_origin)
+        return;
+    plan->capacity_origin = origin;
+    plan->capacity_cause = cause;
+    if (!input || strlen(input) >= sizeof(plan->capacity_input))
+        input = "unknown";
+    (void)snprintf(plan->capacity_input, sizeof(plan->capacity_input), "%s", input);
+}
+
+void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan)
+{
+    if (!plan || plan->path_universal)
+        return;
+    plan->capacity_origin = NULL;
+    plan->capacity_cause = NULL;
+    plan->capacity_input[0] = '\0';
+}
+
 /* The path floor outgrew path_groups. Like a closure bound this is capacity,
  * not missing evidence: the plan widens to the whole catalog, and OPAQUE
  * stays COMPLETE with the reason naming the widening. */
@@ -645,6 +667,7 @@ static void plan_take_path_group(struct zcl_devloop_plan *plan,
     if (plan->path_universal)
         return;
     if (!plan_add_path_group(plan, group)) {
+        zcl_devloop_capacity_note(plan, "path", "group-cap", via);
         plan_path_go_universal(plan);
         return;
     }
@@ -1008,6 +1031,7 @@ static bool plan_include_verdict(struct zcl_devloop_plan *plan,
         return false;
     }
     if (capacity > 0) {
+        zcl_devloop_capacity_note(plan, "include", "file-cap", path);
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
     } else {
         plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
@@ -1138,11 +1162,14 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * in below — a partial closure is real evidence. What a CAPACITY bound
      * changes is the answer's shape, not its availability: see
      * plan_go_universal(). */
-    if (truncated)
+    if (truncated) {
+        zcl_devloop_capacity_note(plan, "semantic", "file-cap", "batch");
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
+    }
     for (int i = 0; i < n; i++) {
         if (!plan_fold_reached_file(plan, impacted[i],
                                     ZCL_DEVLOOP_DIM_SEMANTIC)) {
+            zcl_devloop_capacity_note(plan, "semantic", "group-cap", "batch");
             plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
             break;
         }
@@ -1234,6 +1261,7 @@ static bool plan_closure_include_walk(struct zcl_devloop_plan *plan,
         for (int d = 0; d < nd; d++) {
             if (!plan_fold_reached_file(plan, impacted[d],
                                         ZCL_DEVLOOP_DIM_INCLUDE)) {
+                zcl_devloop_capacity_note(plan, "include", "group-cap", files[i]);
                 plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
                 break;
             }
@@ -1268,6 +1296,7 @@ static bool plan_add_closure(const char *repo_root,
     plan->closure_snapshot = false;
     /* A path floor over the group cap stays universal. */
     plan->closure_universal = plan->path_universal;
+    zcl_devloop_capacity_reset_closure(plan);
     plan->closure_groups_len = 0;
     /* This call OWNS the two graph dimensions; reset them and let the walks
      * below escalate. The OPAQUE dimension belongs to the path floor and is
