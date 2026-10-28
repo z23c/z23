@@ -1341,9 +1341,16 @@ static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
     node_rpc_test_set_connect_wait(NULL, NULL);
     pthread_join(signaler, NULL);
     printf("  real-signal connect-phase: interrupted=%d\n", wait.interrupted);
-    rt_expect(wait.interrupted > 0 && rt_has(b, "connect timed out") && ms >= 35 && ms < 150,
-              pass ? "same for the relative-deadline entry"
-                   : "40ms + real signals: connect phase keeps original deadline", ms, 0);
+    bool matched = wait.interrupted > 0 && rt_has(b, "connect timed out") && ms >= 35 && ms < 150;
+    const char *name = pass ? "same for the relative-deadline entry"
+                            : "40ms + real signals: connect phase keeps original deadline";
+    char failure_name[192];
+    if (!matched) {
+        snprintf(failure_name, sizeof failure_name, "%s interrupted=%d timeout_match=%d",
+                 name, wait.interrupted, rt_has(b, "connect timed out"));
+        name = failure_name;
+    }
+    rt_expect(matched, name, ms, 0);
     free(b);
     return true;
 }
