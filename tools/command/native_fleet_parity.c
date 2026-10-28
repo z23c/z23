@@ -16,6 +16,7 @@
 #include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/file_sync.h"
 #include "util/file_tree_ops.h"
 #include "util/log_macros.h"
 
@@ -184,7 +185,7 @@ static bool fp_write_all(const char *path, const char *line, size_t len)
     if (fd < 0)
         return false;
     w = write(fd, line, len);
-    if (w == (ssize_t)len && fsync(fd) != 0)
+    if (w == (ssize_t)len && platform_file_sync(fd) != 0)
         w = -1;
     return close(fd) == 0 && w == (ssize_t)len;
 }
