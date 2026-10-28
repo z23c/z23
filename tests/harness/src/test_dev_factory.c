@@ -550,6 +550,16 @@ int test_dev_factory(void)
         ASSERT_EQ((int)dfx_num(&c, "jobs.cold_build_unbaselined_first_jobs"), 0);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 1);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 1);
+        ASSERT(dfx_str_is(&c, "jobs.failed_group_attribution_basis",
+                          "latest_cwd_verdict_time_proxy"));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_group_attribution_skew_s"), 120);
+        /* Even the failed build matches: this is a time proxy, not a job join. */
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.named"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.unnamed"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.unnamed"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.lint.named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.lint.unnamed"), 0);
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_groups_overflow"), 0);
         {
             const struct json_value *g = dfx_at(&c, "jobs.failed_groups");
@@ -561,6 +571,20 @@ int test_dev_factory(void)
             ASSERT_STR_EQ(json_get_str(json_get(json_at(g, 1), "group")),
                           "zcl_group_b");
         }
+        dfx_end(&c);
+        /* A later run overwrites the only verdict; historical names disappear. */
+        (void)snprintf(vtext, sizeof(vtext),
+                       "{\"ended_unix\":%ld,\"failed_groups\":[\"later_group\"]}\n",
+                       now + 1000);
+        dfx_write(vpath, vtext);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_unnamed"), 2);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.named"), 0);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.build.unnamed"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_by_class.t_fast.unnamed"), 1);
+        ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 0);
         dfx_end(&c);
         dfx_env(jobs, land, att, proc);
         PASS();

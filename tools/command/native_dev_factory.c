@@ -22,6 +22,8 @@
  * proxy: first-job run time above the non-first median of its class) and
  * failed_runs_named / failed_runs_unnamed, where a failed run is named when
  * <cwd>/build/test-verdict.json ended within 120 s of it and lists groups.
+ * failed_runs_by_class splits that coverage by job class; attribution metadata
+ * labels the latest-cwd-verdict time proxy, which is not an exact job join.
  * cold_t_fast_* counts t-fast runs with cpu_s above 600 (cold builds), their
  * run_s total and how many ran without a -j token; warm_t_fast_n counts the
  * rest. */
@@ -756,6 +758,7 @@ struct fac_name {
 
 struct fac_verdict {
     int64_t named, unnamed, overflow;
+    int64_t named_by_class[FAC_NCLASS], unnamed_by_class[FAC_NCLASS];
     size_t nn;
     struct fac_name names[FAC_MAX_NAMES];
 };
@@ -851,10 +854,32 @@ static void fac_verdict_job(const struct fac_job *jb, struct fac_verdict *v)
         named = fac_verdict_match(&doc, jb->ended) && fac_verdict_names(&doc, v);
         json_free(&doc);
     }
-    if (named)
+    if (named) {
         fac_inc(&v->named);
-    else
+        fac_inc(&v->named_by_class[jb->cls]);
+    } else {
         fac_inc(&v->unnamed);
+        fac_inc(&v->unnamed_by_class[jb->cls]);
+    }
+}
+
+static void fac_verdict_coverage(const struct fac_verdict *v,
+                                  struct json_value *out)
+{
+    struct json_value classes;
+    fac_new_obj(&classes);
+    for (int c = 0; c < FAC_NCLASS; c++) {
+        struct json_value one;
+        fac_new_obj(&one);
+        (void)json_push_kv_int(&one, "named", v->named_by_class[c]);
+        (void)json_push_kv_int(&one, "unnamed", v->unnamed_by_class[c]);
+        fac_attach(&classes, fac_class_names[c], &one);
+    }
+    fac_attach(out, "failed_runs_by_class", &classes);
+    (void)json_push_kv_str(out, "failed_group_attribution_basis",
+                           "latest_cwd_verdict_time_proxy");
+    (void)json_push_kv_real(out, "failed_group_attribution_skew_s",
+                            FAC_VERDICT_SKEW_S);
 }
 
 static int fac_cmp_name(const void *a, const void *b)
@@ -876,6 +901,7 @@ static void fac_failed_section(const struct fac_jobs *j, struct json_value *out)
         fac_verdict_job(&j->v[i], v);
     (void)json_push_kv_int(out, "failed_runs_named", v->named);
     (void)json_push_kv_int(out, "failed_runs_unnamed", v->unnamed);
+    fac_verdict_coverage(v, out);
     qsort(v->names, v->nn, sizeof(*v->names), fac_cmp_name);
     json_init(&names);
     json_set_array(&names);
