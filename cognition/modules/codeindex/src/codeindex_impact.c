@@ -210,6 +210,14 @@ static void ci_strlist_free(struct ci_strlist *l)
     l->cap = l->len = 0;
 }
 
+static void ci_strlist_advance(struct ci_strlist *frontier,
+                               struct ci_strlist *next)
+{
+    ci_strlist_free(frontier);
+    *frontier = *next;
+    memset(next, 0, sizeof(*next));
+}
+
 static int ci_str_cmp(const void *a, const void *b)
 {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
@@ -587,6 +595,56 @@ static int ci_closure_collect_output(struct ci_closure_ctx *c,
     return n;
 }
 
+static bool ci_closure_walk(struct ci_closure_ctx *c, struct codeindex *ci,
+                            int depth, struct ci_strlist *frontier,
+                            struct ci_strlist *next, bool *truncated,
+                            bool stop_at_truncation,
+                            codeindex_impact_terminal_fn terminal, void *terminal_user)
+{
+    for (int d = 0; d < depth && frontier->len > 0; d++) {
+        if (stop_at_truncation && *truncated)
+            break;
+        /* Deterministic per-level expansion order. */
+        qsort(frontier->items, frontier->len, sizeof(*frontier->items),
+              ci_str_cmp);
+        for (size_t i = 0; i < frontier->len; i++) {
+            if (!ci_closure_expand_symbol(c, ci, frontier->items[i], next,
+                                          truncated, terminal, terminal_user))
+                return false;
+            /* The caller has already decided a bounded closure means "run
+             * everything", so paging the rest of a huge frontier cannot
+             * change its answer — only its wall clock. Stop here. */
+            if (stop_at_truncation && *truncated)
+                break;
+        }
+        ci_strlist_advance(frontier, next);
+    }
+
+    return true;
+}
+
+static const char *ci_reverse_init(struct ci_closure_ctx *c)
+{
+    if (!ci_strset_init(&c->seen_syms, 1024) ||
+        !ci_strset_init(&c->seen_sites, 1024) ||
+        !ci_strset_init(&c->seen_files, 1024)) {
+        ci_closure_ctx_free(c);
+        return "closure set init failed";
+    }
+    c->refbuf = zcl_malloc(sizeof(*c->refbuf) * CI_CLOSURE_QUERY_BATCH,
+                          "ci_closure_refbuf");
+    c->symbuf = zcl_malloc(sizeof(*c->symbuf) * CI_CLOSURE_QUERY_BATCH,
+                          "ci_closure_symbuf");
+    c->incbuf = zcl_malloc(sizeof(*c->incbuf) * CI_CLOSURE_QUERY_BATCH,
+                          "ci_closure_incbuf");
+    if (!c->refbuf || !c->symbuf || !c->incbuf) {
+        ci_closure_ctx_free(c);
+        return "closure batch alloc failed";
+    }
+
+    return NULL;
+}
+
 static int impact_closure_impl(
     struct codeindex *ci, const char *overlay_root,
     const char (*changed_files)[256], int n_changed, int max_depth,
@@ -602,22 +660,8 @@ static int impact_closure_impl(
 
     struct ci_closure_ctx c = {0};
     int rc = -1;
-    if (!ci_strset_init(&c.seen_syms, 1024) ||
-        !ci_strset_init(&c.seen_sites, 1024) ||
-        !ci_strset_init(&c.seen_files, 1024)) {
-        ci_closure_ctx_free(&c);
-        LOG_ERR("codeindex", "closure set init failed");
-    }
-    c.refbuf = zcl_malloc(sizeof(*c.refbuf) * CI_CLOSURE_QUERY_BATCH,
-                          "ci_closure_refbuf");
-    c.symbuf = zcl_malloc(sizeof(*c.symbuf) * CI_CLOSURE_QUERY_BATCH,
-                          "ci_closure_symbuf");
-    c.incbuf = zcl_malloc(sizeof(*c.incbuf) * CI_CLOSURE_QUERY_BATCH,
-                          "ci_closure_incbuf");
-    if (!c.refbuf || !c.symbuf || !c.incbuf) {
-        ci_closure_ctx_free(&c);
-        LOG_ERR("codeindex", "closure batch alloc failed");
-    }
+    const char *init_error = ci_reverse_init(&c);
+    if (init_error) LOG_ERR("codeindex", "%s", init_error);
 
     struct ci_strlist frontier = {0};
     struct ci_strlist next = {0};
@@ -626,26 +670,9 @@ static int impact_closure_impl(
                              &frontier, truncated, stop_at_truncation))
         goto done;
 
-    for (int d = 0; d < depth && frontier.len > 0; d++) {
-        if (stop_at_truncation && *truncated)
-            break;
-        /* Deterministic per-level expansion order. */
-        qsort(frontier.items, frontier.len, sizeof(*frontier.items),
-              ci_str_cmp);
-        for (size_t i = 0; i < frontier.len; i++) {
-            if (!ci_closure_expand_symbol(&c, ci, frontier.items[i], &next,
-                                          truncated, terminal, terminal_user))
-                goto done;
-            /* The caller has already decided a bounded closure means "run
-             * everything", so paging the rest of a huge frontier cannot
-             * change its answer — only its wall clock. Stop here. */
-            if (stop_at_truncation && *truncated)
-                break;
-        }
-        ci_strlist_free(&frontier);
-        frontier = next;
-        memset(&next, 0, sizeof(next));
-    }
+    if (!ci_closure_walk(&c, ci, depth, &frontier, &next, truncated,
+                         stop_at_truncation, terminal, terminal_user))
+        goto done;
 
     /* Deterministic, unique output. */
     rc = ci_closure_collect_output(&c, out, cap, truncated);
@@ -831,6 +858,32 @@ bool codeindex_include_query_unsafe_cause(struct codeindex *ci,
     return true;
 }
 
+static int reverse_include_probe(struct codeindex *ci, const char *path, int cap, int n,
+                                 enum codeindex_include_dim *dim,
+                                 const char **error, const char **detail)
+{
+    if (n != cap) return 0;
+    char (*wide)[256] = zcl_malloc(sizeof(*wide) * (size_t)cap + sizeof(*wide),
+                                   "ci_revinc_probe");
+    if (!wide) {
+        *error = "alloc";
+        *detail = "";
+        return -1;
+    }
+    int nw = ci_store_dependents_of_file(ci->store, path, wide, cap + 1);
+    free(wide);
+    if (nw < 0) {
+        *error = "failed for ";
+        *detail = path;
+        return -1;
+    }
+    if (nw > cap) {
+        *dim = CODEINDEX_INCLUDE_DIM_TRUNCATED;
+        return 1;
+    }
+    return 0;
+}
+
 int codeindex_reverse_includes(struct codeindex *ci, const char *path,
                                char (*out)[256], int cap,
                                enum codeindex_include_dim *dim)
@@ -858,20 +911,13 @@ int codeindex_reverse_includes(struct codeindex *ci, const char *path,
     /* A result that exactly fills `cap` is ambiguous: complete-and-exact, or
      * clipped. Re-ask for one row more than the caller can hold; only that
      * distinguishes the two, and guessing would mint a false COMPLETE. */
-    if (n == cap) {
-        char (*wide)[256] = zcl_malloc(sizeof(*wide) * (size_t)cap + sizeof(*wide),
-                                       "ci_revinc_probe");
-        if (!wide)
-            LOG_ERR("codeindex", "reverse-include probe alloc");
-        int nw = ci_store_dependents_of_file(ci->store, path, wide, cap + 1);
-        free(wide);
-        if (nw < 0)
-            LOG_ERR("codeindex", "reverse-include probe failed for %s", path);
-        if (nw > cap) {
-            *dim = CODEINDEX_INCLUDE_DIM_TRUNCATED;
-            return n;
-        }
-    }
+    const char *probe_error = NULL, *probe_detail = NULL;
+    int probe = reverse_include_probe(ci, path, cap, n, dim,
+                                      &probe_error, &probe_detail);
+    if (probe < 0)
+        LOG_ERR("codeindex", "reverse-include probe %s%s",
+                probe_error, probe_detail);
+    if (probe > 0) return n;
     *dim = filled_include_dim(narrow_refused);
     return n;
 }
@@ -942,6 +988,89 @@ static bool ci_fwd_record_symbol_file(struct ci_closure_ctx *c,
     return true;
 }
 
+static bool ci_fwd_expand_level(struct ci_closure_ctx *c, struct codeindex *ci,
+                                struct ci_strlist *frontier,
+                                struct ci_strlist *next, bool *truncated)
+{
+    for (size_t i = 0; i < frontier->len; i++) {
+        int nc = codeindex_callees(ci, frontier->items[i], c->refbuf,
+                                   CI_CLOSURE_QUERY_BATCH);
+        if (nc < 0) {
+            ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR,
+                "[codeindex] %s:%d %s(): callees failed for %s\n",
+                __FILE__, __LINE__, "codeindex_forward_closure", frontier->items[i]);
+            return false;  /* rc stays -1; cleanup below runs */
+        }
+        if (nc == CI_CLOSURE_QUERY_BATCH)
+            *truncated = true;  /* more callees than one batch */
+        for (int j = 0; j < nc; j++) {
+            const char *callee = c->refbuf[j].callee;
+            if (!callee[0])
+                continue;
+            if (c->seen_syms.len >= CI_CLOSURE_MAX_SYMS) {
+                *truncated = true;
+                continue;
+            }
+            bool new_sym = false;
+            if (!ci_strset_add(&c->seen_syms, callee, &new_sym))
+                return false;
+            if (!new_sym)
+                continue;
+            /* Record the callee's file at DISCOVERY so depth bounding can
+             * never drop it. */
+            if (!ci_fwd_record_symbol_file(c, ci, callee, truncated))
+                return false;
+            if (!ci_strlist_push(next, callee))
+                return false;
+        }
+    }
+    return true;
+}
+
+static const char *ci_forward_init(struct ci_closure_ctx *c)
+{
+    if (!ci_strset_init(&c->seen_syms, 1024) ||
+        !ci_strset_init(&c->seen_files, 1024)) {
+        ci_closure_ctx_free(c);
+        return "forward closure set init failed";
+    }
+    c->refbuf = zcl_malloc(sizeof(*c->refbuf) * CI_CLOSURE_QUERY_BATCH,
+                          "ci_fwd_refbuf");
+    c->incbuf = zcl_malloc(sizeof(*c->incbuf) * CI_CLOSURE_QUERY_BATCH,
+                          "ci_fwd_incbuf");
+    if (!c->refbuf || !c->incbuf) {
+        ci_closure_ctx_free(c);
+        return "forward closure batch alloc failed";
+    }
+
+    return NULL;
+}
+
+static bool ci_forward_walk(struct ci_closure_ctx *c, struct codeindex *ci,
+                            const char *root_symbol, struct ci_strlist *frontier,
+                            struct ci_strlist *next, bool *truncated)
+{
+    bool added = false;
+    if (!ci_strset_add(&c->seen_syms, root_symbol, &added))
+        return false;
+    if (!ci_fwd_record_symbol_file(c, ci, root_symbol, truncated))
+        return false;
+    if (!ci_strlist_push(frontier, root_symbol))
+        return false;
+
+    for (int d = 0; d < CI_FWD_DEPTH_CEIL && frontier->len > 0; d++) {
+        qsort(frontier->items, frontier->len, sizeof(*frontier->items),
+              ci_str_cmp);
+        if (!ci_fwd_expand_level(c, ci, frontier, next, truncated))
+            return false;
+        ci_strlist_advance(frontier, next);
+    }
+    if (frontier->len > 0)
+        *truncated = true;  /* depth ceiling hit with the frontier non-empty */
+
+    return true;
+}
+
 int codeindex_forward_closure(struct codeindex *ci, const char *root_symbol,
                               char (*out)[256], int cap,
                               bool *truncated, bool *root_found)
@@ -953,19 +1082,8 @@ int codeindex_forward_closure(struct codeindex *ci, const char *root_symbol,
 
     struct ci_closure_ctx c = {0};
     int rc = -1;
-    if (!ci_strset_init(&c.seen_syms, 1024) ||
-        !ci_strset_init(&c.seen_files, 1024)) {
-        ci_closure_ctx_free(&c);
-        LOG_ERR("codeindex", "forward closure set init failed");
-    }
-    c.refbuf = zcl_malloc(sizeof(*c.refbuf) * CI_CLOSURE_QUERY_BATCH,
-                          "ci_fwd_refbuf");
-    c.incbuf = zcl_malloc(sizeof(*c.incbuf) * CI_CLOSURE_QUERY_BATCH,
-                          "ci_fwd_incbuf");
-    if (!c.refbuf || !c.incbuf) {
-        ci_closure_ctx_free(&c);
-        LOG_ERR("codeindex", "forward closure batch alloc failed");
-    }
+    const char *init_error = ci_forward_init(&c);
+    if (init_error) LOG_ERR("codeindex", "%s", init_error);
 
     /* The root must resolve to a known in-tree symbol; otherwise its inputs
      * cannot be bounded (the caller treats this as UNCACHEABLE). */
@@ -976,7 +1094,6 @@ int codeindex_forward_closure(struct codeindex *ci, const char *root_symbol,
         LOG_ERR("codeindex", "root symbol lookup failed");
     }
     if (!found) {
-        if (root_found) *root_found = false;
         ci_closure_ctx_free(&c);
         return 0;  /* empty closure, not an error */
     }
@@ -985,73 +1102,10 @@ int codeindex_forward_closure(struct codeindex *ci, const char *root_symbol,
     struct ci_strlist frontier = {0};
     struct ci_strlist next = {0};
 
-    bool added = false;
-    if (!ci_strset_add(&c.seen_syms, root_symbol, &added))
-        goto done;
-    if (!ci_fwd_record_symbol_file(&c, ci, root_symbol, truncated))
-        goto done;
-    if (!ci_strlist_push(&frontier, root_symbol))
+    if (!ci_forward_walk(&c, ci, root_symbol, &frontier, &next, truncated))
         goto done;
 
-    for (int d = 0; d < CI_FWD_DEPTH_CEIL && frontier.len > 0; d++) {
-        qsort(frontier.items, frontier.len, sizeof(*frontier.items),
-              ci_str_cmp);
-        for (size_t i = 0; i < frontier.len; i++) {
-            int nc = codeindex_callees(ci, frontier.items[i], c.refbuf,
-                                       CI_CLOSURE_QUERY_BATCH);
-            if (nc < 0) {
-                ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR,
-                    "[codeindex] %s:%d %s(): callees failed for %s\n",
-                    __FILE__, __LINE__, __func__, frontier.items[i]);
-                goto done;  /* rc stays -1; cleanup below runs */
-            }
-            if (nc == CI_CLOSURE_QUERY_BATCH)
-                *truncated = true;  /* more callees than one batch */
-            for (int j = 0; j < nc; j++) {
-                const char *callee = c.refbuf[j].callee;
-                if (!callee[0])
-                    continue;
-                if (c.seen_syms.len >= CI_CLOSURE_MAX_SYMS) {
-                    *truncated = true;
-                    continue;
-                }
-                bool new_sym = false;
-                if (!ci_strset_add(&c.seen_syms, callee, &new_sym))
-                    goto done;
-                if (!new_sym)
-                    continue;
-                /* Record the callee's file at DISCOVERY so depth bounding can
-                 * never drop it. */
-                if (!ci_fwd_record_symbol_file(&c, ci, callee, truncated))
-                    goto done;
-                if (!ci_strlist_push(&next, callee))
-                    goto done;
-            }
-        }
-        ci_strlist_free(&frontier);
-        frontier = next;
-        memset(&next, 0, sizeof(next));
-    }
-    if (frontier.len > 0)
-        *truncated = true;  /* depth ceiling hit with the frontier non-empty */
-
-    ci_strlist_sort(&c.files);
-    int n = 0;
-    for (size_t i = 0; i < c.files.len && n < cap; i++) {
-        memset(out[n], 0, sizeof(out[n]));
-        int w = snprintf(out[n], sizeof(out[n]), "%s", c.files.items[i]);
-        /* A path longer than the caller's row lands as a SILENTLY DIFFERENT
-         * path: the caller then hashes whatever the truncated prefix names, or
-         * fails to open it. Either way the set it holds is not the set we
-         * computed, so report truncation — testcache turns that into
-         * UNCACHEABLE and the group runs. */
-        if (w < 0 || (size_t)w >= sizeof(out[n]))
-            *truncated = true;
-        n++;
-    }
-    if ((size_t)n < c.files.len)
-        *truncated = true;  /* caller's cap could not hold the full set */
-    rc = n;
+    rc = ci_closure_collect_output(&c, out, cap, truncated);
 
 done:
     ci_strlist_free(&frontier);
