@@ -294,22 +294,11 @@ static struct zcl_result accepted_projection_check(
     return ZCL_OK;
 }
 
-/* long-function-ok:accepted-work-authority-join -- one fail-closed join over
- * immutable CAS acceptance and all live revocation/projection authorities. */
-struct zcl_result zcode_accepted_work_find(
-    struct node_db *ndb, const char *workspace,
-    const char *source_root_sha3, int64_t now,
-    bool rebuild_projection, struct zcode_accepted_work_status *out)
+static struct zcl_result accepted_find_receipt(
+    const struct vcs_zcode_task_index *index, const char *workspace,
+    const char *source_root_sha3, const uint8_t source_root[32], int64_t now,
+    struct zcode_accepted_work_status *out)
 {
-    uint8_t source_root[32];
-    if (!ndb || !ndb->open || !workspace || !source_root_sha3 ||
-        !zcl_hex_decode_lower(source_root_sha3, source_root, 32) ||
-        now <= 0 || !out)
-        return ZCL_ERR(-1, "accepted-work-input-invalid");
-    memset(out, 0, sizeof(*out));
-    struct vcs_zcode_task_index *index =
-        vcs_zcode_task_index_build(workspace, now);
-    if (!index) return ZCL_ERR(-1, "accepted-work-index-failed");
     size_t matches = 0;
     for (size_t i = 0; i < vcs_zcode_task_index_lane_count(index); i++) {
         const struct vcs_zcode_task_lane_entry *lane =
@@ -327,12 +316,17 @@ struct zcl_result zcode_accepted_work_find(
         if (matches == 0) out->accepted = accepted;
         matches++;
     }
-    if (matches != 1) {
-        vcs_zcode_task_index_free(index);
+    if (matches != 1)
         return ZCL_ERR(-1, matches > 1
             ? "accepted-work-source-ambiguous"
             : "accepted-work-not-human-accepted");
-    }
+    return ZCL_OK;
+}
+
+static struct zcl_result accepted_find_action(
+    struct node_db *ndb, const char *workspace, int64_t now,
+    struct zcode_accepted_work_status *out)
+{
     char task_hex[65], candidate_hex[65], policy_hex[65], proof_hex[65];
     zcl_hex_encode(out->accepted.task_root, 32, task_hex);
     zcl_hex_encode(out->accepted.candidate_root, 32, candidate_hex);
@@ -344,7 +338,6 @@ struct zcl_result zcode_accepted_work_find(
         ndb, task_hex, candidate_hex, policy_hex, actions,
         ACCEPTED_ACTION_MAX + 1);
     if (action_count <= 0 || action_count > ACCEPTED_ACTION_MAX) {
-        vcs_zcode_task_index_free(index);
         return ZCL_ERR(-1, "accepted-work-action-projection-mismatch");
     }
     bool evaluated = false;
@@ -364,8 +357,31 @@ struct zcl_result zcode_accepted_work_find(
         }
     }
     if (!evaluated) {
-        vcs_zcode_task_index_free(index);
         return ZCL_ERR(-1, "accepted-work-proof-set-or-policy-mismatch");
+    }
+    return ZCL_OK;
+}
+
+struct zcl_result zcode_accepted_work_find(
+    struct node_db *ndb, const char *workspace,
+    const char *source_root_sha3, int64_t now,
+    bool rebuild_projection, struct zcode_accepted_work_status *out)
+{
+    uint8_t source_root[32];
+    if (!ndb || !ndb->open || !workspace || !source_root_sha3 ||
+        !zcl_hex_decode_lower(source_root_sha3, source_root, 32) ||
+        now <= 0 || !out)
+        return ZCL_ERR(-1, "accepted-work-input-invalid");
+    memset(out, 0, sizeof(*out));
+    struct vcs_zcode_task_index *index =
+        vcs_zcode_task_index_build(workspace, now);
+    if (!index) return ZCL_ERR(-1, "accepted-work-index-failed");
+    struct zcl_result result = accepted_find_receipt(
+        index, workspace, source_root_sha3, source_root, now, out);
+    if (result.ok) result = accepted_find_action(ndb, workspace, now, out);
+    if (!result.ok) {
+        vcs_zcode_task_index_free(index);
+        return result;
     }
     if (!accepted_signer_current(
             ndb, out->accepted.expected_signer, now, out->worker_id)) {

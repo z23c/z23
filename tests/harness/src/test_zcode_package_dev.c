@@ -3184,6 +3184,22 @@ static bool zpd_future_acceptance(const char *workspace, const char *datadir,
     return true;
 }
 
+static bool zpd_revoked_acceptance_partial(
+    struct node_db *db, const char *workspace, const char *source,
+    int64_t now, const struct zcode_accepted_work_status *expected)
+{
+    struct zcode_accepted_work_status actual;
+    memset(&actual, 0xa5, sizeof actual);
+    struct zcl_result result = zcode_accepted_work_find(
+        db, workspace, source, now, false, &actual);
+    return !result.ok &&
+        strcmp(result.message, "accepted-work-proof-set-or-policy-mismatch") == 0 &&
+        memcmp(actual.accepted.accepted_work_root,
+               expected->accepted.accepted_work_root, 32) == 0 &&
+        actual.action_id[0] == '\0' && actual.worker_id[0] == '\0' &&
+        !actual.projection_rebuilt;
+}
+
 static bool zpd_exact_acceptance_refuses(
     struct node_db *ndb, const char *workspace,
     const struct zcode_accepted_work_status *expected, int tamper, int64_t now)
@@ -5418,10 +5434,9 @@ static __attribute__((unused)) int zpd_test_work_start(void)
                    (int64_t)platform_time_wall_unix()).ok);
         ASSERT(zpd_exact_acceptance_refuses(&acceptance_db, root,
             &exact_accepted, -1, (int64_t)platform_time_wall_unix()));
-        ASSERT(!zcode_accepted_work_find(
+        ASSERT(zpd_revoked_acceptance_partial(
                     &acceptance_db, root, candidate_source_hex,
-                    (int64_t)platform_time_wall_unix(), false,
-                    &accepted_status).ok);
+                    (int64_t)platform_time_wall_unix(), &exact_accepted));
         struct db_build_worker accepted_worker;
         ASSERT(db_build_worker_find(
             &acceptance_db, accepted_worker_id, &accepted_worker));
