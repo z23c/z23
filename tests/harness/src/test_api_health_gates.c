@@ -259,6 +259,22 @@ static bool small_gap_permanent_health(bool ok, uint8_t *resp, size_t cap)
     return ok;
 }
 
+static bool typed_blocker_beats_review(bool ok, uint8_t *resp, size_t cap)
+{
+    agent_security_posture_test_override_review_required(1);
+    size_t n = api_handle_request("GET", "/api/status", NULL, 0, resp, cap);
+    const char *body = api_test_body(resp, n, cap);
+    struct json_value root = {0};
+    ok = ok && body && json_read(&root, body, strlen(body));
+    const char *primary = json_get_str(json_get(&root, "primary_blocker"));
+    const char *next = json_get_str(json_get(&root, "next_endpoint"));
+    ok = ok && primary && strcmp(primary, "chain.test_authority_failure") == 0;
+    ok = ok && next && strcmp(next, "/api/v1/health") == 0;
+    json_free(&root);
+    agent_security_posture_test_override_review_required(0);
+    return ok;
+}
+
 static bool public_status_small_served_gap(uint8_t *resp, size_t cap)
 {
     test_reset_shared_globals();
@@ -328,6 +344,7 @@ static bool public_status_small_served_gap(uint8_t *resp, size_t cap)
         blocker_clear("peer_floor.test_transient");
 
         ok = small_gap_permanent_health(ok, resp, cap);
+        ok = typed_blocker_beats_review(ok, resp, cap);
         blocker_clear("chain.test_authority_failure");
     }
 

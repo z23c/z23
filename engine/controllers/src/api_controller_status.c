@@ -784,6 +784,68 @@ size_t api_serve_unsupported_version(const char *requested_version,
     return n;
 }
 
+struct api_node_summary_reason {
+    enum node_status_reason reason;
+    const char *primary;
+    const char *next_endpoint;
+};
+
+static struct api_node_summary_reason api_node_summary_select_reason(
+    const struct node_health_snapshot *health,
+    const struct agent_security_posture *posture,
+    const struct blocker_snapshot *authority_blocker,
+    bool material_gap, const struct download_stats_snapshot *download)
+{
+    struct api_node_summary_reason selected = {
+        ZCL_STATUS_REASON_NONE, "none", "/api/v1/agent"
+    };
+    if (authority_blocker) {
+        selected.reason = ZCL_STATUS_REASON_TYPED_BLOCKER;
+        selected.primary = authority_blocker->id;
+        selected.next_endpoint = "/api/v1/health";
+    } else if (posture->review_required) {
+        selected.reason = ZCL_STATUS_REASON_POSTURE_REVIEW;
+        selected.primary = posture->status;
+        selected.next_endpoint = "/api/v1/health";
+    } else if (!health->serving) {
+        selected.reason = health->blocking_reason[0] ? ZCL_STATUS_REASON_HEALTH_BLOCKER
+                                                     : ZCL_STATUS_REASON_NOT_SERVING;
+        selected.primary = health->blocking_reason[0] ? health->blocking_reason
+                                                       : "not_serving";
+        selected.next_endpoint = "/api/v1/health";
+    } else if (!health->has_peers) {
+        selected.reason = ZCL_STATUS_REASON_NO_PEERS;
+        selected.primary = "no_peers";
+        selected.next_endpoint = "/api/v1/peers";
+    } else if (material_gap &&
+               (download->in_flight > 0 || download->queued > 0)) {
+        selected.reason = ZCL_STATUS_REASON_CHAIN_GAP_DOWNLOADING;
+        selected.primary = "chain_gap";
+        selected.next_endpoint = "/api/v1/downloadstats";
+    } else if (material_gap) {
+        selected.reason = ZCL_STATUS_REASON_DOWNLOAD_QUEUE_IDLE;
+        selected.primary = "download_queue_idle";
+        selected.next_endpoint = "/api/v1/downloadstats";
+    } else if (!health->healthy) {
+        selected.reason = ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY;
+        selected.primary = "healthcheck_unhealthy";
+        selected.next_endpoint = "/api/v1/health";
+    }
+    return selected;
+}
+
+static void api_node_summary_push_warnings(
+    struct json_value *body, const struct node_health_snapshot *health,
+    const struct blocker_snapshot *warning_blocker)
+{
+    json_push_kv_bool(body, "warning", health->warning || warning_blocker != NULL);
+    json_push_kv_int(body, "warning_count", (int64_t)health->warning_count + (warning_blocker ? 1 : 0));
+    if (health->warning_reasons[0]) json_push_kv_str(body, "warning_reasons", health->warning_reasons);
+    if (warning_blocker) json_push_kv_str(body, "typed_blocker_warning", warning_blocker->id);
+    json_push_kv_bool(body, "operator_latch_recovered",
+                      health->operator_latch_recovered);
+}
+
 /* Route: /api/status and /api/node/summary */
 size_t api_serve_node_summary(uint8_t *response, size_t response_max)
 {
@@ -809,47 +871,15 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
         target = health.peer_best_height;
     int64_t gap = target > height ? target - height : 0;
     int64_t index_gap = indexed_height > height ? indexed_height - height : 0;
-    const char *primary = "none";
-    const char *next_endpoint = "/api/v1/agent";
     bool material_gap = gap > ZCL_NODE_HEALTH_LAG_WARN_BLOCKS;
     /* This chain only picks WHICH reason applies, from what this endpoint's
      * node_health_snapshot can actually observe. status/summary/operator_needed
      * all come back from the one policy table
      * (controllers/operator_needed_policy.def) so this endpoint and the agent
      * summary cannot answer "does an operator need to act" differently. */
-    enum node_status_reason reason = ZCL_STATUS_REASON_NONE;
-    if (authority_blocker) {
-        reason = ZCL_STATUS_REASON_TYPED_BLOCKER;
-        primary = authority_blocker->id;
-        next_endpoint = "/api/v1/health";
-    } else if (posture.review_required) {
-        reason = ZCL_STATUS_REASON_POSTURE_REVIEW;
-        primary = posture.status;
-        next_endpoint = "/api/v1/health";
-    } else if (!health.serving) {
-        reason = health.blocking_reason[0] ? ZCL_STATUS_REASON_HEALTH_BLOCKER
-                                          : ZCL_STATUS_REASON_NOT_SERVING;
-        primary = health.blocking_reason[0] ? health.blocking_reason
-                                            : "not_serving";
-        next_endpoint = "/api/v1/health";
-    } else if (!health.has_peers) {
-        reason = ZCL_STATUS_REASON_NO_PEERS;
-        primary = "no_peers";
-        next_endpoint = "/api/v1/peers";
-    } else if (material_gap &&
-               (dl_snap.in_flight > 0 || dl_snap.queued > 0)) {
-        reason = ZCL_STATUS_REASON_CHAIN_GAP_DOWNLOADING;
-        primary = "chain_gap";
-        next_endpoint = "/api/v1/downloadstats";
-    } else if (material_gap) {
-        reason = ZCL_STATUS_REASON_DOWNLOAD_QUEUE_IDLE;
-        primary = "download_queue_idle";
-        next_endpoint = "/api/v1/downloadstats";
-    } else if (!health.healthy) {
-        reason = ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY;
-        primary = "healthcheck_unhealthy";
-        next_endpoint = "/api/v1/health";
-    }
+    struct api_node_summary_reason selected = api_node_summary_select_reason(
+        &health, &posture, authority_blocker, material_gap, &dl_snap);
+    enum node_status_reason reason = selected.reason;
     const char *status = node_status_reason_status(reason);
     const char *summary = node_status_reason_summary(reason);
     bool operator_needed = node_status_reason_operator_needed(
@@ -865,15 +895,10 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
         agent_security_posture_allows_public_serving(&posture);
     json_push_kv_bool(&body, "healthy", health.healthy && public_serving); json_push_kv_bool(&body, "serving", public_serving);
     json_push_kv_bool(&body, "operator_needed", operator_needed);
-    json_push_kv_bool(&body, "warning", health.warning || warning_blocker != NULL);
-    json_push_kv_int(&body, "warning_count", (int64_t)health.warning_count + (warning_blocker ? 1 : 0));
-    if (health.warning_reasons[0]) json_push_kv_str(&body, "warning_reasons", health.warning_reasons);
-    if (warning_blocker) json_push_kv_str(&body, "typed_blocker_warning", warning_blocker->id);
-    json_push_kv_bool(&body, "operator_latch_recovered",
-                      health.operator_latch_recovered);
+    api_node_summary_push_warnings(&body, &health, warning_blocker);
     json_push_kv_str(&body, "summary", summary);
-    json_push_kv_str(&body, "primary_blocker", primary);
-    json_push_kv_str(&body, "next_endpoint", next_endpoint);
+    json_push_kv_str(&body, "primary_blocker", selected.primary);
+    json_push_kv_str(&body, "next_endpoint", selected.next_endpoint);
     agent_push_operator_lane_fields_json(&body);
     agent_push_operator_lane_json(&body, "operator_lane");
     agent_push_readiness_contract_json(
