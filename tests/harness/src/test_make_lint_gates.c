@@ -94,25 +94,29 @@ bool lint_gates_group_requires_quiet_pool(const char *group_name)
 #include "util/spawn.h"
 #include <fcntl.h>
 
-/* Builder shell identities distinguish background dispatch from the serial
- * parent without a clock or a rendezvous that can deadlock on the mutation. */
+/* Builder identities distinguish independent single-goal dispatches. */
 static const char build_needs_fixture_setup[] =
     "set -eu\n"
     "stage=setup; mode=none\n"
     "trap 'status=$?; if [ \"$status\" != 0 ]; then printf \"build-needs: mode=%s stage=%s exit=%s\\n\" \"$mode\" \"$stage\" \"$status\" >&2; fi' EXIT\n"
     "for tool in make bash flock sed grep sort wc awk; do command -v \"$tool\" >/dev/null; done\n"
     "cd \"$2\"\n"
+    "mkdir -p tools/dev\n"
+    "cp \"$1/tools/dev/test-build-needs.mk\" tools/dev/\n"
     "sed -n '/^ZCL_TEST_BUILD_NEEDS_RUN = /,/^$/p' \"$1/Makefile\" > Makefile\n"
     "grep -q '^ZCL_TEST_BUILD_NEEDS_RUN = ' Makefile\n"
     "cat >> Makefile <<'MAKE'\n"
     "SHELL := bash\n"
-    "MAKE = build_need\n"
+    "MAKE = $(CURDIR)/build_need\n"
     "profile = $(if $(filter fixture-a,$(MAKECMDGOALS)),a,$(if $(filter fixture-b,$(MAKECMDGOALS)),b,none))\n"
     ".PHONY: run fixture-a fixture-b\n"
     "run: shared\n"
-    "\t+@build_need() { printf '%s\\n' \"$$BASHPID\" >> dispatchers || return; printf '%s %s\\n' \"$${!#}\" \"$$BASH_SUBSHELL\" >> phases || return; command make \"$$@\"; }; $(call ZCL_TEST_BUILD_NEEDS_RUN,sh ./runner,--exact=fixture)\n"
+    "\t+@$(call ZCL_TEST_BUILD_NEEDS_RUN,sh ./runner,--exact=fixture)\n"
     "shared:\n\t@echo shared >> count && touch shared\n"
     "fixture-a fixture-b: shared\n"
+    "\t@PROFILE=$(profile) sh ./helper $@\n"
+    ".PHONY: fixture-c fixture-d fixture-e fixture-f\n"
+    "fixture-c fixture-d fixture-e fixture-f: shared\n"
     "\t@PROFILE=$(profile) sh ./helper $@\n"
     "dev-bin dev-package-verifier-ensure: shared\n"
     "\t@PROFILE=$(profile) sh ./helper $@\n"
@@ -123,14 +127,15 @@ static const char build_needs_fixture_setup[] =
     "cat > runner <<'RUNNER'\n"
     "set -eu\n"
     "[ \"$1\" = --list-build-needs ] && [ \"$2\" = --exact=fixture ] || exit 2\n"
-    "case $BUILD_NEEDS_FIXTURE_MODE in empty) exit 0;; selector) exit 2;; covered*) printf 'dev-bin path-node\\ndev-package-verifier-ensure path-verifier\\n'; exit 0;; ensure-only) printf 'dev-package-verifier-ensure path-verifier\\n'; exit 0;; node-*) printf 'z23 path-public\\nzclassic23 path-alias\\nfixture-a path-a\\n'; exit 0;; overlap|failed|absent) ;; *) exit 2;; esac\n"
+    "if [ \"$BUILD_NEEDS_FIXTURE_MODE\" = fanout ]; then for name in a b c d e f; do printf 'fixture-%s path-%s\\n' \"$name\" \"$name\"; done; exit 0; fi\n"
+    "case $BUILD_NEEDS_FIXTURE_MODE in empty) exit 0;; selector) exit 2;; covered*) printf 'dev-bin path-node\\ndev-package-verifier-ensure path-verifier\\n'; exit 0;; ensure-only) printf 'dev-package-verifier-ensure path-verifier\\n'; exit 0;; node-*) printf 'z23 path-public\\nzclassic23 path-alias\\nfixture-a path-a\\n'; exit 0;; overlap|failed|absent|missing-result) ;; *) exit 2;; esac\n"
     "printf 'fixture-a path-a\\nfixture-b path-b\\n'\n"
     "RUNNER\n"
     "cat > helper <<'HELPER'\n"
     "set -eu\n"
     "[ \"${ZCL_CHECKOUT_LOCK_HELD:-}\" = 1 ]\n"
-    "case $MAKEFLAGS in *jobserver*) ;; *) echo missing-jobserver >&2; exit 3;; esac\n"
-    "case $1:$PROFILE in fixture-a:a) path=path-a;; fixture-b:b) path=path-b;; dev-bin:none) path=path-node;; dev-package-verifier-ensure:none) path=path-verifier;; z23:none) path=path-public;; *) echo wrong-profile >&2; exit 3;; esac\n"
+    "case ${BUILD_NEEDS_EXPECT_JOBS:-}:$MAKEFLAGS in 1:*|*jobserver*) ;; *) echo missing-jobserver >&2; exit 3;; esac\n"
+    "case $1:$PROFILE in fixture-a:a) path=path-a;; fixture-b:b) path=path-b;; fixture-[cdef]:none) path=path-${1#fixture-};; dev-bin:none) path=path-node;; dev-package-verifier-ensure:none) path=path-verifier;; z23:none) path=path-public;; *) echo wrong-profile >&2; exit 3;; esac\n"
     "echo \"$1\" >> count; touch \"$1\"\n"
     "if [ \"$1\" = z23 ]; then\n"
     "  exec 8>node-lock; flock -n 8 || { echo overlapping-node-producer >&2; exit 9; }\n"
@@ -141,11 +146,31 @@ static const char build_needs_fixture_setup[] =
     "case $BUILD_NEEDS_FIXTURE_MODE:$1 in covered-dev-fail:dev-bin) exit 5;; covered-fail:dev-package-verifier-ensure) exit 5;; covered-absent:dev-package-verifier-ensure) exit 0;; esac\n"
     "case $1 in dev-bin) touch producer-done;; dev-package-verifier-ensure) case $BUILD_NEEDS_FIXTURE_MODE in covered*) [ -e producer-done ];; esac;; esac\n"
     "case $BUILD_NEEDS_FIXTURE_MODE:$1 in failed:fixture-a) exit 5;; absent:fixture-a) exit 0;; esac\n"
+    "if [ \"$BUILD_NEEDS_FIXTURE_MODE:$1\" = missing-result:fixture-a ]; then for record in \"$ZCL_TEST_NEED_DIR\"/*.target; do if [ \"$(cat \"$record\")\" = fixture-a ]; then mkdir \"${record%.target}.rc\"; fi; done; fi\n"
     "touch \"$path\"\n"
     "HELPER\n";
 
+/* Measure the number of recursive builds admitted before their Makefiles are
+ * parsed. A short fixture delay makes the unbounded parent fanout observable;
+ * correctness requires the maximum not exceed the requested job count. */
+static const char build_needs_fixture_wrapper[] =
+    "cat > build_need <<'WRAPPER'\n"
+    "#!/bin/sh\n"
+    "set -eu\n"
+    "for target do :; done\n"
+    "if [ \"$target\" = all ]; then exec make \"$@\"; fi\n"
+    "printf '%s\\n' \"$$\" >> dispatchers; printf '%s\\n' \"$target\" >> phases\n"
+    "if [ \"$BUILD_NEEDS_FIXTURE_MODE\" != fanout ]; then exec make \"$@\"; fi\n"
+    "{ flock 9; active=$(cat parse-active); active=$((active + 1)); printf '%s\\n' \"$active\" > parse-active; maximum=$(cat parse-max); if [ \"$active\" -gt \"$maximum\" ]; then printf '%s\\n' \"$active\" > parse-max; fi; } 9>parse-lock\n"
+    "sleep 0.1\n"
+    "rc=0; make \"$@\" || rc=$?\n"
+    "{ flock 9; active=$(cat parse-active); printf '%s\\n' \"$((active - 1))\" > parse-active; } 9>parse-lock\n"
+    "exit \"$rc\"\n"
+    "WRAPPER\n"
+    "chmod +x build_need\n";
+
 static const char build_needs_fixture_cases[] =
-    "for mode in overlap failed absent empty selector covered covered-fail covered-absent covered-dev-fail ensure-only node-aliases node-producer-fail node-public-absent node-alias-absent; do\n"
+    "for mode in overlap failed absent empty selector covered covered-fail covered-absent covered-dev-fail ensure-only node-aliases node-producer-fail node-public-absent node-alias-absent missing-result; do\n"
     "  stage=reset\n"
     "  rm -f count shared fixture-a fixture-b path-a path-b dispatchers phases dev-bin dev-package-verifier-ensure path-node path-verifier producer-done z23 path-public path-alias node-producers node-lock\n"
     "  case $mode in node-producer-fail) touch path-public path-alias;; esac\n"
@@ -156,6 +181,7 @@ static const char build_needs_fixture_cases[] =
     "  case $mode in\n"
     "    overlap) [ \"$rc\" = 0 ]; [ -e path-a ] && [ -e path-b ];;\n"
     "    failed|absent) [ \"$rc\" != 0 ]; grep -q 'FAIL test_need_unbuildable_fixture-a' log; [ -e path-b ];;\n"
+    "    missing-result) [ \"$rc\" != 0 ]; grep -q 'FAIL test_need_unbuildable_fixture-a: build result missing' log; [ -e path-a ] && [ -e path-b ];;\n"
     "    empty) [ \"$rc\" = 0 ]; [ ! -e fixture-a ] && [ ! -e fixture-b ] && [ ! -e dispatchers ];;\n"
     "    selector) [ \"$rc\" != 0 ]; [ ! -e fixture-a ] && [ ! -e fixture-b ] && [ ! -e dispatchers ];;\n"
     "    covered) [ \"$rc\" = 0 ]; [ -e path-node ] && [ -e path-verifier ];;\n"
@@ -171,7 +197,7 @@ static const char build_needs_fixture_cases[] =
     "    stage=single-node-producer; [ \"$(wc -l < node-producers)\" -eq 1 ]\n"
     "    [ -e path-a ]; [ \"$(wc -l < dispatchers)\" -eq 2 ]\n"
     "    [ \"$(sort -u dispatchers | wc -l)\" -eq 2 ]\n"
-    "    grep -q '^z23 2$' phases; grep -q '^fixture-a 2$' phases;;\n"
+    "    grep -qx z23 phases; grep -qx fixture-a phases;;\n"
     "  esac\n"
     "  stage=shared-once\n"
     "  [ \"$(grep -c '^shared$' count)\" = 1 ]\n"
@@ -181,15 +207,33 @@ static const char build_needs_fixture_cases[] =
     "    stage=independent-dispatch; [ \"$(sort -u dispatchers | wc -l)\" -eq 2 ];;\n"
     "  esac\n"
     "  case $mode in covered|covered-fail|covered-absent)\n"
-    "    stage=deferred-verifier; grep -qx 'dev-package-verifier-ensure 1' phases;;\n"
+    "    stage=deferred-verifier; grep -qx dev-package-verifier-ensure phases; [ -e producer-done ];;\n"
     "  esac\n"
     "  stage=jobserver\n"
     "  if grep -E 'jobserver unavailable|forced in submake' log; then exit 1; fi\n"
     "  printf 'build-needs: %s OK\\n' \"$mode\"\n"
     "done\n";
 
+static const char build_needs_fixture_parallel[] =
+    "for jobs in 1 2 4; do\n"
+    "  stage=parallel-reset; mode=fanout\n"
+    "  rm -f path-a path-b path-c path-d path-e path-f dispatchers phases\n"
+    "  printf '0\\n' > parse-active; printf '0\\n' > parse-max\n"
+    "  stage=parallel-dispatch\n"
+    "  BUILD_NEEDS_FIXTURE_MODE=fanout BUILD_NEEDS_EXPECT_JOBS=\"$jobs\" bash \"$1/tools/dev/checkout-lock.sh\" foreground \"$2/lock\" -- make -j\"$jobs\" --no-print-directory run > log 2>&1\n"
+    "  cat log\n"
+    "  maximum=$(cat parse-max); active=$(cat parse-active)\n"
+    "  printf 'build-needs: jobs=%s max-dispatch=%s active-after=%s\\n' \"$jobs\" \"$maximum\" \"$active\"\n"
+    "  stage=parallel-bound; [ \"$maximum\" -le \"$jobs\" ]; [ \"$maximum\" -ge 1 ]; [ \"$active\" = 0 ]\n"
+    "  [ \"$(wc -l < dispatchers)\" -eq 6 ]\n"
+    "  for name in a b c d e f; do [ -e \"path-$name\" ]; done\n"
+    "  if grep -E 'jobserver unavailable|forced in submake' log; then exit 1; fi\n"
+    "done\n";
+
 static_assert(sizeof(build_needs_fixture_setup) <= 4096);
 static_assert(sizeof(build_needs_fixture_cases) <= 4096);
+static_assert(sizeof(build_needs_fixture_wrapper) <= 4096);
+static_assert(sizeof(build_needs_fixture_parallel) <= 4096);
 
 static int build_needs_fixture_result(bool ran,
     const struct zcl_devloop_process_result *run, int restored)
@@ -230,10 +274,16 @@ static int build_needs_fixture_run(const char *root, const char *fixture,
 static int t_build_needs_overlap(void)
 {
     char script[sizeof(build_needs_fixture_setup) +
-                sizeof(build_needs_fixture_cases) - 1];
+                sizeof(build_needs_fixture_wrapper) +
+                sizeof(build_needs_fixture_cases) +
+                sizeof(build_needs_fixture_parallel) - 3];
     memcpy(script, build_needs_fixture_setup, sizeof(build_needs_fixture_setup) - 1);
     memcpy(script + sizeof(build_needs_fixture_setup) - 1,
-           build_needs_fixture_cases, sizeof(build_needs_fixture_cases));
+           build_needs_fixture_wrapper, sizeof(build_needs_fixture_wrapper) - 1);
+    memcpy(script + sizeof(build_needs_fixture_setup) + sizeof(build_needs_fixture_wrapper) - 2,
+           build_needs_fixture_cases, sizeof(build_needs_fixture_cases) - 1);
+    memcpy(script + sizeof(build_needs_fixture_setup) + sizeof(build_needs_fixture_wrapper) + sizeof(build_needs_fixture_cases) - 3,
+           build_needs_fixture_parallel, sizeof(build_needs_fixture_parallel));
     char fixture[PATH_MAX] = {0};
     struct stat st;
     test_make_tmpdir(fixture, sizeof(fixture), "build_needs", "overlap");

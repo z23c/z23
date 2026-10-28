@@ -4293,7 +4293,9 @@ $(TEST_TSAN_LINK_RSP): $(TEST_TSAN_OBJS)
 # runner exec. Each target is its own single-goal make, so it resolves its own
 # epoch profile the way a standalone `make <target>` does, and runs inside the
 # checkout lock this recipe already holds (checkout-lock.sh is re-entrant).
-# Independent targets overlap; join every child before returning any failure.
+# A small dispatcher graph admits each recursive make through the jobserver
+# before it parses this Makefile. Independent targets overlap within the
+# caller's job limit; join every child before returning any failure.
 # A target that fails, or leaves its path absent, fails the run by the same
 # name a landing proof uses. The runner never builds; a proof execs it too.
 # The call lines are `+` so the per-target makes share the jobserver; under
@@ -4308,30 +4310,44 @@ ZCL_TEST_BUILD_NEEDS = $(if $(ZCL_MAKE_NO_EXEC),: test build needs not listed in
 ZCL_TEST_BUILD_NEEDS_RUN = needs="$$($(1) --list-build-needs $(2))" || exit 2; \
 	dev_selected="$$(printf '%s\n' "$$needs" | awk '$$1 == "dev-bin" { print 1 }')" || exit 2; \
 	node_needs="$$(printf '%s\n' "$$needs" | awk '$$1 == "z23" || $$1 == "zclassic23"')" || exit 2; \
-	printf '%s\n' "$$needs" | { pids=; deferred_path=; node_started=; \
+	[ -n "$$needs" ] || exit 0; \
+	printf '%s\n' "$$needs" | { ids=; count=0; deferred_path=; node_started=; \
+	mkdir -p build/scratch || exit 2; \
+	work="$$(mktemp -d "$(CURDIR)/build/scratch/test-needs.XXXXXX")" || exit 2; \
+	trap 'status=$$?; rm -rf "$$work"; exit "$$status"' 0; \
+	trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; \
 	build_target() { \
 	  $(MAKE) --no-print-directory "$$1" </dev/null && [ -e "$$2" ] || { \
 	    echo "FAIL test_need_unbuildable_$$1: make $$1 did not produce $$2" >&2; \
 	    return 1; }; \
-	}; build_node_aliases() { \
-	  node_failed=0; $(MAKE) --no-print-directory z23 </dev/null || node_failed=1; \
-	  printf '%s\n' "$$node_needs" | { failed="$$node_failed"; \
-	    while read -r alias alias_path; do \
-	      if [ "$$node_failed" != 0 ] || [ ! -e "$$alias_path" ]; then \
-	        echo "FAIL test_need_unbuildable_$$alias: make z23 did not produce $$alias_path" >&2; failed=1; \
-	      fi; \
-	    done; exit "$$failed"; }; \
 	}; while read -r target path; do \
 	  [ -n "$$target" ] || continue; \
-	  case "$$target" in z23|zclassic23) \
-	    if [ -z "$$node_started" ]; then \
-	      build_node_aliases & pids="$$pids $$!"; node_started=1; \
-	    fi; continue;; esac; \
 	  if [ "$$target" = dev-package-verifier-ensure ] && [ -n "$$dev_selected" ]; then \
 	    deferred_path="$$path"; continue; \
 	  fi; \
-	  build_target "$$target" "$$path" & pids="$$pids $$!"; \
-	done; failed=0; for pid in $$pids; do wait "$$pid" || failed=1; done; \
+	  case "$$target" in z23|zclassic23) \
+	    [ -z "$$node_started" ] || continue; node_started=1; target=z23; outputs="$$node_needs";; \
+	    *) outputs="$$target $$path";; esac; \
+	  id="need_$$count"; count=$$((count + 1)); ids="$$ids $$id"; \
+	  printf '%s\n' "$$target" > "$$work/$$id.target" && \
+	  printf '%s\n' "$$outputs" > "$$work/$$id.outputs" || exit 2; \
+	done; failed=0; \
+	if [ -n "$$ids" ]; then \
+	  ZCL_TEST_NEED_DIR="$$work" ZCL_TEST_NEED_IDS="$$ids" \
+	  ZCL_TEST_NEED_MAKEFILE="$(CURDIR)/Makefile" \
+	    $(MAKE) --no-print-directory -f "$(CURDIR)/tools/dev/test-build-needs.mk" MAKE="$(MAKE)" all || failed=1; \
+	  for id in $$ids; do \
+	    result="$$(cat "$$work/$$id.rc" 2>/dev/null)" || result=missing; \
+	    if [ "$$result" != 0 ]; then \
+	      failed=1; \
+	      if [ "$$result" = missing ]; then \
+	        while read -r target path; do \
+	          echo "FAIL test_need_unbuildable_$$target: build result missing for $$path" >&2; \
+	        done < "$$work/$$id.outputs"; \
+	      fi; \
+	    fi; \
+	  done; \
+	fi; \
 	if [ "$$failed" = 0 ] && [ -n "$$deferred_path" ]; then \
 	  build_target dev-package-verifier-ensure "$$deferred_path" || failed=1; \
 	fi; \
