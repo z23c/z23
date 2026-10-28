@@ -141,10 +141,50 @@ static bool package_manifest_totals(const struct vcs_package_manifest *manifest,
     return true;
 }
 
-bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
-                              const char *path, uint32_t mode, uint64_t size,
-                              const uint8_t *chunk_hashes,
-                              uint32_t chunk_count)
+static bool package_manifest_reserve(struct vcs_package_manifest *manifest)
+{
+    if (manifest->count == manifest->cap) {
+        size_t new_cap = manifest->cap ? manifest->cap * 2 : 16;
+        if (new_cap > VCS_PACKAGE_MAX_FILES)
+            new_cap = VCS_PACKAGE_MAX_FILES;
+        if (new_cap < manifest->count ||
+            new_cap > SIZE_MAX / sizeof(*manifest->files))
+            LOG_FAIL("vcs.package", "package file capacity overflow");
+        struct vcs_package_file *files = zcl_realloc(
+            manifest->files, new_cap * sizeof(*files), "vcs_package_files");
+        if (!files)
+            LOG_FAIL("vcs.package", "alloc package files");
+        manifest->files = files;
+        manifest->cap = new_cap;
+    }
+    return true;
+}
+
+static bool package_manifest_copy(const char *path, const uint8_t *chunk_hashes,
+                                  uint32_t chunk_count, char **path_out,
+                                  uint8_t **hash_out)
+{
+    char *path_copy = zcl_strdup(path, "vcs_package_path");
+    if (!path_copy)
+        LOG_FAIL("vcs.package", "copy package path");
+    uint8_t *hash_copy = NULL;
+    if (chunk_count > 0) {
+        size_t hash_bytes = (size_t)chunk_count * 32u;
+        hash_copy = zcl_malloc(hash_bytes, "vcs_package_chunk_hashes");
+        if (!hash_copy) {
+            free(path_copy);
+            LOG_FAIL("vcs.package", "copy package chunk hashes");
+        }
+        memcpy(hash_copy, chunk_hashes, hash_bytes);
+    }
+    *path_out = path_copy;
+    *hash_out = hash_copy;
+    return true;
+}
+
+static bool package_manifest_validate_add(const struct vcs_package_manifest *manifest,
+                                          const char *path, uint32_t mode, uint64_t size,
+                                          const uint8_t *chunk_hashes, uint32_t chunk_count)
 {
     uint32_t expected = 0;
     if (!manifest || !path)
@@ -166,6 +206,17 @@ bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
         size > VCS_PACKAGE_MAX_TOTAL_BYTES - total_bytes ||
         chunk_count > VCS_PACKAGE_MAX_TOTAL_CHUNKS - total_chunks)
         LOG_FAIL("vcs.package", "package aggregate limit exceeded");
+    return true;
+}
+
+bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
+                              const char *path, uint32_t mode, uint64_t size,
+                              const uint8_t *chunk_hashes,
+                              uint32_t chunk_count)
+{
+    if (!package_manifest_validate_add(manifest, path, mode, size,
+                                       chunk_hashes, chunk_count))
+        return false;
 
     size_t insert_at = 0;
     while (insert_at < manifest->count &&
@@ -175,34 +226,14 @@ bool vcs_package_manifest_add(struct vcs_package_manifest *manifest,
         strcmp(manifest->files[insert_at].path, path) == 0)
         LOG_FAIL("vcs.package", "duplicate package path %s", path);
 
-    if (manifest->count == manifest->cap) {
-        size_t new_cap = manifest->cap ? manifest->cap * 2 : 16;
-        if (new_cap > VCS_PACKAGE_MAX_FILES)
-            new_cap = VCS_PACKAGE_MAX_FILES;
-        if (new_cap < manifest->count ||
-            new_cap > SIZE_MAX / sizeof(*manifest->files))
-            LOG_FAIL("vcs.package", "package file capacity overflow");
-        struct vcs_package_file *files = zcl_realloc(
-            manifest->files, new_cap * sizeof(*files), "vcs_package_files");
-        if (!files)
-            LOG_FAIL("vcs.package", "alloc package files");
-        manifest->files = files;
-        manifest->cap = new_cap;
-    }
+    if (!package_manifest_reserve(manifest))
+        return false;
 
-    char *path_copy = zcl_strdup(path, "vcs_package_path");
-    if (!path_copy)
-        LOG_FAIL("vcs.package", "copy package path");
+    char *path_copy = NULL;
     uint8_t *hash_copy = NULL;
-    if (chunk_count > 0) {
-        size_t hash_bytes = (size_t)chunk_count * 32u;
-        hash_copy = zcl_malloc(hash_bytes, "vcs_package_chunk_hashes");
-        if (!hash_copy) {
-            free(path_copy);
-            LOG_FAIL("vcs.package", "copy package chunk hashes");
-        }
-        memcpy(hash_copy, chunk_hashes, hash_bytes);
-    }
+    if (!package_manifest_copy(path, chunk_hashes, chunk_count,
+                               &path_copy, &hash_copy))
+        return false;
 
     if (insert_at < manifest->count) {
         memmove(&manifest->files[insert_at + 1],
@@ -332,6 +363,62 @@ static bool package_wire_has(size_t wire_len, size_t off, size_t need)
     return off <= wire_len && need <= wire_len - off;
 }
 
+static bool package_parse_record(const uint8_t *wire, size_t wire_len,
+                                 size_t *off, uint32_t i,
+                                 struct vcs_package_manifest *out,
+                                 const char **reject)
+{
+    if (!package_wire_has(wire_len, (*off), 2)) {
+        *reject = "path-length-truncated";
+        return false;
+    }
+    uint16_t path_len = vcs_rd_u16le(wire + (*off));
+    (*off) += 2;
+    if (!package_wire_has(wire_len, (*off), path_len) ||
+        !package_path_valid_n(wire + (*off), path_len)) {
+        *reject = "path";
+        return false;
+    }
+    char path[VCS_PACKAGE_PATH_MAX + 1];
+    memcpy(path, wire + (*off), path_len);
+    path[path_len] = '\0';
+    (*off) += path_len;
+    if (i > 0 && strcmp(out->files[i - 1].path, path) >= 0) {
+        *reject = "path-order-or-duplicate";
+        return false;
+    }
+    if (!package_wire_has(wire_len, (*off), 4u + 8u + 4u)) {
+        *reject = "file-metadata-truncated";
+        return false;
+    }
+    uint32_t mode = vcs_rd_u32le(wire + (*off));
+    (*off) += 4;
+    uint64_t size = vcs_rd_u64le(wire + (*off));
+    (*off) += 8;
+    uint32_t chunk_count = vcs_rd_u32le(wire + (*off));
+    (*off) += 4;
+
+    uint32_t expected = 0;
+    if (!package_mode_valid(mode) ||
+        !package_expected_chunks(size, &expected) ||
+        expected != chunk_count) {
+        *reject = "file-metadata";
+        return false;
+    }
+    size_t hash_bytes = (size_t)chunk_count * 32u;
+    if (!package_wire_has(wire_len, (*off), hash_bytes)) {
+        *reject = "chunk-hashes-truncated";
+        return false;
+    }
+    if (!vcs_package_manifest_add(out, path, mode, size, wire + (*off),
+                                  chunk_count)) {
+        *reject = "manifest-limits";
+        return false;
+    }
+    (*off) += hash_bytes;
+    return true;
+}
+
 bool vcs_package_manifest_parse(const uint8_t *wire, size_t wire_len,
                                 struct vcs_package_manifest *out)
 {
@@ -367,54 +454,8 @@ bool vcs_package_manifest_parse(const uint8_t *wire, size_t wire_len,
     }
 
     for (uint32_t i = 0; i < file_count; i++) {
-        if (!package_wire_has(wire_len, off, 2)) {
-            reject = "path-length-truncated";
+        if (!package_parse_record(wire, wire_len, &off, i, out, &reject))
             goto rejected;
-        }
-        uint16_t path_len = vcs_rd_u16le(wire + off);
-        off += 2;
-        if (!package_wire_has(wire_len, off, path_len) ||
-            !package_path_valid_n(wire + off, path_len)) {
-            reject = "path";
-            goto rejected;
-        }
-        char path[VCS_PACKAGE_PATH_MAX + 1];
-        memcpy(path, wire + off, path_len);
-        path[path_len] = '\0';
-        off += path_len;
-        if (i > 0 && strcmp(out->files[i - 1].path, path) >= 0) {
-            reject = "path-order-or-duplicate";
-            goto rejected;
-        }
-        if (!package_wire_has(wire_len, off, 4u + 8u + 4u)) {
-            reject = "file-metadata-truncated";
-            goto rejected;
-        }
-        uint32_t mode = vcs_rd_u32le(wire + off);
-        off += 4;
-        uint64_t size = vcs_rd_u64le(wire + off);
-        off += 8;
-        uint32_t chunk_count = vcs_rd_u32le(wire + off);
-        off += 4;
-
-        uint32_t expected = 0;
-        if (!package_mode_valid(mode) ||
-            !package_expected_chunks(size, &expected) ||
-            expected != chunk_count) {
-            reject = "file-metadata";
-            goto rejected;
-        }
-        size_t hash_bytes = (size_t)chunk_count * 32u;
-        if (!package_wire_has(wire_len, off, hash_bytes)) {
-            reject = "chunk-hashes-truncated";
-            goto rejected;
-        }
-        if (!vcs_package_manifest_add(out, path, mode, size, wire + off,
-                                      chunk_count)) {
-            reject = "manifest-limits";
-            goto rejected;
-        }
-        off += hash_bytes;
     }
     if (off != wire_len) {
         reject = "trailing-data";

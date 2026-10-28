@@ -1444,6 +1444,20 @@ static int t_package_manifest_source_scale(void)
 }
 
 /* ── test 1b: content.v2 package manifest + chunk verification ─── */
+/* Every strict prefix must refuse without leaving a partial manifest. */
+static bool package_prefixes_rejected(const uint8_t *wire, size_t wire_len)
+{
+    bool all_clean = true;
+    for (size_t cut = 0; cut < wire_len; cut++) {
+        struct vcs_package_manifest truncated;
+        bool accepted = vcs_package_manifest_parse(wire, cut, &truncated);
+        if (accepted || truncated.files || truncated.count || truncated.cap)
+            all_clean = false;
+        vcs_package_manifest_free(&truncated);
+    }
+    return all_clean;
+}
+
 static int t_package_manifest(void)
 {
     int failures = 0;
@@ -1699,6 +1713,8 @@ static int t_package_manifest(void)
                                             &duplicate_wire,
                                             &duplicate_wire_len));
     if (duplicate_wire) {
+        VC_CHECK("package: every two-file truncation refuses and clears output",
+                 package_prefixes_rejected(duplicate_wire, duplicate_wire_len));
         const size_t first_entry_bytes = 2u + 3u + 4u + 8u + 4u;
         const size_t second_path = VCS_PACKAGE_MANIFEST_WIRE_HEADER_BYTES +
             first_entry_bytes + 2u;
