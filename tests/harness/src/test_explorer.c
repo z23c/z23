@@ -262,10 +262,82 @@ static int ex_shielded_sign_witness(void)
     return failures;
 }
 
+static const char ex_favicon_header[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: image/png\r\n"
+    "Cache-Control: public, max-age=86400\r\n"
+    "Connection: close\r\n\r\n";
+static const uint8_t ex_favicon_payload[] = {0x89,0x50,0x4e,0x47};
+static bool ex_favicon_boundary_case(const char *path,size_t cap)
+{
+    uint8_t out[512];
+    memset(out,0xa5,sizeof(out));
+    size_t n=explorer_handle_request("GET",path,NULL,0,out,cap);
+    bool guard_changed=false;
+    for(size_t i=cap;i<sizeof(out);i++)
+        if(out[i]!=0xa5) guard_changed=true;
+    size_t header=sizeof(ex_favicon_header)-1;
+    bool ok=n<=cap && !guard_changed;
+    if(cap>=header+sizeof(ex_favicon_payload))
+        ok=ok && n==header+sizeof(ex_favicon_payload) &&
+            !memcmp(out,ex_favicon_header,header) &&
+            !memcmp(out+header,ex_favicon_payload,sizeof(ex_favicon_payload));
+    if(!ok)
+        printf("favicon boundary path=%s cap=%zu returned=%zu guard_changed=%d\n",
+               path,cap,n,guard_changed?1:0);
+    return ok;
+}
+static bool ex_favicon_setup(const char *dir,char *path,size_t pathcap)
+{
+    char subdir[320];
+    int n=snprintf(subdir,sizeof(subdir),"%s/explorer",dir);
+    if(n<0 || (size_t)n>=sizeof(subdir) || platform_directory_create(subdir,0700)!=0)
+        return false;
+    n=snprintf(path,pathcap,"%s/favicon.png",subdir);
+    if(n<0 || (size_t)n>=pathcap) return false;
+    FILE *f=fopen(path,"wb");
+    if(!f) return false;
+    bool ok=fwrite(ex_favicon_payload,1,sizeof(ex_favicon_payload),f)==sizeof(ex_favicon_payload);
+    if(fclose(f)!=0) ok=false;
+    return ok;
+}
+static bool ex_favicon_cases(void)
+{
+    size_t h=sizeof(ex_favicon_header)-1;
+    const size_t caps[]={0,1,h-1,h,h+sizeof(ex_favicon_payload),h+sizeof(ex_favicon_payload)+1};
+    const char *aliases[]={"/explorer/favicon.png","/favicon.ico"};
+    bool ok=true;
+    for(size_t a=0;a<sizeof(aliases)/sizeof(aliases[0]);a++)
+        for(size_t i=0;i<sizeof(caps)/sizeof(caps[0]);i++)
+            if(!ex_favicon_boundary_case(aliases[a],caps[i])) ok=false;
+    return ok;
+}
+static int ex_favicon_boundaries(void)
+{
+    char dir[256],path[384]={0};
+    test_make_tmpdir(dir,sizeof(dir),"explorer","favicon_boundaries");
+    bool setup=ex_favicon_setup(dir,path,sizeof(path));
+    printf("explorer: favicon fixture setup... %s\n",setup?"OK":"FAIL");
+    bool ok=setup;
+    if(setup) {
+        explorer_test_set_datadir(dir);
+        ok=ex_favicon_cases();
+        if(unlink(path)!=0) ok=false;
+        uint8_t out[8];
+        if(explorer_handle_request("GET","/explorer/favicon.png",NULL,0,out,sizeof(out))!=0 ||
+           explorer_handle_request("GET","/favicon.ico",NULL,0,out,sizeof(out))!=0) ok=false;
+        explorer_test_set_datadir(NULL);
+    }
+    if(!fixture_rm_ok(dir)) ok=false;
+    printf("explorer: favicon response boundaries... %s\n",ok?"OK":"FAIL");
+    return ok?0:1;
+}
+
 int test_explorer(void)
 {
     int failures = 0;
     failures += ex_shielded_sign_witness();
+    failures += ex_favicon_boundaries();
     uint8_t resp[8192];
     failures += ex_rpc_tx_rows();
 

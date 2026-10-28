@@ -535,6 +535,27 @@ static size_t explorer_redirect(uint8_t *response, size_t response_max,
     return (size_t)n < response_max ? (size_t)n : response_max;
 }
 
+static size_t serve_favicon(uint8_t *response, size_t response_max)
+{
+    struct explorer_context *ctx = explorer_ctx();
+    if (!ctx->datadir) return 0;
+    char fpath[1200];
+    snprintf(fpath, sizeof(fpath), "%s/explorer/favicon.png", ctx->datadir);
+    FILE *f = fopen(fpath, "rb");
+    if (!f) return 0;
+    int n = snprintf((char *)response, response_max,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: image/png\r\n"
+        "Cache-Control: public, max-age=86400\r\n"
+        "Connection: close\r\n\r\n");
+    if (n < 0) { fclose(f); return 0; }
+    if ((size_t)n >= response_max) { fclose(f); return response_max; }
+    size_t off = (size_t)n;
+    off += fread(response + off, 1, response_max - off, f);
+    fclose(f);
+    return off;
+}
+
 size_t explorer_handle_request(const char *method, const char *path,
                                 const uint8_t *body, size_t body_len,
                                 uint8_t *response, size_t response_max)
@@ -558,27 +579,8 @@ size_t explorer_handle_request(const char *method, const char *path,
         return serve_css(response, response_max);
 
     if (strcmp(path, "/explorer/favicon.png") == 0 ||
-        strcmp(path, "/favicon.ico") == 0) {
-        struct explorer_context *ctx = explorer_ctx();
-        if (!ctx->datadir) return 0; /* no datadir → no favicon to serve */
-        char fpath[1200];
-        snprintf(fpath, sizeof(fpath), "%s/explorer/favicon.png", ctx->datadir);
-        FILE *f = fopen(fpath, "rb");
-        if (f) {
-            size_t off = 0;
-            int n = snprintf((char *)response, response_max,
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: image/png\r\n"
-                "Cache-Control: public, max-age=86400\r\n"
-                "Connection: close\r\n\r\n");
-            if (n > 0) off = (size_t)n;
-            off += fread(response + off, 1, response_max - off, f);
-            fclose(f);
-            return off;
-        }
-        return 0;
-    }
-
+        strcmp(path, "/favicon.ico") == 0)
+        return serve_favicon(response, response_max);
     if (strcmp(path, "/explorer") == 0 || strcmp(path, "/explorer/") == 0 ||
         strncmp(path, "/explorer?", 10) == 0 || strncmp(path, "/explorer/?", 11) == 0) {
         int page = 0;
