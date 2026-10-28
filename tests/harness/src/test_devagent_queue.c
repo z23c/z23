@@ -1741,7 +1741,7 @@ static bool dvx_path_post_case(const char *path, const char *name,
     dvx_post(&c, "doc", name, NULL, path, brief, NULL, -1);
     bool ran = dvx_run(&c);
     bool result = accepted ? dvx_ok(&c) :
-        (!dvx_ok(&c) && c.reply.error.code &&
+        (!dvx_ok(&c) &&
          strcmp(c.reply.error.code, "BAD_INPUT") == 0);
     dvx_end(&c);
     if (!ran || !result)
