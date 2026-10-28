@@ -1745,6 +1745,14 @@ int test_ontology(void)
         ASSERT(strcmp(hex, "5ac273a11dd688e410cdd8a75f731c4fd55452902903bb8e6db77a9b8e4579b0") == 0);
         zcl_hex_encode(pr, 32, hex);
         ASSERT(strcmp(hex, "074718a2890f5c95cba70f02ced4ff98c8bba41257b047336f2ab8169c1f4242") == 0);
+        uint8_t predicate_again[32], zero_root[32] = {0};
+        ASSERT(zcl_ontology_predicate_v1_root(&p, predicate_again));
+        ASSERT(memcmp(predicate_again, pr, 32) == 0);
+        struct zcl_ontology_predicate_v1 invalid_p = p;
+        invalid_p.reserved = 1;
+        memset(predicate_again, 0xff, sizeof(predicate_again));
+        ASSERT(!zcl_ontology_predicate_v1_root(&invalid_p, predicate_again));
+        ASSERT(memcmp(predicate_again, zero_root, 32) == 0);
         zcl_hex_encode(here, 32, hex);
         ASSERT(strcmp(hex, "db1f284062b7f1aae9e8eeb495ce789cb94e18c169223a3eafbd210a036f324e") == 0);
         uint8_t changed[32];
@@ -1803,6 +1811,12 @@ int test_ontology(void)
         q.import_context_roots = (const uint8_t (*)[32])&foreign;
         q.import_count = 1;
         memcpy(q.context_root, importing, 32);
+        q.contexts = &contexts[2]; q.context_count = 1;
+        memset(&result, 0xff, sizeof(result));
+        ASSERT(!zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
+        uint8_t zero_result[sizeof(result)] = {0};
+        ASSERT(memcmp(&result, zero_result, sizeof(result)) == 0);
+        q.contexts = contexts; q.context_count = 3;
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
         ASSERT(result.observed_positive && !result.observed_negative);

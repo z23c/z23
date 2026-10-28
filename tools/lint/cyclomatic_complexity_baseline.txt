@@ -8,8 +8,6 @@
 apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
-cognition/modules/ontology/src/ontology.c:contexts_bound:17
-cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_string:16
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18

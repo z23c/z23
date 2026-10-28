@@ -64,11 +64,10 @@ bool zcl_source_universe_v1_root(
     return true;
 }
 
-bool zcl_ontology_predicate_v1_root(
-    const struct zcl_ontology_predicate_v1 *p, uint8_t out[32])
+static bool ontology_predicate_fields_valid(
+    const struct zcl_ontology_predicate_v1 *p)
 {
-    if (out) memset(out, 0, 32);
-    if (!p || !out || p->schema_version != ZCL_ONTOLOGY_OBJECT_VERSION ||
+    if (p->schema_version != ZCL_ONTOLOGY_OBJECT_VERSION ||
         p->arity > ZCL_ONTOLOGY_MAX_ARITY ||
         (p->world != ZCL_ONTOLOGY_OPEN_WORLD &&
          p->world != ZCL_ONTOLOGY_CLOSED_WORLD) ||
@@ -79,6 +78,14 @@ bool zcl_ontology_predicate_v1_root(
         (p->world == ZCL_ONTOLOGY_CLOSED_WORLD &&
          p->coverage_required == 0) ||
         !nonzero(p->term_root)) return false;
+    return true;
+}
+
+bool zcl_ontology_predicate_v1_root(
+    const struct zcl_ontology_predicate_v1 *p, uint8_t out[32])
+{
+    if (out) memset(out, 0, 32);
+    if (!p || !out || !ontology_predicate_fields_valid(p)) return false;
     for (size_t i = 0; i < ZCL_ONTOLOGY_MAX_ARITY; i++)
         if ((i < p->arity) != nonzero(p->argument_type_roots[i])) return false;
     struct sha3_256_ctx sha; hash_start(&sha, "zcl.ontology_predicate.v1");
@@ -177,6 +184,16 @@ static bool context_visible(const struct zcl_ontology_query_v1 *q,
     return false;
 }
 
+static bool ontology_context_matches(const struct zcl_ontology_context_v1 *c,
+                                     const uint8_t root[32],
+                                     const uint8_t universe_root[32])
+{
+    uint8_t actual[32];
+    return zcl_ontology_context_v1_root(c, actual) &&
+           memcmp(actual, root, 32) == 0 &&
+           memcmp(c->universe_root, universe_root, 32) == 0;
+}
+
 static bool contexts_bound(const struct zcl_ontology_query_v1 *q,
                            const uint8_t universe_root[32])
 {
@@ -192,10 +209,7 @@ static bool contexts_bound(const struct zcl_ontology_query_v1 *q,
             : q->import_context_roots[wanted - 1u];
         bool found = false;
         for (size_t i = 0; i < q->context_count; i++) {
-            uint8_t actual[32];
-            if (zcl_ontology_context_v1_root(&q->contexts[i], actual) &&
-                memcmp(actual, root, 32) == 0 &&
-                memcmp(q->contexts[i].universe_root, universe_root, 32) == 0) {
+            if (ontology_context_matches(&q->contexts[i], root, universe_root)) {
                 found = true;
                 break;
             }
