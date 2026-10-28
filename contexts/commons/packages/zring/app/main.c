@@ -2,8 +2,7 @@
  *
  * Usage: zring [CAP]
  * Reads stdin in random-sized bursts through a CAP-byte ring (default
- * 16) and writes stdout, verifying the FIFO invariant by comparing a
- * running CRC-free checksum: prints "ok: N bytes pumped" on success.
+ * 16) and writes stdout; prints "ok: N bytes pumped" on success.
  * This is the package's real consumer. */
 #include "zring/zring.h"
 
@@ -20,6 +19,17 @@ static int finish_pump(size_t total, size_t cap) {
   return 0;
 }
 
+static bool parse_capacity(const char *arg, size_t max, size_t *cap) {
+  char *end = NULL;
+  long c = strtol(arg, &end, 10);
+  if (end == arg || *end != '\0' || c < 1 || c > (long)max) {
+    fprintf(stderr, "zring: bad capacity (1..%zu)\n", max);
+    return false;
+  }
+  *cap = (size_t)c;
+  return true;
+}
+
 int main(int argc, char **argv) {
   static unsigned char store[65536];
   static unsigned char in[4096], out[4096];
@@ -27,15 +37,7 @@ int main(int argc, char **argv) {
   zring r;
   size_t total = 0;
   int eof = 0;
-  if (argc > 1) {
-    char *end = NULL;
-    long c = strtol(argv[1], &end, 10);
-    if (end == argv[1] || *end != '\0' || c < 1 || c > (long)sizeof(store)) {
-      fprintf(stderr, "zring: bad capacity (1..%zu)\n", sizeof(store));
-      return 2;
-    }
-    cap = (size_t)c;
-  }
+  if (argc > 1 && !parse_capacity(argv[1], sizeof(store), &cap)) return 2;
   if (zring_init(&r, store, cap) != ZRING_OK) {
     fprintf(stderr, "zring: init failed\n");
     return 1;

@@ -133,7 +133,6 @@ contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_otpauth_format:16
 contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_store_decode:20
 contexts/commons/packages/zrand/app/main.c:main:20
 contexts/commons/packages/zre/src/zre.c:addthread:16
-contexts/commons/packages/zring/app/main.c:main:18
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17

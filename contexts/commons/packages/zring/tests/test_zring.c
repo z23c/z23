@@ -339,5 +339,10 @@ static void test_cli(void) {
 #endif
   cli_unused_output(NULL, 0, "ok: 0 bytes pumped");
   cli_unused_output("0", 2, "bad capacity");
+  cli_unused_output("65537", 2, "bad capacity");
+  cli_unused_output("999999999999999999999999", 2, "bad capacity");
+  cli_unused_output("", 2, "bad capacity");
+  cli_unused_output("1x", 2, "bad capacity");
+  cli_unused_output(" +1", 0, "ok: 0 bytes pumped through 1-byte ring");
   cli_failed_input();
 }
