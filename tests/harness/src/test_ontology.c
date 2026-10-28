@@ -1767,6 +1767,9 @@ int test_ontology(void)
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(result.incomplete_reason ==
                ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED);
+        ASSERT(result.facts_examined == 1);
+        ASSERT(!result.observed_positive);
+        ASSERT(!result.observed_negative);
         ASSERT(strcmp(result.truncation_reason,
                       "explicit_negation_unsupported") == 0);
         p.explicit_negation = 1;
@@ -1863,13 +1866,21 @@ int test_ontology(void)
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE && !result.complete);
         ASSERT(result.observed_positive && !result.observed_negative);
+        ASSERT(result.facts_examined == 1);
         ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
         ASSERT(strcmp(result.truncation_reason, "fact_budget_exhausted") == 0);
         memset(facts[0].evidence_root, 0, sizeof(facts[0].evidence_root));
-        q.assertion_count = 1; q.fact_budget = 1;
+        q.assertion_count = 1; q.fact_budget = 0;
+        ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
+        ASSERT(result.facts_examined == 0);
+        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
+        q.fact_budget = 1;
         ASSERT(zcl_ontology_evaluate_atom_v1(&u, &p, &q, &result));
         ASSERT(result.status == ZCL_ONTOLOGY_INCOMPLETE);
         ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_ASSERTION_INVALID);
+        ASSERT(result.facts_examined == 1);
+        ASSERT(!result.observed_positive);
+        ASSERT(!result.observed_negative);
         ASSERT(strcmp(result.truncation_reason, "invalid_assertion") == 0);
         p.execution_tier = ZCL_ONTOLOGY_TIER_HORN;
         ASSERT(zcl_ontology_predicate_v1_root(&p, pr));

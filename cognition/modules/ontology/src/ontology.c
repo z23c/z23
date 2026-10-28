@@ -236,17 +236,20 @@ static bool coverage_declared_for_all_contexts(
     return true;
 }
 
-bool zcl_ontology_evaluate_atom_v1(
-    const struct zcl_source_universe_v1 *u,
+static bool ontology_arguments_valid(const struct zcl_ontology_predicate_v1 *p,
+                                     const struct zcl_ontology_query_v1 *q)
+{
+    for (size_t i = 0; i < ZCL_ONTOLOGY_MAX_ARITY; i++)
+        if ((i < p->arity) != nonzero(q->argument_roots[i])) return false;
+    return true;
+}
+
+static bool ontology_query_bindings_valid(
     const struct zcl_ontology_predicate_v1 *p,
     const struct zcl_ontology_query_v1 *q,
-    struct zcl_ontology_result_v1 *out)
+    const uint8_t universe_root[32], const uint8_t predicate_root[32])
 {
-    uint8_t universe_root[32], predicate_root[32];
-    if (out) memset(out, 0, sizeof(*out));
-    if (!out || !q || !zcl_source_universe_v1_root(u, universe_root) ||
-        !zcl_ontology_predicate_v1_root(p, predicate_root) ||
-        q->arity != p->arity || memcmp(q->predicate_root, predicate_root, 32) ||
+    if (q->arity != p->arity || memcmp(q->predicate_root, predicate_root, 32) ||
         !nonzero(q->context_root) || q->import_count > ZCL_ONTOLOGY_MAX_IMPORTS ||
         (q->import_count && !q->import_context_roots) ||
         q->context_count > ZCL_ONTOLOGY_MAX_CONTEXTS ||
@@ -254,13 +257,24 @@ bool zcl_ontology_evaluate_atom_v1(
         (q->coverage_count && !q->coverage) ||
         (q->assertion_count && !q->assertions) ||
         !contexts_bound(q, universe_root)) return false;
-    for (size_t i = 0; i < ZCL_ONTOLOGY_MAX_ARITY; i++)
-        if ((i < p->arity) != nonzero(q->argument_roots[i])) return false;
-    if (p->execution_tier != ZCL_ONTOLOGY_TIER_EXACT) {
-        out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
-        out->incomplete_reason = ZCL_ONTOLOGY_REASON_PREDICATE_TIER;
-        out->truncation_reason = "predicate_tier_unsupported"; return true;
-    }
+    return ontology_arguments_valid(p, q);
+}
+
+static bool ontology_query_valid(const struct zcl_source_universe_v1 *u,
+                                 const struct zcl_ontology_predicate_v1 *p,
+                                 const struct zcl_ontology_query_v1 *q)
+{
+    uint8_t universe_root[32], predicate_root[32];
+    return zcl_source_universe_v1_root(u, universe_root) &&
+           zcl_ontology_predicate_v1_root(p, predicate_root) &&
+           ontology_query_bindings_valid(p, q, universe_root, predicate_root);
+}
+
+static bool ontology_scan_assertions(const struct zcl_ontology_predicate_v1 *p,
+                                     const struct zcl_ontology_query_v1 *q,
+                                     struct zcl_ontology_result_v1 *out,
+                                     size_t *limit_out)
+{
     size_t limit = q->assertion_count;
     if (limit > q->fact_budget) limit = q->fact_budget;
     for (size_t i = 0; i < limit; i++) {
@@ -270,7 +284,7 @@ bool zcl_ontology_evaluate_atom_v1(
         if (!zcl_ontology_assertion_v1_root(a, assertion_root)) {
             out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
             out->incomplete_reason = ZCL_ONTOLOGY_REASON_ASSERTION_INVALID;
-            out->truncation_reason = "invalid_assertion"; return true;
+            out->truncation_reason = "invalid_assertion"; return false;
         }
         if (a->arity != q->arity || !context_visible(q, a->context_root) ||
             memcmp(a->predicate_root, q->predicate_root, 32) ||
@@ -282,16 +296,19 @@ bool zcl_ontology_evaluate_atom_v1(
             out->incomplete_reason =
                 ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED;
             out->truncation_reason = "explicit_negation_unsupported";
-            return true;
+            return false;
         }
         if (a->polarity == ZCL_ONTOLOGY_POSITIVE) out->observed_positive = true;
         if (a->polarity == ZCL_ONTOLOGY_NEGATIVE) out->observed_negative = true;
     }
-    if (q->assertion_count > limit) {
-        out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
-        out->incomplete_reason = ZCL_ONTOLOGY_REASON_FACT_BUDGET;
-        out->truncation_reason = "fact_budget_exhausted"; return true;
-    }
+    *limit_out = limit;
+    return true;
+}
+
+static bool ontology_closed_absence(const struct zcl_ontology_predicate_v1 *p,
+                                    const struct zcl_ontology_query_v1 *q,
+                                    struct zcl_ontology_result_v1 *out)
+{
     if (!out->observed_positive && !out->observed_negative &&
         p->world == ZCL_ONTOLOGY_CLOSED_WORLD) {
         out->status = ZCL_ONTOLOGY_INCOMPLETE;
@@ -307,6 +324,30 @@ bool zcl_ontology_evaluate_atom_v1(
         }
         return true;
     }
+    return false;
+}
+
+bool zcl_ontology_evaluate_atom_v1(
+    const struct zcl_source_universe_v1 *u,
+    const struct zcl_ontology_predicate_v1 *p,
+    const struct zcl_ontology_query_v1 *q,
+    struct zcl_ontology_result_v1 *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!out || !q || !ontology_query_valid(u, p, q)) return false;
+    if (p->execution_tier != ZCL_ONTOLOGY_TIER_EXACT) {
+        out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+        out->incomplete_reason = ZCL_ONTOLOGY_REASON_PREDICATE_TIER;
+        out->truncation_reason = "predicate_tier_unsupported"; return true;
+    }
+    size_t limit;
+    if (!ontology_scan_assertions(p, q, out, &limit)) return true;
+    if (q->assertion_count > limit) {
+        out->status = ZCL_ONTOLOGY_INCOMPLETE; out->complete = false;
+        out->incomplete_reason = ZCL_ONTOLOGY_REASON_FACT_BUDGET;
+        out->truncation_reason = "fact_budget_exhausted"; return true;
+    }
+    if (ontology_closed_absence(p, q, out)) return true;
     /* Argument roots have no accepted term manifest in this v1 request.  An
      * exact assertion can remain visible as observed evidence, but cannot
      * establish a typed truth claim until that binding is supplied. */
