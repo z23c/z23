@@ -466,6 +466,37 @@ static bool cli_feed_contents(const char *bytes, bool compact) {
   return items == 3 && ((strchr(bytes, '\n') == NULL) == compact);
 }
 
+static const char cli_pretty_golden[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  "<rss version=\"2.0\">\n"
+  "  <channel>\n"
+  "    <title>ZClassic23 News</title>\n"
+  "    <link>https://example.com/</link>\n"
+  "    <description>Full-node and C23 Commons announcements</description>\n"
+  "    <item>\n"
+  "      <title>ZClassic23 node syncs past the Sapling frontier</title>\n"
+  "      <link>https://example.com/posts/1</link>\n"
+  "      <guid>https://example.com/posts/1</guid>\n"
+  "      <pubDate>Sun, 16 Aug 2026 00:00:00 +0000</pubDate>\n"
+  "    </item>\n"
+  "    <item>\n"
+  "      <title>C23 Commons: publish, verify, reproduce</title>\n"
+  "      <link>https://example.com/posts/2</link>\n"
+  "      <guid>https://example.com/posts/2</guid>\n"
+  "      <pubDate>Sat, 15 Aug 2026 00:00:00 +0000</pubDate>\n"
+  "    </item>\n"
+  "    <item>\n"
+  "      <title>Escaping &amp; &lt;friends&gt; — a \"writer\" story</title>\n"
+  "      <link>https://example.com/posts/3</link>\n"
+  "      <guid>https://example.com/posts/3</guid>\n"
+  "      <pubDate>Fri, 14 Aug 2026 00:00:00 +0000</pubDate>\n"
+  "    </item>\n"
+  "  </channel>\n"
+  "</rss>\n"
+  ;
+static const char cli_compact_golden[] =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?><rss version=\"2.0\"><channel><title>ZClassic23 News</title><link>https://example.com/</link><description>Full-node and C23 Commons announcements</description><item><title>ZClassic23 node syncs past the Sapling frontier</title><link>https://example.com/posts/1</link><guid>https://example.com/posts/1</guid><pubDate>Sun, 16 Aug 2026 00:00:00 +0000</pubDate></item><item><title>C23 Commons: publish, verify, reproduce</title><link>https://example.com/posts/2</link><guid>https://example.com/posts/2</guid><pubDate>Sat, 15 Aug 2026 00:00:00 +0000</pubDate></item><item><title>Escaping &amp; &lt;friends&gt; — a \"writer\" story</title><link>https://example.com/posts/3</link><guid>https://example.com/posts/3</guid><pubDate>Fri, 14 Aug 2026 00:00:00 +0000</pubDate></item></channel></rss>"
+  ;
 static int cli_normal(bool compact) {
   FILE *output = tmpfile();
   if (!output) return 1;
@@ -477,6 +508,8 @@ static int cli_normal(bool compact) {
   size_t n = fread(bytes, 1, sizeof bytes - 1, output);
   ok = ok && !ferror(output) && n > 0 && n < sizeof bytes - 1;
   ok = ok && cli_feed_contents(bytes, compact);
+  const char *golden = compact ? cli_compact_golden : cli_pretty_golden;
+  ok = ok && n == strlen(golden) && memcmp(bytes, golden, n) == 0;
   if (fclose(output) != 0) ok = false;
   cli_output = NULL;
   return ok ? 0 : 1;

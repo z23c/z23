@@ -34,6 +34,39 @@ static int finish_output(void) {
   return 0;
 }
 
+static zxml_status write_header(zxml *x) {
+  zxml_status st = zxml_decl(x);
+  if (st == ZXML_OK)
+    st = zxml_elem_open(x, "rss");
+  if (st == ZXML_OK)
+    st = zxml_attr(x, "version", "2.0");
+  if (st == ZXML_OK)
+    st = zxml_elem_open(x, "channel");
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "title", "ZClassic23 News");
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "link", "https://example.com/");
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "description",
+                   "Full-node and C23 Commons announcements");
+  return st;
+}
+
+static zxml_status write_item(zxml *x, size_t i) {
+  zxml_status st = zxml_elem_open(x, "item");
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "title", k_items[i].title);
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "link", k_items[i].link);
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "guid", k_items[i].link);
+  if (st == ZXML_OK)
+    st = zxml_elem(x, "pubDate", k_items[i].date);
+  if (st == ZXML_OK)
+    st = zxml_elem_close(x);
+  return st;
+}
+
 int main(int argc, char **argv) {
   unsigned flags = ZXML_PRETTY;
   if (argc == 2 && strcmp(argv[1], "--compact") == 0)
@@ -45,33 +78,10 @@ int main(int argc, char **argv) {
 
   zxml x;
   zxml_open(&x, out_write, NULL, flags);
-  zxml_status st = zxml_decl(&x);
-  if (st == ZXML_OK)
-    st = zxml_elem_open(&x, "rss");
-  if (st == ZXML_OK)
-    st = zxml_attr(&x, "version", "2.0");
-  if (st == ZXML_OK)
-    st = zxml_elem_open(&x, "channel");
-  if (st == ZXML_OK)
-    st = zxml_elem(&x, "title", "ZClassic23 News");
-  if (st == ZXML_OK)
-    st = zxml_elem(&x, "link", "https://example.com/");
-  if (st == ZXML_OK)
-    st = zxml_elem(&x, "description",
-                   "Full-node and C23 Commons announcements");
+  zxml_status st = write_header(&x);
   for (size_t i = 0; i < sizeof(k_items) / sizeof(k_items[0]) && st == ZXML_OK;
        i++) {
-    st = zxml_elem_open(&x, "item");
-    if (st == ZXML_OK)
-      st = zxml_elem(&x, "title", k_items[i].title);
-    if (st == ZXML_OK)
-      st = zxml_elem(&x, "link", k_items[i].link);
-    if (st == ZXML_OK)
-      st = zxml_elem(&x, "guid", k_items[i].link);
-    if (st == ZXML_OK)
-      st = zxml_elem(&x, "pubDate", k_items[i].date);
-    if (st == ZXML_OK)
-      st = zxml_elem_close(&x);
+    st = write_item(&x, i);
   }
   if (st == ZXML_OK)
     st = zxml_elem_close(&x); /* channel */
