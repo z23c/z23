@@ -78,6 +78,48 @@ static zescape_err unescape_small(size_t *err_pos, size_t pos)
     return ZESCAPE_ERR_SMALL;
 }
 
+static zescape_err unescape_hex(const char *in, size_t len, size_t *i,
+                                uint8_t *v, size_t *err_pos)
+{
+    if (*i + 2 >= len) {
+        if (err_pos) *err_pos = *i - 1;
+        return ZESCAPE_ERR_TRUNCATED;
+    }
+    int hi = hexval(in[*i + 1]);
+    int lo = hexval(in[*i + 2]);
+    if (hi < 0 || lo < 0) {
+        if (err_pos) *err_pos = (hi < 0) ? *i + 1 : *i + 2;
+        return ZESCAPE_ERR_BAD_HEX;
+    }
+    *v = (uint8_t)((hi << 4) | lo);
+    *i += 2;
+    return ZESCAPE_OK;
+}
+
+static zescape_err unescape_value(const char *in, size_t len, size_t *i,
+                                  uint8_t *v, size_t *err_pos)
+{
+    size_t esc = *i - 1;
+    switch (in[*i]) {
+    case '\\': *v = '\\'; break;
+    case '"':  *v = '"'; break;
+    case '\'': *v = '\''; break;
+    case 'n':  *v = '\n'; break;
+    case 'r':  *v = '\r'; break;
+    case 't':  *v = '\t'; break;
+    case '0':  *v = '\0'; break;
+    case 'a':  *v = '\a'; break;
+    case 'b':  *v = '\b'; break;
+    case 'f':  *v = '\f'; break;
+    case 'v':  *v = '\v'; break;
+    case 'x': return unescape_hex(in, len, i, v, err_pos);
+    default:
+        if (err_pos) *err_pos = esc;
+        return ZESCAPE_ERR_BAD_ESCAPE;
+    }
+    return ZESCAPE_OK;
+}
+
 zescape_err zescape_unescape(const char *in, size_t len,
                              void *out, size_t cap,
                              size_t *out_len, size_t *err_pos)
@@ -102,37 +144,8 @@ zescape_err zescape_unescape(const char *in, size_t len,
             return ZESCAPE_ERR_TRUNCATED;
         }
         uint8_t v;
-        switch (in[i]) {
-        case '\\': v = '\\'; break;
-        case '"':  v = '"';  break;
-        case '\'': v = '\''; break;
-        case 'n':  v = '\n'; break;
-        case 'r':  v = '\r'; break;
-        case 't':  v = '\t'; break;
-        case '0':  v = '\0'; break;
-        case 'a':  v = '\a'; break;
-        case 'b':  v = '\b'; break;
-        case 'f':  v = '\f'; break;
-        case 'v':  v = '\v'; break;
-        case 'x': {
-            if (i + 2 >= len) {
-                if (err_pos) *err_pos = esc;
-                return ZESCAPE_ERR_TRUNCATED;
-            }
-            int hi = hexval(in[i + 1]);
-            int lo = hexval(in[i + 2]);
-            if (hi < 0 || lo < 0) {
-                if (err_pos) *err_pos = (hi < 0) ? i + 1 : i + 2;
-                return ZESCAPE_ERR_BAD_HEX;
-            }
-            v = (uint8_t)((hi << 4) | lo);
-            i += 2;
-            break;
-        }
-        default:
-            if (err_pos) *err_pos = esc;
-            return ZESCAPE_ERR_BAD_ESCAPE;
-        }
+        zescape_err err = unescape_value(in, len, &i, &v, err_pos);
+        if (err != ZESCAPE_OK) return err;
         if (o >= cap) return unescape_small(err_pos, esc);
         dst[o++] = v;
         i++;

@@ -135,6 +135,25 @@ static void test_unescape_errors(void)
     CHECK(zescape_unescape("a", 1, buf, 4, NULL, &pos) == ZESCAPE_ERR_NULL);
 }
 
+static void test_unescape_full_buffer_errors(void)
+{
+    static const struct { const char *input; zescape_err err; size_t pos; } cases[] = {
+        {"A\\q", ZESCAPE_ERR_BAD_ESCAPE, 1},
+        {"A\\xG0", ZESCAPE_ERR_BAD_HEX, 3},
+        {"A\\x0", ZESCAPE_ERR_TRUNCATED, 1},
+        {"A\\x41", ZESCAPE_ERR_SMALL, 1},
+        {"AB", ZESCAPE_ERR_SMALL, 1},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint8_t out[] = {0x7e, 0x7e, 0x7e};
+        size_t n = 91, pos = 92;
+        CHECK(zescape_unescape(cases[i].input, strlen(cases[i].input),
+                               out + 1, 1, &n, &pos) == cases[i].err);
+        CHECK(pos == cases[i].pos && n == 91);
+        CHECK(out[0] == 0x7e && out[1] == 'A' && out[2] == 0x7e);
+    }
+}
+
 static uint64_t rng_state = 0x2545f4914f6cdd1dull;
 static uint32_t rng_next(void)
 {
@@ -261,6 +280,7 @@ int main(void)
     test_escape_small_buffer();
     test_unescape_basics();
     test_unescape_errors();
+    test_unescape_full_buffer_errors();
     test_roundtrip_fuzz();
     test_err_str();
     puts("test_zescape: all groups passed (escape small unescape errors fuzz errstr)");
