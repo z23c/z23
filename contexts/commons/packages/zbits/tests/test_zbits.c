@@ -324,10 +324,38 @@ static void test_cli_errors(void) {
   CHECK(cli_case(4, comment_only, 2, "", usage) == 0);
 }
 
+static void test_cli_boundaries(void) {
+  const char *bad = "zbits: bad input\n";
+  const char *usage = "usage: zbits <count|first-set|first-clear|flip-all> BITS\n"
+      "       zbits rank BITS I\n       zbits <or|and|andnot> A B\n";
+  char *rank_end[] = {"zbits", "rank", "101", "3", NULL};
+  CHECK(cli_case(4, rank_end, 0, "2\n", "") == 0);
+  char *negative[] = {"zbits", "rank", "101", "-1", NULL};
+  char *junk[] = {"zbits", "rank", "101", "2x", NULL};
+  char *unequal[] = {"zbits", "or", "101", "10", NULL};
+  CHECK(cli_case(4, negative, 1, "", bad) == 0);
+  CHECK(cli_case(4, junk, 1, "", bad) == 0);
+  CHECK(cli_case(4, unequal, 1, "", bad) == 0);
+  char *unknown[] = {"zbits", "unknown", "101", NULL};
+  char *unknown_bad[] = {"zbits", "unknown", "10x", NULL};
+  CHECK(cli_case(3, unknown, 2, "", usage) == 0);
+  CHECK(cli_case(3, unknown_bad, 1, "", bad) == 0);
+  char bits[4098];
+  memset(bits, '1', sizeof bits - 1);
+  bits[4096] = '\0';
+  char *limit[] = {"zbits", "count", bits, NULL};
+  CHECK(cli_case(3, limit, 0, "4096\n", "") == 0);
+  bits[4096] = '1'; bits[4097] = '\0';
+  CHECK(cli_case(3, limit, 1, "", bad) == 0);
+  bits[0] = '\0';
+  CHECK(cli_case(3, limit, 1, "", bad) == 0);
+}
+
 int main(void) {
   cli_sink = stdout; cli_errors = stderr;
   test_cli_output();
   test_cli_errors();
+  test_cli_boundaries();
   test_count_ignores_storage_tail();
   test_basic();
   test_bulk();
