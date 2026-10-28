@@ -246,6 +246,12 @@ static int ic_case_pixels(const char *dir)
         ASSERT(ic_render_text(dir, "bar", "canvas 600 400\nbar Half | 50\n", &bar));
         ASSERT(ic_pixel_is(&bar, 186, 108, 242, 181, 68));
         ASSERT(ic_pixel_is(&bar, 498, 108, 36, 56, 68));
+        free(bar.rows);
+        bar.rows = NULL;
+        /* 1% of 456 px is 4 px: the fill must not be padded wider. */
+        ASSERT(ic_render_text(dir, "bar1", "canvas 600 400\nbar One | 1\n", &bar));
+        ASSERT(ic_pixel_is(&bar, 73, 108, 242, 181, 68));
+        ASSERT(ic_pixel_is(&bar, 82, 108, 36, 56, 68));
         ASSERT(ic_render_text(dir, "blank", "canvas 600 400\n", &blank));
         ASSERT_EQ(ic_count(&blank, 242, 181, 68), 0u);
         ASSERT_EQ(ic_count(&blank, 36, 56, 68), 0u);
@@ -272,11 +278,13 @@ static const struct ic_bad_case IC_BAD[] = {
     {"a second footer fails", "canvas 600 600\nfooter a\nfooter b\n",
      "line 3: only one footer is allowed (the first is on line 2)"},
     {"canvas numbers too large for unsigned fail as out of range",
-     "canvas 99999999999999999999 600\n", "out of range"},
+     "canvas 99999999999999999999 600\n", "line 1: canvas 4294967295x600 out of range"},
     {"an unknown directive names its line", "# note\ncanvas 600 600\nsection A\nbogus x | y\n",
      "line 4: unknown directive 'bogus'"},
-    {"a canvas below the minimum fails", "canvas 100 100\nsection A\n", "out of range"},
-    {"a canvas above the maximum fails", "canvas 99999 600\nsection A\n", "out of range"},
+    {"a canvas below the minimum fails", "canvas 100 100\nsection A\n",
+     "line 1: canvas 100x100 out of range"},
+    {"a canvas above the maximum fails", "# big\ncanvas 99999 600\nsection A\n",
+     "line 2: canvas 99999x600 out of range"},
     {"a malformed canvas line fails", "canvas wide tall\n", "canvas takes a width and a height"},
     {"canvas after another directive fails", "section A\ncanvas 600 600\n",
      "line 2: canvas must be the first directive"},
@@ -287,7 +295,12 @@ static const struct ic_bad_case IC_BAD[] = {
     {"four stats on a narrow canvas fail", "canvas 320 600\nstat 1 | a\nstat 2 | b\nstat 3 | c\nstat 4 | d\n",
      "line 2: the canvas is too narrow for 4 stats"},
     {"a cta on a narrow canvas fails", "canvas 320 900\ncta Help | @bot | ask\n",
-     "cta heading 'Help' does not fit"},
+     "line 2: the canvas is too narrow for a cta card"},
+    {"an empty cta on a narrow canvas fails too", "canvas 320 900\ncta\n",
+     "line 2: the canvas is too narrow for a cta card"},
+    {"a cta heading wider than its text area fails",
+     "canvas 600 900\ncta A heading far too long for this card | @bot | ask\n",
+     "cta heading 'A heading far too long for this card' does not fit"},
     {"a title wider than the page fails", "canvas 320 600\ntitle ABCDEFGHIJ\n",
      "title 'ABCDEFGHIJ' does not fit"},
     {"a word wider than its line fails", "canvas 320 600\ncheck Supercalifragilisticexpialidocious\n",

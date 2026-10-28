@@ -362,7 +362,6 @@ static void ic_bar(struct ic_page *p, char *f[IC_FIELDS])
     p->y += 44;
     ic_round_rect(p, IC_MARGIN, p->y, (uint32_t)cw, 18u, 9u, IC_TRACK);
     uint32_t fill = (uint32_t)((uint64_t)cw * (uint64_t)pct / 100u);
-    if (pct > 0 && fill < 18u) fill = 18u;
     if (fill > 0) ic_round_rect(p, IC_MARGIN, p->y, fill, 18u, 9u, tone);
     p->y += 18 + 32;
 }
@@ -396,6 +395,11 @@ static void ic_cta(struct ic_page *p, char *f[IC_FIELDS])
     int32_t cw = ic_content_width(p), tx = IC_MARGIN + 40 + 96 + 32;
     int32_t tmax = cw - (tx - IC_MARGIN) - 32;
     char lines[IC_WRAP_LINES][IC_LINE_MAX];
+    if (tmax < IC_MIN_TILE) {
+        ic_fail(p, "the canvas is too narrow for a cta card (%d px of text, need %d)",
+                tmax, IC_MIN_TILE);
+        return;
+    }
     if (!ic_fit(p, "cta heading", f[0], 34u, true, tmax) ||
         !ic_fit(p, "cta handle", f[1], 52u, true, tmax)) return;
     unsigned n = ic_wrap(p, "cta line", f[2], 26u, false, tmax, lines);
@@ -482,7 +486,7 @@ static bool ic_open_canvas(struct ic_page *p, uint32_t w, uint32_t h)
 {
     if (w < 320u || h < 320u || w > ZCL_PRESENT_CANVAS_DIMENSION_MAX ||
         h > ZCL_PRESENT_CANVAS_DIMENSION_MAX) {
-        fprintf(stderr, "infocard: canvas %ux%u out of range (320..%u)\n", w, h,
+        ic_fail(p, "canvas %ux%u out of range (320..%u)", w, h,
                 ZCL_PRESENT_CANVAS_DIMENSION_MAX);
         return false;
     }
