@@ -57,7 +57,6 @@ void codeindex_impact_cause_reset(struct ci_impact_cause *cause)
     if (cause)
         memset(cause, 0, sizeof(*cause));
 }
-#ifdef ZCL_TESTING
 static bool ci_impact_cause_copy(char *out, size_t cap, const char *source)
 {
     out[0] = '\0';
@@ -68,6 +67,7 @@ static bool ci_impact_cause_copy(char *out, size_t cap, const char *source)
     out[n] = '\0';
     return len >= cap;
 }
+#ifdef ZCL_TESTING
 void codeindex_test_impact_cause_identity(struct ci_impact_cause *cause,
                                          const char *path, const char *node)
 {
@@ -231,6 +231,7 @@ static void ci_strlist_sort(struct ci_strlist *l)
 
 /* ── traversal state (heap-owned; freed on every exit) ── */
 struct ci_closure_ctx {
+    struct ci_impact_cause *cause;
     struct ci_strset  seen_syms;   /* symbol identity keys queued/visited */
     struct ci_strset  seen_sites;  /* (enclosing, file) pairs already resolved */
     struct ci_strset  seen_files;  /* impacted files already collected */
@@ -239,6 +240,23 @@ struct ci_closure_ctx {
     struct ci_symbol *symbuf;      /* CI_CLOSURE_QUERY_BATCH rows */
     char            (*incbuf)[256];/* CI_CLOSURE_QUERY_BATCH include rows (fwd) */
 };
+
+static void ci_closure_cause(struct ci_closure_ctx *c,
+                             enum ci_impact_cause_reason reason,
+                             uint64_t capacity, uint64_t count,
+                             const char *path, const char *node)
+{
+    struct ci_impact_cause *cause = c->cause;
+    if (!cause || cause->reason != CI_IMPACT_CAUSE_NONE)
+        return;
+    cause->reason = reason;
+    cause->capacity = capacity;
+    cause->count_reached = count;
+    cause->count_known = true;
+    cause->path_known = path && path[0];
+    cause->path_truncated = ci_impact_cause_copy(cause->path, sizeof(cause->path), path);
+    cause->node_truncated = ci_impact_cause_copy(cause->node, sizeof(cause->node), node);
+}
 
 static void ci_closure_ctx_free(struct ci_closure_ctx *c)
 {
@@ -264,6 +282,8 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
         return true;
     if (c->files.len >= CI_IMPACT_CLOSURE_MAX_FILES) {
         *hit_cap = true;
+        ci_closure_cause(c, CI_IMPACT_CAUSE_FILE_SET_CAPACITY,
+                         CI_IMPACT_CLOSURE_MAX_FILES, c->files.len, path, NULL);
         return true;
     }
     return ci_strlist_push(&c->files, path);
@@ -306,6 +326,8 @@ static bool ci_closure_queue(struct ci_closure_ctx *c, const char *key,
 {
     if (c->seen_syms.len >= CI_CLOSURE_MAX_SYMS) {
         *truncated = true;
+        ci_closure_cause(c, CI_IMPACT_CAUSE_QUEUE_SYMBOL_CAPACITY,
+                         CI_CLOSURE_MAX_SYMS, c->seen_syms.len, NULL, key);
         return true;
     }
     bool added = false;
@@ -337,12 +359,17 @@ static bool ci_closure_seed_file(struct ci_closure_ctx *c, struct codeindex *ci,
                                         CI_CLOSURE_QUERY_BATCH);
     if (ns < 0)
         LOG_FAIL("codeindex", "symbols_in_file failed for %s", file);
-    if (ns == CI_CLOSURE_QUERY_BATCH)
+    if (ns == CI_CLOSURE_QUERY_BATCH) {
         *truncated = true;  /* a file with more symbols than we can enumerate */
+        ci_closure_cause(c, CI_IMPACT_CAUSE_SEED_QUERY_SATURATED,
+                         CI_CLOSURE_QUERY_BATCH, ns, file, NULL);
+    }
 
     for (int i = 0; i < ns; i++) {
         if (c->seen_syms.len >= CI_CLOSURE_MAX_SYMS) {
             *truncated = true;
+            ci_closure_cause(c, CI_IMPACT_CAUSE_SEED_SYMBOL_CAPACITY,
+                             CI_CLOSURE_MAX_SYMS, c->seen_syms.len, file, NULL);
             break;
         }
         if (!ci_closure_queue_symbol(c, &c->symbuf[i], frontier, truncated))
@@ -494,8 +521,11 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
     int nc = codeindex_callers(ci, name, c->refbuf, CI_CLOSURE_QUERY_BATCH);
     if (nc < 0)
         LOG_FAIL("codeindex", "callers failed for %s", name);
-    if (nc == CI_CLOSURE_QUERY_BATCH)
+    if (nc == CI_CLOSURE_QUERY_BATCH) {
         *truncated = true;  /* more callers than one batch — closure incomplete */
+        ci_closure_cause(c, CI_IMPACT_CAUSE_CALLER_QUERY_SATURATED,
+                         CI_CLOSURE_QUERY_BATCH, nc, NULL, key);
+    }
 
     for (int i = 0; i < nc; i++) {
         const struct ci_ref *ref = &c->refbuf[i];
@@ -513,6 +543,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
             continue;  /* file-scope reference: file recorded, no symbol to walk */
         if (c->seen_syms.len >= CI_CLOSURE_MAX_SYMS) {
             *truncated = true;
+            ci_closure_cause(c, CI_IMPACT_CAUSE_CALLER_SYMBOL_CAPACITY,
+                             CI_CLOSURE_MAX_SYMS, c->seen_syms.len, ref->ref_file, key);
             continue;
         }
         if (!ci_closure_queue_caller(c, ci, ref->enclosing, ref->ref_file,
@@ -586,12 +618,19 @@ static int ci_closure_collect_output(struct ci_closure_ctx *c,
          * fails to open it. Either way the set it holds is not the set we
          * computed, so report truncation — testcache turns that into
          * UNCACHEABLE and the group runs. */
-        if (w < 0 || (size_t)w >= sizeof(out[n]))
+        if (w < 0 || (size_t)w >= sizeof(out[n])) {
             *truncated = true;
+            ci_closure_cause(c, w < 0 ? CI_IMPACT_CAUSE_OUTPUT_FORMAT_ERROR :
+                             CI_IMPACT_CAUSE_OUTPUT_PATH_CAPACITY,
+                             sizeof(out[n]), strlen(c->files.items[i]), c->files.items[i], NULL);
+        }
         n++;
     }
-    if ((size_t)n < c->files.len)
+    if ((size_t)n < c->files.len) {
         *truncated = true;  /* caller's cap could not hold the full set */
+        ci_closure_cause(c, CI_IMPACT_CAUSE_OUTPUT_ROW_CAPACITY,
+                         (uint64_t)cap, (uint64_t)n, NULL, NULL);
+    }
     return n;
 }
 
@@ -649,8 +688,10 @@ static int impact_closure_impl(
     struct codeindex *ci, const char *overlay_root,
     const char (*changed_files)[256], int n_changed, int max_depth,
     codeindex_impact_terminal_fn terminal, void *terminal_user,
-    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation)
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation,
+    struct ci_impact_cause *cause)
 {
+    codeindex_impact_cause_reset(cause);
     if (truncated) *truncated = false;
     if (!ci || !ci->store || !changed_files || n_changed < 0 || !out ||
         cap <= 0 || !truncated)
@@ -658,7 +699,7 @@ static int impact_closure_impl(
 
     int depth = max_depth > 0 ? max_depth : CI_CLOSURE_DEFAULT_DEPTH;
 
-    struct ci_closure_ctx c = {0};
+    struct ci_closure_ctx c = {.cause = cause};
     int rc = -1;
     const char *init_error = ci_reverse_init(&c);
     if (init_error) LOG_ERR("codeindex", "%s", init_error);
@@ -693,7 +734,7 @@ int codeindex_impact_closure(struct codeindex *ci,
 {
     return impact_closure_impl(ci, NULL, changed_files, n_changed, max_depth,
                                NULL, NULL,
-                               out, cap, truncated, false);
+                               out, cap, truncated, false, NULL);
 }
 
 int codeindex_impact_closure_overlay(
@@ -707,7 +748,7 @@ int codeindex_impact_closure_overlay(
     }
     return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
                                NULL, NULL,
-                               out, cap, truncated, false);
+                               out, cap, truncated, false, NULL);
 }
 
 int codeindex_impact_closure_with_terminal(
@@ -721,7 +762,7 @@ int codeindex_impact_closure_with_terminal(
     }
     return impact_closure_impl(ci, NULL, changed_files, n_changed, max_depth,
                                terminal, terminal_user,
-                               out, cap, truncated, false);
+                               out, cap, truncated, false, NULL);
 }
 
 int codeindex_impact_closure_bounded(
@@ -730,13 +771,26 @@ int codeindex_impact_closure_bounded(
     codeindex_impact_terminal_fn terminal, void *terminal_user,
     char (*out)[256], int cap, bool *truncated, bool stop_at_truncation)
 {
+    return codeindex_impact_closure_bounded_cause(ci, root, changed_files,
+        n_changed, max_depth, terminal, terminal_user, out, cap, truncated,
+        stop_at_truncation, NULL);
+}
+
+int codeindex_impact_closure_bounded_cause(
+    struct codeindex *ci, const char *root,
+    const char (*changed_files)[256], int n_changed, int max_depth,
+    codeindex_impact_terminal_fn terminal, void *terminal_user,
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation,
+    struct ci_impact_cause *cause)
+{
+    codeindex_impact_cause_reset(cause);
     if ((root && !root[0]) || !terminal) {
         if (truncated) *truncated = false;
         LOG_ERR("codeindex", "bounded closure input is empty");
     }
     return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
                                terminal, terminal_user,
-                               out, cap, truncated, stop_at_truncation);
+                               out, cap, truncated, stop_at_truncation, cause);
 }
 
 /* ── reverse INCLUDE closure ────────────────────────────────────────────

@@ -533,6 +533,14 @@ int codeindex_impact_closure_bounded(
     const char (*changed_files)[256], int n_changed, int max_depth,
     codeindex_impact_terminal_fn terminal, void *terminal_user,
     char (*out)[256], int cap, bool *truncated, bool stop_at_truncation);
+/* Optional cause resets at entry, including invalid arguments, and preserves
+ * the first observation if traversal later fails. */
+int codeindex_impact_closure_bounded_cause(
+    struct codeindex *ci, const char *root,
+    const char (*changed_files)[256], int n_changed, int max_depth,
+    codeindex_impact_terminal_fn terminal, void *terminal_user,
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation,
+    struct ci_impact_cause *cause);
 
 /* ── Forward (callee) input-closure query — the content-addressed test cache
  * key input (symmetric mirror of codeindex_impact_closure) ──────────────

@@ -646,6 +646,51 @@ static bool ic_write_fanout_caller(const char *root)
     return ok;
 }
 
+static bool ic_nonterminal(const char *path, void *user)
+{
+    (void)path;
+    (void)user;
+    return false;
+}
+
+static bool ic_cause_parity(struct codeindex *ci)
+{
+    const char changed[1][256] = {"core/modules/net/src/tor_integration.c"};
+    char old[1][256], observed[1][256];
+    bool old_trunc = false, new_trunc = false;
+    struct ci_impact_cause cause;
+    int a = codeindex_impact_closure_bounded(ci, NULL, changed, 1, 0,
+        ic_nonterminal, NULL, old, 1, &old_trunc, false);
+    int b = codeindex_impact_closure_bounded_cause(ci, NULL, changed, 1, 0,
+        ic_nonterminal, NULL, observed, 1, &new_trunc, false, &cause);
+    return a == 1 && b == a && old_trunc && new_trunc &&
+        strcmp(old[0], observed[0]) == 0 &&
+        cause.reason == CI_IMPACT_CAUSE_CALLER_QUERY_SATURATED &&
+        cause.count_known && cause.count_reached == 4096 &&
+        cause.capacity == 4096 && strcmp(cause.node, "tor_leaf") == 0;
+}
+
+static bool ic_output_cause(struct codeindex *ci)
+{
+    const char changed[2][256] = {"a.c", "b.c"};
+    char out[1][256];
+    bool truncated = false;
+    struct ci_impact_cause cause;
+    int n = codeindex_impact_closure_bounded_cause(ci, NULL, changed, 2, 1,
+        ic_nonterminal, NULL, out, 1, &truncated, false, &cause);
+    if (n != 1 || !truncated || cause.reason != CI_IMPACT_CAUSE_OUTPUT_ROW_CAPACITY ||
+        cause.capacity != 1 || cause.count_reached != 1)
+        return false;
+    truncated = true;
+    n = codeindex_impact_closure_bounded_cause(ci, NULL, changed, 2, 1,
+        ic_nonterminal, NULL, out, 1, &truncated, false, NULL);
+    if (n != 1 || !truncated)
+        return false;
+    n = codeindex_impact_closure_bounded_cause(ci, "", changed, 2, 1,
+        ic_nonterminal, NULL, out, 1, &truncated, false, &cause);
+    return n < 0 && !truncated && cause.reason == CI_IMPACT_CAUSE_NONE;
+}
+
 static int test_ic_truncated_closure_preserves_groups(void)
 {
     int failures = 0;
@@ -673,9 +718,14 @@ static int test_ic_truncated_closure_preserves_groups(void)
                       "closure-universal") == 0);
         ASSERT(plan.closure_universal);
         ASSERT_STR_EQ(plan.capacity_origin, "semantic");
-        ASSERT_STR_EQ(plan.capacity_cause, "closure-truncated");
+        ASSERT_STR_EQ(plan.capacity_cause, "caller_query_saturated");
         ASSERT_STR_EQ(plan.capacity_input, "batch");
         ASSERT(!plan.closure_truncated);
+        struct codeindex *ci = codeindex_open(IC_FIX_TRUNC);
+        ASSERT(ci != NULL);
+        ASSERT(ic_cause_parity(ci));
+        ASSERT(ic_output_cause(ci));
+        codeindex_close(ci);
 
         /* C1, the whole point: INCOMPLETE is not EMPTY. The partial walk
          * reached download.c, so "download" is planned. Before this change the

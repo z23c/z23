@@ -1147,11 +1147,12 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * unowned caller is never a boundary and the graph keeps climbing. */
     struct plan_owner_memo memo = {0};
     plan_owner_memo_init(&memo);
-    int n = codeindex_impact_closure_bounded(
+    struct ci_impact_cause cause;
+    int n = codeindex_impact_closure_bounded_cause(
         ci, plan->closure_snapshot ? root : NULL,
         changed, (int)semantic_count, 0,
         plan_reached_proof_owner, &memo, impacted,
-        closure_file_cap, &truncated, true);
+        closure_file_cap, &truncated, true, &cause);
     free(memo.entries);
     if (n < 0) {
         plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
@@ -1163,7 +1164,9 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * changes is the answer's shape, not its availability: see
      * plan_go_universal(). */
     if (truncated) {
-        zcl_devloop_capacity_note(plan, "semantic", "closure-truncated", "batch");
+        zcl_devloop_capacity_note(plan, "semantic",
+            cause.reason == CI_IMPACT_CAUSE_NONE ? "closure-truncated" :
+            codeindex_impact_cause_label(cause.reason), "batch");
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
     }
     for (int i = 0; i < n; i++) {
