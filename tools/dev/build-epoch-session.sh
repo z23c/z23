@@ -335,6 +335,7 @@ verify_authority()
         "$actual_build_system")" ||
         fail 'compile epoch recomputation failed'
     [ "$actual_epoch" = "$EPOCH" ] || fail 'profile/flags do not derive the requested epoch'
+    VERIFIED_BUILD_SYSTEM_ID="$actual_build_system"
     "$VERIFY_TOOL" verify-record "$SOURCE_ID" "$COMPLETE" "$MUTATION" >/dev/null
 }
 
@@ -758,5 +759,5 @@ for old in "${epochs[@]}"; do
     [ "$CANDIDATE_ROOT" = - ] || rm -rf -- "$CANDIDATE_ROOT/epochs/$old"
 done
 
-printf 'build-epoch-session: acquired profile=%s epoch=%s lease=%s\n' \
-    "$PROFILE" "$EPOCH" "$LEASE"
+printf 'build-epoch-session: acquired profile=%s epoch=%s lease=%s build_system_id=%s\n' \
+    "$PROFILE" "$EPOCH" "$LEASE" "$VERIFIED_BUILD_SYSTEM_ID"

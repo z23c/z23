@@ -789,15 +789,19 @@ SESSION_MAIN="$WORK/sessions/epochs/$EPOCH_MAIN/.build-session"
 SESSION_EPOCH_ROOT="$WORK/sessions/epochs/$EPOCH_MAIN"
 start_session()
 {
-    local source_id="$1" mutation="$2"
+    local source_id="$1" mutation="$2" acquired
     local root="$WORK/sessions"
     local lease="$root/epochs/$EPOCH_MAIN/.leases/selftest-$$"
     set_state "$source_id" "$mutation"
-    STATE_FILE="$STATE" "$SESSION_TOOL" acquire "$SESSION_MAIN" "$lease" \
+    acquired="$(STATE_FILE="$STATE" "$SESSION_TOOL" acquire "$SESSION_MAIN" "$lease" \
         "$root" "$WORK/candidates" 5 "$source_id" 1 "$mutation" \
         "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
         "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$$" "$VERIFY" \
-        >/dev/null || fail 'session acquire failed before candidate publication'
+        )" || fail 'session acquire failed before candidate publication'
+    case "$acquired" in
+        *" build_system_id=$BSYS_REAL") ;;
+        *) fail 'session acquire did not report verified build-system identity' ;;
+    esac
     [ -d "$WORK/candidates/epochs/$EPOCH_MAIN" ] ||
         fail 'session published a dangling candidate epoch pointer'
     [ "$(cat "$WORK/candidates/.current-epoch")" = "$EPOCH_MAIN" ] ||
