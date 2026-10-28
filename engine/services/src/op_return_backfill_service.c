@@ -693,6 +693,31 @@ static bool zepoch_find_anchor(struct node_db *ndb, int32_t min_height,
     return found;
 }
 
+static bool zepoch_dump_anchor(struct json_value *out, struct node_db *ndb,
+                               bool db_open, int64_t epoch, bool have_cursor,
+                               const struct op_return_index_cursor *cur)
+{
+    bool anchored = false;
+    if (db_open && epoch >= 0) {
+        struct zanc_anchor a;
+        if (zepoch_find_anchor(ndb, (int32_t)(epoch * 1000), &a)) {
+            anchored = true;
+            json_push_kv_str(out, "anchor_label", a.label);
+            char txid_hex[65];
+            HexStr(a.txid, 32, false, txid_hex, sizeof(txid_hex));
+            json_push_kv_str(out, "anchor_txid", txid_hex);
+            json_push_kv_int(out, "anchor_height", a.height);
+            char ad_hex[65];
+            HexStr(a.digest, 32, false, ad_hex, sizeof(ad_hex));
+            json_push_kv_str(out, "anchor_digest", ad_hex);
+            json_push_kv_bool(out, "digest_match",
+                              have_cursor &&
+                              memcmp(a.digest, cur->digest, 32) == 0);
+        }
+    }
+    return anchored;
+}
+
 bool zepoch_status_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -734,24 +759,8 @@ bool zepoch_status_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "epoch", epoch);
     json_push_kv_int(out, "epoch_start", epoch >= 0 ? epoch * 1000 : -1);
 
-    bool anchored = false;
-    if (db_open && epoch >= 0) {
-        struct zanc_anchor a;
-        if (zepoch_find_anchor(ndb, (int32_t)(epoch * 1000), &a)) {
-            anchored = true;
-            json_push_kv_str(out, "anchor_label", a.label);
-            char txid_hex[65];
-            HexStr(a.txid, 32, false, txid_hex, sizeof(txid_hex));
-            json_push_kv_str(out, "anchor_txid", txid_hex);
-            json_push_kv_int(out, "anchor_height", a.height);
-            char ad_hex[65];
-            HexStr(a.digest, 32, false, ad_hex, sizeof(ad_hex));
-            json_push_kv_str(out, "anchor_digest", ad_hex);
-            json_push_kv_bool(out, "digest_match",
-                              have_cursor &&
-                              memcmp(a.digest, cur.digest, 32) == 0);
-        }
-    }
+    bool anchored = zepoch_dump_anchor(out, ndb, db_open, epoch, have_cursor,
+                                       &cur);
     json_push_kv_bool(out, "anchored", anchored);
     return true;
 }

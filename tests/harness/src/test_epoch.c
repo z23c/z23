@@ -1000,6 +1000,61 @@ static int test_epoch_offline_anchor(void)
 
 /* ── 8. epoch arithmetic agrees with dumpstate zepoch ──────────────── */
 
+static bool ep_dump_unanchored(const struct json_value *dump)
+{
+    const struct json_value *anchored = json_get(dump, "anchored");
+    const struct json_value *epoch = json_get(dump, "epoch");
+    return anchored && anchored->type == JSON_BOOL && !json_get_bool(anchored) &&
+           epoch && epoch->type == JSON_INT && json_get_int(epoch) == -1 &&
+           !json_get(dump, "anchor_label") && !json_get(dump, "digest_match");
+}
+
+static bool ep_dump_anchored(const struct json_value *dump)
+{
+    const struct json_value *anchored = json_get(dump, "anchored");
+    const struct json_value *match = json_get(dump, "digest_match");
+    const struct json_value *label = json_get(dump, "anchor_label");
+    const struct json_value *height = json_get(dump, "anchor_height");
+    char digest[65];
+    ep_hex32(0x33, digest);
+    const struct json_value *actual_digest = json_get(dump, "anchor_digest");
+    return anchored && anchored->type == JSON_BOOL && json_get_bool(anchored) &&
+           match && match->type == JSON_BOOL && json_get_bool(match) &&
+           label && label->type == JSON_STR &&
+           strcmp(json_get_str(label), "zepoch@1000") == 0 &&
+           height && height->type == JSON_INT && json_get_int(height) == 1005 &&
+           actual_digest && actual_digest->type == JSON_STR &&
+           strcmp(json_get_str(actual_digest), digest) == 0;
+}
+
+static int test_epoch_dump_anchor(void)
+{
+    struct ep_fixture f;
+    printf("epoch dump: anchor defaults and matching anchor... ");
+    if (!ep_fixture_init(&f, "dump-anchor")) return ep_report(false);
+    struct json_value dump = {0};
+    struct node_db closed_ndb = {0};
+    g_op_return_backfill_test_ndb = &closed_ndb;
+    bool ok = zepoch_status_dump_state_json(&dump, NULL) &&
+              ep_dump_unanchored(&dump) &&
+              json_get(&dump, "wired") &&
+              json_get(&dump, "wired")->type == JSON_BOOL &&
+              !json_get_bool(json_get(&dump, "wired"));
+    json_free(&dump);
+    g_op_return_backfill_test_ndb = &f.ndb;
+    ok = ok && zepoch_status_dump_state_json(&dump, NULL) &&
+         ep_dump_unanchored(&dump);
+    json_free(&dump);
+    ok = ok && ep_set_cursor(&f, 0, 0, 1001, 0x33) &&
+         ep_put_anchor(&f, 123, 1005, 0x33, "zepoch@1000");
+    ok = ok && zepoch_status_dump_state_json(&dump, NULL) &&
+         ep_dump_anchored(&dump);
+    json_free(&dump);
+    g_op_return_backfill_test_ndb = NULL;
+    ep_fixture_free(&f);
+    return ep_report(ok);
+}
+
 /* The `core epoch status` reply agrees with the dumper's epoch fields at
  * height `h`: epoch = h/1000 and the dump names the same epoch and tip. */
 static bool ep_arith_agrees(const struct zcl_command_reply *r,
@@ -1083,6 +1138,7 @@ int test_epoch(void)
     failures += test_epoch_paging();
     failures += test_epoch_agreement();
     failures += test_epoch_offline_anchor();
+    failures += test_epoch_dump_anchor();
     failures += test_epoch_arithmetic();
 
     node_rpc_client_set_test_hook(NULL);
