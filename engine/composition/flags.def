@@ -2477,6 +2477,8 @@ Z23_FLAG("ZCL_TEST_REAL_HOME", "env_test", "-", "-",
           "explicit opt-in (1) for the few test groups that need real chain or params files: the runners then leave HOME alone while the canonical-datadir writer guard still applies; first use tests/harness/src/test_home_isolation.c:auto")
 Z23_FLAG("ZCL_TEST_DISK_SCRATCH_ROOT", "env_test", "-", "-",
           "disk-backed scratch root (<real cache dir>/zclassic23/test-scratch) exported by the test runners before they move HOME, only when that filesystem is not tmpfs; block-I/O fixtures such as test_boot_phase use it because fsync on tmpfs never advances ru_oublock; first use tests/harness/src/test_home_isolation.c:auto")
+Z23_FLAG("ZCL_TEST_IMPROVE_DISK", "env_test", "-", "-",
+          "force the improvement fixture to use its existing test directory; first use tests/harness/src/test_zcode_dev_objects.c:auto")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
           "first use tests/harness/src/test_parallel.c:auto; documented at docs/dev/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",

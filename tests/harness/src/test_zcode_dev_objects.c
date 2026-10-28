@@ -73,6 +73,11 @@
 
 #include <secp256k1.h>
 #include <dirent.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#include <sys/mount.h>
+#include <linux/magic.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3908,6 +3913,25 @@ static bool zd_bundle_task_binding_refuses(
     return ok;
 }
 
+static void zd_improve_tmpdir(char *out, size_t cap, const char *prefix,
+                              const char *tag)
+{
+#if defined(__linux__)
+    struct statfs fs;
+    if (!getenv("ZCL_TEST_IMPROVE_DISK") && statfs("/dev/shm", &fs) == 0 &&
+        (unsigned long)fs.f_type == (unsigned long)TMPFS_MAGIC &&
+        !(fs.f_flags & MS_NOEXEC)) {
+        int n = snprintf(out, cap, "/dev/shm/z23zd%d_%s_XXXXXX", (int)getpid(), tag);
+        if (n > 0 && (size_t)n < cap && mkdtemp(out)) {
+            if (strcmp(tag, "improve") == 0) printf("[improve fixture: tmpfs] ");
+            return;
+        }
+    }
+#endif
+    if (strcmp(tag, "improve") == 0) printf("[improve fixture: disk fallback] ");
+    test_make_tmpdir(out, cap, prefix, tag);
+}
+
 static int test_zd_improve_command(void)
 {
     int failures = 0;
@@ -3915,7 +3939,7 @@ static int test_zd_improve_command(void)
         char dir[256], candidate_dir[256], preprocessed[320], source_dir[320];
         char source_path[384], workspace[4096], candidate_workspace[4096];
         char base_true[4352], base_false[4352];
-        test_make_tmpdir(dir, sizeof(dir), "zcode_dev", "improve");
+        zd_improve_tmpdir(dir, sizeof(dir), "zcode_dev", "improve");
         ASSERT(platform_directory_canonical_real(dir, workspace,
                                                  sizeof(workspace)));
         (void)snprintf(source_dir, sizeof(source_dir), "%s/src", workspace);
@@ -3956,7 +3980,7 @@ static int test_zd_improve_command(void)
                        workspace);
         ASSERT(zd_copy_executable("/usr/bin/true", base_true));
         ASSERT(zd_copy_executable("/usr/bin/false", base_false));
-        test_make_tmpdir(candidate_dir, sizeof(candidate_dir), "zcode_dev",
+        zd_improve_tmpdir(candidate_dir, sizeof(candidate_dir), "zcode_dev",
                          "candidate");
         ASSERT(platform_directory_canonical_real(
             candidate_dir, candidate_workspace, sizeof(candidate_workspace)));
@@ -4369,7 +4393,7 @@ static int test_zd_improve_command(void)
         /* Own temp dir: the captured workspace tree must stay unchanged. */
         char fixed_dir[256], fixed_real[4096];
         char outside_fixed[4352], outside_link[4352];
-        test_make_tmpdir(fixed_dir, sizeof(fixed_dir), "zcode_dev",
+        zd_improve_tmpdir(fixed_dir, sizeof(fixed_dir), "zcode_dev",
                          "fixed_outside");
         ASSERT(platform_directory_canonical_real(fixed_dir, fixed_real,
                                                  sizeof(fixed_real)));
@@ -4793,7 +4817,7 @@ static int test_zd_improve_command(void)
         char mismatched_receiver[256], unbound_receiver[256];
         char corrupt_receiver[256];
         char task_corrupt_receiver[256], task_mismatch_receiver[256];
-        test_make_tmpdir(transfer_dir, sizeof(transfer_dir), "zcode_dev",
+        zd_improve_tmpdir(transfer_dir, sizeof(transfer_dir), "zcode_dev",
                          "authority_transfer");
         struct vcs_package_store *transfer_store = vcs_package_store_open(
             transfer_dir, UINT64_C(256) * 1024u * 1024u);
@@ -4913,7 +4937,7 @@ static int test_zd_improve_command(void)
                       transfer_action),
                   VCS_ZCODE_WORK_CONTEXT_OK);
         char quota_dir[256];
-        test_make_tmpdir(quota_dir, sizeof(quota_dir), "zcode_dev",
+        zd_improve_tmpdir(quota_dir, sizeof(quota_dir), "zcode_dev",
                          "authority_quota_retry");
         struct vcs_package_store *quota_store =
             vcs_package_store_open(quota_dir, 1);
@@ -4960,7 +4984,7 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(received_transfer.candidate_authority_len,
                   authority_bundle_len);
         ASSERT(received_transfer.task_authority_len > 0);
-        test_make_tmpdir(receiver, sizeof(receiver), "zcode_dev",
+        zd_improve_tmpdir(receiver, sizeof(receiver), "zcode_dev",
                          "authority_receiver");
         ASSERT(vcs_object_store_init(receiver));
         const uint8_t poisoned_task_object[] = "interrupted-task-import";
@@ -5093,7 +5117,7 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(vcs_zcode_task_authority_validate_for_candidate(
                       receiver, &task, &candidate),
                   VCS_ZCODE_TASK_AUTHORITY_OK);
-        test_make_tmpdir(restored_receiver, sizeof(restored_receiver),
+        zd_improve_tmpdir(restored_receiver, sizeof(restored_receiver),
                          "zcode_dev", "context-restored-receiver");
         uint8_t restore_policy_root[32], restore_input_root[32];
         uint8_t restore_action_root[32];
@@ -5171,7 +5195,7 @@ static int test_zd_improve_command(void)
                       restored_manifest_id, 32) == 0);
         ASSERT(memcmp(restored_roots.action_root, transfer_action, 32) == 0);
         ASSERT(vcs_object_has(restored_receiver, restored_roots.input_root));
-        test_make_tmpdir(restored_checkout, sizeof(restored_checkout),
+        zd_improve_tmpdir(restored_checkout, sizeof(restored_checkout),
                          "zcode_dev", "context-restored-checkout");
         ASSERT_EQ(vcs_tree_materialize(
                       restored_receiver, restored_roots.source_root,
@@ -5188,7 +5212,7 @@ static int test_zd_improve_command(void)
                       transfer_store, &transfer, VCS_BUILD_ACTION_KIND_V1,
                       transfer_now, workspace, mismatched_root,
                       mismatched_action), VCS_ZCODE_WORK_CONTEXT_OK);
-        test_make_tmpdir(mismatched_receiver, sizeof(mismatched_receiver),
+        zd_improve_tmpdir(mismatched_receiver, sizeof(mismatched_receiver),
                          "zcode_dev", "context-mismatched-receiver");
         struct vcs_zcode_work_context_roots mismatched_roots;
         ASSERT_EQ(vcs_zcode_work_context_restore_for_kind(
@@ -5228,7 +5252,7 @@ static int test_zd_improve_command(void)
         transfer.fixed_input = bound_wire;
         transfer.fixed_input_len = bound_wire_len;
         free(unbound_wire);
-        test_make_tmpdir(unbound_receiver, sizeof(unbound_receiver),
+        zd_improve_tmpdir(unbound_receiver, sizeof(unbound_receiver),
                          "zcode_dev", "context-unbound-receiver");
         ASSERT_EQ(vcs_zcode_work_context_restore_for_kind(
                       transfer_store, unbound_root, unbound_receiver,
@@ -5238,7 +5262,7 @@ static int test_zd_improve_command(void)
                       sizeof(mismatched_roots)) == 0);
         struct vcs_zcode_task_v1 mismatched_task = received_transfer.task;
         mismatched_task.acceptance_tests_root[0] ^= 1u;
-        test_make_tmpdir(task_mismatch_receiver,
+        zd_improve_tmpdir(task_mismatch_receiver,
                          sizeof(task_mismatch_receiver), "zcode_dev",
                          "task_authority_mismatch");
         ASSERT_EQ(vcs_zcode_task_authority_bundle_import(
@@ -5250,7 +5274,7 @@ static int test_zd_improve_command(void)
                                task.dependency_lock_root));
         received_transfer.task_authority[
             received_transfer.task_authority_len - 1u] ^= 1u;
-        test_make_tmpdir(task_corrupt_receiver,
+        zd_improve_tmpdir(task_corrupt_receiver,
                          sizeof(task_corrupt_receiver), "zcode_dev",
                          "task_authority_corrupt");
         ASSERT(vcs_zcode_task_authority_bundle_import(
@@ -5267,7 +5291,7 @@ static int test_zd_improve_command(void)
         vcs_package_store_close(transfer_store);
         test_rm_rf(transfer_dir);
         authority_bundle[authority_bundle_len - 1u] ^= 1u;
-        test_make_tmpdir(corrupt_receiver, sizeof(corrupt_receiver),
+        zd_improve_tmpdir(corrupt_receiver, sizeof(corrupt_receiver),
                          "zcode_dev", "authority_corrupt");
         ASSERT_EQ(vcs_zcode_candidate_bundle_import(
                       corrupt_receiver, &task, &candidate, authority_bundle,
@@ -6082,7 +6106,7 @@ static int test_zd_improve_command(void)
         char package_mapping_hex[65];
         zcl_hex_encode(package_mapping_root, 32, package_mapping_hex);
         char publication_seed[256];
-        test_make_tmpdir(publication_seed, sizeof(publication_seed),
+        zd_improve_tmpdir(publication_seed, sizeof(publication_seed),
                          "zcode_dev", "publication_seed");
         ASSERT_EQ(vcs_tree_materialize(
                       workspace, accepted_source_root, publication_seed,
@@ -6137,7 +6161,7 @@ static int test_zd_improve_command(void)
         zcl_hex_encode(publication_anchor.publication_job_root, 32,
                        publication_job_hex);
         char publication_store[512];
-        test_make_tmpdir(publication_store, sizeof(publication_store),
+        zd_improve_tmpdir(publication_store, sizeof(publication_store),
                          "zcode_dev", "accepted-publication-store");
         char zcode_store_path[4352];
         (void)snprintf(zcode_store_path, sizeof(zcode_store_path),
@@ -6508,9 +6532,9 @@ static int test_zd_improve_command(void)
         vcs_package_manifest_free(&published_manifest);
         free(published_manifest_wire);
         char carrier_workspace[512], carrier_destination[512];
-        test_make_tmpdir(carrier_workspace, sizeof(carrier_workspace),
+        zd_improve_tmpdir(carrier_workspace, sizeof(carrier_workspace),
                          "zcode_dev", "published-carrier-workspace");
-        test_make_tmpdir(carrier_destination, sizeof(carrier_destination),
+        zd_improve_tmpdir(carrier_destination, sizeof(carrier_destination),
                          "zcode_dev", "published-carrier-destination");
         struct vcs_source_package_checkout_metrics carrier_metrics;
         uint8_t candidate_source_root[32];
@@ -7761,6 +7785,7 @@ static int test_zd_improve_command(void)
         test_rm_rf(dir);
         PASS();
     } _test_next:;
+    test_shm_reap_own("z23zd");
     node_rpc_client_set_test_hook(NULL);
     return failures;
 }
