@@ -317,6 +317,57 @@ static bool dvt_snapshot_root_test(void)
         dvt_probe_membership(false);
 }
 
+static bool dvt_closure_files(void)
+{
+    return dvt_fixture_write(DVT_TEST_FILE,
+        "#include \"local.h\"\n#include <ignored.h>\n") &&
+        dvt_fixture_write("tests/harness/src/local.h", "#include \"nested.h\"\n") &&
+        dvt_fixture_write("tests/harness/src/nested.h", "/* nested */\n") &&
+        dvt_fixture_write("tests/harness/src/ignored.h", "/* angle */\n") &&
+        dvt_fixture_write("tools/local.h", "/* duplicate */\n") &&
+        dvt_fixture_write("Makefile", "CFLAGS = -Wall \\\n -Wextra\n");
+}
+
+static bool dvt_closure_commit(void)
+{
+    char output[2048];
+    const char *add[] = {"git", "add", ".", NULL};
+    const char *commit[] = {"git", "-c", "user.name=Fixture", "-c",
+        "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "-c", "core.hooksPath=/dev/null", "commit", "-qm", "closure", NULL};
+    return zcl_spawn_capture(add, output, sizeof(output), 30000) == 0 &&
+        zcl_spawn_capture(commit, output, sizeof(output), 30000) == 0;
+}
+
+static bool dvt_closure_members(const struct dvt_call *c)
+{
+    return dvt_files_contains(c, "tests/harness/src/local.h") &&
+        dvt_files_contains(c, "tests/harness/src/nested.h") &&
+        !dvt_files_contains(c, "tests/harness/src/ignored.h") &&
+        !dvt_files_contains(c, "tools/local.h") && dvt_files_sorted(c);
+}
+
+static bool dvt_fixture_closure_epoch(void)
+{
+    char epoch[65], key[65];
+    struct dvt_call a, b;
+    bool ok = dvt_closure_files() && dvt_closure_commit();
+    dvt_begin(&a);
+    (void)json_push_kv_str(&a.input, "group", DVT_GROUP);
+    ok = ok && dvt_run(&a) && dvt_ok(&a) && dvt_closure_members(&a);
+    (void)snprintf(epoch, sizeof(epoch), "%s", dvt_str(&a, "epoch"));
+    (void)snprintf(key, sizeof(key), "%s", dvt_str(&a, "key"));
+    dvt_end(&a);
+    ok = ok && dvt_fixture_write("Makefile", "CFLAGS = -Wall \\\n -Werror\n");
+    dvt_begin(&b);
+    (void)json_push_kv_str(&b.input, "group", DVT_GROUP);
+    ok = ok && dvt_run(&b) && dvt_ok(&b) &&
+        strcmp(epoch, dvt_str(&b, "epoch")) != 0 &&
+        strcmp(key, dvt_str(&b, "key")) != 0;
+    dvt_end(&b);
+    return ok;
+}
+
 static int dvt_referrer_mutation_test(void)
 {
     int failures = 0;
@@ -338,6 +389,7 @@ static int dvt_referrer_mutation_test(void)
         ok = ok && dvt_snapshot_table_test();
         ok = ok && dvt_snapshot_fallback_test();
         ok = ok && dvt_snapshot_root_test();
+        ok = ok && dvt_fixture_closure_epoch();
         bool restored = chdir(saved) == 0;
         ASSERT(restored);
         ASSERT_EQ(test_rm_rf_recursive(root), 0);

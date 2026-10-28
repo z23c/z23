@@ -224,6 +224,70 @@ struct dvt_blob {
     char hash[41];
 };
 
+static bool dvt_append_blob(struct zcl_command_reply *reply, struct dvt_blob **rows,
+                            size_t *n, size_t *cap, const char *path, const char *hash)
+{
+    if (*n == *cap) {
+        size_t ncap = *cap ? *cap * 2 : 1024;
+        struct dvt_blob *nrows =
+            zcl_realloc(*rows, ncap * sizeof(*nrows), "ticketkey_tree");
+        if (!nrows) {
+            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
+                     "execute", "out of memory reading the tip tree",
+                     "git ls-tree -r -z <tip>");
+            return false;
+        }
+        *rows = nrows;
+        *cap = ncap;
+    }
+    (*rows)[*n].path = zcl_malloc(strlen(path) + 1, "ticketkey_path");
+    if (!(*rows)[*n].path) {
+        dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
+                 "out of memory reading the tip tree",
+                 "git ls-tree -r -z <tip>");
+        return false;
+    }
+    (void)memcpy((*rows)[*n].path, path, strlen(path) + 1);
+    (void)memcpy((*rows)[*n].hash, hash, 41);
+    return true;
+}
+
+static int dvt_tree_record(struct zcl_command_reply *reply, char *p, size_t rec_len,
+                       char **path_out, char **hash_out)
+{
+    char *tab, *sp1, *sp2, *hash;
+    tab = memchr(p, '\t', rec_len);
+    if (!tab) {
+        dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
+                 "git ls-tree record has no path separator",
+                 "git ls-tree -r -z <tip>");
+        return -1;
+    }
+    *tab = '\0';
+    *path_out = tab + 1;
+    /* Header is "<mode> SP <type> SP <hash>". */
+    sp1 = strchr(p, ' ');
+    sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
+    if (!sp1 || !sp2) {
+        dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
+                 "git ls-tree record has no mode/type/hash",
+                 "git ls-tree -r -z <tip>");
+        return -1;
+    }
+    if (strncmp(sp1 + 1, "blob ", 5) != 0) {
+        return 0;
+    }
+    hash = sp2 + 1;
+    if (!dvt_is_hex40(hash) || (*path_out)[0] == '\0' || (*path_out)[0] == '/') {
+        dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
+                 "git ls-tree record failed to validate",
+                 "git ls-tree -r -z <tip>");
+        return -1;
+    }
+    *hash_out = hash;
+    return 1;
+}
+
 /* Parse `git ls-tree -r -z <tip>` records ("<mode> SP <type> SP <hash> TAB
  * <path> NUL", `len` bytes of them) into blob rows. Submodules (type
  * commit) and anything that is not a blob carry no file bytes to key and
@@ -241,9 +305,6 @@ static bool dvt_parse_tree(struct zcl_command_reply *reply, char *buf,
     *nblobs = 0;
     while (p < end) {
         char *rec_end = memchr(p, '\0', (size_t)(end - p));
-        char *tab;
-        char *sp1;
-        char *sp2;
         char *hash;
         char *path;
         size_t rec_len = rec_end ? (size_t)(rec_end - p) : (size_t)(end - p);
@@ -251,57 +312,15 @@ static bool dvt_parse_tree(struct zcl_command_reply *reply, char *buf,
             p = rec_end ? rec_end + 1 : end;
             continue;
         }
-        tab = memchr(p, '\t', rec_len);
-        if (!tab) {
-            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
-                     "git ls-tree record has no path separator",
-                     "git ls-tree -r -z <tip>");
+        int kind = dvt_tree_record(reply, p, rec_len, &path, &hash);
+        if (kind < 0)
             goto fail;
-        }
-        *tab = '\0';
-        path = tab + 1;
-        /* Header is "<mode> SP <type> SP <hash>". */
-        sp1 = strchr(p, ' ');
-        sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
-        if (!sp1 || !sp2) {
-            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
-                     "git ls-tree record has no mode/type/hash",
-                     "git ls-tree -r -z <tip>");
-            goto fail;
-        }
-        if (strncmp(sp1 + 1, "blob ", 5) != 0) {
+        if (kind == 0) {
             p = rec_end ? rec_end + 1 : end;
             continue;
         }
-        hash = sp2 + 1;
-        if (!dvt_is_hex40(hash) || path[0] == '\0' || path[0] == '/') {
-            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
-                     "git ls-tree record failed to validate",
-                     "git ls-tree -r -z <tip>");
+        if (!dvt_append_blob(reply, &rows, &n, &cap, path, hash))
             goto fail;
-        }
-        if (n == cap) {
-            size_t ncap = cap ? cap * 2 : 1024;
-            struct dvt_blob *nrows =
-                zcl_realloc(rows, ncap * sizeof(*nrows), "ticketkey_tree");
-            if (!nrows) {
-                dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED",
-                         "execute", "out of memory reading the tip tree",
-                         "git ls-tree -r -z <tip>");
-                goto fail;
-            }
-            rows = nrows;
-            cap = ncap;
-        }
-        rows[n].path = zcl_malloc(strlen(path) + 1, "ticketkey_path");
-        if (!rows[n].path) {
-            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
-                     "out of memory reading the tip tree",
-                     "git ls-tree -r -z <tip>");
-            goto fail;
-        }
-        (void)memcpy(rows[n].path, path, strlen(path) + 1);
-        (void)memcpy(rows[n].hash, hash, 41);
         n++;
         p = rec_end ? rec_end + 1 : end;
     }
@@ -596,6 +615,75 @@ static bool dvt_add_header(struct dvt_set *set, const char *path)
                        strncmp(path, "vendor/", 7) == 0);
 }
 
+static bool dvt_resolve_header(const char *header, size_t hlen, const char *dir,
+                               const struct dvt_blob *blobs, size_t nblobs,
+                               struct dvt_set *set)
+{
+    bool resolved = false;
+    size_t k;
+    if (dir[0]) {
+        char cand[4096];
+        size_t dlen = strlen(dir);
+        if (dlen + 1 + hlen < sizeof(cand)) {
+            (void)memcpy(cand, dir, dlen);
+            cand[dlen] = '/';
+            (void)memcpy(cand + dlen + 1, header,
+                         hlen + 1);
+            if (dvt_tree_find(blobs, nblobs, cand)) {
+                if (!dvt_add_header(set, cand))
+                    return false;
+                resolved = true;
+            }
+        }
+    } else if (dvt_tree_find(blobs, nblobs, header)) {
+        if (!dvt_add_header(set, header))
+            return false;
+        resolved = true;
+    }
+    if (!resolved) {
+        for (k = 0; k < nblobs; k++) {
+            const char *bp = blobs[k].path;
+            const char *bs = strrchr(bp, '/');
+            const char *base = bs ? bs + 1 : bp;
+            if (strcmp(base, header) == 0) {
+                if (!dvt_add_header(set, bp))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool dvt_scan_line(const char *p, size_t line_len, const char *dir,
+                          const struct dvt_blob *blobs, size_t nblobs,
+                          struct dvt_set *set)
+{
+    const char *q = p;
+    while (q < p + line_len && (*q == ' ' || *q == '\t'))
+        q++;
+    if (q + 8 <= p + line_len && strncmp(q, "#include", 8) == 0) {
+        q += 8;
+        while (q < p + line_len && (*q == ' ' || *q == '\t'))
+            q++;
+        if (q < p + line_len && *q == '"') {
+            const char *name = q + 1;
+            const char *quote =
+                memchr(name, '"', (size_t)((p + line_len) - name));
+            if (quote && quote > name) {
+                char header[1024];
+                size_t hlen = (size_t)(quote - name);
+                if (hlen < sizeof(header)) {
+                    (void)memcpy(header, name, hlen);
+                    header[hlen] = '\0';
+                    if (!dvt_resolve_header(header, hlen, dir, blobs, nblobs, set))
+                        return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 /* Scan blob text for #include "header" lines. A quoted name resolves
  * against the includer's directory first, then by basename across the tip
  * tree; every resolution joins the set. Angle includes are system headers
@@ -617,59 +705,8 @@ static bool dvt_scan_includes(const char *content, const char *path,
     while (p && *p) {
         const char *line_end = strchr(p, '\n');
         size_t line_len = line_end ? (size_t)(line_end - p) : strlen(p);
-        const char *q = p;
-        while (q < p + line_len && (*q == ' ' || *q == '\t'))
-            q++;
-        if (q + 8 <= p + line_len && strncmp(q, "#include", 8) == 0) {
-            q += 8;
-            while (q < p + line_len && (*q == ' ' || *q == '\t'))
-                q++;
-            if (q < p + line_len && *q == '"') {
-                const char *name = q + 1;
-                const char *quote =
-                    memchr(name, '"', (size_t)((p + line_len) - name));
-                if (quote && quote > name) {
-                    char header[1024];
-                    size_t hlen = (size_t)(quote - name);
-                    if (hlen > 0 && hlen < sizeof(header)) {
-                        bool resolved = false;
-                        size_t k;
-                        (void)memcpy(header, name, hlen);
-                        header[hlen] = '\0';
-                        if (dir[0]) {
-                            char cand[4096];
-                            size_t dlen = strlen(dir);
-                            if (dlen + 1 + hlen < sizeof(cand)) {
-                                (void)memcpy(cand, dir, dlen);
-                                cand[dlen] = '/';
-                                (void)memcpy(cand + dlen + 1, header,
-                                             hlen + 1);
-                                if (dvt_tree_find(blobs, nblobs, cand)) {
-                                    if (!dvt_add_header(set, cand))
-                                        return false;
-                                    resolved = true;
-                                }
-                            }
-                        } else if (dvt_tree_find(blobs, nblobs, header)) {
-                            if (!dvt_add_header(set, header))
-                                return false;
-                            resolved = true;
-                        }
-                        if (!resolved) {
-                            for (k = 0; k < nblobs; k++) {
-                                const char *bp = blobs[k].path;
-                                const char *bs = strrchr(bp, '/');
-                                const char *base = bs ? bs + 1 : bp;
-                                if (strcmp(base, header) == 0) {
-                                    if (!dvt_add_header(set, bp))
-                                        return false;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (!dvt_scan_line(p, line_len, dir, blobs, nblobs, set))
+            return false;
         p = line_end ? line_end + 1 : NULL;
     }
     return true;
@@ -688,34 +725,35 @@ static int64_t dvt_elapsed_ms(int64_t t0_ns)
     return ms < 0 ? 0 : ms;
 }
 
-/* Toolchain epoch: SHA3-256 over "cc:<first `cc --version` line>\n" plus
- * the CFLAGS logical line from the checkout Makefile. See the EPOCH block
- * in the file contract for why this is re-derived here. */
-static bool dvt_epoch(const char *top, char epoch_hex[65])
+static void dvt_join_cflags(const char *line, char cflags[65536])
 {
-    const char *cc_argv[] = {"cc", "--version", NULL};
-    char cc_out[4096];
-    char cc_line[1024];
+    size_t clen = 0;
+    /* Join backslash continuations into one line. */
+    while (line) {
+        const char *le = strchr(line, '\n');
+        size_t ll =
+            le ? (size_t)(le - line) : strlen(line);
+        bool cont = ll > 0 && line[ll - 1] == '\\';
+        size_t take = cont ? ll - 1 : ll;
+        if (clen + take + 1 < 65536) {
+            (void)memcpy(cflags + clen, line, take);
+            clen += take;
+            cflags[clen] = '\0';
+        }
+        if (!le)
+            break;
+        line = le + 1;
+        if (!cont)
+            break;
+    }
+}
+
+static void dvt_read_cflags(const char *top, char cflags[65536])
+{
     char make_path[8192];
     FILE *mf = NULL;
     char *make_buf = NULL;
     size_t make_len = 0;
-    char cflags[65536];
-    char cflags_src[66000];
-    struct sha3_256_ctx ctx;
-    unsigned char digest[32];
-    size_t i;
-    int rc = zcl_spawn_capture(cc_argv, cc_out, sizeof(cc_out),
-                               DVT_GIT_TIMEOUT_MS);
-    if (rc != 0 || cc_out[0] == '\0') {
-        (void)snprintf(cc_line, sizeof(cc_line), "unavailable");
-    } else {
-        char *nl = strchr(cc_out, '\n');
-        if (nl)
-            *nl = '\0';
-        cc_out[sizeof(cc_line) - 1] = '\0';
-        (void)snprintf(cc_line, sizeof(cc_line), "%s", cc_out);
-    }
     /* The CFLAGS logical line: "CFLAGS = ..." plus \-continuations. */
     cflags[0] = '\0';
     if (strlen(top) + sizeof("/Makefile") < sizeof(make_path)) {
@@ -733,25 +771,7 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
                 const char *nl = strchr(line, '\n');
                 size_t llen = nl ? (size_t)(nl - line) : strlen(line);
                 if (llen >= 9 && strncmp(line, "CFLAGS = ", 9) == 0) {
-                    size_t clen = 0;
-                    /* Join backslash continuations into one line. */
-                    while (line) {
-                        const char *le = strchr(line, '\n');
-                        size_t ll =
-                            le ? (size_t)(le - line) : strlen(line);
-                        bool cont = ll > 0 && line[ll - 1] == '\\';
-                        size_t take = cont ? ll - 1 : ll;
-                        if (clen + take + 1 < sizeof(cflags)) {
-                            (void)memcpy(cflags + clen, line, take);
-                            clen += take;
-                            cflags[clen] = '\0';
-                        }
-                        if (!le)
-                            break;
-                        line = le + 1;
-                        if (!cont)
-                            break;
-                    }
+                    dvt_join_cflags(line, cflags);
                     break;
                 }
                 line = nl ? nl + 1 : NULL;
@@ -760,6 +780,33 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
         }
         (void)fclose(mf);
     }
+}
+
+/* Toolchain epoch: SHA3-256 over "cc:<first `cc --version` line>\n" plus
+ * the CFLAGS logical line from the checkout Makefile. See the EPOCH block
+ * in the file contract for why this is re-derived here. */
+static bool dvt_epoch(const char *top, char epoch_hex[65])
+{
+    const char *cc_argv[] = {"cc", "--version", NULL};
+    char cc_out[4096];
+    char cc_line[1024];
+    char cflags[65536];
+    char cflags_src[66000];
+    struct sha3_256_ctx ctx;
+    unsigned char digest[32];
+    size_t i;
+    int rc = zcl_spawn_capture(cc_argv, cc_out, sizeof(cc_out),
+                               DVT_GIT_TIMEOUT_MS);
+    if (rc != 0 || cc_out[0] == '\0') {
+        (void)snprintf(cc_line, sizeof(cc_line), "unavailable");
+    } else {
+        char *nl = strchr(cc_out, '\n');
+        if (nl)
+            *nl = '\0';
+        cc_out[sizeof(cc_line) - 1] = '\0';
+        (void)snprintf(cc_line, sizeof(cc_line), "%s", cc_out);
+    }
+    dvt_read_cflags(top, cflags);
     if (cflags[0] == '\0')
         (void)snprintf(cflags, sizeof(cflags), "unavailable");
     (void)snprintf(cflags_src, sizeof(cflags_src), "cc:%s\nmakefile:%s\n",
