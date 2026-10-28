@@ -272,7 +272,26 @@ static void test_distinguishing_boundaries(void) {
   }
 }
 
+static void test_utf8_recovery_boundaries(void) {
+  static const char malformed[] = {'a', (char)0xe2, 'B', (char)0x80, 'c'};
+  static const char upper[] = {'a', (char)0xf4, (char)0x8f, (char)0xbf,
+                               (char)0xbf, 'b'};
+  static const char beyond[] = {'a', (char)0xf4, (char)0x90, (char)0x80,
+                                (char)0x80, 'b'};
+  char out[16];
+  CHECK(zslug(malformed, sizeof malformed, out, sizeof out, NULL) == 5);
+  CHECK(strcmp(out, "a-b-c") == 0);
+  CHECK(zslug(upper, sizeof upper, out, sizeof out, NULL) == 3);
+  CHECK(strcmp(out, "a-b") == 0);
+  CHECK(zslug(beyond, sizeof beyond, out, sizeof out, NULL) == 3);
+  CHECK(strcmp(out, "a-b") == 0);
+  memset(out, 0x7f, sizeof out);
+  CHECK(zslug(malformed, sizeof malformed, out, 4, NULL) == 5);
+  CHECK(strcmp(out, "a-b") == 0 && (unsigned char)out[4] == 0x7f);
+}
+
 int main(void) {
+  test_utf8_recovery_boundaries();
   test_distinguishing_boundaries();
   test_basic_kats();
   test_latin1_folds();
