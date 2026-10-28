@@ -55,6 +55,24 @@ static int show(zu256256 v)
     return finish_output(printf("0x%s\n", h));
 }
 
+static int binary_command(const char *op, zu256256 a, zu256256 b)
+{
+    if (strcmp(op, "add") == 0) return show(zu256_add(a, b, NULL));
+    else if (strcmp(op, "sub") == 0) return show(zu256_sub(a, b, NULL));
+    else if (strcmp(op, "mul") == 0) return show(zu256_mul(a, b, NULL));
+    else if (strcmp(op, "div") == 0 || strcmp(op, "mod") == 0) {
+        zu256256 q, r;
+        if (!zu256_divmod(a, b, &q, &r)) {
+            fprintf(stderr, "zu256: division by zero\n");
+            return 1;
+        }
+        return show(strcmp(op, "div") == 0 ? q : r);
+    } else {
+        fprintf(stderr, "zu256: unknown op %s\n", op);
+        return 2;
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -91,18 +109,5 @@ int main(int argc, char **argv)
         fprintf(stderr, "zu256: bad number %s\n", argv[3]);
         return 2;
     }
-    if (strcmp(argv[1], "add") == 0) return show(zu256_add(a, b, NULL));
-    else if (strcmp(argv[1], "sub") == 0) return show(zu256_sub(a, b, NULL));
-    else if (strcmp(argv[1], "mul") == 0) return show(zu256_mul(a, b, NULL));
-    else if (strcmp(argv[1], "div") == 0 || strcmp(argv[1], "mod") == 0) {
-        zu256256 q, r;
-        if (!zu256_divmod(a, b, &q, &r)) {
-            fprintf(stderr, "zu256: division by zero\n");
-            return 1;
-        }
-        return show(strcmp(argv[1], "div") == 0 ? q : r);
-    } else {
-        fprintf(stderr, "zu256: unknown op %s\n", argv[1]);
-        return 2;
-    }
+    return binary_command(argv[1], a, b);
 }

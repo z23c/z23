@@ -9,15 +9,19 @@
 #include <limits.h>
 
 static FILE *cli_sink;
+static FILE *cli_errors;
 static size_t cli_flushes;
 static FILE *real_stdout(void) { return stdout; }
+static FILE *real_stderr(void) { return stderr; }
 [[maybe_unused]] static int cli_flush(FILE *stream)
 {
     if (stream == cli_sink) cli_flushes++;
     return fflush(stream);
 }
 #undef stdout
+#undef stderr
 #define stdout cli_sink
+#define stderr (cli_errors ? cli_errors : real_stderr())
 #define printf(...) fprintf(cli_sink, __VA_ARGS__)
 #define puts(text) fprintf(cli_sink, "%s\n", (text))
 #define fflush cli_flush
@@ -28,7 +32,9 @@ static FILE *real_stdout(void) { return stdout; }
 #undef puts
 #undef fflush
 #undef stdout
+#undef stderr
 #define stdout real_stdout()
+#define stderr real_stderr()
 
 #define CHECK(cond) \
     if (!(cond)) { \
@@ -342,6 +348,31 @@ static void output_unused(void)
     }
     CHECK(fclose(sink) == 0);
 }
+
+static void test_cli_error_precedence(void)
+{
+    const struct { const char *op, *a, *b, *error; int status; } rows[] = {
+        {"unknown", "bad!", "bad!", "zu256: bad number bad!\n", 2},
+        {"unknown", "1", NULL, "zu256: missing operand\n", 2},
+        {"unknown", "1", "bad!", "zu256: bad number bad!\n", 2},
+        {"unknown", "1", "2", "zu256: unknown op unknown\n", 2},
+        {"div", "1", "0", "zu256: division by zero\n", 1},
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        FILE *sink = tmpfile(), *errors = tmpfile();
+        CHECK(sink != NULL && errors != NULL);
+        cli_errors = errors;
+        CHECK(output_invoke(sink, rows[i].op, rows[i].a, rows[i].b) == rows[i].status);
+        cli_errors = NULL;
+        rewind(errors);
+        char text[128];
+        size_t n = fread(text, 1, sizeof text, errors);
+        CHECK(!ferror(errors) && n == strlen(rows[i].error) &&
+              memcmp(text, rows[i].error, n) == 0);
+        CHECK(ftell(sink) == 0 && cli_flushes == 0);
+        CHECK(fclose(sink) == 0 && fclose(errors) == 0);
+    }
+}
 static void test_cli_output(void)
 {
     for (size_t i = 0; i < sizeof output_rows / sizeof output_rows[0]; i++) {
@@ -352,4 +383,5 @@ static void test_cli_output(void)
 #endif
     }
     output_unused();
+    test_cli_error_precedence();
 }

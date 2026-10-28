@@ -136,7 +136,6 @@ contexts/commons/packages/zre/src/zre.c:addthread:16
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
-contexts/commons/packages/zu256/app/main.c:main:19
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_materialize_package:28
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_rm_rf:16
