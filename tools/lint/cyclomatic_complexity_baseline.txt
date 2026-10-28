@@ -597,7 +597,6 @@ engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verifi
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18
 engine/controllers/src/api_controller_app_protocols.c:api_app_protocol_push_openapi_extensions:40
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_dispatch:42
-engine/controllers/src/api_controller_routes.c:api_dynamic_route_match:20
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/api_controller_status.c:api_serve_node_summary:30
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34

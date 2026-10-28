@@ -337,6 +337,26 @@ static bool api_path_prefix_boundary(const char *path, const char *prefix)
     return path[n] == '\0' || path[n] == '/' || path[n] == '?';
 }
 
+static const char *api_dynamic_value_end(const char *value_start,
+                                         const char *suffix)
+{
+    const char *value_end;
+    if (suffix[0]) {
+        const char *query = strchr(value_start, '?');
+        value_end = strstr(value_start, suffix);
+        if (!value_end) return NULL;
+        if (query && value_end > query) return NULL;
+        const char *after = value_end + strlen(suffix);
+        if (*after != '\0' && *after != '?') return NULL;
+    } else {
+        value_end = value_start;
+        while (*value_end && *value_end != '/' && *value_end != '?')
+            value_end++;
+        if (*value_end == '/') return NULL;
+    }
+    return value_end;
+}
+
 static bool api_dynamic_route_match(const char *pattern, const char *path,
                                     char *param, size_t param_len)
 {
@@ -357,25 +377,9 @@ static bool api_dynamic_route_match(const char *pattern, const char *path,
 
     const char *value_start = path + prefix_len;
     const char *suffix = close + 1;
-    const char *value_end = NULL;
-
-    if (suffix[0]) {
-        const char *query = strchr(value_start, '?');
-        value_end = strstr(value_start, suffix);
-        if (!value_end)
-            return false;
-        if (query && value_end > query)
-            return false;
-        const char *after = value_end + strlen(suffix);
-        if (*after != '\0' && *after != '?')
-            return false;
-    } else {
-        value_end = value_start;
-        while (*value_end && *value_end != '/' && *value_end != '?')
-            value_end++;
-        if (*value_end == '/')
-            return false;
-    }
+    const char *value_end = api_dynamic_value_end(value_start, suffix);
+    if (!value_end)
+        return false;
 
     size_t value_len = (size_t)(value_end - value_start);
     if (value_len == 0)

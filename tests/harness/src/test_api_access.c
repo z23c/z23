@@ -65,10 +65,21 @@ static bool route_classifier_clears_public_paths(void)
            !api_route_is_operator_private(NULL);
 }
 
+static bool route_classifier_dynamic_boundaries(void)
+{
+    return api_route_is_operator_private("/api/build_receipts/abc") &&
+           api_route_is_operator_private("/api/build_receipts/abc?x=1") &&
+           !api_route_is_operator_private("/api/build_receipts/") &&
+           !api_route_is_operator_private("/api/build_receipts/?x=1") &&
+           !api_route_is_operator_private("/api/build_receipts/abc/extra") &&
+           !api_route_is_operator_private("/api/build_receipts/abc/?x=1");
+}
+
 static bool route_classifier_flags_expected_private_paths(void)
 {
     bool ok = route_classifier_flags_private_paths();
     ok = ok && route_classifier_clears_public_paths();
+    ok = ok && route_classifier_dynamic_boundaries();
     return ok;
 }
 
