@@ -477,6 +477,10 @@ static void test_explicit_lengths(void) {
 }
 
 static void test_empty_fragment_alternatives(void) {
+  /* Nested empty branches exercise remapped split and jump chains. */
+  SPAN("^(?:(?:)|(?:a{0}))b$", "b", 0, 1);
+  SPAN("^(?:(?:a{0})|a)*b$", "aab", 0, 3);
+  SPAN("^(?:a|(?:a{0}))b$", "ab", 0, 2);
   const char *patterns[] = {"|a", "|a", "b||a", "(?:)|a", "a{0}|b", "a{0,0}|b", "(?:a{0})|b", "^(?:|a)b$", "^(?:|a)+$"};
   const char *texts[] = {"x", "a", "a", "b", "x", "b", "b", "b", ""};
   const size_t ends[] = {0, 0, 0, 0, 0, 0, 0, 1, 0};

@@ -1026,6 +1026,38 @@ bool zre_match(const zre_prog *prog, const char *text, size_t len,
 
 /* ---- public entry points ---------------------------------------------- */
 
+/* Follow removed fall-through jumps and remap a relative branch target. */
+static int32_t compact_target(const emitter *e, const uint32_t *newidx,
+                              size_t from, int32_t offset) {
+  int32_t target = (int32_t)from + offset;
+  while (newidx[target] == UINT32_MAX)
+    target += e->code[target].x;
+  return (int32_t)newidx[target] - (int32_t)newidx[from];
+}
+
+/* Drop fall-through jumps and preserve relative branch targets. */
+static void compact_code(const emitter *e, zre_prog *prog) {
+  uint32_t newidx[ZRE_MAX_PROG];
+  size_t m = 0;
+  for (size_t i = 0; i < e->n; i++) {
+    if (e->code[i].op == OP_JMP && e->code[i].x == 1)
+      newidx[i] = UINT32_MAX;
+    else
+      newidx[i] = (uint32_t)m++;
+  }
+  for (size_t i = 0; i < e->n; i++) {
+    if (newidx[i] == UINT32_MAX) continue;
+    inst tmp = e->code[i];
+    if (tmp.op == OP_SPLIT || tmp.op == OP_JMP) {
+      tmp.x = compact_target(e, newidx, i, tmp.x);
+      if (tmp.op == OP_SPLIT)
+        tmp.y = compact_target(e, newidx, i, tmp.y);
+    }
+    prog->code[newidx[i]] = tmp;
+  }
+  prog->ninst = m;
+}
+
 zre_status zre_compile(const char *pattern, size_t len, zre_prog **prog_out,
                        char *errbuf, size_t errbuf_cap) {
   if (errbuf && errbuf_cap)
@@ -1089,39 +1121,7 @@ zre_status zre_compile(const char *pattern, size_t len, zre_prog **prog_out,
   }
   prog->ncap = p.ncap;
 
-  /* Compaction: drop JMPs whose target is the next instruction (plain
-   * fall-through), remapping every SPLIT/JMP relative target. Removed
-   * JMPs can chain, so targets resolve by walking. */
-  {
-    uint32_t newidx[ZRE_MAX_PROG];
-    size_t m = 0;
-    for (size_t i = 0; i < e.n; i++) {
-      if (e.code[i].op == OP_JMP && e.code[i].x == 1) {
-        newidx[i] = UINT32_MAX; /* removed */
-      } else {
-        newidx[i] = (uint32_t)m++;
-      }
-    }
-    for (size_t i = 0; i < e.n; i++) {
-      if (newidx[i] == UINT32_MAX)
-        continue;
-      inst tmp = e.code[i];
-      if (tmp.op == OP_SPLIT || tmp.op == OP_JMP) {
-        int32_t tx = (int32_t)i + tmp.x;
-        while (newidx[tx] == UINT32_MAX)
-          tx += e.code[tx].x; /* skip a removed fall-through JMP */
-        tmp.x = (int32_t)newidx[tx] - (int32_t)newidx[i];
-        if (tmp.op == OP_SPLIT) {
-          int32_t ty = (int32_t)i + tmp.y;
-          while (newidx[ty] == UINT32_MAX)
-            ty += e.code[ty].x;
-          tmp.y = (int32_t)newidx[ty] - (int32_t)newidx[i];
-        }
-      }
-      prog->code[newidx[i]] = tmp;
-    }
-    prog->ninst = m;
-  }
+  compact_code(&e, prog);
   free(e.code);
   free(p.nodes);
   *prog_out = prog;

@@ -142,7 +142,6 @@ contexts/commons/packages/zre/src/zre.c:parse_class:19
 contexts/commons/packages/zre/src/zre.c:parse_counted:16
 contexts/commons/packages/zre/src/zre.c:parse_escape:19
 contexts/commons/packages/zre/src/zre.c:parse_repeat:22
-contexts/commons/packages/zre/src/zre.c:zre_compile:25
 contexts/commons/packages/zring/app/main.c:main:18
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
