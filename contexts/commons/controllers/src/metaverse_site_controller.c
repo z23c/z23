@@ -8,6 +8,7 @@
  * zcode.commons.* typed commands call. */
 
 #include "controllers/metaverse_site_controller.h"
+#include "site_route_internal.h"
 
 #include "views/metaverse_view.h"
 
@@ -437,13 +438,7 @@ size_t metaverse_site_handle_request(const char *method, const char *path,
 
     /* Split the route from the query string (bounded copy). */
     char route[1024];
-    size_t rlen = 0;
-    while (path[rlen] && path[rlen] != '?' && rlen < sizeof(route) - 1) {
-        route[rlen] = path[rlen];
-        rlen++;
-    }
-    route[rlen] = '\0';
-    const char *query = path[rlen] == '?' ? path + rlen + 1 : NULL;
+    const char *query = site_split_route(path, route, sizeof(route));
 
     char dd[4400];
     if (!ms_datadir(datadir, dd))

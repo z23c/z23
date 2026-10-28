@@ -984,6 +984,19 @@ static int t_bounded(const char *dd)
 
 /* ══ 6. honest 404s ══════════════════════════════════════════════════ */
 
+static int t_route_query_boundaries(const char *dd)
+{
+    int failures = 0;
+    size_t len = 0;
+    const char *r = zs_get(dd, "/zcode/contexts/commons/packages/?q=demo", &len);
+    ZS_CHECK("existing slash alias retains search", len > 0 &&
+             strstr(r, "HTTP/1.1 200") == r && strstr(r, "alice/demo"));
+    r = zs_get(dd, "/zcode/packages?q=demo?tail", &len);
+    ZS_CHECK("search retains later delimiter", len > 0 &&
+             strstr(r, "HTTP/1.1 200") == r && !strstr(r, "alice/demo"));
+    return failures;
+}
+
 static int t_not_found(const char *dd)
 {
     int failures = 0;
@@ -1188,6 +1201,7 @@ int test_zcode_site(void)
     }
     failures += t_escaping(dd);
     failures += t_not_found(dd);
+    failures += t_route_query_boundaries(dd);
     failures += t_error_length(dd);
 
     const char *dd2 = "./test-tmp/zcode_site_bounded";

@@ -399,6 +399,28 @@ static int t_empty(const char *dd)
 
 /* ══ 4. honest failures + escaping ═══════════════════════════════════ */
 
+static int t_route_boundaries(const char *dd)
+{
+    int failures = 0;
+    size_t len = 0;
+    const char *r = ms_get(dd, "/metaverse/property/?kind=bogus", &len);
+    MS_CHECK("trailing slash retains query", len > 0 &&
+             strstr(r, "HTTP/1.1 400") == r && strstr(r, "unknown kind"));
+    r = ms_get(dd, "/metaverse/property?x=1&kind=zcode_package?tail", &len);
+    MS_CHECK("query retains later delimiter", len > 0 &&
+             strstr(r, "HTTP/1.1 400") == r && strstr(r, "unknown kind"));
+    char path[1100];
+    memset(path, 'x', sizeof(path));
+    memcpy(path, "/metaverse/", 11);
+    memcpy(path + 1050, "?hidden-suffix", 15);
+    path[1065] = '\0';
+    r = ms_get(dd, path, &len);
+    MS_CHECK("long unknown route bounded", len > 0 &&
+             strstr(r, "HTTP/1.1 404") == r &&
+             strstr(r, "Unknown metaverse route") && !strstr(r, "hidden-suffix"));
+    return failures;
+}
+
 static int t_failures(const char *dd)
 {
     int failures = 0;
@@ -465,6 +487,7 @@ int test_metaverse_site(void)
     mkdir(dd, 0755);
     failures += t_routes_and_agreement(dd);
     failures += t_failures(dd);
+    failures += t_route_boundaries(dd);
     failures += t_bounded(dd);
     test_rm_rf_recursive(dd);
 

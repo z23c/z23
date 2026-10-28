@@ -13,6 +13,7 @@
  * and there is no website database. */
 
 #include "controllers/zcode_site_controller.h"
+#include "site_route_internal.h"
 
 #include "views/zcode_view.h"
 
@@ -729,20 +730,6 @@ static size_t zs_handle_download(const char *zcode_dir, const char *rest,
                              resp, max);
 }
 
-/* Split the route from the query string (bounded copy into route). Returns
- * the query after '?', or NULL when the path carries none. */
-static const char *zs_split_route(const char *path, char *route,
-                                  size_t route_max)
-{
-    size_t rlen = 0;
-    while (path[rlen] && path[rlen] != '?' && rlen < route_max - 1) {
-        route[rlen] = path[rlen];
-        rlen++;
-    }
-    route[rlen] = '\0';
-    return path[rlen] == '?' ? path + rlen + 1 : NULL;
-}
-
 /* The index, the package list, one package and one publisher. Sets *n and
  * returns true when the route is one of these. */
 static bool zs_route_catalog(const char *zcode_dir, const char *route,
@@ -825,7 +812,7 @@ size_t zcode_site_handle_request(const char *method, const char *path,
 
     /* Split the route from the query string (bounded copy). */
     char route[1024];
-    const char *query = zs_split_route(path, route, sizeof(route));
+    const char *query = site_split_route(path, route, sizeof(route));
 
     /* Public onboarding is compiled content, independent of private stores. */
     if (zs_path_eq(route, "/zcode/develop") ||
