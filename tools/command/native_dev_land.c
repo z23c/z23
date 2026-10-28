@@ -12972,7 +12972,7 @@ static const struct dl_next_entry k_dl_next[] = {
     {"FENCE_WINDOWS_UNAVAILABLE", "run dev land on a POSIX host; z23 dev land status reads the queue anywhere"},
     {"STATE_DIR_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
     {"QUEUE_LOCK_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
-    {"QUEUE_READ_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"QUEUE_READ_FAILED", "check that the land state path and queue file have the expected types and read permissions; if the local queue is intentionally disabled, query the host that owns the queue"},
     {"QUEUE_WRITE_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
     {"OUTCOME_WRITE_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
     {"WORKTREE_STATE_UNAVAILABLE", "read the path named in error.evidence, repair it, then retry z23 dev land @A"},

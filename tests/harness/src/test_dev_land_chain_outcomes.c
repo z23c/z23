@@ -539,7 +539,31 @@ int test_dev_land_chain_relation(void)
 int test_dev_land_malformed_queue_refusal(void)
 {
     int failures = 0;
-    TEST("land: a legacy row blocks status, submit and step without losing bytes") {
+    TEST("land: non-directory and malformed queue refusals preserve evidence") {
+        {
+            struct dlx_call c;
+            char parent[1024], land[1200], after[64];
+            size_t n = 0;
+            static const char marker[] = "fixture marker\n";
+            dlx_isolate("non_directory_land");
+            ASSERT(snprintf(parent, sizeof(parent), "%s/z23/dev", g_dlx_state) < (int)sizeof(parent));
+            ASSERT(dlx_mkdir_p(parent));
+            dlx_landdir(land, sizeof(land));
+            ASSERT(dlx_write(land, marker));
+            dlx_begin(&c, "status");
+            ASSERT(dlx_run(&c));
+            ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+            ASSERT(!c.reply.error.mutated);
+            char evidence[64];
+            ASSERT(snprintf(evidence, sizeof(evidence), "queue_read_failed_errno_%d", ENOTDIR) < (int)sizeof(evidence));
+            ASSERT_STR_EQ(dlx_err_evidence(&c), evidence);
+            ASSERT(strstr(c.reply.error.next_action, "types and read permissions") != NULL);
+            ASSERT(strstr(c.reply.error.next_action, "host that owns the queue") != NULL);
+            ASSERT(dlx_slurp(land, after, sizeof(after), &n));
+            ASSERT(n == sizeof(marker) - 1 && memcmp(after, marker, n) == 0);
+            dlx_end(&c);
+            dlx_restore();
+        }
         struct dlx_rig rig;
         struct dlx_call c;
         char landdir[1024], qpath[1200], before[8192], after[8192];
