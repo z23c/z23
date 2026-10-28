@@ -741,6 +741,7 @@ static bool zs_route_catalog(const char *zcode_dir, const char *route,
         return true;
     }
     if (zs_path_eq(route, "/zcode/packages") ||
+        zs_path_eq(route, "/zcode/packages/") ||
         zs_path_eq(route, "/zcode/contexts/commons/packages/")) {
         *n = zs_handle_packages(zcode_dir, query, resp, max);
         return true;

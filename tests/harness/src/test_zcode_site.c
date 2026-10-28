@@ -979,6 +979,10 @@ static int t_bounded(const char *dd)
              len > 0 && len < 65536 /* the onion budget */ &&
              strstr(r, "HTTP/1.1 200 OK") == r &&
              strstr(r, "not shown (page cap"));
+    r = zs_get(dd, "/zcode/packages/", &len);
+    ZS_CHECK("bounded: canonical slash retains page cap",
+             len > 0 && len < 65536 && strstr(r, "HTTP/1.1 200 OK") == r &&
+             strstr(r, "not shown (page cap"));
     return failures;
 }
 
@@ -991,6 +995,12 @@ static int t_route_query_boundaries(const char *dd)
     const char *r = zs_get(dd, "/zcode/contexts/commons/packages/?q=demo", &len);
     ZS_CHECK("existing slash alias retains search", len > 0 &&
              strstr(r, "HTTP/1.1 200") == r && strstr(r, "alice/demo"));
+    r = zs_get(dd, "/zcode/packages/?q=demo", &len);
+    ZS_CHECK("canonical slash retains search", len > 0 &&
+             strstr(r, "HTTP/1.1 200") == r && strstr(r, "alice/demo"));
+    r = zs_get(dd, "/zcode/packages/?q=demo?tail", &len);
+    ZS_CHECK("canonical slash search retains later delimiter", len > 0 &&
+             strstr(r, "HTTP/1.1 200") == r && !strstr(r, "alice/demo"));
     r = zs_get(dd, "/zcode/packages?q=demo?tail", &len);
     ZS_CHECK("search retains later delimiter", len > 0 &&
              strstr(r, "HTTP/1.1 200") == r && !strstr(r, "alice/demo"));
