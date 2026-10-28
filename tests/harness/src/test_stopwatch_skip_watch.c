@@ -618,11 +618,11 @@ static bool ssw_path_env_case(const char *which, const char *file_env,
         free(saved_dir);
         return false;
     }
-    bool ok = setenv(file_env, "/tmp/direct-ledger", 1) == 0 &&
-              setenv(dir_env, "/tmp/fallback-dir", 1) == 0;
-    bool direct_ok = ssw_resolve_boundaries(which, "/tmp/direct-ledger");
+    bool ok = setenv(file_env, "direct-ledger", 1) == 0 &&
+              setenv(dir_env, "fallback-dir", 1) == 0;
+    bool direct_ok = ssw_resolve_boundaries(which, "direct-ledger");
     bool unset_ok = unsetenv(file_env) == 0;
-    bool dir_ok = ssw_resolve_boundaries(which, "/tmp/fallback-dir/history.jsonl");
+    bool dir_ok = ssw_resolve_boundaries(which, "fallback-dir/history.jsonl");
     bool file_restored = ssw_restore_env(file_env, saved_file);
     bool dir_restored = ssw_restore_env(dir_env, saved_dir);
     return ok && direct_ok && unset_ok && dir_ok && file_restored && dir_restored;
