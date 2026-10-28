@@ -212,7 +212,15 @@ static long job_read_pid(const char *id)
 
 static bool job_pid_alive(long pid)
 {
+    if (pid <= 0)
+        return false;
+    if (g_hooks && g_hooks->pid_liveness)
+        return g_hooks->pid_liveness((uint64_t)pid) != OS_PROC_LIVENESS_DEAD;
+#if defined(_WIN32)
+    return os_proc_pid_liveness((uint64_t)pid) != OS_PROC_LIVENESS_DEAD;
+#else
     return pid > 0 && (kill((pid_t)pid, 0) == 0 || errno == EPERM);
+#endif
 }
 
 /* ── classification ──────────────────────────────────────────────────────── */

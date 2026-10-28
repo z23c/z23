@@ -288,6 +288,61 @@ static void dj_write_pid(const char *id, long pid)
     (void)fclose(f);
 }
 
+static enum os_proc_liveness dj_unknown_pid(uint64_t pid)
+{
+    (void)pid;
+    return OS_PROC_LIVENESS_UNKNOWN;
+}
+
+static enum os_proc_liveness dj_dead_observation(uint64_t pid)
+{
+    (void)pid;
+    return OS_PROC_LIVENESS_DEAD;
+}
+
+static int dj_test_unknown_liveness(struct zcl_dev_job_hooks *hooks)
+{
+    int failures = 0;
+    struct dj_call c, w, duplicate;
+    char id[128], log[4096];
+    TEST("dev.job: unknown liveness stays nonterminal until rc") {
+        g_no_child = true;
+        dj_start(&c, g_repo, "make", "ok", true);
+        g_no_child = false;
+        ASSERT(dj_ok(&c));
+        (void)snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
+        (void)snprintf(log, sizeof(log), "%s", dj_str(&c, "log"));
+        dj_write_pid(id, 123);
+        hooks->pid_liveness = dj_unknown_pid;
+        dj_wait(&w, id, NULL, 1, 0);
+        ASSERT_STR_EQ(dj_str(&w, "state"), "running");
+        dj_end(&w);
+        dj_start(&duplicate, g_repo, "make", "ok", true);
+        ASSERT_STR_EQ(dj_str(&duplicate, "state"), "attached");
+        ASSERT_STR_EQ(dj_str(&duplicate, "job_id"), id);
+        dj_end(&duplicate);
+        hooks->pid_liveness = dj_dead_observation;
+        dj_wait(&w, id, NULL, 1, 0);
+        ASSERT_STR_EQ(dj_str(&w, "state"), "lost");
+        dj_end(&w);
+        hooks->pid_liveness = dj_unknown_pid;
+        FILE *f = fopen(log, "w");
+        ASSERT(f != NULL);
+        ASSERT(fputs("rc=3\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        dj_wait(&w, id, NULL, 1, 0);
+        ASSERT_STR_EQ(dj_str(&w, "state"), "failed");
+        ASSERT_EQ(dj_int(&w, "rc"), 3);
+        dj_end(&w);
+        hooks->pid_liveness = NULL;
+        dj_end(&c);
+        PASS();
+    } _test_next:;
+    hooks->pid_liveness = NULL;
+    g_no_child = false;
+    return failures;
+}
+
 int test_dev_job(void);
 int test_dev_job(void)
 {
@@ -300,6 +355,7 @@ int test_dev_job(void)
     dj_isolate();
     hooks.primary_checkout = g_repo;
     zcl_dev_job_set_hooks(&hooks);
+    failures += dj_test_unknown_liveness(&hooks);
 
     TEST("dev.job: argv[0] outside the allowlist is refused") {
         dj_start(&c, g_repo, "sh", "ok", true);

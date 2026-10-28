@@ -13,6 +13,7 @@
 #define ZCL_NATIVE_DEV_JOB_H
 
 #include "json/json.h"
+#include "platform/os_proc.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,11 +38,13 @@ enum zcl_dev_job_state {
  * the exec core run the job argv itself instead of through devbuild / the
  * host build queue. `primary_checkout`, when set, names the primary checkout
  * whose worktrees are registered in place of this binary's own repository.
+ * `pid_liveness`, when set, supplies a process observation for tests.
  * None of these is reachable from any command input. */
 struct zcl_dev_job_hooks {
     bool (*launch)(const char *job_id);
     bool runner_direct;
     const char *primary_checkout;
+    enum os_proc_liveness (*pid_liveness)(uint64_t pid);
 };
 void zcl_dev_job_set_hooks(const struct zcl_dev_job_hooks *hooks);
 const struct zcl_dev_job_hooks *zcl_dev_job_hooks(void);
@@ -74,7 +77,9 @@ enum zcl_dev_job_state zcl_dev_job_eval(const char *id,
                                         const struct json_value *handle,
                                         int *rc, long *pid);
 
-/* Pure: classify a job from what is on disk. `started_unix` and `now_unix`
+/* RUNNING is nonterminal, not proof of a live process: launch grace and
+ * indeterminate liveness can also leave a job nonterminal.
+ * Pure: classify a job from what is on disk. `started_unix` and `now_unix`
  * give the launch grace for a child that has not written its pid yet. */
 enum zcl_dev_job_state zcl_dev_job_classify(bool have_rc, int rc,
                                             long pid, bool pid_alive,
