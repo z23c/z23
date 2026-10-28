@@ -11,6 +11,7 @@
 #include "platform/time_compat.h"
 #include "services/metaverse_space_scout_service.h"
 #include "vcs/space_scout.h"
+#include "vcs/vcs_object.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -109,6 +110,30 @@ static bool scout_store_decide(void *opaque, const uint8_t root[32],
   return policy->calls != policy->deny_call;
 }
 
+struct scout_fixture_policy {
+  const char *workspace;
+  unsigned calls, selected;
+  bool deny, injected, order_ok;
+  uint8_t roots[3][32];
+};
+
+static bool scout_fixture_decide(void *opaque, const uint8_t root[32],
+                                 const char *type)
+{
+  static const char *const names[] = {"space.scout.mission",
+      "space.scout.evidence_map", "space.scout.attestation"};
+  struct scout_fixture_policy *p = opaque;
+  if (!p || !root || !type || p->calls >= 3) return false;
+  unsigned i = p->calls++;
+  p->order_ok &= strcmp(type, names[i]) == 0;
+  memcpy(p->roots[i], root, 32);
+  if (p->calls != p->selected) return true;
+  if (p->deny) return false;
+  const uint8_t bad = 0xa5;
+  p->injected = vcs_object_put_addressed(p->workspace, root, &bad, 1);
+  return p->injected;
+}
+
 static void scout_mission(struct vcs_space_scout_mission_v1 *mission)
 {
   memset(mission, 0, sizeof(*mission));
@@ -122,6 +147,85 @@ static void scout_mission(struct vcs_space_scout_mission_v1 *mission)
   mission->maximum_portals = 8;
   mission->maximum_bytes = 1000;
   mission->deadline_ms = 1000;
+}
+
+static bool scout_fixture_objects(const struct scout_fixture_policy *p)
+{
+  for (unsigned i = 0; i < 3; i++) {
+    bool exists = vcs_object_has(p->workspace, p->roots[i]);
+    if (exists != (i < p->selected)) return false;
+  }
+  uint8_t *bytes = NULL;
+  size_t len = 0;
+  int rc = vcs_object_load_raw(p->workspace, p->roots[p->selected - 1],
+                               &bytes, &len);
+  bool ok = rc == 0 && len == 1 && bytes && bytes[0] == 0xa5;
+  free(bytes);
+  return ok;
+}
+
+static bool scout_fixture_result(const struct scout_fixture_policy *policy,
+                                 struct zcl_result result, bool mutated,
+                                 const void *out, const void *saved, size_t size)
+{
+  bool ok = !result.ok && policy->order_ok &&
+      policy->calls == (policy->deny ? policy->selected : 3) &&
+      memcmp(saved, out, size) == 0;
+  if (policy->deny)
+    return ok && !mutated && !vcs_object_store_initialized(policy->workspace) &&
+           strcmp(result.message, "space-scout-evidence-store-policy-denied") == 0;
+  return ok && policy->injected && mutated == (policy->selected > 1) &&
+         strcmp(result.message, "space-scout-cas-store-failed") == 0 &&
+         scout_fixture_objects(policy);
+}
+
+static bool scout_fixture_case(unsigned selected, bool deny)
+{
+  char workspace[PATH_MAX];
+  if (!test_mkdtemp(workspace, sizeof workspace, "zcl_scout_policy")) return false;
+  struct vcs_space_scout_mission_v1 mission;
+  scout_mission(&mission);
+  struct metaverse_space_scout_plan_out plan;
+  struct vcs_zcode_dht_delegation delegation;
+  uint8_t online_seed[32];
+  bool setup = metaverse_space_scout_plan(&mission, &plan).ok &&
+      scout_delegation(&delegation, online_seed, 1) &&
+      (deny || vcs_object_store_init(workspace));
+  struct scout_graph graph = {0};
+  struct scout_clock clock = {0};
+  struct vcs_space_scout_run_context context = {
+      .observe = scout_observe, .observe_context = &graph,
+      .monotonic_ms = scout_now, .clock_context = &clock};
+  struct scout_fixture_policy policy = {
+      .workspace = workspace, .selected = selected, .deny = deny, .order_ok = true};
+  struct metaverse_space_scout_run_out out;
+  unsigned char saved[sizeof out];
+  memset(&out, 0xa5, sizeof out);
+  memcpy(saved, &out, sizeof out);
+  bool mutated = true;
+  struct zcl_result result = {0};
+  if (setup)
+    result = metaverse_space_scout_run(workspace, &mission, plan.plan_token, true,
+        &context, &delegation, online_seed, scout_fixture_decide, &policy,
+        &mutated, &out);
+  bool ok = setup && scout_fixture_result(&policy, result, mutated,
+                                           &out, saved, sizeof out);
+  test_rm_rf(workspace);
+  return ok;
+}
+
+static int test_scout_policy_and_partial_store(void)
+{
+  int failures = 0;
+  TEST("space scout: ordered policy and partial CAS failure") {
+    for (unsigned i = 1; i <= 3; i++) {
+      ASSERT(scout_fixture_case(i, true));
+      ASSERT(scout_fixture_case(i, false));
+    }
+    PASS();
+  }
+_test_next:;
+  return failures;
 }
 
 static int test_scout_canonical_evidence(void)
@@ -514,6 +618,7 @@ int test_space_scout(void)
   failures += test_scout_canonical_evidence();
   failures += test_scout_bounds();
   failures += test_scout_attestation_and_service();
+  failures += test_scout_policy_and_partial_store();
   failures += test_scout_deadline_cancels_discovery();
   printf("=== space_scout: %d failures ===\n", failures);
   return failures;
