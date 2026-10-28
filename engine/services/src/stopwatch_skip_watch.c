@@ -294,6 +294,11 @@ bool stopwatch_skip_read_ledger(const char *path,
     return scan_finish(out, &c.st);
 }
 
+static bool stopwatch_path_value_present(const char *value)
+{
+    return value && value[0];
+}
+
 bool stopwatch_skip_resolve_ledger(const char *which, char *out, size_t cap)
 {
     if (!out || cap == 0)
@@ -318,18 +323,21 @@ bool stopwatch_skip_resolve_ledger(const char *which, char *out, size_t cap)
     }
 
     const char *v = getenv(file_env);
-    if (v && v[0]) {
-        evidence_copy_bounded(out, cap, v, strlen(v));
+    if (stopwatch_path_value_present(v)) {
+        size_t len = strlen(v);
+        if (len >= cap)
+            LOG_FAIL("stopwatch", "%s path too long for buffer", file_env);
+        evidence_copy_bounded(out, cap, v, len);
         return true;
     }
     v = getenv(dir_env);
-    if (v && v[0]) {
+    if (stopwatch_path_value_present(v)) {
         if (snprintf(out, cap, "%s/history.jsonl", v) >= (int)cap)
             LOG_FAIL("stopwatch", "%s path too long for buffer", dir_env);
         return true;
     }
     const char *home = getenv("HOME");
-    if (!home || !home[0]) {
+    if (!stopwatch_path_value_present(home)) {
         out[0] = '\0';
         LOG_FAIL("stopwatch", "no %s, no %s and no HOME to resolve the %s "
                  "ledger path from", file_env, dir_env, which);

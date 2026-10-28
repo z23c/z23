@@ -153,8 +153,8 @@ bool stopwatch_skip_scan(const char *text, size_t len,
 bool stopwatch_skip_read_ledger(const char *path,
                                 struct stopwatch_skip_report *out);
 
-/* Resolve a ledger path. `which` is "c3" or "netdisrupt". Returns false when
- * no path can be resolved (no env override and no HOME). */
+/* Resolve a ledger path. `which` is "c3" or "netdisrupt". Returns false on
+ * invalid arguments, an unavailable path, or an output buffer too small. */
 bool stopwatch_skip_resolve_ledger(const char *which, char *out, size_t cap);
 
 /* One operator-readable line describing the report. TWO alarms live here and

@@ -588,6 +588,57 @@ static bool ssw_absent_ledger_path_stays_silent(bool ok, const char *absent)
     return ok;
 }
 
+static bool ssw_resolve_boundaries(const char *which, const char *expected)
+{
+    char out[128];
+    size_t len = strlen(expected);
+    bool ok = stopwatch_skip_resolve_ledger(which, out, len + 1) &&
+              strcmp(out, expected) == 0;
+    bool exact_short = stopwatch_skip_resolve_ledger(which, out, len);
+    bool smaller = stopwatch_skip_resolve_ledger(which, out, len - 1);
+    return ok && !exact_short && !smaller;
+}
+
+static bool ssw_restore_env(const char *name, char *saved)
+{
+    int rc = saved ? setenv(name, saved, 1) : unsetenv(name);
+    free(saved);
+    return rc == 0;
+}
+
+static bool ssw_path_env_case(const char *which, const char *file_env,
+                              const char *dir_env)
+{
+    const char *file_value = getenv(file_env);
+    const char *dir_value = getenv(dir_env);
+    char *saved_file = file_value ? strdup(file_value) : NULL;
+    char *saved_dir = dir_value ? strdup(dir_value) : NULL;
+    if ((file_value && !saved_file) || (dir_value && !saved_dir)) {
+        free(saved_file);
+        free(saved_dir);
+        return false;
+    }
+    bool ok = setenv(file_env, "/tmp/direct-ledger", 1) == 0 &&
+              setenv(dir_env, "/tmp/fallback-dir", 1) == 0;
+    bool direct_ok = ssw_resolve_boundaries(which, "/tmp/direct-ledger");
+    bool unset_ok = unsetenv(file_env) == 0;
+    bool dir_ok = ssw_resolve_boundaries(which, "/tmp/fallback-dir/history.jsonl");
+    bool file_restored = ssw_restore_env(file_env, saved_file);
+    bool dir_restored = ssw_restore_env(dir_env, saved_dir);
+    return ok && direct_ok && unset_ok && dir_ok && file_restored && dir_restored;
+}
+
+static int ssw_path_boundary_test(void)
+{
+    bool c3 = ssw_path_env_case("c3", "ZCL_C3_STOPWATCH_HISTORY",
+                                "ZCL_C3_HISTORY_DIR");
+    bool nd = ssw_path_env_case("netdisrupt", "ZCL_NETDISRUPT_STOPWATCH_HISTORY",
+                                "ZCL_ND_HISTORY_DIR");
+    printf("stopwatch_skip_watch: path length boundaries... %s\n",
+           c3 && nd ? "OK" : "FAIL");
+    return c3 && nd ? 0 : 1;
+}
+
 static bool ssw_history_env_resolves_named_ledger(bool ok, const char *path,
                                                  const char *absent)
 {
@@ -843,6 +894,7 @@ int test_stopwatch_skip_watch(void)
 
     /* ── file + env + typed-dump path, all under a private tmp dir ──── */
     bool ok = ssw_ledger_file_env_and_typed_dump();
+    failures += ssw_path_boundary_test();
     SSW_CHECK("ledger file + env resolution + typed dump report the alarm",
               ok);
 
