@@ -72,6 +72,87 @@ static bool copy_value(const struct json_value *from,
     return !value || json_push_kv(to, to_key, value);
 }
 
+static bool reflex_status(const char *status)
+{
+    static const char *const statuses[] = {
+        "edit_seen", "impact_ready", "reflex_ready", "compile_only",
+        "story_green", "story_red",
+    };
+    if (!status) return false;
+    for (size_t i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++)
+        if (strcmp(status, statuses[i]) == 0) return true;
+    return false;
+}
+
+static const char *cycle_lane(const struct json_value *cycle, bool live)
+{
+    const char *status = json_get_str(json_get(cycle, "status"));
+    const char *action = json_get_str(json_get(cycle, "action"));
+    if (live) return "LIVE";
+    if (reflex_status(status)) return "REFLEX";
+    if (status && strcmp(status, "fallback_ready") == 0) return "VERIFY";
+    if (action && strcmp(action, "restart") == 0) return "FAST_RESTART";
+    return "VERIFY";
+}
+
+static bool project_cycle_fields(const struct json_value *cycle,
+                                  struct json_value *compact)
+{
+    static const struct {
+        const char *from, *to;
+        bool boolean;
+    } fields[] = {
+        { "status", "status", false },
+        { "phase", "event", false },
+        { "edit_epoch", "edit_epoch", false },
+        { "action", "action", false },
+        { "elapsed_us", "feedback_us", false },
+        { "elapsed_ms", "feedback_ms", false },
+        { "feedback_class", "feedback_class", false },
+        { "candidate_object_root", "candidate_object_root", false },
+        { "candidate_module_root", "candidate_module_root", false },
+        { "loaded_mapping_root", "loaded_mapping_root", false },
+        { "candidate_bytes_executed", "candidate_bytes_executed", false },
+        { "story_id", "story_id", false },
+        { "story_root", "story_root", false },
+        { "story_fixture_root", "story_fixture_root", false },
+        { "story_fixture_id", "story_fixture_id", false },
+        { "story_adapter", "story_adapter", false },
+        { "story_timeout_ms", "story_timeout_ms", false },
+        { "forbidden_effect_mask", "forbidden_effect_mask", false },
+        { "observation_root", "observation_root", false },
+        { "exercised_owner_surface", "exercised_owner_surface", false },
+        { "story_detail", "story_detail", false },
+        { "impact_us", "impact_us", false },
+        { "closure_us", "closure_us", false },
+        { "runtime_published", "runtime_published", true },
+        { "proof_complete", "proof_complete", true },
+        { "proof_scope", "proof_scope", false },
+        { "source_id_sha256", "source_identity_sha256", false },
+        { "vcs_commit", "zvcs_commit_root", false },
+        { "proof_receipt_root", "proof_receipt_root", false },
+        { "publication_job_root", "publication_job_root", false },
+        { "publication_enqueue_us", "publication_enqueue_us", false },
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        bool ok = fields[i].boolean
+            ? json_push_kv_bool(compact, fields[i].to,
+                json_get_bool(json_get(cycle, fields[i].from)))
+            : copy_value(cycle, compact, fields[i].from, fields[i].to);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static const char *unpublished_reason(const struct json_value *cycle)
+{
+    const char *why = json_get_str(json_get(cycle, "why_not_live"));
+    if (!why || !why[0])
+        why = json_get_str(json_get(cycle, "failure_capsule"));
+    if (!why || !why[0]) why = json_get_str(json_get(cycle, "reason"));
+    return why && why[0] ? why : "runtime publication was not proven";
+}
+
 static bool project_cycle(const struct json_value *cycle,
                           int64_t epoch, struct json_value *compact)
 {
@@ -80,76 +161,17 @@ static bool project_cycle(const struct json_value *cycle,
     json_init(compact);
     json_set_object(compact);
     const bool live = json_get_bool(json_get(cycle, "runtime_published"));
-    const char *action = json_get_str(json_get(cycle, "action"));
-    const char *status = json_get_str(json_get(cycle, "status"));
-    const bool reflex = status &&
-        (strcmp(status, "edit_seen") == 0 ||
-         strcmp(status, "impact_ready") == 0 ||
-         strcmp(status, "reflex_ready") == 0 ||
-         strcmp(status, "compile_only") == 0 ||
-         strcmp(status, "story_green") == 0 ||
-         strcmp(status, "story_red") == 0);
     bool ok = json_push_kv_str(compact, "schema", "zcl.dev_drive.v1") &&
         json_push_kv_int(compact, "epoch", epoch) &&
-        json_push_kv_str(compact, "lane", live ? "LIVE" :
-            reflex ? "REFLEX" :
-            status && strcmp(status, "fallback_ready") == 0 ? "VERIFY" :
-            action && strcmp(action, "restart") == 0 ? "FAST_RESTART" :
-            "VERIFY") &&
-        copy_value(cycle, compact, "status", "status") &&
-        copy_value(cycle, compact, "phase", "event") &&
-        copy_value(cycle, compact, "edit_epoch", "edit_epoch") &&
-        copy_value(cycle, compact, "action", "action") &&
-        copy_value(cycle, compact, "elapsed_us", "feedback_us") &&
-        copy_value(cycle, compact, "elapsed_ms", "feedback_ms") &&
-        copy_value(cycle, compact, "feedback_class", "feedback_class") &&
-        copy_value(cycle, compact, "candidate_object_root",
-                   "candidate_object_root") &&
-        copy_value(cycle, compact, "candidate_module_root",
-                   "candidate_module_root") &&
-        copy_value(cycle, compact, "loaded_mapping_root",
-                   "loaded_mapping_root") &&
-        copy_value(cycle, compact, "candidate_bytes_executed",
-                   "candidate_bytes_executed") &&
-        copy_value(cycle, compact, "story_id", "story_id") &&
-        copy_value(cycle, compact, "story_root", "story_root") &&
-        copy_value(cycle, compact, "story_fixture_root",
-                   "story_fixture_root") &&
-        copy_value(cycle, compact, "story_fixture_id", "story_fixture_id") &&
-        copy_value(cycle, compact, "story_adapter", "story_adapter") &&
-        copy_value(cycle, compact, "story_timeout_ms", "story_timeout_ms") &&
-        copy_value(cycle, compact, "forbidden_effect_mask",
-                   "forbidden_effect_mask") &&
-        copy_value(cycle, compact, "observation_root", "observation_root") &&
-        copy_value(cycle, compact, "exercised_owner_surface",
-                   "exercised_owner_surface") &&
-        copy_value(cycle, compact, "story_detail", "story_detail") &&
-        copy_value(cycle, compact, "impact_us", "impact_us") &&
-        copy_value(cycle, compact, "closure_us", "closure_us") &&
-        json_push_kv_bool(compact, "runtime_published", live) &&
-        json_push_kv_bool(compact, "proof_complete",
-            json_get_bool(json_get(cycle, "proof_complete"))) &&
-        copy_value(cycle, compact, "proof_scope", "proof_scope") &&
-        copy_value(cycle, compact, "source_id_sha256",
-                   "source_identity_sha256") &&
-        copy_value(cycle, compact, "vcs_commit", "zvcs_commit_root") &&
-        copy_value(cycle, compact, "proof_receipt_root",
-                   "proof_receipt_root") &&
-        copy_value(cycle, compact, "publication_job_root",
-                   "publication_job_root") &&
-        copy_value(cycle, compact, "publication_enqueue_us",
-                   "publication_enqueue_us");
+        json_push_kv_str(compact, "lane", cycle_lane(cycle, live)) &&
+        project_cycle_fields(cycle, compact);
     if (!ok) {
         json_free(compact);
         return false;
     }
     if (!live) {
-        const char *why = json_get_str(json_get(cycle, "why_not_live"));
-        if (!why || !why[0])
-            why = json_get_str(json_get(cycle, "failure_capsule"));
-        if (!why || !why[0]) why = json_get_str(json_get(cycle, "reason"));
         if (!json_push_kv_str(compact, "why_not_live",
-            why && why[0] ? why : "runtime publication was not proven")) {
+                             unpublished_reason(cycle))) {
             json_free(compact);
             return false;
         }
@@ -167,36 +189,58 @@ static bool lower_hex_64(const char *value)
     return true;
 }
 
-static bool handoff_validate(const struct dev_reflex_proof_handoff_v2 *input,
-                             char *why, size_t why_size)
+static const char *handoff_input_failure(
+    const struct dev_reflex_proof_handoff_v2 *input)
 {
-    const char *failure = NULL;
-    if (!input) failure = "handoff is absent";
-    else if (!lower_hex_64(input->candidate_epoch) ||
-             !lower_hex_64(input->source_epoch))
-        failure = "candidate/source epoch must be exact lowercase SHA3 roots";
-    else if (!input->affected_component[0] || !input->action[0] ||
-             input->affected_file_count == 0)
-        failure = "affected component, action, and file count are required";
-    else if (!lower_hex_64(input->proof_inputs_sha3))
-        failure = "proof inputs must be one immutable SHA3 root";
-    else if (strcmp(input->feedback_class, "HOT_EXECUTE") != 0 &&
+    if (!lower_hex_64(input->candidate_epoch) ||
+        !lower_hex_64(input->source_epoch))
+        return "candidate/source epoch must be exact lowercase SHA3 roots";
+    if (!input->affected_component[0] || !input->action[0] ||
+        input->affected_file_count == 0)
+        return "affected component, action, and file count are required";
+    if (!lower_hex_64(input->proof_inputs_sha3))
+        return "proof inputs must be one immutable SHA3 root";
+    return NULL;
+}
+
+static const char *handoff_behavior_failure(
+    const struct dev_reflex_proof_handoff_v2 *input)
+{
+    if (strcmp(input->feedback_class, "HOT_EXECUTE") != 0 &&
              strcmp(input->feedback_class, "HOT_SHADOW_CORE") != 0 &&
              strcmp(input->feedback_class, "HOT_FORK") != 0)
-        failure = "proof handoff requires an exact behavior feedback class";
-    else if (!lower_hex_64(input->candidate_object_root) ||
+        return "proof handoff requires an exact behavior feedback class";
+    if (!lower_hex_64(input->candidate_object_root) ||
              !lower_hex_64(input->candidate_module_root) ||
              !lower_hex_64(input->story_root) ||
              !lower_hex_64(input->story_fixture_root) ||
              !lower_hex_64(input->observation_root))
-        failure = "candidate, story, fixture, and observation roots are required";
-    else if (!input->compile_green)
-        failure = "compile-green evidence is required before proof handoff";
-    else if (input->story_obtained &&
+        return "candidate, story, fixture, and observation roots are required";
+    if (!input->compile_green)
+        return "compile-green evidence is required before proof handoff";
+    return NULL;
+}
+
+static const char *handoff_story_failure(
+    const struct dev_reflex_proof_handoff_v2 *input)
+{
+    if (input->story_obtained &&
              !lower_hex_64(input->focused_evidence_sha3))
-        failure = "obtained story/focused evidence requires an exact SHA3 root";
-    else if (!input->story_obtained && input->focused_evidence_sha3[0])
-        failure = "absent story evidence cannot carry a synthetic root";
+        return "obtained story/focused evidence requires an exact SHA3 root";
+    if (!input->story_obtained && input->focused_evidence_sha3[0])
+        return "absent story evidence cannot carry a synthetic root";
+    return NULL;
+}
+
+static bool handoff_validate(const struct dev_reflex_proof_handoff_v2 *input,
+                             char *why, size_t why_size)
+{
+    const char *failure = "handoff is absent";
+    if (input) {
+        failure = handoff_input_failure(input);
+        if (!failure) failure = handoff_behavior_failure(input);
+        if (!failure) failure = handoff_story_failure(input);
+    }
     if (!failure) return true;
     if (why && why_size) (void)snprintf(why, why_size, "%s", failure);
     return false;

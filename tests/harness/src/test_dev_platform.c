@@ -8606,6 +8606,97 @@ static int test_drive_focused_partial(void)
     return failures;
 }
 
+static int test_reflex_projection_order(void)
+{
+    int failures = 0;
+    TEST("dev platform: reflex projection preserves ordered fields and renames") {
+        const struct dev_reflex_policy_service_v1 *policy =
+            dev_reflex_policy_service_builtin();
+        static const char input[] =
+            "{\"publication_enqueue_us\":31,\"publication_job_root\":\"job\","
+            "\"proof_receipt_root\":\"receipt\",\"vcs_commit\":\"commit\","
+            "\"source_id_sha256\":\"source\",\"proof_scope\":\"scope\","
+            "\"proof_complete\":true,\"runtime_published\":false,"
+            "\"closure_us\":23,\"impact_us\":22,\"story_detail\":\"detail\","
+            "\"exercised_owner_surface\":\"owner\",\"observation_root\":\"obs\","
+            "\"forbidden_effect_mask\":\"mask\",\"story_timeout_ms\":17,"
+            "\"story_adapter\":\"adapter\",\"story_fixture_id\":\"fixture-id\","
+            "\"story_fixture_root\":\"fixture\",\"story_root\":\"story\","
+            "\"story_id\":\"story-id\",\"candidate_bytes_executed\":true,"
+            "\"loaded_mapping_root\":\"mapping\",\"candidate_module_root\":\"module\","
+            "\"candidate_object_root\":\"object\",\"feedback_class\":\"class\","
+            "\"elapsed_ms\":6,\"elapsed_us\":5,\"action\":\"restart\","
+            "\"edit_epoch\":3,\"phase\":\"STORY_GREEN\",\"status\":\"story_green\","
+            "\"why_not_live\":\"primary\",\"failure_capsule\":\"secondary\","
+            "\"reason\":\"tertiary\"}";
+        static const char expected[] =
+            "{\"schema\":\"zcl.dev_drive.v1\",\"epoch\":9,\"lane\":\"REFLEX\","
+            "\"status\":\"story_green\",\"event\":\"STORY_GREEN\",\"edit_epoch\":3,"
+            "\"action\":\"restart\",\"feedback_us\":5,\"feedback_ms\":6,"
+            "\"feedback_class\":\"class\",\"candidate_object_root\":\"object\","
+            "\"candidate_module_root\":\"module\",\"loaded_mapping_root\":\"mapping\","
+            "\"candidate_bytes_executed\":true,\"story_id\":\"story-id\","
+            "\"story_root\":\"story\",\"story_fixture_root\":\"fixture\","
+            "\"story_fixture_id\":\"fixture-id\",\"story_adapter\":\"adapter\","
+            "\"story_timeout_ms\":17,\"forbidden_effect_mask\":\"mask\","
+            "\"observation_root\":\"obs\",\"exercised_owner_surface\":\"owner\","
+            "\"story_detail\":\"detail\",\"impact_us\":22,\"closure_us\":23,"
+            "\"runtime_published\":false,\"proof_complete\":true,"
+            "\"proof_scope\":\"scope\",\"source_identity_sha256\":\"source\","
+            "\"zvcs_commit_root\":\"commit\",\"proof_receipt_root\":\"receipt\","
+            "\"publication_job_root\":\"job\",\"publication_enqueue_us\":31,"
+            "\"why_not_live\":\"primary\"}";
+        struct json_value cycle, compact;
+        char body[4096];
+        json_init(&cycle);
+        ASSERT(json_read(&cycle, input, sizeof(input) - 1));
+        ASSERT(policy->project_cycle(&cycle, 9, &compact));
+        ASSERT(json_write(&compact, body, sizeof(body)) < sizeof(body));
+        ASSERT_STR_EQ(body, expected);
+        json_free(&compact);
+        json_free(&cycle);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_reflex_projection_lanes(void)
+{
+    int failures = 0;
+    TEST("dev platform: reflex lanes and unpublished reasons keep precedence") {
+        const struct dev_reflex_policy_service_v1 *policy =
+            dev_reflex_policy_service_builtin();
+        static const struct {
+            const char *input, *lane, *why;
+        } cases[] = {
+            { "{\"status\":\"story_green\",\"action\":\"restart\",\"runtime_published\":true}", "LIVE", NULL },
+            { "{\"status\":\"edit_seen\",\"action\":\"restart\"}", "REFLEX", "runtime publication was not proven" },
+            { "{\"status\":\"impact_ready\",\"action\":\"restart\"}", "REFLEX", "runtime publication was not proven" },
+            { "{\"status\":\"reflex_ready\",\"action\":\"restart\"}", "REFLEX", "runtime publication was not proven" },
+            { "{\"status\":\"compile_only\",\"action\":\"restart\"}", "REFLEX", "runtime publication was not proven" },
+            { "{\"status\":\"story_red\",\"action\":\"restart\"}", "REFLEX", "runtime publication was not proven" },
+            { "{\"status\":\"fallback_ready\",\"action\":\"restart\",\"why_not_live\":\"\",\"failure_capsule\":\"capsule\",\"reason\":\"reason\"}", "VERIFY", "capsule" },
+            { "{\"status\":\"focused_green\",\"action\":\"restart\",\"failure_capsule\":\"\",\"reason\":\"reason\"}", "FAST_RESTART", "reason" },
+            { "{}", "VERIFY", "runtime publication was not proven" },
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct json_value cycle, compact;
+            json_init(&cycle);
+            ASSERT(json_read(&cycle, cases[i].input, strlen(cases[i].input)));
+            ASSERT(policy->project_cycle(&cycle, 0, &compact));
+            ASSERT_STR_EQ(json_get_str(json_get(&compact, "lane")), cases[i].lane);
+            if (cases[i].why)
+                ASSERT_STR_EQ(json_get_str(json_get(&compact, "why_not_live")), cases[i].why);
+            else
+                ASSERT(json_get(&compact, "why_not_live") == NULL);
+            json_free(&compact);
+            json_free(&cycle);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_reflex_policy_boundary(void)
 {
     int failures = 0;
@@ -8673,6 +8764,7 @@ static int test_reflex_policy_boundary(void)
             .compile_green = true,
             .story_obtained = true,
         };
+        const struct dev_reflex_proof_handoff_v2 valid = handoff;
         char why[128] = {0};
         ASSERT(policy->handoff_validate(&handoff, why, sizeof(why)));
         handoff.compile_green = false;
@@ -8683,6 +8775,36 @@ static int test_reflex_policy_boundary(void)
                        sizeof(handoff.feedback_class), "%s", "COMPILE_ONLY");
         ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
         ASSERT(strstr(why, "behavior feedback class") != NULL);
+        handoff.candidate_epoch[0] = '\0';
+        handoff.affected_component[0] = '\0';
+        handoff.proof_inputs_sha3[0] = '\0';
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "candidate/source epoch must be exact lowercase SHA3 roots");
+        memcpy(handoff.candidate_epoch, valid.candidate_epoch, sizeof(handoff.candidate_epoch));
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "affected component, action, and file count are required");
+        memcpy(handoff.affected_component, valid.affected_component, sizeof(handoff.affected_component));
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof inputs must be one immutable SHA3 root");
+        handoff = valid;
+        handoff.compile_green = false;
+        handoff.story_root[0] = '\0';
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "candidate, story, fixture, and observation roots are required");
+        handoff = valid;
+        handoff.story_obtained = false;
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "absent story evidence cannot carry a synthetic root");
+        handoff.focused_evidence_sha3[0] = '\0';
+        (void)snprintf(why, sizeof(why), "%s", "unchanged");
+        ASSERT(policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "unchanged");
+        handoff.story_obtained = true;
+        ASSERT(!policy->handoff_validate(&handoff, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "obtained story/focused evidence requires an exact SHA3 root");
+        ASSERT(!policy->handoff_validate(NULL, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "handoff is absent");
+        ASSERT(!policy->handoff_validate(&handoff, NULL, 0));
         PASS();
     } _test_next:;
     return failures;
@@ -12007,6 +12129,8 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_cycle_proof_reuse_contract, 5),
     DP_CASE(test_progressive_event_vocabulary, 5),
     DP_CASE(test_reflex_policy_boundary, 5),
+    DP_CASE(test_reflex_projection_order, 5),
+    DP_CASE(test_reflex_projection_lanes, 5),
     DP_CASE(test_drive_focused_partial, 5),
     DP_CASE(test_hotfork_descriptor_boundary, 5),
     DP_CASE(test_template_generator_concurrency, 3),
@@ -12158,7 +12282,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 72u + (unsigned)(
+    if (DP_CASE_COUNT != 74u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else
