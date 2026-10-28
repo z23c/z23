@@ -1,0 +1,18 @@
+# Example infocard spec: a Z23 update card (render: infocard SPEC OUT.png)
+canvas 1080 1620
+title Z23 | UPDATE | 28 October 2026
+subtitle Your own node. Your own lab. Software made for you, shared freely.
+stat 1 | binary: node, wallet and Tor
+stat 15 | branches at most per function
+stat 10/15 | newcomer fixes done
+section PROGRESS
+bar Validates the chain exactly like zclassicd | 100 | 100%
+bar Code split into small functions | 66 | 66%
+bar Newcomer first-run fixes | 67 | 10 of 15
+section NEW THIS WEEK
+check Quiet one-line installer that keeps a full log
+check z23 --help opens with a short Start-here block
+check z23 status says how to start a node when none runs
+check Readable wiki pages right in the terminal
+cta Need help with Z23? | Ask @for_vcc_bot | Mention it or reply to it in Z23 Chat. Install, run a node, build, contribute: just ask.
+footer Free and open source. Build it, check it, share it.

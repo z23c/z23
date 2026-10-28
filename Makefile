@@ -8280,6 +8280,31 @@ $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 	    $(ARENA_VIEW_INCLUDES) \
 	    -o $@ $^ -lm
 
+# infocard SPEC OUT.png: one-page update card from a text spec (Inter canvas +
+# native PNG writer). The infocard test group runs the built binary.
+.PHONY: tools/infocard
+tools/infocard: $(BIN_DIR)/infocard
+INFOCARD_SRCS = tools/infocard.c \
+	contexts/explorer/modules/presentation/src/canvas.c \
+	platform/modules/util/src/png_writer.c \
+	platform/modules/base/src/safe_alloc.c
+$(BIN_DIR)/infocard: $(INFOCARD_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
+	    -Icontexts/explorer/modules/presentation/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -o $@ $^ -lm
+ifeq ($(ZCL_HOST_WINDOWS),)
+$(BIN_DIR)/test_zcl: | $(BIN_DIR)/infocard
+$(TEST_PARALLEL_BIN): | $(BIN_DIR)/infocard
+$(TEST_PARALLEL_FAST_BIN): | $(BIN_DIR)/infocard
+$(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/infocard
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/infocard
+endif
+
 ARENA_DEMO_BINS = $(BIN_DIR)/arena_runner $(BIN_DIR)/arena_svg \
 	$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone
 
