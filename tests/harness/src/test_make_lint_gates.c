@@ -1268,6 +1268,40 @@ int test_make_lint_gates_heavy_03(void)
 /* The exclusive lane: dispatch regressions, stale sandbox cleanup and root probe.
  * Keeps the group name `make_lint_gates` so `--only=make_lint_gates` (a
  * substring match) selects it plus every shard. */
+static int t_lint_inventory_dispatch(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"\n"
+        "mkdir -p tools/lint bin fake build/gen build/bin\n"
+        "cp \"$1/tools/lint/run_lint.sh\" tools/lint/\n"
+        "printf '#!/bin/sh\necho generator >> calls\nexit ${GEN_RC:-0}\n' > bin/gen_capability_inventory.exe\n"
+        "printf '#!/bin/sh\necho make >> calls\nexit 0\n' > fake/make\n"
+        "printf '#!/bin/sh\necho \"echo worker >> calls\"\n' > bin/z23-lint\n"
+        "chmod +x bin/gen_capability_inventory.exe bin/z23-lint fake/make; cp bin/z23-lint build/bin/z23-lint\n"
+        "export PATH=\"$2/fake:$PATH\" ZCL_HOST_EXEEXT=.exe\n"
+        "bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "printf 'make\nworker\n' > expected; cmp expected calls\n"
+        ": > calls\n"
+        "ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "printf 'generator\nworker\n' > expected; cmp expected calls\n"
+        ": > calls; GEN_RC=9; export GEN_RC\n"
+        "if ZCL_LINT_INVENTORY_TOOL=bin/gen_capability_inventory.exe bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1; then exit 1; fi\n"
+        "printf 'generator\n' > expected; cmp expected calls\n"
+        "rm bin/gen_capability_inventory.exe; : > calls; GEN_RC=0\n"
+        "bash tools/lint/run_lint.sh --jobs 1 --bin-dir bin check-kpi-floor >log 2>&1\n"
+        "printf 'make\nworker\n' > expected; cmp expected calls\n"
+        "printf '#!/bin/sh\ntouch driver-ran\n' > tools/lint/run_lint.sh\n"
+        "chmod +x tools/lint/run_lint.sh\n"
+        "awk '/^lint-fast: .*EQUIHASH_FACT_TOOL/{f=1; next} /^lint-land: .*EQUIHASH_FACT_TOOL/{f=2; next} /^lint: .*LINTC_TOOL.*NETWORK_TOOL_HARDENING_BINS/{f=3; next} f && /^\\t@.*run_lint.sh/{print (f==1 ? \"fast:\" : f==2 ? \"land:\" : \"full:\"); print; f=0}' \"$1/Makefile\" > Fixture.mk\n"
+        "printf '.PHONY: fast land full\nLINT_PARALLEL_GATES=x\n' >> Fixture.mk\n"
+        "for target in fast land full; do for mode in n t q; do /usr/bin/make -f Fixture.mk -$mode $target >/dev/null 2>&1 || [ $mode = q ]; test ! -e driver-ran; done; done\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "lint_inventory", "dispatch");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates(void)
 {
     char real_root[PATH_MAX];
@@ -1276,6 +1310,7 @@ int test_make_lint_gates(void)
 
     printf("\n=== make_lint_gates tests ===\n");
 
+    if (t_lint_inventory_dispatch() != 0) return 1;
     if (t_build_needs_overlap() != 0) return 1;
     if (t_lint_explicit_gates_run_once() != 0) return 1;
     /* Reap leaked sandbox bases; safe only here, before any shard exists. */

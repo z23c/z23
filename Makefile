@@ -723,6 +723,7 @@ $(BUILD_IDENTITY_STAMP): $(BUILD_MUTATION_STAMP) tools/dev/source-identity.sh
 # build/bin/zclassic23* names remain as temporary symlink aliases so existing
 # bots and scripts get an obvious migration path.
 ZCL_HOST_EXEEXT = $(if $(ZCL_HOST_WINDOWS),.exe,)
+CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory$(ZCL_HOST_EXEEXT)
 Z23_BIN = $(BIN_DIR)/z23$(ZCL_HOST_EXEEXT)
 Z23_DEV_BIN = $(BIN_DIR)/z23-dev$(ZCL_HOST_EXEEXT)
 # Unshippable compiler-speed artifact. `make ship` / `make deploy` refuse it.
@@ -6558,8 +6559,8 @@ lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
 lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
-		$(HOTSWAP_ACTION_PLAN)
-	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
+		$(HOTSWAP_ACTION_PLAN) $(CAPABILITY_INVENTORY_TOOL)
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
 
@@ -6621,8 +6622,8 @@ lint-land: $(LINT_LAND_GATES)
 else
 lint-land: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) $(FILE_SIZE_POLICY_BIN) $(TOOLGEN_BIN) tor-provenance-ready $(TOR_PROVENANCE_BIN) \
 		$(HOTSWAP_ACTION_PLAN) tools/core_seal $(BIN_DIR)/check_no_hardlink_seeding \
-		$(NETWORK_TOOL_HARDENING_BINS)
-	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_LAND_GATES)
+		$(NETWORK_TOOL_HARDENING_BINS) $(CAPABILITY_INVENTORY_TOOL)
+	@ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_LAND_GATES)
 	@echo "lint-land: OK"
 endif
 
@@ -14952,7 +14953,6 @@ docs-api-reference: $(API_REFERENCE_TOOL)
 # tables grep-friendly without requiring jq or loading one giant document.
 # It is build output, never tracked: `make docs-capability-inventory` writes
 # build/gen/CAPABILITY_INVENTORY.jsonl (the old tracked path stays ignored).
-CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory$(ZCL_HOST_EXEEXT)
 CAPABILITY_INVENTORY_PLATFORM_SRCS = $(if $(ZCL_HOST_WINDOWS), \
 	platform/modules/platform/src/directory_compat.c platform/modules/platform/src/positioned_file.c,)
 CAPABILITY_INVENTORY_PLATFORM_LIBS = $(if $(ZCL_HOST_WINDOWS),-ladvapi32,)
@@ -15852,8 +15852,8 @@ else
 # Dispatching them again through the script creates independent writers
 # (notably two Windows linkers in `make lint check-windows-acceptance`).
 LINT_PARALLEL_GATES = $(filter-out $(MAKECMDGOALS),$(LINT_GATES))
-lint: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS) $(filter $(LINT_GATES),$(MAKECMDGOALS))
-	@$(if $(LINT_PARALLEL_GATES),tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
+lint: $(LINTC_TOOL) $(NETWORK_TOOL_HARDENING_BINS) $(CAPABILITY_INVENTORY_TOOL) $(filter $(LINT_GATES),$(MAKECMDGOALS))
+	@$(if $(LINT_PARALLEL_GATES),ZCL_LINT_INVENTORY_TOOL="$(CAPABILITY_INVENTORY_TOOL)" tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_PARALLEL_GATES),:)
 	@echo "══ LINT: all checks passed ══"
 endif
 

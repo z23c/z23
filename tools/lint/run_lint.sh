@@ -72,6 +72,8 @@ STATE_DIR="${ZCL_LINT_TIMING_DIR:-$ROOT/.cache/lint-timing}"
 GATES_DIR="${ZCL_LINT_GATES_DIR_X:-$STATE_DIR/gates/run.$$}"
 JOBS="${ZCL_LINT_JOBS:-8}"
 BIN_DIR="build/bin"
+INVENTORY_TOOL="${ZCL_LINT_INVENTORY_TOOL:-}"
+unset ZCL_LINT_INVENTORY_TOOL
 BUDGET_SEC="${ZCL_LINT_BUDGET_SEC:-75}"
 
 # Gates that must run serially — see the header contract. Code-index coverage
@@ -457,20 +459,15 @@ main() {
         exit 2
     fi
 
-    # The capability inventory is untracked build output. Three gates read it
-    # (check-capability-inventory-generated writes it, check-kpi-floor and
-    # check-generated-artifact-contradictions consume it), and the pool runs
-    # them concurrently, so it is generated ONCE, serially, before the pool.
-    # Every path that dispatches through this driver (lint, lint-land,
-    # lint-fast, the proof's lint dimension) therefore sees a fresh file.
+    # Generate once before concurrent consumers; standalone callers may build it.
     case "$requested" in
         *" check-capability-inventory-generated "*|*" check-kpi-floor "*|\
         *" check-generated-artifact-contradictions "*)
             echo "run_lint.sh: generating build/gen/CAPABILITY_INVENTORY.jsonl before the gate pool" >&2
-            if ! make -s --no-print-directory docs-capability-inventory >&2; then
-                echo "run_lint.sh: FATAL — make docs-capability-inventory failed;" \
-                     "the gates that read it cannot be graded" >&2
-                exit 1
+            if [ -n "$INVENTORY_TOOL" ]; then
+                mkdir -p build/gen && "$INVENTORY_TOOL" build/gen/CAPABILITY_INVENTORY.jsonl . >&2 || exit 1
+            else
+                make -s --no-print-directory docs-capability-inventory >&2 || exit 1
             fi ;;
     esac
 

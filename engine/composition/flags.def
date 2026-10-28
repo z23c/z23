@@ -1456,6 +1456,8 @@ Z23_FLAG("ZCL_LINT_GATES_DIR_X", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:auto")
 Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_make_lint_gates.c:auto")
+Z23_FLAG("ZCL_LINT_INVENTORY_TOOL", "env_build", "-", "-",
+          "Path to the Make-prepared capability inventory generator; absent uses the Make fallback.")
 Z23_FLAG("ZCL_LINT_JOBS", "env_build", "8", "-",
           "undocumented; first use tools/lint/run_lint.sh:auto")
 Z23_FLAG("ZCL_BUILD_MAX_JOBS", "env_build", "-", "-",
