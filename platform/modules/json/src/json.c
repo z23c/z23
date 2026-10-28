@@ -401,71 +401,62 @@ static size_t json_escape_str(const char *s, char *buf, size_t buflen)
     return pos;
 }
 
+static size_t json_write_literal(const char *s, size_t n, char *buf, size_t cap)
+{
+    if (n <= cap) memcpy(buf, s, n);
+    return n;
+}
+
+static size_t json_write_number(const struct json_value *v, char *buf, size_t cap)
+{
+    char tmp[64];
+    int n = v->type == JSON_INT ? snprintf(tmp, sizeof(tmp), "%" PRId64, v->val.i)
+                                : snprintf(tmp, sizeof(tmp), "%.8g", v->val.d);
+    return json_write_literal(tmp, (size_t)n, buf, cap);
+}
+
+static size_t json_write_array(const struct json_value *v, char *buf, size_t cap)
+{
+    size_t pos = 0;
+    if (pos < cap) { buf[pos] = '['; } pos++;
+    for (size_t i = 0; i < v->num_children; i++) {
+        if (i > 0) { if (pos < cap) buf[pos] = ','; pos++; }
+        pos += json_write(&v->children[i], buf + pos, cap > pos ? cap - pos : 0);
+    }
+    if (pos < cap) { buf[pos] = ']'; } pos++;
+    return pos;
+}
+
+static size_t json_write_object(const struct json_value *v, char *buf, size_t cap)
+{
+    size_t pos = 0;
+    if (pos < cap) { buf[pos] = '{'; } pos++;
+    for (size_t i = 0; i < v->num_children; i++) {
+        if (i > 0) { if (pos < cap) buf[pos] = ','; pos++; }
+        pos += json_escape_str(v->keys[i] ? v->keys[i] : "", buf + pos,
+                               cap > pos ? cap - pos : 0);
+        if (pos < cap) { buf[pos] = ':'; } pos++;
+        pos += json_write(&v->children[i], buf + pos, cap > pos ? cap - pos : 0);
+    }
+    if (pos < cap) { buf[pos] = '}'; } pos++;
+    return pos;
+}
+
 size_t json_write(const struct json_value *v, char *buf, size_t buflen)
 {
     size_t pos = 0;
     switch (v->type) {
-    case JSON_NULL:
-        if (pos + 4 <= buflen) memcpy(buf + pos, "null", 4);
-        pos += 4;
-        break;
+    case JSON_NULL: pos = json_write_literal("null", 4, buf, buflen); break;
     case JSON_BOOL:
-        if (v->val.b) {
-            if (pos + 4 <= buflen) memcpy(buf + pos, "true", 4);
-            pos += 4;
-        } else {
-            if (pos + 5 <= buflen) memcpy(buf + pos, "false", 5);
-            pos += 5;
-        }
-        break;
-    case JSON_INT: {
-        char tmp[32];
-        int n = snprintf(tmp, sizeof(tmp), "%" PRId64, v->val.i);
-        if (pos + (size_t)n <= buflen) memcpy(buf + pos, tmp, (size_t)n);
-        pos += (size_t)n;
-        break;
+        pos = v->val.b ? json_write_literal("true", 4, buf, buflen)
+                       : json_write_literal("false", 5, buf, buflen); break;
+    case JSON_INT: case JSON_REAL: pos = json_write_number(v, buf, buflen); break;
+    case JSON_STR: pos = json_escape_str(v->val.s ? v->val.s : "", buf, buflen); break;
+    case JSON_ARR: pos = json_write_array(v, buf, buflen); break;
+    case JSON_OBJ: pos = json_write_object(v, buf, buflen); break;
     }
-    case JSON_REAL: {
-        char tmp[64];
-        int n = snprintf(tmp, sizeof(tmp), "%.8g", v->val.d);
-        if (pos + (size_t)n <= buflen) memcpy(buf + pos, tmp, (size_t)n);
-        pos += (size_t)n;
-        break;
-    }
-    case JSON_STR:
-        pos += json_escape_str(v->val.s ? v->val.s : "", buf + pos,
-                               buflen > pos ? buflen - pos : 0);
-        break;
-    case JSON_ARR: {
-        if (pos < buflen) { buf[pos] = '['; } pos++;
-        for (size_t i = 0; i < v->num_children; i++) {
-            if (i > 0) { if (pos < buflen) { buf[pos] = ','; } pos++; }
-            pos += json_write(&v->children[i], buf + pos,
-                              buflen > pos ? buflen - pos : 0);
-        }
-        if (pos < buflen) { buf[pos] = ']'; } pos++;
-        break;
-    }
-    case JSON_OBJ: {
-        if (pos < buflen) { buf[pos] = '{'; } pos++;
-        for (size_t i = 0; i < v->num_children; i++) {
-            if (i > 0) { if (pos < buflen) { buf[pos] = ','; } pos++; }
-            pos += json_escape_str(v->keys[i] ? v->keys[i] : "",
-                                   buf + pos,
-                                   buflen > pos ? buflen - pos : 0);
-            if (pos < buflen) { buf[pos] = ':'; } pos++;
-            pos += json_write(&v->children[i], buf + pos,
-                              buflen > pos ? buflen - pos : 0);
-        }
-        if (pos < buflen) { buf[pos] = '}'; } pos++;
-        break;
-    }
-    }
-    /* Always NUL-terminate, even on truncation (pos >= buflen): callers pass
-     * fixed buffers and then %s-print or strlen the result, so leaving it
-     * unterminated is an over-read. On truncation, terminate at the last byte. */
     if (pos < buflen) buf[pos] = '\0';
-    else if (buflen)  buf[buflen - 1] = '\0';
+    else if (buflen) buf[buflen - 1] = '\0';
     return pos;
 }
 
@@ -765,52 +756,65 @@ static bool parse_array_r(struct json_value *v, const char **pp,
     return false;
 }
 
+static bool parse_value_string(struct json_value *v, bool keep, const char **pp,
+                               const char *end)
+{
+    char *s = NULL;
+    const char *p = *pp;
+    if (!parse_string(keep ? &s : NULL, &p, end)) return false;
+    v->type = JSON_STR;
+    v->val.s = s;
+    *pp = p;
+    return true;
+}
+
+static bool parse_value_container(struct json_value *v, bool keep, const char **pp,
+                                  const char *end, int depth)
+{
+    bool obj = **pp == '{';
+    if (depth >= JSON_MAX_DEPTH) return false;
+    (*pp)++;
+    if (obj) json_set_object(v); else json_set_array(v);
+    return obj ? parse_object_r(keep ? v : NULL, pp, end, depth)
+               : parse_array_r(keep ? v : NULL, pp, end, depth);
+}
+
+static bool parse_value_literal(struct json_value *v, const char **pp,
+                                const char *end)
+{
+    const char *p = *pp;
+    if (end - p >= 4 && memcmp(p, "null", 4) == 0) {
+        v->type = JSON_NULL; *pp = p + 4; return true;
+    }
+    if (end - p >= 4 && memcmp(p, "true", 4) == 0) {
+        v->type = JSON_BOOL; v->val.b = true; *pp = p + 4; return true;
+    }
+    if (end - p >= 5 && memcmp(p, "false", 5) == 0) {
+        v->type = JSON_BOOL; v->val.b = false; *pp = p + 5; return true;
+    }
+    return false;
+}
+
 static bool parse_value_r(struct json_value *v, const char **pp,
                           const char *end, int depth)
 {
     const char *p = skip_ws(*pp, end);
     if (p >= end) return false;
-
-    /* v == NULL is json_valid: scalars land in a stack sink and containers
-     * never grow, so the walk is the same grammar with no allocation. */
     struct json_value sink;
     bool keep = v != NULL;
     if (!keep) v = &sink;
     json_init(v);
-
     if (*p == '"') {
-        char *s = NULL;
-        if (!parse_string(keep ? &s : NULL, &p, end)) return false;
-        v->type = JSON_STR;
-        v->val.s = s;
-        *pp = p;
-        return true;
+        bool ok = parse_value_string(v, keep, &p, end);
+        if (ok) *pp = p;
+        return ok;
     }
     if (*p == '{' || *p == '[') {
-        bool obj = *p == '{';
         if (depth >= JSON_MAX_DEPTH) return false;
-        *pp = p + 1;
-        if (obj) json_set_object(v); else json_set_array(v);
-        return obj ? parse_object_r(keep ? v : NULL, pp, end, depth)
-                   : parse_array_r(keep ? v : NULL, pp, end, depth);
+        *pp = p;
+        return parse_value_container(v, keep, pp, end, depth);
     }
-    if (end - p >= 4 && memcmp(p, "null", 4) == 0) {
-        v->type = JSON_NULL;
-        *pp = p + 4;
-        return true;
-    }
-    if (end - p >= 4 && memcmp(p, "true", 4) == 0) {
-        v->type = JSON_BOOL;
-        v->val.b = true;
-        *pp = p + 4;
-        return true;
-    }
-    if (end - p >= 5 && memcmp(p, "false", 5) == 0) {
-        v->type = JSON_BOOL;
-        v->val.b = false;
-        *pp = p + 5;
-        return true;
-    }
+    if (parse_value_literal(v, &p, end)) { *pp = p; return true; }
     if (*p == '-' || (*p >= '0' && *p <= '9')) {
         *pp = p;
         return parse_number(v, pp, end);

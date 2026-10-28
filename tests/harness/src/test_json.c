@@ -882,6 +882,58 @@ static int json_accessors_null_safe_case(void)
     return failures;
 }
 
+static bool json_scalar_capacity(const char *raw)
+{
+    struct json_value v;
+    size_t n = strlen(raw);
+    char buf[128];
+    if (strcmp(raw, "-0") == 0) { json_init(&v); json_set_real(&v, -0.0); }
+    else if (!json_read(&v, raw, n)) return false;
+    memset(buf, 'Z', sizeof(buf));
+    bool ok = json_write(&v, buf, n - 1) == n &&
+        buf[n - 2] == '\0' && buf[n - 1] == 'Z';
+    for (size_t i = 0; i + 2 < n; i++) ok = ok && buf[i] == 'Z';
+    memset(buf, 'Z', sizeof(buf));
+    ok = ok && json_write(&v, buf, n) == n &&
+        memcmp(buf, raw, n - 1) == 0 && buf[n - 1] == '\0' && buf[n] == 'Z';
+    memset(buf, 'Z', sizeof(buf));
+    ok = ok && json_write(&v, buf, n + 1) == n &&
+        strcmp(buf, raw) == 0 && buf[n + 1] == 'Z';
+    json_free(&v);
+    return ok;
+}
+
+static int json_scalar_boundary_case(void)
+{
+    const char *values[] = {"null", "true", "false", "-9223372036854775808",
+                            "9223372036854775807", "1.5", "-0"};
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++)
+        ok = json_scalar_capacity(values[i]) && ok;
+    printf("json scalar write boundaries... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int json_write_boundary_case(void)
+{
+    static const char raw[] = "{\"s\":\"a\\n\\\"\\\\\",\"v\":[null,true,false,-9223372036854775808,1.5]}";
+    struct json_value v;
+    if (!json_read(&v, raw, sizeof(raw) - 1)) return 1;
+    char buf[256];
+    size_t n = json_write(&v, buf, sizeof(buf));
+    bool ok = n == sizeof(raw) - 1 && strcmp(buf, raw) == 0;
+    const size_t caps[] = {0, 1, sizeof(raw) - 1, sizeof(raw)};
+    for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+        memset(buf, 0x5a, sizeof(buf));
+        size_t got = json_write(&v, buf, caps[i]);
+        ok = ok && got == n && buf[caps[i]] == 'Z';
+        if (caps[i]) ok = ok && buf[caps[i] - 1] == '\0';
+    }
+    json_free(&v);
+    printf("json exact write and capacity boundaries... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_json(void)
 {
     int failures = json_unicode_cases() + json_number_cases() + json_heap_accounting_cases() + json_checked_copy_cases() + json_growth_cases() + json_append_target_cases() + cgo_decoder_tests() + cgo_passive_tests() + cga_goal_tests();
@@ -900,6 +952,8 @@ int test_json(void)
     failures += json_parse_deeply_nested_array_case();
     failures += json_parse_large_array_case();
     failures += json_write_read_roundtrip_case();
+    failures += json_write_boundary_case();
+    failures += json_scalar_boundary_case();
     failures += json_nesting_limit_and_copy_cases();
     failures += json_accessors_null_safe_case();
 
