@@ -107,6 +107,29 @@ static void test_line_layout(void)
     free(pem);
 }
 
+static void test_bounded_parse(void)
+{
+    static const char wire[] = "-----BEGIN A-----\naGk=\n-----END A-----\n"
+                               "-----BEGIN B-----\n-----END B-----\n";
+    static const char first[] = "-----BEGIN A-----\naGk=\n-----END A-----\n";
+    char input[sizeof wire - 1];
+    memcpy(input, wire, sizeof input);
+    zpem_block block;
+    CHECK(zpem_parse(input, sizeof input, &block) == ZPEM_OK);
+    CHECK(block.label == input + 11 && block.label_len == 1);
+    CHECK(block.b64 == input + 18 && block.b64_len == 5);
+    CHECK(block.consumed == sizeof first - 1);
+    memset(&block, 0xa5, sizeof block);
+    CHECK(zpem_parse(input, sizeof first - 2, &block) == ZPEM_ERR_FORMAT);
+    CHECK(block.label == NULL && block.label_len == 0 && block.b64 == NULL &&
+          block.b64_len == 0 && block.consumed == 0);
+    memset(&block, 0xa5, sizeof block);
+    unsigned char saved[sizeof block];
+    memcpy(saved, &block, sizeof block);
+    CHECK(zpem_parse(NULL, 1, &block) == ZPEM_ERR_ARG);
+    CHECK(memcmp(&block, saved, sizeof block) == 0);
+}
+
 static void test_multi_block(void)
 {
     static const char two[] =
@@ -367,6 +390,7 @@ int main(void)
     test_kat();
     test_roundtrip_boundaries();
     test_line_layout();
+    test_bounded_parse();
     test_multi_block();
     test_crlf();
     test_rejects();

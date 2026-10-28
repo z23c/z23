@@ -122,11 +122,9 @@ static int line_end(const char *buf, size_t n, size_t i, size_t *next)
     return 0;
 }
 
-zpem_err zpem_parse(const char *pem, size_t n, zpem_block *blk)
+static zpem_err parse_begin(const char *pem, size_t n, size_t *label_len,
+                            size_t *body_start)
 {
-    if (!pem || !blk) return ZPEM_ERR_ARG;
-    memset(blk, 0, sizeof(*blk));
-
     static const char begin[] = "-----BEGIN ";
     if (n < sizeof(begin) - 1 || memcmp(pem, begin, sizeof(begin) - 1) != 0)
         return ZPEM_ERR_FORMAT;
@@ -143,17 +141,19 @@ zpem_err zpem_parse(const char *pem, size_t n, zpem_block *blk)
         }
     }
     if (label_end == n) return ZPEM_ERR_FORMAT; /* no closing marker */
-    size_t label_len = label_end - (sizeof(begin) - 1);
-    zpem_err le = label_check(pem + sizeof(begin) - 1, label_len);
+    *label_len = label_end - (sizeof(begin) - 1);
+    zpem_err le = label_check(pem + sizeof(begin) - 1, *label_len);
     if (le != ZPEM_OK) return le == ZPEM_ERR_ARG ? ZPEM_ERR_FORMAT : le;
+    *body_start = i;
+    return ZPEM_OK;
+}
 
-    const char *label = pem + sizeof(begin) - 1;
-    size_t b64_start = i;
-
-    /* Scan body until the END marker line. */
-    size_t j = b64_start;
+static zpem_err parse_body(const char *pem, size_t n, size_t body_start,
+                           size_t *body_end)
+{
+    size_t j = body_start;
     while (span_fits(n, j, sizeof end_marker - 1)) {
-        if (end_marker_matches(pem, n, b64_start, j)) break;
+        if (end_marker_matches(pem, n, body_start, j)) break;
         char c = pem[j];
         /* Body chars: base64 alphabet, '=', CR, LF only. */
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -163,10 +163,14 @@ zpem_err zpem_parse(const char *pem, size_t n, zpem_block *blk)
         j++;
     }
     if (!span_fits(n, j, sizeof end_marker - 1)) return ZPEM_ERR_FORMAT; /* no END */
-    size_t b64_len = j - b64_start;
+    *body_end = j;
+    return ZPEM_OK;
+}
 
-    /* END label must match. */
-    size_t k = j + sizeof end_marker - 1;
+static zpem_err parse_end(const char *pem, size_t n, const char *label,
+                          size_t label_len, size_t body_end, size_t *consumed)
+{
+    size_t k = body_end + sizeof end_marker - 1;
     if (!trailer_fits(n, k, label_len)) return ZPEM_ERR_FORMAT;
     if (memcmp(pem + k, label, label_len) != 0) return ZPEM_ERR_FORMAT;
     k += label_len;
@@ -175,13 +179,28 @@ zpem_err zpem_parse(const char *pem, size_t n, zpem_block *blk)
     size_t after;
     int eol = line_end(pem, n, k, &after);
     if (!eol) return ZPEM_ERR_FORMAT;
-    k = after;
+    *consumed = after;
+    return ZPEM_OK;
+}
+
+zpem_err zpem_parse(const char *pem, size_t n, zpem_block *blk)
+{
+    if (!pem || !blk) return ZPEM_ERR_ARG;
+    memset(blk, 0, sizeof(*blk));
+    size_t label_len, b64_start, body_end, consumed;
+    zpem_err e = parse_begin(pem, n, &label_len, &b64_start);
+    if (e != ZPEM_OK) return e;
+    e = parse_body(pem, n, b64_start, &body_end);
+    if (e != ZPEM_OK) return e;
+    const char *label = pem + sizeof("-----BEGIN ") - 1;
+    e = parse_end(pem, n, label, label_len, body_end, &consumed);
+    if (e != ZPEM_OK) return e;
 
     blk->label = label;
     blk->label_len = label_len;
     blk->b64 = pem + b64_start;
-    blk->b64_len = b64_len;
-    blk->consumed = k;
+    blk->b64_len = body_end - b64_start;
+    blk->consumed = consumed;
     return ZPEM_OK;
 }
 
