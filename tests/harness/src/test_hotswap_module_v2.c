@@ -990,6 +990,53 @@ static int t_elf_probe_rejects_deception(void)
     return failures;
 }
 
+/* Refusal order is part of the audit contract: each row contains two
+ * independent faults, so a phase split cannot silently choose a later one. */
+static int t_elf_probe_refusal_order_and_bounds(void)
+{
+    static const char *const expected[] = {
+        "not an ELF file (magic 00 45 4c 46)",
+        "program header 0 (type 1) claims offset 18446744073709551615 size 4096, past the 4096 byte file",
+        "PT_LOAD 0 vaddr range overflows",
+        "duplicate DT_STRTAB",
+        "the dynamic array has no DT_NULL terminator within PT_DYNAMIC",
+        "DT_INIT_ARRAY and DT_INIT_ARRAYSZ disagree about whether an init array exists",
+        "zcl_hotswap_module_core_seal_root byte 0 is 0x47, not a lowercase hex digit",
+        "file is 32 bytes, shorter than a 64 byte ELF64 header"
+    };
+    int failures = 0;
+    TEST("ELF probe preserves first refusal and bounds") {
+        for (size_t row = 0; row < sizeof(expected) / sizeof(expected[0]); row++) {
+            unsigned char image[4096];
+            char path[64], err[256];
+            struct hotswap_elf_facts facts, zero;
+            memset(&zero, 0, sizeof(zero));
+            elf_fixture(image, false, false);
+            switch (row) {
+            case 0: image[0] = 0; image[4] = 0; break;
+            case 1: elf_put64(image + 64 + 8, UINT64_MAX); image[4] = 2; elf_put16(image + 60, 0); break;
+            case 2: elf_put64(image + 64 + 16, UINT64_MAX); elf_put16(image + 60, 0); break;
+            case 3: elf_dyn(image, 5, 5, 0x10400); elf_put16(image + 60, 0); break;
+            case 4: for (size_t i = 5; i < 9; i++) elf_dyn(image, i, 1, 0); elf_put16(image + 60, 0); break;
+            case 5: elf_dyn(image, 5, 25, 0x10680); elf_dyn(image, 6, 0, 0); elf_put16(image + 60, 0); break;
+            case 6: image[1728] = 'G'; elf_put16(image + 60, 0); break;
+            case 7: image[0] = 0; break;
+            }
+            int fd = fixture_fd(image, path);
+            ASSERT(fd >= 0);
+            if (row == 7) ASSERT(ftruncate(fd, 32) == 0);
+            memset(&facts, 0xa5, sizeof(facts));
+            ASSERT(!hotswap_elf_probe_fd(fd, &facts, err, sizeof(err)));
+            ASSERT_STR_EQ(err, expected[row]);
+            ASSERT(memcmp(&facts, &zero, sizeof(facts)) == 0);
+            ASSERT(lseek(fd, 0, SEEK_CUR) == (off_t)(row == 7 ? 32 : 4096));
+            close(fd); unlink(path);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int t_sealed_image_is_bounded(void)
 {
     int failures = 0;
@@ -1357,6 +1404,7 @@ int test_hotswap_module_v2(void)
     failures += t_consensus_pin_matches_the_seal();
     failures += t_pre_map_policy_is_zero_execution();
     failures += t_elf_probe_rejects_deception();
+    failures += t_elf_probe_refusal_order_and_bounds();
     failures += t_sealed_image_is_bounded();
     failures += t_pure_hotfork_refuses_generic_module();
 #if defined(__linux__)
