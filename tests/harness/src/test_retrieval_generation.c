@@ -700,8 +700,180 @@ static int case_text_proof_mapping(void)
     return failures;
 }
 
+static bool rg_cap_page(FILE *out)
+{
+    char line[16384];
+    struct json_value page;
+    json_init(&page);
+    rewind(out);
+    bool parsed = fgets(line, sizeof(line), out) &&
+        json_read(&page, line, strlen(line));
+    const struct json_value *data = json_get(&page, "data");
+    const char *reason = json_get_str(json_get(data, "graph_fallback_reason"));
+    const struct json_value *bm25 = json_get(data, "bm25");
+    const struct json_value *graph = json_get(data, "identifier_graph");
+    const struct json_value *seeds = json_get(data, "identifier_seed_symbols");
+    const struct json_value *files = json_get(data, "observed_reverse_ref_files");
+    const char *bm25_root = json_get_str(json_get(bm25, "ranking_root_sha3"));
+    const char *graph_root = json_get_str(json_get(graph, "ranking_root_sha3"));
+    bool ok = parsed && reason && strcmp(reason, "query_atom_cap") == 0 &&
+        json_get_bool(json_get(data, "query_lookup_saturated")) &&
+        seeds && files && json_get_int(seeds) == 0 && json_get_int(files) == 0 &&
+        json_get_int(json_get(bm25, "ranked_files")) > 0 &&
+        bm25_root && graph_root && strcmp(bm25_root, graph_root) == 0;
+    json_free(&page);
+    return ok;
+}
+
+static bool rg_cap_setup(char *temporary, size_t temporary_size,
+                         char *workspace, size_t workspace_size,
+                         struct json_value *input, const char *query)
+{
+    uint8_t expected[32];
+    char expected_hex[65];
+    bool ready = test_mkdtemp(temporary, temporary_size, "rg-cap") &&
+        platform_directory_canonical_real(temporary, workspace, workspace_size) &&
+        rg_write(workspace, "lib/net/src/generation.c", rg_source_a) &&
+        rg_manifest_root(workspace, expected);
+    if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
+    json_init(input);
+    json_set_object(input);
+    return ready && json_push_kv_str(input, "workspace", workspace) &&
+        json_push_kv_str(input, "expected_vcs_root", expected_hex) &&
+        json_push_kv_str(input, "task_id", "query-cap") &&
+        json_push_kv_str(input, "query", query);
+}
+
+static int case_query_atom_cap(void)
+{
+    int failures = 0;
+    char temporary[PLATFORM_TEMP_PATH_MAX] = {0}, workspace[PLATFORM_TEMP_PATH_MAX] = {0};
+    char query[2048] = "generation ";
+    size_t used = strlen(query);
+    for (unsigned i = 0; i < 129; i++) {
+        int n = snprintf(query + used, sizeof(query) - used, "term%03u ", i);
+        if (n < 0 || (size_t)n >= sizeof(query) - used) return 1;
+        used += (size_t)n;
+    }
+    struct json_value input;
+    bool ready = rg_cap_setup(temporary, sizeof(temporary), workspace,
+                              sizeof(workspace), &input, query);
+    FILE *out = rg_text_output();
+    char code[64] = {0}, message[256] = {0};
+    int rc = ready && out ? zcl_native_dev_retrieval_stream_jsonl(
+        &input, 16384u, out, code, sizeof(code), message, sizeof(message))
+        : ZCL_COMMAND_EXIT_INTERNAL;
+    RG_CHECK("query atom cap falls back to BM25 without graph evidence",
+             rc == ZCL_COMMAND_EXIT_OK && out && rg_cap_page(out));
+    if (out) fclose(out);
+    json_free(&input);
+    if (temporary[0]) dir_remove_tree(temporary);
+    return failures;
+}
+
+static bool rg_graph_rows(const struct json_value *arm, size_t offset,
+                          const int expected[6], bool graph)
+{
+    static const int original[6] = {1, 6, 2, 3, 4, 5};
+    const struct json_value *rows = json_get(arm, "ranking");
+    if (!rows || rows->num_children != (offset == 0 ? 4u : 2u)) return false;
+    for (size_t i = 0; i < rows->num_children; i++) {
+        const struct json_value *row = json_at(rows, i);
+        char path[64];
+        snprintf(path, sizeof(path), "lib/net/src/file%d.c", expected[offset + i]);
+        const char *actual = json_get_str(json_get(row, "path"));
+        if (!actual || strcmp(actual, path) != 0 ||
+            json_get_int(json_get(row, "rank")) != (int64_t)(offset + i + 1)) return false;
+        if (graph &&
+            (json_get_int(json_get(row, "original_bm25_rank")) != original[offset + i] ||
+             json_get_int(json_get(row, "identifier_hits")) != (offset + i == 0 ? 1 : 0) ||
+             json_get_int(json_get(row, "caller_seed_hits")) != (offset + i == 1 ? 1 : 0))) return false;
+    }
+    return true;
+}
+
+static bool rg_graph_page(const struct json_value *data, size_t offset)
+{
+    static const int bm25_order[6] = {0, 2, 3, 4, 5, 1};
+    static const int graph_order[6] = {0, 1, 2, 3, 4, 5};
+    const struct json_value *bm25 = json_get(data, "bm25");
+    const struct json_value *graph = json_get(data, "identifier_graph");
+    const char *br = json_get_str(json_get(bm25, "ranking_root_sha3"));
+    const char *gr = json_get_str(json_get(graph, "ranking_root_sha3"));
+    return json_get_int(json_get(data, "rank_offset")) == (int64_t)offset &&
+        json_get_bool(json_get(data, "has_more")) == (offset == 0) &&
+        json_get_bool(json_get(graph, "evidence_available")) &&
+        json_get_int(json_get(data, "identifier_seed_symbols")) == 1 &&
+        json_get_int(json_get(data, "observed_reverse_ref_files")) == 1 &&
+        br && gr && strcmp(br, "e7cb17e0fceb87627d3f6354dc594ad717742cfb937c7568deb54efee4f4ab1b") == 0 &&
+        strcmp(gr, "85221cb5f621adf435819e4b1aa2a536fcb6d4b6f72decfde11f5d47f8de0e2a") == 0 &&
+        json_get_int(json_get(graph, "context_bytes_at_5")) == 371 &&
+        json_get_int(json_get(bm25, "context_bytes_at_5")) == 384 &&
+        rg_graph_rows(bm25, offset, bm25_order, false) &&
+        rg_graph_rows(graph, offset, graph_order, true);
+}
+
+static bool rg_graph_output(FILE *out)
+{
+    char line[16384]; size_t pages = 0; bool ok = true;
+    rewind(out);
+    while (fgets(line, sizeof(line), out)) {
+        struct json_value page; json_init(&page);
+        bool parsed = json_read(&page, line, strlen(line));
+        if (!parsed || pages >= 2 || !rg_graph_page(json_get(&page, "data"), pages * 4))
+            ok = false;
+        json_free(&page);
+        pages++;
+    }
+    return ok && pages == 2;
+}
+
+static void rg_graph_cleanup(FILE *out, struct json_value *input,
+                             const char *temporary)
+{
+    if (out) fclose(out);
+    json_free(input);
+    if (temporary[0]) dir_remove_tree(temporary);
+}
+
+static int case_graph_probe(void)
+{
+    int failures = 0;
+    char temporary[PLATFORM_TEMP_PATH_MAX] = {0}, workspace[PLATFORM_TEMP_PATH_MAX] = {0};
+    uint8_t expected[32]; char expected_hex[65];
+    bool ready = test_mkdtemp(temporary, sizeof(temporary), "rg-graph") &&
+        platform_directory_canonical_real(temporary, workspace, sizeof(workspace));
+    static const char *const files[] = {
+        "/* Purpose: common common common. */\nint raretarget(void) { return 1; }\n",
+        "/* Purpose: common. */\nint caller(void) { return raretarget(); }\n",
+        "/* Purpose: common common common common. */\nint distracta(void) { return 1; }\n",
+        "/* Purpose: common common common common. */\nint distractb(void) { return 1; }\n",
+        "/* Purpose: common common common common. */\nint distractc(void) { return 1; }\n",
+        "/* Purpose: common common common common. */\nint distractd(void) { return 1; }\n",
+    };
+    for (size_t i = 0; i < 6 && ready; i++) {
+        char path[64]; snprintf(path, sizeof(path), "lib/net/src/file%zu.c", i);
+        ready = rg_write(workspace, path, files[i]);
+    }
+    ready = ready && rg_manifest_root(workspace, expected);
+    if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
+    struct json_value input; json_init(&input); json_set_object(&input);
+    ready = ready && json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "expected_vcs_root", expected_hex) &&
+        json_push_kv_str(&input, "task_id", "graph-probe") &&
+        json_push_kv_str(&input, "query", "raretarget common");
+    FILE *out = rg_text_output(); char code[64] = {0}, message[256] = {0};
+    int rc = ready && out ? zcl_native_dev_retrieval_stream_jsonl(
+        &input, 4096u, out, code, sizeof(code), message, sizeof(message))
+        : ZCL_COMMAND_EXIT_INTERNAL;
+    RG_CHECK("graph reranking preserves paged ranking evidence and budget",
+             rc == ZCL_COMMAND_EXIT_OK && out && rg_graph_output(out));
+    rg_graph_cleanup(out, &input, temporary);
+    return failures;
+}
+
 int test_retrieval_generation(void)
 {
     return case_projection_binding() + case_aba_generation_join() + case_stream_utf8() +
-        case_text_proof_mapping();
+        case_text_proof_mapping() + case_query_atom_cap() + case_graph_probe();
 }

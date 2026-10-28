@@ -1113,8 +1113,6 @@ tools/command/native_dev_command.c:zcl_native_handle_dev_drive:35
 tools/command/native_dev_command.c:zcl_native_handle_dev_ff:23
 tools/command/native_dev_command.c:zcl_native_handle_dev_publication_status:16
 tools/command/native_dev_retrieval_command.c:rb_canonical_repo_path:16
-tools/command/native_dev_retrieval_command.c:rb_identifier_graph_rank:56
-tools/command/native_dev_retrieval_command.c:rb_push_rank:27
 tools/command/native_dev_retrieval_command.c:zcl_native_dev_retrieval_snapshot_compute:21
 tools/command/native_dev_retrieval_command.c:zcl_native_dev_retrieval_stream_jsonl:47
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29

@@ -398,6 +398,251 @@ static bool rb_rank_add_graph_score(struct rb_rank *rank,
  * The arm is
  * a strict permutation of BM25's retained candidates; any bounded lookup
  * saturation falls back byte-for-byte to BM25. */
+static bool rb_graph_measure_atoms(struct codeindex *ci, const struct rb_rank *bm25,
+    const struct rb_atoms *query_atoms, struct rb_graph_score *scores,
+    size_t *frequency, bool *saturated, char fallback_reason[64])
+{
+    for (size_t i = 0; i < bm25->count && !*saturated; i++) {
+        scores[i].bm25_rank = i;
+        scores[i].path = bm25->paths[i];
+        scores[i].context_bytes = bm25->rows[i].context_bytes;
+        struct ci_symbol *symbols = NULL;
+        size_t count = 0;
+        bool truncated = false;
+        if (!rb_load_symbols(ci, bm25->paths[i], &symbols, &count, &truncated)) {
+            if (!truncated) return false;
+            *saturated = true;
+            (void)snprintf(fallback_reason, 64, "%s", "symbol_cap");
+            break;
+        }
+        bool seen[RB_QUERY_ATOMS] = {0};
+        for (size_t s = 0; s < count; s++) {
+            struct rb_atoms atoms = {0};
+            if (!zcl_retrieval_tokenize(symbols[s].name, rb_atom_add, &atoms)) {
+                free(symbols);
+                return false;
+            }
+            (void)rb_atoms_overlap(query_atoms, &atoms, seen);
+        }
+        for (size_t atom = 0; atom < query_atoms->count; atom++)
+            if (seen[atom]) frequency[atom]++;
+        free(symbols);
+    }
+    return true;
+}
+
+struct rb_seed_scan {
+    struct codeindex *ci;
+    const struct rb_rank *bm25;
+    const struct rb_atoms *query;
+    const size_t *frequency;
+    struct rb_graph_score *scores;
+    char (*ids)[400];
+    size_t count;
+    bool saturated;
+    char *reason;
+};
+
+/* Refs are syntactic identifier-'(' observations, so functions, macros,
+ * and other same-named indexed symbols may seed them. The result is
+ * deliberately not labeled a resolved call. */
+static bool rb_graph_add_callers(struct rb_seed_scan *scan,
+                                 const struct ci_symbol *symbol)
+{
+    struct ci_ref *callers = NULL;
+    size_t count = 0;
+    bool truncated = false;
+    if (!rb_load_callers(scan->ci, symbol, &callers, &count, &truncated)) {
+        if (!truncated) return false;
+        scan->saturated = true;
+        (void)snprintf(scan->reason, 64, "%s", "caller_cap");
+        return true;
+    }
+    bool seen[RB_RETAIN_ROWS] = {0};
+    for (size_t c = 0; c < count; c++) {
+        int candidate = rb_bm25_index(scan->bm25, callers[c].ref_file);
+        if (candidate < 0 || seen[candidate]) continue;
+        seen[candidate] = true;
+        scan->scores[candidate].caller_seed_hits++;
+    }
+    free(callers);
+    return true;
+}
+
+static bool rb_graph_seed_symbol(struct rb_seed_scan *scan,
+                                 const struct ci_symbol *symbol, bool *atom_seen)
+{
+    struct rb_atoms atoms = {0};
+    if (!zcl_retrieval_tokenize(symbol->name, rb_atom_add, &atoms)) return false;
+    if (!rb_atoms_overlap_rare(scan->query, &atoms, scan->frequency, atom_seen))
+        return true;
+    char id[400];
+    if (codeindex_symbol_record_id(symbol, id, sizeof(id)) < 0) return false;
+    bool duplicate = false;
+    for (size_t prior = 0; prior < scan->count; prior++)
+        if (strcmp(scan->ids[prior], id) == 0) duplicate = true;
+    if (duplicate) return true;
+    if (scan->count >= RB_IDENTIFIER_SEEDS_MAX) {
+        scan->saturated = true;
+        (void)snprintf(scan->reason, 64, "%s", "identifier_seed_cap");
+        return true;
+    }
+    (void)snprintf(scan->ids[scan->count], sizeof(scan->ids[0]), "%s", id);
+    scan->count++;
+    return rb_graph_add_callers(scan, symbol);
+}
+
+static bool rb_graph_scan_seeds(struct rb_seed_scan *scan)
+{
+    for (size_t i = 0; i < scan->bm25->count && !scan->saturated; i++) {
+        struct ci_symbol *symbols = NULL;
+        size_t count = 0;
+        bool truncated = false;
+        if (!rb_load_symbols(scan->ci, scan->bm25->paths[i], &symbols, &count,
+                             &truncated)) {
+            if (!truncated) return false;
+            scan->saturated = true;
+            (void)snprintf(scan->reason, 64, "%s", "symbol_cap");
+            break;
+        }
+        bool atom_seen[RB_QUERY_ATOMS] = {0};
+        for (size_t s = 0; s < count && !scan->saturated; s++) {
+            if (!rb_graph_seed_symbol(scan, &symbols[s], atom_seen)) {
+                free(symbols);
+                return false;
+            }
+        }
+        for (size_t atom = 0; atom < scan->query->count; atom++)
+            if (atom_seen[atom]) scan->scores[i].identifier_hits++;
+        free(symbols);
+    }
+    return true;
+}
+
+static bool rb_graph_window_budget(const struct rb_graph_score *scores,
+                                   size_t window, size_t top,
+                                   uint64_t *budget, bool *evidence)
+{
+    *budget = 0;
+    *evidence = false;
+    for (size_t i = 0; i < top; i++) {
+        if (UINT64_MAX - *budget < scores[i].context_bytes) {
+            ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR, "[%s] %s:%d %s(): %s\n", RB_TAG,
+                            __FILE__, __LINE__, "rb_identifier_graph_rank",
+                            "BM25 top-five context byte sum overflow");
+            return false;
+        }
+        *budget += scores[i].context_bytes;
+    }
+    for (size_t i = 0; i < window; i++)
+        if (scores[i].identifier_hits != 0 || scores[i].caller_seed_hits != 0)
+            *evidence = true;
+    return true;
+}
+
+static size_t rb_graph_select(const struct rb_graph_score *scores, size_t window,
+                              size_t top, uint64_t budget, bool *selected_original)
+{
+    size_t selected = 0;
+    uint64_t selected_context = 0;
+    for (size_t i = 0; i < window && selected < top; i++) {
+        if (UINT64_MAX - selected_context < scores[i].context_bytes ||
+            selected_context + scores[i].context_bytes > budget) continue;
+        selected_original[scores[i].bm25_rank] = true;
+        selected_context += scores[i].context_bytes;
+        selected++;
+    }
+    return selected;
+}
+
+static bool rb_graph_append_rank(struct rb_rank *rank,
+    const struct vcs_manifest *manifest, const struct rb_graph_score *scores,
+    const struct rb_graph_score *original, const bool *selected,
+    size_t window, size_t count)
+{
+    for (size_t i = 0; i < window; i++) {
+        if (!selected[scores[i].bm25_rank]) continue;
+        if (!rb_rank_add_graph_score(rank, &scores[i], manifest)) return false;
+    }
+    for (size_t i = 0; i < window; i++) {
+        if (selected[i]) continue;
+        if (!rb_rank_add_graph_score(rank, &original[i], manifest)) return false;
+    }
+    for (size_t i = window; i < count; i++)
+        if (!rb_rank_add_graph_score(rank, &original[i], manifest)) return false;
+    return true;
+}
+
+static bool rb_graph_finish(const struct rb_rank *bm25,
+    const struct vcs_manifest *manifest, struct rb_rank *rank,
+    struct rb_graph_score *scores, char (*seed_ids)[400], size_t seed_count,
+    size_t *seed_count_out, size_t *graph_count_out,
+    bool *query_lookup_saturated_out, char fallback_reason[64])
+{
+    size_t graph_files = 0;
+    for (size_t i = 0; i < bm25->count; i++)
+        if (scores[i].caller_seed_hits != 0) graph_files++;
+
+    /* Reorder only the original top twenty. This preserves the exact top-20
+     * candidate set and therefore cannot lower Recall@20. The selected top
+     * five must also fit within BM25's original top-five byte budget. */
+    const size_t window = bm25->count < RB_RERANK_WINDOW
+                              ? bm25->count
+                              : RB_RERANK_WINDOW;
+    const size_t top = window < 5u ? window : 5u;
+    uint64_t context_budget = 0;
+    bool window_evidence = false;
+    if (!rb_graph_window_budget(scores, window, top, &context_budget,
+                                &window_evidence)) {
+        free(seed_ids);
+        return false;
+    }
+    if (!window_evidence) {
+        free(seed_ids);
+        *seed_count_out = seed_count;
+        *graph_count_out = graph_files;
+        *query_lookup_saturated_out = false;
+        (void)snprintf(fallback_reason, 64, "%s", "no_window_evidence");
+        return rb_rank_copy(bm25, manifest, rank);
+    }
+
+    struct rb_graph_score by_original[RB_RETAIN_ROWS];
+    memcpy(by_original, scores, sizeof(by_original));
+    qsort(scores, window, sizeof(scores[0]), rb_graph_score_cmp);
+    bool selected_original[RB_RETAIN_ROWS] = {0};
+    size_t selected = rb_graph_select(scores, window, top, context_budget,
+                                      selected_original);
+    if (selected != top) {
+        free(seed_ids);
+        *seed_count_out = seed_count;
+        *graph_count_out = graph_files;
+        *query_lookup_saturated_out = false;
+        (void)snprintf(fallback_reason, 64, "%s",
+                       "context_guard_fallback");
+        return rb_rank_copy(bm25, manifest, rank);
+    }
+
+    rank->complete = bm25->complete;
+    if (!rb_graph_append_rank(rank, manifest, scores, by_original,
+                              selected_original, window, bm25->count)) {
+        free(seed_ids);
+        return false;
+    }
+    rank->evidence_available = true;
+    free(seed_ids);
+    if (seed_count == 0) {
+        ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR, "[%s] %s:%d %s(): %s\n", RB_TAG,
+                        __FILE__, __LINE__, "rb_identifier_graph_rank",
+                        "identifier evidence applied without a seed symbol");
+        return false;
+    }
+    *seed_count_out = seed_count;
+    *graph_count_out = graph_files;
+    *query_lookup_saturated_out = false;
+    (void)snprintf(fallback_reason, 64, "%s", "none");
+    return true;
+}
+
 static bool rb_identifier_graph_rank(
     struct codeindex *ci, const char *query, const struct rb_rank *bm25,
     const struct vcs_manifest *manifest, struct rb_rank *rank,
@@ -419,117 +664,21 @@ static bool rb_identifier_graph_rank(
     bool saturated = false;
     size_t atom_file_frequency[RB_QUERY_ATOMS] = {0};
 
-    /* First measure identifier-atom selectivity over the sealed BM25 pool.
-     * This is independent of relevance and prevents generic query words from
-     * creating an unbounded number of graph seeds. */
-    for (size_t i = 0; i < bm25->count && !saturated; i++) {
-        scores[i].bm25_rank = i;
-        scores[i].path = bm25->paths[i];
-        scores[i].context_bytes = bm25->rows[i].context_bytes;
-        struct ci_symbol *symbols = NULL;
-        size_t symbol_count = 0;
-        bool lookup_truncated = false;
-        if (!rb_load_symbols(ci, bm25->paths[i], &symbols, &symbol_count,
-                             &lookup_truncated)) {
-            if (!lookup_truncated) {
-                free(seed_ids);
-                return false;
-            }
-            saturated = true;
-            (void)snprintf(fallback_reason, 64, "%s", "symbol_cap");
-            break;
-        }
-        bool atom_seen[RB_QUERY_ATOMS] = {0};
-        for (size_t s = 0; s < symbol_count; s++) {
-            struct rb_atoms symbol_atoms = {0};
-            if (!zcl_retrieval_tokenize(symbols[s].name, rb_atom_add,
-                                        &symbol_atoms)) {
-                free(symbols);
-                free(seed_ids);
-                return false;
-            }
-            (void)rb_atoms_overlap(&query_atoms, &symbol_atoms, atom_seen);
-        }
-        for (size_t atom = 0; atom < query_atoms.count; atom++)
-            if (atom_seen[atom]) atom_file_frequency[atom]++;
-        free(symbols);
+    /* Measure selectivity over the sealed BM25 pool before choosing seeds. */
+    if (!rb_graph_measure_atoms(ci, bm25, &query_atoms, scores,
+                                atom_file_frequency, &saturated, fallback_reason)) {
+        free(seed_ids);
+        return false;
     }
 
-    for (size_t i = 0; i < bm25->count && !saturated; i++) {
-        struct ci_symbol *symbols = NULL;
-        size_t symbol_count = 0;
-        bool lookup_truncated = false;
-        if (!rb_load_symbols(ci, bm25->paths[i], &symbols, &symbol_count,
-                             &lookup_truncated)) {
-            if (!lookup_truncated) {
-                free(seed_ids);
-                return false;
-            }
-            saturated = true;
-            (void)snprintf(fallback_reason, 64, "%s", "symbol_cap");
-            break;
-        }
-        bool atom_seen[RB_QUERY_ATOMS] = {0};
-        for (size_t s = 0; s < symbol_count && !saturated; s++) {
-            struct rb_atoms symbol_atoms = {0};
-            if (!zcl_retrieval_tokenize(symbols[s].name, rb_atom_add,
-                                        &symbol_atoms)) {
-                free(symbols);
-                free(seed_ids);
-                return false;
-            }
-            if (!rb_atoms_overlap_rare(&query_atoms, &symbol_atoms,
-                                       atom_file_frequency, atom_seen))
-                continue;
-            char id[400];
-            if (codeindex_symbol_record_id(&symbols[s], id, sizeof(id)) < 0) {
-                free(symbols);
-                free(seed_ids);
-                return false;
-            }
-            bool duplicate = false;
-            for (size_t prior = 0; prior < seed_count; prior++)
-                if (strcmp(seed_ids[prior], id) == 0) duplicate = true;
-            if (duplicate) continue;
-            if (seed_count >= RB_IDENTIFIER_SEEDS_MAX) {
-                saturated = true;
-                (void)snprintf(fallback_reason, 64, "%s", "identifier_seed_cap");
-                break;
-            }
-            (void)snprintf(seed_ids[seed_count], sizeof(seed_ids[0]), "%s",
-                           id);
-            seed_count++;
-
-            /* Refs are syntactic identifier-'(' observations, so functions,
-             * macros, and other same-named indexed symbols may seed them.
-             * The result is deliberately not labeled a resolved call. */
-            struct ci_ref *callers = NULL;
-            size_t caller_count = 0;
-            lookup_truncated = false;
-            if (!rb_load_callers(ci, &symbols[s], &callers, &caller_count,
-                                 &lookup_truncated)) {
-                if (!lookup_truncated) {
-                    free(symbols);
-                    free(seed_ids);
-                    return false;
-                }
-                saturated = true;
-                (void)snprintf(fallback_reason, 64, "%s", "caller_cap");
-                break;
-            }
-            bool caller_seen[RB_RETAIN_ROWS] = {0};
-            for (size_t c = 0; c < caller_count; c++) {
-                int candidate = rb_bm25_index(bm25, callers[c].ref_file);
-                if (candidate < 0 || caller_seen[candidate]) continue;
-                caller_seen[candidate] = true;
-                scores[candidate].caller_seed_hits++;
-            }
-            free(callers);
-        }
-        for (size_t atom = 0; atom < query_atoms.count; atom++)
-            if (atom_seen[atom]) scores[i].identifier_hits++;
-        free(symbols);
-    }
+    struct rb_seed_scan scan = {
+        .ci = ci, .bm25 = bm25, .query = &query_atoms,
+        .frequency = atom_file_frequency, .scores = scores,
+        .ids = seed_ids, .saturated = saturated, .reason = fallback_reason,
+    };
+    if (!rb_graph_scan_seeds(&scan)) { free(seed_ids); return false; }
+    seed_count = scan.count;
+    saturated = scan.saturated;
 
     if (saturated) {
         free(seed_ids);
@@ -538,96 +687,9 @@ static bool rb_identifier_graph_rank(
         *graph_count_out = 0;
         return rb_rank_copy(bm25, manifest, rank);
     }
-    size_t graph_files = 0;
-    for (size_t i = 0; i < bm25->count; i++)
-        if (scores[i].caller_seed_hits != 0) graph_files++;
-
-    /* Reorder only the original top twenty. This preserves the exact top-20
-     * candidate set and therefore cannot lower Recall@20. The selected top
-     * five must also fit within BM25's original top-five byte budget. */
-    const size_t window = bm25->count < RB_RERANK_WINDOW
-                              ? bm25->count
-                              : RB_RERANK_WINDOW;
-    const size_t top = window < 5u ? window : 5u;
-    uint64_t context_budget = 0;
-    bool window_evidence = false;
-    for (size_t i = 0; i < top; i++) {
-        if (UINT64_MAX - context_budget < scores[i].context_bytes) {
-            LOG_ERROR(RB_TAG, "BM25 top-five context byte sum overflow");
-            free(seed_ids);
-            return false;
-        }
-        context_budget += scores[i].context_bytes;
-    }
-    for (size_t i = 0; i < window; i++)
-        if (scores[i].identifier_hits != 0 ||
-            scores[i].caller_seed_hits != 0)
-            window_evidence = true;
-    if (!window_evidence) {
-        free(seed_ids);
-        *seed_count_out = seed_count;
-        *graph_count_out = graph_files;
-        *query_lookup_saturated_out = false;
-        (void)snprintf(fallback_reason, 64, "%s", "no_window_evidence");
-        return rb_rank_copy(bm25, manifest, rank);
-    }
-
-    struct rb_graph_score by_original[RB_RETAIN_ROWS];
-    memcpy(by_original, scores, sizeof(by_original));
-    qsort(scores, window, sizeof(scores[0]), rb_graph_score_cmp);
-    bool selected_original[RB_RETAIN_ROWS] = {0};
-    size_t selected = 0;
-    uint64_t selected_context = 0;
-    for (size_t i = 0; i < window && selected < top; i++) {
-        if (UINT64_MAX - selected_context < scores[i].context_bytes ||
-            selected_context + scores[i].context_bytes > context_budget)
-            continue;
-        selected_original[scores[i].bm25_rank] = true;
-        selected_context += scores[i].context_bytes;
-        selected++;
-    }
-    if (selected != top) {
-        free(seed_ids);
-        *seed_count_out = seed_count;
-        *graph_count_out = graph_files;
-        *query_lookup_saturated_out = false;
-        (void)snprintf(fallback_reason, 64, "%s",
-                       "context_guard_fallback");
-        return rb_rank_copy(bm25, manifest, rank);
-    }
-
-    rank->complete = bm25->complete;
-    for (size_t i = 0; i < window; i++) {
-        if (!selected_original[scores[i].bm25_rank]) continue;
-        if (!rb_rank_add_graph_score(rank, &scores[i], manifest)) {
-            free(seed_ids);
-            return false;
-        }
-    }
-    for (size_t i = 0; i < window; i++) {
-        if (selected_original[i]) continue;
-        if (!rb_rank_add_graph_score(rank, &by_original[i], manifest)) {
-            free(seed_ids);
-            return false;
-        }
-    }
-    for (size_t i = window; i < bm25->count; i++) {
-        if (!rb_rank_add_graph_score(rank, &by_original[i], manifest)) {
-            free(seed_ids);
-            return false;
-        }
-    }
-    rank->evidence_available = true;
-    free(seed_ids);
-    if (seed_count == 0) {
-        LOG_ERROR(RB_TAG, "identifier evidence applied without a seed symbol");
-        return false;
-    }
-    *seed_count_out = seed_count;
-    *graph_count_out = graph_files;
-    *query_lookup_saturated_out = false;
-    (void)snprintf(fallback_reason, 64, "%s", "none");
-    return true;
+    return rb_graph_finish(bm25, manifest, rank, scores, seed_ids, seed_count,
+                           seed_count_out, graph_count_out,
+                           query_lookup_saturated_out, fallback_reason);
 }
 
 static void rb_u64le(uint8_t out[8], uint64_t value)
@@ -660,26 +722,52 @@ static void rb_rank_root(const struct rb_rank *rank, char out[65])
     zcl_hex_encode(root, sizeof(root), out);
 }
 
-static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank,
-                         size_t offset, size_t page_limit)
+static bool rb_rank_context_cost(const struct rb_rank *rank, uint64_t *cost)
 {
     uint64_t bytes_at_5 = 0;
     for (size_t i = 0; i < rank->count && i < 5; i++) {
         if (UINT64_MAX - bytes_at_5 < rank->rows[i].context_bytes) {
-            LOG_ERROR(RB_TAG, "top-five context byte sum overflow");
+            ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR, "[%s] %s:%d %s(): %s\n", RB_TAG,
+                            __FILE__, __LINE__, "rb_push_rank",
+                            "top-five context byte sum overflow");
             return false;
         }
         bytes_at_5 += rank->rows[i].context_bytes;
     }
     if (bytes_at_5 > INT64_MAX || bytes_at_5 > UINT64_MAX - 3u) {
-        LOG_ERROR(RB_TAG, "top-five context cost exceeds output range");
+        ZCL_LOG_EMIT_AT(ZCL_LOG_ERROR, "[%s] %s:%d %s(): %s\n", RB_TAG,
+                        __FILE__, __LINE__, "rb_push_rank",
+                        "top-five context cost exceeds output range");
         return false;
     }
-    size_t displayed = rank->count > offset ? rank->count - offset : 0;
-    if (displayed > page_limit) displayed = page_limit;
+    *cost = bytes_at_5;
+    return true;
+}
+
+static bool rb_push_rank_row(struct json_value *rows, const struct rb_rank *rank,
+                             size_t i)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    bool ok = json_push_kv_int(&row, "rank", (int64_t)i + 1) &&
+        json_push_kv_str(&row, "path", rank->rows[i].path) &&
+        json_push_kv_int(&row, "context_bytes", (int64_t)rank->rows[i].context_bytes);
+    if (ok && rank->evidence_available)
+        ok = json_push_kv_int(&row, "original_bm25_rank", (int64_t)rank->original_bm25_rank[i]) &&
+            json_push_kv_int(&row, "identifier_hits", (int64_t)rank->identifier_hits[i]) &&
+            json_push_kv_int(&row, "caller_seed_hits", (int64_t)rank->caller_seed_hits[i]);
+    ok = ok && json_push_back(rows, &row);
+    json_free(&row);
+    return ok;
+}
+
+static bool rb_push_rank_header(struct json_value *object, const struct rb_rank *rank,
+                                size_t offset, size_t displayed, uint64_t bytes_at_5)
+{
     char ranking_root[65];
     rb_rank_root(rank, ranking_root);
-    bool ok = json_push_kv_bool(object, "ranking_complete", rank->complete) &&
+    return json_push_kv_bool(object, "ranking_complete", rank->complete) &&
         json_push_kv_bool(object, "evidence_available",
                           rank->evidence_available) &&
         json_push_kv_int(object, "ranked_files", (int64_t)rank->count) &&
@@ -689,29 +777,22 @@ static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank,
         json_push_kv_int(object, "context_bytes_at_5", (int64_t)bytes_at_5) &&
         json_push_kv_int(object, "approximate_tokens_at_5",
                          (int64_t)((bytes_at_5 + 3u) / 4u));
+}
+
+static bool rb_push_rank(struct json_value *object, const struct rb_rank *rank,
+                         size_t offset, size_t page_limit)
+{
+    uint64_t bytes_at_5 = 0;
+    if (!rb_rank_context_cost(rank, &bytes_at_5)) return false;
+    size_t displayed = rank->count > offset ? rank->count - offset : 0;
+    if (displayed > page_limit) displayed = page_limit;
+    bool ok = rb_push_rank_header(object, rank, offset, displayed, bytes_at_5);
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
     for (size_t i = offset; i < rank->count &&
          i < offset + page_limit && ok; i++) {
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        ok = json_push_kv_int(&row, "rank", (int64_t)i + 1) &&
-            json_push_kv_str(&row, "path", rank->rows[i].path) &&
-            json_push_kv_int(&row, "context_bytes",
-                             (int64_t)rank->rows[i].context_bytes);
-        if (ok && rank->evidence_available)
-            ok = json_push_kv_int(
-                     &row, "original_bm25_rank",
-                     (int64_t)rank->original_bm25_rank[i]) &&
-                json_push_kv_int(&row, "identifier_hits",
-                                 (int64_t)rank->identifier_hits[i]) &&
-                json_push_kv_int(&row, "caller_seed_hits",
-                                 (int64_t)rank->caller_seed_hits[i]);
-        ok = ok &&
-            json_push_back(&rows, &row);
-        json_free(&row);
+        ok = rb_push_rank_row(&rows, rank, i);
     }
     if (ok) ok = json_push_kv(object, "ranking", &rows);
     json_free(&rows);
