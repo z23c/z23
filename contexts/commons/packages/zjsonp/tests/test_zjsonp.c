@@ -593,6 +593,39 @@ cleanup:
   return failed;
 }
 
+static int test_phase_boundaries(void) {
+  const char *doc = "{\"n\":-12.5e+2,\"s\":\"\\ud83d\\ude00\"}";
+  static const struct { zjsonp_event_kind kind; size_t off, len; } want[] = {
+    {ZJRP_OBJ_OPEN, 0, 0}, {ZJRP_KEY, 2, 1}, {ZJRP_NUM, 5, 8},
+    {ZJRP_KEY, 15, 1}, {ZJRP_STR, 19, 12}, {ZJRP_OBJ_CLOSE, 32, 0}
+  };
+  zjsonp p;
+  zjsonp_init(&p, doc, strlen(doc));
+  for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+    zjsonp_event ev;
+    CHECK(zjsonp_next(&p, &ev) == ZJRP_OK);
+    CHECK(ev.kind == want[i].kind && ev.off == want[i].off && ev.len == want[i].len);
+  }
+  zjsonp_event ev;
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_DONE);
+  zjsonp_init(&p, "[1e+]", 5);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_OK);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 4);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 4);
+  return 0;
+}
+
+static int test_bad_surrogate_pairs(void) {
+  static const char *const docs[] = {"\"\\udc00\"", "\"\\ud800\\u0041\""};
+  for (size_t i = 0; i < sizeof docs / sizeof docs[0]; i++) {
+    zjsonp_event events[2];
+    size_t n = 0;
+    CHECK(slurp(docs[i], events, 2, &n) == ZJRP_DONE && n == 1);
+    CHECK(zjsonp_str_decode(docs[i], &events[0], NULL, 0) == SIZE_MAX);
+  }
+  return 0;
+}
+
 int main(void) {
   struct {
     const char *name;
@@ -602,6 +635,8 @@ int main(void) {
       {"cli_output", test_cli_output},
       {"cli_input_bound", test_cli_input_bound},
       {"terminal_syntax", test_terminal_syntax},
+      {"phase_boundaries", test_phase_boundaries},
+      {"bad_surrogate_pairs", test_bad_surrogate_pairs},
       {"negative_zero_integer", test_negative_zero_integer},
       {"kat", test_kat},       {"syntax_errors", test_syntax_errors},
       {"utf8", test_utf8},     {"decode", test_decode},

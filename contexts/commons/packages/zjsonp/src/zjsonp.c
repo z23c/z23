@@ -118,36 +118,52 @@ static bool literal_error(zjsonp *p, const char *lit, size_t n) {
 /* Scan a number per the strict grammar starting at pos. On success
  * advances pos past the number and returns its length, else 0 and
  * pos identifies the offending byte (len at end of input). */
-static size_t scan_number(zjsonp *p) {
-  size_t i = p->pos;
-  if (i < p->len && p->text[i] == '-')
-    i++;
-  if (i >= p->len)
-    return number_error(p, i);
-  if (p->text[i] == '0') {
-    i++;
-  } else if (p->text[i] >= '1' && p->text[i] <= '9') {
-    while (i < p->len && p->text[i] >= '0' && p->text[i] <= '9')
-      i++;
-  } else {
-    return number_error(p, i);
-  }
+static bool number_digit(char c) { return c >= '0' && c <= '9'; }
+
+static bool number_integer(zjsonp *p, size_t *at) {
+  size_t i = *at;
+  if (i < p->len && p->text[i] == '-') i++;
+  if (i >= p->len) { number_error(p, i); return false; }
+  if (p->text[i] == '0') i++;
+  else if (p->text[i] >= '1' && p->text[i] <= '9') {
+    while (i < p->len && number_digit(p->text[i])) i++;
+  } else { number_error(p, i); return false; }
+  *at = i;
+  return true;
+}
+
+static bool number_fraction(zjsonp *p, size_t *at) {
+  size_t i = *at;
   if (i < p->len && p->text[i] == '.') {
     i++;
-    if (i >= p->len || p->text[i] < '0' || p->text[i] > '9')
-      return number_error(p, i);
-    while (i < p->len && p->text[i] >= '0' && p->text[i] <= '9')
-      i++;
+    if (i >= p->len || !number_digit(p->text[i])) {
+      number_error(p, i); return false;
+    }
+    while (i < p->len && number_digit(p->text[i])) i++;
   }
+  *at = i;
+  return true;
+}
+
+static bool number_exponent(zjsonp *p, size_t *at) {
+  size_t i = *at;
   if (i < p->len && (p->text[i] == 'e' || p->text[i] == 'E')) {
     i++;
     if (i < p->len && (p->text[i] == '+' || p->text[i] == '-'))
       i++;
-    if (i >= p->len || p->text[i] < '0' || p->text[i] > '9')
-      return number_error(p, i);
-    while (i < p->len && p->text[i] >= '0' && p->text[i] <= '9')
-      i++;
+    if (i >= p->len || !number_digit(p->text[i])) {
+      number_error(p, i); return false;
+    }
+    while (i < p->len && number_digit(p->text[i])) i++;
   }
+  *at = i;
+  return true;
+}
+
+static size_t scan_number(zjsonp *p) {
+  size_t i = p->pos;
+  if (!number_integer(p, &i) || !number_fraction(p, &i) ||
+      !number_exponent(p, &i)) return 0;
   size_t n = i - p->pos;
   p->pos = i;
   return n;
@@ -207,93 +223,66 @@ static zjsonp_status syntax_failure(zjsonp *p) {
   return ZJRP_SYNTAX;
 }
 
-zjsonp_status zjsonp_next(zjsonp *p, zjsonp_event *ev) {
-  if (!p || !parser_ready(p, ev))
-    return ZJRP_SYNTAX;
+static zjsonp_status close_container(zjsonp *p, zjsonp_event *ev) {
+  uint32_t lvl = p->depth - 1;
+  bool is_arr = (p->is_array >> lvl) & 1u;
+  char c = p->text[p->pos];
+  if (is_arr != (c == ']')) return syntax_failure(p);
+  if ((p->after_comma >> lvl) & 1u) return syntax_failure(p);
+  if (!is_arr && !((p->expect_key >> lvl) & 1u)) return syntax_failure(p);
+  p->pos++;
+  p->depth--;
+  ev->kind = is_arr ? ZJRP_ARR_CLOSE : ZJRP_OBJ_CLOSE;
+  ev->off = p->pos - 1;
+  ev->len = 0;
+  value_done(p);
+  return ZJRP_OK;
+}
 
-  skip_ws(p);
-
-  /* Complete document: only trailing whitespace may follow. */
-  if (p->top_done && p->depth == 0)
-    return p->pos == p->len ? ZJRP_DONE : syntax_failure(p);
-
-  /* Container close? */
-  if (p->depth > 0 && p->pos < p->len &&
-      (p->text[p->pos] == '}' || p->text[p->pos] == ']')) {
-    uint32_t lvl = p->depth - 1;
-    bool is_arr = (p->is_array >> lvl) & 1u;
-    char c = p->text[p->pos];
-    if (is_arr != (c == ']'))
-      return syntax_failure(p); /* mismatched bracket */
-    if ((p->after_comma >> lvl) & 1u)
-      return syntax_failure(p); /* trailing comma */
-    if (!is_arr && !((p->expect_key >> lvl) & 1u))
-      return syntax_failure(p); /* key with no value */
+static zjsonp_status read_key(zjsonp *p, zjsonp_event *ev, uint32_t lvl) {
+  if (!((p->first >> lvl) & 1u)) {
+    if (p->pos >= p->len || p->text[p->pos] != ',') return syntax_failure(p);
     p->pos++;
-    p->depth--;
-    ev->kind = is_arr ? ZJRP_ARR_CLOSE : ZJRP_OBJ_CLOSE;
-    ev->off = p->pos - 1;
-    ev->len = 0;
-    value_done(p);
-    return ZJRP_OK;
+    p->after_comma |= 1u << lvl;
+    skip_ws(p);
   }
+  if (p->pos >= p->len || p->text[p->pos] != '"') return syntax_failure(p);
+  size_t off = 0, len = 0;
+  if (!scan_string(p, &off, &len)) return syntax_failure(p);
+  p->expect_key &= ~(1u << lvl);
+  ev->kind = ZJRP_KEY;
+  ev->off = off;
+  ev->len = len;
+  return ZJRP_OK;
+}
 
-  /* Object key? */
-  if (p->depth > 0) {
-    uint32_t lvl = p->depth - 1;
-    if (!((p->is_array >> lvl) & 1u) && ((p->expect_key >> lvl) & 1u)) {
-      if (!((p->first >> lvl) & 1u)) {
-        if (p->pos >= p->len || p->text[p->pos] != ',')
-          return syntax_failure(p);
-        p->pos++;
-        p->after_comma |= 1u << lvl;
-        skip_ws(p);
-      }
-      if (p->pos >= p->len || p->text[p->pos] != '"')
-        return syntax_failure(p);
-      size_t off = 0, len = 0;
-      if (!scan_string(p, &off, &len))
-        return syntax_failure(p);
-      p->expect_key &= ~(1u << lvl);
-      ev->kind = ZJRP_KEY;
-      ev->off = off;
-      ev->len = len;
-      return ZJRP_OK;
-    }
+static zjsonp_status open_container(zjsonp *p, zjsonp_event *ev, char c) {
+  if (p->depth == ZJRP_MAX_DEPTH) return ZJRP_DEPTH;
+  uint32_t lvl = p->depth;
+  p->depth++;
+  if (c == '[') {
+    p->is_array |= 1u << lvl;
+    p->expect_key &= ~(1u << lvl);
+  } else {
+    p->is_array &= ~(1u << lvl);
+    p->expect_key |= 1u << lvl;
   }
+  p->first |= 1u << lvl;
+  p->after_comma &= ~(1u << lvl);
+  p->pos++;
+  ev->kind = c == '[' ? ZJRP_ARR_OPEN : ZJRP_OBJ_OPEN;
+  ev->len = 0;
+  return ZJRP_OK;
+}
 
-  if (!value_preamble(p))
-    return syntax_failure(p);
-  if (p->pos >= p->len)
-    return syntax_failure(p); /* truncated input */
-
+static zjsonp_status read_value(zjsonp *p, zjsonp_event *ev) {
   char c = p->text[p->pos];
   ev->off = p->pos;
   switch (c) {
-  case '{':
-  case '[': {
-    if (p->depth == ZJRP_MAX_DEPTH)
-      return ZJRP_DEPTH;
-    uint32_t lvl = p->depth;
-    p->depth++;
-    if (c == '[') {
-      p->is_array |= 1u << lvl;
-      p->expect_key &= ~(1u << lvl);
-    } else {
-      p->is_array &= ~(1u << lvl);
-      p->expect_key |= 1u << lvl;
-    }
-    p->first |= 1u << lvl;
-    p->after_comma &= ~(1u << lvl);
-    p->pos++;
-    ev->kind = c == '[' ? ZJRP_ARR_OPEN : ZJRP_OBJ_OPEN;
-    ev->len = 0;
-    return ZJRP_OK;
-  }
+  case '{': case '[': return open_container(p, ev, c);
   case '"': {
     size_t off = 0, len = 0;
-    if (!scan_string(p, &off, &len))
-      return syntax_failure(p);
+    if (!scan_string(p, &off, &len)) return syntax_failure(p);
     ev->kind = ZJRP_STR;
     ev->off = off;
     ev->len = len;
@@ -301,36 +290,38 @@ zjsonp_status zjsonp_next(zjsonp *p, zjsonp_event *ev) {
     return ZJRP_OK;
   }
   case 't':
-    if (!match_literal(p, "true", 4))
-      return syntax_failure(p);
-    ev->kind = ZJRP_BOOL;
-    ev->len = 4;
-    value_done(p);
-    return ZJRP_OK;
+    if (!match_literal(p, "true", 4)) return syntax_failure(p);
+    ev->kind = ZJRP_BOOL; ev->len = 4; value_done(p); return ZJRP_OK;
   case 'f':
-    if (!match_literal(p, "false", 5))
-      return syntax_failure(p);
-    ev->kind = ZJRP_BOOL;
-    ev->len = 5;
-    value_done(p);
-    return ZJRP_OK;
+    if (!match_literal(p, "false", 5)) return syntax_failure(p);
+    ev->kind = ZJRP_BOOL; ev->len = 5; value_done(p); return ZJRP_OK;
   case 'n':
-    if (!match_literal(p, "null", 4))
-      return syntax_failure(p);
-    ev->kind = ZJRP_NULL;
-    ev->len = 4;
-    value_done(p);
-    return ZJRP_OK;
+    if (!match_literal(p, "null", 4)) return syntax_failure(p);
+    ev->kind = ZJRP_NULL; ev->len = 4; value_done(p); return ZJRP_OK;
   default: {
     size_t n = scan_number(p);
-    if (n == 0)
-      return syntax_failure(p);
-    ev->kind = ZJRP_NUM;
-    ev->len = n;
-    value_done(p);
-    return ZJRP_OK;
+    if (n == 0) return syntax_failure(p);
+    ev->kind = ZJRP_NUM; ev->len = n; value_done(p); return ZJRP_OK;
   }
   }
+}
+
+zjsonp_status zjsonp_next(zjsonp *p, zjsonp_event *ev) {
+  if (!p || !parser_ready(p, ev)) return ZJRP_SYNTAX;
+  skip_ws(p);
+  if (p->top_done && p->depth == 0)
+    return p->pos == p->len ? ZJRP_DONE : syntax_failure(p);
+  if (p->depth > 0 && p->pos < p->len &&
+      (p->text[p->pos] == '}' || p->text[p->pos] == ']'))
+    return close_container(p, ev);
+  if (p->depth > 0) {
+    uint32_t lvl = p->depth - 1;
+    if (!((p->is_array >> lvl) & 1u) && ((p->expect_key >> lvl) & 1u))
+      return read_key(p, ev, lvl);
+  }
+  if (!value_preamble(p)) return syntax_failure(p);
+  if (p->pos >= p->len) return syntax_failure(p);
+  return read_value(p, ev);
 }
 
 /* Raw UTF-8 is one scalar, not one scalar per byte. Escapes enter with
@@ -343,6 +334,58 @@ static size_t encode_string_scalar(const char *text, size_t remaining,
   return zutf8_encode(cp, enc);
 }
 
+static bool decode_hex4(const char *text, uint32_t *out) {
+  uint32_t v = 0;
+  for (int k = 0; k < 4; k++) {
+    char h = text[k];
+    v <<= 4;
+    if (h >= '0' && h <= '9') v |= (uint32_t)(h - '0');
+    else if (h >= 'a' && h <= 'f') v |= (uint32_t)(h - 'a' + 10);
+    else if (h >= 'A' && h <= 'F') v |= (uint32_t)(h - 'A' + 10);
+    else return false;
+  }
+  *out = v;
+  return true;
+}
+
+static bool decode_unicode_escape(const char *text, size_t remaining,
+                                  uint32_t *cp, size_t *adv) {
+  uint32_t v;
+  if (remaining < 6 || !decode_hex4(text + 2, &v)) return false;
+  *adv = 6;
+  if (v >= 0xd800 && v <= 0xdbff) {
+    uint32_t lo;
+    if (remaining < 12 || text[6] != '\\' || text[7] != 'u' ||
+        !decode_hex4(text + 8, &lo) || lo < 0xdc00 || lo > 0xdfff)
+      return false;
+    *cp = 0x10000 + ((v - 0xd800) << 10) + (lo - 0xdc00);
+    *adv = 12;
+  } else if (v >= 0xdc00 && v <= 0xdfff) {
+    return false;
+  } else {
+    *cp = v;
+  }
+  return true;
+}
+
+static bool decode_escape(const char *text, size_t remaining,
+                          uint32_t *cp, size_t *adv) {
+  if (remaining < 2) return false;
+  *adv = 2;
+  switch (text[1]) {
+  case '"': *cp = '"'; return true;
+  case '\\': *cp = '\\'; return true;
+  case '/': *cp = '/'; return true;
+  case 'b': *cp = 0x08; return true;
+  case 'f': *cp = 0x0c; return true;
+  case 'n': *cp = 0x0a; return true;
+  case 'r': *cp = 0x0d; return true;
+  case 't': *cp = 0x09; return true;
+  case 'u': return decode_unicode_escape(text, remaining, cp, adv);
+  default: return false;
+  }
+}
+
 size_t zjsonp_str_decode(const char *text, const zjsonp_event *ev,
                          char *out, size_t cap) {
   if (!text || !ev || (ev->kind != ZJRP_KEY && ev->kind != ZJRP_STR))
@@ -353,67 +396,13 @@ size_t zjsonp_str_decode(const char *text, const zjsonp_event *ev,
     unsigned char c = (unsigned char)text[i];
     uint32_t cp = c;
     size_t adv = 1;
-    if (c == '\\') {
-      if (i + 1 >= end)
-        return SIZE_MAX;
-      char e = text[i + 1];
-      switch (e) {
-      case '"': cp = '"'; adv = 2; break;
-      case '\\': cp = '\\'; adv = 2; break;
-      case '/': cp = '/'; adv = 2; break;
-      case 'b': cp = 0x08; adv = 2; break;
-      case 'f': cp = 0x0c; adv = 2; break;
-      case 'n': cp = 0x0a; adv = 2; break;
-      case 'r': cp = 0x0d; adv = 2; break;
-      case 't': cp = 0x09; adv = 2; break;
-      case 'u': {
-        if (i + 5 >= end)
-          return SIZE_MAX;
-        uint32_t v = 0;
-        for (int k = 2; k <= 5; k++) {
-          char h = text[i + k];
-          v <<= 4;
-          if (h >= '0' && h <= '9') v |= (uint32_t)(h - '0');
-          else if (h >= 'a' && h <= 'f') v |= (uint32_t)(h - 'a' + 10);
-          else if (h >= 'A' && h <= 'F') v |= (uint32_t)(h - 'A' + 10);
-          else return SIZE_MAX;
-        }
-        adv = 6;
-        if (v >= 0xd800 && v <= 0xdbff) { /* high surrogate */
-          if (i + 11 >= end || text[i + 6] != '\\' ||
-              text[i + 7] != 'u')
-            return SIZE_MAX;
-          uint32_t lo = 0;
-          for (int k = 8; k <= 11; k++) {
-            char h = text[i + k];
-            lo <<= 4;
-            if (h >= '0' && h <= '9') lo |= (uint32_t)(h - '0');
-            else if (h >= 'a' && h <= 'f') lo |= (uint32_t)(h - 'a' + 10);
-            else if (h >= 'A' && h <= 'F') lo |= (uint32_t)(h - 'A' + 10);
-            else return SIZE_MAX;
-          }
-          if (lo < 0xdc00 || lo > 0xdfff)
-            return SIZE_MAX;
-          cp = 0x10000 + ((v - 0xd800) << 10) + (lo - 0xdc00);
-          adv = 12;
-        } else if (v >= 0xdc00 && v <= 0xdfff) {
-          return SIZE_MAX; /* lone low surrogate */
-        } else {
-          cp = v;
-        }
-        break;
-      }
-      default:
-        return SIZE_MAX;
-      }
-    }
+    if (c == '\\' && !decode_escape(text + i, end - i, &cp, &adv))
+      return SIZE_MAX;
     char enc[4];
     size_t en = encode_string_scalar(text + i, end - i, cp, &adv, enc);
-    if (en == 0)
-      return SIZE_MAX;
+    if (en == 0) return SIZE_MAX;
     for (size_t k = 0; k < en; k++) {
-      if (n < cap && out)
-        out[n] = enc[k];
+      if (n < cap && out) out[n] = enc[k];
       n++;
     }
     i += adv;
