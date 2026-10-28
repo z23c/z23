@@ -129,7 +129,6 @@ contexts/commons/packages/zdogview/src/zdogview.c:zv_tri:23
 contexts/commons/packages/zhuman/app/main.c:main:17
 contexts/commons/packages/zmath/app/main.c:main:22
 contexts/commons/packages/zmath/tests/test_zmath.c:test_checked_i64:19
-contexts/commons/packages/zmd/src/zmd.c:url_ok:24
 contexts/commons/packages/zotpcli/app/main.c:cmd_add:21
 contexts/commons/packages/zotpcli/app/main.c:parse_options:23
 contexts/commons/packages/zotpcli/src/zotpcli.c:json_str_decode:32
