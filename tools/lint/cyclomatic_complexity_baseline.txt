@@ -120,7 +120,6 @@ contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_tamper:46
 contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_txq:32
 contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_wire:47
 contexts/commons/packages/zbits/app/main.c:main:28
-contexts/commons/packages/zdiff/src/zdiff.c:zdiff_run:33
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zdogfight/tests/test_zdogfight.c:test_bounds_and_wrap:30
