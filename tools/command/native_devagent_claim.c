@@ -78,7 +78,7 @@
  * Any Git invocation that does not exit 0 is ok=false, status "GIT_FAILED",
  * with a message naming the failing argv.
  *
- * PROCESS RULE. Run Git only through zcl_spawn_capture() from util/spawn.h.
+ * PROCESS RULE. Run Git through the bounded platform host-tool capture.
  * popen(), system() and a shell command string are forbidden and gated.
  *
  * Implement this file only; the test tests/harness/src/test_devagent_claim.c
@@ -93,6 +93,9 @@
 #include "json/json.h"
 #include "zutf8/zutf8.h"
 #include "platform/clock.h"
+#include "platform/file_stream.h"
+#include "platform/path_compat.h"
+#include "platform/process_lifecycle.h"
 #include "platform/private_file.h"
 #include "platform/rng.h"
 #include "util/file_io.h"
@@ -104,6 +107,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
@@ -118,6 +124,23 @@
 
 /* ── git via the only allowed rail ──────────────────────────────────────── */
 
+#ifdef _WIN32
+static int dvc_windows_git_capture(const char **argv, char *out, size_t cap)
+{
+    const char *image = getenv("ZCL_DEV_GIT_EXE");
+    if (!image || !image[0]) image = "C:/msys64/usr/bin/git.exe";
+    static const char *const env[] = {
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0", "LANG=C", "LC_ALL=C", NULL,
+    };
+    argv[0] = image;
+    struct platform_process_options options = { .image = image, .argv = argv, .env = env };
+    struct platform_process_capture_result observed = {0};
+    return platform_path_is_absolute(image) &&
+        platform_process_capture_stdout(&options, out, cap, 30000, &observed) &&
+        !observed.timed_out && !observed.output_truncated && observed.exit_code == 0 ? 0 : -1;
+}
+#endif
 static bool dvc_git(const char *cwd, const char *const args[],
                     char *out, size_t cap, char *why, size_t whycap)
 {
@@ -133,7 +156,12 @@ static bool dvc_git(const char *cwd, const char *const args[],
     }
     argv[n] = NULL;
     out[0] = '\0';
-    int rc = zcl_spawn_capture(argv, out, cap, 30000);
+    int rc;
+#ifdef _WIN32
+    rc = dvc_windows_git_capture(argv, out, cap);
+#else
+    rc = zcl_spawn_capture(argv, out, cap, 30000);
+#endif
     if (rc != 0) {
         size_t used = 0;
         for (size_t i = 0; argv[i] && used + 2 < whycap; i++)
@@ -221,6 +249,30 @@ static size_t dvc_path_pop(const char *out, size_t used)
 
 /* Fold one segment of `len` bytes into the normalized prefix: skip empty
  * and ".", pop on "..", append anything else. NULL, or why it failed. */
+#ifdef _WIN32
+static bool dvc_windows_fixed_device(const char *seg, size_t stem)
+{
+    return stem == 3 && (!memcmp(seg, "con", 3) || !memcmp(seg, "prn", 3) ||
+                         !memcmp(seg, "aux", 3) || !memcmp(seg, "nul", 3));
+}
+static bool dvc_windows_numbered_device(const char *seg, size_t stem)
+{
+    if (stem != 4 && stem != 5) return false;
+    if (memcmp(seg, "com", 3) && memcmp(seg, "lpt", 3)) return false;
+    if (stem == 4) return seg[3] >= '1' && seg[3] <= '9';
+    return (unsigned char)seg[3] == 0xc2 &&
+        ((unsigned char)seg[4] == 0xb9 || (unsigned char)seg[4] == 0xb2 ||
+         (unsigned char)seg[4] == 0xb3);
+}
+static bool dvc_windows_segment_safe(const char *seg, size_t len)
+{
+    if (!len || seg[len - 1] == '.' || seg[len - 1] == ' ') return false;
+    size_t stem = 0;
+    while (stem < len && seg[stem] != '.') stem++;
+    return !dvc_windows_fixed_device(seg, stem) &&
+           !dvc_windows_numbered_device(seg, stem);
+}
+#endif
 static const char *dvc_path_step(char *out, size_t *used, size_t cap,
                                  const char *seg, size_t len)
 {
@@ -228,6 +280,10 @@ static const char *dvc_path_step(char *out, size_t *used, size_t cap,
     bool dotdot = len == 2 && seg[0] == '.' && seg[1] == '.';
     if (len == 0 || dot)
         return NULL;
+#ifdef _WIN32
+    if (!dotdot && !dvc_windows_segment_safe(seg, len))
+        return "has an unsafe Windows segment";
+#endif
     if (dotdot && *used == 0)
         return "escapes the worktree root";
     if (dotdot) {
@@ -247,10 +303,37 @@ static const char *dvc_path_step(char *out, size_t *used, size_t cap,
  * segments and resolve ".." against the worktree root, so every spelling of
  * one file compares equal. Returns NULL on success, or why the path names no
  * file inside this worktree (empty, absolute, escaping the root, too long). */
+#ifdef _WIN32
+static bool dvc_windows_char_safe(unsigned char c)
+{
+    return c >= 0x20 && !strchr(":*?\"<>|~", c);
+}
+static const char *dvc_windows_path_prepare(const char *in, char out[DVC_PATH_CAP])
+{
+    size_t len = strlen(in);
+    if (!zutf8_validate_n(in, len)) return "is invalid UTF-8";
+    if (len >= DVC_PATH_CAP) return "is too long";
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '\\') c = '/';
+        if (!dvc_windows_char_safe(c)) return "has an unsafe Windows spelling";
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        out[i] = (char)c;
+    }
+    out[len] = '\0';
+    return NULL;
+}
+#endif
 static const char *dvc_path_normalize(const char *in, char *out, size_t cap)
 {
     if (!in || !in[0])
         return "is empty";
+#ifdef _WIN32
+    char win_path[DVC_PATH_CAP];
+    const char *why = dvc_windows_path_prepare(in, win_path);
+    if (why) return why;
+    in = win_path;
+#endif
     if (in[0] == '/')
         return "is absolute";
     size_t used = 0;
@@ -269,6 +352,35 @@ static const char *dvc_path_normalize(const char *in, char *out, size_t cap)
 /* Does the files array on this ledger line contain `path`? Recorded paths
  * are normalized before the compare, so a row written before normalization
  * existed still matches every spelling of its file. */
+#ifdef _WIN32
+static bool dvc_windows_path_equal(const char *a, const char *b)
+{
+    wchar_t wa[DVC_PATH_CAP], wb[DVC_PATH_CAP];
+    int na = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a, -1, wa, DVC_PATH_CAP);
+    int nb = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, b, -1, wb, DVC_PATH_CAP);
+    if (!na || !nb) return true; /* uncomparable legacy path conflicts */
+    int comparison = CompareStringOrdinal(wa, -1, wb, -1, TRUE);
+    return comparison == 0 || comparison == CSTR_EQUAL;
+}
+#endif
+static bool dvc_read_line_item(const char **cursor, char item[DVC_PATH_CAP])
+{
+    const char *p = *cursor;
+    size_t used = 0;
+    while (*p && *p != '"') {
+#ifdef _WIN32
+        if (used + 1 >= DVC_PATH_CAP) return false;
+        if (*p == '\\' && p[1] != '\\' && p[1] != '"') return false;
+#endif
+        if (*p == '\\' && p[1]) p++;
+        if (used + 1 < DVC_PATH_CAP) item[used++] = *p;
+        p++;
+    }
+    item[used] = '\0';
+    if (*p == '"') p++;
+    *cursor = p;
+    return true;
+}
 static bool dvc_line_has_file(const char *line, const char *path)
 {
     const char *p = strstr(line, "\"files\":[");
@@ -282,21 +394,20 @@ static bool dvc_line_has_file(const char *line, const char *path)
         }
         p++;
         char item[DVC_PATH_CAP];
-        size_t used = 0;
-        while (*p && *p != '"') {
-            if (*p == '\\' && p[1])
-                p++;
-            if (used + 1 < sizeof(item))
-                item[used++] = *p;
-            p++;
-        }
-        item[used] = '\0';
-        if (*p == '"')
-            p++;
+        if (!dvc_read_line_item(&p, item)) return true;
         char norm[DVC_PATH_CAP];
+#ifdef _WIN32
+        if (dvc_path_normalize(item, norm, sizeof(norm))) return true;
+        const char *cmp = norm;
+#else
         const char *cmp =
             dvc_path_normalize(item, norm, sizeof(norm)) ? item : norm;
+#endif
+#ifdef _WIN32
+        if (dvc_windows_path_equal(cmp, path))
+#else
         if (strcmp(cmp, path) == 0)
+#endif
             return true;
     }
     return false;
@@ -388,19 +499,59 @@ static bool dvc_git_step(const char *cwd, const char *const args[],
     return false;
 }
 
+#ifdef _WIN32
+/* Git returns relative paths where possible. Resolve them against -C
+ * without guessing mappings for MSYS root paths. */
+static bool dvc_windows_git_join(const char *cwd, const char *raw,
+                                 char *joined, size_t cap)
+{
+    if (!raw || !raw[0]) return false;
+    bool absolute = platform_path_is_absolute(raw);
+    if (!absolute && (raw[0] == '/' || raw[0] == '\\' ||
+                      (raw[0] && raw[1] == ':'))) return false;
+    int n = absolute ? snprintf(joined, cap, "%s", raw) :
+        snprintf(joined, cap, "%s/%s", cwd, raw);
+    return n >= 0 && (size_t)n < cap;
+}
+static bool dvc_windows_git_path(const char *cwd, const char *raw,
+                                 char *out, size_t cap)
+{
+    if (cap > INT_MAX) return false;
+    char joined[PATH_MAX];
+    if (!dvc_windows_git_join(cwd, raw, joined, sizeof(joined))) return false;
+    wchar_t input[PATH_MAX], full[PATH_MAX];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, joined, -1,
+                             input, PATH_MAX)) return false;
+    DWORD size = GetFullPathNameW(input, PATH_MAX, full, NULL);
+    if (!size || size >= PATH_MAX) return false;
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, full, -1,
+                             out, (int)cap, NULL, NULL)) return false;
+    return platform_path_is_absolute(out);
+}
+#endif
 static bool dvc_git_facts(const char *cwd, struct dvc_facts *facts,
                           struct zcl_command_reply *reply)
 {
+#ifdef _WIN32
+    static const char *const common_args[] = {"rev-parse", "--path-format=relative", "--git-common-dir", NULL};
+    static const char *const top_args[] = {"rev-parse", "--path-format=relative", "--show-toplevel", NULL};
+#else
     static const char *const common_args[] = {"rev-parse",
                                               "--git-common-dir", NULL};
     static const char *const top_args[] = {"rev-parse", "--show-toplevel",
                                            NULL};
+#endif
     static const char *const branch_args[] = {"rev-parse", "--abbrev-ref",
                                               "HEAD", NULL};
     char common[PATH_MAX];
+#ifdef _WIN32
+    char top[PATH_MAX];
+#else
+    char *top = facts->toplevel;
+#endif
     if (!dvc_git_step(cwd, common_args, common, sizeof(common),
                       "git rev-parse --git-common-dir failed", reply) ||
-        !dvc_git_step(cwd, top_args, facts->toplevel,
+        !dvc_git_step(cwd, top_args, top,
                       sizeof(facts->toplevel),
                       "git rev-parse --show-toplevel failed", reply) ||
         !dvc_git_step(cwd, branch_args, facts->branch,
@@ -409,12 +560,30 @@ static bool dvc_git_facts(const char *cwd, struct dvc_facts *facts,
         return false;
     if (strcmp(facts->branch, "HEAD") == 0)
         facts->branch[0] = '\0';
-    if (common[0] == '/')
-        (void)snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s", common,
+#ifdef _WIN32
+    char resolved_common[PATH_MAX];
+    if (!dvc_windows_git_path(cwd, common, resolved_common, sizeof(resolved_common)) ||
+        !dvc_windows_git_path(cwd, top, facts->toplevel, sizeof(facts->toplevel))) {
+        dvc_fail(reply, "GIT_FAILED", "git", "unsupported Git directory path", common);
+        return false;
+    }
+#endif
+    int n;
+#ifdef _WIN32
+    n = snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s", resolved_common,
+                 DVC_LEDGER_NAME);
+#else
+    if (platform_path_is_absolute(common))
+        n = snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s", common,
                        DVC_LEDGER_NAME);
     else
-        (void)snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s/%s", cwd,
+        n = snprintf(facts->ledger, sizeof(facts->ledger), "%s/%s/%s", cwd,
                        common, DVC_LEDGER_NAME);
+#endif
+    if (n < 0 || (size_t)n >= sizeof(facts->ledger)) {
+        dvc_fail(reply, "GIT_FAILED", "git", "claim ledger path is too long", common);
+        return false;
+    }
     return true;
 }
 
@@ -463,9 +632,17 @@ static bool dvc_ledger_load(const char *path, struct dvc_ledger *lg,
                             struct zcl_command_reply *reply)
 {
     memset(lg, 0, sizeof(*lg));
+#ifdef _WIN32
+    FILE *probe = platform_file_stream_open_read(path);
+#else
     FILE *probe = fopen(path, "rb");
+#endif
     if (!probe) {
+#ifdef _WIN32
+        if (platform_private_path_absent(path))
+#else
         if (errno == ENOENT)
+#endif
             return true;
         dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "ledger",
                  "the claim ledger could not be opened for reading", path);

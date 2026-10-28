@@ -23,6 +23,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_state_publication_cas_refusal \
 	database_lifetime \
 	datadir_privacy \
+	dev_agent_claim \
 	dev_agent_mail \
 	dev_fleet_capture \
 	dev_train_keep \
@@ -34,6 +35,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	export_snapshot \
 	file_metadata \
 	file_ops_copy \
+	file_stream \
 	file_service_transport \
 	format_attribute \
 	glob_match \
@@ -296,6 +298,38 @@ ZCL_WINDOWS_ACCEPTANCE_dev_fleet_capture_SOURCES := \
 	tests/harness/src/dev_fleet_capture_windows_acceptance.c \
 	tools/command/native_dev_fleet_process.c
 
+# Real claim handler and persistence with a minimal reply-envelope adapter.
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_claim_SOURCES := \
+	tests/harness/src/dev_agent_claim_windows_acceptance.c \
+	tools/command/native_devagent_claim.c \
+	contexts/commons/packages/zutf8/src/zutf8.c \
+	platform/modules/json/src/json.c \
+	platform/modules/util/src/file_io.c \
+	platform/modules/util/src/spawn.c \
+	platform/modules/platform/src/file_stream.c \
+	platform/modules/platform/src/process_lifecycle.c \
+	platform/modules/platform/src/os_proc.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/positioned_file.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/platform/src/rng.c \
+	platform/modules/base/src/cleanse.c \
+	platform/modules/base/src/result.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/src/log_level.c \
+	core/modules/crypto/src/sha256.c
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_claim_FLAGS := \
+	-Itools -Icontexts/commons/packages/zutf8/include \
+	-ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_claim_LIBS := \
+	-Wl,--gc-sections -ladvapi32 -lbcrypt -lpsapi -lshell32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+
+ZCL_WINDOWS_ACCEPTANCE_file_stream_SOURCES := \
+	platform/modules/platform/tests/file_stream_windows_acceptance.c \
+	platform/modules/platform/src/file_stream.c \
+	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_SOURCES := \
 	tests/harness/src/dev_agent_mail_windows_acceptance.c \
 	tools/command/native_devagent_mail.c \
