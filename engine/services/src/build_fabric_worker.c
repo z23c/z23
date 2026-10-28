@@ -188,13 +188,10 @@ struct zcl_result build_fabric_worker_verifier_path_for_test(
                                            out, cap);
 }
 #endif
-static struct zcl_result bfw_paths_init(const char *workspace, const char *lease_id,
-                                        const char *kind,
-                                        struct bfw_paths *p)
+static struct zcl_result bfw_paths_directories(const char *workspace,
+                                               const char *lease_id,
+                                               struct bfw_paths *p)
 {
-    if (!workspace || !workspace[0] || !lease_id || !p)
-        return ZCL_ERR(-1, "worker paths require workspace and lease");
-    ZCL_CHECK(bfw_worker_path(workspace, p->worker, sizeof(p->worker)));
     char base[BFW_PATH_MAX];
     int n = snprintf(base, sizeof(base), "%s/.zvcs/build-work", workspace);
     if (n <= 0 || (size_t)n >= sizeof(base)) return ZCL_ERR(-1, "worker base path too long");
@@ -208,6 +205,10 @@ static struct zcl_result bfw_paths_init(const char *workspace, const char *lease
         return ZCL_ERR(-1, "isolated source/output path too long");
     if (mkdir(p->src, 0700) != 0 || mkdir(p->build, 0700) != 0)
         return ZCL_ERR(-1, "cannot create isolated source/output directories");
+    return ZCL_OK;
+}
+static struct zcl_result bfw_paths_action(const char *kind, struct bfw_paths *p)
+{
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_V1) == 0) {
         if (!zcl_path_join(p->input, sizeof(p->input), p->src, "unit.i") ||
             !zcl_path_join(p->output, sizeof(p->output), p->build, VCS_BUILD_OUTPUT_V1))
@@ -234,6 +235,17 @@ static struct zcl_result bfw_paths_init(const char *workspace, const char *lease
         return ZCL_ERR(-1, "worker action kind has no fixed executor");
     }
     return ZCL_OK;
+}
+static struct zcl_result bfw_paths_init(const char *workspace, const char *lease_id,
+                                        const char *kind,
+                                        struct bfw_paths *p)
+{
+    if (!workspace || !workspace[0] || !lease_id || !p)
+        return ZCL_ERR(-1, "worker paths require workspace and lease");
+    ZCL_CHECK(bfw_worker_path(workspace, p->worker, sizeof(p->worker)));
+    struct zcl_result directories = bfw_paths_directories(workspace, lease_id, p);
+    if (!directories.ok) return directories;
+    return bfw_paths_action(kind, p);
 }
 static void bfw_paths_cleanup(const struct bfw_paths *p)
 {
