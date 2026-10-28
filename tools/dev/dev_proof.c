@@ -7489,6 +7489,30 @@ static bool dp_select_scratch(const char *root, char *scratch, size_t size)
     return true;
 }
 
+/* Admit capacity provenance into the existing bounded selector detail. */
+static void dp_select_capacity_detail(struct zcl_dev_proof_range_selection *out,
+                                      const struct zcl_devloop_plan *plan)
+{
+    if (!plan->closure_universal || !plan->capacity_origin)
+        return;
+    int n = snprintf(out->detail, sizeof(out->detail),
+                     "capacity_origin=%s capacity_cause=%s capacity_input=%s",
+                     plan->capacity_origin, plan->capacity_cause,
+                     plan->capacity_input);
+    if (n < 0 || (size_t)n >= sizeof(out->detail))
+        (void)snprintf(out->detail, sizeof(out->detail),
+                       "capacity_origin=%s capacity_cause=%s capacity_input=unknown",
+                       plan->capacity_origin, plan->capacity_cause);
+}
+
+#if defined(ZCL_TESTING)
+void zcl_dev_proof_test_select_capacity_detail(
+    struct zcl_dev_proof_range_selection *out, const struct zcl_devloop_plan *plan)
+{
+    dp_select_capacity_detail(out, plan);
+}
+#endif
+
 /* Close and widen the plan the way the proof worker does. The first close may
  * be what builds the code index, and the proof asks again after its graph
  * refresh, so ask once more. A plan that still cannot close never narrows: a
@@ -7505,6 +7529,7 @@ static void dp_select_close(const char *root,
     bool widened = dp_changed_set_widen(set, plan);
     if (admitted) {
         out->reason = dp_selection_reason(plan, widened);
+        dp_select_capacity_detail(out, plan);
         return;
     }
     (void)zcl_devloop_plan_refusal_text(plan, out->detail,

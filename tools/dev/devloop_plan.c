@@ -1163,7 +1163,7 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * changes is the answer's shape, not its availability: see
      * plan_go_universal(). */
     if (truncated) {
-        zcl_devloop_capacity_note(plan, "semantic", "file-cap", "batch");
+        zcl_devloop_capacity_note(plan, "semantic", "closure-truncated", "batch");
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
     }
     for (int i = 0; i < n; i++) {

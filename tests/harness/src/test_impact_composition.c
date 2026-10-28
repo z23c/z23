@@ -673,7 +673,7 @@ static int test_ic_truncated_closure_preserves_groups(void)
                       "closure-universal") == 0);
         ASSERT(plan.closure_universal);
         ASSERT_STR_EQ(plan.capacity_origin, "semantic");
-        ASSERT_STR_EQ(plan.capacity_cause, "file-cap");
+        ASSERT_STR_EQ(plan.capacity_cause, "closure-truncated");
         ASSERT_STR_EQ(plan.capacity_input, "batch");
         ASSERT(!plan.closure_truncated);
 
@@ -1234,6 +1234,8 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
  * where the index could not answer at all. */
 
 extern void zcl_dev_proof_test_capacity_note(FILE *, const struct zcl_devloop_plan *);
+extern void zcl_dev_proof_test_select_capacity_detail(
+    struct zcl_dev_proof_range_selection *, const struct zcl_devloop_plan *);
 
 static bool ic_capacity_note_is(const struct zcl_devloop_plan *plan, const char *expected)
 {
@@ -1257,13 +1259,26 @@ static int test_ic_capacity_provenance(void)
         zcl_devloop_capacity_note(&plan, "semantic", "group-cap", "batch");
         ASSERT_STR_EQ(plan.capacity_origin, "include");
         ASSERT(ic_capacity_note_is(&plan, "capacity_origin=include capacity_cause=file-cap capacity_input=a%20b%25%0A\n"));
+        struct zcl_dev_proof_range_selection selection = {0};
+        zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
+        ASSERT_STR_EQ(selection.detail,
+                      "capacity_origin=include capacity_cause=file-cap capacity_input=a b%\n");
         zcl_devloop_capacity_reset_closure(&plan);
         ASSERT(plan.capacity_origin == NULL && plan.capacity_input[0] == '\0');
         char long_input[300];
         memset(long_input, 'x', sizeof(long_input));
         long_input[sizeof(long_input) - 1] = '\0';
-        zcl_devloop_capacity_note(&plan, "semantic", "file-cap", long_input);
+        zcl_devloop_capacity_note(&plan, "semantic", "closure-truncated", long_input);
         ASSERT_STR_EQ(plan.capacity_input, "unknown");
+        zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
+        ASSERT_STR_EQ(selection.detail,
+                      "capacity_origin=semantic capacity_cause=closure-truncated capacity_input=unknown");
+        zcl_devloop_capacity_reset_closure(&plan);
+        long_input[200] = '\0';
+        zcl_devloop_capacity_note(&plan, "include", "file-cap", long_input);
+        zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
+        ASSERT_STR_EQ(selection.detail,
+                      "capacity_origin=include capacity_cause=file-cap capacity_input=unknown");
         zcl_devloop_capacity_reset_closure(&plan);
         zcl_devloop_capacity_note(&plan, "path", "group-cap", "file.c");
         plan.path_universal = true;
