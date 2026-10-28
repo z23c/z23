@@ -113,11 +113,53 @@ static unsigned count_non_sky_pixels(const uint8_t *rgb, size_t len)
     return painted;
 }
 
+static uint64_t frame_hash(const uint8_t *rgb, size_t len)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < len; i++) {
+        h ^= rgb[i];
+        h *= UINT64_C(1099511628211);
+    }
+    return h;
+}
+
+static void test_verify_header_size(const uint8_t *replay)
+{
+    uint8_t header[ZDOGVIEW_HEADER_LEN + ZDOG_STATE_WIRE_MAX + 1] = {0};
+    zdogview_verified v = {0};
+    memcpy(header, replay, ZDOGVIEW_HEADER_LEN);
+    wr_u32(header + ZDOGVIEW_REPLAY_MAGIC_LEN, ZDOGVIEW_REPLAY_VERSION + 1);
+    CHECK(zdogview_verify(header, sizeof header, &v) == ZDOGVIEW_MISMATCH);
+    CHECK(v.reason && strcmp(v.reason, "header-version") == 0 && v.seed == 0);
+    wr_u32(header + ZDOGVIEW_REPLAY_MAGIC_LEN, ZDOGVIEW_REPLAY_VERSION);
+    header[ZDOGVIEW_REPLAY_MAGIC_LEN + 12u] = 5;
+    CHECK(zdogview_verify(header, sizeof header, &v) == ZDOGVIEW_MISMATCH);
+    CHECK(v.reason && strcmp(v.reason, "header-planes") == 0 &&
+          v.seed == 42 && v.planes_per_team == 5 && v.num_planes == 0);
+    header[ZDOGVIEW_REPLAY_MAGIC_LEN + 12u] = 2;
+    CHECK(zdogview_verify(header, sizeof header - 2, &v) == ZDOGVIEW_MISMATCH);
+    CHECK(v.reason && strcmp(v.reason, "truncated") == 0 && v.seed == 0);
+    CHECK(zdogview_verify(header, sizeof header, &v) == ZDOGVIEW_MISMATCH);
+    CHECK(v.reason && strcmp(v.reason, "size") == 0 && v.seed == 42 &&
+          v.planes_per_team == 2 && v.num_planes == 4 && v.recorded_ticks == 0);
+}
+
+static void test_verify_null_input(size_t n)
+{
+    zdogview_verified v;
+    memset(&v, 0xa5, sizeof v);
+    v.reason = NULL;
+    CHECK(zdogview_verify(NULL, n, &v) == ZDOGVIEW_MISMATCH);
+    CHECK(v.reason && strcmp(v.reason, "truncated") == 0 && v.seed == 0);
+}
+
 int main(void)
 {
     static uint8_t replay[1200000];
     const size_t n = record_match(replay, sizeof(replay), 42, 2);
     CHECK(n > ZDOGVIEW_HEADER_LEN + ZDOG_STATE_WIRE_MAX);
+    test_verify_null_input(n);
+    test_verify_header_size(replay);
 
     zdogview_verified v;
     CHECK(zdogview_verify(replay, n, &v) == ZDOGVIEW_OK);
@@ -161,6 +203,10 @@ int main(void)
 
     static zdogview_frame s1, s2, s3;
     zdogview_render_scene(&m, v.seed, v.kills, v.num_kills, &s1);
+    /* Original fixed replay/seed scene: full-frame and left-edge preservation. */
+    CHECK(frame_hash(s1.rgb, sizeof s1.rgb) == UINT64_C(10326441286287597983));
+    CHECK(s1.rgb[0] == 8 && s1.rgb[1] == 11 && s1.rgb[2] == 18);
+    CHECK(s1.rgb[86400] == 13 && s1.rgb[86401] == 17 && s1.rgb[86402] == 26); /* (0,90) */
     zdogview_render_scene(&m, v.seed, v.kills, v.num_kills, &s2);
     CHECK(memcmp(s1.rgb, s2.rgb, sizeof(s1.rgb)) == 0);
     zdogview_render_scene(&m, v.seed ^ 1u, v.kills, v.num_kills, &s3);

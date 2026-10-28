@@ -26,11 +26,8 @@ static int zv_fail(zdogview_verified *out, const char *reason)
     return ZDOGVIEW_MISMATCH;
 }
 
-int zdogview_verify(const uint8_t *buf, size_t len, zdogview_verified *out)
+static int zv_header(const uint8_t *buf, size_t len, zdogview_verified *out)
 {
-    if (!out)
-        return ZDOGVIEW_BAD_ARG;
-    memset(out, 0, sizeof(*out));
     if (!buf)
         return zv_fail(out, "truncated");
     if (len < ZDOGVIEW_HEADER_LEN + ZDOG_STATE_WIRE_MAX)
@@ -49,14 +46,17 @@ int zdogview_verify(const uint8_t *buf, size_t len, zdogview_verified *out)
     if (tick_bytes == 0 || frames_len % tick_bytes != 0)
         return zv_fail(out, "size");
     out->recorded_ticks = frames_len / tick_bytes;
+    return ZDOGVIEW_OK;
+}
 
-    zdog_match m;
-    zdog_match_init(&m, out->seed, out->planes_per_team);
+static int zv_replay(const uint8_t **frames, zdogview_verified *out,
+                     zdog_match *m)
+{
     bool was_alive[ZDOG_MAX_PLANES];
     for (unsigned i = 0; i < out->num_planes; i++)
-        was_alive[i] = m.planes[i].alive != 0;
+        was_alive[i] = m->planes[i].alive != 0;
 
-    const uint8_t *fp = buf + ZDOGVIEW_HEADER_LEN;
+    const uint8_t *fp = *frames;
     for (uint64_t t = 0; t < out->recorded_ticks; t++) {
         zdog_ctl ctls[ZDOG_MAX_PLANES];
         for (unsigned i = 0; i < out->num_planes; i++) {
@@ -64,20 +64,36 @@ int zdogview_verify(const uint8_t *buf, size_t len, zdogview_verified *out)
                 return zv_fail(out, "ctl-frame");
             fp += ZDOG_CTL_WIRE_LEN;
         }
-        zdog_tick(&m, ctls);
+        zdog_tick(m, ctls);
         for (unsigned i = 0; i < out->num_planes; i++) {
-            if (was_alive[i] && m.planes[i].alive == 0 &&
+            if (was_alive[i] && m->planes[i].alive == 0 &&
                 out->num_kills < ZDOGVIEW_MAX_KILLS) {
                 zdogview_kill *k = &out->kills[out->num_kills++];
-                k->tick = m.tick;
-                k->x = m.planes[i].x;
-                k->y = m.planes[i].y;
-                k->z = m.planes[i].z;
-                k->team = m.planes[i].team;
+                k->tick = m->tick;
+                k->x = m->planes[i].x;
+                k->y = m->planes[i].y;
+                k->z = m->planes[i].z;
+                k->team = m->planes[i].team;
             }
-            was_alive[i] = m.planes[i].alive != 0;
+            was_alive[i] = m->planes[i].alive != 0;
         }
     }
+    *frames = fp;
+    return ZDOGVIEW_OK;
+}
+
+int zdogview_verify(const uint8_t *buf, size_t len, zdogview_verified *out)
+{
+    if (!out)
+        return ZDOGVIEW_BAD_ARG;
+    memset(out, 0, sizeof(*out));
+    int status = zv_header(buf, len, out);
+    if (status != ZDOGVIEW_OK) return status;
+    zdog_match m;
+    zdog_match_init(&m, out->seed, out->planes_per_team);
+    const uint8_t *fp = buf + ZDOGVIEW_HEADER_LEN;
+    status = zv_replay(&fp, out, &m);
+    if (status != ZDOGVIEW_OK) return status;
 
     if (m.phase != ZDOG_PHASE_DONE)
         return zv_fail(out, "match-incomplete");
@@ -154,8 +170,10 @@ static int64_t zv_edge(int x0, int y0, int x1, int y1, int x, int y)
     return (int64_t)(x - x0) * (y1 - y0) - (int64_t)(y - y0) * (x1 - x0);
 }
 
-static void zv_tri(zv_fb *f, int x0, int y0, int x1, int y1, int x2, int y2,
-                   uint8_t r, uint8_t g, uint8_t b)
+typedef struct { int minx, maxx, miny, maxy; } zv_bounds;
+
+static zv_bounds zv_triangle_bounds(const zv_fb *f, int x0, int y0,
+                                    int x1, int y1, int x2, int y2)
 {
     int minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx)
@@ -182,11 +200,18 @@ static void zv_tri(zv_fb *f, int x0, int y0, int x1, int y1, int x2, int y2,
         maxx = (int)f->width - 1;
     if (maxy >= (int)f->height)
         maxy = (int)f->height - 1;
+    return (zv_bounds){minx, maxx, miny, maxy};
+}
+
+static void zv_tri(zv_fb *f, int x0, int y0, int x1, int y1, int x2, int y2,
+                   uint8_t r, uint8_t g, uint8_t b)
+{
+    zv_bounds bounds = zv_triangle_bounds(f, x0, y0, x1, y1, x2, y2);
     const int64_t a01 = zv_edge(x0, y0, x1, y1, x2, y2);
     if (a01 == 0)
         return;
-    for (int y = miny; y <= maxy; y++) {
-        for (int x = minx; x <= maxx; x++) {
+    for (int y = bounds.miny; y <= bounds.maxy; y++) {
+        for (int x = bounds.minx; x <= bounds.maxx; x++) {
             const int64_t w0 = zv_edge(x1, y1, x2, y2, x, y);
             const int64_t w1 = zv_edge(x2, y2, x0, y0, x, y);
             const int64_t w2 = zv_edge(x0, y0, x1, y1, x, y);
