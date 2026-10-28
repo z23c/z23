@@ -47,25 +47,58 @@ static int hexval(char c) {
   return -1;
 }
 
-int zcidr_parse_v6(const char *s, size_t len, zcidr_v6 *out) {
-  uint16_t groups[8];
-  int ngroups = 0;
-  int dbl_colon_at = -1; /* group index where "::" occurred */
-  size_t i = 0;
-  if (!s || !out || len == 0) return 0;
-  memset(groups, 0, sizeof groups);
-
-  if (len >= 2 && s[0] == ':' && s[1] == ':') {
-    dbl_colon_at = 0;
-    i = 2;
-    if (i == len) goto finish; /* "::" alone */
-  } else if (s[0] == ':') {
-    return 0;
+static int parse_v6_group(const char *s, size_t len, size_t *pos,
+                          uint16_t *group) {
+  unsigned v = 0;
+  int digits = 0;
+  while (*pos < len && hexval(s[*pos]) >= 0) {
+    int h = hexval(s[*pos]);
+    if (digits == 4) return 0;
+    v = v * 16 + (unsigned)h;
+    digits++;
+    (*pos)++;
   }
+  if (digits == 0) return 0;
+  *group = (uint16_t)v;
+  return 1;
+}
 
+static int finish_v6(uint16_t groups[8], int ngroups, int dbl_colon_at,
+                     zcidr_v6 *out) {
+  if (dbl_colon_at < 0) {
+    if (ngroups != 8) return 0;
+  } else {
+    int insert = 8 - ngroups;
+    if (insert < 1) return 0;
+    for (int g = ngroups - 1; g >= dbl_colon_at; g--)
+      groups[g + insert] = groups[g];
+    for (int g = dbl_colon_at; g < dbl_colon_at + insert; g++) groups[g] = 0;
+  }
+  for (size_t i = 0; i < 8; i++) {
+    out->b[i * 2] = (uint8_t)(groups[i] >> 8);
+    out->b[i * 2 + 1] = (uint8_t)(groups[i] & 0xFF);
+  }
+  return 1;
+}
+
+static int parse_v6_separator(const char *s, size_t len, size_t *i,
+                              int ngroups, int *dbl_colon_at) {
+  if (s[*i] != ':') return 0;
+  if (*i + 1 < len && s[*i + 1] == ':') {
+    if (*dbl_colon_at >= 0) return 0;
+    *dbl_colon_at = ngroups;
+    *i += 2;
+  } else {
+    (*i)++;
+    if (*i == len) return 0;
+  }
+  return 1;
+}
+
+static int parse_v6_groups(const char *s, size_t len, size_t i,
+                           uint16_t groups[8], int *count, int *dbl_colon_at) {
+  int ngroups = 0;
   while (i < len) {
-    unsigned v = 0;
-    int digits = 0;
     /* possible IPv4 tail: must start at a group boundary */
     if (ngroups < 8) {
       zcidr_v4 tail;
@@ -76,49 +109,34 @@ int zcidr_parse_v6(const char *s, size_t len, zcidr_v6 *out) {
         groups[ngroups++] = (uint16_t)((tail.b[2] << 8) | tail.b[3]);
         i += consumed;
         if (i != len) return 0;
-        goto finish;
+        break;
       }
     }
-    while (i < len && hexval(s[i]) >= 0) {
-      int h = hexval(s[i]);
-      if (digits == 4) return 0;
-      v = v * 16 + (unsigned)h;
-      digits++;
-      i++;
-    }
-    if (digits == 0) return 0;
+    uint16_t group;
+    if (!parse_v6_group(s, len, &i, &group)) return 0;
     if (ngroups >= 8) return 0;
-    groups[ngroups++] = (uint16_t)v;
+    groups[ngroups++] = group;
     if (i == len) break;
-    if (s[i] != ':') return 0;
-    /* ":" or "::" */
-    if (i + 1 < len && s[i + 1] == ':') {
-      if (dbl_colon_at >= 0) return 0; /* only one "::" allowed */
-      dbl_colon_at = ngroups;
-      i += 2;
-      if (i == len) goto finish; /* trailing "::" */
-    } else {
-      i++;
-      if (i == len) return 0; /* trailing single ":" */
-    }
+    if (!parse_v6_separator(s, len, &i, ngroups, dbl_colon_at)) return 0;
   }
-
-finish:
-  if (dbl_colon_at < 0) {
-    if (ngroups != 8) return 0;
-  } else {
-    int insert = 8 - ngroups;
-    int g;
-    if (insert < 1) return 0; /* "::" must compress at least one group */
-    for (g = ngroups - 1; g >= dbl_colon_at; g--)
-      groups[g + insert] = groups[g];
-    for (g = dbl_colon_at; g < dbl_colon_at + insert; g++) groups[g] = 0;
-  }
-  for (i = 0; i < 8; i++) {
-    out->b[i * 2] = (uint8_t)(groups[i] >> 8);
-    out->b[i * 2 + 1] = (uint8_t)(groups[i] & 0xFF);
-  }
+  *count = ngroups;
   return 1;
+}
+
+int zcidr_parse_v6(const char *s, size_t len, zcidr_v6 *out) {
+  uint16_t groups[8] = {0};
+  int ngroups = 0;
+  int dbl_colon_at = -1; /* group index where "::" occurred */
+  size_t i = 0;
+  if (!s || !out || len == 0) return 0;
+  if (len >= 2 && s[0] == ':' && s[1] == ':') {
+    dbl_colon_at = 0;
+    i = 2;
+  } else if (s[0] == ':') {
+    return 0;
+  }
+  if (!parse_v6_groups(s, len, i, groups, &ngroups, &dbl_colon_at)) return 0;
+  return finish_v6(groups, ngroups, dbl_colon_at, out);
 }
 
 /* ---------- prefix ------------------------------------------------- */

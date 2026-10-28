@@ -443,12 +443,32 @@ static void test_cli_output_refusal(void) {
 #endif
 }
 
+static void test_v6_tail_boundaries(void) {
+  const char *good = "1:2:3:4:5:6:1.2.3.4";
+  const uint8_t expected[16] = {0,1,0,2,0,3,0,4,0,5,0,6,1,2,3,4};
+  zcidr_v6 out = {{0}};
+  CHECK(zcidr_parse_v6(good, strlen(good), &out));
+  CHECK(memcmp(out.b, expected, sizeof expected) == 0);
+  static const char *const bad[] = {
+    "1:2:3:4:5:6:7:1.2.3.4", "1:2:3:4:5:6::1.2.3.4",
+    "1:2:3:4:5:6:7:8::", "::1:2:3:4:5:6:7:8"
+  };
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    zcidr_v6 saved;
+    memset(&out, 0xa5, sizeof out);
+    memcpy(&saved, &out, sizeof out);
+    CHECK(!zcidr_parse_v6(bad[i], strlen(bad[i]), &out));
+    CHECK(memcmp(&out, &saved, sizeof out) == 0);
+  }
+}
+
 int main(void) {
   cli_out = stdout;
   cli_err = stderr;
   test_v4_kats();
   test_v4_bad();
   test_v6_kats();
+  test_v6_tail_boundaries();
   test_v6_bad();
   test_contains();
   test_cmp_and_network();
