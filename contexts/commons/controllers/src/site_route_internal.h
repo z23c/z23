@@ -1,4 +1,6 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * purpose: Split bounded site routes from query strings for Commons controllers.
+ */
 #ifndef ZCL_COMMONS_SITE_ROUTE_INTERNAL_H
 #define ZCL_COMMONS_SITE_ROUTE_INTERNAL_H
 
