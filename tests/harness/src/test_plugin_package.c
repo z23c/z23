@@ -7,6 +7,8 @@
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_store.h"
 #include "plugin/plugin_run.h"
+#include "plugin/plugin_attest.h"
+#include "plugin/plugin_hostcall.h"
 #include "vcs/package_checkout.h"
 #include "vcs/package_public_shape.h"
 
@@ -417,6 +419,133 @@ static int pp_runtime_journey(void)
     pp_close(&f);
     return failures;
 }
+/* This local handler proves the confined child reached the granted host call. */
+static int pp_tip(void *ctx, const uint8_t *payload, size_t len,
+                  uint8_t *out, size_t cap, size_t *out_len)
+{
+    (void)ctx; (void)payload;
+    if (len != 0 || cap < 4) return -1;
+    out[0] = out[1] = out[2] = 0; out[3] = 7;
+    *out_len = 4;
+    return 0;
+}
+
+static bool pp_host_image(struct pp_fixture *f)
+{
+    FILE *image = fopen("build/fixtures/plugin_hostcall_child", "rb");
+    if (!image) return false;
+    uint8_t *bytes = malloc(PP_CAP);
+    if (!bytes) { fclose(image); return false; }
+    size_t n = fread(bytes, 1, PP_CAP, image);
+    bool ok = !ferror(image) && n > 0 && n < PP_CAP;
+    ok = fclose(image) == 0 && ok;
+    ok = ok && pp_write(f->executable, (const char *)bytes, n);
+    free(bytes);
+    return ok;
+}
+
+static bool pp_attest_two(struct pp_fixture *f, const char *root,
+                          char *dir, size_t dir_cap, char *pins, size_t pins_cap)
+{
+    char keys[2][1400], pubs[2][65], lines[131];
+    if (!pp_path(dir, dir_cap, f->base, "attestations") || mkdir(dir, 0700) ||
+        !pp_path(pins, pins_cap, f->base, "builder-pins")) return false;
+    for (size_t i = 0; i < 2; i++) {
+        char leaf[32];
+        snprintf(leaf, sizeof leaf, "builder-%zu.key", i);
+        if (!pp_path(keys[i], sizeof keys[i], f->base, leaf) ||
+            plugin_keygen(keys[i], pubs[i]) != PLUGIN_OK) return false;
+        struct plugin_attest_request request = {
+            .image_path = f->executable, .key_path = keys[i], .name = "demo",
+            .version = "1.0.0", .source_root = root,
+            .toolchain = i ? "fixture-b" : "fixture-a", .dir = dir
+        };
+        struct plugin_attest_result result;
+        if (plugin_attest_make(&request, &result) != PLUGIN_ATTEST_OK) return false;
+    }
+    int n = snprintf(lines, sizeof lines, "%s\n%s\n", pubs[0], pubs[1]);
+    return n == 130 && pp_write(pins, lines, (size_t)n) && chmod(pins, 0600) == 0;
+}
+
+/* Wait for the child outcome; the group silence watchdog owns hang detection. */
+static bool pp_host_observed(struct plugin_run *run, struct plugin_run_info *info)
+{
+    const struct timespec tick = {.tv_nsec = 5000000L};
+    for (;;) {
+        if (plugin_run_poll(run) != PLUGIN_RUN_OK) return false;
+        plugin_run_info_get(run, info);
+        if (info->crashes || info->restarts || info->fell_back ||
+            info->state == PLUGIN_RUN_STATE_FAILED ||
+            info->state == PLUGIN_RUN_STATE_STOPPED) return false;
+        if (strncmp(info->last_log, "hostcall ", 9) == 0) return true;
+        nanosleep(&tick, NULL);
+    }
+}
+
+static int pp_attested_host_journey(void)
+{
+    int failures = 0;
+    struct pp_fixture f = {0};
+    struct plugin_run *run = NULL;
+    bool ready = pp_open(&f);
+    TEST("plugin package: attested received generation makes a host call") {
+        char generation[129], dir[1400], pins[1400], image[1400], digest[129];
+        /* Two local fixture keys assert this source root; no build is reproduced. */
+        const char *claimed_source_root =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        struct plugin_attest_report report;
+        ASSERT(ready);
+        ASSERT(plugin_capability_add("chain.read", 10, &f.capabilities));
+        ASSERT(pp_host_image(&f));
+        ASSERT(pp_publish(&f, 1));
+        ASSERT(pp_attest_two(&f, claimed_source_root, dir, sizeof dir, pins, sizeof pins));
+        ASSERT_EQ(plugin_attest_verify_dir(f.packed.manifest_path, dir, pins, 2, claimed_source_root, &report), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(report.attested, 2u);
+        ASSERT_STR_EQ(report.source_root, claimed_source_root);
+        ASSERT_EQ(plugin_attest_verify_dir(f.packed.manifest_path, dir, pins, 2,
+                  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &report),
+                  PLUGIN_ATTEST_SOURCE_ROOT_MISMATCH);
+        ASSERT(pp_fetch(&f));
+        ASSERT(pp_path(f.checkout, sizeof f.checkout, f.base, "attested-received"));
+        struct vcs_package_checkout_metrics metrics;
+        ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, f.checkout, &metrics), VCS_PACKAGE_CHECKOUT_OK);
+        ASSERT_EQ(metrics.files, 4u);
+        ASSERT(pp_path(f.manifest, sizeof f.manifest, f.checkout, "demo.plugin.json"));
+        ASSERT_EQ(plugin_attest_verify_dir(f.manifest, dir, pins, 2, claimed_source_root, &report), PLUGIN_ATTEST_OK);
+        ASSERT(pp_keys(f.plugins, f.packed.public_key));
+        struct plugin_manifest installed;
+        int present = -1;
+        ASSERT_EQ(plugin_store_install(f.plugins, f.manifest, &installed, &present), PLUGIN_OK);
+        ASSERT_EQ(present, 0);
+        memcpy(generation, installed.generation, sizeof generation);
+        ASSERT(pp_path(image, sizeof image, f.checkout, "demo"));
+        ASSERT_EQ(plugin_hash_file(image, digest), PLUGIN_OK);
+        ASSERT_STR_EQ(report.image, digest);
+        ASSERT_STR_EQ(generation, f.packed.generation);
+        ASSERT_EQ(plugin_store_switch(f.plugins, "demo", generation), PLUGIN_OK);
+        struct plugin_hostcall_handlers handlers = {0};
+        handlers.method[PLUGIN_HOSTCALL_M_CHAIN_TIP - 1] = pp_tip;
+        struct plugin_run_options options = {
+            .root = f.plugins, .name = "demo", .ping_interval_ms = 40,
+            .ping_deadline_ms = 2000, .ping_miss_limit = 2, .backoff_initial_ms = 20,
+            .backoff_max_ms = 2000, .stable_ms = 60000, .hostcall = &handlers
+        };
+        ASSERT_EQ(plugin_run_open(&options, &run, NULL), PLUGIN_RUN_OK);
+        struct plugin_run_info info;
+        ASSERT(pp_host_observed(run, &info));
+        ASSERT_STR_EQ(info.last_log, "hostcall tip=0 height=7 wallet=10");
+        ASSERT_STR_EQ(info.generation, generation);
+        ASSERT_EQ(info.state, PLUGIN_RUN_STATE_RUNNING);
+        ASSERT_EQ(info.crashes, 0u);
+        ASSERT_EQ(info.restarts, 0u);
+        ASSERT(!info.fell_back);
+        PASS();
+    } _test_next:;
+    plugin_run_close(run);
+    pp_close(&f);
+    return failures;
+}
+
 #endif
 
 
@@ -712,6 +841,7 @@ int test_plugin_package(void)
     failures += pp_refusal_switch();
 #if defined(__linux__)
     failures += pp_runtime_journey();
+    failures += pp_attested_host_journey();
 #endif
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
