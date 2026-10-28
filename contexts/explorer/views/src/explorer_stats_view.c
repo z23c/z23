@@ -197,19 +197,18 @@ static void render_shielded_largest(char *r, size_t max, size_t *off,
 }
 
 /* Render shielded section HTML (sprout or sapling).
- * pos_is_shielding: true for Sprout (positive sprout_value = shielding),
- *                   false for Sapling (positive value_balance = unshielding). */
+ * pos_is_shielding: whether a positive persisted delta increases the pool. */
 static void render_shielded_section(char *r, size_t max, size_t *off,
     const char *title, const char *desc, const struct shielded_stats *ss,
     int64_t nullifier_count, /* -1 to skip */
     sqlite3 *db, const char *col, int start_year, bool pos_is_shielding)
 {
     char in_str[32], out_str[32], peak_str[32], peak_neg_str[32], net_str[32];
-    /* Sign conventions differ: Sprout pos=shielding, Sapling pos=unshielding */
+    /* Both persisted pool deltas are positive when shielding. */
     int64_t total_shielded, total_unshielded, peak_shield_val, peak_unshield_val;
     int64_t peak_shield_h, peak_unshield_h;
     if (pos_is_shielding) {
-        /* Sprout: positive = shielding, negative = unshielding */
+        /* Positive = shielding, negative = unshielding. */
         total_shielded = ss->sum_pos;
         total_unshielded = ss->sum_neg < 0 ? -ss->sum_neg : ss->sum_neg;
         peak_shield_val = ss->peak_pos_value;
@@ -217,7 +216,7 @@ static void render_shielded_section(char *r, size_t max, size_t *off,
         peak_unshield_val = ss->peak_neg_value < 0 ? -ss->peak_neg_value : ss->peak_neg_value;
         peak_unshield_h = ss->peak_neg_height;
     } else {
-        /* Sapling: positive = unshielding, negative = shielding */
+        /* Positive = unshielding, negative = shielding. */
         total_shielded = ss->sum_neg < 0 ? -ss->sum_neg : ss->sum_neg;
         total_unshielded = ss->sum_pos;
         peak_shield_val = ss->peak_neg_value < 0 ? -ss->peak_neg_value : ss->peak_neg_value;
@@ -733,9 +732,9 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
     render_shielded_section((char *)r, max, &off,
         "Sapling Pool (Modern Privacy)",
         "Sapling uses Groth16 proofs. Activated at block 382168. "
-        "Positive value_balance = unshielding (z&rarr;t), "
-        "negative = shielding (t&rarr;z).",
-        &sapling, nullifier_count, db, "sapling_value", 2018, false);
+        "Positive pool changes represent shielding (t&rarr;z); "
+        "negative changes represent unshielding (z&rarr;t).",
+        &sapling, nullifier_count, db, "sapling_value", 2018, true);
 
     off = emit_section_6_utxo_distribution(r, max, off, &ctx, db);
     off = emit_section_7_address_distribution(r, max, off, &ctx, db);

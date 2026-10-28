@@ -18,6 +18,10 @@
 #include "views/explorer_pages_loading_view.h"
 #include "views/explorer_pages_view.h"
 #include "views/explorer_stats_internal.h"
+#include "views/explorer_stats_view.h"
+#include "validation/connect_block.h"
+#include "primitives/block.h"
+#include "primitives/transaction.h"
 #include <string.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -156,9 +160,112 @@ static int ex_rpc_tx_rows(void)
     return failures;
 }
 
+static bool ex_shielded_seed(sqlite3 *db, int64_t *incoming, int64_t *outgoing)
+{
+    bool ok = sqlite3_exec(db,
+        "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER, status INTEGER, "
+        "num_tx INTEGER, bits INTEGER, sapling_value INTEGER, sprout_value INTEGER);"
+        "CREATE TABLE view_integrity(height INTEGER);"
+        "INSERT INTO blocks VALUES(0,x'0206260143838b5ff52dc2eb7b4b8099d4e4c99dc3ef19794289a2cd4c100700',1478403829,3,1,520617983,0,0);"
+        "INSERT INTO view_integrity VALUES(0),(1),(2);", NULL, NULL, NULL) == SQLITE_OK;
+    struct transaction tx = {0};
+    struct block blk = {0};
+    blk.vtx = &tx;
+    blk.num_vtx = 1;
+    tx.value_balance = -700000000;
+    connect_block_shielded_values(&blk, NULL, incoming);
+    tx.value_balance = 300000000;
+    connect_block_shielded_values(&blk, NULL, outgoing);
+    sqlite3_stmt *stmt = NULL;
+    ok = ok && sqlite3_prepare_v2(db,
+        "INSERT INTO blocks VALUES(?1,zeroblob(32),1600000000,3,1,520617983,?2,0)",
+        -1, &stmt, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_int(stmt, 1, 1); sqlite3_bind_int64(stmt, 2, *incoming);
+        ok = sqlite3_step(stmt) == SQLITE_DONE;
+        sqlite3_reset(stmt);
+        sqlite3_bind_int(stmt, 1, 2); sqlite3_bind_int64(stmt, 2, *outgoing);
+        ok = sqlite3_step(stmt) == SQLITE_DONE && ok;
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool ex_shielded_setup_valid(bool setup, int64_t incoming,
+                                    int64_t outgoing, size_t n,
+                                    const char *sapling, const char *end)
+{
+    return setup && incoming == 700000000 && outgoing == -300000000 &&
+           n > 0 && sapling && end;
+}
+
+static int ex_shielded_detail_checks(const char *s)
+{
+    int failures = 0;
+    const char *patterns[] = {
+        "<div class='num'>4.00000000 ZCL</div><div class='lbl'>Net Pool Balance",
+        "Largest Single Shielding</div><div class='val'><a href='/explorer/block/1'>Block 1</a> &mdash; 7.00000000 ZCL",
+        "Largest Single Unshielding</div><div class='val'><a href='/explorer/block/2'>Block 2</a> &mdash; 3.00000000 ZCL",
+        "<a href='/explorer/block/1'>1</a></td><td>2020-09-13 12:26:40 UTC</td><td class='amount'>7.00000000 ZCL</td><td><span style='color:#33ff99'>Shielding",
+        "<a href='/explorer/block/2'>2</a></td><td>2020-09-13 12:26:40 UTC</td><td class='amount'>3.00000000 ZCL</td><td><span style='color:#ff6666'>Unshielding",
+    };
+    const char *labels[] = {"net pool balance", "peak shielding", "peak unshielding",
+                            "largest shielding direction", "largest unshielding direction"};
+    for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
+        bool ok = s && strstr(s, patterns[i]);
+        printf("explorer: sapling %s... %s\n", labels[i], ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+}
+
+static int ex_shielded_results(char *sapling, size_t n, bool setup,
+                               int64_t incoming, int64_t outgoing)
+{
+    int failures = 0;
+    char *end = sapling ? strstr(sapling, "UTXO") : NULL;
+    printf("explorer shielded witness incoming=%" PRId64 " outgoing=%" PRId64 " rendered=%d\n", incoming, outgoing, sapling != NULL);
+    if (sapling && end) {
+        *end = 0;
+        printf("explorer shielded section: %.2500s\n", sapling);
+    }
+    bool shielding = sapling && end && strstr(sapling, "Total Shielded (t&rarr;z)</div><div class='val amount'>7.00000000 ZCL") != NULL;
+    bool unshielding = sapling && end && strstr(sapling, "Total Unshielded (z&rarr;t)</div><div class='val amount'>3.00000000 ZCL") != NULL;
+    bool valid = ex_shielded_setup_valid(setup, incoming, outgoing, n, sapling, end);
+    printf("explorer: shielded fixture setup... %s\n", valid ? "OK" : "FAIL");
+    if (!valid) failures++;
+    printf("explorer: sapling shielding total... %s\n", shielding ? "OK" : "FAIL");
+    if (!shielding) failures++;
+    printf("explorer: sapling unshielding total... %s\n", unshielding ? "OK" : "FAIL");
+    if (!unshielding) failures++;
+    failures += ex_shielded_detail_checks(end ? sapling : NULL);
+    return failures;
+}
+
+static int ex_shielded_sign_witness(void)
+{
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "explorer", "shielded_sign");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    sqlite3 *db = NULL;
+    int64_t incoming = 0, outgoing = 0;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK;
+    if (ok) ok = ex_shielded_seed(db, &incoming, &outgoing);
+    if (db) sqlite3_close(db);
+    uint8_t *out = malloc(1048576); // raw-alloc-ok:test-fixture
+    size_t n = out ? explorer_stats_build(out, 1048575, dir) : 0;
+    if (out) out[n < 1048576 ? n : 1048575] = 0;
+    char *sapling = out ? strstr((char *)out, "Sapling Pool (Modern Privacy)") : NULL;
+    int failures = ex_shielded_results(sapling, n, ok, incoming, outgoing);
+    free(out);
+    if (!fixture_rm_ok(dir)) failures++;
+    return failures;
+}
+
 int test_explorer(void)
 {
     int failures = 0;
+    failures += ex_shielded_sign_witness();
     uint8_t resp[8192];
     failures += ex_rpc_tx_rows();
 
