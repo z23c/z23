@@ -34,46 +34,33 @@ static int parse_u64(const char *s, uint64_t *out)
     return 1;
 }
 
-int main(int argc, char **argv)
+static int pow_command(uint64_t a, const char *arg)
 {
-    if (argc < 3) return usage();
-
-    if (strcmp(argv[1], "digits") == 0) {
-        uint64_t a;
-        if (!parse_u64(argv[2], &a)) return usage();
-        printf("%u\n", zmath_digits_u64(a));
-        return 0;
+    uint64_t b, r;
+    if (!parse_u64(arg, &b) || b > 1000000) return usage();
+    if (!zmath_pow_u64(a, (unsigned)b, &r)) {
+        puts("overflow");
+        return 1;
     }
+    printf("%llu\n", (unsigned long long)r);
+    return 0;
+}
 
-    if (argc < 4) return usage();
-    uint64_t a, b;
-    if (!parse_u64(argv[2], &a)) return usage();
-
-    if (strcmp(argv[1], "pow") == 0) {
-        if (!parse_u64(argv[3], &b) || b > 1000000) return usage();
-        uint64_t r;
-        if (!zmath_pow_u64(a, (unsigned)b, &r)) {
-            puts("overflow");
-            return 1;
-        }
-        printf("%llu\n", (unsigned long long)r);
-        return 0;
-    }
-
-    if (!parse_u64(argv[3], &b)) return usage();
+static int binary_command(const char *op, uint64_t a, uint64_t b)
+{
     uint64_t r;
 
-    if (strcmp(argv[1], "add") == 0) {
+    if (strcmp(op, "add") == 0) {
         if (!zmath_add_u64(a, b, &r)) { puts("overflow"); return 1; }
-    } else if (strcmp(argv[1], "sub") == 0) {
+    } else if (strcmp(op, "sub") == 0) {
         if (!zmath_sub_u64(a, b, &r)) { puts("overflow"); return 1; }
-    } else if (strcmp(argv[1], "mul") == 0) {
+    } else if (strcmp(op, "mul") == 0) {
         if (!zmath_mul_u64(a, b, &r)) { puts("overflow"); return 1; }
-    } else if (strcmp(argv[1], "gcd") == 0) {
+    } else if (strcmp(op, "gcd") == 0) {
         r = zmath_gcd(a, b);
-    } else if (strcmp(argv[1], "lcm") == 0) {
+    } else if (strcmp(op, "lcm") == 0) {
         if (!zmath_lcm(a, b, &r)) { puts("overflow"); return 1; }
-    } else if (strcmp(argv[1], "div-ceil") == 0) {
+    } else if (strcmp(op, "div-ceil") == 0) {
         if (b == 0) { fprintf(stderr, "zmath: division by zero\n"); return 2; }
         r = zmath_div_ceil_u64(a, b);
     } else {
@@ -81,4 +68,21 @@ int main(int argc, char **argv)
     }
     printf("%llu\n", (unsigned long long)r);
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 3) return usage();
+    if (strcmp(argv[1], "digits") == 0) {
+        uint64_t a;
+        if (!parse_u64(argv[2], &a)) return usage();
+        printf("%u\n", zmath_digits_u64(a));
+        return 0;
+    }
+    if (argc < 4) return usage();
+    uint64_t a, b;
+    if (!parse_u64(argv[2], &a)) return usage();
+    if (strcmp(argv[1], "pow") == 0) return pow_command(a, argv[3]);
+    if (!parse_u64(argv[3], &b)) return usage();
+    return binary_command(argv[1], a, b);
 }

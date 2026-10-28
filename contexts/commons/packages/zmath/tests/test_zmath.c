@@ -4,9 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+static FILE *cli_real_stderr(void) { return stderr; }
+static FILE *cli_out, *cli_err;
+#undef stderr
+#define stderr cli_err
+#define printf(...) fprintf(cli_out, __VA_ARGS__)
+#define puts(s) (fputs((s), cli_out) == EOF ? EOF : fputc('\n', cli_out))
 #define main zmath_cli_main
 #include "../app/main.c"
 #undef main
+#undef puts
+#undef printf
+#undef stderr
+#define stderr cli_real_stderr()
 
 #define CHECK(cond) do { \
     if (!(cond)) { \
@@ -229,9 +239,64 @@ static void test_cli_rejects_invalid_unsigned(void)
     CHECK(failures == 0);
 }
 
+static bool cli_text(FILE *f, const char *expected)
+{
+    rewind(f);
+    char buf[256];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    return !ferror(f) && n == strlen(expected) && memcmp(buf, expected, n) == 0;
+}
+
+static bool cli_case(int argc, char **argv, int status, const char *out,
+                     const char *err)
+{
+    cli_out = tmpfile(); cli_err = tmpfile();
+    if (!cli_out || !cli_err) {
+        if (cli_out) fclose(cli_out);
+        if (cli_err) fclose(cli_err);
+        return false;
+    }
+    int actual = zmath_cli_main(argc, argv);
+    bool ok = actual == status && cli_text(cli_out, out) && cli_text(cli_err, err);
+    if (fclose(cli_out) != 0) ok = false;
+    if (fclose(cli_err) != 0) ok = false;
+    return ok;
+}
+
+static void test_cli_cases(void)
+{
+    const char *usage_text = "usage: zmath <add|sub|mul|gcd|lcm|pow|div-ceil|digits> args...\n";
+    const struct { char *op, *a, *b; int status; const char *out, *err; } rows[] = {
+        {"add", "1", "2", 0, "3\n", ""}, {"sub", "0", "1", 1, "overflow\n", ""},
+        {"mul", "18446744073709551615", "2", 1, "overflow\n", ""},
+        {"add", "18446744073709551615", "1", 1, "overflow\n", ""},
+        {"gcd", "12", "18", 0, "6\n", ""},
+        {"lcm", "18446744073709551615", "2", 1, "overflow\n", ""},
+        {"div-ceil", "7", "3", 0, "3\n", ""},
+        {"div-ceil", "7", "0", 2, "", "zmath: division by zero\n"},
+        {"pow", "2", "64", 1, "overflow\n", ""},
+        {"pow", "1", "1000000", 0, "1\n", ""},
+        {"pow", "1", "1000001", 2, "", usage_text},
+        {"unknown", "1", "2", 2, "", usage_text},
+        {"unknown", "-1", "2", 2, "", usage_text},
+        {"add", " 1", "2", 2, "", usage_text},
+        {"add", "+1", "2", 2, "", usage_text},
+        {"add", "18446744073709551616", "2", 2, "", usage_text},
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        char *args[] = {"zmath", rows[i].op, rows[i].a, rows[i].b, NULL};
+        CHECK(cli_case(4, args, rows[i].status, rows[i].out, rows[i].err));
+    }
+    char *digits[] = {"zmath", "digits", "123", "ignored", NULL};
+    char *missing[] = {"zmath", "add", "1", NULL};
+    CHECK(cli_case(4, digits, 0, "3\n", ""));
+    CHECK(cli_case(3, missing, 2, "", usage_text));
+}
+
 int main(void)
 {
     test_cli_rejects_invalid_unsigned();
+    test_cli_cases();
     test_checked_u64();
     test_checked_i64();
     test_saturating();
