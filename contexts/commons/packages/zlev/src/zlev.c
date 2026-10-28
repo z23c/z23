@@ -38,6 +38,31 @@ size_t zlev_distance(const void *a, size_t na, const void *b, size_t nb) {
   return prev[nb];
 }
 
+static int bounded_row(unsigned char current, const unsigned char *columns,
+                          size_t nb, size_t i, size_t limit,
+                          unsigned short *row, const unsigned short *prev) {
+  /* Banded window: cells [lo, hi]; column 0 remains while i <= limit. */
+  size_t lo = i > limit ? i - limit : 0;
+  size_t hi = i + limit < nb ? i + limit : nb;
+  size_t row_min = lo == 0 ? i : (size_t)ZLEV_MAX + 1;
+  size_t jfrom = lo == 0 ? 1 : lo;
+  row[0] = (unsigned short)i;
+  if (lo > 1) row[lo - 1] = (unsigned short)(limit + 1); /* wall */
+  for (size_t j = jfrom; j <= hi; j++) {
+    size_t cost = current == columns[j - 1] ? 0 : 1;
+    size_t del = prev[j] + 1, ins = row[j - 1] + 1,
+           sub = prev[j - 1] + cost;
+    size_t m = del < ins ? del : ins;
+    if (sub < m) m = sub;
+    if (m > limit + 1) m = limit + 1;
+    row[j] = (unsigned short)m;
+    if (m < row_min) row_min = m;
+  }
+  /* The following row must see a wall beyond this band's high end. */
+  for (size_t j = hi + 1; j <= nb; j++) row[j] = (unsigned short)(limit + 1);
+  return row_min > limit && hi == nb;
+}
+
 size_t zlev_distance_bounded(const void *a, size_t na, const void *b,
                              size_t nb, size_t limit) {
   const unsigned char *pa = a, *pb = b;
@@ -63,28 +88,8 @@ size_t zlev_distance_bounded(const void *a, size_t na, const void *b,
   }
   for (j = 0; j <= nb; j++) prev[j] = (unsigned short)j;
   for (i = 1; i <= na; i++) {
-    /* Banded window: cells [lo, hi]; cells outside are > limit away.
-     * Column 0 stays in the band while i <= limit. */
-    size_t lo = i > limit ? i - limit : 0;
-    size_t hi = i + limit < nb ? i + limit : nb;
-    size_t row_min = lo == 0 ? i : (size_t)ZLEV_MAX + 1;
-    size_t jfrom = lo == 0 ? 1 : lo;
-    row[0] = (unsigned short)i;
-    if (lo > 1) row[lo - 1] = (unsigned short)(limit + 1); /* wall */
-    for (j = jfrom; j <= hi; j++) {
-      size_t cost = pa[i - 1] == pb[j - 1] ? 0 : 1;
-      size_t del = prev[j] + 1, ins = row[j - 1] + 1,
-             sub = prev[j - 1] + cost;
-      size_t m = del < ins ? del : ins;
-      if (sub < m) m = sub;
-      if (m > limit + 1) m = limit + 1; /* saturate */
-      row[j] = (unsigned short)m;
-      if (m < row_min) row_min = m;
-    }
-    /* Cells past hi are unreachable-within-limit: saturate prev so
-     * the next row sees the wall. */
-    for (j = hi + 1; j <= nb; j++) row[j] = (unsigned short)(limit + 1);
-    if (row_min > limit && hi == nb) return limit + 1; /* row escaped */
+    if (bounded_row(pa[i - 1], pb, nb, i, limit, row, prev))
+      return limit + 1; /* row escaped */
     memcpy(prev, row, (nb + 1) * sizeof(unsigned short));
   }
   return prev[nb] > limit ? limit + 1 : prev[nb];

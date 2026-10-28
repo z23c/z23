@@ -153,11 +153,27 @@ static void test_similarity_rounding(void) {
   CHECK(zlev_similarity_milli("abc", 3, "abd", 3) == 666);
 }
 
+static void test_alternating_bands(void) {
+  static const unsigned char a[] = {0, 0xff, 'a', 'b', 0, 0x80, 'c'};
+  static const unsigned char b[] = {0, 0xff, 'x', 0, 0x80};
+  static const size_t limits[] = {SIZE_MAX, 1, 0, 3, SIZE_MAX, 2, 0, 7};
+  size_t full = zlev_distance(a, sizeof a, b, sizeof b);
+  for (size_t i = 0; i < sizeof limits / sizeof limits[0]; i++) {
+    size_t limit = limits[i];
+    size_t effective = limit > ZLEV_MAX ? ZLEV_MAX : limit;
+    size_t want = full <= effective ? full : effective + 1;
+    CHECK(zlev_distance_bounded(a, sizeof a, b, sizeof b, limit) == want);
+    CHECK(zlev_distance_bounded(b, sizeof b, a, sizeof a, limit) == want);
+    CHECK(zlev_distance_bounded(a, sizeof a, a, sizeof a, limit) == 0);
+  }
+}
+
 static void test_cli(void);
 
 int main(void) {
   test_cli();
   test_similarity_rounding();
+  test_alternating_bands();
   test_kat();
   test_bound();
   test_sim();
