@@ -57,6 +57,7 @@
 #include "storage/coins_db.h"
 #include "coins/undo.h"
 #include "validation/chainstate.h"
+#include "validation/connect_block.h"
 #include "validation/txmempool.h"
 #include "validation/process_block.h"
 #include "sapling/incremental_merkle_tree.h"
@@ -248,10 +249,9 @@ static bool catchup_reopen_batch_txn(struct node_db *ndb, int h,
  * Per-block write order: stamp the txid index rows (transactions table),
  * run the single per-block explorer hook (explorer_index_block, which
  * writes tx_outputs/inputs/op_returns/sapling/joinsplits/sprout_nullifiers
- * + the chained view_integrity receipt and returns the shielded value
- * accumulators), backfill blk.sprout_value/sapling_value from those
- * accumulators, THEN db_block_save_canonical — so the blocks row and the integrity
- * receipt agree. prev_receipt carries the previous height's receipt
+ * + the chained view_integrity receipt), compute the per-block shielded
+ * values using the consensus helper, THEN db_block_save_canonical.
+ * prev_receipt carries the previous height's receipt
  * forward across the ascending catchup walk (NULL/zeros at genesis);
  * out_receipt receives this height's receipt for the next iteration.
  *
@@ -311,17 +311,14 @@ static bool sync_block_lean(struct node_db *ndb,
                      pindex->nHeight, i);
     }
 
-    /* Full per-block explorer projections + chained integrity receipt.
-     * Read-derived, node.db-only; returns the shielded value accumulators
-     * so the blocks row agrees with the receipt it just wrote. */
-    int64_t sprout_val = 0, sapling_val = 0;
+    /* Explorer receipt values retain their existing sign convention. */
     if (!explorer_index_block(ndb, blk, pindex, prev_receipt, out_receipt,
-                              &sprout_val, &sapling_val))
+                              NULL, NULL))
         LOG_WARN("catchup", "sync_block_lean: explorer projections failed at "
                  "height %d (continuing — degraded explorer row, not fatal)",
                  pindex->nHeight);
-    db_blk.sprout_value = sprout_val;
-    db_blk.sapling_value = sapling_val;
+    connect_block_shielded_values(blk, &db_blk.sprout_value,
+                                  &db_blk.sapling_value);
 
     if (!db_block_save_canonical(ndb, &db_blk))
         LOG_FAIL("sync", "sync_block_lean: db_block_save_canonical failed at height %d",

@@ -10,6 +10,7 @@
 #include "controllers/sync_controller.h"
 #include "util/blocker.h"
 #include "validation/chainstate.h"
+#include "validation/connect_block.h"
 #include "chain/chain.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -966,6 +967,66 @@ static int ndc_check_service_conflict_rollback(struct ndc_fix_ctx *fx)
     return failures;
 }
 
+static int ndc_check_shielded_values(int64_t balance, const char *label)
+{
+    int failures = 0;
+    struct node_db ndb;
+    if (!node_db_open(&ndb, ":memory:")) return 1;
+    struct js_description js = {0};
+    js.vpub_old = 17;
+    js.vpub_new = 5;
+    struct transaction tx = {0};
+    tx.hash.data[0] = 0x61;
+    tx.value_balance = balance;
+    tx.v_joinsplit = &js;
+    tx.num_joinsplit = 1;
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000123u;
+    blk.header.nBits = 0x2000ffffu;
+    blk.header.hashPrevBlock.data[0] = 0x33;
+    blk.header.hashMerkleRoot.data[0] = 0x44;
+    blk.vtx = &tx;
+    blk.num_vtx = 1;
+    struct uint256 hash;
+    block_get_hash(&blk, &hash);
+    struct block_index parent = {0}, index = {0};
+    parent.nChainSproutValue = 1000;
+    parent.nChainSaplingValue = 2000;
+    parent.has_chain_sprout_value = true;
+    parent.has_chain_sapling_value = true;
+    index.pprev = &parent;
+    index.nHeight = 1;
+    index.nStatus = BLOCK_HAVE_DATA;
+    index.phashBlock = &hash;
+    int64_t expected_sprout = 0, expected_sapling = 0;
+    connect_block_shielded_values(&blk, &expected_sprout, &expected_sapling);
+    uint8_t direct_receipt[32] = {0}, saved_receipt[32] = {0};
+    int64_t explorer_sprout = 0, explorer_sapling = 0;
+    bool saved = node_db_catchup_test_sync_block_lean(&ndb, &blk, &index);
+    bool receipt_found = db_view_integrity_get(&ndb, 1, saved_receipt);
+    bool projected = explorer_index_block(&ndb, &blk, &index, NULL, direct_receipt,
+                                          &explorer_sprout, &explorer_sapling);
+    printf("shielded receipt %s ", label);
+    for (size_t i = 0; i < sizeof(saved_receipt); i++) printf("%02x", saved_receipt[i]);
+    printf(" explorer_sprout=%lld explorer_sapling=%lld\n",
+           (long long)explorer_sprout, (long long)explorer_sapling);
+    NDC_CHECK("explorer projection retains historical values", projected && explorer_sprout == expected_sprout && explorer_sapling == balance);
+    NDC_CHECK("catchup retains explorer receipt", projected && receipt_found && memcmp(direct_receipt, saved_receipt, 32) == 0);
+    struct db_block row = {0};
+    bool found = saved && db_block_find_by_hash(&ndb, hash.data, &row);
+    printf("shielded witness %s saved=%d found=%d sprout=%lld expected=%lld sapling=%lld expected=%lld\n",
+           label, saved, found, (long long)row.sprout_value,
+           (long long)expected_sprout, (long long)row.sapling_value,
+           (long long)expected_sapling);
+    NDC_CHECK("shielded witness saved exact row", saved && found);
+    NDC_CHECK("shielded witness sprout delta", found && row.sprout_value == expected_sprout);
+    NDC_CHECK("shielded witness sapling delta", found && row.sapling_value == expected_sapling);
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -980,6 +1041,8 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_tail_fold_and_sparse_prefix();
     failures += ndc_check_hashless_sync_block_lean();
     failures += ndc_check_competing_fork_parent();
+    failures += ndc_check_shielded_values(7, "positive");
+    failures += ndc_check_shielded_values(-11, "negative");
     failures += ndc_check_torn_hashless_walk();
 
     /* ── Commit cadence / BUSY_SNAPSHOT restart / abort-streak park ────
