@@ -31,6 +31,11 @@ void agent_impact_add_group_list(struct agent_impact_acc *acc, const char *group
 bool agent_impact_path_is_direct_development_contract(const char *path);
 bool agent_impact_apply_shared_rules(const char *path,
                                      struct agent_impact_acc *acc);
+/* Presentation priority only: groups from exact literal alternatives in the
+ * same shared rules. Globs/escapes do not match. Does not select a route or
+ * change the full impact accumulator's ordering/membership. */
+void agent_impact_collect_literal_groups(const char *path,
+                                          struct agent_impact_acc *acc);
 size_t agent_impact_rule_count(void);
 
 #endif

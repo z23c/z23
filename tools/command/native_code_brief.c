@@ -356,6 +356,14 @@ static void cb_add_test(struct cb_brief *b, const char *group)
 
 static void cb_collect_tests(struct cb_brief *b)
 {
+    /* Brief presentation only: keep the path's exact proofs before broad
+     * shared-rule groups consume the cap. Full routing stays authoritative. */
+    struct agent_impact_acc literal = {0};
+    for (size_t i = 0; i < b->npaths; i++)
+        agent_impact_collect_literal_groups(b->paths[i], &literal);
+    for (size_t g = 0; g < literal.groups_len; g++)
+        cb_add_test(b, literal.groups[g]);
+    b->cut_tests = b->cut_tests || literal.groups_lost;
     for (size_t i = 0; i < b->npaths; i++) {
         struct agent_impact_acc acc;
         bool crisk = false;

@@ -37,7 +37,7 @@ void agent_impact_add_group(struct agent_impact_acc *acc, const char *group)
 
 static bool agent_impact_match_one_pattern(const char *path,
                                            const char *pattern,
-                                           size_t len)
+                                           size_t len, bool literal_only)
 {
     if (!path || !pattern || len == 0)
         return false;
@@ -57,11 +57,12 @@ static bool agent_impact_match_one_pattern(const char *path,
     buf[len] = 0;
     if (!strpbrk(buf, "*?[\\"))
         return strcmp(buf, path) == 0;
-    return platform_glob_match(buf, path, false);
+    return !literal_only && platform_glob_match(buf, path, false);
 }
 
 static bool agent_impact_match_any_pattern(const char *path,
-                                           const char *patterns)
+                                           const char *patterns,
+                                           bool literal_only)
 {
     if (!path || !path[0] || !patterns || !patterns[0])
         return false;
@@ -70,7 +71,7 @@ static bool agent_impact_match_any_pattern(const char *path,
     while (*start) {
         const char *bar = strchr(start, '|');
         size_t len = bar ? (size_t)(bar - start) : strlen(start);
-        if (agent_impact_match_one_pattern(path, start, len))
+        if (agent_impact_match_one_pattern(path, start, len, literal_only))
             return true;
         if (!bar)
             break;
@@ -125,7 +126,7 @@ bool agent_impact_apply_shared_rules(const char *path,
 
 #define AGENT_IMPACT_RULE(patterns, groups) \
     do { \
-        if (agent_impact_match_any_pattern(path, (patterns))) { \
+        if (agent_impact_match_any_pattern(path, (patterns), false)) { \
             if (!acc) \
                 return true; \
             agent_impact_add_group_list((acc), (groups)); \
@@ -138,6 +139,20 @@ bool agent_impact_apply_shared_rules(const char *path,
 #undef AGENT_IMPACT_RULE
 
     return matched;
+}
+
+void agent_impact_collect_literal_groups(const char *path,
+                                          struct agent_impact_acc *acc)
+{
+    if (!acc)
+        return;
+#define AGENT_IMPACT_RULE(patterns, groups) \
+    do { \
+        if (agent_impact_match_any_pattern(path, (patterns), true)) \
+            agent_impact_add_group_list(acc, (groups)); \
+    } while (0);
+#include "controllers/agent_impact_rules.def"
+#undef AGENT_IMPACT_RULE
 }
 
 size_t agent_impact_rule_count(void)

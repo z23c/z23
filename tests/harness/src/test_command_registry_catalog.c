@@ -631,6 +631,60 @@ static int test_code_guide_brief(void)
     return failures;
 }
 
+static int test_code_guide_fetch_focus(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    TEST("code.guide keeps exact fetch proof visible under the test cap") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        ASSERT(brief_run(root,
+            "{\"paths\":[\"cognition/modules/codeindex/src/codeindex_fetch.c\"]}",
+            &reply, why, sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const struct json_value *tests = json_get(&reply.data, "tests");
+        ASSERT(brief_array_has(tests, "code_fetch"));
+        ASSERT_STR_EQ(json_get_str(json_at(tests, 0)), "code_fetch");
+        struct agent_impact_acc acc;
+        bool risk = false;
+        const char *route = zcl_native_code_route_for_path(
+            "cognition/modules/codeindex/src/codeindex_fetch.c", &acc, &risk);
+        ASSERT(brief_array_has(tests, route));
+        ASSERT(json_size(tests) <= 12);
+        ASSERT(brief_array_has(json_get(&reply.data, "cut"), "tests"));
+        ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_literal_priority(void)
+{
+    int failures = 0;
+    TEST("code.guide priority accepts literal alternatives and excludes glob-only matches") {
+        const char *literal_paths[] = {
+            "cognition/modules/codeindex/src/codeindex_fetch.c",
+            "cognition/modules/codeindex/include/codeindex/codeindex_fetch.h",
+        };
+        for (size_t i = 0; i < sizeof(literal_paths) / sizeof(*literal_paths); i++) {
+            struct agent_impact_acc acc = {0};
+            agent_impact_collect_literal_groups(literal_paths[i], &acc);
+            ASSERT(acc.groups_len > 0);
+            ASSERT_STR_EQ(acc.groups[0], "code_fetch");
+        }
+        struct agent_impact_acc literal = {0}, full = {0};
+        const char *glob_only = "cognition/modules/codeindex/src/brief_no_literal_rule.c";
+        agent_impact_collect_literal_groups(glob_only, &literal);
+        ASSERT_EQ(literal.groups_len, 0);
+        ASSERT(agent_impact_apply_shared_rules(glob_only, &full));
+        ASSERT(full.groups_len > 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_devagent_focus(void)
 {
     int failures = 0;
@@ -6929,6 +6983,8 @@ int test_command_registry_catalog(void)
     failures += test_yardsale_guide();
     failures += test_code_guide_leaf();
     failures += test_code_guide_brief();
+    failures += test_code_guide_fetch_focus();
+    failures += test_code_guide_literal_priority();
     failures += test_code_guide_brief_budget();
     failures += test_code_guide_devagent_focus();
     failures += test_code_guide_lint_catalog();
