@@ -22,10 +22,6 @@ cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_st
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
 cognition/services/src/dev_reflex_policy_service.c:handoff_validate:24
 cognition/services/src/dev_reflex_policy_service.c:project_cycle:59
-cognition/services/src/experience_compilation_service.c:experience_compile_checked:41
-cognition/services/src/experience_compilation_service.c:experience_output_aliases:24
-cognition/services/src/experience_compilation_service.c:experience_store_science:20
-cognition/services/src/experience_compilation_service.c:experience_validate_observation:18
 cognition/services/src/zcode_retrieval_profile_comparison_service.c:zcode_retrieval_profile_comparison_observe:27
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21

@@ -44,15 +44,16 @@ static bool experience_workspace_size(const char *workspace, size_t *bytes)
     return true;
 }
 
-static bool experience_output_aliases(
-    const struct zcl_experience_episode_v1 *episode,
-    const struct zcl_experience_compilation_v1 *out, size_t workspace_bytes)
-{
 #define EXPERIENCE_ARRAY_BYTES(count_, item_size_)                       \
     ((count_) > SIZE_MAX / (item_size_) ? SIZE_MAX :                    \
      (count_) * (item_size_))
 #define EXPERIENCE_INPUT_OVERLAPS(pointer, count) \
     experience_memory_overlaps(out, sizeof(*out), (pointer), (count))
+
+static bool experience_output_aliases_provenance(
+    const struct zcl_experience_episode_v1 *episode,
+    const struct zcl_experience_compilation_v1 *out, size_t workspace_bytes)
+{
     bool aliases =
         EXPERIENCE_INPUT_OVERLAPS(episode, sizeof(*episode)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->workspace, workspace_bytes) ||
@@ -77,7 +78,15 @@ static bool experience_output_aliases(
         (episode->parent_count != 0 && EXPERIENCE_INPUT_OVERLAPS(
             episode->parents,
             EXPERIENCE_ARRAY_BYTES(episode->parent_count,
-                sizeof(*episode->parents)))) ||
+                sizeof(*episode->parents))));
+    return aliases;
+}
+
+static bool experience_output_aliases_science(
+    const struct zcl_experience_episode_v1 *episode,
+    const struct zcl_experience_compilation_v1 *out)
+{
+    bool aliases =
         EXPERIENCE_INPUT_OVERLAPS(episode->attention_bid,
                                   sizeof(*episode->attention_bid)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->relations,
@@ -95,9 +104,17 @@ static bool experience_output_aliases(
         (episode->replication_acceptance && EXPERIENCE_INPUT_OVERLAPS(
             episode->replication_acceptance,
             sizeof(*episode->replication_acceptance)));
+    return aliases;
+}
 #undef EXPERIENCE_INPUT_OVERLAPS
 #undef EXPERIENCE_ARRAY_BYTES
-    return aliases;
+
+static bool experience_output_aliases(
+    const struct zcl_experience_episode_v1 *episode,
+    const struct zcl_experience_compilation_v1 *out, size_t workspace_bytes)
+{
+    return experience_output_aliases_provenance(episode, out, workspace_bytes) ||
+        experience_output_aliases_science(episode, out);
 }
 
 static bool experience_store_receipt(
@@ -162,6 +179,49 @@ static bool experience_store_report(
     return ok;
 }
 
+static bool experience_revalidate_science(
+    const char *workspace, const uint8_t expected_signer[32],
+    const uint8_t relations_root[32], const uint8_t statement_root[32])
+{
+    uint8_t *loaded_relations = NULL, *loaded_statement = NULL;
+    size_t loaded_relations_len = 0, loaded_statement_len = 0;
+    struct vcs_zcode_science_relation_set_v1 parsed_relations;
+    struct vcs_zcode_science_statement_v1 parsed_statement;
+    uint8_t checked_relations[32], checked_statement[32];
+    bool ok = vcs_object_load_raw_bounded(
+                  workspace, relations_root, VCS_ZCODE_SCIENCE_RELATION_SET_MAX_WIRE_BYTES,
+                  &loaded_relations, &loaded_relations_len) == 0 &&
+        vcs_object_load_raw_bounded(
+                  workspace, statement_root, VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES,
+                  &loaded_statement, &loaded_statement_len) == 0 &&
+        vcs_zcode_science_relation_set_parse(
+                  loaded_relations, loaded_relations_len,
+                  &parsed_relations) == VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_relation_set_root(
+                  &parsed_relations, checked_relations) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        experience_root_equal(relations_root, checked_relations) &&
+        loaded_statement_len == VCS_ZCODE_SCIENCE_STATEMENT_WIRE_BYTES &&
+        vcs_zcode_science_statement_parse(
+                  loaded_statement, loaded_statement_len,
+                  &parsed_statement) == VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_statement_root(
+                  &parsed_statement, checked_statement) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        experience_root_equal(statement_root, checked_statement) &&
+        vcs_zcode_science_statement_verify(
+                  &parsed_statement, expected_signer) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_statement_validate_relations(
+                  &parsed_statement, &parsed_relations) ==
+            VCS_ZCODE_SCIENCE_OK;
+    free(loaded_relations);
+    free(loaded_statement);
+    if (!ok)
+        LOG_ERROR("experience.compile", "science CAS revalidation failed");
+    return ok;
+}
+
 static bool experience_store_science(
     const char *workspace,
     const struct vcs_zcode_science_relation_set_v1 *relations,
@@ -192,43 +252,8 @@ static bool experience_store_science(
         return false;
     }
 
-    uint8_t *loaded_relations = NULL, *loaded_statement = NULL;
-    size_t loaded_relations_len = 0, loaded_statement_len = 0;
-    struct vcs_zcode_science_relation_set_v1 parsed_relations;
-    struct vcs_zcode_science_statement_v1 parsed_statement;
-    uint8_t checked_relations[32], checked_statement[32];
-    bool ok = vcs_object_load_raw_bounded(
-                  workspace, relations_root, sizeof(relation_wire),
-                  &loaded_relations, &loaded_relations_len) == 0 &&
-        vcs_object_load_raw_bounded(
-                  workspace, statement_root, sizeof(statement_wire),
-                  &loaded_statement, &loaded_statement_len) == 0 &&
-        vcs_zcode_science_relation_set_parse(
-                  loaded_relations, loaded_relations_len,
-                  &parsed_relations) == VCS_ZCODE_SCIENCE_OK &&
-        vcs_zcode_science_relation_set_root(
-                  &parsed_relations, checked_relations) ==
-            VCS_ZCODE_SCIENCE_OK &&
-        experience_root_equal(relations_root, checked_relations) &&
-        loaded_statement_len == sizeof(statement_wire) &&
-        vcs_zcode_science_statement_parse(
-                  loaded_statement, loaded_statement_len,
-                  &parsed_statement) == VCS_ZCODE_SCIENCE_OK &&
-        vcs_zcode_science_statement_root(
-                  &parsed_statement, checked_statement) ==
-            VCS_ZCODE_SCIENCE_OK &&
-        experience_root_equal(statement_root, checked_statement) &&
-        vcs_zcode_science_statement_verify(
-                  &parsed_statement, expected_signer) ==
-            VCS_ZCODE_SCIENCE_OK &&
-        vcs_zcode_science_statement_validate_relations(
-                  &parsed_statement, &parsed_relations) ==
-            VCS_ZCODE_SCIENCE_OK;
-    free(loaded_relations);
-    free(loaded_statement);
-    if (!ok)
-        LOG_ERROR("experience.compile", "science CAS revalidation failed");
-    return ok;
+    return experience_revalidate_science(workspace, expected_signer,
+                                         relations_root, statement_root);
 }
 
 static enum zcl_experience_compilation_error experience_validate_story_focus(
@@ -249,6 +274,29 @@ static enum zcl_experience_compilation_error experience_validate_story_focus(
             VCS_ZCODE_FOCUS_OK)
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_FOCUS,
                                "task, source, context, or generation moved");
+    return ZCL_EXPERIENCE_COMPILATION_OK;
+}
+
+static enum zcl_experience_compilation_error experience_validate_report(
+    const struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *result, uint8_t expected_outcome)
+{
+    if (vcs_zcode_specialist_report_validate(
+            episode->specialist_report) != VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_specialist_report_root(
+            episode->specialist_report, result->report_root) !=
+                VCS_ZCODE_FOCUS_OK ||
+        episode->specialist_report->status != expected_outcome ||
+        !experience_root_equal(episode->specialist_report->focus_root,
+                               result->focus_root) ||
+        !experience_root_equal(episode->specialist_report->evidence_root,
+                               result->receipt_root) ||
+        !experience_root_equal(episode->specialist_report->result_root,
+                               episode->work_receipt->output_root) ||
+        !experience_root_equal(episode->specialist_report->specialist_root,
+                               episode->work_receipt->signer_pubkey))
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPORT,
+                               "report does not describe the exact receipt");
     return ZCL_EXPERIENCE_COMPILATION_OK;
 }
 
@@ -276,23 +324,7 @@ static enum zcl_experience_compilation_error experience_validate_observation(
                                "signed work observation is stale or misbound");
     *expected_outcome = episode->work_receipt->status == VCS_ZCODE_WORK_PASS ?
         ZCL_ONTOLOGY_PROVED : ZCL_ONTOLOGY_DISPROVED;
-    if (vcs_zcode_specialist_report_validate(
-            episode->specialist_report) != VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_specialist_report_root(
-            episode->specialist_report, result->report_root) !=
-                VCS_ZCODE_FOCUS_OK ||
-        episode->specialist_report->status != *expected_outcome ||
-        !experience_root_equal(episode->specialist_report->focus_root,
-                               result->focus_root) ||
-        !experience_root_equal(episode->specialist_report->evidence_root,
-                               result->receipt_root) ||
-        !experience_root_equal(episode->specialist_report->result_root,
-                               episode->work_receipt->output_root) ||
-        !experience_root_equal(episode->specialist_report->specialist_root,
-                               episode->work_receipt->signer_pubkey))
-        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPORT,
-                               "report does not describe the exact receipt");
-    return ZCL_EXPERIENCE_COMPILATION_OK;
+    return experience_validate_report(episode, result, *expected_outcome);
 }
 
 static enum zcl_experience_compilation_error experience_validate_lesson(
@@ -489,7 +521,63 @@ const char *zcl_experience_compilation_error_string(
     }
 }
 
-static enum zcl_experience_compilation_error experience_compile_checked(
+static enum zcl_experience_compilation_error experience_validate_qualification(
+    const struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *out)
+{
+    bool scientific_any = episode->outcome_predicate ||
+        episode->benchmark_action || episode->replication_acceptance ||
+        episode->observed_at_unix != 0;
+    bool scientific_all = episode->outcome_predicate &&
+        episode->benchmark_action && episode->replication_acceptance &&
+        episode->observed_at_unix > 0;
+    if (scientific_any != scientific_all) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
+                               "scientific qualification bundle incomplete");
+    }
+    if (episode->claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
+        episode->parent_count > VCS_ZCODE_HEURISTIC_MAX_PARENTS ||
+        episode->story->event_count > ZCL_STORY_MAX_EVENTS) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_FOCUS,
+                               "bounded episode count exceeded");
+    }
+    return ZCL_EXPERIENCE_COMPILATION_OK;
+}
+
+static bool experience_invalid_arrays(
+    const struct zcl_experience_episode_v1 *episode)
+{
+    return (episode->claim_count != 0 && !episode->claim_roots) ||
+        (episode->parent_count != 0 && !episode->parents) ||
+        (episode->parent_count == 0 && episode->parents);
+}
+
+static bool experience_required_fields_missing(
+    const struct zcl_experience_episode_v1 *episode)
+{
+    return !episode->story || !episode->task || !episode->agent_context ||
+        !episode->focus || !episode->work_receipt ||
+        !episode->specialist_report || !episode->heuristic ||
+        !episode->attention_bid || !episode->relations ||
+        !episode->statement || !episode->local_acceptance ||
+        experience_invalid_arrays(episode);
+}
+
+static enum zcl_experience_compilation_error experience_validate_fields(
+    const struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *out)
+{
+    if (experience_required_fields_missing(episode)) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
+                               "required episode field absent");
+    }
+    return experience_validate_qualification(episode, out);
+}
+
+static enum zcl_experience_compilation_error experience_validate_inputs(
     const struct zcl_experience_episode_v1 *episode,
     struct zcl_experience_compilation_v1 *out)
 {
@@ -516,40 +604,24 @@ static enum zcl_experience_compilation_error experience_compile_checked(
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
                                "workspace path is empty or unbounded");
     }
-    if (!episode->story || !episode->task || !episode->agent_context ||
-        !episode->focus || !episode->work_receipt ||
-        !episode->specialist_report || !episode->heuristic ||
-        !episode->attention_bid || !episode->relations ||
-        !episode->statement || !episode->local_acceptance ||
-        (episode->claim_count != 0 && !episode->claim_roots) ||
-        (episode->parent_count != 0 && !episode->parents) ||
-        (episode->parent_count == 0 && episode->parents)) {
-        memset(out, 0, sizeof(*out));
-        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
-                               "required episode field absent");
-    }
-    bool scientific_any = episode->outcome_predicate ||
-        episode->benchmark_action || episode->replication_acceptance ||
-        episode->observed_at_unix != 0;
-    bool scientific_all = episode->outcome_predicate &&
-        episode->benchmark_action && episode->replication_acceptance &&
-        episode->observed_at_unix > 0;
-    if (scientific_any != scientific_all) {
-        memset(out, 0, sizeof(*out));
-        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
-                               "scientific qualification bundle incomplete");
-    }
-    if (episode->claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
-        episode->parent_count > VCS_ZCODE_HEURISTIC_MAX_PARENTS ||
-        episode->story->event_count > ZCL_STORY_MAX_EVENTS) {
-        memset(out, 0, sizeof(*out));
-        return experience_fail(ZCL_EXPERIENCE_COMPILATION_FOCUS,
-                               "bounded episode count exceeded");
-    }
+    enum zcl_experience_compilation_error field_error =
+        experience_validate_fields(episode, out);
+    if (field_error != ZCL_EXPERIENCE_COMPILATION_OK) return field_error;
     if (experience_output_aliases(episode, out, workspace_bytes))
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_ALIAS,
                                "output overlaps episode input");
     memset(out, 0, sizeof(*out));
+
+    return ZCL_EXPERIENCE_COMPILATION_OK;
+}
+
+static enum zcl_experience_compilation_error experience_compile_checked(
+    const struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *out)
+{
+    enum zcl_experience_compilation_error input_error =
+        experience_validate_inputs(episode, out);
+    if (input_error != ZCL_EXPERIENCE_COMPILATION_OK) return input_error;
 
     struct zcl_experience_compilation_v1 result = {0};
     uint8_t expected_outcome = ZCL_ONTOLOGY_UNKNOWN;
