@@ -153,14 +153,11 @@ contexts/commons/packages/zpool/app/main.c:main:25
 contexts/commons/packages/zrand/app/main.c:main:20
 contexts/commons/packages/zre/app/main.c:main:20
 contexts/commons/packages/zre/src/zre.c:addthread:16
-contexts/commons/packages/zre/src/zre.c:gen:49
-contexts/commons/packages/zre/src/zre.c:parse_atom:26
 contexts/commons/packages/zre/src/zre.c:parse_class:19
 contexts/commons/packages/zre/src/zre.c:parse_counted:16
 contexts/commons/packages/zre/src/zre.c:parse_escape:19
 contexts/commons/packages/zre/src/zre.c:parse_repeat:22
 contexts/commons/packages/zre/src/zre.c:zre_compile:25
-contexts/commons/packages/zre/src/zre.c:zre_match:32
 contexts/commons/packages/zring/app/main.c:main:18
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/zslug/src/zslug.c:utf8_decode:24

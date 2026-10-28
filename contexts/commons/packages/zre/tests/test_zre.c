@@ -85,9 +85,37 @@ static void CERR(const char *pat, zre_status want) {
   if (st != want)
     fprintf(stderr, "FAIL compile \"%s\": got %s, want %s\n", pat,
             zre_strerror(st), zre_strerror(want));
-  else
-    CHECK(prog == NULL && err[0] != '\0');
+  CHECK(st == want);
+  CHECK(prog == NULL && err[0] != '\0');
   zre_free(prog);
+}
+
+static void test_priority_and_error_boundaries(void) {
+  static const struct { const char *pat; zre_status status; const char *offset; } bad[] = {
+      {"(", ZRE_ERR_UNBALANCED, "offset 1"},
+      {"\\", ZRE_ERR_ESCAPE, "offset 1"},
+      {"(?=a)", ZRE_ERR_UNSUPPORTED, "offset 1"},
+  };
+  for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    zre_prog *p = NULL;
+    char err[128];
+    zre_status st = zre_compile(bad[i].pat, strlen(bad[i].pat), &p, err, sizeof(err));
+    CHECK(st == bad[i].status && p == NULL && strstr(err, bad[i].offset));
+    zre_free(p);
+  }
+  zre_prog *p = compile("(a|aa)*b");
+  CHECK(p != NULL);
+  if (p) {
+    zre_span caps[3] = {{42, 43}, {44, 45}, {46, 47}};
+    CHECK(zre_match(p, "aab", 3, caps, 3));
+    CHECK(caps[0].start == 0 && caps[0].end == 3);
+    CHECK(caps[1].start == 1 && caps[1].end == 2);
+    CHECK(caps[2].start == ZRE_NOMATCH && caps[2].end == ZRE_NOMATCH);
+    caps[0] = (zre_span){42, 43};
+    CHECK(!zre_match(p, "aa", 2, caps, 3));
+    CHECK(caps[0].start == 42 && caps[0].end == 43);
+    zre_free(p);
+  }
 }
 
 static void test_literals(void) {
@@ -560,6 +588,7 @@ int main(void) {
   test_cli_bound();
   test_cli_controls();
   test_cli_read_error();
+  test_priority_and_error_boundaries();
   test_literals();
   test_dot();
   test_star_plus_quest();

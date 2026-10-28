@@ -294,52 +294,70 @@ static bool parse_class(parser *p, uint32_t bm[8]) {
 
 static int32_t parse_alt(parser *p);
 
+static int32_t parse_group_atom(parser *p) {
+  p->pos++;
+  uint8_t cap = 0;
+  bool capture = true;
+  if (p->pos < p->len && p->pat[p->pos] == '?') {
+    if (p->pos + 1 < p->len && p->pat[p->pos + 1] == ':') {
+      capture = false;
+      p->pos += 2;
+    } else {
+      fail(p, ZRE_ERR_UNSUPPORTED,
+           "only (?:...) non-capturing groups are supported");
+      return -1;
+    }
+  }
+  if (++p->depth > (int)ZRE_MAX_NEST) {
+    fail(p, ZRE_ERR_NEST, "groups nested too deep");
+    return -1;
+  }
+  if (capture) {
+    if (p->ncap >= ZRE_MAX_GROUPS) {
+      fail(p, ZRE_ERR_GROUPS, "too many capture groups");
+      return -1;
+    }
+    cap = (uint8_t)++p->ncap;
+  }
+  int32_t body = parse_alt(p);
+  p->depth--;
+  if (p->err != ZRE_OK)
+    return -1;
+  if (p->pos >= p->len || p->pat[p->pos] != ')') {
+    fail(p, ZRE_ERR_UNBALANCED, "unbalanced '('");
+    return -1;
+  }
+  p->pos++;
+  int32_t g = new_node(p, N_GROUP);
+  if (g < 0)
+    return -1;
+  p->nodes[g].child = body;
+  p->nodes[g].cap = cap;
+  return g;
+}
+
+static int32_t parse_escape_atom(parser *p) {
+  p->pos++;
+  esc_val e;
+  if (!parse_escape(p, &e))
+    return -1;
+  int32_t n = new_node(p, e.is_class ? N_CLASS : N_CHAR);
+  if (n < 0)
+    return -1;
+  if (e.is_class)
+    memcpy(p->nodes[n].cls, e.cls, sizeof(e.cls));
+  else
+    p->nodes[n].c = e.c;
+  return n;
+}
+
 static int32_t parse_atom(parser *p) {
   if (p->pos >= p->len)
     return new_node(p, N_EMPTY);
   int c = (unsigned char)p->pat[p->pos];
   switch (c) {
-  case '(': {
-    p->pos++;
-    uint8_t cap = 0;
-    bool capture = true;
-    if (p->pos < p->len && p->pat[p->pos] == '?') {
-      if (p->pos + 1 < p->len && p->pat[p->pos + 1] == ':') {
-        capture = false;
-        p->pos += 2;
-      } else {
-        fail(p, ZRE_ERR_UNSUPPORTED,
-             "only (?:...) non-capturing groups are supported");
-        return -1;
-      }
-    }
-    if (++p->depth > (int)ZRE_MAX_NEST) {
-      fail(p, ZRE_ERR_NEST, "groups nested too deep");
-      return -1;
-    }
-    if (capture) {
-      if (p->ncap >= ZRE_MAX_GROUPS) {
-        fail(p, ZRE_ERR_GROUPS, "too many capture groups");
-        return -1;
-      }
-      cap = (uint8_t)++p->ncap;
-    }
-    int32_t body = parse_alt(p);
-    p->depth--;
-    if (p->err != ZRE_OK)
-      return -1;
-    if (p->pos >= p->len || p->pat[p->pos] != ')') {
-      fail(p, ZRE_ERR_UNBALANCED, "unbalanced '('");
-      return -1;
-    }
-    p->pos++;
-    int32_t g = new_node(p, N_GROUP);
-    if (g < 0)
-      return -1;
-    p->nodes[g].child = body;
-    p->nodes[g].cap = cap;
-    return g;
-  }
+  case '(':
+    return parse_group_atom(p);
   case '.':
     p->pos++;
     return new_node(p, N_ANY);
@@ -357,20 +375,8 @@ static int32_t parse_atom(parser *p) {
   case '$':
     p->pos++;
     return new_node(p, N_EOL);
-  case '\\': {
-    p->pos++;
-    esc_val e;
-    if (!parse_escape(p, &e))
-      return -1;
-    int32_t n = new_node(p, e.is_class ? N_CLASS : N_CHAR);
-    if (n < 0)
-      return -1;
-    if (e.is_class)
-      memcpy(p->nodes[n].cls, e.cls, sizeof(e.cls));
-    else
-      p->nodes[n].c = e.c;
-    return n;
-  }
+  case '\\':
+    return parse_escape_atom(p);
   default: {
     p->pos++;
     int32_t n = new_node(p, N_CHAR);
@@ -658,6 +664,138 @@ static int32_t gen_repeat_exit(emitter *e, int32_t out) {
   return out < 0 ? gen_epsilon(e) : out;
 }
 
+static int32_t gen_group(emitter *e, const node *n) {
+  if (n->cap == 0)
+    return gen(e, n->child);
+  int32_t s1 = emit(e, OP_SAVE);
+  if (s1 < 0)
+    return -1;
+  e->code[s1].x = 2 * n->cap;
+  int32_t d = gen(e, n->child);
+  if (e->err != ZRE_OK)
+    return -1;
+  if (d >= 0)
+    patch(e, d, (int32_t)e->n);
+  int32_t s2 = emit(e, OP_SAVE);
+  if (s2 < 0)
+    return -1;
+  e->code[s2].x = 2 * n->cap + 1;
+  int32_t j = emit_jmp(e);
+  if (j < 0)
+    return -1;
+  return list1(j, 0);
+}
+
+static int32_t gen_concat(emitter *e, const node *n) {
+  int32_t out = -1;
+  for (int32_t c = n->child; c >= 0; c = e->nodes[c].next) {
+    gen_seq(e, c, &out);
+    if (e->err != ZRE_OK)
+      return -1;
+  }
+  return out;
+}
+
+static int32_t gen_alt(emitter *e, const node *n) {
+  int32_t out = -1, py = -1;
+  for (int32_t c = n->child; c >= 0; c = e->nodes[c].next) {
+    if (py >= 0) {
+      patch(e, py, (int32_t)e->n); /* previous split's fallback: here */
+      py = -1;
+    }
+    if (e->nodes[c].next >= 0) {
+      int32_t s = emit_split(e);
+      if (s < 0)
+        return -1;
+      py = list1(s, 1);
+    }
+    int32_t d = gen(e, c);
+    if (e->err != ZRE_OK)
+      return -1;
+    out = lappend(e, out, d);
+  }
+  return out;
+}
+
+static int32_t gen_counted(emitter *e, int32_t child, int32_t min,
+                           int32_t max) {
+  /* General counted: min mandatory copies, then either an unbounded
+   * tail ({m,} = m copies then star) or (max-min) optional copies. */
+  int32_t out = -1;
+  for (int32_t i = 0; i < min; i++) {
+    gen_seq(e, child, &out);
+    if (e->err != ZRE_OK)
+      return -1;
+  }
+  if (max < 0) {
+    int32_t cs = (int32_t)e->n;
+    if (out >= 0)
+      patch(e, out, cs);
+    int32_t s = emit_split(e);
+    if (s < 0)
+      return -1;
+    int32_t d = gen(e, child);
+    if (e->err != ZRE_OK)
+      return -1;
+    if (d >= 0)
+      patch(e, d, s);
+    return list1(s, 1);
+  }
+  for (int32_t i = min; i < max; i++) {
+    int32_t cs = (int32_t)e->n;
+    if (out >= 0)
+      patch(e, out, cs);
+    int32_t s = emit_split(e);
+    if (s < 0)
+      return -1;
+    int32_t d = gen(e, child);
+    if (e->err != ZRE_OK)
+      return -1;
+    out = lappend(e, d, list1(s, 1));
+  }
+  return gen_repeat_exit(e, out);
+}
+
+static int32_t gen_rep(emitter *e, const node *n) {
+  int32_t child = n->child;
+  int32_t min = n->min, max = n->max;
+  if (min == 0 && max == -1) { /* star */
+    int32_t s = emit_split(e);
+    if (s < 0)
+      return -1;
+    int32_t d = gen(e, child);
+    if (e->err != ZRE_OK)
+      return -1;
+    if (d >= 0)
+      patch(e, d, s);
+    return list1(s, 1);
+  }
+  if (min == 1 && max == -1) { /* plus */
+    int32_t st = (int32_t)e->n;
+    int32_t d = gen(e, child);
+    if (e->err != ZRE_OK)
+      return -1;
+    int32_t s = emit_split(e);
+    if (s < 0)
+      return -1;
+    e->code[s].x = st - s; /* loop back */
+    if (d >= 0)
+      patch(e, d, s);
+    return list1(s, 1);
+  }
+  if (min == 0 && max == 1) { /* quest */
+    int32_t s = emit_split(e);
+    if (s < 0)
+      return -1;
+    int32_t d = gen(e, child);
+    if (e->err != ZRE_OK)
+      return -1;
+    return lappend(e, d, list1(s, 1));
+  }
+  return gen_counted(e, child, min, max);
+}
+
+
 static int32_t gen(emitter *e, int32_t ni) {
   const node *n = &e->nodes[ni];
   switch (n->kind) {
@@ -673,128 +811,14 @@ static int32_t gen(emitter *e, int32_t ni) {
     return gen_leaf(e, OP_BOL, 0, NULL);
   case N_EOL:
     return gen_leaf(e, OP_EOL, 0, NULL);
-  case N_GROUP: {
-    if (n->cap == 0)
-      return gen(e, n->child);
-    int32_t s1 = emit(e, OP_SAVE);
-    if (s1 < 0)
-      return -1;
-    e->code[s1].x = 2 * n->cap;
-    int32_t d = gen(e, n->child);
-    if (e->err != ZRE_OK)
-      return -1;
-    if (d >= 0)
-      patch(e, d, (int32_t)e->n);
-    int32_t s2 = emit(e, OP_SAVE);
-    if (s2 < 0)
-      return -1;
-    e->code[s2].x = 2 * n->cap + 1;
-    int32_t j = emit_jmp(e);
-    if (j < 0)
-      return -1;
-    return list1(j, 0);
-  }
-  case N_CONCAT: {
-    int32_t out = -1;
-    for (int32_t c = n->child; c >= 0; c = e->nodes[c].next) {
-      gen_seq(e, c, &out);
-      if (e->err != ZRE_OK)
-        return -1;
-    }
-    return out;
-  }
-  case N_ALT: {
-    int32_t out = -1, py = -1;
-    for (int32_t c = n->child; c >= 0; c = e->nodes[c].next) {
-      if (py >= 0) {
-        patch(e, py, (int32_t)e->n); /* previous split's fallback: here */
-        py = -1;
-      }
-      if (e->nodes[c].next >= 0) {
-        int32_t s = emit_split(e);
-        if (s < 0)
-          return -1;
-        py = list1(s, 1);
-      }
-      int32_t d = gen(e, c);
-      if (e->err != ZRE_OK)
-        return -1;
-      out = lappend(e, out, d);
-    }
-    return out;
-  }
-  case N_REP: {
-    int32_t child = n->child;
-    int32_t min = n->min, max = n->max;
-    if (min == 0 && max == -1) { /* star */
-      int32_t s = emit_split(e);
-      if (s < 0)
-        return -1;
-      int32_t d = gen(e, child);
-      if (e->err != ZRE_OK)
-        return -1;
-      if (d >= 0)
-        patch(e, d, s);
-      return list1(s, 1);
-    }
-    if (min == 1 && max == -1) { /* plus */
-      int32_t st = (int32_t)e->n;
-      int32_t d = gen(e, child);
-      if (e->err != ZRE_OK)
-        return -1;
-      int32_t s = emit_split(e);
-      if (s < 0)
-        return -1;
-      e->code[s].x = st - s; /* loop back */
-      if (d >= 0)
-        patch(e, d, s);
-      return list1(s, 1);
-    }
-    if (min == 0 && max == 1) { /* quest */
-      int32_t s = emit_split(e);
-      if (s < 0)
-        return -1;
-      int32_t d = gen(e, child);
-      if (e->err != ZRE_OK)
-        return -1;
-      return lappend(e, d, list1(s, 1));
-    }
-    /* General counted: min mandatory copies, then either an unbounded
-     * tail ({m,} = m copies then star) or (max-min) optional copies. */
-    int32_t out = -1;
-    for (int32_t i = 0; i < min; i++) {
-      gen_seq(e, child, &out);
-      if (e->err != ZRE_OK)
-        return -1;
-    }
-    if (max < 0) {
-      int32_t cs = (int32_t)e->n;
-      if (out >= 0)
-        patch(e, out, cs);
-      int32_t s = emit_split(e);
-      if (s < 0)
-        return -1;
-      int32_t d = gen(e, child);
-      if (e->err != ZRE_OK)
-        return -1;
-      if (d >= 0)
-        patch(e, d, s);
-      return list1(s, 1);
-    }
-    for (int32_t i = min; i < max; i++) {
-      int32_t cs = (int32_t)e->n;
-      if (out >= 0)
-        patch(e, out, cs);
-      int32_t s = emit_split(e);
-      if (s < 0)
-        return -1;
-      int32_t d = gen(e, child);
-      if (e->err != ZRE_OK)
-        return -1;
-      out = lappend(e, d, list1(s, 1));
-    }
-    return gen_repeat_exit(e, out);
-  }
+  case N_GROUP:
+    return gen_group(e, n);
+  case N_CONCAT:
+    return gen_concat(e, n);
+  case N_ALT:
+    return gen_alt(e, n);
+  case N_REP:
+    return gen_rep(e, n);
   default:
     gen_fail(e, ZRE_ERR_PROGRAM, "internal: unknown AST node");
     return -1;
@@ -889,6 +913,68 @@ static void addthread(vm *v, const zre_prog *p, thread **list, size_t *nl,
   }
 }
 
+static void vm_step(vm *v, const zre_prog *prog, const char *text,
+                    size_t len, size_t sp, bool *matched, size_t *mslots) {
+  bool cut = false;
+  v->gen++;
+  for (size_t i = 0; i < v->ncur; i++) {
+    thread *t = &v->cur[i];
+    const inst *in = &prog->code[t->pc];
+    switch (in->op) {
+    case OP_CHAR:
+      if (sp < len && (uint8_t)text[sp] == in->c)
+        addthread(v, prog, &v->nxt, &v->nnxt, t->pc + 1, t->slots, sp + 1,
+                  len);
+      break;
+    case OP_CLASS:
+      if (sp < len && bm_get(in->cls, (unsigned char)text[sp]))
+        addthread(v, prog, &v->nxt, &v->nnxt, t->pc + 1, t->slots, sp + 1,
+                  len);
+      break;
+    case OP_ANY:
+      if (sp < len && text[sp] != '\n')
+        addthread(v, prog, &v->nxt, &v->nnxt, t->pc + 1, t->slots, sp + 1,
+                  len);
+      break;
+    case OP_MATCH:
+      /* Priority order makes this the leftmost-first winner; cut all
+       * lower-priority threads for the rest of this step. */
+      memcpy(mslots, t->slots, ZRE_SLOTS * sizeof(*mslots));
+      mslots[1] = sp;
+      *matched = true;
+      cut = true;
+      break;
+    default:
+      break; /* epsilon ops never sit in a thread list */
+    }
+    if (cut)
+      break;
+  }
+}
+
+static bool vm_allocate(vm *v, size_t ninst) {
+  v->cur = malloc(ninst * sizeof(thread));
+  v->nxt = malloc(ninst * sizeof(thread));
+  v->stack = malloc((2 * ninst + 2) * sizeof(thread));
+  v->capstack = 2 * ninst + 2;
+  v->seen = calloc(ninst, sizeof(uint32_t));
+  return v->cur && v->nxt && v->stack && v->seen;
+}
+
+static void vm_capture(const zre_prog *prog, zre_span *caps, size_t max_caps,
+                       const size_t *mslots) {
+  size_t nspans = prog->ncap + 1;
+  for (size_t i = 0; i < max_caps; i++) {
+    if (i < nspans) {
+      caps[i].start = mslots[2 * i];
+      caps[i].end = mslots[2 * i + 1];
+    } else {
+      caps[i].start = ZRE_NOMATCH;
+      caps[i].end = ZRE_NOMATCH;
+    }
+  }
+}
+
 bool zre_match(const zre_prog *prog, const char *text, size_t len,
                zre_span caps[], size_t max_caps) {
   if (!prog || (!text && len > 0) || (!caps && max_caps > 0))
@@ -896,12 +982,7 @@ bool zre_match(const zre_prog *prog, const char *text, size_t len,
   size_t ninst = prog->ninst;
   vm v;
   memset(&v, 0, sizeof(v));
-  v.cur = malloc(ninst * sizeof(thread));
-  v.nxt = malloc(ninst * sizeof(thread));
-  v.stack = malloc((2 * ninst + 2) * sizeof(thread));
-  v.capstack = 2 * ninst + 2;
-  v.seen = calloc(ninst, sizeof(uint32_t));
-  if (!v.cur || !v.nxt || !v.stack || !v.seen) {
+  if (!vm_allocate(&v, ninst)) {
     free(v.cur);
     free(v.nxt);
     free(v.stack);
@@ -915,7 +996,6 @@ bool zre_match(const zre_prog *prog, const char *text, size_t len,
     mslots[i] = ZRE_NOMATCH;
 
   for (size_t sp = 0; sp <= len; sp++) {
-    bool cut = false; /* this step's MATCH cut lower-priority threads */
     if (!matched) {
       /* Lowest-priority thread: a match attempt starting here. */
       size_t init[ZRE_SLOTS];
@@ -925,40 +1005,7 @@ bool zre_match(const zre_prog *prog, const char *text, size_t len,
       v.gen++;
       addthread(&v, prog, &v.cur, &v.ncur, 0, init, sp, len);
     }
-    v.gen++;
-    for (size_t i = 0; i < v.ncur; i++) {
-      thread *t = &v.cur[i];
-      const inst *in = &prog->code[t->pc];
-      switch (in->op) {
-      case OP_CHAR:
-        if (sp < len && (uint8_t)text[sp] == in->c)
-          addthread(&v, prog, &v.nxt, &v.nnxt, t->pc + 1, t->slots, sp + 1,
-                    len);
-        break;
-      case OP_CLASS:
-        if (sp < len && bm_get(in->cls, (unsigned char)text[sp]))
-          addthread(&v, prog, &v.nxt, &v.nnxt, t->pc + 1, t->slots, sp + 1,
-                    len);
-        break;
-      case OP_ANY:
-        if (sp < len && text[sp] != '\n')
-          addthread(&v, prog, &v.nxt, &v.nnxt, t->pc + 1, t->slots, sp + 1,
-                    len);
-        break;
-      case OP_MATCH:
-        /* Priority order makes this the leftmost-first winner; cut all
-         * lower-priority threads for the rest of this step. */
-        memcpy(mslots, t->slots, sizeof(mslots));
-        mslots[1] = sp;
-        matched = true;
-        cut = true;
-        break;
-      default:
-        break; /* epsilon ops never sit in a thread list */
-      }
-      if (cut)
-        break;
-    }
+    vm_step(&v, prog, text, len, sp, &matched, mslots);
     thread *tmp = v.cur;
     v.cur = v.nxt;
     v.nxt = tmp;
@@ -968,18 +1015,8 @@ bool zre_match(const zre_prog *prog, const char *text, size_t len,
       break;
   }
 
-  if (matched && caps) {
-    size_t nspans = prog->ncap + 1;
-    for (size_t i = 0; i < max_caps; i++) {
-      if (i < nspans) {
-        caps[i].start = mslots[2 * i];
-        caps[i].end = mslots[2 * i + 1];
-      } else {
-        caps[i].start = ZRE_NOMATCH;
-        caps[i].end = ZRE_NOMATCH;
-      }
-    }
-  }
+  if (matched && caps)
+    vm_capture(prog, caps, max_caps, mslots);
   free(v.cur);
   free(v.nxt);
   free(v.stack);
