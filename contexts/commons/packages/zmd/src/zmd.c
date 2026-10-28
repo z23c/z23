@@ -79,15 +79,27 @@ static bool scheme_is(const char *u, size_t n, const char *want) {
   return true;
 }
 
-/* URL policy (see the header): no whitespace or control bytes; a scheme
- * must be http, https, or mailto (case-insensitive); schemeless URLs
- * pass. Anything malformed fails closed. */
-static bool url_ok(const char *u, size_t n) {
+static bool url_bytes_ok(const char *u, size_t n) {
   for (size_t i = 0; i < n; i++) {
     unsigned char c = (unsigned char)u[i];
     if (c <= 0x20 || c == 0x7f)
       return false; /* whitespace and control bytes are never allowed */
   }
+  return true;
+}
+
+static bool scheme_name_ok(const char *u, size_t n) {
+  if (n == 0) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = u[i];
+    bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    bool rest = (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
+    if (!alpha && !(i > 0 && rest)) return false;
+  }
+  return true;
+}
+
+static bool url_scheme_ok(const char *u, size_t n) {
   size_t colon = n;
   for (size_t i = 0; i < n; i++) {
     char c = u[i];
@@ -100,17 +112,16 @@ static bool url_ok(const char *u, size_t n) {
   }
   if (colon == n)
     return true; /* no scheme: relative URL */
-  if (colon == 0)
-    return false;
-  for (size_t i = 0; i < colon; i++) {
-    char c = u[i];
-    bool alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-    bool rest = (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.';
-    if (!alpha && !(i > 0 && rest))
-      return false; /* invalid scheme name: fail closed */
-  }
+  if (!scheme_name_ok(u, colon)) return false;
   return scheme_is(u, colon, "http") || scheme_is(u, colon, "https") ||
          scheme_is(u, colon, "mailto");
+}
+
+/* URL policy (see the header): no whitespace or control bytes; a scheme
+ * must be http, https, or mailto (case-insensitive); schemeless URLs
+ * pass. Anything malformed fails closed. */
+static bool url_ok(const char *u, size_t n) {
+  return url_bytes_ok(u, n) && url_scheme_ok(u, n);
 }
 
 /* Parse "[text](url)" with s[i] == '['. On success fills the text and

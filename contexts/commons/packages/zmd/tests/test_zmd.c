@@ -171,6 +171,21 @@ static void test_url_policy(void) {
   EXPECT("[a](https://x/\x01y)", "<p>[a](https://x/\x01y)</p>\n");
 }
 
+static void test_url_boundaries(void) {
+  EXPECT("[a]()", "<p><a href=\"\">a</a></p>\n");
+  EXPECT("![p]()", "<p><img src=\"\" alt=\"p\"></p>\n");
+  EXPECT("[a](p/x:y)", "<p><a href=\"p/x:y\">a</a></p>\n");
+  EXPECT("[a](p?q:x)", "<p><a href=\"p?q:x\">a</a></p>\n");
+  EXPECT("[a](p#x:y)", "<p><a href=\"p#x:y\">a</a></p>\n");
+  EXPECT("![p](p/x:y)", "<p><img src=\"p/x:y\" alt=\"p\"></p>\n");
+  EXPECT("![p](p?q:x)", "<p><img src=\"p?q:x\" alt=\"p\"></p>\n");
+  EXPECT("![p](p#x:y)", "<p><img src=\"p#x:y\" alt=\"p\"></p>\n");
+  EXPECT("[a](1http:x)", "<p>[a](1http:x)</p>\n");
+  EXPECT("![p](1http:x)", "<p>![p](1http:x)</p>\n");
+  EXPECT("[a](p/\x7f" "x)", "<p>[a](p/\x7f" "x)</p>\n");
+  EXPECT("![p](p/\x7f" "x)", "<p>![p](p/\x7f" "x)</p>\n");
+}
+
 static void test_fences(void) {
   EXPECT("```\nint x;\n```", "<pre><code>int x;\n</code></pre>\n");
   EXPECT("```c\nint x;\n```", "<pre><code>int x;\n</code></pre>\n");
@@ -348,6 +363,7 @@ int main(void) {
   test_escaping();
   test_links_images();
   test_url_policy();
+  test_url_boundaries();
   test_fences();
   test_rules();
   test_lists();
