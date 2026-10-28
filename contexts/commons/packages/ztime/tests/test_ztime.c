@@ -74,6 +74,28 @@ static void test_parse_kats(void) {
   PARSE("2001-09-09T06:16:40+04:30", 1000000000, 0);
 }
 
+static void test_parse_bounded_input(void) {
+  static const char raw[] = {'1','9','7','0','-','0','1','-','0','1','T',
+    '0','0',':','0','0',':','0','0','.','5','-','0','1',':','0','0','X'};
+  ztime_instant out = {123, 456};
+  CHECK(ztime_parse_n(raw, sizeof raw - 1, &out));
+  CHECK(out.unix_secs == 3600 && out.nanos == 500000000);
+  static const char *const bad[] = {
+    "1970-01-01T00:00:00.1234567890Z", "1970-01-01T00:00:00.1+01:",
+    "1970-01-01T00:00:00.1", "1970-01-01T00:00:00.1Zx"
+  };
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    memset(&out, 0xa5, sizeof out);
+    CHECK(!ztime_parse_n(bad[i], strlen(bad[i]), &out));
+    unsigned char zero[sizeof out];
+    memset(zero, 0, sizeof zero);
+    CHECK(memcmp(&out, zero, sizeof out) == 0);
+  }
+  memset(&out, 0xa5, sizeof out);
+  CHECK(!ztime_parse_n(raw, sizeof raw, &out));
+  CHECK(out.unix_secs == 0 && out.nanos == 0);
+}
+
 static void test_null_parse_state(void) {
   ztime_instant it = {.unix_secs = 123, .nanos = 456};
   CHECK(!ztime_parse(NULL, &it) && it.unix_secs == 0 && it.nanos == 0);
@@ -350,6 +372,7 @@ int main(void) {
     test_civil_from_overflow_days();
     test_civil_range_rejection();
   test_parse_kats();
+  test_parse_bounded_input();
   test_parse_errors();
   test_format_kats();
   test_round_trip_sweep();

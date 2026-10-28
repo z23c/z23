@@ -82,25 +82,20 @@ static bool parse_uint(const char *s, size_t len, uint32_t *out) {
   return true;
 }
 
-bool ztime_parse_n(const char *str, size_t len, ztime_instant *out) {
-  if (!out)
-    return false;
-  memset(out, 0, sizeof(*out));
-  /* Minimum: "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes. */
-  if (!str || len < 20)
-    return false;
+typedef struct { uint32_t year, month, day, hour, min, sec; } parsed_civil;
 
-  uint32_t year, month, day, hour, min, sec;
-  if (!parse_uint(str, 4, &year) || str[4] != '-' ||
-      !parse_uint(str + 5, 2, &month) || str[7] != '-' ||
-      !parse_uint(str + 8, 2, &day) || str[10] != 'T' ||
-      !parse_uint(str + 11, 2, &hour) || str[13] != ':' ||
-      !parse_uint(str + 14, 2, &min) || str[16] != ':' ||
-      !parse_uint(str + 17, 2, &sec))
-    return false;
-  size_t pos = 19;
+static bool parse_civil_fields(const char *str, parsed_civil *v) {
+  return parse_uint(str, 4, &v->year) && str[4] == '-' &&
+      parse_uint(str + 5, 2, &v->month) && str[7] == '-' &&
+      parse_uint(str + 8, 2, &v->day) && str[10] == 'T' &&
+      parse_uint(str + 11, 2, &v->hour) && str[13] == ':' &&
+      parse_uint(str + 14, 2, &v->min) && str[16] == ':' &&
+      parse_uint(str + 17, 2, &v->sec);
+}
 
-  uint32_t nanos = 0;
+static bool parse_fraction(const char *str, size_t len, size_t *cursor,
+                           uint32_t *nanos) {
+  size_t pos = *cursor;
   if (pos < len && str[pos] == '.') {
     pos++;
     size_t digits = 0;
@@ -119,10 +114,14 @@ bool ztime_parse_n(const char *str, size_t len, ztime_instant *out) {
       frac *= 10;
       digits++;
     }
-    nanos = frac;
+    *nanos = frac;
   }
+  *cursor = pos;
+  return true;
+}
 
-  int64_t offset_secs = 0;
+static bool parse_offset(const char *str, size_t len, size_t pos,
+                         int64_t *offset_secs) {
   if (pos < len && str[pos] == 'Z') {
     pos++;
   } else if (pos < len && (str[pos] == '+' || str[pos] == '-')) {
@@ -135,24 +134,41 @@ bool ztime_parse_n(const char *str, size_t len, ztime_instant *out) {
       return false;
     if (oh > 23 || om > 59)
       return false;
-    offset_secs = (int64_t)(oh * 3600 + om * 60);
+    *offset_secs = (int64_t)(oh * 3600 + om * 60);
     if (str[pos] == '-')
-      offset_secs = -offset_secs;
+      *offset_secs = -*offset_secs;
     pos += 6;
   } else {
     return false; /* RFC 3339 requires an explicit offset */
   }
   if (pos != len)
     return false; /* trailing garbage */
+  return true;
+}
 
-  if (hour > 23 || min > 59 || sec > 59)
+bool ztime_parse_n(const char *str, size_t len, ztime_instant *out) {
+  if (!out)
+    return false;
+  memset(out, 0, sizeof(*out));
+  /* Minimum: "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes. */
+  if (!str || len < 20)
+    return false;
+  parsed_civil v;
+  if (!parse_civil_fields(str, &v)) return false;
+  size_t pos = 19;
+  uint32_t nanos = 0;
+  int64_t offset_secs = 0;
+  if (!parse_fraction(str, len, &pos, &nanos) ||
+      !parse_offset(str, len, pos, &offset_secs)) return false;
+
+  if (v.hour > 23 || v.min > 59 || v.sec > 59)
     return false; /* leap seconds rejected, not smeared */
   int64_t days;
-  if (!ztime_days_from_civil(year, month, day, &days))
+  if (!ztime_days_from_civil(v.year, v.month, v.day, &days))
     return false;
 
-  int64_t secs = days * 86400 + (int64_t)hour * 3600 +
-                 (int64_t)min * 60 + sec - offset_secs;
+  int64_t secs = days * 86400 + (int64_t)v.hour * 3600 +
+                 (int64_t)v.min * 60 + v.sec - offset_secs;
   out->unix_secs = secs;
   out->nanos = nanos;
   return true;
