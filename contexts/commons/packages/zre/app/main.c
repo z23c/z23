@@ -24,40 +24,7 @@ static bool read_input(FILE *source, size_t *len) {
   return !ferror(source) && extra == EOF;
 }
 
-int main(int argc, char **argv) {
-  if (argc < 2 || argc > 3) {
-    fprintf(stderr, "usage: zre PATTERN [FILE]\n");
-    return 2;
-  }
-  char err[128];
-  zre_prog *prog = NULL;
-  zre_status st =
-      zre_compile(argv[1], strlen(argv[1]), &prog, err, sizeof(err));
-  if (st != ZRE_OK) {
-    fprintf(stderr, "%s\n", err[0] ? err : zre_strerror(st));
-    return 2;
-  }
-
-  FILE *in = stdin;
-  if (argc == 3 && strcmp(argv[2], "-") != 0) {
-    in = fopen(argv[2], "rb");
-    if (!in) {
-      fprintf(stderr, "zre: cannot open %s\n", argv[2]);
-      zre_free(prog);
-      return 2;
-    }
-  }
-  size_t len;
-  if (!read_input(in, &len)) {
-    fprintf(stderr, "zre: read error or input over 16 MiB bound\n");
-    if (in != stdin)
-      fclose(in);
-    zre_free(prog);
-    return 2;
-  }
-  if (in != stdin)
-    fclose(in);
-
+static int zre_cli_lines(const zre_prog *prog, size_t len, FILE *output, FILE *errors) {
   int matched = 0, truncated_note = 0;
   size_t pos = 0;
   while (pos < len) {
@@ -71,17 +38,61 @@ int main(int argc, char **argv) {
     size_t line_len = end - start;
     if (line_len > MAX_LINE) {
       if (!truncated_note) {
-        fprintf(stderr, "zre: line over %u bytes; matching truncated\n",
+        fprintf(errors, "zre: line over %u bytes; matching truncated\n",
                 MAX_LINE);
         truncated_note = 1;
       }
       line_len = MAX_LINE;
     }
     if (zre_match(prog, input + start, line_len, NULL, 0)) {
-      printf("%.*s\n", (int)(end - start), input + start);
+      fprintf(output, "%.*s\n", (int)(end - start), input + start);
       matched = 1;
     }
   }
+  return matched;
+}
+
+static int zre_cli_run(int argc, char **argv, FILE *source, FILE *output, FILE *errors) {
+  if (argc < 2 || argc > 3) {
+    fprintf(errors, "usage: zre PATTERN [FILE]\n");
+    return 2;
+  }
+  char err[128];
+  zre_prog *prog = NULL;
+  zre_status st =
+      zre_compile(argv[1], strlen(argv[1]), &prog, err, sizeof(err));
+  if (st != ZRE_OK) {
+    fprintf(errors, "%s\n", err[0] ? err : zre_strerror(st));
+    return 2;
+  }
+
+  FILE *in = source;
+  if (argc == 3 && strcmp(argv[2], "-") != 0) {
+    in = fopen(argv[2], "rb");
+    if (!in) {
+      fprintf(errors, "zre: cannot open %s\n", argv[2]);
+      zre_free(prog);
+      return 2;
+    }
+  }
+  size_t len;
+  if (!read_input(in, &len)) {
+    fprintf(errors, "zre: read error or input over 16 MiB bound\n");
+    if (in != source)
+      fclose(in);
+    zre_free(prog);
+    return 2;
+  }
+  if (in != source)
+    fclose(in);
+
+  int matched = zre_cli_lines(prog, len, output, errors);
   zre_free(prog);
   return matched ? 0 : 1;
 }
+
+#ifndef ZRE_CLI_EMBEDDED
+int main(int argc, char **argv) {
+  return zre_cli_run(argc, argv, stdin, stdout, stderr);
+}
+#endif

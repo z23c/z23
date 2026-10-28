@@ -10,15 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 
-static FILE *cli_source, *cli_sink;
-#undef stdin
-#define stdin cli_source
-#define printf(...) fprintf(cli_sink, __VA_ARGS__)
-#define main zre_cli_main
+#define ZRE_CLI_EMBEDDED
 #include "../app/main.c"
-#undef main
-#undef printf
-#undef stdin
+#undef ZRE_CLI_EMBEDDED
 
 static int failures = 0;
 
@@ -514,9 +508,8 @@ static void test_empty_fragment_alternatives(void) {
 
 static bool cli_result(FILE *source, FILE *output, bool dash,
                         int status, const char *want) {
-  cli_source = source; cli_sink = output;
   char *args[] = {"zre", "^X$", "-", NULL};
-  if (zre_cli_main(dash ? 3 : 2, args) != status) return false;
+  if (zre_cli_run(dash ? 3 : 2, args, source, output, stderr) != status) return false;
   rewind(output);
   char bytes[80];
   size_t n = fread(bytes, 1, sizeof bytes, output);
@@ -547,6 +540,24 @@ cleanup:
   if (source && fclose(source) != 0) bad = 1;
   if (output && fclose(output) != 0) bad = 1;
   return bad;
+}
+
+static void test_cli_usage_output(void) {
+  FILE *source = tmpfile(), *output = tmpfile(), *errors = tmpfile();
+  if (!source || !output || !errors) { CHECK(false); goto cleanup; }
+  char *args[] = {"zre", NULL};
+  CHECK(zre_cli_run(1, args, source, output, errors) == 2);
+  rewind(errors);
+  char text[80] = {0};
+  size_t n = fread(text, 1, sizeof text, errors);
+  static const char expected[] = "usage: zre PATTERN [FILE]\n";
+  CHECK(!ferror(errors) && n == sizeof(expected) - 1 &&
+        memcmp(text, expected, n) == 0);
+  CHECK(ftell(output) == 0);
+cleanup:
+  if (source) CHECK(fclose(source) == 0);
+  if (output) CHECK(fclose(output) == 0);
+  if (errors) CHECK(fclose(errors) == 0);
 }
 
 static void test_cli_bound(void) {
@@ -585,6 +596,7 @@ static void test_cli_read_error(void) {
 }
 
 int main(void) {
+  test_cli_usage_output();
   test_cli_bound();
   test_cli_controls();
   test_cli_read_error();
