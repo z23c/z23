@@ -146,6 +146,19 @@ typedef struct {
   uint32_t cls[8];
 } esc_val;
 
+/* Decode the ASCII shorthand classes, including their complements. */
+static bool escape_shorthand(int c, esc_val *out) {
+  switch (c) {
+  case 'd': case 'D': bm_digits(out->cls); break;
+  case 'w': case 'W': bm_word(out->cls); break;
+  case 's': case 'S': bm_space(out->cls); break;
+  default: return false;
+  }
+  out->is_class = true;
+  if (c == 'D' || c == 'W' || c == 'S') bm_not(out->cls);
+  return true;
+}
+
 static bool parse_escape(parser *p, esc_val *out) {
   if (p->pos >= p->len) {
     fail(p, ZRE_ERR_ESCAPE, "trailing '\\'");
@@ -154,34 +167,8 @@ static bool parse_escape(parser *p, esc_val *out) {
   int c = (unsigned char)p->pat[p->pos++];
   out->is_class = false;
   memset(out->cls, 0, sizeof(out->cls));
+  if (escape_shorthand(c, out)) return true;
   switch (c) {
-  case 'd':
-    out->is_class = true;
-    bm_digits(out->cls);
-    return true;
-  case 'D':
-    out->is_class = true;
-    bm_digits(out->cls);
-    bm_not(out->cls);
-    return true;
-  case 'w':
-    out->is_class = true;
-    bm_word(out->cls);
-    return true;
-  case 'W':
-    out->is_class = true;
-    bm_word(out->cls);
-    bm_not(out->cls);
-    return true;
-  case 's':
-    out->is_class = true;
-    bm_space(out->cls);
-    return true;
-  case 'S':
-    out->is_class = true;
-    bm_space(out->cls);
-    bm_not(out->cls);
-    return true;
   case 'n': out->c = '\n'; return true;
   case 't': out->c = '\t'; return true;
   case 'r': out->c = '\r'; return true;
@@ -236,6 +223,28 @@ static bool class_item(parser *p, uint32_t bm[8], bool *is_class,
   return true;
 }
 
+/* Consume a class range endpoint after the dash. */
+static bool class_range(parser *p, uint32_t bm[8], uint8_t lo) {
+  p->pos++;
+  bool hi_is_class = false;
+  uint8_t hi = 0;
+  if (p->pos >= p->len || p->pat[p->pos] == ']') {
+    fail(p, ZRE_ERR_CLASS, "unterminated character class");
+    return false;
+  }
+  if (!class_item(p, bm, &hi_is_class, &hi)) return false;
+  if (hi_is_class) {
+    fail(p, ZRE_ERR_CLASS, "shorthand class as range endpoint");
+    return false;
+  }
+  if (hi < lo) {
+    fail(p, ZRE_ERR_CLASS, "inverted range");
+    return false;
+  }
+  bm_range(bm, lo, hi);
+  return true;
+}
+
 /* At '['; consumes through the closing ']'. */
 static bool parse_class(parser *p, uint32_t bm[8]) {
   p->pos++; /* '[' */
@@ -265,24 +274,7 @@ static bool parse_class(parser *p, uint32_t bm[8]) {
     /* Range? '-' present and not the class's last character. */
     if (p->pos < p->len && p->pat[p->pos] == '-' && p->pos + 1 < p->len &&
         p->pat[p->pos + 1] != ']') {
-      p->pos++; /* '-' */
-      bool hi_is_class = false;
-      uint8_t hi = 0;
-      if (p->pos >= p->len || p->pat[p->pos] == ']') {
-        fail(p, ZRE_ERR_CLASS, "unterminated character class");
-        return false;
-      }
-      if (!class_item(p, bm, &hi_is_class, &hi))
-        return false;
-      if (hi_is_class) {
-        fail(p, ZRE_ERR_CLASS, "shorthand class as range endpoint");
-        return false;
-      }
-      if (hi < lo) {
-        fail(p, ZRE_ERR_CLASS, "inverted range");
-        return false;
-      }
-      bm_range(bm, lo, hi);
+      if (!class_range(p, bm, lo)) return false;
     } else {
       bm_set(bm, lo);
     }

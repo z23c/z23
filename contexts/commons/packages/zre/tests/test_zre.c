@@ -242,6 +242,31 @@ static void test_escapes(void) {
   CERR("\\1", ZRE_ERR_UNSUPPORTED); /* backreference */
 }
 
+static void test_class_escape_boundaries(void) {
+  M("^[]]$", "]");
+  M("^[-a]$", "-");
+  M("^[^\\D]$", "5");
+  NM("^[^\\D]$", "a");
+  M("^[\\W]$", "\x80");
+  NM("^[\\w]$", "\x80");
+  M("^[\\d-]$", "-");
+  static const struct { const char *pattern; zre_status status; const char *message; } cases[] = {
+    {"[z-a]", ZRE_ERR_CLASS, "zre: inverted range at offset 4"},
+    {"[a-\\D]", ZRE_ERR_CLASS, "zre: shorthand class as range endpoint at offset 5"},
+    {"[a-\\x4]", ZRE_ERR_ESCAPE, "zre: '\\x' needs two hex digits at offset 5"},
+    {"[a-\\1]", ZRE_ERR_UNSUPPORTED, "zre: backreferences are not supported at offset 5"},
+  };
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    zre_prog *prog = NULL;
+    char err[128];
+    zre_status st = zre_compile(cases[i].pattern, strlen(cases[i].pattern),
+                                &prog, err, sizeof err);
+    CHECK(st == cases[i].status && prog == NULL);
+    CHECK(strcmp(err, cases[i].message) == 0);
+    zre_free(prog);
+  }
+}
+
 static void test_anchors(void) {
   M("^abc", "abcdef");
   NM("^abc", "xabc");
@@ -636,6 +661,7 @@ int main(void) {
   test_repeat_error_offsets();
   test_classes();
   test_escapes();
+  test_class_escape_boundaries();
   test_anchors();
   test_groups_captures();
   test_alternation();
