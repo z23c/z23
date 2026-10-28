@@ -608,7 +608,6 @@ engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
 engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/nodelog_controller.c:line_level:22
-engine/controllers/src/nodelog_controller.c:parse_syslog_timestamp:16
 engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
@@ -801,7 +800,6 @@ engine/services/src/gap_fill_service.c:gap_fill_pass:27
 engine/services/src/legacy_import_service.c:legacy_import_service_run:66
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
-engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
 engine/services/src/mirror_divergence_locator.c:mirror_divergence_locate:18
 engine/services/src/node_db_catchup_decrypt.c:node_db_catchup_try_sapling_decrypt:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:113
