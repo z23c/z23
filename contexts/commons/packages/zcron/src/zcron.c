@@ -102,10 +102,62 @@ static int name3(parser *ps, const char *const names[], int nnames,
   return 0;
 }
 
-/*
- * Parse one field into a bitmask.  lo..hi is the value domain
- * (inclusive); value v sets bit (bit_base + v).
- */
+typedef struct { int a, b, step, star; } field_item;
+
+static int parse_item_base(parser *ps, int lo, int hi,
+                           const char *const names[], int nnames,
+                           const char *fname, field_item *item) {
+  item->step = 1;
+  item->star = 0;
+  if (ps->p < ps->end && *ps->p == '*') {
+    ps->p++;
+    item->star = 1;
+    item->a = lo;
+    item->b = hi;
+  } else {
+    if (!parse_uint(ps, &item->a) &&
+        !(names && name3(ps, names, nnames, lo, &item->a))) {
+      perr(ps, fname);
+      return 0;
+    }
+    item->b = item->a;
+  }
+  return 1;
+}
+
+static int parse_item_step(parser *ps, field_item *item) {
+  if (ps->p < ps->end && *ps->p == '/') {
+    ps->p++;
+    if (!parse_uint(ps, &item->step) || item->step < 1) {
+      perr(ps, "bad step");
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int parse_item(parser *ps, int lo, int hi, const char *const names[],
+                      int nnames, const char *fname, field_item *item) {
+  if (!parse_item_base(ps, lo, hi, names, nnames, fname, item)) return 0;
+  if (!item->star && ps->p < ps->end && *ps->p == '-') {
+    ps->p++;
+    if (!parse_uint(ps, &item->b) &&
+        !(names && name3(ps, names, nnames, lo, &item->b))) {
+      perr(ps, "bad range end");
+      return 0;
+    }
+  }
+  if (!parse_item_step(ps, item)) return 0;
+  if (item->a < lo || item->a > hi || item->b < lo || item->b > hi ||
+      item->a > item->b) {
+    perr(ps, "value out of range");
+    return 0;
+  }
+  return 1;
+}
+
+/* Parse one field into a bitmask; value v sets bit (bit_base + v) for
+ * the inclusive domain lo..hi. Preserve list and star semantics. */
 static int parse_field(parser *ps, int lo, int hi, unsigned bit_base,
                        const char *const names[], int nnames,
                        uint64_t *bits, int *is_star, const char *fname,
@@ -114,56 +166,17 @@ static int parse_field(parser *ps, int lo, int hi, unsigned bit_base,
   *bits = 0;
   *is_star = 0;
   for (;;) {
-    int a, b, step = 1;
-    int star = 0;
-    int have_a;
+    field_item item;
     skip_ws(ps);
-    if (ps->p < ps->end && *ps->p == '*') {
-      ps->p++;
-      star = 1;
-      a = lo;
-      b = hi;
-      have_a = 1;
-    } else {
-      have_a = parse_uint(ps, &a) ||
-               (names && name3(ps, names, nnames, lo, &a));
-      if (!have_a) {
-        perr(ps, fname);
-        return 0;
-      }
-      b = a;
-    }
-    if (!star && ps->p < ps->end && *ps->p == '-') {
-      ps->p++;
-      if (!parse_uint(ps, &b) &&
-          !(names && name3(ps, names, nnames, lo, &b))) {
-        perr(ps, "bad range end");
-        return 0;
-      }
-    }
-    if (ps->p < ps->end && *ps->p == '/') {
-      ps->p++;
-      if (!parse_uint(ps, &step) || step < 1) {
-        perr(ps, "bad step");
-        return 0;
-      }
-      if (star) {
-        a = lo;
-        b = hi;
-      }
-    }
-    if (a < lo || a > hi || b < lo || b > hi || a > b) {
-      perr(ps, "value out of range");
-      return 0;
-    }
+    if (!parse_item(ps, lo, hi, names, nnames, fname, &item)) return 0;
     {
       int v;
-      for (v = a; v <= b; v += step) {
+      for (v = item.a; v <= item.b; v += item.step) {
         int vv = (fold_7_to_0 && v == 7) ? 0 : v;
         *bits |= 1ull << (bit_base + vv);
       }
     }
-    if (star && first && step == 1 &&
+    if (item.star && first && item.step == 1 &&
         (ps->p >= ps->end || *ps->p != ','))
       *is_star = 1;
     const char *field_end = ps->p;

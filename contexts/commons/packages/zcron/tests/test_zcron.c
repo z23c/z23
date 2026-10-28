@@ -315,7 +315,38 @@ static void test_required_field_separators(void) {
 
 static void test_cli(void);
 
+static void test_field_boundaries(void) {
+  static const struct { const char *expr, *error; } bad[] = {
+    {"0 0 1,q * *", "bad dom"},
+    {"0 0 1- * *", "bad range end"},
+    {"0 0 1/0 * *", "bad step"},
+    {"0 0 1,32 * *", "value out of range"},
+  };
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+    zcron out, saved;
+    memset(&out, 0xa5, sizeof out);
+    memcpy(&saved, &out, sizeof out);
+    char err[64];
+    CHECK(!zcron_parse(bad[i].expr, strlen(bad[i].expr), &out, err, sizeof err));
+    CHECK(strcmp(err, bad[i].error) == 0 && memcmp(&out, &saved, sizeof out) == 0);
+    char short_err[4] = {'x','x','x','x'};
+    CHECK(!zcron_parse(bad[i].expr, strlen(bad[i].expr), &out, short_err, 3));
+    CHECK(short_err[0] == bad[i].error[0] && short_err[1] == bad[i].error[1] &&
+          short_err[2] == '\0' && short_err[3] == 'x');
+  }
+  static const struct { const char *expr; int star; } valid[] = {
+    {"0 0 * * 1", 1}, {"0 0 *,1 * 1", 0}, {"0 0 * ,1 * 1", 1},
+    {"0 0 */1 * 1", 1}, {"0 0 */2 * 1", 0},
+  };
+  for (size_t i = 0; i < sizeof valid / sizeof valid[0]; i++) {
+    zcron out = {0};
+    CHECK(zcron_parse(valid[i].expr, strlen(valid[i].expr), &out, NULL, 0));
+    CHECK(out.dom_star == valid[i].star && !out.dow_star);
+  }
+}
+
 int main(void) {
+  test_field_boundaries();
   test_cli();
   expect_next("* * * * *", LLONG_MAX, -1);
     test_required_field_separators();
