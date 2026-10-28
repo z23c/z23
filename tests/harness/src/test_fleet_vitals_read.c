@@ -43,6 +43,8 @@ static bool vr_listing(const char *dir, char *out, size_t cap)
     if (!d)
         return false;
     for (struct dirent *e = readdir(d); e; e = readdir(d)) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
         struct stat st;
         char path[1100];
         snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
@@ -61,6 +63,32 @@ static bool vr_touch(const char *path)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     return fd >= 0 && close(fd) == 0;
+}
+
+/* A sibling is outside the measured home; real entries remain observable. */
+static int vr_listing_fixture(void)
+{
+    int failures = 0;
+    char parent[512] = {0}, home[640], sibling[640], entry[800];
+    char before[2048], after[2048];
+    TEST_CASE("fleet_vitals_read: listing excludes navigation entries") {
+        ASSERT(test_mkdtemp(parent, sizeof parent, "vitals_listing"));
+        snprintf(home, sizeof home, "%s/home", parent);
+        snprintf(sibling, sizeof sibling, "%s/sibling", parent);
+        ASSERT(mkdir(home, 0700) == 0);
+        ASSERT(vr_listing(home, before, sizeof before));
+        ASSERT_STR_EQ(before, "");
+        ASSERT(vr_touch(sibling));
+        ASSERT(vr_listing(home, after, sizeof after));
+        ASSERT_STR_EQ(after, before);
+        snprintf(entry, sizeof entry, "%s/.visible", home);
+        ASSERT(vr_touch(entry));
+        ASSERT(vr_listing(home, after, sizeof after));
+        ASSERT(strcmp(after, before) != 0);
+        ASSERT_STR_EQ(after, ".visible:0;");
+    } TEST_END
+    if (parent[0]) test_rm_rf(parent);
+    return failures;
 }
 
 static int vr_read_leaf(void)
@@ -118,7 +146,8 @@ static int vr_read_leaf(void)
 int test_fleet_vitals_read(void);
 int test_fleet_vitals_read(void)
 {
-    int failures = vr_read_leaf();
+    int failures = vr_listing_fixture();
+    failures += vr_read_leaf();
     if (failures == 0)
         printf("test_fleet_vitals_read: all passed\n");
     else
