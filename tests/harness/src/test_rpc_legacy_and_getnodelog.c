@@ -166,6 +166,9 @@ static bool check_rpc_getnodelog_write_since_log(const char *log_path)
                 ok = ok && fputs("{\"ts\":\"2026-06-23T18:34:19.000000Z\","
                                  "\"level\":\"info\","
                                  "\"event\":\"node_log_since_recent\"}\n", fp) >= 0;
+                ok = ok && fputs("Jun  3 18:34:19 node_log_since_syslog_old\n", fp) >= 0;
+                ok = ok && fputs("Jun 23 18:34:19 node_log_since_syslog_recent\n", fp) >= 0;
+                ok = ok && fputs("Jun xx 18:34:19 node_log_since_syslog_bad\n", fp) >= 0;
                 ok = ok && fclose(fp) == 0;
             }
             return ok;
@@ -198,13 +201,17 @@ static bool check_rpc_getnodelog_since_lines_ok(const struct json_value *result)
                 json_get(result, "undated_lines_included");
             const struct json_value *complete =
                 json_get(result, "since_filter_complete");
-            bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 2;
+            bool ok = lines && lines->type == JSON_ARR && json_size(lines) == 4;
             ok = ok && strstr(json_get_str(json_at(lines, 0)),
-                              "node_log_since_recent") != NULL;
+                              "node_log_since_syslog_bad") != NULL;
             ok = ok && strstr(json_get_str(json_at(lines, 1)),
+                              "node_log_since_syslog_recent") != NULL;
+            ok = ok && strstr(json_get_str(json_at(lines, 2)),
+                              "node_log_since_recent") != NULL;
+            ok = ok && strstr(json_get_str(json_at(lines, 3)),
                               "node_log_since_undated") != NULL;
-            ok = ok && skipped && json_get_int(skipped) == 1;
-            ok = ok && undated && json_get_int(undated) == 1;
+            ok = ok && skipped && json_get_int(skipped) == 2;
+            ok = ok && undated && json_get_int(undated) == 2;
             ok = ok && complete && !json_get_bool(complete);
     return ok;
 }

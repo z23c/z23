@@ -176,6 +176,19 @@ static bool parse_mmdd_timestamp(const char *s, int64_t now, int64_t *out)
                                   hour, minute, second, now, out);
 }
 
+static bool parse_syslog_day(const char **cursor, int *day)
+{
+    const char *p = *cursor;
+    if (*p == ' ') p++;
+    if (*p < '0' || *p > '9') return false;
+    *day = *p++ - '0';
+    if (*p >= '0' && *p <= '9')
+        *day = *day * 10 + (*p++ - '0');
+    if (*p++ != ' ') return false;
+    *cursor = p;
+    return true;
+}
+
 static bool parse_syslog_timestamp(const char *s, int64_t now, int64_t *out)
 {
     if (!s || strlen(s) < 15)
@@ -186,12 +199,8 @@ static bool parse_syslog_timestamp(const char *s, int64_t now, int64_t *out)
         return false;
 
     const char *p = s + 4;
-    if (*p == ' ') p++;
-    if (*p < '0' || *p > '9') return false;
-    int day = *p++ - '0';
-    if (*p >= '0' && *p <= '9')
-        day = day * 10 + (*p++ - '0');
-    if (*p++ != ' ') return false;
+    int day;
+    if (!parse_syslog_day(&p, &day)) return false;
 
     int hour = 0, minute = 0, second = 0;
     if (!digit2(p, &hour) || p[2] != ':' ||
