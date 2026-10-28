@@ -556,6 +556,90 @@ static int ps_test_projection_scan_quarantine(void)
     return failures;
 }
 
+static bool ps_legacy_marker_unchanged(const char *legacy, const char *created,
+                                     const struct stat *before)
+{
+    struct stat after, missing;
+    return stat(legacy, &after) == 0 && before->st_ino == after.st_ino &&
+           before->st_size == after.st_size &&
+           lstat(created, &missing) != 0 && errno == ENOENT;
+}
+
+/* Busy close must retain cleanup ownership and prevent a new singleton. */
+static int ps_test_checked_busy_close(void)
+{
+    int failures = 0;
+    char dir[256], other[256];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "checked_busy");
+    test_make_tmpdir(other, sizeof(other), "progress_store", "checked_other");
+    char legacy[512], created[512]; struct stat legacy_before;
+    snprintf(legacy, sizeof(legacy), "%s/progress.kv", other);
+    snprintf(created, sizeof(created), "%s/consensus.db", other);
+    FILE *marker = fopen(legacy, "wb");
+    bool marker_ok = marker && fwrite("sentinel", 1, 8, marker) == 8;
+    if (marker && fclose(marker) != 0) marker_ok = false;
+    marker_ok = marker_ok && stat(legacy, &legacy_before) == 0;
+    PS_CHECK("checked close: legacy sentinel created", marker_ok);
+    bool opened = progress_store_open(dir);
+    PS_CHECK("checked close: fixture opens", opened);
+    sqlite3_stmt *pending = NULL;
+    int rc = opened ? sqlite3_prepare_v2(progress_store_db(), "SELECT 1", -1, &pending, NULL) : SQLITE_ERROR;
+    PS_CHECK("checked close: live statement prepared", rc == SQLITE_OK && pending != NULL);
+    if (opened && pending) {
+        PS_CHECK("checked close: busy reported", progress_store_close_checked() == PROGRESS_STORE_CLOSE_BUSY);
+        PS_CHECK("checked close: no active singleton exposed", progress_store_db() == NULL);
+        char hidden[512];
+        PS_CHECK("checked close: path unavailable", !progress_store_path(hidden, sizeof(hidden)));
+        sqlite3 *unexpected_reader = progress_store_open_reader();
+        PS_CHECK("checked close: reader unavailable", unexpected_reader == NULL);
+        if (unexpected_reader)
+            PS_CHECK("checked close: unexpected reader released",
+                     sqlite3_close(unexpected_reader) == SQLITE_OK);
+        PS_CHECK("checked close: same path cannot reopen", !progress_store_open(dir));
+        PS_CHECK("checked close: different path cannot reopen", !progress_store_open(other));
+        PS_CHECK("checked close: no migration side effect", marker_ok &&
+                 ps_legacy_marker_unchanged(legacy, created, &legacy_before));
+        PS_CHECK("checked close: statement releases", sqlite3_finalize(pending) == SQLITE_OK);
+        pending = NULL;
+        PS_CHECK("checked close: retry completes", progress_store_close_checked() == PROGRESS_STORE_CLOSE_OK);
+        PS_CHECK("checked close: fresh open after cleanup", progress_store_open(dir));
+        PS_CHECK("checked close: final close succeeds", progress_store_close_checked() == PROGRESS_STORE_CLOSE_OK);
+    } else {
+        if (pending) sqlite3_finalize(pending);
+        if (opened) progress_store_close();
+    }
+    test_cleanup_tmpdir(dir);
+    test_cleanup_tmpdir(other);
+    return failures;
+}
+
+static int ps_test_checkpoint_busy_close(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "checkpoint_busy");
+    bool opened = progress_store_open(dir);
+    PS_CHECK("checkpoint busy: open", opened);
+    sqlite3 *reader = opened ? progress_store_open_reader() : NULL;
+    sqlite3_stmt *pin = NULL;
+    bool pinned = reader && sqlite3_exec(reader, "BEGIN", NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(reader, "SELECT count(*) FROM stage_cursor", -1, &pin, NULL) == SQLITE_OK &&
+        sqlite3_step(pin) == SQLITE_ROW;
+    PS_CHECK("checkpoint busy: reader pins WAL", pinned);
+    bool wrote = opened && sqlite3_exec(progress_store_db(),
+        "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('checkpoint_fixture',7,0)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    PS_CHECK("checkpoint busy: write after snapshot", wrote);
+    if (pinned && wrote)
+        PS_CHECK("checkpoint busy: error returned", progress_store_close_checked() == PROGRESS_STORE_CLOSE_CHECKPOINT_ERROR);
+    else if (opened)
+        progress_store_close();
+    if (pin) sqlite3_finalize(pin);
+    if (reader) { (void)sqlite3_exec(reader, "ROLLBACK", NULL, NULL, NULL); sqlite3_close(reader); }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int ps_test_open_creates_store(void)
 {
     int failures = 0;
@@ -1591,6 +1675,8 @@ int test_progress_store(void)
 
     /* ── open creates file + table, idempotent on same path ────────── */
     failures += ps_test_open_creates_store();
+    failures += ps_test_checked_busy_close();
+    failures += ps_test_checkpoint_busy_close();
 
     /* ── cursor persistence: stage cursor survives close + reopen ──── */
     failures += ps_test_cursor_persist();

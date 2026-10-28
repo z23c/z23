@@ -56,6 +56,11 @@
 /* PROGRESS_STORE_PATH_MAX comes from storage/progress_store.h. */
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
+static sqlite3 *g_closing_db = NULL;
+static bool g_close_pending = false;
+/* Failure remains visible across BUSY cleanup retries. */
+static bool g_checkpoint_failed = false;
 static pthread_mutex_t g_tx_lock;
 static pthread_once_t g_tx_lock_once = PTHREAD_ONCE_INIT;
 static _Atomic(sqlite3 *) g_db = NULL;
@@ -291,15 +296,14 @@ static bool progress_store_quick_check_rejects(sqlite3 *db,
     return !skip_existing_check && !progress_store_quick_check_ok(db);
 }
 
-bool progress_store_open(const char *datadir)
+static bool progress_store_open_prepare(const char *datadir, char *display_path, char *path, uintptr_t *out_handle)
 {
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
         "open: empty datadir");
 
-    char display_path[PROGRESS_STORE_PATH_MAX];
-    int n = snprintf(display_path, sizeof(display_path), "%s/%s",
+    int n = snprintf(display_path, PROGRESS_STORE_PATH_MAX, "%s/%s",
                      datadir, PROGRESS_STORE_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(display_path))
+    if (n <= 0 || (size_t)n >= PROGRESS_STORE_PATH_MAX)
         LOG_FAIL("progress_store", "open: datadir path too long");
 
 #ifdef _WIN32
@@ -336,9 +340,8 @@ bool progress_store_open(const char *datadir)
 #endif
 
     uintptr_t opened_dir_handle = UINTPTR_MAX;
-    char path[PROGRESS_STORE_PATH_MAX];
     if (!progress_directory_open(datadir, PROGRESS_STORE_FILENAME, path,
-                                 sizeof(path),
+                                 PROGRESS_STORE_PATH_MAX,
                                  &opened_dir_handle))
         LOG_FAIL("progress_store", "open: datadir capability failed: %s",
                  strerror(errno));
@@ -372,6 +375,90 @@ bool progress_store_open(const char *datadir)
     return false;
 #endif
 #endif
+
+    *out_handle = opened_dir_handle;
+    return true;
+}
+
+static bool progress_store_open_finish_checks(sqlite3 *db, const char *path, uintptr_t opened_dir_handle, const char *opened_vfs_name)
+{
+    (void)opened_vfs_name;
+    bool contained_candidate = false;
+    if (!progress_store_candidate_state(db, &contained_candidate) ||
+        contained_candidate) {
+        if (contained_candidate) {
+            fprintf(stderr,  // obs-ok:progress-store-open-failure
+                    "[progress_store] refusing contained consensus-state "
+                    "candidate at %s; selected-chain activation evidence "
+                    "is absent\n", path);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                        "action=progress_store_candidate_refused "
+                        "reason=activation_authority_absent path=%s", path);
+        } else {
+            fprintf(stderr,  // obs-ok:progress-store-open-failure
+                    "[progress_store] candidate containment inspection "
+                    "failed for %s\n", path);
+        }
+        sqlite3_close(db);
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
+        progress_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+
+    if (!apply_pragmas(db) || !stage_table_ensure(db) ||
+        !progress_meta_table_ensure(db) ||
+        !repair_marker_table_ensure(db) ||
+        !repair_marker_migrate_from_progress_meta(db)) {
+        sqlite3_close(db);
+#ifdef _WIN32
+        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
+        progress_directory_close(opened_dir_handle);
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+
+    /* A FUTURE consensus.db schema marker means this binary is OLDER than the
+     * one that last wrote this datadir (a binary downgrade). Silently
+     * proceeding would let consensus_db_finalize_flip() treat it as
+     * "not yet flipped" and overwrite the newer marker with this binary's
+     * OLDER version. Refuse the open outright — the caller (boot) already
+     * FATALs+exits on progress_store_open() returning false
+     * (boot_snapshot_install_gate_boot), so this is a loud, fail-fast boot
+     * refusal naming both versions, never a silent re-flip. */
+    {
+        uint32_t marker_v = 0;
+        char derr[256] = "";
+        if (consensus_db_schema_is_downgrade(db, &marker_v, derr, sizeof(derr))) {
+            fprintf(stderr,  // obs-ok:progress-store-open-failure
+                    "[progress_store] FATAL: %s\n", derr);
+            sqlite3_close(db);
+#ifdef _WIN32
+            (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+#endif
+            progress_directory_close(opened_dir_handle);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                        "action=progress_store_downgrade_refused "
+                        "reason=schema_marker_future marker_version=%u "
+                        "binary_version=%u path=%s", marker_v,
+                        (unsigned)CONSENSUS_DB_SCHEMA_VERSION, path);
+            pthread_mutex_unlock(&g_lock);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool progress_store_open_impl(const char *datadir)
+{
+    char display_path[PROGRESS_STORE_PATH_MAX], path[PROGRESS_STORE_PATH_MAX];
+    uintptr_t opened_dir_handle = UINTPTR_MAX;
+    if (!progress_store_open_prepare(datadir, display_path, path, &opened_dir_handle))
+        return false;
 
     pthread_mutex_lock(&g_lock);
 
@@ -514,72 +601,13 @@ bool progress_store_open(const char *datadir)
 #endif
     }
 
-    bool contained_candidate = false;
-    if (!progress_store_candidate_state(db, &contained_candidate) ||
-        contained_candidate) {
-        if (contained_candidate) {
-            fprintf(stderr,  // obs-ok:progress-store-open-failure
-                    "[progress_store] refusing contained consensus-state "
-                    "candidate at %s; selected-chain activation evidence "
-                    "is absent\n", path);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=progress_store_candidate_refused "
-                        "reason=activation_authority_absent path=%s", path);
-        } else {
-            fprintf(stderr,  // obs-ok:progress-store-open-failure
-                    "[progress_store] candidate containment inspection "
-                    "failed for %s\n", path);
-        }
-        sqlite3_close(db);
 #ifdef _WIN32
-        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
+    const char *check_vfs = opened_vfs_name;
+#else
+    const char *check_vfs = NULL;
 #endif
-        progress_directory_close(opened_dir_handle);
-        pthread_mutex_unlock(&g_lock);
+    if (!progress_store_open_finish_checks(db, path, opened_dir_handle, check_vfs))
         return false;
-    }
-
-    if (!apply_pragmas(db) || !stage_table_ensure(db) ||
-        !progress_meta_table_ensure(db) ||
-        !repair_marker_table_ensure(db) ||
-        !repair_marker_migrate_from_progress_meta(db)) {
-        sqlite3_close(db);
-#ifdef _WIN32
-        (void)sqlite_vfs_dir_unregister(opened_vfs_name);
-#endif
-        progress_directory_close(opened_dir_handle);
-        pthread_mutex_unlock(&g_lock);
-        return false;
-    }
-
-    /* A FUTURE consensus.db schema marker means this binary is OLDER than the
-     * one that last wrote this datadir (a binary downgrade). Silently
-     * proceeding would let consensus_db_finalize_flip() treat it as
-     * "not yet flipped" and overwrite the newer marker with this binary's
-     * OLDER version. Refuse the open outright — the caller (boot) already
-     * FATALs+exits on progress_store_open() returning false
-     * (boot_snapshot_install_gate_boot), so this is a loud, fail-fast boot
-     * refusal naming both versions, never a silent re-flip. */
-    {
-        uint32_t marker_v = 0;
-        char derr[256] = "";
-        if (consensus_db_schema_is_downgrade(db, &marker_v, derr, sizeof(derr))) {
-            fprintf(stderr,  // obs-ok:progress-store-open-failure
-                    "[progress_store] FATAL: %s\n", derr);
-            sqlite3_close(db);
-#ifdef _WIN32
-            (void)sqlite_vfs_dir_unregister(opened_vfs_name);
-#endif
-            progress_directory_close(opened_dir_handle);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=progress_store_downgrade_refused "
-                        "reason=schema_marker_future marker_version=%u "
-                        "binary_version=%u path=%s", marker_v,
-                        (unsigned)CONSENSUS_DB_SCHEMA_VERSION, path);
-            pthread_mutex_unlock(&g_lock);
-            return false;
-        }
-    }
 
     snprintf(g_path, sizeof(g_path), "%s", path);
     snprintf(g_display_path, sizeof(g_display_path), "%s", display_path);
@@ -598,6 +626,14 @@ bool progress_store_open(const char *datadir)
     return true;
 }
 
+bool progress_store_open(const char *datadir)
+{
+    pthread_mutex_lock(&g_lifecycle_lock);
+    bool ok = !g_close_pending && progress_store_open_impl(datadir);
+    pthread_mutex_unlock(&g_lifecycle_lock);
+    return ok;
+}
+
 sqlite3 *progress_store_db(void)
 {
     return atomic_load_explicit(&g_db, memory_order_acquire);
@@ -614,7 +650,7 @@ bool progress_store_path(char *out, size_t cap)
     /* g_path is set once under g_lock in progress_store_open and only cleared
      * on close; a brief lock gives a torn-free snapshot. Empty => not open. */
     pthread_mutex_lock(&g_lock);
-    bool ok = g_path[0] != '\0' && strlen(g_path) < cap;
+    bool ok = atomic_load_explicit(&g_db, memory_order_acquire) != NULL && g_path[0] != '\0' && strlen(g_path) < cap;
     if (ok) snprintf(out, cap, "%s", g_path);
     else    out[0] = '\0';
     pthread_mutex_unlock(&g_lock);
@@ -742,52 +778,65 @@ bool progress_store_checkpoint(void)
     return rc == SQLITE_OK;
 }
 
-void progress_store_close(void)
+enum progress_store_close_result progress_store_close_checked(void)
 {
+    pthread_mutex_lock(&g_lifecycle_lock);
     pthread_mutex_lock(&g_lock);
     progress_store_tx_lock();
-    sqlite3 *db = atomic_exchange_explicit(&g_db, NULL,
-                                            memory_order_acq_rel);
-    if (!db) {
+    sqlite3 *db = g_closing_db;
+    if (!db && !g_close_pending)
+        db = atomic_exchange_explicit(&g_db, NULL, memory_order_acq_rel);
+    if (!db && !g_close_pending) {
         progress_store_tx_unlock();
         pthread_mutex_unlock(&g_lock);
-        return;
+        pthread_mutex_unlock(&g_lifecycle_lock);
+        return PROGRESS_STORE_CLOSE_OK;
     }
-
-    /* Best-effort checkpoint so the WAL truncates cleanly. Failures
-     * here are not fatal — sqlite3_close still runs. */
-    char *err = NULL;
-    if (sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)",
-                     NULL, NULL, &err) != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:progress-store-lifecycle
-                "[progress_store] checkpoint on close: %s\n",
-                err ? err : "(no message)");
+    g_close_pending = true;
+    enum progress_store_close_result result = PROGRESS_STORE_CLOSE_OK;
+    if (db) {
+        g_closing_db = db;
+        if (sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL) != SQLITE_OK)
+            g_checkpoint_failed = true;
+        int rc = sqlite3_close(db);
+        if (rc != SQLITE_OK) {
+            result = rc == SQLITE_BUSY ? PROGRESS_STORE_CLOSE_BUSY : PROGRESS_STORE_CLOSE_ERROR;
+            goto done;
+        }
+        g_closing_db = NULL;
     }
-    if (err) sqlite3_free(err);
-
-    int rc = sqlite3_close(db);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:progress-store-lifecycle
-                "[progress_store] sqlite3_close: rc=%d (%s)\n",
-                rc, sqlite3_errstr(rc));
-    } else {
-        fprintf(stderr,  // obs-ok:progress-store-lifecycle
-                "[progress_store] closed %s\n", g_display_path);
-    }
-
 #ifdef _WIN32
     if (g_vfs_name[0] != '\0') {
-        (void)sqlite_vfs_dir_unregister(g_vfs_name);
+        if (!sqlite_vfs_dir_unregister(g_vfs_name)) {
+            result = PROGRESS_STORE_CLOSE_ERROR;
+            goto done;
+        }
         g_vfs_name[0] = '\0';
     }
 #endif
+    /* This existing API has no checked directory-close result. */
     progress_directory_close(g_dir_handle);
     g_dir_handle = UINTPTR_MAX;
     g_path[0] = '\0';
     g_display_path[0] = '\0';
     g_opened_at = 0;
+    g_close_pending = false;
+    if (g_checkpoint_failed)
+        result = PROGRESS_STORE_CLOSE_CHECKPOINT_ERROR;
+    g_checkpoint_failed = false;
+done:
     progress_store_tx_unlock();
     pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_lifecycle_lock);
+    return result;
+}
+
+void progress_store_close(void)
+{
+    enum progress_store_close_result result = progress_store_close_checked();
+    if (result != PROGRESS_STORE_CLOSE_OK)
+        fprintf(stderr,  // obs-ok:progress-store-lifecycle
+                "[progress_store] checked close failed result=%d\n", (int)result);
 }
 
 bool progress_store_dump_state_json(struct json_value *out, const char *key)

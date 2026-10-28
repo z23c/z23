@@ -47,6 +47,8 @@
  * mutation. Idempotent — a second call with the same datadir is a
  * no-op and returns true. A second call with a *different* datadir
  * returns false (one process, one progress store). */
+/* Lifecycle calls require quiesced borrowers and must not run while the
+ * caller holds progress_store_tx_lock; raw handles do not carry a lease. */
 bool progress_store_open(const char *datadir);
 
 /* Verified-clean quick_check skip. Composition installs a probe (this module
@@ -144,6 +146,16 @@ bool progress_store_checkpoint(void);
 
 /* Graceful close: PRAGMA wal_checkpoint(TRUNCATE), sqlite3_close. Safe
  * to call repeatedly and from shutdown paths. */
+/* Caller must quiesce borrowed handles. BUSY retains cleanup ownership;
+ * retry after outstanding statements close. CHECKPOINT_ERROR means the
+ * SQLite handle closed but WAL checkpoint failed. */
+enum progress_store_close_result {
+    PROGRESS_STORE_CLOSE_OK,
+    PROGRESS_STORE_CLOSE_BUSY,
+    PROGRESS_STORE_CLOSE_ERROR,
+    PROGRESS_STORE_CLOSE_CHECKPOINT_ERROR
+};
+enum progress_store_close_result progress_store_close_checked(void);
 void progress_store_close(void);
 
 /* For `z23 dumpstate progress` (dump-state convention). `out` is
