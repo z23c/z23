@@ -19,6 +19,41 @@ static bool push_comp(zrange *out, zrange_op op, const zsemver *v) {
   return true;
 }
 
+/* Expand a compatible range into its inclusive lower and exclusive upper bounds. */
+static bool push_compatible(zrange *out, const zsemver *v, bool caret) {
+  if (!push_comp(out, ZRANGE_GE, v))
+    return false;
+  zsemver up;
+  memset(&up, 0, sizeof(up));
+  if (caret) {
+    if (v->major > 0) {
+      if (v->major == UINT64_MAX)
+        return false;
+      up.major = v->major + 1;
+    } else if (v->minor > 0) {
+      if (v->minor == UINT64_MAX)
+        return false;
+      up.minor = v->minor + 1;
+    } else {
+      if (v->patch == UINT64_MAX)
+        return false;
+      up.patch = v->patch + 1;
+    }
+  } else {
+    if (v->minor == UINT64_MAX)
+      return false;
+    up.major = v->major;
+    up.minor = v->minor + 1;
+  }
+  return push_comp(out, ZRANGE_LT, &up);
+}
+
+static zrange_op explicit_op(char c, bool equal) {
+  if (c == '<') return equal ? ZRANGE_LE : ZRANGE_LT;
+  if (c == '>') return equal ? ZRANGE_GE : ZRANGE_GT;
+  return ZRANGE_EQ;
+}
+
 /* Parse one comparator token over tok[0..tlen) and push the one or two
  * comparators it expands to (^ and ~ each add a lower AND an upper
  * bound). */
@@ -36,10 +71,7 @@ static bool push_token(zrange *out, const char *tok, size_t tlen) {
     pos = 1;
   } else if (tok[0] == '<' || tok[0] == '>' || tok[0] == '=') {
     bool eq = tlen > 1 && tok[1] == '=';
-    if (tok[0] == '<')
-      op = eq ? ZRANGE_LE : ZRANGE_LT;
-    else if (tok[0] == '>')
-      op = eq ? ZRANGE_GE : ZRANGE_GT;
+    op = explicit_op(tok[0], eq);
     pos = eq ? 2 : 1;
   }
   if (pos >= tlen)
@@ -50,35 +82,37 @@ static bool push_token(zrange *out, const char *tok, size_t tlen) {
   if (!caret && !tilde)
     return push_comp(out, op, &v);
 
-  /* Caret / tilde: lower bound >= v, upper bound per the npm tables. */
-  if (!push_comp(out, ZRANGE_GE, &v))
-    return false;
-  zsemver up;
-  memset(&up, 0, sizeof(up));
-  if (caret) {
-    if (v.major > 0) {
-      if (v.major == UINT64_MAX)
-        return false; /* overflow past the version ceiling */
-      up.major = v.major + 1;
-    } else if (v.minor > 0) {
-      if (v.minor == UINT64_MAX)
-        return false;
-      up.minor = v.minor + 1;
-    } else {
-      if (v.patch == UINT64_MAX)
-        return false;
-      up.patch = v.patch + 1;
-    }
-  } else {
-    if (v.minor == UINT64_MAX)
-      return false; /* overflow */
-    up.major = v.major;
-    up.minor = v.minor + 1;
-  }
-  return push_comp(out, ZRANGE_LT, &up);
+  return push_compatible(out, &v, caret);
 }
 
-/* Parse into *out; false leaves *out untouched. */
+/* Scan one nonempty comparator set, consuming a union separator if present. */
+static bool parse_set(const char *str, size_t len, size_t *pos,
+                      zrange *out, bool *union_seen) {
+  bool any = false;
+  *union_seen = false;
+  while (*pos < len) {
+    while (*pos < len && is_ws(str[*pos]))
+      (*pos)++;
+    if (*pos == len)
+      break;
+    if (str[*pos] == '|') {
+      if (*pos + 1 >= len || str[*pos + 1] != '|')
+        return false;
+      *pos += 2;
+      *union_seen = true;
+      break;
+    }
+    size_t start = *pos;
+    while (*pos < len && !is_ws(str[*pos]) && str[*pos] != '|')
+      (*pos)++;
+    if (!push_token(out, str + start, *pos - start))
+      return false;
+    any = true;
+  }
+  return any;
+}
+
+/* Parse into *out; the public wrapper clears it on failure. */
 static bool parse_into(const char *str, size_t len, zrange *out) {
   size_t pos = 0;
   for (;;) {
@@ -89,29 +123,9 @@ static bool parse_into(const char *str, size_t len, zrange *out) {
     set->count = 0;
     out->set_count++;
 
-    bool any = false;
     bool union_seen = false;
-    while (pos < len) {
-      while (pos < len && is_ws(str[pos]))
-        pos++;
-      if (pos == len)
-        break;
-      if (str[pos] == '|') {
-        if (pos + 1 >= len || str[pos + 1] != '|')
-          return false; /* single '|' is not the union operator */
-        pos += 2;
-        union_seen = true;
-        break;
-      }
-      size_t start = pos;
-      while (pos < len && !is_ws(str[pos]) && str[pos] != '|')
-        pos++;
-      if (!push_token(out, str + start, pos - start))
-        return false;
-      any = true;
-    }
-    if (!any)
-      return false; /* empty set (leading/trailing/doubled "||") */
+    if (!parse_set(str, len, &pos, out, &union_seen))
+      return false; /* invalid or empty set */
     if (!union_seen)
       return true; /* reached the end of input */
     /* A consumed "||" must be followed by another set; loop on. */

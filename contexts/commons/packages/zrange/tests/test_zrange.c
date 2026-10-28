@@ -190,6 +190,22 @@ static void test_satisfies_edge_args(void) {
   CHECK(rr.set_count == 1 && rr.comp_count == 2);
 }
 
+static void test_expansion_order_and_failure_clear(void) {
+  zrange parsed;
+  const unsigned char zero[sizeof(zrange)] = {0};
+  CHECK(zrange_parse("^1.2.3-rc.1 || ~0.2.3", &parsed));
+  CHECK(parsed.set_count == 2 && parsed.comp_count == 4);
+  CHECK(parsed.sets[0].start == 0 && parsed.sets[0].count == 2);
+  CHECK(parsed.sets[1].start == 2 && parsed.sets[1].count == 2);
+  CHECK(parsed.comps[0].op == ZRANGE_GE && parsed.comps[0].version.prerelease);
+  CHECK(parsed.comps[1].op == ZRANGE_LT && parsed.comps[1].version.major == 2);
+  CHECK(parsed.comps[2].op == ZRANGE_GE && parsed.comps[2].version.minor == 2);
+  CHECK(parsed.comps[3].op == ZRANGE_LT && parsed.comps[3].version.minor == 3);
+  memset(&parsed, 0xA5, sizeof parsed);
+  CHECK(!zrange_parse("1.2.3 || ^0.0.18446744073709551615", &parsed));
+  CHECK(memcmp(&parsed, zero, sizeof parsed) == 0);
+}
+
 static void test_null_wrapper_state(void) {
   zrange parsed;
   const unsigned char zero[sizeof(zrange)] = {0};
@@ -267,6 +283,7 @@ static void test_cli_bound(void) {
 int main(void) {
   test_cli_bound();
   test_null_wrapper_state();
+  test_expansion_order_and_failure_clear();
   test_explicit_operators();
   test_caret_expansions();
   test_tilde_expansions();
