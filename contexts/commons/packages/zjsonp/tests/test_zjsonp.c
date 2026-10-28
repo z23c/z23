@@ -626,6 +626,20 @@ static int test_bad_surrogate_pairs(void) {
   return 0;
 }
 
+static int test_string_error_precedence(void) {
+  const char invalid_escape[] = {'"', (char)0xff, '\\', 'x', '"'};
+  const char valid_escape[] = {'"', (char)0xff, '\\', 'n', '"'};
+  zjsonp p;
+  zjsonp_event ev;
+  zjsonp_init(&p, invalid_escape, sizeof invalid_escape);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 3);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 3);
+  zjsonp_init(&p, valid_escape, sizeof valid_escape);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 1);
+  CHECK(zjsonp_next(&p, &ev) == ZJRP_SYNTAX && zjsonp_pos(&p) == 1);
+  return 0;
+}
+
 int main(void) {
   struct {
     const char *name;
@@ -637,6 +651,7 @@ int main(void) {
       {"terminal_syntax", test_terminal_syntax},
       {"phase_boundaries", test_phase_boundaries},
       {"bad_surrogate_pairs", test_bad_surrogate_pairs},
+      {"string_error_precedence", test_string_error_precedence},
       {"negative_zero_integer", test_negative_zero_integer},
       {"kat", test_kat},       {"syntax_errors", test_syntax_errors},
       {"utf8", test_utf8},     {"decode", test_decode},

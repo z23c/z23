@@ -55,6 +55,35 @@ static bool string_payload_valid(zjsonp *p, size_t start, size_t end) {
   return true;
 }
 
+static bool scan_unicode_escape(zjsonp *p, size_t *pos) {
+  size_t i = *pos;
+  if (i + 5 >= p->len)
+    return string_error(p, p->len);
+  for (int k = 2; k <= 5; k++) {
+    char h = p->text[i + k];
+    bool hex = (h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') ||
+               (h >= 'A' && h <= 'F');
+    if (!hex)
+      return string_error(p, i + (size_t)k);
+  }
+  *pos += 6;
+  return true;
+}
+
+static bool scan_escape(zjsonp *p, size_t *pos) {
+  size_t i = *pos;
+  if (i + 1 >= p->len)
+    return string_error(p, p->len);
+  char e = p->text[i + 1];
+  if (e == 'u')
+    return scan_unicode_escape(p, pos);
+  if (e != '"' && e != '\\' && e != '/' && e != 'b' && e != 'f' &&
+      e != 'n' && e != 'r' && e != 't')
+    return string_error(p, i + 1);
+  *pos += 2;
+  return true;
+}
+
 /* Scan a string whose opening quote is at pos. On success returns
  * true, sets off/len to the raw payload between the quotes, and
  * leaves pos past the closing quote. Raw payload bytes must be
@@ -73,26 +102,8 @@ static bool scan_string(zjsonp *p, size_t *off, size_t *len) {
       return string_payload_valid(p, start, i);
     }
     if (c == '\\') {
-      if (i + 1 >= p->len)
-        return string_error(p, p->len);
-      char e = p->text[i + 1];
-      if (e == 'u') {
-        if (i + 5 >= p->len)
-          return string_error(p, p->len);
-        for (int k = 2; k <= 5; k++) {
-          char h = p->text[i + k];
-          bool hex = (h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') ||
-                     (h >= 'A' && h <= 'F');
-          if (!hex)
-            return string_error(p, i + (size_t)k);
-        }
-        i += 6;
-        continue;
-      }
-      if (e != '"' && e != '\\' && e != '/' && e != 'b' && e != 'f' &&
-          e != 'n' && e != 'r' && e != 't')
-        return string_error(p, i + 1);
-      i += 2;
+      if (!scan_escape(p, &i))
+        return false;
       continue;
     }
     if (c < 0x20)
