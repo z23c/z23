@@ -126,11 +126,14 @@ static bool ic_fit(struct ic_page *p, const char *what, const char *s,
     return false;
 }
 
+/* A filled circle of radius r spans 2r+1 pixels, so r stays below half of
+ * w and h to keep the corners inside the w x h box. */
 static void ic_round_rect(struct ic_page *p, int32_t x, int32_t y, uint32_t w,
                           uint32_t h, uint32_t r, ic_color c)
 {
-    if (2u * r > w) r = w / 2u;
-    if (2u * r > h) r = h / 2u;
+    if (w == 0 || h == 0) return;
+    if (2u * r >= w) r = (w - 1u) / 2u;
+    if (2u * r >= h) r = (h - 1u) / 2u;
     zcl_present_canvas_fill_rect(&p->canvas, x + (int32_t)r, y, w - 2u * r, h, c);
     zcl_present_canvas_fill_rect(&p->canvas, x, y + (int32_t)r, w, h - 2u * r, c);
     int32_t x1 = x + (int32_t)(w - r) - 1, y1 = y + (int32_t)(h - r) - 1;

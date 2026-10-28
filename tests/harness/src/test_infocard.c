@@ -245,13 +245,21 @@ static int ic_case_pixels(const char *dir)
          * and a 50% fill ends at x 300. */
         ASSERT(ic_render_text(dir, "bar", "canvas 600 400\nbar Half | 50\n", &bar));
         ASSERT(ic_pixel_is(&bar, 186, 108, 242, 181, 68));
+        ASSERT(ic_pixel_is(&bar, 299, 108, 242, 181, 68));
+        ASSERT(ic_pixel_is(&bar, 300, 108, 36, 56, 68));
         ASSERT(ic_pixel_is(&bar, 498, 108, 36, 56, 68));
+        ASSERT(ic_pixel_is(&bar, 527, 108, 36, 56, 68));
+        /* Nothing of the bar lands outside its 456 x 18 box. */
+        ASSERT(!ic_pixel_is(&bar, 528, 108, 36, 56, 68));
+        ASSERT(!ic_pixel_is(&bar, 81, 99, 242, 181, 68));
+        ASSERT(!ic_pixel_is(&bar, 81, 118, 242, 181, 68));
+        ASSERT(!ic_pixel_is(&bar, 81, 118, 36, 56, 68));
         free(bar.rows);
         bar.rows = NULL;
-        /* 1% of 456 px is 4 px: the fill must not be padded wider. */
+        /* 1% of 456 px is 4 px (x 72..75): exactly that, not padded wider. */
         ASSERT(ic_render_text(dir, "bar1", "canvas 600 400\nbar One | 1\n", &bar));
-        ASSERT(ic_pixel_is(&bar, 73, 108, 242, 181, 68));
-        ASSERT(ic_pixel_is(&bar, 82, 108, 36, 56, 68));
+        ASSERT(ic_pixel_is(&bar, 75, 108, 242, 181, 68));
+        ASSERT(ic_pixel_is(&bar, 76, 108, 36, 56, 68));
         ASSERT(ic_render_text(dir, "blank", "canvas 600 400\n", &blank));
         ASSERT_EQ(ic_count(&blank, 242, 181, 68), 0u);
         ASSERT_EQ(ic_count(&blank, 36, 56, 68), 0u);
