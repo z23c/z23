@@ -4078,6 +4078,73 @@ static void work_envelope_echo(const struct zcl_command_request *request,
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
+static bool work_budget_payload(struct zcl_command_reply *reply, size_t padding)
+{
+    static const char escaped[] = "quote\" backslash\\ newline\n tab\t";
+    if (padding > ZCL_COMMAND_LIST_BUDGET) return false;
+    memset(work_envelope_padding, 'x', padding);
+    work_envelope_padding[padding] = '\0';
+    json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+    return json_push_kv_str(&reply->data, "echo", escaped) &&
+           json_push_kv_str(&reply->data, "padding", work_envelope_padding);
+}
+
+static bool work_budget_measure(const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, struct zcl_command_budget_fixture *fixture,
+    size_t padding, size_t *bytes)
+{
+    char wire[ZCL_COMMAND_LIST_BUDGET + 3u];
+    size_t usable = 0;
+    return work_budget_payload(reply, padding) &&
+        zcl_command_registry_test_success_budget(spec, reply, fixture, &usable,
+                                                 wire, sizeof(wire), bytes);
+}
+
+static bool work_budget_boundary(const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, struct zcl_command_budget_fixture *f,
+    size_t padding)
+{
+    size_t below = 0, exact = 0, refused = 0;
+    return padding > 0 &&
+        work_budget_measure(spec, reply, f, padding - 1, &below) &&
+        below == ZCL_COMMAND_LIST_BUDGET - 1u &&
+        work_budget_measure(spec, reply, f, padding, &exact) &&
+        exact == ZCL_COMMAND_LIST_BUDGET &&
+        work_budget_measure(spec, reply, f, padding + 1, &refused) && refused == 0;
+}
+
+static bool work_budget_witness(const struct zcl_command_spec *spec,
+    struct zcl_command_reply *reply, struct zcl_command_budget_fixture *f,
+    size_t padding)
+{
+    size_t exact = 0, refused = 0;
+    f->elapsed_us = 10;
+    bool ok = work_budget_measure(spec, reply, f, padding - 1, &exact) &&
+        exact == ZCL_COMMAND_LIST_BUDGET &&
+        work_budget_measure(spec, reply, f, padding, &refused) && refused == 0;
+    if (ok) printf("work ceiling witness: path=%s padding_step=1 elapsed_us=9->10 first_bytes=8191 next=refused limit=8192\n",
+                   spec->path);
+    return ok;
+}
+
+static bool work_budget_fixed(const struct zcl_command_spec *spec)
+{
+    struct zcl_command_budget_fixture f = {.elapsed_us = 9,
+        .budget_bytes = ZCL_COMMAND_LIST_BUDGET};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, spec->output_schema);
+    reply.status = ZCL_COMMAND_STATUS_PASSED;
+    reply.exit_code = ZCL_COMMAND_EXIT_OK;
+    size_t empty = 0;
+    bool ok = work_budget_measure(spec, &reply, &f, 0, &empty) &&
+        empty > 0 && empty < ZCL_COMMAND_LIST_BUDGET;
+    size_t padding = ok ? ZCL_COMMAND_LIST_BUDGET - empty : 0;
+    ok = ok && work_budget_boundary(spec, &reply, &f, padding) &&
+        work_budget_witness(spec, &reply, &f, padding);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
 static int test_work_envelope_ceiling(void)
 {
     int failures = 0;
@@ -4104,7 +4171,8 @@ static int test_work_envelope_ceiling(void)
             ASSERT(json_push_kv_str(&input, "work", "serializer-fixture"));
             ASSERT(json_push_kv_bool(&input, "details", true));
             size_t input_bytes = json_write(&input, NULL, 0);
-            bool saw_exact_limit = false, saw_refusal = false;
+            ASSERT(work_budget_fixed(real));
+            bool saw_refusal = false;
             for (size_t padding = ZCL_COMMAND_LIST_BUDGET - 1024u;
                  padding <= ZCL_COMMAND_LIST_BUDGET; ++padding) {
                 memset(work_envelope_padding, 'x', padding);
@@ -4135,7 +4203,6 @@ static int test_work_envelope_ceiling(void)
                     ASSERT_STR_EQ(json_get_str(json_get(data, "echo")), escaped);
                     ASSERT_STR_EQ(json_get_str(json_get(data, "padding")),
                                   work_envelope_padding);
-                    saw_exact_limit |= n == ZCL_COMMAND_LIST_BUDGET;
                 } else {
                     ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INTERNAL);
                     ASSERT(!json_get_bool(json_get(&envelope, "ok")));
@@ -4148,9 +4215,8 @@ static int test_work_envelope_ceiling(void)
                 ASSERT_STR_EQ(json_get_str(json_get(&input, "workspace")), escaped);
                 json_free(&envelope);
             }
-            ASSERT(saw_exact_limit);
             ASSERT(saw_refusal);
-            printf("work serializer ceiling: path=%s limit=%d capacity=%zu exact=1 refused=1 escaped=1\n",
+            printf("work serializer ceiling: path=%s limit=%d capacity=%zu refused=1 escaped=1\n",
                    paths[alias], spec.budget_bytes,
                    (size_t)ZCL_COMMAND_LIST_BUDGET + 1u);
             json_free(&input);
