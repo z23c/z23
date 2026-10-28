@@ -2,6 +2,7 @@
  * Purpose: typed in-process PSK tunnel throughput benchmark leaf. */
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "base/utc_tm.h"
 #include "services/device_host_bench.h"
 #include "platform/clock.h"
 #include "util/authority_receipt.h"
@@ -108,7 +109,7 @@ static bool bench_provenance(struct json_value *data, const struct device_host_b
     int64_t wall_ms = clock_now_wall_ms();
     time_t seconds = (time_t)(wall_ms / 1000);
     struct tm utc; char stamp[32] = "";
-    if (gmtime_r(&seconds, &utc)) (void)strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    if (zcl_utc_tm(seconds, &utc)) (void)strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
     return bench_build_flags(data) && json_push_kv_str(data, "source_id_sha256", zcl_build_source_id_sha256()) &&
         json_push_kv_real(data, "host_load1", bench_load1()) &&
         json_push_kv_bool(data, "profile_removed", bench->profile_removed) &&
