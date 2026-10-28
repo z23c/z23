@@ -285,7 +285,28 @@ static void test_cli_output_errors(void) {
   }
 }
 
+static void test_encode_boundaries(void) {
+  static const char *const expected[] = {"", "", "%", "%F", "%FF"};
+  const unsigned char input = 0xff;
+  for (size_t cap = 0; cap <= 4; cap++) {
+    unsigned char buf[6];
+    memset(buf, 0xa5, sizeof buf);
+    CHECK(zpct_encode((char *)buf + 1, cap, &input, 1, ZPCT_UNRESERVED) == 3);
+    CHECK(buf[0] == 0xa5 && buf[cap + 1] == 0xa5);
+    if (cap) CHECK(strcmp((char *)buf + 1, expected[cap]) == 0);
+  }
+  char out[3] = {'x','y','z'};
+  CHECK(zpct_encode(out, sizeof out, NULL, 1, (zpct_set)9) == SIZE_MAX);
+  CHECK(out[0] == '\0' && out[1] == 'y');
+  out[0] = 'x';
+  CHECK(zpct_encode(out, sizeof out, NULL, 0, (zpct_set)9) == SIZE_MAX);
+  CHECK(out[0] == '\0' && out[1] == 'y');
+  out[0] = 'x';
+  CHECK(zpct_encode(out, 0, NULL, 1, (zpct_set)9) == SIZE_MAX && out[0] == 'x');
+}
+
 int main(void) {
+  test_encode_boundaries();
   test_cli_stream_boundaries();
   test_cli_output_errors();
   test_error_termination();

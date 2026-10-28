@@ -8,18 +8,26 @@ static size_t zpct__error(char *dst, size_t cap) {
   return SIZE_MAX;
 }
 
-static int zpct__in_set(unsigned char c, zpct_set set) {
+static int zpct__unreserved(unsigned char c) {
   if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
       (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
       c == '~')
-    return 1; /* unreserved: always */
-  if (set >= ZPCT_SUBDELIM)
-    switch (c) {
+    return 1;
+  return 0;
+}
+
+static int zpct__subdelim(unsigned char c) {
+  switch (c) {
     case '!': case '$': case '&': case '\'': case '(':
     case ')': case '*': case '+': case ',': case ';': case '=':
       return 1;
-    default: break;
-    }
+    default: return 0;
+  }
+}
+
+static int zpct__in_set(unsigned char c, zpct_set set) {
+  if (zpct__unreserved(c)) return 1;
+  if (set >= ZPCT_SUBDELIM && zpct__subdelim(c)) return 1;
   if (set >= ZPCT_PCHAR && (c == ':' || c == '@')) return 1;
   return 0;
 }
@@ -27,6 +35,11 @@ static int zpct__in_set(unsigned char c, zpct_set set) {
 int zpct_is_unescaped(unsigned char c, zpct_set set) {
   if (set < ZPCT_UNRESERVED || set > ZPCT_PCHAR) return 0;
   return zpct__in_set(c, set);
+}
+
+static void zpct__emit(char *dst, size_t cap, size_t *len, char c) {
+  if (dst != NULL && *len + 1 < cap) dst[*len] = c;
+  (*len)++;
 }
 
 size_t zpct_encode(char *dst, size_t cap, const void *src, size_t n,
@@ -40,15 +53,11 @@ size_t zpct_encode(char *dst, size_t cap, const void *src, size_t n,
   for (i = 0; i < n; i++) {
     unsigned char c = p[i];
     if (zpct__in_set(c, set)) {
-      if (dst != NULL && len + 1 < cap) dst[len] = (char)c;
-      len++;
+      zpct__emit(dst, cap, &len, (char)c);
     } else {
-      if (dst != NULL && len + 1 < cap) dst[len] = '%';
-      len++;
-      if (dst != NULL && len + 1 < cap) dst[len] = HEX[c >> 4];
-      len++;
-      if (dst != NULL && len + 1 < cap) dst[len] = HEX[c & 15];
-      len++;
+      zpct__emit(dst, cap, &len, '%');
+      zpct__emit(dst, cap, &len, HEX[c >> 4]);
+      zpct__emit(dst, cap, &len, HEX[c & 15]);
     }
   }
   if (dst != NULL && cap > 0) dst[len < cap ? len : cap - 1] = '\0';
