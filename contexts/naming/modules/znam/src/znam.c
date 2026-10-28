@@ -38,6 +38,57 @@ bool znam_validate_name(const char *name)
 
 /* ── Parser ─────────────────────────────────────────────────────── */
 
+static bool znam_parse_target(struct overlay_reader *r, struct znam_message *msg)
+{
+    uint8_t target_type = 0;
+    if (!overlay_read_u8(r, &target_type)) return false;
+    if (target_type < 1 || target_type > ZNAM_TYPE_CONTENT) return false;
+    msg->target_type = target_type;
+    size_t len = 0;
+    if (!overlay_read_bounded(r, (uint8_t *)msg->target_value, ZNAM_VALUE_MAX, &len))
+        return false;
+    if (len == 0) return false;
+    msg->target_value[len] = '\0';
+    return true;
+}
+
+static bool znam_parse_owner(struct overlay_reader *r, struct znam_message *msg)
+{
+    size_t len = 0;
+    if (!overlay_read_bounded(r, (uint8_t *)msg->new_owner, sizeof(msg->new_owner) - 1, &len))
+        return false;
+    if (len == 0) return false;
+    msg->new_owner[len] = '\0';
+    return true;
+}
+
+static bool znam_parse_text(struct overlay_reader *r, struct znam_message *msg)
+{
+    size_t len = 0;
+    if (!overlay_read_bounded(r, (uint8_t *)msg->text_key, ZNAM_TEXT_KEY_MAX, &len))
+        return false;
+    if (len == 0) return false;
+    msg->text_key[len] = '\0';
+    if (!overlay_read_bounded(r, (uint8_t *)msg->text_value, ZNAM_TEXT_VAL_MAX, &len))
+        return false;
+    msg->text_value[len] = '\0';
+    return true;
+}
+
+static bool znam_parse_name(struct overlay_reader *r, struct znam_message *msg)
+{
+    size_t len = 0;
+    if (!overlay_read_bounded(r, (uint8_t *)msg->name, ZNAM_NAME_MAX, &len))
+        return false;
+    if (len == 0) return false;
+    msg->name[len] = '\0';
+    if (!znam_validate_name(msg->name)) {
+        msg->command = ZNAM_CMD_INVALID;
+        return false;
+    }
+    return true;
+}
+
 bool znam_parse(const uint8_t *script, size_t script_len,
                 struct znam_message *msg)
 {
@@ -60,64 +111,19 @@ bool znam_parse(const uint8_t *script, size_t script_len,
     msg->command = (enum znam_command)cmd;
 
     /* Field 3: name (always present) */
-    size_t len = 0;
-    if (!overlay_read_bounded(&r, (uint8_t *)msg->name, ZNAM_NAME_MAX, &len))
-        return false;
-    if (len == 0) return false;
-    msg->name[len] = '\0';
-
-    if (!znam_validate_name(msg->name)) {
-        msg->command = ZNAM_CMD_INVALID;
-        return false;
-    }
+    if (!znam_parse_name(&r, msg)) return false;
 
     switch (msg->command) {
     case ZNAM_CMD_REGISTER:
     case ZNAM_CMD_UPDATE:
-    case ZNAM_CMD_SET_RECORD: {
-        /* Field 4: target_type */
-        uint8_t target_type = 0;
-        if (!overlay_read_u8(&r, &target_type)) return false;
-        if (target_type < 1 || target_type > ZNAM_TYPE_CONTENT) return false;
-        msg->target_type = target_type;
-
-        /* Field 5: target_value */
-        if (!overlay_read_bounded(&r, (uint8_t *)msg->target_value,
-                                  ZNAM_VALUE_MAX, &len))
-            return false;
-        if (len == 0) return false;
-        msg->target_value[len] = '\0';
-        return true;
-    }
-
+    case ZNAM_CMD_SET_RECORD:
+        return znam_parse_target(&r, msg);
     case ZNAM_CMD_TRANSFER:
-        /* Field 4: new_owner address */
-        if (!overlay_read_bounded(&r, (uint8_t *)msg->new_owner,
-                                  sizeof(msg->new_owner) - 1, &len))
-            return false;
-        if (len == 0) return false;
-        msg->new_owner[len] = '\0';
-        return true;
-
+        return znam_parse_owner(&r, msg);
     case ZNAM_CMD_RENEW:
-        /* No additional fields */
         return true;
-
     case ZNAM_CMD_SET_TEXT:
-        /* Field 4: text key */
-        if (!overlay_read_bounded(&r, (uint8_t *)msg->text_key,
-                                  ZNAM_TEXT_KEY_MAX, &len))
-            return false;
-        if (len == 0) return false;
-        msg->text_key[len] = '\0';
-
-        /* Field 5: text value (may be empty) */
-        if (!overlay_read_bounded(&r, (uint8_t *)msg->text_value,
-                                  ZNAM_TEXT_VAL_MAX, &len))
-            return false;
-        msg->text_value[len] = '\0';
-        return true;
-
+        return znam_parse_text(&r, msg);
     default:
         return false;
     }

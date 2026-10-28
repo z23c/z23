@@ -6,6 +6,7 @@
 #include "test/test_core.h"
 #include "models/database.h"
 #include "models/znam.h"
+#include "overlay/overlay_codec.h"
 #include "controllers/name_controller.h"
 #include "rpc/server.h"
 #include "json/json.h"
@@ -2033,9 +2034,207 @@ static int znam_test_rpc_non_owner_rejected(void)
     return failures;
 }
 
+#define ZF_CHECK(label, condition) do { \
+    bool passed_ = (condition); \
+    printf("znam parser fixture %s... %s\n", label, passed_ ? "OK" : "FAIL"); \
+    if (!passed_) failures++; \
+} while (0)
+
+static void zf_header(struct overlay_writer *w, uint8_t *buf, size_t cap,
+                      uint8_t cmd, const uint8_t *name, size_t name_len)
+{
+    overlay_writer_begin(w, buf, cap, ZNAM_LOKAD_BYTES);
+    overlay_put_u8(w, 1);
+    overlay_put_u8(w, cmd);
+    overlay_put_field(w, name, name_len);
+}
+
+static int zf_trailing_commands(void)
+{
+    int failures = 0;
+    for (uint8_t cmd = 1; cmd <= 6; cmd++) {
+        uint8_t buf[512]; struct overlay_writer w;
+        zf_header(&w, buf, sizeof buf, cmd, (const uint8_t *)"alice", 5);
+        if (cmd == ZNAM_CMD_REGISTER || cmd == ZNAM_CMD_UPDATE || cmd == ZNAM_CMD_SET_RECORD) {
+            overlay_put_u8(&w, ZNAM_TYPE_BTC);
+            overlay_put_field(&w, (const uint8_t *)"target", 6);
+        } else if (cmd == ZNAM_CMD_TRANSFER) {
+            overlay_put_field(&w, (const uint8_t *)"owner", 5);
+        } else if (cmd == ZNAM_CMD_SET_TEXT) {
+            overlay_put_field(&w, (const uint8_t *)"key", 3);
+            overlay_put_field(&w, (const uint8_t *)"value", 5);
+        }
+        size_t n = overlay_writer_finish(&w);
+        if (n < sizeof buf) buf[n++] = 0xff;
+        struct znam_message msg;
+        bool ok = n > 0 && znam_parse(buf, n, &msg);
+        ZF_CHECK("all commands accept trailing byte", ok && msg.command == (enum znam_command)cmd && strcmp(msg.name, "alice") == 0);
+    }
+    return failures;
+}
+
+static int zf_embedded_nul(void)
+{
+    int failures = 0;
+    uint8_t buf[512]; struct overlay_writer w;
+    const uint8_t name[] = {'a','b',0,'z'}, value[] = {'x',0,'y'};
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, name, sizeof name);
+    overlay_put_u8(&w, ZNAM_TYPE_BTC);
+    overlay_put_field(&w, value, sizeof value);
+    size_t n = overlay_writer_finish(&w); struct znam_message msg;
+    bool ok = n && znam_parse(buf, n, &msg);
+    ZF_CHECK("name and target retain embedded NUL bytes", ok && memcmp(msg.name, name, sizeof name) == 0 && memcmp(msg.target_value, value, sizeof value) == 0);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, value, sizeof value); overlay_put_field(&w, value, sizeof value);
+    n = overlay_writer_finish(&w); ok = n && znam_parse(buf, n, &msg);
+    ZF_CHECK("text key and value retain embedded NUL bytes", ok && memcmp(msg.text_key, value, sizeof value) == 0 && memcmp(msg.text_value, value, sizeof value) == 0);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_TRANSFER, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, value, sizeof value);
+    n = overlay_writer_finish(&w); ok = n && znam_parse(buf, n, &msg);
+    ZF_CHECK("owner retains embedded NUL bytes", ok && memcmp(msg.new_owner, value, sizeof value) == 0);
+    return failures;
+}
+
+static int zf_partial_fields(void)
+{
+    int failures = 0; uint8_t buf[512]; struct overlay_writer w; struct znam_message msg;
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, (const uint8_t *)"alice", 5);
+    size_t name_end = w.off;
+    overlay_put_u8(&w, ZNAM_TYPE_BTC); size_t type_end = w.off;
+    overlay_put_field(&w, (const uint8_t *)"target", 6);
+    size_t full = overlay_writer_finish(&w);
+    bool ok = znam_parse(buf, name_end, &msg);
+    ZF_CHECK("missing target type retains command and name", !ok && msg.command == ZNAM_CMD_REGISTER && strcmp(msg.name, "alice") == 0 && msg.target_type == 0);
+    ok = znam_parse(buf, type_end, &msg);
+    ZF_CHECK("missing target value retains type", !ok && msg.command == ZNAM_CMD_REGISTER && msg.target_type == ZNAM_TYPE_BTC && msg.target_value[0] == 0);
+    ok = znam_parse(buf, full - 1, &msg);
+    ZF_CHECK("truncated target retains type", !ok && msg.target_type == ZNAM_TYPE_BTC);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, (const uint8_t *)"key", 3); size_t key_end = w.off;
+    ok = znam_parse(buf, key_end, &msg);
+    ZF_CHECK("missing text value retains key", !ok && msg.command == ZNAM_CMD_SET_TEXT && strcmp(msg.text_key, "key") == 0 && msg.text_value[0] == 0);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_RENEW, (const uint8_t *)"Bad", 3);
+    ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("invalid name resets command but retains name", !ok && msg.command == ZNAM_CMD_INVALID && strcmp(msg.name, "Bad") == 0);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_RENEW, NULL, 0);
+    ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("empty name retains command", !ok && msg.command == ZNAM_CMD_RENEW && msg.name[0] == 0);
+    return failures;
+}
+
+static int zf_bounds_and_type(void)
+{
+    int failures = 0; uint8_t buf[512], name[ZNAM_NAME_MAX + 1], value[ZNAM_VALUE_MAX + 1];
+    memset(name, 'a', sizeof name); memset(value, 'v', sizeof value);
+    struct overlay_writer w; struct znam_message msg;
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, name, ZNAM_NAME_MAX);
+    overlay_put_u8(&w, ZNAM_TYPE_CONTENT); overlay_put_field(&w, value, ZNAM_VALUE_MAX);
+    bool ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("maximum name and target accepted", ok && strlen(msg.name) == ZNAM_NAME_MAX && strlen(msg.target_value) == ZNAM_VALUE_MAX);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_RENEW, name, sizeof name);
+    ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("overlong name retains command", !ok && msg.command == ZNAM_CMD_RENEW);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, (const uint8_t *)"alice", 5);
+    overlay_put_u8(&w, ZNAM_TYPE_CONTENT + 1); overlay_put_field(&w, value, 1);
+    ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("invalid type leaves type unset", !ok && msg.command == ZNAM_CMD_REGISTER && msg.target_type == 0);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, (const uint8_t *)"alice", 5);
+    overlay_put_u8(&w, ZNAM_TYPE_BTC); overlay_put_field(&w, value, sizeof value);
+    ok = znam_parse(buf, overlay_writer_finish(&w), &msg);
+    ZF_CHECK("overlong target retains type", !ok && msg.target_type == ZNAM_TYPE_BTC);
+    return failures;
+}
+static bool zf_same_fields(const struct znam_message *a, const struct znam_message *b)
+{
+    return a->command == b->command && a->target_type == b->target_type &&
+        memcmp(a->name, b->name, sizeof a->name) == 0 &&
+        memcmp(a->target_value, b->target_value, sizeof a->target_value) == 0 &&
+        memcmp(a->new_owner, b->new_owner, sizeof a->new_owner) == 0 &&
+        memcmp(a->text_key, b->text_key, sizeof a->text_key) == 0 &&
+        memcmp(a->text_value, b->text_value, sizeof a->text_value) == 0;
+}
+
+static bool zf_refused_fields(const uint8_t *buf, size_t n, const struct znam_message *expected)
+{
+    struct znam_message got;
+    memset(&got, 0xa5, sizeof got);
+    return !znam_parse(buf, n, &got) && zf_same_fields(&got, expected);
+}
+
+static int zf_seeded_partial(void)
+{
+    int failures = 0; uint8_t buf[512]; struct overlay_writer w;
+    struct znam_message want = {0};
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_REGISTER, (const uint8_t *)"alice", 5);
+    want.command = ZNAM_CMD_REGISTER; memcpy(want.name, "alice", 6);
+    ZF_CHECK("missing type clears all later fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_u8(&w, ZNAM_TYPE_BTC); want.target_type = ZNAM_TYPE_BTC;
+    ZF_CHECK("missing target clears later fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_field(&w, NULL, 0);
+    ZF_CHECK("empty target retains prior fields", zf_refused_fields(buf, w.off, &want));
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_TRANSFER, (const uint8_t *)"alice", 5);
+    memset(&want, 0, sizeof want); want.command = ZNAM_CMD_TRANSFER; memcpy(want.name, "alice", 6);
+    ZF_CHECK("missing owner clears later fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_field(&w, NULL, 0);
+    ZF_CHECK("empty owner retains prior fields", zf_refused_fields(buf, w.off, &want));
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    memset(&want, 0, sizeof want); want.command = ZNAM_CMD_SET_TEXT; memcpy(want.name, "alice", 6);
+    ZF_CHECK("missing key clears later fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_field(&w, NULL, 0);
+    ZF_CHECK("empty key retains prior fields", zf_refused_fields(buf, w.off, &want));
+    return failures;
+}
+
+static int zf_seeded_name_and_text(void)
+{
+    int failures = 0; uint8_t buf[512], field[ZNAM_TEXT_VAL_MAX + 1];
+    memset(field, 'x', sizeof field);
+    struct overlay_writer w; struct znam_message want = {0};
+    overlay_writer_begin(&w, buf, sizeof buf, ZNAM_LOKAD_BYTES); overlay_put_u8(&w, 1); overlay_put_u8(&w, ZNAM_CMD_RENEW);
+    want.command = ZNAM_CMD_RENEW;
+    ZF_CHECK("missing name retains command and clears fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_field(&w, (const uint8_t *)"alice", 5);
+    ZF_CHECK("truncated name retains command and clears fields", zf_refused_fields(buf, w.off - 1, &want));
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, (const uint8_t *)"key", 3);
+    memset(&want, 0, sizeof want); want.command = ZNAM_CMD_SET_TEXT; memcpy(want.name, "alice", 6); memcpy(want.text_key, "key", 4);
+    ZF_CHECK("missing text value retains key and clears fields", zf_refused_fields(buf, w.off, &want));
+    overlay_put_field(&w, field, sizeof field);
+    ZF_CHECK("overlong text value retains key and clears fields", zf_refused_fields(buf, w.off, &want));
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_TRANSFER, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, field, sizeof want.new_owner);
+    memset(&want, 0, sizeof want); want.command = ZNAM_CMD_TRANSFER; memcpy(want.name, "alice", 6);
+    ZF_CHECK("overlong owner retains prior fields", zf_refused_fields(buf, w.off, &want));
+    return failures;
+}
+
+static int zf_text_owner_limits(void)
+{
+    int failures = 0; uint8_t buf[512], key[ZNAM_TEXT_KEY_MAX + 1], value[ZNAM_TEXT_VAL_MAX];
+    memset(key, 'k', sizeof key); memset(value, 'v', sizeof value);
+    struct overlay_writer w; struct znam_message got, want = {0};
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, key, ZNAM_TEXT_KEY_MAX); overlay_put_field(&w, value, sizeof value);
+    bool ok = znam_parse(buf, w.off, &got);
+    ZF_CHECK("maximum text key and value accepted", ok && strlen(got.text_key) == ZNAM_TEXT_KEY_MAX && strlen(got.text_value) == ZNAM_TEXT_VAL_MAX);
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_SET_TEXT, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, key, sizeof key);
+    want.command = ZNAM_CMD_SET_TEXT; memcpy(want.name, "alice", 6);
+    ZF_CHECK("overlong key retains prior fields", zf_refused_fields(buf, w.off, &want));
+    zf_header(&w, buf, sizeof buf, ZNAM_CMD_TRANSFER, (const uint8_t *)"alice", 5);
+    overlay_put_field(&w, value, sizeof got.new_owner - 1);
+    ok = znam_parse(buf, w.off, &got);
+    ZF_CHECK("maximum owner accepted", ok && strlen(got.new_owner) == sizeof got.new_owner - 1);
+    return failures;
+}
+
+#undef ZF_CHECK
+
 int test_znam(void)
 {
     int failures = 0;
+    failures += zf_trailing_commands() + zf_embedded_nul() + zf_partial_fields() + zf_bounds_and_type();
+    failures += zf_seeded_partial() + zf_seeded_name_and_text() + zf_text_owner_limits();
     failures += znam_addr_save_bounds();
 
     /* ── Name validation ──────────────────────────────────────── */
