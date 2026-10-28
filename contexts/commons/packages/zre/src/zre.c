@@ -392,31 +392,31 @@ static bool is_postfix(int c) {
   return c == '*' || c == '+' || c == '?' || c == '{';
 }
 
-/* Parse a counted repeat body after '{'; bounds out via min and max.
- * The caller has verified the next byte is a digit. */
-static bool parse_counted(parser *p, int32_t *min, int32_t *max) {
-  size_t m = 0, n = 0;
-  bool have_n = false, open_ended = false;
+/* Parse decimal digits, rejecting bounds above the limit. */
+static bool parse_repeat_number(parser *p, size_t *value) {
+  *value = 0;
   while (p->pos < p->len && is_digit((unsigned char)p->pat[p->pos])) {
-    m = m * 10 + (size_t)(p->pat[p->pos] - '0');
-    if (m > ZRE_MAX_REPEAT) {
+    *value = *value * 10 + (size_t)(p->pat[p->pos] - '0');
+    if (*value > ZRE_MAX_REPEAT) {
       fail(p, ZRE_ERR_REPEAT, "repeat bound over 255");
       return false;
     }
     p->pos++;
   }
+  return true;
+}
+
+/* Parse a counted repeat body after the opening brace; bounds out via min and max.
+ * The caller has verified the next byte is a digit. */
+static bool parse_counted(parser *p, int32_t *min, int32_t *max) {
+  size_t m = 0, n = 0;
+  bool have_n = false, open_ended = false;
+  if (!parse_repeat_number(p, &m)) return false;
   if (p->pos < p->len && p->pat[p->pos] == ',') {
     p->pos++;
     if (p->pos < p->len && is_digit((unsigned char)p->pat[p->pos])) {
       have_n = true;
-      while (p->pos < p->len && is_digit((unsigned char)p->pat[p->pos])) {
-        n = n * 10 + (size_t)(p->pat[p->pos] - '0');
-        if (n > ZRE_MAX_REPEAT) {
-          fail(p, ZRE_ERR_REPEAT, "repeat bound over 255");
-          return false;
-        }
-        p->pos++;
-      }
+      if (!parse_repeat_number(p, &n)) return false;
     } else {
       open_ended = true;
     }
@@ -438,6 +438,40 @@ static bool parse_counted(parser *p, int32_t *min, int32_t *max) {
   return true;
 }
 
+/* Return 1 for a postfix, 0 for none, and -1 for malformed counts. */
+static int parse_postfix(parser *p, int32_t *min, int32_t *max) {
+  if (p->pos >= p->len) return 0;
+  int c = (unsigned char)p->pat[p->pos];
+  if (c == '*' || c == '+' || c == '?') {
+    *min = c == '+' ? 1 : 0;
+    *max = c == '?' ? 1 : -1;
+    p->pos++;
+    return 1;
+  }
+  if (c == '{' && p->pos + 1 < p->len &&
+      is_digit((unsigned char)p->pat[p->pos + 1])) {
+    p->pos++;
+    return parse_counted(p, min, max) ? 1 : -1;
+  }
+  return 0;
+}
+
+static bool validate_postfix(parser *p, int32_t atom) {
+  int kind = p->nodes[atom].kind;
+  if (kind == N_BOL || kind == N_EOL) {
+    fail(p, ZRE_ERR_REPEAT, "repeat of an anchor");
+    return false;
+  }
+  /* A postfix on a postfix is invalid; lazy forms do not exist. */
+  if (p->pos < p->len && is_postfix((unsigned char)p->pat[p->pos]) &&
+      (p->pat[p->pos] != '{' ||
+       (p->pos + 1 < p->len && is_digit((unsigned char)p->pat[p->pos + 1])))) {
+    fail(p, ZRE_ERR_REPEAT, "stacked repeat postfix");
+    return false;
+  }
+  return true;
+}
+
 static int32_t parse_repeat(parser *p) {
   if (p->pos < p->len &&
       (p->pat[p->pos] == '*' || p->pat[p->pos] == '+' || p->pat[p->pos] == '?')) {
@@ -445,47 +479,14 @@ static int32_t parse_repeat(parser *p) {
     return -1;
   }
   int32_t atom = parse_atom(p);
-  if (atom < 0)
-    return -1;
-  if (p->pos >= p->len)
-    return atom;
-  int c = (unsigned char)p->pat[p->pos];
+  if (atom < 0) return -1;
   int32_t min, max;
-  if (c == '*') {
-    min = 0;
-    max = -1;
-    p->pos++;
-  } else if (c == '+') {
-    min = 1;
-    max = -1;
-    p->pos++;
-  } else if (c == '?') {
-    min = 0;
-    max = 1;
-    p->pos++;
-  } else if (c == '{' && p->pos + 1 < p->len &&
-             is_digit((unsigned char)p->pat[p->pos + 1])) {
-    p->pos++; /* '{' */
-    if (!parse_counted(p, &min, &max))
-      return -1;
-  } else {
-    return atom; /* no postfix */
-  }
-  int kind = p->nodes[atom].kind;
-  if (kind == N_BOL || kind == N_EOL) {
-    fail(p, ZRE_ERR_REPEAT, "repeat of an anchor");
-    return -1;
-  }
-  /* A postfix on a postfix ("a**", "a*?" — lazy forms do not exist). */
-  if (p->pos < p->len && is_postfix((unsigned char)p->pat[p->pos]) &&
-      (p->pat[p->pos] != '{' ||
-       (p->pos + 1 < p->len && is_digit((unsigned char)p->pat[p->pos + 1])))) {
-    fail(p, ZRE_ERR_REPEAT, "stacked repeat postfix");
-    return -1;
-  }
+  int postfix = parse_postfix(p, &min, &max);
+  if (postfix < 0) return -1;
+  if (!postfix) return atom;
+  if (!validate_postfix(p, atom)) return -1;
   int32_t r = new_node(p, N_REP);
-  if (r < 0)
-    return -1;
+  if (r < 0) return -1;
   p->nodes[r].child = atom;
   p->nodes[r].min = min;
   p->nodes[r].max = max;

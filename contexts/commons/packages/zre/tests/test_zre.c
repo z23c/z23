@@ -169,6 +169,30 @@ static void test_counted(void) {
   NM("^\\d{3}-\\d{4}$", "55-1234");
 }
 
+static void test_repeat_error_offsets(void) {
+  static const struct { const char *pattern; const char *error; } cases[] = {
+    {"a{256}", "zre: repeat bound over 255 at offset 4"},
+    {"a{1,256}", "zre: repeat bound over 255 at offset 6"},
+    {"a{3,2}", "zre: repeat upper bound below lower bound at offset 6"},
+    {"a{1", "zre: unterminated counted repeat at offset 3"},
+    {"^{256}", "zre: repeat bound over 255 at offset 4"},
+    {"^{2}", "zre: repeat of an anchor at offset 4"},
+    {"a**", "zre: stacked repeat postfix at offset 2"},
+    {"*", "zre: repeat with no preceding atom at offset 0"},
+  };
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    zre_prog *prog = NULL;
+    char err[128];
+    zre_status st = zre_compile(cases[i].pattern, strlen(cases[i].pattern),
+                                &prog, err, sizeof err);
+    CHECK(st == ZRE_ERR_REPEAT && prog == NULL);
+    CHECK(strcmp(err, cases[i].error) == 0);
+    zre_free(prog);
+  }
+  M("a{", "a{");
+  M("a*{x}", "aaa{x}");
+}
+
 static void test_classes(void) {
   M("[abc]", "a");
   NM("^[abc]$", "d");
@@ -609,6 +633,7 @@ int main(void) {
   test_dot();
   test_star_plus_quest();
   test_counted();
+  test_repeat_error_offsets();
   test_classes();
   test_escapes();
   test_anchors();
