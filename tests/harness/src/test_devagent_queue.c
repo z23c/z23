@@ -1734,6 +1734,66 @@ static bool dvx_meta_post(struct dvx_call *c, char *brief, size_t cap)
     return true;
 }
 
+static bool dvx_path_post_case(const char *path, const char *name,
+                               const char *brief, bool accepted)
+{
+    struct dvx_call c, st;
+    dvx_post(&c, "doc", name, NULL, path, brief, NULL, -1);
+    bool ran = dvx_run(&c);
+    bool result = accepted ? dvx_ok(&c) :
+        (!dvx_ok(&c) && c.reply.error.code &&
+         strcmp(c.reply.error.code, "BAD_INPUT") == 0);
+    dvx_end(&c);
+    if (!ran || !result)
+        return false;
+    const struct json_value *rows = dvx_status_rows(&st, "queued");
+    const struct json_value *row = dvx_row_named(rows, name);
+    const char *saved = row ? json_get_str(json_get(row, "path")) : NULL;
+    bool ok = rows && (accepted ? (saved && strcmp(saved, path) == 0) : row == NULL);
+    dvx_end(&st);
+    return ok;
+}
+
+static bool dvx_path_boundaries(const char *brief)
+{
+    static const struct { const char *path; bool accepted; } cases[] = {
+        {"a/", true}, {"a\\", true}, {".../x", true}, {"a,b", true},
+        {"a//b", false}, {"a/./b", false}, {"a/../b", false},
+        {"C:x", false}, {"/a", false}, {"a:b", false},
+        {"a,,b", false}, {"a,b,c,d,e", false}, {"a/\xc3\xa9", false}
+    };
+    char name[32], longpath[258];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        (void)snprintf(name, sizeof(name), "path-%zu", i);
+        if (!dvx_path_post_case(cases[i].path, name, brief, cases[i].accepted))
+            return false;
+    }
+    memset(longpath, 'a', 257);
+    longpath[256] = '\0';
+    if (!dvx_path_post_case(longpath, "path-256", brief, true))
+        return false;
+    longpath[256] = 'a';
+    longpath[257] = '\0';
+    return dvx_path_post_case(longpath, "path-257", brief, false);
+}
+
+static int dvx_path_boundary_case(void)
+{
+    int failures = 0;
+    TEST("queue: path boundaries preserve post and stored scope") {
+        struct dvx_call c;
+        char brief[1300];
+        dvx_isolate("path-boundaries");
+        ASSERT(dvx_meta_post(&c, brief, sizeof(brief)));
+        ASSERT(dvx_path_boundaries(brief));
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+
 static int dvx_metadata_queued_case(void)
 {
     int failures = 0;
@@ -2052,6 +2112,7 @@ int test_devagent_queue(void)
 
     failures += dvx_receipt_root_cases();
     failures += dvx_unresolved_candidate_root_case();
+    failures += dvx_path_boundary_case();
     failures += dvx_metadata_queued_case();
     failures += dvx_metadata_running_case();
     failures += dvx_metadata_oom_case();

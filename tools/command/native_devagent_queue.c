@@ -270,6 +270,31 @@ static bool dvq_model_ok(const char *s)
     return true;
 }
 
+static bool dvq_path_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+           c == '-' || c == '+';
+}
+
+static bool dvq_segment_ok(const char *seg, const char *end)
+{
+    size_t len = (size_t)(end - seg);
+    if (len == 0 || (len == 1 && seg[0] == '.') ||
+        (len == 2 && seg[0] == '.' && seg[1] == '.'))
+        return false;
+    for (const char *q = seg; q < end; q++)
+        if (!dvq_path_char_ok(*q))
+            return false;
+    return true;
+}
+
+static bool dvq_drive_prefix(const char *s)
+{
+    return s[1] == ':' && ((s[0] >= 'a' && s[0] <= 'z') ||
+                           (s[0] >= 'A' && s[0] <= 'Z'));
+}
+
 /* A unit relpath is anchored at the worktree root: relative, no drive or
  * root prefix, no parent escape, no empty segments. */
 static bool dvq_path_ok(const char *s)
@@ -280,23 +305,14 @@ static bool dvq_path_ok(const char *s)
     n = strlen(s);
     if (n > 256 || s[0] == '/' || s[0] == '\\' || s[0] == '~')
         return false;
-    if (s[1] == ':' && ((s[0] >= 'a' && s[0] <= 'z') ||
-                        (s[0] >= 'A' && s[0] <= 'Z')))
+    if (dvq_drive_prefix(s))
         return false;
     for (const char *p = s; *p;) {
         const char *seg = p;
         while (*p && *p != '/' && *p != '\\')
             p++;
-        if ((size_t)(p - seg) == 0 || ((size_t)(p - seg) == 1 && seg[0] == '.') ||
-            ((size_t)(p - seg) == 2 && seg[0] == '.' && seg[1] == '.'))
+        if (!dvq_segment_ok(seg, p))
             return false;
-        for (const char *q = seg; q < p; q++) {
-            bool ok = (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
-                      (*q >= '0' && *q <= '9') || *q == '_' || *q == '.' ||
-                      *q == '-' || *q == '+';
-            if (!ok)
-                return false;
-        }
         if (*p)
             p++;
     }

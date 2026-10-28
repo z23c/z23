@@ -1158,7 +1158,6 @@ tools/command/native_devagent_mail.c:dvm_has_ipv4:17
 tools/command/native_devagent_queue.c:dvq_compose_task:21
 tools/command/native_devagent_queue.c:dvq_model_ok:16
 tools/command/native_devagent_queue.c:dvq_next:46
-tools/command/native_devagent_queue.c:dvq_path_ok:34
 tools/command/native_devagent_queue.c:dvq_post:34
 tools/command/native_devagent_queue.c:dvq_status:27
 tools/command/native_devagent_queue.c:dvq_task_prev:23
