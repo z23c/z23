@@ -448,15 +448,9 @@ static void urs_frontier_fixture_teardown(struct urs_frontier_fixture *fx)
     unlink(fx->db_path);
 }
 
-int test_utxo_recovery_service(void)
+static int urs_case_wipe_allowed(void)
 {
-    printf("\n=== utxo recovery service tests ===\n");
     int failures = 0;
-#if !defined(_WIN32)
-    failures += urs_chainstate_census_cases();
-    failures += urs_chainstate_copy_refusal_case();
-#endif
-
     /* ── 1. Policy-gated wipe: allowed (small UTXO set) ── */
 
     {
@@ -518,6 +512,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_wipe_refused(void)
+{
+    int failures = 0;
     /* ── 2. Policy-gated wipe: refused (too many rows) ── */
 
     {
@@ -556,6 +556,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_reimport_flag(void)
+{
+    int failures = 0;
     /* ── 3. Reimport flag detection ── */
 
     {
@@ -580,6 +586,12 @@ int test_utxo_recovery_service(void)
         rmdir(tmpdir);
     }
 
+    return failures;
+}
+
+static int urs_case_reimport_absent(void)
+{
+    int failures = 0;
     /* ── 4. Reimport flag absent → returns false ── */
 
     {
@@ -593,6 +605,12 @@ int test_utxo_recovery_service(void)
         rmdir(tmpdir);
     }
 
+    return failures;
+}
+
+static int urs_case_reimport_prepare(void)
+{
+    int failures = 0;
     /* ── 5. Prepare reimport: wipe + clear migration flag ── */
 
     {
@@ -667,6 +685,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_cleanup_above_tip(void)
+{
+    int failures = 0;
     /* ── 6. Clean above tip: removes only stragglers ── */
 
     {
@@ -712,6 +736,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_cleanup_limit(void)
+{
+    int failures = 0;
     /* ── 7. Clean above tip: refuses when >1000 ── */
 
     {
@@ -794,6 +824,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_cleanup_coinbase(void)
+{
+    int failures = 0;
     /* ── 8. Clean above tip: stale coinbase at tip+1 is rewound ── */
 
     {
@@ -839,6 +875,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_cleanup_single_block_limit(void)
+{
+    int failures = 0;
     /* ── 9. Clean above tip: refuses >32 single-block rows ── */
 
     {
@@ -883,6 +925,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_mirror_overshoot(void)
+{
+    int failures = 0;
     /* ── 9b. Clean above tip: MIRROR-ONLY overshoot >guard self-heals ──
      *
      * Kernel coins_kv is proven-authority AND its own derived coins-best
@@ -973,6 +1021,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_kernel_overshoot(void)
+{
+    int failures = 0;
     /* ── 9c. Clean above tip: KERNEL-store overshoot still refuses ──
      *
      * Kernel coins_kv is proven-authority (same as 9b) but its OWN derived
@@ -1075,6 +1129,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_reimport_zero(void)
+{
+    int failures = 0;
     /* ── 10. Reimport flag with "0" value → no reimport ── */
 
     {
@@ -1095,6 +1155,12 @@ int test_utxo_recovery_service(void)
         rmdir(tmpdir);
     }
 
+    return failures;
+}
+
+static int urs_case_migrated_noop(void)
+{
+    int failures = 0;
     /* ── 11. LDB import: already migrated → no-op ── */
 
     {
@@ -1144,6 +1210,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_restore_genesis(void)
+{
+    int failures = 0;
     /* ── 12. Restore with no UTXOs publishes genesis through CSR ── */
 
     {
@@ -1231,6 +1303,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_finalized_floor(void)
+{
+    int failures = 0;
     /* ── 12b. scan_fallback cannot roll below finalized reducer floor ── */
 
     {
@@ -1315,6 +1393,55 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static bool urs_restored_at(const struct chain_restore_result *r, int height)
+{
+    return r->status.ok && r->restored && r->restored_height == height;
+}
+
+static bool urs_restored_active_at(const struct chain_restore_result *r, int height)
+{
+    return r->status.ok && r->restored && !r->skip_activate &&
+           r->restored_height == height;
+}
+
+static bool urs_seed_frontier(bool up, int start, int end)
+{
+    return up && urs_seed_frontier_schema() &&
+           urs_seed_validated_headers(start, end);
+}
+
+static bool urs_floor_row_rewound(int ok, const char *status)
+{
+    return ok == 0 && strcmp(status, "floor_rewind") == 0;
+}
+
+static bool urs_cycle_ready(bool up, bool seeded, const struct block_index *cut,
+                            const struct block_index *loop, const struct block_index *candidate)
+{
+    return up && seeded && cut && loop && candidate;
+}
+
+static bool urs_empty_store_ready(bool up, bool seeded, bool genesis,
+                                  const struct block_index *candidate, bool opened)
+{
+    return up && seeded && genesis && candidate && opened;
+}
+
+static bool urs_frontier_views_match(const struct urs_frontier_fixture *fx,
+                                     const struct uint256 *got,
+                                     const struct uint256 *want, int anchor)
+{
+    return uint256_eq(got, want) &&
+        active_chain_height(&fx->ms.chain_active) == anchor + 10 &&
+        fx->ms.pindex_best_header && fx->ms.pindex_best_header->nHeight == anchor + 20;
+}
+
+static int urs_case_frontier_clamp(void)
+{
+    int failures = 0;
     /* ── 12d. Invariant A: restore candidate above the validated header
      *         frontier is clamped to the hash-linked ancestor (via=pprev) ── */
 
@@ -1322,8 +1449,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_clamp_pprev", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
 
         struct uint256 cand_hash;
         urs_hash_for_height(A + 20, &cand_hash);
@@ -1352,18 +1478,20 @@ int test_utxo_recovery_service(void)
         URS_CHECK("urs: invariant A clamps restore candidate to the "
                   "hash-linked frontier ancestor (via=pprev)",
                   up && seeded && scan_fallback &&
-                  rr.status.ok && rr.restored &&
-                  rr.restored_height == A + 10 &&
+                  urs_restored_at(&rr, A + 10) &&
                   uint256_eq(&rr.restored_hash, &want_hash) &&
-                  uint256_eq(&got_best, &want_hash) &&
-                  active_chain_height(&fx.ms.chain_active) == A + 10 &&
-                  fx.ms.pindex_best_header &&
-                  fx.ms.pindex_best_header->nHeight == A + 20);
+                  urs_frontier_views_match(&fx, &got_best, &want_hash, A));
 
         if (up)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_torn_frontier(void)
+{
+    int failures = 0;
     /* ── 12d2. Same clamp with the pprev chain TORN above the frontier
      *          (the live-wedge shape): the clamp resolves the frontier tip
      *          from validate_headers_log's OWN hash (via=log_hash) ── */
@@ -1372,8 +1500,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_clamp_loghash", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
 
         /* Sever pprev ABOVE the frontier — candidate 3,143,175 / extent
          * break 3,142,801 / frontier 3,141,533 in the live fixture. */
@@ -1400,8 +1527,7 @@ int test_utxo_recovery_service(void)
         URS_CHECK("urs: invariant A clamp survives a torn pprev extent "
                   "via the log's own hash (via=log_hash)",
                   up && seeded && cut && scan_fallback &&
-                  rr.status.ok && rr.restored &&
-                  rr.restored_height == A + 10 &&
+                  urs_restored_at(&rr, A + 10) &&
                   uint256_eq(&rr.restored_hash, &want_hash) &&
                   active_chain_height(&fx.ms.chain_active) == A + 10);
 
@@ -1409,6 +1535,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_cyclic_frontier(void)
+{
+    int failures = 0;
     /* ── 12d3. Same clamp with a cyclic/non-descending pprev extent above
      *          the frontier: boot must not spin; it should fall through to
      *          validate_headers_log's OWN hash (via=log_hash) ── */
@@ -1417,8 +1549,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_clamp_cycle", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
 
         struct uint256 cut_hash;
         struct uint256 loop_hash;
@@ -1438,7 +1569,7 @@ int test_utxo_recovery_service(void)
 
         struct chain_restore_result rr;
         memset(&rr, 0, sizeof(rr));
-        if (up && seeded && cut && loop && scan_fallback)
+        if (urs_cycle_ready(up, seeded, cut, loop, scan_fallback))
             rr = utxo_recovery_restore_chain_tip(&fx.uctx, scan_fallback);
 
         struct uint256 want_hash;
@@ -1446,9 +1577,8 @@ int test_utxo_recovery_service(void)
 
         URS_CHECK("urs: invariant A clamp bounds cyclic pprev descent "
                   "and falls back to the log's own hash",
-                  up && seeded && cut && loop && scan_fallback &&
-                  rr.status.ok && rr.restored &&
-                  rr.restored_height == A + 10 &&
+                  urs_cycle_ready(up, seeded, cut, loop, scan_fallback) &&
+                  urs_restored_at(&rr, A + 10) &&
                   uint256_eq(&rr.restored_hash, &want_hash) &&
                   active_chain_height(&fx.ms.chain_active) == A + 10);
 
@@ -1456,6 +1586,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_empty_coins(void)
+{
+    int failures = 0;
     /* ── 12d4. Wired-but-EMPTY canonical coins store (the pre-fold instant-on
      *         shape: boot-1 prefetched bodies ahead of the validated headers,
      *         zero coins behind them): the scan_fallback commit must roll back
@@ -1468,8 +1604,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_empty_coins_rb", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
 
         /* The fixture segment starts at A — seat genesis so the rollback
          * target resolves, exactly as the production block-index ladder
@@ -1499,12 +1634,12 @@ int test_utxo_recovery_service(void)
 
         struct chain_restore_result rr;
         memset(&rr, 0, sizeof(rr));
-        if (up && seeded && genesis_ok && scan_fallback && cvs_open)
+        if (urs_empty_store_ready(up, seeded, genesis_ok, scan_fallback, cvs_open))
             rr = utxo_recovery_restore_chain_tip(&fx.uctx, scan_fallback);
 
         URS_CHECK("urs: wired empty coins store rolls the scan_fallback "
                   "commit back to genesis (no state behind the tip)",
-                  up && seeded && genesis_ok && scan_fallback && cvs_open &&
+                  urs_empty_store_ready(up, seeded, genesis_ok, scan_fallback, cvs_open) &&
                   rr.status.ok && !rr.restored &&
                   active_chain_height(&fx.ms.chain_active) == 0);
 
@@ -1514,6 +1649,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_frontier_fail_open(void)
+{
+    int failures = 0;
     /* ── 12e. Fresh datadir / no frontier evidence: FAIL OPEN (no clamp,
      *         today's behavior preserved bit-for-bit) ── */
 
@@ -1545,6 +1686,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_floor_rewind(void)
+{
+    int failures = 0;
     /* ── 12f. A finalized floor ABOVE the frontier is provably unbackable:
      *         the clamp commits the frontier and REWINDS the floor rows
      *         (ok=0, status='floor_rewind' — history preserved) ── */
@@ -1553,8 +1700,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_floor_rewind", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
         struct uint256 floor_hash;
         urs_hash_for_height(A + 15, &floor_hash);
         /* The bogus over-frontier anchor stamp from the live wedge. */
@@ -1579,16 +1725,20 @@ int test_utxo_recovery_service(void)
         URS_CHECK("urs: unbackable finalized floor is rewound with "
                   "evidence (ok=0 status=floor_rewind)",
                   up && seeded && scan_fallback &&
-                  rr.status.ok && rr.restored &&
-                  rr.restored_height == A + 10 &&
-                  row_found && row_ok == 0 &&
-                  strcmp(row_status, "floor_rewind") == 0 &&
+                  urs_restored_at(&rr, A + 10) &&
+                  row_found && urs_floor_row_rewound(row_ok, row_status) &&
                   urs_tipfin_max_ok() == -1);
 
         if (up)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_guard_rewind(void)
+{
+    int failures = 0;
     /* ── 12g. scan_fallback floor-guard learns the rewind: an unbackable
      *         floor no longer fabricates restored_height=floor — the guard
      *         rewinds it and the consistent scan_fallback commits ── */
@@ -1597,8 +1747,7 @@ int test_utxo_recovery_service(void)
         const int A = REDUCER_FRONTIER_TRUSTED_ANCHOR;
         struct urs_frontier_fixture fx;
         bool up = urs_frontier_fixture_setup(&fx, "urs_guard_rewind", A, 21);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 10);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 10);
         struct uint256 floor_hash;
         urs_hash_for_height(A + 15, &floor_hash);
         seeded = seeded
@@ -1624,17 +1773,42 @@ int test_utxo_recovery_service(void)
         URS_CHECK("urs: scan_fallback guard rewinds the unbackable floor "
                   "and commits the consistent fallback",
                   up && seeded && scan_fallback &&
-                  rr.status.ok && rr.restored && !rr.skip_activate &&
-                  rr.restored_height == A + 5 &&
+                  urs_restored_active_at(&rr, A + 5) &&
                   uint256_eq(&rr.restored_hash, &cand_hash) &&
-                  row_found && row_ok == 0 &&
-                  strcmp(row_status, "floor_rewind") == 0 &&
+                  row_found && urs_floor_row_rewound(row_ok, row_status) &&
                   active_chain_height(&fx.ms.chain_active) == A + 5);
 
         if (up)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static bool urs_island_rewind_result(const struct chain_restore_result *rr,
+    const struct uint256 *candidate, bool rows_found,
+    int ok38, const char *st38, int ok35, const char *st35,
+    int ok33, const char *st33, const struct urs_frontier_fixture *fx, int height)
+{
+    return urs_restored_active_at(rr, height) &&
+        uint256_eq(&rr->restored_hash, candidate) && rows_found &&
+        urs_floor_row_rewound(ok38, st38) &&
+        urs_floor_row_rewound(ok35, st35) &&
+        urs_floor_row_rewound(ok33, st33) && urs_tipfin_max_ok() == -1 &&
+        active_chain_height(&fx->ms.chain_active) == height;
+}
+
+static bool urs_seed_island_floors(bool seeded, int anchor,
+    const struct uint256 *h33, const struct uint256 *h35, const struct uint256 *h39)
+{
+    return seeded && urs_seed_finalized_floor(anchor + 33, h33, "anchor") &&
+        urs_seed_finalized_floor(anchor + 35, h35, "anchor") &&
+        urs_seed_finalized_floor(anchor + 38, h39, "anchor");
+}
+
+static int urs_case_detached_island(void)
+{
+    int failures = 0;
     /* ── 12h. The detached-index-island shape: a detached index island
      *         vouched for by fabricated log evidence. The log frontier
      *         sits ABOVE the floor (fabricated anchor rows + cursors), so
@@ -1656,8 +1830,7 @@ int test_utxo_recovery_service(void)
         if (up)
             urs_build_segment(&fx.ms, A + 30, 11);
         /* Fabricated log evidence up to the island top: frontier=A+40. */
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 40);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 40);
 
         /* Floor debris, loudest shape on top: A+38 records the hash of
          * the A+39 island block (height disagreement), A+35/A+33 record
@@ -1666,10 +1839,7 @@ int test_utxo_recovery_service(void)
         urs_hash_for_height(A + 39, &h39);
         urs_hash_for_height(A + 35, &h35);
         urs_hash_for_height(A + 33, &h33);
-        seeded = seeded
-              && urs_seed_finalized_floor(A + 33, &h33, "anchor")
-              && urs_seed_finalized_floor(A + 35, &h35, "anchor")
-              && urs_seed_finalized_floor(A + 38, &h39, "anchor");
+        seeded = urs_seed_island_floors(seeded, A, &h33, &h35, &h39);
 
         struct uint256 cand_hash;
         urs_hash_for_height(A + 5, &cand_hash);
@@ -1691,20 +1861,19 @@ int test_utxo_recovery_service(void)
         URS_CHECK("urs: island-backed floor rows (wrong-height + unrooted) "
                   "are all rewound and the trust-rooted fallback commits",
                   up && seeded && scan_fallback &&
-                  rr.status.ok && rr.restored && !rr.skip_activate &&
-                  rr.restored_height == A + 5 &&
-                  uint256_eq(&rr.restored_hash, &cand_hash) &&
-                  rows_found &&
-                  ok38 == 0 && strcmp(st38, "floor_rewind") == 0 &&
-                  ok35 == 0 && strcmp(st35, "floor_rewind") == 0 &&
-                  ok33 == 0 && strcmp(st33, "floor_rewind") == 0 &&
-                  urs_tipfin_max_ok() == -1 &&
-                  active_chain_height(&fx.ms.chain_active) == A + 5);
+                  urs_island_rewind_result(&rr, &cand_hash, rows_found,
+                      ok38, st38, ok35, st35, ok33, st33, &fx, A + 5));
 
         if (up)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_island_candidate(void)
+{
+    int failures = 0;
     /* ── 12i. A detached-island candidate WITHIN the (fabricated) log
      *         frontier is refused by the INDEX half of the gate: the
      *         height test alone would have installed it ── */
@@ -1715,8 +1884,7 @@ int test_utxo_recovery_service(void)
         bool up = urs_frontier_fixture_setup(&fx, "urs_island_cand", A, 21);
         if (up)
             urs_build_segment(&fx.ms, A + 30, 11);
-        bool seeded = up && urs_seed_frontier_schema()
-                   && urs_seed_validated_headers(A + 1, A + 40);
+        bool seeded = urs_seed_frontier(up, A + 1, A + 40);
 
         struct uint256 cand_hash;
         urs_hash_for_height(A + 40, &cand_hash);
@@ -1737,6 +1905,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_rolling_window(void)
+{
+    int failures = 0;
     /* ── 12j. Rolling-window abstention: the candidate sits BELOW the
      *         oldest validate_headers_log row (the log is a pruned
      *         window), so the log cannot refute it — the index half
@@ -1777,6 +1951,12 @@ int test_utxo_recovery_service(void)
             urs_frontier_fixture_teardown(&fx);
     }
 
+    return failures;
+}
+
+static int urs_case_invalid_context(void)
+{
+    int failures = 0;
     /* ── 12c. Recovery entry points return rich status on invalid context ── */
 
     {
@@ -1802,6 +1982,12 @@ int test_utxo_recovery_service(void)
                   !er.bulk_reload_pending);
     }
 
+    return failures;
+}
+
+static int urs_case_zero_tip(void)
+{
+    int failures = 0;
     /* ── 13. Clean above tip: no-op when tip=0 ── */
 
     {
@@ -1828,6 +2014,12 @@ int test_utxo_recovery_service(void)
         block_map_free(&ms.map_block_index);
     }
 
+    return failures;
+}
+
+static int urs_case_stale_cursor(void)
+{
+    int failures = 0;
     /* ── 14. Stale coins cursor can advance to sync projection tip ── */
 
     {
@@ -1911,6 +2103,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_stale_cursor_lag(void)
+{
+    int failures = 0;
     /* ── 15. Stale cursor repair tolerates live UTXO height lag ── */
 
     {
@@ -1980,6 +2178,12 @@ int test_utxo_recovery_service(void)
         unlink(db_path);
     }
 
+    return failures;
+}
+
+static int urs_case_no_turbo(void)
+{
+    int failures = 0;
     /* ── Turbo mode follows the BULK RELOAD, not the word "recovered" ──
      *
      * Entering turbo mode DROPS every secondary index on node.db and the
@@ -2042,6 +2246,47 @@ int test_utxo_recovery_service(void)
         }
     }
 
+    return failures;
+}
+
+int test_utxo_recovery_service(void)
+{
+    printf("\n=== utxo recovery service tests ===\n");
+    int failures = 0;
+#if !defined(_WIN32)
+    failures += urs_chainstate_census_cases();
+    failures += urs_chainstate_copy_refusal_case();
+#endif
+    failures += urs_case_wipe_allowed();
+    failures += urs_case_wipe_refused();
+    failures += urs_case_reimport_flag();
+    failures += urs_case_reimport_absent();
+    failures += urs_case_reimport_prepare();
+    failures += urs_case_cleanup_above_tip();
+    failures += urs_case_cleanup_limit();
+    failures += urs_case_cleanup_coinbase();
+    failures += urs_case_cleanup_single_block_limit();
+    failures += urs_case_mirror_overshoot();
+    failures += urs_case_kernel_overshoot();
+    failures += urs_case_reimport_zero();
+    failures += urs_case_migrated_noop();
+    failures += urs_case_restore_genesis();
+    failures += urs_case_finalized_floor();
+    failures += urs_case_frontier_clamp();
+    failures += urs_case_torn_frontier();
+    failures += urs_case_cyclic_frontier();
+    failures += urs_case_empty_coins();
+    failures += urs_case_frontier_fail_open();
+    failures += urs_case_floor_rewind();
+    failures += urs_case_guard_rewind();
+    failures += urs_case_detached_island();
+    failures += urs_case_island_candidate();
+    failures += urs_case_rolling_window();
+    failures += urs_case_invalid_context();
+    failures += urs_case_zero_tip();
+    failures += urs_case_stale_cursor();
+    failures += urs_case_stale_cursor_lag();
+    failures += urs_case_no_turbo();
     printf("--- utxo_recovery_service: %d failure(s) ---\n", failures);
     return failures;
 }
