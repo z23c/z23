@@ -121,7 +121,6 @@ contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_txq:32
 contexts/commons/modules/zssh/tests/test_zssh_packet.c:test_wire:47
 contexts/commons/packages/zbits/app/main.c:main:28
 contexts/commons/packages/zcidr/src/zcidr.c:zcidr_parse_v6:32
-contexts/commons/packages/zcron/src/zcron.c:parse_field:33
 contexts/commons/packages/zdiff/src/zdiff.c:zdiff_run:33
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
