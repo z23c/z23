@@ -164,6 +164,23 @@ static void belig_earliest_category(
     }
 }
 
+/* The hundred-tests crossing: cumulative settled test points in
+ * (day, entry id) order; the first day the threshold is reached. */
+static void belig_hundred_tests(struct belig_test_fact *tests,
+                                size_t test_count, struct vcs_badge_facts *out)
+{
+    qsort(tests, test_count, sizeof(*tests), belig_test_fact_cmp);
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < test_count && !out->hundred_tests_crossed; i++) {
+        cumulative += tests[i].points;
+        if (cumulative >= VCS_BADGE_HUNDRED_TESTS_POINTS) {
+            out->hundred_tests_crossed = true;
+            out->hundred_tests_day = tests[i].day;
+            memcpy(out->hundred_tests_root, tests[i].release_root, 32);
+        }
+    }
+}
+
 /* Ledger facts: spans, thresholds, per-category firsts, and the
  * whole-ledger earliest day. */
 static void belig_facts_ledger(const uint8_t contributor[33],
@@ -217,18 +234,7 @@ static void belig_facts_ledger(const uint8_t contributor[33],
             out->test_points_total += facts[i].points;
         }
     }
-    /* The hundred-tests crossing: cumulative settled test points in
-     * (day, entry id) order; the first day the threshold is reached. */
-    qsort(tests, test_count, sizeof(*tests), belig_test_fact_cmp);
-    uint64_t cumulative = 0;
-    for (size_t i = 0; i < test_count && !out->hundred_tests_crossed; i++) {
-        cumulative += tests[i].points;
-        if (cumulative >= VCS_BADGE_HUNDRED_TESTS_POINTS) {
-            out->hundred_tests_crossed = true;
-            out->hundred_tests_day = tests[i].day;
-            memcpy(out->hundred_tests_root, tests[i].release_root, 32);
-        }
-    }
+    belig_hundred_tests(tests, test_count, out);
     belig_earliest_category(facts, mine, fact_count,
                             VCS_REWARD_CATEGORY_BUG_FIX_REGRESSION,
                             &out->has_bug_fix, &out->bug_fix_day,

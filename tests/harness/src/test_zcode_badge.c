@@ -1986,12 +1986,53 @@ static int zb_nofollow_trailing_sep(void)
 }
 #endif /* !_WIN32 */
 
+/* Settle days out of order and distinguish the same-day crossing roots. */
+static int t_hundred_tests_order(void)
+{
+    int failures = 0;
+    char dir[4400], zcode[4400];
+    snprintf(dir, sizeof(dir), "test-tmp/zb_order_%ld", (long)getpid());
+    snprintf(zcode, sizeof(zcode), "%s/zcode", dir);
+    zb_rm_rf(dir);
+    bool ready = zb_mkdir_p(zcode);
+    struct privkey sk;
+    struct pubkey pk;
+    ready = ready && zb_keypair(2, &sk, &pk);
+    struct vcs_reward_ledger *l = ready ? vcs_reward_ledger_load(zcode) : NULL;
+    uint8_t id_a[32], id_b[32], id_early[32];
+    ready = l &&
+        zb_auto(l, 0x31, pk.vch, VCS_REWARD_CATEGORY_TEST_CONTRIBUTION,
+                50, 0x31, id_a) == VCS_REWARD_ENQUEUE_OK &&
+        zb_auto(l, 0x32, pk.vch, VCS_REWARD_CATEGORY_TEST_CONTRIBUTION,
+                50, 0x32, id_b) == VCS_REWARD_ENQUEUE_OK &&
+        zb_settle(l, 20001) == VCS_REWARD_COMMIT_OK &&
+        zb_auto(l, 0x33, pk.vch, VCS_REWARD_CATEGORY_TEST_CONTRIBUTION,
+                50, 0x33, id_early) == VCS_REWARD_ENQUEUE_OK &&
+        zb_settle(l, 20000) == VCS_REWARD_COMMIT_OK;
+    ZB_CHECK("crossing: out-of-order days and same-day facts settled", ready);
+    if (ready) {
+        struct vcs_badge_facts facts;
+        uint8_t expected[32];
+        zb_root(memcmp(id_a, id_b, 32) < 0 ? 0x31 : 0x32, expected);
+        vcs_badge_facts_build(pk.vch, NULL, l, 20001, &facts);
+        ZB_CHECK("crossing: exact 100 selects earliest day and entry id root",
+                 facts.hundred_tests_crossed &&
+                 facts.hundred_tests_day == 20001 &&
+                 facts.test_points_total == 150 &&
+                 memcmp(facts.hundred_tests_root, expected, 32) == 0);
+    }
+    vcs_reward_ledger_free(l);
+    zb_rm_rf(dir);
+    return failures;
+}
+
 int test_zcode_badge(void)
 {
     printf("\n=== zcode_badge: SIMULATED ZCODE Badges (slice 10) ===\n");
     int failures = 0;
     failures += t_codec();
     failures += t_evaluator();
+    failures += t_hundred_tests_order();
     failures += t_store();
     failures += t_plan_issue();
     failures += t_permanence_dedup();
