@@ -652,7 +652,6 @@ engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v6
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
 engine/models/src/fleet_board_post.c:db_fleet_board_ids_before:18
-engine/modules/engine/src/engine_wire_response.c:engine_response_error_text:20
 engine/modules/engine/src/engine_wire_response.c:read_text:24
 engine/modules/fleetledger/src/fleet_ledger.c:index_row:17
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_append:27
