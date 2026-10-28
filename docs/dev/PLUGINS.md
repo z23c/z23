@@ -609,9 +609,11 @@ Every refusal carries `error.code` and `error.next_action`.
 
 ## Builder attestations
 
-A publisher signature proves who published an executable. An attestation
-proves an independent builder compiled the same source package root and got
-the same bytes. `plugin attest` and `plugin attest_verify` are owner-only,
+A publisher signature binds an executable to a publisher key. An attestation
+is a builder-key-signed claim linking an executable digest to a declared source
+package root and toolchain. Verification checks pinned builder signatures and
+matching image and source claims; it does not establish that compilation occurred
+or that the builders are independent. `plugin attest` and `plugin attest_verify` are owner-only,
 never remote, read and write files only, and are not wired into `install`,
 `switch` or any fetch: they decide nothing until a caller asks.
 
