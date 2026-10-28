@@ -6515,6 +6515,7 @@ EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
 
 LINT_FAST_GATES := \
     check-toolgen \
+    check-no-bare-tmp-fixture \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
     check-architecture-tree \
@@ -6571,7 +6572,8 @@ endif
 # wasting a whole ~7-minute proof on a failure that costs milliseconds to see.
 # Members of LINT_GATES already wired in run_lint.sh's gate_command() table.
 # Environment-dependent gates (check-git-hooks-installed) are deliberately out.
-# lint-fast itself is unchanged; agents keep using it for the edit loop.
+# Keep the fast set suitable for the edit loop; move cheap recurring failures
+# there when they can save a failed landing submission.
 # check-kpi-floor (522 ms) failed land row 757's full proof lint after a whole stacked proof.
 # check-no-new-bash (280 ms median) failed 2 lane full-lint runs on 2026-10-23.
 # check-no-block-index-flat (301 ms median) failed 1 lane full-lint run on 2026-10-23.
@@ -6589,7 +6591,6 @@ LINT_LAND_EXTRA_GATES := \
     check-release-no-dev-symbols \
     check-service-result-convergence \
     check-file-purpose \
-    check-no-bare-tmp-fixture \
     check-network-tool-hardening \
     check-proc-self-shim \
     check-no-hardlink-seeding \
