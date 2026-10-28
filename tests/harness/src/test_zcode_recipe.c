@@ -692,10 +692,39 @@ static int zr_bounds_count(enum vcs_package_recipe_error *err)
     return failures;
 }
 
+static int zr_define_boundaries(void)
+{
+    int failures = 0;
+    static const struct { const char *text; bool valid; } cases[] = {
+        {"", false}, {"A", true}, {"_a9", true}, {"A=", true},
+        {"A=+.,:-_09azAZ", true},
+        {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", true},
+        {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", false},
+        {"A=1234567890123456789012345678901", true},
+        {"A=12345678901234567890123456789012", false},
+        {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=1234567890123456789012345678901", true},
+        {"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=12345678901234567890123456789012", false},
+        {"=A", false}, {"9A", false}, {"A==", false},
+        {"A=/", false}, {"A=$", false}, {"A= ", false},
+        {"A\x80", false}, {"A=\xff", false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct vcs_package_recipe r;
+        enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
+        vcs_package_recipe_init(&r);
+        bool accepted = vcs_package_recipe_add_define(&r, cases[i].text, &err);
+        ZR_CHECK("bounds: define boundary and alphabet", accepted == cases[i].valid &&
+                 (accepted || err == VCS_PACKAGE_RECIPE_ERR_DEFINE));
+        vcs_package_recipe_free(&r);
+    }
+    return failures;
+}
+
 /* String bound, extensions and define grammar. */
 static int zr_bounds_names(enum vcs_package_recipe_error *err)
 {
     int failures = 0;
+    failures += zr_define_boundaries();
     struct vcs_package_recipe r;
 
     /* String bound: a 1025-char path fails the path grammar. */

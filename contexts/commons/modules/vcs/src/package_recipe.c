@@ -158,34 +158,27 @@ bool vcs_package_recipe_program_output(const char *program_path,
 
 static bool recipe_define_valid(const char *define)
 {
+    static const char first[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_";
+    static const char name_chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789";
+    static const char value_chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_0123456789+.,:-";
     if (!define || !define[0] || strlen(define) > VCS_PACKAGE_RECIPE_DEFINE_MAX)
         return false;
-    const char *p = define;
-    if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_'))
+    if (strspn(define, first) == 0)
         return false;
-    size_t name_len = 0;
-    for (; *p && *p != '='; p++) {
-        char c = *p;
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-              (c >= '0' && c <= '9') || c == '_'))
-            return false;
-        if (++name_len > 32)
-            return false;
-    }
-    if (*p == '=') {
-        size_t value_len = 0;
-        for (p++; *p; p++) {
-            char c = *p;
-            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                      (c >= '0' && c <= '9') || c == '_' || c == '+' ||
-                      c == '.' || c == ',' || c == ':' || c == '-';
-            if (!ok)
-                return false;
-            if (++value_len > 31)
-                return false;
-        }
-    }
-    return true;
+    size_t name_len = strspn(define, name_chars);
+    if (name_len > 32)
+        return false;
+    const char *rest = define + name_len;
+    if (*rest == '\0')
+        return true;
+    if (*rest != '=')
+        return false;
+    rest++;
+    size_t value_len = strspn(rest, value_chars);
+    return value_len <= 31 && rest[value_len] == '\0';
 }
 
 /* ── string-list insertion (canonical order, duplicates rejected) ───── */
