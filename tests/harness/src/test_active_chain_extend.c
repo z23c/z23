@@ -690,7 +690,10 @@ static bool ace_empty_tip_slot_window(struct main_state *ms,
 
 /* 17. SELF-HEAL: the raw tip slot is empty but the authority resolves the
  * finalized tip (same height) through the block map. The tip is re-installed
- * into chain[2] and the window extends along the have-data frontier to 5. */
+ * into chain[2] and the window extends along the have-data frontier to 5.
+ * Cause of the earlier red row: with the authority installed,
+ * active_chain_height() answers the authority height (2), so the extended
+ * window is pinned through active_chain_cached_height() instead. */
 static bool ace_self_heal_reinstalls_empty_tip_slot(struct main_state *ms)
 {
     struct block_index *b[8];
@@ -702,7 +705,8 @@ static bool ace_self_heal_reinstalls_empty_tip_slot(struct main_state *ms)
                                          &ms->map_block_index, b[5], 5);
     ok = ok && active_chain_at(&ms->chain_active, 2) == b[2];
     ok = ok && active_chain_at(&ms->chain_active, 5) == b[5];
-    ok = ok && active_chain_height(&ms->chain_active) == 5;
+    ok = ok && active_chain_cached_height(&ms->chain_active) == 5;
+    ok = ok && active_chain_height(&ms->chain_active) == 2; /* authority's */
     ace_auth_reset();
     return ok;
 }
@@ -875,7 +879,7 @@ int test_active_chain_extend(void)
     {
         struct main_state ms;
         ACE_CHECK("empty tip slot self-heals from authority-resolved tip and "
-                  "extends",
+                  "extends (raw window 5, authority height 2)",
                   ace_self_heal_reinstalls_empty_tip_slot(&ms));
         main_state_free(&ms);
     }
