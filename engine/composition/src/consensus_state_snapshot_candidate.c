@@ -169,6 +169,18 @@ static bool bind_source_column(sqlite3_stmt *destination, int destination_col,
     }
 }
 
+static bool stream_copy_row(sqlite3_stmt *write, sqlite3_stmt *read,
+                            int columns)
+{
+    bool ok = sqlite3_reset(write) == SQLITE_OK &&
+              sqlite3_clear_bindings(write) == SQLITE_OK;
+    for (int i = 0; ok && i < columns; i++)
+        ok = bind_source_column(write, i + 1, read, i);
+    if (ok)
+        ok = sqlite3_step(write) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+    return ok;
+}
+
 static bool stream_copy(sqlite3 *source, sqlite3 *destination,
                         const char *select_sql, const char *insert_sql,
                         int columns, uint64_t *rows_out)
@@ -182,12 +194,7 @@ static bool stream_copy(sqlite3 *source, sqlite3 *destination,
     uint64_t rows = 0;
     int rc = SQLITE_ERROR;
     while (ok && (rc = sqlite3_step(read)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
-        ok = sqlite3_reset(write) == SQLITE_OK &&
-             sqlite3_clear_bindings(write) == SQLITE_OK;
-        for (int i = 0; ok && i < columns; i++)
-            ok = bind_source_column(write, i + 1, read, i);
-        if (ok)
-            ok = sqlite3_step(write) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+        ok = stream_copy_row(write, read, columns);
         if (ok && rows == UINT64_MAX)
             ok = false;
         if (ok)
@@ -205,6 +212,23 @@ static bool stream_copy(sqlite3 *source, sqlite3 *destination,
     if (rows_out)
         *rows_out = rows;
     return ok;
+}
+
+static bool candidate_copy_provenance(sqlite3 *source, sqlite3 *destination)
+{
+    uint64_t rows = 0;
+    return stream_copy(source, destination,
+            "SELECT singleton,schema,source_epoch_digest,source_tree_root,"
+            "running_binary_digest,toolchain_digest,build_inputs_digest,"
+            "chain_corpus_digest,source_clean,validation_profile,producer_commit,"
+            "fold_cursor,receipt_digest FROM source_receipt ORDER BY singleton",
+            "INSERT INTO consensus_state_source_receipt VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            13, &rows) && rows == 1 &&
+        stream_copy(source, destination,
+            "SELECT ordinal,component,cursor,first_height,last_height,row_count,"
+            "hash_bound_count,component_digest FROM bundle_proof ORDER BY ordinal",
+            "INSERT INTO consensus_state_bundle_proof VALUES(?,?,?,?,?,?,?,?)",
+            8, &rows) && rows == CONSENSUS_STATE_BUNDLE_PROOF_COUNT;
 }
 
 static bool candidate_copy_components(
@@ -256,18 +280,7 @@ static bool candidate_copy_components(
             result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
             "injected failure after candidate nullifiers");
 
-    if (!stream_copy(source, destination,
-            "SELECT singleton,schema,source_epoch_digest,source_tree_root,"
-            "running_binary_digest,toolchain_digest,build_inputs_digest,"
-            "chain_corpus_digest,source_clean,validation_profile,producer_commit,"
-            "fold_cursor,receipt_digest FROM source_receipt ORDER BY singleton",
-            "INSERT INTO consensus_state_source_receipt VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            13, &rows) || rows != 1 ||
-        !stream_copy(source, destination,
-            "SELECT ordinal,component,cursor,first_height,last_height,row_count,"
-            "hash_bound_count,component_digest FROM bundle_proof ORDER BY ordinal",
-            "INSERT INTO consensus_state_bundle_proof VALUES(?,?,?,?,?,?,?,?)",
-            8, &rows) || rows != CONSENSUS_STATE_BUNDLE_PROOF_COUNT)
+    if (!candidate_copy_provenance(source, destination))
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
             "candidate provenance stream mismatch");
@@ -291,7 +304,7 @@ static bool insert_meta_blob(sqlite3 *db, const char *key,
     return ok;
 }
 
-static bool candidate_write_control(
+static bool candidate_write_meta_row(
     sqlite3 *db, const struct consensus_state_bundle_manifest *manifest,
     const uint8_t admission_receipt[32])
 {
@@ -349,14 +362,19 @@ static bool candidate_write_control(
         ok = sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     if (stmt)
         sqlite3_finalize(stmt);
+    return ok;
 #undef CANDIDATE_BIND
+}
 
+static bool candidate_write_progress_meta(
+    sqlite3 *db, const struct consensus_state_bundle_manifest *manifest)
+{
     uint8_t applied_height[8], trusted_height[8];
     uint8_t one = 1;
     uint8_t zero_text = '0';
     zcl_write_i64_le(applied_height, (int64_t)manifest->height + 1);
     zcl_write_i64_le(trusted_height, manifest->height);
-    ok = ok && candidate_exec(db,
+    return candidate_exec(db,
         "INSERT INTO anchor_state VALUES(0,0),(1,0)",
         "candidate anchor completeness") &&
         insert_meta_blob(db, COINS_APPLIED_HEIGHT_KEY,
@@ -369,9 +387,13 @@ static bool candidate_write_control(
                          trusted_height, sizeof(trusted_height)) &&
         insert_meta_blob(db, REDUCER_TRUSTED_BASE_HASH_KEY,
                          manifest->block_hash, 32);
-    if (!ok)
-        return false;
+}
 
+static bool candidate_write_stage_cursors(
+    sqlite3 *db, const struct consensus_state_bundle_manifest *manifest)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok = true;
     static const char *const stages[] = {
         "header_admit", "validate_headers", "body_fetch", "body_persist",
         "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
@@ -392,9 +414,14 @@ static bool candidate_write_control(
              sqlite3_step(stmt) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     }
     sqlite3_finalize(stmt);
-    stmt = NULL;
-    if (!ok || manifest->utxo_count > INT64_MAX)
-        return false;
+    return ok;
+}
+
+static bool candidate_write_anchor_logs(
+    sqlite3 *db, const struct consensus_state_bundle_manifest *manifest)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool ok;
     if (sqlite3_prepare_v2(db,
             "INSERT INTO utxo_apply_log VALUES(?,'anchor',1,0,0,0,NULL,NULL,0)",
             -1, &stmt, NULL) != SQLITE_OK)
@@ -418,6 +445,181 @@ static bool candidate_write_control(
     return ok;
 }
 
+static bool candidate_write_control(
+    sqlite3 *db, const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t admission_receipt[32])
+{
+    bool ok = candidate_write_meta_row(db, manifest, admission_receipt);
+    ok = ok && candidate_write_progress_meta(db, manifest);
+    if (!ok)
+        return false;
+
+    ok = candidate_write_stage_cursors(db, manifest);
+    if (!ok || manifest->utxo_count > INT64_MAX)
+        return false;
+    return candidate_write_anchor_logs(db, manifest);
+}
+
+static bool candidate_manifest_complete(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    return manifest->history_complete && manifest->activation_boundary == 0 &&
+           manifest->sprout_source_cursor == 0 &&
+           manifest->sapling_source_cursor == 0 &&
+           manifest->nullifier_source_cursor == 0 &&
+           manifest->source_fold_cursor == (int64_t)manifest->height + 1;
+}
+
+static bool candidate_build_open_stage(
+    struct consensus_state_candidate_output *output, sqlite3 **destination,
+    const struct consensus_state_candidate_request *request,
+    struct consensus_state_candidate_result *result, bool *transaction)
+{
+    bool ok = true;
+    if (!consensus_state_candidate_output_sqlite_open(output, destination)) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+            "candidate SQLite staging open failed");
+        ok = false;
+    }
+    if (ok && request->failpoint ==
+                  CONSENSUS_CANDIDATE_FAIL_AFTER_STAGING_OPEN) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
+            "injected failure after candidate staging open");
+        ok = false;
+    }
+    if (ok && !candidate_exec(*destination, "BEGIN IMMEDIATE",
+                              "candidate transaction begin")) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+            "candidate transaction begin failed");
+        ok = false;
+    } else if (ok) {
+        *transaction = true;
+    }
+    return ok;
+}
+
+static bool candidate_build_fill(
+    sqlite3 *source, sqlite3 *destination,
+    const struct consensus_state_candidate_request *request,
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t admission_receipt[32],
+    struct consensus_state_candidate_result *result)
+{
+    bool ok = true;
+    if (ok && !candidate_create_schema(destination)) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+            "candidate closed schema creation failed");
+        ok = false;
+    }
+    if (ok && request->failpoint == CONSENSUS_CANDIDATE_FAIL_AFTER_SCHEMA) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
+            "injected failure after candidate schema");
+        ok = false;
+    }
+    if (ok)
+        ok = candidate_copy_components(source, destination, manifest,
+                                       request->failpoint, result);
+    if (ok && !candidate_write_control(destination, manifest,
+                                       admission_receipt)) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+            "candidate control/provenance write failed");
+        ok = false;
+    }
+    if (ok && request->failpoint ==
+                  CONSENSUS_CANDIDATE_FAIL_AFTER_PROVENANCE) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
+            "injected failure after candidate provenance");
+        ok = false;
+    }
+    return ok;
+}
+
+static bool candidate_build_finish(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_candidate_output *output, sqlite3 **destination,
+    bool transaction, bool ok,
+    const struct consensus_state_candidate_request *request,
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t admission_receipt[32],
+    struct consensus_state_candidate_result *result)
+{
+    if (transaction) {
+        if (!candidate_exec(*destination, ok ? "COMMIT" : "ROLLBACK",
+                            ok ? "candidate commit" : "candidate rollback")) {
+            if (ok)
+                (void)consensus_state_candidate_fail(
+                    result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+                    "candidate transaction close failed");
+            ok = false;
+            (void)candidate_exec(*destination, "ROLLBACK",
+                                 "candidate rollback retry");
+        }
+        transaction = false;
+    }
+    if (ok && request->failpoint == CONSENSUS_CANDIDATE_FAIL_AFTER_COMMIT) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
+            "injected failure after candidate commit");
+        ok = false;
+    }
+    if (!consensus_state_candidate_sqlite_close_strict(output,
+                                                        destination)) {
+        if (ok)
+            (void)consensus_state_candidate_fail(
+                result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
+                "candidate strict close failed");
+        ok = false;
+    }
+    if (ok && !consensus_state_artifact_evidence_revalidate(evidence)) {
+        (void)consensus_state_candidate_fail(
+            result, CONSENSUS_CANDIDATE_REFUSED,
+            "candidate source evidence changed during stream");
+        ok = false;
+    }
+    if (ok)
+        ok = consensus_state_candidate_output_finalize(
+            output, manifest, admission_receipt, request->failpoint, result);
+    return ok;
+}
+
+static void candidate_build_release(
+    const struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_candidate_output *output)
+{
+    consensus_state_candidate_output_cleanup(output);
+    if (!output->binding.abandon_on_close)
+        free(output);
+    consensus_state_artifact_evidence_candidate_lease_end(evidence);
+}
+
+static void candidate_build_fill_result(
+    struct consensus_state_candidate_result *result,
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    result->status = CONSENSUS_CANDIDATE_VERIFIED_CONTAINED;
+    result->source_clean = manifest->source_clean;
+    result->validation_profile = manifest->validation_profile;
+    result->height = manifest->height;
+    result->utxo_count = manifest->utxo_count;
+    result->anchor_count = manifest->anchor_count;
+    result->nullifier_count = manifest->nullifier_count;
+    memcpy(result->artifact_digest, manifest->artifact_digest, 32);
+    snprintf(result->reason, sizeof(result->reason),
+             "built immutable contained %s height=%d source=%s profile=%s; "
+             "active generation unchanged",
+             CONSENSUS_STATE_CANDIDATE_SCHEMA, manifest->height,
+             manifest->source_clean ? "clean" : "dirty",
+             manifest->validation_profile == CONSENSUS_STATE_VALIDATION_FULL
+                 ? "full" : "checkpoint_fold");
+}
+
 bool consensus_state_snapshot_candidate_build(
     const struct consensus_state_artifact_evidence *evidence,
     const struct consensus_state_candidate_request *request,
@@ -438,11 +640,7 @@ bool consensus_state_snapshot_candidate_build(
         return consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_REFUSED,
             "candidate artifact evidence is stale");
-    if (!manifest.history_complete || manifest.activation_boundary != 0 ||
-        manifest.sprout_source_cursor != 0 ||
-        manifest.sapling_source_cursor != 0 ||
-        manifest.nullifier_source_cursor != 0 ||
-        manifest.source_fold_cursor != (int64_t)manifest.height + 1) {
+    if (!candidate_manifest_complete(&manifest)) {
         bool refused = consensus_state_candidate_fail(
             result, CONSENSUS_CANDIDATE_REFUSED,
             "candidate requires complete genesis-derived shielded history");
@@ -464,122 +662,22 @@ bool consensus_state_snapshot_candidate_build(
         consensus_state_artifact_evidence_candidate_lease_end(evidence);
         return false; // raw-return-ok:logged-by-callee
     }
-    bool ok = true;
     sqlite3 *destination = NULL;
     bool transaction = false;
-    if (!consensus_state_candidate_output_sqlite_open(output, &destination)) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-            "candidate SQLite staging open failed");
-        ok = false;
-    }
-    if (ok && request->failpoint ==
-                  CONSENSUS_CANDIDATE_FAIL_AFTER_STAGING_OPEN) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
-            "injected failure after candidate staging open");
-        ok = false;
-    }
-    if (ok && !candidate_exec(destination, "BEGIN IMMEDIATE",
-                              "candidate transaction begin")) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-            "candidate transaction begin failed");
-        ok = false;
-    } else if (ok) {
-        transaction = true;
-    }
-    if (ok && !candidate_create_schema(destination)) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-            "candidate closed schema creation failed");
-        ok = false;
-    }
-    if (ok && request->failpoint == CONSENSUS_CANDIDATE_FAIL_AFTER_SCHEMA) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
-            "injected failure after candidate schema");
-        ok = false;
-    }
+    bool ok = candidate_build_open_stage(output, &destination, request, result,
+                                         &transaction);
     if (ok)
-        ok = candidate_copy_components(source, destination, &manifest,
-                                       request->failpoint, result);
-    if (ok && !candidate_write_control(destination, &manifest,
-                                       admission_receipt)) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-            "candidate control/provenance write failed");
-        ok = false;
-    }
-    if (ok && request->failpoint ==
-                  CONSENSUS_CANDIDATE_FAIL_AFTER_PROVENANCE) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
-            "injected failure after candidate provenance");
-        ok = false;
-    }
-    if (transaction) {
-        if (!candidate_exec(destination, ok ? "COMMIT" : "ROLLBACK",
-                            ok ? "candidate commit" : "candidate rollback")) {
-            if (ok)
-                (void)consensus_state_candidate_fail(
-                    result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-                    "candidate transaction close failed");
-            ok = false;
-            (void)candidate_exec(destination, "ROLLBACK",
-                                 "candidate rollback retry");
-        }
-        transaction = false;
-    }
-    if (ok && request->failpoint == CONSENSUS_CANDIDATE_FAIL_AFTER_COMMIT) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_INJECTED_FAILURE,
-            "injected failure after candidate commit");
-        ok = false;
-    }
-    if (!consensus_state_candidate_sqlite_close_strict(output,
-                                                        &destination)) {
-        if (ok)
-            (void)consensus_state_candidate_fail(
-                result, CONSENSUS_CANDIDATE_OUTPUT_ERROR,
-                "candidate strict close failed");
-        ok = false;
-    }
-    if (ok && !consensus_state_artifact_evidence_revalidate(evidence)) {
-        (void)consensus_state_candidate_fail(
-            result, CONSENSUS_CANDIDATE_REFUSED,
-            "candidate source evidence changed during stream");
-        ok = false;
-    }
-    if (ok)
-        ok = consensus_state_candidate_output_finalize(
-            output, &manifest, admission_receipt, request->failpoint, result);
+        ok = candidate_build_fill(source, destination, request, &manifest,
+                                  admission_receipt, result);
+    ok = candidate_build_finish(evidence, output, &destination, transaction,
+                                ok, request, &manifest, admission_receipt,
+                                result);
     if (!ok) {
-        consensus_state_candidate_output_cleanup(output);
-        if (!output->binding.abandon_on_close)
-            free(output);
-        consensus_state_artifact_evidence_candidate_lease_end(evidence);
+        candidate_build_release(evidence, output);
         return false;
     }
 
-    result->status = CONSENSUS_CANDIDATE_VERIFIED_CONTAINED;
-    result->source_clean = manifest.source_clean;
-    result->validation_profile = manifest.validation_profile;
-    result->height = manifest.height;
-    result->utxo_count = manifest.utxo_count;
-    result->anchor_count = manifest.anchor_count;
-    result->nullifier_count = manifest.nullifier_count;
-    memcpy(result->artifact_digest, manifest.artifact_digest, 32);
-    snprintf(result->reason, sizeof(result->reason),
-             "built immutable contained %s height=%d source=%s profile=%s; "
-             "active generation unchanged",
-             CONSENSUS_STATE_CANDIDATE_SCHEMA, manifest.height,
-             manifest.source_clean ? "clean" : "dirty",
-             manifest.validation_profile == CONSENSUS_STATE_VALIDATION_FULL
-                 ? "full" : "checkpoint_fold");
-    consensus_state_candidate_output_cleanup(output);
-    if (!output->binding.abandon_on_close)
-        free(output);
-    consensus_state_artifact_evidence_candidate_lease_end(evidence);
+    candidate_build_fill_result(result, &manifest);
+    candidate_build_release(evidence, output);
     return true;
 }
