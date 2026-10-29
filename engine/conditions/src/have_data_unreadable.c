@@ -245,32 +245,16 @@ static enum condition_remedy_result remedy_have_data_unreadable(void)
     return COND_REMEDY_OK;
 }
 
-/* The detect-time target has healed when the stage_repair note has moved on
- * or the block has left the index (or changed hash), and otherwise when its
- * body is readable again — or, outside the note case, when the reducer
- * stage's cursor has advanced past it. */
-static bool hdu_target_healed(struct block_index *p, int target,
-                              bool note_target, bool same_note)
+/* The detect-time target has healed without a body read when the
+ * stage_repair note has moved on or the block has left the index (or changed
+ * hash). */
+static bool hdu_target_gone(struct block_index *p, bool note_target,
+                            bool same_note)
 {
-    if (note_target && !same_note) {
+    if (note_target && !same_note)
         return true;
-    }
-    if (!p || (note_target && (!p->phashBlock ||
-                               !uint256_eq(p->phashBlock, &g_target_hash)))) {
-        return true;
-    }
-    char datadir[2048];
-    GetDataDir(true, datadir, sizeof(datadir));
-    /* The reducer stage's own cursor advancing past target is the
-     * authoritative "re-derived through the repaired height" signal for the
-     * mid-chain (backfill/replay) case: there the active/finalized tip can
-     * already sit above an arbitrary rewound target even though nothing has
-     * actually been repaired yet, so tip-height alone is not a safe witness.
-     * Covers the tip+1 case too — once the block is re-fetched and applied,
-     * the cursor advances to target+1. */
-    return block_index_have_data_readable(p, datadir) ||
-           (!note_target &&
-            (int64_t)utxo_apply_stage_cursor() > (int64_t)target);
+    return !p || (note_target && (!p->phashBlock ||
+                                  !uint256_eq(p->phashBlock, &g_target_hash)));
 }
 
 static bool witness_have_data_unreadable(int64_t target_at_detect)
@@ -290,7 +274,21 @@ static bool witness_have_data_unreadable(int64_t target_at_detect)
     struct block_index *p = note_target
         ? active_chain_at(&ms->chain_active, target)
         : target_index(ms, target);
-    bool healed = hdu_target_healed(p, target, note_target, same_note);
+    bool healed = hdu_target_gone(p, note_target, same_note);
+    if (!healed) {
+        char datadir[2048];
+        GetDataDir(true, datadir, sizeof(datadir));
+        /* The reducer stage's own cursor advancing past target is the
+         * authoritative "re-derived through the repaired height" signal for the
+         * mid-chain (backfill/replay) case: there the active/finalized tip can
+         * already sit above an arbitrary rewound target even though nothing has
+         * actually been repaired yet, so tip-height alone is not a safe witness.
+         * Covers the tip+1 case too — once the block is re-fetched and applied,
+         * the cursor advances to target+1. */
+        healed = block_index_have_data_readable(p, datadir) ||
+                 (!note_target &&
+                  (int64_t)utxo_apply_stage_cursor() > (int64_t)target);
+    }
 
     /* When the torn body at `target` is readable/advanced again, retire the
      * stage_repair body-read note + its typed blocker so the
