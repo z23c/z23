@@ -5,6 +5,21 @@
 #include <stdio.h>
 #include <string.h>
 
+/* A busy node may answer its status without the synced field; only "no" holds a host apart. */
+static void sync_rule_tests(void)
+{
+    static const char unsure[] = "{\"hosts\":["
+        "{\"host\":\"a\",\"reachable\":true,\"synced\":\"unknown\",\"blocker\":\"STATUS_SOURCE_UNAVAILABLE\","
+        "\"height\":3301698,\"reference_height\":3301698,\"disk_free_gb\":50},"
+        "{\"host\":\"b\",\"reachable\":true,\"height\":3301697,\"reference_height\":3301698},"
+        "{\"host\":\"c\",\"reachable\":true,\"synced\":\"no\",\"height\":3301698,\"reference_height\":3301698,"
+        "\"disk_free_gb\":49}]}";
+    char out[1024];
+    assert(zapp_hosts_format(unsure, out, sizeof(out)) && !strncmp(out, "2 of 3 hosts in sync\n", 21));
+    assert(strstr(out, "\na · in sync · 3,301,698\n\nb · in sync · 3,301,697\n\n"));
+    assert(strstr(out, "\nc · not synced · 3,301,698\n  Low on disk · 49 GB free\n"));
+    assert(!strstr(out, "STATUS") && !strstr(out, "50 GB"));
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -19,10 +34,11 @@ int main(void)
     char out[4096];
     assert(zapp_hosts_format(snapshot, out, sizeof(out)));
     assert(!strncmp(out, "1 of 3 hosts in sync\n", 21));
-    assert(strstr(out, "\nr1 · in sync · 3,301,130\n  Blocked: review required bootstrap trust · 644 GB free\n"));
+    assert(strstr(out, "\nr1 · in sync · 3,301,130\n\nr2"));
     assert(strstr(out, "\nr2 · 10 blocks behind · 3,301,120\n\nmac"));
     assert(strstr(out, "\nmac · not answering after 25.0 s\n"));
-    assert(!strstr(out, "0 GB"));
+    assert(!strstr(out, "Blocked") && !strstr(out, "bootstrap") && !strstr(out, "GB"));
+    sync_rule_tests();
     static const char skew[] = "{\"hosts\":["
         "{\"host\":\"r2\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301630,\"reference_height\":3301631},"
         "{\"host\":\"r1\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301633,\"reference_height\":3301631},"
@@ -30,7 +46,7 @@ int main(void)
     assert(zapp_hosts_format(skew, out, sizeof(out)) && !strncmp(out, "2 of 3 hosts in sync\n", 21));
     assert(strstr(out, "\nr2 · in sync · 3,301,630\n") && strstr(out, "\nr1 · in sync · 3,301,633\n"));
     assert(strstr(out, "\nr3 · 3 blocks behind · 3,301,628\n"));
-    static const char small[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":999,"
+    static const char small[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"synced\":\"no\",\"height\":999,"
         "\"reference_height\":1000}]}";
     assert(zapp_hosts_format(small, out, sizeof(out)) && strstr(out, "\nt · 1 block behind · 999\n"));
     static const char large[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":0,"
@@ -39,7 +55,7 @@ int main(void)
            strstr(out, "\nt · 9,223,372,036,854,775,807 blocks behind · 0\n"));
     static const char odd[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":-5,"
         "\"node\":\"STARTING_UP\",\"blocker\":\"none\",\"disk_free_gb\":7}]}";
-    assert(zapp_hosts_format(odd, out, sizeof(out)) && strstr(out, "\nt · height unknown\n  Node starting up · 7 GB free\n"));
+    assert(zapp_hosts_format(odd, out, sizeof(out)) && strstr(out, "\nt · height unknown\n  Low on disk · 7 GB free\n"));
     assert(!zapp_hosts_format("{\"hosts\":[]}", out, sizeof(out)) && !out[0]);
     assert(!zapp_hosts_format("not json", out, sizeof(out)));
     assert(!zapp_hosts_format(snapshot, out, 40) && !out[0]);

@@ -60,7 +60,10 @@ sync, with its peer count. The fleet line repeats the paired host's cached
 fleet headline, read every 60 seconds without probing the hosts again. When
 the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
-synchronization detail, balance, **Stop node** and fleet invitations. Command
+synchronization detail, balance, **Stop node** and fleet invitations. Each host
+row gives the host's state and height and adds free disk only below 50 GB;
+blockers are left to the voice assistant. A host counts as in sync within two
+blocks of its `zclassicd` unless it reports itself not synced. Command
 output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
 logcat. The app runs only two read-only node commands, the node status and

@@ -17,8 +17,9 @@ static bool count_of(const struct json_value *row, const char *key, int64_t *val
     if (!v || v->type != JSON_INT) return false;
     *value = json_get_int(v); return true;
 }
-/* The two heights come from separate commands, so a block that lands between them shows a host
- * that reports itself synced as a block or two apart from its zclassicd. */
+/* The two heights come from separate commands, so a block that lands between them shows a host at
+ * the network height a block or two apart from its zclassicd. A busy node can answer its status
+ * without the synced field; only a host that reports itself not synced is held apart. */
 enum { IN_SYNC_SKEW = 2 };
 static bool host_ok(const struct json_value *row)
 {
@@ -26,7 +27,7 @@ static bool host_ok(const struct json_value *row)
     return count_of(row, "height", &height) && count_of(row, "reference_height", &reference) &&
         height >= 0 && reference >= 0 &&
         (height > reference ? height - reference : reference - height) <= IN_SYNC_SKEW &&
-        !strcmp(text_of(row, "synced"), "yes");
+        strcmp(text_of(row, "synced"), "no");
 }
 [[gnu::format(printf, 4, 5)]]
 static size_t append(char *out, size_t cap, size_t used, const char *format, ...)
@@ -78,32 +79,14 @@ static size_t state_text(const struct json_value *row, char *out, size_t cap, si
     return append(out, cap, used, "%s %s %s · %s", zapp_grouped(gap, by), gap == 1 ? "block" : "blocks",
                   height < reference ? "behind" : "ahead", at);
 }
-/* A status code such as review_required_bootstrap_trust read as words. */
-static const char *plain_words(const char *code, char out[160])
+/* Free disk shows only below the 50 GB floor the node's own preflight keeps. Blocker codes stay off
+ * the screen; the voice assistant reads a host's blockers on request. */
+enum { LOW_DISK_GB = 50 };
+static size_t disk_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
-    size_t i = 0;
-    for (; code[i] && i < 159; i++) {
-        char ch = code[i] == '_' ? ' ' : code[i];
-        out[i] = ch >= 'A' && ch <= 'Z' ? (char)(ch - 'A' + 'a') : ch;
-    }
-    out[i] = 0;
-    return out;
-}
-static bool known(const char *value)
-{
-    return strcmp(value, "unknown") && strcmp(value, "none") && strcmp(value, "ok");
-}
-static size_t detail_text(const struct json_value *row, char *out, size_t cap, size_t used)
-{
-    const char *node = text_of(row, "node"), *blocker = text_of(row, "blocker");
-    char words[160];
     int64_t disk = 0;
-    bool blocked = known(blocker), odd = !blocked && known(node);
-    if (blocked) used = append(out, cap, used, "\n  Blocked: %s", plain_words(blocker, words));
-    else if (odd) used = append(out, cap, used, "\n  Node %s", plain_words(node, words));
-    if (count_of(row, "disk_free_gb", &disk))
-        used = append(out, cap, used, "%s%lld GB free", blocked || odd ? " · " : "\n  ", (long long)disk);
-    return used;
+    if (!count_of(row, "disk_free_gb", &disk) || disk < 0 || disk >= LOW_DISK_GB) return used;
+    return append(out, cap, used, "\n  Low on disk · %lld GB free", (long long)disk);
 }
 static size_t row_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
@@ -115,7 +98,7 @@ static size_t row_text(const struct json_value *row, char *out, size_t cap, size
             (long long)(ms / 1000), (long long)(ms % 1000 / 100));
     used = append(out, cap, used, "\n%s · ", text_of(row, "host"));
     used = state_text(row, out, cap, used);
-    used = detail_text(row, out, cap, used);
+    used = disk_text(row, out, cap, used);
     return append(out, cap, used, "\n");
 }
 bool zapp_hosts_format(const char *json, char *out, size_t cap)
