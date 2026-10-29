@@ -177,36 +177,13 @@ static bool solve_store_pow_fields(int64_t product_id,
     return true;
 }
 
-int test_store(void)
+static struct wallet g_store_test_wallet;
+static struct app_runtime_context g_store_test_rt;
+static uint8_t resp[65536];  /* styled pages inline ~14 KB CSS */
+
+static int test_store_product_listing(void)
 {
     int failures = 0;
-    setup_datadir();
-
-    /* Wire a seeded merchant wallet as the current runtime so the
-     * order-creation path (serve_create_order → zslp_generate_payment_address
-     * → app_runtime_wallet) can mint a REAL, recoverable Sapling z-address —
-     * exactly as production does. Without a seeded keystore the order-create
-     * tests would (correctly) be refused with a 503, since the placeholder
-     * fallback has been removed. Static storage: the runtime pointer must
-     * outlive every call below. */
-    static struct wallet g_store_test_wallet;
-    static struct app_runtime_context g_store_test_rt;
-    memset(&g_store_test_wallet, 0, sizeof(g_store_test_wallet));
-    wallet_init(&g_store_test_wallet);
-    {
-        uint8_t seed[32];
-        memset(seed, 0x5A, sizeof(seed));
-        if (!sapling_keystore_set_seed(&g_store_test_wallet.sapling_keys, seed)) {
-            printf("store: FAIL (could not seed merchant wallet)\n");
-            failures++;
-        }
-    }
-    memset(&g_store_test_rt, 0, sizeof(g_store_test_rt));
-    g_store_test_rt.wallet = &g_store_test_wallet;
-    app_runtime_set_current(&g_store_test_rt);
-
-    uint8_t resp[65536];  /* styled pages inline ~14 KB CSS */
-
     /* ── Product listing ──────────────────────────────────── */
 
     printf("store: GET /store returns product listing... ");
@@ -242,7 +219,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_product_detail(void)
+{
+    int failures = 0;
     /* ── Product detail ───────────────────────────────────── */
 
     printf("store: GET /store/product/1 returns detail page... ");
@@ -270,7 +252,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_product_errors(void)
+{
+    int failures = 0;
     printf("store: GET /store/product/999 returns 404... ");
     {
         size_t n = store_handle_request("GET", "/store/product/999", NULL, 0,
@@ -288,12 +275,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── Create order ─────────────────────────────────────── */
-
-    char csrf1[64] = "";
-    bool have_csrf1 = fetch_csrf_token(1, csrf1, sizeof(csrf1));
-
+static int test_store_buy_form(const char *csrf1, bool have_csrf1)
+{
+    int failures = 0;
     printf("store: POST /store/buy/1 creates order (valid CSRF + PoW)... ");
     {
         char pow_ts[32] = "", pow_nonce[32] = "";
@@ -316,7 +303,12 @@ int test_store(void)
         if (ok) printf("OK (%zu bytes)\n", n);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_orders_rest(const char *csrf1)
+{
+    int failures = 0;
     printf("store: POST /store/orders REST create works (valid CSRF + PoW)... ");
     {
         char pow_ts[32] = "", pow_nonce[32] = "";
@@ -337,7 +329,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_sentinel(const char *csrf1)
+{
+    int failures = 0;
     /* ── Length-delimited form parsing ────────────────────────────
      * HTTP dispatch hands store_handle_request body slices WITHOUT a
      * NUL terminator, so the form scanner may not rely on any sentinel
@@ -373,7 +370,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_missing_addr(const char *csrf1)
+{
+    int failures = 0;
     printf("store: body missing customer_addr names the refusal (no sentinel luck)... ");
     {
         char pow_ts[32] = "", pow_nonce[32] = "";
@@ -403,7 +405,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_decoy(const char *csrf1)
+{
+    int failures = 0;
     printf("store: decoy prefix cannot shadow a properly delimited field... ");
     {
         char pow_ts[32] = "", pow_nonce[32] = "";
@@ -435,7 +442,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_duplicate(const char *csrf1)
+{
+    int failures = 0;
     printf("store: duplicate customer_addr field refuses ambiguity... ");
     {
         char pow_ts[32] = "", pow_nonce[32] = "";
@@ -467,7 +479,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_ampersand(void)
+{
+    int failures = 0;
     printf("store: shared form scanner uses ampersand boundaries only... ");
     {
         static const char body[] =
@@ -482,7 +499,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_nul(void)
+{
+    int failures = 0;
     printf("store: shared form scanner refuses NUL and malformed escapes... ");
     {
         static const char raw_nul[] = {'f','e','e','=','1','\0','2'};
@@ -504,7 +526,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_form_truncate(void)
+{
+    int failures = 0;
     printf("store: shared form scanner refuses output truncation... ");
     {
         static const char body[] = "fee=1234";
@@ -516,7 +543,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_pow_refuses_no_pow(const char *csrf1)
+{
+    int failures = 0;
     /* ── PoW order gate (resource-exhaustion mitigation) ──────────
      * Verified threat: POST /store/orders and /store/buy/:id minted a
      * z-address + wrote a DB row per request behind CSRF alone. These
@@ -559,7 +591,14 @@ int test_store(void)
             if (ok) printf("OK (pending count unchanged: %d)\n", before);
             else { printf("FAIL (before=%d after=%d)\n", before, after); failures++; }
         }
+    }
+    return failures;
+}
 
+static int test_store_pow_refuses_garbage_and_replay(const char *csrf1)
+{
+    int failures = 0;
+    {
         printf("store: order WITH garbage pow_nonce refused (unsolved puzzle)... ");
         {
             char body[384];
@@ -610,7 +649,12 @@ int test_store(void)
             else { printf("FAIL\n"); failures++; }
         }
     }
+    return failures;
+}
 
+static int test_store_buy_unknown_product(void)
+{
+    int failures = 0;
     printf("store: POST /store/buy/999 returns 404... ");
     {
         /* id=999 routes through a path id, so the CSRF context will be
@@ -633,7 +677,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_buy_address_refusals(const char *csrf1)
+{
+    int failures = 0;
     /* reject t-addr with bad Base58Check. */
     printf("store: POST /store/buy rejects t-addr with bad checksum... ");
     {
@@ -668,7 +717,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_orders_without_csrf(void)
+{
+    int failures = 0;
     /* CSRF: POST without any csrf_token must be rejected. */
     printf("store: POST /store/orders without csrf_token returns 400... ");
     {
@@ -683,7 +737,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_csrf_product_mismatch(const char *csrf1)
+{
+    int failures = 0;
     /* CSRF: token bound to product-id; replaying product 1's token
      * when POSTing for a different id must fail. */
     printf("store: CSRF token for one product_id rejected for another... ");
@@ -700,7 +759,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_customer_addr_urldecode(const char *csrf1)
+{
+    int failures = 0;
     /* URL-decode: percent-encoded address must decode to the raw
      * string before validation.  Before the fix, `%74` was kept as the
      * three literal bytes and the address failed length/shape checks
@@ -729,7 +793,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_order_status_page(void)
+{
+    int failures = 0;
     /* ── Order status ─────────────────────────────────────── */
 
     printf("store: GET /store/order/1 returns status page... ");
@@ -754,7 +823,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_order_status_rest(void)
+{
+    int failures = 0;
     printf("store: GET /store/orders REST index works... ");
     {
         size_t n = store_handle_request("GET", "/store/orders", NULL, 0,
@@ -784,7 +858,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_zslp_token_ops(void)
+{
+    int failures = 0;
     /* ── ZSLP token operations ────────────────────────────── */
 
     printf("store: zslp_create_token returns token_id... ");
@@ -838,7 +917,12 @@ int test_store(void)
         if (ok) printf("OK (t1Seller456 balance=100)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_payment_mint_addr(void)
+{
+    int failures = 0;
     printf("store: zslp_generate_payment_address mints a real z-address... ");
     {
         /* The seeded merchant runtime wallet (wired above) lets the
@@ -867,7 +951,12 @@ int test_store(void)
         if (ok) printf("OK (refused, no fake address)\n");
         else { printf("FAIL (got '%s')\n", addr); failures++; }
     }
+    return failures;
+}
 
+static int test_store_mint_null_wallet(void)
+{
+    int failures = 0;
     /* ── TEETH: the service-layer mint, called directly with the wallet ──
      * Proves both halves of the fix in one place (no runtime needed, since
      * zslp_payment_generate_address takes the wallet by argument):
@@ -895,7 +984,12 @@ int test_store(void)
         if (ok) printf("OK (both refused)\n");
         else { printf("FAIL (got '%s')\n", addr); failures++; }
     }
+    return failures;
+}
 
+static int test_store_mint_real_wallet(void)
+{
+    int failures = 0;
     printf("store: payment mint yields a real z-address with a key... ");
     {
         struct wallet *w = zcl_calloc(1, sizeof(struct wallet),
@@ -923,7 +1017,12 @@ int test_store(void)
             printf("FAIL (wallet alloc)\n"); failures++;
         }
     }
+    return failures;
+}
 
+static int test_store_token_gated_access(void)
+{
+    int failures = 0;
     /* ── Token-gated access ───────────────────────────────── */
 
     printf("store: token-gated access denied without tokens... ");
@@ -967,7 +1066,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_null_path(void)
+{
+    int failures = 0;
     /* ── NULL safety ──────────────────────────────────────── */
 
     printf("store: NULL path returns 0... ");
@@ -978,7 +1082,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_zslp_null_params(void)
+{
+    int failures = 0;
     printf("store: zslp NULL params safe... ");
     {
         bool ok = true;
@@ -995,7 +1104,12 @@ int test_store(void)
         if (ok) printf("OK (all NULL cases safe)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_processor_multi_token(void)
+{
+    int failures = 0;
     /* ── Payment processor ────────────────────────────────── */
 
     printf("store: store_process_payments runs safely... ");
@@ -1020,7 +1134,12 @@ int test_store(void)
         else { printf("FAIL (A=%llu, B=%llu)\n",
                        (unsigned long long)a, (unsigned long long)b); failures++; }
     }
+    return failures;
+}
 
+static int test_store_validation_a(void)
+{
+    int failures = 0;
     /* ── ZSLP input validation ────────────────────────────── */
 
     printf("store: reject ticker > 10 chars... ");
@@ -1063,7 +1182,12 @@ int test_store(void)
         if (ok) printf("OK (rejected)\n");
         else { printf("FAIL (should reject)\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_validation_b(void)
+{
+    int failures = 0;
     printf("store: zslp create validator rejects bad ticker... ");
     {
         struct zslp_token_create_request req = {
@@ -1118,7 +1242,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_e2e_listing_detail(void)
+{
+    int failures = 0;
     /* ── End-to-end purchase flow ────────────────────────────── */
 
     printf("store: e2e: GET /store lists 3 products... ");
@@ -1146,7 +1275,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_e2e_buy(void)
+{
+    int failures = 0;
     printf("store: e2e: POST /store/buy/1 creates order with z-addr (valid PoW)... ");
     {
         char csrf_e2e[64] = "";
@@ -1170,7 +1304,12 @@ int test_store(void)
         if (ok) printf("OK (z-address generated)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_e2e_order_access(void)
+{
+    int failures = 0;
     printf("store: e2e: GET /store/order shows Pending status... ");
     {
         /* Order created above; query the latest order */
@@ -1196,7 +1335,12 @@ int test_store(void)
         if (ok) printf("OK (access granted)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_zslp_edge(void)
+{
+    int failures = 0;
     /* ── ZSLP edge cases ─────────────────────────────────────── */
 
     printf("store: zslp multiple mints accumulate... ");
@@ -1250,7 +1394,12 @@ int test_store(void)
         else { printf("FAIL (X=%llu, Y=%llu)\n",
                        (unsigned long long)x, (unsigned long long)y); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_basic(void)
+{
+    int failures = 0;
     /* ── Template engine tests ────────────────────────────────── */
 
     printf("template: basic variable substitution... ");
@@ -1283,7 +1432,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (%s)\n", out); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_render_edges(void)
+{
+    int failures = 0;
     printf("template: triple-brace raw output (no escaping)... ");
     {
         char out[256];
@@ -1319,7 +1473,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_null_mixed(void)
+{
+    int failures = 0;
     printf("template: NULL safety... ");
     {
         char out[64];
@@ -1350,7 +1509,12 @@ int test_store(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (%s)\n", out); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_product_card(void)
+{
+    int failures = 0;
     printf("template: value with NULL treated as empty string... ");
     {
         char out[64];
@@ -1391,7 +1555,12 @@ int test_store(void)
         if (ok) printf("OK (%zu bytes)\n", n);
         else { printf("FAIL (%s)\n", out); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_xss_card(void)
+{
+    int failures = 0;
     printf("template: product card escapes HTML in name... ");
     {
         static const char CARD[] =
@@ -1411,7 +1580,12 @@ int test_store(void)
         if (ok) printf("OK (XSS neutralized)\n");
         else { printf("FAIL (%s)\n", out); failures++; }
     }
+    return failures;
+}
 
+static int test_store_template_complex(void)
+{
+    int failures = 0;
     printf("template: multiple variables in complex template... ");
     {
         char out[1024];
@@ -1437,7 +1611,12 @@ int test_store(void)
         if (ok) printf("OK (5 variables rendered)\n");
         else { printf("FAIL (%s)\n", out); failures++; }
     }
+    return failures;
+}
 
+static int test_store_sapling_small_buffer(void)
+{
+    int failures = 0;
     /* ── Sapling z-address generation ────────────────────────── */
 
     printf("store: zslp_generate_payment_address rejects small buffer... ");
@@ -1449,7 +1628,12 @@ int test_store(void)
         if (ok) printf("OK (rejected buffer < 80)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int test_store_refusal_unseeded_mint(void)
+{
+    int failures = 0;
     /* ── Refusal teeth (no seeded keystore) ─────────────────────
      * Drop the runtime wallet so the controller path has no seeded
      * keystore, then prove EVERY entry point refuses (no synthetic
@@ -1470,7 +1654,12 @@ int test_store(void)
         if (ok) printf("OK (both refused)\n");
         else { printf("FAIL (a1='%s' a2='%s')\n", addr1, addr2); failures++; }
     }
+    return failures;
+}
 
+static int test_store_refusal_buy_503(void)
+{
+    int failures = 0;
     printf("store: buy serves 503 rather than bind a fake address... ");
     {
         uint8_t resp[4096];
@@ -1504,21 +1693,14 @@ int test_store(void)
 
     /* Restore the seeded merchant wallet for any subsequent tests. */
     app_runtime_set_current(&g_store_test_rt);
+    return failures;
+}
 
-    /* ── Pending-order pool caps + pruning ──────────────────────
-     * Seed rows directly via db_store_order_save (bypassing HTTP/PoW —
-     * these are DB-shape preconditions, not proof the HTTP path can
-     * reach them; that's proven separately above) to reach the cap
-     * WITHOUT solving hundreds of real puzzles, then prove ONE real
-     * HTTP order-create attempt is refused while the pool is full, and
-     * that pruning reclaims expired rows so it un-refuses. */
+static int test_store_pool_product_cap(struct node_db *ndb, bool *have_db_io)
+{
+    int failures = 0;
+    bool have_db = *have_db_io;
     {
-        char dbpath[320];
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", test_datadir);
-        struct node_db ndb;
-        memset(&ndb, 0, sizeof(ndb));
-        bool have_db = node_db_open(&ndb, dbpath);
-
         printf("store: per-product pending cap refuses a real order when full... ");
         {
             /* Fill product 77's (synthetic — no real product row needed,
@@ -1533,10 +1715,10 @@ int test_store(void)
                          "zs1capfill%06d", i);
                 o.amount_zatoshi = 1000000;
                 o.status = STORE_ORDER_PENDING;
-                if (!db_store_order_save(&ndb, &o)) { have_db = false; break; }
+                if (!db_store_order_save(ndb, &o)) { have_db = false; break; }
             }
             int pending77 = have_db
-                ? db_store_order_count_pending_for_product(&ndb, 77) : -1;
+                ? db_store_order_count_pending_for_product(ndb, 77) : -1;
 
             char csrf_ctx77[64], csrf77[33];
             store_csrf_context(csrf_ctx77, sizeof(csrf_ctx77), 77);
@@ -1574,7 +1756,16 @@ int test_store(void)
             else { printf("FAIL (have_db=%d solved77=%d pending77=%d)\n",
                           have_db, solved77, pending77); failures++; }
         }
+    }
+    *have_db_io = have_db;
+    return failures;
+}
 
+static int test_store_pool_prune(struct node_db *ndb, bool *have_db_io)
+{
+    int failures = 0;
+    bool have_db = *have_db_io;
+    {
         printf("store: prune_expired evicts the cap-filling rows, unblocking a real order... ");
         {
             /* The seeded rows above have created_at="now" (db_store_order_save
@@ -1584,19 +1775,19 @@ int test_store(void)
              * i.e. "everything") to prove the DELETE path itself works and
              * actually shrinks the count. */
             int fresh_pruned = have_db
-                ? db_store_order_prune_expired(&ndb, STORE_ORDER_PENDING_EXPIRE_SECS)
+                ? db_store_order_prune_expired(ndb, STORE_ORDER_PENDING_EXPIRE_SECS)
                 : -1;
             int before = have_db
-                ? db_store_order_count_pending_for_product(&ndb, 77) : -1;
+                ? db_store_order_count_pending_for_product(ndb, 77) : -1;
             /* A 0-second window means "created before right now" — cross
              * into the next wall-clock second first so rows created a
              * moment ago (same second as this call) are strictly older
              * than the cutoff, not tied with it. */
             if (have_db) wait_for_next_wall_second();
             int aged_pruned = have_db
-                ? db_store_order_prune_expired(&ndb, 0) : -1;
+                ? db_store_order_prune_expired(ndb, 0) : -1;
             int after = have_db
-                ? db_store_order_count_pending_for_product(&ndb, 77) : -1;
+                ? db_store_order_count_pending_for_product(ndb, 77) : -1;
 
             bool ok = have_db && fresh_pruned == 0 &&
                       before == STORE_ORDER_MAX_PENDING_PER_PRODUCT &&
@@ -1610,7 +1801,15 @@ int test_store(void)
                 failures++;
             }
         }
+    }
+    return failures;
+}
 
+static int test_store_pool_global_cap(struct node_db *ndb, bool *have_db_io, const char *csrf1)
+{
+    int failures = 0;
+    bool have_db = *have_db_io;
+    {
         printf("store: global pending cap refuses a real order when full (product cap not tripped)... ");
         {
             /* Spread STORE_ORDER_MAX_PENDING_GLOBAL rows across many
@@ -1629,13 +1828,13 @@ int test_store(void)
                          "zs1globalfill%06d", i);
                 o.amount_zatoshi = 1000000;
                 o.status = STORE_ORDER_PENDING;
-                if (!db_store_order_save(&ndb, &o)) { seed_ok = false; break; }
+                if (!db_store_order_save(ndb, &o)) { seed_ok = false; break; }
             }
             int pending_global = seed_ok
-                ? db_store_order_count_pending(&ndb) : -1;
+                ? db_store_order_count_pending(ndb) : -1;
             /* Product 1 (a real, unrelated product) has 0 rows of its own. */
             int pending1 = seed_ok
-                ? db_store_order_count_pending_for_product(&ndb, 1) : -1;
+                ? db_store_order_count_pending_for_product(ndb, 1) : -1;
 
             char pow_ts[32] = "", pow_nonce[32] = "";
             bool have_pow = solve_store_pow_fields(1, pow_ts, sizeof(pow_ts),
@@ -1667,13 +1866,42 @@ int test_store(void)
              * same reasoning as the prune test above. */
             if (seed_ok) {
                 wait_for_next_wall_second();
-                db_store_order_prune_expired(&ndb, 0);
+                db_store_order_prune_expired(ndb, 0);
             }
         }
+    }
+    return failures;
+}
+
+    /* ── Pending-order pool caps + pruning ──────────────────────
+     * Seed rows directly via db_store_order_save (bypassing HTTP/PoW —
+     * these are DB-shape preconditions, not proof the HTTP path can
+     * reach them; that's proven separately above) to reach the cap
+     * WITHOUT solving hundreds of real puzzles, then prove ONE real
+     * HTTP order-create attempt is refused while the pool is full, and
+     * that pruning reclaims expired rows so it un-refuses. */
+static int test_store_pool_caps(const char *csrf1)
+{
+    int failures = 0;
+    {
+        char dbpath[320];
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", test_datadir);
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        bool have_db = node_db_open(&ndb, dbpath);
+
+        failures += test_store_pool_product_cap(&ndb, &have_db);
+        failures += test_store_pool_prune(&ndb, &have_db);
+        failures += test_store_pool_global_cap(&ndb, &have_db, csrf1);
 
         if (have_db) node_db_close(&ndb);
     }
+    return failures;
+}
 
+static int test_store_json_products(void)
+{
+    int failures = 0;
     /* ── Robustness: products.json loading ── */
     printf("store: loads products from JSON file... ");
     {
@@ -1710,6 +1938,88 @@ int test_store(void)
         unlink(json_path);
         test_cleanup_tmpdir(store_dir);
     }
+    return failures;
+}
+
+int test_store(void)
+{
+    int failures = 0;
+    setup_datadir();
+
+    /* Wire a seeded merchant wallet as the current runtime so the
+     * order-creation path (serve_create_order → zslp_generate_payment_address
+     * → app_runtime_wallet) can mint a REAL, recoverable Sapling z-address —
+     * exactly as production does. Without a seeded keystore the order-create
+     * tests would (correctly) be refused with a 503, since the placeholder
+     * fallback has been removed. Static storage: the runtime pointer must
+     * outlive every call below. */
+
+    memset(&g_store_test_wallet, 0, sizeof(g_store_test_wallet));
+    wallet_init(&g_store_test_wallet);
+    {
+        uint8_t seed[32];
+        memset(seed, 0x5A, sizeof(seed));
+        if (!sapling_keystore_set_seed(&g_store_test_wallet.sapling_keys, seed)) {
+            printf("store: FAIL (could not seed merchant wallet)\n");
+            failures++;
+        }
+    }
+    memset(&g_store_test_rt, 0, sizeof(g_store_test_rt));
+    g_store_test_rt.wallet = &g_store_test_wallet;
+    app_runtime_set_current(&g_store_test_rt);
+
+    failures += test_store_product_listing();
+    failures += test_store_product_detail();
+    failures += test_store_product_errors();
+
+    /* ── Create order ─────────────────────────────────────── */
+
+    char csrf1[64] = "";
+    bool have_csrf1 = fetch_csrf_token(1, csrf1, sizeof(csrf1));
+
+    failures += test_store_buy_form(csrf1, have_csrf1);
+    failures += test_store_orders_rest(csrf1);
+    failures += test_store_form_sentinel(csrf1);
+    failures += test_store_form_missing_addr(csrf1);
+    failures += test_store_form_decoy(csrf1);
+    failures += test_store_form_duplicate(csrf1);
+    failures += test_store_form_ampersand();
+    failures += test_store_form_nul();
+    failures += test_store_form_truncate();
+    failures += test_store_pow_refuses_no_pow(csrf1);
+    failures += test_store_pow_refuses_garbage_and_replay(csrf1);
+    failures += test_store_buy_unknown_product();
+    failures += test_store_buy_address_refusals(csrf1);
+    failures += test_store_orders_without_csrf();
+    failures += test_store_csrf_product_mismatch(csrf1);
+    failures += test_store_customer_addr_urldecode(csrf1);
+    failures += test_store_order_status_page();
+    failures += test_store_order_status_rest();
+    failures += test_store_zslp_token_ops();
+    failures += test_store_payment_mint_addr();
+    failures += test_store_mint_null_wallet();
+    failures += test_store_mint_real_wallet();
+    failures += test_store_token_gated_access();
+    failures += test_store_null_path();
+    failures += test_store_zslp_null_params();
+    failures += test_store_processor_multi_token();
+    failures += test_store_validation_a();
+    failures += test_store_validation_b();
+    failures += test_store_e2e_listing_detail();
+    failures += test_store_e2e_buy();
+    failures += test_store_e2e_order_access();
+    failures += test_store_zslp_edge();
+    failures += test_store_template_basic();
+    failures += test_store_template_render_edges();
+    failures += test_store_template_null_mixed();
+    failures += test_store_template_product_card();
+    failures += test_store_template_xss_card();
+    failures += test_store_template_complex();
+    failures += test_store_sapling_small_buffer();
+    failures += test_store_refusal_unseeded_mint();
+    failures += test_store_refusal_buy_503();
+    failures += test_store_pool_caps(csrf1);
+    failures += test_store_json_products();
 
     /* Tear down the seeded merchant runtime wallet. */
     app_runtime_set_current(NULL);
