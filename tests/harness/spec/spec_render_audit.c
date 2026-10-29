@@ -30,8 +30,7 @@ static char g_tmp[256];
 
 static bool make_db(int64_t t_sat, int64_t z_sat, int n_txs, int n_peers)
 {
-    snprintf(g_tmp, sizeof(g_tmp), "/tmp/zcl_audit_XXXXXX");
-    if (!mkdtemp(g_tmp)) return false;
+    if (!test_mkdtemp(g_tmp, sizeof(g_tmp), "zcl_audit")) return false;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/node.db", g_tmp);

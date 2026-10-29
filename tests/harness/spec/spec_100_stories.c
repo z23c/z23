@@ -221,8 +221,7 @@ static void seed_whale_wallet(sqlite3 *db) {
 }
 
 static bool make_wallet(enum wallet_state ws) {
-    snprintf(_d, sizeof(_d), "/tmp/zcl100_XXXXXX");
-    if (!mkdtemp(_d)) return false;
+    if (!test_mkdtemp(_d, sizeof(_d), "zcl100")) return false;
     char path[512];
     snprintf(path, sizeof(path), "%s/node.db", _d);
     sqlite3 *db = NULL;

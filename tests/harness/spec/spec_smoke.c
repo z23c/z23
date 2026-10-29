@@ -54,8 +54,7 @@ static char g_dir[256];
 
 static bool setup_wallet(int64_t t_sat, int64_t z_sat,
                           int n_tx, int n_peers) {
-    snprintf(g_dir, sizeof(g_dir), "/tmp/zcl_smoke_XXXXXX");
-    if (!mkdtemp(g_dir)) return false;
+    if (!test_mkdtemp(g_dir, sizeof(g_dir), "zcl_smoke")) return false;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/node.db", g_dir);

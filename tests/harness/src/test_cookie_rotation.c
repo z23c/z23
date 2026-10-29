@@ -408,8 +408,8 @@ int test_cookie_rotation(void)
 {
     int failures = 0;
 
-    char tmpdir[] = "/tmp/zcl_cookie_test_XXXXXX";
-    if (!mkdtemp(tmpdir)) {
+    char tmpdir[PATH_MAX];
+    if (!test_mkdtemp(tmpdir, sizeof(tmpdir), "zcl_cookie_test")) {
         printf("cookie_rotation: cannot create tmpdir... SKIP\n");
         return 0;
     }

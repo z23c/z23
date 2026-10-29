@@ -303,8 +303,9 @@ int check_connman_addnode_census_harvest_to_addrman(void)
         memset(&sigs, 0, sizeof(sigs));
         bool ok = connman_init(&cm, params, &sigs);
 
-        char tmpdir[] = "/tmp/zcl_connman_harvest_XXXXXX";
-        ok = ok && mkdtemp(tmpdir) != NULL;
+        char tmpdir[PATH_MAX];
+        ok = ok && test_mkdtemp(tmpdir, sizeof(tmpdir),
+                                "zcl_connman_harvest") != NULL;
         if (ok)
             cm.datadir = tmpdir;
 

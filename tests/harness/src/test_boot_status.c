@@ -169,8 +169,8 @@ int test_boot_status(void)
     }
 
     /* ── serialize -> read round-trip (no writer state) ───────────── */
-    char tmpl[] = "/tmp/zcl_bootstatus_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_bootstatus");
     BS_CHECK("mkdtemp created a scratch datadir", dir != NULL);
     if (!dir)
         return failures;
@@ -296,8 +296,9 @@ int test_boot_status(void)
 
     /* ── reader fails closed on absent / empty / malformed ────────── */
     {
-        char empty_dir[] = "/tmp/zcl_bootstatus_empty_XXXXXX";
-        char *ed = mkdtemp(empty_dir);
+        char empty_dir[PATH_MAX];
+        char *ed = test_mkdtemp(empty_dir, sizeof(empty_dir),
+                                "zcl_bootstatus_empty");
         struct boot_status_snapshot out;
         char why[128];
         BS_CHECK("read of missing file returns false",

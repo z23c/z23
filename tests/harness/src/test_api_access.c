@@ -194,7 +194,7 @@ static void delete_lane_status_files(char paths[3][640],
  * unknown sources. */
 static bool background_quality_reports_unknown_source(void)
 {
-    char tmp[] = "/tmp/zcl_quality_unknown_XXXXXX";
+    char tmp[256];
     char status_dir[512] = {0};
     char paths[3][640] = {{0}};
     const char *old = getenv("ZCL_QUALITY_STATE_DIR");
@@ -203,7 +203,8 @@ static bool background_quality_reports_unknown_source(void)
     bool ok = !old_set ||
         snprintf(old_copy, sizeof(old_copy), "%s", old) <
             (int)sizeof(old_copy);
-    char *root = ok ? mkdtemp(tmp) : NULL;
+    char *root = ok ? test_mkdtemp(tmp, sizeof(tmp), "zcl_quality_unknown")
+                    : NULL;
     ok = ok && status_dir_created(root, status_dir,
                                   sizeof(status_dir)) &&
         write_lane_status_files(status_dir, paths);

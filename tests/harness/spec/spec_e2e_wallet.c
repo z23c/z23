@@ -28,8 +28,7 @@ static char g_tmpdir[256];
 
 static bool setup_test_db(int64_t transparent_sat, int64_t shielded_sat)
 {
-    snprintf(g_tmpdir, sizeof(g_tmpdir), "/tmp/zcl_e2e_XXXXXX");
-    if (!mkdtemp(g_tmpdir)) return false;
+    if (!test_mkdtemp(g_tmpdir, sizeof(g_tmpdir), "zcl_e2e")) return false;
 
     char dbpath[512];
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", g_tmpdir);

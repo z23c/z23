@@ -999,8 +999,8 @@ static int test_binary_ab_fallback_posix_arm(void)
 
     blocker_module_init();
 
-    char tmpl[] = "/tmp/zcl_ab_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_ab");
     if (!dir) {
         printf("ab: mkdtemp failed — cannot run seam tests\n");
         return 1;

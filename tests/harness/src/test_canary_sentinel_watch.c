@@ -873,8 +873,8 @@ int test_canary_sentinel_watch(void)
     printf("\n=== canary_sentinel_watch tests ===\n");
     int failures = 0;
 
-    char tmpl[] = "/tmp/zcl_canary_watch_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_canary_watch");
     if (!dir) {
         printf("canary_sentinel_watch: mkdtemp FAILED — cannot run\n");
         return 1;

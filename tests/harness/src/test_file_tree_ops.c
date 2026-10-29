@@ -345,8 +345,8 @@ static int test_nested_copy_signature_parity(void)
     int failures = 0;
 
     TEST("file_tree_ops nested copy preserves bytes + mtime_ns (signature)") {
-        char root[] = "/tmp/zcl_fto_sig_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_sig");
         char src[1024], dst[1024], copied[1024], buf[64];
         bool ok = dir != NULL;
 
@@ -422,8 +422,8 @@ static int test_update_only(void)
     int failures = 0;
 
     TEST("file_tree_ops UPDATE_ONLY skips newer dst, copies older dst") {
-        char root[] = "/tmp/zcl_fto_upd_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_upd");
         char src[1024], dst[1024], d_new[1024], d_old[1024];
         bool ok = dir != NULL;
 
@@ -459,8 +459,8 @@ static int test_filter(void)
     int failures = 0;
 
     TEST("file_tree_ops filter skips LOCK + prefix/suffix patterns") {
-        char root[] = "/tmp/zcl_fto_filt_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_filt");
         char src[1024], dst[1024];
         char keep[1024], lock[1024], tmp[1024], bak[1024];
         char d_keep[1024], d_lock[1024], d_tmp[1024], d_bak[1024];
@@ -507,8 +507,8 @@ static int test_symlink_refuse(void)
     int failures = 0;
 
     TEST("file_tree_ops refuses symlink root and symlink entries") {
-        char root[] = "/tmp/zcl_fto_lnk_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_lnk");
         bool ok = dir != NULL;
 
         /* (a) symlink ROOT is refused; (b) symlink ENTRY inside a tree is
@@ -533,8 +533,8 @@ static int test_remove_and_enoent(void)
     int failures = 0;
 
     TEST("file_tree_ops remove clears nested tree; ENOENT is success") {
-        char root[] = "/tmp/zcl_fto_rm_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_rm");
         char tree[1024], sub[1024], f1[1024], f2[1024], missing[1024];
         bool ok = dir != NULL;
 
@@ -572,8 +572,8 @@ static int test_unwritable_dest(void)
     int failures = 0;
 
     TEST("file_tree_ops surfaces an unwritable destination with context") {
-        char root[] = "/tmp/zcl_fto_perm_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_perm");
         char src[1024], f[1024], ro[1024], dst[1024];
         bool ok = dir != NULL;
         bool as_root = (geteuid() == 0);
@@ -614,8 +614,8 @@ static int test_depth_bound(void)
     int failures = 0;
 
     TEST("file_tree_ops copy refuses a tree deeper than the depth bound") {
-        char root[] = "/tmp/zcl_fto_deep_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_fto_deep");
         char src[1024], dst[1024];
         bool ok = dir != NULL;
 

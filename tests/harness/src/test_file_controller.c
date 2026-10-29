@@ -661,8 +661,8 @@ static int test_file_export_snapshot_success(void)
         int tables_count = 0;
         bool ok = true;
 
-        snprintf(dir, sizeof(dir), "/tmp/zcl_file_export_success_XXXXXX");
-        ok = ok && mkdtemp(dir) != NULL;
+        ok = ok && test_mkdtemp(dir, sizeof(dir), "zcl_file_export_success")
+                       != NULL;
         snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
         snprintf(snap_path, sizeof(snap_path), "%s/consensus_snapshot.db", dir);
         ok = ok && build_snapshot_source_db(db_path, true);
@@ -722,8 +722,8 @@ static int test_file_export_snapshot_fail_closes_partial(void)
         char snap_path[320];
         bool ok = true;
 
-        snprintf(dir, sizeof(dir), "/tmp/zcl_file_export_fail_XXXXXX");
-        ok = ok && mkdtemp(dir) != NULL;
+        ok = ok && test_mkdtemp(dir, sizeof(dir), "zcl_file_export_fail")
+                       != NULL;
         snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
         snprintf(snap_path, sizeof(snap_path), "%s/consensus_snapshot.db", dir);
         ok = ok && build_snapshot_source_db(db_path, false);

@@ -42,8 +42,7 @@
 
 static void make_tmpdir(char *buf, size_t cap)
 {
-    snprintf(buf, cap, "/tmp/zcl_blf_XXXXXX");
-    if (!mkdtemp(buf)) {
+    if (!test_mkdtemp(buf, cap, "zcl_blf")) {
         perror("mkdtemp");
         buf[0] = '\0';
     }
@@ -173,7 +172,7 @@ int test_block_log_file(void)
 
     /* ── 1. Empty log: tip = UINT32_MAX, read miss returns NOT_FOUND. */
     {
-        char dir[64];
+        char dir[256];
         make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
@@ -195,7 +194,7 @@ int test_block_log_file(void)
 
     /* ── 2. Append + read back. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         struct zcl_result r = block_log_file_open(dir, &h, &p);
@@ -226,7 +225,7 @@ int test_block_log_file(void)
 
     /* ── 3. Idempotent re-append: same hash + same bytes -> OK. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));
@@ -251,7 +250,7 @@ int test_block_log_file(void)
 
     /* ── 4. Iteration order. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));
@@ -275,7 +274,7 @@ int test_block_log_file(void)
 
     /* ── 5. Persistence across close/reopen. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));
@@ -303,7 +302,7 @@ int test_block_log_file(void)
      * Approximated by truncating blocks.idx to length 0 and reopening
      * — the recovery scan must rebuild the index by walking blocks.log. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));
@@ -338,7 +337,7 @@ int test_block_log_file(void)
      * appended past the last complete record. Recovery must truncate
      * back to the last good record. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));
@@ -374,7 +373,7 @@ int test_block_log_file(void)
 
     /* ── 8. Tip selection across multi-block append. */
     {
-        char dir[64]; make_tmpdir(dir, sizeof dir);
+        char dir[256]; make_tmpdir(dir, sizeof dir);
         struct block_log_file *h = NULL;
         struct block_log_port p = {0};
         ZCL_TEST_SETUP(block_log_file_open(dir, &h, &p));

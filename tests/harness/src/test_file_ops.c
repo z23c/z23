@@ -31,8 +31,8 @@ static int test_dir_copy_success(void)
     int failures = 0;
 
     TEST("file_ops dir_copy copies regular files and reports success") {
-        char root[] = "/tmp/zcl_file_ops_success_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_file_ops_success");
         char src[1024], dst[1024], a[1024], b[1024], copied[1024];
         char buf[64];
         bool ok = dir != NULL;
@@ -64,8 +64,8 @@ static int test_file_copy_overwrites_regular_files(void)
     int failures = 0;
 
     TEST("file_ops file_copy overwrites files and rejects directories") {
-        char root[] = "/tmp/zcl_file_copy_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_file_copy");
         char src[1024], dst[1024], bad_src[1024];
         char buf[64];
         bool ok = dir != NULL;
@@ -96,8 +96,8 @@ static int test_dir_copy_partial_failure(void)
     int failures = 0;
 
     TEST("file_ops dir_copy fails closed when a source entry cannot be copied") {
-        char root[] = "/tmp/zcl_file_ops_partial_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_file_ops_partial");
         char src[1024], dst[1024], ok_file[1024], bad_dir[1024];
         bool ok = dir != NULL;
 
@@ -125,8 +125,8 @@ static int test_block_files_copy_rev_failure(void)
     int failures = 0;
 
     TEST("file_ops block_files_copy fails when rev file copy fails") {
-        char root[] = "/tmp/zcl_block_files_fail_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[PATH_MAX];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_block_files_fail");
         char src[1024], dst[1024], blk[1024], rev_dir[1024];
         bool ok = dir != NULL;
         int copied = 0;

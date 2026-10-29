@@ -551,8 +551,8 @@ static int check_durable_record_roundtrip_and_race(
     const struct consensus_state_publication_decision_record *admit2)
 {
     int failures = 0;
-    char dir_template[] = "/tmp/zcl-pcas-XXXXXX";
-    char *dir = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir = test_mkdtemp(dir_template, sizeof(dir_template), "zcl-pcas");
     PCAS_CHECK("fixture directory", dir != NULL);
     if (dir) {
         int dir_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);

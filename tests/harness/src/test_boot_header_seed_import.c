@@ -219,8 +219,8 @@ static int case_import_roundtrip(void)
         rom_seed_set_peer_bps_cap(1ull << 30);
         rom_seed_set_global_bps_cap(1ull << 30);
 
-        char sroot[] = "/tmp/zcl_hsi_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_hsi_srv");
         ASSERT(sdir != NULL);
 
         struct rom_artifact art;
@@ -241,8 +241,8 @@ static int case_import_roundtrip(void)
         ASSERT(strcmp(hm.filename, "block_index.bin") == 0);
         ASSERT(memcmp(hm.chunk_root, art.chunk_root, 32) == 0);
 
-        char croot[] = "/tmp/zcl_hsi_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_hsi_cli");
         ASSERT(cdir != NULL);
         struct rom_fetch_peer peers[1];
         memset(peers, 0, sizeof(peers));
@@ -329,8 +329,8 @@ static int case_bad_row(void)
         rom_seed_set_global_bps_cap(1ull << 30);
         blocker_clear("block_index.flat_row_quarantine");
 
-        char sroot[] = "/tmp/zcl_hsi_bad_srv_XXXXXX";
-        char *sdir = mkdtemp(sroot);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_hsi_bad_srv");
         ASSERT(sdir != NULL);
 
         /* 100 rows h=0..99; the TIP (h=99) carries an all-0xFF stored hash that
@@ -347,8 +347,8 @@ static int case_bad_row(void)
         memset(&hm, 0, sizeof(hm));
         ASSERT(boot_bundle_pick_header_seed_manifest(dirjson, &hm));
 
-        char croot[] = "/tmp/zcl_hsi_bad_cli_XXXXXX";
-        char *cdir = mkdtemp(croot);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_hsi_bad_cli");
         ASSERT(cdir != NULL);
         struct rom_fetch_peer peers[1];
         memset(peers, 0, sizeof(peers));

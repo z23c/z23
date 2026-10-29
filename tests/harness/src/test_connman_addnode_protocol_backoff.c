@@ -289,8 +289,9 @@ int check_connman_addnode_onion_seed_last_resort(void)
         no_dns_no_fixed.nFixedSeeds = 0;
         bool ok = no_dns_no_fixed.nOnionSeeds > 0;
 
-        char tmpdir[] = "/tmp/zcl_connman_lastresort_XXXXXX";
-        ok = ok && mkdtemp(tmpdir) != NULL;
+        char tmpdir[PATH_MAX];
+        ok = ok && test_mkdtemp(tmpdir, sizeof(tmpdir),
+                                "zcl_connman_lastresort") != NULL;
 
         struct connman cm;
         struct node_signals sigs;
