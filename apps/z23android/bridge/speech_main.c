@@ -102,8 +102,9 @@ static bool chat(const struct json_value *request, int client, struct json_value
         if (n <= 0 || !zapp_hosts_format(fleet_snapshot, context + n, FLEET_CAP + 128 - (size_t)n))
             snprintf(context, FLEET_CAP + 128, "Fleet status not yet observed.");
         pthread_mutex_unlock(&fleet_lock);
-        ok = (stream ? zapp_assistant_respond : zapp_assistant_chat)(&assistant, prompt, context, client,
-                answer, TEXT_CAP) && json_push_kv_str(response, "text", answer);
+        ok = (stream ? zapp_assistant_respond : zapp_assistant_chat)(&assistant, prompt,
+                json_get(request, "history"), context, client, answer, TEXT_CAP) &&
+            json_push_kv_str(response, "text", answer);
     }
     if (answer) { memory_cleanse(answer, TEXT_CAP); free(answer); }
     free(context);
@@ -173,7 +174,8 @@ static bool answer(int client, const char *prompt, char *out, size_t capacity, c
     *error = "The laptop host could not complete that request.";
     json_set_object(&response);
     bool ok = prompt && no_nul_escape(prompt) && json_read(&request, prompt, strlen(prompt)) &&
-        request.type == JSON_OBJ && request.num_children == 3 && string_is(&request, "schema", "z23.voice/1");
+        request.type == JSON_OBJ && string_is(&request, "schema", "z23.voice/1") &&
+        request.num_children == (json_get(&request, "history") ? 4u : 3u);
     if (ok) ok = timed_op(find_op(&request), &request, client, &response);
     if (ok) ok = json_write(&response, out, capacity) < capacity;
     if (!ok && capacity) out[0] = 0;

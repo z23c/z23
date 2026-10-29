@@ -4,12 +4,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 #define ZAPP_CONVERSATION_CAP 16001
+#define ZAPP_HISTORY_CAP 4096
+#define ZAPP_HISTORY_TURNS 32
+struct json_value;
+/* Earlier exchanges, oldest first, stored as NUL-terminated question and answer strings. */
+struct zapp_history {
+    char text[ZAPP_HISTORY_CAP];
+    size_t used, turns;
+};
 struct zapp_conversation_snapshot {
     char sync_status[1024];
     char balance[512];
-    char history[4096]; /* Recent exchanges, oldest first; empty when none. */
     bool balance_known, balance_stale, node_running;
 };
 bool zapp_conversation_format(const struct zapp_conversation_snapshot *snapshot,
                               const char *question, char *out, size_t cap);
+/* Appends one exchange; false if it cannot fit. A full history first drops its oldest exchanges
+ * down to half its capacity, so the retained exchanges stay an unchanged prefix for many turns. */
+bool zapp_history_append(struct zapp_history *h, const char *question, const char *answer);
+/* Writes the history as a JSON array of [question, answer] pairs. */
+bool zapp_history_json(const struct zapp_history *h, struct json_value *out);
 #endif

@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct json_value;
+
 /* Local inference servers on 127.0.0.1. The speaker reference is a WAV used
  * to condition synthesis; it is owned by the caller and outlives each call. */
 struct zapp_assistant {
@@ -14,13 +16,16 @@ struct zapp_assistant {
 /* Every call aborts when client_fd disconnects. Errors are written as user text. */
 bool zapp_assistant_transcribe(const struct zapp_assistant *a, const unsigned char *wav,
     size_t size, int client_fd, char *text, size_t cap);
-/* context is untrusted observation text (node and fleet) shown to the model as data. */
+/* history is NULL or an array of at most ZAPP_ASSISTANT_TURNS [question, answer] string pairs,
+ * oldest first, sent as earlier turns. context is untrusted observation text (node and fleet)
+ * shown to the model as data with the current question. */
+#define ZAPP_ASSISTANT_TURNS 32u
 bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
-    const char *context, int client_fd, char *answer, size_t cap);
+    const struct json_value *history, const char *context, int client_fd, char *answer, size_t cap);
 /* Like chat, but streams: each spoken chunk is sent to client_fd as a text event followed by
  * PCM16 events (zapp_relay_emit) while the model is still writing. answer holds the full text. */
 bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
-    const char *context, int client_fd, char *answer, size_t cap);
+    const struct json_value *history, const char *context, int client_fd, char *answer, size_t cap);
 /* Returns mono PCM16 WAV owned by the caller, which cleanses and frees it. */
 bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
     int client_fd, unsigned char **wav, size_t *size);

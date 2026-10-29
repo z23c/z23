@@ -14,13 +14,21 @@
 
 static const char pairing[] = "{\"port\":12345,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}";
 static const int16_t capture[] = {INT16_MIN, -1, 0, 1, INT16_MAX};
-static const char *mock_reply, *mock_op, *mock_scope;
+static const char *mock_reply, *mock_op, *mock_scope, *mock_history;
 static bool mock_success;
 static unsigned calls;
 static void check_string(const struct json_value *root, const char *key, const char *value)
 {
     const char *s = json_get_str(json_get(root, key));
     assert(s && !strcmp(s, value));
+}
+/* The request carries exactly the expected history array, or none. */
+static void check_history(const struct json_value *root)
+{
+    const struct json_value *history = json_get(root, "history");
+    assert(root->num_children == (mock_history ? 4u : 3u) && !history == !mock_history);
+    char text[256];
+    if (history) assert(json_write(history, text, sizeof(text)) < sizeof(text) && !strcmp(text, mock_history));
 }
 bool zapp_bridge_speech(const char *files, const char *wire, char *out, size_t cap,
                         const atomic_bool *cancel)
@@ -29,7 +37,8 @@ bool zapp_bridge_speech(const char *files, const char *wire, char *out, size_t c
     assert(!cancel || !atomic_load(cancel));
     calls++;
     struct json_value root = {0};
-    assert(json_read(&root, wire, strlen(wire)) && root.type == JSON_OBJ && root.num_children == 3);
+    assert(json_read(&root, wire, strlen(wire)) && root.type == JSON_OBJ);
+    check_history(&root);
     check_string(&root, "schema", "z23.voice/1");
     check_string(&root, "op", mock_op);
     if (!strcmp(mock_op, "transcribe")) {
@@ -57,7 +66,8 @@ bool zapp_bridge_speech_events(const char *files, const char *wire, char *out, s
     assert(files && wire && out && cap && on_event && !cancel);
     calls++;
     struct json_value root = {0};
-    assert(json_read(&root, wire, strlen(wire)) && root.type == JSON_OBJ && root.num_children == 3);
+    assert(json_read(&root, wire, strlen(wire)) && root.type == JSON_OBJ);
+    check_history(&root);
     check_string(&root, "schema", "z23.voice/1"); check_string(&root, "op", "respond");
     check_string(&root, "prompt", "How is my node?");
     json_cleanse_strings(&root); json_free(&root);
@@ -201,18 +211,27 @@ static void chat_cases(const char *directory)
 {
     char answer[256]; mock_op = "chat"; mock_success = true;
     mock_reply = "{\"text\":\"Your node is in step.\"}";
-    assert(zapp_speech_client_chat(directory, "How is my node?", answer, sizeof(answer), NULL));
+    assert(zapp_speech_client_chat(directory, "How is my node?", NULL, answer, sizeof(answer), NULL));
     assert(!strcmp(answer, "Your node is in step."));
+    struct json_value history = {0};
+    mock_history = "[[\"hi\",\"hello\"]]";
+    assert(json_read(&history, mock_history, strlen(mock_history)));
+    assert(zapp_speech_client_chat(directory, "How is my node?", &history, answer, sizeof(answer), NULL));
+    assert(!strcmp(answer, "Your node is in step."));
+    mock_events[0] = NULL;
+    assert(zapp_speech_client_respond(directory, "How is my node?", &history, NULL, NULL, NULL, answer,
+                                      sizeof(answer), NULL) && !strcmp(answer, "Your node is in step."));
+    mock_history = NULL; json_free(&history);
     const char *bad[] = {"{}", "{\"text\":\"\"}", "{\"text\":1}", "{\"text\":\"a\",\"b\":1}"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         mock_reply = bad[i];
-        assert(!zapp_speech_client_chat(directory, "How is my node?", answer, sizeof(answer), NULL));
+        assert(!zapp_speech_client_chat(directory, "How is my node?", NULL, answer, sizeof(answer), NULL));
     }
     mock_success = false; mock_reply = "Model unavailable.";
-    assert(!zapp_speech_client_chat(directory, "How is my node?", answer, sizeof(answer), NULL));
+    assert(!zapp_speech_client_chat(directory, "How is my node?", NULL, answer, sizeof(answer), NULL));
     assert(!strcmp(answer, mock_reply));
     unsigned before = calls;
-    assert(!zapp_speech_client_chat(directory, "", answer, sizeof(answer), NULL) && calls == before);
+    assert(!zapp_speech_client_chat(directory, "", NULL, answer, sizeof(answer), NULL) && calls == before);
 }
 struct heard { unsigned texts, pcms; char text[64]; int16_t samples[8]; size_t count; int rate; };
 static void heard_text(const char *text, void *ctx)
@@ -231,7 +250,7 @@ static bool respond_with(const char *directory, const char *event, const char *f
 {
     mock_events[0] = event; mock_events[1] = NULL; mock_reply = final; mock_success = success;
     *h = (struct heard){0};
-    return zapp_speech_client_respond(directory, "How is my node?", heard_text, heard_pcm, h, answer, cap, NULL);
+    return zapp_speech_client_respond(directory, "How is my node?", NULL, heard_text, heard_pcm, h, answer, cap, NULL);
 }
 static void respond_cases(const char *directory)
 {
@@ -241,15 +260,15 @@ static void respond_cases(const char *directory)
     mock_events[1] = "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100ff7f0080ffff\"}";
     mock_events[2] = "{\"event\":\"mood\",\"data\":\"ignored\"}"; mock_events[3] = NULL;
     mock_reply = final; mock_success = true; h = (struct heard){0};
-    assert(zapp_speech_client_respond(directory, "How is my node?", heard_text, heard_pcm, &h, answer, sizeof(answer), NULL));
+    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, heard_text, heard_pcm, &h, answer, sizeof(answer), NULL));
     assert(!strcmp(answer, "Hello there.") && h.texts == 1 && !strcmp(h.text, "Hello there."));
     assert(h.pcms == 1 && h.count == 4 && h.rate == 24000);
     assert(h.samples[0] == 1 && h.samples[1] == INT16_MAX && h.samples[2] == INT16_MIN && h.samples[3] == -1);
     mock_events[0] = NULL;
-    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, answer, sizeof(answer), NULL));
+    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, NULL, answer, sizeof(answer), NULL));
     mock_events[0] = "{\"event\":\"text\",\"data\":\"x\"}"; mock_events[1] = "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100\"}";
     mock_events[2] = NULL;
-    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, answer, sizeof(answer), NULL));
+    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, NULL, answer, sizeof(answer), NULL));
     const char *bad[] = {
         "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"zz00\"}", "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"010\"}",
         "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100aa\"}", "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"\"}",
@@ -274,7 +293,7 @@ static void respond_cases(const char *directory)
     assert(!respond_with(directory, NULL, "Model unavailable.", false, &h, answer, sizeof(answer)));
     assert(!strcmp(answer, "Model unavailable."));
     unsigned before = calls;
-    assert(!zapp_speech_client_respond(directory, "", NULL, NULL, NULL, answer, sizeof(answer), NULL) && calls == before);
+    assert(!zapp_speech_client_respond(directory, "", NULL, NULL, NULL, NULL, answer, sizeof(answer), NULL) && calls == before);
 }
 static void fleet_cases(const char *directory)
 {

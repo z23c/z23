@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
+struct json_value;
 bool zapp_speech_client_pair(const char *files, const char *json, char *error, size_t cap);
 /* True when the stored pairing is exactly this descriptor. */
 bool zapp_speech_client_paired(const char *files, const char *json);
@@ -12,13 +13,15 @@ bool zapp_speech_client_transcribe(const char *files, const int16_t *samples, si
     char *text, size_t cap, const atomic_bool *cancel);
 bool zapp_speech_client_speak(const char *files, const char *text, int16_t **samples,
     size_t *count, int *rate, const atomic_bool *cancel, char *error, size_t cap);
-/* Asks the paired laptop's private model; on failure answer holds user-facing text. */
-bool zapp_speech_client_chat(const char *files, const char *prompt, char *answer, size_t cap,
-    const atomic_bool *cancel);
+/* Asks the paired laptop's private model; on failure answer holds user-facing text. history is
+ * NULL or a JSON array of earlier [question, answer] pairs, oldest first. */
+bool zapp_speech_client_chat(const char *files, const char *prompt, const struct json_value *history,
+    char *answer, size_t cap, const atomic_bool *cancel);
 /* Streams the paired laptop's answer: on_text receives each spoken sentence and on_pcm each run
  * of mono PCM16 samples as the host produces them. answer holds the full text, or user-facing
- * error text on failure. The sample buffer is cleansed after each callback. */
-bool zapp_speech_client_respond(const char *files, const char *prompt,
+ * error text on failure. The sample buffer is cleansed after each callback. history is as for
+ * zapp_speech_client_chat. */
+bool zapp_speech_client_respond(const char *files, const char *prompt, const struct json_value *history,
     void (*on_text)(const char *text, void *ctx),
     void (*on_pcm)(const int16_t *samples, size_t count, int rate, void *ctx),
     void *ctx, char *answer, size_t cap, const atomic_bool *cancel);

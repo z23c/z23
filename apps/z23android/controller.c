@@ -24,6 +24,7 @@ struct controller {
     pthread_cond_t changed;
     struct zapp_runtime runtime;
     struct zapp_view view;
+    struct zapp_history history;
     char files[1024], action[32], argument[24000];
     uint64_t camera_ticket;
     void (*notify)(void);
@@ -123,6 +124,7 @@ static void observe_node(struct controller *c)
 }
 static void chat_result(struct controller *c, const char *prompt, const char *answer)
 {
+    (void)zapp_history_append(&c->history, prompt, answer);
     size_t needed = strlen(prompt) + strlen(answer) + 24;
     size_t used = strlen(c->view.transcript);
     if (needed >= sizeof(c->view.transcript)) {
@@ -131,13 +133,6 @@ static void chat_result(struct controller *c, const char *prompt, const char *an
     if (needed >= sizeof(c->view.transcript) - used) used = 0;
     snprintf(c->view.transcript + used, sizeof(c->view.transcript) - used,
         "%sYou: %s\n\nZ23: %s\n", used ? "\n" : "", prompt, answer);
-}
-static void recent_history(const char *transcript, char *out, size_t cap)
-{
-    size_t n = strlen(transcript);
-    const char *start = transcript + (n >= cap ? n - cap + 1 : 0);
-    if (start != transcript) { const char *line = strchr(start, '\n'); start = line ? line + 1 : transcript + n; }
-    copy_text(out, cap, start);
 }
 static void voice_stage(struct controller *c, enum zapp_voice_state state, const char *text)
 {
@@ -167,32 +162,33 @@ static void stream_pcm(const int16_t *samples, size_t count, int rate, void *opa
     if (!v->failed && !zapp_player_write(v->player, samples, count, &v->c->voice_cancel,
                                          v->error, sizeof(v->error))) v->failed = true;
 }
-/* Asks the paired laptop's private model with a fresh node snapshot and recent history; with a
+/* Asks the paired laptop's private model with a fresh node snapshot and earlier exchanges; with a
  * stream, the answer is spoken as it is written. */
 static bool ask_with(struct controller *c, const char *question, char *out, const atomic_bool *cancel,
                      struct voice_stream *stream)
 {
-    struct zapp_conversation_snapshot *snapshot = calloc(1, sizeof(*snapshot));
+    struct zapp_conversation_snapshot snapshot = {0};
+    struct json_value history = {0};
     char *prompt = calloc(1, ZAPP_CONVERSATION_CAP);
-    if (!snapshot || !prompt) {
-        free(snapshot); free(prompt);
-        copy_text(out, ZAPP_TEXT_CAP, "Not enough memory to prepare the question."); return false;
-    }
+    if (!prompt) { copy_text(out, ZAPP_TEXT_CAP, "Not enough memory to prepare the question."); return false; }
     observe_node(c);
     pthread_mutex_lock(&c->lock);
-    copy_text(snapshot->sync_status, sizeof(snapshot->sync_status), c->view.sync_status);
-    copy_text(snapshot->balance, sizeof(snapshot->balance), c->view.balance);
-    recent_history(c->view.transcript, snapshot->history, sizeof(snapshot->history));
-    snapshot->balance_known = c->view.balance_known;
-    snapshot->balance_stale = c->view.balance_stale;
-    snapshot->node_running = c->view.node_running;
+    copy_text(snapshot.sync_status, sizeof(snapshot.sync_status), c->view.sync_status);
+    copy_text(snapshot.balance, sizeof(snapshot.balance), c->view.balance);
+    snapshot.balance_known = c->view.balance_known;
+    snapshot.balance_stale = c->view.balance_stale;
+    snapshot.node_running = c->view.node_running;
+    const struct json_value *earlier = zapp_history_json(&c->history, &history) ? &history : NULL;
     pthread_mutex_unlock(&c->lock);
-    bool ok = !atomic_load(cancel) && zapp_conversation_format(snapshot, question, prompt, ZAPP_CONVERSATION_CAP);
-    if (ok) ok = stream ? zapp_speech_client_respond(c->files, prompt, NULL, stream_pcm, stream, out, ZAPP_TEXT_CAP, cancel) :
-        zapp_speech_client_chat(c->files, prompt, out, ZAPP_TEXT_CAP, cancel);
+    bool ok = !atomic_load(cancel) &&
+        zapp_conversation_format(&snapshot, question, prompt, ZAPP_CONVERSATION_CAP);
+    if (ok) ok = stream ? zapp_speech_client_respond(c->files, prompt, earlier, NULL, stream_pcm, stream,
+                                                     out, ZAPP_TEXT_CAP, cancel) :
+        zapp_speech_client_chat(c->files, prompt, earlier, out, ZAPP_TEXT_CAP, cancel);
     else if (!atomic_load(cancel)) copy_text(out, ZAPP_TEXT_CAP, "Question is invalid or too long.");
     memory_cleanse(prompt, ZAPP_CONVERSATION_CAP); free(prompt);
-    memory_cleanse(snapshot, sizeof(*snapshot)); free(snapshot);
+    memory_cleanse(&snapshot, sizeof(snapshot));
+    json_cleanse_strings(&history); json_free(&history);
     return ok && !atomic_load(cancel);
 }
 static bool ask_assistant(struct controller *c, const char *question, char *out, const atomic_bool *cancel)

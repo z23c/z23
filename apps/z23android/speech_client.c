@@ -117,13 +117,20 @@ static unsigned char *hex_decode(const char *hex, size_t *size)
     }
     *size = n / 2; return out;
 }
-static bool request(const char *files, const char *op, const char *key, const char *value,
-    struct json_value *response, const atomic_bool *cancel, char *error, size_t cap)
+static bool request_root(struct json_value *root, const char *op, const char *key, const char *value,
+                         const struct json_value *history)
 {
-    struct json_value root = {0}; json_set_object(&root);
+    json_set_object(root);
+    return json_push_kv_str(root, "schema", "z23.voice/1") && json_push_kv_str(root, "op", op) &&
+        json_push_kv_str(root, key, value) && (!history || json_push_kv(root, "history", history));
+}
+static bool request(const char *files, const char *op, const char *key, const char *value,
+    const struct json_value *history, struct json_value *response, const atomic_bool *cancel,
+    char *error, size_t cap)
+{
+    struct json_value root = {0};
     char *wire = calloc(1, SPEECH_CAP), *answer = calloc(1, SPEECH_CAP);
-    bool ok = wire && answer && json_push_kv_str(&root, "schema", "z23.voice/1") &&
-        json_push_kv_str(&root, "op", op) && json_push_kv_str(&root, key, value);
+    bool ok = wire && answer && request_root(&root, op, key, value, history);
     size_t n = ok ? json_write(&root, wire, SPEECH_CAP) : SPEECH_CAP;
     ok = ok && n < SPEECH_CAP && zapp_bridge_speech(files, wire, answer, SPEECH_CAP, cancel);
     if (!ok && answer && answer[0]) snprintf(error, cap, "%s", answer);
@@ -142,7 +149,7 @@ bool zapp_speech_client_transcribe(const char *files, const int16_t *samples, si
     bool ok = wav && zapp_voice_wav_encode(samples, count, wav, bytes, &size);
     char *hex = ok ? hex_encode(wav, size) : NULL;
     struct json_value response = {0};
-    ok = hex && request(files, "transcribe", "wav", hex, &response, cancel, text, cap);
+    ok = hex && request(files, "transcribe", "wav", hex, NULL, &response, cancel, text, cap);
     const char *value = json_get_str(json_get(&response, "text"));
     ok = ok && value && value[0] && strlen(value) < cap;
     if (ok) memcpy(text, value, strlen(value) + 1);
@@ -157,7 +164,7 @@ bool zapp_speech_client_speak(const char *files, const char *text, int16_t **sam
     snprintf(error, cap, "Spoken playback unavailable. Your reply is shown as text.");
     if (!text[0] || strlen(text) > 1000) return false;
     struct json_value response = {0};
-    bool ok = request(files, "synthesize", "text", text, &response, cancel, error, cap);
+    bool ok = request(files, "synthesize", "text", text, NULL, &response, cancel, error, cap);
     size_t bytes = 0, decoded = 0; uint32_t hz = 0;
     unsigned char *wav = ok ? hex_decode(json_get_str(json_get(&response, "wav")), &bytes) : NULL;
     int16_t *pcm = wav ? malloc(480000 * sizeof(*pcm)) : NULL;
@@ -166,13 +173,14 @@ bool zapp_speech_client_speak(const char *files, const char *text, int16_t **sam
     else dispose(pcm, 480000 * sizeof(*pcm));
     dispose(wav, bytes); json_cleanse_strings(&response); json_free(&response); return ok;
 }
-bool zapp_speech_client_chat(const char *files, const char *prompt, char *answer, size_t cap,
-    const atomic_bool *cancel)
+bool zapp_speech_client_chat(const char *files, const char *prompt, const struct json_value *history,
+    char *answer, size_t cap, const atomic_bool *cancel)
 {
     if (!files || !prompt || !answer || !cap) return false;
     snprintf(answer, cap, "The private assistant on your laptop is unavailable. Connect it over USB.");
     struct json_value response = {0};
-    bool ok = prompt[0] && request(files, "chat", "prompt", prompt, &response, cancel, answer, cap);
+    bool ok = prompt[0] &&
+        request(files, "chat", "prompt", prompt, history, &response, cancel, answer, cap);
     const char *text = ok ? json_get_str(json_get(&response, "text")) : NULL;
     ok = text && text[0] && strlen(text) < cap;
     if (ok) memcpy(answer, text, strlen(text) + 1);
@@ -184,7 +192,8 @@ bool zapp_speech_client_fleet(const char *files, bool refresh, char *out, size_t
     if (!files || !out || !cap) return false;
     snprintf(out, cap, "Fleet status is unavailable. Connect the laptop host over USB.");
     struct json_value response = {0};
-    bool ok = request(files, "fleet", "scope", refresh ? "refresh" : "status", &response, cancel, out, cap);
+    bool ok = request(files, "fleet", "scope", refresh ? "refresh" : "status", NULL, &response,
+                      cancel, out, cap);
     const struct json_value *fleet = ok ? json_get(&response, "fleet") : NULL;
     ok = fleet && fleet->type == JSON_OBJ && json_write(fleet, out, cap) < cap;
     json_cleanse_strings(&response); json_free(&response); return ok;
@@ -231,11 +240,11 @@ static bool respond_event(const struct json_value *event, void *opaque)
     if (s->on_text) s->on_text(text, s->ctx);
     return true;
 }
-static bool respond_wire(const char *prompt, char *wire)
+static bool respond_wire(const char *prompt, const struct json_value *history, char *wire)
 {
-    struct json_value root = {0}; json_set_object(&root);
-    bool ok = json_push_kv_str(&root, "schema", "z23.voice/1") && json_push_kv_str(&root, "op", "respond") &&
-        json_push_kv_str(&root, "prompt", prompt) && json_write(&root, wire, SPEECH_CAP) < SPEECH_CAP;
+    struct json_value root = {0};
+    bool ok = request_root(&root, "respond", "prompt", prompt, history) &&
+        json_write(&root, wire, SPEECH_CAP) < SPEECH_CAP;
     json_cleanse_strings(&root); json_free(&root);
     return ok;
 }
@@ -252,7 +261,7 @@ static bool respond_final(bool delivered, const char *reply, char *answer, size_
     json_cleanse_strings(&response); json_free(&response);
     return ok;
 }
-bool zapp_speech_client_respond(const char *files, const char *prompt,
+bool zapp_speech_client_respond(const char *files, const char *prompt, const struct json_value *history,
     void (*on_text)(const char *, void *), void (*on_pcm)(const int16_t *, size_t, int, void *),
     void *ctx, char *answer, size_t cap, const atomic_bool *cancel)
 {
@@ -260,7 +269,7 @@ bool zapp_speech_client_respond(const char *files, const char *prompt,
     snprintf(answer, cap, "The private assistant on your laptop is unavailable. Connect it over USB.");
     char *wire = calloc(1, SPEECH_CAP), *reply = calloc(1, SPEECH_CAP);
     struct respond_state *state = calloc(1, sizeof(*state));
-    bool ok = prompt[0] && wire && reply && state && respond_wire(prompt, wire);
+    bool ok = prompt[0] && wire && reply && state && respond_wire(prompt, history, wire);
     if (ok) {
         state->on_text = on_text; state->on_pcm = on_pcm; state->ctx = ctx;
         ok = respond_final(zapp_bridge_speech_events(files, wire, reply, SPEECH_CAP, respond_event, state, cancel),

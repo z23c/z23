@@ -282,7 +282,7 @@ static void respond_streamed(void)
     struct zapp_assistant a = {.chat_port = chat.port, .tts_port = tts.port, .speaker_b64 = "c3BlYWtlcg=="};
     char answer[512];
     reset_log();
-    assert(zapp_assistant_respond(&a, "How is the fleet?", "ctx", -1, answer, sizeof(answer)));
+    assert(zapp_assistant_respond(&a, "How is the fleet?", NULL, "ctx", -1, answer, sizeof(answer)));
     pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
     assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
     assert(strstr(chat.body[0], "\"stream\":true") && strstr(chat.body[0], "\"max_tokens\":320") &&
@@ -308,19 +308,62 @@ static void respond_muted(void)
     struct zapp_assistant a = {.chat_port = chat2.port, .tts_port = tts2.port, .speaker_b64 = "c3BlYWtlcg=="};
     char answer[512];
     reset_log();
-    assert(zapp_assistant_respond(&a, "How is the fleet?", NULL, -1, answer, sizeof(answer)));
+    assert(zapp_assistant_respond(&a, "How is the fleet?", NULL, NULL, -1, answer, sizeof(answer)));
     pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
     assert(emitted_count == 2 && strstr(emitted[0], "\"event\":\"text\"") && strstr(emitted[1], "Everything"));
     close(chat2.listener); close(tts2.listener);
     reset_log();
     a.chat_port = 1;
-    assert(!zapp_assistant_respond(&a, "Hi", NULL, -1, answer, sizeof(answer)) && strstr(answer, "unavailable"));
+    assert(!zapp_assistant_respond(&a, "Hi", NULL, NULL, -1, answer, sizeof(answer)) && strstr(answer, "unavailable"));
+}
+static void expect_message(const struct json_value *messages, size_t i, const char *role, const char *content)
+{
+    const struct json_value *m = json_at(messages, i);
+    assert(m && !strcmp(json_get_str(json_get(m, "role")), role) &&
+           !strcmp(json_get_str(json_get(m, "content")), content));
+}
+static bool messages_for(const char *history_json, struct json_value *messages)
+{
+    struct json_value history = {0};
+    assert(json_read(&history, history_json, strlen(history_json)));
+    bool ok = chat_messages(messages, "Q?", &history, "fleet data");
+    json_free(&history);
+    return ok;
+}
+static void message_cases(void)
+{
+    struct json_value messages = {0};
+    assert(chat_messages(&messages, "Q?", NULL, NULL) && json_size(&messages) == 2);
+    expect_message(&messages, 0, "system", system_prompt);
+    expect_message(&messages, 1, "user", "Observations:\nnone\n\nQ?");
+    json_free(&messages);
+    assert(messages_for("[[\"q1\",\"a1\"],[\"q2\",\"a2\"]]", &messages) && json_size(&messages) == 6);
+    expect_message(&messages, 0, "system", system_prompt);
+    expect_message(&messages, 1, "user", "q1"); expect_message(&messages, 2, "assistant", "a1");
+    expect_message(&messages, 3, "user", "q2"); expect_message(&messages, 4, "assistant", "a2");
+    expect_message(&messages, 5, "user", "Observations:\nfleet data\n\nQ?");
+    json_free(&messages);
+    const char *bad[] = {"{}", "[[\"q\"]]", "[[\"q\",\"a\",\"b\"]]", "[[\"q\",1]]", "[[\"\",\"a\"]]", "[[\"q\",\"\"]]",
+                         "[\"q\"]", "[[\"\xff\",\"a\"]]"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        assert(!messages_for(bad[i], &messages));
+        json_free(&messages);
+    }
+    char many[1024] = "[";
+    for (unsigned i = 0; i <= ZAPP_ASSISTANT_TURNS; i++) strcat(many, i ? ",[\"q\",\"a\"]" : "[\"q\",\"a\"]");
+    strcat(many, "]");
+    assert(!messages_for(many, &messages));
+    json_free(&messages);
+    size_t n = strlen(many);
+    many[n - 11] = ']'; many[n - 10] = 0;
+    assert(messages_for(many, &messages) && json_size(&messages) == 2 + 2 * ZAPP_ASSISTANT_TURNS);
+    json_free(&messages);
 }
 int main(void)
 {
     struct zapp_assistant a = {.speaker_b64 = NULL};
     sentence_cases(&a); think_cases(&a); split_cases(&a); rejected_cases(&a);
-    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted();
+    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); message_cases();
     reset_log();
     puts("assistant tests passed");
     return 0;

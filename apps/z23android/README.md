@@ -60,8 +60,12 @@ an unavailable balance is not displayed as zero.
 
 Chat refreshes a bounded read-only node summary before asking the private
 model on the paired laptop host. The summary includes synchronization text,
-balance, availability flags and recent conversation. It excludes keys,
-addresses and raw RPC output.
+balance and availability flags. It excludes keys, addresses and raw RPC
+output. Up to 32 earlier exchanges, at most 4 KB, travel as separate turns
+with a constant system message, so the model server reuses their cached
+prefix instead of re-reading the whole conversation for every question. When
+the history fills, the oldest exchanges are dropped down to half its size at
+once, which keeps the remaining prefix unchanged for many turns.
 Chat cannot execute wallet operations or spend funds.
 While an answer is pending, Send becomes Stop reply. Cancellation closes the
 client connection and discards late answers. It does not stop the full node
@@ -178,6 +182,12 @@ Two answers of 15.8 s and 22.0 s played with 2 gaps totaling 0.52 s and with
 no gaps. Four synthesized sentences transcribed back to their input text
 except one compound word. These are single observations, not guarantees.
 Recognition accuracy and speech quality are otherwise unqualified.
+
+With earlier exchanges sent as separate turns, chat re-reads 285-347 prompt
+tokens per question (0.80-0.96 s) instead of 669-734 tokens that grew with the
+conversation (1.75-1.84 s). Over six later answers the first text arrived in
+1.1-1.3 s and first audio in 4.4-5.2 s after the host received the question; in
+three of them the first sound came 5.4-5.7 s after the end of speech.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That
