@@ -512,6 +512,132 @@ static void publish_build_refusal(struct json_value *result,
             vcs_zcode_dht_record_error_string(reason));
 }
 
+/* The pointer-namespace publish gates; true means the spec may go on. */
+static bool publish_pointer_gates(const struct vcs_zcode_dht_publish_spec *spec,
+                                  struct json_value *result,
+                                  enum vcs_zcode_dht_record_kind evidence_kind) {
+  if (evidence_kind || spec->kind != VCS_ZCODE_DHT_RECORD_POINTER)
+    return true;
+  if (strcmp(spec->namespace_name, "zclassic23.package") == 0 &&
+      !boot_zcode_dht_package_pointer_publish_gate(spec, result))
+    return false;
+  /* The attestation lane rides the SAME frozen publish path: a POINTER in
+   * VCS_PACKAGE_ATTEST_DHT_NAMESPACE binds the attested package root to the
+   * attestation blob root. Its gate is local hygiene only — the binding a
+   * READER can rely on is re-checked receiver-side by
+   * vcs_package_attest_transport_admit(expect_package_root). PROVIDER
+   * records in the same namespace are deliberately ungated. */
+  if (strcmp(spec->namespace_name, VCS_PACKAGE_ATTEST_DHT_NAMESPACE) == 0 &&
+      !boot_zcode_dht_attestation_pointer_publish_gate(spec, result))
+    return false;
+  /* Work solutions ride the same frozen publish path: a POINTER in
+   * VCS_ZCODE_WORK_DHT_NAMESPACE binds a task root (semantic) to the source
+   * package that proves it (transport). Gate doctrine identical to the
+   * attestation lane above — local hygiene publisher-side, the real
+   * property is the puller's vcs_zcode_work_solution_admit. PROVIDER
+   * records here are deliberately ungated. */
+  if (strcmp(spec->namespace_name, VCS_ZCODE_WORK_DHT_NAMESPACE) == 0 &&
+      !boot_zcode_dht_work_pointer_publish_gate(spec, result))
+    return false;
+  /* Task postings ride the same frozen publish path: a POINTER in
+   * VCS_ZCODE_TASK_DHT_NAMESPACE binds a task root (semantic) to the
+   * context package that carries its goal and proof policy (transport).
+   * Gate doctrine identical to the two lanes above — local hygiene
+   * publisher-side, the real property is the puller's
+   * vcs_zcode_task_context_admit. PROVIDER records here are deliberately
+   * ungated. */
+  if (strcmp(spec->namespace_name, VCS_ZCODE_TASK_DHT_NAMESPACE) == 0 &&
+      !boot_zcode_dht_task_pointer_publish_gate(spec, result))
+    return false;
+  return true;
+}
+
+/* Plan mode; false means an error is already written to result. */
+static bool publish_plan_step(struct vcs_zcode_dht_publish_spec *spec,
+                              uint8_t *token, struct vcs_zcode_dht_record *record,
+                              enum vcs_zcode_dht_record_error *reason,
+                              struct json_value *result,
+                              enum vcs_zcode_dht_record_kind evidence_kind) {
+  bool planned = evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+      ? boot_zcode_dht_storage_ack_plan(spec, token, record)
+      : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
+        ? boot_zcode_dht_source_reproduction_ack_plan(
+              spec, token, record)
+        : boot_zcode_dht_record_publish_plan(spec, token, record,
+                                             reason);
+  if (!planned) {
+    if (!evidence_kind)
+      publish_build_refusal(result, *reason);
+    else
+      rpc_error(
+          result,
+          evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+              ? "POSSESSION_REQUIRED" : "SOURCE_RECONSTRUCTION_REQUIRED",
+          evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+              ? "complete pinned bytes failed full possession proof"
+              : "complete accepted source carrier failed exact "
+                "reconstruction");
+    return false;
+  }
+  return true;
+}
+
+/* Commit mode; false means an error is already written to result. */
+static bool publish_commit_step(const struct json_value *in,
+                                struct vcs_zcode_dht_publish_spec *spec,
+                                uint8_t *token,
+                                struct vcs_zcode_dht_record *record,
+                                enum vcs_zcode_dht_record_error *reason,
+                                struct json_value *result,
+                                enum vcs_zcode_dht_record_kind evidence_kind) {
+  const char *hex = input_str(in, "plan_token");
+  if (!hex || strlen(hex) != 64 || !zcl_hex_decode_lower(hex, token, 32)) {
+    rpc_error(result, "INVALID_PLAN_TOKEN",
+              "commit requires the exact canonical plan_token");
+    return false;
+  }
+  enum vcs_zcode_dht_record_store_result stored =
+      evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
+          ? boot_zcode_dht_storage_ack_commit(
+                spec, token, public_now(), record)
+      : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
+        ? boot_zcode_dht_source_reproduction_ack_commit(
+              spec, token, public_now(), record)
+        : boot_zcode_dht_record_publish_commit(spec, token, public_now(),
+                                               record, reason);
+  if (stored != VCS_ZCODE_DHT_RECORD_STORE_ADDED &&
+      stored != VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE &&
+      stored != VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
+    if (!evidence_kind && *reason != VCS_ZCODE_DHT_RECORD_OK &&
+        stored == VCS_ZCODE_DHT_RECORD_STORE_INVALID)
+      publish_build_refusal(result, *reason);
+    else
+      rpc_error(result,
+                stored == VCS_ZCODE_DHT_RECORD_STORE_STALE
+                    ? "STALE_PLAN" : "PUBLISH_REFUSED",
+                vcs_zcode_dht_record_store_result_string(stored));
+    return false;
+  }
+  return true;
+}
+
+static void publish_fill_result(struct json_value *result, const char *mode,
+                                const uint8_t *token,
+                                const struct vcs_zcode_dht_record *record) {
+  char token_hex[65];
+  zcl_hex_encode(token, 32, token_hex);
+  json_set_object(result);
+  json_push_kv_bool(result, "ok", true);
+  json_push_kv_str(result, "mode", mode);
+  json_push_kv_bool(result, "committed", strcmp(mode, "commit") == 0);
+  json_push_kv_str(result, "plan_token", token_hex);
+  struct json_value row;
+  json_init(&row);
+  boot_zcode_dht_record_json(&row, record, true);
+  json_push_kv(result, "record", &row);
+  json_free(&row);
+}
+
 static bool rpc_publish_impl(
     const struct json_value *params, bool help, struct json_value *result,
     enum vcs_zcode_dht_record_kind evidence_kind) {
@@ -537,108 +663,19 @@ static bool rpc_publish_impl(
               "ACK evidence uses its dedicated byte-proof path");
     return true;
   }
-  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
-      strcmp(spec.namespace_name, "zclassic23.package") == 0 &&
-      !boot_zcode_dht_package_pointer_publish_gate(&spec, result))
-    return true;
-  /* The attestation lane rides the SAME frozen publish path: a POINTER in
-   * VCS_PACKAGE_ATTEST_DHT_NAMESPACE binds the attested package root to the
-   * attestation blob root. Its gate is local hygiene only — the binding a
-   * READER can rely on is re-checked receiver-side by
-   * vcs_package_attest_transport_admit(expect_package_root). PROVIDER
-   * records in the same namespace are deliberately ungated. */
-  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
-      strcmp(spec.namespace_name, VCS_PACKAGE_ATTEST_DHT_NAMESPACE) == 0 &&
-      !boot_zcode_dht_attestation_pointer_publish_gate(&spec, result))
-    return true;
-  /* Work solutions ride the same frozen publish path: a POINTER in
-   * VCS_ZCODE_WORK_DHT_NAMESPACE binds a task root (semantic) to the source
-   * package that proves it (transport). Gate doctrine identical to the
-   * attestation lane above — local hygiene publisher-side, the real
-   * property is the puller's vcs_zcode_work_solution_admit. PROVIDER
-   * records here are deliberately ungated. */
-  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
-      strcmp(spec.namespace_name, VCS_ZCODE_WORK_DHT_NAMESPACE) == 0 &&
-      !boot_zcode_dht_work_pointer_publish_gate(&spec, result))
-    return true;
-  /* Task postings ride the same frozen publish path: a POINTER in
-   * VCS_ZCODE_TASK_DHT_NAMESPACE binds a task root (semantic) to the
-   * context package that carries its goal and proof policy (transport).
-   * Gate doctrine identical to the two lanes above — local hygiene
-   * publisher-side, the real property is the puller's
-   * vcs_zcode_task_context_admit. PROVIDER records here are deliberately
-   * ungated. */
-  if (!evidence_kind && spec.kind == VCS_ZCODE_DHT_RECORD_POINTER &&
-      strcmp(spec.namespace_name, VCS_ZCODE_TASK_DHT_NAMESPACE) == 0 &&
-      !boot_zcode_dht_task_pointer_publish_gate(&spec, result))
+  if (!publish_pointer_gates(&spec, result, evidence_kind))
     return true;
   uint8_t token[32];
   struct vcs_zcode_dht_record record;
   enum vcs_zcode_dht_record_error reason = VCS_ZCODE_DHT_RECORD_OK;
-  if (strcmp(mode, "plan") == 0) {
-    bool planned = evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-        ? boot_zcode_dht_storage_ack_plan(&spec, token, &record)
-        : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-          ? boot_zcode_dht_source_reproduction_ack_plan(
-                &spec, token, &record)
-          : boot_zcode_dht_record_publish_plan(&spec, token, &record,
-                                               &reason);
-    if (!planned) {
-      if (!evidence_kind)
-        publish_build_refusal(result, reason);
-      else
-        rpc_error(
-            result,
-            evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-                ? "POSSESSION_REQUIRED" : "SOURCE_RECONSTRUCTION_REQUIRED",
-            evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-                ? "complete pinned bytes failed full possession proof"
-                : "complete accepted source carrier failed exact "
-                  "reconstruction");
-      return true;
-    }
-  } else {
-    const char *hex = input_str(in, "plan_token");
-    if (!hex || strlen(hex) != 64 || !zcl_hex_decode_lower(hex, token, 32)) {
-      rpc_error(result, "INVALID_PLAN_TOKEN",
-                "commit requires the exact canonical plan_token");
-      return true;
-    }
-    enum vcs_zcode_dht_record_store_result stored =
-        evidence_kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK
-            ? boot_zcode_dht_storage_ack_commit(
-                  &spec, token, public_now(), &record)
-        : evidence_kind == VCS_ZCODE_DHT_RECORD_SOURCE_REPRODUCTION_ACK
-          ? boot_zcode_dht_source_reproduction_ack_commit(
-                &spec, token, public_now(), &record)
-          : boot_zcode_dht_record_publish_commit(&spec, token, public_now(),
-                                                 &record, &reason);
-    if (stored != VCS_ZCODE_DHT_RECORD_STORE_ADDED &&
-        stored != VCS_ZCODE_DHT_RECORD_STORE_DUPLICATE &&
-        stored != VCS_ZCODE_DHT_RECORD_STORE_CONFLICT) {
-      if (!evidence_kind && reason != VCS_ZCODE_DHT_RECORD_OK &&
-          stored == VCS_ZCODE_DHT_RECORD_STORE_INVALID)
-        publish_build_refusal(result, reason);
-      else
-        rpc_error(result,
-                  stored == VCS_ZCODE_DHT_RECORD_STORE_STALE
-                      ? "STALE_PLAN" : "PUBLISH_REFUSED",
-                  vcs_zcode_dht_record_store_result_string(stored));
-      return true;
-    }
-  }
-  char token_hex[65];
-  zcl_hex_encode(token, 32, token_hex);
-  json_set_object(result);
-  json_push_kv_bool(result, "ok", true);
-  json_push_kv_str(result, "mode", mode);
-  json_push_kv_bool(result, "committed", strcmp(mode, "commit") == 0);
-  json_push_kv_str(result, "plan_token", token_hex);
-  struct json_value row;
-  json_init(&row);
-  boot_zcode_dht_record_json(&row, &record, true);
-  json_push_kv(result, "record", &row);
-  json_free(&row);
+  bool ok = strcmp(mode, "plan") == 0
+      ? publish_plan_step(&spec, token, &record, &reason, result,
+                          evidence_kind)
+      : publish_commit_step(in, &spec, token, &record, &reason, result,
+                            evidence_kind);
+  if (!ok)
+    return true;
+  publish_fill_result(result, mode, token, &record);
   return true;
 }
 
