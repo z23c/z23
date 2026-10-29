@@ -27,39 +27,64 @@
 
 /* ── save_block_index_recent ─────────────────────────────── */
 
+/* Bind columns 1-2 (hash, prev_hash). The predecessor hash is resolved only
+ * after the column-1 bind succeeded; *prev_out is written at that point.
+ * Returns SQLITE_OK or the first failing SQLite code. */
+static int bind_block_index_cache_row_hashes(sqlite3_stmt *ins,
+                                             const struct block_index *p,
+                                             const unsigned char **prev_out)
+{
+    static const unsigned char zero32[32] = {0};
+    int rc = sqlite3_bind_blob(ins, 1, p->phashBlock->data, 32, SQLITE_STATIC);
+    if (rc != SQLITE_OK)
+        return rc;
+    const unsigned char *prev = (p->pprev && p->pprev->phashBlock)
+        ? p->pprev->phashBlock->data : zero32;
+    *prev_out = prev;
+    return sqlite3_bind_blob(ins, 2, prev, 32, SQLITE_STATIC);
+}
+
+/* Bind columns 3-8 (height .. file), each only after the previous succeeded. */
+static int bind_block_index_cache_row_header_ints(sqlite3_stmt *ins,
+                                                  const struct block_index *p)
+{
+    int rc;
+    if ((rc = sqlite3_bind_int(ins, 3, p->nHeight)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 4, (int)p->nBits)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 5, (int)p->nTime)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 6, p->nVersion)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 7, (int)p->nStatus)) != SQLITE_OK) return rc;
+    return sqlite3_bind_int(ins, 8, p->nFile);
+}
+
+/* Bind columns 9-14 (positions .. chain tx), then step the statement. */
+static int bind_and_step_block_index_cache_row_tail(sqlite3_stmt *ins,
+                                                    const struct block_index *p)
+{
+    int rc;
+    if ((rc = sqlite3_bind_int(ins, 9, (int)p->nDataPos)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 10, (int)p->nUndoPos)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 11, (int)p->nTx)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_blob(ins, 12, p->nChainWork.pn, 32, SQLITE_STATIC)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 13, (int)p->nCachedBranchId)) != SQLITE_OK) return rc;
+    if ((rc = sqlite3_bind_int(ins, 14, (int)p->nChainTx)) != SQLITE_OK) return rc;
+    return AR_STEP_WRITE(ins);
+}
+
 /* Bind one row's columns (1-14) in INSERT order, then step the statement.
  * Returns SQLITE_DONE when the row was written, else the first failing
  * SQLite code; the caller logs and aborts the save. */
 static int bind_and_step_block_index_cache_row(sqlite3_stmt *ins,
                                                const struct block_index *p,
-                                               const unsigned char *prev)
+                                               const unsigned char **prev_out)
 {
-    struct bind_col { int col; bool is_blob; int val; const void *blob; };
-    const struct bind_col cols[] = {
-        {1,  true,  0,                       p->phashBlock->data},
-        {2,  true,  0,                       prev},
-        {3,  false, p->nHeight,              NULL},
-        {4,  false, (int)p->nBits,           NULL},
-        {5,  false, (int)p->nTime,           NULL},
-        {6,  false, p->nVersion,             NULL},
-        {7,  false, (int)p->nStatus,         NULL},
-        {8,  false, p->nFile,                NULL},
-        {9,  false, (int)p->nDataPos,        NULL},
-        {10, false, (int)p->nUndoPos,        NULL},
-        {11, false, (int)p->nTx,             NULL},
-        {12, true,  0,                       p->nChainWork.pn},
-        {13, false, (int)p->nCachedBranchId, NULL},
-        {14, false, (int)p->nChainTx,        NULL},
-    };
-    for (size_t i = 0; i < sizeof cols / sizeof cols[0]; i++) {
-        const struct bind_col *c = &cols[i];
-        int rc = c->is_blob
-            ? sqlite3_bind_blob(ins, c->col, c->blob, 32, SQLITE_STATIC)
-            : sqlite3_bind_int(ins, c->col, c->val);
-        if (rc != SQLITE_OK)
-            return rc;
-    }
-    return AR_STEP_WRITE(ins);
+    int rc = bind_block_index_cache_row_hashes(ins, p, prev_out);
+    if (rc != SQLITE_OK)
+        return rc;
+    rc = bind_block_index_cache_row_header_ints(ins, p);
+    if (rc != SQLITE_OK)
+        return rc;
+    return bind_and_step_block_index_cache_row_tail(ins, p);
 }
 
 /* Single O(rows) pass: write every map_block_index entry through the
@@ -70,16 +95,14 @@ static int write_block_index_cache_rows(struct node_db *ndb, struct main_state *
                                         sqlite3_stmt *ins, size_t *count,
                                         uint8_t envelope_acc[32], bool *tx_open)
 {
-    static const unsigned char zero32[32] = {0};
     size_t iter = 0;
     struct block_index *p;
     while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
         if (!p || !p->phashBlock) continue;
 
         sqlite3_reset(ins);
-        const unsigned char *prev = (p->pprev && p->pprev->phashBlock)
-            ? p->pprev->phashBlock->data : zero32;
-        int rc = bind_and_step_block_index_cache_row(ins, p, prev);
+        const unsigned char *prev = NULL;
+        int rc = bind_and_step_block_index_cache_row(ins, p, &prev);
         if (rc != SQLITE_DONE)
             return rc;
         bic_row_digest_xor(envelope_acc, p, prev);  /* same O(rows) pass */
