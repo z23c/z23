@@ -293,6 +293,48 @@ opret_check_window(struct node_db *ndb, struct main_state *ms,
     return AUDIT_TICK_CLEAN;
 }
 
+/* Choose the [h_start, h_end] window for this tick: the pinned investigation
+ * range when one is active, otherwise a seeded random window. Returns false
+ * when the tick must be skipped (the caller counts the skip). */
+static bool opret_pick_window(const struct op_return_index_cursor *oc,
+                              uint64_t seed, int32_t *h_start, int32_t *h_end)
+{
+    int32_t cursor = oc->height;
+    /* The catalog covers [base, cursor], not [0, cursor], on a snapshot-seeded
+     * datadir. Auditing a height below the declared base would compare stored
+     * rows the catalog never claimed to hold against extracted rows and report
+     * a false mismatch. */
+    int32_t base = oc->base_height > 0 ? oc->base_height : 0;
+
+    if (atomic_load(&g_opret_leg.investigating)) {
+        *h_start = atomic_load(&g_opret_leg.pinned_h_start);
+        *h_end = atomic_load(&g_opret_leg.pinned_h_end);
+        if (*h_end > cursor) *h_end = cursor;
+        if (*h_start < base || *h_start > *h_end) {
+            /* The folded prefix shrank under us (should not happen —
+             * op_return_index_truncate resets to -1, not a partial rewind).
+             * Drop the investigation defensively rather than check a
+             * degenerate range. */
+            atomic_store(&g_opret_leg.investigating, false);
+            atomic_store(&g_opret_leg.confirm_streak, 0);
+            return false;
+        }
+        return true;
+    }
+    const int32_t w = STATE_AUDITOR_OPRET_WINDOW_BLOCKS;
+    if (cursor - base + 1 < w)
+        return false; /* not enough folded history yet */
+    uint8_t sh[32];
+    seed_hash(seed, 0, sh);
+    uint64_t r;
+    memcpy(&r, sh, sizeof(r));
+    int32_t max_start = cursor - w + 1;
+    *h_start = base + (int32_t)(r % (uint64_t)((int64_t)max_start -
+                                               (int64_t)base + 1));
+    *h_end = *h_start + w - 1;
+    return true;
+}
+
 static void opret_leg_tick(struct node_db *ndb, struct main_state *ms,
                            const char *datadir, uint64_t seed)
 {
@@ -307,42 +349,10 @@ static void opret_leg_tick(struct node_db *ndb, struct main_state *ms,
         atomic_fetch_add(&g_opret_skipped, 1);
         return;
     }
-    int32_t cursor = oc.height;
-    /* The catalog covers [base, cursor], not [0, cursor], on a snapshot-seeded
-     * datadir. Auditing a height below the declared base would compare stored
-     * rows the catalog never claimed to hold against extracted rows and report
-     * a false mismatch. */
-    int32_t base = oc.base_height > 0 ? oc.base_height : 0;
-
     int32_t h_start, h_end;
-    if (atomic_load(&g_opret_leg.investigating)) {
-        h_start = atomic_load(&g_opret_leg.pinned_h_start);
-        h_end = atomic_load(&g_opret_leg.pinned_h_end);
-        if (h_end > cursor) h_end = cursor;
-        if (h_start < base || h_start > h_end) {
-            /* The folded prefix shrank under us (should not happen —
-             * op_return_index_truncate resets to -1, not a partial rewind).
-             * Drop the investigation defensively rather than check a
-             * degenerate range. */
-            atomic_store(&g_opret_leg.investigating, false);
-            atomic_store(&g_opret_leg.confirm_streak, 0);
-            atomic_fetch_add(&g_opret_skipped, 1);
-            return;
-        }
-    } else {
-        const int32_t w = STATE_AUDITOR_OPRET_WINDOW_BLOCKS;
-        if (cursor - base + 1 < w) {
-            atomic_fetch_add(&g_opret_skipped, 1);
-            return; /* not enough folded history yet */
-        }
-        uint8_t sh[32];
-        seed_hash(seed, 0, sh);
-        uint64_t r;
-        memcpy(&r, sh, sizeof(r));
-        int32_t max_start = cursor - w + 1;
-        h_start = base + (int32_t)(r % (uint64_t)((int64_t)max_start -
-                                                  (int64_t)base + 1));
-        h_end = h_start + w - 1;
+    if (!opret_pick_window(&oc, seed, &h_start, &h_end)) {
+        atomic_fetch_add(&g_opret_skipped, 1);
+        return;
     }
 
     char detail[192] = {0};
@@ -395,6 +405,69 @@ static void opret_leg_tick(struct node_db *ndb, struct main_state *ms,
 
 /* ── coins_commitment leg: pure per-window check ────────────────────── */
 
+/* One keyspace-window scan of a single source (coins_kv authority or utxos
+ * projection). */
+struct coins_scan {
+    struct utxo_commitment uc;
+    size_t rows;
+    int32_t min_h, max_h;
+    uint8_t last[32];
+};
+
+static bool coins_scan_window(sqlite3 *db, const char *table,
+                              const uint8_t txid_lo[32],
+                              struct coins_scan *s)
+{
+    s->rows = 0;
+    s->min_h = INT32_MAX;
+    s->max_h = INT32_MIN;
+    return utxo_commitment_compute_range(db, table, txid_lo,
+                                         STATE_AUDITOR_COINS_WINDOW_ROWS,
+                                         &s->uc, &s->rows, &s->min_h,
+                                         &s->max_h, s->last);
+}
+
+/* Read the authority applied height (under the progress-store trylock) and
+ * the projection cursor. False when the trylock is busy or either marker is
+ * missing, i.e. the pair is not comparable. */
+static bool coins_read_markers(sqlite3 *pdb, struct node_db *ndb,
+                               int32_t *auth_h, int64_t *proj_h)
+{
+    bool afound = false;
+    *auth_h = -1;
+    if (!progress_store_tx_trylock()) return false; // raw-return-ok:caller maps to AUDIT_TICK_SKIPPED
+    (void)coins_kv_get_applied_height(pdb, auth_h, &afound);
+    progress_store_tx_unlock();
+    *proj_h = -1;
+    bool pfound = node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
+                                        proj_h);
+    return afound && pfound;
+}
+
+/* Scan the same keyspace window in both sources; false when either scan
+ * cannot run. */
+static bool coins_scan_both(sqlite3 *pdb, struct node_db *ndb,
+                            const uint8_t txid_lo[32],
+                            struct coins_scan *auth, struct coins_scan *proj)
+{
+    if (!coins_scan_window(pdb, "coins", txid_lo, auth))
+        return false; // raw-return-ok:caller maps to AUDIT_TICK_SKIPPED
+    return coins_scan_window(ndb->db, "utxos", txid_lo, proj);
+}
+
+/* Height span covered by the non-empty scans; -1/-1 when both are empty. */
+static void coins_merge_heights(const struct coins_scan *auth,
+                                const struct coins_scan *proj,
+                                int32_t *out_h_min, int32_t *out_h_max)
+{
+    if (auth->rows > 0) { *out_h_min = auth->min_h; *out_h_max = auth->max_h; }
+    if (proj->rows > 0) {
+        if (*out_h_min < 0 || proj->min_h < *out_h_min)
+            *out_h_min = proj->min_h;
+        if (proj->max_h > *out_h_max) *out_h_max = proj->max_h;
+    }
+}
+
 /* One keyspace-window cross-check between the coins_kv authority and the
  * utxos projection. SKIPPED (never a false MISMATCH) whenever the two
  * sources are not provably reflecting the same instant: bulk-fold mode
@@ -420,42 +493,18 @@ coins_check_window(sqlite3 *pdb, struct node_db *ndb,
      * of corruption. */
     if (coins_ram_active()) return AUDIT_TICK_SKIPPED;
 
-    int32_t auth_h0 = -1;
-    bool afound0 = false;
-    if (!progress_store_tx_trylock()) return AUDIT_TICK_SKIPPED;
-    (void)coins_kv_get_applied_height(pdb, &auth_h0, &afound0);
-    progress_store_tx_unlock();
-    int64_t proj_h0 = -1;
-    bool pfound0 = node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
-                                         &proj_h0);
-    if (!afound0 || !pfound0 || (int64_t)auth_h0 != proj_h0)
+    int32_t auth_h0, auth_h1;
+    int64_t proj_h0, proj_h1;
+    if (!coins_read_markers(pdb, ndb, &auth_h0, &proj_h0) ||
+        (int64_t)auth_h0 != proj_h0)
         return AUDIT_TICK_SKIPPED; /* catch-up lag/lead — not comparable */
 
-    struct utxo_commitment auth_uc, proj_uc;
-    size_t auth_rows = 0, proj_rows = 0;
-    int32_t auth_min = INT32_MAX, auth_max = INT32_MIN;
-    int32_t proj_min = INT32_MAX, proj_max = INT32_MIN;
-    uint8_t auth_last[32], proj_last[32];
-    if (!utxo_commitment_compute_range(pdb, "coins", txid_lo,
-                                       STATE_AUDITOR_COINS_WINDOW_ROWS,
-                                       &auth_uc, &auth_rows, &auth_min,
-                                       &auth_max, auth_last))
-        return AUDIT_TICK_SKIPPED;
-    if (!utxo_commitment_compute_range(ndb->db, "utxos", txid_lo,
-                                       STATE_AUDITOR_COINS_WINDOW_ROWS,
-                                       &proj_uc, &proj_rows, &proj_min,
-                                       &proj_max, proj_last))
+    struct coins_scan auth, proj;
+    if (!coins_scan_both(pdb, ndb, txid_lo, &auth, &proj))
         return AUDIT_TICK_SKIPPED;
 
-    int32_t auth_h1 = -1;
-    bool afound1 = false;
-    if (!progress_store_tx_trylock()) return AUDIT_TICK_SKIPPED;
-    (void)coins_kv_get_applied_height(pdb, &auth_h1, &afound1);
-    progress_store_tx_unlock();
-    int64_t proj_h1 = -1;
-    bool pfound1 = node_db_state_get_int(ndb, UTXO_MIRROR_SYNC_CURSOR_KEY,
-                                         &proj_h1);
-    if (!afound1 || !pfound1 || auth_h1 != auth_h0 || proj_h1 != proj_h0)
+    if (!coins_read_markers(pdb, ndb, &auth_h1, &proj_h1) ||
+        auth_h1 != auth_h0 || proj_h1 != proj_h0)
         return AUDIT_TICK_SKIPPED; /* the set moved mid-window — torn scan */
 
     uint64_t mirror_generation1 = 0;
@@ -463,20 +512,16 @@ coins_check_window(sqlite3 *pdb, struct node_db *ndb,
         mirror_generation1 != mirror_generation0)
         return AUDIT_TICK_SKIPPED; /* mirror transaction overlapped the scan */
 
-    if (auth_rows > 0) { *out_h_min = auth_min; *out_h_max = auth_max; }
-    if (proj_rows > 0) {
-        if (*out_h_min < 0 || proj_min < *out_h_min) *out_h_min = proj_min;
-        if (proj_max > *out_h_max) *out_h_max = proj_max;
-    }
+    coins_merge_heights(&auth, &proj, out_h_min, out_h_max);
 
-    if (utxo_commitment_equal(&auth_uc, &proj_uc))
+    if (utxo_commitment_equal(&auth.uc, &proj.uc))
         return AUDIT_TICK_CLEAN;
 
     char txid_hex[65] = {0};
     HexStr(txid_lo, 32, false, txid_hex, sizeof(txid_hex));
     snprintf(detail, detail_cap,
              "keyspace_window txid_lo=%s rows(auth=%zu proj=%zu) "
-             "heights=[%d,%d]", txid_hex, auth_rows, proj_rows,
+             "heights=[%d,%d]", txid_hex, auth.rows, proj.rows,
              *out_h_min, *out_h_max);
     return AUDIT_TICK_MISMATCH;
 }

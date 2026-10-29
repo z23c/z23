@@ -416,8 +416,6 @@ engine/services/src/op_return_backfill_service.c:backfill_run_once_typed:36
 engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:31
 engine/services/src/shielded_history_promote_service.c:shielded_history_promote_run:20
-engine/services/src/state_auditor.c:coins_check_window:25
-engine/services/src/state_auditor.c:opret_leg_tick:18
 engine/services/src/sticky_escalator.c:apply_drive:23
 engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:28
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:20
