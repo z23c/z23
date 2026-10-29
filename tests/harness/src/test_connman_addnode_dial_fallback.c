@@ -1054,3 +1054,640 @@ int check_connman_addnode_inbound_ephemeral_not_block(void)
     return failures;
 }
 
+/* ── Characterization pins: connman_pick_next_outbound_target,
+ * connman_get_outbound_health and connman_run_message_cycle. Every
+ * expectation is read off the current core code; the pins hold the
+ * observable behaviour still while connman.c is split. Local fixtures
+ * only: no sockets, no dials, no real peers. */
+
+extern bool g_connect_only; /* core/modules/net/src/connman.c */
+
+static int outbound_pin_report(const char *name, bool ok)
+{
+    printf("connman_addnode_fallback: %s... %s\n", name, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static bool outbound_pin_init(struct connman *cm, struct node_signals *sigs)
+{
+    chain_params_select(CHAIN_MAIN);
+    return connman_init(cm, chain_params_get(), sigs);
+}
+
+static void outbound_pin_add_addnode(struct connman *cm, uint8_t a,
+                                     uint8_t b, uint8_t c, uint8_t d)
+{
+    struct net_address addr;
+    test_set_ipv4(&addr, a, b, c, d, 8033);
+    cm->addnodes[cm->num_addnodes++] = addr;
+}
+
+static int outbound_pin_addrman_attempts(struct connman *cm,
+                                         uint8_t first, uint8_t second)
+{
+    for (int i = 0; i < cm->manager.addrman.id_count; i++) {
+        const struct addr_info *info = &cm->manager.addrman.entries[i];
+        if (info->used && info->addr.svc.addr.ip[12] == first &&
+            info->addr.svc.addr.ip[13] == second)
+            return info->attempts;
+    }
+    return -1;
+}
+
+static void outbound_pin_add_addrman_47_88(struct connman *cm)
+{
+    struct net_address addr;
+    struct net_addr src;
+    net_addr_init(&src);
+    test_set_ipv4(&addr, 47, 88, 87, 154, 8033);
+    addrman_add(&cm->manager.addrman, &addr, &src, 0);
+}
+
+static bool outbound_pin_pick_null_args(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_ADDRMAN;
+    size_t cursor = 0;
+    size_t index = 5;
+    memset(&pick, 0, sizeof(pick));
+    ok = ok && !connman_pick_next_outbound_target(NULL, &cursor, &pick,
+                                                  &source, &index);
+    ok = ok && !connman_pick_next_outbound_target(&cm, NULL, &pick,
+                                                  &source, &index);
+    ok = ok && !connman_pick_next_outbound_target(&cm, &cursor, NULL,
+                                                  &source, &index);
+    ok = ok && !connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                  NULL, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDRMAN && index == 5 && cursor == 0;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_empty_yields_none(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_ADDRMAN;
+    size_t cursor = 7;
+    size_t index = 5;
+    memset(&pick, 0xAA, sizeof(pick));
+    ok = ok && !connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                  &source, &index);
+    ok = ok && source == CONNMAN_TARGET_NONE && index == SIZE_MAX &&
+         cursor == 7;
+    ok = ok && pick.addr.svc.port == 0 && pick.addr.svc.addr.ip[0] == 0 &&
+         pick.addr.svc.addr.ip[15] == 0;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_connect_only_gates_addrman(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addrman_47_88(&cm);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    g_connect_only = true;
+    ok = ok && !connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                  &source, &index);
+    g_connect_only = false;
+    ok = ok && source == CONNMAN_TARGET_NONE && index == SIZE_MAX;
+    ok = ok && outbound_pin_addrman_attempts(&cm, 47, 88) == 0;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_skips_retired_and_cooling(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    outbound_pin_add_addnode(&cm, 192, 0, 2, 9);
+    cm.addnode_retired[0] = true;
+    cm.addnode_last_attempt[1] = (int64_t)platform_time_wall_time_t() + 1000;
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 2 &&
+         cursor == 0;
+    ok = ok && net_addr_eq(&pick.addr.svc.addr,
+                           &cm.addnodes[2].svc.addr);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_cursor_wraps(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    outbound_pin_add_addnode(&cm, 192, 0, 2, 9);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 4;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    /* cursor 4 starts the walk at 4 % 3 == 1 */
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && index == 2 && cursor == 0;
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && index == 0 && cursor == 1;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_connected_clears_backoff(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 10,
+                             PEER_HANDSHAKE_COMPLETE, false, false) != NULL;
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    cm.addnode_backoff_sec[0] = 120;
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    ok = ok && cm.addnode_backoff_sec[0] == 0;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_backoff_window(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    /* 100 s ago inside a 300 s backoff: cooling. 40 s ago with no backoff
+     * uses the 30 s default: ready. */
+    cm.addnode_backoff_sec[0] = 300;
+    cm.addnode_last_attempt[0] = now - 100;
+    cm.addnode_backoff_sec[1] = 0;
+    cm.addnode_last_attempt[1] = now - 40;
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_saturated_group(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 50,
+                             PEER_HANDSHAKE_COMPLETE, false, false) != NULL;
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 51,
+                             PEER_HANDSHAKE_COMPLETE, false, false) != NULL;
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    /* Group 203.0 holds MAX_OUTBOUND_PER_GROUP16 outbound peers, so its
+     * addnode is deferred while 198.51's addnode is ready. */
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    /* Retire the only other ready addnode: nothing else is ready, so the
+     * saturated addnode is dialled anyway. */
+    cm.addnode_retired[1] = true;
+    cursor = 0;
+    index = SIZE_MAX;
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 0 && cursor == 1;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_pick_addrman_fallthrough(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    cm.addnode_last_attempt[0] = (int64_t)platform_time_wall_time_t() + 1000;
+    outbound_pin_add_addrman_47_88(&cm);
+    struct addr_info pick;
+    enum connman_outbound_target_source source = CONNMAN_TARGET_NONE;
+    size_t cursor = 0;
+    size_t index = SIZE_MAX;
+    memset(&pick, 0, sizeof(pick));
+    ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
+                                                 &source, &index);
+    ok = ok && source == CONNMAN_TARGET_ADDRMAN && index == SIZE_MAX &&
+         cursor == 0;
+    ok = ok && pick.addr.svc.addr.ip[12] == 47 &&
+         pick.addr.svc.addr.ip[13] == 88 && pick.addr.svc.port == 8033;
+    ok = ok && outbound_pin_addrman_attempts(&cm, 47, 88) == 1;
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_health_is_zero(const struct connman_outbound_health *h)
+{
+    struct connman_outbound_health zero;
+    memset(&zero, 0, sizeof(zero));
+    return memcmp(h, &zero, sizeof(zero)) == 0;
+}
+
+static bool outbound_pin_health_null_args(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    struct connman_outbound_health h;
+    memset(&h, 0xff, sizeof(h));
+    connman_get_outbound_health(NULL, &h);
+    ok = ok && outbound_pin_health_is_zero(&h);
+    /* NULL out: nothing to write, must simply return. */
+    connman_get_outbound_health(&cm, NULL);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_health_addnode_ledger(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    outbound_pin_add_addnode(&cm, 203, 0, 113, 10);
+    outbound_pin_add_addnode(&cm, 198, 51, 100, 7);
+    outbound_pin_add_addnode(&cm, 192, 0, 2, 9);
+    cm.addnode_tcp_failures[0] = 3;
+    cm.addnode_tcp_failures[1] = 0;
+    cm.addnode_tcp_failures[2] = 0;
+    cm.addnode_protocol_failures[0] = 0;
+    cm.addnode_protocol_failures[1] = 2;
+    cm.addnode_protocol_failures[2] = 0;
+    cm.addnode_backoff_sec[0] = 60;
+    cm.addnode_backoff_sec[1] = 120;
+    cm.addnode_backoff_sec[2] = 0;
+    cm.addnode_retired[0] = false;
+    cm.addnode_retired[1] = false;
+    cm.addnode_retired[2] = true;
+    struct connman_outbound_health h;
+    memset(&h, 0, sizeof(h));
+    connman_get_outbound_health(&cm, &h);
+    ok = ok && h.addnode_count == 3 && h.addnode_tcp_failures == 3 &&
+         h.addnode_protocol_failures == 2 && h.addnode_backoff_active == 2 &&
+         h.addnode_backoff_max_sec == 120 && h.addnode_retired_count == 1;
+    ok = ok && h.outbound_total == 0 && h.inbound_total == 0 &&
+         h.ipv4_group_count == 0;
+    connman_free(&cm);
+    return ok;
+}
+
+/* Feeler and disconnected peers are excluded. The handshaked outbound peer
+ * without NODE_NETWORK is neither healthy nor handshake-pending. */
+static bool outbound_pin_health_classes_expected(
+    const struct connman_outbound_health *h)
+{
+    return h->outbound_total == 1 && h->healthy == 0 &&
+           h->handshake_incomplete == 0 && h->connecting == 0 &&
+           h->ipv4_group_count == 1 && h->healthy_ipv4_group_count == 0 &&
+           h->inbound_total == 2 && h->inbound_healthy == 1 &&
+           h->inbound_handshake_incomplete == 1;
+}
+
+static bool outbound_pin_health_peer_classes(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = outbound_pin_init(&cm, &sigs);
+    struct p2p_node *feeler = add_test_peer(&cm, 203, 0, 113, 60,
+                                            PEER_ACTIVE, false, false);
+    struct p2p_node *quiet = add_test_peer(&cm, 198, 51, 100, 8,
+                                           PEER_ACTIVE, false, false);
+    ok = ok && feeler != NULL && quiet != NULL;
+    ok = ok && add_test_peer(&cm, 192, 0, 2, 20, PEER_CONNECTING,
+                             true, false) != NULL;
+    ok = ok && add_test_peer(&cm, 192, 0, 2, 21, PEER_ACTIVE,
+                             true, false) != NULL;
+    ok = ok && add_test_peer(&cm, 10, 0, 0, 5, PEER_ACTIVE,
+                             false, true) != NULL;
+    if (feeler)
+        feeler->is_feeler = true;
+    if (quiet)
+        quiet->services = 0;
+    struct connman_outbound_health h;
+    memset(&h, 0, sizeof(h));
+    connman_get_outbound_health(&cm, &h);
+    ok = ok && outbound_pin_health_classes_expected(&h);
+    connman_free(&cm);
+    return ok;
+}
+
+struct outbound_pin_cycle_ctx {
+    char log[8];
+    size_t len;
+};
+
+struct outbound_pin_expect {
+    bool ret;
+    uint64_t snapshotted;
+    uint64_t sends;
+    uint64_t processes;
+    uint64_t ready;
+    const char *log;
+};
+
+static void outbound_pin_log(struct outbound_pin_cycle_ctx *c, char tag)
+{
+    if (c->len < sizeof(c->log))
+        c->log[c->len++] = tag;
+}
+
+static bool outbound_pin_cycle_send(void *ctx, struct p2p_node *node,
+                                    bool send_trickle)
+{
+    (void)node;
+    (void)send_trickle;
+    outbound_pin_log(ctx, 'S');
+    return true;
+}
+
+static bool outbound_pin_cycle_process(void *ctx, struct p2p_node *node)
+{
+    (void)node;
+    outbound_pin_log(ctx, 'P');
+    return true;
+}
+
+static bool outbound_pin_cycle_setup(struct connman *cm,
+    struct node_signals *sigs, struct outbound_pin_cycle_ctx *ctx,
+    bool with_send, bool with_process)
+{
+    memset(sigs, 0, sizeof(*sigs));
+    memset(ctx, 0, sizeof(*ctx));
+    sigs->ctx = ctx;
+    if (with_send)
+        sigs->send_messages = outbound_pin_cycle_send;
+    if (with_process)
+        sigs->process_messages = outbound_pin_cycle_process;
+    return outbound_pin_init(cm, sigs);
+}
+
+static bool outbound_pin_cycle_expect(struct connman *cm,
+    const struct outbound_pin_cycle_ctx *ctx, bool got,
+    const struct outbound_pin_expect *want)
+{
+    struct connman_message_cycle_stats st;
+    connman_get_message_cycle_stats(cm, &st);
+    size_t n = strlen(want->log);
+    return got == want->ret && st.cycles == 1 &&
+           st.nodes_snapshotted == want->snapshotted &&
+           st.send_calls == want->sends &&
+           st.process_calls == want->processes &&
+           st.recv_ready == want->ready &&
+           ctx->len == n && memcmp(ctx->log, want->log, n) == 0;
+}
+
+static void outbound_pin_clear_recv(struct connman *cm)
+{
+    for (size_t i = 0; i < cm->manager.num_nodes; i++)
+        cm->manager.nodes[i]->recv_msg_count = 0;
+}
+
+static bool outbound_pin_cycle_no_peers(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {false, 0, 0, 0, 0, ""};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_disconnected_only(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 70, PEER_ACTIVE,
+                             false, true) != NULL;
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {false, 0, 0, 0, 0, ""};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_serving_sends_only(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 71, PEER_SNAPSHOT_SERVING,
+                             false, false) != NULL;
+    bool got = connman_run_message_cycle(&cm);
+    /* Serving counts as work from the send phase alone. */
+    const struct outbound_pin_expect want = {true, 1, 1, 0, 0, "S"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_active_idle_no_work(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    ok = ok && add_test_peer(&cm, 203, 0, 113, 72, PEER_ACTIVE,
+                             false, false) != NULL;
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {false, 1, 1, 0, 0, "S"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_recv_processed(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    struct p2p_node *n = add_test_peer(&cm, 203, 0, 113, 73, PEER_ACTIVE,
+                                       false, false);
+    ok = ok && n != NULL;
+    if (n)
+        n->recv_msg_count = 2;
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {true, 1, 1, 1, 1, "SP"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    outbound_pin_clear_recv(&cm);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_recv_without_process(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, false);
+    struct p2p_node *n = add_test_peer(&cm, 203, 0, 113, 74, PEER_ACTIVE,
+                                       false, false);
+    ok = ok && n != NULL;
+    if (n)
+        n->recv_msg_count = 2;
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {false, 1, 1, 0, 0, "S"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    outbound_pin_clear_recv(&cm);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_process_without_send(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, false, true);
+    struct p2p_node *n = add_test_peer(&cm, 203, 0, 113, 75, PEER_ACTIVE,
+                                       false, false);
+    ok = ok && n != NULL;
+    if (n)
+        n->recv_msg_count = 1;
+    bool got = connman_run_message_cycle(&cm);
+    const struct outbound_pin_expect want = {true, 1, 0, 1, 1, "P"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    outbound_pin_clear_recv(&cm);
+    connman_free(&cm);
+    return ok;
+}
+
+static bool outbound_pin_cycle_all_sends_before_processing(void)
+{
+    struct connman cm;
+    struct node_signals sigs;
+    struct outbound_pin_cycle_ctx ctx;
+    bool ok = outbound_pin_cycle_setup(&cm, &sigs, &ctx, true, true);
+    struct p2p_node *a = add_test_peer(&cm, 203, 0, 113, 76, PEER_ACTIVE,
+                                       false, false);
+    struct p2p_node *b = add_test_peer(&cm, 203, 0, 113, 77, PEER_ACTIVE,
+                                       false, false);
+    struct p2p_node *gone = add_test_peer(&cm, 203, 0, 113, 78, PEER_ACTIVE,
+                                          false, true);
+    ok = ok && a != NULL && b != NULL && gone != NULL;
+    if (a)
+        a->recv_msg_count = 1;
+    if (b)
+        b->recv_msg_count = 1;
+    if (gone)
+        gone->recv_msg_count = 1;
+    bool got = connman_run_message_cycle(&cm);
+    /* The disconnected peer is neither sent to nor processed. */
+    const struct outbound_pin_expect want = {true, 2, 2, 2, 2, "SSPP"};
+    ok = ok && outbound_pin_cycle_expect(&cm, &ctx, got, &want);
+    outbound_pin_clear_recv(&cm);
+    connman_free(&cm);
+    return ok;
+}
+
+int check_connman_outbound_pin_characterization(void)
+{
+    int failures = 0;
+    failures += outbound_pin_report("pick refuses null arguments",
+                                    outbound_pin_pick_null_args());
+    failures += outbound_pin_report("pick on empty connman yields none",
+                                    outbound_pin_pick_empty_yields_none());
+    failures += outbound_pin_report("pick gates addrman on connect-only",
+                                    outbound_pin_pick_connect_only_gates_addrman());
+    failures += outbound_pin_report("pick skips retired and cooling addnodes",
+                                    outbound_pin_pick_skips_retired_and_cooling());
+    failures += outbound_pin_report("pick walks cursor with wraparound",
+                                    outbound_pin_pick_cursor_wraps());
+    failures += outbound_pin_report("pick clears backoff of connected addnode",
+                                    outbound_pin_pick_connected_clears_backoff());
+    failures += outbound_pin_report("pick honours per-addnode backoff window",
+                                    outbound_pin_pick_backoff_window());
+    failures += outbound_pin_report("pick defers saturated-group addnode",
+                                    outbound_pin_pick_saturated_group());
+    failures += outbound_pin_report("pick falls through to addrman",
+                                    outbound_pin_pick_addrman_fallthrough());
+    failures += outbound_pin_report("outbound health null arguments",
+                                    outbound_pin_health_null_args());
+    failures += outbound_pin_report("outbound health addnode ledger",
+                                    outbound_pin_health_addnode_ledger());
+    failures += outbound_pin_report("outbound health peer classes",
+                                    outbound_pin_health_peer_classes());
+    failures += outbound_pin_report("message cycle with no peers",
+                                    outbound_pin_cycle_no_peers());
+    failures += outbound_pin_report("message cycle skips disconnected only",
+                                    outbound_pin_cycle_disconnected_only());
+    failures += outbound_pin_report("message cycle serving peer is work",
+                                    outbound_pin_cycle_serving_sends_only());
+    failures += outbound_pin_report("message cycle idle active peer",
+                                    outbound_pin_cycle_active_idle_no_work());
+    failures += outbound_pin_report("message cycle processes received",
+                                    outbound_pin_cycle_recv_processed());
+    failures += outbound_pin_report("message cycle recv without processor",
+                                    outbound_pin_cycle_recv_without_process());
+    failures += outbound_pin_report("message cycle process without send",
+                                    outbound_pin_cycle_process_without_send());
+    failures += outbound_pin_report("message cycle sends before processing",
+                                    outbound_pin_cycle_all_sends_before_processing());
+    return failures;
+}

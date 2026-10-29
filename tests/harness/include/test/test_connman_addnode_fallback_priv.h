@@ -49,6 +49,7 @@ int check_connman_addnode_peer_floor_diverse_subnets(void);
 int check_connman_addnode_addrman_skips_saturated(void);
 int check_connman_addnode_inbound_ephemeral_not_block(void);
 int check_connman_dialer_gather_pins(void);
+int check_connman_outbound_pin_characterization(void);
 
 /* test_connman_addnode_protocol_backoff.c — pre/post-handshake protocol
  * backoff, addrman-failure cooldown, failure-aware distinct batches, the

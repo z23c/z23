@@ -120,6 +120,7 @@ int test_connman_addnode_fallback(void)
     failures += check_connman_addnode_operator_local_sockets_stay();
     failures += check_connman_addnode_feeler_does_not_evict();
     failures += check_connman_addnode_unreserved_dial_serial();
+    failures += check_connman_outbound_pin_characterization();
     failures += check_connman_noise_required();
     return failures;
 }
