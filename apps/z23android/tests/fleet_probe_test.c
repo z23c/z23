@@ -8,10 +8,10 @@ bool zapp_relay_stopping(void) { return false; }
 static void check_parse(void)
 {
     struct zapp_fleet_host hosts[4]; size_t n = 0;
-    assert(zapp_fleet_hosts_parse("r1=rhett.dev,mac=user@rentamac", hosts, 4, &n) && n == 2);
-    assert(!strcmp(hosts[0].label, "r1") && !strcmp(hosts[0].destination, "rhett.dev"));
-    assert(!strcmp(hosts[1].label, "mac") && !strcmp(hosts[1].destination, "user@rentamac"));
-    assert(!zapp_fleet_hosts_parse("R1=rhett.dev", hosts, 4, &n));
+    assert(zapp_fleet_hosts_parse("r1=node1.example,mac=user@node2.example", hosts, 4, &n) && n == 2);
+    assert(!strcmp(hosts[0].label, "r1") && !strcmp(hosts[0].destination, "node1.example"));
+    assert(!strcmp(hosts[1].label, "mac") && !strcmp(hosts[1].destination, "user@node2.example"));
+    assert(!zapp_fleet_hosts_parse("R1=node1.example", hosts, 4, &n));
     assert(!zapp_fleet_hosts_parse("r1=-oProxyCommand=x", hosts, 4, &n));
     assert(!zapp_fleet_hosts_parse("r1=host;rm", hosts, 4, &n));
     assert(!zapp_fleet_hosts_parse("r1", hosts, 4, &n));

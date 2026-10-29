@@ -115,7 +115,7 @@ static void split_cases(const struct zapp_assistant *a)
 {
     static const size_t counts[] = {6, 8, 10, 12, 15, 9};
     char words[400] = "", delta[512], sse[1024];
-    for (int i = 0; i < 60; i++) strcat(words, "word ");
+    for (int i = 0; i < 60; i++) memcpy(words + 5 * i, "word ", 5);
     snprintf(delta, sizeof(delta), "%s", words);
     snprintf(sse, sizeof(sse), "data: {\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\ndata: [DONE]\n", delta);
     reset_log();
@@ -401,8 +401,10 @@ static void message_cases(void)
         json_free(&messages);
     }
     char many[1024] = "[";
-    for (unsigned i = 0; i <= ZAPP_ASSISTANT_TURNS; i++) strcat(many, i ? ",[\"q\",\"a\"]" : "[\"q\",\"a\"]");
-    strcat(many, "]");
+    size_t at = 1;
+    for (unsigned i = 0; i <= ZAPP_ASSISTANT_TURNS; i++, at += strlen(many + at))
+        (void)snprintf(many + at, sizeof(many) - at, "%s[\"q\",\"a\"]", i ? "," : "");
+    (void)snprintf(many + at, sizeof(many) - at, "]");
     assert(!messages_for(many, &messages));
     json_free(&messages);
     size_t n = strlen(many);

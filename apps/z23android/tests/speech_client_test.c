@@ -188,9 +188,9 @@ static void speak_cases(const char *directory)
     mock_op = "synthesize"; mock_success = true;
     unsigned char wav[54]; size_t bytes = 0;
     assert(zapp_voice_wav_encode(capture, 5, wav, sizeof(wav), &bytes));
-    char reply[128]; strcpy(reply, "{\"wav\":\"");
+    char reply[128]; memcpy(reply, "{\"wav\":\"", 8);
     for (size_t i = 0; i < bytes; i++) (void)snprintf(reply + 8 + i * 2, sizeof(reply) - 8 - i * 2, "%02x", wav[i]);
-    strcpy(reply + 8 + bytes * 2, "\"}"); mock_reply = reply;
+    memcpy(reply + 8 + bytes * 2, "\"}", 3); mock_reply = reply;
     int16_t *pcm = NULL; size_t count = 0; int rate = 0; char error[256];
     assert(zapp_speech_client_speak(directory, "Hello.", &pcm, &count, &rate, NULL, error, sizeof(error)));
     assert(count == 5 && rate == 16000 && !memcmp(pcm, capture, sizeof(capture)));
@@ -199,7 +199,7 @@ static void speak_cases(const char *directory)
         "{\"wav\":\"0000\"}", "{\"wav\":false}", "{\"wav\":\"00\",\"extra\":1}"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) speak_refused(directory, bad[i]);
     char *large = malloc(1920101); assert(large);
-    memcpy(large, "{\"wav\":\"", 8); memset(large + 8, '0', 1920090); strcpy(large + 1920098, "\"}");
+    memcpy(large, "{\"wav\":\"", 8); memset(large + 8, '0', 1920090); memcpy(large + 1920098, "\"}", 3);
     speak_refused(directory, large); free(large);
     mock_success = false; speak_refused(directory, "Synthesis refused.");
     unsigned before = calls;
@@ -284,7 +284,7 @@ static void respond_cases(const char *directory)
     }
     char *large = malloc(96100); assert(large);
     int head = snprintf(large, 96100, "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"");
-    memset(large + head, '0', 96004); strcpy(large + head + 96004, "\"}");
+    memset(large + head, '0', 96004); memcpy(large + head + 96004, "\"}", 3);
     assert(!respond_with(directory, large, final, true, &h, answer, sizeof(answer)) && !h.pcms); free(large);
     for (size_t i = 0; i < 2; i++) {
         const char *finals[] = {"{\"text\":\"\"}", "{\"text\":\"a\",\"b\":1}"};
