@@ -171,6 +171,18 @@ void boot_fleet_roster_invalidate(void);
  * Returns how many rows were written (at most one pass's worth). */
 size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now);
 
+/* Open a configured outbound connection to the persistent onion of every
+ * OTHER machine on this box's own verified roster, through `dial(onion, 0)`
+ * (app_add_configured_node: a .onion host goes through embedded Tor on the
+ * default P2P port). A line is dialled only when it verifies under the fleet
+ * root, its box is not revoked by the head, it is not this box, and it names
+ * an onion; each onion is dialled once per call. The onion is the machine's
+ * own signed claim, so dialling it is how the claim gets tested. No root, a
+ * root the chain refuses, a gate switched off, or a head that cannot be
+ * trusted dials nobody. Returns how many onions were dialled. */
+size_t boot_fleet_roster_dial(struct node_db *ndb,
+                              void (*dial)(const char *host, int port));
+
 /* Refusal log lines are rate limited: one per kind per
  * BOOT_FLEET_ROSTER_LOG_WINDOW_S, and the lines that were left out are
  * counted. True when the caller should log now; `*skipped` (optional) then

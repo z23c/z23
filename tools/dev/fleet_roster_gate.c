@@ -14,6 +14,7 @@
 #include "base/safe_alloc.h"
 #include "util/fleet_roster_check.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -123,11 +124,37 @@ static bool gate_each_line(void (*visit)(const char *line, void *user),
     return fleet_roster_each_line(visit, user, &why);
 }
 
+/* The endpoint one sealed line claims: its receipt's onion and whether the
+ * line's box key is this box's own (so a box never dials itself). The key
+ * is loaded only for its public half and the seed is cleansed at once. */
+static bool gate_endpoint(const char *line, const uint8_t root[32],
+                          char *onion, size_t cap, bool *self, void *ctx)
+{
+    uint8_t seed[FLEET_ENROL_SEED_BYTES], own_pub[FLEET_ENROL_PUBKEY_BYTES];
+    struct fleet_machine machine;
+    const char *why = NULL;
+    bool present = false;
+    (void)ctx;
+    memset(&machine, 0, sizeof machine);
+    if (!fleet_machine_parse(line, root, &machine, &why))
+        return false;
+    if (strlen(machine.receipt.onion) >= cap)
+        return false;
+    (void)snprintf(onion, cap, "%s", machine.receipt.onion);
+    bool ok = fleet_enrol_key_load(seed, own_pub, false, &present, &why);
+    memory_cleanse(seed, sizeof seed);
+    *self = ok && present &&
+            memcmp(machine.receipt.box_pubkey, own_pub,
+                   FLEET_ENROL_PUBKEY_BYTES) == 0;
+    return true;
+}
+
 static const struct zcl_fleet_roster_provider g_provider = {
     .root = gate_root,
     .verify = gate_verify,
     .head = gate_head,
     .each_line = gate_each_line,
+    .endpoint = gate_endpoint,
     .ctx = NULL,
     .name = "fleet_enrol_roster",
 };

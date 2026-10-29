@@ -33,6 +33,8 @@
 #include "config/boot.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
 #include "config/boot_error.h"          /* pre-registry typed failure surface */
+#include "config/boot_fleet_roster.h"
+#include "config/runtime.h"
 #include "config/args.h"                /* flag ladder, -loglevel, usage text */
 #include "main_cli_modes.h"             /* bench/cli/import/gen run-and-exit modes */
 #include "multicall.h"                  /* z23 jsonq: in-process query tool */
@@ -1027,6 +1029,7 @@ int main(int argc, char **argv)
         return rc;
 
     main_wire_explicit_addnodes(argc, argv);
+    (void)boot_fleet_roster_dial(app_runtime_node_db(), app_add_configured_node);
     main_auto_addnode_local_zclassicd(argc, argv, &ctx);
     main_run_service_loop(&ctx, show_metrics);
 

@@ -8965,6 +8965,109 @@ static int test_fleet_board_roster_relay(void)
     return failures;
 }
 
+#define FBD_ONION_A "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
+#define FBD_ONION_B "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxa.onion"
+#define FBD_ONION_C "cdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxab.onion"
+
+static struct {
+    char host[8][80];
+    int port[8];
+    size_t n;
+} g_fbd;
+
+static void fbd_dial(const char *host, int port)
+{
+    if (g_fbd.n < 8) {
+        (void)snprintf(g_fbd.host[g_fbd.n], sizeof g_fbd.host[0], "%s", host);
+        g_fbd.port[g_fbd.n] = port;
+    }
+    g_fbd.n++;
+}
+
+static bool fbd_verify_cb(const char *line, const uint8_t root[32],
+                          enum zcl_fleet_root_state state, bool require,
+                          uint8_t signer[32], uint8_t box[32], bool *sealed,
+                          const char **why, void *ctx)
+{
+    (void)root; (void)state; (void)require; (void)ctx;
+    *sealed = line[0] != 'D';
+    *why = "fleetboard.roster_signature_invalid";
+    if (line[0] == 'D')
+        return false;
+    memset(signer, 0, 32);
+    memset(box, 0, 32);
+    signer[0] = (uint8_t)(0x80 | line[0]);
+    box[0] = (uint8_t)line[0];
+    return true;
+}
+
+static bool fbd_endpoint_cb(const char *line, const uint8_t root[32],
+                            char *onion, size_t cap, bool *self, void *ctx)
+{
+    (void)root; (void)ctx;
+    *self = line[0] == 'B';
+    switch (line[0]) {
+    case 'A': (void)snprintf(onion, cap, "%s", FBD_ONION_A); return true;
+    case 'B': (void)snprintf(onion, cap, "%s", FBD_ONION_B); return true;
+    case 'C': (void)snprintf(onion, cap, "%s", FBD_ONION_C); return true;
+    case 'E': onion[0] = '\0'; return true;
+    default: return false;
+    }
+}
+
+static bool fbd_each_cb(void (*visit)(const char *line, void *user),
+                        void *user, void *ctx)
+{
+    static const char *const lines[] = { "A", "B", "C", "D", "E", "A" };
+    (void)ctx;
+    for (size_t i = 0; i < sizeof lines / sizeof lines[0]; i++)
+        visit(lines[i], user);
+    return true;
+}
+
+static int test_fleet_board_roster_dial(void)
+{
+    int failures = 0;
+    TEST("fleet roster dial: only a verified, unrevoked, other machine with "
+         "an onion is dialled, once per call, and nobody without a root or "
+         "with a head that cannot be trusted") {
+        struct node_db db;
+        static const struct zcl_fleet_roster_provider provider = {
+            .root = fbr_root_cb, .verify = fbd_verify_cb,
+            .head = fbr_head_cb, .each_line = fbd_each_cb,
+            .endpoint = fbd_endpoint_cb, .ctx = NULL,
+            .name = "fleet-dial-test" };
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        fbr_install(FBR_ROOT, false);
+        zcl_fleet_roster_provider_install(&provider);
+        g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+        g_fbr.head.count = 1;
+        g_fbr.head.revoked[0][0] = 'C';
+        memset(&g_fbd, 0, sizeof g_fbd);
+        ASSERT_EQ(boot_fleet_roster_dial(&db, fbd_dial), 1);
+        ASSERT_EQ(g_fbd.n, 1);
+        ASSERT_STR_EQ(g_fbd.host[0], FBD_ONION_A);
+        ASSERT_EQ(g_fbd.port[0], 0);
+        ASSERT_EQ(boot_fleet_roster_dial(&db, fbd_dial), 1);
+        ASSERT_EQ(g_fbd.n, 2);
+        g_fbr.head.state = ZCL_FLEET_HEAD_FAILED;
+        ASSERT_EQ(boot_fleet_roster_dial(&db, fbd_dial), 0);
+        g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+        g_fbr.present = false;
+        ASSERT_EQ(boot_fleet_roster_dial(&db, fbd_dial), 0);
+        g_fbr.present = true;
+        fbr_uninstall();
+        ASSERT_EQ(boot_fleet_roster_dial(&db, fbd_dial), 0);
+        ASSERT_EQ(g_fbd.n, 2);
+        node_db_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -9027,6 +9130,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_cost();
     failures += test_fleet_board_roster_publish();
     failures += test_fleet_board_roster_relay();
+    failures += test_fleet_board_roster_dial();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */

@@ -914,6 +914,80 @@ size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now)
     return wrote;
 }
 
+/* ── dialling the owner's other machines ─────────────────────────────── */
+
+#define DIAL_ONION_CAP 96
+
+struct dial_acc {
+    const struct root_view *rv;
+    const struct zcl_fleet_head *head;
+    void (*dial)(const char *host, int port);
+    size_t n;
+    char onions[BOOT_FLEET_ROSTER_MAX][DIAL_ONION_CAP];
+};
+
+static bool dial_seen(const struct dial_acc *a, const char *onion)
+{
+    for (size_t i = 0; i < a->n; i++)
+        if (strcmp(a->onions[i], onion) == 0)
+            return true;
+    return false;
+}
+
+/* One roster line: dial its onion when it verifies under the root, names a
+ * box the head does not revoke, is not this box, and has not been dialled
+ * in this pass. */
+static void dial_line(const char *line, void *user)
+{
+    struct dial_acc *a = user;
+    uint8_t signer[32], box[32];
+    char onion[DIAL_ONION_CAP];
+    bool sealed = false, self = false;
+    if (a->n >= BOOT_FLEET_ROSTER_MAX)
+        return;
+    if (roster_verify(line, a->rv, signer, box, &sealed) &&
+        !head_revokes(a->head, box) && !head_revokes(a->head, signer) &&
+        zcl_fleet_roster_endpoint(line, a->rv->root, onion, sizeof onion,
+                                  &self) &&
+        !self && onion[0] && !dial_seen(a, onion)) {
+        memcpy(a->onions[a->n++], onion, sizeof onion);
+        a->dial(onion, 0);
+    }
+    memset(signer, 0, sizeof signer);
+}
+
+size_t boot_fleet_roster_dial(struct node_db *ndb,
+                              void (*dial)(const char *host, int port))
+{
+    struct root_view rv;
+    bool disabled = false;
+    size_t n = 0;
+    if (!ndb || !dial || !zcl_fleet_roster_provider_installed())
+        return 0;
+    if (roster_root_view(ndb, &rv, &disabled) != SNAP_READY)
+        return 0;
+    struct dial_acc *a = zcl_calloc(1, sizeof *a, "fleet_roster_dial");
+    struct zcl_fleet_head *head = zcl_calloc(1, sizeof *head,
+                                             "fleet_roster_dial_head");
+    if (a && head) {
+        zcl_fleet_roster_head(rv.root, head);
+        /* A head that cannot be trusted admits nobody, here as in the gate. */
+        if (head->state != ZCL_FLEET_HEAD_FAILED) {
+            a->rv = &rv;
+            a->head = head;
+            a->dial = dial;
+            (void)zcl_fleet_roster_each_line(dial_line, a);
+            n = a->n;
+        }
+        LOG_INFO(ROSTER_LOG, "fleet roster: dialling %zu other machine(s) "
+                 "by onion", n);
+    }
+    free(a);
+    free(head);
+    memset(rv.root, 0, sizeof rv.root);
+    return n;
+}
+
 #ifdef ZCL_TESTING
 void boot_fleet_roster_test_reset(void)
 {

@@ -97,3 +97,17 @@ bool zcl_fleet_roster_each_line(void (*visit)(const char *line, void *user),
         return true; /* nothing to visit is not a failure */
     return g_provider.each_line(visit, user, g_provider.ctx);
 }
+
+bool zcl_fleet_roster_endpoint(const char *line, const uint8_t root[32],
+                               char *onion, size_t cap, bool *self)
+{
+    if (onion && cap)
+        onion[0] = '\0';
+    if (self)
+        *self = false;
+    if (!line || !root || !onion || !cap || !self ||
+        !atomic_load_explicit(&g_ready, memory_order_acquire) ||
+        !g_provider.endpoint)
+        return false;
+    return g_provider.endpoint(line, root, onion, cap, self, g_provider.ctx);
+}

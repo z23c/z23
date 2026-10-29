@@ -95,6 +95,14 @@ struct zcl_fleet_roster_provider {
      * The manager publishes these onto the board. False when unreadable. */
     bool (*each_line)(void (*visit)(const char *line, void *user),
                       void *user, void *ctx);
+    /* The dialable endpoint of one line sealed by `root`: `onion` receives
+     * the receipt's persistent onion hostname ("" when it names none) and
+     * `self` whether the line's box key is this box's own. Optional; a
+     * provider without it offers no endpoint. False when the line does not
+     * parse or verify under `root`. The onion is the box's own signed
+     * claim, not a fact: dialling it is how the claim gets tested. */
+    bool (*endpoint)(const char *line, const uint8_t root[32], char *onion,
+                     size_t cap, bool *self, void *ctx);
     void *ctx;
     const char *name;
 };
@@ -118,5 +126,9 @@ void zcl_fleet_roster_head(const uint8_t root[32],
                            struct zcl_fleet_head *out);
 bool zcl_fleet_roster_each_line(void (*visit)(const char *line, void *user),
                                 void *user);
+/* The endpoint of one line. With no provider, or one without an endpoint
+ * callback, false: no endpoint is known. */
+bool zcl_fleet_roster_endpoint(const char *line, const uint8_t root[32],
+                               char *onion, size_t cap, bool *self);
 
 #endif /* ZCL_UTIL_FLEET_ROSTER_CHECK_H */
