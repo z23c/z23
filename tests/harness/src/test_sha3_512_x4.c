@@ -93,25 +93,11 @@ static void x4_reference(const uint8_t key[32], const uint8_t nonce[32],
     }
 }
 
-int test_sha3_512_x4(void)
+/* Section 1: both lanes equal four independent one-shot sha3_512 hashes.
+ * Returns the number of failed checks (0 or 1). */
+static int x4_contract_failures(bool have_vec)
 {
     int failures = 0;
-    const bool have_vec = keccak_x4_available();
-
-    printf("\n=== sha3_512_x4 (4-way SHA3-512 keystream parity oracle) ===\n");
-    printf("sha3_512_x4: %s 4-lane Keccak available on host... %s\n",
-           SHA3_VEC_NAME,
-           have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
-
-#if defined(__aarch64__)
-    printf("sha3_512_x4: AUTO refuses the measured-slower NEON tier... ");
-    if (sha3_512_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR)
-        printf("OK (scalar)\n");
-    else {
-        printf("FAIL\n");
-        failures++;
-    }
-#endif
 
     /* ── 1. Contract: both lanes == 4x independent one-shot sha3_512 ──── */
     printf("sha3_512_x4: matches 4x one-shot sha3_512(key||nonce||le64(ctr))... ");
@@ -138,6 +124,14 @@ int test_sha3_512_x4(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", bad); failures++; }
     }
+    return failures;
+}
+
+/* Section 2: vector lane versus scalar lane over 20000 random triples.
+ * Returns the number of failed checks (0 or 1). */
+static int x4_parity_failures(bool have_vec)
+{
+    int failures = 0;
 
     /* ── 2. Randomized parity: vector lane vs scalar lane, 20000 triples ─ */
     printf("sha3_512_x4: parity vector-vs-scalar x20000 random triples... ");
@@ -170,6 +164,14 @@ int test_sha3_512_x4(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", bad); failures++; }
     }
+    return failures;
+}
+
+/* Section 3: counter carry and wrap boundaries across the four lanes.
+ * Returns the number of failed checks (0 or 1). */
+static int x4_carry_failures(bool have_vec)
+{
+    int failures = 0;
 
     /* ── 3. Counter-carry geometry across the 4 lanes ─────────────────── */
     printf("sha3_512_x4: counter carry/wrap boundaries (both lanes)... ");
@@ -202,6 +204,14 @@ int test_sha3_512_x4(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", bad); failures++; }
     }
+    return failures;
+}
+
+/* Section 4: the keystream must depend on the key, the nonce and the counter.
+ * Returns the number of failed checks (0 or 1). */
+static int x4_teeth_failures(bool have_vec)
+{
+    int failures = 0;
 
     /* ── 4. TEETH: the keystream must actually depend on every input ──── */
     printf("sha3_512_x4: teeth (key/nonce/counter each change keystream)... ");
@@ -246,7 +256,12 @@ int test_sha3_512_x4(void)
         if (bad == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", bad); failures++; }
     }
+    return failures;
+}
 
+/* Section 5: honest benchmark, reported and never gated. */
+static void x4_bench(bool have_vec)
+{
     /* ── 5. Honest benchmark: one 64 KiB file_service frame = 256 calls ── */
     {
         uint8_t key[32], nonce[32], out[256];
@@ -287,6 +302,33 @@ int test_sha3_512_x4(void)
         }
         (void)sink;
     }
+}
+
+int test_sha3_512_x4(void)
+{
+    int failures = 0;
+    const bool have_vec = keccak_x4_available();
+
+    printf("\n=== sha3_512_x4 (4-way SHA3-512 keystream parity oracle) ===\n");
+    printf("sha3_512_x4: %s 4-lane Keccak available on host... %s\n",
+           SHA3_VEC_NAME,
+           have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
+
+#if defined(__aarch64__)
+    printf("sha3_512_x4: AUTO refuses the measured-slower NEON tier... ");
+    if (sha3_512_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR)
+        printf("OK (scalar)\n");
+    else {
+        printf("FAIL\n");
+        failures++;
+    }
+#endif
+
+    failures += x4_contract_failures(have_vec);
+    failures += x4_parity_failures(have_vec);
+    failures += x4_carry_failures(have_vec);
+    failures += x4_teeth_failures(have_vec);
+    x4_bench(have_vec);
 
     /* Restore the shipped default for any subsequent in-process use. */
     sha3_512_x4_select_impl(SHA3_IMPL_AUTO);
