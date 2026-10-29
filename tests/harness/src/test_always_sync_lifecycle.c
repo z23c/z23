@@ -476,7 +476,7 @@ static int lc_s1_kill_hole_combo(int failures, const char *dir,
     return failures;
 }
 
-static int lc_s1_lifecycle(int failures)
+static int lc_s1_forward_fold_soak_and_faults(int failures)
 {
     const int32_t TARGET = 240;   /* a few hundred synthetic blocks */
     const int32_t STEP = 40;
@@ -658,7 +658,7 @@ static int test_always_sync_lifecycle_platform_arm(void)
 
     /* ══ SECTION 1 — forward-fold soak: anchor base → target tip, faults
      * injected inline, two-state + forbidden guards asserted after each. ══ */
-    failures = lc_s1_lifecycle(failures);
+    failures = lc_s1_forward_fold_soak_and_faults(failures);
 
     /* ══ SECTION 2 — the full sim/simnet_chaos injector matrix under the
      * two-state contract + the crash guard + never-page. Each injector builds
