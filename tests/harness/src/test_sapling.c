@@ -1940,6 +1940,70 @@ static int test_sapling_fr_inv_a_a_1_1(void)
     return failures;
 }
 
+static int test_sapling_fr_sqrt_branches(void)
+{
+    int failures = 0;
+
+    /* --- Fr square root: zero, one, square, non-residue, non-reduced --- */
+    printf("fr_sqrt zero/one/square/non-residue/non-reduced... ");
+    {
+        uint8_t zero_b[32] = {0};
+        uint8_t one_b[32] = {1};
+        uint8_t four_b[32] = {4};
+        uint8_t five_b[32] = {5};
+        /* p in little-endian bytes: the encoding of 0 mod p, not reduced */
+        static const uint8_t p_b[32] = {
+            0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+            0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
+            0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+            0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73
+        };
+        struct fr a, r, sq, sentinel;
+        bool ok = true;
+        fr_one(&sentinel);
+
+        /* zero: true, root is zero, pre-filled output is overwritten */
+        fr_from_bytes(&a, zero_b);
+        r = sentinel;
+        ok = ok && fr_sqrt(&r, &a) && fr_is_zero(&r);
+
+        /* one: true, and the root squares back to one */
+        fr_from_bytes(&a, one_b);
+        ok = ok && fr_sqrt(&r, &a);
+        fr_sq(&sq, &r);
+        ok = ok && fr_eq(&sq, &a);
+
+        /* square 4: true, root squares back to 4 */
+        fr_from_bytes(&a, four_b);
+        ok = ok && fr_sqrt(&r, &a);
+        fr_sq(&sq, &r);
+        ok = ok && fr_eq(&sq, &a);
+
+        /* 5 is a non-residue: false, *r untouched */
+        fr_from_bytes(&a, five_b);
+        r = sentinel;
+        ok = ok && !fr_sqrt(&r, &a) && fr_eq(&r, &sentinel);
+
+        /* p bytes reduce to 0 in fr_from_bytes (its return is not asserted) */
+        (void)fr_from_bytes(&a, p_b);
+        r = sentinel;
+        ok = ok && fr_sqrt(&r, &a) && fr_is_zero(&r);
+
+        /* non-reduced limbs equal to p: not zero, not a residue, refused */
+        a.d[0] = 0xffffffff00000001ULL;
+        a.d[1] = 0x53bda402fffe5bfeULL;
+        a.d[2] = 0x3339d80809a1d805ULL;
+        a.d[3] = 0x73eda753299d7d48ULL;
+        r = sentinel;
+        ok = ok && !fr_sqrt(&r, &a) && fr_eq(&r, &sentinel);
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
 static int test_sapling_jub_identity_is_identity(void)
 {
     int failures = 0;
@@ -5975,6 +6039,7 @@ int test_sapling(void)
     failures += test_sapling_fr_from_bytes_to_bytes_roundtrip();
     failures += test_sapling_fr_mul_7_7_49();
     failures += test_sapling_fr_inv_a_a_1_1();
+    failures += test_sapling_fr_sqrt_branches();
     failures += test_sapling_jub_identity_is_identity();
     failures += test_sapling_jub_double_identity();
     failures += test_sapling_jub_from_bytes_to_bytes_roundtrip();
