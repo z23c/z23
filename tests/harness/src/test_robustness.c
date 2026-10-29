@@ -989,7 +989,7 @@ static int check_running_pid_lock_detection(void)
 }
 
 /* zcl_malloc must survive a zero-size request and serve a small one. */
-static int check_alloc_failure_safety(void)
+static int check_zcl_malloc_zero_and_small_sizes(void)
 {
     int failures = 0;
 
@@ -1036,7 +1036,7 @@ int test_robustness(void)
     failures += check_pid_lock_detection();
     failures += check_shutdown_marker_detection();
     failures += check_running_pid_lock_detection();
-    failures += check_alloc_failure_safety();
+    failures += check_zcl_malloc_zero_and_small_sizes();
 
     cleanup_robustness_datadir();
     return failures;
