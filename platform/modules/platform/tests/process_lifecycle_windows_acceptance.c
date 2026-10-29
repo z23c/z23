@@ -95,51 +95,72 @@ static int capture_tree_mode(void)
     return 48;
 }
 
+static bool child_mode_args_ok(int argc, char **argv)
+{
+    return argc == 9 && strcmp(argv[2], "space value") == 0 &&
+           strcmp(argv[3], "quote\"value") == 0 &&
+           strcmp(argv[4], "trailing\\") == 0;
+}
+
+static bool child_mode_env_ok(DWORD inherited_error_mode)
+{
+    BOOL in_job = FALSE;
+    return getenv("Z23_PROCESS_TEST") != NULL &&
+           strcmp(getenv("Z23_PROCESS_TEST"), "controlled") == 0 &&
+           getenv("Z23_PROCESS_UNEXPECTED") == NULL &&
+           GetConsoleWindow() == NULL &&
+           IsProcessInJob(GetCurrentProcess(), NULL, &in_job) && in_job &&
+           GetPriorityClass(GetCurrentProcess()) == BELOW_NORMAL_PRIORITY_CLASS &&
+           (inherited_error_mode & (SEM_FAILCRITICALERRORS |
+                                    SEM_NOGPFAULTERRORBOX |
+                                    SEM_NOOPENFILEERRORBOX)) ==
+               (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                SEM_NOOPENFILEERRORBOX);
+}
+
+static bool child_mode_paths_ok(char **argv)
+{
+    wchar_t image[32768], cwd[32768], expected_image[32768], expected_cwd[32768];
+    return GetModuleFileNameW(NULL, image, 32768) &&
+           GetCurrentDirectoryW(32768, cwd) &&
+           MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argv[5], -1,
+                               expected_image, 32768) &&
+           MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argv[6], -1,
+                               expected_cwd, 32768) &&
+           _wcsicmp(image, expected_image) == 0 &&
+           _wcsicmp(cwd, expected_cwd) == 0;
+}
+
+static bool child_mode_capability_ok(const char *text)
+{
+    HANDLE allowed = (HANDLE)(uintptr_t)_strtoui64(text, NULL, 10);
+    char capability[8] = {0};
+    DWORD flags = 0, received = 0;
+    return GetHandleInformation(allowed, &flags) &&
+           ReadFile(allowed, capability, 7, &received, NULL) && received == 7 &&
+           memcmp(capability, "allowed", 7) == 0;
+}
+
 static int child_mode(int argc, char **argv)
 {
     DWORD inherited_error_mode = GetErrorMode();
-    BOOL in_job = FALSE;
     platform_process_child_prepare_headless();
-    if (argc != 9 || strcmp(argv[2], "space value") != 0 ||
-        strcmp(argv[3], "quote\"value") != 0 ||
-        strcmp(argv[4], "trailing\\") != 0 ||
-        !getenv("Z23_PROCESS_TEST") ||
-        strcmp(getenv("Z23_PROCESS_TEST"), "controlled") != 0 ||
-        getenv("Z23_PROCESS_UNEXPECTED") != NULL || GetConsoleWindow() != NULL ||
-        !IsProcessInJob(GetCurrentProcess(), NULL, &in_job) || !in_job ||
-        GetPriorityClass(GetCurrentProcess()) != BELOW_NORMAL_PRIORITY_CLASS ||
-        (inherited_error_mode & (SEM_FAILCRITICALERRORS |
-                                 SEM_NOGPFAULTERRORBOX |
-                                 SEM_NOOPENFILEERRORBOX)) !=
-            (SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
-             SEM_NOOPENFILEERRORBOX))
+    if (!child_mode_args_ok(argc, argv) ||
+        !child_mode_env_ok(inherited_error_mode))
         return 20;
-    wchar_t image[32768], cwd[32768], expected_image[32768], expected_cwd[32768];
-    if (!GetModuleFileNameW(NULL, image, 32768) ||
-        !GetCurrentDirectoryW(32768, cwd) ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argv[5], -1,
-                             expected_image, 32768) ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, argv[6], -1,
-                             expected_cwd, 32768) ||
-        _wcsicmp(image, expected_image) != 0 ||
-        _wcsicmp(cwd, expected_cwd) != 0)
-        return 21;
+    if (!child_mode_paths_ok(argv)) return 21;
     uintptr_t inherited = (uintptr_t)_strtoui64(argv[7], NULL, 10);
     DWORD flags = 0;
     if (GetHandleInformation((HANDLE)inherited, &flags) ||
         GetLastError() != ERROR_INVALID_HANDLE)
         return 22;
-    HANDLE allowed = (HANDLE)(uintptr_t)_strtoui64(argv[8], NULL, 10);
-    char capability[8] = {0}; DWORD received = 0;
-    if (!GetHandleInformation(allowed, &flags) ||
-        !ReadFile(allowed, capability, 7, &received, NULL) || received != 7 ||
-        memcmp(capability, "allowed", 7) != 0)
-        return 25;
+    if (!child_mode_capability_ok(argv[8])) return 25;
     FILE *proof = fopen("process-lifecycle.proof", "wb");
     if (!proof) return 23;
     bool ok = fputs("ok\n", proof) >= 0 && fclose(proof) == 0;
     return ok ? 0 : 24;
 }
+
 
 /* File-input cases use this driver's trusted self image and private fixture. */
 
@@ -288,125 +309,195 @@ static int capture_mode(int argc, char **argv)
     return -1;
 }
 
-int main(int argc, char **argv)
+static const char *const child_mode_env[] = {"Z23_PROCESS_TEST=controlled", NULL};
+
+struct child_mode_session {
+    wchar_t image_w[32768];
+    wchar_t temp_w[32768];
+    wchar_t proof[32768];
+    char image[32768];
+    char cwd[32768];
+    char handle_text[32];
+    char pipe_text[32];
+    char captured[128];
+    HANDLE inherited;
+    HANDLE pipe_read;
+    bool started;
+    enum platform_process_wait_result waited;
+    uint32_t code;
+    bool tree_started;
+    enum platform_process_wait_result tree_waited;
+    uint32_t tree_code;
+    bool tree_reported;
+    bool tree_reaped;
+    bool detached_started;
+    bool detached_released;
+    bool detached_parent_exited;
+    bool detached_tree_reaped;
+    bool captured_ok;
+    bool empty_ok;
+    bool boundary_ok;
+    bool large_ok;
+    bool timed_tree_reaped;
+    bool relative_refused;
+    bool relative_cwd_refused;
+    bool ok;
+};
+
+static int child_mode_make_temp_dir(struct child_mode_session *s)
 {
-    int capture_code = capture_mode(argc, argv);
-    if (capture_code >= 0) return capture_code;
-    if (argc == 2 && strcmp(argv[1], "--tree-child") == 0)
-        return tree_child_mode();
-    if (argc == 3 && strcmp(argv[1], "--tree-parent") == 0)
-        return tree_parent_mode(argv[2]);
-    if (argc > 1 && strcmp(argv[1], "--child") == 0)
-        return child_mode(argc, argv);
-    wchar_t image_w[32768], temp_w[32768];
-    if (!GetModuleFileNameW(NULL, image_w, 32768) ||
-        !GetTempPathW(32768, temp_w)) return 1;
-    size_t used = wcslen(temp_w);
-    int written = swprintf(temp_w + used, 32768 - used,
+    if (!GetModuleFileNameW(NULL, s->image_w, 32768) ||
+        !GetTempPathW(32768, s->temp_w)) return 1;
+    size_t used = wcslen(s->temp_w);
+    int written = swprintf(s->temp_w + used, 32768 - used,
                            L"z23-process-%lu", (unsigned long)GetCurrentProcessId());
-    if (written <= 0 || !CreateDirectoryW(temp_w, NULL)) return 2;
-    char image[32768], cwd[32768], handle_text[32], pipe_text[32];
-    HANDLE inherited = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (written <= 0 || !CreateDirectoryW(s->temp_w, NULL)) return 2;
+    return 0;
+}
+
+static int child_mode_open_handles(struct child_mode_session *s)
+{
+    s->inherited = CreateEventW(NULL, TRUE, FALSE, NULL);
     SECURITY_ATTRIBUTES security = {
         .nLength = sizeof(security), .bInheritHandle = TRUE};
-    HANDLE pipe_read = INVALID_HANDLE_VALUE, pipe_write = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
     DWORD sent = 0;
-    if (!CreatePipe(&pipe_read, &pipe_write, &security, 0) ||
+    s->pipe_read = INVALID_HANDLE_VALUE;
+    if (!CreatePipe(&s->pipe_read, &pipe_write, &security, 0) ||
         !SetHandleInformation(pipe_write, HANDLE_FLAG_INHERIT, 0) ||
         !WriteFile(pipe_write, "allowed", 7, &sent, NULL) || sent != 7)
         return 3;
     CloseHandle(pipe_write);
-    if (!inherited || !SetHandleInformation(inherited, HANDLE_FLAG_INHERIT,
-                                            HANDLE_FLAG_INHERIT) ||
-        !utf8(image_w, image, sizeof(image)) || !utf8(temp_w, cwd, sizeof(cwd)))
+    if (!s->inherited || !SetHandleInformation(s->inherited, HANDLE_FLAG_INHERIT,
+                                               HANDLE_FLAG_INHERIT) ||
+        !utf8(s->image_w, s->image, sizeof(s->image)) ||
+        !utf8(s->temp_w, s->cwd, sizeof(s->cwd)))
         return 3;
-    (void)snprintf(handle_text, sizeof(handle_text), "%llu",
-                   (unsigned long long)(uintptr_t)inherited);
-    (void)snprintf(pipe_text, sizeof(pipe_text), "%llu",
-                   (unsigned long long)(uintptr_t)pipe_read);
+    (void)snprintf(s->handle_text, sizeof(s->handle_text), "%llu",
+                   (unsigned long long)(uintptr_t)s->inherited);
+    (void)snprintf(s->pipe_text, sizeof(s->pipe_text), "%llu",
+                   (unsigned long long)(uintptr_t)s->pipe_read);
+    return 0;
+}
+
+static int child_mode_prepare(struct child_mode_session *s)
+{
+    int status = child_mode_make_temp_dir(s);
+    return status != 0 ? status : child_mode_open_handles(s);
+}
+
+static void child_mode_run_hidden(struct child_mode_session *s)
+{
     const char *const child_argv[] = {
-        image, "--child", "space value", "quote\"value", "trailing\\",
-        image, cwd, handle_text, pipe_text, NULL};
-    const char *const child_env[] = {"Z23_PROCESS_TEST=controlled", NULL};
-    const uintptr_t allowed_handles[] = {(uintptr_t)pipe_read};
+        s->image, "--child", "space value", "quote\"value", "trailing\\",
+        s->image, s->cwd, s->handle_text, s->pipe_text, NULL};
+    const uintptr_t allowed_handles[] = {(uintptr_t)s->pipe_read};
     (void)SetEnvironmentVariableW(L"Z23_PROCESS_UNEXPECTED", L"inherited");
     struct platform_process process;
     platform_process_init(&process);
     struct platform_process_options options = {
-        .image = image, .argv = child_argv, .cwd = cwd, .env = child_env,
-        .inherited = allowed_handles, .inherited_count = 1};
-    bool started = platform_process_start_hidden(&process, &options);
-    uint32_t code = UINT32_MAX;
-    enum platform_process_wait_result waited = started
-        ? platform_process_wait(&process, 10000, &code)
+        .image = s->image, .argv = child_argv, .cwd = s->cwd,
+        .env = child_mode_env, .inherited = allowed_handles,
+        .inherited_count = 1};
+    s->started = platform_process_start_hidden(&process, &options);
+    s->code = UINT32_MAX;
+    s->waited = s->started
+        ? platform_process_wait(&process, 10000, &s->code)
         : PLATFORM_PROCESS_WAIT_FAILED;
     platform_process_close(&process);
-    CloseHandle(inherited);
-    CloseHandle(pipe_read);
-    wchar_t proof[32768];
-    (void)swprintf(proof, 32768, L"%ls\\process-lifecycle.proof", temp_w);
-    DWORD attributes = GetFileAttributesW(proof);
-    bool ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0 &&
-              attributes != INVALID_FILE_ATTRIBUTES;
+    CloseHandle(s->inherited);
+    CloseHandle(s->pipe_read);
+    (void)swprintf(s->proof, 32768, L"%ls\\process-lifecycle.proof", s->temp_w);
+    DWORD attributes = GetFileAttributesW(s->proof);
+    s->ok = s->waited == PLATFORM_PROCESS_WAIT_EXITED && s->code == 0 &&
+            attributes != INVALID_FILE_ATTRIBUTES;
+}
 
-    char captured[128];
-    struct platform_process_capture_result capture = {0};
+static struct platform_process_options child_mode_capture_options(
+    const struct child_mode_session *s, const char *const *argv)
+{
+    struct platform_process_options options = {
+        .image = s->image, .argv = argv, .cwd = s->cwd, .env = child_mode_env};
+    return options;
+}
+
+static bool child_mode_capture_stdout(struct child_mode_session *s)
+{
     const char *const capture_argv[] = {
-        image, "--capture-child", "space \"value\" trailing\\",
+        s->image, "--capture-child", "space \"value\" trailing\\",
         "stderr-must-not-be-captured", NULL};
-    struct platform_process_options capture_options = {
-        .image = image, .argv = capture_argv, .cwd = cwd, .env = child_env};
-    bool captured_ok = platform_process_capture_stdout(
-        &capture_options, captured, sizeof(captured), 10000u, &capture) &&
+    struct platform_process_options options =
+        child_mode_capture_options(s, capture_argv);
+    struct platform_process_capture_result capture = {0};
+    return platform_process_capture_stdout(
+        &options, s->captured, sizeof(s->captured), 10000u, &capture) &&
         capture.exit_code == 7u && !capture.timed_out &&
         !capture.output_truncated &&
-        strcmp(captured, "space \"value\" trailing\\") == 0 &&
-        strstr(captured, "stderr") == NULL;
+        strcmp(s->captured, "space \"value\" trailing\\") == 0 &&
+        strstr(s->captured, "stderr") == NULL;
+}
 
+static bool child_mode_capture_empty(struct child_mode_session *s)
+{
     const char *const empty_argv[] = {
-        image, "--capture-child", "", "ignored", NULL};
-    capture_options.argv = empty_argv;
+        s->image, "--capture-child", "", "ignored", NULL};
+    struct platform_process_options options =
+        child_mode_capture_options(s, empty_argv);
     bool empty_ok = true;
     for (size_t i = 0; i < 64u && empty_ok; i++) {
         struct platform_process_capture_result empty = {0};
         empty_ok = platform_process_capture_stdout(
-            &capture_options, captured, sizeof(captured), 10000u, &empty) &&
+            &options, s->captured, sizeof(s->captured), 10000u, &empty) &&
             empty.exit_code == 7u && !empty.timed_out &&
-            !empty.output_truncated && captured[0] == '\0';
+            !empty.output_truncated && s->captured[0] == '\0';
     }
+    return empty_ok;
+}
 
+static bool child_mode_capture_boundary(struct child_mode_session *s)
+{
     char boundary[8];
     struct platform_process_capture_result exact = {0}, truncated = {0};
     const char *const exact_argv[] = {
-        image, "--capture-child", "1234567", "ignored", NULL};
-    capture_options.argv = exact_argv;
+        s->image, "--capture-child", "1234567", "ignored", NULL};
+    struct platform_process_options options =
+        child_mode_capture_options(s, exact_argv);
     bool boundary_ok = platform_process_capture_stdout(
-        &capture_options, boundary, sizeof(boundary), 10000u, &exact) &&
+        &options, boundary, sizeof(boundary), 10000u, &exact) &&
         exact.exit_code == 7u && !exact.output_truncated &&
         strcmp(boundary, "1234567") == 0;
     const char *const truncated_argv[] = {
-        image, "--capture-child", "12345678", "ignored", NULL};
-    capture_options.argv = truncated_argv;
+        s->image, "--capture-child", "12345678", "ignored", NULL};
+    options.argv = truncated_argv;
     boundary_ok = boundary_ok && platform_process_capture_stdout(
-        &capture_options, boundary, sizeof(boundary), 10000u, &truncated) &&
+        &options, boundary, sizeof(boundary), 10000u, &truncated) &&
         truncated.exit_code == 7u && truncated.output_truncated &&
         strcmp(boundary, "1234567") == 0;
+    return boundary_ok;
+}
 
+static bool child_mode_capture_large(struct child_mode_session *s)
+{
     char large[64];
     struct platform_process_capture_result large_result = {0};
-    const char *const large_argv[] = {image, "--capture-large", NULL};
-    capture_options.argv = large_argv;
-    bool large_ok = platform_process_capture_stdout(
-        &capture_options, large, sizeof(large), 10000u, &large_result) &&
+    const char *const large_argv[] = {s->image, "--capture-large", NULL};
+    struct platform_process_options options =
+        child_mode_capture_options(s, large_argv);
+    return platform_process_capture_stdout(
+        &options, large, sizeof(large), 10000u, &large_result) &&
         large_result.exit_code == 0u && !large_result.timed_out &&
         large_result.output_truncated && strlen(large) == sizeof(large) - 1u;
+}
 
+static bool child_mode_capture_timed(struct child_mode_session *s)
+{
     char timed_output[64];
     struct platform_process_capture_result timed = {0};
-    const char *const timed_argv[] = {image, "--capture-tree", NULL};
-    capture_options.argv = timed_argv;
+    const char *const timed_argv[] = {s->image, "--capture-tree", NULL};
+    struct platform_process_options options =
+        child_mode_capture_options(s, timed_argv);
     bool timed_ok = platform_process_capture_stdout(
-        &capture_options, timed_output, sizeof(timed_output), 100u, &timed) &&
+        &options, timed_output, sizeof(timed_output), 100u, &timed) &&
         timed.timed_out && timed.exit_code == 124u;
     char *pid_end = NULL;
     unsigned long timed_pid = strtoul(timed_output, &pid_end, 10);
@@ -416,22 +507,51 @@ int main(int argc, char **argv)
         (*pid_end == '\n' || *pid_end == '\r') &&
         (!timed_child || WaitForSingleObject(timed_child, 2000) == WAIT_OBJECT_0);
     if (timed_child) CloseHandle(timed_child);
+    return timed_tree_reaped;
+}
 
+static void child_mode_capture_refused(struct child_mode_session *s)
+{
+    const char *const timed_argv[] = {s->image, "--capture-tree", NULL};
     char refused[8] = "dirty";
     struct platform_process_capture_result refused_result = {0};
-    struct platform_process_options refused_options = capture_options;
+    struct platform_process_options refused_options =
+        child_mode_capture_options(s, timed_argv);
     refused_options.image = "relative.exe";
-    bool relative_refused = !platform_process_capture_stdout(
+    s->relative_refused = !platform_process_capture_stdout(
         &refused_options, refused, sizeof(refused), 100u, &refused_result) &&
         refused[0] == 0;
-    refused_options.image = image;
+    refused_options.image = s->image;
     refused_options.cwd = ".";
-    bool relative_cwd_refused = !platform_process_capture_stdout(
+    s->relative_cwd_refused = !platform_process_capture_stdout(
         &refused_options, refused, sizeof(refused), 100u, &refused_result) &&
         refused[0] == 0;
-    ok = ok && captured_ok && empty_ok && boundary_ok && large_ok &&
-         timed_tree_reaped && relative_refused && relative_cwd_refused;
+}
 
+static void child_mode_capture_checks(struct child_mode_session *s)
+{
+    s->captured_ok = child_mode_capture_stdout(s);
+    s->empty_ok = child_mode_capture_empty(s);
+    s->boundary_ok = child_mode_capture_boundary(s);
+    s->large_ok = child_mode_capture_large(s);
+    s->timed_tree_reaped = child_mode_capture_timed(s);
+    child_mode_capture_refused(s);
+}
+
+static bool child_mode_capture_ok(const struct child_mode_session *s)
+{
+    return s->captured_ok && s->empty_ok && s->boundary_ok && s->large_ok &&
+           s->timed_tree_reaped && s->relative_refused &&
+           s->relative_cwd_refused;
+}
+
+static bool child_mode_wait_reaped(HANDLE handle)
+{
+    return handle && WaitForSingleObject(handle, 2000) == WAIT_OBJECT_0;
+}
+
+static void child_mode_tree_reap(struct child_mode_session *s)
+{
     SECURITY_ATTRIBUTES tree_security = {
         .nLength = sizeof(tree_security), .bInheritHandle = TRUE};
     HANDLE tree_read = INVALID_HANDLE_VALUE, tree_write = INVALID_HANDLE_VALUE;
@@ -442,13 +562,13 @@ int main(int argc, char **argv)
     (void)snprintf(tree_handle, sizeof(tree_handle), "%llu",
                    (unsigned long long)(uintptr_t)tree_write);
     const char *const tree_argv[] = {
-        image, "--tree-parent", tree_handle, NULL};
+        s->image, "--tree-parent", tree_handle, NULL};
     const uintptr_t tree_handles[] = {(uintptr_t)tree_write};
     struct platform_process tree;
     platform_process_init(&tree);
     struct platform_process_options tree_options = {
-        .image = image, .argv = tree_argv, .cwd = cwd, .env = child_env,
-        .inherited = tree_handles, .inherited_count = 1};
+        .image = s->image, .argv = tree_argv, .cwd = s->cwd,
+        .env = child_mode_env, .inherited = tree_handles, .inherited_count = 1};
     bool tree_started = tree_pipe &&
         platform_process_start_hidden(&tree, &tree_options);
     uint32_t tree_code = UINT32_MAX;
@@ -463,33 +583,43 @@ int main(int argc, char **argv)
     HANDLE descendant = tree_reported
         ? OpenProcess(SYNCHRONIZE, FALSE, tree_pid) : NULL;
     platform_process_close(&tree); /* kill-on-close must reap the descendant */
-    bool tree_reaped = descendant &&
-        WaitForSingleObject(descendant, 2000) == WAIT_OBJECT_0;
+    bool tree_reaped = child_mode_wait_reaped(descendant);
     if (descendant) CloseHandle(descendant);
     if (tree_read != INVALID_HANDLE_VALUE) CloseHandle(tree_read);
+    s->tree_started = tree_started;
+    s->tree_waited = tree_waited;
+    s->tree_code = tree_code;
+    s->tree_reported = tree_reported;
+    s->tree_reaped = tree_reaped;
+}
 
+static void child_mode_detached_check(struct child_mode_session *s)
+{
+    SECURITY_ATTRIBUTES detached_security = {
+        .nLength = sizeof(detached_security), .bInheritHandle = TRUE};
     HANDLE detached_read = INVALID_HANDLE_VALUE;
     HANDLE detached_write = INVALID_HANDLE_VALUE;
     DWORD detached_pid = 0, detached_bytes = 0;
     bool detached_pipe =
-        CreatePipe(&detached_read, &detached_write, &tree_security, 0) &&
+        CreatePipe(&detached_read, &detached_write, &detached_security, 0) &&
         SetHandleInformation(detached_read, HANDLE_FLAG_INHERIT, 0);
     char detached_handle[32];
     (void)snprintf(detached_handle, sizeof(detached_handle), "%llu",
                    (unsigned long long)(uintptr_t)detached_write);
     const char *const detached_argv[] = {
-        image, "--tree-parent", detached_handle, NULL};
+        s->image, "--tree-parent", detached_handle, NULL};
     const uintptr_t detached_handles[] = {(uintptr_t)detached_write};
     struct platform_process detached;
     platform_process_init(&detached);
     struct platform_process_options detached_options = {
-        .image = image, .argv = detached_argv, .cwd = cwd, .env = child_env,
-        .inherited = detached_handles, .inherited_count = 1};
-    bool detached_started = detached_pipe &&
+        .image = s->image, .argv = detached_argv, .cwd = s->cwd,
+        .env = child_mode_env, .inherited = detached_handles,
+        .inherited_count = 1};
+    s->detached_started = detached_pipe &&
         platform_process_start_hidden(&detached, &detached_options);
     uint64_t detached_parent_pid = detached.pid;
     if (detached_write != INVALID_HANDLE_VALUE) CloseHandle(detached_write);
-    bool detached_reported = detached_started &&
+    bool detached_reported = s->detached_started &&
         ReadFile(detached_read, &detached_pid, sizeof(detached_pid),
                  &detached_bytes, NULL) &&
         detached_bytes == sizeof(detached_pid) && detached_pid != 0;
@@ -497,24 +627,51 @@ int main(int argc, char **argv)
         ? OpenProcess(SYNCHRONIZE, FALSE, (DWORD)detached_parent_pid) : NULL;
     HANDLE detached_descendant = detached_reported
         ? OpenProcess(SYNCHRONIZE, FALSE, detached_pid) : NULL;
-    bool detached_released = detached_reported &&
-        platform_process_detach(&detached);
-    bool detached_parent_exited = detached_parent &&
-        WaitForSingleObject(detached_parent, 2000) == WAIT_OBJECT_0;
-    bool detached_tree_reaped = detached_descendant &&
-        WaitForSingleObject(detached_descendant, 2000) == WAIT_OBJECT_0;
+    s->detached_released = detached_reported && platform_process_detach(&detached);
+    s->detached_parent_exited = child_mode_wait_reaped(detached_parent);
+    s->detached_tree_reaped = child_mode_wait_reaped(detached_descendant);
     if (detached_parent) CloseHandle(detached_parent);
     if (detached_descendant) CloseHandle(detached_descendant);
     if (detached_read != INVALID_HANDLE_VALUE) CloseHandle(detached_read);
     platform_process_close(&detached);
-    ok = ok && tree_reported && tree_reaped && detached_released &&
-        detached_parent_exited && detached_tree_reaped;
-    ok = ok && capture_file_stdin_cases(image, cwd, child_env);
-    (void)DeleteFileW(proof);
-    (void)RemoveDirectoryW(temp_w);
+}
+
+static bool child_mode_tree_ok(const struct child_mode_session *s)
+{
+    return s->tree_reported && s->tree_reaped && s->detached_released &&
+           s->detached_parent_exited && s->detached_tree_reaped;
+}
+
+static void child_mode_run_checks(struct child_mode_session *s)
+{
+    child_mode_run_hidden(s);
+    child_mode_capture_checks(s);
+    s->ok = s->ok && child_mode_capture_ok(s);
+    child_mode_tree_reap(s);
+    child_mode_detached_check(s);
+    s->ok = s->ok && child_mode_tree_ok(s);
+    s->ok = s->ok && capture_file_stdin_cases(s->image, s->cwd, child_mode_env);
+    (void)DeleteFileW(s->proof);
+    (void)RemoveDirectoryW(s->temp_w);
     (void)SetEnvironmentVariableW(L"Z23_PROCESS_UNEXPECTED", NULL);
-    if (!ok) {
-        if (runtime_is_wine() && code == 22) {
+}
+
+int main(int argc, char **argv)
+{
+    int capture_code = capture_mode(argc, argv);
+    if (capture_code >= 0) return capture_code;
+    if (argc == 2 && strcmp(argv[1], "--tree-child") == 0)
+        return tree_child_mode();
+    if (argc == 3 && strcmp(argv[1], "--tree-parent") == 0)
+        return tree_parent_mode(argv[2]);
+    if (argc > 1 && strcmp(argv[1], "--child") == 0)
+        return child_mode(argc, argv);
+    struct child_mode_session s = {0};
+    int setup = child_mode_prepare(&s);
+    if (setup != 0) return setup;
+    child_mode_run_checks(&s);
+    if (!s.ok) {
+        if (runtime_is_wine() && s.code == 22) {
             fputs("process-lifecycle-acceptance: REFUSE: Wine cannot prove "
                   "PROC_THREAD_ATTRIBUTE_HANDLE_LIST isolation\n", stderr);
             return 77;
@@ -526,12 +683,12 @@ int main(int argc, char **argv)
                 "detached_parent_exited=%d detached_tree_reaped=%d "
                 "capture=%d empty=%d boundary=%d large=%d timed_tree=%d "
                 "relative=%d relative_cwd=%d\n",
-                started, (int)waited, (unsigned long)code, tree_started,
-                (int)tree_waited, (unsigned long)tree_code, tree_reaped,
-                detached_started, detached_released, detached_parent_exited,
-                detached_tree_reaped, captured_ok, empty_ok, boundary_ok,
-                large_ok, timed_tree_reaped, relative_refused,
-                relative_cwd_refused);
+                s.started, (int)s.waited, (unsigned long)s.code,
+                s.tree_started, (int)s.tree_waited, (unsigned long)s.tree_code,
+                s.tree_reaped, s.detached_started, s.detached_released,
+                s.detached_parent_exited, s.detached_tree_reaped,
+                s.captured_ok, s.empty_ok, s.boundary_ok, s.large_ok,
+                s.timed_tree_reaped, s.relative_refused, s.relative_cwd_refused);
         return 4;
     }
     puts("process-lifecycle-acceptance: ok");
