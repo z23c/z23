@@ -433,6 +433,144 @@ static bool zb_sign_badge(struct vcs_badge *badge,
     return true;
 }
 
+/* The failed-issue reply code, message and idempotency for one error. */
+static void zb_issue_error_text(enum vcs_badge_issue_error ierr,
+                                const char **code, const char **message,
+                                bool *idempotent)
+{
+    switch (ierr) {
+    case VCS_BADGE_ISSUE_UNKNOWN_PLAN:
+        *code = "UNKNOWN_PLAN";
+        *message = "no persisted plan names this plan id";
+        break;
+    case VCS_BADGE_ISSUE_ALREADY_ISSUED:
+        *code = "ALREADY_ISSUED";
+        *message = "this plan was already issued: the commit record "
+                   "exists, so re-issuing is a duplicate — never a "
+                   "double-issue";
+        *idempotent = true;
+        break;
+    case VCS_BADGE_ISSUE_PLAN_CORRUPT:
+        *code = "PLAN_CORRUPT";
+        *message = "the plan wire is unreadable or commits a "
+                   "different id";
+        break;
+    case VCS_BADGE_ISSUE_POLICY_MISMATCH:
+        *code = "POLICY_MISMATCH";
+        *message = "the plan's policy id or issuer key is not the "
+                   "configured badge policy";
+        break;
+    case VCS_BADGE_ISSUE_STALE:
+        *code = "STALE_PLAN";
+        *message = "a planned row no longer matches current facts or "
+                   "the current badge store (re-plan): the offending "
+                   "row and rule are named in the evidence";
+        break;
+    case VCS_BADGE_ISSUE_SIGN:
+        *code = "SIGN_FAILURE";
+        *message = "the issuer signature could not be produced or "
+                   "did not verify";
+        break;
+    case VCS_BADGE_ISSUE_IO:
+        *code = "ISSUE_IO";
+        *message = "a durable write failed mid-issue; the partial "
+                   "state is resumable — re-issue the same plan id";
+        break;
+    case VCS_BADGE_ISSUE_OK: break;
+    }
+}
+
+/* Validate the operator issuer secret and derive its pubkey; the first
+ * failure frees the context and fails the reply (the caller returns). */
+static bool zb_issue_signer_init(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply,
+                                 struct zb_ctx *ctx,
+                                 struct zb_sign_ctx *signer)
+{
+    const char *secret_hex = zb_input_str(request->input, "issuer_secret");
+    if (!secret_hex ||
+        !zcl_hex_decode(secret_hex, signer->secret.vch, 32)) {
+        zb_ctx_free(ctx);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_ISSUER_SECRET",
+                               "normalize", false, false,
+                               "issuer_secret must be the 64-hex issuer "
+                               "secret key (SIMULATED issuance only)",
+                               "issuer_secret");
+        return false;
+    }
+    signer->secret.fValid = true;
+    signer->secret.fCompressed = true;
+    struct pubkey issuer;
+    pubkey_init(&issuer);
+    if (!privkey_range_check(&signer->secret) ||
+        !privkey_get_pubkey(&signer->secret, &issuer) ||
+        issuer.size != COMPRESSED_PUBLIC_KEY_SIZE) {
+        memset(signer, 0, sizeof(*signer));
+        zb_ctx_free(ctx);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_ISSUER_SECRET",
+                               "normalize", false, false,
+                               "issuer_secret is not a valid secp256k1 "
+                               "secret key", "issuer_secret");
+        return false;
+    }
+    if (memcmp(issuer.vch, ctx->policy.issuer_pubkey, 33) != 0) {
+        memset(signer, 0, sizeof(*signer));
+        zb_ctx_free(ctx);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "ISSUER_KEY_MISMATCH", "execute", false, false,
+            "the issuer key is not the configured policy issuer: badges "
+            "may only be issued by the key named in "
+            "<datadir>/zcode/badge_policy",
+            "badge_policy");
+        return false;
+    }
+    return true;
+}
+
+/* Push the issued badge rows and the truncation flag into the reply data. */
+static void zb_push_issued_badges(struct vcs_badge_store *store,
+                                  const uint8_t plan_id[32],
+                                  struct json_value *data)
+{
+    /* The issued badges (the commit record is the durable receipt). */
+    uint8_t badge_ids[VCS_BADGE_MAX_PLAN_ROWS][32];
+    size_t named = vcs_badge_commit_record_badges(
+        store, plan_id, badge_ids, VCS_BADGE_MAX_PLAN_ROWS);
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
+    size_t rendered = named < ZB_PAGE_CAP ? named : ZB_PAGE_CAP;
+    for (size_t i = 0; i < rendered; i++) {
+        const struct vcs_badge *b =
+            vcs_badge_store_find(store, badge_ids[i]);
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        char hex[67];
+        zcl_hex_encode(badge_ids[i], 32, hex);
+        (void)json_push_kv_str(&row, "badge_id", hex);
+        if (b) {
+            (void)json_push_kv_str(&row, "type",
+                                   vcs_badge_type_string(
+                                       (enum vcs_badge_type)b->type));
+            zcl_hex_encode(b->recipient, 33, hex);
+            (void)json_push_kv_str(&row, "recipient", hex);
+            zb_push_period(&row, b->period_first_day,
+                           b->period_last_day);
+            (void)json_push_kv_int(&row, "sequence",
+                                   (int64_t)b->sequence);
+        }
+        (void)json_push_back(&rows, &row);
+        json_free(&row);
+    }
+    (void)json_push_kv(data, "badges", &rows);
+    json_free(&rows);
+    (void)json_push_kv_bool(data, "badges_truncated", named > rendered);
+}
+
 void zcl_native_handle_zcode_badge_issue(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -464,48 +602,10 @@ void zcl_native_handle_zcode_badge_issue(
                                "plan id", plan_hex ? plan_hex : "");
         return;
     }
-    const char *secret_hex = zb_input_str(request->input, "issuer_secret");
     struct zb_sign_ctx signer;
     memset(&signer, 0, sizeof(signer));
-    if (!secret_hex ||
-        !zcl_hex_decode(secret_hex, signer.secret.vch, 32)) {
-        zb_ctx_free(&ctx);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_ISSUER_SECRET",
-                               "normalize", false, false,
-                               "issuer_secret must be the 64-hex issuer "
-                               "secret key (SIMULATED issuance only)",
-                               "issuer_secret");
+    if (!zb_issue_signer_init(request, reply, &ctx, &signer))
         return;
-    }
-    signer.secret.fValid = true;
-    signer.secret.fCompressed = true;
-    struct pubkey issuer;
-    pubkey_init(&issuer);
-    if (!privkey_range_check(&signer.secret) ||
-        !privkey_get_pubkey(&signer.secret, &issuer) ||
-        issuer.size != COMPRESSED_PUBLIC_KEY_SIZE) {
-        memset(&signer, 0, sizeof(signer));
-        zb_ctx_free(&ctx);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_ISSUER_SECRET",
-                               "normalize", false, false,
-                               "issuer_secret is not a valid secp256k1 "
-                               "secret key", "issuer_secret");
-        return;
-    }
-    if (memcmp(issuer.vch, ctx.policy.issuer_pubkey, 33) != 0) {
-        memset(&signer, 0, sizeof(signer));
-        zb_ctx_free(&ctx);
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "ISSUER_KEY_MISMATCH", "execute", false, false,
-            "the issuer key is not the configured policy issuer: badges "
-            "may only be issued by the key named in "
-            "<datadir>/zcode/badge_policy",
-            "badge_policy");
-        return;
-    }
 
     struct vcs_badge_issue_result result;
     char detail[256];
@@ -518,46 +618,7 @@ void zcl_native_handle_zcode_badge_issue(
         const char *code = "ISSUE_FAILED";
         const char *message = "the badge batch could not be issued";
         bool idempotent = false;
-        switch (ierr) {
-        case VCS_BADGE_ISSUE_UNKNOWN_PLAN:
-            code = "UNKNOWN_PLAN";
-            message = "no persisted plan names this plan id";
-            break;
-        case VCS_BADGE_ISSUE_ALREADY_ISSUED:
-            code = "ALREADY_ISSUED";
-            message = "this plan was already issued: the commit record "
-                      "exists, so re-issuing is a duplicate — never a "
-                      "double-issue";
-            idempotent = true;
-            break;
-        case VCS_BADGE_ISSUE_PLAN_CORRUPT:
-            code = "PLAN_CORRUPT";
-            message = "the plan wire is unreadable or commits a "
-                      "different id";
-            break;
-        case VCS_BADGE_ISSUE_POLICY_MISMATCH:
-            code = "POLICY_MISMATCH";
-            message = "the plan's policy id or issuer key is not the "
-                      "configured badge policy";
-            break;
-        case VCS_BADGE_ISSUE_STALE:
-            code = "STALE_PLAN";
-            message = "a planned row no longer matches current facts or "
-                      "the current badge store (re-plan): the offending "
-                      "row and rule are named in the evidence";
-            break;
-        case VCS_BADGE_ISSUE_SIGN:
-            code = "SIGN_FAILURE";
-            message = "the issuer signature could not be produced or "
-                      "did not verify";
-            break;
-        case VCS_BADGE_ISSUE_IO:
-            code = "ISSUE_IO";
-            message = "a durable write failed mid-issue; the partial "
-                      "state is resumable — re-issue the same plan id";
-            break;
-        case VCS_BADGE_ISSUE_OK: break;
-        }
+        zb_issue_error_text(ierr, &code, &message, &idempotent);
         char evidence[300];
         snprintf(evidence, sizeof(evidence), "%s%s%s",
                  detail[0] ? detail : "", detail[0] ? " plan=" : "",
@@ -576,41 +637,7 @@ void zcl_native_handle_zcode_badge_issue(
                            (int64_t)result.replayed_count);
     (void)json_push_kv_bool(&reply->data, "resumed", result.resumed);
 
-    /* The issued badges (the commit record is the durable receipt). */
-    uint8_t badge_ids[VCS_BADGE_MAX_PLAN_ROWS][32];
-    size_t named = vcs_badge_commit_record_badges(
-        ctx.store, plan_id, badge_ids, VCS_BADGE_MAX_PLAN_ROWS);
-    struct json_value rows;
-    json_init(&rows);
-    json_set_array(&rows);
-    size_t rendered = named < ZB_PAGE_CAP ? named : ZB_PAGE_CAP;
-    for (size_t i = 0; i < rendered; i++) {
-        const struct vcs_badge *b =
-            vcs_badge_store_find(ctx.store, badge_ids[i]);
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        char hex[67];
-        zcl_hex_encode(badge_ids[i], 32, hex);
-        (void)json_push_kv_str(&row, "badge_id", hex);
-        if (b) {
-            (void)json_push_kv_str(&row, "type",
-                                   vcs_badge_type_string(
-                                       (enum vcs_badge_type)b->type));
-            zcl_hex_encode(b->recipient, 33, hex);
-            (void)json_push_kv_str(&row, "recipient", hex);
-            zb_push_period(&row, b->period_first_day,
-                           b->period_last_day);
-            (void)json_push_kv_int(&row, "sequence",
-                                   (int64_t)b->sequence);
-        }
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
-    }
-    (void)json_push_kv(&reply->data, "badges", &rows);
-    json_free(&rows);
-    (void)json_push_kv_bool(&reply->data, "badges_truncated",
-                            named > rendered);
+    zb_push_issued_badges(ctx.store, plan_id, &reply->data);
     (void)json_push_kv_bool(&reply->data, "simulated", true);
     (void)json_push_kv_str(
         &reply->data, "issue_note",
@@ -623,6 +650,48 @@ void zcl_native_handle_zcode_badge_issue(
 }
 
 /* ── zcode contributor badges ───────────────────────────────────────── */
+
+/* The page window: an optional limit (default 16, capped) and offset. */
+static void zb_page_window(const struct zcl_command_request *request,
+                           size_t *limit, size_t *offset)
+{
+    *limit = 16;
+    const struct json_value *lv = json_get(request->input, "limit");
+    if (lv && json_get_int(lv) > 0)
+        *limit = (size_t)json_get_int(lv);
+    if (*limit > ZB_PAGE_CAP)
+        *limit = ZB_PAGE_CAP;
+    *offset = 0;
+    const struct json_value *ov = json_get(request->input, "offset");
+    if (ov && json_get_int(ov) > 0)
+        *offset = (size_t)json_get_int(ov);
+}
+
+/* Page by fetching the first (offset + limit) recognized badges in
+ * issuance order and emitting the tail window. */
+static size_t zb_fetch_contributor_page(struct zb_ctx *ctx,
+                                        uint8_t pubkey[33], size_t offset,
+                                        size_t limit,
+                                        struct vcs_badge page[ZB_PAGE_CAP],
+                                        size_t *total)
+{
+    size_t shown = 0;
+    *total = 0;
+    if (ctx->policy_present) {
+        *total = vcs_badge_store_contributor_badges(
+            ctx->store, &ctx->policy, pubkey, NULL, 0);
+        size_t want = offset + limit;
+        if (want > ZB_PAGE_CAP)
+            want = ZB_PAGE_CAP;
+        (void)vcs_badge_store_contributor_badges(ctx->store, &ctx->policy,
+                                                 pubkey, page, want);
+        size_t have = *total < want ? *total : want;
+        shown = have > offset ? have - offset : 0;
+        if (shown > 0)
+            memmove(page, page + offset, shown * sizeof(*page));
+    }
+    return shown;
+}
 
 void zcl_native_handle_zcode_contributor_badges(
     const struct zcl_command_request *request,
@@ -639,35 +708,14 @@ void zcl_native_handle_zcode_contributor_badges(
         return;
     }
 
-    size_t limit = 16;
-    const struct json_value *lv = json_get(request->input, "limit");
-    if (lv && json_get_int(lv) > 0)
-        limit = (size_t)json_get_int(lv);
-    if (limit > ZB_PAGE_CAP)
-        limit = ZB_PAGE_CAP;
+    size_t limit = 0;
     size_t offset = 0;
-    const struct json_value *ov = json_get(request->input, "offset");
-    if (ov && json_get_int(ov) > 0)
-        offset = (size_t)json_get_int(ov);
+    zb_page_window(request, &limit, &offset);
 
-    /* Page by fetching the first (offset + limit) recognized badges in
-     * issuance order and emitting the tail window. */
-    size_t shown = 0;
     size_t total = 0;
     struct vcs_badge page[ZB_PAGE_CAP];
-    if (ctx.policy_present) {
-        total = vcs_badge_store_contributor_badges(
-            ctx.store, &ctx.policy, pubkey, NULL, 0);
-        size_t want = offset + limit;
-        if (want > ZB_PAGE_CAP)
-            want = ZB_PAGE_CAP;
-        (void)vcs_badge_store_contributor_badges(ctx.store, &ctx.policy,
-                                                 pubkey, page, want);
-        size_t have = total < want ? total : want;
-        shown = have > offset ? have - offset : 0;
-        if (shown > 0)
-            memmove(page, page + offset, shown * sizeof(*page));
-    }
+    size_t shown = zb_fetch_contributor_page(&ctx, pubkey, offset, limit,
+                                             page, &total);
 
     struct json_value rows;
     json_init(&rows);
