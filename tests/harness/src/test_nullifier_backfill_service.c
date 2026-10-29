@@ -148,22 +148,45 @@ static void nbf_chain_free(struct nbf_chain *ch)
     memset(ch, 0, sizeof(*ch));
 }
 
+/* Returns the reader's source chain, or NULL without a context. */
+static struct nbf_chain *nbf_reader_source_chain(struct nbf_reader_ctx *ctx)
+{
+    return ctx ? ctx->source : NULL;
+}
+
+/* Returns the replacement chain when one is armed for this height, else
+ * the chain the caller validated against. */
+static struct nbf_chain *nbf_reader_chain_at_height(struct nbf_reader_ctx *ctx,
+                                                    struct nbf_chain *ch,
+                                                    int64_t height)
+{
+    if (ctx->replacement && height == ctx->replace_height)
+        return ctx->replacement;
+    return ch;
+}
+
+/* True when the reader's one-shot selected-tip move is due at this height. */
+static bool nbf_reader_should_move_tip(struct nbf_reader_ctx *ctx,
+                                       int64_t height)
+{
+    return ctx->move_main && ctx->move_tip && !ctx->moved &&
+           height == ctx->move_after_height;
+}
+
 static bool nbf_reader(struct block *out, int64_t height,
                        const char *datadir, void *user, bool *found_out)
 {
     (void)datadir;
     struct nbf_reader_ctx *ctx = user;
-    struct nbf_chain *ch = ctx ? ctx->source : NULL;
+    struct nbf_chain *ch = nbf_reader_source_chain(ctx);
     if (found_out)
         *found_out = false;
     if (!out || !ch || !found_out || height < 0 || height >= ch->n)
         return false;
-    if (ctx->replacement && height == ctx->replace_height)
-        ch = ctx->replacement;
+    ch = nbf_reader_chain_at_height(ctx, ch, height);
     if (!test_block_copy(out, &ch->bodies[height], "nbf_reader_copy"))
         return false;
-    if (ctx->move_main && ctx->move_tip && !ctx->moved &&
-        height == ctx->move_after_height) {
+    if (nbf_reader_should_move_tip(ctx, height)) {
         if (!active_chain_move_window_tip(&ctx->move_main->chain_active,
                                           ctx->move_tip))
             return false;
@@ -273,28 +296,30 @@ static bool nbf_seed_marker(sqlite3 *db, const char *key, const char *value)
     return progress_meta_set(db, key, value, strlen(value));
 }
 
-int test_nullifier_backfill_service(void);
-int test_nullifier_backfill_service(void)
+/* Builds both chains and the reader context, opens the progress store,
+ * seeds the gap blocker and checks the pre-backfill baseline.  Returns
+ * the database handle through db_out. */
+static int nbf_test_setup_chains_and_baseline(char dir[256],
+                                              struct nbf_chain *ch,
+                                              struct nbf_chain *fork,
+                                              struct main_state *main,
+                                              struct nbf_reader_ctx *reader_ctx,
+                                              sqlite3 **db_out)
 {
     int failures = 0;
-    char dir[256];
-    struct nbf_chain ch;
-    struct nbf_chain fork;
-    struct main_state main;
-    struct nbf_reader_ctx reader_ctx = {0};
 
-    test_make_tmpdir(dir, sizeof(dir), "nullifier_backfill", "main");
-    NB_CHECK("chain init", nbf_chain_init(&ch));
-    NB_CHECK("fork chain init", nbf_chain_init_variant(&fork, 0x30));
-    main_state_init(&main);
+    NB_CHECK("chain init", nbf_chain_init(ch));
+    NB_CHECK("fork chain init", nbf_chain_init_variant(fork, 0x30));
+    main_state_init(main);
     NB_CHECK("selected chain installed",
-             active_chain_move_window_tip(&main.chain_active,
-                                          &ch.indices[ch.n - 1]));
-    reader_ctx.source = &ch;
-    reader_ctx.replace_height = -1;
-    reader_ctx.move_after_height = -1;
+             active_chain_move_window_tip(&main->chain_active,
+                                          &ch->indices[ch->n - 1]));
+    reader_ctx->source = ch;
+    reader_ctx->replace_height = -1;
+    reader_ctx->move_after_height = -1;
     NB_CHECK("progress_store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
+    *db_out = db;
     NB_CHECK("db handle", db != NULL);
     NB_CHECK("schema ensure", nullifier_kv_ensure_schema(db));
 
@@ -307,20 +332,21 @@ int test_nullifier_backfill_service(void)
 
     bool accepted = false;
     NB_CHECK("pre-backfill duplicate candidate runs",
-             nbf_candidate_accepted(db, &ch.bodies[3], &accepted));
+             nbf_candidate_accepted(db, &ch->bodies[3], &accepted));
     NB_CHECK("pre-backfill duplicate candidate accepted because set is empty",
              accepted);
     NB_CHECK("pre-backfill rollback left set empty", nbf_row_count(db) == 0);
+    return failures;
+}
 
-    struct nullifier_backfill_config cfg = {
-        .main = &main,
-        .progress_db = db,
-        .datadir = dir,
-        .read_block = nbf_reader,
-        .read_block_user = &reader_ctx,
-    };
+/* Runs the backfill once from the empty set and checks the report, the
+ * inserted rows, the markers and the security posture. */
+static int nbf_test_first_run_checks(struct nullifier_backfill_config *cfg,
+                                     sqlite3 *db)
+{
+    int failures = 0;
     struct nullifier_backfill_report rep;
-    struct zcl_result r = nullifier_backfill_service_run(&cfg, &rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &rep);
     NB_CHECK("service run ok", r.ok);
     NB_CHECK("service walked expected range",
              rep.completed && !rep.already_complete &&
@@ -335,20 +361,44 @@ int test_nullifier_backfill_service(void)
              !blocker_exists(UTXO_APPLY_NF_GAP_BLOCKER_ID));
     NB_CHECK("security posture reports nullifier history complete",
              nbf_posture_complete());
+    return failures;
+}
 
-    accepted = true;
+/* Re-runs the duplicate candidate after the backfill and checks it is
+ * rejected while the rollback keeps the exact set. */
+static int nbf_test_duplicate_candidate_rejected(sqlite3 *db,
+                                                 struct nbf_chain *ch)
+{
+    int failures = 0;
+    bool accepted = true;
     NB_CHECK("post-backfill duplicate candidate runs",
-             nbf_candidate_accepted(db, &ch.bodies[3], &accepted));
+             nbf_candidate_accepted(db, &ch->bodies[3], &accepted));
     NB_CHECK("post-backfill duplicate candidate rejected", !accepted);
     NB_CHECK("post-backfill rollback kept exact set", nbf_row_count(db) == 3);
+    return failures;
+}
 
+/* Runs the service a second time over the completed set and checks the
+ * reported no-op. */
+static int nbf_test_idempotent_rerun(struct nullifier_backfill_config *cfg,
+                                     sqlite3 *db)
+{
+    int failures = 0;
     struct nullifier_backfill_report rep2;
-    r = nullifier_backfill_service_run(&cfg, &rep2);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &rep2);
     NB_CHECK("idempotent second run ok", r.ok);
     NB_CHECK("idempotent second run no-op",
              rep2.completed && rep2.already_complete &&
              rep2.blocks_scanned == 0 && nbf_row_count(db) == 3);
+    return failures;
+}
 
+/* Seeds an unbound extra row under a positive activation boundary and
+ * checks the run rebuilds the bound set and clears the boundary. */
+static int nbf_test_preloaded_v3_rebuild(struct nullifier_backfill_config *cfg,
+                                         sqlite3 *db)
+{
+    int failures = 0;
     NB_CHECK("preloaded-v3 setup restores positive boundary",
              nbf_seed_marker(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "3"));
     NB_CHECK("preloaded-v3 setup removes chain receipt",
@@ -361,13 +411,20 @@ int test_nullifier_backfill_service(void)
                  nbf_row_count(db) == 4);
     }
     struct nullifier_backfill_report preloaded_rep;
-    r = nullifier_backfill_service_run(&cfg, &preloaded_rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &preloaded_rep);
     NB_CHECK("preloaded-v3 unbound rows are rebuilt", r.ok);
     NB_CHECK("preloaded-v3 scan removes extras and clears boundary",
              preloaded_rep.completed && preloaded_rep.blocks_scanned == 3 &&
              nbf_expected_rows_present(db) &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "0"));
+    return failures;
+}
 
+/* Seeds a mid-run resume cursor below the activation boundary and checks
+ * dump_state_json reports in_progress with both cursors. */
+static int nbf_test_resume_setup_and_dump(sqlite3 *db)
+{
+    int failures = 0;
     NB_CHECK("resume setup clears rows",
              nullifier_kv_delete_range(db, 0, 10) && nbf_row_count(db) == 0);
     {
@@ -400,9 +457,17 @@ int test_nullifier_backfill_service(void)
         NB_CHECK("dump_state_json reports in_progress with cursors",
                  shape_ok);
     }
+    return failures;
+}
 
+/* Resumes from the persisted cursor and checks the restored set, the
+ * zeroed markers and the complete dump_state_json status. */
+static int nbf_test_resume_run_checks(struct nullifier_backfill_config *cfg,
+                                      sqlite3 *db)
+{
+    int failures = 0;
     struct nullifier_backfill_report rep3;
-    r = nullifier_backfill_service_run(&cfg, &rep3);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &rep3);
     NB_CHECK("resume run ok", r.ok);
     NB_CHECK("resume run starts at persisted next height",
              rep3.completed && rep3.start_height == 2 &&
@@ -424,6 +489,16 @@ int test_nullifier_backfill_service(void)
         NB_CHECK("dump_state_json reports explicit complete post-run",
                  shape_ok);
     }
+    return failures;
+}
+
+/* Substitutes a stale-fork body at one height and checks it is rejected
+ * without publishing completeness. */
+static int nbf_test_stale_fork_rejected(struct nullifier_backfill_config *cfg,
+                                        sqlite3 *db, struct nbf_chain *fork,
+                                        struct nbf_reader_ctx *reader_ctx)
+{
+    int failures = 0;
 
     /* A node.db height lookup is only a body location.  A body from a stale
      * fork at that same height must fail its selected-header hash before it
@@ -434,17 +509,28 @@ int test_nullifier_backfill_service(void)
              nbf_seed_marker(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "3"));
     NB_CHECK("stale-fork setup clears resume",
              progress_meta_delete(db, NULLIFIER_BACKFILL_RESUME_KEY));
-    reader_ctx.replacement = &fork;
-    reader_ctx.replace_height = 1;
+    reader_ctx->replacement = fork;
+    reader_ctx->replace_height = 1;
     struct nullifier_backfill_report fork_rep;
-    r = nullifier_backfill_service_run(&cfg, &fork_rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &fork_rep);
     NB_CHECK("same-height stale-fork body is rejected", !r.ok);
     NB_CHECK("stale-fork body cannot publish completeness",
              !fork_rep.completed &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "3") &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_RESUME_KEY, "1"));
-    reader_ctx.replacement = NULL;
-    reader_ctx.replace_height = -1;
+    reader_ctx->replacement = NULL;
+    reader_ctx->replace_height = -1;
+    return failures;
+}
+
+/* Moves the selected tip after the last body read and checks the final
+ * CAS discards the changed generation. */
+static int nbf_test_chain_change_cas(struct nullifier_backfill_config *cfg,
+                                     sqlite3 *db, struct main_state *main,
+                                     struct nbf_chain *fork,
+                                     struct nbf_reader_ctx *reader_ctx)
+{
+    int failures = 0;
 
     /* Move to a different selected tip only after the last old-generation
      * body was returned.  Every height verifies, so only the final CAS can
@@ -455,28 +541,38 @@ int test_nullifier_backfill_service(void)
              nbf_seed_marker(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "3"));
     NB_CHECK("chain-change setup clears resume",
              progress_meta_delete(db, NULLIFIER_BACKFILL_RESUME_KEY));
-    reader_ctx.move_main = &main;
-    reader_ctx.move_tip = &fork.indices[fork.n - 1];
-    reader_ctx.move_after_height = 2;
-    reader_ctx.moved = false;
+    reader_ctx->move_main = main;
+    reader_ctx->move_tip = &fork->indices[fork->n - 1];
+    reader_ctx->move_after_height = 2;
+    reader_ctx->moved = false;
     struct nullifier_backfill_report changed_rep;
-    r = nullifier_backfill_service_run(&cfg, &changed_rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &changed_rep);
     NB_CHECK("final CAS rejects changed selected chain",
-             !r.ok && reader_ctx.moved && !changed_rep.completed);
+             !r.ok && reader_ctx->moved && !changed_rep.completed);
     NB_CHECK("changed generation is discarded and remains incomplete",
              nbf_row_count(db) == 0 &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "3") &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_RESUME_KEY, "0"));
-    reader_ctx.move_main = NULL;
-    reader_ctx.move_tip = NULL;
-    reader_ctx.move_after_height = -1;
+    reader_ctx->move_main = NULL;
+    reader_ctx->move_tip = NULL;
+    reader_ctx->move_after_height = -1;
+    return failures;
+}
+
+/* Returns to the original chain with a fork-bound resume cursor seeded
+ * and checks the backfill restarts from height zero. */
+static int nbf_test_resume_rebound(struct nullifier_backfill_config *cfg,
+                                   sqlite3 *db, struct main_state *main,
+                                   struct nbf_chain *ch)
+{
+    int failures = 0;
 
     /* A resume cursor belongs to the persisted fork generation.  Returning
      * to the original chain must reset it to zero rather than trust the
      * fork's completed prefix; this invocation then safely restarts. */
     NB_CHECK("resume-fork switches selected chain",
-             active_chain_move_window_tip(&main.chain_active,
-                                          &ch.indices[ch.n - 1]));
+             active_chain_move_window_tip(&main->chain_active,
+                                          &ch->indices[ch->n - 1]));
     {
         uint8_t a[32];
         nbf_nf(a, 0xA1, 0x51);
@@ -486,7 +582,7 @@ int test_nullifier_backfill_service(void)
     NB_CHECK("resume-fork seeds stale cursor",
              nbf_seed_marker(db, NULLIFIER_BACKFILL_RESUME_KEY, "2"));
     struct nullifier_backfill_report rebound_rep;
-    r = nullifier_backfill_service_run(&cfg, &rebound_rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &rebound_rep);
     NB_CHECK("fork-bound resume is discarded then restarted", r.ok);
     NB_CHECK("resume restart proves full selected prefix",
              rebound_rep.completed && rebound_rep.start_height == 0 &&
@@ -494,14 +590,58 @@ int test_nullifier_backfill_service(void)
              nbf_expected_rows_present(db) &&
              nbf_marker_is(db, NULLIFIER_BACKFILL_ACTIVATION_KEY, "0") &&
              nbf_marker_absent(db, NULLIFIER_BACKFILL_RESUME_KEY));
+    return failures;
+}
 
+/* Deletes the activation marker and checks the run reports unknown
+ * rather than complete. */
+static int nbf_test_missing_activation(struct nullifier_backfill_config *cfg,
+                                       sqlite3 *db)
+{
+    int failures = 0;
     NB_CHECK("missing activation marker setup",
              progress_meta_delete(db, NULLIFIER_BACKFILL_ACTIVATION_KEY));
     struct nullifier_backfill_report missing_rep;
-    r = nullifier_backfill_service_run(&cfg, &missing_rep);
+    struct zcl_result r = nullifier_backfill_service_run(cfg, &missing_rep);
     NB_CHECK("missing activation marker is unknown, never complete",
              !r.ok && !missing_rep.completed &&
              !missing_rep.already_complete);
+    return failures;
+}
+
+int test_nullifier_backfill_service(void);
+int test_nullifier_backfill_service(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct nbf_chain ch;
+    struct nbf_chain fork;
+    struct main_state main;
+    struct nbf_reader_ctx reader_ctx = {0};
+    sqlite3 *db = NULL;
+
+    test_make_tmpdir(dir, sizeof(dir), "nullifier_backfill", "main");
+    failures += nbf_test_setup_chains_and_baseline(dir, &ch, &fork, &main,
+                                                   &reader_ctx, &db);
+
+    struct nullifier_backfill_config cfg = {
+        .main = &main,
+        .progress_db = db,
+        .datadir = dir,
+        .read_block = nbf_reader,
+        .read_block_user = &reader_ctx,
+    };
+    failures += nbf_test_first_run_checks(&cfg, db);
+    failures += nbf_test_duplicate_candidate_rejected(db, &ch);
+    failures += nbf_test_idempotent_rerun(&cfg, db);
+    failures += nbf_test_preloaded_v3_rebuild(&cfg, db);
+    failures += nbf_test_resume_setup_and_dump(db);
+    failures += nbf_test_resume_run_checks(&cfg, db);
+    failures += nbf_test_stale_fork_rejected(&cfg, db, &fork, &reader_ctx);
+    failures += nbf_test_chain_change_cas(&cfg, db, &main, &fork,
+                                          &reader_ctx);
+    failures += nbf_test_resume_rebound(&cfg, db, &main, &ch);
+    failures += nbf_test_missing_activation(&cfg, db);
 
     progress_store_close();
     blocker_clear(UTXO_APPLY_NF_GAP_BLOCKER_ID);
