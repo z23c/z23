@@ -594,6 +594,192 @@ static bool rpc_receive_until(platform_socket_t sock, int64_t deadline_ms,
     }
 }
 
+/* The connect deadline: min(overall deadline, connect phase). */
+static int64_t rpc_connect_deadline(const struct rpc_budget *budget,
+                                    int64_t deadline_ms)
+{
+    const int64_t now_ms = rpc_now_ms();
+    int64_t connect_until = rpc_phase_deadline_ms(
+        now_ms, deadline_ms, budget->connect_ms);
+    /* A relative budget always granted the connect at least 1ms. */
+    if (!budget->absolute && connect_until <= now_ms)
+        connect_until = rpc_deadline_after(now_ms, 1);
+    return connect_until;
+}
+
+/* Error body for a failed rpc_connect_until (crc != 0). */
+static char *rpc_connect_failure_body(int crc)
+{
+    if (crc == -1)
+        return rpc_transport_error(
+            "cannot connect to node (connection refused) — is the node "
+            "running and is -rpcport correct?");
+    if (crc == -2)
+        return rpc_transport_error(
+            "cannot connect to node (connect timed out) — the RPC port "
+            "is not accepting connections; check -rpcport and the node");
+    return rpc_transport_error("cannot connect to node");
+}
+
+enum rpc_request_state {
+    RPC_REQUEST_SENT,
+    RPC_REQUEST_EXPIRED,
+    RPC_REQUEST_FAILED,
+};
+
+/* Send header then body. EXPIRED only when an absolute budget ran out on the
+ * header write; any other short/failed write is FAILED. */
+static int rpc_send_request(platform_socket_t sock, const char *header,
+                            size_t hlen, const char *body, size_t blen,
+                            int64_t deadline_ms, bool absolute)
+{
+    int sent = rpc_send_deadline(sock, header, hlen, deadline_ms);
+    if (sent == RPC_SEND_EXPIRED && absolute)
+        return RPC_REQUEST_EXPIRED;
+    if (sent != RPC_SEND_OK ||
+        rpc_send_deadline(sock, body, blen, deadline_ms) != RPC_SEND_OK)
+        return RPC_REQUEST_FAILED;
+    return RPC_REQUEST_SENT;
+}
+
+/* True when the Content-Length header promises more body than arrived.
+ * `body_start` points at the CRLFCRLF that ends the headers. */
+static bool rpc_reply_truncated(const char *buf, size_t len,
+                                const char *body_start)
+{
+    size_t body_offset = (size_t)(body_start + 4 - buf);
+    size_t body_len = len >= body_offset ? len - body_offset : 0;
+    const char *content_length = strstr(buf, "Content-Length:");
+    if (!content_length || content_length >= body_start)
+        return false;
+    const char *value = content_length + strlen("Content-Length:");
+    while (value < body_start && (*value == ' ' || *value == '\t'))
+        value++;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long expected = strtoull(value, &end, 10);
+    return errno == 0 && end && end > value && end <= body_start &&
+           expected > (unsigned long long)body_len;
+}
+
+/* Extract "result"/"error" from the JSON reply. *parsed is set when the body
+ * parsed. *answered is set when an answer was produced (including NULL on
+ * allocation failure); then `buf` has been freed and the return is final. */
+static char *rpc_json_answer(char *buf, size_t cap, bool *parsed,
+                             bool *answered)
+{
+    struct json_value v;
+    if (!json_read(&v, buf, strlen(buf)))
+        return NULL;
+    *parsed = true;
+    const struct json_value *res = json_get(&v, "result");
+    const struct json_value *err = json_get(&v, "error");
+    if (err && err->type != JSON_NULL) {
+        *answered = true;
+        char *out = zcl_malloc(4096, "rpc error json");
+        if (!out) { json_free(&v); free(buf); return NULL; }
+        json_write(err, out, 4096);
+        json_free(&v);
+        free(buf);
+        return out;
+    }
+    if (res) {
+        *answered = true;
+        char *out = zcl_malloc(cap, "rpc result json");
+        if (!out) { json_free(&v); free(buf); return NULL; }
+        json_write(res, out, cap);
+        json_free(&v);
+        free(buf);
+        return out;
+    }
+    json_free(&v);
+    return NULL;
+}
+
+/* Allocate the response buffer and read the reply, then close `sock`.
+ * False on allocation failure. */
+static bool rpc_receive_reply(platform_socket_t sock, int64_t deadline_ms,
+                              char **bufp, size_t *lenp, size_t *capp,
+                              bool *timed_out)
+{
+    *bufp = zcl_malloc(*capp, "rpc response buf");
+    if (!*bufp) { platform_socket_close(sock); return false; }
+    bool alloc_ok = rpc_receive_until(sock, deadline_ms, bufp, lenp, capp,
+                                      timed_out);
+    platform_socket_close(sock);
+    return alloc_ok;
+}
+
+/* True when a usable RPC cookie for `datadir` was read into `cookie`. */
+static bool rpc_cookie_available(const char *datadir, char *cookie,
+                                 size_t cookie_size)
+{
+    return datadir && datadir[0] && read_cookie_at(datadir, cookie,
+                                                    cookie_size);
+}
+
+/* Turn the raw received bytes into the caller-visible reply: refuse a
+ * timed-out or truncated reply, strip the HTTP headers and extract the
+ * JSON-RPC result or error. Consumes `buf`. */
+static char *rpc_finish_reply(char *buf, size_t len, size_t cap,
+                              bool timed_out)
+{
+    if (timed_out && len == 0) {
+        free(buf);
+        return rpc_transport_error(
+            "node accepted the connection but did not answer within the "
+            "deadline — the node is busy or wedged; retry, or inspect "
+            "`ops state --subsystem=supervisor`");
+    }
+    buf[len] = 0;
+
+    /* Validate HTTP framing before stripping headers.  A server-side request
+     * watchdog can close the socket after the HTTP preamble was written but
+     * before the JSON body is complete.  recv() then reports a clean EOF, not
+     * EAGAIN, so `timed_out` is false even though the response is truncated.
+     * Never hand that fragment to the JSON layer as a misleading BAD_RPC_BODY. */
+    char *body_start = strstr(buf, "\r\n\r\n");
+    if (body_start) {
+        if (rpc_reply_truncated(buf, len, body_start)) {
+            free(buf);
+            return rpc_transport_error(
+                "node connection closed before the complete response "
+                "arrived (truncated reply) — the node is busy or its "
+                "request deadline is too short; retry, or inspect "
+                "`ops state --subsystem=supervisor`");
+        }
+        body_start += 4;
+        size_t bslen = len - (size_t)(body_start - buf);
+        memmove(buf, body_start, bslen + 1);
+    }
+
+    /* Extract "result" from {"result":...,"error":null,"id":1} */
+    bool parsed = false;
+    bool answered = false;
+    char *answer = rpc_json_answer(buf, cap, &parsed, &answered);
+    if (answered)
+        return answer;
+
+    /* A deadline that fired part-way through the reply leaves a TRUNCATED
+     * body — commonly just the HTTP headers, because the node writes those
+     * before its handler blocks. The fragment is not JSON, so every caller
+     * that parses this return value reports its own "unparseable body"
+     * (e.g. core.wallet.utxo.list -> TOOL_ERROR "RPC listunspent returned an
+     * unparseable body") and the operator learns nothing about the real
+     * cause. The `timed_out && len == 0` branch above already names the
+     * empty case; this names the partial one, so a slow node reads as a slow
+     * node at every layer. Only the unparseable path is redirected: a body
+     * that parsed is a real answer even if the FIN arrived late. */
+    if (timed_out && !parsed) {
+        free(buf);
+        return rpc_transport_error(
+            "node answered only partially before the deadline (truncated "
+            "reply) — the node is busy or wedged; retry, or inspect "
+            "`ops state --subsystem=supervisor`");
+    }
+    return buf;
+}
+
 /* Shared implementation behind the env-defaulted node_rpc_call_http, the
  * relative-deadline node_rpc_call_http_deadline and the absolute-deadline
  * node_rpc_call_*_until. A relative `total_ms` is clamped here to the same
@@ -614,8 +800,7 @@ static char *node_rpc_call_http_impl(const char *method,
      * credential that the node would reject with a cryptic 401. The read is
      * blocking file I/O and cannot be preempted by the deadline checks. */
     char cookie[256];
-    if (!datadir || !datadir[0] || !read_cookie_at(
-            datadir, cookie, sizeof(cookie)))
+    if (!rpc_cookie_available(datadir, cookie, sizeof(cookie)))
         return cookie_error_body(datadir);
     if (rpc_budget_expired(&budget)) {
         memset(cookie, 0, sizeof(cookie));
@@ -658,25 +843,12 @@ static char *node_rpc_call_http_impl(const char *method,
     /* Bound the connect so a firewalled/hung local port cannot block the whole
      * command: min(overall deadline, connect phase), recomputed after every
      * interrupted or readiness wake. */
-    const int64_t now_ms = rpc_now_ms();
-    int64_t connect_until = rpc_phase_deadline_ms(
-        now_ms, deadline_ms, budget.connect_ms);
-    /* A relative budget always granted the connect at least 1ms. */
-    if (!budget.absolute && connect_until <= now_ms)
-        connect_until = rpc_deadline_after(now_ms, 1);
-    int crc = rpc_connect_until(sock, &addr, connect_until);
+    int crc = rpc_connect_until(sock, &addr,
+                                rpc_connect_deadline(&budget, deadline_ms));
     if (crc != 0) {
         memset(cookie, 0, sizeof(cookie));
         platform_socket_close(sock);
-        if (crc == -1)
-            return rpc_transport_error(
-                "cannot connect to node (connection refused) — is the node "
-                "running and is -rpcport correct?");
-        if (crc == -2)
-            return rpc_transport_error(
-                "cannot connect to node (connect timed out) — the RPC port "
-                "is not accepting connections; check -rpcport and the node");
-        return rpc_transport_error("cannot connect to node");
+        return rpc_connect_failure_body(crc);
     }
 
     char auth_b64[512];
@@ -700,114 +872,25 @@ static char *node_rpc_call_http_impl(const char *method,
     /* MSG_NOSIGNAL: a peer reset mid-send must return EPIPE, not raise
      * SIGPIPE and kill the caller. Treat any short/failed write as
      * fatal for this request — a truncated POST yields a bogus reply. */
-    int sent = rpc_send_deadline(sock, header, (size_t)hlen, deadline_ms);
-    if (sent == RPC_SEND_EXPIRED && budget.absolute) {
+    int send_state = rpc_send_request(sock, header, (size_t)hlen, body,
+                                      (size_t)blen, deadline_ms,
+                                      budget.absolute);
+    if (send_state == RPC_REQUEST_EXPIRED) {
         platform_socket_close(sock);
         return rpc_deadline_expired_body("before transmit");
     }
-    if (sent != RPC_SEND_OK ||
-        rpc_send_deadline(sock, body, (size_t)blen, deadline_ms) !=
-            RPC_SEND_OK) {
+    if (send_state != RPC_REQUEST_SENT) {
         platform_socket_close(sock);
         return strdup("{\"error\":{\"code\":-32603,"
                       "\"message\":\"failed to send request to node\"}}");
     }
 
     size_t cap = 65536, len = 0;
-    char *buf = zcl_malloc(cap, "rpc response buf");
-    if (!buf) { platform_socket_close(sock); return NULL; }
+    char *buf = NULL;
     bool timed_out = false;
-    bool alloc_ok = rpc_receive_until(sock, deadline_ms, &buf, &len, &cap,
-                                      &timed_out);
-    platform_socket_close(sock);
-    if (!alloc_ok)
+    if (!rpc_receive_reply(sock, deadline_ms, &buf, &len, &cap, &timed_out))
         return NULL;
-
-    if (timed_out && len == 0) {
-        free(buf);
-        return rpc_transport_error(
-            "node accepted the connection but did not answer within the "
-            "deadline — the node is busy or wedged; retry, or inspect "
-            "`ops state --subsystem=supervisor`");
-    }
-    buf[len] = 0;
-
-    /* Validate HTTP framing before stripping headers.  A server-side request
-     * watchdog can close the socket after the HTTP preamble was written but
-     * before the JSON body is complete.  recv() then reports a clean EOF, not
-     * EAGAIN, so `timed_out` is false even though the response is truncated.
-     * Never hand that fragment to the JSON layer as a misleading BAD_RPC_BODY. */
-    char *body_start = strstr(buf, "\r\n\r\n");
-    if (body_start) {
-        size_t body_offset = (size_t)(body_start + 4 - buf);
-        size_t body_len = len >= body_offset ? len - body_offset : 0;
-        char *content_length = strstr(buf, "Content-Length:");
-        if (content_length && content_length < body_start) {
-            char *value = content_length + strlen("Content-Length:");
-            while (value < body_start && (*value == ' ' || *value == '\t'))
-                value++;
-            errno = 0;
-            char *end = NULL;
-            unsigned long long expected = strtoull(value, &end, 10);
-            if (errno == 0 && end && end > value && end <= body_start &&
-                expected > (unsigned long long)body_len) {
-                free(buf);
-                return rpc_transport_error(
-                    "node connection closed before the complete response "
-                    "arrived (truncated reply) — the node is busy or its "
-                    "request deadline is too short; retry, or inspect "
-                    "`ops state --subsystem=supervisor`");
-            }
-        }
-        body_start += 4;
-        size_t bslen = len - (size_t)(body_start - buf);
-        memmove(buf, body_start, bslen + 1);
-    }
-
-    /* Extract "result" from {"result":...,"error":null,"id":1} */
-    struct json_value v;
-    bool parsed = false;
-    if (json_read(&v, buf, strlen(buf))) {
-        parsed = true;
-        const struct json_value *res = json_get(&v, "result");
-        const struct json_value *err = json_get(&v, "error");
-        if (err && err->type != JSON_NULL) {
-            char *out = zcl_malloc(4096, "rpc error json");
-            if (!out) { json_free(&v); free(buf); return NULL; }
-            json_write(err, out, 4096);
-            json_free(&v);
-            free(buf);
-            return out;
-        }
-        if (res) {
-            char *out = zcl_malloc(cap, "rpc result json");
-            if (!out) { json_free(&v); free(buf); return NULL; }
-            json_write(res, out, cap);
-            json_free(&v);
-            free(buf);
-            return out;
-        }
-        json_free(&v);
-    }
-
-    /* A deadline that fired part-way through the reply leaves a TRUNCATED
-     * body — commonly just the HTTP headers, because the node writes those
-     * before its handler blocks. The fragment is not JSON, so every caller
-     * that parses this return value reports its own "unparseable body"
-     * (e.g. core.wallet.utxo.list -> TOOL_ERROR "RPC listunspent returned an
-     * unparseable body") and the operator learns nothing about the real
-     * cause. The `timed_out && len == 0` branch above already names the
-     * empty case; this names the partial one, so a slow node reads as a slow
-     * node at every layer. Only the unparseable path is redirected: a body
-     * that parsed is a real answer even if the FIN arrived late. */
-    if (timed_out && !parsed) {
-        free(buf);
-        return rpc_transport_error(
-            "node answered only partially before the deadline (truncated "
-            "reply) — the node is busy or wedged; retry, or inspect "
-            "`ops state --subsystem=supervisor`");
-    }
-    return buf;
+    return rpc_finish_reply(buf, len, cap, timed_out);
 }
 
 /* The default out-of-process HTTP backend, using the env-configurable
