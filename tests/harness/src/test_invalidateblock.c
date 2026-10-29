@@ -466,6 +466,161 @@ int test_invalidateblock(void)
         main_state_free(&ms);
     }
 
+    /* ── 10. clear_invalid: refusal, descendant-only, unrelated marks ── */
+    {
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        struct block_index *g  = mk_idx(&ms, 0, 1,  0x00, NULL);
+        struct block_index *a1 = mk_idx(&ms, 1, 10, 0x0A, g);
+
+        size_t cleared = 99;
+        process_block_clear_invalid(NULL, a1, &cleared);
+        IB_CHECK("clear NULL ms: cleared_out zeroed", cleared == 0);
+        cleared = 99;
+        process_block_clear_invalid(&ms, NULL, &cleared);
+        IB_CHECK("clear NULL target: cleared_out zeroed", cleared == 0);
+        a1->nStatus |= BLOCK_FAILED_VALID;
+        process_block_clear_invalid(&ms, a1, NULL);
+        IB_CHECK("clear NULL cleared_out: target failure still cleared",
+                 (a1->nStatus & BLOCK_FAILED_ANY_MASK) == 0);
+
+        free_idx(g); free_idx(a1);
+        main_state_free(&ms);
+    }
+    {
+        /* Clean target with a failed descendant: only the descendant counts. */
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        struct block_index *g  = mk_idx(&ms, 0, 1,  0x00, NULL);
+        struct block_index *a1 = mk_idx(&ms, 1, 10, 0x0A, g);
+        struct block_index *a2 = mk_idx(&ms, 2, 20, 0x0B, a1);
+        a2->nStatus |= BLOCK_FAILED_CHILD;
+
+        size_t cleared = 0;
+        process_block_clear_invalid(&ms, a1, &cleared);
+        IB_CHECK("clean target: only failed descendant counted", cleared == 1);
+        IB_CHECK("clean target: descendant failure bits cleared",
+                 (a2->nStatus & BLOCK_FAILED_ANY_MASK) == 0);
+
+        free_idx(g); free_idx(a1); free_idx(a2);
+        main_state_free(&ms);
+    }
+    {
+        /* Marks off the target's ancestry are never cleared: a fork root and
+         * its child, and a corrupt ring whose pprev is not strictly
+         * decreasing (walk breaks before reaching the target). */
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        struct block_index *g  = mk_idx(&ms, 0, 1,  0x00, NULL);
+        struct block_index *a1 = mk_idx(&ms, 1, 10, 0x0A, g);
+        struct block_index *a2 = mk_idx(&ms, 2, 20, 0x0B, a1);
+        struct block_index *b1 = mk_idx(&ms, 1, 11, 0x1A, g);
+        struct block_index *b2 = mk_idx(&ms, 2, 21, 0x1B, b1);
+        struct block_index *q  = mk_idx(&ms, 3, 30, 0x7B, a1);
+        struct block_index *p  = mk_idx(&ms, 3, 30, 0x7A, a2);
+        p->pprev = q;
+
+        active_chain_move_window_tip(&ms.chain_active, g);
+        active_chain_move_window_tip(&ms.chain_active, a1);
+        active_chain_move_window_tip(&ms.chain_active, a2);
+        ms.pindex_best_header = a2;
+
+        process_block_mark_invalid(&ms, b1, NULL);
+        p->nStatus |= BLOCK_FAILED_CHILD;
+
+        size_t cleared = 99;
+        process_block_clear_invalid(&ms, a1, &cleared);
+        IB_CHECK("unrelated marks: cleared count zero", cleared == 0);
+        IB_CHECK("unrelated marks: fork root keeps FAILED_VALID",
+                 (b1->nStatus & BLOCK_FAILED_VALID) != 0);
+        IB_CHECK("unrelated marks: fork child keeps FAILED_CHILD",
+                 (b2->nStatus & BLOCK_FAILED_CHILD) != 0);
+        IB_CHECK("unrelated marks: corrupt-ring entry keeps FAILED_CHILD",
+                 (p->nStatus & BLOCK_FAILED_CHILD) != 0);
+
+        free_idx(g); free_idx(a1); free_idx(a2); free_idx(b1);
+        free_idx(b2); free_idx(q); free_idx(p);
+        main_state_free(&ms);
+    }
+    {
+        /* Same-hash header twin (pindex_best_header) is cleared with the
+         * target but does not add to the durable cleared count. */
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        struct block_index *g = mk_idx(&ms, 0, 1, 0x00, NULL);
+        struct block_index *target = mk_idx(&ms, 1, 10, 0x0A, g);
+        struct block_index header_twin = *target;
+        header_twin.hashBlock = *target->phashBlock;
+        header_twin.phashBlock = &header_twin.hashBlock;
+        header_twin.pprev = g;
+        active_chain_move_window_tip(&ms.chain_active, g);
+        ms.pindex_best_header = &header_twin;
+
+        process_block_mark_invalid(&ms, target, NULL);
+        IB_CHECK("header twin: marked failed with target",
+                 (header_twin.nStatus & BLOCK_FAILED_VALID) != 0);
+        size_t cleared = 0;
+        process_block_clear_invalid(&ms, target, &cleared);
+        IB_CHECK("header twin: durable cleared count is target only",
+                 cleared == 1);
+        IB_CHECK("header twin: twin failure bits cleared",
+                 (header_twin.nStatus & BLOCK_FAILED_ANY_MASK) == 0);
+
+        free_idx(g); free_idx(target);
+        main_state_free(&ms);
+    }
+
+    /* ── 11. reconsider: out-hash and no-failure contract ─────────── */
+    {
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        struct block_index *g  = mk_idx(&ms, 0, 1,  0x00, NULL);
+        struct block_index *a1 = mk_idx(&ms, 1, 10, 0x0A, g);
+        struct block_index *b1 = mk_idx(&ms, 1, 11, 0x1A, g);
+
+        active_chain_move_window_tip(&ms.chain_active, g);
+        active_chain_move_window_tip(&ms.chain_active, a1);
+        ms.pindex_best_header = a1;
+
+        struct uint256 out;
+        memset(&out, 0xEE, sizeof(out));
+        IB_CHECK("reconsider NULL ms: out_hash zeroed",
+                 process_block_reconsider(NULL, a1->phashBlock, &out) ==
+                     RECONSIDER_NOT_ATTEMPTED && uint256_is_null(&out));
+
+        struct uint256 unknown;
+        memset(&unknown, 0xAB, sizeof(unknown));
+        memset(&out, 0xEE, sizeof(out));
+        IB_CHECK("reconsider unknown hash: out_hash zeroed",
+                 process_block_reconsider(&ms, &unknown, &out) ==
+                     RECONSIDER_BLOCK_NOT_FOUND && uint256_is_null(&out));
+
+        memset(&out, 0xEE, sizeof(out));
+        IB_CHECK("reconsider clean block: NO_FAILURE",
+                 process_block_reconsider(&ms, a1->phashBlock, &out) ==
+                     RECONSIDER_NO_FAILURE);
+        IB_CHECK("reconsider clean block: out_hash names target",
+                 uint256_eq(&out, a1->phashBlock));
+
+        process_block_mark_invalid(&ms, b1, NULL);
+        memset(&out, 0xEE, sizeof(out));
+        IB_CHECK("reconsider failed fork block: RECONSIDER_OK",
+                 process_block_reconsider(&ms, b1->phashBlock, &out) ==
+                     RECONSIDER_OK);
+        IB_CHECK("reconsider failed fork block: out_hash names target",
+                 uint256_eq(&out, b1->phashBlock));
+        IB_CHECK("reconsider failed fork block: failure bits cleared",
+                 (b1->nStatus & BLOCK_FAILED_ANY_MASK) == 0);
+
+        free_idx(g); free_idx(a1); free_idx(b1);
+        main_state_free(&ms);
+    }
+
     printf("invalidateblock: %d failures\n", failures);
     return failures;
 }
