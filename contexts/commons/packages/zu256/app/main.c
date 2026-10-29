@@ -73,6 +73,15 @@ static int binary_command(const char *op, zu256256 a, zu256256 b)
     }
 }
 
+static bool known_binary(const char *op)
+{
+    static const char *const ops[] = {"add", "sub", "mul", "div", "mod", "shl", "shr"};
+    for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+        if (strcmp(op, ops[i]) == 0) return true;
+    }
+    return false;
+}
+
 static int check_arity(int argc, char **argv)
 {
     if (argc < 3) {
@@ -80,7 +89,10 @@ static int check_arity(int argc, char **argv)
             "usage: zu256 add|sub|mul|div|mod A B | shl|shr A N | dec|hex A\n");
         return 2;
     }
-    int expected = strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "hex") == 0 ? 3 : 4;
+    bool unary = strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "hex") == 0;
+    /* unknown ops keep the older precedence: missing operand, bad A/B, then unknown op */
+    if (!unary && !known_binary(argv[1])) return 0;
+    int expected = unary ? 3 : 4;
     if (argc != expected) {
         fprintf(stderr, "zu256: %s expects %d operand%s\n", argv[1],
                 expected - 2, expected == 3 ? "" : "s");
@@ -112,6 +124,10 @@ int main(int argc, char **argv)
             return 2;
         }
         return show(argv[1][2] == 'l' ? zu256_shl(a, n) : zu256_shr(a, n));
+    }
+    if (argc < 4) {
+        fprintf(stderr, "zu256: missing operand\n");
+        return 2;
     }
     if (!parse(argv[3], &b)) {
         fprintf(stderr, "zu256: bad number %s\n", argv[3]);
