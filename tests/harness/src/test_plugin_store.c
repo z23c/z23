@@ -1563,8 +1563,14 @@ static enum plugin_status pst_short_flip_worker(struct pst_fx *fx, const struct 
     return PLUGIN_OK;
 }
 
+/* Seam budget: stays under the ~12.8 s the 32 serialized 400 ms holds take, so
+ * the last waiters still wait longer than one budget, yet leaves 5.6 s of slack
+ * over a 400 ms hold: on a loaded host a holder that oversleeps its pause by
+ * more than the budget would show a waiter no handover and answer BUSY. */
+enum { PST_SLOW_BUDGET_MS = 6000, PST_SLOW_HOLD_MS = 400 };
+
 /* A loaded host makes every hold long against the wait budget. The seam sets
- * that ratio directly: 400 ms holds, 2 s budget, 8 contenders, so a waiter
+ * that ratio directly: 400 ms holds, 6 s budget, 8 contenders, so a waiter
  * needs more than the budget in wall time yet the lock keeps changing hands.
  * That is progress, not a stuck holder, and must not answer PLUGIN_BUSY. */
 static int pst_case_slow_holds(void)
@@ -1577,7 +1583,7 @@ static int pst_case_slow_holds(void)
         pid_t pids[KIDS];
         ASSERT(pst_three_generations(&fx, &t));
         ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.a), PLUGIN_OK);
-        plugin_lock_test_timing(2000, 400);
+        plugin_lock_test_timing(PST_SLOW_BUDGET_MS, PST_SLOW_HOLD_MS);
         for (int i = 0; i < KIDS; i++)
             pids[i] = pst_spawn(pst_short_flip_worker, &fx, &t);
         plugin_lock_test_timing(0, 0);
