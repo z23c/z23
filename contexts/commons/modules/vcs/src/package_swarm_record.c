@@ -66,6 +66,28 @@ bool vcs_swarm_record_persist(const char *zcode_dir, const char *root_hex,
     return true;
 }
 
+static bool record_read_open_file(struct platform_positioned_file *file,
+                                  uint8_t *wire, size_t *wire_len)
+{
+    uint64_t size = 0;
+    bool sized = platform_positioned_file_size(file, &size) &&
+                 size <= VCS_SWARM_RECORD_WIRE_BYTES;
+    *wire_len = sized ? (size_t)size : 0;
+    bool read_ok =
+        sized && platform_positioned_file_read(file, wire, *wire_len, 0) ==
+                     (int64_t)*wire_len;
+    platform_positioned_file_close(file);
+    return read_ok;
+}
+
+static bool record_wire_supported(uint16_t version, size_t wire_len)
+{
+    return (version == SWARM_RECORD_VERSION &&
+            wire_len == VCS_SWARM_RECORD_WIRE_BYTES) ||
+           (version == SWARM_RECORD_VERSION_LEGACY &&
+            wire_len == SWARM_RECORD_WIRE_BYTES_LEGACY);
+}
+
 bool vcs_swarm_record_load(const char *path, struct vcs_swarm_record *out)
 {
     if (!path || !out)
@@ -76,20 +98,11 @@ bool vcs_swarm_record_load(const char *path, struct vcs_swarm_record *out)
     if (!platform_positioned_file_open(&file, path))
         LOG_FAIL(SWARM_RECORD_LOG, "download record %s is not a real file",
                  path);
-    uint64_t size = 0;
-    bool sized = platform_positioned_file_size(&file, &size) &&
-                 size <= sizeof(wire);
-    size_t wire_len = sized ? (size_t)size : 0;
-    bool read_ok = sized && platform_positioned_file_read(
-                               &file, wire, wire_len, 0) == (int64_t)wire_len;
-    platform_positioned_file_close(&file);
+    size_t wire_len = 0;
+    bool read_ok = record_read_open_file(&file, wire, &wire_len);
     uint16_t version = read_ok && wire_len >= 10u
                            ? vcs_rd_u16le(wire + 8) : 0;
-    bool supported =
-        (version == SWARM_RECORD_VERSION &&
-         wire_len == VCS_SWARM_RECORD_WIRE_BYTES) ||
-        (version == SWARM_RECORD_VERSION_LEGACY &&
-         wire_len == SWARM_RECORD_WIRE_BYTES_LEGACY);
+    bool supported = record_wire_supported(version, wire_len);
     if (!read_ok || !supported ||
         memcmp(wire, record_magic, sizeof(record_magic)) != 0)
         LOG_FAIL(SWARM_RECORD_LOG, "download record %s has invalid wire",
