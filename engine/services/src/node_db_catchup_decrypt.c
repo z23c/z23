@@ -54,28 +54,28 @@ static bool catchup_sapling_open_output_plaintext(
     uint8_t plaintext[564])
 {
     if (!ke->used)
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t dhsecret[32];
     if (!sapling_ka_agree(od->ephemeral_key.data, ke->ivk, dhsecret))
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t dec_key[32];
     if (!sapling_kdf(dec_key, dhsecret, od->ephemeral_key.data)) {
         memory_cleanse(dhsecret, sizeof(dhsecret));
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
     }
     memory_cleanse(dhsecret, sizeof(dhsecret));
 
     if (!sapling_note_decrypt(dec_key, od->enc_ciphertext, 580,
                               plaintext)) {
         memory_cleanse(dec_key, sizeof(dec_key));
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
     }
     memory_cleanse(dec_key, sizeof(dec_key));
 
     if (plaintext[0] != 0x01)
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
     return true;
 }
 
@@ -93,7 +93,7 @@ static bool catchup_sapling_output_opened_by_key(
 {
     uint8_t plaintext[564];
     if (!catchup_sapling_open_output_plaintext(od, ke, plaintext))
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t d[11];
     memcpy(d, plaintext + 1, sizeof(d));
@@ -105,13 +105,13 @@ static bool catchup_sapling_output_opened_by_key(
 
     uint8_t pk_d[32];
     if (!sapling_ivk_to_pkd(ke->ivk, d, pk_d))
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t cm[32];
     if (!sapling_compute_cm(d, pk_d, value, rcm, cm))
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
     if (memcmp(cm, od->cm.data, sizeof(cm)) != 0)
-        return false;
+        return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t ak[32], nk[32];
     sapling_ask_to_ak(ke->xsk.expsk.ask, ak);
