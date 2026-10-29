@@ -80,6 +80,119 @@ static bool perf_make_spend(struct transaction *tx,
     return true;
 }
 
+/* Mint up to `count` coinbase-only blocks, recording each txid into
+ * funded[i] when `funded` is non-NULL. Returns how many were minted before
+ * the first rejection (== count on success). A skipped run (`go` false)
+ * reports `count`. */
+static size_t perf_mint_run(struct simnet *s, bool go, size_t count,
+                            struct uint256 *funded)
+{
+    size_t i = 0;
+    for (; go && i < count; i++) {
+        if (!simnet_mint_coinbase(s, funded ? &funded[i] : NULL))
+            return i;
+    }
+    return count;
+}
+
+/* Arm the requested fault injection, if any. True when nothing failed. */
+static bool perf_arm_inject(const struct simnet_perf_config *cfg,
+                            struct simnet *s)
+{
+    if (cfg->inject != SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE)
+        return true;
+    /* Armed on a freshly initialized (therefore empty) map, which is the
+     * only safe moment — see coins/coins_fault.h's arming contract. */
+    return coins_fault_arm_map_hash_collapse(&s->view.cache_coins, true);
+}
+
+enum perf_value_status {
+    PERF_VALUE_OK,
+    PERF_VALUE_ABSENT,
+    PERF_VALUE_TOO_SMALL,
+};
+
+/* Value of the funded coinbase output; skipped (OK) when `go` is false. */
+static enum perf_value_status perf_read_cb_value(struct simnet *s, bool go,
+                                                 const struct uint256 *txid,
+                                                 int64_t *cb_value)
+{
+    if (!go)
+        return PERF_VALUE_OK;
+    if (!simnet_coin_value(s, txid, 0, cb_value))
+        return PERF_VALUE_ABSENT;
+    if (*cb_value <= PERF_SPEND_FEE)
+        return PERF_VALUE_TOO_SMALL;
+    return PERF_VALUE_OK;
+}
+
+enum perf_measure_status {
+    PERF_MEASURE_OK,
+    PERF_MEASURE_BUILD_FAILED,
+    PERF_MEASURE_MINT_REJECTED,
+};
+
+/* Phase 3 loop. Skipped (OK) when `go` is false. On a rejected mint
+ * *failed_block is the block that was rejected. */
+static enum perf_measure_status perf_measure_blocks(
+    struct simnet *s, bool go, const struct simnet_perf_config *cfg,
+    int blocks, const struct uint256 *funded, struct transaction *block_txs,
+    int64_t cb_value, int64_t *build_ns, int64_t *fold_ns,
+    uint64_t *measured_txs, int *failed_block)
+{
+    const int per_block = cfg->txs_per_block;
+    for (int b = 0; go && b < blocks; b++) {
+        int64_t t0 = clock_thread_cpu_ns();
+        bool built = true;
+        for (int k = 0; k < per_block; k++) {
+            if (!perf_make_spend(&block_txs[k],
+                                 &funded[(size_t)b * (size_t)per_block + (size_t)k],
+                                 cb_value - PERF_SPEND_FEE, (uint8_t)(k & 0xFF))) {
+                built = false;
+                break;
+            }
+        }
+        int64_t t1 = clock_thread_cpu_ns();
+        if (!built) {
+            /* perf_make_spend already logged; free the partial block. */
+            for (int k = 0; k < per_block; k++)
+                transaction_free(&block_txs[k]);
+            return PERF_MEASURE_BUILD_FAILED;
+        }
+        /* Ownership of every tx's vin/vout transfers to simnet here (it
+         * transaction_init()s our copies), so the buffer is clean next round
+         * on both the accept and the reject path. */
+        bool minted = simnet_mint_txs(s, block_txs, (size_t)per_block);
+        int64_t t2 = clock_thread_cpu_ns();
+
+        *build_ns += t1 - t0;
+        *fold_ns += t2 - t1;
+        if (!minted) {
+            *failed_block = b;
+            return PERF_MEASURE_MINT_REJECTED;
+        }
+        /* The block's own coinbase folds through connect_block too. */
+        *measured_txs += (uint64_t)per_block + 1u;
+    }
+    return PERF_MEASURE_OK;
+}
+
+/* Publish the sample's totals into `out` (when `go`), then report whether
+ * the sample is vacuous (no fold time or no measured txs). */
+static bool perf_publish_is_vacuous(struct simnet *s, bool go,
+                                    struct perf_sample *out, int64_t build_ns,
+                                    int64_t fold_ns, uint64_t measured_txs)
+{
+    if (!go)
+        return false;
+    out->build_cpu_ns = build_ns;
+    out->fold_cpu_ns = fold_ns;
+    out->measured_txs = measured_txs;
+    out->coins_at_end = (uint64_t)coins_map_count(&s->view.cache_coins);
+    out->tip_height = simnet_tip_height(s);
+    return out->fold_cpu_ns <= 0 || out->measured_txs == 0;
+}
+
 /* Run ONE sample of the workload at `blocks` measured blocks.
  *
  * Four phases:
@@ -138,13 +251,9 @@ static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
 
     bool ok = true;
 
-    if (cfg->inject == SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE) {
-        /* Armed on a freshly initialized (therefore empty) map, which is the
-         * only safe moment — see coins/coins_fault.h's arming contract. */
-        if (!coins_fault_arm_map_hash_collapse(&s.view.cache_coins, true)) {
-            LOG_ERROR("simnet_perf", "could not arm the coins hash collapse");
-            ok = false;
-        }
+    if (!perf_arm_inject(cfg, &s)) {
+        LOG_ERROR("simnet_perf", "could not arm the coins hash collapse");
+        ok = false;
     }
 
     /* Phase 1a: map ballast. Minted BEFORE the spendable funding, and the
@@ -156,38 +265,40 @@ static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
      * last sits behind them and is never probed. Measured, scale 1: ballast
      * last moved the armed/clean ratio 4.4x -> 4.8x, ballast first moved it
      * 4.4x -> 6.3-8.4x. */
-    for (size_t i = 0; ok && i < ballast; i++) {
-        if (!simnet_mint_coinbase(&s, NULL)) {
-            LOG_ERROR("simnet_perf", "ballast mint %zu rejected", i);
-            ok = false;
-        }
+    size_t ballast_done = perf_mint_run(&s, ok, ballast, NULL);
+    if (ballast_done < ballast) {
+        size_t i = ballast_done;
+        LOG_ERROR("simnet_perf", "ballast mint %zu rejected", i);
+        ok = false;
     }
 
     /* Phase 1b: spendable funding. */
-    for (size_t i = 0; ok && i < spendable; i++) {
-        if (!simnet_mint_coinbase(&s, &funded[i])) {
-            LOG_ERROR("simnet_perf", "funding mint %zu rejected", i);
-            ok = false;
-        }
+    size_t funding_done = perf_mint_run(&s, ok, spendable, funded);
+    if (funding_done < spendable) {
+        size_t i = funding_done;
+        LOG_ERROR("simnet_perf", "funding mint %zu rejected", i);
+        ok = false;
     }
 
     /* Phase 2: maturity filler. */
-    for (int i = 0; ok && i < COINBASE_MATURITY; i++) {
-        if (!simnet_mint_coinbase(&s, NULL)) {
-            LOG_ERROR("simnet_perf", "maturity filler mint %d rejected", i);
-            ok = false;
-        }
+    size_t filler_done = perf_mint_run(&s, ok, COINBASE_MATURITY, NULL);
+    if (filler_done < COINBASE_MATURITY) {
+        int i = (int)filler_done;
+        LOG_ERROR("simnet_perf", "maturity filler mint %d rejected", i);
+        ok = false;
     }
 
     /* Read the coinbase output value once, outside the timed region, so the
      * measured phase does no bookkeeping lookups of its own. Every synthetic
      * coinbase carries the same value. */
     int64_t cb_value = 0;
-    if (ok && !simnet_coin_value(&s, &funded[0], 0, &cb_value)) {
+    enum perf_value_status vstatus =
+        perf_read_cb_value(&s, ok, &funded[0], &cb_value);
+    if (vstatus == PERF_VALUE_ABSENT) {
         LOG_ERROR("simnet_perf", "funded coinbase 0 absent from the UTXO view");
         ok = false;
     }
-    if (ok && cb_value <= PERF_SPEND_FEE) {
+    if (vstatus == PERF_VALUE_TOO_SMALL) {
         LOG_ERROR("simnet_perf", "coinbase value %lld too small to spend",
                 (long long)cb_value);
         ok = false;
@@ -197,53 +308,22 @@ static bool perf_one_sample(const struct simnet_perf_config *cfg, int blocks,
     int64_t build_ns = 0;
     int64_t fold_ns = 0;
     uint64_t measured_txs = 0;
-    for (int b = 0; ok && b < blocks; b++) {
-        int64_t t0 = clock_thread_cpu_ns();
-        for (int k = 0; k < per_block; k++) {
-            if (!perf_make_spend(&block_txs[k],
-                                 &funded[(size_t)b * (size_t)per_block + (size_t)k],
-                                 cb_value - PERF_SPEND_FEE, (uint8_t)(k & 0xFF))) {
-                ok = false;
-                break;
-            }
-        }
-        int64_t t1 = clock_thread_cpu_ns();
-        if (!ok) {
-            /* perf_make_spend already logged; free the partial block. */
-            for (int k = 0; k < per_block; k++)
-                transaction_free(&block_txs[k]);
-            break;
-        }
-        /* Ownership of every tx's vin/vout transfers to simnet here (it
-         * transaction_init()s our copies), so the buffer is clean next round
-         * on both the accept and the reject path. */
-        bool minted = simnet_mint_txs(&s, block_txs, (size_t)per_block);
-        int64_t t2 = clock_thread_cpu_ns();
+    int b = 0;
+    enum perf_measure_status mstatus =
+        perf_measure_blocks(&s, ok, cfg, blocks, funded, block_txs, cb_value,
+                            &build_ns, &fold_ns, &measured_txs, &b);
+    if (mstatus == PERF_MEASURE_MINT_REJECTED)
+        LOG_ERROR("simnet_perf", "measured mint %d rejected", b);
+    if (mstatus != PERF_MEASURE_OK)
+        ok = false;
 
-        build_ns += t1 - t0;
-        fold_ns += t2 - t1;
-        if (!minted) {
-            LOG_ERROR("simnet_perf", "measured mint %d rejected", b);
-            ok = false;
-            break;
-        }
-        /* The block's own coinbase folds through connect_block too. */
-        measured_txs += (uint64_t)per_block + 1u;
-    }
-
-    if (ok) {
-        out->build_cpu_ns = build_ns;
-        out->fold_cpu_ns = fold_ns;
-        out->measured_txs = measured_txs;
-        out->coins_at_end = (uint64_t)coins_map_count(&s.view.cache_coins);
-        out->tip_height = simnet_tip_height(&s);
-        if (out->fold_cpu_ns <= 0 || out->measured_txs == 0) {
-            LOG_ERROR("simnet_perf",
-                    "refusing a vacuous sample (fold_ns=%lld txs=%llu)",
-                    (long long)out->fold_cpu_ns,
-                    (unsigned long long)out->measured_txs);
-            ok = false;
-        }
+    if (perf_publish_is_vacuous(&s, ok, out, build_ns, fold_ns,
+                                measured_txs)) {
+        LOG_ERROR("simnet_perf",
+                "refusing a vacuous sample (fold_ns=%lld txs=%llu)",
+                (long long)out->fold_cpu_ns,
+                (unsigned long long)out->measured_txs);
+        ok = false;
     }
 
     simnet_free(&s);
@@ -284,6 +364,46 @@ static int64_t perf_min(const int64_t *v, size_t n)
     return m;
 }
 
+/* True when lo <= v <= hi. */
+static bool perf_in_range(int64_t v, int64_t lo, int64_t hi)
+{
+    return v >= lo && v <= hi;
+}
+
+/* Setup blocks one ladder point at `scale` needs. */
+static int64_t perf_funding_blocks(const struct simnet_perf_config *cfg,
+                                   int scale)
+{
+    return (int64_t)cfg->blocks * scale * cfg->txs_per_block *
+           cfg->funding_multiple;
+}
+
+/* Run the discarded warm-up (rep -1) and the `cfg->reps` measured samples of
+ * one point, filling the sample arrays and the point's per-sample fields.
+ * On failure *failed_rep is the rep that failed. */
+static bool perf_collect_samples(const struct simnet_perf_config *cfg,
+                                 int blocks, int64_t *build_samples,
+                                 int64_t *fold_samples,
+                                 struct simnet_perf_point *pt,
+                                 int *failed_rep)
+{
+    for (int r = -1; r < cfg->reps; r++) {
+        struct perf_sample sample;
+        if (!perf_one_sample(cfg, blocks, &sample)) {
+            *failed_rep = r;
+            return false;
+        }
+        if (r < 0)
+            continue;
+        build_samples[r] = sample.build_cpu_ns;
+        fold_samples[r] = sample.fold_cpu_ns;
+        pt->measured_txs = sample.measured_txs;
+        pt->coins_at_end = sample.coins_at_end;
+        pt->tip_height = sample.tip_height;
+    }
+    return true;
+}
+
 /* ── Public surface ──────────────────────────────────────────────────── */
 
 void simnet_perf_config_defaults(struct simnet_perf_config *cfg)
@@ -310,15 +430,15 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
     if (cfg->blocks < 1 || cfg->txs_per_block < 1)
         LOG_FAIL("simnet_perf", "blocks=%d txs_per_block=%d must both be >= 1",
                  cfg->blocks, cfg->txs_per_block);
-    if (cfg->scale_count < 2 || cfg->scale_count > SIMNET_PERF_MAX_POINTS)
+    if (!perf_in_range((int64_t)cfg->scale_count, 2, SIMNET_PERF_MAX_POINTS))
         LOG_FAIL("simnet_perf",
                  "scale_count=%zu must be 2..%d (a growth ratio needs two "
                  "workload sizes)", cfg->scale_count, SIMNET_PERF_MAX_POINTS);
-    if (cfg->reps < 1 || cfg->reps > PERF_MAX_REPS)
+    if (!perf_in_range(cfg->reps, 1, PERF_MAX_REPS))
         LOG_FAIL("simnet_perf", "reps=%d must be 1..%d", cfg->reps,
                  PERF_MAX_REPS);
-    if (cfg->funding_multiple < 1 ||
-        cfg->funding_multiple > PERF_MAX_FUNDING_MULTIPLE)
+    if (!perf_in_range(cfg->funding_multiple, 1,
+                       PERF_MAX_FUNDING_MULTIPLE))
         LOG_FAIL("simnet_perf", "funding_multiple=%d must be 1..%d",
                  cfg->funding_multiple, PERF_MAX_FUNDING_MULTIPLE);
     for (size_t i = 0; i < cfg->scale_count; i++) {
@@ -329,8 +449,7 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
             LOG_FAIL("simnet_perf",
                      "scales must strictly increase (scales[%zu]=%d <= %d)",
                      i, cfg->scales[i], cfg->scales[i - 1]);
-        int64_t funding = (int64_t)cfg->blocks * cfg->scales[i] *
-                          cfg->txs_per_block * cfg->funding_multiple;
+        int64_t funding = perf_funding_blocks(cfg, cfg->scales[i]);
         if (funding > PERF_MAX_FUNDING_BLOCKS)
             LOG_FAIL("simnet_perf",
                      "scale %d needs %lld funding blocks, over the %d cap",
@@ -364,21 +483,13 @@ bool simnet_perf_run(const struct simnet_perf_config *cfg,
          * rather than load-bearing; it is kept because `make sim-perf`'s
          * absolute growth budget was calibrated with it. Same discipline as
          * tools/simd_bench.c.) */
-        for (int r = -1; r < reps; r++) {
-            struct perf_sample sample;
-            if (!perf_one_sample(cfg, blocks, &sample))
-                LOG_FAIL("simnet_perf",
-                         "workload failed at scale %d rep %d — a rejected mint "
-                         "is a harness bug, never a perf result",
-                         cfg->scales[p], r);
-            if (r < 0)
-                continue;
-            build_samples[r] = sample.build_cpu_ns;
-            fold_samples[r] = sample.fold_cpu_ns;
-            pt->measured_txs = sample.measured_txs;
-            pt->coins_at_end = sample.coins_at_end;
-            pt->tip_height = sample.tip_height;
-        }
+        int r = 0;
+        if (!perf_collect_samples(cfg, blocks, build_samples, fold_samples, pt,
+                                  &r))
+            LOG_FAIL("simnet_perf",
+                     "workload failed at scale %d rep %d — a rejected mint "
+                     "is a harness bug, never a perf result",
+                     cfg->scales[p], r);
 
         pt->build_cpu_ns = perf_min(build_samples, (size_t)reps);
         pt->fold_cpu_ns = perf_min(fold_samples, (size_t)reps);
@@ -454,6 +565,38 @@ bool simnet_perf_metric(const struct simnet_perf_result *r, const char *name,
     return false;
 }
 
+/* Each operator accepts the orderings of actual-vs-expected in its mask. */
+#define PERF_ORD_LT 1u
+#define PERF_ORD_EQ 2u
+#define PERF_ORD_GT 4u
+
+struct perf_op_row {
+    const char *op;
+    unsigned accepts;
+};
+
+static const struct perf_op_row PERF_OPS[] = {
+    { "==", PERF_ORD_EQ },
+    { "!=", PERF_ORD_LT | PERF_ORD_GT },
+    { ">=", PERF_ORD_GT | PERF_ORD_EQ },
+    { "<=", PERF_ORD_LT | PERF_ORD_EQ },
+    { ">", PERF_ORD_GT },
+    { "<", PERF_ORD_LT },
+};
+
+/* 0 when `actual op expected` holds, -1 when it does not, -2 for an unknown
+ * operator. */
+static int perf_compare(const char *op, int64_t actual, int64_t expected)
+{
+    const unsigned ord = actual < expected ? PERF_ORD_LT
+                       : actual == expected ? PERF_ORD_EQ : PERF_ORD_GT;
+    for (size_t i = 0; i < sizeof(PERF_OPS) / sizeof(PERF_OPS[0]); i++) {
+        if (strcmp(op, PERF_OPS[i].op) == 0)
+            return (PERF_OPS[i].accepts & ord) ? 0 : -1;
+    }
+    return -2;
+}
+
 int simnet_perf_expect(const struct simnet_perf_result *r, const char *name,
                        const char *op, int64_t expected, int64_t *out_actual)
 {
@@ -465,13 +608,7 @@ int simnet_perf_expect(const struct simnet_perf_result *r, const char *name,
     if (out_actual)
         *out_actual = actual;
     /* Same operator set as the chaos DSL's compare_metric (tools/sim/chaos.c). */
-    if (strcmp(op, "==") == 0) return actual == expected ? 0 : -1;
-    if (strcmp(op, "!=") == 0) return actual != expected ? 0 : -1;
-    if (strcmp(op, ">=") == 0) return actual >= expected ? 0 : -1;
-    if (strcmp(op, "<=") == 0) return actual <= expected ? 0 : -1;
-    if (strcmp(op, ">") == 0)  return actual > expected ? 0 : -1;
-    if (strcmp(op, "<") == 0)  return actual < expected ? 0 : -1;
-    return -2;
+    return perf_compare(op, actual, expected);
 }
 
 void simnet_perf_print(const struct simnet_perf_result *r, FILE *out)
