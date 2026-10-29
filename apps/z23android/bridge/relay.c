@@ -166,6 +166,21 @@ static const char *validated_prompt(struct json_value *root, char *wire, const c
     if (!token_matches(received, token) || !prompt || !prompt[0] || strlen(prompt) > prompt_bound || !zutf8_validate(prompt)) return NULL;
     return prompt;
 }
+static bool send_bytes(int fd, const char *data, size_t size)
+{
+    size_t sent = 0; int64_t now = now_ms();
+    while (now >= 0 && sent < size && wait_fd(fd, POLLOUT, now + 5000)) {
+        ssize_t count = send(fd, data + sent, size - sent, MSG_NOSIGNAL);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (count <= 0) break;
+        sent += (size_t)count;
+    }
+    return sent == size;
+}
+bool zapp_relay_emit(int fd, const char *line)
+{
+    return line && send_bytes(fd, line, strlen(line)) && send_bytes(fd, "\n", 1);
+}
 static void send_response(int fd, bool ok, const char *message)
 {
     struct json_value root = {0}; json_set_object(&root);
@@ -173,13 +188,8 @@ static void send_response(int fd, bool ok, const char *message)
     bool built = json_push_kv_bool(&root, "ok", ok) && json_push_kv_str(&root, ok ? "answer" : "error", message);
     size_t n = built && wire ? json_write(&root, wire, WIRE_CAP - 1) : WIRE_CAP;
     if (n < WIRE_CAP - 1) {
-        wire[n++] = '\n'; size_t sent = 0; int64_t now = now_ms();
-        while (now >= 0 && sent < n && wait_fd(fd, POLLOUT, now + 5000)) {
-            ssize_t count = send(fd, wire + sent, n - sent, MSG_NOSIGNAL);
-            if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-            if (count <= 0) break;
-            sent += (size_t)count;
-        }
+        wire[n++] = '\n';
+        (void)send_bytes(fd, wire, n);
     }
     if (wire) { memory_cleanse(wire, WIRE_CAP); free(wire); }
     json_cleanse_strings(&root); json_free(&root);

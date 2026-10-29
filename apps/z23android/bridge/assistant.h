@@ -17,6 +17,10 @@ bool zapp_assistant_transcribe(const struct zapp_assistant *a, const unsigned ch
 /* context is untrusted observation text (node and fleet) shown to the model as data. */
 bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
     const char *context, int client_fd, char *answer, size_t cap);
+/* Like chat, but streams: each spoken chunk is sent to client_fd as a text event followed by
+ * PCM16 events (zapp_relay_emit) while the model is still writing. answer holds the full text. */
+bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
+    const char *context, int client_fd, char *answer, size_t cap);
 /* Returns mono PCM16 WAV owned by the caller, which cleanses and frees it. */
 bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
     int client_fd, unsigned char **wav, size_t *size);

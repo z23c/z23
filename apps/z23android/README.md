@@ -98,16 +98,18 @@ Place these files, verified with `sha256sum -c`, in one models directory.
 They come from `unsloth/Qwen3.5-4B-GGUF` revision
 `e87f176479d0855a907a41277aca2f8ee7a09523`, `unslothai/Qwen3-ASR-0.6B-GGUF`
 revision `9045ad9c16021af1f08a4862a9a13d56177eec24` and
-`ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF` revision
-`ca27d74bc954b73dadab5b71ca265d87fc861a7c`. Review each model card and
-license before downloading.
+`mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF` revision
+`0762b31e9cd99274d49dca4e895bd81863134f08`. Review each model card and
+license before downloading. The 0.6B speech model synthesizes at 0.77 times
+real time on the measured laptop against 0.96 for the 1.7B model, which leaves
+headroom for gapless streamed answers.
 
 ```text
 00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4  Qwen3.5-4B-Q4_K_M.gguf
 bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971  Qwen3-ASR-0.6B-Q8_0.gguf
 41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d  mmproj-Qwen3-ASR-0.6B-Q8_0.gguf
-ac7931aeb2e7aad1a6ed6602d353a5679c9d096b18ce8204ac730a8408d572e1  Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
-6fd65188839bcd6ecc91b277ad471e22a0edfada4699a0fe82f1165c18cfcce2  mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+59b28b4ab6a1c4e24e6701fc871a427c1fb3e8333f0ed5cebec3bb67a699ae8e  Qwen3-TTS-12Hz-0.6B-Base.Q8_0.gguf
+202c1fbf3a0f00b7586ca45b8328d696cc6cd980c3798979eaa4fefe8efd8320  Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf
 ```
 
 ### Run and pair
@@ -156,19 +158,26 @@ change hosts or spend funds.
   private-directory checks allow group write only for the app's own group.
 - A relaunch with `FLAG_ACTIVITY_CLEAR_TASK` creates the new activity before
   the old one is destroyed; the newest activity takes over the native UI.
-- Each capture logs its level floor and peak under logcat tag `z23`, and the
-  host logs the elapsed milliseconds of every operation. On the measured Pixel,
+- Each capture logs its level floor and peak under logcat tag `z23`, and each
+  spoken answer logs its playback length and the number and length of gaps
+  where audio ran out before the answer ended. The host logs the elapsed
+  milliseconds of every operation and, for streamed answers, the time to the
+  first text and the first audio. On the measured Pixel,
   speech from a laptop speaker peaked at mean levels of 417-556 over a floor
   of 10-12.
 
 ### Measured latency
 
 Measured 2026-10-29 on an AMD Ryzen 7 PRO 8840U with Radeon 780M graphics
-(Vulkan, RADV) and a Pixel over USB, for a 2-second spoken fleet question:
-recognition 0.23 s, chat 4.3 s, first synthesized chunk 4.5 s; first audio
-9.4 s after the end of speech. Synthesis runs at about 0.9 times real time
-with about 0.5 s fixed cost per request. These are single observations, not
-guarantees. Recognition accuracy and speech quality are unqualified.
+(Vulkan, RADV) and a Pixel over USB, for a 2-second spoken fleet question with
+streamed answers: recognition 0.23 s, first answer text 1.2-2.2 s, first audio
+4.8-5.9 s after the host receives the question, and 5.6-6.5 s from the end of
+speech to the first sound on the phone. Chat and synthesis share the
+integrated GPU, so the first chunk is synthesized mostly after chat finishes.
+Two answers of 15.8 s and 22.0 s played with 2 gaps totaling 0.52 s and with
+no gaps. Four synthesized sentences transcribed back to their input text
+except one compound word. These are single observations, not guarantees.
+Recognition accuracy and speech quality are otherwise unqualified.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That

@@ -56,7 +56,7 @@ test-bridge: bridge
 
 SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
 SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
-HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c bridge/host.c bridge/relay.c hosts.c pairing.c \
+HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
   ../../platform/modules/sha3/src/sha3.c \
   ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
 .PHONY: speech-bridge speech-probe test-voice test-host preview-apk
@@ -164,3 +164,7 @@ test-host:
 	'$(BUILD_DIR)/fleet-probe-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/http_test.c bridge/http.c $(SPEECH_JSON) -o '$(BUILD_DIR)/http-test'
 	'$(BUILD_DIR)/http-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/assistant_test.c bridge/http.c voice.c \
+	  ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  $(SPEECH_JSON) -o '$(BUILD_DIR)/assistant-test'
+	'$(BUILD_DIR)/assistant-test'

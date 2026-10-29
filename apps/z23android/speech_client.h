@@ -15,6 +15,13 @@ bool zapp_speech_client_speak(const char *files, const char *text, int16_t **sam
 /* Asks the paired laptop's private model; on failure answer holds user-facing text. */
 bool zapp_speech_client_chat(const char *files, const char *prompt, char *answer, size_t cap,
     const atomic_bool *cancel);
+/* Streams the paired laptop's answer: on_text receives each spoken sentence and on_pcm each run
+ * of mono PCM16 samples as the host produces them. answer holds the full text, or user-facing
+ * error text on failure. The sample buffer is cleansed after each callback. */
+bool zapp_speech_client_respond(const char *files, const char *prompt,
+    void (*on_text)(const char *text, void *ctx),
+    void (*on_pcm)(const int16_t *samples, size_t count, int rate, void *ctx),
+    void *ctx, char *answer, size_t cap, const atomic_bool *cancel);
 /* Writes the host's fleet snapshot as JSON; refresh probes the hosts again first. */
 bool zapp_speech_client_fleet(const char *files, bool refresh, char *out, size_t cap,
     const atomic_bool *cancel);

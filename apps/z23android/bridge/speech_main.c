@@ -90,7 +90,7 @@ static bool transcribe(const struct json_value *request, int client, struct json
     if (wav) { memory_cleanse(wav, bytes); free(wav); }
     return ok;
 }
-static bool chat(const struct json_value *request, int client, struct json_value *response)
+static bool chat(const struct json_value *request, int client, struct json_value *response, bool stream)
 {
     const char *prompt = json_get_str(json_get(request, "prompt"));
     char *context = malloc(FLEET_CAP + 128), *answer = calloc(1, TEXT_CAP);
@@ -102,8 +102,8 @@ static bool chat(const struct json_value *request, int client, struct json_value
         if (n <= 0 || !zapp_hosts_format(fleet_snapshot, context + n, FLEET_CAP + 128 - (size_t)n))
             snprintf(context, FLEET_CAP + 128, "Fleet status not yet observed.");
         pthread_mutex_unlock(&fleet_lock);
-        ok = zapp_assistant_chat(&assistant, prompt, context, client, answer, TEXT_CAP) &&
-            json_push_kv_str(response, "text", answer);
+        ok = (stream ? zapp_assistant_respond : zapp_assistant_chat)(&assistant, prompt, context, client,
+                answer, TEXT_CAP) && json_push_kv_str(response, "text", answer);
     }
     if (answer) { memory_cleanse(answer, TEXT_CAP); free(answer); }
     free(context);
@@ -142,17 +142,17 @@ static bool fleet(const struct json_value *request, struct json_value *response)
     json_free(&snapshot);
     return ok;
 }
-static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet"};
+static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet", "respond"};
 static size_t find_op(const struct json_value *request)
 {
     size_t op = 0;
-    while (op < 4 && !string_is(request, "op", ops[op])) op++;
+    while (op < 5 && !string_is(request, "op", ops[op])) op++;
     return op;
 }
 static bool run_op(size_t op, const struct json_value *request, int client, struct json_value *response)
 {
     if (op == 0) return transcribe(request, client, response);
-    if (op == 1) return chat(request, client, response);
+    if (op == 1 || op == 4) return chat(request, client, response, op == 4);
     if (op == 2) return synthesize(request, client, response);
     if (op == 3) return fleet(request, response);
     return false;
@@ -163,7 +163,7 @@ static bool timed_op(size_t op, const struct json_value *request, int client, st
     clock_gettime(CLOCK_MONOTONIC, &start);
     bool ok = run_op(op, request, client, response);
     clock_gettime(CLOCK_MONOTONIC, &end);
-    if (op < 4) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
+    if (op < 5) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
         (long long)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
     return ok;
 }

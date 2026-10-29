@@ -16,7 +16,10 @@
 
 static bool answer(int fd, const char *prompt, char *out, size_t cap, const char **error)
 {
-    (void)fd; (void)error;
+    (void)error;
+    if (!strcmp(prompt, "stream"))
+        assert(zapp_relay_emit(fd, "{\"event\":\"text\",\"data\":\"first\"}") &&
+               zapp_relay_emit(fd, "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100\"}"));
     return snprintf(out, cap, "reply: %s", prompt) > 0;
 }
 static int connect_port(int port)
@@ -84,12 +87,31 @@ static void hello(int port, const char *token)
     char wire[512]; snprintf(wire, sizeof(wire), "{\"token\":\"%s\",\"prompt\":\"hello\"}\n", token);
     exchange(port, wire, true);
 }
+/* Events arrive in order before the final reply, each on its own line. */
+static void streamed(int port, const char *token)
+{
+    char wire[512], buf[1024], expected[1024]; size_t used = 0; ssize_t n;
+    snprintf(wire, sizeof(wire), "{\"token\":\"%s\",\"prompt\":\"stream\"}\n", token);
+    int fd = connect_port(port);
+    assert(send(fd, wire, strlen(wire), 0) == (ssize_t)strlen(wire));
+    while (used < sizeof(buf) - 1 && (n = recv(fd, buf + used, sizeof(buf) - 1 - used, 0)) > 0) used += (size_t)n;
+    buf[used] = 0; close(fd);
+    snprintf(expected, sizeof(expected), "%s\n%s\n%s\n", "{\"event\":\"text\",\"data\":\"first\"}",
+        "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100\"}", "{\"ok\":true,\"answer\":\"reply: stream\"}");
+    assert(!strcmp(buf, expected));
+    int pair[2]; assert(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+    assert(zapp_relay_emit(pair[0], "{}") && !zapp_relay_emit(pair[0], NULL));
+    close(pair[1]);
+    assert(!zapp_relay_emit(pair[0], "{}"));
+    close(pair[0]);
+}
 static void ephemeral_cases(const char *dir, const char *path)
 {
     pid_t child = start_relay(dir, 0);
     assert(wait_for(path, NULL));
     char token[65], wire[512]; int port = read_descriptor(path, token);
     hello(port, token);
+    streamed(port, token);
     exchange(port, "{\"token\":\"bad\",\"prompt\":\"hello\"}\n", false);
     exchange(port, "{broken}\n", false);
     snprintf(wire, sizeof(wire), "{\"token\":\"%s\",\"prompt\":\"hello\\u0000hidden\"}\n", token);

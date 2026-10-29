@@ -128,6 +128,7 @@ static bool spawn(const struct zapp_fleet_host *host, struct probe *p)
         (char *)host->destination, (char *)probe_command, NULL};
     p->pid = fork();
     if (p->pid == 0) {
+        signal(SIGPIPE, SIG_DFL);
         int nul = open("/dev/null", O_RDWR | O_CLOEXEC);
         if (setpgid(0, 0) || nul < 0 || dup2(nul, 0) < 0 || dup2(pipefd[1], 1) < 0 ||
             dup2(nul, 2) < 0) _exit(127);

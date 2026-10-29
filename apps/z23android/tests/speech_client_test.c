@@ -50,6 +50,28 @@ bool zapp_bridge_speech(const char *files, const char *wire, char *out, size_t c
     json_cleanse_strings(&root); json_free(&root);
     return mock_success;
 }
+static const char *mock_events[4];
+bool zapp_bridge_speech_events(const char *files, const char *wire, char *out, size_t cap,
+    bool (*on_event)(const struct json_value *event, void *ctx), void *ctx, const atomic_bool *cancel)
+{
+    assert(files && wire && out && cap && on_event && !cancel);
+    calls++;
+    struct json_value root = {0};
+    assert(json_read(&root, wire, strlen(wire)) && root.type == JSON_OBJ && root.num_children == 3);
+    check_string(&root, "schema", "z23.voice/1"); check_string(&root, "op", "respond");
+    check_string(&root, "prompt", "How is my node?");
+    json_cleanse_strings(&root); json_free(&root);
+    for (size_t i = 0; i < 4 && mock_events[i]; i++) {
+        struct json_value event = {0};
+        assert(json_read(&event, mock_events[i], strlen(mock_events[i])));
+        bool more = on_event(&event, ctx);
+        json_free(&event);
+        if (!more) { snprintf(out, cap, "Voice cancelled."); return false; }
+    }
+    assert(mock_reply && strlen(mock_reply) < cap);
+    memcpy(out, mock_reply, strlen(mock_reply) + 1);
+    return mock_success;
+}
 static void path_join(char *out, size_t cap, const char *directory, const char *name)
 {
     int n = snprintf(out, cap, "%s/%s", directory, name);
@@ -192,6 +214,68 @@ static void chat_cases(const char *directory)
     unsigned before = calls;
     assert(!zapp_speech_client_chat(directory, "", answer, sizeof(answer), NULL) && calls == before);
 }
+struct heard { unsigned texts, pcms; char text[64]; int16_t samples[8]; size_t count; int rate; };
+static void heard_text(const char *text, void *ctx)
+{
+    struct heard *h = ctx;
+    h->texts++; snprintf(h->text, sizeof(h->text), "%s", text);
+}
+static void heard_pcm(const int16_t *samples, size_t count, int rate, void *ctx)
+{
+    struct heard *h = ctx;
+    assert(count <= 8);
+    h->pcms++; h->count = count; h->rate = rate; memcpy(h->samples, samples, count * sizeof(*samples));
+}
+static bool respond_with(const char *directory, const char *event, const char *final, bool success,
+    struct heard *h, char *answer, size_t cap)
+{
+    mock_events[0] = event; mock_events[1] = NULL; mock_reply = final; mock_success = success;
+    *h = (struct heard){0};
+    return zapp_speech_client_respond(directory, "How is my node?", heard_text, heard_pcm, h, answer, cap, NULL);
+}
+static void respond_cases(const char *directory)
+{
+    char answer[256]; struct heard h;
+    const char *final = "{\"text\":\"Hello there.\"}";
+    mock_events[0] = "{\"event\":\"text\",\"data\":\"Hello there.\"}";
+    mock_events[1] = "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100ff7f0080ffff\"}";
+    mock_events[2] = "{\"event\":\"mood\",\"data\":\"ignored\"}"; mock_events[3] = NULL;
+    mock_reply = final; mock_success = true; h = (struct heard){0};
+    assert(zapp_speech_client_respond(directory, "How is my node?", heard_text, heard_pcm, &h, answer, sizeof(answer), NULL));
+    assert(!strcmp(answer, "Hello there.") && h.texts == 1 && !strcmp(h.text, "Hello there."));
+    assert(h.pcms == 1 && h.count == 4 && h.rate == 24000);
+    assert(h.samples[0] == 1 && h.samples[1] == INT16_MAX && h.samples[2] == INT16_MIN && h.samples[3] == -1);
+    mock_events[0] = NULL;
+    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, answer, sizeof(answer), NULL));
+    mock_events[0] = "{\"event\":\"text\",\"data\":\"x\"}"; mock_events[1] = "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100\"}";
+    mock_events[2] = NULL;
+    assert(zapp_speech_client_respond(directory, "How is my node?", NULL, NULL, NULL, answer, sizeof(answer), NULL));
+    const char *bad[] = {
+        "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"zz00\"}", "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"010\"}",
+        "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"0100aa\"}", "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"\"}",
+        "{\"event\":\"pcm\",\"rate\":24000}", "{\"event\":\"pcm\",\"data\":\"0100\"}",
+        "{\"event\":\"pcm\",\"rate\":7999,\"data\":\"0100\"}", "{\"event\":\"pcm\",\"rate\":48001,\"data\":\"0100\"}",
+        "{\"event\":\"pcm\",\"rate\":\"24000\",\"data\":\"0100\"}",
+        "{\"event\":\"text\"}", "{\"event\":\"text\",\"data\":\"\"}", "{\"event\":\"\",\"data\":\"x\"}", "{\"event\":1}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        assert(!respond_with(directory, bad[i], final, true, &h, answer, sizeof(answer)));
+        assert(!strcmp(answer, "Voice cancelled.") || !strcmp(answer, "The private assistant on your laptop is unavailable. Connect it over USB."));
+        assert(!h.texts && !h.pcms);
+    }
+    char *large = malloc(96100); assert(large);
+    int head = snprintf(large, 96100, "{\"event\":\"pcm\",\"rate\":24000,\"data\":\"");
+    memset(large + head, '0', 96004); strcpy(large + head + 96004, "\"}");
+    assert(!respond_with(directory, large, final, true, &h, answer, sizeof(answer)) && !h.pcms); free(large);
+    for (size_t i = 0; i < 2; i++) {
+        const char *finals[] = {"{\"text\":\"\"}", "{\"text\":\"a\",\"b\":1}"};
+        assert(!respond_with(directory, NULL, finals[i], true, &h, answer, sizeof(answer)));
+    }
+    assert(!respond_with(directory, NULL, "Model unavailable.", false, &h, answer, sizeof(answer)));
+    assert(!strcmp(answer, "Model unavailable."));
+    unsigned before = calls;
+    assert(!zapp_speech_client_respond(directory, "", NULL, NULL, NULL, answer, sizeof(answer), NULL) && calls == before);
+}
 static void fleet_cases(const char *directory)
 {
     char out[256]; mock_op = "fleet"; mock_success = true; mock_scope = "refresh";
@@ -207,6 +291,6 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     pairing_cases(argv[1]); transcribe_cases(argv[1]); speak_cases(argv[1]);
-    chat_cases(argv[1]); fleet_cases(argv[1]);
+    chat_cases(argv[1]); respond_cases(argv[1]); fleet_cases(argv[1]);
     puts("speech client tests passed"); return 0;
 }

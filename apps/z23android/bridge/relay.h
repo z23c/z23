@@ -9,6 +9,9 @@ int zapp_relay_run(const char *directory, bool (*answer)(int client_fd,
 bool zapp_relay_stopping(void);
 /* False once the relay is stopping or client_fd disconnected; -1 checks only stopping. */
 bool zapp_relay_client_alive(int client_fd);
+/* Writes line and a newline to the client before the final reply; false once the client is gone.
+ * The line must be one JSON object without a newline. */
+bool zapp_relay_emit(int client_fd, const char *line);
 int zapp_relay_run_sized(const char *directory, bool (*answer)(int client_fd,
     const char *prompt, char *out, size_t cap, const char **error),
     size_t prompt_limit, size_t answer_limit);

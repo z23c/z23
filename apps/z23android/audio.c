@@ -23,6 +23,9 @@ struct zapp_player {
     _Atomic uint64_t head, tail;
     atomic_bool failed;
     int16_t *ring;
+    /* Written by the playback callback only; read after the stream is closed. */
+    uint64_t played, silent, gap_frames;
+    uint32_t gaps;
 };
 
 static bool audio_error(char *error, size_t cap, const char *message,
@@ -57,6 +60,9 @@ static aaudio_data_callback_result_t player_feed(AAudioStream *stream, void *use
     size_t n = head - tail < (uint64_t)frames ? (size_t)(head - tail) : (size_t)frames;
     for (size_t i = 0; i < n; ++i) out[i] = p->ring[(tail + i) % p->cap];
     for (size_t i = n; i < (size_t)frames; ++i) out[i] = 0;
+    if (n && p->silent) { p->gaps++; p->gap_frames += p->silent; p->silent = 0; }
+    if (p->played && n < (size_t)frames) p->silent += (size_t)frames - n;
+    p->played += n;
     atomic_store_explicit(&p->tail, tail + n, memory_order_release);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -255,6 +261,10 @@ bool zapp_player_close(struct zapp_player *p, bool drain, const atomic_bool *can
         }
     }
     ok = audio_close(p->stream, ok, error, error_cap);
+    if (p->played)
+        __android_log_print(ANDROID_LOG_INFO, "z23", "voice playback %llu ms, %u gaps totaling %llu ms",
+                            (unsigned long long)(p->played * 1000 / (uint64_t)p->rate), p->gaps,
+                            (unsigned long long)(p->gap_frames * 1000 / (uint64_t)p->rate));
     memory_cleanse(p->ring, p->cap * sizeof(*p->ring));
     free(p->ring);
     free(p);

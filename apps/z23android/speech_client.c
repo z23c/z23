@@ -189,3 +189,83 @@ bool zapp_speech_client_fleet(const char *files, bool refresh, char *out, size_t
     ok = fleet && fleet->type == JSON_OBJ && json_write(fleet, out, cap) < cap;
     json_cleanse_strings(&response); json_free(&response); return ok;
 }
+#define PCM_EVENT_SAMPLES 24000u
+struct respond_state {
+    void (*on_text)(const char *text, void *ctx);
+    void (*on_pcm)(const int16_t *samples, size_t count, int rate, void *ctx);
+    void *ctx;
+    int16_t pcm[PCM_EVENT_SAMPLES];
+};
+/* Decodes hex PCM16 little-endian into out; false unless it is a whole, bounded sample run. */
+static bool pcm_decode(const char *hex, int16_t *out, size_t *count)
+{
+    size_t n = hex ? strlen(hex) : 0;
+    if (!n || n % 4 || n / 4 > PCM_EVENT_SAMPLES) return false;
+    for (size_t i = 0; i < n; i += 4) {
+        int b[4];
+        for (size_t k = 0; k < 4; k++) b[k] = nibble(hex[i + k]);
+        if ((b[0] | b[1] | b[2] | b[3]) < 0) return false;
+        out[i / 4] = (int16_t)(uint16_t)(b[0] << 4 | b[1] | b[2] << 12 | b[3] << 8);
+    }
+    *count = n / 4; return true;
+}
+static bool pcm_event(struct respond_state *s, const struct json_value *event)
+{
+    const struct json_value *rate = json_get(event, "rate");
+    size_t count = 0;
+    if (!rate || rate->type != JSON_INT || json_get_int(rate) < 8000 || json_get_int(rate) > 48000 ||
+        !pcm_decode(json_get_str(json_get(event, "data")), s->pcm, &count)) return false;
+    if (s->on_pcm) s->on_pcm(s->pcm, count, (int)json_get_int(rate), s->ctx);
+    memory_cleanse(s->pcm, count * sizeof(*s->pcm));
+    return true;
+}
+static bool respond_event(const struct json_value *event, void *opaque)
+{
+    struct respond_state *s = opaque;
+    const char *kind = json_get_str(json_get(event, "event"));
+    if (!kind || !kind[0]) return false;
+    if (!strcmp(kind, "pcm")) return pcm_event(s, event);
+    if (strcmp(kind, "text")) return true;
+    const char *text = json_get_str(json_get(event, "data"));
+    if (!text[0]) return false;
+    if (s->on_text) s->on_text(text, s->ctx);
+    return true;
+}
+static bool respond_wire(const char *prompt, char *wire)
+{
+    struct json_value root = {0}; json_set_object(&root);
+    bool ok = json_push_kv_str(&root, "schema", "z23.voice/1") && json_push_kv_str(&root, "op", "respond") &&
+        json_push_kv_str(&root, "prompt", prompt) && json_write(&root, wire, SPEECH_CAP) < SPEECH_CAP;
+    json_cleanse_strings(&root); json_free(&root);
+    return ok;
+}
+/* The final line's answer is {"text":...}; failures leave the host's error text in answer. */
+static bool respond_final(bool delivered, const char *reply, char *answer, size_t cap)
+{
+    struct json_value response = {0};
+    if (!delivered && reply[0]) snprintf(answer, cap, "%s", reply);
+    bool ok = delivered && !strstr(reply, "\\u0000") && json_read(&response, reply, strlen(reply)) &&
+        response.type == JSON_OBJ && response.num_children == 1;
+    const char *text = ok ? json_get_str(json_get(&response, "text")) : NULL;
+    ok = text && text[0] && strlen(text) < cap;
+    if (ok) memcpy(answer, text, strlen(text) + 1);
+    json_cleanse_strings(&response); json_free(&response);
+    return ok;
+}
+bool zapp_speech_client_respond(const char *files, const char *prompt,
+    void (*on_text)(const char *, void *), void (*on_pcm)(const int16_t *, size_t, int, void *),
+    void *ctx, char *answer, size_t cap, const atomic_bool *cancel)
+{
+    if (!files || !prompt || !answer || !cap) return false;
+    snprintf(answer, cap, "The private assistant on your laptop is unavailable. Connect it over USB.");
+    char *wire = calloc(1, SPEECH_CAP), *reply = calloc(1, SPEECH_CAP);
+    struct respond_state *state = calloc(1, sizeof(*state));
+    bool ok = prompt[0] && wire && reply && state && respond_wire(prompt, wire);
+    if (ok) {
+        state->on_text = on_text; state->on_pcm = on_pcm; state->ctx = ctx;
+        ok = respond_final(zapp_bridge_speech_events(files, wire, reply, SPEECH_CAP, respond_event, state, cancel),
+                           reply, answer, cap);
+    }
+    dispose(wire, SPEECH_CAP); dispose(reply, SPEECH_CAP); dispose(state, sizeof(*state));
+    return ok;
+}

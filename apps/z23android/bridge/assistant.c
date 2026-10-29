@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #include "assistant.h"
 #include "http.h"
+#include "relay.h"
+#include "voice.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "encoding/utilstrencodings.h"
@@ -9,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define JSON_CAP 4194304u
 #define WAV_CAP 8388608u
@@ -29,16 +32,35 @@ char *zapp_assistant_base64(const unsigned char *bytes, size_t size)
     if (out && EncodeBase64(bytes, size, out, cap) != cap - 1) { dispose(out, cap); out = NULL; }
     return out;
 }
+static char *wire_json(const struct json_value *request, size_t *n)
+{
+    *n = json_write(request, NULL, 0);
+    char *wire = *n && *n < JSON_CAP ? malloc(*n + 1) : NULL;
+    if (wire && json_write(request, wire, *n + 1) != *n) { dispose(wire, *n + 1); wire = NULL; }
+    return wire;
+}
 static bool post(uint16_t port, const char *path, const struct json_value *request,
                  int client, size_t cap, int timeout_ms, unsigned char **body, size_t *size)
 {
-    size_t n = json_write(request, NULL, 0);
-    char *wire = n && n < JSON_CAP ? malloc(n + 1) : NULL;
-    bool ok = wire && json_write(request, wire, n + 1) == n;
+    size_t n = 0;
+    char *wire = wire_json(request, &n);
     struct zapp_http_request r = {.port = port, .method = "POST", .path = path,
         .content_type = "application/json", .body = wire, .body_size = n,
         .response_cap = cap, .timeout_ms = timeout_ms, .alive_fd = client};
-    ok = ok && zapp_http_exchange(&r, body, size);
+    bool ok = wire && zapp_http_exchange(&r, body, size);
+    dispose(wire, n + 1);
+    return ok;
+}
+typedef bool (*body_sink)(const unsigned char *data, size_t size, void *ctx);
+static bool post_stream(uint16_t port, const char *path, const struct json_value *request, int client,
+                        size_t cap, body_sink sink, void (*on_type)(const char *, void *), void *ctx)
+{
+    size_t n = 0;
+    char *wire = wire_json(request, &n);
+    struct zapp_http_request r = {.port = port, .method = "POST", .path = path,
+        .content_type = "application/json", .body = wire, .body_size = n,
+        .response_cap = cap, .timeout_ms = 120000, .alive_fd = client, .on_type = on_type};
+    bool ok = wire && zapp_http_stream(&r, sink, ctx);
     dispose(wire, n + 1);
     return ok;
 }
@@ -49,16 +71,22 @@ static bool push_message(struct json_value *messages, const char *role, const st
         json_push_back(messages, &m);
     json_cleanse_strings(&m); json_free(&m); return ok;
 }
+static bool completion_request(struct json_value *request, struct json_value *kwargs,
+                               const struct json_value *messages, int max_tokens, bool stream)
+{
+    json_set_object(request); json_set_object(kwargs);
+    return json_push_kv_bool(kwargs, "enable_thinking", false) &&
+        json_push_kv(request, "messages", messages) &&
+        json_push_kv_int(request, "max_tokens", max_tokens) &&
+        json_push_kv_real(request, "temperature", 0.6) &&
+        json_push_kv(request, "chat_template_kwargs", kwargs) &&
+        (!stream || json_push_kv_bool(request, "stream", true));
+}
 static bool completion(uint16_t port, const struct json_value *messages, int max_tokens,
                        int client, char *out, size_t cap)
 {
     struct json_value request = {0}, kwargs = {0}, response = {0};
-    json_set_object(&request); json_set_object(&kwargs);
-    bool ok = json_push_kv_bool(&kwargs, "enable_thinking", false) &&
-        json_push_kv(&request, "messages", messages) &&
-        json_push_kv_int(&request, "max_tokens", max_tokens) &&
-        json_push_kv_real(&request, "temperature", 0.6) &&
-        json_push_kv(&request, "chat_template_kwargs", &kwargs);
+    bool ok = completion_request(&request, &kwargs, messages, max_tokens, false);
     unsigned char *body = NULL; size_t size = 0;
     ok = ok && post(port, "/v1/chat/completions", &request, client, 1048576, 120000, &body, &size) &&
         json_read(&response, (const char *)body, size);
@@ -106,25 +134,33 @@ bool zapp_assistant_transcribe(const struct zapp_assistant *a, const unsigned ch
     json_free(&part); json_cleanse_strings(&input); json_free(&input);
     return ok;
 }
+/* Builds the system and user messages shared by the buffered and streamed chat. */
+static bool chat_messages(struct json_value *messages, const char *prompt, const char *context)
+{
+    size_t n = sizeof(system_prompt) + strlen(context ? context : "") + 32;
+    char *system = malloc(n);
+    struct json_value sys = {0}, user = {0};
+    json_set_array(messages);
+    if (system) snprintf(system, n, "%s\n\nObservations:\n%s", system_prompt, context && context[0] ? context : "none");
+    if (system) json_set_str(&sys, system);
+    json_set_str(&user, prompt);
+    bool ok = system && push_message(messages, "system", &sys) && push_message(messages, "user", &user);
+    if (system) dispose(system, n);
+    json_cleanse_strings(&sys); json_free(&sys); json_cleanse_strings(&user); json_free(&user);
+    return ok;
+}
 bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
     const char *context, int client, char *answer, size_t cap)
 {
     snprintf(answer, cap, "The private model on the laptop host is unavailable.");
-    size_t n = sizeof(system_prompt) + strlen(context ? context : "") + 32;
-    char *system = malloc(n);
-    struct json_value messages = {0}, sys = {0}, user = {0};
-    json_set_array(&messages);
-    if (system) snprintf(system, n, "%s\n\nObservations:\n%s", system_prompt, context && context[0] ? context : "none");
-    if (system) json_set_str(&sys, system);
-    json_set_str(&user, prompt);
-    bool ok = system && push_message(&messages, "system", &sys) && push_message(&messages, "user", &user);
+    struct json_value messages = {0};
+    bool ok = chat_messages(&messages, prompt, context);
     char *reply = calloc(1, cap);
     ok = ok && reply && completion(a->chat_port, &messages, 320, client, reply, cap);
     if (ok) { spoken(reply); ok = reply[0] != 0; }
     if (ok) memcpy(answer, reply, strlen(reply) + 1);
-    dispose(reply, cap); if (system) dispose(system, n);
+    dispose(reply, cap);
     json_cleanse_strings(&messages); json_free(&messages);
-    json_cleanse_strings(&sys); json_free(&sys); json_cleanse_strings(&user); json_free(&user);
     return ok;
 }
 static uint32_t le32(const unsigned char *p)
@@ -193,5 +229,236 @@ bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
     ok = ok && post(a->tts_port, "/tts", &request, client, WAV_CAP, 120000, &body, &length) &&
         pcm16(body, length, wav, size);
     dispose(body, length + 1); json_cleanse_strings(&request); json_free(&request);
+    return ok;
+}
+#define LINE_CAP 98304u
+#define SSE_CAP 16384u
+#define THINK_CAP 8192u
+#define MIN_CHUNK 24u
+#define MAX_CHUNK 160u
+/* The first chunk is short: synthesis returns audio only when a chunk is complete. */
+#define FIRST_CHUNK 32u
+#define PCM_RATE 24000
+#define PCM_EVENT_MAX 24000u
+/* One streamed answer: chat text is cut into spoken chunks and each chunk's audio is
+ * relayed to the phone as PCM16 events while the model is still writing. */
+struct respond {
+    const struct zapp_assistant *a;
+    int client, rate;
+    int64_t start_ms;
+    bool audio, mute, dead, done, pcm_bad, open;
+    char *text; size_t text_len, text_cap;
+    char raw[THINK_CAP]; size_t raw_len, fed;
+    char pending[MAX_CHUNK + 2]; size_t pending_len;
+    char sse[SSE_CAP]; size_t sse_len;
+    unsigned char carry[4]; size_t carry_len;
+    int16_t pcm[PCM_EVENT_MAX]; size_t pcm_len;
+    char line[LINE_CAP];
+};
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static bool emit_text(struct respond *r, const char *sentence)
+{
+    if (r->text_len == strlen(sentence))
+        fprintf(stderr, "respond first text in %lld ms\n", (long long)(now_ms() - r->start_ms));
+    struct json_value event = {0}; json_set_object(&event);
+    bool ok = json_push_kv_str(&event, "event", "text") && json_push_kv_str(&event, "data", sentence);
+    size_t n = ok ? json_write(&event, r->line, LINE_CAP) : LINE_CAP;
+    ok = n < LINE_CAP && zapp_relay_emit(r->client, r->line);
+    json_cleanse_strings(&event); json_free(&event);
+    return ok;
+}
+static bool emit_pcm(struct respond *r)
+{
+    static const char digits[] = "0123456789abcdef";
+    int head = snprintf(r->line, LINE_CAP, "{\"event\":\"pcm\",\"rate\":%d,\"data\":\"", r->rate);
+    char *out = r->line + head;
+    for (size_t i = 0; i < r->pcm_len; i++, out += 4) {
+        uint16_t v = (uint16_t)r->pcm[i];
+        out[0] = digits[(v >> 4) & 15]; out[1] = digits[v & 15];
+        out[2] = digits[v >> 12]; out[3] = digits[(v >> 8) & 15];
+    }
+    memcpy(out, "\"}", 3);
+    bool ok = zapp_relay_emit(r->client, r->line);
+    memory_cleanse(r->line, (size_t)(out - r->line) + 3);
+    memory_cleanse(r->pcm, r->pcm_len * sizeof(*r->pcm)); r->pcm_len = 0;
+    if (ok && !r->audio) {
+        r->audio = true;
+        fprintf(stderr, "respond first audio in %lld ms\n", (long long)(now_ms() - r->start_ms));
+    }
+    if (!ok) r->dead = true;
+    return ok;
+}
+/* Converts little-endian float32 samples as they arrive; a sample may span two calls. */
+static bool pcm_push(struct respond *r, const unsigned char *data, size_t size)
+{
+    for (size_t i = 0; i < size; i++) {
+        r->carry[r->carry_len++] = data[i];
+        if (r->carry_len < 4) continue;
+        r->pcm[r->pcm_len++] = (int16_t)wav_sample(r->carry, 0, false);
+        r->carry_len = 0;
+        if (r->pcm_len >= (size_t)r->rate / 2 && !emit_pcm(r)) return false;
+    }
+    return !r->pcm_len || emit_pcm(r);
+}
+static bool tts_sink(const unsigned char *data, size_t size, void *ctx)
+{
+    struct respond *r = ctx;
+    return !r->pcm_bad && !r->dead && pcm_push(r, data, size);
+}
+static void tts_type(const char *type, void *ctx)
+{
+    struct respond *r = ctx;
+    const char *rate = strstr(type, "rate=");
+    long hz = rate ? strtol(rate + 5, NULL, 10) : PCM_RATE;
+    r->pcm_bad = strncmp(type, "audio/pcm", 9) || hz < 8000 || hz > 48000 ||
+        (strstr(type, "encoding=") && !strstr(type, "encoding=float"));
+    if (!r->pcm_bad) r->rate = (int)hz;
+}
+static bool synthesize(struct respond *r, const char *text)
+{
+    struct json_value request = {0}; json_set_object(&request);
+    bool ok = json_push_kv_str(&request, "input", text) && json_push_kv_str(&request, "lang", "en") &&
+        json_push_kv_str(&request, "response_format", "pcm") && json_push_kv_bool(&request, "stream", true) &&
+        json_push_kv_int(&request, "seed", 7) &&
+        (!r->a->speaker_b64 || json_push_kv_str(&request, "speaker_ref_b64", r->a->speaker_b64));
+    r->carry_len = 0; r->rate = PCM_RATE; r->pcm_bad = false;
+    ok = ok && post_stream(r->a->tts_port, "/tts", &request, r->client, WAV_CAP, tts_sink, tts_type, r);
+    json_cleanse_strings(&request); json_free(&request);
+    return ok;
+}
+/* A failed synthesis silences the rest of the answer; the text still completes. */
+static bool speak(struct respond *r, const char *sentence)
+{
+    if (!emit_text(r, sentence)) r->dead = true;
+    else if (!r->mute && !synthesize(r, sentence) && !r->dead) r->mute = true;
+    return !r->dead;
+}
+static bool append_text(struct respond *r, const char *chunk)
+{
+    size_t n = strlen(chunk), sep = r->text_len ? 1 : 0;
+    if (n + sep >= r->text_cap - r->text_len) return false;
+    if (sep) r->text[r->text_len++] = ' ';
+    memcpy(r->text + r->text_len, chunk, n + 1); r->text_len += n;
+    return true;
+}
+static bool speak_pending(struct respond *r, size_t n)
+{
+    char chunk[MAX_CHUNK + 2];
+    snprintf(chunk, sizeof(chunk), "%.*s", (int)n, r->pending);
+    trim(chunk);
+    memmove(r->pending, r->pending + n, r->pending_len - n + 1); r->pending_len -= n;
+    size_t lead = strspn(r->pending, " ");
+    memmove(r->pending, r->pending + lead, r->pending_len - lead + 1); r->pending_len -= lead;
+    return !chunk[0] || (append_text(r, chunk) && speak(r, chunk));
+}
+/* Length of the next chunk to speak: up to the first sentence or clause end that leaves at
+ * least MIN_CHUNK bytes and is followed by a space, or a forced split once cap is exceeded. */
+static size_t ready_len(const char *pending, size_t len, size_t cap)
+{
+    for (size_t i = MIN_CHUNK - 1; i + 1 < len && i < cap; i++)
+        if (pending[i + 1] == ' ' && strchr(".!?,;:", pending[i])) return i + 1;
+    return len > cap ? zapp_voice_chunk(pending, cap) : 0;
+}
+static bool drain(struct respond *r)
+{
+    for (size_t n; (n = ready_len(r->pending, r->pending_len, r->text_len ? MAX_CHUNK : FIRST_CHUNK));)
+        if (!speak_pending(r, n)) return false;
+    return true;
+}
+/* Same character filtering as spoken(). */
+static bool push_char(struct respond *r, char c)
+{
+    if (strchr("*#`_|>", c)) return true;
+    if (c == '\n') c = ' ';
+    if (c == ' ' && !r->pending_len) return true;
+    r->pending[r->pending_len++] = c; r->pending[r->pending_len] = 0;
+    return drain(r);
+}
+static bool feed_raw(struct respond *r)
+{
+    for (; r->fed < r->raw_len; r->fed++)
+        if (!push_char(r, r->raw[r->fed])) return false;
+    memory_cleanse(r->raw, r->raw_len);
+    r->raw_len = r->fed = 0;
+    return true;
+}
+/* Text is held back while it can still be a leading think block, which is dropped like spoken() does. */
+static void gate_update(struct respond *r)
+{
+    const char *end = strstr(r->raw, "</think>");
+    const char *start = r->raw + strspn(r->raw, " \t\r\n");
+    size_t n = strlen(start);
+    if (end) { r->fed = (size_t)(end - r->raw) + 8; r->open = true; }
+    else r->open = strncmp(start, "<think>", n < 7 ? n : 7) != 0;
+}
+static bool push_delta(struct respond *r, const char *content)
+{
+    size_t n = strlen(content);
+    if (n >= sizeof(r->raw) - r->raw_len) return false;
+    memcpy(r->raw + r->raw_len, content, n + 1); r->raw_len += n;
+    if (!r->open) gate_update(r);
+    return !r->open || feed_raw(r);
+}
+static bool sse_data(struct respond *r, const char *payload)
+{
+    if (r->done) return true;
+    if (!strcmp(payload, "[DONE]")) { r->done = true; return true; }
+    struct json_value doc = {0};
+    bool ok = json_read(&doc, payload, strlen(payload));
+    const char *content = json_get_str(json_get(json_get(json_at(json_get(&doc, "choices"), 0), "delta"), "content"));
+    if (ok && content && content[0]) ok = zutf8_validate(content) && push_delta(r, content);
+    json_cleanse_strings(&doc); json_free(&doc);
+    return ok;
+}
+static bool sse_line(struct respond *r)
+{
+    if (r->sse_len && r->sse[r->sse_len - 1] == '\r') r->sse[--r->sse_len] = 0;
+    if (strncmp(r->sse, "data:", 5)) return true;
+    const char *payload = r->sse + 5;
+    return sse_data(r, payload + (*payload == ' '));
+}
+/* Accepts server-sent events in pieces of any size; only data lines matter. */
+static bool sse_sink(const unsigned char *data, size_t size, void *ctx)
+{
+    struct respond *r = ctx;
+    for (size_t i = 0; i < size; i++) {
+        if (data[i] == '\n') {
+            r->sse[r->sse_len] = 0;
+            bool ok = sse_line(r);
+            memory_cleanse(r->sse, r->sse_len); r->sse_len = 0;
+            if (!ok) return false;
+        } else if (!data[i] || r->sse_len + 1 >= sizeof(r->sse)) return false;
+        else r->sse[r->sse_len++] = (char)data[i];
+    }
+    return true;
+}
+static bool respond_finish(struct respond *r)
+{
+    if (!r->open) { r->open = true; if (!feed_raw(r)) return false; }
+    return !r->pending_len || speak_pending(r, r->pending_len);
+}
+bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
+    const char *context, int client, char *answer, size_t cap)
+{
+    snprintf(answer, cap, "The private model on the laptop host is unavailable.");
+    struct respond *r = calloc(1, sizeof(*r));
+    struct json_value messages = {0}, request = {0}, kwargs = {0};
+    if (r) {
+        r->a = a; r->client = client; r->rate = PCM_RATE; r->start_ms = now_ms();
+        r->text = calloc(1, cap); r->text_cap = cap;
+    }
+    bool ok = r && r->text && chat_messages(&messages, prompt, context) &&
+        completion_request(&request, &kwargs, &messages, 320, true) &&
+        post_stream(a->chat_port, "/v1/chat/completions", &request, client, 1048576, sse_sink, NULL, r);
+    ok = ok && r->done && respond_finish(r) && !r->dead && r->text[0];
+    if (ok) memcpy(answer, r->text, r->text_len + 1);
+    json_cleanse_strings(&request); json_free(&request); json_free(&kwargs);
+    json_cleanse_strings(&messages); json_free(&messages);
+    if (r) { dispose(r->text, cap); memory_cleanse(r, sizeof(*r)); free(r); }
     return ok;
 }

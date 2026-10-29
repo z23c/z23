@@ -142,16 +142,53 @@ static bool encode_request(struct json_value *request, char *wire, const char *t
     if (*size < WIRE_CAP - 1) wire[(*size)++] = '\n'; else ok = false;
     return ok;
 }
-static bool read_reply(int fd, const char *wire, size_t size, char *reply, int64_t deadline,
-                       const atomic_bool *cancel, struct json_value *response)
+struct events { bool (*fn)(const struct json_value *event, void *ctx); void *ctx; };
+enum { LINE_EVENT, LINE_FINAL, LINE_BAD };
+/* A line with an "event" member goes to the callback; any other line is the final reply. */
+static int handle_line(const char *line, const struct events *events, struct json_value *final)
 {
-    return fd >= 0 && exchange_send(fd, wire, size, deadline, cancel) &&
-        exchange_receive(fd, reply, deadline, cancel) && !cancelled(cancel) &&
+    if (strstr(line, "\\u0000") || !json_read(final, line, strlen(line)) || final->type != JSON_OBJ)
+        return LINE_BAD;
+    if (!json_get(final, "event")) return final->num_children == 2 ? LINE_FINAL : LINE_BAD;
+    bool ok = events->fn(final, events->ctx);
+    json_cleanse_strings(final); json_free(final); json_init(final);
+    return ok ? LINE_EVENT : LINE_BAD;
+}
+/* Reads newline-delimited lines, each at most WIRE_CAP - 1 bytes, until the final reply, which
+ * must be the last bytes received. */
+static bool receive_events(int fd, char *buf, int64_t deadline, const atomic_bool *cancel,
+                           const struct events *events, struct json_value *final)
+{
+    size_t used = 0;
+    for (;;) {
+        char *end = memchr(buf, '\n', used);
+        if (end) {
+            *end = 0;
+            int line = handle_line(buf, events, final);
+            if (line == LINE_FINAL) return end == buf + used - 1;
+            if (line != LINE_EVENT) return false;
+            used -= (size_t)(end - buf) + 1;
+            memmove(buf, end + 1, used);
+            continue;
+        }
+        if (used >= WIRE_CAP - 1 || !wait_socket(fd, POLLIN, deadline, cancel)) return false;
+        ssize_t n = recv(fd, buf + used, WIRE_CAP - 1 - used, 0);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (n <= 0 || memchr(buf + used, 0, (size_t)n)) return false;
+        used += (size_t)n;
+    }
+}
+static bool read_reply(int fd, const char *wire, size_t size, char *reply, int64_t deadline,
+                       const atomic_bool *cancel, const struct events *events, struct json_value *response)
+{
+    if (fd < 0 || !exchange_send(fd, wire, size, deadline, cancel)) return false;
+    if (events) return receive_events(fd, reply, deadline, cancel, events, response) && !cancelled(cancel);
+    return exchange_receive(fd, reply, deadline, cancel) && !cancelled(cancel) &&
         !strstr(reply, "\\u0000") && json_read(response, reply, strlen(reply)) &&
         response->type == JSON_OBJ && response->num_children == 2;
 }
-static bool bridge_exchange(const char *prompt, const char *token, uint16_t port,
-                            char *out, size_t cap, const atomic_bool *cancel)
+static bool bridge_exchange(const char *prompt, const char *token, uint16_t port, char *out, size_t cap,
+                            const atomic_bool *cancel, const struct events *events)
 {
     struct json_value request = {0}, response = {0}; json_set_object(&request);
     char *wire = calloc(1, WIRE_CAP), *reply = calloc(1, WIRE_CAP);
@@ -159,7 +196,7 @@ static bool bridge_exchange(const char *prompt, const char *token, uint16_t port
     bool ok = reply && encode_request(&request, wire, token, prompt, &size);
     int64_t now = now_ms();
     int fd = ok && now >= 0 ? connect_local(port, now + 100000, cancel) : -1;
-    ok = read_reply(fd, wire, size, reply, now + 100000, cancel, &response);
+    ok = read_reply(fd, wire, size, reply, now + 100000, cancel, events, &response);
     if (fd >= 0) close(fd);
     ok = bridge_response(ok, &response, out, cap);
     json_cleanse_strings(&request); json_free(&request);
@@ -176,19 +213,30 @@ bool zapp_bridge_chat(const char *files, const char *prompt, char *out, size_t c
     uint16_t port = 0; char token[65] = "";
     bool ok = !cancelled(cancel) && prompt[0] && strlen(prompt) <= 16000 &&
         descriptor(files, "codex-bridge.json", &port, token) && !cancelled(cancel);
-    if (ok) ok = bridge_exchange(prompt, token, port, out, cap, cancel);
+    if (ok) ok = bridge_exchange(prompt, token, port, out, cap, cancel, NULL);
     if (cancelled(cancel)) { snprintf(out, cap, "Reply cancelled."); ok = false; }
     memory_cleanse(token, sizeof(token)); return ok;
 }
-bool zapp_bridge_speech(const char *files, const char *request, char *out, size_t cap,
-                       const atomic_bool *cancel)
+static bool speech_call(const char *files, const char *request, char *out, size_t cap,
+                        const atomic_bool *cancel, const struct events *events)
 {
     if (!files || !request || !out || !cap) return false;
     snprintf(out, cap, "Pair your voice host and connect its USB tunnel.");
     uint16_t port = 0; char token[65] = "";
     bool ok = !cancelled(cancel) && request[0] && strlen(request) <= 1300000 &&
         descriptor(files, "speech-bridge.json", &port, token) && !cancelled(cancel);
-    if (ok) ok = bridge_exchange(request, token, port, out, cap, cancel);
+    if (ok) ok = bridge_exchange(request, token, port, out, cap, cancel, events);
     if (cancelled(cancel)) { snprintf(out, cap, "Voice cancelled."); ok = false; }
     memory_cleanse(token, sizeof(token)); return ok;
+}
+bool zapp_bridge_speech(const char *files, const char *request, char *out, size_t cap,
+                       const atomic_bool *cancel)
+{
+    return speech_call(files, request, out, cap, cancel, NULL);
+}
+bool zapp_bridge_speech_events(const char *files, const char *request, char *out, size_t cap,
+    bool (*on_event)(const struct json_value *event, void *ctx), void *ctx, const atomic_bool *cancel)
+{
+    const struct events events = {on_event, ctx};
+    return on_event && speech_call(files, request, out, cap, cancel, &events);
 }

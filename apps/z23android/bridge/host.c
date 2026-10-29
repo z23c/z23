@@ -20,7 +20,7 @@ struct model_role { const char *name, *model, *mmproj, *context; };
 static const struct model_role roles[ZAPP_HOST_SERVERS] = {
     {"chat", "Qwen3.5-4B-Q4_K_M.gguf", NULL, "8192"},
     {"asr", "Qwen3-ASR-0.6B-Q8_0.gguf", "mmproj-Qwen3-ASR-0.6B-Q8_0.gguf", "4096"},
-    {"tts", "Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf", "mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf", "4096"},
+    {"tts", "Qwen3-TTS-12Hz-0.6B-Base.Q8_0.gguf", "Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf", "4096"},
 };
 static void pause_ms(long ms)
 {
@@ -43,6 +43,7 @@ static bool server_paths(const char *models, const char *dir, const struct model
 }
 static void exec_server(const char *exe, char *const argv[], const char *log)
 {
+    signal(SIGPIPE, SIG_DFL);
     int nul = open("/dev/null", O_RDONLY | O_CLOEXEC);
     int out = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (setpgid(0, 0) || prctl(PR_SET_PDEATHSIG, SIGTERM) || nul < 0 || out < 0 ||
@@ -154,6 +155,7 @@ static bool run_adb(const char *adb, char *const argv[], const char *input)
     if (pipe2(in, O_CLOEXEC)) return false;
     pid_t pid = fork();
     if (pid == 0) {
+        signal(SIGPIPE, SIG_DFL);
         int nul = open("/dev/null", O_WRONLY | O_CLOEXEC);
         if (nul < 0 || dup2(in[0], 0) < 0 || dup2(nul, 1) < 0 || dup2(nul, 2) < 0) _exit(127);
         execv(adb, argv);
