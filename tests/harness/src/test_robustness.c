@@ -993,7 +993,7 @@ static int check_zcl_malloc_zero_and_small_sizes(void)
 {
     int failures = 0;
 
-    printf("robust: OOM protection logs on alloc failure simulation... ");
+    printf("robust: zcl_malloc zero and small sizes... ");
     {
         /* zcl_malloc with size 0 should return NULL without crashing,
          * and zcl_malloc with reasonable size should succeed. */
