@@ -546,7 +546,7 @@ static int legacy_import_scan_matched_block(
     platform_read_mapping_close(&mapping);
     platform_positioned_file_close(&file);
     if (!stable)
-        return -1;
+        return -1; /* raw-return-ok:the run logs LEGACY_IMPORT_UNSTABLE */
     return 1;
 }
 
