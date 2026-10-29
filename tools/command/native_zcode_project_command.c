@@ -610,6 +610,46 @@ static bool zproject_render_expert(struct json_value *out,
                               prepared->capsule_root);
 }
 
+static bool zproject_push_exact_policy(
+    struct json_value *exact, const struct vcs_zcode_proof_policy_v1 *policy,
+    const uint8_t root[32])
+{
+    return zproject_push_root(exact, "root", root) &&
+        json_push_kv_int(exact, "required_proofs",
+                         policy->required_proofs) &&
+        json_push_kv_int(exact, "minimum_compile_receipts",
+                         policy->minimum_compile_receipts) &&
+        json_push_kv_int(exact, "minimum_test_receipts",
+                         policy->minimum_test_receipts) &&
+        json_push_kv_int(exact, "minimum_fuzz_receipts",
+                         policy->minimum_fuzz_receipts) &&
+        json_push_kv_int(exact, "minimum_reviews",
+                         policy->minimum_reviews) &&
+        json_push_kv_int(exact, "minimum_matching_receipts",
+                         policy->minimum_matching_receipts) &&
+        json_push_kv_int(exact, "maximum_proof_age_seconds",
+                         policy->maximum_proof_age_seconds);
+}
+
+static bool zproject_push_profile_flags(
+    struct json_value *out, const struct vcs_zcode_dev_profile *profile)
+{
+    return json_push_kv_str(out, "name", profile->name) &&
+           json_push_kv_bool(out, "package_build", true) &&
+           json_push_kv_bool(out, "declared_tests", true) &&
+           json_push_kv_bool(out, "warning_fatal",
+                             profile->warning_fatal) &&
+           json_push_kv_bool(out, "sanitizers", profile->sanitizers) &&
+           json_push_kv_bool(out, "deterministic_fuzz",
+                             profile->deterministic_fuzz) &&
+           json_push_kv_bool(out, "local_reproduction",
+                             profile->local_reproduction) &&
+           json_push_kv_bool(out, "separate_review",
+                             profile->separate_review) &&
+           json_push_kv_bool(out, "approved_reproduction",
+                             profile->approved_reproduction);
+}
+
 static bool zproject_render_profile(struct json_value *out)
 {
     struct vcs_zcode_dev_profile profile;
@@ -621,38 +661,11 @@ static bool zproject_render_profile(struct json_value *out)
     struct json_value exact;
     json_init(&exact);
     json_set_object(&exact);
-    bool ok = zproject_push_root(&exact, "root", root) &&
-        json_push_kv_int(&exact, "required_proofs",
-                         profile.policy.required_proofs) &&
-        json_push_kv_int(&exact, "minimum_compile_receipts",
-                         profile.policy.minimum_compile_receipts) &&
-        json_push_kv_int(&exact, "minimum_test_receipts",
-                         profile.policy.minimum_test_receipts) &&
-        json_push_kv_int(&exact, "minimum_fuzz_receipts",
-                         profile.policy.minimum_fuzz_receipts) &&
-        json_push_kv_int(&exact, "minimum_reviews",
-                         profile.policy.minimum_reviews) &&
-        json_push_kv_int(&exact, "minimum_matching_receipts",
-                         profile.policy.minimum_matching_receipts) &&
-        json_push_kv_int(&exact, "maximum_proof_age_seconds",
-                         profile.policy.maximum_proof_age_seconds);
+    bool ok = zproject_push_exact_policy(&exact, &profile.policy, root);
     json_init(out);
     json_set_object(out);
     if (ok) {
-        ok = json_push_kv_str(out, "name", profile.name) &&
-             json_push_kv_bool(out, "package_build", true) &&
-             json_push_kv_bool(out, "declared_tests", true) &&
-             json_push_kv_bool(out, "warning_fatal",
-                               profile.warning_fatal) &&
-             json_push_kv_bool(out, "sanitizers", profile.sanitizers) &&
-             json_push_kv_bool(out, "deterministic_fuzz",
-                               profile.deterministic_fuzz) &&
-             json_push_kv_bool(out, "local_reproduction",
-                               profile.local_reproduction) &&
-             json_push_kv_bool(out, "separate_review",
-                               profile.separate_review) &&
-             json_push_kv_bool(out, "approved_reproduction",
-                               profile.approved_reproduction) &&
+        ok = zproject_push_profile_flags(out, &profile) &&
              json_push_kv(out, "exact_policy", &exact);
     }
     json_free(&exact);
@@ -671,6 +684,134 @@ static bool zproject_total_bytes(const struct vcs_package_manifest *manifest,
     }
     *out = total;
     return true;
+}
+
+static void zproject_inspect_unprepared(struct zcl_command_reply *reply,
+                                        const struct zcl_command_request *request,
+                                        enum vcs_package_prepare_error err,
+                                        const char *detail)
+{
+    struct zproject_init_plan plan;
+    struct vcs_package_prepared scan;
+    char plan_detail[256] = {0};
+    if (zproject_plan_derive(request->input, &plan, &scan, plan_detail,
+                             sizeof(plan_detail))) {
+        uint64_t total_bytes = 0;
+        bool ok = zproject_total_bytes(&scan.manifest, &total_bytes) &&
+                  zproject_render_plan(&reply->data, &plan, &scan) &&
+                  json_push_kv_int(&reply->data, "file_count",
+                                   (int64_t)scan.manifest.count) &&
+                  json_push_kv_int(&reply->data, "total_project_bytes",
+                                   (int64_t)total_bytes) &&
+                  json_push_kv_bool(&reply->data,
+                                    "existing_package_config", false) &&
+                  json_push_kv_str(&reply->data, "suggested_profile",
+                                   "standard") &&
+                  json_push_kv_str(&reply->data, "next_safe_command",
+                                   "zcode project init plan");
+        vcs_package_prepared_free(&scan);
+        if (!ok)
+            zproject_fail(reply, "PROJECT_INSPECT_OUTPUT",
+                          "the bounded initialization proposal could not be rendered");
+        return;
+    }
+    vcs_package_prepared_free(&scan);
+    char message[384];
+    (void)snprintf(message, sizeof(message), "%s: %s%s%s",
+                   vcs_package_prepare_error_string(err), detail,
+                   plan_detail[0] ? "; initialization: " : "",
+                   plan_detail);
+    zproject_fail(reply, "PROJECT_INSPECT_FAILED", message);
+}
+
+static bool zproject_render_inspect_scopes(
+    struct json_value *scopes, const struct vcs_package_prepared *prepared)
+{
+    bool ok = true;
+    const struct vcs_package_recipe_strings *lists[] = {
+        &prepared->recipe.include_dirs,
+    };
+    for (size_t i = 0; ok && i < lists[0]->count; i++) {
+        struct json_value value;
+        json_init(&value); json_set_str(&value, lists[0]->items[i]);
+        ok = json_push_back(scopes, &value);
+        json_free(&value);
+    }
+    struct json_value src, tests, app;
+    json_init(&src); json_set_str(&src, "src");
+    json_init(&tests); json_set_str(&tests, "tests");
+    json_init(&app); json_set_str(&app, "app");
+    if (ok) ok = json_push_back(scopes, &src);
+    if (ok && prepared->recipe.test_sources.count != 0)
+        ok = json_push_back(scopes, &tests);
+    /* A package that declares a program is edited in app/ too — the same
+     * reasoning that puts tests/ on this list only when tests exist. */
+    if (ok && prepared->recipe.programs.count != 0)
+        ok = json_push_back(scopes, &app);
+    json_free(&src); json_free(&tests); json_free(&app);
+    return ok;
+}
+
+static bool zproject_push_inspect_identity(
+    struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared,
+    uint64_t total_bytes)
+{
+    return json_push_kv_str(&reply->data, "name", prepared->release.name) &&
+           json_push_kv_str(&reply->data, "semver",
+                            prepared->release.semver) &&
+           json_push_kv_str(&reply->data, "license",
+                            prepared->release.license) &&
+           json_push_kv_int(&reply->data, "file_count",
+                            (int64_t)prepared->manifest.count) &&
+           json_push_kv_int(&reply->data, "total_project_bytes",
+                            (int64_t)total_bytes);
+}
+
+static bool zproject_push_inspect_views(
+    struct zcl_command_reply *reply, struct json_value *layout,
+    struct json_value *scopes, struct json_value *limits,
+    struct json_value *profile, struct json_value *expert)
+{
+    return json_push_kv(&reply->data, "layout", layout) &&
+           json_push_kv(&reply->data, "likely_write_scopes", scopes) &&
+           json_push_kv(&reply->data, "resource_ceilings", limits) &&
+           json_push_kv_str(&reply->data, "suggested_profile", "standard") &&
+           json_push_kv(&reply->data, "proof_profile", profile) &&
+           json_push_kv_bool(&reply->data, "existing_package_config", true) &&
+           json_push_kv_bool(&reply->data, "read_only", true) &&
+           json_push_kv_str(&reply->data, "next_safe_command",
+                            "zcode work start") &&
+           json_push_kv(&reply->data, "expert", expert);
+}
+
+static bool zproject_inspect_render_ready(
+    struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared)
+{
+    uint64_t total_bytes = 0;
+    struct json_value layout, expert, profile, limits, scopes;
+    json_init(&layout);
+    json_init(&expert);
+    json_init(&profile);
+    bool ok = zproject_total_bytes(&prepared->manifest, &total_bytes) &&
+              zproject_render_layout(&layout, prepared, prepared->release.name) &&
+              zproject_render_expert(&expert, prepared) &&
+              zproject_render_profile(&profile);
+    json_init(&limits); json_set_object(&limits);
+    json_init(&scopes); json_set_array(&scopes);
+    if (ok) ok = zproject_render_inspect_scopes(&scopes, prepared);
+    if (ok) {
+        ok = json_push_kv_int(&limits, "maximum_test_seconds",
+                              prepared->recipe.maximum_test_seconds) &&
+             json_push_kv_int(&limits, "maximum_memory_bytes",
+                              (int64_t)prepared->recipe.maximum_memory_bytes) &&
+             zproject_push_inspect_identity(reply, prepared, total_bytes) &&
+             zproject_push_inspect_views(reply, &layout, &scopes, &limits,
+                                         &profile, &expert);
+    }
+    json_free(&scopes); json_free(&limits); json_free(&profile);
+    json_free(&expert);
+    json_free(&layout);
+    return ok;
 }
 
 void zcl_native_handle_zcode_project_inspect(
@@ -696,102 +837,11 @@ void zcl_native_handle_zcode_project_inspect(
     enum vcs_package_prepare_error err = vcs_package_prepare(
         &options, &prepared, detail, sizeof(detail));
     if (err != VCS_PACKAGE_PREPARE_OK) {
-        struct zproject_init_plan plan;
-        struct vcs_package_prepared scan;
-        char plan_detail[256] = {0};
-        if (zproject_plan_derive(request->input, &plan, &scan, plan_detail,
-                                 sizeof(plan_detail))) {
-            uint64_t total_bytes = 0;
-            bool ok = zproject_total_bytes(&scan.manifest, &total_bytes) &&
-                      zproject_render_plan(&reply->data, &plan, &scan) &&
-                      json_push_kv_int(&reply->data, "file_count",
-                                       (int64_t)scan.manifest.count) &&
-                      json_push_kv_int(&reply->data, "total_project_bytes",
-                                       (int64_t)total_bytes) &&
-                      json_push_kv_bool(&reply->data,
-                                        "existing_package_config", false) &&
-                      json_push_kv_str(&reply->data, "suggested_profile",
-                                       "standard") &&
-                      json_push_kv_str(&reply->data, "next_safe_command",
-                                       "zcode project init plan");
-            vcs_package_prepared_free(&scan);
-            if (!ok)
-                zproject_fail(reply, "PROJECT_INSPECT_OUTPUT",
-                              "the bounded initialization proposal could not be rendered");
-            return;
-        }
-        vcs_package_prepared_free(&scan);
-        char message[384];
-        (void)snprintf(message, sizeof(message), "%s: %s%s%s",
-                       vcs_package_prepare_error_string(err), detail,
-                       plan_detail[0] ? "; initialization: " : "",
-                       plan_detail);
-        zproject_fail(reply, "PROJECT_INSPECT_FAILED", message);
+        zproject_inspect_unprepared(reply, request, err, detail);
         return;
     }
 
-    uint64_t total_bytes = 0;
-    struct json_value layout, expert, profile, limits, scopes;
-    json_init(&layout);
-    json_init(&expert);
-    json_init(&profile);
-    bool ok = zproject_total_bytes(&prepared.manifest, &total_bytes) &&
-              zproject_render_layout(&layout, &prepared, prepared.release.name) &&
-              zproject_render_expert(&expert, &prepared) &&
-              zproject_render_profile(&profile);
-    json_init(&limits); json_set_object(&limits);
-    json_init(&scopes); json_set_array(&scopes);
-    if (ok) {
-        const struct vcs_package_recipe_strings *lists[] = {
-            &prepared.recipe.include_dirs,
-        };
-        for (size_t i = 0; ok && i < lists[0]->count; i++) {
-            struct json_value value;
-            json_init(&value); json_set_str(&value, lists[0]->items[i]);
-            ok = json_push_back(&scopes, &value);
-            json_free(&value);
-        }
-        struct json_value src, tests, app;
-        json_init(&src); json_set_str(&src, "src");
-        json_init(&tests); json_set_str(&tests, "tests");
-        json_init(&app); json_set_str(&app, "app");
-        if (ok) ok = json_push_back(&scopes, &src);
-        if (ok && prepared.recipe.test_sources.count != 0)
-            ok = json_push_back(&scopes, &tests);
-        /* A package that declares a program is edited in app/ too — the same
-         * reasoning that puts tests/ on this list only when tests exist. */
-        if (ok && prepared.recipe.programs.count != 0)
-            ok = json_push_back(&scopes, &app);
-        json_free(&src); json_free(&tests); json_free(&app);
-    }
-    if (ok) {
-        ok = json_push_kv_int(&limits, "maximum_test_seconds",
-                              prepared.recipe.maximum_test_seconds) &&
-             json_push_kv_int(&limits, "maximum_memory_bytes",
-                              (int64_t)prepared.recipe.maximum_memory_bytes) &&
-             json_push_kv_str(&reply->data, "name", prepared.release.name) &&
-             json_push_kv_str(&reply->data, "semver",
-                              prepared.release.semver) &&
-             json_push_kv_str(&reply->data, "license",
-                              prepared.release.license) &&
-             json_push_kv_int(&reply->data, "file_count",
-                              (int64_t)prepared.manifest.count) &&
-             json_push_kv_int(&reply->data, "total_project_bytes",
-                              (int64_t)total_bytes) &&
-             json_push_kv(&reply->data, "layout", &layout) &&
-             json_push_kv(&reply->data, "likely_write_scopes", &scopes) &&
-             json_push_kv(&reply->data, "resource_ceilings", &limits) &&
-             json_push_kv_str(&reply->data, "suggested_profile", "standard") &&
-             json_push_kv(&reply->data, "proof_profile", &profile) &&
-             json_push_kv_bool(&reply->data, "existing_package_config", true) &&
-             json_push_kv_bool(&reply->data, "read_only", true) &&
-             json_push_kv_str(&reply->data, "next_safe_command",
-                              "zcode work start") &&
-             json_push_kv(&reply->data, "expert", &expert);
-    }
-    json_free(&scopes); json_free(&limits); json_free(&profile);
-    json_free(&expert);
-    json_free(&layout);
+    bool ok = zproject_inspect_render_ready(reply, &prepared);
     vcs_package_prepared_free(&prepared);
     if (!ok)
         zproject_fail(reply, "PROJECT_INSPECT_OUTPUT",
@@ -1039,6 +1089,26 @@ void zcl_native_handle_zcode_project_init_commit(
                          "zcode project status");
 }
 
+static bool zproject_status_render_ready(
+    struct zcl_command_reply *reply, const struct vcs_package_prepared *prepared)
+{
+    struct json_value expert;
+    bool ok = zproject_render_expert(&expert, prepared) &&
+              json_push_kv_str(&reply->data, "state", "READY") &&
+              json_push_kv_str(&reply->data, "name",
+                               prepared->release.name) &&
+              json_push_kv_str(&reply->data, "semver",
+                               prepared->release.semver) &&
+              json_push_kv_str(&reply->data, "license",
+                               prepared->release.license) &&
+              json_push_kv_bool(&reply->data, "read_only", true) &&
+              json_push_kv_str(&reply->data, "next_safe_command",
+                               "zcode work start") &&
+              json_push_kv(&reply->data, "expert", &expert);
+    json_free(&expert);
+    return ok;
+}
+
 void zcl_native_handle_zcode_project_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1064,20 +1134,7 @@ void zcl_native_handle_zcode_project_status(
     enum vcs_package_prepare_error err = vcs_package_prepare(
         &options, &prepared, detail, sizeof(detail));
     if (err == VCS_PACKAGE_PREPARE_OK) {
-        struct json_value expert;
-        bool ok = zproject_render_expert(&expert, &prepared) &&
-                  json_push_kv_str(&reply->data, "state", "READY") &&
-                  json_push_kv_str(&reply->data, "name",
-                                   prepared.release.name) &&
-                  json_push_kv_str(&reply->data, "semver",
-                                   prepared.release.semver) &&
-                  json_push_kv_str(&reply->data, "license",
-                                   prepared.release.license) &&
-                  json_push_kv_bool(&reply->data, "read_only", true) &&
-                  json_push_kv_str(&reply->data, "next_safe_command",
-                                   "zcode work start") &&
-                  json_push_kv(&reply->data, "expert", &expert);
-        json_free(&expert);
+        bool ok = zproject_status_render_ready(reply, &prepared);
         vcs_package_prepared_free(&prepared);
         if (!ok)
             zproject_fail_at(reply, "PROJECT_STATUS_OUTPUT", "status",
