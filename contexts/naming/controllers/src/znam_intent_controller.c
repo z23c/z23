@@ -86,14 +86,16 @@ static bool znic_prepare_context_complete(
            input_count && maximum_fee_zat > 0;
 }
 
-static struct zcl_result znic_check_name_registration(
-    enum znam_intent_operation operation, bool found)
+static bool znic_register_collides(enum znam_intent_operation operation,
+                                   bool found)
 {
-    if (operation == ZNAM_INTENT_REGISTER && found)
-        return ZCL_ERR(-4, "ZNAM name is already registered");
-    if (operation != ZNAM_INTENT_REGISTER && !found)
-        return ZCL_ERR(-5, "ZNAM name is not registered");
-    return ZCL_OK;
+    return operation == ZNAM_INTENT_REGISTER && found;
+}
+
+static bool znic_non_register_missing(enum znam_intent_operation operation,
+                                      bool found)
+{
+    return operation != ZNAM_INTENT_REGISTER && !found;
 }
 
 static struct zcl_result znic_build_base_tx(
@@ -130,10 +132,10 @@ static struct zcl_result znic_prepare(
         return ZCL_ERR(-3, "ZNAM wallet prepare context is incomplete");
     struct znam_entry existing;
     bool found = db_znam_find(ctx->node_db, request->name, &existing);
-    struct zcl_result registration =
-        znic_check_name_registration(request->operation, found);
-    if (!registration.ok)
-        return registration;
+    if (znic_register_collides(request->operation, found))
+        return ZCL_ERR(-4, "ZNAM name is already registered");
+    if (znic_non_register_missing(request->operation, found))
+        return ZCL_ERR(-5, "ZNAM name is not registered");
     uint8_t script[512];
     size_t script_len = 0;
     ZCL_CHECK(znic_build_script(request, script, &script_len));
