@@ -620,6 +620,206 @@ bool vcs_badge_plan_build(const struct vcs_badge_store *store,
 
 /* ── issue ──────────────────────────────────────────────────────────── */
 
+/* Construct the exact unsigned content used for both validation and signing. */
+static void belig_issue_badge(const struct vcs_badge_plan *plan,
+                              const struct vcs_badge_plan_row *r,
+                              struct vcs_badge *badge)
+{
+    memset(badge, 0, sizeof(*badge));
+    badge->schema_version = VCS_PACKAGE_BADGE_VERSION;
+    badge->type = (uint8_t)r->type;
+    memcpy(badge->recipient, r->contributor, 33);
+    badge->period_first_day = r->period_first;
+    badge->period_last_day = r->period_last;
+    memcpy(badge->evidence_root, r->evidence_root, 32);
+    memcpy(badge->policy_id, plan->policy_id, 32);
+    badge->sequence = r->sequence;
+    memcpy(badge->issuer_pubkey, plan->issuer_pubkey, 33);
+}
+
+static const char *belig_issue_rule(const struct vcs_badge_eval *eval,
+                                    const struct vcs_badge_plan_row *r,
+                                    const struct vcs_badge_store *store,
+                                    const struct vcs_badge_policy *policy,
+                                    const uint8_t badge_id[32])
+{
+    if (!eval->available || !eval->eligible)
+        return VCS_BADGE_RULE_NOT_ELIGIBLE;
+    if (eval->period_first != r->period_first ||
+        eval->period_last != r->period_last)
+        return VCS_BADGE_RULE_PERIOD_CHANGED;
+    if (memcmp(eval->evidence_root, r->evidence_root, 32) != 0)
+        return VCS_BADGE_RULE_EVIDENCE_CHANGED;
+    if (!vcs_badge_store_find(store, badge_id) &&
+        vcs_badge_store_dedup_hit(store, policy, r->contributor, r->type,
+                                  r->period_first, r->period_last))
+        return VCS_BADGE_RULE_DUPLICATE;
+    return NULL;
+}
+
+static bool belig_issue_sequence_conflict(
+    const struct vcs_badge_store *store, const struct vcs_badge_plan *plan,
+    const struct vcs_badge_plan_row *r, const uint8_t badge_id[32])
+{
+    if (!vcs_badge_store_find(store, badge_id)) {
+        for (size_t j = 0; j < vcs_badge_store_badge_count(store); j++) {
+            const struct vcs_badge *b = vcs_badge_store_at(store, j);
+            if (b->sequence == r->sequence &&
+                memcmp(b->issuer_pubkey, plan->issuer_pubkey, 33) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static enum vcs_badge_issue_error belig_issue_check_row(
+    const struct vcs_badge_plan *plan, size_t i,
+    const struct vcs_badge_facts *facts, const struct vcs_badge_store *store,
+    const struct vcs_badge_policy *policy, char *detail, size_t detail_size)
+{
+    const struct vcs_badge_plan_row *r = &plan->rows[i];
+    struct vcs_badge_eval eval;
+    if (!vcs_badge_evaluate(r->type, r->contributor, facts,
+                            plan->planned_day, &eval))
+        LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG, "re-evaluate row %zu", i);
+    struct vcs_badge badge;
+    belig_issue_badge(plan, r, &badge);
+    uint8_t badge_id[32];
+    if (vcs_badge_id(&badge, badge_id) != VCS_BADGE_OK)
+        LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG, "badge id for row %zu", i);
+    const char *rule = belig_issue_rule(&eval, r, store, policy, badge_id);
+    if (rule) {
+        if (detail && detail_size > 0)
+            snprintf(detail, detail_size, "row %zu (%s): %s", i,
+                     vcs_badge_type_string(r->type), rule);
+        return VCS_BADGE_ISSUE_STALE;
+    }
+    if (belig_issue_sequence_conflict(store, plan, r, badge_id)) {
+        if (detail && detail_size > 0)
+            snprintf(detail, detail_size, "row %zu (%s): sequence-conflict", i,
+                     vcs_badge_type_string(r->type));
+        return VCS_BADGE_ISSUE_STALE;
+    }
+    return VCS_BADGE_ISSUE_OK;
+}
+
+/* Rebuild current facts once per sorted contributor; write nothing. */
+static enum vcs_badge_issue_error belig_issue_validate(
+    const struct vcs_badge_plan *plan, const struct vcs_badge_store *store,
+    const struct vcs_badge_policy *policy, const struct vcs_package_index *index,
+    const struct vcs_reward_ledger *ledger, char *detail, size_t detail_size)
+{
+    struct vcs_badge_facts facts;
+    bool facts_valid = false;
+    uint8_t facts_contributor[33];
+    memset(facts_contributor, 0, sizeof(facts_contributor));
+    for (size_t i = 0; i < plan->row_count; i++) {
+        const struct vcs_badge_plan_row *r = &plan->rows[i];
+        if (!facts_valid || memcmp(facts_contributor, r->contributor, 33) != 0) {
+            vcs_badge_facts_build(r->contributor, index, ledger,
+                                  plan->planned_day, &facts);
+            memcpy(facts_contributor, r->contributor, 33);
+            facts_valid = true;
+        }
+        enum vcs_badge_issue_error err = belig_issue_check_row(
+            plan, i, &facts, store, policy, detail, detail_size);
+        if (err != VCS_BADGE_ISSUE_OK)
+            return err;
+    }
+    return VCS_BADGE_ISSUE_OK;
+}
+
+static enum vcs_badge_issue_error belig_issue_persist_row(
+    struct vcs_badge_store *store, const struct vcs_badge_plan *plan, size_t i,
+    vcs_badge_sign_fn sign, void *sign_ctx, uint8_t badge_id[32],
+    uint32_t *issued, uint32_t *replayed, char *detail, size_t detail_size)
+{
+    const struct vcs_badge_plan_row *r = &plan->rows[i];
+    struct vcs_badge badge;
+    belig_issue_badge(plan, r, &badge);
+    if (vcs_badge_id(&badge, badge_id) != VCS_BADGE_OK)
+        return VCS_BADGE_ISSUE_IO;
+    if (vcs_badge_store_find(store, badge_id)) {
+        (*replayed)++;
+        return VCS_BADGE_ISSUE_OK;
+    }
+    if (!sign(&badge, badge_id, sign_ctx) ||
+        vcs_badge_verify(&badge) != VCS_BADGE_OK) {
+        if (detail && detail_size > 0)
+            snprintf(detail, detail_size,
+                     "row %zu (%s): the signer failed or produced a "
+                     "bad signature", i, vcs_badge_type_string(r->type));
+        return VCS_BADGE_ISSUE_SIGN;
+    }
+    uint8_t persisted_id[32];
+    enum vcs_badge_persist_error perr =
+        vcs_badge_store_persist(store, &badge, persisted_id);
+    if (perr == VCS_BADGE_PERSIST_DUPLICATE) {
+        (*replayed)++;
+        return VCS_BADGE_ISSUE_OK;
+    }
+    if (perr != VCS_BADGE_PERSIST_OK) {
+        if (detail && detail_size > 0)
+            snprintf(detail, detail_size, "row %zu (%s): persist: %s", i,
+                     vcs_badge_type_string(r->type),
+                     vcs_badge_persist_error_string(perr));
+        return VCS_BADGE_ISSUE_IO;
+    }
+    (*issued)++;
+    return VCS_BADGE_ISSUE_OK;
+}
+
+/* Persist badge wires first and the commit record last. */
+static enum vcs_badge_issue_error belig_issue_persist(
+    struct vcs_badge_store *store, const struct vcs_badge_plan *plan,
+    const uint8_t plan_id[32], vcs_badge_sign_fn sign, void *sign_ctx,
+    struct vcs_badge_issue_result *out, char *detail, size_t detail_size)
+{
+    uint8_t (*badge_ids)[32] = NULL;
+    if (plan->row_count > 0) {
+        badge_ids = zcl_calloc(plan->row_count, sizeof(*badge_ids),
+                               "badge_issue_ids");
+        if (!badge_ids)
+            LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG,
+                       "alloc %zu badge ids", plan->row_count);
+    }
+    enum vcs_badge_issue_error err = VCS_BADGE_ISSUE_OK;
+    uint32_t issued = 0, replayed = 0;
+    for (size_t i = 0; i < plan->row_count; i++) {
+        err = belig_issue_persist_row(store, plan, i, sign, sign_ctx,
+                                      badge_ids[i], &issued, &replayed,
+                                      detail, detail_size);
+        if (err != VCS_BADGE_ISSUE_OK)
+            goto done;
+    }
+    if (!vcs_badge_commit_record_write(store, plan_id, badge_ids,
+                                       plan->row_count))
+        err = VCS_BADGE_ISSUE_IO;
+done:
+    if (err == VCS_BADGE_ISSUE_OK) {
+        out->issued_count = issued + replayed;
+        out->replayed_count = replayed;
+        out->resumed = replayed > 0;
+    }
+    free(badge_ids);
+    return err;
+}
+
+static bool belig_issue_policy_matches(const struct vcs_badge_plan *plan,
+                                       const struct vcs_badge_policy *policy,
+                                       char *detail, size_t detail_size)
+{
+    if (memcmp(plan->policy_id, policy->policy_id, 32) != 0 ||
+        memcmp(plan->issuer_pubkey, policy->issuer_pubkey, 33) != 0) {
+        if (detail && detail_size > 0)
+            snprintf(detail, detail_size,
+                     "the plan's policy id or issuer key is not the "
+                     "configured badge policy");
+        return false;
+    }
+    return true;
+}
+
 enum vcs_badge_issue_error vcs_badge_issue(
     struct vcs_badge_store *store, const struct vcs_badge_policy *policy,
     const uint8_t plan_id[32], const struct vcs_package_index *index,
@@ -640,173 +840,12 @@ enum vcs_badge_issue_error vcs_badge_issue(
     if (read != 0)
         return read > 0 ? VCS_BADGE_ISSUE_UNKNOWN_PLAN
                         : VCS_BADGE_ISSUE_PLAN_CORRUPT;
-    if (memcmp(plan.policy_id, policy->policy_id, 32) != 0 ||
-        memcmp(plan.issuer_pubkey, policy->issuer_pubkey, 33) != 0) {
-        if (detail && detail_size > 0)
-            snprintf(detail, detail_size,
-                     "the plan's policy id or issuer key is not the "
-                     "configured badge policy");
+    if (!belig_issue_policy_matches(&plan, policy, detail, detail_size))
         return VCS_BADGE_ISSUE_POLICY_MISMATCH;
-    }
-
-    /* PASS 1 — re-validate every row against CURRENT facts (rebuilt at
-     * the plan's recorded day, never the wall clock) and the CURRENT
-     * store. Rows are sorted by contributor, so the facts rebuild runs
-     * once per distinct contributor. Nothing is written in this pass. */
-    {
-        struct vcs_badge_facts facts;
-        bool facts_valid = false;
-        uint8_t facts_contributor[33];
-        memset(facts_contributor, 0, sizeof(facts_contributor));
-        for (size_t i = 0; i < plan.row_count; i++) {
-            const struct vcs_badge_plan_row *r = &plan.rows[i];
-            if (!facts_valid ||
-                memcmp(facts_contributor, r->contributor, 33) != 0) {
-                vcs_badge_facts_build(r->contributor, index, ledger,
-                                      plan.planned_day, &facts);
-                memcpy(facts_contributor, r->contributor, 33);
-                facts_valid = true;
-            }
-            struct vcs_badge_eval eval;
-            if (!vcs_badge_evaluate(r->type, r->contributor, &facts,
-                                    plan.planned_day, &eval))
-                LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG,
-                           "re-evaluate row %zu", i);
-            /* The would-be badge id first: a row whose EXACT badge is
-             * already durable is a crash replay, not a duplicate — the
-             * dedup rule and the sequence check apply only to fresh
-             * content. */
-            struct vcs_badge would;
-            memset(&would, 0, sizeof(would));
-            would.schema_version = VCS_PACKAGE_BADGE_VERSION;
-            would.type = (uint8_t)r->type;
-            memcpy(would.recipient, r->contributor, 33);
-            would.period_first_day = r->period_first;
-            would.period_last_day = r->period_last;
-            memcpy(would.evidence_root, r->evidence_root, 32);
-            memcpy(would.policy_id, plan.policy_id, 32);
-            would.sequence = r->sequence;
-            memcpy(would.issuer_pubkey, plan.issuer_pubkey, 33);
-            uint8_t would_id[32];
-            if (vcs_badge_id(&would, would_id) != VCS_BADGE_OK)
-                LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG,
-                           "badge id for row %zu", i);
-            const char *rule = NULL;
-            if (!eval.available || !eval.eligible)
-                rule = VCS_BADGE_RULE_NOT_ELIGIBLE;
-            else if (eval.period_first != r->period_first ||
-                     eval.period_last != r->period_last)
-                rule = VCS_BADGE_RULE_PERIOD_CHANGED;
-            else if (memcmp(eval.evidence_root, r->evidence_root, 32) != 0)
-                rule = VCS_BADGE_RULE_EVIDENCE_CHANGED;
-            else if (!vcs_badge_store_find(store, would_id) &&
-                     vcs_badge_store_dedup_hit(store, policy,
-                                               r->contributor, r->type,
-                                               r->period_first,
-                                               r->period_last))
-                rule = VCS_BADGE_RULE_DUPLICATE;
-            if (rule) {
-                if (detail && detail_size > 0)
-                    snprintf(detail, detail_size,
-                             "row %zu (%s): %s", i,
-                             vcs_badge_type_string(r->type), rule);
-                return VCS_BADGE_ISSUE_STALE;
-            }
-            /* Sequence conflict: a persisted badge by this issuer already
-             * carries this sequence with DIFFERENT content (the identical
-             * badge id is the crash replay, accepted above). */
-            if (!vcs_badge_store_find(store, would_id)) {
-                for (size_t j = 0; j < vcs_badge_store_badge_count(store);
-                     j++) {
-                    const struct vcs_badge *b =
-                        vcs_badge_store_at(store, j);
-                    if (b->sequence == r->sequence &&
-                        memcmp(b->issuer_pubkey, plan.issuer_pubkey, 33) ==
-                            0) {
-                        if (detail && detail_size > 0)
-                            snprintf(detail, detail_size,
-                                     "row %zu (%s): sequence-conflict", i,
-                                     vcs_badge_type_string(r->type));
-                        return VCS_BADGE_ISSUE_STALE;
-                    }
-                }
-            }
-        }
-    }
-
-    /* PASS 2 — sign and persist every fresh badge (dedup by badge id:
-     * a crash replay writes nothing twice), then the commit record
-     * LAST. */
-    uint8_t (*badge_ids)[32] = NULL;
-    if (plan.row_count > 0) {
-        badge_ids = zcl_calloc(plan.row_count, sizeof(*badge_ids),
-                               "badge_issue_ids");
-        if (!badge_ids)
-            LOG_RETURN(VCS_BADGE_ISSUE_IO, BELIG_LOG,
-                       "alloc %zu badge ids", plan.row_count);
-    }
-    enum vcs_badge_issue_error err = VCS_BADGE_ISSUE_OK;
-    uint32_t issued = 0, replayed = 0;
-    for (size_t i = 0; i < plan.row_count; i++) {
-        const struct vcs_badge_plan_row *r = &plan.rows[i];
-        struct vcs_badge badge;
-        memset(&badge, 0, sizeof(badge));
-        badge.schema_version = VCS_PACKAGE_BADGE_VERSION;
-        badge.type = (uint8_t)r->type;
-        memcpy(badge.recipient, r->contributor, 33);
-        badge.period_first_day = r->period_first;
-        badge.period_last_day = r->period_last;
-        memcpy(badge.evidence_root, r->evidence_root, 32);
-        memcpy(badge.policy_id, plan.policy_id, 32);
-        badge.sequence = r->sequence;
-        memcpy(badge.issuer_pubkey, plan.issuer_pubkey, 33);
-        uint8_t badge_id[32];
-        if (vcs_badge_id(&badge, badge_id) != VCS_BADGE_OK) {
-            err = VCS_BADGE_ISSUE_IO;
-            goto done;
-        }
-        memcpy(badge_ids[i], badge_id, 32);
-        if (vcs_badge_store_find(store, badge_id)) {
-            replayed++;
-            continue; /* crash resume: the identical badge is durable */
-        }
-        if (!sign(&badge, badge_id, sign_ctx) ||
-            vcs_badge_verify(&badge) != VCS_BADGE_OK) {
-            if (detail && detail_size > 0)
-                snprintf(detail, detail_size,
-                         "row %zu (%s): the signer failed or produced a "
-                         "bad signature", i,
-                         vcs_badge_type_string(r->type));
-            err = VCS_BADGE_ISSUE_SIGN;
-            goto done;
-        }
-        uint8_t persisted_id[32];
-        enum vcs_badge_persist_error perr =
-            vcs_badge_store_persist(store, &badge, persisted_id);
-        if (perr == VCS_BADGE_PERSIST_DUPLICATE) {
-            replayed++;
-            continue;
-        }
-        if (perr != VCS_BADGE_PERSIST_OK) {
-            if (detail && detail_size > 0)
-                snprintf(detail, detail_size, "row %zu (%s): persist: %s",
-                         i, vcs_badge_type_string(r->type),
-                         vcs_badge_persist_error_string(perr));
-            err = VCS_BADGE_ISSUE_IO;
-            goto done;
-        }
-        issued++;
-    }
-    if (!vcs_badge_commit_record_write(store, plan_id, badge_ids,
-                                       plan.row_count))
-        err = VCS_BADGE_ISSUE_IO;
-
-done:
-    if (err == VCS_BADGE_ISSUE_OK) {
-        out->issued_count = issued + replayed;
-        out->replayed_count = replayed;
-        out->resumed = replayed > 0;
-    }
-    free(badge_ids);
-    return err;
+    enum vcs_badge_issue_error err = belig_issue_validate(
+        &plan, store, policy, index, ledger, detail, detail_size);
+    if (err != VCS_BADGE_ISSUE_OK)
+        return err;
+    return belig_issue_persist(store, &plan, plan_id, sign, sign_ctx, out,
+                               detail, detail_size);
 }

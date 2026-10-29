@@ -1225,6 +1225,11 @@ static int zb_pi_stale_rows(struct zb_issue_ctx *ctx)
                                  "issue: wrong-evidence plan assembles",
                                  "issue: wrong-evidence row rejected",
                                  VCS_BADGE_RULE_EVIDENCE_CHANGED);
+    row.sequence = 1; /* a different durable badge already uses this sequence */
+    failures += zb_pi_reject_row(ctx, &row, 20000,
+                                 "issue: stale plus used-sequence plan assembles",
+                                 "issue: stale evidence precedes sequence conflict",
+                                 VCS_BADGE_RULE_EVIDENCE_CHANGED);
     return failures;
 }
 
@@ -1290,6 +1295,10 @@ static int zb_pi_sign_and_resume(struct zb_issue_ctx *ctx)
              zb_sign(&ctx->issuer_sk, &partial) &&
                  vcs_badge_store_persist(ctx->s, &partial, pid) ==
                      VCS_BADGE_PERSIST_OK);
+    ZB_CHECK("issue: partial badge also matches dedup",
+             vcs_badge_store_dedup_hit(ctx->s, &ctx->policy,
+                                       r0->contributor, r0->type,
+                                       r0->period_first, r0->period_last));
     memset(&result, 0, sizeof(result));
     ZB_CHECK("issue: interrupted issue resumes",
              vcs_badge_issue(ctx->s, &ctx->policy, eplan.plan_id, NULL,
