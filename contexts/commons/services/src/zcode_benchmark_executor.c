@@ -161,7 +161,7 @@ static bool exec_policy_parse(const char *policy,
         unsigned long long value = strtoull(eq + 1, &end, 10);
         if (!end || *end != '\0') return false;
         if (!exec_policy_token(tok, value, out, seen))
-            return false;
+            return false; // raw-return-ok: a refused token refuses the whole policy; the caller refuses the run
     }
     return seen[0] && seen[1] && seen[2] && seen[3];
 }
@@ -756,13 +756,19 @@ struct exec_held {
     uint64_t *sorted;
     struct exec_wires w;
 };
+/* Release the sample buffers and the context; the payload is not yet
+ * allocated on the profile and manifest paths, so it is not touched. */
+static void exec_held_release_samples(struct exec_held *h)
+{
+    free(h->sorted);
+    free(h->samples);
+    exec_context_free(h->ctx);
+}
 /* Release every buffer and the context, in the original order. */
 static void exec_held_release(struct exec_held *h)
 {
     free(h->w.payload);
-    free(h->sorted);
-    free(h->samples);
-    exec_context_free(h->ctx);
+    exec_held_release_samples(h);
 }
 /* Each artifact step releases every buffer and the context before it
  * builds its own literal error, so no error is constructed ahead of a
@@ -775,7 +781,7 @@ static struct zcl_result exec_run_profile(struct exec_held *h,
         vcs_zcode_hardware_profile_root(&h->ctx->profile,
                                         out->hardware_profile_root) !=
             VCS_ZCODE_SCIENCE_OK) {
-        exec_held_release(h);
+        exec_held_release_samples(h);
         return ZCL_ERR(-1, "executor-profile-serialize-failed");
     }
     return ZCL_OK;
@@ -800,7 +806,7 @@ static struct zcl_result exec_run_manifest(struct exec_held *h,
         vcs_zcode_raw_sample_manifest_v1_root(&manifest,
                                               out->manifest_root) !=
             VCS_ZCODE_RECEIPT_OK) {
-        exec_held_release(h);
+        exec_held_release_samples(h);
         return ZCL_ERR(-1, "executor-manifest-failed");
     }
     return ZCL_OK;
