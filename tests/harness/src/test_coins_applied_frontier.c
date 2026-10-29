@@ -1249,7 +1249,11 @@ static int caf_part_f(void)
      * bootstrap). A pristine from-genesis store gets coins_applied_height=1;
      * every non-pristine shape (already-present / borrowed-proven / coins
      * present / cursor present) is a fail-closed no-op. ─────────────────── */
-    return caf_f_pristine() + caf_f_coins() + caf_f_cursor();
+    int failures = 0;
+    failures += caf_f_pristine();
+    failures += caf_f_coins();
+    failures += caf_f_cursor();
+    return failures;
 }
 
 int test_coins_applied_frontier(void);
