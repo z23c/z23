@@ -306,7 +306,99 @@ static bool push_summary(struct slo_scan *scan, const char *instance,
     *out_reason = s.reason;
     return true;
 }
+static void summary_seed_instances(struct slo_scan *scan)
+{
+    if (scan->filter) {
+        (void)add_instance(scan, scan->filter);
+    } else {
+        /* Required public-node lanes remain visible when their recorder is
+         * silent; observed retired/custom lanes are appended below. */
+        (void)add_instance(scan, "canonical");
+        (void)add_instance(scan, "dev");
+    }
+}
 
+static bool summary_tail_truncated(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && st.st_size > (off_t)SLO_LEDGER_TAIL_BYTES;
+}
+
+static bool summary_push_summaries(struct slo_scan *scan, unsigned window_hours,
+                                   int64_t now_unix, bool invalid,
+                                   struct json_value *summaries,
+                                   const char **overall,
+                                   const char **overall_reason)
+{
+    int overall_rank = 0;
+    for (size_t i = 0; i < scan->instance_count; i++) {
+        const char *verdict = NULL;
+        const char *reason = NULL;
+        if (!push_summary(scan, scan->instances[i], window_hours, now_unix,
+                          invalid, summaries, &verdict, &reason))
+            return false;
+        int rank = verdict_rank(verdict);
+        if (rank > overall_rank) {
+            overall_rank = rank;
+            *overall = verdict;
+            *overall_reason = reason;
+        }
+    }
+    return true;
+}
+
+static bool summary_push_ledger_fields(struct json_value *out, const char *path,
+                                       const struct slo_scan *scan,
+                                       unsigned incomplete, bool tail_truncated)
+{
+    return json_push_kv_str(out, "schema", "zcl.slo_evidence.v1") &&
+           json_push_kv_bool(out, "reporter_only", true) &&
+           json_push_kv_bool(out, "node_free", true) &&
+           json_push_kv_str(out, "ledger_path", path) &&
+           json_push_kv_int(out, "tail_byte_budget",
+                            SLO_LEDGER_TAIL_BYTES) &&
+           json_push_kv_int(out, "sample_capacity",
+                            SLO_SUMMARY_SAMPLE_CAP) &&
+           json_push_kv_int(out, "rows_scanned",
+                            (int64_t)scan->valid_rows) &&
+           json_push_kv_int(out, "ignored_rows",
+                            (int64_t)scan->ignored_rows) &&
+           json_push_kv_int(out, "malformed_rows",
+                            (int64_t)scan->malformed_rows) &&
+           json_push_kv_int(out, "incomplete_rows", incomplete) &&
+           json_push_kv_bool(out, "tail_truncated", tail_truncated) &&
+           json_push_kv_bool(out, "sample_overflow",
+                             scan->sample_overflow) &&
+           json_push_kv_bool(out, "instance_overflow",
+                             scan->instance_overflow);
+}
+
+static bool summary_push_verdict_fields(struct json_value *out, int64_t now_unix,
+                                        const char *overall,
+                                        const char *overall_reason,
+                                        struct json_value *summaries)
+{
+    return json_push_kv_int(out, "captured_at", now_unix) &&
+           json_push_kv_str(out, "verdict", overall) &&
+           json_push_kv_str(out, "reason", overall_reason) &&
+           json_push_kv(out, "summaries", summaries);
+}
+
+static bool summary_instance_rejected(const char *instance)
+{
+    return instance && instance[0] && !slo_ledger_instance_valid(instance);
+}
+
+static const char *summary_instance_filter(const char *instance)
+{
+    return instance && instance[0] ? instance : NULL;
+}
+
+static bool summary_scan_invalid(const struct slo_scan *scan)
+{
+    return scan->malformed_rows > 0 || scan->sample_overflow ||
+           scan->instance_overflow;
+}
 
 bool slo_ledger_summary_render_path(const char *path, const char *instance,
                                     unsigned window_hours, int64_t now_unix,
@@ -319,24 +411,17 @@ bool slo_ledger_summary_render_path(const char *path, const char *instance,
     if (window_hours == 0 || window_hours > SLO_SUMMARY_MAX_HOURS)
         LOG_FAIL("slo_evidence", "window_hours=%u outside 1..%u",
                  window_hours, SLO_SUMMARY_MAX_HOURS);
-    if (instance && instance[0] && !slo_ledger_instance_valid(instance))
+    if (summary_instance_rejected(instance))
         LOG_FAIL("slo_evidence", "invalid instance name '%s'", instance);
 
     struct slo_scan scan = {0};
-    scan.filter = instance && instance[0] ? instance : NULL;
+    scan.filter = summary_instance_filter(instance);
     scan.samples = zcl_calloc(SLO_SUMMARY_SAMPLE_CAP,
                               sizeof(*scan.samples), "slo evidence samples");
     if (!scan.samples)
         LOG_FAIL("slo_evidence", "could not allocate bounded sample arena");
 
-    if (scan.filter) {
-        (void)add_instance(&scan, scan.filter);
-    } else {
-        /* Required public-node lanes remain visible when their recorder is
-         * silent; observed retired/custom lanes are appended below. */
-        (void)add_instance(&scan, "canonical");
-        (void)add_instance(&scan, "dev");
-    }
+    summary_seed_instances(&scan);
 
     unsigned overlong = 0;
     unsigned incomplete = 0;
@@ -351,12 +436,8 @@ bool slo_ledger_summary_render_path(const char *path, const char *instance,
     qsort(scan.samples, scan.sample_count, sizeof(*scan.samples),
           compare_samples);
 
-    bool tail_truncated = false;
-    struct stat st;
-    if (stat(path, &st) == 0 && st.st_size > (off_t)SLO_LEDGER_TAIL_BYTES)
-        tail_truncated = true;
-    bool invalid = scan.malformed_rows > 0 || scan.sample_overflow ||
-                   scan.instance_overflow;
+    bool tail_truncated = summary_tail_truncated(path);
+    bool invalid = summary_scan_invalid(&scan);
 
     json_set_object(out);
     struct json_value summaries;
@@ -364,48 +445,17 @@ bool slo_ledger_summary_render_path(const char *path, const char *instance,
     json_set_array(&summaries);
     const char *overall = "OK";
     const char *overall_reason = "nominal";
-    int overall_rank = 0;
-    for (size_t i = 0; i < scan.instance_count; i++) {
-        const char *verdict = NULL;
-        const char *reason = NULL;
-        if (!push_summary(&scan, scan.instances[i], window_hours, now_unix,
-                          invalid, &summaries, &verdict, &reason)) {
-            json_free(&summaries);
-            free(scan.samples);
-            return false;
-        }
-        int rank = verdict_rank(verdict);
-        if (rank > overall_rank) {
-            overall_rank = rank;
-            overall = verdict;
-            overall_reason = reason;
-        }
+    if (!summary_push_summaries(&scan, window_hours, now_unix, invalid,
+                                &summaries, &overall, &overall_reason)) {
+        json_free(&summaries);
+        free(scan.samples);
+        return false;
     }
 
-    bool ok = json_push_kv_str(out, "schema", "zcl.slo_evidence.v1") &&
-              json_push_kv_bool(out, "reporter_only", true) &&
-              json_push_kv_bool(out, "node_free", true) &&
-              json_push_kv_str(out, "ledger_path", path) &&
-              json_push_kv_int(out, "tail_byte_budget",
-                               SLO_LEDGER_TAIL_BYTES) &&
-              json_push_kv_int(out, "sample_capacity",
-                               SLO_SUMMARY_SAMPLE_CAP) &&
-              json_push_kv_int(out, "rows_scanned",
-                               (int64_t)scan.valid_rows) &&
-              json_push_kv_int(out, "ignored_rows",
-                               (int64_t)scan.ignored_rows) &&
-              json_push_kv_int(out, "malformed_rows",
-                               (int64_t)scan.malformed_rows) &&
-              json_push_kv_int(out, "incomplete_rows", incomplete) &&
-              json_push_kv_bool(out, "tail_truncated", tail_truncated) &&
-              json_push_kv_bool(out, "sample_overflow",
-                                scan.sample_overflow) &&
-              json_push_kv_bool(out, "instance_overflow",
-                                scan.instance_overflow) &&
-              json_push_kv_int(out, "captured_at", now_unix) &&
-              json_push_kv_str(out, "verdict", overall) &&
-              json_push_kv_str(out, "reason", overall_reason) &&
-              json_push_kv(out, "summaries", &summaries);
+    bool ok = summary_push_ledger_fields(out, path, &scan, incomplete,
+                                         tail_truncated) &&
+              summary_push_verdict_fields(out, now_unix, overall,
+                                          overall_reason, &summaries);
     if (ok)
         diag_push_health(out, strcmp(overall, "OK") == 0, overall_reason);
     json_free(&summaries);
