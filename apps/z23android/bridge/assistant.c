@@ -111,15 +111,6 @@ static void trim(char *text)
     memmove(text, text + start, n + 1);
     while (n && strchr(" \t\r\n", text[n - 1])) text[--n] = 0;
 }
-static void spoken(char *text)
-{
-    char *think = strstr(text, "</think>");
-    if (think) memmove(text, think + 8, strlen(think + 8) + 1);
-    size_t w = 0;
-    for (size_t r = 0; text[r]; r++)
-        if (!strchr("*#`|>", text[r])) text[w++] = text[r] == '\n' || text[r] == '_' ? ' ' : text[r];
-    text[w] = 0; trim(text);
-}
 bool zapp_assistant_transcribe(const struct zapp_assistant *a, const unsigned char *wav,
     size_t size, int client, char *text, size_t cap)
 {
@@ -186,20 +177,6 @@ static bool chat_messages(struct json_value *messages, const char *prompt, const
         push_history(messages, history, zapp_prompt_question(prompt)) && push_text(messages, "user", current);
     if (current) dispose(current, n);
     free(system);
-    return ok;
-}
-bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
-    const struct json_value *history, const char *context, int client, char *answer, size_t cap)
-{
-    snprintf(answer, cap, "The private model on the laptop host is unavailable.");
-    struct json_value messages = {0};
-    bool ok = chat_messages(&messages, prompt, history, context, NULL);
-    char *reply = calloc(1, cap);
-    ok = ok && reply && completion(a->chat_port, &messages, 320, client, reply, cap);
-    if (ok) { spoken(reply); ok = reply[0] != 0; }
-    if (ok) memcpy(answer, reply, strlen(reply) + 1);
-    dispose(reply, cap);
-    json_cleanse_strings(&messages); json_free(&messages);
     return ok;
 }
 static uint32_t le32(const unsigned char *p)
@@ -281,13 +258,13 @@ bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
 #define PCM_RATE 24000
 #define PCM_EVENT_MAX 24000u
 #define TOOL_CAP 8192u
-/* One streamed answer: chat text is cut into spoken chunks and each chunk's audio is
- * relayed to the phone as PCM16 events while the model is still writing. */
+/* One answer: chat text is cut into spoken chunks and, unless quiet, each chunk and its audio
+ * are relayed to the phone as text and PCM16 events while the model is still writing. */
 struct respond {
     const struct zapp_assistant *a;
     int client, rate;
     int64_t start_ms;
-    bool audio, mute, dead, done, pcm_bad, open;
+    bool audio, mute, quiet, dead, done, pcm_bad, open;
     char *text; size_t text_len, text_cap;
     char tool_id[64], tool_name[32], tool_args[256];
     char raw[THINK_CAP]; size_t raw_len, fed;
@@ -373,9 +350,11 @@ static bool synthesize(struct respond *r, const char *text)
     json_cleanse_strings(&request); json_free(&request);
     return ok;
 }
-/* A failed synthesis silences the rest of the answer; the text still completes. */
+/* A failed synthesis silences the rest of the answer; the text still completes. A quiet answer
+ * sends nothing while it is written. */
 static bool speak(struct respond *r, const char *sentence)
 {
+    if (r->quiet) return true;
     if (!emit_text(r, sentence)) r->dead = true;
     else if (!r->mute && !synthesize(r, sentence) && !r->dead) r->mute = true;
     return !r->dead;
@@ -430,7 +409,7 @@ static bool drain(struct respond *r)
         if (!speak_pending(r, n)) return false;
     return true;
 }
-/* Same character filtering as spoken(). */
+/* Markdown marks are dropped, and newlines and underscores read as spaces. */
 static bool push_char(struct respond *r, char c)
 {
     if (strchr("*#`|>", c)) return true;
@@ -447,7 +426,7 @@ static bool feed_raw(struct respond *r)
     r->raw_len = r->fed = 0;
     return true;
 }
-/* Text is held back while it can still be a leading think block, which is dropped like spoken() does. */
+/* Text is held back while it can still be a leading think block, which is dropped. */
 static void gate_update(struct respond *r)
 {
     const char *end = strstr(r->raw, "</think>");
@@ -586,14 +565,14 @@ static bool answer_rounds(struct respond *r, struct json_value *messages, const 
     return stream_round(r, messages, t ? t->schema : NULL) &&
         (!only_called_tool(r) || tool_round(r, messages));
 }
-bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
-    const struct json_value *history, const char *context, int client, char *answer, size_t cap)
+static bool converse(const struct zapp_assistant *a, const char *prompt, const struct json_value *history,
+                     const char *context, int client, bool quiet, char *answer, size_t cap)
 {
     snprintf(answer, cap, "The private model on the laptop host is unavailable.");
     struct respond *r = calloc(1, sizeof(*r));
     struct json_value messages = {0};
     if (r) {
-        r->a = a; r->client = client; r->rate = PCM_RATE; r->start_ms = now_ms();
+        r->a = a; r->client = client; r->rate = PCM_RATE; r->start_ms = now_ms(); r->quiet = quiet;
         r->text = calloc(1, cap); r->text_cap = cap;
     }
     bool ok = r && r->text &&
@@ -604,4 +583,14 @@ bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
     json_cleanse_strings(&messages); json_free(&messages);
     if (r) { dispose(r->text, cap); memory_cleanse(r, sizeof(*r)); free(r); }
     return ok;
+}
+bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
+    const struct json_value *history, const char *context, int client, char *answer, size_t cap)
+{
+    return converse(a, prompt, history, context, client, true, answer, cap);
+}
+bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
+    const struct json_value *history, const char *context, int client, char *answer, size_t cap)
+{
+    return converse(a, prompt, history, context, client, false, answer, cap);
 }

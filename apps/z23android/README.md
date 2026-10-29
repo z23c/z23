@@ -204,7 +204,9 @@ ask a follow-up within 6 seconds, or stay quiet to end the conversation. A
 conversation holds at most eight spoken exchanges. It stops at a start or stop
 proposal, which waits for a tap on screen, and when an answer cannot be spoken.
 When no speech starts within 8 seconds of pressing **Talk**, listening stops.
-Typed questions use the same private model. **Refresh fleet** probes every
+Typed questions and the question under **Talk** send the same request to the
+private model, with the same fleet tool, and show the answer without speaking
+it. **Refresh fleet** probes every
 host. “Start node” and “stop node” create proposals that require **Confirm
 start** or **Confirm stop** on screen. The assistant cannot run commands,
 change hosts or spend funds.
@@ -343,6 +345,13 @@ guide said to name an in-sync host's blockers when asked, the same fleet gave a
 cause the observations do not give in 4 of 9 answers, all low disk; all 3
 answers on why the Mac's height was unknown said its node was not answering,
 and 1 of 6 answers about r2 listed its four blockers.
+
+Typed questions once went without the fleet tool and its guide. On the live
+fleet on 2026-10-29, with r2 in sync, r1's `zclassicd` height unknown and the
+Mac's node not answering at 23 GB free, 20 answers each to "Which hosts need
+attention?" from Qwen3.5-4B named both r1 and the Mac in 4 of 20 without the
+guide and 19 of 20 with it; one answer with the guide gave low disk as the
+reason the Mac's node was not answering.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to

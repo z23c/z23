@@ -7,7 +7,7 @@
 
 struct json_value;
 
-/* Read-only tools offered to the model in streamed answers: schema is an OpenAI tools array,
+/* Read-only tools offered to the model in every answer: schema is an OpenAI tools array,
  * guide is added to the system prompt whenever they are offered, and run executes one call,
  * writing its result, untrusted observation text, to out; it returns false for a refused call.
  * wanted, when set, fills the call a prompt needs, a tool name and JSON arguments, which then
@@ -32,15 +32,15 @@ bool zapp_assistant_transcribe(const struct zapp_assistant *a, const unsigned ch
     size_t size, int client_fd, char *text, size_t cap);
 /* history is NULL or an array of at most ZAPP_ASSISTANT_TURNS [question, answer] string pairs,
  * oldest first, sent as earlier turns. context is untrusted observation text (node and fleet)
- * shown to the model as data with the current question. */
+ * shown to the model as data with the current question. answer holds the full text, which
+ * client_fd receives only as the reply. With tools, a call the prompt wants runs first and its
+ * result goes with the question in the only request, which offers no tools; otherwise a reply
+ * that only calls one is run and its result goes to a second request without tools. */
 #define ZAPP_ASSISTANT_TURNS 32u
 bool zapp_assistant_chat(const struct zapp_assistant *a, const char *prompt,
     const struct json_value *history, const char *context, int client_fd, char *answer, size_t cap);
-/* Like chat, but streams: each spoken chunk is sent to client_fd as a text event followed by
- * PCM16 events (zapp_relay_emit) while the model is still writing. answer holds the full text.
- * With tools, a call the prompt wants runs first and its result goes with the question in the only
- * request, which offers no tools; otherwise a reply that only calls one is run and its result goes
- * to a second request without tools. */
+/* Like chat, with the same requests, but streams: each spoken chunk is sent to client_fd as a
+ * text event followed by PCM16 events (zapp_relay_emit) while the model is still writing. */
 bool zapp_assistant_respond(const struct zapp_assistant *a, const char *prompt,
     const struct json_value *history, const char *context, int client_fd, char *answer, size_t cap);
 /* Returns mono PCM16 WAV owned by the caller, which cleanses and frees it. */

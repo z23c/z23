@@ -100,14 +100,11 @@ static void tool_cases(const struct zapp_assistant *a)
 /* Underscores read as spaces, so identifiers such as blocker ids are spoken as words. */
 static void underscore_cases(const struct zapp_assistant *a)
 {
-    char text[] = "r2 waits on *review_required*\nnow";
-    spoken(text);
-    assert(!strcmp(text, "r2 waits on review required now"));
     reset_log();
     struct respond *r = new_respond(a, true);
-    assert(feed(r, "data: {\"choices\":[{\"delta\":{\"content\":\"Blocked by review_required.\"}}]}\n"
+    assert(feed(r, "data: {\"choices\":[{\"delta\":{\"content\":\"r2 waits on *review_required*\\nnow.\"}}]}\n"
                 "data: [DONE]\n", 9) && respond_finish(r) && emitted_count == 1);
-    expect_line(0, "text", "Blocked by review required.");
+    expect_line(0, "text", "r2 waits on review required now.");
     free_respond(r);
 }
 static void sentence_cases(const struct zapp_assistant *a)
@@ -444,6 +441,31 @@ static void respond_tool(bool answers)
     close(chat.listener); close(tts.listener);
     json_free(&schema);
 }
+/* A typed question gets the requests and answer a spoken one gets, returned whole: no events and
+ * no speech. */
+static void chat_quiet(void)
+{
+    static const char tool_schema[] = "[{\"type\":\"function\",\"function\":{\"name\":\"host_blockers\"}}]";
+    struct json_value schema = {0};
+    assert(json_read(&schema, tool_schema, strlen(tool_schema)));
+    struct zapp_assistant_tools tools = {.schema = &schema, .guide = "Call host_blockers first.", .run = fake_tool};
+    struct mock chat = {.chat = true, .connections = 2, .script = {tool_fixture}};
+    pthread_t chat_thread;
+    start_mock(&chat, &chat_thread);
+    struct zapp_assistant a = {.chat_port = chat.port, .tts_port = 1, .tools = &tools};
+    char answer[512];
+    reset_log(); tool_answers = true;
+    assert(zapp_assistant_chat(&a, "What blocks r1?", NULL, "ctx", -1, answer, sizeof(answer)));
+    pthread_join(chat_thread, NULL);
+    assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
+    assert(strstr(chat.body[0], "\"tools\":[{\"type\":\"function\"") && strstr(chat.body[0], "Call host_blockers first."));
+    assert(strstr(chat.body[1], "boot.slow") && emitted_count == 0);
+    close(chat.listener);
+    reset_log();
+    a.chat_port = 1;
+    assert(!zapp_assistant_chat(&a, "Hi", NULL, NULL, -1, answer, sizeof(answer)) && strstr(answer, "unavailable"));
+    json_free(&schema);
+}
 static bool fill_call(const char *prompt, char *name, size_t name_cap, char *arguments, size_t arguments_cap)
 {
     if (!strstr(prompt, "r1")) return false;
@@ -540,6 +562,7 @@ int main(void)
     sentence_cases(&a); think_cases(&a); split_cases(&a); cap_cases(&a); clause_cases(&a);
     rejected_cases(&a); tool_cases(&a); underscore_cases(&a);
     pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
+    chat_quiet();
     message_cases();
     reset_log();
     puts("assistant tests passed");
