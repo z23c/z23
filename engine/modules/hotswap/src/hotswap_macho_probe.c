@@ -595,17 +595,9 @@ bool hotswap_macho_probe_fd(int fd, struct hotswap_macho_facts *out,
 }
 
 #if defined(__APPLE__)
-bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
-                                 const char expected_core_seal_root[65],
-                                 uint32_t expected_abi,
-                                 char *err, size_t err_cap)
+static bool mp_admit_structure(const struct hotswap_macho_facts *facts,
+                               char *err, size_t err_cap)
 {
-    if (!facts) {
-        if (err && err_cap)
-            snprintf(err, err_cap, "macho admit: no facts");
-        return false;
-    }
-
     if (facts->init_section_entries !=
         ZCL_HOTSWAP_MACHO_PROBE_CLEAN_INIT_SECTION_ENTRIES) {
         if (err && err_cap)
@@ -635,7 +627,12 @@ bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
                      "macho admit: undefined symbol list exceeds probe capacity");
         return false;
     }
+    return true;
+}
 
+static bool mp_admit_abi(const struct hotswap_macho_facts *facts,
+                         uint32_t expected_abi, char *err, size_t err_cap)
+{
     if (!facts->abi_version_present) {
         if (err && err_cap)
             snprintf(err, err_cap,
@@ -650,24 +647,51 @@ bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
                      facts->abi_version, expected_abi);
         return false;
     }
+    return true;
+}
 
-    if (expected_core_seal_root && expected_core_seal_root[0]) {
-        if (!facts->core_seal_root_present) {
-            if (err && err_cap)
-                snprintf(err, err_cap,
-                         "macho admit: artifact exports no %s — rebuild it",
-                         HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
-            return false;
-        }
-        if (strncmp(facts->core_seal_root, expected_core_seal_root, 65) != 0) {
-            if (err && err_cap)
-                snprintf(err, err_cap,
-                         "macho admit: sealed-core ROOT mismatch: artifact=%.64s "
-                         "resident=%s (rebuild the module)",
-                         facts->core_seal_root, expected_core_seal_root);
-            return false;
-        }
+static bool mp_admit_seal_root(const struct hotswap_macho_facts *facts,
+                               const char expected_core_seal_root[65],
+                               char *err, size_t err_cap)
+{
+    if (!facts->core_seal_root_present) {
+        if (err && err_cap)
+            snprintf(err, err_cap,
+                     "macho admit: artifact exports no %s — rebuild it",
+                     HOTSWAP_MODULE_CORE_SEAL_ROOT_SYMBOL);
+        return false;
     }
+    if (strncmp(facts->core_seal_root, expected_core_seal_root, 65) != 0) {
+        if (err && err_cap)
+            snprintf(err, err_cap,
+                     "macho admit: sealed-core ROOT mismatch: artifact=%.64s "
+                     "resident=%s (rebuild the module)",
+                     facts->core_seal_root, expected_core_seal_root);
+        return false;
+    }
+    return true;
+}
+
+bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
+                                 const char expected_core_seal_root[65],
+                                 uint32_t expected_abi,
+                                 char *err, size_t err_cap)
+{
+    if (!facts) {
+        if (err && err_cap)
+            snprintf(err, err_cap, "macho admit: no facts");
+        return false;
+    }
+
+    if (!mp_admit_structure(facts, err, err_cap))
+        return false; // raw-return-ok:propagates_admit_diagnostic
+
+    if (!mp_admit_abi(facts, expected_abi, err, err_cap))
+        return false; // raw-return-ok:propagates_admit_diagnostic
+
+    if (expected_core_seal_root && expected_core_seal_root[0] &&
+        !mp_admit_seal_root(facts, expected_core_seal_root, err, err_cap))
+        return false; // raw-return-ok:propagates_admit_diagnostic
 
     if (err && err_cap)
         err[0] = '\0';
