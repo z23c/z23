@@ -433,7 +433,7 @@ static int tzslp_test_transfer_model(void)
     return failures;
 }
 
-static int tzslp_test_key_checks_first(void)
+static int tzslp_test_token_key_nonhex_accept_hex_reject(void)
 {
     int failures = 0;
 
@@ -493,7 +493,7 @@ static int tzslp_test_key_checks_first(void)
     return failures;
 }
 
-static int tzslp_test_key_checks_second(void)
+static int tzslp_test_token_key_64char_and_invalid_inputs(void)
 {
     int failures = 0;
 
@@ -558,8 +558,8 @@ int test_model_zslp(void)
 
     /* ── token_key validator disambiguation ─────────────────── */
 
-    failures += tzslp_test_key_checks_first();
-    failures += tzslp_test_key_checks_second();
+    failures += tzslp_test_token_key_nonhex_accept_hex_reject();
+    failures += tzslp_test_token_key_64char_and_invalid_inputs();
 
     failures += tzslp_test_display_order();
 
