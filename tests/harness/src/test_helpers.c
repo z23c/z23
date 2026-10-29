@@ -176,6 +176,17 @@ void test_make_tmpdir(char *buf, size_t n, const char *prefix,
 #endif
 }
 
+#if defined(_WIN32)
+/* True when `path` is drive-qualified or UNC: already absolute for Win32. */
+static bool test_win_path_is_absolute(const char *path)
+{
+    return ((path[0] == '\\' || path[0] == '/') &&
+            (path[1] == '\\' || path[1] == '/')) ||
+           (path[0] && path[1] == ':' &&
+            (path[2] == '\\' || path[2] == '/'));
+}
+#endif
+
 /* Absolutize `path` against the process cwd into `abs`; the
  * platform_private_* seam is absolute-only (POSIX-rooted, drive-absolute on
  * Windows). Copies `path` unchanged when cwd is unavailable; returns whether
@@ -187,10 +198,7 @@ bool test_abs_path(const char *path, char *abs, size_t n)
 #if defined(_WIN32)
     /* A leading slash is rooted only in POSIX/MSYS pathname syntax; native
      * Win32 APIs require either a drive-qualified path or a UNC path. */
-    if (((path[0] == '\\' || path[0] == '/') &&
-         (path[1] == '\\' || path[1] == '/')) ||
-        (path[0] && path[1] == ':' &&
-         (path[2] == '\\' || path[2] == '/'))) {
+    if (test_win_path_is_absolute(path)) {
         snprintf(abs, n, "%s", path);
         return strlen(path) < n;
     }
@@ -351,6 +359,144 @@ static size_t test_quote_arg(char *out, size_t out_n, const char *arg)
     return len;
 }
 
+/* True when argv, argv[0] and out are non-NULL and cap is nonzero. */
+static bool test_capture_args_valid(const char *const argv[],
+                                    char *out, size_t cap)
+{
+    return argv && argv[0] && out && cap != 0;
+}
+
+/* Copy execve-style "KEY=VALUE" envp strings into the NUL-separated,
+ * double-NUL-terminated Win32 environment block; *env_arg stays NULL when
+ * envp is NULL. False when the block overflows. */
+static bool test_envp_to_env_block(const char *const envp[],
+                                   char *block, size_t block_n,
+                                   void **env_arg)
+{
+    if (!envp)
+        return true;
+    size_t pos = 0;
+    for (size_t i = 0; envp[i]; i++) {
+        size_t len = strlen(envp[i]) + 1;
+        if (pos + len + 1 >= block_n)
+            return false;
+        memcpy(block + pos, envp[i], len);
+        pos += len;
+    }
+    block[pos] = '\0';
+    *env_arg = block;
+    return true;
+}
+
+/* Append `got` bytes from `buf` to `out` at `pos`, clamped to the room left
+ * below the terminating NUL; returns the advanced position. */
+static size_t test_append_clamped(char *out, size_t pos, size_t cap,
+                                  const char *buf, size_t got)
+{
+    size_t take = got;
+    size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
+    if (take > room)
+        take = room;
+    if (take > 0) {
+        memcpy(out + pos, buf, take);
+        pos += take;
+    }
+    return pos;
+}
+
+/* True when every string in the NULL-terminated `needles` array occurs in
+ * `out`. */
+static bool test_out_has_all_needles(const char *out,
+                                     const char *const *needles)
+{
+    bool all = true;
+    for (size_t i = 0; needles[i]; i++)
+        if (!strstr(out, needles[i])) { all = false; break; }
+    return all;
+}
+
+/* Read up to one bufferful of the bytes queued on `rd` into `out`; *found
+ * reports that every needle now occurs in `out`. Returns the advanced
+ * position. */
+static size_t test_read_queued_bytes(HANDLE rd, char *out, size_t pos,
+                                     size_t cap, DWORD avail,
+                                     const char *const *needles, bool *found)
+{
+    char buf[4096];
+    DWORD want = avail > sizeof(buf) ? (DWORD)sizeof(buf) : avail;
+    DWORD got = 0;
+    if (ReadFile(rd, buf, want, &got, NULL) && got > 0) {
+        pos = test_append_clamped(out, pos, cap, buf, got);
+        out[pos] = '\0';
+        *found = test_out_has_all_needles(out, needles);
+    }
+    return pos;
+}
+
+/* Read `rd` to EOF into `out`, clamped to cap-1 bytes, and NUL-terminate. */
+static void test_drain_pipe_to_buf(HANDLE rd, char *out, size_t cap)
+{
+    size_t pos = 0;
+    for (;;) {
+        char buf[4096];
+        DWORD got = 0;
+        if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || got == 0)
+            break;
+        pos = test_append_clamped(out, pos, cap, buf, got);
+    }
+    out[pos < cap ? pos : cap - 1] = '\0';
+}
+
+/* Drain the bytes still queued on `rd` into `out`, clamped, and
+ * NUL-terminate; returns the advanced position. */
+static size_t test_drain_pipe_leftovers(HANDLE rd, char *out, size_t pos,
+                                        size_t cap)
+{
+    DWORD avail = 0;
+    DWORD got = 0;
+    char buf[4096];
+    while (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) &&
+           avail > 0 &&
+           ReadFile(rd, buf, sizeof(buf), &got, NULL) && got > 0)
+        pos = test_append_clamped(out, pos, cap, buf, got);
+    out[pos < cap ? pos : cap - 1] = '\0';
+    return pos;
+}
+
+/* Drain without blocking: PeekNamedPipe reports the queued byte count,
+ * so ReadFile is only ever asked for bytes already in the pipe — the
+ * poll()+O_NONBLOCK shape, minus the socket-only WSAPoll. */
+static bool test_poll_pipe_for_needles(HANDLE rd, HANDLE proc,
+                                       const char *const *needles, int max_ms,
+                                       char *out, size_t cap)
+{
+    size_t pos = 0;
+    bool found = false;
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)(max_ms > 0 ? max_ms : 0);
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
+            break; /* child hung up */
+        if (avail > 0) {
+            pos = test_read_queued_bytes(rd, out, pos, cap, avail, needles,
+                                         &found);
+            if (found)
+                return true;
+        } else {
+            if (GetTickCount64() >= deadline)
+                break;
+            if (WaitForSingleObject(proc, 0) == WAIT_OBJECT_0) {
+                /* Child exited: one last drain so its final bytes count. */
+                pos = test_drain_pipe_leftovers(rd, out, pos, cap);
+                break;
+            }
+            Sleep(10);
+        }
+    }
+    out[pos < cap ? pos : cap - 1] = '\0';
+    return false;
+}
+
 int test_spawn_argv_wait(const char *const argv[])
 {
     if (!argv || !argv[0]) {
@@ -409,7 +555,7 @@ int test_spawn_capture_env(const char *const argv[],
                            const char *const envp[],
                            char *out, size_t cap)
 {
-    if (!argv || !argv[0] || !out || cap == 0) {
+    if (!test_capture_args_valid(argv, out, cap)) {
         fprintf(stderr, "test_spawn_capture_env: bad args\n");
         return -1;
     }
@@ -434,19 +580,9 @@ int test_spawn_capture_env(const char *const argv[],
      * double-NUL terminated. */
     char env_block[16384];
     void *env_arg = NULL;
-    if (envp) {
-        size_t pos = 0;
-        for (size_t i = 0; envp[i]; i++) {
-            size_t len = strlen(envp[i]) + 1;
-            if (pos + len + 1 >= sizeof(env_block)) {
-                fprintf(stderr, "test_spawn_capture_env: env block too long\n");
-                return -1;
-            }
-            memcpy(env_block + pos, envp[i], len);
-            pos += len;
-        }
-        env_block[pos] = '\0';
-        env_arg = env_block;
+    if (!test_envp_to_env_block(envp, env_block, sizeof(env_block), &env_arg)) {
+        fprintf(stderr, "test_spawn_capture_env: env block too long\n");
+        return -1;
     }
 
     SECURITY_ATTRIBUTES sa;
@@ -484,22 +620,7 @@ int test_spawn_capture_env(const char *const argv[],
     CloseHandle(pi.hThread);
     CloseHandle(wr); /* child's copy is inherited; ours must close to see EOF */
 
-    size_t pos = 0;
-    for (;;) {
-        char buf[4096];
-        DWORD got = 0;
-        if (!ReadFile(rd, buf, sizeof(buf), &got, NULL) || got == 0)
-            break;
-        size_t take = got;
-        size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
-        if (take > room)
-            take = room;
-        if (take > 0) {
-            memcpy(out + pos, buf, take);
-            pos += take;
-        }
-    }
-    out[pos < cap ? pos : cap - 1] = '\0';
+    test_drain_pipe_to_buf(rd, out, cap);
     CloseHandle(rd);
 
     if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
@@ -522,7 +643,7 @@ bool test_spawn_capture_kill(const char *const argv[],
                              const char *const *needles, int max_ms,
                              char *out, size_t cap)
 {
-    if (!argv || !argv[0] || !needles || !out || cap == 0) {
+    if (!test_capture_args_valid(argv, out, cap) || !needles) {
         fprintf(stderr, "test_spawn_capture_kill: bad args\n");
         return false;
     }
@@ -544,19 +665,9 @@ bool test_spawn_capture_kill(const char *const argv[],
 
     char env_block[16384];
     void *env_arg = NULL;
-    if (envp) {
-        size_t pos = 0;
-        for (size_t i = 0; envp[i]; i++) {
-            size_t len = strlen(envp[i]) + 1;
-            if (pos + len + 1 >= sizeof(env_block)) {
-                fprintf(stderr, "test_spawn_capture_kill: env block too long\n");
-                return false;
-            }
-            memcpy(env_block + pos, envp[i], len);
-            pos += len;
-        }
-        env_block[pos] = '\0';
-        env_arg = env_block;
+    if (!test_envp_to_env_block(envp, env_block, sizeof(env_block), &env_arg)) {
+        fprintf(stderr, "test_spawn_capture_kill: env block too long\n");
+        return false;
     }
 
     SECURITY_ATTRIBUTES sa;
@@ -593,61 +704,8 @@ bool test_spawn_capture_kill(const char *const argv[],
     CloseHandle(pi.hThread);
     CloseHandle(wr); /* child's copy is inherited; ours must close to see EOF */
 
-    /* Drain without blocking: PeekNamedPipe reports the queued byte count,
-     * so ReadFile is only ever asked for bytes already in the pipe — the
-     * poll()+O_NONBLOCK shape, minus the socket-only WSAPoll. */
-    size_t pos = 0;
-    bool found = false;
-    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)(max_ms > 0 ? max_ms : 0);
-    for (;;) {
-        DWORD avail = 0;
-        if (!PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL))
-            break; /* child hung up */
-        if (avail > 0) {
-            char buf[4096];
-            DWORD want = avail > sizeof(buf) ? (DWORD)sizeof(buf) : avail;
-            DWORD got = 0;
-            if (ReadFile(rd, buf, want, &got, NULL) && got > 0) {
-                size_t take = got;
-                size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
-                if (take > room)
-                    take = room;
-                if (take > 0) {
-                    memcpy(out + pos, buf, take);
-                    pos += take;
-                    out[pos] = '\0';
-                }
-                bool all = true;
-                for (size_t i = 0; needles[i]; i++)
-                    if (!strstr(out, needles[i])) { all = false; break; }
-                if (all) { found = true; break; }
-            }
-        } else {
-            if (GetTickCount64() >= deadline)
-                break;
-            if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
-                /* Child exited: one last drain so its final bytes count. */
-                DWORD got = 0;
-                char buf[4096];
-                while (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) &&
-                       avail > 0 &&
-                       ReadFile(rd, buf, sizeof(buf), &got, NULL) && got > 0) {
-                    size_t take = got;
-                    size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
-                    if (take > room)
-                        take = room;
-                    if (take > 0) {
-                        memcpy(out + pos, buf, take);
-                        pos += take;
-                    }
-                }
-                out[pos < cap ? pos : cap - 1] = '\0';
-                break;
-            }
-            Sleep(10);
-        }
-    }
-    out[pos < cap ? pos : cap - 1] = '\0';
+    bool found = test_poll_pipe_for_needles(rd, pi.hProcess, needles, max_ms,
+                                            out, cap);
     CloseHandle(rd);
 
     /* SIGKILL analogue, then reap. */
@@ -657,10 +715,7 @@ bool test_spawn_capture_kill(const char *const argv[],
 
     if (found)
         return true;
-    for (size_t i = 0; needles[i]; i++)
-        if (!strstr(out, needles[i]))
-            return false;
-    return true;
+    return test_out_has_all_needles(out, needles);
 }
 
 #endif /* _WIN32 */
