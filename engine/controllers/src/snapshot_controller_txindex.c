@@ -260,6 +260,36 @@ static bool snapshot_tx_index_raw_save_one(struct node_db *ndb,
     return saved;
 }
 
+/* Scan one mapped blk file for magic-framed blocks and index each. False is
+ * only a save failure (callee logged), which aborts the build. */
+static bool snapshot_tx_index_raw_walk_file(struct node_db *ndb,
+                                            const uint8_t *file_data,
+                                            size_t file_size, int file_num,
+                                            int *indexed, int *skipped,
+                                            int64_t t_start, bool *tx_open)
+{
+    size_t pos = 0;
+    while (pos + 8 <= file_size) {
+        if (!snapshot_block_file_magic_ok(file_data + pos)) {
+            pos++;
+            continue;
+        }
+        uint32_t block_size = 0;
+        memcpy(&block_size, file_data + pos + 4, 4);
+        if (!snapshot_block_file_size_ok(block_size, file_size, pos)) {
+            pos++;
+            continue;
+        }
+
+        if (!snapshot_tx_index_raw_save_one(ndb, file_data, block_size,
+                                            file_num, pos, indexed,
+                                            skipped, t_start, tx_open))
+            return false; // raw-return-ok:callee-logged
+        pos += 8 + block_size;
+    }
+    return true;
+}
+
 static bool snapshot_tx_index_build_from_block_files(struct node_db *ndb,
                                                      const char *datadir,
                                                      int *indexed,
@@ -309,31 +339,15 @@ static bool snapshot_tx_index_build_from_block_files(struct node_db *ndb,
         const uint8_t *file_data = mapping.data;
         files_seen++;
 
-        size_t pos = 0;
-        while (pos + 8 <= file_size) {
-            if (!snapshot_block_file_magic_ok(file_data + pos)) {
-                pos++;
-                continue;
-            }
-            uint32_t block_size = 0;
-            memcpy(&block_size, file_data + pos + 4, 4);
-            if (!snapshot_block_file_size_ok(block_size, file_size, pos)) {
-                pos++;
-                continue;
-            }
-
-            if (!snapshot_tx_index_raw_save_one(ndb, file_data, block_size,
-                                                file_num, pos, indexed,
-                                                skipped, t_start, tx_open)) {
-                /* raw-return-ok:callee-logged */
-                platform_read_mapping_close(&mapping);
-                close(fd);
-                return false;
-            }
-            pos += 8 + block_size;
-        }
+        bool walked = snapshot_tx_index_raw_walk_file(
+            ndb, file_data, file_size, file_num, indexed, skipped,
+            t_start, tx_open);
         platform_read_mapping_close(&mapping);
         close(fd);
+        if (!walked) {
+            /* raw-return-ok:callee-logged */
+            return false;
+        }
     }
 
     return files_seen > 0;
@@ -385,6 +399,333 @@ static bool snapshot_tx_index_refresh_mapping(const char *datadir,
     return true;
 }
 
+enum tx_index_setup_stage {
+    TX_SETUP_OK = 0,
+    TX_SETUP_SKIP_COMPLETE,
+    TX_SETUP_CONFIG_FAIL,
+    TX_SETUP_READ_OPEN_FAIL,
+    TX_SETUP_PREPARE_FAIL,
+    TX_SETUP_BEGIN_FAIL
+};
+
+/* What the thread must log for one block-index row. Skips that are not
+ * log-due (or have no log at all) come back as TX_ROW_DONE. */
+enum tx_index_row_status {
+    TX_ROW_DONE = 0,
+    TX_ROW_BAD_OFFSET,
+    TX_ROW_UNLOCATABLE,
+    TX_ROW_HASH_MISMATCH
+};
+
+/* Read-only blk file cache for the block-index row walk. */
+struct tx_index_walk {
+    struct node_db *ndb;
+    const char *datadir;
+    int64_t t_start;
+    bool *tx_open;
+    int cached_file;
+    int cached_fd;
+    const uint8_t *cached_data;
+    size_t cached_size;
+    struct platform_read_mapping cached_mapping;
+};
+
+static bool snapshot_tx_index_open_read_db(const char *db_path,
+                                           sqlite3 **read_db)
+{
+    if (sqlite3_open_v2(db_path, read_db,
+                        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
+                        NULL) != SQLITE_OK || !*read_db)
+        return false; // raw-return-ok:thread logs the open failure with the sqlite errmsg
+    sqlite3_busy_timeout(*read_db, 30000);
+    return true;
+}
+
+/* Everything before the row walk: completion marker, additive configure,
+ * read-only handle, scan statement, bulk transaction. The stage names the
+ * first step that failed; the thread logs and cleans up. */
+static int snapshot_tx_index_setup(struct node_db *ndb, const char *db_path,
+                                   sqlite3 **read_db, sqlite3_stmt **query,
+                                   int64_t *t_start, bool *tx_open)
+{
+    /* Check how many transactions already indexed. A nonzero count is not
+     * proof that the index is complete; older boots skipped on a count
+     * heuristic, which left historical spends unrecoverable during replay.
+     * The explicit completion marker is the authority; ZClassic's historical
+     * transaction count can legitimately be far below arbitrary large
+     * thresholds. */
+    int existing = db_tx_count(ndb);
+    int64_t complete = 0;
+    node_db_state_get_int(ndb, "tx_index_complete", &complete);
+    if (complete >= 3) {
+        printf("tx_index: complete marker v%lld present (%d transactions), skipping\n",
+               (long long)complete, existing);
+        return TX_SETUP_SKIP_COMPLETE;
+    }
+
+    printf("tx_index: additive build from block files (existing=%d, marker=%lld)...\n",
+           existing, (long long)complete);
+    fflush(stdout);
+    *t_start = (int64_t)platform_time_wall_time_t();
+
+    if (!db_tx_configure_additive_build(ndb))
+        return TX_SETUP_CONFIG_FAIL; // raw-return-ok:thread closes the db; configure failure is the stage
+    if (!snapshot_tx_index_open_read_db(db_path, read_db))
+        return TX_SETUP_READ_OPEN_FAIL; // raw-return-ok:thread logs the open failure
+    if (!db_block_prepare_file_position_scan(*read_db, query))
+        return TX_SETUP_PREPARE_FAIL; // raw-return-ok:prepare failure is the stage
+    if (!snapshot_tx_begin_checked(ndb,
+            "tx_index begin bulk load transaction"))
+        return TX_SETUP_BEGIN_FAIL; // raw-return-ok:snapshot_tx_begin_checked already LOG_FAILs
+    *tx_open = true;
+    return TX_SETUP_OK;
+}
+
+/* Release what the failed setup stage had opened, in the original order. */
+static void snapshot_tx_index_setup_cleanup(struct snapshot_tx_index_job *job,
+                                            struct node_db *ndb,
+                                            sqlite3 *read_db,
+                                            sqlite3_stmt *query, int stage)
+{
+    if (stage == TX_SETUP_BEGIN_FAIL)
+        sqlite3_finalize(query);
+    if (stage == TX_SETUP_BEGIN_FAIL || stage == TX_SETUP_PREPARE_FAIL)
+        sqlite3_close(read_db);
+    if (stage == TX_SETUP_READ_OPEN_FAIL && read_db)
+        sqlite3_close(read_db);
+    node_db_close(ndb);
+    if (stage == TX_SETUP_SKIP_COMPLETE)
+        job->result = 0;
+}
+
+static void snapshot_tx_index_walk_init(struct tx_index_walk *w,
+                                        struct node_db *ndb,
+                                        const char *datadir, int64_t t_start,
+                                        bool *tx_open)
+{
+    w->ndb = ndb;
+    w->datadir = datadir;
+    w->t_start = t_start;
+    w->tx_open = tx_open;
+    w->cached_file = -1;
+    w->cached_fd = -1;
+    w->cached_data = NULL;
+    w->cached_size = 0;
+    platform_read_mapping_init(&w->cached_mapping);
+}
+
+/* Poll every 4096 rows (first row included). */
+static bool snapshot_tx_index_row_poll_stop(int *rows_seen)
+{
+    return ((*rows_seen)++ & 4095) == 0 && thread_registry_shutdown_requested();
+}
+
+/* Stop stepping once the build has failed: the loop then ends without the
+ * extra sqlite3_step a failed row would otherwise cost. */
+static int snapshot_tx_index_next_row(sqlite3_stmt *query, bool ok)
+{
+    if (!ok)
+        return SQLITE_ABORT;
+    return AR_STEP_ROW_READONLY(query);
+}
+
+static bool snapshot_tx_index_skip_log_due(int skipped)
+{
+    return skipped < 20 || (skipped % 10000) == 0;
+}
+
+/* Count one skipped row; report the logged status only while the log is due. */
+static int snapshot_tx_index_skip_row(int *skipped, int logged_status)
+{
+    bool due = snapshot_tx_index_skip_log_due(*skipped);
+    (*skipped)++;
+    return due ? logged_status : TX_ROW_DONE;
+}
+
+/* Save the first num_tx transactions of a verified block (all when num_tx is
+ * not positive or exceeds the block), then release it. */
+static bool snapshot_tx_index_save_row_block(struct tx_index_walk *w,
+                                             struct block *blk,
+                                             const struct uint256 *block_hash,
+                                             int height, int file_num,
+                                             int data_pos, int num_tx,
+                                             int *indexed)
+{
+    size_t tx_limit = blk->num_vtx;
+    if (num_tx > 0 && (size_t)num_tx < tx_limit)
+        tx_limit = (size_t)num_tx;
+
+    size_t saved_num_vtx = blk->num_vtx;
+    blk->num_vtx = tx_limit;
+    bool saved = snapshot_tx_index_save_block_txs(
+        w->ndb, blk, block_hash, height, file_num, data_pos,
+        indexed, w->t_start, w->tx_open);
+    blk->num_vtx = saved_num_vtx;
+    block_free(blk);
+    return saved;
+}
+
+/* Process one block-index row. *ok goes false when the build must abort
+ * (mapping or save failure); every other outcome is a TX_ROW_* status. */
+static int snapshot_tx_index_row_process(struct tx_index_walk *w,
+                                         const uint8_t *block_hash,
+                                         int height, int file_num,
+                                         int data_pos, int num_tx,
+                                         int *indexed, int *skipped,
+                                         bool *ok, char *got, char *want)
+{
+    if (!block_hash || file_num < 0 || data_pos < 0)
+        return TX_ROW_DONE;
+
+    /* Keep the descriptor alive for the mapping's full lifetime. */
+    if (file_num != w->cached_file &&
+        !snapshot_tx_index_refresh_mapping(w->datadir, file_num,
+                                           &w->cached_file, &w->cached_fd,
+                                           &w->cached_data, &w->cached_size,
+                                           &w->cached_mapping)) {
+        /* raw-return-ok:callee-logged */
+        *ok = false;
+        return TX_ROW_DONE;
+    }
+
+    if (!w->cached_data || (size_t)data_pos >= w->cached_size)
+        return snapshot_tx_index_skip_row(skipped, TX_ROW_BAD_OFFSET);
+
+    const uint8_t *bdata = NULL;
+    size_t bavail = 0;
+    if (!snapshot_locate_block_payload(w->cached_data, w->cached_size,
+                                       (size_t)data_pos, height,
+                                       &bdata, &bavail))
+        return snapshot_tx_index_skip_row(skipped, TX_ROW_UNLOCATABLE);
+
+    struct block blk;
+    struct uint256 disk_hash;
+    if (!snapshot_deserialize_index_block(bdata, bavail, height,
+                                          &blk, &disk_hash)) {
+        (*skipped)++;
+        return TX_ROW_DONE;
+    }
+    struct uint256 expected_hash;
+    memcpy(expected_hash.data, block_hash, 32);
+    if (uint256_cmp(&disk_hash, &expected_hash) != 0) {
+        uint256_get_hex(&disk_hash, got);
+        uint256_get_hex(&expected_hash, want);
+        block_free(&blk);
+        return snapshot_tx_index_skip_row(skipped, TX_ROW_HASH_MISMATCH);
+    }
+
+    *ok = snapshot_tx_index_save_row_block(w, &blk, &expected_hash, height,
+                                           file_num, data_pos, num_tx,
+                                           indexed);
+    return TX_ROW_DONE;
+}
+
+static bool snapshot_tx_index_query_failed(int rc, bool ok)
+{
+    return rc != SQLITE_DONE && ok;
+}
+
+static bool snapshot_tx_index_has_skips(bool ok, int skipped)
+{
+    return ok && skipped > 0;
+}
+
+/* Close the row-walk transaction after the loop: roll back on failure,
+ * otherwise commit; returns the build's ok flag. */
+static bool snapshot_tx_index_end_scan_tx(struct node_db *ndb, bool tx_open,
+                                          bool ok)
+{
+    if (tx_open && !ok)
+        snapshot_tx_rollback_best_effort(ndb, "tx_index rollback after failure");
+    else if (tx_open && !snapshot_tx_commit_checked(ndb, "tx_index final commit")) {
+        ok = false;
+        snapshot_tx_rollback_best_effort(ndb, "tx_index rollback after final commit failure");
+    }
+    return ok;
+}
+
+static void snapshot_tx_index_release_scan(struct tx_index_walk *w,
+                                           sqlite3_stmt *query,
+                                           sqlite3 *read_db)
+{
+    platform_read_mapping_close(&w->cached_mapping);
+    if (w->cached_fd >= 0)
+        close(w->cached_fd);
+    sqlite3_finalize(query);
+    sqlite3_close(read_db);
+}
+
+/* Raw blk*.dat walk in its own transaction after the row walk skipped
+ * blocks; returns the build's ok flag. */
+static bool snapshot_tx_index_run_raw_fallback(struct node_db *ndb,
+                                               const char *datadir,
+                                               int *indexed, int *skipped,
+                                               int64_t t_start,
+                                               bool *tx_open)
+{
+    bool ok = true;
+    if (!snapshot_tx_begin_checked(ndb,
+            "tx_index raw fallback begin")) {
+        ok = false;
+    } else {
+        *tx_open = true;
+    }
+    if (ok)
+        ok = snapshot_tx_index_build_from_block_files(
+            ndb, datadir, indexed, skipped, t_start, tx_open);
+    return ok;
+}
+
+/* Close the fallback transaction; returns the build's ok flag. */
+static bool snapshot_tx_index_end_fallback_tx(struct node_db *ndb,
+                                              bool *tx_open, bool ok)
+{
+    if (*tx_open && !ok) {
+        snapshot_tx_rollback_best_effort(ndb,
+            "tx_index raw fallback rollback after failure");
+        *tx_open = false;
+    } else if (*tx_open && !snapshot_tx_commit_checked(ndb,
+                   "tx_index raw fallback final commit")) {
+        ok = false;
+        snapshot_tx_rollback_best_effort(ndb,
+            "tx_index raw fallback rollback after final commit failure");
+        *tx_open = false;
+    } else {
+        *tx_open = false;
+    }
+    return ok;
+}
+
+static bool snapshot_tx_index_finalize_failed(struct node_db *ndb, bool ok)
+{
+    return ok && !db_tx_finalize_bulk_load(ndb);
+}
+
+/* Record the completion marker only for a fully successful build. */
+static void snapshot_tx_index_mark_complete(struct node_db *ndb, bool ok)
+{
+    if (ok)
+        node_db_state_set_int(ndb, "tx_index_complete", 3);
+}
+
+static void snapshot_tx_index_report(struct snapshot_tx_index_job *job,
+                                     bool ok, int indexed, int skipped,
+                                     int64_t t_start)
+{
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
+    if (ok) {
+        printf("tx_index: complete — %d transactions indexed, %d blocks "
+               "skipped in %llds\n",
+               indexed, skipped, (long long)elapsed);
+        fflush(stdout);
+        job->result = 0;
+    } else {
+        printf("tx_index: failed after %d transactions in %llds\n",
+               indexed, (long long)elapsed);
+        fflush(stdout);
+    }
+}
+
 static void *build_tx_index_thread(void *arg)
 {
     struct snapshot_tx_index_job *job = arg;
@@ -394,6 +735,7 @@ static void *build_tx_index_thread(void *arg)
     bool tx_open = false;
     int rc;
     sqlite3 *read_db = NULL;
+    sqlite3_stmt *query = NULL;
 
     if (!job) {
         LOG_NULL("snapshot", "build_tx_index_thread called with NULL job");
@@ -409,68 +751,20 @@ static void *build_tx_index_thread(void *arg)
         LOG_NULL("snapshot", "tx_index: failed to open SQLite");
     }
 
-    /* Check how many transactions already indexed. A nonzero count is not
-     * proof that the index is complete; older boots skipped on a count
-     * heuristic, which left historical spends unrecoverable during replay.
-     * The explicit completion marker is the authority; ZClassic's historical
-     * transaction count can legitimately be far below arbitrary large
-     * thresholds. */
-    int existing = db_tx_count(&ndb);
-    int64_t complete = 0;
-    node_db_state_get_int(&ndb, "tx_index_complete", &complete);
-    if (complete >= 3) {
-        printf("tx_index: complete marker v%lld present (%d transactions), skipping\n",
-               (long long)complete, existing);
-        node_db_close(&ndb);
-        job->result = 0;
-        return NULL;
-    }
-
-    printf("tx_index: additive build from block files (existing=%d, marker=%lld)...\n",
-           existing, (long long)complete);
-    fflush(stdout);
-    int64_t t_start = (int64_t)platform_time_wall_time_t();
-
-    if (!db_tx_configure_additive_build(&ndb)) {
-        node_db_close(&ndb);
-        return NULL;
-    }
-
-    if (sqlite3_open_v2(db_path, &read_db,
-                        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
-                        NULL) != SQLITE_OK || !read_db) {
+    int64_t t_start = 0;
+    int stage = snapshot_tx_index_setup(&ndb, db_path, &read_db, &query,
+                                        &t_start, &tx_open);
+    if (stage == TX_SETUP_READ_OPEN_FAIL)
         LOG_WARN("tx_index", "tx_index: failed to open read-only SQLite: %s", read_db ? sqlite3_errmsg(read_db) : "db unavailable");
-        if (read_db)
-            sqlite3_close(read_db);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    sqlite3_busy_timeout(read_db, 30000);
-
-    sqlite3_stmt *query = NULL;
-    if (!db_block_prepare_file_position_scan(read_db, &query)) {
-        sqlite3_close(read_db);
-        node_db_close(&ndb);
+    if (stage != TX_SETUP_OK) {
+        snapshot_tx_index_setup_cleanup(job, &ndb, read_db, query, stage);
         return NULL;
     }
 
     int indexed = 0;
     int skipped = 0;
-    int cached_file = -1;
-    const uint8_t *cached_data = NULL;
-    size_t cached_size = 0;
-    int cached_fd = -1;
-    struct platform_read_mapping cached_mapping;
-    platform_read_mapping_init(&cached_mapping);
-
-    if (!snapshot_tx_begin_checked(&ndb,
-            "tx_index begin bulk load transaction")) {
-        sqlite3_finalize(query);
-        sqlite3_close(read_db);
-        node_db_close(&ndb);
-        return NULL;
-    }
-    tx_open = true;
+    struct tx_index_walk walk;
+    snapshot_tx_index_walk_init(&walk, &ndb, datadir, t_start, &tx_open);
     ok = true;
 
     /* Shutdown poll: the row loop walks every block-index row and maps each
@@ -483,8 +777,8 @@ static void *build_tx_index_thread(void *arg)
     int rows_seen = 0;
     for (rc = AR_STEP_ROW_READONLY(query);
          rc == SQLITE_ROW;
-         rc = AR_STEP_ROW_READONLY(query)) {
-        if ((rows_seen++ & 4095) == 0 && thread_registry_shutdown_requested()) {
+         rc = snapshot_tx_index_next_row(query, ok)) {
+        if (snapshot_tx_index_row_poll_stop(&rows_seen)) {
             LOG_INFO("snapshot",
                      "tx_index: aborted: shutdown requested (%d indexed)",
                      indexed);
@@ -496,150 +790,55 @@ static void *build_tx_index_thread(void *arg)
         int file_num = sqlite3_column_int(query, 2);
         int data_pos = sqlite3_column_int(query, 3);
         int num_tx = sqlite3_column_int(query, 4);
+        char got[65] = "", want[65] = "";
 
-        if (!block_hash || file_num < 0 || data_pos < 0) continue;
-
-        /* Keep the descriptor alive for the mapping's full lifetime. */
-        if (file_num != cached_file &&
-            !snapshot_tx_index_refresh_mapping(datadir, file_num,
-                                               &cached_file, &cached_fd,
-                                               &cached_data, &cached_size,
-                                               &cached_mapping)) {
-            /* raw-return-ok:callee-logged */
-            ok = false;
-            break;
-        }
-
-        if (!cached_data || (size_t)data_pos >= cached_size) {
-            if (skipped < 20 || (skipped % 10000) == 0)
-                LOG_WARN("tx_index", "tx_index: skipping invalid block offset file=%d " "height=%d pos=%d size=%zu", file_num, height, data_pos, cached_size);
-            skipped++;
-            continue;
-        }
-
-        const uint8_t *bdata = NULL;
-        size_t bavail = 0;
-        if (!snapshot_locate_block_payload(cached_data, cached_size,
-                                           (size_t)data_pos, height,
-                                           &bdata, &bavail)) {
-            if (skipped < 20 || (skipped % 10000) == 0)
-                LOG_WARN("tx_index", "tx_index: skipping unlocatable block file=%d " "height=%d pos=%d size=%zu", file_num, height, data_pos, cached_size);
-            skipped++;
-            continue;
-        }
-
-        struct block blk;
-        struct uint256 disk_hash;
-        if (!snapshot_deserialize_index_block(bdata, bavail, height,
-                                              &blk, &disk_hash)) {
-            skipped++;
-            continue;
-        }
-        struct uint256 expected_hash;
-        memcpy(expected_hash.data, block_hash, 32);
-        if (uint256_cmp(&disk_hash, &expected_hash) != 0) {
-            char got[65], want[65];
-            uint256_get_hex(&disk_hash, got);
-            uint256_get_hex(&expected_hash, want);
-            if (skipped < 20 || (skipped % 10000) == 0)
-                LOG_WARN("tx_index", "tx_index: skipping block hash mismatch height=%d " "got=%s want=%s", height, got, want);
-            block_free(&blk);
-            skipped++;
-            continue;
-        }
-
-        size_t tx_limit = blk.num_vtx;
-        if (num_tx > 0 && (size_t)num_tx < tx_limit)
-            tx_limit = (size_t)num_tx;
-
-        size_t saved_num_vtx = blk.num_vtx;
-        blk.num_vtx = tx_limit;
-        ok = snapshot_tx_index_save_block_txs(
-            &ndb, &blk, &expected_hash, height, file_num, data_pos,
-            &indexed, t_start, &tx_open);
-        blk.num_vtx = saved_num_vtx;
-        block_free(&blk);
-        if (!ok)
-            break;
-
+        int row = snapshot_tx_index_row_process(
+            &walk, block_hash, height, file_num, data_pos, num_tx,
+            &indexed, &skipped, &ok, got, want);
+        size_t cached_size = walk.cached_size;
+        if (row == TX_ROW_BAD_OFFSET)
+            LOG_WARN("tx_index", "tx_index: skipping invalid block offset file=%d " "height=%d pos=%d size=%zu", file_num, height, data_pos, cached_size);
+        if (row == TX_ROW_UNLOCATABLE)
+            LOG_WARN("tx_index", "tx_index: skipping unlocatable block file=%d " "height=%d pos=%d size=%zu", file_num, height, data_pos, cached_size);
+        if (row == TX_ROW_HASH_MISMATCH)
+            LOG_WARN("tx_index", "tx_index: skipping block hash mismatch height=%d " "got=%s want=%s", height, got, want);
     }
 
-    if (rc != SQLITE_DONE && ok) {
+    if (snapshot_tx_index_query_failed(rc, ok)) {
         LOG_WARN("tx_index", "tx_index: block query failed: %s", sqlite3_errmsg(read_db));
         ok = false;
     }
 
-    if (tx_open && !ok)
-        snapshot_tx_rollback_best_effort(&ndb, "tx_index rollback after failure");
-    else if (tx_open && !snapshot_tx_commit_checked(&ndb, "tx_index final commit")) {
-        ok = false;
-        snapshot_tx_rollback_best_effort(&ndb, "tx_index rollback after final commit failure");
-    }
+    ok = snapshot_tx_index_end_scan_tx(&ndb, tx_open, ok);
 
-    platform_read_mapping_close(&cached_mapping);
-    if (cached_fd >= 0)
-        close(cached_fd);
-    sqlite3_finalize(query);
-    sqlite3_close(read_db);
+    snapshot_tx_index_release_scan(&walk, query, read_db);
     query = NULL;
     read_db = NULL;
-    cached_data = NULL;
     tx_open = false;
 
-    if (ok && skipped > 0) {
+    if (snapshot_tx_index_has_skips(ok, skipped)) {
         LOG_WARN("tx_index", "tx_index: SQLite block rows skipped %d blocks; falling " "back to raw blk*.dat walk", skipped);
         skipped = 0;
-        if (!snapshot_tx_begin_checked(&ndb,
-                "tx_index raw fallback begin")) {
-            ok = false;
-        } else {
-            tx_open = true;
-        }
-        if (ok)
-            ok = snapshot_tx_index_build_from_block_files(
-                &ndb, datadir, &indexed, &skipped, t_start, &tx_open);
+        ok = snapshot_tx_index_run_raw_fallback(&ndb, datadir, &indexed,
+                                                &skipped, t_start, &tx_open);
     }
 
-    if (ok && skipped > 0) {
+    if (snapshot_tx_index_has_skips(ok, skipped)) {
         LOG_WARN("tx_index", "tx_index: incomplete — raw block-file walk skipped %d " "blocks; leaving marker unset so a safer builder can retry", skipped);
         ok = false;
     }
 
-    if (tx_open && !ok) {
-        snapshot_tx_rollback_best_effort(&ndb,
-            "tx_index raw fallback rollback after failure");
-        tx_open = false;
-    } else if (tx_open && !snapshot_tx_commit_checked(&ndb,
-                   "tx_index raw fallback final commit")) {
-        ok = false;
-        snapshot_tx_rollback_best_effort(&ndb,
-            "tx_index raw fallback rollback after final commit failure");
-        tx_open = false;
-    } else {
-        tx_open = false;
-    }
+    ok = snapshot_tx_index_end_fallback_tx(&ndb, &tx_open, ok);
 
-    if (ok && !db_tx_finalize_bulk_load(&ndb)) {
+    if (snapshot_tx_index_finalize_failed(&ndb, ok)) {
         LOG_WARN("tx_index", "tx_index: failed to finalize bulk load indexes");
         ok = false;
     }
-    if (ok)
-        node_db_state_set_int(&ndb, "tx_index_complete", 3);
+    snapshot_tx_index_mark_complete(&ndb, ok);
 
     node_db_close(&ndb);
 
-    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-    if (ok) {
-        printf("tx_index: complete — %d transactions indexed, %d blocks "
-               "skipped in %llds\n",
-               indexed, skipped, (long long)elapsed);
-        fflush(stdout);
-        job->result = 0;
-    } else {
-        printf("tx_index: failed after %d transactions in %llds\n",
-               indexed, (long long)elapsed);
-        fflush(stdout);
-    }
+    snapshot_tx_index_report(job, ok, indexed, skipped, t_start);
     return NULL;
 }
 

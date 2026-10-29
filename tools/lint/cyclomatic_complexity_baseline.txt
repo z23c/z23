@@ -420,8 +420,6 @@ engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_conn
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_resolve_range:21
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_run:20
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
-engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:54
-engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_from_block_files:16
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/entry/main_cli_modes.c:bench_crypto_verify:22
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
