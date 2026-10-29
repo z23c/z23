@@ -468,19 +468,20 @@ static int case_poison_none_frontier_is_noop(void)
 static bool downstream_rewind_state_matches(
     sqlite3 *db, bool rv, struct stage_repair_header_solution_result *res)
 {
-    return rv &&
-           res->repaired &&
-           res->mode == STAGE_REPAIR_POISON_DOWNSTREAM_STALE &&
-           /* Downstream rows deleted; validate row (ok=1) preserved. */
-           !row_exists(db, "body_fetch_log", 2) &&
-           row_exists(db, "validate_headers_log", 2) &&
-           /* tip_finalize_log ok=0 row MUST survive (deletion banned). */
-           row_exists(db, "tip_finalize_log", 2) &&
-           /* Downstream cursors rewound to the frontier. */
-           cursor_for(db, "body_fetch") == 2 &&
-           cursor_for(db, "tip_finalize") == 2 &&
-           /* validate_headers cursor untouched on a downstream rewind. */
-           cursor_for(db, "validate_headers") == 5;
+    bool ok = rv;
+    ok = ok && res->repaired;
+    ok = ok && res->mode == STAGE_REPAIR_POISON_DOWNSTREAM_STALE;
+    /* Downstream rows deleted; validate row (ok=1) preserved. */
+    ok = ok && !row_exists(db, "body_fetch_log", 2);
+    ok = ok && row_exists(db, "validate_headers_log", 2);
+    /* tip_finalize_log ok=0 row MUST survive (deletion banned). */
+    ok = ok && row_exists(db, "tip_finalize_log", 2);
+    /* Downstream cursors rewound to the frontier. */
+    ok = ok && cursor_for(db, "body_fetch") == 2;
+    ok = ok && cursor_for(db, "tip_finalize") == 2;
+    /* validate_headers cursor untouched on a downstream rewind. */
+    ok = ok && cursor_for(db, "validate_headers") == 5;
+    return ok;
 }
 
 static int case_downstream_rewind_succeeds(void)
@@ -554,13 +555,14 @@ static int case_validate_invalid_solution_not_repairable(void)
 static bool loaded_header_fields_match(struct block_header *loaded,
                                        struct block_header *h)
 {
-    return loaded->nVersion == h->nVersion &&
-           loaded->nTime == h->nTime &&
-           loaded->nBits == h->nBits &&
-           loaded->nSolutionSize == h->nSolutionSize &&
-           memcmp(loaded->nSolution, h->nSolution, h->nSolutionSize) == 0 &&
-           uint256_eq(&loaded->hashPrevBlock, &h->hashPrevBlock) &&
-           uint256_eq(&loaded->hashMerkleRoot, &h->hashMerkleRoot);
+    bool ok = loaded->nVersion == h->nVersion;
+    ok = ok && loaded->nTime == h->nTime;
+    ok = ok && loaded->nBits == h->nBits;
+    ok = ok && loaded->nSolutionSize == h->nSolutionSize;
+    ok = ok && memcmp(loaded->nSolution, h->nSolution, h->nSolutionSize) == 0;
+    ok = ok && uint256_eq(&loaded->hashPrevBlock, &h->hashPrevBlock);
+    ok = ok && uint256_eq(&loaded->hashMerkleRoot, &h->hashMerkleRoot);
+    return ok;
 }
 
 static int case_header_roundtrip(void)
@@ -706,7 +708,9 @@ static bool seed_proof_rewind_cursors(sqlite3 *db)
 static bool proof_rewind_rederived_state(sqlite3 *db, bool rv, bool repaired,
                                          int height)
 {
-    bool ok = rv && repaired && height == 3;
+    bool ok = rv;
+    ok = ok && repaired;
+    ok = ok && height == 3;
     /* The "could not determine validity" verdict is GONE — proof_validate
      * will re-derive it (a fresh row, not the frozen ok=0). This is the
      * Law-7 witness: a transient is never persisted as terminal. */
@@ -834,9 +838,10 @@ static bool reinject_transient_proof_hole(sqlite3 *db)
  * row survives and the proof cursor stays at 5. */
 static bool proof_second_pass_left_hole_intact(sqlite3 *db, bool repaired2)
 {
-    return repaired2 == false &&
-           row_exists(db, "proof_validate_log", 3) &&
-           cursor_for(db, "proof_validate") == 5;
+    bool ok = repaired2 == false;
+    ok = ok && row_exists(db, "proof_validate_log", 3);
+    ok = ok && cursor_for(db, "proof_validate") == 5;
+    return ok;
 }
 
 static int case_proof_oneshot_marker_bounds_retry(void)
@@ -930,10 +935,13 @@ static bool churn_ask_matches(bool prior_ok, sqlite3 *db, int hstar,
     out.tip_finalize_cursor_before = cursor_before;
     bool rv = stage_reducer_frontier_reconcile_tip_finalize_cursor_for_testing(
         db, true, &out);
-    return prior_ok && rv && out.clamped_tip_finalize == expect_clamped &&
-           out.tip_finalize_cursor_after == expect_after &&
-           cursor_for(db, "tip_finalize") == expect_db_cursor &&
-           blocker_exists("tip_finalize.rewind_churn") == expect_blocker;
+    bool ok = prior_ok;
+    ok = ok && rv;
+    ok = ok && out.clamped_tip_finalize == expect_clamped;
+    ok = ok && out.tip_finalize_cursor_after == expect_after;
+    ok = ok && cursor_for(db, "tip_finalize") == expect_db_cursor;
+    ok = ok && blocker_exists("tip_finalize.rewind_churn") == expect_blocker;
+    return ok;
 }
 
 static int case_tip_finalize_rewind_churn(void)
