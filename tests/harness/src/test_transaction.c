@@ -1040,8 +1040,9 @@ static int test_tx_serialize_roundtrip(void)
 
 /* Pins js_description_serialize / js_description_deserialize byte layout.
  * Groth wire: 8+8 vpub, 32 anchor, 2x32 nullifiers, 2x32 commitments,
- * 32 ephemeral key, 32 random seed, 2x32 macs, 280 proof, 2x601 ciphertexts
- * = 1786 bytes. PHGR wire: same but a 296-byte proof = 1802 bytes. */
+ * 32 ephemeral key, 32 random seed, 2x32 macs, GROTH_PROOF_SIZE (192) proof,
+ * 2x601 ciphertexts = 1698 bytes. PHGR wire: same but a PHGR_PROOF_SIZE (296)
+ * proof = 1802 bytes. */
 struct js_pin_span {
     size_t off;
     size_t len;
@@ -1051,7 +1052,8 @@ struct js_pin_span {
 static const struct js_pin_span js_pin_groth_spans[] = {
     {16, 32, 0xA1}, {48, 32, 0xB0}, {80, 32, 0xB1}, {112, 32, 0xC0},
     {144, 32, 0xC1}, {176, 32, 0xE0}, {208, 32, 0xD0}, {240, 32, 0xF0},
-    {272, 32, 0xF1}, {304, 280, 0x5A}, {584, 601, 0x41}, {1185, 601, 0x42},
+    {272, 32, 0xF1}, {304, GROTH_PROOF_SIZE, 0x5A}, {496, 601, 0x41},
+    {1097, 601, 0x42},
 };
 
 static const struct js_pin_span js_pin_phgr_spans[] = {
@@ -1117,7 +1119,7 @@ static int test_tx_js_description_serialize_groth_layout(void)
         struct byte_stream ws;
         stream_init(&ws, 0);
         bool ok = js_description_serialize(&js, &ws) &&
-                  js_pin_wire_ok(&ws, 1786, js_pin_groth_spans,
+                  js_pin_wire_ok(&ws, 1698, js_pin_groth_spans,
                                  sizeof js_pin_groth_spans / sizeof js_pin_groth_spans[0]);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -1158,13 +1160,14 @@ static int test_tx_js_description_serialize_groth_tail_ignored(void)
         struct js_description a, b;
         js_pin_fill(&a);
         js_pin_fill(&b);
-        memset(b.proof + 280, 0x77, 16);
+        memset(b.proof + GROTH_PROOF_SIZE, 0x77,
+               PHGR_PROOF_SIZE - GROTH_PROOF_SIZE);
         struct byte_stream wa, wb;
         stream_init(&wa, 0);
         stream_init(&wb, 0);
         bool ok = js_description_serialize(&a, &wa) &&
                   js_description_serialize(&b, &wb);
-        ok = ok && wa.size == 1786 && wb.size == 1786;
+        ok = ok && wa.size == 1698 && wb.size == 1698;
         ok = ok && memcmp(wa.data, wb.data, wa.size) == 0;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
@@ -1200,8 +1203,8 @@ static int test_tx_js_description_deserialize_truncation(void)
     /* Each cut lands on a field boundary (fails reading the field that
      * starts there) or one byte short of the end of a field. */
     static const size_t groth_cuts[] = {0, 8, 16, 48, 80, 112, 144, 176,
-                                        208, 240, 272, 304, 583, 584,
-                                        1185, 1785};
+                                        208, 240, 272, 304, 495, 496,
+                                        1096, 1097, 1697};
     static const size_t phgr_cuts[] = {0, 8, 16, 48, 80, 112, 144, 176,
                                        208, 240, 272, 304, 600, 1201, 1801};
 
@@ -1242,7 +1245,7 @@ static int test_tx_js_description_deserialize_truncation(void)
         /* A groth-length buffer is too short for the 296-byte phgr proof. */
         struct js_description out;
         struct byte_stream rs;
-        stream_init_from_data(&rs, ws.data, 1786);
+        stream_init_from_data(&rs, ws.data, 1698);
         ok = ok && !js_description_deserialize(&out, false, &rs) && rs.error;
         stream_free(&rs);
         if (ok) printf("OK\n");
@@ -1267,7 +1270,7 @@ static int test_tx_js_description_deserialize_groth_roundtrip(void)
         bool ok = js_description_serialize(&src, &ws);
         stream_init_from_data(&rs, ws.data, ws.size);
         ok = ok && js_description_deserialize(&dst, true, &rs) &&
-             rs.read_pos == 1786 && stream_remaining(&rs) == 0 &&
+             rs.read_pos == 1698 && stream_remaining(&rs) == 0 &&
              dst.use_groth && dst.vpub_old == src.vpub_old && dst.vpub_new == -2;
         ok = ok && js_description_serialize(&dst, &re) &&
              re.size == ws.size && memcmp(re.data, ws.data, ws.size) == 0;
@@ -1297,7 +1300,8 @@ static int test_tx_js_description_deserialize_groth_zero_proof_tail(void)
         stream_init_from_data(&rs, ws.data, ws.size);
         ok = ok && js_description_deserialize(&dst, true, &rs);
         static const struct js_pin_span proof_spans[] = {
-            {0, 280, 0x5A}, {280, 16, 0x00},
+            {0, GROTH_PROOF_SIZE, 0x5A},
+            {GROTH_PROOF_SIZE, PHGR_PROOF_SIZE - GROTH_PROOF_SIZE, 0x00},
         };
         ok = ok && dst.use_groth &&
              js_pin_spans_match(dst.proof, sizeof dst.proof, proof_spans, 2);
@@ -1339,7 +1343,7 @@ static int test_tx_js_description_deserialize_groth_trailing(void)
 {
     int failures = 0;
 
-    printf("js_description deserialize groth reads 1786 of phgr 1802 bytes... ");
+    printf("js_description deserialize groth reads 1698 of phgr 1802 bytes... ");
     {
         struct js_description src, dst;
         js_pin_fill(&src);
@@ -1349,8 +1353,9 @@ static int test_tx_js_description_deserialize_groth_trailing(void)
         bool ok = js_description_serialize(&src, &ws);
         stream_init_from_data(&rs, ws.data, ws.size);
         ok = ok && js_description_deserialize(&dst, true, &rs);
-        /* This function does not reject trailing bytes; it stops at 1786. */
-        ok = ok && rs.read_pos == 1786 && stream_remaining(&rs) == 16;
+        /* This function does not reject trailing bytes; it stops at 1698,
+         * leaving the 104 bytes of the phgr proof tail (1802 - 1698). */
+        ok = ok && rs.read_pos == 1698 && stream_remaining(&rs) == 104;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
         stream_free(&ws);
