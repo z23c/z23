@@ -650,6 +650,13 @@ static bool promote_flip_and_stamp(struct sqlite3 *target,
                                     req->checkpoint_height);
 }
 
+/* Nothing to promote: report committed=false through the optional out-param. */
+static void promote_clear_committed(struct shielded_promote_report *out)
+{
+    if (out)
+        out->committed = false;
+}
+
 bool shielded_history_promote_run(const struct shielded_promote_request *req,
                                   struct shielded_promote_report *out)
 {
@@ -673,8 +680,7 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
         LOG_INFO(PROMOTE_SUBSYS,
                  "target cursors already zero — shielded history complete, "
                  "nothing to promote");
-        if (out)
-            out->committed = false;
+        promote_clear_committed(out);
         return true;
     }
     report.anchor_boundary = anchor_boundary;
