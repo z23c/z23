@@ -73,6 +73,7 @@ struct cb_brief {
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped;
     int64_t deadline_ms;
+    const char *root;
 };
 
 /* ── text helpers ─────────────────────────────────────────────────────── */
@@ -104,37 +105,66 @@ static bool cb_has(const void *list, size_t n, size_t stride,
 
 /* ── input ────────────────────────────────────────────────────────────── */
 
-static bool cb_path_ok(const char *p)
+#define CB_BAD_PATH "paths must be repo-relative paths without empty segments, backslashes or control bytes"
+
+/* Refusal for a root-relative path, or NULL when its shape is sound. */
+static const char *cb_path_shape(const char *p)
 {
-    size_t n = strlen(p);
-    if (n == 0 || n >= CB_PATH_CAP || p[0] == '/' || strchr(p, '\\'))
-        return false;
-    for (size_t i = 0; i < n; i++)
+    if (strchr(p, '\\'))
+        return CB_BAD_PATH;
+    for (size_t i = 0; p[i]; i++)
         if ((unsigned char)p[i] < 0x20)
-            return false;
-    for (const char *seg = p; seg;) {
+            return CB_BAD_PATH;
+    const char *seg = p;
+    while (seg) {
         const char *slash = strchr(seg, '/');
         size_t len = slash ? (size_t)(slash - seg) : strlen(seg);
-        if (len == 0 || (len == 2 && seg[0] == '.' && seg[1] == '.'))
-            return false;
+        if (len == 2 && seg[0] == '.' && seg[1] == '.')
+            return "paths must not contain .. segments";
+        if (len == 0)
+            return CB_BAD_PATH;
         seg = slash ? slash + 1 : NULL;
     }
-    return true;
+    return NULL;
+}
+
+/* An absolute path is accepted only under the source root; it becomes the
+ * root-relative remainder. The root is compared over the bytes the caller
+ * owns, so a prefix that runs past len is never matched. */
+static const char *cb_root_relative(const struct cb_brief *b, const char **s,
+                                    size_t *len)
+{
+    size_t rootlen = b->root ? strlen(b->root) : 0;
+    if ((*s)[0] != '/')
+        return NULL;
+    if (rootlen == 0 || *len <= rootlen ||
+        memcmp(*s, b->root, rootlen) != 0 || (*s)[rootlen] != '/')
+        return "paths must be under the source root";
+    *s += rootlen + 1;
+    *len -= rootlen + 1;
+    return NULL;
 }
 
 static const char *cb_add_path(struct cb_brief *b, const char *s, size_t len)
 {
     char tmp[CB_PATH_CAP];
+    const char *err;
     while (len >= 2 && s[0] == '.' && s[1] == '/') {
         s += 2;
         len -= 2;
     }
-    if (len == 0 || len >= CB_PATH_CAP)
-        return "paths must be repo-relative paths of at most 255 bytes";
+    if ((err = cb_root_relative(b, &s, &len)))
+        return err;
+    while (len > 0 && s[len - 1] == '/')
+        len--;
+    if (len == 0)
+        return "paths must not be empty";
+    if (len >= CB_PATH_CAP)
+        return "paths must be at most 255 bytes";
     memcpy(tmp, s, len);
     tmp[len] = '\0';
-    if (!cb_path_ok(tmp))
-        return "paths must be repo-relative paths without .. segments";
+    if ((err = cb_path_shape(tmp)))
+        return err;
     if (cb_has(b->paths, b->npaths, CB_PATH_CAP, tmp))
         return NULL;
     if (b->npaths >= CB_MAX_PATHS)
@@ -767,6 +797,7 @@ void zcl_code_brief_render(const struct zcl_command_request *request,
         return;
     }
     memset(b, 0, sizeof(*b));
+    b->root = zcl_native_source_root(request);
     err = cb_parse(b, request->input);
     if (err) {
         cb_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_CODE_GUIDE_INPUT", err);

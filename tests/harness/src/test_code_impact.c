@@ -733,6 +733,21 @@ static int test_code_room_command_feature(void)
     return failures;
 }
 
+/* Run code.guide over one paths string rooted at root; the caller frees reply. */
+static void cg_guide_paths(const char *root, const char *paths,
+                           struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "paths", paths);
+    struct zcl_command_context ctx = { .source_root = root };
+    struct zcl_command_request request = { .input = &input, .context = &ctx };
+    zcl_command_reply_init(reply, "zcl.test.code_guide.v1");
+    zcl_native_handle_code_guide(&request, reply);
+    json_free(&input);
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -772,6 +787,46 @@ static int test_code_guide(void)
         ASSERT_STR_EQ(reply.error.code, "BAD_CODE_GUIDE_INPUT");
         zcl_command_reply_free(&reply);
         json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_paths(void)
+{
+    int failures = 0;
+    TEST("code.guide accepts trailing slashes and under-root absolute paths only") {
+        char cwd[512], abs[512];
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        int n = snprintf(abs, sizeof(abs), "%s/tools/command/native_code_brief.c", cwd);
+        ASSERT(n > 0 && (size_t)n < sizeof(abs));
+        struct zcl_command_reply reply;
+
+        cg_guide_paths(cwd, "tests/harness/src/", &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
+        cg_guide_paths(cwd, abs, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        const struct json_value *owners = json_get(&reply.data, "owners");
+        ASSERT(owners && json_size(owners) > 0);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(owners, 0), "file")),
+                      "tools/AGENTS.md");
+        zcl_command_reply_free(&reply);
+
+        cg_guide_paths(cwd, "/etc/passwd", &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.message, "paths must be under the source root");
+        zcl_command_reply_free(&reply);
+
+        cg_guide_paths(cwd, "a/../b", &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(reply.error.message, "paths must not contain .. segments");
+        zcl_command_reply_free(&reply);
+
+        cg_guide_paths(cwd, "a//b", &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
+        zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
     return failures;
@@ -2004,6 +2059,7 @@ int test_code_impact(void)
     failures += test_boot_services_rule_capacity();
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide();
+    failures += test_code_guide_paths();
     failures += test_code_impact_conditional_include_edge();
     failures += test_code_impact_conditional_hazards();
     failures += test_code_impact_long_include_line();
