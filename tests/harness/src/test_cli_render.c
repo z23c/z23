@@ -953,6 +953,73 @@ static int test_lab_run_render(void)
         ASSERT(strstr(out, "receipt") == NULL);
         PASS();
     }
+    TEST("lab.run real-shape sanitizer receipt: finding, exit 1, real sandbox") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[],"
+            "\"raw_tail\":\"\",\"detail\":\"\"},"
+            "\"run\":{\"ran\":true,\"exit_code\":1,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"disk_exceeded\":false,"
+            "\"wall_us\":900,\"max_rss_kb\":2048,\"stdout\":\"\","
+            "\"stdout_truncated\":false,\"stderr\":\"ub.c:9:7: runtime error: "
+            "signed integer overflow\\nSUMMARY: UndefinedBehaviorSanitizer\\n\","
+            "\"stderr_truncated\":false},"
+            "\"sanitizer\":{\"enabled\":true,\"status\":\"enabled\","
+            "\"findings\":2,\"first\":\"ub.c:9:7: runtime error: signed "
+            "integer overflow\"},"
+            "\"confinement\":{\"landlock\":true,\"pidns\":true,"
+            "\"landlock_abi\":4,\"seccomp\":true,\"no_new_privs\":true,"
+            "\"network\":\"denied\",\"filesystem\":\"private workdir\","
+            "\"processes\":\"no fork; threads only\","
+            "\"signals\":\"own PID namespace\"},\"cache\":{\"hit\":false}}}",
+            true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "sanitizers on") != NULL);
+        ASSERT(strstr(out, "exit 1 in 1 ms") != NULL);
+        ASSERT(strstr(out, "2 sanitizer findings") != NULL);
+        ASSERT(strstr(out, "signed integer overflow") != NULL);
+        ASSERT(strstr(out, "no network, private workdir, no fork") != NULL);
+        ASSERT(strstr(out, "receipt  5e400b25a201") != NULL);
+        PASS();
+    }
+    TEST("lab.run unavailable sanitizers are not reported as off or on") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":true,\"exit_code\":0,\"wall_us\":900,"
+            "\"max_rss_kb\":1024,\"stdout\":\"\",\"stderr\":\"\"},"
+            "\"sanitizer\":{\"enabled\":false,\"status\":\"unavailable\","
+            "\"findings\":0,\"first\":\"\"},\"confinement\":{},"
+            "\"cache\":{\"hit\":false}}}", true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "sanitizers unavailable") != NULL);
+        ASSERT(strstr(out, "sanitizers off") == NULL);
+        PASS();
+    }
+    TEST("lab.run compile that never produced diagnostics still says why") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":5000,\"diagnostics\":[],"
+            "\"raw_tail\":\"\",\"detail\":\"compile exceeded 8000 ms\"},"
+            "\"run\":{\"ran\":false},\"sanitizer\":{\"enabled\":false},"
+            "\"confinement\":{},\"cache\":{\"hit\":false}}}", true, out,
+            sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "error") != NULL);
+        ASSERT(strstr(out, "compile exceeded 8000 ms") != NULL);
+        ASSERT(strstr(out, "did not run") != NULL);
+        n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":5000,\"diagnostics\":[],"
+            "\"raw_tail\":\"cc1: out of memory\\n\",\"detail\":\"\"},"
+            "\"run\":{\"ran\":false},\"sanitizer\":{\"enabled\":false}}}",
+            true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "cc1: out of memory") != NULL);
+        n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":5000,\"diagnostics\":[]},"
+            "\"run\":{\"ran\":false},\"sanitizer\":{\"enabled\":false}}}",
+            true, out, sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "no compiler message was recorded") != NULL);
+        PASS();
+    }
     TEST("lab.run escapes control bytes in file, diagnostic and output") {
         size_t n = cr_lab_render_file("a\\u001b[31mb\\u0007.c",
             "\"compile\":{\"ok\":false,\"wall_us\":2000,\"diagnostics\":["

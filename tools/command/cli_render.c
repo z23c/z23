@@ -997,7 +997,7 @@ static void render_schema_doc(struct buf *b,
     emit_header(b, e, head);
     const char *id = json_get_str(json_get(root, "id"));
     if (id && id[0])
-        emit_kv(b, e, 7, "id", id);
+        emit_kv(b, e, 8, "id", id);
     const char *keys = json_get_str(json_get(root, "allowed_keys"));
     char spaced[384];
     if (keys && keys[0]) {
@@ -1014,7 +1014,7 @@ static void render_schema_doc(struct buf *b,
         spaced[sl] = '\0';
         keys = spaced;
     }
-    emit_kv(b, e, 7, "keys",
+    emit_kv(b, e, 8, "keys",
             (keys && keys[0]) ? keys : "(no arguments)");
 }
 
@@ -1525,9 +1525,9 @@ static void lab_emit_text(struct buf *b, const struct zcl_cli_render_env *e,
 }
 
 /* The first diagnostics of a failed compile, errors before notes. */
-static void lab_emit_diagnostics(struct buf *b,
-                                 const struct zcl_cli_render_env *e,
-                                 const struct json_value *diags)
+static int lab_emit_diagnostics(struct buf *b,
+                                const struct zcl_cli_render_env *e,
+                                const struct json_value *diags)
 {
     int shown = 0;
     for (int pass = 0; pass < 2 && diags && diags->type == JSON_ARR; pass++) {
@@ -1546,6 +1546,25 @@ static void lab_emit_diagnostics(struct buf *b,
             shown++;
         }
     }
+    return shown;
+}
+
+/* A compile that failed without a parsed diagnostic (never started, timed
+ * out, or only raw compiler output) still says why. */
+static void lab_emit_compile_reason(struct buf *b,
+                                    const struct zcl_cli_render_env *e,
+                                    const struct json_value *comp)
+{
+    if (lab_emit_diagnostics(b, e, json_get(comp, "diagnostics")) > 0)
+        return;
+    const char *d = lab_str(json_get(comp, "detail"));
+    const char *tail = lab_str(json_get(comp, "raw_tail"));
+    if (d[0])
+        lab_emit_text(b, e, "error", d, false);
+    else if (tail[0])
+        lab_emit_text(b, e, "error", tail, false);
+    else
+        emit_kv(b, e, 7, "error", "no compiler message was recorded");
 }
 
 /* The `ran` row, only for a run that happened: exit, signal, timeout or
@@ -1645,9 +1664,12 @@ static void lab_emit_built(struct buf *b, const struct zcl_cli_render_env *e,
     char wall[32], line[160];
     lab_fmt_wall(wall, sizeof(wall), json_get_int(json_get(comp, "wall_us")));
     const struct json_value *en = json_get(san, "enabled");
+    const char *st = lab_str(json_get(san, "status"));
     const char *what = "failed";
     if (json_get_bool(json_get(comp, "ok")))
-        what = !en || en->type != JSON_BOOL ? "strict C23"
+        what = strcmp(st, "unavailable") == 0
+                   ? "strict C23, sanitizers unavailable"
+               : !en || en->type != JSON_BOOL ? "strict C23"
                : en->val.b ? "strict C23, sanitizers on"
                            : "strict C23, sanitizers off";
     (void)snprintf(line, sizeof(line), "%s (%s)", what, wall);
@@ -1666,7 +1688,7 @@ static void render_lab_run(struct buf *b, const struct zcl_cli_render_env *e,
     emit_header(b, e, head);
     lab_emit_built(b, e, comp, json_get(data, "sanitizer"));
     if (!json_get_bool(json_get(comp, "ok"))) {
-        lab_emit_diagnostics(b, e, json_get(comp, "diagnostics"));
+        lab_emit_compile_reason(b, e, comp);
         emit_kv(b, e, 7, "ran", "did not run: the program did not compile");
     } else if (!json_get_bool(json_get(json_get(data, "run"), "ran"))) {
         const char *d = lab_str(json_get(comp, "detail"));
