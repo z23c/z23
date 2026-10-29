@@ -39,42 +39,34 @@ const char *vcs_package_lifecycle_state_string(
     return "unknown-state";
 }
 
-static const char *install_error_string_codec(
-    enum vcs_package_install_error error)
-{
-    switch (error) {
-    case VCS_PACKAGE_INSTALL_OK: return "ok";
-    case VCS_PACKAGE_INSTALL_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_INSTALL_ERR_ALLOC: return "allocation-failure";
-    case VCS_PACKAGE_INSTALL_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_PACKAGE_INSTALL_ERR_WIRE_VERSION: return "wire-version";
-    case VCS_PACKAGE_INSTALL_ERR_WIRE_TRUNCATED: return "wire-truncated";
-    case VCS_PACKAGE_INSTALL_ERR_WIRE_TRAILING: return "wire-trailing";
-    case VCS_PACKAGE_INSTALL_ERR_WIRE_OVERSIZE: return "wire-oversize";
-    default: return NULL;
-    }
-}
-
-static const char *install_error_string_content(
-    enum vcs_package_install_error error)
-{
-    switch (error) {
-    case VCS_PACKAGE_INSTALL_ERR_ROOT: return "all-zero-root";
-    case VCS_PACKAGE_INSTALL_ERR_STEP_COUNT: return "step-count-bound";
-    case VCS_PACKAGE_INSTALL_ERR_STEP_ORDER: return "steps-not-build-order";
-    case VCS_PACKAGE_INSTALL_ERR_FIELD: return "field-grammar";
-    case VCS_PACKAGE_INSTALL_ERR_STATE: return "lifecycle-state";
-    case VCS_PACKAGE_INSTALL_ERR_EXPIRY: return "plan-expiry";
-    case VCS_PACKAGE_INSTALL_ERR_GEN_COUNT: return "generation-count-bound";
-    default: return "unknown-error";
-    }
-}
+static const struct {
+    enum vcs_package_install_error code;
+    const char *name;
+} install_error_names[] = {
+    { VCS_PACKAGE_INSTALL_OK, "ok" },
+    { VCS_PACKAGE_INSTALL_ERR_NULL, "null-argument" },
+    { VCS_PACKAGE_INSTALL_ERR_ALLOC, "allocation-failure" },
+    { VCS_PACKAGE_INSTALL_ERR_WIRE_MAGIC, "wire-magic" },
+    { VCS_PACKAGE_INSTALL_ERR_WIRE_VERSION, "wire-version" },
+    { VCS_PACKAGE_INSTALL_ERR_WIRE_TRUNCATED, "wire-truncated" },
+    { VCS_PACKAGE_INSTALL_ERR_WIRE_TRAILING, "wire-trailing" },
+    { VCS_PACKAGE_INSTALL_ERR_WIRE_OVERSIZE, "wire-oversize" },
+    { VCS_PACKAGE_INSTALL_ERR_ROOT, "all-zero-root" },
+    { VCS_PACKAGE_INSTALL_ERR_STEP_COUNT, "step-count-bound" },
+    { VCS_PACKAGE_INSTALL_ERR_STEP_ORDER, "steps-not-build-order" },
+    { VCS_PACKAGE_INSTALL_ERR_FIELD, "field-grammar" },
+    { VCS_PACKAGE_INSTALL_ERR_STATE, "lifecycle-state" },
+    { VCS_PACKAGE_INSTALL_ERR_EXPIRY, "plan-expiry" },
+    { VCS_PACKAGE_INSTALL_ERR_GEN_COUNT, "generation-count-bound" },
+};
 
 const char *vcs_package_install_error_string(
     enum vcs_package_install_error error)
 {
-    const char *name = install_error_string_codec(error);
-    return name ? name : install_error_string_content(error);
+    for (size_t i = 0; i < sizeof(install_error_names) / sizeof(install_error_names[0]); i++)
+        if (install_error_names[i].code == error)
+            return install_error_names[i].name;
+    return "unknown-error";
 }
 
 void vcs_package_plan_init(struct vcs_package_plan *plan)
