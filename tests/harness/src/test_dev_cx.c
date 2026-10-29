@@ -395,6 +395,8 @@ static int cxt_test_next_stale(void)
     int failures = 0;
     struct cxt_call c;
     char repo[CXT_PATH], wt[CXT_PATH], order[1024];
+    /* The dirty lane's commit is old, but its uncommitted edit keeps it live,
+     * so it still holds the file it committed (d.c) as well as c.c. */
     TEST("dev.cx.next: an idle lane frees its files; fresh and dirty lanes keep theirs") {
         cxt_new_repo(repo, sizeof(repo), "stale");
         for (const char *f = "abcd"; *f; f++) {
@@ -419,9 +421,9 @@ static int cxt_test_next_stale(void)
         cxt_next(&c, repo, 50, NULL, NULL);
         ASSERT(cxt_ok(&c));
         cxt_order(&c, order, sizeof(order));
-        ASSERT_STR_EQ(order, "src/a.c,src/d.c");
-        ASSERT_EQ(cxt_skipped(&c, "changed"), 2);
-        ASSERT_EQ(cxt_skipped(&c, "stale_holder"), 2);
+        ASSERT_STR_EQ(order, "src/a.c");
+        ASSERT_EQ(cxt_skipped(&c, "changed"), 3);
+        ASSERT_EQ(cxt_skipped(&c, "stale_holder"), 1);
         cxt_end(&c);
         PASS();
     }
