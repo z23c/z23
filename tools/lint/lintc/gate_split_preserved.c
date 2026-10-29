@@ -55,7 +55,7 @@ static void sp_add(struct sp_list *l, char *key, char *func, unsigned line, size
         l->v = nv;
         l->cap = nc;
     }
-    l->v[l->n++] = (struct sp_ent){ key, func, line, off, 0 };
+    l->v[l->n++] = (struct sp_ent){ key, func, line, off, 0, 0 };
 }
 
 /* s[a..b) with every whitespace run outside a literal collapsed to one space
