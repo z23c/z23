@@ -444,7 +444,7 @@ static bool blog_anchor_plan_store(
     return stored;
 }
 
-/* Prepares the raw transaction and persists the reserved plan atomically. */
+/* Prepares the raw transaction and persists the reserved plan (not one transaction). */
 static struct zcl_result blog_anchor_plan_reserve(
     const struct blog_anchor_runtime *rt,
     const struct blog_anchor_request *request,
@@ -496,21 +496,31 @@ struct zcl_result blog_publication_anchor_plan(
     struct blog_anchor_transaction_result *out)
 {
     ZCL_CHECK(blog_anchor_runtime_validate(rt, true, false));
-    ZCL_CHECK(blog_anchor_plan_request_validate(request, out));
+    struct zcl_result step = blog_anchor_plan_request_validate(request, out);
+    if (!step.ok)
+        return step;
     uint8_t request_digest[32];
     blog_anchor_request_digest(request, request_digest);
     bool replayed = false;
-    ZCL_CHECK(blog_anchor_plan_replay_lookup(rt, request, request_digest, out,
-                                             &replayed));
+    step = blog_anchor_plan_replay_lookup(rt, request, request_digest, out,
+                                          &replayed);
+    if (!step.ok)
+        return step;
     if (replayed)
         return ZCL_OK;
     struct wallet_money_snapshot money;
-    ZCL_CHECK(blog_anchor_plan_preconditions(rt, request, &money));
+    step = blog_anchor_plan_preconditions(rt, request, &money);
+    if (!step.ok)
+        return step;
     struct blog_anchor_plan_payload payload;
-    ZCL_CHECK(blog_anchor_plan_payload_build(request, &payload));
+    step = blog_anchor_plan_payload_build(request, &payload);
+    if (!step.ok)
+        return step;
     struct vault_intent_row row;
-    ZCL_CHECK(blog_anchor_plan_reserve(rt, request, request_digest, &money,
-                                       &payload, &row));
+    step = blog_anchor_plan_reserve(rt, request, request_digest, &money,
+                                    &payload, &row);
+    if (!step.ok)
+        return step;
     blog_anchor_view(&row, &payload, out);
     return ZCL_OK;
 }
@@ -579,7 +589,7 @@ static bool blog_anchor_commit_snapshot_bound(
 
 /* Loads the prepared raw transaction, claims, publishes, and records it. */
 static struct zcl_result blog_anchor_commit_publish(
-    const struct blog_anchor_runtime *rt, const uint8_t plan_id[32],
+    const struct blog_anchor_runtime *rt,
     struct vault_intent_row *row,
     const struct blog_anchor_plan_payload *payload,
     struct blog_anchor_transaction_result *out)
@@ -616,7 +626,7 @@ static struct zcl_result blog_anchor_commit_publish(
                        published.message);
     if (!vault_intent_set_state(rt->node_db, row->plan_id,
             VAULT_INTENT_MEMPOOL_ACCEPTED, payload->txid, "", rt->now_unix) ||
-        !vault_intent_find(rt->node_db, plan_id, row))
+        !vault_intent_find(rt->node_db, row->plan_id, row))
         return ZCL_ERR(BLOG_ERR_TX,
                        "Blog transaction published but durable intent state is uncertain");
     blog_anchor_view(row, payload, out);
@@ -628,9 +638,14 @@ struct zcl_result blog_publication_anchor_commit(
     const uint8_t plan_id[32], struct blog_anchor_transaction_result *out)
 {
     ZCL_CHECK(blog_anchor_runtime_validate(rt, false, true));
-    ZCL_CHECK(blog_anchor_commit_args_validate(wallet_scope, plan_id, out));
+    struct zcl_result step =
+        blog_anchor_commit_args_validate(wallet_scope, plan_id, out);
+    if (!step.ok)
+        return step;
     struct vault_intent_row row;
-    ZCL_CHECK(blog_anchor_commit_plan_load(rt, plan_id, wallet_scope, &row));
+    step = blog_anchor_commit_plan_load(rt, plan_id, wallet_scope, &row);
+    if (!step.ok)
+        return step;
     struct blog_anchor_plan_payload payload;
     ZCL_CHECK(blog_anchor_payload_open(rt, &row, &payload));
     if (blog_anchor_commit_already_broadcast(&row)) {
@@ -655,5 +670,5 @@ struct zcl_result blog_publication_anchor_commit(
     }
     ZCL_CHECK(blog_anchor_event_verify(rt->node_db, payload.blog_name,
                                        payload.event_id));
-    return blog_anchor_commit_publish(rt, plan_id, &row, &payload, out);
+    return blog_anchor_commit_publish(rt, &row, &payload, out);
 }
