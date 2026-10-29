@@ -22,6 +22,26 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__linux__) || defined(__APPLE__)
+static bool pr_call(const char *path, const struct json_value *input, struct zcl_command_reply *reply)
+{
+    zcl_command_reply_init(reply, NULL);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    if (!spec || !spec->handler) return false;
+    reply->data_schema = spec->output_schema ? spec->output_schema : reply->data_schema;
+    struct zcl_command_request request = {.spec = spec, .input = input};
+    spec->handler(&request, reply);
+    return true;
+}
+static bool pr_passed(const struct zcl_command_reply *r) { return r->status == ZCL_COMMAND_STATUS_PASSED; }
+static bool pr_code(const struct zcl_command_reply *r, const char *code)
+{
+    return r->status == ZCL_COMMAND_STATUS_FAILED && !strcmp(r->error.code, code);
+}
+static const char *pr_str(const struct zcl_command_reply *r, const char *key) { return json_get_str(json_get(&r->data, key)); }
+
+#endif
+
 #if defined(__linux__)
 struct pr_fx {
     char root[1024], cs[1100], hs[1100], hc[1100], ev[1100], slot[1100], env[1200];
@@ -176,21 +196,6 @@ static bool pr_input(const struct pr_fx *fx, struct json_value *in, const char *
     if (fault) ok = ok && json_push_kv_bool(in, "test_smoke_fault", true);
     return ok;
 }
-static bool pr_call(const char *path, const struct json_value *input, struct zcl_command_reply *reply)
-{
-    zcl_command_reply_init(reply, NULL);
-    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
-    if (!spec || !spec->handler) return false;
-    reply->data_schema = spec->output_schema ? spec->output_schema : reply->data_schema;
-    struct zcl_command_request request = {.spec = spec, .input = input};
-    spec->handler(&request, reply);
-    return true;
-}
-static bool pr_passed(const struct zcl_command_reply *r) { return r->status == ZCL_COMMAND_STATUS_PASSED; }
-static bool pr_code(const struct zcl_command_reply *r, const char *code)
-{
-    return r->status == ZCL_COMMAND_STATUS_FAILED && !strcmp(r->error.code, code);
-}
 static bool pr_plan(const struct pr_fx *fx, const char *extra_key, int64_t extra, struct zcl_command_reply *reply)
 {
     struct json_value in = {0};
@@ -211,7 +216,6 @@ static bool pr_bool(const struct zcl_command_reply *r, const char *key, bool wan
     const struct json_value *v = json_get(&r->data, key);
     return v && v->type == JSON_BOOL && json_get_bool(v) == want;
 }
-static const char *pr_str(const struct zcl_command_reply *r, const char *key) { return json_get_str(json_get(&r->data, key)); }
 
 /* The grant a profile holds for its peer: revoked_at, or UINT64_MAX when unreadable. */
 static uint64_t pr_revoked(const char *profile, const char *peer_hex)
@@ -263,6 +267,17 @@ static int pr_plan_threshold(void)
         ASSERT(pr_fixture(&due, 86400));
         ASSERT(pr_fixture(&later, 10 * 86400));
         struct zcl_command_reply r = {0};
+        struct json_value defaults = {0}; json_set_object(&defaults);
+        ASSERT(json_push_kv_str(&defaults, "state_dir", due.cs));
+        ASSERT(json_push_kv_str(&defaults, "hub_state_dir", due.hs));
+        ASSERT(json_push_kv_str(&defaults, "hub_config_dir", due.hc));
+        ASSERT(pr_call("ops.mesh.device.pair.renew", &defaults, &r));
+        ASSERT(pr_passed(&r)); ASSERT_STR_EQ(pr_str(&r, "peer"), "r2");
+        zcl_command_reply_free(&r); json_free(&defaults);
+        json_set_object(&defaults); ASSERT(json_push_kv_str(&defaults, "peer", ""));
+        ASSERT(pr_call("ops.mesh.device.pair.renew", &defaults, &r));
+        ASSERT(pr_code(&r, "RENEW_INPUT_REFUSED"));
+        zcl_command_reply_free(&r); json_free(&defaults);
         ASSERT(pr_plan(&due, NULL, 0, &r)); ASSERT(pr_passed(&r));
         ASSERT(pr_bool(&r, "renew_due", true)); ASSERT(pr_bool(&r, "committed", false));
         ASSERT_EQ(strlen(pr_str(&r, "plan_id")), 64u);
@@ -493,6 +508,7 @@ static int pr_status(void)
     } TEST_END
     return failures;
 }
+
 static int pr_bounds(void)
 {
     int failures = 0;
@@ -528,9 +544,87 @@ static int pr_bounds(void)
 
 #endif
 
+#if defined(__linux__) || defined(__APPLE__)
+static bool pr_status_default_home(void)
+{
+    char root[1024]; const char *home = getenv("HOME");
+    char *saved = home ? strdup(home) : NULL;
+    if (home && !saved) return false;
+    if (!test_mkdtemp(root, sizeof(root), "pair-status-home")) { free(saved); return false; }
+    struct json_value in = {0}; struct zcl_command_reply r = {0}; json_set_object(&in);
+    bool ok = setenv("HOME", root, 1) == 0 && pr_call("ops.mesh.device.pair.status", &in, &r) &&
+              pr_passed(&r) && strcmp(pr_str(&r, "peer"), "r2") == 0 &&
+              json_get_int(json_get(&r.data, "renew_before_s")) == 259200;
+    bool restored = saved ? setenv("HOME", saved, 1) == 0 : unsetenv("HOME") == 0;
+    zcl_command_reply_free(&r); json_free(&in); free(saved); test_rm_rf(root);
+    return ok && restored;
+}
+
+static bool pr_status_input_check(const char *key, bool integer, const char *value, bool expected)
+{
+    struct json_value in = {0}; struct zcl_command_reply r = {0}; json_set_object(&in);
+    char root[1024];
+    if (!test_mkdtemp(root, sizeof(root), "pair-status-input")) { json_free(&in); return false; }
+    bool ok = integer ? json_push_kv_int(&in, key, 3600) : json_push_kv_str(&in, key, value);
+    if (strcmp(key, "state_dir") != 0) ok = ok && json_push_kv_str(&in, "state_dir", root);
+    ok = ok && pr_call("ops.mesh.device.pair.status", &in, &r) &&
+         (expected ? pr_passed(&r) : pr_code(&r, "PAIR_STATUS_INPUT_REFUSED"));
+    zcl_command_reply_free(&r); json_free(&in); test_rm_rf(root); return ok;
+}
+
+static bool pr_bound_registry(const char *path, const char *key, int64_t lo, int64_t hi)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    struct zcl_command_input_descriptor desc = {0};
+    if (!spec || !zcl_command_registry_input_descriptor(spec, key, &desc) ||
+        desc.type != JSON_INT || desc.minimum != lo || desc.maximum != hi) return false;
+    const int64_t values[] = {lo - 1, lo, lo + 1, hi, hi + 1};
+    for (size_t j = 0; j < 5; ++j) {
+        struct json_value in = {0}; json_set_object(&in);
+        bool ok = json_push_kv_int(&in, key, values[j]) &&
+                  zcl_command_registry_input_validate(spec, &in, NULL, 0) == (j > 0 && j < 4);
+        json_free(&in); if (!ok) return false;
+    }
+    struct json_value in = {0}; json_set_object(&in);
+    bool ok = json_push_kv_str(&in, key, "1") &&
+              !zcl_command_registry_input_validate(spec, &in, NULL, 0);
+    json_free(&in); return ok;
+}
+
+static int pr_status_contract(void)
+{
+    int failures = 0;
+    TEST_CASE("pair status defaults and invalid inputs") {
+        ASSERT(pr_status_default_home());
+        ASSERT(pr_status_input_check("state_dir", false, "", false));
+        ASSERT(pr_status_input_check("state_dir", true, NULL, false));
+        ASSERT(pr_status_input_check("peer", false, "BAD/peer", false));
+        ASSERT(pr_status_input_check("renew_before_s", true, NULL, true));
+    } TEST_END
+    return failures;
+}
+
+static int pr_registry_contract(void)
+{
+    int failures = 0;
+    TEST_CASE("pair renewal window registry bounds") {
+        ASSERT(pr_bound_registry("ops.mesh.device.pair.status", "renew_before_s", 3600, 2592000));
+        ASSERT(pr_bound_registry("ops.mesh.device.pair.renew", "renew_before_s", 3600, 2592000));
+        ASSERT(pr_bound_registry("ops.mesh.device.pair.renew", "grant_days", 1, 30));
+    } TEST_END
+    return failures;
+}
+
+
+#endif
+
 int test_pair_renew(void)
 {
     int failures = 0;
+#if defined(__linux__) || defined(__APPLE__)
+    failures += pr_status_contract();
+    failures += pr_registry_contract();
+#endif
 #if defined(__linux__)
     failures += pr_plan_threshold();
     failures += pr_confirm_roundtrip();

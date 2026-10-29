@@ -763,10 +763,24 @@ static const struct cr_int_bound *cr_cx_next_bound(const char *path,
         ? &cx_next : NULL;
 }
 
+static const struct cr_int_bound *cr_pair_bound(const char *path, const char *key)
+{
+    static const struct cr_int_bound renew = { "renew_before_s", 3600, 2592000 };
+    static const struct cr_int_bound grant_days = { "grant_days", 1, 30 };
+    if (strcmp(path, "ops.mesh.device.pair.renew") == 0 &&
+        strcmp(key, grant_days.key) == 0) return &grant_days;
+    if ((strcmp(path, "ops.mesh.device.pair.status") == 0 ||
+         strcmp(path, "ops.mesh.device.pair.renew") == 0) &&
+        strcmp(key, renew.key) == 0) return &renew;
+    return NULL;
+}
+
 static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
                                                    const char *key)
 {
     static const struct cr_int_bound examples = { "example_limit", 0, 32 };
+    const struct cr_int_bound *pair = cr_pair_bound(path, key);
+    if (pair) return pair;
     if (strcmp(path, "core.consensus.utxo.compare.offline") == 0 &&
         strcmp(key, examples.key) == 0) return &examples;
     /* fleet.invite ttl_hours: whole hours, 1 to 168 (FLEET_ENROL_TTL_HOURS_MIN/MAX). */

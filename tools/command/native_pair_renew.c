@@ -126,7 +126,8 @@ static bool pr_parse(const struct json_value *in, struct pr_cfg *cfg)
 {
     bool given;
     uint64_t days = PR_GRANT_DAYS_DEFAULT, before = PAIR_RENEW_BEFORE_DEFAULT_S;
-    const char *peer = json_get_str(json_get(in, "peer"));
+    const struct json_value *peer_value = json_get(in, "peer");
+    const char *peer = peer_value ? json_get_str(peer_value) : NULL;
     memset(cfg, 0, sizeof(*cfg));
     bool ok = pr_peer_in(peer, cfg) && pr_state_dir_in(in, cfg) &&
               pr_path_in(in, "hub_state_dir", cfg->hub_state, &given) && pr_path_in(in, "hub_config_dir", cfg->hub_config, &given) &&

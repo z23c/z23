@@ -249,8 +249,10 @@ static void pair_status_fail(struct zcl_command_reply *reply, const char *code, 
 static bool pair_status_inputs(const struct json_value *in, char state[PAIR_PATH_MAX], char peer[PAIR_NAME_MAX],
                                uint64_t *before_s)
 {
-    const char *dir = json_get_str(json_get(in, "state_dir"));
-    const char *name = json_get_str(json_get(in, "peer"));
+    const struct json_value *dir_value = json_get(in, "state_dir");
+    const struct json_value *name_value = json_get(in, "peer");
+    const char *dir = dir_value ? json_get_str(dir_value) : NULL;
+    const char *name = name_value ? json_get_str(name_value) : NULL;
     const struct json_value *before = json_get(in, "renew_before_s");
     const char *home = getenv("HOME");
     char fallback[PAIR_PATH_MAX];
