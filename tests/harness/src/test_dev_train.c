@@ -596,7 +596,7 @@ static int dvt_invalid_sources(const char *parent, const char *root,
                                 const char *valid)
 {
     int failures = 0;
-    char ceiling[4096], saved[8192], missing[1024], plain[1024], mixed[2048];
+    char ceiling[4096], saved[8192], missing[1024], plain[1024], inside[1024], mixed[2048];
     const char *previous = getenv("GIT_CEILING_DIRECTORIES");
     bool had_previous = previous != NULL, changed = false;
     ASSERT(!previous || strlen(previous) < sizeof(saved));
@@ -607,9 +607,13 @@ static int dvt_invalid_sources(const char *parent, const char *root,
     ASSERT(snprintf(missing, sizeof(missing), "%s/missing", ceiling) < (int)sizeof(missing));
     ASSERT(snprintf(plain, sizeof(plain), "%s/plain", ceiling) < (int)sizeof(plain));
     ASSERT(platform_directory_ensure(plain, 0700));
+    /* No ceiling applies under the checkout: Git discovery finds the root. */
+    ASSERT(snprintf(inside, sizeof(inside), "%s/plain-inside", root) < (int)sizeof(inside));
+    ASSERT(platform_directory_ensure(inside, 0700));
     ASSERT(snprintf(mixed, sizeof(mixed), "%s\n%s", valid, missing) < (int)sizeof(mixed));
     failures += dvt_refused_source(parent, root, "missing", missing, missing, "SOURCE_LOG_FAILED");
-    failures += dvt_refused_source(parent, root, "plain", plain, plain, "SOURCE_LOG_FAILED");
+    failures += dvt_refused_source(parent, root, "plain", plain, plain, "SOURCE_NOT_CHECKOUT");
+    failures += dvt_refused_source(parent, root, "inside", inside, inside, "SOURCE_NOT_CHECKOUT");
     failures += dvt_refused_source(parent, root, "badref", "refs/heads/not-present", "refs/heads/not-present", "SOURCE_LOG_FAILED");
     failures += dvt_refused_source(parent, root, "mixed", mixed, missing, "SOURCE_LOG_FAILED");
     failures += dvt_refused_source(parent, root, "notokens", "\n\n", "", "NO_SOURCES");

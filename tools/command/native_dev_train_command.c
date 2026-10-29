@@ -23,6 +23,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
+#include "util/spawn.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -189,10 +190,58 @@ static bool dvt_prepare_stack(const struct zcl_command_request *request,
 static bool dvt_source_fail(struct zcl_command_reply *reply, const char *code,
                             const char *message, const char *source)
 {
-    (void)json_push_kv_str(&reply->data, "source", source);
+    if (!json_push_kv_str(&reply->data, "source", source)) {
+        /* Never answer a source refusal that cannot name its source. */
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "REPLY_ALLOC_FAILED", "source",
+                 "could not record the failing source in the reply", source);
+        return false;
+    }
     dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
              code, "source", message, source);
     return false;
+}
+
+/* One git command whose success is proven: an observed zero exit, EOF, and no
+ * overflow or timeout. zcl_dev_train_git() cannot tell "exit 0" from "exit
+ * status unknown", so an enumeration never trusts it. `out` is terminated. */
+static bool dvt_git_exact(const char *dir, const char *const args[], char *out,
+                          size_t cap, bool *overflow)
+{
+    const char *argv[20];
+    size_t n = 0;
+    struct zcl_spawn_binary_observation seen;
+    argv[n++] = "git";
+    argv[n++] = "-C";
+    argv[n++] = dir;
+    for (size_t i = 0; args[i] && n + 1 < sizeof(argv) / sizeof(argv[0]); i++)
+        argv[n++] = args[i];
+    argv[n] = NULL;
+    struct zcl_result r = zcl_spawn_capture_binary(argv, out, cap - 1,
+                                                    DVT_GIT_TIMEOUT_MS, &seen);
+    *overflow = seen.overflow;
+    if (!r.ok) {
+        out[0] = '\0';
+        return false;
+    }
+    out[seen.output_len] = '\0';
+    return true;
+}
+
+/* A directory source must itself be the top of a Git checkout. Git discovers
+ * parents, so a plain directory inside some checkout would otherwise be read
+ * as that enclosing repository's HEAD. */
+static bool dvt_source_is_checkout(const char *source)
+{
+    const char *args[] = {"rev-parse", "--show-toplevel", NULL};
+    char top[PATH_MAX], want[PATH_MAX], have[PATH_MAX];
+    bool overflow;
+    if (!dvt_git_exact(source, args, top, sizeof top, &overflow))
+        return false;
+    zcl_dev_train_strip(top);
+    return top[0] && platform_directory_canonical_real(top, have, sizeof have) &&
+           platform_directory_canonical_real(source, want, sizeof want) &&
+           strcmp(have, want) == 0;
 }
 
 static bool dvt_source_range(const char *root, const char *source,
@@ -201,6 +250,9 @@ static bool dvt_source_range(const char *root, const char *source,
 {
     *is_dir = zcl_dev_train_is_dir(source);
     *repo = *is_dir ? source : root;
+    if (*is_dir && !dvt_source_is_checkout(source))
+        return dvt_source_fail(reply, "SOURCE_NOT_CHECKOUT",
+                                "source directory is not the top of a Git checkout", source);
     int n = snprintf(range, cap, "origin/main..%s", *is_dir ? "HEAD" : source);
     if (n < 0 || (size_t)n >= cap)
         return dvt_source_fail(reply, "SOURCE_RANGE_TOO_LONG",
@@ -212,12 +264,13 @@ static bool dvt_source_log(const char *repo, const char *source, const char *ran
                            struct zcl_command_reply *reply, char *out, size_t cap)
 {
     const char *args[] = {"log", "--reverse", "--format=%H%x1f%s", range, NULL};
-    if (zcl_dev_train_git(repo, args, out, cap, DVT_GIT_TIMEOUT_MS) != 0)
-        return dvt_source_fail(reply, "SOURCE_LOG_FAILED",
-                                "could not enumerate the source commit range", source);
-    if (strlen(out) >= cap - 1)
-        return dvt_source_fail(reply, "SOURCE_LOG_TOO_LARGE",
-                                "source commit list exceeds the capture bound", source);
+    bool overflow = false;
+    if (!dvt_git_exact(repo, args, out, cap, &overflow))
+        return overflow
+                   ? dvt_source_fail(reply, "SOURCE_LOG_TOO_LARGE",
+                                     "source commit list exceeds the capture bound", source)
+                   : dvt_source_fail(reply, "SOURCE_LOG_FAILED",
+                                     "could not enumerate the source commit range", source);
     return true;
 }
 
