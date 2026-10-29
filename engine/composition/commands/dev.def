@@ -3088,8 +3088,10 @@ ZCL_COMMAND_DEV_READ(
     "tools/lint/cyclomatic_complexity_baseline.txt, one per file: "
     "{file, functions[], max_score, lines}, fewest functions first, then "
     "lowest max_score, then path. Skips core/, custody-owned paths, "
-    "contexts/commons/packages/, files of 1300 or more lines, files any "
-    "worktree of this repository changes against origin/main, and the paths "
+    "contexts/commons/packages/, files of 1300 or more lines, files a live "
+    "worktree of this repository changes against origin/main (live: "
+    "uncommitted tracked changes or a HEAD commit under 48 hours old; "
+    "skipped.stale_holder counts files idle lanes no longer hold), and the paths "
     "listed in the exclude file. prefix is a comma list of path prefixes to "
     "keep; cwd names the checkout (default: the current directory). "
     "Read-only; a missing origin/main refuses.", 65536,

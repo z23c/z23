@@ -52,9 +52,11 @@ bool cx_row_parse(const char *line, size_t len, struct cx_row *out);
 
 /* Every path any worktree of the repository at root changes against
  * origin/main: committed (merge-base diff of its HEAD), staged, unstaged and
- * untracked. Worktrees are scanned in parallel; one that cannot be compared
+ * untracked. A worktree holds them (into out) only while live: uncommitted
+ * tracked changes, or a HEAD commit under 48 hours old; an idle one's files
+ * go into stale. Worktrees are scanned in parallel; one that cannot be compared
  * fails the whole call (why names it): an unknown is never read as clean. */
-bool cx_changed_files(const char *root, struct cx_set *out, char *why,
-                      size_t why_cap);
+bool cx_changed_files(const char *root, struct cx_set *out,
+                      struct cx_set *stale, char *why, size_t why_cap);
 
 #endif

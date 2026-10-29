@@ -24,10 +24,16 @@
 #define SC_MS 300000
 #define SC_THREADS 8
 
+/* A worktree holds its changed files only while it is live: it has
+ * uncommitted tracked changes, or its HEAD commit is at most this many hours
+ * old. Index and reflog mtimes are rewritten by tooling and are no signal. */
+#define SC_LIVE_HOURS 48
+
 struct sc_task {
     char path[ZCL_CX_PATH_MAX];
     char head[80];
     struct cx_set files;
+    bool live;
     bool ok;
 };
 
@@ -64,15 +70,49 @@ static bool sc_add_status(struct cx_set *set, const char *text)
     return true;
 }
 
+/* True when a porcelain line is not untracked ("??"): a tracked change. */
+static bool sc_has_tracked(const char *text)
+{
+    for (const char *p = text; *p;) {
+        size_t n = strcspn(p, "\n");
+        if (n >= 4 && strncmp(p, "??", 2) != 0)
+            return true;
+        p += n + (p[n] ? 1 : 0);
+    }
+    return false;
+}
+
+/* Is the worktree's HEAD commit within SC_LIVE_HOURS? git does the clock
+ * (rev-list prints the commit only when it is that recent). -1 on error. */
+static int sc_head_fresh(const char *root, const char *head, char *buf)
+{
+    char since[40];
+    const char *argv[] = {"git", "rev-list", "--no-walk", since, head, NULL};
+    snprintf(since, sizeof(since), "--since=%d.hours.ago", SC_LIVE_HOURS);
+    if (cx_run(root, argv, buf, SC_BUF, SC_MS, false) != 0)
+        return -1;
+    return buf[0] != '\0';
+}
+
 static bool sc_scan_one(const char *root, struct sc_task *t, char *buf)
 {
     char range[160];
+    int fresh = 1;
     if (sc_git(t->path, "status", "--porcelain", "--no-renames", "-uall",
                buf) != 0 ||
         !sc_add_status(&t->files, buf))
         return false;
-    if (!t->head[0])
+    t->live = sc_has_tracked(buf);
+    if (!t->head[0]) {
+        t->live = true;
         return true;
+    }
+    if (!t->live) {
+        fresh = sc_head_fresh(root, t->head, buf);
+        if (fresh < 0)
+            return false;
+        t->live = fresh == 1;
+    }
     if (snprintf(range, sizeof(range), "origin/main...%s", t->head) >=
         (int)sizeof(range))
         return false;
@@ -169,7 +209,8 @@ static struct sc_task *sc_tasks(const char *list, size_t *count, bool *ok)
     return tasks;
 }
 
-static bool sc_merge(struct sc_pool *pool, struct cx_set *out, char *why,
+static bool sc_merge(struct sc_pool *pool, struct cx_set *out,
+                     struct cx_set *stale, char *why,
                      size_t why_cap)
 {
     bool ok = true;
@@ -179,13 +220,15 @@ static bool sc_merge(struct sc_pool *pool, struct cx_set *out, char *why,
             snprintf(why, why_cap, "%s", t->path);
         ok = ok && t->ok;
         for (size_t k = 0; ok && k < t->files.n; k++)
-            ok = cx_set_add(out, t->files.v[k], strlen(t->files.v[k]));
+            ok = cx_set_add(t->live ? out : stale, t->files.v[k],
+                            strlen(t->files.v[k]));
         cx_set_free(&t->files);
     }
     return ok;
 }
 
-bool cx_changed_files(const char *root, struct cx_set *out, char *why,
+bool cx_changed_files(const char *root, struct cx_set *out,
+                      struct cx_set *stale, char *why,
                       size_t why_cap)
 {
     struct sc_pool pool;
@@ -201,7 +244,7 @@ bool cx_changed_files(const char *root, struct cx_set *out, char *why,
         pool.root = root;
         if (listed) {
             sc_run_pool(&pool);
-            ok = sc_merge(&pool, out, why, why_cap);
+            ok = sc_merge(&pool, out, stale, why, why_cap);
         }
     }
     if (!ok && !why[0])

@@ -3,7 +3,9 @@
  *          cyclomatic-complexity baseline: one unit per file, fewest
  *          functions first, then lowest max score, then path. Skips sealed,
  *          custody-owned and pinned-root paths, files of 1300 or more lines,
- *          files any worktree of this repository changes against origin/main,
+ *          files a live worktree of this repository changes against
+ *          origin/main (uncommitted tracked changes or a HEAD under 48 hours
+ *          old; idle lanes are counted as skipped.stale_holder, not held),
  *          and files named in exclude=. Read-only; ports cx-swarm's picker. */
 
 #include "command/native_command.h"
@@ -32,12 +34,13 @@ enum cx_skip {
     CX_SKIP_EXCLUDED,
     CX_SKIP_PREFIX,
     CX_SKIP_MISSING,
+    CX_STALE_HOLDER, /* not a skip: files an idle worktree no longer holds */
     CX_SKIP_KINDS
 };
 
 static const char *const k_skip_name[CX_SKIP_KINDS] = {
     "kept", "sealed", "custody", "packages", "large", "changed", "excluded",
-    "prefix", "missing"
+    "prefix", "missing", "stale_holder"
 };
 
 /* Paths the custody checks own, named after the groups of the Makefile's
@@ -57,7 +60,9 @@ struct cx_args {
 
 struct cx_sets {
     struct cx_set excluded; /* exclude= file */
-    struct cx_set changed;  /* changed by a worktree against origin/main */
+    struct cx_set changed;  /* changed by a live worktree against origin/main */
+    struct cx_set stale;    /* changed only by idle (stale) worktrees */
+    size_t freed;           /* candidates an idle worktree no longer holds */
 };
 
 struct cx_unit {
@@ -138,7 +143,7 @@ static int cx_count_lines(const char *root, const char *file)
 }
 
 static enum cx_skip cx_classify(const char *root, const char *file,
-                                const struct cx_sets *sets,
+                                struct cx_sets *sets,
                                 const struct cx_args *a, int *lines)
 {
     if (strncmp(file, "core/", 5) == 0)
@@ -153,6 +158,7 @@ static enum cx_skip cx_classify(const char *root, const char *file,
         return CX_SKIP_EXCLUDED;
     if (cx_set_has(&sets->changed, file))
         return CX_SKIP_CHANGED;
+    sets->freed += cx_set_has(&sets->stale, file);
     *lines = cx_count_lines(root, file);
     if (*lines < 0)
         return CX_SKIP_MISSING;
@@ -261,7 +267,7 @@ static int cx_max_score(const struct cx_row *rows, size_t i, size_t j)
 }
 
 static size_t cx_select(const struct cx_row *rows, size_t n, const char *root,
-                        const struct cx_sets *sets, const struct cx_args *a,
+                        struct cx_sets *sets, const struct cx_args *a,
                         struct cx_pick *picks, size_t *skipped)
 {
     size_t kept = 0;
@@ -279,6 +285,7 @@ static size_t cx_select(const struct cx_row *rows, size_t n, const char *root,
                                              cx_max_score(rows, i, j), lines };
         kept++;
     }
+    skipped[CX_STALE_HOLDER] = sets->freed;
     qsort(picks, kept, sizeof(*picks), cx_pick_cmp);
     return kept;
 }
@@ -382,7 +389,8 @@ static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
                     buf) != 0)
         cx_fail(reply, "NEXT_NO_ORIGIN_MAIN",
                 "refs/remotes/origin/main is missing; fetch it first", root);
-    else if (!cx_changed_files(root, &sets->changed, why, sizeof(why)))
+    else if (!cx_changed_files(root, &sets->changed, &sets->stale, why,
+                            sizeof(why)))
         cx_fail(reply, "NEXT_WORKTREE_SCAN",
                 "a worktree could not be compared with origin/main", why);
     else
@@ -421,4 +429,5 @@ void zcl_native_handle_dev_cx_next(const struct zcl_command_request *request,
     free(rows);
     cx_set_free(&sets.excluded);
     cx_set_free(&sets.changed);
+    cx_set_free(&sets.stale);
 }

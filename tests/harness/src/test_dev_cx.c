@@ -381,6 +381,55 @@ _test_next:;
     return failures;
 }
 
+/* A lane commit dated 2020 (idle) or now (fresh), via the committer date. */
+static void cxt_commit_dated(const char *wt, const char *msg, const char *date)
+{
+    if (date)
+        (void)setenv("GIT_COMMITTER_DATE", date, 1);
+    cxt_git(wt, "commit", "-q", "-am", msg, NULL);
+    (void)unsetenv("GIT_COMMITTER_DATE");
+}
+
+static int cxt_test_next_stale(void)
+{
+    int failures = 0;
+    struct cxt_call c;
+    char repo[CXT_PATH], wt[CXT_PATH], order[1024];
+    TEST("dev.cx.next: an idle lane frees its files; fresh and dirty lanes keep theirs") {
+        cxt_new_repo(repo, sizeof(repo), "stale");
+        for (const char *f = "abcd"; *f; f++) {
+            char rel[32];
+            (void)snprintf(rel, sizeof(rel), "src/%c.c", *f);
+            cxt_src(repo, rel, 16, 0);
+        }
+        cxt_pin_and_commit(repo);
+        (void)snprintf(wt, sizeof(wt), "%s-idle", repo);
+        cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
+        cxt_src(wt, "src/a.c", 16, 1);
+        cxt_commit_dated(wt, "idle", "2020-01-01T00:00:00 +0000");
+        (void)snprintf(wt, sizeof(wt), "%s-fresh", repo);
+        cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
+        cxt_src(wt, "src/b.c", 16, 1);
+        cxt_commit_dated(wt, "fresh", NULL);
+        (void)snprintf(wt, sizeof(wt), "%s-dirty", repo);
+        cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
+        cxt_src(wt, "src/d.c", 16, 1);
+        cxt_commit_dated(wt, "old", "2020-01-01T00:00:00 +0000");
+        cxt_src(wt, "src/c.c", 16, 1);
+        cxt_next(&c, repo, 50, NULL, NULL);
+        ASSERT(cxt_ok(&c));
+        cxt_order(&c, order, sizeof(order));
+        ASSERT_STR_EQ(order, "src/a.c,src/d.c");
+        ASSERT_EQ(cxt_skipped(&c, "changed"), 2);
+        ASSERT_EQ(cxt_skipped(&c, "stale_holder"), 2);
+        cxt_end(&c);
+        PASS();
+    }
+_test_next:;
+    (void)unsetenv("GIT_COMMITTER_DATE");
+    return failures;
+}
+
 /* ── dev.cx.check ────────────────────────────────────────────────────────── */
 
 /* A lane whose src/split.c carries one function at complexity 17 (`big_a`)
@@ -659,6 +708,7 @@ int test_dev_cx(void)
     failures += cxt_test_next_window(repo);
     failures += cxt_test_next_refusals(repo);
     failures += cxt_test_next_scan_failure(repo);
+    failures += cxt_test_next_stale();
     failures += cxt_test_check_untracked();
     failures += cxt_test_check_pass();
     failures += cxt_test_check_scope();
