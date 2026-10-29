@@ -129,6 +129,17 @@ static enum zcl_moderation_error attest_chain_shape(
     return ZCL_MODERATION_OK;
 }
 
+typedef enum zcl_moderation_error (*attest_check_fn)(
+    const struct zcl_moderation_attestation_v1 *attestation);
+
+/* Run in order; the first failing check names the error. */
+static const attest_check_fn attest_checks[] = {
+    attest_header_shape,
+    attest_time_shape,
+    attest_roots_shape,
+    attest_chain_shape,
+};
+
 /* The single shape authority. require_signature is false only from within
  * sign(), where the signature field is deliberately still zero. */
 static enum zcl_moderation_error attest_shape(
@@ -136,14 +147,11 @@ static enum zcl_moderation_error attest_shape(
     bool require_signature)
 {
     if (!attestation) return ZCL_MODERATION_NULL;
-    enum zcl_moderation_error error = attest_header_shape(attestation);
-    if (error != ZCL_MODERATION_OK) return error;
-    error = attest_time_shape(attestation);
-    if (error != ZCL_MODERATION_OK) return error;
-    error = attest_roots_shape(attestation);
-    if (error != ZCL_MODERATION_OK) return error;
-    error = attest_chain_shape(attestation);
-    if (error != ZCL_MODERATION_OK) return error;
+    for (size_t i = 0; i < sizeof(attest_checks) / sizeof(attest_checks[0]);
+         i++) {
+        enum zcl_moderation_error error = attest_checks[i](attestation);
+        if (error != ZCL_MODERATION_OK) return error;
+    }
     if (require_signature && !zcl_bytes_any_set(attestation->signature, 64))
         return ZCL_MODERATION_SIGNATURE;
     return ZCL_MODERATION_OK;
