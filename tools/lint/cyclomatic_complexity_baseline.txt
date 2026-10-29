@@ -337,7 +337,6 @@ engine/composition/src/consensus_state_snapshot_install_activate.c:activate_appl
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_stream_copy:16
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_verify_terminal_in_tx:16
 engine/composition/src/consensus_state_snapshot_install_activate.c:consensus_state_snapshot_install_activate:77
-engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88

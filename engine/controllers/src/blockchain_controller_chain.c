@@ -53,6 +53,141 @@
 #include <string.h>
 #include <time.h>
 
+/* Push the IBD-shaped fields for an unresolved provable tip; returns the
+ * best header height reported. */
+static int gbci_push_unresolved_tip(struct json_value *result,
+                                    const struct block_index *bh, int32_t hstar)
+{
+    int hdr_h = bh ? bh->nHeight : 0;
+    json_push_kv_int(result, "blocks", hstar > 0 ? hstar : 0);
+    json_push_kv_int(result, "headers", hdr_h);
+    json_push_kv_int(result, "best_header_height", hdr_h);
+    if (bh && bh->phashBlock) {
+        char hbhex[65];
+        uint256_get_hex(bh->phashBlock, hbhex);
+        json_push_kv_str(result, "bestblockhash", hbhex);
+    }
+    json_push_kv_bool(result, "initialblockdownload", true);
+    return hdr_h;
+}
+
+/* Push bestblockhash, mediantime, difficulty and chainwork for the tip. */
+static void gbci_push_tip_identity(struct json_value *result,
+                                   struct block_index *tip)
+{
+    if (tip && tip->phashBlock) {
+        char hex[65];
+        uint256_get_hex(tip->phashBlock, hex);
+        json_push_kv_str(result, "bestblockhash", hex);
+    }
+
+    /* Median-time-past at tip — zclassicd parity for BIP113 / mempool
+     * timestamp checks. */
+    if (tip)
+        json_push_kv_int(result, "mediantime",
+                         block_index_get_median_time_past(tip));
+
+    json_push_kv_real(result, "difficulty", difficulty_from_index(tip));
+
+    /* Cumulative PoW at tip, big-endian hex (zclassicd format). */
+    if (tip) {
+        char work_hex[65];
+        arith_uint256_get_hex(&tip->nChainWork, work_hex);
+        json_push_kv_str(result, "chainwork", work_hex);
+    }
+}
+
+static double gbci_verification_progress(const struct chain_params *cp,
+                                         struct block_index *tip)
+{
+    double progress = 1.0;
+    if (tip) {
+        progress = checkpoints_guess_verification_progress(
+            &cp->checkpointData, tip, true);
+        if (progress <= 0.0 || progress > 1.0) {
+            /* Fallback: ratio against best peer height. Catches the
+             * fresh-IBD window where the checkpoint projection isn't
+             * meaningful yet. */
+            struct connman *cm = rpc_net_get_connman();
+            int max_peer_h = cm ? connman_max_peer_height(cm) : 0;
+            int our_h = tip->nHeight;
+            progress = (max_peer_h > 0 && our_h < max_peer_h)
+                ? (double)our_h / (double)max_peer_h
+                : 1.0;
+        }
+    }
+    return progress;
+}
+
+static void gbci_push_value_pools(struct json_value *result,
+                                  const struct block_index *tip)
+{
+    if (tip) {
+        struct json_value pools = {0};
+        json_set_array(&pools);
+        const struct {
+            const char *id;
+            bool        monitored;
+            int64_t     zat;
+        } pool_defs[] = {
+            { "sprout",  tip->has_chain_sprout_value,
+              tip->has_chain_sprout_value  ? tip->nChainSproutValue  : 0 },
+            { "sapling", tip->has_chain_sapling_value,
+              tip->has_chain_sapling_value ? tip->nChainSaplingValue : 0 },
+        };
+        for (size_t i = 0; i < sizeof(pool_defs)/sizeof(pool_defs[0]); i++) {
+            struct json_value pool = {0};
+            json_set_object(&pool);
+            json_push_kv_str(&pool, "id", pool_defs[i].id);
+            json_push_kv_bool(&pool, "monitored", pool_defs[i].monitored);
+            if (pool_defs[i].monitored) {
+                json_push_kv_real(&pool, "chainValue",
+                                  (double)pool_defs[i].zat / 1e8);
+                json_push_kv_int(&pool, "chainValueZat", pool_defs[i].zat);
+            }
+            json_push_back(&pools, &pool);
+            json_free(&pool);
+        }
+        json_push_kv(result, "valuePools", &pools);
+        json_free(&pools);
+    }
+}
+
+static void gbci_push_upgrades(struct json_value *result,
+                               const struct chain_params *cp, int tip_height)
+{
+    struct json_value upgrades = {0};
+    json_set_object(&upgrades);
+    for (int idx = UPGRADE_OVERWINTER; idx < MAX_NETWORK_UPGRADES; idx++) {
+        int activation = cp->consensus.vUpgrades[idx].nActivationHeight;
+        if (activation == NETWORK_UPGRADE_NO_ACTIVATION)
+            continue;
+        const struct nu_info *info = &NetworkUpgradeInfo[idx];
+        char key[48];
+        snprintf(key, sizeof(key), "%08x", info->nBranchId);
+        if (json_get(&upgrades, key) != NULL) {
+            /* Branch id already present — append the upgrade name to keep
+             * the JSON map key unique. */
+            snprintf(key, sizeof(key), "%08x-%s", info->nBranchId,
+                     info->strName ? info->strName : "?");
+        }
+        const char *status =
+            tip_height >= activation ? "active" :
+            (activation == NETWORK_UPGRADE_NO_ACTIVATION ? "disabled" :
+             "pending");
+        struct json_value upg = {0};
+        json_set_object(&upg);
+        json_push_kv_str(&upg, "name", info->strName ? info->strName : "?");
+        json_push_kv_int(&upg, "activationheight", activation);
+        json_push_kv_str(&upg, "status", status);
+        json_push_kv_str(&upg, "info", info->strInfo ? info->strInfo : "");
+        json_push_kv(&upgrades, key, &upg);
+        json_free(&upg);
+    }
+    json_push_kv(result, "upgrades", &upgrades);
+    json_free(&upgrades);
+}
+
 bool rpc_getblockchaininfo(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
@@ -93,17 +228,8 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
          * be parseable JSON. blocks = the honest provable height (>=0), headers
          * = the best header height we know, initialblockdownload = true, and
          * bestblockhash when the header tip is available. */
-        struct block_index *bh = ctx->main_state->pindex_best_header;
-        int hdr_h = bh ? bh->nHeight : 0;
-        json_push_kv_int(result, "blocks", hstar > 0 ? hstar : 0);
-        json_push_kv_int(result, "headers", hdr_h);
-        json_push_kv_int(result, "best_header_height", hdr_h);
-        if (bh && bh->phashBlock) {
-            char hbhex[65];
-            uint256_get_hex(bh->phashBlock, hbhex);
-            json_push_kv_str(result, "bestblockhash", hbhex);
-        }
-        json_push_kv_bool(result, "initialblockdownload", true);
+        int hdr_h = gbci_push_unresolved_tip(
+            result, ctx->main_state->pindex_best_header, hstar);
         LOG_WARN("blockchain",
                  "getblockchaininfo: provable tip hstar=%d unresolved — "
                  "returning IBD object (blocks=%d headers=%d)",
@@ -121,48 +247,14 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
     json_push_kv_bool(result, "initialblockdownload",
                       is_initial_block_download(ctx->main_state));
 
-    if (tip && tip->phashBlock) {
-        char hex[65];
-        uint256_get_hex(tip->phashBlock, hex);
-        json_push_kv_str(result, "bestblockhash", hex);
-    }
-
-    /* Median-time-past at tip — zclassicd parity for BIP113 / mempool
-     * timestamp checks. */
-    if (tip)
-        json_push_kv_int(result, "mediantime",
-                         block_index_get_median_time_past(tip));
-
-    json_push_kv_real(result, "difficulty", difficulty_from_index(tip));
-
-    /* Cumulative PoW at tip, big-endian hex (zclassicd format). */
-    if (tip) {
-        char work_hex[65];
-        arith_uint256_get_hex(&tip->nChainWork, work_hex);
-        json_push_kv_str(result, "chainwork", work_hex);
-    }
+    gbci_push_tip_identity(result, tip);
 
     /* verificationprogress: fraction of expected validation work done,
      * matching zclassicd semantics (chain_tx history vs checkpoint
      * baseline projection). Falls back to peer-height ratio only when
      * the checkpoint data is unavailable. */
-    double progress = 1.0;
-    if (tip) {
-        progress = checkpoints_guess_verification_progress(
-            &cp->checkpointData, tip, true);
-        if (progress <= 0.0 || progress > 1.0) {
-            /* Fallback: ratio against best peer height. Catches the
-             * fresh-IBD window where the checkpoint projection isn't
-             * meaningful yet. */
-            struct connman *cm = rpc_net_get_connman();
-            int max_peer_h = cm ? connman_max_peer_height(cm) : 0;
-            int our_h = tip->nHeight;
-            progress = (max_peer_h > 0 && our_h < max_peer_h)
-                ? (double)our_h / (double)max_peer_h
-                : 1.0;
-        }
-    }
-    json_push_kv_real(result, "verificationprogress", progress);
+    json_push_kv_real(result, "verificationprogress",
+                      gbci_verification_progress(cp, tip));
 
     /* valuePools — sprout + sapling pool balances. Match zclassicd
      * format: each pool is an object with id / monitored / chainValue
@@ -180,35 +272,7 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
      * in sync_controller_catchup.c) writes sapling_value=0 per block, so
      * a SUM under-reports the pool balance on any datadir whose history
      * came through catchup rather than the consensus connect_block path. */
-    if (tip) {
-        struct json_value pools = {0};
-        json_set_array(&pools);
-        const struct {
-            const char *id;
-            bool        monitored;
-            int64_t     zat;
-        } pool_defs[] = {
-            { "sprout",  tip->has_chain_sprout_value,
-              tip->has_chain_sprout_value  ? tip->nChainSproutValue  : 0 },
-            { "sapling", tip->has_chain_sapling_value,
-              tip->has_chain_sapling_value ? tip->nChainSaplingValue : 0 },
-        };
-        for (size_t i = 0; i < sizeof(pool_defs)/sizeof(pool_defs[0]); i++) {
-            struct json_value pool = {0};
-            json_set_object(&pool);
-            json_push_kv_str(&pool, "id", pool_defs[i].id);
-            json_push_kv_bool(&pool, "monitored", pool_defs[i].monitored);
-            if (pool_defs[i].monitored) {
-                json_push_kv_real(&pool, "chainValue",
-                                  (double)pool_defs[i].zat / 1e8);
-                json_push_kv_int(&pool, "chainValueZat", pool_defs[i].zat);
-            }
-            json_push_back(&pools, &pool);
-            json_free(&pool);
-        }
-        json_push_kv(result, "valuePools", &pools);
-        json_free(&pools);
-    }
+    gbci_push_value_pools(result, tip);
 
     /* Upgrades — one entry per network-upgrade slot whose activation
      * height is set (skipping BASE_SPROUT, which is always-active and
@@ -225,37 +289,7 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
      * and disambiguate any colliding key with the upgrade name so every
      * map key is unique. The shared branch id is a consensus value and
      * is unchanged. */
-    struct json_value upgrades = {0};
-    json_set_object(&upgrades);
-    int tip_height = tip ? tip->nHeight : 0;
-    for (int idx = UPGRADE_OVERWINTER; idx < MAX_NETWORK_UPGRADES; idx++) {
-        int activation = cp->consensus.vUpgrades[idx].nActivationHeight;
-        if (activation == NETWORK_UPGRADE_NO_ACTIVATION)
-            continue;
-        const struct nu_info *info = &NetworkUpgradeInfo[idx];
-        char key[48];
-        snprintf(key, sizeof(key), "%08x", info->nBranchId);
-        if (json_get(&upgrades, key) != NULL) {
-            /* Branch id already present — append the upgrade name to keep
-             * the JSON map key unique. */
-            snprintf(key, sizeof(key), "%08x-%s", info->nBranchId,
-                     info->strName ? info->strName : "?");
-        }
-        const char *status =
-            tip_height >= activation ? "active" :
-            (activation == NETWORK_UPGRADE_NO_ACTIVATION ? "disabled" :
-             "pending");
-        struct json_value upg = {0};
-        json_set_object(&upg);
-        json_push_kv_str(&upg, "name", info->strName ? info->strName : "?");
-        json_push_kv_int(&upg, "activationheight", activation);
-        json_push_kv_str(&upg, "status", status);
-        json_push_kv_str(&upg, "info", info->strInfo ? info->strInfo : "");
-        json_push_kv(&upgrades, key, &upg);
-        json_free(&upg);
-    }
-    json_push_kv(result, "upgrades", &upgrades);
-    json_free(&upgrades);
+    gbci_push_upgrades(result, cp, tip ? tip->nHeight : 0);
 
     return true;
 }
