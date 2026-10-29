@@ -245,7 +245,7 @@ static bool dlq_policy(const char *text)
     char st[600], dir[700], path[800];
     if (!platform_state_root(st, sizeof(st)))
         return false;
-    (void)snprintf(dir, sizeof(dir), "%s/queue", st);
+    (void)snprintf(dir, sizeof(dir), "%s/land", st);
     (void)snprintf(path, sizeof(path), "%s/receive-policy", dir);
     (void)mkdir(dir, 0700);
     (void)remove(path);

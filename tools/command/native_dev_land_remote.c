@@ -39,7 +39,7 @@
  *          pre-push hook trusts; RECEIVE_WORKTREE_DIRTY when it holds tracked
  *          changes, which are never reset) and queues the tip through the
  *          in-process submit path, returning submit's reply unchanged.
- *          Admission: the host's file <state root>/queue/receive-policy
+ *          Admission: the host's file <state root>/land/receive-policy
  *          (beside queue.jsonl) holds one line `require_receipts=N`. Absent
  *          or N=0 changes nothing. With N>0 receive needs --offer and
  *          --receipts (RECEIVE_RECEIPTS_REQUIRED), runs check_offer's checks
@@ -415,7 +415,7 @@ static bool dlr_recv_policy(int *need, struct zcl_command_reply *reply)
     *need = 0;
     if (!platform_state_root(state, sizeof(state)))
         return true; /* no state root: the worktree step refuses as before */
-    if (snprintf(path, sizeof(path), "%s/queue/receive-policy", state) >=
+    if (snprintf(path, sizeof(path), "%s/land/receive-policy", state) >=
         (int)sizeof(path)) {
         dlr_recv_fail(reply, "RECEIVE_BAD_POLICY", "policy",
                       "the receive-policy path is too long", state);
