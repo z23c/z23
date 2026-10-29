@@ -292,7 +292,7 @@ static int test_encode_significant_digits(void)
     return failures;
 }
 
-int test_domain_encoding_base58(void)
+static int test_base58_contract_rules(void)
 {
     int failures = 0;
 
@@ -327,6 +327,12 @@ int test_domain_encoding_base58(void)
         bool ok = domain_encoding_base58_decode("0OIl", dec, sizeof dec, &dec_len);
         B58_CHECK("invalid character rejected", !ok);
     }
+    return failures;
+}
+
+static int test_base58_known_vectors(void)
+{
+    int failures = 0;
 
     /* (2) Known-answer vectors (encode + decode). */
     for (size_t i = 0; i < sizeof k_vectors / sizeof k_vectors[0]; i++) {
@@ -336,6 +342,12 @@ int test_domain_encoding_base58(void)
         snprintf(name, sizeof name, "vector[%zu] decode", i);
         B58_CHECK(name, decode_matches(k_vectors[i].enc, k_vectors[i].bytes, k_vectors[i].len));
     }
+    return failures;
+}
+
+static int test_base58_roundtrip_lengths(void)
+{
+    int failures = 0;
 
     /* (3) Round-trip on varied sizes. */
     {
@@ -347,6 +359,12 @@ int test_domain_encoding_base58(void)
             B58_CHECK(name, roundtrip_ok(buf, L));
         }
     }
+    return failures;
+}
+
+static int test_base58check_contract(void)
+{
+    int failures = 0;
 
     /* (4) Base58Check round-trip + checksum mismatch rejection on a 21-byte
      * P2PKH-shaped payload (version 0x00 + 20-byte hash). The encoded
@@ -404,6 +422,12 @@ int test_domain_encoding_base58(void)
         else
             B58_CHECK("Base58Check encode (synthetic payload)", ok);
     }
+    return failures;
+}
+
+static int test_base58_p2sh_payload(void)
+{
+    int failures = 0;
 
     /* BIP-13 P2SH: prefix 0x05, sample payload. */
     {
@@ -421,6 +445,12 @@ int test_domain_encoding_base58(void)
         B58_CHECK("BIP-13 P2SH encode succeeds", ok && enc_len > 0);
         B58_CHECK("BIP-13 P2SH round-trip", ok && check_roundtrip_ok(p2sh, sizeof p2sh));
     }
+    return failures;
+}
+
+static int test_base58_random_roundtrips(void)
+{
+    int failures = 0;
 
     /* Random-ish Base58Check round-trips across multiple lengths. */
     {
@@ -432,6 +462,12 @@ int test_domain_encoding_base58(void)
             B58_CHECK(name, check_roundtrip_ok(buf, L));
         }
     }
+    return failures;
+}
+
+static int test_base58_stack_caps(void)
+{
+    int failures = 0;
 
     /* Stack-VLA caps: oversized payloads are rejected on both encode
      * paths; the largest legitimate inputs stay far inside the cap. */
@@ -449,6 +485,12 @@ int test_domain_encoding_base58(void)
         B58_CHECK("base58check encode accepts payload at the cap",
                   domain_encoding_base58check_encode(big, 1020, enc, sizeof enc, &enc_len));
     }
+    return failures;
+}
+
+static int test_base58_whitespace(void)
+{
+    int failures = 0;
 
     /* (6) Whitespace handling preserved. */
     {
@@ -461,6 +503,21 @@ int test_domain_encoding_base58(void)
         ok = domain_encoding_base58_decode("a3 gV", dec, sizeof dec, &dec_len);
         B58_CHECK("decode rejects embedded whitespace tail", !ok);
     }
+    return failures;
+}
+
+int test_domain_encoding_base58(void)
+{
+    int failures = 0;
+
+    failures += test_base58_contract_rules();
+    failures += test_base58_known_vectors();
+    failures += test_base58_roundtrip_lengths();
+    failures += test_base58check_contract();
+    failures += test_base58_p2sh_payload();
+    failures += test_base58_random_roundtrips();
+    failures += test_base58_stack_caps();
+    failures += test_base58_whitespace();
 
     return failures + test_decode_active_span() + test_encode_significant_digits() +
         test_decode_leading_ones_bound();
