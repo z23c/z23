@@ -402,6 +402,216 @@ static void gap_fill_persist_coverage(void)
     (void)body_history_save(db);
 }
 
+struct gap_fill_snapshot {
+    struct block_index *best;
+    struct gap_fill_window gf_window;
+    int tip_h;
+    int best_h;
+    bool has_window;
+};
+
+/* Caller holds cs_main. Reads the tip and best header, floors the window
+ * on the seed cursor and the validate_headers cursor, and records the
+ * result in *s. */
+static void gap_fill_take_snapshot(struct main_state *ms,
+                                   struct gap_fill_snapshot *s)
+{
+    int tip_h = active_chain_height(&ms->chain_active);
+    s->best = ms->pindex_best_header;
+    s->best_h = s->best ? s->best->nHeight : 0;
+    /* Seed-floor raise: on a bundle/snapshot-seeded node the install
+     * advances the stage cursors (body_fetch = seed+1) but never moves
+     * chainactive, so active_tip_h sits far BELOW the reducer's fold
+     * frontier. A window floored at active_tip_h fills dl_queue with
+     * below-floor heights the fold will not consume next, and the
+     * height-sorted keep-lowest eviction then actively REFUSES the
+     * fold-needed successors above the seed. Raise the window's bottom to the fold's next-needed
+     * height. No-op on an unseeded node, where body_fetch prefetches at
+     * or ahead of the active tip. The S2.4 floor below still applies
+     * unchanged — it only ever LOWERS the window as a defensive
+     * backstop, never behind the fold. */
+    {
+        uint64_t bf_cur = body_fetch_stage_cursor();
+        if (bf_cur > 0 && bf_cur - 1 > (uint64_t)tip_h)
+            tip_h = (int)(bf_cur - 1);
+    }
+    /* S2.4: floor the download window on the validate_headers cursor, not
+     * body_fetch. body_fetch only advances once a body is already on disk
+     * (BLOCK_HAVE_DATA); a stall there must NOT also freeze on-disk body
+     * prefetch. validate_headers is header-only (Equihash + PoW, no body),
+     * structurally decoupled from body availability, and normally runs far
+     * ahead — so the transport keeps caching bodies forward while the
+     * reducer is briefly stalled, and the reducer consumes them when it
+     * advances. The floor still exists as a defensive backstop against the
+     * window running past validated headers; GAPFILL_WINDOW still bounds
+     * it, and gap_fill_block_needs_queue skips any block already on disk. */
+    s->has_window =
+        gap_fill_compute_window(tip_h, s->best_h, validate_headers_stage_cursor(),
+                                &s->gf_window) && s->best;
+    tip_h = s->gf_window.effective_tip_h;
+    s->tip_h = tip_h;
+}
+
+static void gap_fill_set_window_stats(int tip_h, int best_h, int lo, int hi)
+{
+    pthread_mutex_lock(&g_gf.mu);
+    g_gf.stats.last_tip_h     = tip_h;
+    g_gf.stats.last_best_h    = best_h;
+    g_gf.stats.last_window_lo = lo;
+    g_gf.stats.last_window_hi = hi;
+    pthread_mutex_unlock(&g_gf.mu);
+}
+
+/* Queues the filtered arrays and returns the number enqueued. Caller has
+ * released cs_main. */
+static int gap_fill_queue_window(struct download_manager *dm,
+                                 const struct gap_fill_snapshot *s,
+                                 struct uint256 *hashes, int32_t *heights,
+                                 int n_need, int lo, int hi)
+{
+    int enqueued = 0;
+    if (n_need > 0) {
+        size_t added = dl_queue_blocks(dm, hashes, heights,
+                                       (size_t)n_need);
+        enqueued = (int)added;
+        if (added > 0) {
+            printf("[gap-fill] queued %zu blocks (window [%d..%d] "
+                   "tip=%d best=%d)\n",
+                   added, lo, hi, s->tip_h, s->best_h);
+            event_emitf(EV_BLOCK_REQUESTED, 0,
+                        "gap_fill queued=%zu lo=%d hi=%d tip=%d best=%d",
+                        added, lo, hi, s->tip_h, s->best_h);
+            gap_fill_wake_dispatcher("queued_blocks");
+        } else {
+            gap_fill_wake_dispatch_if_idle(dm, "queued_idle");
+        }
+
+        /* Explicitly front-insert (priority) the LOWEST N missing blocks
+         * of the window — the connectable bottom (tip+1, tip+2, ...).
+         * hashes[]/heights[] were built from bis[] which is highest-first
+         * (collect_pprev_window walks pprev from the top), so the lowest
+         * heights are at the END of the parallel arrays. Even though
+         * dl_queue_push now keeps the queue height-sorted, this guarantees
+         * the connectable bottom is queued first regardless of any later
+         * far-ahead enqueue, belt-and-suspenders against starvation. */
+        int prio = n_need < GAPFILL_PRIORITY_BOTTOM_N
+                       ? n_need : GAPFILL_PRIORITY_BOTTOM_N;
+        for (int i = 0; i < prio; i++) {
+            int idx = n_need - 1 - i; /* lowest heights live at the tail */
+            dl_queue_priority(dm, &hashes[idx], heights[idx]);
+        }
+    }
+    return enqueued;
+}
+
+/* Caller holds cs_main; this function releases it on every path. */
+static int gap_fill_enqueue_window(struct main_state *ms,
+                                   struct download_manager *dm,
+                                   struct gap_fill_snapshot *s,
+                                   struct block_index **bis, int collected)
+{
+    /* Filter: needs data AND not in-flight. Build parallel arrays for
+     * dl_queue_blocks. We allocate up to `collected` slots. */
+    struct uint256 *hashes = zcl_malloc((size_t)collected * sizeof(*hashes),
+                                        "gap_fill_hashes");
+    int32_t *heights = zcl_malloc((size_t)collected * sizeof(*heights),
+                                  "gap_fill_heights");
+    /* Body-coverage capture: heights in this window that already have their
+     * body on disk. Captured here under cs_main (plain ints), fed to the
+     * coverage map AFTER the lock is released so no block_index is touched
+     * off-lock. */
+    int32_t *have_heights = zcl_malloc((size_t)collected * sizeof(*have_heights),
+                                       "gap_fill_have_heights");
+    if (!hashes || !heights || !have_heights) {
+        zcl_mutex_unlock(&ms->cs_main);
+        free(bis); free(hashes); free(heights); free(have_heights);
+        return 0;
+    }
+
+    int n_need = 0;
+    int n_have = 0;
+    int lo = bis[collected - 1] ? bis[collected - 1]->nHeight : s->tip_h + 1;
+    int hi = bis[0] ? bis[0]->nHeight : s->tip_h;
+    for (int i = 0; i < collected; i++) {
+        struct block_index *bi = bis[i];
+        if (bi && (bi->nStatus & BLOCK_HAVE_DATA))
+            have_heights[n_have++] = bi->nHeight;
+        if (!gap_fill_block_needs_queue(bi)) continue;
+        if (dl_is_in_flight(dm, bi->phashBlock)) continue;
+        hashes[n_need]  = *bi->phashBlock; /* value copy */
+        heights[n_need] = bi->nHeight;
+        n_need++;
+    }
+    zcl_mutex_unlock(&ms->cs_main);
+    free(bis);
+
+    int enqueued = gap_fill_queue_window(dm, s, hashes, heights, n_need,
+                                         lo, hi);
+
+    /* Maintain the body-coverage map + drive the gap-fill scheduler over
+     * the full gap [tip+1, best_header] the active chain must fill. */
+    gap_fill_update_coverage(have_heights, n_have, s->tip_h + 1, s->best_h, dm,
+                             enqueued > 0);
+
+    free(hashes);
+    free(heights);
+    free(have_heights);
+
+    gap_fill_set_window_stats(s->tip_h, s->best_h, lo, hi);
+    return enqueued;
+}
+
+/* Caller holds cs_main; this function releases it on every path. */
+static int gap_fill_pass_window(struct main_state *ms,
+                                struct download_manager *dm,
+                                struct gap_fill_snapshot *s)
+{
+    /* Window: collect at most GAPFILL_WINDOW indices from pprev,
+     * stopping at tip_h (exclusive).
+     *
+     * When the gap (best_h - tip_h) exceeds GAPFILL_WINDOW, walking
+     * back from `best` for GAPFILL_WINDOW steps gives us the TOP of
+     * the gap (e.g. h=76094..141629 with tip=8911) — but
+     * reducer activation needs the BOTTOM of the gap (h=8912..) to extend the
+     * active chain. The far-ahead blocks are useless until
+     * intermediates connect, and they saturate dl_queue (capacity
+     * 65536), preventing the immediate successors from even being
+     * queued. Result: chain wedges at the current tip.
+     *
+     * Walk pprev from `best` down to height `tip_h + window` FIRST
+     * (discarding those entries), then collect the next `window`
+     * entries which end at tip_h+1. That gives the bottom window
+     * of the gap, which is what the active chain needs next. */
+    int window = s->gf_window.count;
+    struct block_index *walk_start =
+        gap_fill_window_walk_start(s->best, &s->gf_window);
+
+    if (!walk_start) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return -1; // raw-return-ok:sentinel
+    }
+
+    struct block_index **bis = zcl_malloc((size_t)window * sizeof(*bis),
+                                          "gap_fill_window");
+    if (!bis) {
+        zcl_mutex_unlock(&ms->cs_main);
+        return 0;
+    }
+    int collected = collect_pprev_window(walk_start, s->tip_h, bis, window);
+    if (collected < 0) {
+        zcl_mutex_unlock(&ms->cs_main);
+        free(bis);
+        return -1; // raw-return-ok:sentinel
+    }
+    if (collected == 0) {
+        zcl_mutex_unlock(&ms->cs_main);
+        free(bis);
+        gap_fill_set_window_stats(s->tip_h, s->best_h, s->tip_h + 1, s->tip_h);
+        return 0;
+    }
+    return gap_fill_enqueue_window(ms, dm, s, bis, collected);
+}
+
 /* One pass: scan [tip+1, best_header] for missing data, queue
  * downloads. Returns number of blocks enqueued (0 = idle, -1 =
  * corrupt walk detected). */
@@ -424,183 +634,18 @@ static int gap_fill_pass(void)
      * only for the pointer reads + pprev walk; the dl_queue_blocks
      * call is done outside the lock. */
     zcl_mutex_lock(&ms->cs_main);
-    int tip_h = active_chain_height(&ms->chain_active);
-    struct block_index *best = ms->pindex_best_header;
-    int best_h = best ? best->nHeight : 0;
-    /* Seed-floor raise: on a bundle/snapshot-seeded node the install
-     * advances the stage cursors (body_fetch = seed+1) but never moves
-     * chainactive, so active_tip_h sits far BELOW the reducer's fold
-     * frontier. A window floored at active_tip_h fills dl_queue with
-     * below-floor heights the fold will not consume next, and the
-     * height-sorted keep-lowest eviction then actively REFUSES the
-     * fold-needed successors above the seed. Raise the window's bottom to the fold's next-needed
-     * height. No-op on an unseeded node, where body_fetch prefetches at
-     * or ahead of the active tip. The S2.4 floor below still applies
-     * unchanged — it only ever LOWERS the window as a defensive
-     * backstop, never behind the fold. */
-    {
-        uint64_t bf_cur = body_fetch_stage_cursor();
-        if (bf_cur > 0 && bf_cur - 1 > (uint64_t)tip_h)
-            tip_h = (int)(bf_cur - 1);
-    }
-    struct gap_fill_window gf_window;
-    /* S2.4: floor the download window on the validate_headers cursor, not
-     * body_fetch. body_fetch only advances once a body is already on disk
-     * (BLOCK_HAVE_DATA); a stall there must NOT also freeze on-disk body
-     * prefetch. validate_headers is header-only (Equihash + PoW, no body),
-     * structurally decoupled from body availability, and normally runs far
-     * ahead — so the transport keeps caching bodies forward while the
-     * reducer is briefly stalled, and the reducer consumes them when it
-     * advances. The floor still exists as a defensive backstop against the
-     * window running past validated headers; GAPFILL_WINDOW still bounds
-     * it, and gap_fill_block_needs_queue skips any block already on disk. */
-    bool has_window =
-        gap_fill_compute_window(tip_h, best_h, validate_headers_stage_cursor(),
-                                &gf_window) && best;
-    tip_h = gf_window.effective_tip_h;
+    struct gap_fill_snapshot snap;
+    gap_fill_take_snapshot(ms, &snap);
 
-    if (!has_window) {
+    if (!snap.has_window) {
         zcl_mutex_unlock(&ms->cs_main);
         pthread_mutex_lock(&g_gf.mu);
-        g_gf.stats.last_tip_h  = tip_h;
-        g_gf.stats.last_best_h = best_h;
+        g_gf.stats.last_tip_h  = snap.tip_h;
+        g_gf.stats.last_best_h = snap.best_h;
         pthread_mutex_unlock(&g_gf.mu);
         return 0;
     }
-
-    /* Window: collect at most GAPFILL_WINDOW indices from pprev,
-     * stopping at tip_h (exclusive).
-     *
-     * When the gap (best_h - tip_h) exceeds GAPFILL_WINDOW, walking
-     * back from `best` for GAPFILL_WINDOW steps gives us the TOP of
-     * the gap (e.g. h=76094..141629 with tip=8911) — but
-     * reducer activation needs the BOTTOM of the gap (h=8912..) to extend the
-     * active chain. The far-ahead blocks are useless until
-     * intermediates connect, and they saturate dl_queue (capacity
-     * 65536), preventing the immediate successors from even being
-     * queued. Result: chain wedges at the current tip.
-     *
-     * Walk pprev from `best` down to height `tip_h + window` FIRST
-     * (discarding those entries), then collect the next `window`
-     * entries which end at tip_h+1. That gives the bottom window
-     * of the gap, which is what the active chain needs next. */
-    int window = gf_window.count;
-    struct block_index *walk_start =
-        gap_fill_window_walk_start(best, &gf_window);
-
-    if (!walk_start) {
-        zcl_mutex_unlock(&ms->cs_main);
-        return -1; // raw-return-ok:sentinel
-    }
-
-    struct block_index **bis = zcl_malloc((size_t)window * sizeof(*bis),
-                                          "gap_fill_window");
-    if (!bis) {
-        zcl_mutex_unlock(&ms->cs_main);
-        return 0;
-    }
-    int collected = collect_pprev_window(walk_start, tip_h, bis, window);
-    if (collected < 0) {
-        zcl_mutex_unlock(&ms->cs_main);
-        free(bis);
-        return -1; // raw-return-ok:sentinel
-    }
-    if (collected == 0) {
-        zcl_mutex_unlock(&ms->cs_main);
-        free(bis);
-        pthread_mutex_lock(&g_gf.mu);
-        g_gf.stats.last_tip_h = tip_h;
-        g_gf.stats.last_best_h = best_h;
-        g_gf.stats.last_window_lo = tip_h + 1;
-        g_gf.stats.last_window_hi = tip_h;
-        pthread_mutex_unlock(&g_gf.mu);
-        return 0;
-    }
-
-    /* Filter: needs data AND not in-flight. Build parallel arrays for
-     * dl_queue_blocks. We allocate up to `collected` slots. */
-    struct uint256 *hashes = zcl_malloc((size_t)collected * sizeof(*hashes),
-                                        "gap_fill_hashes");
-    int32_t *heights = zcl_malloc((size_t)collected * sizeof(*heights),
-                                  "gap_fill_heights");
-    /* Body-coverage capture: heights in this window that already have their
-     * body on disk. Captured here under cs_main (plain ints), fed to the
-     * coverage map AFTER the lock is released so no block_index is touched
-     * off-lock. */
-    int32_t *have_heights = zcl_malloc((size_t)collected * sizeof(*have_heights),
-                                       "gap_fill_have_heights");
-    if (!hashes || !heights || !have_heights) {
-        zcl_mutex_unlock(&ms->cs_main);
-        free(bis); free(hashes); free(heights); free(have_heights);
-        return 0;
-    }
-
-    int n_need = 0;
-    int n_have = 0;
-    int lo = bis[collected - 1] ? bis[collected - 1]->nHeight : tip_h + 1;
-    int hi = bis[0] ? bis[0]->nHeight : tip_h;
-    for (int i = 0; i < collected; i++) {
-        struct block_index *bi = bis[i];
-        if (bi && (bi->nStatus & BLOCK_HAVE_DATA))
-            have_heights[n_have++] = bi->nHeight;
-        if (!gap_fill_block_needs_queue(bi)) continue;
-        if (dl_is_in_flight(dm, bi->phashBlock)) continue;
-        hashes[n_need]  = *bi->phashBlock; /* value copy */
-        heights[n_need] = bi->nHeight;
-        n_need++;
-    }
-    zcl_mutex_unlock(&ms->cs_main);
-    free(bis);
-
-    int enqueued = 0;
-    if (n_need > 0) {
-        size_t added = dl_queue_blocks(dm, hashes, heights,
-                                       (size_t)n_need);
-        enqueued = (int)added;
-        if (added > 0) {
-            printf("[gap-fill] queued %zu blocks (window [%d..%d] "
-                   "tip=%d best=%d)\n",
-                   added, lo, hi, tip_h, best_h);
-            event_emitf(EV_BLOCK_REQUESTED, 0,
-                        "gap_fill queued=%zu lo=%d hi=%d tip=%d best=%d",
-                        added, lo, hi, tip_h, best_h);
-            gap_fill_wake_dispatcher("queued_blocks");
-        } else {
-            gap_fill_wake_dispatch_if_idle(dm, "queued_idle");
-        }
-
-        /* Explicitly front-insert (priority) the LOWEST N missing blocks
-         * of the window — the connectable bottom (tip+1, tip+2, ...).
-         * hashes[]/heights[] were built from bis[] which is highest-first
-         * (collect_pprev_window walks pprev from the top), so the lowest
-         * heights are at the END of the parallel arrays. Even though
-         * dl_queue_push now keeps the queue height-sorted, this guarantees
-         * the connectable bottom is queued first regardless of any later
-         * far-ahead enqueue, belt-and-suspenders against starvation. */
-        int prio = n_need < GAPFILL_PRIORITY_BOTTOM_N
-                       ? n_need : GAPFILL_PRIORITY_BOTTOM_N;
-        for (int i = 0; i < prio; i++) {
-            int idx = n_need - 1 - i; /* lowest heights live at the tail */
-            dl_queue_priority(dm, &hashes[idx], heights[idx]);
-        }
-    }
-
-    /* Maintain the body-coverage map + drive the gap-fill scheduler over
-     * the full gap [tip+1, best_header] the active chain must fill. */
-    gap_fill_update_coverage(have_heights, n_have, tip_h + 1, best_h, dm,
-                             enqueued > 0);
-
-    free(hashes);
-    free(heights);
-    free(have_heights);
-
-    pthread_mutex_lock(&g_gf.mu);
-    g_gf.stats.last_tip_h     = tip_h;
-    g_gf.stats.last_best_h    = best_h;
-    g_gf.stats.last_window_lo = lo;
-    g_gf.stats.last_window_hi = hi;
-    pthread_mutex_unlock(&g_gf.mu);
-    return enqueued;
+    return gap_fill_pass_window(ms, dm, &snap);
 }
 
 /* Shutdown predicate + heartbeat the census catch-up burst calls between
