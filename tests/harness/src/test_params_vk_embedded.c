@@ -271,81 +271,584 @@ static bool vk_contextual_ok(struct vk_js_inputs *js_out)
     return ok;
 }
 
+/* Map the currently selected network back to the enum a section restores
+ * after forcing CHAIN_MAIN; CHAIN_MAIN when nothing is selected. */
+static enum chain_network vk_network_of(const struct chain_params *prev)
+{
+    if (!prev) return CHAIN_MAIN;
+    if (strcmp(prev->strNetworkID, "test") == 0) return CHAIN_TESTNET;
+    if (strcmp(prev->strNetworkID, "regtest") == 0) return CHAIN_REGTEST;
+    return CHAIN_MAIN;
+}
+
+/* What looking for a real parameter directory found and did. */
+enum vk_stage_outcome {
+    VK_REAL_PARAMS_ABSENT, /* no readable directory: nothing staged */
+    VK_REAL_PARAMS_STAGED, /* planted-corruption fixture staged */
+    VK_REAL_PARAMS_FAILED, /* directory present but staging failed */
+};
+
+/* Probe for a readable real parameter directory (HOME/.zcash-params with a
+ * readable sprout-verifying.key) and stage the planted-corruption fixture
+ * from it. Never prints; callers report. */
+static enum vk_stage_outcome vk_probe_and_stage_planted(char *real_dir,
+                                                        size_t dir_cap,
+                                                        char *scratch,
+                                                        size_t cap)
+{
+    const char *home = getenv("HOME");
+    snprintf(real_dir, dir_cap, "%s/.zcash-params", home ? home : "");
+
+    char probe[1200];
+    snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
+    if (!home || access(probe, R_OK) != 0)
+        return VK_REAL_PARAMS_ABSENT;
+    return vk_stage_planted_dir(real_dir, scratch, cap)
+        ? VK_REAL_PARAMS_STAGED : VK_REAL_PARAMS_FAILED;
+}
+
+/* The first three blobs are Groth16 keys and must be self-describing:
+ * the ic_len they carry has to account for their own length exactly.
+ * This runs with or without a parameter directory. */
+static int vk_check_blob_prefix_lengths(void)
+{
+    int failures = 0;
+
+    for (size_t i = 0; i < 3; i++) {
+        const struct zcl_embedded_vk *e = &zcl_embedded_vks[i];
+        char name[128];
+
+        snprintf(name, sizeof(name),
+                 "%s blob is long enough to carry an ic_len", e->name);
+        VK_CHECK(name, e->len > VK_HEADER_BYTES);
+        if (e->len <= VK_HEADER_BYTES) continue;
+
+        uint32_t ic_len = be32_at(e->bytes + VK_IC_LEN_OFFSET);
+        size_t want = (size_t)VK_HEADER_BYTES +
+                      (size_t)ic_len * VK_IC_POINT_BYTES;
+
+        snprintf(name, sizeof(name),
+                 "%s is exactly 868+%u*96=%zu bytes (got %zu)",
+                 e->name, ic_len, want, e->len);
+        VK_CHECK(name, e->len == want);
+    }
+    return failures;
+}
+
+/* Byte-for-byte against the real files, when this machine has them.
+ * Read-only: never write into a parameter directory. */
+static int vk_check_blobs_match_real_files(void)
+{
+    int failures = 0;
+
+    const char *home = getenv("HOME");
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/.zcash-params", home ? home : "");
+
+    char probe[1200];
+    snprintf(probe, sizeof(probe), "%s/%s", dir, vk_source_file[0]);
+    if (!home || access(probe, R_OK) != 0) {
+        printf("params_vk_embedded: external prefix comparison... "
+               "NOT INSTALLED (no readable %s; the params-free "
+               "validation contract remains mandatory below)\n", dir);
+    } else {
+        for (size_t i = 0; i < ZCL_EMBEDDED_VK_COUNT; i++) {
+            const struct zcl_embedded_vk *e = &zcl_embedded_vks[i];
+            char path[1200], name[256];
+            snprintf(path, sizeof(path), "%s/%s", dir, vk_source_file[i]);
+
+            FILE *f = fopen(path, "rb");
+            snprintf(name, sizeof(name), "%s: opened %s",
+                     e->name, vk_source_file[i]);
+            VK_CHECK(name, f != NULL);
+            if (!f) continue;
+
+            uint8_t *buf = malloc(e->len);
+            snprintf(name, sizeof(name), "%s: allocated %zu bytes",
+                     e->name, e->len);
+            VK_CHECK(name, buf != NULL);
+            if (!buf) { fclose(f); continue; }
+
+            size_t got = fread(buf, 1, e->len, f);
+            fclose(f);
+
+            snprintf(name, sizeof(name),
+                     "%s: read %zu bytes of prefix", e->name, e->len);
+            VK_CHECK(name, got == e->len);
+
+            snprintf(name, sizeof(name),
+                     "%s: embedded blob equals the leading %zu bytes of %s",
+                     e->name, e->len, vk_source_file[i]);
+            VK_CHECK(name, got == e->len &&
+                           memcmp(buf, e->bytes, e->len) == 0);
+            free(buf);
+        }
+    }
+    return failures;
+}
+
+/* The installed Sapling keys equal those a good parameter
+ * directory would install (parsed from the real files'
+ * prefixes, compared field by field): the fallback verifier
+ * is bit-for-bit identical, so it accepts nothing a
+ * fully-parameterised node would reject. */
+static int vk_check_published_match_real_files(const char *real_dir)
+{
+    int failures = 0;
+
+    struct groth16_vk from_file = {0};
+    char p[1200];
+    snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
+    bool ok = vk_from_real_file(&from_file, p, zcl_embedded_vks[0].len);
+    VK_CHECK("real sapling-spend VK prefix parses", ok);
+    VK_CHECK("published spend VK == the real file's spend VK",
+             ok && vk_equal(sapling_test_published_spend_vk(), &from_file));
+    free(from_file.ic);
+
+    struct groth16_vk out_file = {0};
+    snprintf(p, sizeof(p), "%s/sapling-output.params", real_dir);
+    ok = vk_from_real_file(&out_file, p, zcl_embedded_vks[1].len);
+    VK_CHECK("real sapling-output VK prefix parses", ok);
+    VK_CHECK("published output VK == the real file's output VK",
+             ok && vk_equal(sapling_test_published_output_vk(), &out_file));
+    free(out_file.ic);
+    return failures;
+}
+
+/* Section 1b's staged run on mainnet: the corrupt directory is refused,
+ * nothing stays published, then the fallback installs and the A/B proof
+ * pair runs. */
+static int vk_refused_dir_mainnet_checks(const char *real_dir,
+                                         const char *scratch)
+{
+    int failures = 0;
+
+    /* Mainnet, where a PHGR13 failure is fatal to the load.
+     * Restored below so the network of other groups is
+     * unchanged. */
+    const struct chain_params *prev = chain_params_get();
+    bool had_prev = (prev != NULL);
+    enum chain_network prev_net = vk_network_of(prev);
+    chain_params_select(CHAIN_MAIN);
+
+    /* Deterministic baseline: another group in this process may
+     * have loaded parameters or installed a PHGR13 fixture VK. */
+    sapling_free_params();
+    sprout_phgr_set_vk(NULL);
+
+    VK_CHECK("a corrupt sprout-verifying.key is REFUSED",
+             !sapling_init_params(scratch));
+    VK_CHECK("a refused directory reports params as NOT loaded",
+             !sapling_params_loaded());
+
+    /* The publish/free invariant: nothing is published. */
+    VK_CHECK("refused load publishes NO spend VK",
+             sapling_test_published_spend_vk() == NULL);
+    VK_CHECK("refused load publishes NO output VK",
+             sapling_test_published_output_vk() == NULL);
+    VK_CHECK("refused load publishes NO sprout-groth16 VK",
+             sprout_test_published_vk() == NULL);
+    VK_CHECK("refused load publishes NO PHGR13 VK",
+             sprout_test_published_phgr_vk() == NULL);
+
+#ifdef ZCL_UAF_PROBE
+    /* Opt-in reproducer (build with -DZCL_UAF_PROBE, run under
+     * valgrind or ASan): drives the dereference the production
+     * verifier performs (bls12_381.c groth16_verify, "struct
+     * g1_point vk_x = vk->ic[0];") against whatever the refused
+     * load left published; the pointer must be NULL. Off by
+     * default so a plain run needs no checker. */
+    {
+        const struct groth16_vk *pub_vk =
+            sapling_test_published_spend_vk();
+        fprintf(stderr, "[uaf-probe] published spend vk=%p\n",
+                (const void *)pub_vk);
+        if (pub_vk) {
+            struct groth16_proof pr;
+            memset(&pr, 0, sizeof(pr));
+            uint64_t pub[7][4];
+            memset(pub, 0, sizeof(pub));
+            pub[0][0] = 1;
+            fprintf(stderr, "[uaf-probe] groth16_verify -> %d\n",
+                    (int)groth16_verify(pub_vk, &pr, pub, 7));
+        }
+    }
+#endif
+
+    /* Fail-closed is therefore still reachable: with nothing
+     * published the consensus entry points reject. */
+    {
+        struct sapling_verification_ctx vctx;
+        sapling_verification_ctx_init(&vctx);
+        uint8_t cv[32], cm[32], epk[32], zk[192];
+        memset(cv, 0x11, 32); memset(cm, 0x22, 32);
+        memset(epk, 0x33, 32); memset(zk, 0x44, 192);
+        VK_CHECK("with nothing published, check_output rejects",
+                 !sapling_check_output(&vctx, cv, cm, epk, zk));
+    }
+
+    /* The A side of the A/B below: the SAME real mainnet shielded
+     * transaction through the SAME entry point is REJECTED while
+     * no verifying key is published. */
+    VK_CHECK("before the fallback, a real mainnet shielded proof "
+             "is REJECTED (fail-closed)",
+             !vk_contextual_ok(NULL));
+
+    /* Now the fallback. */
+    VK_CHECK("embedded VKs install after a refused directory",
+             sapling_install_embedded_vks());
+    VK_CHECK("fallback arms proof validation",
+             sapling_params_loaded());
+    VK_CHECK("fallback reports keys as compiled-in",
+             sapling_vks_are_embedded());
+    VK_CHECK("fallback does NOT arm proving",
+             !zclassic_sapling_prover_is_ready());
+
+    failures += vk_check_published_match_real_files(real_dir);
+
+    /* The B side: the SAME transaction and entry point is now
+     * ACCEPTED against the compiled-in PHGR13 key, attributable
+     * to the fallback alone. */
+    {
+        struct vk_js_inputs js;
+        VK_CHECK("a REAL mainnet shielded proof validates on the "
+                 "fallback keys", vk_contextual_ok(&js));
+
+        /* The verifier is not a rubber stamp: one flipped proof
+         * byte, same public inputs, must be rejected. Driven
+         * through sprout_verify_phgr13 because a tampered tx
+         * would fail its JoinSplit signature before the proof
+         * was checked. */
+        VK_CHECK("fixture JoinSplit public inputs recovered",
+                 js.valid);
+        if (js.valid) {
+            VK_CHECK("the fallback PHGR13 key accepts the real "
+                     "proof directly",
+                     sprout_verify_phgr13(js.proof, js.rt,
+                         js.h_sig, js.mac1, js.mac2, js.nf1,
+                         js.nf2, js.cm1, js.cm2,
+                         js.vpub_old, js.vpub_new));
+            uint8_t bad_proof[PHGR_PROOF_SIZE];
+            memcpy(bad_proof, js.proof, sizeof(bad_proof));
+            bad_proof[17] ^= 0x01u;
+            VK_CHECK("one flipped proof byte is REJECTED by the "
+                     "fallback PHGR13 key",
+                     !sprout_verify_phgr13(bad_proof, js.rt,
+                         js.h_sig, js.mac1, js.mac2, js.nf1,
+                         js.nf2, js.cm1, js.cm2,
+                         js.vpub_old, js.vpub_new));
+        }
+    }
+
+    /* Leave the process as this section found it: nothing loaded,
+     * so a later group's sapling_init_params does a real load. */
+    sapling_free_params();
+    sprout_phgr_set_vk(NULL);
+    if (had_prev) chain_params_select(prev_net);
+    return failures;
+}
+
+/* Section 1b: a parameter directory that is PRESENT but corrupt is refused
+ * whole, strands no published key, and falls back to the compiled-in ones. */
+static int vk_check_refused_dir_falls_back(void)
+{
+    int failures = 0;
+
+    char real_dir[1024];
+    char scratch[1200];
+    enum vk_stage_outcome staged =
+        vk_probe_and_stage_planted(real_dir, sizeof(real_dir), scratch,
+                                   sizeof(scratch));
+    if (staged == VK_REAL_PARAMS_ABSENT) {
+        printf("params_vk_embedded: external complete-directory "
+               "corruption fixture... NOT INSTALLED (needs readable %s; "
+               "embedded fallback and bad-blob refusal remain mandatory "
+               "below)\n", real_dir);
+    } else {
+        /* The machine HAS the files, so a staging failure is a failure,
+         * not a skip. */
+        VK_CHECK("planted-corruption fixture staged",
+                 staged == VK_REAL_PARAMS_STAGED);
+    }
+
+    if (staged == VK_REAL_PARAMS_STAGED) {
+        failures += vk_refused_dir_mainnet_checks(real_dir, scratch);
+        vk_unstage_planted_dir(scratch);
+    }
+    return failures;
+}
+
+/* Section 2: installing the embedded keys arms proof validation. */
+static int vk_check_embedded_install_arms_validation(void)
+{
+    int failures = 0;
+
+    VK_CHECK("install succeeds", sapling_install_embedded_vks());
+    VK_CHECK("params report as loaded (proof validation armed)",
+             sapling_params_loaded());
+    VK_CHECK("keys report as embedded, not from a parameter directory",
+             sapling_vks_are_embedded());
+    VK_CHECK("install is idempotent", sapling_install_embedded_vks());
+    VK_CHECK("a real mainnet shielded proof validates with the embedded "
+             "keys", vk_contextual_ok(NULL));
+    return failures;
+}
+
+/* Section 3: proving stays fail-closed. */
+static int vk_check_proving_fail_closed(void)
+{
+    int failures = 0;
+
+    /* No proving keys were loaded, so the prover must not claim to be
+     * ready: build_output_description() writes a 192-byte zero proof when
+     * no proving key is present, and the wallet's refusal on this flag
+     * keeps that branch unreachable. */
+    VK_CHECK("prover is NOT ready with verifying keys alone",
+             !zclassic_sapling_prover_is_ready());
+
+    const char *status = zclassic_sapling_prover_status();
+    VK_CHECK("prover status names the missing parameters",
+             status != NULL &&
+             strcmp(status, "params_not_initialized") == 0);
+    return failures;
+}
+
+/* Section 4: a planted bad blob is refused by the production digest check. */
+static int vk_check_planted_bad_blob_refused(void)
+{
+    int failures = 0;
+
+    const struct zcl_embedded_vk *e = &zcl_embedded_vks[0];
+
+    /* Control: the genuine blob passes, so a later refusal means the
+     * planted damage was detected and not that the check refuses
+     * everything. */
+    VK_CHECK("genuine blob passes its own digest",
+             sapling_test_embedded_vk_sha256_ok(e->name, e->bytes, e->len,
+                                                e->sha256_hex));
+
+    uint8_t *bad = malloc(e->len);
+    VK_CHECK("allocated planted-bad-blob copy", bad != NULL);
+    if (bad) {
+        /* One flipped bit, in the middle of the key material. */
+        memcpy(bad, e->bytes, e->len);
+        bad[e->len / 2] ^= 0x01u;
+        VK_CHECK("one flipped bit is refused",
+                 !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
+                                                     e->sha256_hex));
+
+        /* First byte, last byte, and a truncation: a length-only or
+         * prefix-only comparison would let at least one of these pass. */
+        memcpy(bad, e->bytes, e->len);
+        bad[0] ^= 0xffu;
+        VK_CHECK("a corrupt first byte is refused",
+                 !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
+                                                     e->sha256_hex));
+
+        memcpy(bad, e->bytes, e->len);
+        bad[e->len - 1] ^= 0xffu;
+        VK_CHECK("a corrupt last byte is refused",
+                 !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
+                                                     e->sha256_hex));
+
+        VK_CHECK("a truncated blob is refused",
+                 !sapling_test_embedded_vk_sha256_ok(e->name, e->bytes,
+                                                     e->len - 1,
+                                                     e->sha256_hex));
+        free(bad);
+    }
+
+    /* Cross-wiring: the right bytes under the wrong name's digest must
+     * fail, so the table cannot be reordered without being noticed. */
+    VK_CHECK("spend bytes under the output digest are refused",
+             !sapling_test_embedded_vk_sha256_ok(
+                 zcl_embedded_vks[0].name, zcl_embedded_vks[0].bytes,
+                 zcl_embedded_vks[0].len, zcl_embedded_vks[1].sha256_hex));
+    return failures;
+}
+
+/* Section 5 states A and B: the fallback arms validation but not proving,
+ * and a directory failing its pin leaves the published VK pointers
+ * untouched. Hands those pointers back for state C. */
+static int vk_late_upgrade_states_a_and_b(const char *scratch,
+        const struct groth16_vk **spend_pub,
+        const struct groth16_vk **output_pub,
+        const struct groth16_vk **sprout_pub)
+{
+    int failures = 0;
+
+    /* Deterministic baseline: no keys, no proving backend. */
+    sapling_free_params();
+    sprout_phgr_set_vk(NULL);
+    zclassic_test_prover_reset();
+
+    /* ── State A: verifying keys only ─────────────────────────── */
+    VK_CHECK("A: the fallback installs", sapling_install_embedded_vks());
+    VK_CHECK("A: validation is armed", sapling_params_loaded());
+    VK_CHECK("A: proving is NOT armed — sending is refused",
+             !zclassic_sapling_prover_is_ready());
+    VK_CHECK("A: no proving key is resident",
+             sapling_get_spend_pk(NULL) == NULL &&
+             sapling_get_output_pk(NULL) == NULL);
+
+    /* The exact pointers the consensus verifiers read; a later load
+     * must not swap or free them (verifiers hold no lock). */
+    *spend_pub = sapling_test_published_spend_vk();
+    *output_pub = sapling_test_published_output_vk();
+    *sprout_pub = sprout_test_published_vk();
+    VK_CHECK("A: all three Groth16 VKs are published",
+             *spend_pub && *output_pub && *sprout_pub);
+
+    /* ── State B: a directory that fails its pin ───────────────── */
+    VK_CHECK("B: a directory failing its SHA-512 pin is REFUSED",
+             !sapling_init_params(scratch));
+    VK_CHECK("B: proving is still NOT armed",
+             !zclassic_sapling_prover_is_ready());
+    VK_CHECK("B: no proving key was published from refused bytes",
+             sapling_get_spend_pk(NULL) == NULL &&
+             sapling_get_output_pk(NULL) == NULL);
+    /* The refusal must not cost validation: the published pointers
+     * are the SAME objects (a freed and reinstalled key would be a
+     * verifier reading freed heap). */
+    VK_CHECK("B: validation survives the refusal, same VK objects",
+             sapling_test_published_spend_vk() == *spend_pub &&
+             sapling_test_published_output_vk() == *output_pub &&
+             sprout_test_published_vk() == *sprout_pub);
+    {
+        struct vk_js_inputs js;
+        VK_CHECK("B: a real mainnet shielded proof still validates",
+                 vk_contextual_ok(&js));
+    }
+    return failures;
+}
+
+/* Section 5 state C: the real directory loads late and arms proving without
+ * touching the published verifying keys. */
+static int vk_late_upgrade_state_c(const char *real_dir,
+        const struct groth16_vk *spend_pub,
+        const struct groth16_vk *output_pub,
+        const struct groth16_vk *sprout_pub)
+{
+    int failures = 0;
+
+    /* ── State C: the real directory ──────────────────────────── */
+    VK_CHECK("C: the late proving parameters LOAD",
+             sapling_init_params(real_dir));
+
+    /* Regression: sapling_init_params() must not return true early on
+     * the params_loaded flag the fallback set; proving readiness must
+     * become true without a restart. */
+    VK_CHECK("C: proving is armed — sending is possible",
+             zclassic_sapling_prover_is_ready());
+    VK_CHECK("C: the proving keys are resident",
+             sapling_get_spend_pk(NULL) != NULL &&
+             sapling_get_output_pk(NULL) != NULL);
+    {
+        size_t sn = 0, on = 0;
+        (void)sapling_get_spend_pk(&sn);
+        (void)sapling_get_output_pk(&on);
+        VK_CHECK("C: the proving keys are whole files, not prefixes",
+                 sn > zcl_embedded_vks[0].len &&
+                 on > zcl_embedded_vks[1].len);
+    }
+    /* Readiness is not a flag someone set: the backend reached READY
+     * only by proving a Spend + Output + binding bundle and having
+     * this node's own consensus verifier accept it. Re-running the
+     * gate from the READY state must agree. */
+    VK_CHECK("C: the prover->verifier gate agrees",
+             zclassic_sapling_prover_run_self_test());
+    VK_CHECK("C: status says ready",
+             strcmp(zclassic_sapling_prover_status(), "ready") == 0);
+
+    /* The upgrade must not have touched the keys the verifiers are
+     * reading. Same objects, same values, no window. */
+    VK_CHECK("C: the upgrade did NOT republish the verifying keys",
+             sapling_test_published_spend_vk() == spend_pub &&
+             sapling_test_published_output_vk() == output_pub &&
+             sprout_test_published_vk() == sprout_pub);
+    {
+        struct groth16_vk from_file = {0};
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
+        bool ok = vk_from_real_file(&from_file, p,
+                                    zcl_embedded_vks[0].len);
+        VK_CHECK("C: published spend VK still equals the real file's",
+                 ok && vk_equal(sapling_test_published_spend_vk(),
+                                &from_file));
+        free(from_file.ic);
+    }
+    {
+        struct vk_js_inputs js;
+        VK_CHECK("C: a real mainnet shielded proof still validates",
+                 vk_contextual_ok(&js));
+    }
+
+    /* Idempotent: a second call after a full load does nothing and
+     * says so, rather than re-reading 777 MB or re-publishing. */
+    VK_CHECK("C: a repeat call is a no-op that still reports loaded",
+             sapling_init_params(real_dir) &&
+             sapling_test_published_spend_vk() == spend_pub);
+    return failures;
+}
+
+/* Section 5: proving parameters that arrive after the fallback arm sending
+ * without a restart. */
+static int vk_check_late_proving_upgrade(void)
+{
+    int failures = 0;
+
+    char real_dir[1024];
+    char scratch[1200];
+    enum vk_stage_outcome staged =
+        vk_probe_and_stage_planted(real_dir, sizeof(real_dir), scratch,
+                                   sizeof(scratch));
+    if (staged == VK_REAL_PARAMS_ABSENT) {
+        printf("params_vk_embedded: external late-proving upgrade... "
+               "NOT INSTALLED (no readable %s; asserting the honest "
+               "validation-only state)\n", real_dir);
+        VK_CHECK("without external proving parameters the prover remains "
+                 "unavailable", !zclassic_sapling_prover_is_ready());
+        VK_CHECK("without external proving parameters status remains "
+                 "params_not_initialized",
+                 strcmp(zclassic_sapling_prover_status(),
+                        "params_not_initialized") == 0);
+    } else {
+        VK_CHECK("late-load fixture staged",
+                 staged == VK_REAL_PARAMS_STAGED);
+    }
+
+    if (staged == VK_REAL_PARAMS_STAGED) {
+        const struct chain_params *prev = chain_params_get();
+        bool had_prev = (prev != NULL);
+        enum chain_network prev_net = vk_network_of(prev);
+        chain_params_select(CHAIN_MAIN);
+
+        const struct groth16_vk *spend_pub = NULL;
+        const struct groth16_vk *output_pub = NULL;
+        const struct groth16_vk *sprout_pub = NULL;
+        failures += vk_late_upgrade_states_a_and_b(scratch, &spend_pub,
+                                                   &output_pub, &sprout_pub);
+        failures += vk_late_upgrade_state_c(real_dir, spend_pub, output_pub,
+                                            sprout_pub);
+
+        /* Leave the process as this section found it. */
+        sapling_free_params();
+        sprout_phgr_set_vk(NULL);
+        zclassic_test_prover_reset();
+        if (had_prev) chain_params_select(prev_net);
+        vk_unstage_planted_dir(scratch);
+    }
+    return failures;
+}
+
 int test_params_vk_embedded(void);
 int test_params_vk_embedded(void)
 {
     int failures = 0;
 
     /* ── 1. Each blob is exactly the verifying-key prefix ─────────────── */
-    {
-        /* The first three blobs are Groth16 keys and must be self-describing:
-         * the ic_len they carry has to account for their own length exactly.
-         * This runs with or without a parameter directory. */
-        for (size_t i = 0; i < 3; i++) {
-            const struct zcl_embedded_vk *e = &zcl_embedded_vks[i];
-            char name[128];
-
-            snprintf(name, sizeof(name),
-                     "%s blob is long enough to carry an ic_len", e->name);
-            VK_CHECK(name, e->len > VK_HEADER_BYTES);
-            if (e->len <= VK_HEADER_BYTES) continue;
-
-            uint32_t ic_len = be32_at(e->bytes + VK_IC_LEN_OFFSET);
-            size_t want = (size_t)VK_HEADER_BYTES +
-                          (size_t)ic_len * VK_IC_POINT_BYTES;
-
-            snprintf(name, sizeof(name),
-                     "%s is exactly 868+%u*96=%zu bytes (got %zu)",
-                     e->name, ic_len, want, e->len);
-            VK_CHECK(name, e->len == want);
-        }
-
-        /* Byte-for-byte against the real files, when this machine has them.
-         * Read-only: never write into a parameter directory. */
-        const char *home = getenv("HOME");
-        char dir[1024];
-        snprintf(dir, sizeof(dir), "%s/.zcash-params", home ? home : "");
-
-        char probe[1200];
-        snprintf(probe, sizeof(probe), "%s/%s", dir, vk_source_file[0]);
-        if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: external prefix comparison... "
-                   "NOT INSTALLED (no readable %s; the params-free "
-                   "validation contract remains mandatory below)\n", dir);
-        } else {
-            for (size_t i = 0; i < ZCL_EMBEDDED_VK_COUNT; i++) {
-                const struct zcl_embedded_vk *e = &zcl_embedded_vks[i];
-                char path[1200], name[256];
-                snprintf(path, sizeof(path), "%s/%s", dir, vk_source_file[i]);
-
-                FILE *f = fopen(path, "rb");
-                snprintf(name, sizeof(name), "%s: opened %s",
-                         e->name, vk_source_file[i]);
-                VK_CHECK(name, f != NULL);
-                if (!f) continue;
-
-                uint8_t *buf = malloc(e->len);
-                snprintf(name, sizeof(name), "%s: allocated %zu bytes",
-                         e->name, e->len);
-                VK_CHECK(name, buf != NULL);
-                if (!buf) { fclose(f); continue; }
-
-                size_t got = fread(buf, 1, e->len, f);
-                fclose(f);
-
-                snprintf(name, sizeof(name),
-                         "%s: read %zu bytes of prefix", e->name, e->len);
-                VK_CHECK(name, got == e->len);
-
-                snprintf(name, sizeof(name),
-                         "%s: embedded blob equals the leading %zu bytes of %s",
-                         e->name, e->len, vk_source_file[i]);
-                VK_CHECK(name, got == e->len &&
-                               memcmp(buf, e->bytes, e->len) == 0);
-                free(buf);
-            }
-        }
-    }
+    failures += vk_check_blob_prefix_lengths();
+    failures += vk_check_blobs_match_real_files();
 
     /* ── 1b. A REFUSED parameter directory falls back, strands nothing ──
      *
@@ -365,265 +868,16 @@ int test_params_vk_embedded(void)
      * flipped bit in a private copy of sprout-verifying.key, the only file
      * whose failure lands AFTER the three Groth16 keys are parsed.
      * ~/.zcash-params is never written. */
-    {
-        const char *home = getenv("HOME");
-        char real_dir[1024];
-        snprintf(real_dir, sizeof(real_dir), "%s/.zcash-params", home ? home : "");
-
-        char probe[1200];
-        snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
-        char scratch[1200];
-        bool staged = false;
-        if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: external complete-directory "
-                   "corruption fixture... NOT INSTALLED (needs readable %s; "
-                   "embedded fallback and bad-blob refusal remain mandatory "
-                   "below)\n", real_dir);
-        } else {
-            /* The machine HAS the files, so a staging failure is a failure,
-             * not a skip. */
-            staged = vk_stage_planted_dir(real_dir, scratch, sizeof(scratch));
-            VK_CHECK("planted-corruption fixture staged", staged);
-        }
-
-        if (staged) {
-            {
-                /* Mainnet, where a PHGR13 failure is fatal to the load.
-                 * Restored below so the network of other groups is
-                 * unchanged. */
-                const struct chain_params *prev = chain_params_get();
-                bool had_prev = (prev != NULL);
-                enum chain_network prev_net = CHAIN_MAIN;
-                if (had_prev) {
-                    if (strcmp(prev->strNetworkID, "test") == 0)
-                        prev_net = CHAIN_TESTNET;
-                    else if (strcmp(prev->strNetworkID, "regtest") == 0)
-                        prev_net = CHAIN_REGTEST;
-                }
-                chain_params_select(CHAIN_MAIN);
-
-                /* Deterministic baseline: another group in this process may
-                 * have loaded parameters or installed a PHGR13 fixture VK. */
-                sapling_free_params();
-                sprout_phgr_set_vk(NULL);
-
-                VK_CHECK("a corrupt sprout-verifying.key is REFUSED",
-                         !sapling_init_params(scratch));
-                VK_CHECK("a refused directory reports params as NOT loaded",
-                         !sapling_params_loaded());
-
-                /* The publish/free invariant: nothing is published. */
-                VK_CHECK("refused load publishes NO spend VK",
-                         sapling_test_published_spend_vk() == NULL);
-                VK_CHECK("refused load publishes NO output VK",
-                         sapling_test_published_output_vk() == NULL);
-                VK_CHECK("refused load publishes NO sprout-groth16 VK",
-                         sprout_test_published_vk() == NULL);
-                VK_CHECK("refused load publishes NO PHGR13 VK",
-                         sprout_test_published_phgr_vk() == NULL);
-
-#ifdef ZCL_UAF_PROBE
-                /* Opt-in reproducer (build with -DZCL_UAF_PROBE, run under
-                 * valgrind or ASan): drives the dereference the production
-                 * verifier performs (bls12_381.c groth16_verify, "struct
-                 * g1_point vk_x = vk->ic[0];") against whatever the refused
-                 * load left published; the pointer must be NULL. Off by
-                 * default so a plain run needs no checker. */
-                {
-                    const struct groth16_vk *pub_vk =
-                        sapling_test_published_spend_vk();
-                    fprintf(stderr, "[uaf-probe] published spend vk=%p\n",
-                            (const void *)pub_vk);
-                    if (pub_vk) {
-                        struct groth16_proof pr;
-                        memset(&pr, 0, sizeof(pr));
-                        uint64_t pub[7][4];
-                        memset(pub, 0, sizeof(pub));
-                        pub[0][0] = 1;
-                        fprintf(stderr, "[uaf-probe] groth16_verify -> %d\n",
-                                (int)groth16_verify(pub_vk, &pr, pub, 7));
-                    }
-                }
-#endif
-
-                /* Fail-closed is therefore still reachable: with nothing
-                 * published the consensus entry points reject. */
-                {
-                    struct sapling_verification_ctx vctx;
-                    sapling_verification_ctx_init(&vctx);
-                    uint8_t cv[32], cm[32], epk[32], zk[192];
-                    memset(cv, 0x11, 32); memset(cm, 0x22, 32);
-                    memset(epk, 0x33, 32); memset(zk, 0x44, 192);
-                    VK_CHECK("with nothing published, check_output rejects",
-                             !sapling_check_output(&vctx, cv, cm, epk, zk));
-                }
-
-                /* The A side of the A/B below: the SAME real mainnet shielded
-                 * transaction through the SAME entry point is REJECTED while
-                 * no verifying key is published. */
-                VK_CHECK("before the fallback, a real mainnet shielded proof "
-                         "is REJECTED (fail-closed)",
-                         !vk_contextual_ok(NULL));
-
-                /* Now the fallback. */
-                VK_CHECK("embedded VKs install after a refused directory",
-                         sapling_install_embedded_vks());
-                VK_CHECK("fallback arms proof validation",
-                         sapling_params_loaded());
-                VK_CHECK("fallback reports keys as compiled-in",
-                         sapling_vks_are_embedded());
-                VK_CHECK("fallback does NOT arm proving",
-                         !zclassic_sapling_prover_is_ready());
-
-                /* The installed Sapling keys equal those a good parameter
-                 * directory would install (parsed from the real files'
-                 * prefixes, compared field by field): the fallback verifier
-                 * is bit-for-bit identical, so it accepts nothing a
-                 * fully-parameterised node would reject. */
-                {
-                    struct groth16_vk from_file = {0};
-                    char p[1200];
-                    snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
-                    bool ok = vk_from_real_file(&from_file, p,
-                                                zcl_embedded_vks[0].len);
-                    VK_CHECK("real sapling-spend VK prefix parses", ok);
-                    VK_CHECK("published spend VK == the real file's spend VK",
-                             ok && vk_equal(sapling_test_published_spend_vk(),
-                                            &from_file));
-                    free(from_file.ic);
-
-                    struct groth16_vk out_file = {0};
-                    snprintf(p, sizeof(p), "%s/sapling-output.params", real_dir);
-                    ok = vk_from_real_file(&out_file, p,
-                                           zcl_embedded_vks[1].len);
-                    VK_CHECK("real sapling-output VK prefix parses", ok);
-                    VK_CHECK("published output VK == the real file's output VK",
-                             ok && vk_equal(sapling_test_published_output_vk(),
-                                            &out_file));
-                    free(out_file.ic);
-                }
-
-                /* The B side: the SAME transaction and entry point is now
-                 * ACCEPTED against the compiled-in PHGR13 key, attributable
-                 * to the fallback alone. */
-                {
-                    struct vk_js_inputs js;
-                    VK_CHECK("a REAL mainnet shielded proof validates on the "
-                             "fallback keys", vk_contextual_ok(&js));
-
-                    /* The verifier is not a rubber stamp: one flipped proof
-                     * byte, same public inputs, must be rejected. Driven
-                     * through sprout_verify_phgr13 because a tampered tx
-                     * would fail its JoinSplit signature before the proof
-                     * was checked. */
-                    VK_CHECK("fixture JoinSplit public inputs recovered",
-                             js.valid);
-                    if (js.valid) {
-                        VK_CHECK("the fallback PHGR13 key accepts the real "
-                                 "proof directly",
-                                 sprout_verify_phgr13(js.proof, js.rt,
-                                     js.h_sig, js.mac1, js.mac2, js.nf1,
-                                     js.nf2, js.cm1, js.cm2,
-                                     js.vpub_old, js.vpub_new));
-                        uint8_t bad_proof[PHGR_PROOF_SIZE];
-                        memcpy(bad_proof, js.proof, sizeof(bad_proof));
-                        bad_proof[17] ^= 0x01u;
-                        VK_CHECK("one flipped proof byte is REJECTED by the "
-                                 "fallback PHGR13 key",
-                                 !sprout_verify_phgr13(bad_proof, js.rt,
-                                     js.h_sig, js.mac1, js.mac2, js.nf1,
-                                     js.nf2, js.cm1, js.cm2,
-                                     js.vpub_old, js.vpub_new));
-                    }
-                }
-
-                /* Leave the process as this section found it: nothing loaded,
-                 * so a later group's sapling_init_params does a real load. */
-                sapling_free_params();
-                sprout_phgr_set_vk(NULL);
-                if (had_prev) chain_params_select(prev_net);
-            }
-
-            vk_unstage_planted_dir(scratch);
-        }
-    }
+    failures += vk_check_refused_dir_falls_back();
 
     /* ── 2. Installing the embedded keys arms validation ──────────────── */
-    {
-        VK_CHECK("install succeeds", sapling_install_embedded_vks());
-        VK_CHECK("params report as loaded (proof validation armed)",
-                 sapling_params_loaded());
-        VK_CHECK("keys report as embedded, not from a parameter directory",
-                 sapling_vks_are_embedded());
-        VK_CHECK("install is idempotent", sapling_install_embedded_vks());
-        VK_CHECK("a real mainnet shielded proof validates with the embedded "
-                 "keys", vk_contextual_ok(NULL));
-    }
+    failures += vk_check_embedded_install_arms_validation();
 
     /* ── 3. Proving stays fail-closed ─────────────────────────────────── */
-    {
-        /* No proving keys were loaded, so the prover must not claim to be
-         * ready: build_output_description() writes a 192-byte zero proof when
-         * no proving key is present, and the wallet's refusal on this flag
-         * keeps that branch unreachable. */
-        VK_CHECK("prover is NOT ready with verifying keys alone",
-                 !zclassic_sapling_prover_is_ready());
-
-        const char *status = zclassic_sapling_prover_status();
-        VK_CHECK("prover status names the missing parameters",
-                 status != NULL &&
-                 strcmp(status, "params_not_initialized") == 0);
-    }
+    failures += vk_check_proving_fail_closed();
 
     /* ── 4. A planted bad blob is refused ─────────────────────────────── */
-    {
-        const struct zcl_embedded_vk *e = &zcl_embedded_vks[0];
-
-        /* Control: the genuine blob passes, so a later refusal means the
-         * planted damage was detected and not that the check refuses
-         * everything. */
-        VK_CHECK("genuine blob passes its own digest",
-                 sapling_test_embedded_vk_sha256_ok(e->name, e->bytes, e->len,
-                                                    e->sha256_hex));
-
-        uint8_t *bad = malloc(e->len);
-        VK_CHECK("allocated planted-bad-blob copy", bad != NULL);
-        if (bad) {
-            /* One flipped bit, in the middle of the key material. */
-            memcpy(bad, e->bytes, e->len);
-            bad[e->len / 2] ^= 0x01u;
-            VK_CHECK("one flipped bit is refused",
-                     !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
-                                                         e->sha256_hex));
-
-            /* First byte, last byte, and a truncation: a length-only or
-             * prefix-only comparison would let at least one of these pass. */
-            memcpy(bad, e->bytes, e->len);
-            bad[0] ^= 0xffu;
-            VK_CHECK("a corrupt first byte is refused",
-                     !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
-                                                         e->sha256_hex));
-
-            memcpy(bad, e->bytes, e->len);
-            bad[e->len - 1] ^= 0xffu;
-            VK_CHECK("a corrupt last byte is refused",
-                     !sapling_test_embedded_vk_sha256_ok(e->name, bad, e->len,
-                                                         e->sha256_hex));
-
-            VK_CHECK("a truncated blob is refused",
-                     !sapling_test_embedded_vk_sha256_ok(e->name, e->bytes,
-                                                         e->len - 1,
-                                                         e->sha256_hex));
-            free(bad);
-        }
-
-        /* Cross-wiring: the right bytes under the wrong name's digest must
-         * fail, so the table cannot be reordered without being noticed. */
-        VK_CHECK("spend bytes under the output digest are refused",
-                 !sapling_test_embedded_vk_sha256_ok(
-                     zcl_embedded_vks[0].name, zcl_embedded_vks[0].bytes,
-                     zcl_embedded_vks[0].len, zcl_embedded_vks[1].sha256_hex));
-    }
+    failures += vk_check_planted_bad_blob_refused();
 
     /* ── 5. Proving parameters that arrive AFTER the fallback ──────────
      *
@@ -645,154 +899,7 @@ int test_params_vk_embedded(void)
      *
      * The upgrade half needs a real parameter directory. Without one, the
      * validation-only state is asserted explicitly instead of a SKIP. */
-    {
-        const char *home = getenv("HOME");
-        char real_dir[1024];
-        snprintf(real_dir, sizeof(real_dir), "%s/.zcash-params",
-                 home ? home : "");
-        char probe[1200];
-        snprintf(probe, sizeof(probe), "%s/sprout-verifying.key", real_dir);
-
-        char scratch[1200];
-        bool staged = false;
-        if (!home || access(probe, R_OK) != 0) {
-            printf("params_vk_embedded: external late-proving upgrade... "
-                   "NOT INSTALLED (no readable %s; asserting the honest "
-                   "validation-only state)\n", real_dir);
-            VK_CHECK("without external proving parameters the prover remains "
-                     "unavailable", !zclassic_sapling_prover_is_ready());
-            VK_CHECK("without external proving parameters status remains "
-                     "params_not_initialized",
-                     strcmp(zclassic_sapling_prover_status(),
-                            "params_not_initialized") == 0);
-        } else {
-            staged = vk_stage_planted_dir(real_dir, scratch, sizeof(scratch));
-            VK_CHECK("late-load fixture staged", staged);
-        }
-
-        if (staged) {
-            const struct chain_params *prev = chain_params_get();
-            bool had_prev = (prev != NULL);
-            enum chain_network prev_net = CHAIN_MAIN;
-            if (had_prev) {
-                if (strcmp(prev->strNetworkID, "test") == 0)
-                    prev_net = CHAIN_TESTNET;
-                else if (strcmp(prev->strNetworkID, "regtest") == 0)
-                    prev_net = CHAIN_REGTEST;
-            }
-            chain_params_select(CHAIN_MAIN);
-
-            /* Deterministic baseline: no keys, no proving backend. */
-            sapling_free_params();
-            sprout_phgr_set_vk(NULL);
-            zclassic_test_prover_reset();
-
-            /* ── State A: verifying keys only ─────────────────────────── */
-            VK_CHECK("A: the fallback installs", sapling_install_embedded_vks());
-            VK_CHECK("A: validation is armed", sapling_params_loaded());
-            VK_CHECK("A: proving is NOT armed — sending is refused",
-                     !zclassic_sapling_prover_is_ready());
-            VK_CHECK("A: no proving key is resident",
-                     sapling_get_spend_pk(NULL) == NULL &&
-                     sapling_get_output_pk(NULL) == NULL);
-
-            /* The exact pointers the consensus verifiers read; a later load
-             * must not swap or free them (verifiers hold no lock). */
-            const struct groth16_vk *spend_pub =
-                sapling_test_published_spend_vk();
-            const struct groth16_vk *output_pub =
-                sapling_test_published_output_vk();
-            const struct groth16_vk *sprout_pub = sprout_test_published_vk();
-            VK_CHECK("A: all three Groth16 VKs are published",
-                     spend_pub && output_pub && sprout_pub);
-
-            /* ── State B: a directory that fails its pin ───────────────── */
-            VK_CHECK("B: a directory failing its SHA-512 pin is REFUSED",
-                     !sapling_init_params(scratch));
-            VK_CHECK("B: proving is still NOT armed",
-                     !zclassic_sapling_prover_is_ready());
-            VK_CHECK("B: no proving key was published from refused bytes",
-                     sapling_get_spend_pk(NULL) == NULL &&
-                     sapling_get_output_pk(NULL) == NULL);
-            /* The refusal must not cost validation: the published pointers
-             * are the SAME objects (a freed and reinstalled key would be a
-             * verifier reading freed heap). */
-            VK_CHECK("B: validation survives the refusal, same VK objects",
-                     sapling_test_published_spend_vk() == spend_pub &&
-                     sapling_test_published_output_vk() == output_pub &&
-                     sprout_test_published_vk() == sprout_pub);
-            {
-                struct vk_js_inputs js;
-                VK_CHECK("B: a real mainnet shielded proof still validates",
-                         vk_contextual_ok(&js));
-            }
-
-            /* ── State C: the real directory ──────────────────────────── */
-            VK_CHECK("C: the late proving parameters LOAD",
-                     sapling_init_params(real_dir));
-
-            /* Regression: sapling_init_params() must not return true early on
-             * the params_loaded flag the fallback set; proving readiness must
-             * become true without a restart. */
-            VK_CHECK("C: proving is armed — sending is possible",
-                     zclassic_sapling_prover_is_ready());
-            VK_CHECK("C: the proving keys are resident",
-                     sapling_get_spend_pk(NULL) != NULL &&
-                     sapling_get_output_pk(NULL) != NULL);
-            {
-                size_t sn = 0, on = 0;
-                (void)sapling_get_spend_pk(&sn);
-                (void)sapling_get_output_pk(&on);
-                VK_CHECK("C: the proving keys are whole files, not prefixes",
-                         sn > zcl_embedded_vks[0].len &&
-                         on > zcl_embedded_vks[1].len);
-            }
-            /* Readiness is not a flag someone set: the backend reached READY
-             * only by proving a Spend + Output + binding bundle and having
-             * this node's own consensus verifier accept it. Re-running the
-             * gate from the READY state must agree. */
-            VK_CHECK("C: the prover->verifier gate agrees",
-                     zclassic_sapling_prover_run_self_test());
-            VK_CHECK("C: status says ready",
-                     strcmp(zclassic_sapling_prover_status(), "ready") == 0);
-
-            /* The upgrade must not have touched the keys the verifiers are
-             * reading. Same objects, same values, no window. */
-            VK_CHECK("C: the upgrade did NOT republish the verifying keys",
-                     sapling_test_published_spend_vk() == spend_pub &&
-                     sapling_test_published_output_vk() == output_pub &&
-                     sprout_test_published_vk() == sprout_pub);
-            {
-                struct groth16_vk from_file = {0};
-                char p[1200];
-                snprintf(p, sizeof(p), "%s/sapling-spend.params", real_dir);
-                bool ok = vk_from_real_file(&from_file, p,
-                                            zcl_embedded_vks[0].len);
-                VK_CHECK("C: published spend VK still equals the real file's",
-                         ok && vk_equal(sapling_test_published_spend_vk(),
-                                        &from_file));
-                free(from_file.ic);
-            }
-            {
-                struct vk_js_inputs js;
-                VK_CHECK("C: a real mainnet shielded proof still validates",
-                         vk_contextual_ok(&js));
-            }
-
-            /* Idempotent: a second call after a full load does nothing and
-             * says so, rather than re-reading 777 MB or re-publishing. */
-            VK_CHECK("C: a repeat call is a no-op that still reports loaded",
-                     sapling_init_params(real_dir) &&
-                     sapling_test_published_spend_vk() == spend_pub);
-
-            /* Leave the process as this section found it. */
-            sapling_free_params();
-            sprout_phgr_set_vk(NULL);
-            zclassic_test_prover_reset();
-            if (had_prev) chain_params_select(prev_net);
-            vk_unstage_planted_dir(scratch);
-        }
-    }
+    failures += vk_check_late_proving_upgrade();
 
     printf("params_vk_embedded tests: %s\n", failures ? "FAILED" : "PASSED");
     return failures;
