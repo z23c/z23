@@ -274,7 +274,7 @@ engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/boot_auto_refold.c:arf_read:17
 engine/modules/storage/src/boot_auto_refold.c:arf_write:17
-engine/modules/storage/src/coins_ram.c:coins_ram_flush:46
+engine/modules/storage/src/coins_ram.c:coins_ram_flush:27
 engine/modules/storage/src/coins_ram.c:coins_ram_reconcile_boot:33
 engine/reducer/conditions/src/reducer_drive_watchdog.c:reducer_drive_dump_state_json:51
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:detect_reducer_frontier_reconcile_light:29

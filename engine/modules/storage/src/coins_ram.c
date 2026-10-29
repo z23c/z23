@@ -1177,6 +1177,61 @@ static bool coins_ram_flush_has_reducer_witness(sqlite3 *db,
     return true;
 }
 
+static int coins_ram_flush_read_wm(sqlite3 *db, int32_t *durable, size_t *bad_len)
+{
+    uint8_t prior_wm[8] = {0}; size_t prior_wm_len = 0; bool prior_wm_found = false;
+    if (!progress_meta_get(db, COINS_RAM_FLUSHED_HEIGHT_KEY, prior_wm,
+                           sizeof(prior_wm), &prior_wm_len, &prior_wm_found))
+        return 1;
+    if (prior_wm_found) {
+        if (prior_wm_len != sizeof(prior_wm)) { *bad_len = prior_wm_len; return 2; }
+        uint64_t u = 0; for (int i = 0; i < 8; i++) u |= (uint64_t)prior_wm[i] << (8 * i);
+        *durable = (int32_t)u;
+    }
+    return 0;
+}
+
+static void coins_ram_flush_fill_rows(struct coins_kv_add_row *adds,
+                                      struct coins_kv_spend_row *spends)
+{
+    size_t ai = 0, si = 0;
+    for (size_t k = 0; k < G.occupied_count; k++) {
+        const struct ram_slot *s = &G.slots[G.occupied[k]];
+        if (s->state == SLOT_LIVE) {
+            adds[ai].txid = s->txid; adds[ai].vout = s->vout;
+            adds[ai].value = s->value; adds[ai].height = s->height;
+            adds[ai].is_coinbase = s->is_coinbase != 0;
+            adds[ai].script = s->script_len ? s->script : NULL;
+            adds[ai].script_len = s->script_len;
+            ai++;
+        } else if (s->state == SLOT_TOMB) {
+            spends[si].txid = s->txid; spends[si].vout = s->vout;
+            si++;
+        }
+    }
+}
+
+static bool coins_ram_flush_write(sqlite3 *db, struct coins_kv_add_row *adds,
+    size_t nadd, struct coins_kv_spend_row *spends, size_t nspend, int32_t flushed_height)
+{
+    if (nadd && !coins_kv_add_many_sqlite(db, adds, nadd)) return false;
+    if (nspend && !coins_kv_spend_many_sqlite(db, spends, nspend)) return false;
+    uint8_t wm[8]; for (int i = 0; i < 8; i++) wm[i] = (uint8_t)(((uint64_t)(uint32_t)flushed_height) >> (8 * i));
+    if (!progress_meta_set_in_tx(db, COINS_RAM_FLUSHED_HEIGHT_KEY, wm, 8)) return false;
+    if (!G.writer || !G.writer(db, flushed_height + 1)) return false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "INSERT INTO stage_cursor (name, cursor, updated_at) "
+        "VALUES ('utxo_apply', ?1, strftime('%s','now')) "
+        "ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor, "
+        "updated_at=excluded.updated_at", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)(flushed_height + 1));
+    bool ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(st);
+    return ok;
+}
+
 bool coins_ram_flush(int32_t flushed_height)
 {
     if (!coins_ram_active()) return false;
@@ -1186,20 +1241,13 @@ bool coins_ram_flush(int32_t flushed_height)
                  "after stage_batch_end",
                  flushed_height);
     sqlite3 *db = G.db; progress_store_tx_lock();
-    uint8_t prior_wm[8] = {0};
-    size_t prior_wm_len = 0; bool prior_wm_found = false;
-    if (!progress_meta_get(db, COINS_RAM_FLUSHED_HEIGHT_KEY, prior_wm,
-                           sizeof(prior_wm), &prior_wm_len, &prior_wm_found)) {
+    int32_t durable_height = -1; size_t prior_wm_len = 0;
+    int wm_rc = coins_ram_flush_read_wm(db, &durable_height, &prior_wm_len);
+    if (wm_rc) {
         progress_store_tx_unlock();
-        LOG_FAIL("coins_ram", "flush: durable watermark read failed");
-    }
-    int32_t durable_height = -1; if (prior_wm_found) {
-        if (prior_wm_len != sizeof(prior_wm)) {
-            progress_store_tx_unlock();
-            LOG_FAIL("coins_ram", "flush: malformed watermark len=%zu", prior_wm_len);
-        }
-        uint64_t u = 0; for (int i = 0; i < 8; i++) u |= (uint64_t)prior_wm[i] << (8 * i);
-        durable_height = (int32_t)u;
+        if (wm_rc == 1)
+            LOG_FAIL("coins_ram", "flush: durable watermark read failed");
+        LOG_FAIL("coins_ram", "flush: malformed watermark len=%zu", prior_wm_len);
     }
     if (flushed_height <= durable_height && !(G.since_flush > 0 && G.last_applied > durable_height)) {
         progress_store_tx_unlock();
@@ -1234,56 +1282,14 @@ bool coins_ram_flush(int32_t flushed_height)
             LOG_FAIL("coins_ram", "flush: OOM spends");
         }
     }
-    size_t ai = 0, si = 0;
-    for (size_t k = 0; k < G.occupied_count; k++) {
-        size_t i = G.occupied[k];
-        const struct ram_slot *s = &G.slots[i];
-        if (s->state == SLOT_LIVE) {
-            adds[ai].txid        = s->txid;
-            adds[ai].vout        = s->vout;
-            adds[ai].value       = s->value;
-            adds[ai].height      = s->height;
-            adds[ai].is_coinbase = s->is_coinbase != 0;
-            adds[ai].script      = s->script_len ? s->script : NULL;
-            adds[ai].script_len  = s->script_len;
-            ai++;
-        } else if (s->state == SLOT_TOMB) {
-            spends[si].txid = s->txid;
-            spends[si].vout = s->vout;
-            si++;
-        }
-    }
-
-    char *err = NULL;
-    bool ok = true;
+    coins_ram_flush_fill_rows(adds, spends);
+    char *err = NULL; bool ok = true;
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("coins_ram", "flush: BEGIN failed: %s", err ? err : "?");
         ok = false;
     }
-    if (ok && nadd && !coins_kv_add_many_sqlite(db, adds, nadd))   ok = false;
-    if (ok && nspend && !coins_kv_spend_many_sqlite(db, spends, nspend)) ok = false;
-    if (ok) {
-        uint8_t wm[8];
-        for (int i = 0; i < 8; i++) wm[i] = (uint8_t)(((uint64_t)(uint32_t)flushed_height) >> (8 * i));
-        if (!progress_meta_set_in_tx(db, COINS_RAM_FLUSHED_HEIGHT_KEY, wm, 8))
-            ok = false;
-    }
-    if (ok && (!G.writer || !G.writer(db, flushed_height + 1)))
+    if (ok && !coins_ram_flush_write(db, adds, nadd, spends, nspend, flushed_height))
         ok = false;
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        if (sqlite3_prepare_v2(db,
-            "INSERT INTO stage_cursor (name, cursor, updated_at) "
-            "VALUES ('utxo_apply', ?1, strftime('%s','now')) "
-            "ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor, "
-            "updated_at=excluded.updated_at", -1, &st, NULL) != SQLITE_OK) {
-            ok = false;
-        } else {
-            sqlite3_bind_int64(st, 1, (sqlite3_int64)(flushed_height + 1));
-            if (sqlite3_step(st) != SQLITE_DONE) ok = false;  // raw-sql-ok:progress-kv-kernel-store
-            sqlite3_finalize(st);
-        }
-    }
 
     if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("coins_ram", "flush: COMMIT failed: %s", err ? err : "?");
