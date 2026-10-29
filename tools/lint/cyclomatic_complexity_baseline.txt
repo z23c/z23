@@ -469,7 +469,6 @@ engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/snapshot_controller_txindex.c:build_tx_index_thread:54
 engine/controllers/src/snapshot_controller_txindex.c:snapshot_tx_index_build_from_block_files:16
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
-engine/controllers/src/sync_controller_sapling_tree_persist.c:sapling_tree_persist_pair_status:19
 engine/entry/main_cli_modes.c:bench_crypto_verify:22
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
 engine/entry/main_cli_modes.c:bench_find_live_pid:22

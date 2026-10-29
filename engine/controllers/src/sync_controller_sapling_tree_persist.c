@@ -187,6 +187,37 @@ static bool sapling_tree_begin_with_retry(struct node_db *ndb, int64_t height)
     return false;
 }
 
+/* Bump the per-thread foreign-tx deferral counter (capped) and report whether
+ * the livelock blocker must be raised now (cap reached, not yet raised). */
+static bool sapling_tree_count_foreign_tx_deferral(void)
+{
+    if (t_sapling_foreign_tx_deferrals <
+        SAPLING_TREE_FOREIGN_TX_MAX_DEFERRALS)
+        t_sapling_foreign_tx_deferrals++;
+    return t_sapling_foreign_tx_deferrals ==
+               SAPLING_TREE_FOREIGN_TX_MAX_DEFERRALS &&
+           !t_sapling_foreign_tx_blocker_raised;
+}
+
+/* Commit (ok) or roll back (!ok) the transaction this call began, and on a
+ * committed write clear the persist-busy blocker and the deferral state.
+ * Returns the final ok. */
+static bool sapling_tree_finish_own_tx(struct node_db *ndb, bool ok)
+{
+    if (ok) {
+        ok = node_db_commit(ndb);
+    } else {
+        node_db_rollback(ndb);
+    }
+    if (ok && t_sapling_foreign_tx_blocker_raised)
+        blocker_clear("sapling_tree_rebuild.persist_busy");
+    if (ok) {
+        t_sapling_foreign_tx_deferrals = 0;
+        t_sapling_foreign_tx_blocker_raised = false;
+    }
+    return ok;
+}
+
 /* lane/sapling-tree-persist: persist node_state["sapling_tree"] and
  * node_state["sapling_tree_rebuild_height"] as ONE atomic write so a crash
  * can never pair the tree blob with a stale/absent height (the boot-time
@@ -217,12 +248,7 @@ sapling_tree_persist_pair_status(struct node_db *ndb,
 #ifdef ZCL_TESTING
             atomic_fetch_add(&g_sapling_persist_deferrals, 1);
 #endif
-            if (t_sapling_foreign_tx_deferrals <
-                SAPLING_TREE_FOREIGN_TX_MAX_DEFERRALS)
-                t_sapling_foreign_tx_deferrals++;
-            if (t_sapling_foreign_tx_deferrals ==
-                    SAPLING_TREE_FOREIGN_TX_MAX_DEFERRALS &&
-                !t_sapling_foreign_tx_blocker_raised) {
+            if (sapling_tree_count_foreign_tx_deferral()) {
                 sapling_tree_raise_persist_livelock_blocker(height);
                 t_sapling_foreign_tx_blocker_raised = true;
             } else {
@@ -248,19 +274,8 @@ sapling_tree_persist_pair_status(struct node_db *ndb,
               node_db_state_set_int(ndb, "sapling_tree_rebuild_height",
                                     height);
 
-    if (own_tx) {
-        if (ok) {
-            ok = node_db_commit(ndb);
-        } else {
-            node_db_rollback(ndb);
-        }
-    }
-    if (own_tx && ok && t_sapling_foreign_tx_blocker_raised)
-        blocker_clear("sapling_tree_rebuild.persist_busy");
-    if (own_tx && ok) {
-        t_sapling_foreign_tx_deferrals = 0;
-        t_sapling_foreign_tx_blocker_raised = false;
-    }
+    if (own_tx)
+        ok = sapling_tree_finish_own_tx(ndb, ok);
     return ok ? SAPLING_PERSIST_OK : SAPLING_PERSIST_FAILED;
 }
 
