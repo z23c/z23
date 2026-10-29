@@ -287,6 +287,135 @@ static bool condition_due_for_remedy(const struct condition *cond,
     return last == 0 || now - last >= backoff;
 }
 
+/* Episode start: first tick on which the condition is not yet active. */
+static void condition_begin_episode(const struct condition *cond,
+                                    struct condition_state *s, int64_t now)
+{
+    atomic_store(&s->currently_active, true);
+    atomic_store(&s->first_detect_unix, now);
+    atomic_store(&s->target_at_detect, now);
+    fprintf(stderr,  // obs-ok:condition-detected-paired
+            "[condition_engine] detected name=%s severity=%s\n",
+            cond->name, condition_severity_name(cond->severity));
+    event_emitf(EV_CONDITION_DETECTED, 0,
+                "name=%s severity=%s",
+                cond->name, condition_severity_name(cond->severity));
+}
+
+/* One remedy attempt. Returns true when the witness cleared the condition
+ * (already marked cleared), false when the tick should continue. */
+static bool condition_run_remedy(const struct condition *cond,
+                                 struct condition_state *s, int64_t now,
+                                 int64_t target)
+{
+    enum condition_remedy_result r = cond->remedy();
+    int attempts = atomic_fetch_add(&s->attempts, 1) + 1;
+    atomic_store(&s->last_remedy_unix, now);
+
+    /* DOCTRINE (FRAMEWORK.md §9): a remedy may only be reported as `ok`
+     * if the symptom actually cleared. We re-check the witness right
+     * after the remedy ran. A remedy that returned COND_REMEDY_OK but did
+     * NOT clear the symptom is reported as `unwitnessed` — NOT ok — so a
+     * frozen tip can never self-report success. Witnessed success clears
+     * the condition (and resets attempts); an unwitnessed OK leaves the
+     * attempt counted so it accrues toward operator escalation. */
+    bool witnessed = cond->witness(target);
+    enum condition_remedy_result reported = r;
+    if (r == COND_REMEDY_OK && !witnessed)
+        reported = COND_REMEDY_UNWITNESSED;
+    atomic_store(&s->last_outcome, reported);
+
+    fprintf(stderr,  // obs-ok:condition-remedy-paired
+            "[condition_engine] remedy name=%s attempt=%d result=%s\n",
+            cond->name, attempts,
+            condition_remedy_result_name(reported));
+    event_emitf(EV_CONDITION_REMEDY_ATTEMPTED, 0,
+                "name=%s attempt=%d result=%s",
+                cond->name, attempts,
+                condition_remedy_result_name(reported));
+
+    if (witnessed) {
+        condition_mark_cleared(cond, s, now);
+        return true;
+    }
+
+    /* TL-1 (decouple witness-CLEAR from budget REFRESH): the witness did
+     * NOT clear, but the remedy may be making durable, resumable progress
+     * toward a future witnessed success that has not yet landed (a chunked
+     * repair that legitimately spans more rounds than max_attempts). When
+     * the optional progressing() callback confirms that, RESET the attempt
+     * budget so a genuinely-converging repair is never converted into a
+     * false operator page. This is NOT a clear: currently_active and
+     * cleared_count are untouched — only the H* witness above clears. The
+     * callback re-snapshots its own delta baseline on a true return, so
+     * pure churn (no durable progress) returns false, the budget still
+     * exhausts here, and the operator is paged in bounded time. */
+    if (cond->progressing && cond->progressing(target))
+        atomic_store(&s->attempts, 0);
+    return false;
+}
+
+/* Emit an operator-needed page when the rate-limit ladder allows it. */
+static void condition_emit_operator_page(const struct condition *cond,
+                                         struct condition_state *s,
+                                         int64_t now)
+{
+    struct page_ladder *pl = page_ladder_for(s, true);
+    int interval = pl ? atomic_load(&pl->interval_secs)
+                      : COND_PAGE_BASE_SECS;
+    int64_t last_page = atomic_load(&s->last_operator_needed_unix);
+    if (last_page == 0 || now - last_page >= interval) {
+        atomic_store(&s->last_operator_needed_unix, now);
+        atomic_store(&s->operator_needed_emitted, true);
+        /* Escalate the repage gap: next = min(last*2, cap). The first
+         * page of an episode emits immediately and keeps the base gap. */
+        int next = interval;
+        if (last_page != 0) {
+            next = interval * 2;
+            if (next > COND_PAGE_CAP_SECS)
+                next = COND_PAGE_CAP_SECS;
+        }
+        int page_n = 1;
+        if (pl) {
+            atomic_store(&pl->interval_secs, next);
+            page_n = atomic_fetch_add(&pl->pages, 1) + 1;
+        }
+        long long active_for =
+            (long long)(now - atomic_load(&s->first_detect_unix));
+        fprintf(stderr,  // obs-ok:condition-operator-paired
+                "[condition_engine] operator_needed name=%s attempts=%d"
+                " active_for=%llds page=%d next_page_in=%ds\n",
+                cond->name, atomic_load(&s->attempts),
+                active_for, page_n, next);
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "condition=%s attempts=%d active_for=%llds page=%d"
+                    " next_page_in=%ds",
+                    cond->name, atomic_load(&s->attempts),
+                    active_for, page_n, next);
+    }
+}
+
+/* True when the episode has been active longer than its age budget. */
+static bool condition_over_age_budget(const struct condition *cond,
+                                      struct condition_state *s, int64_t now,
+                                      int poll_secs, int max_attempts)
+{
+    /* Age-based page: attempts alone can sit below max_attempts indefinitely
+     * (cooldown_rearm and progressing() both reset the counter, and a long
+     * backoff accrues slowly), so an episode active longer than the worst
+     * case its own schedule needs (one poll + max_attempts backoffs, doubled
+     * for slack, floored at COND_PAGE_AGE_FLOOR_SECS) pages the operator
+     * even at attempts < max_attempts. The existing page ladder still rate
+     * limits repages (60s doubling to the 3600s cap). */
+    int backoff = cond->backoff_secs > 0 ? cond->backoff_secs : 0;
+    int64_t age_budget =
+        (int64_t)poll_secs + (int64_t)backoff * max_attempts * 2;
+    if (age_budget < COND_PAGE_AGE_FLOOR_SECS)
+        age_budget = COND_PAGE_AGE_FLOOR_SECS;
+    int64_t first_detect = atomic_load(&s->first_detect_unix);
+    return first_detect != 0 && now - first_detect >= age_budget;
+}
+
 static void condition_tick_one(const struct condition *cond, int64_t now)
 {
     struct condition_state *s = (struct condition_state *)&cond->state;
@@ -318,17 +447,8 @@ static void condition_tick_one(const struct condition *cond, int64_t now)
          * attempts froze at 1/5 with no remedy retry and no page. */
     }
 
-    if (!atomic_load(&s->currently_active)) {
-        atomic_store(&s->currently_active, true);
-        atomic_store(&s->first_detect_unix, now);
-        atomic_store(&s->target_at_detect, now);
-        fprintf(stderr,  // obs-ok:condition-detected-paired
-                "[condition_engine] detected name=%s severity=%s\n",
-                cond->name, condition_severity_name(cond->severity));
-        event_emitf(EV_CONDITION_DETECTED, 0,
-                    "name=%s severity=%s",
-                    cond->name, condition_severity_name(cond->severity));
-    }
+    if (!atomic_load(&s->currently_active))
+        condition_begin_episode(cond, s, now);
 
     target = atomic_load(&s->target_at_detect);
 
@@ -339,104 +459,15 @@ static void condition_tick_one(const struct condition *cond, int64_t now)
         return;
     }
 
-    if (condition_due_for_remedy(cond, s, now)) {
-        enum condition_remedy_result r = cond->remedy();
-        int attempts = atomic_fetch_add(&s->attempts, 1) + 1;
-        atomic_store(&s->last_remedy_unix, now);
-
-        /* DOCTRINE (FRAMEWORK.md §9): a remedy may only be reported as `ok`
-         * if the symptom actually cleared. We re-check the witness right
-         * after the remedy ran. A remedy that returned COND_REMEDY_OK but did
-         * NOT clear the symptom is reported as `unwitnessed` — NOT ok — so a
-         * frozen tip can never self-report success. Witnessed success clears
-         * the condition (and resets attempts); an unwitnessed OK leaves the
-         * attempt counted so it accrues toward operator escalation. */
-        bool witnessed = cond->witness(target);
-        enum condition_remedy_result reported = r;
-        if (r == COND_REMEDY_OK && !witnessed)
-            reported = COND_REMEDY_UNWITNESSED;
-        atomic_store(&s->last_outcome, reported);
-
-        fprintf(stderr,  // obs-ok:condition-remedy-paired
-                "[condition_engine] remedy name=%s attempt=%d result=%s\n",
-                cond->name, attempts,
-                condition_remedy_result_name(reported));
-        event_emitf(EV_CONDITION_REMEDY_ATTEMPTED, 0,
-                    "name=%s attempt=%d result=%s",
-                    cond->name, attempts,
-                    condition_remedy_result_name(reported));
-
-        if (witnessed) {
-            condition_mark_cleared(cond, s, now);
-            return;
-        }
-
-        /* TL-1 (decouple witness-CLEAR from budget REFRESH): the witness did
-         * NOT clear, but the remedy may be making durable, resumable progress
-         * toward a future witnessed success that has not yet landed (a chunked
-         * repair that legitimately spans more rounds than max_attempts). When
-         * the optional progressing() callback confirms that, RESET the attempt
-         * budget so a genuinely-converging repair is never converted into a
-         * false operator page. This is NOT a clear: currently_active and
-         * cleared_count are untouched — only the H* witness above clears. The
-         * callback re-snapshots its own delta baseline on a true return, so
-         * pure churn (no durable progress) returns false, the budget still
-         * exhausts here, and the operator is paged in bounded time. */
-        if (cond->progressing && cond->progressing(target))
-            atomic_store(&s->attempts, 0);
-    }
+    if (condition_due_for_remedy(cond, s, now) &&
+        condition_run_remedy(cond, s, now, target))
+        return;
 
     int max_attempts = cond->max_attempts > 0 ? cond->max_attempts : 1;
-    /* Age-based page: attempts alone can sit below max_attempts indefinitely
-     * (cooldown_rearm and progressing() both reset the counter, and a long
-     * backoff accrues slowly), so an episode active longer than the worst
-     * case its own schedule needs (one poll + max_attempts backoffs, doubled
-     * for slack, floored at COND_PAGE_AGE_FLOOR_SECS) pages the operator
-     * even at attempts < max_attempts. The existing page ladder still rate
-     * limits repages (60s doubling to the 3600s cap). */
-    int backoff = cond->backoff_secs > 0 ? cond->backoff_secs : 0;
-    int64_t age_budget =
-        (int64_t)poll_secs + (int64_t)backoff * max_attempts * 2;
-    if (age_budget < COND_PAGE_AGE_FLOOR_SECS)
-        age_budget = COND_PAGE_AGE_FLOOR_SECS;
-    int64_t first_detect = atomic_load(&s->first_detect_unix);
     bool over_age_budget =
-        first_detect != 0 && now - first_detect >= age_budget;
-    if (atomic_load(&s->attempts) >= max_attempts || over_age_budget) {
-        struct page_ladder *pl = page_ladder_for(s, true);
-        int interval = pl ? atomic_load(&pl->interval_secs)
-                          : COND_PAGE_BASE_SECS;
-        int64_t last_page = atomic_load(&s->last_operator_needed_unix);
-        if (last_page == 0 || now - last_page >= interval) {
-            atomic_store(&s->last_operator_needed_unix, now);
-            atomic_store(&s->operator_needed_emitted, true);
-            /* Escalate the repage gap: next = min(last*2, cap). The first
-             * page of an episode emits immediately and keeps the base gap. */
-            int next = interval;
-            if (last_page != 0) {
-                next = interval * 2;
-                if (next > COND_PAGE_CAP_SECS)
-                    next = COND_PAGE_CAP_SECS;
-            }
-            int page_n = 1;
-            if (pl) {
-                atomic_store(&pl->interval_secs, next);
-                page_n = atomic_fetch_add(&pl->pages, 1) + 1;
-            }
-            long long active_for =
-                (long long)(now - atomic_load(&s->first_detect_unix));
-            fprintf(stderr,  // obs-ok:condition-operator-paired
-                    "[condition_engine] operator_needed name=%s attempts=%d"
-                    " active_for=%llds page=%d next_page_in=%ds\n",
-                    cond->name, atomic_load(&s->attempts),
-                    active_for, page_n, next);
-            event_emitf(EV_OPERATOR_NEEDED, 0,
-                        "condition=%s attempts=%d active_for=%llds page=%d"
-                        " next_page_in=%ds",
-                        cond->name, atomic_load(&s->attempts),
-                        active_for, page_n, next);
-        }
-    }
+        condition_over_age_budget(cond, s, now, poll_secs, max_attempts);
+    if (atomic_load(&s->attempts) >= max_attempts || over_age_budget)
+        condition_emit_operator_page(cond, s, now);
 }
 
 void condition_engine_tick(void)
