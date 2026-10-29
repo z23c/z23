@@ -312,16 +312,8 @@ static bool pr_seed_structure(sqlite3 *db)
            nullifier_kv_initialize_history(db, 0);
 }
 
-/* Seed the fold-produced rows AFTER begin, so the crypto stage rows pick up the
- * source-epoch authority the producer just published (exactly the ordering a
- * real -mint-anchor fold follows). */
-static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
+static bool pr_seed_fold_hash_rows(sqlite3 *db, uint8_t hash[2][32])
 {
-    if (!pr_insert_header(db, 0, hash[0], NULL) ||
-        !pr_insert_header(db, 1, hash[1], hash[0]) ||
-        !pr_insert_tip(db, 0, "finalized", hash[1]) ||
-        !pr_insert_tip(db, 1, "anchor", hash[1]))
-        return false;
     static const char *const hash_sql[] = {
         "INSERT INTO validate_headers_log VALUES(?,?,1)",
         "INSERT INTO body_fetch_log VALUES(?,?,1)",
@@ -343,7 +335,11 @@ static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
                 return false;
         }
     }
+    return true;
+}
 
+static bool pr_seed_fold_state_rows(sqlite3 *db, uint8_t nf[32])
+{
     uint8_t txid[32];
     for (size_t i = 0; i < sizeof(txid); i++)
         txid[i] = (uint8_t)(0xc1u + i);
@@ -362,6 +358,22 @@ static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
     if (!anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &sprout, 1) ||
         !anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &sapling, 1) ||
         !nullifier_kv_add(db, nf, 0, 1))
+        return false;
+    return true;
+}
+
+/* Seed the fold-produced rows AFTER begin, so the crypto stage rows pick up the
+ * source-epoch authority the producer just published (exactly the ordering a
+ * real -mint-anchor fold follows). */
+static bool pr_seed_fold_rows(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
+{
+    if (!pr_insert_header(db, 0, hash[0], NULL) ||
+        !pr_insert_header(db, 1, hash[1], hash[0]) ||
+        !pr_insert_tip(db, 0, "finalized", hash[1]) ||
+        !pr_insert_tip(db, 1, "anchor", hash[1]))
+        return false;
+    if (!pr_seed_fold_hash_rows(db, hash) ||
+        !pr_seed_fold_state_rows(db, nf))
         return false;
 
     const uint8_t one = 1;
@@ -406,7 +418,25 @@ static bool pr_run_export(sqlite3 *db, int output_dir_fd, const char *name,
     return consensus_state_snapshot_export(db, &request, out);
 }
 
-int test_consensus_state_producer_receipt(void)
+/* Shared fixture state for the scenario helpers below. Each helper runs its
+ * checks in the same order the original single function did. */
+struct pr_fixture {
+    sqlite3 *db;
+    const char *dir;
+    uint8_t hash[3][32];
+    uint8_t nf[32];
+    char err[256];
+    char status_err[256];
+    struct producer_status_read producer_status;
+    struct consensus_state_source_receipt original_claim;
+    uint8_t original_epoch[32];
+    char export_dir[512];
+    char accepted_output[640];
+    int output_dir_fd;
+    struct consensus_state_producer_session_retired retired;
+};
+
+static int pr_running_digest_checks(void)
 {
     int failures = 0;
     uint8_t running_digest_a[32] = {0};
@@ -423,6 +453,437 @@ int test_consensus_state_producer_receipt(void)
                                    sizeof(running_digest_a)) &&
                  memcmp(running_digest_a, running_digest_b,
                         sizeof(running_digest_a)) == 0);
+    return failures;
+}
+
+static int pr_begin_refusal_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* finalize BEFORE begin fails closed: no start session exists. */
+    PR_CHECK("finalize without a start session refuses",
+             !consensus_state_producer_receipt_finalize(db, 1, f->hash[1], err,
+                                                         err_size) &&
+             strstr(err, "no start session") != NULL);
+
+    /* Producer START ownership. */
+    char overlong_source_id[66];
+    memset(overlong_source_id, 'a', sizeof(overlong_source_id) - 1u);
+    overlong_source_id[sizeof(overlong_source_id) - 1u] = '\0';
+    consensus_state_producer_receipt_test_set_identity(overlong_source_id,
+                                                        true);
+    PR_CHECK("overlong source identity cannot truncate into authority",
+             !consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size) &&
+             strstr(err, "no exact 64-hex") != NULL);
+    consensus_state_producer_receipt_test_set_identity(PR_TEST_SOURCE_ID,
+                                                        true);
+    PR_CHECK("producer begin writes the durable session",
+             consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size));
+    PR_CHECK("new producer session uses source-identity v2 with no Git authority",
+             pr_scalar_true(db,
+                 "SELECT schema='zcl.consensus_state_producer_session.v2' "
+                 "AND typeof(producer_commit)='text' "
+                 "AND length(producer_commit)=0 "
+                 "FROM consensus_state_producer_session WHERE singleton=1"));
+    /* Idempotent resume by the same binary + claim is a no-op success. */
+    PR_CHECK("producer begin is idempotent for the same binary",
+             consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size));
+    return failures;
+}
+
+static int pr_session_claim_tamper_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+    struct consensus_state_source_receipt *original = &f->original_claim;
+
+    /* A row can be internally self-consistent yet still be foreign. The old
+     * resume path derived its expected epoch from these stored fields and
+     * therefore adopted each of these attacker-rewritten claims. */
+    PR_CHECK("capture exact current v2 session claim",
+             pr_read_session_claim(db, original, f->original_epoch));
+    PR_CHECK("self-consistent stored source-root tamper cannot resume",
+             pr_self_consistent_claim_tamper_refuses(
+                 db, original, f->original_epoch, PR_MUTATE_SOURCE_ROOT,
+                 err, err_size));
+    PR_CHECK("self-consistent stored toolchain tamper cannot resume",
+             pr_self_consistent_claim_tamper_refuses(
+                 db, original, f->original_epoch, PR_MUTATE_TOOLCHAIN,
+                 err, err_size));
+    PR_CHECK("self-consistent stored build-input tamper cannot resume",
+             pr_self_consistent_claim_tamper_refuses(
+                 db, original, f->original_epoch, PR_MUTATE_BUILD_INPUTS,
+                 err, err_size));
+    return failures;
+}
+
+static int pr_profile_and_legacy_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* A different validation profile on the same datadir refuses. */
+    PR_CHECK("producer begin refuses a conflicting profile",
+             !consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD, err,
+                 err_size));
+
+    /* A structurally valid legacy row is still readable by diagnostics, but
+     * can neither resume a fold nor finalize a new authoritative receipt. */
+    PR_CHECK("fixture relabels the durable session as legacy v1",
+             pr_exec(db,
+                 "UPDATE consensus_state_producer_session "
+                 "SET schema='zcl.consensus_state_producer_session.v1',"
+                 "producer_commit='" PR_TEST_LEGACY_COMMIT "'"));
+    PR_CHECK("legacy v1 producer session cannot resume",
+             !consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size) &&
+             strstr(err, "legacy v1 session") != NULL);
+    PR_CHECK("legacy v1 producer session cannot finalize",
+             !consensus_state_producer_receipt_finalize(
+                 db, 1, f->hash[1], err, err_size) &&
+             strstr(err, "legacy v1 session") != NULL);
+    PR_CHECK("legacy v1 refusal writes no final receipt",
+             pr_scalar_true(db,
+                 "SELECT count(*)=0 FROM sqlite_master "
+                 "WHERE type='table' "
+                 "AND name='consensus_state_source_receipt'"));
+    PR_CHECK("fixture restores the current v2 session",
+             pr_exec(db,
+                 "UPDATE consensus_state_producer_session "
+                 "SET schema='zcl.consensus_state_producer_session.v2',"
+                 "producer_commit=''"));
+    return failures;
+}
+
+static int pr_finalize_tamper_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    PR_CHECK("finalize refuses self-consistent stored source-root tamper",
+             pr_self_consistent_claim_tamper_finalize_refuses(
+                 f->db, &f->original_claim, f->original_epoch,
+                 PR_MUTATE_SOURCE_ROOT, f->hash[1], f->err, sizeof(f->err)));
+    PR_CHECK("finalize refuses self-consistent stored toolchain tamper",
+             pr_self_consistent_claim_tamper_finalize_refuses(
+                 f->db, &f->original_claim, f->original_epoch,
+                 PR_MUTATE_TOOLCHAIN, f->hash[1], f->err, sizeof(f->err)));
+    PR_CHECK("finalize refuses self-consistent stored build-input tamper",
+             pr_self_consistent_claim_tamper_finalize_refuses(
+                 f->db, &f->original_claim, f->original_epoch,
+                 PR_MUTATE_BUILD_INPUTS, f->hash[1], f->err, sizeof(f->err)));
+    return failures;
+}
+
+static int pr_producer_receipt_finalize_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* Producer END ownership: finalize binds the receipt to the fold. */
+    PR_CHECK("producer finalize writes the source receipt",
+             consensus_state_producer_receipt_finalize(db, 1, f->hash[1], err,
+                                                        err_size));
+    PR_CHECK("new final receipt uses source-identity v2 with no Git authority",
+             pr_scalar_true(db,
+                 "SELECT schema='zcl.consensus_state_source_receipt.v2' "
+                 "AND typeof(producer_commit)='text' "
+                 "AND length(producer_commit)=0 "
+                 "FROM consensus_state_source_receipt WHERE singleton=1"));
+    PR_CHECK("v2 producer status exposes source telemetry",
+             consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             f->producer_status.receipt_finalized &&
+             strcmp(f->producer_status.receipt_schema,
+                    CONSENSUS_STATE_SOURCE_RECEIPT_SCHEMA_V2) == 0 &&
+             strcmp(f->producer_status.source_tree_root,
+                    PR_TEST_SOURCE_ID) == 0 &&
+             strlen(f->producer_status.source_epoch_digest) == 64 &&
+             f->producer_status.producer_commit[0] == '\0');
+    return failures;
+}
+
+static int pr_zero_authority_status_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    PR_CHECK("producer status rejects zero toolchain/build-input authority",
+             pr_exec(db,
+                 "UPDATE consensus_state_source_receipt "
+                 "SET toolchain_digest=zeroblob(32),"
+                 "build_inputs_digest=zeroblob(32)") &&
+             !consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             !f->producer_status.receipt_finalized &&
+             strstr(f->status_err, "finalized receipt") != NULL);
+    PR_CHECK("producer status fixture restores exact build claims",
+             pr_exec(db,
+                 "UPDATE consensus_state_source_receipt SET "
+                 "toolchain_digest=(SELECT toolchain_digest FROM "
+                 "consensus_state_producer_session WHERE singleton=1),"
+                 "build_inputs_digest=(SELECT build_inputs_digest FROM "
+                 "consensus_state_producer_session WHERE singleton=1)") &&
+             consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             f->producer_status.receipt_finalized);
+    return failures;
+}
+
+static int pr_fold_cursor_status_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    PR_CHECK("producer status rejects an impossible finalized fold cursor",
+             pr_exec(db,
+                 "UPDATE consensus_state_source_receipt SET fold_cursor=0") &&
+             !consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             !f->producer_status.receipt_finalized &&
+             strstr(f->status_err, "finalized receipt") != NULL);
+    PR_CHECK("producer status fixture restores the finalized fold cursor",
+             pr_exec(db,
+                 "UPDATE consensus_state_source_receipt SET fold_cursor=2") &&
+             consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             f->producer_status.receipt_finalized &&
+             f->producer_status.fold_cursor == 2);
+    PR_CHECK("producer finalize exact retry is idempotent",
+             consensus_state_producer_receipt_finalize(db, 1, f->hash[1], err,
+                                                        err_size));
+    return failures;
+}
+
+static int pr_export_setup_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    PR_CHECK("compiled checkpoint override arms",
+             pr_arm_checkpoint(f->db, f->hash[1]));
+
+    snprintf(f->export_dir, sizeof(f->export_dir), "%s/export", f->dir);
+    PR_CHECK("descriptor-bound output directory",
+             mkdir(f->export_dir, 0700) == 0);
+    f->output_dir_fd = open(f->export_dir,
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    PR_CHECK("output directory descriptor", f->output_dir_fd >= 0);
+
+    snprintf(f->accepted_output, sizeof(f->accepted_output),
+             "%s/accepted.bundle.db", f->export_dir);
+    return failures;
+}
+
+static int pr_accepted_export_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    struct consensus_state_export_result accepted;
+    bool exported = pr_run_export(f->db, f->output_dir_fd,
+                                  "accepted.bundle.db", f->hash[1], &accepted);
+    struct stat st;
+#if defined(__linux__)
+    PR_CHECK("producer-earned receipt is admitted end-to-end",
+             exported && accepted.status == CONSENSUS_EXPORT_EXPORTED &&
+             accepted.history_complete && accepted.height == 1 &&
+             accepted.source_clean &&
+             accepted.validation_profile == CONSENSUS_STATE_VALIDATION_FULL &&
+             accepted.utxo_count == 1 && accepted.anchor_count == 2 &&
+             accepted.nullifier_count == 1 &&
+             lstat(f->accepted_output, &st) == 0 && S_ISREG(st.st_mode));
+#else
+    /* The receipt is valid but this platform lacks a qualified O_TMPFILE +
+     * exact-descriptor no-replace publication mechanism: the exporter names
+     * that boundary and leaves no file behind. */
+    errno = 0;
+    PR_CHECK("producer-earned receipt refuses without anonymous staging",
+             !exported &&
+             accepted.status == CONSENSUS_EXPORT_OUTPUT_ERROR &&
+             strstr(accepted.reason, "anonymous no-replace output staging") !=
+                 NULL &&
+             lstat(f->accepted_output, &st) != 0 && errno == ENOENT);
+#endif
+    return failures;
+}
+
+static int pr_cadence_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* Standing export cadence: the same receipt-owning producer may advance
+     * the singleton to a strictly higher, newly linked corpus; the monotonic
+     * guard admits h=2 and the generic conflict branch must not reject it. */
+    PR_CHECK("producer fixture extends the linked header corpus",
+             pr_insert_header(db, 2, f->hash[2], f->hash[1]));
+    PR_CHECK("producer receipt advances monotonically under the same session",
+             consensus_state_producer_receipt_finalize(db, 2, f->hash[2], err,
+                                                        err_size) &&
+             pr_scalar_true(db,
+                 "SELECT fold_cursor=3 FROM consensus_state_source_receipt "
+                 "WHERE singleton=1"));
+    PR_CHECK("producer receipt refuses a backward re-finalize",
+             !consensus_state_producer_receipt_finalize(db, 1, f->hash[1], err,
+                                                         err_size) &&
+             strstr(err, "cannot move the committed fold cursor backward") !=
+                 NULL);
+    return failures;
+}
+
+static int pr_tamper_receipt_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* TAMPER: flip a byte of the receipt digest — the exporter refuses. */
+    char tamper_output[640];
+    snprintf(tamper_output, sizeof(tamper_output), "%s/tamper.bundle.db",
+             f->export_dir);
+    PR_CHECK("corrupt the finalized receipt digest",
+             pr_exec(db,
+                 "UPDATE consensus_state_source_receipt "
+                 "SET receipt_digest=zeroblob(32)"));
+    memset(f->status_err, 0, sizeof(f->status_err));
+    PR_CHECK("producer status never labels a corrupt receipt finalized",
+             !consensus_state_producer_status_read(
+                 f->dir, &f->producer_status, f->status_err,
+                 sizeof(f->status_err)) &&
+             !f->producer_status.receipt_finalized &&
+             strstr(f->status_err, "digest verification") != NULL);
+    PR_CHECK("finalize refuses to overwrite conflicting durable evidence",
+             !consensus_state_producer_receipt_finalize(db, 2, f->hash[2], err,
+                                                         err_size) &&
+             strstr(err, "conflicting finalized receipt") != NULL);
+    struct consensus_state_export_result tampered;
+    PR_CHECK("tampered receipt is refused and publishes nothing",
+             !pr_run_export(db, f->output_dir_fd, "tamper.bundle.db",
+                            f->hash[1], &tampered) &&
+             tampered.status == CONSENSUS_EXPORT_MISSING_PROOF &&
+             access(tamper_output, F_OK) != 0);
+    return failures;
+}
+
+static int pr_missing_and_unowned_checks(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* MISSING: delete the receipt — the exporter refuses. */
+    char missing_output[640];
+    snprintf(missing_output, sizeof(missing_output), "%s/missing.bundle.db",
+             f->export_dir);
+    PR_CHECK("delete the finalized receipt",
+             pr_exec(db, "DELETE FROM consensus_state_source_receipt"));
+    struct consensus_state_export_result missing;
+    PR_CHECK("missing receipt is refused and publishes nothing",
+             !pr_run_export(db, f->output_dir_fd, "missing.bundle.db",
+                            f->hash[1], &missing) &&
+             missing.status == CONSENSUS_EXPORT_MISSING_PROOF &&
+             access(missing_output, F_OK) != 0);
+
+    /* UNOWNED START SESSION: corrupt the recorded running-binary digest so the
+     * running executable no longer owns the session — finalize refuses. */
+    PR_CHECK("corrupt the start session's running-binary digest",
+             pr_exec(db,
+                 "UPDATE consensus_state_producer_session "
+                 "SET running_binary_digest=zeroblob(32)"));
+    PR_CHECK("finalize refuses a session the running binary does not own",
+             !consensus_state_producer_receipt_finalize(db, 1, f->hash[1], err,
+                                                         err_size) &&
+             strstr(err, "does not own the start session") != NULL);
+    return failures;
+}
+
+static int pr_retire_checks_a(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    /* OPERATOR RETIREMENT. The session above is now foreign (zeroblob binary
+     * digest): exactly the datadir state a binary upgrade leaves behind, the
+     * state that degrades the exporter at every boot. The typed remedy must
+     * delete it, audit it, and let begin() start over. */
+    memset(&f->retired, 0, sizeof(f->retired));
+    PR_CHECK("retire deletes the foreign session and audits it",
+             consensus_state_producer_session_retire(
+                 db, &f->retired, err, err_size) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=0 "
+                 "FROM consensus_state_producer_session") &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 FROM progress_meta "
+                 "WHERE key='consensus_state.producer_session_retired_"
+                 "binary_digest' AND value=zeroblob(32)"));
+    PR_CHECK("retire evidence reports the retired foreign session",
+             strspn(f->retired.running_binary_digest, "0") == 64 &&
+             strlen(f->retired.source_tree_root) == 64 &&
+             strlen(f->retired.source_epoch_digest) == 64 &&
+             f->retired.validation_profile == CONSENSUS_STATE_VALIDATION_FULL &&
+             f->retired.started_us > 0);
+    PR_CHECK("retire is idempotent against an empty datadir",
+             consensus_state_producer_session_retire(
+                 db, &f->retired, err, err_size) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
+    PR_CHECK("begin re-mints a fresh session after retirement",
+             consensus_state_producer_receipt_begin(
+                 db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size) &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 "
+                 "FROM consensus_state_producer_session"));
+    return failures;
+}
+
+static int pr_retire_checks_b(struct pr_fixture *f)
+{
+    int failures = 0;
+    sqlite3 *db = f->db;
+    char *err = f->err;
+    const size_t err_size = sizeof(f->err);
+
+    PR_CHECK("retire refuses the running build's own session",
+             consensus_state_producer_session_retire(
+                 db, &f->retired, err, err_size) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT &&
+             strstr(err, "matches this running build") != NULL &&
+             pr_scalar_true(db,
+                 "SELECT count(*)=1 "
+                 "FROM consensus_state_producer_session"));
+    PR_CHECK("retire tolerates a datadir with no session table",
+             pr_exec(db,
+                 "DROP TABLE consensus_state_producer_session") &&
+             consensus_state_producer_session_retire(
+                 db, &f->retired, err, err_size) ==
+                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
+    return failures;
+}
+
+int test_consensus_state_producer_receipt(void)
+{
+    int failures = pr_running_digest_checks();
     consensus_state_producer_receipt_test_set_identity(PR_TEST_SOURCE_ID,
                                                         true);
 
@@ -436,339 +897,49 @@ int test_consensus_state_producer_receipt(void)
     PR_CHECK("owned progress store opens", progress_store_open(dir));
     sqlite3 *db = progress_store_db();
 
-    uint8_t hash[3][32] = {{0}};
-    uint8_t nf[32] = {0};
+    struct pr_fixture f;
+    memset(&f, 0, sizeof(f));
+    f.db = db;
+    f.dir = dir;
     for (size_t i = 0; i < 32; i++) {
-        hash[0][i] = (uint8_t)(0x21u + i);
-        hash[1][i] = (uint8_t)(0x61u + i);
-        hash[2][i] = (uint8_t)(0x81u + i);
-        nf[i] = (uint8_t)(0xa1u + i);
+        f.hash[0][i] = (uint8_t)(0x21u + i);
+        f.hash[1][i] = (uint8_t)(0x61u + i);
+        f.hash[2][i] = (uint8_t)(0x81u + i);
+        f.nf[i] = (uint8_t)(0xa1u + i);
     }
 
     PR_CHECK("structural tables seed", db && pr_seed_structure(db));
 
-    /* finalize BEFORE begin fails closed: no start session exists. */
-    char err[256] = {0};
-    PR_CHECK("finalize without a start session refuses",
-             !consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
-                                                         sizeof(err)) &&
-             strstr(err, "no start session") != NULL);
-
-    /* Producer START ownership. */
-    char overlong_source_id[66];
-    memset(overlong_source_id, 'a', sizeof(overlong_source_id) - 1u);
-    overlong_source_id[sizeof(overlong_source_id) - 1u] = '\0';
-    consensus_state_producer_receipt_test_set_identity(overlong_source_id,
-                                                        true);
-    PR_CHECK("overlong source identity cannot truncate into authority",
-             !consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)) &&
-             strstr(err, "no exact 64-hex") != NULL);
-    consensus_state_producer_receipt_test_set_identity(PR_TEST_SOURCE_ID,
-                                                        true);
-    PR_CHECK("producer begin writes the durable session",
-             consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)));
-    PR_CHECK("new producer session uses source-identity v2 with no Git authority",
-             pr_scalar_true(db,
-                 "SELECT schema='zcl.consensus_state_producer_session.v2' "
-                 "AND typeof(producer_commit)='text' "
-                 "AND length(producer_commit)=0 "
-                 "FROM consensus_state_producer_session WHERE singleton=1"));
-    /* Idempotent resume by the same binary + claim is a no-op success. */
-    PR_CHECK("producer begin is idempotent for the same binary",
-             consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)));
-
-    /* A row can be internally self-consistent yet still be foreign. The old
-     * resume path derived its expected epoch from these stored fields and
-     * therefore adopted each of these attacker-rewritten claims. */
-    struct consensus_state_source_receipt original_claim;
-    uint8_t original_epoch[32];
-    PR_CHECK("capture exact current v2 session claim",
-             pr_read_session_claim(db, &original_claim, original_epoch));
-    PR_CHECK("self-consistent stored source-root tamper cannot resume",
-             pr_self_consistent_claim_tamper_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_SOURCE_ROOT,
-                 err, sizeof(err)));
-    PR_CHECK("self-consistent stored toolchain tamper cannot resume",
-             pr_self_consistent_claim_tamper_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_TOOLCHAIN,
-                 err, sizeof(err)));
-    PR_CHECK("self-consistent stored build-input tamper cannot resume",
-             pr_self_consistent_claim_tamper_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_BUILD_INPUTS,
-                 err, sizeof(err)));
-
-    /* A different validation profile on the same datadir refuses. */
-    PR_CHECK("producer begin refuses a conflicting profile",
-             !consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD, err,
-                 sizeof(err)));
-
-    /* A structurally valid legacy row is still readable by diagnostics, but
-     * can neither resume a fold nor finalize a new authoritative receipt. */
-    PR_CHECK("fixture relabels the durable session as legacy v1",
-             pr_exec(db,
-                 "UPDATE consensus_state_producer_session "
-                 "SET schema='zcl.consensus_state_producer_session.v1',"
-                 "producer_commit='" PR_TEST_LEGACY_COMMIT "'"));
-    PR_CHECK("legacy v1 producer session cannot resume",
-             !consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)) &&
-             strstr(err, "legacy v1 session") != NULL);
-    PR_CHECK("legacy v1 producer session cannot finalize",
-             !consensus_state_producer_receipt_finalize(
-                 db, 1, hash[1], err, sizeof(err)) &&
-             strstr(err, "legacy v1 session") != NULL);
-    PR_CHECK("legacy v1 refusal writes no final receipt",
-             pr_scalar_true(db,
-                 "SELECT count(*)=0 FROM sqlite_master "
-                 "WHERE type='table' "
-                 "AND name='consensus_state_source_receipt'"));
-    PR_CHECK("fixture restores the current v2 session",
-             pr_exec(db,
-                 "UPDATE consensus_state_producer_session "
-                 "SET schema='zcl.consensus_state_producer_session.v2',"
-                 "producer_commit=''"));
+    failures += pr_begin_refusal_checks(&f);
+    failures += pr_session_claim_tamper_checks(&f);
+    failures += pr_profile_and_legacy_checks(&f);
 
     /* The fold runs; its crypto rows are stamped with the published epoch. */
     PR_CHECK("fold rows seed with the published source epoch",
-             pr_seed_fold_rows(db, hash, nf));
+             pr_seed_fold_rows(db, f.hash, f.nf));
 
-    PR_CHECK("finalize refuses self-consistent stored source-root tamper",
-             pr_self_consistent_claim_tamper_finalize_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_SOURCE_ROOT,
-                 hash[1], err, sizeof(err)));
-    PR_CHECK("finalize refuses self-consistent stored toolchain tamper",
-             pr_self_consistent_claim_tamper_finalize_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_TOOLCHAIN,
-                 hash[1], err, sizeof(err)));
-    PR_CHECK("finalize refuses self-consistent stored build-input tamper",
-             pr_self_consistent_claim_tamper_finalize_refuses(
-                 db, &original_claim, original_epoch, PR_MUTATE_BUILD_INPUTS,
-                 hash[1], err, sizeof(err)));
+    failures += pr_finalize_tamper_checks(&f);
+    failures += pr_producer_receipt_finalize_checks(&f);
+    failures += pr_zero_authority_status_checks(&f);
+    failures += pr_fold_cursor_status_checks(&f);
+    failures += pr_export_setup_checks(&f);
+    failures += pr_accepted_export_checks(&f);
+    failures += pr_cadence_checks(&f);
+    failures += pr_tamper_receipt_checks(&f);
+    failures += pr_missing_and_unowned_checks(&f);
 
-    /* Producer END ownership: finalize binds the receipt to the fold. */
-    PR_CHECK("producer finalize writes the source receipt",
-             consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
-                                                        sizeof(err)));
-    PR_CHECK("new final receipt uses source-identity v2 with no Git authority",
-             pr_scalar_true(db,
-                 "SELECT schema='zcl.consensus_state_source_receipt.v2' "
-                 "AND typeof(producer_commit)='text' "
-                 "AND length(producer_commit)=0 "
-                 "FROM consensus_state_source_receipt WHERE singleton=1"));
-    struct producer_status_read producer_status;
-    char status_err[256] = {0};
-    PR_CHECK("v2 producer status exposes source telemetry",
-             consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             producer_status.receipt_finalized &&
-             strcmp(producer_status.receipt_schema,
-                    CONSENSUS_STATE_SOURCE_RECEIPT_SCHEMA_V2) == 0 &&
-             strcmp(producer_status.source_tree_root,
-                    PR_TEST_SOURCE_ID) == 0 &&
-             strlen(producer_status.source_epoch_digest) == 64 &&
-             producer_status.producer_commit[0] == '\0');
-    PR_CHECK("producer status rejects zero toolchain/build-input authority",
-             pr_exec(db,
-                 "UPDATE consensus_state_source_receipt "
-                 "SET toolchain_digest=zeroblob(32),"
-                 "build_inputs_digest=zeroblob(32)") &&
-             !consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             !producer_status.receipt_finalized &&
-             strstr(status_err, "finalized receipt") != NULL);
-    PR_CHECK("producer status fixture restores exact build claims",
-             pr_exec(db,
-                 "UPDATE consensus_state_source_receipt SET "
-                 "toolchain_digest=(SELECT toolchain_digest FROM "
-                 "consensus_state_producer_session WHERE singleton=1),"
-                 "build_inputs_digest=(SELECT build_inputs_digest FROM "
-                 "consensus_state_producer_session WHERE singleton=1)") &&
-             consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             producer_status.receipt_finalized);
-    PR_CHECK("producer status rejects an impossible finalized fold cursor",
-             pr_exec(db,
-                 "UPDATE consensus_state_source_receipt SET fold_cursor=0") &&
-             !consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             !producer_status.receipt_finalized &&
-             strstr(status_err, "finalized receipt") != NULL);
-    PR_CHECK("producer status fixture restores the finalized fold cursor",
-             pr_exec(db,
-                 "UPDATE consensus_state_source_receipt SET fold_cursor=2") &&
-             consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             producer_status.receipt_finalized &&
-             producer_status.fold_cursor == 2);
-    PR_CHECK("producer finalize exact retry is idempotent",
-             consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
-                                                        sizeof(err)));
-
-    PR_CHECK("compiled checkpoint override arms", pr_arm_checkpoint(db, hash[1]));
-
-    char export_dir[512];
-    snprintf(export_dir, sizeof(export_dir), "%s/export", dir);
-    PR_CHECK("descriptor-bound output directory",
-             mkdir(export_dir, 0700) == 0);
-    int output_dir_fd = open(export_dir,
-        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    PR_CHECK("output directory descriptor", output_dir_fd >= 0);
-
-    char accepted_output[640];
-    snprintf(accepted_output, sizeof(accepted_output), "%s/accepted.bundle.db",
-             export_dir);
-    struct consensus_state_export_result accepted;
-    bool exported = pr_run_export(db, output_dir_fd, "accepted.bundle.db",
-                                  hash[1], &accepted);
-    struct stat st;
-#if defined(__linux__)
-    PR_CHECK("producer-earned receipt is admitted end-to-end",
-             exported && accepted.status == CONSENSUS_EXPORT_EXPORTED &&
-             accepted.history_complete && accepted.height == 1 &&
-             accepted.source_clean &&
-             accepted.validation_profile == CONSENSUS_STATE_VALIDATION_FULL &&
-             accepted.utxo_count == 1 && accepted.anchor_count == 2 &&
-             accepted.nullifier_count == 1 &&
-             lstat(accepted_output, &st) == 0 && S_ISREG(st.st_mode));
-#else
-    /* The receipt is valid but this platform lacks a qualified O_TMPFILE +
-     * exact-descriptor no-replace publication mechanism: the exporter names
-     * that boundary and leaves no file behind. */
-    errno = 0;
-    PR_CHECK("producer-earned receipt refuses without anonymous staging",
-             !exported &&
-             accepted.status == CONSENSUS_EXPORT_OUTPUT_ERROR &&
-             strstr(accepted.reason, "anonymous no-replace output staging") !=
-                 NULL &&
-             lstat(accepted_output, &st) != 0 && errno == ENOENT);
-#endif
-
-    /* Standing export cadence: the same receipt-owning producer may advance
-     * the singleton to a strictly higher, newly linked corpus; the monotonic
-     * guard admits h=2 and the generic conflict branch must not reject it. */
-    PR_CHECK("producer fixture extends the linked header corpus",
-             pr_insert_header(db, 2, hash[2], hash[1]));
-    PR_CHECK("producer receipt advances monotonically under the same session",
-             consensus_state_producer_receipt_finalize(db, 2, hash[2], err,
-                                                        sizeof(err)) &&
-             pr_scalar_true(db,
-                 "SELECT fold_cursor=3 FROM consensus_state_source_receipt "
-                 "WHERE singleton=1"));
-    PR_CHECK("producer receipt refuses a backward re-finalize",
-             !consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
-                                                         sizeof(err)) &&
-             strstr(err, "cannot move the committed fold cursor backward") !=
-                 NULL);
-
-    /* TAMPER: flip a byte of the receipt digest — the exporter refuses. */
-    char tamper_output[640];
-    snprintf(tamper_output, sizeof(tamper_output), "%s/tamper.bundle.db",
-             export_dir);
-    PR_CHECK("corrupt the finalized receipt digest",
-             pr_exec(db,
-                 "UPDATE consensus_state_source_receipt "
-                 "SET receipt_digest=zeroblob(32)"));
-    memset(status_err, 0, sizeof(status_err));
-    PR_CHECK("producer status never labels a corrupt receipt finalized",
-             !consensus_state_producer_status_read(
-                 dir, &producer_status, status_err, sizeof(status_err)) &&
-             !producer_status.receipt_finalized &&
-             strstr(status_err, "digest verification") != NULL);
-    PR_CHECK("finalize refuses to overwrite conflicting durable evidence",
-             !consensus_state_producer_receipt_finalize(db, 2, hash[2], err,
-                                                         sizeof(err)) &&
-             strstr(err, "conflicting finalized receipt") != NULL);
-    struct consensus_state_export_result tampered;
-    PR_CHECK("tampered receipt is refused and publishes nothing",
-             !pr_run_export(db, output_dir_fd, "tamper.bundle.db", hash[1],
-                            &tampered) &&
-             tampered.status == CONSENSUS_EXPORT_MISSING_PROOF &&
-             access(tamper_output, F_OK) != 0);
-
-    /* MISSING: delete the receipt — the exporter refuses. */
-    char missing_output[640];
-    snprintf(missing_output, sizeof(missing_output), "%s/missing.bundle.db",
-             export_dir);
-    PR_CHECK("delete the finalized receipt",
-             pr_exec(db, "DELETE FROM consensus_state_source_receipt"));
-    struct consensus_state_export_result missing;
-    PR_CHECK("missing receipt is refused and publishes nothing",
-             !pr_run_export(db, output_dir_fd, "missing.bundle.db", hash[1],
-                            &missing) &&
-             missing.status == CONSENSUS_EXPORT_MISSING_PROOF &&
-             access(missing_output, F_OK) != 0);
-
-    /* UNOWNED START SESSION: corrupt the recorded running-binary digest so the
-     * running executable no longer owns the session — finalize refuses. */
-    PR_CHECK("corrupt the start session's running-binary digest",
-             pr_exec(db,
-                 "UPDATE consensus_state_producer_session "
-                 "SET running_binary_digest=zeroblob(32)"));
-    PR_CHECK("finalize refuses a session the running binary does not own",
-             !consensus_state_producer_receipt_finalize(db, 1, hash[1], err,
-                                                         sizeof(err)) &&
-             strstr(err, "does not own the start session") != NULL);
-
-    /* OPERATOR RETIREMENT. The session above is now foreign (zeroblob binary
-     * digest): exactly the datadir state a binary upgrade leaves behind, the
-     * state that degrades the exporter at every boot. The typed remedy must
-     * delete it, audit it, and let begin() start over. */
-    struct consensus_state_producer_session_retired retired;
-    memset(&retired, 0, sizeof(retired));
-    PR_CHECK("retire deletes the foreign session and audits it",
-             consensus_state_producer_session_retire(
-                 db, &retired, err, sizeof(err)) ==
-                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED &&
-             pr_scalar_true(db,
-                 "SELECT count(*)=0 "
-                 "FROM consensus_state_producer_session") &&
-             pr_scalar_true(db,
-                 "SELECT count(*)=1 FROM progress_meta "
-                 "WHERE key='consensus_state.producer_session_retired_"
-                 "binary_digest' AND value=zeroblob(32)"));
-    PR_CHECK("retire evidence reports the retired foreign session",
-             strspn(retired.running_binary_digest, "0") == 64 &&
-             strlen(retired.source_tree_root) == 64 &&
-             strlen(retired.source_epoch_digest) == 64 &&
-             retired.validation_profile == CONSENSUS_STATE_VALIDATION_FULL &&
-             retired.started_us > 0);
-    PR_CHECK("retire is idempotent against an empty datadir",
-             consensus_state_producer_session_retire(
-                 db, &retired, err, sizeof(err)) ==
-                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
-    PR_CHECK("begin re-mints a fresh session after retirement",
-             consensus_state_producer_receipt_begin(
-                 db, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof(err)) &&
-             pr_scalar_true(db,
-                 "SELECT count(*)=1 "
-                 "FROM consensus_state_producer_session"));
-    PR_CHECK("retire refuses the running build's own session",
-             consensus_state_producer_session_retire(
-                 db, &retired, err, sizeof(err)) ==
-                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_CURRENT &&
-             strstr(err, "matches this running build") != NULL &&
-             pr_scalar_true(db,
-                 "SELECT count(*)=1 "
-                 "FROM consensus_state_producer_session"));
-    PR_CHECK("retire tolerates a datadir with no session table",
-             pr_exec(db,
-                 "DROP TABLE consensus_state_producer_session") &&
-             consensus_state_producer_session_retire(
-                 db, &retired, err, sizeof(err)) ==
-                 CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT);
+    /* OPERATOR RETIREMENT (see pr_retire_checks_a). */
+    failures += pr_retire_checks_a(&f);
+    failures += pr_retire_checks_b(&f);
 
     reducer_frontier_test_set_compiled_anchor(-1);
     checkpoints_reset_sha3_override_for_test();
     consensus_state_producer_receipt_test_set_identity(NULL, false);
     progress_store_close();
-    if (output_dir_fd >= 0)
-        close(output_dir_fd);
-    (void)unlink(accepted_output);
-    (void)rmdir(export_dir);
+    if (f.output_dir_fd >= 0)
+        close(f.output_dir_fd);
+    (void)unlink(f.accepted_output);
+    (void)rmdir(f.export_dir);
     (void)rmdir(dir);
     return failures;
 }

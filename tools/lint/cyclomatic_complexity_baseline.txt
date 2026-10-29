@@ -577,8 +577,6 @@ tests/harness/src/test_codeindex.c:write_fixture:28
 tests/harness/src/test_codeindex_projection.c:test_codeindex_projection_integrity:46
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
-tests/harness/src/test_consensus_state_producer_receipt.c:pr_seed_fold_rows:19
-tests/harness/src/test_consensus_state_producer_receipt.c:test_consensus_state_producer_receipt:62
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_run_rung_ladder_tests:45
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_receipt_version:23
 tests/harness/src/test_consensus_state_snapshot_export.c:cse_seed_source:24
