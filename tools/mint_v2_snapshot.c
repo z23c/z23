@@ -358,7 +358,33 @@ static bool write_bundle_sidecars(const char *bundle_dir, const char *snap_name,
  * so the shared object set links. */
 volatile sig_atomic_t g_shutdown_requested = 0;
 
-int main(int argc, char **argv)
+/* State shared by the mint phases. Each phase returns 0 on success; a phase that
+ * fails after the node_state handle is open closes it through mint_abort(). */
+struct mint_ctx {
+    const char *datadir;
+    const char *out_path;
+    const char *bundle_dir;
+    int32_t seed_h;
+    sqlite3 *pdb;
+    struct main_state ms;
+    struct node_db ndb;
+    struct block_index *best;
+    uint8_t anchor_hash[32];
+    int64_t built_h;
+    uint8_t got_sha3[32];
+    uint64_t got_count;
+    int64_t got_supply;
+    char sha3hex[65];
+};
+
+/* Closes the node_state handle on a failed phase; the caller returns 1. */
+static int mint_abort(struct mint_ctx *c)
+{
+    node_db_close(&c->ndb);
+    return 1;
+}
+
+static int mint_parse_args(int argc, char **argv, struct mint_ctx *c)
 {
     if (argc != 4 && argc != 5) {
         fprintf(stderr,
@@ -378,173 +404,200 @@ int main(int argc, char **argv)
                 argv[0]);
         return 2;
     }
-    const char *datadir = argv[1];
-    int32_t seed_h = (int32_t)strtol(argv[2], NULL, 10);  /* 0 = auto */
-    const char *out_path = argv[3];
-    const char *bundle_dir = (argc == 5) ? argv[4] : NULL;
+    c->datadir = argv[1];
+    c->seed_h = (int32_t)strtol(argv[2], NULL, 10);  /* 0 = auto */
+    c->out_path = argv[3];
+    c->bundle_dir = (argc == 5) ? argv[4] : NULL;
 
-    if (seed_h < 0) {
+    if (c->seed_h < 0) {
         fprintf(stderr, "seed_height must be >= 0 (0 = auto-pick coins_applied-1)\n");
         return 2;
     }
+    return 0;
+}
 
-    /* (1) coins_kv home. */
-    if (!progress_store_open(datadir)) {
-        fprintf(stderr, "progress_store_open(%s) failed\n", datadir);
+/* Auto-pick the seed height from the source's coins-applied frontier when
+ * the caller passes 0. The ONLY coherent mint height is coins_applied-1 (the
+ * coin set is exactly as-of the last applied block; the coherence guard
+ * below enforces this). Saves the caller from reading the kernel store by hand. */
+static int mint_auto_seed(sqlite3 *pdb, int32_t *seed_h)
+{
+    int32_t ca = 0;
+    bool caf = false;
+    if (!coins_kv_get_applied_height(pdb, &ca, &caf) || !caf || ca <= 1) {
+        fprintf(stderr, "auto-seed: could not read coins_applied_height "
+                "(found=%d val=%d)\n", caf, ca);
         return 1;
     }
-    sqlite3 *pdb = progress_store_db();
-    if (!pdb) {
+    *seed_h = ca - 1;
+    fprintf(stderr, "[mint-v2] auto seed height = coins_applied(%d) - 1 = %d\n",
+            ca, *seed_h);
+    return 0;
+}
+
+/* (1) coins_kv home. */
+static int mint_open_source(struct mint_ctx *c)
+{
+    if (!progress_store_open(c->datadir)) {
+        fprintf(stderr, "progress_store_open(%s) failed\n", c->datadir);
+        return 1;
+    }
+    c->pdb = progress_store_db();
+    if (!c->pdb) {
         fprintf(stderr, "progress_store_db() returned NULL\n");
         return 1;
     }
-
-    /* Auto-pick the seed height from the source's coins-applied frontier when
-     * the caller passes 0. The ONLY coherent mint height is coins_applied-1 (the
-     * coin set is exactly as-of the last applied block; the coherence guard
-     * below enforces this). Saves the caller from reading the kernel store by hand. */
-    if (seed_h == 0) {
-        int32_t ca = 0;
-        bool caf = false;
-        if (!coins_kv_get_applied_height(pdb, &ca, &caf) || !caf || ca <= 1) {
-            fprintf(stderr, "auto-seed: could not read coins_applied_height "
-                    "(found=%d val=%d)\n", caf, ca);
-            return 1;
-        }
-        seed_h = ca - 1;
-        fprintf(stderr, "[mint-v2] auto seed height = coins_applied(%d) - 1 = %d\n",
-                ca, seed_h);
-    }
+    if (c->seed_h == 0 && mint_auto_seed(c->pdb, &c->seed_h) != 0)
+        return 1;
 
     int64_t num_txs = 0, count = 0, supply = 0;
-    if (coins_kv_setinfo(pdb, &num_txs, &count, &supply))
+    if (coins_kv_setinfo(c->pdb, &num_txs, &count, &supply))
         fprintf(stderr, "coins_kv: count=%lld supply=%lld\n",
                 (long long)count, (long long)supply);
+    return 0;
+}
 
-    /* (2) in-memory block index. */
-    struct main_state ms;
-    main_state_init(&ms);
-    if (!load_block_index_flat(datadir, &ms).ok) {
+/* (2) in-memory block index. */
+static int mint_open_index(struct mint_ctx *c)
+{
+    main_state_init(&c->ms);
+    if (!load_block_index_flat(c->datadir, &c->ms).ok) {
         fprintf(stderr, "load_block_index_flat(%s) failed — the source datadir "
                 "has no readable block_index.bin. Point at a datadir from a "
                 "synced z23 node, which writes block_index.bin itself "
                 "(no zclassicd / --importblockindex step is involved).\n",
-                datadir);
+                c->datadir);
         return 1;
     }
 
     /* node_state home (opened early — the topup below reads node.db `blocks`). */
     char ndb_path[1100];
-    snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", datadir);
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open(&ndb, ndb_path)) {
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", c->datadir);
+    memset(&c->ndb, 0, sizeof(c->ndb));
+    if (!node_db_open(&c->ndb, ndb_path)) {
         fprintf(stderr, "node_db_open(%s) failed\n", ndb_path);
         return 1;
     }
+    return 0;
+}
 
-    /* (3) the stale flat block_index.bin may stop below the coins frontier.
-     * Top up the [flat_tip+1 .. seed_h] window from node.db `blocks` (reading
-     * the REAL hashFinalSaplingRoot from each body) so the active chain reaches
-     * the seed height with verifiable roots. */
+/* (3) the stale flat block_index.bin may stop below the coins frontier.
+ * Top up the [flat_tip+1 .. seed_h] window from node.db `blocks` (reading
+ * the REAL hashFinalSaplingRoot from each body) so the active chain reaches
+ * the seed height with verifiable roots. */
+static int mint_topup_flat_tip(struct mint_ctx *c)
+{
     int flat_tip = -1;
     struct block_index *flat_tip_bi = NULL;
     {
         size_t it = 0;
         struct block_index *p = NULL;
-        while (block_map_next(&ms.map_block_index, &it, NULL, &p)) {
+        while (block_map_next(&c->ms.map_block_index, &it, NULL, &p)) {
             if (!p || !p->phashBlock) continue;
             if (p->nHeight > flat_tip) { flat_tip = p->nHeight; flat_tip_bi = p; }
         }
     }
-    if (flat_tip < seed_h) {
+    if (flat_tip < c->seed_h) {
         fprintf(stderr, "[mint-v2] flat block_index tip h=%d < seed h=%d — "
                 "topping up FORWARD by prev_hash from node.db `blocks`...\n",
-                flat_tip, seed_h);
-        long up = topup_forward_from_node_db(&ms, &ndb, datadir,
-                                             flat_tip_bi, seed_h);
+                flat_tip, c->seed_h);
+        long up = topup_forward_from_node_db(&c->ms, &c->ndb, c->datadir,
+                                             flat_tip_bi, c->seed_h);
         if (up < 0) {
             fprintf(stderr, "topup failed\n");
-            node_db_close(&ndb);
-            return 1;
+            return mint_abort(c);
         }
         fprintf(stderr, "[mint-v2] topped up %ld block-index entries\n", up);
     }
+    return 0;
+}
 
-    /* find the highest block in the map and install it as the active tip so
-     * active_chain_extend_window can densify the [..tip] window. */
+/* Diagnostic: walk pprev from the tip and report the first gap (a NULL
+ * pprev or a non-contiguous height step) so a densify failure is legible. */
+static void mint_report_pprev_gaps(struct block_index *best)
+{
+    struct block_index *w = best;
+    int prev_h = best->nHeight + 1;
+    while (w) {
+        if (w->nHeight != prev_h - 1) {
+            fprintf(stderr, "[mint-v2] pprev height step gap: %d -> %d\n",
+                    prev_h, w->nHeight);
+            break;
+        }
+        if (!w->pprev) {
+            if (w->nHeight != 0)
+                fprintf(stderr, "[mint-v2] pprev chain breaks at h=%d "
+                        "(NULL pprev, not genesis)\n", w->nHeight);
+            break;
+        }
+        prev_h = w->nHeight;
+        w = w->pprev;
+    }
+}
+
+/* find the highest block in the map and install it as the active tip so
+ * active_chain_extend_window can densify the [..tip] window. */
+static int mint_select_tip(struct mint_ctx *c)
+{
     struct block_index *best = NULL;
     {
         size_t it = 0;
         struct block_index *p = NULL;
-        while (block_map_next(&ms.map_block_index, &it, NULL, &p)) {
+        while (block_map_next(&c->ms.map_block_index, &it, NULL, &p)) {
             if (!p || !p->phashBlock) continue;
             if (!best || p->nHeight > best->nHeight) best = p;
         }
     }
     if (!best) {
         fprintf(stderr, "block index map empty after load\n");
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
-    ms.pindex_best_header = best;
+    c->best = best;
+    c->ms.pindex_best_header = best;
+    mint_report_pprev_gaps(best);
+    return 0;
+}
 
-    /* Diagnostic: walk pprev from the tip and report the first gap (a NULL
-     * pprev or a non-contiguous height step) so a densify failure is legible. */
-    {
-        struct block_index *w = best;
-        int prev_h = best->nHeight + 1;
-        while (w) {
-            if (w->nHeight != prev_h - 1) {
-                fprintf(stderr, "[mint-v2] pprev height step gap: %d -> %d\n",
-                        prev_h, w->nHeight);
-                break;
-            }
-            if (!w->pprev) {
-                if (w->nHeight != 0)
-                    fprintf(stderr, "[mint-v2] pprev chain breaks at h=%d "
-                            "(NULL pprev, not genesis)\n", w->nHeight);
-                break;
-            }
-            prev_h = w->nHeight;
-            w = w->pprev;
-        }
-    }
-
+/* Resolves the seed-height block and installs the densified active-chain window
+ * up to it, with the historical-slot sanity check. */
+static int mint_install_seed_window(struct mint_ctx *c)
+{
     /* Resolve the seed-height block by walking pprev from the map tip (no
      * active-chain window needed yet). */
-    struct block_index *seed_bi_mut = best;
-    while (seed_bi_mut && seed_bi_mut->nHeight > seed_h)
+    struct block_index *seed_bi_mut = c->best;
+    while (seed_bi_mut && seed_bi_mut->nHeight > c->seed_h)
         seed_bi_mut = seed_bi_mut->pprev;
-    if (!seed_bi_mut || seed_bi_mut->nHeight != seed_h) {
+    if (!seed_bi_mut || seed_bi_mut->nHeight != c->seed_h) {
         fprintf(stderr, "no block_index at seed height h=%d (map tip h=%d)\n",
-                seed_h, best->nHeight);
-        node_db_close(&ndb);
-        return 1;
+                c->seed_h, c->best->nHeight);
+        return mint_abort(c);
     }
-    uint8_t anchor_hash[32];
-    memcpy(anchor_hash, seed_bi_mut->hashBlock.data, 32);
+    memcpy(c->anchor_hash, seed_bi_mut->hashBlock.data, 32);
 
     /* Set the active tip AT the seed height and densify the full [0..seed_h]
      * window (active_chain_move_window_tip -> active_chain_fill_window walks
      * pprev to genesis). This is what sapling_tree_rebuild's per-height
      * active_chain_at() reads, and it caps the rebuild endpoint to seed_h. */
-    if (!active_chain_move_window_tip(&ms.chain_active, seed_bi_mut)) {
+    if (!active_chain_move_window_tip(&c->ms.chain_active, seed_bi_mut)) {
         fprintf(stderr, "failed to install+densify the active-chain window to "
-                "the seed height h=%d\n", seed_h);
-        node_db_close(&ndb);
-        return 1;
+                "the seed height h=%d\n", c->seed_h);
+        return mint_abort(c);
     }
     /* Sanity: a few historical slots must resolve (else the bodies would be
      * skipped and the rebuild would produce a wrong root). */
-    if (!active_chain_at(&ms.chain_active, 476969) ||
-        !active_chain_at(&ms.chain_active, seed_h)) {
+    if (!active_chain_at(&c->ms.chain_active, 476969) ||
+        !active_chain_at(&c->ms.chain_active, c->seed_h)) {
         fprintf(stderr, "active-chain window did not densify (slot 476969 or "
                 "seed missing) — pprev chain incomplete\n");
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
+    return 0;
+}
 
+/* Reuses the persisted Sapling frontier when it already sits at the seed height,
+ * otherwise drives the consensus-validating rebuild from blocks/. */
+static int mint_acquire_frontier(struct mint_ctx *c)
+{
     /* (5) Acquire the Sapling frontier at the seed height.
      *
      * FAST PATH (reuse): a SYNCED source already persists
@@ -565,69 +618,76 @@ int main(int argc, char **argv)
      * hashFinalSaplingRoot, and persists the serialized frontier. */
     int64_t persisted_tree_h = 0;
     bool reuse_frontier = (getenv("ZCL_MINT_FORCE_REBUILD") == NULL) &&
-        node_db_state_get_int(&ndb, "sapling_tree_rebuild_height",
+        node_db_state_get_int(&c->ndb, "sapling_tree_rebuild_height",
                               &persisted_tree_h) &&
-        persisted_tree_h == seed_h;
+        persisted_tree_h == c->seed_h;
     if (reuse_frontier) {
         uint8_t probe[8192];
         size_t probe_len = 0;
-        reuse_frontier = node_db_state_get(&ndb, "sapling_tree", probe,
+        reuse_frontier = node_db_state_get(&c->ndb, "sapling_tree", probe,
                                            sizeof(probe), &probe_len) &&
                          probe_len > 0;
     }
     if (reuse_frontier) {
         fprintf(stderr, "[mint-v2] REUSING persisted Sapling frontier already at "
                 "h=%d (no blocks/ replay; the v2 loader re-verifies its root "
-                "against the PoW-proven seed header at load)\n", seed_h);
+                "against the PoW-proven seed header at load)\n", c->seed_h);
     } else {
-        (void)node_db_state_set(&ndb, "sapling_tree", NULL, 0);
-        (void)node_db_state_set(&ndb, "sapling_tree_rescan_height", NULL, 0);
-        (void)node_db_state_set(&ndb, "sapling_tree_rebuild_height", NULL, 0);
+        (void)node_db_state_set(&c->ndb, "sapling_tree", NULL, 0);
+        (void)node_db_state_set(&c->ndb, "sapling_tree_rescan_height", NULL, 0);
+        (void)node_db_state_set(&c->ndb, "sapling_tree_rebuild_height", NULL, 0);
 
         fprintf(stderr, "[mint-v2] driving sapling_tree_rebuild to h=%d "
                 "(this replays note commitments from blocks/ — minutes)...\n",
-                seed_h);
-        int appended = sapling_tree_rebuild(&ndb, &ms.chain_active, datadir);
+                c->seed_h);
+        int appended = sapling_tree_rebuild(&c->ndb, &c->ms.chain_active, c->datadir);
         if (appended < 0) {
             fprintf(stderr, "sapling_tree_rebuild FAILED (rc=%d)\n", appended);
-            node_db_close(&ndb);
-            return 1;
+            return mint_abort(c);
         }
     }
+    return 0;
+}
 
+/* Reads the height the Sapling rebuild actually reached. */
+static int mint_read_built_height(struct mint_ctx *c)
+{
     /* The rebuild may have capped its endpoint to the coins-applied frontier;
      * read the ACTUAL height it persisted so we stamp the snapshot coherently. */
     int64_t built_h = 0;
-    if (!node_db_state_get_int(&ndb, "sapling_tree_rebuild_height", &built_h) ||
+    if (!node_db_state_get_int(&c->ndb, "sapling_tree_rebuild_height", &built_h) ||
         built_h <= 0) {
         fprintf(stderr, "sapling_tree_rebuild did not persist a rebuild height\n");
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
+    c->built_h = built_h;
+    return 0;
+}
 
-    /* COHERENCE GUARD (the utxo_collision fix). The snapshot UTXO body is the
-     * ENTIRE coins table = the set AS OF the last applied block =
-     * coins_applied_height - 1. The header height (seed_h) we stamp MUST equal
-     * that coin-set height, else a fresh node re-applies the block whose coins
-     * the snapshot ALREADY contains and utxo_apply rejects it (utxo_collision)
-     * — H* pins at the seed forever. The Sapling frontier + anchor hash must be
-     * at the SAME height too. So: the authoritative seed height is the coin-set
-     * height; the Sapling rebuild MUST reach it (it needs the body at that
-     * height on disk). If the source's block bodies stop BELOW the coin-set
-     * height (a coins-ahead-of-bodies mid-sync source), the bundle cannot be
-     * coherent — FAIL loudly rather than ship a colliding snapshot. */
+/* COHERENCE GUARD (the utxo_collision fix). The snapshot UTXO body is the
+ * ENTIRE coins table = the set AS OF the last applied block =
+ * coins_applied_height - 1. The header height (seed_h) we stamp MUST equal
+ * that coin-set height, else a fresh node re-applies the block whose coins
+ * the snapshot ALREADY contains and utxo_apply rejects it (utxo_collision)
+ * — H* pins at the seed forever. The Sapling frontier + anchor hash must be
+ * at the SAME height too. So: the authoritative seed height is the coin-set
+ * height; the Sapling rebuild MUST reach it (it needs the body at that
+ * height on disk). If the source's block bodies stop BELOW the coin-set
+ * height (a coins-ahead-of-bodies mid-sync source), the bundle cannot be
+ * coherent — FAIL loudly rather than ship a colliding snapshot. */
+static int mint_check_coin_set(struct mint_ctx *c)
+{
     int32_t coins_applied = 0;
     bool ca_found = false;
-    if (!coins_kv_get_applied_height(pdb, &coins_applied, &ca_found) ||
+    if (!coins_kv_get_applied_height(c->pdb, &coins_applied, &ca_found) ||
         !ca_found || coins_applied <= 0) {
         fprintf(stderr, "[mint-v2] could not read coins_applied_height "
                 "(found=%d val=%d) — cannot guarantee snapshot coherence\n",
                 ca_found, coins_applied);
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
     int32_t coin_set_h = coins_applied - 1;  /* the coins table is as-of here */
-    if ((int32_t)built_h != coin_set_h) {
+    if ((int32_t)c->built_h != coin_set_h) {
         fprintf(stderr,
                 "[mint-v2] FATAL: incoherent source — coin set is as-of h=%d "
                 "(coins_applied_height=%d) but the Sapling rebuild only reached "
@@ -636,65 +696,85 @@ int main(int argc, char **argv)
                 "node would hit utxo_collision re-applying h=%lld. Mint from a "
                 "source whose block bodies reach the coin-set height "
                 "(node.db blocks max >= %d).\n",
-                coin_set_h, coins_applied, (long long)built_h, coin_set_h,
-                coin_set_h, (long long)built_h, (long long)built_h + 1,
+                coin_set_h, coins_applied, (long long)c->built_h, coin_set_h,
+                coin_set_h, (long long)c->built_h, (long long)c->built_h + 1,
                 coin_set_h);
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
-    if ((int32_t)built_h != seed_h) {
+    return 0;
+}
+
+/* Re-stamps the seed height and anchor at the height the rebuild reached. */
+static int mint_restamp_seed(struct mint_ctx *c)
+{
+    if ((int32_t)c->built_h != c->seed_h) {
         fprintf(stderr, "[mint-v2] stamping the snapshot at the coin-set height "
                 "h=%lld (requested seed h=%d); UTXO set + Sapling frontier + "
                 "anchor are all coherent at h=%lld.\n",
-                (long long)built_h, seed_h, (long long)built_h);
-        seed_h = (int32_t)built_h;
-        const struct block_index *bh = active_chain_at(&ms.chain_active, seed_h);
+                (long long)c->built_h, c->seed_h, (long long)c->built_h);
+        c->seed_h = (int32_t)c->built_h;
+        const struct block_index *bh = active_chain_at(&c->ms.chain_active, c->seed_h);
         if (bh) {
-            memcpy(anchor_hash, bh->hashBlock.data, 32);
+            memcpy(c->anchor_hash, bh->hashBlock.data, 32);
         } else {
             fprintf(stderr, "could not resolve block_index at capped h=%d "
-                    "for the anchor hash\n", seed_h);
-            node_db_close(&ndb);
-            return 1;
+                    "for the anchor hash\n", c->seed_h);
+            return mint_abort(c);
         }
     }
+    return 0;
+}
 
-    /* (6) read the frontier blob + write the v2 snapshot. */
+static int mint_settle_height(struct mint_ctx *c)
+{
+    if (mint_read_built_height(c) != 0)
+        return 1;
+    if (mint_check_coin_set(c) != 0)
+        return 1;
+    return mint_restamp_seed(c);
+}
+
+/* (6) read the frontier blob + write the v2 snapshot. */
+static int mint_write_snapshot(struct mint_ctx *c)
+{
+    const char *out_path = c->out_path;
     uint8_t frontier[8192];
     size_t flen = 0;
-    if (!node_db_state_get(&ndb, "sapling_tree", frontier, sizeof(frontier),
+    if (!node_db_state_get(&c->ndb, "sapling_tree", frontier, sizeof(frontier),
                            &flen) || flen == 0) {
         fprintf(stderr, "could not read back node_state[sapling_tree]\n");
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
     fprintf(stderr, "[mint-v2] sapling frontier built: %zu bytes at h=%d\n",
-            flen, seed_h);
+            flen, c->seed_h);
 
-    uint8_t got_sha3[32] = {0};
-    uint64_t got_count = 0;
-    int64_t got_supply = 0;
+    memset(c->got_sha3, 0, sizeof(c->got_sha3));
+    c->got_count = 0;
+    c->got_supply = 0;
     /* Sapling-only shielded => the canonical writer emits format version 2
      * (single Sapling-frontier section), byte-identical to the historical v2. */
     struct snapshot_shielded sap_only = {
         .sapling = frontier, .sapling_len = (uint32_t)flen,
     };
-    if (!coins_kv_snapshot_write(pdb, out_path, seed_h, anchor_hash,
+    if (!coins_kv_snapshot_write(c->pdb, out_path, c->seed_h, c->anchor_hash,
                                  flen > 0 ? &sap_only : NULL,
-                                 got_sha3, &got_count, &got_supply)) {
+                                 c->got_sha3, &c->got_count, &c->got_supply)) {
         fprintf(stderr, "coins_kv_snapshot_write (v2 sapling-only) FAILED\n");
-        node_db_close(&ndb);
-        return 1;
+        return mint_abort(c);
     }
 
-    char sha3hex[65];
     for (int i = 0; i < 32; i++)
-        snprintf(sha3hex + i * 2, 3, "%02x", got_sha3[i]);
+        snprintf(c->sha3hex + i * 2, 3, "%02x", c->got_sha3[i]);
     fprintf(stderr,
             "WROTE v2 %s height=%d count=%llu supply=%lld frontier=%zuB sha3=%s\n",
-            out_path, seed_h, (unsigned long long)got_count,
-            (long long)got_supply, flen, sha3hex);
+            out_path, c->seed_h, (unsigned long long)c->got_count,
+            (long long)c->got_supply, flen, c->sha3hex);
+    return 0;
+}
 
+/* Re-reads the written artifact and unlinks it on any mismatch. */
+static int mint_self_attest(struct mint_ctx *c)
+{
     /* ── MANDATORY POST-WRITE SELF-ATTEST ──────────────────────────────────
      * Generalizes the anchor_selfmint hard-verify (write → re-open → assert
      * written == intended → unlink on mismatch). Re-open the just-written
@@ -704,6 +784,12 @@ int main(int argc, char **argv)
      * in-file header field equals what THIS mint intended. Any failure means we
      * produced a corrupt or wrong artifact — UNLINK it and exit non-zero so a
      * bad snapshot is NEVER published. */
+    const char *out_path = c->out_path;
+    const uint8_t *anchor_hash = c->anchor_hash;
+    const uint8_t *got_sha3 = c->got_sha3;
+    uint64_t got_count = c->got_count;
+    int64_t got_supply = c->got_supply;
+    int32_t seed_h = c->seed_h;
     {
         char verr[256] = {0};
         struct uss_header vhdr;
@@ -715,8 +801,7 @@ int main(int argc, char **argv)
                     "verify of %s failed (%s) — UNLINKING (refusing to publish a "
                     "bad artifact)\n", out_path, verr);
             unlink(out_path);
-            node_db_close(&ndb);
-            return 1;
+            return mint_abort(c);
         }
         bool ok_ver  = (vhdr.version == 2);
         bool ok_h    = (vhdr.height == (uint32_t)seed_h);
@@ -732,106 +817,139 @@ int main(int argc, char **argv)
                     "supply_ok=%d anchor_ok=%d sha3_ok=%d) — UNLINKING %s\n",
                     ok_ver, ok_h, ok_cnt, ok_sup, ok_anc, ok_sha3, out_path);
             unlink(out_path);
-            node_db_close(&ndb);
-            return 1;
+            return mint_abort(c);
         }
         fprintf(stderr, "[mint-v2] BODY-INTEGRITY OK: re-read body SHA3 matches the "
                 "header, and count/supply/anchor/height equal the mint intent "
                 "(count=%llu supply=%lld height=%d)\n",
                 (unsigned long long)got_count, (long long)got_supply, seed_h);
     }
+    return 0;
+}
 
-    /* ── STARTER-PACK BUNDLE (optional) ────────────────────────────────────
-     * Emit a CONTIGUOUS block_index.bin (genesis..seed) + the snapshot into
-     * bundle_dir. A fresh node's from-genesis active chain caps at the first
-     * pprev hole, so the contiguity invariant is load-bearing: we re-resolve
-     * the seed-height block in the densified map, VERIFY it walks pprev to
-     * genesis with no gap, then dump the whole map via save_block_index_flat
-     * (BIIE-embedded, self-verifying — no external sidecar needed). */
-    if (bundle_dir) {
-        const struct block_index *seed_chk =
-            active_chain_at(&ms.chain_active, seed_h);
-        if (!seed_chk) {
-            fprintf(stderr, "[bundle] active_chain_at(seed h=%d) NULL — cannot "
-                    "verify contiguity; refusing to emit a holed bundle\n", seed_h);
-            node_db_close(&ndb);
-            return 1;
-        }
-        if (!verify_contiguous_to_genesis(seed_chk)) {
-            fprintf(stderr, "[bundle] source chain is NOT contiguous genesis..%d "
-                    "— refusing to emit a bundle that would leave the seed "
-                    "unreachable. Pick a seed below the first hole.\n", seed_h);
-            node_db_close(&ndb);
-            return 1;
-        }
-        fprintf(stderr, "[bundle] contiguity verified genesis..%d\n", seed_h);
+/* Writes the contiguous block_index.bin into the bundle and verifies it loads back. */
+static int mint_bundle_index(struct mint_ctx *c)
+{
+    const char *bundle_dir = c->bundle_dir;
+    int32_t seed_h = c->seed_h;
+    const struct block_index *seed_chk =
+        active_chain_at(&c->ms.chain_active, seed_h);
+    if (!seed_chk) {
+        fprintf(stderr, "[bundle] active_chain_at(seed h=%d) NULL — cannot "
+                "verify contiguity; refusing to emit a holed bundle\n", seed_h);
+        return mint_abort(c);
+    }
+    if (!verify_contiguous_to_genesis(seed_chk)) {
+        fprintf(stderr, "[bundle] source chain is NOT contiguous genesis..%d "
+                "— refusing to emit a bundle that would leave the seed "
+                "unreachable. Pick a seed below the first hole.\n", seed_h);
+        return mint_abort(c);
+    }
+    fprintf(stderr, "[bundle] contiguity verified genesis..%d\n", seed_h);
 
-        if (mkdir(bundle_dir, 0755) != 0 && errno != EEXIST) {
-            fprintf(stderr, "[bundle] mkdir(%s) failed: %s\n", bundle_dir,
-                    strerror(errno));
-            node_db_close(&ndb);
-            return 1;
-        }
-
-        /* Reset the active tip to EXACTLY the seed height so the emitted index
-         * is bounded at the seed (a fresh node fetches above-seed bodies via
-         * P2P). save_block_index_flat dumps the whole map; entries above the
-         * seed are harmless (boot drops their borrowed have-data), but trimming
-         * to the seed keeps the bundle minimal and unambiguous. */
-        struct block_index *seed_mut =
-            (struct block_index *)active_chain_at(&ms.chain_active, seed_h);
-        if (seed_mut)
-            (void)active_chain_move_window_tip(&ms.chain_active, seed_mut);
-
-        fprintf(stderr, "[bundle] writing contiguous block_index.bin to %s ...\n",
-                bundle_dir);
-        save_block_index_flat(bundle_dir, &ms);
-
-        /* Verify the emitted index round-trips (loads + integrity-passes). */
-        struct main_state vms;
-        main_state_init(&vms);
-        if (!load_block_index_flat(bundle_dir, &vms).ok) {
-            fprintf(stderr, "[bundle] VERIFY FAILED: emitted block_index.bin "
-                    "did not load back\n");
-            node_db_close(&ndb);
-            return 1;
-        }
-
-        /* Copy the snapshot in under a canonical name. */
-        char snap_name[256];
-        snprintf(snap_name, sizeof(snap_name), "utxo-seed-%d.snapshot", seed_h);
-        char snap_dst[1200];
-        snprintf(snap_dst, sizeof(snap_dst), "%s/%s", bundle_dir, snap_name);
-        if (!copy_file(out_path, snap_dst)) {
-            node_db_close(&ndb);
-            return 1;
-        }
-
-        /* Publish sidecars: SHA256SUMS (for `sha256sum -c`) + manifest.json. */
-        if (!write_bundle_sidecars(bundle_dir, snap_name, seed_h, sha3hex,
-                                   anchor_hash, got_count, got_supply)) {
-            fprintf(stderr, "[bundle] FAILED to write publish sidecars "
-                    "(SHA256SUMS / manifest.json)\n");
-            node_db_close(&ndb);
-            return 1;
-        }
-
-        fprintf(stderr,
-                "\nSTARTER-PACK BUNDLE READY in %s:\n"
-                "  block_index.bin              (contiguous genesis..%d)\n"
-                "  %s        (v2: UTXO+frontier, count=%llu)\n"
-                "  SHA256SUMS                   (run: cd %s && sha256sum -c SHA256SUMS)\n"
-                "  manifest.json                (provenance: heights, hashes, source SHA-256)\n"
-                "\nFresh-node usage (zero flags — boot autodetects a dropped-in bundle):\n"
-                "  cp %s/block_index.bin   <DATADIR>/\n"
-                "  cp %s/%s   <DATADIR>/\n"
-                "  z23 -datadir=<DATADIR>\n"
-                "  (the explicit -load-snapshot-at-own-height=<DATADIR>/%s flag still\n"
-                "   works as a forced override, but is not required.)\n",
-                bundle_dir, seed_h, snap_name, (unsigned long long)got_count,
-                bundle_dir, bundle_dir, bundle_dir, snap_name, snap_name);
+    if (mkdir(bundle_dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "[bundle] mkdir(%s) failed: %s\n", bundle_dir,
+                strerror(errno));
+        return mint_abort(c);
     }
 
-    node_db_close(&ndb);
+    /* Reset the active tip to EXACTLY the seed height so the emitted index
+     * is bounded at the seed (a fresh node fetches above-seed bodies via
+     * P2P). save_block_index_flat dumps the whole map; entries above the
+     * seed are harmless (boot drops their borrowed have-data), but trimming
+     * to the seed keeps the bundle minimal and unambiguous. */
+    struct block_index *seed_mut =
+        (struct block_index *)active_chain_at(&c->ms.chain_active, seed_h);
+    if (seed_mut)
+        (void)active_chain_move_window_tip(&c->ms.chain_active, seed_mut);
+
+    fprintf(stderr, "[bundle] writing contiguous block_index.bin to %s ...\n",
+            bundle_dir);
+    save_block_index_flat(bundle_dir, &c->ms);
+
+    /* Verify the emitted index round-trips (loads + integrity-passes). */
+    struct main_state vms;
+    main_state_init(&vms);
+    if (!load_block_index_flat(bundle_dir, &vms).ok) {
+        fprintf(stderr, "[bundle] VERIFY FAILED: emitted block_index.bin "
+                "did not load back\n");
+        return mint_abort(c);
+    }
+    return 0;
+}
+
+/* Copies the snapshot into the bundle and writes the publish sidecars. */
+static int mint_bundle_publish(struct mint_ctx *c)
+{
+    const char *bundle_dir = c->bundle_dir;
+    const char *out_path = c->out_path;
+    int32_t seed_h = c->seed_h;
+
+    /* Copy the snapshot in under a canonical name. */
+    char snap_name[256];
+    snprintf(snap_name, sizeof(snap_name), "utxo-seed-%d.snapshot", seed_h);
+    char snap_dst[1200];
+    snprintf(snap_dst, sizeof(snap_dst), "%s/%s", bundle_dir, snap_name);
+    if (!copy_file(out_path, snap_dst))
+        return mint_abort(c);
+
+    /* Publish sidecars: SHA256SUMS (for `sha256sum -c`) + manifest.json. */
+    if (!write_bundle_sidecars(bundle_dir, snap_name, seed_h, c->sha3hex,
+                               c->anchor_hash, c->got_count, c->got_supply)) {
+        fprintf(stderr, "[bundle] FAILED to write publish sidecars "
+                "(SHA256SUMS / manifest.json)\n");
+        return mint_abort(c);
+    }
+
+    fprintf(stderr,
+            "\nSTARTER-PACK BUNDLE READY in %s:\n"
+            "  block_index.bin              (contiguous genesis..%d)\n"
+            "  %s        (v2: UTXO+frontier, count=%llu)\n"
+            "  SHA256SUMS                   (run: cd %s && sha256sum -c SHA256SUMS)\n"
+            "  manifest.json                (provenance: heights, hashes, source SHA-256)\n"
+            "\nFresh-node usage (zero flags — boot autodetects a dropped-in bundle):\n"
+            "  cp %s/block_index.bin   <DATADIR>/\n"
+            "  cp %s/%s   <DATADIR>/\n"
+            "  z23 -datadir=<DATADIR>\n"
+            "  (the explicit -load-snapshot-at-own-height=<DATADIR>/%s flag still\n"
+            "   works as a forced override, but is not required.)\n",
+            bundle_dir, seed_h, snap_name, (unsigned long long)c->got_count,
+            bundle_dir, bundle_dir, bundle_dir, snap_name, snap_name);
+    return 0;
+}
+
+/* ── STARTER-PACK BUNDLE (optional) ────────────────────────────────────
+ * Emit a CONTIGUOUS block_index.bin (genesis..seed) + the snapshot into
+ * bundle_dir. A fresh node's from-genesis active chain caps at the first
+ * pprev hole, so the contiguity invariant is load-bearing: we re-resolve
+ * the seed-height block in the densified map, VERIFY it walks pprev to
+ * genesis with no gap, then dump the whole map via save_block_index_flat
+ * (BIIE-embedded, self-verifying — no external sidecar needed). */
+static int mint_emit_bundle(struct mint_ctx *c)
+{
+    if (mint_bundle_index(c) != 0)
+        return 1;
+    return mint_bundle_publish(c);
+}
+
+int main(int argc, char **argv)
+{
+    struct mint_ctx c;
+    int rc = mint_parse_args(argc, argv, &c);
+    if (rc != 0)
+        return rc;
+    if (mint_open_source(&c) != 0 || mint_open_index(&c) != 0)
+        return 1;
+    if (mint_topup_flat_tip(&c) != 0 || mint_select_tip(&c) != 0)
+        return 1;
+    if (mint_install_seed_window(&c) != 0 || mint_acquire_frontier(&c) != 0)
+        return 1;
+    if (mint_settle_height(&c) != 0 || mint_write_snapshot(&c) != 0)
+        return 1;
+    if (mint_self_attest(&c) != 0)
+        return 1;
+    if (c.bundle_dir && mint_emit_bundle(&c) != 0)
+        return 1;
+    node_db_close(&c.ndb);
     return 0;
 }
