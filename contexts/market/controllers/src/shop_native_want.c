@@ -795,47 +795,47 @@ static void shw_cancel_commit(const char *datadir, const uint8_t want_id[32],
                               const uint8_t buyer[32], const char *id_hex,
                               int64_t now_unix, struct zcl_command_reply *reply)
 {
-struct node_db ndb;
-if (!shw_open_board_write(datadir, &ndb, reply))
-    return;
-struct shop_want row;
-bool found = db_shop_want_find(&ndb, want_id, &row);
-if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
+    struct node_db ndb;
+    if (!shw_open_board_write(datadir, &ndb, reply))
+        return;
+    struct shop_want row;
+    bool found = db_shop_want_find(&ndb, want_id, &row);
+    if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
+        node_db_close(&ndb);
+        shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                 "WRONG_BUYER_KEY", "custody",
+                 "the presented buyer_secret derives a different pubkey "
+                 "than the one that signed this want — only the posting "
+                 "key can cancel it", id_hex);
+        return;
+    }
+    if (!found) {
+        node_db_close(&ndb);
+        shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                 "WANT_NOT_FOUND", "execute",
+                 "no want with this id is stored on this node's board",
+                 id_hex);
+        return;
+    }
+    bool already = row.cancelled_unix > 0;
+    bool marked = already ||
+                  db_shop_want_mark_cancelled(&ndb, want_id, now_unix);
     node_db_close(&ndb);
-    shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-             "WRONG_BUYER_KEY", "custody",
-             "the presented buyer_secret derives a different pubkey "
-             "than the one that signed this want — only the posting "
-             "key can cancel it", id_hex);
-    return;
-}
-if (!found) {
-    node_db_close(&ndb);
-    shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-             "WANT_NOT_FOUND", "execute",
-             "no want with this id is stored on this node's board",
-             id_hex);
-    return;
-}
-bool already = row.cancelled_unix > 0;
-bool marked = already ||
-              db_shop_want_mark_cancelled(&ndb, want_id, now_unix);
-node_db_close(&ndb);
-if (!marked) {
-    shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-             "CANCEL_FAILED", "execute",
-             "the cancellation could not be persisted", id_hex);
-    return;
-}
-(void)json_push_kv_str(&reply->data, "mode", "commit");
-(void)json_push_kv_str(&reply->data, "datadir", datadir);
-(void)json_push_kv_str(&reply->data, "want_id", id_hex);
-(void)json_push_kv_bool(&reply->data, "cancelled", true);
-(void)json_push_kv_bool(&reply->data, "already_cancelled", already);
-(void)json_push_kv_str(&reply->data, "cancel_note",
-    "cancellation is local and key-checked; the signed row stays "
-    "stored as evidence and the want leaves the open board");
-reply->error.mutated = !already;
+    if (!marked) {
+        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                 "CANCEL_FAILED", "execute",
+                 "the cancellation could not be persisted", id_hex);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "mode", "commit");
+    (void)json_push_kv_str(&reply->data, "datadir", datadir);
+    (void)json_push_kv_str(&reply->data, "want_id", id_hex);
+    (void)json_push_kv_bool(&reply->data, "cancelled", true);
+    (void)json_push_kv_bool(&reply->data, "already_cancelled", already);
+    (void)json_push_kv_str(&reply->data, "cancel_note",
+        "cancellation is local and key-checked; the signed row stays "
+        "stored as evidence and the want leaves the open board");
+    reply->error.mutated = !already;
 }
 
 void zcl_native_handle_shop_want_cancel(
