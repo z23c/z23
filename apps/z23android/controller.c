@@ -31,7 +31,7 @@ struct controller {
     char files[1024], action[32], argument[24000];
     uint64_t camera_ticket;
     void (*notify)(void);
-    bool pending, autostart_checked, hidden;
+    bool pending, autostart_checked, hidden, shown;
     time_t fleet_at;
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
@@ -558,10 +558,12 @@ static void *worker(void *opaque)
         struct timespec until;
         if (clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
         until.tv_sec += 10;
-        /* While hidden no screen shows the node or fleet; only an action or showing the app wakes it. */
-        if (!c->pending && !first && c->hidden) (void)pthread_cond_wait(&c->changed, &c->lock);
-        else if (!c->pending && !first) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
-        first = false;
+        /* While hidden no screen shows the node or fleet; only an action or showing the app wakes it.
+         * shown also covers an app shown while the worker was busy, when no waiter took the signal. */
+        bool wait = !c->pending && !first && !c->shown;
+        if (wait && c->hidden) (void)pthread_cond_wait(&c->changed, &c->lock);
+        else if (wait) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
+        first = false; c->shown = false;
         bool hidden = c->hidden;
         if (c->pending) {
             copy_text(action, sizeof(action), c->action); copy_text(arg, sizeof(arg), c->argument);
@@ -757,7 +759,7 @@ void zapp_controller_visible(bool visible)
     pthread_mutex_lock(&startup_lock);
     if (current) {
         pthread_mutex_lock(&current->lock);
-        current->hidden = !visible;
+        current->hidden = !visible; current->shown = visible;
         pthread_cond_signal(&current->changed);
         pthread_mutex_unlock(&current->lock);
     }
