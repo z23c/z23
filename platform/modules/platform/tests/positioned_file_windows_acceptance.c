@@ -71,21 +71,14 @@ static int open_pattern_file(struct platform_positioned_file *file,
 
 /* Runs the four reader threads plus the short and out-of-range reads;
  * returns nonzero when any of them fails. */
-static int run_concurrent_reads(struct platform_positioned_file *file)
+static int run_concurrent_reads(struct platform_positioned_file *file,
+                                struct read_task *tasks)
 {
-    struct read_task tasks[4] = {
-        {file, 0, "00000000", 0}, {file, 8, "11111111", 0},
-        {file, 16, "22222222", 0}, {file, 24, "33333333", 0}};
     HANDLE threads[4];
     for (unsigned i = 0; i < 4; ++i)
         threads[i] = CreateThread(NULL, 0, read_worker, &tasks[i], 0, NULL);
     DWORD wait = WaitForMultipleObjects(4, threads, TRUE, 30000);
     int failed = wait != WAIT_OBJECT_0;
-    /* A timeout or failed wait can leave reader threads still running;
-     * join every live one so none outlives this function's task storage. */
-    if (wait != WAIT_OBJECT_0)
-        for (unsigned i = 0; i < 4; ++i)
-            if (threads[i]) WaitForSingleObject(threads[i], INFINITE);
     for (unsigned i = 0; i < 4; ++i) {
         if (threads[i]) CloseHandle(threads[i]);
         failed |= tasks[i].failed;
@@ -157,7 +150,12 @@ int main(void)
     struct platform_positioned_file file;
     int opened = open_pattern_file(&file, utf8_path, path);
     if (opened != 0) return opened;
-    int failed = run_concurrent_reads(&file);
+    /* Kept in main's frame so reader threads never outlive the task storage,
+     * including after a wait timeout or failure. */
+    struct read_task tasks[4] = {
+        {&file, 0, "00000000", 0}, {&file, 8, "11111111", 0},
+        {&file, 16, "22222222", 0}, {&file, 24, "33333333", 0}};
+    int failed = run_concurrent_reads(&file, tasks);
     platform_positioned_file_close(&file);
     int beneath = probe_open_beneath(&file, utf8_path, path);
     if (beneath < 0) return 5;
