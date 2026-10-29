@@ -74,6 +74,10 @@
 #include "script/sighashtype.h"
 #include "primitives/transaction.h"
 #include "util/safe_alloc.h"
+#include "consensus/upgrades.h"
+#include "crypto/ed25519.h"
+#include "sapling/params_init.h"
+#include "sapling/params_vk_embedded.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -288,6 +292,289 @@ static bool tela_install_tip(struct main_state *ms, struct block_index *bi,
     bi->nBits = 0x1f07ffff;
     bi->pprev = NULL;
     return active_chain_install_tip_slot(&ms->chain_active, bi);
+}
+
+/* ── contextual_check_transaction refusal branches ───────────────────
+ * One row per refusal branch of contextual_check_transaction_impl(),
+ * driven through the public wrapper. Each row pins the returned bool, the
+ * exact reject reason and the DoS score. Callers pass dosLevel =
+ * TELA_BRANCH_DOS (10): a row expecting 10 proves the caller's dosLevel is
+ * threaded through, a row expecting 100 or 0 proves a fixed score.
+ *
+ * Expected values were read from contextual_check_tx.c and
+ * domain/consensus/sapling_structural.c. Branches NOT pinned here, because
+ * no sender-reachable input or no real fixture reaches them:
+ *   - bad-txns-sapling-binding-sig-invalid: needs valid Groth16 spend/output
+ *     proofs first (no prover fixture in this file).
+ *   - bad-txns-joinsplit-phgr13-invalid: the PHGR13 unverifiable gate fires
+ *     first unless the PHGR13 key is loaded.
+ *   - error-computing-signature-hash and sapling-verification-ctx-init-failed:
+ *     local-fault paths with no sender-reachable input (calloc failure).
+ *   - tx-overwinter-active and tx-overwinter-flag-not-set: need an
+ *     Overwinter-only window; mainnet activates Overwinter and Sapling
+ *     together, so no height reaches them with the chain params. */
+#define TELA_BRANCH_DOS 10
+#define TELA_SAPLING_H 500000
+
+static int tela_row_refused(const char *name, struct transaction *tx,
+                            int height, const char *reason, int dos)
+{
+    const struct consensus_params *cp = &chain_params_get()->consensus;
+    struct validation_state vs;
+    validation_state_init(&vs);
+    bool accepted = contextual_check_transaction(tx, &vs, cp, height,
+                                                 TELA_BRANCH_DOS);
+    bool ok = !accepted && strcmp(vs.reject_reason, reason) == 0 &&
+              vs.dos == dos;
+    printf("tx_contextual_branches: %s... %s\n", name, ok ? "OK" : "FAIL");
+    if (!ok)
+        printf("  got accepted=%d reason=%s dos=%d\n", (int)accepted,
+               vs.reject_reason, vs.dos);
+    transaction_free(tx);
+    return ok ? 0 : 1;
+}
+
+static int tela_row_accepted(const char *name, struct transaction *tx,
+                             int height)
+{
+    const struct consensus_params *cp = &chain_params_get()->consensus;
+    struct validation_state vs;
+    validation_state_init(&vs);
+    bool accepted = contextual_check_transaction(tx, &vs, cp, height,
+                                                 TELA_BRANCH_DOS);
+    bool ok = accepted && vs.reject_reason[0] == '\0';
+    printf("tx_contextual_branches: %s... %s\n", name, ok ? "OK" : "FAIL");
+    if (!ok)
+        printf("  got accepted=%d reason=%s dos=%d\n", (int)accepted,
+               vs.reject_reason, vs.dos);
+    transaction_free(tx);
+    return ok ? 0 : 1;
+}
+
+/* Sapling-era rows: each mutates one field of a transparent tx that is
+ * otherwise valid, so the first failing structural rule is the one under
+ * test. */
+static int tela_structural_rows(void)
+{
+    int f = 0;
+    struct transaction tx;
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    f += tela_row_accepted("valid transparent sapling v4 -> accepted",
+                           &tx, TELA_SAPLING_H);
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    tx.overwintered = false;
+    f += tela_row_refused("sapling version without overwintered flag",
+                          &tx, TELA_SAPLING_H,
+                          "tx-overwintered-flag-not-set", TELA_BRANCH_DOS);
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    tx.version_group_id = 0x12345678u;
+    f += tela_row_refused("sapling overwintered with wrong group id",
+                          &tx, TELA_SAPLING_H,
+                          "bad-sapling-tx-version-group-id", TELA_BRANCH_DOS);
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    tx.version = 3;
+    f += tela_row_refused("sapling overwintered version too low",
+                          &tx, TELA_SAPLING_H,
+                          "bad-tx-sapling-version-too-low", 100);
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    tx.version = 5;
+    f += tela_row_refused("sapling overwintered version too high",
+                          &tx, TELA_SAPLING_H,
+                          "bad-tx-sapling-version-too-high", 100);
+
+    tx = tela_make_tx(TELA_SAPLING_H - 2, 0, 0xFFFFFFFF, false);
+    f += tela_row_refused("expired two blocks ago -> dos=dosLevel",
+                          &tx, TELA_SAPLING_H, "tx-overwinter-expired",
+                          TELA_BRANCH_DOS);
+
+    tx = tela_make_tx(TELA_SAPLING_H - 1, 0, 0xFFFFFFFF, false);
+    f += tela_row_refused("expired this block -> dos=0",
+                          &tx, TELA_SAPLING_H, "tx-overwinter-expired", 0);
+
+    tx = tela_make_tx(TELA_SAPLING_H, 0, 0xFFFFFFFF, false);
+    f += tela_row_refused("overwintered tx before Overwinter",
+                          &tx, 1, "tx-overwinter-not-active",
+                          TELA_BRANCH_DOS);
+    return f;
+}
+
+/* Pre-Sapling size cap: 3000 vouts of a 25-byte script serialize past
+ * MAX_TX_SIZE_BEFORE_SAPLING (100000). */
+static int tela_oversize_row(void)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    if (!transaction_alloc(&tx, 1, 3000)) {
+        printf("tx_contextual_branches: oversize tx alloc... FAIL\n");
+        return 1;
+    }
+    tx.version = 1;
+    tx.overwintered = false;
+    memset(tx.vin[0].prevout.hash.data, 0xAA, 32);
+    tx.vin[0].sequence = 0xFFFFFFFF;
+    for (size_t i = 0; i < tx.num_vout; i++) {
+        uint8_t pk[25];
+        memset(pk, 0, sizeof(pk));
+        pk[0] = 0x76;
+        pk[1] = 0xa9;
+        pk[2] = 0x14;
+        pk[23] = 0x88;
+        pk[24] = 0xac;
+        tx.vout[i].value = 1;
+        script_set(&tx.vout[i].script_pub_key, pk, sizeof(pk));
+    }
+    return tela_row_refused("pre-sapling oversized tx -> bad-txns-oversize",
+                            &tx, 1, "bad-txns-oversize", 100);
+}
+
+/* A Sapling-v4 transaction carrying one bogus Sapling output. */
+static void tela_add_output(struct transaction *tx)
+{
+    tx->v_shielded_output = zcl_calloc(1, sizeof(struct output_description),
+                                       "tela_shielded_output");
+    tx->num_shielded_output = 1;
+    memset(tx->v_shielded_output[0].zkproof, 0xCD, GROTH_PROOF_SIZE);
+    memset(tx->v_shielded_output[0].cv.data, 0xAB, 32);
+    memset(tx->v_shielded_output[0].cm.data, 0x01, 32);
+    memset(tx->v_shielded_output[0].ephemeral_key.data, 0xEF, 32);
+}
+
+static void tela_add_spend(struct transaction *tx)
+{
+    tx->v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description),
+                                      "tela_shielded_spend");
+    tx->num_shielded_spend = 1;
+    memset(tx->v_shielded_spend[0].zkproof, 0xCD, GROTH_PROOF_SIZE);
+    memset(tx->v_shielded_spend[0].cv.data, 0xAB, 32);
+    memset(tx->v_shielded_spend[0].nullifier.data, 0x02, 32);
+}
+
+static void tela_add_joinsplit(struct transaction *tx, bool groth)
+{
+    tx->v_joinsplit = zcl_calloc(1, sizeof(struct js_description),
+                                 "tela_joinsplit");
+    tx->num_joinsplit = 1;
+    tx->v_joinsplit[0].use_groth = groth;
+    memset(tx->v_joinsplit[0].proof, 0xCD, sizeof(tx->v_joinsplit[0].proof));
+}
+
+/* Sign the JoinSplit sighash exactly as contextual_check_tx.c computes it
+ * (empty script, NOT_AN_INPUT, SIGHASH_ALL, current epoch branch id) so
+ * the Ed25519 check passes and the proof check is the one that refuses. */
+static bool tela_sign_joinsplit(struct transaction *tx, int height)
+{
+    const struct consensus_params *cp = &chain_params_get()->consensus;
+    uint8_t seed[32], sk[32], pk[32];
+    memset(seed, 0x42, sizeof(seed));
+    ed25519_keypair(pk, sk, seed);
+    memcpy(tx->joinsplit_pubkey.data, pk, 32);
+
+    struct script empty_script;
+    empty_script.size = 0;
+    struct sighash_type ht;
+    ht.raw = 1;
+    struct uint256 digest;
+    uint256_set_null(&digest);
+    uint32_t branch_id = consensus_current_epoch_branch_id(height, cp);
+    if (!signature_hash(&empty_script, tx, NOT_AN_INPUT, ht, 0, branch_id,
+                        NULL, &digest))
+        return false;
+    ed25519_sign(tx->joinsplit_sig, digest.data, 32, sk, pk);
+    return true;
+}
+
+static int tela_unverifiable_row(void)
+{
+    sapling_free_params();
+    struct transaction tx = tela_make_tx(TELA_SAPLING_H + 100, 0,
+                                         0xFFFFFFFF, false);
+    tela_add_output(&tx);
+    return tela_row_refused("shielded tx, no verifying keys -> unavailable, dos=0",
+                            &tx, TELA_SAPLING_H,
+                            "shielded-verify-unavailable", 0);
+}
+
+static int tela_joinsplit_sig_row(void)
+{
+    struct transaction tx = tela_make_tx(TELA_SAPLING_H + 100, 0,
+                                         0xFFFFFFFF, false);
+    tela_add_joinsplit(&tx, true);
+    memset(tx.joinsplit_pubkey.data, 0xBB, 32);
+    memset(tx.joinsplit_sig, 0xCC, sizeof(tx.joinsplit_sig));
+    return tela_row_refused("joinsplit with bad ed25519 sig",
+                            &tx, TELA_SAPLING_H,
+                            "bad-txns-joinsplit-signature", 100);
+}
+
+static int tela_groth_proof_row(void)
+{
+    struct transaction tx = tela_make_tx(TELA_SAPLING_H + 100, 0,
+                                         0xFFFFFFFF, false);
+    tela_add_joinsplit(&tx, true);
+    if (!tela_sign_joinsplit(&tx, TELA_SAPLING_H)) {
+        transaction_free(&tx);
+        printf("tx_contextual_branches: joinsplit sighash... FAIL\n");
+        return 1;
+    }
+    return tela_row_refused("joinsplit groth16 proof invalid, sig valid",
+                            &tx, TELA_SAPLING_H,
+                            "bad-txns-joinsplit-proof-invalid", 100);
+}
+
+/* Keyed rows: verifying keys installed, so each shielded verifier runs and
+ * refuses the bogus proof bytes. */
+static int tela_keyed_rows(void)
+{
+    if (!sapling_install_embedded_vks()) {
+        printf("tx_contextual_branches: verifying keys installed... FAIL\n");
+        return 1;
+    }
+    int f = 0;
+    struct transaction tx;
+
+    tx = tela_make_tx(TELA_SAPLING_H + 100, 0, 0xFFFFFFFF, false);
+    tela_add_output(&tx);
+    f += tela_row_refused("sapling output proof invalid",
+                          &tx, TELA_SAPLING_H,
+                          "bad-txns-sapling-output-description-invalid", 100);
+
+    tx = tela_make_tx(TELA_SAPLING_H + 100, 0, 0xFFFFFFFF, false);
+    tela_add_spend(&tx);
+    f += tela_row_refused("sapling spend proof invalid",
+                          &tx, TELA_SAPLING_H,
+                          "bad-txns-sapling-spend-description-invalid", 100);
+
+    f += tela_joinsplit_sig_row();
+    f += tela_groth_proof_row();
+
+    /* Deferred proof validation below the policy height skips the proof
+     * checks, so the same bogus output is accepted. The global is restored
+     * afterwards. */
+    int prev_defer = g_deferred_proof_validation_below_height;
+    g_deferred_proof_validation_below_height = TELA_SAPLING_H + 1000;
+    tx = tela_make_tx(TELA_SAPLING_H + 100, 0, 0xFFFFFFFF, false);
+    tela_add_output(&tx);
+    f += tela_row_accepted("deferred proofs below policy height -> accepted",
+                           &tx, TELA_SAPLING_H);
+    g_deferred_proof_validation_below_height = prev_defer;
+    return f;
+}
+
+static int tela_branch_rows(void)
+{
+    bool had_params = sapling_params_loaded();
+    int f = tela_structural_rows();
+    f += tela_oversize_row();
+    f += tela_unverifiable_row();
+    f += tela_keyed_rows();
+    if (!had_params)
+        sapling_free_params();
+    return f;
 }
 
 int test_tx_expiry_locktime_adversarial(void)
@@ -620,6 +907,8 @@ int test_tx_expiry_locktime_adversarial(void)
         main_state_free(&ms);
         TELA_CHECK("mempool: sequence=0xFFFFFFFF overrides a deep-future lock_time -> ACCEPT_OK", ok);
     }
+
+    failures += tela_branch_rows();
 
     return failures;
 }
