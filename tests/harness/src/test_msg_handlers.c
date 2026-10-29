@@ -18,7 +18,9 @@
 #include "net/msgprocessor.h"
 #include "net/msg_internal.h"
 #include "net/download.h"
+#include "net/file_market.h"
 #include "net/peer_scoring.h"
+#include "core/serialize.h"
 #include "consensus/validation.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
@@ -1127,6 +1129,328 @@ static int test_swarm_utxo_sha3_verify_mismatch_is_not_silent(void)
     return failures;
 }
 
+/* ── Characterization: zfilelist handler (via the dispatch table) ───
+ * Pins handle_zfilelist: empty/truncated/paid/TTL-0 payloads are no-ops, TTL
+ * clamps, at most 50 offers are read, and the relay gate runs only for a NEW
+ * TTL>1 offer with a net manager. */
+struct zfl_probe {
+    int saves;
+    int relay_calls;
+    bool relay_answer;
+};
+
+static bool zfl_save(const struct file_offer *offer, void *ctx)
+{
+    (void)offer;
+    ((struct zfl_probe *)ctx)->saves++;
+    return true;
+}
+
+static bool zfl_relay_allowed(const struct file_offer *offer, void *ctx)
+{
+    struct zfl_probe *probe = ctx;
+    (void)offer;
+    probe->relay_calls++;
+    return probe->relay_answer;
+}
+
+static void zfl_put(struct byte_stream *s, uint8_t id, uint8_t ttl,
+                    int64_t price)
+{
+    struct file_offer o;
+    memset(&o, 0, sizeof(o));
+    o.root_hash[0] = 0xD0;
+    o.root_hash[1] = id;
+    snprintf(o.filename, sizeof(o.filename), "zfl-%u", (unsigned)id);
+    o.size_bytes = 1024 * 1024;
+    o.num_chunks = 1;
+    o.price_per_mb = price;
+    o.ttl = ttl;
+    (void)file_offer_serialize(&o, s);
+}
+
+static bool zfl_stored(uint8_t id, struct file_offer *out)
+{
+    uint8_t root[32] = {0xD0, id};
+    return file_market_find_offer(root, out);
+}
+
+/* Delivers the payload in s through the dispatch-table zfilelist row. */
+static bool zfl_run(struct msg_processor *mp, struct byte_stream *s)
+{
+    const struct msg_dispatch_entry *e = msg_get_dispatch_table();
+    while (e->handler && strcmp(e->command, "zfilelist") != 0)
+        e++;
+    struct p2p_node node = {.id = 901};
+    snprintf(node.addr_name, sizeof(node.addr_name), "test-peer");
+    return e->handler && e->handler(mp, &node, s);
+}
+
+/* One payload carrying exactly one offer. */
+static bool zfl_send1(struct msg_processor *mp, uint8_t id, uint8_t ttl,
+                      int64_t price)
+{
+    struct byte_stream s;
+    stream_init(&s, 512);
+    (void)stream_write_compact_size(&s, 1);
+    zfl_put(&s, id, ttl, price);
+    bool ok = zfl_run(mp, &s);
+    stream_free(&s);
+    return ok;
+}
+
+static int test_zfilelist_empty_and_dropped_offers(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: zfilelist no-ops on empty, paid, TTL-0 and truncated "
+         "payloads; relay gate needs a net manager") {
+        struct msg_processor mp;
+        struct zfl_probe probe = {0};
+        struct file_offer got;
+        struct byte_stream s;
+        memset(&mp, 0, sizeof(mp));
+        probe.relay_answer = true;
+        msg_processor_set_file_offer_save(&mp, zfl_save, &probe);
+        msg_processor_set_offer_relay_allowed(&mp, zfl_relay_allowed, &probe);
+
+        stream_init(&s, 64);
+        ASSERT(zfl_run(&mp, &s));
+        stream_free(&s);
+
+        stream_init(&s, 256);
+        ASSERT(stream_write_compact_size(&s, 3));
+        zfl_put(&s, 21, 2, 1);
+        zfl_put(&s, 22, 0, 0);
+        ASSERT(zfl_run(&mp, &s));
+        stream_free(&s);
+        ASSERT(!zfl_stored(21, &got));
+        ASSERT(!zfl_stored(22, &got));
+        ASSERT_EQ(probe.saves, 0);
+        ASSERT_EQ(probe.relay_calls, 0);
+
+        ASSERT(zfl_send1(&mp, 26, 3, 0));
+        ASSERT(zfl_stored(26, &got));
+        ASSERT_EQ(got.ttl, 3);
+        ASSERT_EQ(probe.saves, 1);
+        ASSERT_EQ(probe.relay_calls, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zfilelist_ttl_clamp_relay_gate_and_update(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: zfilelist clamps TTL, counts relay refusals, and "
+         "skips the gate for TTL 1 and updates") {
+        struct msg_processor mp;
+        struct net_manager nm;
+        struct zfl_probe probe = {0};
+        struct file_offer got;
+        memset(&mp, 0, sizeof(mp));
+        net_manager_init(&nm);
+        mp.net_mgr = &nm;
+        msg_processor_set_file_offer_save(&mp, zfl_save, &probe);
+        msg_processor_set_offer_relay_allowed(&mp, zfl_relay_allowed, &probe);
+
+        ASSERT(zfl_send1(&mp, 23, 200, 0));
+        ASSERT(zfl_stored(23, &got));
+        ASSERT_EQ(got.ttl, FILE_MARKET_MAX_TTL);
+        ASSERT_EQ(probe.saves, 1);
+        ASSERT_EQ(probe.relay_calls, 1);
+        ASSERT_EQ(msg_processor_offer_relay_hidden(&mp), 1);
+
+        ASSERT(zfl_send1(&mp, 24, 1, 0));
+        ASSERT(zfl_stored(24, &got));
+        ASSERT_EQ(probe.relay_calls, 1);
+
+        ASSERT(zfl_send1(&mp, 23, 200, 0));
+        ASSERT_EQ(probe.saves, 3);
+        ASSERT_EQ(probe.relay_calls, 1);
+
+        probe.relay_answer = true;
+        ASSERT(zfl_send1(&mp, 27, 3, 0));
+        ASSERT_EQ(probe.relay_calls, 2);
+        ASSERT_EQ(msg_processor_offer_relay_hidden(&mp), 1);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_zfilelist_count_clamp_and_truncated_batch(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: zfilelist reads at most 50 offers and stops at a "
+         "truncated one") {
+        struct msg_processor mp;
+        struct zfl_probe probe = {0};
+        struct file_offer got;
+        struct byte_stream s;
+        memset(&mp, 0, sizeof(mp));
+        msg_processor_set_file_offer_save(&mp, zfl_save, &probe);
+        msg_processor_set_offer_relay_allowed(&mp, zfl_relay_allowed, &probe);
+
+        stream_init(&s, 1 << 16);
+        ASSERT(stream_write_compact_size(&s, 60));
+        for (uint8_t i = 0; i < 55; i++)
+            zfl_put(&s, (uint8_t)(10 + i), 1, 0);
+        ASSERT(zfl_run(&mp, &s));
+        stream_free(&s);
+        ASSERT(zfl_stored(59, &got));
+        ASSERT(!zfl_stored(60, &got));
+        ASSERT_EQ(probe.saves, 50);
+
+        stream_init(&s, 256);
+        ASSERT(stream_write_compact_size(&s, 2));
+        zfl_put(&s, 70, 1, 0);
+        ASSERT(zfl_run(&mp, &s));
+        stream_free(&s);
+        ASSERT_EQ(probe.saves, 51);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool submit_async_nonretryable(struct block *block,
+                                      struct validation_state *out, void *ctx)
+{
+    (void)block;
+    struct async_block_submit_ctx *submit_ctx = ctx;
+    atomic_fetch_add_explicit(&submit_ctx->entered, 1, memory_order_relaxed);
+    validation_state_invalid(out, false, REJECT_INVALID, "bad-block-test",
+                             NULL);
+    return false;
+}
+
+static bool submit_async_accept(struct block *block,
+                                struct validation_state *out, void *ctx)
+{
+    (void)block; (void)out; (void)ctx;
+    return true;
+}
+
+/* Enqueues one body and waits for its outcome; snapshot precedes stop. */
+static bool intake_run(struct msg_processor *mp, uint8_t tag,
+                       struct uint256 *hash, struct msg_block_intake_stats *snap)
+{
+    struct block blk;
+    struct validation_state state;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000003u;
+    blk.header.nBits = 0x1f00ffffu;
+    blk.header.nNonce.data[0] = tag;
+    block_get_hash(&blk, hash);
+    block_clear_seen(hash);
+    validation_state_init(&state);
+    bool queued = msg_processor_enqueue_p2p_block(mp, &blk, hash, 90 + tag,
+                                                  &state);
+    block_free(&blk);
+    for (int i = 0; queued && i < 2000; i++) {
+        msg_processor_get_block_intake_stats(mp, snap);
+        if (snap->accepted + snap->rejected + snap->retryable > 0)
+            return true;
+        test_msg_sleep_ms(1);
+    }
+    return false;
+}
+
+static int test_intake_worker_rejects_nonretryable_body(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: intake worker rejects a non-retryable body, marks it "
+         "seen, and brackets the batch") {
+        test_msg_sync_to_blocks_download();
+        ASSERT(sync_get_state() == SYNC_BLOCKS_DOWNLOAD);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct async_block_submit_ctx submit_ctx = {0};
+        struct msg_processor mp;
+        memset(&mp, 0, sizeof(mp));
+        mp.main_state = &ms;
+        mp.params = chain_params_get();
+        mp.block_submit = submit_async_nonretryable;
+        mp.block_submit_ctx = &submit_ctx;
+        mp.catchup_drain = count_async_catchup_drain;
+        mp.catchup_drain_ctx = &submit_ctx;
+        msg_processor_set_catchup_batch_scope(
+            &mp, count_async_batch_begin, count_async_batch_end, &submit_ctx);
+
+        struct uint256 hash; struct msg_block_intake_stats stats;
+        ASSERT(intake_run(&mp, 0x61, &hash, &stats));
+        ASSERT_EQ(stats.rejected, 1);
+        ASSERT_EQ(stats.accepted, 0);
+        msg_processor_stop_block_intake(&mp);
+
+        ASSERT(block_already_seen(&hash));
+        ASSERT_EQ(atomic_load(&submit_ctx.entered), 1);
+        ASSERT_EQ(atomic_load(&submit_ctx.batch_begins), 1);
+        ASSERT_EQ(atomic_load(&submit_ctx.batch_ends), 1);
+        ASSERT_EQ(atomic_load(&submit_ctx.drains), 1);
+        main_state_free(&ms);
+        test_msg_sync_to_idle();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_intake_worker_submit_unavailable_rejects(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: intake worker without a block submitter rejects the "
+         "body as non-retryable") {
+        test_msg_sync_to_blocks_download();
+        ASSERT(sync_get_state() == SYNC_BLOCKS_DOWNLOAD);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct msg_processor mp;
+        memset(&mp, 0, sizeof(mp));
+        mp.main_state = &ms;
+        mp.params = chain_params_get();
+
+        struct uint256 hash; struct msg_block_intake_stats stats;
+        ASSERT(intake_run(&mp, 0x62, &hash, &stats));
+        ASSERT_EQ(stats.rejected, 1);
+        msg_processor_stop_block_intake(&mp);
+
+        ASSERT(block_already_seen(&hash));
+        main_state_free(&ms);
+        test_msg_sync_to_idle();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_intake_worker_accept_without_landing_not_marked_seen(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: intake worker accepts a valid body that did not land "
+         "on the active chain without marking it seen") {
+        test_msg_sync_to_blocks_download();
+        ASSERT(sync_get_state() == SYNC_BLOCKS_DOWNLOAD);
+        struct main_state ms;
+        main_state_init(&ms);
+        struct msg_processor mp;
+        memset(&mp, 0, sizeof(mp));
+        mp.main_state = &ms;
+        mp.params = chain_params_get();
+        mp.block_submit = submit_async_accept;
+
+        struct uint256 hash; struct msg_block_intake_stats stats;
+        ASSERT(intake_run(&mp, 0x63, &hash, &stats));
+        ASSERT_EQ(stats.accepted, 1);
+        ASSERT_EQ(stats.rejected, 0);
+        msg_processor_stop_block_intake(&mp);
+
+        ASSERT(!block_already_seen(&hash));
+        main_state_free(&ms);
+        test_msg_sync_to_idle();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_msg_handlers(void);
@@ -1162,6 +1486,12 @@ int test_msg_handlers(void)
     failures += test_msg_process_messages_yields_after_bounded_batch();
     failures += test_swarm_utxo_sha3_verify_passed_is_quiet();
     failures += test_swarm_utxo_sha3_verify_mismatch_is_not_silent();
+    failures += test_zfilelist_empty_and_dropped_offers();
+    failures += test_zfilelist_ttl_clamp_relay_gate_and_update();
+    failures += test_zfilelist_count_clamp_and_truncated_batch();
+    failures += test_intake_worker_rejects_nonretryable_body();
+    failures += test_intake_worker_submit_unavailable_rejects();
+    failures += test_intake_worker_accept_without_landing_not_marked_seen();
 
     return failures;
 }
