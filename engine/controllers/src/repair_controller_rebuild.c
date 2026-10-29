@@ -147,7 +147,7 @@ bool rebuild_recent_resolve_range(int tip_height, int remote_height,
         hi = lo + (REBUILD_RECENT_MAX_RANGE - 1);
 
     if (!rebuild_recent_check_span(lo, remote_height, err, err_sz))
-        return false;
+        return false; // raw-return-ok:err_text_set_by_callee
 
     *lo_out = lo;
     *hi_out = hi; /* hi < lo => idempotent no-op (already at/above tip) */
@@ -205,6 +205,7 @@ static bool rebuild_recent_parse_block(char *hex_buf, int height,
                                        struct block *blk,
                                        char *err, size_t err_sz)
 {
+    block_init(blk);
     size_t hex_len = strlen(hex_buf);
     size_t bin_len = hex_len / 2;
     unsigned char *bin = zcl_malloc(bin_len, "rebuild_recent_bin");
@@ -222,7 +223,6 @@ static bool rebuild_recent_parse_block(char *hex_buf, int height,
 
     struct byte_stream s;
     stream_init_from_data(&s, bin, parsed);
-    block_init(blk);
     if (!block_deserialize(blk, &s)) {
         block_free(blk);
         stream_free(&s);
@@ -328,11 +328,11 @@ static bool rebuild_recent_fetch_and_connect(struct repair_context *ctx,
         return true; /* present; advance to the next height */
 
     if (!rebuild_recent_fetch_block_hex(height, hex_buf, err, err_sz))
-        return false;
+        return false; // raw-return-ok:err_text_set_by_callee
 
     struct block blk;
     if (!rebuild_recent_parse_block(hex_buf, height, &blk, err, err_sz))
-        return false;
+        return false; // raw-return-ok:err_text_set_by_callee
 
     if (!rebuild_recent_check_block_hash(&blk, height, &canonical_hash,
                                          canonical_hex, err, err_sz))
@@ -735,6 +735,7 @@ static bool backfill_header_solutions_decode_block(char *hex_buf, int h,
                                                    struct block *blk,
                                                    char *err, size_t err_sz)
 {
+    block_init(blk);
     size_t bin_len = strlen(hex_buf) / 2;
     if (bin_len == 0) {
         snprintf(err, err_sz, "empty block hex for %d", h);
@@ -748,7 +749,6 @@ static bool backfill_header_solutions_decode_block(char *hex_buf, int h,
     size_t parsed = ParseHex(hex_buf, bin, bin_len);
     struct byte_stream s;
     stream_init_from_data(&s, bin, parsed);
-    block_init(blk);
     bool dok = (parsed > 0) && block_deserialize(blk, &s);
     stream_free(&s);
     free(bin);
@@ -785,11 +785,11 @@ static bool backfill_header_solutions_run(struct repair_context *ctx,
 {
     sqlite3 *pdb = NULL;
     if (!backfill_header_solutions_check_stores(ctx, &pdb, err, err_sz))
-        return false;
+        return false; // raw-return-ok:err_text_set_by_callee
 
     int hi = 0;
     if (!backfill_header_solutions_upper_bound(ctx, &hi, err, err_sz))
-        return false;
+        return false; // raw-return-ok:err_text_set_by_callee
 
     int lo = 0;
     if (!backfill_header_solutions_start_height(ctx, from_arg, from_present,
