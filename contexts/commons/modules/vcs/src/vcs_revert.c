@@ -214,19 +214,147 @@ static bool revert_commit_op(struct revert_op *op)
     return true;
 }
 
+/* Argument guard for vcs_revert(): true when every pointer is non-NULL. The
+ * LOG_ERR for a failure stays in vcs_revert(). */
+static bool revert_args_ok(const struct vcs_repo *r, const uint8_t target_commit[32],
+                           const uint8_t out_new_commit[32])
+{
+    return r && target_commit && out_new_commit;
+}
+
+/* Load the target commit, then its tree manifest. Returns 0 on success, 1 when
+ * the commit fails to load and 2 when its manifest does. */
+static int revert_load_target(struct vcs_repo *r, const uint8_t target_commit[32],
+                              struct vcs_commit *tc, struct vcs_manifest *target)
+{
+    if (!load_commit_by_id(r->root, target_commit, tc))
+        return 1;
+    if (!manifest_load(r->root, tc->tree_hash, target))
+        return 2;
+    return 0;
+}
+
+/* Outcome of the seal pre-check; vcs_revert() maps each failure to its log. */
+enum revert_seal_step {
+    REVERT_SEAL_OK,
+    REVERT_SEAL_REFUSED,
+    REVERT_SEAL_GLOBS,
+    REVERT_SEAL_HASH,
+    REVERT_SEAL_PEEK,
+};
+
+/* Seal pre-check body: loads the sealset of the target manifest and peeks
+ * (non-consuming) at the seal state. Frees target on every non-OK outcome. */
+static int revert_seal_precheck(struct vcs_repo *r, struct vcs_manifest *target)
+{
+    char **seal_globs = NULL;
+    size_t n_seal_globs = 0;
+    if (!vcs_seal_load_globs(r->root, &seal_globs, &n_seal_globs)) {
+        vcs_manifest_free(target);
+        return REVERT_SEAL_GLOBS;
+    }
+    uint8_t target_sealset[32];
+    bool tsh = vcs_sealset_hash(target, seal_globs, n_seal_globs, target_sealset);
+    vcs_seal_free_globs(seal_globs, n_seal_globs);
+    if (!tsh) {
+        vcs_manifest_free(target);
+        return REVERT_SEAL_HASH;
+    }
+    enum vcs_seal_result presr = vcs_seal_peek(r->idx, target_sealset);
+    if (presr == VCS_SEAL_REFUSED) {
+        vcs_manifest_free(target);
+        return REVERT_SEAL_REFUSED;
+    }
+    if (presr != VCS_SEAL_OK) {
+        vcs_manifest_free(target);
+        return REVERT_SEAL_PEEK;
+    }
+    return REVERT_SEAL_OK;
+}
+
+/* Diff the current manifest against the target into the plan, then release
+ * both manifests. Any failure is recorded in plan->err. */
+static void revert_plan_diff(struct revert_plan *plan, struct vcs_manifest *cur,
+                             struct vcs_manifest *target)
+{
+    vcs_manifest_diff(cur, target, revert_collect_cb, plan);
+    vcs_manifest_free(cur);
+    vcs_manifest_free(target);
+}
+
+/* Phase 1 driver: stage every write op. Returns false at the first failed
+ * stage; the caller frees the plan (unlinking staged temps). */
+static bool revert_stage_all(struct vcs_repo *r, struct revert_plan *plan)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        if (plan->ops[i].is_delete) continue;
+        if (!revert_stage_op(r, &plan->ops[i]))
+            return false;
+    }
+    return true;
+}
+
+/* Phase 2 driver: commit ops in order. Returns how many committed; a value
+ * below plan->count names the op that failed (it is the next index). */
+static size_t revert_commit_all(struct revert_plan *plan)
+{
+    size_t committed = 0;
+    for (size_t i = 0; i < plan->count; i++) {
+        if (!revert_commit_op(&plan->ops[i]))
+            break;
+        committed++;
+    }
+    return committed;
+}
+
+/* Record the restoration as a forward commit, then activate the binary
+ * generation the target commit names. Returns the snapshot's own status when
+ * it fails, VCS_EPARTIAL when the relink fails, else VCS_OK. */
+static int revert_record_forward(struct vcs_repo *r, const uint8_t target_commit[32],
+                                 struct vcs_commit *tc, uint8_t out_new_commit[32],
+                                 const struct vcs_revert_relink_ops *relink)
+{
+    /* Record the restoration as a forward commit. */
+    char taskref[64];
+    char hex[65];
+    zcl_hex_encode(target_commit, 32, hex);
+    snprintf(taskref, sizeof(taskref), "revert:%.16s", hex);
+    struct vcs_snapshot_meta meta = {0};
+    meta.verdict_status = tc->verdict_status;
+    meta.phase = "revert";
+    meta.generation_sha256 = tc->generation_sha256;
+    meta.task_ref = taskref;
+    int sr = vcs_snapshot(r, &meta, out_new_commit);
+    if (sr != VCS_OK)
+        return sr;  /* propagate VCS_REFUSED / VCS_ERR */
+
+    /* Binary-generation relink half. The source revert + forward
+     * commit above already stand — append-only, never undone — regardless of
+     * what happens below. */
+    if (relink && relink->activate_generation) {
+        static const uint8_t zero32[32] = {0};
+        if (memcmp(tc->generation_sha256, zero32, 32) != 0) {
+            if (!relink->activate_generation(tc->generation_sha256, relink->ctx))
+                return VCS_EPARTIAL;
+        }
+    }
+    return VCS_OK;
+}
+
 int vcs_revert(struct vcs_repo *r, const uint8_t target_commit[32],
                const struct vcs_revert_relink_ops *relink,
                uint8_t out_new_commit[32])
 {
-    if (!r || !target_commit || !out_new_commit)
+    if (!revert_args_ok(r, target_commit, out_new_commit))
         LOG_ERR("vcs", "null arg to revert");
 
     /* Load the target manifest. */
     struct vcs_commit tc;
-    if (!load_commit_by_id(r->root, target_commit, &tc))
-        LOG_ERR("vcs", "load target commit");
     struct vcs_manifest target;
-    if (!manifest_load(r->root, tc.tree_hash, &target))
+    int lrc = revert_load_target(r, target_commit, &tc, &target);
+    if (lrc == 1)
+        LOG_ERR("vcs", "load target commit");
+    if (lrc == 2)
         LOG_ERR("vcs", "load target manifest");
 
     /* Seal pre-check, BEFORE any worktree file is touched. A full revert
@@ -241,28 +369,15 @@ int vcs_revert(struct vcs_repo *r, const uint8_t target_commit[32],
      * earlier and non-consuming (vcs_seal_peek) so a legitimately
      * token-authorized revert still lets vcs_snapshot() spend the token
      * exactly once. */
-    char **seal_globs = NULL;
-    size_t n_seal_globs = 0;
-    if (!vcs_seal_load_globs(r->root, &seal_globs, &n_seal_globs)) {
-        vcs_manifest_free(&target);
-        LOG_ERR("vcs", "load globs (revert seal pre-check)");
-    }
-    uint8_t target_sealset[32];
-    bool tsh = vcs_sealset_hash(&target, seal_globs, n_seal_globs, target_sealset);
-    vcs_seal_free_globs(seal_globs, n_seal_globs);
-    if (!tsh) {
-        vcs_manifest_free(&target);
-        LOG_ERR("vcs", "sealset_hash (revert seal pre-check)");
-    }
-    enum vcs_seal_result presr = vcs_seal_peek(r->idx, target_sealset);
-    if (presr == VCS_SEAL_REFUSED) {
-        vcs_manifest_free(&target);
+    int src = revert_seal_precheck(r, &target);
+    if (src == REVERT_SEAL_REFUSED)
         return VCS_REFUSED;
-    }
-    if (presr != VCS_SEAL_OK) {
-        vcs_manifest_free(&target);
+    if (src == REVERT_SEAL_GLOBS)
+        LOG_ERR("vcs", "load globs (revert seal pre-check)");
+    if (src == REVERT_SEAL_HASH)
+        LOG_ERR("vcs", "sealset_hash (revert seal pre-check)");
+    if (src == REVERT_SEAL_PEEK)
         LOG_ERR("vcs", "seal pre-check error");
-    }
 
     /* Current worktree manifest. */
     struct vcs_manifest cur;
@@ -285,9 +400,7 @@ int vcs_revert(struct vcs_repo *r, const uint8_t target_commit[32],
      * the call reports VCS_EPARTIAL (a partial, honestly-named state) rather
      * than pretending the revert was clean. */
     struct revert_plan plan = { .r = r };
-    vcs_manifest_diff(&cur, &target, revert_collect_cb, &plan);
-    vcs_manifest_free(&cur);
-    vcs_manifest_free(&target);
+    revert_plan_diff(&plan, &cur, &target);
     if (plan.err) {
         revert_plan_free(&plan, true);
         LOG_ERR("vcs", "plan worktree restore");
@@ -295,63 +408,34 @@ int vcs_revert(struct vcs_repo *r, const uint8_t target_commit[32],
 
     /* Phase 1 — stage every write. The live worktree stays untouched until the
      * whole write set has been staged and validated. */
-    for (size_t i = 0; i < plan.count; i++) {
-        if (plan.ops[i].is_delete) continue;
-        if (!revert_stage_op(r, &plan.ops[i])) {
-            revert_plan_free(&plan, true);   /* unlink every staged temp */
-            LOG_ERR("vcs", "stage worktree restore (worktree left untouched)");
-        }
+    if (!revert_stage_all(r, &plan)) {
+        revert_plan_free(&plan, true);   /* unlink every staged temp */
+        LOG_ERR("vcs", "stage worktree restore (worktree left untouched)");
     }
 
     /* Phase 2 — commit: rename staged temps into place, then apply deletes. */
-    size_t committed = 0;
-    for (size_t i = 0; i < plan.count; i++) {
-        if (!revert_commit_op(&plan.ops[i])) {
-            /* Near-impossible on a single filesystem. Name the mutations that
-             * already flipped [0,committed) plus the one that failed, so the
-             * partial state is recoverable and honestly reported. */
-            LOG_WARN("vcs", "partial worktree restore — %zu of %zu mutation(s) "
-                     "already applied before a phase-2 failure:",
-                     committed, plan.count);
-            for (size_t k = 0; k < committed; k++)
-                LOG_WARN("vcs", "  %s: %s",
-                         plan.ops[k].is_delete ? "deleted" : "wrote",
-                         plan.ops[k].relpath);
-            LOG_WARN("vcs", "  FAILED on %s: %s",
-                     plan.ops[i].is_delete ? "delete" : "write",
-                     plan.ops[i].relpath);
-            revert_plan_free(&plan, true);   /* unlink any not-yet-renamed temps */
-            return VCS_EPARTIAL;
-        }
-        committed++;
+    size_t committed = revert_commit_all(&plan);
+    size_t i = committed;   /* the op that failed, when one did */
+    if (i != plan.count) {
+        /* Near-impossible on a single filesystem. Name the mutations that
+         * already flipped [0,committed) plus the one that failed, so the
+         * partial state is recoverable and honestly reported. */
+        LOG_WARN("vcs", "partial worktree restore — %zu of %zu mutation(s) "
+                 "already applied before a phase-2 failure:",
+                 committed, plan.count);
+        for (size_t k = 0; k < committed; k++)
+            LOG_WARN("vcs", "  %s: %s",
+                     plan.ops[k].is_delete ? "deleted" : "wrote",
+                     plan.ops[k].relpath);
+        LOG_WARN("vcs", "  FAILED on %s: %s",
+                 plan.ops[i].is_delete ? "delete" : "write",
+                 plan.ops[i].relpath);
+        revert_plan_free(&plan, true);   /* unlink any not-yet-renamed temps */
+        return VCS_EPARTIAL;
     }
     revert_plan_free(&plan, true);   /* frees heap; committed temps already NULL */
 
-    /* Record the restoration as a forward commit. */
-    char taskref[64];
-    char hex[65];
-    zcl_hex_encode(target_commit, 32, hex);
-    snprintf(taskref, sizeof(taskref), "revert:%.16s", hex);
-    struct vcs_snapshot_meta meta = {0};
-    meta.verdict_status = tc.verdict_status;
-    meta.phase = "revert";
-    meta.generation_sha256 = tc.generation_sha256;
-    meta.task_ref = taskref;
-    int sr = vcs_snapshot(r, &meta, out_new_commit);
-    if (sr != VCS_OK)
-        return sr;  /* propagate VCS_REFUSED / VCS_ERR */
-
-    /* Binary-generation relink half. The source revert + forward
-     * commit above already stand — append-only, never undone — regardless of
-     * what happens below. */
-    if (relink && relink->activate_generation) {
-        static const uint8_t zero32[32] = {0};
-        if (memcmp(tc.generation_sha256, zero32, 32) != 0) {
-            if (!relink->activate_generation(tc.generation_sha256, relink->ctx))
-                return VCS_EPARTIAL;
-        }
-    }
-    return VCS_OK;
+    return revert_record_forward(r, target_commit, &tc, out_new_commit, relink);
 }
 
 #else /* _WIN32 */
