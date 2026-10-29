@@ -133,14 +133,11 @@ static bool blog_anchor_payload_encode(
     return off == needed;
 }
 
-static bool blog_anchor_payload_decode(
+/* Decodes the name, event, script, txid, and fee fields with bounds checks. */
+static bool blog_anchor_payload_body_decode(
     const uint8_t *raw, size_t raw_len,
     struct blog_anchor_plan_payload *payload)
 {
-    if (!raw || !payload || raw_len < 80 || raw_len > BLOG_ANCHOR_PAYLOAD_MAX ||
-        memcmp(raw, "BAP1", 4) != 0)
-        return false;
-    memset(payload, 0, sizeof(*payload));
     size_t off = 4;
     size_t name_len = raw[off++];
     if (name_len == 0 || name_len > BLOG_NAME_MAX ||
@@ -158,14 +155,33 @@ static bool blog_anchor_payload_decode(
     off += payload->script_len;
     memcpy(payload->txid, raw + off, 32); off += 32;
     payload->actual_fee_zat = zcl_read_i64_le(raw + off); off += 8;
+    return off == raw_len;
+}
+
+/* Checks the fee and txid and that the script rebinds the same name and event. */
+static bool blog_anchor_payload_script_tail_valid(
+    const struct blog_anchor_plan_payload *payload)
+{
     char parsed_name[BLOG_NAME_MAX + 1];
     uint8_t parsed_event[32];
-    return off == raw_len && payload->actual_fee_zat >= 0 &&
+    return payload->actual_fee_zat >= 0 &&
         zcl_bytes_any_set(payload->txid, 32) &&
         blog_anchor_script_parse(payload->script, payload->script_len,
                                  parsed_name, parsed_event).ok &&
         strcmp(parsed_name, payload->blog_name) == 0 &&
         memcmp(parsed_event, payload->event_id, 32) == 0;
+}
+
+static bool blog_anchor_payload_decode(
+    const uint8_t *raw, size_t raw_len,
+    struct blog_anchor_plan_payload *payload)
+{
+    if (!raw || !payload || raw_len < 80 || raw_len > BLOG_ANCHOR_PAYLOAD_MAX ||
+        memcmp(raw, "BAP1", 4) != 0)
+        return false;
+    memset(payload, 0, sizeof(*payload));
+    return blog_anchor_payload_body_decode(raw, raw_len, payload) &&
+        blog_anchor_payload_script_tail_valid(payload);
 }
 
 static void blog_anchor_intent_digest(
@@ -273,12 +289,12 @@ struct zcl_result blog_publication_anchor_status(
     blog_anchor_view(&row, &payload, out);
     return ZCL_OK;
 }
-struct zcl_result blog_publication_anchor_plan(
-    const struct blog_anchor_runtime *rt,
+
+/* Validates the plan request's scope, name, event ID, and idempotency key. */
+static struct zcl_result blog_anchor_plan_request_validate(
     const struct blog_anchor_request *request,
     struct blog_anchor_transaction_result *out)
 {
-    ZCL_CHECK(blog_anchor_runtime_validate(rt, true, false));
     if (!request || !out ||
         (strcmp(request->wallet_scope, "dev") != 0 &&
          strcmp(request->wallet_scope, "prod") != 0) ||
@@ -288,39 +304,155 @@ struct zcl_result blog_publication_anchor_plan(
         strlen(request->idempotency_key) > BLOG_ANCHOR_IDEMPOTENCY_MAX)
         return ZCL_ERR(BLOG_ERR_ARGS,
                        "scope, canonical name, event ID, and idempotency key are required");
-    uint8_t request_digest[32];
-    blog_anchor_request_digest(request, request_digest);
+    return ZCL_OK;
+}
+
+/* Loads an earlier plan stored under this idempotency key, if one exists. */
+static struct zcl_result blog_anchor_plan_replay_lookup(
+    const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    const uint8_t request_digest[32],
+    struct blog_anchor_transaction_result *out, bool *replayed)
+{
     struct vault_intent_row existing;
-    if (vault_intent_find_application_idempotency(
-            rt->node_db, request->wallet_scope, BLOG_ANCHOR_APPLICATION,
-            request->idempotency_key, &existing)) {
-        if (!existing.has_request_digest ||
-            memcmp(existing.request_digest, request_digest, 32) != 0)
-            return ZCL_ERR(BLOG_ERR_TX,
-                           "idempotency key names a different Blog anchor");
-        ZCL_CHECK(blog_publication_anchor_status(rt, existing.plan_id, out));
-        out->idempotent_replay = true;
+    *replayed = vault_intent_find_application_idempotency(
+        rt->node_db, request->wallet_scope, BLOG_ANCHOR_APPLICATION,
+        request->idempotency_key, &existing);
+    if (!*replayed)
         return ZCL_OK;
-    }
+    if (!existing.has_request_digest ||
+        memcmp(existing.request_digest, request_digest, 32) != 0)
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "idempotency key names a different Blog anchor");
+    ZCL_CHECK(blog_publication_anchor_status(rt, existing.plan_id, out));
+    out->idempotent_replay = true;
+    return ZCL_OK;
+}
+
+/* Verifies the stored event, current money, and an affordable maximum fee. */
+static struct zcl_result blog_anchor_plan_preconditions(
+    const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    struct wallet_money_snapshot *money)
+{
     ZCL_CHECK(blog_anchor_event_verify(rt->node_db, request->blog_name,
                                        request->event_id));
-    struct wallet_money_snapshot money;
-    ZCL_CHECK(blog_anchor_money_current(rt, request->wallet_scope, &money));
-    int64_t liquid = money.confirmed_zat - money.intent_reserved_zat;
+    ZCL_CHECK(blog_anchor_money_current(rt, request->wallet_scope, money));
+    int64_t liquid = money->confirmed_zat - money->intent_reserved_zat;
     if (liquid < rt->maximum_fee_zat ||
         (strcmp(request->wallet_scope, "dev") == 0 &&
-         money.agent_available_zat < rt->maximum_fee_zat))
+         money->agent_available_zat < rt->maximum_fee_zat))
         return ZCL_ERR(BLOG_ERR_TX,
                        "custody allocation cannot reserve the maximum fee");
+    return ZCL_OK;
+}
 
-    struct blog_anchor_plan_payload payload;
-    memset(&payload, 0, sizeof(payload));
-    (void)snprintf(payload.blog_name, sizeof(payload.blog_name), "%s",
+/* Fills the payload name, event ID, and anchor script from the request. */
+static struct zcl_result blog_anchor_plan_payload_build(
+    const struct blog_anchor_request *request,
+    struct blog_anchor_plan_payload *payload)
+{
+    memset(payload, 0, sizeof(*payload));
+    (void)snprintf(payload->blog_name, sizeof(payload->blog_name), "%s",
                    request->blog_name);
-    memcpy(payload.event_id, request->event_id, 32);
+    memcpy(payload->event_id, request->event_id, 32);
     ZCL_CHECK(blog_anchor_script_build(
-        request->blog_name, request->event_id, payload.script,
-        sizeof(payload.script), &payload.script_len));
+        request->blog_name, request->event_id, payload->script,
+        sizeof(payload->script), &payload->script_len));
+    return ZCL_OK;
+}
+
+/* True when prepare failed or broke the exact size, txid, or fee contract. */
+static bool blog_anchor_prepared_fee_contract_broken(
+    const struct zcl_result *prepared, size_t raw_tx_len,
+    const struct blog_anchor_plan_payload *payload, int64_t maximum_fee_zat)
+{
+    return !prepared->ok || raw_tx_len == 0 ||
+        raw_tx_len > VAULT_INTENT_RAW_MAX ||
+        !zcl_bytes_any_set(payload->txid, 32) || payload->actual_fee_zat < 0 ||
+        payload->actual_fee_zat > maximum_fee_zat;
+}
+
+/* Populates the fresh intent row from runtime, request, and money snapshot. */
+static void blog_anchor_plan_row_init(
+    struct vault_intent_row *row, const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    const struct wallet_money_snapshot *money,
+    const uint8_t request_digest[32])
+{
+    row->state = VAULT_INTENT_PLANNED;
+    row->route = VAULT_INTENT_ROUTE_TRANSPARENT;
+    row->created_at = rt->now_unix;
+    row->expires_at = rt->now_unix + BLOG_ANCHOR_PLAN_TTL;
+    row->updated_at = rt->now_unix;
+    row->anchor_height = rt->tip_height;
+    memcpy(row->anchor_hash, rt->tip_hash, 32);
+    (void)snprintf(row->wallet_scope, sizeof(row->wallet_scope), "%s",
+                   request->wallet_scope);
+    (void)snprintf(row->wallet_instance_id, sizeof(row->wallet_instance_id),
+                   "%s", money->identity.wallet_instance_id);
+    wallet_identity_genesis_hex(&money->identity, row->wallet_genesis);
+    memcpy(row->snapshot_root, money->snapshot_root, 32);
+    row->has_snapshot_root = true;
+    row->recipient_value_zat = 0;
+    row->max_fee_zat = rt->maximum_fee_zat;
+    row->reserved_zat = rt->maximum_fee_zat;
+    (void)snprintf(row->application_kind, sizeof(row->application_kind), "%s",
+                   BLOG_ANCHOR_APPLICATION);
+    (void)snprintf(row->idempotency_key, sizeof(row->idempotency_key), "%s",
+                   request->idempotency_key);
+    memcpy(row->request_digest, request_digest, 32);
+    row->has_request_digest = true;
+}
+
+/* Encrypts and reserves the intent, rebinding it to a fresh money snapshot. */
+static bool blog_anchor_plan_store(
+    const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    const struct wallet_money_snapshot *money,
+    const struct blog_anchor_plan_payload *payload,
+    struct vault_intent_row *row, const uint8_t *raw_tx, size_t raw_tx_len)
+{
+    uint8_t plain[BLOG_ANCHOR_PAYLOAD_MAX];
+    size_t plain_len = 0;
+    bool encoded = blog_anchor_payload_encode(
+        payload, plain, sizeof(plain), &plain_len);
+    bool encrypted = encoded && wallet_metadata_encrypt(
+        rt->node_db, row->plan_id, 32, plain, plain_len,
+        row->encrypted_payload, sizeof(row->encrypted_payload),
+        &row->encrypted_payload_len);
+    if (encrypted)
+        blog_anchor_intent_digest(plain, plain_len, row, row->digest);
+    bool stored = encrypted && vault_intent_reserve_with_raw(
+        rt->node_db, row, money->confirmed_zat, raw_tx, raw_tx_len);
+    if (stored) {
+        struct wallet_money_snapshot refreshed;
+        struct zcl_result current = blog_anchor_money_current(
+            rt, request->wallet_scope, &refreshed);
+        stored = current.ok;
+        if (stored) {
+            memcpy(row->snapshot_root, refreshed.snapshot_root, 32);
+            blog_anchor_intent_digest(plain, plain_len, row, row->digest);
+            stored = vault_intent_save(rt->node_db, row);
+        }
+        if (!stored)
+            (void)vault_intent_set_state(rt->node_db, row->plan_id,
+                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
+                rt->now_unix);
+    }
+    memory_cleanse(plain, sizeof(plain));
+    return stored;
+}
+
+/* Prepares the raw transaction and persists the reserved plan atomically. */
+static struct zcl_result blog_anchor_plan_reserve(
+    const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    const uint8_t request_digest[32],
+    const struct wallet_money_snapshot *money,
+    struct blog_anchor_plan_payload *payload,
+    struct vault_intent_row *row)
+{
     uint8_t *raw_tx = zcl_malloc(VAULT_INTENT_RAW_MAX,
                                   "blog_anchor_prepared_raw");
     if (!raw_tx)
@@ -328,13 +460,11 @@ struct zcl_result blog_publication_anchor_plan(
                        "Blog anchor raw transaction allocation failed");
     size_t raw_tx_len = 0;
     struct zcl_result prepared = rt->prepare(
-        rt->prepare_ctx, payload.script, payload.script_len,
+        rt->prepare_ctx, payload->script, payload->script_len,
         rt->maximum_fee_zat, raw_tx, VAULT_INTENT_RAW_MAX, &raw_tx_len,
-        payload.txid, &payload.actual_fee_zat);
-    if (!prepared.ok || raw_tx_len == 0 ||
-        raw_tx_len > VAULT_INTENT_RAW_MAX ||
-        !zcl_bytes_any_set(payload.txid, 32) || payload.actual_fee_zat < 0 ||
-        payload.actual_fee_zat > rt->maximum_fee_zat) {
+        payload->txid, &payload->actual_fee_zat);
+    if (blog_anchor_prepared_fee_contract_broken(
+            &prepared, raw_tx_len, payload, rt->maximum_fee_zat)) {
         memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
         free(raw_tx);
         return prepared.ok
@@ -343,70 +473,153 @@ struct zcl_result blog_publication_anchor_plan(
             : prepared;
     }
 
-    struct vault_intent_row row;
-    memset(&row, 0, sizeof(row));
-    if (RAND_bytes(row.plan_id, 32) != 1) {
+    memset(row, 0, sizeof(*row));
+    if (RAND_bytes(row->plan_id, 32) != 1) {
         memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
         free(raw_tx);
         return ZCL_ERR(BLOG_ERR_TX, "could not mint Blog anchor plan ID");
     }
-    row.state = VAULT_INTENT_PLANNED;
-    row.route = VAULT_INTENT_ROUTE_TRANSPARENT;
-    row.created_at = rt->now_unix;
-    row.expires_at = rt->now_unix + BLOG_ANCHOR_PLAN_TTL;
-    row.updated_at = rt->now_unix;
-    row.anchor_height = rt->tip_height;
-    memcpy(row.anchor_hash, rt->tip_hash, 32);
-    (void)snprintf(row.wallet_scope, sizeof(row.wallet_scope), "%s",
-                   request->wallet_scope);
-    (void)snprintf(row.wallet_instance_id, sizeof(row.wallet_instance_id),
-                   "%s", money.identity.wallet_instance_id);
-    wallet_identity_genesis_hex(&money.identity, row.wallet_genesis);
-    memcpy(row.snapshot_root, money.snapshot_root, 32);
-    row.has_snapshot_root = true;
-    row.recipient_value_zat = 0;
-    row.max_fee_zat = rt->maximum_fee_zat;
-    row.reserved_zat = rt->maximum_fee_zat;
-    (void)snprintf(row.application_kind, sizeof(row.application_kind), "%s",
-                   BLOG_ANCHOR_APPLICATION);
-    (void)snprintf(row.idempotency_key, sizeof(row.idempotency_key), "%s",
-                   request->idempotency_key);
-    memcpy(row.request_digest, request_digest, 32);
-    row.has_request_digest = true;
-    uint8_t plain[BLOG_ANCHOR_PAYLOAD_MAX];
-    size_t plain_len = 0;
-    bool encoded = blog_anchor_payload_encode(
-        &payload, plain, sizeof(plain), &plain_len);
-    bool encrypted = encoded && wallet_metadata_encrypt(
-        rt->node_db, row.plan_id, 32, plain, plain_len,
-        row.encrypted_payload, sizeof(row.encrypted_payload),
-        &row.encrypted_payload_len);
-    if (encrypted)
-        blog_anchor_intent_digest(plain, plain_len, &row, row.digest);
-    bool stored = encrypted && vault_intent_reserve_with_raw(
-        rt->node_db, &row, money.confirmed_zat, raw_tx, raw_tx_len);
-    if (stored) {
-        struct wallet_money_snapshot refreshed;
-        struct zcl_result current = blog_anchor_money_current(
-            rt, request->wallet_scope, &refreshed);
-        stored = current.ok;
-        if (stored) {
-            memcpy(row.snapshot_root, refreshed.snapshot_root, 32);
-            blog_anchor_intent_digest(plain, plain_len, &row, row.digest);
-            stored = vault_intent_save(rt->node_db, &row);
-        }
-        if (!stored)
-            (void)vault_intent_set_state(rt->node_db, row.plan_id,
-                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
-                rt->now_unix);
-    }
-    memory_cleanse(plain, sizeof(plain));
+    blog_anchor_plan_row_init(row, rt, request, money, request_digest);
+    bool stored = blog_anchor_plan_store(rt, request, money, payload, row,
+                                         raw_tx, raw_tx_len);
     memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
     free(raw_tx);
     if (!stored)
         return ZCL_ERR(BLOG_ERR_TX,
                        "Blog anchor reservation could not be persisted atomically");
+    return ZCL_OK;
+}
+
+struct zcl_result blog_publication_anchor_plan(
+    const struct blog_anchor_runtime *rt,
+    const struct blog_anchor_request *request,
+    struct blog_anchor_transaction_result *out)
+{
+    ZCL_CHECK(blog_anchor_runtime_validate(rt, true, false));
+    ZCL_CHECK(blog_anchor_plan_request_validate(request, out));
+    uint8_t request_digest[32];
+    blog_anchor_request_digest(request, request_digest);
+    bool replayed = false;
+    ZCL_CHECK(blog_anchor_plan_replay_lookup(rt, request, request_digest, out,
+                                             &replayed));
+    if (replayed)
+        return ZCL_OK;
+    struct wallet_money_snapshot money;
+    ZCL_CHECK(blog_anchor_plan_preconditions(rt, request, &money));
+    struct blog_anchor_plan_payload payload;
+    ZCL_CHECK(blog_anchor_plan_payload_build(request, &payload));
+    struct vault_intent_row row;
+    ZCL_CHECK(blog_anchor_plan_reserve(rt, request, request_digest, &money,
+                                       &payload, &row));
     blog_anchor_view(&row, &payload, out);
+    return ZCL_OK;
+}
+
+/* Requires an explicit known wallet scope plus plan ID and output. */
+static struct zcl_result blog_anchor_commit_args_validate(
+    const char *wallet_scope, const uint8_t plan_id[32],
+    struct blog_anchor_transaction_result *out)
+{
+    if (!wallet_scope || !plan_id || !out ||
+        (strcmp(wallet_scope, "dev") != 0 && strcmp(wallet_scope, "prod") != 0))
+        return ZCL_ERR(BLOG_ERR_ARGS,
+                       "explicit wallet scope, plan ID, and output are required");
+    return ZCL_OK;
+}
+
+/* Expires due intents and loads this scope's matching Blog anchor plan. */
+static struct zcl_result blog_anchor_commit_plan_load(
+    const struct blog_anchor_runtime *rt, const uint8_t plan_id[32],
+    const char *wallet_scope, struct vault_intent_row *row)
+{
+    (void)vault_intent_expire_due(rt->node_db, rt->now_unix);
+    if (!vault_intent_find(rt->node_db, plan_id, row) ||
+        strcmp(row->application_kind, BLOG_ANCHOR_APPLICATION) != 0)
+        return ZCL_ERR(BLOG_ERR_TX, "Blog anchor plan was not found");
+    if (strcmp(row->wallet_scope, wallet_scope) != 0)
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "wallet scope does not match Blog anchor plan");
+    return ZCL_OK;
+}
+
+/* True when the plan already has a txid in a post-publication state. */
+static bool blog_anchor_commit_already_broadcast(
+    const struct vault_intent_row *row)
+{
+    return row->has_txid && row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
+        row->state <= VAULT_INTENT_REORGED;
+}
+
+/* True while the plan is still planned or proving and not yet expired. */
+static bool blog_anchor_commit_state_committable(
+    const struct vault_intent_row *row, int64_t now_unix)
+{
+    return (row->state == VAULT_INTENT_PLANNED ||
+            row->state == VAULT_INTENT_PROVING) &&
+        row->expires_at > now_unix;
+}
+
+/* Reads current money and checks the plan still binds to it and the tip. */
+static bool blog_anchor_commit_snapshot_bound(
+    const struct blog_anchor_runtime *rt, const char *wallet_scope,
+    const struct vault_intent_row *row, struct wallet_money_snapshot *money,
+    struct zcl_result *current)
+{
+    *current = blog_anchor_money_current(rt, wallet_scope, money);
+    char genesis[65] = {0};
+    if (current->ok)
+        wallet_identity_genesis_hex(&money->identity, genesis);
+    return current->ok &&
+        strcmp(row->wallet_instance_id, money->identity.wallet_instance_id) == 0 &&
+        strcmp(row->wallet_genesis, genesis) == 0 &&
+        row->anchor_height == rt->tip_height &&
+        memcmp(row->anchor_hash, rt->tip_hash, 32) == 0 &&
+        memcmp(row->snapshot_root, money->snapshot_root, 32) == 0;
+}
+
+/* Loads the prepared raw transaction, claims, publishes, and records it. */
+static struct zcl_result blog_anchor_commit_publish(
+    const struct blog_anchor_runtime *rt, const uint8_t plan_id[32],
+    struct vault_intent_row *row,
+    const struct blog_anchor_plan_payload *payload,
+    struct blog_anchor_transaction_result *out)
+{
+    uint8_t *raw_tx = zcl_malloc(VAULT_INTENT_RAW_MAX,
+                                  "blog_anchor_commit_raw");
+    if (!raw_tx)
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "Blog anchor raw transaction allocation failed");
+    size_t raw_tx_len = 0;
+    if (!vault_intent_load_raw(rt->node_db, row->plan_id, raw_tx,
+                               VAULT_INTENT_RAW_MAX, &raw_tx_len)) {
+        free(raw_tx);
+        (void)vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_CONFLICTED, NULL, "PREPARED_TX_MISSING",
+            rt->now_unix);
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "prepared Blog transaction is missing after restart");
+    }
+    if (row->state == VAULT_INTENT_PLANNED &&
+        !vault_intent_claim_commit(rt->node_db, row->plan_id, rt->now_unix)) {
+        memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
+        free(raw_tx);
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "another commit claimed this Blog anchor plan");
+    }
+    struct zcl_result published = rt->publish(
+        rt->publish_ctx, raw_tx, raw_tx_len, payload->txid);
+    memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
+    free(raw_tx);
+    if (!published.ok)
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "COMMIT_UNCERTAIN: exact Blog transaction publication failed: %s",
+                       published.message);
+    if (!vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_MEMPOOL_ACCEPTED, payload->txid, "", rt->now_unix) ||
+        !vault_intent_find(rt->node_db, plan_id, row))
+        return ZCL_ERR(BLOG_ERR_TX,
+                       "Blog transaction published but durable intent state is uncertain");
+    blog_anchor_view(row, payload, out);
     return ZCL_OK;
 }
 
@@ -415,43 +628,23 @@ struct zcl_result blog_publication_anchor_commit(
     const uint8_t plan_id[32], struct blog_anchor_transaction_result *out)
 {
     ZCL_CHECK(blog_anchor_runtime_validate(rt, false, true));
-    if (!wallet_scope || !plan_id || !out ||
-        (strcmp(wallet_scope, "dev") != 0 && strcmp(wallet_scope, "prod") != 0))
-        return ZCL_ERR(BLOG_ERR_ARGS,
-                       "explicit wallet scope, plan ID, and output are required");
-    (void)vault_intent_expire_due(rt->node_db, rt->now_unix);
+    ZCL_CHECK(blog_anchor_commit_args_validate(wallet_scope, plan_id, out));
     struct vault_intent_row row;
-    if (!vault_intent_find(rt->node_db, plan_id, &row) ||
-        strcmp(row.application_kind, BLOG_ANCHOR_APPLICATION) != 0)
-        return ZCL_ERR(BLOG_ERR_TX, "Blog anchor plan was not found");
-    if (strcmp(row.wallet_scope, wallet_scope) != 0)
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "wallet scope does not match Blog anchor plan");
+    ZCL_CHECK(blog_anchor_commit_plan_load(rt, plan_id, wallet_scope, &row));
     struct blog_anchor_plan_payload payload;
     ZCL_CHECK(blog_anchor_payload_open(rt, &row, &payload));
-    if (row.has_txid && row.state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
-        row.state <= VAULT_INTENT_REORGED) {
+    if (blog_anchor_commit_already_broadcast(&row)) {
         blog_anchor_view(&row, &payload, out);
         out->idempotent_replay = true;
         return ZCL_OK;
     }
-    if ((row.state != VAULT_INTENT_PLANNED &&
-         row.state != VAULT_INTENT_PROVING) || row.expires_at <= rt->now_unix)
+    if (!blog_anchor_commit_state_committable(&row, rt->now_unix))
         return ZCL_ERR(BLOG_ERR_TX, "Blog anchor plan is not committable");
 
     struct wallet_money_snapshot money;
-    struct zcl_result current = blog_anchor_money_current(
-        rt, wallet_scope, &money);
-    char genesis[65] = {0};
-    if (current.ok)
-        wallet_identity_genesis_hex(&money.identity, genesis);
-    bool bound = current.ok &&
-        strcmp(row.wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
-        strcmp(row.wallet_genesis, genesis) == 0 &&
-        row.anchor_height == rt->tip_height &&
-        memcmp(row.anchor_hash, rt->tip_hash, 32) == 0 &&
-        memcmp(row.snapshot_root, money.snapshot_root, 32) == 0;
-    if (!bound) {
+    struct zcl_result current;
+    if (!blog_anchor_commit_snapshot_bound(rt, wallet_scope, &row, &money,
+                                           &current)) {
         (void)vault_intent_set_state(rt->node_db, row.plan_id,
             VAULT_INTENT_CONFLICTED, NULL, "MONEY_SNAPSHOT_CHANGED",
             rt->now_unix);
@@ -462,41 +655,5 @@ struct zcl_result blog_publication_anchor_commit(
     }
     ZCL_CHECK(blog_anchor_event_verify(rt->node_db, payload.blog_name,
                                        payload.event_id));
-    uint8_t *raw_tx = zcl_malloc(VAULT_INTENT_RAW_MAX,
-                                  "blog_anchor_commit_raw");
-    if (!raw_tx)
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "Blog anchor raw transaction allocation failed");
-    size_t raw_tx_len = 0;
-    if (!vault_intent_load_raw(rt->node_db, row.plan_id, raw_tx,
-                               VAULT_INTENT_RAW_MAX, &raw_tx_len)) {
-        free(raw_tx);
-        (void)vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_CONFLICTED, NULL, "PREPARED_TX_MISSING",
-            rt->now_unix);
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "prepared Blog transaction is missing after restart");
-    }
-    if (row.state == VAULT_INTENT_PLANNED &&
-        !vault_intent_claim_commit(rt->node_db, row.plan_id, rt->now_unix)) {
-        memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
-        free(raw_tx);
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "another commit claimed this Blog anchor plan");
-    }
-    struct zcl_result published = rt->publish(
-        rt->publish_ctx, raw_tx, raw_tx_len, payload.txid);
-    memory_cleanse(raw_tx, VAULT_INTENT_RAW_MAX);
-    free(raw_tx);
-    if (!published.ok)
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "COMMIT_UNCERTAIN: exact Blog transaction publication failed: %s",
-                       published.message);
-    if (!vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_MEMPOOL_ACCEPTED, payload.txid, "", rt->now_unix) ||
-        !vault_intent_find(rt->node_db, row.plan_id, &row))
-        return ZCL_ERR(BLOG_ERR_TX,
-                       "Blog transaction published but durable intent state is uncertain");
-    blog_anchor_view(&row, &payload, out);
-    return ZCL_OK;
+    return blog_anchor_commit_publish(rt, plan_id, &row, &payload, out);
 }
