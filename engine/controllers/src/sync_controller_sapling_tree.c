@@ -129,6 +129,449 @@ static bool sapling_tree_rebuild_shutdown_requested(void)
     return thread_registry_shutdown_requested();
 }
 
+/* Typed skip accounting: one counter per class so a dropped-block gap is
+ * never silent. The order of the table below is the order of `counts`. */
+enum sapling_rebuild_skip_kind {
+    SAPLING_SKIP_NO_INDEX,
+    SAPLING_SKIP_NO_DATA,
+    SAPLING_SKIP_NO_MMAP,
+    SAPLING_SKIP_DATAPOS_OOB,
+    SAPLING_SKIP_DESERIALIZE,
+    SAPLING_SKIP_KIND_COUNT
+};
+
+struct sapling_rebuild_skips {
+    int counts[SAPLING_SKIP_KIND_COUNT];
+    int first_height;
+    int last_height;
+};
+
+static const struct {
+    const char *tag;
+    const char *fail_reason;
+    const char *class_name;
+} k_sapling_skip_kinds[SAPLING_SKIP_KIND_COUNT] = {
+    {"no_index", "shielded_verify_skip_no_index", "no_index"},
+    {"no_data", "shielded_verify_skip_no_data", "no_data"},
+    {"no_mmap", "shielded_verify_skip_no_mmap", "no_mmap"},
+    {"datapos_out_of_range", "shielded_verify_skip_datapos_out_of_range",
+     "datapos_oob"},
+    {"deserialize_failed", "shielded_verify_skip_deserialize_failed",
+     "deserialize"},
+};
+
+/* Account one skipped block. True means the caller MUST fail-closed, and
+ * *fail_reason then names the class. */
+static bool sapling_rebuild_note_skip(struct sapling_rebuild_skips *sk,
+                                      enum sapling_rebuild_skip_kind kind,
+                                      int h, bool fatal,
+                                      const char **fail_reason)
+{
+    if (!sapling_rebuild_account_skip(k_sapling_skip_kinds[kind].tag, h, fatal,
+                                      &sk->counts[kind], &sk->first_height,
+                                      &sk->last_height))
+        return false;
+    *fail_reason = k_sapling_skip_kinds[kind].fail_reason;
+    return true;
+}
+
+/* Cap the endpoint to coins-best when present and below *chain_tip. */
+static bool sapling_rebuild_cap_endpoint(int32_t *coins_best, int *chain_tip)
+{
+    if (reducer_frontier_derive_coins_best_now(coins_best, NULL, NULL)
+        && *coins_best >= 0 && *coins_best < *chain_tip) {
+        *chain_tip = *coins_best;
+        return true;
+    }
+    return false;
+}
+
+enum sapling_resume_result {
+    SAPLING_RESUME_NONE,
+    SAPLING_RESUME_DONE,
+    SAPLING_RESUME_REFUSED,
+    SAPLING_RESUME_MISMATCH,
+    SAPLING_RESUME_UNVERIFIED
+};
+
+/* Resume candidate (1): the flat-file checkpoint. DONE updates the tree,
+ * start height, commitment total and ckpt_h; REFUSED sets *verdict. */
+static enum sapling_resume_result sapling_rebuild_resume_flat(
+        const struct active_chain *chain, const char *datadir, int chain_tip,
+        int sapling_height, struct incremental_merkle_tree *tree,
+        int *start_height, int *total_commitments, int64_t *ckpt_h,
+        int64_t *flat_h_out, enum sapling_ckpt_verdict *verdict)
+{
+    char ckpt_path[512];
+    int n = snprintf(ckpt_path, sizeof(ckpt_path),
+                     "%s/sapling_tree_ckpt.dat", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(ckpt_path))
+        return SAPLING_RESUME_NONE;
+    int64_t flat_h = 0;
+    uint8_t flat_hash[32] = {0};
+    struct incremental_merkle_tree ff_tree;
+    sapling_tree_init(&ff_tree);
+    if (!(sapling_tree_load_checkpoint(&ff_tree, &flat_h, flat_hash,
+                                       ckpt_path)
+          && flat_h > sapling_height))
+        return SAPLING_RESUME_NONE;
+    /* Fail-closed bind to the header chain at flat_h: height <=
+     * endpoint, same block hash, and root == hashFinalSaplingRoot.
+     * A stale/reorged/mismatched checkpoint is refused and the
+     * replay restarts from Sapling activation. */
+    const struct block_index *ckpt_bi = active_chain_at(chain, (int)flat_h);
+    struct uint256 ffr;
+    incremental_tree_root(&ff_tree, &ffr);
+    bool exp_hash_known = ckpt_bi && ckpt_bi->phashBlock;
+    enum sapling_ckpt_verdict v = sapling_ckpt_verify_binding(
+        flat_h, &ffr, flat_hash, chain_tip,
+        exp_hash_known ? ckpt_bi->phashBlock->data : NULL,
+        exp_hash_known,
+        sapling_rebuild_header_root_known(ckpt_bi)
+            ? &ckpt_bi->hashFinalSaplingRoot : NULL,
+        sapling_rebuild_header_root_known(ckpt_bi));
+    *flat_h_out = flat_h;
+    if (v != SAPLING_CKPT_OK) {
+        *verdict = v;
+        return SAPLING_RESUME_REFUSED;
+    }
+    *tree = ff_tree;
+    *start_height = (int)flat_h + 1;
+    *total_commitments = (int)incremental_tree_size(tree);
+    *ckpt_h = flat_h;
+    return SAPLING_RESUME_DONE;
+}
+
+/* Resume candidate (2): node_state["sapling_tree"]. */
+static enum sapling_resume_result sapling_rebuild_resume_node_state(
+        struct node_db *ndb, const struct active_chain *chain, int chain_tip,
+        int sapling_height, struct incremental_merkle_tree *tree,
+        int *start_height, int *total_commitments, int64_t *ckpt_h)
+{
+    if (!(node_db_state_get_int(ndb, "sapling_tree_rebuild_height", ckpt_h)
+          && *ckpt_h > sapling_height && *ckpt_h <= chain_tip))
+        return SAPLING_RESUME_NONE;
+    uint8_t tbuf[8192];
+    size_t tlen = 0;
+    if (!(node_db_state_get(ndb, "sapling_tree", tbuf, sizeof(tbuf), &tlen)
+          && tlen > 0))
+        return SAPLING_RESUME_NONE;
+    struct byte_stream ts;
+    stream_init_from_data(&ts, tbuf, tlen);
+    if (!incremental_tree_deserialize(tree, &ts))
+        return SAPLING_RESUME_NONE;
+    const struct block_index *ckpt_bi = active_chain_at(chain, (int)*ckpt_h);
+    if (!sapling_rebuild_header_root_known(ckpt_bi)) {
+        sapling_tree_init(tree);
+        return SAPLING_RESUME_UNVERIFIED;
+    }
+    struct uint256 ckpt_root;
+    incremental_tree_root(tree, &ckpt_root);
+    if (memcmp(ckpt_root.data, ckpt_bi->hashFinalSaplingRoot.data, 32) != 0) {
+        sapling_tree_init(tree);
+        return SAPLING_RESUME_MISMATCH;
+    }
+    *start_height = (int)*ckpt_h + 1;
+    *total_commitments = (int)incremental_tree_size(tree);
+    return SAPLING_RESUME_DONE;
+}
+
+/* Header-only pre-flight; on refusal seeds the skip tally and the fail
+ * reason/height the shared fail path reports. */
+static bool sapling_rebuild_preflight(
+        const struct active_chain *chain,
+        const struct incremental_merkle_tree *tree, int start_height,
+        int chain_tip, struct sapling_rebuild_skips *sk,
+        const char **fail_reason, int *fail_height)
+{
+    struct sapling_rebuild_impossible pf = {0};
+    if (!sapling_rebuild_replay_is_impossible(chain, tree, start_height,
+                                              chain_tip, &pf))
+        return false;
+    sk->counts[SAPLING_SKIP_NO_INDEX] = pf.no_index;
+    sk->counts[SAPLING_SKIP_NO_DATA] = pf.no_data;
+    sk->first_height = start_height;
+    sk->last_height = pf.gap_last_h;
+    *fail_reason = SAPLING_REBUILD_REASON_REPLAY_IMPOSSIBLE;
+    *fail_height = (pf.first_body_h >= 0) ? pf.first_body_h : pf.gap_last_h;
+    return true;
+}
+
+/* Supervisor heartbeat; true when a tick was recorded (caller logs). */
+static bool sapling_rebuild_heartbeat(supervisor_child_id sup_id, int h,
+                                      int64_t *last_heartbeat_ms,
+                                      int total_commitments)
+{
+    if (sup_id == SUPERVISOR_INVALID_ID || (h % 1000) != 0)
+        return false;
+    int64_t now_ms = GetTimeMillis();
+    if (now_ms - *last_heartbeat_ms < SAPLING_TREE_REBUILD_HEARTBEAT_MS)
+        return false;
+    *last_heartbeat_ms = now_ms;
+    supervisor_tick(sup_id);
+    supervisor_progress(sup_id, total_commitments);
+    return true;
+}
+
+/* Ensure the block file holding bi is mapped. False on a failed open. */
+static bool sapling_rebuild_map_block_file(
+        struct sync_block_file_mapping *mapping, int *cached_file,
+        const char *datadir, const struct block_index *bi)
+{
+    if (bi->nFile == *cached_file)
+        return true;
+    if (!sync_block_file_mapping_open(mapping, datadir, bi->nFile)) {
+        *cached_file = -1;
+        return false;
+    }
+    *cached_file = bi->nFile;
+    return true;
+}
+
+enum sapling_locate_result {
+    SAPLING_LOCATE_OK,
+    SAPLING_LOCATE_SKIP,
+    SAPLING_LOCATE_FAIL
+};
+
+/* Find the block at h and its mapped data; account a skip otherwise. */
+static enum sapling_locate_result sapling_rebuild_locate_block(
+        const struct active_chain *chain, const char *datadir, int h,
+        bool fatal, struct sapling_rebuild_skips *sk, int *cached_file,
+        struct sync_block_file_mapping *mapping,
+        const struct block_index **bi_out, const char **fail_reason)
+{
+    enum sapling_rebuild_skip_kind kind;
+    const struct block_index *bi = active_chain_at(chain, h);
+    *bi_out = bi;
+    if (!bi)
+        kind = SAPLING_SKIP_NO_INDEX;
+    else if (!(bi->nStatus & BLOCK_HAVE_DATA))
+        kind = SAPLING_SKIP_NO_DATA;
+    else if (!sapling_rebuild_map_block_file(mapping, cached_file, datadir, bi))
+        kind = SAPLING_SKIP_NO_MMAP;
+    else if ((uintmax_t)bi->nDataPos >= (uintmax_t)mapping->view.size)
+        /* Data position past the mapped size: the block file grew after
+         * it was mmap'd (stale cached_size), or the recorded position is
+         * corrupt. */
+        kind = SAPLING_SKIP_DATAPOS_OOB;
+    else
+        return SAPLING_LOCATE_OK;
+    return sapling_rebuild_note_skip(sk, kind, h, fatal, fail_reason)
+               ? SAPLING_LOCATE_FAIL : SAPLING_LOCATE_SKIP;
+}
+
+/* Deserialize the block at bi from the mapping. */
+static bool sapling_rebuild_read_block(
+        const struct sync_block_file_mapping *mapping,
+        const struct block_index *bi, struct block *blk)
+{
+    block_init(blk);
+    size_t data_pos = (size_t)bi->nDataPos;
+    size_t remaining = mapping->view.size - data_pos;
+    struct byte_stream s;
+    stream_init_from_data(&s, mapping->view.data + data_pos, remaining);
+    return block_deserialize(blk, &s);
+}
+
+/* Append every shielded-output commitment of blk; returns the number added. */
+static int sapling_rebuild_fold_block(struct incremental_merkle_tree *tree,
+                                      const struct block *blk,
+                                      int *total_commitments)
+{
+    int appended_this_block = 0;
+    for (size_t i = 0; i < blk->num_vtx; i++) {
+        const struct transaction *tx = &blk->vtx[i];
+        for (size_t j = 0; j < tx->num_shielded_output; j++) {
+            incremental_tree_append(tree, &tx->v_shielded_output[j].cm);
+            (*total_commitments)++;
+            appended_this_block++;
+        }
+    }
+    return appended_this_block;
+}
+
+/* Per-block and checkpoint root checks; sets fail_reason/fail_height. */
+static void sapling_rebuild_check_block_roots(
+        struct incremental_merkle_tree *tree, const struct block_index *bi,
+        const struct block *blk, bool is_checkpoint, int appended_this_block,
+        int h, int *mismatches, const char **fail_reason, int *fail_height)
+{
+    /* Per-block root check, mirroring the live fold's cadence
+     * (fold_sapling in utxo_apply_anchors.c): whenever a block changed
+     * the tree, the post-append incremental root must equal that block's
+     * committed hashFinalSaplingRoot, localizing a divergence to the
+     * exact block. Compare against the block-index root
+     * (bi->hashFinalSaplingRoot), the node-validated source the final tip
+     * check also uses, not the re-read on-disk block header. Checkpoint
+     * heights are skipped; the checkpoint verify below covers them.
+     * Detection only. */
+    if (!is_checkpoint && appended_this_block > 0 &&
+        sapling_rebuild_header_root_known(bi)) {
+        struct uint256 computed;
+        incremental_tree_root(tree, &computed);
+        if (!uint256_eq(&computed, &bi->hashFinalSaplingRoot)) {
+            (*mismatches)++;
+            *fail_reason = "intermediate_sapling_root_mismatch";
+            *fail_height = h;
+        }
+    }
+
+    if (is_checkpoint) {
+        struct uint256 computed;
+        incremental_tree_root(tree, &computed);
+        if (!sapling_rebuild_header_root_known(bi)) {
+            *fail_reason = "checkpoint_missing_sapling_root";
+            *fail_height = h;
+        } else if (memcmp(computed.data,
+                   blk->header.hashFinalSaplingRoot.data, 32) != 0) {
+            (*mismatches)++;
+            *fail_reason = "checkpoint_sapling_root_mismatch";
+            *fail_height = h;
+        }
+    }
+}
+
+/* Persist the per-100k checkpoint. Returns the fail reason, or NULL on
+ * success (then *ps may be SAPLING_PERSIST_DEFERRED). */
+static const char *sapling_rebuild_persist_checkpoint(
+        struct node_db *ndb, const struct incremental_merkle_tree *tree, int h,
+        enum sapling_persist_status *ps)
+{
+    struct byte_stream ts;
+    stream_init(&ts, 4096);
+    if (!incremental_tree_serialize(tree, &ts)) {
+        stream_free(&ts);
+        return "serialize_checkpoint_tree_failed";
+    }
+    *ps = sapling_tree_persist_pair_status(ndb, ts.data, ts.size, (int64_t)h);
+    stream_free(&ts);
+    if (*ps == SAPLING_PERSIST_FAILED)
+        return "persist_checkpoint_pair_failed";
+    return NULL;
+}
+
+/* Persist the final tree with the bounded DEFERRED retry. *serialized is
+ * false when the tree could not be serialized. */
+static enum sapling_persist_status sapling_rebuild_persist_final(
+        struct node_db *ndb, const struct incremental_merkle_tree *tree,
+        int chain_tip, bool *serialized)
+{
+    struct byte_stream ts;
+    stream_init(&ts, 4096);
+    *serialized = incremental_tree_serialize(tree, &ts);
+    if (!*serialized) {
+        stream_free(&ts);
+        return SAPLING_PERSIST_FAILED;
+    }
+    /* The final persist MUST durably land the rebuilt tree. A DEFERRED
+     * result means the reducer's batch tx transiently owns the connection;
+     * the reducer commits on a seconds timescale, so a bounded wait-then-
+     * retry (yielding this background thread) lets the persist land without
+     * ever nesting a BEGIN. Exhaustion is handled below. */
+    enum sapling_persist_status ps = SAPLING_PERSIST_DEFERRED;
+    for (int a = 1; a <= SAPLING_TREE_FINAL_PERSIST_ATTEMPTS &&
+                    ps == SAPLING_PERSIST_DEFERRED; a++) {
+        ps = sapling_tree_persist_pair_status(ndb, ts.data, ts.size,
+                                              (int64_t)chain_tip);
+        if (ps == SAPLING_PERSIST_DEFERRED &&
+            a < SAPLING_TREE_FINAL_PERSIST_ATTEMPTS) {
+            int64_t backoff_ms =
+                (int64_t)SAPLING_TREE_FINAL_PERSIST_BACKOFF_MS * a;
+            struct timespec bt = {
+                .tv_sec = backoff_ms / 1000,
+                .tv_nsec = (backoff_ms % 1000) * 1000000L,
+            };
+            nanosleep(&bt, NULL);
+        }
+    }
+    stream_free(&ts);
+    return ps;
+}
+
+/* Name the persist_busy TRANSIENT blocker; fills `reason` for the caller's log. */
+static void sapling_rebuild_raise_persist_busy(char *reason, size_t reason_sz,
+                                               int chain_tip)
+{
+    snprintf(reason, reason_sz,
+            "final persist deferred height=%lld: connection stayed in "
+            "a foreign open transaction past %d attempts",
+            (long long)chain_tip,
+            SAPLING_TREE_FINAL_PERSIST_ATTEMPTS);
+    struct blocker_record rec;
+    if (blocker_init(&rec, "sapling_tree_rebuild.persist_busy",
+                     "sync.sapling_tree_rebuild",
+                     BLOCKER_TRANSIENT, reason))
+        blocker_set(&rec);
+}
+
+/* Build the skip tally (total, span, comma-separated non-zero classes). */
+static void sapling_rebuild_fill_skip_tally(
+        struct sapling_rebuild_skip_tally *tally,
+        const struct sapling_rebuild_skips *sk)
+{
+    tally->total = 0;
+    for (int i = 0; i < SAPLING_SKIP_KIND_COUNT; i++)
+        tally->total += sk->counts[i];
+    tally->first_height = sk->first_height;
+    tally->last_height = sk->last_height;
+    size_t off = 0;
+    for (int i = 0; i < SAPLING_SKIP_KIND_COUNT; i++) {
+        if (sk->counts[i] <= 0 || off + 1 >= sizeof(tally->classes))
+            continue;
+        int w = snprintf(tally->classes + off,
+                         sizeof(tally->classes) - off, "%s%s",
+                         off ? "," : "", k_sapling_skip_kinds[i].class_name);
+        if (w <= 0 || (size_t)w >= sizeof(tally->classes) - off)
+            break;
+        off += (size_t)w;
+    }
+}
+
+/* Re-arm the shared liveness contract at the top of an invocation. */
+static void sapling_rebuild_arm_child(supervisor_child_id sup_id)
+{
+    if (sup_id == SUPERVISOR_INVALID_ID)
+        return;
+    atomic_store(&g_sapling_rebuild_contract.completed, false);
+    atomic_store(&g_sapling_rebuild_contract.deadline_secs, 180);
+    supervisor_progress(sup_id, 0);
+    supervisor_tick(sup_id);
+}
+
+/* Complete the supervisor child so a give-up is not mistaken for a stall. */
+static void sapling_rebuild_complete_child(supervisor_child_id sup_id)
+{
+    if (sup_id != SUPERVISOR_INVALID_ID)
+        supervisor_child_complete(sup_id);
+}
+
+/* Final progress report, then complete the child. */
+static void sapling_rebuild_finish_child(supervisor_child_id sup_id,
+                                         int total_commitments)
+{
+    if (sup_id == SUPERVISOR_INVALID_ID)
+        return;
+    supervisor_progress(sup_id, total_commitments);
+    supervisor_tick(sup_id);
+    supervisor_child_complete(sup_id);
+}
+
+/* Does the rebuilt root equal the endpoint block's committed root? */
+static bool sapling_rebuild_tip_matches(const struct block_index *tip,
+                                        const struct uint256 *final_root,
+                                        bool *tip_root_known)
+{
+    *tip_root_known = sapling_rebuild_header_root_known(tip);
+    return *tip_root_known && memcmp(final_root->data,
+                               tip->hashFinalSaplingRoot.data, 32) == 0;
+}
+
+static int sapling_rebuild_replayed_blocks(int start_height, int chain_tip)
+{
+    return (chain_tip >= start_height) ? (chain_tip - start_height + 1) : 0;
+}
+
 int sapling_tree_rebuild(struct node_db *ndb,
                          const struct active_chain *chain,
                          const char *datadir)
@@ -157,12 +600,10 @@ int sapling_tree_rebuild(struct node_db *ndb,
     bool endpoint_is_coins_applied = false;
     {
         int32_t coins_best = -1;
-        if (reducer_frontier_derive_coins_best_now(&coins_best, NULL, NULL)
-            && coins_best >= 0 && coins_best < chain_tip) {
+        if (sapling_rebuild_cap_endpoint(&coins_best, &chain_tip)) {
             LOG_INFO("sapling_tree_rebuild",
                      "sapling_tree_rebuild: capping endpoint to coins-applied "
                      "height %d (header tip %d)", coins_best, header_tip);
-            chain_tip = coins_best;
             endpoint_is_coins_applied = true;
         }
     }
@@ -170,12 +611,7 @@ int sapling_tree_rebuild(struct node_db *ndb,
     if (chain_tip < sapling_height) return 0;
 
     supervisor_child_id sup_id = sapling_tree_rebuild_supervisor_ensure();
-    if (sup_id != SUPERVISOR_INVALID_ID) {
-        atomic_store(&g_sapling_rebuild_contract.completed, false);
-        atomic_store(&g_sapling_rebuild_contract.deadline_secs, 180);
-        supervisor_progress(sup_id, 0);
-        supervisor_tick(sup_id);
-    }
+    sapling_rebuild_arm_child(sup_id);
     int64_t last_heartbeat_ms = GetTimeMillis();
 
     struct incremental_merkle_tree tree;
@@ -188,13 +624,10 @@ int sapling_tree_rebuild(struct node_db *ndb,
 
     /* Typed skip accounting — one counter per class so a dropped-block gap is
      * never silent (see sapling_rebuild_account_skip). */
-    int skipped_no_index = 0;
-    int skipped_no_data = 0;
-    int skipped_no_mmap = 0;
-    int skipped_datapos_oob = 0;
-    int skipped_deserialize = 0;
-    int first_skip_height = -1;
-    int last_skip_height = -1;
+    struct sapling_rebuild_skips skips = {
+        .first_height = -1,
+        .last_height = -1,
+    };
 
     /* Try to resume from a persisted frontier to avoid a full replay
      * on crash recovery. Three candidates, most
@@ -228,90 +661,40 @@ int sapling_tree_rebuild(struct node_db *ndb,
     }
 
     if (ckpt_h == 0) {
-        char ckpt_path[512];
-        int n = snprintf(ckpt_path, sizeof(ckpt_path),
-                         "%s/sapling_tree_ckpt.dat", datadir);
-        if (n > 0 && (size_t)n < sizeof(ckpt_path)) {
-            int64_t flat_h = 0;
-            uint8_t flat_hash[32] = {0};
-            struct incremental_merkle_tree ff_tree;
-            sapling_tree_init(&ff_tree);
-            if (sapling_tree_load_checkpoint(&ff_tree, &flat_h, flat_hash,
-                                             ckpt_path)
-                && flat_h > sapling_height) {
-                /* Fail-closed bind to the header chain at flat_h: height <=
-                 * endpoint, same block hash, and root == hashFinalSaplingRoot.
-                 * A stale/reorged/mismatched checkpoint is refused and the
-                 * replay restarts from Sapling activation. */
-                const struct block_index *ckpt_bi =
-                    active_chain_at(chain, (int)flat_h);
-                struct uint256 ffr;
-                incremental_tree_root(&ff_tree, &ffr);
-                bool exp_hash_known = ckpt_bi && ckpt_bi->phashBlock;
-                enum sapling_ckpt_verdict v = sapling_ckpt_verify_binding(
-                    flat_h, &ffr, flat_hash, chain_tip,
-                    exp_hash_known ? ckpt_bi->phashBlock->data : NULL,
-                    exp_hash_known,
-                    sapling_rebuild_header_root_known(ckpt_bi)
-                        ? &ckpt_bi->hashFinalSaplingRoot : NULL,
-                    sapling_rebuild_header_root_known(ckpt_bi));
-                if (v == SAPLING_CKPT_OK) {
-                    tree = ff_tree;
-                    start_height = (int)flat_h + 1;
-                    total_commitments =
-                        (int)incremental_tree_size(&tree);
-                    ckpt_h = flat_h;
-                    LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from flat-file checkpoint h=%lld " "(%d commitments,)", (long long)flat_h, total_commitments);
-                    fflush(stderr);
-                } else {
-                    LOG_WARN("sapling_tree_rebuild",
-                             "sapling_tree_rebuild: refusing flat-file "
-                             "checkpoint h=%lld (%s)",
-                             (long long)flat_h, sapling_ckpt_verdict_str(v));
-                }
-            }
+        int64_t flat_h = 0;
+        enum sapling_ckpt_verdict v = SAPLING_CKPT_OK;
+        enum sapling_resume_result rr = sapling_rebuild_resume_flat(
+            chain, datadir, chain_tip, sapling_height, &tree, &start_height,
+            &total_commitments, &ckpt_h, &flat_h, &v);
+        if (rr == SAPLING_RESUME_DONE) {
+            LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from flat-file checkpoint h=%lld " "(%d commitments,)", (long long)flat_h, total_commitments);
+            fflush(stderr);
+        } else if (rr == SAPLING_RESUME_REFUSED) {
+            LOG_WARN("sapling_tree_rebuild",
+                     "sapling_tree_rebuild: refusing flat-file "
+                     "checkpoint h=%lld (%s)",
+                     (long long)flat_h, sapling_ckpt_verdict_str(v));
         }
     }
 
-    if (ckpt_h == 0
-        && node_db_state_get_int(ndb, "sapling_tree_rebuild_height", &ckpt_h)
-        && ckpt_h > sapling_height && ckpt_h <= chain_tip) {
-        uint8_t tbuf[8192];
-        size_t tlen = 0;
-        if (node_db_state_get(ndb, "sapling_tree", tbuf, sizeof(tbuf), &tlen)
-            && tlen > 0) {
-            struct byte_stream ts;
-            stream_init_from_data(&ts, tbuf, tlen);
-            if (incremental_tree_deserialize(&tree, &ts)) {
-                const struct block_index *ckpt_bi =
-                    active_chain_at(chain, (int)ckpt_h);
-                if (sapling_rebuild_header_root_known(ckpt_bi)) {
-                    struct uint256 ckpt_root;
-                    incremental_tree_root(&tree, &ckpt_root);
-                    if (memcmp(ckpt_root.data,
-                               ckpt_bi->hashFinalSaplingRoot.data,
-                               32) == 0) {
-                        start_height = (int)ckpt_h + 1;
-                        total_commitments =
-                            (int)incremental_tree_size(&tree);
-                        LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from checkpoint h=%d (%d commitments)", (int)ckpt_h, total_commitments);
-                        fflush(stderr);
-                    } else {
-                        LOG_WARN("sapling_tree_rebuild",
-                                 "sapling_tree_rebuild: checkpoint h=%d "
-                                 "root mismatch; replaying from activation",
-                                 (int)ckpt_h);
-                        sapling_tree_init(&tree);
-                    }
-                } else {
-                    LOG_WARN("sapling_tree_rebuild",
-                             "sapling_tree_rebuild: refusing unverified "
-                             "node_state checkpoint h=%d (missing "
-                             "hashFinalSaplingRoot)",
-                             (int)ckpt_h);
-                    sapling_tree_init(&tree);
-                }
-            }
+    if (ckpt_h == 0) {
+        enum sapling_resume_result rr = sapling_rebuild_resume_node_state(
+            ndb, chain, chain_tip, sapling_height, &tree, &start_height,
+            &total_commitments, &ckpt_h);
+        if (rr == SAPLING_RESUME_DONE) {
+            LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: resuming " "from checkpoint h=%d (%d commitments)", (int)ckpt_h, total_commitments);
+            fflush(stderr);
+        } else if (rr == SAPLING_RESUME_MISMATCH) {
+            LOG_WARN("sapling_tree_rebuild",
+                     "sapling_tree_rebuild: checkpoint h=%d "
+                     "root mismatch; replaying from activation",
+                     (int)ckpt_h);
+        } else if (rr == SAPLING_RESUME_UNVERIFIED) {
+            LOG_WARN("sapling_tree_rebuild",
+                     "sapling_tree_rebuild: refusing unverified "
+                     "node_state checkpoint h=%d (missing "
+                     "hashFinalSaplingRoot)",
+                     (int)ckpt_h);
         }
     }
 
@@ -325,20 +708,9 @@ int sapling_tree_rebuild(struct node_db *ndb,
      * ever be conservative. Seeding the skip counters here is what makes the
      * shared fail path below report the absent run with the same tally and the
      * same body-availability DEPENDENCY class a post-hoc mismatch produces. */
-    {
-        struct sapling_rebuild_impossible pf = {0};
-        if (sapling_rebuild_replay_is_impossible(chain, &tree, start_height,
-                                                 chain_tip, &pf)) {
-            skipped_no_index = pf.no_index;
-            skipped_no_data = pf.no_data;
-            first_skip_height = start_height;
-            last_skip_height = pf.gap_last_h;
-            fail_reason = SAPLING_REBUILD_REASON_REPLAY_IMPOSSIBLE;
-            fail_height = (pf.first_body_h >= 0) ? pf.first_body_h
-                                                 : pf.gap_last_h;
-            goto fail;
-        }
-    }
+    if (sapling_rebuild_preflight(chain, &tree, start_height, chain_tip,
+                                  &skips, &fail_reason, &fail_height))
+        goto fail;
 
     LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: replaying h=%d..%d", start_height, chain_tip);
     fflush(stderr);
@@ -352,138 +724,44 @@ int sapling_tree_rebuild(struct node_db *ndb,
                 goto aborted;
             }
         }
-        if (sup_id != SUPERVISOR_INVALID_ID && (h % 1000) == 0) {
-            int64_t now_ms = GetTimeMillis();
-            if (now_ms - last_heartbeat_ms >=
-                SAPLING_TREE_REBUILD_HEARTBEAT_MS) {
-                last_heartbeat_ms = now_ms;
-                supervisor_tick(sup_id);
-                supervisor_progress(sup_id, total_commitments);
-                LOG_INFO("sapling_tree_rebuild",
-                        "sapling_tree_rebuild: heartbeat h=%d/%d "
-                        "commitments_folded=%d", h, chain_tip,
-                        total_commitments);
-            }
+        if (sapling_rebuild_heartbeat(sup_id, h, &last_heartbeat_ms,
+                                      total_commitments))
+            LOG_INFO("sapling_tree_rebuild",
+                    "sapling_tree_rebuild: heartbeat h=%d/%d "
+                    "commitments_folded=%d", h, chain_tip,
+                    total_commitments);
+        const struct block_index *bi = NULL;
+        enum sapling_locate_result loc = sapling_rebuild_locate_block(
+            chain, datadir, h, endpoint_is_coins_applied, &skips,
+            &cached_file, &cached_mapping, &bi, &fail_reason);
+        if (loc == SAPLING_LOCATE_FAIL) {
+            fail_height = h;
+            goto fail;
         }
-        const struct block_index *bi = active_chain_at(chain, h);
-        if (!bi) {
-            if (sapling_rebuild_account_skip("no_index", h,
-                    endpoint_is_coins_applied, &skipped_no_index,
-                    &first_skip_height, &last_skip_height)) {
-                fail_reason = "shielded_verify_skip_no_index";
-                fail_height = h;
-                goto fail;
-            }
+        if (loc == SAPLING_LOCATE_SKIP)
             continue;
-        }
-        if (!(bi->nStatus & BLOCK_HAVE_DATA)) {
-            if (sapling_rebuild_account_skip("no_data", h,
-                    endpoint_is_coins_applied, &skipped_no_data,
-                    &first_skip_height, &last_skip_height)) {
-                fail_reason = "shielded_verify_skip_no_data";
-                fail_height = h;
-                goto fail;
-            }
-            continue;
-        }
-
-        if (bi->nFile != cached_file) {
-            if (!sync_block_file_mapping_open(&cached_mapping, datadir,
-                                              bi->nFile)) {
-                cached_file = -1;
-                if (sapling_rebuild_account_skip("no_mmap", h,
-                        endpoint_is_coins_applied, &skipped_no_mmap,
-                        &first_skip_height, &last_skip_height)) {
-                    fail_reason = "shielded_verify_skip_no_mmap";
-                    fail_height = h;
-                    goto fail;
-                }
-                continue;
-            }
-            cached_file = bi->nFile;
-        }
-
-        if ((uintmax_t)bi->nDataPos >=
-            (uintmax_t)cached_mapping.view.size) {
-            /* Data position past the mapped size: the block file grew after
-             * it was mmap'd (stale cached_size), or the recorded position is
-             * corrupt. */
-            if (sapling_rebuild_account_skip("datapos_out_of_range", h,
-                    endpoint_is_coins_applied, &skipped_datapos_oob,
-                    &first_skip_height, &last_skip_height)) {
-                fail_reason = "shielded_verify_skip_datapos_out_of_range";
-                fail_height = h;
-                goto fail;
-            }
-            continue;
-        }
 
         struct block blk;
-        block_init(&blk);
-        size_t data_pos = (size_t)bi->nDataPos;
-        size_t remaining = cached_mapping.view.size - data_pos;
-        struct byte_stream s;
-        stream_init_from_data(&s, cached_mapping.view.data + data_pos,
-                              remaining);
-        if (!block_deserialize(&blk, &s)) {
+        if (!sapling_rebuild_read_block(&cached_mapping, bi, &blk)) {
             block_free(&blk);
-            if (sapling_rebuild_account_skip("deserialize_failed", h,
-                    endpoint_is_coins_applied, &skipped_deserialize,
-                    &first_skip_height, &last_skip_height)) {
-                fail_reason = "shielded_verify_skip_deserialize_failed";
+            if (sapling_rebuild_note_skip(&skips, SAPLING_SKIP_DESERIALIZE, h,
+                                          endpoint_is_coins_applied,
+                                          &fail_reason)) {
                 fail_height = h;
                 goto fail;
             }
             continue;
         }
 
-        int appended_this_block = 0;
-        for (size_t i = 0; i < blk.num_vtx; i++) {
-            const struct transaction *tx = &blk.vtx[i];
-            for (size_t j = 0; j < tx->num_shielded_output; j++) {
-                incremental_tree_append(&tree,
-                    &tx->v_shielded_output[j].cm);
-                total_commitments++;
-                appended_this_block++;
-            }
-        }
+        int appended_this_block =
+            sapling_rebuild_fold_block(&tree, &blk, &total_commitments);
 
         bool is_checkpoint = ((h - sapling_height) % 100000 == 0 &&
                               h > sapling_height);
 
-        /* Per-block root check, mirroring the live fold's cadence
-         * (fold_sapling in utxo_apply_anchors.c): whenever a block changed
-         * the tree, the post-append incremental root must equal that block's
-         * committed hashFinalSaplingRoot, localizing a divergence to the
-         * exact block. Compare against the block-index root
-         * (bi->hashFinalSaplingRoot), the node-validated source the final tip
-         * check also uses, not the re-read on-disk block header. Checkpoint
-         * heights are skipped; the checkpoint verify below covers them.
-         * Detection only. */
-        if (!is_checkpoint && appended_this_block > 0 &&
-            sapling_rebuild_header_root_known(bi)) {
-            struct uint256 computed;
-            incremental_tree_root(&tree, &computed);
-            if (!uint256_eq(&computed, &bi->hashFinalSaplingRoot)) {
-                mismatches++;
-                fail_reason = "intermediate_sapling_root_mismatch";
-                fail_height = h;
-            }
-        }
-
-        if (is_checkpoint) {
-            struct uint256 computed;
-            incremental_tree_root(&tree, &computed);
-            if (!sapling_rebuild_header_root_known(bi)) {
-                fail_reason = "checkpoint_missing_sapling_root";
-                fail_height = h;
-            } else if (memcmp(computed.data,
-                       blk.header.hashFinalSaplingRoot.data, 32) != 0) {
-                mismatches++;
-                fail_reason = "checkpoint_sapling_root_mismatch";
-                fail_height = h;
-            }
-        }
+        sapling_rebuild_check_block_roots(&tree, bi, &blk, is_checkpoint,
+                                          appended_this_block, h, &mismatches,
+                                          &fail_reason, &fail_height);
 
         block_free(&blk);
 
@@ -494,20 +772,10 @@ int sapling_tree_rebuild(struct node_db *ndb,
             LOG_WARN("sapling_tree_rebuild", "  sapling_tree_rebuild: h=%d/%d " "commitments=%d mismatches=%d", h, chain_tip, total_commitments, mismatches);
             fflush(stderr);
 
-            struct byte_stream ts;
-            stream_init(&ts, 4096);
-            if (!incremental_tree_serialize(&tree, &ts)) {
-                stream_free(&ts);
-                fail_reason = "serialize_checkpoint_tree_failed";
-                fail_height = h;
-                goto fail;
-            }
-            enum sapling_persist_status ps =
-                sapling_tree_persist_pair_status(ndb, ts.data, ts.size,
-                                                 (int64_t)h);
-            stream_free(&ts);
-            if (ps == SAPLING_PERSIST_FAILED) {
-                fail_reason = "persist_checkpoint_pair_failed";
+            enum sapling_persist_status ps = SAPLING_PERSIST_OK;
+            fail_reason = sapling_rebuild_persist_checkpoint(ndb, &tree, h,
+                                                             &ps);
+            if (fail_reason) {
                 fail_height = h;
                 goto fail;
             }
@@ -523,10 +791,12 @@ int sapling_tree_rebuild(struct node_db *ndb,
 
     sync_block_file_mapping_close(&cached_mapping);
 
-    sapling_rebuild_log_skip_summary(skipped_no_index, skipped_no_data,
-                                     skipped_no_mmap, skipped_datapos_oob,
-                                     skipped_deserialize, first_skip_height,
-                                     last_skip_height,
+    sapling_rebuild_log_skip_summary(skips.counts[SAPLING_SKIP_NO_INDEX],
+                                     skips.counts[SAPLING_SKIP_NO_DATA],
+                                     skips.counts[SAPLING_SKIP_NO_MMAP],
+                                     skips.counts[SAPLING_SKIP_DATAPOS_OOB],
+                                     skips.counts[SAPLING_SKIP_DESERIALIZE],
+                                     skips.first_height, skips.last_height,
                                      endpoint_is_coins_applied);
 
     /* Verify against the resolved endpoint (the coins-applied frontier, or the
@@ -536,16 +806,14 @@ int sapling_tree_rebuild(struct node_db *ndb,
     const struct block_index *tip = active_chain_at(chain, chain_tip);
     struct uint256 final_root;
     incremental_tree_root(&tree, &final_root);
-    bool tip_root_known = sapling_rebuild_header_root_known(tip);
-    bool match = tip_root_known && memcmp(final_root.data,
-                               tip->hashFinalSaplingRoot.data, 32) == 0;
+    bool tip_root_known = false;
+    bool match = sapling_rebuild_tip_matches(tip, &final_root, &tip_root_known);
 
     char root_hex[65];
     uint256_get_hex(&final_root, root_hex);
     int64_t replay_ms = GetTimeMillis() - t_replay_start;
-    int replayed_blocks = (chain_tip >= start_height)
-                          ? (chain_tip - start_height + 1)
-                          : 0;
+    int replayed_blocks = sapling_rebuild_replayed_blocks(start_height,
+                                                          chain_tip);
     LOG_INFO("sapling_tree_rebuild", "sapling_tree_rebuild: replayed %d blocks in %lld ms", replayed_blocks, (long long)replay_ms);
     LOG_WARN("sapling_tree_rebuild", "sapling_tree_rebuild: DONE commitments=%d " "mismatches=%d root=%s match=%s", total_commitments, mismatches, root_hex, match ? "YES" : "NO");
     fflush(stderr);
@@ -558,36 +826,14 @@ int sapling_tree_rebuild(struct node_db *ndb,
     }
 
     {
-        struct byte_stream ts;
-        stream_init(&ts, 4096);
-        if (!incremental_tree_serialize(&tree, &ts)) {
-            stream_free(&ts);
+        bool serialized = false;
+        enum sapling_persist_status ps = sapling_rebuild_persist_final(
+            ndb, &tree, chain_tip, &serialized);
+        if (!serialized) {
             fail_reason = "serialize_final_tree_failed";
             fail_height = chain_tip;
             goto fail;
         }
-        /* The final persist MUST durably land the rebuilt tree. A DEFERRED
-         * result means the reducer's batch tx transiently owns the connection;
-         * the reducer commits on a seconds timescale, so a bounded wait-then-
-         * retry (yielding this background thread) lets the persist land without
-         * ever nesting a BEGIN. Exhaustion is handled below. */
-        enum sapling_persist_status ps = SAPLING_PERSIST_DEFERRED;
-        for (int a = 1; a <= SAPLING_TREE_FINAL_PERSIST_ATTEMPTS &&
-                        ps == SAPLING_PERSIST_DEFERRED; a++) {
-            ps = sapling_tree_persist_pair_status(ndb, ts.data, ts.size,
-                                                  (int64_t)chain_tip);
-            if (ps == SAPLING_PERSIST_DEFERRED &&
-                a < SAPLING_TREE_FINAL_PERSIST_ATTEMPTS) {
-                int64_t backoff_ms =
-                    (int64_t)SAPLING_TREE_FINAL_PERSIST_BACKOFF_MS * a;
-                struct timespec bt = {
-                    .tv_sec = backoff_ms / 1000,
-                    .tv_nsec = (backoff_ms % 1000) * 1000000L,
-                };
-                nanosleep(&bt, NULL);
-            }
-        }
-        stream_free(&ts);
         if (ps == SAPLING_PERSIST_DEFERRED) {
             /* Busy past the budget: a transient lock condition, not a
              * derived-state disagreement. Name the persist_busy TRANSIENT
@@ -597,19 +843,10 @@ int sapling_tree_rebuild(struct node_db *ndb,
              * root/state mismatches). Complete the child first so a clean
              * give-up is not a hung stall. */
             char reason[BLOCKER_REASON_MAX];
-            snprintf(reason, sizeof(reason),
-                    "final persist deferred height=%lld: connection stayed in "
-                    "a foreign open transaction past %d attempts",
-                    (long long)chain_tip,
-                    SAPLING_TREE_FINAL_PERSIST_ATTEMPTS);
-            struct blocker_record rec;
-            if (blocker_init(&rec, "sapling_tree_rebuild.persist_busy",
-                             "sync.sapling_tree_rebuild",
-                             BLOCKER_TRANSIENT, reason))
-                blocker_set(&rec);
+            sapling_rebuild_raise_persist_busy(reason, sizeof(reason),
+                                               chain_tip);
             LOG_ERROR("sapling_tree_rebuild", "%s", reason);
-            if (sup_id != SUPERVISOR_INVALID_ID)
-                supervisor_child_complete(sup_id);
+            sapling_rebuild_complete_child(sup_id);
             return -1; // raw-return-ok:logged_above_and_persist_busy_blocker_set
         }
         if (ps == SAPLING_PERSIST_FAILED) {
@@ -620,11 +857,7 @@ int sapling_tree_rebuild(struct node_db *ndb,
     }
 
     (void)tree;
-    if (sup_id != SUPERVISOR_INVALID_ID) {
-        supervisor_progress(sup_id, total_commitments);
-        supervisor_tick(sup_id);
-        supervisor_child_complete(sup_id);
-    }
+    sapling_rebuild_finish_child(sup_id, total_commitments);
     blocker_clear("sapling_tree_rebuild.fail_closed");
     blocker_clear("sapling_tree_rebuild.persist_busy");
     return total_commitments;
@@ -637,8 +870,7 @@ aborted:
      * next run resumes from them. Complete the supervisor child so a clean
      * give-up is not mistaken for a hung stall. */
     sync_block_file_mapping_close(&cached_mapping);
-    if (sup_id != SUPERVISOR_INVALID_ID)
-        supervisor_child_complete(sup_id);
+    sapling_rebuild_complete_child(sup_id);
     LOG_INFO("sapling_tree_rebuild",
              "sapling_tree_rebuild: shutdown requested at h=%d of %d — "
              "aborting replay; partial fold stays resumable from the "
@@ -647,8 +879,7 @@ aborted:
 
 fail:
     sync_block_file_mapping_close(&cached_mapping);
-    if (sup_id != SUPERVISOR_INVALID_ID)
-        supervisor_child_complete(sup_id);
+    sapling_rebuild_complete_child(sup_id);
     /* A tip/intermediate root mismatch is often the downstream shadow of an
      * earlier dropped block. Emit the skip tally next
      * to the fail-closed reason. The same tally decides the
@@ -660,27 +891,14 @@ fail:
      * mismatch". */
     struct sapling_rebuild_skip_tally fail_skips = {0};
     {
-        fail_skips.total = skipped_no_index + skipped_no_data +
-                           skipped_no_mmap + skipped_datapos_oob +
-                           skipped_deserialize;
-        fail_skips.first_height = first_skip_height;
-        fail_skips.last_height = last_skip_height;
-        size_t off = 0;
-        static const char *k_names[5] = {"no_index", "no_data", "no_mmap",
-                                         "datapos_oob", "deserialize"};
-        const int counts[5] = {skipped_no_index, skipped_no_data,
-                               skipped_no_mmap, skipped_datapos_oob,
-                               skipped_deserialize};
-        for (int i = 0; i < 5; i++) {
-            if (counts[i] <= 0 || off + 1 >= sizeof(fail_skips.classes))
-                continue;
-            int w = snprintf(fail_skips.classes + off,
-                             sizeof(fail_skips.classes) - off, "%s%s",
-                             off ? "," : "", k_names[i]);
-            if (w <= 0 || (size_t)w >= sizeof(fail_skips.classes) - off)
-                break;
-            off += (size_t)w;
-        }
+        sapling_rebuild_fill_skip_tally(&fail_skips, &skips);
+        const int skipped_no_index = skips.counts[SAPLING_SKIP_NO_INDEX];
+        const int skipped_no_data = skips.counts[SAPLING_SKIP_NO_DATA];
+        const int skipped_no_mmap = skips.counts[SAPLING_SKIP_NO_MMAP];
+        const int skipped_datapos_oob = skips.counts[SAPLING_SKIP_DATAPOS_OOB];
+        const int skipped_deserialize = skips.counts[SAPLING_SKIP_DESERIALIZE];
+        const int first_skip_height = skips.first_height;
+        const int last_skip_height = skips.last_height;
         if (fail_skips.total > 0)
             LOG_WARN("sapling_tree_rebuild",
                     "sapling_tree_rebuild: at fail — %d block(s) were skipped "
