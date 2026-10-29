@@ -800,7 +800,7 @@ static int test_code_guide_lint_catalog_exclusions(void)
         "{\"paths\":[\"tools/command/native_command.c\"]}",
         "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"]}",
         "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"],\"budget\":256}",
-        "{\"paths\":[\"does/not/" "exist.xyz\"]}"
+        ("{\"paths\":[\"does/not/" "exist.xyz\"]}")
     };
     TEST("code.guide does not infer lint catalog eligibility from reduced or unmapped groups") {
         ASSERT(brief_fixture(root, sizeof(root)));

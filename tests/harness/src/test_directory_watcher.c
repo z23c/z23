@@ -194,7 +194,8 @@ static int directory_watcher_filtered_write_file(
  * timeout_ms; returns 0 only when both steps behaved as the probe needs. */
 static int directory_watcher_filtered_write_and_wait(
     struct platform_directory_watcher *watcher, const char *path, int flags,
-    const char *data, int timeout_ms, int expected)
+    const char *data, int timeout_ms,
+    enum platform_directory_watch_result expected)
 {
     if (directory_watcher_filtered_write_file(path, flags, data) != 0)
         return 1;
