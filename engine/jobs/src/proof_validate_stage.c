@@ -242,6 +242,203 @@ static void add_failure_counter(const char *type, void *user)
         atomic_fetch_add(&g_binding_sig_failed_total, 1);
 }
 
+/* Apply a lookahead-pool verdict to the summary, counters and profile. */
+static void pv_apply_lookahead_hit(struct proof_verify_summary *summary,
+                                   const struct pv_lookahead_verdict *cached)
+{
+    proof_verify_summary_init(summary);
+    summary->ok = cached->ok;
+    summary->sapling_spends_total = cached->sapling_spends_total;
+    summary->sapling_outputs_total = cached->sapling_outputs_total;
+    summary->sprout_joinsplits_total = cached->sprout_joinsplits_total;
+    summary->first_failure_txid = cached->first_failure_txid;
+    summary->first_failure_proof_type = cached->first_failure_proof_type;
+    /* Apply the worker-accumulated serial-reduce counter deltas; the drive
+     * consumes heights in strict serial order, so every counter equals the
+     * serial sweep's value at each block boundary. */
+    atomic_fetch_add(&g_sapling_spends_verified_total,
+                     cached->spends_verified);
+    atomic_fetch_add(&g_sapling_outputs_verified_total,
+                     cached->outputs_verified);
+    atomic_fetch_add(&g_sprout_groth16_verified_total,
+                     cached->sprout_groth16_verified);
+    atomic_fetch_add(&g_sprout_phgr13_verified_total,
+                     cached->sprout_phgr13_verified);
+    atomic_fetch_add(&g_binding_sig_verified_total,
+                     cached->binding_sig_verified);
+    if (!cached->ok)
+        add_failure_counter(cached->first_failure_proof_type, NULL);
+    pv_profile_add(RPF_PV_LOOKAHEAD_HITS, 1);
+    pv_profile_add(RPF_PV_SPENDS, cached->spends_verified);
+    pv_profile_add(RPF_PV_OUTPUTS, cached->outputs_verified);
+    pv_profile_add(RPF_PV_SPROUT_GROTH16, cached->sprout_groth16_verified);
+    pv_profile_add(RPF_PV_SPROUT_PHGR13, cached->sprout_phgr13_verified);
+    pv_profile_add(RPF_PV_BINDING_SIGS, cached->binding_sig_verified);
+    stage_body_read_hold_clear(STAGE_NAME);
+}
+
+/* Inline (non-lookahead) verification of the block at next_h. Returns true
+ * when the stage must return *early_ret now; false to continue with summary. */
+static bool pv_verify_block_inline(struct stage_step_ctx *c, struct block_index *bi,
+                                   int next_h, bool skip_crypto,
+                                   struct proof_verify_summary *summary,
+                                   job_result_t *early_ret)
+{
+    /* Lookahead consulted and missed. skip_crypto never consults it, so that
+     * pass-through is neither a hit nor a miss. */
+    if (!skip_crypto)
+        pv_profile_add(RPF_PV_LOOKAHEAD_MISSES, 1);
+    struct block owned;
+    struct block_parse_handle handle;
+    const struct block *blk = NULL;
+    bool borrowed = false;
+    /* Body acquisition. In production this is a block_parse_cache acquire, so
+     * it is normally a shared-cache hit populated by body_persist rather than
+     * a disk read + deserialize — whether that is true on a live fold is
+     * exactly what this measurement answers. */
+    int64_t t_acquire = platform_time_monotonic_us();
+    if (!stage_acquire_block_view(&owned, &handle, &blk, &borrowed,
+                                  bi, next_h, g_datadir,
+                                  g_reader, g_reader_user)) {
+        pv_profile_us(RPF_PV_BODY_ACQUIRE_US, t_acquire);
+        block_free(&owned);
+        /* body_persist already hash+merkle verified this body — a later
+         * read failure is not a normal wait (see stage_body_read_hold). */
+        *early_ret = stage_body_read_hold(STAGE_NAME, next_h, bi->phashBlock,
+                                    &g_last_blocked_unix);
+        return true;
+    }
+    pv_profile_us(RPF_PV_BODY_ACQUIRE_US, t_acquire);
+    stage_body_read_hold_clear(STAGE_NAME);
+    /* The sapling-params wait gate is a VERIFICATION precondition; in the
+     * OFFLINE FAST-MINT pass-through we never call the proof verifier, so the
+     * params need not be loaded. Keep the gate ONLY when actually verifying. */
+    if (!skip_crypto && !g_tx_verifier &&
+        proof_verify_block_has_shielded_proofs(blk) &&
+        !sapling_params_loaded()) {
+        stage_release_block_view(&owned, &handle, borrowed);
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        /* The zk verification keys are not loaded yet and this block carries
+         * shielded proofs that REQUIRE them. The LOADER (load_params_thread,
+         * boot.c) is the AUTHORITY for this blocker: it names PERMANENT
+         * "params_missing" ONLY on a genuine corrupt/parse failure. During the
+         * NORMAL in-flight background load g_params_loaded is still false with
+         * nothing wrong, so naming a PERMANENT blocker here would convert a
+         * transient param-load window into a wedge. Only RE-SURFACE the loader's
+         * blocker (it already declared it permanent) as JOB_BLOCKED; otherwise
+         * HOLD the cursor (JOB_IDLE) and re-derive next tick — once the keys
+         * finish loading the same height advances. proof_validate never SETS the
+         * blocker, so no blocker_clear is needed. */
+        if (!blocker_exists("params_missing"))
+        {
+            *early_ret = JOB_IDLE; /* transient load window; re-derive next tick */
+            return true;
+        }
+        /* The loader ALREADY declared params_missing PERMANENT (a genuine
+         * corrupt/parse failure — an anomaly, still registry-visible here).
+         * Re-surfacing it as this stage's blocker cannot fail on the literal
+         * id/owner, but if it ever did, failing OPEN to JOB_IDLE would silently
+         * spin on an unvalidatable shielded block; latch JOB_FATAL instead so
+         * the permanent params_missing halt is surfaced (Task A #9). */
+        if (!blocker_init(&c->blocker, "params_missing", "crypto.params",
+                          BLOCKER_PERMANENT,
+                          "zk verification keys not loaded; shielded-proof block "
+                          "cannot be validated"))
+        {
+            *early_ret = JOB_FATAL; /* blocker_init logged the reason; latch fatal */
+            return true;
+        }
+        *early_ret = JOB_BLOCKED;
+        return true;
+    }
+
+    if (skip_crypto) {
+        /* OFFLINE FAST-MINT pass-through (jobs/mint_skip_crypto.h): the
+         * -mint-anchor-fast driver set the toggle. SKIP validate_block_proofs
+         * (Groth16 / Ed25519 / PHGR13 / binding-sig) and synthesize an advancing
+         * summary with durable status "checkpoint_fold", never "verified". The
+         * coin SET is unaffected (utxo_apply is the state
+         * transition; proofs only authorize shielded value, they do not change
+         * which outpoints a block consumes). The terminal SHA3==checkpoint
+         * assertion certifies only the transparent fold, not skipped proofs. A
+         * divergence still aborts without publishing the minted DB. Default OFF
+         * → a normal boot never reaches this branch. */
+        proof_verify_summary_init(summary);   /* ok=1, internal_error=0 */
+    } else {
+        /* Production path: fan per-tx shielded-proof verification across the
+         * worker pool, then reduce in original tx order — the add_success /
+         * add_failure counter callbacks fire in serial-sweep order. */
+        int64_t t_verify = platform_time_monotonic_us();
+        proof_verify_block(blk, next_h, g_tx_verifier, g_tx_verifier_user,
+                           true, add_success_counters, add_failure_counter,
+                           NULL, summary);
+        pv_profile_us(RPF_PV_VERIFY_US, t_verify);
+    }
+    stage_release_block_view(&owned, &handle, borrowed);
+    return false;
+}
+
+/* Write the terminal row for a block whose upstream script_validate verdict
+ * was ok=0 and advance the cursor past it. */
+static job_result_t pv_advance_upstream_failed(struct stage_step_ctx *c, sqlite3 *db,
+                                               const struct block_index *bi, int next_h)
+{
+    if (!proof_validate_log_insert(db, next_h, "upstream_failed", false,
+                    0, 0, 0, bi->phashBlock, NULL, NULL))
+        return JOB_FATAL;
+    atomic_fetch_add(&g_upstream_failed_total, 1);
+    pv_unresolved_clear();
+    atomic_store(&g_last_advance_height, (int64_t)next_h);
+    c->cursor_out = c->cursor_in + 1;
+    return JOB_ADVANCED;
+}
+
+/* Persist the verdict row for a completed (non-internal_error) summary and
+ * advance the cursor. */
+static job_result_t pv_record_verdict(struct stage_step_ctx *c, sqlite3 *db,
+                                      const struct block_index *bi, int next_h,
+                                      bool skip_crypto,
+                                      const struct proof_verify_summary *summary)
+{
+    const char *status = skip_crypto ? "checkpoint_fold" : "verified";
+    bool ok = true;
+    const struct uint256 *fail_txid = NULL;
+    const char *fail_type = NULL;
+    char fail_txid_hex[65] = {0};
+    if (!summary->ok) {
+        /* TL-2 holds the internal_error class above, so a !ok summary here is a
+         * GENUINE proof-invalid verdict (a real bad proof): write the terminal
+         * ok=0 row and advance the cursor — this path is unchanged. */
+        uint256_get_hex(&summary->first_failure_txid, fail_txid_hex);
+        fail_txid = &summary->first_failure_txid;
+        fail_type = summary->first_failure_proof_type;
+        status = "proof_invalid";
+        ok = false;
+        atomic_fetch_add(&g_proof_invalid_total, 1);
+        event_emitf(EV_BLOCK_REJECTED, 0,
+                    "proof_validate proof_invalid height=%d type=%s txid=%s",
+                    next_h, fail_type ? fail_type : "unknown", fail_txid_hex);
+    } else if (!skip_crypto) {
+        atomic_fetch_add(&g_verified_total, 1);
+    }
+
+    int64_t t_insert = platform_time_monotonic_us();
+    if (!proof_validate_log_insert(db, next_h, status, ok,
+                    summary->sapling_spends_total,
+                    summary->sapling_outputs_total,
+                    summary->sprout_joinsplits_total, bi->phashBlock,
+                    fail_txid, fail_type))
+        return JOB_FATAL;
+    pv_profile_us(RPF_PV_LOG_INSERT_US, t_insert);
+
+    /* A height advanced cleanly: release any HOLD budget/named blocker so a
+     * later internal_error restarts the budget clock from scratch. */
+    pv_unresolved_clear();
+    atomic_store(&g_last_advance_height, (int64_t)next_h);
+    c->cursor_out = c->cursor_in + 1;
+    return JOB_ADVANCED;
+}
+
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
@@ -359,16 +556,8 @@ static job_result_t step_validate(struct stage_step_ctx *c)
             c, next_h, expected_evidence, upstream.evidence);
     }
     proof_validate_upstream_evidence_clear();
-    if (upstream.ok == 0) {
-        if (!proof_validate_log_insert(db, next_h, "upstream_failed", false,
-                        0, 0, 0, bi->phashBlock, NULL, NULL))
-            return JOB_FATAL;
-        atomic_fetch_add(&g_upstream_failed_total, 1);
-        pv_unresolved_clear();
-        atomic_store(&g_last_advance_height, (int64_t)next_h);
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
+    if (upstream.ok == 0)
+        return pv_advance_upstream_failed(c, db, bi, next_h);
     struct proof_verify_summary summary;
     struct pv_lookahead_verdict cached;
     if (!skip_crypto &&
@@ -384,119 +573,12 @@ static job_result_t step_validate(struct stage_step_ctx *c)
          * block read and its params wait gate are not needed on a hit: the
          * worker proved the body readable, and a shielded block can only be
          * cached after the keys loaded (the worker mirrors the gate). */
-        proof_verify_summary_init(&summary);
-        summary.ok = cached.ok;
-        summary.sapling_spends_total = cached.sapling_spends_total;
-        summary.sapling_outputs_total = cached.sapling_outputs_total;
-        summary.sprout_joinsplits_total = cached.sprout_joinsplits_total;
-        summary.first_failure_txid = cached.first_failure_txid;
-        summary.first_failure_proof_type = cached.first_failure_proof_type;
-        /* Apply the worker-accumulated serial-reduce counter deltas; the drive
-         * consumes heights in strict serial order, so every counter equals the
-         * serial sweep's value at each block boundary. */
-        atomic_fetch_add(&g_sapling_spends_verified_total,
-                         cached.spends_verified);
-        atomic_fetch_add(&g_sapling_outputs_verified_total,
-                         cached.outputs_verified);
-        atomic_fetch_add(&g_sprout_groth16_verified_total,
-                         cached.sprout_groth16_verified);
-        atomic_fetch_add(&g_sprout_phgr13_verified_total,
-                         cached.sprout_phgr13_verified);
-        atomic_fetch_add(&g_binding_sig_verified_total,
-                         cached.binding_sig_verified);
-        if (!cached.ok)
-            add_failure_counter(cached.first_failure_proof_type, NULL);
-        pv_profile_add(RPF_PV_LOOKAHEAD_HITS, 1);
-        pv_profile_add(RPF_PV_SPENDS, cached.spends_verified);
-        pv_profile_add(RPF_PV_OUTPUTS, cached.outputs_verified);
-        pv_profile_add(RPF_PV_SPROUT_GROTH16, cached.sprout_groth16_verified);
-        pv_profile_add(RPF_PV_SPROUT_PHGR13, cached.sprout_phgr13_verified);
-        pv_profile_add(RPF_PV_BINDING_SIGS, cached.binding_sig_verified);
-        stage_body_read_hold_clear(STAGE_NAME);
+        pv_apply_lookahead_hit(&summary, &cached);
     } else {
-    /* Lookahead consulted and missed. skip_crypto never consults it, so that
-     * pass-through is neither a hit nor a miss. */
-    if (!skip_crypto)
-        pv_profile_add(RPF_PV_LOOKAHEAD_MISSES, 1);
-    struct block owned;
-    struct block_parse_handle handle;
-    const struct block *blk = NULL;
-    bool borrowed = false;
-    /* Body acquisition. In production this is a block_parse_cache acquire, so
-     * it is normally a shared-cache hit populated by body_persist rather than
-     * a disk read + deserialize — whether that is true on a live fold is
-     * exactly what this measurement answers. */
-    int64_t t_acquire = platform_time_monotonic_us();
-    if (!stage_acquire_block_view(&owned, &handle, &blk, &borrowed,
-                                  bi, next_h, g_datadir,
-                                  g_reader, g_reader_user)) {
-        pv_profile_us(RPF_PV_BODY_ACQUIRE_US, t_acquire);
-        block_free(&owned);
-        /* body_persist already hash+merkle verified this body — a later
-         * read failure is not a normal wait (see stage_body_read_hold). */
-        return stage_body_read_hold(STAGE_NAME, next_h, bi->phashBlock,
-                                    &g_last_blocked_unix);
-    }
-    pv_profile_us(RPF_PV_BODY_ACQUIRE_US, t_acquire);
-    stage_body_read_hold_clear(STAGE_NAME);
-    /* The sapling-params wait gate is a VERIFICATION precondition; in the
-     * OFFLINE FAST-MINT pass-through we never call the proof verifier, so the
-     * params need not be loaded. Keep the gate ONLY when actually verifying. */
-    if (!skip_crypto && !g_tx_verifier &&
-        proof_verify_block_has_shielded_proofs(blk) &&
-        !sapling_params_loaded()) {
-        stage_release_block_view(&owned, &handle, borrowed);
-        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-        /* The zk verification keys are not loaded yet and this block carries
-         * shielded proofs that REQUIRE them. The LOADER (load_params_thread,
-         * boot.c) is the AUTHORITY for this blocker: it names PERMANENT
-         * "params_missing" ONLY on a genuine corrupt/parse failure. During the
-         * NORMAL in-flight background load g_params_loaded is still false with
-         * nothing wrong, so naming a PERMANENT blocker here would convert a
-         * transient param-load window into a wedge. Only RE-SURFACE the loader's
-         * blocker (it already declared it permanent) as JOB_BLOCKED; otherwise
-         * HOLD the cursor (JOB_IDLE) and re-derive next tick — once the keys
-         * finish loading the same height advances. proof_validate never SETS the
-         * blocker, so no blocker_clear is needed. */
-        if (!blocker_exists("params_missing"))
-            return JOB_IDLE; /* transient load window; re-derive next tick */
-        /* The loader ALREADY declared params_missing PERMANENT (a genuine
-         * corrupt/parse failure — an anomaly, still registry-visible here).
-         * Re-surfacing it as this stage's blocker cannot fail on the literal
-         * id/owner, but if it ever did, failing OPEN to JOB_IDLE would silently
-         * spin on an unvalidatable shielded block; latch JOB_FATAL instead so
-         * the permanent params_missing halt is surfaced (Task A #9). */
-        if (!blocker_init(&c->blocker, "params_missing", "crypto.params",
-                          BLOCKER_PERMANENT,
-                          "zk verification keys not loaded; shielded-proof block "
-                          "cannot be validated"))
-            return JOB_FATAL; /* blocker_init logged the reason; latch fatal */
-        return JOB_BLOCKED;
-    }
-
-    if (skip_crypto) {
-        /* OFFLINE FAST-MINT pass-through (jobs/mint_skip_crypto.h): the
-         * -mint-anchor-fast driver set the toggle. SKIP validate_block_proofs
-         * (Groth16 / Ed25519 / PHGR13 / binding-sig) and synthesize an advancing
-         * summary with durable status "checkpoint_fold", never "verified". The
-         * coin SET is unaffected (utxo_apply is the state
-         * transition; proofs only authorize shielded value, they do not change
-         * which outpoints a block consumes). The terminal SHA3==checkpoint
-         * assertion certifies only the transparent fold, not skipped proofs. A
-         * divergence still aborts without publishing the minted DB. Default OFF
-         * → a normal boot never reaches this branch. */
-        proof_verify_summary_init(&summary);   /* ok=1, internal_error=0 */
-    } else {
-        /* Production path: fan per-tx shielded-proof verification across the
-         * worker pool, then reduce in original tx order — the add_success /
-         * add_failure counter callbacks fire in serial-sweep order. */
-        int64_t t_verify = platform_time_monotonic_us();
-        proof_verify_block(blk, next_h, g_tx_verifier, g_tx_verifier_user,
-                           true, add_success_counters, add_failure_counter,
-                           NULL, &summary);
-        pv_profile_us(RPF_PV_VERIFY_US, t_verify);
-    }
-    stage_release_block_view(&owned, &handle, borrowed);
+        job_result_t early_ret;
+        if (pv_verify_block_inline(c, bi, next_h, skip_crypto, &summary,
+                                   &early_ret))
+            return early_ret;
     }
 
     /* TL-2: the internal_error class is a TRANSIENT "could not complete proof
@@ -512,43 +594,7 @@ static job_result_t step_validate(struct stage_step_ctx *c)
         return pv_hold_unresolved(c, next_h, &summary.first_failure_txid,
                                   summary.first_failure_proof_type);
 
-    const char *status = skip_crypto ? "checkpoint_fold" : "verified";
-    bool ok = true;
-    const struct uint256 *fail_txid = NULL;
-    const char *fail_type = NULL;
-    char fail_txid_hex[65] = {0};
-    if (!summary.ok) {
-        /* TL-2 holds the internal_error class above, so a !ok summary here is a
-         * GENUINE proof-invalid verdict (a real bad proof): write the terminal
-         * ok=0 row and advance the cursor — this path is unchanged. */
-        uint256_get_hex(&summary.first_failure_txid, fail_txid_hex);
-        fail_txid = &summary.first_failure_txid;
-        fail_type = summary.first_failure_proof_type;
-        status = "proof_invalid";
-        ok = false;
-        atomic_fetch_add(&g_proof_invalid_total, 1);
-        event_emitf(EV_BLOCK_REJECTED, 0,
-                    "proof_validate proof_invalid height=%d type=%s txid=%s",
-                    next_h, fail_type ? fail_type : "unknown", fail_txid_hex);
-    } else if (!skip_crypto) {
-        atomic_fetch_add(&g_verified_total, 1);
-    }
-
-    int64_t t_insert = platform_time_monotonic_us();
-    if (!proof_validate_log_insert(db, next_h, status, ok,
-                    summary.sapling_spends_total,
-                    summary.sapling_outputs_total,
-                    summary.sprout_joinsplits_total, bi->phashBlock,
-                    fail_txid, fail_type))
-        return JOB_FATAL;
-    pv_profile_us(RPF_PV_LOG_INSERT_US, t_insert);
-
-    /* A height advanced cleanly: release any HOLD budget/named blocker so a
-     * later internal_error restarts the budget clock from scratch. */
-    pv_unresolved_clear();
-    atomic_store(&g_last_advance_height, (int64_t)next_h);
-    c->cursor_out = c->cursor_in + 1;
-    return JOB_ADVANCED;
+    return pv_record_verdict(c, db, bi, next_h, skip_crypto, &summary);
 }
 bool proof_validate_stage_init(struct main_state *ms)
 {
