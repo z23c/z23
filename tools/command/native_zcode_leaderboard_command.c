@@ -130,6 +130,153 @@ static void zl_push_unavailable(struct json_value *obj)
     json_free(&ua);
 }
 
+/* Format "<datadir>/zcode" into out; false when it does not fit. */
+static bool zl_format_zcode_dir(const char *datadir, char *out, size_t cap)
+{
+    int zn = snprintf(out, cap, "%s/zcode", datadir);
+    return !(zn < 0 || (size_t)zn >= cap);
+}
+
+/* A category name was given and is unknown (absent or empty means overall). */
+static bool zl_category_rejected(const char *cat_name,
+                                 enum vcs_rank_category *category)
+{
+    return cat_name && cat_name[0] &&
+           !vcs_rank_category_from_string(cat_name, category);
+}
+
+static int64_t zl_today(const struct zcl_command_request *request)
+{
+    /* "Today": explicit civil `day` when given (pure window arithmetic);
+     * the host clock only when omitted. */
+    int64_t today = 0;
+    const struct json_value *dv = json_get(request->input, "day");
+    if (dv)
+        today = json_get_int(dv);
+    else
+        today = vcs_rank_day_from_unix(platform_time_wall_unix());
+    return today;
+}
+
+/* Page inputs: offset defaults to 0; limit defaults to 16 and is clamped. */
+static void zl_read_page_args(const struct json_value *input, size_t *offset,
+                              size_t *limit)
+{
+    const struct json_value *ov = json_get(input, "offset");
+    if (ov && json_get_int(ov) > 0)
+        *offset = (size_t)json_get_int(ov);
+    const struct json_value *lv = json_get(input, "limit");
+    if (lv && json_get_int(lv) > 0)
+        *limit = (size_t)json_get_int(lv);
+    if (*limit > VCS_RANK_MAX_PAGE_ROWS)
+        *limit = VCS_RANK_MAX_PAGE_ROWS;
+}
+
+/* The first page of the table; none when the category has no facts. */
+static size_t zl_first_page(const struct vcs_rank_projection *proj,
+                            enum vcs_rank_category category, bool available,
+                            struct vcs_rank_entry *entries)
+{
+    if (!available)
+        return 0;
+    return vcs_rank_table(proj, category, entries, VCS_RANK_MAX_PAGE_ROWS);
+}
+
+/* Re-rank with a cap covering offset + limit (bounded by the
+ * projection's contributor bound). */
+static size_t zl_wide_cap(size_t offset, size_t limit)
+{
+    size_t cap = offset + limit;
+    if (cap > VCS_RANK_MAX_CONTRIBUTORS)
+        cap = VCS_RANK_MAX_CONTRIBUTORS;
+    return cap;
+}
+
+static bool zl_wide_needed(size_t offset, bool available, size_t total)
+{
+    return offset > 0 && available && offset < total;
+}
+
+static size_t zl_rendered_count(size_t page_count, size_t offset,
+                                size_t limit)
+{
+    size_t rendered = 0;
+    if (offset < page_count) {
+        rendered = page_count - offset;
+        if (rendered > limit)
+            rendered = limit;
+    }
+    return rendered;
+}
+
+static void zl_push_header(struct json_value *data,
+                           enum vcs_rank_period period,
+                           const struct vcs_rank_window *window,
+                           enum vcs_rank_category category, bool available)
+{
+    (void)json_push_kv_str(data, "period", vcs_rank_period_string(period));
+    zl_push_window(data, window);
+    (void)json_push_kv_str(data, "category",
+                           vcs_rank_category_string(category));
+    (void)json_push_kv_bool(data, "category_available", available);
+    if (!available)
+        (void)json_push_kv_str(
+            data, "category_note",
+            "this category's facts are P2P service credit (slices 11-12); "
+            "it ranks nobody and reports zero honestly in v1");
+}
+
+static void zl_push_breakdown(struct json_value *row,
+                              const struct vcs_rank_entry *e)
+{
+    struct json_value bd;
+    json_init(&bd);
+    json_set_object(&bd);
+    for (size_t c = 0; c < VCS_RANK_CATEGORY_COUNT; c++) {
+        enum vcs_rank_category cc = (enum vcs_rank_category)c;
+        if (cc == VCS_RANK_CATEGORY_OVERALL)
+            continue;
+        (void)json_push_kv_int(&bd, vcs_rank_category_string(cc),
+                               (int64_t)e->category_points[c]);
+    }
+    (void)json_push_kv(row, "category_breakdown", &bd);
+    json_free(&bd);
+}
+
+static void zl_push_row(struct json_value *rows,
+                        const struct vcs_rank_entry *e, bool breakdown)
+{
+    char pub_hex[67];
+    zcl_hex_encode(e->contributor, 33, pub_hex);
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_int(&row, "rank", (int64_t)e->rank);
+    (void)json_push_kv_str(&row, "contributor", pub_hex);
+    (void)json_push_kv_int(&row, "points", (int64_t)e->points);
+    (void)json_push_kv_int(&row, "earned_score",
+                           (int64_t)e->earned_score);
+    (void)json_push_kv_int(&row, "token_rewards_received",
+                           (int64_t)e->token_rewards_received);
+    if (breakdown)
+        zl_push_breakdown(&row, e);
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
+static void zl_push_rows(struct json_value *data,
+                         const struct vcs_rank_entry *page, size_t offset,
+                         size_t rendered, bool breakdown)
+{
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
+    for (size_t i = 0; i < rendered; i++)
+        zl_push_row(&rows, &page[offset + i], breakdown);
+    (void)json_push_kv(data, "rows", &rows);
+    json_free(&rows);
+}
+
 /* The shared handler: rank one period's window. */
 static void zl_leaderboard(const struct zcl_command_request *request,
                            struct zcl_command_reply *reply,
@@ -145,8 +292,7 @@ static void zl_leaderboard(const struct zcl_command_request *request,
         return;
     }
     char zcode_dir[4400];
-    int zn = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
-    if (zn < 0 || (size_t)zn >= sizeof(zcode_dir)) {
+    if (!zl_format_zcode_dir(datadir, zcode_dir, sizeof(zcode_dir))) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
                                "normalize", false, false,
@@ -156,8 +302,7 @@ static void zl_leaderboard(const struct zcl_command_request *request,
 
     enum vcs_rank_category category = VCS_RANK_CATEGORY_OVERALL;
     const char *cat_name = zl_input_str(request->input, "category");
-    if (cat_name && cat_name[0] &&
-        !vcs_rank_category_from_string(cat_name, &category)) {
+    if (zl_category_rejected(cat_name, &category)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_CATEGORY",
                                "normalize", false, false,
@@ -171,17 +316,8 @@ static void zl_leaderboard(const struct zcl_command_request *request,
         return;
     }
 
-    /* "Today": explicit civil `day` when given (pure window arithmetic);
-     * the host clock only when omitted. */
-    int64_t today = 0;
-    const struct json_value *dv = json_get(request->input, "day");
-    if (dv)
-        today = json_get_int(dv);
-    else
-        today = vcs_rank_day_from_unix(platform_time_wall_unix());
-
     struct vcs_rank_window window;
-    if (!vcs_rank_window_for(period, today, &window)) {
+    if (!vcs_rank_window_for(period, zl_today(request), &window)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "WINDOW",
                                "execute", false, false,
@@ -212,35 +348,21 @@ static void zl_leaderboard(const struct zcl_command_request *request,
     }
 
     bool category_available = vcs_rank_category_available(category);
-    size_t total = 0;
     struct vcs_rank_entry entries[VCS_RANK_MAX_PAGE_ROWS];
-    if (category_available)
-        total = vcs_rank_table(proj, category, entries,
-                               VCS_RANK_MAX_PAGE_ROWS);
+    size_t total = zl_first_page(proj, category, category_available, entries);
 
     /* Page bounds: offset shifts into the table beyond the first page by
      * re-running the bounded sort with a wider cap. */
     size_t offset = 0;
-    const struct json_value *ov = json_get(request->input, "offset");
-    if (ov && json_get_int(ov) > 0)
-        offset = (size_t)json_get_int(ov);
     size_t limit = 16;
-    const struct json_value *lv = json_get(request->input, "limit");
-    if (lv && json_get_int(lv) > 0)
-        limit = (size_t)json_get_int(lv);
-    if (limit > VCS_RANK_MAX_PAGE_ROWS)
-        limit = VCS_RANK_MAX_PAGE_ROWS;
+    zl_read_page_args(request->input, &offset, &limit);
 
     struct vcs_rank_entry *page = entries;
     size_t page_count = total < VCS_RANK_MAX_PAGE_ROWS
         ? total : VCS_RANK_MAX_PAGE_ROWS;
     struct vcs_rank_entry *wide = NULL;
-    if (offset > 0 && category_available && offset < total) {
-        /* Re-rank with a cap covering offset + limit (bounded by the
-         * projection's contributor bound). */
-        size_t cap = offset + limit;
-        if (cap > VCS_RANK_MAX_CONTRIBUTORS)
-            cap = VCS_RANK_MAX_CONTRIBUTORS;
+    if (zl_wide_needed(offset, category_available, total)) {
+        size_t cap = zl_wide_cap(offset, limit);
         wide = zcl_malloc(cap * sizeof(*wide), "zl_leaderboard_page");
         if (!wide) {
             vcs_rank_projection_free(proj);
@@ -255,67 +377,16 @@ static void zl_leaderboard(const struct zcl_command_request *request,
         page_count = total < cap ? total : cap;
     }
 
-    size_t rendered = 0;
-    if (offset < page_count) {
-        rendered = page_count - offset;
-        if (rendered > limit)
-            rendered = limit;
-    }
+    size_t rendered = zl_rendered_count(page_count, offset, limit);
 
     bool breakdown = false;
     const struct json_value *bv = json_get(request->input, "breakdown");
     if (bv)
         breakdown = json_get_bool(bv);
 
-    (void)json_push_kv_str(&reply->data, "period",
-                           vcs_rank_period_string(period));
-    zl_push_window(&reply->data, &window);
-    (void)json_push_kv_str(&reply->data, "category",
-                           vcs_rank_category_string(category));
-    (void)json_push_kv_bool(&reply->data, "category_available",
-                            category_available);
-    if (!category_available)
-        (void)json_push_kv_str(
-            &reply->data, "category_note",
-            "this category's facts are P2P service credit (slices 11-12); "
-            "it ranks nobody and reports zero honestly in v1");
-
-    struct json_value rows;
-    json_init(&rows);
-    json_set_array(&rows);
-    for (size_t i = 0; i < rendered; i++) {
-        const struct vcs_rank_entry *e = &page[offset + i];
-        char pub_hex[67];
-        zcl_hex_encode(e->contributor, 33, pub_hex);
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_int(&row, "rank", (int64_t)e->rank);
-        (void)json_push_kv_str(&row, "contributor", pub_hex);
-        (void)json_push_kv_int(&row, "points", (int64_t)e->points);
-        (void)json_push_kv_int(&row, "earned_score",
-                               (int64_t)e->earned_score);
-        (void)json_push_kv_int(&row, "token_rewards_received",
-                               (int64_t)e->token_rewards_received);
-        if (breakdown) {
-            struct json_value bd;
-            json_init(&bd);
-            json_set_object(&bd);
-            for (size_t c = 0; c < VCS_RANK_CATEGORY_COUNT; c++) {
-                enum vcs_rank_category cc = (enum vcs_rank_category)c;
-                if (cc == VCS_RANK_CATEGORY_OVERALL)
-                    continue;
-                (void)json_push_kv_int(&bd, vcs_rank_category_string(cc),
-                                       (int64_t)e->category_points[c]);
-            }
-            (void)json_push_kv(&row, "category_breakdown", &bd);
-            json_free(&bd);
-        }
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
-    }
-    (void)json_push_kv(&reply->data, "rows", &rows);
-    json_free(&rows);
+    zl_push_header(&reply->data, period, &window, category,
+                   category_available);
+    zl_push_rows(&reply->data, page, offset, rendered, breakdown);
     free(wide);
 
     (void)json_push_kv_int(&reply->data, "total_ranked", (int64_t)total);
