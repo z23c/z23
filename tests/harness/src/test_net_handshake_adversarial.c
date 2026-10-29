@@ -1347,6 +1347,99 @@ static int test_previous_build_peer_still_interoperates(void)
     return failures;
 }
 
+/* process_version() branches the handshake tests above do not reach. */
+
+/* Undeserialisable payload: LOG_FAIL returns false before any field is
+ * written and before any reply is queued. */
+static int test_version_undeserialisable_rejected_unchanged(void)
+{
+    int failures = 0;
+    TEST("handshake: empty version payload rejected, no node field written") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, true));
+
+        struct byte_stream payload;
+        stream_init(&payload, 8); /* zero bytes: the first read fails */
+        ASSERT(!process_version(&f.mp, &f.node, &payload));
+        ASSERT_EQ(f.node.version, 0);
+        ASSERT(f.node.state == PEER_CONNECTED);
+
+        struct hs_capture cap;
+        hs_capture_sent(f.peer_fd, &cap);
+        ASSERT_EQ(cap.len, 0);
+
+        stream_free(&payload);
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A version arriving after the handshake already completed (with no prior
+ * node->version) records the new fields, returns true, and answers nothing:
+ * the early return sits before push_verack(). */
+static int test_version_after_handshake_recorded_not_answered(void)
+{
+    int failures = 0;
+    TEST("handshake: version after handshake completes is recorded, not answered") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, true));
+        f.node.state = PEER_HANDSHAKE_COMPLETE;
+
+        struct byte_stream payload;
+        hs_build_version_payload(&payload, PROTOCOL_VERSION,
+                                 0x3333333333333333ULL, "/test:0.1/");
+        ASSERT(process_version(&f.mp, &f.node, &payload));
+        ASSERT_EQ(f.node.version, PROTOCOL_VERSION);
+        ASSERT_EQ(f.node.starting_height, 100);
+        ASSERT(f.node.state == PEER_HANDSHAKE_COMPLETE);
+        ASSERT(!f.node.get_addr);
+
+        struct hs_capture cap;
+        hs_capture_sent(f.peer_fd, &cap);
+        ASSERT_EQ(cap.len, 0);
+
+        stream_free(&payload);
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Outbound peer (we sent our version first): the version moves the node to
+ * VERSION_RECEIVED, copies the advertised fields, asks for addresses, and
+ * answers with verack and getaddr but never a version of its own. */
+static int test_outbound_version_receipt_state(void)
+{
+    int failures = 0;
+    TEST("handshake: outbound version receipt moves to VERSION_RECEIVED, asks getaddr") {
+        struct hs_fixture f;
+        ASSERT(hs_fixture_setup(&f, false));
+        f.node.state = PEER_VERSION_SENT;
+
+        struct byte_stream payload;
+        hs_build_version_payload(&payload, PROTOCOL_VERSION,
+                                 0x4444444444444444ULL, "/test:0.1/");
+        ASSERT(process_version(&f.mp, &f.node, &payload));
+        ASSERT(f.node.state == PEER_VERSION_RECEIVED);
+        ASSERT_EQ(f.node.services, NODE_NETWORK); /* no ZCL23 bit: plain subver */
+        ASSERT(f.node.relay_txes);
+        ASSERT(f.node.get_addr);
+        ASSERT(strcmp(f.node.clean_sub_ver, "/test:0.1/") == 0);
+
+        struct hs_capture cap;
+        hs_capture_sent(f.peer_fd, &cap);
+        ASSERT(hs_captured_has_command(&cap, "verack"));
+        ASSERT(hs_captured_has_command(&cap, "getaddr"));
+        ASSERT(!hs_captured_has_command(&cap, "version"));
+
+        stream_free(&payload);
+        hs_fixture_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_net_handshake_adversarial(void);
@@ -1377,6 +1470,9 @@ int test_net_handshake_adversarial(void)
     failures += test_peer_build_identity_is_read_but_never_gates();
     failures += test_peer_advertising_the_new_subversion_still_handshakes();
     failures += test_previous_build_peer_still_interoperates();
+    failures += test_version_undeserialisable_rejected_unchanged();
+    failures += test_version_after_handshake_recorded_not_answered();
+    failures += test_outbound_version_receipt_state();
 
     return failures;
 }

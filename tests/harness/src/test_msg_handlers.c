@@ -17,6 +17,7 @@
 #include "core/hash.h"
 #include "net/msgprocessor.h"
 #include "net/msg_internal.h"
+#include "net/version.h"
 #include "net/download.h"
 #include "net/file_market.h"
 #include "net/peer_scoring.h"
@@ -1863,6 +1864,57 @@ static int test_pin_reject_more_work_marks_seen(void)
     return failures;
 }
 
+/* Build-identity prefix reader (msg_version_parse_build_identity_prefix),
+ * one row per branch. A "(src:" candidate whose first 12 characters are not
+ * lowercase hex is skipped and the scan moves to the next marker. Success
+ * writes the 12-character prefix; a refusal once the scan starts leaves
+ * out[0] == '\0', while a short buffer is refused with out untouched. */
+struct msg_prefix_row {
+    const char *subver;
+    bool ok;
+    const char *want;
+};
+
+static int test_msg_build_identity_prefix_branches(void)
+{
+    int failures = 0;
+    static const struct msg_prefix_row rows[] = {
+        {"/ZClassic23:0.1.0(src:0123456789ab)/", true, "0123456789ab"},
+        {"/ZClassic23:0.1.0(src:0123456789ab)zzz", true, "0123456789ab"},
+        {"(src:zzzzzzzzzzzz)(src:fedcba987654)", true, "fedcba987654"},
+        {"(src:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)/",
+         true, "0123456789ab"},
+        {"(src:0123456789a)", false, ""},
+        {"(src:0123456789AB)", false, ""},
+        {"(src:0123456789abx)", false, ""},
+        {"(src:0123456789abcd", false, ""},
+        {"(src:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefx",
+         false, ""},
+        {"/ZClassic23:0.1.0/", false, ""},
+    };
+    TEST("msg_handlers: build identity prefix reader, one row per branch") {
+        char out[ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE];
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            memset(out, 'x', sizeof(out));
+            ASSERT_EQ(msg_version_parse_build_identity_prefix(
+                          rows[i].subver, out, sizeof(out)), rows[i].ok);
+            ASSERT(strcmp(out, rows[i].ok ? rows[i].want : "") == 0);
+        }
+
+        /* Refusals before any scan: a short buffer is left untouched. */
+        memset(out, 'x', sizeof(out));
+        ASSERT(!msg_version_parse_build_identity_prefix(
+            "(src:0123456789ab)", out, ZCL_BUILD_IDENTITY_PREFIX_BUFSIZE - 1));
+        ASSERT(out[0] == 'x');
+        ASSERT(!msg_version_parse_build_identity_prefix(
+            "(src:0123456789ab)", NULL, sizeof(out)));
+        ASSERT(!msg_version_parse_build_identity_prefix(NULL, out, sizeof(out)));
+        ASSERT(out[0] == '\0');
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_msg_handlers(void);
@@ -1915,6 +1967,7 @@ int test_msg_handlers(void)
     failures += test_pin_reject_no_index_marks_seen();
     failures += test_pin_reject_equal_work_marks_seen();
     failures += test_pin_reject_more_work_marks_seen();
+    failures += test_msg_build_identity_prefix_branches();
 
     return failures;
 }
