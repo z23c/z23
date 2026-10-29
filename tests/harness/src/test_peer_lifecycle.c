@@ -1494,6 +1494,380 @@ static int test_peer_lifecycle_empty_incident_readiness(void)
     return failures;
 }
 
+/* Pins note_terminal's reject branch, the first-observation admission with a
+ * NULL reason, the once-per-generation dedupe, and the NULL-node path. */
+static int test_peer_lifecycle_terminal_reject_and_null_node(void)
+{
+    int failures = 0;
+    TEST_CASE("peer_lifecycle: reject and null-node terminals count once")
+    {
+        struct net_address addr;
+        struct p2p_node node;
+        struct peer_lifecycle_summary s;
+        struct json_value peer;
+
+        peer_lifecycle_reset_for_test();
+        event_log_init();
+        g_lifecycle_terminal_reject_events = 0;
+        ASSERT(event_observe(EV_PEER_HANDSHAKE_FAILURE,
+                             lifecycle_terminal_observer, NULL));
+
+        memset(&node, 0, sizeof(node));
+        test_addr_ipv4(&addr, 198, 51, 100, 78, 8033);
+        node.addr = addr;
+        node.id = 7803;
+        node.state = PEER_CONNECTING;
+        snprintf(node.addr_name, sizeof(node.addr_name),
+                 "198.51.100.78:8033");
+
+        /* A reject with no prior connect is the first observation of its
+         * generation: counted once as a reject and a pre-handshake
+         * disconnect, with a NULL reason stored as the empty string. */
+        peer_lifecycle_note_reject(&node, NULL);
+        peer_lifecycle_note_reject(&node, "second-reject");
+        peer_lifecycle_get_summary(&s);
+        ASSERT(s.connected == 0);
+        ASSERT(s.rejected == 1);
+        ASSERT(s.timeout == 0);
+        ASSERT(s.pre_handshake_disconnects == 1);
+        ASSERT(g_lifecycle_terminal_reject_events == 1);
+
+        json_init(&peer);
+        ASSERT(peer_lifecycle_peer_json(&node, &peer));
+        ASSERT(json_get_int(json_get(&peer, "rejected")) == 1);
+        ASSERT(strcmp(json_get_str(json_get(&peer, "last_reason")), "") == 0);
+        json_free(&peer);
+        event_clear_observers(EV_PEER_HANDSHAKE_FAILURE);
+
+        /* A NULL node has no addr_name and no peer id: its timeout is still
+         * counted, and the later NULL disconnect is deduped against it. */
+        peer_lifecycle_reset_for_test();
+        peer_lifecycle_note_timeout(NULL, "null-node");
+        peer_lifecycle_note_disconnected(NULL, "null-cleanup");
+        peer_lifecycle_get_summary(&s);
+        ASSERT(s.connected == 0);
+        ASSERT(s.timeout == 1);
+        ASSERT(s.disconnected == 0);
+        ASSERT(s.pre_handshake_disconnects == 1);
+    } TEST_END
+    return failures;
+}
+
+/* Pins note_terminal's handshaked branch: the timeout is counted but is not a
+ * pre-handshake incident, and it still emits the timeout event. */
+static int test_peer_lifecycle_terminal_handshaked_timeout(void)
+{
+    int failures = 0;
+    TEST_CASE("peer_lifecycle: timeout after handshake is not pre-handshake")
+    {
+        struct net_address addr;
+        struct p2p_node node;
+        struct peer_lifecycle_summary s;
+        struct json_value peer;
+
+        peer_lifecycle_reset_for_test();
+        event_log_init();
+        g_lifecycle_terminal_timeout_events = 0;
+        ASSERT(event_observe(EV_PEER_CONNECT_TIMEOUT,
+                             lifecycle_terminal_observer, NULL));
+
+        memset(&node, 0, sizeof(node));
+        test_addr_ipv4(&addr, 198, 51, 100, 79, 8033);
+        node.addr = addr;
+        node.id = 7803;
+        node.state = PEER_HANDSHAKE_COMPLETE;
+        snprintf(node.addr_name, sizeof(node.addr_name),
+                 "198.51.100.79:8033");
+        peer_lifecycle_note_connected(&node, PEER_LIFECYCLE_SOURCE_ADDNODE);
+        peer_lifecycle_note_handshake_complete(&node);
+        peer_lifecycle_note_timeout(&node, "late-timeout");
+
+        peer_lifecycle_get_summary(&s);
+        ASSERT(s.connected == 1);
+        ASSERT(s.timeout == 1);
+        ASSERT(s.pre_handshake_disconnects == 0);
+        ASSERT(g_lifecycle_terminal_timeout_events == 1);
+
+        json_init(&peer);
+        ASSERT(peer_lifecycle_peer_json(&node, &peer));
+        ASSERT(json_get_int(json_get(&peer, "timeout")) == 1);
+        ASSERT(json_get_int(json_get(&peer,
+                                     "pre_handshake_disconnects")) == 0);
+        ASSERT(strcmp(json_get_str(json_get(&peer, "last_reason")),
+                      "late-timeout") == 0);
+        json_free(&peer);
+        event_clear_observers(EV_PEER_CONNECT_TIMEOUT);
+    } TEST_END
+    return failures;
+}
+
+/* Pins host_group_add_entry's direction, handshake, service, and reconnect
+ * roll-up through the duplicate-host sections of the incident view. */
+static int test_peer_lifecycle_host_group_rollup(void)
+{
+    int failures = 0;
+    TEST_CASE("peer_lifecycle: host group rolls up direction and handshake")
+    {
+        struct net_address addr;
+        struct p2p_node inbound;
+        struct p2p_node outbound;
+        struct json_value incidents;
+        const struct json_value *group;
+
+        peer_lifecycle_reset_for_test();
+        event_log_init();
+
+        memset(&inbound, 0, sizeof(inbound));
+        test_addr_ipv4(&addr, 198, 51, 100, 90, 8033);
+        inbound.addr = addr;
+        inbound.id = 8101;
+        inbound.inbound = true;
+        inbound.state = PEER_HANDSHAKE_COMPLETE;
+        inbound.services = NODE_NETWORK | NODE_ZCL23;
+        snprintf(inbound.addr_name, sizeof(inbound.addr_name),
+                 "198.51.100.90:8033");
+        peer_lifecycle_note_connected(&inbound,
+                                      PEER_LIFECYCLE_SOURCE_INBOUND);
+        peer_lifecycle_note_version_received(&inbound, inbound.services,
+                                             3172092,
+                                             msg_version_user_agent());
+        peer_lifecycle_note_handshake_complete(&inbound);
+
+        /* The first generation times out before handshake; the reconnect
+         * re-arms the connection and completes the handshake. */
+        memset(&outbound, 0, sizeof(outbound));
+        test_addr_ipv4(&addr, 198, 51, 100, 90, 8034);
+        outbound.addr = addr;
+        outbound.id = 8102;
+        outbound.state = PEER_CONNECTING;
+        snprintf(outbound.addr_name, sizeof(outbound.addr_name),
+                 "198.51.100.90:8034");
+        peer_lifecycle_note_connected(&outbound,
+                                      PEER_LIFECYCLE_SOURCE_ADDNODE);
+        peer_lifecycle_note_timeout(&outbound, "handshake");
+        peer_lifecycle_note_connected(&outbound,
+                                      PEER_LIFECYCLE_SOURCE_ADDNODE);
+        peer_lifecycle_note_version_received(&outbound, NODE_NETWORK,
+                                             3172090,
+                                             "/MagicBean:2.1.2-beta6/");
+        peer_lifecycle_note_handshake_complete(&outbound);
+
+        /* An unknown-source address on the same host is neither open nor
+         * handshaked. */
+        test_addr_ipv4(&addr, 198, 51, 100, 90, 8035);
+        peer_lifecycle_note_attempt(&addr, PEER_LIFECYCLE_SOURCE_UNKNOWN);
+
+        json_init(&incidents);
+        ASSERT(peer_lifecycle_incidents_json(&incidents));
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "duplicate_host_group_count")) == 1);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "duplicate_open_host_group_count")) == 1);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "duplicate_handshaked_host_group_count"))
+               == 1);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "current_open_connection_count")) == 2);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "current_handshaked_connection_count"))
+               == 2);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "bootstrap_useful_count")) == 2);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "fast_sync_useful_count")) == 1);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "host_group_overflow")) == 0);
+        ASSERT(json_get_int(json_get(&incidents, "incident_count")) == 3);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "host_incident_count")) == 1);
+
+        group = find_lifecycle_obj_str(json_get(&incidents,
+                                                "duplicate_host_groups"),
+                                       "host", "198.51.100.90");
+        ASSERT(group != NULL);
+        if (group) {
+            ASSERT(json_get_int(json_get(group, "entries")) == 3);
+            ASSERT(json_get_int(json_get(group, "inbound_entries")) == 1);
+            ASSERT(json_get_int(json_get(group, "outbound_entries")) == 1);
+            ASSERT(json_get_int(json_get(group, "unknown_entries")) == 1);
+            ASSERT(json_get_int(json_get(group, "open_connections")) == 2);
+            ASSERT(json_get_int(json_get(group,
+                                         "handshaked_open_connections")) == 2);
+            ASSERT(json_get_int(json_get(group,
+                                         "connected")) == 3);
+            ASSERT(json_get_int(json_get(group,
+                                         "handshake_complete")) == 2);
+            ASSERT(json_get_int(json_get(group, "reconnects")) == 1);
+            ASSERT(json_get_int(json_get(group, "timeout")) == 1);
+            ASSERT(json_get_int(json_get(group,
+                                         "pre_handshake_disconnects")) == 1);
+            ASSERT(json_get_int(json_get(group,
+                                         "handshaked_network_connections"))
+                   == 2);
+            ASSERT(json_get_int(json_get(group,
+                                         "handshaked_zclassic23_connections"))
+                   == 1);
+            ASSERT(json_get_int(json_get(group,
+                                         "bootstrap_useful_connections"))
+                   == 2);
+            ASSERT(json_get_int(json_get(group,
+                                         "fast_sync_useful_connections"))
+                   == 1);
+            ASSERT(json_get_int(json_get(group,
+                                         "max_advertised_height")) == 3172092);
+        }
+        json_free(&incidents);
+    } TEST_END
+    return failures;
+}
+
+/* Pins find_host_group's overflow return: the 65th distinct host has no free
+ * group slot, so it is counted and never reaches host_group_add_entry. */
+static int test_peer_lifecycle_host_group_overflow(void)
+{
+    int failures = 0;
+    TEST_CASE("peer_lifecycle: a 65th distinct host overflows the group table")
+    {
+        struct net_address addr;
+        struct json_value incidents;
+
+        peer_lifecycle_reset_for_test();
+        event_log_init();
+        for (uint8_t i = 1; i <= 65; i++) {
+            test_addr_ipv4(&addr, 203, 0, 113, i, 8333);
+            peer_lifecycle_note_attempt(&addr, PEER_LIFECYCLE_SOURCE_ADDRMAN);
+        }
+
+        json_init(&incidents);
+        ASSERT(peer_lifecycle_incidents_json(&incidents));
+        ASSERT(json_get_int(json_get(&incidents, "group_limit")) == 64);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "host_group_overflow")) == 1);
+        ASSERT(json_get_int(json_get(&incidents, "incident_count")) == 0);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "host_count_returned")) == 0);
+        json_free(&incidents);
+    } TEST_END
+    return failures;
+}
+
+/* Pins each bootstrap and fast-sync readiness branch that
+ * peer_lifecycle_incidents_json can select, plus its NULL-out refusal. */
+static int test_peer_lifecycle_incident_readiness_branches(void)
+{
+    int failures = 0;
+    TEST_CASE("peer_lifecycle: incident readiness names each blocker")
+    {
+        struct net_address addr;
+        struct p2p_node node;
+        struct json_value incidents;
+
+        peer_lifecycle_reset_for_test();
+        event_log_init();
+        ASSERT(!peer_lifecycle_incidents_json(NULL));
+
+        /* Stage 1: an open connection with no completed handshake. */
+        memset(&node, 0, sizeof(node));
+        test_addr_ipv4(&addr, 198, 51, 100, 120, 8033);
+        node.addr = addr;
+        node.id = 8201;
+        node.inbound = true;
+        node.state = PEER_CONNECTING;
+        snprintf(node.addr_name, sizeof(node.addr_name),
+                 "198.51.100.120:8033");
+        peer_lifecycle_note_connected(&node, PEER_LIFECYCLE_SOURCE_INBOUND);
+
+        json_init(&incidents);
+        ASSERT(peer_lifecycle_incidents_json(&incidents));
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "current_open_connection_count")) == 1);
+        ASSERT(json_get_int(json_get(&incidents,
+                                     "current_handshaked_connection_count"))
+               == 0);
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "bootstrap_readiness")),
+                      "no_current_handshaked_connection") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "fast_sync_readiness")),
+                      "no_current_handshaked_connection") == 0);
+        ASSERT(json_get_bool(json_get(&incidents, "bootstrap_blocked")));
+        ASSERT(json_get_bool(json_get(&incidents, "fast_sync_blocked")));
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "safe_next_action")),
+                      "add_or_fix_bootstrap_peers") == 0);
+        json_free(&incidents);
+
+        /* Stage 2: a handshaked NODE_NETWORK peer without ZClassic23 leaves
+         * bootstrap ready and fast sync blocked. */
+        memset(&node, 0, sizeof(node));
+        test_addr_ipv4(&addr, 198, 51, 100, 121, 8033);
+        node.addr = addr;
+        node.id = 8202;
+        node.inbound = true;
+        node.state = PEER_HANDSHAKE_COMPLETE;
+        snprintf(node.addr_name, sizeof(node.addr_name),
+                 "198.51.100.121:8033");
+        peer_lifecycle_note_connected(&node, PEER_LIFECYCLE_SOURCE_INBOUND);
+        peer_lifecycle_note_version_received(&node, NODE_NETWORK, 3172091,
+                                             "/MagicBean:2.1.2-beta6/");
+        peer_lifecycle_note_handshake_complete(&node);
+
+        json_init(&incidents);
+        ASSERT(peer_lifecycle_incidents_json(&incidents));
+        ASSERT(json_get_int(json_get(&incidents, "bootstrap_useful_count"))
+               == 1);
+        ASSERT(json_get_int(json_get(&incidents, "fast_sync_useful_count"))
+               == 0);
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "bootstrap_readiness")),
+                      "ready") == 0);
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "fast_sync_readiness")),
+                      "no_zclassic23_fast_sync_peer") == 0);
+        ASSERT(!json_get_bool(json_get(&incidents, "bootstrap_blocked")));
+        ASSERT(json_get_bool(json_get(&incidents, "fast_sync_blocked")));
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "incident_severity")),
+                      "ok") == 0);
+        ASSERT(!json_get_bool(json_get(&incidents, "stability_blocker")));
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "safe_next_action")),
+                      "prefer_zclassic23_fast_sync_peer") == 0);
+        json_free(&incidents);
+
+        /* Stage 3: a ZClassic23 handshaked peer clears every blocker and
+         * leaves no scored incident. */
+        memset(&node, 0, sizeof(node));
+        test_addr_ipv4(&addr, 198, 51, 100, 122, 8033);
+        node.addr = addr;
+        node.id = 8203;
+        node.inbound = true;
+        node.state = PEER_HANDSHAKE_COMPLETE;
+        snprintf(node.addr_name, sizeof(node.addr_name),
+                 "198.51.100.122:8033");
+        peer_lifecycle_note_connected(&node, PEER_LIFECYCLE_SOURCE_INBOUND);
+        peer_lifecycle_note_version_received(&node,
+                                             NODE_NETWORK | NODE_ZCL23,
+                                             3172093,
+                                             msg_version_user_agent());
+        peer_lifecycle_note_handshake_complete(&node);
+
+        json_init(&incidents);
+        ASSERT(peer_lifecycle_incidents_json(&incidents));
+        ASSERT(json_get_int(json_get(&incidents, "fast_sync_useful_count"))
+               == 1);
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "fast_sync_readiness")),
+                      "ready") == 0);
+        ASSERT(!json_get_bool(json_get(&incidents, "fast_sync_blocked")));
+        ASSERT(strcmp(json_get_str(json_get(&incidents,
+                                            "safe_next_action")),
+                      "peer lifecycle has no scored incidents") == 0);
+        json_free(&incidents);
+    } TEST_END
+    return failures;
+}
+
 int test_peer_lifecycle(void)
 {
     int failures = 0;
@@ -1514,6 +1888,11 @@ int test_peer_lifecycle(void)
     failures += test_peer_lifecycle_mixed_direction_host_view();
     failures += test_peer_lifecycle_host_readiness_reasons();
     failures += test_peer_lifecycle_empty_incident_readiness();
+    failures += test_peer_lifecycle_terminal_reject_and_null_node();
+    failures += test_peer_lifecycle_terminal_handshaked_timeout();
+    failures += test_peer_lifecycle_host_group_rollup();
+    failures += test_peer_lifecycle_host_group_overflow();
+    failures += test_peer_lifecycle_incident_readiness_branches();
 
     return failures;
 }
