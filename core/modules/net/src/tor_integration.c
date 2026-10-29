@@ -246,6 +246,84 @@ static bool tor_persist_symbols_available(void)
            hs_parse_address && hs_service_find;
 }
 
+/* Allocate the port list and the two port configs. On failure everything
+ * allocated here is already released and the outputs are untouched. */
+static bool tor_persist_alloc_ports(tor_smartlist_t **ports_out,
+                                    tor_hs_port_config_t **pc_out,
+                                    tor_hs_port_config_t **p2p_pc_out)
+{
+    tor_smartlist_t *ports = smartlist_new();
+    tor_hs_port_config_t *pc = NULL;
+    tor_hs_port_config_t *p2p_pc = NULL;
+    if (ports) {
+        pc = tor_malloc_zero_(sizeof(*pc) + 1);
+        p2p_pc = tor_malloc_zero_(sizeof(*p2p_pc) + 1);
+    }
+    if (!ports || !pc || !p2p_pc) {
+        if (pc) tor_free_(pc);
+        if (p2p_pc) tor_free_(p2p_pc);
+        if (ports) smartlist_free_(ports);
+        return false;
+    }
+    *ports_out = ports;
+    *pc_out = pc;
+    *p2p_pc_out = p2p_pc;
+    return true;
+}
+
+/* Add the P2P port mapping to the list, or release its config when the P2P
+ * port needs no mapping. */
+static void tor_persist_add_p2p_port(tor_smartlist_t *ports,
+                                     tor_hs_port_config_t *p2p_pc,
+                                     uint16_t p2p_port)
+{
+    /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
+     * persistent onion identity at <onion>:<p2p_port>, forwarded to the
+     * local listener by stock Tor hidden-service machinery
+     * (hs_service.c -> connection_exit_connect) as an ordinary TCP
+     * connection from 127.0.0.1 — no fork change needed. Deliberately NOT
+     * dynhost_add_virtual_port: that would route the port into the HTTP
+     * interception layer (dynhost_handlers.c), which exists for port-80
+     * traffic only. */
+    if (p2p_port > 0 && p2p_port != 80) {
+        p2p_pc->virtual_port = p2p_port;
+        p2p_pc->is_unix_addr = 0;
+        p2p_pc->real_port = p2p_port;
+        p2p_pc->real_addr.family = AF_INET;
+        p2p_pc->real_addr.addr.in_addr[0] = 127;
+        p2p_pc->real_addr.addr.in_addr[1] = 0;
+        p2p_pc->real_addr.addr.in_addr[2] = 0;
+        p2p_pc->real_addr.addr.in_addr[3] = 1;
+        smartlist_add(ports, p2p_pc);
+    } else {
+        tor_free_(p2p_pc);
+    }
+}
+
+/* Look up the registered service for a Tor-derived address, NULL if the
+ * address does not parse or no service is registered. */
+static void *tor_persist_find_service(const char *address)
+{
+    tor_ed25519_public_key_t pk;
+    void *service = NULL;
+    if (hs_parse_address(address, &pk, NULL, NULL) == 0)
+        service = hs_service_find(&pk);
+    return service;
+}
+
+/* Print the install summary lines. */
+static void tor_persist_announce(bool created, const char *address)
+{
+    printf("Tor: persistent onion identity %s: %s.onion\n",
+           created ? "minted" : "loaded", address);
+    fflush(stdout);
+    if (g_rotated_old_address[0]) {
+        printf("Tor: onion identity rotated: old=%s new=%s.onion\n",
+               g_rotated_old_address, address);
+        fflush(stdout);
+    }
+}
+
 /* One install attempt from the monitor poll loop.
  * Returns 1 once the persistent service is registered with dynhost,
  * 0 while the dynhost subsystem is not up yet (retry next poll — not an
@@ -276,45 +354,18 @@ static int tor_try_install_persistent_identity(const char *datadir)
     /* Virtual port 80 with NO real port — exactly how dynhost.c configures
      * its own service: interception happens before any real-port mapping
      * is consulted, so real_addr stays AF_UNSPEC. */
-    tor_smartlist_t *ports = smartlist_new();
+    tor_smartlist_t *ports = NULL;
     tor_hs_port_config_t *pc = NULL;
     tor_hs_port_config_t *p2p_pc = NULL;
-    if (ports) {
-        pc = tor_malloc_zero_(sizeof(*pc) + 1);
-        p2p_pc = tor_malloc_zero_(sizeof(*p2p_pc) + 1);
-    }
-    if (!ports || !pc || !p2p_pc) {
-        if (pc) tor_free_(pc);
-        if (p2p_pc) tor_free_(p2p_pc);
-        if (ports) smartlist_free_(ports);
+    if (!tor_persist_alloc_ports(&ports, &pc, &p2p_pc)) {
         tor_free_(sk);
         LOG_ERR("tor", "allocation failed for persistent onion ports");
     }
     pc->virtual_port = 80;
     smartlist_add(ports, pc);
 
-    /* SECOND port mapping: the node's P2P port. Inbound P2P rides the
-     * persistent onion identity at <onion>:<p2p_port>, forwarded to the
-     * local listener by stock Tor hidden-service machinery
-     * (hs_service.c -> connection_exit_connect) as an ordinary TCP
-     * connection from 127.0.0.1 — no fork change needed. Deliberately NOT
-     * dynhost_add_virtual_port: that would route the port into the HTTP
-     * interception layer (dynhost_handlers.c), which exists for port-80
-     * traffic only. */
     uint16_t p2p_port = atomic_load(&g_tor_p2p_port);
-    if (p2p_port > 0 && p2p_port != 80) {
-        p2p_pc->virtual_port = p2p_port;
-        p2p_pc->is_unix_addr = 0;
-        p2p_pc->real_port = p2p_port;
-        p2p_pc->real_addr.family = AF_INET;
-        p2p_pc->real_addr.addr.in_addr[0] = 127;
-        p2p_pc->real_addr.addr.in_addr[1] = 0;
-        p2p_pc->real_addr.addr.in_addr[2] = 0;
-        p2p_pc->real_addr.addr.in_addr[3] = 1;
-        smartlist_add(ports, p2p_pc);
-    } else {
-        tor_free_(p2p_pc);
-    }
+    tor_persist_add_p2p_port(ports, p2p_pc, p2p_port);
 
     char *address_out = NULL;
     /* Ownership of sk and ports passes to Tor on EVERY path below. */
@@ -334,10 +385,7 @@ static int tor_try_install_persistent_identity(const char *datadir)
                        "pure prop224 derivation — vendored fork drift");
     }
 
-    tor_ed25519_public_key_t pk;
-    void *service = NULL;
-    if (hs_parse_address(address_out, &pk, NULL, NULL) == 0)
-        service = hs_service_find(&pk);
+    void *service = tor_persist_find_service(address_out);
     if (!service) {
         tor_free_(address_out);
         LOG_ERR("tor", "persistent onion service missing right after "
@@ -356,14 +404,7 @@ static int tor_try_install_persistent_identity(const char *datadir)
     if (p2p_port > 0 && p2p_port != 80)
         net_set_onion_ingress_port(p2p_port);
 
-    printf("Tor: persistent onion identity %s: %s.onion\n",
-           created ? "minted" : "loaded", address_out);
-    fflush(stdout);
-    if (g_rotated_old_address[0]) {
-        printf("Tor: onion identity rotated: old=%s new=%s.onion\n",
-               g_rotated_old_address, address_out);
-        fflush(stdout);
-    }
+    tor_persist_announce(created, address_out);
     tor_free_(address_out);
     return 1;
 }
@@ -395,6 +436,18 @@ const char *tor_onion_port_map_state_name(
     return "unknown";
 }
 
+static enum tor_onion_port_map_state tor_port_map_state_of(
+    bool enabled, bool ready, bool persistent, int install_state)
+{
+    if (!enabled)
+        return TOR_ONION_PORT_MAP_DISABLED;
+    if (persistent && install_state < 0)
+        return TOR_ONION_PORT_MAP_FAILED;
+    if (!ready || (persistent && install_state != 1))
+        return TOR_ONION_PORT_MAP_PENDING;
+    return TOR_ONION_PORT_MAP_INSTALLED;
+}
+
 void tor_integration_port_map_snapshot(struct tor_onion_port_map *out)
 {
     if (!out)
@@ -414,14 +467,8 @@ void tor_integration_port_map_snapshot(struct tor_onion_port_map *out)
     out->p2p_route_expected = persistent && p2p_port > 0 && p2p_port != 80;
     out->expected_route_count = 1 + (out->p2p_route_expected ? 1 : 0);
 
-    if (!enabled)
-        out->state = TOR_ONION_PORT_MAP_DISABLED;
-    else if (persistent && install_state < 0)
-        out->state = TOR_ONION_PORT_MAP_FAILED;
-    else if (!ready || (persistent && install_state != 1))
-        out->state = TOR_ONION_PORT_MAP_PENDING;
-    else
-        out->state = TOR_ONION_PORT_MAP_INSTALLED;
+    out->state = tor_port_map_state_of(enabled, ready, persistent,
+                                       install_state);
 
     out->application_route_installed = ready;
     out->p2p_route_installed = ready && out->p2p_route_expected &&
@@ -482,6 +529,53 @@ static long tor_log_scan_offset(const char *datadir,
     return (long)md.size;
 }
 
+static bool tor_poll_onion_address_once(const char *datadir,
+                                        const char *log_path)
+{
+    bool have_addr = false;
+    if (atomic_load(&g_onion_persist)) {
+        /* -onion-persist: the address comes from OUR persisted
+         * identity, registered with dynhost by the install step. The
+         * ephemeral log-scan fallback is deliberately skipped here —
+         * in persist mode an ephemeral line would name dynhost's
+         * throwaway race-loser service, not this node's identity.
+         * Install failure is already a named LOG_ERR; the poll's
+         * "still waiting" line keeps the stall named. */
+        if (atomic_load(&g_persist_install_state) == 0) {
+            int rc = tor_try_install_persistent_identity(datadir);
+            if (rc != 0)
+                atomic_store(&g_persist_install_state, rc);
+        }
+        if (atomic_load(&g_persist_install_state) == 1 &&
+            read_onion_from_hostname_file(datadir))
+            have_addr = true;
+    } else {
+        /* Default ephemeral mode: a hostname file left by a previous
+         * -onion-persist boot is deliberately NOT read here — no
+         * service is registered for that identity this boot. */
+        if (tor_log_last_ephemeral_address(log_path,
+                                           g_tor_log_scan_from,
+                                           g_onion_address,
+                                           sizeof(g_onion_address))) {
+            ensure_onion_suffix();
+            have_addr = true;
+        }
+    }
+    return have_addr;
+}
+
+static void tor_report_slow_wait(int waited, bool have_addr)
+{
+    if (have_addr)
+        fprintf(stderr,  // obs-ok:bootstrap-progress-named
+                "Tor: still waiting for onion DESCRIPTOR PUBLICATION "
+                "after %ds (HSDir upload may be slow)\n", waited);
+    else
+        fprintf(stderr,  // obs-ok:bootstrap-progress-named
+                "Tor: still waiting for .onion address after %ds "
+                "(bootstrap may be slow)\n", waited);
+}
+
 /* Wait for the .onion address AND onion DESCRIPTOR PUBLICATION.
 
  * Default (ephemeral) mode: parse the dynhost log for THIS start's
@@ -523,34 +617,7 @@ static bool read_onion_address(const char *datadir)
             return false;
 
         if (!have_addr) {
-            if (atomic_load(&g_onion_persist)) {
-                /* -onion-persist: the address comes from OUR persisted
-                 * identity, registered with dynhost by the install step. The
-                 * ephemeral log-scan fallback is deliberately skipped here —
-                 * in persist mode an ephemeral line would name dynhost's
-                 * throwaway race-loser service, not this node's identity.
-                 * Install failure is already a named LOG_ERR; the poll's
-                 * "still waiting" line keeps the stall named. */
-                if (atomic_load(&g_persist_install_state) == 0) {
-                    int rc = tor_try_install_persistent_identity(datadir);
-                    if (rc != 0)
-                        atomic_store(&g_persist_install_state, rc);
-                }
-                if (atomic_load(&g_persist_install_state) == 1 &&
-                    read_onion_from_hostname_file(datadir))
-                    have_addr = true;
-            } else {
-                /* Default ephemeral mode: a hostname file left by a previous
-                 * -onion-persist boot is deliberately NOT read here — no
-                 * service is registered for that identity this boot. */
-                if (tor_log_last_ephemeral_address(log_path,
-                                                   g_tor_log_scan_from,
-                                                   g_onion_address,
-                                                   sizeof(g_onion_address))) {
-                    ensure_onion_suffix();
-                    have_addr = true;
-                }
-            }
+            have_addr = tor_poll_onion_address_once(datadir, log_path);
             if (have_addr && !announced_addr) {
                 /* Outbound dynhost streams can be queued now. Do not wait for
                  * our own inbound descriptor upload: Tor will build the peer
@@ -571,16 +638,8 @@ static bool read_onion_address(const char *datadir)
             return true;
 
         /* Slow bootstrap is a named state, not a silent hang. */
-        if (++waited % 60 == 0) {
-            if (have_addr)
-                fprintf(stderr,  // obs-ok:bootstrap-progress-named
-                        "Tor: still waiting for onion DESCRIPTOR PUBLICATION "
-                        "after %ds (HSDir upload may be slow)\n", waited);
-            else
-                fprintf(stderr,  // obs-ok:bootstrap-progress-named
-                        "Tor: still waiting for .onion address after %ds "
-                        "(bootstrap may be slow)\n", waited);
-        }
+        if (++waited % 60 == 0)
+            tor_report_slow_wait(waited, have_addr);
         platform_sleep_ms(1000);
     }
 }

@@ -332,3 +332,7 @@ later lane flips it HARD.
 - 2026-10-29T11:51:34Z — REASON: Owner-authorized 2026-10-19 hardening program, behaviour-preserving: core wave 1 complexity splits of 9 functions in 5 tier-A net files (acme_b64url, acme_selfsigned, acme_arm_file, https_server_redirect, rom_seed_policy); no validity predicate touched; Sonnet writers, Sonnet non-author reviews
   old ROOT: 21061f6194fbaed2abae7d60072b91ed8f762681c53a8544245399bf8505b80f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T12:19:33Z — REASON: core hardening wave 2: behaviour-preserving complexity splits of 8 tier-A net files (addrman_codec, rom_seed, tor_integration, onion_ratelimit, file_market_offer, onion_directory, onion_identity, netbase), lead reseal
+  old ROOT: f6e5e9b15d5cf0976fd5ca073ba7715b054c417e98e442bd4a36be583e7cb5ae
+  by: owner unseal ritual (make core-unseal)

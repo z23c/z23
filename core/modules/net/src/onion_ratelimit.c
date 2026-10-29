@@ -118,25 +118,24 @@ static bool path_prefix(const char *path, const char *prefix, size_t plen)
     return path && strncmp(path, prefix, plen) == 0;
 }
 
-enum onion_route_class onion_route_classify(const char *method,
-                                            const char *path,
-                                            char route_key_out[32])
+/* True (route key filled) when the request is one of the hand-written
+ * EXPENSIVE specials; checked in the original order. */
+static bool onion_route_is_expensive_special(const char *method,
+                                             const char *path,
+                                             char route_key_out[32])
 {
-    if (route_key_out) route_key_out[0] = '\0';
-    if (!path) return ONION_ROUTE_STATIC; /* NULL becomes "/" downstream */
-
     /* EXPENSIVE: free-text hostname search. Prefix-matches exactly the way
      * onion_service_handle_request() itself dispatches "/search", so
      * classification can never disagree with routing. */
     if (path_prefix(path, "/search", 7)) {
         if (route_key_out) snprintf(route_key_out, 32, "search-hostname");
-        return ONION_ROUTE_EXPENSIVE;
+        return true;
     }
 
     /* EXPENSIVE: free-text block/tx/address/token search. */
     if (path_prefix(path, "/explorer/search", 16)) {
         if (route_key_out) snprintf(route_key_out, 32, "search-explorer");
-        return ONION_ROUTE_EXPENSIVE;
+        return true;
     }
 
     /* EXPENSIVE: order creation — mints a z-address and writes a row.
@@ -149,18 +148,26 @@ enum onion_route_class onion_route_classify(const char *method,
          strcmp(path, "/store/orders/") == 0 ||
          path_prefix(path, "/store/buy/", 11))) {
         if (route_key_out) snprintf(route_key_out, 32, "store-order");
-        return ONION_ROUTE_EXPENSIVE;
+        return true;
     }
+    return false;
+}
 
+static bool onion_route_is_static_page(const char *path)
+{
     /* STATIC: the pages and assets that must stay reachable no matter what
      * the other tiers are doing — including the node's own error pages. */
-    if (strcmp(path, "/") == 0 ||
-        strcmp(path, "/status") == 0 ||
-        strcmp(path, "/favicon.ico") == 0 ||
-        strcmp(path, "/explorer/style.css") == 0 ||
-        strcmp(path, "/explorer/favicon.png") == 0)
-        return ONION_ROUTE_STATIC;
+    return strcmp(path, "/") == 0 ||
+           strcmp(path, "/status") == 0 ||
+           strcmp(path, "/favicon.ico") == 0 ||
+           strcmp(path, "/explorer/style.css") == 0 ||
+           strcmp(path, "/explorer/favicon.png") == 0;
+}
 
+/* True with *cls set when a site_routes.def row prefix-matches. */
+static bool onion_route_site_match(const char *path, char route_key_out[32],
+                                   enum onion_route_class *cls)
+{
     /* App MVC mounts — the rows of net/site_routes.def, prefix-matched in
      * dispatch order, exactly the way onion_service_handle_request()
      * dispatches them, so classification can never disagree with routing.
@@ -171,10 +178,30 @@ enum onion_route_class onion_route_classify(const char *method,
     if (path_prefix(path, prefix, sizeof(prefix) - 1)) { \
         if (route_key_out && (rkey)[0]) \
             snprintf(route_key_out, 32, "%s", rkey); \
-        return cost; \
+        *cls = cost; \
+        return true; \
     }
 #include "net/site_routes.def"
 #undef SITE_ROUTE
+    return false;
+}
+
+enum onion_route_class onion_route_classify(const char *method,
+                                            const char *path,
+                                            char route_key_out[32])
+{
+    if (route_key_out) route_key_out[0] = '\0';
+    if (!path) return ONION_ROUTE_STATIC; /* NULL becomes "/" downstream */
+
+    if (onion_route_is_expensive_special(method, path, route_key_out))
+        return ONION_ROUTE_EXPENSIVE;
+
+    if (onion_route_is_static_page(path))
+        return ONION_ROUTE_STATIC;
+
+    enum onion_route_class site_cls = ONION_ROUTE_CHEAP;
+    if (onion_route_site_match(path, route_key_out, &site_cls))
+        return site_cls;
 
     return ONION_ROUTE_CHEAP;
 }
@@ -385,6 +412,21 @@ static void onion_fill_challenge(const char *route_key,
  * for query/form fields, kept local so core/modules/net has no dependency on
  * app/controllers. pow_ts/pow_nonce are always plain decimal digits, so
  * no percent or `+` decoding is needed. */
+static bool extract_param_at_boundary(const char *hay, size_t i)
+{
+    return i == 0 || hay[i - 1] == '&' || hay[i - 1] == '?';
+}
+
+static size_t extract_param_value_len(const char *hay, size_t hay_len,
+                                      size_t vstart)
+{
+    size_t vlen = 0;
+    while (vstart + vlen < hay_len && hay[vstart + vlen] != '&' &&
+           hay[vstart + vlen] != ' ' && hay[vstart + vlen] != '\0')
+        vlen++;
+    return vlen;
+}
+
 static bool extract_param(const char *hay, size_t hay_len, const char *key,
                           char *out, size_t out_max)
 {
@@ -395,16 +437,13 @@ static bool extract_param(const char *hay, size_t hay_len, const char *key,
         return false; // raw-return-ok:key-cannot-fit-not-a-server-error
 
     for (size_t i = 0; i + klen < hay_len; i++) {
-        bool at_boundary = (i == 0 || hay[i - 1] == '&' || hay[i - 1] == '?');
+        bool at_boundary = extract_param_at_boundary(hay, i);
         if (!at_boundary) continue;
         if (memcmp(hay + i, key, klen) != 0) continue;
         if (hay[i + klen] != '=') continue;
 
         size_t vstart = i + klen + 1;
-        size_t vlen = 0;
-        while (vstart + vlen < hay_len && hay[vstart + vlen] != '&' &&
-               hay[vstart + vlen] != ' ' && hay[vstart + vlen] != '\0')
-            vlen++;
+        size_t vlen = extract_param_value_len(hay, hay_len, vstart);
         if (vlen == 0 || vlen >= out_max)
             return false; // raw-return-ok:empty-or-oversized-value-not-a-server-error
         memcpy(out, hay + vstart, vlen);
@@ -438,6 +477,24 @@ static bool onion_puzzle_present(const char *route_key,
     onion_route_token(route_key, token);
     return puzzle_gate_verify(&g_onion_puzzle_gate, token, (int64_t)ts,
                               (uint64_t)nonce);
+}
+
+/* Read pow_ts/pow_nonce from the path, falling back to the body; true when
+ * both fields were found in one place. */
+static bool onion_admit_collect_pow(const char *path, const uint8_t *body,
+                                    size_t body_len, char ts_str[32],
+                                    char nonce_str[32])
+{
+    size_t path_len = path ? strlen(path) : 0;
+    bool have = extract_param(path, path_len, "pow_ts", ts_str, 32) &&
+                extract_param(path, path_len, "pow_nonce", nonce_str, 32);
+    if (!have && body && body_len) {
+        have = extract_param((const char *)body, body_len, "pow_ts",
+                             ts_str, 32) &&
+               extract_param((const char *)body, body_len, "pow_nonce",
+                             nonce_str, 32);
+    }
+    return have;
 }
 
 enum onion_admit_result onion_ratelimit_admit(
@@ -481,16 +538,8 @@ enum onion_admit_result onion_ratelimit_admit(
     atomic_fetch_add(&g_puzzle_required_total, 1);
 
     char ts_str[32] = "", nonce_str[32] = "";
-    size_t path_len = path ? strlen(path) : 0;
-    bool have = extract_param(path, path_len, "pow_ts", ts_str, sizeof(ts_str)) &&
-                extract_param(path, path_len, "pow_nonce", nonce_str,
-                              sizeof(nonce_str));
-    if (!have && body && body_len) {
-        have = extract_param((const char *)body, body_len, "pow_ts",
-                             ts_str, sizeof(ts_str)) &&
-               extract_param((const char *)body, body_len, "pow_nonce",
-                             nonce_str, sizeof(nonce_str));
-    }
+    bool have = onion_admit_collect_pow(path, body, body_len, ts_str,
+                                        nonce_str);
 
     if (!have || !onion_puzzle_present(route_key, ts_str, nonce_str)) {
         atomic_fetch_add(&g_puzzle_failed_total, 1);

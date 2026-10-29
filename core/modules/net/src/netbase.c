@@ -84,10 +84,8 @@ void net_get_p2p_socket_buffer_stats(struct net_p2p_socket_buffer_stats *out)
         &g_p2p_socket_degraded, memory_order_relaxed);
 }
 
-void split_host_port(const char *in, char *host_out, size_t host_size,
-                     int *port_out)
+static const char *netbase_last_colon(const char *in, size_t len)
 {
-    size_t len = strlen(in);
     const char *colon = NULL;
     for (size_t i = len; i > 0; i--) {
         if (in[i - 1] == ':') {
@@ -95,21 +93,34 @@ void split_host_port(const char *in, char *host_out, size_t host_size,
             break;
         }
     }
+    return colon;
+}
 
-    if (colon) {
-        bool bracketed = (in[0] == '[' && colon > in && colon[-1] == ']');
-        bool multi_colon = false;
-        for (const char *p = in; p < colon; p++) {
-            if (*p == ':') { multi_colon = true; break; }
-        }
-        if (colon != in && (bracketed || !multi_colon)) {
-            int n = 0;
-            if (ParseInt32(colon + 1, &n) && n > 0 && n < 0x10000) {
-                *port_out = n;
-                len = (size_t)(colon - in);
-            }
+static void netbase_take_port(const char *in, const char *colon,
+                              size_t *len, int *port_out)
+{
+    bool bracketed = (in[0] == '[' && colon > in && colon[-1] == ']');
+    bool multi_colon = false;
+    for (const char *p = in; p < colon; p++) {
+        if (*p == ':') { multi_colon = true; break; }
+    }
+    if (colon != in && (bracketed || !multi_colon)) {
+        int n = 0;
+        if (ParseInt32(colon + 1, &n) && n > 0 && n < 0x10000) {
+            *port_out = n;
+            *len = (size_t)(colon - in);
         }
     }
+}
+
+void split_host_port(const char *in, char *host_out, size_t host_size,
+                     int *port_out)
+{
+    size_t len = strlen(in);
+    const char *colon = netbase_last_colon(in, len);
+
+    if (colon)
+        netbase_take_port(in, colon, &len, port_out);
 
     if (len >= 2 && in[0] == '[' && in[len - 1] == ']') {
         if (len - 2 < host_size) {

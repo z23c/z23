@@ -129,48 +129,36 @@ static bool addrman_record_is_dead(const struct addr_info *e, int64_t now)
            now - e->last_success > ADDRMAN_MIN_FAIL_DAYS * 24 * 60 * 60;
 }
 
-/* Read one persisted entry.
- *
- * Returns false ONLY when the stream is truncated or malformed at the byte
- * level — that is unrecoverable and aborts the load. A record that parses
- * cleanly but describes something we would never dial is reported through
- * `*usable = false`: the caller drops it and keeps reading, so one bad row
- * costs one row rather than the whole file.
- *
- * peers.dat is attacker-influenced by construction — peers tell us about
- * other peers and we write down what they said — so every field is treated
- * as hostile input here. */
-static bool addrman_read_entry(struct byte_stream *s, uint8_t version,
-                               int64_t now, struct addr_info *out,
-                               bool *usable)
+/* Read the fixed fields of one persisted entry; false when the stream is
+ * truncated. Version 2 adds the onion tail. */
+static bool addrman_read_entry_fields(struct byte_stream *s, uint8_t version,
+                                      struct addr_info *out, int32_t *attempts,
+                                      uint8_t *addr_flag, uint8_t *src_flag)
 {
-    *usable = false;
-    memset(out, 0, sizeof(*out));
-    out->used = true;
-
-    int32_t attempts = 0;
     if (!stream_read_bytes(s, out->addr.svc.addr.ip, 16) ||
         !stream_read_u16_le(s, &out->addr.svc.port) ||
         !stream_read_u64_le(s, &out->addr.nServices) ||
         !stream_read_u32_le(s, &out->addr.nTime) ||
         !stream_read_bytes(s, out->source.ip, 16) ||
         !stream_read_i64_le(s, &out->last_success) ||
-        !stream_read_i32_le(s, &attempts))
+        !stream_read_i32_le(s, attempts))
         return false;
 
-    uint8_t addr_flag = 0, src_flag = 0;
     if (version >= ADDRMAN_SER_VERSION_ONION) {
         if (!stream_read_bytes(s, out->addr.svc.addr.torv3, TORV3_ADDR_SIZE) ||
-            !stream_read_u8(s, &addr_flag) ||
+            !stream_read_u8(s, addr_flag) ||
             !stream_read_bytes(s, out->source.torv3, TORV3_ADDR_SIZE) ||
-            !stream_read_u8(s, &src_flag) ||
+            !stream_read_u8(s, src_flag) ||
             !stream_read_i64_le(s, &out->last_try))
             return false;
     }
+    return true;
+}
 
-    addrman_sanitize_addr(&out->addr.svc.addr, addr_flag);
-    addrman_sanitize_addr(&out->source, src_flag);
-
+/* Clamp the counters and timestamps of a decoded entry. */
+static void addrman_clamp_entry(struct addr_info *out, int32_t attempts,
+                                int64_t now)
+{
     /* A NEGATIVE attempts count is the sharpest edge in this record.
      * addr_info_get_chance() computes pow(0.66, attempts), so attempts ==
      * -100 yields a selection chance of 0.66^-100 — astronomically above
@@ -195,6 +183,37 @@ static bool addrman_read_entry(struct byte_stream *s, uint8_t version,
         out->last_try = 0;
     else if (out->last_try > now)
         out->last_try = now;
+}
+
+/* Read one persisted entry.
+ *
+ * Returns false ONLY when the stream is truncated or malformed at the byte
+ * level — that is unrecoverable and aborts the load. A record that parses
+ * cleanly but describes something we would never dial is reported through
+ * `*usable = false`: the caller drops it and keeps reading, so one bad row
+ * costs one row rather than the whole file.
+ *
+ * peers.dat is attacker-influenced by construction — peers tell us about
+ * other peers and we write down what they said — so every field is treated
+ * as hostile input here. */
+static bool addrman_read_entry(struct byte_stream *s, uint8_t version,
+                               int64_t now, struct addr_info *out,
+                               bool *usable)
+{
+    *usable = false;
+    memset(out, 0, sizeof(*out));
+    out->used = true;
+
+    int32_t attempts = 0;
+    uint8_t addr_flag = 0, src_flag = 0;
+    if (!addrman_read_entry_fields(s, version, out, &attempts,
+                                   &addr_flag, &src_flag))
+        return false;
+
+    addrman_sanitize_addr(&out->addr.svc.addr, addr_flag);
+    addrman_sanitize_addr(&out->source, src_flag);
+
+    addrman_clamp_entry(out, attempts, now);
 
     /* Dialability, not policy: a port of zero or an address that is not even
      * well-formed can never become a connection, so it is dead weight in a
@@ -212,6 +231,52 @@ static bool addrman_read_entry(struct byte_stream *s, uint8_t version,
     return true;
 }
 
+/* Write every used NEW entry, then every TRIED entry. Returns 0 on success,
+ * 1 when a new entry failed to write, 2 when a tried entry did; `*bad_i`
+ * names the entry. */
+static int addrman_write_entries(const struct addr_man *am,
+                                 struct byte_stream *s, int *mapUnkIds,
+                                 int *bad_i)
+{
+    int nIds = 0;
+    for (int i = 0; i < am->id_count; i++) {
+        if (am->entries[i].used && am->entries[i].ref_count > 0) {
+            mapUnkIds[i] = nIds;
+            if (!addrman_write_entry(s, &am->entries[i])) { *bad_i = i; return 1; }
+            nIds++;
+        }
+    }
+    for (int i = 0; i < am->id_count; i++) {
+        if (am->entries[i].used && am->entries[i].in_tried) {
+            if (!addrman_write_entry(s, &am->entries[i])) { *bad_i = i; return 2; }
+        }
+    }
+    return 0;
+}
+
+/* Write the NEW bucket table. Returns 0 on success, 1 when a bucket size
+ * failed to write, 2 when a bucket index did; `*bad_bucket` and `*bad_i`
+ * name the slot. */
+static int addrman_write_bucket_table(const struct addr_man *am,
+                                      struct byte_stream *s,
+                                      const int *mapUnkIds,
+                                      int *bad_bucket, int *bad_i)
+{
+    for (int bucket = 0; bucket < ADDRMAN_NEW_BUCKET_COUNT; bucket++) {
+        int nSize = 0;
+        for (int i = 0; i < ADDRMAN_BUCKET_SIZE; i++)
+            if (am->vvNew[bucket][i] != -1) nSize++;
+        if (!stream_write_i32_le(s, nSize)) { *bad_bucket = bucket; return 1; }
+        for (int i = 0; i < ADDRMAN_BUCKET_SIZE; i++) {
+            if (am->vvNew[bucket][i] != -1) {
+                int nIndex = mapUnkIds[am->vvNew[bucket][i]];
+                if (!stream_write_i32_le(s, nIndex)) { *bad_bucket = bucket; *bad_i = i; return 2; }
+            }
+        }
+    }
+    return 0;
+}
+
 bool addrman_serialize(const struct addr_man *am, struct byte_stream *s)
 {
     if (!stream_write_u8(s, ADDRMAN_SER_VERSION_CURRENT)) LOG_FAIL("addrman", "serialize: failed to write version");
@@ -226,35 +291,233 @@ bool addrman_serialize(const struct addr_man *am, struct byte_stream *s)
     int *mapUnkIds = zcl_calloc((size_t)am->id_count > 0 ? (size_t)am->id_count : 1, sizeof(int), "addr_unk_ids");
     if (!mapUnkIds) LOG_FAIL("addrman", "serialize: alloc failed for mapUnkIds");
 
-    int nIds = 0;
-    for (int i = 0; i < am->id_count; i++) {
-        if (am->entries[i].used && am->entries[i].ref_count > 0) {
-            mapUnkIds[i] = nIds;
-            if (!addrman_write_entry(s, &am->entries[i])) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write new entry i=%d", i); }
-            nIds++;
-        }
-    }
-    for (int i = 0; i < am->id_count; i++) {
-        if (am->entries[i].used && am->entries[i].in_tried) {
-            if (!addrman_write_entry(s, &am->entries[i])) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write tried entry i=%d", i); }
-        }
-    }
+    int i = 0;
+    int bucket = 0;
+    int werr = addrman_write_entries(am, s, mapUnkIds, &i);
+    if (werr == 1) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write new entry i=%d", i); }
+    if (werr == 2) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write tried entry i=%d", i); }
 
-    for (int bucket = 0; bucket < ADDRMAN_NEW_BUCKET_COUNT; bucket++) {
-        int nSize = 0;
-        for (int i = 0; i < ADDRMAN_BUCKET_SIZE; i++)
-            if (am->vvNew[bucket][i] != -1) nSize++;
-        if (!stream_write_i32_le(s, nSize)) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write bucket size bucket=%d", bucket); }
-        for (int i = 0; i < ADDRMAN_BUCKET_SIZE; i++) {
-            if (am->vvNew[bucket][i] != -1) {
-                int nIndex = mapUnkIds[am->vvNew[bucket][i]];
-                if (!stream_write_i32_le(s, nIndex)) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write bucket index bucket=%d i=%d", bucket, i); }
-            }
-        }
-    }
+    int berr = addrman_write_bucket_table(am, s, mapUnkIds, &bucket, &i);
+    if (berr == 1) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write bucket size bucket=%d", bucket); }
+    if (berr == 2) { free(mapUnkIds); LOG_FAIL("addrman", "serialize: failed to write bucket index bucket=%d i=%d", bucket, i); }
 
     free(mapUnkIds);
     return true;
+}
+
+/* Count bounds for the persisted tables. */
+static bool addrman_new_count_ok(int32_t nNew)
+{
+    return !(nNew < 0 || nNew > ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE);
+}
+
+static bool addrman_tried_count_ok(int32_t nTried)
+{
+    return !(nTried < 0 || nTried > ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE);
+}
+
+/* Clamp the writer's bucket-count word to the walk this build can do. */
+static int addrman_clamp_table_buckets(int32_t nUBuckets)
+{
+    int table_buckets = nUBuckets;
+    if (table_buckets < 0)
+        table_buckets = 0;
+    if (table_buckets > ADDRMAN_NEW_BUCKET_COUNT)
+        table_buckets = ADDRMAN_NEW_BUCKET_COUNT;
+    return table_buckets;
+}
+
+/* Grow the entry array to hold `need` rows; false when the allocation
+ * fails. */
+static bool addrman_reserve_entries(struct addr_man *am, size_t need)
+{
+    if (need > am->entries_cap) {
+        struct addr_info *p = zcl_realloc(am->entries,
+                                       need * sizeof(struct addr_info), "addr_entries");
+        if (!p) return false;
+        memset(p + am->entries_cap, 0,
+               (need - am->entries_cap) * sizeof(struct addr_info));
+        am->entries = p;
+        am->entries_cap = need;
+    }
+    return true;
+}
+
+/* Allocate the file-position -> id remap; `*remap` stays NULL when there are
+ * no NEW rows. False when the allocation fails. */
+static bool addrman_alloc_remap(int32_t nNew, int **remap)
+{
+    *remap = NULL;
+    if (nNew > 0) {
+        *remap = zcl_calloc((size_t)nNew, sizeof(int), "addr_deser_remap");
+        if (!*remap) return false;
+    }
+    return true;
+}
+
+/* Read the NEW rows into entries[0..placed). False when a row is truncated
+ * (`*bad_n` names it). */
+static bool addrman_load_new_rows(struct addr_man *am, struct byte_stream *s,
+                                  uint8_t nVersion, int64_t now, int32_t nNew,
+                                  int *remap, int *placed_out,
+                                  int *nDropped, int *bad_n)
+{
+    int placed = 0;
+    for (int n = 0; n < nNew; n++) {
+        struct addr_info info;
+        bool usable = false;
+        if (!addrman_read_entry(s, nVersion, now, &info, &usable)) {
+            *bad_n = n;
+            return false;
+        }
+        if (!usable) {
+            remap[n] = -1;
+            (*nDropped)++;
+            continue;
+        }
+
+        int id = placed++;
+        remap[n] = id;
+        am->entries[id] = info;
+        struct addr_info *stored = &am->entries[id];
+        stored->random_pos = (int)am->random_size;
+        addrman_random_push_locked(am, id);
+        /* Bucket placement happens after the table is read, in one pass that
+         * handles both "the table placed it" and "nothing did". */
+    }
+    *placed_out = placed;
+    return true;
+}
+
+/* Try to seat one TRIED entry; false when its slot is taken or the array
+ * cannot grow. */
+static bool addrman_place_tried(struct addr_man *am, struct addr_info *info)
+{
+    int nKBucket = addr_info_get_tried_bucket(info, &am->nKey);
+    int nKBucketPos = addr_info_get_bucket_position(info, &am->nKey,
+                                                     false, nKBucket);
+    if (am->vvTried[nKBucket][nKBucketPos] != -1)
+        return false;
+    info->random_pos = (int)am->random_size;
+    info->in_tried = true;
+    int id = am->id_count++;
+    if ((size_t)id >= am->entries_cap) {
+        size_t new_cap = am->entries_cap * 2;
+        while (new_cap <= (size_t)id) new_cap *= 2;
+        struct addr_info *p = zcl_realloc(am->entries,
+            new_cap * sizeof(struct addr_info), "addr_entries");
+        if (!p) { am->id_count--; return false; }
+        memset(p + am->entries_cap, 0,
+            (new_cap - am->entries_cap) * sizeof(struct addr_info));
+        am->entries = p;
+        am->entries_cap = new_cap;
+    }
+    am->entries[id] = *info;
+    addrman_random_push_locked(am, id);
+    am->vvTried[nKBucket][nKBucketPos] = id;
+    return true;
+}
+
+/* Read the TRIED rows. False when a row is truncated (`*bad_n` names it). */
+static bool addrman_load_tried_rows(struct addr_man *am, struct byte_stream *s,
+                                    uint8_t nVersion, int64_t now,
+                                    int32_t nTried, int *nLost,
+                                    int *nDropped, int *bad_n)
+{
+    for (int n = 0; n < nTried; n++) {
+        struct addr_info info;
+        bool usable = false;
+        if (!addrman_read_entry(s, nVersion, now, &info, &usable)) {
+            *bad_n = n;
+            return false;
+        }
+        if (!usable) {
+            (*nLost)++;
+            (*nDropped)++;
+            continue;
+        }
+
+        if (!addrman_place_tried(am, &info))
+            (*nLost)++;
+    }
+    return true;
+}
+
+/* How many buckets of the table are worth walking: none when the writer's
+ * geometry or format version rules the table out. */
+static int addrman_bucket_walk_limit(uint8_t nVersion, int32_t nUBuckets,
+                                     int table_buckets)
+{
+    bool table_usable = (nVersion >= ADDRMAN_SER_VERSION_LEGACY &&
+                         nUBuckets == ADDRMAN_NEW_BUCKET_COUNT);
+    return table_usable ? table_buckets : 0;
+}
+
+/* Seat one bucket-table slot onto the row it names, if that row survived. */
+static void addrman_apply_bucket_slot(struct addr_man *am, const int *remap,
+                                      int32_t nNew, int bucket, int32_t nIndex)
+{
+    if (nIndex < 0 || nIndex >= nNew)
+        return;
+    int id = remap ? remap[nIndex] : -1;
+    if (id < 0 || (size_t)id >= am->entries_cap)
+        return;   /* the row this slot named was dropped on load */
+    struct addr_info *info = &am->entries[id];
+    int nUBucketPos = addr_info_get_bucket_position(
+        info, &am->nKey, true, bucket);
+    if (am->vvNew[bucket][nUBucketPos] == -1 &&
+        info->ref_count < ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
+        info->ref_count++;
+        am->vvNew[bucket][nUBucketPos] = id;
+    }
+}
+
+/* Read one bucket of the table. Returns 0 on success, 1 when the bucket size
+ * is unreadable or out of range, 2 when its index list is truncated. */
+static int addrman_read_bucket(struct addr_man *am, struct byte_stream *s,
+                               const int *remap, int32_t nNew, int bucket)
+{
+    int32_t nSize;
+    if (!stream_read_i32_le(s, &nSize) ||
+        nSize < 0 || nSize > ADDRMAN_BUCKET_SIZE)
+        return 1;
+    for (int n = 0; n < nSize; n++) {
+        int32_t nIndex;
+        if (!stream_read_i32_le(s, &nIndex))
+            return 2;
+        addrman_apply_bucket_slot(am, remap, nNew, bucket, nIndex);
+    }
+    return 0;
+}
+
+/* Bucket every NEW entry the table left unplaced; returns how many. */
+static int addrman_rebucket_unplaced(struct addr_man *am, int placed)
+{
+    int rebucketed = 0;
+    for (int i = 0; i < placed; i++) {
+        struct addr_info *info = &am->entries[i];
+        if (!info->used || info->in_tried || info->ref_count > 0)
+            continue;
+        int nUBucket = addr_info_get_new_bucket(info, &am->nKey,
+                                                 &info->source);
+        int nUBucketPos = addr_info_get_bucket_position(info, &am->nKey,
+                                                         true, nUBucket);
+        if (am->vvNew[nUBucket][nUBucketPos] == -1) {
+            am->vvNew[nUBucket][nUBucketPos] = i;
+            info->ref_count++;
+            rebucketed++;
+        }
+    }
+    return rebucketed;
+}
+
+/* Size and fill the in-memory address index from the loaded entries. */
+static void addrman_rebuild_loaded_index(struct addr_man *am)
+{
+    size_t want = ADDRMAN_INDEX_INITIAL_SLOTS;
+    while ((size_t)(am->id_count + 1) * 2 >= want)
+        want *= 2;
+    addrman_index_rebuild_locked(am, want);
 }
 
 bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
@@ -289,11 +552,11 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * multi-GB zcl_realloc. LOG_FAIL alone (the prior form) logged but continued
      * into the overflow, so this must return false. A valid peers.dat never has
      * negative or over-cap counts, so this rejects only corrupt input. */
-    if (nNew < 0 || nNew > ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE) {
+    if (!addrman_new_count_ok(nNew)) {
         LOG_FAIL("addrman", "deserialize: nNew=%d out of range", nNew);
         return false;
     }
-    if (nTried < 0 || nTried > ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE) {
+    if (!addrman_tried_count_ok(nTried)) {
         LOG_FAIL("addrman", "deserialize: nTried=%d out of range", nTried);
         return false;
     }
@@ -306,22 +569,10 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * outcome this store exists to prevent — over something we can recompute.
      * Clamp the walk instead; nothing is read after the table, so stopping
      * early costs nothing. */
-    int table_buckets = nUBuckets;
-    if (table_buckets < 0)
-        table_buckets = 0;
-    if (table_buckets > ADDRMAN_NEW_BUCKET_COUNT)
-        table_buckets = ADDRMAN_NEW_BUCKET_COUNT;
+    int table_buckets = addrman_clamp_table_buckets(nUBuckets);
 
     size_t need = (size_t)(nNew + nTried);
-    if (need > am->entries_cap) {
-        struct addr_info *p = zcl_realloc(am->entries,
-                                       need * sizeof(struct addr_info), "addr_entries");
-        if (!p) LOG_FAIL("addrman", "deserialize: realloc failed for entries need=%zu", need);
-        memset(p + am->entries_cap, 0,
-               (need - am->entries_cap) * sizeof(struct addr_info));
-        am->entries = p;
-        am->entries_cap = need;
-    }
+    if (!addrman_reserve_entries(am, need)) LOG_FAIL("addrman", "deserialize: realloc failed for entries need=%zu", need);
 
     const int64_t now = GetAdjustedTime();
 
@@ -332,118 +583,48 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * like this keeps entries[0..id_count) hole-free, which the bucket
      * tables, the random order and the address index all rely on. */
     int *remap = NULL;
-    if (nNew > 0) {
-        remap = zcl_calloc((size_t)nNew, sizeof(int), "addr_deser_remap");
-        if (!remap) LOG_FAIL("addrman", "deserialize: alloc failed for remap");
-    }
+    if (!addrman_alloc_remap(nNew, &remap)) LOG_FAIL("addrman", "deserialize: alloc failed for remap");
 
     int placed = 0;
     int nDropped = 0;
-    for (int n = 0; n < nNew; n++) {
-        struct addr_info info;
-        bool usable = false;
-        if (!addrman_read_entry(s, nVersion, now, &info, &usable)) {
-            free(remap);
-            LOG_FAIL("addrman", "deserialize: failed to read new entry n=%d", n);
-            return false;
-        }
-        if (!usable) {
-            remap[n] = -1;
-            nDropped++;
-            continue;
-        }
-
-        int id = placed++;
-        remap[n] = id;
-        am->entries[id] = info;
-        struct addr_info *stored = &am->entries[id];
-        stored->random_pos = (int)am->random_size;
-        addrman_random_push_locked(am, id);
-        /* Bucket placement happens after the table is read, in one pass that
-         * handles both "the table placed it" and "nothing did". */
+    int n = 0;
+    if (!addrman_load_new_rows(am, s, nVersion, now, nNew, remap, &placed,
+                               &nDropped, &n)) {
+        free(remap);
+        LOG_FAIL("addrman", "deserialize: failed to read new entry n=%d", n);
+        return false;
     }
     am->id_count = placed;
     am->new_count = placed;
 
     int nLost = 0;
-    for (int n = 0; n < nTried; n++) {
-        struct addr_info info;
-        bool usable = false;
-        if (!addrman_read_entry(s, nVersion, now, &info, &usable)) {
-            free(remap);
-            LOG_FAIL("addrman", "deserialize: failed to read tried entry n=%d", n);
-            return false;
-        }
-        if (!usable) {
-            nLost++;
-            nDropped++;
-            continue;
-        }
-
-        int nKBucket = addr_info_get_tried_bucket(&info, &am->nKey);
-        int nKBucketPos = addr_info_get_bucket_position(&info, &am->nKey,
-                                                         false, nKBucket);
-        if (am->vvTried[nKBucket][nKBucketPos] == -1) {
-            info.random_pos = (int)am->random_size;
-            info.in_tried = true;
-            int id = am->id_count++;
-            if ((size_t)id >= am->entries_cap) {
-                size_t new_cap = am->entries_cap * 2;
-                while (new_cap <= (size_t)id) new_cap *= 2;
-                struct addr_info *p = zcl_realloc(am->entries,
-                    new_cap * sizeof(struct addr_info), "addr_entries");
-                if (!p) { am->id_count--; nLost++; continue; }
-                memset(p + am->entries_cap, 0,
-                    (new_cap - am->entries_cap) * sizeof(struct addr_info));
-                am->entries = p;
-                am->entries_cap = new_cap;
-            }
-            am->entries[id] = info;
-            addrman_random_push_locked(am, id);
-            am->vvTried[nKBucket][nKBucketPos] = id;
-        } else {
-            nLost++;
-        }
+    if (!addrman_load_tried_rows(am, s, nVersion, now, nTried, &nLost,
+                                 &nDropped, &n)) {
+        free(remap);
+        LOG_FAIL("addrman", "deserialize: failed to read tried entry n=%d", n);
+        return false;
     }
     am->tried_count = nTried - nLost;
 
     /* Apply the bucket table. Every failure here ABANDONS THE TABLE and keeps
      * the addresses: a truncated or nonsensical hint costs us the writer's
      * layout, which the pass below recomputes, and never the address book. */
-    bool table_usable = (nVersion >= ADDRMAN_SER_VERSION_LEGACY &&
-                         nUBuckets == ADDRMAN_NEW_BUCKET_COUNT);
-    for (int bucket = 0; table_usable && bucket < table_buckets; bucket++) {
-        int32_t nSize;
-        if (!stream_read_i32_le(s, &nSize) ||
-            nSize < 0 || nSize > ADDRMAN_BUCKET_SIZE) {
+    int walk_limit = addrman_bucket_walk_limit(nVersion, nUBuckets, table_buckets);
+    for (int bucket = 0; bucket < walk_limit; bucket++) {
+        int bstat = addrman_read_bucket(am, s, remap, nNew, bucket);
+        if (bstat == 1) {
             LOG_WARN("addrman",
                      "load: bucket table unreadable at bucket=%d — "
                      "re-bucketing the remaining addresses ourselves", bucket);
             break;
         }
-        for (int n = 0; n < nSize; n++) {
-            int32_t nIndex;
-            if (!stream_read_i32_le(s, &nIndex)) {
-                LOG_WARN("addrman",
-                         "load: bucket table truncated at bucket=%d — "
-                         "re-bucketing the remaining addresses ourselves",
-                         bucket);
-                bucket = table_buckets;   /* stop the outer walk too */
-                break;
-            }
-            if (nIndex < 0 || nIndex >= nNew)
-                continue;
-            int id = remap ? remap[nIndex] : -1;
-            if (id < 0 || (size_t)id >= am->entries_cap)
-                continue;   /* the row this slot named was dropped on load */
-            struct addr_info *info = &am->entries[id];
-            int nUBucketPos = addr_info_get_bucket_position(
-                info, &am->nKey, true, bucket);
-            if (am->vvNew[bucket][nUBucketPos] == -1 &&
-                info->ref_count < ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
-                info->ref_count++;
-                am->vvNew[bucket][nUBucketPos] = id;
-            }
+        if (bstat == 2) {
+            LOG_WARN("addrman",
+                     "load: bucket table truncated at bucket=%d — "
+                     "re-bucketing the remaining addresses ourselves",
+                     bucket);
+            bucket = walk_limit;   /* stop the outer walk too */
+            break;
         }
     }
 
@@ -456,21 +637,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * nKey. An address that loads into no bucket can never be selected, so
      * leaving it unplaced would be memory we kept and could not use. Deriving
      * the position ourselves is also the safer reading of an untrusted hint. */
-    int rebucketed = 0;
-    for (int i = 0; i < placed; i++) {
-        struct addr_info *info = &am->entries[i];
-        if (!info->used || info->in_tried || info->ref_count > 0)
-            continue;
-        int nUBucket = addr_info_get_new_bucket(info, &am->nKey,
-                                                 &info->source);
-        int nUBucketPos = addr_info_get_bucket_position(info, &am->nKey,
-                                                         true, nUBucket);
-        if (am->vvNew[nUBucket][nUBucketPos] == -1) {
-            am->vvNew[nUBucket][nUBucketPos] = i;
-            info->ref_count++;
-            rebucketed++;
-        }
-    }
+    int rebucketed = addrman_rebucket_unplaced(am, placed);
     if (rebucketed > 0)
         LOG_INFO("addrman", "load: re-bucketed %d address(es) from their own "
                             "addresses", rebucketed);
@@ -483,12 +650,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
     /* Rebuild the in-memory address index from the loaded entries (the index
      * is never serialized). addrman_clear() above emptied it; size it to hold
      * every loaded id at < 50% load, then fold in all used entries. */
-    {
-        size_t want = ADDRMAN_INDEX_INITIAL_SLOTS;
-        while ((size_t)(am->id_count + 1) * 2 >= want)
-            want *= 2;
-        addrman_index_rebuild_locked(am, want);
-    }
+    addrman_rebuild_loaded_index(am);
 
     return true;
 }

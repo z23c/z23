@@ -819,6 +819,35 @@ static bool register_self(sqlite3 *db)
 
 /* ── The census bridge ────────────────────────────────────── */
 
+static void odir_observe_one(sqlite3 *db, sqlite3_stmt *up_ok, sqlite3_stmt *up_fail,
+                             const struct onion_directory_observation *o, int64_t now,
+                             struct onion_directory_refresh_stats *st)
+{
+    if (!onion_hostname_valid(o->hostname)) {
+        st->unknown++;
+        return;
+    }
+    int64_t probe = (o->observed_unix > 0 && o->observed_unix <= now)
+                        ? o->observed_unix : now;
+    sqlite3_stmt *s = o->reachable ? up_ok : up_fail;
+    sqlite3_reset(s);
+    if (o->reachable) {
+        for (int c = 1; c <= 3; c++)
+            sqlite3_bind_int64(s, c, probe);
+        sqlite3_bind_int64(s, 4, o->best_height > 0 ? o->best_height : 0);
+        sqlite3_bind_text(s, 5, o->hostname, -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_int64(s, 1, probe);
+        sqlite3_bind_text(s, 2, o->hostname, -1, SQLITE_STATIC);
+    }
+    if (AR_STEP_WRITE(s) != SQLITE_DONE || sqlite3_changes(db) <= 0)
+        st->unknown++;
+    else if (o->reachable)
+        st->observed++, st->refreshed++;
+    else
+        st->observed++, st->failed++;
+}
+
 int onion_service_directory_observe(const struct onion_directory_observation *obs,
                                     size_t n,
                                     struct onion_directory_refresh_stats *out)
@@ -861,38 +890,7 @@ int onion_service_directory_observe(const struct onion_directory_observation *ob
     struct onion_directory_refresh_stats st = {0};
     int64_t now = (int64_t)platform_time_wall_time_t();
     for (size_t i = 0; i < n; i++) {
-        const struct onion_directory_observation *o = &obs[i];
-        if (!onion_hostname_valid(o->hostname)) {
-            st.unknown++;
-            continue;
-        }
-        int64_t probe = (o->observed_unix > 0 && o->observed_unix <= now)
-                            ? o->observed_unix : now;
-        if (o->reachable) {
-            sqlite3_reset(up_ok);
-            sqlite3_bind_int64(up_ok, 1, probe);
-            sqlite3_bind_int64(up_ok, 2, probe);
-            sqlite3_bind_int64(up_ok, 3, probe);
-            sqlite3_bind_int64(up_ok, 4,
-                               o->best_height > 0 ? o->best_height : 0);
-            sqlite3_bind_text(up_ok, 5, o->hostname, -1, SQLITE_STATIC);
-            if (AR_STEP_WRITE(up_ok) == SQLITE_DONE && sqlite3_changes(db) > 0) {
-                st.observed++;
-                st.refreshed++;
-            } else {
-                st.unknown++;
-            }
-        } else {
-            sqlite3_reset(up_fail);
-            sqlite3_bind_int64(up_fail, 1, probe);
-            sqlite3_bind_text(up_fail, 2, o->hostname, -1, SQLITE_STATIC);
-            if (AR_STEP_WRITE(up_fail) == SQLITE_DONE && sqlite3_changes(db) > 0) {
-                st.observed++;
-                st.failed++;
-            } else {
-                st.unknown++;
-            }
-        }
+        odir_observe_one(db, up_ok, up_fail, &obs[i], now, &st);
     }
     sqlite3_finalize(up_ok);
     sqlite3_finalize(up_fail);
@@ -948,6 +946,42 @@ static int64_t odir_json_int(const char *seg, const char *key, int64_t dflt)
     return (int64_t)strtoll(k, NULL, 10);
 }
 
+static bool odir_hint_take_host(const char **pp, char host[64])
+{
+    const char *p = *pp, *end = strchr(p, '"');
+    size_t hlen = end ? (size_t)(end - p) : 0;
+    *pp = hlen ? end + 1 : p + 1;
+    if (hlen == 0 || hlen >= 64)
+        return false;
+    memcpy(host, p, hlen);
+    host[hlen] = '\0';
+    return true;
+}
+
+static void odir_hint_fill(struct onion_relay_hint *h, const char *host, const char *p)
+{
+    /* Only the rest of THIS object, so a later node's port/height can
+     * never be read as this one's. */
+    char seg[512];
+    size_t seglen = strcspn(p, "}");
+    if (seglen >= sizeof(seg))
+        seglen = sizeof(seg) - 1;
+    memcpy(seg, p, seglen);
+    seg[seglen] = '\0';
+    memset(h, 0, sizeof(*h));
+    snprintf(h->hostname, sizeof(h->hostname), "%s", host);
+    int64_t port = odir_json_int(seg, "\"port\"", 0), height, seen;
+    h->port = (port > 0 && port <= 65535) ? (int)port : 0;
+    height = odir_json_int(seg, "\"height\"", 0);
+    h->height = (height > 0 && height <= 0x7fffffff) ? (int)height : 0;
+    seen = odir_json_int(seg, "\"last_seen\"", 0);
+    h->last_seen = seen > 0 ? seen : 0;
+    /* The app-service advertisement, same per-object binding: only the
+     * rest of THIS object, normalized (junk ids dropped, capped). An
+     * old peer simply has no "apps" key and reads as "". */
+    (void)onion_directory_apps_from_json(seg, h->apps, sizeof(h->apps));
+}
+
 int onion_directory_parse_relay_hints(const char *body, const char *self_host,
                                       struct onion_relay_hint *out, size_t max)
 {
@@ -961,20 +995,9 @@ int onion_directory_parse_relay_hints(const char *body, const char *self_host,
     const char *p = body;
     while ((size_t)kept < max && (p = strstr(p, NEEDLE)) != NULL) {
         p += NEEDLE_LEN;
-        const char *end = strchr(p, '"');
-        if (!end || end == p) {
-            p++;
-            continue;
-        }
-        size_t hlen = (size_t)(end - p);
         char host[64];
-        if (hlen >= sizeof(host)) {
-            p = end + 1;
+        if (!odir_hint_take_host(&p, host))
             continue;
-        }
-        memcpy(host, p, hlen);
-        host[hlen] = '\0';
-        p = end + 1;
 
         /* Every hostname, from every source, through the one v3 rule. */
         if (!onion_hostname_valid(host))
@@ -986,30 +1009,7 @@ int onion_directory_parse_relay_hints(const char *body, const char *self_host,
             dup = (strcmp(out[i].hostname, host) == 0);
         if (dup)
             continue;
-
-        /* Only the rest of THIS object, so a later node's port/height can
-         * never be read as this one's. */
-        char seg[512];
-        const char *obj_end = strchr(p, '}');
-        size_t seglen = obj_end ? (size_t)(obj_end - p) : strlen(p);
-        if (seglen >= sizeof(seg))
-            seglen = sizeof(seg) - 1;
-        memcpy(seg, p, seglen);
-        seg[seglen] = '\0';
-
-        memset(&out[kept], 0, sizeof(out[kept]));
-        snprintf(out[kept].hostname, sizeof(out[kept].hostname), "%s", host);
-        int64_t port = odir_json_int(seg, "\"port\"", 0);
-        out[kept].port = (port > 0 && port <= 65535) ? (int)port : 0;
-        int64_t height = odir_json_int(seg, "\"height\"", 0);
-        out[kept].height = (height > 0 && height <= 0x7fffffff) ? (int)height : 0;
-        int64_t seen = odir_json_int(seg, "\"last_seen\"", 0);
-        out[kept].last_seen = seen > 0 ? seen : 0;
-        /* The app-service advertisement, same per-object binding: only the
-         * rest of THIS object, normalized (junk ids dropped, capped). An
-         * old peer simply has no "apps" key and reads as "". */
-        (void)onion_directory_apps_from_json(seg, out[kept].apps,
-                                             sizeof(out[kept].apps));
+        odir_hint_fill(&out[kept], host, p);
         kept++;
     }
     return kept;

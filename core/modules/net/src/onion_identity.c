@@ -138,6 +138,71 @@ static bool onion_identity_dir(const char *datadir, char *dir_out,
     return true;
 }
 
+enum {
+    ONION_MINT_OK = 0,
+    ONION_MINT_CSPRNG_FAILED,
+    ONION_MINT_WRITE_FAILED
+};
+
+static int onion_identity_mint_seed(uint8_t seed_out[32], const char *seed_path)
+{
+    if (!zcl_random_secret_bytes(seed_out, 32, "onion_identity_seed"))
+        return ONION_MINT_CSPRNG_FAILED;
+    struct platform_private_file seed_file;
+    platform_private_file_init(&seed_file);
+    if (!platform_private_file_create(seed_path, &seed_file) ||
+        !platform_private_file_write_at(&seed_file, seed_out, 32, 0) ||
+        !platform_private_file_truncate(&seed_file, 32) ||
+        !platform_private_file_flush(&seed_file)) {
+        platform_private_file_close(&seed_file);
+        return ONION_MINT_WRITE_FAILED;
+    }
+    platform_private_file_close(&seed_file);
+    return ONION_MINT_OK;
+}
+
+static bool onion_identity_archive_seed(struct platform_private_file *seed_file,
+                                        const char *seed_path,
+                                        const char *seed_arch)
+{
+    struct platform_private_file_identity seed_identity;
+    bool already_same = false;
+    if (!platform_private_file_identity(seed_file, &seed_identity) ||
+        !platform_private_file_link_no_clobber(seed_path, seed_arch,
+                                               &seed_identity,
+                                               &already_same) ||
+        !platform_private_file_retire_if_identity(seed_file, seed_path,
+                                                  &seed_identity)) {
+        platform_private_file_close(seed_file);
+        return false;
+    }
+    platform_private_file_close(seed_file);
+    return true;
+}
+
+static bool onion_identity_archive_hostname(const char *hostname_path,
+                                            const char *host_arch)
+{
+    struct platform_private_file hostname_file;
+    struct platform_private_file_identity hostname_identity;
+    bool already_same = false;
+    platform_private_file_init(&hostname_file);
+    if (!platform_private_file_open_locked(hostname_path, &hostname_file) ||
+        !platform_private_file_identity(&hostname_file,
+                                         &hostname_identity) ||
+        !platform_private_file_link_no_clobber(hostname_path, host_arch,
+                                               &hostname_identity,
+                                               &already_same) ||
+        !platform_private_file_retire_if_identity(&hostname_file,
+                                                  hostname_path,
+                                                  &hostname_identity)) {
+        platform_private_file_close(&hostname_file);
+        return false;
+    }
+    platform_private_file_close(&hostname_file);
+    return true;
+}
+
 bool onion_identity_ensure(const char *datadir, uint8_t seed_out[32],
                            char *addr_out, size_t addr_out_size,
                            bool *created_out)
@@ -162,19 +227,12 @@ bool onion_identity_ensure(const char *datadir, uint8_t seed_out[32],
                             "would change the shop's address); restore the "
                             "file or pass -onion-rotate", seed_path);
     } else {
-        if (!zcl_random_secret_bytes(seed_out, 32, "onion_identity_seed"))
+        int mint = onion_identity_mint_seed(seed_out, seed_path);
+        if (mint == ONION_MINT_CSPRNG_FAILED)
             LOG_FAIL("tor", "CSPRNG refused the onion identity seed");
-        struct platform_private_file seed_file;
-        platform_private_file_init(&seed_file);
-        if (!platform_private_file_create(seed_path, &seed_file) ||
-            !platform_private_file_write_at(&seed_file, seed_out, 32, 0) ||
-            !platform_private_file_truncate(&seed_file, 32) ||
-            !platform_private_file_flush(&seed_file)) {
-            platform_private_file_close(&seed_file);
+        if (mint == ONION_MINT_WRITE_FAILED)
             LOG_FAIL("tor", "cannot write onion identity seed %s: %s",
                      seed_path, strerror(errno));
-        }
-        platform_private_file_close(&seed_file);
         created = true;
     }
 
@@ -241,39 +299,14 @@ bool onion_identity_rotate(const char *datadir, char *old_addr_out,
     snprintf(seed_arch, sizeof(seed_arch), "%s/identity_seed.%s",
              archive, addr);
     snprintf(host_arch, sizeof(host_arch), "%s/hostname.%s", archive, addr);
-    struct platform_private_file_identity seed_identity;
-    bool already_same = false;
-    if (!platform_private_file_identity(&seed_file, &seed_identity) ||
-        !platform_private_file_link_no_clobber(seed_path, seed_arch,
-                                               &seed_identity,
-                                               &already_same) ||
-        !platform_private_file_retire_if_identity(&seed_file, seed_path,
-                                                  &seed_identity)) {
-        platform_private_file_close(&seed_file);
+    if (!onion_identity_archive_seed(&seed_file, seed_path, seed_arch))
         LOG_FAIL("tor", "failed to archive exact onion identity seed to %s",
                  seed_arch);
-    }
-    platform_private_file_close(&seed_file);
 
     if (!platform_private_path_absent(hostname_path)) {
-        struct platform_private_file hostname_file;
-        struct platform_private_file_identity hostname_identity;
-        platform_private_file_init(&hostname_file);
-        already_same = false;
-        if (!platform_private_file_open_locked(hostname_path, &hostname_file) ||
-            !platform_private_file_identity(&hostname_file,
-                                             &hostname_identity) ||
-            !platform_private_file_link_no_clobber(hostname_path, host_arch,
-                                                   &hostname_identity,
-                                                   &already_same) ||
-            !platform_private_file_retire_if_identity(&hostname_file,
-                                                      hostname_path,
-                                                      &hostname_identity)) {
-            platform_private_file_close(&hostname_file);
+        if (!onion_identity_archive_hostname(hostname_path, host_arch))
             LOG_FAIL("tor", "failed to archive exact onion hostname to %s",
                      host_arch);
-        }
-        platform_private_file_close(&hostname_file);
     }
 
     memcpy(old_addr_out, addr, 57);

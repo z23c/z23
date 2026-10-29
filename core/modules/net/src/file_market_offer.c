@@ -82,7 +82,7 @@ static void domain_hash(const char *domain, size_t domain_len,
     sha3_256_finalize(&sha, out);
 }
 
-const char *file_offer_auth_error_string(enum file_offer_auth_error error)
+static const char *auth_error_string_head(enum file_offer_auth_error error)
 {
     switch (error) {
     case FILE_OFFER_AUTH_OK: return "ok";
@@ -94,6 +94,13 @@ const char *file_offer_auth_error_string(enum file_offer_auth_error error)
     case FILE_OFFER_AUTH_ERR_CONTENT_ROOT: return "content-root-zero";
     case FILE_OFFER_AUTH_ERR_SELLER_KEY: return "seller-key-zero";
     case FILE_OFFER_AUTH_ERR_NONCE: return "nonce-invalid";
+    default: return NULL;
+    }
+}
+
+static const char *auth_error_string_body(enum file_offer_auth_error error)
+{
+    switch (error) {
     case FILE_OFFER_AUTH_ERR_FILENAME: return "filename-invalid";
     case FILE_OFFER_AUTH_ERR_SIZE: return "size-invalid";
     case FILE_OFFER_AUTH_ERR_CHUNKS: return "chunk-count-invalid";
@@ -103,13 +110,30 @@ const char *file_offer_auth_error_string(enum file_offer_auth_error error)
     case FILE_OFFER_AUTH_ERR_ENDPOINT: return "endpoint-invalid";
     case FILE_OFFER_AUTH_ERR_TIME: return "time-order-invalid";
     case FILE_OFFER_AUTH_ERR_LIFETIME: return "lifetime-too-long";
+    default: return NULL;
+    }
+}
+
+static const char *auth_error_string_tail(enum file_offer_auth_error error)
+{
+    switch (error) {
     case FILE_OFFER_AUTH_ERR_SIGNATURE: return "signature-invalid";
     case FILE_OFFER_AUTH_ERR_KEY_MISMATCH: return "seller-key-mismatch";
     case FILE_OFFER_AUTH_ERR_NETWORK_MISMATCH: return "network-mismatch";
     case FILE_OFFER_AUTH_ERR_EXPIRED: return "offer-expired";
     case FILE_OFFER_AUTH_ERR_NOT_YET_VALID: return "offer-not-yet-valid";
+    default: return NULL;
     }
-    return "unknown";
+}
+
+const char *file_offer_auth_error_string(enum file_offer_auth_error error)
+{
+    const char *text = auth_error_string_head(error);
+    if (!text)
+        text = auth_error_string_body(error);
+    if (!text)
+        text = auth_error_string_tail(error);
+    return text ? text : "unknown";
 }
 
 static bool price_for_bytes(uint64_t size_bytes, int64_t price_per_mb,
@@ -225,13 +249,9 @@ static enum file_offer_auth_error offer_endpoint_fields(
     return FILE_OFFER_AUTH_ERR_ENDPOINT;
 }
 
-static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
-                                                bool require_signature)
+static enum file_offer_auth_error offer_identity_fields(
+    const struct file_offer *offer)
 {
-    struct jub_point payment_key;
-    int64_t total_price_zat;
-    uint32_t expected_chunks = 0;
-    size_t name_len;
     if (!offer)
         return FILE_OFFER_AUTH_ERR_NULL;
     if (!file_offer_auth_version_supported(offer->auth_version))
@@ -244,6 +264,16 @@ static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
         return FILE_OFFER_AUTH_ERR_SELLER_KEY;
     if (offer->nonce == 0 || offer->nonce > (uint64_t)INT64_MAX)
         return FILE_OFFER_AUTH_ERR_NONCE;
+    return FILE_OFFER_AUTH_OK;
+}
+
+static enum file_offer_auth_error offer_content_fields(
+    const struct file_offer *offer)
+{
+    struct jub_point payment_key;
+    int64_t total_price_zat;
+    uint32_t expected_chunks = 0;
+    size_t name_len;
     name_len = strnlen(offer->filename, sizeof(offer->filename));
     if (name_len == 0 || name_len > 255)
         return FILE_OFFER_AUTH_ERR_FILENAME;
@@ -261,6 +291,18 @@ static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
         !jub_from_bytes(&payment_key, offer->z_addr + 11) ||
         jub_is_identity(&payment_key))
         return FILE_OFFER_AUTH_ERR_PAYMENT_ADDRESS;
+    return FILE_OFFER_AUTH_OK;
+}
+
+static enum file_offer_auth_error offer_fields(const struct file_offer *offer,
+                                                bool require_signature)
+{
+    enum file_offer_auth_error identity = offer_identity_fields(offer);
+    if (identity != FILE_OFFER_AUTH_OK)
+        return identity;
+    enum file_offer_auth_error content = offer_content_fields(offer);
+    if (content != FILE_OFFER_AUTH_OK)
+        return content;
     enum file_offer_auth_error endpoint = offer_endpoint_fields(offer);
     if (endpoint != FILE_OFFER_AUTH_OK)
         return endpoint;

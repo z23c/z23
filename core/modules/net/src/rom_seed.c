@@ -142,12 +142,138 @@ static int reg_slot_locked(const char *filename)
     return -1;
 }
 
+/* Read exactly `want` bytes at `offset` into buf. Returns 0 on success, -1 on
+ * a read error, 1 on an unexpected EOF; *got is the byte count read so far. */
+static int rom_seed_read_exact(struct platform_positioned_file *file,
+                               uint8_t *buf, uint32_t want, uint64_t offset,
+                               uint32_t *got)
+{
+    *got = 0;
+    while (*got < want) {
+        int64_t r = platform_positioned_file_read(
+            file, buf + *got, want - *got, offset + *got);
+        if (r < 0)
+            return -1;
+        if (r == 0)
+            return 1;
+        *got += (uint32_t)r;
+    }
+    return 0;
+}
+
+static bool rom_seed_register_chunk_count_ok(uint32_t num_chunks)
+{
+    return !(num_chunks == 0 || num_chunks > ROM_SEED_MAX_CHUNKS);
+}
+
+static void rom_seed_register_copy_out(struct rom_artifact *out,
+                                       const struct rom_artifact *art)
+{
+    if (out)
+        *out = *art;
+}
+
+static bool rom_seed_register_args_ok(const char *datadir,
+                                      const char *filename)
+{
+    return datadir && datadir[0] && rom_filename_ok(filename);
+}
+
+static bool rom_seed_register_path_ok(char *path, size_t cap,
+                                      const char *datadir,
+                                      const char *filename)
+{
+    int pn = snprintf(path, cap, "%s/%s", datadir, filename);
+    return !(pn <= 0 || (size_t)pn >= cap);
+}
+
+static void rom_seed_register_art_init(struct rom_artifact *art,
+                                       enum rom_artifact_kind kind,
+                                       const char *datadir,
+                                       const char *filename,
+                                       uint64_t size_bytes,
+                                       uint32_t num_chunks)
+{
+    memset(art, 0, sizeof(*art));
+    art->kind = kind;
+    snprintf(art->filename, sizeof(art->filename), "%s", filename);
+    art->size_bytes = size_bytes;
+    art->chunk_size = ROM_SEED_CHUNK_SIZE;
+    art->num_chunks = num_chunks;
+    if (kind == ROM_ARTIFACT_HEADER_SEED)
+        art->height = rom_seed_header_seed_height(datadir, filename, size_bytes);
+}
+
+/* Read, check and fold chunk `ci` into the artifact digests. */
+static enum rom_register_result rom_seed_register_chunk(
+    struct platform_positioned_file *file, uint8_t *buf,
+    enum rom_artifact_kind kind, uint64_t size_bytes, uint32_t ci,
+    uint64_t *total_read, struct rom_artifact *art,
+    struct sha3_256_ctx *whole_ctx, struct sha3_256_ctx *root_ctx)
+{
+    /* Read exactly one chunk (short only for the final chunk). */
+    uint32_t want = ROM_SEED_CHUNK_SIZE;
+    uint64_t remaining = size_bytes - *total_read;
+    if (remaining < want)
+        want = (uint32_t)remaining;
+
+    uint32_t got = 0;
+    int rr = rom_seed_read_exact(file, buf, want, *total_read, &got);
+    if (rr < 0)
+        return ROM_REG_ERR_IO;
+    if (rr > 0) /* unexpected EOF vs stat size → corrupt */
+        return ROM_REG_ERR_CORRUPT;
+
+    /* Content check on the first bytes of chunk 0. The window is the
+     * largest any kind needs (the 68-byte ZVSB header); the SQLite check
+     * still reads only its own leading 16 and rejects a short window. */
+    if (ci == 0) {
+        size_t window = got < ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES
+            ? (size_t)got : (size_t)ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES;
+        if (!rom_seed_kind_content_ok(kind, buf, window, size_bytes))
+            return ROM_REG_ERR_CORRUPT;
+        /* The source root is read from the SAME bytes the digests above
+         * are being folded over — never from a name, a sidecar, or a
+         * peer's claim. content_ok already proved it parses. */
+        if (kind == ROM_ARTIFACT_SOURCE_BUNDLE)
+            art->has_source_root =
+                rom_seed_source_bundle_root(buf, window, art->source_root);
+    }
+
+    sha3_256_write(whole_ctx, buf, got);
+    sha3_256(buf, got, art->chunk_sha3[ci]);
+    sha3_256_write(root_ctx, art->chunk_sha3[ci], 32);
+    *total_read += got;
+    return ROM_REG_OK;
+}
+
+static bool rom_seed_register_digest_mismatch(const uint8_t *expected,
+                                              const struct rom_artifact *art)
+{
+    return expected && memcmp(art->whole_sha3, expected, 32) != 0;
+}
+
+/* Insert into the registry under the lock; false when the registry is full. */
+static bool rom_seed_register_store(const char *filename,
+                                    const struct rom_artifact *art)
+{
+    pthread_mutex_lock(&g_reg_mutex);
+    int slot = reg_slot_locked(filename);
+    if (slot < 0) {
+        pthread_mutex_unlock(&g_reg_mutex);
+        return false;
+    }
+    g_artifacts[slot] = *art;
+    pthread_mutex_unlock(&g_reg_mutex);
+    return true;
+}
+
 enum rom_register_result rom_seed_register(const char *datadir,
                                            const char *filename,
                                            const uint8_t *expected_whole_sha3,
                                            struct rom_artifact *out)
 {
-    if (!datadir || !datadir[0] || !rom_filename_ok(filename)) {
+    if (!rom_seed_register_args_ok(datadir, filename)) {
         LOG_WARN(ROM_SUBSYS, "register: bad args (datadir/filename)");
         return ROM_REG_ERR_ARGS;
     }
@@ -159,8 +285,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
     }
 
     char path[1024];
-    int pn = snprintf(path, sizeof(path), "%s/%s", datadir, filename);
-    if (pn <= 0 || (size_t)pn >= sizeof(path)) {
+    if (!rom_seed_register_path_ok(path, sizeof(path), datadir, filename)) {
         LOG_WARN(ROM_SUBSYS, "register: path overflow for '%s'", filename);
         return ROM_REG_ERR_ARGS;
     }
@@ -194,7 +319,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
 
     uint32_t num_chunks =
         (uint32_t)((size_bytes + ROM_SEED_CHUNK_SIZE - 1) / ROM_SEED_CHUNK_SIZE);
-    if (num_chunks == 0 || num_chunks > ROM_SEED_MAX_CHUNKS) {
+    if (!rom_seed_register_chunk_count_ok(num_chunks)) {
         platform_positioned_file_close(&file);
         LOG_WARN(ROM_SUBSYS, "register: '%s' chunk count %u out of range",
                  filename, num_chunks);
@@ -209,14 +334,8 @@ enum rom_register_result rom_seed_register(const char *datadir,
     }
 
     struct rom_artifact art;
-    memset(&art, 0, sizeof(art));
-    art.kind = kind;
-    snprintf(art.filename, sizeof(art.filename), "%s", filename);
-    art.size_bytes = size_bytes;
-    art.chunk_size = ROM_SEED_CHUNK_SIZE;
-    art.num_chunks = num_chunks;
-    if (kind == ROM_ARTIFACT_HEADER_SEED)
-        art.height = rom_seed_header_seed_height(datadir, filename, size_bytes);
+    rom_seed_register_art_init(&art, kind, datadir, filename, size_bytes,
+                               num_chunks);
 
     struct sha3_256_ctx whole_ctx;
     sha3_256_init(&whole_ctx);
@@ -226,51 +345,10 @@ enum rom_register_result rom_seed_register(const char *datadir,
     enum rom_register_result rc = ROM_REG_OK;
     uint64_t total_read = 0;
     for (uint32_t ci = 0; ci < num_chunks; ci++) {
-        /* Read exactly one chunk (short only for the final chunk). */
-        uint32_t want = ROM_SEED_CHUNK_SIZE;
-        uint64_t remaining = size_bytes - total_read;
-        if (remaining < want)
-            want = (uint32_t)remaining;
-
-        uint32_t got = 0;
-        while (got < want) {
-            int64_t r = platform_positioned_file_read(
-                &file, buf + got, want - got, total_read + got);
-            if (r < 0) {
-                rc = ROM_REG_ERR_IO;
-                break;
-            }
-            if (r == 0) { /* unexpected EOF vs stat size → corrupt */
-                rc = ROM_REG_ERR_CORRUPT;
-                break;
-            }
-            got += (uint32_t)r;
-        }
+        rc = rom_seed_register_chunk(&file, buf, kind, size_bytes, ci,
+                                     &total_read, &art, &whole_ctx, &root_ctx);
         if (rc != ROM_REG_OK)
             break;
-
-        /* Content check on the first bytes of chunk 0. The window is the
-         * largest any kind needs (the 68-byte ZVSB header); the SQLite check
-         * still reads only its own leading 16 and rejects a short window. */
-        if (ci == 0) {
-            size_t window = got < ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES
-                ? (size_t)got : (size_t)ROM_SEED_SOURCE_BUNDLE_HEADER_BYTES;
-            if (!rom_seed_kind_content_ok(kind, buf, window, size_bytes)) {
-                rc = ROM_REG_ERR_CORRUPT;
-                break;
-            }
-            /* The source root is read from the SAME bytes the digests above
-             * are being folded over — never from a name, a sidecar, or a
-             * peer's claim. content_ok already proved it parses. */
-            if (kind == ROM_ARTIFACT_SOURCE_BUNDLE)
-                art.has_source_root =
-                    rom_seed_source_bundle_root(buf, window, art.source_root);
-        }
-
-        sha3_256_write(&whole_ctx, buf, got);
-        sha3_256(buf, got, art.chunk_sha3[ci]);
-        sha3_256_write(&root_ctx, art.chunk_sha3[ci], 32);
-        total_read += got;
     }
 
     free(buf);
@@ -284,8 +362,7 @@ enum rom_register_result rom_seed_register(const char *datadir,
     sha3_256_finalize(&whole_ctx, art.whole_sha3);
     sha3_256_finalize(&root_ctx, art.chunk_root);
 
-    if (expected_whole_sha3 &&
-        memcmp(art.whole_sha3, expected_whole_sha3, 32) != 0) {
+    if (rom_seed_register_digest_mismatch(expected_whole_sha3, &art)) {
         LOG_WARN(ROM_SUBSYS, "register: '%s' whole-file digest mismatch "
                  "(corrupt / not the expected artifact)", filename);
         return ROM_REG_ERR_CORRUPT;
@@ -294,19 +371,13 @@ enum rom_register_result rom_seed_register(const char *datadir,
     art.registered_at = (int64_t)platform_time_wall_time_t();
     art.used = true;
 
-    pthread_mutex_lock(&g_reg_mutex);
-    int slot = reg_slot_locked(filename);
-    if (slot < 0) {
-        pthread_mutex_unlock(&g_reg_mutex);
+    if (!rom_seed_register_store(filename, &art)) {
         LOG_WARN(ROM_SUBSYS, "register: registry full (%u), dropping '%s'",
                  ROM_SEED_MAX_ARTIFACTS, filename);
         return ROM_REG_ERR_FULL;
     }
-    g_artifacts[slot] = art;
-    pthread_mutex_unlock(&g_reg_mutex);
 
-    if (out)
-        *out = art;
+    rom_seed_register_copy_out(out, &art);
 
     char root_hex[65];
     HexStr(art.chunk_root, 32, false, root_hex, sizeof(root_hex));
@@ -454,12 +525,8 @@ static int rom_seed_scan_source_bundles(const char *datadir,
     return registered;
 }
 
-int rom_seed_scan_datadir(const char *datadir)
+static int rom_seed_scan_exact_names(const char *datadir)
 {
-    if (!datadir || !datadir[0]) {
-        LOG_WARN(ROM_SUBSYS, "scan: empty datadir");
-        return 0;
-    }
     /* Exactly-named artifacts FIRST, by name. A datadir root grows without
      * bound and readdir order is arbitrary, so leaving these to the walk means
      * a node silently stops offering one the day its datadir gets big enough —
@@ -483,6 +550,16 @@ int rom_seed_scan_datadir(const char *datadir)
             ROM_REG_OK)
             registered++;
     }
+    return registered;
+}
+
+int rom_seed_scan_datadir(const char *datadir)
+{
+    if (!datadir || !datadir[0]) {
+        LOG_WARN(ROM_SUBSYS, "scan: empty datadir");
+        return 0;
+    }
+    int registered = rom_seed_scan_exact_names(datadir);
 
     DIR *d = opendir(datadir);
     if (!d) {
@@ -581,11 +658,19 @@ bool rom_seed_find_by_root(const uint8_t root_hash[32], struct rom_artifact *out
     return found;
 }
 
+static bool rom_seed_read_chunk_arg_null(const struct rom_artifact *a,
+                                         const char *datadir,
+                                         const uint8_t *buf,
+                                         const uint32_t *out_sz)
+{
+    return !a || !datadir || !buf || !out_sz;
+}
+
 bool rom_seed_read_chunk(const struct rom_artifact *a, const char *datadir,
                          uint32_t idx, uint8_t *buf, uint32_t buf_cap,
                          uint32_t *out_sz)
 {
-    if (!a || !datadir || !buf || !out_sz)
+    if (rom_seed_read_chunk_arg_null(a, datadir, buf, out_sz))
         LOG_FAIL(ROM_SUBSYS, "read_chunk: null arg");
     if (idx >= a->num_chunks)
         LOG_FAIL(ROM_SUBSYS, "read_chunk: idx %u >= num_chunks %u",
@@ -616,20 +701,12 @@ bool rom_seed_read_chunk(const struct rom_artifact *a, const char *datadir,
     }
 
     uint32_t got = 0;
-    while (got < want) {
-        int64_t r = platform_positioned_file_read(
-            &file, buf + got, want - got, offset + got);
-        if (r < 0) {
-            platform_positioned_file_close(&file);
-            LOG_FAIL(ROM_SUBSYS, "read_chunk: positioned read failed");
-        }
-        if (r == 0) {
-            platform_positioned_file_close(&file);
-            LOG_FAIL(ROM_SUBSYS, "read_chunk: short read (file changed?)");
-        }
-        got += (uint32_t)r;
-    }
+    int rr = rom_seed_read_exact(&file, buf, want, offset, &got);
     platform_positioned_file_close(&file);
+    if (rr < 0)
+        LOG_FAIL(ROM_SUBSYS, "read_chunk: positioned read failed");
+    if (rr > 0)
+        LOG_FAIL(ROM_SUBSYS, "read_chunk: short read (file changed?)");
 
     uint8_t h[32];
     sha3_256(buf, got, h);
