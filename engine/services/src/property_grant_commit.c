@@ -119,6 +119,250 @@ static uint64_t chain_len(const char *grant_id)
     return n;
 }
 
+/* Outcome of the checks that run before the catalog is consulted. */
+enum commit_pre {
+    COMMIT_PRE_PROCEED = 0,
+    COMMIT_PRE_KEY_REUSED,
+    COMMIT_PRE_REPLAYED,
+    COMMIT_PRE_COMMITTED,
+    COMMIT_PRE_EXPIRED,
+};
+
+/* Lock held, and still held on return. The idempotency lookup and the
+ * already-committed/expired guards of one COMMIT attempt. On KEY_REUSED,
+ * `reused_seq` and `reused_grant` carry what the caller's message names. On
+ * REPLAYED, `out` is already filled. */
+static enum commit_pre commit_precheck(
+    const struct property_grant_plan *plan, const char *idempotency_key,
+    int64_t now, struct property_grant_commit_result *out,
+    uint64_t *reused_seq, char reused_grant[METAVERSE_GRANT_ID_LEN + 1])
+{
+    /* IDEMPOTENCY FIRST. A retry of an already-committed (grant, key) is a
+     * LOOKUP, not a second execution: it must succeed, return the identical
+     * receipt, and charge nothing. Checking this before the
+     * already-committed/expired guards is what makes a retry after a lost
+     * response work at all. */
+    const struct metaverse_receipt *replay = NULL;
+    enum pg_replay_match replay_match = receipt_by_key(
+        plan->grant_id, idempotency_key, &plan->request, &replay);
+    if (replay_match == PG_REPLAY_DIFFERENT) {
+        /* Copied out: everything the message names lives in the store, and the
+         * message is written after the unlock. */
+        *reused_seq = replay->seq;
+        snprintf(reused_grant, METAVERSE_GRANT_ID_LEN + 1, "%s",
+                 plan->grant_id);
+        return COMMIT_PRE_KEY_REUSED;
+    }
+    if (replay_match == PG_REPLAY_SAME) {
+        out->receipt = *replay;
+        out->replayed = true;
+        const struct metaverse_grant *g = pg_find_grant(plan->grant_id);
+        out->budget_remaining_zat = g ? effective_budget_remaining(g) : 0;
+        return COMMIT_PRE_REPLAYED;
+    }
+
+    if (plan->committed) return COMMIT_PRE_COMMITTED;
+    if (now >= plan->expires_unix) return COMMIT_PRE_EXPIRED;
+    return COMMIT_PRE_PROCEED;
+}
+
+/* Outcome of the catalog re-check. */
+enum commit_catalog {
+    COMMIT_CAT_OK = 0,
+    COMMIT_CAT_NO_LOOKUP,
+    COMMIT_CAT_MOVED,
+    COMMIT_CAT_VANISHED,
+    COMMIT_CAT_NOT_FOUND,
+    COMMIT_CAT_OWNER_MISMATCH,
+    COMMIT_CAT_STALE_REVISION,
+};
+
+/* Lock held on entry, and held again on every return. Re-checks 2 and 3. On
+ * OK, `*planp` and `*gp` are re-resolved and `view` is the catalog's answer. */
+static enum commit_catalog commit_read_catalog(
+    const char *plan_id, struct property_grant_plan **planp,
+    struct metaverse_grant **gp, struct metaverse_catalog_view *view)
+{
+    struct property_grant_plan *plan = *planp;
+    /* ── Re-check 2: current ownership and revision from the catalog ──────
+     *
+     * THE LOOKUP RUNS WITH NO LOCK HELD. The real catalog rebuilds every view
+     * from datadir bytes on every call, and doing that inside the store mutex
+     * would stall every other grant decision in the process behind a disk
+     * read. So: copy what the lookup needs, RELEASE, look up, RE-ACQUIRE, and
+     * confirm the store-wide authority generation did not move. Everything
+     * after the re-acquire re-reads the store fresh, exactly as before. */
+    metaverse_catalog_lookup_fn lookup = g_pg_store.env.catalog_lookup;
+    void *lookup_ctx = g_pg_store.env.catalog_ctx;
+    if (!lookup) return COMMIT_CAT_NO_LOOKUP;
+    struct metaverse_property_id target = plan->request.property;
+    uint64_t seen_generation = g_pg_store.authority_generation;
+    pthread_mutex_unlock(&g_pg_store.lock);
+
+    memset(view, 0, sizeof(*view));
+    bool found = lookup(&target, view, lookup_ctx);
+
+    pthread_mutex_lock(&g_pg_store.lock);
+    if (g_pg_store.authority_generation != seen_generation)
+        return COMMIT_CAT_MOVED;
+    /* The generation is unchanged, so nothing was minted, delegated, revoked,
+     * debited or reset; plan and grant are the same records. Re-resolve the
+     * pointers anyway — the arrays are addressed by index and a pointer held
+     * across an unlock is a habit worth not having. */
+    plan = pg_find_plan_locked(plan_id);
+    struct metaverse_grant *g = plan ? pg_find_grant(plan->grant_id) : NULL;
+    *planp = plan;
+    *gp = g;
+    if (!plan || !g) return COMMIT_CAT_VANISHED;
+    if (!found) return COMMIT_CAT_NOT_FOUND;
+    /* The controlling principal must be the one the plan was quoted against.
+     * A property that changed hands between plan and commit is a different
+     * authority situation, and silently committing under the new owner is
+     * exactly the confused-deputy the re-check exists to stop. */
+    if (plan->catalog_seen &&
+        strcmp(view->controller, plan->controller_at_plan) != 0)
+        return COMMIT_CAT_OWNER_MISMATCH;
+    /* ── Re-check 3: OPTIMISTIC CONCURRENCY on the property revision ────── */
+    if (!plan->catalog_seen || view->revision != plan->property_revision)
+        return COMMIT_CAT_STALE_REVISION;
+    return COMMIT_CAT_OK;
+}
+
+/* Outcome of the fresh capability check. */
+enum commit_cap {
+    COMMIT_CAP_OK = 0,
+    COMMIT_CAP_MISSING_ANCESTOR,
+    COMMIT_CAP_REFUSED,
+};
+
+/* Lock held. Re-check 4: collect the ancestors and run the full capability
+ * check. `anc_count` is set; `v` carries the verdict on REFUSED. */
+static enum commit_cap commit_check_capability(
+    const struct metaverse_grant *g, const struct metaverse_action_request *req,
+    const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH],
+    size_t *anc_count, enum metaverse_grant_verdict *v)
+{
+    *anc_count = 0;
+    const struct metaverse_grant *const *anc_arg = NULL;
+    if (g->lineage_count > 0) {
+        if (!pg_collect_ancestors(g, anc, anc_count))
+            return COMMIT_CAP_MISSING_ANCESTOR;
+        anc_arg = anc;
+    }
+
+    *v = metaverse_grant_check(g, anc_arg, *anc_count, req);
+    return *v == METAVERSE_GRANT_OK ? COMMIT_CAP_OK : COMMIT_CAP_REFUSED;
+}
+
+/* Lock held. Resolve and copy the ancestor records. On a miss, returns false
+ * with `missing` and `acting` holding the ids the caller's message names. */
+static bool commit_resolve_lineage(
+    const struct metaverse_grant *g, size_t anc_count,
+    struct metaverse_grant *lineage[METAVERSE_GRANT_MAX_DEPTH],
+    struct metaverse_grant lineage_before[METAVERSE_GRANT_MAX_DEPTH],
+    char missing[METAVERSE_GRANT_ID_LEN + 1],
+    char acting[METAVERSE_GRANT_ID_LEN + 1])
+{
+    for (size_t i = 0; i < anc_count; i++) {
+        lineage[i] = pg_find_grant(g->lineage[i].grant_id);
+        if (!lineage[i]) {
+            snprintf(missing, METAVERSE_GRANT_ID_LEN + 1, "%s",
+                     g->lineage[i].grant_id);
+            snprintf(acting, METAVERSE_GRANT_ID_LEN + 1, "%s", g->grant_id);
+            return false;
+        }
+        lineage_before[i] = *lineage[i];
+    }
+    return true;
+}
+
+/* Outcome of charging the grant and its lineage. */
+enum commit_debit {
+    COMMIT_DEBIT_OK = 0,
+    COMMIT_DEBIT_OWN_REJECTED,
+    COMMIT_DEBIT_ANCESTOR_REFUSED,
+};
+
+/* Lock held. Charge the grant, then every ancestor. Every refusal restores the
+ * whole records it had already moved before returning; `failed` is the index
+ * of the ancestor that refused. */
+static enum commit_debit commit_apply_debit(
+    struct metaverse_grant *g, const struct metaverse_action_request *req,
+    struct metaverse_grant *const *lineage,
+    const struct metaverse_grant *lineage_before, size_t anc_count,
+    const struct metaverse_grant *grant_before_effect, size_t *failed)
+{
+    if (!metaverse_grant_record_commit(g, req)) {
+        /* It can refuse AFTER having already rolled the rate window, so the
+         * restore is not optional on this path either. */
+        *g = *grant_before_effect;
+        return COMMIT_DEBIT_OWN_REJECTED;
+    }
+
+    for (size_t i = 0; i < anc_count; i++) {
+        if (metaverse_grant_record_descendant_charge(lineage[i], req))
+            continue;
+        for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
+        *g = *grant_before_effect;
+        *failed = i;
+        return COMMIT_DEBIT_ANCESTOR_REFUSED;
+    }
+    return COMMIT_DEBIT_OK;
+}
+
+/* Lock held. Build the receipt for this commit and seal it. When the seal
+ * fails the grant and its lineage are restored before returning false. */
+static bool commit_seal_receipt(
+    struct metaverse_grant *g, const struct metaverse_action_request *req,
+    const char *idempotency_key, int64_t revision, int64_t height, int64_t now,
+    struct metaverse_grant *const *lineage,
+    const struct metaverse_grant *lineage_before, size_t anc_count,
+    const struct metaverse_grant *grant_before_effect,
+    struct metaverse_receipt *r)
+{
+    memset(r, 0, sizeof(*r));
+    r->seq = chain_len(g->grant_id) + 1u;
+    snprintf(r->grant_id, sizeof(r->grant_id), "%s", g->grant_id);
+    snprintf(r->actor, sizeof(r->actor), "%s", req->actor);
+    snprintf(r->counterparty, sizeof(r->counterparty), "%s", req->counterparty);
+    if (idempotency_key)
+        snprintf(r->idempotency_key, sizeof(r->idempotency_key), "%s",
+                 idempotency_key);
+    r->property = req->property;
+    r->action = req->action;
+    r->value_zat = req->value_zat;
+    r->property_revision = revision;
+    r->height = height;
+    r->unix_time = now;
+    r->grant_spent_after_zat = g->spent_zat;
+
+    const struct metaverse_receipt *prev = last_receipt(g->grant_id);
+    bool sealed = metaverse_receipt_seal(r, prev ? prev->chain_hash : NULL,
+                                         g_pg_store.sk, g_pg_store.pk);
+#ifdef ZCL_TESTING
+    /* The one point where a test can make the seal fail. See the hook's
+     * declaration: the real sealer cannot fail here, so without this the
+     * restore below has no test. */
+    if (sealed && g_pg_store.seal_hook)
+        sealed = g_pg_store.seal_hook(g_pg_store.seal_hook_ctx);
+#endif
+    if (!sealed) {
+        /* No evidence, so no effect. The restore is byte-exact, which is why
+         * this path does NOT bump the authority generation: the record is
+         * genuinely unmutated, the receipt array is untouched, and the plan is
+         * still uncommitted, so there is nothing for a reader to have missed.
+         * A bump here would be the opposite defect — telling every in-flight
+         * decision the world moved when it did not.
+         *
+         * The lineage is restored with it: by here every ancestor has taken
+         * this action's charge, and leaving any of them debited for a commit
+         * that minted no receipt is the same defect one record over. */
+        *g = *grant_before_effect;
+        for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
+    }
+    return sealed;
+}
+
 /* One COMMIT attempt. Returns AUTHORITY_CHANGED when the store moved while the
  * catalog was being read outside the lock; property_grant_service_commit()
  * retries exactly once and then gives up rather than committing over a state
@@ -139,20 +383,11 @@ static enum property_grant_reason commit_attempt(
         return PROPERTY_GRANT_PLAN_UNKNOWN;
     }
 
-    /* IDEMPOTENCY FIRST. A retry of an already-committed (grant, key) is a
-     * LOOKUP, not a second execution: it must succeed, return the identical
-     * receipt, and charge nothing. Checking this before the
-     * already-committed/expired guards is what makes a retry after a lost
-     * response work at all. */
-    const struct metaverse_receipt *replay = NULL;
-    enum pg_replay_match replay_match = receipt_by_key(
-        plan->grant_id, idempotency_key, &plan->request, &replay);
-    if (replay_match == PG_REPLAY_DIFFERENT) {
-        /* Copied out: everything the message names lives in the store, and the
-         * message is written after the unlock. */
-        uint64_t seq = replay->seq;
-        char reused_grant[METAVERSE_GRANT_ID_LEN + 1];
-        snprintf(reused_grant, sizeof(reused_grant), "%s", plan->grant_id);
+    uint64_t seq = 0;
+    char reused_grant[METAVERSE_GRANT_ID_LEN + 1];
+    enum commit_pre pre = commit_precheck(plan, idempotency_key, now, out,
+                                          &seq, reused_grant);
+    if (pre == COMMIT_PRE_KEY_REUSED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
                  "commit: idempotency key on plan %s already names receipt %llu "
@@ -163,22 +398,17 @@ static enum property_grant_reason commit_attempt(
                  plan_id, (unsigned long long)seq, reused_grant);
         return PROPERTY_GRANT_IDEMPOTENCY_KEY_REUSED;
     }
-    if (replay_match == PG_REPLAY_SAME) {
-        out->receipt = *replay;
-        out->replayed = true;
-        const struct metaverse_grant *g = pg_find_grant(plan->grant_id);
-        out->budget_remaining_zat = g ? effective_budget_remaining(g) : 0;
+    if (pre == COMMIT_PRE_REPLAYED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         return PROPERTY_GRANT_OK;
     }
-
-    if (plan->committed) {
+    if (pre == COMMIT_PRE_COMMITTED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG, "commit: plan %s already committed (seq %llu)",
                  plan_id, (unsigned long long)plan->receipt_seq);
         return PROPERTY_GRANT_PLAN_ALREADY_COMMITTED;
     }
-    if (now >= plan->expires_unix) {
+    if (pre == COMMIT_PRE_EXPIRED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG, "commit: plan %s expired at %lld, now %lld", plan_id,
                  (long long)plan->expires_unix, (long long)now);
@@ -194,70 +424,41 @@ static enum property_grant_reason commit_attempt(
         return PROPERTY_GRANT_GRANT_UNKNOWN;
     }
 
-    /* ── Re-check 2: current ownership and revision from the catalog ──────
-     *
-     * THE LOOKUP RUNS WITH NO LOCK HELD. The real catalog rebuilds every view
-     * from datadir bytes on every call, and doing that inside the store mutex
-     * would stall every other grant decision in the process behind a disk
-     * read. So: copy what the lookup needs, RELEASE, look up, RE-ACQUIRE, and
-     * confirm the store-wide authority generation did not move. Everything
-     * after the re-acquire re-reads the store fresh, exactly as before. */
-    metaverse_catalog_lookup_fn lookup = g_pg_store.env.catalog_lookup;
-    void *lookup_ctx = g_pg_store.env.catalog_ctx;
-    if (!lookup) {
+    struct metaverse_catalog_view view;
+    enum commit_catalog cat = commit_read_catalog(plan_id, &plan, &g, &view);
+    if (cat == COMMIT_CAT_NO_LOOKUP) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
                  "commit: no property catalog installed — refusing to commit "
                  "an action whose current ownership cannot be confirmed");
         return PROPERTY_GRANT_CATALOG_UNAVAILABLE;
     }
-    struct metaverse_property_id target = plan->request.property;
-    uint64_t seen_generation = g_pg_store.authority_generation;
-    pthread_mutex_unlock(&g_pg_store.lock);
-
-    struct metaverse_catalog_view view;
-    memset(&view, 0, sizeof(view));
-    bool found = lookup(&target, &view, lookup_ctx);
-
-    pthread_mutex_lock(&g_pg_store.lock);
-    if (g_pg_store.authority_generation != seen_generation) {
+    if (cat == COMMIT_CAT_MOVED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
                  "commit: the store moved while reading the catalog for plan "
                  "%s — retrying", plan_id);
         return PROPERTY_GRANT_AUTHORITY_CHANGED;
     }
-    /* The generation is unchanged, so nothing was minted, delegated, revoked,
-     * debited or reset; plan and grant are the same records. Re-resolve the
-     * pointers anyway — the arrays are addressed by index and a pointer held
-     * across an unlock is a habit worth not having. */
-    plan = pg_find_plan_locked(plan_id);
-    g = plan ? pg_find_grant(plan->grant_id) : NULL;
-    if (!plan || !g) {
+    if (cat == COMMIT_CAT_VANISHED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_ERROR(PGC_LOG,
                   "commit: plan or grant vanished at an unchanged authority "
                   "generation (plan %s)", plan_id);
         return PROPERTY_GRANT_AUTHORITY_CHANGED;
     }
-    if (!found) {
+    if (cat == COMMIT_CAT_NOT_FOUND) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG, "commit: property not in the catalog (plan %s)",
                  plan_id);
         return PROPERTY_GRANT_PROPERTY_UNKNOWN;
     }
-    /* The controlling principal must be the one the plan was quoted against.
-     * A property that changed hands between plan and commit is a different
-     * authority situation, and silently committing under the new owner is
-     * exactly the confused-deputy the re-check exists to stop. */
-    if (plan->catalog_seen &&
-        strcmp(view.controller, plan->controller_at_plan) != 0) {
+    if (cat == COMMIT_CAT_OWNER_MISMATCH) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG, "commit: controller changed since plan %s", plan_id);
         return PROPERTY_GRANT_OWNER_MISMATCH;
     }
-    /* ── Re-check 3: OPTIMISTIC CONCURRENCY on the property revision ────── */
-    if (!plan->catalog_seen || view.revision != plan->property_revision) {
+    if (cat == COMMIT_CAT_STALE_REVISION) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
                  "commit: stale revision — plan %s saw %lld, catalog now %lld",
@@ -273,20 +474,15 @@ static enum property_grant_reason commit_attempt(
 
     const struct metaverse_grant *anc[METAVERSE_GRANT_MAX_DEPTH];
     size_t anc_count = 0;
-    const struct metaverse_grant *const *anc_arg = NULL;
-    if (g->lineage_count > 0) {
-        if (!pg_collect_ancestors(g, anc, &anc_count)) {
-            pthread_mutex_unlock(&g_pg_store.lock);
-            LOG_WARN(PGC_LOG, "commit: grant %s has a missing ancestor",
-                     g->grant_id);
-            return PROPERTY_GRANT_ANCESTOR_REVOKED;
-        }
-        anc_arg = anc;
+    enum metaverse_grant_verdict v = METAVERSE_GRANT_OK;
+    enum commit_cap cap = commit_check_capability(g, &req, anc, &anc_count, &v);
+    if (cap == COMMIT_CAP_MISSING_ANCESTOR) {
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_WARN(PGC_LOG, "commit: grant %s has a missing ancestor",
+                 g->grant_id);
+        return PROPERTY_GRANT_ANCESTOR_REVOKED;
     }
-
-    enum metaverse_grant_verdict v =
-        metaverse_grant_check(g, anc_arg, anc_count, &req);
-    if (v != METAVERSE_GRANT_OK) {
+    if (cap == COMMIT_CAP_REFUSED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG, "commit: grant %s refused at commit time (%s)",
                  g->grant_id, metaverse_grant_verdict_token(v));
@@ -331,21 +527,16 @@ static enum property_grant_reason commit_attempt(
      * expected path. */
     struct metaverse_grant *lineage[METAVERSE_GRANT_MAX_DEPTH];
     struct metaverse_grant lineage_before[METAVERSE_GRANT_MAX_DEPTH];
-    for (size_t i = 0; i < anc_count; i++) {
-        lineage[i] = pg_find_grant(g->lineage[i].grant_id);
-        if (!lineage[i]) {
-            char missing[METAVERSE_GRANT_ID_LEN + 1];
-            char acting[METAVERSE_GRANT_ID_LEN + 1];
-            snprintf(missing, sizeof(missing), "%s", g->lineage[i].grant_id);
-            snprintf(acting, sizeof(acting), "%s", g->grant_id);
-            pthread_mutex_unlock(&g_pg_store.lock);
-            LOG_ERROR(PGC_LOG,
-                      "commit: ancestor %s of grant %s vanished between the "
-                      "capability check and the debit",
-                      missing, acting);
-            return PROPERTY_GRANT_ANCESTOR_REVOKED;
-        }
-        lineage_before[i] = *lineage[i];
+    char missing[METAVERSE_GRANT_ID_LEN + 1];
+    char acting[METAVERSE_GRANT_ID_LEN + 1];
+    if (!commit_resolve_lineage(g, anc_count, lineage, lineage_before, missing,
+                                acting)) {
+        pthread_mutex_unlock(&g_pg_store.lock);
+        LOG_ERROR(PGC_LOG,
+                  "commit: ancestor %s of grant %s vanished between the "
+                  "capability check and the debit",
+                  missing, acting);
+        return PROPERTY_GRANT_ANCESTOR_REVOKED;
     }
 
     /* ── THE WHOLE RECORD, BEFORE THE EFFECT ────────────────────────────────
@@ -377,22 +568,18 @@ static enum property_grant_reason commit_attempt(
      * taken: property_grant_service_snapshot() takes the same mutex. */
     const struct metaverse_grant grant_before_effect = *g;
 
-    if (!metaverse_grant_record_commit(g, &req)) {
-        /* It can refuse AFTER having already rolled the rate window, so the
-         * restore is not optional on this path either. */
-        *g = grant_before_effect;
+    size_t i = 0;
+    enum commit_debit debit = commit_apply_debit(
+        g, &req, lineage, lineage_before, anc_count, &grant_before_effect,
+        &i);
+    if (debit == COMMIT_DEBIT_OWN_REJECTED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_ERROR(PGC_LOG,
                   "commit: grant %s passed the check but rejected the debit",
                   g->grant_id);
         return PROPERTY_GRANT_BUDGET_EXCEEDED;
     }
-
-    for (size_t i = 0; i < anc_count; i++) {
-        if (metaverse_grant_record_descendant_charge(lineage[i], &req))
-            continue;
-        for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
-        *g = grant_before_effect;
+    if (debit == COMMIT_DEBIT_ANCESTOR_REFUSED) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
                  "commit: grant %s may spend this, but its ancestor %s cannot "
@@ -402,45 +589,9 @@ static enum property_grant_reason commit_attempt(
     }
 
     struct metaverse_receipt r;
-    memset(&r, 0, sizeof(r));
-    r.seq = chain_len(g->grant_id) + 1u;
-    snprintf(r.grant_id, sizeof(r.grant_id), "%s", g->grant_id);
-    snprintf(r.actor, sizeof(r.actor), "%s", req.actor);
-    snprintf(r.counterparty, sizeof(r.counterparty), "%s", req.counterparty);
-    if (idempotency_key)
-        snprintf(r.idempotency_key, sizeof(r.idempotency_key), "%s",
-                 idempotency_key);
-    r.property = req.property;
-    r.action = req.action;
-    r.value_zat = req.value_zat;
-    r.property_revision = view.revision;
-    r.height = height;
-    r.unix_time = now;
-    r.grant_spent_after_zat = g->spent_zat;
-
-    const struct metaverse_receipt *prev = last_receipt(g->grant_id);
-    bool sealed = metaverse_receipt_seal(&r, prev ? prev->chain_hash : NULL,
-                                         g_pg_store.sk, g_pg_store.pk);
-#ifdef ZCL_TESTING
-    /* The one point where a test can make the seal fail. See the hook's
-     * declaration: the real sealer cannot fail here, so without this the
-     * restore below has no test. */
-    if (sealed && g_pg_store.seal_hook)
-        sealed = g_pg_store.seal_hook(g_pg_store.seal_hook_ctx);
-#endif
-    if (!sealed) {
-        /* No evidence, so no effect. The restore is byte-exact, which is why
-         * this path does NOT bump the authority generation: the record is
-         * genuinely unmutated, the receipt array is untouched, and the plan is
-         * still uncommitted, so there is nothing for a reader to have missed.
-         * A bump here would be the opposite defect — telling every in-flight
-         * decision the world moved when it did not.
-         *
-         * The lineage is restored with it: by here every ancestor has taken
-         * this action's charge, and leaving any of them debited for a commit
-         * that minted no receipt is the same defect one record over. */
-        *g = grant_before_effect;
-        for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
+    if (!commit_seal_receipt(g, &req, idempotency_key, view.revision, height,
+                             now, lineage, lineage_before, anc_count,
+                             &grant_before_effect, &r)) {
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_ERROR(PGC_LOG, "commit: could not seal receipt for grant %s",
                   g->grant_id);
