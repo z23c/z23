@@ -1143,6 +1143,88 @@ static int test_block_swarm_sovereignty_gate(void)
     return failures;
 }
 
+/* ══════════ Test 8: serve-side refusal and fallback branches ══════════ */
+
+/* Every hash is 0xEE, so no disk body can match. */
+static int bs_block_hashes_range_bogus(int32_t start, int32_t end,
+                                       uint8_t (*hashes_out)[32], size_t max,
+                                       void *ctx)
+{
+    (void)ctx;
+    int n = 0;
+    for (int32_t h = start; h <= end && (size_t)n < max; h++, n++)
+        memset(hashes_out[n], 0xEE, 32);
+    return n;
+}
+
+/* Pins mp_serve_block_req: truncated and out-of-range requests queue nothing
+ * (only the latter is scored), a missing hash source queues nothing, and a
+ * hash mismatch sends a header-only zblkdata frame. */
+static int test_block_swarm_serve_refusal_branches(void)
+{
+    int failures = 0;
+
+    TEST("block swarm serve: refusal and fallback branches of zblkreq") {
+        const int invalid_weight = peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE);
+        struct bs_seeder seed;
+        ASSERT(bs_seeder_build(&seed, 128, 11u, "sbr"));
+        struct p2p_node *a_node = bs_make_peer(&seed.nm, 2);
+        ASSERT(a_node);
+        struct send_segment *sent_a = bs_install_sentinel(a_node);
+        msg_block_hashes_range_fn saved_range = seed.mp.block_hashes_range;
+        struct byte_stream req;
+
+        stream_init(&req, 4);                       /* no index at all */
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        ASSERT(bs_queue_depth(sent_a) == 0);
+        ASSERT(atomic_load(&a_node->misbehavior) == 0);
+        stream_init(&req, 16);                      /* 2 pieces: 0 and 1 */
+        stream_write_u32_le(&req, 2);
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        ASSERT(bs_queue_depth(sent_a) == 0);
+        ASSERT(atomic_load(&a_node->misbehavior) == invalid_weight);
+
+        seed.mp.block_hashes_range = NULL;          /* block_count == 0 */
+        stream_init(&req, 16);
+        stream_write_u32_le(&req, 0);
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        seed.mp.block_hashes_range = saved_range;
+        ASSERT(bs_queue_depth(sent_a) == 0);
+
+        stream_init(&req, 16);                      /* honest piece 0 */
+        stream_write_u32_le(&req, 0);
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        ASSERT(bs_queue_depth(sent_a) == 1);
+        size_t full_frame = sent_a->next->size;
+        bs_drop_queue(a_node, sent_a);
+
+        seed.mp.block_hashes_range = bs_block_hashes_range_bogus;
+        stream_init(&req, 16);                      /* hash mismatch */
+        stream_write_u32_le(&req, 0);
+        mp_serve_block_req(&seed.mp, a_node, &req);
+        stream_free(&req);
+        seed.mp.block_hashes_range = saved_range;
+        ASSERT(bs_queue_depth(sent_a) == 1);
+        ASSERT(sent_a->next->size ==
+               (size_t)(MESSAGE_START_SIZE + COMMAND_SIZE + 8 + 8 + 32 * 64));
+        ASSERT(full_frame > sent_a->next->size);
+        ASSERT(memcmp(sent_a->next->data + MESSAGE_START_SIZE, MSG_BLOCK_DATA,
+                      strlen(MSG_BLOCK_DATA)) == 0);
+        bs_drop_queue(a_node, sent_a);
+        send_segment_free(sent_a);
+        a_node->send_head = a_node->send_tail = NULL;
+        p2p_node_free(a_node);
+        bs_seeder_free(&seed);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_block_swarm_manifest_republish(void)
 {
     int failures = 0;
@@ -1409,6 +1491,7 @@ int test_block_swarm_loopback(void)
     failures += test_block_swarm_duplicate_delivery();
     failures += test_block_swarm_manifest_anchor();
     failures += test_block_swarm_sovereignty_gate();
+    failures += test_block_swarm_serve_refusal_branches();
     failures += test_block_swarm_manifest_republish();
     failures += test_block_swarm_past_peer_manifest();
     boot_snapshot_offer_test_set_trust_override(-1);

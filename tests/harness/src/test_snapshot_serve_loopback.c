@@ -600,6 +600,95 @@ static int test_snapshot_serve_loopback_impl(bool corrupt_chunk)
     return failures;
 }
 
+/* mp_serve_chunk_req is private to core/modules/net/src (msgprocessor_snapshot_internal.h);
+ * reached by extern prototype, the test_block_swarm_loopback.c precedent. */
+extern void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
+                               struct byte_stream *s);
+
+/* Pins mp_serve_chunk_req's refusal branches. A truncated request and a
+ * request made while no manifest is servable queue nothing and are not
+ * scored; an index past the manifest queues nothing and is scored as an
+ * invalid message. The served-chunk branch is not reached here. */
+static int test_snapshot_serve_chunk_refusal_branches(void)
+{
+    int failures = 0;
+
+    printf("snapshot serve: chunk refusal branches queue nothing... ");
+    {
+        struct net_manager nm;
+        struct msg_processor mp;
+        struct net_address addr;
+        struct byte_stream req;
+        unsigned char ip4[4] = {50, 0, 0, 3};
+        const int invalid_weight =
+            peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE);
+
+        net_manager_init(&nm);
+        memset(&mp, 0, sizeof(mp));
+        mp.net_mgr = &nm;
+        mp.datadir = ".";
+        net_address_init(&addr);
+        net_addr_set_ipv4(&addr.svc.addr, ip4);
+        addr.svc.port = 8233;
+        struct p2p_node *node = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
+                                                 &addr, "chunk-refuse", false);
+        bool ok = (node != NULL);
+
+        /* Truncated: no chunk index. */
+        stream_init(&req, 2);
+        mp_serve_chunk_req(&mp, node, &req);
+        stream_free(&req);
+        ok = ok && node->send_head == NULL;
+        ok = ok && atomic_load(&node->misbehavior) == 0;
+
+        /* Trust refused: serving is not allowed, so no manifest is ready. */
+        boot_snapshot_offer_test_set_trust_override(0);
+        stream_init(&req, 8);
+        stream_write_u32_le(&req, 0);
+        mp_serve_chunk_req(&mp, node, &req);
+        stream_free(&req);
+        ok = ok && node->send_head == NULL;
+        ok = ok && atomic_load(&node->misbehavior) == 0;
+
+        /* Trusted, but no manifest has been published. */
+        boot_snapshot_offer_test_set_trust_override(1);
+        msg_processor_invalidate_manifest();
+        stream_init(&req, 8);
+        stream_write_u32_le(&req, 0);
+        mp_serve_chunk_req(&mp, node, &req);
+        stream_free(&req);
+        ok = ok && node->send_head == NULL;
+        ok = ok && atomic_load(&node->misbehavior) == 0;
+
+        /* Trusted with a 2-chunk manifest: index 2 is out of range. */
+        struct sync_manifest published;
+        memset(&published, 0, sizeof(published));
+        published.height = 321;
+        published.num_utxos = 654;
+        published.num_chunks = 2;
+        published.chunk_size = SYNC_CHUNK_SIZE;
+        published.chunk_hashes = zcl_calloc(2, sizeof(*published.chunk_hashes),
+                                            "test_chunk_hashes");
+        ok = ok && published.chunk_hashes != NULL;
+        ok = ok && msg_processor_publish_manifest(&published);
+        stream_init(&req, 8);
+        stream_write_u32_le(&req, 2);
+        mp_serve_chunk_req(&mp, node, &req);
+        stream_free(&req);
+        ok = ok && node->send_head == NULL;
+        ok = ok && atomic_load(&node->misbehavior) == invalid_weight;
+        msg_processor_invalidate_manifest();
+
+        boot_snapshot_offer_test_set_trust_override(-1);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int test_snapshot_serve_loopback(void)
 {
     int failures = 0;
@@ -614,6 +703,7 @@ int test_snapshot_serve_loopback(void)
 
     failures += test_snapshot_serve_loopback_impl(false);
     failures += test_snapshot_serve_loopback_impl(true);
+    failures += test_snapshot_serve_chunk_refusal_branches();
 
     {
         struct snapsync_serve_puzzle_census c;
