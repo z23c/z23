@@ -545,21 +545,20 @@ static enum zswap_ceremony_error zswap_ceremony_check_tx_shape(
     return ZSWAP_CEREMONY_OK;
 }
 
-/* Insertion-sort the first count entries by outpoint. */
+/* Order two buyer inputs by outpoint; only txid and vout take part. */
+static int zswap_ceremony_input_outpoint_cmp(const void *a, const void *b)
+{
+    const struct zswap_swap_input *x = a;
+    const struct zswap_swap_input *y = b;
+    return outpoint_cmp_fields(x->txid, x->vout, y->txid, y->vout);
+}
+
+/* Sort the first count entries by outpoint. */
 static void zswap_ceremony_sort_buyer_inputs(struct zswap_swap_input *sorted,
                                              size_t count)
 {
-    for (size_t i = 1; i < count; i++) {
-        struct zswap_swap_input key = sorted[i];
-        size_t j = i;
-        while (j > 0 && outpoint_cmp_fields(sorted[j - 1].txid,
-                                            sorted[j - 1].vout,
-                                            key.txid, key.vout) > 0) {
-            sorted[j] = sorted[j - 1];
-            j--;
-        }
-        sorted[j] = key;
-    }
+    qsort(sorted, count, sizeof(sorted[0]),
+          zswap_ceremony_input_outpoint_cmp);
 }
 
 /* Check the tx spends the seller's token input then the sorted buyer
