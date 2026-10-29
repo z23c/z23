@@ -283,9 +283,9 @@ bool cec_reconstruct_active_tip_evidence(
     if (reason_out)
         reason_out[0] = '\0';
     if (!cer_check_tip_args(authority, active_tip, csv, reason_out))
-        return false;
+        return false; // raw-return-ok:reason_out-carries-the-failure-to-caller
     if (!cer_check_tip_hash(active_tip, csv, reason_out))
-        return false;
+        return false; // raw-return-ok:reason_out-carries-the-failure-to-caller
 
     /* The coins (UTXO) best-block cursor is a PROJECTION that trails or,
      * on a torn restart, transiently overshoots the tip — it is NOT part
@@ -306,9 +306,9 @@ bool cec_reconstruct_active_tip_evidence(
     }
 
     if (!cer_check_tip_ancestry(authority, active_tip, reason_out))
-        return false;
+        return false; // raw-return-ok:reason_out-carries-the-failure-to-caller
     if (!cer_check_tip_chainwork(active_tip, reason_out))
-        return false;
+        return false; // raw-return-ok:reason_out-carries-the-failure-to-caller
 
     /* Refused-rewind mode: reconcile found the persisted tip AHEAD of the
      * in-memory tip and refused to rewrite it downward. The in-memory tip
