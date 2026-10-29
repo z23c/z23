@@ -66,6 +66,228 @@ static bool addnode_dht_hint_wait_and_rate_ok(struct connman *cm)
            !connman_outbound_rate_allowed_for_test(false, false, false);
 }
 
+/* ── connman_gather_dial_candidates branch pins (characterization) ────────
+ * Each case drives the public gather through its gate order: anchors, then
+ * DHT hints, then addrman draws. Addrman holds only the hints the case queues
+ * (loopback or TEST-NET addresses), so the expected rows follow from the gates
+ * alone and no random pick can change them. */
+
+static void dialer_pin_init(struct connman *cm, bool *ok)
+{
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    *ok = connman_init(cm, params, &sigs);
+}
+
+static void dialer_pin_anchor(struct connman *cm, size_t i,
+                              uint8_t a, uint8_t b, uint8_t c, uint8_t d,
+                              uint16_t port)
+{
+    struct net_address addr;
+    test_set_ipv4(&addr, a, b, c, d, port);
+    cm->anchors.peers[i].addr = addr.svc.addr;
+    cm->anchors.peers[i].port = port;
+    cm->anchors.peers[i].services = NODE_NETWORK;
+}
+
+static void dialer_pin_anchors_reset(struct connman *cm)
+{
+    memset(&cm->anchors, 0, sizeof(cm->anchors));
+    memset(cm->anchors_tried, 0, sizeof(cm->anchors_tried));
+}
+
+static void dialer_pin_hint(struct connman *cm, bool *ok,
+                            uint8_t a, uint8_t b, uint8_t c, uint8_t d,
+                            uint16_t port)
+{
+    struct net_address hint;
+    test_set_ipv4(&hint, a, b, c, d, port);
+    *ok = *ok && connman_queue_dht_hint(cm, &hint);
+}
+
+static bool dialer_pin_all_source(const struct connman_dial_candidate *c,
+                                  size_t n,
+                                  enum connman_outbound_target_source want)
+{
+    for (size_t i = 0; i < n; i++)
+        if (c[i].source != want)
+            return false;
+    return true;
+}
+
+static int dialer_pin_report(const char *name, bool ok)
+{
+    printf("connman_gather pins: %s... %s\n", name, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int dialer_pin_null_and_zero(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[4];
+    dialer_pin_init(&cm, &ok);
+    ok = ok && connman_gather_dial_candidates(NULL, out, 4) == 0 &&
+         connman_gather_dial_candidates(&cm, NULL, 4) == 0 &&
+         connman_gather_dial_candidates(&cm, out, 0) == 0;
+    connman_free(&cm);
+    return dialer_pin_report("null cm/out and zero max return 0", ok);
+}
+
+static int dialer_pin_clamp_to_batch_max(void)
+{
+    struct connman cm;
+    bool ok = true;
+    static const uint16_t ports[9] = { 20022, 20023, 20024, 20025, 20026,
+                                       20027, 20028, 8033, 18033 };
+    struct connman_dial_candidate out[12];
+    dialer_pin_init(&cm, &ok);
+    for (size_t i = 0; i < 9; i++)
+        dialer_pin_hint(&cm, &ok, 127, 0, 0, 1, ports[i]);
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 12) : 0;
+    ok = ok && n == 8 && out[0].addr.svc.port == 20022 &&
+         out[7].addr.svc.port == 8033 &&
+         dialer_pin_all_source(out, n, CONNMAN_TARGET_DHT_HINT) &&
+         cm.dht_hint_count == 1;
+    connman_free(&cm);
+    return dialer_pin_report("max 12 clamps to the batch bound of 8", ok);
+}
+
+static int dialer_pin_connect_only_skips_anchors(void)
+{
+    extern bool g_connect_only; /* net/src/connman.c */
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_anchors_reset(&cm);
+    dialer_pin_anchor(&cm, 0, 203, 0, 113, 21, 8033);
+    dialer_pin_anchor(&cm, 1, 198, 51, 100, 22, 8033);
+    cm.anchors.count = 2;
+    bool saved = g_connect_only;
+    g_connect_only = true;
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 1;
+    g_connect_only = saved;
+    ok = ok && n == 0 && !cm.anchors_tried[0] && !cm.anchors_tried[1];
+    connman_free(&cm);
+    return dialer_pin_report("connect-only skips anchors untouched", ok);
+}
+
+static int dialer_pin_anchor_port_zero_dropped(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_anchors_reset(&cm);
+    dialer_pin_anchor(&cm, 0, 203, 0, 113, 21, 0);
+    dialer_pin_anchor(&cm, 1, 198, 51, 100, 22, 8033);
+    dialer_pin_anchor(&cm, 2, 192, 0, 2, 23, 8033);
+    cm.anchors.count = 3;
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 0;
+    ok = ok && n == 2 && out[0].source == CONNMAN_TARGET_ANCHOR &&
+         out[1].source == CONNMAN_TARGET_ANCHOR &&
+         net_addr_eq(&out[0].addr.svc.addr, &cm.anchors.peers[1].addr) &&
+         out[0].addr.svc.port == 8033 &&
+         net_addr_eq(&out[1].addr.svc.addr, &cm.anchors.peers[2].addr) &&
+         cm.anchors_tried[0] && cm.anchors_tried[1] && cm.anchors_tried[2];
+    connman_free(&cm);
+    return dialer_pin_report("port-0 anchor dropped but still marked tried", ok);
+}
+
+static int dialer_pin_anchor_group_cap(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_anchors_reset(&cm);
+    dialer_pin_anchor(&cm, 0, 203, 0, 113, 21, 8033);
+    dialer_pin_anchor(&cm, 1, 203, 0, 113, 22, 8033);
+    dialer_pin_anchor(&cm, 2, 203, 0, 113, 23, 8033);
+    cm.anchors.count = 3;
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 0;
+    ok = ok && n == 2 &&
+         net_addr_eq(&out[0].addr.svc.addr, &cm.anchors.peers[0].addr) &&
+         net_addr_eq(&out[1].addr.svc.addr, &cm.anchors.peers[1].addr) &&
+         dialer_pin_all_source(out, n, CONNMAN_TARGET_ANCHOR) &&
+         cm.anchors_tried[2];
+    connman_free(&cm);
+    return dialer_pin_report("third anchor in one /16 refused (cap 2)", ok);
+}
+
+static int dialer_pin_anchor_duplicate_once(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_anchors_reset(&cm);
+    dialer_pin_anchor(&cm, 0, 203, 0, 113, 21, 8033);
+    dialer_pin_anchor(&cm, 1, 203, 0, 113, 21, 8033);
+    dialer_pin_anchor(&cm, 2, 198, 51, 100, 22, 8033);
+    cm.anchors.count = 3;
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 0;
+    ok = ok && n == 2 &&
+         net_addr_eq(&out[0].addr.svc.addr, &cm.anchors.peers[0].addr) &&
+         net_addr_eq(&out[1].addr.svc.addr, &cm.anchors.peers[2].addr) &&
+         cm.anchors_tried[1];
+    connman_free(&cm);
+    return dialer_pin_report("duplicate anchor yields one candidate", ok);
+}
+
+static int dialer_pin_dht_hint_filters(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_hint(&cm, &ok, 127, 0, 0, 1, 20023);
+    dialer_pin_hint(&cm, &ok, 127, 0, 0, 1, 9999);
+    dialer_pin_hint(&cm, &ok, 203, 0, 113, 5, 8033);
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 0;
+    ok = ok && n == 2 && out[0].addr.svc.port == 20023 &&
+         out[1].addr.svc.port == 8033 &&
+         dialer_pin_all_source(out, n, CONNMAN_TARGET_DHT_HINT) &&
+         cm.dht_hint_count == 0;
+    connman_free(&cm);
+    return dialer_pin_report("unreachable-port hint dropped, others kept", ok);
+}
+
+static int dialer_pin_dht_hint_group_cap(void)
+{
+    struct connman cm;
+    bool ok = true;
+    struct connman_dial_candidate out[8];
+    dialer_pin_init(&cm, &ok);
+    dialer_pin_hint(&cm, &ok, 203, 0, 113, 5, 8033);
+    dialer_pin_hint(&cm, &ok, 203, 0, 113, 6, 18033);
+    dialer_pin_hint(&cm, &ok, 203, 0, 113, 7, 8034);
+    size_t n = ok ? connman_gather_dial_candidates(&cm, out, 8) : 0;
+    ok = ok && n == 2 && out[0].addr.svc.port == 8033 &&
+         out[1].addr.svc.port == 18033 &&
+         dialer_pin_all_source(out, n, CONNMAN_TARGET_DHT_HINT) &&
+         cm.dht_hint_count == 0;
+    connman_free(&cm);
+    return dialer_pin_report("third non-local hint in one /16 refused", ok);
+}
+
+int check_connman_dialer_gather_pins(void)
+{
+    int failures = 0;
+    failures += dialer_pin_null_and_zero();
+    failures += dialer_pin_clamp_to_batch_max();
+    failures += dialer_pin_connect_only_skips_anchors();
+    failures += dialer_pin_anchor_port_zero_dropped();
+    failures += dialer_pin_anchor_group_cap();
+    failures += dialer_pin_anchor_duplicate_once();
+    failures += dialer_pin_dht_hint_filters();
+    failures += dialer_pin_dht_hint_group_cap();
+    return failures;
+}
+
 int check_connman_addnode_dht_hint_priority_dial(void)
 {
     int failures = 0;
