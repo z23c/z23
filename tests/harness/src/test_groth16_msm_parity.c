@@ -82,6 +82,107 @@ static int verdict_parity(const struct groth16_vk *vk_naive,
     return a ? 1 : 0;
 }
 
+/* Edge vectors: each must accept with comb==naive, and a one-bit flip must
+ * reject with comb==naive. */
+static bool battery_edge_ok(const struct groth16_vk *vk_naive,
+                            const struct groth16_vk *vk_comb,
+                            const struct g1_point *G1, const struct g2_point *G2)
+{
+    /* Deterministic edge + pseudo-random K-tuples. */
+    uint64_t battery[][K_INPUTS][4] = {
+        {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},               /* all-zero */
+        {{1,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},               /* single 1 */
+        {{1,0,0,0},{2,0,0,0},{3,0,0,0},{4,0,0,0}},               /* small mix */
+        {{0xFFFFFFFFFFFFFFFFULL,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},
+        {{0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL,
+          0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL},           /* all 256 bits */
+         {0,0,0,0},{0,0,0,0},{0,0,0,0}},
+        {{FR_MINUS_1[0],FR_MINUS_1[1],FR_MINUS_1[2],FR_MINUS_1[3]},
+         {FR_MINUS_1[0],FR_MINUS_1[1],FR_MINUS_1[2],FR_MINUS_1[3]},
+         {1,0,0,0},{2,0,0,0}},                                   /* r-1 heavy */
+    };
+    size_t n_edge = sizeof(battery) / sizeof(battery[0]);
+
+    bool ok = true;
+    /* edge vectors */
+    for (size_t e = 0; e < n_edge && ok; e++) {
+        struct g1_point vk_x;
+        ref_vk_x(&vk_x, vk_naive, battery[e], K_INPUTS);
+        struct groth16_proof pr;
+        pr.a = *G1; pr.b = *G2;
+        g1_neg(&pr.c, &vk_x);            /* valid: e(vk_x+C,-G2)=1 */
+        int v = verdict_parity(vk_naive, vk_comb, &pr, battery[e], K_INPUTS);
+        if (v != 1) ok = false;          /* must agree AND accept */
+
+        /* reject control: flip one input bit -> both must reject */
+        uint64_t bad[K_INPUTS][4];
+        memcpy(bad, battery[e], sizeof(bad));
+        bad[0][0] ^= 0x1;
+        int vr = verdict_parity(vk_naive, vk_comb, &pr, bad, K_INPUTS);
+        if (vr != 0) ok = false;         /* must agree AND reject */
+    }
+    return ok;
+}
+
+/* Random vectors from a deterministic splitmix64 stream: comb==naive, accept. */
+static bool battery_random_ok(const struct groth16_vk *vk_naive,
+                              const struct groth16_vk *vk_comb,
+                              const struct g1_point *G1, const struct g2_point *G2)
+{
+    /* Add pseudo-random tuples via a deterministic splitmix64 stream. */
+    uint64_t s = 0x123456789ABCDEF0ULL;
+
+    bool ok = true;
+    /* random vectors */
+    for (int r = 0; r < 128 && ok; r++) {
+        uint64_t inp[K_INPUTS][4];
+        for (int i = 0; i < K_INPUTS; i++)
+            for (int limb = 0; limb < 4; limb++)
+                inp[i][limb] = splitmix64(&s);
+        struct g1_point vk_x;
+        ref_vk_x(&vk_x, vk_naive, inp, K_INPUTS);
+        struct groth16_proof pr;
+        pr.a = *G1; pr.b = *G2;
+        g1_neg(&pr.c, &vk_x);
+        if (verdict_parity(vk_naive, vk_comb, &pr, inp, K_INPUTS) != 1)
+            ok = false;
+    }
+    return ok;
+}
+
+/* Batch verify: comb and naive must agree on accept, and on reject after a
+ * corrupted proof. */
+static bool batch_parity_ok(const struct groth16_vk *vk_naive,
+                            const struct groth16_vk *vk_comb,
+                            const struct g1_point *G1, const struct g2_point *G2)
+{
+    struct groth16_proof proofs[4];
+    uint64_t flat[4 * K_INPUTS][4];
+    bool ok = true;
+    for (int j = 0; j < 4; j++) {
+        uint64_t inp[K_INPUTS][4];
+        for (int i = 0; i < K_INPUTS; i++) {
+            inp[i][0] = (uint64_t)(j * 11 + i + 1);
+            inp[i][1] = inp[i][2] = inp[i][3] = 0;
+            memcpy(flat[j * K_INPUTS + i], inp[i], sizeof(inp[i]));
+        }
+        struct g1_point vk_x;
+        ref_vk_x(&vk_x, vk_naive, inp, K_INPUTS);
+        proofs[j].a = *G1; proofs[j].b = *G2;
+        g1_neg(&proofs[j].c, &vk_x);
+    }
+    bool bn = groth16_batch_verify(vk_naive, proofs, flat, K_INPUTS, 4);
+    bool bc = groth16_batch_verify(vk_comb,  proofs, flat, K_INPUTS, 4);
+    if (bn != bc || !bn) ok = false;     /* must agree AND accept */
+
+    /* corrupt one -> both must reject, still agreeing */
+    g1_add(&proofs[2].c, &proofs[2].c, G1);
+    bool bn2 = groth16_batch_verify(vk_naive, proofs, flat, K_INPUTS, 4);
+    bool bc2 = groth16_batch_verify(vk_comb,  proofs, flat, K_INPUTS, 4);
+    if (bn2 != bc2 || bn2) ok = false;   /* must agree AND reject */
+    return ok;
+}
+
 int test_groth16_msm_parity(void)
 {
     int failures = 0;
@@ -123,56 +224,8 @@ int test_groth16_msm_parity(void)
     /* ---- Battery of public-input vectors ---- */
     printf("groth16_msm_parity: comb==naive verdict over input battery... ");
     {
-        /* Deterministic edge + pseudo-random K-tuples. */
-        uint64_t battery[][K_INPUTS][4] = {
-            {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},               /* all-zero */
-            {{1,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},               /* single 1 */
-            {{1,0,0,0},{2,0,0,0},{3,0,0,0},{4,0,0,0}},               /* small mix */
-            {{0xFFFFFFFFFFFFFFFFULL,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},
-            {{0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL,
-              0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL},           /* all 256 bits */
-             {0,0,0,0},{0,0,0,0},{0,0,0,0}},
-            {{FR_MINUS_1[0],FR_MINUS_1[1],FR_MINUS_1[2],FR_MINUS_1[3]},
-             {FR_MINUS_1[0],FR_MINUS_1[1],FR_MINUS_1[2],FR_MINUS_1[3]},
-             {1,0,0,0},{2,0,0,0}},                                   /* r-1 heavy */
-        };
-        size_t n_edge = sizeof(battery) / sizeof(battery[0]);
-
-        /* Add pseudo-random tuples via a deterministic splitmix64 stream. */
-        uint64_t s = 0x123456789ABCDEF0ULL;
-
-        bool ok = true;
-        /* edge vectors */
-        for (size_t e = 0; e < n_edge && ok; e++) {
-            struct g1_point vk_x;
-            ref_vk_x(&vk_x, &vk_naive, battery[e], K_INPUTS);
-            struct groth16_proof pr;
-            pr.a = G1; pr.b = G2;
-            g1_neg(&pr.c, &vk_x);            /* valid: e(vk_x+C,-G2)=1 */
-            int v = verdict_parity(&vk_naive, &vk_comb, &pr, battery[e], K_INPUTS);
-            if (v != 1) ok = false;          /* must agree AND accept */
-
-            /* reject control: flip one input bit -> both must reject */
-            uint64_t bad[K_INPUTS][4];
-            memcpy(bad, battery[e], sizeof(bad));
-            bad[0][0] ^= 0x1;
-            int vr = verdict_parity(&vk_naive, &vk_comb, &pr, bad, K_INPUTS);
-            if (vr != 0) ok = false;         /* must agree AND reject */
-        }
-        /* random vectors */
-        for (int r = 0; r < 128 && ok; r++) {
-            uint64_t inp[K_INPUTS][4];
-            for (int i = 0; i < K_INPUTS; i++)
-                for (int limb = 0; limb < 4; limb++)
-                    inp[i][limb] = splitmix64(&s);
-            struct g1_point vk_x;
-            ref_vk_x(&vk_x, &vk_naive, inp, K_INPUTS);
-            struct groth16_proof pr;
-            pr.a = G1; pr.b = G2;
-            g1_neg(&pr.c, &vk_x);
-            if (verdict_parity(&vk_naive, &vk_comb, &pr, inp, K_INPUTS) != 1)
-                ok = false;
-        }
+        bool ok = battery_edge_ok(&vk_naive, &vk_comb, &G1, &G2) &&
+                  battery_random_ok(&vk_naive, &vk_comb, &G1, &G2);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -180,31 +233,7 @@ int test_groth16_msm_parity(void)
     /* ---- Batch verify parity ---- */
     printf("groth16_msm_parity: batch comb==naive verdict... ");
     {
-        struct groth16_proof proofs[4];
-        uint64_t flat[4 * K_INPUTS][4];
-        bool ok = true;
-        for (int j = 0; j < 4; j++) {
-            uint64_t inp[K_INPUTS][4];
-            for (int i = 0; i < K_INPUTS; i++) {
-                inp[i][0] = (uint64_t)(j * 11 + i + 1);
-                inp[i][1] = inp[i][2] = inp[i][3] = 0;
-                memcpy(flat[j * K_INPUTS + i], inp[i], sizeof(inp[i]));
-            }
-            struct g1_point vk_x;
-            ref_vk_x(&vk_x, &vk_naive, inp, K_INPUTS);
-            proofs[j].a = G1; proofs[j].b = G2;
-            g1_neg(&proofs[j].c, &vk_x);
-        }
-        bool bn = groth16_batch_verify(&vk_naive, proofs, flat, K_INPUTS, 4);
-        bool bc = groth16_batch_verify(&vk_comb,  proofs, flat, K_INPUTS, 4);
-        if (bn != bc || !bn) ok = false;     /* must agree AND accept */
-
-        /* corrupt one -> both must reject, still agreeing */
-        g1_add(&proofs[2].c, &proofs[2].c, &G1);
-        bool bn2 = groth16_batch_verify(&vk_naive, proofs, flat, K_INPUTS, 4);
-        bool bc2 = groth16_batch_verify(&vk_comb,  proofs, flat, K_INPUTS, 4);
-        if (bn2 != bc2 || bn2) ok = false;   /* must agree AND reject */
-
+        bool ok = batch_parity_ok(&vk_naive, &vk_comb, &G1, &G2);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
