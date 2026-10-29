@@ -856,6 +856,7 @@ static int test_mail_cursor_row(const char *name, const char *bytes, size_t n,
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1223,6 +1224,7 @@ static int test_mail_utf8_ref(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1431,6 +1433,7 @@ static int test_mail_exact_maximum(void)
         dvx_restore();
         PASS();
     } _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1463,6 +1466,7 @@ static int test_mail_exact_malformed(void)
         dvx_restore();
         PASS();
     } _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1489,6 +1493,7 @@ static int test_mail_exact_nul(void)
         dvx_restore();
         PASS();
     } _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1542,6 +1547,7 @@ static int test_mail_leaf_registered(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1629,6 +1635,7 @@ static int test_mail_first_post_roundtrip(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1667,6 +1674,7 @@ static int test_mail_ack_persists_cursor(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1800,6 +1808,7 @@ static int test_mail_body_refusals(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -1950,6 +1959,7 @@ static int test_mail_body_path_verdicts(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -2008,6 +2018,7 @@ static int test_mail_ack_atomic(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 
@@ -2107,6 +2118,7 @@ static int test_mail_fork_interleave(void)
         PASS();
     }
 _test_next:;
+    dvx_restore();
     return failures;
 }
 #endif /* !defined(_WIN32) */
