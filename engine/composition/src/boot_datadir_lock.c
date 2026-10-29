@@ -330,8 +330,9 @@ static void report_pidfile_open_failure(const char *datadir, int e)
                       datadir, BDL_PIDFILE, strerror(e));
 }
 
-/* Report a lock file that fstat did not identify as an unlinked regular
- * file; closes the lock file and datadir descriptors itself. */
+/* Report a lock file that fstat did not identify as a regular file with
+ * exactly one hard link (st_nlink == 1); closes the lock file and datadir
+ * descriptors itself. */
 static void report_pidfile_not_private(const char *datadir, int stat_rc,
                                        const struct stat *st, int fd,
                                        int dir_fd)
