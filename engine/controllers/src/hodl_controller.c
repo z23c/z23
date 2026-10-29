@@ -293,15 +293,20 @@ static void hodl_heatmap_scan(struct coins_view_db *coins_db, int tip_height,
     db_iter_free(&it);
 }
 
-/* Render the creation heatmap into the top portion of the pixel buffer. */
-static void hodl_heatmap_render(const int64_t *grid, int img_w, int heatmap_h,
-                                uint8_t *pixels)
+/* Find max grid value for normalization. */
+static int64_t hodl_heatmap_grid_max(const int64_t *grid, int img_w,
+                                     int heatmap_h)
 {
-    /* Find max grid value for normalization */
     int64_t grid_max = 0;
     for (int i = 0; i < heatmap_h * img_w; i++)
         if (grid[i] > grid_max) grid_max = grid[i];
+    return grid_max;
+}
 
+/* Render the creation heatmap into the top portion of the pixel buffer. */
+static void hodl_heatmap_render(const int64_t *grid, int64_t grid_max,
+                                int img_w, int heatmap_h, uint8_t *pixels)
+{
     for (int row = 0; row < heatmap_h; row++) {
         for (int col = 0; col < img_w; col++) {
             int64_t count = grid[row * img_w + col];
@@ -465,6 +470,9 @@ static bool rpc_gethodlwaveimage(const struct json_value *params, bool help,
     hodl_heatmap_scan(coins_db, tip_height, blocks_per_col, IMG_W, HEATMAP_H,
                       &acc);
 
+    /* Find max grid value for normalization */
+    int64_t grid_max = hodl_heatmap_grid_max(acc.grid, IMG_W, HEATMAP_H);
+
     /* Allocate pixel buffer */
     uint8_t *pixels = zcl_calloc((size_t)(IMG_W * IMG_H * 3), 1, "heatmap_pixels");
     if (!pixels) {
@@ -474,7 +482,7 @@ static bool rpc_gethodlwaveimage(const struct json_value *params, bool help,
     }
 
     /* Render heatmap (top portion) */
-    hodl_heatmap_render(acc.grid, IMG_W, HEATMAP_H, pixels);
+    hodl_heatmap_render(acc.grid, grid_max, IMG_W, HEATMAP_H, pixels);
 
     /* Render separator gap (dark gray line) */
     hodl_render_separator_gap(pixels, IMG_W, HEATMAP_H, GAP_H);
