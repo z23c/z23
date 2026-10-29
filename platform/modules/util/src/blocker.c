@@ -143,6 +143,102 @@ static int find_free_slot_locked(void)
     return -1;
 }
 
+static void blocker_set_escape_locked(struct blocker_slot *s,
+                                      const struct blocker_record *r,
+                                      int64_t now,
+                                      bool identity_changed)
+{
+    if (r->escape_deadline_secs > 0) {
+        s->escape_span_us = r->escape_deadline_secs * 1000000;
+        /* Anchor a fresh forward horizon from NOW (never the stale
+         * since_us) only on a new occurrence or when a deadline is
+         * first requested. On a same-identity refire, LEAVE the
+         * existing deadline/rearm_count/escalated untouched so the
+         * sweep keeps driving the still-live fault toward escalation. */
+        if (identity_changed || s->escape_deadline_us <= 0) {
+            s->escape_deadline_us = now + s->escape_span_us;
+            s->rearm_count = 0;
+            s->escalated = false;
+            /* A fresh horizon is a fresh EDGE. `escape_fired` is the
+             * "already dispatched for THIS deadline crossing" latch; the
+             * update path used to re-anchor the deadline and leave the
+             * latch set, so an escape-armed blocker that kept re-firing
+             * with a changing reason dispatched its remedy exactly ONCE
+             * per registry lifetime and never again. Re-arming the latch
+             * with the deadline it belongs to keeps the sweep
+             * edge-triggered (no re-fire within one crossing — the
+             * existing behaviour) while letting the next crossing fire. */
+            s->escape_fired = false;
+        } else if (s->escape_fired && now >= s->escape_deadline_us &&
+                   (s->retry_budget < 0 ||
+                    s->retry_count < s->retry_budget)) {
+            /* Same-identity refire of a still-live fault whose remedy has
+             * already run. The branch above only re-anchors when the
+             * identity CHANGED, and identity keys on `reason` — so a
+             * stable fault (the common shape: the reason text does not
+             * move while the fault persists) left the deadline in the
+             * past with the latch set, and `if (s->escape_fired) continue`
+             * skipped it for the rest of the registry's life. The remedy
+             * therefore ran exactly ONCE no matter what retry_budget
+             * claimed, which made the budget decoration — the same defect
+             * the comment above was written to close, fixed there only for
+             * the identity-changed half.
+             *
+             * Re-anchor the horizon so the NEXT crossing can dispatch, and
+             * only while the declared budget still has room (an exhausted
+             * budget must stay quiet, which the dispatch pass enforces
+             * separately). rearm_count/escalated are deliberately left
+             * untouched: those drive the rule-2 escalation ladder for
+             * blockers with NO escape action, and an escape-armed blocker
+             * escalates by spending its budget, not by re-arming. */
+            s->escape_deadline_us = now + s->escape_span_us;
+            s->escape_fired = false;
+        }
+    } else {
+        s->escape_deadline_us = 0;
+        s->escape_span_us = 0;
+        if (identity_changed) {
+            s->rearm_count = 0;
+            s->escalated = false;
+        }
+    }
+}
+
+static void blocker_set_refresh_locked(struct blocker_slot *s,
+                                       const struct blocker_record *r,
+                                       int64_t now)
+{
+    /* Fault IDENTITY: does this refire describe the SAME live fault, or
+     * a genuinely new occurrence? Identity = the class plus the
+     * descriptive fields the producer varies when the underlying fault
+     * changes (reason, and the root-cause edge caused_by/cause_detail).
+     * A worker stall re-raised with the same enum reason is the SAME
+     * stall still live; a stall re-raised at a new height/target changes
+     * reason and is a fresh occurrence. This is the keystone
+     * convergence fix: only a genuinely NEW occurrence may reset the
+     * rule-2 escalation clock (rearm_count/escalated) and re-anchor the
+     * deadline horizon. An actively-refiring SAME-identity blocker must
+     * keep advancing toward escalation — the previous code reset both on
+     * every touch and re-anchored the deadline to the ever-staler fixed
+     * since_us, so a still-stalling worker dodged escalation forever. */
+    bool identity_changed =
+        (int)s->class != (int)r->class ||
+        strcmp(s->reason, r->reason) != 0 ||
+        strcmp(s->caused_by, r->caused_by) != 0 ||
+        strcmp(s->cause_detail, r->cause_detail) != 0;
+
+    /* Refresh fields except since_us (preserves age semantics). */
+    s->class = r->class;
+    s->retry_budget = r->retry_budget;
+    s->ttl_us = r->transient_ttl_secs * 1000000;
+    snprintf(s->owner_subsystem, BLOCKER_OWNER_MAX, "%s", r->owner_subsystem);
+    snprintf(s->escape_action, BLOCKER_ACTION_MAX, "%s", r->escape_action);
+    snprintf(s->reason, BLOCKER_REASON_MAX, "%s", r->reason);
+    snprintf(s->caused_by, BLOCKER_ID_MAX, "%s", r->caused_by);
+    snprintf(s->cause_detail, BLOCKER_CAUSE_DETAIL_MAX, "%s", r->cause_detail);
+    blocker_set_escape_locked(s, r, now, identity_changed);
+}
+
 int blocker_set(const struct blocker_record *r)
 {
     if (!r) LOG_ERR("blocker", "set: null record");
@@ -167,88 +263,7 @@ int blocker_set(const struct blocker_record *r)
             return 1; /* rate-limited dup */
         }
         s->last_set_us = now;
-        /* Fault IDENTITY: does this refire describe the SAME live fault, or
-         * a genuinely new occurrence? Identity = the class plus the
-         * descriptive fields the producer varies when the underlying fault
-         * changes (reason, and the root-cause edge caused_by/cause_detail).
-         * A worker stall re-raised with the same enum reason is the SAME
-         * stall still live; a stall re-raised at a new height/target changes
-         * reason and is a fresh occurrence. This is the keystone
-         * convergence fix: only a genuinely NEW occurrence may reset the
-         * rule-2 escalation clock (rearm_count/escalated) and re-anchor the
-         * deadline horizon. An actively-refiring SAME-identity blocker must
-         * keep advancing toward escalation — the previous code reset both on
-         * every touch and re-anchored the deadline to the ever-staler fixed
-         * since_us, so a still-stalling worker dodged escalation forever. */
-        bool identity_changed =
-            (int)s->class != (int)r->class ||
-            strcmp(s->reason, r->reason) != 0 ||
-            strcmp(s->caused_by, r->caused_by) != 0 ||
-            strcmp(s->cause_detail, r->cause_detail) != 0;
-
-        /* Refresh fields except since_us (preserves age semantics). */
-        s->class = r->class;
-        s->retry_budget = r->retry_budget;
-        s->ttl_us = r->transient_ttl_secs * 1000000;
-        snprintf(s->owner_subsystem, BLOCKER_OWNER_MAX, "%s", r->owner_subsystem);
-        snprintf(s->escape_action, BLOCKER_ACTION_MAX, "%s", r->escape_action);
-        snprintf(s->reason, BLOCKER_REASON_MAX, "%s", r->reason);
-        snprintf(s->caused_by, BLOCKER_ID_MAX, "%s", r->caused_by);
-        snprintf(s->cause_detail, BLOCKER_CAUSE_DETAIL_MAX, "%s", r->cause_detail);
-        if (r->escape_deadline_secs > 0) {
-            s->escape_span_us = r->escape_deadline_secs * 1000000;
-            /* Anchor a fresh forward horizon from NOW (never the stale
-             * since_us) only on a new occurrence or when a deadline is
-             * first requested. On a same-identity refire, LEAVE the
-             * existing deadline/rearm_count/escalated untouched so the
-             * sweep keeps driving the still-live fault toward escalation. */
-            if (identity_changed || s->escape_deadline_us <= 0) {
-                s->escape_deadline_us = now + s->escape_span_us;
-                s->rearm_count = 0;
-                s->escalated = false;
-                /* A fresh horizon is a fresh EDGE. `escape_fired` is the
-                 * "already dispatched for THIS deadline crossing" latch; the
-                 * update path used to re-anchor the deadline and leave the
-                 * latch set, so an escape-armed blocker that kept re-firing
-                 * with a changing reason dispatched its remedy exactly ONCE
-                 * per registry lifetime and never again. Re-arming the latch
-                 * with the deadline it belongs to keeps the sweep
-                 * edge-triggered (no re-fire within one crossing — the
-                 * existing behaviour) while letting the next crossing fire. */
-                s->escape_fired = false;
-            } else if (s->escape_fired && now >= s->escape_deadline_us &&
-                       (s->retry_budget < 0 ||
-                        s->retry_count < s->retry_budget)) {
-                /* Same-identity refire of a still-live fault whose remedy has
-                 * already run. The branch above only re-anchors when the
-                 * identity CHANGED, and identity keys on `reason` — so a
-                 * stable fault (the common shape: the reason text does not
-                 * move while the fault persists) left the deadline in the
-                 * past with the latch set, and `if (s->escape_fired) continue`
-                 * skipped it for the rest of the registry's life. The remedy
-                 * therefore ran exactly ONCE no matter what retry_budget
-                 * claimed, which made the budget decoration — the same defect
-                 * the comment above was written to close, fixed there only for
-                 * the identity-changed half.
-                 *
-                 * Re-anchor the horizon so the NEXT crossing can dispatch, and
-                 * only while the declared budget still has room (an exhausted
-                 * budget must stay quiet, which the dispatch pass enforces
-                 * separately). rearm_count/escalated are deliberately left
-                 * untouched: those drive the rule-2 escalation ladder for
-                 * blockers with NO escape action, and an escape-armed blocker
-                 * escalates by spending its budget, not by re-arming. */
-                s->escape_deadline_us = now + s->escape_span_us;
-                s->escape_fired = false;
-            }
-        } else {
-            s->escape_deadline_us = 0;
-            s->escape_span_us = 0;
-            if (identity_changed) {
-                s->rearm_count = 0;
-                s->escalated = false;
-            }
-        }
+        blocker_set_refresh_locked(s, r, now);
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
@@ -625,6 +640,99 @@ static void emit_sweep_logs(char logs[BLOCKER_CAP][SWEEP_LOG_CAP], int count)
 
 /* ── Sweep ─────────────────────────────────────────────────────────── */
 
+/* Rule 1 helper: retire a TRANSIENT blocker whose TTL window has lapsed. */
+static bool blocker_sweep_retire_ttl_locked(struct blocker_slot *s, int64_t now)
+{
+    /* Rule 1 (TTL retirement, TRANSIENT only): a blocker is a live
+     * claim, not a log line. One that has not re-fired within its TTL
+     * window is stale evidence — retire it, witnessed via the counter
+     * + last-retired record above, never a silent delete. Applies
+     * uniformly whether or not the blocker also carries an
+     * escape_deadline_us / is currently escalated (rule 2 below);
+     * inactivity outranks escalation. */
+    if (s->class == BLOCKER_TRANSIENT) {
+        int64_t ttl_us = (s->ttl_us > 0)
+            ? s->ttl_us
+            : (int64_t)BLOCKER_DEFAULT_TRANSIENT_TTL_SECS * 1000000;
+        if (now - s->last_fire_us >= ttl_us) {
+            record_retirement_locked(s, now);
+            memset(s, 0, sizeof(*s));
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Rule 2 helper: re-arm or escalate a TRANSIENT blocker with an overdue
+ * deadline and no escape action. Appends at most one diagnostic. */
+static void blocker_sweep_rule2_locked(struct blocker_slot *s, int64_t now,
+                                       char logs[][SWEEP_LOG_CAP], int *log_n)
+{
+    /* Rule 2 (overdue deadline, TRANSIENT only, no actionable escape):
+     * an escape_deadline_us with an empty escape_action has nothing to
+     * dispatch and would otherwise sit with a growing-negative
+     * deadline_remaining_us forever (this was the live
+     * worker.stall.op.projection_backfill defect). Re-arm a bounded
+     * number of times, then escalate visibly instead. Blockers with a
+     * real escape_action are untouched here — they fall through to the
+     * dispatch pass below exactly as before. */
+    if (s->class == BLOCKER_TRANSIENT && s->escape_deadline_us > 0 &&
+        now >= s->escape_deadline_us && s->escape_action[0] == '\0') {
+        if (s->rearm_count < BLOCKER_MAX_DEADLINE_REARMS) {
+            int64_t span = (s->escape_span_us > 0)
+                ? s->escape_span_us
+                : (int64_t)BLOCKER_DEFAULT_TRANSIENT_TTL_SECS * 1000000;
+            s->escape_deadline_us = now + span;
+            s->rearm_count++;
+        } else if (!s->escalated) {
+            s->escalated = true;
+            atomic_fetch_add(&g_generation, 1);
+            snprintf(logs[(*log_n)++], SWEEP_LOG_CAP,
+                    "[blocker] %s escalated: deadline overdue after %d "
+                    "re-arm(s) with no escape action (id=%s owner=%s)\n",
+                    blocker_class_name(s->class), s->rearm_count,
+                    s->id, s->owner_subsystem);  // obs-ok:blocker-deadline-escalated
+        }
+    }
+}
+
+/* Bounded retry budget helper: true when the declared budget is spent. */
+static bool blocker_sweep_budget_spent_locked(struct blocker_slot *s,
+                                              char logs[][SWEEP_LOG_CAP],
+                                              int *log_n)
+{
+    /* Bounded retry budget (budget > 0 only; -1 = unbounded and 0 = the
+     * blocker_init default "no bound requested"). Dispatching an escape
+     * IS a retry attempt, so a budget that is never decremented is
+     * decoration: `blocker_record_retry` had zero production callers, so
+     * `retry_count` sat at 0 for every live blocker while the escape
+     * ladder fired. Charge the attempt here, and stop dispatching once
+     * the declared budget is spent rather than retrying forever against
+     * a budget the record claims is finite. */
+    if (s->retry_budget > 0 && s->retry_count >= s->retry_budget) {
+        snprintf(logs[(*log_n)++], SWEEP_LOG_CAP,
+                "[blocker] escape '%s' budget exhausted "
+                "(retry_count=%d budget=%d id=%s) — not dispatching\n",
+                s->escape_action, s->retry_count, s->retry_budget,
+                s->id);  // obs-ok:blocker-escape-budget-exhausted
+        s->escape_fired = true;
+        return true;
+    }
+    return false;
+}
+
+/* Escape registry lookup: the registered callback for `name`, or NULL. */
+static blocker_escape_fn blocker_find_escape_locked(const char *name)
+{
+    for (int k = 0; k < BLOCKER_ESCAPE_CAP; k++) {
+        if (g_escapes[k].in_use &&
+            strcmp(g_escapes[k].name, name) == 0) {
+            return g_escapes[k].fn;
+        }
+    }
+    return NULL;
+}
+
 int blocker_supervisor_sweep(void)
 {
     /* Collect (snapshot, fn) pairs under lock, release, dispatch.
@@ -643,83 +751,16 @@ int blocker_supervisor_sweep(void)
     for (int i = 0; i < BLOCKER_CAP; i++) {
         struct blocker_slot *s = &g_slots[i];
         if (!s->in_use) continue;
-
-        /* Rule 1 (TTL retirement, TRANSIENT only): a blocker is a live
-         * claim, not a log line. One that has not re-fired within its TTL
-         * window is stale evidence — retire it, witnessed via the counter
-         * + last-retired record above, never a silent delete. Applies
-         * uniformly whether or not the blocker also carries an
-         * escape_deadline_us / is currently escalated (rule 2 below);
-         * inactivity outranks escalation. */
-        if (s->class == BLOCKER_TRANSIENT) {
-            int64_t ttl_us = (s->ttl_us > 0)
-                ? s->ttl_us
-                : (int64_t)BLOCKER_DEFAULT_TRANSIENT_TTL_SECS * 1000000;
-            if (now - s->last_fire_us >= ttl_us) {
-                record_retirement_locked(s, now);
-                memset(s, 0, sizeof(*s));
-                continue;
-            }
-        }
-
-        /* Rule 2 (overdue deadline, TRANSIENT only, no actionable escape):
-         * an escape_deadline_us with an empty escape_action has nothing to
-         * dispatch and would otherwise sit with a growing-negative
-         * deadline_remaining_us forever (this was the live
-         * worker.stall.op.projection_backfill defect). Re-arm a bounded
-         * number of times, then escalate visibly instead. Blockers with a
-         * real escape_action are untouched here — they fall through to the
-         * dispatch pass below exactly as before. */
-        if (s->class == BLOCKER_TRANSIENT && s->escape_deadline_us > 0 &&
-            now >= s->escape_deadline_us && s->escape_action[0] == '\0') {
-            if (s->rearm_count < BLOCKER_MAX_DEADLINE_REARMS) {
-                int64_t span = (s->escape_span_us > 0)
-                    ? s->escape_span_us
-                    : (int64_t)BLOCKER_DEFAULT_TRANSIENT_TTL_SECS * 1000000;
-                s->escape_deadline_us = now + span;
-                s->rearm_count++;
-            } else if (!s->escalated) {
-                s->escalated = true;
-                atomic_fetch_add(&g_generation, 1);
-                snprintf(logs[log_n++], SWEEP_LOG_CAP,
-                        "[blocker] %s escalated: deadline overdue after %d "
-                        "re-arm(s) with no escape action (id=%s owner=%s)\n",
-                        blocker_class_name(s->class), s->rearm_count,
-                        s->id, s->owner_subsystem);  // obs-ok:blocker-deadline-escalated
-            }
-        }
+        if (blocker_sweep_retire_ttl_locked(s, now)) continue;
+        blocker_sweep_rule2_locked(s, now, logs, &log_n);
 
         if (s->escape_fired) continue;
         if (s->escape_deadline_us <= 0) continue;
         if (now < s->escape_deadline_us) continue;
         if (s->escape_action[0] == '\0') continue;
-
-        /* Bounded retry budget (budget > 0 only; -1 = unbounded and 0 = the
-         * blocker_init default "no bound requested"). Dispatching an escape
-         * IS a retry attempt, so a budget that is never decremented is
-         * decoration: `blocker_record_retry` had zero production callers, so
-         * `retry_count` sat at 0 for every live blocker while the escape
-         * ladder fired. Charge the attempt here, and stop dispatching once
-         * the declared budget is spent rather than retrying forever against
-         * a budget the record claims is finite. */
-        if (s->retry_budget > 0 && s->retry_count >= s->retry_budget) {
-            snprintf(logs[log_n++], SWEEP_LOG_CAP,
-                    "[blocker] escape '%s' budget exhausted "
-                    "(retry_count=%d budget=%d id=%s) — not dispatching\n",
-                    s->escape_action, s->retry_count, s->retry_budget,
-                    s->id);  // obs-ok:blocker-escape-budget-exhausted
-            s->escape_fired = true;
-            continue;
-        }
+        if (blocker_sweep_budget_spent_locked(s, logs, &log_n)) continue;
         /* Look up function. */
-        blocker_escape_fn fn = NULL;
-        for (int k = 0; k < BLOCKER_ESCAPE_CAP; k++) {
-            if (g_escapes[k].in_use &&
-                strcmp(g_escapes[k].name, s->escape_action) == 0) {
-                fn = g_escapes[k].fn;
-                break;
-            }
-        }
+        blocker_escape_fn fn = blocker_find_escape_locked(s->escape_action);
         if (!fn) {
             /* Action registered? No → log once per record, skip. We mark
              * escape_fired to avoid spam; operator must clear. */
