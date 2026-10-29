@@ -17,6 +17,8 @@
  *   5.  Bounded aging: a proven-dead record does not come back, and a peer
  *       that keeps failing is deprioritised.
  *   6.  addrman_proven_count() counts only addresses we actually connected to.
+ *   8.  addrman_deserialize(): each header refusal, row drop, table fault and
+ *       geometry branch returns the verdict pinned in its table row.
  *
  * Not proved here: the full two-node boot leg over a real socket (see test
  * 3). All file I/O is local (./test-tmp); no network, no live datadir.
@@ -974,6 +976,283 @@ static int pm_anchor_set_comparison_ignores_order(void)
     return failures;
 }
 
+/* ── 8. addrman_deserialize: one row per branch, verdict pinned ──────────
+ *
+ * Each row names a store body by its header words and row/table shape, and
+ * the verdict the loader reaches today: the bool it returns and, when it
+ * succeeds, how many entries it keeps. Refusals return false; a dropped row
+ * or a bad bucket table still returns true. */
+#define PM_HDR_BYTES 46   /* version, key size, nKey[32], three i32 words */
+#define PM_KEEP_CUT  1    /* row flag: truncate the body at `keep` bytes */
+#define PM_NUB_V2    ((int32_t)(ADDRMAN_NEW_BUCKET_COUNT ^ (1 << 30)))
+#define PM_NUB_V0    ((int32_t)ADDRMAN_NEW_BUCKET_COUNT)
+#define PM_NUB_BAD   ((int32_t)(512 ^ (1 << 30)))
+#define PM_BASE_V2   .version = 2, .key_size = 32, .nUBuckets = PM_NUB_V2
+
+enum pm_row_kind { PM_ROW_OK, PM_ROW_PORT_ZERO, PM_ROW_DEAD };
+
+enum pm_table_mode {
+    PM_TABLE_NONE,          /* stream ends after the rows */
+    PM_TABLE_ZERO,          /* every bucket size 0 */
+    PM_TABLE_NSIZE_HUGE,    /* bucket 0 size above ADDRMAN_BUCKET_SIZE */
+    PM_TABLE_INDEX_CUT,     /* bucket 0 lists two indices, stream ends after one */
+    PM_TABLE_PLACE_ROW0,    /* bucket 0 names row 0 */
+    PM_TABLE_INDEX_RANGE,   /* bucket 0 names an index past nNew */
+};
+
+struct pm_branch {
+    const char *name;
+    uint8_t version;
+    uint8_t key_size;
+    int32_t nNew;
+    int32_t nTried;
+    int32_t nUBuckets;      /* the raw word as written */
+    int rows;               /* records after the header: NEW rows, then TRIED */
+    enum pm_row_kind row_kind;
+    enum pm_table_mode table;
+    unsigned cut;           /* PM_KEEP_CUT truncates the body at `keep` */
+    size_t keep;
+    bool want_ok;
+    size_t want_size;       /* addrman_size() when the load succeeds */
+};
+
+static const struct pm_branch pm_branch_table[] = {
+    /* ── header: every read and every refusal before the rows ───────────── */
+    { .name = "empty stream", PM_BASE_V2, .cut = PM_KEEP_CUT, .keep = 0,
+      .want_ok = false },
+    { .name = "cut after the version byte", PM_BASE_V2,
+      .cut = PM_KEEP_CUT, .keep = 1, .want_ok = false },
+    { .name = "cut inside nKey", PM_BASE_V2,
+      .cut = PM_KEEP_CUT, .keep = 33, .want_ok = false },
+    { .name = "cut before nNew", PM_BASE_V2,
+      .cut = PM_KEEP_CUT, .keep = 34, .want_ok = false },
+    { .name = "cut before nTried", PM_BASE_V2,
+      .cut = PM_KEEP_CUT, .keep = 38, .want_ok = false },
+    { .name = "cut before the bucket count", PM_BASE_V2,
+      .cut = PM_KEEP_CUT, .keep = 42, .want_ok = false },
+    { .name = "version 3 refused", .version = 3, .key_size = 32,
+      .nUBuckets = PM_NUB_V2, .want_ok = false },
+    { .name = "version 255 refused", .version = 255, .key_size = 32,
+      .nUBuckets = PM_NUB_V2, .want_ok = false },
+    { .name = "key size 31 refused", .version = 2, .key_size = 31,
+      .nUBuckets = PM_NUB_V2, .want_ok = false },
+    { .name = "nNew negative refused", PM_BASE_V2, .nNew = -1,
+      .want_ok = false },
+    { .name = "nNew over cap refused", PM_BASE_V2,
+      .nNew = ADDRMAN_NEW_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE + 1,
+      .want_ok = false },
+    { .name = "nTried negative refused", PM_BASE_V2, .nTried = -1,
+      .want_ok = false },
+    { .name = "nTried over cap refused", PM_BASE_V2,
+      .nTried = ADDRMAN_TRIED_BUCKET_COUNT * ADDRMAN_BUCKET_SIZE + 1,
+      .want_ok = false },
+
+    /* ── rows: a bad row costs that row, a truncated row costs the load ── */
+    { .name = "empty store, no rows, no table", PM_BASE_V2,
+      .want_ok = true, .want_size = 0 },
+    { .name = "NEW row cut mid-record", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .cut = PM_KEEP_CUT, .keep = PM_HDR_BYTES + 50, .want_ok = false },
+    { .name = "TRIED row missing", PM_BASE_V2, .nTried = 1, .rows = 0,
+      .want_ok = false },
+    { .name = "TRIED row placed", PM_BASE_V2, .nTried = 1, .rows = 1,
+      .want_ok = true, .want_size = 1 },
+    { .name = "NEW row with port 0 dropped", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .row_kind = PM_ROW_PORT_ZERO, .want_ok = true, .want_size = 0 },
+    { .name = "dead NEW row dropped", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .row_kind = PM_ROW_DEAD, .want_ok = true, .want_size = 0 },
+    { .name = "NEW row kept, no table", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .want_ok = true, .want_size = 1 },
+
+    /* ── bucket table: a hint, abandoned on any fault, never the rows ──── */
+    { .name = "NEW row kept, zero table", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_ZERO, .want_ok = true, .want_size = 1 },
+    { .name = "table places row 0", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_PLACE_ROW0, .want_ok = true, .want_size = 1 },
+    { .name = "table bucket size over limit", PM_BASE_V2, .nNew = 1,
+      .rows = 1, .table = PM_TABLE_NSIZE_HUGE, .want_ok = true,
+      .want_size = 1 },
+    { .name = "table index cut short", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_INDEX_CUT, .want_ok = true, .want_size = 1 },
+    { .name = "table index past nNew", PM_BASE_V2, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_INDEX_RANGE, .want_ok = true, .want_size = 1 },
+
+    /* ── geometry and format: the table is only read for v1+ at this size */
+    { .name = "v0 row kept, table ignored", .version = 0, .key_size = 32,
+      .nUBuckets = PM_NUB_V0, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_ZERO, .want_ok = true, .want_size = 1 },
+    { .name = "v1 wrong geometry, row kept", .version = 1, .key_size = 32,
+      .nUBuckets = PM_NUB_BAD, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_ZERO, .want_ok = true, .want_size = 1 },
+    { .name = "v2 wrong geometry, row kept", .version = 2, .key_size = 32,
+      .nUBuckets = PM_NUB_BAD, .nNew = 1, .rows = 1,
+      .table = PM_TABLE_ZERO, .want_ok = true, .want_size = 1 },
+};
+
+/* One record in the width the row's version reads. */
+static bool pm_branch_write_row(struct byte_stream *s,
+                                const struct pm_branch *c, int i)
+{
+    const int64_t now = (int64_t)platform_time_wall_time_t();
+    struct pm_forged f;
+    memset(&f, 0, sizeof(f));
+    f.version = c->version;
+    if (c->version >= 2) {
+        pm_set_onion(&f.addr, (unsigned char)(0x31 + i));
+        f.addr_flag = 1;
+    } else {
+        pm_set_ipv4(&f.addr, 198, 51, 100, (unsigned char)(4 + i));
+    }
+    f.port = c->row_kind == PM_ROW_PORT_ZERO ? 0 : 8033;
+    f.last_success = now - 300;
+    f.last_try = now - 300;
+    if (c->row_kind == PM_ROW_DEAD) {
+        f.last_success = 0;
+        f.attempts = ADDRMAN_RETRIES;
+        f.last_try = 0;
+    }
+    unsigned char zero16[16];
+    memset(zero16, 0, sizeof(zero16));
+    unsigned char zero32[TORV3_ADDR_SIZE];
+    memset(zero32, 0, sizeof(zero32));
+    bool ok = pm_forge_write_addr_record(s, &f, zero16);
+    if (ok && c->version >= 2)
+        ok = pm_forge_write_v2_fields(s, &f, zero32);
+    return ok;
+}
+
+/* The bucket table, in the shape the row names. */
+static bool pm_branch_write_table(struct byte_stream *s,
+                                  enum pm_table_mode mode)
+{
+    int32_t first_size = 0;
+    int32_t first_index = 0;
+    bool with_index = false;
+    switch (mode) {
+    case PM_TABLE_NONE:
+        return true;
+    case PM_TABLE_NSIZE_HUGE:
+        return stream_write_i32_le(s, ADDRMAN_BUCKET_SIZE + 1);
+    case PM_TABLE_INDEX_CUT:
+        return stream_write_i32_le(s, 2) && stream_write_i32_le(s, 0);
+    case PM_TABLE_PLACE_ROW0:
+        first_size = 1;
+        first_index = 0;
+        with_index = true;
+        break;
+    case PM_TABLE_INDEX_RANGE:
+        first_size = 1;
+        first_index = 5;
+        with_index = true;
+        break;
+    case PM_TABLE_ZERO:
+        break;
+    }
+    bool ok = stream_write_i32_le(s, first_size);
+    if (ok && with_index)
+        ok = stream_write_i32_le(s, first_index);
+    for (int b = 1; ok && b < ADDRMAN_NEW_BUCKET_COUNT; b++)
+        ok = stream_write_i32_le(s, 0);
+    return ok;
+}
+
+static bool pm_branch_build(struct byte_stream *s, const struct pm_branch *c)
+{
+    unsigned char key[32];
+    memset(key, 0xa5, sizeof(key));
+    bool ok = stream_write_u8(s, c->version) &&
+              stream_write_u8(s, c->key_size) &&
+              stream_write_bytes(s, key, sizeof(key)) &&
+              stream_write_i32_le(s, c->nNew) &&
+              stream_write_i32_le(s, c->nTried) &&
+              stream_write_i32_le(s, c->nUBuckets);
+    for (int i = 0; ok && i < c->rows; i++)
+        ok = pm_branch_write_row(s, c, i);
+    return ok && pm_branch_write_table(s, c->table);
+}
+
+static bool pm_branch_check(const struct pm_branch *c)
+{
+    struct byte_stream s;
+    stream_init(&s, 16384);
+    if (!pm_branch_build(&s, c)) {
+        stream_free(&s);
+        return false;
+    }
+    size_t len = s.size;
+    if ((c->cut & PM_KEEP_CUT) && c->keep < len)
+        len = c->keep;
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct byte_stream r;
+    stream_init_from_data(&r, s.data, len);
+    bool got = addrman_deserialize(&am, &r);
+    bool ok = got == c->want_ok;
+    if (ok && got) {
+        char err[256];
+        ok = addrman_size(&am) == c->want_size &&
+             addrman_consistency_check(&am, err, sizeof(err)) == 0 &&
+             addrman_index_verify(&am, err, sizeof(err)) == 0;
+    }
+    stream_free(&r);
+    addrman_free(&am);
+    stream_free(&s);
+    return ok;
+}
+
+static int pm_deserialize_branch_verdicts(void)
+{
+    int failures = 0;
+    /* ── 8. every branch of addrman_deserialize, one row each ─────────── */
+    printf("peer_memory: addrman_deserialize branch verdicts... ");
+    bool ok = true;
+    const size_t rows = sizeof(pm_branch_table) / sizeof(pm_branch_table[0]);
+    for (size_t k = 0; ok && k < rows; k++) {
+        ok = pm_branch_check(&pm_branch_table[k]);
+        if (!ok)
+            printf("[%s] ", pm_branch_table[k].name);
+    }
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int pm_refused_store_clears_table(void)
+{
+    int failures = 0;
+    /* 8b. addrman_deserialize clears the table before it reads anything, so
+     * a refused store never leaves the previous contents behind. */
+    printf("peer_memory: refused store leaves the table empty... ");
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src;
+    pm_set_ipv4(&src, 5, 5, 5, 5);
+    struct net_address a;
+    net_address_init(&a);
+    pm_set_onion(&a.svc.addr, 0x61);
+    a.svc.port = 8033;
+    a.nTime = (uint32_t)platform_time_wall_time_t();
+    bool ok = addrman_add(&am, &a, &src, 0) && addrman_size(&am) == 1;
+
+    struct pm_branch bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.version = 3;
+    bad.key_size = 32;
+    bad.nUBuckets = PM_NUB_V2;
+    struct byte_stream s;
+    stream_init(&s, 4096);
+    ok = ok && pm_branch_build(&s, &bad);
+    struct byte_stream r;
+    stream_init_from_data(&r, s.data, s.size);
+    ok = ok && !addrman_deserialize(&am, &r) && addrman_size(&am) == 0;
+    stream_free(&r);
+    stream_free(&s);
+    addrman_free(&am);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 static int test_peer_memory_platform_arm(void);
 
 static int test_peer_memory_platform_arm(void)
@@ -1006,6 +1285,10 @@ static int test_peer_memory_platform_arm(void)
     failures += pm_proven_count_ignores_hearsay();
 
     failures += pm_anchor_set_comparison_ignores_order();
+
+    failures += pm_deserialize_branch_verdicts();
+
+    failures += pm_refused_store_clears_table();
 
     return failures + ZCL_TEST_SETUP_FAILURES();
 }
