@@ -486,82 +486,94 @@ static void describe_brief_metric(const struct zcl_command_spec *spec, size_t i)
                describe_needed_bytes(i), ZCL_COMMAND_SPEC_BUDGET);
 }
 
-int main(int argc, char **argv)
+struct describe_leaf_tally {
+    size_t leaves;
+    size_t largest;
+    size_t new_overflow;
+    size_t fixed_overflow;
+    const char *largest_path;
+};
+
+struct describe_menu_tally {
+    size_t menus;
+    size_t largest_menu;
+    size_t menu_overflow;
+    const char *largest_menu_path;
+};
+
+/* Checks one leaf: a fitting document, a baselined overflow, or a new one. */
+static void describe_check_leaf(const struct zcl_command_registry *reg,
+                                size_t i, const char *baseline_path,
+                                bool verbose, char *out, size_t out_size,
+                                struct describe_leaf_tally *t)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <baseline.txt> [-v]\n", argv[0]);
-        return 2;
-    }
-    const bool verbose = argc > 2 && strcmp(argv[2], "-v") == 0;
-    if (!describe_catalog_ready(argv[1]))
-        return 1;
-
-    const struct zcl_command_registry reg = { .commands = g_specs,
-                                              .count = SPEC_COUNT };
-    char out[ZCL_COMMAND_LIST_BUDGET + 1];
-    size_t leaves = 0, largest = 0, new_overflow = 0, fixed_overflow = 0;
-    const char *largest_path = "";
-
-    for (size_t i = 0; i < SPEC_COUNT; i++) {
-        const struct zcl_command_spec *spec = &g_specs[i];
-        if (spec->mode == ZCL_COMMAND_MODE_BRANCH)
-            continue;   /* branches render a menu, gated below */
-        leaves++;
-        describe_brief_metric(spec, i);
-        size_t n = zcl_command_registry_describe_json(&reg, spec->path, out,
-                                                      sizeof(out));
-        if (n > 0) {
-            if (n > largest) {
-                largest = n;
-                largest_path = spec->path;
-            }
-            if (verbose)
-                printf("  %5zu  %s\n", n, spec->path);
-            struct baseline_entry *b = baseline_find(spec->path);
-            if (b)
-                fprintf(stderr,
-                    "STALE BASELINE: %s now fits (%zu bytes) — delete its line "
-                    "from %s. This baseline may only shrink.\n",
-                    spec->path, n, argv[1]);
-            continue;
+    const struct zcl_command_spec *spec = &g_specs[i];
+    t->leaves++;
+    describe_brief_metric(spec, i);
+    size_t n = zcl_command_registry_describe_json(reg, spec->path, out,
+                                                  out_size);
+    if (n > 0) {
+        if (n > t->largest) {
+            t->largest = n;
+            t->largest_path = spec->path;
         }
-
-        size_t need = describe_needed_bytes(i);
+        if (verbose)
+            printf("  %5zu  %s\n", n, spec->path);
         struct baseline_entry *b = baseline_find(spec->path);
-        if (b) {
-            b->seen_overflowing = true;
-            if (verbose)
-                printf("  BASELINED  %s (needs %zu of %u)\n", spec->path, need,
-                       ZCL_COMMAND_SPEC_BUDGET);
-            continue;
-        }
-        if (need == 0) {
-            fixed_overflow++;
+        if (b)
             fprintf(stderr,
-                "OVER BUDGET: %s — its describe document does not fit "
-                "ZCL_COMMAND_SPEC_BUDGET (%u bytes) even with an empty "
-                "`semantics`. Shorten the fixed fields (summary, example, "
-                "input_keys, schema ids).\n",
-                spec->path, ZCL_COMMAND_SPEC_BUDGET);
-            continue;
-        }
-        new_overflow++;
-        fprintf(stderr,
-            "OVER BUDGET: %s — its describe document needs %zu bytes and "
-            "ZCL_COMMAND_SPEC_BUDGET is %u. `discover describe %s` cannot be "
-            "read at all: the renderer reports DESCRIBE_BUDGET and the leaf's "
-            "written contract is invisible. Trim its `semantics` in "
-            "engine/composition/commands/*.def by at least %zu bytes. Do NOT raise the "
-            "budget.\n",
-            spec->path, need, ZCL_COMMAND_SPEC_BUDGET, spec->path,
-            need - ZCL_COMMAND_SPEC_BUDGET);
+                "STALE BASELINE: %s now fits (%zu bytes) — delete its line "
+                "from %s. This baseline may only shrink.\n",
+                spec->path, n, baseline_path);
+        return;
     }
 
+    size_t need = describe_needed_bytes(i);
+    struct baseline_entry *b = baseline_find(spec->path);
+    if (b) {
+        b->seen_overflowing = true;
+        if (verbose)
+            printf("  BASELINED  %s (needs %zu of %u)\n", spec->path, need,
+                   ZCL_COMMAND_SPEC_BUDGET);
+        return;
+    }
+    if (need == 0) {
+        t->fixed_overflow++;
+        fprintf(stderr,
+            "OVER BUDGET: %s — its describe document does not fit "
+            "ZCL_COMMAND_SPEC_BUDGET (%u bytes) even with an empty "
+            "`semantics`. Shorten the fixed fields (summary, example, "
+            "input_keys, schema ids).\n",
+            spec->path, ZCL_COMMAND_SPEC_BUDGET);
+        return;
+    }
+    t->new_overflow++;
+    fprintf(stderr,
+        "OVER BUDGET: %s — its describe document needs %zu bytes and "
+        "ZCL_COMMAND_SPEC_BUDGET is %u. `discover describe %s` cannot be "
+        "read at all: the renderer reports DESCRIBE_BUDGET and the leaf's "
+        "written contract is invisible. Trim its `semantics` in "
+        "engine/composition/commands/*.def by at least %zu bytes. Do NOT raise the "
+        "budget.\n",
+        spec->path, need, ZCL_COMMAND_SPEC_BUDGET, spec->path,
+        need - ZCL_COMMAND_SPEC_BUDGET);
+}
+
+/* Counts baseline entries that no longer overflow; they must be deleted. */
+static size_t describe_count_stale(void)
+{
     size_t stale = 0;
     for (size_t i = 0; i < g_baseline_count; i++)
         if (!g_baseline[i].seen_overflowing)
             stale++;
+    return stale;
+}
 
+/* Checks every branch menu and then the root menu against their budgets. */
+static void describe_check_menus(const struct zcl_command_registry *reg,
+                                 bool verbose, char *out, size_t out_size,
+                                 struct describe_menu_tally *t)
+{
     /* ── Branch menus ────────────────────────────────────────────────────
      * The leaf loop above once skipped branches with "gated by MENU_BUDGET"
      * — but nothing gated menus. zcode.package crossed
@@ -575,25 +587,23 @@ int main(int argc, char **argv)
      * dotted paths as aliases so existing CLI words resolve unchanged —
      * the zcode.package.swarm and zcode.package.dev.* migrations are the
      * precedent), not by raising the budget. */
-    size_t menus = 0, largest_menu = 0, menu_overflow = 0;
-    const char *largest_menu_path = "";
     for (size_t i = 0; i < SPEC_COUNT; i++) {
         const struct zcl_command_spec *spec = &g_specs[i];
         if (spec->mode != ZCL_COMMAND_MODE_BRANCH)
             continue;
-        menus++;
-        size_t n = zcl_command_registry_menu_json(&reg, spec->path, out,
-                                                  sizeof(out));
+        t->menus++;
+        size_t n = zcl_command_registry_menu_json(reg, spec->path, out,
+                                                  out_size);
         if (n > 0) {
-            if (n > largest_menu) {
-                largest_menu = n;
-                largest_menu_path = spec->path;
+            if (n > t->largest_menu) {
+                t->largest_menu = n;
+                t->largest_menu_path = spec->path;
             }
             if (verbose)
                 printf("  %5zu  menu %s\n", n, spec->path);
             continue;
         }
-        menu_overflow++;
+        t->menu_overflow++;
         fprintf(stderr,
             "MENU OVER BUDGET: %s — its branch menu does not fit "
             "ZCL_COMMAND_BRANCH_BUDGET (%u bytes). `discover help %s` "
@@ -607,33 +617,59 @@ int main(int argc, char **argv)
     }
     /* The root menu is rendered from the same renderer with the root
      * budget; gate it too. */
-    menus++;
+    t->menus++;
     {
-        size_t n = zcl_command_registry_menu_json(&reg, "", out,
-                                                  sizeof(out));
+        size_t n = zcl_command_registry_menu_json(reg, "", out,
+                                                  out_size);
         if (n > 0) {
-            if (n > largest_menu) {
-                largest_menu = n;
-                largest_menu_path = "root";
+            if (n > t->largest_menu) {
+                t->largest_menu = n;
+                t->largest_menu_path = "root";
             }
             if (verbose)
                 printf("  %5zu  menu root\n", n);
         } else {
-            menu_overflow++;
+            t->menu_overflow++;
             fprintf(stderr,
                 "MENU OVER BUDGET: root — the root menu does not fit "
                 "ZCL_COMMAND_ROOT_BUDGET (%u bytes).\n",
                 ZCL_COMMAND_ROOT_BUDGET);
         }
     }
+}
 
-    if (new_overflow || fixed_overflow || menu_overflow || stale) {
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        fprintf(stderr, "usage: %s <baseline.txt> [-v]\n", argv[0]);
+        return 2;
+    }
+    const bool verbose = argc > 2 && strcmp(argv[2], "-v") == 0;
+    if (!describe_catalog_ready(argv[1]))
+        return 1;
+
+    const struct zcl_command_registry reg = { .commands = g_specs,
+                                              .count = SPEC_COUNT };
+    char out[ZCL_COMMAND_LIST_BUDGET + 1];
+    struct describe_leaf_tally leaf = { .largest_path = "" };
+    struct describe_menu_tally menu = { .largest_menu_path = "" };
+
+    for (size_t i = 0; i < SPEC_COUNT; i++) {
+        if (g_specs[i].mode == ZCL_COMMAND_MODE_BRANCH)
+            continue;   /* branches render a menu, gated below */
+        describe_check_leaf(&reg, i, argv[1], verbose, out, sizeof(out), &leaf);
+    }
+
+    size_t stale = describe_count_stale();
+    describe_check_menus(&reg, verbose, out, sizeof(out), &menu);
+
+    if (leaf.new_overflow || leaf.fixed_overflow || menu.menu_overflow || stale) {
         fprintf(stderr,
             "\nFAIL: %zu leaf/leaves over the describe budget, %zu "
             "menu%s over the menu budget%s. Baseline: %s (%zu entr%s, "
             "may only shrink).\n",
-            new_overflow + fixed_overflow, menu_overflow,
-            menu_overflow == 1 ? "" : "s",
+            leaf.new_overflow + leaf.fixed_overflow, menu.menu_overflow,
+            menu.menu_overflow == 1 ? "" : "s",
             stale ? ", plus a stale baseline entry" : "", argv[1],
             g_baseline_count, g_baseline_count == 1 ? "y" : "ies");
         return 1;
@@ -641,7 +677,7 @@ int main(int argc, char **argv)
     printf("check-describe-budget: %zu leaves render; largest %zu/%u bytes "
            "(%s); %zu branch menus render, largest %zu bytes (%s); "
            "%zu baselined pre-existing.\n",
-           leaves, largest, ZCL_COMMAND_SPEC_BUDGET, largest_path,
-           menus, largest_menu, largest_menu_path, g_baseline_count);
+           leaf.leaves, leaf.largest, ZCL_COMMAND_SPEC_BUDGET, leaf.largest_path,
+           menu.menus, menu.largest_menu, menu.largest_menu_path, g_baseline_count);
     return 0;
 }
