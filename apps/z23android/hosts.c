@@ -64,12 +64,14 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
     return out;
 }
-/* "in sync", blocks behind or ahead of the host's zclassicd, then the height; a negative height is unknown. */
+/* "in sync", blocks behind or ahead of the host's zclassicd, then the height. A host that answered the
+ * probe without a height has a node that did not answer; a negative height is unknown. */
 static size_t state_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
     int64_t height = -1, reference = -1;
     char at[32], by[32];
-    if (!count_of(row, "height", &height) || height < 0) return append(out, cap, used, "height unknown");
+    if (!count_of(row, "height", &height)) return append(out, cap, used, "node not answering");
+    if (height < 0) return append(out, cap, used, "height unknown");
     zapp_grouped(height, at);
     if (host_ok(row)) return append(out, cap, used, "in sync · %s", at);
     if (!count_of(row, "reference_height", &reference) || reference < 0)
@@ -94,7 +96,7 @@ static size_t row_text(const struct json_value *row, char *out, size_t cap, size
     int64_t ms = 0;
     (void)count_of(row, "probe_ms", &ms);
     if (!reachable || reachable->type != JSON_BOOL || !json_get_bool(reachable))
-        return append(out, cap, used, "\n%s · not answering after %lld.%lld s\n", text_of(row, "host"),
+        return append(out, cap, used, "\n%s · host not answering after %lld.%lld s\n", text_of(row, "host"),
             (long long)(ms / 1000), (long long)(ms % 1000 / 100));
     used = append(out, cap, used, "\n%s · ", text_of(row, "host"));
     used = state_text(row, out, cap, used);

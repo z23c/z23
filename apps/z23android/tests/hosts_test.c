@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* A busy node may answer its status without the synced field; only "no" holds a host apart. */
+/* A busy node may answer its status without the synced field; only "no" holds a host apart. A host
+ * that answers the probe while its node gives no height says that its node is not answering. */
 static void sync_rule_tests(void)
 {
     static const char unsure[] = "{\"hosts\":["
@@ -19,6 +20,10 @@ static void sync_rule_tests(void)
     assert(strstr(out, "\na · in sync · 3,301,698\n\nb · in sync · 3,301,697\n\n"));
     assert(strstr(out, "\nc · not synced · 3,301,698\n  Low on disk · 49 GB free\n"));
     assert(!strstr(out, "STATUS") && !strstr(out, "50 GB"));
+    static const char silent[] = "{\"hosts\":[{\"host\":\"m\",\"reachable\":true,\"height\":null,"
+        "\"reference_height\":3301698,\"disk_free_gb\":23}]}";
+    assert(zapp_hosts_format(silent, out, sizeof(out)));
+    assert(strstr(out, "\nm · node not answering\n  Low on disk · 23 GB free\n"));
 }
 /* The fleet line keeps its place from launch while a laptop host is paired. */
 static void fleet_line_tests(void)
@@ -49,7 +54,7 @@ int main(void)
     assert(!strncmp(out, "1 of 3 hosts in sync\n", 21));
     assert(strstr(out, "\nr1 · in sync · 3,301,130\n\nr2"));
     assert(strstr(out, "\nr2 · 10 blocks behind · 3,301,120\n\nmac"));
-    assert(strstr(out, "\nmac · not answering after 25.0 s\n"));
+    assert(strstr(out, "\nmac · host not answering after 25.0 s\n"));
     assert(!strstr(out, "Blocked") && !strstr(out, "bootstrap") && !strstr(out, "GB"));
     sync_rule_tests();
     fleet_line_tests();

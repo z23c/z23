@@ -64,7 +64,9 @@ the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
 synchronization detail, balance, **Stop node** and fleet invitations. Each host
 row gives the host's state and height and adds free disk only below 50 GB;
-blockers are left to the voice assistant. A host counts as in sync within two
+blockers are left to the voice assistant. A host whose node gives no height
+reads "node not answering", and one that does not answer the probe reads "host
+not answering". A host counts as in sync within two
 blocks of its `zclassicd` unless it reports itself not synced. Command
 output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
@@ -322,6 +324,11 @@ are in sync gave a wrong count in 0 of 6 answers about the whole fleet, against
 about a named host fetched its blocker report in 3 of 3 answers, against 0 of 3.
 Answers still named a cause the observations do not give in 8 of 9, against 7
 of 9, and none of 6 answers about r2 listed the four blockers its report held.
+Once host rows said "node not answering" instead of "height unknown" and the
+guide said to name an in-sync host's blockers when asked, the same fleet gave a
+cause the observations do not give in 4 of 9 answers, all low disk; all 3
+answers on why the Mac's height was unknown said its node was not answering,
+and 1 of 3 answers about r2 listed its four blockers.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to
