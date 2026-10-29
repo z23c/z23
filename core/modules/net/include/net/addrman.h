@@ -32,6 +32,9 @@ struct addr_info {
     struct net_addr source;
     int64_t last_success;
     int64_t last_try;
+    /* addr_man.connect_epoch when `attempts` last grew. Not serialized: see
+     * addrman_attempt. */
+    uint64_t charged_epoch;
     int attempts;
     int ref_count;
     bool in_tried;
@@ -115,6 +118,11 @@ struct addr_man {
     int new_count;
     int vvNew[ADDRMAN_NEW_BUCKET_COUNT][ADDRMAN_BUCKET_SIZE];
 
+    /* Number of connections recorded by addrman_good, from 1, so a record
+     * whose charged_epoch is 0 (fresh or loaded) is charged on its first
+     * failure. Each value is one epoch for addr_info.charged_epoch. */
+    uint64_t connect_epoch;
+
     /* The current epoch's published weight table, or NULL when nothing has
      * been published — in which case every address reads exactly 1.0.
      * Replaced whole under `cs`; never mutated in place. */
@@ -143,8 +151,12 @@ bool addrman_add(struct addr_man *am, const struct net_address *addr,
 void addrman_good(struct addr_man *am, const struct net_service *addr,
                   int64_t nTime);
 
+/* Record a dial attempt: refresh last_try and add one to `attempts`. During an
+ * `outage`, when no outbound peer is healthy, the failing network may be this
+ * node's own (offline, or an OS withholding network from a background app), so
+ * an address is charged at most once per connection epoch. */
 void addrman_attempt(struct addr_man *am, const struct net_service *addr,
-                     int64_t nTime);
+                     int64_t nTime, bool outage);
 
 /* Copy the exact endpoint's durable dial ledger. O(1) through addrman's
  * address index; false means the endpoint is absent or its port differs.

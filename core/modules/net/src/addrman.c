@@ -487,6 +487,7 @@ void addrman_init(struct addr_man *am)
     am->id_count = 0;
     am->tried_count = 0;
     am->new_count = 0;
+    am->connect_epoch = 1;
     am->weights = NULL;   /* nothing published: every address reads 1.0 */
     am->random_order = NULL;
     am->random_size = 0;
@@ -895,6 +896,7 @@ void addrman_good(struct addr_man *am, const struct net_service *addr,
                   int64_t nTime)
 {
     zcl_mutex_lock(&am->cs);
+    am->connect_epoch++;
 
     int nId;
     struct addr_info *pinfo = addrman_find_addr_locked(am, &addr->addr, &nId);
@@ -933,7 +935,7 @@ void addrman_good(struct addr_man *am, const struct net_service *addr,
 }
 
 void addrman_attempt(struct addr_man *am, const struct net_service *addr,
-                     int64_t nTime)
+                     int64_t nTime, bool outage)
 {
     zcl_mutex_lock(&am->cs);
     int nId;
@@ -943,7 +945,9 @@ void addrman_attempt(struct addr_man *am, const struct net_service *addr,
         return;
     }
     pinfo->last_try = nTime;
-    pinfo->attempts++;
+    if (!outage || pinfo->charged_epoch != am->connect_epoch)
+        pinfo->attempts++;
+    pinfo->charged_epoch = am->connect_epoch;
     zcl_mutex_unlock(&am->cs);
 }
 

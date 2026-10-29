@@ -88,6 +88,42 @@ static size_t dial_scheduler_want(bool rate_ok, size_t outbound_healthy,
     return want;
 }
 
+/* Failure-aware dial backoff for an addrman candidate, keyed on its
+ * consecutive-failure count. A first miss recovers fast (may be transient); a
+ * persistently dead-on-arrival address (refuses TCP, or accepts it yet never
+ * handshakes, so addrman_good() — which zeroes attempts — never fires) ramps to
+ * a 6 h ceiling instead of the old 1 h, so a large stale peers.dat stops
+ * re-dialing every known-dead address up to 24x/day and spends each batch slot
+ * on a DISTINCT live candidate. A handshake resets attempts to 0, and
+ * fresh/harvested/seed addresses (attempts==0) are always dialable. During an
+ * outage each address is charged once (addrman_attempt), and a peer that ever
+ * handshook waits at most the first-miss cooldown (connman_addrman_retry_cooldown). */
+int connman_addrman_retry_cooldown_for_attempts(int attempts)
+{
+    if (attempts <= 0)
+        return 0;
+    if (attempts >= 10) return 21600;  /* 6 h  — effectively dead */
+    if (attempts >= 7)  return 7200;   /* 2 h  */
+    if (attempts >= 5)  return 3600;   /* 1 h  */
+    if (attempts >= 3)  return 900;    /* 15 m */
+    if (attempts >= 2)  return 300;    /* 5 m  */
+    return 60;                               /* 1 m  — first miss */
+}
+
+/* While no outbound peer is healthy, the likeliest failure is this node's own
+ * network, and an address that has ever completed a handshake is the likeliest
+ * way back: it waits at most the first-miss cooldown, whatever its streak. A
+ * streak run up during an outage would otherwise hold every proven peer out
+ * for hours after the network returns. */
+int connman_addrman_retry_cooldown(const struct addr_info *info, bool starving)
+{
+    int cooldown = connman_addrman_retry_cooldown_for_attempts(info->attempts);
+    int first_miss = connman_addrman_retry_cooldown_for_attempts(1);
+    if (starving && info->last_success > 0 && cooldown > first_miss)
+        cooldown = first_miss;
+    return cooldown;
+}
+
 #ifdef ZCL_TESTING
 size_t connman_dial_scheduler_want_for_test(bool rate_ok,
                                             size_t outbound_healthy,
@@ -114,6 +150,11 @@ bool connman_outbound_rate_allowed_for_test(bool below_floor,
 {
     return outbound_rate_allowed(below_floor, interval_elapsed,
                                  dht_hint_pending);
+}
+
+int connman_addrman_retry_cooldown_for_test(int attempts)
+{
+    return connman_addrman_retry_cooldown_for_attempts(attempts);
 }
 #endif
 #define ZCL_FEELER_INTERVAL_DEFAULT_SECS 120
@@ -493,7 +534,8 @@ static void connman_record_dial_failure(struct connman *cm,
          * on a true consecutive-failure count. */
         if (c->is_feeler || c->source == CONNMAN_TARGET_DHT_HINT)
             addrman_attempt(&cm->manager.addrman, &c->addr.svc,
-                            (int64_t)platform_time_wall_time_t());
+                            (int64_t)platform_time_wall_time_t(),
+                            connman_outbound_healthy_count(cm) == 0);
     }
     /* ANCHOR carries no durable per-address failure ledger. */
     event_emitf(EV_TCP_CONNECT_FAILED, 0, "%s:%u", ipbuf, c->addr.svc.port);

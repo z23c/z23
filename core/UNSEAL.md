@@ -352,3 +352,11 @@ later lane flips it HARD.
 - 2026-10-29T14:19:01Z — REASON: core wave 5: behaviour-preserving complexity splits of 6 net files (file_market_delivery_onion, file_market_payment, nat, onion_stream, https_server, onion_service)
   old ROOT: d2c03c7da5594351d12091fb18d539c3ecff41d55bb7075584f8d3395b38b45d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T19:03:07Z — REASON: addrman: charge a failed dial against an address at most once until some connection succeeds, and retry a proven peer within a minute while no outbound peer is healthy, so a local network outage (offline, or Android withholding network from a background app) cannot strand the node without peers for hours; directed by the owner 2026-10-29
+  old ROOT: e8be97ea47e0f2cc648d2a5c3e247f2a19187dff31821eb8c2f182b5846746c6
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T20:11:38Z — REASON: addrman review fixes: cap a failed dial at one charge per connection epoch only while no outbound peer is healthy, and count every connection as a new epoch; directed by the owner 2026-10-29
+  old ROOT: 1171b5099d05b85ec56ccb5c04f608028aadea4d1b7f649750ac04426b6a0af8
+  by: owner unseal ritual (make core-unseal)

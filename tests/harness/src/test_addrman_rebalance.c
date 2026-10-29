@@ -360,7 +360,7 @@ static int addrman_rebalance_attempt_tracking(void)
         addrman_add(&am, &addr, &src, 0);
 
         for (int i = 0; i < 5; i++)
-            addrman_attempt(&am, &addr.svc, (int64_t)platform_time_wall_time_t() + i);
+            addrman_attempt(&am, &addr.svc, (int64_t)platform_time_wall_time_t() + i, false);
 
         bool consistent = (addrman_consistency_check(&am, NULL, 0) == 0);
         if (consistent)
@@ -1084,7 +1084,7 @@ static bool pin_good_retry(struct addr_man *am, const struct net_address *x,
                            int64_t T)
 {
     struct addr_info out;
-    addrman_attempt(am, &x->svc, T + 1);
+    addrman_attempt(am, &x->svc, T + 1, false);
     bool ok = addrman_find_info(am, &x->svc, &out) && out.attempts == 1;
     addrman_good(am, &x->svc, T + 5);
     ok = ok && addrman_find_info(am, &x->svc, &out) && out.in_tried;

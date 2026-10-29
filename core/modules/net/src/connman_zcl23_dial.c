@@ -101,6 +101,7 @@ bool connman_gather_known_zcl23_candidate(
     atomic_fetch_add(&cm->zcl23_candidates_seen, (uint64_t)count);
     size_t start = (size_t)GetRand((uint64_t)count);
     int64_t now = (int64_t)platform_time_wall_time_t();
+    bool starving = connman_outbound_healthy_count(cm) == 0;
     for (int offset = 0; offset < count; offset++) {
         const struct connman_known_peer *peer =
             &peers[(start + (size_t)offset) % (size_t)count];
@@ -132,18 +133,17 @@ bool connman_gather_known_zcl23_candidate(
             continue;
         }
 
-        int cooldown =
-            connman_addrman_retry_cooldown_for_attempts(info.attempts);
-        if (info.last_try > 0 && now - info.last_try < cooldown) {
+        if (info.last_try > 0 &&
+            now - info.last_try < connman_addrman_retry_cooldown(&info, starving)) {
             atomic_fetch_add(&cm->zcl23_backoff_skips, 1);
             continue;
         }
-        if (!connman_addrman_candidate_usable(cm, &info)) {
+        if (!connman_addrman_candidate_usable(cm, &info, starving)) {
             atomic_fetch_add(&cm->zcl23_policy_skips, 1);
             continue;
         }
 
-        addrman_attempt(&cm->manager.addrman, &addr.svc, now);
+        addrman_attempt(&cm->manager.addrman, &addr.svc, now, starving);
         out->addr = addr;
         out->source = CONNMAN_TARGET_ZCL23_DB;
         out->addnode_index = SIZE_MAX;

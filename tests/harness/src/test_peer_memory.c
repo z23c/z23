@@ -343,7 +343,7 @@ static int pm_ranking_fields_roundtrip(void)
 
     bool ok = addrman_add(&am, &a, &src, 0);
     addrman_good(&am, &a.svc, t_ok);      /* promotes to the tried table */
-    addrman_attempt(&am, &a.svc, t_try);  /* and records a later attempt */
+    addrman_attempt(&am, &a.svc, t_try, false);  /* and records a later attempt */
 
     struct addr_man am2;
     ok = ok && pm_roundtrip(&am, &am2);
@@ -769,7 +769,7 @@ static int pm_proven_dead_records_age_out(void)
     dead.nTime = (uint32_t)now;
     bool ok = addrman_add(&am, &dead, &src, 0);
     for (int i = 0; i < ADDRMAN_RETRIES + 1; i++)
-        addrman_attempt(&am, &dead.svc, now - (i * 60));
+        addrman_attempt(&am, &dead.svc, now - (i * 60), false);
 
     /* alive: we connected to it, so it stays no matter the attempts */
     struct net_address alive;
@@ -780,7 +780,7 @@ static int pm_proven_dead_records_age_out(void)
     ok = ok && addrman_add(&am, &alive, &src, 0);
     addrman_good(&am, &alive.svc, now - 60);
     for (int i = 0; i < ADDRMAN_RETRIES + 2; i++)
-        addrman_attempt(&am, &alive.svc, now);
+        addrman_attempt(&am, &alive.svc, now, false);
 
     struct addr_man am2;
     ok = ok && pm_roundtrip(&am, &am2);
@@ -793,6 +793,54 @@ static int pm_proven_dead_records_age_out(void)
         ok = ok && addrman_index_verify(&am2, err, sizeof(err)) == 0;
         addrman_free(&am2);
     }
+    addrman_free(&am);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int pm_outage_charges_each_address_once(void)
+{
+    int failures = 0;
+    /* ── 5a'. an outage is charged once, not once per redial ──────────── */
+    printf("peer_memory: failures during an outage charge once... ");
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src;
+    pm_set_ipv4(&src, 5, 5, 5, 5);
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    struct net_address peer, witness;
+    net_address_init(&peer);
+    pm_set_onion(&peer.svc.addr, 0x41);
+    peer.svc.port = 8033;
+    peer.nTime = (uint32_t)now;
+    net_address_init(&witness);
+    pm_set_onion(&witness.svc.addr, 0x42);
+    witness.svc.port = 8033;
+    witness.nTime = (uint32_t)now;
+    bool ok = addrman_add(&am, &peer, &src, 0) &&
+              addrman_add(&am, &witness, &src, 0);
+
+    /* Twenty redials during an outage: one charge, each redial still
+     * recorded as the last try. */
+    for (int i = 0; i < 20; i++)
+        addrman_attempt(&am, &peer.svc, now - 2000 + i * 60, true);
+    struct addr_info got;
+    ok = ok && addrman_find_info(&am, &peer.svc, &got) &&
+         got.attempts == 1 && got.last_try == now - 2000 + 19 * 60;
+
+    /* A connection elsewhere opens a new epoch: the next outage failure
+     * counts, the one after it does not. */
+    addrman_good(&am, &witness.svc, now - 100);
+    addrman_attempt(&am, &peer.svc, now - 90, true);
+    addrman_attempt(&am, &peer.svc, now - 80, true);
+    ok = ok && addrman_find_info(&am, &peer.svc, &got) && got.attempts == 2;
+
+    /* While the network works, every failure counts, even with no new
+     * connection, so a dead address still climbs to the long cooldowns. */
+    for (int i = 0; i < 5; i++)
+        addrman_attempt(&am, &peer.svc, now - 70 + i, false);
+    ok = ok && addrman_find_info(&am, &peer.svc, &got) && got.attempts == 7;
     addrman_free(&am);
     if (ok) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
@@ -950,6 +998,8 @@ static int test_peer_memory_platform_arm(void)
     failures += pm_unusable_bucket_table_keeps_addresses();
 
     failures += pm_proven_dead_records_age_out();
+
+    failures += pm_outage_charges_each_address_once();
 
     failures += pm_repeated_failures_lower_dial_chance();
 

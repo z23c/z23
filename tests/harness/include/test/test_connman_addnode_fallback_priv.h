@@ -45,6 +45,7 @@ int check_connman_addnode_outbound_health_diversity(void);
 int check_connman_addnode_non_network_not_floor(void);
 int check_connman_addnode_cold_start_discovery_floor(void);
 int check_connman_addnode_max_height_ignores_unusable(void);
+int check_connman_addnode_starving_redials_proven_peer(void);
 int check_connman_addnode_peer_floor_diverse_subnets(void);
 int check_connman_addnode_addrman_skips_saturated(void);
 int check_connman_addnode_inbound_ephemeral_not_block(void);

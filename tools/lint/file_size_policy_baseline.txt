@@ -22,7 +22,7 @@ engine/composition/src/boot.c 3732
 engine/composition/src/boot_refold_staged.c 1810
 cognition/modules/codeindex/src/codeindex_merkle.c 1681
 engine/modules/hotswap/src/hotswap_activate.c 2314
-core/modules/net/src/connman.c 3081
+core/modules/net/src/connman.c 3053
 core/modules/net/src/download.c 1672
 core/modules/net/src/fast_sync.c 1684
 core/modules/net/src/file_service.c 2517

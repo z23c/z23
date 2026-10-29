@@ -106,8 +106,10 @@ bool connman_mutual_dial_holds(struct connman *cm,
 /* Shared failure-aware addrman policy. Discovered ZCL23 endpoints must pass
  * this same durable cooldown/diversity gate instead of owning a retry loop. */
 int connman_addrman_retry_cooldown_for_attempts(int attempts);
+int connman_addrman_retry_cooldown(const struct addr_info *info, bool starving);
 bool connman_addrman_candidate_usable(struct connman *cm,
-                                      const struct addr_info *info);
+                                      const struct addr_info *info,
+                                      bool starving);
 
 bool connman_gather_known_zcl23_candidate(
     struct connman *cm, const struct net_service *batch_services,

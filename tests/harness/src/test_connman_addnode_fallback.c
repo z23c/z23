@@ -61,7 +61,9 @@ struct p2p_node *add_test_peer(struct connman *cm,
  * true iff an entry with that octet was found. Direct field pokes are the
  * standard fixture idiom in this file (see "addrman repeated failures cool
  * down"): they set the exact ledger state a real run reaches after N failed
- * dials without needing to actually drive N dials. */
+ * dials without needing to actually drive N dials. Those N charges fell in
+ * earlier connection epochs (addrman_attempt), so the streak carries no
+ * current-epoch mark, exactly as a record loaded from peers.dat. */
 bool test_addrman_set_fail(struct connman *cm, uint8_t first_octet,
                                   int attempts, int64_t last_try)
 {
@@ -73,6 +75,7 @@ bool test_addrman_set_fail(struct connman *cm, uint8_t first_octet,
             info->attempts = attempts;
             info->last_try = last_try;
             info->last_success = 0;   /* never handshook = dead-on-arrival */
+            info->charged_epoch = 0;
             return true;
         }
     }
@@ -91,6 +94,7 @@ int test_connman_addnode_fallback(void)
     failures += check_connman_addnode_non_network_not_floor();
     failures += check_connman_addnode_cold_start_discovery_floor();
     failures += check_connman_addnode_max_height_ignores_unusable();
+    failures += check_connman_addnode_starving_redials_proven_peer();
     failures += check_connman_addnode_peer_floor_diverse_subnets();
     failures += check_connman_addnode_addrman_skips_saturated();
     failures += check_connman_addnode_inbound_ephemeral_not_block();

@@ -792,36 +792,9 @@ static bool connman_addr_is_advertised_external(
     return port == 0 || addr->svc.port == port;
 }
 
-/* Failure-aware dial backoff for an addrman candidate, keyed on its
- * consecutive-failure count. A first miss recovers fast (may be transient); a
- * persistently dead-on-arrival address (refuses TCP, or accepts it yet never
- * handshakes, so addrman_good() — which zeroes attempts — never fires) ramps to
- * a 6 h ceiling instead of the old 1 h, so a large stale peers.dat stops
- * re-dialing every known-dead address up to 24x/day and spends each batch slot
- * on a DISTINCT live candidate. Safe for recovery: a peer that ever handshook
- * has attempts reset to 0, and fresh/harvested/seed addresses (attempts==0) are
- * always dialable, so ONLY never-worked addresses are backed off. */
-int connman_addrman_retry_cooldown_for_attempts(int attempts)
-{
-    if (attempts <= 0)
-        return 0;
-    if (attempts >= 10) return 21600;  /* 6 h  — effectively dead */
-    if (attempts >= 7)  return 7200;   /* 2 h  */
-    if (attempts >= 5)  return 3600;   /* 1 h  */
-    if (attempts >= 3)  return 900;    /* 15 m */
-    if (attempts >= 2)  return 300;    /* 5 m  */
-    return 60;                               /* 1 m  — first miss */
-}
-
-#ifdef ZCL_TESTING
-int connman_addrman_retry_cooldown_for_test(int attempts)
-{
-    return connman_addrman_retry_cooldown_for_attempts(attempts);
-}
-#endif
-
 bool connman_addrman_candidate_usable(struct connman *cm,
-                                      const struct addr_info *info)
+                                      const struct addr_info *info,
+                                      bool starving)
 {
     if (!cm || !info)
         return false;
@@ -834,9 +807,7 @@ bool connman_addrman_candidate_usable(struct connman *cm,
 
     if (info->last_try > 0) {
         int64_t now = (int64_t)platform_time_wall_time_t();
-        int cooldown =
-            connman_addrman_retry_cooldown_for_attempts(info->attempts);
-        if (now - info->last_try < cooldown)
+        if (now - info->last_try < connman_addrman_retry_cooldown(info, starving))
             return false;
     }
 
@@ -858,12 +829,13 @@ static bool connman_pick_addrman_target(struct connman *cm,
     if (!cm || !result)
         return false;
 
+    bool starving = connman_outbound_healthy_count(cm) == 0;
     for (int i = 0; i < 64; i++) {
         struct addr_info pick;
         memset(&pick, 0, sizeof(pick));
         if (!addrman_select(&cm->manager.addrman, false, &pick))
             return false;
-        if (connman_addrman_candidate_usable(cm, &pick)) {
+        if (connman_addrman_candidate_usable(cm, &pick, starving)) {
             *result = pick;
             return true;
         }
@@ -890,7 +862,7 @@ static bool connman_pick_addrman_target(struct connman *cm,
     zcl_mutex_unlock(&am->cs);
 
     for (size_t i = 0; i < n_candidates; i++) {
-        if (connman_addrman_candidate_usable(cm, &candidates[i])) {
+        if (connman_addrman_candidate_usable(cm, &candidates[i], starving)) {
             *result = candidates[i];
             return true;
         }
@@ -1033,7 +1005,8 @@ bool connman_pick_next_outbound_target(
         return false;
 
     addrman_attempt(&cm->manager.addrman, &result->addr.svc,
-                    (int64_t)platform_time_wall_time_t());
+                    (int64_t)platform_time_wall_time_t(),
+                    connman_outbound_healthy_count(cm) == 0);
     *source = CONNMAN_TARGET_ADDRMAN;
     return true;
 }

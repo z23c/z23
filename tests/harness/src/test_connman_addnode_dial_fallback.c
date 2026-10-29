@@ -1691,3 +1691,69 @@ int check_connman_outbound_pin_characterization(void)
                                     outbound_pin_cycle_all_sends_before_processing());
     return failures;
 }
+
+/* Charge an addrman entry (matched by ip[12]) with a failure streak while
+ * keeping whatever success history it has. */
+static bool starving_set_streak(struct connman *cm, uint8_t first_octet,
+                                int attempts, int64_t last_try)
+{
+    for (int i = 0; i < cm->manager.addrman.id_count; i++) {
+        struct addr_info *info = &cm->manager.addrman.entries[i];
+        if (info->used && info->addr.svc.addr.ip[12] == first_octet) {
+            info->attempts = attempts;
+            info->last_try = last_try;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* An outage charges every peer. Once the network returns, a peer this node
+ * has handshaken with must be redialed within a minute while no outbound peer
+ * is healthy, not after its six-hour streak cooldown; an address never reached
+ * keeps its cooldown, and so does the proven peer once any peer is healthy. */
+int check_connman_addnode_starving_redials_proven_peer(void)
+{
+    int failures = 0;
+    printf("connman_addnode_fallback: with no healthy peer a proven peer is "
+           "redialed within a minute... ");
+    {
+        chain_params_select(CHAIN_MAIN);
+        const struct chain_params *params = chain_params_get();
+        struct connman cm;
+        struct node_signals sigs;
+        struct net_addr src;
+        memset(&sigs, 0, sizeof(sigs));
+        net_addr_init(&src);
+        bool ok = connman_init(&cm, params, &sigs);
+        int64_t now = (int64_t)platform_time_wall_time_t();
+
+        struct net_address proven, stranger;
+        test_set_ipv4(&proven, 82, 165, 1, 1, 8033);
+        proven.nTime = (uint32_t)now;
+        test_set_ipv4(&stranger, 83, 169, 1, 1, 8033);
+        stranger.nTime = (uint32_t)now;
+        ok = ok && addrman_add(&cm.manager.addrman, &proven, &src, 0) &&
+             addrman_add(&cm.manager.addrman, &stranger, &src, 0);
+        if (ok)
+            addrman_good(&cm.manager.addrman, &proven.svc, now - 3600);
+        ok = ok && starving_set_streak(&cm, 82, 10, now - 120) &&
+             starving_set_streak(&cm, 83, 10, now - 120);
+
+        struct connman_dial_candidate batch[4];
+        size_t n = ok ? connman_gather_dial_candidates(&cm, batch, 4) : 0;
+        ok = ok && n == 1 && batch[0].source == CONNMAN_TARGET_ADDRMAN &&
+             batch[0].addr.svc.addr.ip[12] == 82;
+
+        ok = ok && starving_set_streak(&cm, 82, 10, now - 120) &&
+             add_test_peer(&cm, 84, 200, 1, 1, PEER_HANDSHAKE_COMPLETE,
+                           false, false) != NULL;
+        n = ok ? connman_gather_dial_candidates(&cm, batch, 4) : 1;
+        ok = ok && n == 0;
+
+        connman_free(&cm);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
