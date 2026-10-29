@@ -302,12 +302,15 @@ static bool umrt_initial_fifo(void)
 }
 /* Existing harness pattern: child alarm makes a blocked open a test failure,
  * never a hung test runner. Parent must observe normal successful exit. */
+/* Pure hang guard: the child builds a SQLite fixture before the open under
+ * test, so 5 s was tight on a loaded host; nothing asserts on elapsed time. */
+#define UMRT_HANG_GUARD_SECONDS 120u
 static bool umrt_bounded(bool replacement)
 {
     pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
-        alarm(5);
+        alarm(UMRT_HANG_GUARD_SECONDS);
         bool ok = replacement ? umrt_changed(1, false) : umrt_initial_fifo();
         _exit(ok ? 0 : 1);
     }
