@@ -539,14 +539,17 @@ static int t_substituted_table(void)
 
 /* ── E. both ends of both lists ──────────────────────────────────── */
 
-static int t_list_ends(void)
+/* Each scenario helper returns its failure count, or -1 when its fixture
+ * case cannot be opened (the caller then returns 1, as before). */
+
+static int t_list_end_last_file(void)
 {
     int failures = 0;
     struct vcs_pkgcap_report r;
 
     /* E1: the reach is in the LAST shipped file. */
     struct pcc_case last;
-    if (!pcc_case_open(&last, "lastfile")) return 1;
+    if (!pcc_case_open(&last, "lastfile")) return -1;
     bool built =
         pcc_write_table(last.table, "CAP_NETWORK", NULL) &&
         pcc_write(last.dir, "src/one.c", "int a(void){return 0;}\n") &&
@@ -564,10 +567,18 @@ static int t_list_ends(void)
               r.sources_listed == 3 && r.sources_scanned == 3);
     pcc_case_close(&last);
 
+    return failures;
+}
+
+static int t_list_end_first_file(void)
+{
+    int failures = 0;
+    struct vcs_pkgcap_report r;
+
     /* E2: the same defect in the FIRST shipped file. */
     struct pcc_case first;
-    if (!pcc_case_open(&first, "firstfile")) return 1;
-    built = pcc_write_table(first.table, "CAP_NETWORK", NULL) &&
+    if (!pcc_case_open(&first, "firstfile")) return -1;
+    bool built = pcc_write_table(first.table, "CAP_NETWORK", NULL) &&
             pcc_write(first.dir, "src/one.c",
                       "int a(int fd){return connect(fd,0,0);}\n") &&
             pcc_write(first.dir, "src/two.c", "int b(void){return 0;}\n") &&
@@ -582,10 +593,18 @@ static int t_list_ends(void)
                   pcc_finding_names(&r, "CAP_NETWORK", "src/one.c"));
     pcc_case_close(&first);
 
+    return failures;
+}
+
+static int t_list_end_claim_tail(void)
+{
+    int failures = 0;
+    struct vcs_pkgcap_report r;
+
     /* E3: the unreached class is the LAST entry of the claim array. */
     struct pcc_case tail;
-    if (!pcc_case_open(&tail, "claimtail")) return 1;
-    built = pcc_write_table(tail.table, "CAP_NETWORK", NULL) &&
+    if (!pcc_case_open(&tail, "claimtail")) return -1;
+    bool built = pcc_write_table(tail.table, "CAP_NETWORK", NULL) &&
             pcc_write(tail.dir, "src/w.c",
                       "void w(void *p){(void)fwrite(p,1,1,0);}\n") &&
             pcc_write_manifest(tail.dir,
@@ -600,10 +619,18 @@ static int t_list_ends(void)
     PCC_CHECK("E3: the claim array kept both entries", r.claimed.count == 2);
     pcc_case_close(&tail);
 
+    return failures;
+}
+
+static int t_list_end_claim_head(void)
+{
+    int failures = 0;
+    struct vcs_pkgcap_report r;
+
     /* E4: the same defect in the FIRST claim position. */
     struct pcc_case head;
-    if (!pcc_case_open(&head, "claimhead")) return 1;
-    built = pcc_write_table(head.table, "CAP_NETWORK", NULL) &&
+    if (!pcc_case_open(&head, "claimhead")) return -1;
+    bool built = pcc_write_table(head.table, "CAP_NETWORK", NULL) &&
             pcc_write(head.dir, "src/n.c",
                       "int n(int fd){return connect(fd,0,0);}\n") &&
             pcc_write_manifest(head.dir, "\"CAP_FS_WRITE\", \"CAP_NETWORK\"",
@@ -615,6 +642,25 @@ static int t_list_ends(void)
                   r.rule == VCS_PKGCAP_RULE_CLAIM_NOT_REACHED &&
                   strstr(r.detail, "CAP_FS_WRITE") != NULL);
     pcc_case_close(&head);
+
+    return failures;
+}
+
+static int t_list_ends(void)
+{
+    int failures = 0;
+    int part = t_list_end_last_file();
+    if (part < 0) return 1;
+    failures += part;
+    part = t_list_end_first_file();
+    if (part < 0) return 1;
+    failures += part;
+    part = t_list_end_claim_tail();
+    if (part < 0) return 1;
+    failures += part;
+    part = t_list_end_claim_head();
+    if (part < 0) return 1;
+    failures += part;
 
     return failures;
 }
