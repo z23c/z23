@@ -242,6 +242,77 @@ size_t blog_build_node_announce(uint8_t *out, size_t out_len,
     return slp_len + 1 + hlen;
 }
 
+/* Pull the .onion hostname out of the SLP SEND in vout[0] of a deserialized
+ * wallet transaction into *slot. Returns 1 when a hostname was stored. */
+static int blog_wallet_tx_hostname(const struct transaction *tx,
+                                   struct onion_peer *slot, int height)
+{
+    struct slp_message msg;
+    if (!slp_parse(tx->vout[0].script_pub_key.data,
+                   tx->vout[0].script_pub_key.size, &msg) ||
+        msg.type != SLP_TX_SEND) {
+        return 0;
+    }
+
+    /* Skip SLP fields to find .onion hostname after them */
+    const uint8_t *p = tx->vout[0].script_pub_key.data + 1; /* skip OP_RETURN */
+    const uint8_t *end = tx->vout[0].script_pub_key.data +
+                          tx->vout[0].script_pub_key.size;
+    const uint8_t *data;
+    size_t len;
+
+    /* Skip: lokad_id, token_type, "SEND", token_id — read_push refuses a
+     * NULL cursor, so a failed field short-circuits the rest. */
+    for (int i = 0; i < 4; i++)
+        p = read_push(p, end, &data, &len);
+    /* Skip output quantities */
+    for (int i = 0; i < 19 && p; i++) {
+        const uint8_t *saved = p;
+        p = read_push(p, end, &data, &len);
+        if (!p || len != 8) { p = saved; break; }
+    }
+
+    /* Remaining data: [1 byte length][hostname] */
+    if (p && p < end) {
+        size_t hlen = (size_t)*p++;
+        if (hlen > 0 && hlen < 63 && p + hlen <= end &&
+            hlen > 6 && memcmp(p + hlen - 6, ".onion", 6) == 0) {
+            memcpy(slot->hostname, p, hlen);
+            slot->hostname[hlen] = '\0';
+            slot->height = height;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Deserialize one raw wallet transaction and, when it carries a ZSLP SEND
+ * hostname, store it in *slot. Returns 1 when a hostname was stored. */
+static int blog_wallet_raw_hostname(const uint8_t *raw, int raw_len,
+                                    struct onion_peer *slot, int height)
+{
+    /* Deserialize transaction */
+    struct transaction tx;
+    transaction_init(&tx);
+    struct byte_stream bs;
+    stream_init_from_data(&bs, raw, (size_t)raw_len);
+    if (!transaction_deserialize(&tx, &bs)) {
+        transaction_free(&tx);
+        return 0;
+    }
+
+    /* Check vout[0] for OP_RETURN with SLP */
+    if (tx.num_vout < 1 || tx.vout[0].script_pub_key.size < 10 ||
+        tx.vout[0].script_pub_key.data[0] != 0x6a) {
+        transaction_free(&tx);
+        return 0;
+    }
+
+    int stored = blog_wallet_tx_hostname(&tx, slot, height);
+    transaction_free(&tx);
+    return stored;
+}
+
 /* SOURCE 2 of 2 — the WALLET SCRAPE. Deliberately still wired.
  *
  * This reads db_wallet_tx_recent_raw(): it can only ever see transactions
@@ -288,64 +359,7 @@ static int blog_discover_onion_peers_wallet(const char *datadir,
             continue;
         }
 
-        /* Deserialize transaction */
-        struct transaction tx;
-        transaction_init(&tx);
-        struct byte_stream bs;
-        stream_init_from_data(&bs, raw, (size_t)raw_len);
-        if (!transaction_deserialize(&tx, &bs)) {
-            transaction_free(&tx);
-            db_wallet_tx_raw_view_free(&rows[ri]);
-            continue;
-        }
-
-        /* Check vout[0] for OP_RETURN with SLP */
-        if (tx.num_vout < 1 || tx.vout[0].script_pub_key.size < 10 ||
-            tx.vout[0].script_pub_key.data[0] != 0x6a) {
-            transaction_free(&tx);
-            db_wallet_tx_raw_view_free(&rows[ri]);
-            continue;
-        }
-
-        struct slp_message msg;
-        if (!slp_parse(tx.vout[0].script_pub_key.data,
-                       tx.vout[0].script_pub_key.size, &msg) ||
-            msg.type != SLP_TX_SEND) {
-            transaction_free(&tx);
-            db_wallet_tx_raw_view_free(&rows[ri]);
-            continue;
-        }
-
-        /* Skip SLP fields to find .onion hostname after them */
-        const uint8_t *p = tx.vout[0].script_pub_key.data + 1; /* skip OP_RETURN */
-        const uint8_t *end = tx.vout[0].script_pub_key.data +
-                              tx.vout[0].script_pub_key.size;
-        const uint8_t *data;
-        size_t len;
-
-        /* Skip: lokad_id, token_type, "SEND", token_id — read_push refuses a
-         * NULL cursor, so a failed field short-circuits the rest. */
-        for (int i = 0; i < 4; i++)
-            p = read_push(p, end, &data, &len);
-        /* Skip output quantities */
-        for (int i = 0; i < 19 && p; i++) {
-            const uint8_t *saved = p;
-            p = read_push(p, end, &data, &len);
-            if (!p || len != 8) { p = saved; break; }
-        }
-
-        /* Remaining data: [1 byte length][hostname] */
-        if (p && p < end) {
-            size_t hlen = (size_t)*p++;
-            if (hlen > 0 && hlen < 63 && p + hlen <= end &&
-                hlen > 6 && memcmp(p + hlen - 6, ".onion", 6) == 0) {
-                memcpy(out[found].hostname, p, hlen);
-                out[found].hostname[hlen] = '\0';
-                out[found].height = height;
-                found++;
-            }
-        }
-        transaction_free(&tx);
+        found += blog_wallet_raw_hostname(raw, raw_len, &out[found], height);
         db_wallet_tx_raw_view_free(&rows[ri]);
     }
 

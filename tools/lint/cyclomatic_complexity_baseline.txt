@@ -459,7 +459,6 @@ engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verifi
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
-engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
 engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
