@@ -25,10 +25,6 @@ contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:26
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
-contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_body:28
-contexts/commons/modules/vcs/src/zcode_patronage.c:patronage_fields:38
-contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_error_string:21
-contexts/commons/modules/vcs/src/zcode_patronage.c:vcs_zcode_patronage_intent_parse:31
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:55

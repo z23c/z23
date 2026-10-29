@@ -11,40 +11,46 @@
 static const uint8_t patronage_magic[8] =
     {'Z','C','P','A','T','R','\r','\n'};
 
+static const struct {
+    enum vcs_zcode_patronage_error error;
+    const char *name;
+} patronage_error_names[] = {
+    {VCS_ZCODE_PATRONAGE_OK, "ok"},
+    {VCS_ZCODE_PATRONAGE_NULL, "null-argument"},
+    {VCS_ZCODE_PATRONAGE_WIRE_SIZE, "wire-size"},
+    {VCS_ZCODE_PATRONAGE_MAGIC, "wire-magic"},
+    {VCS_ZCODE_PATRONAGE_VERSION, "schema-version"},
+    {VCS_ZCODE_PATRONAGE_ENUM, "closed-enum"},
+    {VCS_ZCODE_PATRONAGE_FLAGS, "authority-or-simulation-flags"},
+    {VCS_ZCODE_PATRONAGE_ROOT, "required-root"},
+    {VCS_ZCODE_PATRONAGE_AMOUNT, "amount"},
+    {VCS_ZCODE_PATRONAGE_TIME, "time-order"},
+    {VCS_ZCODE_PATRONAGE_SEQUENCE, "sequence"},
+    {VCS_ZCODE_PATRONAGE_SHAPE, "mode-shape"},
+    {VCS_ZCODE_PATRONAGE_SIGNATURE, "signature"},
+    {VCS_ZCODE_PATRONAGE_CONTEXT, "validation-context"},
+    {VCS_ZCODE_PATRONAGE_CAS, "canonical-cas"},
+    {VCS_ZCODE_PATRONAGE_NETWORK, "network-mismatch"},
+    {VCS_ZCODE_PATRONAGE_CONTRIBUTOR, "contributor-binding"},
+    {VCS_ZCODE_PATRONAGE_TASK, "task-binding"},
+    {VCS_ZCODE_PATRONAGE_POLICY, "proof-policy-binding"},
+    {VCS_ZCODE_PATRONAGE_TARGET, "target-binding"},
+};
+
 const char *vcs_zcode_patronage_error_string(
     enum vcs_zcode_patronage_error error)
 {
-    switch (error) {
-    case VCS_ZCODE_PATRONAGE_OK: return "ok";
-    case VCS_ZCODE_PATRONAGE_NULL: return "null-argument";
-    case VCS_ZCODE_PATRONAGE_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_PATRONAGE_MAGIC: return "wire-magic";
-    case VCS_ZCODE_PATRONAGE_VERSION: return "schema-version";
-    case VCS_ZCODE_PATRONAGE_ENUM: return "closed-enum";
-    case VCS_ZCODE_PATRONAGE_FLAGS: return "authority-or-simulation-flags";
-    case VCS_ZCODE_PATRONAGE_ROOT: return "required-root";
-    case VCS_ZCODE_PATRONAGE_AMOUNT: return "amount";
-    case VCS_ZCODE_PATRONAGE_TIME: return "time-order";
-    case VCS_ZCODE_PATRONAGE_SEQUENCE: return "sequence";
-    case VCS_ZCODE_PATRONAGE_SHAPE: return "mode-shape";
-    case VCS_ZCODE_PATRONAGE_SIGNATURE: return "signature";
-    case VCS_ZCODE_PATRONAGE_CONTEXT: return "validation-context";
-    case VCS_ZCODE_PATRONAGE_CAS: return "canonical-cas";
-    case VCS_ZCODE_PATRONAGE_NETWORK: return "network-mismatch";
-    case VCS_ZCODE_PATRONAGE_CONTRIBUTOR: return "contributor-binding";
-    case VCS_ZCODE_PATRONAGE_TASK: return "task-binding";
-    case VCS_ZCODE_PATRONAGE_POLICY: return "proof-policy-binding";
-    case VCS_ZCODE_PATRONAGE_TARGET: return "target-binding";
-    }
+    for (size_t i = 0;
+         i < sizeof(patronage_error_names) / sizeof(patronage_error_names[0]);
+         i++)
+        if (patronage_error_names[i].error == error)
+            return patronage_error_names[i].name;
     return "unknown";
 }
 
-static enum vcs_zcode_patronage_error patronage_fields(
-    const struct vcs_zcode_patronage_intent_v1 *intent, bool signed_wire)
+static enum vcs_zcode_patronage_error patronage_enum_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
 {
-    if (!intent) return VCS_ZCODE_PATRONAGE_NULL;
-    if (intent->schema_version != VCS_ZCODE_PATRONAGE_INTENT_VERSION)
-        return VCS_ZCODE_PATRONAGE_VERSION;
     if (intent->mode < VCS_ZCODE_PATRONAGE_EXACT_TASK_COMMISSION ||
         intent->mode > VCS_ZCODE_PATRONAGE_DIRECT_GIFT ||
         intent->target_kind < VCS_ZCODE_PATRONAGE_TARGET_TASK ||
@@ -53,6 +59,12 @@ static enum vcs_zcode_patronage_error patronage_fields(
         intent->settlement_trust_mode >
             VCS_ZCODE_PATRONAGE_FUTURE_ASSISTED_2OF3)
         return VCS_ZCODE_PATRONAGE_ENUM;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_flags_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
     uint8_t allowed = VCS_ZCODE_PATRONAGE_NO_AUTHORITY |
         VCS_ZCODE_PATRONAGE_ANONYMOUS_DISPLAY |
         VCS_ZCODE_PATRONAGE_SIMULATION_ONLY;
@@ -60,6 +72,23 @@ static enum vcs_zcode_patronage_error patronage_fields(
         (intent->flags & VCS_ZCODE_PATRONAGE_NO_AUTHORITY) == 0 ||
         (intent->flags & VCS_ZCODE_PATRONAGE_SIMULATION_ONLY) == 0)
         return VCS_ZCODE_PATRONAGE_FLAGS;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_head_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    if (!intent) return VCS_ZCODE_PATRONAGE_NULL;
+    if (intent->schema_version != VCS_ZCODE_PATRONAGE_INTENT_VERSION)
+        return VCS_ZCODE_PATRONAGE_VERSION;
+    enum vcs_zcode_patronage_error error = patronage_enum_error(intent);
+    if (error != VCS_ZCODE_PATRONAGE_OK) return error;
+    return patronage_flags_error(intent);
+}
+
+static enum vcs_zcode_patronage_error patronage_root_time_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
     const uint8_t *required[] = {
         intent->network_genesis_root,
         intent->zc23_token_or_simulation_root,
@@ -73,21 +102,41 @@ static enum vcs_zcode_patronage_error patronage_fields(
     if (intent->created_unix <= 0 ||
         intent->expires_unix <= intent->created_unix)
         return VCS_ZCODE_PATRONAGE_TIME;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_exact_shape_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent, bool task, bool policy)
+{
+    if (intent->target_kind != VCS_ZCODE_PATRONAGE_TARGET_TASK ||
+        !task || !policy || memcmp(intent->target_root,
+                                  intent->task_root, 32) != 0)
+        return VCS_ZCODE_PATRONAGE_SHAPE;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_shape_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
     bool task = zcl_bytes_any_set(intent->task_root, 32);
     bool policy = zcl_bytes_any_set(intent->proof_policy_root, 32);
-    if (intent->mode == VCS_ZCODE_PATRONAGE_EXACT_TASK_COMMISSION) {
-        if (intent->target_kind != VCS_ZCODE_PATRONAGE_TARGET_TASK ||
-            !task || !policy || memcmp(intent->target_root,
-                                      intent->task_root, 32) != 0)
-            return VCS_ZCODE_PATRONAGE_SHAPE;
-    } else if (intent->mode == VCS_ZCODE_PATRONAGE_PACKAGE_CONTINUITY) {
+    if (intent->mode == VCS_ZCODE_PATRONAGE_EXACT_TASK_COMMISSION)
+        return patronage_exact_shape_error(intent, task, policy);
+    if (intent->mode == VCS_ZCODE_PATRONAGE_PACKAGE_CONTINUITY) {
         if (intent->target_kind != VCS_ZCODE_PATRONAGE_TARGET_PACKAGE ||
             task || !policy)
             return VCS_ZCODE_PATRONAGE_SHAPE;
-    } else if (intent->target_kind == VCS_ZCODE_PATRONAGE_TARGET_TASK ||
-               task || policy) {
-        return VCS_ZCODE_PATRONAGE_SHAPE;
+        return VCS_ZCODE_PATRONAGE_OK;
     }
+    if (intent->target_kind == VCS_ZCODE_PATRONAGE_TARGET_TASK ||
+        task || policy)
+        return VCS_ZCODE_PATRONAGE_SHAPE;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_refund_error(
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
     if (intent->mode != VCS_ZCODE_PATRONAGE_DIRECT_GIFT &&
         (intent->refund_height == 0 ||
          intent->refund_unix < intent->expires_unix))
@@ -95,6 +144,20 @@ static enum vcs_zcode_patronage_error patronage_fields(
     if (intent->mode == VCS_ZCODE_PATRONAGE_DIRECT_GIFT &&
         (intent->refund_height != 0 || intent->refund_unix != 0))
         return VCS_ZCODE_PATRONAGE_SHAPE;
+    return VCS_ZCODE_PATRONAGE_OK;
+}
+
+static enum vcs_zcode_patronage_error patronage_fields(
+    const struct vcs_zcode_patronage_intent_v1 *intent, bool signed_wire)
+{
+    enum vcs_zcode_patronage_error error = patronage_head_error(intent);
+    if (error != VCS_ZCODE_PATRONAGE_OK) return error;
+    error = patronage_root_time_error(intent);
+    if (error != VCS_ZCODE_PATRONAGE_OK) return error;
+    error = patronage_shape_error(intent);
+    if (error != VCS_ZCODE_PATRONAGE_OK) return error;
+    error = patronage_refund_error(intent);
+    if (error != VCS_ZCODE_PATRONAGE_OK) return error;
     if (signed_wire && !zcl_bytes_any_set(intent->signature, 32))
         return VCS_ZCODE_PATRONAGE_SIGNATURE;
     return VCS_ZCODE_PATRONAGE_OK;
@@ -106,6 +169,46 @@ enum vcs_zcode_patronage_error vcs_zcode_patronage_intent_validate(
     return patronage_fields(intent, true);
 }
 
+static bool patronage_write_header(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    return zcl_codec_write_bytes(writer, patronage_magic, 8) &&
+        zcl_codec_write_u16le(writer, intent->schema_version) &&
+        zcl_codec_write_u8(writer, intent->mode) &&
+        zcl_codec_write_u8(writer, intent->target_kind) &&
+        zcl_codec_write_u8(writer, intent->settlement_trust_mode) &&
+        zcl_codec_write_u8(writer, intent->flags) &&
+        zcl_codec_write_u16le(writer, 0);
+}
+
+static bool patronage_write_roots(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    return zcl_codec_write_bytes(writer, intent->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            intent->zc23_token_or_simulation_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            intent->patron_contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, intent->patron_zid_pubkey, 32) &&
+        zcl_codec_write_bytes(writer, intent->target_root, 32) &&
+        zcl_codec_write_bytes(writer, intent->task_root, 32) &&
+        zcl_codec_write_bytes(writer, intent->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            intent->intended_recipient_binding_root, 32);
+}
+
+static bool patronage_write_tail(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_patronage_intent_v1 *intent)
+{
+    return zcl_codec_write_u64le(writer, intent->amount_atoms) &&
+        zcl_codec_write_i64le(writer, intent->created_unix) &&
+        zcl_codec_write_i64le(writer, intent->expires_unix) &&
+        zcl_codec_write_u64le(writer, intent->refund_height) &&
+        zcl_codec_write_i64le(writer, intent->refund_unix) &&
+        zcl_codec_write_u64le(writer, intent->sequence) &&
+        zcl_codec_write_u64le(writer, intent->maximum_zcl_fee_zat);
+}
+
 static enum vcs_zcode_patronage_error patronage_body(
     const struct vcs_zcode_patronage_intent_v1 *intent,
     uint8_t out[VCS_ZCODE_PATRONAGE_INTENT_BODY_BYTES])
@@ -115,31 +218,9 @@ static enum vcs_zcode_patronage_error patronage_body(
         return out ? error : VCS_ZCODE_PATRONAGE_NULL;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_PATRONAGE_INTENT_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, patronage_magic, 8) &&
-        zcl_codec_write_u16le(&writer, intent->schema_version) &&
-        zcl_codec_write_u8(&writer, intent->mode) &&
-        zcl_codec_write_u8(&writer, intent->target_kind) &&
-        zcl_codec_write_u8(&writer, intent->settlement_trust_mode) &&
-        zcl_codec_write_u8(&writer, intent->flags) &&
-        zcl_codec_write_u16le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer, intent->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            intent->zc23_token_or_simulation_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            intent->patron_contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, intent->patron_zid_pubkey, 32) &&
-        zcl_codec_write_bytes(&writer, intent->target_root, 32) &&
-        zcl_codec_write_bytes(&writer, intent->task_root, 32) &&
-        zcl_codec_write_bytes(&writer, intent->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            intent->intended_recipient_binding_root, 32) &&
-        zcl_codec_write_u64le(&writer, intent->amount_atoms) &&
-        zcl_codec_write_i64le(&writer, intent->created_unix) &&
-        zcl_codec_write_i64le(&writer, intent->expires_unix) &&
-        zcl_codec_write_u64le(&writer, intent->refund_height) &&
-        zcl_codec_write_i64le(&writer, intent->refund_unix) &&
-        zcl_codec_write_u64le(&writer, intent->sequence) &&
-        zcl_codec_write_u64le(&writer, intent->maximum_zcl_fee_zat);
+    bool ok = patronage_write_header(&writer, intent) &&
+        patronage_write_roots(&writer, intent) &&
+        patronage_write_tail(&writer, intent);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_PATRONAGE_INTENT_BODY_BYTES
@@ -173,6 +254,49 @@ enum vcs_zcode_patronage_error vcs_zcode_patronage_intent_serialize(
     return error;
 }
 
+static bool patronage_read_header(struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_intent_v1 *out, uint8_t magic[8],
+    uint16_t *reserved)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->mode) &&
+        zcl_codec_read_u8(reader, &out->target_kind) &&
+        zcl_codec_read_u8(reader, &out->settlement_trust_mode) &&
+        zcl_codec_read_u8(reader, &out->flags) &&
+        zcl_codec_read_u16le(reader, reserved);
+}
+
+static bool patronage_read_roots(struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_intent_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->zc23_token_or_simulation_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->patron_contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, out->patron_zid_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, out->target_root, 32) &&
+        zcl_codec_read_bytes(reader, out->task_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->intended_recipient_binding_root, 32);
+}
+
+static bool patronage_read_tail(struct zcl_codec_reader *reader,
+    struct vcs_zcode_patronage_intent_v1 *out)
+{
+    return zcl_codec_read_u64le(reader, &out->amount_atoms) &&
+        zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_i64le(reader, &out->expires_unix) &&
+        zcl_codec_read_u64le(reader, &out->refund_height) &&
+        zcl_codec_read_i64le(reader, &out->refund_unix) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_u64le(reader, &out->maximum_zcl_fee_zat) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_zcode_patronage_error vcs_zcode_patronage_intent_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_patronage_intent_v1 *out)
@@ -184,33 +308,9 @@ enum vcs_zcode_patronage_error vcs_zcode_patronage_intent_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint16_t reserved = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->mode) &&
-        zcl_codec_read_u8(&reader, &out->target_kind) &&
-        zcl_codec_read_u8(&reader, &out->settlement_trust_mode) &&
-        zcl_codec_read_u8(&reader, &out->flags) &&
-        zcl_codec_read_u16le(&reader, &reserved) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->zc23_token_or_simulation_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->patron_contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->patron_zid_pubkey, 32) &&
-        zcl_codec_read_bytes(&reader, out->target_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->intended_recipient_binding_root, 32) &&
-        zcl_codec_read_u64le(&reader, &out->amount_atoms) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_i64le(&reader, &out->expires_unix) &&
-        zcl_codec_read_u64le(&reader, &out->refund_height) &&
-        zcl_codec_read_i64le(&reader, &out->refund_unix) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_u64le(&reader, &out->maximum_zcl_fee_zat) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = patronage_read_header(&reader, out, magic, &reserved) &&
+        patronage_read_roots(&reader, out) &&
+        patronage_read_tail(&reader, out);
     enum vcs_zcode_patronage_error error = !ok
         ? VCS_ZCODE_PATRONAGE_WIRE_SIZE
         : memcmp(magic, patronage_magic, 8) != 0
