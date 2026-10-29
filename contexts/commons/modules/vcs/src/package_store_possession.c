@@ -292,6 +292,25 @@ static bool read_exact(int descriptor, uint8_t *out, size_t length)
     return true;
 }
 
+static bool proof_chunk_shape_ok(int descriptor, size_t expected,
+                                 struct stat *before)
+{
+    return fstat(descriptor, before) == 0 && S_ISREG(before->st_mode) &&
+           before->st_size >= 0 &&
+           (uint64_t)before->st_size == (uint64_t)expected;
+}
+
+static bool proof_chunk_stable(int descriptor, const struct stat *before,
+                               struct stat *after)
+{
+    return fstat(descriptor, after) == 0 &&
+           before->st_dev == after->st_dev &&
+           before->st_ino == after->st_ino &&
+           before->st_size == after->st_size &&
+           timespec_same(before->st_mtim, after->st_mtim) &&
+           timespec_same(before->st_ctim, after->st_ctim);
+}
+
 static bool proof_read_chunk(struct vcs_package_possession_proof *proof,
                              const struct vcs_package_file *file,
                              uint32_t chunk_index, size_t expected,
@@ -306,21 +325,14 @@ static bool proof_read_chunk(struct vcs_package_possession_proof *proof,
         return false;
     }
     struct stat before, after;
-    bool shape_ok = fstat(descriptor, &before) == 0 &&
-                    S_ISREG(before.st_mode) && before.st_size >= 0 &&
-                    (uint64_t)before.st_size == (uint64_t)expected;
+    bool shape_ok = proof_chunk_shape_ok(descriptor, expected, &before);
     uint8_t *bytes = shape_ok
                          ? zcl_malloc(expected, "possession_chunk")
                          : NULL;
     if (shape_ok && !bytes)
         proof->failure = VCS_PACKAGE_POSSESSION_ALLOC;
     bool read_ok = shape_ok && bytes && read_exact(descriptor, bytes, expected);
-    bool stable = fstat(descriptor, &after) == 0 &&
-                  before.st_dev == after.st_dev &&
-                  before.st_ino == after.st_ino &&
-                  before.st_size == after.st_size &&
-                  timespec_same(before.st_mtim, after.st_mtim) &&
-                  timespec_same(before.st_ctim, after.st_ctim);
+    bool stable = proof_chunk_stable(descriptor, &before, &after);
     (void)close(descriptor);
     bool verified = read_ok && stable &&
                     vcs_package_verify_chunk(file, chunk_index, bytes,
@@ -367,6 +379,28 @@ static bool proof_capture_manifest(struct vcs_package_store *store,
     return found;
 }
 
+static enum vcs_package_possession_failure proof_begin_failure(
+    bool found, bool complete, bool require_pinned, bool pinned)
+{
+    if (!found)
+        return VCS_PACKAGE_POSSESSION_UNTRACKED;
+    if (!complete)
+        return VCS_PACKAGE_POSSESSION_INCOMPLETE;
+    if (require_pinned && !pinned)
+        return VCS_PACKAGE_POSSESSION_UNPINNED;
+    return VCS_PACKAGE_POSSESSION_ALLOC;
+}
+
+static bool proof_begin_parse(struct vcs_package_possession_proof *proof,
+                              const uint8_t *wire, size_t wire_len,
+                              const uint8_t package_root[32])
+{
+    uint8_t derived_root[32];
+    return vcs_package_manifest_parse(wire, wire_len, &proof->manifest) &&
+           vcs_package_manifest_root(&proof->manifest, derived_root) &&
+           memcmp(derived_root, package_root, 32) == 0;
+}
+
 struct vcs_package_possession_proof *vcs_package_store_possession_begin(
     struct vcs_package_store *store, const uint8_t package_root[32],
     bool require_pinned, struct vcs_package_possession_receipt *receipt)
@@ -395,11 +429,7 @@ struct vcs_package_possession_proof *vcs_package_store_possession_begin(
                                          &wire_len, &complete, &pinned);
     if (!found || !complete || (require_pinned && !pinned) || !wire) {
         enum vcs_package_possession_failure failure =
-            !found ? VCS_PACKAGE_POSSESSION_UNTRACKED
-                     : (!complete ? VCS_PACKAGE_POSSESSION_INCOMPLETE
-                                  : (require_pinned && !pinned
-                                         ? VCS_PACKAGE_POSSESSION_UNPINNED
-                                         : VCS_PACKAGE_POSSESSION_ALLOC));
+            proof_begin_failure(found, complete, require_pinned, pinned);
         receipt_set(receipt, proof->generation, 0, 0, complete, pinned,
                     failure);
         free(wire);
@@ -407,11 +437,7 @@ struct vcs_package_possession_proof *vcs_package_store_possession_begin(
         return NULL;
     }
     proof->snapshot_pinned = pinned;
-    uint8_t derived_root[32];
-    bool parsed = vcs_package_manifest_parse(wire, wire_len,
-                                             &proof->manifest) &&
-                  vcs_package_manifest_root(&proof->manifest, derived_root) &&
-                  memcmp(derived_root, package_root, 32) == 0;
+    bool parsed = proof_begin_parse(proof, wire, wire_len, package_root);
     free(wire);
     if (!parsed) {
         vcs_package_manifest_free(&proof->manifest);
@@ -478,111 +504,142 @@ static bool proof_generation_current(
     return current;
 }
 
-enum vcs_package_possession_step vcs_package_store_possession_step(
-    struct vcs_package_possession_proof *proof, uint64_t byte_budget,
-    uint32_t chunk_budget, struct vcs_package_possession_receipt *receipt,
-    uint64_t *bytes_used)
+enum proof_hash_outcome {
+    PROOF_HASH_OPERATED,
+    PROOF_HASH_SKIPPED,
+    PROOF_HASH_BUDGET,
+    PROOF_HASH_STOPPED,
+};
+
+static void proof_report_used(uint64_t *bytes_used, uint64_t used)
 {
     if (bytes_used)
-        *bytes_used = 0;
-    if (!proof || proof->phase == POSSESSION_TERMINAL) {
-        if (proof)
-            receipt_set(receipt, proof->generation, proof->bytes_verified,
-                        proof->coordinate_count, true,
-                        proof->snapshot_pinned, proof->failure);
-        return proof && proof->failure == VCS_PACKAGE_POSSESSION_NONE
-                   ? VCS_PACKAGE_POSSESSION_SUCCESS
-                   : VCS_PACKAGE_POSSESSION_FAILED;
-    }
-    uint64_t used = 0;
-    uint32_t operations = 0;
-    while (operations < chunk_budget) {
-        if (proof->phase == POSSESSION_HASH_CHUNKS) {
-            if (proof->file_index >= proof->manifest.count) {
-                proof->phase = POSSESSION_RECHECK_FILES;
-                proof->coordinate = 0;
-                continue;
-            }
-            const struct vcs_package_file *file =
-                &proof->manifest.files[proof->file_index];
-            if (proof->chunk_index >= file->chunk_count) {
-                proof->file_index++;
-                proof->chunk_index = 0;
-                continue;
-            }
-            size_t expected = proof_expected_chunk(file, proof->chunk_index);
-            if ((uint64_t)expected > byte_budget - used) {
-                receipt_set(receipt, proof->generation,
-                            proof->bytes_verified, proof->coordinate,
-                            true, proof->snapshot_pinned,
-                            VCS_PACKAGE_POSSESSION_NONE);
-                if (bytes_used)
-                    *bytes_used = used;
-                return used ? VCS_PACKAGE_POSSESSION_PROGRESS
-                            : VCS_PACKAGE_POSSESSION_BUDGET;
-            }
-            if (!proof_read_chunk(proof, file, proof->chunk_index, expected,
-                                  &proof->fingerprints[proof->coordinate])) {
-                proof->phase = POSSESSION_TERMINAL;
-                break;
-            }
-            proof->bytes_verified += expected;
-            used += expected;
-            proof->coordinate++;
-            proof->chunk_index++;
-            operations++;
-            continue;
-        }
-        if (proof->coordinate < proof->coordinate_count) {
-            uint32_t coordinate = 0;
-            const struct vcs_package_file *file = NULL;
-            uint32_t chunk_index = 0;
-            for (size_t i = 0; i < proof->manifest.count; i++) {
-                uint32_t count = proof->manifest.files[i].chunk_count;
-                if (proof->coordinate < coordinate + count) {
-                    file = &proof->manifest.files[i];
-                    chunk_index = proof->coordinate - coordinate;
-                    break;
-                }
-                coordinate += count;
-            }
-            if (!file) {
-                proof->failure = VCS_PACKAGE_POSSESSION_MANIFEST;
-                proof->phase = POSSESSION_TERMINAL;
-                break;
-            }
-            const uint8_t *hash =
-                file->chunk_hashes + (size_t)chunk_index * 32u;
-            char path[STORE_PATH_MAX];
-            struct stat status;
-            proof_cas_path(proof, hash, path);
-            if (lstat(path, &status) != 0 || !S_ISREG(status.st_mode) ||
-                !fingerprint_same(&proof->fingerprints[proof->coordinate],
-                                  &status)) {
-                proof->failure = VCS_PACKAGE_POSSESSION_MUTATED;
-                proof->phase = POSSESSION_TERMINAL;
-                break;
-            }
-            proof->coordinate++;
-            operations++;
-            continue;
-        }
-        bool complete = false, pinned = false;
-        bool current = proof_generation_current(proof, &complete, &pinned);
-        if (!current) {
-            proof->failure = VCS_PACKAGE_POSSESSION_MUTATED;
-            proof->phase = POSSESSION_TERMINAL;
-        }
-        receipt_set(receipt, proof->generation, proof->bytes_verified,
-                    proof->coordinate_count, complete, pinned,
-                    proof->failure);
-        if (bytes_used)
-            *bytes_used = used;
-        return current ? VCS_PACKAGE_POSSESSION_SUCCESS
-                       : VCS_PACKAGE_POSSESSION_FAILED;
-    }
-    if (bytes_used)
         *bytes_used = used;
+}
+
+static enum vcs_package_possession_step proof_step_terminal_result(
+    const struct vcs_package_possession_proof *proof,
+    struct vcs_package_possession_receipt *receipt)
+{
+    if (proof)
+        receipt_set(receipt, proof->generation, proof->bytes_verified,
+                    proof->coordinate_count, true,
+                    proof->snapshot_pinned, proof->failure);
+    return proof && proof->failure == VCS_PACKAGE_POSSESSION_NONE
+               ? VCS_PACKAGE_POSSESSION_SUCCESS
+               : VCS_PACKAGE_POSSESSION_FAILED;
+}
+
+static enum proof_hash_outcome proof_step_hash_one(
+    struct vcs_package_possession_proof *proof, uint64_t byte_budget,
+    uint64_t *used)
+{
+    if (proof->file_index >= proof->manifest.count) {
+        proof->phase = POSSESSION_RECHECK_FILES;
+        proof->coordinate = 0;
+        return PROOF_HASH_SKIPPED;
+    }
+    const struct vcs_package_file *file =
+        &proof->manifest.files[proof->file_index];
+    if (proof->chunk_index >= file->chunk_count) {
+        proof->file_index++;
+        proof->chunk_index = 0;
+        return PROOF_HASH_SKIPPED;
+    }
+    size_t expected = proof_expected_chunk(file, proof->chunk_index);
+    if ((uint64_t)expected > byte_budget - *used)
+        return PROOF_HASH_BUDGET;
+    if (!proof_read_chunk(proof, file, proof->chunk_index, expected,
+                          &proof->fingerprints[proof->coordinate])) {
+        proof->phase = POSSESSION_TERMINAL;
+        return PROOF_HASH_STOPPED;
+    }
+    proof->bytes_verified += expected;
+    *used += expected;
+    proof->coordinate++;
+    proof->chunk_index++;
+    return PROOF_HASH_OPERATED;
+}
+
+static enum vcs_package_possession_step proof_step_budget_stop(
+    struct vcs_package_possession_proof *proof, uint64_t used,
+    struct vcs_package_possession_receipt *receipt, uint64_t *bytes_used)
+{
+    receipt_set(receipt, proof->generation, proof->bytes_verified,
+                proof->coordinate, true, proof->snapshot_pinned,
+                VCS_PACKAGE_POSSESSION_NONE);
+    proof_report_used(bytes_used, used);
+    return used ? VCS_PACKAGE_POSSESSION_PROGRESS
+                : VCS_PACKAGE_POSSESSION_BUDGET;
+}
+
+static const struct vcs_package_file *proof_coordinate_file(
+    const struct vcs_package_possession_proof *proof, uint32_t *chunk_index)
+{
+    uint32_t coordinate = 0;
+    for (size_t i = 0; i < proof->manifest.count; i++) {
+        uint32_t count = proof->manifest.files[i].chunk_count;
+        if (proof->coordinate < coordinate + count) {
+            *chunk_index = proof->coordinate - coordinate;
+            return &proof->manifest.files[i];
+        }
+        coordinate += count;
+    }
+    return NULL;
+}
+
+static bool proof_coordinate_mutated(
+    const struct vcs_package_possession_proof *proof,
+    const struct vcs_package_file *file, uint32_t chunk_index)
+{
+    const uint8_t *hash = file->chunk_hashes + (size_t)chunk_index * 32u;
+    char path[STORE_PATH_MAX];
+    struct stat status;
+    proof_cas_path(proof, hash, path);
+    return lstat(path, &status) != 0 || !S_ISREG(status.st_mode) ||
+           !fingerprint_same(&proof->fingerprints[proof->coordinate],
+                             &status);
+}
+
+static bool proof_step_recheck_one(struct vcs_package_possession_proof *proof)
+{
+    uint32_t chunk_index = 0;
+    const struct vcs_package_file *file =
+        proof_coordinate_file(proof, &chunk_index);
+    if (!file) {
+        proof->failure = VCS_PACKAGE_POSSESSION_MANIFEST;
+        proof->phase = POSSESSION_TERMINAL;
+        return false;
+    }
+    if (proof_coordinate_mutated(proof, file, chunk_index)) {
+        proof->failure = VCS_PACKAGE_POSSESSION_MUTATED;
+        proof->phase = POSSESSION_TERMINAL;
+        return false;
+    }
+    proof->coordinate++;
+    return true;
+}
+
+static bool proof_step_finish_recheck(
+    struct vcs_package_possession_proof *proof,
+    struct vcs_package_possession_receipt *receipt)
+{
+    bool complete = false, pinned = false;
+    bool current = proof_generation_current(proof, &complete, &pinned);
+    if (!current) {
+        proof->failure = VCS_PACKAGE_POSSESSION_MUTATED;
+        proof->phase = POSSESSION_TERMINAL;
+    }
+    receipt_set(receipt, proof->generation, proof->bytes_verified,
+                proof->coordinate_count, complete, pinned,
+                proof->failure);
+    return current;
+}
+
+static enum vcs_package_possession_step proof_step_progress(
+    const struct vcs_package_possession_proof *proof,
+    struct vcs_package_possession_receipt *receipt)
+{
     receipt_set(receipt, proof->generation, proof->bytes_verified,
                 proof->phase == POSSESSION_RECHECK_FILES
                     ? proof->coordinate_count
@@ -591,6 +648,44 @@ enum vcs_package_possession_step vcs_package_store_possession_step(
     return proof->phase == POSSESSION_TERMINAL
                ? VCS_PACKAGE_POSSESSION_FAILED
                : VCS_PACKAGE_POSSESSION_PROGRESS;
+}
+
+enum vcs_package_possession_step vcs_package_store_possession_step(
+    struct vcs_package_possession_proof *proof, uint64_t byte_budget,
+    uint32_t chunk_budget, struct vcs_package_possession_receipt *receipt,
+    uint64_t *bytes_used)
+{
+    proof_report_used(bytes_used, 0);
+    if (!proof || proof->phase == POSSESSION_TERMINAL)
+        return proof_step_terminal_result(proof, receipt);
+    uint64_t used = 0;
+    uint32_t operations = 0;
+    while (operations < chunk_budget) {
+        if (proof->phase == POSSESSION_HASH_CHUNKS) {
+            enum proof_hash_outcome outcome =
+                proof_step_hash_one(proof, byte_budget, &used);
+            if (outcome == PROOF_HASH_BUDGET)
+                return proof_step_budget_stop(proof, used, receipt,
+                                              bytes_used);
+            if (outcome == PROOF_HASH_STOPPED)
+                break;
+            if (outcome == PROOF_HASH_OPERATED)
+                operations++;
+            continue;
+        }
+        if (proof->coordinate < proof->coordinate_count) {
+            if (!proof_step_recheck_one(proof))
+                break;
+            operations++;
+            continue;
+        }
+        bool current = proof_step_finish_recheck(proof, receipt);
+        proof_report_used(bytes_used, used);
+        return current ? VCS_PACKAGE_POSSESSION_SUCCESS
+                       : VCS_PACKAGE_POSSESSION_FAILED;
+    }
+    proof_report_used(bytes_used, used);
+    return proof_step_progress(proof, receipt);
 }
 
 void vcs_package_store_possession_free(
