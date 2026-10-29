@@ -739,23 +739,20 @@ static void ps_deps_json(char *out, size_t cap, const uint8_t *const roots[],
     snprintf(out + used, cap - used, "]}");
 }
 
-static int t_ps_dependency_closure(void)
+/* The dependency, and the top package that names it. The top package is
+ * refused until its dependency is public. */
+static int ps_closure_dep_and_top(struct ps_node *n, struct ps_pkg *dep,
+                                  struct ps_pkg *top)
 {
     int failures = 0;
-    struct ps_node n;
-    if (!ps_node_open(&n, "closure")) {
-        printf("  zcode_public_shape: node open... FAIL\n");
-        return 1;
-    }
     /* The dependency, built first so the top package can name its root. */
     const struct ps_file dep_files[] = {
         {"LICENSE", TEST_LICENSE_TEXT_MIT, 0},
         {"src/d.c", "int d(void) { return 1; }\n", 0},
     };
-    struct ps_pkg dep;
-    PS_CHECK("dependency builds", ps_pkg_build(&dep, dep_files, 2));
+    PS_CHECK("dependency builds", ps_pkg_build(dep, dep_files, 2));
 
-    const uint8_t *dep_roots[1] = {dep.root};
+    const uint8_t *dep_roots[1] = {dep->root};
     char top_json[512];
     ps_deps_json(top_json, sizeof(top_json), dep_roots, 1);
     const struct ps_file top_files[] = {
@@ -763,16 +760,16 @@ static int t_ps_dependency_closure(void)
         {"src/t.c", "int t(void) { return 2; }\n", 0},
         {"zcode-package.json", top_json, 0},
     };
-    struct ps_pkg top;
     PS_CHECK("top package stored and published",
-             ps_pkg_build(&top, top_files, 3) &&
-                 ps_pkg_store(n.store, &top, NULL) &&
-                 ps_publish(n.store, top.root, 0x61, "pstop/fixture", "MIT"));
+             ps_pkg_build(top, top_files, 3) &&
+                 ps_pkg_store(n->store, top, NULL) &&
+                 ps_publish(n->store, top->root, 0x61, "pstop/fixture",
+                            "MIT"));
 
     /* The top package is itself flawless. It is refused anyway, because a
      * stranger cannot reproduce what this node cannot hand over. */
     struct vcs_package_public_verdict v;
-    vcs_package_public_shape_classify(n.store, top.root, &v);
+    vcs_package_public_shape_classify(n->store, top->root, &v);
     PS_CHECK("a package whose dependency is absent is refused",
              v.shape == VCS_PACKAGE_PUBLIC_REFUSED &&
                  strcmp(v.rule, "dependency-not-public") == 0);
@@ -780,10 +777,19 @@ static int t_ps_dependency_closure(void)
              v.dep_scoped);
     PS_CHECK("the peer-facing rule hides which byte is missing",
              v.dependency_rule && strcmp(v.dependency_rule, "not-tracked") == 0);
+    return failures;
+}
 
+/* The dependency unsigned, then signed: its dependent is refused until the
+ * dependency carries a verified release, and the graph closes after that. */
+static int ps_closure_dep_states(struct ps_node *n, struct ps_pkg *dep,
+                                 struct ps_pkg *top)
+{
+    int failures = 0;
+    struct vcs_package_public_verdict v;
     /* Present but unsigned: still not something a stranger could rebuild. */
-    PS_CHECK("dependency stored", ps_pkg_store(n.store, &dep, NULL));
-    vcs_package_public_shape_classify(n.store, top.root, &v);
+    PS_CHECK("dependency stored", ps_pkg_store(n->store, dep, NULL));
+    vcs_package_public_shape_classify(n->store, top->root, &v);
     PS_CHECK("an unsigned dependency still refuses the dependent",
              v.shape == VCS_PACKAGE_PUBLIC_REFUSED &&
                  v.dependency_rule &&
@@ -791,12 +797,19 @@ static int t_ps_dependency_closure(void)
 
     /* Signed: the graph closes. */
     PS_CHECK("dependency published",
-             ps_publish(n.store, dep.root, 0x62, "psdep/fixture", "MIT"));
-    vcs_package_public_shape_classify(n.store, top.root, &v);
+             ps_publish(n->store, dep->root, 0x62, "psdep/fixture", "MIT"));
+    vcs_package_public_shape_classify(n->store, top->root, &v);
     PS_CHECK("a fully public graph is hostable",
              v.shape == VCS_PACKAGE_PUBLIC_RELEASE &&
                  v.dependencies_checked == 1u && v.dep_scoped);
+    return failures;
+}
 
+/* A work object and a posted task: both move between peers, neither is a
+ * licensed shape. */
+static int ps_closure_work_and_task(struct ps_node *n, struct ps_pkg *work)
+{
+    int failures = 0;
     /* A work object is fetchable between peers that already accepted each
      * other's signed work — and is still not a licensed shape, so it can
      * never stand in for a dependency. */
@@ -805,12 +818,12 @@ static int t_ps_dependency_closure(void)
     const struct ps_file work_files[] = {
         {VCS_ZCODE_WORK_CONTEXT_PATH, work_action, 0},
     };
-    struct ps_pkg work;
     PS_CHECK("work object stored",
-             ps_pkg_build(&work, work_files, 1) &&
-                 ps_pkg_store(n.store, &work, NULL));
+             ps_pkg_build(work, work_files, 1) &&
+                 ps_pkg_store(n->store, work, NULL));
     PS_CHECK("a work object moves between peers on its own terms",
-             ps_is_shape(n.store, work.root, VCS_PACKAGE_PUBLIC_WORK_CONTEXT));
+             ps_is_shape(n->store, work->root,
+                         VCS_PACKAGE_PUBLIC_WORK_CONTEXT));
 
     /* A posted task is the unsigned three-file carrier: shape dispatch
      * only — the proof that the bytes prove their task is the fetching
@@ -823,12 +836,21 @@ static int t_ps_dependency_closure(void)
     struct ps_pkg task;
     PS_CHECK("task carrier stored",
              ps_pkg_build(&task, task_files, 3) &&
-                 ps_pkg_store(n.store, &task, NULL));
+                 ps_pkg_store(n->store, &task, NULL));
     PS_CHECK("a posted task moves between peers on its own terms",
-             ps_is_shape(n.store, task.root,
+             ps_is_shape(n->store, task.root,
                          VCS_PACKAGE_PUBLIC_TASK_CONTEXT));
+    return failures;
+}
 
-    const uint8_t *work_roots[1] = {work.root};
+/* A package whose only dependency is a work object: that edge is refused. */
+static int ps_closure_work_dependent(struct ps_node *n,
+                                     const struct ps_pkg *work,
+                                     struct ps_pkg *wdep)
+{
+    int failures = 0;
+    struct vcs_package_public_verdict v;
+    const uint8_t *work_roots[1] = {work->root};
     char work_json[512];
     ps_deps_json(work_json, sizeof(work_json), work_roots, 1);
     const struct ps_file wdep_files[] = {
@@ -836,19 +858,26 @@ static int t_ps_dependency_closure(void)
         {"src/w.c", "int w(void) { return 3; }\n", 0},
         {"zcode-package.json", work_json, 0},
     };
-    struct ps_pkg wdep;
     PS_CHECK("package depending on a work object stored and published",
-             ps_pkg_build(&wdep, wdep_files, 3) &&
-                 ps_pkg_store(n.store, &wdep, NULL) &&
-                 ps_publish(n.store, wdep.root, 0x63, "pswork/fixture",
+             ps_pkg_build(wdep, wdep_files, 3) &&
+                 ps_pkg_store(n->store, wdep, NULL) &&
+                 ps_publish(n->store, wdep->root, 0x63, "pswork/fixture",
                             "MIT"));
-    vcs_package_public_shape_classify(n.store, wdep.root, &v);
+    vcs_package_public_shape_classify(n->store, wdep->root, &v);
     PS_CHECK("a work object cannot satisfy a dependency edge",
              v.shape == VCS_PACKAGE_PUBLIC_REFUSED &&
                  strcmp(v.rule, "dependency-not-public") == 0 &&
                  v.dependency_rule &&
                  strcmp(v.dependency_rule, "work-context") == 0);
+    return failures;
+}
 
+/* A chain two levels deep: the middle package names an absent root, so the
+ * head is refused through it. */
+static int ps_closure_transitive(struct ps_node *n, struct ps_pkg *mid,
+                                 struct ps_pkg *head)
+{
+    int failures = 0;
     /* Transitive: the dependency's own dependency is absent. */
     uint8_t ghost[32];
     memset(ghost, 0x7e, sizeof(ghost));
@@ -860,15 +889,15 @@ static int t_ps_dependency_closure(void)
         {"src/m.c", "int m(void) { return 4; }\n", 0},
         {"zcode-package.json", mid_json, 0},
     };
-    struct ps_pkg mid;
     PS_CHECK("middle package stored and published",
-             ps_pkg_build(&mid, mid_files, 3) &&
-                 ps_pkg_store(n.store, &mid, NULL) &&
-                 ps_publish(n.store, mid.root, 0x64, "psmid/fixture", "MIT"));
+             ps_pkg_build(mid, mid_files, 3) &&
+                 ps_pkg_store(n->store, mid, NULL) &&
+                 ps_publish(n->store, mid->root, 0x64, "psmid/fixture",
+                            "MIT"));
     PS_CHECK("the middle package is itself refused",
-             ps_refused(n.store, mid.root, "dependency-not-public"));
+             ps_refused(n->store, mid->root, "dependency-not-public"));
 
-    const uint8_t *mid_roots[1] = {mid.root};
+    const uint8_t *mid_roots[1] = {mid->root};
     char head_json[512];
     ps_deps_json(head_json, sizeof(head_json), mid_roots, 1);
     const struct ps_file head_files[] = {
@@ -876,28 +905,33 @@ static int t_ps_dependency_closure(void)
         {"src/h.c", "int h(void) { return 5; }\n", 0},
         {"zcode-package.json", head_json, 0},
     };
-    struct ps_pkg head;
     PS_CHECK("head package stored and published",
-             ps_pkg_build(&head, head_files, 3) &&
-                 ps_pkg_store(n.store, &head, NULL) &&
-                 ps_publish(n.store, head.root, 0x65, "pshead/fixture",
+             ps_pkg_build(head, head_files, 3) &&
+                 ps_pkg_store(n->store, head, NULL) &&
+                 ps_publish(n->store, head->root, 0x65, "pshead/fixture",
                             "MIT"));
     PS_CHECK("a hole two levels down still refuses the top",
-             ps_refused(n.store, head.root, "dependency-not-public"));
+             ps_refused(n->store, head->root, "dependency-not-public"));
+    return failures;
+}
 
-    /* A mis-licensed dependency is refused for its own reason, reported to
-     * the operator and not to the peer. */
+/* A mis-licensed dependency is refused for its own reason, reported to
+ * the operator and not to the peer. */
+static int ps_closure_mislicensed(struct ps_node *n, struct ps_pkg *fake,
+                                  struct ps_pkg *fdep)
+{
+    int failures = 0;
+    struct vcs_package_public_verdict v;
     const struct ps_file fake_files[] = {
         {"LICENSE", TEST_LICENSE_TEXT_PLACEHOLDER, 0},
         {"src/f.c", "int f(void) { return 6; }\n", 0},
     };
-    struct ps_pkg fake;
     PS_CHECK("mis-licensed dependency stored and published",
-             ps_pkg_build(&fake, fake_files, 2) &&
-                 ps_pkg_store(n.store, &fake, NULL) &&
-                 ps_publish(n.store, fake.root, 0x66, "psfake/fixture",
+             ps_pkg_build(fake, fake_files, 2) &&
+                 ps_pkg_store(n->store, fake, NULL) &&
+                 ps_publish(n->store, fake->root, 0x66, "psfake/fixture",
                             "MIT"));
-    const uint8_t *fake_roots[1] = {fake.root};
+    const uint8_t *fake_roots[1] = {fake->root};
     char fdep_json[512];
     ps_deps_json(fdep_json, sizeof(fdep_json), fake_roots, 1);
     const struct ps_file fdep_files[] = {
@@ -905,17 +939,34 @@ static int t_ps_dependency_closure(void)
         {"src/g.c", "int g(void) { return 7; }\n", 0},
         {"zcode-package.json", fdep_json, 0},
     };
-    struct ps_pkg fdep;
     PS_CHECK("dependent on the mis-licensed package stored and published",
-             ps_pkg_build(&fdep, fdep_files, 3) &&
-                 ps_pkg_store(n.store, &fdep, NULL) &&
-                 ps_publish(n.store, fdep.root, 0x67, "psfdep/fixture",
+             ps_pkg_build(fdep, fdep_files, 3) &&
+                 ps_pkg_store(n->store, fdep, NULL) &&
+                 ps_publish(n->store, fdep->root, 0x67, "psfdep/fixture",
                             "MIT"));
-    vcs_package_public_shape_classify(n.store, fdep.root, &v);
+    vcs_package_public_shape_classify(n->store, fdep->root, &v);
     PS_CHECK("a mis-licensed dependency refuses the dependent",
              v.shape == VCS_PACKAGE_PUBLIC_REFUSED &&
                  v.dependency_rule &&
                  strcmp(v.dependency_rule, "license-text-mismatch") == 0);
+    return failures;
+}
+
+static int t_ps_dependency_closure(void)
+{
+    int failures = 0;
+    struct ps_node n;
+    if (!ps_node_open(&n, "closure")) {
+        printf("  zcode_public_shape: node open... FAIL\n");
+        return 1;
+    }
+    struct ps_pkg dep, top, work, wdep, mid, head, fake, fdep;
+    failures += ps_closure_dep_and_top(&n, &dep, &top);
+    failures += ps_closure_dep_states(&n, &dep, &top);
+    failures += ps_closure_work_and_task(&n, &work);
+    failures += ps_closure_work_dependent(&n, &work, &wdep);
+    failures += ps_closure_transitive(&n, &mid, &head);
+    failures += ps_closure_mislicensed(&n, &fake, &fdep);
 
     ps_pkg_free(&dep);
     ps_pkg_free(&top);
