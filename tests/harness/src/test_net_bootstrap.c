@@ -57,9 +57,8 @@ static void capture_addnode_cb(const char *host, uint16_t port, void *ctx)
     g_captured_count++;
 }
 
-int test_net_bootstrap(void)
+static int check_addnode_parse_line_cases(void)
 {
-    printf("\n=== net bootstrap-surface tests ===\n");
     int failures = 0;
 
     /* ── addnode_file_parse_line: pure cases ─────────────────────── */
@@ -114,6 +113,13 @@ int test_net_bootstrap(void)
                     !addnode_file_line_is_blank("host.example.com\n"));
     }
 
+    return failures;
+}
+
+static int check_addnode_load_missing_file_noop(void)
+{
+    int failures = 0;
+
     /* ── addnode_file_load: missing file is a clean no-op ────────── */
     {
         char tmpdir[] = "/tmp/zcl_addnode_file_XXXXXX";
@@ -128,6 +134,28 @@ int test_net_bootstrap(void)
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
          TEST_DISCARD(system(cmd));
     }
+
+    return failures;
+}
+
+/* g_captured[0..3] must hold the four good peers written by the
+ * pedantic-load case. */
+static bool captured_addnodes_match_expected(void)
+{
+    bool ok = strcmp(g_captured[0].host, "host1.example.com") == 0 &&
+              g_captured[0].port == 9033;
+    ok = ok && strcmp(g_captured[1].host, "host2.example.com") == 0 &&
+         g_captured[1].port == 0;
+    ok = ok && strcmp(g_captured[2].host, "203.0.113.7") == 0 &&
+         g_captured[2].port == 18033;
+    ok = ok && strcmp(g_captured[3].host, "203.0.113.8") == 0 &&
+         g_captured[3].port == 8033;
+    return ok;
+}
+
+static int check_addnode_load_skips_bad_lines(void)
+{
+    int failures = 0;
 
     /* ── addnode_file_load: pedantic parse — bad lines skipped, ────
      * good lines still load; never fatal. */
@@ -163,20 +191,41 @@ int test_net_bootstrap(void)
         g_captured_count = 0;
         int rc = ok ? addnode_file_load(path, capture_addnode_cb, NULL) : -1;
         ok = ok && rc == 4 && g_captured_count == 4;
-        ok = ok && strcmp(g_captured[0].host, "host1.example.com") == 0 &&
-             g_captured[0].port == 9033;
-        ok = ok && strcmp(g_captured[1].host, "host2.example.com") == 0 &&
-             g_captured[1].port == 0;
-        ok = ok && strcmp(g_captured[2].host, "203.0.113.7") == 0 &&
-             g_captured[2].port == 18033;
-        ok = ok && strcmp(g_captured[3].host, "203.0.113.8") == 0 &&
-             g_captured[3].port == 8033;
+        ok = ok && captured_addnodes_match_expected();
         NBOOT_CHECK("load: good lines loaded, one bad line skipped (not fatal)", ok);
 
         char cmd[700];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
          TEST_DISCARD(system(cmd));
     }
+
+    return failures;
+}
+
+/* Scan a deserialized addrman's entries[] directly for two wanted
+ * addresses (whitebox). */
+static bool addrman_entries_hold(struct addr_man *am,
+                                 struct net_address *want_a1,
+                                 struct net_address *want_a3)
+{
+    bool found_a1 = false, found_a3 = false;
+    for (size_t i = 0; i < am->entries_cap; i++) {
+        struct addr_info *ai = &am->entries[i];
+        if (!ai->used)
+            continue;
+        if (net_addr_eq(&ai->addr.svc.addr, &want_a1->svc.addr) &&
+            ai->addr.svc.port == want_a1->svc.port)
+            found_a1 = true;
+        if (net_addr_eq(&ai->addr.svc.addr, &want_a3->svc.addr) &&
+            ai->addr.svc.port == want_a3->svc.port)
+            found_a3 = true;
+    }
+    return found_a1 && found_a3;
+}
+
+static int check_addrman_save_load_roundtrip(void)
+{
+    int failures = 0;
 
     /* ── addrman save/load round-trip across independent connman
      * instances sharing a datadir: known-good peers survive a restart. */
@@ -235,20 +284,7 @@ int test_net_bootstrap(void)
              * truncates to 0, so it can't prove membership here. Scan the
              * deserialized table's entries[] directly instead (whitebox,
              * matches addrman_consistency_check's own access pattern). */
-            struct addr_man *am2 = &cm2.manager.addrman;
-            bool found_a1 = false, found_a3 = false;
-            for (size_t i = 0; i < am2->entries_cap; i++) {
-                struct addr_info *ai = &am2->entries[i];
-                if (!ai->used)
-                    continue;
-                if (net_addr_eq(&ai->addr.svc.addr, &a1.svc.addr) &&
-                    ai->addr.svc.port == a1.svc.port)
-                    found_a1 = true;
-                if (net_addr_eq(&ai->addr.svc.addr, &a3.svc.addr) &&
-                    ai->addr.svc.port == a3.svc.port)
-                    found_a3 = true;
-            }
-            ok = ok && found_a1 && found_a3;
+            ok = ok && addrman_entries_hold(&cm2.manager.addrman, &a1, &a3);
         }
 
         NBOOT_CHECK("addrman: save then load in a fresh connman recovers "
@@ -260,6 +296,19 @@ int test_net_bootstrap(void)
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
          TEST_DISCARD(system(cmd));
     }
+
+    return failures;
+}
+
+int test_net_bootstrap(void)
+{
+    printf("\n=== net bootstrap-surface tests ===\n");
+    int failures = 0;
+
+    failures += check_addnode_parse_line_cases();
+    failures += check_addnode_load_missing_file_noop();
+    failures += check_addnode_load_skips_bad_lines();
+    failures += check_addrman_save_load_roundtrip();
 
     return failures;
 }
