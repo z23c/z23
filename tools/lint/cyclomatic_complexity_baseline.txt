@@ -305,11 +305,6 @@ engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin_result_string:16
-engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_normal_boot_preflight#2:20
-engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_preflight_run_all#2:16
-engine/composition/src/boot_mint_anchor_preflight.c:copy_exact_file:16
-engine/composition/src/boot_mint_anchor_preflight.c:windows_family_preflight:48
-engine/composition/src/boot_mint_anchor_preflight.c:windows_projection_snapshot_allowed:23
 engine/composition/src/boot_refold_staged.c:boot_autodetect_bundle_snapshot:24
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:113
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
