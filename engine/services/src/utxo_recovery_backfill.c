@@ -578,23 +578,34 @@ int utxo_recovery_shielded_verify_may_run(int chain_tip, int projection_tip,
     return projection_tip + 1 >= chain_tip && header_tip <= (int64_t)chain_tip + 1 ? 1 : 0;
 }
 
-/* Phase 1 (no db): derive the values of [from, to] from block bodies. Stops at
- * the first height with no body or an unreadable body, so the result is always
- * the contiguous verified prefix (the count of items = heights verified). */
+/* Phase 1 (no db): derive the values of [from, to] from block bodies.
+ * A height whose index entry has no body at all (no BLOCK_HAVE_DATA, nFile < 0
+ * or nDataPos == 0: e.g. below an imported snapshot) has nothing to prove from:
+ * it is passed over and the imported row stays as it is. A height the index
+ * says HAS a body but that cannot be read (or has no index entry) stops the
+ * batch so it is retried. *through = last height passed over or verified
+ * (from - 1 when none); the return value is the number of items derived. */
 static int verify_collect_range(struct active_chain *chain, const char *datadir,
                                 int from, int to,
-                                struct shielded_verify_item *items)
+                                struct shielded_verify_item *items,
+                                int *through)
 {
     int n = 0;
+    *through = from - 1;
     for (int h = from; h <= to; h++) {
         struct block_index *bi = active_chain_at(chain, h);
-        if (!bi || bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
-            (bi->nDataPos == 0 && bi->nHeight > 0))
-            break;   /* cannot prove this height: stop, retry next tick */
-        int64_t sprout = 0, sapling = 0;
-        if (backfill_resolve_block_values(bi, datadir, &sprout, &sapling) != 0)
-            break;   /* cannot prove this height: stop, retry next tick */
-        items[n++] = (struct shielded_verify_item){ bi, sprout, sapling };
+        if (!bi)
+            break;
+        bool has_body = bi->nFile >= 0 && (bi->nStatus & BLOCK_HAVE_DATA) &&
+                        !(bi->nDataPos == 0 && bi->nHeight > 0);
+        if (has_body) {
+            int64_t sprout = 0, sapling = 0;
+            if (backfill_resolve_block_values(bi, datadir, &sprout,
+                                              &sapling) != 0)
+                break;   /* body expected but unreadable: retry next tick */
+            items[n++] = (struct shielded_verify_item){ bi, sprout, sapling };
+        }
+        *through = h;
     }
     return n;
 }
@@ -712,14 +723,14 @@ struct zcl_result utxo_recovery_verify_shielded_values_batch(
     vctx.items = zcl_calloc(slots, sizeof(*vctx.items), "shielded_verify_items");
     if (!vctx.items)
         return ZCL_ERR(-54, "shielded verify: out of memory");
+    int verified = to;
     if (to >= from)
         vctx.count = verify_collect_range(&state->chain_active, datadir,
-                                          from, to, vctx.items);
-    /* Only the contiguous verified prefix is certified: a height whose body
+                                          from, to, vctx.items, &verified);
+    /* Only the contiguous proven-or-bodiless prefix is certified: a height whose body
      * is missing or unreadable stops the batch, the cursor stays below it and
      * the done marker is withheld until a later batch verifies it. */
-    int verified = to >= from ? from + vctx.count - 1 : to;
-    vctx.through = (to >= from && vctx.count > 0) ? verified : (int)cursor;
+    vctx.through = (to >= from && verified >= from) ? verified : (int)cursor;
     vctx.mark_done = verified >= tip_height;
     res.through = verified;
     if (!verify_commit_batch(ndb, dbsvc, &vctx))

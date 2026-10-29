@@ -369,9 +369,9 @@ static int sbf_test_verify_missing_body(void)
     main_state_init(&ms);
     SBF_CHECK("(k) fixture built", sbf_build_verify_fixture(&ms, &ndb));
     struct block_index *gap = active_chain_at(&ms.chain_active, 3);
-    uint32_t status = gap ? gap->nStatus : 0;
+    int file = gap ? gap->nFile : 0;
     if (gap)
-        gap->nStatus &= ~(uint32_t)BLOCK_HAVE_DATA;   /* body "missing" */
+        gap->nFile = 99;   /* HAVE_DATA but the file is unreadable */
 
     struct shielded_value_verify_batch b1 = {0};
     struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
@@ -388,7 +388,7 @@ static int sbf_test_verify_missing_body(void)
               sbf_read_col_int(&ndb, 4, "sapling_value") == -104);
 
     if (gap)
-        gap->nStatus = status;                       /* body now present */
+        gap->nFile = file;                           /* body now readable */
     struct shielded_value_verify_batch b2 = {0};
     r = utxo_recovery_verify_shielded_values_batch(&ndb, NULL, &ms, vdir, 1, 9,
                                                    512, &b2);
@@ -396,6 +396,49 @@ static int sbf_test_verify_missing_body(void)
               r.ok && b2.from == 3 && b2.at_tip && b2.repaired == 3);
     SBF_CHECK("(k) gap row repaired",
               sbf_read_col_int(&ndb, 3, "sapling_value") == 103);
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* heights below an imported snapshot have no body and no HAVE_DATA: the pass
+ * advances past them, repairs the provable wrong-sign heights above, and
+ * reaches done; the imported rows stay as they are */
+static int sbf_test_verify_snapshot_gap(void)
+{
+    int failures = 0;
+    char vdir[256], vpath[320];
+    test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "snapshot_gap");
+    g_sbf_dir = vdir;
+    snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    SBF_CHECK("(l) node.db opens", node_db_open(&ndb, vpath));
+    struct main_state ms;
+    main_state_init(&ms);
+    SBF_CHECK("(l) fixture built", sbf_build_verify_fixture(&ms, &ndb));
+    /* heights 1..4 are imported: no body. Row 3 keeps its (wrong) imported
+     * value; rows 5 (wrong sign) is provable and must be repaired. */
+    for (int h = 1; h <= 4; h++) {
+        struct block_index *bi = active_chain_at(&ms.chain_active, h);
+        if (bi) {
+            bi->nStatus &= ~(uint32_t)BLOCK_HAVE_DATA;
+            bi->nFile = -1;
+        }
+    }
+    struct shielded_value_verify_batch b = {0};
+    struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+        &ndb, NULL, &ms, vdir, 1, 9, 512, &b);
+    int64_t done = 0;
+    SBF_CHECK("(l) advances past the no-data heights to the tip",
+              r.ok && b.at_tip && b.through == 9);
+    SBF_CHECK("(l) provable wrong-sign height repaired",
+              b.repaired == 1 && sbf_read_col_int(&ndb, 5, "sapling_value") == 105);
+    SBF_CHECK("(l) imported no-data row left as it is",
+              sbf_read_col_int(&ndb, 3, "sapling_value") == -103);
+    SBF_CHECK("(l) done marker set",
+              node_db_state_get_int(&ndb, "shielded_value_verify_done", &done) &&
+              done == 1);
     main_state_free(&ms);
     node_db_close(&ndb);
     return failures;
@@ -682,6 +725,7 @@ int test_utxo_recovery_shielded_backfill(void)
     failures += sbf_test_verify_pass();
     failures += sbf_test_cache_vs_body();
     failures += sbf_test_verify_missing_body();
+    failures += sbf_test_verify_snapshot_gap();
     failures += sbf_test_verify_yield();
     disk_block_io_set_deferred_sync(false);
 
