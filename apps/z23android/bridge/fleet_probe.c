@@ -313,7 +313,8 @@ const char *zapp_prompt_question(const char *prompt)
 bool zapp_fleet_tool_wanted(const struct zapp_fleet_host *hosts, size_t count, const char *prompt,
                             char *name, size_t name_cap, char *arguments, size_t arguments_cap)
 {
-    static const char *const asks[] = {"blocker", "blocked", "blocking", "wrong", "problem", "issue", "stuck"};
+    static const char *const asks[] = {"blocker", "blocked", "blocking", "wrong", "problem", "issue", "stuck",
+                                       "why"};
     const char *question = zapp_prompt_question(prompt);
     const struct zapp_fleet_host *named = NULL;
     bool asked = false;

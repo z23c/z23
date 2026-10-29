@@ -92,7 +92,8 @@ static void check_wanted(void)
     assert(zapp_fleet_hosts_parse("r1=node1.example,r2=node2.example,mac=user@node3.example", hosts, 3, &n));
     const char *wanted[][2] = {{"Question: What are the blockers on R One?", "r1"}, {"Question: why is r 2 blocked", "r2"},
         {"Question: What's wrong with the Mac?", "mac"}, {"Question: Is r1 stuck?", "r1"},
-        {"Question: any issues on R2 or r1", "r1"}, {"what blocks... Question: what is wrong on r2", "r2"}};
+        {"Question: any issues on R2 or r1", "r1"}, {"what blocks... Question: what is wrong on r2", "r2"},
+        {"Question: Why is the Mac's height unknown?", "mac"}};
     for (size_t i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
         char want[64];
         snprintf(want, sizeof(want), "{\"host\":\"%s\"}", wanted[i][1]);
@@ -101,7 +102,7 @@ static void check_wanted(void)
     }
     const char *not_wanted[] = {"Question: What block height is r1 at?", "Question: Is there a problem with my wallet?",
         "Question: Is the machine stuck?", "Question: is r12 blocked?", "Node blocked on r1.\n\nQuestion: How is r1?",
-        "How is the fleet?", "", NULL};
+        "How is the fleet?", "Question: Why is my balance unknown?", "", NULL};
     for (size_t i = 0; i < sizeof(not_wanted) / sizeof(not_wanted[0]); i++)
         assert(!zapp_fleet_tool_wanted(hosts, n, not_wanted[i], name, sizeof(name), args, sizeof(args)));
     assert(!zapp_fleet_tool_wanted(hosts, 0, wanted[0][0], name, sizeof(name), args, sizeof(args)));

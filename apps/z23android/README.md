@@ -166,8 +166,8 @@ synthesized voice varies between answers. `--fleet` lists SSH destinations
 that accept non-interactive key login; the host runs only two fixed read-only
 commands on them: a status command on each host, reported as block height
 against `zclassicd`, and `z23 core sync blockers` on one configured host, either
-when a question names it and asks about its blockers or problems, or when the
-chat model asks for that host's report.
+when a question names it and asks why or about its blockers or problems, or
+when the chat model asks for that host's report.
 
 On first start the host prints a six-character pairing code and opens the app
 with a pairing offer. Accept on the phone only if it shows the same code. The
@@ -312,6 +312,14 @@ Two of 10 answers about r2 with a report still said its blockers keep it from
 syncing. The two heights of a host come from separate commands, so a host that
 reports itself synced can read one block behind its `zclassicd`; such a gap of
 up to two blocks now counts as in sync.
+
+With a fixed three-host fleet served by a stand-in `ssh`, three answers to
+each of five questions on 2026-10-29: the guide that leads with how many hosts
+are in sync gave a wrong count in 0 of 6 answers about the whole fleet, against
+2 of 6 when it led with how many match `zclassicd`; a question asking why
+about a named host fetched its blocker report in 3 of 3 answers, against 0 of 3.
+Answers still named a cause the observations do not give in 8 of 9, against 7
+of 9, and none of 6 answers about r2 listed the four blockers its report held.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to
