@@ -348,6 +348,50 @@ static bool map_preflight_untouched(const char *dir, bool *verdict)
     return same;
 }
 
+/* Capture existing timing output while checking source immutability. */
+static bool map_capture_preflight(const char *dir, bool *verdict, char *text, size_t cap)
+{
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0) { fclose(capture); return false; }
+    fflush(stdout);
+    if (dup2(fileno(capture), STDOUT_FILENO) < 0) {
+        close(saved); fclose(capture); return false;
+    }
+    bool unchanged = map_preflight_untouched(dir, verdict);
+    fflush(stdout);
+    bool restored = dup2(saved, STDOUT_FILENO) >= 0;
+    close(saved);
+    rewind(capture);
+    size_t n = fread(text, 1, cap - 1, capture);
+    text[n] = 0;
+    bool read_ok = !ferror(capture);
+    if (fclose(capture) != 0) read_ok = false;
+    return unchanged && restored && read_ok;
+}
+
+static bool map_copy_marks(const char *text, bool verdict)
+{
+    bool final = strstr(text, "mint_preflight.final_stability ") != NULL;
+    return strstr(text, "mint_preflight.temp_create ") &&
+        strstr(text, "mint_preflight.copy ") &&
+        strstr(text, "mint_preflight.copy_stability ") &&
+        strstr(text, "mint_preflight.copy_inspect ") &&
+        strstr(text, "mint_preflight.cleanup_check ") &&
+        !strstr(text, "mint_preflight.live_inspect ") && final == verdict;
+}
+
+static bool map_marked_preflight(const char *dir, bool copy_path, bool *verdict)
+{
+    char text[4096];
+    if (!map_capture_preflight(dir, verdict, text, sizeof text)) return false;
+    if (copy_path) return map_copy_marks(text, *verdict);
+    return strstr(text, "mint_preflight.live_inspect ") &&
+        (strstr(text, "mint_preflight.live_stability ") != NULL) == *verdict &&
+        !strstr(text, "mint_preflight.temp_create ");
+}
+
 static int test_normal_preflight_live_verdicts(void)
 {
     int failures = 0;
@@ -363,7 +407,7 @@ static int test_normal_preflight_live_verdicts(void)
     if (db)
         sqlite3_close(db);
     MAP_CHECK("live: clean datadir is allowed and no byte/mtime changes",
-              map_preflight_untouched(dir, &verdict) && verdict);
+              map_marked_preflight(dir, false, &verdict) && verdict);
 
     /* Empty -wal beside a clean main file takes the live path too. */
     char wal[600];
@@ -432,7 +476,7 @@ static int map_alternate_temp_root(const char *dir, sqlite3 *db)
             "DELETE FROM progress_meta WHERE key='" MINT_ANCHOR_IN_PROGRESS_KEY "'",
             NULL, NULL, NULL) == SQLITE_OK);
         MAP_CHECK("wal-only: ordinary WAL is allowed, source untouched",
-                  map_preflight_untouched(dir, &verdict) && verdict);
+                  map_marked_preflight(dir, true, &verdict) && verdict);
         struct stat dir_stat;
         bool have_path = dir[0] == '/' && stat(dir, &dir_stat) == 0 && S_ISDIR(dir_stat.st_mode);
         MAP_CHECK("wal-only: datadir alias selected", have_path && setenv("TMPDIR", dir, 1) == 0);
@@ -463,7 +507,7 @@ static int test_normal_preflight_marker_only_in_wal(void)
     map_capture(dir, "-wal", &wal_state);
     MAP_CHECK("wal-only: -wal holds frames, main file does not have the marker", wal_state.exists && wal_state.st.st_size > 0);
     MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
-              map_preflight_untouched(dir, &verdict) && !verdict);
+              map_marked_preflight(dir, true, &verdict) && !verdict);
     failures += map_alternate_temp_root(dir, db);
     if (db)
         sqlite3_close(db);

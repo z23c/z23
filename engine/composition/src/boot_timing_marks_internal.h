@@ -1,8 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Purpose: internal contract for the boot phase-timing marks shared between
- * engine/composition/src/boot_timing_marks.c (the emitters) and engine/composition/src/boot.c (the
- * only caller — app_init chains them across every boot phase).
+ * Purpose: internal boot timing marks used by app_init and mint-anchor
+ * preflight, emitted by engine/composition/src/boot_timing_marks.c.
  *
  * Split out of engine/composition/src/boot.c when that file passed its shape ceiling.
  * The three helpers are one self-contained surface: read the monotonic boot

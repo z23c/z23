@@ -3,6 +3,7 @@
  * including committed state that exists only in a kill-9-surviving WAL. */
 #define _GNU_SOURCE
 #include "config/boot.h"
+#include "boot_timing_marks_internal.h"
 #include "config/mint_anchor_progress.h"
 #include "base/hex.h"
 #include "chain/checkpoints.h"
@@ -509,25 +510,39 @@ static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbas
     int n2 = snprintf(wal_copy, sizeof(wal_copy), "%s/%s-wal", temp_dir, kbase);
     if (n1 <= 0 || n1 >= 2304 || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy))
         return false;
-    if (!copy_exact_file(&files[0], main_copy) || !copy_exact_file(&files[1], wal_copy))
-        return false;
-    for (size_t i = 0; i < 3; i++)
-        if (!source_unchanged(dirfd, &files[i]))
-            return false;
-    return true;
+    int64_t phase = boot_clock_ms();
+    bool copied = copy_exact_file(&files[0], main_copy) && copy_exact_file(&files[1], wal_copy);
+    phase = boot_submark("mint_preflight.copy", phase);
+    if (!copied) return false;
+    bool stable = true;
+    for (size_t i = 0; stable && i < 3; i++)
+        stable = source_unchanged(dirfd, &files[i]);
+    (void)boot_submark("mint_preflight.copy_stability", phase);
+    return stable;
 }
 
 static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason, size_t reason_size) {
     char temp_dir[PLATFORM_TEMP_PATH_MAX] = {0};
     char main_copy[2304] = {0};
+    int64_t phase = boot_clock_ms();
     bool ok = platform_temp_directory_create("zcl-preflight-", temp_dir, sizeof(temp_dir));
+    phase = boot_submark("mint_preflight.temp_create", phase);
     if (ok)
         ok = copy_family_stable(dirfd, temp_dir, kbase, files, main_copy);
-    if (ok)
+    if (ok) {
+        phase = boot_clock_ms();
         ok = inspect_snapshot(main_copy, reason, reason_size);
-    for (size_t i = 0; ok && i < 3; i++)
-        ok = source_unchanged(dirfd, &files[i]);
+        phase = boot_submark("mint_preflight.copy_inspect", phase);
+    }
+    if (ok) {
+        phase = boot_clock_ms();
+        for (size_t i = 0; ok && i < 3; i++)
+            ok = source_unchanged(dirfd, &files[i]);
+        (void)boot_submark("mint_preflight.final_stability", phase);
+    }
+    phase = boot_clock_ms();
     bool cleanup_ok = temp_dir[0] && access(temp_dir, F_OK) == 0 ? remove_temp_family(temp_dir, main_copy) : true;
+    (void)boot_submark("mint_preflight.cleanup_check", phase);
     return ok && cleanup_ok;
 }
 
@@ -586,9 +601,14 @@ static bool inspect_family(const char *datadir, int dirfd, const char *kbase, st
         return false;
     if (!live_inspect_eligible(&files[1]))
         return inspect_via_copy(dirfd, kbase, files, reason, reason_size);
+    int64_t phase = boot_clock_ms();
     bool ok = inspect_live_immutable(datadir, kbase, reason, reason_size);
-    for (size_t i = 0; ok && i < 3; i++)
-        ok = source_unchanged(dirfd, &files[i]);
+    phase = boot_submark("mint_preflight.live_inspect", phase);
+    if (ok) {
+        for (size_t i = 0; ok && i < 3; i++)
+            ok = source_unchanged(dirfd, &files[i]);
+        (void)boot_submark("mint_preflight.live_stability", phase);
+    }
     return ok;
 }
 
