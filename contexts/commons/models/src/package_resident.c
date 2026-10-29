@@ -226,7 +226,9 @@ struct zcl_result package_resident_store_open(
         struct zcl_result cleanup = package_resident_store_close(store);
         return cleanup.ok ? result : cleanup;
     }
-    struct zcl_result result = sqlite3_busy_timeout(store->db, 250) == SQLITE_OK
+    /* 5000 ms matches vcs_index: a background update writer and the editor save
+     * contend for resident.db, and 250 ms expired under load (database is locked). */
+    struct zcl_result result = sqlite3_busy_timeout(store->db, 5000) == SQLITE_OK
         ? ZCL_OK : ZCL_ERR(-1, "resident-store: bounded contention setup refused");
     /* EXTRA also synchronizes the directory when the rollback journal is
      * unlinked. SQLite's single transaction is the only commit authority;
