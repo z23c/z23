@@ -2048,6 +2048,307 @@ static int test_dl_batch_compaction_deep_queue(void)
     return failures;
 }
 
+/* Characterization (pins current behaviour before the download.c split):
+ * dl_queue_blocks_class argument refusals, dedup and staging order. */
+static int test_dl_queue_blocks_class_refusals_and_dedup(void)
+{
+    int failures = 0;
+    TEST("dl_queue_blocks_class refuses bad args and dedups queued and in-flight hashes") {
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 h1 = make_hash16(1), h2 = make_hash16(2);
+        struct uint256 h3 = make_hash16(3), h4 = make_hash16(4);
+        struct uint256 h5 = make_hash16(5);
+        int32_t ht1 = 10, ht2 = 5, ht3 = 7, ht5 = 7;
+        struct uint256 out[4];
+        struct uint256 batch[3] = {h2, h3, h2};
+        int32_t batch_heights[3] = {ht2, ht3, ht2};
+
+        /* Refusals return 0 and leave the queue untouched. */
+        ASSERT(dl_queue_blocks_class(NULL, &h1, &ht1, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dl_queue_blocks_class(&dm, NULL, &ht1, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dl_queue_blocks_class(&dm, &h1, &ht1, 1, (enum dl_work_class)42) == 0);
+        ASSERT(dl_queue_blocks_class(&dm, &h1, &ht1, 0, DL_WORK_FORWARD) == 0);
+        ASSERT(dm.queue_len == 0);
+
+        /* One forward hash, then a batch whose second h2 is an in-batch duplicate. */
+        ASSERT(dl_queue_blocks_class(&dm, &h1, &ht1, 1, DL_WORK_FORWARD) == 1);
+        ASSERT(dl_queue_blocks_class(&dm, batch, batch_heights, 3, DL_WORK_FORWARD) == 2);
+        ASSERT(dm.queue_len == 3);
+        /* Already-queued hash: no new entry. */
+        ASSERT(dl_queue_blocks_class(&dm, &h1, &ht1, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dm.queue_len == 3);
+
+        /* Lowest height first. */
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 3) == 3);
+        ASSERT(uint256_eq(&out[0], &h2));
+        ASSERT(uint256_eq(&out[1], &h3));
+        ASSERT(uint256_eq(&out[2], &h1));
+
+        /* In-flight hash is skipped; queue stays empty. */
+        ASSERT(dl_queue_blocks_class(&dm, &h2, &ht2, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dm.queue_len == 0);
+        ASSERT(dl_peer_in_flight(&dm, 1) == 3);
+
+        /* NULL heights store height -1, which sorts after known heights. */
+        ASSERT(dl_queue_blocks_class(&dm, &h4, NULL, 1, DL_WORK_FORWARD) == 1);
+        ASSERT(dl_queue_blocks_class(&dm, &h5, &ht5, 1, DL_WORK_FORWARD) == 1);
+        ASSERT(dl_assign_to_peer(&dm, 2, out, 2) == 2);
+        ASSERT(uint256_eq(&out[0], &h5));
+        ASSERT(uint256_eq(&out[1], &h4));
+
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dl_queue_blocks_class_forward_promotes_history(void)
+{
+    int failures = 0;
+    TEST("forward enqueue promotes a queued history hash without adding a duplicate") {
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 h = make_hash16(20);
+        int32_t ht = 50;
+        struct dl_diagnostics diag;
+
+        ASSERT(dl_queue_blocks_class(&dm, &h, &ht, 1, DL_WORK_HISTORY) == 1);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.queued_history == 1 && diag.queued_forward == 0);
+        uint64_t gen = diag.queue_generation;
+
+        /* Forward request for a queued history hash: promotion, zero added.
+         * NULL heights keep the queued height. */
+        ASSERT(dl_queue_blocks_class(&dm, &h, NULL, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dm.queue_len == 1);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.queued_forward == 1 && diag.queued_history == 0);
+        ASSERT(diag.queue_generation > gen);
+
+        /* Re-enqueue in either class of an already-forward hash: no-op. */
+        ASSERT(dl_queue_blocks_class(&dm, &h, &ht, 1, DL_WORK_FORWARD) == 0);
+        ASSERT(dl_queue_blocks_class(&dm, &h, &ht, 1, DL_WORK_HISTORY) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.queued_forward == 1 && diag.queued_history == 0);
+        ASSERT(dm.queue_len == 1);
+
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dl_queue_blocks_class_cap_trims_highest(void)
+{
+    int failures = 0;
+    TEST("a batch past DL_QUEUE_MAX_CAP keeps the lowest heights and counts survivors") {
+        const size_t total_in = 65538; /* the 65536 cap plus two overflow entries */
+        struct uint256 *hashes = calloc(total_in, sizeof(*hashes));
+        int32_t *heights = calloc(total_in, sizeof(*heights));
+        if (!hashes || !heights) {
+            free(hashes);
+            free(heights);
+            failures++;
+            goto _test_next;
+        }
+        for (size_t i = 0; i < total_in; i++) {
+            uint32_t v = (uint32_t)i;
+            memcpy(hashes[i].data, &v, sizeof(v));
+            heights[i] = (int32_t)i + 1;
+        }
+        struct download_manager dm;
+        dl_init(&dm);
+        size_t added = dl_queue_blocks_class(&dm, hashes, heights, total_in,
+                                             DL_WORK_FORWARD);
+        size_t queued = dm.queue_len;
+        uint64_t evicted = dm.total_queue_evicted;
+        int32_t top_height = queued ? dm.queue_heights[queued - 1] : -1;
+        bool top_hash_ok = queued &&
+            uint256_eq(&dm.queue[queued - 1], &hashes[queued - 1]);
+        dl_free(&dm);
+        free(hashes);
+        free(heights);
+
+        ASSERT(added == 65536);
+        ASSERT(queued == 65536);
+        ASSERT(evicted == 2);
+        ASSERT(top_height == 65536);
+        ASSERT(top_hash_ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Characterization: dl_assign_to_peer refusal results and their counters. */
+static int test_dl_assign_to_peer_refusal_results(void)
+{
+    int failures = 0;
+    TEST("dl_assign_to_peer refusals return 0 and record the matching result") {
+        test_dl_force_sync_idle();
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 out[200];
+        struct dl_diagnostics diag;
+
+        /* Empty queue: NO_QUEUE, then the peer is parked and not counted. */
+        ASSERT(dl_assign_to_peer(&dm, 2, out, 1) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.last_assign_result == DL_ASSIGN_NO_QUEUE);
+        ASSERT(diag.assign_attempts == 1);
+        ASSERT(dl_assign_to_peer(&dm, 2, out, 1) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.assign_attempts == 1);
+
+        /* Queued work with max_assign 0: MAX_ZERO, queue untouched. */
+        struct uint256 hashes[200];
+        int32_t heights[200];
+        for (int i = 0; i < 200; i++) {
+            hashes[i] = make_hash16((uint16_t)(300 + i));
+            heights[i] = 300 + i;
+        }
+        ASSERT(dl_queue_blocks(&dm, hashes, heights, 200) == 200);
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 0) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.last_assign_result == DL_ASSIGN_MAX_ZERO);
+        ASSERT(dm.queue_len == 200);
+
+        /* max_assign caps the batch; then the per-peer window fills at 128. */
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 3) == 3);
+        ASSERT(dm.queue_len == 197);
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 200) == 125);
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 200) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.last_assign_result == DL_ASSIGN_PEER_WINDOW_FULL);
+        ASSERT(dl_peer_in_flight(&dm, 1) == DL_MAX_IN_FLIGHT_PER_PEER);
+        ASSERT(dm.queue_len == 72);
+
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Characterization: loopback cap and bandwidth-score scaling of the window. */
+static size_t dl_char_assign_after_seed(uint32_t score)
+{
+    struct download_manager dm;
+    dl_init(&dm);
+    struct uint256 hashes[200];
+    int32_t heights[200];
+    for (int i = 0; i < 200; i++) {
+        hashes[i] = make_hash16((uint16_t)(500 + i));
+        heights[i] = 500 + i;
+    }
+    dl_peer_seed_bandwidth_score(&dm, 1, score);
+    (void)dl_queue_blocks(&dm, hashes, heights, 200);
+    struct uint256 out[200];
+    size_t got = dl_assign_to_peer(&dm, 1, out, 200);
+    dl_free(&dm);
+    return got;
+}
+
+static int test_dl_assign_to_peer_loopback_and_score_limits(void)
+{
+    int failures = 0;
+    TEST("loopback peers get DL_MAX_IN_FLIGHT_PER_LOOPBACK; score scales the WAN window") {
+        test_dl_force_sync_idle();
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 hashes[600];
+        int32_t heights[600];
+        struct uint256 out[600];
+        for (int i = 0; i < 600; i++) {
+            hashes[i] = make_hash16((uint16_t)(600 + i));
+            heights[i] = 600 + i;
+        }
+        dl_set_peer_loopback(&dm, 1, true);
+        ASSERT(dl_queue_blocks(&dm, hashes, heights, 600) == 600);
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 600) == DL_MAX_IN_FLIGHT_PER_LOOPBACK);
+        dl_free(&dm);
+
+        /* score 0 keeps the default 128; 1 clamps up to 16; 32 maps to 32;
+         * 255 clamps down to the 128 per-peer maximum. */
+        struct { uint32_t score; size_t want; } rows[] = {
+            {0, 128}, {1, 16}, {32, 32}, {255, 128},
+        };
+        for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++)
+            ASSERT(dl_char_assign_after_seed(rows[r].score) == rows[r].want);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Characterization: global in-flight window clamps and refuses. */
+static int test_dl_assign_to_peer_global_window_clamp(void)
+{
+    int failures = 0;
+    TEST("global window clamps a batch and refuses once 1024 blocks are in flight") {
+        test_dl_force_sync_idle();
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 hashes[1100];
+        int32_t heights[1100];
+        struct uint256 out[600];
+        struct dl_diagnostics diag;
+        for (int i = 0; i < 1100; i++) {
+            hashes[i] = make_hash16((uint16_t)i);
+            heights[i] = i;
+        }
+        ASSERT(dl_queue_blocks(&dm, hashes, heights, 1100) == 1100);
+        for (uint32_t peer = 1; peer <= 7; peer++)
+            ASSERT(dl_assign_to_peer(&dm, peer, out, 128) == 128);
+        ASSERT(dm.num_active == 896);
+
+        /* Loopback wants 512 but 896 + 512 exceeds the 1024 total: clamp to 128. */
+        dl_set_peer_loopback(&dm, 20, true);
+        ASSERT(dl_assign_to_peer(&dm, 20, out, 600) == 128);
+        ASSERT(dm.num_active == DL_MAX_IN_FLIGHT_TOTAL);
+
+        /* The global window is full: the next peer gets nothing. */
+        ASSERT(dl_assign_to_peer(&dm, 8, out, 128) == 0);
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.last_assign_result == DL_ASSIGN_GLOBAL_WINDOW_FULL);
+        ASSERT(dm.queue_len == 76);
+
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Characterization: history lane caps a peer at DL_MAX_HISTORY_PER_PEER. */
+static int test_dl_assign_to_peer_history_lane_limits(void)
+{
+    int failures = 0;
+    TEST("history lane hands a peer DL_MAX_HISTORY_PER_PEER, then reports throttled") {
+        test_dl_force_sync_idle();
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 history[40];
+        int32_t history_heights[40];
+        for (int i = 0; i < 40; i++) {
+            history[i] = make_hash16((uint16_t)(8000 + i));
+            history_heights[i] = 100 + i;
+        }
+        ASSERT(dl_queue_blocks_class(&dm, history, history_heights, 40,
+                                     DL_WORK_HISTORY) == 40);
+        struct uint256 out[4];
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 4) == DL_MAX_HISTORY_PER_PEER);
+        ASSERT(dl_assign_to_peer(&dm, 1, out, 4) == 0);
+
+        struct dl_diagnostics diag;
+        dl_get_diagnostics(&dm, &diag);
+        ASSERT(diag.last_assign_result == DL_ASSIGN_HISTORY_THROTTLED);
+        ASSERT(diag.in_flight_history == DL_MAX_HISTORY_PER_PEER);
+        ASSERT(diag.queued_history == 38);
+
+        dl_free(&dm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_download(void)
 {
     int failures = 0;
@@ -2095,6 +2396,13 @@ int test_download(void)
     failures += test_dl_tip_bias_prefers_fast_peer();
     failures += test_dl_tip_bias_no_starvation_shallow_queue();
     failures += test_dl_batch_compaction_deep_queue();
+    failures += test_dl_queue_blocks_class_refusals_and_dedup();
+    failures += test_dl_queue_blocks_class_forward_promotes_history();
+    failures += test_dl_queue_blocks_class_cap_trims_highest();
+    failures += test_dl_assign_to_peer_refusal_results();
+    failures += test_dl_assign_to_peer_loopback_and_score_limits();
+    failures += test_dl_assign_to_peer_global_window_clamp();
+    failures += test_dl_assign_to_peer_history_lane_limits();
     failures += test_gap_fill_registers_supervisor_contract();
     return failures;
 }
