@@ -461,7 +461,8 @@ static int nbf_test_resume_setup_and_dump(sqlite3 *db)
 }
 
 /* Resumes from the persisted cursor and checks the restored set, the
- * zeroed markers and the complete dump_state_json status. */
+ * activation marker reset to zero with the resume marker cleared, and
+ * the complete dump_state_json status. */
 static int nbf_test_resume_run_checks(struct nullifier_backfill_config *cfg,
                                       sqlite3 *db)
 {
