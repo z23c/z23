@@ -31,6 +31,8 @@
 #ifndef ZCL_JOB_H
 #define ZCL_JOB_H
 
+#include "jobs/catchup_cadence.h"
+
 typedef enum {
     JOB_ADVANCED = 0, /* cursor moved; output committed */
     JOB_BLOCKED  = 1, /* typed blocker preventing progress; cursor unchanged */
@@ -63,11 +65,13 @@ typedef enum {
             batched = stage_batch_begin(batch_db);                \
             if (!batched) progress_store_tx_unlock();             \
         }                                                         \
+        struct catchup_drain_budget budget = catchup_drain_budget_begin(); \
         int advanced = 0;                                         \
         for (int i = 0; i < max_steps; i++) {                     \
             job_result_t r = prefix##_stage_step_once();          \
             if (r != JOB_ADVANCED) break;                         \
             advanced++;                                           \
+            if (catchup_drain_budget_due(&budget)) break;         \
         }                                                         \
         if (batched) {                                            \
             /* COMMIT on forward advance OR durable non-advancing  \

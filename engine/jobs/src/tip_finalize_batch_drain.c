@@ -66,11 +66,13 @@ int tip_finalize_stage_drain(int max_steps)
     if (batched)
         window_batch_begin();
 
+    struct catchup_drain_budget budget = catchup_drain_budget_begin();
     int advanced = 0;
     for (int i = 0; i < max_steps; i++) {
         if (tip_finalize_stage_step_once() != JOB_ADVANCED)
             break;
         advanced++;
+        if (catchup_drain_budget_due(&budget)) break;
     }
 
     if (batched) {

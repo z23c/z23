@@ -45,6 +45,12 @@ int present_x11_clipboard_write_target(
 #define RGFW_IMPLEMENTATION
 #define RGFW_NO_API
 #define RGFW_NO_IOKIT
+#if defined(__ANDROID__)
+/* External vendor definitions may call Bionic's internal fortified wrappers
+ * without violating C inline linkage in this single implementation unit. */
+#define RGFWDEF
+#define XDLDEF
+#endif
 #if defined(__clang__)
 /* RGFW has legacy numeric `_MSC_VER` probes. Never manufacture this compiler
  * identity: Apple and MinGW system headers use its presence to select MSVC

@@ -87,6 +87,16 @@ struct coins_view_cache;
 struct main_state;
 struct chain_params;
 
+/* Install once before starting admission workers. The callback object must
+ * have static lifetime. Callers must not hold cs_main unless they also hold
+ * the backend guard. An unregistered guard preserves standalone in-memory
+ * view behavior; production storage must install its guard before workers. */
+struct mempool_backend_guard {
+    void (*acquire)(void);
+    void (*release)(void);
+};
+bool mempool_install_backend_guard(const struct mempool_backend_guard *guard);
+
 enum mempool_accept_result accept_to_mempool(
     struct tx_mempool *pool,
     struct coins_view_cache *coins_tip,

@@ -33,6 +33,7 @@ core.wallet.address.new    exempt: keystore write, guarded by wallet AR + AT_RES
 core.wallet.address.import exempt: keystore write, guarded by wallet AR + AT_REST
 core.wallet.transaction.send  exempt: signs+broadcasts, no privileged datadir install
 core.wallet.shielded.send     exempt: signs+broadcasts, no privileged datadir install
+core.mining.regtest-mine      exempt: produces regtest blocks, no privileged artifact installation
 core.wallet.shielded.address  exempt: wallet-local, rebuildable projection
 core.wallet.backup.now     exempt: wallet-local, rebuildable projection
 core.wallet.rescan         exempt: wallet-local, rebuildable projection

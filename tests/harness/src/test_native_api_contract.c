@@ -4065,6 +4065,106 @@ static int test_discover_transport_projection(void)
     return failures;
 }
 
+static const char *mine_test_chain;
+static int mine_test_calls;
+static bool mine_test_bad_result;
+
+static char *mine_test_rpc(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "getblockchaininfo") == 0)
+        return strdup(mine_test_chain);
+    if (strcmp(method, "generatetoaddress") == 0) {
+        mine_test_calls++;
+        return strdup(mine_test_bad_result ? "{}" :
+            "[\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"]");
+    }
+    return NULL;
+}
+
+static int test_regtest_mine_invalid(void)
+{
+    int failures = 0;
+    TEST("regtest mine rejects invalid bounds and confirmation") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "core.mining.regtest-mine");
+        ASSERT(spec != NULL);
+        mine_test_calls = 0;
+        node_rpc_client_set_test_hook(mine_test_rpc);
+        const char *inputs[] = {
+            "{\"address\":\"x\",\"blocks\":0,\"confirm\":true}",
+            "{\"address\":\"x\",\"blocks\":102,\"confirm\":true}",
+            "{\"address\":\"x\",\"blocks\":1.5,\"confirm\":true}",
+            "{\"address\":\"x\",\"blocks\":1,\"confirm\":1}",
+            "{\"address\":\"\",\"blocks\":1,\"confirm\":true}"
+        };
+        bool rejected = true;
+        for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+            struct json_value input; json_init(&input);
+            bool parsed = json_read(&input, inputs[i], strlen(inputs[i]));
+            struct zcl_command_request req = {.spec = spec, .input = &input};
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, spec->output_schema);
+            if (parsed) spec->handler(&req, &reply);
+            rejected = rejected && parsed && reply.exit_code != ZCL_COMMAND_EXIT_OK &&
+                       !reply.error.mutated;
+            zcl_command_reply_free(&reply); json_free(&input);
+        }
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(rejected && mine_test_calls == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_regtest_mine_native(void)
+{
+    int failures = 0;
+    TEST("regtest mine plans and fails closed before bounded commit") {
+        const struct zcl_command_spec *spec =
+            find_spec(zcl_command_catalog(), "core.mining.regtest-mine");
+        ASSERT(spec && spec->handler == zcl_native_handle_regtest_mine);
+        struct json_value input; json_init(&input); json_set_object(&input);
+        (void)json_push_kv_str(&input, "address", "regtest-address");
+        (void)json_push_kv_int(&input, "blocks", 1);
+        struct zcl_command_request req = {.spec = spec, .input = &input};
+        struct zcl_command_reply reply;
+        mine_test_calls = 0; mine_test_bad_result = false;
+        node_rpc_client_set_test_hook(mine_test_rpc);
+        zcl_command_reply_init(&reply, spec->output_schema);
+        spec->handler(&req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")), "plan");
+        ASSERT_EQ(mine_test_calls, 0);
+        zcl_command_reply_free(&reply);
+        (void)json_push_kv_bool(&input, "confirm", true);
+        mine_test_chain = "{\"chain\":\"main\"}";
+        zcl_command_reply_init(&reply, spec->output_schema);
+        spec->handler(&req, &reply);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(mine_test_calls, 0);
+        zcl_command_reply_free(&reply);
+        mine_test_chain = "{\"chain\":\"regtest\"}";
+        zcl_command_reply_init(&reply, spec->output_schema);
+        spec->handler(&req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(mine_test_calls, 1);
+        ASSERT(reply.error.mutated);
+        zcl_command_reply_free(&reply);
+        mine_test_bad_result = true;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        spec->handler(&req, &reply);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT(reply.error.mutated);
+        ASSERT_EQ(mine_test_calls, 2);
+        zcl_command_reply_free(&reply);
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_native_api_contract(void)
 {
     int failures = 0;
@@ -4080,6 +4180,8 @@ int test_native_api_contract(void)
     failures += test_missing_required_input_fails_closed_structured();
     failures += test_dev_failure_native_api();
     failures += test_native_app_catalog_uses_strict_builtin_source();
+    failures += test_regtest_mine_invalid();
+    failures += test_regtest_mine_native();
     failures += test_wallet_send_amount_admission();
     failures += test_wallet_mutating_native_e2e();
     failures += test_wallet_security_refusal_flags();

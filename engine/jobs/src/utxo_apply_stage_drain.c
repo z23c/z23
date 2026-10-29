@@ -51,6 +51,19 @@ static bool utxo_apply_drain_batch_open(sqlite3 *batch_db)
     return true;
 }
 
+static int utxo_apply_drain_steps(int max_steps)
+{
+    struct catchup_drain_budget budget = catchup_drain_budget_begin();
+    int advanced = 0;
+    for (int i = 0; i < max_steps; i++) {
+        job_result_t r = utxo_apply_stage_step_once();
+        if (r != JOB_ADVANCED) break;
+        advanced++;
+        if (catchup_drain_budget_due(&budget)) break;
+    }
+    return advanced;
+}
+
 int utxo_apply_stage_drain(int max_steps)
 {
     /* Block intake can drain before boot finishes the stage's init; nothing
@@ -64,12 +77,7 @@ int utxo_apply_stage_drain(int max_steps)
     int64_t h_before_batch =
         (int64_t)stage_cursor_persisted(batch_db, STAGE_NAME, STAGE_NAME) - 1;
 
-    int advanced = 0;
-    for (int i = 0; i < max_steps; i++) {
-        job_result_t r = utxo_apply_stage_step_once();
-        if (r != JOB_ADVANCED) break;
-        advanced++;
-    }
+    int advanced = utxo_apply_drain_steps(max_steps);
 
     bool committed = false;
     int64_t commit_us = 0;

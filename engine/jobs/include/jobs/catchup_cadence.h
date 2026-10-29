@@ -114,6 +114,14 @@ bool catchup_cadence_active_cached(void);
  * when active, returns ZCL_CATCHUP_DRAIN_BATCH (default 2000, clamped). */
 int catchup_cadence_drain_batch(int normal_batch);
 
+/* Optional elapsed limit, evaluated only between complete advancing steps.
+ * Uses the cached catch-up decision to avoid taking network locks under the
+ * progress-store lock. A zero budget leaves the drain unchanged. */
+struct catchup_drain_budget { int64_t start_us, limit_us; };
+struct catchup_drain_budget catchup_drain_budget_begin(void);
+bool catchup_drain_budget_due(const struct catchup_drain_budget *budget);
+
+
 /* Per-child supervisor tick period in microseconds. Returns 0 when inactive
  * (=> the caller uses its normal period_secs, unchanged); when active,
  * returns ZCL_CATCHUP_TICK_MS * 1000 (default 1000ms, clamped [1000,2000]).

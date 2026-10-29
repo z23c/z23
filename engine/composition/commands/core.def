@@ -1775,3 +1775,21 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_core_zdir_deregister)
+
+ZCL_COMMAND_READY_COMMAND(
+    "core.mining.regtest-mine", "core.mining", "",
+    "Mine bounded regtest blocks to an address",
+    "Plans or mines 1 to 101 blocks to a transparent regtest address. "
+    "Commit requires confirm:true and a node reporting regtest; the node "
+    "also enforces its mining and sovereignty guards. An interrupted commit "
+    "has an unknown outcome and must not be retried blindly.", 0,
+    "mining,regtest,blocks", "zcl.regtest_mine.input.v1",
+    "zcl.regtest_mine.v1", "address,blocks,confirm", "",
+    "z23 core mining regtest-mine --input='{\"address\":\"<regtest-address>\",\"blocks\":1}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_regtest_mine)

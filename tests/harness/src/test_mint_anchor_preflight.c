@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <sqlite3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -413,6 +414,38 @@ static int test_normal_preflight_live_verdicts(void)
 /* The case that makes the live read-only open unsafe without its guard: the
  * marker is committed only in the -wal (autocheckpoint off, connection still
  * open, so -wal and -shm both exist and the main file has not seen it). */
+static int map_alternate_temp_root(const char *dir, sqlite3 *db)
+{
+    int failures = 0;
+    bool verdict = true;
+    char temp_root[600];
+    const char *old = getenv("TMPDIR");
+    char *saved = old ? strdup(old) : NULL;
+    bool root_ready = (!old || saved) &&
+        test_mkdtemp(temp_root, sizeof(temp_root), "z23-preflight-test") != NULL;
+    MAP_CHECK("wal-only: alternate temporary root created", root_ready);
+    if (root_ready) {
+        MAP_CHECK("wal-only: alternate root selected", setenv("TMPDIR", temp_root, 1) == 0);
+        MAP_CHECK("wal-only: alternate root sees marker, source untouched",
+                  map_preflight_untouched(dir, &verdict) && !verdict);
+        MAP_CHECK("wal-only: remove producer marker", sqlite3_exec(db,
+            "DELETE FROM progress_meta WHERE key='" MINT_ANCHOR_IN_PROGRESS_KEY "'",
+            NULL, NULL, NULL) == SQLITE_OK);
+        MAP_CHECK("wal-only: ordinary WAL is allowed, source untouched",
+                  map_preflight_untouched(dir, &verdict) && verdict);
+        struct stat dir_stat;
+        bool have_path = dir[0] == '/' && stat(dir, &dir_stat) == 0 && S_ISDIR(dir_stat.st_mode);
+        MAP_CHECK("wal-only: datadir alias selected", have_path && setenv("TMPDIR", dir, 1) == 0);
+        MAP_CHECK("wal-only: datadir temporary-root alias refused, source untouched",
+                  have_path && map_preflight_untouched(dir, &verdict) && !verdict);
+        MAP_CHECK("wal-only: restore temporary environment",
+                  saved ? setenv("TMPDIR", saved, 1) == 0 : unsetenv("TMPDIR") == 0);
+        MAP_CHECK("wal-only: alternate root left empty", rmdir(temp_root) == 0);
+    }
+    free(saved);
+    return failures;
+}
+
 static int test_normal_preflight_marker_only_in_wal(void)
 {
     int failures = 0;
@@ -431,6 +464,7 @@ static int test_normal_preflight_marker_only_in_wal(void)
     MAP_CHECK("wal-only: -wal holds frames, main file does not have the marker", wal_state.exists && wal_state.st.st_size > 0);
     MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
               map_preflight_untouched(dir, &verdict) && !verdict);
+    failures += map_alternate_temp_root(dir, db);
     if (db)
         sqlite3_close(db);
     map_cleanup_dir(dir);

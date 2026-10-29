@@ -24,6 +24,56 @@
 #include "primitives/transaction.h"
 #include "wallet/wallet.h"
 #include "util/safe_alloc.h"
+#include "storage/progress_store.h"
+#include <pthread.h>
+
+#ifdef ZCL_TESTING
+bool boot_install_mempool_backend_guard(void);
+void boot_test_set_mempool_guard_attempt(void (*hook)(void));
+static pthread_mutex_t atm_guard_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t atm_guard_changed = PTHREAD_COND_INITIALIZER;
+static bool atm_guard_attempted, atm_guard_continue, atm_guard_probed, atm_guard_busy;
+static int atm_guard_calls;
+static int atm_guard_target;
+static void atm_note_guard_attempt(void)
+{
+    pthread_mutex_lock(&atm_guard_lock);
+    if (++atm_guard_calls != atm_guard_target) {
+        pthread_mutex_unlock(&atm_guard_lock);
+        return;
+    }
+    atm_guard_attempted = true;
+    pthread_cond_broadcast(&atm_guard_changed);
+    while (!atm_guard_continue)
+        pthread_cond_wait(&atm_guard_changed, &atm_guard_lock);
+    bool acquired = progress_store_tx_trylock();
+    if (acquired) progress_store_tx_unlock();
+    atm_guard_busy = !acquired;
+    atm_guard_probed = true;
+    pthread_cond_broadcast(&atm_guard_changed);
+    pthread_mutex_unlock(&atm_guard_lock);
+}
+struct atm_guard_job {
+    struct tx_mempool *pool;
+    struct coins_view_cache *coins;
+    struct main_state *state;
+    const struct chain_params *params;
+    struct transaction *tx;
+    enum mempool_accept_result result;
+    bool done;
+};
+static void *atm_guard_worker(void *opaque)
+{
+    struct atm_guard_job *job = opaque;
+    job->result = accept_to_mempool(job->pool, job->coins, job->state,
+                                    job->params, job->tx);
+    pthread_mutex_lock(&atm_guard_lock);
+    job->done = true;
+    pthread_cond_broadcast(&atm_guard_changed);
+    pthread_mutex_unlock(&atm_guard_lock);
+    return NULL;
+}
+#endif
 
 /* Stamp a P2PKH UTXO (scriptPubKey = DUP HASH160 <pkh> EQUALVERIFY
  * CHECKSIG) into the view at `txid`:0 with `value`. */
@@ -107,6 +157,84 @@ static void atm_sign_input(struct transaction *tx,
     tx->vin[0].script_sig = ss;
     transaction_compute_hash(tx);
 }
+
+#ifdef ZCL_TESTING
+static bool atm_guard_contend(struct atm_guard_job *job)
+{
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, atm_guard_worker, job) != 0) return false;
+    pthread_mutex_lock(&atm_guard_lock);
+    while (!atm_guard_attempted && !job->done)
+        pthread_cond_wait(&atm_guard_changed, &atm_guard_lock);
+    bool observed = atm_guard_attempted;
+    pthread_mutex_unlock(&atm_guard_lock);
+    if (!observed) { pthread_join(worker, NULL); return false; }
+    progress_store_tx_lock();
+    pthread_mutex_lock(&atm_guard_lock);
+    atm_guard_continue = true;
+    pthread_cond_broadcast(&atm_guard_changed);
+    while (!atm_guard_probed)
+        pthread_cond_wait(&atm_guard_changed, &atm_guard_lock);
+    bool blocked = atm_guard_busy && !job->done;
+    pthread_mutex_unlock(&atm_guard_lock);
+    bool main_available = zcl_mutex_trylock(&job->state->cs_main);
+    if (main_available) zcl_mutex_unlock(&job->state->cs_main);
+    progress_store_tx_unlock();
+    pthread_join(worker, NULL);
+    return blocked && main_available && job->result == MEMPOOL_ACCEPT_OK &&
+           tx_mempool_exists(job->pool, &job->tx->hash);
+}
+
+static bool atm_guard_case(int target, struct main_state *state,
+                           const struct chain_params *params,
+                           const struct key_id *kid, const struct script *spk,
+                           const struct privkey *key, const struct pubkey *pub,
+                           int64_t value)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+    struct coins_view null_view = {0};
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+    struct uint256 utxo;
+    memset(utxo.data, 0xD8, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, value, kid);
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    atm_sign_input(&tx, spk, value, key, pub, false);
+    struct atm_guard_job job = {
+        .pool = &pool, .coins = &coins, .state = state,
+        .params = params, .tx = &tx, .result = MEMPOOL_ACCEPT_INTERNAL_ERROR,
+    };
+    atm_guard_target = target;
+    atm_guard_attempted = atm_guard_continue = atm_guard_probed = atm_guard_busy = false;
+    atm_guard_calls = 0;
+    ok = ok && boot_install_mempool_backend_guard();
+    boot_test_set_mempool_guard_attempt(atm_note_guard_attempt);
+    if (ok) ok = atm_guard_contend(&job);
+    boot_test_set_mempool_guard_attempt(NULL);
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static int atm_guard_test(struct main_state *state,
+                          const struct chain_params *params,
+                          const struct key_id *kid, const struct script *spk,
+                          const struct privkey *key, const struct pubkey *pub,
+                          int64_t value)
+{
+    int failures = 0;
+    for (int target = 1; target <= 2; ++target) {
+        printf("accept_to_mempool: progress/main ordering guard %d... ", target);
+        if (atm_guard_case(target, state, params, kid, spk, key, pub, value))
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+#endif
 
 int test_accept_to_mempool(void)
 {
@@ -202,6 +330,14 @@ int test_accept_to_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    /* The real progress mutex must be acquired before the input-dependent
+     * cs_main section. Simulate the finalizer holding progress and needing
+     * cs_main while a valid transaction reaches the shared gate. */
+#ifdef ZCL_TESTING
+    failures += atm_guard_test(&main_state, params, &kid, &prev_spk,
+                               &key, &pub, utxo_value);
+#endif
 
     /* ================================================================
      * 3. Missing inputs → MISSING_INPUTS (orphan, not relayed).

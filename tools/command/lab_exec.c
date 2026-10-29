@@ -90,9 +90,16 @@ static bool lab_nr_kept(int nr, enum lab_profile profile)
     if (nr == SYS_clone3)
         return false;
 #endif
-    if (profile == LAB_PROFILE_COMPILE &&
-        (nr == SYS_fork || nr == SYS_vfork))
-        return false;
+    if (profile == LAB_PROFILE_COMPILE) {
+#ifdef SYS_fork
+        if (nr == SYS_fork)
+            return false;
+#endif
+#ifdef SYS_vfork
+        if (nr == SYS_vfork)
+            return false;
+#endif
+    }
     return true;
 }
 

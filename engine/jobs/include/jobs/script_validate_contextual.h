@@ -26,6 +26,7 @@ struct block;
  * the caller owns it on every verdict. */
 enum script_validate_ctx_verdict {
     SV_CTX_PASS,        /* gate closed or block passed — proceed to verify */
+    SV_CTX_WAIT_LOCK,   /* chain state busy — recoverable, JOB_IDLE */
     SV_CTX_WAIT_PARAMS, /* zk params still loading — recoverable, JOB_IDLE */
     SV_CTX_REJECTED,    /* ok=0 row written; advance cursor (JOB_ADVANCED) */
     SV_CTX_FATAL,       /* log insert failed — JOB_FATAL */

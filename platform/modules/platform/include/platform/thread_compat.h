@@ -2,7 +2,8 @@
  * Purpose: bounded pthread_join for shutdown paths (supervisor,
  * thread_registry, connman, gap_fill_service) that must not hang forever on
  * a stuck worker. Linux's pthread_timedjoin_np() and Win32's waitable thread
- * handles enforce the deadline directly. Darwin has neither API, so its arm
+ * handles enforce the deadline directly. Android polls Bionic's retained
+ * thread tid before joining. Darwin has neither API, so its arm
  * uses a short-lived join waiter: canceling a waiter blocked in pthread_join()
  * leaves the target joinable, preserving ownership for a later final drain. */
 
@@ -11,6 +12,26 @@
 
 #include <pthread.h>
 #include <time.h>
+
+#if defined(__ANDROID__)
+#include <errno.h>
+
+/* The caller owns a joinable thread and excludes concurrent join/detach.
+ * Bionic retains its thread record until join and the kernel clears its tid
+ * on exit. Only tid zero proves that pthread_join will not wait for exit.
+ * A positive tid can be recycled, so thread-directed signals are unsuitable. */
+static inline int platform_thread_tryjoin(pthread_t thread, void **result)
+{
+    if (pthread_equal(thread, pthread_self()))
+        return EDEADLK;
+    pid_t tid = pthread_gettid_np(thread);
+    if (tid < 0)
+        return ESRCH;
+    if (tid != 0)
+        return EBUSY;
+    return pthread_join(thread, result);
+}
+#endif
 
 #if defined(__APPLE__)
 #include <errno.h>
@@ -107,6 +128,26 @@ static inline int platform_thread_join_until(pthread_t thread,
     if (wait_result != WAIT_OBJECT_0)
         return EINVAL;
     return pthread_join(thread, result);
+#elif defined(__ANDROID__)
+    if (!deadline || deadline->tv_nsec < 0 || deadline->tv_nsec >= 1000000000L)
+        return EINVAL;
+    for (;;) {
+        int rc = platform_thread_tryjoin(thread, result);
+        if (rc != EBUSY)
+            return rc;
+        struct timespec now;
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0)
+            return errno;
+        if (now.tv_sec > deadline->tv_sec ||
+            (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec))
+            return ETIMEDOUT;
+        struct timespec delay = { .tv_sec = 0, .tv_nsec = 1000000L };
+        if (now.tv_sec == deadline->tv_sec &&
+            deadline->tv_nsec - now.tv_nsec < delay.tv_nsec)
+            delay.tv_nsec = deadline->tv_nsec - now.tv_nsec;
+        if (nanosleep(&delay, NULL) != 0 && errno != EINTR)
+            return errno;
+    }
 #elif defined(__linux__)
     return pthread_timedjoin_np(thread, result, deadline);
 #elif defined(__APPLE__)

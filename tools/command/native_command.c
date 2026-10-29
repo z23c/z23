@@ -709,9 +709,114 @@ static bool nc_rpc_body_has_error(const struct json_value *body,
            (ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR);
 }
 
+static void nc_mine_fail(struct zcl_command_reply *reply, const char *code,
+                         const char *message, bool mutated)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, code, "dispatch", false,
+                           mutated, message, "core.mining.regtest-mine");
+}
+
+static bool nc_mine_regtest_node(struct zcl_command_reply *reply)
+{
+    struct json_value body;
+    json_init(&body);
+    if (!nc_rpc_fetch_object("getblockchaininfo", NULL, "getblockchaininfo",
+                             "node unavailable", "INVALID_CHAIN_RESPONSE",
+                             "invalid chain response", reply, &body))
+        return false;
+    const char *chain = json_get_str(json_get(&body, "chain"));
+    bool valid = chain && strcmp(chain, "regtest") == 0;
+    json_free(&body);
+    if (!valid)
+        nc_mine_fail(reply, "REGTEST_REQUIRED", "node is not regtest", false);
+    return valid;
+}
+
+static bool nc_mine_params(int64_t blocks, const char *address,
+                           char *out, size_t cap)
+{
+    struct json_value arr, item;
+    json_init(&arr); json_set_array(&arr);
+    json_init(&item); json_set_int(&item, blocks);
+    bool ok = json_push_back(&arr, &item);
+    json_free(&item); json_init(&item); json_set_str(&item, address);
+    ok = ok && json_push_back(&arr, &item);
+    size_t n = ok ? json_write(&arr, out, cap) : 0;
+    json_free(&item); json_free(&arr);
+    return n > 0 && n < cap;
+}
+
+static bool nc_mine_hashes(const struct json_value *result, int64_t blocks)
+{
+    if (result->type != JSON_ARR || result->num_children != (size_t)blocks)
+        return false;
+    for (size_t i = 0; i < result->num_children; i++) {
+        const char *hash = json_get_str(&result->children[i]);
+        if (!hash || strlen(hash) != 64)
+            return false;
+        for (size_t j = 0; j < 64; j++)
+            if (!isxdigit((unsigned char)hash[j])) return false;
+    }
+    return true;
+}
+
+static bool nc_mine_input(const struct json_value *input, const char **address,
+                          int64_t *blocks, bool *confirm)
+{
+    const struct json_value *n = json_get(input, "blocks");
+    const struct json_value *a = json_get(input, "address");
+    const struct json_value *c = json_get(input, "confirm");
+    *address = a && a->type == JSON_STR ? json_get_str(a) : NULL;
+    *blocks = n && n->type == JSON_INT ? json_get_int(n) : 0;
+    *confirm = c && c->type == JSON_BOOL && json_get_bool(c);
+    return *address && (*address)[0] && strlen(*address) <= 128 &&
+           *blocks >= 1 && *blocks <= 101 && (!c || c->type == JSON_BOOL);
+}
+
+void zcl_native_handle_regtest_mine(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply)
+{
+    const char *address;
+    int64_t blocks;
+    bool confirm;
+    if (!nc_mine_input(request->input, &address, &blocks, &confirm)) {
+        nc_mine_fail(reply, "INVALID_INPUT", "address and 1 to 101 blocks required", false);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "address", address);
+    (void)json_push_kv_int(&reply->data, "blocks", blocks);
+    if (!confirm) {
+        (void)json_push_kv_str(&reply->data, "stage", "plan");
+        return;
+    }
+    if (!nc_mine_regtest_node(reply)) return;
+    char params[512];
+    if (!nc_mine_params(blocks, address, params, sizeof(params))) {
+        nc_mine_fail(reply, "INVALID_INPUT", "could not encode mining request", false);
+        return;
+    }
+    char *raw = node_rpc_call("generatetoaddress", params);
+    struct json_value result; json_init(&result);
+    bool ok = raw && json_read(&result, raw, strlen(raw)) &&
+              nc_mine_hashes(&result, blocks);
+    free(raw);
+    if (!ok) {
+        json_free(&result);
+        nc_mine_fail(reply, "MINING_OUTCOME_UNKNOWN",
+                     "mining outcome unknown; inspect chain before retry", true);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "stage", "committed");
+    (void)json_push_kv(&reply->data, "block_hashes", &result);
+    reply->error.mutated = true;
+    json_free(&result);
+}
+
 /* ── ops.state / ops.selftest native leaves ──────────────────────────────
  * ops.state calls the `dumpstate` RPC method directly, while ops.selftest is
  * a node-free, deterministic well-formedness sweep of the registry. */
+
 /* dumpstate params: [subsystem] or [subsystem, key]. Build via JSON so the
  * subsystem/key strings are correctly escaped, never printf-spliced. */
 static bool nc_ops_state_build_params(const char *sub, const char *key,

@@ -5,6 +5,7 @@
  */
 
 #include "jobs/catchup_cadence.h"
+#include "platform/time_compat.h"
 #include "jobs/tip_finalize_stage.h"  /* tip_finalize_stage_cursor (lock-free) */
 #include "net/connman.h"              /* connman_max_peer_height, connman_get_node_count */
 #include "services/sync_monitor.h"    /* sync_monitor_connman */
@@ -157,6 +158,27 @@ int catchup_cadence_drain_batch(int normal_batch)
                                 1, 1000000);
     catchup_log_once(batch, catchup_cadence_tick_period_us());
     return batch;
+}
+
+struct catchup_drain_budget catchup_drain_budget_begin(void)
+{
+    struct catchup_drain_budget budget = {0};
+    const char *value = getenv("ZCL_CATCHUP_DRAIN_BUDGET_MS");
+    if (!catchup_cadence_active_cached() || !value || !value[0]) return budget;
+    char *end = NULL;
+    long ms = strtol(value, &end, 10);
+    if (!end || *end || ms < 1 || ms > 60000) return budget;
+    budget.limit_us = (int64_t)ms * 1000;
+    budget.start_us = platform_time_monotonic_us();
+    return budget;
+}
+
+bool catchup_drain_budget_due(const struct catchup_drain_budget *budget)
+{
+    if (!budget || !budget->limit_us) return false;
+    int64_t now = platform_time_monotonic_us();
+    return budget->start_us <= 0 || now <= 0 || now < budget->start_us ||
+           now - budget->start_us >= budget->limit_us;
 }
 
 int64_t catchup_cadence_tick_period_us(void)

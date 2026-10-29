@@ -63,6 +63,32 @@ LIBEVENT_PATCH="$VENDOR/patches/libevent-2.1.12-secure-rng-abi.patch"
 # unless VENDOR_TARGET is set — the same provenance descriptors, so no
 # existing stamp is invalidated by this capability existing.
 VENDOR_TARGET="${VENDOR_TARGET:-}"
+VENDOR_ANDROID_API=""
+VENDOR_CONFIG_HOST="$VENDOR_TARGET"
+case "$VENDOR_TARGET" in
+    aarch64-linux-android*)
+        VENDOR_ANDROID_API="${VENDOR_TARGET#aarch64-linux-android}"
+        case "$VENDOR_ANDROID_API" in
+            ""|*[!0-9]*|0*) echo "Android target requires a decimal API level" >&2; exit 1 ;;
+        esac
+        [[ ${#VENDOR_ANDROID_API} -le 2 && "$VENDOR_ANDROID_API" -ge 21 ]] ||
+            { echo "Android ARM64 API level must be 21..99" >&2; exit 1; }
+        ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}"
+        [[ -f "$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" ]] ||
+            { echo "ANDROID_NDK_ROOT must name an installed Android NDK" >&2; exit 1; }
+        export ANDROID_NDK_ROOT
+        VENDOR_CC="${VENDOR_CC:-$VENDOR_TARGET-clang}"
+        VENDOR_AR="${VENDOR_AR:-llvm-ar}"
+        VENDOR_RANLIB="${VENDOR_RANLIB:-llvm-ranlib}"
+        VENDOR_CONFIG_HOST=aarch64-linux-android
+        if ! printf '#if !defined(__ANDROID__) || !defined(__aarch64__) || !defined(__ANDROID_API__) || __ANDROID_API__ != %s\n#error Android compiler target mismatch\n#endif\n' "$VENDOR_ANDROID_API" |
+            "$VENDOR_CC" -E -x c - >/dev/null; then
+            echo "Android compiler must target ARM64 API $VENDOR_ANDROID_API: $VENDOR_CC" >&2
+            exit 1
+        fi
+
+        ;;
+esac
 if [[ -n "$VENDOR_TARGET" ]]; then
     case "$VENDOR_TARGET" in
         *[!A-Za-z0-9_.-]*|"")
@@ -184,6 +210,7 @@ vendor_target_os() {
     case "$VENDOR_CC_MACHINE" in
         *mingw*|*cygwin*|*windows*) printf 'windows'; return ;;
         *darwin*|*apple*) printf 'darwin'; return ;;
+        *android*) printf 'android'; return ;;
         ?*) printf 'posix'; return ;;
     esac
     # -dumpmachine failed (it is allowed to: see vendor_cc_machine). Fall back
@@ -219,6 +246,7 @@ if [[ "$VENDOR_TARGET_OS" == windows ]]; then
     esac
 elif [[ -n "$VENDOR_TARGET" ]]; then
     case "$VENDOR_TARGET_OS:$VENDOR_CC_MACHINE" in
+        android:aarch64-*) OPENSSL_CONFIG_TARGET="android-arm64" ;;
         darwin:x86_64-*) OPENSSL_CONFIG_TARGET="darwin64-x86_64-cc" ;;
         darwin:arm64-*|darwin:aarch64-*) OPENSSL_CONFIG_TARGET="darwin64-arm64-cc" ;;
         *)
@@ -251,7 +279,7 @@ VENDOR_C_STD="$(vendor_c_std)"
 # Every cross builder below takes the same autotools/cmake host argument; the
 # host build passes none, so its command lines are byte-identical to before.
 VENDOR_CROSS_HOST_ARGS=()
-[[ -n "$VENDOR_TARGET" ]] && VENDOR_CROSS_HOST_ARGS=(--host="$VENDOR_TARGET")
+[[ -n "$VENDOR_TARGET" ]] && VENDOR_CROSS_HOST_ARGS=(--host="$VENDOR_CONFIG_HOST")
 VENDOR_RANLIB="${VENDOR_RANLIB:-$(if [[ -n "$VENDOR_TARGET" ]]; then printf '%s' "$VENDOR_TARGET-ranlib"; else printf 'ranlib'; fi)}"
 
 # libevent's configure decides whether to build libevent_openssl.a by LINKING
@@ -445,7 +473,7 @@ archive_group() {
         libcrypto.a|libssl.a) printf 'openssl' ;;
         libevent.a|libevent_openssl.a|libevent_pthreads.a) printf 'libevent' ;;
         libleveldb.a) printf 'leveldb' ;;
-        libsecp256k1-darwin.a|libsecp256k1-windows.a) printf 'secp_native' ;;
+        libsecp256k1-darwin.a|libsecp256k1-windows.a|libsecp256k1-android.a) printf 'secp_native' ;;
         *) return 1 ;;
     esac
 }
@@ -512,6 +540,11 @@ recipe_flags() {
     fi
     if [[ "$group" == openssl && -n "$OPENSSL_CONFIG_TARGET" ]]; then
         printf '; config_target=%s' "$OPENSSL_CONFIG_TARGET"
+    fi
+    if [[ -n "$VENDOR_ANDROID_API" ]]; then
+        printf '; android_api=%s; ndk=%s; cmake_toolchain=%s' "$VENDOR_ANDROID_API" \
+            "$(vp_sha256_file "$ANDROID_NDK_ROOT/source.properties")" \
+            "$(vp_sha256_file "$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake")"
     fi
     if [[ "$VENDOR_TARGET_OS" == darwin ]]; then
         printf '; macosx_deployment_target=%s' "$MACOSX_DEPLOYMENT_TARGET"
@@ -827,7 +860,7 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     # shellcheck disable=SC2086
     ( cd "$d" \
         && export CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
-        && ./Configure $OPENSSL_CONFIG_TARGET no-shared no-tests \
+        && ./Configure $OPENSSL_CONFIG_TARGET ${VENDOR_ANDROID_API:+-D__ANDROID_API__=$VENDOR_ANDROID_API} no-shared no-tests \
              --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib >/dev/null \
         && make -j"$JOBS" build_libs >/dev/null 2>&1 )
     # OpenSSL also records the literal compiler command in its version data.
@@ -1111,7 +1144,8 @@ build_secp_native() {
     case "$VENDOR_TARGET_OS" in
         darwin) archive=libsecp256k1-darwin.a ;;
         windows) archive=libsecp256k1-windows.a ;;
-        *) die "native libsecp256k1 archive requires Darwin or Windows" ;;
+        android) archive=libsecp256k1-android.a ;;
+        *) die "native libsecp256k1 archive requires Darwin, Windows or Android" ;;
     esac
     have "$archive" && {
         say "skip    $archive (provenance current)"; return;
@@ -1130,14 +1164,17 @@ build_secp_native() {
     local -a secp_cross=()
     if [[ -n "$VENDOR_TARGET" ]]; then
         case "$VENDOR_TARGET_OS" in
+            android) secp_cross=(-DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake"
+                -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM="android-$VENDOR_ANDROID_API") ;;
             windows) secp_cross=(-DCMAKE_SYSTEM_NAME=Windows) ;;
             darwin) secp_cross=(-DCMAKE_SYSTEM_NAME=Darwin) ;;
         esac
-        secp_cross+=(-DCMAKE_RANLIB="$VENDOR_RANLIB")
+        secp_cross+=(-DCMAKE_RANLIB="$(command -v "$VENDOR_RANLIB")")
     fi
     cmake -S "$d" -B "$WORK/secp-native-build" \
         ${secp_cross[@]+"${secp_cross[@]}"} \
-        -DCMAKE_C_COMPILER="$VENDOR_CC" -DCMAKE_AR="$VENDOR_AR" \
+        -DCMAKE_C_COMPILER="$(command -v "$VENDOR_CC")" \
+        -DCMAKE_AR="$(command -v "$VENDOR_AR")" \
         -DBUILD_SHARED_LIBS=OFF \
         -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
         -DSECP256K1_ENABLE_MODULE_ECDH=ON \
@@ -1166,6 +1203,7 @@ fi
 if [ -n "$VENDOR_CC_MACHINE" ] && [ "$VENDOR_CC_MACHINE" != "$(vendor_cc_machine cc)" ]; then
     case "$(basename "$VENDOR_AR")" in
         "$VENDOR_CC_MACHINE"-*) ;;
+        llvm-ar) [[ "$VENDOR_TARGET_OS" == android ]] || die "llvm-ar cross exception requires Android" ;;
         *) die "VENDOR_CC targets $VENDOR_CC_MACHINE but VENDOR_AR is \
 '$VENDOR_AR' -- pass the matching ${VENDOR_CC_MACHINE}-ar" ;;
     esac
@@ -1179,6 +1217,7 @@ REQUIRED=(libsecp256k1.a libcrypto.a libssl.a libevent.a libevent_openssl.a
 case "$VENDOR_TARGET_OS" in
     darwin) REQUIRED+=(libsecp256k1-darwin.a) ;;
     windows) REQUIRED+=(libsecp256k1-windows.a) ;;
+    android) REQUIRED+=(libsecp256k1-android.a) ;;
 esac
 # Two archives leave the cross set, neither by relaxing anything:
 #   libsecp256k1.a  — the ONE committed archive, an ELF for this host. A cross
@@ -1240,7 +1279,7 @@ ALL=(build_tor_stub build_zlib build_sqlite build_openssl build_libevent build_l
 # Darwin and Windows both need secp built here; Linux takes the pinned
 # archive. One condition, because both arms appended the same builder.
 case "$VENDOR_TARGET_OS" in
-    darwin|windows) ALL+=(build_secp_native) ;;
+    darwin|windows|android) ALL+=(build_secp_native) ;;
 esac
 # LevelDB leaves the cross build for the reason given at REQUIRED above: the
 # shipped node does not link it, so a cross tree neither builds it nor needs a
@@ -1264,6 +1303,7 @@ declare -A BUILDER=(
     [libleveldb.a]=build_leveldb
     [libsecp256k1-darwin.a]=build_secp_native
     [libsecp256k1-windows.a]=build_secp_native
+    [libsecp256k1-android.a]=build_secp_native
 )
 
 if [[ $# -gt 0 ]]; then

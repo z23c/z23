@@ -57,6 +57,9 @@ int zcl_native_command_main(const char *root_word,
                             enum chain_network network,
                             bool datadir_explicit);
 
+void zcl_native_handle_regtest_mine(const struct zcl_command_request *request,
+                                    struct zcl_command_reply *reply);
+
 /* Actual standalone entry owns signal scope; callable registry/legacy entry
  * never infer ownership. end must also handle a partially failed begin.
  * Runtime storage outlives dispatch; scope restoration precedes output. */

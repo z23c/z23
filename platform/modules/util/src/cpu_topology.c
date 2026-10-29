@@ -37,6 +37,7 @@
 
 
 #include <limits.h>
+#include <errno.h>
 #include <pthread.h>
 #include <limits.h>
 #if !defined(_WIN32)
@@ -758,10 +759,19 @@ bool cpu_topology_pin_thread(pthread_t thread, int domain)
         if (c >= 0 && c < CPU_SETSIZE) CPU_SET(c, &set);
     }
 
+#if defined(__ANDROID__)
+    /* Bionic has no pthread affinity setter. A foreign thread's kernel tid
+     * can be recycled between lookup and placement even while its pthread
+     * handle remains joinable. Only self-placement avoids that race. */
+    int rc = pthread_equal(thread, pthread_self()) ? 0 : ENOTSUP;
+    if (rc == 0 && sched_setaffinity(0, sizeof(set), &set) != 0)
+        rc = errno;
+#else
     int rc = pthread_setaffinity_np(thread, sizeof(set), &set);
+#endif
     if (rc != 0) {
         LOG_FAIL("cpu_topology",
-                 "pin_thread: pthread_setaffinity_np failed for domain %d: "
+                 "pin_thread: setting thread affinity failed for domain %d: "
                  "errno=%d (%s)", domain, rc, strerror(rc));
     }
     return true;

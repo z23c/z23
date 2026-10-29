@@ -677,12 +677,23 @@ static void header_admit_stage_lock_main(struct main_state *ms)
     zcl_mutex_lock(&ms->cs_main);
 }
 
+/* Never wait for progress-store while holding main: another stage can
+ * hold progress-store while waiting for main. The caller retries on idle. */
+static bool header_admit_lock_pair(struct main_state *ms)
+{
+    header_admit_stage_lock_main(ms);
+    if (progress_store_tx_trylock()) return true;
+    zcl_mutex_unlock(&ms->cs_main);
+    return false;
+}
+
 job_result_t header_admit_stage_step_once(void)
 {
     struct main_state *ms = g_ms;
     if (!ms || !g_stage) return JOB_IDLE;
-    header_admit_stage_lock_main(ms);
+    if (!header_admit_lock_pair(ms)) return JOB_IDLE;
     job_result_t result = header_admit_owned_stage_step_once();
+    progress_store_tx_unlock();
     zcl_mutex_unlock(&ms->cs_main);
     return result;
 }
@@ -697,8 +708,9 @@ int header_admit_stage_drain(int max_steps)
 {
     struct main_state *ms = g_ms;
     if (max_steps <= 0 || !ms || !g_stage) return 0;
-    header_admit_stage_lock_main(ms);
+    if (!header_admit_lock_pair(ms)) return 0;
     int advanced = header_admit_owned_stage_drain(max_steps);
+    progress_store_tx_unlock();
     zcl_mutex_unlock(&ms->cs_main);
     return advanced;
 }

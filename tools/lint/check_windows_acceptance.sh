@@ -107,6 +107,8 @@ exempt_table() {
 platform/modules/platform/tests/test_platform.c	Not an acceptance program: it is the zclassic23/platform zcode package's own standalone test, shipped in the files list of platform/modules/platform/zcode-package.json. It carries its own AGENT_IMPACT_RULE in cognition/controllers/include/controllers/agent_impact_rules.def, which names the dev_platform and os_proc groups. Cross-linking it for Windows would say nothing the package pipeline does not already own.
 platform/modules/base/tests/test_base.c	Not an acceptance program: it is the zclassic23/base zcode package's own test binary. The Makefile builds and runs it as $(ZCODE_PACKAGE_BASE_TEST_BIN) and again under ASan as $(ZCODE_PACKAGE_BASE_ASAN_BIN), so it is executed natively on every run of those targets -- stronger evidence than a cross-link.
 platform/modules/base/tests/cleanse_probe.c	Not a program at all: it defines package_base_cleanse_probe() and no main(). It exists as a separate translation unit so memory_cleanse() cannot be optimised away, and it is compiled into both zcode base test binaries above.
+platform/modules/platform/tests/cpu_affinity_android_acceptance.c	Android Bionic-only affinity acceptance program: make ZCL_TARGET=android-arm64 android-acceptance cross-links it; android-acceptance-device executes it on the connected Android device. Its Bionic pthread API cannot be graded by a Windows cross-link.
+platform/modules/platform/tests/thread_join_android_acceptance.c	Android Bionic-only thread-join acceptance program: make ZCL_TARGET=android-arm64 android-acceptance cross-links it; android-acceptance-device executes it on the connected Android device. Its Bionic pthread API cannot be graded by a Windows cross-link.
 EXEMPT_EOF
 }
 

@@ -123,10 +123,17 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
      * ContextualCheckTransaction IBD short-circuit (per-tx rules only;
      * finality + BIP34 always run — see contextual_check_block). */
     const struct chain_params *cp = chain_params_get();
-    if (script_validate_ctx_gate_closed(ms, cp, bi, next_h))
+    /* The stage holds progress-store. Do not wait for cs_main: a main-first
+     * reader may be waiting for that store. Retrying preserves every check. */
+    if (!zcl_mutex_trylock(&ms->cs_main))
+        return SV_CTX_WAIT_LOCK;
+    if (script_validate_ctx_gate_closed(ms, cp, bi, next_h)) {
+        zcl_mutex_unlock(&ms->cs_main);
         return SV_CTX_PASS;
+    }
 
     bool is_ibd = is_initial_block_download(ms);
+    zcl_mutex_unlock(&ms->cs_main);
     /* The !is_ibd branch of contextual_check_block runs FULL shielded
      * verification, which is fail-closed when the zk params are absent
      * (they load in a background boot thread, and boot merely warns on

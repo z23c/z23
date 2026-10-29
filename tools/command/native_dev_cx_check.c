@@ -16,6 +16,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -114,13 +115,14 @@ static const char *ck_worktree(struct cx_check *ck, const char *wt_in)
 {
     char top[ZCL_CX_PATH_MAX], real_top[PATH_MAX];
     const char *argv[] = {"git", "rev-parse", "--show-toplevel", NULL};
-    if (!realpath(wt_in, ck->wt) ||
+    if (!platform_directory_canonical_real(wt_in, ck->wt, sizeof(ck->wt)) ||
         cx_run(ck->wt, argv, top, sizeof(top), 30000, false) != 0) {
         (void)snprintf(ck->detail, sizeof(ck->detail), "%s", wt_in);
         return "CX_BAD_WORKTREE";
     }
     top[strcspn(top, "\r\n")] = '\0';
-    if (!realpath(top, real_top) || strcmp(real_top, ck->wt) != 0) {
+    if (!platform_directory_canonical_real(top, real_top, sizeof(real_top)) ||
+        strcmp(real_top, ck->wt) != 0) {
         (void)snprintf(ck->detail, sizeof(ck->detail),
                        "not the top of a git worktree: %s", ck->wt);
         return "CX_BAD_WORKTREE";

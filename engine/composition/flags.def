@@ -290,6 +290,8 @@ Z23_FLAG("ZCL_BYTE_ORDER_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_byte_order_codec_single_report.c:auto")
 Z23_FLAG("ZCL_C23_MAX_GLIBC", "env_build", "GLIBC_2.38", "-",
           "undocumented; first use tools/scripts/check_c23_node_binary.sh:auto")
+Z23_FLAG("ZCL_CATCHUP_DRAIN_BUDGET_MS", "env_runtime", "unset", "-",
+          "Optional 1..60000 ms catch-up drain budget; yields between completed steps, not a hard deadline")
 Z23_FLAG("ZCL_CATCHUP_FSYNC_COMMIT_INTERVAL", "env_runtime", "8", "-",
           "undocumented; first use engine/reducer/services/src/reducer_body_fsync.c:auto")
 Z23_FLAG("ZCL_C3_ARTIFACT_ROOT", "env_build", "-", "-",

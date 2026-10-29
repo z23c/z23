@@ -996,6 +996,21 @@ static bool ckv_authority_unmet(char *reason, size_t reason_cap,
     return false;
 }
 
+static bool ckv_authority_nonempty(sqlite3 *db)
+{
+    if (coins_kv_overlay_safe())
+        return coins_ram_count() > 0;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM coins LIMIT 1", -1,
+                           &stmt, NULL) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    bool nonempty = sqlite3_step(stmt) == SQLITE_ROW; // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(stmt);
+    return nonempty;
+}
+
 bool coins_kv_proven_authority_reason(sqlite3 *db, int32_t *out_applied,
                                       char *reason, size_t reason_cap)
 {
@@ -1031,7 +1046,7 @@ bool coins_kv_proven_authority_reason(sqlite3 *db, int32_t *out_applied,
                                    "coins_kv_migration_marker_absent");
 
     /* (3) the set is non-empty. */
-    if (coins_kv_count(db) <= 0)
+    if (!ckv_authority_nonempty(db))
         return ckv_authority_unmet(reason, reason_cap, "coins_kv_empty");
 
     if (out_applied) *out_applied = applied;

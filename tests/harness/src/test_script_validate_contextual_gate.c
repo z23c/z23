@@ -49,6 +49,7 @@
 #include "validation/main_state.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -417,6 +418,7 @@ static int cg_setup(const char *tag, char *dir_out, size_t dir_out_size,
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));
+    zcl_mutex_init(&ms->cs_main);
     active_chain_init(&ms->chain_active);
     if (!cg_chain_build(sc, CG_CHAIN_LEN)) return 2;
     return 0;
@@ -441,6 +443,7 @@ static void cg_teardown(const char *dir, struct main_state *ms,
     script_validate_stage_shutdown();
     cg_seed_tip(-1, NULL);  /* never leak a finalized tip to later tests */
     active_chain_free(&ms->chain_active);
+    zcl_mutex_destroy(&ms->cs_main);
     cg_chain_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -502,6 +505,52 @@ static bool cg_rejected_with_reason(bool ok, const char *reject_reason,
     return !ok && strcmp(reject_reason, want) == 0;
 }
 
+struct cg_main_holder {
+    struct main_state *ms;
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    bool held, release;
+};
+
+static void *cg_hold_main(void *arg)
+{
+    struct cg_main_holder *h = arg;
+    zcl_mutex_lock(&h->ms->cs_main);
+    pthread_mutex_lock(&h->mutex);
+    h->held = true;
+    pthread_cond_broadcast(&h->changed);
+    while (!h->release) pthread_cond_wait(&h->changed, &h->mutex);
+    pthread_mutex_unlock(&h->mutex);
+    zcl_mutex_unlock(&h->ms->cs_main);
+    return NULL;
+}
+
+static bool cg_contention_retries(struct main_state *ms, struct cg_chain *sc)
+{
+    struct cg_main_holder h = {.ms = ms, .mutex = PTHREAD_MUTEX_INITIALIZER,
+                               .changed = PTHREAD_COND_INITIALIZER};
+    pthread_t worker;
+    if (pthread_create(&worker, NULL, cg_hold_main, &h)) return false;
+    pthread_mutex_lock(&h.mutex);
+    while (!h.held) pthread_cond_wait(&h.changed, &h.mutex);
+    pthread_mutex_unlock(&h.mutex);
+    int advance = script_validate_stage_drain(100);
+    int ok = -1; char status[64];
+    bool absent = !cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status, sizeof(status));
+    pthread_mutex_lock(&h.mutex);
+    h.release = true;
+    pthread_cond_broadcast(&h.changed);
+    pthread_mutex_unlock(&h.mutex);
+    pthread_join(worker, NULL);
+    pthread_cond_destroy(&h.changed);
+    pthread_mutex_destroy(&h.mutex);
+    int after = script_validate_stage_drain(100);
+    bool row = cg_log_row_at(progress_store_db(), CG_GATE_H, &ok, status, sizeof(status));
+    (void)sc;
+    return advance == 0 && absent && after == CG_CHAIN_LEN && row &&
+           cg_row_rejected_as(ok, status, "bad-cb-height");
+}
+
 int test_script_validate_contextual_gate(void);
 int test_script_validate_contextual_gate(void)
 {
@@ -509,6 +558,16 @@ int test_script_validate_contextual_gate(void)
     int failures = 0;
 
     blocker_module_init();
+
+    {
+        char dir[256]; struct main_state ms; struct cg_chain sc;
+        CG_CHECK("contention: setup", cg_setup("contention", dir, sizeof(dir), &ms, &sc) == 0);
+        CG_CHECK("contention: corrupt cb height", cg_corrupt_cb_height(&sc, CG_GATE_H));
+        CG_CHECK("contention: arm", cg_arm(&ms, &sc) == 0);
+        cg_seed_tip(CG_CHAIN_LEN - 1, &sc.hashes[CG_CHAIN_LEN - 1]);
+        CG_CHECK("contention: idle then retry preserves contextual rejection", cg_contention_retries(&ms, &sc));
+        cg_teardown(dir, &ms, &sc);
+    }
 
     /* (1) CORRECTION-1 pin: unseeded finalized tip (tip_h == -1) keeps
      * the gate CLOSED — a BIP34-violating block at a gate-eligible

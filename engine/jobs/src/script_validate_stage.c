@@ -550,6 +550,7 @@ static int sv_step_contextual_gate(struct stage_step_ctx *c, sqlite3 *db,
                                   (uint64_t)(platform_time_monotonic_us() -
                                              phase_started));
         return 0;
+    case SV_CTX_WAIT_LOCK:
     case SV_CTX_WAIT_PARAMS:
         sv_release_stage_block(handle, owned, borrowed);
         atomic_store(&g_last_blocked_unix, platform_time_wall_unix());

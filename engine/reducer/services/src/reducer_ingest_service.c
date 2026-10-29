@@ -24,6 +24,7 @@
 #include "validation/chainstate.h"
 #include "event/event.h"
 #include "core/utiltime.h"
+#include "platform/time_compat.h"
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -412,6 +413,13 @@ static _Atomic uint64_t g_catchup_known_header_bypass_total;
 #ifdef ZCL_TESTING
 static void (*g_context_main_hook)(void *);
 static void *g_context_main_hook_ctx;
+static void (*g_context_retry_hook)(void *);
+static void *g_context_retry_hook_ctx;
+void reducer_ingest_set_context_retry_hook_for_testing(void (*hook)(void *), void *ctx)
+{
+    g_context_retry_hook = hook;
+    g_context_retry_hook_ctx = ctx;
+}
 void reducer_ingest_set_context_main_hook_for_testing(
     void (*hook)(void *), void *ctx);
 void reducer_ingest_set_context_main_hook_for_testing(
@@ -431,14 +439,22 @@ static void reducer_context_lock_main(struct main_state *ms)
     zcl_mutex_lock(&ms->cs_main);
 }
 
-/* Context is read under cs_main then progress-store, before ctl->mutex/drain.
- * Missing parents keep the existing staging/drain path and are rechecked there. */
+/* Context is read under cs_main and progress-store before ctl->mutex/drain.
+ * Release cs_main on contention: stage steps hold progress-store and may need
+ * cs_main. Missing parents are rechecked by the staging/drain path. */
 static bool reducer_gate_header_context(struct chain_activation_controller *ctl,
     struct block *block, struct validation_state *out)
 {
     bool parent_known = false;
-    reducer_context_lock_main(ctl->ms);
-    progress_store_tx_lock();
+    for (;;) {
+        reducer_context_lock_main(ctl->ms);
+        if (progress_store_tx_trylock()) break;
+        zcl_mutex_unlock(&ctl->ms->cs_main);
+#ifdef ZCL_TESTING
+        if (g_context_retry_hook) g_context_retry_hook(g_context_retry_hook_ctx);
+#endif
+        platform_sleep_ms(1);
+    }
     bool ok = header_admit_check_contextual_locked(ctl->ms, ctl->params,
         &block->header, out, &parent_known);
     progress_store_tx_unlock();

@@ -8,6 +8,7 @@
 #include "chain/checkpoints.h"
 #include "event/event.h"
 #include "platform/system_memory.h"
+#include "platform/temp_directory.h"
 #include "services/disk_monitor.h"
 #include "storage/consensus_db.h" /* consensus_db_kernel_store_path + names */
 #include "util/ar_step_readonly.h"
@@ -486,9 +487,11 @@ static void preflight_kernel_basename(const char *datadir, char *out, size_t cap
 }
 
 static bool datadir_is_not_tmp(int dirfd) {
+    const char *base = getenv("TMPDIR");
+    if (!base || base[0] != '/') base = "/tmp";
     struct stat datadir_identity;
     struct stat tmp_identity;
-    if (fstat(dirfd, &datadir_identity) != 0 || stat("/tmp", &tmp_identity) != 0 ||
+    if (fstat(dirfd, &datadir_identity) != 0 || stat(base, &tmp_identity) != 0 ||
         (datadir_identity.st_dev == tmp_identity.st_dev && datadir_identity.st_ino == tmp_identity.st_ino)) {
         LOG_WARN(PREFLIGHT_SUBSYS, "preflight disposable root cannot be the node datadir");
         return false;
@@ -496,7 +499,7 @@ static bool datadir_is_not_tmp(int dirfd) {
     return true;
 }
 
-/* Copy path: snapshot the whole family into a private /tmp directory, inspect
+/* Copy path: snapshot the whole family into a private temporary directory, inspect
  * the copy, and delete it. Used whenever the WAL holds frames, because only a
  * WAL-aware open can see committed state that has not been checkpointed. */
 static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbase, struct preflight_source_file files[3],
@@ -515,9 +518,9 @@ static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbas
 }
 
 static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason, size_t reason_size) {
-    char temp_dir[] = "/tmp/zcl-preflight-XXXXXX";
+    char temp_dir[PLATFORM_TEMP_PATH_MAX] = {0};
     char main_copy[2304] = {0};
-    bool ok = mkdtemp(temp_dir) != NULL;
+    bool ok = platform_temp_directory_create("zcl-preflight-", temp_dir, sizeof(temp_dir));
     if (ok)
         ok = copy_family_stable(dirfd, temp_dir, kbase, files, main_copy);
     if (ok)

@@ -19,6 +19,9 @@
 #include <sys/uio.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if defined(__ANDROID__) && defined(__linux__)
+#include <linux/fs.h>
+#endif
 
 bool hub_io_send(int fd, const uint8_t *frame, size_t total)
 {

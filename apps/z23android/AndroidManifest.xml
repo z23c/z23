@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.z23.nativeapp" android:versionCode="1" android:versionName="0.1.0">
+    <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <application android:label="Z23" android:icon="@drawable/ic_z23"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:hasCode="false" android:allowBackup="false"
+        android:fullBackupContent="false" android:debuggable="false" android:hardwareAccelerated="true"
+        android:extractNativeLibs="true" android:supportsRtl="true">
+        <activity android:name="android.app.NativeActivity"
+            android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.lib_name" android:value="z23android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

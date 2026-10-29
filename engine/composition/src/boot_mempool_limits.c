@@ -1,12 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Mempool-limits boot adapter — lifted out of boot_services.c to keep that
- * composition-root file under the E1 line ceiling. PURE relocation: the
- * adapter body (start/stop callbacks + the service_kernel registration
- * block) is byte-identical to its prior home; only its surrounding TU
- * changed, following the same precedent as engine/composition/src/boot_msg_callbacks.c
- * and engine/composition/src/boot_utxo_replay.c (read their header comments for the
- * pattern).
+ * composition-root file under the E1 line ceiling. The backend lock guard is
+ * installed before the limits service starts or admission workers run.
  *
  * svc->service_kernel has exactly one registrant across the whole boot
  * path: mempool_limits. It is registered and started as the very first
@@ -23,7 +19,37 @@
 
 #include "config/boot_mempool_limits.h"
 #include "services/mempool_limits.h"
+#include "storage/progress_store.h"
+#include "util/boot_phase.h"
+#include "validation/accept_to_mempool.h"
+#include <stdatomic.h>
 #include <stdio.h>
+
+#ifdef ZCL_TESTING
+static _Atomic(void (*)(void)) g_mempool_guard_attempt;
+void boot_test_set_mempool_guard_attempt(void (*hook)(void))
+{
+    atomic_store(&g_mempool_guard_attempt, hook);
+}
+#endif
+
+static void boot_mempool_guard_acquire(void)
+{
+#ifdef ZCL_TESTING
+    void (*attempt)(void) = atomic_load(&g_mempool_guard_attempt);
+    if (attempt) attempt();
+#endif
+    progress_store_tx_lock();
+}
+
+bool boot_install_mempool_backend_guard(void)
+{
+    static const struct mempool_backend_guard guard = {
+        .acquire = boot_mempool_guard_acquire,
+        .release = progress_store_tx_unlock,
+    };
+    return mempool_install_backend_guard(&guard);
+}
 
 static bool boot_mempool_limits_start(void *ctx)
 {
@@ -54,6 +80,8 @@ static void boot_mempool_limits_stop(void *ctx)
 
 bool boot_start_mempool_limits_service(struct boot_svc_ctx *svc)
 {
+    if (!boot_install_mempool_backend_guard())
+        return boot_step_fail("mempool_backend_guard");
     if (svc->db_service) {
         const struct zcl_service_spec mempool_limits_spec = {
             .name = "mempool_limits",
@@ -65,11 +93,11 @@ bool boot_start_mempool_limits_service(struct boot_svc_ctx *svc)
         if (!zcl_service_kernel_register(&svc->service_kernel,
                                          &mempool_limits_spec)) {
             fprintf(stderr, "FATAL: failed to register boot services\n");
-            return false;
+            return boot_step_fail("mempool_limits_service");
         }
         if (!zcl_service_kernel_start_all(&svc->service_kernel)) {
             fprintf(stderr, "FATAL: failed to start required boot services\n");
-            return false;
+            return boot_step_fail("mempool_limits_service");
         }
     }
     return true;

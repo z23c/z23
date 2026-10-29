@@ -26,6 +26,7 @@
 #include "controllers/rpc_client.h"
 #include "controllers/rpc_params.h"
 #include "json/json.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_store.h"
@@ -34,7 +35,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define FBC_TIMEOUT_DEFAULT_S 300
 #define FBC_TIMEOUT_MAX_S 1800
@@ -377,8 +377,7 @@ void zcl_native_handle_fleet_bundle_fetch(
         fbc_fetch_resident(store, &in, reply);
         return;
     }
-    struct stat st;
-    if (lstat(in.args.out_path, &st) == 0) {
+    if (!platform_private_path_absent(in.args.out_path)) {
         fbc_fail(reply, "OUT_EXISTS",
                  "out already exists; pick a path that does not exist",
                  false, false, FBC_FETCH_CMD);

@@ -235,7 +235,7 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_regress)
     return fixture_finish(out, 5, 4, "behavior regression: case 5 refused");
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_loop)
-    for (volatile uint64_t spin = 0;; spin++) {}
+    for (;;) {}
     return fixture_finish(out, 1, 1, "unreachable");
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_segv)
     volatile int *wild = (volatile int *)(uintptr_t)16;
@@ -303,7 +303,7 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
      * end, still bound the leaf to the deadline, and survive. */
     for (int fd = 3; fd < 256; fd++)
         (void)close(fd);
-    for (volatile uint64_t spin = 0;; spin++) {}
+    for (;;) {}
     return fixture_finish(out, 1, 1, "unreachable");
 #else
 #error "unknown reflex runner fixture kind"

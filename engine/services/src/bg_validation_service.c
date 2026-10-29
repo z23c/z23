@@ -53,6 +53,7 @@
 // init/stop/reset are void lifecycle. Behavior bit-for-bit.
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "services/bg_validation_service.h"
 #include "services/bg_validation_authority.h"
 #include "bg_validation_internal.h"
@@ -1089,7 +1090,7 @@ void bg_validation_stop(struct bg_validation_service *svc)
 #if defined(__linux__)
     if (platform_time_realtime_timespec(&ts) == 0) {
         ts.tv_sec += 5;
-        int rc = pthread_timedjoin_np(svc->thread, NULL, &ts);
+        int rc = platform_thread_join_until(svc->thread, NULL, &ts);
         if (rc != 0) {
             LOG_WARN("bg_validation_stop", "bg_validation_stop: thread join exceeded deadline (rc=%d); retaining ownership", rc);
             pthread_join(svc->thread, NULL);

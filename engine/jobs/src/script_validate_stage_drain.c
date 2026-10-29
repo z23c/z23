@@ -32,12 +32,14 @@ int script_validate_stage_drain(int max_steps)
         if (!batched)
             progress_store_tx_unlock();
     }
+    struct catchup_drain_budget budget = catchup_drain_budget_begin();
     int advanced = 0;
     for (int i = 0; i < max_steps; i++) {
         job_result_t r = script_validate_stage_step_once();
         if (r != JOB_ADVANCED)
             break;
         advanced++;
+        if (catchup_drain_budget_due(&budget)) break;
     }
     if (batched) {
         stage_batch_end(batch_db, advanced > 0 || stage_batch_dirty());

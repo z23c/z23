@@ -72,7 +72,10 @@ static const int g_stage1_extra[] = {
 #ifdef __NR_execveat
     __NR_execveat,
 #endif
-    __NR_arch_prctl, __NR_set_tid_address, __NR_set_robust_list,
+#ifdef __NR_arch_prctl
+    __NR_arch_prctl,
+#endif
+    __NR_set_tid_address, __NR_set_robust_list,
 #ifdef __NR_rseq
     __NR_rseq,
 #endif

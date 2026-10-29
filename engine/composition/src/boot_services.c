@@ -647,7 +647,7 @@ bool app_init_services(struct app_context *ctx,
     zcl_service_kernel_init(&svc->runtime_kernel);
     zcl_service_kernel_init(&svc->frontend_kernel);
     if (!boot_start_mempool_limits_service(svc))
-        return boot_step_fail("mempool_limits_service");
+        return false;
     svc->runtime.db_service = svc->db_service;
     svc->runtime.snapshot_sync = &svc->snapshot_sync;
     svc->runtime.mempool = svc->mempool;

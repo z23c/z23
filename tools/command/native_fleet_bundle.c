@@ -8,6 +8,7 @@
 
 #include "base/safe_alloc.h"
 #include "crypto/sha256.h"
+#include "platform/private_file.h"
 #include "vcs/blob_store.h"
 #include "vcs/bundle_carry.h"
 #include "vcs/package_store.h"
@@ -336,8 +337,7 @@ enum zcl_fleet_bundle_status zcl_fleet_bundle_fetch_step(
     if (args->size < 1u || args->size > (uint64_t)VCS_BUNDLE_MAX_BYTES)
         return zfb_refuse(out, "BAD_SIZE",
                           "size must be 1 to 5242880 bytes", false, false);
-    struct stat st;
-    if (lstat(args->out_path, &st) == 0 || errno != ENOENT)
+    if (!platform_private_path_absent(args->out_path))
         return zfb_refuse(out, "OUT_EXISTS",
                           "out already exists (or cannot be checked); pick "
                           "a path that does not exist", false, false);

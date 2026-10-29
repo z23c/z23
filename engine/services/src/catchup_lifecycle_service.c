@@ -30,6 +30,7 @@
  * path (and `z23 getnodelog` filter) as every other service failure. */
 
 #include "platform/time_compat.h"
+#include "platform/thread_compat.h"
 #include "services/catchup_lifecycle_service.h"
 #include "controllers/sync_controller.h" /* struct node_db_sync_catchup_job */
 #include "util/log_macros.h"
@@ -77,7 +78,7 @@ static bool catchup_lifecycle_join_thread_bounded(pthread_t thread,
 #endif
     {
         catchup_lifecycle_join_deadline_from_now(&deadline, timeout_sec);
-        rc = pthread_timedjoin_np(thread, NULL, &deadline);
+        rc = platform_thread_join_until(thread, NULL, &deadline);
     }
     if (rc == 0)
         return true;

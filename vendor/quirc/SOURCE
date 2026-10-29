@@ -1,0 +1,5 @@
+Upstream: https://github.com/dlbeer/quirc
+Commit: 927d680904dc95fdff4cd9d022eb374b438ff8f2
+License: ISC (LICENSE)
+Files: lib/quirc.c lib/decode.c lib/identify.c lib/version_db.c lib/quirc.h lib/quirc_internal.h LICENSE
+Local source changes: none; patches/strict-c23.patch is applied only to build output

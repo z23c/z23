@@ -19,6 +19,11 @@
 #include "test/test_core.h"
 
 #include "jobs/catchup_cadence.h"
+#include "jobs/job.h"
+#include "platform/clock.h"
+#include "storage/progress_store.h"
+#include "util/stage.h"
+#include <sqlite3.h>
 #include "jobs/validate_headers_stage.h"   /* VH_BATCH_SIZE, VH_BATCH_PER_TICK */
 #include "net/connman.h"
 #include "net/protocol.h"
@@ -40,6 +45,7 @@
 static void cc_clear_env(void)
 {
     unsetenv("ZCL_CATCHUP_DRAIN_BATCH");
+    unsetenv("ZCL_CATCHUP_DRAIN_BUDGET_MS");
     unsetenv("ZCL_CATCHUP_GAP_THRESHOLD");
     unsetenv("ZCL_CATCHUP_TICK_MS");
     unsetenv("ZCL_CATCHUP_DEFER_GAP_THRESHOLD");
@@ -406,9 +412,81 @@ static int case_small_backlog_defer_sync_gate(void)
     return failures;
 }
 
+static int64_t cc_fake_time = 1000;
+static int cc_fake_steps;
+static int64_t cc_now(void *unused) { (void)unused; return cc_fake_time; }
+static int64_t cc_wall(void *unused) { (void)unused; return 1; }
+static job_result_t cc_fake_stage_step_once(void)
+{
+    cc_fake_steps++;
+    sqlite3 *db = progress_store_db();
+    if (db && sqlite3_exec(db, "INSERT INTO cc_budget_rows VALUES(1)", NULL, NULL, NULL) != SQLITE_OK)
+        return JOB_FATAL;
+    if (cc_fake_time > 0) cc_fake_time += 40000;
+    return JOB_ADVANCED;
+}
+STAGE_DRAIN_IMPL(cc_fake)
+
+static void *cc_probe_progress_lock(void *arg)
+{
+    bool *unlocked = arg;
+    *unlocked = progress_store_tx_trylock();
+    if (*unlocked) progress_store_tx_unlock();
+    return NULL;
+}
+
+static int case_elapsed_budget(void)
+{
+    int failures = 0;
+    struct connman cm;
+    struct p2p_node peer;
+    cc_reset(&cm);
+    cc_add_peer(&cm, &peer, 1000);
+    catchup_cadence_test_set_log_head_override(0);
+    CC_CHECK("budget: catch-up active", catchup_cadence_active());
+    struct platform_clock_source source = {cc_now, cc_wall, NULL};
+    platform_clock_set_source(&source);
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "catchup_cadence", "budget");
+    bool opened = progress_store_open(dir);
+    CC_CHECK("budget: store opens", opened);
+    if (!opened) { platform_clock_clear_source(); cc_cleanup(); return failures; }
+    sqlite3 *db = progress_store_db();
+    CC_CHECK("budget: row table created", sqlite3_exec(db, "CREATE TABLE cc_budget_rows(v INTEGER)", NULL, NULL, NULL) == SQLITE_OK);
+    cc_fake_time = 1000; cc_fake_steps = 0;
+    CC_CHECK("budget: unset keeps full drain", cc_fake_stage_drain(5) == 5 && cc_fake_steps == 5);
+    setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", "100", 1);
+    cc_fake_time = 1000; cc_fake_steps = 0;
+    CC_CHECK("budget: yields after complete step", cc_fake_stage_drain(8) == 3 && cc_fake_steps == 3);
+    CC_CHECK("budget: next drain progresses", cc_fake_stage_drain(8) == 3 && cc_fake_steps == 6);
+    sqlite3_stmt *rows = NULL;
+    bool committed = sqlite3_get_autocommit(db) == 1 &&
+                     sqlite3_prepare_v2(db, "SELECT count(*) FROM cc_budget_rows", -1, &rows, NULL) == SQLITE_OK &&
+                     sqlite3_step(rows) == SQLITE_ROW && sqlite3_column_int(rows, 0) == 11;
+    sqlite3_finalize(rows);
+    CC_CHECK("budget: yielded batches commit all rows", committed);
+    bool unlocked = false;
+    pthread_t probe;
+    bool probe_started = pthread_create(&probe, NULL, cc_probe_progress_lock, &unlocked) == 0;
+    if (probe_started) pthread_join(probe, NULL);
+    CC_CHECK("budget: yielded batch releases progress lock", probe_started && unlocked);
+    cc_fake_time = 0; cc_fake_steps = 0;
+    CC_CHECK("budget: failed clock yields after step", cc_fake_stage_drain(8) == 1 && cc_fake_steps == 1);
+    cm.manager.num_nodes = 0;
+    CC_CHECK("budget: catch-up inactive", !catchup_cadence_active());
+    cc_fake_time = 1000; cc_fake_steps = 0;
+    CC_CHECK("budget: inactive keeps full drain", cc_fake_stage_drain(5) == 5 && cc_fake_steps == 5);
+    platform_clock_clear_source();
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    cc_cleanup();
+    return failures;
+}
+
 int test_catchup_cadence(void)
 {
     int failures = 0;
+    failures += case_elapsed_budget();
     failures += case_no_peers_inert();
     failures += case_small_gap_inert();
     failures += case_gap_just_under_threshold_inert();

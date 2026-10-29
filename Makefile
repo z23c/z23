@@ -71,6 +71,7 @@ ZCL_WINDOWS_API_FLOOR := -D_WIN32_WINNT=0x0A00
 # and the mismatch is exactly the silent kind. `make ZCL_TARGET=... release`
 # is the supported entry point.
 ZCL_TARGET ?= host
+ZCL_BUILD_OS := $(shell uname -s 2>/dev/null)
 ZCL_HOST_OS := $(shell uname -s 2>/dev/null)
 ZCL_CROSS_TRIPLE :=
 ifneq ($(ZCL_TARGET),host)
@@ -80,8 +81,25 @@ ZCL_CROSS_TRIPLE := x86_64-w64-mingw32
 # takes the same branches a native MSYS2 build takes -- there is no second
 # Windows configuration to keep in sync with the first.
 ZCL_HOST_OS := MINGW64_NT-10.0
+else ifeq ($(ZCL_TARGET),android-arm64)
+ANDROID_API ?= 35
+ifneq ($(shell printf '%s\n' '$(ANDROID_API)' | grep -Ex '[0-9]+' >/dev/null && test '$(ANDROID_API)' -ge 21 && printf yes),yes)
+$(error ANDROID_API must be an integer at least 21 for Android ARM64)
+endif
+ifeq ($(strip $(ANDROID_NDK_ROOT)),)
+$(error android-arm64 requires ANDROID_NDK_ROOT)
+endif
+ZCL_ANDROID_HOST_TAG := $(if $(filter Darwin,$(ZCL_BUILD_OS)),darwin-x86_64,linux-x86_64)
+ZCL_ANDROID_BIN := $(ANDROID_NDK_ROOT)/toolchains/llvm/prebuilt/$(ZCL_ANDROID_HOST_TAG)/bin
+ZCL_CROSS_TRIPLE := aarch64-linux-android$(ANDROID_API)
+ifeq ($(wildcard $(ZCL_ANDROID_BIN)/$(ZCL_CROSS_TRIPLE)-clang),)
+$(error Android compiler missing: $(ZCL_ANDROID_BIN)/$(ZCL_CROSS_TRIPLE)-clang)
+endif
+ZCL_HOST_OS := Android
+export PATH := $(ZCL_ANDROID_BIN):$(PATH)
+export ANDROID_NDK_ROOT ANDROID_API
 else
-$(error unknown ZCL_TARGET '$(ZCL_TARGET)' — known: host, windows-x86_64)
+$(error unknown ZCL_TARGET '$(ZCL_TARGET)' — known: host, windows-x86_64, android-arm64)
 endif
 endif
 # Where the archives for THIS target live. vendor/lib holds exactly one target
@@ -96,6 +114,10 @@ ZCL_VENDOR_INC_FLAGS := $(if $(ZCL_CROSS_TRIPLE),-Ivendor/cross/$(ZCL_CROSS_TRIP
 # file it did not change.
 ZCL_OBJCOPY := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-objcopy,objcopy)
 ZCL_STRIP_TOOL := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-strip,strip)
+ifeq ($(ZCL_HOST_OS),Android)
+ZCL_OBJCOPY := $(ZCL_ANDROID_BIN)/llvm-objcopy
+ZCL_STRIP_TOOL := $(ZCL_ANDROID_BIN)/llvm-strip
+endif
 
 ZCL_HOST_WINDOWS := $(if $(filter MINGW% MSYS%,$(ZCL_HOST_OS)),1,)
 ifneq ($(ZCL_HOST_WINDOWS),)
@@ -142,6 +164,15 @@ ZCL_PLATFORM_NODE_LIBS = \
 # absent from PATH.  The shipped C23 node does not link this runtime at all.
 ZCL_CXX_RUNTIME_LIB = -l:libstdc++.a
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
+ZCL_TEST_STACK_SETUP = :
+else ifeq ($(ZCL_HOST_OS),Android)
+CC = $(ZCL_ANDROID_BIN)/$(ZCL_CROSS_TRIPLE)-clang
+CXX = $(ZCL_ANDROID_BIN)/$(ZCL_CROSS_TRIPLE)-clang++
+ZCL_PLATFORM_CPPFLAGS =
+ZCL_LTO_FLAG = -flto=thin
+ZCL_PLATFORM_NODE_LIBS =
+ZCL_CXX_RUNTIME_LIB = -lc++_static -lc++abi
+ZCL_WARN_MAYBE_UNINITIALIZED =
 ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
 CC = clang
@@ -206,17 +237,26 @@ ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = ulimit -s unlimited
 endif
+# Generators execute on the build machine, independently of the artifact ABI.
+ZCL_BUILD_CC = $(CC)
+ifeq ($(ZCL_HOST_OS),Android)
+HOST_CC ?= cc
+ZCL_BUILD_CC = $(HOST_CC)
+ZCL_DEV_LINKER = -fuse-ld=lld
+endif
 # Read the canonical standalone catalog before selecting node build authority.
 # Its := library rows need these values before the include. Exact generated
 # paths qualify; an unknown path, mixed node goal, or default build does not.
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
 include platform/modules/platform/tests/windows_acceptance.mk
+include platform/modules/platform/tests/android_acceptance.mk
 ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures \
 	windows-acceptance-compile $(addprefix \
 	$(ZCL_WINDOWS_ACCEPTANCE_DIR)/,$(addsuffix .exe,$(ZCL_WINDOWS_ACCEPTANCE_TESTS)))
 
 ZCL_WINDOWS_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS),$(MAKECMDGOALS))),,1),)
+ZCL_ANDROID_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS),$(MAKECMDGOALS))),,1),)
 
 ZCL_USE_CCACHE ?= 1
 # The compile cache ships in-tree (tools/zcc.c). Prefer it over any installed
@@ -224,7 +264,7 @@ ZCL_USE_CCACHE ?= 1
 # to install, and fall back to a host cache only if the in-tree one cannot be
 # built here. This is a parse-time $(shell) because $(CC) is fixed before the
 # first recipe runs; see tools/dev/zcc_bootstrap.sh for why and what it costs.
-ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ]; then \
+ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ] && [ "$(ZCL_ANDROID_STANDALONE_ONLY)" != "1" ]; then \
                               $(CURDIR)/tools/dev/zcc_bootstrap.sh 2>/dev/null \
                               || command -v sccache 2>/dev/null \
                               || command -v ccache 2>/dev/null; fi)
@@ -284,6 +324,7 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 ZCL_TOR_PROVENANCE_GOALS := build/bin/z23-tor-provenance \
 	tools/tor-provenance z23-tor-provenance
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
+	$(ZCL_ANDROID_ACCEPTANCE_GOALS) \
 	$(ZCL_WINDOWS_STANDALONE_GOALS) \
 	$(ZCL_TOR_PROVENANCE_GOALS) \
 	presentation-lib presentation-demo presentation-relaunch \
@@ -360,7 +401,7 @@ endif
 # restart, the boundary recipe must also drop this session's cached capture:
 # the pre-boundary parse may already have memoized a record that cannot see
 # the inputs this boundary establishes.
-NODE_SECP_ARCHIVE = $(if $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_VENDOR_LIB)/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),$(ZCL_VENDOR_LIB)/libsecp256k1-windows.a,$(ZCL_VENDOR_LIB)/libsecp256k1.a))
+NODE_SECP_ARCHIVE = $(if $(filter Android,$(ZCL_HOST_OS)),$(ZCL_VENDOR_LIB)/libsecp256k1-android.a,$(if $(filter Darwin,$(ZCL_HOST_OS)),$(ZCL_VENDOR_LIB)/libsecp256k1-darwin.a,$(if $(ZCL_HOST_WINDOWS),$(ZCL_VENDOR_LIB)/libsecp256k1-windows.a,$(ZCL_VENDOR_LIB)/libsecp256k1.a)))
 ZCL_GC_SECTIONS_LDFLAG = -Wl,--gc-sections
 ifeq ($(ZCL_HOST_OS),Darwin)
 # Apple ld has no --gc-sections; -dead_strip is its equivalent.
@@ -400,7 +441,7 @@ ZCL_WINDOWS_LAUNCHER_GOALS := windows-headless-run windows-headless-run-selftest
 ZCL_BUILD_QUERY_GOALS := print-node-c23-srcs help doctor doctor-env doctor-build timings agent-dev-status print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags
 # Receipt hooks use in-tree C23 and system libraries, never node archives.
 ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe,$(MAKECMDGOALS))),,1),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1134,7 +1175,7 @@ DEV_PACKAGE_VERIFY_ENSURE_STAMP = $(BUILD_DIR)/dev-package-verifier.ensure
 # pkg-config probes feed only compile/link flag expansion. The hot-swap loop
 # compiles nothing inside this parse (the fast path replays cached flags), so
 # it skips the probes.
-ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
+ifneq ($(filter 1,$(ZCL_HOTSWAP_LOOP_ONLY))$(filter Android,$(ZCL_HOST_OS)),)
 GTK_CFLAGS :=
 GTK_LIBS   :=
 GTK_DEF    :=
@@ -1159,7 +1200,12 @@ endif
 #   -fPIE / -pie              position-independent executable (ASLR)
 #   -Wl,-z,relro -Wl,-z,now   full RELRO (GOT mapped read-only after binding)
 #   -Wl,-z,noexecstack        non-executable stack (NX)
-ifeq ($(ZCL_HOST_OS),Darwin)
+ifeq ($(ZCL_HOST_OS),Android)
+HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE
+HARDEN_LDFLAGS = -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,max-page-size=16384
+ZCL_ARCH_CFLAGS = -march=armv8-a
+ZCL_DLOPEN_LIB = -ldl
+else ifeq ($(ZCL_HOST_OS),Darwin)
 HARDEN_CFLAGS = -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fPIE
 HARDEN_LDFLAGS =
 ZCL_ARCH_CFLAGS = $(if $(ZCL_NATIVE),-march=native,)
@@ -1611,7 +1657,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe \
-	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS)
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 
@@ -1662,7 +1708,7 @@ endif
 ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 CXX_STDLIB_FILE :=
 else
-CXX_STDLIB_FILE := $(shell $(CXX) -print-file-name=libstdc++.a 2>/dev/null)
+CXX_STDLIB_FILE := $(if $(filter Android,$(ZCL_HOST_OS)),,$(shell $(CXX) -print-file-name=libstdc++.a 2>/dev/null))
 endif
 CXX_STDLIB_DIR := $(if $(filter /%,$(CXX_STDLIB_FILE)),$(dir $(CXX_STDLIB_FILE)),)
 CXX_STDLIB_LDFLAGS := $(if $(CXX_STDLIB_DIR),-L$(CXX_STDLIB_DIR),)
@@ -1670,7 +1716,7 @@ LIBS = $(NODE_SECP_ARCHIVE) -L$(ZCL_VENDOR_LIB) -lleveldb \
 	$(CXX_STDLIB_LDFLAGS) $(ZCL_CXX_RUNTIME_LIB) -lsqlite3 \
 	-levent -levent_openssl -levent_pthreads \
 	-lssl -lcrypto -lz $(ZCL_DLOPEN_LIB) \
-	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,$(if $(filter Android,$(ZCL_HOST_OS)),,-lpthread)) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
 # The shipped node is a C23 artifact. It never links the optional GTK/WebKit
@@ -1685,7 +1731,7 @@ NODE_C23_LIBS = $(NODE_SECP_ARCHIVE) $(ZCL_VENDOR_LIB)/libsqlite3.a \
 	$(ZCL_VENDOR_LIB)/libevent.a $(ZCL_VENDOR_LIB)/libevent_openssl.a \
 	$(ZCL_VENDOR_LIB)/libevent_pthreads.a $(ZCL_VENDOR_LIB)/libssl.a \
 	$(ZCL_VENDOR_LIB)/libcrypto.a $(ZCL_VENDOR_LIB)/libz.a $(ZCL_DLOPEN_LIB) \
-	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
+	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,$(if $(filter Android,$(ZCL_HOST_OS)),,-lpthread)) -lm \
 	$(ZCL_PLATFORM_NODE_LIBS)
 
 # ── Host-local compile epochs ─────────────────────────────────────────────
@@ -2108,15 +2154,15 @@ endif
 # Build every missing OR provenance-stale vendor/lib/*.a from its pinned,
 # SHA256-verified source. `make vendor-force` rebuilds all of them.
 vendor:
-	tools/scripts/build_vendor.sh
+	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh
 vendor-force:
-	VENDOR_FORCE=1 tools/scripts/build_vendor.sh
+	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) VENDOR_FORCE=1 tools/scripts/build_vendor.sh
 vendor-provenance:
-	@tools/scripts/build_vendor.sh --check-provenance
+	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh --check-provenance
 # Link/release/deploy front door: repair stale archives, then independently
 # audit installed bytes before any binary can consume them.
 vendor-ready:
-	@tools/scripts/build_vendor.sh
+	@VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_vendor.sh
 	@tools/dep_audit.sh
 
 # Build the real embedded onion service from the pinned submodule. This
@@ -3721,6 +3767,10 @@ TMPL_CSS_DIR = contexts/wallet/views/css
 TMPL_SRC = $(wildcard $(TMPL_DIR)/*.chtml) \
 	$(wildcard $(TMPL_CSS_DIR)/*.ccss)
 TMPL_TOOL = $(BIN_DIR)/gen_templates
+ifeq ($(ZCL_HOST_OS),Android)
+TMPL_TOOL = $(BUILD_DIR)/host/bin/gen_templates
+GUEST_KERNEL_TOOL = $(BUILD_DIR)/host/bin/gen_guest_kernel
+endif
 SITE_CSS_GEN = contexts/explorer/views/include/views/site_css.h
 SITE_CSS_SRC = contexts/explorer/views/src/site.css
 INSTALL_SH_GEN = contexts/commons/views/include/views/install_script_gen.h
@@ -3734,7 +3784,7 @@ OBJECT_GEN_HEADERS = $(filter-out tools/dev/native_tunnel_export_binding.h,$(VIE
 $(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c \
 		platform/modules/platform/src/path_replace.c
 	@mkdir -p $(dir $@) build/identity
-	$(CC) -std=c23 -O2 -Wall -Wextra -Iplatform/modules/base/include \
+	$(ZCL_BUILD_CC) -std=c23 -O2 -Wall -Wextra -Iplatform/modules/base/include \
 		-Iplatform/modules/util/include -Iplatform/modules/platform/include -o $@ $^
 
 # The stamp records the variable's value and is rewritten only when it changes,
@@ -3747,9 +3797,9 @@ $(GUEST_KERNEL_STAMP): FORCE
 
 $(GUEST_KERNEL_TOOL): $(GUEST_KERNEL_TOOL_SRCS) tools/command/native_builtin_kernel.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -Itools -Iplatform/modules/base/include \
+	$(ZCL_BUILD_CC) -std=c23 -O2 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -Itools -Iplatform/modules/base/include \
 	    -Iplatform/modules/util/include -Icore/modules/crypto/include -Ivendor/include \
-	    -o $@ $(GUEST_KERNEL_TOOL_SRCS) -Lvendor/lib -lz
+	    -o $@ $(GUEST_KERNEL_TOOL_SRCS) $(if $(filter Android,$(ZCL_HOST_OS)),,-Lvendor/lib) -lz
 
 # The linked source is always this generated file, so a change of the stamp
 # changes the one source every object and link depends on: the packed kernel,

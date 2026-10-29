@@ -15,6 +15,7 @@ map is for maintainers or is reference.
 6. [`SYNC.md`](node/SYNC.md) — getting to the chain tip faster.
 7. [`RUNBOOK.md`](RUNBOOK.md) — something looks wrong: symptom-driven fixes.
 8. [`C23_COMMONS_QUICKSTART.md`](commons/C23_COMMONS_QUICKSTART.md) — write, share and reproduce a C23 package.
+9. [Android ARM64](dev/ANDROID.md) — cross-build and run the native executable over USB.
 
 Documents marked "(maintainers)" below are for the people who run the project's
 hosts and land changes. You do not need them to contribute.

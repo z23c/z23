@@ -1,4 +1,5 @@
-/* Canonical semantic transaction catalog.
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * Canonical semantic transaction catalog.
  *
  * TX_TYPE(id, family, availability, transaction_role, chain_encoding,
  *         privacy, lifecycle, builder_command, commit_command,
@@ -11,9 +12,9 @@
 
 TX_TYPE("coinbase_reward", "base_zcl", "process_only", "chain_transaction",
         "coinbase", "transparent", "receive_validate_project", "", "",
-        "core.wallet.transaction.get", "core.mining.status",
+        "core.wallet.transaction.get", "core.mining.status,core.mining.regtest-mine",
         "all_zcl_networks", "coinbase_reward", "simnet_confirmed", "test_simnet",
-        "Block subsidy and fees created by a valid mined block; the node validates and indexes it but exposes no agent mining mutation.")
+        "Block subsidy and fees created by a valid mined block; ordinary networks validate and index it, while bounded native mining is available only on regtest.")
 TX_TYPE("transparent_t_to_t", "base_zcl", "ready", "chain_transaction",
         "transparent_standard_script", "transparent",
         "durable_plan_commit_reconcile", "vault.intent.plan",

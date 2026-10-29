@@ -20,6 +20,7 @@
 
 #include "core/uint256.h"
 #include "storage/coins_kv.h"
+#include "storage/coins_ram.h"
 #include "storage/progress_store.h"
 
 #include <sqlite3.h>
@@ -55,6 +56,43 @@ static bool sov_set_applied(sqlite3 *db, int32_t h)
               && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
     if (err) sqlite3_free(err);
     return ok;
+}
+
+static int sov_cache_reads(sqlite3 *db)
+{
+    int hits = 0, misses = 0, ignored = 0;
+    if (sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_HIT, &hits, &ignored, 1) != SQLITE_OK ||
+        sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 1) != SQLITE_OK)
+        return -1;
+    return hits + misses;
+}
+
+static int sov_bounded_authority(sqlite3 *db, const struct uint256 *txid,
+                                 const unsigned char *script, size_t script_len)
+{
+    int failures = 0;
+    bool inserted = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    for (uint32_t i = 1; inserted && i <= 8192; i++)
+        inserted = coins_kv_add(db, txid->data, i, 1, 60, true, script, script_len);
+    if (inserted)
+        inserted = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    else
+        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    SOV_CHECK("large fixture inserted", inserted);
+    (void)sov_cache_reads(db);
+    int64_t count = coins_kv_count_sqlite(db);
+    int count_reads = sov_cache_reads(db);
+    bool authority = coins_kv_is_proven_authority(db, NULL);
+    int authority_reads = sov_cache_reads(db);
+    printf("  coins_kv_sovereign: page accesses count=%d authority=%d\n",
+           count_reads, authority_reads);
+    SOV_CHECK("large fixture counted", count == 8193);
+    SOV_CHECK("large fixture authority", authority);
+    SOV_CHECK("authority avoids full coin scan", count_reads >= 20 &&
+              authority_reads >= 0 && authority_reads + 10 < count_reads);
+    SOV_CHECK("remove fixture rows", sqlite3_exec(db,
+                  "DELETE FROM coins WHERE vout > 0", NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
 }
 
 int test_coins_kv_sovereign_gate(void);
@@ -203,6 +241,31 @@ int test_coins_kv_sovereign_gate(void)
               coins_kv_mark_migration_complete(db));
     SOV_CHECK("still proven authority after idempotent stamp",
               coins_kv_is_proven_authority(db, NULL));
+
+    failures += sov_bounded_authority(db, &t2, sc, sizeof(sc));
+
+    /* The authority gate reads the effective overlay, including tombstones. */
+    if (coins_ram_enabled()) {
+        SOV_CHECK("overlay init", coins_ram_init(db, 1000000,
+                                                coins_kv_set_applied_height_in_tx));
+        coins_ram_writer_enter();
+        SOV_CHECK("overlay tombstone", coins_kv_spend(db, t2.data, 0));
+        SOV_CHECK("overlay empty count", coins_kv_count(db) == 0);
+        SOV_CHECK("overlay empty authority", !coins_kv_is_proven_authority(db, NULL));
+        SOV_CHECK("overlay add", coins_kv_add(db, t1.data, 0, 1234, 60,
+                                               true, sc, sizeof(sc)));
+        SOV_CHECK("overlay live count", coins_kv_count(db) > 0);
+        SOV_CHECK("overlay live authority", coins_kv_is_proven_authority(db, NULL));
+        coins_ram_writer_exit();
+        coins_ram_shutdown();
+    }
+
+    SOV_CHECK("remove coins for empty authority", sqlite3_exec(
+                  db, "DELETE FROM coins", NULL, NULL, NULL) == SQLITE_OK);
+    SOV_CHECK("empty authority refused", !coins_kv_is_proven_authority(db, NULL));
+    SOV_CHECK("drop coins for read error", sqlite3_exec(
+                  db, "DROP TABLE coins", NULL, NULL, NULL) == SQLITE_OK);
+    SOV_CHECK("read error authority refused", !coins_kv_is_proven_authority(db, NULL));
 
     progress_store_close();
     test_cleanup_tmpdir(dir);

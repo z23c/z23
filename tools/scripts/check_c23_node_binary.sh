@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
-# Fail closed unless the shipped node has only the glibc runtime family as a
+# Fail closed unless the shipped node has only the platform runtime family as a
 # dynamic dependency. Before glibc 2.34, pthread and dl are separate DSOs;
 # newer glibc merges them into libc. Every project/third-party dependency must
 # still be linked from a pinned static archive; GUI and C++ runtimes belong to
@@ -29,7 +29,8 @@ if command -v objdump >/dev/null 2>&1; then
         sed -n 's/^.*file format //p' | head -1 || true)"
 fi
 
-if [[ "$(uname -s 2>/dev/null)" == Darwin && "$bin_format" != pei-* ]]; then
+elf_magic="$(LC_ALL=C od -An -tx1 -N4 "$bin" | tr -d ' \n')"
+if [[ "$(uname -s 2>/dev/null)" == Darwin && "$bin_format" != pei-* && "$elf_magic" != 7f454c46 ]]; then
     command -v otool >/dev/null 2>&1 || {
         echo "c23-node: otool is required for the Mach-O dependency audit" >&2
         exit 1
@@ -120,10 +121,54 @@ case "$bin_format:$(uname -s 2>/dev/null)" in
         ;;
 esac
 
-command -v readelf >/dev/null 2>&1 || {
+readelf_tool="$(command -v readelf || true)"
+if [[ -z "$readelf_tool" && -n "${ANDROID_NDK_ROOT:-}" ]]; then
+    ndk_host=linux-x86_64
+    [[ "$(uname -s 2>/dev/null)" != Darwin ]] || ndk_host=darwin-x86_64
+    ndk_readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$ndk_host/bin/llvm-readelf"
+    [[ ! -x "$ndk_readelf" ]] || readelf_tool="$ndk_readelf"
+fi
+[[ -n "$readelf_tool" ]] || {
     echo "c23-node: readelf is required for the release dependency audit" >&2
     exit 1
 }
+program_headers="$(LC_ALL=C "$readelf_tool" -lW "$bin")" || {
+    echo "c23-node: unreadable ELF program headers" >&2; exit 1;
+}
+interpreter="$(sed -n 's/.*Requesting program interpreter: \([^]]*\)].*/\1/p' <<<"$program_headers")"
+if [[ "$interpreter" == /system/bin/linker64 ]]; then
+    elf_header="$(LC_ALL=C "$readelf_tool" -hW "$bin")" || exit 1
+    dynamic="$(LC_ALL=C "$readelf_tool" -dW "$bin")" || exit 1
+    symbols="$(LC_ALL=C "$readelf_tool" -Ws "$bin")" || exit 1
+    if ! grep -Eq 'Class:[[:space:]]+ELF64$' <<<"$elf_header" ||
+       ! grep -Eq 'Machine:[[:space:]]+AArch64$' <<<"$elf_header" ||
+       ! grep -Eq 'Type:[[:space:]]+DYN[[:space:]]' <<<"$elf_header" ||
+       ! grep -Eq '\(FLAGS_1\).*Flags:.*PIE' <<<"$dynamic"; then
+        echo "c23-node: Android requires an AArch64 ELF64 PIE executable" >&2
+        exit 1
+    fi
+    bad=0
+    have_libc=0
+    while IFS= read -r dep; do
+        case "$dep" in
+            libc.so) have_libc=1 ;;
+            libm.so|libdl.so) ;;
+            *) echo "c23-node: forbidden dynamic dependency: $dep" >&2; bad=1 ;;
+        esac
+    done < <(sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' <<<"$dynamic")
+    if [[ "$have_libc" != 1 ]]; then
+        echo "c23-node: Android libc runtime dependency missing" >&2
+        bad=1
+    fi
+    if grep -E 'GLIBCXX_|CXXABI_|__gxx_personality_v0|__cxa_(throw|rethrow|begin_catch|end_catch|allocate_exception|free_exception|pure_virtual|guard_)|_Z(nw|dl|da|na)' \
+            <<<"$symbols" >/dev/null; then
+        echo "c23-node: C++ runtime symbol found in node executable" >&2
+        bad=1
+    fi
+    test "$bad" -eq 0 || exit 1
+    echo "c23-node: PASS (AArch64 Android PIE; pinned static project dependencies; Bionic system runtimes only)"
+    exit 0
+fi
 command -v objdump >/dev/null 2>&1 || {
     echo "c23-node: objdump is required for the release ABI audit" >&2
     exit 1
@@ -148,7 +193,7 @@ while IFS= read -r dep; do
         libc.so.6|libm.so.6|libpthread.so.0|libdl.so.2) ;;
         *) echo "c23-node: forbidden dynamic dependency: $dep" >&2; bad=1 ;;
     esac
-done < <(readelf -d "$bin" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
+done < <("$readelf_tool" -d "$bin" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
 
 # __cxa_finalize and __cxa_atexit are ordinary libc startup/teardown symbols
 # emitted for C PIE executables too. Reject the C++ exception/guard/personality
@@ -156,7 +201,7 @@ done < <(readelf -d "$bin" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')
 # not use grep -q here: under pipefail its early close SIGPIPEs readelf, making
 # the answer depend on whether readelf filled the pipe buffer (large binaries
 # used to false-pass while small binaries failed on __cxa_finalize).
-if readelf -Ws "$bin" | grep -E \
+if "$readelf_tool" -Ws "$bin" | grep -E \
         'GLIBCXX_|CXXABI_|__gxx_personality_v0|__cxa_(throw|rethrow|begin_catch|end_catch|allocate_exception|free_exception|pure_virtual|guard_)|_Z(nw|dl|da|na)' \
         >/dev/null; then
     echo "c23-node: C++ runtime symbol found in node executable" >&2

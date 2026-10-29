@@ -342,6 +342,50 @@ static int ha_deferred_context_case(void)
     return failures;
 }
 
+struct ha_progress_busy {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    bool done, drain;
+    int result;
+};
+
+static void *ha_progress_busy_worker(void *arg)
+{
+    struct ha_progress_busy *c = arg;
+    int result = c->drain ? header_admit_stage_drain(100)
+                          : (int)header_admit_stage_step_once();
+    pthread_mutex_lock(&c->mutex);
+    c->result = result; c->done = true;
+    pthread_cond_broadcast(&c->changed);
+    pthread_mutex_unlock(&c->mutex);
+    return NULL;
+}
+
+static bool ha_progress_busy_yields(struct main_state *ms, bool drain)
+{
+    struct ha_progress_busy c = {.mutex = PTHREAD_MUTEX_INITIALIZER,
+                                 .changed = PTHREAD_COND_INITIALIZER, .drain = drain};
+    progress_store_tx_lock();
+    pthread_t worker;
+    bool started = pthread_create(&worker, NULL, ha_progress_busy_worker, &c) == 0;
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec += 5;
+    pthread_mutex_lock(&c.mutex);
+    int rc = 0;
+    while (started && !c.done && rc == 0)
+        rc = pthread_cond_timedwait(&c.changed, &c.mutex, &deadline);
+    bool done = c.done;
+    pthread_mutex_unlock(&c.mutex);
+    bool main_free = done && zcl_mutex_trylock(&ms->cs_main);
+    if (main_free) zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
+    if (started) pthread_join(worker, NULL);
+    pthread_cond_destroy(&c.changed);
+    pthread_mutex_destroy(&c.mutex);
+    return started && done && main_free && c.result == (drain ? 0 : (int)JOB_IDLE);
+}
+
 static int ha_drain_five_block_chain_case(void)
 {
     int failures = 0;
@@ -365,6 +409,9 @@ static int ha_drain_five_block_chain_case(void)
     HA_CHECK("init is idempotent (same ms)",
              header_admit_stage_init(&ms));
 
+    HA_CHECK("contended step yields and releases main", ha_progress_busy_yields(&ms, false));
+    HA_CHECK("contended drain yields and releases main", ha_progress_busy_yields(&ms, true));
+    HA_CHECK("contended calls leave cursor unchanged", header_admit_stage_cursor() == 0);
     uint64_t audits_before = header_admit_stage_reorg_audit_total();
     int advanced = header_admit_stage_drain(100);
     HA_CHECK("drain advances 5 times", advanced == 5);

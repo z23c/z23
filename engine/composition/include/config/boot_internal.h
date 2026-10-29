@@ -293,6 +293,10 @@ struct boot_svc_ctx {
      * its own pthread_t — see sync_watchdog_start()/stop(). */
 };
 
+bool boot_install_mempool_backend_guard(void);
+#ifdef ZCL_TESTING
+void boot_test_set_mempool_guard_attempt(void (*hook)(void));
+#endif
 bool app_init_services(struct app_context *ctx,
                         const struct chain_params *params,
                         struct boot_svc_ctx *svc);

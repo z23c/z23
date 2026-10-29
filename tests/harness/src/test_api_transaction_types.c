@@ -371,6 +371,24 @@ static bool tx_type_oprindex_nonchain_ok(void)
         strcmp(entry->category, "local_projection_recovery") == 0;
 }
 
+static bool tx_type_regtest_mining_maps_coinbase(void)
+{
+    const char *path = "core.mining.regtest-mine";
+    const struct zcl_transaction_type_contract *type =
+        zcl_transaction_type_find("coinbase_reward");
+    return type && zcl_transaction_type_command_roles(type, path) ==
+        ZCL_TRANSACTION_COMMAND_ROLE_COMPONENT &&
+        zcl_transaction_nonchain_command_find(path) == NULL;
+}
+
+static int check_api_tx_type_regtest_mining_maps_coinbase(void)
+{
+    printf("api: regtest mining is a coinbase component without exemption... ");
+    bool ok = tx_type_regtest_mining_maps_coinbase();
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok ? 0 : 1;
+}
+
 static int check_api_tx_type_reverse_aliases_real_types(void)
 {
     int failures = 0;
@@ -1449,6 +1467,7 @@ int api_transaction_type_focused_tests(void)
     failures += check_api_tx_type_registry_refs_real_leaves();
     failures += check_api_tx_type_micro_lab_covers_100_slots();
     failures += check_api_tx_type_reverse_aliases_real_types();
+    failures += check_api_tx_type_regtest_mining_maps_coinbase();
     failures += check_api_tx_type_chain_cmds_have_reverse_map();
     failures += check_api_tx_type_wire_catalog_eras_carriers();
     failures += check_api_tx_type_collection_readiness_proof();

@@ -9,7 +9,7 @@
  *              with a non-blocking flock and then HELD through the removal;
  *            - the sibling files <copy>.bundle, <copy>.prime.log and
  *              <copy>.lock, unlinked only when they are regular files
- *              (lstat, never through a symlink), the lock last;
+ *              (no-follow metadata, never through a symlink), the lock last;
  *            - the shape of an orphaned copy: a directory git no longer
  *              registers, whose .git file names a worktree administrative
  *              directory that is gone, with a sibling .lock;
@@ -23,6 +23,8 @@
 #include "command/host_gc_priv.h"
 
 #include "util/path_util.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -76,16 +78,16 @@ void hg_lock_release(int fd)
         (void)close(fd);
 }
 
-/* Unlink `path` only when lstat says it is a regular file; returns the bytes
+/* Unlink `path` only when no-follow metadata says it is a regular file; returns the bytes
  * it held, 0 for anything else (a symlink is left exactly where it is). */
 static uint64_t hg_unlink_regular(const char *path)
 {
-    struct stat st;
-    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
+    struct platform_file_metadata metadata;
+    if (platform_file_metadata_read(path, &metadata) != PLATFORM_FILE_METADATA_OK)
         return 0;
     if (unlink(path) != 0)
         return 0;
-    return (uint64_t)st.st_size;
+    return metadata.size;
 }
 
 uint64_t hg_remove_siblings(const char *wt)
@@ -102,9 +104,9 @@ uint64_t hg_remove_siblings(const char *wt)
 static bool hg_regular_sibling(const char *dir, const char *suffix)
 {
     char path[HG_SIB_CAP];
-    struct stat st;
+    struct platform_file_metadata metadata;
     return hg_sibling_path(path, sizeof(path), dir, suffix) &&
-           lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+           platform_file_metadata_read(path, &metadata) == PLATFORM_FILE_METADATA_OK;
 }
 
 /* The gitdir a linked worktree's .git FILE names, or false when .git is not
@@ -112,10 +114,10 @@ static bool hg_regular_sibling(const char *dir, const char *suffix)
 static bool hg_dotgit_target(const char *dir, char *out, size_t cap)
 {
     char dotgit[HG_SIB_CAP], line[HOST_GC_PATH_CAP + 16];
-    struct stat st;
+    struct platform_file_metadata metadata;
     FILE *f;
     if (!hg_sibling_path(dotgit, sizeof(dotgit), dir, "/.git") ||
-        lstat(dotgit, &st) != 0 || !S_ISREG(st.st_mode))
+        platform_file_metadata_read(dotgit, &metadata) != PLATFORM_FILE_METADATA_OK)
         return false;
     f = fopen(dotgit, "r");
     if (!f)
@@ -131,7 +133,7 @@ bool hg_orphan_shape(const char *dir)
 {
     char target[HOST_GC_PATH_CAP];
     struct stat st;
-    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+    if (platform_directory_probe_real(dir) != PLATFORM_DIRECTORY_PROBE_OK ||
         !hg_regular_sibling(dir, ".lock") ||
         !hg_dotgit_target(dir, target, sizeof(target)))
         return false;

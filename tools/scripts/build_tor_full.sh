@@ -42,6 +42,27 @@ HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
 # VENDOR_TARGET is unset, so every existing native path is byte-for-byte
 # unchanged.
 VENDOR_TARGET="${VENDOR_TARGET:-}"
+VENDOR_CONFIG_HOST="$VENDOR_TARGET"
+case "$VENDOR_TARGET" in
+    aarch64-linux-android*)
+        android_api="${VENDOR_TARGET#aarch64-linux-android}"
+        case "$android_api" in
+            ""|*[!0-9]*|0*) echo "Android target requires a decimal API level" >&2; exit 1 ;;
+        esac
+        [[ ${#android_api} -le 2 && "$android_api" -ge 21 ]] ||
+            { echo "Android ARM64 API level must be 21..99" >&2; exit 1; }
+        export VENDOR_CC="${VENDOR_CC:-$VENDOR_TARGET-clang}"
+        export VENDOR_AR="${VENDOR_AR:-llvm-ar}"
+        export VENDOR_RANLIB="${VENDOR_RANLIB:-llvm-ranlib}"
+        VENDOR_CONFIG_HOST=aarch64-linux-android
+        if ! printf '#if !defined(__ANDROID__) || !defined(__aarch64__) || !defined(__ANDROID_API__) || __ANDROID_API__ != %s\n#error Android compiler target mismatch\n#endif\n' "$android_api" |
+            "$VENDOR_CC" -E -x c - >/dev/null; then
+            echo "Android compiler must target ARM64 API $android_api: $VENDOR_CC" >&2
+            exit 1
+        fi
+
+        ;;
+esac
 TOR_BUILD_DIR="$TOR_DIR"
 # Where configure lives. The host build configures the submodule IN TREE, so
 # vendor/tor gains a config.status; autoconf then REFUSES any out-of-tree
@@ -213,7 +234,7 @@ if [ -n "$VENDOR_TARGET" ]; then
     # own documented escape hatch for exactly that false positive
     # (configure.ac's error text names the flag), not a new check invented
     # here.
-    configure_opts+=(--host="$VENDOR_TARGET" --disable-tool-name-check)
+    configure_opts+=(--host="$VENDOR_CONFIG_HOST" --disable-tool-name-check)
     tor_cross_env=(
         "CC=${VENDOR_CC:-$VENDOR_TARGET-gcc}"
         "AR=${VENDOR_AR:-$VENDOR_TARGET-ar}"
@@ -253,7 +274,7 @@ fi
 # the node links for this exact target, on every host/target that needs it.
 needs_vendored_deps=false
 case "$HOST_OS" in Darwin|MINGW*|MSYS*) needs_vendored_deps=true ;; esac
-case "$VENDOR_TARGET" in *mingw*|*windows*|*darwin*) needs_vendored_deps=true ;; esac
+case "$VENDOR_TARGET" in *mingw*|*windows*|*darwin*|*android*) needs_vendored_deps=true ;; esac
 if $needs_vendored_deps; then
     vendor_missing=""
     for required in \

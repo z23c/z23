@@ -27,6 +27,40 @@
 #include "util/log_macros.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
+
+static _Atomic(const struct mempool_backend_guard *) g_backend_guard;
+
+bool mempool_install_backend_guard(const struct mempool_backend_guard *guard)
+{
+    if (!guard || !guard->acquire || !guard->release) return false;
+    const struct mempool_backend_guard *expected = NULL;
+    return atomic_compare_exchange_strong(&g_backend_guard, &expected, guard) ||
+           expected == guard;
+}
+
+static const struct mempool_backend_guard *mempool_guard_enter(
+    struct main_state *state)
+{
+    const struct mempool_backend_guard *guard = atomic_load(&g_backend_guard);
+    if (!guard) {
+        zcl_mutex_lock(&state->cs_main);
+        return NULL;
+    }
+    for (;;) {
+        guard->acquire();
+        if (zcl_mutex_trylock(&state->cs_main)) return guard;
+        guard->release();
+        platform_sleep_ms(1);
+    }
+}
+
+static void mempool_guard_leave(struct main_state *state,
+                                const struct mempool_backend_guard *guard)
+{
+    zcl_mutex_unlock(&state->cs_main);
+    if (guard) guard->release();
+}
 
 static void mempool_accept_detail(char *out, size_t cap, const char *detail)
 {
@@ -139,12 +173,13 @@ enum mempool_accept_result accept_to_mempool_detailed(
     /* BIP113 mempool policy evaluates against the current tip's MTP.
      * Snapshot height + cutoff under cs_main so a concurrent reorg cannot
      * give us a height from one tip and a timestamp from another. */
-    zcl_mutex_lock(&main_state->cs_main);
+    const struct mempool_backend_guard *snapshot_guard =
+        mempool_guard_enter(main_state);
     tip_height = active_chain_height(&main_state->chain_active);
     struct block_index *tip = active_chain_tip(&main_state->chain_active);
     if (tip)
         lock_time_cutoff = block_index_get_median_time_past(tip);
-    zcl_mutex_unlock(&main_state->cs_main);
+    mempool_guard_leave(main_state, snapshot_guard);
     int next_height = tip_height + 1;
     uint32_t branch_id =
         consensus_current_epoch_branch_id(next_height, &params->consensus);
@@ -193,29 +228,29 @@ enum mempool_accept_result accept_to_mempool_detailed(
      * confirmed transaction using the pre-connect cache generation. If we
      * win the lock first, finalize removes our entry. If finalize wins, it
      * invalidates changed cache keys first and this recheck fails closed. */
-    zcl_mutex_lock(&main_state->cs_main);
+    const struct mempool_backend_guard *guard = mempool_guard_enter(main_state);
     if (!coins_view_cache_have_inputs(coins_tip, tx)) {
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_MISSING_INPUTS;
     }
     if (!coins_view_cache_have_joinsplit_requirements(coins_tip, tx)) {
         mempool_accept_detail(detail_out, detail_cap,
                               "shielded-requirements-missing");
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_INVALID;
     }
 
     int64_t value_in = coins_view_cache_get_value_in(coins_tip, tx);
     if (value_in < 0) {
         mempool_accept_detail(detail_out, detail_cap, "input-value-invalid");
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_INVALID;
     }
 
     int64_t value_out = transaction_get_value_out(tx);
     if (value_out < 0 || value_in < value_out) {
         mempool_accept_detail(detail_out, detail_cap, "value-balance-invalid");
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_INVALID;
     }
 
@@ -223,7 +258,7 @@ enum mempool_accept_result accept_to_mempool_detailed(
 
     int64_t min_relay_fee = pool->min_relay_fee;
     if (min_relay_fee > 0 && fee < min_relay_fee) {
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_BELOW_FEE;
     }
 
@@ -235,7 +270,7 @@ enum mempool_accept_result accept_to_mempool_detailed(
         if (!missing_inputs)
             mempool_accept_detail(detail_out, detail_cap,
                                   "transparent-script-invalid");
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return missing_inputs ? MEMPOOL_ACCEPT_MISSING_INPUTS
                               : MEMPOOL_ACCEPT_INVALID;
     }
@@ -260,7 +295,7 @@ enum mempool_accept_result accept_to_mempool_detailed(
         enum mempool_accept_result race_result = tx_mempool_exists(pool, &hash)
             ? MEMPOOL_ACCEPT_DUPLICATE
             : MEMPOOL_ACCEPT_INTERNAL_ERROR;
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return race_result;
     }
 
@@ -268,12 +303,11 @@ enum mempool_accept_result accept_to_mempool_detailed(
      * recomputed. Never report success/relay a candidate no longer owned by
      * the mempool. */
     if (!tx_mempool_exists(pool, &hash)) {
-        zcl_mutex_unlock(&main_state->cs_main);
+        mempool_guard_leave(main_state, guard);
         return MEMPOOL_ACCEPT_INTERNAL_ERROR;
     }
 
-    zcl_mutex_unlock(&main_state->cs_main);
-
+    mempool_guard_leave(main_state, guard);
     return MEMPOOL_ACCEPT_OK;
 }
 

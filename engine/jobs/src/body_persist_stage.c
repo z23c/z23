@@ -597,6 +597,7 @@ int body_persist_stage_drain(int max_steps)
         if (!batched)
             progress_store_tx_unlock();
     }
+    struct catchup_drain_budget budget = catchup_drain_budget_begin();
     int advanced = 0;
     /* Reuse one read fd across this drain's tail reads (append-only forward
      * fold on this thread); exit() closes it. Reads below the sealed frontier
@@ -607,6 +608,7 @@ int body_persist_stage_drain(int max_steps)
         if (r != JOB_ADVANCED)
             break;
         advanced++;
+        if (catchup_drain_budget_due(&budget)) break;
     }
     disk_block_io_read_fd_cache_exit();
     if (batched) {

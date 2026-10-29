@@ -232,12 +232,14 @@ static void ts_block_free(struct block *blk)
     free(blk->vtx);
 }
 
-static sqlite3 *ts_db(int *failures)
+static sqlite3 *ts_db(int *failure_count)
 {
     sqlite3 *db = NULL;
+    int failures = 0;
     TS_CHECK("open in-memory store",
              sqlite3_open(":memory:", &db) == SQLITE_OK &&
              shielded_pool_kv_ensure_schema(db));
+    *failure_count += failures;
     return db;
 }
 

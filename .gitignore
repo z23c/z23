@@ -1,3 +1,4 @@
+# Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
 # Ignoring a file is not the same as it being welcome. The repository ROOT is
 # a curated list — source areas, top-level docs, and a short set of generated
 # entries (build/, test-tmp/, compile_commands.json, tool caches). The rules
@@ -26,7 +27,7 @@ vendor/.build/
 # Generated control state, never a compiler input.
 /vendor/.build.lock
 vendor/.build-*/
-vendor/.build-*.lock/
+vendor/.build-*.lock
 # Per-target archives + headers, built from the SAME pinned sources by
 # VENDOR_TARGET=<triple> tools/scripts/build_vendor.sh for a cross release
 # (e.g. vendor/cross/x86_64-w64-mingw32). vendor/lib holds exactly one target,

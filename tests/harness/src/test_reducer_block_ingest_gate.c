@@ -270,6 +270,8 @@ static int rbi_context_valid_twin(struct chain_activation_controller *ctl,
 
 void reducer_ingest_set_context_main_hook_for_testing(
     void (*hook)(void *), void *ctx);
+void reducer_ingest_set_context_retry_hook_for_testing(
+    void (*hook)(void *), void *ctx);
 
 struct rbi_main_cycle {
     pthread_mutex_t mutex;
@@ -278,7 +280,7 @@ struct rbi_main_cycle {
     struct block *candidate;
     struct validation_state *verdict;
     int route;
-    bool attempted, accepted;
+    bool attempted, accepted, proceed;
 };
 
 static void rbi_observe_main_attempt(void *arg)
@@ -331,6 +333,52 @@ static bool rbi_intake_main_order(struct chain_activation_controller *ctl,
     pthread_mutex_destroy(&cycle.mutex);
     *ordered = started && attempted && progress_free;
     return cycle.accepted;
+}
+
+static void rbi_hold_retry(void *arg)
+{
+    struct rbi_main_cycle *cycle = arg;
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->attempted = true;
+    pthread_cond_broadcast(&cycle->changed);
+    while (!cycle->proceed) pthread_cond_wait(&cycle->changed, &cycle->mutex);
+    pthread_mutex_unlock(&cycle->mutex);
+}
+
+static bool rbi_progress_contention(struct chain_activation_controller *ctl,
+                                    struct block *candidate)
+{
+    struct validation_state verdict;
+    struct rbi_main_cycle cycle = {
+        .mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER,
+        .ctl = ctl, .candidate = candidate, .route = 2, .verdict = &verdict
+    };
+    reducer_ingest_set_context_retry_hook_for_testing(rbi_hold_retry, &cycle);
+    progress_store_tx_lock();
+    pthread_t worker;
+    bool started = pthread_create(&worker, NULL, rbi_contended_worker, &cycle) == 0;
+    struct timespec deadline;
+    platform_time_realtime_timespec(&deadline);
+    deadline.tv_sec += 5;
+    pthread_mutex_lock(&cycle.mutex);
+    int rc = 0;
+    while (started && !cycle.attempted && rc == 0)
+        rc = pthread_cond_timedwait(&cycle.changed, &cycle.mutex, &deadline);
+    bool attempted = cycle.attempted;
+    pthread_mutex_unlock(&cycle.mutex);
+    bool main_free = attempted && zcl_mutex_trylock(&ctl->ms->cs_main);
+    if (main_free) zcl_mutex_unlock(&ctl->ms->cs_main);
+    progress_store_tx_unlock();
+    pthread_mutex_lock(&cycle.mutex);
+    cycle.proceed = true;
+    pthread_cond_broadcast(&cycle.changed);
+    pthread_mutex_unlock(&cycle.mutex);
+    if (started) pthread_join(worker, NULL);
+    reducer_ingest_set_context_retry_hook_for_testing(NULL, NULL);
+    pthread_cond_destroy(&cycle.changed);
+    pthread_mutex_destroy(&cycle.mutex);
+    return started && attempted && main_free && !cycle.accepted &&
+           strcmp(verdict.reject_reason, "time-too-old") == 0;
 }
 
 static int rbi_context_intake_case(void)
@@ -390,6 +438,8 @@ static int rbi_context_intake_case(void)
                 header_admit_stage_cursor() == cursor && active_chain_height(&ms.chain_active) == 28 &&
                 mailbox_header_admit_drain(rbi_discard_header) == 0);
         }
+        RBI_CHECK("context: progress contention releases main before retry",
+                  rbi_progress_contention(&ctl, &candidate));
         failures += rbi_context_valid_twin(&ctl, &candidate, &parents[28]);
     }
     block_free(&candidate);

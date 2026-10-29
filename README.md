@@ -61,7 +61,8 @@ build/bin/z23 status                        # in a second terminal: how it is do
 You need gcc 14+ (or clang with `-std=c23`) and GNU make. The first build
 fetches pinned sources and checks each one's SHA-256; after that it builds
 offline. macOS, Windows and the rest are in
-[Getting Started](docs/node/GETTING_STARTED.md).
+[Getting Started](docs/node/GETTING_STARTED.md). For an experimental Android app, see
+[Android ARM64](docs/dev/ANDROID.md).
 
 ## Run a node
 

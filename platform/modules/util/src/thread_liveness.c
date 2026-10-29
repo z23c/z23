@@ -11,6 +11,7 @@
 #endif
 
 #include "util/thread_liveness.h"
+#include "platform/thread_compat.h"
 
 #include "util/log_macros.h"
 #include "util/thread_registry.h"
@@ -102,7 +103,14 @@ static bool tl_on_respawn(struct liveness_contract *self)
         goto out;
 
     if (atomic_load(&c->worker_tid_set)) {
-#if defined(__linux__)
+#if defined(__ANDROID__)
+        int jr = platform_thread_tryjoin(c->worker_tid, NULL);
+        if (jr != 0) {
+            /* Preserve ownership until Bionic proves the worker has exited. */
+            atomic_store(&self->worker_state, SUPERVISOR_WORKER_EXITED);
+            goto out;
+        }
+#elif defined(__linux__)
         int jr = pthread_tryjoin_np(c->worker_tid, NULL);
 #elif defined(_WIN32)
         int jr = _pthread_tryjoin(c->worker_tid, NULL);
