@@ -78,49 +78,149 @@ static bool fixture_write(const wchar_t *path, char digit)
     return ok;
 }
 
-static bool mutation_acceptance(void)
+static bool mutation_root_create(wchar_t root_wide[MAX_PATH], char *root,
+                                 size_t root_size)
 {
-    wchar_t temp[MAX_PATH], root_wide[MAX_PATH];
-    wchar_t source_dir[MAX_PATH + 32], source[MAX_PATH + 64];
-    wchar_t index_dir[MAX_PATH + 32];
-    char root[2048];
+    wchar_t temp[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, temp);
     if (!n || n >= MAX_PATH ||
         !GetTempFileNameW(temp, L"zci", 0, root_wide)) return false;
     if (!DeleteFileW(root_wide) ||
         WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root_wide, -1,
-                            root, sizeof(root), NULL, NULL) <= 0 ||
+                            root, root_size, NULL, NULL) <= 0 ||
         !platform_private_directory_create(root)) return false;
+    return true;
+}
+
+static bool mutation_initial_refresh(const char *root,
+                                     struct ci_merkle_node *initial,
+                                     struct ci_merkle_cost *cost)
+{
+    struct ci_merkle *tree = ci_merkle_refresh(root, cost);
+    bool ok = tree && ci_merkle_root(tree, initial) && cost->files_total == 1 &&
+              cost->files_read == 1;
+    ci_merkle_free(tree);
+    return ok;
+}
+
+static bool mutation_warm_reuse(const char *root,
+                                const struct ci_merkle_node *initial,
+                                struct ci_merkle_node *reference,
+                                struct ci_merkle_cost *cost)
+{
+    struct ci_merkle *tree = ci_merkle_refresh(root, cost);
+    bool ok = tree && ci_merkle_root(tree, reference) && cost->snapshot_used &&
+              cost->files_read == 0 && cost->bytes_read == 0 &&
+              cost->leaves_reused == 1 &&
+              memcmp(initial->digest.bytes, reference->digest.bytes, 32) == 0;
+    ci_merkle_free(tree);
+    return ok;
+}
+
+static bool mutation_changed_refresh(const char *root,
+                                     const struct ci_merkle_node *initial,
+                                     struct ci_merkle_node *changed,
+                                     struct ci_merkle_cost *cost)
+{
+    struct ci_merkle *tree = ci_merkle_refresh(root, cost);
+    bool ok = tree && ci_merkle_root(tree, changed) && cost->files_read == 1 &&
+              memcmp(initial->digest.bytes, changed->digest.bytes, 32) != 0;
+    ci_merkle_free(tree);
+    return ok;
+}
+
+static bool mutation_cold_matches(const char *root,
+                                  const struct ci_merkle_node *changed,
+                                  struct ci_merkle_node *reference,
+                                  struct ci_merkle_cost *cost)
+{
+    struct ci_merkle *tree = ci_merkle_build_cold(root, cost);
+    bool ok = tree && ci_merkle_root(tree, reference) &&
+              memcmp(changed->digest.bytes, reference->digest.bytes, 32) == 0;
+    ci_merkle_free(tree);
+    return ok;
+}
+
+static bool mutation_cleanup(const char *root, const wchar_t *root_wide,
+                             const wchar_t *source_dir, const wchar_t *source,
+                             const wchar_t *index_dir)
+{
+    bool cleaned = ci_merkle_forget(root);
+    if (!RemoveDirectoryW(index_dir)) cleaned = false;
+    if (!DeleteFileW(source)) cleaned = false;
+    if (!RemoveDirectoryW(source_dir)) cleaned = false;
+    if (!RemoveDirectoryW(root_wide)) cleaned = false;
+    return cleaned;
+}
+
+static bool mutation_acceptance(void)
+{
+    wchar_t root_wide[MAX_PATH];
+    wchar_t source_dir[MAX_PATH + 32], source[MAX_PATH + 64];
+    wchar_t index_dir[MAX_PATH + 32];
+    char root[2048];
+    if (!mutation_root_create(root_wide, root, sizeof(root))) return false;
     (void)swprintf(source_dir, MAX_PATH + 32, L"%ls\\platform", root_wide);
     (void)swprintf(source, MAX_PATH + 64, L"%ls\\item.c", source_dir);
     (void)swprintf(index_dir, MAX_PATH + 32, L"%ls\\.codeindex", root_wide);
     bool ok = CreateDirectoryW(source_dir, NULL) && fixture_write(source, '1');
     struct ci_merkle_cost cost = {0};
     struct ci_merkle_node initial, changed, reference;
-    struct ci_merkle *tree = ok ? ci_merkle_refresh(root, &cost) : NULL;
-    ok = tree && ci_merkle_root(tree, &initial) && cost.files_total == 1 &&
-         cost.files_read == 1;
-    ci_merkle_free(tree);
-    tree = ok ? ci_merkle_refresh(root, &cost) : NULL;
-    ok = tree && ci_merkle_root(tree, &reference) && cost.snapshot_used &&
-         cost.files_read == 0 && cost.bytes_read == 0 && cost.leaves_reused == 1 &&
-         memcmp(initial.digest.bytes, reference.digest.bytes, 32) == 0;
-    ci_merkle_free(tree);
-    ok = ok && fixture_write(source, '2');
-    tree = ok ? ci_merkle_refresh(root, &cost) : NULL;
-    ok = tree && ci_merkle_root(tree, &changed) && cost.files_read == 1 &&
-         memcmp(initial.digest.bytes, changed.digest.bytes, 32) != 0;
-    ci_merkle_free(tree);
-    tree = ok ? ci_merkle_build_cold(root, &cost) : NULL;
-    ok = tree && ci_merkle_root(tree, &reference) &&
-         memcmp(changed.digest.bytes, reference.digest.bytes, 32) == 0;
-    ci_merkle_free(tree);
-    bool cleaned = ci_merkle_forget(root);
-    if (!RemoveDirectoryW(index_dir)) cleaned = false;
-    if (!DeleteFileW(source)) cleaned = false;
-    if (!RemoveDirectoryW(source_dir)) cleaned = false;
-    if (!RemoveDirectoryW(root_wide)) cleaned = false;
+    ok = ok && mutation_initial_refresh(root, &initial, &cost);
+    ok = ok && mutation_warm_reuse(root, &initial, &reference, &cost);
+    ok = ok && fixture_write(source, '2') &&
+         mutation_changed_refresh(root, &initial, &changed, &cost);
+    ok = ok && mutation_cold_matches(root, &changed, &reference, &cost);
+    bool cleaned = mutation_cleanup(root, root_wide, source_dir, source,
+                                    index_dir);
     return ok && cleaned;
+}
+
+static bool source_root_capture(LARGE_INTEGER *frequency, LARGE_INTEGER *start,
+                                LARGE_INTEGER *end, uint8_t first[32],
+                                uint8_t second[32])
+{
+    return QueryPerformanceFrequency(frequency) &&
+           ci_source_stat_root_sha3(".", first) &&
+           QueryPerformanceCounter(start) &&
+           ci_source_stat_root_sha3(".", second) &&
+           QueryPerformanceCounter(end);
+}
+
+static bool merkle_reuse_unchanged(const struct ci_merkle_cost *cost,
+                                   const struct ci_merkle_node *prepared,
+                                   const struct ci_merkle_node *reused)
+{
+    return cost->snapshot_used && cost->files_total != 0 &&
+           cost->files_read == 0 && cost->bytes_read == 0 &&
+           cost->leaves_reused == cost->files_total &&
+           memcmp(prepared->digest.bytes, reused->digest.bytes, 32) == 0;
+}
+
+static int merkle_reuse_stage(LARGE_INTEGER frequency, LARGE_INTEGER *start,
+                              LARGE_INTEGER *end, uint64_t budget_us)
+{
+    struct ci_merkle_cost cost = {0};
+    struct ci_merkle_node prepared, reused;
+    struct ci_merkle *tree = ci_merkle_refresh(".", &cost);
+    bool ok = tree && ci_merkle_root(tree, &prepared);
+    ci_merkle_free(tree);
+    if (!ok || !QueryPerformanceCounter(start))
+        return fail("prepare native Merkle refresh");
+    tree = ci_merkle_refresh(".", &cost);
+    ok = tree && ci_merkle_root(tree, &reused) &&
+         QueryPerformanceCounter(end);
+    ci_merkle_free(tree);
+    if (!ok || !merkle_reuse_unchanged(&cost, &prepared, &reused))
+        return fail("unchanged source tree was not fully reused");
+    uint64_t microseconds = elapsed_us(*start, *end, frequency);
+    if (microseconds > budget_us)
+        return fail("warm native Merkle refresh exceeded the latency budget");
+    printf("codeindex_freshness_windows_acceptance: Merkle PASS "
+           "files_reused=%u bytes_read=%llu elapsed_us=%llu\n",
+           cost.leaves_reused, (unsigned long long)cost.bytes_read,
+           (unsigned long long)microseconds);
+    return 0;
 }
 
 int main(void)
@@ -128,11 +228,7 @@ int main(void)
     static const uint64_t budget_us = UINT64_C(150000);
     LARGE_INTEGER frequency, start, end;
     uint8_t first[32], second[32];
-    if (!QueryPerformanceFrequency(&frequency) ||
-        !ci_source_stat_root_sha3(".", first) ||
-        !QueryPerformanceCounter(&start) ||
-        !ci_source_stat_root_sha3(".", second) ||
-        !QueryPerformanceCounter(&end))
+    if (!source_root_capture(&frequency, &start, &end, first, second))
         return fail("source metadata root capture");
     if (memcmp(first, second, sizeof(first)) != 0)
         return fail("unchanged source metadata root changed");
@@ -149,30 +245,7 @@ int main(void)
            (unsigned long long)microseconds);
     if (!mutation_acceptance())
         return fail("native Merkle reuse or same-size subsecond edit detection");
-    struct ci_merkle_cost cost = {0};
-    struct ci_merkle_node prepared, reused;
-    struct ci_merkle *tree = ci_merkle_refresh(".", &cost);
-    bool ok = tree && ci_merkle_root(tree, &prepared);
-    ci_merkle_free(tree);
-    if (!ok || !QueryPerformanceCounter(&start))
-        return fail("prepare native Merkle refresh");
-    tree = ci_merkle_refresh(".", &cost);
-    ok = tree && ci_merkle_root(tree, &reused) &&
-         QueryPerformanceCounter(&end);
-    ci_merkle_free(tree);
-    if (!ok || !cost.snapshot_used || cost.files_total == 0 ||
-        cost.files_read != 0 || cost.bytes_read != 0 ||
-        cost.leaves_reused != cost.files_total ||
-        memcmp(prepared.digest.bytes, reused.digest.bytes, 32) != 0)
-        return fail("unchanged source tree was not fully reused");
-    microseconds = elapsed_us(start, end, frequency);
-    if (microseconds > budget_us)
-        return fail("warm native Merkle refresh exceeded the latency budget");
-    printf("codeindex_freshness_windows_acceptance: Merkle PASS "
-           "files_reused=%u bytes_read=%llu elapsed_us=%llu\n",
-           cost.leaves_reused, (unsigned long long)cost.bytes_read,
-           (unsigned long long)microseconds);
-    return 0;
+    return merkle_reuse_stage(frequency, &start, &end, budget_us);
 }
 
 #else
