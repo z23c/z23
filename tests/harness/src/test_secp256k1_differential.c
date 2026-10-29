@@ -455,29 +455,10 @@ static void dump_seeds(const struct secp_corpus *c, const char *dir)
     printf("  seeds: wrote %zu vectors to %s\n", c->n, dir);
 }
 
-int test_secp256k1_differential(void)
+/* ── L3 ground-truth checks: each prints its own line and returns failures ── */
+static int secp_l3_base_point(void)
 {
     int failures = 0;
-    printf("\n=== secp256k1_differential (candidate vs vendored archive) ===\n");
-
-    g_ref_ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY |
-                                         SECP256K1_CONTEXT_SIGN);
-    if (!g_ref_ctx) {
-        printf("FAIL: reference context creation failed\n");
-        return 1;
-    }
-
-    crypto_sig_verify_fn cand = candidate_verify_fn();
-    printf("candidate registered... ");
-    if (cand) {
-        printf("OK\n");
-    } else {
-        printf("FAIL (no ACTIVE ecdsa-secp256k1 scheme)\n");
-        secp256k1_context_destroy(g_ref_ctx);
-        return 1;
-    }
-
-    /* ── L3: external ground truth ──────────────────────────────────── */
     printf("L3 ground truth: scalar 1 -> published base point G... ");
     {
         struct privkey one;
@@ -492,7 +473,12 @@ int test_secp256k1_differential(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int secp_l3_order_minus_one(void)
+{
+    int failures = 0;
     printf("L3 ground truth: scalar n-1 -> -G (same x, odd y)... ");
     {
         struct privkey nm1;
@@ -508,7 +494,12 @@ int test_secp256k1_differential(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int secp_l3_rejected_scalars(void)
+{
+    int failures = 0;
     printf("L3 ground truth: scalars 0, n, n+1 rejected as secret keys... ");
     {
         struct privkey z, n, np1;
@@ -523,7 +514,12 @@ int test_secp256k1_differential(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int secp_l3_homomorphism(void)
+{
+    int failures = 0;
     printf("L3 algebraic: pubkey(a) tweaked by b == pubkey(a+b)... ");
     {
         /* (a)G + (b)G == (a+b)G. A homomorphism no implementation can satisfy
@@ -548,6 +544,227 @@ int test_secp256k1_differential(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+/* ── L1 + L2 per-vector step: returns divergences for this vector ─────── */
+static int secp_check_one_vector(crypto_sig_verify_fn cand,
+                                 const struct secp_vector *v,
+                                 struct secp_transcript *tr, int *accepted)
+{
+    int diverged = 0;
+    bool cv = cand(v->pub, v->publen, v->msg, v->msglen, v->sig, v->siglen);
+    bool rv = ref_ecdsa_verify(v->pub, v->publen, v->msg, v->msglen,
+                               v->sig, v->siglen);
+    if (cv != rv) {
+        printf("  DIVERGENCE [%s]: candidate=%d reference=%d\n",
+               v->name, cv, rv);
+        diverged++;
+    }
+    if (cv) (*accepted)++;
+
+    /* The real consensus entry point must agree with the registry
+     * wrapper for every input struct pubkey can represent. */
+    if (v->publen > 0 && v->publen <= PUBLIC_KEY_SIZE && v->msglen == 32) {
+        struct pubkey pk;
+        pubkey_init(&pk);
+        pubkey_set(&pk, v->pub, (unsigned int)v->publen);
+        struct uint256 h;
+        memcpy(h.data, v->msg, 32);
+        bool pv = pubkey_verify(&pk, &h, v->sig, v->siglen);
+        if (pv != cv) {
+            printf("  DIVERGENCE [%s]: pubkey_verify=%d registry=%d\n",
+                   v->name, pv, cv);
+            diverged++;
+        }
+    }
+
+    tr_str(tr, v->name);
+    tr_bool(tr, cv);
+    tr_bool(tr, ref_is_low_s(v->sig, v->siglen));
+    tr_bool(tr, ref_pubkey_on_curve(v->pub, v->publen));
+    return diverged;
+}
+
+/* ── L1 over the corpus, plus the non-vacuity floor ─────────────────────── */
+static int secp_l1_corpus(crypto_sig_verify_fn cand,
+                          const struct secp_corpus *corpus,
+                          struct secp_transcript *tr)
+{
+    int failures = 0;
+    int diverged = 0, accepted = 0;
+    for (size_t i = 0; i < corpus->n; i++)
+        diverged += secp_check_one_vector(cand, &corpus->v[i], tr, &accepted);
+    printf("L1 differential over %zu vectors... ", corpus->n);
+    if (diverged == 0) printf("OK (%d accept / %zu)\n", accepted, corpus->n);
+    else { printf("FAIL (%d divergences)\n", diverged); failures += diverged; }
+
+    /* At least one vector must ACCEPT and at least one must REJECT, or the
+     * corpus is vacuous and an always-false implementation would pass. */
+    printf("corpus is non-vacuous (some accept, some reject)... ");
+    if (accepted > 0 && (size_t)accepted < corpus->n) printf("OK\n");
+    else { printf("FAIL (accepted=%d of %zu)\n", accepted, corpus->n); failures++; }
+    return failures;
+}
+
+static int secp_null_arg_contract(crypto_sig_verify_fn cand)
+{
+    int failures = 0;
+    printf("null-argument contract matches reference... ");
+    {
+        uint8_t m[32] = {0}, s[8] = {0}, p[33] = {0};
+        struct { const uint8_t *pub; const uint8_t *msg; const uint8_t *sig; } n3[] = {
+            { NULL, m, s }, { p, NULL, s }, { p, m, NULL }, { NULL, NULL, NULL },
+        };
+        bool ok = true;
+        for (size_t i = 0; i < 4; i++) {
+            bool cv = cand(n3[i].pub, 33, n3[i].msg, 32, n3[i].sig, 8);
+            bool rv = ref_ecdsa_verify(n3[i].pub, 33, n3[i].msg, 32, n3[i].sig, 8);
+            ok = ok && !cv && cv == rv;
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int secp_low_s_split(struct secp_base *base, struct secp_transcript *tr)
+{
+    int failures = 0;
+    printf("low-S: pubkey_check_low_s rejects high-S, verify still accepts... ");
+    {
+        uint8_t high[SECP_VEC_MAX_SIG];
+        size_t hlen = secp_der_encode(high, sizeof(high), base->r, base->s_high,
+                                      false, false);
+        bool low_ok  = pubkey_check_low_s(base->sig_der, base->sig_len);
+        bool high_ok = pubkey_check_low_s(high, hlen);
+        bool verifies = pubkey_verify(&base->pub_c, &base->msg, high, hlen);
+        bool ref_low  = ref_is_low_s(base->sig_der, base->sig_len);
+        bool ref_high = ref_is_low_s(high, hlen);
+        if (low_ok && !high_ok && verifies &&
+            low_ok == ref_low && high_ok == ref_high) {
+            printf("OK\n");
+        } else {
+            printf("FAIL (low=%d high=%d verify=%d)\n", low_ok, high_ok, verifies);
+            failures++;
+        }
+        tr_bool(tr, low_ok); tr_bool(tr, high_ok); tr_bool(tr, verifies);
+    }
+    return failures;
+}
+
+static int secp_rfc6979_determinism(struct secp_base *base, struct secp_transcript *tr)
+{
+    int failures = 0;
+    printf("RFC6979 determinism: repeated signing is byte-identical... ");
+    {
+        uint8_t again[SIGNATURE_SIZE];
+        size_t alen = sizeof(again);
+        bool ok = privkey_sign(&base->key, &base->msg, again, &alen) &&
+                  alen == base->sig_len &&
+                  memcmp(again, base->sig_der, alen) == 0;
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+        tr_bytes(tr, base->sig_der, base->sig_len);
+        tr_bytes(tr, base->pub_c.vch, base->pub_c.size);
+        tr_bytes(tr, base->pub_u.vch, base->pub_u.size);
+    }
+    return failures;
+}
+
+static int secp_recovery_round_trip(struct secp_base *base, struct secp_transcript *tr)
+{
+    int failures = 0;
+    printf("compact recovery round trip + adversarial headers... ");
+    {
+        uint8_t comp[COMPACT_SIGNATURE_SIZE];
+        bool ok = privkey_sign_compact(&base->key, &base->msg, comp);
+        struct pubkey rec;
+        pubkey_init(&rec);
+        ok = ok && pubkey_recover_compact(&rec, &base->msg, comp);
+        ok = ok && rec.size == base->pub_c.size &&
+             memcmp(rec.vch, base->pub_c.vch, rec.size) == 0;
+
+        /* A recovered key from a WRONG message must not equal the signer. */
+        struct uint256 other = base->msg;
+        other.data[0] ^= 0xFF;
+        struct pubkey wrongrec;
+        pubkey_init(&wrongrec);
+        bool recovered_other = pubkey_recover_compact(&wrongrec, &other, comp);
+        ok = ok && (!recovered_other ||
+                    wrongrec.size != base->pub_c.size ||
+                    memcmp(wrongrec.vch, base->pub_c.vch, wrongrec.size) != 0);
+
+        /* All-zero compact signature must not recover a usable key. */
+        uint8_t zerosig[COMPACT_SIGNATURE_SIZE] = {0};
+        zerosig[0] = 27;
+        struct pubkey zrec;
+        pubkey_init(&zrec);
+        bool zok = pubkey_recover_compact(&zrec, &base->msg, zerosig);
+        ok = ok && (!zok || !pubkey_is_fully_valid(&zrec));
+
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+        tr_bytes(tr, comp, sizeof(comp));
+    }
+    return failures;
+}
+
+static int secp_l2_golden(struct secp_transcript *tr)
+{
+    int failures = 0;
+    unsigned char digest[32];
+    sha3_256_finalize(&tr->h, digest);
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    hex[64] = '\0';
+
+    if (getenv("ZCL_SECP_GOLDEN_RECORD")) {
+        printf("L2 golden RECORD MODE: %s\n", hex);
+    } else {
+        printf("L2 golden transcript... ");
+        if (strcmp(hex, SECP_GOLDEN_SHA3) == 0) {
+            printf("OK\n");
+        } else {
+            printf("FAIL\n    expected %s\n    actual   %s\n",
+                   SECP_GOLDEN_SHA3, hex);
+            printf("    (an intentional change re-records with "
+                   "ZCL_SECP_GOLDEN_RECORD=1; a surprise here is a "
+                   "consensus-visible divergence)\n");
+            failures++;
+        }
+    }
+    return failures;
+}
+
+int test_secp256k1_differential(void)
+{
+    int failures = 0;
+    printf("\n=== secp256k1_differential (candidate vs vendored archive) ===\n");
+
+    g_ref_ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY |
+                                         SECP256K1_CONTEXT_SIGN);
+    if (!g_ref_ctx) {
+        printf("FAIL: reference context creation failed\n");
+        return 1;
+    }
+
+    crypto_sig_verify_fn cand = candidate_verify_fn();
+    printf("candidate registered... ");
+    if (cand) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (no ACTIVE ecdsa-secp256k1 scheme)\n");
+        secp256k1_context_destroy(g_ref_ctx);
+        return 1;
+    }
+
+    /* ── L3: external ground truth ──────────────────────────────────── */
+    failures += secp_l3_base_point();
+    failures += secp_l3_order_minus_one();
+    failures += secp_l3_rejected_scalars();
+    failures += secp_l3_homomorphism();
 
     /* ── build the corpus ───────────────────────────────────────────── */
     struct secp_base base;
@@ -571,160 +788,22 @@ int test_secp256k1_differential(void)
     /* ── L1 + L2 over the corpus ────────────────────────────────────── */
     struct secp_transcript tr;
     tr_init(&tr);
-    int diverged = 0, accepted = 0;
-    for (size_t i = 0; i < corpus.n; i++) {
-        const struct secp_vector *v = &corpus.v[i];
-        bool cv = cand(v->pub, v->publen, v->msg, v->msglen, v->sig, v->siglen);
-        bool rv = ref_ecdsa_verify(v->pub, v->publen, v->msg, v->msglen,
-                                   v->sig, v->siglen);
-        if (cv != rv) {
-            printf("  DIVERGENCE [%s]: candidate=%d reference=%d\n",
-                   v->name, cv, rv);
-            diverged++;
-        }
-        if (cv) accepted++;
-
-        /* The real consensus entry point must agree with the registry
-         * wrapper for every input struct pubkey can represent. */
-        if (v->publen > 0 && v->publen <= PUBLIC_KEY_SIZE && v->msglen == 32) {
-            struct pubkey pk;
-            pubkey_init(&pk);
-            pubkey_set(&pk, v->pub, (unsigned int)v->publen);
-            struct uint256 h;
-            memcpy(h.data, v->msg, 32);
-            bool pv = pubkey_verify(&pk, &h, v->sig, v->siglen);
-            if (pv != cv) {
-                printf("  DIVERGENCE [%s]: pubkey_verify=%d registry=%d\n",
-                       v->name, pv, cv);
-                diverged++;
-            }
-        }
-
-        tr_str(&tr, v->name);
-        tr_bool(&tr, cv);
-        tr_bool(&tr, ref_is_low_s(v->sig, v->siglen));
-        tr_bool(&tr, ref_pubkey_on_curve(v->pub, v->publen));
-    }
-    printf("L1 differential over %zu vectors... ", corpus.n);
-    if (diverged == 0) printf("OK (%d accept / %zu)\n", accepted, corpus.n);
-    else { printf("FAIL (%d divergences)\n", diverged); failures += diverged; }
-
-    /* At least one vector must ACCEPT and at least one must REJECT, or the
-     * corpus is vacuous and an always-false implementation would pass. */
-    printf("corpus is non-vacuous (some accept, some reject)... ");
-    if (accepted > 0 && (size_t)accepted < corpus.n) printf("OK\n");
-    else { printf("FAIL (accepted=%d of %zu)\n", accepted, corpus.n); failures++; }
+    failures += secp_l1_corpus(cand, &corpus, &tr);
 
     /* ── NULL-argument contract (cannot ride in a vector) ───────────── */
-    printf("null-argument contract matches reference... ");
-    {
-        uint8_t m[32] = {0}, s[8] = {0}, p[33] = {0};
-        struct { const uint8_t *pub; const uint8_t *msg; const uint8_t *sig; } n3[] = {
-            { NULL, m, s }, { p, NULL, s }, { p, m, NULL }, { NULL, NULL, NULL },
-        };
-        bool ok = true;
-        for (size_t i = 0; i < 4; i++) {
-            bool cv = cand(n3[i].pub, 33, n3[i].msg, 32, n3[i].sig, 8);
-            bool rv = ref_ecdsa_verify(n3[i].pub, 33, n3[i].msg, 32, n3[i].sig, 8);
-            ok = ok && !cv && cv == rv;
-        }
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += secp_null_arg_contract(cand);
 
     /* ── low-S contract split ───────────────────────────────────────── */
-    printf("low-S: pubkey_check_low_s rejects high-S, verify still accepts... ");
-    {
-        uint8_t high[SECP_VEC_MAX_SIG];
-        size_t hlen = secp_der_encode(high, sizeof(high), base.r, base.s_high,
-                                      false, false);
-        bool low_ok  = pubkey_check_low_s(base.sig_der, base.sig_len);
-        bool high_ok = pubkey_check_low_s(high, hlen);
-        bool verifies = pubkey_verify(&base.pub_c, &base.msg, high, hlen);
-        bool ref_low  = ref_is_low_s(base.sig_der, base.sig_len);
-        bool ref_high = ref_is_low_s(high, hlen);
-        if (low_ok && !high_ok && verifies &&
-            low_ok == ref_low && high_ok == ref_high) {
-            printf("OK\n");
-        } else {
-            printf("FAIL (low=%d high=%d verify=%d)\n", low_ok, high_ok, verifies);
-            failures++;
-        }
-        tr_bool(&tr, low_ok); tr_bool(&tr, high_ok); tr_bool(&tr, verifies);
-    }
+    failures += secp_low_s_split(&base, &tr);
 
     /* ── deterministic signing: same key+msg -> identical DER bytes ──── */
-    printf("RFC6979 determinism: repeated signing is byte-identical... ");
-    {
-        uint8_t again[SIGNATURE_SIZE];
-        size_t alen = sizeof(again);
-        bool ok = privkey_sign(&base.key, &base.msg, again, &alen) &&
-                  alen == base.sig_len &&
-                  memcmp(again, base.sig_der, alen) == 0;
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        tr_bytes(&tr, base.sig_der, base.sig_len);
-        tr_bytes(&tr, base.pub_c.vch, base.pub_c.size);
-        tr_bytes(&tr, base.pub_u.vch, base.pub_u.size);
-    }
+    failures += secp_rfc6979_determinism(&base, &tr);
 
     /* ── recoverable-signature round trip + adversarial recids ──────── */
-    printf("compact recovery round trip + adversarial headers... ");
-    {
-        uint8_t comp[COMPACT_SIGNATURE_SIZE];
-        bool ok = privkey_sign_compact(&base.key, &base.msg, comp);
-        struct pubkey rec;
-        pubkey_init(&rec);
-        ok = ok && pubkey_recover_compact(&rec, &base.msg, comp);
-        ok = ok && rec.size == base.pub_c.size &&
-             memcmp(rec.vch, base.pub_c.vch, rec.size) == 0;
-
-        /* A recovered key from a WRONG message must not equal the signer. */
-        struct uint256 other = base.msg;
-        other.data[0] ^= 0xFF;
-        struct pubkey wrongrec;
-        pubkey_init(&wrongrec);
-        bool recovered_other = pubkey_recover_compact(&wrongrec, &other, comp);
-        ok = ok && (!recovered_other ||
-                    wrongrec.size != base.pub_c.size ||
-                    memcmp(wrongrec.vch, base.pub_c.vch, wrongrec.size) != 0);
-
-        /* All-zero compact signature must not recover a usable key. */
-        uint8_t zerosig[COMPACT_SIGNATURE_SIZE] = {0};
-        zerosig[0] = 27;
-        struct pubkey zrec;
-        pubkey_init(&zrec);
-        bool zok = pubkey_recover_compact(&zrec, &base.msg, zerosig);
-        ok = ok && (!zok || !pubkey_is_fully_valid(&zrec));
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        tr_bytes(&tr, comp, sizeof(comp));
-    }
+    failures += secp_recovery_round_trip(&base, &tr);
 
     /* ── L2 golden ──────────────────────────────────────────────────── */
-    unsigned char digest[32];
-    sha3_256_finalize(&tr.h, digest);
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", digest[i]);
-    hex[64] = '\0';
-
-    if (getenv("ZCL_SECP_GOLDEN_RECORD")) {
-        printf("L2 golden RECORD MODE: %s\n", hex);
-    } else {
-        printf("L2 golden transcript... ");
-        if (strcmp(hex, SECP_GOLDEN_SHA3) == 0) {
-            printf("OK\n");
-        } else {
-            printf("FAIL\n    expected %s\n    actual   %s\n",
-                   SECP_GOLDEN_SHA3, hex);
-            printf("    (an intentional change re-records with "
-                   "ZCL_SECP_GOLDEN_RECORD=1; a surprise here is a "
-                   "consensus-visible divergence)\n");
-            failures++;
-        }
-    }
+    failures += secp_l2_golden(&tr);
 
     const char *seeddir = getenv("ZCL_SECP_DUMP_SEEDS");
     if (seeddir)
