@@ -321,13 +321,9 @@ static int prune_case_rev_unlink_retry(void)
     return failures;
 }
 
-/* ── Tests ─────────────────────────────────────────────────── */
-
-int test_block_pruning(void)
+static int prune_case_short_chain(void)
 {
-    printf("\n=== block_pruning tests ===\n");
     int failures = 0;
-
     /* ── 1. Chain too short — nothing pruned ──────────── */
     {
         struct prune_fixture f;
@@ -346,7 +342,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_basic(void)
+{
+    int failures = 0;
     /* ── 2. Basic pruning — old file deleted ──────────── */
     {
         install_prune_observer();
@@ -418,12 +419,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
-    /* ── 2b. A refused blk unlink must not remove its rev file ─── */
-    failures += prune_case_blk_unlink_refused();
-    /* ── 2c. A refused rev unlink stays eligible for retry ─── */
-    failures += prune_case_rev_unlink_retry();
-
+static int prune_case_file0(void)
+{
+    int failures = 0;
     /* ── 3. File 0 never pruned ───────────────────────── */
     {
         struct prune_fixture f;
@@ -444,7 +445,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_mixed(void)
+{
+    int failures = 0;
     /* ── 4. File with mixed heights — not pruned until max is old enough ── */
     {
         struct prune_fixture f;
@@ -484,7 +490,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_idempotent(void)
+{
+    int failures = 0;
     /* ── 5. Second pass is idempotent ─────────────────── */
     {
         struct prune_fixture f;
@@ -509,7 +520,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_nodata(void)
+{
+    int failures = 0;
     /* ── 6. Blocks without BLOCK_HAVE_DATA are ignored ── */
     {
         struct prune_fixture f;
@@ -532,7 +548,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_sealed_range(void)
+{
+    int failures = 0;
     /* ── 6b. prune_sealed_range: never prunes beyond the caller's proven
      * sealed+verified boundary, even when keep_blocks alone would allow it —
      * the two floors intersect (min), so a shallow seal frontier can never
@@ -589,7 +610,12 @@ int test_block_pruning(void)
 
         fixture_destroy(&f);
     }
+    return failures;
+}
 
+static int prune_case_status_snapshot(void)
+{
+    int failures = 0;
     /* ── 7. Status snapshot works ─────────────────────── */
     {
         struct block_pruning_service svc;
@@ -610,7 +636,12 @@ int test_block_pruning(void)
 
         active_chain_free(&ms.chain_active);
     }
+    return failures;
+}
 
+static int prune_case_null_svc(void)
+{
+    int failures = 0;
     /* ── 8. NULL svc doesn't crash ────────────────────── */
     {
         int p = block_pruning_run_once(NULL);
@@ -621,7 +652,12 @@ int test_block_pruning(void)
         PRUNE_CHECK("prune: get_status(NULL) returns zeroed status",
                     st.state == 0 && st.files_pruned == 0);
     }
+    return failures;
+}
 
+static int prune_case_min_keep(void)
+{
+    int failures = 0;
     /* ── 9. Minimum keep_blocks enforced ──────────────── */
     {
         struct block_pruning_service svc;
@@ -645,7 +681,12 @@ int test_block_pruning(void)
         unsetenv("ZCL_PRUNE_KEEP_BLOCKS");
         active_chain_free(&ms.chain_active);
     }
+    return failures;
+}
 
+static int prune_case_lifecycle(void)
+{
+    int failures = 0;
     /* ── 10. Start/stop lifecycle ─────────────────────── */
     {
         supervisor_reset_for_testing();
@@ -699,6 +740,31 @@ int test_block_pruning(void)
         fixture_destroy(&f);
         supervisor_reset_for_testing();
     }
+    return failures;
+}
+
+/* ── Tests ─────────────────────────────────────────────────── */
+
+int test_block_pruning(void)
+{
+    printf("\n=== block_pruning tests ===\n");
+    int failures = 0;
+
+    failures += prune_case_short_chain();
+    failures += prune_case_basic();
+    /* ── 2b. A refused blk unlink must not remove its rev file ─── */
+    failures += prune_case_blk_unlink_refused();
+    /* ── 2c. A refused rev unlink stays eligible for retry ─── */
+    failures += prune_case_rev_unlink_retry();
+    failures += prune_case_file0();
+    failures += prune_case_mixed();
+    failures += prune_case_idempotent();
+    failures += prune_case_nodata();
+    failures += prune_case_sealed_range();
+    failures += prune_case_status_snapshot();
+    failures += prune_case_null_svc();
+    failures += prune_case_min_keep();
+    failures += prune_case_lifecycle();
 
     event_clear_observers(EV_BLOCK_PRUNING_DONE);
     return failures;

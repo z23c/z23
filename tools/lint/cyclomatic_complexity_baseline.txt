@@ -572,7 +572,6 @@ tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
 tests/harness/src/test_always_sync_lifecycle.c:test_always_sync_lifecycle_platform_arm:47
-tests/harness/src/test_block_pruning.c:test_block_pruning:25
 tests/harness/src/test_block_status_event_restart_proof.c:rp_one_cycle:43
 tests/harness/src/test_block_status_event_restart_proof.c:test_block_status_event_restart_proof_platform_arm:21
 tests/harness/src/test_blog.c:test_blog:60
