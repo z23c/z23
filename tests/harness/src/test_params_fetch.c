@@ -1442,14 +1442,17 @@ static void build_state3(uint8_t *img, const char *magic, uint32_t fi,
     img[88] = bm;
 }
 
+/* Removes only the partial and resume-state names of file 3. The installed
+ * final file is left alone so later tests that depend on it keep running. */
 static void reset_file3(void)
 {
     const char *n = zcl_param_pins[3].name;
     char name[300];
-    rm_in_dir(n);
     snprintf(name, sizeof(name), "%s.part", n);
     rm_in_dir(name);
     snprintf(name, sizeof(name), "%s.zpart", n);
+    rm_in_dir(name);
+    snprintf(name, sizeof(name), "%s.zpart.new", n);
     rm_in_dir(name);
 }
 
@@ -1541,6 +1544,8 @@ static int test_state_reverify_branches(void)
                               junk_man, STATE3_LEN, NULL, 0, false, 0);
     failures += run_state_row("bitmap bit with no matching bytes is dropped",
                               bit_set, STATE3_LEN, NULL, 0, true, 0);
+    /* Leave no partial or resume state behind for the tests that follow. */
+    reset_file3();
 
     /* Bitmap-confirm success needs the real bytes; skipped when absent. */
     size_t len = 0;
@@ -1563,6 +1568,7 @@ static int test_state_reverify_branches(void)
                                   real, STATE3_LEN, flipped, len, true, 0);
         free(flipped);
     }
+    reset_file3();
     free(body);
     return failures;
 }
