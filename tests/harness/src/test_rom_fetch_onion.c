@@ -239,14 +239,8 @@ static bool loopback_listen(platform_socket_t *fd_out, uint16_t *port_out)
     return true;
 }
 
-int test_rom_fetch_onion(void);
-int test_rom_fetch_onion(void)
+static bool check_onion_seeder_routes(void)
 {
-    int failures = 0;
-
-    /* ── 1. an onion seeder is dialed over a circuit, not the resolver ── */
-    printf("rom_fetch_onion: .onion seeder routes to the Tor stream, not "
-           "getaddrinfo... ");
     {
         stub_reset();
         rom_fetch_set_onion_backend_for_test(&g_stub_backend);
@@ -285,13 +279,12 @@ int test_rom_fetch_onion(void)
             platform_socket_close(fd);
         rom_fetch_set_onion_backend_for_test(NULL);
         stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        return ok;
     }
+}
 
-    /* ── 2. clearnet is untouched: same resolver path, no circuit ─────── */
-    printf("rom_fetch_onion: clearnet seeder still takes the resolver path... ");
+static bool check_clearnet_resolver_path(void)
+{
     {
         stub_reset();
         rom_fetch_set_onion_backend_for_test(&g_stub_backend);
@@ -331,18 +324,13 @@ int test_rom_fetch_onion(void)
             platform_socket_close(lfd);
         rom_fetch_set_onion_backend_for_test(NULL);
         stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        return ok;
     }
+}
 
-    /* ── 3. a malformed onion name fails closed - no DNS, no circuit ──── */
-    printf("rom_fetch_onion: malformed .onion refused without resolution or "
-           "circuit... ");
+static bool check_bad_onion_names(void)
+{
     {
-        stub_reset();
-        rom_fetch_set_onion_backend_for_test(&g_stub_backend);
-
         /* Each carries the .onion suffix, so the onion route claims it and it must die there, not fall through to getaddrinfo (a name leak) or clearnet (a downgrade). */
         static const char *const bad[] = {
             "notavalidonion.onion",
@@ -359,7 +347,13 @@ int test_rom_fetch_onion(void)
                 ok = false;
             }
         }
+        return ok;
+    }
+}
 
+static bool check_noncanonical_onion_names(bool ok)
+{
+    {
         /* Suffix detection is case-insensitive and tolerates one terminal root dot; the stricter onion decoder refuses both inside the onion route, before any resolver or circuit. */
         char canonical[ONION_V3_ADDRESS_LEN + 1];
         char uppercase[ONION_V3_ADDRESS_LEN + 1];
@@ -389,6 +383,17 @@ int test_rom_fetch_onion(void)
                 }
             }
         }
+        return ok;
+    }
+}
+
+static bool check_malformed_onion_refused(void)
+{
+    {
+        stub_reset();
+        rom_fetch_set_onion_backend_for_test(&g_stub_backend);
+        bool ok = check_bad_onion_names();
+        ok = check_noncanonical_onion_names(ok);
 
         pthread_mutex_lock(&g_mu);
         ok = ok && g_stub.opens == 0;
@@ -399,14 +404,12 @@ int test_rom_fetch_onion(void)
 
         rom_fetch_set_onion_backend_for_test(NULL);
         stub_reset();
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        return ok;
     }
+}
 
-    /* ── 4. reachability and speed are separate, per transport ────────── */
-    printf("rom_fetch_onion: onion budgets are their own axis and clearnet "
-           "is unchanged... ");
+static bool check_onion_budgets(void)
+{
     {
         struct rom_fetch_dial_budgets b;
         memset(&b, 0, sizeof(b));
@@ -424,10 +427,37 @@ int test_rom_fetch_onion(void)
 
         /* The onion connect budget is the P2P dialer's measured circuit budget. */
         ok = ok && b.onion_connect_ms == ONION_STREAM_CONNECT_TIMEOUT_MS;
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        return ok;
     }
+}
+
+int test_rom_fetch_onion(void);
+int test_rom_fetch_onion(void)
+{
+    int failures = 0;
+
+    /* ── 1. an onion seeder is dialed over a circuit, not the resolver ── */
+    printf("rom_fetch_onion: .onion seeder routes to the Tor stream, not "
+           "getaddrinfo... ");
+    if (check_onion_seeder_routes()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    /* ── 2. clearnet is untouched: same resolver path, no circuit ─────── */
+    printf("rom_fetch_onion: clearnet seeder still takes the resolver path... ");
+    if (check_clearnet_resolver_path()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    /* ── 3. a malformed onion name fails closed - no DNS, no circuit ──── */
+    printf("rom_fetch_onion: malformed .onion refused without resolution or "
+           "circuit... ");
+    if (check_malformed_onion_refused()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    /* ── 4. reachability and speed are separate, per transport ────────── */
+    printf("rom_fetch_onion: onion budgets are their own axis and clearnet "
+           "is unchanged... ");
+    if (check_onion_budgets()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
 
     free(g_stub.echo);
     g_stub.echo = NULL;
