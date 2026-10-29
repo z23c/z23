@@ -108,52 +108,184 @@ static int fgl_case_graders(void)
     "{\"tip\":\"t\",\"note\":\"" note "\",\"state\":\"" state \
     "\",\"ts\":\"" ts "\"}\n"
 
+static void fgl_iso(int64_t t, char *out, size_t cap);
+
+static bool fgl_train(char *buf, size_t cap, int local, int tree, const char *note,
+                      int64_t at)
+{
+    size_t used = strlen(buf);
+    char iso[32];
+    fgl_iso(at - 60, iso, sizeof(iso));
+    int n = snprintf(buf + used, cap - used,
+        "{\"seq\":%lld,\"state\":\"landed\",\"note\":\"%s\",\"worktree\":\"same\","
+        "\"ts\":\"%s\",\"landed_at\":%lld,"
+        "\"local\":\"%040d\",\"base\":\"%040d\",\"tree\":\"%040d\","
+        "\"proof_intent\":\"%040d@%040d\",\"tip_pushed\":\"%040d\","
+        "\"publication_target\":\"%064d\",\"publication_proof\":\"%064d\","
+        "\"publication_bundle\":\"%064d\",\"publication_signer\":\"%064d\","
+        "\"publication_signature\":\"%0128d\",\"remote_tip\":\"%040d\","
+        "\"remote_source\":\"%040d\",\"remote_signer\":\"%064d\","
+        "\"remote_signature\":\"%0128d\"}\n",
+        (long long)at, note, iso, (long long)at, local, 9, tree, local, 9, local,
+        1, 2, 3, 4, 5, local, 6, 7, 8);
+    return n >= 0 && (size_t)n < cap - used;
+}
+
 static int fgl_case_trains(const char *root)
 {
     int failures = 0;
-    char pass[600], fail[600], mixed[600];
+    char pass[600], body[16384] = {0};
     struct zcl_goals_options o;
     fgl_options(&o);
     o.repo = root;
     (void)snprintf(pass, sizeof(pass), "%s/pass.jsonl", root);
-    (void)snprintf(mixed, sizeof(mixed), "%s/mixed.jsonl", root);
-    (void)snprintf(fail, sizeof(fail), "%s/fail.jsonl", root);
-    TEST("G9: three landed trains and no failure pass; a failure or a short "
-         "day does not") {
+    TEST("G9: native identity counts trains, not notes or worktrees") {
         struct zcl_goal_result r;
-        ASSERT(fgl_write(pass,
-            FGL_ROW("a", "landed", "2027-01-15T05:13:20Z")
-            FGL_ROW("b", "landed", "2027-01-15T06:00:00Z")
-            FGL_ROW("b", "landed", "2027-01-15T06:30:00Z")
-            FGL_ROW("c", "landed", "2027-01-15T07:43:20Z")
-            FGL_ROW("old", "failed", "2027-01-14T04:13:20Z")));
+        ASSERT(fgl_train(body, sizeof(body), 4, 14, "old", FGL_NOW - 86401));
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 100));
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "b", FGL_NOW - 90));
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "c", FGL_NOW - 80));
+        ASSERT(fgl_write(pass, body));
         o.outcomes = pass;
         r = zcl_goals_measure(&o, "G9");
-        ASSERT(r.grade == ZCL_GOAL_PASS);
-        ASSERT(fgl_has(r.evidence, "3 landed train(s) and 0 failed"));
-        ASSERT(fgl_write(mixed,
-            FGL_ROW("a", "landed", "2027-01-15T05:13:20Z")
-            FGL_ROW("b", "landed", "2027-01-15T06:00:00Z")
-            FGL_ROW("c", "landed", "2027-01-15T07:43:20Z")
-            FGL_ROW("d", "failed", "2027-01-15T07:00:00Z")));
-        o.outcomes = mixed;
-        r = zcl_goals_measure(&o, "G9");
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
-        ASSERT(fgl_has(r.evidence, "3 landed train(s) and 1 failed"));
-        ASSERT(fgl_write(fail,
-            FGL_ROW("old", "landed", "2027-01-14T04:13:20Z")));
-        o.outcomes = fail;
+        ASSERT(fgl_has(r.evidence, "1 landed train(s)"));
+        ASSERT(fgl_train(body, sizeof(body), 2, 12, "a", FGL_NOW - 70));
+        ASSERT(fgl_train(body, sizeof(body), 3, 13, "a", FGL_NOW - 60));
+        ASSERT(fgl_write(pass, body));
         r = zcl_goals_measure(&o, "G9");
-        ASSERT(r.grade == ZCL_GOAL_FAIL);
-        ASSERT(fgl_has(r.evidence, "0 landed train(s)"));
-        ASSERT(fgl_write(fail,
-            "{\"note\":\"a\",\"state\":\"landed\"}\n"));
-        o.outcomes = fail;
-        r = zcl_goals_measure(&o, "G9");
-        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
-        ASSERT(fgl_has(r.evidence, "no readable timestamp"));
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "3 landed train(s)"));
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static int fgl_case_train_unknown_failure(const char *root)
+{
+    int failures = 0;
+    char path[600], body[16384] = {0};
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/unknown-failure.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: unknown pre-submit catchability cannot pass") {
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 300));
+        ASSERT(fgl_train(body, sizeof(body), 2, 12, "b", FGL_NOW - 200));
+        ASSERT(fgl_train(body, sizeof(body), 3, 13, "c", FGL_NOW - 100));
+        size_t used = strlen(body);
+        int n = snprintf(body + used, sizeof(body) - used,
+            "{\"state\":\"failed\",\"ts\":\"2027-01-15T07:00:00Z\","
+            "\"terminal_recorded_at\":%lld,\"dimension\":\"lint\"}\n",
+            (long long)(FGL_NOW - 30));
+        ASSERT(n > 0 && (size_t)n < sizeof(body) - used);
+        ASSERT(fgl_write(path, body));
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "unknown pre-submit catchability"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_train_identity_refusal(const char *root)
+{
+    int failures = 0;
+    char path[600], body[8192] = {0};
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/identity.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: missing, malformed, and conflicting identity refuse") {
+        ASSERT(fgl_write(path, FGL_ROW("a", "landed", "2027-01-15T07:43:20Z")));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 100));
+        char *field = strstr(body, "\"publication_target\":\"");
+        ASSERT(field != NULL);
+        field[strlen("\"publication_target\":\"")] = 'z';
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        body[0] = '\0';
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 100));
+        ASSERT(fgl_train(body, sizeof(body), 1, 12, "b", FGL_NOW - 90));
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_train_failure_time(const char *root)
+{
+    int failures = 0;
+    char path[600], body[8192] = {0};
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/failure-time.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: failed outcomes need a recorded terminal observation") {
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 300));
+        ASSERT(fgl_train(body, sizeof(body), 2, 12, "b", FGL_NOW - 200));
+        ASSERT(fgl_train(body, sizeof(body), 3, 13, "c", FGL_NOW - 100));
+        size_t used = strlen(body);
+        int n = snprintf(body + used, sizeof(body) - used,
+            "{\"state\":\"failed\",\"ts\":\"2027-01-14T07:00:00Z\","
+            "\"terminal_recorded_at\":%lld}\n", (long long)(FGL_NOW - 86401));
+        ASSERT(n > 0 && (size_t)n < sizeof(body) - used);
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_PASS);
+        (void)snprintf(body + used, sizeof(body) - used,
+            "{\"state\":\"failed\",\"ts\":\"2027-01-14T07:00:00Z\"}\n");
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_train_timing(const char *root)
+{
+    int failures = 0;
+    char path[600], body[8192] = {0};
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/timing.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: later members do not refresh an old train") {
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "old", FGL_NOW - 86401));
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "late", FGL_NOW - 10));
+        ASSERT(fgl_write(path, body));
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_FAIL && fgl_has(r.evidence, "0 landed train(s)"));
+        body[0] = '\0';
+        ASSERT(fgl_train(body, sizeof(body), 2, 12, "future", FGL_NOW + 1));
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_write(path, FGL_ROW("missing-time", "landed", "2027-01-15T07:43:20Z")));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgl_case_train_capacity(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    char *body = calloc(1, 524288);
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/train-capacity.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: train capacity exhaustion is unmeasured") {
+        ASSERT(body != NULL);
+        for (int i = 1; i <= 257; i++)
+            ASSERT(fgl_train(body, 524288, i, i + 300, "x", FGL_NOW - i));
+        ASSERT(fgl_write(path, body));
+        ASSERT(zcl_goals_measure(&o, "G9").grade == ZCL_GOAL_UNMEASURED);
+        PASS();
+    } _test_next:;
+    free(body);
     return failures;
 }
 
@@ -213,26 +345,27 @@ static void fgl_groups(char *buf, size_t cap, int count, int bad,
 static int fgl_case_stale(const char *root)
 {
     int failures = 0;
-    char path[600];
+    char path[600], body[4096] = {0};
     struct zcl_goals_options o;
     struct zcl_goal_result r;
     fgl_options(&o);
     (void)snprintf(path, sizeof(path), "%s/stale.jsonl", root);
     o.outcomes = path;
     TEST("G9: a ledger older than origin/main is unmeasured, never a failure") {
-        ASSERT(fgl_write(path,
-            FGL_ROW("a", "landed", "2027-01-15T05:13:20Z")));
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 10000));
+        ASSERT(fgl_write(path, body));
         o.origin_tip_unix = FGL_NOW;
         r = zcl_goals_measure(&o, "G9");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
-        ASSERT(fgl_has(r.evidence, "ledger stale since 2027-01-15T05:13:20Z"));
+        ASSERT(fgl_has(r.evidence, "ledger stale since 1799990000"));
         ASSERT(fgl_has(r.evidence, "read on the lander host"));
         ASSERT(fgl_write(path, ""));
         r = zcl_goals_measure(&o, "G9");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgl_has(r.evidence, "ledger stale since never"));
-        ASSERT(fgl_write(path,
-            FGL_ROW("a", "landed", "2027-01-15T07:43:20Z")));
+        body[0] = '\0';
+        ASSERT(fgl_train(body, sizeof(body), 1, 11, "a", FGL_NOW - 60));
+        ASSERT(fgl_write(path, body));
         o.origin_tip_unix = FGL_NOW - 600;
         r = zcl_goals_measure(&o, "G9");
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
@@ -1487,6 +1620,11 @@ int test_fleet_goals(void)
     failures += fgl_case_catalog();
     failures += fgl_case_graders();
     failures += fgl_case_trains(root);
+    failures += fgl_case_train_unknown_failure(root);
+    failures += fgl_case_train_failure_time(root);
+    failures += fgl_case_train_identity_refusal(root);
+    failures += fgl_case_train_timing(root);
+    failures += fgl_case_train_capacity(root);
     failures += fgl_case_missing(root);
     failures += fgl_case_stale(root);
     failures += fgl_case_d7_unmeasured(root);

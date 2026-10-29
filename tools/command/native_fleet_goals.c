@@ -22,6 +22,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "sha3/sha3.h"
 #include "util/compare.h"
 #include "util/spawn.h"
 
@@ -883,48 +884,165 @@ struct gr_trains {
     int64_t until;
     int64_t failed;
     int64_t unreadable;
+    struct sha3_256_ctx first_hash, second_hash;
     size_t count;
-    char (*keys)[128];
+    struct gr_train_identity *keys;
     size_t cap;
+    bool second_pass;
     struct gr_ledger led;
 };
 
-static bool gr_train_seen(const struct gr_trains *t, const char *key)
+struct gr_train_identity {
+    char target[65], local[41], base[41], tree[41];
+    char proof[65], bundle[65], signer[65], signature[129];
+    int64_t landed_at;
+    bool seen_again;
+};
+
+static const struct json_value *gr_unique(const struct json_value *row, const char *key)
 {
-    for (size_t i = 0; i < t->count; i++)
-        if (strcmp(t->keys[i], key) == 0)
-            return true;
-    return false;
+    const struct json_value *found = NULL;
+    for (size_t i = 0; i < row->num_children; i++) {
+        if (strcmp(row->keys[i], key) != 0) continue;
+        if (found) return NULL;
+        found = &row->children[i];
+    }
+    return found;
 }
 
-static void gr_train_add(struct gr_trains *t, const char *key)
+static bool gr_hex_field(const struct json_value *row, const char *key,
+                         size_t len, char *out)
 {
-    if (t->count == t->cap || gr_train_seen(t, key))
+    const struct json_value *v = gr_unique(row, key);
+    if (!v || v->type != JSON_STR || !v->val.s || strlen(v->val.s) != len)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        if (!((v->val.s[i] >= '0' && v->val.s[i] <= '9') ||
+              (v->val.s[i] >= 'a' && v->val.s[i] <= 'f'))) return false;
+    memcpy(out, v->val.s, len + 1);
+    return true;
+}
+
+static bool gr_train_proof(const struct json_value *row, struct gr_train_identity *id)
+{
+    char pushed[41], intent[82];
+    const struct json_value *v = gr_unique(row, "proof_intent");
+    if (!gr_hex_field(row, "local", 40, id->local) ||
+        !gr_hex_field(row, "base", 40, id->base) ||
+        !gr_hex_field(row, "tree", 40, id->tree) ||
+        !gr_hex_field(row, "tip_pushed", 40, pushed) || strcmp(pushed, id->local))
+        return false;
+    (void)snprintf(intent, sizeof(intent), "%s@%s", id->local, id->base);
+    return v && v->type == JSON_STR && v->val.s && strcmp(v->val.s, intent) == 0;
+}
+
+static bool gr_train_publication(const struct json_value *row, struct gr_train_identity *id)
+{
+    /* These are shape checks on recorded landing evidence, not a new
+     * cryptographic verification of the producer's signatures. */
+    char remote[41], remote_source[41], signer[65], signature[129];
+    return gr_hex_field(row, "publication_target", 64, id->target) &&
+           gr_hex_field(row, "publication_proof", 64, id->proof) &&
+           gr_hex_field(row, "publication_bundle", 64, id->bundle) &&
+           gr_hex_field(row, "publication_signer", 64, id->signer) &&
+           gr_hex_field(row, "publication_signature", 128, id->signature) &&
+           gr_hex_field(row, "remote_tip", 40, remote) &&
+           gr_hex_field(row, "remote_source", 40, remote_source) &&
+           gr_hex_field(row, "remote_signer", 64, signer) &&
+           gr_hex_field(row, "remote_signature", 128, signature);
+}
+
+static bool gr_train_same(const struct gr_train_identity *a, const struct gr_train_identity *b)
+{
+    return !strcmp(a->target, b->target) && !strcmp(a->local, b->local) &&
+           !strcmp(a->base, b->base);
+}
+
+static bool gr_train_consistent(const struct gr_train_identity *a, const struct gr_train_identity *b)
+{
+    return !strcmp(a->tree, b->tree) && !strcmp(a->proof, b->proof) &&
+           !strcmp(a->bundle, b->bundle) && !strcmp(a->signer, b->signer) &&
+           !strcmp(a->signature, b->signature);
+}
+
+static void gr_train_landed(struct gr_trains *t, const struct json_value *row, int64_t at)
+{
+    struct gr_train_identity id = {0};
+    if (!gr_train_proof(row, &id) || !gr_train_publication(row, &id)) {
+        t->unreadable++;
         return;
-    (void)snprintf(t->keys[t->count++], sizeof(t->keys[0]), "%s", key);
+    }
+    for (size_t i = 0; i < t->count; i++) {
+        struct gr_train_identity *prior = &t->keys[i];
+        if (!strcmp(prior->target, id.target) && !strcmp(prior->local, id.local) &&
+            strcmp(prior->base, id.base)) { t->unreadable++; return; }
+        if (!gr_train_same(prior, &id)) continue;
+        if (!gr_train_consistent(prior, &id)) t->unreadable++;
+        if (at < prior->landed_at) prior->landed_at = at;
+        if (t->second_pass) prior->seen_again = true;
+        return;
+    }
+    if (at < t->since) return;
+    if (t->second_pass || t->count == t->cap) { t->unreadable++; return; }
+    id.landed_at = at;
+    t->keys[t->count++] = id;
+}
+
+static bool gr_train_time(const struct json_value *row, const char *state,
+                          int64_t until, int64_t *at)
+{
+    int64_t ts;
+    const struct json_value *v = gr_unique(row, strcmp(state, "landed") == 0 ?
+                                          "landed_at" : "terminal_recorded_at");
+    const struct json_value *tv = gr_unique(row, "ts");
+    if (!tv || tv->type != JSON_STR ||
+        !zcl_objectives_parse_iso8601(json_get_str(tv), &ts) ||
+        !v || v->type != JSON_INT || json_get_int(v) <= 0 ||
+        json_get_int(v) > until || ts > json_get_int(v)) return false;
+    *at = json_get_int(v);
+    return true;
 }
 
 static void gr_train_row(const struct json_value *row, void *user)
 {
     struct gr_trains *t = user;
-    const char *state = json_get_str(json_get(row, "state"));
-    const char *note = json_get_str(json_get(row, "note"));
-    const char *key = note[0] ? note : json_get_str(json_get(row, "worktree"));
-    int64_t ts;
-    gr_ledger_note(&t->led, row);
-    if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0)
-        return;
-    if (!zcl_objectives_parse_iso8601(json_get_str(json_get(row, "ts")),
-                                      &ts)) {
-        t->unreadable++;
-        return;
+    char canonical[8192];
+    size_t len = json_write(row, canonical, sizeof(canonical));
+    if (len >= sizeof(canonical)) { t->unreadable++; return; }
+    struct sha3_256_ctx *hash = t->second_pass ? &t->second_hash : &t->first_hash;
+    sha3_256_write(hash, (const unsigned char *)canonical, len);
+    sha3_256_write(hash, (const unsigned char *)"\0", 1);
+    const struct json_value *sv = gr_unique(row, "state");
+    const char *state = json_get_str(sv);
+    int64_t at;
+    if (!sv || sv->type != JSON_STR) { t->unreadable++; return; }
+    if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0) return;
+    if (!gr_train_time(row, state, t->until, &at)) { t->unreadable++; return; }
+    if (!t->second_pass && at > t->led.newest) {
+        t->led.newest = at;
+        (void)snprintf(t->led.newest_ts, sizeof(t->led.newest_ts), "%lld", (long long)at);
     }
-    if (ts < t->since || ts > t->until)
-        return;
-    if (strcmp(state, "landed") == 0)
-        gr_train_add(t, key);
-    else if (strcmp(state, "failed") == 0)
-        t->failed++;
+    if (strcmp(state, "landed") == 0) gr_train_landed(t, row, at);
+    else if (!t->second_pass && at >= t->since) t->failed++;
+}
+
+static bool gr_train_scan(const char *path, struct gr_trains *t,
+                          char *reason, size_t cap)
+{
+    /* Reject a changed ledger between walks; this digest is local scan
+     * consistency, not a receipt or cryptographic producer verification. */
+    sha3_256_init(&t->first_hash);
+    sha3_256_init(&t->second_hash);
+    if (!zcl_objectives_ledger_walk(path, gr_train_row, t, reason, cap)) return false;
+    t->second_pass = true;
+    if (!zcl_objectives_ledger_walk(path, gr_train_row, t, reason, cap)) return false;
+    unsigned char first[32], second[32];
+    sha3_256_finalize(&t->first_hash, first);
+    sha3_256_finalize(&t->second_hash, second);
+    if (memcmp(first, second, sizeof(first)) != 0) t->unreadable++;
+    for (size_t i = 0; i < t->count; i++)
+        if (!t->keys[i].seen_again) t->unreadable++;
+    return true;
 }
 
 /* Commits that reached origin/main in the window; -1 when git cannot say. */
@@ -945,7 +1063,7 @@ static int64_t gr_origin_commits(const char *repo, int64_t since)
 static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
 {
     struct zcl_objectives_options oo;
-    static char keys[GOALS_TRAINS_MAX][128];
+    static struct gr_train_identity keys[GOALS_TRAINS_MAX];
     struct gr_trains t = {.keys = keys, .cap = GOALS_TRAINS_MAX};
     char path[512], reason[256] = "", repo[512];
     const char *use = NULL;
@@ -962,15 +1080,20 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
     t.since = now - GOALS_DAY_S;
     t.until = now;
     memset(keys, 0, sizeof(keys));
-    if (!zcl_objectives_ledger_walk(use, gr_train_row, &t, reason,
-                                    sizeof(reason)))
+    if (!gr_train_scan(use, &t, reason, sizeof(reason)))
         return gr_unmeasured(next, "%s", reason);
     if (t.unreadable > 0)
-        return gr_unmeasured(next, "%lld landed or failed row(s) in %s have "
-                             "no readable timestamp", (long long)t.unreadable,
+        return gr_unmeasured(next, "%lld landing observation(s) in %s have "
+                             "missing, conflicting, or unreadable evidence", (long long)t.unreadable,
                              use);
     if (gr_ledger_stale(o, repo, &t.led, reason, sizeof(reason)))
         return gr_unmeasured(next, "%s (%s)", reason, use);
+    if (t.failed > 0)
+        return gr_unmeasured(next, "%lld failed attempt(s) have unknown pre-submit "
+                             "catchability (%s)", (long long)t.failed, use);
+    size_t count = 0;
+    for (size_t i = 0; i < t.count; i++)
+        if (t.keys[i].landed_at >= t.since) count++;
     commits = gr_origin_commits(repo, t.since);
     if (commits < 0)
         (void)snprintf(seen, sizeof(seen), "origin/main unreadable");
@@ -978,10 +1101,10 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
         (void)snprintf(seen, sizeof(seen), "%lld commit(s) on origin/main",
                        (long long)commits);
     return zcl_goal_make(
-              zcl_goals_grade_trains((int64_t)t.count, t.failed), next,
+              zcl_goals_grade_trains((int64_t)count, 0), next,
               "%zu landed train(s) and %lld failed attempt(s) in the outcomes "
               "ledger over 24 h, bar %d trains and 0 failures; %s in the same window",
-              t.count, (long long)t.failed, ZCL_GOALS_TRAIN_MIN, seen);
+              count, (long long)t.failed, ZCL_GOALS_TRAIN_MIN, seen);
 }
 
 /* ── D7: the most recent landing groups ───────────────────────────────── */
