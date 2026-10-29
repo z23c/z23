@@ -634,7 +634,7 @@ static int test_nbp_reban_extends_only_and_overwrites_metadata(void)
         const struct ban_entry *e = nbp_entry(&nm, a);
         ASSERT(e != NULL);
         ASSERT_EQ((int)e->score_at_ban, 100);
-        ASSERT(strcmp(e->reason, "flood") == 0);
+        ASSERT(strcmp(e->reason, "invalid_block: flood") == 0);
         ASSERT_EQ((int)nm.num_banned, 1);
 
         net_manager_free(&nm);
@@ -695,7 +695,7 @@ static int test_nbp_ban_db_round_trip_keeps_metadata(void)
         ASSERT(s != NULL);
         ASSERT(s->ban_until == until_scored);
         ASSERT_EQ((int)s->score_at_ban, 100);
-        ASSERT(strcmp(s->reason, "flood") == 0);
+        ASSERT(strcmp(s->reason, "invalid_block: flood") == 0);
         net_manager_free(&nm2);
         PASS();
     } _test_next:;
