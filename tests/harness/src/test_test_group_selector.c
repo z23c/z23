@@ -181,6 +181,55 @@ static void reverse_rotate(char *b, size_t n, size_t k)
     reverse_range(b, 0, n - 1);
 }
 
+/* Running state for capture_command_ends: bytes kept in HEAD, and the ring
+ * that holds the newest bytes for TAIL. */
+struct tgs_ends_state {
+    size_t head_used;
+    size_t ring_len;  /* bytes held in the ring */
+    size_t ring_head; /* index of the oldest byte once wrapped */
+};
+
+static void tgs_ends_head_append(char *head, size_t head_cap,
+                                 struct tgs_ends_state *st,
+                                 const unsigned char *chunk, size_t got)
+{
+    size_t room = head_cap - st->head_used - 1;
+    size_t keep = got < room ? got : room;
+    if (keep > 0) {
+        memcpy(head + st->head_used, chunk, keep);
+        st->head_used += keep;
+    }
+}
+
+static void tgs_ends_ring_append(char *tail, size_t ring_cap,
+                                 struct tgs_ends_state *st,
+                                 const unsigned char *chunk, size_t got)
+{
+    for (size_t i = 0; i < got; i++) {
+        if (st->ring_len < ring_cap) {
+            tail[st->ring_len++] = (char)chunk[i];
+        } else {
+            tail[st->ring_head] = (char)chunk[i];
+            st->ring_head = (st->ring_head + 1) % ring_cap;
+        }
+    }
+}
+
+static void tgs_ends_pump(FILE *pipe, char *head, size_t head_cap,
+                          char *tail, size_t ring_cap,
+                          struct tgs_ends_state *st)
+{
+    unsigned char chunk[4096];
+    for (;;) {
+        size_t got = fread(chunk, 1, sizeof(chunk), pipe);
+        if (got == 0)
+            break;
+        tgs_ends_head_append(head, head_cap, st, chunk, got);
+        /* Ring-append the same bytes; only the last ring_cap survive. */
+        tgs_ends_ring_append(tail, ring_cap, st, chunk, got);
+    }
+}
+
 /* Capture a bounded HEAD and a bounded TAIL of a command whose total output
  * is unbounded, discarding the middle. Both buffers are NUL-terminated and
  * neither grows with the output. Return value matches capture_command. */
@@ -201,37 +250,15 @@ static int capture_command_ends(const char *command, char *head,
     if (!pipe)
         return -1;
     const size_t ring_cap = tail_cap - 1;
-    size_t head_used = 0;
-    size_t ring_len = 0;  /* bytes held in the ring */
-    size_t ring_head = 0; /* index of the oldest byte once wrapped */
-    unsigned char chunk[4096];
-    for (;;) {
-        size_t got = fread(chunk, 1, sizeof(chunk), pipe);
-        if (got == 0)
-            break;
-        size_t room = head_cap - head_used - 1;
-        size_t keep = got < room ? got : room;
-        if (keep > 0) {
-            memcpy(head + head_used, chunk, keep);
-            head_used += keep;
-        }
-        /* Ring-append the same bytes; only the last ring_cap survive. */
-        for (size_t i = 0; i < got; i++) {
-            if (ring_len < ring_cap) {
-                tail[ring_len++] = (char)chunk[i];
-            } else {
-                tail[ring_head] = (char)chunk[i];
-                ring_head = (ring_head + 1) % ring_cap;
-            }
-        }
-    }
-    head[head_used] = '\0';
+    struct tgs_ends_state st = {0};
+    tgs_ends_pump(pipe, head, head_cap, tail, ring_cap, &st);
+    head[st.head_used] = '\0';
     /* Rotate the ring into reading order in place (three reversals), so the
      * capture needs no allocation at all. ring_head is non-zero only after
      * the ring wrapped, and then ring_len == ring_cap. */
-    if (ring_head != 0)
-        reverse_rotate(tail, ring_len, ring_head);
-    tail[ring_len] = '\0';
+    if (st.ring_head != 0)
+        reverse_rotate(tail, st.ring_len, st.ring_head);
+    tail[st.ring_len] = '\0';
     int status = pclose(pipe);
     if (status < 0 || !WIFEXITED(status))
         return -1;
@@ -1565,6 +1592,311 @@ static int test_runner_no_cache_outranks_env(void)
     return failures;
 }
 
+/* Buffers and inputs shared by the nested-runner probes below. The buffers
+ * are owned by test_runner_exact_selection, which outlives every probe. */
+struct tgs_runner_probe {
+    const char *exe;
+    const char *true_bin;
+    char *command;
+    size_t command_cap;
+    char *out;
+    size_t out_cap;
+    char *head;
+    size_t head_cap;
+    char *tail;
+    size_t tail_cap;
+};
+
+/* Each probe below returns its failure count and is checked by the caller
+ * with ASSERT(probe(...) == 0), so the first failing check still stops the
+ * whole TEST exactly where it used to. */
+static int tgs_runner_positive_control(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --jobs=1 --exact=test_hex_codec "
+                     "--no-cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    if (rc != 0)
+        fprintf(stderr, "nested exact positive control:\n%s\n", p->out);
+    ASSERT(rc == 0);
+    ASSERT(strstr(p->out, "groups_ran=1") != NULL);
+    ASSERT(strstr(p->out, "groups_failed=0") != NULL);
+    ASSERT(strstr(p->out, "\"schema\":\"zcl.test_phase_receipt.v1\"") !=
+           NULL);
+    ASSERT(strstr(p->out, "\"startup_ms\":") != NULL);
+    ASSERT(strstr(p->out, "\"test_body_ms\":") != NULL);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_positive_timing(void)
+{
+    int failures = 0;
+    struct json_value timing = {0};
+    ASSERT(selector_timing_read(&timing));
+    ASSERT(selector_timing_zero(&timing, "self_skips"));
+    ASSERT(selector_timing_zero(&timing, "env_unobserved"));
+    ASSERT(selector_timing_zero(&timing, "load_flaky"));
+    ASSERT(selector_timing_hex_key(json_get(&timing, "toolkey_full")));
+    const struct json_value *module = json_get(&timing,
+                                               "hotswap_module_active");
+    ASSERT(module && module->type == JSON_BOOL && !json_get_bool(module));
+    ASSERT(json_get(&timing, "hotswap_module_sha256") &&
+           json_is_null(json_get(&timing, "hotswap_module_sha256")));
+    ASSERT(json_get(&timing, "hotswap_module_source") &&
+           json_is_null(json_get(&timing, "hotswap_module_source")));
+    const struct json_value *timing_rows = json_get(&timing, "groups");
+    ASSERT(timing_rows && timing_rows->type == JSON_ARR &&
+           json_size(timing_rows) == 1);
+    const struct json_value *timing_row = json_at(timing_rows, 0);
+    ASSERT(strcmp(json_get_str(json_get(timing_row, "name")),
+                  "test_hex_codec") == 0);
+    ASSERT(json_get_bool(json_get(timing_row, "measured")));
+    const struct json_value *key_valid = json_get(timing_row, "key_valid");
+    ASSERT(key_valid && key_valid->type == JSON_BOOL &&
+           !json_get_bool(key_valid));
+    ASSERT(json_get(timing_row, "input_key") &&
+           json_is_null(json_get(timing_row, "input_key")));
+    ASSERT(selector_timing_zero(timing_row, "proof_contract"));
+    ASSERT(selector_timing_zero(timing_row, "skip_markers"));
+    ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
+    ASSERT(selector_timing_zero(timing_row, "load_flaky"));
+    json_free(&timing);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_source_id(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap, "\"%s\" --source-id 2>&1",
+                     p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    dump_bad_rc("nested --source-id", rc, 0, p->out);
+    ASSERT(rc == 0);
+    char expected_source[80];
+    ASSERT(snprintf(expected_source, sizeof(expected_source), "%s\n",
+                    zcl_build_source_id_sha256()) == 65);
+    ASSERT(strcmp(p->out, expected_source) == 0);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_source_record(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --source-record 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    dump_bad_rc("nested --source-record", rc, 0, p->out);
+    ASSERT(rc == 0);
+    char expected_record[160];
+    ASSERT(snprintf(expected_record, sizeof(expected_record),
+                    "%s 1 %s\n", zcl_build_source_id_sha256(),
+                    zcl_build_source_mutation_sha256()) == 132);
+    ASSERT(strcmp(p->out, expected_record) == 0);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_source_list(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --source-id --list 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->out, "Usage:") != NULL);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_two_ids(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --jobs=1 "
+                     "--exact=test_hex_codec,test_byte_order_codec "
+                     "--no-cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    dump_bad_rc("nested exact two-id", rc, 0, p->out);
+    ASSERT(rc == 0);
+    ASSERT(strstr(p->out, "groups_ran=2") != NULL);
+    ASSERT(strstr(p->out, "groups_failed=0") != NULL);
+    _test_next:;
+    return failures;
+}
+
+/* One activation run of the stress group: the proof contract must be active,
+ * the cache must be cold, and the input key must match the first run's. */
+static int tgs_runner_proof_run(const struct tgs_runner_probe *p, int proof_run,
+                                char *first_proof_key, size_t first_cap)
+{
+    int failures = 0;
+    struct json_value timing = {0};
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    dump_bad_rc("nested proof-contract activation", rc, 0, p->out);
+    ASSERT(rc == 0);
+    ASSERT(strstr(p->out,
+                  "proof contract "
+                  "group=test_store_e2e_gate "
+                  "env=ZCL_STRESS_TESTS") != NULL);
+    ASSERT(selector_output_contains(p->out, "active-proof-contract"));
+    ASSERT(strstr(p->out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
+           NULL);
+    ASSERT(strstr(p->out, "groups_ran=1 groups_cached=0") != NULL);
+    ASSERT(strstr(p->out, "groups_failed=0 self_skips=0") != NULL);
+    ASSERT(selector_timing_read(&timing));
+    const struct json_value *timing_rows = json_get(&timing, "groups");
+    ASSERT(timing_rows && json_size(timing_rows) == 1);
+    const struct json_value *timing_row = json_at(timing_rows, 0);
+    ASSERT(json_get_bool(json_get(timing_row, "measured")));
+    ASSERT(!json_get_bool(json_get(timing_row, "cached")));
+    ASSERT(json_get_int(json_get(timing_row, "proof_contract")) ==
+           ZCL_TEST_PROOF_STRESS);
+    ASSERT(json_get_bool(json_get(timing_row, "key_valid")));
+    ASSERT(selector_timing_hex_key(json_get(timing_row, "input_key")));
+    const char *key = json_get_str(json_get(timing_row, "input_key"));
+    if (proof_run == 0)
+        memcpy(first_proof_key, key, first_cap);
+    else
+        ASSERT(strcmp(first_proof_key, key) == 0);
+    ASSERT(selector_timing_zero(timing_row, "skip_markers"));
+    ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
+    json_free(&timing);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_proof_contract(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    char first_proof_key[65] = {0};
+    ASSERT(zcl_test_group_proof_contract("test_store_e2e_gate") ==
+           ZCL_TEST_PROOF_STRESS);
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --jobs=1 "
+                     "--exact=test_store_e2e_gate "
+                     "--activate-proof-contracts --cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    for (int proof_run = 0; proof_run < 2; proof_run++)
+        ASSERT(tgs_runner_proof_run(p, proof_run, first_proof_key,
+                                    sizeof(first_proof_key)) == 0);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_stress_env_unset(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "env -u ZCL_STRESS_TESTS \"%s\" --jobs=1 "
+                     "--exact=test_store_e2e_gate --no-cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    ASSERT(rc == 0);
+    ASSERT(strstr(p->out, "self_skips=1") != NULL);
+    struct json_value timing = {0};
+    ASSERT(selector_timing_read(&timing));
+    ASSERT(json_get_int(json_get(&timing, "self_skips")) == 1);
+    const struct json_value *timing_row =
+        json_at(json_get(&timing, "groups"), 0);
+    ASSERT(json_get_int(json_get(timing_row, "skip_markers")) > 0);
+    ASSERT(json_get_bool(json_get(timing_row, "measured")));
+    ASSERT(selector_timing_zero(timing_row, "rc"));
+    ASSERT(selector_timing_zero(timing_row, "proof_contract"));
+    json_free(&timing);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_activate_requires_exact(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --activate-proof-contracts --no-cache 2>&1",
+                     p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->out,
+                  "--activate-proof-contracts requires an exact selector")
+           != NULL);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_exact_refusals(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "\"%s\" --jobs=1 --exact=api --no-cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command(p->command, p->out, p->out_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->out, "--exact contains no registered group: api") !=
+           NULL);
+    n = snprintf(p->command, p->command_cap,
+                 "\"%s\" --jobs=1 "
+                 "--exact=test_hex_codec,api --no-cache 2>&1", p->exe);
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    rc = capture_command(p->command, p->out, p->out_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->out, "--exact contains no registered group: api") !=
+           NULL);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_make_api(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "make -n t-fast-exact ONLY=api "
+                     "TEST_PARALLEL_ARGS= "
+                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
+                     "TEST_PARALLEL_FAST_ACTIVE=%s "
+                     "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+                     p->true_bin, p->true_bin, zcl_build_source_id_sha256(),
+                     zcl_build_source_mutation_sha256());
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command_ends(p->command, p->head, p->head_cap, p->tail,
+                                  p->tail_cap);
+    dump_bad_rc("make -n t-fast-exact ONLY=api (head)", rc, 0, p->head);
+    dump_bad_rc("make -n t-fast-exact ONLY=api (tail)", rc, 0, p->tail);
+    ASSERT(rc == 0);
+    ASSERT(strstr(p->head, "resolves to exact set test_api") != NULL);
+    ASSERT(strstr(p->tail, "--exact=test_api") != NULL);
+    _test_next:;
+    return failures;
+}
+
+static int tgs_runner_make_api_missing(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "make -n t-fast-exact ONLY=api_missing "
+                     "TEST_PARALLEL_ARGS= "
+                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
+                     "TEST_PARALLEL_FAST_ACTIVE=%s "
+                     "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+                     p->true_bin, p->true_bin, zcl_build_source_id_sha256(),
+                     zcl_build_source_mutation_sha256());
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command_ends(p->command, p->head, p->head_cap, p->tail,
+                                  p->tail_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->head, "ONLY='api_missing' is not a valid exact registered group set") != NULL);
+    _test_next:;
+    return failures;
+}
+
 static int test_runner_exact_selection(void)
 {
     int failures = 0;
@@ -1599,92 +1931,24 @@ static int test_runner_exact_selection(void)
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         ASSERT(exe[0] != '\0');
         char command[PATH_MAX + 320];
-        int n = snprintf(command, sizeof(command),
-                         "\"%s\" --jobs=1 --exact=test_hex_codec "
-                         "--no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        int rc = capture_command(command, out, sizeof(out));
-        if (rc != 0)
-            fprintf(stderr, "nested exact positive control:\n%s\n", out);
-        ASSERT(rc == 0);
-        ASSERT(strstr(out, "groups_ran=1") != NULL);
-        ASSERT(strstr(out, "groups_failed=0") != NULL);
-        ASSERT(strstr(out, "\"schema\":\"zcl.test_phase_receipt.v1\"") !=
-               NULL);
-        ASSERT(strstr(out, "\"startup_ms\":") != NULL);
-        ASSERT(strstr(out, "\"test_body_ms\":") != NULL);
-
-        struct json_value timing = {0};
-        ASSERT(selector_timing_read(&timing));
-        ASSERT(selector_timing_zero(&timing, "self_skips"));
-        ASSERT(selector_timing_zero(&timing, "env_unobserved"));
-        ASSERT(selector_timing_zero(&timing, "load_flaky"));
-        ASSERT(selector_timing_hex_key(json_get(&timing, "toolkey_full")));
-        const struct json_value *module = json_get(&timing,
-                                                   "hotswap_module_active");
-        ASSERT(module && module->type == JSON_BOOL && !json_get_bool(module));
-        ASSERT(json_get(&timing, "hotswap_module_sha256") &&
-               json_is_null(json_get(&timing, "hotswap_module_sha256")));
-        ASSERT(json_get(&timing, "hotswap_module_source") &&
-               json_is_null(json_get(&timing, "hotswap_module_source")));
-        const struct json_value *timing_rows = json_get(&timing, "groups");
-        ASSERT(timing_rows && timing_rows->type == JSON_ARR &&
-               json_size(timing_rows) == 1);
-        const struct json_value *timing_row = json_at(timing_rows, 0);
-        ASSERT(strcmp(json_get_str(json_get(timing_row, "name")),
-                      "test_hex_codec") == 0);
-        ASSERT(json_get_bool(json_get(timing_row, "measured")));
-        const struct json_value *key_valid = json_get(timing_row, "key_valid");
-        ASSERT(key_valid && key_valid->type == JSON_BOOL &&
-               !json_get_bool(key_valid));
-        ASSERT(json_get(timing_row, "input_key") &&
-               json_is_null(json_get(timing_row, "input_key")));
-        ASSERT(selector_timing_zero(timing_row, "proof_contract"));
-        ASSERT(selector_timing_zero(timing_row, "skip_markers"));
-        ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
-        ASSERT(selector_timing_zero(timing_row, "load_flaky"));
-        json_free(&timing);
-
-        n = snprintf(command, sizeof(command), "\"%s\" --source-id 2>&1",
-                     exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested --source-id", rc, 0, out);
-        ASSERT(rc == 0);
-        char expected_source[80];
-        ASSERT(snprintf(expected_source, sizeof(expected_source), "%s\n",
-                        zcl_build_source_id_sha256()) == 65);
-        ASSERT(strcmp(out, expected_source) == 0);
-
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --source-record 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested --source-record", rc, 0, out);
-        ASSERT(rc == 0);
-        char expected_record[160];
-        ASSERT(snprintf(expected_record, sizeof(expected_record),
-                        "%s 1 %s\n", zcl_build_source_id_sha256(),
-                        zcl_build_source_mutation_sha256()) == 132);
-        ASSERT(strcmp(out, expected_record) == 0);
-
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --source-id --list 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        ASSERT(rc == 2);
-        ASSERT(strstr(out, "Usage:") != NULL);
-
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --jobs=1 "
-                     "--exact=test_hex_codec,test_byte_order_codec "
-                     "--no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        dump_bad_rc("nested exact two-id", rc, 0, out);
-        ASSERT(rc == 0);
-        ASSERT(strstr(out, "groups_ran=2") != NULL);
-        ASSERT(strstr(out, "groups_failed=0") != NULL);
+        struct tgs_runner_probe probe = {
+            .exe = exe,
+            .true_bin = true_bin,
+            .command = command,
+            .command_cap = sizeof(command),
+            .out = out,
+            .out_cap = sizeof(out),
+            .head = head,
+            .head_cap = sizeof(head),
+            .tail = tail,
+            .tail_cap = sizeof(tail),
+        };
+        ASSERT(tgs_runner_positive_control(&probe) == 0);
+        ASSERT(tgs_runner_positive_timing() == 0);
+        ASSERT(tgs_runner_source_id(&probe) == 0);
+        ASSERT(tgs_runner_source_record(&probe) == 0);
+        ASSERT(tgs_runner_source_list(&probe) == 0);
+        ASSERT(tgs_runner_two_ids(&probe) == 0);
 
         /* Exercise the runner's proof-contract/cache boundary with the
          * smallest real STRESS-contract group.  The contract dispatch is the
@@ -1692,126 +1956,21 @@ static int test_runner_exact_selection(void)
          * 100-second reducer forward-progress acceptance twice only tested
          * that unrelated product behavior twice and dominated every exact
          * selector proof. */
-        ASSERT(zcl_test_group_proof_contract("test_store_e2e_gate") ==
-               ZCL_TEST_PROOF_STRESS);
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --jobs=1 "
-                     "--exact=test_store_e2e_gate "
-                     "--activate-proof-contracts --cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        char first_proof_key[65] = {0};
-        for (int proof_run = 0; proof_run < 2; proof_run++) {
-            rc = capture_command(command, out, sizeof(out));
-            dump_bad_rc("nested proof-contract activation", rc, 0, out);
-            ASSERT(rc == 0);
-            ASSERT(strstr(out,
-                          "proof contract "
-                          "group=test_store_e2e_gate "
-                          "env=ZCL_STRESS_TESTS") != NULL);
-            ASSERT(selector_output_contains(out, "active-proof-contract"));
-            ASSERT(strstr(out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
-                   NULL);
-            ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
-            ASSERT(strstr(out, "groups_failed=0 self_skips=0") != NULL);
-            ASSERT(selector_timing_read(&timing));
-            timing_rows = json_get(&timing, "groups");
-            ASSERT(timing_rows && json_size(timing_rows) == 1);
-            timing_row = json_at(timing_rows, 0);
-            ASSERT(json_get_bool(json_get(timing_row, "measured")));
-            ASSERT(!json_get_bool(json_get(timing_row, "cached")));
-            ASSERT(json_get_int(json_get(timing_row, "proof_contract")) ==
-                   ZCL_TEST_PROOF_STRESS);
-            ASSERT(json_get_bool(json_get(timing_row, "key_valid")));
-            ASSERT(selector_timing_hex_key(json_get(timing_row, "input_key")));
-            const char *key = json_get_str(json_get(timing_row, "input_key"));
-            if (proof_run == 0)
-                memcpy(first_proof_key, key, sizeof(first_proof_key));
-            else
-                ASSERT(strcmp(first_proof_key, key) == 0);
-            ASSERT(selector_timing_zero(timing_row, "skip_markers"));
-            ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
-            json_free(&timing);
-        }
-
-        n = snprintf(command, sizeof(command),
-                     "env -u ZCL_STRESS_TESTS \"%s\" --jobs=1 "
-                     "--exact=test_store_e2e_gate --no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        ASSERT(rc == 0);
-        ASSERT(strstr(out, "self_skips=1") != NULL);
-        ASSERT(selector_timing_read(&timing));
-        ASSERT(json_get_int(json_get(&timing, "self_skips")) == 1);
-        timing_row = json_at(json_get(&timing, "groups"), 0);
-        ASSERT(json_get_int(json_get(timing_row, "skip_markers")) > 0);
-        ASSERT(json_get_bool(json_get(timing_row, "measured")));
-        ASSERT(selector_timing_zero(timing_row, "rc"));
-        ASSERT(selector_timing_zero(timing_row, "proof_contract"));
-        json_free(&timing);
-
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --activate-proof-contracts --no-cache 2>&1",
-                     exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        ASSERT(rc == 2);
-        ASSERT(strstr(out,
-                      "--activate-proof-contracts requires an exact selector")
-               != NULL);
+        ASSERT(tgs_runner_proof_contract(&probe) == 0);
+        ASSERT(tgs_runner_stress_env_unset(&probe) == 0);
+        ASSERT(tgs_runner_activate_requires_exact(&probe) == 0);
 
         /* "test_api" is a valid exact id. Bare "api" is deliberately not:
          * accepting it here would restore the substring false-green. */
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --jobs=1 --exact=api --no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        ASSERT(rc == 2);
-        ASSERT(strstr(out, "--exact contains no registered group: api") !=
-               NULL);
-
-        n = snprintf(command, sizeof(command),
-                     "\"%s\" --jobs=1 "
-                     "--exact=test_hex_codec,api --no-cache 2>&1", exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command(command, out, sizeof(out));
-        ASSERT(rc == 2);
-        ASSERT(strstr(out, "--exact contains no registered group: api") !=
-               NULL);
+        ASSERT(tgs_runner_exact_refusals(&probe) == 0);
 
         /* Exercise the Make admission seam without running its recipe (and
          * therefore without recursively acquiring the checkout lock). */
-        n = snprintf(command, sizeof(command),
-                     "make -n t-fast-exact ONLY=api "
-                     "TEST_PARALLEL_ARGS= "
-                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
-                     "TEST_PARALLEL_FAST_ACTIVE=%s "
-                     "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-                     true_bin, true_bin, zcl_build_source_id_sha256(),
-                     zcl_build_source_mutation_sha256());
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        rc = capture_command_ends(command, head, sizeof(head), tail,
-                                  sizeof(tail));
-        dump_bad_rc("make -n t-fast-exact ONLY=api (head)", rc, 0, head);
-        dump_bad_rc("make -n t-fast-exact ONLY=api (tail)", rc, 0, tail);
-        ASSERT(rc == 0);
-        ASSERT(strstr(head, "resolves to exact set test_api") != NULL);
-        ASSERT(strstr(tail, "--exact=test_api") != NULL);
+        ASSERT(tgs_runner_make_api(&probe) == 0);
 
-        n = snprintf(command, sizeof(command),
-                     "make -n t-fast-exact ONLY=api_missing "
-                     "TEST_PARALLEL_ARGS= "
-                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
-                     "TEST_PARALLEL_FAST_ACTIVE=%s "
-                     "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-                     true_bin, true_bin, zcl_build_source_id_sha256(),
-                     zcl_build_source_mutation_sha256());
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
         /* The refusal is a parse-time $(error): make stops before printing
          * any recipe, so this leg is small and the head alone carries it. */
-        rc = capture_command_ends(command, head, sizeof(head), tail,
-                                  sizeof(tail));
-        ASSERT(rc == 2);
-        ASSERT(strstr(head, "ONLY='api_missing' is not a valid exact registered group set") != NULL);
+        ASSERT(tgs_runner_make_api_missing(&probe) == 0);
         PASS();
     } _test_next:;
     return failures;
