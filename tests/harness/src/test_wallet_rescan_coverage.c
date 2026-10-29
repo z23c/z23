@@ -748,7 +748,7 @@ static int wrc_g_kill_restart_baseline(struct wallet *owner,
 
     struct wallet_sqlite ws;
     failures += wrc_expect("G: wallet_sqlite_open",
-                           wallet_sqlite_open_r(&ws, ndb.db).ok);
+                           wallet_sqlite_open(&ws, ndb.db));
 
     /* The wallet as it ran before the kill: scanned through the coin's
      * height, depth measured from that baseline. */
@@ -968,7 +968,7 @@ int test_wallet_rescan_coverage(void)
     ms.chain_active.capacity = WRC_NBLOCKS;
 
     struct wallet_sqlite ws;
-    WRC_CHECK("wallet_sqlite_open", wallet_sqlite_open_r(&ws, ndb.db).ok);
+    WRC_CHECK("wallet_sqlite_open", wallet_sqlite_open(&ws, ndb.db));
 
     struct tx_mempool mempool;
     tx_mempool_init(&mempool, 0);
