@@ -72,6 +72,66 @@ void zcl_shop_want_view_push_json(
         (void)json_push_kv_int(into, "posted_unix", view->posted_unix);
 }
 
+/* Record a frozen-vector failure message and report the KAT as failed. */
+static bool shop_want_view_kat_report_failure(char *why, size_t why_sz,
+                                              const char *message)
+{
+    if (why == NULL || why_sz == 0)
+        return false;
+    (void)snprintf(why, why_sz, "%s", message);
+    return false;
+}
+
+/* Run the frozen open/preview vector; true when every output matches. */
+static bool shop_want_view_kat_open_preview_matches(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_want_view_input_v1 *input,
+    struct shop_want_view_result_v1 *out)
+{
+    return service->render(input, out) &&
+           strcmp(out->state, "open") == 0 && !out->expired &&
+           strcmp(out->review_state, "reviewed_ok") == 0 &&
+           out->criteria_truncated &&
+           strlen(out->criteria_preview) == SHOP_WANT_VIEW_CRITERIA_PREVIEW &&
+           out->want_id[0] == '0' && out->want_id[1] == '1' &&
+           !out->spec_hash_present &&
+           strstr(out->next_action, "moves no value") != NULL;
+}
+
+/* Run the frozen hidden fulfillment vector; true when both labels match. */
+static bool shop_want_view_kat_fulfill_hidden_matches(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out)
+{
+    return service->render_fulfillment_status(status, status_out) &&
+           strcmp(status_out->readiness, "hidden_by_profile") == 0 &&
+           strcmp(status_out->next_action, "app shop want fulfill review") == 0;
+}
+
+/* Run one frozen fulfillment vector; true when the readiness label matches. */
+static bool shop_want_view_kat_fulfill_readiness_matches(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out,
+    const char *expect_readiness)
+{
+    return service->render_fulfillment_status(status, status_out) &&
+           strcmp(status_out->readiness, expect_readiness) == 0;
+}
+
+/* Run the frozen cancelled/full vector; true when every output matches. */
+static bool shop_want_view_kat_cancelled_full_matches(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_want_view_input_v1 *input,
+    struct shop_want_view_result_v1 *out)
+{
+    return service->render(input, out) &&
+           strcmp(out->state, "cancelled") == 0 && out->spec_hash_present &&
+           strlen(out->criteria) == input->criteria_len &&
+           strstr(out->next_action, "moves no value") != NULL;
+}
+
 static bool shop_want_view_frozen_kat(const void *opaque, char *why,
                                       size_t why_sz)
 {
@@ -88,75 +148,46 @@ static bool shop_want_view_frozen_kat(const void *opaque, char *why,
     input.buyer_pubkey[0] = 2;
     memset(input.criteria, 'x', input.criteria_len);
     struct shop_want_view_result_v1 out;
-    if (!service || !service->render || !service->render_fulfillment_status ||
-        !service->render(&input, &out) ||
-        strcmp(out.state, "open") != 0 || out.expired ||
-        strcmp(out.review_state, "reviewed_ok") != 0 ||
-        !out.criteria_truncated ||
-        strlen(out.criteria_preview) != SHOP_WANT_VIEW_CRITERIA_PREVIEW ||
-        out.want_id[0] != '0' || out.want_id[1] != '1' ||
-        out.spec_hash_present || strstr(out.next_action, "moves no value") == NULL) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen buyer-want open/preview vector failed");
-        return false;
-    }
+    if (!service || !service->render || !service->render_fulfillment_status)
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen buyer-want open/preview vector failed");
+    if (!shop_want_view_kat_open_preview_matches(service, &input, &out))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen buyer-want open/preview vector failed");
     struct shop_fulfill_status_view_input_v1 status = {
         .signature_valid = true,
         .evidence_valid = true,
     };
     struct shop_fulfill_status_view_result_v1 status_out;
-    if (!service->render_fulfillment_status(&status, &status_out) ||
-        strcmp(status_out.readiness, "hidden_by_profile") != 0 ||
-        strcmp(status_out.next_action, "app shop want fulfill review") != 0) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen fulfillment hidden vector failed");
-        return false;
-    }
+    if (!shop_want_view_kat_fulfill_hidden_matches(service, &status,
+                                                   &status_out))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen fulfillment hidden vector failed");
     status.visible = true;
-    if (!service->render_fulfillment_status(&status, &status_out) ||
-        strcmp(status_out.readiness, "ready_for_human_review") != 0) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen fulfillment visible vector failed");
-        return false;
-    }
+    if (!shop_want_view_kat_fulfill_readiness_matches(
+            service, &status, &status_out, "ready_for_human_review"))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen fulfillment visible vector failed");
     status.evidence_valid = false;
-    if (!service->render_fulfillment_status(&status, &status_out) ||
-        strcmp(status_out.readiness, "blocked_by_evidence") != 0) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen fulfillment evidence vector failed");
-        return false;
-    }
+    if (!shop_want_view_kat_fulfill_readiness_matches(
+            service, &status, &status_out, "blocked_by_evidence"))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen fulfillment evidence vector failed");
     status.withdrawn = true;
-    if (!service->render_fulfillment_status(&status, &status_out) ||
-        strcmp(status_out.readiness, "closed") != 0) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen fulfillment closed vector failed");
-        return false;
-    }
+    if (!shop_want_view_kat_fulfill_readiness_matches(service, &status,
+                                                      &status_out, "closed"))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen fulfillment closed vector failed");
     input.full = true;
     input.cancelled_unix = 175;
     input.spec_hash[0] = 3;
-    if (!service->render(&input, &out) ||
-        strcmp(out.state, "cancelled") != 0 || !out.spec_hash_present ||
-        strlen(out.criteria) != input.criteria_len ||
-        strstr(out.next_action, "moves no value") == NULL) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen buyer-want cancelled/full vector failed");
-        return false;
-    }
+    if (!shop_want_view_kat_cancelled_full_matches(service, &input, &out))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen buyer-want cancelled/full vector failed");
     input.review_state = 99;
-    if (service->render(&input, &out)) {
-        if (why && why_sz)
-            (void)snprintf(why, why_sz,
-                           "frozen buyer-want invalid-state vector failed");
-        return false;
-    }
+    if (service->render(&input, &out))
+        return shop_want_view_kat_report_failure(
+            why, why_sz, "frozen buyer-want invalid-state vector failed");
     return true;
 }
 

@@ -49,7 +49,6 @@ contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
 contexts/market/controllers/src/shop_native_fulfill.c:shf_build_row:22
 contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_post:26
 contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_withdraw:20
-contexts/market/controllers/src/shop_native_want_view_contract.c:shop_want_view_frozen_kat:43
 contexts/market/controllers/src/yardsale_controller.c:yardsale_buyer_begin:21
 contexts/market/controllers/src/yardsale_controller.c:yardsale_ceremony_partial_ingest:38
 contexts/market/controllers/src/yardsale_site_controller_buy.c:parse_input_field:22
