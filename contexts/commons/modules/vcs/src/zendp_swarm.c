@@ -32,44 +32,41 @@ const char *zendp_anchor_state_string(enum zendp_anchor_state s)
     return "unknown";
 }
 
-static const char *zendp_result_string_local(enum zendp_result r)
-{
-    switch (r) {
-    case ZENDP_OK:                    return "ok";
-    case ZENDP_ERR_NULL:              return "null-argument";
-    case ZENDP_ERR_SHAPE:             return "record-shape-refused";
-    case ZENDP_ERR_ENCODE:            return "encode-failed";
-    case ZENDP_ERR_SIGN:              return "sign-refused";
-    case ZENDP_ERR_WINDOW_TOO_LONG:   return "window-exceeds-maximum";
-    case ZENDP_ERR_BLOB:              return "blob-refused";
-    case ZENDP_ERR_ABSENT:            return "no-local-witness";
-    case ZENDP_ERR_DECODE:            return "doc-decode-failed";
-    case ZENDP_ERR_VERIFY:            return "verify-failed";
-    default:                          return NULL;
-    }
-}
-
-static const char *zendp_result_string_peer(enum zendp_result r)
-{
-    switch (r) {
-    case ZENDP_ERR_BODY:              return "not-a-zide-body";
-    case ZENDP_ERR_KEY_MISMATCH:      return "signed-by-another-identity";
-    case ZENDP_ERR_STALE:             return "seq-does-not-supersede";
-    case ZENDP_ERR_FULL:              return "directory-full";
-    case ZENDP_ERR_FETCH:             return "swarm-refused";
-    case ZENDP_ERR_NO_ANCHOR_LOOKUP:  return "no-chain-lookup-registered";
-    case ZENDP_ERR_ANCHOR_UNAVAILABLE:return "chain-lookup-unavailable";
-    case ZENDP_ERR_NOT_ANCHORED:      return "key-not-anchored-on-chain";
-    case ZENDP_ERR_ROTATED:           return "key-rotated-away";
-    case ZENDP_ERR_REVOKED:           return "key-revoked";
-    default:                          return "unknown";
-    }
-}
+/* One table for every result code. A code missing from it maps to
+ * "unknown", the same default both former switch halves gave. */
+static const struct {
+    enum zendp_result code;
+    const char *name;
+} zendp_result_names[] = {
+    {ZENDP_OK,                      "ok"},
+    {ZENDP_ERR_NULL,                "null-argument"},
+    {ZENDP_ERR_SHAPE,               "record-shape-refused"},
+    {ZENDP_ERR_ENCODE,              "encode-failed"},
+    {ZENDP_ERR_SIGN,                "sign-refused"},
+    {ZENDP_ERR_WINDOW_TOO_LONG,     "window-exceeds-maximum"},
+    {ZENDP_ERR_BLOB,                "blob-refused"},
+    {ZENDP_ERR_ABSENT,              "no-local-witness"},
+    {ZENDP_ERR_DECODE,              "doc-decode-failed"},
+    {ZENDP_ERR_VERIFY,              "verify-failed"},
+    {ZENDP_ERR_BODY,                "not-a-zide-body"},
+    {ZENDP_ERR_KEY_MISMATCH,        "signed-by-another-identity"},
+    {ZENDP_ERR_STALE,               "seq-does-not-supersede"},
+    {ZENDP_ERR_FULL,                "directory-full"},
+    {ZENDP_ERR_FETCH,               "swarm-refused"},
+    {ZENDP_ERR_NO_ANCHOR_LOOKUP,    "no-chain-lookup-registered"},
+    {ZENDP_ERR_ANCHOR_UNAVAILABLE,  "chain-lookup-unavailable"},
+    {ZENDP_ERR_NOT_ANCHORED,        "key-not-anchored-on-chain"},
+    {ZENDP_ERR_ROTATED,             "key-rotated-away"},
+    {ZENDP_ERR_REVOKED,             "key-revoked"},
+};
 
 const char *zendp_result_string(enum zendp_result r)
 {
-    const char *s = zendp_result_string_local(r);
-    return s ? s : zendp_result_string_peer(r);
+    const size_t n = sizeof(zendp_result_names) / sizeof(zendp_result_names[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (zendp_result_names[i].code == r) return zendp_result_names[i].name;
+    }
+    return "unknown";
 }
 
 /* One lock for every directory this module touches, plus the port.
