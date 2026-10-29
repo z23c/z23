@@ -884,31 +884,112 @@ static void note_cycling_page(int64_t now, enum sticky_rung deepest)
                 (unsigned long long)atomic_load(&g_ladder_cycles));
 }
 
-/* The core step, shared by drive() and the test seam. `now` is wall-unix;
- * `tip` is the observed provable tip (injected in tests). */
-static void apply_drive(int64_t tip, int64_t now)
+/* Arm on a generic CRITICAL trigger when not yet armed. Returns false when the
+ * pass must stop (not armed and not allowed to auto-arm). */
+static bool drive_arm_if_allowed(int64_t tip, int64_t now)
 {
-    /* A queued callback must not arm cross-boot work during store teardown. */
-    if (thread_registry_shutdown_requested()) return;
     if (!atomic_load(&g_armed)) {
         /* Generic CRITICAL conditions are only a belt-and-suspenders trigger
          * while chain work is pending. Named stall signals use note_stall(). */
         if (!sticky_trigger_auto_arm_allowed(
                 g_ms, tip,
                 condition_engine_get_unresolved_critical_count()))
-            return;
+            return false;
         atomic_store(&g_armed, true);
         enter_rung(STICKY_RUNG_RETRY, now);
     }
+    return true;
+}
 
-    /* Honour the post-deepest-rung cooldown before re-driving. */
+/* True while the post-deepest-rung cooldown still holds; re-enters rung 0 once
+ * it has elapsed. */
+static bool drive_rearm_cooldown_pending(int64_t now)
+{
     int64_t rearm = atomic_load(&g_rearm_until_unix);
     if (rearm != 0) {
         if (now < rearm)
-            return;
+            return true;
         atomic_store(&g_rearm_until_unix, 0);
         enter_rung(STICKY_RUNG_RETRY, now);
     }
+    return false;
+}
+
+/* True (and stamps the throttle) when the hold warning is due. */
+static bool drive_hold_warn_due(int64_t now)
+{
+    int64_t last = atomic_load(&g_last_hold_warn_unix);
+    if (last == 0 || now - last >= STICKY_HOLD_WARN_MIN_INTERVAL_SECS) {
+        atomic_store(&g_last_hold_warn_unix, now);
+        return true;
+    }
+    return false;
+}
+
+/* Livelock pass accounting: returns the consecutive zero-progress pass count
+ * (already incremented) or 0 after resetting the counter on a progressing pass. */
+static int drive_livelock_count_pass(int64_t tip, enum sticky_rung cur)
+{
+    int64_t prev_tip = atomic_load(&g_livelock_last_tip);
+    int     prev_rung = atomic_load(&g_livelock_last_rung);
+    bool no_progress = (prev_rung == (int)cur) && (prev_tip >= 0) &&
+                       (tip <= prev_tip);
+    if (no_progress)
+        return atomic_fetch_add(&g_livelock_no_progress_passes, 1) + 1;
+    atomic_store(&g_livelock_no_progress_passes, 0);
+    return 0;
+}
+
+/* Run the current rung's action. Returns true when the episode was cleared
+ * here (resnapshot completion) and the pass must stop; otherwise *res holds
+ * the rung result. */
+static bool drive_dispatch_rung(enum sticky_rung cur, int64_t entry,
+                                int64_t tip, int64_t now,
+                                enum sticky_rung_result *res)
+{
+    /* Most rung actions are idempotent nudges and may run each tick.  The
+     * resnapshot action is different: it rewinds a range. Dispatch it exactly
+     * once per rung entry, then let the forward stages consume that rewind.
+     * Reaching the pre-rewind entry frontier is the exact completion witness;
+     * requiring the generic +2 margin here would advance into deeper recovery
+     * after a successful catch-up merely because no new block arrived. */
+    if (cur == STICKY_RUNG_RESNAPSHOT) {
+        enum sticky_resnapshot_gate_decision decision =
+            sticky_resnapshot_gate_decide(entry, tip);
+        if (decision == STICKY_RESNAPSHOT_COMPLETE) {
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                        "action=sticky-resnapshot-complete tip=%lld "
+                        "entry=%lld dispatches=1",
+                        (long long)tip, (long long)entry);
+            clear_episode(now, tip);
+            return true;
+        }
+        if (decision == STICKY_RESNAPSHOT_HOLD) {
+            *res = STICKY_RUNG_PROGRESSING;
+        } else {
+            *res = rung_action(cur)();
+            atomic_fetch_add(&g_rung_dispatches[cur], 1u);
+            sticky_resnapshot_gate_finish(*res == STICKY_RUNG_PROGRESSING);
+        }
+    } else {
+        *res = rung_action(cur)();
+        atomic_fetch_add(&g_rung_dispatches[cur], 1u);
+    }
+    return false;
+}
+
+/* The core step, shared by drive() and the test seam. `now` is wall-unix;
+ * `tip` is the observed provable tip (injected in tests). */
+static void apply_drive(int64_t tip, int64_t now)
+{
+    /* A queued callback must not arm cross-boot work during store teardown. */
+    if (thread_registry_shutdown_requested()) return;
+    if (!drive_arm_if_allowed(tip, now))
+        return;
+
+    /* Honour the post-deepest-rung cooldown before re-driving. */
+    if (drive_rearm_cooldown_pending(now))
+        return;
 
     /* Progress check: any climb past the entry tip clears the whole episode. */
     int64_t entry = atomic_load(&g_tip_at_rung);
@@ -934,9 +1015,7 @@ static void apply_drive(int64_t tip, int64_t now)
             atomic_store(&g_held_by_permanent, true);
             atomic_fetch_add(&g_hold_permanent_fires, 1u);
             enum sticky_rung held_rung = (enum sticky_rung)atomic_load(&g_rung);
-            int64_t last = atomic_load(&g_last_hold_warn_unix);
-            if (last == 0 || now - last >= STICKY_HOLD_WARN_MIN_INTERVAL_SECS) {
-                atomic_store(&g_last_hold_warn_unix, now);
+            if (drive_hold_warn_due(now)) {
                 LOG_WARN("sticky_escalator",
                          "[sticky_escalator] escalation held: permanent blocker "
                          "'%s' owns this stall — rungs cannot cure incomplete "
@@ -968,12 +1047,8 @@ static void apply_drive(int64_t tip, int64_t now)
      * reset on every rung entry / episode clear (livelock_reset), so a genuine
      * rung advance or tip climb never trips it. */
     {
-        int64_t prev_tip = atomic_load(&g_livelock_last_tip);
-        int     prev_rung = atomic_load(&g_livelock_last_rung);
-        bool no_progress = (prev_rung == (int)cur) && (prev_tip >= 0) &&
-                           (tip <= prev_tip);
-        if (no_progress) {
-            int np = atomic_fetch_add(&g_livelock_no_progress_passes, 1) + 1;
+        int np = drive_livelock_count_pass(tip, cur);
+        {
             if (np >= STICKY_LIVELOCK_MAX_PASSES) {
                 atomic_fetch_add(&g_livelock_force_advances, 1u);
                 LOG_WARN("sticky_escalator",
@@ -998,42 +1073,14 @@ static void apply_drive(int64_t tip, int64_t now)
                 }
                 return;
             }
-        } else {
-            atomic_store(&g_livelock_no_progress_passes, 0);
         }
         atomic_store(&g_livelock_last_tip, tip);
         atomic_store(&g_livelock_last_rung, (int)cur);
     }
 
-    /* Most rung actions are idempotent nudges and may run each tick.  The
-     * resnapshot action is different: it rewinds a range. Dispatch it exactly
-     * once per rung entry, then let the forward stages consume that rewind.
-     * Reaching the pre-rewind entry frontier is the exact completion witness;
-     * requiring the generic +2 margin here would advance into deeper recovery
-     * after a successful catch-up merely because no new block arrived. */
     enum sticky_rung_result res;
-    if (cur == STICKY_RUNG_RESNAPSHOT) {
-        enum sticky_resnapshot_gate_decision decision =
-            sticky_resnapshot_gate_decide(entry, tip);
-        if (decision == STICKY_RESNAPSHOT_COMPLETE) {
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=sticky-resnapshot-complete tip=%lld "
-                        "entry=%lld dispatches=1",
-                        (long long)tip, (long long)entry);
-            clear_episode(now, tip);
-            return;
-        }
-        if (decision == STICKY_RESNAPSHOT_HOLD) {
-            res = STICKY_RUNG_PROGRESSING;
-        } else {
-            res = rung_action(cur)();
-            atomic_fetch_add(&g_rung_dispatches[cur], 1u);
-            sticky_resnapshot_gate_finish(res == STICKY_RUNG_PROGRESSING);
-        }
-    } else {
-        res = rung_action(cur)();
-        atomic_fetch_add(&g_rung_dispatches[cur], 1u);
-    }
+    if (drive_dispatch_rung(cur, entry, tip, now, &res))
+        return;
 
     if (res == STICKY_RUNG_RESOLVED) {
         clear_episode(now, tip);
