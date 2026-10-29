@@ -25,6 +25,9 @@
 #include "net/peer_liveness.h"
 #include "net/tip_watchdog.h"
 #include "net/download.h"
+#include "net/net_fault.h"
+#include "net/peer_scoring.h"
+#include "util/blocker.h"
 #include "event/event.h"
 #include "sync/sync_state.h"
 #include "platform/clock.h"
@@ -2093,6 +2096,479 @@ static int test_net_p2p_node_receive_bytes_parses_message(void)
         else { printf("FAIL\n"); failures++; }
     }
     return failures;
+}
+
+/* ── Characterization pins for net.c before its complexity split ──────
+ * Pin the observable behaviour of p2p_disconnect_reason_name(),
+ * p2p_node_receive_bytes() and peer_misbehaving() as the code stands.
+ * Every expectation was derived by reading net.c, not from a run. */
+
+static const unsigned char char_magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
+static uint8_t char_frames[MAX_RECV_MESSAGES * MSG_HEADER_SIZE];
+
+struct char_reason_row {
+    enum p2p_disconnect_reason reason;
+    const char *name;
+};
+
+static int test_net_char_disconnect_reason_name(void)
+{
+    static const struct char_reason_row rows[] = {
+        {P2P_DISCONNECT_NONE, "unknown"},
+        {P2P_DISCONNECT_REMOTE_CLOSE, "remote_close"},
+        {P2P_DISCONNECT_IO_ERROR, "io_error"},
+        {P2P_DISCONNECT_TRANSPORT_ERROR, "transport_error"},
+        {P2P_DISCONNECT_MESSAGE_PARSE, "message_parse"},
+        {P2P_DISCONNECT_CONNECT_TIMEOUT, "connect_timeout"},
+        {P2P_DISCONNECT_HANDSHAKE_TIMEOUT, "handshake_timeout"},
+        {P2P_DISCONNECT_PONG_TIMEOUT, "pong_timeout"},
+        {P2P_DISCONNECT_HARD_SILENCE, "hard_silence"},
+        {P2P_DISCONNECT_PROTOCOL_VIOLATION, "protocol_violation"},
+        {P2P_DISCONNECT_RESOURCE_LIMIT, "resource_limit"},
+        {P2P_DISCONNECT_SYNC_STALL, "sync_stall"},
+        {P2P_DISCONNECT_POLICY_ROTATION, "policy_rotation"},
+        {P2P_DISCONNECT_FEELER_COMPLETE, "feeler_complete"},
+        {P2P_DISCONNECT_FEELER_TIMEOUT, "feeler_timeout"},
+        {P2P_DISCONNECT_SELF_CONNECTION, "self_connection"},
+        {P2P_DISCONNECT_NOISE_UPGRADE, "noise_upgrade"},
+        {P2P_DISCONNECT_EVICTED, "evicted"},
+        {P2P_DISCONNECT_APPLICATION, "application"},
+        {P2P_DISCONNECT_LOCAL_SHUTDOWN, "local_shutdown"},
+        {P2P_DISCONNECT_REASON_COUNT, "unknown"},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        ok = ok && strcmp(p2p_disconnect_reason_name(rows[i].reason),
+                          rows[i].name) == 0;
+    int raw_negative = -1;
+    int raw_high = 12345;
+    ok = ok && strcmp(p2p_disconnect_reason_name(
+                          (enum p2p_disconnect_reason)raw_negative), "unknown") == 0;
+    ok = ok && strcmp(p2p_disconnect_reason_name(
+                          (enum p2p_disconnect_reason)raw_high), "unknown") == 0;
+
+    printf("net: char disconnect_reason_name maps every reason... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static struct p2p_node *char_recv_node(struct net_manager *nm)
+{
+    net_manager_init(nm);
+    memcpy(nm->message_start, char_magic, MESSAGE_START_SIZE);
+    struct net_address addr;
+    net_address_init(&addr);
+    unsigned char ip4[4] = {203, 0, 113, 9};
+    net_addr_set_ipv4(&addr.svc.addr, ip4);
+    addr.svc.port = 8033;
+    return p2p_node_create(nm, ZCL_INVALID_SOCKET, &addr, "char_recv", true);
+}
+
+static void char_frame(uint8_t *buf, const unsigned char magic[MESSAGE_START_SIZE],
+                       const char *cmd, unsigned int size)
+{
+    struct msg_header hdr;
+    msg_header_init_full(&hdr, magic, cmd, size);
+    memcpy(buf, &hdr, MSG_HEADER_SIZE);
+}
+
+static bool char_recv(struct p2p_node *node, const uint8_t *buf, size_t n)
+{
+    return p2p_node_receive_bytes(node, (const char *)buf, (unsigned int)n,
+                                  char_magic);
+}
+
+struct char_recv_case {
+    const uint8_t *bytes;
+    size_t n;
+    bool want_ret;
+    size_t want_count;
+    int want_offence;
+};
+
+static bool char_recv_case_holds(const struct char_recv_case *c)
+{
+    struct net_manager nm;
+    struct p2p_node *node = char_recv_node(&nm);
+    bool ok = node != NULL;
+    if (ok) {
+        bool ret = char_recv(node, c->bytes, c->n);
+        ok = ret == c->want_ret && node->recv_msg_count == c->want_count &&
+             atomic_load(&node->framing_offence) == c->want_offence;
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+    return ok;
+}
+
+static int test_net_char_receive_bytes_valid_frames(void)
+{
+    uint8_t verack[MSG_HEADER_SIZE];
+    uint8_t two[2 * MSG_HEADER_SIZE];
+    uint8_t bad_magic[MSG_HEADER_SIZE];
+    uint8_t oversize[MSG_HEADER_SIZE];
+    uint8_t over_payload[MSG_HEADER_SIZE];
+    uint8_t limit_size[MSG_HEADER_SIZE];
+    static const unsigned char zero_magic[MESSAGE_START_SIZE] = {0, 0, 0, 0};
+
+    char_frame(verack, char_magic, "verack", 0);
+    memcpy(two, verack, MSG_HEADER_SIZE);
+    memcpy(two + MSG_HEADER_SIZE, verack, MSG_HEADER_SIZE);
+    char_frame(bad_magic, zero_magic, "verack", 0);
+    char_frame(oversize, char_magic, "block", MAX_SIZE + 1);
+    char_frame(over_payload, char_magic, "block",
+               MAX_PROTOCOL_MESSAGE_LENGTH + 1);
+    char_frame(limit_size, char_magic, "block", MAX_PROTOCOL_MESSAGE_LENGTH);
+
+    const struct char_recv_case rows[] = {
+        {verack, 0, true, 0, PEER_OFFENCE_NONE},
+        {verack, MSG_HEADER_SIZE, true, 1, PEER_OFFENCE_NONE},
+        {two, 2 * MSG_HEADER_SIZE, true, 2, PEER_OFFENCE_NONE},
+        {bad_magic, MSG_HEADER_SIZE, false, 1, PEER_OFFENCE_INVALID_HEADER},
+        {oversize, MSG_HEADER_SIZE, false, 1, PEER_OFFENCE_INVALID_HEADER},
+        {over_payload, MSG_HEADER_SIZE, false, 1, PEER_OFFENCE_INVALID_PAYLOAD},
+        {limit_size, MSG_HEADER_SIZE, true, 1, PEER_OFFENCE_NONE},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        ok = ok && char_recv_case_holds(&rows[i]);
+
+    printf("net: char receive_bytes valid and refused frames... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_receive_bytes_split_header(void)
+{
+    uint8_t verack[MSG_HEADER_SIZE];
+    char_frame(verack, char_magic, "verack", 0);
+
+    struct net_manager nm;
+    struct p2p_node *node = char_recv_node(&nm);
+    bool ok = node != NULL;
+    if (ok) {
+        ok = char_recv(node, verack, 10);
+        ok = ok && node->recv_msg_count == 1 &&
+             !net_message_complete(&node->recv_msgs[0]) &&
+             node->recv_msgs[0].hdr_pos == 10;
+        ok = ok && char_recv(node, verack + 10, MSG_HEADER_SIZE - 10);
+        ok = ok && node->recv_msg_count == 1 &&
+             net_message_complete(&node->recv_msgs[0]);
+        char cmd[COMMAND_SIZE + 1];
+        msg_header_get_command(&node->recv_msgs[0].hdr, cmd, sizeof(cmd));
+        ok = ok && strcmp(cmd, "verack") == 0;
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+
+    printf("net: char receive_bytes joins a header split across calls... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_receive_bytes_recv_budget(void)
+{
+    uint8_t frame[MSG_HEADER_SIZE + 100] = {0};
+    char_frame(frame, char_magic, "block", 100);
+
+    struct net_manager nm;
+    struct p2p_node *node = char_recv_node(&nm);
+    bool ok = node != NULL;
+    if (ok) {
+        /* Control: the default budget accepts the 100-byte payload. */
+        unsetenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES");
+        ok = char_recv(node, frame, sizeof(frame));
+        ok = ok && node->recv_msg_count == 1 &&
+             net_message_complete(&node->recv_msgs[0]);
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+
+    /* A 1-byte cap refuses the same frame. The refusal is NET_FRAME_ERR_LOCAL,
+     * so the peer is NOT tagged with a framing offence. */
+    setenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES", "1", 1);
+    node = char_recv_node(&nm);
+    ok = ok && node != NULL;
+    if (node) {
+        ok = ok && !char_recv(node, frame, sizeof(frame));
+        ok = ok && node->recv_msg_count == 1;
+        ok = ok && atomic_load(&node->framing_offence) == PEER_OFFENCE_NONE;
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+    unsetenv("ZCL_MAX_RECVBUFFER_TOTAL_BYTES");
+
+    printf("net: char receive_bytes refuses over-budget payloads locally... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_receive_bytes_partition_window(void)
+{
+    uint8_t verack[MSG_HEADER_SIZE];
+    char_frame(verack, char_magic, "verack", 0);
+
+    struct net_manager nm;
+    struct p2p_node *node = char_recv_node(&nm);
+    bool ok = node != NULL;
+    if (ok) {
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        net_partition_until_unix(now + 3600);
+        bool ret = char_recv(node, verack, MSG_HEADER_SIZE);
+        net_partition_clear();
+        /* Inside the window the bytes are dropped silently: true, nothing queued. */
+        ok = ret && node->recv_msg_count == 0;
+        ok = ok && char_recv(node, verack, MSG_HEADER_SIZE);
+        ok = ok && node->recv_msg_count == 1;
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+
+    printf("net: char receive_bytes drops frames only inside a partition... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_receive_bytes_queue_limit(void)
+{
+    for (size_t i = 0; i < MAX_RECV_MESSAGES; i++)
+        char_frame(char_frames + i * MSG_HEADER_SIZE, char_magic, "verack", 0);
+    uint8_t extra[MSG_HEADER_SIZE];
+    char_frame(extra, char_magic, "verack", 0);
+
+    struct net_manager nm;
+    struct p2p_node *node = char_recv_node(&nm);
+    bool ok = node != NULL;
+    if (ok) {
+        ok = char_recv(node, char_frames, sizeof(char_frames));
+        ok = ok && node->recv_msg_count == MAX_RECV_MESSAGES;
+        /* One more frame with the queue full: refused, and not a framing offence. */
+        ok = ok && !char_recv(node, extra, MSG_HEADER_SIZE);
+        ok = ok && node->recv_msg_count == MAX_RECV_MESSAGES;
+        ok = ok && atomic_load(&node->framing_offence) == PEER_OFFENCE_NONE;
+        p2p_node_free(node);
+    }
+    net_manager_free(&nm);
+
+    printf("net: char receive_bytes refuses frames past the queue limit... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static void char_scoring_defaults(void)
+{
+    unsetenv("ZCL_PEER_BAN_THRESHOLD");
+    unsetenv("ZCL_PEER_BAN_HOURS");
+    unsetenv("ZCL_PEER_LAST_PEER_BAN_SECS");
+    peer_scoring_init();
+    blocker_reset_for_testing();
+}
+
+static void char_score_node(struct p2p_node *node, const unsigned char ip4[4])
+{
+    memset(node, 0, sizeof(*node));
+    snprintf(node->addr_name, sizeof(node->addr_name), "%s", "char_peer");
+    net_addr_set_ipv4(&node->addr.svc.addr, ip4);
+}
+
+static int test_net_char_peer_misbehaving_noops(void)
+{
+    static const unsigned char remote[4] = {203, 0, 113, 9};
+    char_scoring_defaults();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct p2p_node node;
+    char_score_node(&node, remote);
+
+    peer_misbehaving(NULL, &node, 100, "no manager");
+    bool ok = node.misbehavior == 0 && !node.disconnect;
+    peer_misbehaving(&nm, NULL, 100, "no node");
+    ok = ok && nm.num_banned == 0;
+    peer_misbehaving(&nm, &node, 0, "zero");
+    peer_misbehaving(&nm, &node, -5, "negative");
+    ok = ok && node.misbehavior == 0 && !node.disconnect;
+    node.whitelisted = true;
+    peer_misbehaving(&nm, &node, 100, "whitelisted");
+    ok = ok && node.misbehavior == 0 && !node.disconnect && nm.num_banned == 0;
+    net_manager_free(&nm);
+
+    printf("net: char peer_misbehaving ignores null, empty and whitelisted... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_peer_misbehaving_loopback_and_ingress(void)
+{
+    static const unsigned char loopback[4] = {127, 0, 0, 1};
+    char_scoring_defaults();
+    net_set_onion_ingress_port(0);
+
+    struct net_manager nm;
+    struct p2p_node node;
+    net_manager_init(&nm);
+    char_score_node(&node, loopback);
+    /* Same-host loopback that is not Tor ingress is trusted: never scored. */
+    peer_misbehaving(&nm, &node, 100, "loopback");
+    bool ok = node.misbehavior == 0 && !node.disconnect && nm.num_banned == 0;
+    net_manager_free(&nm);
+
+    /* Arm the onion ingress port: the same loopback inbound on it is now
+     * scored, and crossing the threshold disconnects it. Its source address is
+     * shared by every Tor-forwarded peer, so no address ban is written. */
+    net_manager_init(&nm);
+    char_score_node(&node, loopback);
+    node.inbound = true;
+    node.accepted_local_port = 9051;
+    net_set_onion_ingress_port(9051);
+    peer_misbehaving(&nm, &node, 50, "ingress");
+    ok = ok && node.misbehavior == 50 && !node.disconnect;
+    peer_misbehaving(&nm, &node, 50, "ingress");
+    ok = ok && node.misbehavior == 100 && node.disconnect &&
+         atomic_load(&node.disconnect_reason) == P2P_DISCONNECT_PROTOCOL_VIOLATION &&
+         nm.num_banned == 0;
+    net_set_onion_ingress_port(0);
+    net_manager_free(&nm);
+
+    printf("net: char peer_misbehaving trusts loopback but not onion ingress... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static bool char_ban_within(const struct net_manager *nm, int64_t t0,
+                            int64_t t1, int64_t secs)
+{
+    return nm->banned[0].ban_until >= t0 + secs &&
+           nm->banned[0].ban_until <= t1 + secs;
+}
+
+/* Below threshold: scored, not banned. Crossing it: full 24h ban, disconnect,
+ * no blocker, because this peer is not the last one connected. */
+static bool char_full_ban_first_offence(struct net_manager *nm,
+                                        struct p2p_node *node)
+{
+    peer_misbehaving(nm, node, 40, "below");
+    peer_misbehaving(nm, node, 59, "below");
+    bool ok = node->misbehavior == 99 && !node->disconnect && nm->num_banned == 0;
+
+    int64_t t0 = GetTime();
+    peer_misbehaving(nm, node, 1, "bad block");
+    int64_t t1 = GetTime();
+    ok = ok && node->misbehavior == 100 && node->disconnect &&
+         atomic_load(&node->disconnect_reason) == P2P_DISCONNECT_PROTOCOL_VIOLATION &&
+         atomic_load(&node->disconnect_source) == P2P_DISCONNECT_SOURCE_PEER_POLICY;
+    ok = ok && nm->num_banned == 1 &&
+         net_addr_eq(&nm->banned[0].addr, &node->addr.svc.addr) &&
+         nm->banned[0].score_at_ban == 100 &&
+         strcmp(nm->banned[0].reason, "bad block") == 0;
+    ok = ok && char_ban_within(nm, t0, t1, 24 * 60 * 60);
+    return ok && !blocker_exists(PEER_LAST_PEER_BAN_BLOCKER_ID);
+}
+
+static int test_net_char_peer_misbehaving_full_ban(void)
+{
+    static const unsigned char remote[4] = {203, 0, 113, 9};
+    char_scoring_defaults();
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct p2p_node node;
+    char_score_node(&node, remote);
+
+    bool ok = char_full_ban_first_offence(&nm, &node);
+
+    /* A repeat offence for the same address extends the existing entry in
+     * place and takes the reason text, or the fallback when none is given. */
+    peer_misbehaving(&nm, &node, 10, NULL);
+    ok = ok && nm.num_banned == 1 && nm.banned[0].score_at_ban == 110 &&
+         strcmp(nm.banned[0].reason, "threshold reached") == 0;
+
+    net_manager_free(&nm);
+
+    printf("net: char peer_misbehaving full-length ban for a non-last peer... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+static int test_net_char_peer_misbehaving_last_peer(void)
+{
+    static const unsigned char remote[4] = {203, 0, 113, 9};
+    char_scoring_defaults();
+    bool ok = true;
+    int64_t last_peer_secs = peer_scoring_last_peer_ban_secs();
+
+    /* Row 1: the only registered peer crosses the threshold. The bounded
+     * recovery ban applies and the blocker is raised. */
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct p2p_node node;
+    char_score_node(&node, remote);
+    struct p2p_node *only[1] = {&node};
+    nm.nodes = only;
+    nm.num_nodes = 1;
+    int64_t t0 = GetTime();
+    peer_misbehaving(&nm, &node, 100, "bad block");
+    int64_t t1 = GetTime();
+    ok = ok && nm.num_banned == 1 && node.disconnect &&
+         nm.banned[0].ban_until >= t0 + last_peer_secs &&
+         nm.banned[0].ban_until <= t1 + last_peer_secs;
+    ok = ok && blocker_exists(PEER_LAST_PEER_BAN_BLOCKER_ID);
+    nm.nodes = NULL;
+    nm.num_nodes = 0;
+    net_manager_free(&nm);
+
+    /* Row 2: a second live peer is registered, so the ordinary full ban applies
+     * and no blocker is raised. */
+    blocker_reset_for_testing();
+    net_manager_init(&nm);
+    char_score_node(&node, remote);
+    struct p2p_node other;
+    memset(&other, 0, sizeof(other));
+    struct p2p_node *pair[2] = {&node, &other};
+    nm.nodes = pair;
+    nm.num_nodes = 2;
+    t0 = GetTime();
+    peer_misbehaving(&nm, &node, 100, "bad block");
+    t1 = GetTime();
+    ok = ok && nm.num_banned == 1 &&
+         nm.banned[0].ban_until >= t0 + 24 * 60 * 60 &&
+         nm.banned[0].ban_until <= t1 + 24 * 60 * 60;
+    ok = ok && !blocker_exists(PEER_LAST_PEER_BAN_BLOCKER_ID);
+    nm.nodes = NULL;
+    nm.num_nodes = 0;
+    net_manager_free(&nm);
+
+    /* Row 3: the other registered peer is already flagged for disconnect, so
+     * this one is effectively the last peer and gets the bounded ban. */
+    blocker_reset_for_testing();
+    net_manager_init(&nm);
+    char_score_node(&node, remote);
+    memset(&other, 0, sizeof(other));
+    atomic_store(&other.disconnect, true);
+    nm.nodes = pair;
+    nm.num_nodes = 2;
+    t0 = GetTime();
+    peer_misbehaving(&nm, &node, 100, "bad block");
+    t1 = GetTime();
+    ok = ok && nm.num_banned == 1 &&
+         nm.banned[0].ban_until >= t0 + last_peer_secs &&
+         nm.banned[0].ban_until <= t1 + last_peer_secs;
+    ok = ok && blocker_exists(PEER_LAST_PEER_BAN_BLOCKER_ID);
+    nm.nodes = NULL;
+    nm.num_nodes = 0;
+    net_manager_free(&nm);
+
+    printf("net: char peer_misbehaving bounded ban only for the last peer... ");
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
 }
 
 static int test_net_p2p_node_push_address(void)
@@ -6782,6 +7258,16 @@ int test_net(void)
     failures += test_net_peer_strategy_get_addresses_both();
     failures += test_net_msg_processor_cache_versioning();
     failures += test_net_net_peer_misbehaving_accumulates_score();
+    failures += test_net_char_disconnect_reason_name();
+    failures += test_net_char_receive_bytes_valid_frames();
+    failures += test_net_char_receive_bytes_split_header();
+    failures += test_net_char_receive_bytes_recv_budget();
+    failures += test_net_char_receive_bytes_partition_window();
+    failures += test_net_char_receive_bytes_queue_limit();
+    failures += test_net_char_peer_misbehaving_noops();
+    failures += test_net_char_peer_misbehaving_loopback_and_ingress();
+    failures += test_net_char_peer_misbehaving_full_ban();
+    failures += test_net_char_peer_misbehaving_last_peer();
     failures += test_net_dispatch_all_handlers_non_null();
     failures += test_net_p74_watchdog_enters_active_after_61s_stall();
     failures += test_net_p74_watchdog_at_tip_in_flight_cap_estimate_ex();
