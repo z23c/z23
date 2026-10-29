@@ -1621,6 +1621,7 @@ int main(int argc, char **argv)
     { extern int test_netsplit_detector(void); failures += test_netsplit_detector(); }
     { extern int test_directory_influence_policy(void); failures += test_directory_influence_policy(); }
     { extern int test_network_crawler(void); failures += test_network_crawler(); }
+    { extern int test_onion_remote_status(void); failures += test_onion_remote_status(); }
     failures += test_db_maintenance();
     { extern int test_storage_housekeeping(void); failures += test_storage_housekeeping(); }
     failures += test_mempool_limits();

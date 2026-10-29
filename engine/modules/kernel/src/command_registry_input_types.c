@@ -448,6 +448,19 @@ static bool cr_match_wallet_unlock(const char *path, const char *key,
     return true;
 }
 
+/* core.network.onion.remote-status `timeout_secs` is an integer 5..60, the
+ * fetch deadline the handler passes to the embedded-Tor blocking fetch. */
+static bool cr_match_onion_remote_status(const char *path, const char *key,
+                                         const struct json_value *value,
+                                         bool *type_ok)
+{
+    if (strcmp(path, "core.network.onion.remote-status") != 0 ||
+        strcmp(key, "timeout_secs") != 0)
+        return false;
+    *type_ok = cr_int_range(value, 5, 60);
+    return true;
+}
+
 /* fleet.bundle.fetch: the package size (1 B to the 5 MiB bundle cap) and the
  * bounded wait. Leaf-scoped because `size` and `timeout_s` are generic. */
 static bool cr_match_fleet_bundle_ints(const char *path, const char *key,
@@ -499,6 +512,7 @@ static bool cr_match_scoped_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
     return cr_match_wallet_unlock(path, key, value, type_ok) ||
+           cr_match_onion_remote_status(path, key, value, type_ok) ||
            cr_match_wiki_chunk_ints(path, key, value, type_ok) ||
            cr_match_vanity_ints(path, key, value, type_ok) ||
            cr_match_fleet_bundle_ints(path, key, value, type_ok) ||

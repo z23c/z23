@@ -764,6 +764,26 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.network.onion.remote-status", "core.network.onion", "",
+    "Read another node's public /status over Tor",
+    "The running node fetches GET /status only, from one named v3 onion "
+    "through its embedded Tor, parses it strictly (body capped at 4096 "
+    "bytes) and returns the remote height, sync flag, peers seen in the "
+    "last hour, Tor and onion readiness, uptime and last block age beside "
+    "this node's own tip and the height difference. One fetch at a time; "
+    "the raw body is never echoed. Typed refusals: BAD_ONION, BUSY, "
+    "TOR_UNAVAILABLE, TIMEOUT, RATE_LIMITED, PUZZLE_REQUIRED, HTTP_STATUS, "
+    "BODY_TOO_LARGE, BAD_JSON, BAD_HEIGHT.", 0,
+    "onion,tor,remote,status,height,peer,phone",
+    "zcl.onion_remote_status.input.v1", "zcl.onion_remote_status.v1",
+    "onion,timeout_secs", "onion",
+    "z23 core network onion remote-status --onion=<56 chars>.onion",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 ZCL_COMMAND_READY_COMMAND(
     "core.network.onion.vanity", "core.network.onion", "",
     "Search for a v3 onion identity seed with a chosen address prefix",

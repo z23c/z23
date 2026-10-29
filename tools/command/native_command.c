@@ -52,6 +52,7 @@
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_native_handlers.h"
 #include "controllers/net_native_handlers.h"
+#include "controllers/onion_remote_status.h"
 #include "controllers/app_native_handlers.h"
 #include "controllers/meta_native_handlers.h"
 #include "controllers/ops_native_handlers.h"
@@ -161,6 +162,7 @@ static const struct {
     { "core.consensus.utxo.audit", zcl_native_utxo_audit_body },
     { "core.network.peers.incidents", zcl_native_peer_incidents_body },
     { "core.network.onion.health", zcl_native_onion_health_body },
+    { "core.network.onion.remote-status", zcl_native_onion_remote_status_body },
     { "core.wallet.address.list", zcl_native_listaddresses_body },
     { "core.wallet.utxo.list", zcl_native_listunspent_body },
     { "core.wallet.transaction.list", zcl_native_listtransactions_body },
