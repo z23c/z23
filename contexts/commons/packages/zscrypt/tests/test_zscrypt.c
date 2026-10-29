@@ -149,9 +149,6 @@ static void test_cli_args(void)
 {
     char maximum[3 * sizeof(unsigned long) + 1];
     snprintf(maximum, sizeof maximum, "%lu", ULONG_MAX);
-    unsigned long parsed = 0;
-    check(parse_cost(maximum, &parsed) && parsed == ULONG_MAX,
-          "CLI parser accepts ULONG_MAX without deriving");
     char *args[] = {"zscrypt", "pw", "salt", "2", "extra", NULL};
     const char *invalid[] = {"2junk", "", "+2", "-2", " 2", "2 ",
         "2\n", "184467440737095516160", "0x2"};
@@ -178,6 +175,8 @@ static void test_cli_args(void)
     }
     args[3] = "3";
     check(cli_case(4, args, 1, "") == 0, "CLI retains library power-of-two validation");
+    args[3] = maximum;
+    check(cli_case(4, args, 1, "") == 0, "CLI parses ULONG_MAX and library refuses without output");
 }
 
 static int cli_output_failure(bool buffered)
