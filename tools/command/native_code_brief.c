@@ -42,6 +42,8 @@
 #define CB_NEXT_CAP 160
 #define CB_HEAD_CAP 4096
 #define CB_WIKI_DEADLINE_MS 1000
+#define CB_DIR_PAGES 4
+#define CB_POOL_MAX 128
 
 struct cb_owner {
     char file[CB_PATH_CAP];
@@ -436,16 +438,20 @@ static void cb_stem_query(char q[][CB_QUERY_CAP], size_t *n, const char *p)
 
 /* The topic when given, else each path's file stem, then each path's
  * top-level directory: stems are specific, directories match broadly, so a
- * directory can only fill slots the stems left open. */
-static size_t cb_queries(const struct cb_brief *b, char q[][CB_QUERY_CAP])
+ * directory can only fill slots the stems left open. *first_dir is the
+ * index where the directory queries begin (n when there are none). */
+static size_t cb_queries(const struct cb_brief *b, char q[][CB_QUERY_CAP],
+                         size_t *first_dir)
 {
     size_t n = 0;
     if (b->topic[0]) {
         cb_add_query(q, &n, b->topic, strlen(b->topic));
+        *first_dir = n;
         return n;
     }
     for (size_t i = 0; i < b->npaths; i++)
         cb_stem_query(q, &n, b->paths[i]);
+    *first_dir = n;
     for (size_t i = 0; i < b->npaths; i++) {
         const char *slash = strchr(b->paths[i], '/');
         if (slash)
@@ -486,7 +492,7 @@ static void cb_take_lesson(struct cb_brief *b, const struct json_value *e)
 /* One fleet.wiki.find under the brief's absolute deadline. The leaf is
  * called directly, so the caller's authority ceiling is checked here. */
 static void cb_wiki_run(const struct zcl_command_request *request,
-                        const char *q, int64_t deadline_ms,
+                        const char *q, const char *after, int64_t deadline_ms,
                         struct zcl_command_reply *reply)
 {
     const struct zcl_command_spec *spec = zcl_command_registry_find(
@@ -501,7 +507,8 @@ static void cb_wiki_run(const struct zcl_command_request *request,
     sub.view = "normal";
     sub.spec = spec;
     zcl_command_reply_init(reply, "zcl.fleet_wiki_find.v1");
-    if (!spec || !json_push_kv_str(&input, "q", q))
+    if (!spec || !json_push_kv_str(&input, "q", q) ||
+        (after[0] && !json_push_kv_str(&input, "after_slug", after)))
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "WIKI_UNAVAILABLE",
                                "prepare", false, false, "query", "");
@@ -515,21 +522,34 @@ static void cb_wiki_run(const struct zcl_command_request *request,
     json_free(&input);
 }
 
-/* One search. False when it failed; b->unavailable then names why. A query
- * that used up its time cap, or ran past the brief's deadline, is
- * WIKI_DEADLINE rather than a refusal. */
+/* One page of one search. With a pool the entries are collected for
+ * ranking, else taken in the order the wiki gave them; *next is the
+ * after_slug to resume from, empty when the wiki has no more. False when it
+ * failed; b->unavailable then names why. A query that used up its time cap,
+ * or ran past the brief's deadline, is WIKI_DEADLINE rather than a refusal. */
 static bool cb_wiki_find(const struct zcl_command_request *request,
-                         struct cb_brief *b, const char *q)
+                         struct cb_brief *b, const char *q, const char *after,
+                         struct json_value *pool, char *next)
 {
     struct zcl_command_reply reply;
     int64_t start = platform_time_monotonic_ms();
     const struct json_value *entries;
+    const char *more;
     bool ok;
-    cb_wiki_run(request, q, b->deadline_ms, &reply);
+    cb_wiki_run(request, q, after, b->deadline_ms, &reply);
     ok = reply.exit_code == ZCL_COMMAND_EXIT_OK;
     entries = ok ? json_get(&reply.data, "entries") : NULL;
-    for (size_t i = 0; entries && i < json_size(entries); i++)
-        cb_take_lesson(b, json_at(entries, i));
+    for (size_t i = 0; entries && i < json_size(entries); i++) {
+        if (!pool)
+            cb_take_lesson(b, json_at(entries, i));
+        else if (json_size(pool) < CB_POOL_MAX)
+            (void)json_push_back(pool, json_at(entries, i));
+    }
+    more = json_get_str(json_get(&reply.data, "after_slug"));
+    next[0] = '\0';
+    if (ok && json_get_bool(json_get(&reply.data, "incomplete")) &&
+        strlen(more) <= CB_TOPIC_MAX && strcmp(more, after) > 0)
+        memcpy(next, more, strlen(more) + 1);
     if (!ok) {
         int64_t now = platform_time_monotonic_ms();
         bool late = now >= b->deadline_ms ||
@@ -545,18 +565,78 @@ static bool cb_wiki_find(const struct zcl_command_request *request,
     return ok;
 }
 
+/* A directory query matches broadly: read up to CB_DIR_PAGES pages (while
+ * the wiki says more and the deadline allows) into the pool. A page that
+ * fails after the first still leaves the query answered. */
+static bool cb_wiki_dir(const struct zcl_command_request *request,
+                        struct cb_brief *b, const char *q,
+                        struct json_value *pool)
+{
+    char after[CB_TOPIC_MAX + 1] = "";
+    char next[CB_TOPIC_MAX + 1];
+    for (int page = 0; page < CB_DIR_PAGES; page++) {
+        if (!cb_wiki_find(request, b, q, after, pool, next))
+            return page > 0;
+        if (!next[0] || platform_time_monotonic_ms() >= b->deadline_ms)
+            break;
+        memcpy(after, next, strlen(next) + 1);
+    }
+    return true;
+}
+
+/* Newer first by the ISO-8601 `updated` string, ties by slug. */
+static bool cb_pool_before(const struct json_value *a,
+                           const struct json_value *c)
+{
+    int cmp = strcmp(json_get_str(json_get(a, "updated")),
+                     json_get_str(json_get(c, "updated")));
+    if (cmp != 0)
+        return cmp > 0;
+    return strcmp(json_get_str(json_get(a, "slug")),
+                  json_get_str(json_get(c, "slug"))) < 0;
+}
+
+/* Take every pooled entry best first; the slots fill in that order and the
+ * rest only mark the brief capped. */
+static void cb_take_pool(struct cb_brief *b, const struct json_value *pool)
+{
+    bool done[CB_POOL_MAX] = {false};
+    size_t n = json_size(pool);
+    for (size_t round = 0; round < n; round++) {
+        size_t best = n;
+        for (size_t i = 0; i < n; i++)
+            if (!done[i] &&
+                (best == n || cb_pool_before(json_at(pool, i), json_at(pool, best))))
+                best = i;
+        done[best] = true;
+        cb_take_lesson(b, json_at(pool, best));
+    }
+}
+
 static void cb_collect_lessons(const struct zcl_command_request *request,
                                struct cb_brief *b)
 {
     char q[CB_MAX_QUERIES][CB_QUERY_CAP];
-    size_t n = cb_queries(b, q);
+    char none[1] = "";
+    char unused[CB_TOPIC_MAX + 1];
+    size_t first_dir;
+    size_t n = cb_queries(b, q, &first_dir);
     size_t answered = 0;
+    bool ok = true;
+    struct json_value pool;
     b->deadline_ms = platform_time_monotonic_ms() + CB_WIKI_DEADLINE_MS;
-    for (size_t i = 0; i < n && b->nlessons < CB_MAX_LESSONS; i++) {
-        if (!cb_wiki_find(request, b, q[i]))
-            break;
-        answered++;
+    for (size_t i = 0; ok && i < first_dir && b->nlessons < CB_MAX_LESSONS; i++) {
+        ok = cb_wiki_find(request, b, q[i], none, NULL, unused);
+        answered += ok;
     }
+    json_init(&pool);
+    json_set_array(&pool);
+    for (size_t i = first_dir; ok && i < n && b->nlessons < CB_MAX_LESSONS; i++) {
+        ok = cb_wiki_dir(request, b, q[i], &pool);
+        answered += ok;
+    }
+    cb_take_pool(b, &pool);
+    json_free(&pool);
     if (answered > 0)
         b->unavailable[0] = '\0';
 }

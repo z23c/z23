@@ -987,15 +987,51 @@ static const char ms_find_result[] =
 
 static bool g_ms_stub_silent;
 
-/* One entry of a recorded wiki_find body, with its own slug and rule. */
-static int ms_stub_entry(char *out, size_t cap, const char *slug, int n)
+/* One entry of a recorded wiki_find body, with its own slug, rule and time. */
+static int ms_stub_entry_at(char *out, size_t cap, const char *slug, int n,
+                            const char *updated)
 {
     return snprintf(out, cap,
         "%s{\"topic\":\"%s\",\"slug\":\"%s\",\"id\":\"%064d\",\"host\":\"%064d\","
-        "\"created_at\":1,\"expires_at\":2,\"updated\":\"2026-10-12T09:00:00Z\","
+        "\"created_at\":1,\"expires_at\":2,\"updated\":\"%s\","
         "\"summary\":\"s\",\"rules\":[\"Rule of %s.\"],\"rules_omitted\":false,"
         "\"summary_omitted\":false,\"matched\":[\"slug\"]}",
-        n ? "," : "", slug, slug, n + 1, n + 2, slug);
+        n ? "," : "", slug, slug, n + 1, n + 2, updated, slug);
+}
+
+static int ms_stub_entry(char *out, size_t cap, const char *slug, int n)
+{
+    return ms_stub_entry_at(out, cap, slug, n, "2026-10-12T09:00:00Z");
+}
+
+/* The "wikidir" directory query in three pages, the newest entry on the
+ * last: page one has no after_slug in its request, page two resumes from
+ * dir-d, page three from dir-f. */
+static int ms_stub_pages(char *body, size_t cap, const char *req)
+{
+    static const char *const first[] = {"dir-a", "dir-b", "dir-c", "dir-d"};
+    static const char *const second[] = {"dir-e", "dir-f"};
+    const char *after = "";
+    int n = snprintf(body, cap,
+        "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
+        "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[");
+    if (strstr(req, "after_slug") == NULL) {
+        for (int i = 0; i < 4; i++)
+            n += ms_stub_entry(body + n, cap - (size_t)n, first[i], i);
+        after = "dir-d";
+    } else if (strstr(req, "dir-f") == NULL) {
+        for (int i = 0; i < 2; i++)
+            n += ms_stub_entry(body + n, cap - (size_t)n, second[i], i);
+        after = "dir-f";
+    } else {
+        n += ms_stub_entry_at(body + n, cap - (size_t)n, "dir-new", 0,
+                              "2026-10-29T23:08:45Z");
+    }
+    return n + snprintf(body + n, cap - (size_t)n,
+        "],\"returned\":1,\"scanned\":1,\"verified\":1,\"truncated\":false,"
+        "\"incomplete\":%s,\"after_slug\":\"%s\",\"blocked_slug\":\"\","
+        "\"reason\":\"exhausted\"},\"error\":null,\"id\":1}",
+        after[0] ? "true" : "false", after);
 }
 
 /* The body for one request: a query naming native_command finds one stem
@@ -1008,6 +1044,8 @@ static int ms_stub_body(char *body, size_t cap, const char *req)
         "\"incomplete\":false,\"after_slug\":\"\",\"blocked_slug\":\"\","
         "\"reason\":\"exhausted\"},\"error\":null,\"id\":1}";
     int n;
+    if (strstr(req, "wikidir"))
+        return ms_stub_pages(body, cap, req);
     if (!strstr(req, "native_command") && !strstr(req, "tools"))
         return snprintf(body, cap, ms_find_result, 1, 2);
     n = snprintf(body, cap,
@@ -1171,6 +1209,8 @@ static int case_guide_lessons(const char *home, const char *checkout)
     char dd[PATH_MAX + 16], err[PATH_MAX + 32];
     static const char args[] =
         "{\"sub\":\"guide\",\"input\":{\"paths\":[\"tools/command/native_command.c\"]}}";
+    static const char paged[] =
+        "{\"sub\":\"guide\",\"input\":{\"paths\":[\"wikidir/native_command.c\"]}}";
     snprintf(dd, sizeof(dd), "%s/guidedd", home);
     snprintf(err, sizeof(err), "%s/err_guide.txt", home);
     (void)mkdir(dd, 0700);
@@ -1184,6 +1224,23 @@ static int case_guide_lessons(const char *home, const char *checkout)
         ASSERT(has(&m, "native-stem"));
         ASSERT(has(&m, "tools-a"));
         ASSERT(!has(&m, "tools-e"));
+        ASSERT(has(&m, "lessons_capped"));
+        ASSERT_EQ(ms_finish(&m), 0);
+        kill(stub, SIGKILL);
+        waitpid(stub, NULL, 0);
+
+        /* A directory query paged over three replies: the newest entry sits
+         * on the last page and still beats the older ones, while the stem
+         * lesson stays first. */
+        stub = ms_stub_start(dd, &port);
+        ASSERT(stub > 0);
+        ASSERT(ms_start_node(&m, home, checkout, dd, port, err));
+        ASSERT(ms_tool(&m, 2, "z23_code", paged));
+        ASSERT(has(&m, "native-stem"));
+        ASSERT(has(&m, "dir-new"));
+        ASSERT(strstr(m.line, "native-stem") < strstr(m.line, "dir-new"));
+        ASSERT(has(&m, "dir-a"));
+        ASSERT(!has(&m, "dir-d"));
         ASSERT(has(&m, "lessons_capped"));
         ASSERT_EQ(ms_finish(&m), 0);
         kill(stub, SIGKILL);
