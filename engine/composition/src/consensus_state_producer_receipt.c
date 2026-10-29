@@ -272,6 +272,25 @@ static void mismatch_digest8(char out[9], const uint8_t digest[32])
     zcl_hex_encode(digest, 32, full);
     snprintf(out, 9, "%.8s", full);
 }
+static bool mismatch_detail_header(
+    const struct producer_session *stored,
+    const struct consensus_state_source_receipt *current,
+    char *out, size_t out_size)
+{
+    if (!stored || !current || !stored->present) {
+        snprintf(out, out_size, "field=session expected=present actual=absent");
+        return true;
+    }
+    if (stored->claim.schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2 ||
+        current->schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
+        snprintf(out, out_size,
+                 "field=schema_version expected=%u actual=%u",
+                 (unsigned)current->schema_version,
+                 (unsigned)stored->claim.schema_version);
+        return true;
+    }
+    return false;
+}
 /* producer_session_matches_current only reports pass/fail. This walks the
  * exact same fields in the exact same order and stops at the first one
  * that diverges, so the operator sees WHICH input changed (a rebuild
@@ -287,19 +306,9 @@ void producer_session_mismatch_detail(
 {
     if (!out || !out_size)
         return;
-    if (!stored || !current || !stored->present) {
-        snprintf(out, out_size, "field=session expected=present actual=absent");
+    if (mismatch_detail_header(stored, current, out, out_size))
         return;
-    }
     char exp[9], act[9];
-    if (stored->claim.schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2 ||
-        current->schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
-        snprintf(out, out_size,
-                 "field=schema_version expected=%u actual=%u",
-                 (unsigned)current->schema_version,
-                 (unsigned)stored->claim.schema_version);
-        return;
-    }
     if (memcmp(stored->running_binary_digest, running_binary, 32) != 0) {
         mismatch_digest8(exp, running_binary);
         mismatch_digest8(act, stored->running_binary_digest);
@@ -359,6 +368,27 @@ void producer_session_mismatch_detail(
     }
     snprintf(out, out_size, "field=none (session matches)");
 }
+static bool producer_session_read_digests(sqlite3_stmt *st,
+                                          struct producer_session *out,
+                                          uint8_t *version)
+{
+    return producer_session_schema_version(st, 0, version) &&
+           read_session_blob(st, 1, out->running_binary_digest) &&
+           read_session_blob(st, 2, out->claim.source_tree_root) &&
+           read_session_blob(st, 3, out->claim.toolchain_digest) &&
+           read_session_blob(st, 4, out->claim.build_inputs_digest) &&
+           read_session_blob(st, 5, out->source_epoch_digest);
+}
+static bool producer_session_flags_valid(sqlite3_stmt *st)
+{
+    return sqlite3_column_type(st, 6) == SQLITE_INTEGER &&
+           (sqlite3_column_int(st, 6) == 0 ||
+            sqlite3_column_int(st, 6) == 1) &&
+           sqlite3_column_type(st, 7) == SQLITE_INTEGER &&
+           (sqlite3_column_int(st, 7) == CONSENSUS_STATE_VALIDATION_FULL ||
+            sqlite3_column_int(st, 7) ==
+                CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD);
+}
 /* Load the singleton start session. Returns false only on a store error;
  * `out->present` reports whether a row exists. */
 bool producer_session_load(sqlite3 *db, struct producer_session *out)
@@ -381,19 +411,8 @@ bool producer_session_load(sqlite3 *db, struct producer_session *out)
         const unsigned char *commit = sqlite3_column_type(st, 8) == SQLITE_TEXT
             ? sqlite3_column_text(st, 8) : NULL;
         int commit_len = commit ? sqlite3_column_bytes(st, 8) : -1;
-        ok = producer_session_schema_version(st, 0, &version) &&
-             read_session_blob(st, 1, out->running_binary_digest) &&
-             read_session_blob(st, 2, out->claim.source_tree_root) &&
-             read_session_blob(st, 3, out->claim.toolchain_digest) &&
-             read_session_blob(st, 4, out->claim.build_inputs_digest) &&
-             read_session_blob(st, 5, out->source_epoch_digest) &&
-             sqlite3_column_type(st, 6) == SQLITE_INTEGER &&
-             (sqlite3_column_int(st, 6) == 0 ||
-              sqlite3_column_int(st, 6) == 1) &&
-             sqlite3_column_type(st, 7) == SQLITE_INTEGER &&
-             (sqlite3_column_int(st, 7) == CONSENSUS_STATE_VALIDATION_FULL ||
-              sqlite3_column_int(st, 7) ==
-                  CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) &&
+        ok = producer_session_read_digests(st, out, &version) &&
+             producer_session_flags_valid(st) &&
              commit && commit_len >= 0 &&
              consensus_state_source_receipt_commit_valid(
                  version, (const char *)commit, (size_t)commit_len) &&
@@ -413,6 +432,33 @@ bool producer_session_load(sqlite3 *db, struct producer_session *out)
     }
     sqlite3_finalize(st);
     return ok;
+}
+static bool insert_session_bind(sqlite3_stmt *st,
+                                const struct consensus_state_source_receipt *r,
+                                const uint8_t running_binary[32],
+                                const char *schema, size_t commit_len,
+                                const char *datadir, int64_t start_us)
+{
+    int i = 1;
+    return sqlite3_bind_text(st, i++, schema, -1, SQLITE_STATIC) ==
+               SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, running_binary, 32, SQLITE_STATIC) ==
+               SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, r->source_tree_root, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, r->toolchain_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, r->build_inputs_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, r->source_epoch_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_int(st, i++, r->source_clean ? 1 : 0) == SQLITE_OK &&
+           sqlite3_bind_int(st, i++, r->validation_profile) == SQLITE_OK &&
+           sqlite3_bind_text(st, i++, r->producer_commit, (int)commit_len,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_text(st, i++, datadir ? datadir : "", -1,
+                             SQLITE_TRANSIENT) == SQLITE_OK &&
+           sqlite3_bind_int64(st, i++, start_us) == SQLITE_OK;
 }
 static bool insert_session(sqlite3 *db,
                            const struct consensus_state_source_receipt *r,
@@ -435,26 +481,8 @@ static bool insert_session(sqlite3 *db,
             "start_time_us) VALUES(1,?,?,?,?,?,?,?,?,?,?,?)", -1, &st,
             NULL) != SQLITE_OK)
         return false;
-    int i = 1;
-    bool ok = sqlite3_bind_text(st, i++, schema, -1, SQLITE_STATIC) ==
-                  SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, running_binary, 32, SQLITE_STATIC) ==
-                  SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, r->source_tree_root, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, r->toolchain_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, r->build_inputs_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, r->source_epoch_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_int(st, i++, r->source_clean ? 1 : 0) == SQLITE_OK &&
-              sqlite3_bind_int(st, i++, r->validation_profile) == SQLITE_OK &&
-              sqlite3_bind_text(st, i++, r->producer_commit, (int)commit_len,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_text(st, i++, datadir ? datadir : "", -1,
-                                SQLITE_TRANSIENT) == SQLITE_OK &&
-              sqlite3_bind_int64(st, i++, start_us) == SQLITE_OK &&
+    bool ok = insert_session_bind(st, r, running_binary, schema, commit_len,
+                                  datadir, start_us) &&
               sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
     sqlite3_finalize(st);
     return ok;
@@ -469,6 +497,73 @@ static bool exec_checked(sqlite3 *db, const char *sql)
     }
     return ok;
 }
+static bool begin_profile_valid(uint8_t validation_profile)
+{
+    return validation_profile == CONSENSUS_STATE_VALIDATION_FULL ||
+           validation_profile == CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD;
+}
+static bool begin_load_session(sqlite3 *pdb, struct producer_session *existing)
+{
+    bool ok = progress_meta_table_ensure(pdb) &&
+              exec_checked(pdb, PRODUCER_SESSION_SCHEMA_SQL);
+    if (ok)
+        ok = producer_session_load(pdb, existing);
+    return ok;
+}
+/* Decide whether a stored session may be resumed. Returns true to proceed;
+ * on refusal the transaction is rolled back and unlocked, err is set and the
+ * result of set_err (false) is returned. */
+static bool begin_check_existing(
+    sqlite3 *pdb, const struct producer_session *existing,
+    const struct consensus_state_source_receipt *claim,
+    const uint8_t source_epoch[32], const uint8_t running_binary[32],
+    char *err, size_t err_size)
+{
+    /* V1 remains parseable for historical inspection, but cannot be
+     * resumed into current producer authority. */
+    if (existing->claim.schema_version !=
+        CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt begin: legacy v1 session is "
+                       "inspection-only and cannot resume");
+    }
+    /* Exact equality with the independently derived current claim is the
+     * only resume capability. A self-consistent foreign stored
+     * claim+epoch is still foreign and must never be adopted. */
+    if (!producer_session_matches_current(existing, claim, source_epoch,
+                                 running_binary)) {
+        char detail[120];
+        producer_session_mismatch_detail(existing, claim, source_epoch,
+                                         running_binary, detail,
+                                         sizeof detail);
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        char msg[256];
+        snprintf(msg, sizeof msg,
+                "producer receipt begin: session mismatch %s (datadir "
+                "session does not exactly match current running binary "
+                "/ source claim / source epoch / profile)", detail);
+        return set_err(err, err_size, msg);
+    }
+    return true;
+}
+/* Publish the epoch, commit, and roll back on any failure. Returns whether
+ * the transaction committed. */
+static bool begin_publish_and_commit(sqlite3 *pdb, bool ok,
+                                     const uint8_t source_epoch[32])
+{
+    /* Publish the source-epoch authority so fold stages stamp their rows. */
+    if (ok)
+        ok = progress_meta_set_in_tx(pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
+                                     source_epoch, 32);
+    if (ok)
+        ok = exec_checked(pdb, "COMMIT");
+    if (!ok)
+        (void)exec_checked(pdb, "ROLLBACK");
+    return ok;
+}
 bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
                                             uint8_t validation_profile,
                                             char *err, size_t err_size)
@@ -477,8 +572,7 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
         err[0] = '\0';
     if (!pdb)
         return set_err(err, err_size, "producer receipt begin: NULL store");
-    if (validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
-        validation_profile != CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD)
+    if (!begin_profile_valid(validation_profile))
         return set_err(err, err_size,
                        "producer receipt begin: invalid validation profile");
     uint8_t running_binary[32];
@@ -506,57 +600,157 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
         return set_err(err, err_size,
                        "producer receipt begin: cannot open transaction");
     }
-    bool ok = progress_meta_table_ensure(pdb) &&
-              exec_checked(pdb, PRODUCER_SESSION_SCHEMA_SQL);
     struct producer_session existing;
-    if (ok)
-        ok = producer_session_load(pdb, &existing);
+    bool ok = begin_load_session(pdb, &existing);
     if (ok && existing.present) {
-        /* V1 remains parseable for historical inspection, but cannot be
-         * resumed into current producer authority. */
-        if (existing.claim.schema_version !=
-            CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
-            (void)exec_checked(pdb, "ROLLBACK");
-            progress_store_tx_unlock();
-            return set_err(err, err_size,
-                           "producer receipt begin: legacy v1 session is "
-                           "inspection-only and cannot resume");
-        }
-        /* Exact equality with the independently derived current claim is the
-         * only resume capability. A self-consistent foreign stored
-         * claim+epoch is still foreign and must never be adopted. */
-        if (!producer_session_matches_current(&existing, &claim, source_epoch,
-                                     running_binary)) {
-            char detail[120];
-            producer_session_mismatch_detail(&existing, &claim, source_epoch,
-                                             running_binary, detail,
-                                             sizeof detail);
-            (void)exec_checked(pdb, "ROLLBACK");
-            progress_store_tx_unlock();
-            char msg[256];
-            snprintf(msg, sizeof msg,
-                    "producer receipt begin: session mismatch %s (datadir "
-                    "session does not exactly match current running binary "
-                    "/ source claim / source epoch / profile)", detail);
-            return set_err(err, err_size, msg);
-        }
+        if (!begin_check_existing(pdb, &existing, &claim, source_epoch,
+                                  running_binary, err, err_size))
+            return false;
     } else if (ok) {
         ok = insert_session(pdb, &claim, running_binary, datadir, start_us);
     }
-    /* Publish the source-epoch authority so fold stages stamp their rows. */
-    if (ok)
-        ok = progress_meta_set_in_tx(pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
-                                     source_epoch, 32);
-    if (ok)
-        ok = exec_checked(pdb, "COMMIT");
-    if (ok)
-        committed = true;
-    else
-        (void)exec_checked(pdb, "ROLLBACK");
+    committed = begin_publish_and_commit(pdb, ok, source_epoch);
     progress_store_tx_unlock();
     if (!committed)
         return set_err(err, err_size,
                        "producer receipt begin: durable session write failed");
+    return true;
+}
+/* Monotonic re-finalize guard. Returns true to proceed; on refusal the
+ * transaction is rolled back and unlocked and set_err's false is returned. */
+static bool finalize_check_monotonic(sqlite3 *pdb, int32_t height,
+                                     char *err, size_t err_size)
+{
+    /* Monotonic re-finalize guard: the committed generation may only roll
+     * FORWARD. A first finalize (no prior receipt) always passes; a re-finalize
+     * at an equal height is an idempotent re-emit; a re-finalize at a LOWER
+     * height is refused (fail closed). The running-binary + session-epoch checks
+     * above already forbid a FOREIGN binary from re-finalizing at all. */
+    int64_t existing_cursor = 0;
+    bool existing_present = false;
+    if (!read_existing_receipt_fold_cursor(pdb, &existing_cursor,
+                                            &existing_present)) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: existing receipt fold "
+                       "cursor read failed");
+    }
+    if (existing_present && (int64_t)height + 1 < existing_cursor) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        char why[192];
+        snprintf(why, sizeof(why),
+                 "producer receipt finalize: monotonic re-finalize cannot "
+                 "move the committed fold cursor backward (have=%lld "
+                 "want=%lld)", (long long)existing_cursor,
+                 (long long)((int64_t)height + 1));
+        return set_err(err, err_size, why);
+    }
+    return true;
+}
+/* Gate the loaded session against the running build and derive the receipt
+ * to write. Returns true to proceed; on refusal the transaction is rolled
+ * back and unlocked and set_err's false is returned. */
+static bool finalize_prepare_receipt(
+    sqlite3 *pdb, int32_t height, const uint8_t block_hash[32],
+    const uint8_t running_binary[32], const struct producer_session *session,
+    struct consensus_state_source_receipt *receipt, char *err,
+    size_t err_size)
+{
+    if (!session->present) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: no start session — this "
+                       "producer was not begun by a receipt-owning binary");
+    }
+    if (session->claim.schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: legacy v1 session is "
+                       "inspection-only and cannot finalize");
+    }
+    struct consensus_state_source_receipt current_claim;
+    uint8_t current_epoch[32];
+    if (!producer_current_v2_claim(session->claim.validation_profile,
+                                &current_claim, current_epoch)) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(
+            err, err_size,
+            "producer receipt finalize: build has no exact 64-hex SHA-256 "
+            "source identity; an unstamped build cannot finalize a receipt");
+    }
+    if (!producer_session_matches_current(session, &current_claim,
+                                       current_epoch, running_binary)) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: running executable/current "
+                       "build does not own the start session");
+    }
+    *receipt = current_claim;
+    memcpy(receipt->running_binary_digest, running_binary, 32);
+    if (!producer_receipt_header_corpus_digest(pdb, height, block_hash,
+                                               receipt->chain_corpus_digest)) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: genesis..H* header corpus "
+                       "does not resolve the completed tip");
+    }
+    return finalize_check_monotonic(pdb, height, err, err_size);
+}
+static bool finalize_store_receipt(
+    sqlite3 *pdb, const struct consensus_state_source_receipt *receipt,
+    enum final_receipt_state prior)
+{
+    return prior == FINAL_RECEIPT_IDENTICAL ||
+           (prior == FINAL_RECEIPT_MONOTONIC_PREDECESSOR
+                ? advance_final_receipt(pdb, receipt)
+                : write_final_receipt(pdb, receipt));
+}
+/* Write and commit the receipt. Returns false only on a refusal that has
+ * already rolled back, unlocked and set err; otherwise true with *committed
+ * telling whether the transaction committed (rolled back when not). */
+static bool finalize_write_phase(sqlite3 *pdb, bool ok, int32_t height,
+                                 struct consensus_state_source_receipt *receipt,
+                                 char *err, size_t err_size, bool *committed)
+{
+    if (ok) {
+        receipt->fold_cursor = (int64_t)height + 1;
+        consensus_state_source_receipt_digest(receipt, receipt->receipt_digest);
+        ok = exec_checked(pdb, k_receipt_schema_sql);
+    }
+    enum final_receipt_state prior = FINAL_RECEIPT_READ_ERROR;
+    if (ok)
+        prior = final_receipt_state(pdb, receipt);
+    if (ok && prior == FINAL_RECEIPT_CONFLICT) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: conflicting finalized "
+                       "receipt already exists");
+    }
+    if (ok && prior == FINAL_RECEIPT_READ_ERROR) {
+        (void)exec_checked(pdb, "ROLLBACK");
+        progress_store_tx_unlock();
+        return set_err(err, err_size,
+                       "producer receipt finalize: existing receipt read "
+                       "failed");
+    }
+    if (ok)
+        ok = progress_meta_set_in_tx(
+                 pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
+                 receipt->source_epoch_digest, 32) &&
+             finalize_store_receipt(pdb, receipt, prior);
+    if (ok)
+        ok = exec_checked(pdb, "COMMIT");
+    *committed = ok;
+    if (!ok)
+        (void)exec_checked(pdb, "ROLLBACK");
     return true;
 }
 bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
@@ -584,122 +778,17 @@ bool consensus_state_producer_receipt_finalize(sqlite3 *pdb, int32_t height,
     }
     struct producer_session session;
     bool ok = producer_session_load(pdb, &session);
-    if (ok && !session.present) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: no start session — this "
-                       "producer was not begun by a receipt-owning binary");
-    }
-    if (ok && session.claim.schema_version !=
-                  CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: legacy v1 session is "
-                       "inspection-only and cannot finalize");
-    }
-    struct consensus_state_source_receipt current_claim;
-    uint8_t current_epoch[32];
-    if (ok && !producer_current_v2_claim(session.claim.validation_profile,
-                                &current_claim, current_epoch)) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(
-            err, err_size,
-            "producer receipt finalize: build has no exact 64-hex SHA-256 "
-            "source identity; an unstamped build cannot finalize a receipt");
-    }
-    if (ok && !producer_session_matches_current(&session, &current_claim,
-                                       current_epoch, running_binary)) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: running executable/current "
-                       "build does not own the start session");
-    }
     /* Build the receipt from the independently derived current claim after
      * exact session equality, never from durable fields under evaluation.
      * Then bind chain corpus + fold cursor to the completed fold. */
     struct consensus_state_source_receipt receipt;
     memset(&receipt, 0, sizeof(receipt));
-    if (ok) {
-        receipt = current_claim;
-        memcpy(receipt.running_binary_digest, running_binary, 32);
-    }
-    if (ok &&
-        !producer_receipt_header_corpus_digest(pdb, height, block_hash,
-                                               receipt.chain_corpus_digest)) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: genesis..H* header corpus "
-                       "does not resolve the completed tip");
-    }
-    /* Monotonic re-finalize guard: the committed generation may only roll
-     * FORWARD. A first finalize (no prior receipt) always passes; a re-finalize
-     * at an equal height is an idempotent re-emit; a re-finalize at a LOWER
-     * height is refused (fail closed). The running-binary + session-epoch checks
-     * above already forbid a FOREIGN binary from re-finalizing at all. */
-    if (ok) {
-        int64_t existing_cursor = 0;
-        bool existing_present = false;
-        if (!read_existing_receipt_fold_cursor(pdb, &existing_cursor,
-                                                &existing_present)) {
-            (void)exec_checked(pdb, "ROLLBACK");
-            progress_store_tx_unlock();
-            return set_err(err, err_size,
-                           "producer receipt finalize: existing receipt fold "
-                           "cursor read failed");
-        }
-        if (existing_present && (int64_t)height + 1 < existing_cursor) {
-            (void)exec_checked(pdb, "ROLLBACK");
-            progress_store_tx_unlock();
-            char why[192];
-            snprintf(why, sizeof(why),
-                     "producer receipt finalize: monotonic re-finalize cannot "
-                     "move the committed fold cursor backward (have=%lld "
-                     "want=%lld)", (long long)existing_cursor,
-                     (long long)((int64_t)height + 1));
-            return set_err(err, err_size, why);
-        }
-    }
-    if (ok) {
-        receipt.fold_cursor = (int64_t)height + 1;
-        consensus_state_source_receipt_digest(&receipt, receipt.receipt_digest);
-        ok = exec_checked(pdb, k_receipt_schema_sql);
-    }
-    enum final_receipt_state prior = FINAL_RECEIPT_READ_ERROR;
-    if (ok)
-        prior = final_receipt_state(pdb, &receipt);
-    if (ok && prior == FINAL_RECEIPT_CONFLICT) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: conflicting finalized "
-                       "receipt already exists");
-    }
-    if (ok && prior == FINAL_RECEIPT_READ_ERROR) {
-        (void)exec_checked(pdb, "ROLLBACK");
-        progress_store_tx_unlock();
-        return set_err(err, err_size,
-                       "producer receipt finalize: existing receipt read "
-                       "failed");
-    }
-    if (ok)
-        ok = progress_meta_set_in_tx(
-                 pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
-                 receipt.source_epoch_digest, 32) &&
-             (prior == FINAL_RECEIPT_IDENTICAL ||
-              (prior == FINAL_RECEIPT_MONOTONIC_PREDECESSOR
-                   ? advance_final_receipt(pdb, &receipt)
-                   : write_final_receipt(pdb, &receipt)));
-    if (ok)
-        ok = exec_checked(pdb, "COMMIT");
-    if (ok)
-        committed = true;
-    else
-        (void)exec_checked(pdb, "ROLLBACK");
+    if (ok && !finalize_prepare_receipt(pdb, height, block_hash, running_binary,
+                                        &session, &receipt, err, err_size))
+        return false;
+    if (!finalize_write_phase(pdb, ok, height, &receipt, err, err_size,
+                              &committed))
+        return false;
     progress_store_tx_unlock();
     if (!committed)
         return set_err(err, err_size,
