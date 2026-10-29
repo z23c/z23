@@ -547,31 +547,243 @@ static int caf_part_g(const struct caf_ext_coin *ext)
     return failures;
 }
 
-int test_coins_applied_frontier(void);
-int test_coins_applied_frontier(void)
+/* PART A helper: (4a) VIRGIN checks. */
+static int caf_a_virgin(sqlite3 *pdb)
 {
-    printf("\n=== coins_applied_height contiguous-frontier invariant test ===\n");
     int failures = 0;
+    /* (4a) VIRGIN: before any stage activity coins_applied_height is
+     * ABSENT — a fresh datadir is NOT 0-as-applied. */
+    int32_t f0 = -1; bool found0 = true;
+    CAF_CHECK("virgin: get succeeds",
+              coins_kv_get_applied_height(pdb, &f0, &found0));
+    CAF_CHECK("virgin: found == false (ABSENT, never 0-as-applied)",
+              found0 == false);
+    return failures;
+}
 
-    blocker_module_init();
-    caf_mkdir_p("./test-tmp");
+/* PART A helper: (1) forward apply of L. */
+static int caf_a_forward(sqlite3 *pdb, struct caf_branch *L)
+{
+    int failures = 0;
+    /* (1) FORWARD APPLY: drive L's genesis + 3 blocks. The losing
+     * branch L spends EXT_L at h2. frontier must == cursor == L.n. */
+    CAF_CHECK("L seed proof_validate (all ok)",
+              seed_proof_validate(pdb, L, L->n - 1, -1));
+    int adv_l = utxo_apply_stage_drain(100);
+    CAF_CHECK("L drains all", adv_l == L->n);
+    CAF_CHECK("forward apply: frontier == cursor", frontier_eq_cursor(pdb));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("forward apply: frontier present && == L tip+1",
+                  fnd && fr == L->n);
+    }
+    return failures;
+}
 
-    struct caf_ext_coin ext[2];
-    memset(ext, 0, sizeof(ext));
-    ext[0].txid.data[0] = 0xE7; ext[0].txid.data[1] = 0x0A; /* EXT_L */
-    ext[0].vout = 0; ext[0].value = 500000000LL; ext[0].height = 0;
-    ext[0].script[0] = 0x76; ext[0].script[1] = 0xa9; ext[0].script[2] = 0xAA;
-    ext[0].script_len = 3;
-    ext[1].txid.data[0] = 0xE7; ext[1].txid.data[1] = 0x0B; /* EXT_W */
-    ext[1].vout = 0; ext[1].value = 600000000LL; ext[1].height = 0;
-    ext[1].script[0] = 0x76; ext[1].script[1] = 0xa9; ext[1].script[2] = 0xBC;
-    ext[1].script_len = 3;
+/* PART A helper: short disconnect, mark the old tip failed and retract. */
+static int caf_a_short_mark(struct main_state *ms, struct caf_branch *L)
+{
+    int failures = 0;
+    /* Operator disconnect / shorter-window reorg: invalidateblock
+     * retracts the active window first, so no active slot exists at
+     * the old applied height C-1. That absence must drive the same
+     * inverse-delta path as a same-height competing winner. */
+    CAF_CHECK("short disconnect: old tip is hash-addressable",
+              test_block_map_insert(&ms->map_block_index,
+                               L->blocks[L->n - 1].phashBlock,
+                               &L->blocks[L->n - 1]));
+    L->blocks[L->n - 1].nStatus |= BLOCK_FAILED_VALID;
+    CAF_CHECK("short disconnect: failed verdict is exact old tip",
+              block_has_any_failure(&L->blocks[L->n - 1]));
+    CAF_CHECK("short disconnect: retract active window one block",
+              active_chain_move_window_tip(
+                  &ms->chain_active, &L->blocks[L->n - 2]));
+    return failures;
+}
 
+/* PART A helper: short disconnect, fire the unwind through a probe stage. */
+static int caf_a_short_probe(sqlite3 *pdb, struct main_state *ms,
+                             struct caf_branch *L)
+{
+    int failures = 0;
+    stage_t *probe = stage_create("utxo_apply", caf_noop_step, NULL);
+    CAF_CHECK("short disconnect: probe stage_create", probe != NULL);
+    _Atomic uint64_t unwound_n = 0;
+    _Atomic int64_t blocked_t = 0;
+    progress_store_tx_lock();
+    bool unwound = utxo_apply_reorg_unwind_if_needed(
+        pdb, probe, ms, &unwound_n, &blocked_t);
+    progress_store_tx_unlock();
+    CAF_CHECK("short disconnect: unwind succeeds", unwound);
+    CAF_CHECK("short disconnect: unwind counted once",
+              (uint64_t)unwound_n == 1);
+    CAF_CHECK("short disconnect: frontier == cursor at parent+1",
+              frontier_eq_cursor(pdb));
+    int32_t fr = -999; bool fnd = false;
+    (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+    CAF_CHECK("short disconnect: frontier retreats exactly one",
+              fnd && fr == L->n - 1);
+    if (probe) stage_destroy(probe);
+    return failures;
+}
+
+/* PART A helper: short disconnect, reconsider the tip and re-apply it. */
+static int caf_a_short_restore(sqlite3 *pdb, struct main_state *ms,
+                               struct caf_branch *L)
+{
+    int failures = 0;
+    L->blocks[L->n - 1].nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
+    CAF_CHECK("short disconnect: reconsider old tip",
+              !block_has_any_failure(&L->blocks[L->n - 1]));
+    CAF_CHECK("short disconnect: restore active L tip",
+              active_chain_move_window_tip(
+                  &ms->chain_active, &L->blocks[L->n - 1]));
+    CAF_CHECK("short disconnect: re-apply disconnected tip",
+              utxo_apply_stage_drain(100) >= 1);
+    CAF_CHECK("short disconnect: reconnect restores frontier",
+              frontier_eq_cursor(pdb));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("short disconnect: frontier returns to L tip+1",
+                  fnd && fr == L->n);
+    }
+    return failures;
+}
+
+/* PART A helper: (3) install W and snapshot the pre-reorg frontier. */
+static int caf_a_reorg_setup(sqlite3 *pdb, struct main_state *ms,
+                             struct caf_ctx *ctx, struct caf_branch *L,
+                             struct caf_branch *W, int32_t *pre_reorg_frontier)
+{
+    int failures = 0;
+    /* (3) Reorg rewind: install heavier W on active_chain; L and W
+     * share only genesis and diverge at h1, so the unwind pulls the
+     * cursor and frontier back to fork+1 == 1. The unwind is fired
+     * alone and the frontier snapshotted at the decrease, asserting
+     * it == 1; otherwise the forward re-advance over W would mask a
+     * deleted coins_kv_set_applied_height_in_tx(db, fork_plus1) in
+     * utxo_apply_delta_reorg.c or a monotonic floor in the setter. */
+    *pre_reorg_frontier = -1; bool pre_found = false;
+    (void)coins_kv_get_applied_height(pdb, pre_reorg_frontier,
+                                      &pre_found);
+    CAF_CHECK("pre-reorg frontier present (== L.n)",
+              pre_found && *pre_reorg_frontier == L->n);
+
+    ctx->active = W;
+    active_chain_move_window_tip(&ms->chain_active, &W->blocks[W->n - 1]);
+    CAF_CHECK("W seed proof_validate (all ok)",
+              seed_proof_validate(pdb, W, W->n - 1, -1));
+    return failures;
+}
+
+/* PART A helper: fire the reorg unwind alone and check the decrease. */
+static int caf_a_reorg_unwind(sqlite3 *pdb, struct main_state *ms,
+                              int32_t pre_reorg_frontier)
+{
+    int failures = 0;
+    /* Fire the reorg unwind directly, BYPASSING the forward re-advance
+     * (utxo_apply_stage_step_once would unwind AND re-apply one height in
+     * the same call, hiding the decrease). The unwind reads the cursor
+     * from the DB and uses `stage` only as a non-NULL guard, so a
+     * throwaway handle is sufficient; the progress_store tx lock is
+     * recursive, so wrapping the call mirrors production's
+     * step_once discipline exactly. */
+    {
+        stage_t *probe = stage_create("utxo_apply", caf_noop_step, NULL);
+        CAF_CHECK("reorg probe stage_create", probe != NULL);
+        _Atomic uint64_t unwound_n = 0;
+        _Atomic int64_t  blocked_t = 0;
+        progress_store_tx_lock();
+        bool unwound = utxo_apply_reorg_unwind_if_needed(
+            pdb, probe, ms, &unwound_n, &blocked_t);
+        progress_store_tx_unlock();
+        CAF_CHECK("reorg unwind fires alone (no re-advance)", unwound);
+        CAF_CHECK("reorg unwind counted exactly once",
+                  (uint64_t)unwound_n == 1);
+        /* AT THE MOMENT OF THE DECREASE: cursor + frontier both pulled
+         * to fork+1 == 1, strictly BELOW the pre-reorg frontier (4). */
+        CAF_CHECK("reorg decrease: frontier == cursor (== fork+1)",
+                  frontier_eq_cursor(pdb));
+        int32_t frd = -999; bool fndd = false;
+        (void)coins_kv_get_applied_height(pdb, &frd, &fndd);
+        CAF_CHECK("reorg decrease: frontier DECREASED to fork+1 (1), "
+                  "strictly below pre-reorg frontier",
+                  fndd && frd == 1 && frd < pre_reorg_frontier);
+        if (probe) stage_destroy(probe);
+    }
+    return failures;
+}
+
+/* PART A helper: re-advance forward over W to the quiescent tip. */
+static int caf_a_reorg_readvance(sqlite3 *pdb, struct caf_branch *W)
+{
+    int failures = 0;
+    /* Now re-advance forward over the heavier W to the quiescent tip. */
+    int adv_w = utxo_apply_stage_drain(100);
+    CAF_CHECK("re-advanced over W", adv_w >= W->n - 1);
+    CAF_CHECK("after reorg rewind: frontier == cursor",
+              frontier_eq_cursor(pdb));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("after reorg: frontier present && == W tip+1",
+                  fnd && fr == W->n);
+    }
+    return failures;
+}
+
+/* PART A helper: everything that runs with the store and event log open. */
+static int caf_a_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
+                         struct caf_branch *L, struct caf_branch *W)
+{
+    int failures = 0;
+    failures += caf_a_virgin(pdb);
+
+    seed_base_coins(pdb, ext, 2);
+
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    active_chain_init(&ms.chain_active);
+    active_chain_move_window_tip(&ms.chain_active, &L->blocks[L->n - 1]);
+
+    struct caf_ctx ctx = { .active = L, .ext = ext, .n_ext = 2 };
+    CAF_CHECK("stage init (also runs boot backfill)",
+              utxo_apply_stage_init(&ms));
+    utxo_apply_stage_set_reader(caf_reader, &ctx);
+    utxo_apply_stage_set_lookup(caf_lookup, &ctx);
+
+    /* (4b) BOOT BACKFILL on a virgin datadir: no cursor row exists yet,
+     * so backfill leaves the key ABSENT (never seeds from MAX(coins)).
+     * The first forward apply writes it in lockstep with the cursor. */
+    int32_t fb = -1; bool foundb = true;
+    CAF_CHECK("virgin backfill: still ABSENT (no cursor row to seed)",
+              coins_kv_get_applied_height(pdb, &fb, &foundb) &&
+              foundb == false);
+
+    failures += caf_a_forward(pdb, L);
+    failures += caf_a_short_mark(&ms, L);
+    failures += caf_a_short_probe(pdb, &ms, L);
+    failures += caf_a_short_restore(pdb, &ms, L);
+    int32_t pre_reorg_frontier = -1;
+    failures += caf_a_reorg_setup(pdb, &ms, &ctx, L, W, &pre_reorg_frontier);
+    failures += caf_a_reorg_unwind(pdb, &ms, pre_reorg_frontier);
+    failures += caf_a_reorg_readvance(pdb, W);
+
+    utxo_apply_stage_shutdown();
+    active_chain_free(&ms.chain_active);
+    return failures;
+}
+
+static int caf_part_a(const struct caf_ext_coin *ext, struct caf_branch *L,
+                      struct caf_branch *W)
+{
+    int failures = 0;
     /* ── PART A: virgin datadir → ABSENT; forward apply; reorg rewind —
      *           frontier == cursor on every path. ─────────────────────── */
-    struct caf_branch L, W;
-    bool built = branch_build(&L, 0x11, 4, 2, &ext[0]) &&
-                 branch_build(&W, 0x22, 5, 2, &ext[1]);
+    bool built = branch_build(L, 0x11, 4, 2, &ext[0]) &&
+                 branch_build(W, 0x22, 5, 2, &ext[1]);
     CAF_CHECK("branches build", built);
 
     if (built) {
@@ -583,175 +795,62 @@ int test_coins_applied_frontier(void)
         event_log_t *lg = event_log_open(log_path);
         CAF_CHECK("event log opens", lg != NULL);
 
-        if (lg) {
-            sqlite3 *pdb = progress_store_db();
-
-            /* (4a) VIRGIN: before any stage activity coins_applied_height is
-             * ABSENT — a fresh datadir is NOT 0-as-applied. */
-            int32_t f0 = -1; bool found0 = true;
-            CAF_CHECK("virgin: get succeeds",
-                      coins_kv_get_applied_height(pdb, &f0, &found0));
-            CAF_CHECK("virgin: found == false (ABSENT, never 0-as-applied)",
-                      found0 == false);
-
-            seed_base_coins(pdb, ext, 2);
-
-            struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
-            active_chain_move_window_tip(&ms.chain_active, &L.blocks[L.n - 1]);
-
-            struct caf_ctx ctx = { .active = &L, .ext = ext, .n_ext = 2 };
-            CAF_CHECK("stage init (also runs boot backfill)",
-                      utxo_apply_stage_init(&ms));
-            utxo_apply_stage_set_reader(caf_reader, &ctx);
-            utxo_apply_stage_set_lookup(caf_lookup, &ctx);
-
-            /* (4b) BOOT BACKFILL on a virgin datadir: no cursor row exists yet,
-             * so backfill leaves the key ABSENT (never seeds from MAX(coins)).
-             * The first forward apply writes it in lockstep with the cursor. */
-            int32_t fb = -1; bool foundb = true;
-            CAF_CHECK("virgin backfill: still ABSENT (no cursor row to seed)",
-                      coins_kv_get_applied_height(pdb, &fb, &foundb) &&
-                      foundb == false);
-
-            /* (1) FORWARD APPLY: drive L's genesis + 3 blocks. The losing
-             * branch L spends EXT_L at h2. frontier must == cursor == L.n. */
-            CAF_CHECK("L seed proof_validate (all ok)",
-                      seed_proof_validate(pdb, &L, L.n - 1, -1));
-            int adv_l = utxo_apply_stage_drain(100);
-            CAF_CHECK("L drains all", adv_l == L.n);
-            CAF_CHECK("forward apply: frontier == cursor", frontier_eq_cursor(pdb));
-            {
-                int32_t fr = -1; bool fnd = false;
-                (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                CAF_CHECK("forward apply: frontier present && == L tip+1",
-                          fnd && fr == L.n);
-            }
-
-             /* Operator disconnect / shorter-window reorg: invalidateblock
-              * retracts the active window first, so no active slot exists at
-              * the old applied height C-1. That absence must drive the same
-              * inverse-delta path as a same-height competing winner. */
-            CAF_CHECK("short disconnect: old tip is hash-addressable",
-                      test_block_map_insert(&ms.map_block_index,
-                                       L.blocks[L.n - 1].phashBlock,
-                                       &L.blocks[L.n - 1]));
-            L.blocks[L.n - 1].nStatus |= BLOCK_FAILED_VALID;
-            CAF_CHECK("short disconnect: failed verdict is exact old tip",
-                      block_has_any_failure(&L.blocks[L.n - 1]));
-            CAF_CHECK("short disconnect: retract active window one block",
-                      active_chain_move_window_tip(
-                          &ms.chain_active, &L.blocks[L.n - 2]));
-            {
-                stage_t *probe = stage_create("utxo_apply", caf_noop_step, NULL);
-                CAF_CHECK("short disconnect: probe stage_create", probe != NULL);
-                _Atomic uint64_t unwound_n = 0;
-                _Atomic int64_t blocked_t = 0;
-                progress_store_tx_lock();
-                bool unwound = utxo_apply_reorg_unwind_if_needed(
-                    pdb, probe, &ms, &unwound_n, &blocked_t);
-                progress_store_tx_unlock();
-                CAF_CHECK("short disconnect: unwind succeeds", unwound);
-                CAF_CHECK("short disconnect: unwind counted once",
-                          (uint64_t)unwound_n == 1);
-                CAF_CHECK("short disconnect: frontier == cursor at parent+1",
-                          frontier_eq_cursor(pdb));
-                int32_t fr = -999; bool fnd = false;
-                (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                CAF_CHECK("short disconnect: frontier retreats exactly one",
-                          fnd && fr == L.n - 1);
-                if (probe) stage_destroy(probe);
-            }
-            L.blocks[L.n - 1].nStatus &= ~(unsigned)BLOCK_FAILED_ANY_MASK;
-            CAF_CHECK("short disconnect: reconsider old tip",
-                      !block_has_any_failure(&L.blocks[L.n - 1]));
-            CAF_CHECK("short disconnect: restore active L tip",
-                      active_chain_move_window_tip(
-                          &ms.chain_active, &L.blocks[L.n - 1]));
-            CAF_CHECK("short disconnect: re-apply disconnected tip",
-                      utxo_apply_stage_drain(100) >= 1);
-            CAF_CHECK("short disconnect: reconnect restores frontier",
-                      frontier_eq_cursor(pdb));
-            {
-                int32_t fr = -1; bool fnd = false;
-                (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                CAF_CHECK("short disconnect: frontier returns to L tip+1",
-                          fnd && fr == L.n);
-            }
-
-             /* (3) Reorg rewind: install heavier W on active_chain; L and W
-              * share only genesis and diverge at h1, so the unwind pulls the
-              * cursor and frontier back to fork+1 == 1. The unwind is fired
-              * alone and the frontier snapshotted at the decrease, asserting
-              * it == 1; otherwise the forward re-advance over W would mask a
-              * deleted coins_kv_set_applied_height_in_tx(db, fork_plus1) in
-              * utxo_apply_delta_reorg.c or a monotonic floor in the setter. */
-            int32_t pre_reorg_frontier = -1; bool pre_found = false;
-            (void)coins_kv_get_applied_height(pdb, &pre_reorg_frontier,
-                                              &pre_found);
-            CAF_CHECK("pre-reorg frontier present (== L.n)",
-                      pre_found && pre_reorg_frontier == L.n);
-
-            ctx.active = &W;
-            active_chain_move_window_tip(&ms.chain_active, &W.blocks[W.n - 1]);
-            CAF_CHECK("W seed proof_validate (all ok)",
-                      seed_proof_validate(pdb, &W, W.n - 1, -1));
-
-            /* Fire the reorg unwind directly, BYPASSING the forward re-advance
-             * (utxo_apply_stage_step_once would unwind AND re-apply one height in
-             * the same call, hiding the decrease). The unwind reads the cursor
-             * from the DB and uses `stage` only as a non-NULL guard, so a
-             * throwaway handle is sufficient; the progress_store tx lock is
-             * recursive, so wrapping the call mirrors production's
-             * step_once discipline exactly. */
-            {
-                stage_t *probe = stage_create("utxo_apply", caf_noop_step, NULL);
-                CAF_CHECK("reorg probe stage_create", probe != NULL);
-                _Atomic uint64_t unwound_n = 0;
-                _Atomic int64_t  blocked_t = 0;
-                progress_store_tx_lock();
-                bool unwound = utxo_apply_reorg_unwind_if_needed(
-                    pdb, probe, &ms, &unwound_n, &blocked_t);
-                progress_store_tx_unlock();
-                CAF_CHECK("reorg unwind fires alone (no re-advance)", unwound);
-                CAF_CHECK("reorg unwind counted exactly once",
-                          (uint64_t)unwound_n == 1);
-                /* AT THE MOMENT OF THE DECREASE: cursor + frontier both pulled
-                 * to fork+1 == 1, strictly BELOW the pre-reorg frontier (4). */
-                CAF_CHECK("reorg decrease: frontier == cursor (== fork+1)",
-                          frontier_eq_cursor(pdb));
-                int32_t frd = -999; bool fndd = false;
-                (void)coins_kv_get_applied_height(pdb, &frd, &fndd);
-                CAF_CHECK("reorg decrease: frontier DECREASED to fork+1 (1), "
-                          "strictly below pre-reorg frontier",
-                          fndd && frd == 1 && frd < pre_reorg_frontier);
-                if (probe) stage_destroy(probe);
-            }
-
-            /* Now re-advance forward over the heavier W to the quiescent tip. */
-            int adv_w = utxo_apply_stage_drain(100);
-            CAF_CHECK("re-advanced over W", adv_w >= W.n - 1);
-            CAF_CHECK("after reorg rewind: frontier == cursor",
-                      frontier_eq_cursor(pdb));
-            {
-                int32_t fr = -1; bool fnd = false;
-                (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                CAF_CHECK("after reorg: frontier present && == W tip+1",
-                          fnd && fr == W.n);
-            }
-
-            utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
-        }
+        if (lg) failures += caf_a_session(progress_store_db(), ext, L, W);
         if (lg) event_log_close(lg);
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+/* PART B helper: the upstream_failed run with the store and log open. */
+static int caf_b_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
+                         struct caf_branch *F)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    active_chain_init(&ms.chain_active);
+    active_chain_move_window_tip(&ms.chain_active, &F->blocks[F->n - 1]);
+
+    struct caf_ctx ctx = { .active = F, .ext = ext, .n_ext = 0 };
+    CAF_CHECK("upfail: stage init", utxo_apply_stage_init(&ms));
+    utxo_apply_stage_set_reader(caf_reader, &ctx);
+    utxo_apply_stage_set_lookup(caf_lookup, &ctx);
+
+    blocker_clear("utxo_apply.apply_failed");
+    /* Mark height 2 as upstream ok=0 → step_apply blocks at h2. The
+     * prior successful h0/h1 applies leave cursor/frontier == 2, and
+     * the failed h2 row is rolled back so no later height can apply over
+     * the hole. */
+    CAF_CHECK("upfail: seed proof_validate with ok=0 at h2",
+              seed_proof_validate(pdb, F, F->n - 1, 2));
+    int adv = utxo_apply_stage_drain(100);
+    CAF_CHECK("upfail: drains until h2", adv == 2);
+    CAF_CHECK("upfail: recorded an upstream_failed block",
+              utxo_apply_stage_upstream_failed_total() >= 1);
+    CAF_CHECK("upstream_failed blocked: frontier == cursor",
+              frontier_eq_cursor(pdb));
+    CAF_CHECK("upstream_failed blocked: typed blocker recorded",
+              blocker_exists("utxo_apply.apply_failed"));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("upstream_failed: frontier present && == h2",
+                  fnd && fr == 2);
+    }
+    blocker_clear("utxo_apply.apply_failed");
+
+    utxo_apply_stage_shutdown();
+    active_chain_free(&ms.chain_active);
+    return failures;
+}
+
+static int caf_part_b(const struct caf_ext_coin *ext, struct caf_branch *F)
+{
+    int failures = 0;
     /* ── PART B: upstream_failed blocked path (no coin mutation). ─────── */
-    struct caf_branch F;
-    bool fbuilt = branch_build(&F, 0x33, 4, -1, NULL);  /* no spends */
+    bool fbuilt = branch_build(F, 0x33, 4, -1, NULL);  /* no spends */
     CAF_CHECK("fail-branch builds", fbuilt);
 
     if (fbuilt) {
@@ -762,50 +861,69 @@ int test_coins_applied_frontier(void)
         CAF_CHECK("upfail: progress_store opens", progress_store_open(dir));
         event_log_t *lg = event_log_open(log_path);
 
-        if (lg) {
-            sqlite3 *pdb = progress_store_db();
-
-            struct main_state ms;
-            memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
-            active_chain_move_window_tip(&ms.chain_active, &F.blocks[F.n - 1]);
-
-            struct caf_ctx ctx = { .active = &F, .ext = ext, .n_ext = 0 };
-            CAF_CHECK("upfail: stage init", utxo_apply_stage_init(&ms));
-            utxo_apply_stage_set_reader(caf_reader, &ctx);
-            utxo_apply_stage_set_lookup(caf_lookup, &ctx);
-
-            blocker_clear("utxo_apply.apply_failed");
-            /* Mark height 2 as upstream ok=0 → step_apply blocks at h2. The
-             * prior successful h0/h1 applies leave cursor/frontier == 2, and
-             * the failed h2 row is rolled back so no later height can apply over
-             * the hole. */
-            CAF_CHECK("upfail: seed proof_validate with ok=0 at h2",
-                      seed_proof_validate(pdb, &F, F.n - 1, 2));
-            int adv = utxo_apply_stage_drain(100);
-            CAF_CHECK("upfail: drains until h2", adv == 2);
-            CAF_CHECK("upfail: recorded an upstream_failed block",
-                      utxo_apply_stage_upstream_failed_total() >= 1);
-            CAF_CHECK("upstream_failed blocked: frontier == cursor",
-                      frontier_eq_cursor(pdb));
-            CAF_CHECK("upstream_failed blocked: typed blocker recorded",
-                      blocker_exists("utxo_apply.apply_failed"));
-            {
-                int32_t fr = -1; bool fnd = false;
-                (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                CAF_CHECK("upstream_failed: frontier present && == h2",
-                          fnd && fr == 2);
-            }
-            blocker_clear("utxo_apply.apply_failed");
-
-            utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
-        }
+        if (lg) failures += caf_b_session(progress_store_db(), ext, F);
         if (lg) event_log_close(lg);
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+/* PART C helper: seed a high live coin, stamp the cursor, expect ABSENT. */
+static int caf_c_seed(sqlite3 *pdb)
+{
+    int failures = 0;
+    /* NEGATIVE CONTROL (hardening #4): stamp a durable utxo_apply cursor at
+     * 123 AND seed live coins whose MAX(height) is 200 (deliberately HIGHER
+     * than the cursor and DIFFERENT from it). The backfill must seed the
+     * frontier from the CURSOR (123), NEVER from MAX(coins.height) (200) —
+     * the whole point of P2 (MAX(coins.height) is the most-recent surviving
+     * coin's creation height, not a contiguous applied frontier). If the
+     * backfill ever regressed to MAX(coins.height) this asserts 123 != 200
+     * and FAILS. */
+    {
+        uint8_t ctxid[32] = {0};
+        ctxid[0] = 0xC0; ctxid[1] = 0xDE;
+        uint8_t pk[3] = { 0x76, 0xa9, 0xCC };
+        CAF_CHECK("backfill: seed a live coin at height 200 (> cursor 123)",
+                  coins_kv_add(pdb, ctxid, 0, 999000000LL,
+                               (int32_t)200, false, pk, sizeof(pk)));
+    }
+    CAF_CHECK("backfill: stamp utxo_apply cursor=123",
+              caf_exec(pdb,
+                "INSERT OR REPLACE INTO stage_cursor(name, cursor, updated_at) "
+                "VALUES('utxo_apply', 123, 1)"));
+
+    int32_t before = -1; bool found_before = true;
+    CAF_CHECK("backfill: key ABSENT before backfill",
+              coins_kv_get_applied_height(pdb, &before, &found_before) &&
+              found_before == false);
+    return failures;
+}
+
+/* PART C helper: a second backfill call is a no-op. */
+static int caf_c_idempotent(sqlite3 *pdb)
+{
+    int failures = 0;
+    /* Idempotent: a second call is a no-op and never re-seeds (would block
+     * a later legitimate rewind). Lower the cursor and confirm the key is
+     * unchanged. */
+    CAF_CHECK("backfill: lower cursor to 50",
+              caf_exec(pdb,
+                "UPDATE stage_cursor SET cursor=50 WHERE name='utxo_apply'"));
+    CAF_CHECK("backfill: second call no-ops",
+              coins_kv_backfill_applied_height_if_absent(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    int32_t after2 = -1; bool found2 = false;
+    (void)coins_kv_get_applied_height(pdb, &after2, &found2);
+    CAF_CHECK("backfill: idempotent — frontier unchanged (still 123)",
+              found2 && after2 == 123);
+    return failures;
+}
+
+static int caf_part_c(void)
+{
+    int failures = 0;
     /* ── PART C: boot backfill SEEDS from an existing cursor (no key yet). ─
      * Simulate an existing datadir that has a durable utxo_apply cursor but no
      * coins_applied_height key (predates P2): the backfill must seed the
@@ -816,31 +934,7 @@ int test_coins_applied_frontier(void)
         sqlite3 *pdb = progress_store_db();
         (void)coins_kv_ensure_schema(pdb);
 
-        /* NEGATIVE CONTROL (hardening #4): stamp a durable utxo_apply cursor at
-         * 123 AND seed live coins whose MAX(height) is 200 (deliberately HIGHER
-         * than the cursor and DIFFERENT from it). The backfill must seed the
-         * frontier from the CURSOR (123), NEVER from MAX(coins.height) (200) —
-         * the whole point of P2 (MAX(coins.height) is the most-recent surviving
-         * coin's creation height, not a contiguous applied frontier). If the
-         * backfill ever regressed to MAX(coins.height) this asserts 123 != 200
-         * and FAILS. */
-        {
-            uint8_t ctxid[32] = {0};
-            ctxid[0] = 0xC0; ctxid[1] = 0xDE;
-            uint8_t pk[3] = { 0x76, 0xa9, 0xCC };
-            CAF_CHECK("backfill: seed a live coin at height 200 (> cursor 123)",
-                      coins_kv_add(pdb, ctxid, 0, 999000000LL,
-                                   (int32_t)200, false, pk, sizeof(pk)));
-        }
-        CAF_CHECK("backfill: stamp utxo_apply cursor=123",
-                  caf_exec(pdb,
-                    "INSERT OR REPLACE INTO stage_cursor(name, cursor, updated_at) "
-                    "VALUES('utxo_apply', 123, 1)"));
-
-        int32_t before = -1; bool found_before = true;
-        CAF_CHECK("backfill: key ABSENT before backfill",
-                  coins_kv_get_applied_height(pdb, &before, &found_before) &&
-                  found_before == false);
+        failures += caf_c_seed(pdb);
 
         CAF_CHECK("backfill: runs", coins_kv_backfill_applied_height_if_absent(
                       pdb, coins_kv_set_applied_height_in_tx));
@@ -853,126 +947,187 @@ int test_coins_applied_frontier(void)
                   after == 123);
         CAF_CHECK("backfill: frontier == cursor after seed", frontier_eq_cursor(pdb));
 
-        /* Idempotent: a second call is a no-op and never re-seeds (would block
-         * a later legitimate rewind). Lower the cursor and confirm the key is
-         * unchanged. */
-        CAF_CHECK("backfill: lower cursor to 50",
-                  caf_exec(pdb,
-                    "UPDATE stage_cursor SET cursor=50 WHERE name='utxo_apply'"));
-        CAF_CHECK("backfill: second call no-ops",
-                  coins_kv_backfill_applied_height_if_absent(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        int32_t after2 = -1; bool found2 = false;
-        (void)coins_kv_get_applied_height(pdb, &after2, &found2);
-        CAF_CHECK("backfill: idempotent — frontier unchanged (still 123)",
-                  found2 && after2 == 123);
+        failures += caf_c_idempotent(pdb);
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
-     /* PART D: poison_rewind forces the utxo_apply cursor down and co-writes
-      * the frontier in the same BEGIN IMMEDIATE, so coins_applied_height
-      * equals the rewound cursor. */
+/* PART D helper: create the reducer log tables the rewind touches. */
+static int caf_d_schema(sqlite3 *pdb)
+{
+    int failures = 0;
+    /* Schema the rewind touches (mirrors the reducer's *_log tables). */
+    bool sch =
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS validate_headers_log("
+            "height INTEGER PRIMARY KEY, hash BLOB NOT NULL, ok INTEGER NOT NULL,"
+            "fail_reason TEXT, validated_at INTEGER NOT NULL)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS body_fetch_log("
+            "height INTEGER PRIMARY KEY, hash BLOB NOT NULL, source TEXT NOT NULL,"
+            "bytes INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER NOT NULL,"
+            "ok INTEGER NOT NULL, fail_reason TEXT)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS body_persist_log("
+            "height INTEGER PRIMARY KEY, source TEXT, ok INTEGER, persisted_at INTEGER)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS script_validate_log("
+            "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS proof_validate_log("
+            "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS utxo_apply_log("
+            "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS utxo_apply_delta("
+            "height INTEGER PRIMARY KEY)") &&
+        caf_exec(pdb, "CREATE TABLE IF NOT EXISTS tip_finalize_log("
+            "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)");
+    CAF_CHECK("poison: reducer log schema created", sch);
+    CAF_CHECK("poison: stage_cursor table ensured", stage_table_ensure(pdb));
+    return failures;
+}
+
+/* PART D helper: seed an applied pipeline through height 9. */
+static int caf_d_applied(sqlite3 *pdb)
+{
+    int failures = 0;
+    /* Simulate a pipeline applied forward through height 9 (frontier = 10):
+     * ok=1 utxo_apply rows at [0..9], the utxo_apply cursor at 10, and the
+     * applied frontier stamped at 10 (== cursor, the P2 steady state). */
+    const int FRONTIER = 10;
+    bool seeded = true;
+    for (int h = 0; h < FRONTIER && seeded; h++) {
+        char sql[160];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
+            "VALUES(%d,'verified',1)", h);
+        seeded = caf_exec(pdb, sql);
+    }
+    CAF_CHECK("poison: seed ok=1 utxo_apply rows [0..9]", seeded);
+    CAF_CHECK("poison: stamp utxo_apply cursor=10", caf_exec(pdb,
+        "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
+        "VALUES('utxo_apply',10,1)"));
+    CAF_CHECK("poison: stamp applied frontier=10 (== cursor)",
+              coins_kv_backfill_applied_height_if_absent(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    CAF_CHECK("poison: precondition frontier == cursor (10)",
+              frontier_eq_cursor(pdb));
+    return failures;
+}
+
+/* PART D helper: seed the poison shape and run the rewind. */
+static int caf_d_rewind(sqlite3 *pdb)
+{
+    int failures = 0;
+    const int FRONTIER = 10;
+    /* Seed the DOWNSTREAM_STALE poison shape AT the frontier (height 10):
+     * validate_headers ok=1, body_fetch skipped_invalid/header_validation_failed,
+     * and ok=0 downstream rows — the exact shape poison_mode classifies as
+     * STAGE_REPAIR_POISON_DOWNSTREAM_STALE. No ok=1 row sits at/above 10 in
+     * any success_checked_log, so the rewind proceeds. */
+    char ps[2048];
+    snprintf(ps, sizeof(ps),
+        "INSERT OR REPLACE INTO validate_headers_log"
+        "(height,hash,ok,fail_reason,validated_at) VALUES(10,zeroblob(32),1,NULL,1);"
+        "INSERT OR REPLACE INTO body_fetch_log"
+        "(height,hash,source,bytes,fetched_at,ok,fail_reason) "
+        "VALUES(10,zeroblob(32),'skipped_invalid',0,1,0,'header_validation_failed');"
+        "INSERT OR REPLACE INTO body_persist_log(height,source,ok,persisted_at) "
+        "VALUES(10,'upstream_failed',0,1);"
+        "INSERT OR REPLACE INTO script_validate_log(height,status,ok) "
+        "VALUES(10,'upstream_failed',0);"
+        "INSERT OR REPLACE INTO proof_validate_log(height,status,ok) "
+        "VALUES(10,'upstream_failed',0);"
+        "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
+        "VALUES(10,'upstream_failed',0);");
+    CAF_CHECK("poison: seed DOWNSTREAM_STALE poison shape at frontier", caf_exec(pdb, ps));
+
+    /* Invoke the rewind AT the frontier (active_tip = 9). It forces the
+     * utxo_apply cursor DOWN to 10 (== the frontier height) and — with
+     * SERIOUS FIX 1 — co-writes coins_applied_height = 10 in the same txn. */
+    struct stage_repair_header_solution_result res;
+    bool rv = stage_repair_header_solution_poison_rewind(pdb, FRONTIER,
+                                                         FRONTIER - 1, &res);
+    CAF_CHECK("poison: rewind succeeds", rv && res.repaired);
+    /* utxo_apply cursor forced to the frontier height (10). */
+    CAF_CHECK("poison: utxo_apply cursor rewound to frontier height",
+              stage_cursor_persisted(pdb, "utxo_apply", "caf_test") ==
+              (uint64_t)FRONTIER);
+    /* THE FIX: frontier co-moved with the cursor — equal, not stale-high. */
+    CAF_CHECK("poison: coins_applied_height == utxo_apply cursor (co-written)",
+              frontier_eq_cursor(pdb));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("poison: frontier present && == frontier height (10)",
+                  fnd && fr == FRONTIER);
+    }
+    return failures;
+}
+
+static int caf_part_d(void)
+{
+    int failures = 0;
+    /* PART D: poison_rewind forces the utxo_apply cursor down and co-writes
+     * the frontier in the same BEGIN IMMEDIATE, so coins_applied_height
+     * equals the rewound cursor. */
     {
         char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "poison");
         CAF_CHECK("poison: progress_store opens", progress_store_open(dir));
         sqlite3 *pdb = progress_store_db();
         (void)coins_kv_ensure_schema(pdb);
 
-        /* Schema the rewind touches (mirrors the reducer's *_log tables). */
-        bool sch =
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS validate_headers_log("
-                "height INTEGER PRIMARY KEY, hash BLOB NOT NULL, ok INTEGER NOT NULL,"
-                "fail_reason TEXT, validated_at INTEGER NOT NULL)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS body_fetch_log("
-                "height INTEGER PRIMARY KEY, hash BLOB NOT NULL, source TEXT NOT NULL,"
-                "bytes INTEGER NOT NULL DEFAULT 0, fetched_at INTEGER NOT NULL,"
-                "ok INTEGER NOT NULL, fail_reason TEXT)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS body_persist_log("
-                "height INTEGER PRIMARY KEY, source TEXT, ok INTEGER, persisted_at INTEGER)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS script_validate_log("
-                "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS proof_validate_log("
-                "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS utxo_apply_log("
-                "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS utxo_apply_delta("
-                "height INTEGER PRIMARY KEY)") &&
-            caf_exec(pdb, "CREATE TABLE IF NOT EXISTS tip_finalize_log("
-                "height INTEGER PRIMARY KEY, status TEXT, ok INTEGER)");
-        CAF_CHECK("poison: reducer log schema created", sch);
-        CAF_CHECK("poison: stage_cursor table ensured", stage_table_ensure(pdb));
-
-        /* Simulate a pipeline applied forward through height 9 (frontier = 10):
-         * ok=1 utxo_apply rows at [0..9], the utxo_apply cursor at 10, and the
-         * applied frontier stamped at 10 (== cursor, the P2 steady state). */
-        const int FRONTIER = 10;
-        bool seeded = true;
-        for (int h = 0; h < FRONTIER && seeded; h++) {
-            char sql[160];
-            snprintf(sql, sizeof(sql),
-                "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
-                "VALUES(%d,'verified',1)", h);
-            seeded = caf_exec(pdb, sql);
-        }
-        CAF_CHECK("poison: seed ok=1 utxo_apply rows [0..9]", seeded);
-        CAF_CHECK("poison: stamp utxo_apply cursor=10", caf_exec(pdb,
-            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
-            "VALUES('utxo_apply',10,1)"));
-        CAF_CHECK("poison: stamp applied frontier=10 (== cursor)",
-                  coins_kv_backfill_applied_height_if_absent(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        CAF_CHECK("poison: precondition frontier == cursor (10)",
-                  frontier_eq_cursor(pdb));
-
-        /* Seed the DOWNSTREAM_STALE poison shape AT the frontier (height 10):
-         * validate_headers ok=1, body_fetch skipped_invalid/header_validation_failed,
-         * and ok=0 downstream rows — the exact shape poison_mode classifies as
-         * STAGE_REPAIR_POISON_DOWNSTREAM_STALE. No ok=1 row sits at/above 10 in
-         * any success_checked_log, so the rewind proceeds. */
-        char ps[2048];
-        snprintf(ps, sizeof(ps),
-            "INSERT OR REPLACE INTO validate_headers_log"
-            "(height,hash,ok,fail_reason,validated_at) VALUES(10,zeroblob(32),1,NULL,1);"
-            "INSERT OR REPLACE INTO body_fetch_log"
-            "(height,hash,source,bytes,fetched_at,ok,fail_reason) "
-            "VALUES(10,zeroblob(32),'skipped_invalid',0,1,0,'header_validation_failed');"
-            "INSERT OR REPLACE INTO body_persist_log(height,source,ok,persisted_at) "
-            "VALUES(10,'upstream_failed',0,1);"
-            "INSERT OR REPLACE INTO script_validate_log(height,status,ok) "
-            "VALUES(10,'upstream_failed',0);"
-            "INSERT OR REPLACE INTO proof_validate_log(height,status,ok) "
-            "VALUES(10,'upstream_failed',0);"
-            "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok) "
-            "VALUES(10,'upstream_failed',0);");
-        CAF_CHECK("poison: seed DOWNSTREAM_STALE poison shape at frontier", caf_exec(pdb, ps));
-
-        /* Invoke the rewind AT the frontier (active_tip = 9). It forces the
-         * utxo_apply cursor DOWN to 10 (== the frontier height) and — with
-         * SERIOUS FIX 1 — co-writes coins_applied_height = 10 in the same txn. */
-        struct stage_repair_header_solution_result res;
-        bool rv = stage_repair_header_solution_poison_rewind(pdb, FRONTIER,
-                                                             FRONTIER - 1, &res);
-        CAF_CHECK("poison: rewind succeeds", rv && res.repaired);
-        /* utxo_apply cursor forced to the frontier height (10). */
-        CAF_CHECK("poison: utxo_apply cursor rewound to frontier height",
-                  stage_cursor_persisted(pdb, "utxo_apply", "caf_test") ==
-                  (uint64_t)FRONTIER);
-        /* THE FIX: frontier co-moved with the cursor — equal, not stale-high. */
-        CAF_CHECK("poison: coins_applied_height == utxo_apply cursor (co-written)",
-                  frontier_eq_cursor(pdb));
-        {
-            int32_t fr = -1; bool fnd = false;
-            (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-            CAF_CHECK("poison: frontier present && == frontier height (10)",
-                      fnd && fr == FRONTIER);
-        }
+        failures += caf_d_schema(pdb);
+        failures += caf_d_applied(pdb);
+        failures += caf_d_rewind(pdb);
 
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+/* PART E helper: the spend_unknown_utxo run with the store and log open. */
+static int caf_e_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
+                         struct caf_branch *R)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    active_chain_init(&ms.chain_active);
+    active_chain_move_window_tip(&ms.chain_active, &R->blocks[R->n - 1]);
+
+    /* n_ext = 0 → caf_lookup never resolves the phantom spend. */
+    struct caf_ctx ctx = { .active = R, .ext = ext, .n_ext = 0 };
+    CAF_CHECK("reject: stage init", utxo_apply_stage_init(&ms));
+    utxo_apply_stage_set_reader(caf_reader, &ctx);
+    utxo_apply_stage_set_lookup(caf_lookup, &ctx);
+    blocker_clear("utxo_apply.apply_failed");
+
+    CAF_CHECK("reject: seed proof_validate (all ok)",
+              seed_proof_validate(pdb, R, R->n - 1, -1));
+    int adv = utxo_apply_stage_drain(100);
+    CAF_CHECK("reject: drains until h2", adv == 2);
+    CAF_CHECK("reject: recorded a spend_unknown_utxo (coins not mutated)",
+              utxo_apply_stage_spend_unknown_total() >= 1);
+    CAF_CHECK("non-fatal reject blocked: frontier == cursor",
+              frontier_eq_cursor(pdb));
+    CAF_CHECK("reject: typed blocker recorded",
+              blocker_exists("utxo_apply.apply_failed"));
+    {
+        int32_t fr = -1; bool fnd = false;
+        (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
+        CAF_CHECK("reject: frontier present && == h2",
+                  fnd && fr == 2);
+    }
+    blocker_clear("utxo_apply.apply_failed");
+
+    utxo_apply_stage_shutdown();
+    active_chain_free(&ms.chain_active);
+    return failures;
+}
+
+static int caf_part_e(const struct caf_ext_coin *ext)
+{
+    int failures = 0;
     /* ── PART E: non-fatal reject (spend_unknown_utxo) blocks. ────────────
      * A summary.ok==false spend_unknown_utxo leaves the coins UNMUTATED and
      * holds the cursor/frontier at the unresolved height. This pins the
@@ -998,114 +1153,132 @@ int test_coins_applied_frontier(void)
             CAF_CHECK("reject: progress_store opens", progress_store_open(dir));
             event_log_t *lg = event_log_open(log_path);
 
-            if (lg) {
-                sqlite3 *pdb = progress_store_db();
-
-                struct main_state ms;
-                memset(&ms, 0, sizeof(ms));
-                active_chain_init(&ms.chain_active);
-                active_chain_move_window_tip(&ms.chain_active, &R.blocks[R.n - 1]);
-
-                /* n_ext = 0 → caf_lookup never resolves the phantom spend. */
-                struct caf_ctx ctx = { .active = &R, .ext = ext, .n_ext = 0 };
-                CAF_CHECK("reject: stage init", utxo_apply_stage_init(&ms));
-                utxo_apply_stage_set_reader(caf_reader, &ctx);
-                utxo_apply_stage_set_lookup(caf_lookup, &ctx);
-                blocker_clear("utxo_apply.apply_failed");
-
-                CAF_CHECK("reject: seed proof_validate (all ok)",
-                          seed_proof_validate(pdb, &R, R.n - 1, -1));
-                int adv = utxo_apply_stage_drain(100);
-                CAF_CHECK("reject: drains until h2", adv == 2);
-                CAF_CHECK("reject: recorded a spend_unknown_utxo (coins not mutated)",
-                          utxo_apply_stage_spend_unknown_total() >= 1);
-                CAF_CHECK("non-fatal reject blocked: frontier == cursor",
-                          frontier_eq_cursor(pdb));
-                CAF_CHECK("reject: typed blocker recorded",
-                          blocker_exists("utxo_apply.apply_failed"));
-                {
-                    int32_t fr = -1; bool fnd = false;
-                    (void)coins_kv_get_applied_height(pdb, &fr, &fnd);
-                    CAF_CHECK("reject: frontier present && == h2",
-                              fnd && fr == 2);
-                }
-                blocker_clear("utxo_apply.apply_failed");
-
-                utxo_apply_stage_shutdown();
-                active_chain_free(&ms.chain_active);
-            }
+            if (lg) failures += caf_e_session(progress_store_db(), ext, &R);
             if (lg) event_log_close(lg);
             progress_store_close();
             test_cleanup_tmpdir(dir);
         }
         branch_free(&R);
     }
+    return failures;
+}
 
+/* PART F helper: a second genesis seed call never re-seeds. */
+static int caf_f_idempotent(sqlite3 *pdb)
+{
+    int failures = 0;
+    int32_t v = -1; bool found = false;
+    /* (2) Idempotent: a second call never re-seeds. */
+    CAF_CHECK("gseed: second call no-ops",
+              coins_kv_seed_genesis_applied_height(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    CAF_CHECK("gseed: idempotent — still 1",
+              coins_kv_get_applied_height(pdb, &v, &found) && found && v == 1);
+    return failures;
+}
+
+static int caf_f_pristine(void)
+{
+    int failures = 0;
+    /* (1) Pristine store: no key, no coins, no cursor, not proven → seed 1. */
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseed");
+    CAF_CHECK("gseed: progress_store opens", progress_store_open(dir));
+    sqlite3 *pdb = progress_store_db();
+    (void)coins_kv_ensure_schema(pdb);
+    int32_t v = -1; bool found = true;
+    CAF_CHECK("gseed: key ABSENT before seed",
+              coins_kv_get_applied_height(pdb, &v, &found) && !found);
+    CAF_CHECK("gseed: seed runs on a pristine from-genesis store",
+              coins_kv_seed_genesis_applied_height(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    CAF_CHECK("gseed: coins_applied_height == 1 (genesis applied)",
+              coins_kv_get_applied_height(pdb, &v, &found) && found && v == 1);
+    failures += caf_f_idempotent(pdb);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int caf_f_coins(void)
+{
+    int failures = 0;
+    /* (3) Coins already present → not pristine → no-op (key stays ABSENT). */
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseedcoins");
+    CAF_CHECK("gseed-coins: progress_store opens", progress_store_open(dir));
+    sqlite3 *pdb = progress_store_db();
+    (void)coins_kv_ensure_schema(pdb);
+    uint8_t ctxid[32] = {0}; ctxid[0] = 0xAB; uint8_t pk[3] = { 0x76, 0xa9, 0xCC };
+    CAF_CHECK("gseed-coins: seed a live coin at height 5",
+              coins_kv_add(pdb, ctxid, 0, 100000000LL, (int32_t)5, false, pk, sizeof(pk)));
+    CAF_CHECK("gseed-coins: seed no-ops with coins present",
+              coins_kv_seed_genesis_applied_height(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    int32_t v = -1; bool found = true;
+    CAF_CHECK("gseed-coins: key still ABSENT (not a pristine genesis store)",
+              coins_kv_get_applied_height(pdb, &v, &found) && !found);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int caf_f_cursor(void)
+{
+    int failures = 0;
+    /* (4) utxo_apply cursor already stamped → not pristine → no-op. */
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseedcur");
+    CAF_CHECK("gseed-cursor: progress_store opens", progress_store_open(dir));
+    sqlite3 *pdb = progress_store_db();
+    (void)coins_kv_ensure_schema(pdb);
+    CAF_CHECK("gseed-cursor: stamp utxo_apply cursor=7",
+              caf_exec(pdb, "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
+                            "VALUES('utxo_apply',7,1)"));
+    CAF_CHECK("gseed-cursor: seed no-ops with a stamped cursor",
+              coins_kv_seed_genesis_applied_height(
+                  pdb, coins_kv_set_applied_height_in_tx));
+    int32_t v = -1; bool found = true;
+    CAF_CHECK("gseed-cursor: key still ABSENT (fold already started)",
+              coins_kv_get_applied_height(pdb, &v, &found) && !found);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int caf_part_f(void)
+{
     /* ── PART F: coins_kv_seed_genesis_applied_height (regtest genesis mint
      * bootstrap). A pristine from-genesis store gets coins_applied_height=1;
      * every non-pristine shape (already-present / borrowed-proven / coins
      * present / cursor present) is a fail-closed no-op. ─────────────────── */
-    {
-        /* (1) Pristine store: no key, no coins, no cursor, not proven → seed 1. */
-        char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseed");
-        CAF_CHECK("gseed: progress_store opens", progress_store_open(dir));
-        sqlite3 *pdb = progress_store_db();
-        (void)coins_kv_ensure_schema(pdb);
-        int32_t v = -1; bool found = true;
-        CAF_CHECK("gseed: key ABSENT before seed",
-                  coins_kv_get_applied_height(pdb, &v, &found) && !found);
-        CAF_CHECK("gseed: seed runs on a pristine from-genesis store",
-                  coins_kv_seed_genesis_applied_height(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        CAF_CHECK("gseed: coins_applied_height == 1 (genesis applied)",
-                  coins_kv_get_applied_height(pdb, &v, &found) && found && v == 1);
-        /* (2) Idempotent: a second call never re-seeds. */
-        CAF_CHECK("gseed: second call no-ops",
-                  coins_kv_seed_genesis_applied_height(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        v = -1; found = false;
-        CAF_CHECK("gseed: idempotent — still 1",
-                  coins_kv_get_applied_height(pdb, &v, &found) && found && v == 1);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-    {
-        /* (3) Coins already present → not pristine → no-op (key stays ABSENT). */
-        char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseedcoins");
-        CAF_CHECK("gseed-coins: progress_store opens", progress_store_open(dir));
-        sqlite3 *pdb = progress_store_db();
-        (void)coins_kv_ensure_schema(pdb);
-        uint8_t ctxid[32] = {0}; ctxid[0] = 0xAB; uint8_t pk[3] = { 0x76, 0xa9, 0xCC };
-        CAF_CHECK("gseed-coins: seed a live coin at height 5",
-                  coins_kv_add(pdb, ctxid, 0, 100000000LL, (int32_t)5, false, pk, sizeof(pk)));
-        CAF_CHECK("gseed-coins: seed no-ops with coins present",
-                  coins_kv_seed_genesis_applied_height(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        int32_t v = -1; bool found = true;
-        CAF_CHECK("gseed-coins: key still ABSENT (not a pristine genesis store)",
-                  coins_kv_get_applied_height(pdb, &v, &found) && !found);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
-    {
-        /* (4) utxo_apply cursor already stamped → not pristine → no-op. */
-        char dir[256]; test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", "gseedcur");
-        CAF_CHECK("gseed-cursor: progress_store opens", progress_store_open(dir));
-        sqlite3 *pdb = progress_store_db();
-        (void)coins_kv_ensure_schema(pdb);
-        CAF_CHECK("gseed-cursor: stamp utxo_apply cursor=7",
-                  caf_exec(pdb, "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
-                                "VALUES('utxo_apply',7,1)"));
-        CAF_CHECK("gseed-cursor: seed no-ops with a stamped cursor",
-                  coins_kv_seed_genesis_applied_height(
-                      pdb, coins_kv_set_applied_height_in_tx));
-        int32_t v = -1; bool found = true;
-        CAF_CHECK("gseed-cursor: key still ABSENT (fold already started)",
-                  coins_kv_get_applied_height(pdb, &v, &found) && !found);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
-    }
+    return caf_f_pristine() + caf_f_coins() + caf_f_cursor();
+}
 
+int test_coins_applied_frontier(void);
+int test_coins_applied_frontier(void)
+{
+    printf("\n=== coins_applied_height contiguous-frontier invariant test ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+    caf_mkdir_p("./test-tmp");
+
+    struct caf_ext_coin ext[2];
+    memset(ext, 0, sizeof(ext));
+    ext[0].txid.data[0] = 0xE7; ext[0].txid.data[1] = 0x0A; /* EXT_L */
+    ext[0].vout = 0; ext[0].value = 500000000LL; ext[0].height = 0;
+    ext[0].script[0] = 0x76; ext[0].script[1] = 0xa9; ext[0].script[2] = 0xAA;
+    ext[0].script_len = 3;
+    ext[1].txid.data[0] = 0xE7; ext[1].txid.data[1] = 0x0B; /* EXT_W */
+    ext[1].vout = 0; ext[1].value = 600000000LL; ext[1].height = 0;
+    ext[1].script[0] = 0x76; ext[1].script[1] = 0xa9; ext[1].script[2] = 0xBC;
+    ext[1].script_len = 3;
+
+    struct caf_branch L, W, F;
+    failures += caf_part_a(ext, &L, &W);
+    failures += caf_part_b(ext, &F);
+    failures += caf_part_c();
+    failures += caf_part_d();
+    failures += caf_part_e(ext);
+    failures += caf_part_f();
     failures += caf_part_g(ext);
 
     branch_free(&L);
