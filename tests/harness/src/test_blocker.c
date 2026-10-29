@@ -392,7 +392,7 @@ static int check_blocker_causal_selector(void)
 }
 
 /* Top-level keys and blockers array of the JSON state dump. */
-static int check_blocker_state_json_dump(void)
+static int check_blocker_json_dump_shape(void)
 {
     int failures = 0;
 
@@ -1238,7 +1238,7 @@ int test_blocker(void)
     failures += check_blocker_causal_selector();
 
     /* ── JSON dump ─────────────────────────────────────────────── */
-    failures += check_blocker_state_json_dump();
+    failures += check_blocker_json_dump_shape();
 
     /* ── root-cause chaining: caused_by / cause_detail plumbing ──── */
     failures += check_blocker_cause_edge_plumbing();
