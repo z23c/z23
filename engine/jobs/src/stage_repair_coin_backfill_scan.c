@@ -310,51 +310,23 @@ static enum coin_backfill_scan_verdict scan_restart_from_floor(
 }
 
 enum coin_scan_action {
-    COIN_SCAN_ACT_LOG_NULL = 0,
+    COIN_SCAN_ACT_DONE = 0, /* r->verdict holds the return value */
+    COIN_SCAN_ACT_LOG_NULL,
     COIN_SCAN_ACT_LOG_BAD_SET,
     COIN_SCAN_ACT_LOG_BOUNDS,
     COIN_SCAN_ACT_LOG_WINDOW,
     COIN_SCAN_ACT_LOG_TABLES,
-    COIN_SCAN_ACT_RETURN_GAP,
     COIN_SCAN_ACT_LOG_STALE,
-    COIN_SCAN_ACT_RETURN_CLEAN,
     COIN_SCAN_ACT_LOG_SEEDED,
-    COIN_SCAN_ACT_WALK,
     COIN_SCAN_ACT_LOG_CKPT_NOTOP,
     COIN_SCAN_ACT_LOG_PROGRESS,
     COIN_SCAN_ACT_LOG_GAP,
-    COIN_SCAN_ACT_RETURN_REBOUND,
     COIN_SCAN_ACT_LOG_SPEND_FOUND,
     COIN_SCAN_ACT_LOG_NO_TOP,
     COIN_SCAN_ACT_LOG_DELETE_FAIL,
     COIN_SCAN_ACT_LOG_SPENT,
-    COIN_SCAN_ACT_LOG_CLEAN,
-    COIN_SCAN_ACT_COUNT
+    COIN_SCAN_ACT_LOG_CLEAN
 };
-
-/* `&&label` is an address, not a branch. The complexity lexer counts the
- * adjacent '&' characters, so the table lives in this macro and the LOG_*
- * calls stay in coin_backfill_scan_step (those macros print __func__). */
-#define COIN_SCAN_LABELS \
-    &&coin_scan_log_null, \
-    &&coin_scan_log_bad_set, \
-    &&coin_scan_log_bounds, \
-    &&coin_scan_log_window, \
-    &&coin_scan_log_tables, \
-    &&coin_scan_return_gap, \
-    &&coin_scan_log_stale, \
-    &&coin_scan_return_clean, \
-    &&coin_scan_log_seeded, \
-    &&coin_scan_at_walk, \
-    &&coin_scan_log_ckpt_notop, \
-    &&coin_scan_log_progress, \
-    &&coin_scan_log_gap, \
-    &&coin_scan_return_rebound, \
-    &&coin_scan_log_spend_found, \
-    &&coin_scan_log_no_top, \
-    &&coin_scan_log_delete_fail, \
-    &&coin_scan_log_spent, \
-    &&coin_scan_log_clean
 
 struct coin_scan_walk {
     struct sqlite3 *db;
@@ -389,7 +361,7 @@ struct coin_scan_walk {
     struct uint256 block_hash;
     int32_t persist_next;
     struct uint256 persist_hash;
-    enum coin_backfill_scan_verdict rebound_verdict;
+    enum coin_backfill_scan_verdict verdict;
 };
 
 static bool coin_scan_inputs_missing(struct sqlite3 *db,
@@ -463,11 +435,28 @@ static void coin_scan_arm_walk(struct coin_scan_walk *r)
     }
 }
 
+static enum coin_scan_action coin_scan_walk_blocks(struct coin_scan_walk *r);
+
+static enum coin_scan_action coin_scan_finish(struct coin_scan_walk *r,
+                                              enum coin_backfill_scan_verdict v)
+{
+    r->verdict = v;
+    return COIN_SCAN_ACT_DONE;
+}
+
+static enum coin_scan_action coin_scan_begin_walk(struct coin_scan_walk *r)
+{
+    r->start_ns = clock_now_monotonic_ns();
+    r->blocks_done = 0;
+    r->h = r->next;
+    return coin_scan_walk_blocks(r);
+}
+
 static enum coin_scan_action coin_scan_seed_fresh(struct coin_scan_walk *r)
 {
     if (!scan_seed_lineage(r->io, r->floor_height, &r->lineage)) {
         *r->out_next_height = r->floor_height;
-        return COIN_SCAN_ACT_RETURN_GAP; /* logged in helper */
+        return coin_scan_finish(r, COIN_SCAN_GAP); /* logged in helper */
     }
     r->next = r->floor_height;
     return COIN_SCAN_ACT_LOG_SEEDED;
@@ -492,7 +481,7 @@ static enum coin_scan_action coin_scan_apply_resume(struct coin_scan_walk *r)
          * active chain (G10), so returning without rescanning is safe
          * and bounded. */
         *r->out_next_height = r->rec.next_height;
-        return COIN_SCAN_ACT_RETURN_CLEAN;
+        return coin_scan_finish(r, COIN_SCAN_CLEAN);
     }
     r->next = r->rec.next_height;
     memcpy(r->lineage.data, r->rec.last_scanned_hash, 32);
@@ -502,7 +491,7 @@ static enum coin_scan_action coin_scan_apply_resume(struct coin_scan_walk *r)
         memcpy(r->pending_spender, r->rec.spender_txid, 32);
     }
     coin_scan_arm_walk(r);
-    return COIN_SCAN_ACT_WALK;
+    return coin_scan_begin_walk(r);
 }
 
 static enum coin_scan_action coin_scan_open(struct coin_scan_walk *r)
@@ -531,14 +520,14 @@ static enum coin_scan_action coin_scan_open(struct coin_scan_walk *r)
     if (coin_scan_tables_unready(r->db))
         return COIN_SCAN_ACT_LOG_TABLES;
     if (!coin_backfill_scan_set_digest(r->set, r->n, r->set_digest))
-        return COIN_SCAN_ACT_RETURN_GAP; /* logged in helper */
+        return coin_scan_finish(r, COIN_SCAN_GAP); /* logged in helper */
     sort_set_indices(r->set, r->n, r->sorted_idx);
 
     /* ── Resume or seed ──────────────────────────────────────────── */
     bool found = false;
     if (!coin_backfill_scan_record_load(r->db, r->hole_height, r->hole_hash,
                                         &r->rec, &found))
-        return COIN_SCAN_ACT_RETURN_GAP; /* logged in helper */
+        return coin_scan_finish(r, COIN_SCAN_GAP); /* logged in helper */
 
     r->next = r->floor_height;
     uint256_set_null(&r->lineage);
@@ -593,7 +582,7 @@ static enum coin_scan_action coin_scan_write_checkpoint(struct coin_scan_walk *r
     if (!r->pending_spent && r->h > r->top_height && !r->have_top)
         return COIN_SCAN_ACT_LOG_CKPT_NOTOP;
     if (!coin_scan_store_progress(r, persist_next, pl))
-        return COIN_SCAN_ACT_RETURN_GAP; /* logged in helper */
+        return coin_scan_finish(r, COIN_SCAN_GAP); /* logged in helper */
     r->persist_next = persist_next;
     r->persist_hash = *pl;
     return COIN_SCAN_ACT_LOG_PROGRESS;
@@ -661,12 +650,12 @@ static enum coin_scan_action coin_scan_bind_terminal(struct coin_scan_walk *r)
          * hash: the hole block itself was reorged (or the row is stale).
          * Not CLEAN — restart; G3 upstream refuses a permanently stale
          * hole row. */
-        r->rebound_verdict = scan_restart_from_floor(
+        r->verdict = scan_restart_from_floor(
             r->db, r->io, r->hole_height, r->hole_hash, r->floor_height,
             r->frontier_at_start, r->set_digest,
             "terminal hash(H) != hole hash", r->hole_height,
             r->out_next_height);
-        return COIN_SCAN_ACT_RETURN_REBOUND;
+        return COIN_SCAN_ACT_DONE;
     }
     if (!r->pending_spent && !r->have_top)
         return COIN_SCAN_ACT_LOG_NO_TOP;
@@ -676,7 +665,7 @@ static enum coin_scan_action coin_scan_bind_terminal(struct coin_scan_walk *r)
                            r->hole_height + 1, r->frontier_at_start,
                            &r->lineage, r->set_digest, true, &r->top_hash,
                            false, -1, NULL))
-        return COIN_SCAN_ACT_RETURN_GAP; /* logged in helper */
+        return coin_scan_finish(r, COIN_SCAN_GAP); /* logged in helper */
     return COIN_SCAN_ACT_LOG_CLEAN;
 }
 
@@ -693,11 +682,11 @@ static enum coin_scan_action coin_scan_walk_blocks(struct coin_scan_walk *r)
             return coin_scan_note_unreadable(r);
         if (uint256_cmp(&r->blk.header.hashPrevBlock, &r->lineage) != 0) {
             block_free(&r->blk);
-            r->rebound_verdict = scan_restart_from_floor(
+            r->verdict = scan_restart_from_floor(
                 r->db, r->io, r->hole_height, r->hole_hash, r->floor_height,
                 r->frontier_at_start, r->set_digest, "prev-link mismatch",
                 r->h, r->out_next_height);
-            return COIN_SCAN_ACT_RETURN_REBOUND;
+            return COIN_SCAN_ACT_DONE;
         }
         if (coin_scan_capture_spend(r))
             return COIN_SCAN_ACT_LOG_SPEND_FOUND;
@@ -735,152 +724,135 @@ enum coin_backfill_scan_verdict coin_backfill_scan_step(
     run.out_spender_txid = out_spender_txid;
 
     enum coin_scan_action act = coin_scan_open(&run);
-    void *const labels[] = { COIN_SCAN_LABELS };
-    _Static_assert(sizeof labels / sizeof labels[0] == COIN_SCAN_ACT_COUNT,
-                   "coin scan action labels");
-    goto *labels[act];
-
-coin_scan_log_null:
-    LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-               "[coin_backfill] scan: NULL input");
-coin_scan_log_bad_set:
-    LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-               "[coin_backfill] scan: bad set size n=%zu", n);
-coin_scan_log_bounds:
-    LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-               "[coin_backfill] scan: inconsistent bounds floor=%d "
-               "top=%d frontier=%d hole=%d",
-               floor_height, top_height, frontier_at_start, hole_height);
-coin_scan_log_window:
-    LOG_RETURN(COIN_SCAN_WINDOW_OVER_BUDGET, "stage_repair",
-               "[coin_backfill] scan terminal window [%d..%d] (%d blocks)"
-               " exceeds chunk budget max_blocks=%d — refusing (would "
-               "livelock at the frontier clamp)",
-               frontier_at_start, hole_height,
-               hole_height - frontier_at_start + 1, max_blocks);
-coin_scan_log_tables:
-    LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-               "[coin_backfill] scan: table ensure failed");
-coin_scan_return_gap:
-    return COIN_SCAN_GAP;
-coin_scan_log_stale:
-    {
-        int digest_ok = run.digest_ok;
-        struct coin_backfill_scan_record rec = run.rec;
-        LOG_WARN("stage_repair",
-                 "[coin_backfill] scan record stale hole=%d "
-                 "(digest_ok=%d frontier=%d/%d next=%d): restart from "
-                 "floor=%d",
-                 hole_height, digest_ok, rec.frontier_at_start,
-                 frontier_at_start, rec.next_height, floor_height);
+    while (act != COIN_SCAN_ACT_DONE) {
+        switch (act) {
+        case COIN_SCAN_ACT_LOG_NULL:
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan: NULL input");
+        case COIN_SCAN_ACT_LOG_BAD_SET:
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan: bad set size n=%zu", n);
+        case COIN_SCAN_ACT_LOG_BOUNDS:
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan: inconsistent bounds floor=%d "
+                       "top=%d frontier=%d hole=%d",
+                       floor_height, top_height, frontier_at_start,
+                       hole_height);
+        case COIN_SCAN_ACT_LOG_WINDOW:
+            LOG_RETURN(COIN_SCAN_WINDOW_OVER_BUDGET, "stage_repair",
+                       "[coin_backfill] scan terminal window [%d..%d] (%d blocks)"
+                       " exceeds chunk budget max_blocks=%d — refusing (would "
+                       "livelock at the frontier clamp)",
+                       frontier_at_start, hole_height,
+                       hole_height - frontier_at_start + 1, max_blocks);
+        case COIN_SCAN_ACT_LOG_TABLES:
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan: table ensure failed");
+        case COIN_SCAN_ACT_LOG_STALE: {
+            int digest_ok = run.digest_ok;
+            struct coin_backfill_scan_record rec = run.rec;
+            LOG_WARN("stage_repair",
+                     "[coin_backfill] scan record stale hole=%d "
+                     "(digest_ok=%d frontier=%d/%d next=%d): restart from "
+                     "floor=%d",
+                     hole_height, digest_ok, rec.frontier_at_start,
+                     frontier_at_start, rec.next_height, floor_height);
+            act = coin_scan_seed_fresh(&run);
+            break;
+        }
+        case COIN_SCAN_ACT_LOG_SEEDED: {
+            char seed_hex[65];
+            uint256_get_hex(&run.lineage, seed_hex);
+            LOG_INFO("stage_repair",
+                     "[coin_backfill] scan seeded hole=%d floor=%d top=%d "
+                     "lineage=%.8s n=%zu",
+                     hole_height, floor_height, top_height, seed_hex, n);
+            coin_scan_arm_walk(&run);
+            act = coin_scan_begin_walk(&run);
+            break;
+        }
+        case COIN_SCAN_ACT_LOG_CKPT_NOTOP: {
+            int h = run.h;
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan checkpoint without top "
+                       "hash h=%d (programming error)", h);
+        }
+        case COIN_SCAN_ACT_LOG_PROGRESS: {
+            int32_t persist_next = run.persist_next;
+            char lin_hex[65];
+            int blocks_done = run.blocks_done;
+            uint256_get_hex(&run.persist_hash, lin_hex);
+            LOG_INFO("stage_repair",
+                     "[coin_backfill] scan progress hole=%d next=%d top=%d "
+                     "lineage=%.8s blocks=%d",
+                     hole_height, persist_next, top_height, lin_hex,
+                     blocks_done);
+            *out_next_height = persist_next;
+            return COIN_SCAN_IN_PROGRESS;
+        }
+        case COIN_SCAN_ACT_LOG_GAP: {
+            int h = run.h;
+            LOG_WARN("stage_repair",
+                     "[coin_backfill] scan gap: block unreadable h=%d "
+                     "hole=%d (deep body missing — fetch via rebuild_recent "
+                     "/ -cold-import)",
+                     h, hole_height);
+            *out_next_height = h;
+            return COIN_SCAN_GAP;
+        }
+        case COIN_SCAN_ACT_LOG_SPEND_FOUND: {
+            int h = run.h;
+            char sp_hex[65];
+            struct uint256 sp;
+            memcpy(sp.data, run.pending_spender, 32);
+            uint256_get_hex(&sp, sp_hex);
+            LOG_WARN("stage_repair",
+                     "[coin_backfill] scan SPEND FOUND hole=%d h=%d "
+                     "spender=%s — deferring refusal until terminal linkage",
+                     hole_height, h, sp_hex);
+            coin_scan_advance_linked_block(&run);
+            act = coin_scan_walk_blocks(&run);
+            break;
+        }
+        case COIN_SCAN_ACT_LOG_NO_TOP:
+            LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
+                       "[coin_backfill] scan finished without top hash hole=%d "
+                       "(programming error)", hole_height);
+        case COIN_SCAN_ACT_LOG_DELETE_FAIL:
+            LOG_WARN("stage_repair",
+                     "[coin_backfill] scan record delete failed h=%d",
+                     hole_height);
+            act = coin_scan_publish_spend(&run);
+            break;
+        case COIN_SCAN_ACT_LOG_SPENT: {
+            int32_t pending_spent_height = run.pending_spent_height;
+            char sp_hex[65];
+            struct uint256 sp;
+            memcpy(sp.data, run.pending_spender, 32);
+            uint256_get_hex(&sp, sp_hex);
+            LOG_WARN("stage_repair",
+                     "[coin_backfill] scan SPEND CONFIRMED hole=%d h=%d "
+                     "spender=%s after terminal linkage",
+                     hole_height, (int)pending_spent_height, sp_hex);
+            return COIN_SCAN_SPENT_FOUND;
+        }
+        case COIN_SCAN_ACT_LOG_CLEAN: {
+            struct uint256 top_hash = run.top_hash;
+            char top_hex[65];
+            char hole_hex[65];
+            uint256_get_hex(&top_hash, top_hex);
+            uint256_get_hex(hole_hash, hole_hex);
+            LOG_INFO("stage_repair",
+                     "[coin_backfill] scan CLEAN hole=%d hash=%.8s: no spend in "
+                     "[%d..%d], terminal linkage [%d..%d] bound, top_hash=%.8s",
+                     hole_height, hole_hex, floor_height, top_height,
+                     frontier_at_start, hole_height, top_hex);
+            *out_next_height = hole_height + 1;
+            return COIN_SCAN_CLEAN;
+        }
+        default:
+            break;
+        }
     }
-    act = coin_scan_seed_fresh(&run);
-    goto *labels[act];
-coin_scan_return_clean:
-    return COIN_SCAN_CLEAN;
-coin_scan_log_seeded:
-    {
-        char seed_hex[65];
-        uint256_get_hex(&run.lineage, seed_hex);
-        LOG_INFO("stage_repair",
-                 "[coin_backfill] scan seeded hole=%d floor=%d top=%d "
-                 "lineage=%.8s n=%zu",
-                 hole_height, floor_height, top_height, seed_hex, n);
-    }
-    coin_scan_arm_walk(&run);
-    goto coin_scan_at_walk;
-coin_scan_at_walk:
-    run.start_ns = clock_now_monotonic_ns();
-    run.blocks_done = 0;
-    run.h = run.next;
-    act = coin_scan_walk_blocks(&run);
-    goto *labels[act];
-coin_scan_log_ckpt_notop:
-    {
-        int h = run.h;
-        LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-                   "[coin_backfill] scan checkpoint without top "
-                   "hash h=%d (programming error)", h);
-    }
-coin_scan_log_progress:
-    {
-        int32_t persist_next = run.persist_next;
-        char lin_hex[65];
-        int blocks_done = run.blocks_done;
-        uint256_get_hex(&run.persist_hash, lin_hex);
-        LOG_INFO("stage_repair",
-                 "[coin_backfill] scan progress hole=%d next=%d top=%d "
-                 "lineage=%.8s blocks=%d",
-                 hole_height, persist_next, top_height, lin_hex,
-                 blocks_done);
-        *out_next_height = persist_next;
-    }
-    return COIN_SCAN_IN_PROGRESS;
-coin_scan_log_gap:
-    {
-        int h = run.h;
-        LOG_WARN("stage_repair",
-                 "[coin_backfill] scan gap: block unreadable h=%d "
-                 "hole=%d (deep body missing — fetch via rebuild_recent "
-                 "/ -cold-import)",
-                 h, hole_height);
-        *out_next_height = h;
-    }
-    return COIN_SCAN_GAP;
-coin_scan_return_rebound:
-    return run.rebound_verdict;
-coin_scan_log_spend_found:
-    {
-        int h = run.h;
-        char sp_hex[65];
-        struct uint256 sp;
-        memcpy(sp.data, run.pending_spender, 32);
-        uint256_get_hex(&sp, sp_hex);
-        LOG_WARN("stage_repair",
-                 "[coin_backfill] scan SPEND FOUND hole=%d h=%d "
-                 "spender=%s — deferring refusal until terminal linkage",
-                 hole_height, h, sp_hex);
-    }
-    coin_scan_advance_linked_block(&run);
-    act = coin_scan_walk_blocks(&run);
-    goto *labels[act];
-coin_scan_log_no_top:
-    LOG_RETURN(COIN_SCAN_GAP, "stage_repair",
-               "[coin_backfill] scan finished without top hash hole=%d "
-               "(programming error)", hole_height);
-coin_scan_log_delete_fail:
-    LOG_WARN("stage_repair",
-             "[coin_backfill] scan record delete failed h=%d",
-             hole_height);
-    act = coin_scan_publish_spend(&run);
-    goto *labels[act];
-coin_scan_log_spent:
-    {
-        int32_t pending_spent_height = run.pending_spent_height;
-        char sp_hex[65];
-        struct uint256 sp;
-        memcpy(sp.data, run.pending_spender, 32);
-        uint256_get_hex(&sp, sp_hex);
-        LOG_WARN("stage_repair",
-                 "[coin_backfill] scan SPEND CONFIRMED hole=%d h=%d "
-                 "spender=%s after terminal linkage",
-                 hole_height, (int)pending_spent_height, sp_hex);
-    }
-    return COIN_SCAN_SPENT_FOUND;
-coin_scan_log_clean:
-    {
-        struct uint256 top_hash = run.top_hash;
-        char top_hex[65];
-        char hole_hex[65];
-        uint256_get_hex(&top_hash, top_hex);
-        uint256_get_hex(hole_hash, hole_hex);
-        LOG_INFO("stage_repair",
-                 "[coin_backfill] scan CLEAN hole=%d hash=%.8s: no spend in "
-                 "[%d..%d], terminal linkage [%d..%d] bound, top_hash=%.8s",
-                 hole_height, hole_hex, floor_height, top_height,
-                 frontier_at_start, hole_height, top_hex);
-        *out_next_height = hole_height + 1;
-    }
-    return COIN_SCAN_CLEAN;
+    return run.verdict;
 }
-
