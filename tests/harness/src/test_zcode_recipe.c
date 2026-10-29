@@ -886,6 +886,41 @@ static int zr_bounds_wire(void)
     return failures;
 }
 
+/* Invalid libraries win over a truncated scalar tail and release prior lists. */
+static int zr_wire_library_precedence(void)
+{
+    int failures = 0;
+    uint8_t wire[35] = { 'Z', 'C', 'L', 'R', 'C', 'P', '\r', '\n', 1, 0,
+                         0, 0, 1, 0, 3, 0, 'a', '.', 'c',
+                         0, 0, 0, 0, 0, 0, 2, 0, 1, 255 };
+    struct vcs_package_recipe out;
+    enum vcs_package_recipe_error err =
+        vcs_package_recipe_parse(wire, sizeof(wire), &out);
+    ZR_CHECK("wire: unknown library precedes truncated scalars",
+             err == VCS_PACKAGE_RECIPE_ERR_LIBRARY);
+    ZR_CHECK("wire: unknown library resets parsed source",
+             out.sources.items == NULL &&
+             out.sources.count == 0 && out.library_count == 0 &&
+             out.schema_version == VCS_PACKAGE_RECIPE_VERSION);
+    wire[28] = 1;
+    err = vcs_package_recipe_parse(wire, sizeof(wire), &out);
+    ZR_CHECK("wire: duplicate library precedes truncated scalars",
+             err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
+    ZR_CHECK("wire: duplicate library resets parsed source",
+             out.sources.items == NULL &&
+             out.sources.count == 0 && out.library_count == 0 &&
+             out.schema_version == VCS_PACKAGE_RECIPE_VERSION);
+    wire[28] = 2;
+    err = vcs_package_recipe_parse(wire, sizeof(wire), &out);
+    ZR_CHECK("wire: valid libraries expose truncated scalars",
+             err == VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED);
+    ZR_CHECK("wire: truncated scalar resets parsed source",
+             out.sources.items == NULL &&
+             out.sources.count == 0 && out.library_count == 0 &&
+             out.schema_version == VCS_PACKAGE_RECIPE_VERSION);
+    return failures;
+}
+
 static int t_bounds(void)
 {
     int failures = 0;
@@ -896,6 +931,7 @@ static int t_bounds(void)
     failures += zr_bounds_hostile(&err);
     failures += zr_bounds_scalars();
     failures += zr_bounds_wire();
+    failures += zr_wire_library_precedence();
     return failures;
 }
 
