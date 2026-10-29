@@ -1237,4 +1237,91 @@ int test_dev_land_queued_precheck_cases(void)
     return failures;
 }
 
+
+/* ── dev.land.submit plan/confirm over MCP ───────────────────────────────
+ * The MCP front door sets plan_first: a submit without confirm answers with
+ * a plan and queues nothing; plan_id + confirm:true queues; a moved HEAD or a
+ * changed input makes the plan stale. The CLI (plan_first false) queues at
+ * once. State lives under the isolated fixture root. */
+#if !defined(_WIN32)
+void zcl_native_handle_dev_land_submit(const struct zcl_command_request *request,
+                                       struct zcl_command_reply *reply);
+
+static void dlx_plan_call(struct dlx_call *c, const struct dlx_rig *rig,
+                          bool plan_first, const char *plan_id, bool confirm,
+                          const char *note)
+{
+    static struct zcl_command_context ctx;
+    ctx.plan_first = plan_first;
+    dlx_begin(c, "submit");
+    c->request.context = &ctx;
+    (void)json_push_kv_str(&c->input, "worktree", rig->clone);
+    if (plan_id)
+        (void)json_push_kv_str(&c->input, "plan_id", plan_id);
+    if (confirm)
+        (void)json_push_kv_bool(&c->input, "confirm", true);
+    if (note)
+        (void)json_push_kv_str(&c->input, "note", note);
+    zcl_native_handle_dev_land_submit(&c->request, &c->reply);
+}
+
+/* One call that must refuse with `code` and queue nothing. */
+static bool dlx_plan_refused(const struct dlx_rig *rig, const char *plan_id,
+                             bool confirm, const char *note, const char *code)
+{
+    struct dlx_call c;
+    dlx_plan_call(&c, rig, true, plan_id, confirm, note);
+    bool ok = !dlx_ok(&c) && strcmp(dlx_err_code(&c), code) == 0 &&
+              dlx_queue_empty();
+    dlx_end(&c);
+    return ok;
+}
+
+int test_dev_land_submit_plan_flow(void)
+{
+    int failures = 0;
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char plan[80] = "", later[64];
+    TEST("land: dev.land.submit plans, confirms, refuses stale, CLI unchanged") {
+        dlx_isolate("submit_plan");
+        ASSERT(dlx_rig_make(&rig, "submit_plan_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_plan_call(&c, &rig, true, NULL, false, NULL);
+        ASSERT(dlx_ok(&c));
+        ASSERT(strlen(dlx_str(&c, "plan_id")) == 64);
+        ASSERT_STR_EQ(dlx_str(&c, "head"), rig.tip);
+        ASSERT_STR_EQ(dlx_str(&c, "worktree"), rig.clone);
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "mutated")));
+        (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
+        dlx_end(&c);
+        ASSERT(dlx_queue_empty());
+        ASSERT(dlx_plan_refused(&rig, NULL, true, NULL, "PLAN_MISMATCH"));
+        ASSERT(dlx_plan_refused(&rig, plan, false, NULL, "CONFIRM_REQUIRED"));
+        ASSERT(dlx_plan_refused(&rig, plan, true, "changed", "PLAN_MISMATCH"));
+        ASSERT(dlx_commit(rig.clone, "later.txt", "later\n", later));
+        ASSERT(dlx_plan_refused(&rig, plan, true, NULL, "PLAN_MISMATCH"));
+        dlx_plan_call(&c, &rig, true, NULL, false, NULL);
+        ASSERT(dlx_ok(&c));
+        (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
+        dlx_end(&c);
+        ASSERT(dlx_queue_empty());
+        dlx_plan_call(&c, &rig, true, plan, true, NULL);
+        ASSERT(dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 1);
+        dlx_end(&c);
+        ASSERT(dlx_queue_has_one());
+        ASSERT(dlx_commit(rig.clone, "cli.txt", "cli\n", later));
+        dlx_plan_call(&c, &rig, false, NULL, false, NULL);
+        ASSERT(dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+#endif
 #endif /* !defined(_WIN32) */

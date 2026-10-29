@@ -146,6 +146,10 @@ bool dl_stubbed(void);
 bool dl_sha_ok(const char *s);
 int dl_git(const char *dir, const char *const *args, char *out, size_t cap,
            int timeout_ms);
+
+/* Queue one tip exactly as the CLI does (native_dev_land.c). */
+void zcl_native_dev_land_submit_local(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply);
 int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
               const char *observed_main, char *why, size_t why_cap);
 bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row);

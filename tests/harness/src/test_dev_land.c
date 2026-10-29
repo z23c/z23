@@ -373,6 +373,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      dlx_fence_concurrent, 0u},
     {"dlx_fence_negative_cases()",
      dlx_fence_negative_cases, 3u},
+    {"test_dev_land_submit_plan_flow()",
+     test_dev_land_submit_plan_flow, 0u},
     {"test_dev_land_status_registry_run()",
      test_dev_land_status_registry_run, 0u},
     {"test_dev_land_status_observation()",
@@ -728,6 +730,7 @@ static const char *const g_dlx_original_calls[] = {
     "dlx_fence_cases()",
     "dlx_fence_concurrent()",
     "dlx_fence_negative_cases()",
+    "test_dev_land_submit_plan_flow()",
     "test_dev_land_status_registry_run()",
     "test_dev_land_status_observation()",
 #endif

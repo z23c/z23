@@ -289,6 +289,7 @@ int test_dev_land_resubmit_failed_pair(void);
 int test_dev_land_refusal_names_next_step(void);
 int test_dev_land_status_observation(void);
 int test_dev_land_status_registry_run(void);
+int test_dev_land_submit_plan_flow(void);
 bool dlx_fence_prepare(struct dlx_rig *rig, const char *tag,
                                char base[64], char wt[1400], char successor[64]);
 void dlx_fence_call(struct dlx_call *c, const struct dlx_rig *rig,

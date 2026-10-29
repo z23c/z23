@@ -2087,7 +2087,7 @@ ZCL_COMMAND_BRANCH("dev.land", "dev",
                    "Queue a tip, prove it and publish it to origin/main",
                    ZCL_COMMAND_LAYER_DEV)
 
-ZCL_COMMAND_DEV_COMMAND(
+ZCL_COMMAND_READY_COMMAND(
     "dev.land.submit", "dev.land", "",
     "Queue a signed tip for landing and return at once",
     "Queues one signed tip and returns before any mutation of origin; the tip "
@@ -2107,20 +2107,23 @@ ZCL_COMMAND_DEV_COMMAND(
     "worktree and refuses PRECHECK_FAILED; precheck=run (default) runs it and "
     "needs the tip to be the worktree HEAD, precheck=skip queues without it and "
     "appends \" [precheck skipped]\" to the note; any other value is "
-    "refused BAD_INPUT.", 65536,
+    "refused BAD_INPUT. Over MCP a call without confirm returns a plan "
+    "(plan_id, worktree, branch, head, commits_ahead) and queues nothing; "
+    "repeat it with plan_id and confirm:true to queue, and a moved HEAD or "
+    "changed input is refused PLAN_MISMATCH. The CLI queues at once.", 65536,
     "land,submit,queue,lane,tip",
-    "zcl.land_submit_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify,precheck", "",
+    "zcl.land_submit_input.v1", "zcl.land.v1",
+    "tip,worktree,note,json,qualify,precheck,plan_id,confirm", "",
     "z23 dev land submit --worktree=PATH --qualify",
+    ZCL_COMMAND_LAYER_DEV,
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
     ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_DEV_ONLY,
-    zcl_native_handle_dev_land,
-    "the landing queue is a development-lane coordination surface",
-    "z23 dev land submit")
+    zcl_native_handle_dev_land_submit)
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.drive", "dev.land", "",

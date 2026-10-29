@@ -13194,6 +13194,24 @@ void zcl_native_dev_land_submit_received(const struct zcl_command_request *reque
     dl_submit(request, true, reply);
 }
 
+/* The CLI-equivalent submit for tools/command/native_dev_land_plan.c: the same
+ * checks and the same precheck as `dev land submit`, with the next step named
+ * on a refusal, reached without the verb dispatch of the shared handler. */
+void zcl_native_dev_land_submit_local(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    dl_submit(request, false, reply);
+    if (reply->exit_code != ZCL_COMMAND_EXIT_OK && reply->error.code[0] &&
+        !reply->error.next_action[0]) {
+        char step[sizeof(reply->error.next_action)];
+        dl_next_step(reply->error.code, "submit", 0, step, sizeof(step));
+        (void)snprintf(reply->error.next_action,
+                       sizeof(reply->error.next_action), "%s", step);
+    }
+}
+
 int zcl_native_dev_land_git(const char *dir, const char *const *args,
                             char *out, size_t cap, int timeout_ms)
 {
