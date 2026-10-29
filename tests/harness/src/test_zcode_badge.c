@@ -457,25 +457,74 @@ static int t_eval_hundred_tests(const struct vcs_badge_facts *facts,
     return failures;
 }
 
-/* The report badges take the day of the first fix or reproduction. */
+static bool zb_eval_report_fields(const struct vcs_badge_eval *ev, bool eligible,
+                                  int64_t day, const uint8_t root[32],
+                                  const char *detail)
+{
+    return ev->available && ev->eligible == eligible &&
+           ev->period_first == day && ev->period_last == day &&
+           memcmp(ev->evidence_root, root, 32) == 0 &&
+           strcmp(ev->detail, detail) == 0;
+}
+
+/* Reviewed rewards preserve the exact success and missing-fact reports. */
 static int t_eval_fix_reports(const struct vcs_badge_facts *facts,
                               const uint8_t *pk, int64_t today,
                               struct vcs_badge_eval *ev)
 {
     int failures = 0;
-    ZB_CHECK("eval: bug-hunter period is the first fix day",
-             vcs_badge_evaluate(VCS_BADGE_BUG_HUNTER, pk, facts, today,
-                                ev) &&
-                 ev->eligible && ev->period_first == 50 &&
-                 memcmp(ev->evidence_root, facts->bug_fix_root, 32) == 0);
-    ZB_CHECK("eval: security-researcher eligible",
-             vcs_badge_evaluate(VCS_BADGE_SECURITY_RESEARCHER, pk, facts,
-                                today, ev) &&
-                 ev->eligible && ev->period_first == 60);
-    ZB_CHECK("eval: reproducible-builder eligible",
-             vcs_badge_evaluate(VCS_BADGE_REPRODUCIBLE_BUILDER, pk, facts,
-                                today, ev) &&
-                 ev->eligible && ev->period_first == 70);
+    const struct {
+        enum vcs_badge_type type;
+        int64_t day;
+        const uint8_t *root;
+        const char *success, *missing;
+    } cases[] = {
+        {VCS_BADGE_BUG_HUNTER, 50, facts->bug_fix_root,
+         "first settled bug fix on day 50",
+         "no settled bug-fix-with-regression-test reward (manual categories settle after owner review, slice 14)"},
+        {VCS_BADGE_SECURITY_RESEARCHER, 60, facts->security_fix_root,
+         "first settled security fix on day 60",
+         "no settled security-fix reward (manual categories settle after owner review, slice 14)"},
+        {VCS_BADGE_REPRODUCIBLE_BUILDER, 70, facts->reproduction_root,
+         "first settled build reproduction on day 70",
+         "no settled independent-build-reproduction reward (manual categories settle after owner review, slice 14)"},
+    };
+    struct vcs_badge_facts empty = {0};
+    const uint8_t zero[32] = {0};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ZB_CHECK("eval: reviewed reward success fields",
+                 vcs_badge_evaluate(cases[i].type, pk, facts, today, ev) &&
+                 zb_eval_report_fields(ev, true, cases[i].day, cases[i].root,
+                                       cases[i].success));
+        ZB_CHECK("eval: reviewed reward missing fields",
+                 vcs_badge_evaluate(cases[i].type, pk, &empty, today, ev) &&
+                 zb_eval_report_fields(ev, false, VCS_BADGE_PERIOD_NONE, zero,
+                                       cases[i].missing));
+    }
+    return failures;
+}
+
+static int t_eval_rejected_inputs(const uint8_t *pk,
+                                  const struct vcs_badge_facts *facts)
+{
+    int failures = 0;
+    struct vcs_badge_eval out, before;
+    memset(&out, 0xa5, sizeof(out));
+    memcpy(&before, &out, sizeof(out));
+    ZB_CHECK("eval: null contributor leaves output untouched",
+             !vcs_badge_evaluate(VCS_BADGE_FIRST_PACKAGE, NULL, facts, 0, &out) &&
+             memcmp(&out, &before, sizeof(out)) == 0);
+    ZB_CHECK("eval: null facts leaves output untouched",
+             !vcs_badge_evaluate(VCS_BADGE_FIRST_PACKAGE, pk, NULL, 0, &out) &&
+             memcmp(&out, &before, sizeof(out)) == 0);
+    ZB_CHECK("eval: null output refused",
+             !vcs_badge_evaluate(VCS_BADGE_FIRST_PACKAGE, pk, facts, 0, NULL));
+    ZB_CHECK("eval: invalid low type leaves output untouched",
+             !vcs_badge_evaluate((enum vcs_badge_type)-1, pk, facts, 0, &out) &&
+             memcmp(&out, &before, sizeof(out)) == 0);
+    ZB_CHECK("eval: type count leaves output untouched",
+             !vcs_badge_evaluate(VCS_BADGE_TYPE_COUNT, pk, facts, 0, &out) &&
+             memcmp(&out, &before, sizeof(out)) == 0);
     return failures;
 }
 
@@ -642,6 +691,7 @@ static int t_evaluator(void)
     failures += t_eval_packages(&facts, pk.vch, today, &ev);
     failures += t_eval_hundred_tests(&facts, pk.vch, today, &ev);
     failures += t_eval_fix_reports(&facts, pk.vch, today, &ev);
+    failures += t_eval_rejected_inputs(pk.vch, &facts);
     failures += t_eval_windows(&facts, pk.vch, today, &ev);
     failures += t_eval_achievement(&facts, pk.vch, today, &ev);
     failures += t_eval_unavailable(&facts, pk.vch, today, &ev);

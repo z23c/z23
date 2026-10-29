@@ -334,29 +334,10 @@ static void belig_eval_no(struct vcs_badge_eval *out, const char *fmt, ...)
     va_end(ap);
 }
 
-bool vcs_badge_evaluate(enum vcs_badge_type type,
-                        const uint8_t contributor[33],
-                        const struct vcs_badge_facts *facts,
-                        int64_t today_day, struct vcs_badge_eval *out)
+static bool belig_eval_publication(enum vcs_badge_type type,
+                                   const struct vcs_badge_facts *facts,
+                                   struct vcs_badge_eval *out)
 {
-    if (!contributor || !facts || !out)
-        LOG_RETURN(false, BELIG_LOG, "null evaluate");
-    if (type < VCS_BADGE_FIRST_PACKAGE || type >= VCS_BADGE_TYPE_COUNT)
-        LOG_RETURN(false, BELIG_LOG, "badge type %d out of range",
-                   (int)type);
-    memset(out, 0, sizeof(*out));
-    out->type = type;
-    out->available = vcs_badge_type_available(type);
-    out->period_first = VCS_BADGE_PERIOD_NONE;
-    out->period_last = VCS_BADGE_PERIOD_NONE;
-    snprintf(out->detail, sizeof(out->detail), "not eligible");
-    if (!out->available) {
-        belig_eval_unavailable(
-            out, "needs P2P facts that arrive with slices 11-12; "
-                 "honestly unavailable in v1 — never faked");
-        return true;
-    }
-
     switch (type) {
     case VCS_BADGE_FIRST_PACKAGE:
         if (!facts->has_first_package) {
@@ -383,24 +364,49 @@ bool vcs_badge_evaluate(enum vcs_badge_type type,
                  facts->distinct_package_count);
         return true;
 
-    case VCS_BADGE_HUNDRED_TESTS:
-        if (!facts->hundred_tests_crossed) {
-            belig_eval_no(out, "%llu settled test points (need %u)",
-                          (unsigned long long)facts->test_points_total,
-                          (unsigned)VCS_BADGE_HUNDRED_TESTS_POINTS);
-            return true;
-        }
-        out->eligible = true;
-        belig_eval_period(out, facts->hundred_tests_day,
-                          facts->hundred_tests_day);
-        memcpy(out->evidence_root, facts->hundred_tests_root, 32);
-        snprintf(out->detail, sizeof(out->detail),
-                 "%llu settled test points crossed %u on day %lld",
-                 (unsigned long long)facts->test_points_total,
-                 (unsigned)VCS_BADGE_HUNDRED_TESTS_POINTS,
-                 (long long)facts->hundred_tests_day);
-        return true;
+    default: break;
+    }
+    return true;
+}
 
+static bool belig_eval_points(const struct vcs_badge_facts *facts,
+                              struct vcs_badge_eval *out)
+{
+    if (!facts->hundred_tests_crossed) {
+        belig_eval_no(out, "%llu settled test points (need %u)",
+                      (unsigned long long)facts->test_points_total,
+                      (unsigned)VCS_BADGE_HUNDRED_TESTS_POINTS);
+        return true;
+    }
+    out->eligible = true;
+    belig_eval_period(out, facts->hundred_tests_day,
+                      facts->hundred_tests_day);
+    memcpy(out->evidence_root, facts->hundred_tests_root, 32);
+    snprintf(out->detail, sizeof(out->detail),
+             "%llu settled test points crossed %u on day %lld",
+             (unsigned long long)facts->test_points_total,
+             (unsigned)VCS_BADGE_HUNDRED_TESTS_POINTS,
+             (long long)facts->hundred_tests_day);
+    return true;
+
+}
+
+static bool belig_eval_award(struct vcs_badge_eval *out, int64_t day,
+                             const uint8_t root[32], const char *label)
+{
+    out->eligible = true;
+    belig_eval_period(out, day, day);
+    memcpy(out->evidence_root, root, 32);
+    snprintf(out->detail, sizeof(out->detail),
+             "first settled %s on day %lld", label, (long long)day);
+    return true;
+}
+
+static bool belig_eval_reward(enum vcs_badge_type type,
+                              const struct vcs_badge_facts *facts,
+                              struct vcs_badge_eval *out)
+{
+    switch (type) {
     case VCS_BADGE_BUG_HUNTER:
         if (!facts->has_bug_fix) {
             belig_eval_no(out, "no settled bug-fix-with-regression-test "
@@ -408,14 +414,8 @@ bool vcs_badge_evaluate(enum vcs_badge_type type,
                                "owner review, slice 14)");
             return true;
         }
-        out->eligible = true;
-        belig_eval_period(out, facts->bug_fix_day, facts->bug_fix_day);
-        memcpy(out->evidence_root, facts->bug_fix_root, 32);
-        snprintf(out->detail, sizeof(out->detail),
-                 "first settled bug fix on day %lld",
-                 (long long)facts->bug_fix_day);
-        return true;
-
+        return belig_eval_award(out, facts->bug_fix_day,
+                                facts->bug_fix_root, "bug fix");
     case VCS_BADGE_SECURITY_RESEARCHER:
         if (!facts->has_security_fix) {
             belig_eval_no(out, "no settled security-fix reward (manual "
@@ -423,15 +423,8 @@ bool vcs_badge_evaluate(enum vcs_badge_type type,
                                "slice 14)");
             return true;
         }
-        out->eligible = true;
-        belig_eval_period(out, facts->security_fix_day,
-                          facts->security_fix_day);
-        memcpy(out->evidence_root, facts->security_fix_root, 32);
-        snprintf(out->detail, sizeof(out->detail),
-                 "first settled security fix on day %lld",
-                 (long long)facts->security_fix_day);
-        return true;
-
+        return belig_eval_award(out, facts->security_fix_day,
+                                facts->security_fix_root, "security fix");
     case VCS_BADGE_REPRODUCIBLE_BUILDER:
         if (!facts->has_reproduction) {
             belig_eval_no(out, "no settled independent-build-reproduction "
@@ -439,51 +432,57 @@ bool vcs_badge_evaluate(enum vcs_badge_type type,
                                "owner review, slice 14)");
             return true;
         }
-        out->eligible = true;
-        belig_eval_period(out, facts->reproduction_day,
-                          facts->reproduction_day);
-        memcpy(out->evidence_root, facts->reproduction_root, 32);
-        snprintf(out->detail, sizeof(out->detail),
-                 "first settled build reproduction on day %lld",
-                 (long long)facts->reproduction_day);
-        return true;
-
-    case VCS_BADGE_TOP_DAILY:
-    case VCS_BADGE_TOP_WEEKLY:
-    case VCS_BADGE_TOP_MONTHLY: {
-        enum vcs_rank_period period =
-            type == VCS_BADGE_TOP_DAILY    ? VCS_RANK_PERIOD_DAILY
-            : type == VCS_BADGE_TOP_WEEKLY ? VCS_RANK_PERIOD_WEEKLY
-                                           : VCS_RANK_PERIOD_MONTHLY;
-        bool top = type == VCS_BADGE_TOP_DAILY    ? facts->top_daily
-                   : type == VCS_BADGE_TOP_WEEKLY ? facts->top_weekly
-                                                  : facts->top_monthly;
-        uint64_t points =
-            type == VCS_BADGE_TOP_DAILY    ? facts->top_daily_points
-            : type == VCS_BADGE_TOP_WEEKLY ? facts->top_weekly_points
-                                           : facts->top_monthly_points;
-        const char *label = type == VCS_BADGE_TOP_DAILY    ? "day"
-                            : type == VCS_BADGE_TOP_WEEKLY ? "ISO week"
-                                                           : "month";
-        if (!top) {
-            belig_eval_no(out, "not rank 1 overall for the current %s",
-                          label);
-            return true;
-        }
-        struct vcs_rank_window window;
-        if (!vcs_rank_window_for(period, today_day, &window))
-            LOG_RETURN(false, BELIG_LOG, "window for %s", label);
-        out->eligible = true;
-        belig_eval_period(out, window.first_day, window.last_day);
-        vcs_badge_evidence_hash(type, contributor, window.first_day,
-                                window.last_day, points,
-                                out->evidence_root);
-        snprintf(out->detail, sizeof(out->detail),
-                 "rank 1 overall with %llu points for the %s",
-                 (unsigned long long)points, label);
+        return belig_eval_award(out, facts->reproduction_day,
+                                facts->reproduction_root, "build reproduction");
+    default:
         return true;
     }
+}
 
+static bool belig_eval_rank(enum vcs_badge_type type,
+                            const uint8_t contributor[33],
+                            const struct vcs_badge_facts *facts,
+                            int64_t today_day, struct vcs_badge_eval *out)
+{
+    enum vcs_rank_period period =
+        type == VCS_BADGE_TOP_DAILY    ? VCS_RANK_PERIOD_DAILY
+        : type == VCS_BADGE_TOP_WEEKLY ? VCS_RANK_PERIOD_WEEKLY
+                                       : VCS_RANK_PERIOD_MONTHLY;
+    bool top = type == VCS_BADGE_TOP_DAILY    ? facts->top_daily
+               : type == VCS_BADGE_TOP_WEEKLY ? facts->top_weekly
+                                              : facts->top_monthly;
+    uint64_t points =
+        type == VCS_BADGE_TOP_DAILY    ? facts->top_daily_points
+        : type == VCS_BADGE_TOP_WEEKLY ? facts->top_weekly_points
+                                       : facts->top_monthly_points;
+    const char *label = type == VCS_BADGE_TOP_DAILY    ? "day"
+                        : type == VCS_BADGE_TOP_WEEKLY ? "ISO week"
+                                                       : "month";
+    if (!top) {
+        belig_eval_no(out, "not rank 1 overall for the current %s",
+                      label);
+        return true;
+    }
+    struct vcs_rank_window window;
+    if (!vcs_rank_window_for(period, today_day, &window))
+        LOG_RETURN(false, BELIG_LOG, "window for %s", label);
+    out->eligible = true;
+    belig_eval_period(out, window.first_day, window.last_day);
+    vcs_badge_evidence_hash(type, contributor, window.first_day,
+                            window.last_day, points,
+                            out->evidence_root);
+    snprintf(out->detail, sizeof(out->detail),
+             "rank 1 overall with %llu points for the %s",
+             (unsigned long long)points, label);
+    return true;
+}
+
+static bool belig_eval_tenure(enum vcs_badge_type type,
+                              const uint8_t contributor[33],
+                              const struct vcs_badge_facts *facts,
+                              struct vcs_badge_eval *out)
+{
+    switch (type) {
     case VCS_BADGE_ONE_YEAR_MAINTAINER:
         if (!facts->has_settled ||
             facts->latest_settled_day - facts->earliest_settled_day <
@@ -542,12 +541,65 @@ bool vcs_badge_evaluate(enum vcs_badge_type type,
                  (long long)facts->ledger_earliest_day);
         return true;
 
+    default: break;
+    }
+    return true;
+}
+
+static bool belig_eval_available(enum vcs_badge_type type,
+                                 const uint8_t contributor[33],
+                                 const struct vcs_badge_facts *facts,
+                                 int64_t today_day, struct vcs_badge_eval *out)
+{
+    switch (type) {
+    case VCS_BADGE_FIRST_PACKAGE:
+    case VCS_BADGE_TEN_PACKAGES:
+        return belig_eval_publication(type, facts, out);
+    case VCS_BADGE_HUNDRED_TESTS:
+        return belig_eval_points(facts, out);
+    case VCS_BADGE_BUG_HUNTER:
+    case VCS_BADGE_SECURITY_RESEARCHER:
+    case VCS_BADGE_REPRODUCIBLE_BUILDER:
+        return belig_eval_reward(type, facts, out);
+    case VCS_BADGE_TOP_DAILY:
+    case VCS_BADGE_TOP_WEEKLY:
+    case VCS_BADGE_TOP_MONTHLY:
+        return belig_eval_rank(type, contributor, facts, today_day, out);
+    case VCS_BADGE_ONE_YEAR_MAINTAINER:
+    case VCS_BADGE_EARLY_ZCODE_CONTRIBUTOR:
+        return belig_eval_tenure(type, contributor, facts, out);
     case VCS_BADGE_POPULAR_PACKAGE:
     case VCS_BADGE_RARE_PACKAGE_SEEDER:
     case VCS_BADGE_TYPE_COUNT:
-        break; /* handled by the availability check above */
+        break;
     }
     return true;
+}
+
+bool vcs_badge_evaluate(enum vcs_badge_type type,
+                        const uint8_t contributor[33],
+                        const struct vcs_badge_facts *facts,
+                        int64_t today_day, struct vcs_badge_eval *out)
+{
+    if (!contributor || !facts || !out)
+        LOG_RETURN(false, BELIG_LOG, "null evaluate");
+    if (type < VCS_BADGE_FIRST_PACKAGE || type >= VCS_BADGE_TYPE_COUNT)
+        LOG_RETURN(false, BELIG_LOG, "badge type %d out of range",
+                   (int)type);
+    memset(out, 0, sizeof(*out));
+    out->type = type;
+    out->available = vcs_badge_type_available(type);
+    out->period_first = VCS_BADGE_PERIOD_NONE;
+    out->period_last = VCS_BADGE_PERIOD_NONE;
+    snprintf(out->detail, sizeof(out->detail), "not eligible");
+    if (!out->available) {
+        belig_eval_unavailable(
+            out, "needs P2P facts that arrive with slices 11-12; "
+                 "honestly unavailable in v1 — never faked");
+        return true;
+    }
+
+    return belig_eval_available(type, contributor, facts, today_day, out);
 }
 
 /* ── plan build ─────────────────────────────────────────────────────── */
