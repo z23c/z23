@@ -196,6 +196,68 @@ static int c_macos_seatbelt_scope(void)
     return 0;
 }
 
+static int macos_descendant_permissions(pid_t outside)
+{
+    char path[320];
+    int n = snprintf(path, sizeof(path), "%s/output", g_macos_allowed);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return 87;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0 || close(fd) != 0) return 88;
+    if (macos_seatbelt_denied_open_refused() ||
+        macos_seatbelt_inet_connect_refused()) return 89;
+    if (kill(getpid(), 0) != 0) return 90;
+    errno = 0;
+    if (kill(outside, 0) == 0 || errno != EPERM) return 91;
+    return 0;
+}
+
+/* The parent is a consenting, live test process. Signal zero checks
+ * permission without delivering a signal; setup failure is never a pass. */
+static int c_macos_seatbelt_descendant(void)
+{
+    pid_t outside = getppid();
+    if (outside <= 1 || kill(outside, 0) != 0 || kill(getpid(), 0) != 0)
+        return 85;
+    int rc = macos_seatbelt_write_granted_output();
+    if (rc) return rc;
+    pid_t child = fork();
+    if (child < 0) return 86;
+    if (child == 0) _exit(macos_descendant_permissions(outside));
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    if (waited != child) return 93;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 92;
+}
+
+static bool macos_wait_event(pid_t child, int options, int *status);
+static bool macos_kill_reap_test_child(pid_t *child);
+
+/* The unsandboxed supervisor owns a dedicated fixture group, so it can
+ * terminate both generations even if Seatbelt denies the child's signals. */
+static int macos_descendant_supervise(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 95;
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0) _exit(96);
+        _exit(c_macos_seatbelt_descendant());
+    }
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+        (void)macos_kill_reap_test_child(&pid);
+        return 97;
+    }
+    int status = 0;
+    if (macos_wait_event(pid, 0, &status))
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 98;
+    if (kill(-pid, SIGKILL) != 0 && errno != ESRCH)
+        fprintf(stderr, "os_sandbox: fixture group kill failed pgid=%ld errno=%d\n",
+                (long)pid, errno);
+    (void)macos_kill_reap_test_child(&pid);
+    return 100;
+}
+
 static int macos_descriptor_grant_refusal(bool leaf)
 {
     int granted = open(g_macos_denied, O_RDONLY);
@@ -557,6 +619,10 @@ int test_os_sandbox(void)
                     "seatbelt") == 0);
     SB_CHECK("Seatbelt scopes files and denies network",
              sb_run_child(c_macos_seatbelt_scope) == 0);
+    int descendant_rc = macos_descendant_supervise();
+    SB_CHECK("package descendant inherits file, network and signal restrictions",
+             descendant_rc == 0);
+    if (descendant_rc != 0) printf("  descendant stage rc=%d\n", descendant_rc);
     SB_CHECK("package Seatbelt refuses descriptor grants before sandbox entry",
              sb_run_child(c_macos_package_descriptor_refusal) == 0);
     SB_CHECK("leaf Seatbelt refuses descriptor grants before sandbox entry",
