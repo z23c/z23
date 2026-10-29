@@ -20,6 +20,12 @@
  *      simulated restart (the dirty flag is not cleared past the snapshot).
  *  11. concurrent writers serialize on the single-flight write mutex and
  *      leave the file equal to the live table.
+ *  12. ban_addr_ex(): offset <= 0 means 24h, a positive offset is relative;
+ *      a re-ban never shortens a ban and overwrites score and reason.
+ *  13. ban_db_read(): NULL arguments refuse; a round trip keeps ban_until,
+ *      score_at_ban, reason and prefix_len; rows past the cap are dropped.
+ *  14. peer_misbehaving(): NULL and non-positive inputs, trusted peers are
+ *      no-ops; the threshold bans a routable peer once for 24h.
  *
  * One TEST()/ASSERT() block per function (TEST uses a fixed `_test_next:`
  * goto label; see test/test_core.h).
@@ -28,6 +34,7 @@
 #include "test/test_core.h"
 #include "net/net.h"
 #include "net/peer_scoring.h"
+#include "core/utiltime.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -554,10 +561,250 @@ static int test_nbp_concurrent_writes_stay_complete(void)
     return failures;
 }
 
+/* Entry of the table for `addr`, or NULL. */
+static const struct ban_entry *nbp_entry(const struct net_manager *nm,
+                                         struct net_addr addr)
+{
+    for (size_t i = 0; i < nm->num_banned; i++)
+        if (net_addr_eq(&nm->banned[i].addr, &addr))
+            return &nm->banned[i];
+    return NULL;
+}
+
+static int test_nbp_ban_default_and_relative_expiry(void)
+{
+    int failures = 0;
+    TEST("ban_addr_ex: offset <= 0 means 24h; a positive offset is relative to now") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct net_addr zero = nbp_addr(203, 0, 113, 30);
+        struct net_addr rel = nbp_addr(203, 0, 113, 31);
+
+        const int64_t t0 = GetTime();
+        ban_addr(&nm, &zero, 0, false);
+        ban_addr(&nm, &rel, 3600, false);
+        const int64_t t1 = GetTime();
+
+        const struct ban_entry *z = nbp_entry(&nm, zero);
+        const struct ban_entry *r = nbp_entry(&nm, rel);
+        ASSERT(z != NULL);
+        ASSERT(r != NULL);
+        ASSERT(z->ban_until >= t0 + 24 * 60 * 60);
+        ASSERT(z->ban_until <= t1 + 24 * 60 * 60);
+        ASSERT(r->ban_until >= t0 + 3600);
+        ASSERT(r->ban_until <= t1 + 3600);
+        /* Manual bans: score 0, reason "manual", IPv4 prefix 32. */
+        ASSERT_EQ((int)z->score_at_ban, 0);
+        ASSERT(strcmp(z->reason, "manual") == 0);
+        ASSERT_EQ((int)z->prefix_len, 32);
+
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_nbp_reban_extends_only_and_overwrites_metadata(void)
+{
+    int failures = 0;
+    TEST("ban_addr_ex: a re-ban never shortens; score and reason are overwritten") {
+        nbp_default_scoring();
+        struct net_manager nm;
+        net_manager_init(&nm); /* no datadir: in-memory only */
+
+        struct net_addr a = nbp_addr(203, 0, 113, 32);
+        ban_addr(&nm, &a, 3600, false);
+        const int64_t first = nbp_entry(&nm, a)->ban_until;
+
+        /* Shorter window: the existing, longer ban stands. */
+        ban_addr(&nm, &a, 60, false);
+        ASSERT(nbp_entry(&nm, a)->ban_until == first);
+        ASSERT_EQ((int)nm.num_banned, 1);
+
+        /* Longer window: the ban is extended. */
+        ban_addr(&nm, &a, 7200, false);
+        ASSERT(nbp_entry(&nm, a)->ban_until > first);
+        ASSERT_EQ((int)nm.num_banned, 1);
+
+        /* Scored re-ban: score_at_ban and reason are overwritten, the
+         * entry count does not grow. */
+        struct p2p_node node;
+        nbp_flood_node(&node, a);
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "flood");
+        const struct ban_entry *e = nbp_entry(&nm, a);
+        ASSERT(e != NULL);
+        ASSERT_EQ((int)e->score_at_ban, 100);
+        ASSERT(strcmp(e->reason, "flood") == 0);
+        ASSERT_EQ((int)nm.num_banned, 1);
+
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_nbp_ban_db_read_null_args(void)
+{
+    int failures = 0;
+    TEST("ban_db_read: NULL manager or NULL datadir refuses without touching state") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        ASSERT(!ban_db_read(NULL, "/unused"));
+        ASSERT(!ban_db_read(&nm, NULL));
+        ASSERT_EQ((int)nm.num_banned, 0);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_nbp_ban_db_round_trip_keeps_metadata(void)
+{
+    int failures = 0;
+    TEST("ban_db: round trip keeps ban_until, score_at_ban, reason and prefix") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "net_ban_persistence", "roundtrip");
+        nbp_default_scoring();
+        struct net_manager nm;
+        net_manager_init(&nm);
+        nm.datadir = dir;
+
+        struct net_addr manual = nbp_addr(203, 0, 113, 60);
+        struct net_addr scored = nbp_addr(203, 0, 113, 61);
+        ban_addr(&nm, &manual, 3600, false);
+        struct p2p_node node;
+        nbp_flood_node(&node, scored);
+        peer_scoring_record(&nm, &node, PEER_OFFENCE_INVALID_BLOCK, "flood");
+        const int64_t until_manual = nbp_entry(&nm, manual)->ban_until;
+        const int64_t until_scored = nbp_entry(&nm, scored)->ban_until;
+        net_manager_free(&nm); /* flushes any debounced auto write */
+
+        struct net_manager nm2;
+        net_manager_init(&nm2);
+        ASSERT(ban_db_read(&nm2, dir));
+        ASSERT_EQ((int)nm2.num_banned, 2);
+
+        const struct ban_entry *m = nbp_entry(&nm2, manual);
+        ASSERT(m != NULL);
+        ASSERT(m->ban_until == until_manual);
+        ASSERT_EQ((int)m->score_at_ban, 0);
+        ASSERT(strcmp(m->reason, "manual") == 0);
+        ASSERT_EQ((int)m->prefix_len, 32);
+
+        const struct ban_entry *s = nbp_entry(&nm2, scored);
+        ASSERT(s != NULL);
+        ASSERT(s->ban_until == until_scored);
+        ASSERT_EQ((int)s->score_at_ban, 100);
+        ASSERT(strcmp(s->reason, "flood") == 0);
+        net_manager_free(&nm2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_nbp_ban_db_read_drops_rows_past_cap(void)
+{
+    int failures = 0;
+    TEST("ban_db_read: rows past the in-memory cap are dropped; the load still succeeds") {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "net_ban_persistence", "cap_drop");
+        struct net_addr persisted = nbp_addr(203, 0, 113, 50);
+        struct net_manager writer;
+        net_manager_init(&writer);
+        writer.datadir = dir;
+        ban_addr(&writer, &persisted, 3600, false);
+        net_manager_free(&writer);
+
+        /* Fill a manager to the cap with manual bans (no datadir) so the
+         * persisted row has no free slot. */
+        struct net_manager nm;
+        net_manager_init(&nm);
+        for (size_t i = 0; i < NET_BAN_TABLE_MAX; i++)
+            nbp_ban_day(&nm, nbp_flood_addr(i));
+        ASSERT_EQ((int)nm.num_banned, NET_BAN_TABLE_MAX);
+
+        ASSERT(ban_db_read(&nm, dir));
+        ASSERT_EQ((int)nm.num_banned, NET_BAN_TABLE_MAX);
+        ASSERT(!nbp_banned(&nm, persisted));
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_nbp_peer_misbehaving_branches(void)
+{
+    int failures = 0;
+    TEST("peer_misbehaving: no-op inputs and trusted peers; threshold bans a routable peer once") {
+        nbp_default_scoring();
+        struct net_manager nm;
+        net_manager_init(&nm); /* no datadir */
+        const int64_t t0 = GetTime();
+
+        struct net_addr routable = nbp_addr(203, 0, 113, 40);
+        struct p2p_node node;
+        nbp_flood_node(&node, routable);
+
+        peer_misbehaving(NULL, &node, 100, "null manager");
+        peer_misbehaving(&nm, NULL, 100, "null node");
+        peer_misbehaving(&nm, &node, 0, "zero");
+        peer_misbehaving(&nm, &node, -5, "negative");
+        ASSERT_EQ((int)node.misbehavior, 0);
+        ASSERT(!node.disconnect);
+        ASSERT_EQ((int)nm.num_banned, 0);
+
+        /* Below the threshold: scored, not banned, not disconnected. */
+        peer_misbehaving(&nm, &node, 50, "half");
+        ASSERT_EQ((int)node.misbehavior, 50);
+        ASSERT(!node.disconnect);
+        ASSERT_EQ((int)nm.num_banned, 0);
+
+        /* At the threshold: disconnected and address-banned for 24h. */
+        peer_misbehaving(&nm, &node, 50, "pinned");
+        ASSERT_EQ((int)node.misbehavior, 100);
+        ASSERT(node.disconnect);
+        ASSERT(nbp_banned(&nm, routable));
+        const struct ban_entry *e = nbp_entry(&nm, routable);
+        ASSERT(e != NULL);
+        ASSERT_EQ((int)e->score_at_ban, 100);
+        ASSERT(strcmp(e->reason, "pinned") == 0);
+        ASSERT(e->ban_until >= t0 + 24 * 60 * 60);
+        ASSERT_EQ((int)nm.num_banned, 1);
+
+        /* A whitelisted peer is never scored. */
+        struct net_addr white = nbp_addr(203, 0, 113, 41);
+        struct p2p_node trusted;
+        nbp_flood_node(&trusted, white);
+        trusted.whitelisted = true;
+        peer_misbehaving(&nm, &trusted, 100, "whitelisted");
+        ASSERT_EQ((int)trusted.misbehavior, 0);
+        ASSERT(!trusted.disconnect);
+        ASSERT(!nbp_banned(&nm, white));
+
+        /* Loopback is trusted, so it is never scored or banned. */
+        struct net_addr lo = nbp_addr(127, 0, 0, 1);
+        struct p2p_node local;
+        nbp_flood_node(&local, lo);
+        peer_misbehaving(&nm, &local, 100, "loopback");
+        ASSERT_EQ((int)local.misbehavior, 0);
+        ASSERT(!nbp_banned(&nm, lo));
+
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_net_ban_persistence(void);
 int test_net_ban_persistence(void)
 {
     int failures = 0;
+    failures += test_nbp_ban_default_and_relative_expiry();
+    failures += test_nbp_reban_extends_only_and_overwrites_metadata();
+    failures += test_nbp_ban_db_read_null_args();
+    failures += test_nbp_ban_db_round_trip_keeps_metadata();
+    failures += test_nbp_ban_db_read_drops_rows_past_cap();
+    failures += test_nbp_peer_misbehaving_branches();
     failures += test_nbp_ban_reload_still_banned();
     failures += test_nbp_expired_ban_not_resurrected();
     failures += test_nbp_unban_persists();

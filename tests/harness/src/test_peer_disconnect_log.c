@@ -186,6 +186,50 @@ static int test_every_reason_is_named(void)
     return failures;
 }
 
+/* Pins the exact wire spelling of every reason. The name is the operator-
+ * facing token in each disconnect line and metric, so a silent rename must
+ * fail here. NONE and any value past the enum read "unknown". */
+static int test_reason_names_are_pinned(void)
+{
+    int failures = 0;
+    static const struct {
+        enum p2p_disconnect_reason reason;
+        const char *name;
+    } rows[] = {
+        { P2P_DISCONNECT_REMOTE_CLOSE, "remote_close" },
+        { P2P_DISCONNECT_IO_ERROR, "io_error" },
+        { P2P_DISCONNECT_TRANSPORT_ERROR, "transport_error" },
+        { P2P_DISCONNECT_MESSAGE_PARSE, "message_parse" },
+        { P2P_DISCONNECT_CONNECT_TIMEOUT, "connect_timeout" },
+        { P2P_DISCONNECT_HANDSHAKE_TIMEOUT, "handshake_timeout" },
+        { P2P_DISCONNECT_PONG_TIMEOUT, "pong_timeout" },
+        { P2P_DISCONNECT_HARD_SILENCE, "hard_silence" },
+        { P2P_DISCONNECT_PROTOCOL_VIOLATION, "protocol_violation" },
+        { P2P_DISCONNECT_RESOURCE_LIMIT, "resource_limit" },
+        { P2P_DISCONNECT_SYNC_STALL, "sync_stall" },
+        { P2P_DISCONNECT_POLICY_ROTATION, "policy_rotation" },
+        { P2P_DISCONNECT_FEELER_COMPLETE, "feeler_complete" },
+        { P2P_DISCONNECT_FEELER_TIMEOUT, "feeler_timeout" },
+        { P2P_DISCONNECT_SELF_CONNECTION, "self_connection" },
+        { P2P_DISCONNECT_NOISE_UPGRADE, "noise_upgrade" },
+        { P2P_DISCONNECT_EVICTED, "evicted" },
+        { P2P_DISCONNECT_APPLICATION, "application" },
+        { P2P_DISCONNECT_LOCAL_SHUTDOWN, "local_shutdown" },
+    };
+    TEST("peer_disconnect_log: reason names are pinned; NONE and out-of-range read unknown") {
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+            ASSERT(strcmp(p2p_disconnect_reason_name(rows[i].reason),
+                          rows[i].name) == 0);
+        ASSERT(strcmp(p2p_disconnect_reason_name(P2P_DISCONNECT_NONE),
+                      "unknown") == 0);
+        ASSERT(strcmp(p2p_disconnect_reason_name(
+                          (enum p2p_disconnect_reason)P2P_DISCONNECT_REASON_COUNT),
+                      "unknown") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* One emitted line per reason, each carrying that reason's own name — the
  * pairing property a reader depends on when counting opens against closes. */
 static int test_each_reason_emits_one_named_line(void)
@@ -451,6 +495,7 @@ int test_peer_disconnect_log(void)
     failures += test_close_line_shape();
     failures += test_inbound_direction_recorded();
     failures += test_every_reason_is_named();
+    failures += test_reason_names_are_pinned();
     failures += test_each_reason_emits_one_named_line();
     failures += test_timeout_events_are_distinct();
     failures += test_addr_is_json_escaped();
