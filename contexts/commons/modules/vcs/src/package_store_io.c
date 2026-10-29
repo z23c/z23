@@ -876,6 +876,93 @@ static size_t store_gc_collect_refs(const struct vcs_package_store *store,
     return ref_count;
 }
 
+/* Outcome of one CAS shard walk; the caller keeps every log line. */
+enum store_gc_cas_shard {
+    GC_CAS_SHARD_OK,
+    GC_CAS_SHARD_SKIP,
+    GC_CAS_SHARD_LIST_FAIL,
+    GC_CAS_SHARD_OPEN_FAIL,
+    GC_CAS_SHARD_RECORD_FAIL,
+    GC_CAS_SHARD_READ_FAIL,
+};
+
+#if defined(_WIN32)
+/* Recover the orphans of one Windows CAS shard, then remove the shard. */
+static enum store_gc_cas_shard store_gc_cas_win_shard(
+    struct vcs_package_store *store, const char *sub, const char *prefix,
+    const uint8_t (*refs)[32], size_t ref_count, bool *marked)
+{
+    uint8_t prefix_byte;
+    if (!zcl_hex_decode_lower(prefix, &prefix_byte, 1))
+        return GC_CAS_SHARD_SKIP;
+    struct platform_directory_list files = {0};
+    if (!platform_directory_list_regular_sorted(sub, &files))
+        return GC_CAS_SHARD_LIST_FAIL;
+    for (size_t c = 0; c < files.count; c++) {
+        uint8_t hash[32];
+        const char *name = files.entries[c].name;
+        if (!zcl_hex_decode_lower(name, hash, 32) ||
+            strncmp(name, prefix, 2) != 0)
+            continue;
+        char path[STORE_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", sub, name);
+        if (!store_gc_cas_record(store, hash, path, refs, ref_count,
+                                 marked)) {
+            platform_directory_list_free(&files);
+            return GC_CAS_SHARD_RECORD_FAIL;
+        }
+    }
+    platform_directory_list_free(&files);
+    wchar_t wide_sub[STORE_PATH_MAX];
+    if (store_wide_path(sub, wide_sub))
+        (void)RemoveDirectoryW(wide_sub);
+    return GC_CAS_SHARD_OK;
+}
+#else
+/* Recover the orphans of one POSIX CAS shard, then remove it when empty. */
+static enum store_gc_cas_shard store_gc_cas_posix_shard(
+    struct vcs_package_store *store, const char *sub, const char *prefix,
+    const uint8_t (*refs)[32], size_t ref_count, bool *marked,
+    int *saved_errno)
+{
+    uint8_t prefix_byte;
+    if (!zcl_hex_decode_lower(prefix, &prefix_byte, 1))
+        return GC_CAS_SHARD_SKIP;
+    DIR *sd = opendir(sub);
+    if (!sd) {
+        *saved_errno = errno;
+        return GC_CAS_SHARD_OPEN_FAIL;
+    }
+    struct dirent *sent;
+    for (;;) {
+        errno = 0;
+        sent = readdir(sd);
+        if (!sent) break;
+        uint8_t hash[32];
+        if (!zcl_hex_decode_lower(sent->d_name, hash, 32))
+            continue;
+        char hex3[3] = { prefix[0], prefix[1], '\0' };
+        if (strncmp(sent->d_name, hex3, 2) != 0)
+            continue;
+        char path[STORE_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", sub, sent->d_name);
+        if (!store_gc_cas_record(store, hash, path, refs, ref_count,
+                                 marked)) {
+            closedir(sd);
+            return GC_CAS_SHARD_RECORD_FAIL;
+        }
+    }
+    if (errno != 0) {
+        *saved_errno = errno;
+        closedir(sd);
+        return GC_CAS_SHARD_READ_FAIL;
+    }
+    closedir(sd);
+    rmdir(sub); /* no-op unless empty */
+    return GC_CAS_SHARD_OK;
+}
+#endif
+
 /* Delete CAS objects no loaded manifest references; build the CAS set. */
 static bool store_gc_cas(struct vcs_package_store *store)
 {
@@ -900,38 +987,20 @@ static bool store_gc_cas(struct vcs_package_store *store)
         LOG_FAIL(STORE_LOG, "list CAS directory %s", cas_dir);
     }
     for (size_t i = 0; i < dirs.count; i++) {
-        const char *prefix = dirs.entries[i].name;
-        uint8_t prefix_byte;
-        if (!zcl_hex_decode_lower(prefix, &prefix_byte, 1))
-            continue;
         char sub[STORE_PATH_MAX];
-        snprintf(sub, sizeof(sub), "%s/%s", cas_dir, prefix);
-        struct platform_directory_list files = {0};
-        if (!platform_directory_list_regular_sorted(sub, &files)) {
+        snprintf(sub, sizeof(sub), "%s/%s", cas_dir, dirs.entries[i].name);
+        enum store_gc_cas_shard rc = store_gc_cas_win_shard(
+            store, sub, dirs.entries[i].name, refs, ref_count, &marked);
+        if (rc == GC_CAS_SHARD_LIST_FAIL) {
             platform_directory_list_free(&dirs);
             free(refs);
             LOG_FAIL(STORE_LOG, "list CAS shard %s", sub);
         }
-        for (size_t c = 0; c < files.count; c++) {
-            uint8_t hash[32];
-            const char *name = files.entries[c].name;
-            if (!zcl_hex_decode_lower(name, hash, 32) ||
-                strncmp(name, prefix, 2) != 0)
-                continue;
-            char path[STORE_PATH_MAX];
-            snprintf(path, sizeof(path), "%s/%s", sub, name);
-            if (!store_gc_cas_record(store, hash, path, refs,
-                                      ref_count, &marked)) {
-                platform_directory_list_free(&files);
-                platform_directory_list_free(&dirs);
-                free(refs);
-                LOG_FAIL(STORE_LOG, "CAS object recovery in %s", sub);
-            }
+        if (rc == GC_CAS_SHARD_RECORD_FAIL) {
+            platform_directory_list_free(&dirs);
+            free(refs);
+            LOG_FAIL(STORE_LOG, "CAS object recovery in %s", sub);
         }
-        platform_directory_list_free(&files);
-        wchar_t wide_sub[STORE_PATH_MAX];
-        if (store_wide_path(sub, wide_sub))
-            (void)RemoveDirectoryW(wide_sub);
     }
     platform_directory_list_free(&dirs);
 #else
@@ -946,50 +1015,28 @@ static bool store_gc_cas(struct vcs_package_store *store)
         errno = 0;
         ent = readdir(d);
         if (!ent) break;
-        uint8_t prefix_byte;
-        if (!zcl_hex_decode_lower(ent->d_name, &prefix_byte, 1))
-            continue;
         char sub[STORE_PATH_MAX];
         snprintf(sub, sizeof(sub), "%s/%s", cas_dir, ent->d_name);
-        DIR *sd = opendir(sub);
-        if (!sd) {
-            int saved_errno = errno;
+        int saved_errno = 0;
+        enum store_gc_cas_shard rc = store_gc_cas_posix_shard(
+            store, sub, ent->d_name, refs, ref_count, &marked, &saved_errno);
+        if (rc == GC_CAS_SHARD_OPEN_FAIL) {
             closedir(d);
             free(refs);
             LOG_FAIL(STORE_LOG, "open CAS shard %s: %s", sub,
                      strerror(saved_errno));
         }
-        struct dirent *sent;
-        for (;;) {
-            errno = 0;
-            sent = readdir(sd);
-            if (!sent) break;
-            uint8_t hash[32];
-            if (!zcl_hex_decode_lower(sent->d_name, hash, 32))
-                continue;
-            char hex3[3] = { ent->d_name[0], ent->d_name[1], '\0' };
-            if (strncmp(sent->d_name, hex3, 2) != 0)
-                continue;
-            char path[STORE_PATH_MAX];
-            snprintf(path, sizeof(path), "%s/%s", sub, sent->d_name);
-            if (!store_gc_cas_record(store, hash, path, refs,
-                                      ref_count, &marked)) {
-                closedir(sd);
-                closedir(d);
-                free(refs);
-                LOG_FAIL(STORE_LOG, "CAS object recovery in %s", sub);
-            }
+        if (rc == GC_CAS_SHARD_RECORD_FAIL) {
+            closedir(d);
+            free(refs);
+            LOG_FAIL(STORE_LOG, "CAS object recovery in %s", sub);
         }
-        if (errno != 0) {
-            int saved_errno = errno;
-            closedir(sd);
+        if (rc == GC_CAS_SHARD_READ_FAIL) {
             closedir(d);
             free(refs);
             LOG_FAIL(STORE_LOG, "read CAS shard %s: %s", sub,
                      strerror(saved_errno));
         }
-        closedir(sd);
-        rmdir(sub); /* no-op unless empty */
     }
     if (errno != 0) {
         int saved_errno = errno;
