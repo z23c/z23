@@ -25,61 +25,132 @@
 
 #define MMN_TAG "native.market.moderation"
 
-static bool market_moderation_view_frozen_kat(const void *opaque, char *why,
-                                               size_t why_sz)
+/* True when the service pointer and every vtable slot the frozen KAT
+ * calls are present. */
+static bool market_moderation_kat_service_shape_ok(
+    const struct market_moderation_view_service_v1 *service)
 {
-    const struct market_moderation_view_service_v1 *service = opaque;
-    struct market_moderation_decision_result_v1 decision;
-    struct market_moderation_profile_result_v1 profile;
-    struct market_moderation_guide_result_v1 guide;
-    int resolved = -1;
+    return service && service->resolve_profile && service->decide &&
+           service->render_profile && service->render_guide;
+}
+
+/* Walks the pinned visibility rows; returns 0 when every row decides as
+ * pinned, otherwise stores the first failing profile/state pair and
+ * returns nonzero. */
+static int market_moderation_kat_visibility_mismatch(
+    const struct market_moderation_view_service_v1 *service,
+    int *failed_profile, int *failed_state)
+{
     static const bool visible[MARKET_MODERATION_PROFILE_COUNT]
                              [MARKET_REVIEW_STATE_COUNT] = {
         {false, true, false},
         {true, true, true},
     };
-    if (!service || !service->resolve_profile || !service->decide ||
-        !service->render_profile || !service->render_guide) {
-        if (why && why_sz) (void)snprintf(
-            why, why_sz, "frozen moderation service shape vector failed");
-        return false;
-    }
+    struct market_moderation_decision_result_v1 decision;
     for (int p = 0; p < MARKET_MODERATION_PROFILE_COUNT; p++) {
         for (int s = 0; s < MARKET_REVIEW_STATE_COUNT; s++) {
             if (!service->decide(p, s, &decision) || !decision.valid ||
                 decision.visible != visible[p][s] ||
                 !decision.local_view_only || !decision.wire_unchanged) {
-                if (why && why_sz) (void)snprintf(
-                    why, why_sz,
-                    "frozen moderation visibility vector %d/%d failed", p,
-                    s);
-                return false;
+                *failed_profile = p;
+                *failed_state = s;
+                return 1;
             }
         }
     }
+    return 0;
+}
+
+/* Returns 0 when profile 99 decides invalid, local-view-only and
+ * wire-unchanged, and every pinned profile name resolves to its pinned
+ * id. */
+static int market_moderation_kat_resolve_vector(
+    const struct market_moderation_view_service_v1 *service)
+{
+    struct market_moderation_decision_result_v1 decision;
+    int resolved = -1;
     if (!service->decide(99, MARKET_REVIEW_REVIEWED_OK, &decision) ||
         decision.valid || !decision.local_view_only ||
-        !decision.wire_unchanged ||
-        !service->resolve_profile("default", MARKET_MODERATION_PROFILE_OPEN,
+        !decision.wire_unchanged) {
+        return 1;
+    }
+    if (!service->resolve_profile("default", MARKET_MODERATION_PROFILE_OPEN,
                                   &resolved) ||
-        resolved != MARKET_MODERATION_PROFILE_OPEN ||
-        !service->resolve_profile("general", MARKET_MODERATION_PROFILE_OPEN,
+        resolved != MARKET_MODERATION_PROFILE_OPEN) {
+        return 1;
+    }
+    if (!service->resolve_profile("general", MARKET_MODERATION_PROFILE_OPEN,
                                   &resolved) ||
-        resolved != MARKET_MODERATION_PROFILE_DEFAULT ||
-        !service->resolve_profile("open", MARKET_MODERATION_PROFILE_DEFAULT,
+        resolved != MARKET_MODERATION_PROFILE_DEFAULT) {
+        return 1;
+    }
+    if (!service->resolve_profile("open", MARKET_MODERATION_PROFILE_DEFAULT,
                                   &resolved) ||
-        resolved != MARKET_MODERATION_PROFILE_OPEN ||
-        service->resolve_profile("unknown", MARKET_MODERATION_PROFILE_DEFAULT,
-                                 &resolved) ||
-        !service->render_profile(MARKET_MODERATION_PROFILE_DEFAULT, &profile) ||
+        resolved != MARKET_MODERATION_PROFILE_OPEN) {
+        return 1;
+    }
+    if (service->resolve_profile("unknown", MARKET_MODERATION_PROFILE_DEFAULT,
+                                 &resolved)) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Returns 0 when both pinned profiles render with their pinned fields. */
+static int market_moderation_kat_profile_render_vector(
+    const struct market_moderation_view_service_v1 *service)
+{
+    struct market_moderation_profile_result_v1 profile;
+    if (!service->render_profile(MARKET_MODERATION_PROFILE_DEFAULT,
+                                 &profile) ||
         !profile.valid || !profile.immutable ||
         strcmp(profile.profile,
-               MARKET_MODERATION_PROFILE_GENERAL_AUDIENCE_V1) != 0 ||
-        !service->render_profile(MARKET_MODERATION_PROFILE_OPEN, &profile) ||
-        !profile.valid || strcmp(profile.hides, "nothing") != 0 ||
-        !service->render_guide(&guide) || !guide.policy_authority_static ||
+               MARKET_MODERATION_PROFILE_GENERAL_AUDIENCE_V1) != 0) {
+        return 1;
+    }
+    if (!service->render_profile(MARKET_MODERATION_PROFILE_OPEN, &profile) ||
+        !profile.valid || strcmp(profile.hides, "nothing") != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/* Returns 0 when the guide renders with every static-authority flag and
+ * wire_unchanged set. */
+static int market_moderation_kat_guide_vector(
+    const struct market_moderation_view_service_v1 *service)
+{
+    struct market_moderation_guide_result_v1 guide;
+    if (!service->render_guide(&guide) || !guide.policy_authority_static ||
         !guide.persistence_static || !guide.network_authority_static ||
         !guide.wire_unchanged) {
+        return 1;
+    }
+    return 0;
+}
+
+static bool market_moderation_view_frozen_kat(const void *opaque, char *why,
+                                               size_t why_sz)
+{
+    const struct market_moderation_view_service_v1 *service = opaque;
+    if (!market_moderation_kat_service_shape_ok(service)) {
+        if (why && why_sz) (void)snprintf(
+            why, why_sz, "frozen moderation service shape vector failed");
+        return false;
+    }
+    int failed_profile = 0;
+    int failed_state = 0;
+    if (market_moderation_kat_visibility_mismatch(
+            service, &failed_profile, &failed_state) != 0) {
+        if (why && why_sz) (void)snprintf(
+            why, why_sz,
+            "frozen moderation visibility vector %d/%d failed",
+            failed_profile, failed_state);
+        return false;
+    }
+    if (market_moderation_kat_resolve_vector(service) != 0 ||
+        market_moderation_kat_profile_render_vector(service) != 0 ||
+        market_moderation_kat_guide_vector(service) != 0) {
         if (why && why_sz) (void)snprintf(
             why, why_sz, "frozen moderation resolve/profile/guide vector failed");
         return false;
@@ -210,6 +281,31 @@ static void mmn_copy_bool(struct json_value *data,
     const struct json_value *v = json_get(body, key);
     if (v && v->type == JSON_BOOL)
         (void)json_push_kv_bool(data, key, json_get_bool(v));
+}
+
+/* True when mode is plan or commit, and commit also carries a non-empty
+ * plan_token. */
+static bool mmn_plan_commit_mode_valid(const char *mode,
+                                       const char *plan_token)
+{
+    if (!mode)
+        return false;
+    if (strcmp(mode, "plan") == 0)
+        return true;
+    if (strcmp(mode, "commit") == 0)
+        return plan_token && plan_token[0];
+    return false;
+}
+
+/* Sets the reply's mutation flag when the body reports a committed
+ * change. */
+static void mmn_mark_mutated_if_committed(struct zcl_command_reply *reply,
+                                          const struct json_value *body)
+{
+    const struct json_value *committed = json_get(body, "committed");
+    if (committed && committed->type == JSON_BOOL &&
+        json_get_bool(committed))
+        reply->error.mutated = true;
 }
 
 void zcl_native_handle_market_moderation_guide(
@@ -353,9 +449,8 @@ void zcl_native_handle_market_moderation_profile_set(
     const char *profile = mmn_str(request->input, "profile");
     const char *mode = mmn_str(request->input, "mode");
     const char *plan_token = mmn_str(request->input, "plan_token");
-    if (!profile || !profile[0] || !mode ||
-        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
-        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
+    if (!profile || !profile[0] ||
+        !mmn_plan_commit_mode_valid(mode, plan_token)) {
         mmn_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                  ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT", "normalize",
                  "profile plus mode (plan|commit) are required; commit also "
@@ -380,10 +475,7 @@ void zcl_native_handle_market_moderation_profile_set(
     mmn_copy_str(&reply->data, &body, "relay_rule");
     mmn_copy_bool(&reply->data, &body, "relay_rule_unchanged");
     mmn_copy_str(&reply->data, &body, "policy_file");
-    const struct json_value *committed = json_get(&body, "committed");
-    if (committed && committed->type == JSON_BOOL &&
-        json_get_bool(committed))
-        reply->error.mutated = true;
+    mmn_mark_mutated_if_committed(reply, &body);
     json_free(&body);
 }
 
@@ -398,9 +490,8 @@ void zcl_native_handle_market_moderation_relay_set(
     const char *relay_rule = mmn_str(request->input, "relay_rule");
     const char *mode = mmn_str(request->input, "mode");
     const char *plan_token = mmn_str(request->input, "plan_token");
-    if (!relay_rule || !relay_rule[0] || !mode ||
-        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
-        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
+    if (!relay_rule || !relay_rule[0] ||
+        !mmn_plan_commit_mode_valid(mode, plan_token)) {
         mmn_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                  ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT", "normalize",
                  "relay_rule plus mode (plan|commit) are required; commit "
@@ -423,10 +514,7 @@ void zcl_native_handle_market_moderation_relay_set(
     mmn_copy_str(&reply->data, &body, "profile");
     mmn_copy_bool(&reply->data, &body, "profile_unchanged");
     mmn_copy_str(&reply->data, &body, "policy_file");
-    const struct json_value *committed = json_get(&body, "committed");
-    if (committed && committed->type == JSON_BOOL &&
-        json_get_bool(committed))
-        reply->error.mutated = true;
+    mmn_mark_mutated_if_committed(reply, &body);
     json_free(&body);
 }
 
@@ -440,9 +528,7 @@ void zcl_native_handle_market_moderation_review_set(
     const char *mode = mmn_str(request->input, "mode");
     const char *plan_token = mmn_str(request->input, "plan_token");
     if (!offer_id || !offer_id[0] || !review_state || !review_state[0] ||
-        !mode ||
-        (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0) ||
-        (strcmp(mode, "commit") == 0 && (!plan_token || !plan_token[0]))) {
+        !mmn_plan_commit_mode_valid(mode, plan_token)) {
         mmn_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                  ZCL_COMMAND_EXIT_INVALID, "MISSING_INPUT", "normalize",
                  "offer_id, review_state, and mode (plan|commit) are "
@@ -469,10 +555,7 @@ void zcl_native_handle_market_moderation_review_set(
     mmn_copy_bool(&reply->data, &body, "gossiped");
     /* Only the commit leg mutates; a plan reports what WOULD change and
      * must not claim otherwise through the mutation flag. */
-    const struct json_value *committed = json_get(&body, "committed");
-    if (committed && committed->type == JSON_BOOL &&
-        json_get_bool(committed))
-        reply->error.mutated = true;
+    mmn_mark_mutated_if_committed(reply, &body);
     json_free(&body);
 }
 
