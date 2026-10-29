@@ -269,10 +269,9 @@ static int sdn_observe_pet_thread(int fd, int64_t deadline_us,
     return watchdog_count;
 }
 
-static int test_sd_notify_platform_arm(void)
+static int sdn_check_onion_ready_gate(void)
 {
     int failures = 0;
-
     /* ── onion requested but not running must block READY=1 ─────── */
     {
         tor_integration_stop();
@@ -285,7 +284,12 @@ static int test_sd_notify_platform_arm(void)
         SDN_CHECK("READY unblocked after stop clears the request latch",
             !boot_sd_watchdog_onion_blocks_ready());
     }
+    return failures;
+}
 
+static int sdn_check_silent_noop(void)
+{
+    int failures = 0;
     /* ── silent no-op without NOTIFY_SOCKET ──────────────────────── */
     {
         sd_notify_reset_for_testing();
@@ -309,7 +313,12 @@ static int test_sd_notify_platform_arm(void)
 
         sd_notify_reset_for_testing();
     }
+    return failures;
+}
 
+static int sdn_check_path_mode_socket(void)
+{
+    int failures = 0;
     /* ── path-mode NOTIFY_SOCKET: READY=1 + WATCHDOG=1 arrive ────── */
     {
         char path[108];
@@ -368,7 +377,12 @@ static int test_sd_notify_platform_arm(void)
             sd_notify_reset_for_testing();
         }
     }
+    return failures;
+}
 
+static int sdn_check_abstract_namespace(void)
+{
+    int failures = 0;
     /* ── abstract-namespace NOTIFY_SOCKET (leading '@') ──────────── */
 #if defined(__linux__)
     {
@@ -397,7 +411,12 @@ static int test_sd_notify_platform_arm(void)
 #else
     SDN_CHECK("abstract namespace is unavailable off Linux", true);
 #endif
+    return failures;
+}
 
+static int sdn_check_health_gate(void)
+{
+    int failures = 0;
     /* ── health-check gate suppresses WATCHDOG=1 when unhealthy ──── */
     {
         char path[108];
@@ -440,7 +459,12 @@ static int test_sd_notify_platform_arm(void)
             sd_notify_reset_for_testing();
         }
     }
+    return failures;
+}
 
+static int sdn_check_pet_decision_table(void)
+{
+    int failures = 0;
     /* ── pet decision table (boot_sd_watchdog_pet_decide via seam) ──
      * Collection freshness is intentionally absent. The runtime gate already
      * combines the sweep, tick runner, connman, and bounded progress escape. */
@@ -466,7 +490,12 @@ static int test_sd_notify_platform_arm(void)
         SDN_CHECK("runtime pillars: stale connman stops the ping",
             !boot_sd_watchdog_test_runtime_pillars(true, true, false));
     }
+    return failures;
+}
 
+static int sdn_check_pillar_liveness(void)
+{
+    int failures = 0;
     /* ── a pillar measures the SUBJECT, not the machine ─────────────────
      *
      * Each runtime pillar used to be one question — "did this loop get back
@@ -554,6 +583,14 @@ static int test_sd_notify_platform_arm(void)
         SDN_CHECK("gate: slow and wedged must not reach the same verdict",
             slow_runtime != wedged_runtime);
 
+    }
+    return failures;
+}
+
+static int sdn_check_blocked_wait_pillars(void)
+{
+    int failures = 0;
+    {
         /* A parked kernel thread has no CPU/I/O delta to offer. The lease is
          * the explicit evidence that this particular wait is intentional and
          * bounded. The mirror parks on the same pipe without a lease and must
@@ -605,7 +642,14 @@ static int test_sd_notify_platform_arm(void)
             close(pipe_fd[0]);
             close(pipe_fd[1]);
         }
+    }
+    return failures;
+}
 
+static int sdn_check_lease_policy(void)
+{
+    int failures = 0;
+    {
         struct thread_bounded_wait policy = THREAD_BOUNDED_WAIT_INIT;
         int64_t policy_now = platform_time_monotonic_us();
         bool max_admitted = thread_bounded_wait_begin_at(
@@ -619,7 +663,12 @@ static int test_sd_notify_platform_arm(void)
                 &policy, policy_now, THREAD_BOUNDED_WAIT_MAX_US + 1) &&
             !thread_bounded_wait_active_at(&policy, policy_now));
     }
+    return failures;
+}
 
+static int sdn_check_work_probe(void)
+{
+    int failures = 0;
     /* ── the work probe itself ──────────────────────────────────────────
      * The probe is the only thing standing between "slow" and "wedged", so
      * its refusal to guess is part of the contract: an unreadable subject is
@@ -677,7 +726,12 @@ static int test_sd_notify_platform_arm(void)
             thread_work_probe_advanced(&before, &after));
 #endif
     }
+    return failures;
+}
 
+static int sdn_check_backstop_weaker_policy(void)
+{
+    int failures = 0;
     /* ── the backstop must be WEAKER than the policy it backs ──
      *
      * The pet decides with the disjunction above and then calls
@@ -743,7 +797,12 @@ static int test_sd_notify_platform_arm(void)
             sd_notify_reset_for_testing();
         }
     }
+    return failures;
+}
 
+static int sdn_check_earned_readiness(void)
+{
+    int failures = 0;
     /* ── earned readiness: every leg confirmed on its own evidence ──
      *
      * The defect under regression: READY=1 rested on onion descriptor
@@ -809,7 +868,12 @@ static int test_sd_notify_platform_arm(void)
         SDN_CHECK("ready: NULL legs describe as unavailable",
             strstr(desc, "unavailable") != NULL);
     }
+    return failures;
+}
 
+static int sdn_check_pet_thread(void)
+{
+    int failures = 0;
     /* ── real dedicated pet thread, health ring deliberately idle ── */
     {
         char path[108];
@@ -863,7 +927,12 @@ static int test_sd_notify_platform_arm(void)
             sd_notify_reset_for_testing();
         }
     }
+    return failures;
+}
 
+static int sdn_check_ready_hold_high_water(void)
+{
+    int failures = 0;
     /* ── The READY hold buys time only when a leg newly confirms ──
      * Holding READY extends TimeoutStartSec. Extending on every pet
      * period made the deadline unreachable, so a leg that could never
@@ -906,7 +975,12 @@ static int test_sd_notify_platform_arm(void)
         SDN_CHECK("legs: a flapping leg never exceeds its previous high",
                   dipped < high && back == high);
     }
+    return failures;
+}
 
+static int sdn_check_flood_receiver(void)
+{
+    int failures = 0;
     /* ── a full, never-drained receiver must not park the caller ──
      * Reproduces the live fleet incident: systemd's watchdog killed the
      * node 30 times in 3 days while every application signal stayed
@@ -962,6 +1036,28 @@ static int test_sd_notify_platform_arm(void)
             sd_notify_reset_for_testing();
         }
     }
+    return failures;
+}
+
+static int test_sd_notify_platform_arm(void)
+{
+    int failures = 0;
+
+    failures += sdn_check_onion_ready_gate();
+    failures += sdn_check_silent_noop();
+    failures += sdn_check_path_mode_socket();
+    failures += sdn_check_abstract_namespace();
+    failures += sdn_check_health_gate();
+    failures += sdn_check_pet_decision_table();
+    failures += sdn_check_pillar_liveness();
+    failures += sdn_check_blocked_wait_pillars();
+    failures += sdn_check_lease_policy();
+    failures += sdn_check_work_probe();
+    failures += sdn_check_backstop_weaker_policy();
+    failures += sdn_check_earned_readiness();
+    failures += sdn_check_pet_thread();
+    failures += sdn_check_ready_hold_high_water();
+    failures += sdn_check_flood_receiver();
 
     return failures;
 }
