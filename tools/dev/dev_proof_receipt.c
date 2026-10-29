@@ -197,6 +197,31 @@ bool zcl_dev_proof_receipt_serialize(
     return (size_t)(p - out) == ZCL_DEV_PROOF_WIRE_BYTES;
 }
 
+/* Reserved bytes must be zero and both commit lengths SHA-1 or SHA-256. */
+static bool parse_reserved_and_lens(
+    const uint8_t **p, const struct zcl_dev_acceptance_receipt_v1 *out)
+{
+    if (*(*p)++ != 0 || *(*p)++ != 0 ||
+        (out->local_commit_len != 20 && out->local_commit_len != 32) ||
+        (out->remote_base_len != 20 && out->remote_base_len != 32))
+        return false;
+    return true;
+}
+
+static void parse_dimensions(const uint8_t **p,
+                             struct zcl_dev_acceptance_receipt_v1 *out)
+{
+    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
+        struct zcl_dev_proof_dimension *dim = &out->dimensions[i];
+        get_bytes(p, dim->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES);
+        dim->selected = get_u32(p);
+        dim->ran = get_u32(p);
+        dim->reused = get_u32(p);
+        dim->failed = get_u32(p);
+        dim->skipped = get_u32(p);
+    }
+}
+
 bool zcl_dev_proof_receipt_parse(
     const uint8_t *wire, size_t wire_len,
     struct zcl_dev_acceptance_receipt_v1 *out)
@@ -217,9 +242,7 @@ bool zcl_dev_proof_receipt_parse(
     memset(out, 0, sizeof(*out));
     out->local_commit_len = *p++;
     out->remote_base_len = *p++;
-    if (*p++ != 0 || *p++ != 0 ||
-        (out->local_commit_len != 20 && out->local_commit_len != 32) ||
-        (out->remote_base_len != 20 && out->remote_base_len != 32))
+    if (!parse_reserved_and_lens(&p, out))
         return false;
     get_bytes(&p, out->local_commit, ZCL_DEV_PROOF_OID_MAX);
     get_bytes(&p, out->remote_base, ZCL_DEV_PROOF_OID_MAX);
@@ -231,15 +254,7 @@ bool zcl_dev_proof_receipt_parse(
     };
     for (size_t i = 0; i < PROOF_FIXED_ROOTS; i++)
         get_bytes(&p, roots[i], ZCL_DEV_PROOF_ROOT_BYTES);
-    for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
-        struct zcl_dev_proof_dimension *dim = &out->dimensions[i];
-        get_bytes(&p, dim->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES);
-        dim->selected = get_u32(&p);
-        dim->ran = get_u32(&p);
-        dim->reused = get_u32(&p);
-        dim->failed = get_u32(&p);
-        dim->skipped = get_u32(&p);
-    }
+    parse_dimensions(&p, out);
     out->created_unix = get_u64(&p);
     out->elapsed_ms = get_u64(&p);
     out->policy_version = get_u32(&p);
@@ -514,6 +529,16 @@ static bool verdict_group_text(const char *group, size_t *len_out)
     return true;
 }
 
+/* Group characters are in the allowed set and the tail is zero padded. */
+static bool verdict_group_bytes_valid(const struct zcl_dev_verdict_leaf_v1 *leaf)
+{
+    for (size_t i = 0; i < leaf->group_len; i++)
+        if (!verdict_group_char((unsigned char)leaf->group[i])) return false;
+    for (size_t i = leaf->group_len; i < sizeof(leaf->group); i++)
+        if (leaf->group[i] != 0) return false;
+    return true;
+}
+
 static bool verdict_payload_valid(const struct zcl_dev_verdict_leaf_v1 *leaf)
 {
     if (!leaf ||
@@ -524,10 +549,8 @@ static bool verdict_payload_valid(const struct zcl_dev_verdict_leaf_v1 *leaf)
         !verdict_nonzero(leaf->key, sizeof(leaf->key)) ||
         leaf->observed_unix == 0 || leaf->log_seq == 0)
         return false;
-    for (size_t i = 0; i < leaf->group_len; i++)
-        if (!verdict_group_char((unsigned char)leaf->group[i])) return false;
-    for (size_t i = leaf->group_len; i < sizeof(leaf->group); i++)
-        if (leaf->group[i] != 0) return false;
+    if (!verdict_group_bytes_valid(leaf))
+        return false;
     bool have_prev = verdict_nonzero(leaf->prev_log_head,
                                      sizeof(leaf->prev_log_head));
     return (leaf->log_seq == 1 && !have_prev) ||
@@ -643,6 +666,28 @@ bool zcl_dev_verdict_leaf_parse(
     return true;
 }
 
+static bool verdict_has_signature(const struct zcl_dev_verdict_leaf_v1 *leaf)
+{
+    return leaf->has_signature &&
+           verdict_nonzero(leaf->producer_pubkey,
+                           sizeof(leaf->producer_pubkey)) &&
+           verdict_nonzero(leaf->signature, sizeof(leaf->signature));
+}
+
+/* Key and group must match what the caller expects. */
+static const char *verdict_binding_why(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    const uint8_t expected_key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES],
+    const char *expected_group, size_t expected_len)
+{
+    if (memcmp(leaf->key, expected_key, sizeof(leaf->key)) != 0)
+        return ZCL_DEV_VERDICT_WHY_KEY;
+    if (leaf->group_len != expected_len ||
+        memcmp(leaf->group, expected_group, expected_len) != 0)
+        return ZCL_DEV_VERDICT_WHY_GROUP;
+    return NULL;
+}
+
 bool zcl_dev_verdict_leaf_verify(
     const struct zcl_dev_verdict_leaf_v1 *leaf,
     const uint8_t expected_key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES],
@@ -656,15 +701,11 @@ bool zcl_dev_verdict_leaf_verify(
         return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
     if (!verdict_payload_valid(leaf))
         return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
-    if (memcmp(leaf->key, expected_key, sizeof(leaf->key)) != 0)
-        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_KEY);
-    if (leaf->group_len != expected_len ||
-        memcmp(leaf->group, expected_group, expected_len) != 0)
-        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_GROUP);
-    if (!leaf->has_signature ||
-        !verdict_nonzero(leaf->producer_pubkey,
-                         sizeof(leaf->producer_pubkey)) ||
-        !verdict_nonzero(leaf->signature, sizeof(leaf->signature)))
+    const char *binding_why = verdict_binding_why(
+        leaf, expected_key, expected_group, expected_len);
+    if (binding_why)
+        return verdict_fail(why, why_len, binding_why);
+    if (!verdict_has_signature(leaf))
         return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_UNSIGNED);
     if (!verdict_message(leaf, message))
         return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
