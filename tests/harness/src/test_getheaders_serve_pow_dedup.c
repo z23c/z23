@@ -512,6 +512,625 @@ static bool pd_build_getheaders(struct byte_stream *buf,
 
 static struct net_manager g_pd_nm;
 
+/* Shared state of scenario D: one message processor, the repeated request,
+ * the flooding peer and the window allowance measured against it. */
+struct pd_window_ctx {
+    struct msg_processor *mp;
+    struct byte_stream *req_d;
+    struct p2p_node *flooder;
+    node_id_t flood_id;
+    int allowance;
+    int burst;
+};
+
+/* The chain shared by scenarios B, C and D. */
+struct pd_chain4 {
+    struct block_header h[4];
+    struct uint256 hash[4];
+    struct uint256 null_hash;
+    struct block_index *bi[4];
+};
+
+/* Forge B: same solution size, grind until CheckProofOfWork passes
+ * (regtest powLimit is 0x0f0f..., a few tries). */
+static int pd_a_forge_header(const struct block_header *hb,
+                             const struct chain_params *cp,
+                             struct block_header *hy, struct uint256 *hash_y,
+                             bool *y_ready_out)
+{
+    int failures = 0;
+    *hy = *hb;
+    bool y_ready = false;
+    for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
+        for (size_t i = 0; i < hy->nSolutionSize; i++)
+            hy->nSolution[i] = (uint8_t)(hb->nSolution[i] ^ 0xa5 ^
+                                         (uint8_t)attempt);
+        block_header_get_hash(hy, hash_y);
+        if (!CheckProofOfWork(*hash_y, hy->nBits, &cp->consensus))
+            continue;
+        if (check_equihash_solution(hy, cp))
+            continue;      /* astronomically unlikely; skip it */
+        y_ready = true;
+    }
+    PD_CHECK("A: forged header found (PoW passes, Equihash does not)",
+             y_ready);
+    PD_CHECK("A: forged solution really fails Equihash",
+             y_ready && !check_equihash_solution(hy, cp));
+    *y_ready_out = y_ready;
+    return failures;
+}
+
+/* Store 2 — flat block file. */
+static int pd_a_store_flat_file(const char *netdir, struct block_index *bi_y,
+                                const struct block_header *hy,
+                                const struct uint256 *hash_y,
+                                const struct chain_params *cp)
+{
+    int failures = 0;
+    struct disk_block_pos pos;
+    bool wrote = pd_write_flat_block(netdir, hy, cp, &pos);
+    PD_CHECK("A: store 2/3 flat block file written", wrote);
+    if (wrote) {
+        bi_y->nStatus |= BLOCK_HAVE_DATA;
+        block_index_disk_pos_store(bi_y, pos.nFile, pos.nPos);
+        struct block probe;
+        block_init(&probe);
+        bool readable = read_block_from_disk_index(&probe, bi_y, netdir);
+        struct uint256 probe_hash;
+        uint256_set_null(&probe_hash);
+        if (readable)
+            block_header_get_hash(&probe.header, &probe_hash);
+        PD_CHECK("A: store 2/3 really hash-binds (fallback would "
+                 "fire)",
+                 readable && uint256_eq(&probe_hash, hash_y));
+        block_free(&probe);
+    }
+    return failures;
+}
+
+/* Store 3 — node.db `blocks` row. */
+static int pd_a_store_db_row(struct node_db *ndb, const struct block_header *hy,
+                             const struct uint256 *hash_y)
+{
+    int failures = 0;
+    bool row = pd_db_put_header(ndb, 2, hy, hash_y);
+    PD_CHECK("A: store 3/3 node.db row stored", row);
+    if (row) {
+        struct block_header probe;
+        block_header_init(&probe);
+        bool loaded = node_db_runtime_load_header_by_hash_height(
+            2, hash_y->data, &probe);
+        struct uint256 probe_hash;
+        uint256_set_null(&probe_hash);
+        if (loaded)
+            block_header_get_hash(&probe, &probe_hash);
+        PD_CHECK("A: store 3/3 really hash-binds (fallback would "
+                 "fire)",
+                 loaded && uint256_eq(&probe_hash, hash_y));
+    }
+    return failures;
+}
+
+/* Spend one three-store lookup and check its verification bill and refusal. */
+static int pd_a_lookup_bill(struct msg_processor *mp,
+                            struct block_index *bi_y)
+{
+    int failures = 0;
+    unsigned int status_before = bi_y->nStatus;
+    uint64_t pow_before = getheaders_serve_pow_checks();
+    struct block_header out;
+    block_header_init(&out);
+    bool ok = getheaders_index_header_servable(mp, bi_y, &out);
+    uint64_t spent = getheaders_serve_pow_checks() - pow_before;
+
+    printf("getheaders_serve_pow_dedup: A: three-store lookup spent "
+           "%llu Equihash verification(s) (pre-fix: 3)\n",
+           (unsigned long long)spent);
+    PD_CHECK("A: a three-store lookup spends at most ONE Equihash "
+             "verification", spent <= 1);
+    PD_CHECK("A: it spends at least one — verifying once must not "
+             "become verifying zero", spent >= 1);
+
+    /* The security floor: still refused, not a validity verdict. */
+    PD_CHECK("A: the forged header is still REFUSED", !ok);
+    PD_CHECK("A: the refusal is still not a validity verdict",
+             bi_y->nStatus == status_before);
+    return failures;
+}
+
+/* A: the forged entry reachable from all three stores. */
+static int pd_a_three_store_lookup(struct msg_processor *mp,
+                                   struct main_state *ms,
+                                   struct node_db *ndb, const char *netdir,
+                                   struct block_index *bi_y,
+                                   const struct block_header *hy,
+                                   const struct uint256 *hash_y,
+                                   const struct chain_params *cp)
+{
+    int failures = 0;
+    ms->pindex_best_header = bi_y;
+
+    /* Store 1 — in-memory index. */
+    PD_CHECK("A: store 1/3 in-memory solution pinned",
+             pd_pin_solution(bi_y, hy, "pd_forged_sol"));
+
+    failures += pd_a_store_flat_file(netdir, bi_y, hy, hash_y, cp);
+    failures += pd_a_store_db_row(ndb, hy, hash_y);
+    failures += pd_a_lookup_bill(mp, bi_y);
+    return failures;
+}
+
+/* ── A. one lookup, three stores, one verification ────────────────
+ * Entry Y hash-binds, is BLOCK_VALID_TREE and passes CheckProofOfWork, but
+ * its Equihash solution is garbage (the shape a hostile block_index.bin /
+ * node.db bundle can carry), and it is reachable from the index, a flat
+ * block file and a node.db row. */
+static int pd_scenario_a(const struct chain_params *cp, const char *dir,
+                         const char *netdir, struct node_db *ndb)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct block_header hg, ha, hb;
+    struct uint256 hash_g, hash_a, hash_b, null_hash;
+    uint256_set_null(&null_hash);
+    PD_CHECK("A: mine g", pd_mine_header(&hg, 0, &null_hash, cp, 0xA0));
+    block_header_get_hash(&hg, &hash_g);
+    PD_CHECK("A: mine A", pd_mine_header(&ha, 1, &hash_g, cp, 0xA1));
+    block_header_get_hash(&ha, &hash_a);
+    PD_CHECK("A: mine B", pd_mine_header(&hb, 2, &hash_a, cp, 0xA2));
+    block_header_get_hash(&hb, &hash_b);
+
+    struct block_index *bi_g = pd_seed_index(&ms, &hg, &hash_g, 0, NULL);
+    struct block_index *bi_a = pd_seed_index(&ms, &ha, &hash_a, 1, bi_g);
+    PD_CHECK("A: index chain seeded", bi_g && bi_a);
+
+    struct block_header hy;
+    struct uint256 hash_y;
+    bool y_ready = false;
+    failures += pd_a_forge_header(&hb, cp, &hy, &hash_y, &y_ready);
+
+    struct block_index *bi_y = NULL;
+    if (y_ready && bi_a) {
+        bi_y = pd_seed_index(&ms, &hy, &hash_y, 2, bi_a);
+        PD_CHECK("A: forged entry inserted", bi_y != NULL);
+    }
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_pd_nm, NULL);
+
+    if (bi_y)
+        failures += pd_a_three_store_lookup(&mp, &ms, ndb, netdir, bi_y,
+                                            &hy, &hash_y, cp);
+
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Mine the 4-header chain and pin every entry in the index. */
+static int pd_bc_build_chain(struct main_state *ms, struct pd_chain4 *c,
+                             const struct chain_params *cp, bool *seeded_out)
+{
+    int failures = 0;
+    uint256_set_null(&c->null_hash);
+    bool mined = true;
+    for (int i = 0; i < 4; i++) {
+        mined = mined && pd_mine_header(&c->h[i], i,
+                                        i == 0 ? &c->null_hash : &c->hash[i - 1],
+                                        cp, 0xB0);
+        if (!mined)
+            break;
+        block_header_get_hash(&c->h[i], &c->hash[i]);
+    }
+    PD_CHECK("B: mined a 4-header chain", mined);
+
+    bool seeded = mined;
+    for (int i = 0; i < 4 && seeded; i++) {
+        c->bi[i] = pd_seed_index(ms, &c->h[i], &c->hash[i], i,
+                                 i == 0 ? NULL : c->bi[i - 1]);
+        seeded = c->bi[i] && pd_pin_solution(c->bi[i], &c->h[i],
+                                             "pd_chain_sol");
+    }
+    PD_CHECK("B: index chain seeded with real solutions", seeded);
+    *seeded_out = seeded;
+    return failures;
+}
+
+/* B1 — locator anchored at the active tip: serve 1, 2, 3. */
+static int pd_b1_locator_at_tip(struct msg_processor *mp,
+                                struct p2p_node *node,
+                                const struct pd_chain4 *c)
+{
+    int failures = 0;
+    struct byte_stream buf, req;
+    bool built = pd_build_getheaders(&buf, &c->hash[0], 1, &c->null_hash);
+    PD_CHECK("B1: getheaders payload built", built);
+    stream_init_from_data(&req, buf.data, buf.size);
+
+    struct msg_headers_stats st_before, st_after;
+    msg_headers_get_stats(&st_before);
+    uint64_t pow_before = getheaders_serve_pow_checks();
+    bool served = built && process_getheaders(mp, node, &req);
+    uint64_t pow_spent = getheaders_serve_pow_checks() - pow_before;
+    msg_headers_get_stats(&st_after);
+    int64_t wire_count = pd_queued_headers_count(node);
+    uint64_t served_delta =
+        st_after.headers_served_total - st_before.headers_served_total;
+    uint64_t req_delta = st_after.getheaders_served_requests -
+        st_before.getheaders_served_requests;
+
+    printf("getheaders_serve_pow_dedup: B1: served %lld header(s) on "
+           "the wire for %llu Equihash verification(s) (pre-fix: 5 "
+           "for 3)\n", (long long)wire_count,
+           (unsigned long long)pow_spent);
+
+    PD_CHECK("B1: the request was answered", served);
+    PD_CHECK("B1: the reply carried the 3 header-only entries",
+             wire_count == 3);
+    PD_CHECK("B1: exactly one Equihash verification per header "
+             "SERVED", wire_count > 0 &&
+             pow_spent == (uint64_t)wire_count);
+    PD_CHECK("B1: headers_served_total counted the served headers",
+             served_delta == (uint64_t)wire_count);
+    PD_CHECK("B1: getheaders_served_requests counted the request",
+             req_delta == 1);
+    PD_CHECK("C: the two counters are not the same number "
+             "(3 headers, 1 request)", served_delta != req_delta);
+    stream_free(&req);
+    stream_free(&buf);
+    pd_drain_send_queue(node);
+    return failures;
+}
+
+/* B2/C: hash_stop-only form anchored at the best header (successor NULL)
+ * serves nothing: requests move, headers do not, proving neither
+ * counter copies the other or sticks at zero. */
+static int pd_b2_empty_reply(struct msg_processor *mp, struct p2p_node *node,
+                             const struct pd_chain4 *c)
+{
+    int failures = 0;
+    struct msg_headers_stats st_before, st_after;
+    msg_headers_get_stats(&st_before);
+    uint64_t pow_before = getheaders_serve_pow_checks();
+    struct byte_stream buf2, req2;
+    bool built2 = pd_build_getheaders(&buf2, NULL, 0, &c->hash[3]);
+    PD_CHECK("B2: empty-locator getheaders payload built", built2);
+    stream_init_from_data(&req2, buf2.data, buf2.size);
+    bool served2 = built2 && process_getheaders(mp, node, &req2);
+    uint64_t pow_spent = getheaders_serve_pow_checks() - pow_before;
+    msg_headers_get_stats(&st_after);
+    int64_t wire2 = pd_queued_headers_count(node);
+
+    PD_CHECK("B2: the request was answered", served2);
+    PD_CHECK("B2: with a 0-header reply", wire2 == 0);
+    PD_CHECK("B2: and cost no Equihash work at all", pow_spent == 0);
+    PD_CHECK("C: a 0-header reply still counts as a request",
+             st_after.getheaders_served_requests -
+             st_before.getheaders_served_requests == 1);
+    PD_CHECK("C: and adds nothing to headers_served_total",
+             st_after.headers_served_total ==
+             st_before.headers_served_total);
+    PD_CHECK("C: both counters are non-zero overall — not stubs",
+             st_after.headers_served_total > 0 &&
+             st_after.getheaders_served_requests > 0);
+    stream_free(&req2);
+    stream_free(&buf2);
+    pd_drain_send_queue(node);
+    return failures;
+}
+
+/* ── D. the per-peer serve window ─────────────────────────────
+ * Each reply costs real Equihash work, so the serve path bounds how
+ * often one peer may ask (GETHEADERS_SERVE_* in net/msg_internal.h): a
+ * fixed header budget per window (GETHEADERS_SERVE_HEADERS_PER_WINDOW)
+ * translated into a request allowance by the peer's reply page size
+ * (getheaders_serve_request_allowance() / getheaders_serve_page()).
+ *
+ *   D0 allowance helpers: legacy (services=0) gets 375, a ZCL23 peer
+ *      30; allowance * page size is invariant across the two;
+ *   D1 an honest burst is fully served;
+ *   D2 the flood: served stops at the allowance, every excess request
+ *      is deferred silently (true return, zero wire bytes, no
+ *      disconnect, its own counter), and the window is per-peer;
+ *   D3 expiry restores service.
+ *
+ * Time is injected through the window field (as in
+ * test_net_handshake_adversarial.c): D3 backdates
+ * node.getheaders_rate_window_start past the window. No sleeps. */
+static int pd_d0_allowance_helpers(void)
+{
+    int failures = 0;
+    PD_CHECK("D0: legacy services get a 375-request allowance",
+             getheaders_serve_request_allowance(0) == 375u);
+    PD_CHECK("D0: a ZCL23 peer gets a 30-request allowance",
+             getheaders_serve_request_allowance(NODE_ZCL23) == 30u);
+    PD_CHECK("D0: both allowances draw down the same header budget",
+             getheaders_serve_request_allowance(0) *
+                     (uint32_t)getheaders_serve_page(0) ==
+             getheaders_serve_request_allowance(NODE_ZCL23) *
+                     (uint32_t)getheaders_serve_page(NODE_ZCL23));
+    return failures;
+}
+
+/* D1: an honest burst is fully served. */
+static int pd_d1_honest_burst(const struct pd_window_ctx *w)
+{
+    int failures = 0;
+    struct msg_headers_stats st_before, st_after;
+    uint64_t defer_before = getheaders_deferred_rate_window();
+    msg_headers_get_stats(&st_before);
+    bool burst_served = true;
+    int64_t burst_wire = 1;
+    for (int i = 0; i < w->burst && burst_served; i++) {
+        w->req_d->read_pos = 0;   /* re-send the identical request */
+        burst_served = process_getheaders(w->mp, w->flooder, w->req_d);
+        burst_wire = pd_queued_headers_count(w->flooder);
+        pd_drain_send_queue(w->flooder);
+    }
+    msg_headers_get_stats(&st_after);
+    PD_CHECK("D1: an honest burst is answered every time",
+             burst_served);
+    PD_CHECK("D1: every burst reply carried its header",
+             burst_wire == 1);
+    PD_CHECK("D1: the burst moved only the served counters",
+             st_after.getheaders_served_requests -
+                 st_before.getheaders_served_requests == (uint64_t)w->burst &&
+             st_after.headers_served_total -
+                 st_before.headers_served_total == (uint64_t)w->burst);
+    PD_CHECK("D1: the burst deferred nothing",
+             getheaders_deferred_rate_window() == defer_before);
+    return failures;
+}
+
+/* D2 witness checks: every admitted request is witnessed once. */
+static int pd_d2_witness_checks(const struct pd_window_ctx *w,
+                                const struct getheaders_receipt_stats *rs_before,
+                                uint64_t pow_before_d)
+{
+    int failures = 0;
+    struct getheaders_receipt_stats rs_after;
+    getheaders_verify_receipt_stats(&rs_after);
+    uint64_t fresh = getheaders_serve_pow_checks() - pow_before_d;
+    PD_CHECK("D2: every admitted request was witnessed once — "
+             "a receipt hit or a fresh proof, never neither, "
+             "never both",
+             rs_after.hits - rs_before->hits + fresh ==
+             (uint64_t)(w->allowance - w->burst));
+    PD_CHECK("D2: the flood's fresh-proof bill is at most ONE — "
+             "the receipt covers every repeat of a served "
+             "header",
+             fresh <= 1u);
+    return failures;
+}
+
+/* D2, the flood: another burst+10 requests in the same window get the
+ * allowance; the rest are deferred. */
+static int pd_d2_flood(const struct pd_window_ctx *w,
+                       uint64_t served_at_window_start)
+{
+    int failures = 0;
+    struct msg_headers_stats st_before, st_after;
+    uint64_t defer_before = getheaders_deferred_rate_window();
+    msg_headers_get_stats(&st_before);
+    uint64_t pow_before_d = getheaders_serve_pow_checks();
+    /* Every admitted request is witnessed once: the receipt layer skips a
+     * proof it already paid (a hit) or the serve pays one fresh pow check, so
+     * the pow counter alone does not count admitted serves. A witness count
+     * below the admitted count (a serve that skipped verification) or more
+     * than one fresh proof (a receipt miss re-proving per request) is a failure. */
+    struct getheaders_receipt_stats rs_before;
+    getheaders_verify_receipt_stats(&rs_before);
+    const int flood_extra = 10;
+    const int flood_total = w->allowance - w->burst + flood_extra;
+    int deferred_seen = 0;
+    int served_seen = 0;
+    bool defer_clean = true;
+    for (int i = 0; i < flood_total; i++) {
+        w->req_d->read_pos = 0;   /* re-send the identical request */
+        bool answered = process_getheaders(w->mp, w->flooder, w->req_d);
+        bool queued = pd_queued_headers_count(w->flooder) >= 0;
+        pd_drain_send_queue(w->flooder);
+        bool punished = w->flooder->disconnect;
+        pd_clear_fixture_disconnect(w->flooder);
+        if (answered && queued) {
+            served_seen++;
+        } else {
+            /* DEFER shape: handled, nothing on the wire, no new disconnect. */
+            deferred_seen++;
+            defer_clean = defer_clean && answered && !queued &&
+                          !punished;
+        }
+    }
+    msg_headers_get_stats(&st_after);
+    PD_CHECK("D2: served stops EXACTLY at the window allowance",
+             st_after.getheaders_served_requests -
+                 st_before.getheaders_served_requests ==
+             (uint64_t)(w->allowance - w->burst));
+    PD_CHECK("D2: the window admitted the allowance and no more",
+             st_after.getheaders_served_requests -
+                 served_at_window_start == (uint64_t)w->allowance);
+    PD_CHECK("D2: every request past the allowance is deferred",
+             deferred_seen == flood_extra &&
+             served_seen == w->allowance - w->burst);
+    PD_CHECK("D2: a deferred request is silent, handled, and "
+             "unpunished", defer_clean);
+    PD_CHECK("D2: deferrals are counted as deferrals, not serves",
+             getheaders_deferred_rate_window() - defer_before ==
+             flood_extra);
+    PD_CHECK("D2: the stats object surfaces the same defer count",
+             st_after.getheaders_deferred_rate_window -
+                 st_before.getheaders_deferred_rate_window ==
+             (uint64_t)flood_extra);
+    failures += pd_d2_witness_checks(w, &rs_before, pow_before_d);
+    return failures;
+}
+
+/* D2b: the window is per-peer; a fresh peer is served while the flooder is exhausted. */
+static int pd_d2b_per_peer(const struct pd_window_ctx *w)
+{
+    int failures = 0;
+    struct p2p_node other;
+    pd_setup_node(&other);
+    other.id = w->flood_id + 1;
+    w->req_d->read_pos = 0;
+    bool other_served = process_getheaders(w->mp, &other, w->req_d);
+    bool other_queued = pd_queued_headers_count(&other) >= 0;
+    pd_drain_send_queue(&other);
+    pd_clear_fixture_disconnect(&other);
+    /* The fresh peer's own window opened and drew one admission. */
+    PD_CHECK("D2: the window is per-peer, not global",
+             other_served && other_queued &&
+             other.getheaders_rate_window_count == 1 &&
+             w->flooder->getheaders_rate_window_count ==
+                 (uint32_t)w->allowance);
+    return failures;
+}
+
+/* D3: backdate the window start to the boundary with the count
+ * exhausted; the next request rolls the window, resets the count, and
+ * is served. */
+static int pd_d3_window_expiry(const struct pd_window_ctx *w)
+{
+    int failures = 0;
+    struct msg_headers_stats st_before, st_after;
+    msg_headers_get_stats(&st_before);
+    uint64_t defer_stable = getheaders_deferred_rate_window();
+    w->flooder->getheaders_rate_window_start =
+        platform_time_wall_time_t() -
+        GETHEADERS_SERVE_WINDOW_SECS - 1;
+    w->flooder->getheaders_rate_window_count = (uint32_t)w->allowance;
+    w->req_d->read_pos = 0;
+    bool resumed = process_getheaders(w->mp, w->flooder, w->req_d);
+    int64_t resumed_wire = pd_queued_headers_count(w->flooder);
+    pd_drain_send_queue(w->flooder);
+    msg_headers_get_stats(&st_after);
+    PD_CHECK("D3: an expired window serves the same peer again",
+             resumed && resumed_wire == 1);
+    PD_CHECK("D3: the roll reset the exhausted window",
+             w->flooder->getheaders_rate_window_count == 1);
+    PD_CHECK("D3: resumed service counts as a serve, not a defer",
+             st_after.getheaders_served_requests -
+                 st_before.getheaders_served_requests == 1 &&
+             getheaders_deferred_rate_window() == defer_stable);
+    return failures;
+}
+
+/* D: the per-peer window scenarios D0 to D4 against the seeded chain. */
+static int pd_scenario_d(struct msg_processor *mp, const struct pd_chain4 *c)
+{
+    int failures = 0;
+    failures += pd_d0_allowance_helpers();
+    struct p2p_node flooder;
+    pd_setup_node(&flooder);
+    node_id_t flood_id = flooder.id;
+    /* pd_setup_node() memsets the fixture, so flooder.services is 0: a legacy
+     * peer taking 160-header pages, allowance 375 vs 30 for ZCL23; see
+     * getheaders_serve_request_allowance() in net/msg_internal.h. */
+    const int allowance =
+        (int)getheaders_serve_request_allowance(flooder.services);
+
+    /* hash_stop-only form anchored at h[2]: each admitted request serves
+     * exactly one header (h[3]), so the window is measured against the real
+     * per-request cost. */
+    struct byte_stream buf_d, req_d;
+    bool built_d = pd_build_getheaders(&buf_d, NULL, 0, &c->hash[2]);
+    PD_CHECK("D: getheaders payload built", built_d);
+    stream_init_from_data(&req_d, buf_d.data, buf_d.size);
+
+    struct pd_window_ctx w = { mp, &req_d, &flooder, flood_id, allowance, 5 };
+    struct msg_headers_stats st_start;
+    msg_headers_get_stats(&st_start);
+    /* Window baseline: everything served from here is admitted against one allowance. */
+    uint64_t served_at_window_start = st_start.getheaders_served_requests;
+    failures += pd_d1_honest_burst(&w);
+    failures += pd_d2_flood(&w, served_at_window_start);
+    failures += pd_d2b_per_peer(&w);
+
+    /* D2c: the allowance follows the requesting peer's services: a ZCL23
+     * peer closes at 30 while the legacy flooder holds 375. */
+    PD_CHECK("D2c: a ZCL23 peer's window closes at ITS allowance "
+             "(30 pages), the legacy flooder's at 375",
+             pd_zcl23_window_closes_at_own_allowance(
+                 mp, &req_d, flood_id + 2, &flooder, allowance));
+
+    failures += pd_d3_window_expiry(&w);
+
+    /* D4: a deferred request is parked and answered once the window rolls,
+     * since a legacy client has no retry timer. Contract in the helpers above. */
+    PD_CHECK("D4: a deferred getheaders is replayed exactly once "
+             "when the window rolls, unasked, without spending a "
+             "second defer — the snapshot defer parks nothing, a "
+             "served ask supersedes the park, and unanswerable "
+             "asks leave it in place",
+             pd_deferred_request_replays_once(mp, &req_d,
+                                              flood_id + 3));
+
+    stream_free(&req_d);
+    stream_free(&buf_d);
+    pd_drain_send_queue(&flooder);
+    return failures;
+}
+
+/* A same-hash twin of entry 0 is the validated active tip while the
+ * block map retains bi[0] (the restart shape where locator lookup and
+ * chain[] own different block_index objects). Entries 1..3 are the
+ * header-only zone the serve path must walk. */
+static int pd_bc_park_active_tip(struct main_state *ms, struct pd_chain4 *c,
+                                 struct block_index *active_twin)
+{
+    int failures = 0;
+    struct block_index **bi = c->bi;
+    bi[0]->nStatus |= BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    bi[0]->nTx = 1;
+    bi[0]->nChainTx = 1;
+    block_index_init(active_twin);
+    active_twin->phashBlock = bi[0]->phashBlock;
+    active_twin->nHeight = bi[0]->nHeight;
+    active_twin->nStatus = bi[0]->nStatus;
+    active_twin->nTx = bi[0]->nTx;
+    active_twin->nChainTx = bi[0]->nChainTx;
+    active_twin->nChainWork = bi[0]->nChainWork;
+    PD_CHECK("B: active tip parked at same-hash entry-0 twin",
+             active_chain_move_window_tip(&ms->chain_active,
+                                          active_twin));
+    ms->pindex_best_header = bi[3];
+    return failures;
+}
+
+/* ── B/C. one request, one verification per header served ─────────
+ * A clean 3-header chain above an active tip, every header mined and pinned
+ * in the index, so each entry is servable in-memory at one verification. */
+static int pd_scenario_bcd(const struct chain_params *cp, const char *dir)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct pd_chain4 chain;
+    memset(&chain, 0, sizeof(chain));
+    bool seeded = false;
+    failures += pd_bc_build_chain(&ms, &chain, cp, &seeded);
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_pd_nm, NULL);
+
+    if (seeded) {
+        struct block_index active_twin;
+        failures += pd_bc_park_active_tip(&ms, &chain, &active_twin);
+
+        struct p2p_node node;
+        pd_setup_node(&node);
+
+        failures += pd_b1_locator_at_tip(&mp, &node, &chain);
+        failures += pd_b2_empty_reply(&mp, &node, &chain);
+        failures += pd_scenario_d(&mp, &chain);
+    }
+
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_getheaders_serve_pow_dedup(void);
 int test_getheaders_serve_pow_dedup(void)
 {
@@ -554,456 +1173,8 @@ int test_getheaders_serve_pow_dedup(void)
     runtime.db_service = &dbsvc;
     app_runtime_set_current(&runtime);
 
-    /* ── A. one lookup, three stores, one verification ────────────────
-     * Entry Y hash-binds, is BLOCK_VALID_TREE and passes CheckProofOfWork, but
-     * its Equihash solution is garbage (the shape a hostile block_index.bin /
-     * node.db bundle can carry), and it is reachable from the index, a flat
-     * block file and a node.db row. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-
-        struct block_header hg, ha, hb;
-        struct uint256 hash_g, hash_a, hash_b, null_hash;
-        uint256_set_null(&null_hash);
-        PD_CHECK("A: mine g", pd_mine_header(&hg, 0, &null_hash, cp, 0xA0));
-        block_header_get_hash(&hg, &hash_g);
-        PD_CHECK("A: mine A", pd_mine_header(&ha, 1, &hash_g, cp, 0xA1));
-        block_header_get_hash(&ha, &hash_a);
-        PD_CHECK("A: mine B", pd_mine_header(&hb, 2, &hash_a, cp, 0xA2));
-        block_header_get_hash(&hb, &hash_b);
-
-        struct block_index *bi_g = pd_seed_index(&ms, &hg, &hash_g, 0, NULL);
-        struct block_index *bi_a = pd_seed_index(&ms, &ha, &hash_a, 1, bi_g);
-        PD_CHECK("A: index chain seeded", bi_g && bi_a);
-
-        /* Forge B: same solution size, grind until CheckProofOfWork passes
-         * (regtest powLimit is 0x0f0f..., a few tries). */
-        struct block_header hy = hb;
-        struct uint256 hash_y;
-        bool y_ready = false;
-        for (int attempt = 0; attempt < 4096 && !y_ready; attempt++) {
-            for (size_t i = 0; i < hy.nSolutionSize; i++)
-                hy.nSolution[i] = (uint8_t)(hb.nSolution[i] ^ 0xa5 ^
-                                            (uint8_t)attempt);
-            block_header_get_hash(&hy, &hash_y);
-            if (!CheckProofOfWork(hash_y, hy.nBits, &cp->consensus))
-                continue;
-            if (check_equihash_solution(&hy, cp))
-                continue;      /* astronomically unlikely; skip it */
-            y_ready = true;
-        }
-        PD_CHECK("A: forged header found (PoW passes, Equihash does not)",
-                 y_ready);
-        PD_CHECK("A: forged solution really fails Equihash",
-                 y_ready && !check_equihash_solution(&hy, cp));
-
-        struct block_index *bi_y = NULL;
-        if (y_ready && bi_a) {
-            bi_y = pd_seed_index(&ms, &hy, &hash_y, 2, bi_a);
-            PD_CHECK("A: forged entry inserted", bi_y != NULL);
-        }
-
-        struct msg_processor mp;
-        msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_pd_nm, NULL);
-
-        if (bi_y) {
-            ms.pindex_best_header = bi_y;
-
-            /* Store 1 — in-memory index. */
-            PD_CHECK("A: store 1/3 in-memory solution pinned",
-                     pd_pin_solution(bi_y, &hy, "pd_forged_sol"));
-
-            /* Store 2 — flat block file. */
-            struct disk_block_pos pos;
-            bool wrote = pd_write_flat_block(netdir, &hy, cp, &pos);
-            PD_CHECK("A: store 2/3 flat block file written", wrote);
-            if (wrote) {
-                bi_y->nStatus |= BLOCK_HAVE_DATA;
-                block_index_disk_pos_store(bi_y, pos.nFile, pos.nPos);
-                struct block probe;
-                block_init(&probe);
-                bool readable = read_block_from_disk_index(&probe, bi_y, netdir);
-                struct uint256 probe_hash;
-                uint256_set_null(&probe_hash);
-                if (readable)
-                    block_header_get_hash(&probe.header, &probe_hash);
-                PD_CHECK("A: store 2/3 really hash-binds (fallback would "
-                         "fire)",
-                         readable && uint256_eq(&probe_hash, &hash_y));
-                block_free(&probe);
-            }
-
-            /* Store 3 — node.db `blocks` row. */
-            bool row = pd_db_put_header(&ndb, 2, &hy, &hash_y);
-            PD_CHECK("A: store 3/3 node.db row stored", row);
-            if (row) {
-                struct block_header probe;
-                block_header_init(&probe);
-                bool loaded = node_db_runtime_load_header_by_hash_height(
-                    2, hash_y.data, &probe);
-                struct uint256 probe_hash;
-                uint256_set_null(&probe_hash);
-                if (loaded)
-                    block_header_get_hash(&probe, &probe_hash);
-                PD_CHECK("A: store 3/3 really hash-binds (fallback would "
-                         "fire)",
-                         loaded && uint256_eq(&probe_hash, &hash_y));
-            }
-
-            unsigned int status_before = bi_y->nStatus;
-            uint64_t pow_before = getheaders_serve_pow_checks();
-            struct block_header out;
-            block_header_init(&out);
-            bool ok = getheaders_index_header_servable(&mp, bi_y, &out);
-            uint64_t spent = getheaders_serve_pow_checks() - pow_before;
-
-            printf("getheaders_serve_pow_dedup: A: three-store lookup spent "
-                   "%llu Equihash verification(s) (pre-fix: 3)\n",
-                   (unsigned long long)spent);
-            PD_CHECK("A: a three-store lookup spends at most ONE Equihash "
-                     "verification", spent <= 1);
-            PD_CHECK("A: it spends at least one — verifying once must not "
-                     "become verifying zero", spent >= 1);
-
-            /* The security floor: still refused, not a validity verdict. */
-            PD_CHECK("A: the forged header is still REFUSED", !ok);
-            PD_CHECK("A: the refusal is still not a validity verdict",
-                     bi_y->nStatus == status_before);
-        }
-
-        main_state_free(&ms);
-    }
-
-    /* ── B/C. one request, one verification per header served ─────────
-     * A clean 3-header chain above an active tip, every header mined and pinned
-     * in the index, so each entry is servable in-memory at one verification. */
-    {
-        struct main_state ms;
-        main_state_init(&ms);
-
-        struct block_header h[4];
-        struct uint256 hash[4], null_hash;
-        uint256_set_null(&null_hash);
-        bool mined = true;
-        for (int i = 0; i < 4; i++) {
-            mined = mined && pd_mine_header(&h[i], i,
-                                            i == 0 ? &null_hash : &hash[i - 1],
-                                            cp, 0xB0);
-            if (!mined)
-                break;
-            block_header_get_hash(&h[i], &hash[i]);
-        }
-        PD_CHECK("B: mined a 4-header chain", mined);
-
-        struct block_index *bi[4] = {0};
-        bool seeded = mined;
-        for (int i = 0; i < 4 && seeded; i++) {
-            bi[i] = pd_seed_index(&ms, &h[i], &hash[i], i,
-                                  i == 0 ? NULL : bi[i - 1]);
-            seeded = bi[i] && pd_pin_solution(bi[i], &h[i], "pd_chain_sol");
-        }
-        PD_CHECK("B: index chain seeded with real solutions", seeded);
-
-        struct msg_processor mp;
-        msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_pd_nm, NULL);
-
-        if (seeded) {
-            /* A same-hash twin of entry 0 is the validated active tip while the
-             * block map retains bi[0] (the restart shape where locator lookup and
-             * chain[] own different block_index objects). Entries 1..3 are the
-             * header-only zone the serve path must walk. */
-            bi[0]->nStatus |= BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-            bi[0]->nTx = 1;
-            bi[0]->nChainTx = 1;
-            struct block_index active_twin;
-            block_index_init(&active_twin);
-            active_twin.phashBlock = bi[0]->phashBlock;
-            active_twin.nHeight = bi[0]->nHeight;
-            active_twin.nStatus = bi[0]->nStatus;
-            active_twin.nTx = bi[0]->nTx;
-            active_twin.nChainTx = bi[0]->nChainTx;
-            active_twin.nChainWork = bi[0]->nChainWork;
-            PD_CHECK("B: active tip parked at same-hash entry-0 twin",
-                     active_chain_move_window_tip(&ms.chain_active,
-                                                  &active_twin));
-            ms.pindex_best_header = bi[3];
-
-            struct p2p_node node;
-            pd_setup_node(&node);
-
-            /* B1 — locator anchored at the active tip: serve 1, 2, 3. */
-            struct byte_stream buf, req;
-            bool built = pd_build_getheaders(&buf, &hash[0], 1, &null_hash);
-            PD_CHECK("B1: getheaders payload built", built);
-            stream_init_from_data(&req, buf.data, buf.size);
-
-            struct msg_headers_stats st_before, st_after;
-            msg_headers_get_stats(&st_before);
-            uint64_t pow_before = getheaders_serve_pow_checks();
-            bool served = built && process_getheaders(&mp, &node, &req);
-            uint64_t pow_spent = getheaders_serve_pow_checks() - pow_before;
-            msg_headers_get_stats(&st_after);
-            int64_t wire_count = pd_queued_headers_count(&node);
-            uint64_t served_delta =
-                st_after.headers_served_total - st_before.headers_served_total;
-            uint64_t req_delta = st_after.getheaders_served_requests -
-                st_before.getheaders_served_requests;
-
-            printf("getheaders_serve_pow_dedup: B1: served %lld header(s) on "
-                   "the wire for %llu Equihash verification(s) (pre-fix: 5 "
-                   "for 3)\n", (long long)wire_count,
-                   (unsigned long long)pow_spent);
-
-            PD_CHECK("B1: the request was answered", served);
-            PD_CHECK("B1: the reply carried the 3 header-only entries",
-                     wire_count == 3);
-            PD_CHECK("B1: exactly one Equihash verification per header "
-                     "SERVED", wire_count > 0 &&
-                     pow_spent == (uint64_t)wire_count);
-            PD_CHECK("B1: headers_served_total counted the served headers",
-                     served_delta == (uint64_t)wire_count);
-            PD_CHECK("B1: getheaders_served_requests counted the request",
-                     req_delta == 1);
-            PD_CHECK("C: the two counters are not the same number "
-                     "(3 headers, 1 request)", served_delta != req_delta);
-            stream_free(&req);
-            stream_free(&buf);
-            pd_drain_send_queue(&node);
-
-            /* B2/C: hash_stop-only form anchored at the best header (successor NULL)
-             * serves nothing: requests move, headers do not, proving neither
-             * counter copies the other or sticks at zero. */
-            msg_headers_get_stats(&st_before);
-            pow_before = getheaders_serve_pow_checks();
-            struct byte_stream buf2, req2;
-            bool built2 = pd_build_getheaders(&buf2, NULL, 0, &hash[3]);
-            PD_CHECK("B2: empty-locator getheaders payload built", built2);
-            stream_init_from_data(&req2, buf2.data, buf2.size);
-            bool served2 = built2 && process_getheaders(&mp, &node, &req2);
-            pow_spent = getheaders_serve_pow_checks() - pow_before;
-            msg_headers_get_stats(&st_after);
-            int64_t wire2 = pd_queued_headers_count(&node);
-
-            PD_CHECK("B2: the request was answered", served2);
-            PD_CHECK("B2: with a 0-header reply", wire2 == 0);
-            PD_CHECK("B2: and cost no Equihash work at all", pow_spent == 0);
-            PD_CHECK("C: a 0-header reply still counts as a request",
-                     st_after.getheaders_served_requests -
-                     st_before.getheaders_served_requests == 1);
-            PD_CHECK("C: and adds nothing to headers_served_total",
-                     st_after.headers_served_total ==
-                     st_before.headers_served_total);
-            PD_CHECK("C: both counters are non-zero overall — not stubs",
-                     st_after.headers_served_total > 0 &&
-                     st_after.getheaders_served_requests > 0);
-            stream_free(&req2);
-            stream_free(&buf2);
-            pd_drain_send_queue(&node);
-
-        /* ── D. the per-peer serve window ─────────────────────────────
-         * Each reply costs real Equihash work, so the serve path bounds how
-         * often one peer may ask (GETHEADERS_SERVE_* in net/msg_internal.h): a
-         * fixed header budget per window (GETHEADERS_SERVE_HEADERS_PER_WINDOW)
-         * translated into a request allowance by the peer's reply page size
-         * (getheaders_serve_request_allowance() / getheaders_serve_page()).
-         *
-         *   D0 allowance helpers: legacy (services=0) gets 375, a ZCL23 peer
-         *      30; allowance * page size is invariant across the two;
-         *   D1 an honest burst is fully served;
-         *   D2 the flood: served stops at the allowance, every excess request
-         *      is deferred silently (true return, zero wire bytes, no
-         *      disconnect, its own counter), and the window is per-peer;
-         *   D3 expiry restores service.
-         *
-         * Time is injected through the window field (as in
-         * test_net_handshake_adversarial.c): D3 backdates
-         * node.getheaders_rate_window_start past the window. No sleeps. */
-            PD_CHECK("D0: legacy services get a 375-request allowance",
-                     getheaders_serve_request_allowance(0) == 375u);
-            PD_CHECK("D0: a ZCL23 peer gets a 30-request allowance",
-                     getheaders_serve_request_allowance(NODE_ZCL23) == 30u);
-            PD_CHECK("D0: both allowances draw down the same header budget",
-                     getheaders_serve_request_allowance(0) *
-                             (uint32_t)getheaders_serve_page(0) ==
-                     getheaders_serve_request_allowance(NODE_ZCL23) *
-                             (uint32_t)getheaders_serve_page(NODE_ZCL23));
-            struct p2p_node flooder;
-            pd_setup_node(&flooder);
-            node_id_t flood_id = flooder.id;
-            /* pd_setup_node() memsets the fixture, so flooder.services is 0: a legacy
-             * peer taking 160-header pages, allowance 375 vs 30 for ZCL23; see
-             * getheaders_serve_request_allowance() in net/msg_internal.h. */
-            const int allowance =
-                (int)getheaders_serve_request_allowance(flooder.services);
-
-            /* hash_stop-only form anchored at h[2]: each admitted request serves
-             * exactly one header (h[3]), so the window is measured against the real
-             * per-request cost. */
-            struct byte_stream buf_d, req_d;
-            bool built_d = pd_build_getheaders(&buf_d, NULL, 0, &hash[2]);
-            PD_CHECK("D: getheaders payload built", built_d);
-            stream_init_from_data(&req_d, buf_d.data, buf_d.size);
-
-            uint64_t defer_before = getheaders_deferred_rate_window();
-            msg_headers_get_stats(&st_before);
-            /* Window baseline: everything served from here is admitted against one allowance. */
-            uint64_t served_at_window_start =
-                st_before.getheaders_served_requests;
-            const int burst = 5;
-            bool burst_served = true;
-            int64_t burst_wire = 1;
-            for (int i = 0; i < burst && burst_served; i++) {
-                req_d.read_pos = 0;   /* re-send the identical request */
-                burst_served = process_getheaders(&mp, &flooder, &req_d);
-                burst_wire = pd_queued_headers_count(&flooder);
-                pd_drain_send_queue(&flooder);
-            }
-            msg_headers_get_stats(&st_after);
-            PD_CHECK("D1: an honest burst is answered every time",
-                     burst_served);
-            PD_CHECK("D1: every burst reply carried its header",
-                     burst_wire == 1);
-            PD_CHECK("D1: the burst moved only the served counters",
-                     st_after.getheaders_served_requests -
-                         st_before.getheaders_served_requests == burst &&
-                     st_after.headers_served_total -
-                         st_before.headers_served_total == burst);
-            PD_CHECK("D1: the burst deferred nothing",
-                     getheaders_deferred_rate_window() == defer_before);
-
-            /* D2, the flood: another burst+10 requests in the same window get the
-             * allowance; the rest are deferred. */
-            msg_headers_get_stats(&st_before);
-            uint64_t pow_before_d = getheaders_serve_pow_checks();
-            /* Every admitted request is witnessed once: the receipt layer skips a
-             * proof it already paid (a hit) or the serve pays one fresh pow check, so
-             * the pow counter alone does not count admitted serves. A witness count
-             * below the admitted count (a serve that skipped verification) or more
-             * than one fresh proof (a receipt miss re-proving per request) is a failure. */
-            struct getheaders_receipt_stats rs_before;
-            getheaders_verify_receipt_stats(&rs_before);
-            const int flood_extra = 10;
-            const int flood_total = allowance - burst + flood_extra;
-            int deferred_seen = 0;
-            int served_seen = 0;
-            bool defer_clean = true;
-            for (int i = 0; i < flood_total; i++) {
-                req_d.read_pos = 0;   /* re-send the identical request */
-                bool answered = process_getheaders(&mp, &flooder, &req_d);
-                bool queued = pd_queued_headers_count(&flooder) >= 0;
-                pd_drain_send_queue(&flooder);
-                bool punished = flooder.disconnect;
-                pd_clear_fixture_disconnect(&flooder);
-                if (answered && queued) {
-                    served_seen++;
-                } else {
-                    /* DEFER shape: handled, nothing on the wire, no new disconnect. */
-                    deferred_seen++;
-                    defer_clean = defer_clean && answered && !queued &&
-                                  !punished;
-                }
-            }
-            msg_headers_get_stats(&st_after);
-            PD_CHECK("D2: served stops EXACTLY at the window allowance",
-                     st_after.getheaders_served_requests -
-                         st_before.getheaders_served_requests ==
-                     (uint64_t)(allowance - burst));
-            PD_CHECK("D2: the window admitted the allowance and no more",
-                     st_after.getheaders_served_requests -
-                         served_at_window_start == (uint64_t)allowance);
-            PD_CHECK("D2: every request past the allowance is deferred",
-                     deferred_seen == flood_extra &&
-                     served_seen == allowance - burst);
-            PD_CHECK("D2: a deferred request is silent, handled, and "
-                     "unpunished", defer_clean);
-            PD_CHECK("D2: deferrals are counted as deferrals, not serves",
-                     getheaders_deferred_rate_window() - defer_before ==
-                     flood_extra);
-            PD_CHECK("D2: the stats object surfaces the same defer count",
-                     st_after.getheaders_deferred_rate_window -
-                         st_before.getheaders_deferred_rate_window ==
-                     (uint64_t)flood_extra);
-            {
-                struct getheaders_receipt_stats rs_after;
-                getheaders_verify_receipt_stats(&rs_after);
-                uint64_t fresh = getheaders_serve_pow_checks() - pow_before_d;
-                PD_CHECK("D2: every admitted request was witnessed once — "
-                         "a receipt hit or a fresh proof, never neither, "
-                         "never both",
-                         rs_after.hits - rs_before.hits + fresh ==
-                         (uint64_t)(allowance - burst));
-                PD_CHECK("D2: the flood's fresh-proof bill is at most ONE — "
-                         "the receipt covers every repeat of a served "
-                         "header",
-                         fresh <= 1u);
-            }
-
-            /* D2b: the window is per-peer; a fresh peer is served while the flooder is exhausted. */
-            {
-                struct p2p_node other;
-                pd_setup_node(&other);
-                other.id = flood_id + 1;
-                req_d.read_pos = 0;
-                bool other_served = process_getheaders(&mp, &other, &req_d);
-                bool other_queued = pd_queued_headers_count(&other) >= 0;
-                pd_drain_send_queue(&other);
-                pd_clear_fixture_disconnect(&other);
-                /* The fresh peer's own window opened and drew one admission. */
-                PD_CHECK("D2: the window is per-peer, not global",
-                         other_served && other_queued &&
-                         other.getheaders_rate_window_count == 1 &&
-                         flooder.getheaders_rate_window_count ==
-                             (uint32_t)allowance);
-            }
-
-            /* D2c: the allowance follows the requesting peer's services: a ZCL23
-             * peer closes at 30 while the legacy flooder holds 375. */
-            PD_CHECK("D2c: a ZCL23 peer's window closes at ITS allowance "
-                     "(30 pages), the legacy flooder's at 375",
-                     pd_zcl23_window_closes_at_own_allowance(
-                         &mp, &req_d, flood_id + 2, &flooder, allowance));
-
-            /* D3: backdate the window start to the boundary with the count
-             * exhausted; the next request rolls the window, resets the count, and
-             * is served. */
-            msg_headers_get_stats(&st_before);
-            uint64_t defer_stable = getheaders_deferred_rate_window();
-            flooder.getheaders_rate_window_start =
-                platform_time_wall_time_t() -
-                GETHEADERS_SERVE_WINDOW_SECS - 1;
-            flooder.getheaders_rate_window_count = (uint32_t)allowance;
-            req_d.read_pos = 0;
-            bool resumed = process_getheaders(&mp, &flooder, &req_d);
-            int64_t resumed_wire = pd_queued_headers_count(&flooder);
-            pd_drain_send_queue(&flooder);
-            msg_headers_get_stats(&st_after);
-            PD_CHECK("D3: an expired window serves the same peer again",
-                     resumed && resumed_wire == 1);
-            PD_CHECK("D3: the roll reset the exhausted window",
-                     flooder.getheaders_rate_window_count == 1);
-            PD_CHECK("D3: resumed service counts as a serve, not a defer",
-                     st_after.getheaders_served_requests -
-                         st_before.getheaders_served_requests == 1 &&
-                     getheaders_deferred_rate_window() == defer_stable);
-
-            /* D4: a deferred request is parked and answered once the window rolls,
-             * since a legacy client has no retry timer. Contract in the helpers above. */
-            PD_CHECK("D4: a deferred getheaders is replayed exactly once "
-                     "when the window rolls, unasked, without spending a "
-                     "second defer — the snapshot defer parks nothing, a "
-                     "served ask supersedes the park, and unanswerable "
-                     "asks leave it in place",
-                     pd_deferred_request_replays_once(&mp, &req_d,
-                                                      flood_id + 3));
-
-            stream_free(&req_d);
-            stream_free(&buf_d);
-            pd_drain_send_queue(&flooder);
-        }
-
-        main_state_free(&ms);
-    }
+    failures += pd_scenario_a(cp, dir, netdir, &ndb);
+    failures += pd_scenario_bcd(cp, dir);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
