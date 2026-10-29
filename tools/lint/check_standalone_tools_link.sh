@@ -12,14 +12,8 @@
 # missing platform/modules/platform/src/clock.c) and every gate stayed green for it. That is
 # the class this gate closes.
 #
-# Mechanism: the tool list is DERIVED from the Makefile, never hand-written, so
-# a newly added tool is covered the day it lands. Anything the Makefile can
-# build and that is not explicitly exempted below must link. The exempt set is
-# small, closed, and carries a reason per entry; an unknown tool is NOT
-# exempt — this gate is fail-closed by construction.
-#
-# Cost: the covered tools are single-translation-unit builds. ~6 s warm,
-# ~70 s cold, and a no-op once built (make decides).
+# Tool rules come from the Makefile. CI fuzz exemptions are derived from its
+# validated fuzz-ci dependencies; other unknown tools remain covered.
 #
 # NOTE — this is the only lint gate that EXECUTES `make`, and that is
 # deliberate: a rule's -I paths and object list are only proven by actually
@@ -74,21 +68,6 @@ declare -A EXEMPT=(
     [gen_templates]="built by every build (TMPL_GEN prerequisite)"
     [core_seal]="built by make lint (check-core-sealed)"
     [check_observability_pairing]="built by make lint (check-observability-pairing)"
-    # Already built by `make ci`.
-    [fuzz_block]="built by make ci (fuzz-ci)"
-    [fuzz_script]="built by make ci (fuzz-ci)"
-    [fuzz_p2p]="built by make ci (fuzz-ci)"
-    [fuzz_http]="built by make ci (fuzz-ci)"
-    [fuzz_compactblock]="built by make ci (fuzz-ci)"
-    [fuzz_snapshot]="built by make ci (fuzz-ci)"
-    [fuzz_tx_bundle]="built by make ci (fuzz-ci)"
-    [fuzz_rom_manifest]="built by make ci (fuzz-ci)"
-    # Was MISSING from this list while its eight siblings were exempt, so this
-    # gate linked a full libFuzzer+ASan binary on every `make lint` — inside
-    # the gate that is already 93% of the umbrella's wall time. It is in
-    # FUZZ_TARGETS like the rest, so make ci already builds it.
-    [fuzz_overlay]="built by make ci (fuzz-ci)"
-    [fuzz_ecdsa]="built by make ci (fuzz-ci)"
     [crash_recovery_test]="built by make ci (test-crash)"
     [zcl-rpc]="built by make ci (test-crash)"
     # The node and the test runners: whole-program relinks, and each is
@@ -126,11 +105,6 @@ declare -A DARWIN_EXEMPT=(
     [zcl-portfwd]="event loop sits on sys/epoll.h (Linux kernel API)"
     [z23-headless-run.exe]="Win32 PE launcher; #include <windows.h> + -municode, and its rule is inside ifeq (\$(ZCL_HOST_WINDOWS),1) so it does not exist on this host"
     [native_ui_driver]="X11 UI transport; links -Wl,-l:libX11.so.6"
-    [fuzz_zcode_commons]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
-    [fuzz_zcode_dht]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
-    [fuzz_zcode_science]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
-    [fuzz_mesh_status_proto]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
-    [fuzz_semantic_manifest]="host lacks libclang_rt.fuzzer_osx.a (standalone CLT ships no libFuzzer runtime)"
 )
 
 # A missing X11 runtime can excuse only the link, never the strict compile.
@@ -302,38 +276,33 @@ gate_require_scanned "${#TOOLS[@]}" 20 check-standalone-tools-link \
 
 # ── Partition into covered vs must-build ─────────────────────────────────
 GATE_HOST_OS="$(uname -s 2>/dev/null)"
-fuzz_target_line="$(gate_grep -m1 '^FUZZ_TARGETS = ' Makefile || true)"
-fuzz_target_assignments="$(gate_grep -E '^FUZZ_TARGETS[[:space:]]*[:+?]?=' Makefile || true)"
+fuzz_target_line="$(gate_grep -E '^FUZZ_TARGETS[[:space:]]*[:+?]?=' Makefile || true)"
 # This fast literal reader is a coverage gate, not a Make interpreter. Refuse
 # comments or a second assignment rather than treating dead text as fuzz-ci.
-if [[ "$GATE_HOST_OS" == Darwin &&
-      ( -z "$fuzz_target_line" || "$fuzz_target_assignments" != "$fuzz_target_line" ||
+if [[ ( "$fuzz_target_line" != 'FUZZ_TARGETS = '* || "$fuzz_target_line" == *$'\n'* ||
         "$fuzz_target_line" == *'#'* || "$fuzz_target_line" == *'\'* ) ]]; then
     echo "check-standalone-tools-link: FATAL — FUZZ_TARGETS is not one literal uncommented assignment" >&2
     exit 2
 fi
-read -r -a fuzz_target_tokens <<< "$fuzz_target_line"
-declare -A FUZZ_CI_TARGETS=()
+read -r -a fuzz_target_tokens <<< "${fuzz_target_line#FUZZ_TARGETS = }"
 for token in "${fuzz_target_tokens[@]}"; do
-    [[ "$token" == '$(BIN_DIR)/fuzz_'* ]] || continue
-    FUZZ_CI_TARGETS["${token#'$(BIN_DIR)/'}"]=1
+    if [[ ! "$token" =~ ^\$\(BIN_DIR\)/fuzz_[a-zA-Z0-9_]+$ ]]; then
+        echo "check-standalone-tools-link: FATAL — invalid fuzz target: $token" >&2
+        exit 2
+    fi
+    EXEMPT["${token#'$(BIN_DIR)/'}"]="built by make ci (fuzz-ci)"
 done
+fuzz_ci_rules="$(gate_grep -E '^fuzz-ci[[:space:]]*:' Makefile || true)"
+if [[ "$fuzz_ci_rules" != 'fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)' ]]; then
+    echo 'check-standalone-tools-link: FATAL — fuzz-ci prerequisite list changed' >&2
+    exit 2
+fi
 targets=()
 for name in $(printf '%s\n' "${!TOOLS[@]}" | sort); do
-    # A new fuzzer belongs to the fuzz-ci corpus. On Darwin's base CLT,
-    # linking it here fails only after a costly whole-program compile because
-    # libclang_rt.fuzzer_osx.a is absent. Require an explicit host decision
-    # before the proof's prefork build schedules that work.
-    if [[ "$GATE_HOST_OS" == Darwin && "$name" == fuzz_* ]]; then
-        if [[ -z "${FUZZ_CI_TARGETS[$name]:-}" ]]; then
-            echo "check-standalone-tools-link: FATAL — $name has no fuzz-ci target" >&2
-            exit 2
-        fi
-        if [[ -z "${EXEMPT[$name]:-}" && -z "${DARWIN_EXEMPT[$name]:-}" ]]; then
-            echo "check-standalone-tools-link: FATAL — unclassified Darwin fuzz target $name" >&2
-            echo "  Declare its fuzz-ci coverage and host-runtime policy before prefork." >&2
-            exit 2
-        fi
+    # CI-covered fuzzers are exempt; unknown Darwin fuzzers require policy.
+    if [[ "$GATE_HOST_OS" == Darwin && "$name" == fuzz_* && -z "${EXEMPT[$name]:-}" ]]; then
+        echo "check-standalone-tools-link: FATAL — unclassified Darwin fuzz target $name" >&2
+        exit 2
     fi
     [[ -n "${EXEMPT[$name]:-}" ]] && continue
     # A bare non-windows exemption used to sit here. It skipped the tool on

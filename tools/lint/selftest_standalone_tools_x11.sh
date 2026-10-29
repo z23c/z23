@@ -20,7 +20,10 @@ printf '#!/usr/bin/env bash\necho fixture-x11-selftest\n' > "$fixture/tools/lint
 chmod +x "$fixture/tools/lint/selftest_standalone_tools_x11.sh"
 printf 'ZCL_WINDOWS_ACCEPTANCE_TESTS := headless_run\nZCL_WINDOWS_ACCEPTANCE_headless_run_SOURCES := tools/dev/windows_headless_run.c\n' > "$fixture/platform/modules/platform/tests/windows_acceptance.mk"
 {
-    printf 'CC = cc\nZCL_PLATFORM_CPPFLAGS = -DPR72_PLATFORM=1\nBIN_DIR = build/bin\nFUZZ_TARGETS = \n'
+    printf 'CC = cc\nZCL_PLATFORM_CPPFLAGS = -DPR72_PLATFORM=1\nBIN_DIR = build/bin\nFUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto $(BIN_DIR)/fuzz_semantic_manifest\nfuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)\n'
+for name in fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science fuzz_mesh_status_proto fuzz_semantic_manifest; do
+    printf '$(BIN_DIR)/%s:\n\t@mkdir -p build/bin; touch $@\n' "$name"
+done
     # Copy the actual canonical rule, so changing the recipe changes the test.
     awk '/^NATIVE_UI_DRIVER_BIN = / { active=1 } active { if (/^# Crash recovery/) exit; print }' "$ROOT/Makefile"
     for n in {1..20}; do
@@ -123,6 +126,31 @@ for mode in normal build-only list-targets; do
     refute grep -q 'no-x11-runtime-exempt' "$tmp/err"
     if [[ "$mode" == list-targets ]]; then grep -q '^build/bin/native_ui_driver$' "$tmp/out"; else test -s "$fixture/build/bin/native_ui_driver"; fi
 done
+# The derived catalog skips the five CI fuzzers but keeps unrelated tools.
+printf '$(BIN_DIR)/fuzz_unknown_fixture:\n\t@mkdir -p build/bin; touch $@\n' >> "$fixture/Makefile"
+printf '#!/usr/bin/env bash\nprintf "%%s\n" "$PR72_HOST"\n' > "$tmp/bin/uname"
+chmod +x "$tmp/bin/uname"
+check 'CI fuzzers excluded on Linux' 0 env PR72_HOST=Linux "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+for name in fuzz_zcode_commons fuzz_zcode_dht fuzz_zcode_science fuzz_mesh_status_proto fuzz_semantic_manifest; do
+    refute grep -q "^build/bin/$name$" "$tmp/out"
+done
+grep -q '^build/bin/fuzz_unknown_fixture$' "$tmp/out"
+grep -q '^build/bin/fixture_1$' "$tmp/out"
+check 'unknown fuzzer refused on Darwin' 2 env PR72_HOST=Darwin "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+sed 's@ \$(BIN_DIR)/fuzz_zcode_dht@@' "$tmp/Makefile.good" > "$fixture/Makefile"
+check 'removed CI fuzzer is built on Linux' 0 env PR72_HOST=Linux "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+grep -q '^build/bin/fuzz_zcode_dht$' "$tmp/out"
+check 'removed CI fuzzer refused on Darwin' 2 env PR72_HOST=Darwin "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+cp "$tmp/Makefile.good" "$fixture/Makefile"
+printf 'FUZZ_TARGETS += $(BIN_DIR)/other\n' >> "$fixture/Makefile"
+check 'ambiguous CI fuzzer assignment refuses' 2 env PR72_HOST=Linux "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+sed 's@$(BIN_DIR)/fuzz_zcode_dht@invalid@' "$tmp/Makefile.good" > "$fixture/Makefile"
+check 'invalid CI fuzzer token refuses' 2 env PR72_HOST=Linux "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+sed 's/^fuzz-ci:.*/fuzz-ci:/' "$tmp/Makefile.good" > "$fixture/Makefile"
+check 'missing fuzz-ci prerequisite refuses' 2 env PR72_HOST=Linux "PATH=$tmp/bin:$PATH" PR72_FAULT=absent "${gate[@]}" --list-targets
+cp "$tmp/Makefile.good" "$fixture/Makefile"
+rm "$tmp/bin/uname"
+
 # Make's ignored errors must not admit a failed native run or a failed
 # compiler that leaves a nonempty output. Exercise every public gate mode,
 # both option spellings and both supported inherited flag variables.
@@ -179,14 +207,15 @@ printf 'not a directory\n' > "$tmp/not-directory"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$tmp/not-directory" > "$tmp/bin/mktemp"
 check 'temp write failure is fatal' 2 env "PATH=$tmp/bin:$PATH" "${gate[@]}" --list-targets
 rm "$tmp/bin/mktemp"
+printf '$(BIN_DIR)/unknown_fixture:\n\t@exit 1\n' >> "$fixture/Makefile"
 for host in Darwin MSYS_NT-10.0; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$host" > "$tmp/bin/uname"
     chmod +x "$tmp/bin/uname"
     check "$host routing (no Linux exemption)" 0 env "PATH=$tmp/bin:$PATH" PR72_FAULT=compile "${gate[@]}" --list-targets
     refute grep -q 'no-x11-runtime-exempt' "$tmp/err"
+    grep -q '^build/bin/unknown_fixture$' "$tmp/out"
 done
 rm "$tmp/bin/uname"
-printf '$(BIN_DIR)/unknown_fixture:\n\t@exit 1\n' >> "$fixture/Makefile"
 check 'unknown tool remains covered' 0 "${gate[@]}" --list-targets
 grep -q '^build/bin/unknown_fixture$' "$tmp/out"
 check 'unknown tool build fails' 1 "${gate[@]}" --build-only
