@@ -297,9 +297,7 @@ static bool verify_exact_wire_at(int dir_fd, const char *name,
            memcmp(actual, expected, sizeof(actual)) == 0;
 }
 
-static struct zcl_result persist_record(
-    int dir_fd, const char *name,
-    const struct consensus_state_publication_decision_record *record)
+static struct zcl_result persist_check_target(int dir_fd, const char *name)
 {
     if (dir_fd < 0)
         return ZCL_ERR(-40, "cas persist: invalid output directory fd");
@@ -307,19 +305,21 @@ static struct zcl_result persist_record(
         return ZCL_ERR(-41,
                        "cas persist: output_name must be one normalized "
                        "path component");
-    uint8_t wire[CAS_WIRE_SIZE];
-    encode_record(record, wire);
+    return ZCL_OK;
+}
 
+static struct zcl_result persist_open_temp(int dir_fd, const char *name,
+                                           char tmp[256], int *out_fd)
+{
     /* A shared <name>.tmp lets concurrent writers truncate/write the same
      * inode. Give every attempt an exclusive directory-local temp instead. */
-    char tmp[256];
     int fd = -1;
     for (unsigned attempt = 0; attempt < 1024; attempt++) {
         uint64_t nonce = atomic_fetch_add_explicit(
             &g_temp_nonce, 1, memory_order_relaxed);
-        int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%016llx", name,
+        int n = snprintf(tmp, 256, "%s.tmp.%ld.%016llx", name,
                          (long)getpid(), (unsigned long long)nonce);
-        if (n <= 0 || (size_t)n >= sizeof(tmp))
+        if (n <= 0 || (size_t)n >= 256)
             return ZCL_ERR(-42, "cas persist: temp name overflow");
         fd = openat(dir_fd, tmp,
                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -332,6 +332,41 @@ static struct zcl_result persist_record(
     if (fd < 0)
         return ZCL_ERR(-43, "cas persist: openat temp failed: %s",
                        strerror(errno));
+    *out_fd = fd;
+    return ZCL_OK;
+}
+
+static struct zcl_result persist_fail_cleanup(int dir_fd, const char *tmp,
+                                              bool renamed)
+{
+    if (!renamed) {
+        (void)unlinkat(dir_fd, tmp, 0);
+        (void)fsync(dir_fd);
+    }
+    /* After rename, durability may be indeterminate. Never unlink by name:
+     * a concurrent writer may already own it. Retain the self-verifying
+     * record and require the caller to inspect/retry. */
+    if (renamed)
+        return ZCL_ERR(-45, "cas persist: record may be committed; "
+                            "durability/identity verification failed");
+    return ZCL_ERR(-44, "cas persist: durable write failed");
+}
+
+static struct zcl_result persist_record(
+    int dir_fd, const char *name,
+    const struct consensus_state_publication_decision_record *record)
+{
+    struct zcl_result target = persist_check_target(dir_fd, name);
+    if (!target.ok)
+        return target;
+    uint8_t wire[CAS_WIRE_SIZE];
+    encode_record(record, wire);
+
+    char tmp[256];
+    int fd = -1;
+    struct zcl_result opened = persist_open_temp(dir_fd, name, tmp, &fd);
+    if (!opened.ok)
+        return opened;
 #ifdef ZCL_TESTING
     if (g_after_temp_open_hook)
         g_after_temp_open_hook(record, g_after_temp_open_hook_ctx);
@@ -361,19 +396,8 @@ static struct zcl_result persist_record(
         ok = false;
         LOG_WARN(CAS_SUBSYS, "published record verification failed");
     }
-    if (!ok) {
-        if (!renamed) {
-            (void)unlinkat(dir_fd, tmp, 0);
-            (void)fsync(dir_fd);
-        }
-        /* After rename, durability may be indeterminate. Never unlink by name:
-         * a concurrent writer may already own it. Retain the self-verifying
-         * record and require the caller to inspect/retry. */
-        if (renamed)
-            return ZCL_ERR(-45, "cas persist: record may be committed; "
-                                "durability/identity verification failed");
-        return ZCL_ERR(-44, "cas persist: durable write failed");
-    }
+    if (!ok)
+        return persist_fail_cleanup(dir_fd, tmp, renamed);
     return ZCL_OK;
 }
 
@@ -437,15 +461,9 @@ static void store_latest(
 #endif
 
 #if !defined(_WIN32)
-struct zcl_result consensus_state_publication_cas_run(
-    const struct consensus_state_publication_cas_request *request,
-    struct consensus_state_publication_decision_record *out_record)
+static struct zcl_result run_check_request(
+    const struct consensus_state_publication_cas_request *request)
 {
-    struct consensus_state_publication_decision_record local;
-    struct consensus_state_publication_decision_record *rec =
-        out_record ? out_record : &local;
-    memset(rec, 0, sizeof(*rec));
-
     if (!request || !request->main || !request->artifact ||
         !request->chain_evidence || !request->source_receipt)
         return ZCL_ERR(-60, "cas run: null request member");
@@ -458,6 +476,75 @@ struct zcl_result consensus_state_publication_cas_run(
         !progress_store_db())
         return ZCL_ERR(-62, "cas run: request is not the open process "
                             "singleton");
+    return ZCL_OK;
+}
+
+static struct zcl_result run_capture_artifact(
+    const struct consensus_state_publication_cas_request *request,
+    struct consensus_state_publication_cas_inputs *in)
+{
+    /* (a) artifact admission evidence: revalidate the pinned file, then copy
+     * its manifest + logical + receipt (file/inode) identities. */
+    if (!consensus_state_artifact_evidence_revalidate(request->artifact))
+        return ZCL_ERR(-63, "cas run: artifact evidence failed revalidation");
+    if (!consensus_state_artifact_evidence_manifest_copy(
+            request->artifact, &in->manifest) ||
+        !consensus_state_artifact_evidence_digest(
+            request->artifact, in->artifact_logical_digest) ||
+        !consensus_state_artifact_evidence_receipt_digest(
+            request->artifact, in->artifact_receipt_digest))
+        return ZCL_ERR(-64, "cas run: artifact evidence is stale");
+    return ZCL_OK;
+}
+
+static struct zcl_result run_capture_chain(
+    const struct consensus_state_publication_cas_request *request,
+    struct consensus_state_publication_cas_inputs *in)
+{
+    /* (b) selected-chain evidence: bind it to THIS artifact + lane and copy
+     * its opaque digest. */
+    in->chain_evidence_present = true;
+    in->chain_bound_to_artifact =
+        consensus_state_chain_evidence_matches_artifact(
+            request->chain_evidence, request->artifact,
+            request->target_lane);
+    in->checkpoint_authority_used =
+        consensus_state_chain_evidence_used_checkpoint_authority(
+            request->chain_evidence);
+    in->assisted_authority_used =
+        consensus_state_chain_evidence_used_assisted_authority(
+            request->chain_evidence);
+    if (!consensus_state_chain_evidence_digest(request->chain_evidence,
+                                               in->chain_evidence_digest))
+        return ZCL_ERR(-65, "cas run: chain evidence digest unavailable");
+    return ZCL_OK;
+}
+
+static void run_capture_frontier(
+    struct consensus_state_publication_cas_inputs *in)
+{
+    /* Capture the current durable frontier for the CAS binding. */
+    int32_t fh = -1;
+    uint8_t fhash[32] = {0};
+    if (consensus_state_publication_cas_capture_frontier(&fh, fhash)) {
+        in->frontier_known = true;
+        in->frontier_height = fh;
+        memcpy(in->frontier_hash, fhash, 32);
+    }
+}
+
+struct zcl_result consensus_state_publication_cas_run(
+    const struct consensus_state_publication_cas_request *request,
+    struct consensus_state_publication_decision_record *out_record)
+{
+    struct consensus_state_publication_decision_record local;
+    struct consensus_state_publication_decision_record *rec =
+        out_record ? out_record : &local;
+    memset(rec, 0, sizeof(*rec));
+
+    struct zcl_result checked = run_check_request(request);
+    if (!checked.ok)
+        return checked;
 
     struct consensus_state_publication_cas_inputs in;
     memset(&in, 0, sizeof(in));
@@ -465,41 +552,15 @@ struct zcl_result consensus_state_publication_cas_run(
     in.source_receipt_present = true;
     in.source_receipt = *request->source_receipt;
 
-    /* (a) artifact admission evidence: revalidate the pinned file, then copy
-     * its manifest + logical + receipt (file/inode) identities. */
-    if (!consensus_state_artifact_evidence_revalidate(request->artifact))
-        return ZCL_ERR(-63, "cas run: artifact evidence failed revalidation");
-    if (!consensus_state_artifact_evidence_manifest_copy(
-            request->artifact, &in.manifest) ||
-        !consensus_state_artifact_evidence_digest(
-            request->artifact, in.artifact_logical_digest) ||
-        !consensus_state_artifact_evidence_receipt_digest(
-            request->artifact, in.artifact_receipt_digest))
-        return ZCL_ERR(-64, "cas run: artifact evidence is stale");
+    struct zcl_result artifact = run_capture_artifact(request, &in);
+    if (!artifact.ok)
+        return artifact;
 
-    /* (b) selected-chain evidence: bind it to THIS artifact + lane and copy
-     * its opaque digest. */
-    in.chain_evidence_present = true;
-    in.chain_bound_to_artifact = consensus_state_chain_evidence_matches_artifact(
-        request->chain_evidence, request->artifact, request->target_lane);
-    in.checkpoint_authority_used =
-        consensus_state_chain_evidence_used_checkpoint_authority(
-            request->chain_evidence);
-    in.assisted_authority_used =
-        consensus_state_chain_evidence_used_assisted_authority(
-            request->chain_evidence);
-    if (!consensus_state_chain_evidence_digest(request->chain_evidence,
-                                               in.chain_evidence_digest))
-        return ZCL_ERR(-65, "cas run: chain evidence digest unavailable");
+    struct zcl_result chain = run_capture_chain(request, &in);
+    if (!chain.ok)
+        return chain;
 
-    /* Capture the current durable frontier for the CAS binding. */
-    int32_t fh = -1;
-    uint8_t fhash[32] = {0};
-    if (consensus_state_publication_cas_capture_frontier(&fh, fhash)) {
-        in.frontier_known = true;
-        in.frontier_height = fh;
-        memcpy(in.frontier_hash, fhash, 32);
-    }
+    run_capture_frontier(&in);
 
     consensus_state_publication_cas_decide(&in, rec);
 
