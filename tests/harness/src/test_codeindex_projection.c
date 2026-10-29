@@ -134,6 +134,104 @@ static bool cip_queries_intact(struct codeindex *index)
            strcmp(refs[1].callee, "projection_aux") == 0;
 }
 
+/* Creates the temporary workspace and writes both fixture trees. */
+static bool cip_fixture_pair_ready(char temporary[PLATFORM_TEMP_PATH_MAX],
+                                   char workspace[PLATFORM_TEMP_PATH_MAX],
+                                   char first[PATH_MAX], char second[PATH_MAX])
+{
+    bool ready = platform_temp_directory_create(
+        "z23-codeindex-projection-", temporary, PLATFORM_TEMP_PATH_MAX);
+    ready = ready && platform_directory_canonical_real(
+        temporary, workspace, PLATFORM_TEMP_PATH_MAX);
+    int first_n = ready ? snprintf(first, PATH_MAX, "%s/first", workspace)
+                        : -1;
+    int second_n = ready ? snprintf(second, PATH_MAX, "%s/second", workspace)
+                         : -1;
+    return ready && first_n > 0 && (size_t)first_n < PATH_MAX &&
+           second_n > 0 && (size_t)second_n < PATH_MAX &&
+           cip_write(first) && cip_write(second);
+}
+
+/* Opens both retrieval views and captures their four canonical roots. */
+static bool cip_open_paired_views(bool ready, const char *first,
+                                  const char *second,
+                                  struct codeindex **one_view,
+                                  struct codeindex **two_view,
+                                  uint8_t source_root[32],
+                                  uint8_t projection_root[32],
+                                  uint8_t second_source[32],
+                                  uint8_t second_projection[32])
+{
+    *one_view = ready ? codeindex_open_retrieval_view(first) : NULL;
+    *two_view = ready ? codeindex_open_retrieval_view(second) : NULL;
+    return *one_view && *two_view &&
+        codeindex_source_root_sha3(*one_view, source_root) &&
+        codeindex_retrieval_projection_root_sha3(*one_view, projection_root) &&
+        codeindex_source_root_sha3(*two_view, second_source) &&
+        codeindex_retrieval_projection_root_sha3(*two_view,
+                                                 second_projection);
+}
+
+/* Applies one SQL statement when rooted, reopening the index if it took. */
+static struct codeindex *cip_open_after_sql(bool rooted, const char *root,
+                                            const char *sql)
+{
+    return rooted && cip_exec_one(root, sql)
+        ? codeindex_open_existing(root) : NULL;
+}
+
+/* True when the reopened index stays current and generation-matched. */
+static bool cip_logical_root_preserved(struct codeindex *existing,
+                                       const uint8_t source_root[32],
+                                       const uint8_t projection_root[32])
+{
+    bool current = false;
+    return existing && codeindex_retrieval_projection_is_current(
+                           existing, &current) && current &&
+           cip_generation_matches(existing, source_root, projection_root);
+}
+
+/* Applies one poison statement and confirms SQLite still self-checks. */
+static bool cip_poison_applied(const char *root, const char *sql)
+{
+    return cip_exec_one(root, sql) && cip_quick_check(root);
+}
+
+/* True when the reopened index reports its projection no longer current. */
+static bool cip_projection_refused(struct codeindex *witness)
+{
+    bool projection_current = true;
+    return witness && codeindex_retrieval_projection_is_current(
+                          witness, &projection_current) &&
+           !projection_current;
+}
+
+/* True when the witness view does not adopt the poisoned symbol row. */
+static bool cip_symbol_not_adopted(struct codeindex *witness)
+{
+    struct ci_symbol symbol = {0};
+    bool found = false;
+    return witness && codeindex_symbol(witness, "projection_main", &symbol,
+                                       &found) && !found;
+}
+
+/* Resets the exact-read counter, then reopens the view when poisoned. */
+static struct codeindex *cip_open_healed_view(const char *root, bool poisoned)
+{
+    codeindex_test_reset_exact_bytes_read();
+    return poisoned ? codeindex_open_retrieval_view(root) : NULL;
+}
+
+/* True when the healed view read exact bytes and stayed fully intact. */
+static bool cip_healed_view_rebuilt(struct codeindex *healed,
+                                    const uint8_t source_root[32],
+                                    const uint8_t projection_root[32])
+{
+    return healed && codeindex_test_exact_bytes_read() > 0 &&
+           cip_generation_matches(healed, source_root, projection_root) &&
+           cip_queries_intact(healed);
+}
+
 struct cip_poison {
     const char *name;
     const char *sql;
@@ -145,28 +243,15 @@ int test_codeindex_projection_integrity(void)
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     char first[PATH_MAX], second[PATH_MAX];
-    bool ready = platform_temp_directory_create(
-        "z23-codeindex-projection-", temporary, sizeof(temporary));
-    ready = ready && platform_directory_canonical_real(
-        temporary, workspace, sizeof(workspace));
-    int first_n = ready ? snprintf(first, sizeof(first), "%s/first", workspace)
-                        : -1;
-    int second_n = ready ? snprintf(second, sizeof(second), "%s/second", workspace)
-                         : -1;
-    ready = ready && first_n > 0 && (size_t)first_n < sizeof(first) &&
-            second_n > 0 && (size_t)second_n < sizeof(second) &&
-            cip_write(first) && cip_write(second);
+    bool ready = cip_fixture_pair_ready(temporary, workspace, first, second);
     CIP_CHECK("two independent fixtures are ready", ready);
 
-    struct codeindex *one = ready ? codeindex_open_retrieval_view(first) : NULL;
-    struct codeindex *two = ready ? codeindex_open_retrieval_view(second) : NULL;
+    struct codeindex *one = NULL, *two = NULL;
     uint8_t source_root[32], projection_root[32];
     uint8_t second_source[32], second_projection[32];
-    bool rooted = one && two &&
-        codeindex_source_root_sha3(one, source_root) &&
-        codeindex_retrieval_projection_root_sha3(one, projection_root) &&
-        codeindex_source_root_sha3(two, second_source) &&
-        codeindex_retrieval_projection_root_sha3(two, second_projection);
+    bool rooted = cip_open_paired_views(ready, first, second, &one, &two,
+                                        source_root, projection_root,
+                                        second_source, second_projection);
     CIP_CHECK("equal source trees have equal source and projection roots",
               rooted && memcmp(source_root, second_source, 32) == 0 &&
               memcmp(projection_root, second_projection, 32) == 0);
@@ -175,30 +260,25 @@ int test_codeindex_projection_integrity(void)
     codeindex_close(one);
     codeindex_close(two);
 
-    bool physical_only = rooted && cip_exec_one(
+    struct codeindex *existing = cip_open_after_sql(
+        rooted,
         first,
         "UPDATE files SET mtime=mtime+1 "
         "WHERE path='lib/net/src/projection.c'");
-    struct codeindex *existing = physical_only
-        ? codeindex_open_existing(first) : NULL;
-    bool physical_current = false;
     CIP_CHECK("non-retrieval mtime change preserves the logical root",
-              existing && codeindex_retrieval_projection_is_current(
-                  existing, &physical_current) && physical_current &&
-              cip_generation_matches(existing, source_root, projection_root));
+              cip_logical_root_preserved(existing, source_root,
+                                         projection_root));
     codeindex_close(existing);
 
-    bool reordered = rooted && cip_exec_one(
+    existing = cip_open_after_sql(
+        rooted,
         first,
         "UPDATE refs SET rowid=rowid+1000000 "
         "WHERE rowid=(SELECT MIN(rowid) FROM refs "
         "WHERE enclosing='projection_main')");
-    existing = reordered ? codeindex_open_existing(first) : NULL;
-    bool reorder_current = false;
     CIP_CHECK("physical row order does not change the canonical projection",
-              existing && codeindex_retrieval_projection_is_current(
-                  existing, &reorder_current) && reorder_current &&
-              cip_generation_matches(existing, source_root, projection_root));
+              cip_logical_root_preserved(existing, source_root,
+                                         projection_root));
     codeindex_close(existing);
 
     static const struct cip_poison poisons[] = {
@@ -228,31 +308,19 @@ int test_codeindex_projection_integrity(void)
          "WHERE enclosing='projection_main')"},
     };
     for (size_t i = 0; rooted && i < sizeof(poisons) / sizeof(poisons[0]); i++) {
-        bool poisoned = cip_exec_one(first, poisons[i].sql) &&
-                        cip_quick_check(first);
+        bool poisoned = cip_poison_applied(first, poisons[i].sql);
         struct codeindex *witness = poisoned
             ? codeindex_open_existing(first) : NULL;
-        bool projection_current = true;
-        bool refused = witness &&
-            codeindex_retrieval_projection_is_current(
-                witness, &projection_current) && !projection_current;
+        bool refused = cip_projection_refused(witness);
         if (strcmp(poisons[i].name, "full-width symbol line change") == 0) {
-            struct ci_symbol symbol = {0};
-            bool found = false;
             CIP_CHECK("full-width line poison also fails per-row adoption",
-                      witness &&
-                      codeindex_symbol(witness, "projection_main", &symbol,
-                                       &found) && !found);
+                      cip_symbol_not_adopted(witness));
         }
         codeindex_close(witness);
 
-        codeindex_test_reset_exact_bytes_read();
-        struct codeindex *healed = poisoned
-            ? codeindex_open_retrieval_view(first) : NULL;
-        bool rebuilt = healed && codeindex_test_exact_bytes_read() > 0 &&
-                       cip_generation_matches(healed, source_root,
-                                              projection_root) &&
-                       cip_queries_intact(healed);
+        struct codeindex *healed = cip_open_healed_view(first, poisoned);
+        bool rebuilt = cip_healed_view_rebuilt(healed, source_root,
+                                               projection_root);
         char detection_name[160], rebuild_name[160];
         (void)snprintf(detection_name, sizeof(detection_name),
                        "%s is detected while SQLite remains valid",
