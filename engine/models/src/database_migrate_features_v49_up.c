@@ -296,14 +296,10 @@ static int db_migrate_step_64(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
-                                    int *floor)
+static int db_migrate_step_49(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
 {
-    int applied = 0;
-    int current_ver = *version;
-    int floor_ver = *floor;
-
-    if (current_ver < 49) {
+    if (*current_ver < 49) {
         /* v49: ZCODE science — the durable plan/commit idempotency ledger
          * (zcode_science_plans: exact wire + request identity + expiry +
          * result root per write) and the six rebuildable projections of the
@@ -408,12 +404,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "expires_at INTEGER NOT NULL)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('049')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 49, floor_ver);
-        current_ver = 49;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 49, *floor_ver);
+        *current_ver = 49;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 50) {
+static int db_migrate_step_50(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 50) {
         /* v50: yardsale wallet glue — the durable plan/commit idempotency
          * ledger (yardsale_plans) behind yardsale.seller.arm and
          * yardsale.buy: request identity + the exact planned terms
@@ -431,21 +432,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "created_at INTEGER NOT NULL)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('050')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 50, floor_ver);
-        current_ver = 50;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 50, *floor_ver);
+        *current_ver = 50;
+        (*applied)++;
     }
+    return 0;
+}
 
-    {
-        int r = db_migrate_step_51(ndb, &current_ver, &floor_ver, &applied);
-        if (r < 0) {
-            *version = current_ver;
-            *floor = floor_ver;
-            return r;
-        }
-    }
-
-    if (current_ver < 52) {
+static int db_migrate_step_52(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 52) {
         /* v52: stable wallet identity and fail-closed agent-session binding.
          * Existing sessions receive empty binding columns deliberately: they
          * remain listable/revocable, but no money authorization can treat an
@@ -472,12 +469,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON agent_sessions(wallet_scope,wallet_instance_id,revoked)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('052')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 52, floor_ver);
-        current_ver = 52;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 52, *floor_ver);
+        *current_ver = 52;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 53) {
+static int db_migrate_step_53(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 53) {
         /* v53: durable, scope-wide agent allocation accounting. Unlike the
          * rolling rate window this counter never resets; it lets the dev
          * custody floor enforce a lifetime 0.05-ZCL lab allocation across
@@ -491,12 +493,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON agent_sessions(wallet_scope,lifetime_spent_zat)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('053')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 53, floor_ver);
-        current_ver = 53;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 53, *floor_ver);
+        *current_ver = 53;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 54) {
+static int db_migrate_step_54(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 54) {
         /* v54: bind durable transaction intents to the exact custody
          * snapshot and reserve recipient value plus maximum fee. Empty
          * binding fields mark legacy owner plans; agent money paths never
@@ -527,12 +534,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON vault_intents(wallet_scope,wallet_instance_id,state)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('054')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 54, floor_ver);
-        current_ver = 54;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 54, *floor_ver);
+        *current_ver = 54;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 55) {
+static int db_migrate_step_55(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 55) {
         /* v55: authenticated paid file offers. Mutable gossip bookkeeping
          * remains outside the signed body; every money-bearing term is
          * committed by the seller's network-bound Ed25519 contract. Legacy
@@ -591,12 +603,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON file_offers(expires_unix) WHERE auth_version=1");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('055')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 55, floor_ver);
-        current_ver = 55;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 55, *floor_ver);
+        *current_ver = 55;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 56) {
+static int db_migrate_step_56(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 56) {
         /* v56: durable file-market payment claim locators. The exact signed
          * claim and offer wires are retained so restart does not depend on an
          * expiring gossip-cache row. status/height/confirmations are a
@@ -639,12 +656,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON market_payment_claims(txid)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('056')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 56, floor_ver);
-        current_ver = 56;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 56, *floor_ver);
+        *current_ver = 56;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 57) {
+static int db_migrate_step_57(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 57) {
         /* v57: owner-private paid-file content registry. One atomic row binds
          * an authenticated offer_id to the canonical local regular file and
          * its complete bounded chunk-digest manifest. The private path and
@@ -670,12 +692,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON market_contents(registered_at DESC)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('057')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 57, floor_ver);
-        current_ver = 57;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 57, *floor_ver);
+        *current_ver = 57;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 58) {
+static int db_migrate_step_58(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 58) {
         /* v58: application-bound vault intents. Higher-level transactions
          * (starting with market_purchase) reuse the one wallet reservation
          * authority while gaining durable request idempotency. The request
@@ -697,12 +724,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "WHERE application_kind<>'' AND idempotency_key<>''");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('058')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 58, floor_ver);
-        current_ver = 58;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 58, *floor_ver);
+        *current_ver = 58;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 59) {
+static int db_migrate_step_59(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 59) {
         /* v59: buyer-side paid-file assembly. The destination and same-dir
          * staging paths are operator-private. One parent row owns sequential
          * progress; child rows retain the authenticated digest and exact size
@@ -745,12 +777,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON market_download_chunks(plan_id,chunk_index)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('059')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 59, floor_ver);
-        current_ver = 59;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 59, *floor_ver);
+        *current_ver = 59;
+        (*applied)++;
     }
+    return 0;
+}
 
-    if (current_ver < 60) {
+static int db_migrate_step_60(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 60) {
         /* v60: exact input reservations for durable transaction intents.
          * Aggregate ZCL reservations protect the custody budget; this table
          * independently prevents concurrent prepared plans from claiming the
@@ -770,21 +807,17 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "ON vault_intent_inputs(plan_id)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('060')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 60, floor_ver);
-        current_ver = 60;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 60, *floor_ver);
+        *current_ver = 60;
+        (*applied)++;
     }
+    return 0;
+}
 
-    {
-        int r = db_migrate_step_61(ndb, &current_ver, &floor_ver, &applied);
-        if (r < 0) {
-            *version = current_ver;
-            *floor = floor_ver;
-            return r;
-        }
-    }
-
-    if (current_ver < 62) {
+static int db_migrate_step_62(struct node_db *ndb, int *current_ver,
+                              int *floor_ver, int *applied)
+{
+    if (*current_ver < 62) {
         /* v62: singleton owner file-market seller signing key. The seed rests
          * only as a wallet_metadata_encrypt envelope (passphrase-wrapped DEK,
          * public key as AAD); the public key column is the non-secret signer
@@ -797,22 +830,37 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
             "created_at INTEGER NOT NULL CHECK(created_at>0))");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('062')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 62, floor_ver);
-        current_ver = 62;
-        applied++;
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 62, *floor_ver);
+        *current_ver = 62;
+        (*applied)++;
     }
+    return 0;
+}
 
-    {
-        int r = db_migrate_step_63(ndb, &current_ver, &floor_ver, &applied);
-        if (r < 0) {
-            *version = current_ver;
-            *floor = floor_ver;
-            return r;
-        }
-    }
+typedef int (*db_migrate_step_fn)(struct node_db *ndb, int *current_ver,
+                                  int *floor_ver, int *applied);
 
-    {
-        int r = db_migrate_step_64(ndb, &current_ver, &floor_ver, &applied);
+/* v49..v64 in ascending order; each step gates on its own version. */
+static const db_migrate_step_fn k_db_migrate_steps_49_to_64[] = {
+    db_migrate_step_49, db_migrate_step_50, db_migrate_step_51,
+    db_migrate_step_52, db_migrate_step_53, db_migrate_step_54,
+    db_migrate_step_55, db_migrate_step_56, db_migrate_step_57,
+    db_migrate_step_58, db_migrate_step_59, db_migrate_step_60,
+    db_migrate_step_61, db_migrate_step_62, db_migrate_step_63,
+    db_migrate_step_64,
+};
+
+int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
+                                    int *floor)
+{
+    int applied = 0;
+    int current_ver = *version;
+    int floor_ver = *floor;
+
+    for (size_t i = 0; i < sizeof(k_db_migrate_steps_49_to_64) /
+                               sizeof(k_db_migrate_steps_49_to_64[0]); i++) {
+        int r = k_db_migrate_steps_49_to_64[i](ndb, &current_ver, &floor_ver,
+                                               &applied);
         if (r < 0) {
             *version = current_ver;
             *floor = floor_ver;

@@ -448,7 +448,6 @@ engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:53
 engine/jobs/src/validate_headers_stage.c:step_validate:23
 engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
 engine/models/src/database_migrate_features.c:node_db_migrate_features:37
-engine/models/src/database_migrate_features_v49_up.c:node_db_migrate_features_v49_up:25
 engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
 engine/models/src/database_schema_preflight.c:inspect_schema:19
 engine/models/src/database_schema_preflight.c:node_db_schema_preflight_existing:24
