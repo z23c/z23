@@ -1389,6 +1389,11 @@ static bool copy_gate_function(FILE *out, const char *source, const char *name)
     return fwrite(start, 1, len, out) == len;
 }
 
+/* Pure kill deadline for one probe bash child (it forks jsonq repeatedly and
+ * one case writes 17 MiB); a 5 s limit killed it on a heavily loaded host.
+ * Nothing asserts on the elapsed time. */
+#define CANARY_PROBE_TIMEOUT_MS 120000
+
 static bool write_freshness_probe(const char *path, const char *source)
 {
     FILE *out = fopen(path, "w");
@@ -1446,7 +1451,7 @@ static bool run_freshness_probes(const char *script, const char *dir, const char
         const char *argv[] = {"bash", script, dir, cases[i].ts,
                               cases[i].now, cases[i].max, parser, NULL};
         char output[128];
-        int rc = zcl_spawn_capture(argv, output, sizeof(output), 5000);
+        int rc = zcl_spawn_capture(argv, output, sizeof(output), CANARY_PROBE_TIMEOUT_MS);
         if (rc != 0 || strcmp(output, cases[i].expected) != 0) {
             fprintf(stderr, "canary freshness case %zu: rc=%d output=%s\n", i, rc, output);
             ok = false;
@@ -1476,7 +1481,7 @@ static bool run_canary_identity_probes(const char *script, const char *dir, cons
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         const char *argv[] = {"bash", script, dir, cases[i].json, "1000000", "604800", parser, "identity", NULL};
         char output[256];
-        int rc = zcl_spawn_capture(argv, output, sizeof(output), 5000);
+        int rc = zcl_spawn_capture(argv, output, sizeof(output), CANARY_PROBE_TIMEOUT_MS);
         if (rc != 0 || strcmp(output, cases[i].expected) != 0) {
             fprintf(stderr, "canary identity case %zu: rc=%d output=%s\n", i, rc, output);
             ok = false;
@@ -1485,7 +1490,7 @@ static bool run_canary_identity_probes(const char *script, const char *dir, cons
     const char *missing[] = {"bash", script, dir, cases[0].json, "1000000",
                              "604800", "/nonexistent/z23-jsonq", "identity", NULL};
     char output[128];
-    int rc = zcl_spawn_capture(missing, output, sizeof(output), 5000);
+    int rc = zcl_spawn_capture(missing, output, sizeof(output), CANARY_PROBE_TIMEOUT_MS);
     return rc == 0 && strcmp(output, "||unavailable\n") == 0 && ok;
 }
 
