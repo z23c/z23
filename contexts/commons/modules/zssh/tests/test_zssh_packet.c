@@ -712,30 +712,37 @@ static void limits_set_cipher(void)
 }
 
 /* ---- wire helpers ------------------------------------------------------- */
-static void test_wire(void)
+static void wire_check_u32_u64(uint8_t *b)
 {
-    group_begin();
-    uint8_t b[64];
     CHECK(zssh_get_u32((const uint8_t[]){1, 2, 3, 4}) == 0x01020304u);
     zssh_put_u32(b, 0xdeadbeefu);
     CHECK(b[0] == 0xde && b[3] == 0xef);
     zssh_put_u64(b, 0x0102030405060708ull);
     CHECK(b[0] == 1 && b[7] == 8);
     CHECK(zssh_ct_eq(b, b, 8) && zssh_ct_eq(nullptr, nullptr, 0));
-    {
-        uint8_t x[32], y[32];
-        for (int i = 0; i < 32; i++) x[i] = y[i] = (uint8_t)(i * 5 + 1);
-        CHECK(zssh_ct_eq(x, y, 1) && zssh_ct_eq(x, y, 32) && zssh_ct_eq(x, y, 0));
-        y[31] ^= 1;
-        CHECK(!zssh_ct_eq(x, y, 32) && zssh_ct_eq(x, y, 31));
-        y[31] ^= 1; y[0] ^= 0x80;
-        CHECK(!zssh_ct_eq(x, y, 1) && !zssh_ct_eq(x, y, 32));
-    }
+}
+
+static void wire_check_ct_eq_pairs(void)
+{
+    uint8_t x[32], y[32];
+    for (int i = 0; i < 32; i++) x[i] = y[i] = (uint8_t)(i * 5 + 1);
+    CHECK(zssh_ct_eq(x, y, 1) && zssh_ct_eq(x, y, 32) && zssh_ct_eq(x, y, 0));
+    y[31] ^= 1;
+    CHECK(!zssh_ct_eq(x, y, 32) && zssh_ct_eq(x, y, 31));
+    y[31] ^= 1; y[0] ^= 0x80;
+    CHECK(!zssh_ct_eq(x, y, 1) && !zssh_ct_eq(x, y, 32));
+}
+
+static void wire_check_ct_eq_flip(const uint8_t *b)
+{
     uint8_t cx[8]; memcpy(cx, b, 8);
     for (int i = 0; i < 8; i++) { cx[i] ^= 0x10; CHECK(!zssh_ct_eq(b, cx, 8)); cx[i] ^= 0x10; }
+}
 
+static void wire_check_wr_rd_roundtrip(uint8_t *b, size_t cap)
+{
     struct zssh_wr w;
-    zssh_wr_init(&w, b, sizeof b);
+    zssh_wr_init(&w, b, cap);
     zssh_wr_u8(&w, 7); zssh_wr_bool(&w, true); zssh_wr_u32(&w, 0x11223344);
     zssh_wr_cstr(&w, "abc,def");
     zssh_wr_string(&w, (const uint8_t *)"xy", 2);
@@ -750,6 +757,12 @@ static void test_wire(void)
     CHECK(n == 2 && zssh_rd_done(&r) && zssh_rd_left(&r) == 0);
     (void)zssh_rd_u8(&r);
     CHECK(!zssh_rd_ok(&r) && zssh_rd_u32(&r) == 0);
+}
+
+static void wire_check_rd_overrun(void)
+{
+    struct zssh_rd r;
+    const uint8_t *s; size_t n;
     /* string longer than the input: sticky error */
     uint8_t lie[8] = {0, 0, 0, 100, 1, 2, 3, 4};
     zssh_rd_init(&r, lie, 8);
@@ -765,12 +778,23 @@ static void test_wire(void)
     CHECK(zssh_rd_ok(&r) && zssh_rd_done(&r) && zssh_rd_left(&r) == 0);
     zssh_rd_bytes(&r, &s, 1);
     CHECK(!zssh_rd_ok(&r));
+}
+
+static void wire_check_rd_edge_end(void)
+{
+    struct zssh_rd r;
+    const uint8_t *s;
     /* non-NULL buffer read to its end (offset == len), then a zero-byte read */
     uint8_t edge[2] = {1, 2};
     zssh_rd_init(&r, edge, 2);
     zssh_rd_bytes(&r, &s, 2);
     zssh_rd_bytes(&r, &s, 0);
     CHECK(zssh_rd_ok(&r) && zssh_rd_done(&r) && zssh_rd_left(&r) == 0);
+}
+
+static void wire_check_wr_overflow(void)
+{
+    struct zssh_wr w;
     /* writer overflow: nothing written past the cap, sticky */
     uint8_t small[5] = {0};
     zssh_wr_init(&w, small, 5);
@@ -779,7 +803,11 @@ static void test_wire(void)
     CHECK(!zssh_wr_ok(&w) && w.off == 4);
     zssh_wr_u8(&w, 9);
     CHECK(!zssh_wr_ok(&w) && small[4] == 0);
+}
 
+static void wire_check_mpint(void)
+{
+    struct zssh_wr w;
     /* mpint (RFC 4251 5 examples) */
     static const struct { uint8_t in[4]; size_t n; uint8_t out[8]; size_t on; } mp[] = {
         { {0}, 0, {0, 0, 0, 0}, 4 },
@@ -795,7 +823,11 @@ static void test_wire(void)
         zssh_wr_mpint(&w, mp[i].in, mp[i].n);
         CHECK(zssh_wr_ok(&w) && w.off == mp[i].on && memcmp(o, mp[i].out, mp[i].on) == 0);
     }
+}
 
+static void wire_check_null_fail_closed(void)
+{
+    struct zssh_wr w;
     /* NULL with n > 0 fails closed: sticky, nothing written, no dereference */
     {
         uint8_t o[16];
@@ -815,7 +847,11 @@ static void test_wire(void)
         zssh_wr_mpint(&w, nullptr, 0);
         CHECK(zssh_wr_ok(&w) && w.off == 8);
     }
+}
 
+static void wire_check_namelist(void)
+{
+    const uint8_t *s; size_t n;
     /* name-lists */
     const char *cl = "a,bb,ccc", *sv = "zz,ccc,bb";
     struct zssh_namelist c = { (const uint8_t *)cl, strlen(cl) };
@@ -830,16 +866,30 @@ static void test_wire(void)
     CHECK(zssh_namelist_pick(c, none, &s, &n) == -1 && s == nullptr && n == 0);
     struct zssh_namelist empty = { nullptr, 0 };
     CHECK(zssh_namelist_pick(empty, sl, &s, &n) == -1 && !zssh_namelist_has(empty, "a"));
+}
+
+static void test_wire(void)
+{
+    group_begin();
+    uint8_t b[64];
+    wire_check_u32_u64(b);
+    wire_check_ct_eq_pairs();
+    wire_check_ct_eq_flip(b);
+    wire_check_wr_rd_roundtrip(b, sizeof b);
+    wire_check_rd_overrun();
+    wire_check_rd_edge_end();
+    wire_check_wr_overflow();
+    wire_check_mpint();
+    wire_check_null_fail_closed();
+    wire_check_namelist();
     group_end("wire helpers (rd/wr/mpint/namelist/ct)");
 }
 
 /* ---- txq ---------------------------------------------------------------- */
 static struct zssh_txq g_q;
 
-static void test_txq(void)
+static void txq_check_reserve_commit(struct zssh_txq *q)
 {
-    group_begin();
-    struct zssh_txq *q = &g_q;
     zssh_txq_init(q);
     CHECK(zssh_txq_pending(q) == 0 && zssh_txq_room(q) == ZSSH_TXQ_SIZE);
     uint8_t *w = zssh_txq_reserve(q, 100);
@@ -866,12 +916,20 @@ static void test_txq(void)
     CHECK(zssh_txq_reserve(q, 50) != nullptr && zssh_txq_reserve(q, 10) != nullptr);
     CHECK(!zssh_txq_commit(q, 11) && zssh_txq_commit(q, 10) && zssh_txq_pending(q) == 70);
     CHECK(zssh_txq_consume(q, 10) && zssh_txq_pending(q) == 60);
+}
+
+static void txq_check_null_drain(struct zssh_txq *q)
+{
     /* NULL with n > 0 fails closed and leaves the queue untouched */
     CHECK(!zssh_txq_append(q, nullptr, 5) && zssh_txq_pending(q) == 60 && q->reserved == 0);
     CHECK(zssh_txq_append(q, nullptr, 0) && zssh_txq_pending(q) == 60);
     CHECK(!zssh_txq_consume(q, 61) && zssh_txq_pending(q) == 60);
     CHECK(zssh_txq_consume(q, 10) && zssh_txq_pending(q) == 50);
     CHECK(zssh_txq_consume(q, 50) && q->head == 0 && q->tail == 0);
+}
+
+static void txq_check_fill_brim(struct zssh_txq *q)
+{
     /* fill to the brim, nothing more fits */
     CHECK(zssh_txq_reserve(q, ZSSH_TXQ_SIZE + 1) == nullptr);
     uint8_t *all = zssh_txq_reserve(q, ZSSH_TXQ_SIZE);
@@ -882,10 +940,14 @@ static void test_txq(void)
     CHECK(zssh_txq_room(q) == 0 && zssh_txq_reserve(q, 1) == nullptr);
     uint8_t one = 1;
     CHECK(!zssh_txq_append(q, &one, 1));
+}
+
+static void txq_check_compact(struct zssh_txq *q, uint8_t *tail)
+{
+    const uint8_t *pk; size_t pn;
     /* partial consume then compaction keeps order and content */
     CHECK(zssh_txq_consume(q, 1000));
     CHECK(zssh_txq_room(q) == 1000);
-    uint8_t tail[1000];
     for (int i = 0; i < 1000; i++) tail[i] = (uint8_t)(i ^ 0x33);
     CHECK(zssh_txq_append(q, tail, 1000));       /* forces memmove */
     CHECK(q->head == 0 && zssh_txq_pending(q) == ZSSH_TXQ_SIZE);
@@ -897,10 +959,26 @@ static void test_txq(void)
     CHECK(zssh_txq_consume(q, ZSSH_TXQ_SIZE) && zssh_txq_pending(q) == 0);
     zssh_txq_peek(q, &pk, &pn);
     CHECK(pn == 0);                              /* drained queue peeks empty */
+}
+
+static void txq_check_relocate(struct zssh_txq *q, const uint8_t *tail)
+{
     /* emptying the queue relocates the tail, so it drops an open reservation */
     CHECK(zssh_txq_append(q, tail, 10));
     CHECK(zssh_txq_reserve(q, 20) != nullptr && q->reserved == 20);
     CHECK(zssh_txq_consume(q, 10) && q->reserved == 0 && !zssh_txq_commit(q, 1));
+}
+
+static void test_txq(void)
+{
+    group_begin();
+    struct zssh_txq *q = &g_q;
+    uint8_t tail[1000];
+    txq_check_reserve_commit(q);
+    txq_check_null_drain(q);
+    txq_check_fill_brim(q);
+    txq_check_compact(q, tail);
+    txq_check_relocate(q, tail);
     group_end("bounded output queue");
 }
 
