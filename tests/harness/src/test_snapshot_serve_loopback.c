@@ -950,26 +950,39 @@ static int test_snapshot_offer_swarm_gate(void)
 {
     int failures = 0;
 
-    TEST("snapshot send tick: the chunk coordinator is skipped unless the "
-         "peer has a manifest and is past handshake, even with the swarm "
-         "active") {
+    /* Pins only the CLOSED gate: no manifest, or a peer still below
+     * PEER_HANDSHAKE_COMPLETE (PEER_CONNECTED), with the swarm active. The
+     * OPEN branch (manifest and >= PEER_HANDSHAKE_COMPLETE) is not pinned:
+     * g_swarm has no test seam to seed a manifest, so an open gate with an
+     * empty manifest queues nothing observable. */
+    TEST("snapshot send tick: the chunk coordinator queues nothing while the "
+         "swarm is active but the peer has no manifest, or is still only "
+         "PEER_CONNECTED") {
         struct ot_rig r;
-
+        bool claimed = false;
         int32_t inflight_before = 0;
+        int32_t inflight_after = 0;
+        int queued_no_manifest = 0;
+        int queued_connected = 0;
 
         ASSERT(ot_rig_init(&r, 150));
-        ASSERT(msgprocessor_test_swarm_try_claim());
+        claimed = msgprocessor_test_swarm_try_claim();
         inflight_before = r.node->swarm_inflight_chunk;
         r.node->swarm_manifest_received = false;
         mp_snapshot_send_tick(&r.mp, r.node);
-        ASSERT(ot_queued(&r) == 0);
+        queued_no_manifest = ot_queued(&r);
         r.node->swarm_manifest_received = true;
         r.node->state = PEER_CONNECTED;
         mp_snapshot_send_tick(&r.mp, r.node);
-        ASSERT(ot_queued(&r) == 0);
-        ASSERT(r.node->swarm_inflight_chunk == inflight_before);
-        msgprocessor_test_swarm_release();
+        queued_connected = ot_queued(&r);
+        inflight_after = r.node->swarm_inflight_chunk;
+        if (claimed)
+            msgprocessor_test_swarm_release();
         ot_rig_free(&r);
+        ASSERT(claimed);
+        ASSERT(queued_no_manifest == 0);
+        ASSERT(queued_connected == 0);
+        ASSERT(inflight_after == inflight_before);
         PASS();
     } _test_next:;
     return failures;
