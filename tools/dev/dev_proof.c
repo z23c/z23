@@ -1311,6 +1311,12 @@ static bool dp_failure_status_read(const struct proof_paths *paths,
     return true;
 }
 
+static const char *proof_missing_detail(const char *why)
+{
+    return strncmp(why, "remote_toolchain_", 17) == 0
+               ? why : "exact_receipt_missing";
+}
+
 static bool proof_status_read_platform(const char *repo_root,
                                        const char *local_commit,
                                        const char *remote_base,
@@ -1394,8 +1400,7 @@ static bool proof_status_read_platform(const char *repo_root,
     out->state = ZCL_DEV_PROOF_STATE_MISSING;
     /* A receipt refused for its toolchain is not "missing": say why. */
     (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                   strncmp(why, "remote_toolchain_", 17) == 0
-                       ? why : "exact_receipt_missing");
+                   proof_missing_detail(why));
     return true;
 }
 
