@@ -44,21 +44,8 @@ static bool find_diversifier(uint8_t d[11])
     return false;
 }
 
-/* ── Native C23 Groth16 prover baseline ───────────────────────────────
- *
- * NON-GATING diagnostic: measures the native circuits
- * (sapling_output_synthesize / sapling_spend_synthesize) against the
- * trusted-setup proving keys and reports var/constraint counts.
- *
- * A native circuit only round-trips when its auxiliary assignment matches the
- * pk L query and its query densities match the key. `a_len` is a compact
- * query density, not the total variable count, so it is not compared to
- * num_vars; groth16_prove() validates the densities. The exact circuit gates
- * below carry the assertions. */
-static void native_circuit_baseline(void)
+static void native_output_baseline(void)
 {
-    printf("\n--- H1 baseline: native C23 circuit counts (NON-GATING) ---\n");
-
     /* OUTPUT circuit vs sapling-output proving key ------------------- */
     size_t out_pk_len = 0;
     const uint8_t *out_pk_data = sapling_get_output_pk(&out_pk_len);
@@ -116,7 +103,10 @@ static void native_circuit_baseline(void)
     } else {
         printf("  OUTPUT pk: not loaded\n");
     }
+}
 
+static void native_spend_baseline(void)
+{
     /* SPEND circuit vs sapling-spend proving key --------------------- */
     size_t sp_pk_len = 0;
     const uint8_t *sp_pk_data = sapling_get_spend_pk(&sp_pk_len);
@@ -167,8 +157,28 @@ static void native_circuit_baseline(void)
     } else {
         printf("  SPEND  pk: not loaded\n");
     }
+}
+
+/* ── Native C23 Groth16 prover baseline ───────────────────────────────
+ *
+ * NON-GATING diagnostic: measures the native circuits
+ * (sapling_output_synthesize / sapling_spend_synthesize) against the
+ * trusted-setup proving keys and reports var/constraint counts.
+ *
+ * A native circuit only round-trips when its auxiliary assignment matches the
+ * pk L query and its query densities match the key. `a_len` is a compact
+ * query density, not the total variable count, so it is not compared to
+ * num_vars; groth16_prove() validates the densities. The exact circuit gates
+ * below carry the assertions. */
+static void native_circuit_baseline(void)
+{
+    printf("\n--- H1 baseline: native C23 circuit counts (NON-GATING) ---\n");
+
+    native_output_baseline();
+    native_spend_baseline();
     printf("--- end H1 baseline (informational) ---\n");
 }
+
 
 /* Output is gated as one exact production circuit. Params-free: proves the
  * C23 synthesis has the trusted-setup shape and an honest, fully-derived
@@ -227,58 +237,62 @@ static int output_circuit_shape_gate(void)
     return failures;
 }
 
-/* Sapling SPEND circuit port: shape + value + determinism gate.
- *
- * Params-free (pure R1CS synthesis, no proving key); pins the ported prefix
- * (sections 1..21) against ground truth:
- *   (1) cumulative constraint counts per section == the reference trace's
- *       cumulative boundaries;
- *   (2) the in-circuit nk / rk wires carry the reference-correct Jubjub
- *       points, nk also pinned to the librustzcash reference vector;
- *  (2b) section 10's 256 blake2s digest bits == the out-of-circuit CRH^ivk
- *       over the same preimage, and its 251 truncated bits == the pinned
- *       librustzcash ivk (a matching COUNT cannot see a wrong rotation
- *       constant or SIGMA row);
- *  (2c) every section-10 wire is BOUND: flipping any one (keeping
- *       booleanity) must make the R1CS unsatisfiable (count and value checks
- *       read only the honest witness and cannot see an UNDER-constrained
- *       gadget, which would let a prover choose its own ivk);
- *  (2d) sections 11..16, the note-content half: g_d == GH("Zcash_gd", d);
- *       pk_d == [ivk] g_d (the first variable-base multiplication);
- *       repr(g_d)/repr(pk_d) match the compressed encodings; cv is BOUND to
- *       public input 3/4, so the witness must carry the real
- *       [value]G_v + [rcv]G_rcv;
- *  (2e) sections 17..20, the note commitment: the section-17 hash point and
- *       the section-20 commitment point are diffed, x AND y, against the
- *       out-of-circuit table-driven Pedersen hash + Jubjub scalar mul, and
- *       cm.x is tied to sapling_compute_cm() (the note-commitment tree leaf);
- *  (2f) sections 17..21 end to end: the anchor wire is diffed against an
- *       out-of-circuit fold seeded from sapling_compute_cm()'s own output
- *       over the same witnessed path;
- *   (3) synthesis is deterministic (identical inputs => byte-identical witness).
- * Sections 22..28 are not yet ported, so this is a PARTIAL-prefix gate, not a
- * spend round-trip. Returns the number of failures (0 == green). */
-static int spend_circuit_shape_gate(void)
+/* State shared by the spend shape-gate helpers below: the witness and public
+ * inputs, the traced constraint system, and the values each section derives
+ * for the sections after it to check. */
+struct spend_sec10_flips {
+    size_t first_var, last_var;
+    size_t digest_tried, digest_detected;
+    size_t flips_tried, flips_detected;
+};
+
+struct spend_gate_ctx {
+    uint8_t ak[32];
+    struct sapling_spend_witness wit;
+    struct sapling_spend_inputs pub;
+    uint8_t rk_bytes[32];
+    bool rk_ok;
+    uint8_t cv_bytes[32];
+    bool cv_ok;
+    struct spend_section_shape sections[29];
+    size_t nsec;
+    struct spend_wire_probe probe;
+    struct constraint_system cs;
+    bool synth_ok;
+    uint8_t nk_bytes[32];
+    uint8_t ivk_full[32];
+    uint8_t ivk_truncated[32];
+    uint8_t gd_bytes[32];
+    uint8_t pkd_bytes[32];
+    bool pkd_derived;
+    uint8_t cm_api[32];
+    bool cm_api_ok;
+    struct jub_point cm_ref_pt;
+    bool cm_ref_ok;
+    struct spend_sec10_flips sec10;
+};
+
+/* Builds the fixed spend witness, including the authentication path, then
+ * checks that its diversifier is a Jubjub point. Returns the failure count. */
+static int spend_gate_build_witness(struct spend_gate_ctx *g)
 {
-    printf("\n--- H3: Sapling SPEND circuit port shape gate (sections 1-28) ---\n");
     int failures = 0;
+    struct sapling_spend_witness *wit = &g->wit;
 
     /* Fixed witness reusing the H2 KAT scalars so the nk wire ties to the
      * pinned librustzcash reference vector. */
-    uint8_t ak[32];
-    sapling_ask_to_ak(SPEND_ORACLE_KAT_ASK, ak);
+    sapling_ask_to_ak(SPEND_ORACLE_KAT_ASK, g->ak);
 
-    struct sapling_spend_witness wit;
-    memset(&wit, 0, sizeof wit);
-    memcpy(wit.ak, ak, 32);
-    memcpy(wit.nsk, SPEND_ORACLE_KAT_NSK, 32);
-    wit.ar[0] = 0x03;               /* small fixed re-randomization scalar */
-    memcpy(wit.pk_d, ak, 32);
-    wit.value = UINT64_C(54321);
-    wit.rcv[0] = 0x71;              /* small canonical Fs scalar (< 2^252) */
-    wit.rcv[1] = 0x0d;
-    wit.rcm[0] = 0x5c;              /* note commitment randomness (sections 18-20) */
-    wit.rcm[1] = 0x23;
+    memset(wit, 0, sizeof *wit);
+    memcpy(wit->ak, g->ak, 32);
+    memcpy(wit->nsk, SPEND_ORACLE_KAT_NSK, 32);
+    wit->ar[0] = 0x03;               /* small fixed re-randomization scalar */
+    memcpy(wit->pk_d, g->ak, 32);
+    wit->value = UINT64_C(54321);
+    wit->rcv[0] = 0x71;              /* small canonical Fs scalar (< 2^252) */
+    wit->rcv[1] = 0x0d;
+    wit->rcm[0] = 0x5c;              /* note commitment randomness (sections 18-20) */
+    wit->rcm[1] = 0x23;
     /* The 32 authentication-path siblings section 21 folds cm.x through:
      * canonical Fr encodings from a Pedersen Merkle hash, with position bits
      * that are not a function of depth parity alone. */
@@ -288,38 +302,52 @@ static int spend_circuit_shape_gate(void)
         pa[1] = 0x5b;
         pb[0] = (uint8_t)(d * 7u);
         pb[3] = 0x11;
-        pedersen_merkle_hash(0, pa, pb, wit.auth_path[d]);
-        wit.auth_path_bits[d] = (((d * 5u) + (d / 3u)) & 1u) != 0u;
+        pedersen_merkle_hash(0, pa, pb, wit->auth_path[d]);
+        wit->auth_path_bits[d] = (((d * 5u) + (d / 3u)) & 1u) != 0u;
     }
     PROVER_CHECK("found a diversifier whose group_hash is a Jubjub point",
-                 find_diversifier(wit.diversifier));
+                 find_diversifier(wit->diversifier));
+    return failures;
+}
 
-    uint8_t rk_bytes[32];
-    bool rk_ok = sapling_compute_rk(ak, wit.ar, rk_bytes);
-    PROVER_CHECK("compute_rk produced rk for the fixed witness", rk_ok);
+/* Derives rk and cv from the witness, then every public input from it. */
+static int spend_gate_derive_publics(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+
+    g->rk_ok = sapling_compute_rk(g->ak, g->wit.ar, g->rk_bytes);
+    PROVER_CHECK("compute_rk produced rk for the fixed witness", g->rk_ok);
 
     /* cv is a bound PUBLIC INPUT (section 14) and must be the real value
      * commitment. */
-    uint8_t cv_bytes[32];
-    bool cv_ok = sapling_value_commit(wit.value, wit.rcv, cv_bytes);
-    PROVER_CHECK("value_commit produced cv for the fixed witness", cv_ok);
+    g->cv_ok = sapling_value_commit(g->wit.value, g->wit.rcv, g->cv_bytes);
+    PROVER_CHECK("value_commit produced cv for the fixed witness", g->cv_ok);
 
-    struct sapling_spend_inputs pub;
-    memset(&pub, 0, sizeof pub);
+    memset(&g->pub, 0, sizeof g->pub);
     /* Sections 5, 14, 22 and 28 bind rk, cv, the anchor and the nullifier,
      * so all four are real fixture values (placeholders are unsatisfiable). */
     PROVER_CHECK("derived every public input from the witness",
-                 sapling_spend_derive_public(&wit, &pub));
+                 sapling_spend_derive_public(&g->wit, &g->pub));
+    return failures;
+}
 
-    struct spend_section_shape sections[29];
-    size_t nsec = 0;
-    struct spend_wire_probe probe;
-    struct constraint_system cs;
-    cs_init(&cs);
-    bool synth_ok = sapling_spend_synthesize_traced(
-        &cs, &wit, &pub, sections, 29, &nsec, &probe);
-    PROVER_CHECK("traced spend synthesis succeeded", synth_ok);
+/* Runs the traced spend synthesis into the shared constraint system. */
+static int spend_gate_synthesize(struct spend_gate_ctx *g)
+{
+    int failures = 0;
 
+    g->nsec = 0;
+    cs_init(&g->cs);
+    g->synth_ok = sapling_spend_synthesize_traced(
+        &g->cs, &g->wit, &g->pub, g->sections, 29, &g->nsec, &g->probe);
+    PROVER_CHECK("traced spend synthesis succeeded", g->synth_ok);
+    return failures;
+}
+
+/* Per-section cumulative counts and the total against the reference trace. */
+static int spend_gate_check_section_counts(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* (1) Per-section cumulative constraint counts vs the reference trace. */
     static const size_t REF_CUM[28] =
         {20, 272, 1022, 1028, 1030, 1282, 2032, 2808, 3584, 24590,
@@ -355,19 +383,26 @@ static int spend_circuit_shape_gate(void)
         "S27 nf computation — in-circuit blake2s (cum 98775)",
         "S28 pack nullifier (cum 98777)",
     };
-    PROVER_CHECK("synthesized all 28 sections", nsec == 28);
-    for (size_t i = 0; i < 28 && i < nsec; i++)
-        PROVER_CHECK(REF_NAME[i], sections[i].num_constraints == REF_CUM[i]);
+    PROVER_CHECK("synthesized all 28 sections", g->nsec == 28);
+    for (size_t i = 0; i < 28 && i < g->nsec; i++)
+        PROVER_CHECK(REF_NAME[i], g->sections[i].num_constraints == REF_CUM[i]);
     PROVER_CHECK("7 public inputs allocated (bellman-faithful low indices)",
-                 cs.num_inputs == 7);
+                 g->cs.num_inputs == 7);
     PROVER_CHECK("full spend constraint count == 98777",
-                 cs.num_constraints == 98777);
+                 g->cs.num_constraints == 98777);
+    return failures;
+}
+
+/* Per-section deltas against the reference trace and the section-10 cost. */
+static int spend_gate_check_section_deltas(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* Per-section DELTAS as well as cumulative totals (compensating errors
      * in adjacent sections cancel only in the total).
      * 3252 = 13*251 - 11 is double-and-add over the 251 truncated ivk bits;
      * 1265 = 64 + 191 + 252 + 750 + 6 + 2 is expose_value_commitment;
      * 44224 = 32 * 1382 is the whole Merkle fold. */
-    if (nsec >= 21) {
+    if (g->nsec >= 21) {
         static const size_t REF_DELTA[11] =
             {4, 16, 3252, 1265, 776, 776, 982, 252, 750, 6, 44224};
         static const char *REF_DELTA_NAME[11] = {
@@ -386,44 +421,69 @@ static int spend_circuit_shape_gate(void)
         };
         for (size_t i = 0; i < 11; i++)
             PROVER_CHECK(REF_DELTA_NAME[i],
-                         sections[10 + i].num_constraints
-                             - sections[9 + i].num_constraints
+                         g->sections[10 + i].num_constraints
+                             - g->sections[9 + i].num_constraints
                                  == REF_DELTA[i]);
     }
     /* Section 10 alone must cost what the reference blake2s costs for a
      * 512-bit all-allocated input: 21518 constraints, of which 512 are the
      * input allocs the caller pays, leaving 21006 for the hash. */
     PROVER_CHECK("S10 delta == 21006 (bellman blake2s, 512-bit input)",
-                 nsec >= 10 && sections[9].num_constraints
-                             - sections[8].num_constraints == 21006);
+                 g->nsec >= 10 && g->sections[9].num_constraints
+                             - g->sections[8].num_constraints == 21006);
+    return failures;
+}
+
+/* (2) nk wire: the out-of-circuit nk is pinned to the reference, and the
+ * in-circuit nk wires carry the same Jubjub point. */
+static int spend_gate_check_nk_wire(struct spend_gate_ctx *g)
+{
+    int failures = 0;
 
     /* (2) Value gate: in-circuit wires carry reference-correct points; nk is
      *     pinned to the librustzcash reference (H2 KAT). */
-    uint8_t nk_bytes[32];
-    sapling_nsk_to_nk(wit.nsk, nk_bytes);
+    sapling_nsk_to_nk(g->wit.nsk, g->nk_bytes);
     PROVER_CHECK("out-of-circuit nk == pinned librustzcash reference (H2 KAT)",
-                 memcmp(nk_bytes, SPEND_ORACLE_KAT_NK, 32) == 0);
+                 memcmp(g->nk_bytes, SPEND_ORACLE_KAT_NK, 32) == 0);
 
-    struct jub_point nk_pt, rk_pt;
-    struct fr nk_x, nk_y, rk_x, rk_y;
-    bool nk_dec = jub_from_bytes(&nk_pt, nk_bytes);
-    bool rk_dec = rk_ok && jub_from_bytes(&rk_pt, rk_bytes);
+    struct jub_point nk_pt;
+    struct fr nk_x, nk_y;
+    bool nk_dec = jub_from_bytes(&nk_pt, g->nk_bytes);
     if (nk_dec) { jub_get_x(&nk_x, &nk_pt); jub_get_y(&nk_y, &nk_pt); }
-    if (rk_dec) { jub_get_x(&rk_x, &rk_pt); jub_get_y(&rk_y, &rk_pt); }
 
-    bool nk_wire_ok = synth_ok && nk_dec
-        && probe.nk_x < cs.num_vars && probe.nk_y < cs.num_vars
-        && fr_eq(&cs.witness[probe.nk_x], &nk_x)
-        && fr_eq(&cs.witness[probe.nk_y], &nk_y);
+    bool nk_wire_ok = g->synth_ok && nk_dec
+        && g->probe.nk_x < g->cs.num_vars && g->probe.nk_y < g->cs.num_vars
+        && fr_eq(&g->cs.witness[g->probe.nk_x], &nk_x)
+        && fr_eq(&g->cs.witness[g->probe.nk_y], &nk_y);
     PROVER_CHECK("in-circuit nk wire == [nsk] ProofGenerationKeyGenerator",
                  nk_wire_ok);
+    return failures;
+}
 
-    bool rk_wire_ok = synth_ok && rk_dec
-        && probe.rk_x < cs.num_vars && probe.rk_y < cs.num_vars
-        && fr_eq(&cs.witness[probe.rk_x], &rk_x)
-        && fr_eq(&cs.witness[probe.rk_y], &rk_y);
+/* rk wire: the in-circuit rk wires carry ak + [ar] SpendAuthGenerator. */
+static int spend_gate_check_rk_wire(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+
+    struct jub_point rk_pt;
+    struct fr rk_x, rk_y;
+    bool rk_dec = g->rk_ok && jub_from_bytes(&rk_pt, g->rk_bytes);
+    if (rk_dec) { jub_get_x(&rk_x, &rk_pt); jub_get_y(&rk_y, &rk_pt); }
+
+    bool rk_wire_ok = g->synth_ok && rk_dec
+        && g->probe.rk_x < g->cs.num_vars && g->probe.rk_y < g->cs.num_vars
+        && fr_eq(&g->cs.witness[g->probe.rk_x], &rk_x)
+        && fr_eq(&g->cs.witness[g->probe.rk_y], &rk_y);
     PROVER_CHECK("in-circuit rk wire == ak + [ar] SpendAuthGenerator",
                  rk_wire_ok);
+    return failures;
+}
+
+/* Section 10 digest value: the blake2s digest and the truncated ivk, computed
+ * out of circuit, are the references the wire bits are read against. */
+static int spend_gate_check_ivk_value(struct spend_gate_ctx *g)
+{
+    int failures = 0;
 
     /* (2b) Section 10 VALUE gate: read the digest back off the circuit's
      *      wires and diff it against ground truth twice:
@@ -435,33 +495,40 @@ static int spend_circuit_shape_gate(void)
      *
      *      blake2s returns Booleans that may be NEGATED views of a wire, so
      *      the probe's negation flag must be applied. */
-    uint8_t ivk_full[32];
     {
         struct blake2s_ctx bctx;
         blake2s_init_personal(&bctx, 32, (const uint8_t *)"Zcashivk");
-        blake2s_update(&bctx, ak, 32);
-        blake2s_update(&bctx, nk_bytes, 32);
-        blake2s_final(&bctx, ivk_full, 32);
+        blake2s_update(&bctx, g->ak, 32);
+        blake2s_update(&bctx, g->nk_bytes, 32);
+        blake2s_final(&bctx, g->ivk_full, 32);
     }
-    uint8_t ivk_truncated[32];
-    sapling_crh_ivk(ak, nk_bytes, ivk_truncated);
+    sapling_crh_ivk(g->ak, g->nk_bytes, g->ivk_truncated);
     PROVER_CHECK("out-of-circuit CRH^ivk == pinned librustzcash ivk (H2 KAT)",
-                 memcmp(ivk_truncated, SPEND_ORACLE_KAT_IVK, 32) == 0);
+                 memcmp(g->ivk_truncated, SPEND_ORACLE_KAT_IVK, 32) == 0);
+    return failures;
+}
 
+/* Section 10 digest bits: the 256 digest wires and the 251 truncated bits
+ * are read back and diffed against the out-of-circuit ground truth. */
+static int spend_gate_check_ivk_bits(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+    struct constraint_system *cs = &g->cs;
+    struct spend_wire_probe *probe = &g->probe;
     struct fr one_fr;
     fr_one(&one_fr);
-    bool ivk_bits_ok = synth_ok;
-    bool ivk_trunc_ok = synth_ok;
+    bool ivk_bits_ok = g->synth_ok;
+    bool ivk_trunc_ok = g->synth_ok;
     size_t first_bad_ivk_bit = SIZE_MAX;
     for (size_t b = 0; b < 256; b++) {
-        const size_t v = probe.ivk_bit[b];
-        if (v >= cs.num_vars) { ivk_bits_ok = false; ivk_trunc_ok = false;
+        const size_t v = probe->ivk_bit[b];
+        if (v >= cs->num_vars) { ivk_bits_ok = false; ivk_trunc_ok = false;
                                 if (first_bad_ivk_bit == SIZE_MAX)
                                     first_bad_ivk_bit = b;
                                 continue; }
-        bool wire = fr_eq(&cs.witness[v], &one_fr);
-        bool got = probe.ivk_bit_negated[b] ? !wire : wire;
-        bool want_full = ((ivk_full[b / 8] >> (b % 8)) & 1) == 1;
+        bool wire = fr_eq(&cs->witness[v], &one_fr);
+        bool got = probe->ivk_bit_negated[b] ? !wire : wire;
+        bool want_full = ((g->ivk_full[b / 8] >> (b % 8)) & 1) == 1;
         if (got != want_full) {
             ivk_bits_ok = false;
             if (first_bad_ivk_bit == SIZE_MAX)
@@ -481,68 +548,109 @@ static int spend_circuit_shape_gate(void)
                  "CRH^ivk preimage hash", ivk_bits_ok);
     PROVER_CHECK("in-circuit ivk truncated to 251 bits == pinned "
                  "librustzcash ivk", ivk_trunc_ok);
+    return failures;
+}
 
-    /* (2c) ADVERSARIAL: are section 10's wires BOUND? Count and value gates
-     *      pass for an UNDER-constrained gadget. Flip one section-10 wire at
-     *      a time (0<->1, keeping booleanity) and require the system to
-     *      become UNSATISFIED: a free digest bit would let a prover choose
-     *      the CRH^ivk that binds the spend to its viewing key.
-     *
-     *      Probed: the 256 digest wires, and a deterministic stride across
-     *      every wire section 10 allocated (round state, carries, XORs). */
-    size_t sec10_first_var = (nsec >= 10) ? sections[8].num_vars : 0;
-    size_t sec10_last_var  = (nsec >= 10) ? sections[9].num_vars : 0;
-    size_t flips_tried = 0, flips_detected = 0;
-    size_t digest_tried = 0, digest_detected = 0;
-    if (synth_ok && nsec >= 10 && sec10_last_var > sec10_first_var) {
-        struct fr zero_fr;
-        fr_zero(&zero_fr);
+/* Flips each section-10 digest bit (keeping booleanity) and counts the flips
+ * the system rejects. The witness is restored after every flip. */
+static void spend_gate_sec10_flip_digest(struct spend_gate_ctx *g)
+{
+    struct constraint_system *cs = &g->cs;
+    struct fr one_fr, zero_fr;
+    fr_one(&one_fr);
+    fr_zero(&zero_fr);
+    size_t ignored = SIZE_MAX;
+    for (size_t b = 0; b < 256; b++) {
+        const size_t v = g->probe.ivk_bit[b];
+        if (v >= cs->num_vars)
+            continue;
+        struct fr saved = cs->witness[v];
+        cs->witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
+        g->sec10.digest_tried++;
+        if (!cs_is_satisfied(cs, &ignored))
+            g->sec10.digest_detected++;
+        cs->witness[v] = saved;
+    }
+}
+
+/* Flips a deterministic stride of the internal section-10 wires and counts
+ * the flips the system rejects. The witness is restored after every flip. */
+static void spend_gate_sec10_flip_internal(struct spend_gate_ctx *g)
+{
+    struct constraint_system *cs = &g->cs;
+    struct fr one_fr, zero_fr;
+    fr_one(&one_fr);
+    fr_zero(&zero_fr);
+    size_t ignored = SIZE_MAX;
+    const size_t span = g->sec10.last_var - g->sec10.first_var;
+    const size_t stride = (span / 96) ? (span / 96) : 1;
+    for (size_t v = g->sec10.first_var; v < g->sec10.last_var; v += stride) {
+        struct fr saved = cs->witness[v];
+        cs->witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
+        g->sec10.flips_tried++;
+        if (!cs_is_satisfied(cs, &ignored))
+            g->sec10.flips_detected++;
+        cs->witness[v] = saved;
+    }
+}
+
+/* (2c) ADVERSARIAL: are section 10's wires BOUND? Count and value gates
+ *      pass for an UNDER-constrained gadget. Flip one section-10 wire at
+ *      a time (0<->1, keeping booleanity) and require the system to
+ *      become UNSATISFIED: a free digest bit would let a prover choose
+ *      the CRH^ivk that binds the spend to its viewing key.
+ *
+ *      Probed: the 256 digest wires, and a deterministic stride across
+ *      every wire section 10 allocated (round state, carries, XORs). */
+static int spend_gate_sec10_probe(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+    memset(&g->sec10, 0, sizeof g->sec10);
+    g->sec10.first_var = (g->nsec >= 10) ? g->sections[8].num_vars : 0;
+    g->sec10.last_var  = (g->nsec >= 10) ? g->sections[9].num_vars : 0;
+    if (g->synth_ok && g->nsec >= 10 && g->sec10.last_var > g->sec10.first_var) {
         size_t ignored = SIZE_MAX;
 
         /* The honest witness must satisfy the system before any mutation,
          * otherwise "flip detected" is vacuous; this also proves the cv
          * public input is the real value commitment (section 14 binds it). */
         PROVER_CHECK("honest witness satisfies the full 98777-constraint system",
-                     cs_is_satisfied(&cs, &ignored));
+                     cs_is_satisfied(&g->cs, &ignored));
 
-        for (size_t b = 0; b < 256; b++) {
-            const size_t v = probe.ivk_bit[b];
-            if (v >= cs.num_vars)
-                continue;
-            struct fr saved = cs.witness[v];
-            cs.witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
-            digest_tried++;
-            if (!cs_is_satisfied(&cs, &ignored))
-                digest_detected++;
-            cs.witness[v] = saved;
-        }
-
-        const size_t span = sec10_last_var - sec10_first_var;
-        const size_t stride = (span / 96) ? (span / 96) : 1;
-        for (size_t v = sec10_first_var; v < sec10_last_var; v += stride) {
-            struct fr saved = cs.witness[v];
-            cs.witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
-            flips_tried++;
-            if (!cs_is_satisfied(&cs, &ignored))
-                flips_detected++;
-            cs.witness[v] = saved;
-        }
+        spend_gate_sec10_flip_digest(g);
+        spend_gate_sec10_flip_internal(g);
 
         /* Restoring must return the system to satisfied. */
         PROVER_CHECK("witness restored after mutation probe",
-                     cs_is_satisfied(&cs, &ignored));
+                     cs_is_satisfied(&g->cs, &ignored));
     }
+    return failures;
+}
+
+/* Prints the section-10 flip counts and checks that every digest wire and
+ * every probed internal wire is bound. */
+static int spend_gate_sec10_bound_checks(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     printf("  section 10 wires %zu..%zu; single-bit flips detected: "
            "%zu/%zu digest, %zu/%zu strided internal\n",
-           sec10_first_var, sec10_last_var,
-           digest_detected, digest_tried, flips_detected, flips_tried);
+           g->sec10.first_var, g->sec10.last_var,
+           g->sec10.digest_detected, g->sec10.digest_tried,
+           g->sec10.flips_detected, g->sec10.flips_tried);
     PROVER_CHECK("every section-10 digest wire is bound (a flipped digest bit "
                  "breaks the R1CS)",
-                 digest_tried == 256 && digest_detected == 256);
+                 g->sec10.digest_tried == 256 && g->sec10.digest_detected == 256);
     PROVER_CHECK("every probed section-10 internal wire is bound (no free "
                  "wire = no under-constrained gadget)",
-                 flips_tried > 0 && flips_detected == flips_tried);
+                 g->sec10.flips_tried > 0 && g->sec10.flips_detected == g->sec10.flips_tried);
+    return failures;
+}
 
+/* (2d) Sections 11..16 VALUE gate: derives g_d and pk_d = [ivk] g_d out of
+ * circuit for the point and repr checks below. */
+static int spend_gate_derive_gd_pkd(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* (2d) Sections 11..16 VALUE gate, each against an out-of-circuit
      *      ground truth:
      *
@@ -556,19 +664,26 @@ static int spend_circuit_shape_gate(void)
      *
      *      The cv/pk_d bindings are also covered by the satisfaction check
      *      above. */
-    uint8_t gd_bytes[32], pkd_bytes[32];
     struct jub_point gd_pt;
-    bool gd_derived = sapling_diversifier_to_gd(&gd_pt, wit.diversifier);
+    bool gd_derived = sapling_diversifier_to_gd(&gd_pt, g->wit.diversifier);
     if (gd_derived)
-        jub_to_bytes(gd_bytes, &gd_pt);
+        jub_to_bytes(g->gd_bytes, &gd_pt);
     else
-        memset(gd_bytes, 0, sizeof gd_bytes);
-    bool pkd_derived = gd_derived
-        && sapling_ivk_to_pkd(ivk_truncated, wit.diversifier, pkd_bytes);
-    if (!pkd_derived)
-        memset(pkd_bytes, 0, sizeof pkd_bytes);
+        memset(g->gd_bytes, 0, sizeof g->gd_bytes);
+    g->pkd_derived = gd_derived
+        && sapling_ivk_to_pkd(g->ivk_truncated, g->wit.diversifier, g->pkd_bytes);
+    if (!g->pkd_derived)
+        memset(g->pkd_bytes, 0, sizeof g->pkd_bytes);
     PROVER_CHECK("reference g_d and pk_d = [ivk] g_d derived out of circuit",
-                 gd_derived && pkd_derived);
+                 gd_derived && g->pkd_derived);
+    return failures;
+}
+
+/* Section 11, 13 and 14 point wires: each decodes its reference encoding and
+ * compares both coordinate wires. */
+static int spend_gate_check_point_wires(struct spend_gate_ctx *g)
+{
+    int failures = 0;
 
     /* One helper for all three point-wire diffs (g_d, pk_d, cv): decode the
      * reference encoding and compare both coordinate wires. */
@@ -579,26 +694,35 @@ static int spend_circuit_shape_gate(void)
     };
     const struct point_wire_case point_cases[3] = {
         { "in-circuit g_d wire == GH(\"Zcash_gd\", d) (section 11)",
-          gd_bytes,  probe.gd_x,  probe.gd_y },
+          g->gd_bytes,  g->probe.gd_x,  g->probe.gd_y },
         { "in-circuit pk_d wire == reference [ivk] g_d (section 13)",
-          pkd_bytes, probe.pkd_x, probe.pkd_y },
+          g->pkd_bytes, g->probe.pkd_x, g->probe.pkd_y },
         { "in-circuit cv wire == [value]G_v + [rcv]G_rcv (section 14)",
-          cv_bytes,  probe.cv_x,  probe.cv_y },
+          g->cv_bytes,  g->probe.cv_x,  g->probe.cv_y },
     };
     for (size_t i = 0; i < 3; i++) {
         struct jub_point p;
         struct fr px, py;
-        bool ok = synth_ok && jub_from_bytes(&p, point_cases[i].want);
+        bool ok = g->synth_ok && jub_from_bytes(&p, point_cases[i].want);
         if (ok) {
             jub_get_x(&px, &p);
             jub_get_y(&py, &p);
-            ok = point_cases[i].x_var < cs.num_vars
-              && point_cases[i].y_var < cs.num_vars
-              && fr_eq(&cs.witness[point_cases[i].x_var], &px)
-              && fr_eq(&cs.witness[point_cases[i].y_var], &py);
+            ok = point_cases[i].x_var < g->cs.num_vars
+              && point_cases[i].y_var < g->cs.num_vars
+              && fr_eq(&g->cs.witness[point_cases[i].x_var], &px)
+              && fr_eq(&g->cs.witness[point_cases[i].y_var], &py);
         }
         PROVER_CHECK(point_cases[i].label, ok);
     }
+    return failures;
+}
+
+/* Sections 15 and 16: the repr bits are the compressed g_d and pk_d. */
+static int spend_gate_check_repr_wires(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+    struct fr one_fr;
+    fr_one(&one_fr);
 
     /* repr(g_d) / repr(pk_d): Jubjub's compressed encoding is y with x's low
      * bit in the top bit, so repr's 256 little-endian bits ARE the bits of
@@ -606,34 +730,48 @@ static int spend_circuit_shape_gate(void)
     const struct { const char *label; const uint8_t *want; const size_t *bits; }
     repr_cases[2] = {
         { "repr(g_d) 256 bits == compressed g_d (section 15)",
-          gd_bytes,  probe.gd_repr },
+          g->gd_bytes,  g->probe.gd_repr },
         { "repr(pk_d) 256 bits == compressed pk_d (section 16)",
-          pkd_bytes, probe.pkd_repr },
+          g->pkd_bytes, g->probe.pkd_repr },
     };
     for (size_t i = 0; i < 2; i++) {
-        bool ok = synth_ok;
+        bool ok = g->synth_ok;
         for (size_t b = 0; b < 256 && ok; b++) {
             const size_t v = repr_cases[i].bits[b];
             bool want = ((repr_cases[i].want[b / 8] >> (b % 8)) & 1) == 1;
-            ok = v < cs.num_vars
-              && fr_eq(&cs.witness[v], &one_fr) == want;
+            ok = v < g->cs.num_vars
+              && fr_eq(&g->cs.witness[v], &one_fr) == want;
         }
         PROVER_CHECK(repr_cases[i].label, ok);
     }
+    return failures;
+}
+
+/* Section 14's 64 value bits, little-endian (the order section 17 hashes them in). */
+static int spend_gate_check_value_bits(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+    struct fr one_fr;
+    fr_one(&one_fr);
 
     /* Section 14's 64 value bits, little-endian (the order section 17
      * hashes them in). */
-    {
-        bool ok = synth_ok;
-        for (size_t b = 0; b < 64 && ok; b++) {
-            const size_t v = probe.value_bit[b];
-            bool want = ((wit.value >> b) & 1) == 1;
-            ok = v < cs.num_vars && fr_eq(&cs.witness[v], &one_fr) == want;
-        }
-        PROVER_CHECK("64 value bits == note value little-endian (section 14)",
-                     ok);
+    bool ok = g->synth_ok;
+    for (size_t b = 0; b < 64 && ok; b++) {
+        const size_t v = g->probe.value_bit[b];
+        bool want = ((g->wit.value >> b) & 1) == 1;
+        ok = v < g->cs.num_vars && fr_eq(&g->cs.witness[v], &one_fr) == want;
     }
+    PROVER_CHECK("64 value bits == note value little-endian (section 14)",
+                 ok);
+    return failures;
+}
 
+/* Section 20: the in-circuit cm wires equal the reference note commitment,
+ * and cm.x equals the production sapling_compute_cm() output. */
+static int spend_gate_check_cm_wire(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* (2e) Sections 17 and 20 — the note commitment. Read the two points
      * back off the circuit's wires:
      *
@@ -644,26 +782,26 @@ static int spend_circuit_shape_gate(void)
      *      Both references come from sapling_note_commitment_point(), a
      *      different algorithm from the in-circuit Montgomery windows. x AND
      *      y are compared. */
-    uint8_t cm_api[32];
-    bool cm_api_ok = synth_ok && pkd_derived
-        && sapling_compute_cm(wit.diversifier, pkd_bytes, wit.value, wit.rcm,
-                              cm_api);
+    g->cm_api_ok = g->synth_ok && g->pkd_derived
+        && sapling_compute_cm(g->wit.diversifier, g->pkd_bytes, g->wit.value,
+                              g->wit.rcm, g->cm_api);
     {
-        struct jub_point cm_ref_pt;
-        bool cm_ref_ok = pkd_derived
-            && sapling_note_commitment_point(wit.diversifier, pkd_bytes,
-                                             wit.value, wit.rcm, &cm_ref_pt);
+        g->cm_ref_ok = g->pkd_derived
+            && sapling_note_commitment_point(g->wit.diversifier, g->pkd_bytes,
+                                             g->wit.value, g->wit.rcm,
+                                             &g->cm_ref_pt);
         PROVER_CHECK("reference note commitment derived out of circuit",
-                     cm_ref_ok);
+                     g->cm_ref_ok);
 
         struct fr cm_x, cm_y;
-        bool cm_wire_ok = synth_ok && cm_ref_ok;
+        bool cm_wire_ok = g->synth_ok && g->cm_ref_ok;
         if (cm_wire_ok) {
-            jub_get_x(&cm_x, &cm_ref_pt);
-            jub_get_y(&cm_y, &cm_ref_pt);
-            cm_wire_ok = probe.cm_x < cs.num_vars && probe.cm_y < cs.num_vars
-                      && fr_eq(&cs.witness[probe.cm_x], &cm_x)
-                      && fr_eq(&cs.witness[probe.cm_y], &cm_y);
+            jub_get_x(&cm_x, &g->cm_ref_pt);
+            jub_get_y(&cm_y, &g->cm_ref_pt);
+            cm_wire_ok = g->probe.cm_x < g->cs.num_vars
+                      && g->probe.cm_y < g->cs.num_vars
+                      && fr_eq(&g->cs.witness[g->probe.cm_x], &cm_x)
+                      && fr_eq(&g->cs.witness[g->probe.cm_y], &cm_y);
         }
         PROVER_CHECK("in-circuit cm wire == note hash + [rcm] G_rcm "
                      "(section 20)", cm_wire_ok);
@@ -671,19 +809,28 @@ static int spend_circuit_shape_gate(void)
         /* The protocol's `cmu` (the note-commitment tree leaf) is this
          * x-coordinate; tie the wire to the production API. */
         struct fr cm_api_fr;
-        bool cm_api_wire_ok = cm_api_ok
-            && fr_from_bytes(&cm_api_fr, cm_api)
-            && probe.cm_x < cs.num_vars
-            && fr_eq(&cs.witness[probe.cm_x], &cm_api_fr);
+        bool cm_api_wire_ok = g->cm_api_ok
+            && fr_from_bytes(&cm_api_fr, g->cm_api)
+            && g->probe.cm_x < g->cs.num_vars
+            && fr_eq(&g->cs.witness[g->probe.cm_x], &cm_api_fr);
         PROVER_CHECK("in-circuit cm.x == sapling_compute_cm() `cmu` "
                      "(section 20)", cm_api_wire_ok);
+    }
+    return failures;
+}
 
+/* Section 17: the note hash wire is the reference commitment minus [rcm] G_rcm,
+ * checked x and y. */
+static int spend_gate_check_note_hash_wire(struct spend_gate_ctx *g)
+{
+    int failures = 0;
+    {
         /* Section 17's wire pair must be a real curve point carrying the
          * hash: subtract [rcm] G_rcm from the reference commitment and
          * compare. Subtraction keeps ONE reference for both sections. */
         struct fr grcm_x, grcm_y;
         sapling_note_commit_randomness_generator(&grcm_x, &grcm_y);
-        bool hash_wire_ok = synth_ok && cm_ref_ok;
+        bool hash_wire_ok = g->synth_ok && g->cm_ref_ok;
         if (hash_wire_ok) {
             uint8_t grcm_comp[32], grcm_xb[32];
             fr_to_bytes(grcm_comp, &grcm_y);
@@ -694,16 +841,16 @@ static int spend_circuit_shape_gate(void)
                 struct jub_point g_rcm, rcm_pt, hash_pt;
                 hash_wire_ok = jub_from_bytes(&g_rcm, grcm_comp);
                 if (hash_wire_ok) {
-                    jub_scalar_mul(&rcm_pt, &g_rcm, wit.rcm);
+                    jub_scalar_mul(&rcm_pt, &g_rcm, g->wit.rcm);
                     jub_neg(&rcm_pt, &rcm_pt);
-                    jub_add(&hash_pt, &cm_ref_pt, &rcm_pt);
+                    jub_add(&hash_pt, &g->cm_ref_pt, &rcm_pt);
                     struct fr hx, hy;
                     jub_get_x(&hx, &hash_pt);
                     jub_get_y(&hy, &hash_pt);
-                    hash_wire_ok = probe.note_hash_x < cs.num_vars
-                                && probe.note_hash_y < cs.num_vars
-                                && fr_eq(&cs.witness[probe.note_hash_x], &hx)
-                                && fr_eq(&cs.witness[probe.note_hash_y], &hy);
+                    hash_wire_ok = g->probe.note_hash_x < g->cs.num_vars
+                                && g->probe.note_hash_y < g->cs.num_vars
+                                && fr_eq(&g->cs.witness[g->probe.note_hash_x], &hx)
+                                && fr_eq(&g->cs.witness[g->probe.note_hash_y], &hy);
                 }
             }
         }
@@ -711,7 +858,14 @@ static int spend_circuit_shape_gate(void)
                      "PedersenHash(NoteCommitment, note) (section 17)",
                      hash_wire_ok);
     }
+    return failures;
+}
 
+/* (2f) end-to-end anchor: fold the witnessed path from the circuit's own cm.x
+ * and compare with the anchor wire. */
+static int spend_gate_check_anchor(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* (2f) Sections 17..21 end to end: fold the witnessed authentication
      * path out of circuit from sapling_compute_cm()'s OWN cm.x and require
      * the circuit's anchor wire to equal it (a wrong handover between
@@ -719,40 +873,105 @@ static int spend_circuit_shape_gate(void)
     {
         uint8_t anchor_ref[32];
         struct fr anchor_ref_fr;
-        bool ok = cm_api_ok;
+        bool ok = g->cm_api_ok;
         if (ok) {
             uint8_t cur[32];
-            memcpy(cur, cm_api, 32);
+            memcpy(cur, g->cm_api, 32);
             for (size_t d = 0; d < SAPLING_MERKLE_DEPTH; d++) {
                 uint8_t next[32];
-                if (wit.auth_path_bits[d])
-                    pedersen_merkle_hash(d, wit.auth_path[d], cur, next);
+                if (g->wit.auth_path_bits[d])
+                    pedersen_merkle_hash(d, g->wit.auth_path[d], cur, next);
                 else
-                    pedersen_merkle_hash(d, cur, wit.auth_path[d], next);
+                    pedersen_merkle_hash(d, cur, g->wit.auth_path[d], next);
                 memcpy(cur, next, 32);
             }
             memcpy(anchor_ref, cur, 32);
             ok = fr_from_bytes(&anchor_ref_fr, anchor_ref)
-              && probe.anchor < cs.num_vars
-              && fr_eq(&cs.witness[probe.anchor], &anchor_ref_fr);
+              && g->probe.anchor < g->cs.num_vars
+              && fr_eq(&g->cs.witness[g->probe.anchor], &anchor_ref_fr);
         }
         PROVER_CHECK("in-circuit anchor == out-of-circuit fold seeded from the "
                      "circuit's own cm.x (sections 17..21)", ok);
     }
+    return failures;
+}
 
+/* Determinism: a second synthesis gives a byte-identical witness. */
+static int spend_gate_check_determinism(struct spend_gate_ctx *g)
+{
+    int failures = 0;
     /* (3) Determinism: identical inputs => byte-identical witness. */
     struct constraint_system cs2;
     cs_init(&cs2);
     bool synth2 = sapling_spend_synthesize_traced(
-        &cs2, &wit, &pub, NULL, 0, NULL, NULL);
-    bool det_ok = synth2 && cs.num_vars == cs2.num_vars
-        && cs.num_constraints == cs2.num_constraints
-        && memcmp(cs.witness, cs2.witness,
-                  cs.num_vars * sizeof(struct fr)) == 0;
+        &cs2, &g->wit, &g->pub, NULL, 0, NULL, NULL);
+    bool det_ok = synth2 && g->cs.num_vars == cs2.num_vars
+        && g->cs.num_constraints == cs2.num_constraints
+        && memcmp(g->cs.witness, cs2.witness,
+                  g->cs.num_vars * sizeof(struct fr)) == 0;
     PROVER_CHECK("synthesis is deterministic (byte-identical witness)", det_ok);
 
-    cs_free(&cs);
+    cs_free(&g->cs);
     cs_free(&cs2);
+    return failures;
+}
+
+/* Sapling SPEND circuit port: shape + value + determinism gate.
+ *
+ * Params-free (pure R1CS synthesis, no proving key); pins the ported prefix
+ * (sections 1..21) against ground truth:
+ *   (1) cumulative constraint counts per section == the reference trace's
+ *       cumulative boundaries;
+ *   (2) the in-circuit nk / rk wires carry the reference-correct Jubjub
+ *       points, nk also pinned to the librustzcash reference vector;
+ *  (2b) section 10's 256 blake2s digest bits == the out-of-circuit CRH^ivk
+ *       over the same preimage, and its 251 truncated bits == the pinned
+ *       librustzcash ivk (a matching COUNT cannot see a wrong rotation
+ *       constant or SIGMA row);
+ *  (2c) every section-10 wire is BOUND: flipping any one (keeping
+ *       booleanity) must make the R1CS unsatisfiable (count and value checks
+ *       read only the honest witness and cannot see an UNDER-constrained
+ *       gadget, which would let a prover choose its own ivk);
+ *  (2d) sections 11..16, the note-content half: g_d == GH("Zcash_gd", d);
+ *       pk_d == [ivk] g_d (the first variable-base multiplication);
+ *       repr(g_d)/repr(pk_d) match the compressed encodings; cv is BOUND to
+ *       public input 3/4, so the witness must carry the real
+ *       [value]G_v + [rcv]G_rcv;
+ *  (2e) sections 17..20, the note commitment: the section-17 hash point and
+ *       the section-20 commitment point are diffed, x AND y, against the
+ *       out-of-circuit table-driven Pedersen hash + Jubjub scalar mul, and
+ *       cm.x is tied to sapling_compute_cm() (the note-commitment tree leaf);
+ *  (2f) sections 17..21 end to end: the anchor wire is diffed against an
+ *       out-of-circuit fold seeded from sapling_compute_cm()'s own output
+ *       over the same witnessed path;
+ *   (3) synthesis is deterministic (identical inputs => byte-identical witness).
+ * Sections 22..28 are not yet ported, so this is a PARTIAL-prefix gate, not a
+ * spend round-trip. Returns the number of failures (0 == green). */
+static int spend_circuit_shape_gate(void)
+{
+    printf("\n--- H3: Sapling SPEND circuit port shape gate (sections 1-28) ---\n");
+    int failures = 0;
+    struct spend_gate_ctx g;
+
+    failures += spend_gate_build_witness(&g);
+    failures += spend_gate_derive_publics(&g);
+    failures += spend_gate_synthesize(&g);
+    failures += spend_gate_check_section_counts(&g);
+    failures += spend_gate_check_section_deltas(&g);
+    failures += spend_gate_check_nk_wire(&g);
+    failures += spend_gate_check_rk_wire(&g);
+    failures += spend_gate_check_ivk_value(&g);
+    failures += spend_gate_check_ivk_bits(&g);
+    failures += spend_gate_sec10_probe(&g);
+    failures += spend_gate_sec10_bound_checks(&g);
+    failures += spend_gate_derive_gd_pkd(&g);
+    failures += spend_gate_check_point_wires(&g);
+    failures += spend_gate_check_repr_wires(&g);
+    failures += spend_gate_check_value_bits(&g);
+    failures += spend_gate_check_cm_wire(&g);
+    failures += spend_gate_check_note_hash_wire(&g);
+    failures += spend_gate_check_anchor(&g);
+    failures += spend_gate_check_determinism(&g);
 
     printf("--- end H3 shape gate (%d failure[s]) ---\n", failures);
     return failures;
@@ -781,6 +1000,54 @@ int groth16_merkle_path_gate(void);
 int groth16_spend_adversarial_gate(void);
 
 int test_groth16_selfverify(void);
+/* Output proof built through the public proving API, checked by the independent
+ * consensus verifier and against a tampered copy. Runs only when the prover is
+ * ready. Returns the failure count. */
+static int prover_output_roundtrip_checks(void)
+{
+    int failures = 0;
+    uint8_t diversifier[11];
+    uint8_t ask[32], nsk[32], ovk[32];
+    uint8_t ak[32], nk[32], ivk[32], pk_d[32];
+    bool keys_ok = find_diversifier(diversifier) &&
+                   sapling_generate_r(ask) &&
+                   sapling_generate_r(nsk) &&
+                   sapling_generate_r(ovk);
+    if (keys_ok) {
+        sapling_ask_to_ak(ask, ak);
+        sapling_nsk_to_nk(nsk, nk);
+        sapling_crh_ivk(ak, nk, ivk);
+        keys_ok = sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+    }
+    PROVER_CHECK("independent output recipient constructed", keys_ok);
+
+    void *pctx = keys_ok ? zclassic_sapling_proving_ctx_init() : NULL;
+    uint8_t cv[32], cm[32], epk[32], proof[192];
+    uint8_t enc[580], out[80];
+    bool built = pctx && sapling_build_output_with_ctx(
+        pctx, ovk, diversifier, pk_d, UINT64_C(54321), NULL,
+        cv, cm, epk, enc, out, proof);
+    PROVER_CHECK("public proving API produced an output proof", built);
+
+    if (built) {
+        struct sapling_verification_ctx vctx;
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK("independent C23 consensus verifier accepts proof",
+                     sapling_check_output(&vctx, cv, cm, epk, proof));
+
+        uint8_t bad_proof[192];
+        memcpy(bad_proof, proof, sizeof(bad_proof));
+        bad_proof[191] ^= 1;
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK("tampered proof is rejected",
+                     !sapling_check_output(
+                         &vctx, cv, cm, epk, bad_proof));
+    }
+    if (pctx)
+        zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
 int test_groth16_selfverify(void)
 {
     printf("\n=== Sapling prover -> consensus verifier capability ===\n");
@@ -819,47 +1086,8 @@ int test_groth16_selfverify(void)
                  zclassic_sapling_prover_is_ready() &&
                  strcmp(zclassic_sapling_prover_status(), "ready") == 0);
 
-    if (zclassic_sapling_prover_is_ready()) {
-        uint8_t diversifier[11];
-        uint8_t ask[32], nsk[32], ovk[32];
-        uint8_t ak[32], nk[32], ivk[32], pk_d[32];
-        bool keys_ok = find_diversifier(diversifier) &&
-                       sapling_generate_r(ask) &&
-                       sapling_generate_r(nsk) &&
-                       sapling_generate_r(ovk);
-        if (keys_ok) {
-            sapling_ask_to_ak(ask, ak);
-            sapling_nsk_to_nk(nsk, nk);
-            sapling_crh_ivk(ak, nk, ivk);
-            keys_ok = sapling_ivk_to_pkd(ivk, diversifier, pk_d);
-        }
-        PROVER_CHECK("independent output recipient constructed", keys_ok);
-
-        void *pctx = keys_ok ? zclassic_sapling_proving_ctx_init() : NULL;
-        uint8_t cv[32], cm[32], epk[32], proof[192];
-        uint8_t enc[580], out[80];
-        bool built = pctx && sapling_build_output_with_ctx(
-            pctx, ovk, diversifier, pk_d, UINT64_C(54321), NULL,
-            cv, cm, epk, enc, out, proof);
-        PROVER_CHECK("public proving API produced an output proof", built);
-
-        if (built) {
-            struct sapling_verification_ctx vctx;
-            sapling_verification_ctx_init(&vctx);
-            PROVER_CHECK("independent C23 consensus verifier accepts proof",
-                         sapling_check_output(&vctx, cv, cm, epk, proof));
-
-            uint8_t bad_proof[192];
-            memcpy(bad_proof, proof, sizeof(bad_proof));
-            bad_proof[191] ^= 1;
-            sapling_verification_ctx_init(&vctx);
-            PROVER_CHECK("tampered proof is rejected",
-                         !sapling_check_output(
-                             &vctx, cv, cm, epk, bad_proof));
-        }
-        if (pctx)
-            zclassic_sapling_proving_ctx_free(pctx);
-    }
+    if (zclassic_sapling_prover_is_ready())
+        failures += prover_output_roundtrip_checks();
 
     /* Adversarial + negative-control gate over the production SPEND
      * prove->verify round-trip (needs proving readiness). */
