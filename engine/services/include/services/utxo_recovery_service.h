@@ -406,7 +406,8 @@ struct zcl_result utxo_recovery_backfill_shielded_range(struct node_db *ndb,
 
 /* Pure planner for the cursor-gated suffix backfill: given the persisted
  * cursor `done_cursor` (-1 if unset) and the current `tip_height`, return the
- * first height to (re)compute — done_cursor+1, or 1 when unset — when
+ * first height to (re)compute — done_cursor+1, or the tip itself when unset
+ * (the background verify pass covers the rest) — when
  * (done_cursor, tip_height] is non-empty and tip_height > 1000. Returns 0 to
  * SKIP (cursor already covers the tip, or tip too shallow). */
 int utxo_recovery_shielded_backfill_start(int64_t done_cursor, int tip_height);

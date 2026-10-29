@@ -353,6 +353,54 @@ static int sbf_test_cache_vs_body(void)
     return failures;
 }
 
+/* a missing body mid-range stops the batch: the cursor stays below it, no done
+ * marker is set, and a later batch (body present) repairs it */
+static int sbf_test_verify_missing_body(void)
+{
+    int failures = 0;
+    char vdir[256], vpath[320];
+    test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "missing_body");
+    g_sbf_dir = vdir;
+    snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    SBF_CHECK("(k) node.db opens", node_db_open(&ndb, vpath));
+    struct main_state ms;
+    main_state_init(&ms);
+    SBF_CHECK("(k) fixture built", sbf_build_verify_fixture(&ms, &ndb));
+    struct block_index *gap = active_chain_at(&ms.chain_active, 3);
+    uint32_t status = gap ? gap->nStatus : 0;
+    if (gap)
+        gap->nStatus &= ~(uint32_t)BLOCK_HAVE_DATA;   /* body "missing" */
+
+    struct shielded_value_verify_batch b1 = {0};
+    struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+        &ndb, NULL, &ms, vdir, 1, 9, 512, &b1);
+    int64_t cur = -1, done = 0;
+    node_db_state_get_int(&ndb, "shielded_value_verify_height", &cur);
+    SBF_CHECK("(k) batch stops at the missing body", r.ok && b1.scanned == 2 &&
+              b1.through == 2 && !b1.at_tip);
+    SBF_CHECK("(k) cursor stays below the gap", cur == 2);
+    SBF_CHECK("(k) no done marker while a height is unverified",
+              !(node_db_state_get_int(&ndb, "shielded_value_verify_done",
+                                      &done) && done));
+    SBF_CHECK("(k) heights above the gap not touched yet",
+              sbf_read_col_int(&ndb, 4, "sapling_value") == -104);
+
+    if (gap)
+        gap->nStatus = status;                       /* body now present */
+    struct shielded_value_verify_batch b2 = {0};
+    r = utxo_recovery_verify_shielded_values_batch(&ndb, NULL, &ms, vdir, 1, 9,
+                                                   512, &b2);
+    SBF_CHECK("(k) later batch resumes at the gap and finishes",
+              r.ok && b2.from == 3 && b2.at_tip && b2.repaired == 3);
+    SBF_CHECK("(k) gap row repaired",
+              sbf_read_col_int(&ndb, 3, "sapling_value") == 103);
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return failures;
+}
+
 /* the verify pass yields to sync */
 static int sbf_test_verify_yield(void)
 {
@@ -378,8 +426,8 @@ int test_utxo_recovery_shielded_backfill(void)
 
     /* ---- Pure planner ---- */
     {
-        SBF_CHECK("plan: unset cursor starts at 1",
-                  utxo_recovery_shielded_backfill_start(-1, 5000) == 1);
+        SBF_CHECK("plan: unset cursor covers only the tip (no whole-chain body read)",
+                  utxo_recovery_shielded_backfill_start(-1, 5000) == 5000);
         SBF_CHECK("plan: cursor 4000 starts at 4001",
                   utxo_recovery_shielded_backfill_start(4000, 5000) == 4001);
         SBF_CHECK("plan: cursor == tip skips",
@@ -454,8 +502,9 @@ int test_utxo_recovery_shielded_backfill(void)
         int64_t cur = -1;
         node_db_state_get_int(&ndb, "shielded_backfill_height", &cur);
         SBF_CHECK("(a) first pass stamps cursor at tip", cur == 1100);
-        SBF_CHECK("(a) first pass wrote all rows",
-                  sbf_shielded_rows(&ndb, 1, 1100) == 1100);
+        SBF_CHECK("(a) absent-cursor boot read only the tip body",
+                  sbf_shielded_rows(&ndb, 1, 1099) == 0 &&
+                  sbf_shielded_rows(&ndb, 1100, 1100) == 1);
 
         /* Simulate a reboot: close + reopen the same node.db file. */
         node_db_close(&ndb);
@@ -477,7 +526,7 @@ int test_utxo_recovery_shielded_backfill(void)
         node_db_state_get_int(&ndb, "shielded_backfill_height", &cur3);
         SBF_CHECK("(a) re-run keeps cursor (skip)", cur3 == 1100);
         SBF_CHECK("(a) re-run left rows intact",
-                  sbf_shielded_rows(&ndb, 1, 1100) == 1100);
+                  sbf_shielded_rows(&ndb, 1, 1100) == 1);
 
         main_state_free(&ms);
         main_state_free(&ms2);
@@ -632,6 +681,7 @@ int test_utxo_recovery_shielded_backfill(void)
 
     failures += sbf_test_verify_pass();
     failures += sbf_test_cache_vs_body();
+    failures += sbf_test_verify_missing_body();
     failures += sbf_test_verify_yield();
     disk_block_io_set_deferred_sync(false);
 
