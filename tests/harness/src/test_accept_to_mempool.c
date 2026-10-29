@@ -411,8 +411,12 @@ static bool atm_case_conflict(const struct atm_ctx *c)
 static bool atm_case_input_value_invalid(const struct atm_ctx *c)
 {
     struct atm_fix f;
-    /* A prevout outside MoneyRange makes get_value_in return -1. */
-    bool seeded = atm_fix_init(&f, c, 0, 0xE8, -1, 50 * COIN_VALUE, false);
+    /* Deciding check: coins_view_cache_get_value_in rejects a prevout above
+     * MAX_MONEY (MoneyRange) and returns -1. The seed must not be -1
+     * itself: that is the null-output marker, so have_inputs would fail
+     * first and yield MISSING_INPUTS with an empty detail. */
+    bool seeded = atm_fix_init(&f, c, 0, 0xE8, MAX_MONEY + 1,
+                               50 * COIN_VALUE, false);
     char detail[64] = "";
     enum mempool_accept_result r = accept_to_mempool_detailed(
         &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
@@ -529,7 +533,7 @@ static const struct atm_det_case atm_det_cases[] = {
     { "null params -> INTERNAL_ERROR", atm_case_null_params },
     { "pooled txid resubmitted -> DUPLICATE", atm_case_duplicate },
     { "double spend of pooled prevout -> CONFLICT", atm_case_conflict },
-    { "prevout out of MoneyRange -> input-value-invalid",
+    { "get_value_in MoneyRange -> input-value-invalid",
       atm_case_input_value_invalid },
     { "outputs exceed inputs -> value-balance-invalid",
       atm_case_value_balance_invalid },
