@@ -66,6 +66,8 @@
 void utxo_recovery_clear_cold_import_seed(struct node_db *ndb);
 bool utxo_recovery_clear_cold_import_seed_checked(struct node_db *ndb);
 
+#define BOOT_NELEM(a) (sizeof(a) / sizeof((a)[0]))
+
 void boot_refold_staged_init(bool refold_staged)
 {
     (void)refold_progress_boot_init(progress_store_db(), refold_staged);
@@ -231,6 +233,25 @@ static bool mint_load_record_cb(const struct uss_record *r, void *vctx)
     return true;
 }
 
+static bool boot_snapshot_apply_records(sqlite3 *db, struct uss_handle *snapshot,
+                                        uint64_t expected_count,
+                                        struct mint_load_ctx *lc, int64_t *emitted)
+{
+    char *terr = NULL;
+    uint8_t one = 1;
+    *emitted = uss_iter(snapshot, mint_load_record_cb, lc);
+    bool ok = !lc->failed && *emitted == (int64_t)expected_count &&
+              lc->inserted == expected_count;
+    ok = ok && progress_meta_set_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1);
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &terr) != SQLITE_OK)
+        ok = false;
+    if (!ok)
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (terr)
+        sqlite3_free(terr);
+    return ok;
+}
+
 bool boot_snapshot_apply_to_coins_kv(sqlite3 *progress_db,
                                      struct uss_handle *snapshot,
                                      uint64_t expected_count,
@@ -256,23 +277,9 @@ bool boot_snapshot_apply_to_coins_kv(sqlite3 *progress_db,
     }
 
     struct mint_load_ctx lc = { .pdb = progress_db };
-    int64_t emitted = uss_iter(snapshot, mint_load_record_cb, &lc);
-    bool ok = !lc.failed && emitted == (int64_t)expected_count &&
-              lc.inserted == expected_count;
-    if (ok) {
-        uint8_t one = 1;
-        if (!progress_meta_set_in_tx(progress_db,
-                                     COINS_KV_MIGRATION_COMPLETE_KEY,
-                                     &one, 1))
-            ok = false;
-    }
-    if (ok && sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &terr)
-        != SQLITE_OK)
-        ok = false;
-    if (!ok)
-        sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
-    if (terr)
-        sqlite3_free(terr);
+    int64_t emitted = 0;
+    bool ok = boot_snapshot_apply_records(progress_db, snapshot, expected_count,
+                                          &lc, &emitted);
 
     if (out) {
         out->inserted = lc.inserted;
@@ -338,6 +345,132 @@ static bool boot_anchor_seed_from_snapshot(struct node_db *ndb, sqlite3 *rpdb,
                 "snapshot %s (SHA3 verified vs the compiled checkpoint)\n",
                 (unsigned long long)ar.inserted, path);
     return ok;
+}
+
+static bool boot_progress_tx_begin(sqlite3 *db, char **err)
+{
+    progress_store_tx_lock();
+    return sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, err) == SQLITE_OK;
+}
+
+static bool boot_progress_tx_finish(sqlite3 *db, bool ok, char **err)
+{
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    if (!ok)
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (*err) {
+        sqlite3_free(*err);
+        *err = NULL;
+    }
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static bool boot_progress_delete_tables(sqlite3 *db, const char *const *tables,
+                                        size_t n, char **err)
+{
+    for (size_t i = 0; i < n; i++) {
+        char dsql[96];
+        snprintf(dsql, sizeof dsql, "DELETE FROM %s", tables[i]);
+        if (sqlite3_exec(db, dsql, NULL, NULL, err) == SQLITE_OK)
+            continue;
+        if (!*err || !strstr(*err, "no such table"))
+            return false;
+        sqlite3_free(*err);
+        *err = NULL;
+    }
+    return true;
+}
+
+static bool boot_progress_force_stages(sqlite3 *db, const char *const *stages,
+                                       size_t n, int32_t h)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!stage_repair_force_stage_cursor(db, stages[i], h))
+            return false;
+    return true;
+}
+
+static bool boot_progress_raise_stage(sqlite3 *db, const char *stage, int32_t floor_h)
+{
+    int cur = -1;
+    sqlite3_stmt *cst = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT cursor FROM stage_cursor WHERE name = ?",
+                           -1, &cst, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(cst, 1, stage, -1, SQLITE_STATIC);
+        if (sqlite3_step(cst) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
+            cur = sqlite3_column_int(cst, 0);
+    }
+    if (cst)
+        sqlite3_finalize(cst);
+    return stage_repair_force_stage_cursor(db, stage, (cur > floor_h) ? cur : floor_h);
+}
+
+static void boot_anchor_require_proven(sqlite3 *rpdb,
+                                       const struct sha3_utxo_checkpoint *cp,
+                                       bool reseed_ok, int32_t anchor)
+{
+    uint8_t got_root[32] = {0};
+    int64_t got_count = -1;
+    char vreason[256] = {0};
+    if (reseed_ok && coins_kv_verify_against_checkpoint(rpdb, cp, got_root,
+                                                        &got_count, vreason,
+                                                        sizeof vreason))
+        return;
+    fprintf(stderr,
+            "FATAL: -refold-from-anchor: re-seeded anchor set FAILED the "
+            "SHA3/count check (%s, reseed_ok=%d) — refusing to fold from an "
+            "unproven anchor\n",
+            reseed_ok ? vreason : "reseed failed", reseed_ok ? 1 : 0);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "check=refold_from_anchor anchor_h=%d reseed anchor set "
+                "mismatch (count=%lld want=%llu) — the node.db `utxos` "
+                "mirror does not reproduce the compiled checkpoint; ACTION: "
+                "wipe + re-import with the two-step cold-sync recipe",
+                anchor, (long long)got_count,
+                (unsigned long long)cp->utxo_count);
+    _exit(EXIT_FAILURE);
+}
+
+static bool boot_anchor_arm_cursors(sqlite3 *rpdb, int32_t anchor, bool minted)
+{
+    /* Phase 2 (one progress.kv transaction): clear the reducer-derived tables,
+     * force the 8 stage cursors to the ANCHOR (NOT genesis), set the applied
+     * frontier to anchor+1, drop the trusted-base declaration.
+     * stage_repair_force_stage_cursor REQUIRES the caller hold the progress tx
+     * lock + an open transaction. */
+    static const char *const k_refold_tables[] = {
+        "validate_headers_log", "body_fetch_log", "body_persist_log",
+        "script_validate_log", "proof_validate_log", "utxo_apply_log",
+        "tip_finalize_log", "utxo_apply_delta", "created_outputs",
+    };
+    static const char *const k_refold_stages[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
+    };
+    char *err = NULL;
+    bool ok = boot_progress_tx_begin(rpdb, &err) &&
+              boot_progress_delete_tables(rpdb, k_refold_tables,
+                                          BOOT_NELEM(k_refold_tables), &err) &&
+              boot_progress_force_stages(rpdb, k_refold_stages,
+                                         BOOT_NELEM(k_refold_stages), anchor);
+    /* utxo_apply's next-height cursor convention: applied-through `anchor`
+     * means the frontier value is anchor+1. */
+    ok = ok && utxo_apply_frontier_set_in_tx(rpdb, anchor + 1);
+    /* The UTXO snapshot does not carry historical Sprout/Sapling roots.
+     * Record that absence explicitly: the fold must backfill [0,anchor)
+     * before accepting an unknown shielded root. */
+    ok = ok && boot_shielded_history_reset_incomplete_in_tx(rpdb, anchor);
+    if (ok && minted) {
+        uint8_t one = 1;
+        ok = progress_meta_set_in_tx(rpdb, COINS_KV_SELF_FOLDED_KEY, &one, 1);
+    }
+    if (ok) {
+        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HEIGHT_KEY);
+        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HASH_KEY);
+    }
+    return boot_progress_tx_finish(rpdb, ok, &err);
 }
 
 /* B2 — the -refold-from-anchor reset (config/boot.h). Unlike the contained
@@ -423,97 +556,9 @@ void boot_refold_from_anchor_reset(struct node_db *ndb)
      * BEFORE arming any cursor. Routed through the ONE shared checkpoint verifier
      * coins_kv_verify_against_checkpoint (also used by -verify-rom) so the
      * digest/count comparison has a single impl; a wrong set must FATAL here. */
-    uint8_t got_root[32] = {0};
-    int64_t got_count = -1;
-    char vreason[256] = {0};
-    bool anchor_proven =
-        reseed_ok && coins_kv_verify_against_checkpoint(rpdb, cp, got_root,
-                                                        &got_count, vreason,
-                                                        sizeof vreason);
-    if (!anchor_proven) {
-        fprintf(stderr,
-                "FATAL: -refold-from-anchor: re-seeded anchor set FAILED the "
-                "SHA3/count check (%s, reseed_ok=%d) — refusing to fold from an "
-                "unproven anchor\n",
-                reseed_ok ? vreason : "reseed failed", reseed_ok ? 1 : 0);
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                    "check=refold_from_anchor anchor_h=%d reseed anchor set "
-                    "mismatch (count=%lld want=%llu) — the node.db `utxos` "
-                    "mirror does not reproduce the compiled checkpoint; ACTION: "
-                    "wipe + re-import with the two-step cold-sync recipe",
-                    anchor, (long long)got_count,
-                    (unsigned long long)cp->utxo_count);
-        _exit(EXIT_FAILURE);
-    }
+    boot_anchor_require_proven(rpdb, cp, reseed_ok, anchor);
 
-    /* Phase 2 (one progress.kv transaction): clear the reducer-derived tables,
-     * force the 8 stage cursors to the ANCHOR (NOT genesis), set the applied
-     * frontier to anchor+1, drop the trusted-base declaration.
-     * stage_repair_force_stage_cursor REQUIRES the caller hold the progress tx
-     * lock + an open transaction. */
-    static const char *const k_refold_tables[] = {
-        "validate_headers_log", "body_fetch_log", "body_persist_log",
-        "script_validate_log", "proof_validate_log", "utxo_apply_log",
-        "tip_finalize_log", "utxo_apply_delta", "created_outputs",
-    };
-    static const char *const k_refold_stages[] = {
-        "header_admit", "validate_headers", "body_fetch", "body_persist",
-        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
-    };
-    bool refold_ok = true;
-    char *refold_err = NULL;
-    progress_store_tx_lock();
-    if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &refold_err)
-        != SQLITE_OK)
-        refold_ok = false;
-    for (size_t i = 0;
-         refold_ok && i < sizeof(k_refold_tables) / sizeof(k_refold_tables[0]);
-         i++) {
-        char dsql[96];
-        snprintf(dsql, sizeof dsql, "DELETE FROM %s", k_refold_tables[i]);
-        if (sqlite3_exec(rpdb, dsql, NULL, NULL, &refold_err) != SQLITE_OK) {
-            if (refold_err && strstr(refold_err, "no such table")) {
-                sqlite3_free(refold_err);
-                refold_err = NULL;
-            } else {
-                refold_ok = false;
-            }
-        }
-    }
-    for (size_t i = 0;
-         refold_ok && i < sizeof(k_refold_stages) / sizeof(k_refold_stages[0]);
-         i++)
-        if (!stage_repair_force_stage_cursor(rpdb, k_refold_stages[i], anchor))
-            refold_ok = false;
-    /* utxo_apply's next-height cursor convention: applied-through `anchor`
-     * means the frontier value is anchor+1. */
-    if (refold_ok && !utxo_apply_frontier_set_in_tx(rpdb, anchor + 1))
-        refold_ok = false;
-    /* The UTXO snapshot does not carry historical Sprout/Sapling roots.
-     * Record that absence explicitly: the fold must backfill [0,anchor)
-     * before accepting an unknown shielded root. */
-    if (refold_ok && !boot_shielded_history_reset_incomplete_in_tx(rpdb, anchor))
-        refold_ok = false;
-    if (refold_ok && seeded_from_minted_snapshot) {
-        uint8_t one = 1;
-        if (!progress_meta_set_in_tx(rpdb, COINS_KV_SELF_FOLDED_KEY, &one, 1))
-            refold_ok = false;
-    }
-    if (refold_ok) {
-        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HEIGHT_KEY);
-        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HASH_KEY);
-    }
-    if (refold_ok && sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &refold_err)
-        != SQLITE_OK)
-        refold_ok = false;
-    if (!refold_ok)
-        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-    if (refold_err) {
-        sqlite3_free(refold_err);
-        refold_err = NULL;
-    }
-    progress_store_tx_unlock();
-
+    bool refold_ok = boot_anchor_arm_cursors(rpdb, anchor, seeded_from_minted_snapshot);
     if (!refold_ok) {
         fprintf(stderr,
                 "FATAL: -refold-from-anchor: failed to force the 8 stage "
@@ -832,6 +877,28 @@ static bool reopen_progress_store_after_verified_snapshot(const char *datadir,
     return true;
 }
 
+static bool boot_bundle_snapshot_height(const char *nm, const char *pfx, const char *sfx, size_t name_cap, long long *h)
+{
+    size_t plen = strlen(pfx), slen = strlen(sfx), len = strlen(nm);
+    if (len <= plen + slen || len >= name_cap || strncmp(nm, pfx, plen) != 0 ||
+        strcmp(nm + len - slen, sfx) != 0)
+        return false;
+    *h = 0;
+    for (size_t i = plen; i < len - slen; i++) {
+        if (nm[i] < '0' || nm[i] > '9')
+            return false;
+        *h = *h * 10 + (nm[i] - '0');
+    }
+    return true;
+}
+
+static bool boot_bundle_failed_marker(const char *datadir, const char *nm)
+{
+    char failp[1200];
+    int fpn = snprintf(failp, sizeof(failp), "%s/%s.failed", datadir, nm);
+    return fpn > 0 && (size_t)fpn < sizeof(failp) && access(failp, F_OK) == 0;
+}
+
 char *boot_autodetect_bundle_snapshot(const char *datadir)
 {
     if (!datadir || !datadir[0])
@@ -851,26 +918,13 @@ char *boot_autodetect_bundle_snapshot(const char *datadir)
     /* Match utxo-seed-<digits>.snapshot; the highest height wins. */
     static const char PFX[] = "utxo-seed-";
     static const char SFX[] = ".snapshot";
-    const size_t plen = sizeof(PFX) - 1, slen = sizeof(SFX) - 1;
     char best_name[256] = {0};
     long long best_h = -1;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         const char *nm = ent->d_name;
-        size_t len = strlen(nm);
-        if (len <= plen + slen || len >= sizeof(best_name))
-            continue;
-        if (strncmp(nm, PFX, plen) != 0)
-            continue;
-        if (strcmp(nm + len - slen, SFX) != 0)
-            continue;
         long long h = 0;
-        bool digits_ok = true;
-        for (size_t i = plen; i < len - slen; i++) {
-            if (nm[i] < '0' || nm[i] > '9') { digits_ok = false; break; }
-            h = h * 10 + (nm[i] - '0');
-        }
-        if (!digits_ok)
+        if (!boot_bundle_snapshot_height(nm, PFX, SFX, sizeof(best_name), &h))
             continue;
         /* Failure memory (never-stuck): a prior boot that crash-failed seeding
          * THIS snapshot wrote a sibling "<name>.failed" marker (see boot.c
@@ -879,9 +933,7 @@ char *boot_autodetect_bundle_snapshot(const char *datadir)
          * (systemd Restart=always) boot instead of crash-looping forever — no
          * human needed to delete the file. The explicit -load-snapshot flag is
          * unaffected (it never comes through here). */
-        char failp[1200];
-        int fpn = snprintf(failp, sizeof(failp), "%s/%s.failed", datadir, nm);
-        if (fpn > 0 && (size_t)fpn < sizeof(failp) && access(failp, F_OK) == 0) {
+        if (boot_bundle_failed_marker(datadir, nm)) {
             LOG_WARN("boot",
                      "[boot] starter-pack snapshot %s has a .failed marker from a "
                      "prior failed seed — skipping it; using normal P2P sync. "
@@ -909,14 +961,94 @@ char *boot_autodetect_bundle_snapshot(const char *datadir)
     }
 
     char *out = zcl_malloc(1100, "autodetect_bundle_snapshot");
-    if (!out)
-        return NULL;
-    int on = snprintf(out, 1100, "%s/%s", datadir, best_name);
+    int on = out ? snprintf(out, 1100, "%s/%s", datadir, best_name) : -1;
     if (on < 0 || on >= 1100) {
         free(out);
         return NULL;
     }
     return out;
+}
+
+/* True once per run: the caller should `goto` its retry label after the
+ * authority store was rebuilt. */
+static bool boot_snapshot_authority_retry(bool *used, const char *datadir,
+                                          sqlite3 **rpdb, const char *reason)
+{
+    if (*used)
+        return false;
+    *used = true;
+    return reopen_progress_store_after_verified_snapshot(datadir, rpdb, reason);
+}
+
+static bool boot_snapshot_arm_cursors(sqlite3 *rpdb, struct main_state *ms, int32_t seed_h, bool sapling_installed, bool v3, uint8_t *frontier, uint32_t flen, uint8_t *sprout, uint32_t slen, uint8_t *nullifiers, uint64_t ncount)
+{
+    /* Phase 2 — TWO-TIER stage reset (one progress.kv transaction).
+     *
+     * SOUNDNESS / why two tiers (the keystone of this loader): the snapshot
+     * re-seeds ONLY the UTXO set (coins_kv) at seed_h. Two of the eight stages
+     * (header_admit, validate_headers) validate ONLY PoW/Equihash from the
+     * in-memory header chain and NEVER read coins; two more (body_fetch,
+     * body_persist) only observe on-disk block bodies + build the forward
+     * created_outputs creation index — also coins-INDEPENDENT. Their work
+     * ABOVE seed_h is therefore still valid after the re-seed and MUST be
+     * preserved, because:
+     *   (a) rewinding validate_headers forces a P2P header RE-SYNC that, against
+     *       a confused getheaders locator, collapses pindex_best_header from the
+     *       on-disk header tip down to the seed — capping the WHOLE fold at the
+     *       seed height (observed: header tip pinned, H* frozen one block past
+     *       the seed). Keeping validate_headers at the on-disk tip keeps
+     *       pindex_best_header at the real tip, so active_chain_extend_window
+     *       supplies the lookahead all the way up and the coins-fold climbs over
+     *       ON-DISK bodies with NO peers.
+     *   (b) created_outputs (body_persist's forward creation index) is exactly
+     *       what script_validate's prevout resolver reads for coins created in
+     *       blocks ABOVE seed_h — deleting it would make every such prevout
+     *       unresolvable.
+     * The other FOUR stages (script_validate, proof_validate, utxo_apply,
+     * tip_finalize) DO read/derive from the coins set, so their rows above the
+     * old (contaminated) seed are stale: force them DOWN to seed_h and clear
+     * their derived tables so they re-run against the freshly seeded coins.
+     *
+     * Coins-INDEPENDENT stages: preserve at MAX(current, seed_h) — never rewind
+     * below the seed, never below where they already are. Their log tables and
+     * created_outputs are KEPT. */
+    static const char *const k_keep_stages[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+    };
+    /* Coins-DEPENDENT stages: force to seed_h; their derived tables are cleared
+     * (created_outputs is deliberately NOT here — it is body_persist's index). */
+    static const char *const k_coins_stages[] = {
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
+    };
+    static const char *const k_coins_tables[] = {
+        "script_validate_log", "proof_validate_log", "utxo_apply_log",
+        "tip_finalize_log", "utxo_apply_delta",
+    };
+    char *err = NULL;
+    bool ok = boot_progress_tx_begin(rpdb, &err) &&
+              boot_progress_delete_tables(rpdb, k_coins_tables,
+                                          BOOT_NELEM(k_coins_tables), &err);
+    /* Coins-independent stages: keep their on-disk progress (only raise to
+     * seed_h if somehow behind it — never rewind the validated header/body
+     * frontier below where it already stands). Read the durable cursor with a
+     * direct query (we already hold the progress tx lock + an open tx). */
+    for (size_t i = 0;
+         ok && i < BOOT_NELEM(k_keep_stages);
+         i++)
+        ok = boot_progress_raise_stage(rpdb, k_keep_stages[i], seed_h);
+    /* Coins-dependent stages: force DOWN to the seed to re-fold against the
+     * freshly seeded coins. */
+    ok = ok && boot_progress_force_stages(rpdb, k_coins_stages,
+                                          BOOT_NELEM(k_coins_stages), seed_h) &&
+         utxo_apply_frontier_set_in_tx(rpdb, seed_h + 1);
+    /* SHIELDED SEED (v3, Sapling root-verified) or the default cursor reset
+     * (v1/v2). Fail-closed. See config/boot_shielded_seed.h. */
+    ok = ok && boot_shielded_cure_or_reset_in_tx(rpdb, ms, seed_h, sapling_installed, v3, frontier, flen, sprout, slen, nullifiers, ncount);
+    if (ok) {
+        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HEIGHT_KEY);
+        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HASH_KEY);
+    }
+    return boot_progress_tx_finish(rpdb, ok, &err);
 }
 
 void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
@@ -1124,12 +1256,9 @@ void boot_load_snapshot_at_own_height_reset(struct node_db *ndb,
 retry_authority_store:
     sqlite3 *rpdb = progress_store_db();
     if (!rpdb) {
-        if (!authority_retry_used) {
-            authority_retry_used = true;
-            if (reopen_progress_store_after_verified_snapshot(
-                    datadir, &rpdb, "progress_store_not_open"))
-                goto retry_authority_store;
-        }
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "progress_store_not_open"))
+            goto retry_authority_store;
         fprintf(stderr, "FATAL: -load-snapshot-at-own-height: progress store not "
                 "open after verified snapshot; cannot seed\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
@@ -1139,12 +1268,9 @@ retry_authority_store:
 
     /* Interim crash convergence (not atomic): journal before mutation. */
     if (!boot_snapshot_install_marker_begin(rpdb, &hdr, artifact_sha256)) {
-        if (!authority_retry_used) {
-            authority_retry_used = true;
-            if (reopen_progress_store_after_verified_snapshot(datadir, &rpdb,
-                    "install_marker_begin_failed"))
-                goto retry_authority_store;
-        }
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "install_marker_begin_failed"))
+            goto retry_authority_store;
         fprintf(stderr, "FATAL: snapshot install marker failed before mutation\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "load_snapshot install_marker_begin_failed");
         _exit(EXIT_FAILURE);
@@ -1168,12 +1294,9 @@ retry_authority_store:
     /* Phase 1 (own transactions): FULL coins_kv reset, then RE-SEED from the
      * snapshot. Bulk-load under ONE transaction so a crash mid-load rolls back. */
     if (!coins_kv_reset_for_reseed(rpdb)) {
-        if (!authority_retry_used) {
-            authority_retry_used = true;
-            if (reopen_progress_store_after_verified_snapshot(
-                    datadir, &rpdb, "coins_kv_reset_failed"))
-                goto retry_authority_store;
-        }
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "coins_kv_reset_failed"))
+            goto retry_authority_store;
         fprintf(stderr, "FATAL: -load-snapshot-at-own-height: "
                 "coins_kv_reset_for_reseed failed\n");
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
@@ -1205,9 +1328,8 @@ retry_authority_store:
     if (!load_ok && !authority_retry_used) {
         uss_close(h);
         h = NULL;
-        authority_retry_used = true;
-        if (reopen_progress_store_after_verified_snapshot(
-                datadir, &rpdb, "snapshot_apply_failed"))
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "snapshot_apply_failed"))
             goto retry_authority_store;
         h = uss_open(path, /*verify_full_sha3=*/true,
                      /*expected_sha3=*/NULL, &hdr2, err2, sizeof(err2));
@@ -1238,12 +1360,9 @@ retry_authority_store:
     h = NULL;
 
     if (!load_ok) {
-        if (!authority_retry_used) {
-            authority_retry_used = true;
-            if (reopen_progress_store_after_verified_snapshot(
-                    datadir, &rpdb, "snapshot_load_failed"))
-                goto retry_authority_store;
-        }
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "snapshot_load_failed"))
+            goto retry_authority_store;
         fprintf(stderr, "FATAL: -load-snapshot-at-own-height: load FAILED "
                 "(inserted=%llu emitted=%lld want count=%llu) "
                 "— REFUSING to seed\n",
@@ -1309,12 +1428,12 @@ retry_authority_store:
         if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &aherr)
             != SQLITE_OK) {
             if (!authority_retry_used) {
-                if (aherr) { sqlite3_free(aherr); aherr = NULL; }
-                authority_retry_used = true;
-                if (reopen_progress_store_after_verified_snapshot(
-                        datadir, &rpdb, "applied_height_begin_failed"))
-                    goto retry_authority_store;
+                sqlite3_free(aherr);
+                aherr = NULL;
             }
+            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                              &rpdb, "applied_height_begin_failed"))
+                goto retry_authority_store;
             fprintf(stderr, "FATAL: -load-snapshot-at-own-height: pre-rebuild "
                     "applied-height BEGIN failed: %s\n",
                     aherr ? aherr : "(no msg)");
@@ -1325,12 +1444,9 @@ retry_authority_store:
         }
         if (!utxo_apply_frontier_set_in_tx(rpdb, seed_h + 1)) {
             sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-            if (!authority_retry_used) {
-                authority_retry_used = true;
-                if (reopen_progress_store_after_verified_snapshot(
-                        datadir, &rpdb, "applied_height_set_failed"))
-                    goto retry_authority_store;
-            }
+            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                              &rpdb, "applied_height_set_failed"))
+                goto retry_authority_store;
             fprintf(stderr, "FATAL: -load-snapshot-at-own-height: failed to set "
                     "pre-rebuild applied-height=%d — refusing to run the Sapling "
                     "rebuild with an uncapped endpoint\n", seed_h + 1);
@@ -1342,12 +1458,12 @@ retry_authority_store:
         if (sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &aherr) != SQLITE_OK) {
             sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
             if (!authority_retry_used) {
-                if (aherr) { sqlite3_free(aherr); aherr = NULL; }
-                authority_retry_used = true;
-                if (reopen_progress_store_after_verified_snapshot(
-                        datadir, &rpdb, "applied_height_commit_failed"))
-                    goto retry_authority_store;
+                sqlite3_free(aherr);
+                aherr = NULL;
             }
+            if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                              &rpdb, "applied_height_commit_failed"))
+                goto retry_authority_store;
             fprintf(stderr, "FATAL: -load-snapshot-at-own-height: pre-rebuild "
                     "applied-height COMMIT failed: %s\n",
                     aherr ? aherr : "(no msg)");
@@ -1485,129 +1601,14 @@ retry_authority_store:
                  "from genesis on next run");
     }
 
-    /* Phase 2 — TWO-TIER stage reset (one progress.kv transaction).
-     *
-     * SOUNDNESS / why two tiers (the keystone of this loader): the snapshot
-     * re-seeds ONLY the UTXO set (coins_kv) at seed_h. Two of the eight stages
-     * (header_admit, validate_headers) validate ONLY PoW/Equihash from the
-     * in-memory header chain and NEVER read coins; two more (body_fetch,
-     * body_persist) only observe on-disk block bodies + build the forward
-     * created_outputs creation index — also coins-INDEPENDENT. Their work
-     * ABOVE seed_h is therefore still valid after the re-seed and MUST be
-     * preserved, because:
-     *   (a) rewinding validate_headers forces a P2P header RE-SYNC that, against
-     *       a confused getheaders locator, collapses pindex_best_header from the
-     *       on-disk header tip down to the seed — capping the WHOLE fold at the
-     *       seed height (observed: header tip pinned, H* frozen one block past
-     *       the seed). Keeping validate_headers at the on-disk tip keeps
-     *       pindex_best_header at the real tip, so active_chain_extend_window
-     *       supplies the lookahead all the way up and the coins-fold climbs over
-     *       ON-DISK bodies with NO peers.
-     *   (b) created_outputs (body_persist's forward creation index) is exactly
-     *       what script_validate's prevout resolver reads for coins created in
-     *       blocks ABOVE seed_h — deleting it would make every such prevout
-     *       unresolvable.
-     * The other FOUR stages (script_validate, proof_validate, utxo_apply,
-     * tip_finalize) DO read/derive from the coins set, so their rows above the
-     * old (contaminated) seed are stale: force them DOWN to seed_h and clear
-     * their derived tables so they re-run against the freshly seeded coins.
-     *
-     * Coins-INDEPENDENT stages: preserve at MAX(current, seed_h) — never rewind
-     * below the seed, never below where they already are. Their log tables and
-     * created_outputs are KEPT. */
-    static const char *const k_keep_stages[] = {
-        "header_admit", "validate_headers", "body_fetch", "body_persist",
-    };
-    /* Coins-DEPENDENT stages: force to seed_h; their derived tables are cleared
-     * (created_outputs is deliberately NOT here — it is body_persist's index). */
-    static const char *const k_coins_stages[] = {
-        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
-    };
-    static const char *const k_coins_tables[] = {
-        "script_validate_log", "proof_validate_log", "utxo_apply_log",
-        "tip_finalize_log", "utxo_apply_delta",
-    };
-    bool refold_ok = true;
-    char *refold_err = NULL;
-    progress_store_tx_lock();
-    if (sqlite3_exec(rpdb, "BEGIN IMMEDIATE", NULL, NULL, &refold_err)
-        != SQLITE_OK)
-        refold_ok = false;
-    for (size_t i = 0;
-         refold_ok && i < sizeof(k_coins_tables) / sizeof(k_coins_tables[0]);
-         i++) {
-        char dsql[96];
-        snprintf(dsql, sizeof dsql, "DELETE FROM %s", k_coins_tables[i]);
-        if (sqlite3_exec(rpdb, dsql, NULL, NULL, &refold_err) != SQLITE_OK) {
-            if (refold_err && strstr(refold_err, "no such table")) {
-                sqlite3_free(refold_err);
-                refold_err = NULL;
-            } else {
-                refold_ok = false;
-            }
-        }
-    }
-    /* Coins-independent stages: keep their on-disk progress (only raise to
-     * seed_h if somehow behind it — never rewind the validated header/body
-     * frontier below where it already stands). Read the durable cursor with a
-     * direct query (we already hold the progress tx lock + an open tx). */
-    for (size_t i = 0;
-         refold_ok && i < sizeof(k_keep_stages) / sizeof(k_keep_stages[0]);
-         i++) {
-        int cur = -1;
-        sqlite3_stmt *cst = NULL;
-        if (sqlite3_prepare_v2(rpdb,
-                "SELECT cursor FROM stage_cursor WHERE name = ?",
-                -1, &cst, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(cst, 1, k_keep_stages[i], -1, SQLITE_STATIC);
-            if (sqlite3_step(cst) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
-                cur = sqlite3_column_int(cst, 0);
-        }
-        if (cst)
-            sqlite3_finalize(cst);
-        int target = (cur > seed_h) ? cur : seed_h;
-        if (!stage_repair_force_stage_cursor(rpdb, k_keep_stages[i], target))
-            refold_ok = false;
-    }
-    /* Coins-dependent stages: force DOWN to the seed to re-fold against the
-     * freshly seeded coins. */
-    for (size_t i = 0;
-         refold_ok && i < sizeof(k_coins_stages) / sizeof(k_coins_stages[0]);
-         i++)
-        if (!stage_repair_force_stage_cursor(rpdb, k_coins_stages[i], seed_h))
-            refold_ok = false;
-    if (refold_ok && !utxo_apply_frontier_set_in_tx(rpdb, seed_h + 1))
-        refold_ok = false;
-    /* SHIELDED SEED (v3, Sapling root-verified) or the default cursor reset
-     * (v1/v2). Fail-closed. See config/boot_shielded_seed.h. */
-    if (refold_ok && !boot_shielded_cure_or_reset_in_tx(
-            rpdb, ms, seed_h, sapling_installed_from_frontier,
-            embedded_shielded_v3, embedded_frontier, embedded_frontier_len,
-            embedded_sprout, embedded_sprout_len,
-            embedded_nullifiers, embedded_nullifier_count))
-        refold_ok = false;
-    if (refold_ok) {
-        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HEIGHT_KEY);
-        (void)progress_meta_delete_in_tx(rpdb, REDUCER_TRUSTED_BASE_HASH_KEY);
-    }
-    if (refold_ok && sqlite3_exec(rpdb, "COMMIT", NULL, NULL, &refold_err)
-        != SQLITE_OK)
-        refold_ok = false;
-    if (!refold_ok)
-        sqlite3_exec(rpdb, "ROLLBACK", NULL, NULL, NULL);
-    if (refold_err) {
-        sqlite3_free(refold_err);
-        refold_err = NULL;
-    }
-    progress_store_tx_unlock();
-
+    bool refold_ok = boot_snapshot_arm_cursors(
+        rpdb, ms, seed_h, sapling_installed_from_frontier, embedded_shielded_v3,
+        embedded_frontier, embedded_frontier_len, embedded_sprout,
+        embedded_sprout_len, embedded_nullifiers, embedded_nullifier_count);
     if (!refold_ok) {
-        if (!authority_retry_used) {
-            authority_retry_used = true;
-            if (reopen_progress_store_after_verified_snapshot(
-                    datadir, &rpdb, "stage_cursor_arm_failed"))
-                goto retry_authority_store;
-        }
+        if (boot_snapshot_authority_retry(&authority_retry_used, datadir,
+                                          &rpdb, "stage_cursor_arm_failed"))
+            goto retry_authority_store;
         fprintf(stderr,
                 "FATAL: -load-snapshot-at-own-height: failed to force the 8 stage "
                 "cursors to h=%d — refusing to start a half-armed fold\n", seed_h);

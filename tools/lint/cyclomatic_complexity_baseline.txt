@@ -246,11 +246,8 @@ core/modules/validation/src/process_block_tip_child.c:find_verified_unlinked_act
 core/modules/validation/src/txmempool.c:tx_mempool_add_unchecked:18
 core/modules/validation/src/update_coins.c:update_coins_with_undo:16
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:23
-engine/composition/src/boot_refold_staged.c:boot_autodetect_bundle_snapshot:24
-engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:113
+engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:80
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
-engine/composition/src/boot_refold_staged.c:boot_refold_from_anchor_reset:33
-engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_services.c:app_init_services:109
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
