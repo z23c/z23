@@ -632,7 +632,12 @@ static int test_snapshot_serve_chunk_refusal_branches(void)
         addr.svc.port = 8233;
         struct p2p_node *node = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
                                                  &addr, "chunk-refuse", false);
-        bool ok = (node != NULL);
+        if (!node) {
+            printf("FAIL\n");
+            net_manager_free(&nm);
+            return failures + 1;
+        }
+        bool ok = true;
 
         /* Truncated: no chunk index. */
         stream_init(&req, 2);
@@ -667,10 +672,17 @@ static int test_snapshot_serve_chunk_refusal_branches(void)
         published.num_utxos = 654;
         published.num_chunks = 2;
         published.chunk_size = SYNC_CHUNK_SIZE;
-        published.chunk_hashes = zcl_calloc(2, sizeof(*published.chunk_hashes),
-                                            "test_chunk_hashes");
-        ok = ok && published.chunk_hashes != NULL;
-        ok = ok && msg_processor_publish_manifest(&published);
+        if (ok) {
+            published.chunk_hashes = zcl_calloc(2,
+                                                sizeof(*published.chunk_hashes),
+                                                "test_chunk_hashes");
+            ok = published.chunk_hashes != NULL;
+        }
+        /* Publish takes ownership of chunk_hashes; if it is skipped, free them. */
+        if (ok)
+            ok = msg_processor_publish_manifest(&published);
+        else
+            sync_manifest_free(&published);
         stream_init(&req, 8);
         stream_write_u32_le(&req, 2);
         mp_serve_chunk_req(&mp, node, &req);
