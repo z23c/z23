@@ -38,6 +38,42 @@ _Static_assert(AUTHORITY_RECEIPT_OFF_RECEIPT + 32u ==
                    AUTHORITY_RECEIPT_HEADER_BYTES,
                "authority receipt header offsets");
 
+/* Feed the file into the hash in buffer-sized reads; false on a short or
+ * failed read. *offset_out receives the bytes consumed. */
+static bool ar_hash_file_body(struct platform_positioned_file *file,
+                              uint64_t size, struct sha3_256_ctx *ctx,
+                              uint8_t *buffer, size_t buffer_cap,
+                              uint64_t *offset_out)
+{
+    uint64_t offset = 0;
+    bool ok = true;
+    while (offset < size) {
+        size_t wanted = size - offset > buffer_cap
+                            ? buffer_cap : (size_t)(size - offset);
+        int64_t n = platform_positioned_file_read(file, buffer, wanted,
+                                                   offset);
+        if (n <= 0) { ok = false; break; }
+        sha3_256_write(ctx, buffer, (size_t)n);
+        offset += (uint64_t)n;
+    }
+    *offset_out = offset;
+    return ok;
+}
+
+/* True when two snapshots describe the same unchanged file. */
+static bool ar_snapshots_equal(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->size == after->size && before->volume == after->volume &&
+        before->file_low == after->file_low &&
+        before->file_high == after->file_high &&
+        before->modified_seconds == after->modified_seconds &&
+        before->modified_nanoseconds == after->modified_nanoseconds &&
+        before->changed_seconds == after->changed_seconds &&
+        before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
 /* ── Idiom primitive: SHA3-256 of the running executable image ──────────────
  * Race-free direct open of /proc/self/exe (a path readlink reintroduces
  * TOCTOU); byte-identical to consensus_state_replay_receipt.c's original. */
@@ -59,25 +95,12 @@ bool authority_receipt_running_binary_digest(uint8_t out[32])
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
     uint8_t buffer[32768];
-    bool ok = true;
     uint64_t offset = 0;
-    while (offset < before.size) {
-        size_t wanted = before.size - offset > sizeof(buffer)
-                            ? sizeof(buffer) : (size_t)(before.size - offset);
-        int64_t n = platform_positioned_file_read(&file, buffer, wanted,
-                                                   offset);
-        if (n <= 0) { ok = false; break; }
-        sha3_256_write(&ctx, buffer, (size_t)n);
-        offset += (uint64_t)n;
-    }
+    bool ok = ar_hash_file_body(&file, before.size, &ctx, buffer,
+                                sizeof(buffer), &offset);
     ok = ok && offset == before.size &&
         platform_positioned_file_snapshot(&file, &after) &&
-        before.size == after.size && before.volume == after.volume &&
-        before.file_low == after.file_low && before.file_high == after.file_high &&
-        before.modified_seconds == after.modified_seconds &&
-        before.modified_nanoseconds == after.modified_nanoseconds &&
-        before.changed_seconds == after.changed_seconds &&
-        before.changed_nanoseconds == after.changed_nanoseconds;
+        ar_snapshots_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (!ok)
         LOG_FAIL(AR_SUBSYS, "running executable digest failed");
@@ -85,59 +108,63 @@ bool authority_receipt_running_binary_digest(uint8_t out[32])
     return true;
 }
 
-/* ── Idiom primitive: atomic keyed write ───────────────────────────────────
- * tmp -> fsync(file) -> rename -> fsync(dir), under `datadir`, keyed on `name`. */
-bool authority_receipt_write_atomic(const char *datadir, const char *name,
-                                    const uint8_t *payload, size_t len,
-                                    char *final_out, size_t final_cap)
+static bool ar_write_args_valid(const char *datadir, const char *name,
+                                const uint8_t *payload, size_t len)
 {
-    if (!datadir || !datadir[0] || !name || !name[0] || !payload || len == 0)
-        LOG_FAIL(AR_SUBSYS, "invalid write args");
+    return datadir && datadir[0] && name && name[0] && payload && len != 0;
+}
+
+/* True when an snprintf result is positive and fits in cap bytes. */
+static bool ar_path_fits(int n, size_t cap)
+{
+    return n > 0 && (size_t)n < cap;
+}
+
+/* Report the published path to the caller when it asked for it. */
+static void ar_copy_final_path(char *final_out, size_t final_cap,
+                               const char *path)
+{
+    if (final_out && final_cap > 0)
+        snprintf(final_out, final_cap, "%s", path);
+}
 
 #if defined(_WIN32)
-    if (strchr(name, '/') || strchr(name, '\\') || strcmp(name, ".") == 0 ||
-        strcmp(name, "..") == 0)
-        LOG_FAIL(AR_SUBSYS, "invalid receipt child name");
-    uintptr_t directory = 0;
-    if (!platform_private_directory_open_validated(datadir, &directory))
-        LOG_FAIL(AR_SUBSYS, "private datadir validation failed");
-    char final_path[32768], tmp_path[32768], resolved[32768], parent[32768];
-    int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
-    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp", datadir, name);
-    struct platform_private_file staged;
-    platform_private_file_init(&staged);
-    bool ok = fn > 0 && (size_t)fn < sizeof(final_path) && tn > 0 &&
-        (size_t)tn < sizeof(tmp_path) &&
-        platform_private_path_resolve(final_path, resolved, sizeof(resolved),
-                                      parent, sizeof(parent)) &&
-        platform_private_file_create(tmp_path, &staged) &&
-        platform_private_file_write_at(&staged, payload, len, 0) &&
-        platform_private_file_flush(&staged) &&
-        platform_private_file_replace(&staged, tmp_path, resolved) &&
-        platform_private_parent_flush(parent);
-    if (!ok && staged.native != (uintptr_t)-1) {
-        (void)platform_private_file_retire(&staged, tmp_path);
-        platform_private_file_close(&staged);
+/* Retire and close a staged temp file that was created but not published. */
+static void ar_win_abandon_staged(struct platform_private_file *staged,
+                                  const char *tmp_path)
+{
+    if (staged->native != (uintptr_t)-1) {
+        (void)platform_private_file_retire(staged, tmp_path);
+        platform_private_file_close(staged);
     }
-    platform_private_directory_close(directory);
-    if (!ok) LOG_FAIL(AR_SUBSYS, "durable receipt publication failed");
-    if (final_out && final_cap > 0)
-        snprintf(final_out, final_cap, "%s", resolved);
-    return true;
+}
+
+static bool ar_child_name_invalid(const char *name)
+{
+    return strchr(name, '/') || strchr(name, '\\') || strcmp(name, ".") == 0 ||
+        strcmp(name, "..") == 0;
+}
+
+/* Create, write, flush and replace the staged file, then flush its parent. */
+static bool ar_win_publish(struct platform_private_file *staged,
+                           const uint8_t *payload, size_t len,
+                           const char *final_path, const char *tmp_path,
+                           char *resolved, size_t resolved_cap, char *parent,
+                           size_t parent_cap)
+{
+    return platform_private_path_resolve(final_path, resolved, resolved_cap,
+                                         parent, parent_cap) &&
+        platform_private_file_create(tmp_path, staged) &&
+        platform_private_file_write_at(staged, payload, len, 0) &&
+        platform_private_file_flush(staged) &&
+        platform_private_file_replace(staged, tmp_path, resolved) &&
+        platform_private_parent_flush(parent);
+}
 #else
-    char final_path[PATH_MAX], tmp_path[PATH_MAX];
-    int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
-    if (fn <= 0 || (size_t)fn >= sizeof(final_path))
-        LOG_FAIL(AR_SUBSYS, "receipt final path too long");
-    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp.%ld", datadir,
-                      name, (long)getpid());
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp_path))
-        LOG_FAIL(AR_SUBSYS, "receipt tmp path too long");
-
-    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        LOG_FAIL(AR_SUBSYS, "receipt tmp open failed: %s", strerror(errno));
-
+/* Write all of payload, fsync, then close; false if any step failed. The fd
+ * is always closed. */
+static bool ar_write_sync_close(int fd, const uint8_t *payload, size_t len)
+{
     bool ok = true;
     size_t written = 0;
     while (written < len) {
@@ -155,6 +182,101 @@ bool authority_receipt_write_atomic(const char *datadir, const char *name,
         ok = false;
     if (close(fd) != 0)
         ok = false;
+    return ok;
+}
+
+/* Best-effort fsync of the directory entry. */
+static void ar_sync_directory(const char *datadir)
+{
+    int dir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        (void)fsync(dir_fd);
+        (void)close(dir_fd);
+    }
+}
+
+/* Fill out with up to len bytes; false on a read error (EOF is not an error,
+ * *got_out tells how much arrived). */
+static bool ar_read_fill(int fd, uint8_t *out, size_t len, size_t *got_out)
+{
+    size_t got = 0;
+    bool ok = true;
+    while (got < len) {
+        ssize_t n = read(fd, out + got, len - got);
+        if (n > 0) {
+            got += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0)
+            ok = false;
+        break; /* EOF (short file) or read error */
+    }
+    *got_out = got;
+    return ok;
+}
+
+/* True when at least one more byte can be read from fd. */
+static bool ar_has_extra_byte(int fd)
+{
+    for (;;) {
+        uint8_t scratch;
+        ssize_t n = read(fd, &scratch, 1);
+        if (n > 0)
+            return true;
+        if (n < 0 && errno == EINTR)
+            continue;
+        return false; /* EOF (exact length) or error */
+    }
+}
+#endif
+
+/* ── Idiom primitive: atomic keyed write ───────────────────────────────────
+ * tmp -> fsync(file) -> rename -> fsync(dir), under `datadir`, keyed on `name`. */
+bool authority_receipt_write_atomic(const char *datadir, const char *name,
+                                    const uint8_t *payload, size_t len,
+                                    char *final_out, size_t final_cap)
+{
+    if (!ar_write_args_valid(datadir, name, payload, len))
+        LOG_FAIL(AR_SUBSYS, "invalid write args");
+
+#if defined(_WIN32)
+    if (ar_child_name_invalid(name))
+        LOG_FAIL(AR_SUBSYS, "invalid receipt child name");
+    uintptr_t directory = 0;
+    if (!platform_private_directory_open_validated(datadir, &directory))
+        LOG_FAIL(AR_SUBSYS, "private datadir validation failed");
+    char final_path[32768], tmp_path[32768], resolved[32768], parent[32768];
+    int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp", datadir, name);
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    bool ok = ar_path_fits(fn, sizeof(final_path)) &&
+        ar_path_fits(tn, sizeof(tmp_path)) &&
+        ar_win_publish(&staged, payload, len, final_path, tmp_path, resolved,
+                       sizeof(resolved), parent, sizeof(parent));
+    if (!ok)
+        ar_win_abandon_staged(&staged, tmp_path);
+    platform_private_directory_close(directory);
+    if (!ok) LOG_FAIL(AR_SUBSYS, "durable receipt publication failed");
+    ar_copy_final_path(final_out, final_cap, resolved);
+    return true;
+#else
+    char final_path[PATH_MAX], tmp_path[PATH_MAX];
+    int fn = snprintf(final_path, sizeof(final_path), "%s/%s", datadir, name);
+    if (!ar_path_fits(fn, sizeof(final_path)))
+        LOG_FAIL(AR_SUBSYS, "receipt final path too long");
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s/%s.tmp.%ld", datadir,
+                      name, (long)getpid());
+    if (!ar_path_fits(tn, sizeof(tmp_path)))
+        LOG_FAIL(AR_SUBSYS, "receipt tmp path too long");
+
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        LOG_FAIL(AR_SUBSYS, "receipt tmp open failed: %s", strerror(errno));
+
+    bool ok = ar_write_sync_close(fd, payload, len);
     if (ok && rename(tmp_path, final_path) != 0) {
         LOG_WARN(AR_SUBSYS, "receipt rename failed: %s", strerror(errno));
         ok = false;
@@ -163,13 +285,8 @@ bool authority_receipt_write_atomic(const char *datadir, const char *name,
         (void)unlink(tmp_path);
         LOG_FAIL(AR_SUBSYS, "receipt persist (fsync'd) failed");
     }
-    int dir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd >= 0) {
-        (void)fsync(dir_fd);
-        (void)close(dir_fd);
-    }
-    if (final_out && final_cap > 0)
-        snprintf(final_out, final_cap, "%s", final_path);
+    ar_sync_directory(datadir);
+    ar_copy_final_path(final_out, final_cap, final_path);
     return true;
 #endif
 }
@@ -191,34 +308,11 @@ bool authority_receipt_read_fixed(int datadir_fd, const char *name,
         return false;
 
     size_t got = 0;
-    bool ok = true;
-    while (got < len) {
-        ssize_t n = read(fd, out + got, len - got);
-        if (n > 0) {
-            got += (size_t)n;
-            continue;
-        }
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n < 0)
-            ok = false;
-        break; /* EOF (short file) or read error */
-    }
+    bool ok = ar_read_fill(fd, out, len, &got);
     /* Exactly `len` — a longer file is not our canonical receipt. */
     bool extra = false;
-    if (ok && got == len) {
-        for (;;) {
-            uint8_t scratch;
-            ssize_t n = read(fd, &scratch, 1);
-            if (n > 0) {
-                extra = true;
-                break;
-            }
-            if (n < 0 && errno == EINTR)
-                continue;
-            break; /* EOF (exact length) or error */
-        }
-    }
+    if (ok && got == len)
+        extra = ar_has_extra_byte(fd);
     (void)close(fd);
     return ok && got == len && !extra;
 #endif
@@ -320,13 +414,38 @@ bool authority_receipt_header_seal_and_write(struct authority_receipt_header *h,
     return true;
 }
 
+static bool ar_expectations_present(const char *name, const char *schema,
+                                    const uint8_t *artifact,
+                                    const uint8_t *anchor,
+                                    const uint8_t *detail)
+{
+    return name && schema && artifact && anchor && detail;
+}
+
+/* True when the receipt binds exactly the expected schema and digests. */
+static bool ar_header_binds(const struct authority_receipt_header *r,
+                            const char *expect_schema,
+                            const uint8_t expect_artifact[32],
+                            const uint8_t expect_context_anchor[32],
+                            const uint8_t expect_detail_digest[32])
+{
+    size_t esl = strlen(expect_schema);
+    return esl < AUTHORITY_RECEIPT_SCHEMA_FIELD &&
+        strncmp(r->schema, expect_schema, AUTHORITY_RECEIPT_SCHEMA_FIELD) == 0 &&
+        memcmp(r->artifact_digest, expect_artifact, 32) == 0 &&
+        memcmp(r->context_anchor, expect_context_anchor, 32) == 0 &&
+        memcmp(r->detail_digest, expect_detail_digest, 32) == 0;
+}
+
 bool authority_receipt_header_authority_available(
     int datadir_fd, const char *name, const char *expect_schema,
     const uint8_t expect_artifact[32], const uint8_t expect_context_anchor[32],
     const uint8_t expect_detail_digest[32])
 {
-    if (datadir_fd < 0 || !name || !expect_schema || !expect_artifact ||
-        !expect_context_anchor || !expect_detail_digest)
+    if (datadir_fd < 0 || !ar_expectations_present(name, expect_schema,
+                                                   expect_artifact,
+                                                   expect_context_anchor,
+                                                   expect_detail_digest))
         return false;
 
     uint8_t buf[AUTHORITY_RECEIPT_HEADER_BYTES];
@@ -356,12 +475,8 @@ bool authority_receipt_header_authority_available(
         return false;
     }
 
-    size_t esl = strlen(expect_schema);
-    if (esl >= AUTHORITY_RECEIPT_SCHEMA_FIELD ||
-        strncmp(r.schema, expect_schema, AUTHORITY_RECEIPT_SCHEMA_FIELD) != 0 ||
-        memcmp(r.artifact_digest, expect_artifact, 32) != 0 ||
-        memcmp(r.context_anchor, expect_context_anchor, 32) != 0 ||
-        memcmp(r.detail_digest, expect_detail_digest, 32) != 0) {
+    if (!ar_header_binds(&r, expect_schema, expect_artifact,
+                         expect_context_anchor, expect_detail_digest)) {
         LOG_WARN(AR_SUBSYS, "authority receipt '%s' does not bind THIS "
                             "schema/artifact/anchor/detail; transition stays "
                             "contained",

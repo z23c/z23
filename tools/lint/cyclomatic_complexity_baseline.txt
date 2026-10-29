@@ -516,10 +516,6 @@ platform/modules/platform/src/watcher_record.c:platform_watcher_record_is_valid:
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_matches:27
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_parse:30
 platform/modules/platform/tests/read_mapping_windows_acceptance.c:main:16
-platform/modules/util/src/authority_receipt.c:authority_receipt_header_authority_available:16
-platform/modules/util/src/authority_receipt.c:authority_receipt_read_fixed:20
-platform/modules/util/src/authority_receipt.c:authority_receipt_running_binary_digest:19
-platform/modules/util/src/authority_receipt.c:authority_receipt_write_atomic:44
 platform/modules/util/src/cpu_topology.c:scan_darwin:18
 platform/modules/util/src/cpu_topology.c:scan_windows:27
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
