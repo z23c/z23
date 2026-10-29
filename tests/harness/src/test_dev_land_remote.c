@@ -852,6 +852,25 @@ static int dlt_offer_cases(void)
         PASS();
     }
 
+    TEST("land.send --bundle_out: the offer base is the commit's parent even "
+         "when origin/main has moved past it") {
+        char mb[900], mof[900];
+        (void)snprintf(mb, sizeof(mb), "%s/m.bundle", r.base);
+        (void)snprintf(mof, sizeof(mof), "%s/m.bundle.offer.json", r.base);
+        ASSERT(dlt_commit(r.queue, "moved.txt", "moved\n"));
+        ASSERT(DLT_GIT(NULL, 0, r.queue, "push", "--quiet", "origin",
+                       "main") == 0);
+        dlt_send_x(&c, &r, tip, mb, false);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        dlt_check(&c, r.queue, mb, mof, NULL);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "base")),
+                      r.base_sha);
+        dlt_end(&c);
+        PASS();
+    }
+
     TEST("land.send --bundle_out: an existing .offer.json refuses "
          "SEND_OFFER_EXISTS and writes no bundle") {
         char nb[900], no[900];

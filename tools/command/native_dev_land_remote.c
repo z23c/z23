@@ -27,8 +27,8 @@
  *          sha256, are the handoff to a queue host reached another way.
  *          It also writes <bundle_out>.offer.json (SEND_OFFER_EXISTS when
  *          that exists; reported as data.offer), a flat manifest
- *          {schema "zcl.dev_land_offer.v1", commit, base (the origin/main
- *          commit the bundle excludes), bundle_sha256, lane} that the
+ *          {schema "zcl.dev_land_offer.v1", commit, base (the bundle's
+ *          prerequisite: the commit's parent), bundle_sha256, lane} that the
  *          receiver checks with check_offer before it trusts the bundle.
  * check_offer (any machine, read-only) takes --bundle and --offer (absolute
  *          paths) and optional --repo (default: the checkout above the
@@ -786,17 +786,21 @@ static bool dlr_send_bundle(struct dlr_send *s, struct zcl_command_reply *reply)
 }
 
 /* Writes <bundle_out>.offer.json, the flat manifest a receiver checks with
- * dev.land.check_offer: schema, commit, the origin/main commit the bundle
- * excludes, the bundle's sha256 and the lane. Created exclusively. */
+ * dev.land.check_offer: schema, commit, the bundle's prerequisite (the
+ * commit's parent), the bundle's sha256 and the lane. Created exclusively. */
 static bool dlr_send_offer(struct dlr_send *s, struct zcl_command_reply *reply)
 {
-    const char *rp[] = {"rev-parse", "--verify", "--quiet", "origin/main",
-                        NULL};
+    char spec[64];
+    const char *rp[] = {"rev-parse", "--verify", "--quiet", spec, NULL};
     struct json_value doc;
     char body[1024];
     size_t n = 0;
     bool ok = false;
     FILE *f;
+    /* The base is the bundle's prerequisite, the parent of the one included
+     * commit, not the origin/main tip, which may have moved past it. */
+    if (snprintf(spec, sizeof(spec), "%.40s^", s->sha) >= (int)sizeof(spec))
+        return false;
     if (!dlr_send_git(s, rp, s->base, sizeof(s->base), "SEND_GIT_FAILED",
                       reply))
         return false;
