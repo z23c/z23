@@ -276,11 +276,7 @@ engine/models/src/database_migrate_features.c:migration_schema_object_matches:20
 engine/models/src/database_migrate_features.c:node_db_migrate_features:37
 engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
 engine/modules/engine/src/engine_wire_response.c:read_text:24
-engine/modules/hotswap/src/hotswap_activate.c:activate_from_sealed_fd:21
-engine/modules/hotswap/src/hotswap_activate.c:hotswap_module_publish:21
-engine/modules/hotswap/src/hotswap_activate.c:hotswap_rollback:20
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_verify_module_so:33
-engine/modules/hotswap/src/hotswap_activate.c:retire_candidate:18
 engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/boot_auto_refold.c:arf_read:17

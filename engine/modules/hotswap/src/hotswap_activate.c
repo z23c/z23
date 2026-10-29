@@ -837,6 +837,16 @@ static bool act_reject(struct hotswap_activate_report *report,
     return false;
 }
 
+static const char *str_or(const char *s, const char *dflt)
+{
+    return s[0] ? s : dflt;
+}
+
+static void close_fd_if_open(int fd)
+{
+    if (fd >= 0) close(fd);
+}
+
 /* Fill report->leaves / leaf_count / handler_name from an admitted module. */
 static void report_describe_leaves(struct hotswap_activate_report *report,
                                    const struct zcl_hotswap_module *mod)
@@ -871,9 +881,9 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
         act_copy(report->source_tu, sizeof(report->source_tu),
                  module->source_tu);
 
-    hotswap_commit_batch_cb commit_cb = hooks ? hooks->commit : NULL;
-    hotswap_probe_leaf_cb probe_cb = hooks ? hooks->probe : NULL;
-    void *cb_ctx = hooks ? hooks->ctx : NULL;
+    const struct hotswap_publish_hooks none = {0};
+    if (!hooks)
+        hooks = &none;
 
     /* ABI version + required fields + leaf ceiling + the swappable file/leaf
      * allowlist + intra-module leaf uniqueness + the declared probe leaf +
@@ -881,31 +891,31 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
      * LOUDLY, ZERO leaves published, every resident handler untouched. */
     char stage[64] = {0}, why[256] = {0};
     if (!hotswap_module_admit(module, stage, sizeof(stage), why, sizeof(why)))
-        return act_reject(report, stage[0] ? stage : "abi", "%s", why);
+        return act_reject(report, str_or(stage, "abi"), "%s", why);
     report_describe_leaves(report, module);
 
     const char *probe_leaf = hotswap_module_probe_leaf(module->source_tu);
     act_copy(report->probe_leaf, sizeof(report->probe_leaf), probe_leaf);
     zcl_hotswap_handler_fn probe_fn = NULL;
-    for (uint32_t i = 0; i < module->leaf_count && !probe_fn; i++) {
-        if (strcmp(module->leaves[i].name, probe_leaf) == 0)
+    for (uint32_t i = 0; i < module->leaf_count; i++)
+        if (strcmp(module->leaves[i].name, probe_leaf) == 0) {
             probe_fn = module->leaves[i].fn;
-    }
+            break;
+        }
 
     /* PROBE BEFORE PUBLISH. A module asserting its own health is
      * self-certification; this dispatches the DECLARED probe leaf against the
      * registry's public spec/input-validation/reply contract and checks the
      * reply against that leaf's declared output schema. Publishing without it
      * is refused outright. */
-    if (probe_cb) {
+    if (hooks->probe) {
         why[0] = '\0';
-        if (!probe_cb(cb_ctx, probe_leaf, probe_fn, why, sizeof(why))) {
+        if (!hooks->probe(hooks->ctx, probe_leaf, probe_fn, why, sizeof(why))) {
             atomic_fetch_add_explicit(&g_probe_reject_count, 1,
                                       memory_order_relaxed);
             return act_reject(report, "probe", "probe leaf '%s' failed: %s",
                               probe_leaf,
-                              why[0] ? why
-                                     : "reply did not match its declared schema");
+                              str_or(why, "reply did not match its declared schema"));
         }
         report->probed = true;
     } else if (request_activate) {
@@ -926,16 +936,16 @@ bool hotswap_module_publish(const struct zcl_hotswap_module *module,
         return true;
     }
 
-    if (!commit_cb)
+    if (!hooks->commit)
         return act_reject(report, "commit",
                           "no registry commit callback supplied");
     uint32_t gen = 0;
     why[0] = '\0';
-    if (!commit_cb(cb_ctx, module->leaves, (size_t)module->leaf_count, &gen,
-                   why, sizeof(why))) {
+    if (!hooks->commit(hooks->ctx, module->leaves, (size_t)module->leaf_count,
+                       &gen, why, sizeof(why))) {
         /* Rollback: the registry never published, old handlers untouched. */
         return act_reject(report, "commit", "%s",
-                          why[0] ? why : "registry commit failed");
+                          str_or(why, "registry commit failed"));
     }
 
     report->ok = true;
@@ -1198,8 +1208,7 @@ static bool hotswap_reclaim_pending(void *unused)
     for (size_t i = 0; i < release_count; i++) {
         if (release[i].unmap)
             release[i].unmap(release[i].handle);
-        if (release[i].fd >= 0)
-            close(release[i].fd);
+        close_fd_if_open(release[i].fd);
         atomic_fetch_add_explicit(&g_dlclose_count, 1, memory_order_relaxed);
         atomic_fetch_sub_explicit(&g_retained_mapped_count, 1,
                                   memory_order_relaxed);
@@ -1228,41 +1237,34 @@ bool hotswap_reclaim_retained_now(void)
 static void retire_candidate(struct hotswap_retire_candidate *cand)
 {
     if (!cand->handle) {
-        if (cand->fd >= 0)
-            close(cand->fd);
+        close_fd_if_open(cand->fd);
         return;
     }
 
     bool drained = false;
-    if (cand->quiesced_cb) {
-        /* ~2 s worst case: cheap sched_yield spin, escalating to a 1 ms sleep. */
-        for (int i = 0; i < 20000; i++) {
-            if (cand->quiesced_cb(cand->ctx)) { drained = true; break; }
-            if (i % 1000 == 999) {
-                struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
-                nanosleep(&ts, NULL);
-            } else {
-                sched_yield();
-            }
+    /* ~2 s worst case: cheap sched_yield spin, escalating to a 1 ms sleep. */
+    for (int i = 0; cand->quiesced_cb && i < 20000; i++) {
+        if (cand->quiesced_cb(cand->ctx)) { drained = true; break; }
+        if (i % 1000 == 999) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+            nanosleep(&ts, NULL);
+        } else {
+            sched_yield();
         }
     }
 
     pthread_mutex_lock(&g_act_lock);
     bool referenced = image_referenced_locked(&cand->leaves, cand->generation);
-    bool queued = false;
-    if (!(drained && !referenced)) {
-        if (g_pending_count < HOTSWAP_PENDING_RETIRE_MAX) {
-            g_pending[g_pending_count++] = *cand;
-            queued = true;
-        }
-    }
+    bool release = drained && !referenced;
+    bool queued = !release && g_pending_count < HOTSWAP_PENDING_RETIRE_MAX;
+    if (queued)
+        g_pending[g_pending_count++] = *cand;
     pthread_mutex_unlock(&g_act_lock);
 
-    if (drained && !referenced) {
+    if (release) {
         if (cand->unmap)
             cand->unmap(cand->handle);
-        if (cand->fd >= 0)
-            close(cand->fd);
+        close_fd_if_open(cand->fd);
         atomic_fetch_add_explicit(&g_dlclose_count, 1, memory_order_relaxed);
         LOG_INFO("hotswap.activate",
                  "retired superseded module image gen=%u after drain and "
@@ -1402,8 +1404,7 @@ bool hotswap_commit_image(const struct hotswap_commit_image *req)
     /* Depth is 1: the image this shelving displaced is closed, outside the
      * lock. It was reachable only through the entry we just overwrote, and a
      * rollback holding a dup() of it is unaffected. */
-    if (evicted_shelf_fd >= 0)
-        close(evicted_shelf_fd);
+    close_fd_if_open(evicted_shelf_fd);
     if (shelf_dup_failed) {
         atomic_fetch_add_explicit(&g_shelf_dup_fail_count, 1,
                                   memory_order_relaxed);
@@ -1715,6 +1716,37 @@ static bool activate_run(const char *so_path, const char *resolved_datadir,
                                    hooks, report);
 }
 
+static void *sealed_map_module(int fd, struct hotswap_activate_report *report,
+                               const struct zcl_hotswap_module **mod_out)
+{
+    char pinned[64], msg[200] = "could not hash the sealed module image";
+    const char *stage = "dlopen", *err;
+    (void)snprintf(pinned, sizeof(pinned), HOTSWAP_PINNED_FMT, fd);
+    bool hashed = artifact_sha256_fd(fd, report->artifact_sha256) &&
+                  hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256);
+    void *handle = hashed ? dlopen(pinned, RTLD_NOW | RTLD_LOCAL) : NULL;
+    if (handle) {
+        dlerror();
+        *mod_out = dlsym(handle, ZCL_HOTSWAP_MODULE_SYMBOL);
+        err = dlerror();
+        if (!*mod_out || err) {
+            snprintf(msg, sizeof(msg), "missing %s symbol: %s",
+                     ZCL_HOTSWAP_MODULE_SYMBOL, err ? err : "not found");
+            dlclose(handle);
+            handle = NULL;
+            stage = "abi";
+        }
+    } else if (hashed) {
+        err = dlerror();
+        snprintf(msg, sizeof(msg), "dlopen failed: %s", err ? err : "(unknown)");
+    }
+    if (!handle) {
+        close(fd);
+        act_reject(report, stage, "%s", msg);
+    }
+    return handle;
+}
+
 /* ── THE ONE ADMISSION GAUNTLET ───────────────────────────────────────────
  *
  * probe -> hash -> map -> symbol -> consensus pin -> admit -> probe-before-
@@ -1762,10 +1794,7 @@ static bool activate_from_sealed_fd(int fd,
                                     struct hotswap_activate_report *report)
 {
     (void)origin_label;
-    if (!report) {
-        if (fd >= 0) close(fd);
-        return false;
-    }
+    if (!report) { close_fd_if_open(fd); return false; }
     if (fd < 0)
         return act_reject(report, "seal", "no sealed module image to admit");
 
@@ -1783,55 +1812,27 @@ static bool activate_from_sealed_fd(int fd,
     }
 
     /* Pre-map shape check, against the sealed image. */
-    {
-        char probe_err[200];
-        if (!HOTSWAP_PROBE_AND_ADMIT_FD(
-                fd, ZCL_CORE_SEAL_ROOT,
-                ZCL_HOTSWAP_MODULE_ABI_V3, probe_err, sizeof(probe_err))) {
-            close(fd);
-            return act_reject(report, "shape", "%s", probe_err);
-        }
+    char probe_err[200];
+    if (!HOTSWAP_PROBE_AND_ADMIT_FD(
+            fd, ZCL_CORE_SEAL_ROOT,
+            ZCL_HOTSWAP_MODULE_ABI_V3, probe_err, sizeof(probe_err))) {
+        close(fd);
+        return act_reject(report, "shape", "%s", probe_err);
     }
 
-    if (!artifact_sha256_fd(fd, report->artifact_sha256) ||
-        !hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
-        close(fd);
-        return act_reject(report, "dlopen",
-                          "could not hash the sealed module image");
-    }
-    char pinned[64];
-    (void)snprintf(pinned, sizeof(pinned), HOTSWAP_PINNED_FMT, fd);
-    void *handle = dlopen(pinned, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) {
-        const char *dl = dlerror();
-        char msg[200];
-        snprintf(msg, sizeof(msg), "dlopen failed: %s", dl ? dl : "(unknown)");
-        close(fd);
-        return act_reject(report, "dlopen", "%s", msg);
-    }
-
-    dlerror();
-    const struct zcl_hotswap_module *mod = dlsym(handle, ZCL_HOTSWAP_MODULE_SYMBOL);
-    const char *sym_err = dlerror();
-    if (!mod || sym_err) {
-        char msg[200];
-        snprintf(msg, sizeof(msg), "missing %s symbol: %s",
-                 ZCL_HOTSWAP_MODULE_SYMBOL, sym_err ? sym_err : "not found");
-        dlclose(handle);
-        close(fd);
-        return act_reject(report, "abi", "%s", msg);
-    }
+    const struct zcl_hotswap_module *mod = NULL;
+    void *handle = sealed_map_module(fd, report, &mod);
+    if (!handle)
+        return false; // raw-return-ok:sealed_map_module rejected via act_reject
 
     /* Consensus pin BEFORE admit: a module compiled against a different sealed
      * core never reaches a stage that could publish a leaf. */
-    {
-        char pin_stage[32], pin_err[256];
-        if (!module_consensus_pin_ok(handle, pin_stage, sizeof(pin_stage),
-                                     pin_err, sizeof(pin_err))) {
-            dlclose(handle);
-            close(fd);
-            return act_reject(report, pin_stage, "%s", pin_err);
-        }
+    char pin_stage[32], pin_err[256];
+    if (!module_consensus_pin_ok(handle, pin_stage, sizeof(pin_stage),
+                                 pin_err, sizeof(pin_err))) {
+        dlclose(handle);
+        close(fd);
+        return act_reject(report, pin_stage, "%s", pin_err);
     }
 
     /* admit -> probe -> ONE all-or-nothing batch replace. ZERO leaves publish
@@ -1907,6 +1908,40 @@ bool hotswap_activate_local(const char *so_path, const char *resolved_datadir,
                         /*require_authorization=*/false, &local, report);
 }
 
+enum claim { CLAIM_NO_SLOT, CLAIM_EMPTY, CLAIM_BUSY, CLAIM_DUP, CLAIM_OK };
+struct rollback_claim {
+    enum claim outcome;
+    char datadir[HOTSWAP_ACT_DATADIR_MAX], shelf_sha[65];
+    size_t idx;
+    int fd, dup_errno;
+};
+
+static void rollback_claim_slot(const char *source_tu, struct rollback_claim *c)
+{
+    pthread_mutex_lock(&g_act_lock);
+    for (size_t i = 0; i < g_slot_count; i++) {
+        struct hotswap_act_slot *s = &g_slots[i];
+        if (!s->in_use || strcmp(s->source, source_tu) != 0)
+            continue;
+        c->idx = i;
+        if (!s->shelf_present || s->shelf_fd < 0)
+            c->outcome = CLAIM_EMPTY;
+        else if (s->rollback_in_flight)
+            c->outcome = CLAIM_BUSY;
+        else if ((c->fd = dup(s->shelf_fd)) < 0) {
+            c->dup_errno = errno;
+            c->outcome = CLAIM_DUP;
+        } else {
+            s->rollback_in_flight = true;
+            act_copy(c->datadir, sizeof(c->datadir), s->datadir);
+            act_copy(c->shelf_sha, sizeof(c->shelf_sha), s->shelf_sha256);
+            c->outcome = CLAIM_OK;
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_act_lock);
+}
+
 /* ── SHELF ROLLBACK — the second entrance to the ONE gauntlet ─────────────
  *
  * See hotswap/hotswap_shelf.h for what this does and does not mean (it
@@ -1954,42 +1989,9 @@ bool hotswap_rollback(const char *source_tu,
         return act_reject(report, "precheck", "rollback needs a source_tu");
     act_copy(report->source_tu, sizeof(report->source_tu), source_tu);
 
-    enum claim { CLAIM_NO_SLOT, CLAIM_EMPTY, CLAIM_BUSY, CLAIM_DUP, CLAIM_OK };
-    enum claim outcome = CLAIM_NO_SLOT;
-    char datadir[HOTSWAP_ACT_DATADIR_MAX] = {0};
-    char shelf_sha[65] = {0};
-    size_t idx = 0;
-    bool claimed = false;
-    int fd = -1;
-    int dup_errno = 0;
-
-    pthread_mutex_lock(&g_act_lock);
-    for (size_t i = 0; i < g_slot_count; i++) {
-        if (!g_slots[i].in_use || strcmp(g_slots[i].source, source_tu) != 0)
-            continue;
-        idx = i;
-        if (!g_slots[i].shelf_present || g_slots[i].shelf_fd < 0) {
-            outcome = CLAIM_EMPTY;
-        } else if (g_slots[i].rollback_in_flight) {
-            outcome = CLAIM_BUSY;
-        } else {
-            fd = dup(g_slots[i].shelf_fd);
-            if (fd < 0) {
-                dup_errno = errno;
-                outcome = CLAIM_DUP;
-            } else {
-                g_slots[i].rollback_in_flight = true;
-                claimed = true;
-                act_copy(datadir, sizeof(datadir), g_slots[i].datadir);
-                act_copy(shelf_sha, sizeof(shelf_sha), g_slots[i].shelf_sha256);
-                outcome = CLAIM_OK;
-            }
-        }
-        break;
-    }
-    pthread_mutex_unlock(&g_act_lock);
-
-    switch (outcome) {
+    struct rollback_claim c = { .outcome = CLAIM_NO_SLOT, .fd = -1 };
+    rollback_claim_slot(source_tu, &c);
+    switch (c.outcome) {
     case CLAIM_NO_SLOT:
         return act_reject(report, "shelf",
             "source '%s' has never been activated in this process, so nothing "
@@ -2005,27 +2007,26 @@ bool hotswap_rollback(const char *source_tu,
     case CLAIM_DUP:
         return act_reject(report, "shelf",
             "could not duplicate the shelved image for '%s' (errno=%d)",
-            source_tu, dup_errno);
+            source_tu, c.dup_errno);
     case CLAIM_OK:
         break;
     }
+    const char *shelf_sha = c.shelf_sha;
 
     /* From here `fd` belongs to the gauntlet, which closes it on every path
      * except a successful commit (where the image commit takes it over). */
     char origin[320];
     (void)snprintf(origin, sizeof(origin), "shelf:%s@%.16s", source_tu,
                    shelf_sha[0] ? shelf_sha : "(unhashed)");
-    bool ok = activate_from_sealed_fd(fd, origin, datadir,
+    bool ok = activate_from_sealed_fd(c.fd, origin, c.datadir,
                                       /*request_activate=*/true,
                                       /*require_authorization=*/true,
                                       hooks, report);
 
-    if (claimed) {
-        pthread_mutex_lock(&g_act_lock);
-        if (idx < g_slot_count)
-            g_slots[idx].rollback_in_flight = false;
-        pthread_mutex_unlock(&g_act_lock);
-    }
+    pthread_mutex_lock(&g_act_lock);
+    if (c.idx < g_slot_count)
+        g_slots[c.idx].rollback_in_flight = false;
+    pthread_mutex_unlock(&g_act_lock);
 
     if (ok) {
         atomic_fetch_add_explicit(&g_shelf_rollback_count, 1,
