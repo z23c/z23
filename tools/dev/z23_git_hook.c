@@ -150,6 +150,37 @@ static bool hook_append_char(wchar_t **buffer, size_t *used, size_t *capacity,
     return true;
 }
 
+static bool hook_append_run(wchar_t **line, size_t *used, size_t *capacity,
+                            wchar_t value, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!hook_append_char(line, used, capacity, value)) return false;
+    return true;
+}
+
+/* Quote the characters of one argument; the caller owns the outer quotes. */
+static bool hook_append_arg_body(wchar_t **line, size_t *used,
+                                 size_t *capacity, const wchar_t *arg,
+                                 bool quote)
+{
+    size_t slashes = 0;
+    for (const wchar_t *p = arg;; p++) {
+        if (*p == L'\\') { slashes++; continue; }
+        if (*p == L'\"') {
+            if (!hook_append_run(line, used, capacity, L'\\',
+                                 slashes * 2u + 1u) ||
+                !hook_append_char(line, used, capacity, L'\"')) return false;
+        } else {
+            if (*p == 0 && quote) slashes *= 2u;
+            if (!hook_append_run(line, used, capacity, L'\\', slashes))
+                return false;
+            if (*p == 0) return true;
+            if (!hook_append_char(line, used, capacity, *p)) return false;
+        }
+        slashes = 0;
+    }
+}
+
 /* CommandLineToArgvW-compatible quoting: backslashes are doubled only when
  * they precede a quote or the closing quote. */
 static bool hook_append_arg(wchar_t **line, size_t *used, size_t *capacity,
@@ -158,22 +189,7 @@ static bool hook_append_arg(wchar_t **line, size_t *used, size_t *capacity,
     if (*used && !hook_append_char(line, used, capacity, L' ')) return false;
     bool quote = !arg[0] || wcspbrk(arg, L" \t\n\v\"") != NULL;
     if (quote && !hook_append_char(line, used, capacity, L'\"')) return false;
-    size_t slashes = 0;
-    for (const wchar_t *p = arg;; p++) {
-        if (*p == L'\\') { slashes++; continue; }
-        if (*p == L'\"') {
-            for (size_t i = 0; i < slashes * 2u + 1u; i++)
-                if (!hook_append_char(line, used, capacity, L'\\')) return false;
-            if (!hook_append_char(line, used, capacity, L'\"')) return false;
-        } else {
-            if (*p == 0 && quote) slashes *= 2u;
-            for (size_t i = 0; i < slashes; i++)
-                if (!hook_append_char(line, used, capacity, L'\\')) return false;
-            if (*p == 0) break;
-            if (!hook_append_char(line, used, capacity, *p)) return false;
-        }
-        slashes = 0;
-    }
+    if (!hook_append_arg_body(line, used, capacity, arg, quote)) return false;
     return (!quote || hook_append_char(line, used, capacity, L'\"')) &&
            hook_append_char(line, used, capacity, 0);
 }
@@ -248,6 +264,188 @@ static wchar_t *hook_parent_git(void)
     return NULL;
 }
 
+/* Win32 child capture state: the handle list is kept here, not on a stack
+ * frame, because UpdateProcThreadAttribute stores the pointer and the
+ * process reads it at CreateProcessW time. */
+struct hook_capture {
+    HANDLE read_pipe, write_pipe, null_handle, job;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes;
+    bool attributes_initialized;
+    PROCESS_INFORMATION process;
+    HANDLE inherited[2];
+    size_t used;
+    bool truncated;
+};
+
+static void hook_capture_release(struct hook_capture *cap)
+{
+    if (cap->process.hThread) CloseHandle(cap->process.hThread);
+    if (cap->process.hProcess) {
+        (void)TerminateProcess(cap->process.hProcess, 127);
+        CloseHandle(cap->process.hProcess);
+    }
+    if (cap->job) CloseHandle(cap->job);
+    if (cap->read_pipe) CloseHandle(cap->read_pipe);
+    if (cap->write_pipe) CloseHandle(cap->write_pipe);
+    if (cap->null_handle != INVALID_HANDLE_VALUE) CloseHandle(cap->null_handle);
+    if (cap->attributes) {
+        if (cap->attributes_initialized)
+            DeleteProcThreadAttributeList(cap->attributes);
+        free(cap->attributes);
+    }
+}
+
+static bool hook_capture_open(struct hook_capture *cap)
+{
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security), .bInheritHandle = TRUE};
+    if (!CreatePipe(&cap->read_pipe, &cap->write_pipe, &security, 0) ||
+        !SetHandleInformation(cap->read_pipe, HANDLE_FLAG_INHERIT, 0))
+        return false;
+    cap->null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+    if (cap->null_handle == INVALID_HANDLE_VALUE) return false;
+    cap->job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!cap->job || !SetInformationJobObject(cap->job,
+                                              JobObjectExtendedLimitInformation,
+                                              &limits, sizeof(limits)))
+        return false;
+    SIZE_T attribute_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    cap->attributes = zcl_malloc(attribute_size, "git-hook-attributes");
+    cap->inherited[0] = cap->write_pipe;
+    cap->inherited[1] = cap->null_handle;
+    return cap->attributes &&
+        (cap->attributes_initialized = InitializeProcThreadAttributeList(
+              cap->attributes, 1, 0, &attribute_size) != 0) &&
+        UpdateProcThreadAttribute(cap->attributes, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, cap->inherited,
+            sizeof(cap->inherited), NULL, NULL);
+}
+
+static bool hook_capture_spawn(struct hook_capture *cap, wchar_t *line,
+                               wchar_t *application)
+{
+    STARTUPINFOEXW startup = {0};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_HIDE;
+    startup.StartupInfo.hStdInput = cap->null_handle;
+    startup.StartupInfo.hStdOutput = cap->write_pipe;
+    startup.StartupInfo.hStdError = cap->write_pipe;
+    startup.lpAttributeList = cap->attributes;
+    UINT prior_mode = SetErrorMode(
+        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                  EXTENDED_STARTUPINFO_PRESENT;
+    bool started = CreateProcessW(application, line, NULL, NULL, TRUE, flags,
+                                  NULL, NULL, &startup.StartupInfo,
+                                  &cap->process) &&
+                   AssignProcessToJobObject(cap->job, cap->process.hProcess) &&
+                   ResumeThread(cap->process.hThread) != (DWORD)-1;
+    (void)SetErrorMode(prior_mode);
+    return started;
+}
+
+/* Returns NULL when the child is running and its output may be drained,
+ * otherwise the stage that failed. */
+static const char *hook_capture_start(struct hook_capture *cap, wchar_t *line,
+                                      wchar_t *application)
+{
+    if (!hook_capture_open(cap)) return "setup";
+    if (!hook_capture_spawn(cap, line, application)) return "spawn";
+    CloseHandle(cap->process.hThread);
+    cap->process.hThread = NULL;
+    CloseHandle(cap->write_pipe);
+    cap->write_pipe = NULL;
+    return NULL;
+}
+
+static bool hook_capture_read_ready(struct hook_capture *cap, DWORD available,
+                                    char *out, size_t out_size)
+{
+    char discard[1024];
+    char *target = cap->used + 1u < out_size ? out + cap->used : discard;
+    DWORD capacity = target == discard ? sizeof(discard) :
+        (DWORD)(out_size - cap->used - 1u);
+    DWORD amount = 0;
+    if (!ReadFile(cap->read_pipe, target,
+                  available < capacity ? available : capacity,
+                  &amount, NULL) || amount == 0)
+        return false;
+    if (target == discard) cap->truncated = true;
+    else cap->used += amount;
+    return true;
+}
+
+/* A broken pipe is the child closing its output; true means it exited
+ * before the deadline. Any other failure keeps the pipe error. */
+static bool hook_capture_pipe_exited(struct hook_capture *cap,
+                                     ULONGLONG deadline)
+{
+    DWORD pipe_error = GetLastError();
+    if (pipe_error == ERROR_BROKEN_PIPE) {
+        ULONGLONG now = GetTickCount64();
+        DWORD remaining = now < deadline
+            ? (DWORD)(deadline - now) : 0;
+        if (WaitForSingleObject(cap->process.hProcess, remaining) ==
+            WAIT_OBJECT_0)
+            return true;
+    }
+    SetLastError(pipe_error);
+    return false;
+}
+
+/* 1 = stop reading, 0 = keep reading, -1 = failed. */
+static int hook_capture_after_exit(struct hook_capture *cap)
+{
+    DWORD final_available = 0;
+    if (!PeekNamedPipe(cap->read_pipe, NULL, 0, NULL, &final_available, NULL))
+        return GetLastError() == ERROR_BROKEN_PIPE ? 1 : -1;
+    return final_available == 0 ? 1 : 0;
+}
+
+static bool hook_capture_drain(struct hook_capture *cap, char *out,
+                               size_t out_size)
+{
+    ULONGLONG deadline = GetTickCount64() + 1000u;
+    for (;;) {
+        if (GetTickCount64() >= deadline) return false;
+        DWORD available = 0;
+        if (!PeekNamedPipe(cap->read_pipe, NULL, 0, NULL, &available, NULL))
+            return hook_capture_pipe_exited(cap, deadline);
+        if (available) {
+            if (!hook_capture_read_ready(cap, available, out, out_size))
+                return false;
+            continue;
+        }
+        DWORD waited = WaitForSingleObject(cap->process.hProcess, 10);
+        if (waited == WAIT_OBJECT_0) {
+            int state = hook_capture_after_exit(cap);
+            if (state < 0) return false;
+            if (state > 0) return true;
+        } else if (waited != WAIT_TIMEOUT) {
+            return false;
+        }
+    }
+}
+
+static const char *hook_capture_collect(struct hook_capture *cap, char *out,
+                                        size_t out_size, DWORD *exit_code)
+{
+    bool drained = hook_capture_drain(cap, out, out_size);
+    out[cap->used] = 0;
+    if (!drained || cap->truncated) return "capture";
+    if (!GetExitCodeProcess(cap->process.hProcess, exit_code) ||
+        *exit_code > 255u)
+        return "exit-code";
+    CloseHandle(cap->process.hProcess);
+    cap->process.hProcess = NULL;
+    return NULL;
+}
+
 static int child_capture(const char *const argv[], char *out, size_t out_size)
 {
     if (!argv || !argv[0] || !out || out_size == 0) return -1;
@@ -257,153 +455,53 @@ static int child_capture(const char *const argv[], char *out, size_t out_size)
     wchar_t *application = hook_absolute_path(argv[0])
         ? hook_utf16(argv[0]) : hook_parent_git();
     if (!line || !application) { free(line); free(application); return -1; }
-    SECURITY_ATTRIBUTES security = {
-        .nLength = sizeof(security), .bInheritHandle = TRUE};
-    HANDLE read_pipe = NULL, write_pipe = NULL;
-    HANDLE null_handle = INVALID_HANDLE_VALUE;
-    HANDLE job = NULL;
-    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
-    bool attributes_initialized = false;
-    PROCESS_INFORMATION process = {0};
-    bool started = false;
-    const char *failure_reason = "setup";
-    if (!CreatePipe(&read_pipe, &write_pipe, &security, 0) ||
-        !SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0))
-        goto done;
-    null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
-    if (null_handle == INVALID_HANDLE_VALUE) goto done;
-    job = CreateJobObjectW(NULL, NULL);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                         &limits, sizeof(limits)))
-        goto done;
-    SIZE_T attribute_size = 0;
-    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
-    attributes = zcl_malloc(attribute_size, "git-hook-attributes");
-    HANDLE inherited[] = {write_pipe, null_handle};
-    if (!attributes ||
-        !(attributes_initialized = InitializeProcThreadAttributeList(
-              attributes, 1, 0, &attribute_size) != 0) ||
-        !UpdateProcThreadAttribute(attributes, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited),
-            NULL, NULL))
-        goto done;
-    STARTUPINFOEXW startup = {0};
-    startup.StartupInfo.cb = sizeof(startup);
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    startup.StartupInfo.wShowWindow = SW_HIDE;
-    startup.StartupInfo.hStdInput = null_handle;
-    startup.StartupInfo.hStdOutput = write_pipe;
-    startup.StartupInfo.hStdError = write_pipe;
-    startup.lpAttributeList = attributes;
-    UINT prior_mode = SetErrorMode(
-        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
-                  EXTENDED_STARTUPINFO_PRESENT;
-    started = CreateProcessW(application, line, NULL, NULL, TRUE, flags,
-                                         NULL, NULL, &startup.StartupInfo,
-                                         &process) &&
-              AssignProcessToJobObject(job, process.hProcess) &&
-              ResumeThread(process.hThread) != (DWORD)-1;
-    (void)SetErrorMode(prior_mode);
-    if (!started) { failure_reason = "spawn"; goto done; }
-    CloseHandle(process.hThread);
-    process.hThread = NULL;
-    CloseHandle(write_pipe);
-    write_pipe = NULL;
-    size_t used = 0;
-    bool truncated = false, failed = false, finished = false;
-    ULONGLONG deadline = GetTickCount64() + 1000u;
-    for (;;) {
-        if (GetTickCount64() >= deadline) { failed = true; break; }
-        DWORD available = 0;
-        if (!PeekNamedPipe(read_pipe, NULL, 0, NULL, &available, NULL)) {
-            DWORD pipe_error = GetLastError();
-            if (pipe_error == ERROR_BROKEN_PIPE) {
-                ULONGLONG now = GetTickCount64();
-                DWORD remaining = now < deadline
-                    ? (DWORD)(deadline - now) : 0;
-                if (WaitForSingleObject(process.hProcess, remaining) ==
-                    WAIT_OBJECT_0) {
-                    finished = true;
-                    break;
-                }
-            }
-            SetLastError(pipe_error);
-            failed = true;
-            break;
-        }
-        if (available) {
-            char discard[1024];
-            char *target = used + 1u < out_size ? out + used : discard;
-            DWORD capacity = target == discard ? sizeof(discard) :
-                (DWORD)(out_size - used - 1u);
-            DWORD amount = 0;
-            if (!ReadFile(read_pipe, target,
-                          available < capacity ? available : capacity,
-                          &amount, NULL) || amount == 0) {
-                failed = true;
-                break;
-            }
-            if (target == discard) truncated = true;
-            else used += amount;
-            continue;
-        }
-        DWORD waited = WaitForSingleObject(process.hProcess, 10);
-        if (waited == WAIT_OBJECT_0) finished = true;
-        else if (waited != WAIT_TIMEOUT) { failed = true; break; }
-        if (finished) {
-            DWORD final_available = 0;
-            if (!PeekNamedPipe(read_pipe, NULL, 0, NULL, &final_available,
-                               NULL)) {
-                if (GetLastError() == ERROR_BROKEN_PIPE) break;
-                failed = true;
-            }
-            if (failed || final_available == 0) break;
-        }
-    }
-    out[used] = 0;
-    if (failed || truncated) { failure_reason = "capture"; goto done; }
+    struct hook_capture cap = {.null_handle = INVALID_HANDLE_VALUE};
     DWORD exit_code = 0;
-    if (!GetExitCodeProcess(process.hProcess, &exit_code) || exit_code > 255u)
-        { failure_reason = "exit-code"; goto done; }
-    CloseHandle(process.hProcess);
-    process.hProcess = NULL;
-    CloseHandle(job);
-    job = NULL;
-    if (read_pipe) CloseHandle(read_pipe);
-    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
-    DeleteProcThreadAttributeList(attributes);
-    free(attributes);
+    const char *failure_reason = hook_capture_start(&cap, line, application);
+    if (!failure_reason)
+        failure_reason = hook_capture_collect(&cap, out, out_size, &exit_code);
+    DWORD failure = failure_reason ? GetLastError() : 0;
+    hook_capture_release(&cap);
     free(line);
     free(application);
-    return (int)exit_code;
-done:
-    DWORD failure = GetLastError();
-    if (process.hThread) CloseHandle(process.hThread);
-    if (process.hProcess) {
-        (void)TerminateProcess(process.hProcess, 127);
-        CloseHandle(process.hProcess);
-    }
-    if (job) CloseHandle(job);
-    if (read_pipe) CloseHandle(read_pipe);
-    if (write_pipe) CloseHandle(write_pipe);
-    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
-    if (attributes) {
-        if (attributes_initialized)
-            DeleteProcThreadAttributeList(attributes);
-        free(attributes);
-    }
-    free(line);
-    free(application);
+    if (!failure_reason) return (int)exit_code;
     (void)fprintf(stderr,
                   "z23-git-hook: child query failed stage=%s win32=%lu\n",
                   failure_reason, (unsigned long)failure);
     return -1;
 }
 #else
+static void child_capture_exec(const char *const argv[], const int pipefd[2])
+{
+    (void)close(pipefd[0]);
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0 ||
+        dup2(pipefd[1], STDERR_FILENO) < 0)
+        _exit(127);
+    if (pipefd[1] > STDERR_FILENO) (void)close(pipefd[1]);
+    clear_git_local_environment();
+    execvp(argv[0], (char *const *)argv);
+    _exit(127);
+}
+
+/* Returns true when the whole output fit in out; false when it was cut. */
+static bool child_capture_read(int fd, char *out, size_t out_size, size_t *used)
+{
+    bool truncated = false;
+    for (;;) {
+        char discard[1024];
+        void *target = *used + 1 < out_size ? out + *used : discard;
+        size_t capacity = *used + 1 < out_size ? out_size - *used - 1
+                                               : sizeof(discard);
+        ssize_t n = read(fd, target, capacity);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) truncated = true;
+        if (n <= 0) break;
+        if (target == discard) truncated = true;
+        else *used += (size_t)n;
+    }
+    return !truncated;
+}
+
 static int child_capture(const char *const argv[], char *out, size_t out_size)
 {
     int pipefd[2];
@@ -415,37 +513,16 @@ static int child_capture(const char *const argv[], char *out, size_t out_size)
         (void)close(pipefd[1]);
         return -1;
     }
-    if (child == 0) {
-        (void)close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0 ||
-            dup2(pipefd[1], STDERR_FILENO) < 0)
-            _exit(127);
-        if (pipefd[1] > STDERR_FILENO) (void)close(pipefd[1]);
-        clear_git_local_environment();
-        execvp(argv[0], (char *const *)argv);
-        _exit(127);
-    }
+    if (child == 0) child_capture_exec(argv, pipefd);
     (void)close(pipefd[1]);
     size_t used = 0;
-    bool truncated = false;
-    for (;;) {
-        char discard[1024];
-        void *target = used + 1 < out_size ? out + used : discard;
-        size_t capacity = used + 1 < out_size ? out_size - used - 1
-                                               : sizeof(discard);
-        ssize_t n = read(pipefd[0], target, capacity);
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0) truncated = true;
-        if (n <= 0) break;
-        if (target == discard) truncated = true;
-        else used += (size_t)n;
-    }
+    bool complete = child_capture_read(pipefd[0], out, out_size, &used);
     (void)close(pipefd[0]);
     out[used] = 0;
     int status = 0;
     while (waitpid(child, &status, 0) < 0)
         if (errno != EINTR) return -1;
-    if (truncated || !WIFEXITED(status)) return -1;
+    if (!complete || !WIFEXITED(status)) return -1;
     return WEXITSTATUS(status);
 }
 #endif
@@ -575,6 +652,30 @@ static int64_t running_eta(const char *root, const char *local,
     return eta > 0 ? eta : 0;
 }
 
+static int admit_missing_receipt(const char *root, const char *local,
+                                 const char *base)
+{
+    int64_t eta = running_eta(root, local, base);
+    return refusal(eta >= 0 ? "running" : "receipt-missing",
+                   local, base, eta >= 0 ? eta : 0);
+}
+
+static bool admit_child_receipt(const char *root, size_t index,
+                                const struct zcl_dev_proof_dimension *dimension)
+{
+    char root_hex[65], child_path[PATH_MAX];
+    zcl_hex_encode(dimension->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES,
+                   root_hex);
+    int n = snprintf(child_path, sizeof(child_path),
+                     ".cache/zcl-dev-proof/children/%s.child", root_hex);
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    return n > 0 && (size_t)n < sizeof(child_path) &&
+           read_exact_at(root, child_path, child, sizeof(child)) &&
+           zcl_dev_proof_child_receipt_validate(
+               child, sizeof(child), (enum zcl_dev_proof_dimension_id)index,
+               dimension);
+}
+
 static int admit_pair(const char *root, const char *local, const char *base)
 {
     if (!ancestor(base, local)) return refusal("remote-base-not-ancestor",
@@ -596,9 +697,7 @@ static int admit_pair(const char *root, const char *local, const char *base)
         if (read_exact_at(root, path, wire,
                           ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES))
             return refusal(ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED, local, base, 0);
-        int64_t eta = running_eta(root, local, base);
-        return refusal(eta >= 0 ? "running" : "receipt-missing",
-                       local, base, eta >= 0 ? eta : 0);
+        return admit_missing_receipt(root, local, base);
     }
     if (!zcl_dev_proof_receipt_parse(wire, sizeof(wire), &receipt) ||
         !zcl_dev_proof_receipt_validate(&receipt, local, base,
@@ -608,17 +707,7 @@ static int admit_pair(const char *root, const char *local, const char *base)
         const struct zcl_dev_proof_dimension *dimension =
             &receipt.dimensions[i];
         if (!dimension->selected) continue;
-        char root_hex[65], child_path[PATH_MAX];
-        zcl_hex_encode(dimension->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES,
-                       root_hex);
-        n = snprintf(child_path, sizeof(child_path),
-                     ".cache/zcl-dev-proof/children/%s.child", root_hex);
-        uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
-        if (n <= 0 || (size_t)n >= sizeof(child_path) ||
-            !read_exact_at(root, child_path, child, sizeof(child)) ||
-            !zcl_dev_proof_child_receipt_validate(
-                child, sizeof(child), (enum zcl_dev_proof_dimension_id)i,
-                dimension))
+        if (!admit_child_receipt(root, i, dimension))
             return refusal("child-receipt-missing-or-invalid", local, base, 0);
     }
     return 0;
@@ -1054,86 +1143,103 @@ static bool posix_policy_selftest(void)
 }
 #endif
 
-static int selftest(void)
+static bool selftest_receipt_seal(const char *local, const char *base,
+                                  struct zcl_dev_acceptance_receipt_v1 *receipt)
 {
-    static const char local[] =
-        "1111111111111111111111111111111111111111";
-    static const char base[] =
-        "2222222222222222222222222222222222222222";
-    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
-    if (!zcl_dev_proof_oid_decode(local, receipt.local_commit,
-                                  &receipt.local_commit_len) ||
-        !zcl_dev_proof_oid_decode(base, receipt.remote_base,
-                                  &receipt.remote_base_len))
-        return 1;
+    if (!zcl_dev_proof_oid_decode(local, receipt->local_commit,
+                                  &receipt->local_commit_len) ||
+        !zcl_dev_proof_oid_decode(base, receipt->remote_base,
+                                  &receipt->remote_base_len))
+        return false;
     uint8_t *roots[] = {
-        receipt.source_root, receipt.source_cas_root, receipt.mutation_root,
-        receipt.changed_set_root, receipt.impact_policy_root,
-        receipt.compiler_root, receipt.flags_root, receipt.environment_root,
-        receipt.build_graph_root, receipt.child_set_root,
+        receipt->source_root, receipt->source_cas_root, receipt->mutation_root,
+        receipt->changed_set_root, receipt->impact_policy_root,
+        receipt->compiler_root, receipt->flags_root, receipt->environment_root,
+        receipt->build_graph_root, receipt->child_set_root,
     };
     for (size_t root = 0; root < sizeof(roots) / sizeof(roots[0]); root++)
         for (size_t i = 0; i < ZCL_DEV_PROOF_ROOT_BYTES; i++)
             roots[root][i] = (uint8_t)(root + i + 1u);
     for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
-        memset(receipt.dimensions[i].receipt_root, (int)i + 1,
+        memset(receipt->dimensions[i].receipt_root, (int)i + 1,
                ZCL_DEV_PROOF_ROOT_BYTES);
-        receipt.dimensions[i].selected = 1;
-        receipt.dimensions[i].reused = 1;
+        receipt->dimensions[i].selected = 1;
+        receipt->dimensions[i].reused = 1;
     }
-    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
-    receipt.complete = 1;
-    if (!zcl_dev_proof_receipt_child_set_root(
-            &receipt, receipt.child_set_root) ||
-        !zcl_dev_proof_receipt_seal(&receipt))
-        return 1;
+    receipt->policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
+    receipt->complete = 1;
+    return zcl_dev_proof_receipt_child_set_root(
+               receipt, receipt->child_set_root) &&
+           zcl_dev_proof_receipt_seal(receipt);
+}
+
+static bool selftest_child_receipt(struct zcl_dev_acceptance_receipt_v1 *receipt)
+{
     struct zcl_dev_proof_dimension child_dimension =
-        receipt.dimensions[ZCL_DEV_PROOF_TEST];
+        receipt->dimensions[ZCL_DEV_PROOF_TEST];
     uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
     if (!zcl_dev_proof_child_receipt_create(ZCL_DEV_PROOF_TEST,
                                              &child_dimension, child) ||
         !zcl_dev_proof_child_receipt_validate(
             child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension))
-        return 1;
+        return false;
     child[40] ^= 1u;
-    if (zcl_dev_proof_child_receipt_validate(
-            child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension))
-        return 1;
-    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
-    if (!zcl_dev_proof_receipt_serialize(&receipt, wire)) return 1;
-    char fixture[PATH_MAX];
+    return !zcl_dev_proof_child_receipt_validate(
+        child, sizeof(child), ZCL_DEV_PROOF_TEST, &child_dimension);
+}
+
+static bool selftest_fixture_unlink(const char *fixture)
+{
+#if defined(_WIN32)
+    return selftest_fixture_remove(fixture);
+#else
+    return unlink(fixture) == 0;
+#endif
+}
+
+static bool selftest_fixture_write(uint8_t *wire, char fixture[PATH_MAX])
+{
 #if defined(_WIN32)
     struct platform_private_file fixture_file;
     platform_private_file_init(&fixture_file);
     if (!selftest_fixture_create(fixture, &fixture_file) ||
-        !platform_private_file_write_at(&fixture_file, wire, sizeof(wire), 0) ||
+        !platform_private_file_write_at(&fixture_file, wire,
+                                        ZCL_DEV_PROOF_WIRE_BYTES, 0) ||
         !platform_private_file_flush(&fixture_file)) {
         platform_private_file_close(&fixture_file);
-        return 1;
+        return false;
     }
     platform_private_file_close(&fixture_file);
+    return true;
 #else
     memcpy(fixture, "/tmp/z23-git-hook-receipt.XXXXXX",
            sizeof("/tmp/z23-git-hook-receipt.XXXXXX"));
     int fixture_fd = mkstemp(fixture);
-    if (fixture_fd < 0) return 1;
+    if (fixture_fd < 0) return false;
     size_t written = 0;
-    while (written < sizeof(wire)) {
-        ssize_t n = write(fixture_fd, wire + written, sizeof(wire) - written);
+    while (written < ZCL_DEV_PROOF_WIRE_BYTES) {
+        ssize_t n = write(fixture_fd, wire + written,
+                          ZCL_DEV_PROOF_WIRE_BYTES - written);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) {
             (void)close(fixture_fd);
             (void)unlink(fixture);
-            return 1;
+            return false;
         }
         written += (size_t)n;
     }
     if (fsync(fixture_fd) != 0 || close(fixture_fd) != 0) {
         (void)unlink(fixture);
-        return 1;
+        return false;
     }
+    return true;
 #endif
-    uint64_t samples[1000];
+}
+
+/* Each sample is one read, parse and validate of the admitted fixture. */
+static bool selftest_timing(const char *local, const char *base,
+                            const char *fixture, uint64_t samples[1000])
+{
     char why[128];
     for (size_t i = 0; i < 1000; i++) {
         struct zcl_dev_acceptance_receipt_v1 parsed;
@@ -1143,20 +1249,94 @@ static int selftest(void)
             !zcl_dev_proof_receipt_parse(admitted, sizeof(admitted), &parsed) ||
             !zcl_dev_proof_receipt_validate(&parsed, local, base,
                                             why, sizeof(why))) {
-#if defined(_WIN32)
-            (void)selftest_fixture_remove(fixture);
-#else
-            (void)unlink(fixture);
-#endif
-            return 1;
+            (void)selftest_fixture_unlink(fixture);
+            return false;
         }
         samples[i] = sample_clock_ns() - start;
     }
-#if defined(_WIN32)
-    if (!selftest_fixture_remove(fixture)) return 1;
-#else
-    if (unlink(fixture) != 0) return 1;
-#endif
+    return selftest_fixture_unlink(fixture);
+}
+
+static bool selftest_tamper_cases(struct zcl_dev_acceptance_receipt_v1 *receipt,
+                                  const char *local, const char *base,
+                                  enum zcl_log_level restore_level)
+{
+    char why[128];
+    struct zcl_dev_acceptance_receipt_v1 tampered = *receipt;
+    tampered.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
+    if (!selftest_refused("skipped-dimension", restore_level,
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
+        return false;
+    tampered = *receipt;
+    memset(tampered.compiler_root, 0, sizeof(tampered.compiler_root));
+    if (!selftest_refused("hollow-compiler-root", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
+        return false;
+    tampered = *receipt;
+    tampered.complete = 0;
+    if (!selftest_refused("incomplete-receipt", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
+        return false;
+    tampered = *receipt;
+    tampered.child_set_root[0] ^= 1u;
+    if (!selftest_refused("child-set-mismatch", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
+        return false;
+    return selftest_refused("stale-remote-base", restore_level,
+            !zcl_dev_proof_receipt_validate(receipt, local,
+                "3333333333333333333333333333333333333333",
+                why, sizeof(why)));
+}
+
+static bool selftest_wire_cases(struct zcl_dev_acceptance_receipt_v1 *receipt,
+                                const char *local, const char *base,
+                                uint8_t *wire, enum zcl_log_level restore_level)
+{
+    char why[128];
+    wire[100] ^= 1u;
+    struct zcl_dev_acceptance_receipt_v1 parsed;
+    if (!selftest_refused("edited-signed-record", restore_level,
+            zcl_dev_proof_receipt_parse(wire, ZCL_DEV_PROOF_WIRE_BYTES,
+                                        &parsed) &&
+            !zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                            why, sizeof(why)) &&
+            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID) == 0))
+        return false;
+    /* A record from before receipts were signed: the same body, the version
+     * stamped back to 1, no trailer. It parses and is named, never admitted. */
+    return selftest_refused("unsigned-v1-record", restore_level,
+            zcl_dev_proof_receipt_serialize(receipt, wire) &&
+            (wire[ZCL_DEV_PROOF_WIRE_VERSION_OFFSET] = 1u,
+             zcl_dev_proof_receipt_parse(
+                 wire, ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES, &parsed)) &&
+            !parsed.has_signature &&
+            !zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                            why, sizeof(why)) &&
+            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED) == 0);
+}
+
+static int selftest(void)
+{
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    struct zcl_dev_acceptance_receipt_v1 receipt = {0};
+    if (!selftest_receipt_seal(local, base, &receipt)) return 1;
+    if (!selftest_child_receipt(&receipt)) return 1;
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    if (!zcl_dev_proof_receipt_serialize(&receipt, wire)) return 1;
+    char fixture[PATH_MAX];
+    if (!selftest_fixture_write(wire, fixture)) return 1;
+    uint64_t samples[1000];
+    if (!selftest_timing(local, base, fixture, samples)) return 1;
     qsort(samples, 1000, sizeof(samples[0]), compare_u64);
     /* Everything below is a refusal the selftest WANTS. Signature checks log
      * at ERROR when they refuse, which is right in a hook and wrong here: a
@@ -1165,57 +1345,8 @@ static int selftest(void)
      * restore the floor and name the case if one of them does not refuse. */
     enum zcl_log_level restore_level = zcl_log_level_get();
     zcl_log_level_set(ZCL_LOG_OFF);
-    struct zcl_dev_acceptance_receipt_v1 tampered = receipt;
-    tampered.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
-    if (!selftest_refused("skipped-dimension", restore_level,
-            !zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                            why, sizeof(why))))
-        return 1;
-    tampered = receipt;
-    memset(tampered.compiler_root, 0, sizeof(tampered.compiler_root));
-    if (!selftest_refused("hollow-compiler-root", restore_level,
-            zcl_dev_proof_receipt_seal(&tampered) &&
-            !zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                            why, sizeof(why))))
-        return 1;
-    tampered = receipt;
-    tampered.complete = 0;
-    if (!selftest_refused("incomplete-receipt", restore_level,
-            zcl_dev_proof_receipt_seal(&tampered) &&
-            !zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                            why, sizeof(why))))
-        return 1;
-    tampered = receipt;
-    tampered.child_set_root[0] ^= 1u;
-    if (!selftest_refused("child-set-mismatch", restore_level,
-            zcl_dev_proof_receipt_seal(&tampered) &&
-            !zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                            why, sizeof(why))))
-        return 1;
-    if (!selftest_refused("stale-remote-base", restore_level,
-            !zcl_dev_proof_receipt_validate(&receipt, local,
-                "3333333333333333333333333333333333333333",
-                why, sizeof(why))))
-        return 1;
-    wire[100] ^= 1u;
-    struct zcl_dev_acceptance_receipt_v1 parsed;
-    if (!selftest_refused("edited-signed-record", restore_level,
-            zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed) &&
-            !zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                            why, sizeof(why)) &&
-            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID) == 0))
-        return 1;
-    /* A record from before receipts were signed: the same body, the version
-     * stamped back to 1, no trailer. It parses and is named, never admitted. */
-    if (!selftest_refused("unsigned-v1-record", restore_level,
-            zcl_dev_proof_receipt_serialize(&receipt, wire) &&
-            (wire[ZCL_DEV_PROOF_WIRE_VERSION_OFFSET] = 1u,
-             zcl_dev_proof_receipt_parse(
-                 wire, ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES, &parsed)) &&
-            !parsed.has_signature &&
-            !zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                            why, sizeof(why)) &&
-            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED) == 0))
+    if (!selftest_tamper_cases(&receipt, local, base, restore_level)) return 1;
+    if (!selftest_wire_cases(&receipt, local, base, wire, restore_level))
         return 1;
 #if !defined(_WIN32)
     if (!selftest_refused("resident-candidate", restore_level,
