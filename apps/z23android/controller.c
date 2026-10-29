@@ -35,6 +35,7 @@ struct controller {
     time_t fleet_at;
     bool seen_responding;
     int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
+    char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
 };
@@ -110,12 +111,13 @@ static struct node_reading read_status(const char *output)
     json_free(&root);
     return n;
 }
-/* Caller holds c->lock. Offers one question from the latest node reading and current fleet report. */
+/* Caller holds c->lock. Offers one question from the latest node reading, the current fleet report
+ * and the question last answered. */
 static void refresh_suggestion(struct controller *c)
 {
-    int attention = c->view.fleet_stale ? 0 : zapp_fleet_attention(c->view.fleet_status);
     zapp_suggestion(c->view.fleet_paired, c->seen_responding, c->seen_height, c->seen_target, c->seen_peers,
-                    attention, c->view.suggestion, sizeof(c->view.suggestion));
+                    c->view.fleet_stale ? NULL : c->view.fleet_status, c->asked,
+                    c->view.suggestion, sizeof(c->view.suggestion));
 }
 static void observe_node(struct controller *c)
 {
@@ -141,10 +143,15 @@ static void observe_node(struct controller *c)
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
 }
-/* Shows the exchange first; only answers from the model join the history sent with later questions. */
+/* Caller holds c->lock. Shows the exchange first; only answers from the model join the history sent
+ * with later questions and move the suggestion on to a follow-up. */
 static void chat_result(struct controller *c, const char *prompt, const char *answer, bool from_model)
 {
-    if (from_model) (void)zapp_history_append(&c->history, prompt, answer);
+    if (from_model) {
+        (void)zapp_history_append(&c->history, prompt, answer);
+        copy_text(c->asked, sizeof(c->asked), prompt);
+        refresh_suggestion(c);
+    }
     zapp_transcript_prepend(c->view.transcript, sizeof(c->view.transcript), prompt, answer);
 }
 static void voice_stage(struct controller *c, enum zapp_voice_state state, const char *text)

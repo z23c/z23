@@ -62,7 +62,11 @@ laptop host is paired it reads "Fleet · checking" until the first report, so
 the screen does not shift under a tap when the report arrives. While a laptop
 host is paired and voice is idle, a button under **Talk** offers one question
 for the current state: why the node waits for peers, how long it needs to
-catch up, which hosts need attention, else how the fleet is. A voice status
+catch up, which hosts need attention, what is wrong with the first host out of
+sync, else how the fleet is. Once a question is answered, the button offers
+the next one in that order instead of repeating it, so "Which hosts need
+attention?" leads to "What is wrong with r1?", which fetches that host's
+blocker report; with nothing new to ask it disappears. A voice status
 line stays above it; only the default hint gives way. Tapping it asks it as a
 typed question, and it never suggests starting, stopping or joining. When
 the conversation buffer fills, whole older exchanges are dropped first.

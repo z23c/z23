@@ -50,15 +50,38 @@ static void suggestion_tests(void)
     assert(zapp_fleet_attention("") == 0 && zapp_fleet_attention(NULL) == 0);
     assert(zapp_fleet_attention("Fleet status is unavailable.") == 0);
     assert(zapp_fleet_attention("5 of 3 hosts in sync\n") == 0);
-    assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, 2, q, sizeof(q)), ""));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, 0, q, sizeof(q)), "Why is my node waiting for peers?"));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, 0, q, sizeof(q)), "Why is my node waiting for peers?"));
-    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 0, q, sizeof(q)), "How long until my node catches up?"));
-    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 1, q, sizeof(q)), "How long until my node catches up?"));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, 1, q, sizeof(q)), "Which hosts need attention?"));
-    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, 1, q, sizeof(q)), "Which hosts need attention?"));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, 0, q, sizeof(q)), "How is my fleet?"));
-    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, 0, q, sizeof(q)), "How is my fleet?"));
+    static const char calm[] = "2 of 2 hosts in sync\n\nr1 · in sync · 3,301,702\n\nr2 · in sync · 3,301,702\n";
+    static const char trouble[] = "1 of 3 hosts in sync\n\nr2 · in sync · 3,301,932\n\n"
+        "r1 · network height unknown · 3,301,932\n\nmac · node not answering\n  Low on disk · 23 GB free\n";
+    static const char *const offline = "0 of 1 hosts in sync\n\nmac · host not answering after 25.0 s\n";
+    assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, trouble, NULL, q, sizeof(q)), ""));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, calm, NULL, q, sizeof(q)), "How long until my node catches up?"));
+    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, trouble, NULL, q, sizeof(q)), "How long until my node catches up?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, trouble, NULL, q, sizeof(q)), "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, trouble, "", q, sizeof(q)), "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, calm, NULL, q, sizeof(q)), "How is my fleet?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, NULL, NULL, q, sizeof(q)), "How is my fleet?"));
+    /* An answered question gives way to the next one: the first host out of sync, skipping detail
+     * lines and hosts in sync, then the whole fleet, then back to the top of the order. */
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, trouble, "which hosts need attention?", q, sizeof(q)),
+                   "What is wrong with r1?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, trouble, "What is wrong with r1?", q, sizeof(q)),
+                   "How is my fleet?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, trouble, "How is my fleet?", q, sizeof(q)),
+                   "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, trouble, "Why is my node waiting for peers?", q, sizeof(q)),
+                   "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, offline, "Which hosts need attention?", q, sizeof(q)),
+                   "What is wrong with mac?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, trouble, "Is r2 healthy?", q, sizeof(q)),
+                   "Which hosts need attention?"));
+    /* Nothing new to ask once the only question is answered. */
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, calm, "How is my fleet?", q, sizeof(q)), ""));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, "1 of 2 hosts in sync\n\nr1 · in sync · 5\n\n"
+                                   "  Low on disk · 3 GB free\n", "Which hosts need attention?", q, sizeof(q)),
+                   "How is my fleet?"));
 }
 int main(void)
 {

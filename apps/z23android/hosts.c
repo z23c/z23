@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 static const char *text_of(const struct json_value *row, const char *key)
 {
@@ -147,14 +148,40 @@ int zapp_fleet_attention(const char *report)
     if (!report || sscanf(report, "%u of %u hosts in sync", &healthy, &total) != 2 || healthy > total) return 0;
     return (int)(total - healthy);
 }
-const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
-                            int fleet_attention, char *out, size_t cap)
+/* Label of the first host row a zapp_hosts_format report shows out of sync, or "". */
+static void first_attention_host(const char *report, char *label, size_t cap)
 {
-    const char *q = "How is my fleet?";
-    if (!paired) q = "";
-    else if (responding && (peers == 0 || target <= 0)) q = "Why is my node waiting for peers?";
-    else if (responding && height >= 0 && height < target) q = "How long until my node catches up?";
-    else if (fleet_attention > 0) q = "Which hosts need attention?";
-    snprintf(out, cap, "%s", q);
+    static const char sep[] = " · ";
+    label[0] = 0;
+    for (const char *line = report ? strchr(report, '\n') : NULL; line && *line == '\n';) {
+        line++;
+        size_t n = strcspn(line, "\n"), name = strspn(line, "abcdefghijklmnopqrstuvwxyz0123456789-");
+        if (name && name < cap && name + sizeof(sep) - 1 <= n && !strncmp(line + name, sep, sizeof(sep) - 1) &&
+            strncmp(line + name + sizeof(sep) - 1, "in sync", 7)) {
+            snprintf(label, cap, "%.*s", (int)name, line);
+            return;
+        }
+        line += n;
+    }
+}
+const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
+                            const char *report, const char *asked, char *out, size_t cap)
+{
+    char host[16], drill[48] = "";
+    first_attention_host(report, host, sizeof(host));
+    if (host[0]) snprintf(drill, sizeof(drill), "What is wrong with %s?", host);
+    const char *const ask[] = {
+        responding && (peers == 0 || target <= 0) ? "Why is my node waiting for peers?" : "",
+        responding && height >= 0 && height < target ? "How long until my node catches up?" : "",
+        zapp_fleet_attention(report) > 0 ? "Which hosts need attention?" : "", drill, "How is my fleet?"};
+    size_t count = sizeof(ask) / sizeof(ask[0]), start = 0;
+    bool answered = asked && asked[0];
+    for (size_t i = 0; answered && i < count; i++)
+        if (ask[i][0] && !strcasecmp(ask[i], asked)) start = i + 1;
+    out[0] = 0;
+    for (size_t i = 0; paired && !out[0] && i < count; i++) {
+        const char *q = ask[(start + i) % count];
+        if (q[0] && !(answered && !strcasecmp(q, asked))) snprintf(out, cap, "%s", q);
+    }
     return out;
 }

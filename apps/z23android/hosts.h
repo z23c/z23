@@ -26,10 +26,13 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
 /* Hosts not in sync in a zapp_hosts_format report, read from its headline; 0 for an empty or
  * unreadable report. */
 int zapp_fleet_attention(const char *report);
-/* The one question offered under Talk, or "" when none is worth asking. Not paired: "". Node
- * trouble comes first (waiting for peers, then catching up), then hosts needing attention, else a general
- * fleet question. Height, target and peers are negative when unknown. Questions only, never a
+/* The one question offered under Talk, or "" when none is worth asking. Not paired: "". In order:
+ * node trouble (waiting for peers, then catching up), which hosts need attention, what is wrong with
+ * the first host the report shows out of sync, then a general fleet question. asked is the question
+ * last answered, or NULL: the offer is the first question after it in that order, never asked itself,
+ * so an answered question gives way to its follow-up. report is a zapp_hosts_format report, or NULL
+ * when none is current. Height, target and peers are negative when unknown. Questions only, never a
  * control such as start, stop or join. Returns out. */
 const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
-                            int fleet_attention, char *out, size_t cap);
+                            const char *report, const char *asked, char *out, size_t cap);
 #endif
