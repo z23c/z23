@@ -542,6 +542,21 @@ static int cxt_test_check_compile(void)
         cxt_end(&c);
         PASS();
     }
+    TEST("dev.cx.check: a split that keeps a deprecated call compiles, as in the Makefile build") {
+        static char text[16384];
+        cxt_lane(dir, sizeof(dir), "deprecated");
+        (void)snprintf(text, sizeof(text),
+                       "__attribute__((deprecated(\"use new_api\"))) int old_api(int x);\n\n");
+        cxt_fn(text, sizeof(text), "part_a", 8);
+        cxt_fn(text, sizeof(text), "part_b", 8);
+        (void)strcat(text, "int big_a(int x)\n{\n    return part_a(x) + part_b(x) + old_api(x);\n}\n");
+        cxt_put(dir, "src/split.c", text);
+        cxt_check(&c, dir, "src/split.c", "big_a");
+        ASSERT(cxt_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "pass");
+        cxt_end(&c);
+        PASS();
+    }
 _test_next:;
     return failures;
 }

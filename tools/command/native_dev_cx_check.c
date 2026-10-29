@@ -377,14 +377,16 @@ static size_t ck_add_includes(struct cx_check *ck, const char **argv, size_t n,
 }
 
 /* CX_COMPILE: the file builds as C23 with the bridge's flags and the
- * Makefile's own include set (make print-includes). */
+ * Makefile's own include set (make print-includes). Deprecated calls are
+ * allowed, as in every Makefile build: refusing them made engines swap in
+ * the _r variants and so drop the old call's own diagnostics. */
 static const char *ck_step_compile(struct cx_check *ck)
 {
     static const char *const fixed[] = {
         "gcc", "-std=c23", "-c", "-o", "/dev/null", "-O2",
         "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2", "-Wall", "-Wextra",
-        "-Werror", "-Wno-format-truncation", "-D_DEFAULT_SOURCE",
-        "-DZCL_TESTING"
+        "-Werror", "-Wno-format-truncation", "-Wno-deprecated-declarations",
+        "-D_DEFAULT_SOURCE", "-DZCL_TESTING"
     };
     const size_t nfixed = sizeof(fixed) / sizeof(*fixed);
     char inc[65536];
