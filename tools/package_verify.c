@@ -580,14 +580,16 @@ struct pv_run {
     int exit_code;
     int term_signal;
     bool timed_out;
-    bool sandbox_fail; /* the child could not arm its own confinement */
+    bool sandbox_fail; /* confinement setup or runtime census failed */
     /* Process-accounting outcomes. These are DISJOINT from every build
      * verdict above: `headroom_exhausted` is the HOST being out of process
      * table for this uid (a wedge — retry it), `budget_exceeded` is the
      * confined subtree spending more processes than the action declares (a
-     * defect in the input — never retry it). A build error is neither. */
+     * defect in the input — never retry it). `census_unavailable` means
+     * the runtime could not verify the subtree budget. A build error is none. */
     bool headroom_exhausted;
     bool budget_exceeded;
+    bool census_unavailable;
     uint64_t nproc_backstop;   /* absolute RLIMIT_NPROC actually installed */
     uint64_t uid_tasks;        /* real uid's task count at admission       */
     uint64_t subtree_budget;   /* the action's declared process budget     */
@@ -644,6 +646,7 @@ static bool pv_preview_release(pid_t pid, int release_fd)
 static const char *pv_run_process_failure(const struct pv_run *r)
 {
     if (!r) return NULL;
+    if (r->census_unavailable) return "process-census-unavailable";
     if (r->headroom_exhausted) return "process-headroom-exhausted";
     if (r->budget_exceeded) return "process-budget-exceeded";
     return NULL;
@@ -664,8 +667,8 @@ static bool pv_stderr_is_process_exhaustion(const char *stderr_buf)
          strstr(stderr_buf, "fork: retry:") != NULL);
 }
 
-/* If `run` failed on process accounting, print ONE line naming which of the
- * two it was — with the installed backstop, the uid task count at admission,
+/* If `run` failed on process accounting, print ONE line naming the outcome,
+ * with the installed backstop, the uid task count at admission,
  * the uid task count now, and the subtree budget and peak — and return the
  * exit code for it. Returns 0 when the run had no process-accounting
  * failure, so a caller writes:
@@ -673,9 +676,9 @@ static bool pv_stderr_is_process_exhaustion(const char *stderr_buf)
  *     int wedged = pv_report_process_failure(&run, "zbuild-error", true);
  *     if (wedged) return wedged;
  *
- * The two outcomes never share an exit code: a HOST out of process table is
- * PV_EXIT_RESOURCE_WEDGE (retry the action), a SUBTREE over its declared
- * budget is 5 (the input is at fault). Set `trusted_child` only where the
+ * Host exhaustion and an unavailable census return PV_EXIT_RESOURCE_WEDGE;
+ * a subtree over its declared budget returns 5 (the input is at fault).
+ * Set `trusted_child` only where the
  * child is the fixed compiler — see pv_stderr_is_process_exhaustion. */
 static int pv_report_process_failure(const struct pv_run *run,
                                      const char *prefix, bool trusted_child)
@@ -887,9 +890,30 @@ static void pv_run_child_classify_status(int status, struct pv_run *r)
     }
 }
 
+/* Hold the leader until after group termination so the group id cannot be
+ * recycled. A failed wait never produces a valid status. */
+static bool pv_run_kill_reap(pid_t pid, bool kill_leader, int *status,
+                             struct rusage *usage, struct pv_run *r)
+{
+    if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) {
+        fprintf(stderr, "package_verify: process group kill failed pid=%ld errno=%d\n", (long)pid, errno);
+    }
+    if (kill_leader && kill(pid, SIGKILL) != 0 && errno != ESRCH) {
+        fprintf(stderr, "package_verify: process leader kill failed pid=%ld errno=%d\n", (long)pid, errno);
+    }
+    pid_t waited;
+    do { waited = wait4(pid, status, 0, usage); } while (waited < 0 && errno == EINTR);
+    if (waited != pid) {
+        fprintf(stderr, "package_verify: process leader wait failed pid=%ld errno=%d\n", (long)pid, errno);
+        r->sandbox_fail = true;
+        return false;
+    }
+    return true;
+}
+
 /* Poll the confined child until it exits, times out, or exceeds its
- * process-group budget, draining its pipes as it goes. Always leaves the
- * child reaped (status/usage filled via *reaped) before returning. */
+ * process-group budget, draining its pipes as it goes. Reports a valid
+ * status and usage only when the child was successfully reaped. */
 static void pv_run_child_wait_loop(pid_t pid, int out_pipe[2], int err_pipe[2],
                                    int64_t deadline, struct pv_run *r,
                                    size_t *out_len, size_t *err_len,
@@ -908,9 +932,7 @@ static void pv_run_child_wait_loop(pid_t pid, int out_pipe[2], int err_pipe[2],
                             WEXITED | WNOHANG | WNOWAIT);
         if (peeked == 0 && si.si_pid == pid) {
             r->timed_out = pv_preview_finished_late(deadline);
-            kill(-pid, SIGKILL);           /* nothing outlives the action */
-            (void)wait4(pid, status, 0, usage);
-            *reaped = true;
+            *reaped = pv_run_kill_reap(pid, false, status, usage, r);
             return;
         }
         /* Drain whatever the child has written so far (bounded). */
@@ -926,23 +948,26 @@ static void pv_run_child_wait_loop(pid_t pid, int out_pipe[2], int err_pipe[2],
         if (r->subtree_budget && ++census_tick >= PV_NPROC_CENSUS_TICKS) {
             census_tick = 0;
             uint64_t live = os_sandbox_process_group_census(pid);
+            if (live == OS_SANDBOX_CENSUS_UNAVAILABLE) {
+                r->census_unavailable = true;
+                r->sandbox_fail = true;
+                (void)snprintf(r->stderr_buf, sizeof(r->stderr_buf),
+                               "process-group census unavailable");
+                *err_len = strlen(r->stderr_buf);
+                *reaped = pv_run_kill_reap(pid, true, status, usage, r);
+                return;
+            }
             if (live > r->subtree_peak) r->subtree_peak = live;
             if (live > r->subtree_budget) {
-                kill(-pid, SIGKILL);
-                kill(pid, SIGKILL);
-                (void)wait4(pid, status, 0, usage);
-                *reaped = true;
-                r->budget_exceeded = true;
+                *reaped = pv_run_kill_reap(pid, true, status, usage, r);
+                if (*reaped && !r->sandbox_fail) r->budget_exceeded = true;
                 return;
             }
         }
         if (pv_preview_cancelled() || clock_now_monotonic_ns() >= deadline) {
             /* Kill the GROUP, not just the direct child: a descendant that
              * outlived its parent would otherwise survive the deadline. */
-            kill(-pid, SIGKILL);
-            kill(pid, SIGKILL);
-            (void)wait4(pid, status, 0, usage);
-            *reaped = true;
+            *reaped = pv_run_kill_reap(pid, true, status, usage, r);
             r->timed_out = true;
             return;
         }
@@ -1245,8 +1270,7 @@ static struct pv_run pv_run_child(enum pv_process_role role,
         if (g_pv_cpu_used_us > g_pv_cpu_budget_us)
             r.timed_out = true;
     }
-    (void)reaped;
-    if (!r.timed_out)
+    if (reaped && !r.timed_out)
         pv_run_child_classify_status(status, &r);
     int64_t perf_elapsed_ns = clock_now_monotonic_ns() - perf_started_ns;
     pv_perf_record(role, argv,

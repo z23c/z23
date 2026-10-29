@@ -42,10 +42,18 @@
 #include "platform/os_sandbox.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <string.h>
+#include <sys/sysctl.h>
+#endif
 #if !defined(_WIN32)
+#include <sys/resource.h>
 #include <sys/wait.h>
+#include <time.h>
 #endif
 #include <unistd.h>
 #if !defined(_WIN32)
@@ -235,6 +243,94 @@ static int spb_hard_limit_readable(void)
     return failures;
 }
 
+static int spb_census_deny(pid_t group)
+{
+#if defined(__APPLE__)
+    void *lib = dlopen("/usr/lib/libsandbox.1.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return 4;
+    void *symbol = dlsym(lib, "sandbox_init");
+    int (*enter)(const char *, uint64_t, char **) = NULL;
+    if (!symbol || sizeof(symbol) != sizeof(enter)) return 5;
+    memcpy(&enter, &symbol, sizeof(enter));
+    char *error = NULL;
+    if (enter("(version 1)(allow default)(deny sysctl-read)", 0, &error) != 0) return 6;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group};
+    size_t len = 0; errno = 0;
+    int rc = sysctl(mib, 4, NULL, &len, NULL, 0);
+    int saved = errno;
+    if (rc != -1 || saved != EPERM) {
+        dprintf(STDERR_FILENO, "sysctl denial control rc=%d errno=%d len=%zu\n", rc, saved, len);
+        return 10;
+    }
+#elif defined(__linux__)
+    (void)group;
+    struct rlimit limit = {.rlim_cur = 0, .rlim_max = 0};
+    if (setrlimit(RLIMIT_NOFILE, &limit) != 0) return 7;
+    errno = 0;
+    int fd = open("/proc", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) { close(fd); return 10; }
+    if (errno != EMFILE) return 10;
+#else
+    (void)group;
+    return 8;
+#endif
+    return 0;
+}
+
+static int spb_census_failure_child(void)
+{
+    sigset_t signals;
+    if (signal(SIGALRM, SIG_DFL) == SIG_ERR || sigemptyset(&signals) != 0 ||
+        sigaddset(&signals, SIGALRM) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &signals, NULL) != 0) return 2;
+    alarm(5);
+    pid_t group = getpgrp();
+    uint64_t before = os_sandbox_process_group_census(group);
+    if (before == 0 || before == UINT64_MAX) return 3;
+    int denied = spb_census_deny(group);
+    if (denied) return denied;
+    uint64_t after = os_sandbox_process_group_census(group);
+    if (after == UINT64_MAX) return 0;
+    dprintf(STDERR_FILENO, "census after confirmed denial=%llu\n", (unsigned long long)after);
+    return 9;
+}
+
+static pid_t spb_wait_census_child(pid_t child, int *status)
+{
+    pid_t got = -1;
+    for (int i = 0; i < 700; ++i) {
+        got = waitpid(child, status, WNOHANG);
+        if (got == child || (got < 0 && errno != EINTR)) break;
+        struct timespec delay = {.tv_nsec = 10000000};
+        (void)nanosleep(&delay, NULL); /* real-clock: bounded real-child reap; kernel completion has no injected clock */
+    }
+    if (got != child && !(got < 0 && errno == ECHILD)) {
+        (void)kill(child, SIGKILL);
+        for (int i = 0; i < 500; ++i) {
+            pid_t reaped = waitpid(child, status, WNOHANG);
+            if (reaped == child || (reaped < 0 && errno == ECHILD)) break;
+            struct timespec delay = {.tv_nsec = 10000000}; (void)nanosleep(&delay, NULL); /* real-clock: bounded real-child reap; kernel completion has no injected clock */
+        }
+    }
+    return got;
+}
+
+static int spb_census_failure(void)
+{
+    int failures = 0;
+    TEST("process budget: unavailable live group census is not empty") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) _exit(spb_census_failure_child());
+        int status = 0; pid_t got = spb_wait_census_child(child, &status);
+        if (got == child && WIFEXITED(status) && WEXITSTATUS(status) != 0)
+            printf("  census failure stage=%d\n", WEXITSTATUS(status));
+        ASSERT(got == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_sandbox_process_budget_platform_arm(void)
 {
     printf("\n=== sandbox process budget tests ===\n");
@@ -244,6 +340,7 @@ static int test_sandbox_process_budget_platform_arm(void)
     failures += spb_exhaustion_is_an_admission_verdict();
     failures += spb_live_reading_and_census();
     failures += spb_hard_limit_readable();
+    failures += spb_census_failure();
     printf("=== sandbox process budget tests done: %d failure(s) ===\n",
            failures);
     return failures;

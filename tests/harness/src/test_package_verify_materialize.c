@@ -25,13 +25,49 @@
 #define _GNU_SOURCE
 
 #include "test/test_core.h"
+#if defined(__linux__) || defined(__APPLE__)
+#include <errno.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+static int pvm_wait_fault;
+static unsigned pvm_wait_calls;
+static pid_t pvm_wait4(pid_t pid, int *status, int options, struct rusage *usage)
+{
+    ++pvm_wait_calls;
+    if (pvm_wait_fault) {
+        int error = pvm_wait_fault;
+        if (error == EINTR) pvm_wait_fault = 0;
+        errno = error;
+        return -1;
+    }
+    return wait4(pid, status, options, usage);
+}
+#define wait4 pvm_wait4
+#endif
 
 #undef _DEFAULT_SOURCE
 #define main pv_tool_main
 #define g_shutdown_requested pvm_g_shutdown_requested
+#define os_sandbox_process_group_census pvm_process_group_census
 #include "../../../tools/package_verify.c"
+#if defined(__linux__) || defined(__APPLE__)
+#undef wait4
+#endif
+#undef os_sandbox_process_group_census
 #undef g_shutdown_requested
 #undef main
+
+static uint64_t pvm_census_value;
+static bool pvm_census_advance;
+uint64_t pvm_process_group_census(pid_t pgid)
+{
+    (void)pgid;
+    if (pvm_census_advance && pvm_census_value == 1) {
+        pvm_census_value = 2;
+        return 1;
+    }
+    return pvm_census_value;
+}
 
 #define PVM_CHECK(name, expr)                                          \
     do {                                                               \
@@ -497,6 +533,126 @@ static int t_size_disagrees_with_tail(void)
     return failures;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+static void pvm_census_close(int fds[4])
+{
+    for (int i = 0; i < 4; ++i) if (fds[i] >= 0) close(fds[i]);
+}
+
+static void pvm_census_child(void)
+{
+    sigset_t signals;
+    if (setpgid(0, 0) != 0 || signal(SIGALRM, SIG_DFL) == SIG_ERR ||
+        sigemptyset(&signals) != 0 || sigaddset(&signals, SIGALRM) != 0 ||
+        sigprocmask(SIG_UNBLOCK, &signals, NULL) != 0) _exit(1);
+    alarm(10);
+    for (;;) pause();
+}
+
+static bool pvm_census_setup(int fds[4], pid_t *pid)
+{
+    int a[2], b[2];
+    for (int i = 0; i < 4; ++i) fds[i] = -1;
+    if (pipe(a) != 0) return false;
+    fds[0] = a[0]; fds[1] = a[1];
+    if (pipe(b) != 0) { pvm_census_close(fds); return false; }
+    fds[2] = b[0]; fds[3] = b[1];
+    if (fcntl(fds[0], F_SETFL, O_NONBLOCK) < 0 || fcntl(fds[2], F_SETFL, O_NONBLOCK) < 0) { pvm_census_close(fds); return false; }
+    *pid = fork();
+    if (*pid < 0) { pvm_census_close(fds); return false; }
+    if (*pid == 0) pvm_census_child();
+    if (setpgid(*pid, *pid) != 0 && errno != EACCES) { (void)kill(*pid, SIGKILL); pvm_census_close(fds); return false; }
+    if (getpgid(*pid) != *pid) { (void)kill(*pid, SIGKILL); pvm_census_close(fds); return false; }
+    close(fds[1]); fds[1] = -1; close(fds[3]); fds[3] = -1;
+    return true;
+}
+
+static void pvm_census_reap(pid_t pid)
+{
+    if (pid <= 0) return;
+    pid_t probe;
+    do { probe = waitpid(pid, NULL, WNOHANG); }
+    while (probe < 0 && errno == EINTR);
+    if (probe == pid || (probe < 0 && errno == ECHILD)) return;
+    if (probe < 0) return;
+    (void)kill(-pid, SIGKILL); (void)kill(pid, SIGKILL);
+    for (int i = 0; i < 500; ++i) {
+        pid_t got = waitpid(pid, NULL, WNOHANG);
+        if (got == pid || (got < 0 && errno == ECHILD)) return;
+        struct timespec delay = {.tv_nsec = 10000000}; (void)nanosleep(&delay, NULL); /* real-clock: bounded real-child reap; kernel completion has no injected clock */
+    }
+}
+
+static int t_census_unavailable(void)
+{
+    int failures = 0, fds[4]; pid_t pid = -1;
+    if (!pvm_census_setup(fds, &pid)) { pvm_census_reap(pid); return 1; }
+    int out[2] = {fds[0], -1}, err[2] = {fds[2], -1};
+    struct pv_run run = {.subtree_budget = 1};
+    size_t out_len = 0, err_len = 0;
+    int status = 0; bool reaped = false; struct rusage usage = {0};
+    pvm_census_value = UINT64_MAX;
+    pvm_census_advance = false;
+    pv_run_child_wait_loop(pid, out, err, clock_now_monotonic_ns() + 5000000000LL,
+                           &run, &out_len, &err_len, &status, &reaped, &usage);
+    PVM_CHECK("unavailable census fails sandbox without claiming budget excess",
+              reaped && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL && run.sandbox_fail &&
+              run.census_unavailable && !run.budget_exceeded && run.subtree_peak == 0 && !run.timed_out &&
+              strstr(run.stderr_buf, "process-group census unavailable") != NULL);
+    const char *classification = pv_run_process_failure(&run);
+    PVM_CHECK("unavailable census is a retryable resource failure",
+              classification && strcmp(classification, "process-census-unavailable") == 0 &&
+              pv_report_process_failure(&run, "test", false) == PV_EXIT_RESOURCE_WEDGE);
+    pvm_census_reap(pid);
+    pvm_census_close(fds);
+    return failures;
+}
+
+static int t_census_budget_control(void)
+{
+    int failures = 0, fds[4]; pid_t pid = -1;
+    if (!pvm_census_setup(fds, &pid)) { pvm_census_reap(pid); return 1; }
+    int out[2] = {fds[0], -1}, err[2] = {fds[2], -1};
+    struct pv_run run = {.subtree_budget = 1};
+    size_t out_len = 0, err_len = 0;
+    int status = 0; bool reaped = false; struct rusage usage = {0};
+    pvm_census_value = 1; pvm_census_advance = true;
+    pv_run_child_wait_loop(pid, out, err, clock_now_monotonic_ns() + 5000000000LL,
+                           &run, &out_len, &err_len, &status, &reaped, &usage);
+    PVM_CHECK("valid census enforces only an actual budget excess",
+              reaped && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL &&
+              run.budget_exceeded && !run.sandbox_fail && run.subtree_peak == 2 && !run.timed_out);
+    if (!reaped) pvm_census_reap(pid);
+    pvm_census_close(fds);
+    return failures;
+}
+
+static int pvm_wait_fault_case(int fault)
+{
+    int failures = 0, fds[4]; pid_t pid = -1;
+    if (!pvm_census_setup(fds, &pid)) { pvm_census_reap(pid); return 1; }
+    int out[2] = {fds[0], -1}, err[2] = {fds[2], -1};
+    struct pv_run run = {.subtree_budget = 1};
+    size_t out_len = 0, err_len = 0;
+    int status = 0; bool reaped = false; struct rusage usage = {0};
+    pvm_census_value = UINT64_MAX; pvm_census_advance = false;
+    pvm_wait_fault = fault; pvm_wait_calls = 0;
+    pv_run_child_wait_loop(pid, out, err, clock_now_monotonic_ns() + 5000000000LL,
+                           &run, &out_len, &err_len, &status, &reaped, &usage);
+    pvm_wait_fault = 0;
+    if (fault == EINTR) {
+        PVM_CHECK("interrupted wait retries and reaps actual child",
+                  pvm_wait_calls >= 2 && reaped && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    } else {
+        PVM_CHECK("permanent wait failure is not reported as reaped",
+                  pvm_wait_calls == 1 && !reaped && run.sandbox_fail);
+    }
+    pvm_census_reap(pid);
+    pvm_census_close(fds);
+    return failures;
+}
+#endif
+
 int test_package_verify_materialize(void)
 {
     int failures = 0;
@@ -508,5 +664,11 @@ int test_package_verify_materialize(void)
     failures += t_success_identical();
     failures += t_write_error_custody();
     failures += t_size_disagrees_with_tail();
+#if defined(__linux__) || defined(__APPLE__)
+    failures += t_census_unavailable();
+    failures += t_census_budget_control();
+    failures += pvm_wait_fault_case(EINTR);
+    failures += pvm_wait_fault_case(EIO);
+#endif
     return failures;
 }

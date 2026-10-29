@@ -641,8 +641,10 @@ struct os_sandbox_process_budget os_sandbox_process_budget_live(
 /* Count the live processes whose process GROUP id is `pgid`. Subtree-scoped
  * and load-independent: unrelated work of the same uid is not counted. Used
  * by a parent that put its confined child in its own group (setpgid(0,0)
- * before execve) to enforce the action's real process budget. Returns 0 when
- * /proc is unreadable or the group is empty. */
+ * before execve) to enforce the action's real process budget. Returns
+ * OS_SANDBOX_CENSUS_UNAVAILABLE when the scan is incomplete or unreadable;
+ * zero means an empty group or a nonpositive group id. */
+#define OS_SANDBOX_CENSUS_UNAVAILABLE UINT64_MAX
 uint64_t os_sandbox_process_group_census(pid_t pgid);
 
 /* The CLONE_* flag set a session child is cloned with (== SANDBOX_SESSION_NS_

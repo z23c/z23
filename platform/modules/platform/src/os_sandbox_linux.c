@@ -376,23 +376,11 @@ bool os_sandbox_no_new_privs(void)
 
 /* ── Landlock ──────────────────────────────────────────────────────────── */
 
-#ifdef ZCL_HAVE_LANDLOCK
-static int ll_create_ruleset(const struct landlock_ruleset_attr *attr,
-                             size_t size, uint32_t flags)
-{
-    return (int)syscall(__NR_landlock_create_ruleset, attr, size, flags);
-}
-static int ll_restrict_self(int ruleset_fd, uint32_t flags)
-{
-    return (int)syscall(__NR_landlock_restrict_self, ruleset_fd, flags);
-}
-#endif /* ZCL_HAVE_LANDLOCK */
-
 int os_sandbox_landlock_abi(void)
 {
 #ifdef ZCL_HAVE_LANDLOCK
     errno = 0;
-    int abi = ll_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    int abi = (int)syscall(__NR_landlock_create_ruleset, NULL, (size_t)0, (uint32_t)LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 0) return -1;
     return abi;
 #else
@@ -422,7 +410,7 @@ struct zcl_result os_sandbox_landlock_enforce_ruleset(
     for (size_t i = 0; i < n_rules; i++)
         sandbox_grant_stage(i, &rules[i]);
 
-    if (ll_restrict_self(ruleset_fd, 0) != 0) {
+    if ((int)syscall(__NR_landlock_restrict_self, ruleset_fd, (uint32_t)0) != 0) {
         int e = errno;
         close(ruleset_fd);
         return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_SYSCALL,
@@ -489,7 +477,7 @@ struct zcl_result os_sandbox_landlock_apply_to_self(void)
         return ZCL_ERR(OS_SANDBOX_ERR_NO_NEW_PRIVS,
                        "no_new_privs step failed for retrofit join");
 
-    if (ll_restrict_self(fd, 0) != 0)
+    if ((int)syscall(__NR_landlock_restrict_self, fd, (uint32_t)0) != 0)
         return ZCL_ERR(OS_SANDBOX_ERR_LANDLOCK_SYSCALL,
                        "landlock_restrict_self (retrofit join) failed "
                        "errno=%d (%s)", errno, strerror(errno));
@@ -1219,38 +1207,51 @@ struct os_sandbox_process_budget os_sandbox_process_budget_live(
                                         os_sandbox_nproc_hard_limit());
 }
 
+static int sandbox_census_read(const char *path, char *buf, size_t cap)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT || errno == ESRCH ? 0 : -1;
+    ssize_t got;
+    do { got = read(fd, buf, cap - 1); } while (got < 0 && errno == EINTR);
+    int saved = errno, closed = close(fd);
+    if (got < 0 && (saved == ENOENT || saved == ESRCH)) return 0;
+    if (got <= 0 || closed != 0) return -1;
+    buf[got] = '\0';
+    return 1;
+}
+
+static int sandbox_census_entry(const char *name, pid_t pgid)
+{
+    char *end = NULL;
+    long pid = strtol(name, &end, 10);
+    if (!end || *end != '\0' || pid <= 0) return 0;
+    char path[64], buf[512];
+    int n = snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
+    int read_result = sandbox_census_read(path, buf, sizeof(buf));
+    if (read_result <= 0) return read_result;
+    /* comm can contain spaces and parentheses; anchor on the last ')'. */
+    const char *after = strrchr(buf, ')');
+    char state = 0; long ppid = 0, pgrp = 0;
+    if (!after || sscanf(after + 1, " %c %ld %ld", &state, &ppid, &pgrp) != 3) return -1;
+    return pgrp == (long)pgid ? 1 : 0;
+}
+
 uint64_t os_sandbox_process_group_census(pid_t pgid)
 {
     if (pgid <= 0) return 0;
     DIR *proc = opendir("/proc");
-    if (!proc) return 0;
-    uint64_t total = 0;
-    struct dirent *ent;
-    while ((ent = readdir(proc)) != NULL) {
-        char *end = NULL;
-        long pid = strtol(ent->d_name, &end, 10);
-        if (!end || *end != '\0' || pid <= 0) continue;
-        char spath[64];
-        int n = snprintf(spath, sizeof(spath), "/proc/%ld/stat", pid);
-        if (n <= 0 || (size_t)n >= sizeof(spath)) continue;
-        int fd = open(spath, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) continue;
-        char buf[512];
-        ssize_t got = read(fd, buf, sizeof(buf) - 1);
-        (void)close(fd);
-        if (got <= 0) continue;
-        buf[got] = '\0';
-        /* This file is "pid (comm) state ppid pgrp ...". comm may contain
-         * spaces AND parentheses, so anchor on the LAST ')'. */
-        const char *after_comm = strrchr(buf, ')');
-        if (!after_comm) continue;
-        char state = 0;
-        long ppid = 0, pgrp = 0;
-        if (sscanf(after_comm + 1, " %c %ld %ld", &state, &ppid, &pgrp) == 3 &&
-            pgrp == (long)pgid)
-            total++;
+    if (!proc) { LOG_WARN("os_sandbox", "process-group census open failed errno=%d", errno); return OS_SANDBOX_CENSUS_UNAVAILABLE; }
+    uint64_t total = 0; bool ok = true;
+    for (;;) {
+        errno = 0; struct dirent *ent = readdir(proc);
+        if (!ent) { if (errno) ok = false; break; }
+        int result = sandbox_census_entry(ent->d_name, pgid);
+        if (result < 0) { ok = false; break; }
+        total += (uint64_t)result;
     }
-    closedir(proc);
+    if (closedir(proc) != 0) ok = false;
+    if (!ok) { LOG_WARN("os_sandbox", "process-group census incomplete"); return OS_SANDBOX_CENSUS_UNAVAILABLE; }
     return total;
 }
 /* ── namespaces ────────────────────────────────────────────────────────── */
@@ -1306,12 +1307,7 @@ struct zcl_result os_sandbox_write_userns_maps(pid_t pid, unsigned inside_uid,
 
 /* ── capability probe ──────────────────────────────────────────────────── */
 
-/* Child body for the userns probe: exit 0 = a user namespace with its identity
- * map works (the unshare alone passes under the AppArmor restriction). */
-static int userns_probe_child(void)
-{
-    return os_sandbox_userns_identity_probe() ? 0 : 1;
-}
+/* Exit 0 requires a user namespace with its identity map, not just unshare. */
 
 struct os_sandbox_caps os_sandbox_probe_caps(void)
 {
@@ -1327,7 +1323,7 @@ struct os_sandbox_caps os_sandbox_probe_caps(void)
 
     pid_t pid = fork();
     if (pid == 0) {
-        _exit(userns_probe_child());
+        _exit(os_sandbox_userns_identity_probe() ? 0 : 1);
     } else if (pid > 0) {
         int status = 0;
         if (waitpid(pid, &status, 0) == pid &&

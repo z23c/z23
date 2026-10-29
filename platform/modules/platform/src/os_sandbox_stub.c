@@ -622,52 +622,39 @@ struct os_sandbox_process_budget os_sandbox_process_budget_live(
 uint64_t os_sandbox_process_group_census(pid_t group)
 {
 #if defined(__APPLE__)
-    /* Linux answers this from /proc/<pid>/stat's pgrp field; Darwin keeps
-     * the process group inside the same kernel BSD record read for the uid
-     * census above (pbi_pgid). Process-granular like Linux. */
-    if (group <= 0)
-        return 0;
-    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    if (group <= 0) return 0;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group };
     size_t len = 0;
-    if (sysctl(mib, 3, NULL, &len, NULL, 0) != 0 || len == 0)
-        return 0;
-    len += 16u * sizeof(struct kinfo_proc);
-    struct kinfo_proc *procs = malloc(len); // raw-alloc-ok:sandbox-census-scratch
-    if (!procs)
-        return 0;
-    if (sysctl(mib, 3, procs, &len, NULL, 0) != 0) {
-        free(procs);
-        return 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0) {
+        LOG_WARN("os_sandbox", "process-group census size failed errno=%d", errno);
+        return OS_SANDBOX_CENSUS_UNAVAILABLE;
     }
-    size_t count = len / sizeof(procs[0]);
-    uint64_t total = 0;
-    for (size_t i = 0; i < count; i++) {
-        pid_t pid = procs[i].kp_proc.p_pid;
-        if (pid <= 0)
-            continue;
-        struct proc_bsdinfo bsd;
-        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd,
-                         sizeof(bsd)) != (int)sizeof(bsd))
-            continue;
-        if ((pid_t)bsd.pbi_pgid == group)
-            total++;
+    if (len > SIZE_MAX - 16u * sizeof(struct kinfo_proc)) {
+        LOG_WARN("os_sandbox", "process-group census size overflow");
+        return OS_SANDBOX_CENSUS_UNAVAILABLE;
+    }
+    size_t cap = len + 16u * sizeof(struct kinfo_proc);
+    struct kinfo_proc *procs = malloc(cap); // raw-alloc-ok:sandbox-census-scratch
+    if (!procs) {
+        LOG_WARN("os_sandbox", "process-group census allocation failed bytes=%zu", cap);
+        return OS_SANDBOX_CENSUS_UNAVAILABLE;
+    }
+    len = cap;
+    if (sysctl(mib, 4, procs, &len, NULL, 0) != 0 || len > cap || len % sizeof(*procs) != 0) {
+        LOG_WARN("os_sandbox", "process-group census snapshot failed errno=%d", errno);
+        free(procs); return OS_SANDBOX_CENSUS_UNAVAILABLE;
     }
     free(procs);
-    return total;
+    return len / sizeof(struct kinfo_proc);
 #elif defined(_WIN32)
-    /* No Windows equivalent of a POSIX process-group id is implemented here
-     * (that is a real design task, not this compile fix). Same reporting
-     * discipline as os_sandbox_uid_task_count above: 0 is the documented
-     * "unreadable" sentinel per platform/os_sandbox.h, but log it by name so
-     * it is never mistaken for a verified empty group. */
+    /* No Windows equivalent of a POSIX process-group id is implemented. */
     LOG_WARN("os_sandbox",
              "process-group census is unavailable on this operating system "
-             "(no Windows equivalent implemented); reporting 0 for group=%ld",
+             "(no Windows equivalent implemented); reporting unavailable for group=%ld",
              (long)group);
-    return 0;
+    return group <= 0 ? 0 : OS_SANDBOX_CENSUS_UNAVAILABLE;
 #else
-    (void)group;
-    return 0;
+    return group <= 0 ? 0 : OS_SANDBOX_CENSUS_UNAVAILABLE;
 #endif
 }
 
