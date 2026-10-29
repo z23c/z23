@@ -65,10 +65,11 @@ static void digest_i32(struct sha3_256_ctx *ctx, int32_t value)
     digest_u32(ctx, (uint32_t)value);
 }
 
-static bool manifest_is_complete_and_self_bound(
+/* True when a height, cursor or validation-profile field is out of shape. */
+static bool manifest_fields_invalid(
     const struct consensus_state_bundle_manifest *manifest)
 {
-    if (!manifest || manifest->height < 0 ||
+    return manifest->height < 0 ||
         manifest->sapling_frontier_height < 0 ||
         manifest->sapling_frontier_height > manifest->height ||
         !manifest->history_complete || manifest->activation_boundary != 0 ||
@@ -78,12 +79,25 @@ static bool manifest_is_complete_and_self_bound(
         manifest->source_fold_cursor != (int64_t)manifest->height + 1 ||
         (manifest->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          manifest->validation_profile !=
-             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !zcl_bytes_any_set(manifest->block_hash, 32) ||
+             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD);
+}
+
+/* True when any of the manifest's identifying hashes is all zero. */
+static bool manifest_hashes_missing(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    return !zcl_bytes_any_set(manifest->block_hash, 32) ||
         !zcl_bytes_any_set(manifest->sapling_frontier_root, 32) ||
         !zcl_bytes_any_set(manifest->proof_manifest_digest, 32) ||
         !zcl_bytes_any_set(manifest->source_digest, 32) ||
-        !zcl_bytes_any_set(manifest->artifact_digest, 32))
+        !zcl_bytes_any_set(manifest->artifact_digest, 32);
+}
+
+static bool manifest_is_complete_and_self_bound(
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    if (!manifest || manifest_fields_invalid(manifest) ||
+        manifest_hashes_missing(manifest))
         return false;
     uint8_t computed[32];
     consensus_state_bundle_artifact_digest(manifest, computed);
@@ -112,6 +126,31 @@ bool consensus_state_chain_binding_uses_checkpoint_authority(
         memcmp(manifest->block_hash, cp->block_hash, 32) == 0 &&
         memcmp(manifest->sapling_frontier_root,
                cp->sapling_frontier_root, 32) == 0;
+}
+
+/* True when the selected bundle block is not PoW-bound to the manifest. */
+static bool assisted_bundle_location_unbound(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    return !observation->selected_bundle_known ||
+        observation->selected_bundle_height != manifest->height ||
+        memcmp(observation->selected_bundle_hash, manifest->block_hash, 32) != 0 ||
+        !observation->bundle_header_pass_record;
+}
+
+/* True when the Sapling tip root is not PoW-bound to the manifest frontier. */
+static bool assisted_sapling_tip_unbound(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    return !observation->selected_sapling_source_known ||
+        (int64_t)observation->selected_sapling_source_height !=
+            (int64_t)manifest->sapling_frontier_height ||
+        memcmp(observation->selected_sapling_source_root,
+               manifest->sapling_frontier_root, 32) != 0 ||
+        memcmp(observation->selected_bundle_sapling_root,
+               manifest->sapling_frontier_root, 32) != 0;
 }
 
 bool consensus_state_chain_binding_uses_assisted_authority(
@@ -145,61 +184,22 @@ bool consensus_state_chain_binding_uses_assisted_authority(
      * (This is the header-only subset of -5/-6; the script/failure-free body
      * predicates are structurally impossible on borrowed state and are skipped
      * — that is exactly what the tier withholds sovereignty for.) */
-    if (!observation->selected_bundle_known ||
-        observation->selected_bundle_height != manifest->height ||
-        memcmp(observation->selected_bundle_hash, manifest->block_hash, 32) != 0 ||
-        !observation->bundle_header_pass_record)
+    if (assisted_bundle_location_unbound(manifest, observation))
         return false;
     /* Shielded TIP root is PoW-committed: the Sapling source header at the
      * frontier height commits the manifest frontier root (the -9 comparison) and
      * the bundle-height header still carries it (the -10 comparison). Ancestry
      * back to the source is enforced by -11 in decide(). */
-    if (!observation->selected_sapling_source_known ||
-        (int64_t)observation->selected_sapling_source_height !=
-            (int64_t)manifest->sapling_frontier_height ||
-        memcmp(observation->selected_sapling_source_root,
-               manifest->sapling_frontier_root, 32) != 0 ||
-        memcmp(observation->selected_bundle_sapling_root,
-               manifest->sapling_frontier_root, 32) != 0)
+    if (assisted_sapling_tip_unbound(manifest, observation))
         return false;
     return true;
 }
 
-struct zcl_result consensus_state_chain_binding_decide(
-    const struct consensus_state_bundle_manifest *manifest,
-    const struct consensus_state_chain_binding_observation *observation)
+/* -3: the selected frontier must be durable and unchanged across both samples. */
+static struct zcl_result decide_frontier_durable(
+    const struct consensus_state_chain_binding_observation *observation,
+    bool cp_auth, bool assisted)
 {
-    if (!manifest || !observation)
-        return ZCL_ERR(-1, "chain binding: null manifest/observation");
-    if (!manifest_is_complete_and_self_bound(manifest))
-        return ZCL_ERR(-2, "chain binding: manifest is not complete/self-bound");
-
-    /* Below-checkpoint predicates (-5/-6/-7/-8/-9/-10 and the -11 ancestry
-     * links) reference the checkpoint block and its Sapling source, both AT OR
-     * BELOW the checkpoint height. A snapshot-seeded target floors its index
-     * above the checkpoint, so those blocks are never materialized there. When
-     * the bundle is exactly the compiled checkpoint content, the compiled
-     * checkpoint (a stronger, PoW-committed, independently re-derivable trust
-     * root) authorizes them in place of the absent target index. The same
-     * authority also enables the -4 header-bootstrap (instant-on) path and the
-     * -3 fresh-genesis-bootstrap relaxation below. */
-    bool cp_auth =
-        consensus_state_chain_binding_uses_checkpoint_authority(manifest,
-                                                                observation);
-
-    /* Assisted ABOVE-checkpoint borrowed-state admission (the RELEASE_ASSISTED
-     * tier), disjoint from cp_auth. When set it relaxes exactly the predicates
-     * that are structurally impossible on borrowed state — the -4 served-coverage
-     * requirement and the -5/-6/-8 body self-validation — while KEEPING every
-     * PoW fact: -3 frontier determinism, the bundle-height header pass record +
-     * Sapling-tip root binding (both folded into the predicate itself), and the
-     * -11 header work + ancestry. It admits a usable-but-not-sovereign node; the
-     * install runtime withholds the self_folded marker so mine/spend/export/seed
-     * stay denied until background promotion re-derives the seam. */
-    bool assisted =
-        consensus_state_chain_binding_uses_assisted_authority(manifest,
-                                                              observation);
-
     /* -3 selected-frontier durability. The target's frontier must be durable and
      * consistent across the two samples (before AND after). The ONE relaxation is
      * the clean-genesis instant-on bootstrap: a node that has folded ZERO bodies
@@ -237,7 +237,15 @@ struct zcl_result consensus_state_chain_binding_decide(
                        observation->fresh_genesis_bootstrap ? 1 : 0,
                        observation->frontier_unchanged ? 1 : 0,
                        observation->durable_served_height);
+    return ZCL_OK;
+}
 
+/* -4: served coverage, compiled-checkpoint header bootstrap, or assisted bind. */
+static struct zcl_result decide_served_or_bootstrap(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation,
+    bool cp_auth, bool assisted)
+{
     /* -4 admits on EITHER of two sovereign paths:
      *
      *  (a) state-replacement: the target has already folded and durably served
@@ -278,41 +286,57 @@ struct zcl_result consensus_state_chain_binding_decide(
                        "and no compiled-checkpoint header-bootstrap or assisted "
                        "above-checkpoint bind",
                        manifest->height, observation->durable_served_height);
+    return ZCL_OK;
+}
 
-    /* Assisted admission (like cp_auth) skips the -5..-10 body/index self-
-     * validation: those predicates require folded bodies below the seam that a
-     * borrowed-state node structurally lacks. The bundle LOCATION and Sapling
-     * TIP root are still PoW-bound (verified inside the assisted predicate) and
-     * the -11 header work + ancestry below remain enforced. */
-    if (!cp_auth && !assisted) {
-        if (!observation->selected_bundle_known ||
-            observation->selected_bundle_height != manifest->height ||
-            memcmp(observation->selected_bundle_hash,
-                   manifest->block_hash, 32) != 0)
-            return ZCL_ERR(-5, "chain binding: bundle block is not the selected-chain block");
-        if (!observation->selected_bundle_valid_scripts ||
-            !observation->selected_bundle_failure_free ||
-            !observation->bundle_header_pass_record)
-            return ZCL_ERR(-6, "chain binding: bundle block lacks durable validation");
-        if (!observation->selected_sapling_source_known ||
-            observation->selected_sapling_source_height !=
-                manifest->sapling_frontier_height ||
-            !zcl_bytes_any_set(observation->selected_sapling_source_hash, 32))
-            return ZCL_ERR(-7, "chain binding: Sapling source height unavailable");
-        if (!observation->selected_sapling_source_valid_scripts ||
-            !observation->selected_sapling_source_failure_free ||
-            !observation->sapling_source_header_pass_record)
-            return ZCL_ERR(-8, "chain binding: Sapling source lacks durable validation");
-        if (memcmp(observation->selected_sapling_source_root,
-                   manifest->sapling_frontier_root, 32) != 0)
-            return ZCL_ERR(-9, "chain binding: Sapling frontier disagrees with source header");
-        /* A sparse frontier can originate below H only when no later block has
-         * changed it. Requiring the same root in H's header closes that gap. */
-        if (memcmp(observation->selected_bundle_sapling_root,
-                   manifest->sapling_frontier_root, 32) != 0)
-            return ZCL_ERR(-10, "chain binding: Sapling frontier is not current at bundle height");
-    }
+/* -5/-6/-7: the bundle block and the Sapling source height. */
+static struct zcl_result decide_bundle_block(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    if (!observation->selected_bundle_known ||
+        observation->selected_bundle_height != manifest->height ||
+        memcmp(observation->selected_bundle_hash,
+               manifest->block_hash, 32) != 0)
+        return ZCL_ERR(-5, "chain binding: bundle block is not the selected-chain block");
+    if (!observation->selected_bundle_valid_scripts ||
+        !observation->selected_bundle_failure_free ||
+        !observation->bundle_header_pass_record)
+        return ZCL_ERR(-6, "chain binding: bundle block lacks durable validation");
+    if (!observation->selected_sapling_source_known ||
+        observation->selected_sapling_source_height !=
+            manifest->sapling_frontier_height ||
+        !zcl_bytes_any_set(observation->selected_sapling_source_hash, 32))
+        return ZCL_ERR(-7, "chain binding: Sapling source height unavailable");
+    return ZCL_OK;
+}
 
+/* -8/-9/-10: the Sapling source validation and frontier root binds. */
+static struct zcl_result decide_sapling_source(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    if (!observation->selected_sapling_source_valid_scripts ||
+        !observation->selected_sapling_source_failure_free ||
+        !observation->sapling_source_header_pass_record)
+        return ZCL_ERR(-8, "chain binding: Sapling source lacks durable validation");
+    if (memcmp(observation->selected_sapling_source_root,
+               manifest->sapling_frontier_root, 32) != 0)
+        return ZCL_ERR(-9, "chain binding: Sapling frontier disagrees with source header");
+    /* A sparse frontier can originate below H only when no later block has
+     * changed it. Requiring the same root in H's header closes that gap. */
+    if (memcmp(observation->selected_bundle_sapling_root,
+               manifest->sapling_frontier_root, 32) != 0)
+        return ZCL_ERR(-10, "chain binding: Sapling frontier is not current at bundle height");
+    return ZCL_OK;
+}
+
+/* -11: selected-header work/validity and ancestry. */
+static struct zcl_result decide_header_tip(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation,
+    bool cp_auth)
+{
     /* -11 header-tip validity is ALWAYS target-derived: the target must have a
      * real, failure-free, valid-tree selected header at or above the bundle
      * height with nonzero work — this proves the target IS a live chain above
@@ -330,6 +354,70 @@ struct zcl_result consensus_state_chain_binding_decide(
         (!observation->header_descends_from_bundle ||
          !observation->bundle_descends_from_sapling_source))
         return ZCL_ERR(-11, "chain binding: selected-header ancestry missing");
+    return ZCL_OK;
+}
+
+struct zcl_result consensus_state_chain_binding_decide(
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_chain_binding_observation *observation)
+{
+    if (!manifest || !observation)
+        return ZCL_ERR(-1, "chain binding: null manifest/observation");
+    if (!manifest_is_complete_and_self_bound(manifest))
+        return ZCL_ERR(-2, "chain binding: manifest is not complete/self-bound");
+
+    /* Below-checkpoint predicates (-5/-6/-7/-8/-9/-10 and the -11 ancestry
+     * links) reference the checkpoint block and its Sapling source, both AT OR
+     * BELOW the checkpoint height. A snapshot-seeded target floors its index
+     * above the checkpoint, so those blocks are never materialized there. When
+     * the bundle is exactly the compiled checkpoint content, the compiled
+     * checkpoint (a stronger, PoW-committed, independently re-derivable trust
+     * root) authorizes them in place of the absent target index. The same
+     * authority also enables the -4 header-bootstrap (instant-on) path and the
+     * -3 fresh-genesis-bootstrap relaxation below. */
+    bool cp_auth =
+        consensus_state_chain_binding_uses_checkpoint_authority(manifest,
+                                                                observation);
+
+    /* Assisted ABOVE-checkpoint borrowed-state admission (the RELEASE_ASSISTED
+     * tier), disjoint from cp_auth. When set it relaxes exactly the predicates
+     * that are structurally impossible on borrowed state — the -4 served-coverage
+     * requirement and the -5/-6/-8 body self-validation — while KEEPING every
+     * PoW fact: -3 frontier determinism, the bundle-height header pass record +
+     * Sapling-tip root binding (both folded into the predicate itself), and the
+     * -11 header work + ancestry. It admits a usable-but-not-sovereign node; the
+     * install runtime withholds the self_folded marker so mine/spend/export/seed
+     * stay denied until background promotion re-derives the seam. */
+    bool assisted =
+        consensus_state_chain_binding_uses_assisted_authority(manifest,
+                                                              observation);
+
+    struct zcl_result gate = decide_frontier_durable(observation, cp_auth,
+                                                     assisted);
+    if (!gate.ok)
+        return gate;
+
+    gate = decide_served_or_bootstrap(manifest, observation, cp_auth, assisted);
+    if (!gate.ok)
+        return gate;
+
+    /* Assisted admission (like cp_auth) skips the -5..-10 body/index self-
+     * validation: those predicates require folded bodies below the seam that a
+     * borrowed-state node structurally lacks. The bundle LOCATION and Sapling
+     * TIP root are still PoW-bound (verified inside the assisted predicate) and
+     * the -11 header work + ancestry below remain enforced. */
+    if (!cp_auth && !assisted) {
+        gate = decide_bundle_block(manifest, observation);
+        if (!gate.ok)
+            return gate;
+        gate = decide_sapling_source(manifest, observation);
+        if (!gate.ok)
+            return gate;
+    }
+
+    gate = decide_header_tip(manifest, observation, cp_auth);
+    if (!gate.ok)
+        return gate;
     return ZCL_OK;
 }
 
@@ -555,44 +643,22 @@ static void evidence_digest_build(
     sha3_256_finalize(&ctx, out);
 }
 
-struct zcl_result consensus_state_chain_evidence_build(
+/* Sample the selected chain twice under the progress lock and decide. The
+ * lock is released on every path before returning; a refusal propagates the
+ * decide CODE unchanged. On success *observation and *frontier_before hold the
+ * inputs of the evidence digest. */
+static struct zcl_result evidence_sample_and_decide(
     const struct consensus_state_chain_binding_request *request,
-    struct consensus_state_chain_evidence **out)
+    const struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_chain_binding_observation *observation_out,
+    struct chain_frontier_snapshot *frontier_before)
 {
-    if (out)
-        *out = NULL;
-    if (!request || !out || !request->main || !request->artifact)
-        return ZCL_ERR(-20, "chain evidence: null request member");
-    const char *target_lane = target_lane_name(request->target_lane);
-    if (!target_lane)
-        return ZCL_ERR(-21, "chain evidence: target lane is not canonical");
-    /* This implementation reads the process-global reducer/progress authority.
-     * Refuse an API-shaped copy context rather than mixing its chain pointers
-     * with another store's H-star/proof rows. A future copy binder needs one opaque
-     * target context owning both CSR and progress-store identity. */
-    if (condition_engine_main_state() != request->main ||
-        !progress_store_db())
-        return ZCL_ERR(-22,
-                       "chain evidence: request is not the open process singleton");
-    /* Only the strict validator can create artifact evidence. The builder
-     * reasons over its copied manifest while the exact descriptor/read txn
-     * remains pinned by the caller-owned opaque receipt. */
-    struct consensus_state_bundle_manifest manifest_copy;
-    uint8_t artifact_receipt_digest[32];
-    if (!consensus_state_artifact_evidence_manifest_copy(
-            request->artifact, &manifest_copy) ||
-        !consensus_state_artifact_evidence_receipt_digest(
-            request->artifact, artifact_receipt_digest))
-        return ZCL_ERR(-23, "chain evidence: artifact receipt is stale");
-    const struct consensus_state_bundle_manifest *manifest = &manifest_copy;
-
     /* Lock order is progress -> CSR/window. Header-pass reads recursively take
      * this same progress lock, keeping every durable predicate in one store
      * generation throughout the two chain samples. */
     progress_store_tx_lock();
-    struct chain_frontier_snapshot frontier_before;
     struct chain_frontier_snapshot frontier_after;
-    chain_frontier_snapshot_collect(&frontier_before, request->main);
+    chain_frontier_snapshot_collect(frontier_before, request->main);
 
     struct chain_state_frontier_view view_before;
     struct zcl_result captured = csr_capture_frontiers(
@@ -633,15 +699,15 @@ struct zcl_result consensus_state_chain_evidence_build(
     struct consensus_state_chain_binding_observation observation =
         sampled_after;
     observation.before_frontier_consistent =
-        chain_frontier_snapshot_consistent(&frontier_before);
+        chain_frontier_snapshot_consistent(frontier_before);
     observation.after_frontier_consistent =
         chain_frontier_snapshot_consistent(&frontier_after);
-    log_frontier_gates("before", &frontier_before);
+    log_frontier_gates("before", frontier_before);
     log_frontier_gates("after", &frontier_after);
     observation.durable_served_height = frontier_after.served.height;
     observation.frontier_unchanged = capture_equal(&view_before, &view_after) &&
-        chain_frontier_snapshot_equal(&frontier_before, &frontier_after) &&
-        capture_matches_frontier(&view_before, &frontier_before) &&
+        chain_frontier_snapshot_equal(frontier_before, &frontier_after) &&
+        capture_matches_frontier(&view_before, frontier_before) &&
         capture_matches_frontier(&view_after, &frontier_after) &&
         predicates_unchanged;
     /* Gap A — clean-genesis instant-on eligibility. True ONLY when BOTH frontier
@@ -652,7 +718,7 @@ struct zcl_result consensus_state_chain_evidence_build(
      * under the still-held progress lock so it reflects the same store generation
      * as the two frontier samples. */
     observation.fresh_genesis_bootstrap =
-        chain_frontier_snapshot_clean_genesis(&frontier_before) &&
+        chain_frontier_snapshot_clean_genesis(frontier_before) &&
         chain_frontier_snapshot_clean_genesis(&frontier_after) &&
         fresh_genesis_quiescent(progress_store_db());
     /* Request-level assisted opt-in, set on the FINAL observation only (never on
@@ -674,11 +740,61 @@ struct zcl_result consensus_state_chain_evidence_build(
                        decision.message);
     }
     progress_store_tx_unlock();
+    *observation_out = observation;
+    return ZCL_OK;
+}
 
+/* True when the artifact receipt can no longer be re-derived or differs from
+ * the one pinned before the chain capture. */
+static bool artifact_receipt_changed(
+    const struct consensus_state_chain_binding_request *request,
+    const uint8_t artifact_receipt_digest[32])
+{
     uint8_t final_receipt_digest[32];
-    if (!consensus_state_artifact_evidence_receipt_digest(
-            request->artifact, final_receipt_digest) ||
-        memcmp(final_receipt_digest, artifact_receipt_digest, 32) != 0)
+    return !consensus_state_artifact_evidence_receipt_digest(
+               request->artifact, final_receipt_digest) ||
+        memcmp(final_receipt_digest, artifact_receipt_digest, 32) != 0;
+}
+
+struct zcl_result consensus_state_chain_evidence_build(
+    const struct consensus_state_chain_binding_request *request,
+    struct consensus_state_chain_evidence **out)
+{
+    if (out)
+        *out = NULL;
+    if (!request || !out || !request->main || !request->artifact)
+        return ZCL_ERR(-20, "chain evidence: null request member");
+    const char *target_lane = target_lane_name(request->target_lane);
+    if (!target_lane)
+        return ZCL_ERR(-21, "chain evidence: target lane is not canonical");
+    /* This implementation reads the process-global reducer/progress authority.
+     * Refuse an API-shaped copy context rather than mixing its chain pointers
+     * with another store's H-star/proof rows. A future copy binder needs one opaque
+     * target context owning both CSR and progress-store identity. */
+    if (condition_engine_main_state() != request->main ||
+        !progress_store_db())
+        return ZCL_ERR(-22,
+                       "chain evidence: request is not the open process singleton");
+    /* Only the strict validator can create artifact evidence. The builder
+     * reasons over its copied manifest while the exact descriptor/read txn
+     * remains pinned by the caller-owned opaque receipt. */
+    struct consensus_state_bundle_manifest manifest_copy;
+    uint8_t artifact_receipt_digest[32];
+    if (!consensus_state_artifact_evidence_manifest_copy(
+            request->artifact, &manifest_copy) ||
+        !consensus_state_artifact_evidence_receipt_digest(
+            request->artifact, artifact_receipt_digest))
+        return ZCL_ERR(-23, "chain evidence: artifact receipt is stale");
+    const struct consensus_state_bundle_manifest *manifest = &manifest_copy;
+
+    struct chain_frontier_snapshot frontier_before;
+    struct consensus_state_chain_binding_observation observation;
+    struct zcl_result decision = evidence_sample_and_decide(
+        request, manifest, &observation, &frontier_before);
+    if (!decision.ok)
+        return decision;
+
+    if (artifact_receipt_changed(request, artifact_receipt_digest))
         return ZCL_ERR(-27,
                        "chain evidence: artifact changed during chain capture");
 
