@@ -21,6 +21,15 @@
  * unreachable for node-supplied parameters. K < 3 reaches them, but the
  * solver and verifier disagree there (solution_width truncates), so no
  * "true without injection" baseline exists; those arms are left uncovered.
+ *
+ * Characterization (no injection): the refusals that return before any work
+ * (wrong length, NULL arguments, short output buffer), the PoW rejects a
+ * well-formed encoding reaches (out-of-order and non-distinct leaf indices),
+ * and the solver's exact output bytes. Still uncovered: the verifier's
+ * collision-mismatch and non-zero-final-XOR rejects (both need a hand-computed
+ * index set), and the verifier's index-count mismatch (unreachable once the
+ * length check passes). The solver's "no full collision" return is reached
+ * only when the first witness nonce is above 0.
  */
 
 #include "test/test_core.h"
@@ -243,6 +252,145 @@ static int eho_solver_labels(void)
     return failures;
 }
 
+/* ── Characterization: refusals and PoW rejects off the OOM path ──── */
+
+static bool eho_verify_965_bytes(const unsigned char *soln, size_t len)
+{
+    struct blake2b_ctx st;
+    eho_state_965(&st);
+    return equihash_is_valid_solution(&g_p965, &st, soln, len);
+}
+
+static int eho_verifier_refusals(void)
+{
+    int failures = 0;
+    unsigned char zeros[69] = {0};
+    printf("\n--- verifier: length refusals return before any work ---\n");
+
+    EHO_CHECK("(96,5) solution_width is 68 bytes",
+              g_p965.solution_width == 68 && g_soln965_len == 68);
+    EHO_CHECK("one byte short of solution_width -> false",
+              !eho_verify_965_bytes(g_soln965, g_p965.solution_width - 1));
+    EHO_CHECK("one byte over solution_width -> false",
+              !eho_verify_965_bytes(zeros, g_p965.solution_width + 1));
+    EHO_CHECK("empty solution -> false",
+              !eho_verify_965_bytes(g_soln965, 0));
+    return failures;
+}
+
+static int eho_verifier_pow_rejects(void)
+{
+    int failures = 0;
+    unsigned char zeros[68] = {0};
+    unsigned char minimal[68];
+    eh_index idx[32];
+    printf("\n--- verifier: well-formed encodings that break the PoW rules ---\n");
+
+    /* Every index decodes to 0: rows 0 and 1 are identical, so they collide,
+     * but their indices are equal, so the distinct-indices check rejects. */
+    EHO_CHECK("all-zero solution of exact width -> false (non-distinct)",
+              !eho_verify_965_bytes(zeros, sizeof(zeros)));
+
+    /* Swapping the first leaf pair keeps its collision but puts the larger
+     * index first, so the order check rejects. */
+    memcpy(idx, kValidIndices_96_5, sizeof(idx));
+    idx[0] = kValidIndices_96_5[1];
+    idx[1] = kValidIndices_96_5[0];
+    size_t n = eh_get_minimal_from_indices(idx, 32,
+                                           g_p965.collision_bit_length,
+                                           minimal, sizeof(minimal));
+    EHO_CHECK("swapped leaf pair encodes to solution_width",
+              n == g_p965.solution_width);
+    EHO_CHECK("swapped leaf pair (indices out of order) -> false",
+              !eho_verify_965_bytes(minimal, n));
+
+    /* A duplicated leaf index collides with itself and fails distinctness. */
+    memcpy(idx, kValidIndices_96_5, sizeof(idx));
+    idx[1] = idx[0];
+    n = eh_get_minimal_from_indices(idx, 32,
+                                    g_p965.collision_bit_length,
+                                    minimal, sizeof(minimal));
+    EHO_CHECK("duplicated leaf index encodes to solution_width",
+              n == g_p965.solution_width);
+    EHO_CHECK("duplicated leaf index (non-distinct) -> false",
+              !eho_verify_965_bytes(minimal, n));
+    return failures;
+}
+
+static int eho_solver_refusals(void)
+{
+    int failures = 0;
+    unsigned char out[256];
+    struct blake2b_ctx st;
+    printf("\n--- solver: refusals return before any work ---\n");
+
+    eho_state_485(&st, 0);
+    EHO_CHECK("NULL params -> false",
+              !equihash_basic_solve(NULL, &st, out, sizeof(out)));
+    EHO_CHECK("NULL base_state -> false",
+              !equihash_basic_solve(&g_p485, NULL, out, sizeof(out)));
+    EHO_CHECK("NULL soln_out -> false",
+              !equihash_basic_solve(&g_p485, &st, NULL, sizeof(out)));
+    EHO_CHECK("buffer one byte short of solution_width -> false",
+              !equihash_basic_solve(&g_p485, &st, out,
+                                    g_p485.solution_width - 1));
+    EHO_CHECK("zero-length buffer -> false",
+              !equihash_basic_solve(&g_p485, &st, out, 0));
+    return failures;
+}
+
+static int eho_solver_output_bytes(void)
+{
+    int failures = 0;
+    unsigned char ref[256];
+    unsigned char exact[64];
+    unsigned char wide[64];
+    printf("\n--- solver: output bytes are fixed by the witness ---\n");
+
+    if (g_solve_nonce < 0) {
+        EHO_CHECK("(48,5) witness nonce known for byte pinning", false);
+        return failures;
+    }
+
+    bool ref_ok = eho_solve_485(g_solve_nonce, ref, sizeof(ref));
+    EHO_CHECK("(48,5) reference solve succeeds", ref_ok);
+
+    /* An exact-width buffer solves and writes exactly solution_width bytes;
+     * the byte past the output length is never touched. */
+    memset(exact, 0xA5, sizeof(exact));
+    struct blake2b_ctx st;
+    eho_state_485(&st, g_solve_nonce);
+    bool exact_ok = equihash_basic_solve(&g_p485, &st, exact,
+                                         g_p485.solution_width);
+    EHO_CHECK("exact-width buffer solves", exact_ok);
+    EHO_CHECK("exact-width bytes match the reference solve",
+              memcmp(exact, ref, g_p485.solution_width) == 0);
+    EHO_CHECK("byte past exact-width output is untouched",
+              exact[g_p485.solution_width] == 0xA5);
+
+    /* A wider buffer yields the same leading bytes and the same
+     * solution_width-byte encoding. */
+    memset(wide, 0xA5, sizeof(wide));
+    eho_state_485(&st, g_solve_nonce);
+    bool wide_ok = equihash_basic_solve(&g_p485, &st, wide, sizeof(wide));
+    EHO_CHECK("wide buffer solves", wide_ok);
+    EHO_CHECK("wide-buffer bytes match the reference solve",
+              memcmp(wide, ref, g_p485.solution_width) == 0);
+    EHO_CHECK("byte past solution_width in wide buffer is untouched",
+              wide[g_p485.solution_width] == 0xA5);
+
+    /* Nonces the entry loop tried before the first witness returned false,
+     * and a rerun returns false again. */
+    bool all_false = true;
+    for (int nonce = 0; nonce < g_solve_nonce; nonce++) {
+        unsigned char o[256];
+        if (eho_solve_485(nonce, o, sizeof(o)))
+            all_false = false;
+    }
+    EHO_CHECK("nonces before the first witness give up (false)", all_false);
+    return failures;
+}
+
 /* ── The injector's own contract ──────────────────────────────────── */
 
 static int eho_injector_contract(void)
@@ -300,6 +448,10 @@ int test_equihash_oom(void)
     failures += eho_verifier_labels();
     failures += eho_verifier_partial_unwinds();
     failures += eho_solver_labels();
+    failures += eho_verifier_refusals();
+    failures += eho_verifier_pow_rejects();
+    failures += eho_solver_refusals();
+    failures += eho_solver_output_bytes();
     failures += eho_injector_contract();
 
     zcl_alloc_fault_clear();
