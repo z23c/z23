@@ -963,6 +963,268 @@ static int test_help_start_here_block(void)
     return failures;
 }
 
+/* ── Onion-directory seed apply: characterization ──────────────────
+ *
+ * connman_apply_onion_seed_directory_for_test drives apply_onion_seed_directory
+ * at depth 0 without pinning. These rows pin today's return value and the
+ * addrman endpoints (IP, port, default-port fallback) it writes.
+ *
+ * Not reached here, named as uncovered: the pin_endpoints branch and the
+ * depth-1 relay follow (both need a live Tor dial-ready state), and
+ * onion_seed_directory_has_endpoint, which only runs inside
+ * connman_run_onion_seed_pass behind that same dial-ready gate. */
+
+struct seed_dir_ip_row {
+    const char *name;
+    const char *body;
+    int want_added;
+};
+
+struct seed_dir_port_row {
+    const char *name;
+    const char *body;
+    uint16_t want_port;
+};
+
+static const unsigned char seed_dir_ip_example[4] = { 93, 184, 216, 34 };
+static const unsigned char seed_dir_ip_cloudflare[4] = { 1, 1, 1, 1 };
+static struct node_signals g_seed_dir_sigs;
+
+static bool seed_dir_init(struct connman *cm, const struct chain_params *params)
+{
+    memset(&g_seed_dir_sigs, 0, sizeof(g_seed_dir_sigs));
+    return connman_init(cm, params, &g_seed_dir_sigs);
+}
+
+static int seed_dir_apply(struct connman *cm, const char *body)
+{
+    return connman_apply_onion_seed_directory_for_test(
+        cm, ONLYNET_ONION_A, (const uint8_t *)body, strlen(body));
+}
+
+static bool seed_dir_present(struct connman *cm, const unsigned char ip[4],
+                             uint16_t port)
+{
+    struct net_service svc;
+    struct addr_info info;
+    memset(&svc, 0, sizeof(svc));
+    net_addr_set_ipv4(&svc.addr, ip);
+    svc.port = port;
+    return addrman_find_info(&cm->manager.addrman, &svc, &info);
+}
+
+static int test_seed_directory_apply_guards(void)
+{
+    int failures = 0;
+    struct connman cm;
+    chain_params_select(CHAIN_MAIN);
+    netbase_set_onlynet_onion(false);
+    bool ok = seed_dir_init(&cm, chain_params_get());
+    APPCTX_CHECK("seed apply guards: connman_init for the fixture", ok);
+    if (!ok)
+        return failures + 1;
+
+    int before = onlynet_addrman_count(&cm);
+    APPCTX_CHECK("seed apply: NULL connman is refused (-1)",
+                 connman_apply_onion_seed_directory_for_test(
+                     NULL, ONLYNET_ONION_A, (const uint8_t *)"{}", 2) == -1);
+    APPCTX_CHECK("seed apply: NULL onion is refused (-1)",
+                 connman_apply_onion_seed_directory_for_test(
+                     &cm, NULL, (const uint8_t *)"{}", 2) == -1);
+    APPCTX_CHECK("seed apply: NULL body is refused (-1)",
+                 connman_apply_onion_seed_directory_for_test(
+                     &cm, ONLYNET_ONION_A, NULL, 0) == -1);
+    APPCTX_CHECK("seed apply: refused calls write no endpoint",
+                 onlynet_addrman_count(&cm) == before);
+    connman_free(&cm);
+    return failures;
+}
+
+static int test_seed_directory_apply_ip_rules(void)
+{
+    int failures = 0;
+    static const struct seed_dir_ip_row rows[] = {
+        { "no clearnet_ip key", "{}", 0 },
+        { "empty ip string", "{\"clearnet_ip\":\"\"}", 0 },
+        { "unterminated ip string", "{\"clearnet_ip\":\"1.1.1.1", 0 },
+        { "all-zero ip", "{\"clearnet_ip\":\"0.0.0.0\"}", 0 },
+        { "one non-zero octet", "{\"clearnet_ip\":\"0.0.0.1\"}", 1 },
+        { "octet above 255", "{\"clearnet_ip\":\"256.1.1.1\"}", 0 },
+        { "three octets only", "{\"clearnet_ip\":\"1.2.3\"}", 0 },
+        { "trailing letter", "{\"clearnet_ip\":\"1.2.3.4x\"}", 0 },
+        { "trailing space", "{\"clearnet_ip\":\"1.2.3.4 \"}", 0 },
+        { "hostname not IPv4", "{\"clearnet_ip\":\"abc.onion\"}", 0 },
+        { "broadcast accepted", "{\"clearnet_ip\":\"255.255.255.255\"}", 1 },
+        { "bad record then good record",
+          "{\"clearnet_ip\":\"0.0.0.0\"},{\"clearnet_ip\":\"1.1.1.1\"}", 1 },
+    };
+    chain_params_select(CHAIN_MAIN);
+    netbase_set_onlynet_onion(false);
+    struct connman cm;
+    bool ok = seed_dir_init(&cm, chain_params_get());
+    APPCTX_CHECK("seed apply ip rules: connman_init for the fixture", ok);
+    if (!ok)
+        return failures + 1;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        int got = seed_dir_apply(&cm, rows[i].body);
+        printf("app_context: seed apply ip rule %s... ", rows[i].name);
+        if (got == rows[i].want_added) printf("OK\n");
+        else { printf("FAIL (got %d)\n", got); failures++; }
+    }
+
+    /* A 64-byte IP overflows the 64-byte scratch buffer: the record is
+     * skipped and the scan resumes after it. */
+    char ones[65];
+    memset(ones, '1', 64);
+    ones[64] = '\0';
+    char big[128];
+    snprintf(big, sizeof(big), "{\"clearnet_ip\":\"%s\"}", ones);
+    APPCTX_CHECK("seed apply ip rule: 64-byte ip is skipped (0)",
+                 seed_dir_apply(&cm, big) == 0);
+    connman_free(&cm);
+    return failures;
+}
+
+static int seed_dir_port_row_check(const struct chain_params *params,
+                                   const char *name, const char *body,
+                                   uint16_t want_port)
+{
+    int failures = 0;
+    struct connman cm;
+    if (!seed_dir_init(&cm, params))
+        return failures + 1;
+    int added = seed_dir_apply(&cm, body);
+    APPCTX_CHECK(name,
+                 added == 1 &&
+                 seed_dir_present(&cm, seed_dir_ip_example, want_port));
+    connman_free(&cm);
+    return failures;
+}
+
+static int test_seed_directory_apply_port_rules(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    netbase_set_onlynet_onion(false);
+    struct chain_params custom = *chain_params_get();
+    custom.nDefaultPort = 18044;
+
+    static const struct seed_dir_port_row rows[] = {
+        { "clearnet_port 9000 is used",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":9000}", 9000 },
+        { "clearnet_port absent: params default port",
+          "{\"clearnet_ip\":\"93.184.216.34\"}", 18044 },
+        { "clearnet_port 0 falls back to params port",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":0}", 18044 },
+        { "clearnet_port 65536 falls back to params port",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":65536}",
+          18044 },
+        { "clearnet_port 65535 accepted",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":65535}", 65535 },
+        { "clearnet_port 1 accepted",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":1}", 1 },
+        { "quoted clearnet_port falls back to params port",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":\"9000\"}",
+          18044 },
+        { "digits then text: strtoul reads the leading digits",
+          "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":12abc}", 12 },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        failures += seed_dir_port_row_check(&custom, rows[i].name,
+                                            rows[i].body, rows[i].want_port);
+
+    /* The port search window is 50 bytes from the end of the ip string:
+     * a port 1 + pad bytes away is read; 1 + pad of 50 falls back. */
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"clearnet_ip\":\"93.184.216.34\",%*s\"clearnet_port\":9000}",
+             48, "");
+    failures += seed_dir_port_row_check(&custom,
+                                        "port 49 bytes past ip is read",
+                                        body, 9000);
+    snprintf(body, sizeof(body),
+             "{\"clearnet_ip\":\"93.184.216.34\",%*s\"clearnet_port\":9000}",
+             49, "");
+    failures += seed_dir_port_row_check(&custom,
+                                        "port 50 bytes past ip falls back",
+                                        body, 18044);
+
+    /* Fallback when the params default port is itself out of range. */
+    static const int bad_default[] = { 0, 70000 };
+    for (size_t i = 0; i < sizeof(bad_default) / sizeof(bad_default[0]);
+         i++) {
+        struct chain_params p = *chain_params_get();
+        p.nDefaultPort = bad_default[i];
+        failures += seed_dir_port_row_check(&p,
+                                            "bad params port: fallback 8033",
+                                            "{\"clearnet_ip\":\"93.184.216.34\"}",
+                                            8033);
+    }
+    return failures;
+}
+
+static int test_seed_directory_apply_records(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    netbase_set_onlynet_onion(false);
+    struct chain_params custom = *chain_params_get();
+    custom.nDefaultPort = 18044;
+    struct connman cm;
+    bool ok = seed_dir_init(&cm, &custom);
+    APPCTX_CHECK("seed apply records: connman_init for the fixture", ok);
+    if (!ok)
+        return failures + 1;
+
+    /* Only well-formed clearnet records count; each is written with its own
+     * port, and the all-zero record between them is skipped. */
+    int got = seed_dir_apply(&cm,
+        "{\"nodes\":[{\"clearnet_ip\":\"0.0.0.0\"},"
+        "{\"clearnet_ip\":\"1.1.1.1\",\"clearnet_port\":9001},"
+        "{\"clearnet_ip\":\"93.184.216.34\"}]}");
+    APPCTX_CHECK("seed apply records: two valid of three are counted",
+                 got == 2);
+    APPCTX_CHECK("seed apply records: first record keeps its own port",
+                 seed_dir_present(&cm, seed_dir_ip_cloudflare, 9001));
+    APPCTX_CHECK("seed apply records: portless record takes params port",
+                 seed_dir_present(&cm, seed_dir_ip_example, 18044));
+    connman_free(&cm);
+
+    /* Current behaviour, pinned as-is: a record with no clearnet_port takes
+     * the next record's port when that port is within the 50-byte window. */
+    ok = seed_dir_init(&cm, &custom);
+    APPCTX_CHECK("seed apply records: connman_init for the bleed fixture", ok);
+    if (!ok)
+        return failures + 1;
+    got = seed_dir_apply(&cm,
+        "{\"clearnet_ip\":\"1.1.1.1\"},"
+        "{\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":9000}");
+    APPCTX_CHECK("seed apply records: portless record reads the next port",
+                 got == 2 &&
+                 seed_dir_present(&cm, seed_dir_ip_cloudflare, 9000));
+    connman_free(&cm);
+
+    /* Onion-only and empty bodies add no clearnet endpoint. The onion hint is
+     * harvested (its row learned), but the return value counts only clearnet
+     * endpoints. */
+    ok = seed_dir_init(&cm, &custom);
+    APPCTX_CHECK("seed apply records: connman_init for the onion fixture", ok);
+    if (!ok)
+        return failures + 1;
+    int before = onlynet_addrman_count(&cm);
+    char onion_only[256];
+    snprintf(onion_only, sizeof(onion_only),
+             "{\"nodes\":[{\"onion\":\"%s\",\"port\":8033}]}", ONLYNET_ONION_B);
+    APPCTX_CHECK("seed apply records: onion-only body adds zero (0)",
+                 seed_dir_apply(&cm, onion_only) == 0);
+    APPCTX_CHECK("seed apply records: empty body adds zero (0)",
+                 seed_dir_apply(&cm, "") == 0);
+    APPCTX_CHECK("seed apply records: onion-only and empty write no endpoint",
+                 onlynet_addrman_count(&cm) == before);
+    connman_free(&cm);
+    return failures;
+}
+
 int test_app_context(void)
 {
     int failures = 0;
@@ -984,6 +1246,10 @@ int test_app_context(void)
     failures += test_onlynet_clearnet_leaks_closed();
     failures += test_observation_small_buffer();
     failures += test_onlynet_legacy_rpc();
+    failures += test_seed_directory_apply_guards();
+    failures += test_seed_directory_apply_ip_rules();
+    failures += test_seed_directory_apply_port_rules();
+    failures += test_seed_directory_apply_records();
 
     return failures;
 }
