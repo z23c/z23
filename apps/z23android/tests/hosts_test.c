@@ -23,6 +23,13 @@ int main(void)
     assert(strstr(out, "\nr2 · 10 blocks behind · 3,301,120\n\nmac"));
     assert(strstr(out, "\nmac · not answering after 25.0 s\n"));
     assert(!strstr(out, "0 GB"));
+    static const char skew[] = "{\"hosts\":["
+        "{\"host\":\"r2\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301630,\"reference_height\":3301631},"
+        "{\"host\":\"r1\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301633,\"reference_height\":3301631},"
+        "{\"host\":\"r3\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301628,\"reference_height\":3301631}]}";
+    assert(zapp_hosts_format(skew, out, sizeof(out)) && !strncmp(out, "2 of 3 hosts in sync\n", 21));
+    assert(strstr(out, "\nr2 · in sync · 3,301,630\n") && strstr(out, "\nr1 · in sync · 3,301,633\n"));
+    assert(strstr(out, "\nr3 · 3 blocks behind · 3,301,628\n"));
     static const char small[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":999,"
         "\"reference_height\":1000}]}";
     assert(zapp_hosts_format(small, out, sizeof(out)) && strstr(out, "\nt · 1 block behind · 999\n"));

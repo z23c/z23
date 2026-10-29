@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "assistant.h"
+#include "fleet_probe.h"
 #include "http.h"
 #include "relay.h"
 #include "voice.h"
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #define JSON_CAP 4194304u
@@ -146,20 +148,26 @@ static bool push_text(struct json_value *messages, const char *role, const char 
     json_cleanse_strings(&v); json_free(&v); return ok;
 }
 /* One earlier exchange: a [question, answer] pair of non-empty UTF-8 strings. */
-static bool push_turn(struct json_value *messages, const struct json_value *turn)
+static bool valid_turn(const struct json_value *turn)
 {
     const char *q = json_get_str(json_at(turn, 0)), *a = json_get_str(json_at(turn, 1));
     return turn && turn->type == JSON_ARR && turn->num_children == 2 && q[0] && a[0] &&
-        zutf8_validate(q) && zutf8_validate(a) && push_text(messages, "user", q) &&
-        push_text(messages, "assistant", a);
+        zutf8_validate(q) && zutf8_validate(a);
 }
-/* Earlier exchanges become real turns, so the model server reuses their cached prefix. */
-static bool push_history(struct json_value *messages, const struct json_value *history)
+/* Earlier exchanges become real turns, so the model server reuses their cached prefix. An
+ * exchange that asked the question now asked is left out, so the answer comes from the new
+ * observations rather than a copy of the earlier answer. */
+static bool push_history(struct json_value *messages, const struct json_value *history, const char *question)
 {
     if (!history) return true;
     if (history->type != JSON_ARR || history->num_children > ZAPP_ASSISTANT_TURNS) return false;
-    for (size_t i = 0; i < history->num_children; i++)
-        if (!push_turn(messages, json_at(history, i))) return false;
+    for (size_t i = 0; i < history->num_children; i++) {
+        const struct json_value *turn = json_at(history, i);
+        if (!valid_turn(turn)) return false;
+        const char *q = json_get_str(json_at(turn, 0)), *a = json_get_str(json_at(turn, 1));
+        if (strcasecmp(q, question) && !(push_text(messages, "user", q) && push_text(messages, "assistant", a)))
+            return false;
+    }
     return true;
 }
 /* The system message is constant for a tool set, with its guide when tools are offered, and
@@ -173,8 +181,8 @@ static bool chat_messages(struct json_value *messages, const char *prompt, const
     json_set_array(messages);
     if (current) snprintf(current, n, "Observations:\n%s\n\n%s", observed, prompt);
     if (system) snprintf(system, s, "%s%s%s", system_prompt, extra[0] ? " " : "", extra);
-    bool ok = current && system && push_text(messages, "system", system) && push_history(messages, history) &&
-        push_text(messages, "user", current);
+    bool ok = current && system && push_text(messages, "system", system) &&
+        push_history(messages, history, zapp_prompt_question(prompt)) && push_text(messages, "user", current);
     if (current) dispose(current, n);
     free(system);
     return ok;

@@ -303,13 +303,18 @@ static bool mentions_label(const char *text, const char *label)
     snprintf(spoken, sizeof(spoken), "%.*s %s", (int)(n - 1), label, digits[label[n - 1] - '0']);
     return mentions(text, spaced) || mentions(text, spoken);
 }
+const char *zapp_prompt_question(const char *prompt)
+{
+    const char *question = prompt;
+    for (const char *at = prompt ? strstr(prompt, "Question: ") : NULL; at; at = strstr(at + 1, "Question: "))
+        question = at + 10;
+    return question;
+}
 bool zapp_fleet_tool_wanted(const struct zapp_fleet_host *hosts, size_t count, const char *prompt,
                             char *name, size_t name_cap, char *arguments, size_t arguments_cap)
 {
     static const char *const asks[] = {"blocker", "blocked", "blocking", "wrong", "problem", "issue", "stuck"};
-    const char *question = prompt;
-    for (const char *at = prompt ? strstr(prompt, "Question: ") : NULL; at; at = strstr(at + 1, "Question: "))
-        question = at + 10;
+    const char *question = zapp_prompt_question(prompt);
     const struct zapp_fleet_host *named = NULL;
     bool asked = false;
     for (size_t i = 0; question && !asked && i < sizeof(asks) / sizeof(asks[0]); i++)

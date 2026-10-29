@@ -505,6 +505,17 @@ static void message_cases(void)
     expect_message(&messages, 3, "user", "q2"); expect_message(&messages, 4, "assistant", "a2");
     expect_message(&messages, 5, "user", "Observations:\nfleet data\n\nQ?");
     json_free(&messages);
+    struct json_value repeat = {0};
+    static const char earlier[] = "[[\"How is r2?\",\"r2 is not syncing.\"],[\"Other?\",\"a2\"]]";
+    assert(json_read(&repeat, earlier, strlen(earlier)));
+    assert(chat_messages(&messages, "Node data.\n\nQuestion: how is R2?", &repeat, "fleet data", NULL) &&
+           json_size(&messages) == 4);
+    expect_message(&messages, 1, "user", "Other?"); expect_message(&messages, 2, "assistant", "a2");
+    json_free(&messages);
+    assert(chat_messages(&messages, "Question: And r1?", &repeat, "fleet data", NULL) && json_size(&messages) == 6);
+    json_free(&messages); json_free(&repeat);
+    assert(!messages_for("[[\"Q?\",1]]", &messages));
+    json_free(&messages);
     const char *bad[] = {"{}", "[[\"q\"]]", "[[\"q\",\"a\",\"b\"]]", "[[\"q\",1]]", "[[\"\",\"a\"]]", "[[\"q\",\"\"]]",
                          "[\"q\"]", "[[\"\xff\",\"a\"]]"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {

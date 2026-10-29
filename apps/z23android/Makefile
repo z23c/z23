@@ -165,7 +165,7 @@ test-host:
 	'$(BUILD_DIR)/fleet-probe-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/http_test.c bridge/http.c $(SPEECH_JSON) -o '$(BUILD_DIR)/http-test'
 	'$(BUILD_DIR)/http-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/assistant_test.c bridge/http.c voice.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/assistant_test.c bridge/http.c bridge/fleet_probe.c voice.c \
 	  ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/assistant-test'
 	'$(BUILD_DIR)/assistant-test'

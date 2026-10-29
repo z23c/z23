@@ -17,11 +17,16 @@ static bool count_of(const struct json_value *row, const char *key, int64_t *val
     if (!v || v->type != JSON_INT) return false;
     *value = json_get_int(v); return true;
 }
+/* The two heights come from separate commands, so a block that lands between them shows a host
+ * that reports itself synced as a block or two apart from its zclassicd. */
+enum { IN_SYNC_SKEW = 2 };
 static bool host_ok(const struct json_value *row)
 {
     int64_t height, reference;
     return count_of(row, "height", &height) && count_of(row, "reference_height", &reference) &&
-        height == reference && !strcmp(text_of(row, "synced"), "yes");
+        height >= 0 && reference >= 0 &&
+        (height > reference ? height - reference : reference - height) <= IN_SYNC_SKEW &&
+        !strcmp(text_of(row, "synced"), "yes");
 }
 [[gnu::format(printf, 4, 5)]]
 static size_t append(char *out, size_t cap, size_t used, const char *format, ...)

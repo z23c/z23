@@ -28,7 +28,9 @@ bool zapp_fleet_tool_schema(const struct zapp_fleet_host *hosts, size_t count, s
 /* The configured host a host_blockers call names, matching labels without case; NULL refuses. */
 const struct zapp_fleet_host *zapp_fleet_tool_host(const struct zapp_fleet_host *hosts, size_t count,
                                                    const char *name, const char *arguments);
-/* When the question part of a prompt, after its last "Question: ", asks about blockers or
+/* The question part of a prompt: the text after its last "Question: ", or all of it. */
+const char *zapp_prompt_question(const char *prompt);
+/* When the question part of a prompt asks about blockers or
  * problems of a configured host named as written or spoken, fills the host_blockers call for
  * the first configured host it names. */
 bool zapp_fleet_tool_wanted(const struct zapp_fleet_host *hosts, size_t count, const char *prompt,

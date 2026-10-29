@@ -299,8 +299,12 @@ and the four whose clock stayed at 800 MHz took 12.7-14.6 s. Before the guide
 stated that only an operator on the host clears blockers, 2 of 10 answers with
 a report suggested a control for a blocker; afterwards none of 16 new questions
 did. A question repeated on the phone after that change returned the earlier
-answer from the conversation word for word, suggestion included. Two of 10
-answers about r2 with a report still said its blockers keep it from syncing.
+answer from the conversation word for word, suggestion included; the host now
+leaves an earlier exchange with the same question out of the history it sends.
+Two of 10 answers about r2 with a report still said its blockers keep it from
+syncing. The two heights of a host come from separate commands, so a host that
+reports itself synced can read one block behind its `zclassicd`; such a gap of
+up to two blocks now counts as in sync.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to
