@@ -216,6 +216,67 @@ static bool bbf_already_landed(const char *datadir, const char *bundles,
     return true;
 }
 
+/* Build "<datadir>/bundles" into dst; false when it does not fit. */
+static bool bbf_bundles_dir(const char *datadir, char *dst, size_t cap)
+{
+    int n = snprintf(dst, cap, "%s/bundles", datadir);
+    return n >= 0 && (size_t)n < cap;
+}
+/* Probe the seeds for a chunk manifest and run the matching download path. */
+static bool bbf_probe_and_download(const struct rom_fetch_peer *peers,
+                                   size_t npeers,
+                                   const struct rom_fetch_manifest *m,
+                                   uint8_t (*chunk_sha3)[32],
+                                   const char *bundles,
+                                   struct bbf_progress *progress)
+{
+    /* The pre-flight runs against EVERY seed at once rather than walking them.
+     * A seed that accepts the connection and then goes silent costs the whole
+     * connect budget plus the whole probe budget, and walking multiplied that
+     * by the seed count before boot could move on — the very stall the RLS
+     * discovery sweep is already fanned out to avoid, and worse on a Tor
+     * circuit where both budgets are legitimately 4x larger. Same seed wins
+     * (lowest index with a matching chunk count), same verification, same
+     * budgets; only the waiting overlaps. */
+    uint32_t manifest_chunks = 0;
+    bool have_manifest = bbf_probe_manifest(peers, npeers, m->chunk_root,
+                                            m->num_chunks, chunk_sha3,
+                                            ROM_SEED_MAX_CHUNKS,
+                                            &manifest_chunks,
+                                            rom_fetch_get_manifest);
+    uint32_t workers = (uint32_t)(2 * npeers);
+    if (workers > ROM_FETCH_MAX_WORKERS)
+        workers = ROM_FETCH_MAX_WORKERS;
+    bbf_progress_log("downloading", 0, m->num_chunks, 0, m->size_bytes,
+                     "keep this node running while the checkpoint downloads");
+    progress->last_log_ms = platform_time_monotonic_ms();
+    bool ok;
+    if (have_manifest)
+        ok = rom_fetch_download_verified_parallel(peers, npeers, m, chunk_sha3,
+                                                  manifest_chunks, bundles,
+                                                  bbf_download_progress,
+                                                  progress);
+    else
+        ok = rom_fetch_download_parallel(peers, npeers, m, bundles, workers,
+                                         bbf_download_progress, progress);
+    return ok;
+}
+
+static void bbf_mark_verifying(bool ok, struct bbf_progress *progress)
+{
+    /* A fully resumed verified artifact may require no chunk callback. Still
+     * expose the boundary between byte acquisition and state validation. */
+    if (ok && !progress->verifying_logged) {
+        progress->done_chunks = progress->total_chunks;
+        progress->done_bytes = progress->total_bytes;
+        bbf_progress_log("verifying", progress->done_chunks,
+                         progress->total_chunks, progress->done_bytes,
+                         progress->total_bytes,
+                         "download complete; state verification is next");
+        progress->verifying_logged = true;
+    }
+}
+
 bool boot_bundle_fetch_download(const char *datadir,
                                 const struct rom_fetch_peer *peers,
                                 size_t npeers,
@@ -228,8 +289,7 @@ bool boot_bundle_fetch_download(const char *datadir,
                  "refusing bundle fetch: committed manifest not sane / no name");
 
     char bundles[PATH_MAX];
-    int bn = snprintf(bundles, sizeof(bundles), "%s/bundles", datadir);
-    if (bn < 0 || (size_t)bn >= sizeof(bundles))
+    if (!bbf_bundles_dir(datadir, bundles, sizeof(bundles)))
         LOG_FAIL(BBF_SUBSYS, "bundles path too long under %s", datadir);
     if (!platform_private_directory_ensure(bundles))
         LOG_FAIL(BBF_SUBSYS, "private bundles directory %s refused: %s",
@@ -254,48 +314,11 @@ bool boot_bundle_fetch_download(const char *datadir,
     LOG_INFO(BBF_SUBSYS,
              "instant-on: phase=preparing — checking download sources for %s",
              m->filename);
-    /* The pre-flight runs against EVERY seed at once rather than walking them.
-     * A seed that accepts the connection and then goes silent costs the whole
-     * connect budget plus the whole probe budget, and walking multiplied that
-     * by the seed count before boot could move on — the very stall the RLS
-     * discovery sweep is already fanned out to avoid, and worse on a Tor
-     * circuit where both budgets are legitimately 4x larger. Same seed wins
-     * (lowest index with a matching chunk count), same verification, same
-     * budgets; only the waiting overlaps. */
-    uint32_t manifest_chunks = 0;
-    bool have_manifest = bbf_probe_manifest(peers, npeers, m->chunk_root,
-                                            m->num_chunks, chunk_sha3,
-                                            ROM_SEED_MAX_CHUNKS,
-                                            &manifest_chunks,
-                                            rom_fetch_get_manifest);
-    uint32_t workers = (uint32_t)(2 * npeers);
-    if (workers > ROM_FETCH_MAX_WORKERS)
-        workers = ROM_FETCH_MAX_WORKERS;
-    bbf_progress_log("downloading", 0, m->num_chunks, 0, m->size_bytes,
-                     "keep this node running while the checkpoint downloads");
-    progress.last_log_ms = platform_time_monotonic_ms();
-    bool ok;
-    if (have_manifest)
-        ok = rom_fetch_download_verified_parallel(peers, npeers, m, chunk_sha3,
-                                                  manifest_chunks, bundles,
-                                                  bbf_download_progress,
-                                                  &progress);
-    else
-        ok = rom_fetch_download_parallel(peers, npeers, m, bundles, workers,
-                                         bbf_download_progress, &progress);
+    bool ok = bbf_probe_and_download(peers, npeers, m, chunk_sha3, bundles,
+                                     &progress);
     free(chunk_sha3);
 
-    /* A fully resumed verified artifact may require no chunk callback. Still
-     * expose the boundary between byte acquisition and state validation. */
-    if (ok && !progress.verifying_logged) {
-        progress.done_chunks = progress.total_chunks;
-        progress.done_bytes = progress.total_bytes;
-        bbf_progress_log("verifying", progress.done_chunks,
-                         progress.total_chunks, progress.done_bytes,
-                         progress.total_bytes,
-                         "download complete; state verification is next");
-        progress.verifying_logged = true;
-    }
+    bbf_mark_verifying(ok, &progress);
     uint32_t final_chunks = progress.done_chunks;
     uint64_t final_bytes = progress.done_bytes;
     if (!ok) {
@@ -399,6 +422,80 @@ static int bbf_emit_artifact_obj(char *dst, size_t cap, const char *kind,
         return 0;
     return wn;
 }
+enum bbf_hint_body_status {
+    BBF_HINT_BODY_OK = 0,
+    BBF_HINT_BODY_OVERFLOW,
+    BBF_HINT_BODY_BUNDLE_OBJ,
+    BBF_HINT_BODY_SEPARATOR,
+    BBF_HINT_BODY_HEADER_OBJ,
+    BBF_HINT_BODY_CLOSE,
+    BBF_HINT_BODY_FINAL,
+};
+/* Assemble the directory.json hint text into `body`; *wn gets its length.
+ * Returns the first overflow site hit, in the original check order. */
+static enum bbf_hint_body_status
+bbf_hint_body_build(char *body, size_t cap, const struct rom_fetch_manifest *m,
+                    const struct rom_fetch_manifest *hs, int *wn)
+{
+    int off = snprintf(body, cap, "{\"artifacts\":[");
+    if (off <= 0 || (size_t)off >= cap)
+        return BBF_HINT_BODY_OVERFLOW;
+    int en = bbf_emit_artifact_obj(body + off, cap - (size_t)off,
+                                   "consensus_bundle", m);
+    if (en == 0)
+        return BBF_HINT_BODY_BUNDLE_OBJ;
+    off += en;
+    if (hs) {
+        int cn = snprintf(body + off, cap - (size_t)off, ",");
+        if (cn <= 0 || (size_t)(off + cn) >= cap)
+            return BBF_HINT_BODY_SEPARATOR;
+        off += cn;
+        en = bbf_emit_artifact_obj(body + off, cap - (size_t)off,
+                                   "header_seed", hs);
+        if (en == 0)
+            return BBF_HINT_BODY_HEADER_OBJ;
+        off += en;
+    }
+    int cn = snprintf(body + off, cap - (size_t)off, "]}");
+    if (cn <= 0 || (size_t)(off + cn) >= cap)
+        return BBF_HINT_BODY_CLOSE;
+    *wn = off + cn;
+    if (*wn <= 0 || (size_t)*wn >= cap)
+        return BBF_HINT_BODY_FINAL;
+    return BBF_HINT_BODY_OK;
+}
+/* Build the final and staging paths of directory.json. Returns 0 on success,
+ * 1 when the final path is too long, 2 when the staging path is. */
+static int bbf_hint_paths(const char *datadir, char *path, size_t pcap,
+                          char *tmp, size_t tcap)
+{
+    int pn = snprintf(path, pcap, "%s/bundles/directory.json", datadir);
+    if (pn < 0 || (size_t)pn >= pcap)
+        return 1;
+    int tn = snprintf(tmp, tcap, "%s/bundles/directory.json.tmp", datadir);
+    if (tn < 0 || (size_t)tn >= tcap)
+        return 2;
+    return 0;
+}
+/* Durably replace `path` with `body` via the private staging file `tmp`. */
+static bool bbf_hint_write_durable(const char *bundles, const char *path,
+                                   const char *tmp, const char *body,
+                                   size_t wn)
+{
+    (void)platform_private_file_unlink_missing_ok(tmp);
+    struct platform_private_file staging;
+    platform_private_file_init(&staging);
+    if (!platform_private_file_create(tmp, &staging) ||
+        !platform_private_file_write_at(&staging, body, wn, 0) ||
+        !platform_private_file_flush(&staging) ||
+        !platform_private_file_replace(&staging, tmp, path) ||
+        !platform_private_parent_flush(bundles)) {
+        (void)platform_private_file_retire(&staging, tmp);
+        platform_private_file_close(&staging);
+        return false;
+    }
+    return true;
+}
 /* Persist the discovered manifest(s) as the canonical
  * <datadir>/bundles/directory.json hint so a resume/reseed reads them locally
  * without re-querying peers. Emits the {"artifacts":[...]} object
@@ -412,60 +509,40 @@ static bool bbf_write_directory_hint(const char *datadir,
     if (!datadir || !datadir[0] || !m)
         LOG_FAIL(BBF_SUBSYS, "write hint: null arg");
     char bundles[PATH_MAX];
-    int bn = snprintf(bundles, sizeof(bundles), "%s/bundles", datadir);
-    if (bn < 0 || (size_t)bn >= sizeof(bundles))
+    if (!bbf_bundles_dir(datadir, bundles, sizeof(bundles)))
         LOG_FAIL(BBF_SUBSYS, "write hint: bundles path too long under %s",
                  datadir);
     if (!platform_private_directory_ensure(bundles))
         LOG_FAIL(BBF_SUBSYS, "write hint: private directory %s refused: %s",
                  bundles, strerror(errno));
     char body[2048];
-    int off = snprintf(body, sizeof(body), "{\"artifacts\":[");
-    if (off <= 0 || (size_t)off >= sizeof(body))
+    int wn = 0;
+    switch (bbf_hint_body_build(body, sizeof(body), m, hs, &wn)) {
+    case BBF_HINT_BODY_OK:
+        break;
+    case BBF_HINT_BODY_OVERFLOW:
         LOG_FAIL(BBF_SUBSYS, "write hint: directory.json body overflow");
-    int en = bbf_emit_artifact_obj(body + off, sizeof(body) - (size_t)off,
-                                   "consensus_bundle", m);
-    if (en == 0)
+    case BBF_HINT_BODY_BUNDLE_OBJ:
         LOG_FAIL(BBF_SUBSYS, "write hint: bundle artifact object overflow");
-    off += en;
-    if (hs) {
-        int cn = snprintf(body + off, sizeof(body) - (size_t)off, ",");
-        if (cn <= 0 || (size_t)(off + cn) >= sizeof(body))
-            LOG_FAIL(BBF_SUBSYS, "write hint: directory.json separator overflow");
-        off += cn;
-        en = bbf_emit_artifact_obj(body + off, sizeof(body) - (size_t)off,
-                                   "header_seed", hs);
-        if (en == 0)
-            LOG_FAIL(BBF_SUBSYS, "write hint: header-seed artifact object overflow");
-        off += en;
-    }
-    int cn = snprintf(body + off, sizeof(body) - (size_t)off, "]}");
-    if (cn <= 0 || (size_t)(off + cn) >= sizeof(body))
+    case BBF_HINT_BODY_SEPARATOR:
+        LOG_FAIL(BBF_SUBSYS, "write hint: directory.json separator overflow");
+    case BBF_HINT_BODY_HEADER_OBJ:
+        LOG_FAIL(BBF_SUBSYS, "write hint: header-seed artifact object overflow");
+    case BBF_HINT_BODY_CLOSE:
         LOG_FAIL(BBF_SUBSYS, "write hint: directory.json close overflow");
-    int wn = off + cn;
-    if (wn <= 0 || (size_t)wn >= sizeof(body))
+    default:
         LOG_FAIL(BBF_SUBSYS, "write hint: directory.json body overflow");
+    }
     char path[PATH_MAX];
-    int pn = snprintf(path, sizeof(path), "%s/bundles/directory.json", datadir);
-    if (pn < 0 || (size_t)pn >= sizeof(path))
-        LOG_FAIL(BBF_SUBSYS, "write hint: path too long under %s", datadir);
     char tmp[PATH_MAX];
-    int tn = snprintf(tmp, sizeof(tmp), "%s/bundles/directory.json.tmp", datadir);
-    if (tn < 0 || (size_t)tn >= sizeof(tmp))
+    int pr = bbf_hint_paths(datadir, path, sizeof(path), tmp, sizeof(tmp));
+    if (pr == 1)
+        LOG_FAIL(BBF_SUBSYS, "write hint: path too long under %s", datadir);
+    if (pr == 2)
         LOG_FAIL(BBF_SUBSYS, "write hint: tmp path too long under %s", datadir);
-    (void)platform_private_file_unlink_missing_ok(tmp);
-    struct platform_private_file staging;
-    platform_private_file_init(&staging);
-    if (!platform_private_file_create(tmp, &staging) ||
-        !platform_private_file_write_at(&staging, body, (size_t)wn, 0) ||
-        !platform_private_file_flush(&staging) ||
-        !platform_private_file_replace(&staging, tmp, path) ||
-        !platform_private_parent_flush(bundles)) {
-        (void)platform_private_file_retire(&staging, tmp);
-        platform_private_file_close(&staging);
+    if (!bbf_hint_write_durable(bundles, path, tmp, body, (size_t)wn))
         LOG_FAIL(BBF_SUBSYS, "write hint: durable private replace failed: %s",
                  strerror(errno));
-    }
     return true;
 }
 /* One discovered-manifest candidate and how many independent seeds served it.
@@ -641,6 +718,66 @@ static bool bbf_manifest_same_artifact(const struct rom_fetch_manifest *a,
            memcmp(a->chunk_root, b->chunk_root, 32) == 0 &&
            memcmp(a->whole_sha3, b->whole_sha3, 32) == 0;
 }
+/* Pick the bundle (or header-seed) manifest from one seed's listing and tally
+ * it. Returns 0 when nothing was advertised, 1 when tallied, -1 when the
+ * advertised manifest fails the baked-facts cross-check (caller logs). */
+static int bbf_tally_advertised(struct bbf_disc_cand *cands, size_t *ncand,
+                                size_t cap, const char *body, bool header_seed,
+                                bool is_explicit)
+{
+    struct rom_fetch_manifest m;
+    memset(&m, 0, sizeof(m));
+    bool picked = header_seed ? boot_bundle_pick_header_seed_manifest(body, &m)
+                              : boot_bundle_pick_manifest(body, &m);
+    if (!picked)
+        return 0;
+    if (!bbf_manifest_facts_ok(&m))
+        return -1;
+    bbf_tally_cand(cands, ncand, cap, &m, is_explicit);
+    return 1;
+}
+/* Record one responding seed against every ranked bundle / the header seed it
+ * advertised that exact artifact for. */
+static void bbf_bind_responder(struct bbf_discovery *out, const char *body,
+                               const struct rom_fetch_peer *peer)
+{
+    struct rom_fetch_manifest advertised;
+    memset(&advertised, 0, sizeof(advertised));
+    if (boot_bundle_pick_manifest(body, &advertised) &&
+        bbf_manifest_facts_ok(&advertised)) {
+        for (size_t b = 0; b < out->n_bundles; b++) {
+            if (!bbf_manifest_same_artifact(&advertised, &out->bundles[b]))
+                continue;
+            size_t n = out->bundle_peer_count[b];
+            if (n < ROM_FETCH_MAX_WORKERS) {
+                out->bundle_peers[b][n] = *peer;
+                out->bundle_peer_count[b] = n + 1;
+            }
+        }
+    }
+    memset(&advertised, 0, sizeof(advertised));
+    if (out->have_header_seed &&
+        boot_bundle_pick_header_seed_manifest(body, &advertised) &&
+        bbf_manifest_facts_ok(&advertised) &&
+        bbf_manifest_same_artifact(&advertised, &out->header_seed)) {
+        size_t n = out->header_peer_count;
+        if (n < ROM_FETCH_MAX_WORKERS) {
+            out->header_peers[n] = *peer;
+            out->header_peer_count = n + 1;
+        }
+    }
+}
+/* Seed count of the tallied candidate whose whole-file digest is `whole`. */
+static int bbf_winner_count(const struct bbf_disc_cand *cands, size_t ncand,
+                            const uint8_t *whole)
+{
+    for (size_t c = 0; c < ncand; c++) {
+        if (memcmp(cands[c].m.whole_sha3, whole,
+                   sizeof(cands[c].m.whole_sha3)) == 0)
+            return cands[c].count;
+    }
+    return 0;
+}
 /* Query each seed for its directory listing over the FS "RLS" wire, pick both
  * the consensus-bundle and header-seed manifests each advertises, and require
  * >=2 independent seeds returning a byte-identical (chunk_root, whole_sha3,
@@ -691,26 +828,16 @@ static bool bbf_discover_from_peers(const char *datadir,
         }
         const char *body = bodies + i * stride;
         bool is_explicit = explicit_first && i == 0;
-        struct rom_fetch_manifest m;
-        memset(&m, 0, sizeof(m));
-        if (boot_bundle_pick_manifest(body, &m)) {
-            if (bbf_manifest_facts_ok(&m))
-                bbf_tally_cand(bundle_cands, &nbundle, ccap, &m, is_explicit);
-            else
-                LOG_WARN(BBF_SUBSYS, "discovery: seed %s:%u advertised a bundle "
-                         "manifest that fails the baked-facts cross-check — "
-                         "ignoring", peers[i].addr, (unsigned)peers[i].port);
-        }
-        struct rom_fetch_manifest hm;
-        memset(&hm, 0, sizeof(hm));
-        if (boot_bundle_pick_header_seed_manifest(body, &hm)) {
-            if (bbf_manifest_facts_ok(&hm))
-                bbf_tally_cand(hs_cands, &nhs, ccap, &hm, is_explicit);
-            else
-                LOG_WARN(BBF_SUBSYS, "discovery: seed %s:%u advertised a header-"
-                         "seed manifest that fails the baked-facts cross-check "
-                         "— ignoring", peers[i].addr, (unsigned)peers[i].port);
-        }
+        if (bbf_tally_advertised(bundle_cands, &nbundle, ccap, body, false,
+                                 is_explicit) < 0)
+            LOG_WARN(BBF_SUBSYS, "discovery: seed %s:%u advertised a bundle "
+                     "manifest that fails the baked-facts cross-check — "
+                     "ignoring", peers[i].addr, (unsigned)peers[i].port);
+        if (bbf_tally_advertised(hs_cands, &nhs, ccap, body, true,
+                                 is_explicit) < 0)
+            LOG_WARN(BBF_SUBSYS, "discovery: seed %s:%u advertised a header-"
+                     "seed manifest that fails the baked-facts cross-check "
+                     "— ignoring", peers[i].addr, (unsigned)peers[i].port);
     }
     out->n_bundles = bbf_quorum_rank(bundle_cands, nbundle, out->bundles,
                                      ROM_FETCH_MAX_WORKERS);
@@ -729,33 +856,7 @@ static bool bbf_discover_from_peers(const char *datadir,
     for (size_t i = 0; i < np; i++) {
         if (!responded_flags[i])
             continue;
-        const char *body = bodies + i * stride;
-        struct rom_fetch_manifest advertised;
-        memset(&advertised, 0, sizeof(advertised));
-        if (boot_bundle_pick_manifest(body, &advertised) &&
-            bbf_manifest_facts_ok(&advertised)) {
-            for (size_t b = 0; b < out->n_bundles; b++) {
-                if (bbf_manifest_same_artifact(&advertised,
-                                               &out->bundles[b])) {
-                    size_t n = out->bundle_peer_count[b];
-                    if (n < ROM_FETCH_MAX_WORKERS) {
-                        out->bundle_peers[b][n] = peers[i];
-                        out->bundle_peer_count[b] = n + 1;
-                    }
-                }
-            }
-        }
-        memset(&advertised, 0, sizeof(advertised));
-        if (out->have_header_seed &&
-            boot_bundle_pick_header_seed_manifest(body, &advertised) &&
-            bbf_manifest_facts_ok(&advertised) &&
-            bbf_manifest_same_artifact(&advertised, &out->header_seed)) {
-            size_t n = out->header_peer_count;
-            if (n < ROM_FETCH_MAX_WORKERS) {
-                out->header_peers[n] = peers[i];
-                out->header_peer_count = n + 1;
-            }
-        }
+        bbf_bind_responder(out, bodies + i * stride, &peers[i]);
     }
     free(bodies);
     LOG_INFO(BBF_SUBSYS, "discovery: %zu bundle candidate(s) ranked "
@@ -768,19 +869,10 @@ static bool bbf_discover_from_peers(const char *datadir,
      * byte-identical winner is "reached"; proceeding on a lone-seed winner is
      * "degraded_single_seed" (not a refusal — trust binds at install,
      * not at discovery; see bbf_quorum_pick's STEP 0 comment). */
-    {
-        int win_count = 0;
-        for (size_t c = 0; c < nbundle; c++) {
-            if (memcmp(bundle_cands[c].m.whole_sha3, out->bundles[0].whole_sha3,
-                       sizeof(out->bundles[0].whole_sha3)) == 0) {
-                win_count = bundle_cands[c].count;
-                break;
-            }
-        }
-        bbf_record_discovery_outcome(win_count >= 2 ? "reached"
-                                                    : "degraded_single_seed",
-                                     np, responded);
-    }
+    bbf_record_discovery_outcome(
+        bbf_winner_count(bundle_cands, nbundle, out->bundles[0].whole_sha3) >= 2
+            ? "reached" : "degraded_single_seed",
+        np, responded);
     /* Persist the winning (newest) bundle + header seed as the local hint for a
      * resume; a fetch/verify miss on it re-discovers the full ranked set. */
     if (!bbf_write_directory_hint(datadir, &out->bundles[0],
@@ -826,6 +918,49 @@ static bool bbf_header_seed_needed(const char *datadir,
         return false; /* already downloaded — import consumes it, no re-fetch */
     return true;
 }
+/* Fill `disc` from a local directory.json hint body and release the body. */
+static void bbf_adopt_hint_body(char *body, struct bbf_discovery *disc)
+{
+    if (boot_bundle_pick_manifest(body, &disc->bundles[0]))
+        disc->n_bundles = 1;
+    disc->have_header_seed =
+        boot_bundle_pick_header_seed_manifest(body, &disc->header_seed);
+    free(body);
+}
+/* A live discovery narrows the download rotation to the seeds that advertised
+ * the artifact; a local hint keeps the whole seed set. */
+static void bbf_narrow_seeds(bool discovered_live,
+                             const struct rom_fetch_peer *live_peers,
+                             size_t live_np,
+                             const struct rom_fetch_peer **peers, size_t *np)
+{
+    if (discovered_live) {
+        *peers = live_peers;
+        *np = live_np;
+    }
+}
+/* Build the directory.json hint path and the bundles root; false when either
+ * does not fit. */
+static bool bbf_hint_locations(const char *datadir, char *hint_path,
+                               size_t hint_cap, char *bundles_root,
+                               size_t root_cap)
+{
+    int hn = snprintf(hint_path, hint_cap, "%s/bundles/directory.json", datadir);
+    if (hn < 0 || (size_t)hn >= hint_cap)
+        return false;
+    return bbf_bundles_dir(datadir, bundles_root, root_cap);
+}
+/* Load the local directory.json hint into `disc`. Returns 0 when no hint
+ * file exists, 1 when it yielded an artifact, -1 when it yielded none. */
+static int bbf_load_hint(const char *bundles_root, struct bbf_discovery *disc)
+{
+    char *body = bbf_read_text_file(bundles_root, "directory.json",
+                                    BBF_DIRECTORY_JSON_MAX);
+    if (!body)
+        return 0;
+    bbf_adopt_hint_body(body, disc);
+    return (disc->n_bundles == 0 && !disc->have_header_seed) ? -1 : 1;
+}
 bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
 {
     bool bundle_needed = boot_bundle_fetch_should_run(datadir, ctx);
@@ -855,32 +990,21 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
      * GB bytes are swarmed + content-verified against the committed manifest and
      * the install gate binds the result to the compiled checkpoint. */
     char hint_path[PATH_MAX];
-    int hn = snprintf(hint_path, sizeof(hint_path),
-                      "%s/bundles/directory.json", datadir);
-    if (hn < 0 || (size_t)hn >= sizeof(hint_path))
+    char bundles_root[PATH_MAX];
+    if (!bbf_hint_locations(datadir, hint_path, sizeof(hint_path),
+                            bundles_root, sizeof(bundles_root)))
         return false;
     struct bbf_discovery disc;
     memset(&disc, 0, sizeof(disc));
-    char bundles_root[PATH_MAX];
-    int brn = snprintf(bundles_root, sizeof(bundles_root), "%s/bundles",
-                       datadir);
-    if (brn < 0 || (size_t)brn >= sizeof(bundles_root)) return false;
-    char *body = bbf_read_text_file(bundles_root, "directory.json",
-                                    BBF_DIRECTORY_JSON_MAX);
+    int hint = bbf_load_hint(bundles_root, &disc);
     bool discovered_live = false;
-    if (body) {
-        if (boot_bundle_pick_manifest(body, &disc.bundles[0]))
-            disc.n_bundles = 1;
-        disc.have_header_seed =
-            boot_bundle_pick_header_seed_manifest(body, &disc.header_seed);
-        free(body);
-        if (disc.n_bundles == 0 && !disc.have_header_seed) {
-            LOG_WARN(BBF_SUBSYS,
-                     "manifest hint present at %s but no usable artifact "
-                     "— skipping", hint_path);
-            return false;
-        }
-    } else {
+    if (hint < 0) {
+        LOG_WARN(BBF_SUBSYS,
+                 "manifest hint present at %s but no usable artifact "
+                 "— skipping", hint_path);
+        return false;
+    }
+    if (hint == 0) {
         LOG_INFO(BBF_SUBSYS,
                  "no local bundle manifest at %s — attempting peer directory "
                  "discovery over the file-service RLS wire", hint_path);
@@ -898,10 +1022,8 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
     if (header_needed && disc.have_header_seed) {
         const struct rom_fetch_peer *header_peers = peers;
         size_t header_np = np;
-        if (discovered_live) {
-            header_peers = disc.header_peers;
-            header_np = disc.header_peer_count;
-        }
+        bbf_narrow_seeds(discovered_live, disc.header_peers,
+                         disc.header_peer_count, &header_peers, &header_np);
         if (boot_bundle_fetch_download(datadir, header_peers, header_np,
                                        &disc.header_seed)) {
             any = true;
@@ -924,10 +1046,9 @@ bool boot_bundle_fetch_maybe(const char *datadir, const struct app_context *ctx)
         for (size_t bi = 0; bi < disc.n_bundles; bi++) {
             const struct rom_fetch_peer *bundle_peers = peers;
             size_t bundle_np = np;
-            if (discovered_live) {
-                bundle_peers = disc.bundle_peers[bi];
-                bundle_np = disc.bundle_peer_count[bi];
-            }
+            bbf_narrow_seeds(discovered_live, disc.bundle_peers[bi],
+                             disc.bundle_peer_count[bi], &bundle_peers,
+                             &bundle_np);
             if (boot_bundle_fetch_download(datadir, bundle_peers, bundle_np,
                                            &disc.bundles[bi])) {
                 any = true;
