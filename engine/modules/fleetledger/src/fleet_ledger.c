@@ -17,6 +17,7 @@
 
 #include "fleetledger/fleet_ledger.h"
 #include "fleet_ledger_replay.h"
+#include "fleet_ledger_experiment.h"
 
 #include "util/fleet_role_check.h"
 #include "base/hex.h"
@@ -73,44 +74,6 @@ struct fleet_box {
     uint64_t last_seq;
     int64_t last_ts;
     uint8_t head_hash[ZCL_FLEET_HASH_BYTES];
-};
-
-#define FLEET_EXPERIMENT_EVENTS_MAX 1024u
-
-struct fleet_experiment_event {
-    uint8_t phase;
-    uint8_t task_class;
-    uint8_t model;
-    uint8_t outcome;
-    uint8_t note_len;
-    bool have_tokens;
-    bool have_wall;
-    char note[ZCL_FLEET_NOTE_MAX];
-    int64_t tokens;
-    int64_t wall_s;
-
-    /* Everything export needs beyond what stats groups by. Kept on the
-     * SAME retained event rather than a second array: one row, one place
-     * it lives in memory. */
-    int64_t ts_unix;
-    uint8_t box_id[ZCL_FLEET_ID_BYTES];
-    uint8_t story_len;
-    char story[ZCL_FLEET_STORY_MAX];
-    bool have_executor;
-    uint8_t executor;
-    bool have_harness;
-    uint8_t harness;
-    bool have_effort;
-    uint8_t effort;
-    bool have_tokens_in;        int64_t tokens_in;
-    bool have_tokens_out;       int64_t tokens_out;
-    bool have_tokens_cache;     int64_t tokens_cache;
-    bool have_tokens_reasoning; int64_t tokens_reasoning;
-    bool have_tool_uses;        int64_t tool_uses;
-    bool have_turns;            int64_t turns;
-    bool have_lines_added;      int64_t lines_added;
-    bool have_lines_removed;    int64_t lines_removed;
-    bool have_defects;          int64_t defects;
 };
 
 struct zcl_fleet_ledger {
@@ -1298,149 +1261,6 @@ uint64_t zcl_fleet_ledger_experiment_overflow(const struct zcl_fleet_ledger *l)
     return l ? l->experiment_overflow : 0;
 }
 
-static bool experiment_task_equal(const struct fleet_experiment_event *a,
-                                  const struct fleet_experiment_event *b)
-{
-    return a->task_class == b->task_class && a->model == b->model &&
-           a->note_len == b->note_len &&
-           memcmp(a->note, b->note, a->note_len) == 0;
-}
-
-static struct zcl_fleet_experiment_group *exp_group(
-    struct zcl_fleet_experiment_group *out, size_t cap, size_t *count,
-    uint8_t task_class, uint8_t model)
-{
-    for (size_t i = 0; i < *count; i++)
-        if (out[i].task_class == task_class && out[i].model == model)
-            return &out[i];
-    if (*count >= cap)
-        return NULL;
-    struct zcl_fleet_experiment_group *g = &out[(*count)++];
-    memset(g, 0, sizeof(*g));
-    g->task_class = task_class;
-    g->model = model;
-    return g;
-}
-
-static int64_t median_i64(int64_t *v, size_t n)
-{
-    for (size_t i = 1; i < n; i++) {
-        int64_t t = v[i];
-        size_t j = i;
-        while (j > 0 && v[j - 1] > t) {
-            v[j] = v[j - 1];
-            j--;
-        }
-        v[j] = t;
-    }
-    return v[(n - 1) / 2];
-}
-
-static bool experiment_has_predict(const struct zcl_fleet_ledger *ledger,
-                                   const struct fleet_experiment_event *e)
-{
-    for (uint32_t j = 0; j < ledger->experiment_count; j++) {
-        const struct fleet_experiment_event *p = &ledger->experiment[j];
-        if (p->phase == ZCL_FLEET_EXPERIMENT_PREDICT &&
-            experiment_task_equal(p, e))
-            return true;
-    }
-    return false;
-}
-
-/* Tally one event into its group; returns 1 when a result had no predict. */
-static uint64_t experiment_tally_event(const struct zcl_fleet_ledger *ledger,
-                                       struct zcl_fleet_experiment_group *g,
-                                       const struct fleet_experiment_event *e)
-{
-    if (e->phase == ZCL_FLEET_EXPERIMENT_PREDICT) {
-        g->predicts++;
-        return 0;
-    }
-    if (e->phase != ZCL_FLEET_EXPERIMENT_RESULT)
-        return 0;
-    g->results++;
-    if (e->outcome == 1) /* LAND */
-        g->lands++;
-    if (experiment_has_predict(ledger, e))
-        return 0;
-    g->unpredicted++;
-    return 1;
-}
-
-struct experiment_samples {
-    int64_t walls[FLEET_EXPERIMENT_EVENTS_MAX];
-    int64_t tokens[FLEET_EXPERIMENT_EVENTS_MAX];
-    size_t nw, nt;
-    int64_t pred_sum, act_sum;
-    bool have_ratio;
-};
-
-static void experiment_sample_result(const struct zcl_fleet_ledger *ledger,
-                                     struct experiment_samples *s,
-                                     const struct fleet_experiment_event *e)
-{
-    if (e->have_wall && s->nw < FLEET_EXPERIMENT_EVENTS_MAX)
-        s->walls[s->nw++] = e->wall_s;
-    if (e->have_tokens && s->nt < FLEET_EXPERIMENT_EVENTS_MAX)
-        s->tokens[s->nt++] = e->tokens;
-    for (uint32_t j = 0; j < ledger->experiment_count; j++) {
-        const struct fleet_experiment_event *p = &ledger->experiment[j];
-        if (p->phase != ZCL_FLEET_EXPERIMENT_PREDICT ||
-            !experiment_task_equal(p, e) || !p->have_tokens ||
-            !e->have_tokens)
-            continue;
-        s->pred_sum += p->tokens;
-        s->act_sum += e->tokens;
-        s->have_ratio = true;
-        break;
-    }
-}
-
-static void experiment_group_summarize(const struct zcl_fleet_ledger *ledger,
-                                       struct zcl_fleet_experiment_group *g)
-{
-    struct experiment_samples s;
-    memset(&s, 0, sizeof s);
-    for (uint32_t i = 0; i < ledger->experiment_count; i++) {
-        const struct fleet_experiment_event *e = &ledger->experiment[i];
-        if (e->task_class != g->task_class || e->model != g->model)
-            continue;
-        if (e->phase != ZCL_FLEET_EXPERIMENT_RESULT)
-            continue;
-        experiment_sample_result(ledger, &s, e);
-    }
-    if (s.nw > 0) {
-        g->median_wall_s = median_i64(s.walls, s.nw);
-        g->have_median_wall = 1;
-    }
-    if (s.nt > 0) {
-        g->median_tokens = median_i64(s.tokens, s.nt);
-        g->have_median_tokens = 1;
-    }
-    if (s.have_ratio && s.act_sum > 0) {
-        g->pred_actual_bp = (s.pred_sum * 10000) / s.act_sum;
-        g->have_pred_actual = 1;
-    }
-}
-
-static void experiment_groups_sort(struct zcl_fleet_experiment_group *out,
-                                   size_t count)
-{
-    for (size_t i = 1; i < count; i++) {
-        struct zcl_fleet_experiment_group t = out[i];
-        size_t j = i;
-        while (j > 0 &&
-               (out[j - 1].task_class > t.task_class ||
-                (out[j - 1].task_class == t.task_class &&
-                 out[j - 1].model > t.model))) {
-            out[j] = out[j - 1];
-            j--;
-        }
-        out[j] = t;
-    }
-}
-
 enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
     const struct zcl_fleet_ledger *ledger,
     struct zcl_fleet_experiment_group *out, size_t cap, size_t *count,
@@ -1455,24 +1275,9 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
         *index_us = 0;
     int64_t start = platform_time_monotonic_us();
     uint64_t unmatched = 0;
-    enum zcl_fleet_status status = ZCL_FLEET_OK;
-
-    for (uint32_t i = 0; i < ledger->experiment_count; i++) {
-        const struct fleet_experiment_event *e = &ledger->experiment[i];
-        struct zcl_fleet_experiment_group *g =
-            exp_group(out, cap, count, e->task_class, e->model);
-        if (!g) {
-            status = ZCL_FLEET_FULL;
-            break;
-        }
-        unmatched += experiment_tally_event(ledger, g, e);
-    }
-
-    for (size_t gi = 0; gi < *count && status == ZCL_FLEET_OK; gi++)
-        experiment_group_summarize(ledger, &out[gi]);
-
-    /* Stable order: task_class then model, so a fixture has one answer. */
-    experiment_groups_sort(out, *count);
+    enum zcl_fleet_status status = fleet_experiment_groups(
+        ledger->experiment, ledger->experiment_count, out, cap, count,
+        &unmatched);
 
     if (unpredicted)
         *unpredicted = unmatched;
@@ -1480,50 +1285,6 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
     if (index_us)
         *index_us = end > start ? (uint64_t)(end - start) : 0u;
     return status;
-}
-
-/* Copy one retained event into the export shape. A free function rather
- * than inline in the walk below, so the walk's own decision count stays
- * about which rows match rather than about how a row is copied. */
-static void experiment_row_fill(struct zcl_fleet_experiment_row *out,
-                                const struct fleet_experiment_event *e)
-{
-    memset(out, 0, sizeof(*out));
-    out->ts_unix = e->ts_unix;
-    memcpy(out->box_id, e->box_id, ZCL_FLEET_ID_BYTES);
-    out->phase = e->phase;
-    memcpy(out->task_id, e->note, e->note_len);
-    out->task_class = e->task_class;
-    memcpy(out->story, e->story, e->story_len);
-    out->have_executor = e->have_executor ? 1 : 0;
-    out->executor = e->executor;
-    out->have_harness = e->have_harness ? 1 : 0;
-    out->harness = e->harness;
-    out->model = e->model;
-    out->have_effort = e->have_effort ? 1 : 0;
-    out->effort = e->effort;
-    out->have_tokens_in = e->have_tokens_in ? 1 : 0;
-    out->tokens_in = e->tokens_in;
-    out->have_tokens_out = e->have_tokens_out ? 1 : 0;
-    out->tokens_out = e->tokens_out;
-    out->have_tokens_cache = e->have_tokens_cache ? 1 : 0;
-    out->tokens_cache = e->tokens_cache;
-    out->have_tokens_reasoning = e->have_tokens_reasoning ? 1 : 0;
-    out->tokens_reasoning = e->tokens_reasoning;
-    out->have_tool_uses = e->have_tool_uses ? 1 : 0;
-    out->tool_uses = e->tool_uses;
-    out->have_turns = e->have_turns ? 1 : 0;
-    out->turns = e->turns;
-    out->have_wall_s = e->have_wall ? 1 : 0;
-    out->wall_s = e->wall_s;
-    out->have_outcome = e->phase == ZCL_FLEET_EXPERIMENT_RESULT ? 1 : 0;
-    out->outcome = e->outcome;
-    out->have_lines_added = e->have_lines_added ? 1 : 0;
-    out->lines_added = e->lines_added;
-    out->have_lines_removed = e->have_lines_removed ? 1 : 0;
-    out->lines_removed = e->lines_removed;
-    out->have_defects = e->have_defects ? 1 : 0;
-    out->defects = e->defects;
 }
 
 enum zcl_fleet_status zcl_fleet_ledger_experiment_rows(
@@ -1534,20 +1295,8 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_rows(
     if (!ledger || !out || !count)
         return ZCL_FLEET_ARGUMENT;
     *count = 0;
-    enum zcl_fleet_status status = ZCL_FLEET_OK;
-    for (uint32_t i = 0; i < ledger->experiment_count; i++) {
-        const struct fleet_experiment_event *e = &ledger->experiment[i];
-        if (e->ts_unix < since_unix)
-            continue;
-        if (have_box && memcmp(e->box_id, box_id, ZCL_FLEET_ID_BYTES) != 0)
-            continue;
-        if (*count >= cap) {
-            status = ZCL_FLEET_FULL;
-            break;
-        }
-        experiment_row_fill(&out[(*count)++], e);
-    }
-    return status;
+    return fleet_experiment_rows(ledger->experiment, ledger->experiment_count,
+                                 since_unix, box_id, have_box, out, cap, count);
 }
 
 static enum zcl_fleet_status latest_box_rows(
