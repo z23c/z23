@@ -483,6 +483,81 @@ static void vfs_dir_unlock_read_lock(struct vfs_dir_file *f)
                                VFS_DIR_SHARED_SIZE);
 }
 
+/* Bounded 3-try PENDING-byte acquisition. Returns the final lock result;
+ * *invalid_handle is set (with *last_err) when the handle is unusable so the
+ * caller reports it. */
+static BOOL vfs_dir_xlock_take_pending(struct vfs_dir_file *f, DWORD *last_err,
+                                       bool *invalid_handle)
+{
+    BOOL res = TRUE;
+    int count = 3;
+    while (count-- > 0 &&
+           !(res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
+                                      VFS_DIR_PENDING_BYTE, 1))) {
+        *last_err = GetLastError();
+        if (*last_err == ERROR_INVALID_HANDLE) {
+            *invalid_handle = true;
+            return res;
+        }
+        if (count)
+            Sleep(1);
+    }
+    if (!res)
+        *last_err = GetLastError();
+    return res;
+}
+
+static BOOL vfs_dir_xlock_take_shared(struct vfs_dir_file *f, DWORD *last_err,
+                                      int *new_locktype)
+{
+    BOOL res = vfs_dir_get_read_lock(f);
+    if (res)
+        *new_locktype = SQLITE_LOCK_SHARED;
+    else
+        *last_err = GetLastError();
+    return res;
+}
+
+static BOOL vfs_dir_xlock_take_reserved(struct vfs_dir_file *f,
+                                        DWORD *last_err, int *new_locktype)
+{
+    BOOL res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
+                                  VFS_DIR_RESERVED_BYTE, 1);
+    if (res)
+        *new_locktype = SQLITE_LOCK_RESERVED;
+    else
+        *last_err = GetLastError();
+    return res;
+}
+
+/* PENDING held, then trade the read lock for the full SHARED range. */
+static BOOL vfs_dir_xlock_take_exclusive(struct vfs_dir_file *f,
+                                         DWORD *last_err, int *new_locktype,
+                                         BOOL *got_pending)
+{
+    *new_locktype = SQLITE_LOCK_PENDING;
+    *got_pending = FALSE; /* the PENDING byte stays held on this path */
+
+    (void)vfs_dir_unlock_read_lock(f);
+    BOOL res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
+                                  VFS_DIR_SHARED_FIRST, VFS_DIR_SHARED_SIZE);
+    if (res) {
+        *new_locktype = SQLITE_LOCK_EXCLUSIVE;
+    } else {
+        *last_err = GetLastError();
+        (void)vfs_dir_get_read_lock(f);
+    }
+    return res;
+}
+
+static bool vfs_dir_xlock_needs_pending(const struct vfs_dir_file *f,
+                                        int locktype)
+{
+    return f->lock_type == SQLITE_LOCK_NONE ||
+           (locktype == SQLITE_LOCK_EXCLUSIVE &&
+            f->lock_type <= SQLITE_LOCK_RESERVED);
+}
+
 /* The PENDING/SHARED/RESERVED/EXCLUSIVE state machine, mirrored transition
  * for transition from os_win.c winLock (byte layout at the top of this
  * file), including the bounded 3-try PENDING-byte acquisition that works
@@ -502,60 +577,26 @@ static int vfs_dir_xlock(sqlite3_file *fd, int locktype)
         return SQLITE_IOERR_LOCK;
 
     int new_locktype = f->lock_type;
-    if (f->lock_type == SQLITE_LOCK_NONE ||
-        (locktype == SQLITE_LOCK_EXCLUSIVE &&
-         f->lock_type <= SQLITE_LOCK_RESERVED)) {
-        int count = 3;
-        while (count-- > 0 &&
-               !(res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
-                                          VFS_DIR_PENDING_BYTE, 1))) {
-            last_err = GetLastError();
-            if (last_err == ERROR_INVALID_HANDLE) {
-                f->last_errno = last_err;
-                return vfs_dir_log_ioerr(SQLITE_IOERR_LOCK, "xLock", f->leaf,
-                                         last_err);
-            }
-            if (count)
-                Sleep(1);
+    if (vfs_dir_xlock_needs_pending(f, locktype)) {
+        bool invalid_handle = false;
+        res = vfs_dir_xlock_take_pending(f, &last_err, &invalid_handle);
+        if (invalid_handle) {
+            f->last_errno = last_err;
+            return vfs_dir_log_ioerr(SQLITE_IOERR_LOCK, "xLock", f->leaf,
+                                     last_err);
         }
         got_pending = res;
-        if (!res)
-            last_err = GetLastError();
     }
 
-    if (locktype == SQLITE_LOCK_SHARED && res) {
-        res = vfs_dir_get_read_lock(f);
-        if (res)
-            new_locktype = SQLITE_LOCK_SHARED;
-        else
-            last_err = GetLastError();
-    }
+    if (locktype == SQLITE_LOCK_SHARED && res)
+        res = vfs_dir_xlock_take_shared(f, &last_err, &new_locktype);
 
-    if (locktype == SQLITE_LOCK_RESERVED && res) {
-        res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
-                                 VFS_DIR_RESERVED_BYTE, 1);
-        if (res)
-            new_locktype = SQLITE_LOCK_RESERVED;
-        else
-            last_err = GetLastError();
-    }
+    if (locktype == SQLITE_LOCK_RESERVED && res)
+        res = vfs_dir_xlock_take_reserved(f, &last_err, &new_locktype);
 
-    if (locktype == SQLITE_LOCK_EXCLUSIVE && res) {
-        new_locktype = SQLITE_LOCK_PENDING;
-        got_pending = FALSE; /* the PENDING byte stays held on this path */
-    }
-
-    if (locktype == SQLITE_LOCK_EXCLUSIVE && res) {
-        (void)vfs_dir_unlock_read_lock(f);
-        res = vfs_dir_lock_range(f->h, VFS_DIR_LOCKFILE_FLAGS,
-                                 VFS_DIR_SHARED_FIRST, VFS_DIR_SHARED_SIZE);
-        if (res) {
-            new_locktype = SQLITE_LOCK_EXCLUSIVE;
-        } else {
-            last_err = GetLastError();
-            (void)vfs_dir_get_read_lock(f);
-        }
-    }
+    if (locktype == SQLITE_LOCK_EXCLUSIVE && res)
+        res = vfs_dir_xlock_take_exclusive(f, &last_err, &new_locktype,
+                                           &got_pending);
 
     if (got_pending && locktype == SQLITE_LOCK_SHARED)
         (void)vfs_dir_unlock_range(f->h, VFS_DIR_PENDING_BYTE, 1);
@@ -1016,6 +1057,88 @@ const sqlite3_io_methods vfs_dir_io_methods = {
 
 /* ── sqlite3_vfs methods ───────────────────────────────────────────────── */
 
+static bool vfs_dir_open_mint_temp_leaf(char *leaf, size_t cap)
+{
+    bool minted = false;
+    for (int attempt = 0; attempt < 16 && !minted; ++attempt) {
+        uint64_t nonce = 0;
+        sqlite3_randomness((int)sizeof(nonce), &nonce);
+        int n = snprintf(leaf, cap, VFS_DIR_TEMP_PREFIX "%016llx",
+                         (unsigned long long)nonce);
+        minted = n > 0 && (size_t)n < cap;
+    }
+    return minted;
+}
+
+/* Fills leaf and disposition; returns SQLITE_OK or the refusal result. */
+static int vfs_dir_open_resolve_leaf(struct sqlite_vfs_dir_binding *b,
+                                     const char *name, int flags, char *leaf,
+                                     size_t cap, ULONG *disposition)
+{
+    bool is_create = (flags & SQLITE_OPEN_CREATE) != 0;
+    bool is_exclusive = (flags & SQLITE_OPEN_EXCLUSIVE) != 0;
+    bool is_delete_on_close = (flags & SQLITE_OPEN_DELETEONCLOSE) != 0;
+    if (!name) {
+        /* Temp file: SQLite hands the VFS no name, so mint one inside the
+         * bound directory. Temp files are always delete-on-close. */
+        if (!is_delete_on_close)
+            return vfs_dir_log_refusal("xOpen", name,
+                                       "nameless open without DELETEONCLOSE");
+        if (!vfs_dir_open_mint_temp_leaf(leaf, cap))
+            return vfs_dir_log_refusal("xOpen", name,
+                                       "temp leaf mint failed");
+        *disposition = FILE_CREATE; /* fail on the astronomically unlikely
+                                      collision; NtCreateFile says so */
+        return SQLITE_OK;
+    }
+    if (!vfs_dir_valid_leaf(name))
+        return vfs_dir_log_refusal("xOpen", name, "not a plain basename");
+    if (!vfs_dir_name_allowed(b, name))
+        return vfs_dir_log_refusal("xOpen", name,
+                                   "outside the bound database family");
+    memcpy(leaf, name, strlen(name) + 1u);
+    *disposition = is_exclusive ? FILE_CREATE
+                   : is_create  ? FILE_OPEN_IF : FILE_OPEN;
+    return SQLITE_OK;
+}
+
+static ACCESS_MASK vfs_dir_open_access(bool is_readonly,
+                                       bool is_delete_on_close)
+{
+    ACCESS_MASK access = GENERIC_READ | SYNCHRONIZE | FILE_READ_ATTRIBUTES |
+                         FILE_WRITE_ATTRIBUTES;
+    if (!is_readonly)
+        access |= GENERIC_WRITE;
+    if (is_delete_on_close || !is_readonly)
+        access |= DELETE;
+    return access;
+}
+
+static HANDLE vfs_dir_open_child_retrying(struct sqlite_vfs_dir_binding *b,
+                                          const char *leaf, ACCESS_MASK access,
+                                          ULONG disposition, ULONG options,
+                                          NTSTATUS *status)
+{
+    HANDLE child = INVALID_HANDLE_VALUE;
+    int retries = 0;
+    for (;;) {
+        child = vfs_dir_open_child(b, leaf, access, disposition, options,
+                                   status);
+        if (child != INVALID_HANDLE_VALUE)
+            break;
+        if ((ULONG)*status == 0xC0000035u) /* collision on exclusive create */
+            break;
+        SetLastError((ULONG)*status == 0xC0000022u ? ERROR_ACCESS_DENIED
+                     : (ULONG)*status == 0xC0000043u ? ERROR_SHARING_VIOLATION
+                     : ERROR_PATH_NOT_FOUND);
+        DWORD error = NO_ERROR;
+        if (vfs_dir_retry_ioerr(&retries, &error))
+            continue;
+        break;
+    }
+    return child;
+}
+
 static int vfs_dir_open_impl(struct sqlite_vfs_dir_binding *b,
                              const char *name, sqlite3_file *file, int flags,
                              int *out_flags, bool readonly_fallback);
@@ -1045,68 +1168,22 @@ static int vfs_dir_open_impl(struct sqlite_vfs_dir_binding *b,
     f->h = INVALID_HANDLE_VALUE;
 
     bool is_readonly = (flags & SQLITE_OPEN_READONLY) != 0;
-    bool is_create = (flags & SQLITE_OPEN_CREATE) != 0;
     bool is_exclusive = (flags & SQLITE_OPEN_EXCLUSIVE) != 0;
     bool is_delete_on_close = (flags & SQLITE_OPEN_DELETEONCLOSE) != 0;
 
     char leaf[VFS_DIR_LEAF_MAX + 1u];
     ULONG disposition;
-    if (!name) {
-        /* Temp file: SQLite hands the VFS no name, so mint one inside the
-         * bound directory. Temp files are always delete-on-close. */
-        if (!is_delete_on_close)
-            return vfs_dir_log_refusal("xOpen", name,
-                                       "nameless open without DELETEONCLOSE");
-        bool minted = false;
-        for (int attempt = 0; attempt < 16 && !minted; ++attempt) {
-            uint64_t nonce = 0;
-            sqlite3_randomness((int)sizeof(nonce), &nonce);
-            int n = snprintf(leaf, sizeof(leaf), VFS_DIR_TEMP_PREFIX "%016llx",
-                             (unsigned long long)nonce);
-            minted = n > 0 && (size_t)n < sizeof(leaf);
-        }
-        if (!minted)
-            return vfs_dir_log_refusal("xOpen", name,
-                                       "temp leaf mint failed");
-        disposition = FILE_CREATE; /* fail on the astronomically unlikely
-                                      collision; NtCreateFile says so */
-    } else {
-        if (!vfs_dir_valid_leaf(name))
-            return vfs_dir_log_refusal("xOpen", name, "not a plain basename");
-        if (!vfs_dir_name_allowed(b, name))
-            return vfs_dir_log_refusal("xOpen", name,
-                                       "outside the bound database family");
-        memcpy(leaf, name, strlen(name) + 1u);
-        disposition = is_exclusive ? FILE_CREATE
-                      : is_create  ? FILE_OPEN_IF : FILE_OPEN;
-    }
+    int leaf_rc = vfs_dir_open_resolve_leaf(b, name, flags, leaf, sizeof(leaf),
+                                            &disposition);
+    if (leaf_rc != SQLITE_OK)
+        return leaf_rc;
 
-    ACCESS_MASK access = GENERIC_READ | SYNCHRONIZE | FILE_READ_ATTRIBUTES |
-                         FILE_WRITE_ATTRIBUTES;
-    if (!is_readonly)
-        access |= GENERIC_WRITE;
-    if (is_delete_on_close || !is_readonly)
-        access |= DELETE;
+    ACCESS_MASK access = vfs_dir_open_access(is_readonly, is_delete_on_close);
     ULONG options = is_delete_on_close ? FILE_DELETE_ON_CLOSE : 0;
 
     NTSTATUS status = 0;
-    HANDLE child = INVALID_HANDLE_VALUE;
-    int retries = 0;
-    for (;;) {
-        child = vfs_dir_open_child(b, leaf, access, disposition, options,
-                                   &status);
-        if (child != INVALID_HANDLE_VALUE)
-            break;
-        if ((ULONG)status == 0xC0000035u) /* collision on exclusive create */
-            break;
-        SetLastError((ULONG)status == 0xC0000022u ? ERROR_ACCESS_DENIED
-                     : (ULONG)status == 0xC0000043u ? ERROR_SHARING_VIOLATION
-                     : ERROR_PATH_NOT_FOUND);
-        DWORD error = NO_ERROR;
-        if (vfs_dir_retry_ioerr(&retries, &error))
-            continue;
-        break;
-    }
+    HANDLE child = vfs_dir_open_child_retrying(b, leaf, access, disposition,
+                                               options, &status);
     if (child == INVALID_HANDLE_VALUE) {
         /* os_win.c winOpen fallback: a failing READWRITE open is retried as
          * READONLY (never widened, never for temp files). */
