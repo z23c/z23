@@ -192,6 +192,19 @@ static bool activate_bind_column(sqlite3_stmt *dst, int dst_col,
     }
 }
 
+/* Reset the insert statement, bind one source row's columns and step it. */
+static bool activate_copy_row(sqlite3_stmt *write, sqlite3_stmt *read,
+                              int columns)
+{
+    bool ok = sqlite3_reset(write) == SQLITE_OK &&
+              sqlite3_clear_bindings(write) == SQLITE_OK;
+    for (int i = 0; ok && i < columns; i++)
+        ok = activate_bind_column(write, i + 1, read, i);
+    if (ok)
+        ok = sqlite3_step(write) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+    return ok;
+}
+
 /* Stream every row selected from the immutable bundle into the live progress
  * store. Runs inside the caller's open BEGIN IMMEDIATE, so a failure rolls back
  * with the whole install. Emitted SQL uses named columns so the on-disk column
@@ -211,12 +224,7 @@ static bool activate_stream_copy(sqlite3 *src, sqlite3 *dst,
     int rc = SQLITE_ERROR;
     while (ok && (rc = sqlite3_step(read)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
         heartbeat_tick(&hb, rows);
-        ok = sqlite3_reset(write) == SQLITE_OK &&
-             sqlite3_clear_bindings(write) == SQLITE_OK;
-        for (int i = 0; ok && i < columns; i++)
-            ok = activate_bind_column(write, i + 1, read, i);
-        if (ok)
-            ok = sqlite3_step(write) == SQLITE_DONE; // raw-sql-ok:progress-kv-kernel-store
+        ok = activate_copy_row(write, read, columns);
         if (ok && rows == UINT64_MAX)
             ok = false;
         if (ok)
@@ -304,13 +312,10 @@ static bool activate_reset_shielded_history_in_tx(sqlite3 *db)
            shielded_pool_kv_reset_in_tx(db);
 }
 
-/* The single atomic install transaction. Assumes the progress-store tx lock is
- * held and BEGIN IMMEDIATE is open on progress_db. Returns false (with the
- * caller rolling back) on any failure. Never partially applies. */
-static bool activate_apply_in_tx(
-    sqlite3 *progress_db, sqlite3 *bundle_db,
-    const struct consensus_state_bundle_manifest *m, bool assisted_tier,
-    struct consensus_state_activate_result *result)
+/* Clear the reducer-derived logs/deltas and the coins table, and advance the
+ * coins authority generation. */
+static bool activate_clear_derived_state(
+    sqlite3 *progress_db, struct consensus_state_activate_result *result)
 {
     char *err = NULL;
 
@@ -340,6 +345,16 @@ static bool activate_apply_in_tx(
     }
     if (!coins_kv_bump_authority_generation_in_tx(progress_db))
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR, "advancing coins authority generation failed");
+    return true;
+}
+
+/* Reset shielded history, drop stale recovery markers and generation
+ * metadata, and retain the admitted proof prefix. */
+static bool activate_reset_recovery_state(
+    sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct consensus_state_bundle_manifest *m,
+    struct consensus_state_activate_result *result)
+{
     /* 3. Reset both anchor tables + nullifier set to a COMPLETE (activation
      *    cursor 0) history, THEN install the actual rows. This is the exact
      *    difference from the wedge-causing refold: complete history, not an
@@ -378,44 +393,65 @@ static bool activate_apply_in_tx(
             progress_db, bundle_db, m))
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "retaining admitted bundle proof prefix failed");
+    return true;
+}
 
+struct activate_stream_counts {
+    uint64_t coins;
+    uint64_t sprout;
+    uint64_t sapling;
+    uint64_t nfs;
+};
+
+static bool activate_stream_bundle_state(
+    sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct consensus_state_bundle_manifest *m,
+    struct activate_stream_counts *counts,
+    struct consensus_state_activate_result *result)
+{
     /* 4. Stream coins + anchors (by pool) + nullifiers from the bundle. */
-    uint64_t coins = 0, sprout = 0, sapling = 0, nfs = 0;
     if (!activate_stream_copy(bundle_db, progress_db,
             "SELECT txid,vout,value,height,is_coinbase,script "
             "FROM coins ORDER BY txid,vout",
             "INSERT INTO coins(txid,vout,value,height,is_coinbase,script) "
             "VALUES(?,?,?,?,?,?)", 6, "activate_stream_coins",
-            m->utxo_count, &coins) ||
-        coins != m->utxo_count)
+            m->utxo_count, &counts->coins) ||
+        counts->coins != m->utxo_count)
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "coin stream count mismatch (%llu want %llu)",
-                             (unsigned long long)coins,
+                             (unsigned long long)counts->coins,
                              (unsigned long long)m->utxo_count);
     if (!activate_stream_copy(bundle_db, progress_db,
             "SELECT anchor,height,tree FROM anchors WHERE pool=0 ORDER BY anchor",
             "INSERT INTO sprout_anchors(anchor,height,tree) VALUES(?,?,?)",
-            3, "activate_stream_sprout_anchors", 0, &sprout) ||
+            3, "activate_stream_sprout_anchors", 0, &counts->sprout) ||
         !activate_stream_copy(bundle_db, progress_db,
             "SELECT anchor,height,tree FROM anchors WHERE pool=1 ORDER BY anchor",
             "INSERT INTO sapling_anchors(anchor,height,tree) VALUES(?,?,?)",
-            3, "activate_stream_sapling_anchors", 0, &sapling) ||
-        sprout > UINT64_MAX - sapling ||
-        sprout + sapling != m->anchor_count)
+            3, "activate_stream_sapling_anchors", 0, &counts->sapling) ||
+        counts->sprout > UINT64_MAX - counts->sapling ||
+        counts->sprout + counts->sapling != m->anchor_count)
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "anchor stream count mismatch (%llu want %llu)",
-                             (unsigned long long)(sprout + sapling),
+                             (unsigned long long)(counts->sprout +
+                                                  counts->sapling),
                              (unsigned long long)m->anchor_count);
     if (!activate_stream_copy(bundle_db, progress_db,
             "SELECT nf,pool,height FROM nullifiers ORDER BY pool,nf",
             "INSERT INTO nullifiers(nf,pool,height) VALUES(?,?,?)", 3,
-            "activate_stream_nullifiers", m->nullifier_count, &nfs) ||
-        nfs != m->nullifier_count)
+            "activate_stream_nullifiers", m->nullifier_count, &counts->nfs) ||
+        counts->nfs != m->nullifier_count)
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "nullifier stream count mismatch (%llu want %llu)",
-                             (unsigned long long)nfs,
+                             (unsigned long long)counts->nfs,
                              (unsigned long long)m->nullifier_count);
+    return true;
+}
 
+static bool activate_force_stage_cursors(
+    sqlite3 *progress_db, const struct consensus_state_bundle_manifest *m,
+    struct consensus_state_activate_result *result)
+{
     /* 5. Force the 8 stage cursors to the canonical anchor frontier: the seven
      *    upstream stages "processed through the anchor" (next-height cursor =
      *    height+1) and tip_finalize's next-to-finalize = height. This is the
@@ -437,7 +473,16 @@ static bool activate_apply_in_tx(
     if (!utxo_apply_frontier_set_in_tx(progress_db, m->height + 1))
         return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                              "setting coins_applied_height failed");
+    return true;
+}
 
+/* Stamp the tier provenance markers. *seam_recorded reports an assisted
+ * install so the caller can log it. */
+static bool activate_stamp_tier_markers(
+    sqlite3 *progress_db, const struct consensus_state_bundle_manifest *m,
+    bool assisted_tier, bool *seam_recorded,
+    struct consensus_state_activate_result *result)
+{
     /* 6. Provenance markers — the tier boundary. MIGRATION_COMPLETE (operational:
      * serve a validated tip + receive) is stamped on BOTH tiers. SELF_FOLDED (the
      * SOVEREIGN bit: mine/spend/export/seed) is stamped ONLY on a sovereign
@@ -462,11 +507,40 @@ static bool activate_apply_in_tx(
                 m->nullifier_digest))
             return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
                                  "recording assisted-tier promotion seam failed");
+        *seam_recorded = true;
+    }
+    return true;
+}
+
+/* The single atomic install transaction. Assumes the progress-store tx lock is
+ * held and BEGIN IMMEDIATE is open on progress_db. Returns false (with the
+ * caller rolling back) on any failure. Never partially applies. */
+static bool activate_apply_in_tx(
+    sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct consensus_state_bundle_manifest *m, bool assisted_tier,
+    struct consensus_state_activate_result *result)
+{
+    if (!activate_clear_derived_state(progress_db, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!activate_reset_recovery_state(progress_db, bundle_db, m, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+
+    struct activate_stream_counts counts = {0, 0, 0, 0};
+    if (!activate_stream_bundle_state(progress_db, bundle_db, m, &counts,
+                                      result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!activate_force_stage_cursors(progress_db, m, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+
+    bool seam_recorded = false;
+    if (!activate_stamp_tier_markers(progress_db, m, assisted_tier,
+                                     &seam_recorded, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (seam_recorded)
         LOG_INFO(ACTIVATE_SUBSYS,
                  "assisted-tier install: migration-complete stamped, self_folded "
                  "WITHHELD, promotion seam recorded at h=%d (RELEASE_ASSISTED "
                  "until background re-derivation ratifies)", m->height);
-    }
     if (!progress_meta_delete_in_tx(progress_db,
                                     REDUCER_TRUSTED_BASE_HEIGHT_KEY) ||
         !progress_meta_delete_in_tx(progress_db,
@@ -485,9 +559,9 @@ static bool activate_apply_in_tx(
                  "seed-floor declare failed h=%d (bg-validation will walk "
                  "from genesis — slow, correct)", m->height);
 
-    result->utxo_count = coins;
-    result->anchor_count = sprout + sapling;
-    result->nullifier_count = nfs;
+    result->utxo_count = counts.coins;
+    result->anchor_count = counts.sprout + counts.sapling;
+    result->nullifier_count = counts.nfs;
     return true;
 }
 
@@ -561,6 +635,32 @@ static bool activate_decision_matches(
     return true;
 }
 
+static bool activate_verify_stage_cursors(
+    sqlite3 *progress_db,
+    const struct consensus_state_bundle_manifest *manifest,
+    struct consensus_state_activate_result *result)
+{
+    for (size_t i = 0;
+         i < sizeof(k_activate_stages) / sizeof(k_activate_stages[0]); i++) {
+        struct stage_cursor_read_result cursor =
+            stage_cursor_read_persisted(progress_db, k_activate_stages[i],
+                                        ACTIVATE_SUBSYS);
+        uint64_t expected = i + 1 == sizeof(k_activate_stages) /
+                                      sizeof(k_activate_stages[0])
+                                ? (uint64_t)manifest->height
+                                : (uint64_t)manifest->height + 1u;
+        if (!cursor.ok || !cursor.found || cursor.cursor != expected) {
+            return activate_fail(
+                result, CONSENSUS_INSTALL_STORE_ERROR,
+                "post-install stage cursor mismatch stage=%s got=%llu want=%llu",
+                k_activate_stages[i],
+                (unsigned long long)(cursor.found ? cursor.cursor : 0),
+                (unsigned long long)expected);
+        }
+    }
+    return true;
+}
+
 static bool activate_verify_terminal_in_tx(
     sqlite3 *progress_db,
     const struct consensus_state_bundle_manifest *manifest,
@@ -589,40 +689,20 @@ static bool activate_verify_terminal_in_tx(
             hstar, served, applied, durable_height, manifest->height,
             manifest->height, manifest->height + 1, manifest->height);
     }
-    for (size_t i = 0;
-         i < sizeof(k_activate_stages) / sizeof(k_activate_stages[0]); i++) {
-        struct stage_cursor_read_result cursor =
-            stage_cursor_read_persisted(progress_db, k_activate_stages[i],
-                                        ACTIVATE_SUBSYS);
-        uint64_t expected = i + 1 == sizeof(k_activate_stages) /
-                                      sizeof(k_activate_stages[0])
-                                ? (uint64_t)manifest->height
-                                : (uint64_t)manifest->height + 1u;
-        if (!cursor.ok || !cursor.found || cursor.cursor != expected) {
-            return activate_fail(
-                result, CONSENSUS_INSTALL_STORE_ERROR,
-                "post-install stage cursor mismatch stage=%s got=%llu want=%llu",
-                k_activate_stages[i],
-                (unsigned long long)(cursor.found ? cursor.cursor : 0),
-                (unsigned long long)expected);
-        }
-    }
+    if (!activate_verify_stage_cursors(progress_db, manifest, result))
+        return false; // raw-return-ok:logged-by-activate_fail
     result->hstar = hstar;
     result->coins_applied_height = applied;
     activate_phase_done("terminal_frontier", t);
     return true;
 }
 
-bool consensus_state_snapshot_install_activate(
+/* Terminal checks on the request shape and the singleton progress store. */
+static bool activate_check_request(
     sqlite3 *progress_db,
     const struct consensus_state_activate_request *request,
     struct consensus_state_activate_result *result)
 {
-    if (!result) {
-        LOG_WARN(ACTIVATE_SUBSYS, "activation requires a result object");
-        return false;
-    }
-    memset(result, 0, sizeof(*result));
     if (!progress_db || !request || !request->bundle_path ||
         request->datadir_fd < 0 || !request->datadir_display ||
         !request->datadir_display[0])
@@ -635,7 +715,18 @@ bool consensus_state_snapshot_install_activate(
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
                              "progress store is not the singleton opened "
                              "through the classified datadir capability");
+    return true;
+}
 
+/* Open the bundle evidence and bind it to the CAS receipt and caller
+ * assertion. On failure the evidence (if opened) is already freed. */
+static bool activate_admit_bundle(
+    const struct consensus_state_activate_request *request,
+    struct consensus_state_activate_result *result,
+    struct consensus_state_artifact_evidence **evidence_out,
+    struct consensus_state_bundle_manifest *manifest,
+    uint8_t reopened_receipt_digest[32])
+{
     /* 1. Admit + validate the immutable bundle (recomputes UTXO root/count/
      *    supply, verifies every anchor tree->root, and the nullifier digest). */
     struct consensus_state_artifact_evidence *evidence = NULL;
@@ -645,12 +736,12 @@ bool consensus_state_snapshot_install_activate(
     if (!admitted.ok)
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
                              "bundle admission failed: %s", admitted.message);
+    *evidence_out = evidence;
 
     /* The pathname is only a locator. Authority comes from the exact artifact
      * receipt persisted by the publication CAS (logical digest + whole-file
      * digest + descriptor identity). This closes the ADMIT-to-activate rename
      * window, including replacement by another valid same-height/hash bundle. */
-    uint8_t reopened_receipt_digest[32];
     if (!zcl_bytes_any_set(
             request->expected_artifact_receipt_digest, 32) ||
         !consensus_state_artifact_evidence_receipt_digest(
@@ -663,62 +754,320 @@ bool consensus_state_snapshot_install_activate(
                              "artifact receipt");
     }
 
-    struct consensus_state_bundle_manifest manifest;
-    if (!consensus_state_artifact_evidence_manifest_copy(evidence, &manifest)) {
+    if (!consensus_state_artifact_evidence_manifest_copy(evidence, manifest)) {
         consensus_state_artifact_evidence_free(evidence);
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
                              "artifact evidence became stale after admission");
     }
 
     /* 2. Caller height/hash assertion (catches selecting the wrong artifact). */
-    if (request->expected_height != manifest.height ||
-        memcmp(request->expected_block_hash, manifest.block_hash, 32) != 0) {
+    if (request->expected_height != manifest->height ||
+        memcmp(request->expected_block_hash, manifest->block_hash, 32) != 0) {
         consensus_state_artifact_evidence_free(evidence);
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
                              "bundle height/hash does not match caller "
                              "assertion");
     }
+    return true;
+}
 
-    struct consensus_state_publication_decision_record admitted_decision;
-    memset(&admitted_decision, 0, sizeof(admitted_decision));
+/* Durable ADMIT record binding plus the complete-history requirement. */
+static bool activate_check_decision_history(
+    const struct consensus_state_activate_request *request,
+    const struct consensus_state_bundle_manifest *manifest,
+    const uint8_t reopened_receipt_digest[32],
+    struct consensus_state_publication_decision_record *admitted_decision,
+    struct consensus_state_activate_result *result)
+{
+    memset(admitted_decision, 0, sizeof(*admitted_decision));
     if (request->publication_decision)
-        admitted_decision = *request->publication_decision;
+        *admitted_decision = *request->publication_decision;
     if (!activate_decision_matches(
-            request->publication_decision ? &admitted_decision : NULL,
-            &manifest, reopened_receipt_digest, result)) {
-        consensus_state_artifact_evidence_free(evidence);
+            request->publication_decision ? admitted_decision : NULL,
+            manifest, reopened_receipt_digest, result))
         return false; // raw-return-ok:logged-by-activate_fail
-    }
 
     /* 3. ACTIVATE requires a COMPLETE genesis-derived history — a current-only
      *    (positive activation boundary) bundle would reinstate the very gap this
      *    cure closes. Mixed provenance is forbidden. */
-    if (!manifest.history_complete || manifest.activation_boundary != 0 ||
-        manifest.sprout_source_cursor != 0 ||
-        manifest.sapling_source_cursor != 0 ||
-        manifest.nullifier_source_cursor != 0 ||
-        manifest.source_fold_cursor != (int64_t)manifest.height + 1) {
-        consensus_state_artifact_evidence_free(evidence);
+    if (!manifest->history_complete || manifest->activation_boundary != 0 ||
+        manifest->sprout_source_cursor != 0 ||
+        manifest->sapling_source_cursor != 0 ||
+        manifest->nullifier_source_cursor != 0 ||
+        manifest->source_fold_cursor != (int64_t)manifest->height + 1)
         return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
                              "activation requires a complete genesis-derived "
                              "history bundle (no mixed provenance)");
-    }
+    return true;
+}
 
-    result->height = manifest.height;
-
+static bool activate_resolve_tier(
+    struct consensus_state_artifact_evidence *evidence,
+    const struct consensus_state_bundle_manifest *manifest,
+    const struct consensus_state_activate_request *request,
+    struct consensus_state_activate_result *result,
+    enum consensus_state_activate_authority *authority_out)
+{
     /* 3b. Fail-closed ignition whitelist (contract: header + authority.c). */
     char contained_reason[192];
     enum consensus_state_activate_authority authority =
         consensus_state_activate_resolve_authority(
-            evidence, request->datadir_fd, &manifest, request,
+            evidence, request->datadir_fd, manifest, request,
             contained_reason, sizeof(contained_reason));
     if (authority != CONSENSUS_STATE_ACTIVATE_AUTHORITY_RECEIPT &&
         authority != CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_ROM &&
         authority != CONSENSUS_STATE_ACTIVATE_AUTHORITY_CHECKPOINT_CONTENT &&
-        authority != CONSENSUS_STATE_ACTIVATE_AUTHORITY_ASSISTED) {
-        consensus_state_artifact_evidence_free(evidence);
+        authority != CONSENSUS_STATE_ACTIVATE_AUTHORITY_ASSISTED)
         return activate_fail(result, CONSENSUS_INSTALL_VERIFIED_CONTAINED,
                              "%s", contained_reason);
+    *authority_out = authority;
+    return true;
+}
+
+static bool activate_lease_bundle(
+    struct consensus_state_artifact_evidence *evidence,
+    const uint8_t reopened_receipt_digest[32],
+    struct consensus_state_activate_result *result,
+    struct consensus_state_bundle_manifest *leased_manifest,
+    sqlite3 **bundle_db)
+{
+    uint8_t receipt_digest[32];
+    if (!consensus_state_artifact_evidence_candidate_lease_begin(
+            evidence, leased_manifest, receipt_digest, bundle_db))
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                             "artifact evidence lease refused (stale)");
+    if (memcmp(receipt_digest, reopened_receipt_digest, 32) != 0) {
+        consensus_state_artifact_evidence_candidate_lease_end(evidence);
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                             "leased artifact identity differs from the "
+                             "CAS-admitted receipt");
+    }
+    return true;
+}
+
+/* Prior-generation backup, then BEGIN IMMEDIATE, then proof that nothing
+ * moved between the two. */
+static bool activate_cutover_reserve(
+    sqlite3 *progress_db,
+    const struct consensus_state_activate_request *request,
+    struct consensus_state_activate_result *result)
+{
+    char *err = NULL;
+    sqlite3_int64 backup_data_version = -1;
+    sqlite3_int64 backup_changes = -1;
+    if (!activate_backup_prior_generation(
+            progress_db, request->datadir_fd, request->datadir_display,
+            result->prior_generation_path,
+            sizeof(result->prior_generation_path), &backup_data_version,
+            &backup_changes))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "prior-generation backup failed; refusing to "
+                             "install without a rollback point");
+    activate_run_after_backup_hook();
+    if (sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, &err)
+                  != SQLITE_OK) {
+        if (err) { sqlite3_free(err); err = NULL; }
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "install transaction begin failed");
+    }
+    sqlite3_int64 begin_data_version = -1;
+    if (!activate_data_version(progress_db, &begin_data_version) ||
+        begin_data_version != backup_data_version ||
+        sqlite3_total_changes64(progress_db) != backup_changes ||
+        !activate_progress_file_unmoved(progress_db))
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                             "progress store changed between prior-generation "
+                             "backup and cutover reservation");
+    return true;
+}
+
+static bool activate_cutover_guard(
+    sqlite3 *progress_db,
+    const struct consensus_state_publication_decision_record *admitted_decision,
+    struct consensus_state_activate_result *result)
+{
+    /* Check the durable ADMIT's compare-and-swap frontier while the same
+     * BEGIN IMMEDIATE + process lock that spans the cutover is held. */
+    int32_t current_frontier = -1;
+    uint8_t current_frontier_hash[32] = {0};
+    if (!consensus_state_publication_cas_capture_frontier_locked(
+             progress_db, &current_frontier, current_frontier_hash) ||
+        !consensus_state_publication_cas_decision_is_current(
+             admitted_decision, current_frontier,
+             current_frontier_hash))
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                             "publication ADMIT frontier changed before "
+                             "activation (admitted h=%d, live h=%d)",
+                             admitted_decision->expected_frontier_height,
+                             current_frontier);
+    /* Schema creation belongs to the cutover transaction; a failed ensure
+     * must leave the pre-install store exactly unchanged. */
+    if (!coins_kv_ensure_schema(progress_db) ||
+        !anchor_kv_ensure_schema(progress_db) ||
+        !nullifier_kv_ensure_schema(progress_db) ||
+        !reducer_frontier_ensure_schema(progress_db))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                             "ensuring live coin/shielded/frontier schema failed");
+    return true;
+}
+
+/* Install, verify the destination, seed the tip and verify the terminal
+ * frontier, all still inside the uncommitted cutover transaction. */
+static bool activate_cutover_body(
+    sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct consensus_state_bundle_manifest *leased_manifest,
+    bool install_is_assisted,
+    struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_activate_result *result)
+{
+    if (!activate_apply_in_tx(progress_db, bundle_db, leased_manifest,
+                              install_is_assisted, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    activate_run_after_stream_hook();
+    if (!activate_verify_destination(progress_db, leased_manifest, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!consensus_state_artifact_evidence_revalidate(evidence)) {
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                           "artifact evidence changed during activation "
+                           "stream");
+    }
+    if (activate_consume_fail_seed())
+        return activate_fail(result, CONSENSUS_INSTALL_INJECTED_FAILURE,
+                           "injected tip-finalize seed failure");
+    if (!tip_finalize_stage_seed_anchor(
+                  leased_manifest->height, leased_manifest->block_hash, true))
+        return activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                           "tip-finalize anchor seed failed inside cutover "
+                           "transaction");
+    if (activate_consume_fail_after_seed())
+        return activate_fail(result, CONSENSUS_INSTALL_INJECTED_FAILURE,
+                           "injected post-seed cutover failure");
+    if (!activate_verify_terminal_in_tx(progress_db, leased_manifest, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+    if (!consensus_state_artifact_evidence_revalidate(evidence))
+        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
+                           "artifact evidence changed before activation "
+                           "commit");
+    return true;
+}
+
+/* COMMIT the cutover. On failure sets *outcome_unknown when it cannot prove
+ * which generation owns the store. */
+static bool activate_commit_in_tx(
+    sqlite3 *progress_db, struct consensus_state_activate_result *result,
+    bool *outcome_unknown)
+{
+    char *err = NULL;
+    if (sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err) == SQLITE_OK)
+        return true;
+    char commit_detail[128];
+    snprintf(commit_detail, sizeof(commit_detail), "%s",
+             err ? err : sqlite3_errmsg(progress_db));
+    /* When SQLite leaves the transaction active, an acknowledged
+     * ROLLBACK proves the prior generation still owns the store. If
+     * autocommit is already on, COMMIT may have committed or auto-rolled
+     * back before reporting the I/O error; never guess which. */
+    if (sqlite3_get_autocommit(progress_db) == 0) {
+        int rrc = sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
+        *outcome_unknown = rrc != SQLITE_OK ||
+                          sqlite3_get_autocommit(progress_db) == 0;
+    } else {
+        *outcome_unknown = true;
+    }
+    if (*outcome_unknown)
+        (void)activate_fail(
+            result, CONSENSUS_INSTALL_COMMIT_OUTCOME_UNKNOWN,
+            "install COMMIT outcome is unknown (%s); stop and inspect "
+            "or restore the durable prior generation at %s",
+            commit_detail, result->prior_generation_path);
+    else
+        (void)activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
+                           "install COMMIT failed and the cutover "
+                           "transaction was rolled back (%s)",
+                           commit_detail);
+    if (err) { sqlite3_free(err); err = NULL; }
+    return false;
+}
+
+/* Roll back a failed cutover that is still open, unless the outcome is
+ * already unknown. */
+static void activate_rollback_after_failure(
+    sqlite3 *progress_db, struct consensus_state_activate_result *result,
+    bool *outcome_unknown)
+{
+    if (*outcome_unknown || sqlite3_get_autocommit(progress_db) != 0)
+        return;
+    int rrc = sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
+    if (rrc != SQLITE_OK || sqlite3_get_autocommit(progress_db) == 0) {
+        *outcome_unknown = true;
+        (void)activate_fail(
+            result, CONSENSUS_INSTALL_COMMIT_OUTCOME_UNKNOWN,
+            "install rollback outcome is unknown; stop and inspect or "
+            "restore the durable prior generation at %s",
+            result->prior_generation_path);
+    }
+}
+
+/* The cutover under the progress-store tx lock: reserve, guard, install,
+ * COMMIT, and roll back on any failure. */
+static bool activate_cutover_locked(
+    sqlite3 *progress_db, sqlite3 *bundle_db,
+    const struct consensus_state_activate_request *request,
+    const struct consensus_state_bundle_manifest *leased_manifest,
+    const struct consensus_state_publication_decision_record *admitted_decision,
+    bool install_is_assisted,
+    struct consensus_state_artifact_evidence *evidence,
+    struct consensus_state_activate_result *result)
+{
+    bool outcome_unknown = false;
+    bool ok = activate_cutover_reserve(progress_db, request, result) &&
+              activate_cutover_guard(progress_db, admitted_decision, result) &&
+              activate_cutover_body(progress_db, bundle_db, leased_manifest,
+                                    install_is_assisted, evidence, result);
+    if (ok)
+        ok = activate_commit_in_tx(progress_db, result, &outcome_unknown);
+    if (!ok)
+        activate_rollback_after_failure(progress_db, result,
+                                        &outcome_unknown);
+    return ok;
+}
+
+bool consensus_state_snapshot_install_activate(
+    sqlite3 *progress_db,
+    const struct consensus_state_activate_request *request,
+    struct consensus_state_activate_result *result)
+{
+    if (!result) {
+        LOG_WARN(ACTIVATE_SUBSYS, "activation requires a result object");
+        return false;
+    }
+    memset(result, 0, sizeof(*result));
+    if (!activate_check_request(progress_db, request, result))
+        return false; // raw-return-ok:logged-by-activate_fail
+
+    struct consensus_state_artifact_evidence *evidence = NULL;
+    struct consensus_state_bundle_manifest manifest;
+    uint8_t reopened_receipt_digest[32];
+    if (!activate_admit_bundle(request, result, &evidence, &manifest,
+                               reopened_receipt_digest))
+        return false; // raw-return-ok:logged-by-activate_fail
+
+    struct consensus_state_publication_decision_record admitted_decision;
+    if (!activate_check_decision_history(request, &manifest,
+                                         reopened_receipt_digest,
+                                         &admitted_decision, result)) {
+        consensus_state_artifact_evidence_free(evidence);
+        return false; // raw-return-ok:logged-by-activate_fail
+    }
+
+    result->height = manifest.height;
+
+    enum consensus_state_activate_authority authority =
+        CONSENSUS_STATE_ACTIVATE_AUTHORITY_ASSISTED;
+    if (!activate_resolve_tier(evidence, &manifest, request, result,
+                               &authority)) {
+        consensus_state_artifact_evidence_free(evidence);
+        return false; // raw-return-ok:logged-by-activate_fail
     }
     /* The tier is the RESOLVED authority, the single source of truth for the
      * provenance stamp: ASSISTED (borrowed above-checkpoint) → withhold
@@ -734,147 +1083,17 @@ bool consensus_state_snapshot_install_activate(
      *    then run the one atomic install transaction under the progress-store
      *    tx lock (stage_repair_force_stage_cursor requires both). */
     struct consensus_state_bundle_manifest leased_manifest;
-    uint8_t receipt_digest[32];
     sqlite3 *bundle_db = NULL;
-    if (!consensus_state_artifact_evidence_candidate_lease_begin(
-            evidence, &leased_manifest, receipt_digest, &bundle_db)) {
+    if (!activate_lease_bundle(evidence, reopened_receipt_digest, result,
+                               &leased_manifest, &bundle_db)) {
         consensus_state_artifact_evidence_free(evidence);
-        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                             "artifact evidence lease refused (stale)");
-    }
-    if (memcmp(receipt_digest, reopened_receipt_digest, 32) != 0) {
-        consensus_state_artifact_evidence_candidate_lease_end(evidence);
-        consensus_state_artifact_evidence_free(evidence);
-        return activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                             "leased artifact identity differs from the "
-                             "CAS-admitted receipt");
+        return false; // raw-return-ok:logged-by-activate_fail
     }
 
-    bool ok = true;
-    char *err = NULL;
     progress_store_tx_lock();
-    sqlite3_int64 backup_data_version = -1;
-    sqlite3_int64 backup_changes = -1;
-    if (!activate_backup_prior_generation(
-            progress_db, request->datadir_fd, request->datadir_display,
-            result->prior_generation_path,
-            sizeof(result->prior_generation_path), &backup_data_version,
-            &backup_changes))
-        ok = activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
-                           "prior-generation backup failed; refusing to "
-                           "install without a rollback point");
-    if (ok)
-        activate_run_after_backup_hook();
-    if (ok && sqlite3_exec(progress_db, "BEGIN IMMEDIATE", NULL, NULL, &err)
-                  != SQLITE_OK) {
-        if (err) { sqlite3_free(err); err = NULL; }
-        ok = activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
-                           "install transaction begin failed");
-    }
-    sqlite3_int64 begin_data_version = -1;
-    if (ok && (!activate_data_version(progress_db, &begin_data_version) ||
-               begin_data_version != backup_data_version ||
-               sqlite3_total_changes64(progress_db) != backup_changes ||
-               !activate_progress_file_unmoved(progress_db)))
-        ok = activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                           "progress store changed between prior-generation "
-                           "backup and cutover reservation");
-    /* Check the durable ADMIT's compare-and-swap frontier while the same
-     * BEGIN IMMEDIATE + process lock that spans the cutover is held. */
-    int32_t current_frontier = -1;
-    uint8_t current_frontier_hash[32] = {0};
-    if (ok &&
-        (!consensus_state_publication_cas_capture_frontier_locked(
-             progress_db, &current_frontier, current_frontier_hash) ||
-         !consensus_state_publication_cas_decision_is_current(
-             &admitted_decision, current_frontier,
-             current_frontier_hash)))
-        ok = activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                           "publication ADMIT frontier changed before "
-                           "activation (admitted h=%d, live h=%d)",
-                           admitted_decision.expected_frontier_height,
-                           current_frontier);
-    /* Schema creation belongs to the cutover transaction; a failed ensure
-     * must leave the pre-install store exactly unchanged. */
-    if (ok && (!coins_kv_ensure_schema(progress_db) ||
-               !anchor_kv_ensure_schema(progress_db) ||
-               !nullifier_kv_ensure_schema(progress_db) ||
-               !reducer_frontier_ensure_schema(progress_db)))
-        ok = activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
-                           "ensuring live coin/shielded/frontier schema failed");
-    if (ok)
-        ok = activate_apply_in_tx(progress_db, bundle_db, &leased_manifest,
-                                  install_is_assisted, result);
-    if (ok) {
-        activate_run_after_stream_hook();
-        ok = activate_verify_destination(progress_db, &leased_manifest,
-                                         result);
-    }
-    if (ok && !consensus_state_artifact_evidence_revalidate(evidence)) {
-        ok = activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                           "artifact evidence changed during activation "
-                           "stream");
-    }
-    if (ok && activate_consume_fail_seed())
-        ok = activate_fail(result, CONSENSUS_INSTALL_INJECTED_FAILURE,
-                           "injected tip-finalize seed failure");
-    if (ok && !tip_finalize_stage_seed_anchor(
-                  leased_manifest.height, leased_manifest.block_hash, true))
-        ok = activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
-                           "tip-finalize anchor seed failed inside cutover "
-                           "transaction");
-    if (ok && activate_consume_fail_after_seed())
-        ok = activate_fail(result, CONSENSUS_INSTALL_INJECTED_FAILURE,
-                           "injected post-seed cutover failure");
-    if (ok)
-        ok = activate_verify_terminal_in_tx(progress_db, &leased_manifest,
-                                            result);
-    if (ok && !consensus_state_artifact_evidence_revalidate(evidence))
-        ok = activate_fail(result, CONSENSUS_INSTALL_REFUSED,
-                           "artifact evidence changed before activation "
-                           "commit");
-    bool outcome_unknown = false;
-    if (ok && sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err)
-                  != SQLITE_OK) {
-        char commit_detail[128];
-        snprintf(commit_detail, sizeof(commit_detail), "%s",
-                 err ? err : sqlite3_errmsg(progress_db));
-        /* When SQLite leaves the transaction active, an acknowledged
-         * ROLLBACK proves the prior generation still owns the store. If
-         * autocommit is already on, COMMIT may have committed or auto-rolled
-         * back before reporting the I/O error; never guess which. */
-        if (sqlite3_get_autocommit(progress_db) == 0) {
-            int rrc = sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
-            outcome_unknown = rrc != SQLITE_OK ||
-                              sqlite3_get_autocommit(progress_db) == 0;
-        } else {
-            outcome_unknown = true;
-        }
-        if (outcome_unknown)
-            ok = activate_fail(
-                result, CONSENSUS_INSTALL_COMMIT_OUTCOME_UNKNOWN,
-                "install COMMIT outcome is unknown (%s); stop and inspect "
-                "or restore the durable prior generation at %s",
-                commit_detail, result->prior_generation_path);
-        else
-            ok = activate_fail(result, CONSENSUS_INSTALL_STORE_ERROR,
-                               "install COMMIT failed and the cutover "
-                               "transaction was rolled back (%s)",
-                               commit_detail);
-        if (err) { sqlite3_free(err); err = NULL; }
-    }
-    if (!ok && !outcome_unknown &&
-        sqlite3_get_autocommit(progress_db) == 0) {
-        int rrc = sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
-        if (rrc != SQLITE_OK || sqlite3_get_autocommit(progress_db) == 0) {
-            outcome_unknown = true;
-            (void)activate_fail(
-                result, CONSENSUS_INSTALL_COMMIT_OUTCOME_UNKNOWN,
-                "install rollback outcome is unknown; stop and inspect or "
-                "restore the durable prior generation at %s",
-                result->prior_generation_path);
-        }
-    }
+    bool ok = activate_cutover_locked(progress_db, bundle_db, request,
+                                      &leased_manifest, &admitted_decision,
+                                      install_is_assisted, evidence, result);
     progress_store_tx_unlock();
 
     consensus_state_artifact_evidence_candidate_lease_end(evidence);

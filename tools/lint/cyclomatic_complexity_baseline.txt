@@ -321,10 +321,6 @@ engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_anchors:21
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
-engine/composition/src/consensus_state_snapshot_install_activate.c:activate_apply_in_tx:37
-engine/composition/src/consensus_state_snapshot_install_activate.c:activate_stream_copy:16
-engine/composition/src/consensus_state_snapshot_install_activate.c:activate_verify_terminal_in_tx:16
-engine/composition/src/consensus_state_snapshot_install_activate.c:consensus_state_snapshot_install_activate:77
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
