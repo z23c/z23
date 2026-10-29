@@ -32,8 +32,9 @@ z23 fleet wiki history <slug>             # every revision, newest first
 z23 fleet wiki write <slug> <title> <body>
 ```
 
-`write` signs with this node's key. `<body>` is literal text or `@path` to
-read a file. Add `--format=entry` to refuse a body that is not a valid entry.
+`write` signs with this node's key. `<body>` is the literal page text, so
+pass a file's contents as the argument. Add `--format=entry` to refuse a
+body that is not a valid entry.
 
 Reviews are ordinary revisions whose body is a
 `zcl.fleet_wiki_review.v1` object naming one exact revision id:

@@ -19,5 +19,12 @@ section for your step, with `grep -n '^## ' docs/dev/DEVELOPING.md` to find it:
 | Integrate and push | `6. Integrate and push a coherent slice` |
 | Fleet policy, hosts, priorities | `Maintainer hosts`, `Fleet entry and policy ownership`, `The normal loop` |
 
+From Claude Code, call the `z23` MCP server's `z23_code` with `sub` set to
+`guide` for the paths you will edit: it returns owner rules, test groups and
+matching wiki lessons. `z23_search` with `scope` set to `wiki` searches the
+lessons. Tools: [`docs/agent/AGENT_API.md`](../../../docs/agent/AGENT_API.md),
+section `Local MCP adapter`. Reading and writing lessons:
+[`docs/agent/WIKI.md`](../../../docs/agent/WIKI.md).
+
 This compatibility skill holds no project doctrine; edit the canonical
 documents instead.
