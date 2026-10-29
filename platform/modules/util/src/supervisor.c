@@ -1002,6 +1002,69 @@ static void supervisor_monitor_runner(int64_t now)
     }
 }
 
+static void sweep_contract(struct liveness_contract *c, int64_t now)
+{
+    int64_t last_tick = atomic_load(&c->last_tick_us);
+    int64_t period_s  = atomic_load(&c->period_secs);
+    int64_t period_u  = atomic_load(&c->period_us);
+    int64_t deadl_s   = atomic_load(&c->deadline_secs);
+    int64_t quiet_us  = atomic_load(&c->progress_max_quiet_us);
+
+    /* Effective tick window: period_us (sub-second override) wins when set,
+     * else period_secs. Default period_us=0 ⇒ byte-identical to before for
+     * every child that does not opt into the sub-second cadence. */
+    int64_t period_window_us = period_u > 0 ? period_u
+                                            : period_s * 1000000;
+
+    /* Periodic on_tick driving. When the configured period has elapsed we
+     * only MARK the child due (an atomic flag); the tick-runner thread
+     * executes on_tick + stamps last_tick/ticks_run. The sweep never runs
+     * a child callback itself, so no child's I/O can freeze this thread.
+     * (Idempotent: re-marking an already-pending child is a no-op.) */
+    if (period_window_us > 0 &&
+        !atomic_load(&c->tick_running) &&
+        (now - last_tick) >= period_window_us) {
+        atomic_store(&c->tick_pending, true);
+    }
+
+    /* Bounded restart policy (OTP): a restartable child whose worker has
+     * EXITED is respawned here, or escalated to REPEATED_RESTART on storm.
+     * Runs before the stall block: a storm sets stall_reason, which the
+     * block below then honors (skips). TEMPORARY children are a no-op. */
+    maybe_restart(c, now);
+
+    /* Edge-triggered stall fires. Only on the rising edge:
+     * stall_reason transitions NONE → something. */
+    int sr = atomic_load(&c->stall_reason);
+    if (sr != SUPERVISOR_STALL_NONE) return;
+
+    /* Reload last_tick_us in case the tick-runner just bumped it. */
+    int64_t lt = atomic_load(&c->last_tick_us);
+    if (deadl_s > 0 && (now - lt) >= deadl_s * 1000000) {
+        int expected = SUPERVISOR_STALL_NONE;
+        if (atomic_compare_exchange_strong(&c->stall_reason,
+                &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
+            note_stall_fire(c, SUPERVISOR_STALL_TIME_DEADLINE);
+        }
+        return;
+    }
+
+    /* ARMED (see effective_progress_policy). `progress_changed_at_us` is
+     * refreshed by real progress AND by an explicit idle report, so what
+     * this actually detects is "ran repeatedly, produced nothing, and did
+     * not claim to be idle" — stuck, as opposed to caught up. */
+    if (quiet_us > 0) {
+        int64_t changed = atomic_load(&c->progress_changed_at_us);
+        if ((now - changed) >= quiet_us) {
+            int expected = SUPERVISOR_STALL_NONE;
+            if (atomic_compare_exchange_strong(&c->stall_reason,
+                    &expected, SUPERVISOR_STALL_NO_PROGRESS)) {
+                note_stall_fire(c, SUPERVISOR_STALL_NO_PROGRESS);
+            }
+        }
+    }
+}
+
 static void sweep_once(void)
 {
     int64_t now = platform_time_monotonic_us();
@@ -1031,66 +1094,7 @@ static void sweep_once(void)
         if (!c) continue;
         if (atomic_load(&c->completed)) continue;
 
-        int64_t last_tick = atomic_load(&c->last_tick_us);
-        int64_t period_s  = atomic_load(&c->period_secs);
-        int64_t period_u  = atomic_load(&c->period_us);
-        int64_t deadl_s   = atomic_load(&c->deadline_secs);
-        int64_t quiet_us  = atomic_load(&c->progress_max_quiet_us);
-
-        /* Effective tick window: period_us (sub-second override) wins when set,
-         * else period_secs. Default period_us=0 ⇒ byte-identical to before for
-         * every child that does not opt into the sub-second cadence. */
-        int64_t period_window_us = period_u > 0 ? period_u
-                                                : period_s * 1000000;
-
-        /* Periodic on_tick driving. When the configured period has elapsed we
-         * only MARK the child due (an atomic flag); the tick-runner thread
-         * executes on_tick + stamps last_tick/ticks_run. The sweep never runs
-         * a child callback itself, so no child's I/O can freeze this thread.
-         * (Idempotent: re-marking an already-pending child is a no-op.) */
-        if (period_window_us > 0 &&
-            !atomic_load(&c->tick_running) &&
-            (now - last_tick) >= period_window_us) {
-            atomic_store(&c->tick_pending, true);
-        }
-
-        /* Bounded restart policy (OTP): a restartable child whose worker has
-         * EXITED is respawned here, or escalated to REPEATED_RESTART on storm.
-         * Runs before the stall block: a storm sets stall_reason, which the
-         * block below then honors (skips). TEMPORARY children are a no-op. */
-        maybe_restart(c, now);
-
-        /* Edge-triggered stall fires. Only on the rising edge:
-         * stall_reason transitions NONE → something. */
-        int sr = atomic_load(&c->stall_reason);
-        if (sr != SUPERVISOR_STALL_NONE) continue;
-
-        /* Reload last_tick_us in case the tick-runner just bumped it. */
-        int64_t lt = atomic_load(&c->last_tick_us);
-
-        if (deadl_s > 0 && (now - lt) >= deadl_s * 1000000) {
-            int expected = SUPERVISOR_STALL_NONE;
-            if (atomic_compare_exchange_strong(&c->stall_reason,
-                    &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
-                note_stall_fire(c, SUPERVISOR_STALL_TIME_DEADLINE);
-            }
-            continue;
-        }
-
-        /* ARMED (see effective_progress_policy). `progress_changed_at_us` is
-         * refreshed by real progress AND by an explicit idle report, so what
-         * this actually detects is "ran repeatedly, produced nothing, and did
-         * not claim to be idle" — stuck, as opposed to caught up. */
-        if (quiet_us > 0) {
-            int64_t changed = atomic_load(&c->progress_changed_at_us);
-            if ((now - changed) >= quiet_us) {
-                int expected = SUPERVISOR_STALL_NONE;
-                if (atomic_compare_exchange_strong(&c->stall_reason,
-                        &expected, SUPERVISOR_STALL_NO_PROGRESS)) {
-                    note_stall_fire(c, SUPERVISOR_STALL_NO_PROGRESS);
-                }
-            }
-        }
+        sweep_contract(c, now);
     }
 
     /* Drain / monitor the tick-runner. Production startup requires it. Inline
