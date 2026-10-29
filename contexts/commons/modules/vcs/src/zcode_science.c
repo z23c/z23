@@ -101,62 +101,72 @@ static const char *vcs_zcode_science_error_string_field(
     }
 }
 
-static const char *vcs_zcode_science_error_string_binding(
-    enum vcs_zcode_science_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED: return "distinct-root-required";
-    case VCS_ZCODE_SCIENCE_ERR_STUDY_MISMATCH: return "study-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_TASK_MISMATCH: return "task-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_CANDIDATE_MISMATCH:
-        return "candidate-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_RESULT_MISMATCH: return "result-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_REVIEW_MISMATCH: return "review-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_ENVIRONMENT_MISMATCH:
-        return "environment-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_NETWORK_MISMATCH:
-        return "network-genesis-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_IDENTITY_MISMATCH:
-        return "identity-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_EXPIRED: return "object-expired";
-    case VCS_ZCODE_SCIENCE_ERR_EVIDENCE_FUTURE: return "evidence-from-future";
-    case VCS_ZCODE_SCIENCE_ERR_ACTION_MISMATCH: return "action-root-mismatch";
-    default: return NULL;
-    }
-}
+struct vcs_zcode_science_error_text {
+    enum vcs_zcode_science_error error;
+    const char *text;
+};
 
-static const char *vcs_zcode_science_error_string_profile(
+static const struct vcs_zcode_science_error_text
+    vcs_zcode_science_binding_texts[] = {
+    { VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED, "distinct-root-required" },
+    { VCS_ZCODE_SCIENCE_ERR_STUDY_MISMATCH, "study-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_TASK_MISMATCH, "task-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_CANDIDATE_MISMATCH, "candidate-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_RESULT_MISMATCH, "result-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_REVIEW_MISMATCH, "review-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_ENVIRONMENT_MISMATCH,
+      "environment-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_NETWORK_MISMATCH, "network-genesis-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_IDENTITY_MISMATCH, "identity-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_EXPIRED, "object-expired" },
+    { VCS_ZCODE_SCIENCE_ERR_EVIDENCE_FUTURE, "evidence-from-future" },
+    { VCS_ZCODE_SCIENCE_ERR_ACTION_MISMATCH, "action-root-mismatch" },
+};
+
+static const struct vcs_zcode_science_error_text
+    vcs_zcode_science_profile_texts[] = {
+    { VCS_ZCODE_SCIENCE_ERR_PADDING, "string-padding-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_ISA, "isa-bits-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_DISTRIBUTION, "sample-distribution-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_METHOD_MISMATCH, "method-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_HARDWARE_MISMATCH,
+      "hardware-profile-root-mismatch" },
+    { VCS_ZCODE_SCIENCE_ERR_PROFILE, "science-profile-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_RIGHTS, "rights-vocabulary-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP, "authorship-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_EMBARGO, "embargo-time-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE, "science-relation-type-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_RELATION_ORDER,
+      "science-relation-order-invalid" },
+    { VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH,
+      "science-relation-root-mismatch" },
+};
+
+static const char *vcs_zcode_science_error_text_lookup(
+    const struct vcs_zcode_science_error_text *table, size_t count,
     enum vcs_zcode_science_error error)
 {
-    switch (error) {
-    case VCS_ZCODE_SCIENCE_ERR_PADDING: return "string-padding-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_ISA: return "isa-bits-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_DISTRIBUTION:
-        return "sample-distribution-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_METHOD_MISMATCH: return "method-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_HARDWARE_MISMATCH:
-        return "hardware-profile-root-mismatch";
-    case VCS_ZCODE_SCIENCE_ERR_PROFILE: return "science-profile-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_RIGHTS: return "rights-vocabulary-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_AUTHORSHIP: return "authorship-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_EMBARGO: return "embargo-time-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_RELATION_TYPE:
-        return "science-relation-type-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_RELATION_ORDER:
-        return "science-relation-order-invalid";
-    case VCS_ZCODE_SCIENCE_ERR_RELATION_MISMATCH:
-        return "science-relation-root-mismatch";
-    default: return NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (table[i].error == error) return table[i].text;
     }
+    return NULL;
 }
 
 const char *vcs_zcode_science_error_string(enum vcs_zcode_science_error error)
 {
     const char *text = vcs_zcode_science_error_string_field(error);
     if (text) return text;
-    text = vcs_zcode_science_error_string_binding(error);
+    text = vcs_zcode_science_error_text_lookup(
+        vcs_zcode_science_binding_texts,
+        sizeof(vcs_zcode_science_binding_texts) /
+            sizeof(vcs_zcode_science_binding_texts[0]),
+        error);
     if (text) return text;
-    text = vcs_zcode_science_error_string_profile(error);
+    text = vcs_zcode_science_error_text_lookup(
+        vcs_zcode_science_profile_texts,
+        sizeof(vcs_zcode_science_profile_texts) /
+            sizeof(vcs_zcode_science_profile_texts[0]),
+        error);
     if (text) return text;
     return "unknown";
 }
