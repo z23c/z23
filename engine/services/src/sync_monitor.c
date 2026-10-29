@@ -376,6 +376,33 @@ void sync_monitor_kick_local_sync(const char *reason)
     }
 }
 
+static bool frontier_active_fast_match(const struct block_index *bi,
+                                       const struct block_index *prev,
+                                       int target_height)
+{
+    return bi && bi->nHeight == target_height && bi->phashBlock &&
+           !block_has_any_failure(bi) &&
+           (target_height == 0 || !prev || bi->pprev == prev);
+}
+
+static struct block_index *frontier_map_scan(struct main_state *ms,
+                                             int target_height,
+                                             const struct block_index *prev)
+{
+    struct block_index *bi = NULL;
+    size_t iter = 0;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
+        if (bi && bi->nHeight == target_height &&
+            bi->phashBlock && !block_has_any_failure(bi))
+        {
+            if (target_height > 0 && prev && bi->pprev != prev)
+                continue;
+            return bi;
+        }
+    }
+    return NULL;
+}
+
 static struct block_index *find_active_frontier_child(
     struct main_state *ms,
     int target_height)
@@ -388,22 +415,10 @@ static struct block_index *find_active_frontier_child(
     struct block_index *prev = target_height > 0
         ? active_chain_at(&ms->chain_active, target_height - 1)
         : NULL;
-    if (bi && bi->nHeight == target_height && bi->phashBlock &&
-        !block_has_any_failure(bi) &&
-        (target_height == 0 || !prev || bi->pprev == prev))
+    if (frontier_active_fast_match(bi, prev, target_height))
         return bi;
 
-    size_t iter = 0;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-        if (bi && bi->nHeight == target_height &&
-            bi->phashBlock && !block_has_any_failure(bi))
-        {
-            if (target_height > 0 && prev && bi->pprev != prev)
-                continue;
-            return bi;
-        }
-    }
-    return NULL;
+    return frontier_map_scan(ms, target_height, prev);
 }
 
 static struct block_index *find_best_header_ancestor(
@@ -436,15 +451,32 @@ static void reset_local_addnode_backoff(struct connman *cm)
     }
 }
 
+static bool sync_state_is_blocks_active(enum sync_state st)
+{
+    return st == SYNC_BLOCKS_DOWNLOAD || st == SYNC_CONNECTING_BLOCKS;
+}
+
+static bool sync_state_wakes_to_headers(enum sync_state st)
+{
+    return st == SYNC_IDLE || st == SYNC_AT_TIP ||
+           st == SYNC_FINDING_PEERS || st == SYNC_SNAPSHOT_RECEIVE;
+}
+
+static const char *sync_monitor_reason_or(const char *reason,
+                                          const char *fallback)
+{
+    return reason ? reason : fallback;
+}
+
 static bool ensure_blocks_download_state(const char *reason)
 {
     enum sync_state st = sync_get_state();
-    if (st == SYNC_BLOCKS_DOWNLOAD || st == SYNC_CONNECTING_BLOCKS)
+    if (sync_state_is_blocks_active(st))
         return true;
 
     if (st == SYNC_FAILED) {
-        if (!sync_set_state(SYNC_IDLE, reason ? reason :
-                            "frontier body queue reset")) {
+        if (!sync_set_state(SYNC_IDLE, sync_monitor_reason_or(reason,
+                            "frontier body queue reset"))) {
             LOG_WARN("sync_monitor",
                      "[sync_monitor] block-download wake failed: %s -> idle",
                      sync_state_name(st));
@@ -453,10 +485,9 @@ static bool ensure_blocks_download_state(const char *reason)
         st = sync_get_state();
     }
 
-    if (st == SYNC_IDLE || st == SYNC_AT_TIP ||
-        st == SYNC_FINDING_PEERS || st == SYNC_SNAPSHOT_RECEIVE) {
-        if (!sync_set_state(SYNC_HEADERS_DOWNLOAD, reason ? reason :
-                            "frontier body queue headers")) {
+    if (sync_state_wakes_to_headers(st)) {
+        if (!sync_set_state(SYNC_HEADERS_DOWNLOAD, sync_monitor_reason_or(reason,
+                            "frontier body queue headers"))) {
             LOG_WARN("sync_monitor",
                      "[sync_monitor] block-download wake failed: %s -> "
                      "headers_download",
@@ -467,8 +498,8 @@ static bool ensure_blocks_download_state(const char *reason)
     }
 
     if (st == SYNC_HEADERS_DOWNLOAD || st == SYNC_REORG_RECOVERY) {
-        if (!sync_set_state(SYNC_BLOCKS_DOWNLOAD, reason ? reason :
-                            "frontier body queue")) {
+        if (!sync_set_state(SYNC_BLOCKS_DOWNLOAD, sync_monitor_reason_or(reason,
+                            "frontier body queue"))) {
             LOG_WARN("sync_monitor",
                      "[sync_monitor] block-download wake failed: %s -> "
                      "blocks_download",
@@ -478,8 +509,7 @@ static bool ensure_blocks_download_state(const char *reason)
         return true;
     }
 
-    return sync_get_state() == SYNC_BLOCKS_DOWNLOAD ||
-           sync_get_state() == SYNC_CONNECTING_BLOCKS;
+    return sync_state_is_blocks_active(sync_get_state());
 }
 
 enum body_queue_selector { BODY_QUEUE_ACTIVE_FRONTIER = 0,
@@ -520,23 +550,27 @@ static void queue_body_push(struct download_manager *dm,
     dl_queue_priority(dm, hash, target_height);
 }
 
-static struct zcl_result queue_body_target(
+struct body_queue_snapshot {
+    struct uint256 target_hash;
+    bool already_have_data;
+    int local_h;
+    bool history_lane;
+};
+
+/* Resolve and validate the target under cs_main and fill the snapshot. */
+static struct zcl_result queue_body_snapshot(
+    struct main_state *ms,
     int target_height,
-    const char *reason,
     enum body_queue_selector selector,
-    const struct uint256 *expected_hash)
+    const struct uint256 *expected_hash,
+    struct body_queue_snapshot *snap)
 {
-    struct main_state *ms = sync_monitor_main_state();
-    struct download_manager *dm = sync_monitor_download_manager();
-    if (!ms || !dm)
-        return ZCL_ERR(-1, "frontier body queue: missing ms or dm");
     const char *selector_name = selector == BODY_QUEUE_ACTIVE_FRONTIER
         ? "active frontier" : "best-header ancestor";
 
-    struct uint256 target_hash;
-    memset(&target_hash, 0, sizeof(target_hash));
-    bool already_have_data = false;
-    int local_h = target_height - 1;
+    memset(&snap->target_hash, 0, sizeof(snap->target_hash));
+    snap->already_have_data = false;
+    snap->local_h = target_height - 1;
 
     zcl_mutex_lock(&ms->cs_main);
     if (target_height < 0) {
@@ -565,17 +599,40 @@ static struct zcl_result queue_body_target(
         return ZCL_ERR(-6, "frontier body queue: %s hash changed at h=%d",
                        selector_name, target_height);
     }
-    already_have_data = (target->nStatus & BLOCK_HAVE_DATA) != 0;
-    target_hash = *target->phashBlock;
+    snap->already_have_data = (target->nStatus & BLOCK_HAVE_DATA) != 0;
+    snap->target_hash = *target->phashBlock;
     int served_tip = active_chain_height(&ms->chain_active);
     if (selector == BODY_QUEUE_BEST_HEADER_ANCESTOR)
-        local_h = served_tip;
+        snap->local_h = served_tip;
     /* Mid-chain refetch uses the history lane. FORWARD assignment prefers
      * the tip-adjacent reserve, so a height millions below tip sat queued
      * and unwitnessed. */
-    bool history_lane =
+    snap->history_lane =
         queue_body_uses_history_lane(selector, served_tip, target_height);
     zcl_mutex_unlock(&ms->cs_main);
+    return ZCL_OK;
+}
+
+static struct zcl_result queue_body_target(
+    int target_height,
+    const char *reason,
+    enum body_queue_selector selector,
+    const struct uint256 *expected_hash)
+{
+    struct main_state *ms = sync_monitor_main_state();
+    struct download_manager *dm = sync_monitor_download_manager();
+    if (!ms || !dm)
+        return ZCL_ERR(-1, "frontier body queue: missing ms or dm");
+
+    struct body_queue_snapshot snap = {0};
+    struct zcl_result snap_res = queue_body_snapshot(
+        ms, target_height, selector, expected_hash, &snap);
+    if (!snap_res.ok)
+        return snap_res;
+    struct uint256 target_hash = snap.target_hash;
+    bool already_have_data = snap.already_have_data;
+    int local_h = snap.local_h;
+    bool history_lane = snap.history_lane;
 
     /* Receipt can win the race after a Condition's final witness check but
      * before this exact identity/status snapshot. In that case there is no
@@ -593,19 +650,19 @@ static struct zcl_result queue_body_target(
     if (cm)
         connman_kick_seed_discovery(cm);
 
-    if (!ensure_blocks_download_state(reason ? reason :
-                                      "frontier body queue"))
+    if (!ensure_blocks_download_state(sync_monitor_reason_or(reason,
+                                      "frontier body queue")))
         return ZCL_ERR(-5,
                        "frontier body queue: sync state wake failed from %s",
                        sync_state_name(sync_get_state()));
 
-    sync_monitor_kick_local_sync(reason ? reason :
-                                 "frontier body queue");
+    sync_monitor_kick_local_sync(sync_monitor_reason_or(reason,
+                                 "frontier body queue"));
     sync_monitor_record_recovery(WATCHDOG_BODY_FRONTIER_MISSING,
                                  local_h, target_height,
                                  cm ? (int)connman_get_node_count(cm) : 0,
-                                 reason ? reason :
-                                 "frontier body queue");
+                                 sync_monitor_reason_or(reason,
+                                 "frontier body queue"));
     return ZCL_OK;
 }
 
@@ -644,6 +701,58 @@ bool sync_monitor_active_next_child_exists(struct main_state *ms,
     return false;
 }
 
+static bool local_refill_peer_eligible(const struct p2p_node *n, int next_h)
+{
+    if (!n || n->disconnect || n->inbound)
+        return false;
+    if (n->starting_height < next_h ||
+        n->state < PEER_HANDSHAKE_COMPLETE)
+        return false;
+    return true;
+}
+
+static bool local_refill_should_rotate(int prev_retry_count,
+                                       const struct p2p_node *worst,
+                                       int eligible)
+{
+    return prev_retry_count > 0 && worst && eligible >= 2 &&
+           eligible < LOCAL_HEADER_REFILL_MIN_PEERS;
+}
+
+static void local_refill_reset_peer(struct p2p_node *n)
+{
+    atomic_store_explicit(&n->last_getheaders_time, 0, memory_order_relaxed);
+    atomic_store_explicit(&n->getheaders_stale_count, 0, memory_order_relaxed);
+    if (n->state == PEER_HANDSHAKE_COMPLETE ||
+        n->state == PEER_ACTIVE ||
+        n->state == PEER_SYNCING_BLOCKS ||
+        n->state == PEER_STALE) {
+        (void)peer_set_state_checked((uint32_t)n->id, &n->state,
+                                     PEER_SYNCING_HEADERS,
+                                     "condition local header refill");
+    }
+}
+
+/* Caller holds g_local_recovery_lock. */
+static void local_refill_record_locked(int next_h, const char *reason,
+                                       int eligible, bool rotated_peer)
+{
+    if (rotated_peer)
+        g_local_recovery.peer_rotation_count++;
+    g_local_recovery.active = true;
+    g_local_recovery.missing_height = next_h;
+    g_local_recovery.retry_count++;
+    g_local_recovery.distinct_peer_count = eligible;
+    snprintf(g_local_recovery.mode, sizeof(g_local_recovery.mode),
+             "%s", "next-child-missing");
+    snprintf(g_local_recovery.last_reason,
+             sizeof(g_local_recovery.last_reason), "%s",
+             reason ? reason : "");
+    if (eligible >= LOCAL_HEADER_REFILL_MIN_PEERS ||
+        g_local_recovery.retry_count >= LOCAL_HEADER_REFILL_MAX_RETRIES)
+        g_local_recovery.retries_exhausted = true;
+}
+
 int sync_monitor_local_header_refill(struct connman *cm,
                                      int next_h,
                                      const char *reason)
@@ -665,31 +774,18 @@ int sync_monitor_local_header_refill(struct connman *cm,
     zcl_mutex_lock(&cm->manager.cs_nodes);
     for (size_t i = 0; i < cm->manager.num_nodes; i++) {
         struct p2p_node *n = cm->manager.nodes[i];
-        if (!n || n->disconnect || n->inbound)
-            continue;
-        if (n->starting_height < next_h ||
-            n->state < PEER_HANDSHAKE_COMPLETE)
+        if (!local_refill_peer_eligible(n, next_h))
             continue;
 
         eligible++;
-        atomic_store_explicit(&n->last_getheaders_time, 0, memory_order_relaxed);
-        atomic_store_explicit(&n->getheaders_stale_count, 0, memory_order_relaxed);
-        if (n->state == PEER_HANDSHAKE_COMPLETE ||
-            n->state == PEER_ACTIVE ||
-            n->state == PEER_SYNCING_BLOCKS ||
-            n->state == PEER_STALE) {
-            (void)peer_set_state_checked((uint32_t)n->id, &n->state,
-                                         PEER_SYNCING_HEADERS,
-                                         "condition local header refill");
-        }
+        local_refill_reset_peer(n);
 
         if (!worst ||
             n->total_headers_delivered < worst->total_headers_delivered)
             worst = n;
     }
 
-    if (prev_retry_count > 0 && worst && eligible >= 2 &&
-        eligible < LOCAL_HEADER_REFILL_MIN_PEERS) {
+    if (local_refill_should_rotate(prev_retry_count, worst, eligible)) {
         (void)p2p_node_request_disconnect(worst, P2P_DISCONNECT_SYNC_STALL,
             P2P_DISCONNECT_SOURCE_SYNC, worst->endpoint_generation);
         rotated_peer = true;
@@ -701,20 +797,7 @@ int sync_monitor_local_header_refill(struct connman *cm,
     }
 
     pthread_mutex_lock(&g_local_recovery_lock);
-    if (rotated_peer)
-        g_local_recovery.peer_rotation_count++;
-    g_local_recovery.active = true;
-    g_local_recovery.missing_height = next_h;
-    g_local_recovery.retry_count++;
-    g_local_recovery.distinct_peer_count = eligible;
-    snprintf(g_local_recovery.mode, sizeof(g_local_recovery.mode),
-             "%s", "next-child-missing");
-    snprintf(g_local_recovery.last_reason,
-             sizeof(g_local_recovery.last_reason), "%s",
-             reason ? reason : "");
-    if (eligible >= LOCAL_HEADER_REFILL_MIN_PEERS ||
-        g_local_recovery.retry_count >= LOCAL_HEADER_REFILL_MAX_RETRIES)
-        g_local_recovery.retries_exhausted = true;
+    local_refill_record_locked(next_h, reason, eligible, rotated_peer);
     pthread_mutex_unlock(&g_local_recovery_lock);
 
     return eligible;
