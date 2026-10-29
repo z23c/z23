@@ -647,7 +647,6 @@ tests/harness/src/test_reducer_reconcile_witness.c:test_reducer_reconcile_witnes
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
-tests/harness/src/test_sapling_ckpt_persist.c:test_sapling_ckpt_persist:95
 tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
 tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56

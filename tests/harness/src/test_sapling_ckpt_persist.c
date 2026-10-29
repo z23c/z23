@@ -68,7 +68,7 @@ static bool ckpt_ensure_log_schema(sqlite3 *db)
     return true;
 }
 
-int test_sapling_ckpt_persist(void)
+static int ckpt_case_round_trip(void)
 {
     int failures = 0;
     char path[128];
@@ -116,6 +116,13 @@ int test_sapling_ckpt_persist(void)
         unlink(path);
 done_rt:;
     }
+    return failures;
+}
+
+static int ckpt_case_corrupt_rejected(void)
+{
+    int failures = 0;
+    char path[128];
 
     /* (b) corrupted cache is rejected on load (SHA3 tamper detection). */
     printf("sapling_ckpt_persist corrupted cache rejected ... ");
@@ -157,6 +164,12 @@ done_rt:;
         unlink(path);
 done_corrupt:;
     }
+    return failures;
+}
+
+static int ckpt_case_verify_binding(void)
+{
+    int failures = 0;
 
     /* (c)+(d)+(e) fail-closed binding decision (pure, no chain needed). */
     printf("sapling_ckpt_persist verify_binding fail-closed verdicts ... ");
@@ -211,6 +224,12 @@ done_corrupt:;
         if (local) { printf("FAIL (%d verdicts wrong)\n", local); failures += local; }
         else       { printf("OK\n"); }
     }
+    return failures;
+}
+
+static int ckpt_case_absent_cache(void)
+{
+    int failures = 0;
 
     /* (e) absent cache: load of a missing file returns false (full replay). */
     printf("sapling_ckpt_persist absent cache = full-replay path ... ");
@@ -224,6 +243,13 @@ done_corrupt:;
         if (ok) { printf("FAIL (loaded from missing file)\n"); failures++; }
         else    { printf("OK\n"); }
     }
+    return failures;
+}
+
+static int ckpt_case_delta_replay(void)
+{
+    int failures = 0;
+    char path[128];
 
     /* delta-replay equivalence: a resumed frontier + forward replay yields the
      * same root as a full replay (the fast-resume correctness guarantee). */
@@ -277,6 +303,8 @@ done_corrupt:;
         unlink(path);
 done_delta:;
     }
+    return failures;
+}
 
     /* Make coins_kv the PROVEN authority on `db` (the other two rungs of
      * coins_kv_is_proven_authority, beside coins_applied_height itself):
@@ -286,6 +314,45 @@ done_delta:;
      * sapling_tree_flat_checkpoint_note calls internally) reports
      * found=true instead of failing open. */
     #define CKPT_BOUND_H ((int32_t)900000)
+
+static int ckpt_bound_verdict(bool ok, bool wrote_ahead,
+                              bool file_absent_after_refuse, bool wrote_ok,
+                              bool loaded, int64_t got_h, bool wrote_clobber,
+                              bool still_loads, int64_t got_h2)
+{
+    if (!ok) {
+        printf("FAIL (fixture setup)\n");
+        return 1;
+    }
+    if (wrote_ahead) {
+        printf("FAIL (write ahead of frontier was NOT refused)\n");
+        return 1;
+    }
+    if (!file_absent_after_refuse) {
+        printf("FAIL (refused write still created a file)\n");
+        return 1;
+    }
+    if (!wrote_ok || !loaded || got_h != CKPT_BOUND_H) {
+        printf("FAIL (in-window write did not round-trip, got_h=%lld)\n",
+               (long long)got_h);
+        return 1;
+    }
+    if (wrote_clobber) {
+        printf("FAIL (out-of-window write clobbered the good checkpoint)\n");
+        return 1;
+    }
+    if (!still_loads || got_h2 != CKPT_BOUND_H) {
+        printf("FAIL (good checkpoint was NOT preserved, got_h2=%lld)\n",
+               (long long)got_h2);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
+static int ckpt_case_flat_note_bound(void)
+{
+    int failures = 0;
 
     /* (f) BOUND: sapling_tree_flat_checkpoint_note refuses a height ahead
      * of the reducer's own applied frontier — even under force=true — and
@@ -363,29 +430,51 @@ done_delta:;
         unlink(ckpt_path);
         progress_store_close();
 
-        if (!ok) {
-            printf("FAIL (fixture setup)\n"); failures++;
-        } else if (wrote_ahead) {
-            printf("FAIL (write ahead of frontier was NOT refused)\n");
-            failures++;
-        } else if (!file_absent_after_refuse) {
-            printf("FAIL (refused write still created a file)\n");
-            failures++;
-        } else if (!wrote_ok || !loaded || got_h != CKPT_BOUND_H) {
-            printf("FAIL (in-window write did not round-trip, got_h=%lld)\n",
-                   (long long)got_h);
-            failures++;
-        } else if (wrote_clobber) {
-            printf("FAIL (out-of-window write clobbered the good checkpoint)\n");
-            failures++;
-        } else if (!still_loads || got_h2 != CKPT_BOUND_H) {
-            printf("FAIL (good checkpoint was NOT preserved, got_h2=%lld)\n",
-                   (long long)got_h2);
-            failures++;
-        } else {
-            printf("OK\n");
-        }
+        failures += ckpt_bound_verdict(ok, wrote_ahead,
+                                       file_absent_after_refuse, wrote_ok,
+                                       loaded, got_h, wrote_clobber,
+                                       still_loads, got_h2);
     }
+    return failures;
+}
+
+static int ckpt_tier1_verdict(bool ok, bool loaded, int64_t got_h, int64_t H,
+                              const struct uint256 *got_root,
+                              const struct uint256 *want_root,
+                              bool have_hstar, int32_t hstar_now,
+                              int64_t activation, int64_t stall_height)
+{
+    if (!ok) {
+        printf("FAIL (fixture setup)\n");
+        return 1;
+    }
+    if (!loaded || got_h != H) {
+        printf("FAIL (hook did not land a checkpoint at h=%lld, got=%lld)\n",
+               (long long)H, (long long)got_h);
+        return 1;
+    }
+    if (memcmp(got_root->data, want_root->data, 32) != 0) {
+        printf("FAIL (checkpointed root != the anchor_kv frontier root)\n");
+        return 1;
+    }
+    if (!have_hstar || hstar_now != (int32_t)H + 50) {
+        printf("FAIL (reducer frontier re-derivation, hstar=%d)\n", hstar_now);
+        return 1;
+    }
+    if (!(got_h >= activation && got_h < stall_height)) {
+        printf("FAIL (tier1 window precondition NOT satisfied: "
+               "activation=%lld ckpt_h=%lld stall_height=%lld)\n",
+               (long long)activation, (long long)got_h,
+               (long long)stall_height);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
+static int ckpt_case_hook_tier1(void)
+{
+    int failures = 0;
 
     /* (g) sapling_checkpoint_hook_in_tx end-to-end: the reducer-cursor hook
      * checkpoints the anchor_kv frontier at the height the reducer just
@@ -464,29 +553,61 @@ done_delta:;
         unlink(ckpt_path);
         progress_store_close();
 
-        if (!ok) {
-            printf("FAIL (fixture setup)\n"); failures++;
-        } else if (!loaded || got_h != H) {
-            printf("FAIL (hook did not land a checkpoint at h=%lld, got=%lld)\n",
-                   (long long)H, (long long)got_h);
-            failures++;
-        } else if (memcmp(got_root.data, want_root.data, 32) != 0) {
-            printf("FAIL (checkpointed root != the anchor_kv frontier root)\n");
-            failures++;
-        } else if (!have_hstar || hstar_now != (int32_t)H + 50) {
-            printf("FAIL (reducer frontier re-derivation, hstar=%d)\n",
-                   hstar_now);
-            failures++;
-        } else if (!(got_h >= activation && got_h < stall_height)) {
-            printf("FAIL (tier1 window precondition NOT satisfied: "
-                   "activation=%lld ckpt_h=%lld stall_height=%lld)\n",
-                   (long long)activation, (long long)got_h,
-                   (long long)stall_height);
-            failures++;
-        } else {
-            printf("OK\n");
-        }
+        failures += ckpt_tier1_verdict(ok, loaded, got_h, H, &got_root,
+                                       &want_root, have_hstar, hstar_now,
+                                       activation, stall_height);
     }
+    return failures;
+}
+
+static bool ckpt_corrupt_frontier_row(sqlite3 *pdb, int64_t height)
+{
+    sqlite3_stmt *upd = NULL;
+    static const uint8_t garbage[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0};
+    bool ok = sqlite3_prepare_v2(pdb,
+            "UPDATE sapling_anchors SET tree=? WHERE height=?",
+            -1, &upd, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_blob(upd, 1, garbage, sizeof(garbage), SQLITE_STATIC);
+        sqlite3_bind_int64(upd, 2, height);
+        ok = sqlite3_step(upd) == SQLITE_DONE;
+        sqlite3_finalize(upd);
+    }
+    return ok;
+}
+
+static int ckpt_anchor_blocker_verdict(bool ok, bool blocker_raised_on_error,
+                                       bool blocker_cleared_after_repair)
+{
+    if (!ok) {
+        printf("FAIL (fixture setup)\n");
+        return 1;
+    }
+    if (!blocker_raised_on_error) {
+        printf("FAIL (typed blocker NOT raised on anchor read error)\n");
+        return 1;
+    }
+    if (!blocker_cleared_after_repair) {
+        printf("FAIL (typed blocker did NOT self-clear after repair)\n");
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
+static void ckpt_fire_hook_if(bool ok, sqlite3 *pdb, int64_t height,
+                              const uint8_t bhash[32])
+{
+#ifdef ZCL_TESTING
+    sapling_checkpoint_hook_test_force_next();
+#endif
+    if (ok)
+        sapling_checkpoint_hook_in_tx(pdb, height, bhash);
+}
+
+static int ckpt_case_hook_anchor_blocker(void)
+{
+    int failures = 0;
 
     /* (h) sapling_checkpoint_hook_in_tx names a typed blocker (Wave N
      * hardening, FORWARD_PLAN.md item 7) when anchor_kv_latest_tree hits a
@@ -526,19 +647,8 @@ done_delta:;
          * anchor_kv_latest_tree's decode/root check fails -> ANCHOR_KV_ERROR
          * (a genuine store-read error), not ANCHOR_KV_MISSING/
          * HISTORY_INCOMPLETE. */
-        if (ok) {
-            sqlite3_stmt *upd = NULL;
-            static const uint8_t garbage[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0};
-            ok = sqlite3_prepare_v2(pdb,
-                    "UPDATE sapling_anchors SET tree=? WHERE height=?",
-                    -1, &upd, NULL) == SQLITE_OK;
-            if (ok) {
-                sqlite3_bind_blob(upd, 1, garbage, sizeof(garbage), SQLITE_STATIC);
-                sqlite3_bind_int64(upd, 2, H);
-                ok = sqlite3_step(upd) == SQLITE_DONE;
-                sqlite3_finalize(upd);
-            }
-        }
+        if (ok)
+            ok = ckpt_corrupt_frontier_row(pdb, H);
 
         set_sapling_checkpoint_datadir(dir);
         char ckpt_path[512];
@@ -547,11 +657,7 @@ done_delta:;
 
         uint8_t bhash[32];
         for (int i = 0; i < 32; i++) bhash[i] = (uint8_t)(0xC0 + i);
-#ifdef ZCL_TESTING
-        sapling_checkpoint_hook_test_force_next();
-#endif
-        if (ok)
-            sapling_checkpoint_hook_in_tx(pdb, H, bhash);
+        ckpt_fire_hook_if(ok, pdb, H, bhash);
 
         bool blocker_raised_on_error = ok &&
             blocker_exists("sapling_checkpoint_hook.anchor_read_error");
@@ -569,11 +675,7 @@ done_delta:;
         ckpt_fill_hash(&extra_cm, 0x5A, 99);
         incremental_tree_append(&frontier2, &extra_cm);
         ok = ok && anchor_kv_add_tree(pdb, ANCHOR_POOL_SAPLING, &frontier2, H + 1);
-#ifdef ZCL_TESTING
-        sapling_checkpoint_hook_test_force_next();
-#endif
-        if (ok)
-            sapling_checkpoint_hook_in_tx(pdb, H + 1, bhash);
+        ckpt_fire_hook_if(ok, pdb, H + 1, bhash);
         bool blocker_cleared_after_repair = ok &&
             !blocker_exists("sapling_checkpoint_hook.anchor_read_error");
 
@@ -581,20 +683,26 @@ done_delta:;
         unlink(ckpt_path);
         progress_store_close();
 
-        if (!ok) {
-            printf("FAIL (fixture setup)\n"); failures++;
-        } else if (!blocker_raised_on_error) {
-            printf("FAIL (typed blocker NOT raised on anchor read error)\n");
-            failures++;
-        } else if (!blocker_cleared_after_repair) {
-            printf("FAIL (typed blocker did NOT self-clear after repair)\n");
-            failures++;
-        } else {
-            printf("OK\n");
-        }
+        failures += ckpt_anchor_blocker_verdict(ok, blocker_raised_on_error,
+                                                blocker_cleared_after_repair);
     }
+    return failures;
+}
 
     #undef CKPT_BOUND_H
+
+int test_sapling_ckpt_persist(void)
+{
+    int failures = 0;
+
+    failures += ckpt_case_round_trip();
+    failures += ckpt_case_corrupt_rejected();
+    failures += ckpt_case_verify_binding();
+    failures += ckpt_case_absent_cache();
+    failures += ckpt_case_delta_replay();
+    failures += ckpt_case_flat_note_bound();
+    failures += ckpt_case_hook_tier1();
+    failures += ckpt_case_hook_anchor_blocker();
 
     return failures;
 }
