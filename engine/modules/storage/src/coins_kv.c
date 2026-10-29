@@ -241,6 +241,45 @@ bool coins_kv_spend(sqlite3 *db, const uint8_t txid[32], uint32_t vout)
     return rc == SQLITE_DONE;
 }
 
+/* Decide whether add_many/spend_many may use the transaction-scoped cached
+ * statement, and pin the cache to this db on first use. */
+static bool ckv_delta_cache_for(sqlite3 *db)
+{
+    bool cache = t_delta.active &&
+                 (t_delta.db == NULL || t_delta.db == db);
+    if (cache && !t_delta.db)
+        t_delta.db = db;
+    return cache;
+}
+
+/* Release a many-row statement: a cached one is reset (its SQLITE_TRANSIENT
+ * copies dropped), a local one is finalized. */
+static void ckv_release_many_stmt(sqlite3_stmt *s, bool cache)
+{
+    if (cache) {
+        sqlite3_reset(s);
+        sqlite3_clear_bindings(s);
+    } else {
+        sqlite3_finalize(s);
+    }
+}
+
+static void ckv_bind_add_row(sqlite3_stmt *s, const struct coins_kv_add_row *r)
+{
+    sqlite3_reset(s);
+    sqlite3_clear_bindings(s);
+    sqlite3_bind_blob (s, 1, r->txid, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_int  (s, 2, (int)r->vout);
+    sqlite3_bind_int64(s, 3, (sqlite3_int64)r->value);
+    sqlite3_bind_int64(s, 4, (sqlite3_int64)r->height);
+    sqlite3_bind_int  (s, 5, r->is_coinbase ? 1 : 0);
+    if (r->script && r->script_len > 0)
+        sqlite3_bind_blob(s, 6, r->script, (int)r->script_len,
+                          SQLITE_TRANSIENT);
+    else
+        sqlite3_bind_blob(s, 6, "", 0, SQLITE_STATIC);
+}
+
 bool coins_kv_add_many_sqlite(sqlite3 *db, const struct coins_kv_add_row *rows,
                               size_t count)
 {
@@ -253,10 +292,7 @@ bool coins_kv_add_many_sqlite(sqlite3 *db, const struct coins_kv_add_row *rows,
      * of the row loop. Stack-local (never module-static): no cross-thread
      * cached-statement hazard (see the coins_kv.c header note). */
     sqlite3_stmt *local = NULL;
-    bool cache = t_delta.active &&
-                 (t_delta.db == NULL || t_delta.db == db);
-    if (cache && !t_delta.db)
-        t_delta.db = db;
+    bool cache = ckv_delta_cache_for(db);
     sqlite3_stmt **slot = cache ? &t_delta.add_many : &local;
     if (!*slot && sqlite3_prepare_v2(db,
         "INSERT OR IGNORE INTO coins"
@@ -274,18 +310,7 @@ bool coins_kv_add_many_sqlite(sqlite3 *db, const struct coins_kv_add_row *rows,
         if (!r->txid) { ok = false;
             LOG_WARN("coins_kv", "add_many row %zu has NULL txid", i);
             break; }
-        sqlite3_reset(s);
-        sqlite3_clear_bindings(s);
-        sqlite3_bind_blob (s, 1, r->txid, 32, SQLITE_TRANSIENT);
-        sqlite3_bind_int  (s, 2, (int)r->vout);
-        sqlite3_bind_int64(s, 3, (sqlite3_int64)r->value);
-        sqlite3_bind_int64(s, 4, (sqlite3_int64)r->height);
-        sqlite3_bind_int  (s, 5, r->is_coinbase ? 1 : 0);
-        if (r->script && r->script_len > 0)
-            sqlite3_bind_blob(s, 6, r->script, (int)r->script_len,
-                              SQLITE_TRANSIENT);
-        else
-            sqlite3_bind_blob(s, 6, "", 0, SQLITE_STATIC);
+        ckv_bind_add_row(s, r);
         int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
         if (rc != SQLITE_DONE) {
             LOG_WARN("coins_kv",
@@ -304,14 +329,9 @@ bool coins_kv_add_many_sqlite(sqlite3 *db, const struct coins_kv_add_row *rows,
         if (t_delta.active && inserted)
             t_delta.delta++;
     }
-    if (cache) {
-        /* Cached statements outlive the caller's row buffers. Release the
-         * final SQLITE_TRANSIENT copies now; the next call will rebind. */
-        sqlite3_reset(s);
-        sqlite3_clear_bindings(s);
-    } else {
-        sqlite3_finalize(s);
-    }
+    /* Cached statements outlive the caller's row buffers. Release the
+     * final SQLITE_TRANSIENT copies now; the next call will rebind. */
+    ckv_release_many_stmt(s, cache);
     return ok;
 }
 
@@ -344,10 +364,7 @@ bool coins_kv_spend_many_sqlite(sqlite3 *db, const struct coins_kv_spend_row *ro
     if (!rows) return false;
 
     sqlite3_stmt *local = NULL;
-    bool cache = t_delta.active &&
-                 (t_delta.db == NULL || t_delta.db == db);
-    if (cache && !t_delta.db)
-        t_delta.db = db;
+    bool cache = ckv_delta_cache_for(db);
     sqlite3_stmt **slot = cache ? &t_delta.spend_many : &local;
     if (!*slot && sqlite3_prepare_v2(db,
         "DELETE FROM coins WHERE txid=? AND vout=?",
@@ -382,12 +399,7 @@ bool coins_kv_spend_many_sqlite(sqlite3 *db, const struct coins_kv_spend_row *ro
         if (t_delta.active)
             t_delta.delta -= sqlite3_changes(db);
     }
-    if (cache) {
-        sqlite3_reset(s);
-        sqlite3_clear_bindings(s);
-    } else {
-        sqlite3_finalize(s);
-    }
+    ckv_release_many_stmt(s, cache);
     return ok;
 }
 
@@ -809,6 +821,42 @@ static void coins_kv_hex32(char out[65], const uint8_t in[32])
         snprintf(out + 2 * i, 3, "%02x", in[i]);
 }
 
+/* Write a fixed reason string when the caller supplied a reason buffer. */
+static void ckv_reason_text(char *reason, size_t reason_cap, const char *text)
+{
+    if (reason && reason_cap)
+        snprintf(reason, reason_cap, "%s", text);
+}
+
+static void ckv_verify_reason_match(char *reason, size_t reason_cap,
+                                    const struct sha3_utxo_checkpoint *cp)
+{
+    if (reason && reason_cap)
+        snprintf(reason, reason_cap,
+                 "coins_kv reproduces the compiled checkpoint at h=%d",
+                 (int)cp->height);
+}
+
+static void ckv_verify_reason_mismatch(char *reason, size_t reason_cap,
+                                       const struct sha3_utxo_checkpoint *cp,
+                                       const uint8_t got_root[32],
+                                       int64_t got_count)
+{
+    if (reason && reason_cap) {
+        /* Lead with the short count fields (the cheap discriminator) so both the
+         * "count" and "sha3" tokens survive even a small/truncated buffer; the
+         * long hex digests trail. */
+        char got_hex[65], want_hex[65];
+        coins_kv_hex32(got_hex, got_root);
+        coins_kv_hex32(want_hex, cp->sha3_hash);
+        snprintf(reason, reason_cap,
+                 "coins_kv does not reproduce the compiled checkpoint "
+                 "(count got=%lld want=%llu; sha3 got=%s want=%s)",
+                 (long long)got_count, (unsigned long long)cp->utxo_count,
+                 got_hex, want_hex);
+    }
+}
+
 bool coins_kv_verify_against_checkpoint(sqlite3 *db,
                                         const struct sha3_utxo_checkpoint *cp,
                                         uint8_t out_got_root[32],
@@ -831,15 +879,13 @@ bool coins_kv_verify_against_checkpoint(sqlite3 *db,
      * SHA3 the ratify verb and the refold hard-assert use. No second fold. */
     uint8_t got_root[32] = {0};
     if (coins_kv_commitment(db, got_root) != 0) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap,
-                     "coins_kv sha3 commitment computation failed");
+        ckv_reason_text(reason, reason_cap,
+                        "coins_kv sha3 commitment computation failed");
         LOG_FAIL("coins_kv", "verify_against_checkpoint: commitment failed");
     }
     int64_t got_count = coins_kv_count(db);
     if (got_count < 0) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "coins_kv count read failed");
+        ckv_reason_text(reason, reason_cap, "coins_kv count read failed");
         LOG_FAIL("coins_kv", "verify_against_checkpoint: count read failed");
     }
     if (out_got_root)
@@ -850,26 +896,11 @@ bool coins_kv_verify_against_checkpoint(sqlite3 *db,
     bool sha3_ok = memcmp(got_root, cp->sha3_hash, 32) == 0;
     bool count_ok = (uint64_t)got_count == cp->utxo_count;
     if (sha3_ok && count_ok) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap,
-                     "coins_kv reproduces the compiled checkpoint at h=%d",
-                     (int)cp->height);
+        ckv_verify_reason_match(reason, reason_cap, cp);
         return true;
     }
 
-    if (reason && reason_cap) {
-        /* Lead with the short count fields (the cheap discriminator) so both the
-         * "count" and "sha3" tokens survive even a small/truncated buffer; the
-         * long hex digests trail. */
-        char got_hex[65], want_hex[65];
-        coins_kv_hex32(got_hex, got_root);
-        coins_kv_hex32(want_hex, cp->sha3_hash);
-        snprintf(reason, reason_cap,
-                 "coins_kv does not reproduce the compiled checkpoint "
-                 "(count got=%lld want=%llu; sha3 got=%s want=%s)",
-                 (long long)got_count, (unsigned long long)cp->utxo_count,
-                 got_hex, want_hex);
-    }
+    ckv_verify_reason_mismatch(reason, reason_cap, cp, got_root, got_count);
     return false;
 }
 
@@ -1149,14 +1180,62 @@ bool coins_kv_contains_refold_marker(sqlite3 *db)
     return found && n == 1 && v == 0x01;
 }
 
+/* Self-folded marker read; the caller already holds the progress tx lock. */
+static bool ckv_self_folded_marker_locked(sqlite3 *db)
+{
+    uint8_t v = 0;
+    size_t n = 0;
+    bool mfound = false;
+    return progress_meta_get(db, COINS_KV_SELF_FOLDED_KEY,
+                             &v, sizeof(v), &n, &mfound) &&
+           mfound && n == 1 && v == 0x01;
+}
+
+/* The ONE standalone frontier-write txn: BEGIN IMMEDIATE, write, COMMIT. On
+ * failure returns false with *err possibly set; the caller logs, rolls back
+ * and frees *err. */
+static bool ckv_frontier_write_txn(sqlite3 *db, coins_kv_frontier_writer_fn writer,
+                                   int32_t value, char **err)
+{
+    bool ok = true;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    if (ok && !writer(db, value))
+        ok = false;
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
+/* The reindex-epilogue reset txn body (BEGIN .. COMMIT). Same failure
+ * contract as ckv_frontier_write_txn. */
+static bool ckv_reset_reseed_txn(sqlite3 *db, char **err)
+{
+    bool ok = true;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    if (ok && sqlite3_exec(db, "DELETE FROM coins", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    if (ok && !progress_meta_delete_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY))
+        ok = false;
+    if (ok && !progress_meta_delete_in_tx(db, COINS_KV_SELF_FOLDED_KEY))
+        ok = false;
+    if (ok && !progress_meta_delete_in_tx(db, COINS_APPLIED_HEIGHT_KEY))
+        ok = false;
+    if (ok && !coins_kv_bump_authority_generation_in_tx(db))
+        ok = false;
+    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, err) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
 bool coins_kv_tip_is_self_derived(sqlite3 *db, int32_t hstar,
                                   char *reason, size_t reason_cap)
 {
     if (reason && reason_cap)
         reason[0] = '\0';
     if (!db) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "null_db");
+        ckv_reason_text(reason, reason_cap, "null_db");
         return false;
     }
 
@@ -1169,14 +1248,12 @@ bool coins_kv_tip_is_self_derived(sqlite3 *db, int32_t hstar,
     bool found = false;
     if (!coins_kv_get_applied_height(db, &applied, &found)) {
         progress_store_tx_unlock();
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "applied_height_read_error");
+        ckv_reason_text(reason, reason_cap, "applied_height_read_error");
         return false;
     }
     if (!found) {
         progress_store_tx_unlock();
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "applied_height_absent");
+        ckv_reason_text(reason, reason_cap, "applied_height_absent");
         return false;
     }
     if (applied != hstar + 1) {
@@ -1189,17 +1266,11 @@ bool coins_kv_tip_is_self_derived(sqlite3 *db, int32_t hstar,
 
     /* Part 3: NOT borrowed-and-stamped, OR self-folded marker present. */
     bool borrowed_stamped = coins_kv_is_proven_authority(db, NULL);
-    uint8_t v = 0;
-    size_t n = 0;
-    bool mfound = false;
-    bool self_folded = progress_meta_get(db, COINS_KV_SELF_FOLDED_KEY,
-                                         &v, sizeof(v), &n, &mfound) &&
-                       mfound && n == 1 && v == 0x01;
+    bool self_folded = ckv_self_folded_marker_locked(db);
     progress_store_tx_unlock();
 
     if (borrowed_stamped && !self_folded) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "borrowed_seed_no_refold_marker");
+        ckv_reason_text(reason, reason_cap, "borrowed_seed_no_refold_marker");
         return false;
     }
     return true;
@@ -1265,13 +1336,7 @@ bool coins_kv_backfill_applied_height_if_absent(
     /* The ONE allowed standalone txn: a pure backfill of a derived value that
      * already equals the durable cursor, with NO coin mutation. */
     char *err = NULL;
-    bool ok = true;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && !writer(db, (int32_t)cursor))
-        ok = false;
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
+    bool ok = ckv_frontier_write_txn(db, writer, (int32_t)cursor, &err);
     if (!ok) {
         if (err) LOG_WARN("coins_kv",
                           "[coins_kv] applied_height backfill failed: %s", err);
@@ -1339,13 +1404,7 @@ bool coins_kv_seed_genesis_applied_height(
      * genesis tip (hstar==0), so the frontier tear/reconcile diagnostics stay
      * quiet (coins_applied 1 is NOT above the empty-log contiguity anchor+1). */
     char *err = NULL;
-    bool ok = true;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && !writer(db, (int32_t)1))
-        ok = false;
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
+    bool ok = ckv_frontier_write_txn(db, writer, (int32_t)1, &err);
     if (!ok) {
         if (err) LOG_WARN("coins_kv",
                           "[coins_kv] genesis applied_height seed failed: %s", err);
@@ -1376,21 +1435,7 @@ bool coins_kv_reset_for_reseed(sqlite3 *db)
      * stamp is already set) and a borrowed reseed can never inherit a stale
      * sovereignty claim. */
     char *err = NULL;
-    bool ok = true;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && sqlite3_exec(db, "DELETE FROM coins", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
-    if (ok && !progress_meta_delete_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY))
-        ok = false;
-    if (ok && !progress_meta_delete_in_tx(db, COINS_KV_SELF_FOLDED_KEY))
-        ok = false;
-    if (ok && !progress_meta_delete_in_tx(db, COINS_APPLIED_HEIGHT_KEY))
-        ok = false;
-    if (ok && !coins_kv_bump_authority_generation_in_tx(db))
-        ok = false;
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK)
-        ok = false;
+    bool ok = ckv_reset_reseed_txn(db, &err);
     if (!ok) {
         if (err) LOG_WARN("coins_kv",
                           "[coins_kv] reset_for_reseed failed: %s", err);
