@@ -24,48 +24,37 @@ static const uint8_t recipe_root_domain[] = VCS_PACKAGE_RECIPE_ROOT_DOMAIN;
 
 /* ── error strings ──────────────────────────────────────────────────── */
 
-static const char *recipe_error_string_first(
-    enum vcs_package_recipe_error error)
-{
-    switch (error) {
-    case VCS_PACKAGE_RECIPE_OK: return "ok";
-    case VCS_PACKAGE_RECIPE_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_RECIPE_ERR_ALLOC: return "allocation-failure";
-    case VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION: return "schema-version";
-    case VCS_PACKAGE_RECIPE_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_PACKAGE_RECIPE_ERR_WIRE_OVERSIZE: return "wire-oversize";
-    case VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED: return "wire-truncated";
-    case VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING: return "wire-trailing";
-    case VCS_PACKAGE_RECIPE_ERR_LIST_ORDER: return "list-not-canonical-order";
-    default: break;
-    }
-    return NULL;
-}
-
-static const char *recipe_error_string_rest(
-    enum vcs_package_recipe_error error)
-{
-    switch (error) {
-    case VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND: return "list-count-bound";
-    case VCS_PACKAGE_RECIPE_ERR_PATH: return "path-grammar";
-    case VCS_PACKAGE_RECIPE_ERR_DEFINE: return "define-grammar";
-    case VCS_PACKAGE_RECIPE_ERR_LIBRARY: return "library-not-allowed";
-    case VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY: return "sources-empty";
-    case VCS_PACKAGE_RECIPE_ERR_TEST_SECONDS: return "test-seconds-bound";
-    case VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES: return "memory-bytes-bound";
-    case VCS_PACKAGE_RECIPE_ERR_PROGRAM: return "programs-schema-mismatch";
-    default: break;
-    }
-    return NULL;
-}
+static const struct {
+    enum vcs_package_recipe_error error;
+    const char *name;
+} recipe_error_names[] = {
+    { VCS_PACKAGE_RECIPE_OK, "ok" },
+    { VCS_PACKAGE_RECIPE_ERR_NULL, "null-argument" },
+    { VCS_PACKAGE_RECIPE_ERR_ALLOC, "allocation-failure" },
+    { VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION, "schema-version" },
+    { VCS_PACKAGE_RECIPE_ERR_WIRE_MAGIC, "wire-magic" },
+    { VCS_PACKAGE_RECIPE_ERR_WIRE_OVERSIZE, "wire-oversize" },
+    { VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED, "wire-truncated" },
+    { VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING, "wire-trailing" },
+    { VCS_PACKAGE_RECIPE_ERR_LIST_ORDER, "list-not-canonical-order" },
+    { VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND, "list-count-bound" },
+    { VCS_PACKAGE_RECIPE_ERR_PATH, "path-grammar" },
+    { VCS_PACKAGE_RECIPE_ERR_DEFINE, "define-grammar" },
+    { VCS_PACKAGE_RECIPE_ERR_LIBRARY, "library-not-allowed" },
+    { VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY, "sources-empty" },
+    { VCS_PACKAGE_RECIPE_ERR_TEST_SECONDS, "test-seconds-bound" },
+    { VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES, "memory-bytes-bound" },
+    { VCS_PACKAGE_RECIPE_ERR_PROGRAM, "programs-schema-mismatch" },
+};
 
 const char *vcs_package_recipe_error_string(
     enum vcs_package_recipe_error error)
 {
-    const char *name = recipe_error_string_first(error);
-    if (!name)
-        name = recipe_error_string_rest(error);
-    return name ? name : "unknown-error";
+    for (size_t i = 0; i < sizeof(recipe_error_names) / sizeof(recipe_error_names[0]); i++) {
+        if (recipe_error_names[i].error == error)
+            return recipe_error_names[i].name;
+    }
+    return "unknown-error";
 }
 
 /* ── library allowlist ──────────────────────────────────────────────── */
