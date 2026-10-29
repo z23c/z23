@@ -171,21 +171,20 @@ static enum vcs_zcode_shadow_simulation_error shadow_load_score(
               : VCS_ZCODE_SHADOW_SIMULATION_CAS;
 }
 
-static enum vcs_zcode_shadow_simulation_error shadow_package_facts(
-    const char *workspace, const struct vcs_zcode_score_receipt_v1 *score,
-    uint8_t license_root[32], uint8_t *lineage_kind,
-    uint8_t lineage_root[32])
+static enum vcs_zcode_shadow_simulation_error shadow_package_license_root(
+    const char *workspace, const uint8_t package_root[32],
+    uint8_t license_root[32])
 {
     uint8_t *wire = NULL, observed[32];
     size_t wire_len = 0;
     struct vcs_package_manifest manifest;
     vcs_package_manifest_init(&manifest);
-    if (!shadow_sim_load(workspace, score->package_root,
+    if (!shadow_sim_load(workspace, package_root,
                          VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
                          &wire, &wire_len) ||
         !vcs_package_manifest_parse(wire, wire_len, &manifest) ||
         !vcs_package_manifest_root(&manifest, observed) ||
-        !shadow_sim_equal(observed, score->package_root)) {
+        !shadow_sim_equal(observed, package_root)) {
         free(wire);
         vcs_package_manifest_free(&manifest);
         return VCS_ZCODE_SHADOW_SIMULATION_CAS;
@@ -197,9 +196,16 @@ static enum vcs_zcode_shadow_simulation_error shadow_package_facts(
             license = &manifest.files[i];
     bool license_ok = license && vcs_package_file_hash(license, license_root);
     vcs_package_manifest_free(&manifest);
-    if (!license_ok)
-        return VCS_ZCODE_SHADOW_SIMULATION_CAS;
+    return license_ok ? VCS_ZCODE_SHADOW_SIMULATION_OK
+                      : VCS_ZCODE_SHADOW_SIMULATION_CAS;
+}
 
+static enum vcs_zcode_shadow_simulation_error shadow_package_lineage(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *score,
+    uint8_t *lineage_kind, uint8_t lineage_root[32])
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
     struct vcs_package_release release;
     if (!shadow_sim_load(workspace, score->release_root,
                          VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
@@ -225,102 +231,140 @@ static enum vcs_zcode_shadow_simulation_error shadow_package_facts(
     return VCS_ZCODE_SHADOW_SIMULATION_OK;
 }
 
-enum vcs_zcode_shadow_simulation_error
-vcs_zcode_shadow_attribution_plan_cas(
-    const struct vcs_zcode_shadow_attribution_input *input,
-    struct vcs_zcode_shadow_attribution_plan *out)
+static enum vcs_zcode_shadow_simulation_error shadow_package_facts(
+    const char *workspace, const struct vcs_zcode_score_receipt_v1 *score,
+    uint8_t license_root[32], uint8_t *lineage_kind,
+    uint8_t lineage_root[32])
 {
-    if (out) memset(out, 0, sizeof(*out));
-    if (!input || !out || !input->workspace ||
+    enum vcs_zcode_shadow_simulation_error error =
+        shadow_package_license_root(workspace, score->package_root,
+                                    license_root);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    return shadow_package_lineage(workspace, score, lineage_kind,
+                                  lineage_root);
+}
+
+static bool shadow_attribution_inputs_missing(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    const struct vcs_zcode_shadow_attribution_plan *out)
+{
+    return !input || !out || !input->workspace ||
         !input->score_receipt_root || !input->policy_candidate_root ||
         !input->reproduction_request_root ||
         !input->reproduction_proof_set_root ||
-        !input->contributor_binding_root || input->now_unix <= 0)
-        return VCS_ZCODE_SHADOW_SIMULATION_NULL;
+        !input->contributor_binding_root || input->now_unix <= 0;
+}
 
-    if (vcs_zcode_reproduction_qualify_cas(
-            input->workspace, input->score_receipt_root,
-            input->policy_candidate_root,
-            input->reproduction_request_root,
-            input->reproduction_proof_set_root, input->epoch,
-            input->now_unix, &out->qualification) !=
-            VCS_ZCODE_QUALIFICATION_READY)
-        return VCS_ZCODE_SHADOW_SIMULATION_QUALIFICATION;
-
-    struct vcs_zcode_policy_candidate_v1 policy;
-    enum vcs_zcode_shadow_simulation_error error = shadow_load_policy(
-        input->workspace, input->policy_candidate_root, &policy);
-    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
-    struct vcs_zcode_score_receipt_v1 score;
-    error = shadow_load_score(input->workspace, input->score_receipt_root,
-                              &score);
-    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
-
-    struct vcs_zcode_reproduction_request_v1 request;
+static enum vcs_zcode_shadow_simulation_error shadow_attribution_request_load(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    struct vcs_zcode_reproduction_request_v1 *request)
+{
     uint8_t *wire = NULL, observed[32];
     size_t wire_len = 0;
     if (!shadow_sim_load(input->workspace,
                          input->reproduction_request_root,
                          VCS_ZCODE_REPRODUCTION_REQUEST_WIRE_BYTES,
                          &wire, &wire_len) ||
-        vcs_zcode_reproduction_request_parse(wire, wire_len, &request) !=
+        vcs_zcode_reproduction_request_parse(wire, wire_len, request) !=
             VCS_ZCODE_REPRODUCTION_OK ||
-        vcs_zcode_reproduction_request_root(&request, observed) !=
+        vcs_zcode_reproduction_request_root(request, observed) !=
             VCS_ZCODE_REPRODUCTION_OK ||
         !shadow_sim_equal(observed, input->reproduction_request_root)) {
         free(wire);
         return VCS_ZCODE_SHADOW_SIMULATION_CAS;
     }
     free(wire);
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
 
-    uint64_t award = 0;
+static enum vcs_zcode_shadow_simulation_error shadow_attribution_records_load(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_score_receipt_v1 *score,
+    struct vcs_zcode_reproduction_request_v1 *request)
+{
+    enum vcs_zcode_shadow_simulation_error error = shadow_load_policy(
+        input->workspace, input->policy_candidate_root, policy);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    error = shadow_load_score(input->workspace, input->score_receipt_root,
+                              score);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    return shadow_attribution_request_load(input, request);
+}
+
+struct shadow_attribution_clock {
+    uint64_t award;
+    uint64_t opening_height;
+    uint64_t maturity_height;
+    int64_t maturity_mtp;
+};
+
+static enum vcs_zcode_shadow_simulation_error shadow_attribution_clock_plan(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    const struct vcs_zcode_policy_candidate_v1 *policy,
+    const struct vcs_zcode_reproduction_request_v1 *request,
+    struct shadow_attribution_clock *clock)
+{
+    memset(clock, 0, sizeof(*clock));
     if (vcs_zcode_policy_candidate_award_atoms(
-            &policy, VCS_ZCODE_CREATION_PUBLIC_SOURCE, &award) !=
-            VCS_ZCODE_SHADOW_OK || award == 0)
+            policy, VCS_ZCODE_CREATION_PUBLIC_SOURCE, &clock->award) !=
+            VCS_ZCODE_SHADOW_OK || clock->award == 0)
         return VCS_ZCODE_SHADOW_SIMULATION_AWARD;
-    uint64_t epoch_stride = 0, opening_height = 0;
+    uint64_t epoch_stride = 0;
     if (!zcl_u64_add(VCS_ZC23_CHALLENGE_BLOCKS,
                      VCS_ZC23_CHALLENGE_BLOCKS, &epoch_stride) ||
-        !zcl_u64_mul(input->epoch, epoch_stride, &opening_height))
+        !zcl_u64_mul(input->epoch, epoch_stride, &clock->opening_height))
         return VCS_ZCODE_SHADOW_SIMULATION_OVERFLOW;
-    uint64_t maturity_height = 0;
-    if (!zcl_u64_add(opening_height, VCS_ZC23_CHALLENGE_BLOCKS,
-                     &maturity_height) ||
-        request.created_unix > INT64_MAX - VCS_ZC23_CHALLENGE_SECONDS)
+    if (!zcl_u64_add(clock->opening_height, VCS_ZC23_CHALLENGE_BLOCKS,
+                     &clock->maturity_height) ||
+        request->created_unix > INT64_MAX - VCS_ZC23_CHALLENGE_SECONDS)
         return VCS_ZCODE_SHADOW_SIMULATION_OVERFLOW;
-    int64_t maturity_mtp =
-        request.created_unix + VCS_ZC23_CHALLENGE_SECONDS;
-    if (input->now_unix < maturity_mtp)
+    clock->maturity_mtp = request->created_unix + VCS_ZC23_CHALLENGE_SECONDS;
+    if (input->now_unix < clock->maturity_mtp)
         return VCS_ZCODE_SHADOW_SIMULATION_ANCHOR;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
 
+static void shadow_attribution_fill(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    const struct vcs_zcode_policy_candidate_v1 *policy,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    const struct vcs_zcode_reproduction_request_v1 *request,
+    const struct shadow_attribution_clock *clock,
+    struct vcs_zcode_shadow_attribution_plan *out)
+{
     memcpy(out->fixture_branch_root, input->reproduction_proof_set_root, 32);
     struct vcs_zcode_creation_attribution_v1 *attribution =
         &out->attribution;
     attribution->schema_version = VCS_ZCODE_CREATION_ATTRIBUTION_VERSION;
     attribution->category = VCS_ZCODE_CREATION_PUBLIC_SOURCE;
     attribution->epoch = input->epoch;
-    attribution->award_atoms = award;
-    attribution->challenge_opening_height = opening_height;
-    attribution->challenge_opening_mtp = request.created_unix;
-    attribution->challenge_maturity_height = maturity_height;
-    attribution->challenge_maturity_mtp = maturity_mtp;
-    attribution->created_unix = maturity_mtp;
-    memcpy(attribution->network_genesis_root, policy.network_genesis_root, 32);
+    attribution->award_atoms = clock->award;
+    attribution->challenge_opening_height = clock->opening_height;
+    attribution->challenge_opening_mtp = request->created_unix;
+    attribution->challenge_maturity_height = clock->maturity_height;
+    attribution->challenge_maturity_mtp = clock->maturity_mtp;
+    attribution->created_unix = clock->maturity_mtp;
+    memcpy(attribution->network_genesis_root, policy->network_genesis_root, 32);
     memcpy(attribution->zc23_policy_root, input->policy_candidate_root, 32);
     memcpy(attribution->contributor_binding_root,
            input->contributor_binding_root, 32);
-    memcpy(attribution->task_root, score.task_root, 32);
-    memcpy(attribution->candidate_root, score.candidate_root, 32);
-    memcpy(attribution->proof_policy_root, score.proof_policy_root, 32);
-    memcpy(attribution->proof_set_root, score.proof_set_root, 32);
-    memcpy(attribution->proven_lane_root, score.proven_lane_root, 32);
+    memcpy(attribution->task_root, score->task_root, 32);
+    memcpy(attribution->candidate_root, score->candidate_root, 32);
+    memcpy(attribution->proof_policy_root, score->proof_policy_root, 32);
+    memcpy(attribution->proof_set_root, score->proof_set_root, 32);
+    memcpy(attribution->proven_lane_root, score->proven_lane_root, 32);
     memcpy(attribution->score_receipt_root, input->score_receipt_root, 32);
-    memcpy(attribution->package_root, score.package_root, 32);
-    memcpy(attribution->release_root, score.release_root, 32);
-    error = shadow_package_facts(
-        input->workspace, &score, attribution->license_evidence_root,
-        &attribution->lineage_kind, attribution->lineage_root);
-    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    memcpy(attribution->package_root, score->package_root, 32);
+    memcpy(attribution->release_root, score->release_root, 32);
+}
+
+static enum vcs_zcode_shadow_simulation_error shadow_attribution_seal(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    struct vcs_zcode_shadow_attribution_plan *out)
+{
+    struct vcs_zcode_creation_attribution_v1 *attribution =
+        &out->attribution;
     if (!vcs_zcode_shadow_fixture_anchor_root(
             input->policy_candidate_root, out->fixture_branch_root,
             input->epoch, 1, attribution->challenge_opening_hash))
@@ -328,15 +372,25 @@ vcs_zcode_shadow_attribution_plan_cas(
     if (vcs_zcode_creation_attribution_root(
             attribution, out->attribution_root) != VCS_ZCODE_CREATION_OK)
         return VCS_ZCODE_SHADOW_SIMULATION_ATTRIBUTION;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
 
+static enum vcs_zcode_shadow_simulation_error shadow_attribution_verify(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    const struct vcs_zcode_policy_candidate_v1 *policy,
+    const struct shadow_attribution_clock *clock,
+    struct vcs_zcode_shadow_attribution_plan *out)
+{
+    struct vcs_zcode_creation_attribution_v1 *attribution =
+        &out->attribution;
     struct vcs_zcode_commons_projection *projection =
         vcs_zcode_commons_projection_build(input->workspace);
     if (!projection)
         return VCS_ZCODE_SHADOW_SIMULATION_CAS;
     struct shadow_fixture_callbacks fixture = {
         .projection = projection,
-        .opening_height = opening_height,
-        .maturity_height = maturity_height,
+        .opening_height = clock->opening_height,
+        .maturity_height = clock->maturity_height,
     };
     memcpy(fixture.opening_hash, attribution->challenge_opening_hash, 32);
     (void)vcs_zcode_shadow_fixture_anchor_root(
@@ -344,12 +398,12 @@ vcs_zcode_shadow_attribution_plan_cas(
         input->epoch, 2, fixture.maturity_hash);
     struct vcs_zcode_creation_validation_context context = {
         .workspace = input->workspace,
-        .expected_network_genesis_root = policy.network_genesis_root,
+        .expected_network_genesis_root = policy->network_genesis_root,
         .expected_zc23_policy_root = input->policy_candidate_root,
         .expected_epoch = input->epoch,
-        .expected_award_atoms = award,
-        .active_height = maturity_height,
-        .active_mtp = maturity_mtp,
+        .expected_award_atoms = clock->award,
+        .active_height = clock->maturity_height,
+        .active_mtp = clock->maturity_mtp,
         .now_unix = input->now_unix,
         .anchor_is_active = shadow_fixture_anchor,
         .contribution_is_duplicate = shadow_fixture_duplicate,
@@ -366,89 +420,154 @@ vcs_zcode_shadow_attribution_plan_cas(
         : VCS_ZCODE_SHADOW_SIMULATION_ATTRIBUTION;
 }
 
-enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
-    const struct vcs_zcode_shadow_epoch_input *input,
-    struct vcs_zcode_shadow_epoch_plan *out)
+enum vcs_zcode_shadow_simulation_error
+vcs_zcode_shadow_attribution_plan_cas(
+    const struct vcs_zcode_shadow_attribution_input *input,
+    struct vcs_zcode_shadow_attribution_plan *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!input || !out || !input->workspace ||
-        !input->policy_candidate_root || !input->attribution_root ||
-        !input->fixture_branch_root ||
-        !input->previous_epoch_creation_root || input->now_unix <= 0)
+    if (shadow_attribution_inputs_missing(input, out))
         return VCS_ZCODE_SHADOW_SIMULATION_NULL;
+
+    if (vcs_zcode_reproduction_qualify_cas(
+            input->workspace, input->score_receipt_root,
+            input->policy_candidate_root,
+            input->reproduction_request_root,
+            input->reproduction_proof_set_root, input->epoch,
+            input->now_unix, &out->qualification) !=
+            VCS_ZCODE_QUALIFICATION_READY)
+        return VCS_ZCODE_SHADOW_SIMULATION_QUALIFICATION;
+
     struct vcs_zcode_policy_candidate_v1 policy;
-    enum vcs_zcode_shadow_simulation_error error = shadow_load_policy(
-        input->workspace, input->policy_candidate_root, &policy);
+    struct vcs_zcode_score_receipt_v1 score;
+    struct vcs_zcode_reproduction_request_v1 request;
+    enum vcs_zcode_shadow_simulation_error error =
+        shadow_attribution_records_load(input, &policy, &score, &request);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    struct shadow_attribution_clock clock;
+    error = shadow_attribution_clock_plan(input, &policy, &request, &clock);
     if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
 
+    shadow_attribution_fill(input, &policy, &score, &request, &clock, out);
+    struct vcs_zcode_creation_attribution_v1 *attribution =
+        &out->attribution;
+    error = shadow_package_facts(
+        input->workspace, &score, attribution->license_evidence_root,
+        &attribution->lineage_kind, attribution->lineage_root);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    error = shadow_attribution_seal(input, out);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    return shadow_attribution_verify(input, &policy, &clock, out);
+}
+
+static bool shadow_epoch_inputs_missing(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    const struct vcs_zcode_shadow_epoch_plan *out)
+{
+    return !input || !out || !input->workspace ||
+        !input->policy_candidate_root || !input->attribution_root ||
+        !input->fixture_branch_root ||
+        !input->previous_epoch_creation_root || input->now_unix <= 0;
+}
+
+static enum vcs_zcode_shadow_simulation_error shadow_epoch_attribution_load(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    struct vcs_zcode_creation_attribution_v1 *attribution)
+{
     uint8_t *wire = NULL, observed[32];
     size_t wire_len = 0;
-    struct vcs_zcode_creation_attribution_v1 attribution;
     if (!shadow_sim_load(input->workspace, input->attribution_root,
                          VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES,
                          &wire, &wire_len) ||
-        vcs_zcode_creation_attribution_parse(wire, wire_len, &attribution) !=
+        vcs_zcode_creation_attribution_parse(wire, wire_len, attribution) !=
             VCS_ZCODE_CREATION_OK ||
-        vcs_zcode_creation_attribution_root(&attribution, observed) !=
+        vcs_zcode_creation_attribution_root(attribution, observed) !=
             VCS_ZCODE_CREATION_OK ||
         !shadow_sim_equal(observed, input->attribution_root) ||
-        !shadow_sim_equal(attribution.zc23_policy_root,
+        !shadow_sim_equal(attribution->zc23_policy_root,
                           input->policy_candidate_root)) {
         free(wire);
         return VCS_ZCODE_SHADOW_SIMULATION_ATTRIBUTION;
     }
-    free(wire); wire = NULL;
+    free(wire);
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
 
-    if (attribution.epoch == 0) {
-        if (!zcl_bytes_all_zero(input->previous_epoch_creation_root, 32))
-            return VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
-    } else {
-        struct vcs_zcode_epoch_creation_set_v1 previous;
-        vcs_zcode_epoch_creation_init(&previous);
-        bool previous_ok = shadow_sim_load(
-                input->workspace, input->previous_epoch_creation_root,
-                VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES, &wire, &wire_len) &&
-            vcs_zcode_epoch_creation_parse(wire, wire_len, &previous) ==
-                VCS_ZCODE_EPOCH_CREATION_OK &&
-            vcs_zcode_epoch_creation_root(&previous, observed) ==
-                VCS_ZCODE_EPOCH_CREATION_OK &&
-            shadow_sim_equal(observed,
-                             input->previous_epoch_creation_root) &&
-            previous.epoch != UINT64_MAX &&
-            previous.epoch + 1u == attribution.epoch &&
-            shadow_sim_equal(previous.network_genesis_root,
-                             attribution.network_genesis_root) &&
-            shadow_sim_equal(previous.zc23_policy_root,
-                             attribution.zc23_policy_root);
-        free(wire);
-        vcs_zcode_epoch_creation_free(&previous);
-        if (!previous_ok)
-            return VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
-    }
+static bool shadow_epoch_previous_matches(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    const struct vcs_zcode_creation_attribution_v1 *attribution)
+{
+    uint8_t *wire = NULL, observed[32];
+    size_t wire_len = 0;
+    struct vcs_zcode_epoch_creation_set_v1 previous;
+    vcs_zcode_epoch_creation_init(&previous);
+    bool previous_ok = shadow_sim_load(
+            input->workspace, input->previous_epoch_creation_root,
+            VCS_ZCODE_EPOCH_CREATION_MAX_WIRE_BYTES, &wire, &wire_len) &&
+        vcs_zcode_epoch_creation_parse(wire, wire_len, &previous) ==
+            VCS_ZCODE_EPOCH_CREATION_OK &&
+        vcs_zcode_epoch_creation_root(&previous, observed) ==
+            VCS_ZCODE_EPOCH_CREATION_OK &&
+        shadow_sim_equal(observed,
+                         input->previous_epoch_creation_root) &&
+        previous.epoch != UINT64_MAX &&
+        previous.epoch + 1u == attribution->epoch &&
+        shadow_sim_equal(previous.network_genesis_root,
+                         attribution->network_genesis_root) &&
+        shadow_sim_equal(previous.zc23_policy_root,
+                         attribution->zc23_policy_root);
+    free(wire);
+    vcs_zcode_epoch_creation_free(&previous);
+    return previous_ok;
+}
 
-    struct vcs_zcode_epoch_creation_set_v1 *epoch = &out->epoch;
-    vcs_zcode_epoch_creation_init(epoch);
+static enum vcs_zcode_shadow_simulation_error shadow_epoch_predecessor_check(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    const struct vcs_zcode_creation_attribution_v1 *attribution)
+{
+    if (attribution->epoch == 0)
+        return zcl_bytes_all_zero(input->previous_epoch_creation_root, 32)
+            ? VCS_ZCODE_SHADOW_SIMULATION_OK
+            : VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
+    return shadow_epoch_previous_matches(input, attribution)
+        ? VCS_ZCODE_SHADOW_SIMULATION_OK
+        : VCS_ZCODE_SHADOW_SIMULATION_PREDECESSOR;
+}
+
+static enum vcs_zcode_shadow_simulation_error shadow_epoch_fill_fields(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    struct vcs_zcode_epoch_creation_set_v1 *epoch)
+{
     epoch->schema_version = VCS_ZCODE_EPOCH_CREATION_VERSION;
-    epoch->epoch = attribution.epoch;
+    epoch->epoch = attribution->epoch;
     if (vcs_zc23_policy_epoch_cap_atoms(
             epoch->epoch, &epoch->emission_cap_atoms) !=
             VCS_ZCODE_EPOCH_CREATION_OK ||
-        attribution.award_atoms > epoch->emission_cap_atoms)
+        attribution->award_atoms > epoch->emission_cap_atoms)
         return VCS_ZCODE_SHADOW_SIMULATION_AWARD;
-    epoch->actual_mint_atoms = attribution.award_atoms;
+    epoch->actual_mint_atoms = attribution->award_atoms;
     epoch->unissued_atoms = epoch->emission_cap_atoms -
                             epoch->actual_mint_atoms;
-    memcpy(epoch->network_genesis_root, attribution.network_genesis_root, 32);
+    memcpy(epoch->network_genesis_root, attribution->network_genesis_root, 32);
     memcpy(epoch->zc23_policy_root, input->policy_candidate_root, 32);
     memcpy(epoch->previous_epoch_creation_root,
            input->previous_epoch_creation_root, 32);
     memcpy(epoch->committee_evidence_snapshot_root,
            input->fixture_branch_root, 32);
-    epoch->opening_height = attribution.challenge_opening_height;
-    memcpy(epoch->opening_hash, attribution.challenge_opening_hash, 32);
-    epoch->opening_mtp = attribution.challenge_opening_mtp;
-    epoch->maturity_height = attribution.challenge_maturity_height;
-    epoch->maturity_mtp = attribution.challenge_maturity_mtp;
+    epoch->opening_height = attribution->challenge_opening_height;
+    memcpy(epoch->opening_hash, attribution->challenge_opening_hash, 32);
+    epoch->opening_mtp = attribution->challenge_opening_mtp;
+    epoch->maturity_height = attribution->challenge_maturity_height;
+    epoch->maturity_mtp = attribution->challenge_maturity_mtp;
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+static enum vcs_zcode_shadow_simulation_error shadow_epoch_seal(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    struct vcs_zcode_shadow_epoch_plan *out,
+    struct vcs_zcode_epoch_creation_set_v1 *epoch)
+{
     uint8_t expected_opening_hash[32];
     if (!vcs_zcode_shadow_fixture_anchor_root(
             input->policy_candidate_root, input->fixture_branch_root,
@@ -475,7 +594,14 @@ enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
         vcs_zcode_epoch_creation_free(epoch);
         return VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
     }
+    return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
 
+static enum vcs_zcode_shadow_simulation_error shadow_epoch_verify(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    const struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_epoch_creation_set_v1 *epoch)
+{
     struct vcs_zcode_commons_projection *projection =
         vcs_zcode_commons_projection_build(input->workspace);
     if (!projection) {
@@ -491,7 +617,7 @@ enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
     memcpy(fixture.maturity_hash, epoch->maturity_hash, 32);
     struct vcs_zcode_epoch_creation_validation_context context = {
         .workspace = input->workspace,
-        .expected_network_genesis_root = policy.network_genesis_root,
+        .expected_network_genesis_root = policy->network_genesis_root,
         .expected_zc23_policy_root = input->policy_candidate_root,
         .expected_previous_epoch_creation_root =
             input->previous_epoch_creation_root,
@@ -505,7 +631,7 @@ enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
         .callback_opaque = &fixture,
     };
     enum vcs_zcode_epoch_creation_error epoch_error =
-        vcs_zcode_shadow_epoch_verify_cas(epoch, &context, &policy);
+        vcs_zcode_shadow_epoch_verify_cas(epoch, &context, policy);
     vcs_zcode_commons_projection_free(projection);
     if (epoch_error != VCS_ZCODE_EPOCH_CREATION_OK) {
         vcs_zcode_epoch_creation_free(epoch);
@@ -514,6 +640,33 @@ enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
             : VCS_ZCODE_SHADOW_SIMULATION_EPOCH;
     }
     return VCS_ZCODE_SHADOW_SIMULATION_OK;
+}
+
+enum vcs_zcode_shadow_simulation_error vcs_zcode_shadow_epoch_plan_cas(
+    const struct vcs_zcode_shadow_epoch_input *input,
+    struct vcs_zcode_shadow_epoch_plan *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (shadow_epoch_inputs_missing(input, out))
+        return VCS_ZCODE_SHADOW_SIMULATION_NULL;
+    struct vcs_zcode_policy_candidate_v1 policy;
+    enum vcs_zcode_shadow_simulation_error error = shadow_load_policy(
+        input->workspace, input->policy_candidate_root, &policy);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+
+    struct vcs_zcode_creation_attribution_v1 attribution;
+    error = shadow_epoch_attribution_load(input, &attribution);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    error = shadow_epoch_predecessor_check(input, &attribution);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+
+    struct vcs_zcode_epoch_creation_set_v1 *epoch = &out->epoch;
+    vcs_zcode_epoch_creation_init(epoch);
+    error = shadow_epoch_fill_fields(input, &attribution, epoch);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    error = shadow_epoch_seal(input, out, epoch);
+    if (error != VCS_ZCODE_SHADOW_SIMULATION_OK) return error;
+    return shadow_epoch_verify(input, &policy, epoch);
 }
 
 void vcs_zcode_shadow_epoch_plan_free(
