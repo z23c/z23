@@ -190,8 +190,8 @@ static void discovery_poll_child_operations(
   }
 }
 
-/* Drive unstarted nodes while below the ALPHA and success targets,
- * starting child page queries where possible. */
+/* Drive unstarted or partially paged nodes while below the ALPHA and
+ * success targets, starting or resuming child page queries where possible. */
 static void discovery_launch_child_queries(
     struct vcs_zcode_dht_service *service,
     struct service_record_discovery *discovery,
