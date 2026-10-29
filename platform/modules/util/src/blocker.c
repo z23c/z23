@@ -580,20 +580,25 @@ bool blocker_resolve_handoff(const char *id, struct blocker_handoff *out)
     return true;
 }
 
+/* Escape registry lookup: the registered callback for `name`, or NULL. */
+static blocker_escape_fn blocker_find_escape_locked(const char *name)
+{
+    for (int k = 0; k < BLOCKER_ESCAPE_CAP; k++) {
+        if (g_escapes[k].in_use &&
+            strcmp(g_escapes[k].name, name) == 0) {
+            return g_escapes[k].fn;
+        }
+    }
+    return NULL;
+}
+
 blocker_escape_fn blocker_lookup_escape(const char *action_name)
 {
     if (!action_name) return NULL;
     pthread_mutex_lock(&g_lock);
-    for (int i = 0; i < BLOCKER_ESCAPE_CAP; i++) {
-        if (g_escapes[i].in_use &&
-            strcmp(g_escapes[i].name, action_name) == 0) {
-            blocker_escape_fn fn = g_escapes[i].fn;
-            pthread_mutex_unlock(&g_lock);
-            return fn;
-        }
-    }
+    blocker_escape_fn fn = blocker_find_escape_locked(action_name);
     pthread_mutex_unlock(&g_lock);
-    return NULL;
+    return fn;
 }
 
 /* ── Lifecycle policy helpers (rule 1: TTL retirement) ────────────────
@@ -719,18 +724,6 @@ static bool blocker_sweep_budget_spent_locked(struct blocker_slot *s,
         return true;
     }
     return false;
-}
-
-/* Escape registry lookup: the registered callback for `name`, or NULL. */
-static blocker_escape_fn blocker_find_escape_locked(const char *name)
-{
-    for (int k = 0; k < BLOCKER_ESCAPE_CAP; k++) {
-        if (g_escapes[k].in_use &&
-            strcmp(g_escapes[k].name, name) == 0) {
-            return g_escapes[k].fn;
-        }
-    }
-    return NULL;
 }
 
 int blocker_supervisor_sweep(void)
