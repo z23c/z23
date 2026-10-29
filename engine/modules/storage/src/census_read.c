@@ -536,6 +536,69 @@ int census_read_versions(census_reader *r,
 
 /* ── graph ───────────────────────────────────────────────────────────── */
 
+/* Sweep totals and the newest finished sweep time. */
+static void census_graph_read_sweeps(census_reader *r,
+                                     struct census_graph_stats *out)
+{
+    out->sweeps_total = count_rows(r->db, "topo.topology_sweeps");
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(r->db,
+            "SELECT COALESCE(MAX(finished_unix),0) FROM topo.topology_sweeps",
+            -1, &s, NULL) == SQLITE_OK) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+            out->last_sweep_finished_unix = sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
+    }
+}
+
+static void census_graph_read_advertised_in_census(
+    census_reader *r, struct census_graph_stats *out)
+{
+    /* DISTINCT advertised endpoints that are themselves in the census.
+     * node_census keys on a blob; ip_to_str() bridges to the TEXT form. */
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(r->db,
+            "SELECT COUNT(*) FROM (SELECT DISTINCT advertised_ip,"
+            "advertised_port FROM topo.topology_edges) t WHERE EXISTS("
+            "SELECT 1 FROM node_census n WHERE ip_to_str(n.ip)=t.advertised_ip"
+            " AND n.port=t.advertised_port)",
+            -1, &s, NULL) == SQLITE_OK) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+            out->advertised_in_census = sqlite3_column_int64(s, 0);
+        sqlite3_finalize(s);
+    }
+}
+
+static void census_graph_read_top_advertised(census_reader *r,
+                                             struct census_graph_stats *out)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(r->db,
+            "SELECT advertised_ip,advertised_port,SUM(times_seen) ts,"
+            " COUNT(*) obs FROM topo.topology_edges"
+            " GROUP BY advertised_ip,advertised_port"
+            " ORDER BY ts DESC, advertised_ip ASC, advertised_port ASC"
+            " LIMIT ?",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(s, 1, CENSUS_MAX_TOP_ADVERTISED);
+        int k = 0;
+        while (k < CENSUS_MAX_TOP_ADVERTISED &&
+               AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            struct census_top_advertised *t = &out->top[k];
+            memset(t, 0, sizeof(*t));
+            const char *aip = (const char *)sqlite3_column_text(s, 0);
+            int aport = sqlite3_column_int(s, 1);
+            snprintf(t->advertised, sizeof(t->advertised), "%s:%d",
+                     aip ? aip : "", aport);
+            t->times_seen = sqlite3_column_int64(s, 2);
+            t->distinct_observers = sqlite3_column_int64(s, 3);
+            k++;
+        }
+        sqlite3_finalize(s);
+        out->top_count = k;
+    }
+}
+
 bool census_read_graph(census_reader *r, struct census_graph_stats *out)
 {
     if (!out)
@@ -550,57 +613,12 @@ bool census_read_graph(census_reader *r, struct census_graph_stats *out)
     out->observation_count =
         r->observations_present ? count_rows(r->db, "census_observations") : 0;
 
-    if (r->sweeps_present) {
-        out->sweeps_total = count_rows(r->db, "topo.topology_sweeps");
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(r->db,
-                "SELECT COALESCE(MAX(finished_unix),0) FROM topo.topology_sweeps",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-                out->last_sweep_finished_unix = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-        }
-    }
+    if (r->sweeps_present)
+        census_graph_read_sweeps(r, out);
 
     if (r->topology_present) {
-        /* DISTINCT advertised endpoints that are themselves in the census.
-         * node_census keys on a blob; ip_to_str() bridges to the TEXT form. */
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(r->db,
-                "SELECT COUNT(*) FROM (SELECT DISTINCT advertised_ip,"
-                "advertised_port FROM topo.topology_edges) t WHERE EXISTS("
-                "SELECT 1 FROM node_census n WHERE ip_to_str(n.ip)=t.advertised_ip"
-                " AND n.port=t.advertised_port)",
-                -1, &s, NULL) == SQLITE_OK) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
-                out->advertised_in_census = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-        }
-
-        if (sqlite3_prepare_v2(r->db,
-                "SELECT advertised_ip,advertised_port,SUM(times_seen) ts,"
-                " COUNT(*) obs FROM topo.topology_edges"
-                " GROUP BY advertised_ip,advertised_port"
-                " ORDER BY ts DESC, advertised_ip ASC, advertised_port ASC"
-                " LIMIT ?",
-                -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_int(s, 1, CENSUS_MAX_TOP_ADVERTISED);
-            int k = 0;
-            while (k < CENSUS_MAX_TOP_ADVERTISED &&
-                   AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                struct census_top_advertised *t = &out->top[k];
-                memset(t, 0, sizeof(*t));
-                const char *aip = (const char *)sqlite3_column_text(s, 0);
-                int aport = sqlite3_column_int(s, 1);
-                snprintf(t->advertised, sizeof(t->advertised), "%s:%d",
-                         aip ? aip : "", aport);
-                t->times_seen = sqlite3_column_int64(s, 2);
-                t->distinct_observers = sqlite3_column_int64(s, 3);
-                k++;
-            }
-            sqlite3_finalize(s);
-            out->top_count = k;
-        }
+        census_graph_read_advertised_in_census(r, out);
+        census_graph_read_top_advertised(r, out);
     }
     return true;
 }
