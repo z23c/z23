@@ -501,7 +501,6 @@ engine/jobs/src/tip_finalize_stage.c:is_canonical_header_successor:16
 engine/jobs/src/tip_finalize_stage.c:step_finalize:59
 engine/jobs/src/tip_finalize_visible_body.c:tip_finalize_reconcile_visible_cursor_body:21
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:39
-engine/jobs/src/utxo_apply_delta_repair.c:prove_exact_future_coin_suffix:19
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:42
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:53
 engine/jobs/src/validate_headers_stage.c:step_validate:23

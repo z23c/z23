@@ -114,6 +114,33 @@ static bool future_coin_matches_output(sqlite3 *db,
             memcmp(script, out->script_pub_key.data, script_len) == 0);
 }
 
+/* True when the suffix range is unusable or too large for startup repair. */
+static bool future_coin_range_refused(const struct main_state *ms,
+                                      const char *datadir, int first,
+                                      int last)
+{
+    return !ms || !datadir || last < first ||
+           last - first + 1 > UNAPPLIED_COIN_SUFFIX_REPAIR_MAX_BLOCKS;
+}
+
+/* True when the canonical block at `h` is indexed and its body was read. */
+static bool future_coin_body_read(struct main_state *ms, struct block *blk,
+                                  int h, const char *datadir,
+                                  utxo_apply_reader_fn reader,
+                                  void *reader_user)
+{
+    struct block_index *bi = stage_body_index_at(ms, h);
+    return bi && bi->nHeight == h && bi->phashBlock &&
+           stage_read_block(blk, bi, h, datadir, reader, reader_user);
+}
+
+/* True for an output that must have a coins row (not null, spendable). */
+static bool future_coin_output_counted(const struct tx_out *out)
+{
+    return !(tx_out_is_null(out) ||
+             script_is_unspendable(&out->script_pub_key));
+}
+
 /* Prove that rows with creator heights at/above `first` are exactly every
  * spendable output of a canonical, body-readable block suffix.  Inputs are
  * restored separately from their hash-verified pre-suffix creators below. */
@@ -122,8 +149,7 @@ static bool prove_exact_future_coin_suffix(
     utxo_apply_reader_fn reader, void *reader_user,
     int first, int last, int64_t actual_rows)
 {
-    if (!ms || !datadir || last < first ||
-        last - first + 1 > UNAPPLIED_COIN_SUFFIX_REPAIR_MAX_BLOCKS) {
+    if (future_coin_range_refused(ms, datadir, first, last)) {
         LOG_WARN("utxo_apply",
                  "[utxo_apply] future coin repair refused range=[%d,%d] "
                  "cap=%d main_state=%p datadir=%p",
@@ -134,11 +160,10 @@ static bool prove_exact_future_coin_suffix(
 
     int64_t expected_rows = 0;
     for (int h = first; h <= last; h++) {
-        struct block_index *bi = stage_body_index_at(ms, h);
         struct block blk;
         block_init(&blk);
-        if (!bi || bi->nHeight != h || !bi->phashBlock ||
-            !stage_read_block(&blk, bi, h, datadir, reader, reader_user)) {
+        if (!future_coin_body_read(ms, &blk, h, datadir, reader,
+                                   reader_user)) {
             block_free(&blk);
             LOG_WARN("utxo_apply",
                      "[utxo_apply] future coin repair refused: canonical "
@@ -151,8 +176,7 @@ static bool prove_exact_future_coin_suffix(
             const struct transaction *tx = &blk.vtx[ti];
             for (size_t vo = 0; vo < tx->num_vout; vo++) {
                 const struct tx_out *out = &tx->vout[vo];
-                if (tx_out_is_null(out) ||
-                    script_is_unspendable(&out->script_pub_key))
+                if (!future_coin_output_counted(out))
                     continue;
                 if (vo > UINT32_MAX ||
                     !future_coin_matches_output(db, tx, (uint32_t)vo, h)) {
