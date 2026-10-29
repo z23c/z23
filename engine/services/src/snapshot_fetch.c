@@ -285,6 +285,112 @@ bool snapsync_rollback_receive_write_internal(struct node_db *ndb, void *ctx)
     return node_db_rollback(ndb);
 }
 
+static bool snapsync_apply_chunk_args_ok(const struct snapshot_sync_service *svc,
+                                         const uint8_t *chunk_data, size_t chunk_len)
+{
+    return svc && svc->ndb && svc->ndb->open && chunk_data && chunk_len >= 4;
+}
+
+static bool snapsync_chunk_entry_count_ok(uint32_t entries)
+{
+    return entries != 0 && entries <= 1000;
+}
+
+/* Read a little-endian unsigned integer of nbytes (1..8) from p. */
+static uint64_t snapsync_chunk_read_le(const uint8_t *p, size_t nbytes)
+{
+    uint64_t v = 0;
+    for (size_t k = 0; k < nbytes; k++)
+        v |= (uint64_t)p[k] << (k * 8);
+    return v;
+}
+
+/* Decode the fixed 48-byte entry prefix (txid, vout, value, height) and
+ * advance *pos past it. The caller has checked that 48 bytes remain. */
+static void snapsync_chunk_read_fixed(const uint8_t *chunk_data, size_t *pos, struct db_utxo *u)
+{
+    size_t p = *pos;
+
+    memcpy(u->txid, chunk_data + p, 32); p += 32;
+    u->vout = (uint32_t)snapsync_chunk_read_le(chunk_data + p, 4);
+    p += 4;
+    u->value = (int64_t)snapsync_chunk_read_le(chunk_data + p, 8);
+    p += 8;
+    u->height = (int)(chunk_data[p] | (chunk_data[p+1] << 8) |
+                (chunk_data[p+2] << 16) | (chunk_data[p+3] << 24));
+    p += 4;
+    *pos = p;
+}
+
+/* Extra bytes that follow a script-length prefix byte: 2 for 253, 4 for 254. */
+static size_t snapsync_chunk_varint_ext(uint64_t first)
+{
+    if (first == 253)
+        return 2;
+    if (first == 254)
+        return 4;
+    return 0;
+}
+
+/* Script length: the prefix byte itself, or the ext bytes after it (which
+ * advances *pos past them). */
+static uint64_t snapsync_chunk_varint_value(const uint8_t *chunk_data, size_t *pos,
+                                            uint64_t first, size_t ext)
+{
+    uint64_t v = first;
+
+    if (ext) {
+        v = snapsync_chunk_read_le(chunk_data + *pos, ext);
+        *pos += ext;
+    }
+    return v;
+}
+
+/* Account the applied rows under the service lock. Returns false when the
+ * service is no longer receiving (nothing is counted then). */
+static bool snapsync_chunk_account(struct snapshot_sync_service *svc, int applied,
+                                   bool *commit_batch, uint64_t *received,
+                                   uint64_t *offered_count, uint32_t *serving_peer_id)
+{
+    snapsync_service_lock_internal();
+    if (svc->state != SNAPSYNC_RECEIVING) {
+        snapsync_service_unlock_internal();
+        return false;
+    }
+
+    svc->received_utxos += (uint64_t)applied;
+    svc->last_progress_time_us = snapsync_now_us_internal();
+    *received = svc->received_utxos;
+    *offered_count = svc->offered_count;
+    *serving_peer_id = svc->serving_peer_id;
+    if (*received - svc->last_commit_at >= SNAPSYNC_BATCH_COMMIT_ROWS) {
+        *commit_batch = true;
+        svc->last_commit_at = *received;
+    }
+    snapsync_service_unlock_internal();
+    return true;
+}
+
+/* When a batch is due, commit and reopen the transaction, then emit the
+ * progress event. Returns false when the commit/begin pair failed. */
+static bool snapsync_chunk_commit_batch(struct snapshot_sync_service *svc, bool commit_batch,
+                                        uint64_t received, uint64_t offered_count,
+                                        uint32_t serving_peer_id)
+{
+    if (!commit_batch)
+        return true;
+    if (!node_db_commit(svc->ndb) || !node_db_begin(svc->ndb))
+        return false; // raw-return-ok:caller snapsync_apply_chunk_local logs the batch commit/begin failure
+
+    double elapsed_s = (double)(snapsync_now_us_internal() - svc->start_time_us) / 1000000.0;
+    double rate = elapsed_s > 0 ? (double)received / elapsed_s : 0;
+    event_emitf(EV_SNAPSYNC_PROGRESS, serving_peer_id,
+                "received=%llu/%llu rate=%.0f/s",
+                (unsigned long long)received,
+                (unsigned long long)offered_count, rate);
+    return true;
+}
+
 static int snapsync_apply_chunk_local(struct snapshot_sync_service *svc,
                                       const uint8_t *chunk_data,
                                       size_t chunk_len)
@@ -297,13 +403,12 @@ static int snapsync_apply_chunk_local(struct snapshot_sync_service *svc,
     uint64_t offered_count = 0;
     uint64_t received = 0;
 
-    if (!svc || !svc->ndb || !svc->ndb->open || !chunk_data || chunk_len < 4)
+    if (!snapsync_apply_chunk_args_ok(svc, chunk_data, chunk_len))
         LOG_ERR("snapshot_sync", "apply_chunk: invalid args svc=%p chunk=%p len=%zu",
                 (void*)svc, (void*)chunk_data, chunk_len);
 
-    entries = chunk_data[0] | ((uint32_t)chunk_data[1] << 8) |
-              ((uint32_t)chunk_data[2] << 16) | ((uint32_t)chunk_data[3] << 24);
-    if (entries == 0 || entries > 1000)
+    entries = (uint32_t)snapsync_chunk_read_le(chunk_data, 4);
+    if (!snapsync_chunk_entry_count_ok(entries))
         LOG_ERR("snapshot_sync", "apply_chunk: bad entry count %u", entries);
 
     for (uint32_t i = 0; i < entries; i++) {
@@ -311,36 +416,19 @@ static int snapsync_apply_chunk_local(struct snapshot_sync_service *svc,
 
         struct db_utxo u;
         memset(&u, 0, sizeof(u));
-        memcpy(u.txid, chunk_data + pos, 32); pos += 32;
-
-        u.vout = (uint32_t)(chunk_data[pos] | (chunk_data[pos+1] << 8) |
-                  (chunk_data[pos+2] << 16) | (chunk_data[pos+3] << 24));
-        pos += 4;
-
-        u.value = 0;
-        for (int j = 0; j < 8; j++)
-            u.value |= (int64_t)chunk_data[pos + j] << (j * 8);
-        pos += 8;
-
-        u.height = (int)(chunk_data[pos] | (chunk_data[pos+1] << 8) |
-                    (chunk_data[pos+2] << 16) | (chunk_data[pos+3] << 24));
-        pos += 4;
+        snapsync_chunk_read_fixed(chunk_data, &pos, &u);
 
         if (pos >= chunk_len) LOG_ERR("snapshot_sync", "apply_chunk: truncated at coinbase flag, entry %u pos %zu", i, pos);
         u.is_coinbase = (chunk_data[pos++] != 0);
 
         if (pos >= chunk_len) LOG_ERR("snapshot_sync", "apply_chunk: truncated at script varint, entry %u pos %zu", i, pos);
         uint64_t slen = chunk_data[pos++];
-        if (slen == 253) {
-            if (pos + 2 > chunk_len) LOG_ERR("snapshot_sync", "apply_chunk: truncated at 2-byte varint, entry %u pos %zu", i, pos);
-            slen = chunk_data[pos] | (chunk_data[pos+1] << 8);
-            pos += 2;
-        } else if (slen == 254) {
-            if (pos + 4 > chunk_len) LOG_ERR("snapshot_sync", "apply_chunk: truncated at 4-byte varint, entry %u pos %zu", i, pos);
-            slen = chunk_data[pos] | ((uint32_t)chunk_data[pos+1] << 8) |
-                   ((uint32_t)chunk_data[pos+2] << 16) | ((uint32_t)chunk_data[pos+3] << 24);
-            pos += 4;
+        size_t ext = snapsync_chunk_varint_ext(slen);
+        if (ext && pos + ext > chunk_len) {
+            if (ext == 2) LOG_ERR("snapshot_sync", "apply_chunk: truncated at 2-byte varint, entry %u pos %zu", i, pos);
+            else LOG_ERR("snapshot_sync", "apply_chunk: truncated at 4-byte varint, entry %u pos %zu", i, pos);
         }
+        slen = snapsync_chunk_varint_value(chunk_data, &pos, slen, ext);
         if (pos + slen > chunk_len) LOG_ERR("snapshot_sync", "apply_chunk: script overflows chunk, entry %u pos %zu slen %llu", i, pos, (unsigned long long)slen);
 
         u.script = (uint8_t *)(chunk_data + pos);
@@ -355,34 +443,12 @@ static int snapsync_apply_chunk_local(struct snapshot_sync_service *svc,
         applied++;
     }
 
-    snapsync_service_lock_internal();
-    if (svc->state != SNAPSYNC_RECEIVING) {
-        snapsync_service_unlock_internal();
+    if (!snapsync_chunk_account(svc, applied, &commit_batch, &received,
+                                &offered_count, &serving_peer_id))
         return 0;
-    }
 
-    svc->received_utxos += (uint64_t)applied;
-    svc->last_progress_time_us = snapsync_now_us_internal();
-    received = svc->received_utxos;
-    offered_count = svc->offered_count;
-    serving_peer_id = svc->serving_peer_id;
-    if (received - svc->last_commit_at >= SNAPSYNC_BATCH_COMMIT_ROWS) {
-        commit_batch = true;
-        svc->last_commit_at = received;
-    }
-    snapsync_service_unlock_internal();
-
-    if (commit_batch) {
-        if (!node_db_commit(svc->ndb) || !node_db_begin(svc->ndb))
-            LOG_ERR("snapshot_sync", "apply_chunk: batch commit/begin failed at %llu UTXOs", (unsigned long long)received);
-
-        double elapsed_s = (double)(snapsync_now_us_internal() - svc->start_time_us) / 1000000.0;
-        double rate = elapsed_s > 0 ? (double)received / elapsed_s : 0;
-        event_emitf(EV_SNAPSYNC_PROGRESS, serving_peer_id,
-                    "received=%llu/%llu rate=%.0f/s",
-                    (unsigned long long)received,
-                    (unsigned long long)offered_count, rate);
-    }
+    if (!snapsync_chunk_commit_batch(svc, commit_batch, received, offered_count, serving_peer_id))
+        LOG_ERR("snapshot_sync", "apply_chunk: batch commit/begin failed at %llu UTXOs", (unsigned long long)received);
 
     return applied;
 }
