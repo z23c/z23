@@ -111,62 +111,97 @@ static void payment_fixture_release(struct payment_shutdown_fixture *fixture)
     pthread_mutex_unlock(&fixture->mutex);
 }
 
-static bool payment_shutdown_lifecycle_acceptance(void)
+static bool payment_fixture_init(struct payment_shutdown_fixture *fixture)
 {
-    struct payment_shutdown_fixture fixture;
-    memset(&fixture, 0, sizeof(fixture));
-    atomic_init(&fixture.running, false);
-    atomic_init(&fixture.callback_entered, false);
-    atomic_init(&fixture.frontend_stopped, false);
-    atomic_init(&fixture.runtime_stop_entered, false);
-    atomic_init(&fixture.runtime_stop_done, false);
-    atomic_init(&fixture.db_closed, false);
-    atomic_init(&fixture.state_released, false);
-    atomic_init(&fixture.resource_race, false);
-    if (pthread_mutex_init(&fixture.mutex, NULL) != 0)
+    memset(fixture, 0, sizeof(*fixture));
+    atomic_init(&fixture->running, false);
+    atomic_init(&fixture->callback_entered, false);
+    atomic_init(&fixture->frontend_stopped, false);
+    atomic_init(&fixture->runtime_stop_entered, false);
+    atomic_init(&fixture->runtime_stop_done, false);
+    atomic_init(&fixture->db_closed, false);
+    atomic_init(&fixture->state_released, false);
+    atomic_init(&fixture->resource_race, false);
+    if (pthread_mutex_init(&fixture->mutex, NULL) != 0)
         return false;
-    if (pthread_cond_init(&fixture.release_cond, NULL) != 0) {
-        pthread_mutex_destroy(&fixture.mutex);
+    if (pthread_cond_init(&fixture->release_cond, NULL) != 0) {
+        pthread_mutex_destroy(&fixture->mutex);
         return false;
     }
+    return true;
+}
 
-    bool ok = !payment_fixture_start(&fixture) &&
-              !fixture.payment_started;
-    zcl_service_kernel_init(&fixture.frontend);
-    zcl_service_kernel_init(&fixture.runtime);
+static bool payment_fixture_register(struct payment_shutdown_fixture *fixture)
+{
     const struct zcl_service_spec frontend = {
         .name = "rpc_frontend",
         .start = frontend_fixture_start,
         .stop = frontend_fixture_stop,
-        .ctx = &fixture,
+        .ctx = fixture,
     };
     const struct zcl_service_spec payment = {
         .name = "store_payment",
         .start = payment_fixture_start,
         .stop = payment_fixture_stop,
-        .ctx = &fixture,
+        .ctx = fixture,
     };
-    ok = ok && zcl_service_kernel_register(&fixture.frontend, &frontend) &&
-         zcl_service_kernel_register(&fixture.runtime, &payment);
+    return zcl_service_kernel_register(&fixture->frontend, &frontend) &&
+           zcl_service_kernel_register(&fixture->runtime, &payment);
+}
+
+static bool payment_fixture_start_services(struct payment_shutdown_fixture *fixture)
+{
+    return zcl_service_kernel_start_all(&fixture->frontend) &&
+           zcl_service_kernel_start_all(&fixture->runtime) &&
+           payment_fixture_wait(&fixture->callback_entered);
+}
+
+static bool payment_fixture_frontend_stopped(struct payment_shutdown_fixture *fixture)
+{
+    return atomic_load(&fixture->frontend_stopped) &&
+           !atomic_load(&fixture->runtime_stop_entered) &&
+           !atomic_load(&fixture->db_closed) &&
+           !atomic_load(&fixture->state_released);
+}
+
+static bool payment_fixture_runtime_stop_held(struct payment_shutdown_fixture *fixture)
+{
+    return payment_fixture_wait(&fixture->runtime_stop_entered) &&
+           !atomic_load(&fixture->runtime_stop_done) &&
+           !atomic_load(&fixture->db_closed) &&
+           !atomic_load(&fixture->state_released);
+}
+
+static bool payment_fixture_settled(struct payment_shutdown_fixture *fixture)
+{
+    return atomic_load(&fixture->runtime_stop_done) &&
+           atomic_load(&fixture->db_closed) &&
+           atomic_load(&fixture->state_released) &&
+           !atomic_load(&fixture->resource_race);
+}
+
+static bool payment_shutdown_lifecycle_acceptance(void)
+{
+    struct payment_shutdown_fixture fixture;
+    if (!payment_fixture_init(&fixture))
+        return false;
+
+    bool ok = !payment_fixture_start(&fixture) &&
+              !fixture.payment_started;
+    zcl_service_kernel_init(&fixture.frontend);
+    zcl_service_kernel_init(&fixture.runtime);
+    ok = ok && payment_fixture_register(&fixture);
 
     atomic_store(&fixture.running, true);
-    ok = ok && zcl_service_kernel_start_all(&fixture.frontend) &&
-         zcl_service_kernel_start_all(&fixture.runtime) &&
-         payment_fixture_wait(&fixture.callback_entered);
+    ok = ok && payment_fixture_start_services(&fixture);
 
     zcl_service_kernel_stop_all(&fixture.frontend);
-    ok = ok && atomic_load(&fixture.frontend_stopped) &&
-         !atomic_load(&fixture.runtime_stop_entered) &&
-         !atomic_load(&fixture.db_closed) &&
-         !atomic_load(&fixture.state_released);
+    ok = ok && payment_fixture_frontend_stopped(&fixture);
 
     if (pthread_create(&fixture.shutdown_thread, NULL,
                        payment_fixture_runtime_shutdown, &fixture) == 0) {
         fixture.shutdown_started = true;
-        ok = ok && payment_fixture_wait(&fixture.runtime_stop_entered) &&
-             !atomic_load(&fixture.runtime_stop_done) &&
-             !atomic_load(&fixture.db_closed) &&
-             !atomic_load(&fixture.state_released);
+        ok = ok && payment_fixture_runtime_stop_held(&fixture);
     } else {
         ok = false;
     }
@@ -180,10 +215,7 @@ static bool payment_shutdown_lifecycle_acceptance(void)
         payment_fixture_stop(&fixture);
     }
 
-    ok = ok && atomic_load(&fixture.runtime_stop_done) &&
-         atomic_load(&fixture.db_closed) &&
-         atomic_load(&fixture.state_released) &&
-         !atomic_load(&fixture.resource_race);
+    ok = ok && payment_fixture_settled(&fixture);
     pthread_cond_destroy(&fixture.release_cond);
     pthread_mutex_destroy(&fixture.mutex);
     return ok;
