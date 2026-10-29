@@ -1773,6 +1773,486 @@ static int test_chunk_serialize_parity(void)
     return failures;
 }
 
+/* ── Characterization: fast_sync_build_offer and block_piece_manifest_build ──
+ * These pin today's observable behaviour (offer and manifest fields, refusal
+ * branches, the UTXO root cache interaction) so the next complexity split of
+ * fast_sync.c must keep it byte for byte. Fixtures are local node.db files in
+ * a test tmpdir. The chainwork RPC refresh is not driven: it needs a running
+ * zclassicd, and the fake block hashes here make it refuse harmlessly. */
+
+static const uint8_t fsb_height_le8[8] = {0xD2, 0x04, 0, 0, 0, 0, 0, 0};
+static const uint8_t fsb_height_le4[4] = {0xD2, 0x04, 0, 0};
+static const uint8_t fsb_height_le2[2] = {0xD2, 0x04};
+static const uint8_t fsb_height_le9[9] = {0xD2, 0x04, 0, 0, 0, 0, 0, 0, 0};
+
+static sqlite3 *fsb_open_rw(const char *dir)
+{
+    char path[600];
+    sqlite3 *db = NULL;
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                        NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+static void fsb_cleanup(const char *dir)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    (void)unlink(path);
+    (void)rmdir(dir);
+}
+
+static bool fsb_create_chain_tables(sqlite3 *db)
+{
+    return sqlite3_exec(db,
+        "CREATE TABLE node_state(key TEXT PRIMARY KEY, value BLOB);"
+        "CREATE TABLE blocks(hash BLOB PRIMARY KEY, height INTEGER NOT NULL,"
+        " chain_work BLOB);"
+        "CREATE TABLE utxos(txid BLOB NOT NULL, vout INTEGER NOT NULL,"
+        " value INTEGER NOT NULL, script BLOB NOT NULL,"
+        " height INTEGER NOT NULL, is_coinbase INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (txid, vout));",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool fsb_put_node_state(sqlite3 *db, const char *key,
+                               const void *val, int len)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(db, "INSERT INTO node_state(key,value) VALUES(?,?)",
+                           -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(st, 2, val, len, SQLITE_STATIC);
+    ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-setup
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool fsb_put_block(sqlite3 *db, const uint8_t *hash, int hash_len,
+                          int64_t height, const uint8_t *work, int work_len)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(db,
+            "INSERT INTO blocks(hash,height,chain_work) VALUES(?,?,?)",
+            -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(st, 1, hash, hash_len, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 2, height);
+    if (work)
+        sqlite3_bind_blob(st, 3, work, work_len, SQLITE_STATIC);
+    else
+        sqlite3_bind_null(st, 3);
+    ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-setup
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool fsb_put_utxos(sqlite3 *db, int n)
+{
+    for (int i = 0; i < n; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO utxos(txid,vout,value,script,height,is_coinbase)"
+                 " VALUES(zeroblob(32),%d,%d,X'51',100,0)", i, 1000 + i);
+        if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK)
+            return false;
+    }
+    return true;
+}
+
+/* Oracle: the public commitment the offer root must equal. */
+static bool fsb_oracle_root(const char *dir, uint8_t root[32], uint64_t *count)
+{
+    sqlite3 *db = fsb_open_rw(dir);
+    if (!db)
+        return false;
+    utxo_commitment_sha3_compute(db, root, count);
+    sqlite3_close(db);
+    return true;
+}
+
+/* ── fast_sync_build_offer rows ─────────────────────────────── */
+
+struct fsb_offer_row {
+    const char *name;
+    const uint8_t *height_blob;  /* node_state tip_height; NULL = no row */
+    int height_len;
+    int hash_len;                /* node_state tip_hash length; 0 = no row */
+    bool block_row;              /* blocks row for the 0x11 hash exists */
+    int work_len;                /* chain_work length on that row */
+    int utxos;
+    int cache;                   /* 0 none, 1 matching root cached, 2 stale */
+    bool want_ok;
+    int32_t want_height;
+    bool want_hash;              /* block_hash copied from tip_hash */
+    bool want_work;              /* chain_work copied from the blocks row */
+};
+
+static const struct fsb_offer_row fsb_offer_rows[] = {
+    {"8-byte tip_height", fsb_height_le8, 8, 32, true, 32, 3, 0,
+     true, 1234, true, true},
+    {"4-byte tip_height", fsb_height_le4, 4, 32, true, 32, 3, 0,
+     true, 1234, true, true},
+    {"2-byte tip_height zero-extended", fsb_height_le2, 2, 32, true, 32, 3, 0,
+     true, 1234, true, true},
+    {"empty tip_height blob", fsb_height_le2, 0, 32, true, 32, 3, 0,
+     false, 0, true, true},
+    {"9-byte tip_height ignored", fsb_height_le9, 9, 32, true, 32, 3, 0,
+     false, 0, true, true},
+    {"no tip_height row", NULL, 0, 32, true, 32, 3, 0,
+     false, 0, true, true},
+    {"short tip_hash not copied", fsb_height_le8, 8, 16, true, 32, 3, 0,
+     true, 1234, false, false},
+    {"no tip_hash row", fsb_height_le8, 8, 0, true, 32, 3, 0,
+     true, 1234, false, false},
+    {"short chain_work not copied", fsb_height_le8, 8, 32, true, 16, 3, 0,
+     true, 1234, true, false},
+    {"no blocks row for tip hash", fsb_height_le8, 8, 32, false, 32, 3, 0,
+     true, 1234, true, false},
+    {"empty utxo set refuses the offer", fsb_height_le8, 8, 32, true, 32, 0, 0,
+     false, 1234, true, true},
+    {"matching cached root reused", fsb_height_le8, 8, 32, true, 32, 3, 1,
+     true, 1234, true, true},
+    {"stale cached count recomputed", fsb_height_le8, 8, 32, true, 32, 3, 2,
+     true, 1234, true, true},
+};
+
+static bool fsb_seed_offer_db(sqlite3 *db, const struct fsb_offer_row *r)
+{
+    uint8_t hash[32], work[32];
+    bool ok = true;
+    memset(hash, 0x11, sizeof(hash));
+    memset(work, 0x22, sizeof(work));
+    if (!fsb_create_chain_tables(db))
+        return false;
+    if (r->height_blob)
+        ok = fsb_put_node_state(db, "tip_height", r->height_blob, r->height_len);
+    if (ok && r->hash_len > 0)
+        ok = fsb_put_node_state(db, "tip_hash", hash, r->hash_len);
+    if (ok && r->block_row)
+        ok = fsb_put_block(db, hash, 32, 1234, work, r->work_len);
+    return ok && fsb_put_utxos(db, r->utxos);
+}
+
+static void fsb_prime_root_cache(const struct fsb_offer_row *r)
+{
+    uint8_t ee[32];
+    memset(ee, 0xEE, sizeof(ee));
+    fast_sync_reset_utxo_root_cache();
+    if (r->cache == 1)
+        (void)fast_sync_publish_utxo_root_cache(ee, (uint64_t)r->utxos);
+    else if (r->cache == 2)
+        (void)fast_sync_publish_utxo_root_cache(ee, (uint64_t)(r->utxos - 1));
+}
+
+static void fsb_expected_root(int cache, const uint8_t oracle[32],
+                              uint8_t out[32])
+{
+    if (cache == 1)
+        memset(out, 0xEE, 32);
+    else
+        memcpy(out, oracle, 32);
+}
+
+static bool fsb_offer_scalars_hold(const struct fsb_offer_row *r, bool built,
+                                   const struct snapshot_offer *o)
+{
+    bool good = built == r->want_ok
+        && o->height == r->want_height
+        && o->peer_tip_height == r->want_height
+        && o->num_utxos == (uint64_t)r->utxos
+        && o->total_bytes == (uint64_t)r->utxos * 80u
+        && o->protocol_version == FAST_SYNC_PROTOCOL_VERSION
+        && o->snapshot_schema_version == FAST_SYNC_SNAPSHOT_SCHEMA_VERSION;
+    if (!good)
+        fprintf(stderr, "build_offer scalars diverged in row '%s'\n", r->name);
+    return good;
+}
+
+static bool fsb_offer_bytes_hold(const struct fsb_offer_row *r,
+                                 const struct snapshot_offer *o,
+                                 const uint8_t want_root[32])
+{
+    uint8_t want_hash[32] = {0};
+    uint8_t want_work[32] = {0};
+    if (r->want_hash)
+        memset(want_hash, 0x11, sizeof(want_hash));
+    if (r->want_work)
+        memset(want_work, 0x22, sizeof(want_work));
+    bool good = memcmp(o->block_hash, want_hash, 32) == 0
+        && memcmp(o->chain_work, want_work, 32) == 0
+        && (r->utxos == 0 || memcmp(o->utxo_root, want_root, 32) == 0);
+    if (!good)
+        fprintf(stderr, "build_offer bytes diverged in row '%s'\n", r->name);
+    return good;
+}
+
+/* After a build with utxos, the cache must hold the root it served. */
+static bool fsb_offer_cache_holds(const struct fsb_offer_row *r,
+                                  const uint8_t want_root[32])
+{
+    uint8_t cached[32];
+    uint64_t count = 0;
+    if (r->utxos == 0)
+        return true;
+    return fast_sync_get_utxo_root_cache(cached, &count)
+        && count == (uint64_t)r->utxos
+        && memcmp(cached, want_root, 32) == 0;
+}
+
+static bool fsb_offer_row_holds(const struct fsb_offer_row *r, int idx)
+{
+    char tag[32], dir[512];
+    uint8_t oracle[32] = {0};
+    uint8_t want_root[32];
+    uint64_t oracle_count = 0;
+    struct snapshot_offer offer;
+    bool good = false;
+    bool built = false;
+
+    snprintf(tag, sizeof(tag), "offer%d", idx);
+    test_make_tmpdir(dir, sizeof(dir), "fsb_offer", tag);
+    sqlite3 *db = fsb_open_rw(dir);
+    good = db && fsb_seed_offer_db(db, r);
+    sqlite3_close(db);
+    good = good && fsb_oracle_root(dir, oracle, &oracle_count)
+        && oracle_count == (uint64_t)r->utxos;
+
+    fsb_prime_root_cache(r);
+    memset(&offer, 0xAB, sizeof(offer));
+    built = fast_sync_build_offer(dir, &offer);
+    fsb_expected_root(r->cache, oracle, want_root);
+    good = good && fsb_offer_scalars_hold(r, built, &offer)
+        && fsb_offer_bytes_hold(r, &offer, want_root)
+        && fsb_offer_cache_holds(r, want_root);
+    fsb_cleanup(dir);
+    if (!good)
+        fprintf(stderr, "build_offer row '%s' diverged\n", r->name);
+    return good;
+}
+
+static bool fsb_all_offer_rows_hold(void)
+{
+    size_t n = sizeof(fsb_offer_rows) / sizeof(fsb_offer_rows[0]);
+    bool all = true;
+    for (size_t i = 0; i < n; i++) {
+        if (!fsb_offer_row_holds(&fsb_offer_rows[i], (int)i))
+            all = false;
+    }
+    fast_sync_reset_utxo_root_cache();
+    return all;
+}
+
+static bool fsb_offer_refusals_hold(void)
+{
+    struct snapshot_offer offer;
+    uint8_t zero[32] = {0};
+    memset(&offer, 0xAB, sizeof(offer));
+    bool good = !fast_sync_build_offer("/nonexistent/path/zcl", NULL);
+    good = good && !fast_sync_build_offer("/nonexistent/path/zcl", &offer);
+    good = good && offer.height == 0 && offer.peer_tip_height == 0
+        && offer.num_utxos == 0 && offer.total_bytes == 0
+        && offer.protocol_version == FAST_SYNC_PROTOCOL_VERSION
+        && offer.snapshot_schema_version == FAST_SYNC_SNAPSHOT_SCHEMA_VERSION
+        && memcmp(offer.block_hash, zero, 32) == 0
+        && memcmp(offer.chain_work, zero, 32) == 0;
+    return good;
+}
+
+/* ── block_piece_manifest_build rows ─────────────────────────── */
+
+static uint8_t fsb_manifest_fill(int32_t height)
+{
+    return (uint8_t)(height * 3 + 1);
+}
+
+struct fsb_manifest_row {
+    const char *name;
+    int32_t start, end;     /* requested range */
+    int32_t first, last;    /* rows inserted into blocks */
+    int32_t short_height;   /* row whose hash is 16 bytes; 0 = none */
+    bool want_ok;
+    uint32_t want_pieces;
+};
+
+static const struct fsb_manifest_row fsb_manifest_rows[] = {
+    {"single full piece", 1, 64, 1, 64, 0, true, 1},
+    {"partial final piece", 1, 70, 1, 70, 0, true, 2},
+    {"missing tip row leaves tip_hash zero", 1, 10, 1, 9, 0, true, 1},
+    {"short tip hash is not copied", 1, 10, 1, 10, 10, true, 1},
+    {"range starting above height one", 100, 109, 100, 109, 0, true, 1},
+    {"coverage below 90 percent refused", 1, 10, 1, 8, 0, false, 0},
+};
+
+static bool fsb_seed_manifest_db(sqlite3 *db, const struct fsb_manifest_row *r)
+{
+    if (!fsb_create_chain_tables(db))
+        return false;
+    for (int32_t h = r->first; h <= r->last; h++) {
+        uint8_t hash[32];
+        int len = (h == r->short_height) ? 16 : 32;
+        memset(hash, fsb_manifest_fill(h), sizeof(hash));
+        if (!fsb_put_block(db, hash, len, h, NULL, 0))
+            return false;
+    }
+    return true;
+}
+
+/* Oracle: piece hashes over the rows the build can see, in height order,
+ * and the tip hash at end_height when that row is a full 32-byte hash. */
+static void fsb_manifest_expected(const struct fsb_manifest_row *r,
+                                  uint8_t pieces[][32], uint8_t tip[32])
+{
+    for (uint32_t p = 0; p < r->want_pieces; p++) {
+        uint8_t bh[BLOCKS_PER_PIECE][32];
+        uint32_t count = 0;
+        int32_t first = r->start + (int32_t)(p * BLOCKS_PER_PIECE);
+        for (int32_t k = 0; k < BLOCKS_PER_PIECE; k++) {
+            int32_t h = first + k;
+            if (h > r->end || h > r->last)
+                break;
+            if (h == r->short_height)
+                memset(bh[count], 0, 32);
+            else
+                memset(bh[count], fsb_manifest_fill(h), 32);
+            count++;
+        }
+        block_piece_hash((const uint8_t (*)[32])bh, count, p, pieces[p]);
+    }
+    memset(tip, 0, 32);
+    if (r->end >= r->first && r->end <= r->last && r->end != r->short_height)
+        memset(tip, fsb_manifest_fill(r->end), 32);
+}
+
+static bool fsb_manifest_is_zeroed(const struct block_piece_manifest *m)
+{
+    uint8_t zero[32] = {0};
+    return m->start_height == 0 && m->end_height == 0
+        && m->num_pieces == 0 && m->piece_hashes == NULL
+        && memcmp(m->tip_hash, zero, 32) == 0
+        && memcmp(m->merkle_root, zero, 32) == 0;
+}
+
+static bool fsb_manifest_fields_hold(const struct fsb_manifest_row *r,
+                                     const struct block_piece_manifest *m,
+                                     const uint8_t want_pieces[][32],
+                                     const uint8_t want_tip[32],
+                                     const uint8_t want_root[32])
+{
+    if (!r->want_ok)
+        return fsb_manifest_is_zeroed(m);
+    bool good = m->start_height == r->start && m->end_height == r->end
+        && m->num_pieces == r->want_pieces && m->piece_hashes != NULL
+        && memcmp(m->tip_hash, want_tip, 32) == 0
+        && memcmp(m->merkle_root, want_root, 32) == 0;
+    for (uint32_t p = 0; good && p < r->want_pieces; p++)
+        good = memcmp(m->piece_hashes[p], want_pieces[p], 32) == 0;
+    if (!good)
+        fprintf(stderr, "piece manifest fields diverged in row '%s'\n", r->name);
+    return good;
+}
+
+static bool fsb_manifest_row_holds(const struct fsb_manifest_row *r, int idx)
+{
+    char tag[32], dir[512];
+    struct block_piece_manifest m;
+    uint8_t want_pieces[2][32];
+    uint8_t want_tip[32];
+    uint8_t want_root[32];
+    bool good = false;
+    bool built = false;
+
+    snprintf(tag, sizeof(tag), "manifest%d", idx);
+    test_make_tmpdir(dir, sizeof(dir), "fsb_manifest", tag);
+    sqlite3 *db = fsb_open_rw(dir);
+    good = db && fsb_seed_manifest_db(db, r);
+    sqlite3_close(db);
+
+    memset(want_pieces, 0, sizeof(want_pieces));
+    fsb_manifest_expected(r, want_pieces, want_tip);
+    fast_sync_merkle_root((const uint8_t (*)[32])want_pieces, r->want_pieces,
+                          want_root);
+
+    memset(&m, 0xAB, sizeof(m));
+    built = block_piece_manifest_build(dir, r->start, r->end, &m);
+    good = good && built == r->want_ok
+        && fsb_manifest_fields_hold(r, &m, want_pieces, want_tip, want_root);
+    block_piece_manifest_free(&m);
+    fsb_cleanup(dir);
+    if (!good)
+        fprintf(stderr, "piece manifest row '%s' diverged\n", r->name);
+    return good;
+}
+
+static bool fsb_all_manifest_rows_hold(void)
+{
+    size_t n = sizeof(fsb_manifest_rows) / sizeof(fsb_manifest_rows[0]);
+    bool all = true;
+    for (size_t i = 0; i < n; i++) {
+        if (!fsb_manifest_row_holds(&fsb_manifest_rows[i], (int)i))
+            all = false;
+    }
+    return all;
+}
+
+static bool fsb_manifest_refusals_hold(void)
+{
+    struct block_piece_manifest m;
+    char dir[512];
+    memset(&m, 0, sizeof(m));
+    bool good = !block_piece_manifest_build("/nonexistent/path/zcl", 1, 10,
+                                            NULL);
+    good = good && !block_piece_manifest_build("/nonexistent/path/zcl", 10,
+                                               1, &m);
+
+    memset(&m, 0xAB, sizeof(m));
+    good = good && !block_piece_manifest_build("/nonexistent/path/zcl", 1, 10,
+                                               &m)
+        && fsb_manifest_is_zeroed(&m);
+
+    test_make_tmpdir(dir, sizeof(dir), "fsb_manifest", "no_blocks");
+    sqlite3 *db = fsb_open_rw(dir);
+    good = good && db
+        && sqlite3_exec(db,
+               "CREATE TABLE node_state(key TEXT PRIMARY KEY, value BLOB)",
+               NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_close(db);
+    memset(&m, 0xAB, sizeof(m));
+    good = good && !block_piece_manifest_build(dir, 1, 10, &m)
+        && fsb_manifest_is_zeroed(&m);
+    fsb_cleanup(dir);
+    return good;
+}
+
+static int test_fsb_build_offer_pins(void)
+{
+    int failures = 0;
+    TEST("fast_sync_build_offer pins offer fields, refusals and the utxo root cache") {
+        ASSERT(fsb_offer_refusals_hold());
+        ASSERT(fsb_all_offer_rows_hold());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fsb_block_piece_manifest_pins(void)
+{
+    int failures = 0;
+    TEST("block_piece_manifest_build pins piece hashes, tip, merkle root and refusals") {
+        ASSERT(fsb_manifest_refusals_hold());
+        ASSERT(fsb_all_manifest_rows_hold());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ─────────────────────────────────────────── */
 
 int test_fast_sync(void)
@@ -1848,6 +2328,10 @@ int test_fast_sync(void)
     failures += test_apply_chunk_rollback_on_mid_chunk_failure();
     failures += test_chunk_roundtrip_preserves_canonical_utxo_fields();
     failures += test_serve_refuses_oversize_script();
+
+    /* Characterization pins ahead of the fast_sync.c complexity split */
+    failures += test_fsb_build_offer_pins();
+    failures += test_fsb_block_piece_manifest_pins();
 
     return failures;
 }
