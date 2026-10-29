@@ -263,33 +263,42 @@ static bool release_root_zero(const uint8_t root[32])
 
 /* ── error strings ────────────────────────────────────────────────── */
 
+static const struct release_error_name {
+    enum vcs_package_release_error error;
+    const char *name;
+} release_error_names[] = {
+    {VCS_PACKAGE_RELEASE_OK, "ok"},
+    {VCS_PACKAGE_RELEASE_ERR_NULL, "null-argument"},
+    {VCS_PACKAGE_RELEASE_ERR_ALLOC, "allocation-failed"},
+    {VCS_PACKAGE_RELEASE_ERR_SCHEMA_VERSION, "schema-version"},
+    {VCS_PACKAGE_RELEASE_ERR_NAME, "package-name"},
+    {VCS_PACKAGE_RELEASE_ERR_SEMVER, "semantic-version"},
+    {VCS_PACKAGE_RELEASE_ERR_PARENT_FLAG, "parent-presence-flag"},
+    {VCS_PACKAGE_RELEASE_ERR_PUBKEY, "publisher-pubkey"},
+    {VCS_PACKAGE_RELEASE_ERR_REWARD, "reward-address"},
+    {VCS_PACKAGE_RELEASE_ERR_LICENSE, "spdx-license"},
+    {VCS_PACKAGE_RELEASE_ERR_ZNAM_FLAG, "znam-presence-flag"},
+    {VCS_PACKAGE_RELEASE_ERR_ZNAM, "znam-name"},
+    {VCS_PACKAGE_RELEASE_ERR_CHAIN_ID, "chain-id"},
+    {VCS_PACKAGE_RELEASE_ERR_SIG_LOW_S, "signature-not-low-s"},
+    {VCS_PACKAGE_RELEASE_ERR_SIG_VERIFY, "signature-verify"},
+    {VCS_PACKAGE_RELEASE_ERR_WIRE_MAGIC, "wire-magic"},
+    {VCS_PACKAGE_RELEASE_ERR_WIRE_OVERSIZE, "wire-oversize"},
+    {VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED, "wire-truncated"},
+    {VCS_PACKAGE_RELEASE_ERR_WIRE_TRAILING, "wire-trailing-bytes"},
+    {VCS_PACKAGE_RELEASE_ERR_PACKAGE_ROOT, "package-root-zero"},
+    {VCS_PACKAGE_RELEASE_ERR_RECIPE_ROOT, "recipe-root-zero"},
+    {VCS_PACKAGE_RELEASE_ERR_SEQUENCE, "publisher-sequence-zero"},
+    {VCS_PACKAGE_RELEASE_ERR_PARENT_ROOT, "parent-root-zero"},
+};
+
 const char *vcs_package_release_error_string(
     enum vcs_package_release_error error)
 {
-    switch (error) {
-    case VCS_PACKAGE_RELEASE_OK: return "ok";
-    case VCS_PACKAGE_RELEASE_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_RELEASE_ERR_ALLOC: return "allocation-failed";
-    case VCS_PACKAGE_RELEASE_ERR_SCHEMA_VERSION: return "schema-version";
-    case VCS_PACKAGE_RELEASE_ERR_NAME: return "package-name";
-    case VCS_PACKAGE_RELEASE_ERR_SEMVER: return "semantic-version";
-    case VCS_PACKAGE_RELEASE_ERR_PARENT_FLAG: return "parent-presence-flag";
-    case VCS_PACKAGE_RELEASE_ERR_PUBKEY: return "publisher-pubkey";
-    case VCS_PACKAGE_RELEASE_ERR_REWARD: return "reward-address";
-    case VCS_PACKAGE_RELEASE_ERR_LICENSE: return "spdx-license";
-    case VCS_PACKAGE_RELEASE_ERR_ZNAM_FLAG: return "znam-presence-flag";
-    case VCS_PACKAGE_RELEASE_ERR_ZNAM: return "znam-name";
-    case VCS_PACKAGE_RELEASE_ERR_CHAIN_ID: return "chain-id";
-    case VCS_PACKAGE_RELEASE_ERR_SIG_LOW_S: return "signature-not-low-s";
-    case VCS_PACKAGE_RELEASE_ERR_SIG_VERIFY: return "signature-verify";
-    case VCS_PACKAGE_RELEASE_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_PACKAGE_RELEASE_ERR_WIRE_OVERSIZE: return "wire-oversize";
-    case VCS_PACKAGE_RELEASE_ERR_WIRE_TRUNCATED: return "wire-truncated";
-    case VCS_PACKAGE_RELEASE_ERR_WIRE_TRAILING: return "wire-trailing-bytes";
-    case VCS_PACKAGE_RELEASE_ERR_PACKAGE_ROOT: return "package-root-zero";
-    case VCS_PACKAGE_RELEASE_ERR_RECIPE_ROOT: return "recipe-root-zero";
-    case VCS_PACKAGE_RELEASE_ERR_SEQUENCE: return "publisher-sequence-zero";
-    case VCS_PACKAGE_RELEASE_ERR_PARENT_ROOT: return "parent-root-zero";
+    for (size_t i = 0; i < sizeof(release_error_names) /
+                               sizeof(release_error_names[0]); i++) {
+        if (release_error_names[i].error == error)
+            return release_error_names[i].name;
     }
     return "unknown-error";
 }
@@ -393,6 +402,16 @@ bool vcs_package_release_license_text_allowed(const uint8_t *text, size_t len)
 
 /* ── validation ───────────────────────────────────────────────────── */
 
+/* The ZNAM pointer name is only checked when the presence flag is set. */
+static bool release_znam_ok(const struct vcs_package_release *release)
+{
+    if (!release->has_znam)
+        return true;
+    size_t znam_len = release_field_len(release->znam,
+                                        sizeof(release->znam));
+    return release_name_half_valid_n(release->znam, znam_len);
+}
+
 enum vcs_package_release_error vcs_package_release_validate(
     const struct vcs_package_release *release)
 {
@@ -448,13 +467,9 @@ enum vcs_package_release_error vcs_package_release_validate(
         LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_RECIPE_ROOT, "vcs.release",
                    "all-zero recipe root");
 
-    if (release->has_znam) {
-        size_t znam_len = release_field_len(release->znam,
-                                            sizeof(release->znam));
-        if (!release_name_half_valid_n(release->znam, znam_len))
-            LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM, "vcs.release",
-                       "bad ZNAM pointer name");
-    }
+    if (!release_znam_ok(release))
+        LOG_RETURN(VCS_PACKAGE_RELEASE_ERR_ZNAM, "vcs.release",
+                   "bad ZNAM pointer name");
 
     size_t chain_len = release_field_len(release->chain_id,
                                          sizeof(release->chain_id));
