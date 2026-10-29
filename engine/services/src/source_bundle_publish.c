@@ -203,6 +203,132 @@ static unsigned sbp_seed_dir_entries(const char *dirpath,
     return seen;
 }
 
+/* Per-call sweep numbers the caller needs for its own "not guaranteed" log. */
+struct sbp_sweep {
+    unsigned seed_artifacts;
+    unsigned root_artifacts;
+    unsigned root_entries;
+};
+
+/* Build the seeded directory, final, staging and registry-relative names for
+ * one content root, and make sure the directory exists. False on any
+ * truncation or a directory that cannot be ensured. */
+static bool sbp_prepare_paths(const char *datadir, const char *root_hex,
+                              char *seed_dir, char *final_path, char *staging,
+                              char *relname)
+{
+    int dn = snprintf(seed_dir, SOURCE_BUNDLE_PUBLISH_PATH_MAX, "%s/%s",
+                      datadir, ROM_SEED_BUNDLES_SUBDIR);
+    int fn = snprintf(final_path, SOURCE_BUNDLE_PUBLISH_PATH_MAX, "%s/%s%s",
+                      seed_dir, root_hex, ROM_SEED_SOURCE_BUNDLE_SUFFIX);
+    int sn = snprintf(staging, SOURCE_BUNDLE_PUBLISH_PATH_MAX, "%s/%s%s.part",
+                      seed_dir, root_hex, ROM_SEED_SOURCE_BUNDLE_SUFFIX);
+    int rn = snprintf(relname, ROM_SEED_NAME_MAX, "%s/%s%s",
+                      ROM_SEED_BUNDLES_SUBDIR, root_hex,
+                      ROM_SEED_SOURCE_BUNDLE_SUFFIX);
+    return !(dn <= 0 || (size_t)dn >= SOURCE_BUNDLE_PUBLISH_PATH_MAX ||
+             fn <= 0 || (size_t)fn >= SOURCE_BUNDLE_PUBLISH_PATH_MAX ||
+             sn <= 0 || (size_t)sn >= SOURCE_BUNDLE_PUBLISH_PATH_MAX ||
+             rn <= 0 || (size_t)rn >= ROM_SEED_NAME_MAX ||
+             !platform_directory_ensure(seed_dir, 0700));
+}
+
+/* What already sits under the content-addressed name. */
+enum sbp_present_state {
+    SBP_PRESENT_ERROR, SBP_PRESENT_FOREIGN, SBP_PRESENT_SAME, SBP_PRESENT_NONE
+};
+
+static enum sbp_present_state sbp_classify_present(const char *final_path,
+                                                    const uint8_t *wire,
+                                                    size_t wire_len)
+{
+    size_t present_len = 0;
+    uint8_t *present = NULL;
+    enum sbp_read_result read_result =
+        sbp_read_whole(final_path, &present, &present_len);
+    if (read_result == SBP_READ_ERROR)
+        return SBP_PRESENT_ERROR;
+    bool republished = present && present_len == wire_len &&
+        memcmp(present, wire, wire_len) == 0;
+    bool foreign = present && !republished;
+    free(present);
+    if (foreign)
+        return SBP_PRESENT_FOREIGN;
+    return republished ? SBP_PRESENT_SAME : SBP_PRESENT_NONE;
+}
+
+/* True when the registry's answer carries the source root this call captured
+ * and is a source bundle. */
+static bool sbp_offer_confirms_root(const struct rom_artifact *art,
+                                    const uint8_t *root,
+                                    struct rom_artifact *offered)
+{
+    return rom_seed_find_by_root(art->chunk_root, offered) &&
+        offered->has_source_root &&
+        memcmp(offered->source_root, root, 32) == 0 &&
+        offered->kind == ROM_ARTIFACT_SOURCE_BUNDLE;
+}
+
+/* Count both directories a boot sweep walks and set the report's sweep
+ * fields from them. */
+static void sbp_fill_sweep(struct source_bundle_publish_report *report,
+                           const char *datadir, const char *seed_dir,
+                           struct sbp_sweep *sw)
+{
+    unsigned seed_beyond = 0, root_beyond = 0;
+    sw->seed_artifacts = 0;
+    sw->root_artifacts = 0;
+    report->seed_directory_entries =
+        sbp_seed_dir_entries(seed_dir, &sw->seed_artifacts, &seed_beyond);
+    sw->root_entries =
+        sbp_seed_dir_entries(datadir, &sw->root_artifacts, &root_beyond);
+    report->entries_beyond_cap = seed_beyond + root_beyond;
+    report->rescan_guaranteed =
+        report->seed_directory_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
+        sw->root_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
+        (uint64_t)sw->root_artifacts + (uint64_t)sw->seed_artifacts <=
+            (uint64_t)ROM_SEED_MAX_ARTIFACTS;
+}
+
+/* True when the caller supplied every string the publish needs. */
+static bool sbp_args_present(const char *workspace, const char *datadir)
+{
+    return workspace && workspace[0] && datadir && datadir[0];
+}
+
+/* A caller-supplied root is a PIN: true when it is given and differs. */
+static bool sbp_pin_mismatch(const uint8_t *pinned_root, const uint8_t *root)
+{
+    return pinned_root && memcmp(pinned_root, root, 32) != 0;
+}
+
+/* Land the wire under its final name unless the identical file is already
+ * there. */
+static bool sbp_store_unless_republished(bool republished, const char *staging,
+                                         const char *final_path,
+                                         const uint8_t *wire, size_t wire_len)
+{
+    return republished ||
+        sbp_write_atomic(staging, final_path, wire, wire_len);
+}
+
+/* Map a registration refusal to the publish code that names it. */
+static enum source_bundle_publish_result sbp_register_error(
+    enum rom_register_result rr)
+{
+    return rr == ROM_REG_ERR_FULL ? SOURCE_BUNDLE_PUBLISH_ERR_REGISTRY_FULL
+                                  : SOURCE_BUNDLE_PUBLISH_ERR_REGISTER;
+}
+
+/* Hand the price-0 offer to the market when it can be built. */
+static void sbp_announce_offer(const struct rom_artifact *art, uint16_t fs_port)
+{
+    struct file_offer offer;
+    uint8_t self_ip[16] = {0};
+    if (rom_seed_build_offer(art, self_ip, fs_port, &offer))
+        (void)file_market_add_offer(&offer);
+}
+
 /* ── The one entry point ─────────────────────────────────────────────── */
 
 enum source_bundle_publish_result source_bundle_publish(
@@ -212,7 +338,7 @@ enum source_bundle_publish_result source_bundle_publish(
     if (!report)
         return SOURCE_BUNDLE_PUBLISH_ERR_ARGS;
     memset(report, 0, sizeof(*report));
-    if (!workspace || !workspace[0] || !datadir || !datadir[0])
+    if (!sbp_args_present(workspace, datadir))
         return SOURCE_BUNDLE_PUBLISH_ERR_ARGS;
 
     /* Refuse before doing any work when the result could not be served
@@ -238,7 +364,7 @@ enum source_bundle_publish_result source_bundle_publish(
                  workspace);
         return SOURCE_BUNDLE_PUBLISH_ERR_WORKSPACE;
     }
-    if (pinned_root && memcmp(pinned_root, root, 32) != 0) {
+    if (sbp_pin_mismatch(pinned_root, root)) {
         LOG_WARN(SBP_SUBSYS,
                  "publish refused: the captured tree is not the pinned root");
         return SOURCE_BUNDLE_PUBLISH_ERR_ROOT_PIN;
@@ -263,20 +389,8 @@ enum source_bundle_publish_result source_bundle_publish(
     char final_path[SOURCE_BUNDLE_PUBLISH_PATH_MAX];
     char staging[SOURCE_BUNDLE_PUBLISH_PATH_MAX];
     char relname[ROM_SEED_NAME_MAX];
-    int dn = snprintf(seed_dir, sizeof(seed_dir), "%s/%s", datadir,
-                      ROM_SEED_BUNDLES_SUBDIR);
-    int fn = snprintf(final_path, sizeof(final_path), "%s/%s%s", seed_dir,
-                      root_hex, ROM_SEED_SOURCE_BUNDLE_SUFFIX);
-    int sn = snprintf(staging, sizeof(staging), "%s/%s%s.part", seed_dir,
-                      root_hex, ROM_SEED_SOURCE_BUNDLE_SUFFIX);
-    int rn = snprintf(relname, sizeof(relname), "%s/%s%s",
-                      ROM_SEED_BUNDLES_SUBDIR, root_hex,
-                      ROM_SEED_SOURCE_BUNDLE_SUFFIX);
-    if (dn <= 0 || (size_t)dn >= sizeof(seed_dir) ||
-        fn <= 0 || (size_t)fn >= sizeof(final_path) ||
-        sn <= 0 || (size_t)sn >= sizeof(staging) ||
-        rn <= 0 || (size_t)rn >= sizeof(relname) ||
-        !platform_directory_ensure(seed_dir, 0700)) {
+    if (!sbp_prepare_paths(datadir, root_hex, seed_dir, final_path, staging,
+                           relname)) {
         free(wire);
         LOG_WARN(SBP_SUBSYS, "publish refused: seeded directory '%s' unusable",
                  seed_dir);
@@ -286,28 +400,24 @@ enum source_bundle_publish_result source_bundle_publish(
     /* Content-addressed name: an existing file under it is either this exact
      * bundle (a republish, which is a no-op) or something that must not be
      * silently overwritten. */
-    size_t present_len = 0;
-    uint8_t *present = NULL;
-    enum sbp_read_result read_result =
-        sbp_read_whole(final_path, &present, &present_len);
-    if (read_result == SBP_READ_ERROR) {
+    enum sbp_present_state present_state =
+        sbp_classify_present(final_path, wire, wire_len);
+    if (present_state == SBP_PRESENT_ERROR) {
         free(wire);
         LOG_WARN(SBP_SUBSYS, "publish refused: existing '%s' could not be "
                  "verified and was not overwritten", final_path);
         return SOURCE_BUNDLE_PUBLISH_ERR_STORE;
     }
-    bool republished = present && present_len == wire_len &&
-        memcmp(present, wire, wire_len) == 0;
-    bool foreign = present && !republished;
-    free(present);
-    if (foreign) {
+    bool republished = present_state == SBP_PRESENT_SAME;
+    if (present_state == SBP_PRESENT_FOREIGN) {
         free(wire);
         LOG_WARN(SBP_SUBSYS,
                  "publish refused: '%s' already holds different bytes under "
                  "this content root and was not overwritten", final_path);
         return SOURCE_BUNDLE_PUBLISH_ERR_STORE;
     }
-    if (!republished && !sbp_write_atomic(staging, final_path, wire, wire_len)) {
+    if (!sbp_store_unless_republished(republished, staging, final_path, wire,
+                                     wire_len)) {
         free(wire);
         return SOURCE_BUNDLE_PUBLISH_ERR_STORE;
     }
@@ -323,9 +433,7 @@ enum source_bundle_publish_result source_bundle_publish(
         LOG_WARN(SBP_SUBSYS,
                  "publish refused: registering '%s' returned %d", relname,
                  (int)rr);
-        return rr == ROM_REG_ERR_FULL
-            ? SOURCE_BUNDLE_PUBLISH_ERR_REGISTRY_FULL
-            : SOURCE_BUNDLE_PUBLISH_ERR_REGISTER;
+        return sbp_register_error(rr);
     }
 
     /* Announce the price-0 offer with the port a peer would actually dial. The
@@ -333,20 +441,14 @@ enum source_bundle_publish_result source_bundle_publish(
      * for the gossip/market view rather than the discovery path itself — but
      * an offer carrying port 0 would be an advertisement nobody can act on. */
     uint16_t fs_port = fs_server_get_port();
-    struct file_offer offer;
-    uint8_t self_ip[16] = {0};
-    if (rom_seed_build_offer(&art, self_ip, fs_port, &offer))
-        (void)file_market_add_offer(&offer);
+    sbp_announce_offer(&art, fs_port);
 
     /* THE proof. Ask the registry, by the root a peer would ask for, whether
      * this artifact is offered — and require the answer to carry the source
      * root this call captured. Anything else is reported as a failure to
      * publish, never as a success with a note. */
     struct rom_artifact offered;
-    if (!rom_seed_find_by_root(art.chunk_root, &offered) ||
-        !offered.has_source_root ||
-        memcmp(offered.source_root, root, 32) != 0 ||
-        offered.kind != ROM_ARTIFACT_SOURCE_BUNDLE) {
+    if (!sbp_offer_confirms_root(&art, root, &offered)) {
         LOG_WARN(SBP_SUBSYS,
                  "publish refused: the registry did not confirm '%s' as an "
                  "offered source bundle after registering it", relname);
@@ -370,18 +472,11 @@ enum source_bundle_publish_result source_bundle_publish(
      * count alone is a promise a synced node with a header seed and a full
      * shelf of bundles cannot keep. Both directories are counted, and every
      * classifying entry in either of them is a slot contender. */
-    unsigned seed_artifacts = 0, root_artifacts = 0;
-    unsigned seed_beyond = 0, root_beyond = 0;
-    report->seed_directory_entries =
-        sbp_seed_dir_entries(seed_dir, &seed_artifacts, &seed_beyond);
-    unsigned root_entries =
-        sbp_seed_dir_entries(datadir, &root_artifacts, &root_beyond);
-    report->entries_beyond_cap = seed_beyond + root_beyond;
-    report->rescan_guaranteed =
-        report->seed_directory_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
-        root_entries <= ROM_SEED_SCAN_ENTRY_CAP &&
-        (uint64_t)root_artifacts + (uint64_t)seed_artifacts <=
-            (uint64_t)ROM_SEED_MAX_ARTIFACTS;
+    struct sbp_sweep sw;
+    sbp_fill_sweep(report, datadir, seed_dir, &sw);
+    unsigned seed_artifacts = sw.seed_artifacts;
+    unsigned root_artifacts = sw.root_artifacts;
+    unsigned root_entries = sw.root_entries;
     report->bundle = metrics;
     if (!report->rescan_guaranteed)
         LOG_WARN(SBP_SUBSYS,
