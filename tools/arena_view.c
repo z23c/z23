@@ -750,24 +750,23 @@ static void av_text(const char *s, int x, int y, int size, Color c, bool strong)
     DrawTextEx(f, s, (Vector2){ (float)x, (float)y }, (float)size, 0.0f, c);
 }
 
-static void av_draw_hud(const av_view *vw)
-{
-    const av_verified *v = vw->v;
-    const Color hud_green = { 110, 231, 160, 255 };
-    const Color hud_dim = { 130, 145, 165, 255 };
-    const Color red_col = { 255, 107, 94, 255 };
-    const Color blue_col = { 87, 166, 255, 255 };
+static const Color av_c_green = { 110, 231, 160, 255 };
+static const Color av_c_dim = { 130, 145, 165, 255 };
+static const Color av_c_red = { 255, 107, 94, 255 };
+static const Color av_c_blue = { 87, 166, 255, 255 };
 
+static void av_hud_scores(const av_view *vw)
+{
     DrawRectangle(0, 0, GetScreenWidth(), 92, (Color){ 11, 15, 22, 220 });
     DrawRectangle(0, 90, GetScreenWidth(), 2, (Color){ 36, 48, 68, 255 });
     /* Team scores. */
-    av_text(TextFormat("%u", vw->m.score[0]), 28, 10, 48, red_col, true);
-    av_text(vw->red_label, 28, 62, 16, red_col, false);
+    av_text(TextFormat("%u", vw->m.score[0]), 28, 10, 48, av_c_red, true);
+    av_text(vw->red_label, 28, 62, 16, av_c_red, false);
     const char *blue_score = TextFormat("%u", vw->m.score[1]);
     const int bw = av_measure(blue_score, 48, true);
-    av_text(blue_score, GetScreenWidth() - bw - 28, 10, 48, blue_col, true);
+    av_text(blue_score, GetScreenWidth() - bw - 28, 10, 48, av_c_blue, true);
     const int blw = av_measure(vw->blue_label, 16, false);
-    av_text(vw->blue_label, GetScreenWidth() - blw - 28, 62, 16, blue_col,
+    av_text(vw->blue_label, GetScreenWidth() - blw - 28, 62, 16, av_c_blue,
             false);
     /* Clock / phase. */
     const unsigned secs = (unsigned)(vw->tick / 60u);
@@ -776,8 +775,12 @@ static void av_draw_hud(const av_view *vw)
     const char *clock = TextFormat("T+%02u:%02u  %s", secs / 60u, secs % 60u,
                                    speed_tag);
     av_text(clock, GetScreenWidth() / 2 - av_measure(clock, 22, true) / 2, 14,
-            22, hud_green, true);
+            22, av_c_green, true);
+}
 
+static void av_hud_banner(const av_view *vw)
+{
+    const av_verified *v = vw->v;
     if (vw->m.phase == ZDOG_PHASE_DONE) {
         const char *banner = TextFormat(
             "%s %u-%u", av_winner_name(v->final_m.winner),
@@ -785,9 +788,9 @@ static void av_draw_hud(const av_view *vw)
         const int fs = 48;
         const int bwide = av_measure(banner, fs, true);
         const Color banner_col =
-            v->final_m.winner == ZDOG_WINNER_BLUE ? blue_col
-            : v->final_m.winner == ZDOG_WINNER_RED ? red_col
-                                                   : hud_dim;
+            v->final_m.winner == ZDOG_WINNER_BLUE ? av_c_blue
+            : v->final_m.winner == ZDOG_WINNER_RED ? av_c_red
+                                                   : av_c_dim;
         av_text(banner, GetScreenWidth() / 2 - bwide / 2,
                 GetScreenHeight() / 3, fs, banner_col, true);
     }
@@ -795,32 +798,40 @@ static void av_draw_hud(const av_view *vw)
     if (vw->cam == AV_CAM_COCKPIT) {
         const int cx = GetScreenWidth() / 2;
         const int cy = GetScreenHeight() / 2;
-        DrawCircleLines(cx, cy, 18, hud_green);
-        DrawLine(cx - 28, cy, cx - 10, cy, hud_green);
-        DrawLine(cx + 10, cy, cx + 28, cy, hud_green);
-        DrawLine(cx, cy - 28, cx, cy - 10, hud_green);
-        DrawLine(cx, cy + 10, cx, cy + 28, hud_green);
+        DrawCircleLines(cx, cy, 18, av_c_green);
+        DrawLine(cx - 28, cy, cx - 10, cy, av_c_green);
+        DrawLine(cx + 10, cy, cx + 28, cy, av_c_green);
+        DrawLine(cx, cy - 28, cx, cy - 10, av_c_green);
+        DrawLine(cx, cy + 10, cx, cy + 28, av_c_green);
     }
+}
 
+static void av_hud_plane_panel(const av_view *vw)
+{
+    const av_verified *v = vw->v;
     /* Followed-plane panel. */
     const zdog_plane *pl = &vw->m.planes[vw->follow];
     const int px = 28, py = GetScreenHeight() - 118;
     av_text(TextFormat("PLANE %u/%u  %s", vw->follow + 1u, v->num_planes,
                        pl->team == 0 ? vw->red_label : vw->blue_label),
-            px, py, 16, hud_dim, false);
+            px, py, 16, av_c_dim, false);
     av_text(TextFormat("ALT %5dm   SPD %3dm/s   HDG %3ddeg",
                        (int)(pl->y * AV_MM_TO_M), pl->speed / 1000,
                        (int)((float)pl->yaw / 65536.0f * 360.0f)),
-            px, py + 22, 16, hud_green, false);
+            px, py + 22, 16, av_c_green, false);
     /* Health bar. */
     DrawRectangle(px, py + 56, 220, 14, (Color){ 30, 38, 50, 255 });
     const float hf = (float)pl->health / 100.0f;
-    const Color hc = pl->team == 0 ? red_col : blue_col;
+    const Color hc = pl->team == 0 ? av_c_red : av_c_blue;
     DrawRectangle(px + 2, py + 58, (int)(216.0f * hf), 10, hc);
     av_text(pl->alive ? TextFormat("HULL %d", pl->health) : "DESTROYED",
             px + 232, py + 54, 14,
-            pl->alive ? hud_dim : (Color){ 255, 120, 90, 255 }, true);
+            pl->alive ? av_c_dim : (Color){ 255, 120, 90, 255 }, true);
+}
 
+static void av_hud_help(const av_view *vw)
+{
+    const int py = GetScreenHeight() - 118;
     /* Camera + help, bottom-right. */
     static const char *cam_names[] = { "CHASE", "COCKPIT", "ORBIT",
                                        "OVERVIEW" };
@@ -833,20 +844,20 @@ static void av_draw_hud(const av_view *vw)
         "LEFT/RIGHT seek 1s   PGUP/PGDN seek 10s   HOME/END ends";
     const char *cam_line = TextFormat("CAMERA  %s", cam_names[vw->cam]);
     av_text(cam_line, GetScreenWidth() / 2 - av_measure(cam_line, 16, true) / 2,
-            44, 16, hud_green, true);
+            44, 16, av_c_green, true);
     av_text("Z23 ARENA", GetScreenWidth() / 2 - av_measure("Z23 ARENA", 18, true) / 2,
-            66, 18, hud_green, true);
+            66, 18, av_c_green, true);
     av_text(help1, GetScreenWidth() - av_measure(help1, 14, false) - 28, py + 26,
-            14, hud_dim, false);
+            14, av_c_dim, false);
     av_text(seek, GetScreenWidth() - av_measure(seek, 14, false) - 28, py + 48,
-            14, hud_dim, false);
+            14, av_c_dim, false);
     av_text(help2, GetScreenWidth() - av_measure(help2, 14, false) - 28, py + 70,
-            14, hud_dim, false);
+            14, av_c_dim, false);
+}
 
-    /* Verified tag: the recomputed roots are the point of the picture. */
-    char rr[SHA3_256_OUTPUT_SIZE * 2u + 1u];
-    char sr[SHA3_256_OUTPUT_SIZE * 2u + 1u];
-
+static void av_hud_minimap(const av_view *vw)
+{
+    const av_verified *v = vw->v;
     /* Live tactical minimap — the contact-sheet's overhead view, live.
      * Same mapping as tools/arena_svg.c: +x right, +z up. */
     const int map_s = 172, pad = 16;
@@ -855,7 +866,7 @@ static void av_draw_hud(const av_view *vw)
     DrawRectangleLinesEx((Rectangle){ (float)mx, (float)my, (float)map_s,
                                       (float)map_s },
                          2, (Color){ 36, 48, 68, 255 });
-    av_text("MINIMAP", mx, my - 22, 14, hud_green, true);
+    av_text("MINIMAP", mx, my - 22, 14, av_c_green, true);
     for (int g = 1; g < 5; g++) {
         const int d = map_s * g / 5;
         DrawLine(mx + d, my, mx + d, my + map_s,
@@ -871,7 +882,7 @@ static void av_draw_hud(const av_view *vw)
         const int cy2 =
             my + (int)(((int64_t)ZDOG_WORLD_HALF - pl2->z) * map_s /
                        (2 * (int64_t)ZDOG_WORLD_HALF));
-        const Color tc = pl2->team == 0 ? red_col : blue_col;
+        const Color tc = pl2->team == 0 ? av_c_red : av_c_blue;
         if (!pl2->alive) {
             DrawLine(cx2 - 4, cy2 - 4, cx2 + 4, cy2 + 4,
                      (Color){ 61, 74, 92, 220 });
@@ -904,6 +915,14 @@ static void av_draw_hud(const av_view *vw)
                       s->team == 0 ? (Color){ 255, 200, 120, 230 }
                                    : (Color){ 160, 220, 255, 230 });
     }
+}
+
+static void av_hud_footer(const av_view *vw)
+{
+    const av_verified *v = vw->v;
+    /* Verified tag: the recomputed roots are the point of the picture. */
+    char rr[SHA3_256_OUTPUT_SIZE * 2u + 1u];
+    char sr[SHA3_256_OUTPUT_SIZE * 2u + 1u];
 
     /* Roots footer. */
     zcl_hex_encode(v->replay_root, SHA3_256_OUTPUT_SIZE, rr);
@@ -913,7 +932,17 @@ static void av_draw_hud(const av_view *vw)
         (unsigned long long)vw->tick,
         (unsigned long long)v->recorded_ticks);
     av_text(line, GetScreenWidth() / 2 - av_measure(line, 14, false) / 2,
-            GetScreenHeight() - 26, 14, hud_green, false);
+            GetScreenHeight() - 26, 14, av_c_green, false);
+}
+
+static void av_draw_hud(const av_view *vw)
+{
+    av_hud_scores(vw);
+    av_hud_banner(vw);
+    av_hud_plane_panel(vw);
+    av_hud_help(vw);
+    av_hud_minimap(vw);
+    av_hud_footer(vw);
 }
 
 /* Composite the hosted C23 integer view (zdogview) into the local window.
@@ -944,7 +973,7 @@ static void av_draw_hosted(Texture2D *tex, const av_view *vw)
 
 /* Input */
 
-static void av_input(av_view *vw)
+static void av_input_basic(av_view *vw)
 {
     if (IsKeyPressed(KEY_TAB))
         vw->follow = (vw->follow + 1u) % vw->v->num_planes;
@@ -958,6 +987,10 @@ static void av_input(av_view *vw)
         av_advance(vw, 1);
     if (IsKeyPressed(KEY_R))
         av_seek(vw, 0);
+}
+
+static void av_input_seek(av_view *vw)
+{
     if (IsKeyPressed(KEY_HOME))
         av_seek(vw, 0);
     if (IsKeyPressed(KEY_END))
@@ -970,6 +1003,10 @@ static void av_input(av_view *vw)
         av_seek(vw, vw->tick + 600);
     if (IsKeyPressed(KEY_PAGE_DOWN))
         av_seek(vw, vw->tick > 600 ? vw->tick - 600 : 0);
+}
+
+static void av_input_speed(av_view *vw)
+{
     static const float speeds[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 8.0f };
     const unsigned ns = sizeof(speeds) / sizeof(speeds[0]);
     unsigned cur = 0;
@@ -989,6 +1026,13 @@ static void av_input(av_view *vw)
         if (cur > 0)
             vw->speed = speeds[cur - 1u];
     }
+}
+
+static void av_input(av_view *vw)
+{
+    av_input_basic(vw);
+    av_input_seek(vw);
+    av_input_speed(vw);
 }
 
 /* Advance playback by the accumulated real time. */
@@ -1035,22 +1079,59 @@ static int av_parse_cam(const char *v, int *cam_mode)
     return 0;
 }
 
-int main(int argc, char **argv)
-{
-    av_opts o = { NULL, "red", "blue" };
-    bool check_only = false;
-    long frames_limit = 0; /* 0 = run until closed */
-    const char *screenshot = NULL;
-    const char *shot_dir = NULL;
-    long shot_every = 1;
-    const char *shot_every_s = NULL;
-    const char *frames_s = NULL;
-    const char *seek_s = NULL;
-    const char *cam_s = NULL;
-    unsigned long long seek_to = 0;
-    bool show_window = false;
-    int cam_mode = AV_CAM_CHASE;
+/* Parsed command line; AV_CONT from the parse steps means "keep going". */
+#define AV_CONT (-1)
 
+typedef struct {
+    av_opts o;
+    bool check_only;
+    long frames_limit; /* 0 = run until closed */
+    const char *screenshot;
+    const char *shot_dir;
+    long shot_every;
+    const char *shot_every_s;
+    const char *frames_s;
+    const char *seek_s;
+    const char *cam_s;
+    unsigned long long seek_to;
+    bool show_window;
+    int cam_mode;
+} av_cli;
+
+/* Apply one known option; false when the name is not an option. */
+static bool av_cli_set(av_cli *c, const char *name, const char *v,
+                       bool *takes_value)
+{
+    if (strcmp(name, "--replay") == 0)
+        c->o.replay_path = v;
+    else if (strcmp(name, "--red-label") == 0)
+        c->o.red_label = v;
+    else if (strcmp(name, "--blue-label") == 0)
+        c->o.blue_label = v;
+    else if (strcmp(name, "--check-only") == 0)
+        *takes_value = false, c->check_only = true;
+    else if (strcmp(name, "--show") == 0)
+        *takes_value = false, c->show_window = true;
+    else if (strcmp(name, "--frames") == 0)
+        c->frames_s = v;
+    else if (strcmp(name, "--seek") == 0)
+        c->seek_s = v;
+    else if (strcmp(name, "--cam") == 0)
+        c->cam_s = v;
+    else if (strcmp(name, "--screenshot") == 0)
+        c->screenshot = v;
+    else if (strcmp(name, "--screenshot-dir") == 0)
+        c->shot_dir = v;
+    else if (strcmp(name, "--screenshot-every") == 0)
+        c->shot_every_s = v;
+    else
+        return false;
+    return true;
+}
+
+/* Walk argv into the cli; AV_CONT or the process exit code. */
+static int av_cli_parse(av_cli *c, int argc, char **argv)
+{
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = NULL;
@@ -1073,29 +1154,7 @@ int main(int argc, char **argv)
             av_usage(stdout);
             return 0;
         }
-        if (strcmp(name, "--replay") == 0)
-            o.replay_path = v;
-        else if (strcmp(name, "--red-label") == 0)
-            o.red_label = v;
-        else if (strcmp(name, "--blue-label") == 0)
-            o.blue_label = v;
-        else if (strcmp(name, "--check-only") == 0)
-            takes_value = false, check_only = true;
-        else if (strcmp(name, "--show") == 0)
-            takes_value = false, show_window = true;
-        else if (strcmp(name, "--frames") == 0)
-            frames_s = v;
-        else if (strcmp(name, "--seek") == 0)
-            seek_s = v;
-        else if (strcmp(name, "--cam") == 0)
-            cam_s = v;
-        else if (strcmp(name, "--screenshot") == 0)
-            screenshot = v;
-        else if (strcmp(name, "--screenshot-dir") == 0)
-            shot_dir = v;
-        else if (strcmp(name, "--screenshot-every") == 0)
-            shot_every_s = v;
-        else {
+        if (!av_cli_set(c, name, v, &takes_value)) {
             av_err("unknown argument", a);
             av_usage(stderr);
             return 2;
@@ -1110,52 +1169,182 @@ int main(int argc, char **argv)
                 i++;
         }
     }
-    if (frames_s) {
+    return AV_CONT;
+}
+
+/* First half of the value checks: frames, seek, camera, replay, screenshot. */
+static int av_cli_check_a(av_cli *c)
+{
+    if (c->frames_s) {
         char *end = NULL;
-        frames_limit = strtol(frames_s, &end, 10);
-        if (!end || *end || frames_limit < 1) {
-            av_err("--frames needs a positive integer", frames_s);
+        c->frames_limit = strtol(c->frames_s, &end, 10);
+        if (!end || *end || c->frames_limit < 1) {
+            av_err("--frames needs a positive integer", c->frames_s);
             return 2;
         }
     }
-    if (seek_s) {
+    if (c->seek_s) {
         char *end = NULL;
-        seek_to = strtoull(seek_s, &end, 10);
+        c->seek_to = strtoull(c->seek_s, &end, 10);
         if (!end || *end) {
-            av_err("--seek needs a non-negative integer", seek_s);
+            av_err("--seek needs a non-negative integer", c->seek_s);
             return 2;
         }
     }
-    if (cam_s && av_parse_cam(cam_s, &cam_mode) != 0)
+    if (c->cam_s && av_parse_cam(c->cam_s, &c->cam_mode) != 0)
         return 2;
-    if (!o.replay_path) {
+    if (!c->o.replay_path) {
         av_err("missing required argument", "--replay");
         av_usage(stderr);
         return 2;
     }
-    if (screenshot && !check_only && frames_limit <= 0) {
+    if (c->screenshot && !c->check_only && c->frames_limit <= 0) {
         av_err("--screenshot requires --frames", "see usage");
         return 2;
     }
-    if (shot_every_s) {
+    return AV_CONT;
+}
+
+/* Second half: screenshot cadence, directory and the two labels. */
+static int av_cli_check_b(av_cli *c)
+{
+    if (c->shot_every_s) {
         char *end = NULL;
-        shot_every = strtol(shot_every_s, &end, 10);
-        if (!end || *end || shot_every < 1) {
+        c->shot_every = strtol(c->shot_every_s, &end, 10);
+        if (!end || *end || c->shot_every < 1) {
             av_err("--screenshot-every needs a positive integer",
-                   shot_every_s);
+                   c->shot_every_s);
             return 2;
         }
     }
-    if (shot_dir && !shot_dir[0]) {
-        av_err("--screenshot-dir needs a directory path", shot_dir);
+    if (c->shot_dir && !c->shot_dir[0]) {
+        av_err("--screenshot-dir needs a directory path", c->shot_dir);
         return 2;
     }
-    int lrc = av_require_label("--red-label", o.red_label);
+    int lrc = av_require_label("--red-label", c->o.red_label);
     if (lrc != ARENA_HUD_OK)
         return lrc;
-    lrc = av_require_label("--blue-label", o.blue_label);
+    lrc = av_require_label("--blue-label", c->o.blue_label);
     if (lrc != ARENA_HUD_OK)
         return lrc;
+    return AV_CONT;
+}
+
+/* Parse and validate the whole command line; AV_CONT or the exit code. */
+static int av_cli_load(av_cli *c, int argc, char **argv)
+{
+    int rc = av_cli_parse(c, argc, argv);
+    if (rc != AV_CONT)
+        return rc;
+    rc = av_cli_check_a(c);
+    if (rc != AV_CONT)
+        return rc;
+    return av_cli_check_b(c);
+}
+
+/* Open the window and fonts; 0 or the exit code (window state released). */
+static int av_window_open(bool show_window)
+{
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    if (!show_window)
+        SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(1280, 720, "Z23 Arena");
+    if (!IsWindowReady()) {
+        av_err("display/GL context failed",
+               show_window ? "visible window" : "hidden window");
+        CloseWindow();
+        return 4;
+    }
+    SetTargetFPS(60);
+    if (av_fonts_load() != ARENA_HUD_OK) {
+        av_fonts_unload();
+        CloseWindow();
+        return ARENA_HUD_FAIL;
+    }
+    return 0;
+}
+
+/* Which file, if any, this frame is written to. */
+static const char *av_shot_target(const av_cli *c, long frame, char *name,
+                                  size_t name_size)
+{
+    if (c->screenshot && c->frames_limit > 0 &&
+        frame + 1 == c->frames_limit)
+        return c->screenshot;
+    if (c->shot_dir && frame % c->shot_every == 0) {
+        snprintf(name, name_size, "%s/frame_%08ld.png", c->shot_dir, frame);
+        return name;
+    }
+    return NULL;
+}
+
+/* Read the backbuffer into shot_path; true when the capture failed. */
+static bool av_capture(const char *shot_path)
+{
+    bool failed = false;
+    /* TakeScreenshot() has no error reporting. Flush the 2D
+     * batch first so HUD vertices are in the GL backbuffer. */
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    rlDrawRenderBatchActive();
+    unsigned char *rawpx = rlReadScreenPixels(sw, sh);
+    if (!rawpx) {
+        av_err("backbuffer read failed", shot_path);
+        return true;
+    }
+    Color *px = (Color *)rawpx;
+    Image shot = { .data = px,
+                   .width = sw,
+                   .height = sh,
+                   .mipmaps = 1,
+                   .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    if (!ExportImage(shot, shot_path)) {
+        av_err("PNG write failed", shot_path);
+        failed = true;
+    }
+    MemFree(px);
+    return failed;
+}
+
+/* The frame loop; true when a screenshot write failed. */
+static bool av_run_loop(av_view *vw, const av_city *city, Texture2D *tex,
+                        const av_cli *c)
+{
+    long frame = 0;
+    bool io_failed = false;
+    while (!WindowShouldClose()) {
+        if (c->frames_limit > 0 && frame >= c->frames_limit)
+            break;
+        const float dt = GetFrameTime();
+        av_input(vw);
+        av_playback(vw, dt);
+        av_camera_update(vw, dt);
+        BeginDrawing();
+        BeginMode3D(vw->camera);
+        av_draw_world(vw, city);
+        EndMode3D();
+        av_draw_hud(vw);
+        if (IsTextureValid(*tex))
+            av_draw_hosted(tex, vw);
+        char shot_name[512];
+        const char *shot_path =
+            av_shot_target(c, frame, shot_name, sizeof(shot_name));
+        if (shot_path && av_capture(shot_path))
+            io_failed = true;
+        EndDrawing();
+        frame++;
+    }
+    return io_failed;
+}
+
+int main(int argc, char **argv)
+{
+    av_cli cli = { .o = { NULL, "red", "blue" },
+                   .shot_every = 1,
+                   .cam_mode = AV_CAM_CHASE };
+    const int crc = av_cli_load(&cli, argc, argv);
+    if (crc != AV_CONT)
+        return crc;
+    const av_opts o = cli.o;
 
     size_t len = 0;
     uint8_t *buf = av_read_file(o.replay_path, &len);
@@ -1180,7 +1369,7 @@ int main(int argc, char **argv)
     zcl_hex_encode(ver->replay_root, SHA3_256_OUTPUT_SIZE, rr);
     zcl_hex_encode(ver->state_root, SHA3_256_OUTPUT_SIZE, sr);
 
-    if (check_only) {
+    if (cli.check_only) {
         printf("verified replay=%s ticks=%llu events=%u "
                "score=%u-%u winner=%s replay_root=%s state_root=%s\n",
                o.replay_path, (unsigned long long)ver->recorded_ticks,
@@ -1203,90 +1392,26 @@ int main(int argc, char **argv)
     vw.blue_label = o.blue_label;
     vw.playing = true;
     vw.speed = 1.0f;
-    vw.cam = cam_s ? (av_cam_mode)cam_mode : AV_CAM_CHASE;
+    vw.cam = cli.cam_s ? (av_cam_mode)cli.cam_mode : AV_CAM_CHASE;
     vw.orbit_dist = 60.0f;
     vw.orbit_pitch = 0.45f;
     vw.camera.fovy = 62.0f;
     vw.camera.projection = CAMERA_PERSPECTIVE;
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
-    if (!show_window)
-        SetConfigFlags(FLAG_WINDOW_HIDDEN);
-    InitWindow(1280, 720, "Z23 Arena");
-    if (!IsWindowReady()) {
-        av_err("display/GL context failed",
-               show_window ? "visible window" : "hidden window");
-        CloseWindow();
+    const int wrc = av_window_open(cli.show_window);
+    if (wrc != 0) {
         free(ver);
         free(buf);
-        return 4;
-    }
-    SetTargetFPS(60);
-    if (av_fonts_load() != ARENA_HUD_OK) {
-        av_fonts_unload();
-        CloseWindow();
-        free(ver);
-        free(buf);
-        return ARENA_HUD_FAIL;
+        return wrc;
     }
     Image hosted_blank =
         GenImageColor((int)ZDOGVIEW_WIDTH, (int)ZDOGVIEW_HEIGHT, BLACK);
     Texture2D hosted_tex = LoadTextureFromImage(hosted_blank);
     UnloadImage(hosted_blank);
     av_seek(&vw, 0);
-    if (seek_s)
-        av_seek(&vw, seek_to);
+    if (cli.seek_s)
+        av_seek(&vw, cli.seek_to);
 
-    long frame = 0;
-    bool io_failed = false;
-    while (!WindowShouldClose()) {
-        if (frames_limit > 0 && frame >= frames_limit)
-            break;
-        const float dt = GetFrameTime();
-        av_input(&vw);
-        av_playback(&vw, dt);
-        av_camera_update(&vw, dt);
-        BeginDrawing();
-        BeginMode3D(vw.camera);
-        av_draw_world(&vw, &city);
-        EndMode3D();
-        av_draw_hud(&vw);
-        if (IsTextureValid(hosted_tex))
-            av_draw_hosted(&hosted_tex, &vw);
-        const char *shot_path = NULL;
-        char shot_name[512];
-        if (screenshot && frames_limit > 0 && frame + 1 == frames_limit) {
-            shot_path = screenshot;
-        } else if (shot_dir && frame % shot_every == 0) {
-            snprintf(shot_name, sizeof(shot_name), "%s/frame_%08ld.png",
-                     shot_dir, frame);
-            shot_path = shot_name;
-        }
-        if (shot_path) {
-            /* TakeScreenshot() has no error reporting. Flush the 2D
-             * batch first so HUD vertices are in the GL backbuffer. */
-            int sw = GetScreenWidth(), sh = GetScreenHeight();
-            rlDrawRenderBatchActive();
-            unsigned char *rawpx = rlReadScreenPixels(sw, sh);
-            if (!rawpx) {
-                av_err("backbuffer read failed", shot_path);
-                io_failed = true;
-            } else {
-                Color *px = (Color *)rawpx;
-                Image shot = { .data = px,
-                               .width = sw,
-                               .height = sh,
-                               .mipmaps = 1,
-                               .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
-                if (!ExportImage(shot, shot_path)) {
-                    av_err("PNG write failed", shot_path);
-                    io_failed = true;
-                }
-                MemFree(px);
-            }
-        }
-        EndDrawing();
-        frame++;
-    }
+    const bool io_failed = av_run_loop(&vw, &city, &hosted_tex, &cli);
     if (IsTextureValid(hosted_tex))
         UnloadTexture(hosted_tex);
     av_fonts_unload();
