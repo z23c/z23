@@ -352,6 +352,61 @@ static void onion_bridge_queue_state(struct onion_bridge *b, size_t *qlen,
     pthread_mutex_unlock(&b->mu);
 }
 
+/* Pump stop policy for one tick: staging overflow, a terminal stream with
+ * nothing left to flush, or an expired drain budget. Names the reason in
+ * close_reason and returns true when the pump must stop. */
+static bool onion_bridge_pump_should_stop(struct onion_bridge *b, size_t qlen,
+                                          bool overflow, bool terminal,
+                                          int *drain_left_ms)
+{
+    if (overflow) {
+        b->close_reason = "inbound_staging_overflow";
+        return true;
+    }
+    if (terminal && qlen == 0) {
+        b->close_reason = "tor_stream_terminal";
+        return true;
+    }
+    if (terminal) {
+        *drain_left_ms -= ONION_PUMP_TICK_MS;
+        if (*drain_left_ms <= 0) {
+            b->close_reason = "tor_stream_terminal_drain_expired";
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Reads every available app byte into Tor until EAGAIN. Returns true when
+ * the app side is gone; close_reason then names why. */
+static bool onion_bridge_pump_app_to_tor(struct onion_bridge *b, uint8_t *buf,
+                                         size_t cap)
+{
+    bool app_gone = false;
+    for (;;) {
+        int n = onion_socket_receive(b->pump_fd, buf, cap);
+        if (n > 0) {
+            if (!onion_bridge_push(b, buf, (size_t)n)) {
+                app_gone = true;   /* close_reason named by the push */
+                break;
+            }
+            continue;
+        }
+        if (n == 0) {
+            b->close_reason = "app_closed";   /* app closed its end */
+            app_gone = true;
+        } else if (!platform_socket_error_would_block(
+                       platform_socket_last_error()) &&
+                   !platform_socket_error_interrupted(
+                       platform_socket_last_error())) {
+            b->close_reason = "app_fd_read_error";
+            app_gone = true;
+        }
+        break;
+    }
+    return app_gone;
+}
+
 /* Pump thread: shuttles app → Tor bytes (Tor → app is written by the read
  * callback directly). Exits on app EOF/error, stream terminal, or staging
  * overflow, then owns the full teardown.
@@ -371,21 +426,9 @@ static void *onion_bridge_pump(void *arg)
         bool overflow;
         onion_bridge_queue_state(b, &qlen, &overflow);
         bool terminal = atomic_load(&b->terminal_seen);
-        if (overflow) {
-            b->close_reason = "inbound_staging_overflow";
+        if (onion_bridge_pump_should_stop(b, qlen, overflow, terminal,
+                                          &drain_left_ms))
             break;
-        }
-        if (terminal && qlen == 0) {
-            b->close_reason = "tor_stream_terminal";
-            break;
-        }
-        if (terminal) {
-            drain_left_ms -= ONION_PUMP_TICK_MS;
-            if (drain_left_ms <= 0) {
-                b->close_reason = "tor_stream_terminal_drain_expired";
-                break;
-            }
-        }
 
         short events = POLLIN;
         if (qlen > 0)
@@ -411,28 +454,7 @@ static void *onion_bridge_pump(void *arg)
 
         /* App → Tor. POLLHUP can arrive with data still readable, so read
          * until EAGAIN before giving the revents their meaning. */
-        bool app_gone = false;
-        for (;;) {
-            int n = onion_socket_receive(b->pump_fd, buf, sizeof(buf));
-            if (n > 0) {
-                if (!onion_bridge_push(b, buf, (size_t)n)) {
-                    app_gone = true;   /* close_reason named by the push */
-                    break;
-                }
-                continue;
-            }
-            if (n == 0) {
-                b->close_reason = "app_closed";   /* app closed its end */
-                app_gone = true;
-            } else if (!platform_socket_error_would_block(
-                           platform_socket_last_error()) &&
-                       !platform_socket_error_interrupted(
-                           platform_socket_last_error())) {
-                b->close_reason = "app_fd_read_error";
-                app_gone = true;
-            }
-            break;
-        }
+        bool app_gone = onion_bridge_pump_app_to_tor(b, buf, sizeof(buf));
         if (app_gone)
             break;
         if (pfd.revents & (POLLERR | POLLNVAL)) {
@@ -500,6 +522,21 @@ size_t onion_stream_connect_plan_for_test(int connect_timeout_ms,
 }
 #endif
 
+/* Polls until the bridge reaches CONNECTED, goes terminal, or the budget
+ * runs out. Returns the milliseconds waited. */
+static int onion_bridge_wait_circuit(struct onion_bridge *b,
+                                     int connect_timeout_ms)
+{
+    int waited_ms = 0;
+    while (atomic_load(&b->phase) != BRIDGE_CONNECTED &&
+           !atomic_load(&b->terminal_seen) &&
+           waited_ms < connect_timeout_ms) {
+        platform_sleep_ms(ONION_CONNECT_POLL_MS);
+        waited_ms += ONION_CONNECT_POLL_MS;
+    }
+    return waited_ms;
+}
+
 static bool onion_stream_connect_once(const struct net_service *svc,
                                       zcl_socket_t *sock_out,
                                       int connect_timeout_ms,
@@ -565,13 +602,7 @@ static bool onion_stream_connect_once(const struct net_service *svc,
 
     /* Wait for the circuit: CONNECTED wins, a terminal event or the
      * connect budget ends the attempt. */
-    int waited_ms = 0;
-    while (atomic_load(&b->phase) != BRIDGE_CONNECTED &&
-           !atomic_load(&b->terminal_seen) &&
-           waited_ms < connect_timeout_ms) {
-        platform_sleep_ms(ONION_CONNECT_POLL_MS);
-        waited_ms += ONION_CONNECT_POLL_MS;
-    }
+    int waited_ms = onion_bridge_wait_circuit(b, connect_timeout_ms);
 
     /* A stream that reached CONNECTED and then went terminal inside the
      * same wait is NOT a usable circuit. Accepting it handed connman a

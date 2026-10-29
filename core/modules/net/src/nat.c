@@ -279,34 +279,23 @@ static bool ssdp_extract_location(const char *resp, char *url, size_t url_max)
     return true;
 }
 
-/* Simple HTTP GET/POST — returns malloc'd response body. Caller frees. */
-static char *http_request(const char *host, uint16_t port, const char *method,
-                           const char *path, const char *body, size_t body_len,
-                           const char *content_type)
+static bool http_parse_peer(const char *host, uint16_t port, struct sockaddr_in *addr)
 {
-    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
-                                                  true, false);
-    if (sock == PLATFORM_SOCKET_INVALID)
-        LOG_NULL("nat", "TCP socket creation failed");
+    memset(addr, 0, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons(port);
+    return platform_socket_parse_address(AF_INET, host, &addr->sin_addr) == 1;
+}
 
-    (void)platform_socket_set_send_timeout(sock, NAT_HTTP_BUDGET_MS);
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (platform_socket_parse_address(AF_INET, host, &addr.sin_addr) != 1) {
-        platform_socket_close(sock);
-        LOG_NULL("nat", "HTTP host is not a numeric IPv4 address");
-    }
-
+static bool http_connect_budgeted(platform_socket_t sock, struct sockaddr_in *addr)
+{
     /* A blocking connect is not bounded by SO_SNDTIMEO on Winsock.  Drive it
      * nonblocking and accept success only after the socket becomes writable
      * with SO_ERROR=0 inside the same explicit budget. */
     bool connected = platform_socket_set_nonblocking(sock, true);
     if (connected) {
-        int rc = platform_socket_connect(sock, (struct sockaddr *)&addr,
-                                         sizeof(addr));
+        int rc = platform_socket_connect(sock, (struct sockaddr *)addr,
+                                         sizeof(*addr));
         if (rc != 0) {
             int error = platform_socket_last_error();
             connected = platform_socket_error_in_progress(error) &&
@@ -321,11 +310,14 @@ static char *http_request(const char *host, uint16_t port, const char *method,
     }
     if (connected)
         connected = platform_socket_set_nonblocking(sock, false);
-    if (!connected) {
-        platform_socket_close(sock);
-        LOG_NULL("nat", "HTTP connect to %s:%u failed", host, port);
-    }
+    return connected;
+}
 
+static bool http_send_header(platform_socket_t sock, const char *host, uint16_t port,
+                             const char *method, const char *path,
+                             const char *body, size_t body_len,
+                             const char *content_type)
+{
     char header[1024];
     int hlen;
     if (body && body_len > 0) {
@@ -341,21 +333,22 @@ static char *http_request(const char *host, uint16_t port, const char *method,
             "Connection: close\r\n\r\n",
             method, path, host, port);
     }
+    if (hlen <= 0 || (size_t)hlen >= sizeof(header))
+        return false;
+    return platform_socket_send_all(sock, header, (size_t)hlen);
+}
 
-    if (hlen <= 0 || (size_t)hlen >= sizeof(header) ||
-        !platform_socket_send_all(sock, header, (size_t)hlen)) {
-        platform_socket_close(sock);
-        LOG_NULL("nat", "HTTP request header send failed");
-    }
-    if (body && body_len > 0)
-        if (!platform_socket_send_all(sock, body, body_len)) {
-            platform_socket_close(sock);
-            LOG_NULL("nat", "HTTP request body send failed");
-        }
+static bool http_send_body(platform_socket_t sock, const char *body, size_t body_len)
+{
+    if (!body || body_len == 0)
+        return true;
+    return platform_socket_send_all(sock, body, body_len);
+}
 
-    size_t cap = 8192, len = 0;
-    char *buf = zcl_malloc(cap, "nat_recv_buf");
-    if (!buf) { platform_socket_close(sock); LOG_NULL("nat", "malloc failed for HTTP recv buffer: %zu bytes", cap); }
+/* Returns 0, or -1 when the receive buffer cannot grow; *buf is then still the
+ * original allocation, so the caller frees it and logs. */
+static int http_recv_response(platform_socket_t sock, char **buf, size_t *cap, size_t *len)
+{
     const int64_t receive_deadline_ms =
         platform_time_monotonic_ms() + NAT_HTTP_BUDGET_MS;
     for (;;) {
@@ -366,15 +359,57 @@ static char *http_request(const char *host, uint16_t port, const char *method,
         int wait_ms = remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms;
         if (platform_socket_wait_readable(sock, wait_ms) <= 0)
             break;
-        int n = platform_socket_receive(sock, buf + len, cap - len - 1);
+        int n = platform_socket_receive(sock, *buf + *len, *cap - *len - 1);
         if (n <= 0) break;
-        len += (size_t)n;
-        if (len + 1024 > cap) {
-            cap *= 2;
-            char *nb = zcl_realloc(buf, cap, "nat_recv_buf");
-            if (!nb) { free(buf); LOG_NULL("nat", "realloc failed for HTTP response: cap=%zu", cap); }
-            buf = nb;
+        *len += (size_t)n;
+        if (*len + 1024 > *cap) {
+            *cap *= 2;
+            char *nb = zcl_realloc(*buf, *cap, "nat_recv_buf");
+            if (!nb) return -1;
+            *buf = nb;
         }
+    }
+    return 0;
+}
+
+/* Simple HTTP GET/POST — returns malloc'd response body. Caller frees. */
+static char *http_request(const char *host, uint16_t port, const char *method,
+                           const char *path, const char *body, size_t body_len,
+                           const char *content_type)
+{
+    platform_socket_t sock = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                  true, false);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        LOG_NULL("nat", "TCP socket creation failed");
+
+    (void)platform_socket_set_send_timeout(sock, NAT_HTTP_BUDGET_MS);
+
+    struct sockaddr_in addr;
+    if (!http_parse_peer(host, port, &addr)) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP host is not a numeric IPv4 address");
+    }
+    if (!http_connect_budgeted(sock, &addr)) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP connect to %s:%u failed", host, port);
+    }
+
+    if (!http_send_header(sock, host, port, method, path, body, body_len,
+                          content_type)) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP request header send failed");
+    }
+    if (!http_send_body(sock, body, body_len)) {
+        platform_socket_close(sock);
+        LOG_NULL("nat", "HTTP request body send failed");
+    }
+
+    size_t cap = 8192, len = 0;
+    char *buf = zcl_malloc(cap, "nat_recv_buf");
+    if (!buf) { platform_socket_close(sock); LOG_NULL("nat", "malloc failed for HTTP recv buffer: %zu bytes", cap); }
+    if (http_recv_response(sock, &buf, &cap, &len) != 0) {
+        free(buf);
+        LOG_NULL("nat", "realloc failed for HTTP response: cap=%zu", cap);
     }
     platform_socket_close(sock);
     buf[len] = 0;

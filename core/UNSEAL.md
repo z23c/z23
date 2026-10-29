@@ -348,3 +348,7 @@ later lane flips it HARD.
 - 2026-10-29T14:07:01Z — REASON: send real MIME types from core net HTTP replies (onion_service, https_server, file_market_delivery_onion): the 10-12 rename wrote engine/application/*; header strings only, no consensus code
   old ROOT: 99190a8e93e755171d522ceb41ad73839ab52ed40501267efe3f5602c8c372fe
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T14:19:01Z — REASON: core wave 5: behaviour-preserving complexity splits of 6 net files (file_market_delivery_onion, file_market_payment, nat, onion_stream, https_server, onion_service)
+  old ROOT: d2c03c7da5594351d12091fb18d539c3ecff41d55bb7075584f8d3395b38b45d
+  by: owner unseal ritual (make core-unseal)

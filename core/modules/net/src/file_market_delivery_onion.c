@@ -61,16 +61,9 @@ static size_t onion_http_text(uint8_t *response, size_t response_max,
                               (const uint8_t *)text, strlen(text));
 }
 
-/* Parse the path tail after the route prefix: exactly the request hex,
- * then end or "?slice=k". Returns false on any deviation. */
-static bool onion_parse_path(const char *path,
-                             uint8_t wire_out[FILE_MARKET_DELIVERY_WIRE_BYTES],
-                             uint32_t *slice_out)
+static bool onion_parse_request_hex(const char *p,
+    uint8_t wire_out[FILE_MARKET_DELIVERY_WIRE_BYTES], const char **tail)
 {
-    if (!path || !wire_out || !slice_out)
-        return false;
-    *slice_out = 0;
-    const char *p = path + sizeof(FILE_MARKET_ONION_PATH_PREFIX) - 1;
     char hex[ONION_REQUEST_HEX_CHARS + 1];
     size_t hex_len = 0;
     while (p[hex_len] && p[hex_len] != '?' &&
@@ -80,10 +73,15 @@ static bool onion_parse_path(const char *path,
         return false;
     memcpy(hex, p, hex_len);
     hex[hex_len] = '\0';
-    p += hex_len;
     if (!zcl_hex_decode_lower(hex, wire_out,
                               FILE_MARKET_DELIVERY_WIRE_BYTES))
         return false;
+    *tail = p + hex_len;
+    return true;
+}
+
+static bool onion_parse_slice_query(const char *p, uint32_t *slice_out)
+{
     if (*p == '\0')
         return true;
     static const char k_slice_key[] = "?slice=";
@@ -103,6 +101,22 @@ static bool onion_parse_path(const char *path,
         return false;
     *slice_out = slice;
     return true;
+}
+
+/* Parse the path tail after the route prefix: exactly the request hex,
+ * then end or "?slice=k". Returns false on any deviation. */
+static bool onion_parse_path(const char *path,
+                             uint8_t wire_out[FILE_MARKET_DELIVERY_WIRE_BYTES],
+                             uint32_t *slice_out)
+{
+    if (!path || !wire_out || !slice_out)
+        return false;
+    *slice_out = 0;
+    const char *p = path + sizeof(FILE_MARKET_ONION_PATH_PREFIX) - 1;
+    const char *tail = NULL;
+    if (!onion_parse_request_hex(p, wire_out, &tail))
+        return false;
+    return onion_parse_slice_query(tail, slice_out);
 }
 
 static size_t onion_reply_header_write(uint8_t *out,
@@ -286,25 +300,38 @@ static void onion_assembly_discard(uint8_t *assembled, uint32_t size)
     free(assembled);
 }
 
-static enum file_market_delivery_status onion_fetch_with_deadline(
-    file_market_delivery_onion_timed_get_fn get, void *get_ctx,
-    int64_t deadline_ms,
+struct onion_fetch_state {
+    file_market_delivery_onion_timed_get_fn get;
+    void *get_ctx;
+    int64_t deadline_ms;
+    const uint8_t *offer_id;
+    uint32_t chunk_index;
+    char onion_address[ONION_V3_ADDRESS_LEN + 1];
+    char request_hex[ONION_REQUEST_HEX_CHARS + 1];
+    uint8_t *assembled;
+    uint32_t chunk_size;
+    uint32_t slice_count;
+    uint8_t chunk_sha3[32];
+    uint8_t body[FILE_MARKET_ONION_REPLY_MAX];
+};
+
+static bool onion_fetch_args_valid(
+    file_market_delivery_onion_timed_get_fn get,
     const uint8_t seller_onion_pubkey[32],
     const uint8_t network_genesis[32], const uint8_t offer_id[32],
-    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
-    const uint8_t buyer_seed[32],
+    const uint8_t buyer_pubkey[32], const uint8_t buyer_seed[32],
     struct file_market_delivery_chunk *out_chunk)
 {
-    if (out_chunk)
-        memset(out_chunk, 0, sizeof(*out_chunk));
-    if (!get || !seller_onion_pubkey || !network_genesis || !offer_id ||
-        !buyer_pubkey || !buyer_seed || !out_chunk)
-        return FILE_MARKET_DELIVERY_MALFORMED;
+    return get != NULL && seller_onion_pubkey != NULL &&
+        network_genesis != NULL && offer_id != NULL &&
+        buyer_pubkey != NULL && buyer_seed != NULL && out_chunk != NULL;
+}
 
-    char onion_address[ONION_V3_ADDRESS_LEN + 1];
-    if (!onion_v3_address_from_pubkey(seller_onion_pubkey, onion_address))
-        return FILE_MARKET_DELIVERY_MALFORMED;
-
+static bool onion_request_hex_build(const uint8_t network_genesis[32],
+    const uint8_t offer_id[32], uint32_t chunk_index,
+    const uint8_t buyer_pubkey[32], const uint8_t buyer_seed[32],
+    char request_hex[ONION_REQUEST_HEX_CHARS + 1])
+{
     struct file_market_delivery_request request;
     memset(&request, 0, sizeof(request));
     request.version = FILE_MARKET_DELIVERY_VERSION;
@@ -316,114 +343,171 @@ static enum file_market_delivery_status onion_fetch_with_deadline(
                                           buyer_pubkey, request.session_id);
     if (file_market_delivery_request_seal(&request, buyer_seed) !=
         FILE_MARKET_DELIVERY_OK)
-        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
+        return false;
     uint8_t request_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
     if (file_market_delivery_request_encode(&request, request_wire) !=
         FILE_MARKET_DELIVERY_OK)
-        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
-    char request_hex[ONION_REQUEST_HEX_CHARS + 1];
+        return false;
     zcl_hex_encode(request_wire, sizeof(request_wire), request_hex);
+    return true;
+}
 
-    uint8_t *assembled = NULL;
-    uint32_t chunk_size = 0, slice_count = 0;
-    uint8_t chunk_sha3[32];
-    memset(chunk_sha3, 0, sizeof(chunk_sha3));
-    uint8_t body[FILE_MARKET_ONION_REPLY_MAX];
-    memset(body, 0, sizeof(body));
+static enum file_market_delivery_status onion_fetch_abort(
+    struct onion_fetch_state *st, enum file_market_delivery_status status)
+{
+    memory_cleanse(st->body, sizeof(st->body));
+    onion_assembly_discard(st->assembled, st->chunk_size);
+    return status;
+}
 
-    for (uint32_t k = 0; !slice_count || k < slice_count; k++) {
+static enum file_market_delivery_status onion_slice_fetch_once(
+    struct onion_fetch_state *st, const char *path, size_t *body_len,
+    struct onion_reply_header *header)
+{
+    int timeout_secs = 0;
+    if (!onion_deadline_timeout(st->deadline_ms, &timeout_secs))
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    if (!st->get(st->get_ctx, st->onion_address, path, timeout_secs,
+                 st->body, sizeof(st->body), body_len)) {
+        if (!onion_deadline_timeout(st->deadline_ms, &timeout_secs))
+            return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+        return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+    }
+    if (!onion_deadline_timeout(st->deadline_ms, &timeout_secs))
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    if (!onion_reply_header_parse(st->body, *body_len, header) ||
+        memcmp(header->offer_id, st->offer_id, 32) != 0 ||
+        header->chunk_index != st->chunk_index)
+        return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+static bool onion_slice_shape_ok(const struct onion_fetch_state *st,
+    size_t slice_len, const struct onion_reply_header *header, uint32_t k)
+{
+    uint8_t slice_digest[32];
+    sha3_256(st->body + FILE_MARKET_ONION_REPLY_HEADER_BYTES, slice_len,
+             slice_digest);
+    return header->chunk_size > 0 &&
+        header->chunk_size <= FILE_MARKET_CHUNK_SIZE &&
+        header->slice_count ==
+            (header->chunk_size + FILE_MARKET_ONION_SLICE_BYTES - 1) /
+                FILE_MARKET_ONION_SLICE_BYTES &&
+        header->slice_index == k &&
+        memcmp(slice_digest, header->slice_sha3, 32) == 0 &&
+        slice_len ==
+            (k + 1 == header->slice_count
+                 ? header->chunk_size -
+                       (size_t)k * FILE_MARKET_ONION_SLICE_BYTES
+                 : FILE_MARKET_ONION_SLICE_BYTES);
+}
+
+static bool onion_slice_bind(struct onion_fetch_state *st,
+                             const struct onion_reply_header *header)
+{
+    if (st->assembled)
+        return header->chunk_size == st->chunk_size &&
+            header->slice_count == st->slice_count &&
+            memcmp(header->chunk_sha3, st->chunk_sha3, 32) == 0;
+    st->chunk_size = header->chunk_size;
+    st->slice_count = header->slice_count;
+    memcpy(st->chunk_sha3, header->chunk_sha3, 32);
+    st->assembled = zcl_malloc(st->chunk_size,
+                               "market onion chunk assembly");
+    return st->assembled != NULL;
+}
+
+static enum file_market_delivery_status onion_fetch_slice(
+    struct onion_fetch_state *st, const char *path, uint32_t k)
+{
+    struct onion_reply_header header;
+    size_t body_len = 0;
+    enum file_market_delivery_status status =
+        onion_slice_fetch_once(st, path, &body_len, &header);
+    if (status != FILE_MARKET_DELIVERY_READY)
+        return status;
+    if (header.status != FILE_MARKET_DELIVERY_READY)
+        return (enum file_market_delivery_status)header.status;
+    size_t slice_len = body_len - FILE_MARKET_ONION_REPLY_HEADER_BYTES;
+    if (!onion_slice_shape_ok(st, slice_len, &header, k))
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    if (!onion_slice_bind(st, &header))
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    memcpy(st->assembled + (size_t)k * FILE_MARKET_ONION_SLICE_BYTES,
+           st->body + FILE_MARKET_ONION_REPLY_HEADER_BYTES, slice_len);
+    memory_cleanse(st->body, sizeof(st->body));
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+static enum file_market_delivery_status onion_fetch_finish(
+    struct onion_fetch_state *st, struct file_market_delivery_chunk *out_chunk)
+{
+    uint8_t assembled_digest[32];
+    int final_timeout_secs = 0;
+    if (!onion_deadline_timeout(st->deadline_ms, &final_timeout_secs))
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    sha3_256(st->assembled, st->chunk_size, assembled_digest);
+    if (!onion_deadline_timeout(st->deadline_ms, &final_timeout_secs))
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    if (memcmp(assembled_digest, st->chunk_sha3, 32) != 0)
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    out_chunk->data = st->assembled;
+    out_chunk->size = st->chunk_size;
+    memcpy(out_chunk->sha3, st->chunk_sha3, 32);
+    memory_cleanse(st->body, sizeof(st->body));
+    memory_cleanse(assembled_digest, sizeof(assembled_digest));
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+static enum file_market_delivery_status onion_fetch_run(
+    struct onion_fetch_state *st, struct file_market_delivery_chunk *out_chunk)
+{
+    for (uint32_t k = 0; !st->slice_count || k < st->slice_count; k++) {
         char path[sizeof(FILE_MARKET_ONION_PATH_PREFIX) +
                   ONION_REQUEST_HEX_CHARS + 16];
         snprintf(path, sizeof(path), "%s%s?slice=%u",
-                 FILE_MARKET_ONION_PATH_PREFIX, request_hex, k);
-        size_t body_len = 0;
-        int timeout_secs = 0;
-        if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
-            goto resource_limit;
-        if (!get(get_ctx, onion_address, path, timeout_secs, body,
-                 sizeof(body), &body_len)) {
-            if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
-                goto resource_limit;
-            goto transport_fail;
-        }
-        if (!onion_deadline_timeout(deadline_ms, &timeout_secs))
-            goto resource_limit;
-        struct onion_reply_header header;
-        if (!onion_reply_header_parse(body, body_len, &header) ||
-            memcmp(header.offer_id, offer_id, 32) != 0 ||
-            header.chunk_index != chunk_index)
-            goto transport_fail;
-        if (header.status != FILE_MARKET_DELIVERY_READY) {
-            enum file_market_delivery_status status =
-                (enum file_market_delivery_status)header.status;
-            memory_cleanse(body, sizeof(body));
-            onion_assembly_discard(assembled, chunk_size);
-            return status;
-        }
-        size_t slice_len = body_len - FILE_MARKET_ONION_REPLY_HEADER_BYTES;
-        uint8_t slice_digest[32];
-        sha3_256(body + FILE_MARKET_ONION_REPLY_HEADER_BYTES, slice_len,
-                 slice_digest);
-        bool shape_ok = header.chunk_size > 0 &&
-            header.chunk_size <= FILE_MARKET_CHUNK_SIZE &&
-            header.slice_count ==
-                (header.chunk_size + FILE_MARKET_ONION_SLICE_BYTES - 1) /
-                    FILE_MARKET_ONION_SLICE_BYTES &&
-            header.slice_index == k &&
-            memcmp(slice_digest, header.slice_sha3, 32) == 0 &&
-            slice_len ==
-                (k + 1 == header.slice_count
-                     ? header.chunk_size -
-                           (size_t)k * FILE_MARKET_ONION_SLICE_BYTES
-                     : FILE_MARKET_ONION_SLICE_BYTES);
-        if (!shape_ok)
-            goto malformed;
-        if (!assembled) {
-            chunk_size = header.chunk_size;
-            slice_count = header.slice_count;
-            memcpy(chunk_sha3, header.chunk_sha3, 32);
-            assembled = zcl_malloc(chunk_size,
-                                   "market onion chunk assembly");
-            if (!assembled)
-                goto malformed;
-        } else if (header.chunk_size != chunk_size ||
-                   header.slice_count != slice_count ||
-                   memcmp(header.chunk_sha3, chunk_sha3, 32) != 0) {
-            goto malformed;
-        }
-        memcpy(assembled + (size_t)k * FILE_MARKET_ONION_SLICE_BYTES,
-               body + FILE_MARKET_ONION_REPLY_HEADER_BYTES, slice_len);
-        memory_cleanse(body, sizeof(body));
+                 FILE_MARKET_ONION_PATH_PREFIX, st->request_hex, k);
+        enum file_market_delivery_status status =
+            onion_fetch_slice(st, path, k);
+        if (status != FILE_MARKET_DELIVERY_READY)
+            return onion_fetch_abort(st, status);
     }
-
-    uint8_t assembled_digest[32];
-    int final_timeout_secs = 0;
-    if (!onion_deadline_timeout(deadline_ms, &final_timeout_secs))
-        goto resource_limit;
-    sha3_256(assembled, chunk_size, assembled_digest);
-    if (!onion_deadline_timeout(deadline_ms, &final_timeout_secs))
-        goto resource_limit;
-    if (memcmp(assembled_digest, chunk_sha3, 32) != 0)
-        goto malformed;
-    out_chunk->data = assembled;
-    out_chunk->size = chunk_size;
-    memcpy(out_chunk->sha3, chunk_sha3, 32);
-    memory_cleanse(body, sizeof(body));
-    memory_cleanse(assembled_digest, sizeof(assembled_digest));
+    enum file_market_delivery_status status =
+        onion_fetch_finish(st, out_chunk);
+    if (status != FILE_MARKET_DELIVERY_READY)
+        return onion_fetch_abort(st, status);
     return FILE_MARKET_DELIVERY_READY;
+}
 
-transport_fail:
-    memory_cleanse(body, sizeof(body));
-    onion_assembly_discard(assembled, chunk_size);
-    return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
-resource_limit:
-    memory_cleanse(body, sizeof(body));
-    onion_assembly_discard(assembled, chunk_size);
-    return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-malformed:
-    memory_cleanse(body, sizeof(body));
-    onion_assembly_discard(assembled, chunk_size);
-    return FILE_MARKET_DELIVERY_MALFORMED;
+static enum file_market_delivery_status onion_fetch_with_deadline(
+    file_market_delivery_onion_timed_get_fn get, void *get_ctx,
+    int64_t deadline_ms,
+    const uint8_t seller_onion_pubkey[32],
+    const uint8_t network_genesis[32], const uint8_t offer_id[32],
+    uint32_t chunk_index, const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    struct file_market_delivery_chunk *out_chunk)
+{
+    if (out_chunk)
+        memset(out_chunk, 0, sizeof(*out_chunk));
+    if (!onion_fetch_args_valid(get, seller_onion_pubkey, network_genesis,
+                                offer_id, buyer_pubkey, buyer_seed,
+                                out_chunk))
+        return FILE_MARKET_DELIVERY_MALFORMED;
+
+    struct onion_fetch_state st;
+    memset(&st, 0, sizeof(st));
+    st.get = get;
+    st.get_ctx = get_ctx;
+    st.deadline_ms = deadline_ms;
+    st.offer_id = offer_id;
+    st.chunk_index = chunk_index;
+    if (!onion_v3_address_from_pubkey(seller_onion_pubkey, st.onion_address))
+        return FILE_MARKET_DELIVERY_MALFORMED;
+    if (!onion_request_hex_build(network_genesis, offer_id, chunk_index,
+                                 buyer_pubkey, buyer_seed, st.request_hex))
+        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
+    return onion_fetch_run(&st, out_chunk);
 }
 
 enum file_market_delivery_status file_market_delivery_fetch_onion_with(

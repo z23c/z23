@@ -87,7 +87,7 @@ static void payment_domain_hash(const char *domain, size_t domain_len,
     sha3_256_finalize(&sha, out);
 }
 
-const char *file_payment_auth_error_string(
+static const char *payment_auth_error_name_leading(
     enum file_payment_auth_error error)
 {
     switch (error) {
@@ -100,6 +100,14 @@ const char *file_payment_auth_error_string(
     case FILE_PAYMENT_AUTH_ERR_OFFER_ID: return "offer-id-zero";
     case FILE_PAYMENT_AUTH_ERR_TXID: return "txid-zero";
     case FILE_PAYMENT_AUTH_ERR_RANGE: return "chunk-range-invalid";
+    default: return NULL;
+    }
+}
+
+static const char *payment_auth_error_name_trailing(
+    enum file_payment_auth_error error)
+{
+    switch (error) {
     case FILE_PAYMENT_AUTH_ERR_AMOUNT: return "amount-invalid";
     case FILE_PAYMENT_AUTH_ERR_BUYER_KEY: return "buyer-key-zero";
     case FILE_PAYMENT_AUTH_ERR_SIGNATURE: return "signature-invalid";
@@ -108,7 +116,19 @@ const char *file_payment_auth_error_string(
     case FILE_PAYMENT_AUTH_ERR_NETWORK_MISMATCH: return "network-mismatch";
     case FILE_PAYMENT_AUTH_ERR_OFFER_MISMATCH: return "offer-mismatch";
     case FILE_PAYMENT_AUTH_ERR_MEMO: return "memo-mismatch";
+    default: return NULL;
     }
+}
+
+const char *file_payment_auth_error_string(
+    enum file_payment_auth_error error)
+{
+    const char *name = payment_auth_error_name_leading(error);
+    if (name)
+        return name;
+    name = payment_auth_error_name_trailing(error);
+    if (name)
+        return name;
     return "unknown";
 }
 
