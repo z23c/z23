@@ -973,6 +973,21 @@ static bool dvx_engine_refused(const char *tag, const char *engine,
     return ok;
 }
 
+/* True when an argv line (newline-separated) other than an absolute path
+ * contains `word`. Paths name the checkout, whose location may contain it. */
+static bool dvx_argv_mentions(const char *argv, const char *word)
+{
+    char value[1024];
+    for (const char *line = argv; *line;) {
+        size_t len = strcspn(line, "\n");
+        (void)snprintf(value, sizeof(value), "%.*s", (int)len, line);
+        if (value[0] != '/' && strstr(value, word))
+            return true;
+        line += len + (line[len] == '\n');
+    }
+    return false;
+}
+
 static int dvx_engine_cases(void)
 {
     int failures = 0;
@@ -981,7 +996,7 @@ static int dvx_engine_cases(void)
         ASSERT(dvx_engine_argv("engh", "claudeunit", "claude-haiku", NULL, -1,
                                argv, sizeof(argv)));
         ASSERT(strncmp(argv, "--engine\nclaude-haiku\n--task\n", 29) == 0);
-        ASSERT(strstr(argv, "glm") == NULL);
+        ASSERT(!dvx_argv_mentions(argv, "glm"));
         ASSERT(strstr(argv, "--model") == NULL);
         PASS();
     }
@@ -997,7 +1012,7 @@ static int dvx_engine_cases(void)
                                argv, sizeof(argv)));
         ASSERT(strncmp(argv, "--engine\ngpt-sol\n--model\ngpt-6.1-sol\n--task\n",
                        44) == 0);
-        ASSERT(strstr(argv, "glm") == NULL);
+        ASSERT(!dvx_argv_mentions(argv, "glm"));
         PASS();
     }
     TEST("queue: a gpt-astra row launches --engine gpt-astra with its own model") {
@@ -1005,7 +1020,7 @@ static int dvx_engine_cases(void)
                                argv, sizeof(argv)));
         ASSERT(strncmp(argv, "--engine\ngpt-astra\n--model\ngpt-6-astra\n--task\n",
                        46) == 0);
-        ASSERT(strstr(argv, "claude") == NULL);
+        ASSERT(!dvx_argv_mentions(argv, "claude"));
         PASS();
     }
     TEST("queue: gpt and claude/glm model families refuse each other") {
