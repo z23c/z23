@@ -233,6 +233,46 @@ static int fixture_cleanup(const char *root, const struct fixture_key_paths *pat
     return 0;
 }
 
+static int fixture_retained_aside(const char *gens, const char *generation,
+                                  char aside[PLUGIN_PATH_MAX])
+{
+    char prefix[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
+    int n = snprintf(prefix, sizeof(prefix), "%s.old.%lu.", generation,
+                     (unsigned long)GetCurrentProcessId());
+    REQUIRE(n > 0 && (size_t)n < sizeof(prefix));
+    struct platform_directory_list directories = {0};
+    REQUIRE(platform_directory_list_real_sorted(gens, &directories));
+    size_t matches = 0;
+    bool valid = false;
+    for (size_t i = 0; i < directories.count; i++) {
+        const char *name = directories.entries[i].name;
+        if (strncmp(name, prefix, (size_t)n) != 0)
+            continue;
+        matches++;
+        const char *counter = name + n;
+        valid = counter[0] >= '1' && counter[0] <= '9' &&
+                strspn(counter, "0123456789") == strlen(counter) &&
+                plugin_join(aside, PLUGIN_PATH_MAX, gens, name, NULL, NULL);
+    }
+    platform_directory_list_free(&directories);
+    REQUIRE(matches == 1 && valid);
+    return 0;
+}
+
+static int fixture_retained_contents(const char *aside)
+{
+    char path[PLUGIN_PATH_MAX];
+    REQUIRE(plugin_join(path, sizeof(path), aside, "hello", NULL, NULL));
+    char *bytes = NULL;
+    size_t length = 0;
+    REQUIRE(plugin_read_file(path, 13, PLUGIN_OPEN_NOFOLLOW | PLUGIN_OPEN_OWNER_ONLY,
+                             &bytes, &length));
+    bool exact = length == 13 && memcmp(bytes, "corrupt-again", 13) == 0;
+    free(bytes);
+    REQUIRE(exact);
+    return 0;
+}
+
 int main(void)
 {
     char root[PLUGIN_PATH_MAX], key[PLUGIN_PATH_MAX];
@@ -375,18 +415,17 @@ int main(void)
     platform_directory_transaction_move_directory_test_fail_durability_once();
     STATUS(plugin_store_install(store, first.manifest_path, &manifest, &present),
            PLUGIN_ERR_IO);
-    char aside[PLUGIN_PATH_MAX], aside_leaf[PLATFORM_DIRECTORY_CHILD_LEAF_MAX + 1u];
-    n = snprintf(aside_leaf, sizeof(aside_leaf), "%s.old.%lu", first.generation,
-                 (unsigned long)GetCurrentProcessId());
-    REQUIRE(n > 0 && (size_t)n < sizeof(aside_leaf));
-    REQUIRE(plugin_join(aside, sizeof(aside), gens, aside_leaf, NULL, NULL));
+    char aside[PLUGIN_PATH_MAX];
+    REQUIRE(fixture_retained_aside(gens, first.generation, aside) == 0);
     REQUIRE(plugin_check_dir(aside) == PLUGIN_OK);
+    REQUIRE(fixture_retained_contents(aside) == 0);
     STATUS(plugin_store_install(store, first.manifest_path, &manifest, &present),
            PLUGIN_OK);
     REQUIRE(present == 0);
     STATUS(plugin_verify_generation(store, "hello", first.generation), PLUGIN_OK);
     REQUIRE(plugin_check_dir(aside) ==
             PLUGIN_OK); /* Reconciliation evidence retained. */
+    REQUIRE(fixture_retained_contents(aside) == 0);
     puts("PASS unknown prior-aside outcome retains reconciliation evidence and retry "
          "repairs exact generation");
     REQUIRE(fixture_namespace(root) == 0);
