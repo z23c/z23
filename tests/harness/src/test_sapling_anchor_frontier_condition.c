@@ -209,11 +209,9 @@ static const struct json_value *safu_find_entry(const struct json_value *dump)
     return NULL;
 }
 
-int test_sapling_anchor_frontier_condition(void);
-int test_sapling_anchor_frontier_condition(void)
+static int safc_check_from_genesis(void)
 {
     int failures = 0;
-
     /* (d.1) from-genesis store (activation==0): an empty table is COMPLETE, not
      * a curable gap. */
     {
@@ -227,19 +225,12 @@ int test_sapling_anchor_frontier_condition(void)
                        SAPLING_ANCHOR_GAP_NONE);
         if (db) sqlite3_close(db);
     }
+    return failures;
+}
 
-    /* (a)+(d.2) empty table + activation>0 == curable EMPTY_TABLE birth defect. */
-    sqlite3 *db = NULL;
-    SAFC_CHECK("open snapshot-seeded store",
-               sqlite3_open(":memory:", &db) == SQLITE_OK && db);
-    if (!db)
-        return failures + 1;
-    SAFC_CHECK("initialize adopted-above-genesis history (activation=100)",
-               anchor_kv_initialize_history(db, 100));
-    SAFC_CHECK("classify empty table + activation>0 == EMPTY_TABLE",
-               sapling_anchor_frontier_classify(db) ==
-                   SAPLING_ANCHOR_GAP_EMPTY_TABLE);
-
+static int safc_check_empty_stall(sqlite3 *db)
+{
+    int failures = 0;
     /* The stall: a shielded-output block finds the empty table -> fail closed. */
     {
         struct block blk;
@@ -254,7 +245,12 @@ int test_sapling_anchor_frontier_condition(void)
                    strcmp(s.status, "shielded_anchor_history_gap") == 0);
         block_free(&blk);
     }
+    return failures;
+}
 
+static int safc_check_mismatched_seed(sqlite3 *db)
+{
+    int failures = 0;
     /* (c) root-MISMATCH seed writes NOTHING; the stall persists. */
     {
         struct incremental_merkle_tree seed_tree;
@@ -272,7 +268,12 @@ int test_sapling_anchor_frontier_condition(void)
                    sapling_anchor_frontier_classify(db) ==
                        SAPLING_ANCHOR_GAP_EMPTY_TABLE);
     }
+    return failures;
+}
 
+static int safc_check_verified_seed(sqlite3 *db)
+{
+    int failures = 0;
     /* (b) verified seed (root matches) -> latest_tree FOUND and the fold that
      * previously failed closed now proceeds. */
     struct incremental_merkle_tree seed_tree;
@@ -295,6 +296,12 @@ int test_sapling_anchor_frontier_condition(void)
     SAFC_CHECK("birth defect cured: classify no longer EMPTY_TABLE once seeded",
                sapling_anchor_frontier_classify(db) !=
                    SAPLING_ANCHOR_GAP_EMPTY_TABLE);
+    return failures;
+}
+
+static int safc_check_post_seed_fold(sqlite3 *db)
+{
+    int failures = 0;
     {
         struct block blk;
         safc_block_with_output(&blk, 0x22);
@@ -312,21 +319,12 @@ int test_sapling_anchor_frontier_condition(void)
                    anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, &t2, NULL,
                                          &h2) == ANCHOR_KV_FOUND && h2 == 150);
     }
+    return failures;
+}
 
-    /* (d.3) rows present == HISTORICAL (not seed-curable via the birth-defect
-     * cure). */
-    SAFC_CHECK("classify non-empty table == HISTORICAL (owner-gated)",
-               sapling_anchor_frontier_classify(db) ==
-                   SAPLING_ANCHOR_GAP_HISTORICAL);
-
-    sqlite3_close(db);
-
-    /* Registration: the condition is wired into the engine registry. */
-    register_sapling_anchor_frontier_unavailable();
-    SAFC_CHECK("condition registered in the engine",
-               condition_engine_has_registered(
-                   "sapling_anchor_frontier_unavailable"));
-
+static int safc_check_gap_absent(void)
+{
+    int failures = 0;
     /* ── GAP ABSENT: no blocker -> not detected, no remedy call. ── */
     {
         struct safu_engine_fixture fx;
@@ -355,7 +353,93 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
+static int safc_gap_present_detect(void)
+{
+    int failures = 0;
+    struct blocker_record r;
+    blocker_init(&r, UTXO_APPLY_NF_GAP_BLOCKER_ID, "utxo_apply",
+                 BLOCKER_PERMANENT, "test: nullifier history gap");
+    blocker_set(&r);
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "sapling_anchor_frontier_unavailable", &snap);
+    SAFC_CHECK("gap-present: detected + currently_active",
+               got && snap.currently_active);
+    SAFC_CHECK("gap-present: remedy ran exactly once",
+               sapling_anchor_frontier_test_remedy_calls() == 1);
+    SAFC_CHECK("gap-present: outcome FAILED (never self-resolves)",
+               got && snap.last_outcome == COND_REMEDY_FAILED);
+    return failures;
+}
+
+static int safc_gap_present_detail(const struct json_value *detail)
+{
+    int failures = 0;
+    SAFC_CHECK("gap-present: detail present", detail != NULL);
+    SAFC_CHECK("gap-present: episode_kind == NAMED_REMEDY(2)",
+               detail &&
+               json_get_int(json_get(detail, "episode_kind")) == 2);
+    SAFC_CHECK("gap-present: nullifier_gap_blocker_present true",
+               detail &&
+               json_get_bool(json_get(
+                   detail, "nullifier_gap_blocker_present")));
+    return failures;
+}
+
+static int safc_gap_present_remedy(const struct json_value *detail)
+{
+    int failures = 0;
+    const struct json_value *sgr =
+        detail ? json_get(detail, "shielded_gap_remedy") : NULL;
+    SAFC_CHECK("gap-present: named-remedy sub-object present",
+               sgr != NULL);
+    const struct json_value *remedy =
+        sgr ? json_get(sgr, "remedy") : NULL;
+    SAFC_CHECK("gap-present: remedy object present", remedy != NULL);
+    const char *imp =
+        remedy ? json_get_str(json_get(remedy, "import_command"))
+               : NULL;
+    SAFC_CHECK("gap-present: names -import-complete-shielded",
+               imp && strstr(imp, "-import-complete-shielded=") != NULL);
+
+    const struct json_value *cont =
+        sgr ? json_get(sgr, "containment") : NULL;
+    SAFC_CHECK("gap-present: containment present", cont != NULL);
+    SAFC_CHECK("gap-present: auto_execute is structurally false",
+               cont && !json_get_bool(json_get(cont, "auto_execute")));
+    SAFC_CHECK("gap-present: refuses live auto-exec on live datadir",
+               cont && json_get_bool(json_get(cont, "refuses_live")));
+    return failures;
+}
+
+static int safc_gap_present_dump(void)
+{
+    int failures = 0;
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    SAFC_CHECK("gap-present: engine dump ok",
+               condition_engine_dump_state_json(&dump, NULL));
+    const struct json_value *mine = safu_find_entry(&dump);
+    SAFC_CHECK("gap-present: found this condition's entry",
+               mine != NULL);
+    const struct json_value *detail =
+        mine ? json_get(mine, "detail") : NULL;
+    failures += safc_gap_present_detail(detail);
+    failures += safc_gap_present_remedy(detail);
+    json_free(&dump);
+    return failures;
+}
+
+static int safc_check_gap_present(void)
+{
+    int failures = 0;
     /* ── GAP PRESENT (standalone nullifier gap): NAMED REMEDY surfaced,
      * containment refuses live auto-exec, never self-resolves. ── */
     {
@@ -363,67 +447,103 @@ int test_sapling_anchor_frontier_condition(void)
         bool ok = safu_engine_setup(&fx, "present");
         SAFC_CHECK("gap-present fixture setup", ok);
         if (ok) {
-            struct blocker_record r;
-            blocker_init(&r, UTXO_APPLY_NF_GAP_BLOCKER_ID, "utxo_apply",
-                        BLOCKER_PERMANENT, "test: nullifier history gap");
-            blocker_set(&r);
-
-            condition_engine_tick();
-
-            struct condition_runtime_snapshot snap;
-            bool got = condition_engine_get_registered_snapshot(
-                "sapling_anchor_frontier_unavailable", &snap);
-            SAFC_CHECK("gap-present: detected + currently_active",
-                       got && snap.currently_active);
-            SAFC_CHECK("gap-present: remedy ran exactly once",
-                       sapling_anchor_frontier_test_remedy_calls() == 1);
-            SAFC_CHECK("gap-present: outcome FAILED (never self-resolves)",
-                       got && snap.last_outcome == COND_REMEDY_FAILED);
-
-            struct json_value dump;
-            json_init(&dump);
-            json_set_object(&dump);
-            SAFC_CHECK("gap-present: engine dump ok",
-                       condition_engine_dump_state_json(&dump, NULL));
-            const struct json_value *mine = safu_find_entry(&dump);
-            SAFC_CHECK("gap-present: found this condition's entry",
-                       mine != NULL);
-            const struct json_value *detail =
-                mine ? json_get(mine, "detail") : NULL;
-            SAFC_CHECK("gap-present: detail present", detail != NULL);
-            SAFC_CHECK("gap-present: episode_kind == NAMED_REMEDY(2)",
-                       detail &&
-                       json_get_int(json_get(detail, "episode_kind")) == 2);
-            SAFC_CHECK("gap-present: nullifier_gap_blocker_present true",
-                       detail &&
-                       json_get_bool(json_get(
-                           detail, "nullifier_gap_blocker_present")));
-
-            const struct json_value *sgr =
-                detail ? json_get(detail, "shielded_gap_remedy") : NULL;
-            SAFC_CHECK("gap-present: named-remedy sub-object present",
-                       sgr != NULL);
-            const struct json_value *remedy =
-                sgr ? json_get(sgr, "remedy") : NULL;
-            SAFC_CHECK("gap-present: remedy object present", remedy != NULL);
-            const char *imp =
-                remedy ? json_get_str(json_get(remedy, "import_command"))
-                       : NULL;
-            SAFC_CHECK("gap-present: names -import-complete-shielded",
-                       imp && strstr(imp, "-import-complete-shielded=") != NULL);
-
-            const struct json_value *cont =
-                sgr ? json_get(sgr, "containment") : NULL;
-            SAFC_CHECK("gap-present: containment present", cont != NULL);
-            SAFC_CHECK("gap-present: auto_execute is structurally false",
-                       cont && !json_get_bool(json_get(cont, "auto_execute")));
-            SAFC_CHECK("gap-present: refuses live auto-exec on live datadir",
-                       cont && json_get_bool(json_get(cont, "refuses_live")));
-            json_free(&dump);
+            failures += safc_gap_present_detect();
+            failures += safc_gap_present_dump();
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
+static int safc_dual_gap_prepare(const struct safu_engine_fixture *fx)
+{
+    int failures = 0;
+    /* activation>0 + empty table == the curable EMPTY_TABLE class.
+     * Nullifier history is initialized too so markers_read (which
+     * needs all three adoption cursors) succeeds for the hold memo. */
+    SAFC_CHECK("dual-gap: anchor history adopted above genesis",
+               anchor_kv_initialize_history(progress_store_db(), 100));
+    SAFC_CHECK("dual-gap: nullifier history adopted above genesis",
+               nullifier_kv_initialize_history(progress_store_db(),
+                                               100));
+    /* Pin the checkpoint path to the hermetic fixture datadir (no
+     * ckpt file there -> tier1 fails closed deterministically,
+     * regardless of suite-order static path state). */
+    set_sapling_checkpoint_datadir(fx->dir);
+
+    struct blocker_record ra, rn;
+    blocker_init(&ra, UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID, "utxo_apply",
+                 BLOCKER_PERMANENT, "test: anchor history gap");
+    blocker_set(&ra);
+    blocker_init(&rn, UTXO_APPLY_NF_GAP_BLOCKER_ID, "utxo_apply",
+                 BLOCKER_PERMANENT, "test: nullifier history gap");
+    blocker_set(&rn);
+
+    /* The 2026-08-02 wedge shape: a GATE_HOLD already recorded the
+     * in-memory history-hold memo on the stall block. Only a LANDED
+     * cure (tier1/tier1b seed) may clear it — a refused seed must
+     * leave the park in place (the fold stays fail-closed). */
+    SAFC_CHECK("dual-gap: history-hold memo recorded",
+               utxo_apply_history_hold_record(
+                   progress_store_db(), 1, 2, fx->tip->phashBlock));
+    SAFC_CHECK("dual-gap: hold active before remedy",
+               utxo_apply_history_hold_active());
+    return failures;
+}
+
+static int safc_dual_gap_tick(void)
+{
+    int failures = 0;
+    condition_engine_tick();
+
+    SAFC_CHECK("dual-gap: remedy ran exactly once",
+               sapling_anchor_frontier_test_remedy_calls() == 1);
+    SAFC_CHECK("dual-gap: tier1 seed attempted BEFORE the ladder",
+               sapling_anchor_frontier_test_tier1_attempts() == 1);
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "sapling_anchor_frontier_unavailable", &snap);
+    SAFC_CHECK("dual-gap: episode stays active (no fake resolve)",
+               got && snap.currently_active);
+    SAFC_CHECK("dual-gap: outcome is the ladder's, not tier1 OK",
+               got && snap.last_outcome == COND_REMEDY_FAILED);
+    /* A refused seed wrote nothing and cleared nothing: the hold
+     * memo parks the fold until a cure actually lands (the remedy's
+     * utxo_apply_history_hold_clear runs only on tier1/tier1b
+     * SUCCESS — covered live by the anchor replay-canary). */
+    SAFC_CHECK("dual-gap: hold memo survives a refused seed",
+               utxo_apply_history_hold_active());
+    return failures;
+}
+
+static int safc_dual_gap_dump(void)
+{
+    int failures = 0;
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    SAFC_CHECK("dual-gap: engine dump ok",
+               condition_engine_dump_state_json(&dump, NULL));
+    const struct json_value *mine = safu_find_entry(&dump);
+    const struct json_value *detail =
+        mine ? json_get(mine, "detail") : NULL;
+    SAFC_CHECK("dual-gap: episode_kind == BIRTH_DEFECT(1)",
+               detail &&
+               json_get_int(json_get(detail, "episode_kind")) == 1);
+    SAFC_CHECK("dual-gap: anchor gap blocker flagged",
+               detail &&
+               json_get_bool(json_get(detail, "gap_blocker_present")));
+    SAFC_CHECK("dual-gap: nullifier gap blocker flagged",
+               detail &&
+               json_get_bool(json_get(
+                   detail, "nullifier_gap_blocker_present")));
+    json_free(&dump);
+    return failures;
+}
+
+static int safc_check_dual_gap(void)
+{
+    int failures = 0;
     /* ── DUAL GAP (EMPTY_TABLE anchor + nullifier blocker): the birth-defect
      * anchor half is attempted FIRST (tier1 seed), then the named-remedy
      * ladder owns the nullifier half — the 2026-08-01 seed-boot wedge
@@ -434,77 +554,9 @@ int test_sapling_anchor_frontier_condition(void)
         bool ok = safu_engine_setup(&fx, "dual");
         SAFC_CHECK("dual-gap fixture setup", ok);
         if (ok) {
-            /* activation>0 + empty table == the curable EMPTY_TABLE class.
-             * Nullifier history is initialized too so markers_read (which
-             * needs all three adoption cursors) succeeds for the hold memo. */
-            SAFC_CHECK("dual-gap: anchor history adopted above genesis",
-                       anchor_kv_initialize_history(progress_store_db(), 100));
-            SAFC_CHECK("dual-gap: nullifier history adopted above genesis",
-                       nullifier_kv_initialize_history(progress_store_db(),
-                                                       100));
-            /* Pin the checkpoint path to the hermetic fixture datadir (no
-             * ckpt file there -> tier1 fails closed deterministically,
-             * regardless of suite-order static path state). */
-            set_sapling_checkpoint_datadir(fx.dir);
-
-            struct blocker_record ra, rn;
-            blocker_init(&ra, UTXO_APPLY_ANCHOR_GAP_BLOCKER_ID, "utxo_apply",
-                         BLOCKER_PERMANENT, "test: anchor history gap");
-            blocker_set(&ra);
-            blocker_init(&rn, UTXO_APPLY_NF_GAP_BLOCKER_ID, "utxo_apply",
-                         BLOCKER_PERMANENT, "test: nullifier history gap");
-            blocker_set(&rn);
-
-            /* The 2026-08-02 wedge shape: a GATE_HOLD already recorded the
-             * in-memory history-hold memo on the stall block. Only a LANDED
-             * cure (tier1/tier1b seed) may clear it — a refused seed must
-             * leave the park in place (the fold stays fail-closed). */
-            SAFC_CHECK("dual-gap: history-hold memo recorded",
-                       utxo_apply_history_hold_record(
-                           progress_store_db(), 1, 2, fx.tip->phashBlock));
-            SAFC_CHECK("dual-gap: hold active before remedy",
-                       utxo_apply_history_hold_active());
-
-            condition_engine_tick();
-
-            SAFC_CHECK("dual-gap: remedy ran exactly once",
-                       sapling_anchor_frontier_test_remedy_calls() == 1);
-            SAFC_CHECK("dual-gap: tier1 seed attempted BEFORE the ladder",
-                       sapling_anchor_frontier_test_tier1_attempts() == 1);
-            struct condition_runtime_snapshot snap;
-            bool got = condition_engine_get_registered_snapshot(
-                "sapling_anchor_frontier_unavailable", &snap);
-            SAFC_CHECK("dual-gap: episode stays active (no fake resolve)",
-                       got && snap.currently_active);
-            SAFC_CHECK("dual-gap: outcome is the ladder's, not tier1 OK",
-                       got && snap.last_outcome == COND_REMEDY_FAILED);
-            /* A refused seed wrote nothing and cleared nothing: the hold
-             * memo parks the fold until a cure actually lands (the remedy's
-             * utxo_apply_history_hold_clear runs only on tier1/tier1b
-             * SUCCESS — covered live by the anchor replay-canary). */
-            SAFC_CHECK("dual-gap: hold memo survives a refused seed",
-                       utxo_apply_history_hold_active());
-
-            struct json_value dump;
-            json_init(&dump);
-            json_set_object(&dump);
-            SAFC_CHECK("dual-gap: engine dump ok",
-                       condition_engine_dump_state_json(&dump, NULL));
-            const struct json_value *mine = safu_find_entry(&dump);
-            const struct json_value *detail =
-                mine ? json_get(mine, "detail") : NULL;
-            SAFC_CHECK("dual-gap: episode_kind == BIRTH_DEFECT(1)",
-                       detail &&
-                       json_get_int(json_get(detail, "episode_kind")) == 1);
-            SAFC_CHECK("dual-gap: anchor gap blocker flagged",
-                       detail &&
-                       json_get_bool(json_get(detail, "gap_blocker_present")));
-            SAFC_CHECK("dual-gap: nullifier gap blocker flagged",
-                       detail &&
-                       json_get_bool(json_get(
-                           detail, "nullifier_gap_blocker_present")));
-            json_free(&dump);
-
+            failures += safc_dual_gap_prepare(&fx);
+            failures += safc_dual_gap_tick();
+            failures += safc_dual_gap_dump();
             /* The refused tier1 seed wrote nothing: still EMPTY_TABLE. */
             SAFC_CHECK("dual-gap: anchor side still EMPTY_TABLE after refused seed",
                        sapling_anchor_frontier_classify(progress_store_db()) ==
@@ -515,7 +567,12 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
+static int safc_check_gap_cleared(void)
+{
+    int failures = 0;
     /* ── GAP CLEARED: the operator ran the import + rebooted (activation
      * flips to 0, both refresh calls clear the blocker) and the fold resumed
      * (H* climbs past the stall). The very next tick's witness must fire. ── */
@@ -553,9 +610,12 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
-    /* ══ Move 2a — sovereign self-heal LADDER LOGIC (pure + hermetic) ══ */
-
+static int safc_check_rung_select(void)
+{
+    int failures = 0;
     /* (E) Pure rung selection matrix — Rung A fires when bodies present, Rung B
      * when a bundle is present, Rung C otherwise; NONE when no gap. */
     {
@@ -592,7 +652,12 @@ int test_sapling_anchor_frontier_condition(void)
                                                  true) ==
                        SHIELDED_SELFHEAL_RUNG_NONE);
     }
+    return failures;
+}
 
+static int safc_check_named_need(void)
+{
+    int failures = 0;
     /* (F) Rung C named-need composition — the exact first missing height. */
     {
         SAFC_CHECK("named_need: neither known -> -1",
@@ -605,7 +670,12 @@ int test_sapling_anchor_frontier_condition(void)
                    shielded_selfheal_named_need(150, 120) == 120 &&
                    shielded_selfheal_named_need(120, 150) == 120);
     }
+    return failures;
+}
 
+static int safc_check_sovereign_auth(void)
+{
+    int failures = 0;
     /* (G) Sovereign authorization is SEPARATE from the borrowed containment:
      * refuses a throwaway -COPY- copy-prove datadir, authorizes a live one. */
     {
@@ -623,7 +693,12 @@ int test_sapling_anchor_frontier_condition(void)
                    shielded_selfheal_sovereign_authorized());
         rpc_agent_set_boot_context("unknown", "unknown", "", 0, 0, 0, 0);
     }
+    return failures;
+}
 
+static int safc_check_rung_b_arms(void)
+{
+    int failures = 0;
     /* (H) Rung B ARMS the durable install-on-next-boot request when a
      * ROM-matching bundle is present AND the checkpoint header solution is
      * durably available — hermetic against the fixture's own temp datadir (never
@@ -683,7 +758,12 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
+static int safc_check_rung_b_gate(void)
+{
+    int failures = 0;
     /* (H-gate) Rung B does NOT arm the budgeted install when the checkpoint
      * header solution is ABSENT — the solution gate that stops
      * boot_install_bundle_consume from burning BOOT_INSTALL_BUNDLE_MAX on
@@ -716,7 +796,12 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
 
+static int safc_check_progressing(void)
+{
+    int failures = 0;
     /* (I) The .progressing hook resets the budget WHILE the durable heal cursor
      * advances, and returns false on a frozen cursor (so a genuinely stuck node
      * still pages in bounded time and never re-spins). Drives the real hook via
@@ -747,6 +832,60 @@ int test_sapling_anchor_frontier_condition(void)
         }
         safu_engine_teardown(&fx);
     }
+    return failures;
+}
+
+int test_sapling_anchor_frontier_condition(void);
+int test_sapling_anchor_frontier_condition(void)
+{
+    int failures = 0;
+
+    failures += safc_check_from_genesis();
+
+    /* (a)+(d.2) empty table + activation>0 == curable EMPTY_TABLE birth defect. */
+    sqlite3 *db = NULL;
+    SAFC_CHECK("open snapshot-seeded store",
+               sqlite3_open(":memory:", &db) == SQLITE_OK && db);
+    if (!db)
+        return failures + 1;
+    SAFC_CHECK("initialize adopted-above-genesis history (activation=100)",
+               anchor_kv_initialize_history(db, 100));
+    SAFC_CHECK("classify empty table + activation>0 == EMPTY_TABLE",
+               sapling_anchor_frontier_classify(db) ==
+                   SAPLING_ANCHOR_GAP_EMPTY_TABLE);
+
+    failures += safc_check_empty_stall(db);
+    failures += safc_check_mismatched_seed(db);
+    failures += safc_check_verified_seed(db);
+    failures += safc_check_post_seed_fold(db);
+
+    /* (d.3) rows present == HISTORICAL (not seed-curable via the birth-defect
+     * cure). */
+    SAFC_CHECK("classify non-empty table == HISTORICAL (owner-gated)",
+               sapling_anchor_frontier_classify(db) ==
+                   SAPLING_ANCHOR_GAP_HISTORICAL);
+
+    sqlite3_close(db);
+
+    /* Registration: the condition is wired into the engine registry. */
+    register_sapling_anchor_frontier_unavailable();
+    SAFC_CHECK("condition registered in the engine",
+               condition_engine_has_registered(
+                   "sapling_anchor_frontier_unavailable"));
+
+    failures += safc_check_gap_absent();
+    failures += safc_check_gap_present();
+    failures += safc_check_dual_gap();
+    failures += safc_check_gap_cleared();
+
+    /* ══ Move 2a — sovereign self-heal LADDER LOGIC (pure + hermetic) ══ */
+
+    failures += safc_check_rung_select();
+    failures += safc_check_named_need();
+    failures += safc_check_sovereign_auth();
+    failures += safc_check_rung_b_arms();
+    failures += safc_check_rung_b_gate();
+    failures += safc_check_progressing();
 
     return failures;
 }
