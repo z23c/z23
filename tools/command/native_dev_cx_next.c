@@ -4,9 +4,14 @@
  *          functions first, then lowest max score, then path. Skips sealed,
  *          custody-owned and pinned-root paths, files of 1300 or more lines,
  *          files a live worktree of this repository changes against
- *          origin/main (uncommitted tracked changes or a HEAD under 48 hours
- *          old; idle lanes are counted as skipped.stale_holder, not held),
- *          and files named in exclude=. Read-only; ports cx-swarm's picker. */
+ *          origin/main, and files named in exclude=. A worktree is live while
+ *          a pinned file has an uncommitted change, or its git index file was
+ *          modified in the last 48 hours, or its HEAD commit is under 48
+ *          hours old; idle lanes are counted as skipped.stale_holder, not
+ *          held. The worktree scan (native_dev_cx_scan.c) is handed the
+ *          baseline rows and asks git status only about the pinned paths, so
+ *          it takes seconds on a host with a thousand worktrees. Read-only;
+ *          ports cx-swarm's picker. */
 
 #include "command/native_command.h"
 #include "command/native_dev_cx.h"
@@ -370,6 +375,7 @@ static bool cx_load_exclude(const char *path, struct cx_set *set)
 }
 
 static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
+                       struct cx_row **rows, size_t *nrows,
                        struct cx_sets *sets, struct zcl_command_reply *reply)
 {
     char why[ZCL_CX_PATH_MAX + 64];
@@ -389,7 +395,10 @@ static bool cx_prepare(const struct cx_args *a, char *root, size_t cap,
                     buf) != 0)
         cx_fail(reply, "NEXT_NO_ORIGIN_MAIN",
                 "refs/remotes/origin/main is missing; fetch it first", root);
-    else if (!cx_changed_files(root, &sets->changed, &sets->stale, why,
+    else if (*rows = cx_load_rows(root, nrows), !*rows)
+        cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
+                "the complexity baseline could not be read", root);
+    else if (!cx_changed_files(root, *rows, *nrows, &sets->changed, &sets->stale, why,
                             sizeof(why)))
         cx_fail(reply, "NEXT_WORKTREE_SCAN",
                 "a worktree could not be compared with origin/main", why);
@@ -415,10 +424,9 @@ void zcl_native_handle_dev_cx_next(const struct zcl_command_request *request,
                 "input");
         return;
     }
-    if (cx_prepare(&a, root, sizeof(root), &sets, reply)) {
-        rows = cx_load_rows(root, &n);
-        picks = rows ? zcl_calloc(n, sizeof(*picks), "dev_cx.picks") : NULL;
-        if (!rows || !picks)
+    if (cx_prepare(&a, root, sizeof(root), &rows, &n, &sets, reply)) {
+        picks = zcl_calloc(n, sizeof(*picks), "dev_cx.picks");
+        if (!picks)
             cx_fail(reply, "NEXT_BASELINE_UNREADABLE",
                     "the complexity baseline could not be read", root);
         else if (kept = cx_select(rows, n, root, &sets, &a, picks, skipped),

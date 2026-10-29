@@ -50,13 +50,18 @@ int cx_run(const char *dir, const char *const argv[], char *buf, size_t cap,
 bool cx_row_parse(const char *line, size_t len, struct cx_row *out);
 
 
-/* Every path any worktree of the repository at root changes against
- * origin/main: committed (merge-base diff of its HEAD), staged, unstaged and
- * untracked. A worktree holds them (into out) only while live: uncommitted
- * tracked changes, or a HEAD commit under 48 hours old; an idle one's files
- * go into stale. Worktrees are scanned in parallel; one that cannot be compared
- * fails the whole call (why names it): an unknown is never read as clean. */
-bool cx_changed_files(const char *root, struct cx_set *out,
-                      struct cx_set *stale, char *why, size_t why_cap);
+/* Every pinned path any worktree of the repository at root changes against
+ * origin/main: committed (merge-base diff of its HEAD), staged and unstaged.
+ * pins are the baseline rows (sorted by file); only their distinct paths are
+* asked of git status (as literal pathspecs), so untracked and unpinned files are not seen. A
+ * worktree holds its paths (into out) only while live: a pinned file with an
+ * uncommitted change, an index file modified in the last 48 hours, or a HEAD
+ * commit under 48 hours old; an idle one's files go into stale. Worktrees are
+ * scanned in parallel; one that cannot be compared fails the whole call (why
+ * names it): an unknown is never read as clean. A worktree that vanishes
+ * during the scan counts as empty. */
+bool cx_changed_files(const char *root, const struct cx_row *pins, size_t npins,
+                      struct cx_set *out, struct cx_set *stale, char *why,
+                      size_t why_cap);
 
 #endif
