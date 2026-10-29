@@ -266,7 +266,8 @@ static bool bench_read_pid_from_file(const char *path, long *pid_out)
     return true;
 }
 
-static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
+/* Parse ZCL_BENCH_PID; true only when it holds a positive decimal pid. */
+static bool bench_pid_from_env(long *pid_out)
 {
     const char *pid_env = getenv("ZCL_BENCH_PID");
     if (pid_env && *pid_env) {
@@ -274,14 +275,17 @@ static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
         errno = 0;
         long pid = strtol(pid_env, &end, 10);
         if (errno == 0 && end && *end == '\0' && pid > 0) {
-            if (pid_out) *pid_out = pid;
-            if (source && source_len)
-                snprintf(source, source_len, "ZCL_BENCH_PID=%ld", pid);
+            *pid_out = pid;
             return true;
         }
     }
+    return false;
+}
 
-    char default_datadir[512];
+/* Pick the datadir to look in; default_datadir backs the fallback path.
+ * Returns NULL when the fallback path cannot be joined. */
+static const char *bench_pick_datadir(char *default_datadir, size_t cap)
+{
     const char *datadir = getenv("ZCL_BENCH_SOURCE_DATADIR");
     if (!datadir || !*datadir)
         datadir = getenv("ZCL_BENCH_LIVE_DATADIR");
@@ -289,11 +293,28 @@ static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
         const char *home = getenv("HOME");
         if (!home || !*home)
             home = ".";
-        if (!zcl_path_join(default_datadir, sizeof(default_datadir),
-                            home, ".zclassic-c23"))
-            return false;
+        if (!zcl_path_join(default_datadir, cap, home, ".zclassic-c23"))
+            return NULL;
         datadir = default_datadir;
     }
+    return datadir;
+}
+
+static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
+{
+    long env_pid = -1;
+    if (bench_pid_from_env(&env_pid)) {
+        if (pid_out) *pid_out = env_pid;
+        if (source && source_len)
+            snprintf(source, source_len, "ZCL_BENCH_PID=%ld", env_pid);
+        return true;
+    }
+
+    char default_datadir[512];
+    const char *datadir = bench_pick_datadir(default_datadir,
+                                             sizeof(default_datadir));
+    if (!datadir)
+        return false;
 
     char pid_path[512];
     if (!zcl_path_join(pid_path, sizeof(pid_path), datadir,
@@ -308,6 +329,60 @@ static bool bench_find_live_pid(long *pid_out, char *source, size_t source_len)
     return true;
 }
 
+/* Scan an open /proc/<pid>/status for VmRSS; true when found. */
+static bool bench_scan_vmrss(FILE *f, double *rss_mb)
+{
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        long kb = 0;
+        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1) {
+            if (rss_mb) *rss_mb = (double)kb / 1024.0;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Field 22 (starttime) of a /proc/<pid>/stat line; 0 when absent. */
+static unsigned long long bench_stat_start_ticks(const char *line)
+{
+    const char *rp = strrchr(line, ')');
+    if (!rp) return 0;
+    char fields[256];
+    snprintf(fields, sizeof(fields), "%s", rp + 2);
+    char *save = NULL;
+    char *tok = strtok_r(fields, " \t\r\n", &save);
+    unsigned long long start_ticks = 0;
+    for (int field = 3; tok; field++) {
+        if (field == 22) {
+            start_ticks = strtoull(tok, NULL, 10);
+            break;
+        }
+        tok = strtok_r(NULL, " \t\r\n", &save);
+    }
+    return start_ticks;
+}
+
+/* Read one line of an open /proc/<pid>/stat and set *uptime_s from it. */
+static void bench_scan_proc_uptime(FILE *f, double *uptime_s)
+{
+    char line[256];
+    if (!fgets(line, sizeof(line), f))
+        return;
+    unsigned long long start_ticks = bench_stat_start_ticks(line);
+#if defined(_WIN32)
+    long hz = 0;
+#else
+    long hz = sysconf(_SC_CLK_TCK);
+#endif
+    double up = bench_system_uptime_seconds();
+    if (start_ticks > 0 && hz > 0 && up > 0.0) {
+        double start_s = (double)start_ticks / (double)hz;
+        if (up >= start_s)
+            *uptime_s = up - start_s;
+    }
+}
+
 static bool bench_read_proc_status(long pid, double *rss_mb, double *uptime_s)
 {
     if (pid <= 0) return false;
@@ -317,50 +392,14 @@ static bool bench_read_proc_status(long pid, double *rss_mb, double *uptime_s)
     FILE *f = fopen(path, "r");
     if (!f) return false;
 
-    char line[256];
-    bool got_rss = false;
-    while (fgets(line, sizeof(line), f)) {
-        long kb = 0;
-        if (sscanf(line, "VmRSS: %ld kB", &kb) == 1) {
-            if (rss_mb) *rss_mb = (double)kb / 1024.0;
-            got_rss = true;
-            break;
-        }
-    }
+    bool got_rss = bench_scan_vmrss(f, rss_mb);
     fclose(f);
 
     if (uptime_s) {
         snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
         f = fopen(path, "r");
         if (!f) return got_rss;
-        if (fgets(line, sizeof(line), f)) {
-            char *rp = strrchr(line, ')');
-            if (rp) {
-                char fields[256];
-                snprintf(fields, sizeof(fields), "%s", rp + 2);
-                char *save = NULL;
-                char *tok = strtok_r(fields, " \t\r\n", &save);
-                unsigned long long start_ticks = 0;
-                for (int field = 3; tok; field++) {
-                    if (field == 22) {
-                        start_ticks = strtoull(tok, NULL, 10);
-                        break;
-                    }
-                    tok = strtok_r(NULL, " \t\r\n", &save);
-                }
-#if defined(_WIN32)
-                long hz = 0;
-#else
-                long hz = sysconf(_SC_CLK_TCK);
-#endif
-                double up = bench_system_uptime_seconds();
-                if (start_ticks > 0 && hz > 0 && up > 0.0) {
-                    double start_s = (double)start_ticks / (double)hz;
-                    if (up >= start_s)
-                        *uptime_s = up - start_s;
-                }
-            }
-        }
+        bench_scan_proc_uptime(f, uptime_s);
         fclose(f);
     }
 
@@ -454,6 +493,75 @@ static bool bench_higher_is_better(const char *bench)
     return bench && strstr(bench, "#3 stay-in-sync MTBF") != NULL;
 }
 
+struct bench_regress_seen {
+    char bench[96];
+    double prev;
+    double last;
+    int count;
+};
+
+/* Split one history row; on success *name is the bench column inside tmp
+ * and *v its numeric primary value. */
+static bool bench_regress_fields(char *tmp, char **name, double *v)
+{
+    char *fields[6] = {0};
+    char *save = NULL;
+    char *tok = strtok_r(tmp, ",", &save);
+    for (int i = 0; i < 6 && tok; ++i) {
+        fields[i] = tok;
+        tok = strtok_r(NULL, ",", &save);
+    }
+    if (!fields[2] || !fields[3] || fields[3][0] == '\0' ||
+        fields[3][0] == '"')
+        return false;
+    char *end = NULL;
+    *v = strtod(fields[3], &end);
+    if (!end || end == fields[3])
+        return false;
+    *name = fields[2];
+    return true;
+}
+
+/* Fold one numeric sample into the per-bench table (capacity 32). */
+static void bench_regress_note(struct bench_regress_seen *seen,
+                               size_t *seen_len, const char *name, double v)
+{
+    size_t i;
+    for (i = 0; i < *seen_len; ++i) {
+        if (strcmp(seen[i].bench, name) == 0)
+            break;
+    }
+    if (i == *seen_len && *seen_len < 32) {
+        snprintf(seen[i].bench, sizeof(seen[i].bench), "%s", name);
+        seen[i].prev = 0.0;
+        seen[i].last = 0.0;
+        seen[i].count = 0;
+        (*seen_len)++;
+    }
+    if (i < *seen_len) {
+        seen[i].prev = seen[i].last;
+        seen[i].last = v;
+        seen[i].count++;
+    }
+}
+
+static void bench_regress_scan(FILE *f, struct bench_regress_seen *seen,
+                               size_t *seen_len)
+{
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || strncmp(line, "date,", 5) == 0)
+            continue;
+        char tmp[1024];
+        snprintf(tmp, sizeof(tmp), "%s", line);
+        char *name = NULL;
+        double v = 0.0;
+        if (!bench_regress_fields(tmp, &name, &v))
+            continue;
+        bench_regress_note(seen, seen_len, name, v);
+    }
+}
+
 static int bench_regress(void)
 {
     const char *path = bench_history_path();
@@ -463,51 +571,9 @@ static int bench_regress(void)
         return 0;
     }
 
-    struct seen {
-        char bench[96];
-        double prev;
-        double last;
-        int count;
-    } seen[32];
+    struct bench_regress_seen seen[32];
     size_t seen_len = 0;
-    char line[1024];
-    while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || strncmp(line, "date,", 5) == 0)
-            continue;
-        char tmp[1024];
-        snprintf(tmp, sizeof(tmp), "%s", line);
-        char *fields[6] = {0};
-        char *save = NULL;
-        char *tok = strtok_r(tmp, ",", &save);
-        for (int i = 0; i < 6 && tok; ++i) {
-            fields[i] = tok;
-            tok = strtok_r(NULL, ",", &save);
-        }
-        if (!fields[2] || !fields[3] || fields[3][0] == '\0' ||
-            fields[3][0] == '"')
-            continue;
-        char *end = NULL;
-        double v = strtod(fields[3], &end);
-        if (!end || end == fields[3])
-            continue;
-        size_t i;
-        for (i = 0; i < seen_len; ++i) {
-            if (strcmp(seen[i].bench, fields[2]) == 0)
-                break;
-        }
-        if (i == seen_len && seen_len < 32) {
-            snprintf(seen[i].bench, sizeof(seen[i].bench), "%s", fields[2]);
-            seen[i].prev = 0.0;
-            seen[i].last = 0.0;
-            seen[i].count = 0;
-            seen_len++;
-        }
-        if (i < seen_len) {
-            seen[i].prev = seen[i].last;
-            seen[i].last = v;
-            seen[i].count++;
-        }
-    }
+    bench_regress_scan(f, seen, &seen_len);
     fclose(f);
 
     bool failed = false;
@@ -612,6 +678,139 @@ static bool bench_find_diversifier(uint8_t diversifier[11])
     return false;
 }
 
+/* Time the Equihash verify and append its row; the TEETH refusal is
+ * reported on stderr and leaves *nrows unchanged. */
+static void bench_cv_equihash(struct bench_row *rows, size_t *nrows,
+                              double budget_ns)
+{
+    struct block_header h;
+    verify_bench_fill_eh_header(&h);
+
+    /* TEETH: valid -> true, one-bit-flipped -> false. */
+    bool pos = check_equihash_solution(&h, NULL);
+    struct block_header bad = h;
+    bad.nSolution[600] ^= 0x01;
+    bool neg = check_equihash_solution(&bad, NULL);
+    if (!pos || neg) {
+        fprintf(stderr,
+            "[bench-crypto-verify] REFUSING equihash row: verify is "
+            "hollow (valid=%d flipped=%d); expected valid=1 flipped=0\n",
+            pos, neg);
+    } else {
+        bool ok = true;
+        double ns = bench_time_verify(bench_verify_equihash, &h,
+                                      budget_ns, &ok);
+        if (ok) {
+            snprintf(rows[*nrows].bench, sizeof(rows[*nrows].bench),
+                     "consensus-verify equihash-200-9");
+            snprintf(rows[*nrows].unit, sizeof(rows[*nrows].unit), "ns/op");
+            rows[*nrows].value = ns;
+            rows[*nrows].numeric = true;
+            snprintf(rows[*nrows].notes, sizeof(rows[*nrows].notes),
+                "check_equihash_solution on baked real 200,9 witness; "
+                "host-relative; %.0f ops/sec", 1e9 / ns);
+            printf("  %-34s %12.1f ns/op  (%.0f ops/sec)\n",
+                   "equihash-200-9 verify", ns, 1e9 / ns);
+            (*nrows)++;
+        }
+    }
+}
+
+/* Prove one fresh Sapling output into ga; true when it was built. */
+static bool bench_cv_groth16_build(struct bench_groth16_arg *ga)
+{
+    uint8_t diversifier[11];
+    bool div_ok = bench_find_diversifier(diversifier);
+    uint8_t ask[32], nsk[32], ovk[32];
+    sapling_generate_r(ask);
+    sapling_generate_r(nsk);
+    sapling_generate_r(ovk);
+    uint8_t ak[32], nk[32], ivk[32], pk_d[32];
+    sapling_ask_to_ak(ask, ak);
+    sapling_nsk_to_nk(nsk, nk);
+    sapling_crh_ivk(ak, nk, ivk);
+    bool pk_ok = div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    uint8_t enc[580], out_ct[80];
+    bool built = pctx && pk_ok &&
+        sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
+                                      54321, NULL,
+                                      ga->cv, ga->cm, ga->epk, enc,
+                                      out_ct, ga->proof);
+    if (pctx) zclassic_sapling_proving_ctx_free(pctx);
+    return built;
+}
+
+/* TEETH-check and time a built Groth16 output; append its row. */
+static void bench_cv_groth16_row(struct bench_row *rows, size_t *nrows,
+                                 double budget_ns,
+                                 struct bench_groth16_arg *ga)
+{
+    /* TEETH: valid -> true, one-bit-flipped -> false. */
+    sapling_verification_ctx_init(&ga->vctx);
+    bool pos = sapling_check_output(&ga->vctx, ga->cv, ga->cm,
+                                    ga->epk, ga->proof);
+    struct bench_groth16_arg bad = *ga;
+    bad.proof[64] ^= 0x01;
+    sapling_verification_ctx_init(&bad.vctx);
+    bool neg = sapling_check_output(&bad.vctx, bad.cv, bad.cm,
+                                    bad.epk, bad.proof);
+    if (!pos || neg) {
+        fprintf(stderr,
+            "[bench-crypto-verify] REFUSING groth16 row: verify "
+            "is hollow (valid=%d flipped=%d)\n", pos, neg);
+    } else {
+        bool ok = true;
+        double ns = bench_time_verify(bench_verify_groth16, ga,
+                                      budget_ns, &ok);
+        if (ok) {
+            snprintf(rows[*nrows].bench, sizeof(rows[*nrows].bench),
+                     "consensus-verify groth16-bls12-381-output");
+            snprintf(rows[*nrows].unit, sizeof(rows[*nrows].unit),
+                     "ns/op");
+            rows[*nrows].value = ns;
+            rows[*nrows].numeric = true;
+            snprintf(rows[*nrows].notes, sizeof(rows[*nrows].notes),
+                "sapling_check_output (full BLS12-381 pairing) on "
+                "a real prover output proof; host-relative; "
+                "%.0f ops/sec", 1e9 / ns);
+            printf("  %-34s %12.1f ns/op  (%.0f ops/sec)\n",
+                   "groth16-bls12-381 output verify", ns,
+                   1e9 / ns);
+            (*nrows)++;
+        }
+    }
+}
+
+/* Groth16 row; needs the Sapling params directory. */
+static void bench_cv_groth16(struct bench_row *rows, size_t *nrows,
+                             double budget_ns)
+{
+    const char *home = getenv("HOME");
+    char params_dir[512];
+    snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
+             (home && *home) ? home : ".");
+    /* No embedded-VK fallback: this bench PROVES before it times. */
+    if (!sapling_init_params(params_dir)) {
+        printf("  groth16 verify: %s unusable -> SKIPPED (absent, or "
+               "present and REFUSED)\n", params_dir);
+        return;
+    }
+    struct bench_groth16_arg ga;
+    if (!bench_cv_groth16_build(&ga)) {
+        fprintf(stderr, "[bench-crypto-verify] no groth16 row: the "
+                "verify benchmark needs a freshly proved "
+                "output description and this build has no "
+                "native Sapling proving backend or it is not "
+                "ready (backend=%s status=%s).\n",
+                zclassic_sapling_prover_backend(),
+                zclassic_sapling_prover_status());
+        return;
+    }
+    bench_cv_groth16_row(rows, nrows, budget_ns, &ga);
+}
+
 static int bench_crypto_verify(void)
 {
     const char *path = bench_history_path();
@@ -635,119 +834,10 @@ static int bench_crypto_verify(void)
     size_t nrows = 0;
 
     /* ── (b) Equihash (200,9) — hermetic ───────────────────────────── */
-    {
-        struct block_header h;
-        verify_bench_fill_eh_header(&h);
-
-        /* TEETH: valid -> true, one-bit-flipped -> false. */
-        bool pos = check_equihash_solution(&h, NULL);
-        struct block_header bad = h;
-        bad.nSolution[600] ^= 0x01;
-        bool neg = check_equihash_solution(&bad, NULL);
-        if (!pos || neg) {
-            fprintf(stderr,
-                "[bench-crypto-verify] REFUSING equihash row: verify is "
-                "hollow (valid=%d flipped=%d); expected valid=1 flipped=0\n",
-                pos, neg);
-        } else {
-            bool ok = true;
-            double ns = bench_time_verify(bench_verify_equihash, &h,
-                                          budget_ns, &ok);
-            if (ok) {
-                snprintf(rows[nrows].bench, sizeof(rows[nrows].bench),
-                         "consensus-verify equihash-200-9");
-                snprintf(rows[nrows].unit, sizeof(rows[nrows].unit), "ns/op");
-                rows[nrows].value = ns;
-                rows[nrows].numeric = true;
-                snprintf(rows[nrows].notes, sizeof(rows[nrows].notes),
-                    "check_equihash_solution on baked real 200,9 witness; "
-                    "host-relative; %.0f ops/sec", 1e9 / ns);
-                printf("  %-34s %12.1f ns/op  (%.0f ops/sec)\n",
-                       "equihash-200-9 verify", ns, 1e9 / ns);
-                nrows++;
-            }
-        }
-    }
+    bench_cv_equihash(rows, &nrows, budget_ns);
 
     /* ── (a) Groth16 / BLS12-381 output-proof verify — needs params ── */
-    {
-        const char *home = getenv("HOME");
-        char params_dir[512];
-        snprintf(params_dir, sizeof(params_dir), "%s/.zcash-params",
-                 (home && *home) ? home : ".");
-        /* No embedded-VK fallback: this bench PROVES before it times. */
-        if (!sapling_init_params(params_dir)) {
-            printf("  groth16 verify: %s unusable -> SKIPPED (absent, or "
-                   "present and REFUSED)\n", params_dir);
-        } else {
-            uint8_t diversifier[11];
-            bool div_ok = bench_find_diversifier(diversifier);
-            uint8_t ask[32], nsk[32], ovk[32];
-            sapling_generate_r(ask);
-            sapling_generate_r(nsk);
-            sapling_generate_r(ovk);
-            uint8_t ak[32], nk[32], ivk[32], pk_d[32];
-            sapling_ask_to_ak(ask, ak);
-            sapling_nsk_to_nk(nsk, nk);
-            sapling_crh_ivk(ak, nk, ivk);
-            bool pk_ok = div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
-
-            void *pctx = zclassic_sapling_proving_ctx_init();
-            struct bench_groth16_arg ga;
-            uint8_t enc[580], out_ct[80];
-            bool built = pctx && pk_ok &&
-                sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
-                                              54321, NULL,
-                                              ga.cv, ga.cm, ga.epk, enc,
-                                              out_ct, ga.proof);
-            if (pctx) zclassic_sapling_proving_ctx_free(pctx);
-
-            if (!built) {
-                fprintf(stderr, "[bench-crypto-verify] no groth16 row: the "
-                        "verify benchmark needs a freshly proved "
-                        "output description and this build has no "
-                        "native Sapling proving backend or it is not "
-                        "ready (backend=%s status=%s).\n",
-                        zclassic_sapling_prover_backend(),
-                        zclassic_sapling_prover_status());
-            } else {
-                /* TEETH: valid -> true, one-bit-flipped -> false. */
-                sapling_verification_ctx_init(&ga.vctx);
-                bool pos = sapling_check_output(&ga.vctx, ga.cv, ga.cm,
-                                                ga.epk, ga.proof);
-                struct bench_groth16_arg bad = ga;
-                bad.proof[64] ^= 0x01;
-                sapling_verification_ctx_init(&bad.vctx);
-                bool neg = sapling_check_output(&bad.vctx, bad.cv, bad.cm,
-                                                bad.epk, bad.proof);
-                if (!pos || neg) {
-                    fprintf(stderr,
-                        "[bench-crypto-verify] REFUSING groth16 row: verify "
-                        "is hollow (valid=%d flipped=%d)\n", pos, neg);
-                } else {
-                    bool ok = true;
-                    double ns = bench_time_verify(bench_verify_groth16, &ga,
-                                                  budget_ns, &ok);
-                    if (ok) {
-                        snprintf(rows[nrows].bench, sizeof(rows[nrows].bench),
-                                 "consensus-verify groth16-bls12-381-output");
-                        snprintf(rows[nrows].unit, sizeof(rows[nrows].unit),
-                                 "ns/op");
-                        rows[nrows].value = ns;
-                        rows[nrows].numeric = true;
-                        snprintf(rows[nrows].notes, sizeof(rows[nrows].notes),
-                            "sapling_check_output (full BLS12-381 pairing) on "
-                            "a real prover output proof; host-relative; "
-                            "%.0f ops/sec", 1e9 / ns);
-                        printf("  %-34s %12.1f ns/op  (%.0f ops/sec)\n",
-                               "groth16-bls12-381 output verify", ns,
-                               1e9 / ns);
-                        nrows++;
-                    }
-                }
-            }
-        }
-    }
+    bench_cv_groth16(rows, &nrows, budget_ns);
 
     if (nrows == 0) {
         fprintf(stderr,
@@ -1292,6 +1382,25 @@ struct cli_service_snapshot {
 static const char *cli_bound_method;
 static const char *const *cli_bound_params;
 static int cli_bound_nparams;
+/* Skip an optional opening quote at *pp and return the value length. */
+static size_t cli_service_value_len(const char **pp)
+{
+    const char *p = *pp;
+    char quote = '\0';
+    if (*p == '"' || *p == '\'')
+        quote = *p++;
+
+    size_t len = 0;
+    while (p[len] &&
+           ((quote && p[len] != quote) ||
+            (!quote && p[len] != ' ' && p[len] != '\t' &&
+             p[len] != '\n' && p[len] != ';'))) {
+        len++;
+    }
+    *pp = p;
+    return len;
+}
+
 static bool cli_service_exec_arg(struct cli_service_snapshot *snapshot,
                                  const char *key, char *out, size_t out_size)
 {
@@ -1325,17 +1434,7 @@ static bool cli_service_exec_arg(struct cli_service_snapshot *snapshot,
         return false;
     p += strlen(needle);
 
-    char quote = '\0';
-    if (*p == '"' || *p == '\'')
-        quote = *p++;
-
-    size_t len = 0;
-    while (p[len] &&
-           ((quote && p[len] != quote) ||
-            (!quote && p[len] != ' ' && p[len] != '\t' &&
-             p[len] != '\n' && p[len] != ';'))) {
-        len++;
-    }
+    size_t len = cli_service_value_len(&p);
     if (len == 0 || len >= out_size)
         return false;
 

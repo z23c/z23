@@ -251,14 +251,9 @@ engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
-engine/entry/main_cli_modes.c:bench_crypto_verify:22
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
-engine/entry/main_cli_modes.c:bench_find_live_pid:22
-engine/entry/main_cli_modes.c:bench_read_proc_status:16
-engine/entry/main_cli_modes.c:bench_regress:24
 engine/entry/main_cli_modes.c:cli_main:108
 engine/entry/main_cli_modes.c:cli_rpc_call_internal_ex:29
-engine/entry/main_cli_modes.c:cli_service_exec_arg:22
 engine/entry/main_cli_modes.c:import_complete_shielded_mode:39
 engine/entry/main_cli_modes.c:importblockindex_cli_mode:20
 engine/entry/main_cli_modes.c:importchainstate_mode:19
