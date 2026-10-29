@@ -309,12 +309,11 @@ static int spt_case_small_chain_durability(struct main_state *staged_ms)
     return failures;
 }
 
-int test_supervisor_production_tree(void)
+/* Watchdog membership: the production register path lands the
+ * chain_tip_watchdog rung on the tree exactly once, supervisor-driven. */
+static int spt_case_watchdog_register(void)
 {
-    printf("\n=== supervisor_production_tree tests ===\n");
     int failures = 0;
-
-    supervisor_reset_for_testing();
 
     /* Sanity: the tree is empty before any production register runs, so
      * a found child below can only come from our register call. */
@@ -371,6 +370,17 @@ int test_supervisor_production_tree(void)
     main_state_free(&ms);
     chain_tip_watchdog_test_reset_runtime();
     supervisor_reset_for_testing();
+    return failures;
+}
+
+/* Net outbound floor: a healthy peer floor clears a stale no-progress
+ * stall and disables the quiet gate. */
+static int spt_case_net_outbound_floor(void)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+    int idx = -1;
 
     /* Stable-good peer floor is healthy. The progress marker is the
      * outbound peer count, so the count can stay constant for hours; that
@@ -410,6 +420,17 @@ int test_supervisor_production_tree(void)
     connman_free(&cm);
     net_supervisor_test_reset_runtime();
     supervisor_reset_for_testing();
+    return failures;
+}
+
+/* Failed init must be visible: each core staged child is left as a
+ * disabled marker with a named child_reported stall. */
+static int spt_case_staged_failed_init(struct main_state *staged_ms)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+    int idx = -1;
 
     /* Failed init must be visible, not absent. With progress_store closed,
      * every staged child init fails; the production register path should
@@ -419,9 +440,8 @@ int test_supervisor_production_tree(void)
     progress_store_close();
     supervisor_reset_for_testing();
 
-    struct main_state staged_ms;
-    main_state_init(&staged_ms);
-    staged_sync_supervisor_register(&staged_ms);
+    main_state_init(staged_ms);
+    staged_sync_supervisor_register(staged_ms);
 
     SPT_CHECK("staged failed-init children are visible",
               supervisor_child_count_total() ==
@@ -447,190 +467,481 @@ int test_supervisor_production_tree(void)
                              SUPERVISOR_STALL_CHILD_REPORTED &&
                          snap.stall_fires == 1);
     }
+    return failures;
+}
 
-    /* ── Stall escalation (lane 1.4): M consecutive quiet windows name a
-     * typed "stage_stalled_<name>" blocker; a real advance clears it. Pure
-     * decision function — no clock, no live contract — same shape as
-     * reducer_drain.c's reducer_drain_spin_observe(). */
-    {
-        blocker_reset_for_testing();
-        int64_t window_us = staged_sync_supervisor_test_quiet_window_us();
-        bool escalated = false;
+/* Persisting stage escalation: the body_persist scenarios (quiet windows,
+ * the named blocker and its reason, and a real advance clearing it). */
+static int spt_case_stall_body_persist(int64_t window_us)
+{
+    int failures = 0;
+    bool escalated = false;
 
-        /* 1 window < default M=2 -> no blocker yet. */
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.body_persist", "staged.body_fetch",
-            /*cursor=*/100, /*upstream_cursor=*/105, /*have_upstream=*/true,
-            /*quiet_us=*/window_us, &escalated);
-        SPT_CHECK("1 quiet window (< default M=2) does not escalate",
-                  !escalated &&
-                  !blocker_exists("stage_stalled_body_persist"));
+    /* 1 window < default M=2 -> no blocker yet. */
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.body_persist", "staged.body_fetch",
+        /*cursor=*/100, /*upstream_cursor=*/105, /*have_upstream=*/true,
+        /*quiet_us=*/window_us, &escalated);
+    SPT_CHECK("1 quiet window (< default M=2) does not escalate",
+              !escalated &&
+              !blocker_exists("stage_stalled_body_persist"));
 
-        /* 2 windows >= default M=2 -> escalate. */
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.body_persist", "staged.body_fetch",
-            100, 105, true, 2 * window_us, &escalated);
-        SPT_CHECK("2 quiet windows (>= default M=2) escalate",
-                  escalated && blocker_exists("stage_stalled_body_persist"));
-        SPT_CHECK("escalated blocker is TRANSIENT",
-                  blocker_class_for("stage_stalled_body_persist") ==
-                      BLOCKER_TRANSIENT);
+    /* 2 windows >= default M=2 -> escalate. */
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.body_persist", "staged.body_fetch",
+        100, 105, true, 2 * window_us, &escalated);
+    SPT_CHECK("2 quiet windows (>= default M=2) escalate",
+              escalated && blocker_exists("stage_stalled_body_persist"));
+    SPT_CHECK("escalated blocker is TRANSIENT",
+              blocker_class_for("stage_stalled_body_persist") ==
+                  BLOCKER_TRANSIENT);
 
-        struct blocker_snapshot bsnap[BLOCKER_CAP];
-        int bn = blocker_snapshot_all(bsnap, BLOCKER_CAP);
-        bool reason_ok = false;
-        for (int i = 0; i < bn; i++) {
-            if (strcmp(bsnap[i].id, "stage_stalled_body_persist") == 0) {
-                reason_ok = strstr(bsnap[i].reason, "body_persist") != NULL &&
-                            strstr(bsnap[i].reason, "body_fetch") != NULL &&
-                            strstr(bsnap[i].reason, "cursor=100") != NULL;
-                break;
-            }
+    struct blocker_snapshot bsnap[BLOCKER_CAP];
+    int bn = blocker_snapshot_all(bsnap, BLOCKER_CAP);
+    bool reason_ok = false;
+    for (int i = 0; i < bn; i++) {
+        if (strcmp(bsnap[i].id, "stage_stalled_body_persist") == 0) {
+            reason_ok = strstr(bsnap[i].reason, "body_persist") != NULL &&
+                        strstr(bsnap[i].reason, "body_fetch") != NULL &&
+                        strstr(bsnap[i].reason, "cursor=100") != NULL;
+            break;
         }
-        SPT_CHECK("blocker reason names stage/upstream/cursor", reason_ok);
-
-        /* A real advance (quiet resets to 0) clears the blocker. */
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.body_persist", "staged.body_fetch",
-            106, 106, true, 0, &escalated);
-        SPT_CHECK("real advance clears the escalated blocker",
-                  !escalated &&
-                  !blocker_exists("stage_stalled_body_persist"));
-
-        /* header_admit has no upstream reducer stage (pipeline head) — must
-         * not crash and must still escalate/clear correctly. */
-        bool ha_escalated = false;
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.header_admit", "", /*cursor=*/50, /*upstream_cursor=*/0,
-            /*have_upstream=*/false, 2 * window_us, &ha_escalated);
-        SPT_CHECK("no-upstream stage (header_admit) escalates",
-                  ha_escalated &&
-                  blocker_exists("stage_stalled_header_admit"));
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.header_admit", "", 51, 0, false, 0, &ha_escalated);
-        SPT_CHECK("no-upstream stage clears on advance",
-                  !ha_escalated &&
-                  !blocker_exists("stage_stalled_header_admit"));
-
-        /* Env override: ZCL_STAGE_STALL_ESCALATE_WINDOWS=1 escalates after
-         * just 1 quiet window instead of the default 2. */
-        setenv("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "1", 1);
-        bool ov_escalated = false;
-        staged_sync_supervisor_test_apply_stall_escalation(
-            "staged.utxo_apply", "staged.proof_validate",
-            200, 205, true, window_us, &ov_escalated);
-        SPT_CHECK("ZCL_STAGE_STALL_ESCALATE_WINDOWS=1 escalates after 1 window",
-                  ov_escalated && blocker_exists("stage_stalled_utxo_apply"));
-        unsetenv("ZCL_STAGE_STALL_ESCALATE_WINDOWS");
-
-        blocker_reset_for_testing();
     }
+    SPT_CHECK("blocker reason names stage/upstream/cursor", reason_ok);
 
-    /* ── reducer_drive_active() skip branch publishes the drive's age_us as
-     * progress_marker instead of a blind (frozen-cursor) heartbeat, and
-     * skips the drain call entirely — so dumpstate supervisor shows WHY a
-     * stage isn't ticking instead of looking wedged at its pre-drive
-     * cursor. Drives staged_stage_tick end-to-end via a synthetic stage
-     * (spt_stub_drain/spt_stub_cursor), reusing the already
-     * main_state_init()'d `staged_ms`. */
-    {
-        atomic_store(&g_spt_drain_calls, 0);
-        atomic_store(&g_spt_drain_saw_deferred_sync, false);
-        bool esc = false;
+    /* A real advance (quiet resets to 0) clears the blocker. */
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.body_persist", "staged.body_fetch",
+        106, 106, true, 0, &escalated);
+    SPT_CHECK("real advance clears the escalated blocker",
+              !escalated &&
+              !blocker_exists("stage_stalled_body_persist"));
+    return failures;
+}
 
-        int64_t marker = staged_sync_supervisor_test_run_stage_tick(
-            "staged.spt_test_stage", "staged.spt_test_upstream",
-            spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
-            &staged_ms, &esc, NULL);
-        SPT_CHECK("normal tick publishes the stage's own cursor",
-                  marker == (int64_t)SPT_STUB_CURSOR);
-        SPT_CHECK("normal tick drains the stage",
-                  atomic_load(&g_spt_drain_calls) == 1);
+/* Edge stages: header_admit (no upstream reducer stage) and the
+ * ZCL_STAGE_STALL_ESCALATE_WINDOWS env override. */
+static int spt_case_stall_edges(int64_t window_us)
+{
+    int failures = 0;
 
-        reducer_drive_enter_labeled("spt-test-drive");
-        int64_t age_before = reducer_drive_age_us();
-        marker = staged_sync_supervisor_test_run_stage_tick(
-            "staged.spt_test_stage", "staged.spt_test_upstream",
-            spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
-            &staged_ms, &esc, NULL);
-        int64_t age_after = reducer_drive_age_us();
-        SPT_CHECK("drive-active tick publishes the drive's age, not the cursor",
-                  marker != (int64_t)SPT_STUB_CURSOR &&
-                  marker >= age_before && marker <= age_after);
-        SPT_CHECK("drive-active tick skips the drain call",
-                  atomic_load(&g_spt_drain_calls) == 1);
-        reducer_drive_exit();
-    }
+    /* header_admit has no upstream reducer stage (pipeline head) — must
+     * not crash and must still escalate/clear correctly. */
+    bool ha_escalated = false;
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.header_admit", "", /*cursor=*/50, /*upstream_cursor=*/0,
+        /*have_upstream=*/false, 2 * window_us, &ha_escalated);
+    SPT_CHECK("no-upstream stage (header_admit) escalates",
+              ha_escalated &&
+              blocker_exists("stage_stalled_header_admit"));
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.header_admit", "", 51, 0, false, 0, &ha_escalated);
+    SPT_CHECK("no-upstream stage clears on advance",
+              !ha_escalated &&
+              !blocker_exists("stage_stalled_header_admit"));
 
-    /* ── catchup_cadence tick-period integration (Lane B2, wf/catchup-tick):
-     * staged_stage_tick recomputes the contract's effective period_us every
-     * tick — refold_cadence_tick_period_us() first, catchup_cadence_tick_
-     * period_us() second, 0 when neither is active. Prove the full
-     * activate -> deactivate cycle through the REAL staged_stage_tick path
-     * (not just the standalone unit in test_catchup_cadence.c), pinning the
-     * byte-identical-at-tip reset: the moment the gap closes, period_us MUST
-     * return to 0 so the shared 2s period_secs governs again. */
-    {
-        atomic_store(&g_spt_drain_calls, 0);
-        bool esc = false;
-        int64_t period_us = -1;
+    /* Env override: ZCL_STAGE_STALL_ESCALATE_WINDOWS=1 escalates after
+     * just 1 quiet window instead of the default 2. */
+    setenv("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "1", 1);
+    bool ov_escalated = false;
+    staged_sync_supervisor_test_apply_stall_escalation(
+        "staged.utxo_apply", "staged.proof_validate",
+        200, 205, true, window_us, &ov_escalated);
+    SPT_CHECK("ZCL_STAGE_STALL_ESCALATE_WINDOWS=1 escalates after 1 window",
+              ov_escalated && blocker_exists("stage_stalled_utxo_apply"));
+    unsetenv("ZCL_STAGE_STALL_ESCALATE_WINDOWS");
+    return failures;
+}
 
-        /* Baseline: no peers on sync_monitor's connman -> catchup_cadence
-         * inactive -> effective period_us is 0 after the tick. */
-        sync_monitor_set_context(NULL, NULL, NULL);
-        catchup_cadence_test_reset();
-        (void)staged_sync_supervisor_test_run_stage_tick(
-            "staged.spt_test_stage", "staged.spt_test_upstream",
-            spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
-            &staged_ms, &esc, &period_us);
-        SPT_CHECK("catchup inactive: effective period_us is 0",
-                  period_us == 0);
-        SPT_CHECK("catchup inactive: drain keeps immediate durability",
-                  !atomic_load(&g_spt_drain_saw_deferred_sync) &&
-                  !disk_block_io_deferred_sync_enabled());
+/* ── Stall escalation (lane 1.4): M consecutive quiet windows name a
+ * typed "stage_stalled_<name>" blocker; a real advance clears it. Pure
+ * decision function — no clock, no live contract — same shape as
+ * reducer_drain.c's reducer_drain_spin_observe(). */
+static int spt_case_stall_escalation(void)
+{
+    blocker_reset_for_testing();
+    int64_t window_us = staged_sync_supervisor_test_quiet_window_us();
+    int failures = spt_case_stall_body_persist(window_us);
+    failures += spt_case_stall_edges(window_us);
+    blocker_reset_for_testing();
+    return failures;
+}
 
-        /* Activate catchup_cadence: one connected peer far ahead of the
-         * (test-overridden) log_head -> gap >= default threshold (500). */
-        struct connman cc_cm;
-        memset(&cc_cm, 0, sizeof(cc_cm));
-        net_manager_init(&cc_cm.manager);
-        struct p2p_node *peer = spt_add_healthy_outbound(&cc_cm, 20);
-        if (peer) peer->starting_height = 100000;
-        sync_monitor_set_context(&cc_cm, NULL, NULL);
-        catchup_cadence_test_set_log_head_override(0); /* gap = 100000 */
+/* ── reducer_drive_active() skip branch publishes the drive's age_us as
+ * progress_marker instead of a blind (frozen-cursor) heartbeat, and
+ * skips the drain call entirely — so dumpstate supervisor shows WHY a
+ * stage isn't ticking instead of looking wedged at its pre-drive
+ * cursor. Drives staged_stage_tick end-to-end via a synthetic stage
+ * (spt_stub_drain/spt_stub_cursor), reusing the already
+ * main_state_init()'d `staged_ms`. */
+static int spt_case_drive_active(struct main_state *staged_ms)
+{
+    int failures = 0;
+    atomic_store(&g_spt_drain_calls, 0);
+    atomic_store(&g_spt_drain_saw_deferred_sync, false);
+    bool esc = false;
 
-        period_us = -1;
-        atomic_store(&g_spt_drain_saw_deferred_sync, false);
-        (void)staged_sync_supervisor_test_run_stage_tick(
-            "staged.spt_test_stage", "staged.spt_test_upstream",
-            spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
-            &staged_ms, &esc, &period_us);
-        SPT_CHECK("catchup active: effective period_us is 1s (default)",
-                  peer != NULL && period_us == (int64_t)1000 * 1000);
-        SPT_CHECK("catchup active: drain uses paired deferred durability",
-                  atomic_load(&g_spt_drain_saw_deferred_sync) &&
-                  !disk_block_io_deferred_sync_enabled());
+    int64_t marker = staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, NULL);
+    SPT_CHECK("normal tick publishes the stage's own cursor",
+              marker == (int64_t)SPT_STUB_CURSOR);
+    SPT_CHECK("normal tick drains the stage",
+              atomic_load(&g_spt_drain_calls) == 1);
 
-        /* Deactivate: the backlog drains (gap closes) -> RESETS to 0. This
-         * is the load-bearing byte-identical-at-tip property: the shortened
-         * tick period must not leak into a caught-up live node. */
-        catchup_cadence_test_set_log_head_override(100000); /* gap = 0 */
-        period_us = -1;
-        atomic_store(&g_spt_drain_saw_deferred_sync, false);
-        (void)staged_sync_supervisor_test_run_stage_tick(
-            "staged.spt_test_stage", "staged.spt_test_upstream",
-            spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
-            &staged_ms, &esc, &period_us);
-        SPT_CHECK("catchup deactivated (gap closed): period_us resets to 0",
-                  period_us == 0);
-        SPT_CHECK("catchup deactivated: immediate durability restored",
-                  !atomic_load(&g_spt_drain_saw_deferred_sync) &&
-                  !disk_block_io_deferred_sync_enabled());
+    reducer_drive_enter_labeled("spt-test-drive");
+    int64_t age_before = reducer_drive_age_us();
+    marker = staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, NULL);
+    int64_t age_after = reducer_drive_age_us();
+    SPT_CHECK("drive-active tick publishes the drive's age, not the cursor",
+              marker != (int64_t)SPT_STUB_CURSOR &&
+              marker >= age_before && marker <= age_after);
+    SPT_CHECK("drive-active tick skips the drain call",
+              atomic_load(&g_spt_drain_calls) == 1);
+    reducer_drive_exit();
+    return failures;
+}
 
-        catchup_cadence_test_reset();
-        sync_monitor_set_context(NULL, NULL, NULL);
-        connman_free(&cc_cm);
-    }
+/* ── catchup_cadence tick-period integration (Lane B2, wf/catchup-tick):
+ * staged_stage_tick recomputes the contract's effective period_us every
+ * tick — refold_cadence_tick_period_us() first, catchup_cadence_tick_
+ * period_us() second, 0 when neither is active. Prove the full
+ * activate -> deactivate cycle through the REAL staged_stage_tick path
+ * (not just the standalone unit in test_catchup_cadence.c), pinning the
+ * byte-identical-at-tip reset: the moment the gap closes, period_us MUST
+ * return to 0 so the shared 2s period_secs governs again. */
+static int spt_case_catchup_cadence(struct main_state *staged_ms)
+{
+    int failures = 0;
+    atomic_store(&g_spt_drain_calls, 0);
+    bool esc = false;
+    int64_t period_us = -1;
+
+    /* Baseline: no peers on sync_monitor's connman -> catchup_cadence
+     * inactive -> effective period_us is 0 after the tick. */
+    sync_monitor_set_context(NULL, NULL, NULL);
+    catchup_cadence_test_reset();
+    (void)staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("catchup inactive: effective period_us is 0",
+              period_us == 0);
+    SPT_CHECK("catchup inactive: drain keeps immediate durability",
+              !atomic_load(&g_spt_drain_saw_deferred_sync) &&
+              !disk_block_io_deferred_sync_enabled());
+
+    /* Activate catchup_cadence: one connected peer far ahead of the
+     * (test-overridden) log_head -> gap >= default threshold (500). */
+    struct connman cc_cm;
+    memset(&cc_cm, 0, sizeof(cc_cm));
+    net_manager_init(&cc_cm.manager);
+    struct p2p_node *peer = spt_add_healthy_outbound(&cc_cm, 20);
+    if (peer) peer->starting_height = 100000;
+    sync_monitor_set_context(&cc_cm, NULL, NULL);
+    catchup_cadence_test_set_log_head_override(0); /* gap = 100000 */
+
+    period_us = -1;
+    atomic_store(&g_spt_drain_saw_deferred_sync, false);
+    (void)staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("catchup active: effective period_us is 1s (default)",
+              peer != NULL && period_us == (int64_t)1000 * 1000);
+    SPT_CHECK("catchup active: drain uses paired deferred durability",
+              atomic_load(&g_spt_drain_saw_deferred_sync) &&
+              !disk_block_io_deferred_sync_enabled());
+
+    /* Deactivate: the backlog drains (gap closes) -> RESETS to 0. This
+     * is the load-bearing byte-identical-at-tip property: the shortened
+     * tick period must not leak into a caught-up live node. */
+    catchup_cadence_test_set_log_head_override(100000); /* gap = 0 */
+    period_us = -1;
+    atomic_store(&g_spt_drain_saw_deferred_sync, false);
+    (void)staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("catchup deactivated (gap closed): period_us resets to 0",
+              period_us == 0);
+    SPT_CHECK("catchup deactivated: immediate durability restored",
+              !atomic_load(&g_spt_drain_saw_deferred_sync) &&
+              !disk_block_io_deferred_sync_enabled());
+
+    catchup_cadence_test_reset();
+    sync_monitor_set_context(NULL, NULL, NULL);
+    connman_free(&cc_cm);
+    return failures;
+}
+
+/* Heartbeat-driven child checks: registration lands on the tree and the
+ * heartbeat records a tick and a progress marker. */
+static int spt_case_thread_liveness_tree(struct thread_liveness_child *tlc,
+                                         supervisor_child_id tlid)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+    int idx = -1;
+
+    SPT_CHECK("thread_liveness_register returns a valid child id",
+              tlid >= 0);
+
+    memset(&snap, 0, sizeof(snap));
+    count = 0;
+    idx = find_child_snapshot("zcl_test_silent", &snap, &count);
+    SPT_CHECK("supervised thread appears in the tree exactly once",
+              idx >= 0 && count == 1);
+    /* Heartbeat-driven (not supervisor-driven): the loop ticks itself. */
+    SPT_CHECK("supervised thread is heartbeat-driven (period_secs == 0)",
+              snap.period_secs == 0);
+    SPT_CHECK("supervised thread arms the deadline gate (5 s)",
+              snap.deadline_secs == 5);
+
+    /* A heartbeat records a tick + advances the progress marker. */
+    thread_liveness_beat(tlc, 42);
+    memset(&snap, 0, sizeof(snap));
+    count = 0;
+    idx = find_child_snapshot("zcl_test_silent", &snap, &count);
+    SPT_CHECK("heartbeat records a tick and a progress marker",
+              idx >= 0 && snap.ticks_run > 0 && snap.progress_marker == 42);
+    return failures;
+}
+
+/* Silent-stall path: a stopped stub trips a named TRANSIENT blocker. */
+static int spt_case_thread_liveness_stall(struct thread_liveness_child *tlc,
+                                          supervisor_child_id tlid)
+{
+    int failures = 0;
+
+    /* Inject a silent stall (the stub stops ticking): the supervisor
+     * deadline gate would fire this on its clock; inject the edge here so
+     * the test needs no real-time wait (same pattern as the
+     * net.outbound_floor injection above). on_stall must name the typed
+     * TRANSIENT blocker. */
+    SPT_CHECK("no thread_stalled blocker before the stall",
+              !blocker_exists("thread_stalled_zcl_test_silent"));
+    supervisor_report_stall(tlid, SUPERVISOR_STALL_TIME_DEADLINE);
+    SPT_CHECK("silent thread trips a named blocker",
+              blocker_exists("thread_stalled_zcl_test_silent"));
+    SPT_CHECK("thread-stall blocker is TRANSIENT",
+              blocker_class_for("thread_stalled_zcl_test_silent") ==
+                  BLOCKER_TRANSIENT);
+
+    /* A resumed heartbeat clears the blocker and the stall reason. */
+    thread_liveness_beat(tlc, 43);
+    SPT_CHECK("resumed heartbeat clears the thread-stall blocker",
+              !blocker_exists("thread_stalled_zcl_test_silent"));
+    return failures;
+}
+
+/* Recovery and teardown: the resumed heartbeat clears the stall reason,
+ * and retire removes the child from the tree. */
+static int spt_case_thread_liveness_recover(struct thread_liveness_child *tlc)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+
+    memset(&snap, 0, sizeof(snap));
+    count = 0;
+    int idx = find_child_snapshot("zcl_test_silent", &snap, &count);
+    SPT_CHECK("resumed heartbeat clears the stall reason",
+              idx >= 0 && snap.stall_reason == SUPERVISOR_STALL_NONE);
+
+    /* Retire removes the child from the tree. */
+    thread_liveness_retire(tlc);
+    idx = find_child_snapshot("zcl_test_silent", NULL, &count);
+    SPT_CHECK("retire removes the supervised thread from the tree",
+              idx < 0 && count == 0);
+    return failures;
+}
+
+/* ── Universal thread supervision (Gate #23 / util/thread_liveness.h) ──
+ * The platform/modules/util adapter is the shared registration path every
+ * cross-cutting infrastructure thread (health sweep, metrics, event
+ * dispatch, RPC-timeout, DB worker/checkpoint) now uses. Drive it
+ * directly: register a child, prove it lands on the tree with a
+ * heartbeat-driven contract, inject a silent stall (a stub that stops
+ * ticking) and prove it names a typed TRANSIENT blocker, then prove a
+ * resumed heartbeat clears that blocker. This is the honest unit for the
+ * whole cohort — each production thread differs only by its deadline and
+ * its progress marker, both passed through this same seam. */
+static int spt_case_thread_liveness(void)
+{
+    int failures = 0;
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+
+    static struct thread_liveness_child tlc = {
+        .id = SUPERVISOR_INVALID_ID
+    };
+    tlc.id = SUPERVISOR_INVALID_ID;  /* re-arm across sequential runner */
+
+    SPT_CHECK("thread_liveness tree empty before register",
+              supervisor_child_count_total() == 0);
+
+    supervisor_child_id tlid = thread_liveness_register(
+        &tlc, "zcl_test_silent", /*deadline_secs=*/5,
+        /*progress_quiet_us=*/0);
+    failures += spt_case_thread_liveness_tree(&tlc, tlid);
+    failures += spt_case_thread_liveness_stall(&tlc, tlid);
+    failures += spt_case_thread_liveness_recover(&tlc);
+
+    blocker_reset_for_testing();
+    supervisor_reset_for_testing();
+    return failures;
+}
+
+/* Restart spawn: the restartable worker is spawned, registered as a
+ * PERMANENT child on the tree, and reaches its first incarnation. */
+static int spt_case_restart_spawn(struct thread_liveness_child *rc,
+                                  struct spt_restart_worker *w)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+    int idx = -1;
+
+    supervisor_set_tick_ms_for_testing(5);
+    SPT_CHECK("supervisor_start for the restart test", supervisor_start());
+
+    /* Module owns the initial spawn (per the _restartable contract). */
+    int srr = thread_registry_spawn("zcl_spt_restart",
+                                    spt_restart_worker_fn, w,
+                                    &rc->worker_tid);  // thread-supervision-ok:test-fixture-restartable
+    SPT_CHECK("initial restartable worker spawns", srr == 0);
+    supervisor_child_id rid = thread_liveness_register_restartable(
+        rc, "zcl_spt_restart", /*deadline_secs=*/0, /*progress_quiet_us=*/0,
+        spt_restart_worker_fn, w, /*intensity_max=*/3, /*period_secs=*/3600);
+    SPT_CHECK("restartable register returns a valid child id", rid >= 0);
+    SPT_CHECK("worker reaches incarnation 1",
+              spt_poll_int_ge(&w->incarnations, 1, 1000));
+
+    memset(&snap, 0, sizeof(snap));
+    count = 0;
+    idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
+    SPT_CHECK("restartable child on the tree exactly once, PERMANENT",
+              idx >= 0 && count == 1 &&
+              snap.restart_policy == SUPERVISOR_RESTART_PERMANENT);
+    return failures;
+}
+
+/* Restart recovery: a killed incarnation is respawned on Linux (and left
+ * EXITED on Darwin), and a persistent death trips the storm cap. */
+static int spt_case_restart_recovery(struct spt_restart_worker *w)
+{
+    int failures = 0;
+    struct supervisor_snapshot snap;
+    int count = 0;
+    int idx = -1;
+
+    /* Kill incarnation 1. On Linux the supervisor respawns a NEW thread;
+     * on Darwin pthread_tryjoin_np is unavailable, so the restart contract
+     * intentionally fails closed (no respawn) and leaves the child EXITED.
+     * Both behaviours are honest and bounded. */
+    atomic_store(&w->die_through, 1);
+#if defined(__APPLE__)
+    SPT_CHECK("Darwin: dead worker stays dead, no respawn",
+              spt_poll_int_ge(&w->incarnations, 1, 2000));
+    SPT_CHECK("Darwin: child is left EXITED for the operator",
+              spt_poll_worker_state("zcl_spt_restart",
+                                    SUPERVISOR_WORKER_EXITED, 2000));
+    idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
+    SPT_CHECK("Darwin: restart_count stays zero",
+              idx >= 0 && snap.restart_count == 0);
+    SPT_CHECK("Darwin: no restart-storm blocker because no respawn attempted",
+              !blocker_exists("thread_restart_storm_zcl_spt_restart"));
+#else
+    SPT_CHECK("dead worker is respawned — a new worker thread (new tid) runs",
+              spt_poll_int_ge(&w->incarnations, 2, 2000));
+    SPT_CHECK("restart_count advanced after the respawn",
+              spt_poll_restart_count_ge("zcl_spt_restart", 1, 2000));
+    SPT_CHECK("no restart-storm blocker after a single restart",
+              !blocker_exists("thread_restart_storm_zcl_spt_restart"));
+
+    /* Now make EVERY incarnation die immediately → force the storm cap. */
+    atomic_store(&w->die_through, 100000);
+    SPT_CHECK("persistent death trips the PERMANENT restart-storm blocker",
+              spt_poll_blocker("thread_restart_storm_zcl_spt_restart", 3000));
+    SPT_CHECK("restart-storm blocker is PERMANENT",
+              blocker_class_for("thread_restart_storm_zcl_spt_restart") ==
+                  BLOCKER_PERMANENT);
+
+    /* Respawns must stop at the cap: capture the count, wait, prove it
+     * doesn't keep climbing (no infinite respawn). */
+    idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
+    uint32_t restarts_at_storm = snap.restart_count;
+    struct timespec settle = { 0, 100 * 1000000L };  /* 100 ms */
+    nanosleep(&settle, NULL);
+    idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
+    SPT_CHECK("respawns stop after the storm cap (no infinite respawn)",
+              idx >= 0 && snap.restart_count == restarts_at_storm &&
+              snap.restart_count == 3);
+    SPT_CHECK("storm sets the REPEATED_RESTART stall reason",
+              idx >= 0 &&
+              snap.stall_reason == SUPERVISOR_STALL_REPEATED_RESTART);
+#endif
+    return failures;
+}
+
+/* ── Bounded auto-restart, end-to-end (real thread + supervisor) ──────
+ * The die-vs-stall + respawn + storm-cap path exercised with a real worker
+ * thread, the real supervisor thread, and the real thread_liveness respawn
+ * (pthread_tryjoin_np reap). Distinct from the pure engine unit tests in
+ * test_supervisor.c (which stub on_respawn) — here we prove a genuinely
+ * dead thread is replaced by a NEW thread, and that a persistently-dying
+ * worker trips a PERMANENT restart-storm blocker instead of infinite
+ * respawn. */
+static int spt_case_restart_policy(void)
+{
+    int failures = 0;
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+    thread_registry_reset_for_test();
+
+    static struct thread_liveness_child rc = { .id = SUPERVISOR_INVALID_ID };
+    rc.id = SUPERVISOR_INVALID_ID;  /* re-arm across the sequential runner */
+    static struct spt_restart_worker w;
+    memset(&w, 0, sizeof w);
+    w.child = &rc;
+
+    failures += spt_case_restart_spawn(&rc, &w);
+    failures += spt_case_restart_recovery(&w);
+
+    /* Graceful teardown: no more restarts, stop all incarnations, join. */
+    thread_liveness_stop_begin(&rc);
+    atomic_store(&w.stop_all, true);
+    thread_liveness_stop_finish(&rc);
+    supervisor_stop();
+    supervisor_set_tick_ms_for_testing(1000);
+
+    blocker_reset_for_testing();
+    supervisor_reset_for_testing();
+    thread_registry_reset_for_test();
+    return failures;
+}
+
+int test_supervisor_production_tree(void)
+{
+    printf("\n=== supervisor_production_tree tests ===\n");
+    int failures = 0;
+
+    supervisor_reset_for_testing();
+
+    failures += spt_case_watchdog_register();
+    failures += spt_case_net_outbound_floor();
+
+    struct main_state staged_ms;
+    failures += spt_case_staged_failed_init(&staged_ms);
+    failures += spt_case_stall_escalation();
+    failures += spt_case_drive_active(&staged_ms);
+    failures += spt_case_catchup_cadence(&staged_ms);
 
     /* ── small-chain catch-up durability (journey run1 regression) ────── */
     failures += spt_case_small_chain_durability(&staged_ms);
@@ -640,186 +951,8 @@ int test_supervisor_production_tree(void)
     supervisor_reset_for_testing();
     staged_sync_supervisor_test_reset_runtime();
 
-    /* ── Universal thread supervision (Gate #23 / util/thread_liveness.h) ──
-     * The platform/modules/util adapter is the shared registration path every
-     * cross-cutting infrastructure thread (health sweep, metrics, event
-     * dispatch, RPC-timeout, DB worker/checkpoint) now uses. Drive it
-     * directly: register a child, prove it lands on the tree with a
-     * heartbeat-driven contract, inject a silent stall (a stub that stops
-     * ticking) and prove it names a typed TRANSIENT blocker, then prove a
-     * resumed heartbeat clears that blocker. This is the honest unit for the
-     * whole cohort — each production thread differs only by its deadline and
-     * its progress marker, both passed through this same seam. */
-    {
-        supervisor_reset_for_testing();
-        blocker_reset_for_testing();
-
-        static struct thread_liveness_child tlc = {
-            .id = SUPERVISOR_INVALID_ID
-        };
-        tlc.id = SUPERVISOR_INVALID_ID;  /* re-arm across sequential runner */
-
-        SPT_CHECK("thread_liveness tree empty before register",
-                  supervisor_child_count_total() == 0);
-
-        supervisor_child_id tlid = thread_liveness_register(
-            &tlc, "zcl_test_silent", /*deadline_secs=*/5,
-            /*progress_quiet_us=*/0);
-        SPT_CHECK("thread_liveness_register returns a valid child id",
-                  tlid >= 0);
-
-        memset(&snap, 0, sizeof(snap));
-        count = 0;
-        idx = find_child_snapshot("zcl_test_silent", &snap, &count);
-        SPT_CHECK("supervised thread appears in the tree exactly once",
-                  idx >= 0 && count == 1);
-        /* Heartbeat-driven (not supervisor-driven): the loop ticks itself. */
-        SPT_CHECK("supervised thread is heartbeat-driven (period_secs == 0)",
-                  snap.period_secs == 0);
-        SPT_CHECK("supervised thread arms the deadline gate (5 s)",
-                  snap.deadline_secs == 5);
-
-        /* A heartbeat records a tick + advances the progress marker. */
-        thread_liveness_beat(&tlc, 42);
-        memset(&snap, 0, sizeof(snap));
-        count = 0;
-        idx = find_child_snapshot("zcl_test_silent", &snap, &count);
-        SPT_CHECK("heartbeat records a tick and a progress marker",
-                  idx >= 0 && snap.ticks_run > 0 && snap.progress_marker == 42);
-
-        /* Inject a silent stall (the stub stops ticking): the supervisor
-         * deadline gate would fire this on its clock; inject the edge here so
-         * the test needs no real-time wait (same pattern as the
-         * net.outbound_floor injection above). on_stall must name the typed
-         * TRANSIENT blocker. */
-        SPT_CHECK("no thread_stalled blocker before the stall",
-                  !blocker_exists("thread_stalled_zcl_test_silent"));
-        supervisor_report_stall(tlid, SUPERVISOR_STALL_TIME_DEADLINE);
-        SPT_CHECK("silent thread trips a named blocker",
-                  blocker_exists("thread_stalled_zcl_test_silent"));
-        SPT_CHECK("thread-stall blocker is TRANSIENT",
-                  blocker_class_for("thread_stalled_zcl_test_silent") ==
-                      BLOCKER_TRANSIENT);
-
-        /* A resumed heartbeat clears the blocker and the stall reason. */
-        thread_liveness_beat(&tlc, 43);
-        SPT_CHECK("resumed heartbeat clears the thread-stall blocker",
-                  !blocker_exists("thread_stalled_zcl_test_silent"));
-        memset(&snap, 0, sizeof(snap));
-        count = 0;
-        idx = find_child_snapshot("zcl_test_silent", &snap, &count);
-        SPT_CHECK("resumed heartbeat clears the stall reason",
-                  idx >= 0 && snap.stall_reason == SUPERVISOR_STALL_NONE);
-
-        /* Retire removes the child from the tree. */
-        thread_liveness_retire(&tlc);
-        idx = find_child_snapshot("zcl_test_silent", NULL, &count);
-        SPT_CHECK("retire removes the supervised thread from the tree",
-                  idx < 0 && count == 0);
-
-        blocker_reset_for_testing();
-        supervisor_reset_for_testing();
-    }
-
-    /* ── Bounded auto-restart, end-to-end (real thread + supervisor) ──────
-     * The die-vs-stall + respawn + storm-cap path exercised with a real worker
-     * thread, the real supervisor thread, and the real thread_liveness respawn
-     * (pthread_tryjoin_np reap). Distinct from the pure engine unit tests in
-     * test_supervisor.c (which stub on_respawn) — here we prove a genuinely
-     * dead thread is replaced by a NEW thread, and that a persistently-dying
-     * worker trips a PERMANENT restart-storm blocker instead of infinite
-     * respawn. */
-    {
-        supervisor_reset_for_testing();
-        blocker_reset_for_testing();
-        thread_registry_reset_for_test();
-
-        static struct thread_liveness_child rc = { .id = SUPERVISOR_INVALID_ID };
-        rc.id = SUPERVISOR_INVALID_ID;  /* re-arm across the sequential runner */
-        static struct spt_restart_worker w;
-        memset(&w, 0, sizeof w);
-        w.child = &rc;
-
-        supervisor_set_tick_ms_for_testing(5);
-        SPT_CHECK("supervisor_start for the restart test", supervisor_start());
-
-        /* Module owns the initial spawn (per the _restartable contract). */
-        int srr = thread_registry_spawn("zcl_spt_restart",
-                                        spt_restart_worker_fn, &w,
-                                        &rc.worker_tid);  // thread-supervision-ok:test-fixture-restartable
-        SPT_CHECK("initial restartable worker spawns", srr == 0);
-        supervisor_child_id rid = thread_liveness_register_restartable(
-            &rc, "zcl_spt_restart", /*deadline_secs=*/0, /*progress_quiet_us=*/0,
-            spt_restart_worker_fn, &w, /*intensity_max=*/3, /*period_secs=*/3600);
-        SPT_CHECK("restartable register returns a valid child id", rid >= 0);
-        SPT_CHECK("worker reaches incarnation 1",
-                  spt_poll_int_ge(&w.incarnations, 1, 1000));
-
-        memset(&snap, 0, sizeof(snap));
-        count = 0;
-        idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
-        SPT_CHECK("restartable child on the tree exactly once, PERMANENT",
-                  idx >= 0 && count == 1 &&
-                  snap.restart_policy == SUPERVISOR_RESTART_PERMANENT);
-
-        /* Kill incarnation 1. On Linux the supervisor respawns a NEW thread;
-         * on Darwin pthread_tryjoin_np is unavailable, so the restart contract
-         * intentionally fails closed (no respawn) and leaves the child EXITED.
-         * Both behaviours are honest and bounded. */
-        atomic_store(&w.die_through, 1);
-#if defined(__APPLE__)
-        SPT_CHECK("Darwin: dead worker stays dead, no respawn",
-                  spt_poll_int_ge(&w.incarnations, 1, 2000));
-        SPT_CHECK("Darwin: child is left EXITED for the operator",
-                  spt_poll_worker_state("zcl_spt_restart",
-                                        SUPERVISOR_WORKER_EXITED, 2000));
-        idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
-        SPT_CHECK("Darwin: restart_count stays zero",
-                  idx >= 0 && snap.restart_count == 0);
-        SPT_CHECK("Darwin: no restart-storm blocker because no respawn attempted",
-                  !blocker_exists("thread_restart_storm_zcl_spt_restart"));
-#else
-        SPT_CHECK("dead worker is respawned — a new worker thread (new tid) runs",
-                  spt_poll_int_ge(&w.incarnations, 2, 2000));
-        SPT_CHECK("restart_count advanced after the respawn",
-                  spt_poll_restart_count_ge("zcl_spt_restart", 1, 2000));
-        SPT_CHECK("no restart-storm blocker after a single restart",
-                  !blocker_exists("thread_restart_storm_zcl_spt_restart"));
-
-        /* Now make EVERY incarnation die immediately → force the storm cap. */
-        atomic_store(&w.die_through, 100000);
-        SPT_CHECK("persistent death trips the PERMANENT restart-storm blocker",
-                  spt_poll_blocker("thread_restart_storm_zcl_spt_restart", 3000));
-        SPT_CHECK("restart-storm blocker is PERMANENT",
-                  blocker_class_for("thread_restart_storm_zcl_spt_restart") ==
-                      BLOCKER_PERMANENT);
-
-        /* Respawns must stop at the cap: capture the count, wait, prove it
-         * doesn't keep climbing (no infinite respawn). */
-        idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
-        uint32_t restarts_at_storm = snap.restart_count;
-        struct timespec settle = { 0, 100 * 1000000L };  /* 100 ms */
-        nanosleep(&settle, NULL);
-        idx = find_child_snapshot("zcl_spt_restart", &snap, &count);
-        SPT_CHECK("respawns stop after the storm cap (no infinite respawn)",
-                  idx >= 0 && snap.restart_count == restarts_at_storm &&
-                  snap.restart_count == 3);
-        SPT_CHECK("storm sets the REPEATED_RESTART stall reason",
-                  idx >= 0 &&
-                  snap.stall_reason == SUPERVISOR_STALL_REPEATED_RESTART);
-#endif
-
-        /* Graceful teardown: no more restarts, stop all incarnations, join. */
-        thread_liveness_stop_begin(&rc);
-        atomic_store(&w.stop_all, true);
-        thread_liveness_stop_finish(&rc);
-        supervisor_stop();
-        supervisor_set_tick_ms_for_testing(1000);
-
-        blocker_reset_for_testing();
-        supervisor_reset_for_testing();
-        thread_registry_reset_for_test();
-    }
+    failures += spt_case_thread_liveness();
+    failures += spt_case_restart_policy();
 
     printf("supervisor_production_tree: %d failures\n", failures);
     return failures;
