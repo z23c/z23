@@ -51,7 +51,7 @@ enum { SNAP_SCRIPT_INLINE_CAP = 1024 };
  * below report one of these; stream_coins_body logs the failures. */
 enum snap_row_status {
     SNAP_ROW_WRITTEN,    /* record serialised, written to the file and folded */
-    SNAP_ROW_SKIPPED,    /* row carries no canonical 32-byte txid: not in set */
+    SNAP_ROW_SKIPPED,    /* txid blob missing or shorter than 32 bytes: not in set */
     SNAP_ROW_OOM,        /* heap record buffer for an oversized script failed */
     SNAP_ROW_SERIALISE,  /* the shared per-record encoder rejected the row */
     SNAP_ROW_FWRITE      /* the record fwrite to the temp file failed */
@@ -81,9 +81,9 @@ static enum snap_row_status snapshot_emit_record(FILE *out,
     return SNAP_ROW_WRITTEN;
 }
 
-/* Stream ONE stepped coins row: re-read its columns, skip it when it has no
- * canonical 32-byte txid, size the inline/heap record buffer for its script,
- * then emit the record.  Once the row has a canonical txid (every status but
+/* Stream ONE stepped coins row: re-read its columns, skip it when its
+ * txid blob is missing or shorter than 32 bytes, size the inline/heap record
+ * buffer for its script, then emit the record.  Once the row has a usable txid blob (every status but
  * SNAP_ROW_SKIPPED) it reports the effective script length in *eff_slen_out
  * (the OOM log needs it; it is left untouched for a skipped row) and, on
  * SNAP_ROW_WRITTEN, its value in *value_out.  The heap record buffer (if any)
