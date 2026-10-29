@@ -141,8 +141,6 @@ contexts/commons/services/src/zcode_lane_service.c:zcode_lane_advance:53
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
-contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
-contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
 contexts/market/controllers/src/market_moderation_native_handler.c:market_moderation_view_frozen_kat:42
 contexts/market/controllers/src/market_moderation_native_handler.c:zcl_native_handle_market_moderation_profile_set:16
 contexts/market/controllers/src/market_moderation_native_handler.c:zcl_native_handle_market_moderation_relay_set:16

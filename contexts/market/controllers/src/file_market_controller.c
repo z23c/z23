@@ -289,28 +289,39 @@ static bool rpc_zmarket_buy(const struct json_value *params, bool help,
 
 /* ── durable typed purchase payment ─────────────────────────────── */
 
+struct market_purchase_code_entry {
+    int code;
+    const char *name;
+};
+
+static const struct market_purchase_code_entry market_purchase_codes[] = {
+    {-3, "MONEY_STATE_NOT_CURRENT"},
+    {-7, "IDEMPOTENCY_CONFLICT"},
+    {-10, "CUSTODY_ALLOCATION_EXCEEDED"},
+    {-43, "COMMIT_UNCERTAIN"},
+    {-45, "MONEY_SNAPSHOT_CHANGED"},
+    {-46, "OFFER_CONTRACT_CHANGED"},
+    {-47, "COMMIT_BUSY"},
+    {-48, "COMMIT_STATE_UNCERTAIN"},
+    {-60, "DESTINATION_INVALID"},
+    {-61, "DOWNLOAD_BINDING_CONFLICT"},
+    {-62, "DESTINATION_CONFLICT"},
+    {-67, "MANIFEST_VERIFICATION_FAILED"},
+    {-69, "DESTINATION_CONFLICT"},
+    {-75, "STAGING_VERIFICATION_FAILED"},
+    {-76, "DELIVERY_NOT_READY"},
+    {-78, "ONION_DELIVERY_UNAVAILABLE"},
+};
+
 static const char *market_purchase_code(const struct zcl_result *r)
 {
     if (!r) return "PURCHASE_REFUSED";
-    switch (r->code) {
-    case -3:  return "MONEY_STATE_NOT_CURRENT";
-    case -7:  return "IDEMPOTENCY_CONFLICT";
-    case -10: return "CUSTODY_ALLOCATION_EXCEEDED";
-    case -43: return "COMMIT_UNCERTAIN";
-    case -45: return "MONEY_SNAPSHOT_CHANGED";
-    case -46: return "OFFER_CONTRACT_CHANGED";
-    case -47: return "COMMIT_BUSY";
-    case -48: return "COMMIT_STATE_UNCERTAIN";
-    case -60: return "DESTINATION_INVALID";
-    case -61: return "DOWNLOAD_BINDING_CONFLICT";
-    case -62: return "DESTINATION_CONFLICT";
-    case -67: return "MANIFEST_VERIFICATION_FAILED";
-    case -69: return "DESTINATION_CONFLICT";
-    case -75: return "STAGING_VERIFICATION_FAILED";
-    case -76: return "DELIVERY_NOT_READY";
-    case -78: return "ONION_DELIVERY_UNAVAILABLE";
-    default:  return "PURCHASE_REFUSED";
+    for (size_t i = 0; i < sizeof(market_purchase_codes) /
+                           sizeof(market_purchase_codes[0]); i++) {
+        if (market_purchase_codes[i].code == r->code)
+            return market_purchase_codes[i].name;
     }
+    return "PURCHASE_REFUSED";
 }
 
 static bool market_purchase_refuse(struct json_value *result,
@@ -509,6 +520,60 @@ static struct zcl_result market_purchase_runtime(
     return ZCL_OK;
 }
 
+struct market_purchase_plan_args {
+    const char *scope;
+    const char *offer;
+    const char *source;
+    const char *key;
+    int64_t start;
+    int64_t count;
+};
+
+static int64_t market_purchase_plan_int(const struct json_value *in,
+                                        const char *name, int64_t fallback)
+{
+    const struct json_value *v = in ? json_get(in, name) : NULL;
+    return v && v->type == JSON_INT ? json_get_int(v) : fallback;
+}
+
+static void market_purchase_plan_args_read(const struct json_value *in,
+                                           struct market_purchase_plan_args *a)
+{
+    a->scope = in ? json_get_str(json_get(in, "wallet_scope")) : NULL;
+    a->offer = in ? json_get_str(json_get(in, "offer_id")) : NULL;
+    a->source = in ? json_get_str(json_get(in, "source_address")) : NULL;
+    a->key = in ? json_get_str(json_get(in, "idempotency_key")) : NULL;
+    a->start = market_purchase_plan_int(in, "chunk_start", -1);
+    a->count = market_purchase_plan_int(in, "chunks_paid", 0);
+}
+
+static bool market_purchase_plan_args_ok(
+    const struct json_value *in,
+    const struct market_purchase_plan_args *a,
+    struct market_purchase_request *request)
+{
+    return in && in->type == JSON_OBJ && a->scope && a->offer && a->source &&
+        a->key && strlen(a->scope) < sizeof(request->wallet_scope) &&
+        strlen(a->source) <= MARKET_PURCHASE_SOURCE_MAX &&
+        strlen(a->key) < sizeof(request->idempotency_key) &&
+        zcl_hex_decode(a->offer, request->offer_id, 32) && a->start >= 0 &&
+        a->start <= UINT32_MAX && a->count > 0 && a->count <= UINT32_MAX;
+}
+
+static void market_purchase_plan_args_fill(
+    const struct market_purchase_plan_args *a,
+    struct market_purchase_request *request)
+{
+    (void)snprintf(request->wallet_scope, sizeof(request->wallet_scope), "%s",
+                   a->scope);
+    (void)snprintf(request->source_address, sizeof(request->source_address),
+                   "%s", a->source);
+    (void)snprintf(request->idempotency_key, sizeof(request->idempotency_key),
+                   "%s", a->key);
+    request->chunk_start = (uint32_t)a->start;
+    request->chunks_paid = (uint32_t)a->count;
+}
+
 static bool rpc_zmarket_purchase_plan(const struct json_value *params,
                                       bool help,
                                       struct json_value *result)
@@ -518,35 +583,13 @@ static bool rpc_zmarket_purchase_plan(const struct json_value *params,
         return true;
     }
     const struct json_value *in = json_at(params, 0);
-    const char *scope = in ? json_get_str(json_get(in, "wallet_scope")) : NULL;
-    const char *offer = in ? json_get_str(json_get(in, "offer_id")) : NULL;
-    const char *source = in ? json_get_str(json_get(in, "source_address")) : NULL;
-    const char *key = in ? json_get_str(json_get(in, "idempotency_key")) : NULL;
-    const struct json_value *start_value = in
-        ? json_get(in, "chunk_start") : NULL;
-    const struct json_value *count_value = in
-        ? json_get(in, "chunks_paid") : NULL;
-    int64_t start = start_value && start_value->type == JSON_INT
-        ? json_get_int(start_value) : -1;
-    int64_t count = count_value && count_value->type == JSON_INT
-        ? json_get_int(count_value) : 0;
+    struct market_purchase_plan_args args;
+    market_purchase_plan_args_read(in, &args);
     struct market_purchase_request request = {0};
-    if (!in || in->type != JSON_OBJ || !scope || !offer || !source || !key ||
-        strlen(scope) >= sizeof(request.wallet_scope) ||
-        strlen(source) > MARKET_PURCHASE_SOURCE_MAX ||
-        strlen(key) >= sizeof(request.idempotency_key) ||
-        !zcl_hex_decode(offer, request.offer_id, 32) || start < 0 ||
-        start > UINT32_MAX || count <= 0 || count > UINT32_MAX)
+    if (!market_purchase_plan_args_ok(in, &args, &request))
         return market_purchase_refuse(result,
             ZCL_ERR(-1, "complete exact purchase-plan input is required"));
-    (void)snprintf(request.wallet_scope, sizeof(request.wallet_scope), "%s",
-                   scope);
-    (void)snprintf(request.source_address, sizeof(request.source_address),
-                   "%s", source);
-    (void)snprintf(request.idempotency_key, sizeof(request.idempotency_key),
-                   "%s", key);
-    request.chunk_start = (uint32_t)start;
-    request.chunks_paid = (uint32_t)count;
+    market_purchase_plan_args_fill(&args, &request);
     struct market_purchase_runtime runtime;
     struct zcl_result ready = market_purchase_runtime(&runtime, true);
     if (!ready.ok) return market_purchase_refuse(result, ready);
