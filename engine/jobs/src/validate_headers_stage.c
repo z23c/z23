@@ -415,7 +415,7 @@ static int64_t vh_lowest_repairable_failure(const struct vh_job *jobs, int n)
     for (int i = 0; i < n; i++)
         if (!jobs[i].ok && vh_failure_is_repairable(jobs[i].reason))
             return jobs[i].height;
-    return -1;
+    return -1;  // raw-return-ok:no repairable failure in the batch, not an error
 }
 
 enum vh_recheck_write { VH_RW_OK, VH_RW_BLOCKED, VH_RW_LOG_FAULT };
