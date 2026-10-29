@@ -162,10 +162,9 @@ static uint64_t run_jubjub_to_scalar(void *p) {
     return digest;
 }
 
-int test_sapling_crypto(void)
+static int sapling_crypto_fr_zero_one_identity(void)
 {
     int failures = 0;
-
     printf("Fr zero/one identity... ");
     {
         struct fr z, o;
@@ -183,7 +182,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fr_add_sub_neg(void)
+{
+    int failures = 0;
     printf("Fr add/sub/neg... ");
     {
         struct fr a, b, c, neg_a, sum;
@@ -202,7 +206,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fr_mul_sq_inv(void)
+{
+    int failures = 0;
     printf("Fr mul/sq/inv... ");
     {
         struct fr a, two, four, sq_two, inv_a, prod;
@@ -218,7 +227,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fr_from_bytes_to_bytes_roundtrip(void)
+{
+    int failures = 0;
     printf("Fr from_bytes/to_bytes roundtrip... ");
     {
         uint8_t bytes[32] = {0};
@@ -236,7 +250,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fs_zero_one_add_neg(void)
+{
+    int failures = 0;
     printf("Fs zero/one/add/neg... ");
     {
         struct fs z, o, sum, neg_o;
@@ -251,7 +270,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fs_from_bytes_to_bytes_roundtrip(void)
+{
+    int failures = 0;
     printf("Fs from_bytes/to_bytes roundtrip... ");
     {
         uint8_t bytes[32] = {0};
@@ -264,7 +288,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fs_mul(void)
+{
+    int failures = 0;
     printf("Fs mul... ");
     {
         struct fs a, b, c;
@@ -283,7 +312,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fs_to_uniform_64_byte_reduction(void)
+{
+    int failures = 0;
     printf("Fs to_uniform (64-byte reduction)... ");
     {
         uint8_t digest[64] = {0};
@@ -303,11 +337,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Jubjub point operation tests                                     */
-    /* ================================================================ */
-
+static int sapling_crypto_jubjub_identity(void)
+{
+    int failures = 0;
     printf("Jubjub identity... ");
     {
         struct jub_point id;
@@ -320,7 +355,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_compress_decompress_roundtrip(void)
+{
+    int failures = 0;
     printf("Jubjub compress/decompress roundtrip... ");
     {
         /* Generate a known point via ask_to_ak */
@@ -344,7 +384,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_add_associativity(void)
+{
+    int failures = 0;
     printf("Jubjub add associativity... ");
     {
         /* P = ak(1), Q = ak(2), R = ak(3) */
@@ -372,7 +417,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_double_add_to_self(void)
+{
+    int failures = 0;
     printf("Jubjub double = add to self... ");
     {
         uint8_t s[32] = {5};
@@ -389,7 +439,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_negate(void)
+{
+    int failures = 0;
     printf("Jubjub negate... ");
     {
         uint8_t s[32] = {7};
@@ -403,7 +458,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_scalar_mul_by_1(void)
+{
+    int failures = 0;
     printf("Jubjub scalar mul by 1... ");
     {
         uint8_t s[32] = {3};
@@ -420,10 +480,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* correctness: windowed CT jub_scalar_mul vs bit-by-bit oracle.
-     * Covers corner cases (zero scalar, small/large scalars, nibble
-     * transitions) plus random vectors across the scalar range. */
+static int sapling_crypto_jubjub_scalar_mul_matches_naive_double_a(void)
+{
+    int failures = 0;
     printf("Jubjub scalar mul matches naive double-and-add ... ");
     {
         uint8_t seed[32] = {17};
@@ -459,18 +521,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK (%d vectors)\n", N_SAMPLES);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* timing sanity: low-Hamming-weight vs high-Hamming-weight
-     * scalars should not differ materially in runtime. Pre-fix, the
-     * `if (nibble)` branch skipped adds for zero nibbles, so zero-heavy
-     * scalars ran ~25% faster. The new CT implementation always runs
-     * one add per nibble, so both scalars do identical work.
-     *
-     * The tolerance is deliberately generous because CI hosts are noisy
-     * and the twisted-Edwards field math still has minor value-dependent
-     * timing inside fr_add/fr_sub. The gate matches the BLS timing test:
-     * tight enough to catch the old branchy path, loose enough for a
-     * saturated fork-parallel run. */
+static int sapling_crypto_jubjub_scalar_mul_timing_vs_scalar_weigh(void)
+{
+    int failures = 0;
     printf("Jubjub scalar mul timing vs scalar weight ... ");
     {
         uint8_t seed[32] = {23};
@@ -507,7 +563,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_cofactor_multiplication(void)
+{
+    int failures = 0;
     printf("Jubjub cofactor multiplication... ");
     {
         uint8_t s[32] = {11};
@@ -526,7 +587,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_jubjub_get_x_get_y(void)
+{
+    int failures = 0;
     printf("Jubjub get_x/get_y... ");
     {
         uint8_t s[32] = {13};
@@ -542,11 +608,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* BLS12-381 field arithmetic tests                                 */
-    /* ================================================================ */
-
+static int sapling_crypto_fp_zero_one_identity(void)
+{
+    int failures = 0;
     printf("Fp zero/one identity... ");
     {
         struct fp z, o;
@@ -559,7 +626,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp_add_sub_neg(void)
+{
+    int failures = 0;
     printf("Fp add/sub/neg... ");
     {
         struct fp a, b, sum, diff, neg_a;
@@ -573,7 +645,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp_mul_sq_inv(void)
+{
+    int failures = 0;
     printf("Fp mul/sq/inv... ");
     {
         struct fp a, two, four, sq_two, inv_two, prod;
@@ -588,7 +665,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp_from_bytes_to_bytes_roundtrip(void)
+{
+    int failures = 0;
     printf("Fp from_bytes/to_bytes roundtrip... ");
     {
         /* Use the canonical generator x-coordinate */
@@ -602,7 +684,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp_sqrt(void)
+{
+    int failures = 0;
     printf("Fp sqrt... ");
     {
         struct fp a, sq, root;
@@ -617,7 +704,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp2_arithmetic(void)
+{
+    int failures = 0;
     printf("Fp2 arithmetic... ");
     {
         struct fp2 z, o, sum, prod;
@@ -637,7 +729,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fp12_arithmetic(void)
+{
+    int failures = 0;
     printf("Fp12 arithmetic... ");
     {
         struct fp12 z, o, prod;
@@ -656,7 +753,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_g1_identity(void)
+{
+    int failures = 0;
     printf("G1 identity... ");
     {
         struct g1_point id, dbl;
@@ -670,7 +772,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_g1_generator_compressed_roundtrip(void)
+{
+    int failures = 0;
     printf("G1 generator compressed roundtrip... ");
     {
         /* BLS12-381 G1 generator compressed (48 bytes, big-endian) */
@@ -688,7 +795,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_g2_identity(void)
+{
+    int failures = 0;
     printf("G2 identity... ");
     {
         struct g2_point id, dbl;
@@ -699,7 +811,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_bls12_381_pairing_e_g1_g2_is_not_identit(void)
+{
+    int failures = 0;
     printf("BLS12-381 pairing: e(G1, G2) is not identity... ");
     {
         const uint8_t g1_gen[48] = {
@@ -740,7 +857,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_bls12_381_pairing_bilinearity_e_ap_q_e_p(void)
+{
+    int failures = 0;
     printf("BLS12-381 pairing bilinearity: e(aP, Q) = e(P, aQ)... ");
     {
         const uint8_t g1_gen[48] = {
@@ -798,25 +920,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* BLS12-381 subgroup check (Groth16 soundness, consensus Sapling path).
-     *
-     * G1/G2 have large cofactors, so a point can be ON the curve yet carry a
-     * torsion component outside the prime-order-r subgroup. The pairing still
-     * "accepts" such points, so without a subgroup check a malicious prover
-     * could forge an accepting Groth16 proof — a soundness gap. The fix wires
-     * [r]P==O membership into groth16_proof_read for A, B, C.
-     *
-     * This is the hermetic, must-have negative+positive test:
-     *   - the generator (in subgroup) and the identity (point at infinity)
-     *     MUST pass — re-verifying honest historical proofs yields 0 new
-     *     rejections;
-     *   - an on-curve-but-not-in-subgroup point MUST be rejected.
-     *
-     * Test vectors (deterministically derived): the compressed encoding with
-     * affine x = 4 over Fp (G1) and x.c0 = 2 over Fp2, x.c1 = 0 (G2) each
-     * decode to a valid on-curve point that is NOT in the prime-order
-     * subgroup (verified at authoring time by an exhaustive small-x scan). */
+static int sapling_crypto_bls12_381_g1_subgroup_generator_identity(void)
+{
+    int failures = 0;
     printf("BLS12-381 G1 subgroup: generator+identity pass, torsion point rejected... ");
     {
         const uint8_t g1_gen_c[48] = {
@@ -848,7 +957,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_bls12_381_g2_subgroup_generator_identity(void)
+{
+    int failures = 0;
     printf("BLS12-381 G2 subgroup: generator+identity pass, torsion point rejected... ");
     {
         const uint8_t g2_gen_c[96] = {
@@ -886,10 +1000,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* End-to-end: groth16_proof_read must reject a proof whose A, B, or C is a
-     * torsion point, and accept an all-in-subgroup proof. This is the actual
-     * consensus seam the soundness fix protects. */
+static int sapling_crypto_groth16_proof_read_rejects_torsion_a_b_c(void)
+{
+    int failures = 0;
     printf("groth16_proof_read rejects torsion A/B/C, accepts in-subgroup proof... ");
     {
         const uint8_t g1_gen_c[48] = {
@@ -947,20 +1063,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* g1_scalar_mul must run identical work regardless of scalar
-     * Hamming weight. Pre-fix, the prover only executed `g1_add` on
-     * bits that were set — so an attacker measuring wall time of the
-     * prover recovered partial information about the Groth16 blinding
-     * factors `r_blind` / `s_blind` (`groth16_prover.c:906,934`).
-     *
-     * This test compares a Hamming-weight-1 scalar (one `g1_add`,
-     * 256 `g1_double`s) against a full-255-bit scalar (~255 adds + 255
-     * doubles). On the pre-fix code the ratio is ~1.5–2.0; on the
-     * constant-time implementation both sides always do 256 adds and
-     * 256 doubles so the ratio collapses to ~1.0. The tolerance is
-     * deliberately generous to tolerate CI-host noise — anything
-     * beyond 1.20 indicates a skipped-add branch. */
+static int sapling_crypto_bls12_381_g1_scalar_mul_timing_vs_scalar(void)
+{
+    int failures = 0;
     printf("BLS12-381 g1_scalar_mul timing vs scalar weight ... ");
     {
         const uint8_t g1_gen[48] = {
@@ -999,7 +1107,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_multipack_bytes_to_fr(void)
+{
+    int failures = 0;
     printf("multipack_bytes_to_fr... ");
     {
         uint8_t bytes[32];
@@ -1014,11 +1127,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* PRF standalone tests                                             */
-    /* ================================================================ */
-
+static int sapling_crypto_prf_ask_nsk_ovk_deterministic(void)
+{
+    int failures = 0;
     printf("PRF ask/nsk/ovk deterministic... ");
     {
         uint8_t sk[32] = {0};
@@ -1037,7 +1151,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_prf_expand(void)
+{
+    int failures = 0;
     printf("PRF expand... ");
     {
         uint8_t sk[32] = {0};
@@ -1055,7 +1174,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_prf_addr_a_pk_sk_enc_sprout(void)
+{
+    int failures = 0;
     printf("PRF addr a_pk/sk_enc (Sprout)... ");
     {
         uint8_t a_sk[32] = {0};
@@ -1072,11 +1196,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* Sprout h_sig test                                                */
-    /* ================================================================ */
-
+static int sapling_crypto_sprout_h_sig_deterministic(void)
+{
+    int failures = 0;
     printf("Sprout h_sig deterministic... ");
     {
         uint8_t random_seed[32], nf0[32], nf1[32], pk[32];
@@ -1096,11 +1221,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* FF1 format-preserving encryption test                            */
-    /* ================================================================ */
-
+static int sapling_crypto_ff1_encrypt_deterministic(void)
+{
+    int failures = 0;
     printf("FF1 encrypt deterministic... ");
     {
         uint8_t key[32];
@@ -1117,7 +1243,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_ff1_different_keys_produce_different_out(void)
+{
+    int failures = 0;
     printf("FF1 different keys produce different output... ");
     {
         uint8_t key1[32], key2[32];
@@ -1130,18 +1261,23 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================ */
-    /* jubjub_to_scalar constant-time regressions */
-    /*                                                                  */
-    /* `jubjub_to_scalar` reduces a 64-byte blake2b digest modulo the   */
-    /* Jubjub scalar field order r.  It sits on the Sapling nullifier   */
-    /* derivation path via `prf_nsk`, where the input is derived from   */
-    /* a long-lived secret spending key (nsk is reused across every     */
-    /* spend).  A cache-timing or branch leak here correlates across    */
-    /* many spends, so the reduction must be CT.                        */
-    /* ================================================================ */
+/* Compare two little-endian 32-byte scalars from the most significant byte down.
+ * Returns -1, 0 or 1 for a < b, a == b, a > b. */
+static int sapling_crypto_cmp_le32(const uint8_t a[32], const uint8_t b[32])
+{
+    for (int i = 31; i >= 0; i--) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
+    }
+    return 0;
+}
 
+static int sapling_crypto_jubjub_to_scalar_vs_arbitrary_precision(void)
+{
+    int failures = 0;
     printf("jubjub_to_scalar vs arbitrary-precision reference ... ");
     {
         /* Reference reduction that mirrors the implementation:
@@ -1183,12 +1319,7 @@ int test_sapling_crypto(void)
             0xa9, 0xaf, 0x33, 0x65, 0xea, 0xb4, 0x7d, 0x0e,
         };
         /* out < r (little-endian compare from MSB down). */
-        bool lt = false, done = false;
-        for (int i = 31; i >= 0 && !done; i--) {
-            if (out[i] < r_le[i]) { lt = true; done = true; }
-            else if (out[i] > r_le[i]) { lt = false; done = true; }
-        }
-        ok = ok && lt;
+        ok = ok && (sapling_crypto_cmp_le32(out, r_le) < 0);
 
         /* Corner 4 (input == r in the low 32 bytes): must reduce to 0.
          * Here only the low 32 bytes are non-zero, which equals r, so
@@ -1212,28 +1343,18 @@ int test_sapling_crypto(void)
             jubjub_to_scalar(in, o2);
             if (memcmp(o1, o2, 32) != 0) ok = false;
             /* Output must be < r. */
-            bool out_lt = false, out_done = false;
-            for (int k = 31; k >= 0 && !out_done; k--) {
-                if (o1[k] < r_le[k]) { out_lt = true; out_done = true; }
-                else if (o1[k] > r_le[k]) { out_lt = false; out_done = true; }
-            }
             /* out could equal 0 too (which is valid); only reject out > r. */
-            if (!out_lt && out_done) ok = false;
+            if (sapling_crypto_cmp_le32(o1, r_le) > 0) ok = false;
         }
         if (ok) printf("OK (%d vectors + 5 corners)\n", N);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* Timing regression: the implementation had two
-     * secret-dependent branches — `if (input bit set)` and
-     * `if (acc >= r) subtract r` — so an all-ones input ran materially
-     * longer than an all-zero input (~8% on measured hosts, and the
-     * gap widened with cache pressure).  The new branchless path
-     * performs identical work regardless of input Hamming weight.
-     *
-     * Tolerance 0.85..1.15 mirrors the ratio gate and absorbs
-     * normal CI jitter while still tripping on any branch
-     * reintroduction. */
+static int sapling_crypto_jubjub_to_scalar_timing_vs_input_weight(void)
+{
+    int failures = 0;
     printf("jubjub_to_scalar timing vs input weight ... ");
     {
         uint8_t lo_in[64] = {0};                    /* Hamming weight 0 */
@@ -1259,17 +1380,12 @@ int test_sapling_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ================================================================
-     * OOM silent-drop in groth16 CS builders
-     * ================================================================
-     * RED before fix, GREEN after fix. Every block below installs the
-     * test hook that forces the next realloc inside groth16_prover.c
-     * to return NULL, exercises one of the three helpers, and asserts
-     * the OOM signal reached the caller. Pre-fix the helpers silently
-     * drop so the flags stay false — tests FAIL. Post-fix the helpers
-     * set lc->oom_error / cs->oom_error + LOG_FAIL — tests PASS. */
-
+static int sapling_crypto_lc_add_term_signals_oom_on_realloc_failu(void)
+{
+    int failures = 0;
     printf("lc_add_term signals OOM on realloc failure... ");
     {
         struct linear_combination lc;
@@ -1296,7 +1412,12 @@ int test_sapling_crypto(void)
         lc_free(&lc);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_cs_alloc_aux_signals_oom_on_realloc_fail(void)
+{
+    int failures = 0;
     printf("cs_alloc_aux signals OOM on realloc failure... ");
     {
         struct constraint_system cs;
@@ -1325,7 +1446,12 @@ int test_sapling_crypto(void)
         cs_free(&cs);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_cs_enforce_propagates_input_lc_oom_error(void)
+{
+    int failures = 0;
     printf("cs_enforce propagates input-LC oom_error... ");
     {
         struct constraint_system cs;
@@ -1348,7 +1474,12 @@ int test_sapling_crypto(void)
         cs_free(&cs);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_groth16_prove_refuses_on_cs_oom_error_ze(void)
+{
+    int failures = 0;
     printf("groth16_prove refuses on cs.oom_error (zeroed proof)... ");
     {
         struct constraint_system cs;
@@ -1371,9 +1502,12 @@ int test_sapling_crypto(void)
         cs_free(&cs);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── fr_fft fr_fft_parallel non-pow-2 silent no-op ───── */
-
+static int sapling_crypto_fr_fft_uses_the_published_bls12_381_qap(void)
+{
+    int failures = 0;
     printf("fr_fft uses the published BLS12-381 QAP root of unity... ");
     {
         /* Forward FFT of polynomial x over a four-element domain is
@@ -1398,7 +1532,12 @@ int test_sapling_crypto(void)
         ok = ok && memcmp(got, OMEGA4_LE, sizeof(got)) == 0;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fr_fft_returns_false_on_non_pow_2_n(void)
+{
+    int failures = 0;
     printf("fr_fft returns false on non-pow-2 n... ");
     {
         /* Bug pattern: fr_fft's `if ((size_t)1 << log_n != n) return;`
@@ -1411,7 +1550,12 @@ int test_sapling_crypto(void)
         bool ok = (ret == false);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_fr_fft_parallel_returns_false_on_non_pow(void)
+{
+    int failures = 0;
     printf("fr_fft_parallel returns false on non-pow-2 n... ");
     {
         /* n=300 is >= 256 (parallel-dispatch threshold) and non-pow-2,
@@ -1423,7 +1567,12 @@ int test_sapling_crypto(void)
         bool ok = (ret == false);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int sapling_crypto_groth16_prove_refuses_on_non_pow_2_force(void)
+{
+    int failures = 0;
     printf("groth16_prove refuses on non-pow-2 forced domain (zeroed proof)... ");
     {
         /* Force a non-pow-2 FFT domain via the test hook. Pre-fix
@@ -1458,9 +1607,12 @@ int test_sapling_crypto(void)
         cs_free(&cs);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── sapling_spend_synthesize nk_point placeholder UB ──── */
-
+static int sapling_crypto_spend_synth_binds_nk_witness_to_nsk_g_pr(void)
+{
+    int failures = 0;
     printf("spend synth binds nk witness to nsk*G_proof (not uninit stack)... ");
     {
         /* Pre-fix: `sapling_circuit.c:161-162` declared
@@ -1546,9 +1698,12 @@ int test_sapling_crypto(void)
         cs_free(&cs);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── spend-witness parser must reject short buffers ──────── */
-
+static int sapling_crypto_sapling_spend_parse_witness_rejects_shor(void)
+{
+    int failures = 0;
     printf("sapling_spend_parse_witness rejects short buffer (no OOB read)... ");
     {
         /* The merkle-witness wire format is
@@ -1602,6 +1757,223 @@ int test_sapling_crypto(void)
         bool ok = short_rejected && full_accepted && near_full_rejected;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+int test_sapling_crypto(void)
+{
+    int failures = 0;
+
+    failures += sapling_crypto_fr_zero_one_identity();
+
+    failures += sapling_crypto_fr_add_sub_neg();
+
+    failures += sapling_crypto_fr_mul_sq_inv();
+
+    failures += sapling_crypto_fr_from_bytes_to_bytes_roundtrip();
+
+    failures += sapling_crypto_fs_zero_one_add_neg();
+
+    failures += sapling_crypto_fs_from_bytes_to_bytes_roundtrip();
+
+    failures += sapling_crypto_fs_mul();
+
+    failures += sapling_crypto_fs_to_uniform_64_byte_reduction();
+
+    /* ================================================================ */
+    /* Jubjub point operation tests                                     */
+    /* ================================================================ */
+
+    failures += sapling_crypto_jubjub_identity();
+
+    failures += sapling_crypto_jubjub_compress_decompress_roundtrip();
+
+    failures += sapling_crypto_jubjub_add_associativity();
+
+    failures += sapling_crypto_jubjub_double_add_to_self();
+
+    failures += sapling_crypto_jubjub_negate();
+
+    failures += sapling_crypto_jubjub_scalar_mul_by_1();
+
+    /* correctness: windowed CT jub_scalar_mul vs bit-by-bit oracle.
+     * Covers corner cases (zero scalar, small/large scalars, nibble
+     * transitions) plus random vectors across the scalar range. */
+    failures += sapling_crypto_jubjub_scalar_mul_matches_naive_double_a();
+
+    /* timing sanity: low-Hamming-weight vs high-Hamming-weight
+     * scalars should not differ materially in runtime. Pre-fix, the
+     * `if (nibble)` branch skipped adds for zero nibbles, so zero-heavy
+     * scalars ran ~25% faster. The new CT implementation always runs
+     * one add per nibble, so both scalars do identical work.
+     *
+     * The tolerance is deliberately generous because CI hosts are noisy
+     * and the twisted-Edwards field math still has minor value-dependent
+     * timing inside fr_add/fr_sub. The gate matches the BLS timing test:
+     * tight enough to catch the old branchy path, loose enough for a
+     * saturated fork-parallel run. */
+    failures += sapling_crypto_jubjub_scalar_mul_timing_vs_scalar_weigh();
+
+    failures += sapling_crypto_jubjub_cofactor_multiplication();
+
+    failures += sapling_crypto_jubjub_get_x_get_y();
+
+    /* ================================================================ */
+    /* BLS12-381 field arithmetic tests                                 */
+    /* ================================================================ */
+
+    failures += sapling_crypto_fp_zero_one_identity();
+
+    failures += sapling_crypto_fp_add_sub_neg();
+
+    failures += sapling_crypto_fp_mul_sq_inv();
+
+    failures += sapling_crypto_fp_from_bytes_to_bytes_roundtrip();
+
+    failures += sapling_crypto_fp_sqrt();
+
+    failures += sapling_crypto_fp2_arithmetic();
+
+    failures += sapling_crypto_fp12_arithmetic();
+
+    failures += sapling_crypto_g1_identity();
+
+    failures += sapling_crypto_g1_generator_compressed_roundtrip();
+
+    failures += sapling_crypto_g2_identity();
+
+    failures += sapling_crypto_bls12_381_pairing_e_g1_g2_is_not_identit();
+
+    failures += sapling_crypto_bls12_381_pairing_bilinearity_e_ap_q_e_p();
+
+    /* BLS12-381 subgroup check (Groth16 soundness, consensus Sapling path).
+     *
+     * G1/G2 have large cofactors, so a point can be ON the curve yet carry a
+     * torsion component outside the prime-order-r subgroup. The pairing still
+     * "accepts" such points, so without a subgroup check a malicious prover
+     * could forge an accepting Groth16 proof — a soundness gap. The fix wires
+     * [r]P==O membership into groth16_proof_read for A, B, C.
+     *
+     * This is the hermetic, must-have negative+positive test:
+     *   - the generator (in subgroup) and the identity (point at infinity)
+     *     MUST pass — re-verifying honest historical proofs yields 0 new
+     *     rejections;
+     *   - an on-curve-but-not-in-subgroup point MUST be rejected.
+     *
+     * Test vectors (deterministically derived): the compressed encoding with
+     * affine x = 4 over Fp (G1) and x.c0 = 2 over Fp2, x.c1 = 0 (G2) each
+     * decode to a valid on-curve point that is NOT in the prime-order
+     * subgroup (verified at authoring time by an exhaustive small-x scan). */
+    failures += sapling_crypto_bls12_381_g1_subgroup_generator_identity();
+
+    failures += sapling_crypto_bls12_381_g2_subgroup_generator_identity();
+
+    /* End-to-end: groth16_proof_read must reject a proof whose A, B, or C is a
+     * torsion point, and accept an all-in-subgroup proof. This is the actual
+     * consensus seam the soundness fix protects. */
+    failures += sapling_crypto_groth16_proof_read_rejects_torsion_a_b_c();
+
+    /* g1_scalar_mul must run identical work regardless of scalar
+     * Hamming weight. Pre-fix, the prover only executed `g1_add` on
+     * bits that were set — so an attacker measuring wall time of the
+     * prover recovered partial information about the Groth16 blinding
+     * factors `r_blind` / `s_blind` (`groth16_prover.c:906,934`).
+     *
+     * This test compares a Hamming-weight-1 scalar (one `g1_add`,
+     * 256 `g1_double`s) against a full-255-bit scalar (~255 adds + 255
+     * doubles). On the pre-fix code the ratio is ~1.5–2.0; on the
+     * constant-time implementation both sides always do 256 adds and
+     * 256 doubles so the ratio collapses to ~1.0. The tolerance is
+     * deliberately generous to tolerate CI-host noise — anything
+     * beyond 1.20 indicates a skipped-add branch. */
+    failures += sapling_crypto_bls12_381_g1_scalar_mul_timing_vs_scalar();
+
+    failures += sapling_crypto_multipack_bytes_to_fr();
+
+    /* ================================================================ */
+    /* PRF standalone tests                                             */
+    /* ================================================================ */
+
+    failures += sapling_crypto_prf_ask_nsk_ovk_deterministic();
+
+    failures += sapling_crypto_prf_expand();
+
+    failures += sapling_crypto_prf_addr_a_pk_sk_enc_sprout();
+
+    /* ================================================================ */
+    /* Sprout h_sig test                                                */
+    /* ================================================================ */
+
+    failures += sapling_crypto_sprout_h_sig_deterministic();
+
+    /* ================================================================ */
+    /* FF1 format-preserving encryption test                            */
+    /* ================================================================ */
+
+    failures += sapling_crypto_ff1_encrypt_deterministic();
+
+    failures += sapling_crypto_ff1_different_keys_produce_different_out();
+
+    /* ================================================================ */
+    /* jubjub_to_scalar constant-time regressions */
+    /*                                                                  */
+    /* `jubjub_to_scalar` reduces a 64-byte blake2b digest modulo the   */
+    /* Jubjub scalar field order r.  It sits on the Sapling nullifier   */
+    /* derivation path via `prf_nsk`, where the input is derived from   */
+    /* a long-lived secret spending key (nsk is reused across every     */
+    /* spend).  A cache-timing or branch leak here correlates across    */
+    /* many spends, so the reduction must be CT.                        */
+    /* ================================================================ */
+
+    failures += sapling_crypto_jubjub_to_scalar_vs_arbitrary_precision();
+
+    /* Timing regression: the implementation had two
+     * secret-dependent branches — `if (input bit set)` and
+     * `if (acc >= r) subtract r` — so an all-ones input ran materially
+     * longer than an all-zero input (~8% on measured hosts, and the
+     * gap widened with cache pressure).  The new branchless path
+     * performs identical work regardless of input Hamming weight.
+     *
+     * Tolerance 0.85..1.15 mirrors the ratio gate and absorbs
+     * normal CI jitter while still tripping on any branch
+     * reintroduction. */
+    failures += sapling_crypto_jubjub_to_scalar_timing_vs_input_weight();
+
+    /* ================================================================
+     * OOM silent-drop in groth16 CS builders
+     * ================================================================
+     * RED before fix, GREEN after fix. Every block below installs the
+     * test hook that forces the next realloc inside groth16_prover.c
+     * to return NULL, exercises one of the three helpers, and asserts
+     * the OOM signal reached the caller. Pre-fix the helpers silently
+     * drop so the flags stay false — tests FAIL. Post-fix the helpers
+     * set lc->oom_error / cs->oom_error + LOG_FAIL — tests PASS. */
+
+    failures += sapling_crypto_lc_add_term_signals_oom_on_realloc_failu();
+
+    failures += sapling_crypto_cs_alloc_aux_signals_oom_on_realloc_fail();
+
+    failures += sapling_crypto_cs_enforce_propagates_input_lc_oom_error();
+
+    failures += sapling_crypto_groth16_prove_refuses_on_cs_oom_error_ze();
+
+    /* ── fr_fft fr_fft_parallel non-pow-2 silent no-op ───── */
+
+    failures += sapling_crypto_fr_fft_uses_the_published_bls12_381_qap();
+
+    failures += sapling_crypto_fr_fft_returns_false_on_non_pow_2_n();
+
+    failures += sapling_crypto_fr_fft_parallel_returns_false_on_non_pow();
+
+    failures += sapling_crypto_groth16_prove_refuses_on_non_pow_2_force();
+
+    /* ── sapling_spend_synthesize nk_point placeholder UB ──── */
+
+    failures += sapling_crypto_spend_synth_binds_nk_witness_to_nsk_g_pr();
+
+    /* ── spend-witness parser must reject short buffers ──────── */
+
+    failures += sapling_crypto_sapling_spend_parse_witness_rejects_shor();
 
     return failures;
 }

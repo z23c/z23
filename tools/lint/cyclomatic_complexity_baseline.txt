@@ -613,7 +613,6 @@ tests/harness/src/test_pv_lookahead.c:la_fold_from:27
 tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:39
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
-tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38
