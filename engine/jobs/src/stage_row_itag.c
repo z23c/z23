@@ -116,9 +116,103 @@ static bool itag_backfill_set_flag(sqlite3 *db, const char *table)
     return progress_meta_set_in_tx(db, key, &one, sizeof(one));
 }
 
+/* Persist the done-flag only when the scan succeeded; returns the outcome. */
+static bool itag_backfill_set_flag_if(sqlite3 *db, const char *table,
+                                      bool ok_all)
+{
+    return ok_all && itag_backfill_set_flag(db, table);
+}
+
+/* Open the backfill transaction; false means ride the enclosing one. */
+static bool itag_backfill_begin(sqlite3 *db)
+{
+    char *err = NULL;
+    bool began = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err)
+                 == SQLITE_OK;
+    if (err) sqlite3_free(err);
+    return began;
+}
+
+/* Run one transaction-control statement, freeing any error text. */
+static bool itag_backfill_exec(sqlite3 *db, const char *sql)
+{
+    char *cerr = NULL;
+    bool done = sqlite3_exec(db, sql, NULL, NULL, &cerr) == SQLITE_OK;
+    if (cerr) sqlite3_free(cerr);
+    return done;
+}
+
+/* True when both db and a non-empty table name were supplied. */
+static bool itag_backfill_args_ok(sqlite3 *db, const char *table)
+{
+    return db && table && table[0];
+}
+
+/* Statement that ends the owned transaction for the given outcome. */
+static const char *itag_backfill_fini_sql(bool ok_all)
+{
+    return ok_all ? "COMMIT" : "ROLLBACK";
+}
+
+/* End the owned transaction (no-op when riding an enclosing one). */
+static bool itag_backfill_finish(sqlite3 *db, bool began, const char *fini)
+{
+    return !began || itag_backfill_exec(db, fini);
+}
+
+/* Roll back the transaction this backfill opened, if it opened one. */
+static void itag_backfill_rollback(sqlite3 *db, bool began)
+{
+    if (began) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+}
+
+/* Format the ordered scan SELECT; false on truncation. */
+static bool itag_backfill_fmt_select(char *sel, size_t cap, const char *table,
+                                     bool covers)
+{
+    int sn = snprintf(sel, cap,
+                      "SELECT height, ok%s FROM %s ORDER BY height",
+                      covers ? ", status" : "", table);
+    return !(sn <= 0 || sn >= (int)cap);
+}
+
+/* Format the per-row tag UPDATE; false on truncation. */
+static bool itag_backfill_fmt_update(char *upd, size_t cap, const char *table)
+{
+    int un = snprintf(upd, cap,
+                      "UPDATE %s SET itag = ? WHERE height = ?", table);
+    return !(un <= 0 || un >= (int)cap);
+}
+
+/* Recompute the tag of the row `sst` is positioned on and write it through
+ * `ust`. Returns the update step result; *height_out is the row height. */
+static int itag_backfill_update_row(sqlite3_stmt *sst, sqlite3_stmt *ust,
+                                    const char *table, bool covers,
+                                    int64_t *height_out)
+{
+    int64_t height = sqlite3_column_int64(sst, 0);
+    *height_out = height;
+    int okv = sqlite3_column_type(sst, 1) == SQLITE_INTEGER
+                  ? sqlite3_column_int(sst, 1) : 0;
+    const void *status = NULL;
+    size_t status_len = 0;
+    if (covers && sqlite3_column_type(sst, 2) == SQLITE_TEXT) {
+        status = sqlite3_column_text(sst, 2);
+        status_len = (size_t)sqlite3_column_bytes(sst, 2);
+    }
+    uint8_t tag[STAGE_ROW_ITAG_LEN];
+    stage_row_itag_compute(table, height, okv, status, status_len, tag);
+
+    sqlite3_reset(ust);
+    sqlite3_clear_bindings(ust);
+    sqlite3_bind_blob(ust, 1, tag, STAGE_ROW_ITAG_LEN, SQLITE_STATIC);
+    sqlite3_bind_int64(ust, 2, (sqlite3_int64)height);
+    return sqlite3_step(ust);  // raw-sql-ok:progress-kv-kernel-store
+}
+
 bool stage_row_itag_backfill(sqlite3 *db, const char *table)
 {
-    if (!db || !table || !table[0])
+    if (!itag_backfill_args_ok(db, table))
         LOG_FAIL("stage_itag", "backfill: NULL/empty db or table");
 
     progress_store_tx_lock();
@@ -143,10 +237,7 @@ bool stage_row_itag_backfill(sqlite3 *db, const char *table)
      * fails because a batch/txn is already open, ride the enclosing txn: the
      * itag-NULL predicate keeps the UPDATE correct and the flag commits with
      * whatever owns the outer txn. */
-    char *err = NULL;
-    bool began = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err)
-                 == SQLITE_OK;
-    if (err) sqlite3_free(err);
+    bool began = itag_backfill_begin(db);
 
     bool covers = itag_covers_status(table);
     char sel[128];
@@ -157,18 +248,15 @@ bool stage_row_itag_backfill(sqlite3 *db, const char *table)
      * column a query filters on mid-scan is implementation-defined in SQLite, and
      * re-tagging an already-tagged row just rewrites the identical deterministic
      * tag. This runs once (flag-guarded), so the full scan is a one-time O(rows). */
-    int sn = snprintf(sel, sizeof(sel),
-                      "SELECT height, ok%s FROM %s ORDER BY height",
-                      covers ? ", status" : "", table);
-    if (sn <= 0 || sn >= (int)sizeof(sel)) {
-        if (began) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    if (!itag_backfill_fmt_select(sel, sizeof(sel), table, covers)) {
+        itag_backfill_rollback(db, began);
         progress_store_tx_unlock();
         LOG_FAIL("stage_itag", "backfill: select sql overflow for %s", table);
     }
 
     sqlite3_stmt *sst = NULL;
     if (sqlite3_prepare_v2(db, sel, -1, &sst, NULL) != SQLITE_OK) {
-        if (began) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        itag_backfill_rollback(db, began);
         progress_store_tx_unlock();
         LOG_FAIL("stage_itag", "backfill: prepare select %s failed: %s",
                  table, sqlite3_errmsg(db));
@@ -178,17 +266,15 @@ bool stage_row_itag_backfill(sqlite3 *db, const char *table)
      * the concat cannot inject. */
     sqlite3_stmt *ust = NULL;
     char upd[96];
-    int un = snprintf(upd, sizeof(upd),
-                      "UPDATE %s SET itag = ? WHERE height = ?", table);
-    if (un <= 0 || un >= (int)sizeof(upd)) {
+    if (!itag_backfill_fmt_update(upd, sizeof(upd), table)) {
         sqlite3_finalize(sst);
-        if (began) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        itag_backfill_rollback(db, began);
         progress_store_tx_unlock();
         LOG_FAIL("stage_itag", "backfill: update sql overflow for %s", table);
     }
     if (sqlite3_prepare_v2(db, upd, -1, &ust, NULL) != SQLITE_OK) {
         sqlite3_finalize(sst);
-        if (began) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        itag_backfill_rollback(db, began);
         progress_store_tx_unlock();
         LOG_FAIL("stage_itag", "backfill: prepare update %s failed: %s",
                  table, sqlite3_errmsg(db));
@@ -199,23 +285,9 @@ bool stage_row_itag_backfill(sqlite3 *db, const char *table)
     while (true) {
         int rc = sqlite3_step(sst);  // raw-sql-ok:progress-kv-kernel-store
         if (rc == SQLITE_ROW) {
-            int64_t height = sqlite3_column_int64(sst, 0);
-            int okv = sqlite3_column_type(sst, 1) == SQLITE_INTEGER
-                          ? sqlite3_column_int(sst, 1) : 0;
-            const void *status = NULL;
-            size_t status_len = 0;
-            if (covers && sqlite3_column_type(sst, 2) == SQLITE_TEXT) {
-                status = sqlite3_column_text(sst, 2);
-                status_len = (size_t)sqlite3_column_bytes(sst, 2);
-            }
-            uint8_t tag[STAGE_ROW_ITAG_LEN];
-            stage_row_itag_compute(table, height, okv, status, status_len, tag);
-
-            sqlite3_reset(ust);
-            sqlite3_clear_bindings(ust);
-            sqlite3_bind_blob(ust, 1, tag, STAGE_ROW_ITAG_LEN, SQLITE_STATIC);
-            sqlite3_bind_int64(ust, 2, (sqlite3_int64)height);
-            int urc = sqlite3_step(ust);  // raw-sql-ok:progress-kv-kernel-store
+            int64_t height = 0;
+            int urc = itag_backfill_update_row(sst, ust, table, covers,
+                                               &height);
             if (urc != SQLITE_DONE) {
                 LOG_WARN("stage_itag",
                          "[stage_itag] backfill update %s h=%lld rc=%d",
@@ -237,18 +309,12 @@ bool stage_row_itag_backfill(sqlite3 *db, const char *table)
     sqlite3_finalize(sst);
     sqlite3_finalize(ust);
 
-    if (ok_all)
-        ok_all = itag_backfill_set_flag(db, table);
+    ok_all = itag_backfill_set_flag_if(db, table, ok_all);
 
-    if (began) {
-        const char *fini = ok_all ? "COMMIT" : "ROLLBACK";
-        char *cerr = NULL;
-        if (sqlite3_exec(db, fini, NULL, NULL, &cerr) != SQLITE_OK) {
-            if (cerr) sqlite3_free(cerr);
-            progress_store_tx_unlock();
-            LOG_FAIL("stage_itag", "backfill: %s %s failed", fini, table);
-        }
-        if (cerr) sqlite3_free(cerr);
+    const char *fini = itag_backfill_fini_sql(ok_all);
+    if (!itag_backfill_finish(db, began, fini)) {
+        progress_store_tx_unlock();
+        LOG_FAIL("stage_itag", "backfill: %s %s failed", fini, table);
     }
     progress_store_tx_unlock();
 
