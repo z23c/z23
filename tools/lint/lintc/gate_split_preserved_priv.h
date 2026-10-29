@@ -18,6 +18,7 @@ struct sp_ent {
     unsigned line;
     size_t off;
     int miss;
+    int used; /* dedup: a matched copy in a removed function already excused one miss */
 };
 
 struct sp_list {

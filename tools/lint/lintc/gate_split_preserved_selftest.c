@@ -19,6 +19,7 @@
 #define SPS_INC "#include <stdio.h>\n"
 #define SPS_F1 "int f(void)\n{\n    /* keep me */\n    LOG_FAIL(\"f broke\");\n    return 0;\n}\n"
 #define SPS_G1 "int g(void)\n{\n    // other note\n    return 1;\n}\n"
+#define SPS_FN(name, note) "int " name "(void)\n{\n    /* " note " */\n    return 0;\n}\n"
 #define SPS_DUP "\n/* twin note */\nint dup(void)\n{\n    /* inside twin */\n    LOG_ERR(\"dup %d\",\n            1);\n    return 0;\n}\n"
 
 struct sps_case {
@@ -71,6 +72,19 @@ static const struct sps_case k_sps_cases[] = {
     { "a comment dropped from a surviving function in dedup mode",
       SPS_LIC SPS_F1 SPS_G1, SPS_LIC SPS_F1 "int g(void)\n{\n    return 1;\n}\n", 1, 1,
       "base comment line lost" },
+    { "a repeated comment lost with two removed functions, copy kept last, in dedup mode",
+      SPS_LIC SPS_FN("a", "name must exist") SPS_FN("b", "name must exist") SPS_FN("k", "name must exist"),
+      SPS_LIC SPS_FN("k", "name must exist"), 1, 0, NULL },
+    { "the same repeated comment loss in split mode",
+      SPS_LIC SPS_FN("a", "name must exist") SPS_FN("b", "name must exist") SPS_FN("k", "name must exist"),
+      SPS_LIC SPS_FN("k", "name must exist"), 0, 1, "base comment line lost or reworded" },
+    { "a comment lost from a kept function with no copy in a removed one, dedup mode",
+      SPS_LIC SPS_FN("a", "only a") SPS_FN("k", "only k"), SPS_LIC "int k(void)\n{\n    return 0;\n}\n",
+      1, 1, "lost or reworded: /* only k */" },
+    { "two kept copies lost with one removed-function copy, dedup mode",
+      SPS_LIC SPS_FN("a", "dup note") SPS_FN("k", "dup note") SPS_FN("m", "dup note"),
+      SPS_LIC "int k(void)\n{\n    return 0;\n}\n" SPS_FN("m", "dup note"), 1, 1,
+      "base comment line lost or reworded: /* dup note */" },
     { "comment-like text in strings and char literals",
       SPS_LIC "int s(void)\n{\n    const char *u = \"http://a\"; /* real */\n    char q = '\"';\n"
       "    const char *v = \"/* not */\";\n    return 1'000;\n}\n",

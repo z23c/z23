@@ -159,11 +159,32 @@ static void sp_check_logs(struct sp_ctx *c, struct sp_file *b, struct sp_file *n
     }
 }
 
+/* Whether a base entry sits in a function that no longer exists. */
+static int sp_in_removed(const struct sp_ctx *c, const struct sp_ent *e)
+{
+    return *e->func && !sp_has_func(c->cur, e->func);
+}
+
+/* Dedup: the multiset matcher may pair the copies in removed functions and
+ * leave the copy in a kept function unmatched. Excuse that miss by one matched
+ * same-key copy inside a removed function; each such copy excuses one miss. */
+static int sp_excused_by_removed(const struct sp_ctx *c, struct sp_file *b, const struct sp_ent *e)
+{
+    for (size_t j = 0; j < b->cm.n; j++) {
+        struct sp_ent *o = &b->cm.v[j];
+        if (o->miss || o->used || strcmp(o->key, e->key) != 0 || !sp_in_removed(c, o))
+            continue;
+        o->used = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static void sp_check_comments(struct sp_ctx *c, struct sp_file *b)
 {
     for (size_t i = 0; i < b->cm.n; i++) {
         const struct sp_ent *e = &b->cm.v[i];
-        if (e->miss && !(c->dedup && *e->func && !sp_has_func(c->cur, e->func)))
+        if (e->miss && !(c->dedup && (sp_in_removed(c, e) || sp_excused_by_removed(c, b, e))))
             sp_fail(c, e->line, "base comment line lost or reworded", e->key);
     }
 }
