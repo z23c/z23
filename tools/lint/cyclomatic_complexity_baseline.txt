@@ -421,9 +421,6 @@ engine/composition/src/consensus_state_producer_receipt.c:consensus_state_produc
 engine/composition/src/consensus_state_producer_receipt.c:insert_session:18
 engine/composition/src/consensus_state_producer_receipt.c:producer_session_load:22
 engine/composition/src/consensus_state_producer_receipt.c:producer_session_mismatch_detail:16
-engine/composition/src/consensus_state_producer_receipt_final.c:advance_final_receipt:19
-engine/composition/src/consensus_state_producer_receipt_final.c:final_receipt_state:42
-engine/composition/src/consensus_state_producer_receipt_final.c:write_final_receipt:18
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_anchors:21
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
 engine/composition/src/consensus_state_snapshot_candidate.c:candidate_copy_components:16
