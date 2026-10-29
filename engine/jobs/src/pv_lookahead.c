@@ -35,6 +35,10 @@
 
 #define PVLA_MAX_WORKERS 16
 #define PVLA_RETRY_WAIT_MS 20
+/* Wait when the claim reached the end of the active chain: nothing above can
+ * be verified until a block connects, and take() broadcasts on every consumed
+ * block. Must stay well under the liveness deadline of the pool child. */
+#define PVLA_IDLE_WAIT_MS 1000
 
 struct pvla_slot {
     int32_t height;                 /* -1 = empty */
@@ -99,10 +103,17 @@ static _Atomic uint64_t g_bodiless_skipped_total = 0;
  * throughput independent of the drive's consume rate. */
 static _Atomic uint64_t g_verified_total = 0;
 static _Atomic int64_t  g_start_us = 0;
+#ifdef ZCL_TESTING
+static _Atomic uint64_t g_claims_total = 0;   /* pvla_verify_height calls */
+uint64_t pv_lookahead_test_claims_total(void)
+{
+    return atomic_load(&g_claims_total);
+}
+#endif
 
 /* Liveness-tree presence: one child contract for the whole pool. Each worker
  * heartbeats it every loop iteration (workers wake at least every
- * PVLA_RETRY_WAIT_MS even when idle-blocked), so a wedged pool surfaces on the
+ * PVLA_IDLE_WAIT_MS even when idle-blocked), so a wedged pool surfaces on the
  * supervisor tree; progress_marker tracks g_verified_total so a live-but-
  * making-no-progress pool is distinguishable from a healthy idle one. The pool
  * is fold-adjacent, so it stays TEMPORARY (never auto-restarted mid-fold) —
@@ -167,6 +178,11 @@ enum pvla_attempt {
      * !HAVE_DATA means "body not yet written": no pread, infinite re-sweep
      * (gap healing is by design). */
     PVLA_HEIGHT_GAP,
+    /* The height has no block in the active chain. The active chain is
+     * contiguous at the top, so no higher height can be verified either: the
+     * claim is held at this height and the pool idles until a block
+     * connects. */
+    PVLA_PAST_CHAIN,
     /* HAVE_DATA is set but the body read failed. Distinct from
      * PVLA_HEIGHT_GAP: strike-accounted per logical sweep (g_strikes) and
      * capped, because this class storms when the index outlives the file. */
@@ -282,12 +298,18 @@ static void pvla_store_verdict(int32_t h, const struct uint256 *hash,
 
 static enum pvla_attempt pvla_verify_height(int32_t h)
 {
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_claims_total, 1);
+#endif
     struct block_index *bi = active_chain_at(&g_ms->chain_active, h);
-    if (!bi || !(block_index_status_load(bi) & BLOCK_HAVE_DATA) ||
-        !bi->phashBlock) {
-        /* !HAVE_DATA (or the height left the chain): the refetch signal, so
-         * any strike state resets and the height re-enters the cheap
-         * no-pread status-gap path that re-sweeps forever. */
+    if (!bi) {
+        pvla_strike_clear(h);
+        return PVLA_PAST_CHAIN;
+    }
+    if (!(block_index_status_load(bi) & BLOCK_HAVE_DATA) || !bi->phashBlock) {
+        /* !HAVE_DATA: the refetch signal, so any strike state resets and
+         * the height re-enters the cheap no-pread status-gap path that
+         * re-sweeps forever. */
         pvla_strike_clear(h);
         return PVLA_HEIGHT_GAP;
     }
@@ -332,6 +354,19 @@ static enum pvla_attempt pvla_verify_height(int32_t h)
     return PVLA_STORED;
 }
 
+/* g_mu held. Restart the claim at the lowest pending body gap in
+ * [cursor, limit), clear the gap, and report whether one was reclaimed. */
+static bool pvla_reclaim_gap_locked(int64_t cursor, int64_t limit)
+{
+    bool reclaimed = g_lowest_gap >= cursor && g_lowest_gap < limit;
+    if (reclaimed) {
+        g_next_claim = g_lowest_gap;
+        g_sweep_gen++;   /* one logical sweep begins (strike epoch) */
+    }
+    g_lowest_gap = -1;
+    return reclaimed;
+}
+
 /* g_mu held. h is past the lookahead window or INT32_MAX: reclaim a pending
  * gap, clear it, and wait. True means continue the claim loop. */
 static bool pvla_resweep_exhausted_window_locked(int64_t h, int64_t cursor)
@@ -345,21 +380,31 @@ static bool pvla_resweep_exhausted_window_locked(int64_t h, int64_t cursor)
          * height still costs only one cheap failed claim per sweep
          * (active_chain_at / BLOCK_HAVE_DATA, no pread), so the
          * "never block forever on a missing height" property above holds. */
-        if (g_lowest_gap >= cursor && g_lowest_gap < g_next_claim) {
-            g_next_claim = g_lowest_gap;
-            g_sweep_gen++;   /* one logical sweep begins (strike epoch) */
-        }
-        g_lowest_gap = -1;
+        (void)pvla_reclaim_gap_locked(cursor, g_next_claim);
         pvla_timed_wait_locked(PVLA_RETRY_WAIT_MS);
         return true;
     }
     return false;
 }
 
-/* g_mu held. Record a height gap, or hold and retry a global verifier
- * outage, for the attempt just finished. */
-static void pvla_note_verify_attempt_locked(enum pvla_attempt r, int64_t h)
+/* g_mu held. The claim ran past the end of the active chain at h: hold the
+ * claim at h so it is retried once a block connects. A pending body gap below
+ * h is re-swept at the retry cadence; otherwise the pool idles. */
+static void pvla_hold_past_chain_locked(int64_t h, int64_t cursor)
 {
+    if (g_next_claim > h)
+        g_next_claim = h;
+    bool gap = pvla_reclaim_gap_locked(cursor, h);
+    pvla_timed_wait_locked(gap ? PVLA_RETRY_WAIT_MS : PVLA_IDLE_WAIT_MS);
+}
+
+/* g_mu held. Record a height gap, hold at the chain end, or hold and retry a
+ * global verifier outage, for the attempt just finished. */
+static void pvla_note_verify_attempt_locked(enum pvla_attempt r, int64_t h,
+                                            int64_t cursor)
+{
+    if (r == PVLA_PAST_CHAIN)
+        pvla_hold_past_chain_locked(h, cursor);
     if (r == PVLA_HEIGHT_GAP &&
         (g_lowest_gap < 0 || h < g_lowest_gap))
         g_lowest_gap = h;
@@ -415,7 +460,7 @@ static void *pvla_worker_entry(void *arg)
         enum pvla_attempt r = pvla_verify_height((int32_t)h);
 
         pthread_mutex_lock(&g_mu);
-        pvla_note_verify_attempt_locked(r, h);
+        pvla_note_verify_attempt_locked(r, h, cursor);
     }
     pthread_mutex_unlock(&g_mu);
     if (child != SUPERVISOR_INVALID_ID)

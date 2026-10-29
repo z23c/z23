@@ -115,6 +115,11 @@ uint64_t pv_lookahead_miss_total(void);
 uint64_t pv_lookahead_populated(void);
 uint64_t pv_lookahead_bodiless_skipped_total(void);
 
+#ifdef ZCL_TESTING
+/* Number of height claims the workers have made (verification attempts). */
+uint64_t pv_lookahead_test_claims_total(void);
+#endif
+
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. Reports the
  * pool's running flag, worker count, window, queue depth (warmed-not-consumed
  * verdicts), cache hits/misses/hit_rate, verdicts_produced, pre-verify

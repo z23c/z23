@@ -737,6 +737,45 @@ static int la_test_bodiless_reset(void)
     return failures;
 }
 
+/* Chain-end idleness. The active chain ends inside the window: the heights
+ * above it cannot be verified until a block connects, so the workers must
+ * idle instead of re-claiming them, yet still verify a block that connects
+ * later. */
+static int la_test_chain_end_idle(void)
+{
+    int failures = 0;
+    setenv("ZCL_PV_WORKERS", "2", 1);
+    struct la_pool_fixture fx;
+    la_pool_fixture_init(&fx, "idle", 12);
+    bool shortened = false;
+    if (fx.ok) {
+        active_chain_free(&fx.ms.chain_active);
+        active_chain_init(&fx.ms.chain_active);
+        shortened = active_chain_move_window_tip(&fx.ms.chain_active,
+                                                 &fx.sc.blocks[5]);
+    }
+    bool started = shortened &&
+        pv_lookahead_start(&fx.ms, fx.dir, la_reader, &fx.sc, la_verifier,
+                           &fx.sc);
+    PVLA_CHECK("idle: pool starts on a chain ending inside the window",
+               started);
+    if (started) {
+        PVLA_CHECK("idle: every block of the short chain is verified",
+                   la_wait_populated(6, 10000));
+        platform_sleep_ms(100);
+        uint64_t c1 = pv_lookahead_test_claims_total();
+        platform_sleep_ms(500);
+        uint64_t c2 = pv_lookahead_test_claims_total();
+        PVLA_CHECK("idle: no claim spin past the chain end", c2 - c1 < 64);
+        PVLA_CHECK("idle: a block connected while idle is verified",
+                   active_chain_move_window_tip(&fx.ms.chain_active,
+                                                &fx.sc.blocks[8]) &&
+                   la_wait_populated(9, 1500));
+    }
+    la_pool_fixture_destroy(&fx);
+    return failures;
+}
+
 /* ── the tests ───────────────────────────────────────────────────────────── */
 
 static bool la_params_available(void)
@@ -956,6 +995,7 @@ int test_pv_lookahead(void)
     failures += la_test_bodiless_storm();
     failures += la_test_bodiless_heal();
     failures += la_test_bodiless_reset();
+    failures += la_test_chain_end_idle();
 
     printf("pv_lookahead tests: %s\n", failures ? "FAILED" : "PASSED");
     return failures;
