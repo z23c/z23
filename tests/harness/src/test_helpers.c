@@ -359,16 +359,17 @@ static size_t test_quote_arg(char *out, size_t out_n, const char *arg)
     return len;
 }
 
-/* True when argv, argv[0] and out are non-NULL and cap is nonzero. */
-static bool test_capture_args_valid(const char *const argv[],
-                                    char *out, size_t cap)
+/* True when argv and argv[0] are non-NULL. */
+static bool test_argv_nonempty(const char *const argv[])
 {
-    return argv && argv[0] && out && cap != 0;
+    return argv && argv[0];
 }
 
-/* Copy execve-style "KEY=VALUE" envp strings into the NUL-separated,
- * double-NUL-terminated Win32 environment block; *env_arg stays NULL when
- * envp is NULL. False when the block overflows. */
+/* Copy execve-style "KEY=VALUE" envp strings into a NUL-separated Win32
+ * environment block: each string keeps its NUL and one more NUL closes the
+ * block, so a non-empty envp ends double-NUL while an empty envp yields a
+ * single NUL. *env_arg stays NULL when envp is NULL. False when the block
+ * overflows. */
 static bool test_envp_to_env_block(const char *const envp[],
                                    char *block, size_t block_n,
                                    void **env_arg)
@@ -555,7 +556,7 @@ int test_spawn_capture_env(const char *const argv[],
                            const char *const envp[],
                            char *out, size_t cap)
 {
-    if (!test_capture_args_valid(argv, out, cap)) {
+    if (!test_argv_nonempty(argv) || !out || cap == 0) {
         fprintf(stderr, "test_spawn_capture_env: bad args\n");
         return -1;
     }
@@ -643,7 +644,7 @@ bool test_spawn_capture_kill(const char *const argv[],
                              const char *const *needles, int max_ms,
                              char *out, size_t cap)
 {
-    if (!test_capture_args_valid(argv, out, cap) || !needles) {
+    if (!test_argv_nonempty(argv) || !needles || !out || cap == 0) {
         fprintf(stderr, "test_spawn_capture_kill: bad args\n");
         return false;
     }
