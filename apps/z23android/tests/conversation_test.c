@@ -63,40 +63,53 @@ static void history_byte_cases(void)
     assert(zapp_history_append(&h, "five", mid) && h.turns == 3 && !memcmp(before, h.text, kept));
 }
 
-int main(void)
+/* Parses the node JSON between the label and the question; returns the question text. */
+static const char *format_parts(const char *out, struct json_value *node)
 {
-    history_basic_cases(); history_turn_cases(); history_byte_cases();
+    static const char label[] = "This phone's own node, which is not one of the fleet hosts: ";
+    const char *question = strstr(out, "\n\nQuestion: ");
+    assert(!strncmp(out, label, sizeof(label) - 1) && question);
+    const char *json = out + sizeof(label) - 1;
+    assert(json_read(node, json, (size_t)(question - json)) && node->type == JSON_OBJ && json_size(node) == 4);
+    return question + 12;
+}
+static void format_cases(void)
+{
     struct zapp_conversation_snapshot s = {0};
     char out[ZAPP_CONVERSATION_CAP];
     memcpy(s.sync_status, "Node running; status did not answer. Sync progress is unknown.",
            sizeof("Node running; status did not answer. Sync progress is unknown."));
     assert(zapp_conversation_format(&s, "a \"quote\"\nnext", out, sizeof(out)));
-    char *json = strchr(out, '\n');
-    struct json_value root = {0};
-    assert(json && json_read(&root, json + 1, strlen(json + 1)));
-    assert(root.type == JSON_OBJ && json_size(&root) == 5);
-    assert(json_get(&root, "sync_status") && json_get(&root, "balance") &&
-           json_get(&root, "balance_stale") && json_get(&root, "node_running") &&
-           json_get(&root, "question"));
-    assert(!strcmp(json_get_str(json_get(&root, "question")), "a \"quote\"\nnext"));
-    assert(!strcmp(json_get_str(json_get(&root, "balance")), "unavailable"));
-    assert(!json_get_bool(json_get(&root, "balance_stale")));
-    json_free(&root);
-    s.balance_known = s.balance_stale = true;
+    struct json_value node = {0};
+    assert(!strcmp(format_parts(out, &node), "a \"quote\"\nnext"));
+    assert(!json_get_bool(json_get(&node, "running")) && !json_get_bool(json_get(&node, "balance_stale")));
+    assert(!strcmp(json_get_str(json_get(&node, "balance")), "unavailable"));
+    assert(!strcmp(json_get_str(json_get(&node, "sync_status")), s.sync_status));
+    json_free(&node);
+    s.balance_known = s.balance_stale = s.node_running = true;
     memcpy(s.balance, "Total: 1 ZCL (may be stale)", sizeof("Total: 1 ZCL (may be stale)"));
     assert(zapp_conversation_format(&s, "balance?", out, sizeof(out)));
-    json = strchr(out, '\n');
-    assert(json_read(&root, json + 1, strlen(json + 1)));
-    assert(json_get_bool(json_get(&root, "balance_stale")));
-    assert(!strcmp(json_get_str(json_get(&root, "balance")), s.balance));
-    json_free(&root);
-    assert(!zapp_conversation_format(&s, "", out, sizeof(out)));
+    assert(!strcmp(format_parts(out, &node), "balance?"));
+    assert(json_get_bool(json_get(&node, "running")) && json_get_bool(json_get(&node, "balance_stale")));
+    assert(!strcmp(json_get_str(json_get(&node, "balance")), s.balance));
+    json_free(&node);
+    size_t used = (size_t)(strstr(out, "\n\nQuestion: ") - out);
+    assert(!zapp_conversation_format(&s, "balance?", out, used + 12) && !out[0]);
+    assert(!zapp_conversation_format(&s, "balance?", out, used + 20) && !out[0]);
+    assert(zapp_conversation_format(&s, "balance?", out, used + 21));
+    assert(!zapp_conversation_format(&s, "", out, sizeof(out)) && !out[0]);
     assert(!zapp_conversation_format(&s, "\xff", out, sizeof(out)));
-    assert(!zapp_conversation_format(&s, "question", out, 10));
+    assert(!zapp_conversation_format(&s, "question", out, 10) && !out[0]);
+    assert(!zapp_conversation_format(&s, "question", out, 140) && !out[0]);
     char long_question[16001]; memset(long_question, 'a', 16000); long_question[16000] = 0;
-    assert(!zapp_conversation_format(&s, long_question, out, sizeof(out)));
+    assert(!zapp_conversation_format(&s, long_question, out, sizeof(out)) && !out[0]);
     memset(s.sync_status, 'x', sizeof(s.sync_status));
     assert(!zapp_conversation_format(&s, "question", out, sizeof(out)));
+}
+
+int main(void)
+{
+    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases();
     puts("conversation tests passed");
     return 0;
 }

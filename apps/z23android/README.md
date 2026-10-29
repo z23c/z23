@@ -61,11 +61,14 @@ an unavailable balance is not displayed as zero.
 Chat refreshes a bounded read-only node summary before asking the private
 model on the paired laptop host. The summary includes synchronization text,
 balance and availability flags. It excludes keys, addresses and raw RPC
-output. Up to 32 earlier exchanges, at most 4 KB, travel as separate turns
-with a constant system message, so the model server reuses their cached
-prefix instead of re-reading the whole conversation for every question. When
-the history fills, the oldest exchanges are dropped down to half its size at
-once, which keeps the remaining prefix unchanged for many turns.
+output. It travels as data labelled as this phone's own node, apart from the
+fleet hosts, followed by the question. Only answers from the model join the
+history; error messages and answers made on the phone do not. Up to 32 earlier
+exchanges, at most 4 KB, travel as separate turns with a constant system
+message, so the model server reuses their cached prefix instead of re-reading
+the whole conversation for every question. When the history fills, the oldest
+exchanges are dropped down to half its size at once, which keeps the remaining
+prefix unchanged for many turns.
 Chat cannot execute wallet operations or spend funds.
 While an answer is pending, Send becomes Stop reply. Cancellation closes the
 client connection and discards late answers. It does not stop the full node
@@ -225,6 +228,17 @@ level, seven of eight identical requests ran with the GPU at its lowest clock,
 800 MHz, and took 2.2-2.3 times real time; the eighth reached 1.8-2.7 GHz and
 took 0.66. Half of the replayed answers ran at 2.2-2.5 times real time and left
 gaps of 10-28 s under every rule.
+
+Answer quality was sampled on 2026-10-29 with five questions about a fleet of
+three hosts and a stopped phone node, six answers each at temperature 0.6. An
+answer failed when it tied the phone node to a fleet host, named a control that
+does not exist, stated a requested fact wrongly or skipped the question. With
+the phone node labelled apart from the fleet and the question last, 24 of 30
+answers passed, against 20 of 30 with the question inside the node data under a
+per-question instruction; answers that confused the phone node with the fleet
+or named a missing control fell from 10 to 5, and the prompt shrank from
+346-349 to 322-325 tokens. Most remaining misses suggest starting the phone
+node to fix a fleet host.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That

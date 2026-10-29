@@ -127,9 +127,10 @@ static void observe_node(struct controller *c)
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
 }
-static void chat_result(struct controller *c, const char *prompt, const char *answer)
+/* Shows the exchange; only answers from the model join the history sent with later questions. */
+static void chat_result(struct controller *c, const char *prompt, const char *answer, bool from_model)
 {
-    (void)zapp_history_append(&c->history, prompt, answer);
+    if (from_model) (void)zapp_history_append(&c->history, prompt, answer);
     size_t needed = strlen(prompt) + strlen(answer) + 24;
     size_t used = strlen(c->view.transcript);
     if (needed >= sizeof(c->view.transcript)) {
@@ -271,20 +272,23 @@ static enum listen_result voice_listen(struct controller *c, bool follow_up, cha
     return heard ? LISTEN_HEARD : LISTEN_SILENT;
 }
 /* Start and stop stay on-screen proposals; everything else goes to the private model, which
- * streams its audio when the laptop supports it. Without any audio the caller speaks the text. */
-static void voice_reply(struct controller *c, const char *transcript, char *answer, struct voice_stream *stream)
+ * streams its audio when the laptop supports it. Without any audio the caller speaks the text.
+ * Returns whether the private model answered. */
+static bool voice_reply(struct controller *c, const char *transcript, char *answer, struct voice_stream *stream)
 {
     enum zapp_voice_intent intent = zapp_voice_interpret(transcript);
     char brief[120] = "";
     if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP) {
-        voice_answer(c, intent, brief); copy_text(answer, ZAPP_TEXT_CAP, brief); return;
+        voice_answer(c, intent, brief); copy_text(answer, ZAPP_TEXT_CAP, brief); return false;
     }
     voice_stage(c, ZAPP_VOICE_OBSERVING, "Thinking privately on your laptop…");
-    if (ask_with(c, transcript, answer, &c->voice_cancel, stream) || atomic_load(&c->voice_cancel)) return;
-    if (stream->player) return;
-    if (ask_assistant(c, transcript, answer, &c->voice_cancel) || atomic_load(&c->voice_cancel)) return;
+    if (ask_with(c, transcript, answer, &c->voice_cancel, stream)) return true;
+    if (atomic_load(&c->voice_cancel) || stream->player) return false;
+    if (ask_assistant(c, transcript, answer, &c->voice_cancel)) return true;
+    if (atomic_load(&c->voice_cancel)) return false;
     voice_answer(c, intent, brief);
     copy_text(answer, ZAPP_TEXT_CAP, brief);
+    return false;
 }
 static bool speak_chunk(struct controller *c, const char *chunk, struct zapp_player **player,
                         char *error, size_t error_cap)
@@ -347,11 +351,10 @@ static enum turn_result voice_turn(struct controller *c, bool follow_up, char *o
     if (heard == LISTEN_FAILED) copy_text(out, ZAPP_TEXT_CAP, error);
     if (heard != LISTEN_HEARD) return heard == LISTEN_SILENT ? TURN_SILENT : TURN_FAILED;
     struct voice_stream stream = {.c = c};
-    voice_reply(c, transcript, out, &stream);
-    bool proposed = false;
+    bool answered = voice_reply(c, transcript, out, &stream), proposed = false;
     if (!atomic_load(&c->voice_cancel)) {
         pthread_mutex_lock(&c->lock);
-        chat_result(c, transcript, out);
+        chat_result(c, transcript, out, answered);
         proposed = c->view.voice_proposal[0] != 0;
         pthread_mutex_unlock(&c->lock);
     }
@@ -448,7 +451,7 @@ static bool chat_state(struct controller *c)
 static void chat_outcome(struct controller *c, const char *arg, bool ok, char *out)
 {
     if (ok) {
-        chat_result(c, arg, out);
+        chat_result(c, arg, out, true);
         copy_text(c->view.connection, sizeof(c->view.connection), "Answered privately by the model on your laptop.");
     } else if (strcmp(out, "Question is invalid or too long.") &&
                strcmp(out, "Not enough memory to prepare the question."))
