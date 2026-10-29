@@ -228,14 +228,13 @@ static void rp_child_worker(const char *log_path, const char *bip_path,
 
 /* ── One fork + randomised SIGKILL + reboot + verify cycle ───────────── */
 
-static int rp_one_cycle(const char *log_path, const char *bip_path,
-                        const char *dir, struct rp_chain *c,
-                        int cycle_idx, unsigned int *rng_state,
-                        bool *out_all_done)
+/* One fork + SIGKILL round: spawns the resumable child, kills it after a
+ * randomised delay and reaps it. Returns 0 when the child died by SIGKILL or
+ * exited cleanly; returns 1 after reporting the failure. */
+static int rp_fork_and_kill(const char *log_path, const char *bip_path,
+                            const char *dir, struct rp_chain *c,
+                            int cycle_idx, unsigned int *rng_state)
 {
-    int failures = 0;
-    *out_all_done = false;
-
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); return 1; }
     if (pid == 0) {
@@ -262,6 +261,159 @@ static int rp_one_cycle(const char *log_path, const char *bip_path,
                cycle_idx, WIFSIGNALED(status), WIFEXITED(status), status);
         return 1;
     }
+    return 0;
+}
+
+/* Status predicate: HAVE_DATA set and validity at least VALID_SCRIPTS. */
+static bool rp_status_ok(struct disk_block_index *dbi)
+{
+    return (dbi->nStatus & BLOCK_HAVE_DATA) != 0 &&
+           (dbi->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS;
+}
+
+/* Mutable fields written by the body_persist status bump at height h. */
+static bool rp_mutable_ok(struct disk_block_index *dbi, uint64_t h)
+{
+    return dbi->nFile == 0 &&
+           dbi->nDataPos == 1000u + (unsigned)h * 100u &&
+           dbi->nTx == 1;
+}
+
+/* Immutable header bytes of height h: merkle root, sapling root, nonce and
+ * solution. */
+static bool rp_immutable_ok(struct disk_block_index *dbi,
+                            struct rp_chain *c, uint64_t h)
+{
+    return uint256_cmp(&dbi->hashMerkleRoot, &c->blocks[h].merkle_root) == 0 &&
+           uint256_cmp(&dbi->hashFinalSaplingRoot,
+                       &c->blocks[h].sapling_root) == 0 &&
+           uint256_cmp(&dbi->nNonce, &c->blocks[h].nonce) == 0 &&
+           dbi->nSolutionSize == RP_SOLUTION_LEN &&
+           memcmp(dbi->nSolution, c->blocks[h].solution, RP_SOLUTION_LEN) == 0;
+}
+
+/* Verifies one completed height after restart; logs the mismatch if any. */
+static bool rp_check_one_completed_height(block_index_projection_t *bip,
+                                          struct rp_chain *c, uint64_t h)
+{
+    struct disk_block_index dbi;
+    disk_block_index_init(&dbi);
+    bool found = block_index_projection_get(bip, c->blocks[h].hash.data,
+                                            &dbi);
+    if (!found) {
+        printf("    height %" PRIu64 " MISSING from the projection "
+               "after restart (missing-header error)\n", h);
+        return false;
+    }
+    bool status_ok = rp_status_ok(&dbi);
+    bool mutable_ok = rp_mutable_ok(&dbi, h);
+    bool immutable_ok = rp_immutable_ok(&dbi, c, h);
+    if (!status_ok || !mutable_ok || !immutable_ok) {
+        printf("    height %" PRIu64 " WRONG after restart: status_ok=%d "
+               "mutable_ok=%d immutable_ok=%d\n",
+               h, status_ok, mutable_ok, immutable_ok);
+        return false;
+    }
+    return true;
+}
+
+static bool rp_check_completed_heights(block_index_projection_t *bip,
+                                       struct rp_chain *c, uint64_t cursor)
+{
+    bool all_heights_ok = true;
+    for (uint64_t h = 0; h < cursor; h++) {
+        if (!rp_check_one_completed_height(bip, c, h))
+            all_heights_ok = false;
+    }
+    return all_heights_ok;
+}
+
+static bool rp_boundary_ok(block_index_projection_t *bip,
+                           struct rp_chain *c, uint64_t cursor)
+{
+    bool boundary_ok = true;
+    if (cursor < (uint64_t)RP_N_BLOCKS) {
+        struct disk_block_index bdbi;
+        disk_block_index_init(&bdbi);
+        bool bfound = block_index_projection_get(
+            bip, c->blocks[cursor].hash.data, &bdbi);
+        if (bfound)
+            boundary_ok = rp_immutable_ok(&bdbi, c, cursor);
+    }
+    return boundary_ok;
+}
+
+/* Catches the fresh projection up and compares its commitment and count with
+ * the live projection. */
+static bool rp_fresh_matches_live(block_index_projection_t *bip,
+                                  block_index_projection_t *fresh)
+{
+    bool fresh_ok = block_index_projection_catch_up(fresh) != UINT64_MAX;
+    uint8_t clive[32], cfresh[32];
+    return fresh_ok &&
+        block_index_projection_commitment(bip, clive) == 0 &&
+        block_index_projection_commitment(fresh, cfresh) == 0 &&
+        memcmp(clive, cfresh, 32) == 0 &&
+        block_index_projection_count(bip) == block_index_projection_count(fresh);
+}
+
+static bool rp_fresh_replay_ok(block_index_projection_t *bip,
+                               event_log_t *log, const char *bip_path,
+                               int cycle_idx)
+{
+    char fresh_path[600];
+    snprintf(fresh_path, sizeof(fresh_path), "%s.fresh_%d", bip_path,
+            cycle_idx);
+    block_index_projection_t *fresh = block_index_projection_open(fresh_path,
+                                                                  log);
+    bool fresh_ok = fresh != NULL;
+    if (fresh) {
+        fresh_ok = rp_fresh_matches_live(bip, fresh);
+        block_index_projection_close(fresh);
+    }
+    return fresh_ok;
+}
+
+static int rp_resume_fold(sqlite3 *db, struct rp_chain *c,
+                          block_index_projection_t *bip, uint64_t cursor,
+                          bool *out_all_done)
+{
+    int failures = 0;
+    static struct block_index blocks[RP_N_BLOCKS];
+    rp_rebuild_prefix(c, blocks, (int)cursor);
+    if (cursor < (uint64_t)RP_N_BLOCKS) {
+        bool resumed = rp_process_one(db, c, blocks, (int)cursor);
+        RP_CHECK("fold resumes past the crash with no error", resumed);
+        if (resumed) {
+            bool caught_up =
+                block_index_projection_catch_up(bip) != UINT64_MAX;
+            struct disk_block_index dbi;
+            disk_block_index_init(&dbi);
+            bool found = caught_up &&
+                block_index_projection_get(bip, c->blocks[cursor].hash.data,
+                                           &dbi);
+            RP_CHECK("resumed height is found + fully bumped",
+                     found && rp_status_ok(&dbi));
+        }
+        *out_all_done = (cursor + 1 >= (uint64_t)RP_N_BLOCKS);
+    } else {
+        *out_all_done = true;
+    }
+    return failures;
+}
+
+/* ── One fork + randomised SIGKILL + reboot + verify cycle ───────────── */
+
+static int rp_one_cycle(const char *log_path, const char *bip_path,
+                        const char *dir, struct rp_chain *c,
+                        int cycle_idx, unsigned int *rng_state,
+                        bool *out_all_done)
+{
+    int failures = 0;
+    *out_all_done = false;
+
+    if (rp_fork_and_kill(log_path, bip_path, dir, c, cycle_idx, rng_state) != 0)
+        return 1;
 
     /* ── REBOOT: reopen exactly as a real restart would ── */
     event_log_t *log = event_log_open(log_path);
@@ -301,37 +453,7 @@ static int rp_one_cycle(const char *log_path, const char *bip_path,
      * three-event sequence before the crash (or an earlier cycle) — the
      * heights a real fold considers done and never revisits. Assert the
      * projection reconstructs each one EXACTLY. */
-    bool all_heights_ok = true;
-    for (uint64_t h = 0; h < cursor; h++) {
-        struct disk_block_index dbi;
-        disk_block_index_init(&dbi);
-        bool found = block_index_projection_get(bip, c->blocks[h].hash.data,
-                                                &dbi);
-        if (!found) {
-            all_heights_ok = false;
-            printf("    height %" PRIu64 " MISSING from the projection "
-                   "after restart (missing-header error)\n", h);
-            continue;
-        }
-        bool status_ok = (dbi.nStatus & BLOCK_HAVE_DATA) != 0 &&
-                         (dbi.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS;
-        bool mutable_ok = dbi.nFile == 0 &&
-                          dbi.nDataPos == 1000u + (unsigned)h * 100u &&
-                          dbi.nTx == 1;
-        bool immutable_ok =
-            uint256_cmp(&dbi.hashMerkleRoot, &c->blocks[h].merkle_root) == 0 &&
-            uint256_cmp(&dbi.hashFinalSaplingRoot,
-                       &c->blocks[h].sapling_root) == 0 &&
-            uint256_cmp(&dbi.nNonce, &c->blocks[h].nonce) == 0 &&
-            dbi.nSolutionSize == RP_SOLUTION_LEN &&
-            memcmp(dbi.nSolution, c->blocks[h].solution, RP_SOLUTION_LEN) == 0;
-        if (!status_ok || !mutable_ok || !immutable_ok) {
-            all_heights_ok = false;
-            printf("    height %" PRIu64 " WRONG after restart: status_ok=%d "
-                   "mutable_ok=%d immutable_ok=%d\n",
-                   h, status_ok, mutable_ok, immutable_ok);
-        }
-    }
+    bool all_heights_ok = rp_check_completed_heights(bip, c, cursor);
     RP_CHECK("every completed height reconstructs identical state "
              "(status + mutable fields + immutable header bytes)",
              all_heights_ok);
@@ -342,24 +464,7 @@ static int rp_one_cycle(const char *log_path, const char *bip_path,
      * cursor for this one height. That is not corruption: every field is a
      * deterministic function of h and the fold resumes at the cursor. What
      * must never happen is the boundary showing wrong data. */
-    bool boundary_ok = true;
-    if (cursor < (uint64_t)RP_N_BLOCKS) {
-        struct disk_block_index bdbi;
-        disk_block_index_init(&bdbi);
-        bool bfound = block_index_projection_get(
-            bip, c->blocks[cursor].hash.data, &bdbi);
-        if (bfound) {
-            boundary_ok =
-                uint256_cmp(&bdbi.hashMerkleRoot,
-                           &c->blocks[cursor].merkle_root) == 0 &&
-                uint256_cmp(&bdbi.hashFinalSaplingRoot,
-                           &c->blocks[cursor].sapling_root) == 0 &&
-                uint256_cmp(&bdbi.nNonce, &c->blocks[cursor].nonce) == 0 &&
-                bdbi.nSolutionSize == RP_SOLUTION_LEN &&
-                memcmp(bdbi.nSolution, c->blocks[cursor].solution,
-                      RP_SOLUTION_LEN) == 0;
-        }
-    }
+    bool boundary_ok = rp_boundary_ok(bip, c, cursor);
     RP_CHECK("boundary height (at the cursor), if present in the "
              "projection at all, is never corrupted — correct header "
              "bytes whether or not the fold has durably marked it done",
@@ -368,51 +473,76 @@ static int rp_one_cycle(const char *log_path, const char *bip_path,
     /* Prime-Directive check: a FRESH projection replayed from offset 0 over
      * the SAME (possibly torn-tail-truncated) log must match the live
      * continued projection exactly — no path dependence from the crash. */
-    char fresh_path[600];
-    snprintf(fresh_path, sizeof(fresh_path), "%s.fresh_%d", bip_path,
-            cycle_idx);
-    block_index_projection_t *fresh = block_index_projection_open(fresh_path,
-                                                                  log);
-    bool fresh_ok = fresh != NULL;
-    if (fresh) {
-        fresh_ok = block_index_projection_catch_up(fresh) != UINT64_MAX;
-        uint8_t clive[32], cfresh[32];
-        fresh_ok = fresh_ok &&
-            block_index_projection_commitment(bip, clive) == 0 &&
-            block_index_projection_commitment(fresh, cfresh) == 0 &&
-            memcmp(clive, cfresh, 32) == 0 &&
-            block_index_projection_count(bip) == block_index_projection_count(fresh);
-        block_index_projection_close(fresh);
-    }
+    bool fresh_ok = rp_fresh_replay_ok(bip, log, bip_path, cycle_idx);
     RP_CHECK("fresh replay-from-scratch == live continued projection "
              "(Prime Directive)", fresh_ok);
 
     /* (d) RESUME: fold one more height through the SAME reopened handles —
      * no consumer error, the fold resumes cleanly. */
-    static struct block_index blocks[RP_N_BLOCKS];
-    rp_rebuild_prefix(c, blocks, (int)cursor);
-    if (cursor < (uint64_t)RP_N_BLOCKS) {
-        bool resumed = rp_process_one(db, c, blocks, (int)cursor);
-        RP_CHECK("fold resumes past the crash with no error", resumed);
-        if (resumed) {
-            bool caught_up =
-                block_index_projection_catch_up(bip) != UINT64_MAX;
-            struct disk_block_index dbi;
-            disk_block_index_init(&dbi);
-            bool found = caught_up &&
-                block_index_projection_get(bip, c->blocks[cursor].hash.data,
-                                           &dbi);
-            RP_CHECK("resumed height is found + fully bumped",
-                     found && (dbi.nStatus & BLOCK_HAVE_DATA) != 0 &&
-                     (dbi.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS);
-        }
-        *out_all_done = (cursor + 1 >= (uint64_t)RP_N_BLOCKS);
-    } else {
-        *out_all_done = true;
-    }
+    failures += rp_resume_fold(db, c, bip, cursor, out_all_done);
 
     progress_store_close();
     block_index_projection_close(bip);
+    rp_event_log_close(log);
+    return failures;
+}
+
+/* Every height in the fixture has HAVE_DATA and VALID_SCRIPTS set. `complete`
+ * carries the caller's result so far; the scan only continues while it holds. */
+static bool rp_all_heights_bumped(block_index_projection_t *bip,
+                                  struct rp_chain *c, bool complete)
+{
+    for (int h = 0; complete && h < RP_N_BLOCKS; h++) {
+        struct disk_block_index dbi;
+        disk_block_index_init(&dbi);
+        complete = block_index_projection_get(
+                       bip, c->blocks[h].hash.data, &dbi) &&
+                   rp_status_ok(&dbi);
+    }
+    return complete;
+}
+
+/* Folds the remaining heights on the reopened handles and catches the
+ * projection up. Returns whether every height is folded and bumped. */
+static bool rp_drain_fixture(block_index_projection_t *bip, struct rp_chain *c)
+{
+    sqlite3 *db = progress_store_db();
+    uint64_t cursor = 0;
+    bool ok = db != NULL &&
+              stage_cursor_read_or_zero(db, RP_CURSOR_NAME, "rp", &cursor);
+    static struct block_index blocks[RP_N_BLOCKS];
+    rp_rebuild_prefix(c, blocks, (int)cursor);
+    for (uint64_t h = cursor; ok && h < (uint64_t)RP_N_BLOCKS; h++)
+        ok = rp_process_one(db, c, blocks, (int)h);
+    ok = ok && block_index_projection_catch_up(bip) != UINT64_MAX;
+    return rp_all_heights_bumped(bip, c, ok);
+}
+
+/* Reopens the log and projection, drains the fixture and checks the terminal
+ * state. Returns the number of failures; sets *all_done on a full drain. */
+static int rp_terminal_drain(const char *log_path, const char *bip_path,
+                             const char *dir, struct rp_chain *c,
+                             bool *all_done)
+{
+    int failures = 0;
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip =
+        log ? block_index_projection_open(bip_path, log) : NULL;
+    bool ok = log && bip;
+    if (ok) {
+        event_log_set_singleton(log);
+        ok = progress_store_open(dir);
+    }
+    if (ok) {
+        bool complete = rp_drain_fixture(bip, c);
+        RP_CHECK("uninterrupted terminal drain completes the whole "
+                 "fixture (every height bumped)", complete);
+        *all_done = complete;
+        progress_store_close();
+    } else {
+        RP_CHECK("terminal drain: reopen succeeded", false);
+    }
+    if (bip) block_index_projection_close(bip);
     rp_event_log_close(log);
     return failures;
 }
@@ -458,45 +588,8 @@ static int test_block_status_event_restart_proof_platform_arm(void)
 
     /* Terminal: drain any remaining heights uninterrupted, proving the
      * fully-folded terminal is reachable however many SIGKILLs preceded it. */
-    if (!failures) {
-        event_log_t *log = event_log_open(log_path);
-        block_index_projection_t *bip =
-            log ? block_index_projection_open(bip_path, log) : NULL;
-        bool ok = log && bip;
-        if (ok) {
-            event_log_set_singleton(log);
-            ok = progress_store_open(dir);
-        }
-        if (ok) {
-            sqlite3 *db = progress_store_db();
-            uint64_t cursor = 0;
-            ok = db != NULL &&
-                stage_cursor_read_or_zero(db, RP_CURSOR_NAME, "rp", &cursor);
-            static struct block_index blocks[RP_N_BLOCKS];
-            rp_rebuild_prefix(c, blocks, (int)cursor);
-            for (uint64_t h = cursor; ok && h < (uint64_t)RP_N_BLOCKS; h++)
-                ok = rp_process_one(db, c, blocks, (int)h);
-            ok = ok && block_index_projection_catch_up(bip) != UINT64_MAX;
-
-            bool complete = ok;
-            for (int h = 0; complete && h < RP_N_BLOCKS; h++) {
-                struct disk_block_index dbi;
-                disk_block_index_init(&dbi);
-                complete = block_index_projection_get(
-                               bip, c->blocks[h].hash.data, &dbi) &&
-                           (dbi.nStatus & BLOCK_HAVE_DATA) != 0 &&
-                           (dbi.nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_SCRIPTS;
-            }
-            RP_CHECK("uninterrupted terminal drain completes the whole "
-                     "fixture (every height bumped)", complete);
-            all_done = complete;
-            progress_store_close();
-        } else {
-            RP_CHECK("terminal drain: reopen succeeded", false);
-        }
-        if (bip) block_index_projection_close(bip);
-        rp_event_log_close(log);
-    }
+    if (!failures)
+        failures += rp_terminal_drain(log_path, bip_path, dir, c, &all_done);
 
     RP_CHECK("fixture fully folded (kill cycles + terminal drain)", all_done);
 
