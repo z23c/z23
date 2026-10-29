@@ -167,6 +167,55 @@ static bool cin_append(struct cin_answer *answer, size_t *pos,
     return true;
 }
 
+/* One `file` row for a unit; fails when the index does not know the unit. */
+static bool cin_capture_file_row(struct codeindex *index, const char *unit,
+                                 struct cin_answer *answer, size_t *pos)
+{
+    struct ci_file file;
+    bool found = false;
+    memset(&file, 0, sizeof(file));
+    return codeindex_file(index, unit, &file, &found) && found &&
+           cin_append(answer, pos, "file %s|%s;", file.path, file.group);
+}
+
+static bool cin_capture_symbol_rows(struct codeindex *index, const char *unit,
+                                    struct cin_answer *answer, size_t *pos)
+{
+    struct ci_symbol symbols[16];
+    int n = codeindex_symbols_in_file(index, unit, symbols, 16);
+    bool ok = n >= 0 && cin_append(answer, pos, "syms %d:", n);
+    for (int s = 0; ok && s < n; s++)
+        ok = cin_append(answer, pos, "%s@%d,", symbols[s].name,
+                        symbols[s].def_line);
+    return ok;
+}
+
+/* The `_caller` function of a unit and the callees the index reports for it. */
+static bool cin_capture_call_rows(struct codeindex *index, const char *unit,
+                                  struct cin_answer *answer, size_t *pos)
+{
+    struct ci_ref refs[16];
+    char caller[128];
+    const char *slash = strrchr(unit, '/');
+    (void)snprintf(caller, sizeof(caller), "%s", slash ? slash + 1 : "");
+    char *dot = strrchr(caller, '.');
+    if (dot) *dot = '\0';
+    (void)strncat(caller, "_caller", sizeof(caller) - strlen(caller) - 1);
+    int edges = codeindex_callees(index, caller, refs, 16);
+    bool ok = edges >= 0 && cin_append(answer, pos, "|calls %d:", edges);
+    for (int e = 0; ok && e < edges; e++)
+        ok = cin_append(answer, pos, "%s,", refs[e].callee);
+    return ok && cin_append(answer, pos, "\n");
+}
+
+static bool cin_capture_unit(struct codeindex *index, const char *unit,
+                             struct cin_answer *answer, size_t *pos)
+{
+    bool ok = cin_capture_file_row(index, unit, answer, pos);
+    ok = ok && cin_capture_symbol_rows(index, unit, answer, pos);
+    return ok && cin_capture_call_rows(index, unit, answer, pos);
+}
+
 static bool cin_capture(const char *root, struct cin_answer *answer)
 {
     memset(answer, 0, sizeof(*answer));
@@ -177,32 +226,8 @@ static bool cin_capture(const char *root, struct cin_answer *answer)
                                                        answer->projection_root);
     answer->file_count = ok ? codeindex_file_count(index) : -1;
     size_t pos = 0;
-    for (size_t i = 0; ok && i < CIN_UNIT_COUNT; i++) {
-        struct ci_file file;
-        bool found = false;
-        memset(&file, 0, sizeof(file));
-        ok = codeindex_file(index, cin_units[i], &file, &found) && found &&
-             cin_append(answer, &pos, "file %s|%s;", file.path, file.group);
-        struct ci_symbol symbols[16];
-        int n = ok ? codeindex_symbols_in_file(index, cin_units[i], symbols, 16)
-                   : -1;
-        ok = ok && n >= 0 && cin_append(answer, &pos, "syms %d:", n);
-        for (int s = 0; ok && s < n; s++)
-            ok = cin_append(answer, &pos, "%s@%d,", symbols[s].name,
-                            symbols[s].def_line);
-        struct ci_ref refs[16];
-        char caller[128];
-        const char *slash = strrchr(cin_units[i], '/');
-        (void)snprintf(caller, sizeof(caller), "%s", slash ? slash + 1 : "");
-        char *dot = strrchr(caller, '.');
-        if (dot) *dot = '\0';
-        (void)strncat(caller, "_caller", sizeof(caller) - strlen(caller) - 1);
-        int edges = ok ? codeindex_callees(index, caller, refs, 16) : -1;
-        ok = ok && edges >= 0 && cin_append(answer, &pos, "|calls %d:", edges);
-        for (int e = 0; ok && e < edges; e++)
-            ok = cin_append(answer, &pos, "%s,", refs[e].callee);
-        ok = ok && cin_append(answer, &pos, "\n");
-    }
+    for (size_t i = 0; ok && i < CIN_UNIT_COUNT; i++)
+        ok = cin_capture_unit(index, cin_units[i], answer, &pos);
     codeindex_close(index);
     return ok;
 }
@@ -723,35 +748,11 @@ static int cin_depfile_cases(const char *live, const char *reference)
     return failures;
 }
 
-int test_codeindex_incremental(void)
+/* One file, three files, a whole directory and a reverted file. Each edit is
+ * applied to both fixtures and compared to the cold answer. */
+static int cin_edit_cases(const char *live, const char *reference)
 {
     int failures = 0;
-    char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
-    char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
-    char live[PATH_MAX], reference[PATH_MAX];
-    bool ready = platform_temp_directory_create(
-        "z23-codeindex-incremental-", temporary, sizeof(temporary));
-    ready = ready && platform_directory_canonical_real(
-        temporary, workspace, sizeof(workspace));
-    int live_n = ready ? snprintf(live, sizeof(live), "%s/live", workspace) : -1;
-    int reference_n = ready ? snprintf(reference, sizeof(reference),
-                                       "%s/reference", workspace) : -1;
-    ready = ready && live_n > 0 && (size_t)live_n < sizeof(live) &&
-            reference_n > 0 && (size_t)reference_n < sizeof(reference) &&
-            cin_seed(live) && cin_seed(reference);
-    CIN_CHECK("two identical fixtures are ready", ready);
-    if (!ready) return failures;
-
-    int baseline_files = 0;
-    CIN_CHECK("cold builds of identical trees are identical",
-              cin_agrees(live, reference, &baseline_files));
-
-    failures += cin_scope_refusals();
-    failures += cin_identity_reread();
-    failures += cin_depfile_cases(live, reference);
-    failures += cin_vanished_cases(workspace);
-    failures += cin_source_line_cases(workspace);
-
     /* One file. The narrowest incremental case and the one the dev loop
      * actually runs; the spare it leaves behind is what makes the NEXT
      * publication cheap, so its presence is the observable that the
@@ -782,9 +783,15 @@ int test_codeindex_incremental(void)
     CIN_CHECK("reverting a file to its earlier bytes matches a cold rebuild",
               cin_edit_both(live, reference, 0, 2) &&
               cin_agrees(live, reference, NULL));
+    return failures;
+}
 
-    /* A new file is an inventory change: the builder declines the incremental
-     * branch and rebuilds, and the answer is the cold one. */
+/* A new file is an inventory change: the builder declines the incremental
+ * branch and rebuilds, and the answer is the cold one. */
+static int cin_inventory_cases(const char *live, const char *reference,
+                               int baseline_files)
+{
+    int failures = 0;
     bool added = cin_write_file(
         live, "lib/net/src/zeta.c",
         "/* Purpose: incremental fixture inventory growth. */\n"
@@ -798,9 +805,14 @@ int test_codeindex_incremental(void)
               added && cin_agrees(live, reference, &grown_files));
     CIN_CHECK("a new file is admitted into the indexed inventory",
               grown_files == baseline_files + 1);
+    return failures;
+}
 
-    /* A corrupted snapshot is never trusted: it costs one cold pass and the
-     * incremental branch is declined. */
+/* A corrupted snapshot is never trusted: it costs one cold pass and the
+ * incremental branch is declined. */
+static int cin_snapshot_cases(const char *live, const char *reference)
+{
+    int failures = 0;
     bool corrupted = cin_corrupt_snapshot(live);
     CIN_CHECK("a corrupted Merkle snapshot still yields the cold answer",
               corrupted && cin_edit_both(live, reference, 4, 5) &&
@@ -813,6 +825,40 @@ int test_codeindex_incremental(void)
               cin_edit_both(live, reference, 4, 6) &&
               cin_agrees(live, reference, NULL) &&
               cin_exists(live, "index.kv.spare"));
+    return failures;
+}
+
+int test_codeindex_incremental(void)
+{
+    int failures = 0;
+    char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
+    char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
+    char live[PATH_MAX], reference[PATH_MAX];
+    bool ready = platform_temp_directory_create(
+        "z23-codeindex-incremental-", temporary, sizeof(temporary));
+    ready = ready && platform_directory_canonical_real(
+        temporary, workspace, sizeof(workspace));
+    int live_n = ready ? snprintf(live, sizeof(live), "%s/live", workspace) : -1;
+    int reference_n = ready ? snprintf(reference, sizeof(reference),
+                                       "%s/reference", workspace) : -1;
+    ready = ready && live_n > 0 && (size_t)live_n < sizeof(live) &&
+            reference_n > 0 && (size_t)reference_n < sizeof(reference) &&
+            cin_seed(live) && cin_seed(reference);
+    CIN_CHECK("two identical fixtures are ready", ready);
+    if (!ready) return failures;
+
+    int baseline_files = 0;
+    CIN_CHECK("cold builds of identical trees are identical",
+              cin_agrees(live, reference, &baseline_files));
+
+    failures += cin_scope_refusals();
+    failures += cin_identity_reread();
+    failures += cin_depfile_cases(live, reference);
+    failures += cin_vanished_cases(workspace);
+    failures += cin_source_line_cases(workspace);
+    failures += cin_edit_cases(live, reference);
+    failures += cin_inventory_cases(live, reference, baseline_files);
+    failures += cin_snapshot_cases(live, reference);
 
     return failures;
 }

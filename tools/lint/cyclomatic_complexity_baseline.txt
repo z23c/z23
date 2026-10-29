@@ -813,8 +813,6 @@ tests/harness/src/test_code_inventory.c:test_code_inventory:55
 tests/harness/src/test_codeindex.c:concurrent_open_32:16
 tests/harness/src/test_codeindex.c:test_codeindex_platform_arm:333
 tests/harness/src/test_codeindex.c:write_fixture:28
-tests/harness/src/test_codeindex_incremental.c:cin_capture:21
-tests/harness/src/test_codeindex_incremental.c:test_codeindex_incremental:26
 tests/harness/src/test_codeindex_projection.c:test_codeindex_projection_integrity:46
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
 tests/harness/src/test_confine.c:c_confine_serving_normal_ops:26
