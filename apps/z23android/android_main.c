@@ -305,7 +305,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     activity->callbacks->onResume = resume_activity;
     activity->callbacks->onInputQueueCreated = queue_created;
     activity->callbacks->onInputQueueDestroyed = queue_destroyed;
-    JNIEnv *env = activity->env; char native_dir[4096];
+    JNIEnv *env = activity->env; char native_dir[4096]; bool preview = false;
     pthread_mutex_lock(&lock); bool previous = active != NULL; pthread_mutex_unlock(&lock);
     if (previous) detach_activity(env);
     if (!activity->internalDataPath || !native_directory(env, activity->clazz, native_dir, sizeof(native_dir))) goto fail;
@@ -316,7 +316,8 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
         ALooper_addFd(looper, signal_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, signal_ready, NULL) != 1) goto fail;
     pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); pthread_mutex_unlock(&lock);
     if (!clean(env) || !active || !release_surface(env, activity->clazz) ||
-        !zapp_controller_start(activity->internalDataPath, native_dir, notify) ||
+        !zapp_native_ui_package_preview(env, activity->clazz, &preview) ||
+        !zapp_controller_start(activity->internalDataPath, native_dir, preview, notify) ||
         !zapp_native_ui_create(env, activity->clazz, action)) goto fail;
     zapp_camera_set_frame_notify(notify);
     char offer[256];

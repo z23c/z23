@@ -8,6 +8,8 @@
 #include <stddef.h>
 
 typedef void (*zapp_native_action)(const char *action, const char *text);
+/* Whether this is the voice preview package, which never runs a node. */
+bool zapp_native_ui_package_preview(JNIEnv *env, jobject activity, bool *preview);
 bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action action);
 void zapp_native_ui_destroy(JNIEnv *env);
 void zapp_native_ui_input(JNIEnv *env, const AInputEvent *event);

@@ -73,9 +73,10 @@ static bool runtime_directory(const char *name, bool private_mode)
            st.st_uid == getuid() && (!private_mode || (st.st_mode & 077) == 0);
 }
 
-bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs)
+bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview)
 {
     memset(r, 0, sizeof(*r));
+    r->preview = preview;
     if (pthread_mutex_init(&r->mutex, NULL) != 0) return false;
     bool ok = path(r->directory, sizeof(r->directory), files, "node") &&
               path(r->executable, sizeof(r->executable), libs, "libz23node.so") &&
@@ -97,8 +98,8 @@ static bool running_locked(struct zapp_runtime *r)
     return r->node > 0;
 }
 
-/* A node started by an earlier app process can outlive it. Its pid file names it, and its own
- * -datadir argument confirms it, so a reused pid is not mistaken for it. */
+/* A node started by an earlier app process can outlive it. Its pid file names it, and its first
+ * argument, this -datadir, confirms it: the app's own commands pass -datadir last. */
 static pid_t earlier_node(const struct zapp_runtime *r)
 {
     char file[1100], want[1100], args[4096] = "";
@@ -115,9 +116,8 @@ static pid_t earlier_node(const struct zapp_runtime *r)
     if (n <= 0) return 0;
     args[n] = 0;
     snprintf(want, sizeof(want), "-datadir=%s", r->directory);
-    for (ssize_t at = 0; at < n; at += (ssize_t)strlen(args + at) + 1)
-        if (!strcmp(args + at, want)) return (pid_t)pid;
-    return 0;
+    size_t first = strlen(args) + 1;
+    return first < (size_t)n && !strcmp(args + first, want) ? (pid_t)pid : 0;
 }
 static bool child_running(struct zapp_runtime *r)
 {
@@ -212,13 +212,14 @@ static bool remember_on(const struct zapp_runtime *r, bool on)
 bool zapp_node_wanted(const struct zapp_runtime *r)
 {
     char marker[1100];
-    return path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
+    return !r->preview && path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
 }
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
 {
     pthread_mutex_lock(&r->mutex);
-    if (r->stopping || running_locked(r) || earlier_node(r)) {
-        snprintf(out, cap, "%s", r->stopping ? "App is closing." : "The local node is already running.");
+    if (r->preview || r->stopping || running_locked(r) || earlier_node(r)) {
+        snprintf(out, cap, "%s", r->preview ? "The preview app does not run a node. Use the main Z23 app." :
+                 r->stopping ? "App is closing." : "The local node is already running.");
         pthread_mutex_unlock(&r->mutex); return false;
     }
     char data[1100], log[1100];
@@ -231,6 +232,7 @@ bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
     int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);
+    r->stop_sent = false;
     if (rc) { r->node = 0; snprintf(out, cap, "Could not start Z23: %s", strerror(rc)); }
     else snprintf(out, cap, "Node starting.%s",
                   remember_on(r, true) ? "" : " The app could not save this choice.");
@@ -243,6 +245,7 @@ bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
     pthread_mutex_lock(&r->mutex);
     pid_t node = running_locked(r) ? r->node : earlier_node(r);
     int rc = node > 0 ? kill(node, SIGINT) : 0;
+    r->stop_sent = node > 0 && rc == 0;
     bool kept = remember_on(r, false);
     snprintf(out, cap, "%s%s", node <= 0 ? "The local node is stopped." :
              rc == 0 ? "Node stopping. It saves its data first." : "Could not request shutdown.",
@@ -515,12 +518,29 @@ bool zapp_fleet_doctor_format(const char *json, char *out, size_t cap)
     return ok && used;
 }
 
+const char *zapp_json_object(const char *text)
+{
+    const char *json = !text ? NULL : text[0] == '{' ? text : strstr(text, "\n{");
+    return json && json[0] == '\n' ? json + 1 : json;
+}
+
 void zapp_plain_text(char *text, size_t cap)
 {
-    if (!text || !cap || text[0] != '{') return;
+    const char *json = cap ? zapp_json_object(text) : NULL;
+    if (!json) return;
     struct json_value root = {0};
-    const char *message = json_read(&root, text, strlen(text)) ?
+    const char *message = json_read(&root, json, strlen(json)) ?
         json_get_str(json_get(json_get(&root, "error"), "message")) : NULL;
     snprintf(text, cap, "%s", message && message[0] ? message : "The command did not return a readable result.");
     json_free(&root);
+}
+
+bool zapp_node_stopping(struct zapp_runtime *r)
+{
+    bool running = zapp_node_running(r);
+    pthread_mutex_lock(&r->mutex);
+    if (!running) r->stop_sent = false;
+    bool stopping = r->stop_sent;
+    pthread_mutex_unlock(&r->mutex);
+    return stopping;
 }

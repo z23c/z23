@@ -101,7 +101,7 @@ static bool load_density(JNIEnv *env, jobject activity)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-static bool load_identity(JNIEnv *env, jobject activity)
+bool zapp_native_ui_package_preview(JNIEnv *env, jobject activity, bool *preview)
 {
     if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
     jclass cls = (*env)->GetObjectClass(env, activity);
@@ -109,11 +109,15 @@ static bool load_identity(JNIEnv *env, jobject activity)
     jstring package = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
     const char *name = clean(env) && package ? (*env)->GetStringUTFChars(env, package, NULL) : NULL;
     bool ok = clean(env) && name;
-    if (ok) voice_preview = !strncmp(name, "org.z23.voicepreview", strlen("org.z23.voicepreview"));
+    if (ok) *preview = !strncmp(name, "org.z23.voicepreview", strlen("org.z23.voicepreview"));
     if (name) (*env)->ReleaseStringUTFChars(env, package, name);
     ok = clean(env) && ok;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
+}
+static bool load_identity(JNIEnv *env, jobject activity)
+{
+    return zapp_native_ui_package_preview(env, activity, &voice_preview);
 }
 static jobject widget(JNIEnv *env, const char *type, jobject activity)
 {
@@ -560,7 +564,8 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[160] = "", status[320];
     size_t n = strcspn(view->fleet_status, "\n");
-    if (n && n < 140) snprintf(fleet, sizeof(fleet), "\nFleet · %.*s", (int)n, view->fleet_status);
+    if (n && view->fleet_stale) snprintf(fleet, sizeof(fleet), "\nFleet · laptop host not answering");
+    else if (n && n < 140) snprintf(fleet, sizeof(fleet), "\nFleet · %.*s", (int)n, view->fleet_status);
     snprintf(status, sizeof(status), "%s%s", voice_preview ?
              "Preview · separate from your main node" : view->node_line, fleet);
     (void)text(env, status_view, status);
@@ -570,6 +575,11 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[10272], pairing[160];
+    if (view->fleet_status[0]) {
+        snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_stale ? "Laptop host not answering. Last report:\n\n" : "",
+                 view->fleet_status);
+        (void)text(env, hosts_view, fleet);
+    }
     snprintf(fleet, sizeof(fleet), "%s%s%s", view->fleet_preview,
              view->fleet_receipt[0] ? "\nReceipt: " : "", view->fleet_receipt);
     snprintf(pairing, sizeof(pairing), "Your laptop offers private voice and fleet control. "
@@ -577,7 +587,6 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, pair_view, pairing);
     (void)set_visible(env, pair_view, view->pair_offer[0] != 0);
     for (int i = 12; i <= 13; ++i) if (buttons[i]) (void)set_visible(env, buttons[i], view->pair_offer[0] && !view->busy);
-    if (view->fleet_status[0]) (void)text(env, hosts_view, view->fleet_status);
     (void)text(env, fleet_view, fleet);
     (void)text(env, notice_view, view->notice);
     (void)set_visible(env, notice_view, view->notice[0] != 0);

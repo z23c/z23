@@ -35,6 +35,7 @@ struct zapp_view {
     char fleet_preview[2048];
     char fleet_receipt[8192];
     char fleet_status[8192];
+    bool fleet_stale;
     bool busy;
     bool node_running;
     bool node_process_running;

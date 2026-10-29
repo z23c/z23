@@ -45,12 +45,13 @@ const char *zapp_grouped(int64_t value, char out[32])
     out[at] = 0;
     return out;
 }
-const char *zapp_node_line(bool responding, bool process_running, int64_t height, int64_t target,
-                           int64_t peers, char *out, size_t cap)
+const char *zapp_node_line(bool responding, bool process_running, bool stopping, int64_t height,
+                           int64_t target, int64_t peers, char *out, size_t cap)
 {
     char at[32], top[32], count[40] = "";
     if (peers >= 0) snprintf(count, sizeof(count), " · %lld %s", (long long)peers, peers == 1 ? "peer" : "peers");
-    if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
+    if (stopping) snprintf(out, cap, "Node stopping");
+    else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
     else if (height < 0) snprintf(out, cap, "Node running%s", count);
     else if (target <= 0) snprintf(out, cap, "Node waiting for peers · %s", zapp_grouped(height, at));
     else if (height >= target) snprintf(out, cap, "Node in sync · %s%s", zapp_grouped(height, at), count);

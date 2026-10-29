@@ -125,10 +125,11 @@ static void observe_node(struct controller *c)
     struct node_reading n = read_status(ran ? output : NULL);
     observe_balance(c, output);
     free(output);
-    bool process_running = zapp_node_running(&c->runtime);
+    bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     char status[1024], line[96];
     sync_detail(&n, process_running, status, sizeof(status));
-    zapp_node_line(n.responding, process_running, n.height, n.target, n.peers, line, sizeof(line));
+    if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
+    zapp_node_line(n.responding, process_running, stopping, n.height, n.target, n.peers, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
@@ -213,14 +214,19 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     char *formatted = calloc(1, sizeof(c->view.fleet_status));
     bool ok = formatted && zapp_speech_client_fleet(c->files, refresh, out, ZAPP_TEXT_CAP, NULL) &&
         zapp_hosts_format(out, formatted, sizeof(c->view.fleet_status));
+    pthread_mutex_lock(&c->lock);
     if (ok) {
-        pthread_mutex_lock(&c->lock);
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
+        c->view.fleet_stale = false;
         /* An answered fleet request proves the paired host is reachable. */
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
-        pthread_mutex_unlock(&c->lock);
-        copy_text(out, ZAPP_TEXT_CAP, formatted);
-    } else if (formatted) copy_text(out, ZAPP_TEXT_CAP, "Fleet status is unavailable. Connect the laptop host over USB.");
+    } else if (c->view.fleet_status[0]) {
+        /* The last report stays visible, marked old, once the host stops answering. */
+        c->view.fleet_stale = true;
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host not answering. Connect it over USB and keep it running.");
+    }
+    pthread_mutex_unlock(&c->lock);
+    copy_text(out, ZAPP_TEXT_CAP, ok ? formatted : "Fleet status is unavailable. Connect the laptop host over USB.");
     free(formatted);
     return ok;
 }
@@ -239,6 +245,8 @@ static void voice_answer(struct controller *c, enum zapp_voice_intent intent, ch
         else if (strlen(c->view.balance) < 100)
             snprintf(answer, 120, "Balance: %.99s", c->view.balance);
         else copy_text(answer, 120, "The refreshed balance is displayed on screen.");
+    } else if (intent == ZAPP_VOICE_START && c->runtime.preview) {
+        copy_text(answer, 120, "The preview app does not run a node.");
     } else if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP) {
         copy_text(c->view.voice_proposal, sizeof(c->view.voice_proposal),
             intent == ZAPP_VOICE_START ? "node_start" : "node_stop");
@@ -393,8 +401,10 @@ static bool fleet_doctor(struct controller *c, char *out)
 {
     char *json = calloc(1, ZAPP_TEXT_CAP);
     bool ran = json && zapp_operation_run(&c->runtime, "fleet_doctor", json, ZAPP_TEXT_CAP);
-    bool ok = json && zapp_fleet_doctor_format(json, out, ZAPP_NOTICE_CAP);
-    if (!ok) copy_text(out, ZAPP_TEXT_CAP, "The fleet check could not run.");
+    const char *body = json ? zapp_json_object(json) : NULL;
+    bool ok = body && zapp_fleet_doctor_format(body, out, ZAPP_NOTICE_CAP);
+    if (!ok && json) zapp_plain_text(json, ZAPP_TEXT_CAP);
+    if (!ok) copy_text(out, ZAPP_TEXT_CAP, json && json[0] ? json : "The fleet check could not run.");
     free(json);
     return ran && ok;
 }
@@ -484,6 +494,16 @@ static bool node_choice_saved(struct controller *c, const char *action)
     if (strcmp(action, "node_start") && strcmp(action, "node_stop")) return false;
     return zapp_node_wanted(&c->runtime) == !strcmp(action, "node_start");
 }
+/* Caller holds c->lock. Actions under More report beside their controls and the rest on the main
+ * screen; a success already shown by the node line, transcript or host list leaves no notice. */
+static void report(struct controller *c, const char *action, bool ok, const char *out)
+{
+    bool more = !strncmp(action, "fleet_", 6) || !strcmp(action, "voice_pair");
+    bool shown = ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
+                        !strcmp(action, "fleet_hosts") || node_choice_saved(c, action));
+    copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
+              shown ? "" : out[0] ? out : "Operation could not complete.");
+}
 static void execute_result(struct controller *c, const char *action, const char *arg,
                            char *out, bool ok)
 {
@@ -496,11 +516,7 @@ static void execute_result(struct controller *c, const char *action, const char 
     if (!strcmp(action, "fleet_join") && ok) ok = join_result(c, out);
     if (chat) chat_outcome(c, arg, ok, out);
     zapp_plain_text(out, ZAPP_TEXT_CAP);
-    /* Actions under More report beside their controls; the rest report on the main screen. */
-    bool more = !strncmp(action, "fleet_", 6) || !strcmp(action, "voice_pair");
-    bool shown = ok && (chat || !strcmp(action, "fleet_hosts") || node_choice_saved(c, action));
-    copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
-              shown ? "" : out[0] ? out : "Operation could not complete.");
+    report(c, action, ok, out);
     c->view.scanning = false;
     pthread_mutex_unlock(&c->lock);
 }
@@ -517,8 +533,6 @@ static void execute(struct controller *c, const char *action, const char *arg, u
     execute_result(c, action, arg, out, ok);
     memory_cleanse(out, ZAPP_TEXT_CAP); free(out);
 }
-/* Opening the app starts its node once, unless the owner's last choice was Stop node or a node
- * already answers. */
 /* The laptop host refreshes its fleet snapshot every minute; reading its copy as often keeps the
  * fleet headline current without probing the hosts again. */
 static void observe_fleet(struct controller *c)
@@ -531,6 +545,7 @@ static void observe_fleet(struct controller *c)
     free(out);
 }
 static void queue_action(struct controller *c, const char *action, const char *arg);
+/* Opening the app starts the node once when the owner last chose Start node and no node runs. */
 static void start_if_wanted(struct controller *c)
 {
     c->autostart_checked = true;
@@ -561,13 +576,13 @@ static void *worker(void *opaque)
         if (action[0]) {
             execute(c, action, arg, ticket);
             memory_cleanse(arg, sizeof(arg));
-            bool process_running = zapp_node_running(&c->runtime);
+            bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
             pthread_mutex_lock(&c->lock);
             c->view.node_process_running = process_running;
             if (!c->view.node_running) {
                 struct node_reading idle = {.height = -1, .target = -1, .peers = -1};
                 sync_detail(&idle, process_running, c->view.sync_status, sizeof(c->view.sync_status));
-                zapp_node_line(false, process_running, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+                zapp_node_line(false, process_running, stopping, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
             }
             c->view.busy = false;
             pthread_mutex_unlock(&c->lock);
@@ -579,7 +594,7 @@ static void *worker(void *opaque)
     }
     return NULL;
 }
-bool zapp_controller_start(const char *files, const char *libs, void (*notify)(void))
+bool zapp_controller_start(const char *files, const char *libs, bool preview, void (*notify)(void))
 {
     if (!files || !libs || strlen(files) >= 1024) return false;
     pthread_mutex_lock(&startup_lock);
@@ -594,11 +609,11 @@ bool zapp_controller_start(const char *files, const char *libs, void (*notify)(v
     atomic_init(&c->voice_stop, false);
     if (pthread_mutex_init(&c->lock, NULL)) goto fail;
     if (pthread_cond_init(&c->changed, NULL)) { pthread_mutex_destroy(&c->lock); goto fail; }
-    if (!zapp_runtime_init(&c->runtime, files, libs)) { pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail; }
+    if (!zapp_runtime_init(&c->runtime, files, libs, preview)) { pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail; }
     c->view.node_process_running = zapp_node_running(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
-    zapp_node_line(false, c->view.node_process_running, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+    zapp_node_line(false, c->view.node_process_running, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
     copy_text(c->view.connection, sizeof(c->view.connection), "Private assistant: pair your laptop host over USB.");
     zapp_device_info(c->view.hardware, sizeof(c->view.hardware));
     pthread_t thread;

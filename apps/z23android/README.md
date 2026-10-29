@@ -67,11 +67,15 @@ refreshes retain the last value with a stale label; an unavailable balance is
 not displayed as zero.
 
 **Start node** records the choice in the app's private state, and the app
-starts the node each time it opens until **Stop node** clears the choice. The
-app finds a node left by an earlier app process through the node's pid file
-and its `-datadir` argument: it shows that node as running, refuses a second
-start and stops that node on request. The preview package shows no **Start
-node** button and states that it is separate from the main node.
+starts the node each time it opens until **Stop node** clears the choice.
+After **Stop node** the node line reads "Node stopping" until the node has
+saved its data and exited. The app finds a node left by an earlier app process
+through the node's pid file and its first argument, this `-datadir`: it shows
+that node as running, refuses a second start and stops that node on request.
+The preview package never runs a node: it has no **Start node** button,
+answers a spoken start request without proposing one, and states that it is
+separate from the main node. When the laptop host stops answering, the fleet
+line says so and **More** labels the last fleet report as old.
 
 Chat refreshes a bounded read-only node summary before asking the private
 model on the paired laptop host. The summary includes synchronization text,
