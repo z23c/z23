@@ -35,6 +35,8 @@
 #include "sapling/groth16_prover.h"
 #include "sapling/sapling.h"
 #include "sapling/fr.h"
+#include "sapling/circuit_bits.h"
+#include "crypto/blake2s.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -588,6 +590,201 @@ static int gate_synthesis_is_deterministic(const struct constraint_system *cs,
     return failures;
 }
 
+/* ── BLAKE2s gadget (circuit_bits.c gadget_blake2s) ────────────────────── */
+
+/* 21006 constraints for a 512-bit all-allocated input (circuit_bits.h). */
+#define BLAKE2S_GADGET_512_CONSTRAINTS 21006u
+#define BLAKE2S_GADGET_MAX_BYTES       65u
+
+static const uint8_t BLAKE2S_PERS_IVK[8]  = { 'Z', 'c', 'a', 's', 'h', 'i', 'v', 'k' };
+static const uint8_t BLAKE2S_PERS_NF[8]   = { 'Z', 'c', 'a', 's', 'h', '_', 'n', 'f' };
+static const uint8_t BLAKE2S_PERS_ZERO[8] = { 0 };
+
+static void fill_message(uint8_t *msg, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        msg[i] = (uint8_t)(i * 37u + 11u);
+}
+
+/* The witnessed value of a Boolean, read from the wire rather than the cached
+ * cbit_value(), with the NOT view applied. */
+static bool witness_bit(const struct constraint_system *cs, struct cbit b)
+{
+    if (b.kind == CBIT_CONSTANT)
+        return b.constant;
+    struct fr one_fr;
+    fr_one(&one_fr);
+    const bool on_wire = fr_eq(&cs->witness[b.var], &one_fr);
+    return b.kind == CBIT_NOT ? !on_wire : on_wire;
+}
+
+/* LSB-first within each byte, as the gadget reads its input. */
+static void message_to_cbits(struct constraint_system *cs, const uint8_t *msg,
+                             size_t len, struct cbit *bits)
+{
+    for (size_t i = 0; i < len; i++)
+        for (size_t b = 0; b < 8; b++)
+            bits[i * 8 + b] = cbit_alloc(cs, ((msg[i] >> b) & 1u) != 0u);
+}
+
+/* Output bit q is digest bit q (byte q/8, bit q%8). */
+static void cbits_to_digest(const struct constraint_system *cs,
+                            const struct cbit *out, uint8_t digest[32])
+{
+    for (size_t k = 0; k < 32; k++) {
+        uint8_t byte = 0;
+        for (size_t b = 0; b < 8; b++)
+            if (witness_bit(cs, out[k * 8 + b]))
+                byte |= (uint8_t)(1u << b);
+        digest[k] = byte;
+    }
+}
+
+static bool native_blake2s_pers(uint8_t digest[32], const uint8_t pers[8],
+                                const uint8_t *msg, size_t len)
+{
+    struct blake2s_ctx ctx;
+    if (blake2s_init_personal(&ctx, 32, pers) != 0)
+        return false;
+    if (len > 0 && blake2s_update(&ctx, msg, len) != 0)
+        return false;
+    return blake2s_final(&ctx, digest, 32) == 0;
+}
+
+/* One gadget run over `len` allocated bytes: the witness-read digest must equal
+ * the native BLAKE2s-256 of the same bytes and personalization, and the R1CS
+ * must be satisfied. Returns the failure count. */
+static int check_gadget_digest(const uint8_t *msg, size_t len,
+                               const uint8_t pers[8], const char *label)
+{
+    int failures = 0;
+    struct constraint_system cs;
+    cs_init(&cs);
+    struct cbit in[BLAKE2S_GADGET_MAX_BYTES * 8u];
+    struct cbit out[256];
+    message_to_cbits(&cs, msg, len, in);
+    const bool ok = gadget_blake2s(&cs, in, len * 8u, pers, out);
+
+    uint8_t got[32], want[32];
+    cbits_to_digest(&cs, out, got);
+    const bool native_ok = native_blake2s_pers(want, pers, msg, len);
+    size_t bad = SIZE_MAX;
+    const bool sat = cs_is_satisfied(&cs, &bad);
+    MERKLE_CHECK(label, ok && native_ok && sat
+                 && memcmp(got, want, 32) == 0);
+    cs_free(&cs);
+    return failures;
+}
+
+static int gate_blake2s_gadget_matches_native(void)
+{
+    int failures = 0;
+    uint8_t msg[BLAKE2S_GADGET_MAX_BYTES];
+    fill_message(msg, sizeof msg);
+    static const size_t lens[] = { 0, 1, 63, 64, 65 };
+    for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        char label[128];
+        snprintf(label, sizeof label,
+                 "gadget_blake2s(\"Zcashivk\", %zu bytes) == native BLAKE2s-256",
+                 lens[i]);
+        failures += check_gadget_digest(msg, lens[i], BLAKE2S_PERS_IVK, label);
+        snprintf(label, sizeof label,
+                 "gadget_blake2s(\"Zcash_nf\", %zu bytes) == native BLAKE2s-256",
+                 lens[i]);
+        failures += check_gadget_digest(msg, lens[i], BLAKE2S_PERS_NF, label);
+    }
+    return failures;
+}
+
+/* BLAKE2s-256("") with zero personalization is the published vector already
+ * pinned in test_sapling.c (test_sapling_blake2s_256). Returns the failure
+ * count. */
+static int gate_blake2s_gadget_literal_vector(void)
+{
+    int failures = 0;
+    static const uint8_t want[32] = {
+        0x69,0x21,0x7a,0x30, 0x79,0x90,0x80,0x94,
+        0xe1,0x11,0x21,0xd0, 0x42,0x35,0x4a,0x7c,
+        0x1f,0x55,0xb6,0x48, 0x2c,0xa1,0xa5,0x1e,
+        0x1b,0x25,0x0d,0xfd, 0x1e,0xd0,0xee,0xf9
+    };
+    struct constraint_system cs;
+    cs_init(&cs);
+    struct cbit out[256];
+    const bool ok = gadget_blake2s(&cs, NULL, 0, BLAKE2S_PERS_ZERO, out);
+    uint8_t got[32];
+    cbits_to_digest(&cs, out, got);
+    MERKLE_CHECK("gadget_blake2s(zero personalization, empty input) == "
+                 "BLAKE2s-256(\"\") = 69217a30...eef9",
+                 ok && memcmp(got, want, 32) == 0);
+    cs_free(&cs);
+    return failures;
+}
+
+/* The 512-bit all-allocated cost, measured around the gadget only. Returns the
+ * failure count. */
+static int gate_blake2s_gadget_cost(void)
+{
+    int failures = 0;
+    uint8_t msg[64];
+    fill_message(msg, sizeof msg);
+    struct constraint_system cs;
+    cs_init(&cs);
+    struct cbit in[64 * 8u];
+    message_to_cbits(&cs, msg, sizeof msg, in);
+    struct cbit out[256];
+    const size_t before = cs.num_constraints;
+    const bool ok = gadget_blake2s(&cs, in, 64u * 8u, BLAKE2S_PERS_IVK, out);
+    MERKLE_CHECK("gadget_blake2s over 512 allocated bits costs exactly "
+                 "21006 constraints",
+                 ok && cs.num_constraints - before
+                         == BLAKE2S_GADGET_512_CONSTRAINTS);
+    cs_free(&cs);
+    return failures;
+}
+
+/* Every refusal returns false before touching the system, and the accepted
+ * zero-length input runs one empty block. Returns the failure count. */
+static int gate_blake2s_gadget_refusals(void)
+{
+    int failures = 0;
+    struct cbit in[8];
+    for (size_t i = 0; i < 8; i++)
+        in[i] = cbit_constant(false);
+    struct cbit out[256];
+    struct constraint_system cs;
+    cs_init(&cs);
+
+    MERKLE_CHECK("NULL constraint system is refused",
+                 !gadget_blake2s(NULL, in, 8, BLAKE2S_PERS_IVK, out));
+    MERKLE_CHECK("NULL personalization is refused",
+                 !gadget_blake2s(&cs, in, 8, NULL, out));
+    MERKLE_CHECK("NULL output is refused",
+                 !gadget_blake2s(&cs, in, 8, BLAKE2S_PERS_IVK, NULL));
+    MERKLE_CHECK("12 bits (not whole bytes) is refused",
+                 !gadget_blake2s(&cs, in, 12, BLAKE2S_PERS_IVK, out));
+    MERKLE_CHECK("8 bits with NULL input is refused",
+                 !gadget_blake2s(&cs, NULL, 8, BLAKE2S_PERS_IVK, out));
+    MERKLE_CHECK("refusals add no constraints",
+                 cs.num_constraints == 0);
+    MERKLE_CHECK("0 bits with NULL input is accepted (empty message)",
+                 gadget_blake2s(&cs, NULL, 0, BLAKE2S_PERS_IVK, out));
+    cs_free(&cs);
+    return failures;
+}
+
+static int gate_blake2s_gadget(void)
+{
+    printf("\n--- BLAKE2s gadget (circuit_bits.c gadget_blake2s) ---\n");
+    int failures = 0;
+    failures += gate_blake2s_gadget_matches_native();
+    failures += gate_blake2s_gadget_literal_vector();
+    failures += gate_blake2s_gadget_cost();
+    failures += gate_blake2s_gadget_refusals();
+    printf("--- end BLAKE2s gadget (%d failure[s]) ---\n", failures);
+    return failures;
+}
+
 int groth16_merkle_path_gate(void);
 int groth16_merkle_path_gate(void)
 {
@@ -601,6 +798,7 @@ int groth16_merkle_path_gate(void)
     build_fixture(&f);
     failures += gate_fixture_swap_branches(&f);
     failures += level_breakdown_gate(&f);
+    failures += gate_blake2s_gadget();
 
     /* (A) The whole section, top down. */
     struct constraint_system cs;
