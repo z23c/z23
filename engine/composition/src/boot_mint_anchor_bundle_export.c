@@ -50,6 +50,7 @@
 #include "util/log_macros.h"
 #include "core/utiltime.h"                       /* GetTimeMicros */
 
+#ifndef _WIN32  /* only the POSIX export body below uses these helpers */
 /* Resolve the export directory, falling back to the working directory. */
 static const char *bundle_export_dir_or_default(const char *datadir)
 {
@@ -72,13 +73,6 @@ static void bundle_export_blocker_register(const char *reason)
         (void)blocker_set(&frec);
 }
 
-/* The exporter's refusal text, or "unknown" when it recorded none. */
-static const char *bundle_export_result_reason(
-    const struct consensus_state_export_result *res)
-{
-    return res->reason[0] ? res->reason : "unknown";
-}
-
 /* Human-readable name of the validation profile the exporter proved. */
 static const char *bundle_export_profile_name(
     const struct consensus_state_export_result *res)
@@ -94,6 +88,7 @@ static void bundle_export_digest_hex(const uint8_t digest[32], char out[65])
         snprintf(out + 2 * i, 3, "%02x", digest[i]);
 }
 
+#endif /* !_WIN32 */
 /* Emit the contained full-history zcl.consensus_state_bundle.v1 into
  * the mint datadir once the producer source receipt has been finalized. This is
  * the exporter's (config/consensus_state_snapshot_export.h) ONLY viable caller:
@@ -202,19 +197,19 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
         event_emitf(EV_OPERATOR_NEEDED, 0,
                     "condition=mint_bundle_export_failed anchor=%d status=%d "
                     "reason=%s", anchor, (int)res.status,
-                    bundle_export_result_reason(&res));
+                    res.reason[0] ? res.reason : "unknown");
         char breason[640];
         snprintf(breason, sizeof(breason),
                  "consensus-state bundle export refused anchor=%d status=%d: %s "
                  "(verified anchor snapshot + receipt intact)",
                  anchor, (int)res.status,
-                 bundle_export_result_reason(&res));
+                 res.reason[0] ? res.reason : "unknown");
         bundle_export_blocker_register(breason);
         LOG_FAIL("mint_anchor",
                  "[mint-anchor] consensus-state bundle export FAILED (anchor=%d "
                  "status=%d): %s — the verified anchor snapshot and producer "
                  "receipt are unaffected", anchor, (int)res.status,
-                 bundle_export_result_reason(&res));
+                 res.reason[0] ? res.reason : "unknown");
     }
 
     char digest_hex[65];
