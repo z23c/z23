@@ -530,29 +530,14 @@ vector_navigation_preregistration_check_roots(
 }
 
 static enum vcs_zcode_science_error
-vector_navigation_preregistration_check_arm_roots(
-    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
+vector_navigation_preregistration_check_root_rows(
+    const uint8_t (*roots)[32], size_t count)
 {
-    for (size_t i = 0; i < prereg->arm_count; i++)
-        if (!root_nonzero(prereg->arm_roots[i]))
-            return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
-    for (size_t i = 0; i < prereg->arm_count; i++)
-        for (size_t j = i + 1; j < prereg->arm_count; j++)
-            if (memcmp(prereg->arm_roots[i], prereg->arm_roots[j], 32) == 0)
-                return VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED;
-    return VCS_ZCODE_SCIENCE_OK;
-}
-
-static enum vcs_zcode_science_error
-vector_navigation_preregistration_check_gate_roots(
-    const struct vcs_zcode_vector_navigation_preregistration_v1 *prereg)
-{
-    for (size_t i = 0; i < prereg->gate_count; i++)
-        if (!root_nonzero(prereg->gate_roots[i]))
-            return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
-    for (size_t i = 0; i < prereg->gate_count; i++)
-        for (size_t j = i + 1; j < prereg->gate_count; j++)
-            if (memcmp(prereg->gate_roots[i], prereg->gate_roots[j], 32) == 0)
+    for (size_t i = 0; i < count; i++)
+        if (!root_nonzero(roots[i])) return VCS_ZCODE_SCIENCE_ERR_ROOT_ZERO;
+    for (size_t i = 0; i < count; i++)
+        for (size_t j = i + 1; j < count; j++)
+            if (memcmp(roots[i], roots[j], 32) == 0)
                 return VCS_ZCODE_SCIENCE_ERR_ROOT_REUSED;
     return VCS_ZCODE_SCIENCE_OK;
 }
@@ -572,9 +557,11 @@ vcs_zcode_vector_navigation_preregistration_validate(
     if (error != VCS_ZCODE_SCIENCE_OK) return error;
     error = vector_navigation_preregistration_check_roots(prereg);
     if (error != VCS_ZCODE_SCIENCE_OK) return error;
-    error = vector_navigation_preregistration_check_arm_roots(prereg);
+    error = vector_navigation_preregistration_check_root_rows(
+        prereg->arm_roots, prereg->arm_count);
     if (error != VCS_ZCODE_SCIENCE_OK) return error;
-    error = vector_navigation_preregistration_check_gate_roots(prereg);
+    error = vector_navigation_preregistration_check_root_rows(
+        prereg->gate_roots, prereg->gate_count);
     if (error != VCS_ZCODE_SCIENCE_OK) return error;
     return VCS_ZCODE_SCIENCE_OK;
 }
