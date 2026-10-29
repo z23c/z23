@@ -434,7 +434,7 @@ static bool oti_commit_intent_found(const struct overlay_intent_runtime *rt,
                                     struct vault_intent_row *row)
 {
     if (!vault_intent_find(rt->node_db, plan_id, row))
-        return false;
+        return false; // raw-return-ok:row_not_found_is_the_boolean_answer
     return strcmp(row->application_kind, application_kind) == 0;
 }
 
