@@ -225,6 +225,145 @@ bool utxo_recovery_block_trust_rooted(const struct block_index *bi)
  * See services/utxo_recovery_service.h for the full contract + the failure
  * class this cures (a hash-linked but height-scrambled header-only ancestor
  * neither boot repair pass can reach). */
+
+/* Compiled SHA3 checkpoint height, or the reducer's trusted anchor. */
+static int32_t utxo_recovery_relink_anchor_h(void)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    return cp ? cp->height : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+}
+
+/* Pass-1 verdict: what the validating walk found. */
+struct relink_walk {
+    int fixes_needed;
+    struct block_index *terminus;
+    int32_t refuse_at_h;
+    bool repairable, cycle;
+};
+
+/* Pass-1 walk body: tip -> anchor via pprev, no mutation. */
+static void utxo_recovery_relink_walk(struct main_state *ms,
+                                      struct block_index *tip,
+                                      int32_t anchor, struct relink_walk *w)
+{
+    int64_t max_steps = (int64_t)tip->nHeight - (int64_t)anchor + 8;
+    int64_t steps = 0;
+    int32_t correct_h = tip->nHeight;
+    struct block_index *cur = tip;
+    struct block_index *hare = tip;           /* Floyd cycle guard */
+    for (;;) {
+        int32_t parent_h = correct_h - 1;
+        /* Descend DOWN TO AND INCLUDING the node at the anchor height: ancestry_
+         * break only trust-roots once its contiguous descent reaches a node whose
+         * stored nHeight <= anchor, so the anchor node's own label must read
+         * exactly `anchor`. Below the anchor is the attested extent. */
+        if (parent_h < anchor) {              /* cur is the anchor-height node */
+            w->terminus = cur;
+            w->repairable = true;
+            break;
+        }
+        struct block_index *pp = cur->pprev;
+        if (!pp || !pp->phashBlock ||
+            block_map_find(&ms->map_block_index, pp->phashBlock) != pp) {
+            w->refuse_at_h = correct_h;        /* missing-parent linkage break */
+            break;
+        }
+        if (pp->nHeight != parent_h)
+            w->fixes_needed++;
+        cur = pp;
+        correct_h = parent_h;
+        /* Floyd cycle detection over the pprev POINTERS (never heights, which
+         * lie): hare advances two, tortoise (cur) one; a meet is a lasso. */
+        if (hare) hare = hare->pprev;
+        if (hare) hare = hare->pprev;
+        if (hare && hare == cur) { w->cycle = true; w->refuse_at_h = correct_h; break; }
+        if (++steps > max_steps) {            /* defensive backstop */
+            w->refuse_at_h = correct_h;
+            break;
+        }
+    }
+}
+
+/* Terminus IDENTITY: the node the walk reaches at the anchor height MUST be
+ * the compiled checkpoint block, or the whole lineage is wrong. */
+static void utxo_recovery_relink_check_terminus(struct relink_walk *w)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (w->repairable && cp && w->terminus) {
+        struct uint256 cph;
+        memcpy(cph.data, cp->block_hash, 32);
+        if (!w->terminus->phashBlock ||
+            uint256_cmp(w->terminus->phashBlock, &cph) != 0) {
+            w->repairable = false;
+            w->refuse_at_h = w->terminus->nHeight;
+        }
+    }
+}
+
+/* Typed blocker for a refused relink (rate-limited dup is fine). */
+static void utxo_recovery_relink_set_blocker(
+    const struct block_index *tip, const struct utxo_recovery_ancestry_repair *r,
+    int32_t anchor, bool cycle, const char *why)
+{
+    struct blocker_record br;
+    if (blocker_init(&br, UTXO_RECOVERY_ANCESTRY_TEAR_BLOCKER_ID,
+                     "utxo_recovery", BLOCKER_DEPENDENCY, NULL)) {
+        br.retry_budget = -1;              /* unbounded — wait for backfill */
+        snprintf(br.reason, sizeof(br.reason),
+                 "coins_tip=%d refuse_at=%d anchor=%d island_root=%d cycle=%d "
+                 "(%s)",
+                 tip->nHeight, r->refuse_at_h, anchor, r->island_root_h,
+                 cycle ? 1 : 0, why);
+        (void)blocker_set(&br);            /* rate-limited dup is fine */
+    }
+}
+
+struct relink_jrnl { struct block_index *node; int32_t old_h; };
+
+/* Pass-2 relabel walk: journals each changed node, returns the journal length
+ * and adds the relabel count to *fixed. */
+static size_t utxo_recovery_relink_apply(struct block_index *tip, int32_t anchor,
+                                         int fixes_needed,
+                                         struct relink_jrnl *jrnl, int *fixed)
+{
+    size_t jn = 0;
+    int32_t correct_h = tip->nHeight;
+    struct block_index *cur = tip;
+    for (;;) {
+        int32_t parent_h = correct_h - 1;
+        if (parent_h < anchor)                 /* through the anchor node (pass 1) */
+            break;
+        struct block_index *pp = cur->pprev;   /* proven non-NULL in pass 1 */
+        if (pp->nHeight != parent_h) {
+            if (jn < (size_t)fixes_needed) {
+                jrnl[jn].node = pp;
+                jrnl[jn].old_h = pp->nHeight;
+                jn++;
+            }
+            pp->nHeight = parent_h;
+            (*fixed)++;
+        }
+        cur = pp;
+        correct_h = parent_h;
+    }
+    return jn;
+}
+
+/* Undo every journaled relabel, newest first. */
+static void utxo_recovery_relink_revert(const struct relink_jrnl *jrnl, size_t jn)
+{
+    for (size_t i = jn; i > 0; i--)
+        jrnl[i - 1].node->nHeight = jrnl[i - 1].old_h;
+}
+
+/* Rebuild pskip lowest-first (parents before children). */
+static void utxo_recovery_relink_rebuild_skips(const struct relink_jrnl *jrnl,
+                                               size_t jn)
+{
+    for (size_t i = jn; i > 0; i--)
+        block_index_build_skip(jrnl[i - 1].node);
+}
+
 struct utxo_recovery_ancestry_repair
 utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
                                         struct block_index *tip)
@@ -236,9 +375,7 @@ utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
     if (!ms || !tip || tip->nHeight < 0)
         return r;
 
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    const int32_t anchor = cp ? cp->height
-                              : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+    const int32_t anchor = utxo_recovery_relink_anchor_h();
 
     /* Already trust-rooted (or entirely inside the attested extent): nothing
      * to do. The island root also gives the loud-log context. */
@@ -267,76 +404,21 @@ utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
      *      wrong-lineage acyclic path would otherwise get the anchor height
      *      stamped onto a non-checkpoint block, pass a height-only post-check,
      *      and fail-open trust-root O(tip-anchor) mislabels. */
-    int64_t max_steps = (int64_t)tip->nHeight - (int64_t)anchor + 8;
-    int64_t steps = 0;
-    int fixes_needed = 0;
-    int32_t correct_h = tip->nHeight;
-    struct block_index *cur = tip;
-    struct block_index *hare = tip;           /* Floyd cycle guard */
-    struct block_index *terminus = NULL;
-    bool repairable = false, cycle = false;
-    for (;;) {
-        int32_t parent_h = correct_h - 1;
-        /* Descend DOWN TO AND INCLUDING the node at the anchor height: ancestry_
-         * break only trust-roots once its contiguous descent reaches a node whose
-         * stored nHeight <= anchor, so the anchor node's own label must read
-         * exactly `anchor`. Below the anchor is the attested extent. */
-        if (parent_h < anchor) {              /* cur is the anchor-height node */
-            terminus = cur;
-            repairable = true;
-            break;
-        }
-        struct block_index *pp = cur->pprev;
-        if (!pp || !pp->phashBlock ||
-            block_map_find(&ms->map_block_index, pp->phashBlock) != pp) {
-            r.refuse_at_h = correct_h;        /* missing-parent linkage break */
-            break;
-        }
-        if (pp->nHeight != parent_h)
-            fixes_needed++;
-        cur = pp;
-        correct_h = parent_h;
-        /* Floyd cycle detection over the pprev POINTERS (never heights, which
-         * lie): hare advances two, tortoise (cur) one; a meet is a lasso. */
-        if (hare) hare = hare->pprev;
-        if (hare) hare = hare->pprev;
-        if (hare && hare == cur) { cycle = true; r.refuse_at_h = correct_h; break; }
-        if (++steps > max_steps) {            /* defensive backstop */
-            r.refuse_at_h = correct_h;
-            break;
-        }
-    }
+    struct relink_walk w = { .refuse_at_h = r.refuse_at_h };
+    utxo_recovery_relink_walk(ms, tip, anchor, &w);
+    utxo_recovery_relink_check_terminus(&w);
+    r.refuse_at_h = w.refuse_at_h;
+    const int fixes_needed = w.fixes_needed;
+    const bool cycle = w.cycle;
 
-    /* Terminus IDENTITY: the node the walk reaches at the anchor height MUST be
-     * the compiled checkpoint block, or the whole lineage is wrong. */
-    if (repairable && cp && terminus) {
-        struct uint256 cph;
-        memcpy(cph.data, cp->block_hash, 32);
-        if (!terminus->phashBlock ||
-            uint256_cmp(terminus->phashBlock, &cph) != 0) {
-            repairable = false;
-            r.refuse_at_h = terminus->nHeight;
-        }
-    }
-
-    if (!repairable) {
+    if (!w.repairable) {
         /* FAIL-CLOSED: a pprev lasso, a genuine missing-parent break, or a
          * wrong-lineage terminus — real corruption a label relabel cannot cure.
          * Name a typed blocker; MUTATE NOTHING. */
         const char *why = cycle ? "pprev cycle (loader by-height fallback wired a "
                                   "wrong parent from a scrambled height)"
                                 : "pprev torn / wrong-lineage above the attested extent";
-        struct blocker_record br;
-        if (blocker_init(&br, UTXO_RECOVERY_ANCESTRY_TEAR_BLOCKER_ID,
-                         "utxo_recovery", BLOCKER_DEPENDENCY, NULL)) {
-            br.retry_budget = -1;              /* unbounded — wait for backfill */
-            snprintf(br.reason, sizeof(br.reason),
-                     "coins_tip=%d refuse_at=%d anchor=%d island_root=%d cycle=%d "
-                     "(%s)",
-                     tip->nHeight, r.refuse_at_h, anchor, r.island_root_h,
-                     cycle ? 1 : 0, why);
-            (void)blocker_set(&br);            /* rate-limited dup is fine */
-        }
+        utxo_recovery_relink_set_blocker(tip, &r, anchor, cycle, why);
         event_emitf(EV_RECOVERY_ACTION, 0,
                     "action=ancestry_relink_refused coins_tip=%d refuse_at=%d "
                     "anchor=%d island_root=%d cycle=%d",
@@ -363,7 +445,6 @@ utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
      * UNCONDITIONALLY (boot_services_shutdown), so a mutation that does not end
      * up trust-rooting the tip must NOT survive this call — journal (node,
      * old_height) and revert on any post-check failure. */
-    struct relink_jrnl { struct block_index *node; int32_t old_h; };
     struct relink_jrnl *jrnl =
         zcl_malloc((size_t)fixes_needed * sizeof(*jrnl), "relink_journal");
     if (!jrnl) {
@@ -374,33 +455,14 @@ utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
         r.result = UTXO_ANCESTRY_REPAIR_REFUSED;
         return r;
     }
-    size_t jn = 0;
-    correct_h = tip->nHeight;
-    cur = tip;
-    for (;;) {
-        int32_t parent_h = correct_h - 1;
-        if (parent_h < anchor)                 /* through the anchor node (pass 1) */
-            break;
-        struct block_index *pp = cur->pprev;   /* proven non-NULL in pass 1 */
-        if (pp->nHeight != parent_h) {
-            if (jn < (size_t)fixes_needed) {
-                jrnl[jn].node = pp;
-                jrnl[jn].old_h = pp->nHeight;
-                jn++;
-            }
-            pp->nHeight = parent_h;
-            r.fixed++;
-        }
-        cur = pp;
-        correct_h = parent_h;
-    }
+    size_t jn = utxo_recovery_relink_apply(tip, anchor, fixes_needed, jrnl,
+                                           &r.fixed);
 
     /* Authoritative verdict: the tip must now be trust-rooted. If not (defensive
      * — pass 1 proved the path acyclic with a checkpoint terminus), REVERT every
      * mutation so the shutdown save cannot persist unverified labels. */
     if (utxo_recovery_block_ancestry_break(tip) != NULL) {
-        for (size_t i = jn; i > 0; i--)
-            jrnl[i - 1].node->nHeight = jrnl[i - 1].old_h;
+        utxo_recovery_relink_revert(jrnl, jn);
         free(jrnl);
         LOG_WARN("utxo_recovery",
                  "SCOPED ANCESTRY RELINK: relabeled %d then REVERTED (post-check "
@@ -415,8 +477,7 @@ utxo_recovery_relink_scrambled_ancestry(struct main_state *ms,
      * height-independent) is now stale for every mutated node — rebuild it
      * lowest-first (parents before children) so block_index_get_ancestor stays
      * correct for same-boot consumers (tip publish / successor / watchdog). */
-    for (size_t i = jn; i > 0; i--)
-        block_index_build_skip(jrnl[i - 1].node);
+    utxo_recovery_relink_rebuild_skips(jrnl, jn);
     free(jrnl);
 
     LOG_WARN("utxo_recovery",
@@ -507,14 +568,78 @@ void utxo_recovery_note_band_unrooted_tip(const struct block_index *tip,
     utxo_recovery_record_band(producer, tip->nHeight, root->nHeight, fh);
 }
 
+/* Log-unknown carve-out probe: true when the stage log's rolling window
+ * starts above the candidate (the log half abstains). */
+static bool utxo_recovery_clamp_below_log_window(const struct block_index *candidate,
+                                                 int32_t *log_lo)
+{
+    bool lo_found = false;
+    return reducer_frontier_log_coverage_floor(progress_store_db(),
+            "validate_headers_log", log_lo, &lo_found) &&
+        lo_found && candidate->nHeight < *log_lo;
+}
+
+/* Descent continues while the walk node is above the frontier height. */
+static bool utxo_recovery_clamp_walk_above(const struct block_index *walk,
+                                           int32_t fh)
+{
+    return walk && walk->nHeight > fh;
+}
+
+/* True when the pprev hop walk -> prev is non-descending or exceeds the hop
+ * bound (a corrupt block-index cycle); counts the hop. A NULL prev is not a
+ * cycle (the walk simply dies). */
+static bool utxo_recovery_clamp_hop_cyclic(const struct block_index *walk,
+                                           const struct block_index *prev,
+                                           int64_t *hops, int64_t max_hops)
+{
+    return prev && (prev->nHeight >= walk->nHeight || ++*hops > max_hops);
+}
+
+static void utxo_recovery_clamp_set_frontier(int32_t *frontier_out, int32_t fh)
+{
+    if (frontier_out)
+        *frontier_out = fh;
+}
+
+/* True when the descent landed exactly on a trust-rooted frontier block. */
+static bool utxo_recovery_clamp_walk_ok(const struct block_index *walk, int32_t fh)
+{
+    return walk && walk->nHeight == fh && utxo_recovery_block_trust_rooted(walk);
+}
+
+/* Log-as-truth: the frontier block named by validate_headers_log's own hash,
+ * if it resolves at fh on a trust-rooted chain; else NULL. */
+static struct block_index *utxo_recovery_clamp_log_hash_block(
+    struct utxo_recovery_ctx *ctx, int32_t fh)
+{
+    uint8_t lh[32];
+    bool found = false;
+    if (reducer_frontier_log_hash_at(progress_store_db(),
+            "validate_headers_log", "hash", fh, lh, &found) && found) {
+        struct uint256 fhash;
+        memcpy(fhash.data, lh, 32);
+        struct block_index *fb =
+            block_map_find(&ctx->state->map_block_index, &fhash);
+        if (fb && fb->nHeight == fh &&
+            utxo_recovery_block_trust_rooted(fb))
+            return fb;
+    }
+    return NULL;
+}
+
+static void utxo_recovery_clamp_set_flag(bool *clamped_out, bool v)
+{
+    if (clamped_out)
+        *clamped_out = v;
+}
+
 struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
     struct utxo_recovery_ctx *ctx, struct block_index *candidate,
     const char *reason, int32_t *frontier_out, bool *clamped_out)
 {
-    if (clamped_out)
-        *clamped_out = false;
-    if (frontier_out)
-        *frontier_out = -1;
+    utxo_recovery_clamp_set_flag(clamped_out, false);
+    utxo_recovery_clamp_set_frontier(frontier_out, -1);
     if (!ctx || !ctx->state || !candidate)
         return candidate;
     if (!reason)
@@ -523,8 +648,7 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
     int32_t fh = 0;
     if (!utxo_recovery_header_frontier(&fh))
         return candidate;              /* fail-open: behave as today */
-    if (frontier_out)
-        *frontier_out = fh;
+    utxo_recovery_clamp_set_frontier(frontier_out, fh);
     if (candidate->nHeight <= fh) {
         /* Log-derivable — but the INDEX must agree: the log frontier can
          * be fabricated ABOVE the candidate, so a height test alone would
@@ -549,32 +673,27 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
      * Without this carve-out, rewinding fabricated anchor rows collapses
      * the frontier to the compiled SHA3 anchor and drags a trust-rooted
      * candidate tens of thousands of blocks down to it. */
-    {
-        int32_t log_lo = 0;
-        bool lo_found = false;
-        if (reducer_frontier_log_coverage_floor(progress_store_db(),
-                "validate_headers_log", &log_lo, &lo_found) &&
-            lo_found && candidate->nHeight < log_lo) {
-            if (utxo_recovery_block_trust_rooted(candidate)) {
-                LOG_INFO("utxo_recovery",
-                         "Invariant A clamp: candidate h=%d is below the "
-                         "validate_headers_log coverage window (oldest row "
-                         "h=%d, frontier h=%d) — log abstains; committing "
-                         "on trust-rooted index ancestry (reason=%s)",
-                         candidate->nHeight, log_lo, fh, reason);
-                return candidate;
-            }
-            LOG_WARN("utxo_recovery",
-                     "Invariant A clamp: candidate h=%d is below the log "
-                     "coverage window (oldest row h=%d) AND not trust-rooted; "
-                     "refusing install (reason=%s)",
-                     candidate->nHeight, log_lo, reason);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=restore_tip_refused candidate=%d frontier=%d "
-                        "via=unrooted_below_log_window reason=%s",
-                        candidate->nHeight, fh, reason);
-            return NULL;
+    int32_t log_lo = 0;
+    if (utxo_recovery_clamp_below_log_window(candidate, &log_lo)) {
+        if (utxo_recovery_block_trust_rooted(candidate)) {
+            LOG_INFO("utxo_recovery",
+                     "Invariant A clamp: candidate h=%d is below the "
+                     "validate_headers_log coverage window (oldest row "
+                     "h=%d, frontier h=%d) — log abstains; committing "
+                     "on trust-rooted index ancestry (reason=%s)",
+                     candidate->nHeight, log_lo, fh, reason);
+            return candidate;
         }
+        LOG_WARN("utxo_recovery",
+                 "Invariant A clamp: candidate h=%d is below the log "
+                 "coverage window (oldest row h=%d) AND not trust-rooted; "
+                 "refusing install (reason=%s)",
+                 candidate->nHeight, log_lo, reason);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=restore_tip_refused candidate=%d frontier=%d "
+                    "via=unrooted_below_log_window reason=%s",
+                    candidate->nHeight, fh, reason);
+        return NULL;
     }
 
     /* 1) hash-linked descent: pprev only, never by-height. Bounded by the
@@ -584,13 +703,9 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
     struct block_index *walk = candidate;
     int64_t max_hops = (int64_t)candidate->nHeight - (int64_t)fh + 1;
     int64_t hops = 0;
-    while (walk && walk->nHeight > fh) {
+    while (utxo_recovery_clamp_walk_above(walk, fh)) {
         struct block_index *prev = walk->pprev;
-        if (!prev) {
-            walk = NULL;
-            break;
-        }
-        if (prev->nHeight >= walk->nHeight || ++hops > max_hops) {
+        if (utxo_recovery_clamp_hop_cyclic(walk, prev, &hops, max_hops)) {
             LOG_WARN("utxo_recovery",
                      "Invariant A clamp: non-descending/cyclic pprev while "
                      "walking restore candidate h=%d toward frontier h=%d "
@@ -602,15 +717,12 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
                         "frontier=%d at=%d prev=%d reason=%s",
                         candidate->nHeight, fh, walk->nHeight,
                         prev->nHeight, reason);
-            walk = NULL;
-            break;
+            prev = NULL;
         }
         walk = prev;
     }
-    if (walk && walk->nHeight == fh &&
-        utxo_recovery_block_trust_rooted(walk)) {
-        if (clamped_out)
-            *clamped_out = true;
+    if (utxo_recovery_clamp_walk_ok(walk, fh)) {
+        utxo_recovery_clamp_set_flag(clamped_out, true);
         LOG_WARN("utxo_recovery",
                  "Invariant A clamp: restore candidate h=%d above validated "
                  "header frontier h=%d; committing hash-linked ancestor "
@@ -624,30 +736,20 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
     /* 2) torn extent (pprev dies above fh or cycles/non-descends before fh):
      * derive the frontier tip from validate_headers_log's OWN hash
      * (log-as-truth). */
-    uint8_t lh[32];
-    bool found = false;
-    if (reducer_frontier_log_hash_at(progress_store_db(),
-            "validate_headers_log", "hash", fh, lh, &found) && found) {
-        struct uint256 fhash;
-        memcpy(fhash.data, lh, 32);
-        struct block_index *fb =
-            block_map_find(&ctx->state->map_block_index, &fhash);
-        if (fb && fb->nHeight == fh &&
-            utxo_recovery_block_trust_rooted(fb)) {
-            if (clamped_out)
-                *clamped_out = true;
-            LOG_WARN("utxo_recovery",
-                     "Invariant A clamp: restore candidate h=%d above "
-                     "validated header frontier h=%d and pprev chain is "
-                     "torn; committing the frontier block from "
-                     "validate_headers_log's own hash (reason=%s)",
-                     candidate->nHeight, fh, reason);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=restore_tip_clamp candidate=%d frontier=%d "
-                        "via=log_hash reason=%s",
-                        candidate->nHeight, fh, reason);
-            return fb;
-        }
+    struct block_index *fb = utxo_recovery_clamp_log_hash_block(ctx, fh);
+    if (fb) {
+        utxo_recovery_clamp_set_flag(clamped_out, true);
+        LOG_WARN("utxo_recovery",
+                 "Invariant A clamp: restore candidate h=%d above "
+                 "validated header frontier h=%d and pprev chain is "
+                 "torn; committing the frontier block from "
+                 "validate_headers_log's own hash (reason=%s)",
+                 candidate->nHeight, fh, reason);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=restore_tip_clamp candidate=%d frontier=%d "
+                    "via=log_hash reason=%s",
+                    candidate->nHeight, fh, reason);
+        return fb;
     }
 
     LOG_WARN("utxo_recovery",
@@ -659,6 +761,37 @@ struct block_index *utxo_recovery_clamp_tip_to_header_frontier(
                 "action=restore_tip_refused candidate=%d frontier=%d "
                 "reason=%s", candidate->nHeight, fh, reason);
     return NULL;
+}
+
+/* LOG half: the floor sits within the validated header frontier, abstains
+ * fail-open with no log evidence, or predates the log's rolling window. */
+static bool utxo_recovery_settle_log_backed(bool have_fh, int32_t fh,
+                                            bool have_log_lo, int32_t log_lo,
+                                            int served_floor)
+{
+    return !have_fh || served_floor <= fh ||
+        (have_log_lo && served_floor < log_lo);
+}
+
+/* INDEX half: the floor row's own hash resolves at the recorded height on a
+ * trust-rooted chain. */
+static bool utxo_recovery_settle_index_backed(
+    struct utxo_recovery_ctx *ctx, const struct uint256 *served_hash,
+    bool have_served_hash, int served_floor)
+{
+    struct block_index *fb = have_served_hash
+        ? block_map_find(&ctx->state->map_block_index, served_hash)
+        : NULL;
+    return fb && fb->nHeight == served_floor &&
+        utxo_recovery_block_trust_rooted(fb);
+}
+
+/* Oldest row the validate_headers_log still covers, if any. */
+static bool utxo_recovery_settle_log_floor(int32_t *log_lo)
+{
+    bool lo_found = false;
+    return reducer_frontier_log_coverage_floor(progress_store_db(),
+            "validate_headers_log", log_lo, &lo_found) && lo_found;
 }
 
 int utxo_recovery_settle_finalized_floor(struct utxo_recovery_ctx *ctx,
@@ -686,22 +819,13 @@ int utxo_recovery_settle_finalized_floor(struct utxo_recovery_ctx *ctx,
     int32_t fh = -1;
     bool have_fh = utxo_recovery_header_frontier(&fh);
     int32_t log_lo = 0;
-    bool have_log_lo = false;
-    {
-        bool lo_found = false;
-        if (reducer_frontier_log_coverage_floor(progress_store_db(),
-                "validate_headers_log", &log_lo, &lo_found) && lo_found)
-            have_log_lo = true;
-    }
+    bool have_log_lo = utxo_recovery_settle_log_floor(&log_lo);
     int flipped_passes = 0;
     while (served_floor > scan_fallback_h) {
-        struct block_index *fb = *have_served_hash
-            ? block_map_find(&ctx->state->map_block_index, served_hash)
-            : NULL;
-        bool log_backed = !have_fh || served_floor <= fh ||
-            (have_log_lo && served_floor < log_lo);
-        bool index_backed = fb && fb->nHeight == served_floor &&
-            utxo_recovery_block_trust_rooted(fb);
+        bool log_backed = utxo_recovery_settle_log_backed(
+            have_fh, fh, have_log_lo, log_lo, served_floor);
+        bool index_backed = utxo_recovery_settle_index_backed(
+            ctx, served_hash, *have_served_hash, served_floor);
         if (log_backed && index_backed)
             break;  /* real authority — hold the floor */
 
