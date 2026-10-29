@@ -486,6 +486,243 @@ bool api_route_registry_is_private(const char *path)
     return false;
 }
 
+/* Per-node listing moderation: ?profile=open is the explicit
+ * per-request view override; absent means the node's active
+ * profile. Parsing mirrors api_parse_collection_limit. */
+static bool api_dyn_market_profile_parse(const char *path, char *profile,
+                                         size_t profile_len)
+{
+    const char *q = path ? strchr(path, '?') : NULL;
+    if (q) {
+        const char *pp = strstr(q, "profile=");
+        if (pp) {
+            pp += 8;
+            size_t n = 0;
+            while (pp[n] && pp[n] != '&' && n < profile_len - 1) {
+                profile[n] = pp[n];
+                n++;
+            }
+            if (pp[n] && pp[n] != '&')
+                return false;
+            profile[n] = '\0';
+        }
+    }
+    return true;
+}
+
+static size_t api_dyn_json_lookup_finish(
+    const struct api_dynamic_resource_route *route,
+    struct json_value *jr,
+    bool found,
+    uint8_t *response,
+    size_t response_max,
+    const char *not_found)
+{
+    if (found) {
+        api_json_add_freshness(jr, route->freshness, -1);
+        size_t n = api_json_ok(response, response_max, jr);
+        json_free(jr);
+        return n;
+    }
+    json_free(jr);
+    return api_json_error(response, response_max, JSON_404_HEADERS,
+                          not_found);
+}
+
+static size_t api_dyn_market_index(
+    const struct api_dynamic_resource_route *route,
+    const char *path,
+    uint8_t *response,
+    size_t response_max)
+{
+    char profile[40] = "";
+
+    if (!api_dyn_market_profile_parse(path, profile, sizeof(profile)))
+        return api_json_error(response, response_max, JSON_404_HEADERS,
+                              "Invalid profile parameter");
+    struct json_value jr = {0};
+    bool found = api_market_list_profile(profile[0] ? profile : NULL, &jr);
+    return api_dyn_json_lookup_finish(route, &jr, found, response,
+                                      response_max,
+                                      "Invalid profile parameter");
+}
+
+static size_t api_dyn_zslp_token_transfers(const char *path,
+                                           const char *param,
+                                           uint8_t *response,
+                                           size_t response_max)
+{
+    size_t token_len = param ? strlen(param) : 0;
+    if (token_len == 0 || token_len > ZSLP_TOKEN_KEY_MAX)
+        return api_json_error(response, response_max, JSON_404_HEADERS,
+                              "Invalid token id");
+    return api_serve_zslp_token_transfers(path, param, response,
+                                          response_max);
+}
+
+static size_t api_dyn_file_show(const char *param, uint8_t *response,
+                                size_t response_max)
+{
+    if (!param || strlen(param) != 64)
+        return api_json_error(response, response_max, JSON_404_HEADERS,
+                              "Invalid file hash");
+    return api_serve_file_chunk(param, response, response_max);
+}
+
+static size_t api_dyn_name_show(
+    const struct api_dynamic_resource_route *route,
+    const char *param,
+    uint8_t *response,
+    size_t response_max)
+{
+    struct json_value jr = {0};
+    bool found = rpc_name_resolve_api(param, &jr);
+    return api_dyn_json_lookup_finish(route, &jr, found, response,
+                                      response_max, "Name not found");
+}
+
+static size_t api_dyn_service_catalog_show(
+    const struct api_dynamic_resource_route *route,
+    const char *param,
+    uint8_t *response,
+    size_t response_max)
+{
+    struct json_value jr = {0};
+    bool found = api_service_catalog_show_json(param, &jr);
+    return api_dyn_json_lookup_finish(route, &jr, found, response,
+                                      response_max, "Service not found");
+}
+
+static size_t api_dyn_service_operation_show(
+    const struct api_dynamic_resource_route *route,
+    const char *param,
+    uint8_t *response,
+    size_t response_max)
+{
+    struct json_value jr = {0};
+    bool found = api_service_operation_show_json(param, &jr);
+    return api_dyn_json_lookup_finish(route, &jr, found, response,
+                                      response_max,
+                                      "Service operation not found");
+}
+
+/* Each group owns a slice of the dispatch kinds. A group returns true
+ * when it handled the kind and stores the response length in *out. */
+static bool api_dyn_group_lookup(
+    const struct api_dynamic_resource_route *route,
+    const char *path,
+    const char *param,
+    uint8_t *response,
+    size_t response_max,
+    size_t *out)
+{
+    switch (route->dispatch_kind) {
+    case API_DYN_BLOCK_SHOW:
+        *out = do_lookup(LOOKUP_BLOCK, param, response, response_max);
+        return true;
+    case API_DYN_TX_SHOW:
+        *out = do_lookup(LOOKUP_TX, param, response, response_max);
+        return true;
+    case API_DYN_ADDRESS_SHOW:
+        *out = do_lookup(LOOKUP_ADDRESS, param, response, response_max);
+        return true;
+    case API_DYN_ZSLP_TOKENS_INDEX:
+        *out = api_serve_zslp_tokens(path, response, response_max);
+        return true;
+    case API_DYN_ZSLP_TOKEN_SHOW:
+        *out = api_serve_zslp_token(param, response, response_max);
+        return true;
+    case API_DYN_ZSLP_TOKEN_TRANSFERS:
+        *out = api_dyn_zslp_token_transfers(path, param, response,
+                                            response_max);
+        return true;
+    case API_DYN_ONION_ANNOUNCEMENTS_INDEX:
+        *out = api_serve_onion_announcements(path, response, response_max);
+        return true;
+    case API_DYN_FILE_SERVICES_INDEX:
+        *out = api_serve_file_services(path, response, response_max);
+        return true;
+    case API_DYN_PEERS_INDEX:
+        *out = api_serve_peers(path, response, response_max);
+        return true;
+    case API_DYN_EVENTS_INDEX:
+        *out = api_serve_events(path, response, response_max);
+        return true;
+    case API_DYN_FILE_SHOW:
+        *out = api_dyn_file_show(param, response, response_max);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool api_dyn_group_named(
+    const struct api_dynamic_resource_route *route,
+    const char *path,
+    const char *param,
+    uint8_t *response,
+    size_t response_max,
+    size_t *out)
+{
+    switch (route->dispatch_kind) {
+    case API_DYN_NAME_SERVICES:
+        *out = api_serve_name_service_directory(param, path,
+                                                route->freshness,
+                                                response, response_max);
+        return true;
+    case API_DYN_NAME_SHOW:
+        *out = api_dyn_name_show(route, param, response, response_max);
+        return true;
+    case API_DYN_PROTOCOL_SHOW:
+        *out = api_serve_protocol_member(param, route->freshness,
+                                         response, response_max);
+        return true;
+    case API_DYN_TRANSACTION_TYPE_SHOW:
+        *out = api_serve_transaction_type_member(param, route->freshness,
+                                                 response, response_max);
+        return true;
+    case API_DYN_SERVICE_CATALOG_SHOW:
+        *out = api_dyn_service_catalog_show(route, param, response,
+                                            response_max);
+        return true;
+    case API_DYN_SERVICE_OPERATIONS_INDEX:
+        *out = api_serve_service_operations(path, response, response_max);
+        return true;
+    case API_DYN_SERVICE_OPERATION_SHOW:
+        *out = api_dyn_service_operation_show(route, param, response,
+                                              response_max);
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool api_dyn_group_build(
+    const struct api_dynamic_resource_route *route,
+    const char *path,
+    const char *param,
+    uint8_t *response,
+    size_t response_max,
+    size_t *out)
+{
+    switch (route->dispatch_kind) {
+    case API_DYN_BUILD_SHOW:
+        *out = api_serve_build(param, response, response_max);
+        return true;
+    case API_DYN_BUILD_ACTIONS_INDEX:
+        *out = api_serve_build_actions(param, response, response_max);
+        return true;
+    case API_DYN_BUILD_RECEIPT_SHOW:
+        *out = api_serve_build_receipt(param, response, response_max);
+        return true;
+    case API_DYN_MARKET_INDEX:
+        *out = api_dyn_market_index(route, path, response, response_max);
+        return true;
+    default:
+        return false;
+    }
+}
+
 static size_t api_dynamic_route_dispatch(
     const struct api_dynamic_resource_route *route,
     const char *path,
@@ -493,130 +730,17 @@ static size_t api_dynamic_route_dispatch(
     uint8_t *response,
     size_t response_max)
 {
+    size_t n = 0;
+
     if (!route)
         return api_json_error(response, response_max, JSON_500_HEADERS,
                               "Internal error");
-
-    switch (route->dispatch_kind) {
-    case API_DYN_BLOCK_SHOW:
-        return do_lookup(LOOKUP_BLOCK, param, response, response_max);
-    case API_DYN_TX_SHOW:
-        return do_lookup(LOOKUP_TX, param, response, response_max);
-    case API_DYN_ADDRESS_SHOW:
-        return do_lookup(LOOKUP_ADDRESS, param, response, response_max);
-    case API_DYN_ZSLP_TOKENS_INDEX:
-        return api_serve_zslp_tokens(path, response, response_max);
-    case API_DYN_ZSLP_TOKEN_SHOW:
-        return api_serve_zslp_token(param, response, response_max);
-    case API_DYN_ZSLP_TOKEN_TRANSFERS: {
-        size_t token_len = param ? strlen(param) : 0;
-        if (token_len == 0 || token_len > ZSLP_TOKEN_KEY_MAX)
-            return api_json_error(response, response_max, JSON_404_HEADERS,
-                                  "Invalid token id");
-        return api_serve_zslp_token_transfers(path, param, response,
-                                              response_max);
-    }
-    case API_DYN_ONION_ANNOUNCEMENTS_INDEX:
-        return api_serve_onion_announcements(path, response, response_max);
-    case API_DYN_FILE_SERVICES_INDEX:
-        return api_serve_file_services(path, response, response_max);
-    case API_DYN_PEERS_INDEX:
-        return api_serve_peers(path, response, response_max);
-    case API_DYN_EVENTS_INDEX:
-        return api_serve_events(path, response, response_max);
-    case API_DYN_FILE_SHOW:
-        if (!param || strlen(param) != 64)
-            return api_json_error(response, response_max, JSON_404_HEADERS,
-                                  "Invalid file hash");
-        return api_serve_file_chunk(param, response, response_max);
-    case API_DYN_NAME_SERVICES: {
-        return api_serve_name_service_directory(param, path,
-                                                route->freshness,
-                                                response, response_max);
-    }
-    case API_DYN_NAME_SHOW: {
-        struct json_value jr = {0};
-        if (rpc_name_resolve_api(param, &jr)) {
-            api_json_add_freshness(&jr, route->freshness, -1);
-            size_t n = api_json_ok(response, response_max, &jr);
-            json_free(&jr);
-            return n;
-        }
-        json_free(&jr);
-        return api_json_error(response, response_max, JSON_404_HEADERS,
-                              "Name not found");
-    }
-    case API_DYN_PROTOCOL_SHOW: {
-        return api_serve_protocol_member(param, route->freshness,
-                                         response, response_max);
-    }
-    case API_DYN_TRANSACTION_TYPE_SHOW: {
-        return api_serve_transaction_type_member(param, route->freshness,
-                                                  response, response_max);
-    }
-    case API_DYN_SERVICE_CATALOG_SHOW: {
-        struct json_value jr = {0};
-        if (api_service_catalog_show_json(param, &jr)) {
-            api_json_add_freshness(&jr, route->freshness, -1);
-            size_t n = api_json_ok(response, response_max, &jr);
-            json_free(&jr);
-            return n;
-        }
-        json_free(&jr);
-        return api_json_error(response, response_max, JSON_404_HEADERS,
-                              "Service not found");
-    }
-    case API_DYN_SERVICE_OPERATIONS_INDEX:
-        return api_serve_service_operations(path, response, response_max);
-    case API_DYN_SERVICE_OPERATION_SHOW: {
-        struct json_value jr = {0};
-        if (api_service_operation_show_json(param, &jr)) {
-            api_json_add_freshness(&jr, route->freshness, -1);
-            size_t n = api_json_ok(response, response_max, &jr);
-            json_free(&jr);
-            return n;
-        }
-        json_free(&jr);
-        return api_json_error(response, response_max, JSON_404_HEADERS,
-                              "Service operation not found");
-    }
-    case API_DYN_BUILD_SHOW: return api_serve_build(param, response, response_max);
-    case API_DYN_BUILD_ACTIONS_INDEX: return api_serve_build_actions(param, response, response_max);
-    case API_DYN_BUILD_RECEIPT_SHOW: return api_serve_build_receipt(param, response, response_max);
-    case API_DYN_MARKET_INDEX: {
-        /* Per-node listing moderation: ?profile=open is the explicit
-         * per-request view override; absent means the node's active
-         * profile. Parsing mirrors api_parse_collection_limit. */
-        char profile[40] = "";
-        const char *q = path ? strchr(path, '?') : NULL;
-        if (q) {
-            const char *pp = strstr(q, "profile=");
-            if (pp) {
-                pp += 8;
-                size_t n = 0;
-                while (pp[n] && pp[n] != '&' && n < sizeof(profile) - 1) {
-                    profile[n] = pp[n];
-                    n++;
-                }
-                if (pp[n] && pp[n] != '&')
-                    return api_json_error(response, response_max,
-                                          JSON_404_HEADERS,
-                                          "Invalid profile parameter");
-                profile[n] = '\0';
-            }
-        }
-        struct json_value jr = {0};
-        if (api_market_list_profile(profile[0] ? profile : NULL, &jr)) {
-            api_json_add_freshness(&jr, route->freshness, -1);
-            size_t n = api_json_ok(response, response_max, &jr);
-            json_free(&jr);
-            return n;
-        }
-        json_free(&jr);
-        return api_json_error(response, response_max, JSON_404_HEADERS,
-                              "Invalid profile parameter");
-    }
-    }
+    if (api_dyn_group_lookup(route, path, param, response, response_max, &n))
+        return n;
+    if (api_dyn_group_named(route, path, param, response, response_max, &n))
+        return n;
+    if (api_dyn_group_build(route, path, param, response, response_max, &n))
+        return n;
 
     return api_json_error(response, response_max, JSON_500_HEADERS,
                           "Internal error");
