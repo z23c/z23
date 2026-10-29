@@ -391,12 +391,17 @@ static struct node_db_schema_preflight inspect_schema_newer_than_binary(
 }
 
 /* The schema_version node_state value must be exactly one 4-byte blob; this
- * is the shape check a single stepped marker row has to pass. */
-static bool schema_marker_column_is_blob(sqlite3_stmt *stmt)
+ * is the shape check a single stepped marker row has to pass. Copies the blob
+ * into *version only when the check passes; returns false (leaving *version
+ * untouched) otherwise. */
+static bool schema_marker_read_blob(sqlite3_stmt *stmt, int32_t *version)
 {
-    return sqlite3_column_type(stmt, 0) == SQLITE_BLOB &&
-           sqlite3_column_bytes(stmt, 0) == (int)sizeof(int32_t) &&
-           sqlite3_column_blob(stmt, 0) != NULL;
+    if (sqlite3_column_type(stmt, 0) != SQLITE_BLOB ||
+        sqlite3_column_bytes(stmt, 0) != (int)sizeof(*version) ||
+        !sqlite3_column_blob(stmt, 0))
+        return false; // raw-return-ok:malformed marker, the caller reports it
+    memcpy(version, sqlite3_column_blob(stmt, 0), sizeof(*version));
+    return true;
 }
 
 /* Reads and validates the schema_version key. Returns SQLITE_OK with
@@ -422,11 +427,8 @@ static int read_schema_marker(sqlite3 *db, int32_t *version_out,
     bool malformed = false;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:read-only-schema-preflight
         rows++;
-        if (rows != 1 || !schema_marker_column_is_blob(stmt)) {
+        if (rows != 1 || !schema_marker_read_blob(stmt, &version))
             malformed = true;
-            continue;
-        }
-        memcpy(&version, sqlite3_column_blob(stmt, 0), sizeof(version));
     }
     sqlite3_finalize(stmt);
     if (rc != SQLITE_DONE) {
