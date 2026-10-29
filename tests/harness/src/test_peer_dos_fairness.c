@@ -38,6 +38,7 @@
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
+#include "platform/socket_compat.h"
 #include "net/peer_scoring.h"
 #include "net/protocol.h"
 #include "chain/chainparams.h"
@@ -624,6 +625,394 @@ static int pdf_case_timeout_never_scored(void)
     return failures;
 }
 
+/* ── msg_tx.c characterization: process_tx_msg / process_inv ──────────
+ * Pins the CURRENT behaviour of the two message entry points of msg_tx.c,
+ * one row per reachable branch, through the relay fixture above. The
+ * accepted branch (TX_ACCEPT_OK: fee, dandelion relay, wallet callback)
+ * needs a signed spend of a funded coin and is not driven here. */
+
+/* A transparent transaction whose only output is negative: a structural
+ * INVALID that needs no keys and no coins. `tag` varies the hash. */
+static void pdf_make_negative_value_tx(struct transaction *tx, uint8_t tag)
+{
+    transaction_init(tx);
+    transaction_alloc(tx, 1, 1);
+    memset(tx->vin[0].prevout.hash.data, tag, 32);
+    tx->vin[0].prevout.n = 0;
+    tx->vin[0].sequence = 0xFFFFFFFF;
+    tx->vout[0].value = -1;
+    transaction_compute_hash(tx);
+}
+
+static bool pdf_tx_to_stream(struct transaction *tx, struct byte_stream *s)
+{
+    stream_init(s, 512);
+    return transaction_serialize(tx, s);
+}
+
+/* Row 1: bytes that cannot hold a transaction header are a malformed tx:
+ * refused, scored INVALID_MESSAGE, nothing admitted. */
+static int pdf_case_tx_malformed_scored(const struct chain_params *cp,
+                                        struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_garbage");
+
+    struct byte_stream s;
+    stream_init(&s, 8);
+    unsigned char junk[3] = {0xff, 0xff, 0xff};
+    stream_write_bytes(&s, junk, sizeof(junk));
+
+    bool ret = process_tx_msg(&fx.mp, &fx.node, &s);
+    bool ok = (ret == false);
+    ok = ok && (atomic_load(&fx.node.misbehavior) ==
+                peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ret=%d score=%d size=%zu)\n", (int)ret,
+               atomic_load(&fx.node.misbehavior), tx_mempool_size(&fx.pool));
+        failures++;
+    }
+    stream_free(&s);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 2: a tx whose hash is already in the seen ring returns true at once:
+ * no verdict, no score, no mempool change, and the mark stays. */
+static int pdf_case_tx_already_seen_silent(const struct chain_params *cp,
+                                           struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_repeat");
+
+    struct transaction tx;
+    pdf_make_sprout_tx(&tx, 0x31);
+    struct uint256 hash = tx.hash;
+    tx_mark_seen(&hash);
+
+    struct byte_stream s;
+    bool wrote = pdf_tx_to_stream(&tx, &s);
+    bool ret = process_tx_msg(&fx.mp, &fx.node, &s);
+
+    bool ok = wrote && ret;
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+    ok = ok && tx_already_seen(&hash);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (wrote=%d ret=%d score=%d)\n", (int)wrote, (int)ret,
+               atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    tx_clear_seen(&hash);
+    stream_free(&s);
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 3: a structurally INVALID tx is rejected AND scored, and its dedupe
+ * mark is kept (a definite verdict is not cleared). */
+static int pdf_case_tx_invalid_scored_mark_kept(const struct chain_params *cp,
+                                                struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_invalid_tx");
+
+    struct transaction tx;
+    pdf_make_negative_value_tx(&tx, 0x32);
+    struct uint256 hash = tx.hash;
+    struct byte_stream s;
+    bool wrote = pdf_tx_to_stream(&tx, &s);
+
+    bool ret = process_tx_msg(&fx.mp, &fx.node, &s);
+
+    bool ok = wrote && ret;
+    ok = ok && (atomic_load(&fx.node.misbehavior) ==
+                peer_offence_weight(PEER_OFFENCE_INVALID_MESSAGE));
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+    ok = ok && tx_already_seen(&hash);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (wrote=%d ret=%d score=%d)\n", (int)wrote, (int)ret,
+               atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    tx_clear_seen(&hash);
+    stream_free(&s);
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 4: with no verifying keys the tx is UNVERIFIABLE: returns true, costs
+ * no score, and its dedupe mark is cleared so a later re-send gets a verdict. */
+static int pdf_case_tx_unverifiable_clears_mark(const struct chain_params *cp,
+                                                struct main_state *ms)
+{
+    int failures = 0;
+    sapling_free_params();
+
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_unverifiable_tx");
+
+    struct transaction tx;
+    pdf_make_sprout_tx(&tx, 0x41);
+    struct uint256 hash = tx.hash;
+    struct byte_stream s;
+    bool wrote = pdf_tx_to_stream(&tx, &s);
+
+    bool ret = process_tx_msg(&fx.mp, &fx.node, &s);
+
+    bool ok = wrote && ret;
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
+    ok = ok && (tx_mempool_size(&fx.pool) == 0);
+    ok = ok && !tx_already_seen(&hash);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (wrote=%d ret=%d score=%d seen=%d)\n", (int)wrote,
+               (int)ret, atomic_load(&fx.node.misbehavior),
+               (int)tx_already_seen(&hash));
+        failures++;
+    }
+    tx_clear_seen(&hash);
+    stream_free(&s);
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 5: no mempool wired (msg_tx_classify -> INTERNAL_ERROR): returns true,
+ * no score (our fault, not the peer's), the mark is kept. */
+static int pdf_case_tx_no_mempool_unscored(const struct chain_params *cp,
+                                           struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_no_mempool");
+    fx.mp.mempool = NULL;
+
+    struct transaction tx;
+    pdf_make_negative_value_tx(&tx, 0x33);
+    struct uint256 hash = tx.hash;
+    struct byte_stream s;
+    bool wrote = pdf_tx_to_stream(&tx, &s);
+
+    bool ret = process_tx_msg(&fx.mp, &fx.node, &s);
+
+    bool ok = wrote && ret;
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
+    ok = ok && tx_already_seen(&hash);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (wrote=%d ret=%d score=%d)\n", (int)wrote, (int)ret,
+               atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    tx_clear_seen(&hash);
+    stream_free(&s);
+    transaction_free(&tx);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+static struct uint256 make_test_hash_pdf(uint8_t seed)
+{
+    struct uint256 h;
+    memset(h.data, seed, 32);
+    return h;
+}
+
+/* Runs process_inv over one inv item (count 0 or 1) on a fresh heap node and
+ * reports the return value plus whether a `getdata` frame was queued. */
+struct pdf_inv_result {
+    bool ret;
+    bool queued_getdata;
+    size_t queued_bytes;
+};
+
+static struct pdf_inv_result pdf_run_inv(struct pdf_relay_fixture *fx,
+                                         uint64_t count, int type,
+                                         const struct uint256 *hash)
+{
+    struct pdf_inv_result r = {false, false, 0};
+    struct byte_stream s;
+    stream_init(&s, 64);
+    stream_write_compact_size(&s, count);
+    if (count == 1) {
+        struct inv_item inv;
+        inv_item_init_typed(&inv, type, hash);
+        inv_item_serialize(&inv, &s);
+    }
+
+    struct p2p_node *node = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                                            &fx->node.addr, "pdf_inv", true);
+    if (node) {
+        r.ret = process_inv(&fx->mp, node, &s);
+        if (node->send_head) {
+            r.queued_bytes = node->send_size;
+            r.queued_getdata = node->send_head->size >= MSG_HEADER_SIZE &&
+                memcmp(node->send_head->data + 4,
+                       "getdata\0\0\0\0\0", 12) == 0;
+        }
+        p2p_node_free(node);
+    }
+    stream_free(&s);
+    return r;
+}
+
+/* Row 6: an empty stream has no count: process_inv refuses, unscored. */
+static int pdf_case_inv_no_count_refused(const struct chain_params *cp,
+                                         struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_inv_nocount");
+
+    struct byte_stream s;
+    stream_init(&s, 8);
+    bool ret = process_inv(&fx.mp, &fx.node, &s);
+
+    bool ok = (ret == false);
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
+    ok = ok && !fx.node.disconnect;
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ret=%d score=%d)\n", (int)ret,
+               atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    stream_free(&s);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 7: a count above MAX_INV_SZ is refused before any item is read:
+ * disconnect, scored FLOOD. */
+static int pdf_case_inv_oversized_flood(const struct chain_params *cp,
+                                        struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_inv_flood");
+
+    struct byte_stream s;
+    stream_init(&s, 16);
+    stream_write_compact_size(&s, MAX_INV_SZ + 1);
+
+    bool ret = process_inv(&fx.mp, &fx.node, &s);
+
+    bool ok = (ret == false);
+    ok = ok && fx.node.disconnect;
+    ok = ok && (atomic_load(&fx.node.misbehavior) ==
+                peer_offence_weight(PEER_OFFENCE_FLOOD));
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ret=%d disconnect=%d score=%d)\n", (int)ret,
+               (int)fx.node.disconnect, atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    stream_free(&s);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Row 8: a declared item that the stream cannot deliver fails cleanly:
+ * refused, nothing queued, unscored. */
+static int pdf_case_inv_truncated_item_refused(const struct chain_params *cp,
+                                               struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_inv_trunc");
+
+    struct byte_stream s;
+    stream_init(&s, 32);
+    stream_write_compact_size(&s, 2);
+    unsigned char part[10];
+    memset(part, 0xab, sizeof(part));
+    stream_write_bytes(&s, part, sizeof(part));
+
+    bool ret = process_inv(&fx.mp, &fx.node, &s);
+
+    bool ok = (ret == false);
+    ok = ok && (atomic_load(&fx.node.misbehavior) == 0);
+    ok = ok && (fx.node.send_head == NULL);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (ret=%d score=%d)\n", (int)ret,
+               atomic_load(&fx.node.misbehavior));
+        failures++;
+    }
+    stream_free(&s);
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
+/* Rows 9-13: the per-item outcomes of process_inv, one item each. */
+static int pdf_case_inv_item_outcomes(const struct chain_params *cp,
+                                      struct main_state *ms)
+{
+    int failures = 0;
+    struct pdf_relay_fixture fx;
+    pdf_relay_fixture_init(&fx, cp, ms, "pdf_inv_items");
+
+    struct uint256 h = make_test_hash_pdf(0x51);
+    struct pdf_inv_result r;
+
+    /* 9. Empty inv: accepted, nothing requested. */
+    r = pdf_run_inv(&fx, 0, MSG_TX, &h);
+    if (r.ret && !r.queued_getdata && r.queued_bytes == 0)
+        printf("OK\n");
+    else { printf("FAIL empty-inv\n"); failures++; }
+
+    /* 10. Unknown tx, not in mempool: one getdata frame is queued. */
+    r = pdf_run_inv(&fx, 1, MSG_TX, &h);
+    if (r.ret && r.queued_getdata && r.queued_bytes > MSG_HEADER_SIZE)
+        printf("OK\n");
+    else { printf("FAIL unseen-tx getdata\n"); failures++; }
+
+    /* 11. Tx already in the seen ring: nothing requested. */
+    struct uint256 seen_h = make_test_hash_pdf(0x52);
+    tx_mark_seen(&seen_h);
+    r = pdf_run_inv(&fx, 1, MSG_TX, &seen_h);
+    if (r.ret && !r.queued_getdata && r.queued_bytes == 0)
+        printf("OK\n");
+    else { printf("FAIL seen-tx silent\n"); failures++; }
+    tx_clear_seen(&seen_h);
+
+    /* 12. Block already in the seen ring: nothing requested. */
+    struct uint256 blk_h = make_test_hash_pdf(0x53);
+    block_mark_seen(&blk_h);
+    struct pdf_inv_result rb = pdf_run_inv(&fx, 1, MSG_BLOCK, &blk_h);
+    if (rb.ret && !rb.queued_getdata && rb.queued_bytes == 0)
+        printf("OK\n");
+    else { printf("FAIL seen-block silent\n"); failures++; }
+    block_clear_seen(&blk_h);
+
+    /* 13. Unknown inv type: ignored, nothing requested. */
+    r = pdf_run_inv(&fx, 1, 99, &h);
+    if (r.ret && r.queued_bytes == 0)
+        printf("OK\n");
+    else { printf("FAIL unknown-type ignored\n"); failures++; }
+
+    pdf_relay_fixture_free(&fx);
+    return failures;
+}
+
 int test_peer_dos_fairness(void)
 {
     int failures = 0;
@@ -711,6 +1100,37 @@ int test_peer_dos_fairness(void)
      * ================================================================ */
     printf("no production path maps a wall-clock deadline onto ban-score... ");
     failures += pdf_case_timeout_never_scored();
+
+    /* ================================================================
+     * 7. msg_tx.c characterization: the tx and inv entry points, one row
+     *    per reachable branch (see the cases above for what is not driven).
+     * ================================================================ */
+    printf("tx: malformed bytes -> refused and scored INVALID_MESSAGE... ");
+    failures += pdf_case_tx_malformed_scored(cp, &pdf_main_state);
+
+    printf("tx: already-seen hash -> silent true, no verdict... ");
+    failures += pdf_case_tx_already_seen_silent(cp, &pdf_main_state);
+
+    printf("tx: structurally invalid -> rejected, scored, mark kept... ");
+    failures += pdf_case_tx_invalid_scored_mark_kept(cp, &pdf_main_state);
+
+    printf("tx: unverifiable -> unscored, dedupe mark cleared... ");
+    failures += pdf_case_tx_unverifiable_clears_mark(cp, &pdf_main_state);
+
+    printf("tx: no mempool wired -> internal error, unscored... ");
+    failures += pdf_case_tx_no_mempool_unscored(cp, &pdf_main_state);
+
+    printf("inv: no count -> refused, unscored... ");
+    failures += pdf_case_inv_no_count_refused(cp, &pdf_main_state);
+
+    printf("inv: count above MAX_INV_SZ -> disconnect, scored FLOOD... ");
+    failures += pdf_case_inv_oversized_flood(cp, &pdf_main_state);
+
+    printf("inv: truncated item -> refused, nothing queued... ");
+    failures += pdf_case_inv_truncated_item_refused(cp, &pdf_main_state);
+
+    printf("inv: empty / unseen tx / seen tx / seen block / unknown type... ");
+    failures += pdf_case_inv_item_outcomes(cp, &pdf_main_state);
 
     main_state_free(&pdf_main_state);
 
