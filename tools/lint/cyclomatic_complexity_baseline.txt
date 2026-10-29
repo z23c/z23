@@ -621,9 +621,7 @@ engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_relink_scrambled
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_settle_finalized_floor:22
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:20
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_restore_chain_tip:48
-engine/services/src/utxo_recovery_service.c:integrity_checks_boot_ok:25
-engine/services/src/utxo_recovery_service.c:utxo_recovery_commit_tip:28
-engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:32
+engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:22
 platform/modules/encoding/src/utilstrencodings.c:ParseFixedPoint:45
 platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_is_valid:16
