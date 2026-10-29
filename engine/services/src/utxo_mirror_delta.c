@@ -208,6 +208,140 @@ static bool mirror_apply_spent_blob(struct node_db *ndb, struct addr_set *touche
     return true;
 }
 
+/* Count the utxo_apply_delta rows persisted for [cursor, upper); -1 when the
+ * query could not run to a row. */
+static int64_t mirror_count_delta_rows(sqlite3 *rdb, int32_t cursor, int32_t upper)
+{
+    sqlite3_stmt *cnt = NULL;
+    int64_t delta_rows = -1;
+    if (sqlite3_prepare_v2(rdb,
+            "SELECT COUNT(*) FROM utxo_apply_delta WHERE height >= ? AND height < ?",
+            -1, &cnt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(cnt, 1, cursor);
+        sqlite3_bind_int64(cnt, 2, upper);
+        if (sqlite3_step(cnt) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
+            delta_rows = sqlite3_column_int64(cnt, 0);
+    }
+    sqlite3_finalize(cnt);
+    return delta_rows;
+}
+
+enum mirror_coin_row {
+    MIRROR_COIN_ROW_OK,
+    MIRROR_COIN_ROW_BAD_TXID,
+    MIRROR_COIN_ROW_BIG_SCRIPT,
+};
+
+/* Classify the current coins row; *slen_out is the clamped script length. */
+static enum mirror_coin_row mirror_coin_row_check(sqlite3_stmt *sel, int *slen_out)
+{
+    const void *txid = sqlite3_column_blob(sel, 0);
+    if (!txid || sqlite3_column_bytes(sel, 0) != 32)
+        return MIRROR_COIN_ROW_BAD_TXID;
+    int slen = sqlite3_column_bytes(sel, 5);
+    if (slen < 0) slen = 0;
+    *slen_out = slen;
+    if (slen > MAX_SCRIPT_SIZE)
+        return MIRROR_COIN_ROW_BIG_SCRIPT;
+    return MIRROR_COIN_ROW_OK;
+}
+
+/* Upsert the current (already checked) coins row and fold it into the
+ * commitment. Returns the upsert result. */
+static bool mirror_add_coin_row(struct node_db *ndb, struct addr_set *touched,
+                                sqlite3_stmt *sel, int slen,
+                                struct utxo_commitment *uc, bool track_commitment,
+                                int32_t ch, int64_t *rows_changed)
+{
+    const void *txid = sqlite3_column_blob(sel, 0);
+    const void *sc = sqlite3_column_blob(sel, 5);
+    int64_t add_value = sqlite3_column_int64(sel, 2);
+    int add_h_raw = sqlite3_column_int(sel, 3);
+    bool ok = mirror_upsert_coin(ndb, touched,
+                                 (const uint8_t *)txid,
+                                 (uint32_t)sqlite3_column_int(sel, 1),
+                                 add_value, add_h_raw,
+                                 sqlite3_column_int(sel, 4) != 0,
+                                 (const uint8_t *)sc, (size_t)slen);
+    if (ok) {
+        (*rows_changed)++;
+        /* creation_height >= ch: skip a coin a prior (retried) attempt
+         * already folded in — see the maybe_commitment_remove doc
+         * comment for the matching REMOVE-side rationale. */
+        int32_t add_h = add_h_raw < 0 ? 0 : add_h_raw;
+        if (track_commitment && add_h >= ch)
+            utxo_commitment_add(uc, (const uint8_t *)txid,
+                                (uint32_t)sqlite3_column_int(sel, 1),
+                                add_value, add_h);
+    }
+    return ok;
+}
+
+/* 2. DELETE spends: outpoints in spent_blob for the range. */
+static bool mirror_delete_spends(struct node_db *ndb, sqlite3 *rdb,
+                                 struct addr_set *touched, int64_t *rows_changed,
+                                 struct utxo_commitment *uc, int32_t ch,
+                                 int32_t cursor, int32_t upper)
+{
+    bool ok = true;
+    sqlite3_stmt *sp = NULL;
+    if (sqlite3_prepare_v2(rdb,
+            "SELECT height, spent_blob FROM utxo_apply_delta "
+            "WHERE height >= ? AND height < ? ORDER BY height",
+            -1, &sp, NULL) != SQLITE_OK) {
+        ok = false;
+    } else {
+        sqlite3_bind_int64(sp, 1, cursor);
+        sqlite3_bind_int64(sp, 2, upper);
+        while (ok) {
+            int rc = sqlite3_step(sp);  // raw-sql-ok:progress-kv-kernel-store
+            if (rc == SQLITE_DONE) break;
+            if (rc != SQLITE_ROW) { ok = false; break; }
+            int32_t spend_h = (int32_t)sqlite3_column_int64(sp, 0);
+            const uint8_t *blob = sqlite3_column_blob(sp, 1);
+            int blen = sqlite3_column_bytes(sp, 1);
+            if (blen > 0 && blob)
+                ok = mirror_apply_spent_blob(ndb, touched, blob, (size_t)blen,
+                                             rows_changed, uc, ch, spend_h);
+        }
+    }
+    sqlite3_finalize(sp);
+    return ok;
+}
+
+/* 3. Re-derive the addresses + wallet_utxos caches for touched addresses. */
+static bool mirror_refresh_touched(struct node_db *ndb, const struct addr_set *touched)
+{
+    bool ok = true;
+    for (size_t i = 0; i < touched->cap && ok; i++) {
+        if (!touched->used[i]) continue;
+        ok = db_utxo_refresh_caches_for_address(ndb, touched->keys[i]);
+    }
+    return ok;
+}
+
+/* Reject unusable arguments before any work is done. */
+static bool mirror_delta_args_ok(const struct node_db *ndb, int32_t cursor,
+                                 int32_t frontier, const char *cursor_key,
+                                 const int32_t *out_applied_through,
+                                 const int64_t *out_rows_changed)
+{
+    if (!ndb || !ndb->open || !cursor_key || !cursor_key[0] ||
+        !out_applied_through || !out_rows_changed)
+        return false;
+    return frontier > cursor;
+}
+
+/* Clamp the pass to max_heights when that is smaller than the span. */
+static int32_t mirror_delta_upper(int32_t cursor, int32_t frontier,
+                                  int32_t max_heights)
+{
+    int32_t upper = frontier;
+    if (max_heights > 0 && (int64_t)cursor + max_heights < (int64_t)frontier)
+        upper = cursor + max_heights;
+    return upper;
+}
+
 /* ── The delta pass ──────────────────────────────────────────────────── */
 
 int utxo_mirror_delta_apply(struct node_db *ndb,
@@ -217,15 +351,11 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
                             int32_t *out_applied_through,
                             int64_t *out_rows_changed)
 {
-    if (!ndb || !ndb->open || !cursor_key || !cursor_key[0] ||
-        !out_applied_through || !out_rows_changed)
-        return UTXO_MIRROR_DELTA_ERROR;
-    if (frontier <= cursor)
+    if (!mirror_delta_args_ok(ndb, cursor, frontier, cursor_key,
+                              out_applied_through, out_rows_changed))
         return UTXO_MIRROR_DELTA_ERROR;
 
-    int32_t upper = frontier;
-    if (max_heights > 0 && (int64_t)cursor + max_heights < (int64_t)frontier)
-        upper = cursor + max_heights;
+    int32_t upper = mirror_delta_upper(cursor, frontier, max_heights);
 
     char pkv_path[PROGRESS_STORE_PATH_MAX];
     if (!progress_store_path(pkv_path, sizeof(pkv_path)))
@@ -244,17 +374,7 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
      * incomplete → refuse the delta and let the caller quarantine. Every
      * applied height persists a row (utxo_apply_stage.c), so the count must
      * equal the height span. */
-    sqlite3_stmt *cnt = NULL;
-    int64_t delta_rows = -1;
-    if (sqlite3_prepare_v2(rdb,
-            "SELECT COUNT(*) FROM utxo_apply_delta WHERE height >= ? AND height < ?",
-            -1, &cnt, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(cnt, 1, cursor);
-        sqlite3_bind_int64(cnt, 2, upper);
-        if (sqlite3_step(cnt) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
-            delta_rows = sqlite3_column_int64(cnt, 0);
-    }
-    sqlite3_finalize(cnt);
+    int64_t delta_rows = mirror_count_delta_rows(rdb, cursor, upper);
     if (delta_rows != (int64_t)(upper - cursor)) {
         sqlite3_close(rdb);
         LOG_RETURN(UTXO_MIRROR_DELTA_FALLBACK, "utxo_mirror",
@@ -315,75 +435,30 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
             int rc = sqlite3_step(sel);  // raw-sql-ok:progress-kv-kernel-store
             if (rc == SQLITE_DONE) break;
             if (rc != SQLITE_ROW) { ok = false; break; }
-            const void *txid = sqlite3_column_blob(sel, 0);
-            if (!txid || sqlite3_column_bytes(sel, 0) != 32) {
+            int slen = 0;
+            enum mirror_coin_row kind = mirror_coin_row_check(sel, &slen);
+            if (kind == MIRROR_COIN_ROW_BAD_TXID) {
                 LOG_WARN("utxo_mirror", "delta: malformed coin txid — skipping");
                 continue;
             }
-            const void *sc = sqlite3_column_blob(sel, 5);
-            int slen = sqlite3_column_bytes(sel, 5);
-            if (slen < 0) slen = 0;
-            if (slen > MAX_SCRIPT_SIZE) {
+            if (kind == MIRROR_COIN_ROW_BIG_SCRIPT) {
                 LOG_WARN("utxo_mirror", "delta: oversize coin script — skipping");
                 continue;
             }
-            int64_t add_value = sqlite3_column_int64(sel, 2);
-            int add_h_raw = sqlite3_column_int(sel, 3);
-            ok = mirror_upsert_coin(ndb, &touched,
-                                    (const uint8_t *)txid,
-                                    (uint32_t)sqlite3_column_int(sel, 1),
-                                    add_value, add_h_raw,
-                                    sqlite3_column_int(sel, 4) != 0,
-                                    (const uint8_t *)sc, (size_t)slen);
-            if (ok) {
-                rows_changed++;
-                /* creation_height >= ch: skip a coin a prior (retried) attempt
-                 * already folded in — see the maybe_commitment_remove doc
-                 * comment for the matching REMOVE-side rationale. */
-                int32_t add_h = add_h_raw < 0 ? 0 : add_h_raw;
-                if (track_commitment && add_h >= ch)
-                    utxo_commitment_add(&uc, (const uint8_t *)txid,
-                                        (uint32_t)sqlite3_column_int(sel, 1),
-                                        add_value, add_h);
-            }
+            ok = mirror_add_coin_row(ndb, &touched, sel, slen, &uc,
+                                     track_commitment, ch, &rows_changed);
         }
     }
     sqlite3_finalize(sel);
 
-    /* 2. DELETE spends: outpoints in spent_blob for the range. */
-    sqlite3_stmt *sp = NULL;
-    if (ok && sqlite3_prepare_v2(rdb,
-            "SELECT height, spent_blob FROM utxo_apply_delta "
-            "WHERE height >= ? AND height < ? ORDER BY height",
-            -1, &sp, NULL) != SQLITE_OK) {
-        ok = false;
-    } else if (ok) {
-        sqlite3_bind_int64(sp, 1, cursor);
-        sqlite3_bind_int64(sp, 2, upper);
-        while (ok) {
-            int rc = sqlite3_step(sp);  // raw-sql-ok:progress-kv-kernel-store
-            if (rc == SQLITE_DONE) break;
-            if (rc != SQLITE_ROW) { ok = false; break; }
-            int32_t spend_h = (int32_t)sqlite3_column_int64(sp, 0);
-            const uint8_t *blob = sqlite3_column_blob(sp, 1);
-            int blen = sqlite3_column_bytes(sp, 1);
-            if (blen > 0 && blob)
-                ok = mirror_apply_spent_blob(ndb, &touched, blob, (size_t)blen,
-                                             &rows_changed,
-                                             track_commitment ? &uc : NULL, ch,
-                                             spend_h);
-        }
-    }
-    sqlite3_finalize(sp);
+    if (ok)
+        ok = mirror_delete_spends(ndb, rdb, &touched, &rows_changed,
+                                  track_commitment ? &uc : NULL, ch,
+                                  cursor, upper);
     sqlite3_close(rdb);
 
-    /* 3. Re-derive the addresses + wallet_utxos caches for touched addresses. */
-    if (ok) {
-        for (size_t i = 0; i < touched.cap && ok; i++) {
-            if (!touched.used[i]) continue;
-            ok = db_utxo_refresh_caches_for_address(ndb, touched.keys[i]);
-        }
-    }
+    if (ok)
+        ok = mirror_refresh_touched(ndb, &touched);
     addr_set_free(&touched);
 
     if (!ok) {
