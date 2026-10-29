@@ -495,7 +495,6 @@ static int https_public_install_refusal_cases(void)
     char shim_path[PATH_MAX];
     char shim_real[PATH_MAX];
     char out[PATH_MAX];
-    char longurl[2049];
 
     test_make_tmpdir(dir, sizeof(dir), "path_check", "pubinst_refuse");
     snprintf(root, sizeof(root), "%s/public-install", dir);
@@ -509,9 +508,6 @@ static int https_public_install_refusal_cases(void)
              write_small_file(plain, "not a directory"));
     PC_CHECK("refusal fixture: shim realpath",
              realpath(shim_path, shim_real) != NULL);
-    memset(longurl, 'a', 2048);
-    longurl[0] = '/';
-    longurl[2048] = '\0';
 
     PC_CHECK("refusal: NULL root",
              !https_server_public_install_filepath_for_testing(
@@ -528,12 +524,6 @@ static int https_public_install_refusal_cases(void)
     PC_CHECK("refusal: zero-length output buffer",
              !https_server_public_install_filepath_for_testing(
                  root, "/", out, 0));
-    PC_CHECK("refusal: control byte in URL",
-             !https_server_public_install_filepath_for_testing(
-                 root, "/\x01", out, sizeof(out)));
-    PC_CHECK("refusal: URL of 2048 bytes is over the 2047 cap",
-             !https_server_public_install_filepath_for_testing(
-                 root, longurl, out, sizeof(out)));
     PC_CHECK("refusal: bare /bootstrap/ names no file",
              !https_server_public_install_filepath_for_testing(
                  root, "/bootstrap/", out, sizeof(out)));
@@ -553,6 +543,87 @@ static int https_public_install_refusal_cases(void)
              https_server_public_install_filepath_for_testing(
                  root, "/", out, strlen(shim_real) + 1) &&
              strcmp(out, shim_real) == 0);
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Builds "/release/" followed by ten 200-byte directory segments and a
+ * name_len-byte file name, so the URL length is 2019 + name_len. */
+static void build_cap_url(char *url, size_t name_len)
+{
+    size_t len = strlen("/release/");
+
+    memcpy(url, "/release/", len);
+    for (int i = 0; i < 10; i++) {
+        memset(url + len, 'a', 200);
+        len += 200;
+        url[len++] = '/';
+    }
+    memset(url + len, 'f', name_len);
+    url[len + name_len] = '\0';
+}
+
+/* Creates every directory the URL names below root, then the file itself. */
+static bool make_url_file(const char *root, const char *url)
+{
+    char path[PATH_MAX];
+    const char *slash = url;
+    int n;
+
+    while ((slash = strchr(slash + 1, '/')) != NULL) {
+        n = snprintf(path, sizeof(path), "%s%.*s", root,
+                     (int)(slash - url), url);
+        if (n < 0 || (size_t)n >= sizeof(path))
+            return false;
+        if (mkdir(path, 0700) != 0 && errno != EEXIST)
+            return false;
+    }
+    n = snprintf(path, sizeof(path), "%s%s", root, url);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    return write_small_file(path, "routed");
+}
+
+/* Each refusal here names a file that exists, so realpath() cannot be the
+ * reason for the refusal: only the control-byte check or the URL length cap
+ * can refuse it. The exact-cap URL proves the boundary is 2047 bytes. */
+static int https_public_install_routed_refusal_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    char root[PATH_MAX];
+    char ctrl_url[32];
+    char cap_ok[2049];
+    char cap_over[2049];
+    char cap_path[PATH_MAX];
+    char cap_real[PATH_MAX];
+    char out[PATH_MAX];
+
+    test_make_tmpdir(dir, sizeof(dir), "path_check", "pubinst_routed");
+    snprintf(root, sizeof(root), "%s/public-install", dir);
+    snprintf(ctrl_url, sizeof(ctrl_url), "/release/x\x01y");
+    build_cap_url(cap_ok, 28);
+    build_cap_url(cap_over, 29);
+    PC_CHECK("routed fixture: root mkdir", mkdir(root, 0700) == 0);
+    PC_CHECK("routed fixture: control-byte file",
+             make_url_file(root, ctrl_url));
+    PC_CHECK("routed fixture: 2047-byte file", make_url_file(root, cap_ok));
+    PC_CHECK("routed fixture: 2048-byte file", make_url_file(root, cap_over));
+    snprintf(cap_path, sizeof(cap_path), "%s%s", root, cap_ok);
+    PC_CHECK("routed fixture: 2047-byte realpath",
+             realpath(cap_path, cap_real) != NULL);
+
+    PC_CHECK("refusal: control byte in a routed URL with an existing file",
+             !https_server_public_install_filepath_for_testing(
+                 root, ctrl_url, out, sizeof(out)));
+    PC_CHECK("refusal: routed URL of 2048 bytes is over the 2047 cap",
+             !https_server_public_install_filepath_for_testing(
+                 root, cap_over, out, sizeof(out)));
+    PC_CHECK("routed URL of exactly 2047 bytes is accepted",
+             https_server_public_install_filepath_for_testing(
+                 root, cap_ok, out, sizeof(out)) &&
+             strcmp(out, cap_real) == 0);
 
     test_cleanup_tmpdir(dir);
     return failures;
@@ -830,6 +901,7 @@ int test_path_check(void)
     failures += https_acme_redirect_containment_cases();
     failures += https_public_install_jail_cases();
     failures += https_public_install_refusal_cases();
+    failures += https_public_install_routed_refusal_cases();
     failures += https_public_install_mapping_cases();
     failures += path_check_whole_file_cases();
 
