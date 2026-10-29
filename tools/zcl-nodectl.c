@@ -632,6 +632,84 @@ static int cmd_verify_follow(struct rpc_target *legacy,
     return 1;
 }
 
+/* Resolve the slots directory from the environment or HOME; 0 or 64. */
+static int launch_resolve_slots(const char **slots, char *default_slots,
+                                size_t default_slots_size)
+{
+    *slots = getenv("ZCL_BINARY_SLOTS_DIR");
+    if (!*slots || !(*slots)[0]) {
+        const char *home = getenv("HOME");
+        int slots_len = home && home[0]
+            ? snprintf(default_slots, default_slots_size,
+                       "%s/.local/lib/zclassic23-slots", home)
+            : -1;
+        if (slots_len < 0 || (size_t)slots_len >= default_slots_size) {
+            fprintf(stderr, "zcl-nodectl launch: HOME is missing or too long\n");
+            return 64;
+        }
+        *slots = default_slots;
+    }
+    return 0;
+}
+
+static int launch_parse_threshold(uint32_t *threshold)
+{
+    const char *threshold_text = getenv("ZCL_BINARY_FALLBACK_THRESHOLD");
+    if (threshold_text &&
+        !os_binary_slots_parse_threshold(threshold_text, threshold)) {
+        fprintf(stderr, "zcl-nodectl launch: invalid "
+                        "ZCL_BINARY_FALLBACK_THRESHOLD\n");
+        return 64;
+    }
+    return 0;
+}
+
+/* Export the slot environment for the child; closes the launch on failure. */
+static int launch_export_env(struct os_binary_slots_launch *launch,
+                             const char *slots, const char *binary)
+{
+    if (setenv("ZCL_BINARY_SLOTS_DIR", slots, 1) != 0) {
+        fprintf(stderr, "zcl-nodectl launch: setenv slots failed: %s\n",
+                strerror(errno));
+        os_binary_slots_close_launch(launch);
+        return 1;
+    }
+    if (launch->fallback_active) {
+        if (setenv("ZCL_BINARY_FALLBACK_ACTIVE", "1", 1) != 0 ||
+            unsetenv("ZCL_BINARY_CURRENT") != 0) {
+            fprintf(stderr, "zcl-nodectl launch: fallback environment failed: %s\n",
+                    strerror(errno));
+            os_binary_slots_close_launch(launch);
+            return 1;
+        }
+    } else {
+        if (unsetenv("ZCL_BINARY_FALLBACK_ACTIVE") != 0 ||
+            setenv("ZCL_BINARY_CURRENT", binary, 1) != 0) {
+            fprintf(stderr, "zcl-nodectl launch: current environment failed: %s\n",
+                    strerror(errno));
+            os_binary_slots_close_launch(launch);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void launch_print_echo(const struct os_binary_slots_launch *launch,
+                              int argc, char **argv)
+{
+    printf("EXEC %s\n", launch->target_path);
+    printf("FALLBACK_ACTIVE=%s\n",
+           launch->fallback_active ? "1" : "");
+    printf("CURRENT=%s\n", launch->fallback_active ? "" : argv[2]);
+    if (launch->streak_written)
+        printf("STREAK_WRITTEN=%u\n", launch->streak_after);
+    else
+        printf("STREAK_WRITTEN=\n");
+    printf("STREAK_CORRUPT=%s\n", launch->streak_corrupt ? "1" : "0");
+    for (int i = 3; i < argc; i++)
+        printf("ARGV[%d]=%s\n", i - 3, argv[i]);
+}
+
 static int cmd_launch(int argc, char **argv)
 {
     if (argc < 3 || !argv[2] || !argv[2][0]) {
@@ -639,28 +717,13 @@ static int cmd_launch(int argc, char **argv)
                         "<node-binary> [node args...]\n");
         return 64;
     }
-    const char *slots = getenv("ZCL_BINARY_SLOTS_DIR");
+    const char *slots;
     char default_slots[OS_BINARY_SLOTS_PATH_MAX];
-    if (!slots || !slots[0]) {
-        const char *home = getenv("HOME");
-        int slots_len = home && home[0]
-            ? snprintf(default_slots, sizeof(default_slots),
-                       "%s/.local/lib/zclassic23-slots", home)
-            : -1;
-        if (slots_len < 0 || (size_t)slots_len >= sizeof(default_slots)) {
-            fprintf(stderr, "zcl-nodectl launch: HOME is missing or too long\n");
-            return 64;
-        }
-        slots = default_slots;
-    }
+    int rc = launch_resolve_slots(&slots, default_slots, sizeof(default_slots));
+    if (rc != 0) return rc;
     uint32_t threshold = 3;
-    const char *threshold_text = getenv("ZCL_BINARY_FALLBACK_THRESHOLD");
-    if (threshold_text &&
-        !os_binary_slots_parse_threshold(threshold_text, &threshold)) {
-        fprintf(stderr, "zcl-nodectl launch: invalid "
-                        "ZCL_BINARY_FALLBACK_THRESHOLD\n");
-        return 64;
-    }
+    rc = launch_parse_threshold(&threshold);
+    if (rc != 0) return rc;
 
     char error[OS_BINARY_SLOTS_ERROR_MAX];
     if (!os_binary_slots_ensure_directory(slots, error, sizeof(error))) {
@@ -675,29 +738,8 @@ static int cmd_launch(int argc, char **argv)
         return 1;
     }
 
-    if (setenv("ZCL_BINARY_SLOTS_DIR", slots, 1) != 0) {
-        fprintf(stderr, "zcl-nodectl launch: setenv slots failed: %s\n",
-                strerror(errno));
-        os_binary_slots_close_launch(&launch);
-        return 1;
-    }
-    if (launch.fallback_active) {
-        if (setenv("ZCL_BINARY_FALLBACK_ACTIVE", "1", 1) != 0 ||
-            unsetenv("ZCL_BINARY_CURRENT") != 0) {
-            fprintf(stderr, "zcl-nodectl launch: fallback environment failed: %s\n",
-                    strerror(errno));
-            os_binary_slots_close_launch(&launch);
-            return 1;
-        }
-    } else {
-        if (unsetenv("ZCL_BINARY_FALLBACK_ACTIVE") != 0 ||
-            setenv("ZCL_BINARY_CURRENT", argv[2], 1) != 0) {
-            fprintf(stderr, "zcl-nodectl launch: current environment failed: %s\n",
-                    strerror(errno));
-            os_binary_slots_close_launch(&launch);
-            return 1;
-        }
-    }
+    rc = launch_export_env(&launch, slots, argv[2]);
+    if (rc != 0) return rc;
 
     fprintf(stderr,
             "zcl-nodectl launch: target=%s fallback=%d streak_before=%u "
@@ -708,17 +750,7 @@ static int cmd_launch(int argc, char **argv)
 
     const char *test_echo = getenv("ZCL_LAUNCH_TEST_ECHO");
     if (test_echo && strcmp(test_echo, "1") == 0) {
-        printf("EXEC %s\n", launch.target_path);
-        printf("FALLBACK_ACTIVE=%s\n",
-               launch.fallback_active ? "1" : "");
-        printf("CURRENT=%s\n", launch.fallback_active ? "" : argv[2]);
-        if (launch.streak_written)
-            printf("STREAK_WRITTEN=%u\n", launch.streak_after);
-        else
-            printf("STREAK_WRITTEN=\n");
-        printf("STREAK_CORRUPT=%s\n", launch.streak_corrupt ? "1" : "0");
-        for (int i = 3; i < argc; i++)
-            printf("ARGV[%d]=%s\n", i - 3, argv[i]);
+        launch_print_echo(&launch, argc, argv);
         os_binary_slots_close_launch(&launch);
         return 0;
     }
@@ -848,6 +880,39 @@ static int cmd_standalone(int argc, char **argv)
     return -1;
 }
 
+/* Parse the verify-follow options after the command word; false on a bad one. */
+static bool parse_verify_opts(int argc, char **argv, struct verify_opts *opts)
+{
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--restart") == 0) {
+            opts->restart_first = true;
+        } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
+            opts->timeout_secs = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--poll") == 0 && i + 1 < argc) {
+            opts->poll_secs = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--stable") == 0 && i + 1 < argc) {
+            opts->stable_samples = atoi(argv[++i]);
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int dispatch_command(const char *cmd, struct rpc_target *legacy,
+                            struct rpc_target *c23,
+                            const struct verify_opts *opts)
+{
+    if (strcmp(cmd, "status") == 0) return cmd_status(legacy, c23);
+    if (strcmp(cmd, "stop") == 0) return cmd_stop(c23);
+    if (strcmp(cmd, "start") == 0) return cmd_start(c23);
+    if (strcmp(cmd, "restart") == 0) return cmd_restart(c23);
+    if (strcmp(cmd, "verify-follow") == 0) return cmd_verify_follow(legacy, c23, opts);
+
+    usage();
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     int standalone = cmd_standalone(argc, argv);
@@ -884,34 +949,16 @@ int main(int argc, char **argv)
         .poll_secs = 10,
         .stable_samples = 3
     };
-    int i;
 
     if (argc < 2) {
         usage();
         return 1;
     }
 
-    for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--restart") == 0) {
-            opts.restart_first = true;
-        } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
-            opts.timeout_secs = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--poll") == 0 && i + 1 < argc) {
-            opts.poll_secs = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--stable") == 0 && i + 1 < argc) {
-            opts.stable_samples = atoi(argv[++i]);
-        } else {
-            usage();
-            return 1;
-        }
+    if (!parse_verify_opts(argc, argv, &opts)) {
+        usage();
+        return 1;
     }
 
-    if (strcmp(argv[1], "status") == 0) return cmd_status(&legacy, &c23);
-    if (strcmp(argv[1], "stop") == 0) return cmd_stop(&c23);
-    if (strcmp(argv[1], "start") == 0) return cmd_start(&c23);
-    if (strcmp(argv[1], "restart") == 0) return cmd_restart(&c23);
-    if (strcmp(argv[1], "verify-follow") == 0) return cmd_verify_follow(&legacy, &c23, &opts);
-
-    usage();
-    return 1;
+    return dispatch_command(argv[1], &legacy, &c23, &opts);
 }
