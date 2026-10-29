@@ -856,7 +856,6 @@ static int test_mail_cursor_row(const char *name, const char *bytes, size_t n,
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1224,7 +1223,6 @@ static int test_mail_utf8_ref(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1433,7 +1431,6 @@ static int test_mail_exact_maximum(void)
         dvx_restore();
         PASS();
     } _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1466,7 +1463,6 @@ static int test_mail_exact_malformed(void)
         dvx_restore();
         PASS();
     } _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1493,7 +1489,6 @@ static int test_mail_exact_nul(void)
         dvx_restore();
         PASS();
     } _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1547,7 +1542,6 @@ static int test_mail_leaf_registered(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1635,7 +1629,6 @@ static int test_mail_first_post_roundtrip(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1674,7 +1667,6 @@ static int test_mail_ack_persists_cursor(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1808,7 +1800,6 @@ static int test_mail_body_refusals(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -1959,7 +1950,6 @@ static int test_mail_body_path_verdicts(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -2018,7 +2008,6 @@ static int test_mail_ack_atomic(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 
@@ -2037,15 +2026,6 @@ static void dvx_wait_child(pid_t pid, int *status)
 {
     while (waitpid(pid, status, 0) < 0)
         ;
-}
-
-/* Trim trailing CR/LF from a line in place and return its new length. */
-static size_t dvx_trim_line(char *line)
-{
-    size_t len = strlen(line);
-    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-        line[--len] = '\0';
-    return len;
 }
 
 /* Set the alpha/beta found flags by scanning each row's body. */
@@ -2100,7 +2080,10 @@ static int test_mail_fork_interleave(void)
         if (f) {
             while (fgets(line, sizeof(line), f)) {
                 struct json_value v;
-                size_t len = dvx_trim_line(line);
+                size_t len = strlen(line);
+                while (len > 0 &&
+                       (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                    line[--len] = '\0';
                 if (len == 0)
                     continue;
                 nlines++;
@@ -2124,14 +2107,13 @@ static int test_mail_fork_interleave(void)
         PASS();
     }
 _test_next:;
-    dvx_restore();
     return failures;
 }
 #endif /* !defined(_WIN32) */
 
-/* The first group, in original order. Every call runs even after a failure,
- * as the original calls did. */
-static int test_mail_front_half(void)
+/* The read-side checks (cursor, paging, refs, board), in original order.
+ * Every call runs even after a failure, as the original calls did. */
+static int test_mail_read_side_checks(void)
 {
     int failures = 0;
 
@@ -2152,9 +2134,9 @@ static int test_mail_front_half(void)
     return failures;
 }
 
-/* The second group, in original order. A failed test ends this group, as its
- * jump to the end of the original function did. */
-static int test_mail_back_half(void)
+/* The post, ack and body-refusal checks, in original order. A failed test
+ * ends this group, as its jump to the end of the original function did. */
+static int test_mail_post_ack_checks(void)
 {
     int failures = 0;
 
@@ -2181,8 +2163,8 @@ int test_devagent_mail(void)
 {
     int failures = 0;
 
-    failures += test_mail_front_half();
-    failures += test_mail_back_half();
+    failures += test_mail_read_side_checks();
+    failures += test_mail_post_ack_checks();
 
     dvx_restore();
     if (failures == 0)
