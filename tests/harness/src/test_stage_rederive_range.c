@@ -374,133 +374,127 @@ static void sr_redrive(int lo, int hi)
     }
 }
 
-int test_stage_rederive_range(void);
-int test_stage_rederive_range(void)
-{
-    int failures = 0;
+static const int SR_TIP = 3;
 
-    blocker_module_init();
-    chain_params_select(CHAIN_REGTEST);
-    const struct chain_params *cp = chain_params_get();
-
+/* Per-run data paths; the dir buffers outlive setup so teardown can clean them. */
+struct sr_paths {
     char dir[256];
-    sr_mkdir_p("./test-tmp");
-    test_fmt_tmpdir(dir, sizeof(dir), "stage_rederive_range", "main");
-    sr_mkdir_p(dir);
-    SetDataDir(dir);
     char netdir[512];
-    GetDataDir(true, netdir, sizeof(netdir));
-    sr_mkdir_p(netdir);
     char blocksdir[640];
-    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", netdir);
-    sr_mkdir_p(blocksdir);
-
     char log_path[512];
-    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+};
 
-    progress_store_close();
+static void sr_setup_paths(struct sr_paths *p)
+{
+    sr_mkdir_p("./test-tmp");
+    test_fmt_tmpdir(p->dir, sizeof(p->dir), "stage_rederive_range", "main");
+    sr_mkdir_p(p->dir);
+    SetDataDir(p->dir);
+    GetDataDir(true, p->netdir, sizeof(p->netdir));
+    sr_mkdir_p(p->netdir);
+    snprintf(p->blocksdir, sizeof(p->blocksdir), "%s/blocks", p->netdir);
+    sr_mkdir_p(p->blocksdir);
+    snprintf(p->log_path, sizeof(p->log_path), "%s/events.log", p->dir);
+}
+
+/* Setup failed: release what was opened and report the setup failure count. */
+static int sr_abort_setup(event_log_t *lg, int failures)
+{
+    if (lg) event_log_close(lg);
     projection_store_close();
-    bool store_ok = progress_store_open(dir);
-    SR_CHECK("progress_store opens", store_ok);
-    /* Wave A2 split: the created_outputs backfill (TX2) runs on the projection
-     * handle — open it so the projection commit is exercised. */
-    SR_CHECK("projection_store opens", !store_ok || projection_store_open(dir));
-    event_log_t *lg = store_ok ? event_log_open(log_path) : NULL;
-    SR_CHECK("event log opens", lg != NULL);
+    progress_store_close();
+    SetDataDir(""); ClearDataDirCache();
+    chain_params_select(CHAIN_MAIN);
+    printf("=== stage_rederive_range: %d failures (setup) ===\n", failures);
+    return failures;
+}
 
-    if (!store_ok || !lg) {
-        if (lg) event_log_close(lg);
-        projection_store_close();
-        progress_store_close();
-        SetDataDir(""); ClearDataDirCache();
-        chain_params_select(CHAIN_MAIN);
-        printf("=== stage_rederive_range: %d failures (setup) ===\n", failures);
-        return failures;
-    }
-
-    struct main_state ms;
-    main_state_init(&ms);
-
-    struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
+static struct block_index *sr_insert_genesis(struct main_state *ms,
+                                             struct uint256 *genesis_hash)
+{
     struct block_index *genesis =
-        chainstate_insert_block_index((struct chainstate *)&ms, &genesis_hash);
+        chainstate_insert_block_index((struct chainstate *)ms, genesis_hash);
     if (genesis) {
         genesis->nHeight = 0;
         genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
         genesis->nTx = 1;
         genesis->nChainTx = 1;
         genesis->nChainWork = GetBlockProof(genesis);
-        active_chain_move_window_tip(&ms.chain_active, genesis);
-        ms.pindex_best_header = genesis;
+        active_chain_move_window_tip(&ms->chain_active, genesis);
+        ms->pindex_best_header = genesis;
     }
-    SR_CHECK("genesis inserted", genesis != NULL);
+    return genesis;
+}
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
-    SR_CHECK("all eight stages init", stages_ok);
-    SR_CHECK("genesis utxo row seeded",
-             sr_seed_genesis_utxo_apply_row(progress_store_db()));
-    SR_CHECK("genesis anchor seeded",
-             tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
+static bool sr_init_stages(struct main_state *ms)
+{
+    return header_admit_stage_init(ms) &&
+        validate_headers_stage_init(ms) &&
+        body_fetch_stage_init(ms) &&
+        body_persist_stage_init(ms) &&
+        script_validate_stage_init(ms) &&
+        proof_validate_stage_init(ms) &&
+        utxo_apply_stage_init(ms) &&
+        tip_finalize_stage_init(ms);
+}
 
-    sqlite3 *db = progress_store_db();
-
-    /* ── Fold three real blocks to tip 3 ──────────────────────────────── */
-    const int TIP = 3;
-    struct uint256 prev = genesis_hash;
-    bool fold_ok = stages_ok && genesis;
+/* Fold heights 1..TIP on top of genesis; returns false on any stage failure. */
+static bool sr_fold_to_tip(struct main_state *ms, const struct chain_params *cp,
+                           const char *netdir, const struct uint256 *genesis_hash,
+                           bool fold_ok)
+{
+    const int TIP = SR_TIP;
+    struct uint256 prev = *genesis_hash;
     for (int h = 1; h <= TIP && fold_ok; h++)
-        prev = sr_fold_one(&ms, cp, netdir, h, &prev, &fold_ok);
+        prev = sr_fold_one(ms, cp, netdir, h, &prev, &fold_ok);
+    return fold_ok;
+}
+
+static int sr_check_folded(sqlite3 *db, struct main_state *ms, bool fold_ok)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
     SR_CHECK("three blocks folded", fold_ok);
-    SR_CHECK("tip at height 3", active_chain_height(&ms.chain_active) == TIP);
+    SR_CHECK("tip at height 3", active_chain_height(&ms->chain_active) == TIP);
     SR_CHECK("utxo_apply cursor at 4 (next-to-apply past tip)",
              sr_cursor(db, "utxo_apply") == TIP + 1);
     SR_CHECK("coins applied frontier at 4", sr_coins_applied(db) == TIP + 1);
+    return failures;
+}
 
-    if (!fold_ok || active_chain_height(&ms.chain_active) != TIP)
-        goto teardown;
+static void sr_damage_mid_chain(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    (void)sqlite3_prepare_v2(db,
+        "UPDATE script_validate_log SET ok=0, status='stale_test' "
+        "WHERE height=2", -1, &st, NULL);
+    (void)sqlite3_step(st);  // raw-sql-ok:test-seed
+    sqlite3_finalize(st);
+    st = NULL;
+    (void)sqlite3_prepare_v2(db,
+        "DELETE FROM proof_validate_log WHERE height=2", -1, &st, NULL);
+    (void)sqlite3_step(st);  // raw-sql-ok:test-seed
+    sqlite3_finalize(st);
+}
 
-    /* ── Damage a mid-chain RANGE [2,3]: a STALE verdict + a ROWLESS hole ── */
-    {
-        sqlite3_stmt *st = NULL;
-        (void)sqlite3_prepare_v2(db,
-            "UPDATE script_validate_log SET ok=0, status='stale_test' "
-            "WHERE height=2", -1, &st, NULL);
-        (void)sqlite3_step(st);  // raw-sql-ok:test-seed
-        sqlite3_finalize(st);
-        st = NULL;
-        (void)sqlite3_prepare_v2(db,
-            "DELETE FROM proof_validate_log WHERE height=2", -1, &st, NULL);
-        (void)sqlite3_step(st);  // raw-sql-ok:test-seed
-        sqlite3_finalize(st);
-    }
-    {
-        int64_t sv = -1;
-        bool stale = sr_log_int(db, "script_validate_log", "ok", 2, &sv) && sv == 0;
-        SR_CHECK("precondition: script_validate h=2 forced STALE ok=0", stale);
-        SR_CHECK("precondition: proof_validate h=2 is a ROWLESS hole",
-                 !sr_has_row(db, "proof_validate_log", 2));
-        SR_CHECK("precondition: cursors still ahead (stale rows below cursor)",
-                 sr_cursor(db, "script_validate") == TIP + 1 &&
-                 sr_cursor(db, "proof_validate") == TIP + 1);
-    }
+static int sr_check_damage_preconditions(sqlite3 *db)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
+    int64_t sv = -1;
+    bool stale = sr_log_int(db, "script_validate_log", "ok", 2, &sv) && sv == 0;
+    SR_CHECK("precondition: script_validate h=2 forced STALE ok=0", stale);
+    SR_CHECK("precondition: proof_validate h=2 is a ROWLESS hole",
+             !sr_has_row(db, "proof_validate_log", 2));
+    SR_CHECK("precondition: cursors still ahead (stale rows below cursor)",
+             sr_cursor(db, "script_validate") == TIP + 1 &&
+             sr_cursor(db, "proof_validate") == TIP + 1);
+    return failures;
+}
 
-    /* ── (1) Re-derive the range [2,3] ────────────────────────────────── */
-    struct stage_rederive_range_result rr;
-    bool called = stage_rederive_range(db, &ms, 2, 3, &rr);
-    SR_CHECK("stage_rederive_range returned true (no store error)", called);
-    SR_CHECK("result: committed (ok) + rewound + coins_rewound, no refusal",
-             rr.ok && rr.rewound && rr.coins_rewound && !rr.refused_no_inverse);
-    SR_CHECK("result: coins frontier before was 4", rr.coins_frontier_before == TIP + 1);
-
-    /* Rewind assertions: stale suffix deleted, cursors lowered + contiguous. */
+static int sr_check_rewind_suffix(sqlite3 *db)
+{
+    int failures = 0;
     SR_CHECK("rewind: script_validate suffix [2,] deleted",
              !sr_has_row(db, "script_validate_log", 2) &&
              !sr_has_row(db, "script_validate_log", 3));
@@ -512,6 +506,12 @@ int test_stage_rederive_range(void)
              !sr_has_row(db, "utxo_apply_log", 3));
     SR_CHECK("rewind: coins frontier inverse-rewound to 2",
              sr_coins_applied(db) == 2);
+    return failures;
+}
+
+static int sr_check_rewind_cursors(sqlite3 *db)
+{
+    int failures = 0;
     SR_CHECK("rewind: body_fetch cursor lowered to 2",
              sr_cursor(db, "body_fetch") == 2);
     SR_CHECK("rewind: body_persist cursor lowered to 2",
@@ -524,6 +524,13 @@ int test_stage_rederive_range(void)
              sr_cursor(db, "utxo_apply") == 2);
     SR_CHECK("rewind: tip_finalize cursor lowered to 2",
              sr_cursor(db, "tip_finalize") == 2);
+    return failures;
+}
+
+static int sr_check_rewind_contiguity(sqlite3 *db)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
     /* Contiguity: no rederived-stage row survives at/above its cursor. */
     SR_CHECK("contiguity: no script_validate row >= cursor 2",
              sr_max_height(db, "script_validate_log") < 2);
@@ -539,17 +546,44 @@ int test_stage_rederive_range(void)
     SR_CHECK("served-floor: tip_finalize_log rows [2,3] preserved (not deleted)",
              sr_has_row(db, "tip_finalize_log", 2) &&
              sr_has_row(db, "tip_finalize_log", 3));
+    return failures;
+}
 
-    /* ── (2) Idempotency: a second call on the rewound state is a no-op ── */
+static int sr_check_rederive_first(sqlite3 *db, struct main_state *ms)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
+    struct stage_rederive_range_result rr;
+    bool called = stage_rederive_range(db, ms, 2, 3, &rr);
+    SR_CHECK("stage_rederive_range returned true (no store error)", called);
+    SR_CHECK("result: committed (ok) + rewound + coins_rewound, no refusal",
+             rr.ok && rr.rewound && rr.coins_rewound && !rr.refused_no_inverse);
+    SR_CHECK("result: coins frontier before was 4", rr.coins_frontier_before == TIP + 1);
+
+    /* Rewind assertions: stale suffix deleted, cursors lowered + contiguous. */
+    failures += sr_check_rewind_suffix(db);
+    failures += sr_check_rewind_cursors(db);
+    failures += sr_check_rewind_contiguity(db);
+    return failures;
+}
+
+static int sr_check_idempotent(sqlite3 *db, struct main_state *ms)
+{
+    int failures = 0;
     struct stage_rederive_range_result rr2;
-    bool called2 = stage_rederive_range(db, &ms, 2, 3, &rr2);
+    bool called2 = stage_rederive_range(db, ms, 2, 3, &rr2);
     SR_CHECK("idempotent: second call returns ok, nothing rewound",
              called2 && rr2.ok && !rr2.rewound && rr2.cursors_rewound == 0 &&
              !rr2.coins_rewound);
     SR_CHECK("idempotent: cursors unchanged after second call",
              sr_cursor(db, "utxo_apply") == 2 && sr_cursor(db, "tip_finalize") == 2);
+    return failures;
+}
 
-    /* ── (3) Re-fold: byte-identical re-derivation + downstream advance ── */
+static int sr_check_refold(sqlite3 *db)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
     sr_redrive(2, TIP);
     {
         int64_t sv = -1, pv = -1, ua = -1;
@@ -567,40 +601,31 @@ int test_stage_rederive_range(void)
              sr_cursor(db, "utxo_apply") == TIP + 1);
     SR_CHECK("downstream consumer advanced: coins frontier back to 4",
              sr_coins_applied(db) == TIP + 1);
+    return failures;
+}
 
-    /* ── Lane A1: reducer_frontier stale-script rewind = kernel(TX1) then
-     * projection(TX2); crash between them still converges ─────────────────
-     * reducer_frontier_replay_stale_script_tx now commits the KERNEL rewind
-     * (coins/cursors/logs) in TX1 BEFORE the created_outputs backfill in TX2.
-     * The state is back at tip 4 (a clean, never-crashed control). We capture
-     * the control coins commitment, drive the reducer_frontier rewind of
-     * [2,3] directly, assert (case 3) TX2 committed strictly AFTER TX1, then
-     * (case 2) simulate a crash between TX1 and TX2 by deleting the span's
-     * created_outputs (as if TX2 never committed AND the surviving body_persist
-     * rows were absent) and re-fold — the coins commitment must return to the
-     * control. Proof that the created_outputs projection is NOT load-bearing
-     * for the kernel result; prevout resolution's coins_kv fallback is covered
-     * by test_stage_repair_coin_backfill / test_script_validate_stage. */
+/* Lane A1 kernel half: TX1 rewind and the projection TX2 backfill ordering. */
+static int sr_check_a1_rewind(sqlite3 *db, struct main_state *ms)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
     {
-        int ctrl_coins = coins_kv_count(db);
-        int ctrl_applied = sr_coins_applied(db);
-
         uint64_t k0 = 0, p0 = 0;
         reducer_frontier_replay_tx_commit_seqs(&k0, &p0);
 
         /* TX1's private API inherits main-before-progress from its caller. */
-        zcl_mutex_lock(&ms.cs_main);
+        zcl_mutex_lock(&ms->cs_main);
         progress_store_tx_lock();
         bool tx_ok = reducer_frontier_replay_stale_script_tx(
-            db, &ms, /*height*/2, /*replay_first*/2, /*script_cursor*/TIP + 1,
+            db, ms, /*height*/2, /*replay_first*/2, /*script_cursor*/TIP + 1,
             /*proof_cursor*/TIP + 1, /*utxo_cursor*/TIP + 1,
             /*tip_cursor*/TIP + 1, /*backfill_top*/TIP, /*rewind_headers*/false);
         progress_store_tx_unlock();
-        zcl_mutex_unlock(&ms.cs_main);
+        zcl_mutex_unlock(&ms->cs_main);
         SR_CHECK("A1: stale_script_tx kernel TX1 ok", tx_ok);
         /* Wave A2 (D4): TX2 is now a SEPARATE projection-store call the driver
          * makes AFTER releasing the kernel lock (LOCK ORDER LAW). */
-        struct sr_main_cycle cycle = {.ms = &ms,
+        struct sr_main_cycle cycle = {.ms = ms,
                                       .first = 2, .top = TIP};
         bool bf_ok = sr_run_main_cycle(&cycle);
         SR_CHECK("A1: created_outputs backfill (projection TX2) ok", bf_ok);
@@ -626,7 +651,16 @@ int test_stage_rederive_range(void)
                  sr_cursor(db, "tip_finalize") == 2);
         SR_CHECK("A1 rewind: validate_headers authority UNCHANGED at 4",
                  sr_cursor(db, "validate_headers") == TIP + 1);
+    }
+    return failures;
+}
 
+/* Lane A1 crash half: drop TX2's rows, re-fold, and converge on the control. */
+static int sr_check_a1_converge(sqlite3 *db, int ctrl_coins, int ctrl_applied)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
+    {
         /* case 2 — crash between TX1 and TX2: drop the span's created_outputs
          * (TX2's effect) so the forward re-fold cannot rely on it. */
         (void)created_outputs_index_ensure_schema(db);
@@ -647,6 +681,91 @@ int test_stage_rederive_range(void)
                  coins_kv_count(db) == ctrl_coins &&
                  sr_coins_applied(db) == ctrl_applied);
     }
+    return failures;
+}
+
+int test_stage_rederive_range(void);
+int test_stage_rederive_range(void)
+{
+    int failures = 0;
+    const int TIP = SR_TIP;
+
+    blocker_module_init();
+    chain_params_select(CHAIN_REGTEST);
+    const struct chain_params *cp = chain_params_get();
+
+    struct sr_paths paths;
+    sr_setup_paths(&paths);
+
+    progress_store_close();
+    projection_store_close();
+    bool store_ok = progress_store_open(paths.dir);
+    SR_CHECK("progress_store opens", store_ok);
+    /* Wave A2 split: the created_outputs backfill (TX2) runs on the projection
+     * handle — open it so the projection commit is exercised. */
+    SR_CHECK("projection_store opens", !store_ok || projection_store_open(paths.dir));
+    event_log_t *lg = store_ok ? event_log_open(paths.log_path) : NULL;
+    SR_CHECK("event log opens", lg != NULL);
+
+    if (!store_ok || !lg)
+        return sr_abort_setup(lg, failures);
+
+    struct main_state ms;
+    main_state_init(&ms);
+
+    struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
+    struct block_index *genesis = sr_insert_genesis(&ms, &genesis_hash);
+    SR_CHECK("genesis inserted", genesis != NULL);
+
+    bool stages_ok = sr_init_stages(&ms);
+    SR_CHECK("all eight stages init", stages_ok);
+    SR_CHECK("genesis utxo row seeded",
+             sr_seed_genesis_utxo_apply_row(progress_store_db()));
+    SR_CHECK("genesis anchor seeded",
+             tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
+
+    sqlite3 *db = progress_store_db();
+
+    /* ── Fold three real blocks to tip 3 ──────────────────────────────── */
+    bool fold_ok = sr_fold_to_tip(&ms, cp, paths.netdir, &genesis_hash,
+                                  stages_ok && genesis);
+    failures += sr_check_folded(db, &ms, fold_ok);
+
+    if (!fold_ok || active_chain_height(&ms.chain_active) != TIP)
+        goto teardown;
+
+    /* ── Damage a mid-chain RANGE [2,3]: a STALE verdict + a ROWLESS hole ── */
+    sr_damage_mid_chain(db);
+    failures += sr_check_damage_preconditions(db);
+
+    /* ── (1) Re-derive the range [2,3] ────────────────────────────────── */
+    failures += sr_check_rederive_first(db, &ms);
+
+    /* ── (2) Idempotency: a second call on the rewound state is a no-op ── */
+    failures += sr_check_idempotent(db, &ms);
+
+    /* ── (3) Re-fold: byte-identical re-derivation + downstream advance ── */
+    failures += sr_check_refold(db);
+
+    /* ── Lane A1: reducer_frontier stale-script rewind = kernel(TX1) then
+     * projection(TX2); crash between them still converges ─────────────────
+     * reducer_frontier_replay_stale_script_tx now commits the KERNEL rewind
+     * (coins/cursors/logs) in TX1 BEFORE the created_outputs backfill in TX2.
+     * The state is back at tip 4 (a clean, never-crashed control). We capture
+     * the control coins commitment, drive the reducer_frontier rewind of
+     * [2,3] directly, assert (case 3) TX2 committed strictly AFTER TX1, then
+     * (case 2) simulate a crash between TX1 and TX2 by deleting the span's
+     * created_outputs (as if TX2 never committed AND the surviving body_persist
+     * rows were absent) and re-fold — the coins commitment must return to the
+     * control. Proof that the created_outputs projection is NOT load-bearing
+     * for the kernel result; prevout resolution's coins_kv fallback is covered
+     * by test_stage_repair_coin_backfill / test_script_validate_stage. */
+    {
+        int ctrl_coins = coins_kv_count(db);
+        int ctrl_applied = sr_coins_applied(db);
+        failures += sr_check_a1_rewind(db, &ms);
+        failures += sr_check_a1_converge(db, ctrl_coins, ctrl_applied);
+    }
 
 teardown:
     tip_finalize_stage_shutdown();
@@ -660,9 +779,9 @@ teardown:
     event_log_close(lg);
     projection_store_close();
     progress_store_close();
-    test_cleanup_tmpdir(blocksdir);
-    test_cleanup_tmpdir(netdir);
-    test_cleanup_tmpdir(dir);
+    test_cleanup_tmpdir(paths.blocksdir);
+    test_cleanup_tmpdir(paths.netdir);
+    test_cleanup_tmpdir(paths.dir);
     SetDataDir(""); ClearDataDirCache();
     chain_params_select(CHAIN_MAIN);
 
