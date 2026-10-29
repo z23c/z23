@@ -356,37 +356,53 @@ int64_t api_served_tip_height(void)
     return reducer_frontier_external_tip_height();
 }
 
-void api_milestone_status_json(struct json_value *result)
+struct api_milestone_live {
+    int served_height;
+    int indexed_height;
+    int header_height;
+    int peer_best_height;
+    int target;
+    int gap;
+    int peer_count;
+    bool healthy;
+    bool serving;
+    bool has_peers;
+    bool tor_enabled;
+    bool tor_ready;
+    bool onion_service_ready;
+    const char *sync_state;
+    const char *agent_status;
+    const char *readiness_status;
+    const char *height_status;
+};
+
+static bool api_milestone_agent_fields_complete(const struct json_value *agent,
+                                                bool agent_ok)
 {
-    struct node_health_snapshot health = {0};
-    node_health_collect(&health, g_api_ctx.node_db ?
-        g_api_ctx.node_db : app_runtime_node_db(), g_api_ctx.main_state);
-    struct json_value agent = {0};
-    bool agent_ok = api_milestone_agent_snapshot(&agent);
-    const struct json_value *agent_peers = json_get(&agent, "peers");
-    const struct json_value *agent_services = json_get(&agent, "services");
+    const struct json_value *agent_peers = json_get(agent, "peers");
+    const struct json_value *agent_services = json_get(agent, "services");
     const struct json_value *agent_height_contract =
-        json_get(&agent, "height_contract");
+        json_get(agent, "height_contract");
     bool agent_fields_complete = agent_ok;
 
-    api_milestone_require_field(&agent_fields_complete, api_json_has_str_field(&agent, "status"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_str_field(&agent, "readiness_status"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_str_field(agent, "status"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_str_field(agent, "readiness_status"));
     api_milestone_require_field(
         &agent_fields_complete,
         api_json_has_str_field(agent_height_contract, "status"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_bool_field(&agent, "healthy"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_bool_field(&agent, "serving"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(&agent, "served_height"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(&agent, "indexed_height"));
-    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(&agent, "header_height"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_bool_field(agent, "healthy"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_bool_field(agent, "serving"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(agent, "served_height"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(agent, "indexed_height"));
+    api_milestone_require_field(&agent_fields_complete, api_json_has_int_field(agent, "header_height"));
     api_milestone_require_field(&agent_fields_complete,
-                                api_json_has_int_field(&agent,
+                                api_json_has_int_field(agent,
                                                        "peer_best_height"));
     api_milestone_require_field(&agent_fields_complete,
-                                api_json_has_int_field(&agent,
+                                api_json_has_int_field(agent,
                                                        "target_height"));
     api_milestone_require_field(&agent_fields_complete,
-                                api_json_has_int_field(&agent, "gap"));
+                                api_json_has_int_field(agent, "gap"));
     api_milestone_require_field(&agent_fields_complete,
                                 api_json_has_bool_field(agent_peers,
                                                         "has_peers"));
@@ -402,91 +418,219 @@ void api_milestone_status_json(struct json_value *result)
         &agent_fields_complete,
         api_json_has_bool_field(agent_services, "onion_service_ready"));
     api_milestone_require_field(&agent_fields_complete,
-                                api_json_has_str_field(&agent, "sync_state"));
+                                api_json_has_str_field(agent, "sync_state"));
+    return agent_fields_complete;
+}
 
-    int served_height = agent_ok
-        ? api_json_int_field(&agent, "served_height",
+static void api_milestone_live_heights(struct api_milestone_live *live,
+                                       const struct json_value *agent,
+                                       bool agent_ok,
+                                       const struct node_health_snapshot *health)
+{
+    live->served_height = agent_ok
+        ? api_json_int_field(agent, "served_height",
                              (int)api_served_tip_height())
         : (int)api_served_tip_height();
-    int indexed_height = agent_ok
-        ? api_json_int_field(&agent, "indexed_height", health.tip_height)
-        : health.tip_height;
-    int target = indexed_height > served_height ? indexed_height
-                                                : served_height;
-    int header_height = agent_ok
-        ? api_json_int_field(&agent, "header_height", health.header_height)
-        : health.header_height;
-    int peer_best_height = agent_ok
-        ? api_json_int_field(&agent, "peer_best_height",
-                             health.peer_best_height)
-        : health.peer_best_height;
-    if (header_height > target)
-        target = header_height;
-    if (peer_best_height > target)
-        target = peer_best_height;
+    live->indexed_height = agent_ok
+        ? api_json_int_field(agent, "indexed_height", health->tip_height)
+        : health->tip_height;
+    live->target = live->indexed_height > live->served_height
+        ? live->indexed_height : live->served_height;
+    live->header_height = agent_ok
+        ? api_json_int_field(agent, "header_height", health->header_height)
+        : health->header_height;
+    live->peer_best_height = agent_ok
+        ? api_json_int_field(agent, "peer_best_height",
+                             health->peer_best_height)
+        : health->peer_best_height;
+    if (live->header_height > live->target)
+        live->target = live->header_height;
+    if (live->peer_best_height > live->target)
+        live->target = live->peer_best_height;
     if (agent_ok)
-        target = api_json_int_field(&agent, "target_height", target);
-    int gap = agent_ok
-        ? api_json_int_field(&agent, "gap",
-                             target > served_height ? target - served_height : 0)
-        : (target > served_height ? target - served_height : 0);
-    bool live_healthy = agent_ok
-        ? api_json_bool_field(&agent, "healthy", false)
+        live->target = api_json_int_field(agent, "target_height", live->target);
+    live->gap = agent_ok
+        ? api_json_int_field(agent, "gap",
+                             live->target > live->served_height
+                                 ? live->target - live->served_height : 0)
+        : (live->target > live->served_height
+               ? live->target - live->served_height : 0);
+}
+
+static void api_milestone_live_flags(struct api_milestone_live *live,
+                                     const struct json_value *agent,
+                                     bool agent_ok,
+                                     const struct node_health_snapshot *health)
+{
+    live->healthy = agent_ok
+        ? api_json_bool_field(agent, "healthy", false)
         : false;
-    bool live_serving = agent_ok
-        ? api_json_bool_field(&agent, "serving", false)
+    live->serving = agent_ok
+        ? api_json_bool_field(agent, "serving", false)
         : false;
-    bool live_has_peers = agent_ok
-        ? api_json_nested_bool_field(&agent, "peers", "has_peers",
-                                     health.has_peers)
-        : health.has_peers;
-    int live_peer_count = agent_ok
-        ? api_json_nested_int_field(&agent, "peers", "total",
-                                    (int)health.peer_count)
-        : (int)health.peer_count;
-    bool tor_enabled = agent_ok
-        ? api_json_nested_bool_field(&agent, "services", "tor_enabled",
-                                     health.tor_enabled)
-        : health.tor_enabled;
-    bool tor_ready = agent_ok
-        ? api_json_nested_bool_field(&agent, "services", "tor_ready",
-                                     health.tor_ready)
-        : health.tor_ready;
-    bool onion_service_ready = agent_ok
-        ? api_json_nested_bool_field(&agent, "services",
+    live->has_peers = agent_ok
+        ? api_json_nested_bool_field(agent, "peers", "has_peers",
+                                     health->has_peers)
+        : health->has_peers;
+    live->peer_count = agent_ok
+        ? api_json_nested_int_field(agent, "peers", "total",
+                                    (int)health->peer_count)
+        : (int)health->peer_count;
+    live->tor_enabled = agent_ok
+        ? api_json_nested_bool_field(agent, "services", "tor_enabled",
+                                     health->tor_enabled)
+        : health->tor_enabled;
+    live->tor_ready = agent_ok
+        ? api_json_nested_bool_field(agent, "services", "tor_ready",
+                                     health->tor_ready)
+        : health->tor_ready;
+    live->onion_service_ready = agent_ok
+        ? api_json_nested_bool_field(agent, "services",
                                      "onion_service_ready",
-                                     health.onion_service_ready)
-        : health.onion_service_ready;
-    const char *sync_state = agent_ok
-        ? api_json_str_field(&agent, "sync_state",
+                                     health->onion_service_ready)
+        : health->onion_service_ready;
+    live->sync_state = agent_ok
+        ? api_json_str_field(agent, "sync_state",
                              sync_state_name(sync_get_state()))
         : sync_state_name(sync_get_state());
-    const char *agent_status = agent_ok
-        ? api_json_str_field(&agent, "status", "unavailable")
+    live->agent_status = agent_ok
+        ? api_json_str_field(agent, "status", "unavailable")
         : "unavailable";
-    const char *readiness_status = agent_ok
-        ? api_json_str_field(&agent, "readiness_status", "unknown")
+    live->readiness_status = agent_ok
+        ? api_json_str_field(agent, "readiness_status", "unknown")
         : "unknown";
-    const char *height_status = agent_ok
-        ? api_json_str_field(json_get(&agent, "height_contract"), "status",
+    live->height_status = agent_ok
+        ? api_json_str_field(json_get(agent, "height_contract"), "status",
                              "unknown")
         : "unknown";
+}
 
+static int api_milestone_systems_done(const struct api_milestone_live *live,
+                                      bool onion_ok)
+{
     int systems_done = 0;
-    int systems_total = 6;
-    bool onion_ok = tor_enabled && tor_ready && onion_service_ready;
-    if (live_serving)
+    if (live->serving)
         systems_done++;
-    if (live_healthy)
+    if (live->healthy)
         systems_done++;
-    if (served_height > 0)
+    if (live->served_height > 0)
         systems_done++;
-    if (gap <= 1)
+    if (live->gap <= 1)
         systems_done++;
-    if (live_has_peers)
+    if (live->has_peers)
         systems_done++;
     if (onion_ok)
         systems_done++;
+    return systems_done;
+}
+
+static void api_push_milestone_live(struct json_value *result,
+                                    const struct api_milestone_live *l,
+                                    bool agent_ok, bool agent_fields_complete,
+                                    bool onion_ok)
+{
+    struct json_value live;
+    json_init(&live);
+    json_set_object(&live);
+    json_push_kv_str(&live, "source",
+                     agent_ok && agent_fields_complete
+                         ? "agent_cached_summary"
+                         : agent_ok ? "agent_cached_summary_with_fallbacks"
+                                    : "node_health_collect_fallback");
+    json_push_kv_str(&live, "source_schema",
+                     agent_ok ? ZCL_PUBLIC_STATUS_SCHEMA
+                              : "zcl.node_health_snapshot");
+    json_push_kv_bool(&live, "agent_summary_available", agent_ok);
+    json_push_kv_bool(&live, "agent_fields_complete",
+                      agent_fields_complete);
+    json_push_kv_str(&live, "fallback_source",
+                     agent_ok && agent_fields_complete
+                         ? "none"
+                         : agent_ok ? "node_health_collect+sync_state"
+                                    : "node_health_collect");
+    json_push_kv_str(&live, "agent_status", l->agent_status);
+    json_push_kv_str(&live, "readiness_status", l->readiness_status);
+    json_push_kv_str(&live, "height_contract_status", l->height_status);
+    json_push_kv_bool(&live, "healthy", l->healthy);
+    json_push_kv_bool(&live, "serving", l->serving);
+    json_push_kv_int(&live, "served_height", l->served_height);
+    json_push_kv_int(&live, "indexed_height", l->indexed_height);
+    json_push_kv_int(&live, "header_height", l->header_height);
+    json_push_kv_int(&live, "peer_best_height", l->peer_best_height);
+    json_push_kv_int(&live, "target_height", l->target);
+    json_push_kv_int(&live, "gap", l->gap);
+    json_push_kv_int(&live, "peers", l->peer_count);
+    json_push_kv_bool(&live, "tor_enabled", l->tor_enabled);
+    json_push_kv_bool(&live, "onion_ready", onion_ok);
+    json_push_kv_str(&live, "sync_state", l->sync_state);
+    json_push_kv(result, "live", &live);
+    json_free(&live);
+}
+
+static void api_push_milestone_criteria(struct json_value *result,
+                                        const struct mvp_qualification *qualified,
+                                        size_t criteria_count)
+{
+    struct json_value criteria;
+    json_init(&criteria);
+    json_set_array(&criteria);
+    for (size_t i = 0; i < criteria_count; i++) {
+        const struct milestone_criterion *c = &k_mvp_criteria[i];
+        struct json_value item;
+        json_init(&item);
+        json_set_object(&item);
+        json_push_kv_int(&item, "id", c->id);
+        json_push_kv_str(&item, "key", c->key);
+        json_push_kv_str(&item, "title", c->title);
+        json_push_kv_str(&item, "status", api_mvp_current_status(qualified->state[i]));
+        json_push_kv_bool(&item, "strict_pass", qualified->state[i] == 1);
+        json_push_kv_int(&item, "progress_units", c->units);
+        json_push_kv_int(&item, "progress_units_total", 2);
+        json_push_kv_str(&item, "next", c->next);
+        json_push_back(&criteria, &item);
+        json_free(&item);
+    }
+    json_push_kv(result, "criteria", &criteria);
+    json_free(&criteria);
+}
+
+static void api_push_milestone_next(struct json_value *result,
+                                    const struct mvp_qualification *qualified,
+                                    size_t criteria_count)
+{
+    struct json_value next;
+    json_init(&next);
+    json_set_array(&next);
+    for (size_t i = 0; i < criteria_count; i++) {
+        if (qualified->state[i] == 1)
+            continue;
+        struct json_value s;
+        json_init(&s);
+        json_set_str(&s, k_mvp_criteria[i].next);
+        json_push_back(&next, &s);
+        json_free(&s);
+    }
+    json_push_kv(result, "next", &next);
+    json_free(&next);
+}
+
+void api_milestone_status_json(struct json_value *result)
+{
+    struct node_health_snapshot health = {0};
+    node_health_collect(&health, g_api_ctx.node_db ?
+        g_api_ctx.node_db : app_runtime_node_db(), g_api_ctx.main_state);
+    struct json_value agent = {0};
+    bool agent_ok = api_milestone_agent_snapshot(&agent);
+    bool agent_fields_complete =
+        api_milestone_agent_fields_complete(&agent, agent_ok);
+
+    struct api_milestone_live lv;
+    api_milestone_live_heights(&lv, &agent, agent_ok, &health);
+    api_milestone_live_flags(&lv, &agent, agent_ok, &health);
+
+    int systems_total = 6;
+    bool onion_ok = lv.tor_enabled && lv.tor_ready && lv.onion_service_ready;
+    int systems_done = api_milestone_systems_done(&lv, onion_ok);
 
     struct mvp_qualification qualified = api_mvp_qualification();
     int strict_pass = qualified.met_count;
@@ -521,42 +665,8 @@ void api_milestone_status_json(struct json_value *result)
     json_push_kv_int(result, "partial_progress_units", partial_units);
     json_push_kv_int(result, "partial_progress_units_total", max_units);
 
-    struct json_value live;
-    json_init(&live);
-    json_set_object(&live);
-    json_push_kv_str(&live, "source",
-                     agent_ok && agent_fields_complete
-                         ? "agent_cached_summary"
-                         : agent_ok ? "agent_cached_summary_with_fallbacks"
-                                    : "node_health_collect_fallback");
-    json_push_kv_str(&live, "source_schema",
-                     agent_ok ? ZCL_PUBLIC_STATUS_SCHEMA
-                              : "zcl.node_health_snapshot");
-    json_push_kv_bool(&live, "agent_summary_available", agent_ok);
-    json_push_kv_bool(&live, "agent_fields_complete",
-                      agent_fields_complete);
-    json_push_kv_str(&live, "fallback_source",
-                     agent_ok && agent_fields_complete
-                         ? "none"
-                         : agent_ok ? "node_health_collect+sync_state"
-                                    : "node_health_collect");
-    json_push_kv_str(&live, "agent_status", agent_status);
-    json_push_kv_str(&live, "readiness_status", readiness_status);
-    json_push_kv_str(&live, "height_contract_status", height_status);
-    json_push_kv_bool(&live, "healthy", live_healthy);
-    json_push_kv_bool(&live, "serving", live_serving);
-    json_push_kv_int(&live, "served_height", served_height);
-    json_push_kv_int(&live, "indexed_height", indexed_height);
-    json_push_kv_int(&live, "header_height", header_height);
-    json_push_kv_int(&live, "peer_best_height", peer_best_height);
-    json_push_kv_int(&live, "target_height", target);
-    json_push_kv_int(&live, "gap", gap);
-    json_push_kv_int(&live, "peers", live_peer_count);
-    json_push_kv_bool(&live, "tor_enabled", tor_enabled);
-    json_push_kv_bool(&live, "onion_ready", onion_ok);
-    json_push_kv_str(&live, "sync_state", sync_state);
-    json_push_kv(result, "live", &live);
-    json_free(&live);
+    api_push_milestone_live(result, &lv, agent_ok, agent_fields_complete,
+                            onion_ok);
     json_free(&agent);
 
     struct json_value bars;
@@ -576,45 +686,12 @@ void api_milestone_status_json(struct json_value *result)
     json_free(&bars);
     json_free(&ascii);
 
-    struct json_value criteria;
-    json_init(&criteria);
-    json_set_array(&criteria);
-    for (size_t i = 0; i < criteria_count; i++) {
-        const struct milestone_criterion *c = &k_mvp_criteria[i];
-        struct json_value item;
-        json_init(&item);
-        json_set_object(&item);
-        json_push_kv_int(&item, "id", c->id);
-        json_push_kv_str(&item, "key", c->key);
-        json_push_kv_str(&item, "title", c->title);
-        json_push_kv_str(&item, "status", api_mvp_current_status(qualified.state[i]));
-        json_push_kv_bool(&item, "strict_pass", qualified.state[i] == 1);
-        json_push_kv_int(&item, "progress_units", c->units);
-        json_push_kv_int(&item, "progress_units_total", 2);
-        json_push_kv_str(&item, "next", c->next);
-        json_push_back(&criteria, &item);
-        json_free(&item);
-    }
-    json_push_kv(result, "criteria", &criteria);
-    json_free(&criteria);
+    api_push_milestone_criteria(result, &qualified, criteria_count);
 
     api_push_mvp_operator_proofs(result, k_mvp_criteria, criteria_count,
                                  &qualified, partial_units, max_units);
 
-    struct json_value next;
-    json_init(&next);
-    json_set_array(&next);
-    for (size_t i = 0; i < criteria_count; i++) {
-        if (qualified.state[i] == 1)
-            continue;
-        struct json_value s;
-        json_init(&s);
-        json_set_str(&s, k_mvp_criteria[i].next);
-        json_push_back(&next, &s);
-        json_free(&s);
-    }
-    json_push_kv(result, "next", &next);
-    json_free(&next);
+    api_push_milestone_next(result, &qualified, criteria_count);
 }
 
 size_t api_serve_milestone(uint8_t *response, size_t response_max)
