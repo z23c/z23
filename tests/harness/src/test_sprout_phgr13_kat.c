@@ -112,65 +112,127 @@ static bool decode_hex_exact(const char *hex, uint8_t *out, size_t out_len)
     else { printf("FAIL\n"); failures++; }     \
 } while (0)
 
-int test_sprout_phgr13_kat(void)
-{
-    printf("\n=== Sprout PHGR13 real-proof KAT ===\n");
-    int failures = 0;
-
-    static struct ppzksnark_vk fixture_vk;
-    static bool fixture_vk_loaded = false;
-
+struct kat_fixture {
     uint8_t vk_bytes[1449];
     uint8_t proof[296], anchor[32], hsig[32], mac1[32], mac2[32];
     uint8_t nf1[32], nf2[32], cm1[32], cm2[32];
+};
 
-    bool decoded = decode_hex_exact(k_vk_hex, vk_bytes, sizeof(vk_bytes)) &&
-                   decode_hex_exact(k_proof_hex, proof, sizeof(proof)) &&
-                   decode_hex_exact(k_anchor_hex, anchor, sizeof(anchor)) &&
-                   decode_hex_exact(k_hsig_hex, hsig, sizeof(hsig)) &&
-                   decode_hex_exact(k_mac1_hex, mac1, sizeof(mac1)) &&
-                   decode_hex_exact(k_mac2_hex, mac2, sizeof(mac2)) &&
-                   decode_hex_exact(k_nf1_hex, nf1, sizeof(nf1)) &&
-                   decode_hex_exact(k_nf2_hex, nf2, sizeof(nf2)) &&
-                   decode_hex_exact(k_cm1_hex, cm1, sizeof(cm1)) &&
-                   decode_hex_exact(k_cm2_hex, cm2, sizeof(cm2));
-    KAT_CHECK("fixture hex decodes to exact byte lengths", decoded);
-    if (!decoded)
-        return failures;
+static bool kat_decode_fixtures(struct kat_fixture *f)
+{
+    return decode_hex_exact(k_vk_hex, f->vk_bytes, sizeof(f->vk_bytes)) &&
+           decode_hex_exact(k_proof_hex, f->proof, sizeof(f->proof)) &&
+           decode_hex_exact(k_anchor_hex, f->anchor, sizeof(f->anchor)) &&
+           decode_hex_exact(k_hsig_hex, f->hsig, sizeof(f->hsig)) &&
+           decode_hex_exact(k_mac1_hex, f->mac1, sizeof(f->mac1)) &&
+           decode_hex_exact(k_mac2_hex, f->mac2, sizeof(f->mac2)) &&
+           decode_hex_exact(k_nf1_hex, f->nf1, sizeof(f->nf1)) &&
+           decode_hex_exact(k_nf2_hex, f->nf2, sizeof(f->nf2)) &&
+           decode_hex_exact(k_cm1_hex, f->cm1, sizeof(f->cm1)) &&
+           decode_hex_exact(k_cm2_hex, f->cm2, sizeof(f->cm2));
+}
 
-    if (!fixture_vk_loaded) {
-        fixture_vk_loaded = ppzksnark_vk_read(&fixture_vk, vk_bytes,
-                                              sizeof(vk_bytes));
-    }
-    KAT_CHECK("embedded sprout-verifying.key parses", fixture_vk_loaded);
+static int kat_check_vk_parse(const struct ppzksnark_vk *vk, bool loaded)
+{
+    int failures = 0;
+    KAT_CHECK("embedded sprout-verifying.key parses", loaded);
     KAT_CHECK("embedded PHGR13 VK has ic_len == 10",
-              fixture_vk_loaded && fixture_vk.ic_len == 10);
-    if (!fixture_vk_loaded)
-        return failures;
+              loaded && vk->ic_len == 10);
+    return failures;
+}
 
-    sprout_phgr_set_vk(&fixture_vk);
-
+static int kat_check_verify_mutations(const struct kat_fixture *f)
+{
+    int failures = 0;
     KAT_CHECK("real PHGR13 proof verifies",
-              sprout_verify_phgr13(proof, anchor, hsig, mac1, mac2,
-                                   nf1, nf2, cm1, cm2,
+              sprout_verify_phgr13(f->proof, f->anchor, f->hsig, f->mac1, f->mac2,
+                                   f->nf1, f->nf2, f->cm1, f->cm2,
                                    k_vpub_old, k_vpub_new));
 
     uint8_t bad_proof[296];
-    memcpy(bad_proof, proof, sizeof(bad_proof));
+    memcpy(bad_proof, f->proof, sizeof(bad_proof));
     bad_proof[17] ^= 0x01;
     KAT_CHECK("flipped proof byte rejects",
-              !sprout_verify_phgr13(bad_proof, anchor, hsig, mac1, mac2,
-                                    nf1, nf2, cm1, cm2,
+              !sprout_verify_phgr13(bad_proof, f->anchor, f->hsig, f->mac1, f->mac2,
+                                    f->nf1, f->nf2, f->cm1, f->cm2,
                                     k_vpub_old, k_vpub_new));
 
     uint8_t bad_nf1[32];
-    memcpy(bad_nf1, nf1, sizeof(bad_nf1));
+    memcpy(bad_nf1, f->nf1, sizeof(bad_nf1));
     bad_nf1[3] ^= 0x01;
     KAT_CHECK("flipped nullifier rejects",
-              !sprout_verify_phgr13(proof, anchor, hsig, mac1, mac2,
-                                    bad_nf1, nf2, cm1, cm2,
+              !sprout_verify_phgr13(f->proof, f->anchor, f->hsig, f->mac1, f->mac2,
+                                    bad_nf1, f->nf2, f->cm1, f->cm2,
                                     k_vpub_old, k_vpub_new));
+    return failures;
+}
 
+static int kat_check_canonical_identity(struct transaction *tx,
+                                        struct byte_stream *stream)
+{
+    int failures = 0;
+    char txid[65];
+    uint256_get_hex(&tx->hash, txid);
+    KAT_CHECK("canonical transaction identity and complete wire are pinned",
+              g_fixture_tx_sprout_241_len == 2022 &&
+              stream_remaining(stream) == 0 &&
+              strcmp(txid,
+                     "55c6c3a289d295954936076b697cc1e2a713c99d"
+                     "d268934f7ab6518f825148fd") == 0 &&
+              tx->num_joinsplit == 1 && tx->v_joinsplit != NULL);
+    return failures;
+}
+
+static int kat_check_canonical_joinsplit(const struct kat_fixture *f,
+                                         struct transaction *tx)
+{
+    int failures = 0;
+    KAT_CHECK("canonical JoinSplit public inputs match the proof KAT",
+              tx->v_joinsplit &&
+              tx->v_joinsplit[0].vpub_old == k_vpub_old &&
+              tx->v_joinsplit[0].vpub_new == k_vpub_new &&
+              memcmp(tx->v_joinsplit[0].anchor.data, f->anchor, 32) == 0 &&
+              memcmp(tx->v_joinsplit[0].nullifiers[0].data, f->nf1, 32) == 0 &&
+              memcmp(tx->v_joinsplit[0].nullifiers[1].data, f->nf2, 32) == 0 &&
+              memcmp(tx->v_joinsplit[0].commitments[0].data, f->cm1, 32) == 0 &&
+              memcmp(tx->v_joinsplit[0].commitments[1].data, f->cm2, 32) == 0);
+    return failures;
+}
+
+static int kat_check_canonical_contextual(struct transaction *tx,
+                                          struct ppzksnark_vk *vk)
+{
+    int failures = 0;
+    /* contextual_check_transaction() now asks whether this process can
+     * verify a shielded proof AT ALL before it tries: on a NULL VK it sets
+     * local_fault and returns false with DoS 0, so an honest peer is not
+     * charged for our missing keys. That gate reads sapling_params_loaded(),
+     * which hand-publishing one PHGR13 fixture key does not set — so this
+     * KAT was asserting against a process state no real node is ever in,
+     * and read "the canonical proof fails consensus" when the truth was
+     * "this process holds no verifying keys". Install the compiled-in set,
+     * then re-pin the fixture key so the proof under test is still checked
+     * against THIS file's VK. */
+    (void)sapling_install_embedded_vks();
+    sprout_phgr_set_vk(vk);
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    int saved_defer = atomic_exchange(
+        &g_deferred_proof_validation_below_height, -1);
+    struct validation_state contextual;
+    validation_state_init(&contextual);
+    bool consensus_ok = params && contextual_check_transaction(
+        tx, &contextual, &params->consensus, 241, 100);
+    atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
+    KAT_CHECK("canonical JoinSplit signature and proof pass contextual consensus",
+              consensus_ok);
+    return failures;
+}
+
+static int kat_check_canonical_tx(const struct kat_fixture *f,
+                                  struct ppzksnark_vk *vk)
+{
+    int failures = 0;
     /* Full canonical transaction: parser, structural rules, JoinSplit
      * Ed25519 signature, hSig derivation, and PHGR13 proof all run through the
      * production consensus entrypoints. Anchor membership and the transparent
@@ -184,54 +246,43 @@ int test_sprout_phgr13_kat(void)
     bool parsed = transaction_deserialize(&tx, &stream);
     KAT_CHECK("canonical height-241 transaction deserializes", parsed);
     if (parsed) {
-        char txid[65];
-        uint256_get_hex(&tx.hash, txid);
-        KAT_CHECK("canonical transaction identity and complete wire are pinned",
-                  g_fixture_tx_sprout_241_len == 2022 &&
-                  stream_remaining(&stream) == 0 &&
-                  strcmp(txid,
-                         "55c6c3a289d295954936076b697cc1e2a713c99d"
-                         "d268934f7ab6518f825148fd") == 0 &&
-                  tx.num_joinsplit == 1 && tx.v_joinsplit != NULL);
-        KAT_CHECK("canonical JoinSplit public inputs match the proof KAT",
-                  tx.v_joinsplit &&
-                  tx.v_joinsplit[0].vpub_old == k_vpub_old &&
-                  tx.v_joinsplit[0].vpub_new == k_vpub_new &&
-                  memcmp(tx.v_joinsplit[0].anchor.data, anchor, 32) == 0 &&
-                  memcmp(tx.v_joinsplit[0].nullifiers[0].data, nf1, 32) == 0 &&
-                  memcmp(tx.v_joinsplit[0].nullifiers[1].data, nf2, 32) == 0 &&
-                  memcmp(tx.v_joinsplit[0].commitments[0].data, cm1, 32) == 0 &&
-                  memcmp(tx.v_joinsplit[0].commitments[1].data, cm2, 32) == 0);
+        failures += kat_check_canonical_identity(&tx, &stream);
+        failures += kat_check_canonical_joinsplit(f, &tx);
         struct validation_state structural;
         validation_state_init(&structural);
         KAT_CHECK("canonical Sprout transaction passes structural consensus",
                   check_transaction(&tx, &structural));
-
-        /* contextual_check_transaction() now asks whether this process can
-         * verify a shielded proof AT ALL before it tries: on a NULL VK it sets
-         * local_fault and returns false with DoS 0, so an honest peer is not
-         * charged for our missing keys. That gate reads sapling_params_loaded(),
-         * which hand-publishing one PHGR13 fixture key does not set — so this
-         * KAT was asserting against a process state no real node is ever in,
-         * and read "the canonical proof fails consensus" when the truth was
-         * "this process holds no verifying keys". Install the compiled-in set,
-         * then re-pin the fixture key so the proof under test is still checked
-         * against THIS file's VK. */
-        (void)sapling_install_embedded_vks();
-        sprout_phgr_set_vk(&fixture_vk);
-        chain_params_select(CHAIN_MAIN);
-        const struct chain_params *params = chain_params_get();
-        int saved_defer = atomic_exchange(
-            &g_deferred_proof_validation_below_height, -1);
-        struct validation_state contextual;
-        validation_state_init(&contextual);
-        bool consensus_ok = params && contextual_check_transaction(
-            &tx, &contextual, &params->consensus, 241, 100);
-        atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
-        KAT_CHECK("canonical JoinSplit signature and proof pass contextual consensus",
-                  consensus_ok);
+        failures += kat_check_canonical_contextual(&tx, vk);
         transaction_free(&tx);
     }
+    return failures;
+}
+
+int test_sprout_phgr13_kat(void)
+{
+    printf("\n=== Sprout PHGR13 real-proof KAT ===\n");
+    int failures = 0;
+
+    static struct ppzksnark_vk fixture_vk;
+    static bool fixture_vk_loaded = false;
+
+    struct kat_fixture fx;
+    bool decoded = kat_decode_fixtures(&fx);
+    KAT_CHECK("fixture hex decodes to exact byte lengths", decoded);
+    if (!decoded)
+        return failures;
+
+    if (!fixture_vk_loaded) {
+        fixture_vk_loaded = ppzksnark_vk_read(&fixture_vk, fx.vk_bytes,
+                                              sizeof(fx.vk_bytes));
+    }
+    failures += kat_check_vk_parse(&fixture_vk, fixture_vk_loaded);
+    if (!fixture_vk_loaded)
+        return failures;
+
+    sprout_phgr_set_vk(&fixture_vk);
+    failures += kat_check_verify_mutations(&fx);
+    failures += kat_check_canonical_tx(&fx, &fixture_vk);
 
     printf("Sprout PHGR13 real-proof KAT: %s (%d failures)\n",
            failures == 0 ? "OK" : "FAIL", failures);
