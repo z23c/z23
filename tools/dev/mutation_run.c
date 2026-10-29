@@ -1250,32 +1250,42 @@ static void mut_campaign_write_error(struct zcl_mut_report *out, int st,
                                      const struct zcl_mut_config *cfg,
                                      enum zcl_mut_outcome base)
 {
-    if (st == MUT_ST_BASE) {
+    switch (st) {
+    case MUT_ST_PATH:
+        (void)snprintf(out->error, sizeof out->error, "source path too long");
+        return;
+    case MUT_ST_READ:
+        (void)snprintf(out->error, sizeof out->error, "cannot read %.180s",
+                       src_abs);
+        return;
+    case MUT_ST_NOSITE:
+        (void)snprintf(out->error, sizeof out->error,
+                       "no mutation site in %s", cfg->src_rel);
+        return;
+    case MUT_ST_STAGE:
+        (void)snprintf(out->error, sizeof out->error,
+                       "cannot stage the scratch translation unit");
+        return;
+    case MUT_ST_COMPILE:
+        (void)snprintf(out->error, sizeof out->error,
+                       "the unmodified file does not compile on its own");
+        return;
+    case MUT_ST_NOOBJ:
+        (void)snprintf(out->error, sizeof out->error,
+                       "the baseline object was not produced");
+        return;
+    case MUT_ST_LINK:
+        (void)snprintf(out->error, sizeof out->error,
+                       "the baseline link failed");
+        return;
+    case MUT_ST_BASE:
         (void)snprintf(out->error, sizeof out->error,
                        "baseline %s is not green and executing (%s); a "
                        "mutation score against it would mean nothing",
                        cfg->group, zcl_mut_outcome_name(base));
         return;
-    }
-    const char *arg = st == MUT_ST_READ ? src_abs :
-                      st == MUT_ST_NOSITE ? cfg->src_rel : "";
-    static const struct {
-        int code;
-        const char *fmt;
-    } rows[] = {
-        { MUT_ST_PATH, "source path too long" },
-        { MUT_ST_READ, "cannot read %.180s" },
-        { MUT_ST_NOSITE, "no mutation site in %s" },
-        { MUT_ST_STAGE, "cannot stage the scratch translation unit" },
-        { MUT_ST_COMPILE, "the unmodified file does not compile on its own" },
-        { MUT_ST_NOOBJ, "the baseline object was not produced" },
-        { MUT_ST_LINK, "the baseline link failed" },
-    };
-    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
-        if (rows[i].code == st) {
-            (void)snprintf(out->error, sizeof out->error, rows[i].fmt, arg);
-            return;
-        }
+    default:
+        return;
     }
 }
 
@@ -1294,12 +1304,12 @@ static void mut_campaign_classify(struct mut_ctx *c, struct zcl_mut_result *r)
         r->outcome = mut_run_group(c, &r->killed_by);
 }
 
-static void mut_campaign_one(struct mut_ctx *c,
-                             const struct zcl_mut_config *cfg,
-                             const char *src, size_t src_len,
-                             const struct zcl_mut_site *site,
-                             struct zcl_mut_result *r,
-                             struct zcl_mut_report *out)
+static void mut_campaign_evaluate_site(struct mut_ctx *c,
+                                       const struct zcl_mut_config *cfg,
+                                       const char *src, size_t src_len,
+                                       const struct zcl_mut_site *site,
+                                       struct zcl_mut_result *r,
+                                       struct zcl_mut_report *out)
 {
     r->site = *site;
     r->killed_by = "";
@@ -1312,17 +1322,15 @@ static void mut_campaign_one(struct mut_ctx *c,
     } else {
         char *image = NULL;
         size_t ilen = 0;
-        if (!zcl_mut_apply(src, src_len, site, &image, &ilen) ||
-            !mut_write_subject(c, image, ilen)) {
-            free(image);
+        bool staged = zcl_mut_apply(src, src_len, site, &image, &ilen) &&
+                      mut_write_subject(c, image, ilen);
+        free(image);
+        if (!staged)
             r->outcome = ZCL_MUT_OUTCOME_ERROR;
-        } else {
-            free(image);
-            if (mut_compile(c) != 0)
-                r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
-            else
-                mut_campaign_classify(c, r);
-        }
+        else if (mut_compile(c) != 0)
+            r->outcome = ZCL_MUT_OUTCOME_STILLBORN;
+        else
+            mut_campaign_classify(c, r);
         if (cfg->use_cache && r->outcome != ZCL_MUT_OUTCOME_ERROR)
             mut_cache_put(c, key, r->outcome, r->killed_by);
     }
@@ -1331,8 +1339,8 @@ static void mut_campaign_one(struct mut_ctx *c,
     out->result_count++;
 }
 
-static void mut_campaign_verbose_bits(const struct zcl_mut_result *r,
-                                      const char **shown, const char **tag)
+static void mut_campaign_verbose_labels(const struct zcl_mut_result *r,
+                                        const char **shown, const char **tag)
 {
     *shown = r->site.after[0] ? r->site.after : "(delete)";
     *tag = r->cached ? " (cached)" : "";
@@ -1356,6 +1364,15 @@ static void mut_campaign_confirm_source(const char *src_abs, const char *src,
                    32) == 0;
         free(again);
     }
+}
+
+/* Releases the campaign's working buffers; the report is not touched. */
+static void mut_campaign_release(struct mut_ctx *c, struct zcl_mut_site *sites,
+                                 char *src)
+{
+    free(c->baseline_obj);
+    free(sites);
+    free(src);
 }
 
 bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
@@ -1383,19 +1400,17 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
     st = mut_campaign_baseline(&c, src, src_len, out, &base);
     if (st != 0) {
         mut_campaign_write_error(out, st, src_abs, cfg, base);
-        free(c.baseline_obj);
-        free(sites);
-        free(src);
+        mut_campaign_release(&c, sites, src);
         zcl_mut_report_free(out);
         return false;
     }
 
     for (size_t i = 0; i < total; i++) {
         struct zcl_mut_result *r = &out->results[out->result_count];
-        mut_campaign_one(&c, cfg, src, src_len, &sites[i], r, out);
+        mut_campaign_evaluate_site(&c, cfg, src, src_len, &sites[i], r, out);
         const char *shown = NULL;
         const char *tag = NULL;
-        mut_campaign_verbose_bits(r, &shown, &tag);
+        mut_campaign_verbose_labels(r, &shown, &tag);
         if (cfg->verbose)
             fprintf(stderr, "  [%zu/%zu] %s:%zu:%zu %s -> %s  %s%s\n", i + 1,
                     total, cfg->src_rel, r->site.line, r->site.column,
@@ -1409,8 +1424,6 @@ bool zcl_mut_campaign_run(const struct zcl_mut_config *cfg,
 
     mut_campaign_confirm_source(src_abs, src, src_len, out);
     out->wall_ms = mut_now_ms() - started;
-    free(c.baseline_obj);
-    free(sites);
-    free(src);
+    mut_campaign_release(&c, sites, src);
     return true;
 }
