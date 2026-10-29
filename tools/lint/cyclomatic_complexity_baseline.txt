@@ -461,11 +461,9 @@ engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_decode:20
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_validate:36
 engine/modules/framework/src/condition.c:condition_tick_one:28
 engine/modules/hotswap/src/hotswap_activate.c:activate_from_sealed_fd:21
-engine/modules/hotswap/src/hotswap_activate.c:hotswap_module_admit:46
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_module_publish:21
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_rollback:20
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_verify_module_so:33
-engine/modules/hotswap/src/hotswap_activate.c:module_sections_ok:30
 engine/modules/hotswap/src/hotswap_activate.c:retire_candidate:18
 engine/modules/hotswap/src/hotswap_elf_probe.c:hotswap_elf_pre_map_admit:22
 engine/modules/hotswap/src/hotswap_elf_probe.c:sections_agree:40

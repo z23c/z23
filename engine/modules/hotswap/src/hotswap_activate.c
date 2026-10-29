@@ -225,6 +225,57 @@ static bool is_seal_digest(const char *hex)
     return n == 64;
 }
 
+/* Refuse: set `stage` (unless NULL) and format the reason into `why`; either
+ * buffer may be absent. Always returns false. */
+static bool admit_refuse(char *stage, size_t stage_cap, char *why,
+                         size_t why_cap, const char *stage_name,
+                         const char *fmt, ...)
+    __attribute__((format(printf, 6, 7)));
+static bool admit_refuse(char *stage, size_t stage_cap, char *why,
+                         size_t why_cap, const char *stage_name,
+                         const char *fmt, ...)
+{
+    if (stage_name)
+        act_copy(stage, stage_cap, stage_name);
+    if (!why || why_cap == 0)
+        return false;
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(why, why_cap, fmt, ap);
+    va_end(ap);
+    return false;
+}
+
+/* One declared section row: well formed, not repeated, and equal to the
+ * resident's digest for that path. */
+static bool section_row_ok(const struct zcl_hotswap_core_sections *cs,
+                           uint32_t i, char *why, size_t why_cap)
+{
+    const char *path = cs->sections[i].path;
+    const char *digest = cs->sections[i].digest;
+    if (!path || !path[0] || !is_seal_digest(digest))
+        return admit_refuse(NULL, 0, why, why_cap, NULL,
+                            "declared section %u has an empty path or a "
+                            "malformed digest", i);
+    for (uint32_t j = 0; j < i; j++) {
+        if (cs->sections[j].path && strcmp(path, cs->sections[j].path) == 0)
+            return admit_refuse(NULL, 0, why, why_cap, NULL,
+                                "sealed-core section '%s' is declared twice",
+                                path);
+    }
+    const char *host = hotswap_core_section_digest(path);
+    if (!host)
+        return admit_refuse(NULL, 0, why, why_cap, NULL,
+                            "module declares sealed-core section '%s', which "
+                            "this resident's sealed core does not have", path);
+    if (strcmp(digest, host) != 0)
+        return admit_refuse(NULL, 0, why, why_cap, NULL,
+                            "sealed-core section '%s' mismatch: "
+                            "artifact=%.64s resident=%s (rebuild the module)",
+                            path, digest, host);
+    return true;
+}
+
 /* ── THE SECTION DECLARATION CHECK (purely ADDITIVE to the ROOT pin) ───────
  *
  * The ROOT pin (module_consensus_pin_ok, dlsym path) and the pre-map ELF probe
@@ -248,70 +299,106 @@ static bool module_sections_ok(const struct zcl_hotswap_module *module,
 {
     const struct zcl_hotswap_core_sections *cs = module->core_sections;
     act_copy(stage, stage_cap, "sections");
-    if (!cs || !cs->sections || cs->count == 0) {
-        act_copy(why, why_cap,
-                 "module declares no sealed-core sections — built before the "
-                 "section declaration existed; rebuild it with "
-                 "'make hotswap-module-so'");
-        return false;
-    }
-    if (cs->count > ZCL_HOTSWAP_MODULE_MAX_SECTIONS) {
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "module declares %u sealed-core sections, ceiling is %u",
-                     cs->count, ZCL_HOTSWAP_MODULE_MAX_SECTIONS);
-        return false;
-    }
-    if (!is_seal_digest(cs->tree)) {
-        act_copy(why, why_cap,
-                 "module's sealed-core TREE is not 64 lowercase hex");
-        return false;
-    }
-    if (strcmp(cs->tree, ZCL_CORE_SEAL_TREE) != 0) {
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "sealed-core TREE mismatch: artifact=%.64s resident=%s "
-                     "(the module was compiled against a different sealed core;"
-                     " rebuild it)",
-                     cs->tree, ZCL_CORE_SEAL_TREE);
-        return false;
-    }
+    if (!cs || !cs->sections || cs->count == 0)
+        return admit_refuse(NULL, 0, why, why_cap, NULL, "%s",
+                            "module declares no sealed-core sections — built "
+                            "before the section declaration existed; rebuild "
+                            "it with 'make hotswap-module-so'");
+    if (cs->count > ZCL_HOTSWAP_MODULE_MAX_SECTIONS)
+        return admit_refuse(NULL, 0, why, why_cap, NULL,
+                            "module declares %u sealed-core sections, ceiling "
+                            "is %u", cs->count,
+                            ZCL_HOTSWAP_MODULE_MAX_SECTIONS);
+    if (!is_seal_digest(cs->tree))
+        return admit_refuse(NULL, 0, why, why_cap, NULL, "%s",
+                            "module's sealed-core TREE is not 64 lowercase "
+                            "hex");
+    if (strcmp(cs->tree, ZCL_CORE_SEAL_TREE) != 0)
+        return admit_refuse(NULL, 0, why, why_cap, NULL,
+                            "sealed-core TREE mismatch: artifact=%.64s "
+                            "resident=%s (the module was compiled against a "
+                            "different sealed core; rebuild it)",
+                            cs->tree, ZCL_CORE_SEAL_TREE);
     for (uint32_t i = 0; i < cs->count; i++) {
-        const char *path = cs->sections[i].path;
-        const char *digest = cs->sections[i].digest;
-        if (!path || !path[0] || !is_seal_digest(digest)) {
-            if (why && why_cap)
-                snprintf(why, why_cap,
-                         "declared section %u has an empty path or a malformed "
-                         "digest", i);
+        if (!section_row_ok(cs, i, why, why_cap))
             return false;
-        }
-        for (uint32_t j = 0; j < i; j++) {
-            if (cs->sections[j].path && strcmp(path, cs->sections[j].path) == 0) {
-                if (why && why_cap)
-                    snprintf(why, why_cap,
-                             "sealed-core section '%s' is declared twice", path);
-                return false;
-            }
-        }
-        const char *host = hotswap_core_section_digest(path);
-        if (!host) {
-            if (why && why_cap)
-                snprintf(why, why_cap,
-                         "module declares sealed-core section '%s', which this "
-                         "resident's sealed core does not have", path);
-            return false;
-        }
-        if (strcmp(digest, host) != 0) {
-            if (why && why_cap)
-                snprintf(why, why_cap,
-                         "sealed-core section '%s' mismatch: artifact=%.64s "
-                         "resident=%s (rebuild the module)",
-                         path, digest, host);
-            return false;
-        }
     }
     if (stage && stage_cap) stage[0] = '\0';
+    return true;
+}
+
+/* Declared leaves: complete fields, within the ceiling, each named with a
+ * handler. Writes stage/why on refusal. */
+static bool admit_leaves_ok(const struct zcl_hotswap_module *module,
+                            char *stage, size_t stage_cap,
+                            char *why, size_t why_cap)
+{
+    if (!module->source_tu || !module->source_tu[0] || !module->leaves ||
+        !module->self_test || module->leaf_count == 0)
+        return admit_refuse(stage, stage_cap, why, why_cap, "fields", "%s",
+                            "module fields incomplete "
+                            "(source_tu/leaves/leaf_count/self_test)");
+    if (module->leaf_count > ZCL_HOTSWAP_MODULE_MAX_LEAVES)
+        return admit_refuse(stage, stage_cap, why, why_cap, "capacity",
+                            "module declares %u leaves, ceiling is %u (one "
+                            "batch replace must carry them all)",
+                            module->leaf_count, ZCL_HOTSWAP_MODULE_MAX_LEAVES);
+    for (uint32_t i = 0; i < module->leaf_count; i++) {
+        if (!module->leaves[i].name || !module->leaves[i].name[0] ||
+            !module->leaves[i].fn)
+            return admit_refuse(stage, stage_cap, why, why_cap, "fields",
+                                "leaf %u has an empty name or NULL handler", i);
+    }
+    return true;
+}
+
+/* Every leaf is on the file's swappable allowlist and declared once. */
+static bool admit_allowlist_ok(const struct zcl_hotswap_module *module,
+                               char *stage, size_t stage_cap,
+                               char *why, size_t why_cap)
+{
+    const char *allowed = swappable_leaves_for_source(module->source_tu);
+    if (!allowed)
+        return admit_refuse(stage, stage_cap, why, why_cap, "allowlist",
+                            "source '%s' is not on the swappable shape-leaf "
+                            "allowlist", module->source_tu);
+    for (uint32_t i = 0; i < module->leaf_count; i++) {
+        const char *leaf = module->leaves[i].name;
+        if (!leaf_list_contains(allowed, leaf))
+            return admit_refuse(stage, stage_cap, why, why_cap, "allowlist",
+                                "leaf '%s' is not on the swappable allowlist "
+                                "for '%s'", leaf, module->source_tu);
+        for (uint32_t j = 0; j < i; j++) {
+            if (strcmp(leaf, module->leaves[j].name) == 0)
+                return admit_refuse(stage, stage_cap, why, why_cap,
+                                    "duplicate",
+                                    "leaf '%s' is declared twice in one "
+                                    "module", leaf);
+        }
+    }
+    return true;
+}
+
+/* The declared probe leaf must exist for this file AND be one of the
+ * leaves this module actually re-points; otherwise probe-before-publish
+ * would validate code the module never installs. */
+static bool admit_probe_leaf_ok(const struct zcl_hotswap_module *module,
+                                char *stage, size_t stage_cap,
+                                char *why, size_t why_cap)
+{
+    const char *probe = hotswap_module_probe_leaf(module->source_tu);
+    if (!probe || !probe[0])
+        return admit_refuse(stage, stage_cap, why, why_cap, "probe",
+                            "source '%s' declares no probe leaf in "
+                            "engine/composition/hotswap_eligible.def",
+                            module->source_tu);
+    bool probe_exported = false;
+    for (uint32_t i = 0; i < module->leaf_count && !probe_exported; i++)
+        probe_exported = strcmp(module->leaves[i].name, probe) == 0;
+    if (!probe_exported)
+        return admit_refuse(stage, stage_cap, why, why_cap, "probe",
+                            "module does not export its declared probe leaf "
+                            "'%s'", probe);
     return true;
 }
 
@@ -321,20 +408,15 @@ bool hotswap_module_admit(const struct zcl_hotswap_module *module,
 {
     if (stage && stage_cap) stage[0] = '\0';
     if (why && why_cap) why[0] = '\0';
-    if (!module) {
-        act_copy(stage, stage_cap, "abi");
-        act_copy(why, why_cap, "null module");
-        return false;
-    }
-    if (module->abi_version != ZCL_HOTSWAP_MODULE_ABI_V3) {
-        act_copy(stage, stage_cap, "abi");
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "module abi_version %u != required %u (rebuild the module "
-                     "against the current hotswap_module.h)",
-                     module->abi_version, ZCL_HOTSWAP_MODULE_ABI_V3);
-        return false;
-    }
+    if (!module)
+        return admit_refuse(stage, stage_cap, why, why_cap, "abi", "%s",
+                            "null module");
+    if (module->abi_version != ZCL_HOTSWAP_MODULE_ABI_V3)
+        return admit_refuse(stage, stage_cap, why, why_cap, "abi",
+                            "module abi_version %u != required %u (rebuild "
+                            "the module against the current "
+                            "hotswap_module.h)",
+                            module->abi_version, ZCL_HOTSWAP_MODULE_ABI_V3);
     /* The sealed-core SECTION + TREE declaration, verified immediately after
      * the version stamp and BEFORE any other property of the module is
      * considered. A v2 struct is shorter than v3, so `core_sections` is only
@@ -342,95 +424,18 @@ bool hotswap_module_admit(const struct zcl_hotswap_module *module,
      * block sits here and not earlier. */
     if (!module_sections_ok(module, stage, stage_cap, why, why_cap))
         return false;
-    if (!module->source_tu || !module->source_tu[0] || !module->leaves ||
-        !module->self_test || module->leaf_count == 0) {
-        act_copy(stage, stage_cap, "fields");
-        act_copy(why, why_cap,
-                 "module fields incomplete (source_tu/leaves/leaf_count/self_test)");
+    if (!admit_leaves_ok(module, stage, stage_cap, why, why_cap))
         return false;
-    }
-    if (module->leaf_count > ZCL_HOTSWAP_MODULE_MAX_LEAVES) {
-        act_copy(stage, stage_cap, "capacity");
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "module declares %u leaves, ceiling is %u (one batch "
-                     "replace must carry them all)",
-                     module->leaf_count, ZCL_HOTSWAP_MODULE_MAX_LEAVES);
+    if (!admit_allowlist_ok(module, stage, stage_cap, why, why_cap))
         return false;
-    }
-    for (uint32_t i = 0; i < module->leaf_count; i++) {
-        if (!module->leaves[i].name || !module->leaves[i].name[0] ||
-            !module->leaves[i].fn) {
-            act_copy(stage, stage_cap, "fields");
-            if (why && why_cap)
-                snprintf(why, why_cap,
-                         "leaf %u has an empty name or NULL handler", i);
-            return false;
-        }
-    }
-
-    const char *allowed = swappable_leaves_for_source(module->source_tu);
-    if (!allowed) {
-        act_copy(stage, stage_cap, "allowlist");
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "source '%s' is not on the swappable shape-leaf allowlist",
-                     module->source_tu);
+    if (!admit_probe_leaf_ok(module, stage, stage_cap, why, why_cap))
         return false;
-    }
-
-    for (uint32_t i = 0; i < module->leaf_count; i++) {
-        const char *leaf = module->leaves[i].name;
-        if (!leaf_list_contains(allowed, leaf)) {
-            act_copy(stage, stage_cap, "allowlist");
-            if (why && why_cap)
-                snprintf(why, why_cap,
-                         "leaf '%s' is not on the swappable allowlist for '%s'",
-                         leaf, module->source_tu);
-            return false;
-        }
-        for (uint32_t j = 0; j < i; j++) {
-            if (strcmp(leaf, module->leaves[j].name) == 0) {
-                act_copy(stage, stage_cap, "duplicate");
-                if (why && why_cap)
-                    snprintf(why, why_cap,
-                             "leaf '%s' is declared twice in one module", leaf);
-                return false;
-            }
-        }
-    }
-
-    /* The declared probe leaf must exist for this file AND be one of the
-     * leaves this module actually re-points; otherwise probe-before-publish
-     * would validate code the module never installs. */
-    const char *probe = hotswap_module_probe_leaf(module->source_tu);
-    if (!probe || !probe[0]) {
-        act_copy(stage, stage_cap, "probe");
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "source '%s' declares no probe leaf in "
-                     "engine/composition/hotswap_eligible.def", module->source_tu);
-        return false;
-    }
-    bool probe_exported = false;
-    for (uint32_t i = 0; i < module->leaf_count && !probe_exported; i++)
-        probe_exported = strcmp(module->leaves[i].name, probe) == 0;
-    if (!probe_exported) {
-        act_copy(stage, stage_cap, "probe");
-        if (why && why_cap)
-            snprintf(why, why_cap,
-                     "module does not export its declared probe leaf '%s'",
-                     probe);
-        return false;
-    }
 
     char st_err[192] = {0};
-    if (!module->self_test(st_err, sizeof(st_err))) {
-        act_copy(stage, stage_cap, "self_test");
-        act_copy(why, why_cap,
-                 st_err[0] ? st_err : "module self_test returned false");
-        return false;
-    }
+    if (!module->self_test(st_err, sizeof(st_err)))
+        return admit_refuse(stage, stage_cap, why, why_cap, "self_test", "%s",
+                            st_err[0] ? st_err : "module self_test returned "
+                                                 "false");
     return true;
 }
 
