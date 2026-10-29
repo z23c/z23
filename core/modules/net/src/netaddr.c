@@ -136,45 +136,56 @@ bool net_addr_is_routable(const struct net_addr *a)
              net_addr_is_rfc4843(a) || net_addr_is_local(a));
 }
 
-size_t net_addr_get_group(const struct net_addr *a, unsigned char *out,
-                          size_t out_size)
+/* Tail of the group classification: Tor, the 2001:470::/36 block, and the
+ * generic /32 fallback. */
+static void net_addr_group_classify_tail(const struct net_addr *a,
+                                         int *nClass, int *nStartByte,
+                                         int *nBits)
 {
-    int nClass = NET_IPV6;
-    int nStartByte = 0;
-    int nBits = 16;
-
-    if (net_addr_is_local(a)) {
-        nClass = 255;
-        nBits = 0;
-    } else if (!net_addr_is_routable(a)) {
-        nClass = NET_UNROUTABLE;
-        nBits = 0;
-    } else if (net_addr_is_ipv4(a) || net_addr_is_rfc6145(a) ||
-               net_addr_is_rfc6052(a)) {
-        nClass = NET_IPV4;
-        nStartByte = 12;
-    } else if (net_addr_is_rfc3964(a)) {
-        nClass = NET_IPV4;
-        nStartByte = 2;
-    } else if (net_addr_is_rfc4380(a)) {
-        if (out_size < 3) return 0;
-        out[0] = NET_IPV4;
-        out[1] = net_addr_get_byte(a, 3) ^ 0xFF;
-        out[2] = net_addr_get_byte(a, 2) ^ 0xFF;
-        return 3;
-    } else if (net_addr_is_tor(a)) {
-        nClass = NET_ONION;
-        nStartByte = 6;
-        nBits = 4;
+    if (net_addr_is_tor(a)) {
+        *nClass = NET_ONION;
+        *nStartByte = 6;
+        *nBits = 4;
     } else if (net_addr_get_byte(a, 15) == 0x20 &&
                net_addr_get_byte(a, 14) == 0x01 &&
                net_addr_get_byte(a, 13) == 0x04 &&
                net_addr_get_byte(a, 12) == 0x70) {
-        nBits = 36;
+        *nBits = 36;
     } else {
-        nBits = 32;
+        *nBits = 32;
     }
+}
 
+/* Classify a into class/start byte/bits. Returns true when the Teredo
+ * (rfc4380) case applies, which the caller encodes itself. */
+static bool net_addr_group_classify(const struct net_addr *a, int *nClass,
+                                    int *nStartByte, int *nBits)
+{
+    if (net_addr_is_local(a)) {
+        *nClass = 255;
+        *nBits = 0;
+    } else if (!net_addr_is_routable(a)) {
+        *nClass = NET_UNROUTABLE;
+        *nBits = 0;
+    } else if (net_addr_is_ipv4(a) || net_addr_is_rfc6145(a) ||
+               net_addr_is_rfc6052(a)) {
+        *nClass = NET_IPV4;
+        *nStartByte = 12;
+    } else if (net_addr_is_rfc3964(a)) {
+        *nClass = NET_IPV4;
+        *nStartByte = 2;
+    } else if (net_addr_is_rfc4380(a)) {
+        return true;
+    } else {
+        net_addr_group_classify_tail(a, nClass, nStartByte, nBits);
+    }
+    return false;
+}
+
+static size_t net_addr_group_emit(const struct net_addr *a, unsigned char *out,
+                                  size_t out_size, int nClass,
+                                  int nStartByte, int nBits)
+{
     size_t pos = 0;
     if (pos >= out_size) return 0;
     out[pos++] = (unsigned char)nClass;
@@ -187,6 +198,24 @@ size_t net_addr_get_group(const struct net_addr *a, unsigned char *out,
         out[pos++] = net_addr_get_byte(a, 15 - nStartByte) |
                      (unsigned char)((1 << (8 - nBits)) - 1);
     return pos;
+}
+
+size_t net_addr_get_group(const struct net_addr *a, unsigned char *out,
+                          size_t out_size)
+{
+    int nClass = NET_IPV6;
+    int nStartByte = 0;
+    int nBits = 16;
+
+    if (net_addr_group_classify(a, &nClass, &nStartByte, &nBits)) {
+        if (out_size < 3) return 0;
+        out[0] = NET_IPV4;
+        out[1] = net_addr_get_byte(a, 3) ^ 0xFF;
+        out[2] = net_addr_get_byte(a, 2) ^ 0xFF;
+        return 3;
+    }
+
+    return net_addr_group_emit(a, out, out_size, nClass, nStartByte, nBits);
 }
 
 void net_service_get_key(const struct net_service *s,

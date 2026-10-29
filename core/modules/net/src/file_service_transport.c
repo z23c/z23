@@ -126,6 +126,58 @@ static bool wait_for_socket(platform_socket_t socket, short events,
     }
 }
 
+enum fs_send_status {
+    FS_SEND_PROGRESS = 0,
+    FS_SEND_RETRY,
+    FS_SEND_FAILED,
+    FS_SEND_NO_TIMEOUT,
+    FS_SEND_NO_DEADLINE
+};
+
+/* Turn the legacy INT64_MAX deadline into a finite one when the socket has a
+ * send timeout. Returns a status; the caller owns the logging. */
+static int send_legacy_deadline(platform_socket_t socket,
+                                int64_t *deadline_ms,
+                                bool *blocking_legacy_send)
+{
+    int timeout_ms = 0;
+    if (platform_socket_get_send_timeout(socket, &timeout_ms) != 0)
+        return FS_SEND_NO_TIMEOUT;
+    if (timeout_ms > 0) {
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms > INT64_MAX - timeout_ms)
+            return FS_SEND_NO_DEADLINE;
+        *deadline_ms = now_ms + timeout_ms;
+        *blocking_legacy_send = false;
+    }
+    return FS_SEND_PROGRESS;
+}
+
+/* One send attempt. Returns PROGRESS with *count bytes sent, RETRY for an
+ * interrupted or would-block call, FAILED with *error set otherwise. */
+static int send_once(platform_socket_t socket, const uint8_t *data,
+                     size_t remaining, bool blocking_legacy_send,
+                     int *count, int *error)
+{
+    *count = blocking_legacy_send
+        ? platform_socket_send(socket, data, remaining)
+        : platform_socket_send_nonblocking(socket, data, remaining);
+    *error = *count < 0 ? platform_socket_last_error() : 0;
+    if (*count < 0 && (platform_socket_error_interrupted(*error) ||
+                       (!blocking_legacy_send &&
+                        platform_socket_error_would_block(*error))))
+        return FS_SEND_RETRY;
+    if (*count <= 0)
+        return FS_SEND_FAILED;
+    return FS_SEND_PROGRESS;
+}
+
+static bool send_poll_writable(short revents)
+{
+    return (revents & PLATFORM_SOCKET_POLL_WRITE) &&
+           !(revents & PLATFORM_SOCKET_POLL_ERROR);
+}
+
 static bool send_all_until(platform_socket_t socket, const uint8_t *buffer,
                            size_t length, int64_t deadline_ms)
 {
@@ -133,28 +185,25 @@ static bool send_all_until(platform_socket_t socket, const uint8_t *buffer,
         LOG_FAIL("filesvc", "send_all arguments are invalid");
     bool blocking_legacy_send = deadline_ms == INT64_MAX;
     if (blocking_legacy_send) {
-        int timeout_ms = 0;
-        if (platform_socket_get_send_timeout(socket, &timeout_ms) != 0)
+        int status = send_legacy_deadline(socket, &deadline_ms,
+                                          &blocking_legacy_send);
+        if (status == FS_SEND_NO_TIMEOUT)
             LOG_FAIL("filesvc", "send_all could not read socket timeout");
-        if (timeout_ms > 0) {
-            int64_t now_ms = platform_time_monotonic_ms();
-            if (now_ms <= 0 || now_ms > INT64_MAX - timeout_ms)
-                LOG_FAIL("filesvc", "send_all socket deadline unavailable");
-            deadline_ms = now_ms + timeout_ms;
-            blocking_legacy_send = false;
-        }
+        if (status == FS_SEND_NO_DEADLINE)
+            LOG_FAIL("filesvc", "send_all socket deadline unavailable");
     }
     size_t sent = 0;
     while (sent < length) {
         /* INT64_MAX with no configured socket timeout is the legacy blocking
          * contract. Finite callers use the whole-record deadline below. */
+        int count = 0;
+        int error = 0;
         if (blocking_legacy_send) {
-            int count = platform_socket_send(socket, buffer + sent,
-                                             length - sent);
-            int error = count < 0 ? platform_socket_last_error() : 0;
-            if (count < 0 && platform_socket_error_interrupted(error))
+            int status = send_once(socket, buffer + sent, length - sent,
+                                   true, &count, &error);
+            if (status == FS_SEND_RETRY)
                 continue;
-            if (count <= 0) {
+            if (status == FS_SEND_FAILED) {
                 char text[64];
                 LOG_FAIL("filesvc", "send_all failed: %s",
                          fs_socket_error_text(error, text));
@@ -166,16 +215,13 @@ static bool send_all_until(platform_socket_t socket, const uint8_t *buffer,
         if (!wait_for_socket(socket, PLATFORM_SOCKET_POLL_WRITE,
                              deadline_ms, &revents))
             return false;
-        if (!(revents & PLATFORM_SOCKET_POLL_WRITE) ||
-            (revents & PLATFORM_SOCKET_POLL_ERROR))
+        if (!send_poll_writable(revents))
             LOG_FAIL("filesvc", "send_all poll revents=0x%x", revents);
-        int count = platform_socket_send_nonblocking(
-            socket, buffer + sent, length - sent);
-        int error = count < 0 ? platform_socket_last_error() : 0;
-        if (count < 0 && (platform_socket_error_interrupted(error) ||
-                          platform_socket_error_would_block(error)))
+        int status = send_once(socket, buffer + sent, length - sent,
+                               false, &count, &error);
+        if (status == FS_SEND_RETRY)
             continue;
-        if (count <= 0) {
+        if (status == FS_SEND_FAILED) {
             char text[64];
             LOG_FAIL("filesvc", "send_all failed: %s",
                      fs_socket_error_text(error, text));
@@ -459,12 +505,69 @@ bool fs_send_chunk_refusal(struct fs_session *session, uint8_t reason)
     return true;
 }
 
+static bool fs_recv_chunk_args_valid(const struct fs_session *session,
+                                     uint8_t *const *out,
+                                     const uint32_t *out_size,
+                                     const uint8_t *expected_digest)
+{
+    return session && out && out_size && expected_digest &&
+           fs_socket_valid(session->fd);
+}
+
+static bool fs_recv_chunk_body(const struct fs_session *session,
+                               uint8_t *buffer, uint32_t size,
+                               uint8_t mac_wire[32], int64_t deadline_ms)
+{
+    return recv_all_until(session->fd, buffer, size, deadline_ms) &&
+           recv_all_until(session->fd, mac_wire, 32, deadline_ms);
+}
+
+/* True when the wire MAC matches the session key, counter, digest and data.
+ * Cleanses the wire MAC and the expected MAC before returning. */
+static bool fs_recv_chunk_mac_ok(const struct fs_session *session,
+                                 const uint8_t expected_digest[32],
+                                 const uint8_t *buffer, uint32_t size,
+                                 uint8_t mac_wire[32])
+{
+    uint8_t mac_expected[32];
+    struct sha3_256_ctx mac;
+    sha3_256_init(&mac);
+    sha3_256_write(&mac, session->key, sizeof(session->key));
+    sha3_256_write(&mac, (const uint8_t *)&session->recv_counter,
+                   sizeof(session->recv_counter));
+    sha3_256_write(&mac, expected_digest, 32);
+    sha3_256_write(&mac, buffer, size);
+    sha3_256_finalize(&mac, mac_expected);
+    memory_cleanse(&mac, sizeof(mac));
+    uint8_t difference = 0;
+    for (size_t i = 0; i < 32; i++)
+        difference |= mac_wire[i] ^ mac_expected[i];
+    memory_cleanse(mac_wire, 32);
+    memory_cleanse(mac_expected, sizeof(mac_expected));
+    return difference == 0;
+}
+
+static bool fs_recv_chunk_digest_ok(const uint8_t *buffer, uint32_t size,
+                                    const uint8_t expected_digest[32])
+{
+    uint8_t actual_digest[32];
+    sha3_256(buffer, size, actual_digest);
+    bool digest_matches = memcmp(actual_digest, expected_digest, 32) == 0;
+    memory_cleanse(actual_digest, sizeof(actual_digest));
+    return digest_matches;
+}
+
+static bool fs_recv_chunk_in_time(int64_t deadline_ms)
+{
+    int64_t completed_ms = platform_time_monotonic_ms();
+    return !(completed_ms <= 0 || completed_ms >= deadline_ms);
+}
+
 bool fs_recv_chunk_fast(struct fs_session *session, uint8_t **out,
                         uint32_t *out_size,
                         const uint8_t expected_digest[32])
 {
-    if (!session || !out || !out_size || !expected_digest ||
-        !fs_socket_valid(session->fd))
+    if (!fs_recv_chunk_args_valid(session, out, out_size, expected_digest))
         LOG_FAIL("filesvc", "recv_chunk_fast arguments are invalid");
     *out = NULL;
     *out_size = 0;
@@ -486,42 +589,22 @@ bool fs_recv_chunk_fast(struct fs_session *session, uint8_t **out,
     if (!buffer)
         LOG_FAIL("filesvc", "recv_chunk_fast allocation failed size=%u", size);
     uint8_t mac_wire[32];
-    if (!recv_all_until(session->fd, buffer, size, deadline_ms) ||
-        !recv_all_until(session->fd, mac_wire, sizeof(mac_wire), deadline_ms)) {
+    if (!fs_recv_chunk_body(session, buffer, size, mac_wire, deadline_ms)) {
         free(buffer);
         return false;
     }
 
-    uint8_t mac_expected[32];
-    struct sha3_256_ctx mac;
-    sha3_256_init(&mac);
-    sha3_256_write(&mac, session->key, sizeof(session->key));
-    sha3_256_write(&mac, (const uint8_t *)&session->recv_counter,
-                   sizeof(session->recv_counter));
-    sha3_256_write(&mac, expected_digest, 32);
-    sha3_256_write(&mac, buffer, size);
-    sha3_256_finalize(&mac, mac_expected);
-    memory_cleanse(&mac, sizeof(mac));
-    uint8_t difference = 0;
-    for (size_t i = 0; i < sizeof(mac_wire); i++)
-        difference |= mac_wire[i] ^ mac_expected[i];
-    memory_cleanse(mac_wire, sizeof(mac_wire));
-    memory_cleanse(mac_expected, sizeof(mac_expected));
-    if (difference != 0) {
+    if (!fs_recv_chunk_mac_ok(session, expected_digest, buffer, size,
+                              mac_wire)) {
         free(buffer);
         LOG_FAIL("filesvc", "recv_chunk_fast MAC verification failed");
     }
 
-    uint8_t actual_digest[32];
-    sha3_256(buffer, size, actual_digest);
-    bool digest_matches = memcmp(actual_digest, expected_digest, 32) == 0;
-    memory_cleanse(actual_digest, sizeof(actual_digest));
-    if (!digest_matches) {
+    if (!fs_recv_chunk_digest_ok(buffer, size, expected_digest)) {
         free(buffer);
         LOG_FAIL("filesvc", "recv_chunk_fast content digest mismatch");
     }
-    int64_t completed_ms = platform_time_monotonic_ms();
-    if (completed_ms <= 0 || completed_ms >= deadline_ms) {
+    if (!fs_recv_chunk_in_time(deadline_ms)) {
         free(buffer);
         LOG_FAIL("filesvc", "recv_chunk_fast verification exceeded deadline");
     }

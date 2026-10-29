@@ -389,7 +389,7 @@ static int tor_try_install_persistent_identity(const char *datadir)
     if (!service) {
         tor_free_(address_out);
         LOG_ERR("tor", "persistent onion service missing right after "
-                       "registration: %s", address_out);
+                       "registration: %s", addr);
     }
 
     /* Become the dynhost service (see the layer-2 comment above). */

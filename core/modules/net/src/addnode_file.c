@@ -19,6 +19,39 @@ bool addnode_file_line_is_blank(const char *line)
     return *p == '\0' || *p == '\n' || *p == '\r' || *p == '#';
 }
 
+/* Copies the leading token of p into token (cap bytes). Returns its length,
+ * or (size_t)-1 when it does not fit. */
+static size_t addnode_file_take_token(const char *p, char *token, size_t cap)
+{
+    size_t n = 0;
+    while (p[n] && p[n] != '\n' && p[n] != '\r' && p[n] != '#' &&
+           p[n] != ' ' && p[n] != '\t') {
+        if (n >= cap - 1)
+            return (size_t)-1; /* oversized token — reject rather than truncate */
+        token[n] = p[n];
+        n++;
+    }
+    token[n] = '\0';
+    return n;
+}
+
+static void addnode_file_split_port(char *token, uint16_t *port_out)
+{
+    /* Only a single trailing ":PORT" is treated as a port suffix — a token
+     * with more than one colon (bare IPv6, unbracketed) is passed through
+     * whole as the host and left on the default port rather than guessing
+     * which colon is the port separator. */
+    char *colon = strrchr(token, ':');
+    if (colon && colon != token && strchr(token, ':') == colon) {
+        char *end = NULL;
+        long v = strtol(colon + 1, &end, 10);
+        if (end && *end == '\0' && v > 0 && v < 65536) {
+            *port_out = (uint16_t)v;
+            *colon = '\0';
+        }
+    }
+}
+
 bool addnode_file_parse_line(const char *line, char *host_out,
                               size_t host_cap, uint16_t *port_out)
 {
@@ -34,31 +67,13 @@ bool addnode_file_parse_line(const char *line, char *host_out,
         p++;
 
     char token[320];
-    size_t n = 0;
-    while (p[n] && p[n] != '\n' && p[n] != '\r' && p[n] != '#' &&
-           p[n] != ' ' && p[n] != '\t') {
-        if (n >= sizeof(token) - 1)
-            return false; /* oversized token — reject rather than truncate */
-        token[n] = p[n];
-        n++;
-    }
-    token[n] = '\0';
+    size_t n = addnode_file_take_token(p, token, sizeof(token));
+    if (n == (size_t)-1)
+        return false;
     if (n == 0)
         return false;
 
-    /* Only a single trailing ":PORT" is treated as a port suffix — a token
-     * with more than one colon (bare IPv6, unbracketed) is passed through
-     * whole as the host and left on the default port rather than guessing
-     * which colon is the port separator. */
-    char *colon = strrchr(token, ':');
-    if (colon && colon != token && strchr(token, ':') == colon) {
-        char *end = NULL;
-        long v = strtol(colon + 1, &end, 10);
-        if (end && *end == '\0' && v > 0 && v < 65536) {
-            *port_out = (uint16_t)v;
-            *colon = '\0';
-        }
-    }
+    addnode_file_split_port(token, port_out);
 
     if (token[0] == '\0' || strlen(token) >= host_cap)
         return false;

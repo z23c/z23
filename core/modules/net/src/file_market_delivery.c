@@ -441,6 +441,42 @@ static enum file_market_delivery_status delivery_auth_status(
     return FILE_MARKET_DELIVERY_PAYMENT_REJECTED;
 }
 
+/* Authorization, content load and integrity check shared by the clearnet and
+ * onion prepare paths. Leaves the outcome in out_reply->status. */
+static void delivery_authorize_and_load(
+    const struct file_market_delivery_handlers *handlers,
+    const struct file_market_delivery_request *request,
+    struct file_market_delivery_reply *out_reply,
+    struct file_market_delivery_chunk *out_chunk)
+{
+    out_reply->status = delivery_auth_status(handlers->authorize(
+        request->offer_id, request->buyer_pubkey, request->chunk_index,
+        handlers->ctx));
+    if (out_reply->status != FILE_MARKET_DELIVERY_READY)
+        return;
+    if (!handlers->load || !handlers->load(request->offer_id,
+                                           request->chunk_index, out_chunk,
+                                           handlers->ctx) ||
+        !out_chunk->data || out_chunk->size == 0 ||
+        out_chunk->size > FILE_MARKET_CHUNK_SIZE) {
+        free(out_chunk->data);
+        memset(out_chunk, 0, sizeof(*out_chunk));
+        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
+        return;
+    }
+
+    uint8_t actual_sha3[32];
+    sha3_256(out_chunk->data, out_chunk->size, actual_sha3);
+    if (memcmp(actual_sha3, out_chunk->sha3, 32) != 0) {
+        free(out_chunk->data);
+        memset(out_chunk, 0, sizeof(*out_chunk));
+        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
+        return;
+    }
+    out_reply->size = out_chunk->size;
+    memcpy(out_reply->sha3, actual_sha3, 32);
+}
+
 enum file_market_delivery_status file_market_delivery_prepare(
     const struct fs_session *session, const uint8_t *payload, uint32_t plen,
     struct file_market_delivery_reply *out_reply,
@@ -493,32 +529,7 @@ enum file_market_delivery_status file_market_delivery_prepare(
         return out_reply->status;
     }
 
-    out_reply->status = delivery_auth_status(handlers.authorize(
-        request.offer_id, request.buyer_pubkey, request.chunk_index,
-        handlers.ctx));
-    if (out_reply->status != FILE_MARKET_DELIVERY_READY)
-        return out_reply->status;
-    if (!handlers.load || !handlers.load(request.offer_id,
-                                         request.chunk_index, out_chunk,
-                                         handlers.ctx) ||
-        !out_chunk->data || out_chunk->size == 0 ||
-        out_chunk->size > FILE_MARKET_CHUNK_SIZE) {
-        free(out_chunk->data);
-        memset(out_chunk, 0, sizeof(*out_chunk));
-        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
-        return out_reply->status;
-    }
-
-    uint8_t actual_sha3[32];
-    sha3_256(out_chunk->data, out_chunk->size, actual_sha3);
-    if (memcmp(actual_sha3, out_chunk->sha3, 32) != 0) {
-        free(out_chunk->data);
-        memset(out_chunk, 0, sizeof(*out_chunk));
-        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
-        return out_reply->status;
-    }
-    out_reply->size = out_chunk->size;
-    memcpy(out_reply->sha3, actual_sha3, 32);
+    delivery_authorize_and_load(&handlers, &request, out_reply, out_chunk);
     return out_reply->status;
 }
 
@@ -573,32 +584,7 @@ enum file_market_delivery_status file_market_delivery_prepare_onion(
         return out_reply->status;
     }
 
-    out_reply->status = delivery_auth_status(handlers.authorize(
-        request.offer_id, request.buyer_pubkey, request.chunk_index,
-        handlers.ctx));
-    if (out_reply->status != FILE_MARKET_DELIVERY_READY)
-        return out_reply->status;
-    if (!handlers.load || !handlers.load(request.offer_id,
-                                         request.chunk_index, out_chunk,
-                                         handlers.ctx) ||
-        !out_chunk->data || out_chunk->size == 0 ||
-        out_chunk->size > FILE_MARKET_CHUNK_SIZE) {
-        free(out_chunk->data);
-        memset(out_chunk, 0, sizeof(*out_chunk));
-        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
-        return out_reply->status;
-    }
-
-    uint8_t actual_sha3[32];
-    sha3_256(out_chunk->data, out_chunk->size, actual_sha3);
-    if (memcmp(actual_sha3, out_chunk->sha3, 32) != 0) {
-        free(out_chunk->data);
-        memset(out_chunk, 0, sizeof(*out_chunk));
-        out_reply->status = FILE_MARKET_DELIVERY_CONTENT_UNAVAILABLE;
-        return out_reply->status;
-    }
-    out_reply->size = out_chunk->size;
-    memcpy(out_reply->sha3, actual_sha3, 32);
+    delivery_authorize_and_load(&handlers, &request, out_reply, out_chunk);
     return out_reply->status;
 }
 

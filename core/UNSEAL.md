@@ -336,3 +336,7 @@ later lane flips it HARD.
 - 2026-10-29T12:19:33Z — REASON: core hardening wave 2: behaviour-preserving complexity splits of 8 tier-A net files (addrman_codec, rom_seed, tor_integration, onion_ratelimit, file_market_offer, onion_directory, onion_identity, netbase), lead reseal
   old ROOT: f6e5e9b15d5cf0976fd5ca073ba7715b054c417e98e442bd4a36be583e7cb5ae
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T12:47:17Z — REASON: core hardening wave 3: behaviour-preserving complexity splits of 8 tier-A net files (rom_fetch, file_service_transport, file_market, file_market_delivery, addnode_file, anchor_peers, addrman_integrity, netaddr) plus tor_integration log use-after-free fix, lead reseal
+  old ROOT: 266bc904a81facc8b915b135cef4c877909130cf84ad232f710a42681de98a21
+  by: owner unseal ritual (make core-unseal)

@@ -150,6 +150,40 @@ bool file_proof_deserialize(struct file_proof *proof,
 
 /* ── Offer Cache ────────────────────────────────────────────────── */
 
+static bool offer_same_legacy_terms(const struct file_offer *existing,
+                                    const struct file_offer *candidate)
+{
+    return memcmp(existing->root_hash, candidate->root_hash,
+               sizeof(existing->root_hash)) == 0 &&
+        strcmp(existing->filename, candidate->filename) == 0 &&
+        existing->size_bytes == candidate->size_bytes &&
+        existing->num_chunks == candidate->num_chunks &&
+        existing->price_per_mb == candidate->price_per_mb &&
+        memcmp(existing->z_addr, candidate->z_addr,
+               sizeof(existing->z_addr)) == 0 &&
+        memcmp(existing->peer_ip, candidate->peer_ip,
+               sizeof(existing->peer_ip)) == 0 &&
+        existing->endpoint_type == candidate->endpoint_type &&
+        memcmp(existing->onion_pubkey, candidate->onion_pubkey,
+               sizeof(existing->onion_pubkey)) == 0;
+}
+
+static bool offer_same_legacy_seller_terms(const struct file_offer *existing,
+                                           const struct file_offer *candidate)
+{
+    return memcmp(existing->network_genesis, candidate->network_genesis,
+               sizeof(existing->network_genesis)) == 0 &&
+        memcmp(existing->seller_pubkey, candidate->seller_pubkey,
+               sizeof(existing->seller_pubkey)) == 0 &&
+        existing->nonce == candidate->nonce &&
+        existing->issued_unix == candidate->issued_unix &&
+        existing->expires_unix == candidate->expires_unix &&
+        memcmp(existing->seller_signature, candidate->seller_signature,
+               sizeof(existing->seller_signature)) == 0 &&
+        memcmp(existing->offer_id, candidate->offer_id,
+               sizeof(existing->offer_id)) == 0;
+}
+
 bool file_market_offer_can_replace(const struct file_offer *existing,
                                    const struct file_offer *candidate)
 {
@@ -165,30 +199,8 @@ bool file_market_offer_can_replace(const struct file_offer *existing,
              (candidate->issued_unix == existing->issued_unix &&
               candidate->nonce > existing->nonce));
     return existing->auth_version == 0 && candidate->auth_version == 0 &&
-        memcmp(existing->root_hash, candidate->root_hash,
-               sizeof(existing->root_hash)) == 0 &&
-        strcmp(existing->filename, candidate->filename) == 0 &&
-        existing->size_bytes == candidate->size_bytes &&
-        existing->num_chunks == candidate->num_chunks &&
-        existing->price_per_mb == candidate->price_per_mb &&
-        memcmp(existing->z_addr, candidate->z_addr,
-               sizeof(existing->z_addr)) == 0 &&
-        memcmp(existing->peer_ip, candidate->peer_ip,
-               sizeof(existing->peer_ip)) == 0 &&
-        existing->endpoint_type == candidate->endpoint_type &&
-        memcmp(existing->onion_pubkey, candidate->onion_pubkey,
-               sizeof(existing->onion_pubkey)) == 0 &&
-        memcmp(existing->network_genesis, candidate->network_genesis,
-               sizeof(existing->network_genesis)) == 0 &&
-        memcmp(existing->seller_pubkey, candidate->seller_pubkey,
-               sizeof(existing->seller_pubkey)) == 0 &&
-        existing->nonce == candidate->nonce &&
-        existing->issued_unix == candidate->issued_unix &&
-        existing->expires_unix == candidate->expires_unix &&
-        memcmp(existing->seller_signature, candidate->seller_signature,
-               sizeof(existing->seller_signature)) == 0 &&
-        memcmp(existing->offer_id, candidate->offer_id,
-               sizeof(existing->offer_id)) == 0;
+        offer_same_legacy_terms(existing, candidate) &&
+        offer_same_legacy_seller_terms(existing, candidate);
 }
 
 bool file_market_add_offer(const struct file_offer *offer)
@@ -297,6 +309,81 @@ static bool offer_peer_admit_locked(int64_t peer_id, int64_t now_unix)
     return true;
 }
 
+/* Caller holds g_market_mutex. Returns true when the offer id is already
+ * cached; *result then holds the outcome and the caller unlocks and returns. */
+static bool offer_ingest_dedup_locked(
+    const struct file_offer *offer, int64_t now_unix,
+    struct file_offer *out_offer, file_market_offer_persist_fn persist,
+    void *persist_ctx, enum file_market_offer_ingest *result)
+{
+    for (int i = 0; i < g_offer_count; i++) {
+        if (file_offer_auth_version_supported(g_offers[i].auth_version) &&
+            memcmp(g_offers[i].offer_id, offer->offer_id, 32) == 0) {
+            if (persist && !persist(offer, persist_ctx)) {
+                *result = FILE_MARKET_INGEST_PERSIST_FAILED;
+                return true;
+            }
+            g_offers[i].last_seen = now_unix;
+            if (out_offer)
+                *out_offer = g_offers[i];
+            *result = FILE_MARKET_INGEST_DEDUP;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Caller holds g_market_mutex. Returns true when a cached offer shares the
+ * content root; *result then holds the outcome and the caller unlocks and
+ * returns. */
+static bool offer_ingest_root_locked(
+    const struct file_offer *offer, int64_t peer_id, int64_t now_unix,
+    struct file_offer *out_offer, file_market_offer_persist_fn persist,
+    void *persist_ctx, enum file_market_offer_ingest *result)
+{
+    /* One seller owns the live contract for a content root. A fresh contract
+     * from that seller may replace its stale terms; another seller cannot
+     * enter cache, persistence, or relay state. */
+    for (int i = 0; i < g_offer_count; i++) {
+        if (memcmp(g_offers[i].root_hash, offer->root_hash, 32) == 0) {
+            if (!file_market_offer_can_replace(&g_offers[i], offer)) {
+                *result = FILE_MARKET_INGEST_CONFLICT;
+                return true;
+            }
+            if (!offer_peer_admit_locked(peer_id, now_unix)) {
+                *result = FILE_MARKET_INGEST_RATE_LIMITED;
+                return true;
+            }
+            if (persist && !persist(offer, persist_ctx)) {
+                *result = FILE_MARKET_INGEST_PERSIST_FAILED;
+                return true;
+            }
+            g_offers[i] = *offer;
+            if (out_offer)
+                *out_offer = *offer;
+            *result = FILE_MARKET_INGEST_NEW;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Caller holds g_market_mutex. Stores a new offer, evicting the oldest when
+ * the cache is full. */
+static void offer_ingest_store_new_locked(const struct file_offer *offer)
+{
+    if (g_offer_count >= FILE_MARKET_MAX_OFFERS) {
+        int oldest = 0;
+        for (int i = 1; i < g_offer_count; i++) {
+            if (g_offers[i].last_seen < g_offers[oldest].last_seen)
+                oldest = i;
+        }
+        g_offers[oldest] = *offer;
+    } else {
+        g_offers[g_offer_count++] = *offer;
+    }
+}
+
 enum file_market_offer_ingest file_market_ingest_offer_wire_persist(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_network_genesis[32],
@@ -324,43 +411,16 @@ enum file_market_offer_ingest file_market_ingest_offer_wire_persist(
     offer.ttl = FILE_MARKET_MAX_TTL;
 
     pthread_mutex_lock(&g_market_mutex);
-    for (int i = 0; i < g_offer_count; i++) {
-        if (file_offer_auth_version_supported(g_offers[i].auth_version) &&
-            memcmp(g_offers[i].offer_id, offer.offer_id, 32) == 0) {
-            if (persist && !persist(&offer, persist_ctx)) {
-                pthread_mutex_unlock(&g_market_mutex);
-                return FILE_MARKET_INGEST_PERSIST_FAILED;
-            }
-            g_offers[i].last_seen = now_unix;
-            if (out_offer)
-                *out_offer = g_offers[i];
-            pthread_mutex_unlock(&g_market_mutex);
-            return FILE_MARKET_INGEST_DEDUP;
-        }
+    enum file_market_offer_ingest result;
+    if (offer_ingest_dedup_locked(&offer, now_unix, out_offer, persist,
+                                  persist_ctx, &result)) {
+        pthread_mutex_unlock(&g_market_mutex);
+        return result;
     }
-    /* One seller owns the live contract for a content root. A fresh contract
-     * from that seller may replace its stale terms; another seller cannot
-     * enter cache, persistence, or relay state. */
-    for (int i = 0; i < g_offer_count; i++) {
-        if (memcmp(g_offers[i].root_hash, offer.root_hash, 32) == 0) {
-            if (!file_market_offer_can_replace(&g_offers[i], &offer)) {
-                pthread_mutex_unlock(&g_market_mutex);
-                return FILE_MARKET_INGEST_CONFLICT;
-            }
-            if (!offer_peer_admit_locked(peer_id, now_unix)) {
-                pthread_mutex_unlock(&g_market_mutex);
-                return FILE_MARKET_INGEST_RATE_LIMITED;
-            }
-            if (persist && !persist(&offer, persist_ctx)) {
-                pthread_mutex_unlock(&g_market_mutex);
-                return FILE_MARKET_INGEST_PERSIST_FAILED;
-            }
-            g_offers[i] = offer;
-            if (out_offer)
-                *out_offer = offer;
-            pthread_mutex_unlock(&g_market_mutex);
-            return FILE_MARKET_INGEST_NEW;
-        }
+    if (offer_ingest_root_locked(&offer, peer_id, now_unix, out_offer,
+                                 persist, persist_ctx, &result)) {
+        pthread_mutex_unlock(&g_market_mutex);
+        return result;
     }
     if (!offer_peer_admit_locked(peer_id, now_unix)) {
         pthread_mutex_unlock(&g_market_mutex);
@@ -370,16 +430,7 @@ enum file_market_offer_ingest file_market_ingest_offer_wire_persist(
         pthread_mutex_unlock(&g_market_mutex);
         return FILE_MARKET_INGEST_PERSIST_FAILED;
     }
-    if (g_offer_count >= FILE_MARKET_MAX_OFFERS) {
-        int oldest = 0;
-        for (int i = 1; i < g_offer_count; i++) {
-            if (g_offers[i].last_seen < g_offers[oldest].last_seen)
-                oldest = i;
-        }
-        g_offers[oldest] = offer;
-    } else {
-        g_offers[g_offer_count++] = offer;
-    }
+    offer_ingest_store_new_locked(&offer);
     if (out_offer)
         *out_offer = offer;
     pthread_mutex_unlock(&g_market_mutex);

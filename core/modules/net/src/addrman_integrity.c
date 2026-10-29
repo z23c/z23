@@ -82,6 +82,51 @@ static enum aii_verdict aii_read_sidecar(const char *datadir,
     return AII_BODY_UNREADABLE;
 }
 
+/* Compare the sidecar header against the body on disk: size first, then
+ * the streamed hash. Returns AII_OK when they agree. */
+static enum aii_verdict aii_check_body(const char *datadir,
+                                       const char *body_path,
+                                       const struct ssio_sidecar_header *hdr,
+                                       const struct stat *body_st,
+                                       char *err_out, size_t err_cap)
+{
+    if (hdr->body_size != (uint64_t)body_st->st_size) {
+        if (err_out) snprintf(err_out, err_cap,
+                "size drift: sidecar=%llu actual=%lld",
+                (unsigned long long)hdr->body_size,
+                (long long)body_st->st_size);
+        return AII_SIDECAR_STALE;
+    }
+
+    uint8_t actual_hash[32];
+    uint64_t hashed_size = 0;
+    if (!ssio_hash_body(datadir, &aii_spec, actual_hash, &hashed_size)) {
+        if (err_out) snprintf(err_out, err_cap,
+                "failed to hash %s: %s", body_path, strerror(errno));
+        return AII_BODY_UNREADABLE;
+    }
+    if (hashed_size != hdr->body_size) {
+        if (err_out) snprintf(err_out, err_cap,
+                "size drift mid-hash: sidecar=%llu hashed=%llu",
+                (unsigned long long)hdr->body_size,
+                (unsigned long long)hashed_size);
+        return AII_SIDECAR_STALE;
+    }
+    if (memcmp(actual_hash, hdr->body_sha3, 32) != 0) {
+        if (err_out) {
+            char exp[65], got[65];
+            HexStr(hdr->body_sha3, 32, false, exp, sizeof(exp));
+            HexStr(actual_hash, 32, false, got, sizeof(got));
+            snprintf(err_out, err_cap,
+                    "body sha3 mismatch expected=%s actual=%s",
+                    exp, got);
+        }
+        return AII_HASH_MISMATCH;
+    }
+
+    return AII_OK;
+}
+
 /* ── Verification entry point ───────────────────────────────── */
 
 enum aii_verdict aii_verify(const char *datadir,
@@ -118,41 +163,8 @@ enum aii_verdict aii_verify(const char *datadir,
         return rv;
     }
 
-    if (hdr.body_size != (uint64_t)body_st.st_size) {
-        if (err_out) snprintf(err_out, err_cap,
-                "size drift: sidecar=%llu actual=%lld",
-                (unsigned long long)hdr.body_size,
-                (long long)body_st.st_size);
-        return AII_SIDECAR_STALE;
-    }
-
-    uint8_t actual_hash[32];
-    uint64_t hashed_size = 0;
-    if (!ssio_hash_body(datadir, &aii_spec, actual_hash, &hashed_size)) {
-        if (err_out) snprintf(err_out, err_cap,
-                "failed to hash %s: %s", body_path, strerror(errno));
-        return AII_BODY_UNREADABLE;
-    }
-    if (hashed_size != hdr.body_size) {
-        if (err_out) snprintf(err_out, err_cap,
-                "size drift mid-hash: sidecar=%llu hashed=%llu",
-                (unsigned long long)hdr.body_size,
-                (unsigned long long)hashed_size);
-        return AII_SIDECAR_STALE;
-    }
-    if (memcmp(actual_hash, hdr.body_sha3, 32) != 0) {
-        if (err_out) {
-            char exp[65], got[65];
-            HexStr(hdr.body_sha3, 32, false, exp, sizeof(exp));
-            HexStr(actual_hash, 32, false, got, sizeof(got));
-            snprintf(err_out, err_cap,
-                    "body sha3 mismatch expected=%s actual=%s",
-                    exp, got);
-        }
-        return AII_HASH_MISMATCH;
-    }
-
-    return AII_OK;
+    return aii_check_body(datadir, body_path, &hdr, &body_st,
+                          err_out, err_cap);
 }
 
 /* ── Quarantine ─────────────────────────────────────────────── */

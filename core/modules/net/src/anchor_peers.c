@@ -200,13 +200,42 @@ struct zcl_result anchor_peers_save(const char *datadir,
     return ZCL_OK;
 }
 
+/* Zero *out when given; true only when both datadir and out are usable. */
+static bool anchor_load_args_ready(const char *datadir,
+                                   struct anchor_peer_set *out)
+{
+    if (out) { memset(out, 0, sizeof(*out)); out->count = 0; }
+    if (!datadir || !out)
+        return false;
+    return true;
+}
+
+/* Hash the on-disk body and compare it with the sidecar header:
+ * 0 = match, 1 = body unreadable, 2 = size or sha3 mismatch. */
+static int anchor_body_hash_verdict(const char *datadir,
+                                    const struct ssio_sidecar_header *hdr)
+{
+    uint8_t actual_hash[32];
+    uint64_t hashed_size = 0;
+    if (!ssio_hash_body(datadir, &anchors_spec, actual_hash, &hashed_size))
+        return 1;
+    if (hashed_size != hdr->body_size ||
+        memcmp(actual_hash, hdr->body_sha3, 32) != 0)
+        return 2;
+    return 0;
+}
+
+static bool anchor_body_size_in_range(uint64_t body_size)
+{
+    return !(body_size == 0 || body_size > ANCHOR_BODY_MAX);
+}
+
 /* Verify the body against its sidecar (mirrors aii_verify). Fills *deser_ok
  * only when the body is safe to deserialize. Returns an anchor_load_status. */
 enum anchor_load_status anchor_peers_load(const char *datadir,
                                           struct anchor_peer_set *out)
 {
-    if (out) { memset(out, 0, sizeof(*out)); out->count = 0; }
-    if (!datadir || !out)
+    if (!anchor_load_args_ready(datadir, out))
         return ANCHOR_LOAD_EMPTY;
 
     struct platform_positioned_file body;
@@ -245,16 +274,14 @@ enum anchor_load_status anchor_peers_load(const char *datadir,
         return ANCHOR_LOAD_QUARANTINED;
     }
 
-    uint8_t actual_hash[32];
-    uint64_t hashed_size = 0;
-    if (!ssio_hash_body(datadir, &anchors_spec, actual_hash, &hashed_size)) {
+    int hash_verdict = anchor_body_hash_verdict(datadir, &hdr);
+    if (hash_verdict == 1) {
         LOG_WARN("anchor_peers", "anchors body unreadable — quarantining");
         platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "body_unreadable");
         return ANCHOR_LOAD_QUARANTINED;
     }
-    if (hashed_size != hdr.body_size ||
-        memcmp(actual_hash, hdr.body_sha3, 32) != 0) {
+    if (hash_verdict == 2) {
         LOG_WARN("anchor_peers", "anchors body sha3 mismatch — quarantining");
         platform_positioned_file_close(&body);
         ssio_quarantine(datadir, &anchors_spec, "hash_mismatch");
@@ -262,7 +289,7 @@ enum anchor_load_status anchor_peers_load(const char *datadir,
     }
 
     /* Body integrity proven — read + deserialize it (bounded, ≤ 570 bytes). */
-    if (body_size == 0 || body_size > ANCHOR_BODY_MAX) {
+    if (!anchor_body_size_in_range(body_size)) {
         LOG_WARN("anchor_peers", "anchors body size %lld out of range — quarantining",
                  (long long)body_size);
         platform_positioned_file_close(&body);
