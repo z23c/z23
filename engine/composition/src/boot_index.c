@@ -86,12 +86,20 @@ static bool boot_index_shielded_replay_step(sqlite3 *db,
     return ok;
 }
 
+static bool boot_index_shielded_args_valid(sqlite3 *db, const struct block *blk,
+                                           int height, int target_height,
+                                           bool reset)
+{
+    if (!db || target_height < 0 || (reset && blk != NULL))
+        return false;
+    return reset || (height >= 0 && height <= target_height &&
+                     (blk || height == 0));
+}
+
 static bool boot_index_shielded_tx(sqlite3 *db, const struct block *blk,
                                    int height, int target_height, bool reset)
 {
-    if (!db || target_height < 0 || (reset && blk != NULL) ||
-        (!reset && (height < 0 || height > target_height ||
-                    (!blk && height != 0))))
+    if (!boot_index_shielded_args_valid(db, blk, height, target_height, reset))
         LOG_FAIL("reindex-chainstate",
                  "shielded tx invalid args reset=%d blk=%p h=%d target=%d",
                  reset ? 1 : 0, (const void *)blk, height, target_height);
@@ -492,6 +500,103 @@ static bool boot_index_flush_admitted_replay(struct coins_view_sqlite *cvs,
     return boot_index_flush_reindex_coins(cvs, cvtip);
 }
 
+static void boot_index_reindex_wipe_sqlite_coins(struct node_db *ndb)
+{
+    if (!ndb->open)
+        return;
+    if (boot_index_clear_coins_state(ndb))
+        printf("reindex-chainstate: wiped SQLite UTXO set\n");
+}
+
+static void boot_index_reindex_clear_sapling_state(struct node_db *ndb)
+{
+    if (!ndb->open)
+        return;
+    node_db_state_set(ndb, "sapling_tree", NULL, 0);
+    node_db_state_set(ndb, "sapling_tree_rescan_height", NULL, 0);
+}
+
+static void boot_index_reindex_enter_bulk_db(struct node_db *ndb)
+{
+    if (!ndb->open)
+        return;
+    if (!boot_index_enter_turbo_mode(ndb))
+        fprintf(stderr, "reindex-chainstate: failed to enter turbo mode\n");
+    if (!boot_index_set_sync_batch_size(ndb, 1000))
+        fprintf(stderr, "reindex-chainstate: failed to set sync batch size\n");
+}
+
+static void boot_index_reindex_leave_bulk_db(struct node_db *ndb)
+{
+    if (!ndb->open)
+        return;
+    if (!boot_index_flush_write(ndb))
+        fprintf(stderr, "reindex-chainstate: flush failed\n");
+    if (!boot_index_restore_normal_mode(ndb))
+        fprintf(stderr, "reindex-chainstate: failed to restore normal mode\n");
+    if (!boot_index_set_sync_batch_size(ndb, 1))
+        fprintf(stderr, "reindex-chainstate: failed to reset sync batch size\n");
+}
+
+/* Replay one block into the coins cache and shielded history, then flush the
+ * cache when due. Returns false when the replay must stop. */
+static bool boot_index_reindex_replay_height(struct main_state *ms,
+                                             struct coins_view_sqlite *cvs,
+                                             struct coins_view_cache *cvtip,
+                                             sqlite3 *shielded_db,
+                                             const struct chain_params *cparams,
+                                             const char *body_datadir,
+                                             int h, int tip_height)
+{
+    struct block_index *pindex = active_chain_at(
+        &ms->chain_active, h);
+    if (!pindex) {
+        printf("reindex-chainstate: missing block_index at height %d\n", h);
+        return false;
+    }
+
+    struct block blk;
+    if (!read_block_from_disk_index(&blk, pindex, body_datadir)) {
+        fprintf(stderr, "reindex-chainstate: failed to read block at "
+                "height %d — stopping to prevent UTXO corruption\n", h);
+        return false; /* Can't skip blocks during UTXO replay */
+    }
+
+    struct validation_state state;
+    validation_state_init(&state);
+    if (!connect_block(&blk, &state, pindex, cvtip, cparams, false)) {
+        fprintf(stderr, "reindex-chainstate: connect_block FATAL at "
+                "height %d: %s — stopping to prevent UTXO corruption\n",
+                h, state.reject_reason);
+        block_free(&blk);
+        return false; /* MUST stop — continuing would skip this block's UTXOs */
+    }
+
+    if (!boot_index_shielded_tx(
+            shielded_db, &blk, h, tip_height, false)) {
+        fprintf(stderr,
+                "reindex-chainstate: shielded history derivation FATAL at "
+                "height %d — stopping to prevent opposite-verdict state\n",
+                h);
+        block_free(&blk);
+        return false;
+    }
+
+    block_free(&blk);
+
+    size_t cache_bytes = coins_view_cache_memory_usage(cvtip);
+    bool need_flush = boot_reindex_cache_should_flush(h,
+        cvtip->cache_coins.size, cache_bytes);
+    if (need_flush) {
+        if (!boot_index_flush_reindex_coins(cvs, cvtip))
+            return false;
+        platform_allocator_release_free_pages();
+        if (h % 1000 == 0 || h == tip_height)
+            boot_status_set_progress("reindex_chainstate", h, tip_height);
+    }
+    return true;
+}
+
 bool reindex_chainstate(struct main_state *ms,
                           struct coins_view_sqlite *cvs,
                           struct coins_view_cache *cvtip,
@@ -526,10 +631,7 @@ bool reindex_chainstate(struct main_state *ms,
         return false;
     coins_view_cache_free(cvtip);
 
-    if (ndb->open) {
-        if (boot_index_clear_coins_state(ndb))
-            printf("reindex-chainstate: wiped SQLite UTXO set\n");
-    }
+    boot_index_reindex_wipe_sqlite_coins(ndb);
 
     coins_view_cache_init(cvtip, &cvs->view);
 
@@ -555,77 +657,23 @@ bool reindex_chainstate(struct main_state *ms,
     coins_view_cache_set_best_block(cvtip, &cparams->consensus.hashGenesisBlock);
 
     set_flush_policy(3600, 1000000, 500);
-    if (ndb->open) {
-        if (!boot_index_enter_turbo_mode(ndb))
-            fprintf(stderr, "reindex-chainstate: failed to enter turbo mode\n");
-        if (!boot_index_set_sync_batch_size(ndb, 1000))
-            fprintf(stderr, "reindex-chainstate: failed to set sync batch size\n");
-    }
+    boot_index_reindex_enter_bulk_db(ndb);
 
     extern _Atomic bool g_utxo_commitment_skip;
     atomic_store(&g_utxo_commitment_skip, true);
 
-    if (ndb->open) {
-        node_db_state_set(ndb, "sapling_tree", NULL, 0);
-        node_db_state_set(ndb, "sapling_tree_rescan_height", NULL, 0);
-    }
+    boot_index_reindex_clear_sapling_state(ndb);
 
     int64_t t_start = (int64_t)platform_time_wall_time_t();
     int errors = 0;
     boot_status_set_progress("reindex_chainstate", 0, tip_height);
 
     for (int h = 1; h <= tip_height; h++) {
-        struct block_index *pindex = active_chain_at(
-            &ms->chain_active, h);
-        if (!pindex) {
-            printf("reindex-chainstate: missing block_index at height %d\n", h);
+        if (!boot_index_reindex_replay_height(ms, cvs, cvtip, shielded_db,
+                                              cparams, body_datadir, h,
+                                              tip_height)) {
             errors++;
             break;
-        }
-
-        struct block blk;
-        if (!read_block_from_disk_index(&blk, pindex, body_datadir)) {
-            fprintf(stderr, "reindex-chainstate: failed to read block at "
-                    "height %d — stopping to prevent UTXO corruption\n", h);
-            errors++;
-            break; /* Can't skip blocks during UTXO replay */
-        }
-
-        struct validation_state state;
-        validation_state_init(&state);
-        if (!connect_block(&blk, &state, pindex, cvtip, cparams, false)) {
-            fprintf(stderr, "reindex-chainstate: connect_block FATAL at "
-                    "height %d: %s — stopping to prevent UTXO corruption\n",
-                    h, state.reject_reason);
-            block_free(&blk);
-            errors++;
-            break; /* MUST stop — continuing would skip this block's UTXOs */
-        }
-
-        if (!boot_index_shielded_tx(
-                shielded_db, &blk, h, tip_height, false)) {
-            fprintf(stderr,
-                    "reindex-chainstate: shielded history derivation FATAL at "
-                    "height %d — stopping to prevent opposite-verdict state\n",
-                    h);
-            block_free(&blk);
-            errors++;
-            break;
-        }
-
-        block_free(&blk);
-
-        size_t cache_bytes = coins_view_cache_memory_usage(cvtip);
-        bool need_flush = boot_reindex_cache_should_flush(h,
-            cvtip->cache_coins.size, cache_bytes);
-        if (need_flush) {
-            if (!boot_index_flush_reindex_coins(cvs, cvtip)) {
-                errors++;
-                break;
-            }
-            platform_allocator_release_free_pages();
-            if (h % 1000 == 0 || h == tip_height)
-                boot_status_set_progress("reindex_chainstate", h, tip_height);
         }
     }
     if (!boot_index_flush_reindex_coins(cvs, cvtip))
@@ -634,14 +682,7 @@ bool reindex_chainstate(struct main_state *ms,
     atomic_store(&g_utxo_commitment_skip, false);
     /* Restore normal mode — flush every 500 blocks */
     set_flush_policy(3600, 500000, 500);
-    if (ndb->open) {
-        if (!boot_index_flush_write(ndb))
-            fprintf(stderr, "reindex-chainstate: flush failed\n");
-        if (!boot_index_restore_normal_mode(ndb))
-            fprintf(stderr, "reindex-chainstate: failed to restore normal mode\n");
-        if (!boot_index_set_sync_batch_size(ndb, 1))
-            fprintf(stderr, "reindex-chainstate: failed to reset sync batch size\n");
-    }
+    boot_index_reindex_leave_bulk_db(ndb);
 
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
     printf("reindex-chainstate: complete in %lldm%llds (%d errors)\n",
@@ -684,6 +725,73 @@ bool reindex_chainstate(struct main_state *ms,
 /* Block-file scan (scan_block_files_mark_data + helpers) moved to
  * engine/composition/src/boot_block_file_scan.c. */
 
+/* Seed the genesis block's nChainTx / nChainWork. Returns updates made. */
+static int propagate_genesis_block(struct block_index *b)
+{
+    int propagated = 0;
+    if (b->nChainTx == 0) {
+        b->nChainTx = b->nTx > 0 ? b->nTx : 1;
+        propagated++;
+    }
+    if (arith_uint256_is_zero(&b->nChainWork)) {
+        b->nChainWork = GetBlockProof(b);
+        propagated++;
+    }
+    return propagated;
+}
+
+/* Parent has a chain tx count: derive this block's from it. */
+static int propagate_from_counted_parent(struct block_index *b)
+{
+    unsigned int ntx = b->nTx > 0 ? b->nTx : 1;
+    unsigned int expected = b->pprev->nChainTx + ntx;
+    if (b->nChainTx != expected) {
+        b->nChainTx = expected;
+        return 1;
+    }
+    return 0;
+}
+
+/* Parent has no chain tx count yet: seed it, then derive this block's. */
+static int propagate_from_uncounted_parent(struct block_index *b)
+{
+    unsigned int ntx = b->pprev->nTx > 0 ? b->pprev->nTx : 1;
+    b->pprev->nChainTx = b->pprev->nHeight > 0 ?
+        (unsigned)(b->pprev->nHeight) : ntx;
+    unsigned int btx = b->nTx > 0 ? b->nTx : 1;
+    b->nChainTx = b->pprev->nChainTx + btx;
+    if (arith_uint256_is_zero(&b->pprev->nChainWork)) {
+        b->pprev->nChainWork = GetBlockProof(b->pprev);
+        if (b->pprev->pprev &&
+            !arith_uint256_is_zero(&b->pprev->pprev->nChainWork))
+            arith_uint256_add(&b->pprev->nChainWork,
+                &b->pprev->pprev->nChainWork,
+                &b->pprev->nChainWork);
+    }
+    return 2;
+}
+
+/* One block's nChainTx / nChainWork update; returns the updates made. */
+static int propagate_one_block(struct block_index *b)
+{
+    int propagated = 0;
+    if (b->nHeight == 0)
+        propagated += propagate_genesis_block(b);
+    else if (b->pprev && b->pprev->nChainTx > 0)
+        propagated += propagate_from_counted_parent(b);
+    else if (b->pprev && b->pprev->nChainTx == 0)
+        propagated += propagate_from_uncounted_parent(b);
+    /* Propagate nChainWork alongside nChainTx */
+    if (b->pprev && !arith_uint256_is_zero(&b->pprev->nChainWork) &&
+        arith_uint256_is_zero(&b->nChainWork)) {
+        struct arith_uint256 proof = GetBlockProof(b);
+        arith_uint256_add(&b->nChainWork,
+                          &b->pprev->nChainWork, &proof);
+        propagated++;
+    }
+    return propagated;
+}
+
 /* ── Reusable nChainTx + nChainWork propagation ────────────────
  * Called after scan_block_files_mark_data or any operation that
  * sets BLOCK_HAVE_DATA on blocks. Propagates nChainTx (cumulative
@@ -712,47 +820,7 @@ int propagate_nchaintx(struct main_state *ms)
     for (int pass = 0; pass < 50; pass++) {
         int propagated = 0;
         for (size_t i = 0; i < n; i++) {
-            struct block_index *b = sorted[i];
-            if (b->nHeight == 0) {
-                if (b->nChainTx == 0) {
-                    b->nChainTx = b->nTx > 0 ? b->nTx : 1;
-                    propagated++;
-                }
-                if (arith_uint256_is_zero(&b->nChainWork)) {
-                    b->nChainWork = GetBlockProof(b);
-                    propagated++;
-                }
-            } else if (b->pprev && b->pprev->nChainTx > 0) {
-                unsigned int ntx = b->nTx > 0 ? b->nTx : 1;
-                unsigned int expected = b->pprev->nChainTx + ntx;
-                if (b->nChainTx != expected) {
-                    b->nChainTx = expected;
-                    propagated++;
-                }
-            } else if (b->pprev && b->pprev->nChainTx == 0) {
-                unsigned int ntx = b->pprev->nTx > 0 ? b->pprev->nTx : 1;
-                b->pprev->nChainTx = b->pprev->nHeight > 0 ?
-                    (unsigned)(b->pprev->nHeight) : ntx;
-                unsigned int btx = b->nTx > 0 ? b->nTx : 1;
-                b->nChainTx = b->pprev->nChainTx + btx;
-                if (arith_uint256_is_zero(&b->pprev->nChainWork)) {
-                    b->pprev->nChainWork = GetBlockProof(b->pprev);
-                    if (b->pprev->pprev &&
-                        !arith_uint256_is_zero(&b->pprev->pprev->nChainWork))
-                        arith_uint256_add(&b->pprev->nChainWork,
-                            &b->pprev->pprev->nChainWork,
-                            &b->pprev->nChainWork);
-                }
-                propagated += 2;
-            }
-            /* Propagate nChainWork alongside nChainTx */
-            if (b->pprev && !arith_uint256_is_zero(&b->pprev->nChainWork) &&
-                arith_uint256_is_zero(&b->nChainWork)) {
-                struct arith_uint256 proof = GetBlockProof(b);
-                arith_uint256_add(&b->nChainWork,
-                                  &b->pprev->nChainWork, &proof);
-                propagated++;
-            }
+            propagated += propagate_one_block(sorted[i]);
         }
         total_propagated += propagated;
         if (propagated == 0) break;
@@ -760,6 +828,223 @@ int propagate_nchaintx(struct main_state *ms)
 
     free(sorted);
     return total_propagated;
+}
+
+/* Resolve the coins best-block hash and highest UTXO height from the
+ * reducer-derived state. Returns false when no derivation is available. */
+static bool boot_index_derive_coins_inputs(struct uint256 *coins_hash,
+                                           int *utxo_max_h)
+{
+    int32_t d_h = -1;
+    uint8_t d_hash[32];
+    bool d_hf = false;
+    if (!reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_hf))
+        return false;
+    *utxo_max_h = d_h > 0 ? d_h : 0;
+    if (d_hf)
+        memcpy(coins_hash->data, d_hash, 32);
+    return true;
+}
+
+/* Legacy cache reads of the coins best-block and MAX(height) of utxos. */
+static void boot_index_legacy_coins_inputs(struct coins_view_sqlite *cvs,
+                                           struct node_db *ndb,
+                                           struct uint256 *coins_hash,
+                                           int *utxo_max_h)
+{
+    /* Legacy LDB-import safety check: needs the coins.db best-block, not
+     * the projection (no best-block). Read from the coins sqlite view
+     * directly while that legacy recovery fallback remains. */
+    if (cvs && cvs->db)
+        coins_view_sqlite_get_best_block(cvs, coins_hash);
+    if (ndb && ndb->open) {
+        sqlite3_stmt *hst = NULL;
+        if (sqlite3_prepare_v2(ndb->db,
+                "SELECT MAX(height) FROM utxos", -1,
+                &hst, NULL) == SQLITE_OK && hst) {
+            if (AR_STEP_ROW_READONLY(hst) == SQLITE_ROW)  // obs-ok:boot-utxo-max-scan
+                *utxo_max_h = sqlite3_column_int(hst, 0);
+            sqlite3_finalize(hst);
+        }
+    }
+}
+
+/* Highest indexed block at or below utxo_max_h, falling back to the highest
+ * such block that has data. */
+static struct block_index *boot_index_pick_height_anchor(struct main_state *ms,
+                                                         int utxo_max_h)
+{
+    struct block_index *best_anchor = NULL;
+    struct block_index *best_have = NULL;
+    size_t iter = 0;
+    struct block_index *bi;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
+        if (!bi) continue;
+        if (bi->nHeight > utxo_max_h) continue;
+        if (!best_anchor || bi->nHeight > best_anchor->nHeight)
+            best_anchor = bi;
+        if (!(bi->nStatus & BLOCK_HAVE_DATA)) continue;
+        if (!best_have || bi->nHeight > best_have->nHeight)
+            best_have = bi;
+    }
+    return best_anchor ? best_anchor : best_have;
+}
+
+static void boot_index_promote_stale_anchor(struct main_state *ms,
+                                            int utxo_max_h, int *chain_h,
+                                            struct block_index **coins_bi)
+{
+    /* The block index can carry stale height labels after recovery
+     * from flat-index damage.  When coins_best_block resolves to a
+     * hash and the durable UTXO table proves a much higher snapshot
+     * height, preserve that immutable high-water state.  The stale
+     * label can also be too high after a legacy import from a running
+     * node whose chainstate is behind its block tip; in both cases
+     * replay must start from the durable UTXO anchor height. */
+    struct block_index *promote_bi =
+        boot_index_pick_height_anchor(ms, utxo_max_h);
+    if (promote_bi && promote_bi->phashBlock) {
+        printf("[boot] stale coins_best_block h=%d but UTXOs reach "
+               "h=%d — promoting anchor to h=%d%s\n",
+               (*coins_bi)->nHeight, utxo_max_h, promote_bi->nHeight,
+               (promote_bi->nStatus & BLOCK_HAVE_DATA) ? " HAVE_DATA" : "");
+        /* Invariant A — the same hash-linked-to-a-trust-root guard the
+         * two sibling tip-promotion paths below enforce (the coins_bi
+         * path and the best_have_data path). Without it, a header-only
+         * or detached-island block resolved as the highest anchor would
+         * be installed as the live tip: coins_best stamps onto a block
+         * with no real pprev chain, the active_chain is left with
+         * thousands of holes, and Part L's post-restore integrity gate
+         * fail-fasts the boot. Refusing here falls through to the
+         * HAVE_DATA search below, which re-derives forward via gap-fill. */
+        if (!utxo_recovery_block_trust_rooted(promote_bi)) {
+            fprintf(stderr,
+                    "[boot] UTXO/chain mismatch: highest anchor h=%d "
+                    "is NOT hash-linked to a trust root (detached "
+                    "island); refusing tip promotion, keeping tip at "
+                    "h=%d\n", promote_bi->nHeight, *chain_h);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=restore_tip_refused candidate=%d "
+                "via=unrooted reason=utxo_height_anchor",
+                promote_bi->nHeight);
+        } else if (boot_promote_tip_via_csr(
+                promote_bi, "promote_utxo_height_anchor", true)) {
+            snapsync_set_anchor(promote_bi);
+            *chain_h = promote_bi->nHeight;
+            *coins_bi = promote_bi;
+        }
+    }
+}
+
+/* Promote a real (data-bearing) coins-best block that sits above the tip. */
+static void boot_index_promote_coins_best(struct block_index *coins_bi,
+                                          int chain_h)
+{
+    if (!utxo_recovery_block_trust_rooted(coins_bi)) {
+        fprintf(stderr,
+            "[boot] UTXO/chain mismatch: coins at h=%d, chain tip "
+            "at h=%d — but the coins-best block is NOT hash-linked "
+            "to a trust root (detached island); refusing tip "
+            "promotion, keeping tip at h=%d\n",
+            coins_bi->nHeight, chain_h, chain_h);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+            "action=restore_tip_refused candidate=%d "
+            "via=unrooted reason=utxo_chain_mismatch",
+            coins_bi->nHeight);
+    } else {
+        printf("[boot] UTXO/chain mismatch: coins at h=%d, "
+               "chain tip at h=%d — correcting\n",
+               coins_bi->nHeight, chain_h);
+        if (boot_promote_tip_preserving_header_via_csr(
+                coins_bi, "utxo_chain_mismatch", false)) {
+            printf("[boot] Chain tip corrected to h=%d\n",
+                   coins_bi->nHeight);
+        }
+    }
+}
+
+static struct block_index *boot_index_highest_have_data(struct main_state *ms)
+{
+    struct block_index *best_have_data = NULL;
+    size_t iter = 0;
+    struct block_index *bi;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
+        if (!bi) continue;
+        if (!(bi->nStatus & BLOCK_HAVE_DATA)) continue;
+        if (!best_have_data ||
+            bi->nHeight > best_have_data->nHeight)
+            best_have_data = bi;
+    }
+    return best_have_data;
+}
+
+static void boot_index_promote_best_have_data(struct block_index *best_have_data,
+                                              struct node_db *ndb)
+{
+    printf("[boot] coins_best_block not in index — "
+           "using highest HAVE_DATA block at h=%d\n",
+           best_have_data->nHeight);
+    /* Resync coins view + UTXO state to the new tip:
+     *   1. coins_best_block must match the tip hash, or
+     *      connect_block will FATAL on the next block
+     *      with "view/prevblock mismatch".
+     *   2. UTXO rows above the new tip height belong to
+     *      the fork we're abandoning. Delete them so
+     *      future blocks see a coherent set. */
+    if (boot_promote_tip_via_csr(
+            best_have_data, "best_have_data", true)) {
+        /* Chose best_have_data over the orphan-coins
+         * anchor, so clear the anchor too — otherwise
+         * activation stays in ANCHOR_ACTIVE waiting for
+         * tip to climb above the anchor height, but we
+         * intentionally chose a LOWER tip and want
+         * gap-fill to drive us forward. */
+        snapsync_set_anchor(NULL);
+        if (ndb && ndb->open) {
+            int pruned = coins_rewind_above_tip(
+                ndb->db, best_have_data->nHeight, -1);
+            if (pruned < 0)
+                fprintf(stderr,
+                    "[boot] WARN: failed to prune fork-side "
+                    "utxos above h=%d (continuing)\n",
+                    best_have_data->nHeight);
+            else
+                printf("[boot] pruned fork-side utxos above "
+                       "h=%d (rows=%d)\n",
+                       best_have_data->nHeight, pruned);
+        }
+        printf("[boot] cleared orphan-coins restore anchor — "
+               "gap-fill will resync above h=%d\n",
+               best_have_data->nHeight);
+    }
+}
+
+/* coins_best_block hash is missing or not a real block. */
+static void boot_index_recover_missing_coins_best(struct main_state *ms,
+                                                  struct node_db *ndb,
+                                                  int chain_h)
+{
+    /* coins_best_block hash not in block index. Find the highest
+     * block with BLOCK_HAVE_DATA as our best anchor point. The
+     * UTXO set should be valid somewhere near that height. */
+    struct block_index *best_have_data = boot_index_highest_have_data(ms);
+    if (best_have_data &&
+        !utxo_recovery_block_trust_rooted(best_have_data)) {
+        /* Same Invariant A refusal as above: the highest
+         * HAVE_DATA block can sit on a detached island. */
+        fprintf(stderr,
+            "[boot] coins_best_block not in index and the highest "
+            "HAVE_DATA block h=%d is NOT hash-linked to a trust "
+            "root; refusing tip promotion\n",
+            best_have_data->nHeight);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+            "action=restore_tip_refused candidate=%d "
+            "via=unrooted reason=best_have_data",
+            best_have_data->nHeight);
+    } else if (best_have_data &&
+               best_have_data->nHeight > chain_h + 100) {
+        boot_index_promote_best_have_data(best_have_data, ndb);
+    }
 }
 
 /* ── Coins/tip consistency safety check ────────────────────────────────
@@ -793,35 +1078,10 @@ void boot_index_verify_coins_tip_consistency(struct main_state *ms,
      * the derived hash (when the durable logs resolve one), utxo_max_h =
      * the derived height. The promotion heuristic then cannot fire above
      * the derivation. Legacy datadirs keep the cache reads unchanged. */
-    {
-        int32_t d_h = -1;
-        uint8_t d_hash[32];
-        bool d_hf = false;
-        if (reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_hf)) {
-            derived = true;
-            utxo_max_h = d_h > 0 ? d_h : 0;
-            if (d_hf)
-                memcpy(coins_hash.data, d_hash, 32);
-        }
-    }
+    derived = boot_index_derive_coins_inputs(&coins_hash, &utxo_max_h);
 
-    if (!derived) {
-        /* Legacy LDB-import safety check: needs the coins.db best-block, not
-         * the projection (no best-block). Read from the coins sqlite view
-         * directly while that legacy recovery fallback remains. */
-        if (cvs && cvs->db)
-            coins_view_sqlite_get_best_block(cvs, &coins_hash);
-        if (ndb && ndb->open) {
-            sqlite3_stmt *hst = NULL;
-            if (sqlite3_prepare_v2(ndb->db,
-                    "SELECT MAX(height) FROM utxos", -1,
-                    &hst, NULL) == SQLITE_OK && hst) {
-                if (AR_STEP_ROW_READONLY(hst) == SQLITE_ROW)  // obs-ok:boot-utxo-max-scan
-                    utxo_max_h = sqlite3_column_int(hst, 0);
-                sqlite3_finalize(hst);
-            }
-        }
-    }
+    if (!derived)
+        boot_index_legacy_coins_inputs(cvs, ndb, &coins_hash, &utxo_max_h);
 
     int chain_h = active_chain_height(&ms->chain_active);
     struct block_index *coins_bi = NULL;
@@ -830,60 +1090,8 @@ void boot_index_verify_coins_tip_consistency(struct main_state *ms,
         coins_bi = block_map_find(&ms->map_block_index, &coins_hash);
 
     if (coins_bi && utxo_max_h > 100000 &&
-        utxo_max_h > coins_bi->nHeight + 100) {
-        /* The block index can carry stale height labels after recovery
-         * from flat-index damage.  When coins_best_block resolves to a
-         * hash and the durable UTXO table proves a much higher snapshot
-         * height, preserve that immutable high-water state.  The stale
-         * label can also be too high after a legacy import from a running
-         * node whose chainstate is behind its block tip; in both cases
-         * replay must start from the durable UTXO anchor height. */
-        struct block_index *best_anchor = NULL;
-        struct block_index *best_have = NULL;
-        size_t iter = 0;
-        struct block_index *bi;
-        while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-            if (!bi) continue;
-            if (bi->nHeight > utxo_max_h) continue;
-            if (!best_anchor || bi->nHeight > best_anchor->nHeight)
-                best_anchor = bi;
-            if (!(bi->nStatus & BLOCK_HAVE_DATA)) continue;
-            if (!best_have || bi->nHeight > best_have->nHeight)
-                best_have = bi;
-        }
-        struct block_index *promote_bi = best_anchor ? best_anchor : best_have;
-        if (promote_bi && promote_bi->phashBlock) {
-            printf("[boot] stale coins_best_block h=%d but UTXOs reach "
-                   "h=%d — promoting anchor to h=%d%s\n",
-                   coins_bi->nHeight, utxo_max_h, promote_bi->nHeight,
-                   (promote_bi->nStatus & BLOCK_HAVE_DATA) ? " HAVE_DATA" : "");
-            /* Invariant A — the same hash-linked-to-a-trust-root guard the
-             * two sibling tip-promotion paths below enforce (the coins_bi
-             * path and the best_have_data path). Without it, a header-only
-             * or detached-island block resolved as the highest anchor would
-             * be installed as the live tip: coins_best stamps onto a block
-             * with no real pprev chain, the active_chain is left with
-             * thousands of holes, and Part L's post-restore integrity gate
-             * fail-fasts the boot. Refusing here falls through to the
-             * HAVE_DATA search below, which re-derives forward via gap-fill. */
-            if (!utxo_recovery_block_trust_rooted(promote_bi)) {
-                fprintf(stderr,
-                        "[boot] UTXO/chain mismatch: highest anchor h=%d "
-                        "is NOT hash-linked to a trust root (detached "
-                        "island); refusing tip promotion, keeping tip at "
-                        "h=%d\n", promote_bi->nHeight, chain_h);
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=restore_tip_refused candidate=%d "
-                    "via=unrooted reason=utxo_height_anchor",
-                    promote_bi->nHeight);
-            } else if (boot_promote_tip_via_csr(
-                    promote_bi, "promote_utxo_height_anchor", true)) {
-                snapsync_set_anchor(promote_bi);
-                chain_h = promote_bi->nHeight;
-                coins_bi = promote_bi;
-            }
-        }
-    }
+        utxo_max_h > coins_bi->nHeight + 100)
+        boot_index_promote_stale_anchor(ms, utxo_max_h, &chain_h, &coins_bi);
 
     /* Only promote coins_bi to tip if it's a real block (has data on
      * disk). A metadata-anchor placeholder (BLOCK_VALID_UNKNOWN, no
@@ -895,93 +1103,8 @@ void boot_index_verify_coins_tip_consistency(struct main_state *ms,
      * back from. The chain will re-derive forward via gap-fill. */
     bool coins_bi_real = coins_bi &&
                          (coins_bi->nStatus & BLOCK_HAVE_DATA);
-    if (coins_bi_real && coins_bi->nHeight > chain_h) {
-        if (!utxo_recovery_block_trust_rooted(coins_bi)) {
-            fprintf(stderr,
-                "[boot] UTXO/chain mismatch: coins at h=%d, chain tip "
-                "at h=%d — but the coins-best block is NOT hash-linked "
-                "to a trust root (detached island); refusing tip "
-                "promotion, keeping tip at h=%d\n",
-                coins_bi->nHeight, chain_h, chain_h);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                "action=restore_tip_refused candidate=%d "
-                "via=unrooted reason=utxo_chain_mismatch",
-                coins_bi->nHeight);
-        } else {
-            printf("[boot] UTXO/chain mismatch: coins at h=%d, "
-                   "chain tip at h=%d — correcting\n",
-                   coins_bi->nHeight, chain_h);
-            if (boot_promote_tip_preserving_header_via_csr(
-                    coins_bi, "utxo_chain_mismatch", false)) {
-                printf("[boot] Chain tip corrected to h=%d\n",
-                       coins_bi->nHeight);
-            }
-        }
-    } else if ((!coins_bi || !coins_bi_real) && !uint256_is_null(&coins_hash)) {
-        /* coins_best_block hash not in block index. Find the highest
-         * block with BLOCK_HAVE_DATA as our best anchor point. The
-         * UTXO set should be valid somewhere near that height. */
-        struct block_index *best_have_data = NULL;
-        size_t iter = 0;
-        struct block_index *bi;
-        while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-            if (!bi) continue;
-            if (!(bi->nStatus & BLOCK_HAVE_DATA)) continue;
-            if (!best_have_data ||
-                bi->nHeight > best_have_data->nHeight)
-                best_have_data = bi;
-        }
-        if (best_have_data &&
-            !utxo_recovery_block_trust_rooted(best_have_data)) {
-            /* Same Invariant A refusal as above: the highest
-             * HAVE_DATA block can sit on a detached island. */
-            fprintf(stderr,
-                "[boot] coins_best_block not in index and the highest "
-                "HAVE_DATA block h=%d is NOT hash-linked to a trust "
-                "root; refusing tip promotion\n",
-                best_have_data->nHeight);
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                "action=restore_tip_refused candidate=%d "
-                "via=unrooted reason=best_have_data",
-                best_have_data->nHeight);
-        } else if (best_have_data &&
-                   best_have_data->nHeight > chain_h + 100) {
-            printf("[boot] coins_best_block not in index — "
-                   "using highest HAVE_DATA block at h=%d\n",
-                   best_have_data->nHeight);
-            /* Resync coins view + UTXO state to the new tip:
-             *   1. coins_best_block must match the tip hash, or
-             *      connect_block will FATAL on the next block
-             *      with "view/prevblock mismatch".
-             *   2. UTXO rows above the new tip height belong to
-             *      the fork we're abandoning. Delete them so
-             *      future blocks see a coherent set. */
-            if (boot_promote_tip_via_csr(
-                    best_have_data, "best_have_data", true)) {
-                /* Chose best_have_data over the orphan-coins
-                 * anchor, so clear the anchor too — otherwise
-                 * activation stays in ANCHOR_ACTIVE waiting for
-                 * tip to climb above the anchor height, but we
-                 * intentionally chose a LOWER tip and want
-                 * gap-fill to drive us forward. */
-                snapsync_set_anchor(NULL);
-                if (ndb && ndb->open) {
-                    int pruned = coins_rewind_above_tip(
-                        ndb->db, best_have_data->nHeight, -1);
-                    if (pruned < 0)
-                        fprintf(stderr,
-                            "[boot] WARN: failed to prune fork-side "
-                            "utxos above h=%d (continuing)\n",
-                            best_have_data->nHeight);
-                    else
-                        printf("[boot] pruned fork-side utxos above "
-                               "h=%d (rows=%d)\n",
-                               best_have_data->nHeight, pruned);
-                }
-                printf("[boot] cleared orphan-coins restore anchor — "
-                       "gap-fill will resync above h=%d\n",
-                       best_have_data->nHeight);
-            }
-        }
-    }
+    if (coins_bi_real && coins_bi->nHeight > chain_h)
+        boot_index_promote_coins_best(coins_bi, chain_h);
+    else if ((!coins_bi || !coins_bi_real) && !uint256_is_null(&coins_hash))
+        boot_index_recover_missing_coins_best(ms, ndb, chain_h);
 }
