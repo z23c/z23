@@ -196,6 +196,170 @@ static int x25519_check_all_small_order(void)
     return failures;
 }
 
+/* Batch verification (zcl_ed25519_verify_batch, which drives the static
+ * ed_batch_core). Each case states the row that must fail (BATCH_NONE when
+ * every row must verify); the batch verdict must equal the AND of the
+ * single ed25519_verify verdicts, and each row's single verdict is pinned. */
+#define BATCH_ROWS 4
+#define BATCH_NONE SIZE_MAX
+
+struct batch_rows {
+    uint8_t sig[BATCH_ROWS][64];
+    uint8_t pk[BATCH_ROWS][32];
+    uint8_t msg[BATCH_ROWS][32];
+    size_t len[BATCH_ROWS];
+};
+
+struct batch_view {
+    const uint8_t *msgs[BATCH_ROWS];
+    size_t lens[BATCH_ROWS];
+    const uint8_t *sigs[BATCH_ROWS];
+    const uint8_t *pks[BATCH_ROWS];
+};
+
+/* Group order L, little-endian (non-canonical when written into S). */
+static const uint8_t k_batch_L_LE[32] = {
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+    0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+};
+
+/* Order-2 point (0, -1): y = p - 1, sign bit clear. As R it is torsion. */
+static const uint8_t k_batch_order2_R[32] = {
+    0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+};
+
+static void batch_rows_init(struct batch_rows *r)
+{
+    static const char *const k_msgs[BATCH_ROWS] = {
+        "batch row zero", "", "batch row two", "batch row three"
+    };
+    for (size_t k = 0; k < BATCH_ROWS; k++) {
+        uint8_t seed[32], sk[32];
+        for (size_t i = 0; i < 32; i++)
+            seed[i] = (uint8_t)(0x30u + 17u * (unsigned)k + (unsigned)i);
+        ed25519_keypair(r->pk[k], sk, seed);
+        r->len[k] = strlen(k_msgs[k]);
+        memcpy(r->msg[k], k_msgs[k], r->len[k]);
+        ed25519_sign(r->sig[k], r->msg[k], r->len[k], sk, r->pk[k]);
+    }
+}
+
+static void batch_view_of(struct batch_view *v, const struct batch_rows *r)
+{
+    for (size_t k = 0; k < BATCH_ROWS; k++) {
+        v->msgs[k] = r->msg[k];
+        v->lens[k] = r->len[k];
+        v->sigs[k] = r->sig[k];
+        v->pks[k] = r->pk[k];
+    }
+}
+
+/* One batch case over the first n rows of v. */
+static int batch_expect(const char *label, size_t n, size_t bad,
+                        const struct batch_view *v)
+{
+    bool serial = true;
+    bool rows_ok = true;
+    for (size_t i = 0; i < n; i++) {
+        bool one = ed25519_verify(v->sigs[i], v->msgs[i], v->lens[i], v->pks[i]);
+        if (one != (i != bad))
+            rows_ok = false;
+        serial = serial && one;
+    }
+    bool want = (bad >= n);
+    bool batch = ed25519_verify_batch(v->msgs, v->lens, v->sigs, v->pks, n);
+
+    printf("%s... ", label);
+    if (rows_ok && batch == want && serial == want) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (batch=%d serial=%d want=%d rows_ok=%d)\n",
+           (int)batch, (int)serial, (int)want, (int)rows_ok);
+    return 1;
+}
+
+/* The batch rows that are not the all-valid baseline. */
+static int ed25519_check_batch_shapes(const struct batch_rows *r)
+{
+    struct batch_view v;
+    struct batch_rows c;
+    int failures = 0;
+
+    batch_view_of(&v, r);
+    failures += batch_expect("Ed25519 batch n=0 (empty conjunction)", 0, BATCH_NONE, &v);
+    failures += batch_expect("Ed25519 batch n=4 all valid", BATCH_ROWS, BATCH_NONE, &v);
+
+    c = *r;
+    c.sig[2][32] ^= 1; /* S + 1: one corrupted signature among four */
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=4 one corrupted S", BATCH_ROWS, 2, &v);
+
+    c = *r;
+    memcpy(c.pk[3], r->pk[0], 32); /* row 3 verified under row 0's key */
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=4 wrong key in one row", BATCH_ROWS, 3, &v);
+
+    c = *r;
+    memcpy(c.sig[1] + 32, k_batch_L_LE, 32); /* S = L */
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=4 non-canonical S = L", BATCH_ROWS, 1, &v);
+    return failures;
+}
+
+/* The single-row cases: n=1 valid, corrupted, wrong key, identity key,
+ * torsion R, and the NULL-argument refusal. */
+static int ed25519_check_batch_single(const struct batch_rows *r)
+{
+    struct batch_view v;
+    struct batch_rows c;
+    int failures = 0;
+
+    batch_view_of(&v, r);
+    failures += batch_expect("Ed25519 batch n=1 valid row", 1, BATCH_NONE, &v);
+
+    c = *r;
+    c.sig[0][32] ^= 1;
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=1 corrupted S", 1, 0, &v);
+
+    c = *r;
+    memcpy(c.pk[0], r->pk[1], 32);
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=1 wrong key", 1, 0, &v);
+
+    c = *r;
+    memset(c.pk[0], 0, 32);
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=1 identity key", 1, 0, &v);
+
+    c = *r;
+    memcpy(c.sig[0], k_batch_order2_R, 32);
+    batch_view_of(&v, &c);
+    failures += batch_expect("Ed25519 batch n=1 torsion R", 1, 0, &v);
+
+    printf("Ed25519 batch NULL argument array refused... ");
+    if (!ed25519_verify_batch(NULL, NULL, NULL, NULL, 1)) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (accepted NULL arrays)\n");
+        failures++;
+    }
+    return failures;
+}
+
+static int ed25519_check_batch(void)
+{
+    struct batch_rows r;
+    batch_rows_init(&r);
+    return ed25519_check_batch_single(&r) + ed25519_check_batch_shapes(&r);
+}
+
 int test_crypto(void)
 {
     int failures = 0;
@@ -385,6 +549,8 @@ int test_crypto(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (accepted S == L)\n"); failures++; }
     }
+
+    failures += ed25519_check_batch();
 
     /* PBKDF2-HMAC-SHA256 RFC 6070 test vectors. */
     printf("PBKDF2-HMAC-SHA256 RFC 6070 c=1 dkLen=32... ");
