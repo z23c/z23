@@ -81,6 +81,11 @@ static int run_concurrent_reads(struct platform_positioned_file *file)
         threads[i] = CreateThread(NULL, 0, read_worker, &tasks[i], 0, NULL);
     DWORD wait = WaitForMultipleObjects(4, threads, TRUE, 30000);
     int failed = wait != WAIT_OBJECT_0;
+    /* A timeout or failed wait can leave reader threads still running;
+     * join every live one so none outlives this function's task storage. */
+    if (wait != WAIT_OBJECT_0)
+        for (unsigned i = 0; i < 4; ++i)
+            if (threads[i]) WaitForSingleObject(threads[i], INFINITE);
     for (unsigned i = 0; i < 4; ++i) {
         if (threads[i]) CloseHandle(threads[i]);
         failed |= tasks[i].failed;
