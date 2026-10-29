@@ -36,6 +36,11 @@
  *      A parity run over a hollow comparator is worse than no test.
  *   5. AUTO is restored before returning, so no later group inherits a forced
  *      tier.
+ *   6. finalize_states (static, reached only through the batch4/batch8 entry
+ *      points): every lane equals scalar BLAKE2b across both Equihash
+ *      personalizations, the callers' output lengths, and base prefix lengths
+ *      that straddle the 128-byte buffer, plus one literal digest. Skipped
+ *      where AVX2 is not installed.
  *
  * On a host lacking AVX2/AVX-512 the forcing hook returns the tier actually
  * installed; that leg is REPORTED as skipped, never silently counted as
@@ -277,6 +282,142 @@ static int check_comparator_teeth(void)
     return failures;
 }
 
+/* ── Leg 6: finalize_states lanes through the public batch entries ─────
+ * finalize_states() is reached only via equihash_generate_hash_batch4/8, and
+ * only when the base buffer has room for the 4-byte index (buflen + 4 <= 128).
+ * Every lane must equal the scalar BLAKE2b of the same message: the base
+ * prefix followed by the little-endian index. Prefix 0/1/123/124/129 reach
+ * finalize_states (129 leaves a one-byte buffer after one compressed block);
+ * prefix 127/128 take the public scalar fallback. */
+
+#define LEG6_LANES      8
+#define LEG6_PREFIX_MAX 129
+#define LEG6_LIT_HEX    100
+
+struct eh_param { uint32_t n, k; size_t outlen; };
+
+static const struct eh_param leg6_params[] = {
+    { 200u, 9u, 50u },   /* (512/200)*200/8 = 50: the Equihash verifier's hash_output */
+    { 144u, 5u, 54u },   /* (512/144)*144/8 = 54 */
+};
+
+static const size_t leg6_prefix_lens[] = { 0, 1, 123, 124, 127, 128, 129 };
+
+static const uint32_t leg6_indices[LEG6_LANES] = {
+    0u, 1u, 0x7fffffffu, 0x80000000u, 0xdeadbeefu, 2u, 3u, 0xffffffffu
+};
+
+/* Base state: ZcashPoW(n,k) personalization, then prefix_len bytes absorbed
+ * the way eh_base_state() absorbs its header. Returns 0 on success. */
+static int leg6_base(struct blake2b_ctx *base, const struct eh_param *p, size_t prefix_len)
+{
+    uint8_t personal[BLAKE2B_PERSONALBYTES] = {0};
+    uint8_t prefix[LEG6_PREFIX_MAX] = {0};
+
+    memcpy(personal, "ZcashPoW", 8);
+    memcpy(personal + 8, &p->n, 4);
+    memcpy(personal + 12, &p->k, 4);
+    if (blake2b_init_salt_personal(base, p->outlen, NULL, 0, NULL, personal) != 0)
+        return 1;
+    for (size_t i = 0; i < prefix_len; i++)
+        prefix[i] = (uint8_t)(i * 13u + 5u);
+    blake2b_update(base, prefix, prefix_len);
+    return 0;
+}
+
+/* Every lane of the 8-way and the two 4-way entry points against the
+ * sequential scalar reference from the same base. Returns divergent lanes. */
+static int leg6_check_lanes(const struct blake2b_ctx *base, size_t outlen)
+{
+    unsigned char got8[LEG6_LANES][DIGEST_CAP] = {{0}};
+    unsigned char got4[LEG6_LANES][DIGEST_CAP] = {{0}};
+    unsigned char want[DIGEST_CAP] = {0};
+    unsigned char *hp[LEG6_LANES];
+    uint32_t gi[LEG6_LANES];
+    int bad = 0;
+
+    for (int j = 0; j < LEG6_LANES; j++) {
+        gi[j] = leg6_indices[j];
+        hp[j] = got8[j];
+    }
+    equihash_generate_hash_batch8(base, gi, hp, outlen);
+    for (int b = 0; b < LEG6_LANES / 4; b++)
+        equihash_generate_hash_batch4(base, &leg6_indices[b * 4],
+                                      got4[b * 4], got4[b * 4 + 1],
+                                      got4[b * 4 + 2], got4[b * 4 + 3], outlen);
+    for (int j = 0; j < LEG6_LANES; j++) {
+        ref_hash(base, leg6_indices[j], want, outlen);
+        if (memcmp(got8[j], want, outlen) != 0) {
+            report_divergence("batch8 lane vs scalar", j, got8[j], want, outlen);
+            bad++;
+        }
+        if (memcmp(got4[j], want, outlen) != 0) {
+            report_divergence("batch4 lane vs scalar", j, got4[j], want, outlen);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+static int leg6_row(const struct eh_param *p, size_t prefix_len)
+{
+    struct blake2b_ctx base;
+    if (leg6_base(&base, p, prefix_len) != 0) {
+        printf("  n=%u k=%u prefix=%zu : base init failed\n", p->n, p->k, prefix_len);
+        return 1;
+    }
+    int bad = leg6_check_lanes(&base, p->outlen);
+    if (bad)
+        printf("  n=%u k=%u outlen=%zu prefix=%zu : %d lane(s) DIVERGED\n",
+               p->n, p->k, p->outlen, prefix_len, bad);
+    return bad;
+}
+
+/* One literal digest, so the batch lanes are not only compared against the
+ * same scalar code they are checked with. Unpersonalised BLAKE2b, outlen 50,
+ * message = LE32(1) = 01 00 00 00; the expected value is `b2sum -l 400` of
+ * those four bytes. */
+static int leg6_literal(void)
+{
+    static const char want_hex[LEG6_LIT_HEX + 1] =
+        "26fc377c00a22ad1a67382066fbc1b4e40d6863125a35b41a805f6c373c59a9e5"
+        "a01ab6e5e1360732d3082c2cb02e45906f7";
+    struct blake2b_ctx base;
+    unsigned char got[4][DIGEST_CAP] = {{0}};
+    unsigned char *hp[4] = {got[0], got[1], got[2], got[3]};
+    const uint32_t gi[4] = {1u, 1u, 1u, 1u};
+    char hex[LEG6_LIT_HEX + 1] = {0};
+
+    if (blake2b_init(&base, 50) != 0)
+        return 1;
+    equihash_generate_hash_batch4(&base, gi, hp[0], hp[1], hp[2], hp[3], 50);
+    for (size_t i = 0; i < 50; i++)
+        snprintf(hex + 2 * i, 3, "%02x", got[0][i]);
+    if (strcmp(hex, want_hex) == 0)
+        return 0;
+    printf("\n  MISMATCH literal LE32(1) digest : got %s\n", hex);
+    return 1;
+}
+
+/* Leg 6 driver. Forces the AVX2 tier and skips where it is not installed,
+ * using the same runtime check the module dispatches on. */
+static int check_finalize_states_lanes(void)
+{
+    if (equihash_blake2b_batch_select_impl(BLAKE2B_BATCH_IMPL_AVX2) != BLAKE2B_BATCH_IMPL_AVX2) {
+        printf("  finalize_states (AVX2 forced) : not available on this host (skipped)\n");
+        return 0;
+    }
+    int failures = 0;
+    for (size_t p = 0; p < sizeof(leg6_params) / sizeof(leg6_params[0]); p++)
+        for (size_t l = 0; l < sizeof(leg6_prefix_lens) / sizeof(leg6_prefix_lens[0]); l++)
+            failures += leg6_row(&leg6_params[p], leg6_prefix_lens[l]);
+    failures += leg6_literal();
+    printf("  finalize_states (AVX2 forced) : %s\n",
+           failures ? "DIVERGED from scalar BLAKE2b"
+                    : "every lane == scalar BLAKE2b");
+    return failures;
+}
+
 int test_blake2b_batch_parity(void);
 int test_blake2b_batch_parity(void)
 {
@@ -321,6 +462,9 @@ int test_blake2b_batch_parity(void)
     failures += check_hash_not_hollow(&base);
     failures += check_comparator_teeth();
     printf("ok\n");
+
+    /* ── Leg 6: finalize_states lanes through the public entries ──────── */
+    failures += check_finalize_states_lanes();
 
     /* ── Leg 5: never leave a tier forced for the rest of the run ─────── */
     equihash_blake2b_batch_select_impl(BLAKE2B_BATCH_IMPL_AUTO);
