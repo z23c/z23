@@ -49,7 +49,8 @@ static struct p2p_node make_stall_node(int starting_height, bool inbound,
     return n;
 }
 
-int test_header_sync_stall(void)
+/* Case 1: new headers update the usefulness tracking fields. */
+static int check_new_headers_credit_usefulness(void)
 {
     int failures = 0;
 
@@ -70,6 +71,14 @@ int test_header_sync_stall(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Case 2: a zero-new-header delivery credits nothing. */
+static int check_zero_new_headers_not_credited(void)
+{
+    int failures = 0;
+
     /* ── 2. Tracking fields NOT updated on zero new headers ─────── */
     printf("header_sync_stall: tracking fields unchanged on reject... ");
     {
@@ -82,6 +91,14 @@ int test_header_sync_stall(void)
         ok = ok && (n.getheaders_stale_count == 1); /* empty = stale */
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Case 3 (P1): known-header replay earns no usefulness credit. */
+static int check_known_header_replay_earns_no_credit(void)
+{
+    int failures = 0;
 
     /* ── 3. P1: known-header replay earns no usefulness credit ────
      * A replay is accepted but newly_added == 0, so the call site passes
@@ -105,6 +122,14 @@ int test_header_sync_stall(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Case 4: the stale-peer disconnect fires after 120s in IBD. */
+static int check_stale_peer_disconnect_after_120s(void)
+{
+    int failures = 0;
+
     /* ── 4. Stale peer disconnect fires after 120s in IBD ─────────
      * best_header_height far below the peer's claimed tip: the parity
      * gate (P2) stays out of the way. */
@@ -120,6 +145,14 @@ int test_header_sync_stall(void)
         bool ok = !at_119 && at_120;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Cases 5-6: active and non-IBD peers are not disconnected. */
+static int check_active_and_non_ibd_peers_survive(void)
+{
+    int failures = 0;
 
     /* ── 5. Peer with recent useful headers not disconnected ─────── */
     printf("header_sync_stall: active peer not disconnected... ");
@@ -141,6 +174,14 @@ int test_header_sync_stall(void)
             &n, 900, 900, 0, 9999);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Cases 7-8 (P2): parity skips the rule; far-below still cuts. */
+static int check_parity_skip_and_far_below_disconnect(void)
+{
+    int failures = 0;
 
     /* ── 7. P2: frontier parity skips the stale-header rule ───────
      * Our BLOCK height is far behind (IBD true) while our HEADER frontier
@@ -172,6 +213,14 @@ int test_header_sync_stall(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* A header-stale peer serving recent bodies is not churned. */
+static int check_body_stall_boundary_rules(void)
+{
+    int failures = 0;
+
     /* A peer stale for header purposes but serving known bodies is not
      * churned by header accounting; once its body timestamp reaches the
      * body-stall boundary, the body rules own the failover decision. */
@@ -187,6 +236,14 @@ int test_header_sync_stall(void)
         bool ok = !recent && boundary && !future_clock;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Case 9 (P3): loopback exemption at the call-site seam. */
+static int check_loopback_exemption_seam(void)
+{
+    int failures = 0;
 
     /* ── 9. P3: loopback exemption seam ───────────────────────────────
      * Same conditions as case 4. (a) the syncsvc rule still says
@@ -211,6 +268,14 @@ int test_header_sync_stall(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Case 10 (P3): whitelist exempts; a plain remote is still cut. */
+static int check_whitelist_exemption_seam(void)
+{
+    int failures = 0;
+
     /* ── 10. P3: whitelist exemption seam ─────────────────────────────
      * A public address is NOT local, so only the whitelist bit exempts
      * it; with the bit clear the rule's verdict passes through. */
@@ -234,6 +299,14 @@ int test_header_sync_stall(void)
                   plain_disconnects;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* Cases 11-13: the stall-detection gate on state and advance time. */
+static int check_header_stall_detection_states(void)
+{
+    int failures = 0;
 
     /* ── 11. Header sync stall detection fires ───────────────────── */
     printf("header_sync_stall: stall detected after 120s no advance... ");
@@ -264,6 +337,14 @@ int test_header_sync_stall(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    return failures;
+}
+
+/* Cases 14-16: inbound fallback gating; the outbound path works. */
+static int check_inbound_fallback_rules(void)
+{
+    int failures = 0;
+
     /* ── 14. Inbound fallback: normally skipped ──────────────────── */
     printf("header_sync_stall: inbound peer skipped normally... ");
     {
@@ -291,6 +372,25 @@ int test_header_sync_stall(void)
             &n, 100, 15, false);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_header_sync_stall(void)
+{
+    int failures = 0;
+
+    failures += check_new_headers_credit_usefulness();
+    failures += check_zero_new_headers_not_credited();
+    failures += check_known_header_replay_earns_no_credit();
+    failures += check_stale_peer_disconnect_after_120s();
+    failures += check_active_and_non_ibd_peers_survive();
+    failures += check_parity_skip_and_far_below_disconnect();
+    failures += check_body_stall_boundary_rules();
+    failures += check_loopback_exemption_seam();
+    failures += check_whitelist_exemption_seam();
+    failures += check_header_stall_detection_states();
+    failures += check_inbound_fallback_rules();
 
     return failures;
 }
