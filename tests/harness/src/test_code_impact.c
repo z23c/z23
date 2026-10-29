@@ -814,6 +814,13 @@ static int test_code_guide_paths(void)
                       "tools/AGENTS.md");
         zcl_command_reply_free(&reply);
 
+        char rootslash[520];
+        n = snprintf(rootslash, sizeof(rootslash), "%s/", cwd);
+        ASSERT(n > 0 && (size_t)n < sizeof(rootslash));
+        cg_guide_paths(rootslash, abs, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        zcl_command_reply_free(&reply);
+
         cg_guide_paths(cwd, "/etc/passwd", &reply);
         ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_INVALID);
         ASSERT_STR_EQ(reply.error.message, "paths must be under the source root");

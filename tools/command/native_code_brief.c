@@ -135,6 +135,8 @@ static const char *cb_root_relative(const struct cb_brief *b, const char **s,
                                     size_t *len)
 {
     size_t rootlen = b->root ? strlen(b->root) : 0;
+    while (rootlen > 0 && b->root[rootlen - 1] == '/')
+        rootlen--;
     if ((*s)[0] != '/')
         return NULL;
     if (rootlen == 0 || *len <= rootlen ||
