@@ -1358,6 +1358,8 @@ Z23_FLAG("ZCL_LAND_PROOF_IDLE_SEC", "env_runtime", "900", "-",
           "age; tests lower it to exercise the boundary; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_REMOTE_XPORT", "env_test", "-", "-",
           "test build only: one program put in front of ssh and scp by dev.land.send so the tests touch no network; first use tools/command/native_dev_land_remote.c:auto")
+Z23_FLAG("ZCL_LAND_REVERIFY_CX", "env_test", "-", "-",
+          "test build only: the program dev.land.reverify_offer runs in place of this binary for its `dev cx check` child; first use tools/command/native_dev_land_offer.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_DIR_SYNC_FAIL", "env_test", "-", "-",
           "inject failed parent-directory sync after the landing queue rename; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_FENCE_POLICY", "env_test", "-", "-",

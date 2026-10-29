@@ -17,6 +17,7 @@
 #include "util/spawn.h"
 #include "zsha256/zsha256.h"
 
+#include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1057,11 +1058,275 @@ _test_next:;
     return failures;
 }
 
+/* dev.land.reverify_offer: a fixture repo whose commit splits one function
+ * (tools/x.c) and deletes its baseline row, and a fake `dev cx check`
+ * program (ZCL_LAND_REVERIFY_CX) that logs what it saw and answers pass or,
+ * while cx.fail exists, fail. */
+#define DLT_RV_BASELINE "tools/lint/cyclomatic_complexity_baseline.txt"
+#define DLT_RV_CX                                                            \
+    "#!/bin/sh\n"                                                            \
+    "d=$(dirname \"$0\")\n"                                                  \
+    "wt=${4#--worktree=}\n"                                                  \
+    "ch=$(git -C \"$wt\" diff --cached --name-only | tr '\\n' ',')\n"        \
+    "if [ -x \"$wt/build/bin/z23-lint\" ]; then l=yes; else l=no; fi\n"      \
+    "echo \"$1 $2 $3 $5 $6 lint=$l changed=$ch cwd=$(pwd)\" > \"$d/cx.log\"\n" \
+    "if [ -f \"$d/cx.fail\" ]; then\n"                                       \
+    "  echo '{\"ok\":false,\"error\":{\"code\":\"CX_STILL_OVER\","            \
+    "\"evidence\":\"big is still over 15\"}}'; exit 1\n"                     \
+    "fi\n"                                                                   \
+    "echo '{\"ok\":true,\"data\":{\"verdict\":\"pass\"}}'\n"
+
+static void dlt_rv(struct dlt_call *c, const struct dlt_rig *r,
+                   const char *bundle, const char *offer, const char *receipt)
+{
+    dlt_begin(c, "dev.land.reverify_offer");
+    (void)json_push_kv_str(&c->input, "bundle", bundle);
+    (void)json_push_kv_str(&c->input, "offer", offer);
+    (void)json_push_kv_str(&c->input, "repo", r->queue);
+    if (receipt)
+        (void)json_push_kv_str(&c->input, "receipt_out", receipt);
+    dlt_cd(r->queue);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+/* No scratch worktree, no refs/z23-reverify ref and an empty temp dir. */
+static bool dlt_rv_clean(const struct dlt_rig *r, const char *tmp)
+{
+    char out[2048];
+    struct dirent *e;
+    DIR *d;
+    int left = 0;
+    if (DLT_GIT(out, sizeof(out), r->queue, "worktree", "list") != 0 ||
+        (strchr(out, '\n') && strchr(out, '\n')[1]))
+        return false;
+    if (DLT_GIT(out, sizeof(out), r->queue, "for-each-ref",
+                "refs/z23-reverify") != 0 ||
+        out[0])
+        return false;
+    d = opendir(tmp);
+    if (!d)
+        return false;
+    while ((e = readdir(d)) != NULL)
+        left += strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0;
+    (void)closedir(d);
+    return left == 0;
+}
+
+/* Commits `body` as `file` on top of the fixture base (a branch of its own),
+ * after writing the baseline text, and sends it as bundle+offer. */
+static bool dlt_rv_offer(const struct dlt_rig *r, const char *branch,
+                         const char *base, const char *const files[2],
+                         const char *baseline, const char *bundle)
+{
+    struct dlt_call c;
+    char p[1400], sha[64];
+    bool ok;
+    (void)snprintf(p, sizeof(p), "%s/" DLT_RV_BASELINE, r->sender);
+    ok = DLT_GIT(NULL, 0, r->sender, "checkout", "--quiet", "-b", branch,
+                 base) == 0 &&
+         dlt_write(p, baseline, 0644);
+    (void)snprintf(p, sizeof(p), "%s/%s", r->sender, files[1]);
+    ok = ok && (!files[1][0] || dlt_write(p, "int z_changed(void){return 9;}\n",
+                                          0644));
+    ok = ok && dlt_commit(r->sender, files[0],
+                          "int big(void){return 1;}\nint big_a(void){return "
+                          "3;}\nint other(void){return 2;}\n") &&
+         DLT_GIT(sha, sizeof(sha), r->sender, "rev-parse", "HEAD") == 0;
+    sha[strcspn(sha, "\n")] = '\0';
+    if (!ok)
+        return false;
+    dlt_send_x(&c, r, sha, bundle, false);
+    ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED;
+    dlt_end(&c);
+    return ok;
+}
+
+static bool dlt_rv_fixture(const struct dlt_rig *r, const char *base_x,
+                           const char *baseline)
+{
+    char p[1400];
+    const char *queue_files[][2] = {{"tools/y.c", "int zed(void){return 7;}\n"},
+                                    {DLT_RV_BASELINE, baseline}};
+    (void)snprintf(p, sizeof(p), "%s/tools/lint", r->queue);
+    (void)mkdir(p, 0755);
+    for (size_t i = 0; i < 2; i++) {
+        (void)snprintf(p, sizeof(p), "%s/%s", r->queue, queue_files[i][0]);
+        if (!dlt_write(p, queue_files[i][1], 0644))
+            return false;
+    }
+    if (!dlt_commit(r->queue, "tools/x.c", base_x) ||
+        DLT_GIT(NULL, 0, r->queue, "push", "--quiet", "origin", "main") != 0 ||
+        DLT_GIT(NULL, 0, r->sender, "pull", "--quiet", "origin", "main") != 0)
+        return false;
+    /* built after the commit, so the lint copy is not part of the base */
+    (void)snprintf(p, sizeof(p), "%s/build", r->queue);
+    (void)mkdir(p, 0755);
+    (void)snprintf(p, sizeof(p), "%s/build/bin", r->queue);
+    (void)mkdir(p, 0755);
+    (void)snprintf(p, sizeof(p), "%s/build/bin/z23-lint", r->queue);
+    return dlt_write(p, "#!/bin/sh\nexit 0\n", 0755);
+}
+
+static int dlt_reverify_cases(void)
+{
+    static const char base_rows[] =
+        "# baseline\ntools/x.c:big:20\ntools/x.c:other:18\ntools/y.c:zed:17\n";
+    static const char split_rows[] =
+        "# baseline\ntools/x.c:other:16\ntools/y.c:zed:17\n";
+    int failures = 0;
+    struct dlt_rig r;
+    struct dlt_call c;
+    char b1[900], o1[900], b2[900], o2[900], b3[900], o3[900], bad[900];
+    char tmp[900], cx[900], fail[900], log[900], rc[900], rc2[900], text[2048];
+    char base[64], saved[900] = "";
+    const char *old = getenv("TMPDIR");
+    const char *split[2] = {"tools/x.c", ""};
+    const char *two[2] = {"tools/x.c", "tools/y.c"};
+    if (old)
+        (void)snprintf(saved, sizeof(saved), "%s", old);
+    if (!dlt_rig(&r, "reverify") ||
+        !dlt_rv_fixture(&r, "int big(void){return 1;}\nint other(void){return "
+                            "2;}\n",
+                        base_rows) ||
+        DLT_GIT(base, sizeof(base), r.sender, "rev-parse", "HEAD") != 0) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    base[strcspn(base, "\n")] = '\0';
+    (void)snprintf(tmp, sizeof(tmp), "%s/tmp", r.base);
+    (void)snprintf(cx, sizeof(cx), "%s/cx.sh", r.base);
+    (void)snprintf(fail, sizeof(fail), "%s/cx.fail", r.base);
+    (void)snprintf(log, sizeof(log), "%s/cx.log", r.base);
+    (void)snprintf(rc, sizeof(rc), "%s/rv.receipt.json", r.base);
+    (void)snprintf(rc2, sizeof(rc2), "%s/rv2.receipt.json", r.base);
+    (void)snprintf(bad, sizeof(bad), "%s/rv-bad.bundle", r.base);
+    (void)snprintf(b1, sizeof(b1), "%s/rv1.bundle", r.base);
+    (void)snprintf(o1, sizeof(o1), "%s/rv1.bundle.offer.json", r.base);
+    (void)snprintf(b2, sizeof(b2), "%s/rv2.bundle", r.base);
+    (void)snprintf(o2, sizeof(o2), "%s/rv2.bundle.offer.json", r.base);
+    (void)snprintf(b3, sizeof(b3), "%s/rv3.bundle", r.base);
+    (void)snprintf(o3, sizeof(o3), "%s/rv3.bundle.offer.json", r.base);
+    (void)mkdir(tmp, 0700);
+    (void)setenv("TMPDIR", tmp, 1);
+    (void)setenv("ZCL_LAND_REVERIFY_CX", cx, 1);
+    if (!dlt_write(cx, DLT_RV_CX, 0755) ||
+        !dlt_rv_offer(&r, "split", base, split, split_rows, b1) ||
+        !dlt_rv_offer(&r, "two", base, two, split_rows, b2) ||
+        !dlt_rv_offer(&r, "norow", base, split, base_rows, b3)) {
+        printf("offer setup FAILED\n");
+        return 1;
+    }
+
+    TEST("land.reverify_offer: a split commit re-runs dev cx check on its "
+         "base and replies ok with the unit; nothing is left behind") {
+        dlt_rv(&c, &r, b1, o1, NULL);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "file")),
+                      "tools/x.c");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "functions")),
+                      "big");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "base")), base);
+        ASSERT(json_get(&c.reply.data, "receipt") == NULL);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(log, text, sizeof(text)));
+        ASSERT(strstr(text, "dev cx check --file=tools/x.c --functions=big "
+                            "lint=yes changed=tools/x.c, cwd=") != NULL);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer --receipt_out: a pass signs a receipt with the "
+         "five checks that verify_offer_receipt accepts") {
+        dlt_rv(&c, &r, b1, o1, rc);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "receipt")), rc);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(rc, text, sizeof(text)));
+        ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base,cx_check") !=
+               NULL);
+        dlt_vfy(&c, rc, o1);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
+                      "bundle_sha256,bundle_verify,head,base,cx_check");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "ok");
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer: an existing receipt_out refuses "
+         "OFFER_RECEIPT_EXISTS before any worktree is made") {
+        dlt_rv(&c, &r, b1, o1, rc);
+        ASSERT(dlt_refused(&c, "OFFER_RECEIPT_EXISTS"));
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer: a failing dev cx check refuses "
+         "REVERIFY_CX_FAILED with the child's code, and writes no receipt") {
+        ASSERT(dlt_write(fail, "x\n", 0644));
+        dlt_rv(&c, &r, b1, o1, rc2);
+        ASSERT(dlt_refused(&c, "REVERIFY_CX_FAILED"));
+        ASSERT(strstr(c.reply.error.evidence, "exit=1") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "CX_STILL_OVER") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "big is still over 15") != NULL);
+        dlt_end(&c);
+        ASSERT(access(rc2, F_OK) != 0);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        ASSERT(remove(fail) == 0);
+        PASS();
+    }
+
+    TEST("land.reverify_offer: a commit touching two .c files refuses "
+         "REVERIFY_NOT_A_SPLIT") {
+        dlt_rv(&c, &r, b2, o2, rc2);
+        ASSERT(dlt_refused(&c, "REVERIFY_NOT_A_SPLIT"));
+        dlt_end(&c);
+        ASSERT(access(rc2, F_OK) != 0);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer: a .c change that deletes no baseline row "
+         "refuses REVERIFY_NOT_A_SPLIT") {
+        dlt_rv(&c, &r, b3, o3, NULL);
+        ASSERT(dlt_refused(&c, "REVERIFY_NOT_A_SPLIT"));
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+    TEST("land.reverify_offer: a tampered bundle refuses with check_offer's "
+         "OFFER_SHA_MISMATCH, runs no cx check and leaves nothing") {
+        ASSERT(remove(log) == 0);
+        ASSERT(dlt_flip(b1, bad));
+        dlt_rv(&c, &r, bad, o1, rc2);
+        ASSERT(dlt_refused(&c, "OFFER_SHA_MISMATCH"));
+        dlt_end(&c);
+        ASSERT(access(log, F_OK) != 0);
+        ASSERT(access(rc2, F_OK) != 0);
+        ASSERT(dlt_rv_clean(&r, tmp));
+        PASS();
+    }
+
+_test_next:;
+    if (saved[0])
+        (void)setenv("TMPDIR", saved, 1);
+    else
+        (void)unsetenv("TMPDIR");
+    (void)unsetenv("ZCL_LAND_REVERIFY_CX");
+    dlt_done(&r);
+    return failures;
+}
+
 int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
     int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases() +
-                   dlt_offer_cases() + dlt_receipt_cases();
+                   dlt_offer_cases() + dlt_receipt_cases() +
+                   dlt_reverify_cases();
     if (failures == 0)
         printf("test_dev_land_remote: all passed\n");
     else
