@@ -1113,11 +1113,6 @@ struct coins_flush_tail_status {
     int commit_rc;
 };
 
-static bool coins_flush_step_ok(int rc)
-{
-    return rc == SQLITE_DONE || rc == SQLITE_ROW;
-}
-
 static void coins_flush_select_txn_sql(bool owns_db,
                                        const char **txn_begin,
                                        const char **txn_commit,
@@ -1177,7 +1172,7 @@ static size_t coins_flush_insert_outputs(struct coins_view_sqlite *cvs,
         sqlite3_bind_int(ins, 7, cc->height);
         sqlite3_bind_int(ins, 8, cc->is_coinbase ? 1 : 0);
         int rc = sqlite3_step(ins); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-        if (!coins_flush_step_ok(rc)) {
+        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             fprintf(stderr, "coins_flush: INSERT failed rc=%d "  // obs-ok:write_errors-counted-and-rolled-back-below
                     "h=%d vout=%zu: %s\n",
                     rc, cc->height, vi, sqlite3_errmsg(cvs->db));
@@ -1204,7 +1199,7 @@ static void coins_flush_apply_entries(struct coins_view_sqlite *cvs,
             sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
                               e->txid.data, 32, SQLITE_STATIC);
             int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-            if (!coins_flush_step_ok(rc)) {
+            if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
                 fprintf(stderr, "coins_flush: DELETE failed rc=%d: %s\n",  // obs-ok:helper-context-logged
                         rc, sqlite3_errmsg(cvs->db));
                 tally->write_errors++;
@@ -1217,7 +1212,7 @@ static void coins_flush_apply_entries(struct coins_view_sqlite *cvs,
             sqlite3_bind_blob(cvs->stmt_delete_tx, 1,
                               e->txid.data, 32, SQLITE_STATIC);
             int rc = sqlite3_step(cvs->stmt_delete_tx); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-            if (!coins_flush_step_ok(rc)) {
+            if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
                 fprintf(stderr, "coins_flush: pre-DELETE failed rc=%d: %s\n",  // obs-ok:write_errors-counted-and-rolled-back-below
                         rc, sqlite3_errmsg(cvs->db));
                 tally->write_errors++;
@@ -1261,7 +1256,7 @@ static void coins_flush_write_best_and_commitment(
         sqlite3_bind_blob(cvs->stmt_best_set, 1,
                           hash_block->data, 32, SQLITE_STATIC);
         st->best_rc = sqlite3_step(cvs->stmt_best_set); // raw-sql-ok:cvs-zcl-ar-raw-sql-rationale
-        if (!coins_flush_step_ok(st->best_rc)) {
+        if (st->best_rc != SQLITE_DONE && st->best_rc != SQLITE_ROW) {
             st->best_failed = 1;
             return;
         }
@@ -1273,7 +1268,7 @@ static void coins_flush_write_best_and_commitment(
         sqlite3_bind_blob(cvs->stmt_commit_set, 1,
                           buf, UTXO_COMMITMENT_SERIALIZED_SIZE, SQLITE_STATIC);
         st->commit_rc = AR_STEP_WRITE(cvs->stmt_commit_set);
-        if (!coins_flush_step_ok(st->commit_rc))
+        if (st->commit_rc != SQLITE_DONE && st->commit_rc != SQLITE_ROW)
             st->commit_failed = 1;
     }
 }
