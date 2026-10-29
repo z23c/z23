@@ -99,7 +99,8 @@ static int32_t tip_height_or_zero(const struct block_index *chain_tip)
     return chain_tip->nHeight;
 }
 
-/* True when the active chain is empty or sits at genesis height. */
+/* True when the active chain is empty or its tip height is at or below
+ * genesis (zero or negative). */
 static bool chain_at_or_below_genesis(const struct block_index *chain_tip)
 {
     return !chain_tip || chain_tip->nHeight <= 0;
@@ -223,7 +224,8 @@ static bool active_tip_hash_matches(const struct block_index *chain_tip,
 }
 
 /* True when the active tip's height (and hash, when the derivation has a
- * durable witness) matches the DERIVED coins-best; reports both. */
+ * durable witness) matches the DERIVED coins-best; reports the derived
+ * height and whether a durable hash witness exists (not the hash). */
 static bool tip_matches_derived_best(const struct block_index *chain_tip,
                                      int32_t *d_h, bool *d_have)
 {
