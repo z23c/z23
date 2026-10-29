@@ -1039,7 +1039,7 @@ static int fgl_case_g1(const char *root)
         ASSERT(chmod(path, 0666) == 0);
         ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_UNMEASURED);
         ASSERT(chmod(path, 0600) == 0);
-        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PASS);
+        ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PARTIAL);
         {
             char link[700];
             (void)snprintf(link, sizeof(link), "%s.link", path);
@@ -1063,8 +1063,20 @@ static int fgl_case_g1(const char *root)
         ASSERT(zcl_goals_measure(&o, "G1").grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgl_bench(path, 160, 185, FGL_NOW - 3600, FGL_PQFS));
         r = zcl_goals_measure(&o, "G1");
-        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgl_has(r.evidence, "1 h old"));
+        ASSERT(fgl_has(r.evidence, "receipt claims outer handshake"));
+        ASSERT(fgl_has(r.evidence, "directed pair coverage and self-renewal unverified"));
+        {
+            struct zcl_goals_host hosts[2] = {0};
+            (void)snprintf(hosts[0].name, sizeof(hosts[0].name), "alpha");
+            (void)snprintf(hosts[1].name, sizeof(hosts[1].name), "beta");
+            o.hosts = hosts;
+            o.host_count = 2;
+            r = zcl_goals_measure(&o, "G1");
+            ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+            ASSERT(fgl_has(r.evidence, "directed pair coverage and self-renewal unverified"));
+        }
         PASS();
     } _test_next:;
     return failures;

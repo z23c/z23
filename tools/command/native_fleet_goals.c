@@ -365,16 +365,13 @@ static bool gr_bench_read(const char *path, struct json_value *out)
     return true;
 }
 
-/* Grade of a parsed receipt whose throughput and age are known. The outer
- * tunnel is a static PSK with no forward secrecy (docs/spec/
- * TUNNEL_PQ_FORWARD_SECRECY.md); only a receipt recording the hybrid Noise
- * suite as the outer handshake passes, and no producer writes one yet. */
+/* One benchmark receipt cannot establish fleet-wide pair coverage or renewal. */
 static struct zcl_goal_result gr_g1_grade(const struct json_value *rc,
                                           const char *path, int64_t age_s)
 {
     static const char next[] =
         "run `z23 ops mesh device host bench --receipt_out=<path>` on each "
-        "host; PASS needs an outer PQ+FS handshake that no producer records";
+        "host; PASS needs every directed pair and self-renewal evidence";
     const struct json_value *hs = json_get(rc, "outer_handshake");
     double fwd = json_get_real(json_get(rc, "forward_mib_s"));
     double rev = json_get_real(json_get(rc, "reverse_mib_s"));
@@ -390,15 +387,17 @@ static struct zcl_goal_result gr_g1_grade(const struct json_value *rc,
                              GOALS_TUNNEL_MIB_S_MIN, fwd, rev, path, age_h);
     if (hs && hs->type == JSON_STR &&
         strcmp(json_get_str(hs), GOALS_PQFS_SUITE) == 0)
-        return zcl_goal_make(ZCL_GOAL_PASS, next,
-                             "forward %.1f, reverse %.1f MiB/s over %s, "
-                             "receipt %s, %lld h old",
-                             fwd, rev, GOALS_PQFS_SUITE, path, age_h);
+        return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                             "directed pair coverage and self-renewal unverified; "
+                             "forward %.1f, reverse %.1f MiB/s; receipt claims "
+                             "outer handshake %s, %lld h old; receipt %s",
+                             fwd, rev, GOALS_PQFS_SUITE, age_h, path);
     return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                         "directed pair coverage and self-renewal unverified; "
                          "forward %.1f, reverse %.1f MiB/s in-process on one "
-                         "host, receipt %s, %lld h old; outer tunnel static "
-                         "PSK, no forward secrecy; PQ only inside ssh",
-                         fwd, rev, path, age_h);
+                         "host, %lld h old; outer tunnel static PSK, no forward "
+                         "secrecy; PQ only inside ssh; receipt %s",
+                         fwd, rev, age_h, path);
 }
 
 static struct zcl_goal_result gr_g1(const struct zcl_goals_options *o)
