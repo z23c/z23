@@ -13,8 +13,14 @@
  */
 
 #include "test/test_core.h"
+#include "chain/chainparams.h"
+#include "core/serialize.h"
 #include "sapling/params_fetch.h"
+#include "net/msgprocessor.h"
+#include "net/net.h"
+#include "net/netbase.h"
 #include "net/params_service.h"
+#include "net/protocol.h"
 #include "crypto/sha256.h"
 #include "base/safe_alloc.h"
 
@@ -947,6 +953,470 @@ static int test_serve_roundtrip(void)
     return failures;
 }
 
+/* ── 11. The fetch-side handlers: zparamhave and zparamdata ────────── */
+
+/* A zparamdata prefix on the wire: idx:u8, chunk:u32le, len:u32le. */
+#define PH_CHUNK_PREFIX 9
+
+struct ph_fixture {
+    struct net_manager nm;
+    struct msg_processor mp;
+    struct p2p_node *node;
+    struct send_segment *sentinel;
+};
+
+struct ph_chunk_ctx {
+    struct ph_fixture fx;
+    char sub[600];
+    uint8_t *w;
+    int f;
+    int other;
+    size_t want;
+};
+
+static void ph_put_u32(uint8_t *p, uint32_t v)
+{
+    for (int i = 0; i < 4; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void ph_put_u64(uint8_t *p, uint64_t v)
+{
+    for (int i = 0; i < 8; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
+}
+
+/* A zparamhave entry: idx:u8, bytes:u64le, chunks:u32le. */
+static size_t ph_put_entry(uint8_t *p, uint8_t idx, uint64_t bytes,
+                           uint32_t cc)
+{
+    p[0] = idx;
+    ph_put_u64(p + 1, bytes);
+    ph_put_u32(p + 9, cc);
+    return 13;
+}
+
+static void ph_put_chunk_prefix(uint8_t *p, uint8_t idx, uint32_t chunk,
+                                uint32_t len)
+{
+    p[0] = idx;
+    ph_put_u32(p + 1, chunk);
+    ph_put_u32(p + 5, len);
+}
+
+/* A frame is `cmd` when its command field is exactly cmd, NUL padded. */
+static bool ph_is_cmd(const struct send_segment *seg, const char *cmd)
+{
+    size_t n = strlen(cmd);
+    if (seg->size < (size_t)MSG_HEADER_SIZE || n >= COMMAND_SIZE)
+        return false;
+    const uint8_t *c = seg->data + MESSAGE_START_SIZE;
+    return memcmp(c, cmd, n) == 0 && c[n] == 0;
+}
+
+static bool ph_open(struct ph_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    net_manager_init(&fx->nm);
+    fx->mp.params = chain_params_get();
+    fx->mp.net_mgr = &fx->nm;
+
+    struct net_address addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.svc.addr.ip[15] = 9;
+    addr.svc.port = 18033;
+    fx->node = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET, &addr,
+                               "peer-params", false);
+    fx->sentinel = zcl_calloc(1, sizeof(*fx->sentinel), "test_params_sentinel");
+    if (!fx->node || !fx->sentinel)
+        return false;
+    /* A sentinel head keeps p2p_node_end_message from ever touching the
+     * invalid socket; every queued frame lands behind it. */
+    fx->node->send_head = fx->sentinel;
+    fx->node->send_tail = fx->sentinel;
+    fx->node->send_offset = 0;
+    return true;
+}
+
+static void ph_close(struct ph_fixture *fx)
+{
+    if (fx->node)
+        p2p_node_free(fx->node);
+    net_manager_free(&fx->nm);
+}
+
+/* Remove every queued frame, returning how many carried `cmd`. The first
+ * such frame's payload byte is copied out when `first` is non-NULL. */
+static size_t ph_drain(struct ph_fixture *fx, const char *cmd, uint8_t *first)
+{
+    size_t n = 0;
+    struct send_segment *sentinel = fx->sentinel;
+    while (sentinel->next) {
+        struct send_segment *seg = sentinel->next;
+        sentinel->next = seg->next;
+        if (ph_is_cmd(seg, cmd)) {
+            if (n == 0 && first && seg->size > (size_t)MSG_HEADER_SIZE)
+                *first = seg->data[MSG_HEADER_SIZE];
+            n++;
+        }
+        send_segment_free(seg);
+    }
+    fx->node->send_tail = sentinel;
+    fx->node->send_size = 0;
+    return n;
+}
+
+static bool ph_info(struct ph_fixture *fx, const uint8_t *w, size_t len)
+{
+    struct byte_stream s;
+    stream_init(&s, len + 1);
+    if (len)
+        stream_write_bytes(&s, w, len);
+    bool r = mp_handle_param_info(&fx->mp, fx->node, &s);
+    stream_free(&s);
+    return r;
+}
+
+static bool ph_chunk(struct ph_fixture *fx, const uint8_t *w, size_t len)
+{
+    struct byte_stream s;
+    stream_init(&s, len + 1);
+    if (len)
+        stream_write_bytes(&s, w, len);
+    bool r = mp_handle_param_chunk(&fx->mp, fx->node, &s);
+    stream_free(&s);
+    return r;
+}
+
+/* Feed one zparamhave and return how many zparammreq it provoked, or -1 when
+ * the handler did not consume it. */
+static long ph_info_sends(struct ph_fixture *fx, const uint8_t *w, size_t len,
+                          uint8_t *first)
+{
+    if (!ph_info(fx, w, len))
+        return -1;
+    return (long)ph_drain(fx, MSG_PARAM_MAN_REQ, first);
+}
+
+/* Remove every fetch artifact a pinned file can leave in `sub`, then the
+ * directory itself. */
+static void ph_sub_remove(const char *sub)
+{
+    static const char *const suffix[] = {"", ".part", ".zpart", ".zpart.new"};
+    for (int i = 0; i < ZCL_PARAM_FILE_COUNT; i++) {
+        for (size_t k = 0; k < sizeof(suffix) / sizeof(suffix[0]); k++) {
+            char p[900];
+            snprintf(p, sizeof(p), "%s/%s%s", sub, zcl_param_pins[i].name,
+                     suffix[k]);
+            unlink(p);
+        }
+    }
+    rmdir(sub);
+}
+
+/* Start from an empty `sub`, whatever a previous run left behind. */
+static void ph_sub_make(const char *sub)
+{
+    ph_sub_remove(sub);
+    (void)mkdir(sub, 0700);
+}
+
+/* Restart the fetch in `sub` from scratch. Returns the pinned index now in
+ * flight, or -1 when nothing is fetched. */
+static int ph_fetch_begin(const char *sub)
+{
+    int file = -1;
+    param_service_end_fetch();
+    if (!param_service_begin_fetch(sub))
+        return -1;
+    param_service_progress(&file, NULL, NULL);
+    return file;
+}
+
+static uint32_t ph_have(void)
+{
+    uint32_t have = 0;
+    param_service_progress(NULL, &have, NULL);
+    return have;
+}
+
+static int ph_file(void)
+{
+    int file = -2;
+    param_service_progress(&file, NULL, NULL);
+    return file;
+}
+
+static bool ph_chunk_ctx_open(struct ph_chunk_ctx *c, const char *sub)
+{
+    memset(c, 0, sizeof(*c));
+    snprintf(c->sub, sizeof(c->sub), "%s", sub);
+    c->w = zcl_malloc(PH_CHUNK_PREFIX + ZCL_PARAM_CHUNK_BYTES,
+                      "test_params_chunk_wire");
+    if (!c->w || !ph_open(&c->fx))
+        return false;
+    fill_pattern(c->w + PH_CHUNK_PREFIX, ZCL_PARAM_CHUNK_BYTES, 7u);
+    c->f = ph_fetch_begin(c->sub);
+    if (c->f < 0 || c->f >= ZCL_PARAM_FILE_COUNT)
+        return false;
+    c->other = (c->f == 3) ? 2 : 3;
+    c->want = zcl_param_chunk_len(c->f, 0);
+    return c->want > 0;
+}
+
+static void ph_chunk_ctx_close(struct ph_chunk_ctx *c)
+{
+    param_service_end_fetch();
+    ph_close(&c->fx);
+    free(c->w);
+    ph_sub_remove(c->sub);
+}
+
+/* Frame a zparamdata whose prefix claims (idx, chunk, len) and whose body is
+ * the first body_len bytes of the fixture pattern. */
+static bool ph_chunk_send(struct ph_chunk_ctx *c, uint8_t idx, uint32_t chunk,
+                          uint32_t len, size_t body_len)
+{
+    ph_put_chunk_prefix(c->w, idx, chunk, len);
+    return ph_chunk(&c->fx, c->w, PH_CHUNK_PREFIX + body_len);
+}
+
+static int test_param_have_handler(void)
+{
+    int failures = 0;
+    printf("  [handlers] zparamhave advertises only the file being fetched\n");
+
+    char sub[600];
+    snprintf(sub, sizeof(sub), "%s/fetch_have", g_dir);
+    ph_sub_make(sub);
+
+    struct ph_fixture fx;
+    if (!ph_open(&fx)) {
+        CHECK(false, "handler fixture opens");
+        ph_close(&fx);
+        ph_sub_remove(sub);
+        return failures;
+    }
+    int f = ph_fetch_begin(sub);
+    if (f < 0 || f >= ZCL_PARAM_FILE_COUNT) {
+        CHECK(false, "a fresh directory starts a fetch");
+        ph_close(&fx);
+        ph_sub_remove(sub);
+        return failures;
+    }
+    const struct zcl_param_pin *pin = &zcl_param_pins[f];
+    int other = (f == 3) ? 2 : 3;
+    const struct zcl_param_pin *po = &zcl_param_pins[other];
+
+    uint8_t w[1 + 13 * 2];
+    uint8_t first = 0xff;
+    size_t n = 0;
+
+    /* A truncated or empty advertisement is consumed and sends nothing. */
+    CHECK(ph_info_sends(&fx, w, 0, NULL) == 0,
+          "an empty zparamhave is consumed and answered with nothing");
+    w[0] = 1; w[1] = (uint8_t)f; w[2] = 1;
+    CHECK(ph_info_sends(&fx, w, 3, NULL) == 0,
+          "a truncated zparamhave entry is consumed and answered with nothing");
+
+    /* A count above the pinned file total is refused before any entry. */
+    w[0] = (uint8_t)(ZCL_PARAM_FILE_COUNT + 1);
+    CHECK(ph_info_sends(&fx, w, 1, NULL) == 0,
+          "a count above the file total is refused");
+
+    /* Entries that disagree with the compiled-in pin are skipped. */
+    w[0] = 1;
+    n = ph_put_entry(w + 1, (uint8_t)ZCL_PARAM_FILE_COUNT, pin->bytes,
+                     pin->chunk_count);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "an out-of-range file index is skipped");
+    n = ph_put_entry(w + 1, (uint8_t)f, pin->bytes + 1, pin->chunk_count);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "a byte length that disagrees with the pin is skipped");
+    n = ph_put_entry(w + 1, (uint8_t)f, pin->bytes, pin->chunk_count + 1);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "a chunk count that disagrees with the pin is skipped");
+    n = ph_put_entry(w + 1, (uint8_t)other, po->bytes, po->chunk_count);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "a peer serving only another file does not provoke a request");
+
+    /* A matching entry for the file in flight provokes one zparammreq that
+     * names that file, whether or not a mismatched entry comes first. */
+    f = ph_fetch_begin(sub);
+    w[0] = 1;
+    n = ph_put_entry(w + 1, (uint8_t)f, pin->bytes, pin->chunk_count);
+    CHECK(ph_info_sends(&fx, w, 1 + n, &first) == 1 && first == (uint8_t)f,
+          "a matching entry for the file in flight asks for its manifest");
+    w[0] = 2;
+    n = ph_put_entry(w + 1, (uint8_t)other, po->bytes + 1, po->chunk_count);
+    n += ph_put_entry(w + 1 + n, (uint8_t)f, pin->bytes, pin->chunk_count);
+    first = 0xff;
+    CHECK(ph_info_sends(&fx, w, 1 + n, &first) == 1 && first == (uint8_t)f,
+          "a mismatched entry before the matching one is skipped over");
+
+    /* Nothing is asked of a node that has stopped fetching, or that has
+     * already written this peer off. */
+    param_service_end_fetch();
+    w[0] = 1;
+    n = ph_put_entry(w + 1, (uint8_t)f, pin->bytes, pin->chunk_count);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "a matching advertisement while idle asks for nothing");
+    f = ph_fetch_begin(sub);
+    param_service_test_charge_peer(fx.node->id, PARAM_PEER_WASTE_BUDGET_BYTES);
+    CHECK(ph_info_sends(&fx, w, 1 + n, NULL) == 0,
+          "a written-off peer is not asked for a manifest");
+
+    param_service_end_fetch();
+    ph_close(&fx);
+    ph_sub_remove(sub);
+    return failures;
+}
+
+static int test_chunk_refusals(void)
+{
+    int failures = 0;
+    printf("  [handlers] zparamdata refuses malformed frames before any hash\n");
+
+    char sub[600];
+    snprintf(sub, sizeof(sub), "%s/fetch_chunk_refuse", g_dir);
+    ph_sub_make(sub);
+
+    struct ph_chunk_ctx c;
+    if (!ph_chunk_ctx_open(&c, sub)) {
+        CHECK(false, "chunk fixture starts a fetch");
+        ph_chunk_ctx_close(&c);
+        return failures;
+    }
+    uint32_t cc = zcl_param_pins[c.f].chunk_count;
+    uint32_t want = (uint32_t)c.want;
+
+    CHECK(ph_chunk(&c.fx, c.w, 0),
+          "an empty zparamdata is consumed");
+    CHECK(ph_chunk(&c.fx, c.w, 5),
+          "a truncated zparamdata prefix is consumed");
+    CHECK(ph_chunk_send(&c, (uint8_t)ZCL_PARAM_FILE_COUNT, 0, want, c.want),
+          "an out-of-range file index is consumed");
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, cc, 0, 0),
+          "a chunk index past the file end is consumed");
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want + 1, c.want),
+          "a length field that is not the pinned length is consumed");
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want, c.want - 1),
+          "a body shorter than its declared length is consumed");
+
+    CHECK(ph_have() == 0 && ph_file() == c.f,
+          "refused frames leave the fetch untouched");
+    CHECK(ph_drain(&c.fx, MSG_PARAM_CHUNK_REQ, NULL) == 0,
+          "refused frames provoke no chunk request");
+
+    ph_chunk_ctx_close(&c);
+    return failures;
+}
+
+static int test_chunk_admission(void)
+{
+    int failures = 0;
+    printf("  [handlers] zparamdata accepts only a chunk asked of this peer\n");
+
+    char sub[600];
+    snprintf(sub, sizeof(sub), "%s/fetch_chunk_admit", g_dir);
+    ph_sub_make(sub);
+
+    struct ph_chunk_ctx c;
+    if (!ph_chunk_ctx_open(&c, sub)) {
+        CHECK(false, "chunk fixture starts a fetch");
+        ph_chunk_ctx_close(&c);
+        return failures;
+    }
+    uint32_t want = (uint32_t)c.want;
+    size_t other_len = zcl_param_chunk_len(c.other, 0);
+    int32_t id = c.fx.node->id;
+
+    /* A chunk for a file other than the one in flight fails the file gate
+     * and leaves the outstanding request in place. */
+    (void)ph_fetch_begin(c.sub);
+    (void)param_service_test_mark_requested(id, 0);
+    CHECK(ph_chunk_send(&c, (uint8_t)c.other, 0, (uint32_t)other_len, other_len),
+          "a chunk for another file is consumed");
+    CHECK(param_service_test_chunk_admitted(id, 0) && ph_have() == 0,
+          "a chunk for another file neither consumes nor clears the request");
+
+    /* An unsolicited chunk never reaches verification. */
+    (void)ph_fetch_begin(c.sub);
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want, c.want),
+          "an unsolicited chunk is consumed");
+    CHECK(!param_service_test_chunk_admitted(id, 0) && ph_have() == 0,
+          "an unsolicited chunk is refused without touching the fetch");
+
+    /* A written-off peer is refused even with an outstanding request. */
+    (void)ph_fetch_begin(c.sub);
+    (void)param_service_test_mark_requested(id, 0);
+    param_service_test_charge_peer(id, PARAM_PEER_WASTE_BUDGET_BYTES);
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want, c.want),
+          "a chunk from a written-off peer is consumed");
+    CHECK(ph_have() == 0, "a written-off peer's chunk is never accepted");
+
+    /* The right chunk from the wrong peer is refused, and the peer that
+     * asked for it keeps its outstanding request. */
+    (void)ph_fetch_begin(c.sub);
+    (void)param_service_test_mark_requested(id + 1, 0);
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want, c.want),
+          "a chunk from a peer that did not ask is consumed");
+    CHECK(param_service_test_chunk_admitted(id + 1, 0) && ph_have() == 0,
+          "a chunk from a peer that did not ask leaves the asker's request");
+
+    param_service_end_fetch();
+    ph_chunk_ctx_close(&c);
+    return failures;
+}
+
+static int test_chunk_no_manifest(void)
+{
+    int failures = 0;
+    printf("  [handlers] an admitted chunk with no manifest is charged, not kept\n");
+
+    char sub[600];
+    snprintf(sub, sizeof(sub), "%s/fetch_chunk_nomani", g_dir);
+    ph_sub_make(sub);
+
+    struct ph_chunk_ctx c;
+    if (!ph_chunk_ctx_open(&c, sub)) {
+        CHECK(false, "chunk fixture starts a fetch");
+        ph_chunk_ctx_close(&c);
+        return failures;
+    }
+    uint32_t want = (uint32_t)c.want;
+    int32_t id = c.fx.node->id;
+    uint64_t budget = PARAM_PEER_WASTE_BUDGET_BYTES;
+
+    /* The request is outstanding, so the chunk passes the admission gate and
+     * reaches the fetch session, which has no manifest to check it against.
+     * It is refused, its inflight slot is released, and the peer is charged
+     * exactly the chunk's bytes. */
+    (void)ph_fetch_begin(c.sub);
+    (void)param_service_test_mark_requested(id, 0);
+    CHECK(ph_chunk_send(&c, (uint8_t)c.f, 0, want, c.want),
+          "an admitted chunk with no manifest is consumed");
+    CHECK(ph_have() == 0, "a chunk with no manifest is not kept");
+    CHECK(!param_service_test_chunk_admitted(id, 0),
+          "the refused chunk's inflight slot is released");
+    CHECK(ph_drain(&c.fx, MSG_PARAM_CHUNK_REQ, NULL) == 0,
+          "no chunk request follows a refused chunk");
+
+    /* Waste accounting: the peer has spent `want` bytes. Topping it up to one
+     * byte short of the budget keeps it admitted; one more byte writes it off. */
+    param_service_test_charge_peer(id, budget - want - 1);
+    (void)param_service_test_mark_requested(id, 1);
+    CHECK(param_service_test_chunk_admitted(id, 1),
+          "a peer one byte under its waste budget is still admitted");
+    param_service_test_charge_peer(id, 1);
+    CHECK(!param_service_test_chunk_admitted(id, 1),
+          "a peer at its waste budget is written off");
+
+    param_service_end_fetch();
+    ph_chunk_ctx_close(&c);
+    return failures;
+}
+
 /* ── entry point ────────────────────────────────────────────────────── */
 
 int test_params_fetch(void);
@@ -971,6 +1441,10 @@ int test_params_fetch(void)
     failures += test_pins_match_real_files();
     failures += test_serving_off_by_default();
     failures += test_serve_roundtrip();
+    failures += test_param_have_handler();
+    failures += test_chunk_refusals();
+    failures += test_chunk_admission();
+    failures += test_chunk_no_manifest();
 
     cleanup_scratch();
 
