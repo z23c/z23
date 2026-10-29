@@ -825,6 +825,143 @@ static struct zcl_result bg_validation_publish_with_catchup(
 
 /* ── Main validation thread ──────────────────────────────────── */
 
+/* Reads the reducer seed floor; true when an external seed sets it above 0. */
+static bool bg_validation_external_seed_read(int32_t *seed_floor)
+{
+    bool seed_floor_found = false;
+    return reducer_seed_floor_height_read(
+        progress_store_db(), seed_floor, &seed_floor_found) &&
+        seed_floor_found && *seed_floor > 0;
+}
+
+/* Prints and stores the throughput line every LOG_INTERVAL blocks. */
+static void bg_validation_log_progress(struct bg_validation_service *svc,
+    int h, int start_height, int chain_height, int64_t total_sigs,
+    int64_t total_proofs, int64_t *t_last_log, int *h_last_log)
+{
+    if (h % LOG_INTERVAL == 0 && h > start_height) {
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        int64_t elapsed = now - *t_last_log;
+        double bps = elapsed > 0 ?
+            (double)(h - *h_last_log) / (double)elapsed : 0;
+        int remaining = chain_height - h;
+        int eta = bps > 0 ? (int)((double)remaining / bps) : 0;
+
+        printf("[bg-valid] height %d/%d  %.0f blk/s  "
+               "%lld sigs  %lld proofs  ETA %dm%ds\n",
+               h, chain_height, bps,
+               (long long)total_sigs, (long long)total_proofs,
+               eta / 60, eta % 60);
+
+        atomic_store(&svc->progress.blocks_per_sec, (int64_t)bps);
+        *t_last_log = now;
+        *h_last_log = h;
+    }
+}
+
+/* Persists skips and progress every SAVE_INTERVAL blocks. */
+static void bg_validation_save_checkpoint(struct bg_validation_service *svc,
+    int h, int64_t total_skips)
+{
+    if (h % SAVE_INTERVAL == 0) {
+        save_skips(&svc->progress_store, total_skips);
+        save_progress(&svc->progress_store, h);
+
+        /* Bound peak RSS. Every block here churns large transient
+         * heap — a per-block undo buffer (up to MAX_UNDO_READ = 4 MB),
+         * the script_check_item array, and a fully-deserialized block
+         * (hundreds of small tx/vin/vout/joinsplit allocations) — all
+         * freed before the next iteration. The PER-BLOCK footprint is
+         * already bounded, but glibc keeps freed chunks in its arenas
+         * instead of returning them to the OS, so RESIDENT memory
+         * stair-steps upward as the walk deepens (~1.5 GB -> 2.4 GB+
+         * over millions of blocks) and never falls back. malloc_trim
+         * hands the retained pages back to the kernel, flattening peak
+         * RSS. This is purely memory discipline — it does not change
+         * what gets verified. Same idiom fast_sync.c uses after its
+         * bulk UTXO serialization. Called once per SAVE_INTERVAL
+         * (1000 blocks) so the cost is negligible vs. the per-block
+         * crypto. */
+        platform_allocator_release_free_pages();
+    }
+}
+
+/* Pauses an incomplete walk and publishes its partial authority. True when
+ * the caller must return (the walk paused). */
+static bool bg_validation_pause_if_incomplete(
+    struct bg_validation_service *svc, bool coverage_complete,
+    int64_t total_skips, bool external_seeded)
+{
+    if (!atomic_load(&svc->stop_requested) && !coverage_complete) {
+        int verified = atomic_load(&svc->progress.verified_height);
+        save_skips(&svc->progress_store, total_skips);
+        save_progress(&svc->progress_store, verified);
+        atomic_store(&svc->progress.state, BG_VALIDATION_PAUSED);
+        struct zcl_result authority =
+            bg_validation_authority_publish(svc, external_seeded, false);
+        if (!authority.ok)
+            printf("[bg-valid] PAUSED: %s\n", authority.message);
+        bg_validation_supervisor_done();
+        return true;
+    }
+    return false;
+}
+
+/* Finishes a walk that ran to the end (complete, or stopped early). */
+static void bg_validation_finish_run(struct bg_validation_service *svc,
+    bool external_seeded, int start_height, int chain_height, int64_t t_start,
+    int64_t total_sigs, int64_t total_proofs, int64_t total_skips,
+    const char *datadir, const struct chain_params *params, int num_workers)
+{
+    if (!atomic_load(&svc->stop_requested)) {
+        /* Validation complete — save final progress */
+        save_skips(&svc->progress_store, total_skips);
+        save_progress(&svc->progress_store, chain_height);
+        atomic_store(&svc->progress.verified_height, chain_height);
+        atomic_store(&svc->progress.state, BG_VALIDATION_COMPLETE);
+
+        /* Only reset if we crossed the deferred-validation floor.
+         * Otherwise an empty-chain run (chain_height==0) trivially
+         * "completes" and clears the boot-time deferred=3,100,000
+         * setting, which then makes incoming peer blocks at low heights
+         * (h=737 etc.) fail phgr13 verify before the PHGR13 verifying
+         * key is ready. */
+        if (chain_height >= g_deferred_proof_validation_below_height)
+            g_deferred_proof_validation_below_height = -1;
+
+        int64_t total_time = (int64_t)platform_time_wall_time_t() - t_start;
+        printf("[bg-valid] COMPLETE: %d blocks, %lld sigs, %lld proofs "
+               "in %lldm%llds\n",
+               chain_height - start_height + 1,
+               (long long)total_sigs, (long long)total_proofs,
+               (long long)(total_time / 60), (long long)(total_time % 60));
+        event_emitf(EV_SYNC_STATE_CHANGE, 0,
+                    "bg_validation complete height=%d sigs=%lld proofs=%lld "
+                    "time=%llds",
+                    chain_height, (long long)total_sigs,
+                    (long long)total_proofs, (long long)total_time);
+
+        struct zcl_result authority = bg_validation_publish_with_catchup(
+            svc, external_seeded, datadir, params, num_workers);
+        if (!authority.ok)
+            printf("[bg-valid] COMPLETE without full-history authority: %s\n",
+                   authority.message);
+
+        /* Keep the thread alive as the sampled re-verify witness. */
+        bg_validation_supervisor_done();
+        bg_validation_sampled_reverify_loop(svc, chain_height, datadir,
+                                            params, num_workers,
+                                            external_seeded, authority.ok);
+    } else {
+        /* Stopped early — save where we got to */
+        int verified = atomic_load(&svc->progress.verified_height);
+        save_skips(&svc->progress_store, total_skips);
+        save_progress(&svc->progress_store, verified);
+        printf("[bg-valid] Stopped at height %d (will resume next start)\n",
+               verified);
+    }
+}
+
 static void *bg_validation_thread(void *arg)
 {
     struct bg_validation_service *svc = arg;
@@ -844,10 +981,7 @@ static void *bg_validation_thread(void *arg)
     bg_validation_supervisor_heartbeat(svc);
 
     int32_t seed_floor = 0;
-    bool seed_floor_found = false;
-    external_seeded = reducer_seed_floor_height_read(
-        progress_store_db(), &seed_floor, &seed_floor_found) &&
-        seed_floor_found && seed_floor > 0;
+    external_seeded = bg_validation_external_seed_read(&seed_floor);
 
     struct bg_walk_start ws =
         bg_validation_walk_start(svc, external_seeded, seed_floor);
@@ -927,114 +1061,25 @@ static void *bg_validation_thread(void *arg)
         bg_validation_supervisor_heartbeat(svc);
 
         /* Save progress periodically */
-        if (h % SAVE_INTERVAL == 0) {
-            save_skips(&svc->progress_store, total_skips);
-            save_progress(&svc->progress_store, h);
-
-            /* Bound peak RSS. Every block here churns large transient
-             * heap — a per-block undo buffer (up to MAX_UNDO_READ = 4 MB),
-             * the script_check_item array, and a fully-deserialized block
-             * (hundreds of small tx/vin/vout/joinsplit allocations) — all
-             * freed before the next iteration. The PER-BLOCK footprint is
-             * already bounded, but glibc keeps freed chunks in its arenas
-             * instead of returning them to the OS, so RESIDENT memory
-             * stair-steps upward as the walk deepens (~1.5 GB -> 2.4 GB+
-             * over millions of blocks) and never falls back. malloc_trim
-             * hands the retained pages back to the kernel, flattening peak
-             * RSS. This is purely memory discipline — it does not change
-             * what gets verified. Same idiom fast_sync.c uses after its
-             * bulk UTXO serialization. Called once per SAVE_INTERVAL
-             * (1000 blocks) so the cost is negligible vs. the per-block
-             * crypto. */
-            platform_allocator_release_free_pages();
-        }
+        bg_validation_save_checkpoint(svc, h, total_skips);
 
         /* Log progress */
-        if (h % LOG_INTERVAL == 0 && h > start_height) {
-            int64_t now = (int64_t)platform_time_wall_time_t();
-            int64_t elapsed = now - t_last_log;
-            double bps = elapsed > 0 ?
-                (double)(h - h_last_log) / (double)elapsed : 0;
-            int remaining = chain_height - h;
-            int eta = bps > 0 ? (int)((double)remaining / bps) : 0;
-
-            printf("[bg-valid] height %d/%d  %.0f blk/s  "
-                   "%lld sigs  %lld proofs  ETA %dm%ds\n",
-                   h, chain_height, bps,
-                   (long long)total_sigs, (long long)total_proofs,
-                   eta / 60, eta % 60);
-
-            atomic_store(&svc->progress.blocks_per_sec, (int64_t)bps);
-            t_last_log = now;
-            h_last_log = h;
-        }
+        bg_validation_log_progress(svc, h, start_height, chain_height,
+                                   total_sigs, total_proofs, &t_last_log,
+                                   &h_last_log);
 
         /* Yield CPU periodically to avoid starving the node */
         if (h % 100 == 0)
             sched_yield();
     }
 
-    if (!atomic_load(&svc->stop_requested) && !coverage_complete) {
-        int verified = atomic_load(&svc->progress.verified_height);
-        save_skips(&svc->progress_store, total_skips);
-        save_progress(&svc->progress_store, verified);
-        atomic_store(&svc->progress.state, BG_VALIDATION_PAUSED);
-        struct zcl_result authority =
-            bg_validation_authority_publish(svc, external_seeded, false);
-        if (!authority.ok)
-            printf("[bg-valid] PAUSED: %s\n", authority.message);
-        bg_validation_supervisor_done();
+    if (bg_validation_pause_if_incomplete(svc, coverage_complete, total_skips,
+                                          external_seeded))
         return NULL;
-    }
 
-    if (!atomic_load(&svc->stop_requested)) {
-        /* Validation complete — save final progress */
-        save_skips(&svc->progress_store, total_skips);
-        save_progress(&svc->progress_store, chain_height);
-        atomic_store(&svc->progress.verified_height, chain_height);
-        atomic_store(&svc->progress.state, BG_VALIDATION_COMPLETE);
-
-        /* Only reset if we crossed the deferred-validation floor.
-         * Otherwise an empty-chain run (chain_height==0) trivially
-         * "completes" and clears the boot-time deferred=3,100,000
-         * setting, which then makes incoming peer blocks at low heights
-         * (h=737 etc.) fail phgr13 verify before the PHGR13 verifying
-         * key is ready. */
-        if (chain_height >= g_deferred_proof_validation_below_height)
-            g_deferred_proof_validation_below_height = -1;
-
-        int64_t total_time = (int64_t)platform_time_wall_time_t() - t_start;
-        printf("[bg-valid] COMPLETE: %d blocks, %lld sigs, %lld proofs "
-               "in %lldm%llds\n",
-               chain_height - start_height + 1,
-               (long long)total_sigs, (long long)total_proofs,
-               (long long)(total_time / 60), (long long)(total_time % 60));
-        event_emitf(EV_SYNC_STATE_CHANGE, 0,
-                    "bg_validation complete height=%d sigs=%lld proofs=%lld "
-                    "time=%llds",
-                    chain_height, (long long)total_sigs,
-                    (long long)total_proofs, (long long)total_time);
-
-        struct zcl_result authority = bg_validation_publish_with_catchup(
-            svc, external_seeded, datadir, params, num_workers);
-        if (!authority.ok)
-            printf("[bg-valid] COMPLETE without full-history authority: %s\n",
-                   authority.message);
-
-        /* Keep the thread alive as the sampled re-verify witness. */
-        bg_validation_supervisor_done();
-        bg_validation_sampled_reverify_loop(svc, chain_height, datadir,
-                                            params, num_workers,
-                                            external_seeded, authority.ok);
-    } else {
-        /* Stopped early — save where we got to */
-        int verified = atomic_load(&svc->progress.verified_height);
-        save_skips(&svc->progress_store, total_skips);
-        save_progress(&svc->progress_store, verified);
-        printf("[bg-valid] Stopped at height %d (will resume next start)\n",
-               verified);
-    }
-
+    bg_validation_finish_run(svc, external_seeded, start_height, chain_height,
+                             t_start, total_sigs, total_proofs, total_skips,
+                             datadir, params, num_workers);
     bg_validation_supervisor_done();
     return NULL;
 }
