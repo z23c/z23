@@ -698,6 +698,301 @@ static int test_snapshot_serve_chunk_refusal_branches(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+/* ── mp_snapshot_maybe_offer / mp_snapshot_send_tick: pinned before split ──
+ *
+ * Both are non-static in msgprocessor_snapshot.c and are called directly, as
+ * test_block_swarm_loopback.c does for send_tick. Every row builds its own rig
+ * so no peer state carries from one branch to the next. Queued wire segments
+ * sit behind the sentinel and are counted, never pumped. */
+
+void mp_snapshot_maybe_offer(struct msg_processor *mp, struct p2p_node *node);
+void mp_snapshot_send_tick(struct msg_processor *mp, struct p2p_node *node);
+bool msgprocessor_test_swarm_try_claim(void);
+void msgprocessor_test_swarm_release(void);
+bool msgprocessor_test_swarm_is_active(void);
+
+struct ot_rig {
+    struct main_state ms;
+    struct net_manager nm;
+    struct msg_processor mp;
+    struct p2p_node *node;
+    struct send_segment *sentinel;
+};
+
+static bool ot_rig_init(struct ot_rig *r, int32_t chain_height)
+{
+    struct net_address addr;
+
+    memset(r, 0, sizeof(*r));
+    main_state_init(&r->ms);
+    net_manager_init(&r->nm);
+    r->ms.chain_active.height = chain_height;
+    r->mp.main_state = &r->ms;
+    r->mp.params = chain_params_get();
+    r->mp.datadir = ".";
+    r->mp.net_mgr = &r->nm;
+
+    memset(&addr, 0, sizeof(addr));
+    memcpy(addr.svc.addr.ip, pchIPv4Prefix, 12);
+    addr.svc.addr.ip[12] = 9; addr.svc.addr.ip[13] = 9;
+    addr.svc.addr.ip[14] = 9; addr.svc.addr.ip[15] = 9;
+    addr.svc.port = 18033;
+    r->node = p2p_node_create(&r->nm, ZCL_INVALID_SOCKET, &addr,
+                              "peer-offer", false);
+    if (!r->node)
+        return false;
+    r->node->version = 1;
+    r->node->services = NODE_ZCL23;
+    r->node->state = PEER_HANDSHAKE_COMPLETE;
+    r->node->starting_height = -1;
+    r->sentinel = lb_install_sentinel(r->node);
+    return true;
+}
+
+static void ot_rig_free(struct ot_rig *r)
+{
+    if (r->node) {
+        while (r->sentinel->next) {
+            struct send_segment *seg = r->sentinel->next;
+            r->sentinel->next = seg->next;
+            send_segment_free(seg);
+        }
+        send_segment_free(r->sentinel);
+        r->node->send_head = NULL;
+        r->node->send_tail = NULL;
+        p2p_node_free(r->node);
+    }
+    net_manager_free(&r->nm);
+    main_state_free(&r->ms);
+}
+
+static int ot_queued(const struct ot_rig *r)
+{
+    int n = 0;
+
+    for (const struct send_segment *s = r->sentinel->next; s; s = s->next)
+        n++;
+    return n;
+}
+
+/* Cache a deterministic offer at `height` via the production cache setter. */
+static void ot_publish_offer(int32_t height)
+{
+    struct snapshot_offer offer;
+
+    memset(&offer, 0, sizeof(offer));
+    offer.height = height;
+    offer.peer_tip_height = height + 10;
+    offer.protocol_version = FAST_SYNC_PROTOCOL_VERSION;
+    offer.snapshot_schema_version = FAST_SYNC_SNAPSHOT_SCHEMA_VERSION;
+    memset(offer.block_hash, 0x55, 32);
+    memset(offer.utxo_root, 0x44, 32);
+    memset(offer.mmr_root, 0x22, 32);
+    memset(offer.mmb_root, 0x33, 32);
+    memset(offer.chain_work, 0x01, 32);
+    offer.num_utxos = LB_ENTRY_COUNT;
+    offer.total_bytes = LB_ENTRY_COUNT * 80;
+    msg_processor_update_offer(&offer);
+}
+
+static int test_snapshot_offer_maybe_offer(void)
+{
+    int failures = 0;
+
+    boot_snapshot_offer_test_set_trust_override(1);
+    boot_snapshot_offer_test_set_publication_override(1);
+
+    TEST("snapshot offer gates: no ZCL23 service, serving or receiving "
+         "state, chain at or below 100 blocks, and a peer within 100 blocks "
+         "of our height each queue nothing") {
+        struct gate_row {
+            const char *what;
+            uint64_t services;
+            enum peer_state state;
+            int32_t our_height;
+            int32_t starting_height;
+        };
+        static const struct gate_row rows[] = {
+            { "no ZCL23 service", 0, PEER_HANDSHAKE_COMPLETE, 150, -1 },
+            { "peer serving", NODE_ZCL23, PEER_SNAPSHOT_SERVING, 150, -1 },
+            { "peer receiving", NODE_ZCL23, PEER_SNAPSHOT_RECEIVING, 150, -1 },
+            { "our height 100", NODE_ZCL23, PEER_HANDSHAKE_COMPLETE, 100, -1 },
+            { "peer within 100", NODE_ZCL23, PEER_HANDSHAKE_COMPLETE, 150, 50 },
+        };
+
+        ot_publish_offer(150);
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+            struct ot_rig r;
+
+            ASSERT(ot_rig_init(&r, rows[i].our_height));
+            r.node->services = rows[i].services;
+            r.node->state = rows[i].state;
+            r.node->starting_height = rows[i].starting_height;
+            mp_snapshot_maybe_offer(&r.mp, r.node);
+            ASSERT(ot_queued(&r) == 0);
+            ASSERT(r.node->zsync_sent == 0);
+            ot_rig_free(&r);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_snapshot_offer_no_cache(void)
+{
+    int failures = 0;
+
+    TEST("snapshot offer: no cached offer queues nothing and leaves the "
+         "peer unmarked") {
+        struct ot_rig r;
+
+        msg_processor_invalidate_offer();
+        ASSERT(ot_rig_init(&r, 150));
+        mp_snapshot_maybe_offer(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == 0);
+        ASSERT(r.node->zsync_sent == 0);
+        ot_rig_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_snapshot_offer_boundary(void)
+{
+    int failures = 0;
+
+    boot_snapshot_offer_test_set_trust_override(1);
+    boot_snapshot_offer_test_set_publication_override(1);
+
+    TEST("snapshot offer: chain one block past 100 is offered, and the "
+         "starting-height window opens one block early") {
+        static const int32_t heights[] = { 101, 150 };
+        static const int32_t starts[] = { -1, 49 };
+
+        ot_publish_offer(150);
+        for (size_t i = 0; i < sizeof(heights) / sizeof(heights[0]); i++) {
+            struct ot_rig r;
+
+            ASSERT(ot_rig_init(&r, heights[i]));
+            r.node->starting_height = starts[i];
+            mp_snapshot_maybe_offer(&r.mp, r.node);
+            ASSERT(ot_queued(&r) > 0);
+            ASSERT(r.node->zsync_sent == UINT64_MAX);
+            ot_rig_free(&r);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_snapshot_offer_reoffer(void)
+{
+    int failures = 0;
+
+    boot_snapshot_offer_test_set_trust_override(1);
+    boot_snapshot_offer_test_set_publication_override(1);
+
+    TEST("snapshot offer: a fresh peer is offered once, stays quiet while "
+         "the offer is unchanged, and is re-offered when it changes") {
+        struct ot_rig r;
+        int first = 0;
+
+        ot_publish_offer(200);
+        ASSERT(ot_rig_init(&r, 150));
+        mp_snapshot_maybe_offer(&r.mp, r.node);
+        first = ot_queued(&r);
+        ASSERT(first > 0);
+        ASSERT(r.node->zsync_sent == UINT64_MAX);
+        ASSERT(r.node->zsync_offered_height == 200);
+        ASSERT(r.node->zsync_offered_count == LB_ENTRY_COUNT);
+
+        mp_snapshot_maybe_offer(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == first);
+
+        ot_publish_offer(201);
+        mp_snapshot_maybe_offer(&r.mp, r.node);
+        ASSERT(ot_queued(&r) > first);
+        ASSERT(r.node->zsync_offered_height == 201);
+        ot_rig_free(&r);
+        PASS();
+    } _test_next:;
+
+    boot_snapshot_offer_test_set_publication_override(-1);
+    boot_snapshot_offer_test_set_trust_override(-1);
+    msg_processor_invalidate_offer();
+    return failures;
+}
+
+static int test_snapshot_offer_send_tick(void)
+{
+    int failures = 0;
+
+    TEST("snapshot send tick: an idle handshake-complete peer with no swarm "
+         "or manifest queues nothing and keeps its state") {
+        struct ot_rig r;
+
+        ASSERT(!msgprocessor_test_swarm_is_active());
+        ASSERT(ot_rig_init(&r, 150));
+        mp_snapshot_send_tick(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == 0);
+        ASSERT(r.node->state == PEER_HANDSHAKE_COMPLETE);
+        ot_rig_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_snapshot_offer_swarm_gate(void)
+{
+    int failures = 0;
+
+    TEST("snapshot send tick: the chunk coordinator is skipped unless the "
+         "peer has a manifest and is past handshake, even with the swarm "
+         "active") {
+        struct ot_rig r;
+
+        int32_t inflight_before = 0;
+
+        ASSERT(ot_rig_init(&r, 150));
+        ASSERT(msgprocessor_test_swarm_try_claim());
+        inflight_before = r.node->swarm_inflight_chunk;
+        r.node->swarm_manifest_received = false;
+        mp_snapshot_send_tick(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == 0);
+        r.node->swarm_manifest_received = true;
+        r.node->state = PEER_CONNECTED;
+        mp_snapshot_send_tick(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == 0);
+        ASSERT(r.node->swarm_inflight_chunk == inflight_before);
+        msgprocessor_test_swarm_release();
+        ot_rig_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_snapshot_offer_serving(void)
+{
+    int failures = 0;
+
+    TEST("snapshot send tick: a serving peer with no cached offer falls "
+         "through to the idle path and keeps its serving state") {
+        struct ot_rig r;
+
+        msg_processor_invalidate_offer();
+        ASSERT(ot_rig_init(&r, 150));
+        r.node->state = PEER_SNAPSHOT_SERVING;
+        mp_snapshot_send_tick(&r.mp, r.node);
+        ASSERT(ot_queued(&r) == 0);
+        ASSERT(r.node->state == PEER_SNAPSHOT_SERVING);
+        ot_rig_free(&r);
+        PASS();
+    } _test_next:;
+
     return failures;
 }
 
@@ -716,6 +1011,14 @@ int test_snapshot_serve_loopback(void)
     failures += test_snapshot_serve_loopback_impl(false);
     failures += test_snapshot_serve_loopback_impl(true);
     failures += test_snapshot_serve_chunk_refusal_branches();
+
+    failures += test_snapshot_offer_maybe_offer();
+    failures += test_snapshot_offer_no_cache();
+    failures += test_snapshot_offer_boundary();
+    failures += test_snapshot_offer_reoffer();
+    failures += test_snapshot_offer_send_tick();
+    failures += test_snapshot_offer_swarm_gate();
+    failures += test_snapshot_offer_serving();
 
     {
         struct snapsync_serve_puzzle_census c;
