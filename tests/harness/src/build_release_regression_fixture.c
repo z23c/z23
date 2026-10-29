@@ -69,6 +69,201 @@ static bool brf_canonicalize(struct db_build_job *job,
     return true;
 }
 
+/* Check the caller's arguments and create the accepted-work fixture. */
+static bool brf_fixture_created(struct node_db *ndb, const char *dir,
+                                const struct db_build_job *candidate_job,
+                                const uint8_t test_input_root[32], int64_t now,
+                                const uint8_t action_root_out[32],
+                                const uint8_t proof_root_out[32],
+                                const char receipt_id_out[65],
+                                struct test_accepted_work_fixture *fixture)
+{
+    uint8_t candidate_source_root[32];
+    if (!ndb || !dir || !candidate_job || !test_input_root || now <= 30 ||
+        !action_root_out || !proof_root_out || !receipt_id_out ||
+        !zcl_hex_decode_lower(candidate_job->source_cas_sha3,
+                              candidate_source_root, 32) ||
+        !test_accepted_work_fixture_create(
+            dir, candidate_source_root, now, 51, fixture))
+        return false;
+    return true;
+}
+
+/* Install the fixture's proof policy and store its addressed object. */
+static bool brf_policy_stored(const char *dir,
+                              struct test_accepted_work_fixture *fixture)
+{
+    struct vcs_zcode_proof_policy_v1 *policy = &fixture->accepted.policy;
+    *policy = (struct vcs_zcode_proof_policy_v1) {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .required_proofs = VCS_ZCODE_PROOF_TEST,
+        .minimum_test_receipts = 1,
+        .minimum_matching_receipts = 1,
+        .maximum_proof_age_seconds = 3600,
+    };
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    if (vcs_zcode_proof_policy_serialize(policy, policy_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_policy_root(
+            policy, fixture->accepted.proof_policy_root) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(
+            dir, fixture->accepted.proof_policy_root, policy_wire,
+            sizeof(policy_wire)))
+        return false;
+    return true;
+}
+
+/* Store the task with its regression manifest and toolchain, then store the
+ * candidate that references the task. */
+static bool brf_task_candidate_stored(
+    const char *dir, struct test_accepted_work_fixture *fixture,
+    const struct db_build_job *candidate_job)
+{
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
+    memcpy(task->proof_policy_root, fixture->accepted.proof_policy_root, 32);
+    if (!vcs_build_release_regression_manifest_v1_store(
+            dir, task->acceptance_tests_root) ||
+        !zcl_hex_decode_lower(candidate_job->toolchain_sha3,
+                              task->toolchain_capsule_root, 32))
+        return false;
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    if (vcs_zcode_task_serialize(task, task_wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(task, fixture->accepted.task_root) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(
+            dir, fixture->accepted.task_root, task_wire, sizeof(task_wire)))
+        return false;
+
+    struct vcs_zcode_candidate_v1 *candidate = &fixture->accepted.candidate;
+    memcpy(candidate->task_root, fixture->accepted.task_root, 32);
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    if (vcs_zcode_candidate_serialize(candidate, candidate_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(candidate, fixture->accepted.candidate_root) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(
+            dir, fixture->accepted.candidate_root, candidate_wire,
+            sizeof(candidate_wire)))
+        return false;
+    return true;
+}
+
+/* Build the job and action rows, add them to the fabric plan and emit the
+ * resulting action root. */
+static bool brf_action_planned(struct node_db *ndb,
+                               struct test_accepted_work_fixture *fixture,
+                               const struct db_build_job *candidate_job,
+                               const uint8_t test_input_root[32],
+                               struct db_build_job *job,
+                               struct db_build_action *action,
+                               uint8_t action_root_out[32])
+{
+    brf_job(job); brf_action(action);
+    (void)snprintf(job->source_sha256, sizeof(job->source_sha256), "%s",
+                   candidate_job->source_sha256);
+    (void)snprintf(job->source_cas_sha3, sizeof(job->source_cas_sha3), "%s",
+                   candidate_job->source_cas_sha3);
+    (void)snprintf(job->toolchain_sha3, sizeof(job->toolchain_sha3), "%s",
+                   candidate_job->toolchain_sha3);
+    zcl_hex_encode(test_input_root, 32, action->input_root_sha3);
+    zcl_hex_encode(fixture->accepted.task_root, 32, action->task_root_sha3);
+    zcl_hex_encode(fixture->accepted.candidate_root, 32,
+                   action->candidate_root_sha3);
+    zcl_hex_encode(fixture->accepted.proof_policy_root, 32,
+                   action->proof_policy_root_sha3);
+    uint8_t fixed_flags[32], fixed_environment[32];
+    if (!vcs_build_action_v1_fixed_flags_root_for_kind(
+            action->kind, fixed_flags) ||
+        !vcs_build_action_v1_fixed_environment_root_for_kind(
+            action->kind, fixed_environment))
+        return false;
+    zcl_hex_encode(fixed_flags, 32, action->flags_sha3);
+    zcl_hex_encode(fixed_environment, 32, action->environment_sha3);
+    (void)snprintf(action->virtual_workdir, sizeof(action->virtual_workdir),
+                   "%s", VCS_BUILD_PACKAGE_VIRTUAL_ROOT_V1);
+    (void)snprintf(action->declared_outputs, sizeof(action->declared_outputs),
+                   "%s", VCS_BUILD_TEST_OUTPUT_V1);
+    (void)snprintf(action->resource_policy, sizeof(action->resource_policy),
+                   "%s", VCS_BUILD_TEST_RESOURCE_POLICY_V1);
+    if (!brf_canonicalize(job, action) ||
+        !build_fabric_plan(ndb, job, action).ok ||
+        !zcl_hex_decode_lower(action->action_id, action_root_out, 32))
+        return false;
+    return true;
+}
+
+/* Seal and store the passing test work receipt, reporting the sealed receipt
+ * and its object root. */
+static bool brf_work_receipt_stored(
+    const char *dir, struct test_accepted_work_fixture *fixture,
+    const uint8_t test_input_root[32], const uint8_t action_root_out[32],
+    const uint8_t secret[32], const uint8_t pubkey[32], int64_t now,
+    struct vcs_zcode_work_receipt_v1 *work, uint8_t work_root[32])
+{
+    *work = (struct vcs_zcode_work_receipt_v1) {
+        .schema_version = VCS_ZCODE_DEV_VERSION,
+        .work_kind = VCS_ZCODE_WORK_TEST,
+        .status = VCS_ZCODE_WORK_PASS,
+        .exit_status = 0,
+        .started_unix = now - 20,
+        .finished_unix = now - 10,
+    };
+    memcpy(work->task_root, fixture->accepted.task_root, 32);
+    memcpy(work->candidate_root, fixture->accepted.candidate_root, 32);
+    memcpy(work->action_root, action_root_out, 32);
+    memcpy(work->input_root, test_input_root, 32);
+    memcpy(work->proof_policy_root, fixture->accepted.proof_policy_root, 32);
+    memcpy(work->toolchain_capsule_root,
+           fixture->accepted.task.toolchain_capsule_root, 32);
+    memset(work->output_root, 0xe1, 32);
+    memset(work->lease_id, 0xe2, 32);
+    memset(work->evidence_root, 0xe3, 32);
+    memset(work->confinement_root, 0xe4, 32);
+    uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    if (vcs_zcode_work_receipt_seal(work, secret, pubkey) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_work_receipt_serialize(work, work_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_work_receipt_id(work, work_root) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(
+            dir, work_root, work_wire, sizeof(work_wire)))
+        return false;
+    return true;
+}
+
+/* Store the single-receipt proof set, re-run qualification read-only,
+ * confirm the saved receipt kept its REMOTE_OBSERVED trust state, and only
+ * then publish the receipt id. */
+static bool brf_qualification_confirmed(
+    struct node_db *ndb, const char *dir, const char *action_id,
+    const uint8_t work_root[32], const char *receipt_id, int64_t now,
+    uint8_t proof_root_out[32], char receipt_id_out[65])
+{
+    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
+    size_t proof_len = 0;
+    if (vcs_zcode_proof_set_serialize(
+            (const uint8_t (*)[32])work_root, 1, proof_wire,
+            sizeof(proof_wire), &proof_len) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_set_root(
+            (const uint8_t (*)[32])work_root, 1, proof_root_out) !=
+            VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(
+            dir, proof_root_out, proof_wire, proof_len))
+        return false;
+    struct build_fabric_proof_evaluation inspected = {0};
+    struct db_build_receipt unchanged;
+    bool valid = build_fabric_proof_evaluate_readonly(
+               ndb, dir, action_id, now, &inspected).ok &&
+           inspected.policy_satisfied && inspected.test_satisfied &&
+           inspected.test_receipts == 1 &&
+           db_build_receipt_find(ndb, receipt_id, &unchanged) &&
+           strcmp(unchanged.trust_state, "REMOTE_OBSERVED") == 0;
+    if (valid)
+        (void)snprintf(receipt_id_out, 65, "%s", receipt_id);
+    return valid;
+}
+
 /* Build the release test dependency through the same task/action/receipt/CAS
  * model used by real workers. The fixture bypasses process execution only so
  * this unit can exercise qualification policy deterministically; fixed worker
@@ -81,95 +276,19 @@ bool test_build_release_regression_fixture(
     char receipt_id_out[65])
 {
     struct test_accepted_work_fixture fixture;
-    uint8_t candidate_source_root[32];
-    if (!ndb || !dir || !candidate_job || !test_input_root || now <= 30 ||
-        !action_root_out || !proof_root_out || !receipt_id_out ||
-        !zcl_hex_decode_lower(candidate_job->source_cas_sha3,
-                              candidate_source_root, 32) ||
-        !test_accepted_work_fixture_create(
-            dir, candidate_source_root, now, 51, &fixture))
+    if (!brf_fixture_created(ndb, dir, candidate_job, test_input_root, now,
+                             action_root_out, proof_root_out, receipt_id_out,
+                             &fixture))
         return false;
-
-    struct vcs_zcode_proof_policy_v1 *policy = &fixture.accepted.policy;
-    *policy = (struct vcs_zcode_proof_policy_v1) {
-        .schema_version = VCS_ZCODE_DEV_VERSION,
-        .required_proofs = VCS_ZCODE_PROOF_TEST,
-        .minimum_test_receipts = 1,
-        .minimum_matching_receipts = 1,
-        .maximum_proof_age_seconds = 3600,
-    };
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    if (vcs_zcode_proof_policy_serialize(policy, policy_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_root(
-            policy, fixture.accepted.proof_policy_root) !=
-            VCS_ZCODE_DEV_OK ||
-        !vcs_object_put_addressed(
-            dir, fixture.accepted.proof_policy_root, policy_wire,
-            sizeof(policy_wire)))
+    if (!brf_policy_stored(dir, &fixture))
         return false;
-
-    struct vcs_zcode_task_v1 *task = &fixture.accepted.task;
-    memcpy(task->proof_policy_root, fixture.accepted.proof_policy_root, 32);
-    if (!vcs_build_release_regression_manifest_v1_store(
-            dir, task->acceptance_tests_root) ||
-        !zcl_hex_decode_lower(candidate_job->toolchain_sha3,
-                              task->toolchain_capsule_root, 32))
+    if (!brf_task_candidate_stored(dir, &fixture, candidate_job))
         return false;
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    if (vcs_zcode_task_serialize(task, task_wire) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_task_root(task, fixture.accepted.task_root) !=
-            VCS_ZCODE_DEV_OK ||
-        !vcs_object_put_addressed(
-            dir, fixture.accepted.task_root, task_wire, sizeof(task_wire)))
-        return false;
-
-    struct vcs_zcode_candidate_v1 *candidate = &fixture.accepted.candidate;
-    memcpy(candidate->task_root, fixture.accepted.task_root, 32);
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    if (vcs_zcode_candidate_serialize(candidate, candidate_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_root(candidate, fixture.accepted.candidate_root) !=
-            VCS_ZCODE_DEV_OK ||
-        !vcs_object_put_addressed(
-            dir, fixture.accepted.candidate_root, candidate_wire,
-            sizeof(candidate_wire)))
-        return false;
-
     struct db_build_job job;
     struct db_build_action action;
-    brf_job(&job); brf_action(&action);
-    (void)snprintf(job.source_sha256, sizeof(job.source_sha256), "%s",
-                   candidate_job->source_sha256);
-    (void)snprintf(job.source_cas_sha3, sizeof(job.source_cas_sha3), "%s",
-                   candidate_job->source_cas_sha3);
-    (void)snprintf(job.toolchain_sha3, sizeof(job.toolchain_sha3), "%s",
-                   candidate_job->toolchain_sha3);
-    zcl_hex_encode(test_input_root, 32, action.input_root_sha3);
-    zcl_hex_encode(fixture.accepted.task_root, 32, action.task_root_sha3);
-    zcl_hex_encode(fixture.accepted.candidate_root, 32,
-                   action.candidate_root_sha3);
-    zcl_hex_encode(fixture.accepted.proof_policy_root, 32,
-                   action.proof_policy_root_sha3);
-    uint8_t fixed_flags[32], fixed_environment[32];
-    if (!vcs_build_action_v1_fixed_flags_root_for_kind(
-            action.kind, fixed_flags) ||
-        !vcs_build_action_v1_fixed_environment_root_for_kind(
-            action.kind, fixed_environment))
+    if (!brf_action_planned(ndb, &fixture, candidate_job, test_input_root,
+                            &job, &action, action_root_out))
         return false;
-    zcl_hex_encode(fixed_flags, 32, action.flags_sha3);
-    zcl_hex_encode(fixed_environment, 32, action.environment_sha3);
-    (void)snprintf(action.virtual_workdir, sizeof(action.virtual_workdir),
-                   "%s", VCS_BUILD_PACKAGE_VIRTUAL_ROOT_V1);
-    (void)snprintf(action.declared_outputs, sizeof(action.declared_outputs),
-                   "%s", VCS_BUILD_TEST_OUTPUT_V1);
-    (void)snprintf(action.resource_policy, sizeof(action.resource_policy),
-                   "%s", VCS_BUILD_TEST_RESOURCE_POLICY_V1);
-    if (!brf_canonicalize(&job, &action) ||
-        !build_fabric_plan(ndb, &job, &action).ok ||
-        !zcl_hex_decode_lower(action.action_id, action_root_out, 32))
-        return false;
-
     uint8_t seed[32], pubkey[32], secret[32];
     memset(seed, 52, sizeof(seed));
     ed25519_keypair(pubkey, secret, seed);
@@ -184,35 +303,12 @@ bool test_build_release_regression_fixture(
     worker.last_seen_at = now - 30;
     if (!build_fabric_worker_approve(ndb, &worker, now - 30).ok)
         return false;
-
-    struct vcs_zcode_work_receipt_v1 work = {
-        .schema_version = VCS_ZCODE_DEV_VERSION,
-        .work_kind = VCS_ZCODE_WORK_TEST,
-        .status = VCS_ZCODE_WORK_PASS,
-        .exit_status = 0,
-        .started_unix = now - 20,
-        .finished_unix = now - 10,
-    };
-    memcpy(work.task_root, fixture.accepted.task_root, 32);
-    memcpy(work.candidate_root, fixture.accepted.candidate_root, 32);
-    memcpy(work.action_root, action_root_out, 32);
-    memcpy(work.input_root, test_input_root, 32);
-    memcpy(work.proof_policy_root, fixture.accepted.proof_policy_root, 32);
-    memcpy(work.toolchain_capsule_root, task->toolchain_capsule_root, 32);
-    memset(work.output_root, 0xe1, 32);
-    memset(work.lease_id, 0xe2, 32);
-    memset(work.evidence_root, 0xe3, 32);
-    memset(work.confinement_root, 0xe4, 32);
-    uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES], work_root[32];
-    if (vcs_zcode_work_receipt_seal(&work, secret, pubkey) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_work_receipt_serialize(&work, work_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_work_receipt_id(&work, work_root) != VCS_ZCODE_DEV_OK ||
-        !vcs_object_put_addressed(
-            dir, work_root, work_wire, sizeof(work_wire)))
+    struct vcs_zcode_work_receipt_v1 work;
+    uint8_t work_root[32];
+    if (!brf_work_receipt_stored(dir, &fixture, test_input_root,
+                                 action_root_out, secret, pubkey, now, &work,
+                                 work_root))
         return false;
-
     struct db_build_receipt row = {0};
     zcl_hex_encode(work_root, 32, row.receipt_id);
     (void)snprintf(row.action_id, sizeof(row.action_id), "%s",
@@ -242,26 +338,7 @@ bool test_build_release_regression_fixture(
     action.updated_at = work.finished_unix;
     if (!db_build_action_save(ndb, &action)) return false;
 
-    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
-    size_t proof_len = 0;
-    if (vcs_zcode_proof_set_serialize(
-            (const uint8_t (*)[32])&work_root, 1, proof_wire,
-            sizeof(proof_wire), &proof_len) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_root(
-            (const uint8_t (*)[32])&work_root, 1, proof_root_out) !=
-            VCS_ZCODE_DEV_OK ||
-        !vcs_object_put_addressed(
-            dir, proof_root_out, proof_wire, proof_len))
-        return false;
-    struct build_fabric_proof_evaluation inspected = {0};
-    struct db_build_receipt unchanged;
-    bool valid = build_fabric_proof_evaluate_readonly(
-               ndb, dir, action.action_id, now, &inspected).ok &&
-           inspected.policy_satisfied && inspected.test_satisfied &&
-           inspected.test_receipts == 1 &&
-           db_build_receipt_find(ndb, row.receipt_id, &unchanged) &&
-           strcmp(unchanged.trust_state, "REMOTE_OBSERVED") == 0;
-    if (valid)
-        (void)snprintf(receipt_id_out, 65, "%s", row.receipt_id);
-    return valid;
+    return brf_qualification_confirmed(ndb, dir, action.action_id, work_root,
+                                       row.receipt_id, now, proof_root_out,
+                                       receipt_id_out);
 }

@@ -763,7 +763,6 @@ platform/modules/util/src/authority_receipt.c:authority_receipt_write_atomic:44
 platform/modules/util/src/cpu_topology.c:scan_darwin:18
 platform/modules/util/src/cpu_topology.c:scan_windows:27
 platform/modules/util/src/supervisor.c:sweep_once:18
-tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
 tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:32
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
