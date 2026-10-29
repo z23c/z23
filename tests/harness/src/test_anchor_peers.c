@@ -121,6 +121,186 @@ static struct p2p_node *anchor_add_peer(struct connman *cm,
     return n;
 }
 
+/* Save→load round-trip of a 3-peer set; returns 1 on failure. */
+static int anchor_roundtrip_check(void)
+{
+    printf("anchor_peers: save/load round-trip... ");
+    char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "roundtrip");
+    struct anchor_peer_set in;
+    memset(&in, 0, sizeof(in));
+    in.count = 3;
+    anchor_set_ipv4(&in.peers[0].addr, 203, 0, 113, 7);
+    in.peers[0].port = 8033; in.peers[0].services = 1;
+    in.peers[0].last_height = 3117000; in.peers[0].last_success = 1700000001;
+    anchor_set_ipv4(&in.peers[1].addr, 198, 51, 100, 9);
+    in.peers[1].port = 8033; in.peers[1].services = 5;
+    in.peers[1].last_height = 3117005; in.peers[1].last_success = 1700000050;
+    anchor_set_ipv4(&in.peers[2].addr, 192, 0, 2, 3);
+    in.peers[2].port = 18033; in.peers[2].services = 9;
+    in.peers[2].last_height = -1; in.peers[2].last_success = 0;
+
+    bool saved = anchor_peers_save(dir, &in).ok;
+
+    struct anchor_peer_set out;
+    enum anchor_load_status st = anchor_peers_load(dir, &out);
+    bool ok = saved && st == ANCHOR_LOAD_OK && out.count == in.count;
+    for (size_t i = 0; ok && i < in.count; i++)
+        ok = ok && anchor_eq(&in.peers[i], &out.peers[i]);
+
+    anchor_cleanup(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (saved=%d st=%s count=%zu)\n",
+                  saved, anchor_load_status_name(st), out.count); return 1; }
+    return 0;
+}
+
+/* Empty-set save→load round-trip; returns 1 on failure. */
+static int anchor_empty_set_check(void)
+{
+    printf("anchor_peers: empty set round-trip... ");
+    char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "empty");
+    struct anchor_peer_set in; memset(&in, 0, sizeof(in)); in.count = 0;
+    bool saved = anchor_peers_save(dir, &in).ok;
+    struct anchor_peer_set out;
+    enum anchor_load_status st = anchor_peers_load(dir, &out);
+    bool ok = saved && st == ANCHOR_LOAD_OK && out.count == 0;
+    anchor_cleanup(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (saved=%d st=%s)\n", saved, anchor_load_status_name(st)); return 1; }
+    return 0;
+}
+
+/* A missing anchors.dat must load EMPTY; returns 1 on failure. */
+static int anchor_missing_file_check(void)
+{
+    printf("anchor_peers: missing file loads empty... ");
+    char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "missing");
+    struct anchor_peer_set out;
+    memset(&out, 0xAB, sizeof(out)); /* poison to prove it's reset */
+    enum anchor_load_status st = anchor_peers_load(dir, &out);
+    bool ok = st == ANCHOR_LOAD_EMPTY && out.count == 0;
+    anchor_cleanup(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (st=%s count=%zu)\n", anchor_load_status_name(st), out.count); return 1; }
+    return 0;
+}
+
+/* Init a mainnet connman for the collect/gather checks; returns connman_init's result. */
+static bool anchor_connman_init(struct connman *cm)
+{
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    return connman_init(cm, params, &sigs);
+}
+
+/* Check collect_healthy_anchors returns only the 2 healthy outbound peers; returns 1 on failure. */
+static int anchor_collect_healthy_check(void)
+{
+    printf("anchor_peers: collect_healthy_anchors filters... ");
+    struct connman cm;
+    bool ok = anchor_connman_init(&cm);
+
+    /* 2 genuinely-healthy outbound peers … */
+    anchor_add_peer(&cm, 113, 10, PEER_HANDSHAKE_COMPLETE, false, false, false, NODE_NETWORK);
+    anchor_add_peer(&cm, 114, 11, PEER_HANDSHAKE_COMPLETE, false, false, false, NODE_NETWORK);
+    /* … and four that must be EXCLUDED: */
+    anchor_add_peer(&cm, 115, 12, PEER_HANDSHAKE_COMPLETE, true,  false, false, NODE_NETWORK); /* inbound */
+    anchor_add_peer(&cm, 116, 13, PEER_HANDSHAKE_COMPLETE, false, true,  false, NODE_NETWORK); /* disconnecting */
+    anchor_add_peer(&cm, 117, 14, PEER_CONNECTING,         false, false, false, NODE_NETWORK); /* pre-handshake */
+    anchor_add_peer(&cm, 118, 15, PEER_HANDSHAKE_COMPLETE, false, false, true,  NODE_NETWORK); /* feeler */
+    anchor_add_peer(&cm, 119, 16, PEER_HANDSHAKE_COMPLETE, false, false, false, 0);            /* not NODE_NETWORK */
+
+    struct anchor_peer_set set;
+    connman_collect_healthy_anchors(&cm, &set);
+    ok = ok && set.count == 2;
+    /* both collected anchors carry NODE_NETWORK and a real height */
+    for (size_t i = 0; ok && i < set.count; i++)
+        ok = ok && (set.peers[i].services & NODE_NETWORK) != 0 &&
+                   set.peers[i].port == 8033;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (collected=%zu, want 2)\n", set.count); return 1; }
+    return 0;
+}
+
+/* Init cm on mainnet, load its 3 anchors and seed addrman; returns connman_init's result. */
+static bool anchor_gather_prepare(struct connman *cm)
+{
+    bool ok = anchor_connman_init(cm);
+
+    /* Load 3 anchors (distinct /16s so the diversity tally passes). */
+    memset(&cm->anchors, 0, sizeof(cm->anchors));
+    memset(cm->anchors_tried, 0, sizeof(cm->anchors_tried));
+    cm->anchors.count = 3;
+    anchor_set_ipv4(&cm->anchors.peers[0].addr, 203, 0, 113, 21);
+    cm->anchors.peers[0].port = 8033; cm->anchors.peers[0].services = NODE_NETWORK;
+    anchor_set_ipv4(&cm->anchors.peers[1].addr, 198, 51, 100, 22);
+    cm->anchors.peers[1].port = 8033; cm->anchors.peers[1].services = NODE_NETWORK;
+    anchor_set_ipv4(&cm->anchors.peers[2].addr, 192, 0, 2, 23);
+    cm->anchors.peers[2].port = 8033; cm->anchors.peers[2].services = NODE_NETWORK;
+
+    /* Populate addrman with a couple of distinct-/16 addresses. */
+    for (int i = 0; i < 4; i++) {
+        struct net_address a; net_address_init(&a);
+        unsigned char ip4[4] = { (unsigned char)(11 + i), 22, 33, (unsigned char)(40 + i) };
+        net_addr_set_ipv4(&a.svc.addr, ip4);
+        a.svc.port = 8033; a.nServices = NODE_NETWORK;
+        struct net_addr src; net_addr_init(&src);
+        addrman_add(&cm->manager.addrman, &a, &src, 0);
+    }
+    return ok;
+}
+
+/* Count ANCHOR candidates in a batch; false if any anchor follows a non-anchor. */
+static bool anchor_batch_anchor_order_ok(const struct connman_dial_candidate *batch,
+                                         size_t n, size_t *anchor_count)
+{
+    bool seen_nonanchor = false;
+    bool order_ok = true;
+    *anchor_count = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (batch[i].source == CONNMAN_TARGET_ANCHOR) {
+            if (seen_nonanchor) order_ok = false;  /* anchor after addrman */
+            (*anchor_count)++;
+        } else {
+            seen_nonanchor = true;
+        }
+    }
+    return order_ok;
+}
+
+/* Check the first gather returns the 3 loaded anchors before any addrman pick and a second gather returns none; returns 1 on failure. */
+static int anchor_gather_order_check(void)
+{
+    printf("anchor_peers: gather returns anchors before addrman... ");
+    struct connman cm;
+    bool ok = anchor_gather_prepare(&cm);
+
+    struct connman_dial_candidate batch[8];
+    size_t n = connman_gather_dial_candidates(&cm, batch, 8);
+
+    /* The first 3 must be ANCHOR, matching the loaded anchors in order,
+     * and NO anchor may appear after a non-anchor candidate. */
+    size_t anchor_count = 0;
+    bool order_ok = anchor_batch_anchor_order_ok(batch, n, &anchor_count);
+    ok = ok && anchor_count == 3 && order_ok;
+    for (size_t i = 0; ok && i < 3; i++)
+        ok = ok && batch[i].source == CONNMAN_TARGET_ANCHOR &&
+                   net_addr_eq(&batch[i].addr.svc.addr,
+                               &cm.anchors.peers[i].addr);
+
+    /* A second gather returns NO anchors (each got its one attempt). */
+    struct connman_dial_candidate batch2[8];
+    size_t n2 = connman_gather_dial_candidates(&cm, batch2, 8);
+    for (size_t i = 0; ok && i < n2; i++)
+        ok = ok && batch2[i].source != CONNMAN_TARGET_ANCHOR;
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL (n=%zu anchors=%zu order_ok=%d)\n", n, anchor_count, order_ok); return 1; }
+    return 0;
+}
+
 #ifdef ZCL_TESTING
 /* Fork+exec the floor lint gate in isolated selftest mode; return exit code. */
 #if !defined(_WIN32)
@@ -160,6 +340,29 @@ static int run_floor_gate_selftest(const char *fixture_path)
     return -1;
 #endif
 }
+
+/* Check the floor lint gate trips on a planted literal and passes a clean fixture; returns 1 on failure. */
+static int anchor_floor_gate_check(void)
+{
+    printf("anchor_peers: floor lint gate trips then passes... ");
+    char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "floorlint");
+    char bad[512], good[512];
+    snprintf(bad, sizeof(bad), "%s/bad_fixture.c", dir);
+    snprintf(good, sizeof(good), "%s/good_fixture.c", dir);
+
+    FILE *fb = fopen(bad, "w");
+    if (fb) { fprintf(fb, "#define PEER_FLOOR_MIN 3\n"); fclose(fb); }
+    FILE *fg = fopen(good, "w");
+    if (fg) { fprintf(fg, "int x = ZCL_PEER_FLOOR_HEALTHY;\n"); fclose(fg); }
+
+    int rc_bad = run_floor_gate_selftest(bad);
+    int rc_good = run_floor_gate_selftest(good);
+    bool ok = (rc_bad == 1) && (rc_good == 0);
+    anchor_cleanup(dir);
+    if (ok) printf("OK\n");
+    else { printf("FAIL (rc_bad=%d want 1, rc_good=%d want 0)\n", rc_bad, rc_good); return 1; }
+    return 0;
+}
 #endif
 
 int test_anchor_peers(void);
@@ -170,49 +373,10 @@ int test_anchor_peers(void)
     printf("\n=== anchor peers tests ===\n");
 
     /* ── 1. round-trip ─────────────────────────────────────────── */
-    printf("anchor_peers: save/load round-trip... ");
-    {
-        char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "roundtrip");
-        struct anchor_peer_set in;
-        memset(&in, 0, sizeof(in));
-        in.count = 3;
-        anchor_set_ipv4(&in.peers[0].addr, 203, 0, 113, 7);
-        in.peers[0].port = 8033; in.peers[0].services = 1;
-        in.peers[0].last_height = 3117000; in.peers[0].last_success = 1700000001;
-        anchor_set_ipv4(&in.peers[1].addr, 198, 51, 100, 9);
-        in.peers[1].port = 8033; in.peers[1].services = 5;
-        in.peers[1].last_height = 3117005; in.peers[1].last_success = 1700000050;
-        anchor_set_ipv4(&in.peers[2].addr, 192, 0, 2, 3);
-        in.peers[2].port = 18033; in.peers[2].services = 9;
-        in.peers[2].last_height = -1; in.peers[2].last_success = 0;
-
-        bool saved = anchor_peers_save(dir, &in).ok;
-
-        struct anchor_peer_set out;
-        enum anchor_load_status st = anchor_peers_load(dir, &out);
-        bool ok = saved && st == ANCHOR_LOAD_OK && out.count == in.count;
-        for (size_t i = 0; ok && i < in.count; i++)
-            ok = ok && anchor_eq(&in.peers[i], &out.peers[i]);
-
-        anchor_cleanup(dir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (saved=%d st=%s count=%zu)\n",
-                      saved, anchor_load_status_name(st), out.count); failures++; }
-    }
+    failures += anchor_roundtrip_check();
 
     /* ── 2. empty-set round-trip ───────────────────────────────── */
-    printf("anchor_peers: empty set round-trip... ");
-    {
-        char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "empty");
-        struct anchor_peer_set in; memset(&in, 0, sizeof(in)); in.count = 0;
-        bool saved = anchor_peers_save(dir, &in).ok;
-        struct anchor_peer_set out;
-        enum anchor_load_status st = anchor_peers_load(dir, &out);
-        bool ok = saved && st == ANCHOR_LOAD_OK && out.count == 0;
-        anchor_cleanup(dir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (saved=%d st=%s)\n", saved, anchor_load_status_name(st)); failures++; }
-    }
+    failures += anchor_empty_set_check();
 
     /* ── 3. corrupt body → quarantine ──────────────────────────── */
     printf("anchor_peers: corrupt body is quarantined... ");
@@ -251,131 +415,17 @@ int test_anchor_peers(void)
     }
 
     /* ── 4. missing file → EMPTY ───────────────────────────────── */
-    printf("anchor_peers: missing file loads empty... ");
-    {
-        char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "missing");
-        struct anchor_peer_set out;
-        memset(&out, 0xAB, sizeof(out)); /* poison to prove it's reset */
-        enum anchor_load_status st = anchor_peers_load(dir, &out);
-        bool ok = st == ANCHOR_LOAD_EMPTY && out.count == 0;
-        anchor_cleanup(dir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (st=%s count=%zu)\n", anchor_load_status_name(st), out.count); failures++; }
-    }
+    failures += anchor_missing_file_check();
 
     /* ── 5. collect_healthy_anchors filters the node table ─────── */
-    printf("anchor_peers: collect_healthy_anchors filters... ");
-    {
-        chain_params_select(CHAIN_MAIN);
-        const struct chain_params *params = chain_params_get();
-        struct connman cm; struct node_signals sigs;
-        memset(&sigs, 0, sizeof(sigs));
-        bool ok = connman_init(&cm, params, &sigs);
-
-        /* 2 genuinely-healthy outbound peers … */
-        anchor_add_peer(&cm, 113, 10, PEER_HANDSHAKE_COMPLETE, false, false, false, NODE_NETWORK);
-        anchor_add_peer(&cm, 114, 11, PEER_HANDSHAKE_COMPLETE, false, false, false, NODE_NETWORK);
-        /* … and four that must be EXCLUDED: */
-        anchor_add_peer(&cm, 115, 12, PEER_HANDSHAKE_COMPLETE, true,  false, false, NODE_NETWORK); /* inbound */
-        anchor_add_peer(&cm, 116, 13, PEER_HANDSHAKE_COMPLETE, false, true,  false, NODE_NETWORK); /* disconnecting */
-        anchor_add_peer(&cm, 117, 14, PEER_CONNECTING,         false, false, false, NODE_NETWORK); /* pre-handshake */
-        anchor_add_peer(&cm, 118, 15, PEER_HANDSHAKE_COMPLETE, false, false, true,  NODE_NETWORK); /* feeler */
-        anchor_add_peer(&cm, 119, 16, PEER_HANDSHAKE_COMPLETE, false, false, false, 0);            /* not NODE_NETWORK */
-
-        struct anchor_peer_set set;
-        connman_collect_healthy_anchors(&cm, &set);
-        ok = ok && set.count == 2;
-        /* both collected anchors carry NODE_NETWORK and a real height */
-        for (size_t i = 0; ok && i < set.count; i++)
-            ok = ok && (set.peers[i].services & NODE_NETWORK) != 0 &&
-                       set.peers[i].port == 8033;
-        if (ok) printf("OK\n");
-        else { printf("FAIL (collected=%zu, want 2)\n", set.count); failures++; }
-    }
+    failures += anchor_collect_healthy_check();
 
     /* ── 6. anchors are gathered BEFORE addrman picks ──────────── */
-    printf("anchor_peers: gather returns anchors before addrman... ");
-    {
-        chain_params_select(CHAIN_MAIN);
-        const struct chain_params *params = chain_params_get();
-        struct connman cm; struct node_signals sigs;
-        memset(&sigs, 0, sizeof(sigs));
-        bool ok = connman_init(&cm, params, &sigs);
-
-        /* Load 3 anchors (distinct /16s so the diversity tally passes). */
-        memset(&cm.anchors, 0, sizeof(cm.anchors));
-        memset(cm.anchors_tried, 0, sizeof(cm.anchors_tried));
-        cm.anchors.count = 3;
-        anchor_set_ipv4(&cm.anchors.peers[0].addr, 203, 0, 113, 21);
-        cm.anchors.peers[0].port = 8033; cm.anchors.peers[0].services = NODE_NETWORK;
-        anchor_set_ipv4(&cm.anchors.peers[1].addr, 198, 51, 100, 22);
-        cm.anchors.peers[1].port = 8033; cm.anchors.peers[1].services = NODE_NETWORK;
-        anchor_set_ipv4(&cm.anchors.peers[2].addr, 192, 0, 2, 23);
-        cm.anchors.peers[2].port = 8033; cm.anchors.peers[2].services = NODE_NETWORK;
-
-        /* Populate addrman with a couple of distinct-/16 addresses. */
-        for (int i = 0; i < 4; i++) {
-            struct net_address a; net_address_init(&a);
-            unsigned char ip4[4] = { (unsigned char)(11 + i), 22, 33, (unsigned char)(40 + i) };
-            net_addr_set_ipv4(&a.svc.addr, ip4);
-            a.svc.port = 8033; a.nServices = NODE_NETWORK;
-            struct net_addr src; net_addr_init(&src);
-            addrman_add(&cm.manager.addrman, &a, &src, 0);
-        }
-
-        struct connman_dial_candidate batch[8];
-        size_t n = connman_gather_dial_candidates(&cm, batch, 8);
-
-        /* The first 3 must be ANCHOR, matching the loaded anchors in order,
-         * and NO anchor may appear after a non-anchor candidate. */
-        size_t anchor_count = 0;
-        bool seen_nonanchor = false;
-        bool order_ok = true;
-        for (size_t i = 0; i < n; i++) {
-            if (batch[i].source == CONNMAN_TARGET_ANCHOR) {
-                if (seen_nonanchor) order_ok = false;  /* anchor after addrman */
-                anchor_count++;
-            } else {
-                seen_nonanchor = true;
-            }
-        }
-        ok = ok && anchor_count == 3 && order_ok;
-        for (size_t i = 0; ok && i < 3; i++)
-            ok = ok && batch[i].source == CONNMAN_TARGET_ANCHOR &&
-                       net_addr_eq(&batch[i].addr.svc.addr,
-                                   &cm.anchors.peers[i].addr);
-
-        /* A second gather returns NO anchors (each got its one attempt). */
-        struct connman_dial_candidate batch2[8];
-        size_t n2 = connman_gather_dial_candidates(&cm, batch2, 8);
-        for (size_t i = 0; ok && i < n2; i++)
-            ok = ok && batch2[i].source != CONNMAN_TARGET_ANCHOR;
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL (n=%zu anchors=%zu order_ok=%d)\n", n, anchor_count, order_ok); failures++; }
-    }
+    failures += anchor_gather_order_check();
 
 #ifdef ZCL_TESTING
     /* ── 7. floor lint gate trips on a planted literal, passes clean ── */
-    printf("anchor_peers: floor lint gate trips then passes... ");
-    {
-        char dir[256]; anchor_tmp_dir(dir, sizeof(dir), "floorlint");
-        char bad[512], good[512];
-        snprintf(bad, sizeof(bad), "%s/bad_fixture.c", dir);
-        snprintf(good, sizeof(good), "%s/good_fixture.c", dir);
-
-        FILE *fb = fopen(bad, "w");
-        if (fb) { fprintf(fb, "#define PEER_FLOOR_MIN 3\n"); fclose(fb); }
-        FILE *fg = fopen(good, "w");
-        if (fg) { fprintf(fg, "int x = ZCL_PEER_FLOOR_HEALTHY;\n"); fclose(fg); }
-
-        int rc_bad = run_floor_gate_selftest(bad);
-        int rc_good = run_floor_gate_selftest(good);
-        bool ok = (rc_bad == 1) && (rc_good == 0);
-        anchor_cleanup(dir);
-        if (ok) printf("OK\n");
-        else { printf("FAIL (rc_bad=%d want 1, rc_good=%d want 0)\n", rc_bad, rc_good); failures++; }
-    }
+    failures += anchor_floor_gate_check();
 #endif
 
     return failures + ZCL_TEST_SETUP_FAILURES();
