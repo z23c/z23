@@ -182,6 +182,112 @@ static void rebuild_seed_tip(struct main_state *ms, sqlite3 *progress_db)
                  tip_height, r.message);
 }
 
+/* Candidate finalized tip plus the live-chain frame it would extend. */
+struct seed_tip_plan {
+    struct block_index *tip;
+    struct block_index *cur_tip;
+    int tip_height;
+    int cur_h;
+    int effective_floor;
+};
+
+/* Resolve the durable finalized tip and apply the forward-only / gap bounds.
+ * Returns false for every no-op outcome (caller returns 0). */
+static bool seed_tip_resolve_plan(struct main_state *ms,
+                                  sqlite3 *progress_db,
+                                  struct seed_tip_plan *p)
+{
+    /* Self-consistent resolve: the returned height OWNS the returned hash
+     * (see rebuild_seed_tip above — a raw cursor-1 read would manufacture a
+     * splice-class poisoned pair in the advance->anchor crash window). */
+    int tip_height = -1;
+    uint8_t tip_hash[32];
+    if (!tip_finalize_stage_resolve_durable_tip(progress_db, &tip_height,
+                                                tip_hash))
+        return false;
+    if (tip_height < 0)
+        return false;
+
+    struct uint256 th;
+    memcpy(th.data, tip_hash, 32);
+    struct block_index *tip = block_map_find(&ms->map_block_index, &th);
+    if (!tip)
+        return false;
+
+    /* Branch selection uses the cached active-chain window tip, not
+     * active_chain_tip()/height(), which are authority-aware and can already
+     * report the finalized target being adopted. */
+    struct block_index *cur_tip = active_chain_cached_tip(&ms->chain_active);
+    int cur_h = cur_tip ? cur_tip->nHeight : -1;
+
+    /* One effective_floor drives both the bound check and the walk.
+     *   - extend-live-chain branch (cur_tip != NULL) : floor = cached cur_h
+     *   - genesis-root branch       (cur_tip == NULL) : floor = 0 */
+    int effective_floor = cur_tip ? cur_h : 0;
+
+    /* Forward-only: never rewind or sidestep. */
+    if (cur_tip && tip_height <= effective_floor)
+        return false;
+    if (!cur_tip && tip_height <= 0)
+        return false;  /* genesis-only chain: nothing to seed */
+
+    /* Bound the actual walk against effective_floor (not cur_h): a NULL-tip
+     * boot has floor 0, so a far-ahead tip is refused here. */
+    if ((int64_t)tip_height - (int64_t)effective_floor >
+        BLOCK_INDEX_LOADER_SEED_MAX_GAP)
+        return false;
+
+    p->tip = tip;
+    p->cur_tip = cur_tip;
+    p->tip_height = tip_height;
+    p->cur_h = cur_h;
+    p->effective_floor = effective_floor;
+    return true;
+}
+
+/* Contiguity walk down to effective_floor, then the landing check (live tip
+ * pointer-equal, or canonical genesis). Returns 0 to refuse, 1 to proceed. */
+static int seed_tip_walk_ok(const struct seed_tip_plan *p,
+                             const struct chain_params *params)
+{
+    struct block_index *tip = p->tip;
+    struct block_index *cur_tip = p->cur_tip;
+    /* Contiguity walk down to effective_floor. block_index_is_valid already
+     * rejects any BLOCK_FAILED_ANY_MASK failure (incl. TRANSIENT). */
+    struct block_index *node = tip;
+    for (int h = p->tip_height; h > p->effective_floor; h--) {
+        if (!node || node->nHeight != h)
+            return 0;
+        if (!(node->nStatus & BLOCK_HAVE_DATA))
+            return 0;
+        if (!block_index_is_valid(node, BLOCK_VALID_SCRIPTS))
+            return 0;
+        node = node->pprev;
+    }
+
+    if (cur_tip) {
+        /* Extend-live-chain branch: walk must land pointer-equal
+         * on the current tip — a pure forward extension, never a fork. */
+        if (node != cur_tip)
+            return 0;
+    } else {
+        /* GENESIS-ROOT branch. The walk consumed [tip_height..1]; `node`
+         * is now the height-0 terminus. Require height-0 + HAVE_DATA +
+         * VALID_SCRIPTS and the canonical genesis hash. */
+        if (!node || node->nHeight != 0)
+            return 0;
+        if (!(node->nStatus & BLOCK_HAVE_DATA))
+            return 0;
+        if (!block_index_is_valid(node, BLOCK_VALID_SCRIPTS))
+            return 0;
+        if (!node->phashBlock ||
+            memcmp(node->phashBlock->data,
+                   params->consensus.hashGenesisBlock.data, 32) != 0)
+            return 0;  /* terminus is not the canonical genesis — refuse */
+    }
+    return 1;
+}
+
 /* Public, FORWARD-ONLY finalized-tip seed for the NORMAL boot path.
  *
  * rebuild_seed_tip() (above) directly publishes the tip on the
@@ -212,45 +318,13 @@ int block_index_loader_seed_tip_from_finalized(struct main_state *ms,
     if (!params || !progress_db)
         return 0;
 
-    /* Self-consistent resolve: the returned height OWNS the returned hash
-     * (see rebuild_seed_tip above — a raw cursor-1 read would manufacture a
-     * splice-class poisoned pair in the advance->anchor crash window). */
-    int tip_height = -1;
-    uint8_t tip_hash[32];
-    if (!tip_finalize_stage_resolve_durable_tip(progress_db, &tip_height,
-                                                tip_hash))
+    struct seed_tip_plan plan;
+    if (!seed_tip_resolve_plan(ms, progress_db, &plan))
         return 0;
-    if (tip_height < 0)
-        return 0;
-
-    struct uint256 th;
-    memcpy(th.data, tip_hash, 32);
-    struct block_index *tip = block_map_find(&ms->map_block_index, &th);
-    if (!tip)
-        return 0;
-
-    /* Branch selection uses the cached active-chain window tip, not
-     * active_chain_tip()/height(), which are authority-aware and can already
-     * report the finalized target being adopted. */
-    struct block_index *cur_tip = active_chain_cached_tip(&ms->chain_active);
-    int cur_h = cur_tip ? cur_tip->nHeight : -1;
-
-    /* One effective_floor drives both the bound check and the walk.
-     *   - extend-live-chain branch (cur_tip != NULL) : floor = cached cur_h
-     *   - genesis-root branch       (cur_tip == NULL) : floor = 0 */
-    int effective_floor = cur_tip ? cur_h : 0;
-
-    /* Forward-only: never rewind or sidestep. */
-    if (cur_tip && tip_height <= effective_floor)
-        return 0;
-    if (!cur_tip && tip_height <= 0)
-        return 0;  /* genesis-only chain: nothing to seed */
-
-    /* Bound the actual walk against effective_floor (not cur_h): a NULL-tip
-     * boot has floor 0, so a far-ahead tip is refused here. */
-    if ((int64_t)tip_height - (int64_t)effective_floor >
-        BLOCK_INDEX_LOADER_SEED_MAX_GAP)
-        return 0;
+    struct block_index *tip = plan.tip;
+    struct block_index *cur_tip = plan.cur_tip;
+    int tip_height = plan.tip_height;
+    int cur_h = plan.cur_h;
 
     /* Runtime precondition finalized<=coins: install only when coins have
      * been applied through the tip about to be published. */
@@ -265,39 +339,8 @@ int block_index_loader_seed_tip_from_finalized(struct main_state *ms,
         return 0;
     }
 
-    /* Contiguity walk down to effective_floor. block_index_is_valid already
-     * rejects any BLOCK_FAILED_ANY_MASK failure (incl. TRANSIENT). */
-    struct block_index *node = tip;
-    for (int h = tip_height; h > effective_floor; h--) {
-        if (!node || node->nHeight != h)
-            return 0;
-        if (!(node->nStatus & BLOCK_HAVE_DATA))
-            return 0;
-        if (!block_index_is_valid(node, BLOCK_VALID_SCRIPTS))
-            return 0;
-        node = node->pprev;
-    }
-
-    if (cur_tip) {
-        /* Extend-live-chain branch: walk must land pointer-equal
-         * on the current tip — a pure forward extension, never a fork. */
-        if (node != cur_tip)
-            return 0;
-    } else {
-        /* GENESIS-ROOT branch. The walk consumed [tip_height..1]; `node`
-         * is now the height-0 terminus. Require height-0 + HAVE_DATA +
-         * VALID_SCRIPTS and the canonical genesis hash. */
-        if (!node || node->nHeight != 0)
-            return 0;
-        if (!(node->nStatus & BLOCK_HAVE_DATA))
-            return 0;
-        if (!block_index_is_valid(node, BLOCK_VALID_SCRIPTS))
-            return 0;
-        if (!node->phashBlock ||
-            memcmp(node->phashBlock->data,
-                   params->consensus.hashGenesisBlock.data, 32) != 0)
-            return 0;  /* terminus is not the canonical genesis — refuse */
-    }
+    if (!seed_tip_walk_ok(&plan, params))
+        return 0;
 
     /* Install forward-only. chain_set_active_tip publishes the authority
      * itself; no explicit set_authoritative_tip. */
@@ -321,6 +364,18 @@ int block_index_loader_seed_tip_from_finalized(struct main_state *ms,
                tip_height, cur_h, applied);
     }
     return 1;
+}
+
+/* Point every map node's phashBlock at its own per-node hash storage. */
+static void projection_reseed_phash(struct main_state *ms)
+{
+    size_t iter = 0;
+    struct block_index *pi;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+        if (pi) {
+            pi->phashBlock = &pi->hashBlock;
+        }
+    }
 }
 
 struct zcl_result load_block_index_from_projection(struct main_state *ms,
@@ -360,15 +415,7 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
      * phashBlock at it (never into the reallocatable bucket array). The
      * projection-fold inserts go through chainstate_insert_block_index
      * which already does this; this pass re-asserts it idempotently. */
-    {
-        size_t iter = 0;
-        struct block_index *pi;
-        while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
-            if (pi) {
-                pi->phashBlock = &pi->hashBlock;
-            }
-        }
-    }
+    projection_reseed_phash(ms);
 
     /* (2b) Ensure genesis exists in the map so block 1's pprev links; the
      * projection holds blocks 1..tip only. Insert a BARE genesis node

@@ -605,8 +605,6 @@ engine/services/src/block_index_integrity.c:bii_repair_post_activation_anchor:21
 engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43
 engine/services/src/block_index_integrity.c:block_index_repair_pprev:44
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:33
-engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_tip_from_finalized:33
-engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:17
 engine/services/src/block_index_sqlite_cache.c:load_block_index_sqlite:33
 engine/services/src/block_index_sqlite_cache.c:save_block_index_recent:34
 engine/services/src/blog_anchor_transaction_service.c:blog_anchor_payload_decode:17
