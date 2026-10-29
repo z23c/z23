@@ -287,12 +287,13 @@ static void destroy(ANativeActivity *activity)
 static void pause_activity(ANativeActivity *activity)
 {
     (void)activity; foreground = false;
-    zapp_controller_pause();
+    zapp_controller_visible(false);
     zapp_camera_stop();
 }
 static void resume_activity(ANativeActivity *activity)
 {
     foreground = true;
+    zapp_controller_visible(true);
     refresh(activity->env);
 }
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);

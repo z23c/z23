@@ -31,7 +31,7 @@ struct controller {
     char files[1024], action[32], argument[24000];
     uint64_t camera_ticket;
     void (*notify)(void);
-    bool pending, autostart_checked;
+    bool pending, autostart_checked, hidden;
     time_t fleet_at;
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
@@ -558,8 +558,11 @@ static void *worker(void *opaque)
         struct timespec until;
         if (clock_gettime(CLOCK_REALTIME, &until)) { pthread_mutex_unlock(&c->lock); break; }
         until.tv_sec += 10;
-        if (!c->pending && !first) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
+        /* While hidden no screen shows the node or fleet; only an action or showing the app wakes it. */
+        if (!c->pending && !first && c->hidden) (void)pthread_cond_wait(&c->changed, &c->lock);
+        else if (!c->pending && !first) (void)pthread_cond_timedwait(&c->changed, &c->lock, &until);
         first = false;
+        bool hidden = c->hidden;
         if (c->pending) {
             copy_text(action, sizeof(action), c->action); copy_text(arg, sizeof(arg), c->argument);
             ticket = c->camera_ticket; c->pending = false;
@@ -583,8 +586,7 @@ static void *worker(void *opaque)
             pthread_mutex_unlock(&c->lock);
             notify_view(c);
         }
-        observe_node(c);
-        observe_fleet(c);
+        if (!hidden) { observe_node(c); observe_fleet(c); }
         if (!c->autostart_checked) start_if_wanted(c);
     }
     return NULL;
@@ -744,12 +746,20 @@ bool zapp_controller_action(const char *action, const char *arg, const char *mod
 }
 void zapp_controller_detach(void)
 {
-    zapp_controller_pause();
+    zapp_controller_visible(false);
     pthread_mutex_lock(&startup_lock);
     if (current) { pthread_mutex_lock(&current->lock); current->notify = NULL; pthread_mutex_unlock(&current->lock); }
     zapp_camera_stop(); pthread_mutex_unlock(&startup_lock);
 }
-void zapp_controller_pause(void)
+void zapp_controller_visible(bool visible)
 {
-    (void)zapp_controller_action("voice_cancel", "", "");
+    if (!visible) (void)zapp_controller_action("voice_cancel", "", "");
+    pthread_mutex_lock(&startup_lock);
+    if (current) {
+        pthread_mutex_lock(&current->lock);
+        current->hidden = !visible;
+        pthread_cond_signal(&current->changed);
+        pthread_mutex_unlock(&current->lock);
+    }
+    pthread_mutex_unlock(&startup_lock);
 }

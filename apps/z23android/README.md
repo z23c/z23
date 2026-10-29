@@ -77,7 +77,9 @@ unavailable balance is not displayed as zero.
 starts the node each time it opens until **Stop node** clears the choice.
 **Stop node** shows while the node runs or while that choice is saved, so a
 node that keeps exiting on its own can still be turned off.
-Closing or leaving the app does not stop the node.
+Closing or leaving the app does not stop the node. While the app is hidden it
+stops checking the node and fleet, which keep running, and checks again as soon
+as it shows.
 After **Stop node** the node line reads "Node stopping" until the node has
 saved its data and exited. The app finds a node left by an earlier app process
 through the node's pid file and its first argument, this `-datadir`: it shows
