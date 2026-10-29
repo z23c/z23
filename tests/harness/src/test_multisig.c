@@ -25,26 +25,48 @@ static void generate_two_random_pubkeys(struct pubkey *p1,
     privkey_get_pubkey(&k2, p2);
 }
 
-/* Builds an m-of-n (n <= 3) multisig script from fresh keys and checks
- * its <OP_m> <pubkeys> <OP_n> OP_CHECKMULTISIG layout and total size. */
-static bool multisig_script_layout_matches(int required, int total,
-                                           int m_op, int n_op,
-                                           size_t expected_size)
+/* Builds a 2-of-3 multisig script from fresh keys and checks its
+ * OP_2 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG layout and size. */
+static bool two_of_three_script_layout_matches(void)
 {
-    struct privkey keys[3];
-    struct pubkey pks[3];
-    for (int i = 0; i < total; i++)
-        privkey_make_new(&keys[i], true);
-    for (int i = 0; i < total; i++)
-        privkey_get_pubkey(&keys[i], &pks[i]);
+    struct privkey k1, k2, k3;
+    privkey_make_new(&k1, true);
+    privkey_make_new(&k2, true);
+    privkey_make_new(&k3, true);
+    struct pubkey p1, p2, p3;
+    privkey_get_pubkey(&k1, &p1);
+    privkey_get_pubkey(&k2, &p2);
+    privkey_get_pubkey(&k3, &p3);
 
+    struct pubkey pks[3] = { p1, p2, p3 };
     struct script s;
-    script_for_multisig(&s, required, pks, total);
+    script_for_multisig(&s, 2, pks, 3);
 
-    bool ok = (s.data[0] == m_op) &&
-              (s.data[s.size - 2] == n_op) &&
+    /* OP_2 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG */
+    bool ok = (s.data[0] == OP_2) &&
+              (s.data[s.size - 2] == OP_3) &&
               (s.data[s.size - 1] == OP_CHECKMULTISIG) &&
-              (s.size == expected_size);
+              (s.size == 105); /* 1 + (1+33)*3 + 1 + 1 */
+    return ok;
+}
+
+/* Builds a 1-of-1 multisig script from one fresh key and checks its
+ * minimum-case OP_1 <pk1> OP_1 OP_CHECKMULTISIG layout and size. */
+static bool one_of_one_script_layout_matches(void)
+{
+    struct privkey k1;
+    privkey_make_new(&k1, true);
+    struct pubkey p1;
+    privkey_get_pubkey(&k1, &p1);
+
+    struct pubkey pks[1] = { p1 };
+    struct script s;
+    script_for_multisig(&s, 1, pks, 1);
+
+    bool ok = (s.data[0] == OP_1) &&
+              (s.data[s.size - 2] == OP_1) &&
+              (s.data[s.size - 1] == OP_CHECKMULTISIG) &&
+              (s.size == 37); /* 1 + (1+33) + 1 + 1 */
     return ok;
 }
 
@@ -448,9 +470,7 @@ int test_multisig(void)
      * ================================================================ */
     printf("multisig: script_for_multisig 2-of-3 layout... ");
     {
-        /* OP_2 <pk1> <pk2> <pk3> OP_3 OP_CHECKMULTISIG */
-        bool ok = multisig_script_layout_matches(2, 3, OP_2, OP_3,
-                                                 105); /* 1 + (1+33)*3 + 1 + 1 */
+        bool ok = two_of_three_script_layout_matches();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -460,8 +480,7 @@ int test_multisig(void)
      * ================================================================ */
     printf("multisig: script_for_multisig 1-of-1... ");
     {
-        bool ok = multisig_script_layout_matches(1, 1, OP_1, OP_1,
-                                                 37); /* 1 + (1+33) + 1 + 1 */
+        bool ok = one_of_one_script_layout_matches();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
