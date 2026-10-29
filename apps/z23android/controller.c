@@ -222,7 +222,7 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
         c->view.fleet_stale = false;
         /* An answered fleet request proves the paired host is reachable. */
         c->view.fleet_paired = true;
-        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
     } else {
         /* The last report, if any, stays visible, marked old, once no current one arrives. */
         c->view.fleet_stale = true;
@@ -690,7 +690,7 @@ static bool pair_control(struct controller *c, const char *action, const char *a
         zapp_pair_code(arg, c->view.pair_code);
     copy_text(c->view.pair_offer, sizeof(c->view.pair_offer), offer ? arg : "");
     if (!offer) c->view.pair_code[0] = 0;
-    if (known) copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
+    if (known) copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
     return offer || known || !strcmp(action, "pair_reject");
 }
 static const char *confirmed_action(const struct controller *c)
@@ -759,7 +759,7 @@ void zapp_controller_visible(bool visible)
     pthread_mutex_lock(&startup_lock);
     if (current) {
         pthread_mutex_lock(&current->lock);
-        current->hidden = !visible; current->shown = visible;
+        current->shown = visible && current->hidden; current->hidden = !visible;
         pthread_cond_signal(&current->changed);
         pthread_mutex_unlock(&current->lock);
     }

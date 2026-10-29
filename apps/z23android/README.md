@@ -328,7 +328,7 @@ Once host rows said "node not answering" instead of "height unknown" and the
 guide said to name an in-sync host's blockers when asked, the same fleet gave a
 cause the observations do not give in 4 of 9 answers, all low disk; all 3
 answers on why the Mac's height was unknown said its node was not answering,
-and 1 of 3 answers about r2 listed its four blockers.
+and 1 of 6 answers about r2 listed its four blockers.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to
