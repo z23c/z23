@@ -163,8 +163,9 @@ static bool line_has_transient_error(const char *line, size_t len)
  * pointer just past that number; otherwise return NULL. */
 static const char *past_colon_number(const char *p, const char *end)
 {
-    if (p >= end || *p != ':' || p + 1 >= end ||
-        !isdigit((unsigned char)p[1]))
+    if (p >= end || *p != ':')
+        return NULL;
+    if (end - p < 2 || !isdigit((unsigned char)p[1]))
         return NULL;
     const char *q = p + 1;
     while (q < end && isdigit((unsigned char)*q))
