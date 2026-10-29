@@ -5,9 +5,11 @@
  *          CX_PRESERVED, CX_COMPILE, CX_BASELINE_ADDED, CX_STILL_OVER,
  *          CX_GATE. The metric is the lane's own build/bin/z23-lint
  *          check-cyclomatic-complexity; CX_PRESERVED runs its own
- *          check-split-preserved against HEAD. Nothing is reimplemented and no
- *          shell runs. A failed check leaves the baseline byte-for-byte as it
- *          was. Ports cx-swarm's check(). */
+ *          check-split-preserved against HEAD in split mode on purpose: a
+ *          split adds no include and no LOG call, as cx-swarm's check()
+ *          refused any changed include line or LOG_* call. Nothing is
+ *          reimplemented and no shell runs. A failed check leaves the
+ *          baseline byte-for-byte as it was. Ports cx-swarm's check(). */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
