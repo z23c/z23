@@ -14,12 +14,12 @@
  *          vanished meanwhile (a test fixture's checkout): a directory that
  *          is gone changes nothing.
  *          Live: a worktree holds its files only while it is live, that is
- *          while a pinned file has an uncommitted change, or its git index
- *          file (`<gitdir>/index`, found through the `gitdir:` line of a
- *          linked worktree's .git file) was modified in the last 48 hours, or
- *          its HEAD commit is under 48 hours old. Any `git add`, commit or a
- *          writer's own `git status` touches the index, so edits to files
- *          outside the pins keep a lane live without a full status. */
+ *          while the pinned-path status shows a tracked change, or its HEAD
+ *          commit is under 48 hours old, or it has no HEAD; otherwise it is
+ *          stale. Known edge: a lane with an old HEAD whose only uncommitted
+ *          edits are to unpinned files is stale, so its committed pinned
+ *          files are freed (the idle-lane policy). Index mtimes are no
+ *          signal: tooling rewrites them. */
 
 #include "command/native_dev_cx.h"
 
@@ -29,8 +29,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #if !defined(_WIN32)
@@ -43,8 +41,8 @@
 #define SC_ARG_BYTES (64u * 1024u) /* path bytes per git status call */
 
 /* A worktree holds its changed files only while it is live: a pinned file has
- * an uncommitted change, or its index file was modified, or its HEAD commit
- * was made, at most this many hours ago. */
+ * an uncommitted change, or its HEAD commit was made at most this many hours
+ * ago. */
 #define SC_LIVE_HOURS 48
 
 /* Distinct pinned paths, borrowed from the caller's rows. */
@@ -76,43 +74,6 @@ static int sc_git(const char *dir, const char *a, const char *b, const char *c,
                           a, b, c, d, NULL};
     int rc = cx_run(dir, argv, buf, SC_BUF, SC_MS, false);
     return rc == 0 && strlen(buf) >= SC_BUF - 1 ? -1 : rc;
-}
-
-/* The worktree's index file: `.git/index` of a main checkout, or
- * `<dir>/index` for the `gitdir: <dir>` file of a linked worktree. */
-static bool sc_index_path(const char *wt, char *out, size_t cap)
-{
-    char dot[ZCL_CX_PATH_MAX], *text, *eol;
-    struct stat st;
-    size_t len = 0;
-    if (snprintf(dot, sizeof(dot), "%s/.git", wt) >= (int)sizeof(dot) ||
-        stat(dot, &st) != 0)
-        return false;
-    if (S_ISDIR(st.st_mode))
-        return snprintf(out, cap, "%s/index", dot) < (int)cap;
-    text = cx_read_file(dot, &len);
-    if (!text)
-        return false;
-    eol = text + strcspn(text, "\r\n");
-    *eol = '\0';
-    bool ok = strncmp(text, "gitdir: ", 8) == 0;
-    if (ok && text[8] == '/')
-        ok = snprintf(out, cap, "%s/index", text + 8) < (int)cap;
-    else if (ok)
-        ok = snprintf(out, cap, "%s/%s/index", wt, text + 8) < (int)cap;
-    free(text);
-    return ok;
-}
-
-/* Was the worktree's index modified within SC_LIVE_HOURS? A missing index is
- * not fresh. */
-static bool sc_index_fresh(const char *wt)
-{
-    char path[ZCL_CX_PATH_MAX];
-    struct stat st;
-    if (!sc_index_path(wt, path, sizeof(path)) || stat(path, &st) != 0)
-        return false;
-    return difftime(time(NULL), st.st_mtime) <= SC_LIVE_HOURS * 3600.0; // platform-ok: file mtime is wall-clock
 }
 
 /* Adds the paths of `git status --porcelain` lines ("XY path"). */
@@ -195,7 +156,6 @@ static bool sc_scan_one(const char *root, struct sc_task *t, char *buf,
     int fresh = 1;
     if (pins && !sc_status(t, pins, buf))
         return false;
-    t->live = t->live || sc_index_fresh(t->path);
     if (!t->head[0]) {
         t->live = true;
         return true;

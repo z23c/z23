@@ -5,13 +5,13 @@
  *          custody-owned and pinned-root paths, files of 1300 or more lines,
  *          files a live worktree of this repository changes against
  *          origin/main, and files named in exclude=. A worktree is live while
- *          a pinned file has an uncommitted change, or its git index file was
- *          modified in the last 48 hours, or its HEAD commit is under 48
- *          hours old; idle lanes are counted as skipped.stale_holder, not
- *          held. The worktree scan (native_dev_cx_scan.c) is handed the
- *          baseline rows and asks git status only about the pinned paths, so
- *          it takes seconds on a host with a thousand worktrees. Read-only;
- *          ports cx-swarm's picker. */
+ *          a pinned file has an uncommitted change, or its HEAD commit is
+ *          under 48 hours old, or it has no HEAD; idle lanes are counted as
+ *          skipped.stale_holder, not held. Edge: a lane with an old HEAD
+ *          whose only uncommitted edits are to unpinned files is idle. The
+ *          worktree scan (native_dev_cx_scan.c) is handed the baseline rows
+ *          and asks git status only about the pinned paths. Read-only; ports
+ *          cx-swarm's picker. */
 
 #include "command/native_command.h"
 #include "command/native_dev_cx.h"

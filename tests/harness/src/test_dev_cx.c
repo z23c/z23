@@ -27,9 +27,7 @@ int test_dev_cx(void)
     return 0;
 }
 #else
-#include <fcntl.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 #define CXT_PATH 1100
@@ -392,24 +390,6 @@ static void cxt_commit_dated(const char *wt, const char *msg, const char *date)
     (void)unsetenv("GIT_COMMITTER_DATE");
 }
 
-/* Makes a linked worktree look idle: its index file (named by the `gitdir:`
- * line of its .git file) last changed in 2020. */
-static void cxt_age_index(const char *wt)
-{
-    char dot[CXT_PATH], idx[CXT_PATH];
-    const struct timespec old[2] = {{.tv_sec = 1577836800}, {.tv_sec = 1577836800}};
-    char *text;
-    (void)snprintf(dot, sizeof(dot), "%s/.git", wt);
-    text = cx_read_file(dot, NULL);
-    if (!text || strncmp(text, "gitdir: ", 8) != 0)
-        cxt_die("worktree .git is not a gitdir file");
-    text[strcspn(text, "\r\n")] = '\0';
-    (void)snprintf(idx, sizeof(idx), "%s/index", text + 8);
-    free(text);
-    if (utimensat(AT_FDCWD, idx, old, 0) != 0)
-        cxt_die("cannot age a worktree index");
-}
-
 static int cxt_test_next_stale(void)
 {
     int failures = 0;
@@ -429,7 +409,6 @@ static int cxt_test_next_stale(void)
         cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
         cxt_src(wt, "src/a.c", 16, 1);
         cxt_commit_dated(wt, "idle", "2020-01-01T00:00:00 +0000");
-        cxt_age_index(wt);
         (void)snprintf(wt, sizeof(wt), "%s-fresh", repo);
         cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
         cxt_src(wt, "src/b.c", 16, 1);
@@ -438,7 +417,6 @@ static int cxt_test_next_stale(void)
         cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
         cxt_src(wt, "src/d.c", 16, 1);
         cxt_commit_dated(wt, "old", "2020-01-01T00:00:00 +0000");
-        cxt_age_index(wt);
         cxt_src(wt, "src/c.c", 16, 1);
         cxt_next(&c, repo, 50, NULL, NULL);
         ASSERT(cxt_ok(&c));
@@ -454,15 +432,15 @@ _test_next:;
     return failures;
 }
 
-/* Only pinned paths are asked of git status, so a lane's edit to an unpinned
- * file is seen through its index: `git add` keeps an otherwise idle lane live,
- * an idle index frees it, and a removed checkout is not a scan failure. */
-static int cxt_test_next_index_liveness(void)
+/* Only pinned paths are asked of git status, so an old-HEAD lane whose only
+ * uncommitted edit is to an unpinned file is idle and frees its committed
+ * pinned files; a removed checkout is not a scan failure. */
+static int cxt_test_next_unpinned_idle(void)
 {
     int failures = 0;
     struct cxt_call c;
     char repo[CXT_PATH], wt[CXT_PATH], order[1024];
-    TEST("dev.cx.next: a fresh index keeps an idle-commit lane live; a removed lane is no failure") {
+    TEST("dev.cx.next: an old-HEAD lane with only an unpinned edit is idle; a removed lane is no failure") {
         cxt_new_repo(repo, sizeof(repo), "index");
         for (const char *f = "abc"; *f; f++) {
             char rel[32];
@@ -475,14 +453,11 @@ static int cxt_test_next_index_liveness(void)
         cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
         cxt_src(wt, "src/a.c", 16, 1);
         cxt_commit_dated(wt, "idle", "2020-01-01T00:00:00 +0000");
-        cxt_age_index(wt);
         (void)snprintf(wt, sizeof(wt), "%s-staged", repo);
         cxt_git(repo, "worktree", "add", "-q", "--detach", wt);
         cxt_src(wt, "src/b.c", 16, 1);
         cxt_commit_dated(wt, "old", "2020-01-01T00:00:00 +0000");
-        cxt_age_index(wt);
-        /* an unpinned change: invisible to the pathspec status, but git add
-         * rewrites the index, which is the live signal */
+        /* an unpinned change, staged or not, is not a live signal */
         cxt_put(wt, "notes.txt", "two\n");
         cxt_git(wt, "add", "notes.txt", NULL, NULL, NULL);
         (void)snprintf(wt, sizeof(wt), "%s-gone", repo);
@@ -497,9 +472,9 @@ static int cxt_test_next_index_liveness(void)
         cxt_next(&c, repo, 50, NULL, NULL);
         ASSERT(cxt_ok(&c));
         cxt_order(&c, order, sizeof(order));
-        ASSERT_STR_EQ(order, "src/a.c,src/c.c");
-        ASSERT_EQ(cxt_skipped(&c, "changed"), 1);
-        ASSERT_EQ(cxt_skipped(&c, "stale_holder"), 1);
+        ASSERT_STR_EQ(order, "src/a.c,src/b.c,src/c.c");
+        ASSERT_EQ(cxt_skipped(&c, "changed"), 0);
+        ASSERT_EQ(cxt_skipped(&c, "stale_holder"), 2);
         cxt_end(&c);
         PASS();
     }
@@ -856,7 +831,7 @@ int test_dev_cx(void)
     failures += cxt_test_next_refusals(repo);
     failures += cxt_test_next_scan_failure(repo);
     failures += cxt_test_next_stale();
-    failures += cxt_test_next_index_liveness();
+    failures += cxt_test_next_unpinned_idle();
     failures += cxt_test_check_untracked();
     failures += cxt_test_check_pass();
     failures += cxt_test_check_scope();

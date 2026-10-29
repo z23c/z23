@@ -53,10 +53,11 @@ bool cx_row_parse(const char *line, size_t len, struct cx_row *out);
 /* Every pinned path any worktree of the repository at root changes against
  * origin/main: committed (merge-base diff of its HEAD), staged and unstaged.
  * pins are the baseline rows (sorted by file); only their distinct paths are
-* asked of git status (as literal pathspecs), so untracked and unpinned files are not seen. A
- * worktree holds its paths (into out) only while live: a pinned file with an
- * uncommitted change, an index file modified in the last 48 hours, or a HEAD
- * commit under 48 hours old; an idle one's files go into stale. Worktrees are
+ * asked of git status (as literal pathspecs), so untracked and unpinned
+ * files are not seen. A worktree holds its paths (into out) only while live:
+ * a pinned file with an uncommitted change, a HEAD commit under 48 hours
+ * old, or no HEAD; an idle one's files go into stale (edge: a lane with an
+ * old HEAD and only unpinned edits is idle). Worktrees are
  * scanned in parallel; one that cannot be compared fails the whole call (why
  * names it): an unknown is never read as clean. A worktree that vanishes
  * during the scan counts as empty. */
