@@ -179,84 +179,108 @@ static bool decode_hex_exact(const char *hex, uint8_t *out, size_t out_len)
     else { printf("FAIL\n"); failures++; }     \
 } while (0)
 
-int test_sprout_groth16_kat(void)
-{
-    enum {
-        TX_BYTES = 3890,
-        TX_HEX_0_BYTES = 1920,
-        VK_BYTES = 1828,
-        MAINNET_HEIGHT = 476970
-    };
-    printf("\n=== Sprout Groth16 real-proof KAT ===\n");
-    int failures = 0;
-    uint8_t tx_bytes[TX_BYTES], vk_bytes[VK_BYTES];
-    bool decoded = decode_hex_exact(k_tx_hex_0, tx_bytes,
-                                    TX_HEX_0_BYTES) &&
-                   decode_hex_exact(k_tx_hex_1,
-                                    tx_bytes + TX_HEX_0_BYTES,
-                                    sizeof(tx_bytes) - TX_HEX_0_BYTES) &&
-                   decode_hex_exact(k_vk_hex, vk_bytes, sizeof(vk_bytes));
-    KAT_CHECK("canonical transaction and public VK decode exactly", decoded);
-    if (!decoded)
-        return failures;
+enum {
+    TX_BYTES = 3890,
+    TX_HEX_0_BYTES = 1920,
+    VK_BYTES = 1828,
+    MAINNET_HEIGHT = 476970
+};
 
-    static struct groth16_vk fixture_vk;
-    static bool fixture_vk_loaded = false;
-    if (!fixture_vk_loaded)
-        fixture_vk_loaded = groth16_vk_read_raw(&fixture_vk, vk_bytes,
-                                                sizeof(vk_bytes));
+static int kat_check_decode(uint8_t *tx_bytes, uint8_t *vk_bytes, bool *decoded)
+{
+    int failures = 0;
+    *decoded = decode_hex_exact(k_tx_hex_0, tx_bytes,
+                                TX_HEX_0_BYTES) &&
+               decode_hex_exact(k_tx_hex_1,
+                                tx_bytes + TX_HEX_0_BYTES,
+                                TX_BYTES - TX_HEX_0_BYTES) &&
+               decode_hex_exact(k_vk_hex, vk_bytes, VK_BYTES);
+    KAT_CHECK("canonical transaction and public VK decode exactly", *decoded);
+    return failures;
+}
+
+static int kat_check_vk(const uint8_t *vk_bytes, struct groth16_vk *fixture_vk,
+                        bool *loaded)
+{
+    int failures = 0;
+    if (!*loaded)
+        *loaded = groth16_vk_read_raw(fixture_vk, vk_bytes, VK_BYTES);
     KAT_CHECK("embedded Sprout Groth16 VK parses",
-              fixture_vk_loaded && fixture_vk.ic_len == 10);
-    if (!fixture_vk_loaded)
-        return failures;
-    bool verification_set_ready = sapling_params_loaded() ||
-                                  sapling_install_embedded_vks();
-    KAT_CHECK("hash-pinned shielded verification set is published",
-              verification_set_ready);
-    if (!verification_set_ready)
+              *loaded && fixture_vk->ic_len == 10);
+    return failures;
+}
+
+static int kat_install_fixture_vk(struct groth16_vk *fixture_vk, bool *ready)
+{
+    int failures = 0;
+    *ready = sapling_params_loaded() || sapling_install_embedded_vks();
+    KAT_CHECK("hash-pinned shielded verification set is published", *ready);
+    if (!*ready)
         return failures;
     /* The contextual verifier now correctly requires the complete published
      * key set. Override only its Sprout member with this independently decoded
      * canonical fixture after satisfying that production precondition. */
-    sprout_set_vk(&fixture_vk);
+    sprout_set_vk(fixture_vk);
+    return failures;
+}
 
-    struct byte_stream stream;
-    stream_init_from_data(&stream, tx_bytes, sizeof(tx_bytes));
-    struct transaction tx;
-    transaction_init(&tx);
-    bool parsed = transaction_deserialize(&tx, &stream);
-    KAT_CHECK("canonical height-476970 transaction deserializes", parsed);
-    if (!parsed)
-        return failures;
+static int kat_check_parse(struct byte_stream *stream, struct transaction *tx,
+                           bool *parsed)
+{
+    int failures = 0;
+    transaction_init(tx);
+    *parsed = transaction_deserialize(tx, stream);
+    KAT_CHECK("canonical height-476970 transaction deserializes", *parsed);
+    return failures;
+}
 
+static int kat_check_identity(struct transaction *tx, struct byte_stream *stream)
+{
+    int failures = 0;
     char txid[65];
-    uint256_get_hex(&tx.hash, txid);
+    uint256_get_hex(&tx->hash, txid);
     KAT_CHECK("canonical v4 JoinSplit identity and wire are pinned",
-              stream_remaining(&stream) == 0 &&
+              stream_remaining(stream) == 0 &&
               strcmp(txid,
                      "6eb069da34331871a55314ec3b92fcf50d8fabe914d16c46d"
                      "686be853c8a3047") == 0 &&
-              tx.overwintered && tx.version == SAPLING_TX_VERSION &&
-              tx.version_group_id == SAPLING_VERSION_GROUP_ID &&
-              tx.expiry_height == 476990 && tx.num_vin == 14 &&
-              tx.num_vout == 0 && tx.num_joinsplit == 1 &&
-              tx.v_joinsplit && tx.v_joinsplit[0].use_groth &&
-              tx.num_shielded_spend == 0 && tx.num_shielded_output == 0);
+              tx->overwintered && tx->version == SAPLING_TX_VERSION &&
+              tx->version_group_id == SAPLING_VERSION_GROUP_ID &&
+              tx->expiry_height == 476990 && tx->num_vin == 14 &&
+              tx->num_vout == 0 && tx->num_joinsplit == 1 &&
+              tx->v_joinsplit && tx->v_joinsplit[0].use_groth &&
+              tx->num_shielded_spend == 0 && tx->num_shielded_output == 0);
+    return failures;
+}
 
+static int kat_check_roundtrip(const struct transaction *tx,
+                               const uint8_t *tx_bytes)
+{
+    int failures = 0;
     struct byte_stream encoded;
-    stream_init(&encoded, sizeof(tx_bytes));
-    bool roundtrip = transaction_serialize(&tx, &encoded) &&
-                     encoded.size == sizeof(tx_bytes) &&
-                     memcmp(encoded.data, tx_bytes, sizeof(tx_bytes)) == 0;
+    stream_init(&encoded, TX_BYTES);
+    bool roundtrip = transaction_serialize(tx, &encoded) &&
+                     encoded.size == TX_BYTES &&
+                     memcmp(encoded.data, tx_bytes, TX_BYTES) == 0;
     KAT_CHECK("canonical v4 transaction reserializes byte-identically",
               roundtrip);
     stream_free(&encoded);
+    return failures;
+}
 
+static int kat_check_structural(const struct transaction *tx)
+{
+    int failures = 0;
     struct validation_state structural;
     validation_state_init(&structural);
     KAT_CHECK("canonical v4 JoinSplit passes structural consensus",
-              check_transaction(&tx, &structural));
+              check_transaction(tx, &structural));
+    return failures;
+}
 
+static int kat_check_contextual(struct transaction *tx)
+{
+    int failures = 0;
     chain_params_select(CHAIN_MAIN);
     const struct chain_params *params = chain_params_get();
     int saved_defer = atomic_exchange(
@@ -264,22 +288,16 @@ int test_sprout_groth16_kat(void)
     struct validation_state contextual;
     validation_state_init(&contextual);
     bool consensus_ok = params && contextual_check_transaction(
-        &tx, &contextual, &params->consensus, MAINNET_HEIGHT, 100);
+        tx, &contextual, &params->consensus, MAINNET_HEIGHT, 100);
     atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
     KAT_CHECK("canonical JoinSplit signature and Groth16 proof verify",
               consensus_ok);
+    return failures;
+}
 
-    struct js_description *js = &tx.v_joinsplit[0];
-    uint8_t h_sig[32];
-    sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
-                 js->nullifiers[1].data, tx.joinsplit_pubkey.data, h_sig);
-    KAT_CHECK("canonical Groth16 proof verifies directly",
-              sprout_verify_groth16(
-                  js->proof, js->anchor.data, h_sig, js->macs[0].data,
-                  js->macs[1].data, js->nullifiers[0].data,
-                  js->nullifiers[1].data, js->commitments[0].data,
-                  js->commitments[1].data, js->vpub_old, js->vpub_new));
-
+static int kat_check_tampered_inputs(struct js_description *js, uint8_t *h_sig)
+{
+    int failures = 0;
     uint8_t bad_proof[GROTH_PROOF_SIZE];
     memcpy(bad_proof, js->proof, sizeof(bad_proof));
     bad_proof[17] ^= 0x01;
@@ -299,6 +317,59 @@ int test_sprout_groth16_kat(void)
                   js->macs[1].data, bad_nullifier,
                   js->nullifiers[1].data, js->commitments[0].data,
                   js->commitments[1].data, js->vpub_old, js->vpub_new));
+    return failures;
+}
+
+static int kat_check_joinsplit_proof(struct transaction *tx)
+{
+    int failures = 0;
+    struct js_description *js = &tx->v_joinsplit[0];
+    uint8_t h_sig[32];
+    sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
+                 js->nullifiers[1].data, tx->joinsplit_pubkey.data, h_sig);
+    KAT_CHECK("canonical Groth16 proof verifies directly",
+              sprout_verify_groth16(
+                  js->proof, js->anchor.data, h_sig, js->macs[0].data,
+                  js->macs[1].data, js->nullifiers[0].data,
+                  js->nullifiers[1].data, js->commitments[0].data,
+                  js->commitments[1].data, js->vpub_old, js->vpub_new));
+    failures += kat_check_tampered_inputs(js, h_sig);
+    return failures;
+}
+
+int test_sprout_groth16_kat(void)
+{
+    printf("\n=== Sprout Groth16 real-proof KAT ===\n");
+    int failures = 0;
+    uint8_t tx_bytes[TX_BYTES], vk_bytes[VK_BYTES];
+    bool decoded = false;
+    failures += kat_check_decode(tx_bytes, vk_bytes, &decoded);
+    if (!decoded)
+        return failures;
+
+    static struct groth16_vk fixture_vk;
+    static bool fixture_vk_loaded = false;
+    failures += kat_check_vk(vk_bytes, &fixture_vk, &fixture_vk_loaded);
+    if (!fixture_vk_loaded)
+        return failures;
+    bool verification_set_ready = false;
+    failures += kat_install_fixture_vk(&fixture_vk, &verification_set_ready);
+    if (!verification_set_ready)
+        return failures;
+
+    struct byte_stream stream;
+    stream_init_from_data(&stream, tx_bytes, sizeof(tx_bytes));
+    struct transaction tx;
+    bool parsed = false;
+    failures += kat_check_parse(&stream, &tx, &parsed);
+    if (!parsed)
+        return failures;
+
+    failures += kat_check_identity(&tx, &stream);
+    failures += kat_check_roundtrip(&tx, tx_bytes);
+    failures += kat_check_structural(&tx);
+    failures += kat_check_contextual(&tx);
+    failures += kat_check_joinsplit_proof(&tx);
 
     transaction_free(&tx);
     printf("Sprout Groth16 real-proof KAT: %s (%d failures)\n",
