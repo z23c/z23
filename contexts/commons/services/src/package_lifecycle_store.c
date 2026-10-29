@@ -526,6 +526,157 @@ struct zcl_result pkgl_survey_package(const struct pkgl_ctx *ctx,
     return ZCL_OK;
 }
 
+/* Release envelope naming the root: present, and it verifies. */
+static struct zcl_result pkgl_verify_release(
+    const struct pkgl_ctx *ctx, const uint8_t root[32], const char *hex,
+    const struct vcs_package_release **release_out, char *rule_out,
+    size_t rule_cap)
+{
+    const struct vcs_package_release *release = pkgl_release_for_root(ctx, root);
+    if (!release) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "release-missing");
+        return ZCL_ERR(-1, "no release envelope names package root %s", hex);
+    }
+    enum vcs_package_release_error rerr = vcs_package_release_verify(release);
+    if (rerr != VCS_PACKAGE_RELEASE_OK) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "release-verify");
+        return ZCL_ERR(-1, "release for %s: %s", hex,
+                       vcs_package_release_error_string(rerr));
+    }
+    *release_out = release;
+    return ZCL_OK;
+}
+
+/* Manifest under the root, hashing back to it. On failure the manifest is
+ * already freed (or was never loaded), so the caller has nothing to release. */
+static struct zcl_result pkgl_verify_manifest(
+    const struct pkgl_ctx *ctx, const uint8_t root[32], const char *hex,
+    struct vcs_package_manifest *manifest, char *rule_out, size_t rule_cap)
+{
+    struct zcl_result mr = pkgl_load_manifest(ctx, root, manifest);
+    if (!mr.ok) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "manifest-missing");
+        return mr;
+    }
+    uint8_t recomputed[32] = { 0 };
+    if (!vcs_package_manifest_root(manifest, recomputed) ||
+        memcmp(recomputed, root, 32) != 0) {
+        vcs_package_manifest_free(manifest);
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "manifest-root-mismatch");
+        return ZCL_ERR(-1, "manifest under %s does not hash to that root",
+                       hex);
+    }
+    return ZCL_OK;
+}
+
+/* Recipe bound to the envelope and every recipe path present in the manifest.
+ * The caller keeps ownership of the manifest and frees it on failure. */
+static struct zcl_result pkgl_verify_recipe(
+    const struct pkgl_ctx *ctx, const struct vcs_package_release *release,
+    const struct vcs_package_manifest *manifest, const char *hex,
+    char *rule_out, size_t rule_cap)
+{
+    struct vcs_package_recipe recipe;
+    struct zcl_result rr =
+        pkgl_load_recipe(ctx, release->recipe_root, &recipe);
+    if (!rr.ok) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "recipe-missing");
+        return rr;
+    }
+    uint8_t recipe_root[32] = { 0 };
+    if (vcs_package_recipe_root(&recipe, recipe_root) !=
+            VCS_PACKAGE_RECIPE_OK ||
+        memcmp(recipe_root, release->recipe_root, 32) != 0) {
+        vcs_package_recipe_free(&recipe);
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "recipe-root-mismatch");
+        return ZCL_ERR(-1, "recipe does not hash to the envelope's "
+                           "recipe_root for %s", hex);
+    }
+    char membership[160];
+    if (!vcs_package_recipe_files_in_manifest(&recipe, manifest, membership,
+                                              sizeof(membership))) {
+        vcs_package_recipe_free(&recipe);
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "recipe-path-not-in-manifest");
+        return ZCL_ERR(-1, "%s", membership);
+    }
+    vcs_package_recipe_free(&recipe);
+    return ZCL_OK;
+}
+
+/* One chunk, read from its CAS path and re-hashed at its exact coordinates. */
+static struct zcl_result pkgl_verify_one_chunk(
+    const struct pkgl_ctx *ctx, const struct vcs_package_file *f, uint32_t c,
+    const char *hex, char *rule_out, size_t rule_cap)
+{
+    char chex[65];
+    zcl_hex_encode(f->chunk_hashes + (size_t)c * 32u, 32, chex);
+    char rel[96];
+    (void)snprintf(rel, sizeof(rel), "cas/sha3/%.2s/%s", chex, chex);
+    char path[PKGL_PATH_MAX];
+    struct zcl_result jr = pkgl_join(ctx, rel, path, sizeof(path));
+    if (!jr.ok)
+        return jr;
+    uint8_t *bytes = NULL;
+    size_t bytes_len = 0;
+    struct zcl_result br = pkgl_read_file(
+        path, VCS_PACKAGE_CHUNK_BYTES, &bytes, &bytes_len);
+    if (!br.ok) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "chunk-missing");
+        return br;
+    }
+    bool good = vcs_package_verify_chunk(f, c, bytes, bytes_len);
+    free(bytes);
+    if (!good) {
+        if (rule_out)
+            (void)snprintf(rule_out, rule_cap, "chunk-hash-mismatch");
+        /* Format while f->path is still owned by manifest; the
+         * zcl_result copies the message into its fixed buffer. */
+        struct zcl_result result = ZCL_ERR(
+            -1, "chunk %s#%u of %s does not match its committed "
+                "SHA3 — refusing to build tampered content",
+            f->path, c, hex);
+        return result;
+    }
+    return ZCL_OK;
+}
+
+/* Every chunk of one file, in file order. */
+static struct zcl_result pkgl_verify_file_chunks(
+    const struct pkgl_ctx *ctx, const struct vcs_package_file *f,
+    const char *hex, char *rule_out, size_t rule_cap)
+{
+    for (uint32_t c = 0; c < f->chunk_count; c++) {
+        struct zcl_result cr =
+            pkgl_verify_one_chunk(ctx, f, c, hex, rule_out, rule_cap);
+        if (!cr.ok)
+            return cr;
+    }
+    return ZCL_OK;
+}
+
+/* Every chunk, re-hashed from the CAS bytes at its exact coordinates.
+ * This is the gate a tampered store object cannot pass. */
+static struct zcl_result pkgl_verify_chunks(
+    const struct pkgl_ctx *ctx, const struct vcs_package_manifest *manifest,
+    const char *hex, char *rule_out, size_t rule_cap)
+{
+    for (size_t i = 0; i < manifest->count; i++) {
+        struct zcl_result fr = pkgl_verify_file_chunks(
+            ctx, &manifest->files[i], hex, rule_out, rule_cap);
+        if (!fr.ok)
+            return fr;
+    }
+    return ZCL_OK;
+}
+
 // long-function-ok:one-verified-gate — the VERIFIED transition is one
 // decision (envelope, manifest root, recipe binding, every chunk re-hashed);
 // splitting it would let a caller reach a build having run only part of it.
@@ -540,111 +691,29 @@ struct zcl_result pkgl_verify_package(const struct pkgl_ctx *ctx,
     char hex[65];
     zcl_hex_encode(root, 32, hex);
 
-    const struct vcs_package_release *release = pkgl_release_for_root(ctx, root);
-    if (!release) {
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "release-missing");
-        return ZCL_ERR(-1, "no release envelope names package root %s", hex);
-    }
-    enum vcs_package_release_error rerr = vcs_package_release_verify(release);
-    if (rerr != VCS_PACKAGE_RELEASE_OK) {
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "release-verify");
-        return ZCL_ERR(-1, "release for %s: %s", hex,
-                       vcs_package_release_error_string(rerr));
-    }
+    const struct vcs_package_release *release = NULL;
+    struct zcl_result rel =
+        pkgl_verify_release(ctx, root, hex, &release, rule_out, rule_cap);
+    if (!rel.ok)
+        return rel;
 
     struct vcs_package_manifest manifest;
-    struct zcl_result mr = pkgl_load_manifest(ctx, root, &manifest);
-    if (!mr.ok) {
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "manifest-missing");
-        return mr;
-    }
-    uint8_t recomputed[32] = { 0 };
-    if (!vcs_package_manifest_root(&manifest, recomputed) ||
-        memcmp(recomputed, root, 32) != 0) {
+    struct zcl_result mf =
+        pkgl_verify_manifest(ctx, root, hex, &manifest, rule_out, rule_cap);
+    if (!mf.ok)
+        return mf;
+
+    struct zcl_result rc =
+        pkgl_verify_recipe(ctx, release, &manifest, hex, rule_out, rule_cap);
+    if (!rc.ok) {
         vcs_package_manifest_free(&manifest);
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "manifest-root-mismatch");
-        return ZCL_ERR(-1, "manifest under %s does not hash to that root",
-                       hex);
+        return rc;
     }
 
-    struct vcs_package_recipe recipe;
-    struct zcl_result rr =
-        pkgl_load_recipe(ctx, release->recipe_root, &recipe);
-    if (!rr.ok) {
-        vcs_package_manifest_free(&manifest);
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "recipe-missing");
-        return rr;
-    }
-    uint8_t recipe_root[32] = { 0 };
-    if (vcs_package_recipe_root(&recipe, recipe_root) !=
-            VCS_PACKAGE_RECIPE_OK ||
-        memcmp(recipe_root, release->recipe_root, 32) != 0) {
-        vcs_package_recipe_free(&recipe);
-        vcs_package_manifest_free(&manifest);
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "recipe-root-mismatch");
-        return ZCL_ERR(-1, "recipe does not hash to the envelope's "
-                           "recipe_root for %s", hex);
-    }
-    char membership[160];
-    if (!vcs_package_recipe_files_in_manifest(&recipe, &manifest, membership,
-                                              sizeof(membership))) {
-        vcs_package_recipe_free(&recipe);
-        vcs_package_manifest_free(&manifest);
-        if (rule_out)
-            (void)snprintf(rule_out, rule_cap, "recipe-path-not-in-manifest");
-        return ZCL_ERR(-1, "%s", membership);
-    }
-    vcs_package_recipe_free(&recipe);
-
-    /* Every chunk, re-hashed from the CAS bytes at its exact coordinates.
-     * This is the gate a tampered store object cannot pass. */
-    for (size_t i = 0; i < manifest.count; i++) {
-        const struct vcs_package_file *f = &manifest.files[i];
-        for (uint32_t c = 0; c < f->chunk_count; c++) {
-            char chex[65];
-            zcl_hex_encode(f->chunk_hashes + (size_t)c * 32u, 32, chex);
-            char rel[96];
-            (void)snprintf(rel, sizeof(rel), "cas/sha3/%.2s/%s", chex, chex);
-            char path[PKGL_PATH_MAX];
-            struct zcl_result jr = pkgl_join(ctx, rel, path, sizeof(path));
-            if (!jr.ok) {
-                vcs_package_manifest_free(&manifest);
-                return jr;
-            }
-            uint8_t *bytes = NULL;
-            size_t bytes_len = 0;
-            struct zcl_result br = pkgl_read_file(
-                path, VCS_PACKAGE_CHUNK_BYTES, &bytes, &bytes_len);
-            if (!br.ok) {
-                vcs_package_manifest_free(&manifest);
-                if (rule_out)
-                    (void)snprintf(rule_out, rule_cap, "chunk-missing");
-                return br;
-            }
-            bool good = vcs_package_verify_chunk(f, c, bytes, bytes_len);
-            free(bytes);
-            if (!good) {
-                if (rule_out)
-                    (void)snprintf(rule_out, rule_cap, "chunk-hash-mismatch");
-                /* Format while f->path is still owned by manifest; the
-                 * zcl_result copies the message into its fixed buffer. */
-                struct zcl_result result = ZCL_ERR(
-                    -1, "chunk %s#%u of %s does not match its committed "
-                        "SHA3 — refusing to build tampered content",
-                    f->path, c, hex);
-                vcs_package_manifest_free(&manifest);
-                return result;
-            }
-        }
-    }
+    struct zcl_result ch =
+        pkgl_verify_chunks(ctx, &manifest, hex, rule_out, rule_cap);
     vcs_package_manifest_free(&manifest);
-    return ZCL_OK;
+    return ch;
 }
 
 /* ── filesystem primitives ──────────────────────────────────────────── */
@@ -675,6 +744,16 @@ struct zcl_result pkgl_mkdir_p(const char *path)
 #endif
 }
 
+/* Remove one directory entry; a child path that does not fit is an error. */
+static struct zcl_result pkgl_rm_rf_entry(const char *path, const char *name)
+{
+    char child[PKGL_PATH_MAX];
+    int n = snprintf(child, sizeof(child), "%s/%s", path, name);
+    if (n <= 0 || (size_t)n >= sizeof(child))
+        return ZCL_ERR(-1, "path too long under %s", path);
+    return pkgl_rm_rf(child);
+}
+
 struct zcl_result pkgl_rm_rf(const char *path)
 {
     if (!path || !path[0])
@@ -700,13 +779,7 @@ struct zcl_result pkgl_rm_rf(const char *path)
     while ((ent = readdir(dir)) != NULL) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
-        char child[PKGL_PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(child)) {
-            res = ZCL_ERR(-1, "path too long under %s", path);
-            continue;
-        }
-        struct zcl_result cr = pkgl_rm_rf(child);
+        struct zcl_result cr = pkgl_rm_rf_entry(path, ent->d_name);
         if (!cr.ok)
             res = cr;
     }
