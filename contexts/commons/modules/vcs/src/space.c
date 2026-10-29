@@ -59,26 +59,33 @@ static bool bounded_text(const char *text, size_t maximum, bool required,
   return true;
 }
 
+static const struct {
+  enum vcs_space_result result;
+  const char *text;
+} result_names[] = {
+    {VCS_SPACE_OK, "ok"},
+    {VCS_SPACE_ERR_NULL, "null-argument"},
+    {VCS_SPACE_ERR_SIZE, "wire-size"},
+    {VCS_SPACE_ERR_MAGIC, "wire-magic"},
+    {VCS_SPACE_ERR_VERSION, "schema-version"},
+    {VCS_SPACE_ERR_LIMIT, "bound-exceeded"},
+    {VCS_SPACE_ERR_ROOT, "root-shape"},
+    {VCS_SPACE_ERR_ORDER, "root-order"},
+    {VCS_SPACE_ERR_VERB, "read-verb"},
+    {VCS_SPACE_ERR_TEXT, "text-shape"},
+    {VCS_SPACE_ERR_TIME, "validity-window"},
+    {VCS_SPACE_ERR_DELEGATION, "delegation"},
+    {VCS_SPACE_ERR_NETWORK, "wrong-network"},
+    {VCS_SPACE_ERR_SIGNER, "delegated-signer"},
+    {VCS_SPACE_ERR_SIGNATURE, "manifest-signature"},
+    {VCS_SPACE_ERR_CHAIN, "chain-authorization"},
+};
+
 const char *vcs_space_result_string(enum vcs_space_result result)
 {
-  switch (result) {
-  case VCS_SPACE_OK: return "ok";
-  case VCS_SPACE_ERR_NULL: return "null-argument";
-  case VCS_SPACE_ERR_SIZE: return "wire-size";
-  case VCS_SPACE_ERR_MAGIC: return "wire-magic";
-  case VCS_SPACE_ERR_VERSION: return "schema-version";
-  case VCS_SPACE_ERR_LIMIT: return "bound-exceeded";
-  case VCS_SPACE_ERR_ROOT: return "root-shape";
-  case VCS_SPACE_ERR_ORDER: return "root-order";
-  case VCS_SPACE_ERR_VERB: return "read-verb";
-  case VCS_SPACE_ERR_TEXT: return "text-shape";
-  case VCS_SPACE_ERR_TIME: return "validity-window";
-  case VCS_SPACE_ERR_DELEGATION: return "delegation";
-  case VCS_SPACE_ERR_NETWORK: return "wrong-network";
-  case VCS_SPACE_ERR_SIGNER: return "delegated-signer";
-  case VCS_SPACE_ERR_SIGNATURE: return "manifest-signature";
-  case VCS_SPACE_ERR_CHAIN: return "chain-authorization";
-  }
+  for (size_t i = 0; i < sizeof(result_names) / sizeof(result_names[0]); i++)
+    if (result_names[i].result == result)
+      return result_names[i].text;
   return "unknown";
 }
 
@@ -215,11 +222,9 @@ enum vcs_space_result vcs_service_descriptor_root(
              ? VCS_SPACE_OK : VCS_SPACE_ERR_NULL;
 }
 
-static enum vcs_space_result manifest_shape(
-    const struct vcs_space_manifest_v1 *manifest, bool require_signature)
+static enum vcs_space_result manifest_shape_bounds(
+    const struct vcs_space_manifest_v1 *manifest)
 {
-  if (!manifest)
-    return VCS_SPACE_ERR_NULL;
   if (manifest->schema_version != VCS_SPACE_MANIFEST_VERSION)
     return VCS_SPACE_ERR_VERSION;
   if (!manifest->sequence || manifest->sequence > (uint64_t)INT64_MAX ||
@@ -229,6 +234,12 @@ static enum vcs_space_result manifest_shape(
     return VCS_SPACE_ERR_LIMIT;
   if (!manifest->not_before || manifest->expiry <= manifest->not_before)
     return VCS_SPACE_ERR_TIME;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_shape_text_roots(
+    const struct vcs_space_manifest_v1 *manifest)
+{
   if (!bounded_text(manifest->name, VCS_SPACE_NAME_MAX, true, NULL) ||
       !bounded_text(manifest->description, VCS_SPACE_DESCRIPTION_MAX,
                     true, NULL))
@@ -242,6 +253,12 @@ static enum vcs_space_result manifest_shape(
     return VCS_SPACE_ERR_ORDER;
   if (manifest->has_admission != zcl_bytes_any_set(manifest->admission_root, 32))
     return VCS_SPACE_ERR_ROOT;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_shape_delegation(
+    const struct vcs_space_manifest_v1 *manifest)
+{
   if (manifest->not_before < manifest->delegation.not_before ||
       manifest->expiry > manifest->delegation.doc.expiry)
     return VCS_SPACE_ERR_TIME;
@@ -249,6 +266,23 @@ static enum vcs_space_result manifest_shape(
           &manifest->delegation, NULL, NULL, 0, NULL,
           manifest->not_before) != VCS_ZCODE_DHT_DELEGATION_OK)
     return VCS_SPACE_ERR_DELEGATION;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_shape(
+    const struct vcs_space_manifest_v1 *manifest, bool require_signature)
+{
+  if (!manifest)
+    return VCS_SPACE_ERR_NULL;
+  enum vcs_space_result checked = manifest_shape_bounds(manifest);
+  if (checked != VCS_SPACE_OK)
+    return checked;
+  checked = manifest_shape_text_roots(manifest);
+  if (checked != VCS_SPACE_OK)
+    return checked;
+  checked = manifest_shape_delegation(manifest);
+  if (checked != VCS_SPACE_OK)
+    return checked;
   if (require_signature && !zcl_bytes_any_set(manifest->signature, 64))
     return VCS_SPACE_ERR_SIGNATURE;
   return VCS_SPACE_OK;
@@ -439,6 +473,115 @@ static bool take(const uint8_t *wire, size_t wire_len, size_t *off,
   return true;
 }
 
+static enum vcs_space_result manifest_decode_header(
+    struct vcs_space_manifest_v1 *out, const uint8_t *wire,
+    size_t wire_len, size_t *off)
+{
+  if (wire_len < 8u + 2u + 24u + 1u + 1u + 1u + 1u + 1u + 2u +
+                     VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES + 64u ||
+      wire_len > VCS_SPACE_MANIFEST_WIRE_MAX)
+    return VCS_SPACE_ERR_SIZE;
+  if (memcmp(wire, manifest_magic, sizeof(manifest_magic)) != 0)
+    return VCS_SPACE_ERR_MAGIC;
+  *off = sizeof(manifest_magic);
+  out->schema_version = zcl_read_u16_le(wire + *off);
+  *off += 2;
+  out->sequence = zcl_read_u64_le(wire + *off);
+  *off += 8;
+  out->not_before = zcl_read_u64_le(wire + *off);
+  *off += 8;
+  out->expiry = zcl_read_u64_le(wire + *off);
+  *off += 8;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_decode_text(
+    struct vcs_space_manifest_v1 *out, const uint8_t *wire,
+    size_t wire_len, size_t *off)
+{
+  uint8_t name_len = wire[(*off)++];
+  if (!name_len || name_len > VCS_SPACE_NAME_MAX ||
+      !take(wire, wire_len, off, out->name, name_len))
+    return VCS_SPACE_ERR_SIZE;
+  if (*off + 2u > wire_len)
+    return VCS_SPACE_ERR_SIZE;
+  uint16_t description_len = zcl_read_u16_le(wire + *off);
+  *off += 2;
+  if (!description_len || description_len > VCS_SPACE_DESCRIPTION_MAX ||
+      !take(wire, wire_len, off, out->description, description_len))
+    return VCS_SPACE_ERR_SIZE;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_decode_root_section(
+    const uint8_t *wire, size_t wire_len, size_t *off, uint8_t *count,
+    uint8_t roots[][32], size_t maximum)
+{
+  if (*off >= wire_len)
+    return VCS_SPACE_ERR_SIZE;
+  *count = wire[(*off)++];
+  if (*count > maximum ||
+      !take(wire, wire_len, off, roots, (size_t)*count * 32u))
+    return VCS_SPACE_ERR_LIMIT;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_decode_admission(
+    struct vcs_space_manifest_v1 *out, const uint8_t *wire,
+    size_t wire_len, size_t *off)
+{
+  if (*off >= wire_len || wire[*off] > 1u)
+    return VCS_SPACE_ERR_SIZE;
+  out->has_admission = wire[(*off)++] != 0;
+  if (out->has_admission &&
+      !take(wire, wire_len, off, out->admission_root, 32))
+    return VCS_SPACE_ERR_SIZE;
+  return VCS_SPACE_OK;
+}
+
+static enum vcs_space_result manifest_decode_body(
+    struct vcs_space_manifest_v1 *out, const uint8_t *wire,
+    size_t wire_len, size_t *off)
+{
+  enum vcs_space_result parsed =
+      manifest_decode_text(out, wire, wire_len, off);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_root_section(
+        wire, wire_len, off, &out->service_count, out->service_roots,
+        VCS_SPACE_SERVICE_MAX);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_root_section(
+        wire, wire_len, off, &out->object_count, out->object_roots,
+        VCS_SPACE_OBJECT_MAX);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_root_section(
+        wire, wire_len, off, &out->portal_count, out->portal_roots,
+        VCS_SPACE_PORTAL_MAX);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_admission(out, wire, wire_len, off);
+  return parsed;
+}
+
+static enum vcs_space_result manifest_decode_delegation(
+    struct vcs_space_manifest_v1 *out, const uint8_t *wire,
+    size_t wire_len, size_t *off)
+{
+  if (*off + 2u > wire_len)
+    return VCS_SPACE_ERR_SIZE;
+  uint16_t delegation_len = zcl_read_u16_le(wire + *off);
+  *off += 2;
+  if (delegation_len != VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES ||
+      *off + delegation_len + 64u != wire_len)
+    return VCS_SPACE_ERR_SIZE;
+  if (vcs_zcode_dht_delegation_decode(&out->delegation, wire + *off,
+                                      delegation_len) !=
+      VCS_ZCODE_DHT_DELEGATION_OK)
+    return VCS_SPACE_ERR_DELEGATION;
+  *off += delegation_len;
+  memcpy(out->signature, wire + *off, 64);
+  return VCS_SPACE_OK;
+}
+
 enum vcs_space_result vcs_space_manifest_decode(
     struct vcs_space_manifest_v1 *out, const uint8_t *wire,
     size_t wire_len)
@@ -446,86 +589,21 @@ enum vcs_space_result vcs_space_manifest_decode(
   if (!out || !wire)
     return VCS_SPACE_ERR_NULL;
   memset(out, 0, sizeof(*out));
-  if (wire_len < 8u + 2u + 24u + 1u + 1u + 1u + 1u + 1u + 2u +
-                     VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES + 64u ||
-      wire_len > VCS_SPACE_MANIFEST_WIRE_MAX)
-    return VCS_SPACE_ERR_SIZE;
-  if (memcmp(wire, manifest_magic, sizeof(manifest_magic)) != 0)
-    return VCS_SPACE_ERR_MAGIC;
-  size_t off = sizeof(manifest_magic);
-  out->schema_version = zcl_read_u16_le(wire + off);
-  off += 2;
-  out->sequence = zcl_read_u64_le(wire + off);
-  off += 8;
-  out->not_before = zcl_read_u64_le(wire + off);
-  off += 8;
-  out->expiry = zcl_read_u64_le(wire + off);
-  off += 8;
-  uint8_t name_len = wire[off++];
-  if (!name_len || name_len > VCS_SPACE_NAME_MAX ||
-      !take(wire, wire_len, &off, out->name, name_len))
-    goto size_fail;
-  if (off + 2u > wire_len)
-    goto size_fail;
-  uint16_t description_len = zcl_read_u16_le(wire + off);
-  off += 2;
-  if (!description_len || description_len > VCS_SPACE_DESCRIPTION_MAX ||
-      !take(wire, wire_len, &off, out->description, description_len))
-    goto size_fail;
-  if (off >= wire_len)
-    goto size_fail;
-  out->service_count = wire[off++];
-  if (out->service_count > VCS_SPACE_SERVICE_MAX ||
-      !take(wire, wire_len, &off, out->service_roots,
-            (size_t)out->service_count * 32u))
-    goto limit_fail;
-  if (off >= wire_len)
-    goto size_fail;
-  out->object_count = wire[off++];
-  if (out->object_count > VCS_SPACE_OBJECT_MAX ||
-      !take(wire, wire_len, &off, out->object_roots,
-            (size_t)out->object_count * 32u))
-    goto limit_fail;
-  if (off >= wire_len)
-    goto size_fail;
-  out->portal_count = wire[off++];
-  if (out->portal_count > VCS_SPACE_PORTAL_MAX ||
-      !take(wire, wire_len, &off, out->portal_roots,
-            (size_t)out->portal_count * 32u))
-    goto limit_fail;
-  if (off >= wire_len || wire[off] > 1u)
-    goto size_fail;
-  out->has_admission = wire[off++] != 0;
-  if (out->has_admission &&
-      !take(wire, wire_len, &off, out->admission_root, 32))
-    goto size_fail;
-  if (off + 2u > wire_len)
-    goto size_fail;
-  uint16_t delegation_len = zcl_read_u16_le(wire + off);
-  off += 2;
-  if (delegation_len != VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES ||
-      off + delegation_len + 64u != wire_len)
-    goto size_fail;
-  if (vcs_zcode_dht_delegation_decode(&out->delegation, wire + off,
-                                      delegation_len) !=
-      VCS_ZCODE_DHT_DELEGATION_OK)
-    goto delegation_fail;
-  off += delegation_len;
-  memcpy(out->signature, wire + off, 64);
+  size_t off = 0;
+  enum vcs_space_result parsed =
+      manifest_decode_header(out, wire, wire_len, &off);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_body(out, wire, wire_len, &off);
+  if (parsed == VCS_SPACE_OK)
+    parsed = manifest_decode_delegation(out, wire, wire_len, &off);
+  if (parsed != VCS_SPACE_OK) {
+    memset(out, 0, sizeof(*out));
+    return parsed;
+  }
   enum vcs_space_result checked = vcs_space_manifest_validate(out);
   if (checked != VCS_SPACE_OK)
     memset(out, 0, sizeof(*out));
   return checked;
-
-limit_fail:
-  memset(out, 0, sizeof(*out));
-  return VCS_SPACE_ERR_LIMIT;
-delegation_fail:
-  memset(out, 0, sizeof(*out));
-  return VCS_SPACE_ERR_DELEGATION;
-size_fail:
-  memset(out, 0, sizeof(*out));
-  return VCS_SPACE_ERR_SIZE;
 }
 
 enum vcs_space_result vcs_space_manifest_root(
