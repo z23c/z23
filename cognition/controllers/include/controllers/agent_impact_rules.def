@@ -225,6 +225,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/onion_stream.c|core/modules/net/src/onio
  * and a change to it was refused by the pre-push changed-set resolver
  * rather than tested. */
 AGENT_IMPACT_RULE("core/modules/net/src/onion_directory.c|core/modules/net/include/net/onion_discovery.h|tests/harness/src/test_onion_directory.c|tests/harness/src/test_onion_directory_stale_hearsay.c", "onion_directory net onion_stream seed_bootstrap_doors make_lint_gates")
+AGENT_IMPACT_RULE("core/modules/net/src/onion_service.c|core/modules/net/include/net/onion_service.h|tests/harness/src/test_onion_service_serve.c", "onion_service_serve make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/net/src/ws_events.c|core/modules/net/include/net/ws_events.h|tests/harness/src/test_ws_events.c", "ws_events make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/rpc/src/async_rpc_queue.c|engine/modules/rpc/include/rpc/async_rpc_queue.h", "rpc make_lint_gates")
 /* Shared zclassicd transport: RPC parsing/timeout behavior plus the three
