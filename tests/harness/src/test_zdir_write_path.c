@@ -237,49 +237,55 @@ static void zwp_add_plan_fields(struct json_value *input, const char *idem)
 
 /* ── (1) compose -> fold -> deregister -> fold, on real bytes ─────── */
 
-static int t_full_loop(void)
-{
-    int failures = 0;
+/* The loop's shared state: one datadir and node.db, the owner's coin, and
+ * the hostname and key under test. Each phase reads what the last left. */
+struct zwp_loop {
     char dir[256];
     struct node_db ndb;
-    ZWP_CHECK("loop fixture: datadir + node.db",
-              zwp_mk_datadir(dir, sizeof(dir), "loop", &ndb));
-
     uint8_t owner20[20];
-    memset(owner20, 0x41, sizeof(owner20));
     char owner_addr[96];
-    zwp_p2pkh(owner20, owner_addr, sizeof(owner_addr));
+    char host[64];
+    uint8_t key[ZDIR_PUBKEY_LEN];
+    char key_hex[65];
+    struct transaction_lab_simnet_receipt register_mined;
+    struct transaction_lab_simnet_receipt deregister_mined;
+    bool register_mined_ok;
+    bool deregister_mined_ok;
+};
+
+/* Fixture: the datadir, the owner's t-address, and one spendable owner coin. */
+static int zwp_loop_setup(struct zwp_loop *L)
+{
+    int failures = 0;
+    ZWP_CHECK("loop fixture: datadir + node.db",
+              zwp_mk_datadir(L->dir, sizeof(L->dir), "loop", &L->ndb));
+
+    memset(L->owner20, 0x41, sizeof(L->owner20));
+    zwp_p2pkh(L->owner20, L->owner_addr, sizeof(L->owner_addr));
     ZWP_CHECK("loop fixture: owner encodes as a t-address",
-              owner_addr[0] != '\0');
+              L->owner_addr[0] != '\0');
     /* The later projection-only re-register still uses a synthetic previous
      * output; the initial register/deregister receipts seed their own exact
      * block-connected funding outputs. */
-    zwp_seed_owner_utxo(&ndb, 0xA2, owner20, 10);
+    zwp_seed_owner_utxo(&L->ndb, 0xA2, L->owner20, 10);
 
-    char host[64];
-    zwp_mk_host(host, sizeof(host), 'k');
-    uint8_t key[ZDIR_PUBKEY_LEN];
-    memset(key, 0x33, sizeof(key));
-    char key_hex[65];
-    HexStr(key, ZDIR_PUBKEY_LEN, false, key_hex, sizeof(key_hex));
+    zwp_mk_host(L->host, sizeof(L->host), 'k');
+    memset(L->key, 0x33, sizeof(L->key));
+    HexStr(L->key, ZDIR_PUBKEY_LEN, false, L->key_hex, sizeof(L->key_hex));
+    return failures;
+}
 
+static int zwp_loop_register_plan(struct zwp_loop *L)
+{
+    int failures = 0;
     struct json_value input;
     struct zcl_command_reply reply;
-    uint8_t script[ZDIR_SCRIPT_MAX];
-    size_t slen = 0;
-    struct zdir_message msg;
-    struct transaction_lab_simnet_receipt register_mined;
-    struct transaction_lab_simnet_receipt deregister_mined;
-    bool register_mined_ok = false;
-    bool deregister_mined_ok = false;
-    g_zwp_plan_calls = 0;
-
     /* REGISTER: native command creates a scoped reservation and returns a
      * sanitized receipt. Production codec bytes are proven independently
      * below because raw signed bytes never belong in public output. */
-    zwp_input_open(&input, dir);
-    (void)json_push_kv_str(&input, "hostname", host);
-    (void)json_push_kv_str(&input, "pubkey", key_hex);
+    zwp_input_open(&input, L->dir);
+    (void)json_push_kv_str(&input, "hostname", L->host);
+    (void)json_push_kv_str(&input, "pubkey", L->key_hex);
     zwp_add_plan_fields(&input, "zdir-register-fixture");
     zwp_call(zcl_native_handle_core_zdir_register, &input, &reply,
              "zcl.core_zdir_register.v2");
@@ -295,48 +301,69 @@ static int t_full_loop(void)
               json_get(&reply.data, "op_return_hex") == NULL);
     zcl_command_reply_free(&reply);
     json_free(&input);
+    return failures;
+}
 
-    slen = zdir_build_register(script, sizeof(script), host, key);
+/* Codec round-trip of the register bytes, then mine and project them. */
+static int zwp_loop_register_mine(struct zwp_loop *L)
+{
+    int failures = 0;
+    uint8_t script[ZDIR_SCRIPT_MAX];
+    struct zdir_message msg;
+    size_t slen = zdir_build_register(script, sizeof(script), L->host, L->key);
     ZWP_CHECK("register codec: exact bytes round-trip",
               slen > 0 && zdir_parse(script, slen, &msg) &&
               msg.command == ZDIR_CMD_REGISTER &&
-              strcmp(msg.hostname, host) == 0 && msg.has_pubkey &&
-              memcmp(msg.pubkey, key, sizeof(key)) == 0);
+              strcmp(msg.hostname, L->host) == 0 && msg.has_pubkey &&
+              memcmp(msg.pubkey, L->key, sizeof(L->key)) == 0);
 
     /* Mine and project those exact bytes, spent from the owner's coin. */
-    register_mined_ok = slen > 0 &&
+    L->register_mined_ok = slen > 0 &&
         transaction_lab_simnet_mine_owned_op_return_at(
-            script, slen, owner20, 500, &register_mined);
+            script, slen, L->owner20, 500, &L->register_mined);
     ZWP_CHECK("register: exact command bytes pass connect_block",
-              register_mined_ok && register_mined.mined_height == 500 &&
-              register_mined.transaction.num_vout == 2 &&
-              register_mined.change_zat == 800000);
+              L->register_mined_ok && L->register_mined.mined_height == 500 &&
+              L->register_mined.transaction.num_vout == 2 &&
+              L->register_mined.change_zat == 800000);
     ZWP_CHECK("register: block-connected bytes fold through the indexer",
-              register_mined_ok &&
-              transaction_lab_simnet_project(&ndb, &register_mined));
+              L->register_mined_ok &&
+              transaction_lab_simnet_project(&L->ndb, &L->register_mined));
+    return failures;
+}
 
+/* The projection now holds the registered row, with its seniority and key. */
+static int zwp_loop_register_projection(struct zwp_loop *L)
+{
+    int failures = 0;
     struct db_onion_directory row;
     memset(&row, 0, sizeof(row));
-    bool landed = db_onion_directory_find(&ndb, host, &row);
+    bool landed = db_onion_directory_find(&L->ndb, L->host, &row);
     ZWP_CHECK("register: the projection now has the row", landed);
     ZWP_CHECK("register: the row is active",
               landed && strcmp(row.status,
                                ONION_DIRECTORY_STATUS_ACTIVE) == 0);
     ZWP_CHECK("register: the row records the paying owner",
-              landed && strcmp(row.owner_address, owner_addr) == 0);
+              landed && strcmp(row.owner_address, L->owner_addr) == 0);
     ZWP_CHECK("register: seniority is the registering height",
               landed && row.height == 500 && row.updated_height == 500);
     ZWP_CHECK("register: the key binding reached the projection",
               landed && row.has_pubkey &&
-              memcmp(row.master_pubkey, key, 32) == 0);
+              memcmp(row.master_pubkey, L->key, 32) == 0);
     struct db_onion_directory page[4];
     ZWP_CHECK("register: the hostname is now a dial candidate",
-              db_onion_directory_list_active(&ndb, page, 4, 0) == 1);
+              db_onion_directory_list_active(&L->ndb, page, 4, 0) == 1);
+    return failures;
+}
 
+static int zwp_loop_deregister_plan(struct zwp_loop *L)
+{
+    int failures = 0;
+    struct json_value input;
+    struct zcl_command_reply reply;
     /* DEREGISTER: preflight reads the row this loop just wrote, then creates
      * a second sanitized durable reservation. */
-    zwp_input_open(&input, dir);
-    (void)json_push_kv_str(&input, "hostname", host);
+    zwp_input_open(&input, L->dir);
+    (void)json_push_kv_str(&input, "hostname", L->host);
     zwp_add_plan_fields(&input, "zdir-deregister-fixture");
     zwp_call(zcl_native_handle_core_zdir_deregister, &input, &reply,
              "zcl.core_zdir_register.v2");
@@ -347,49 +374,80 @@ static int t_full_loop(void)
               json_get(&reply.data, "owner_address") == NULL);
     zcl_command_reply_free(&reply);
     json_free(&input);
+    return failures;
+}
 
-    slen = zdir_build_deregister(script, sizeof(script), host);
+/* Codec round-trip of the deregister bytes, then mine and project them. */
+static int zwp_loop_deregister_mine(struct zwp_loop *L)
+{
+    int failures = 0;
+    uint8_t script[ZDIR_SCRIPT_MAX];
+    struct zdir_message msg;
+    size_t slen = zdir_build_deregister(script, sizeof(script), L->host);
     ZWP_CHECK("deregister codec: exact bytes round-trip without key",
               slen > 0 && zdir_parse(script, slen, &msg) &&
               msg.command == ZDIR_CMD_DEREGISTER && !msg.has_pubkey);
 
-    deregister_mined_ok = slen > 0 &&
+    L->deregister_mined_ok = slen > 0 &&
         transaction_lab_simnet_mine_owned_op_return_at(
-            script, slen, owner20, 700, &deregister_mined);
+            script, slen, L->owner20, 700, &L->deregister_mined);
     ZWP_CHECK("deregister: exact command bytes pass connect_block",
-              deregister_mined_ok && deregister_mined.mined_height == 700 &&
-              deregister_mined.transaction.num_vout == 2 &&
-              deregister_mined.change_zat == 800000);
+              L->deregister_mined_ok &&
+              L->deregister_mined.mined_height == 700 &&
+              L->deregister_mined.transaction.num_vout == 2 &&
+              L->deregister_mined.change_zat == 800000);
     ZWP_CHECK("deregister: block-connected bytes fold through the indexer",
-              deregister_mined_ok &&
-              transaction_lab_simnet_project(&ndb, &deregister_mined));
+              L->deregister_mined_ok &&
+              transaction_lab_simnet_project(&L->ndb, &L->deregister_mined));
+    return failures;
+}
 
+/* The row is retired, keeping its seniority and history. */
+static int zwp_loop_deregister_retired(struct zwp_loop *L)
+{
+    int failures = 0;
+    struct db_onion_directory row;
+    struct db_onion_directory page[4];
     memset(&row, 0, sizeof(row));
-    bool retired = db_onion_directory_find(&ndb, host, &row);
+    bool retired = db_onion_directory_find(&L->ndb, L->host, &row);
     ZWP_CHECK("deregister: the row is retired", retired &&
               strcmp(row.status, ONION_DIRECTORY_STATUS_RETIRED) == 0);
     ZWP_CHECK("deregister: seniority and history survive retirement",
               retired && row.height == 500 && row.updated_height == 700);
     ZWP_CHECK("deregister: the hostname stops being a dial candidate",
-              db_onion_directory_list_active(&ndb, page, 4, 0) == 0);
+              db_onion_directory_list_active(&L->ndb, page, 4, 0) == 0);
+    return failures;
+}
 
+static int zwp_loop_deregister_twice(struct zwp_loop *L)
+{
+    int failures = 0;
+    struct json_value input;
+    struct zcl_command_reply reply;
     /* And the command now refuses to spend a fee saying it again. */
-    zwp_input_open(&input, dir);
-    (void)json_push_kv_str(&input, "hostname", host);
+    zwp_input_open(&input, L->dir);
+    (void)json_push_kv_str(&input, "hostname", L->host);
     zwp_call(zcl_native_handle_core_zdir_deregister, &input, &reply,
              "zcl.core_zdir_register.v1");
     ZWP_CHECK("deregister twice: ALREADY_RETIRED",
               strcmp(reply.error.code, "ALREADY_RETIRED") == 0);
     zcl_command_reply_free(&reply);
     json_free(&input);
+    return failures;
+}
 
+static int zwp_loop_reregister(struct zwp_loop *L)
+{
+    int failures = 0;
+    uint8_t script[ZDIR_SCRIPT_MAX];
+    struct db_onion_directory row;
     /* A production unbound re-register revives the row without resetting
      * seniority. The native mutation path was already proved above. */
-    slen = zdir_build_register(script, sizeof(script), host, NULL);
+    size_t slen = zdir_build_register(script, sizeof(script), L->host, NULL);
     ZWP_CHECK("re-register: folds and revives the row",
-              slen > 0 && zwp_fold(&ndb, script, slen, 0xA2, 900));
+              slen > 0 && zwp_fold(&L->ndb, script, slen, 0xA2, 900));
     memset(&row, 0, sizeof(row));
-    bool revived = db_onion_directory_find(&ndb, host, &row);
+    bool revived = db_onion_directory_find(&L->ndb, L->host, &row);
     ZWP_CHECK("re-register: active again, seniority unchanged",
               revived && row.height == 500 && row.updated_height == 900 &&
               strcmp(row.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0);
@@ -397,12 +455,33 @@ static int t_full_loop(void)
               revived && !row.has_pubkey);
     ZWP_CHECK("native writes reached exactly two plan RPCs",
               g_zwp_plan_calls == 2);
+    return failures;
+}
 
-    if (register_mined_ok)
-        transaction_lab_simnet_receipt_free(&register_mined);
-    if (deregister_mined_ok)
-        transaction_lab_simnet_receipt_free(&deregister_mined);
-    node_db_close(&ndb);
+static int t_full_loop(void)
+{
+    int failures = 0;
+    struct zwp_loop L;
+    memset(&L, 0, sizeof(L));
+    failures += zwp_loop_setup(&L);
+    g_zwp_plan_calls = 0;
+
+    failures += zwp_loop_register_plan(&L);
+    failures += zwp_loop_register_mine(&L);
+    failures += zwp_loop_register_projection(&L);
+
+    failures += zwp_loop_deregister_plan(&L);
+    failures += zwp_loop_deregister_mine(&L);
+    failures += zwp_loop_deregister_retired(&L);
+
+    failures += zwp_loop_deregister_twice(&L);
+    failures += zwp_loop_reregister(&L);
+
+    if (L.register_mined_ok)
+        transaction_lab_simnet_receipt_free(&L.register_mined);
+    if (L.deregister_mined_ok)
+        transaction_lab_simnet_receipt_free(&L.deregister_mined);
+    node_db_close(&L.ndb);
     return failures;
 }
 
@@ -430,6 +509,77 @@ static bool zwp_fund(struct wallet *w, const struct key_id *kid,
     bool ok = wallet_add_to_wallet(w, &wtx);
     transaction_free(&wtx.tx);
     return ok;
+}
+
+/* Build the owner's base tx and check the input it spent: exactly one, the
+ * owner's coin, and never the richer decoy. */
+static int zwp_owner_check_inputs(const struct wallet_tx *wtx, bool ok,
+                                  const uint8_t owner_txid[32],
+                                  const uint8_t other_txid[32])
+{
+    int failures = 0;
+    ZWP_CHECK("owner proof: the base tx builds", ok);
+    ZWP_CHECK("owner proof: it spends exactly ONE input",
+              ok && wtx->tx.num_vin == 1);
+    ZWP_CHECK("owner proof: that input is the OWNER's coin, not the decoy",
+              ok && wtx->tx.num_vin == 1 &&
+              memcmp(wtx->tx.vin[0].prevout.hash.data, owner_txid, 32) == 0);
+    ZWP_CHECK("owner proof: it is not the richer decoy coin",
+              ok && wtx->tx.num_vin == 1 &&
+              memcmp(wtx->tx.vin[0].prevout.hash.data, other_txid, 32) != 0);
+    return failures;
+}
+
+/* The base tx's outputs: dust back to the owner, and the rest as change. */
+static int zwp_owner_check_outputs(const struct wallet_tx *wtx, bool ok,
+                                   int64_t fee)
+{
+    int failures = 0;
+    ZWP_CHECK("owner proof: output 0 pays dust back to the owner",
+              ok && wtx->tx.num_vout == 2 && wtx->tx.vout[0].value == 546);
+    ZWP_CHECK("owner proof: the remainder is change, not a burn",
+              ok && wtx->tx.num_vout == 2 &&
+              wtx->tx.vout[1].value == 20000 - 546 - fee);
+    return failures;
+}
+
+static int zwp_owner_check_base(struct wallet *w, const char *owner_addr,
+                                const uint8_t owner_txid[32],
+                                const uint8_t other_txid[32], bool funded)
+{
+    int failures = 0;
+    struct wallet_tx wtx;
+    memset(&wtx, 0, sizeof(wtx));
+    int64_t fee = 0;
+    const char *err = NULL;
+    struct zcl_result r = { .ok = false };
+    if (funded)
+        r = zslp_command_build_owner_base_tx(w, owner_addr, &wtx, &fee, &err);
+    failures += zwp_owner_check_inputs(&wtx, r.ok, owner_txid, other_txid);
+    failures += zwp_owner_check_outputs(&wtx, r.ok, fee);
+    if (r.ok)
+        transaction_free(&wtx.tx);
+    return failures;
+}
+
+static int zwp_owner_check_refusal(struct wallet *w)
+{
+    int failures = 0;
+    /* An address the wallet cannot spend under fails CLOSED — it never
+     * broadcasts a tx the projection would refuse. */
+    uint8_t stranger20[20];
+    memset(stranger20, 0x5e, sizeof(stranger20));
+    char stranger_addr[96];
+    zwp_p2pkh(stranger20, stranger_addr, sizeof(stranger_addr));
+    struct wallet_tx wtx;
+    memset(&wtx, 0, sizeof(wtx));
+    int64_t fee = 0;
+    const char *err = NULL;
+    struct zcl_result bad =
+        zslp_command_build_owner_base_tx(w, stranger_addr, &wtx, &fee, &err);
+    ZWP_CHECK("owner proof: a non-owner address is refused, not composed",
+              !bad.ok && err != NULL);
+    return failures;
 }
 
 static int t_owner_proof(void)
@@ -463,43 +613,9 @@ static int t_owner_proof(void)
                   zwp_fund(&w, &owner_kid, 20000, owner_txid);
     ZWP_CHECK("owner proof: both addresses funded", funded);
 
-    struct wallet_tx wtx;
-    memset(&wtx, 0, sizeof(wtx));
-    int64_t fee = 0;
-    const char *err = NULL;
-    struct zcl_result r = { .ok = false };
-    if (funded)
-        r = zslp_command_build_owner_base_tx(&w, owner_addr, &wtx, &fee, &err);
-    ZWP_CHECK("owner proof: the base tx builds", r.ok);
-    ZWP_CHECK("owner proof: it spends exactly ONE input",
-              r.ok && wtx.tx.num_vin == 1);
-    ZWP_CHECK("owner proof: that input is the OWNER's coin, not the decoy",
-              r.ok && wtx.tx.num_vin == 1 &&
-              memcmp(wtx.tx.vin[0].prevout.hash.data, owner_txid, 32) == 0);
-    ZWP_CHECK("owner proof: it is not the richer decoy coin",
-              r.ok && wtx.tx.num_vin == 1 &&
-              memcmp(wtx.tx.vin[0].prevout.hash.data, other_txid, 32) != 0);
-    ZWP_CHECK("owner proof: output 0 pays dust back to the owner",
-              r.ok && wtx.tx.num_vout == 2 && wtx.tx.vout[0].value == 546);
-    ZWP_CHECK("owner proof: the remainder is change, not a burn",
-              r.ok && wtx.tx.num_vout == 2 &&
-              wtx.tx.vout[1].value == 20000 - 546 - fee);
-    if (r.ok)
-        transaction_free(&wtx.tx);
-
-    /* An address the wallet cannot spend under fails CLOSED — it never
-     * broadcasts a tx the projection would refuse. */
-    uint8_t stranger20[20];
-    memset(stranger20, 0x5e, sizeof(stranger20));
-    char stranger_addr[96];
-    zwp_p2pkh(stranger20, stranger_addr, sizeof(stranger_addr));
-    memset(&wtx, 0, sizeof(wtx));
-    err = NULL;
-    struct zcl_result bad =
-        zslp_command_build_owner_base_tx(&w, stranger_addr, &wtx, &fee, &err);
-    ZWP_CHECK("owner proof: a non-owner address is refused, not composed",
-              !bad.ok && err != NULL);
-
+    failures += zwp_owner_check_base(&w, owner_addr, owner_txid, other_txid,
+                                     funded);
+    failures += zwp_owner_check_refusal(&w);
     return failures;
 }
 
