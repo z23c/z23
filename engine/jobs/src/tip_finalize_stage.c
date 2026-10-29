@@ -244,53 +244,10 @@ static bool live_utxo_count_after(int height_after, int64_t *out_count)
     return tip_finalize_hooks_count_utxos(height_after, out_count);
 }
 
-static job_result_t step_finalize(struct stage_step_ctx *c)
+static void step_fin_resolve_tips(struct main_state *ms, sqlite3 *db, int next_h,
+                                  struct block_index **out_old_tip,
+                                  struct block_index **out_new_tip)
 {
-    tip_finalize_observe_mark_step();
-
-    struct main_state *ms = g_ms;
-    if (!ms) return JOB_IDLE;
-    sqlite3 *db = progress_store_db();
-    if (!db) return JOB_IDLE;
-
-    int next_h = (int)c->cursor_in;
-    if (next_h < 0) return JOB_FATAL;
-
-    uint64_t uv_cursor = 0;
-    if (!stage_upstream_frontier_or_zero(db, "utxo_apply", STAGE_NAME,
-                                   &uv_cursor))
-        return JOB_FATAL;
-    if ((uint64_t)next_h > uv_cursor) {  /* ANOMALY: names a typed blocker — see tip_finalize_observe_note_cursor_gap */
-        tip_finalize_observe_note_cursor_gap(next_h, uv_cursor);
-        return JOB_IDLE;
-    }
-    tip_finalize_observe_clear_cursor_gap();
-    if ((uint64_t)next_h >= uv_cursor) {
-        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_AT_UV_FRONTIER);
-        return JOB_IDLE;
-    }
-
-    struct utxo_apply_row upstream;
-    int found = utxo_apply_log_at(db, next_h, &upstream);
-    if (found < 0) return JOB_FATAL;
-    if (found == 0) {  /* durable upstream-log hole, not "not yet" — see stage_upstream_log_hole_note */
-        stage_upstream_log_hole_note(STAGE_NAME, "utxo_apply_log", next_h, uv_cursor, NULL);
-        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_UV_ROW_MISSING);
-        return JOB_IDLE;
-    }
-    stage_upstream_log_hole_clear(STAGE_NAME);
-
-    if (upstream.ok == 0) {
-        tip_finalize_evidence_clear();
-        struct arith_uint256 zero;
-        arith_uint256_set_zero(&zero);
-        if (!log_insert(db, next_h, "upstream_failed", false, &zero, -1, 0, NULL))
-            return JOB_FATAL;
-        tip_finalize_observe_inc_upstream_failed();
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
-
     struct block_index *old_tip = active_chain_at(&ms->chain_active, next_h);
     struct block_index *new_tip = active_chain_at(&ms->chain_active, next_h + 1);
     /* WINDOW-SLOT SELF-HEAL. The active-chain window's lower slot at next_h can
@@ -337,60 +294,44 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
                 new_tip = header_tip;
         }
     }
-    if (!new_tip) {
-        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_LOOKAHEAD_MISSING);
-        return JOB_IDLE;
-    }
-    if (!old_tip || !old_tip->phashBlock) {  /* ANOMALY: names a typed blocker — see tip_finalize_observe_note_tip_missing */
-        tip_finalize_observe_note_tip_missing(next_h);
-        return JOB_IDLE;
-    }
-    /* old_tip (and new_tip above) resolved — clear any stale tip-missing claim. */
-    tip_finalize_observe_clear_tip_missing();
+    *out_old_tip = old_tip;
+    *out_new_tip = new_tip;
+}
 
-    bool anchor_row_compatible = upstream.is_anchor ||
-        upstream.evidence == MINT_VALIDATION_EVIDENCE_VERIFIED;
+/* *stop is set when the returned result must end the step. */
+static job_result_t step_fin_evidence_gate(struct stage_step_ctx *c, sqlite3 *db,
+                                           int next_h,
+                                           const struct utxo_apply_row *upstream,
+                                           struct block_index *old_tip, bool *stop)
+{
+    *stop = true;
+    bool anchor_row_compatible = upstream->is_anchor ||
+        upstream->evidence == MINT_VALIDATION_EVIDENCE_VERIFIED;
     int anchor_ready = anchor_row_compatible
         ? tip_finalize_trusted_anchor_at(db, next_h, old_tip->phashBlock) : 0;
     if (anchor_ready < 0)
         return JOB_FATAL;
-    if (upstream.ok != 1)
-        return tip_finalize_evidence_refuse(c, next_h, upstream.evidence);
+    if (upstream->ok != 1)
+        return tip_finalize_evidence_refuse(c, next_h, upstream->evidence);
     if (anchor_ready != 1) {
         int evidence_ready = tip_finalize_full_evidence_at(
             db, next_h, old_tip->phashBlock);
         if (evidence_ready < 0)
             return JOB_FATAL;
-        if (upstream.evidence != MINT_VALIDATION_EVIDENCE_VERIFIED ||
+        if (upstream->evidence != MINT_VALIDATION_EVIDENCE_VERIFIED ||
             evidence_ready != 1)
-            return tip_finalize_evidence_refuse(c, next_h, upstream.evidence);
+            return tip_finalize_evidence_refuse(c, next_h, upstream->evidence);
     }
     tip_finalize_evidence_clear();
+    *stop = false;
+    return JOB_IDLE;
+}
 
-    struct arith_uint256 work_delta;
-    arith_uint256_set_zero(&work_delta);
-
-    /* Canonical-parent check BY BLOCK HASH, not pointer identity. old_tip and
-     * new_tip can now be resolved from DIFFERENT authorities (active-chain
-     * window vs best-header ancestry vs block map via the self-heals above), so
-     * a duplicate same-hash block_index object would make a pointer compare
-     * false-detect a reorg and write an ok=0 row that caps H* a block below the
-     * truth. Contiguity
-     * is the consensus property child.hashPrevBlock == parent.GetBlockHash();
-     * test THAT. A genuine fork (different parent hash, or a NULL/severed pprev)
-     * still takes the reorg_detected ok=0 advance below — invariant 4 intact. */
-    if (!new_tip->pprev || !new_tip->pprev->phashBlock || !old_tip->phashBlock ||
-        !uint256_eq(new_tip->pprev->phashBlock, old_tip->phashBlock)) {
-        int depth = reorg_depth_from(old_tip, new_tip);
-        if (!log_insert(db, next_h, "reorg_detected", false, &work_delta, -1, depth, NULL))
-            return JOB_FATAL;
-        tip_finalize_observe_inc_reorg_detected();
-        event_emitf(EV_BLOCK_REJECTED, 0,
-                    "tip_finalize reorg_detected height=%d depth=%d", next_h, depth);
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
-
+/* True when the successor is not ready and the step must hold (JOB_IDLE). */
+static bool step_fin_successor_hold(struct main_state *ms, sqlite3 *db, int next_h,
+                                    struct block_index *old_tip,
+                                    struct block_index *new_tip)
+{
     /* Reaching here we KNOW new_tip->pprev == old_tip (the structural-reorg
      * branch above returned first) — a LINEAR one-block lookahead extension.
      * Two outcomes are NOT the same and must be handled differently:
@@ -469,9 +410,205 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
             /* Genuinely not a canonical successor (no/!PoW header, off
              * best_header, or not greater work): hold H until its successor is
              * ready. No DB row, no cursor move. */
-            return JOB_IDLE;
+            return true;
         }
     }
+    return false;
+}
+
+/* *stop is set when the returned result must end the step. */
+static job_result_t step_fin_utxo_check(struct stage_step_ctx *c, sqlite3 *db,
+                                        int next_h,
+                                        const struct utxo_apply_row *upstream,
+                                        struct arith_uint256 *work_delta,
+                                        int64_t *out_utxo_size_after, bool *stop)
+{
+    *stop = true;
+    int64_t utxo_size_after = -1;
+    if (!live_utxo_count_after(next_h + 1, &utxo_size_after))
+        return JOB_FATAL;
+    if (utxo_size_after >= 0) {
+        int64_t spent = 0, added = 0;
+        /* O(1) running total instead of an O(height) SUM(...) WHERE height<=?
+         * per finalize (which made this stage O(height^2) over a fold). upstream
+         * is THIS height's own ok=1 utxo_apply row (loaded above), so the cache
+         * folds in exactly the row the full SUM would; it falls back to the full
+         * SUM on any non-adjacency (reorg rewind / ok=0 gap) or the self-check
+         * stride. Identical values to utxo_apply_sums_through in all cases. */
+        int64_t tf_sum_t0 = platform_time_monotonic_us();
+        if (!utxo_apply_sum_through_incremental(db, next_h,
+                                                upstream->spent_count,
+                                                upstream->added_count,
+                                                &spent, &added))
+            return JOB_FATAL;
+        reducer_stage_profile_observe_us(
+            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_INCREMENTAL_SUM_US,
+            (uint64_t)(platform_time_monotonic_us() - tf_sum_t0));
+        int64_t expected = added - spent;
+        if (utxo_size_after != expected) {
+            if (!log_insert(db, next_h, "utxo_count_diverged", false,
+                            work_delta, utxo_size_after, 0, NULL))
+                return JOB_FATAL;
+            tip_finalize_observe_inc_utxo_count_diverged();
+            event_emitf(EV_BLOCK_REJECTED, 0,
+                        "tip_finalize utxo_count_diverged height=%d live=%lld expected=%lld",
+                        next_h, (long long)utxo_size_after, (long long)expected);
+            c->cursor_out = c->cursor_in + 1;
+            return JOB_ADVANCED;
+        }
+    }
+    *out_utxo_size_after = utxo_size_after;
+    *stop = false;
+    return JOB_IDLE;
+}
+
+static void step_fin_publish_and_advance(sqlite3 *db, int next_h,
+                                         struct block_index *new_tip,
+                                         struct arith_uint256 *work_delta, bool publish)
+{
+    tip_finalize_observe_inc_finalized();
+    tip_finalize_observe_add_work(work_delta);
+    if (publish) {
+        int64_t tf_post_t0 = platform_time_monotonic_us();
+        tip_finalize_run_post_finalize(new_tip);
+        reducer_stage_profile_observe_us(
+            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_POST_FINALIZE_US,
+            (uint64_t)(platform_time_monotonic_us() - tf_post_t0));
+        /* Publish the SELF-CONSISTENT authority pair: the served tip block's
+         * OWN height with its OWN hash — derive the label from the block,
+         * never the cursor. Publishing (next_h, hash(next_h+1)) makes
+         * active_chain_height() == active_chain_tip()->nHeight - 1 at the
+         * finalize frontier, and accept_block_header's label-trust install
+         * turns that inconsistent pair into a -1 height splice across the
+         * whole header graph when a peer re-delivers the tip header. */
+        tip_finalize_observe_update_last_advance(new_tip->nHeight,
+                                                 new_tip->phashBlock->data);
+    } else if (new_tip->nStatus & BLOCK_HAVE_DATA) {
+        /* An at-tip authority path may have published this exact block before
+         * the reducer writes its finalized row. The wallet/MMR/MMB effects are
+         * one-shot and remain gated by publish, but cache invalidation and
+         * confirmed-tx removal are idempotent and mandatory. Skipping them
+         * leaves an already-confirmed transaction live in the mempool. */
+        int64_t tf_post_t0 = platform_time_monotonic_us();
+        tip_finalize_run_mempool_reconcile(new_tip);
+        reducer_stage_profile_observe_us(
+            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_POST_FINALIZE_US,
+            (uint64_t)(platform_time_monotonic_us() - tf_post_t0));
+    }
+    /* O(1) watermark advance (or full-fold fallback on any doubt) — see
+     * tf_advance_provable_tip. reorg rewind always takes the full path above. */
+    int64_t tf_pt_t0 = platform_time_monotonic_us();
+    tf_advance_provable_tip(db, next_h);
+    reducer_stage_profile_observe_us(
+        REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_PROVABLE_TIP_US,
+        (uint64_t)(platform_time_monotonic_us() - tf_pt_t0));
+}
+
+/* *stop is set when the returned result must end the step. */
+static job_result_t step_fin_load_upstream(sqlite3 *db, int next_h,
+                                           struct utxo_apply_row *upstream,
+                                           bool *stop)
+{
+    *stop = true;
+    uint64_t uv_cursor = 0;
+    if (!stage_upstream_frontier_or_zero(db, "utxo_apply", STAGE_NAME,
+                                   &uv_cursor))
+        return JOB_FATAL;
+    if ((uint64_t)next_h > uv_cursor) {  /* ANOMALY: names a typed blocker — see tip_finalize_observe_note_cursor_gap */
+        tip_finalize_observe_note_cursor_gap(next_h, uv_cursor);
+        return JOB_IDLE;
+    }
+    tip_finalize_observe_clear_cursor_gap();
+    if ((uint64_t)next_h >= uv_cursor) {
+        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_AT_UV_FRONTIER);
+        return JOB_IDLE;
+    }
+
+    int found = utxo_apply_log_at(db, next_h, upstream);
+    if (found < 0) return JOB_FATAL;
+    if (found == 0) {  /* durable upstream-log hole, not "not yet" — see stage_upstream_log_hole_note */
+        stage_upstream_log_hole_note(STAGE_NAME, "utxo_apply_log", next_h, uv_cursor, NULL);
+        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_UV_ROW_MISSING);
+        return JOB_IDLE;
+    }
+    stage_upstream_log_hole_clear(STAGE_NAME);
+    *stop = false;
+    return JOB_IDLE;
+}
+
+static job_result_t step_finalize(struct stage_step_ctx *c)
+{
+    tip_finalize_observe_mark_step();
+
+    struct main_state *ms = g_ms;
+    if (!ms) return JOB_IDLE;
+    sqlite3 *db = progress_store_db();
+    if (!db) return JOB_IDLE;
+
+    int next_h = (int)c->cursor_in;
+    if (next_h < 0) return JOB_FATAL;
+
+    struct utxo_apply_row upstream;
+    bool stop = false;
+    job_result_t gate = step_fin_load_upstream(db, next_h, &upstream, &stop);
+    if (stop)
+        return gate;
+
+    if (upstream.ok == 0) {
+        tip_finalize_evidence_clear();
+        struct arith_uint256 zero;
+        arith_uint256_set_zero(&zero);
+        if (!log_insert(db, next_h, "upstream_failed", false, &zero, -1, 0, NULL))
+            return JOB_FATAL;
+        tip_finalize_observe_inc_upstream_failed();
+        c->cursor_out = c->cursor_in + 1;
+        return JOB_ADVANCED;
+    }
+
+    struct block_index *old_tip = NULL;
+    struct block_index *new_tip = NULL;
+    step_fin_resolve_tips(ms, db, next_h, &old_tip, &new_tip);
+    if (!new_tip) {
+        tip_finalize_observe_mark_blocked(TIP_FINALIZE_BLOCKED_LOOKAHEAD_MISSING);
+        return JOB_IDLE;
+    }
+    if (!old_tip || !old_tip->phashBlock) {  /* ANOMALY: names a typed blocker — see tip_finalize_observe_note_tip_missing */
+        tip_finalize_observe_note_tip_missing(next_h);
+        return JOB_IDLE;
+    }
+    /* old_tip (and new_tip above) resolved — clear any stale tip-missing claim. */
+    tip_finalize_observe_clear_tip_missing();
+
+    gate = step_fin_evidence_gate(c, db, next_h, &upstream, old_tip, &stop);
+    if (stop)
+        return gate;
+
+    struct arith_uint256 work_delta;
+    arith_uint256_set_zero(&work_delta);
+
+    /* Canonical-parent check BY BLOCK HASH, not pointer identity. old_tip and
+     * new_tip can now be resolved from DIFFERENT authorities (active-chain
+     * window vs best-header ancestry vs block map via the self-heals above), so
+     * a duplicate same-hash block_index object would make a pointer compare
+     * false-detect a reorg and write an ok=0 row that caps H* a block below the
+     * truth. Contiguity
+     * is the consensus property child.hashPrevBlock == parent.GetBlockHash();
+     * test THAT. A genuine fork (different parent hash, or a NULL/severed pprev)
+     * still takes the reorg_detected ok=0 advance below — invariant 4 intact. */
+    if (!new_tip->pprev || !new_tip->pprev->phashBlock || !old_tip->phashBlock ||
+        !uint256_eq(new_tip->pprev->phashBlock, old_tip->phashBlock)) {
+        int depth = reorg_depth_from(old_tip, new_tip);
+        if (!log_insert(db, next_h, "reorg_detected", false, &work_delta, -1, depth, NULL))
+            return JOB_FATAL;
+        tip_finalize_observe_inc_reorg_detected();
+        event_emitf(EV_BLOCK_REJECTED, 0,
+                    "tip_finalize reorg_detected height=%d depth=%d", next_h, depth);
+        c->cursor_out = c->cursor_in + 1;
+        return JOB_ADVANCED;
+    }
+
+    if (step_fin_successor_hold(ms, db, next_h, old_tip, new_tip))
+        return JOB_IDLE;
     if (arith_uint256_compare(&new_tip->nChainWork, &old_tip->nChainWork) <= 0) {
         if (!log_insert(db, next_h, "precondition_failed", false, &work_delta, -1, 0, NULL))
             return JOB_FATAL;
@@ -488,38 +625,10 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
     arith_uint256_sub(&work_delta, &new_tip->nChainWork, &old_tip->nChainWork);
 
     int64_t utxo_size_after = -1;
-    if (!live_utxo_count_after(next_h + 1, &utxo_size_after))
-        return JOB_FATAL;
-    if (utxo_size_after >= 0) {
-        int64_t spent = 0, added = 0;
-        /* O(1) running total instead of an O(height) SUM(...) WHERE height<=?
-         * per finalize (which made this stage O(height^2) over a fold). upstream
-         * is THIS height's own ok=1 utxo_apply row (loaded above), so the cache
-         * folds in exactly the row the full SUM would; it falls back to the full
-         * SUM on any non-adjacency (reorg rewind / ok=0 gap) or the self-check
-         * stride. Identical values to utxo_apply_sums_through in all cases. */
-        int64_t tf_sum_t0 = platform_time_monotonic_us();
-        if (!utxo_apply_sum_through_incremental(db, next_h,
-                                                upstream.spent_count,
-                                                upstream.added_count,
-                                                &spent, &added))
-            return JOB_FATAL;
-        reducer_stage_profile_observe_us(
-            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_INCREMENTAL_SUM_US,
-            (uint64_t)(platform_time_monotonic_us() - tf_sum_t0));
-        int64_t expected = added - spent;
-        if (utxo_size_after != expected) {
-            if (!log_insert(db, next_h, "utxo_count_diverged", false,
-                            &work_delta, utxo_size_after, 0, NULL))
-                return JOB_FATAL;
-            tip_finalize_observe_inc_utxo_count_diverged();
-            event_emitf(EV_BLOCK_REJECTED, 0,
-                        "tip_finalize utxo_count_diverged height=%d live=%lld expected=%lld",
-                        next_h, (long long)utxo_size_after, (long long)expected);
-            c->cursor_out = c->cursor_in + 1;
-            return JOB_ADVANCED;
-        }
-    }
+    gate = step_fin_utxo_check(c, db, next_h, &upstream, &work_delta,
+                               &utxo_size_after, &stop);
+    if (stop)
+        return gate;
 
     int64_t tf_log_t0 = platform_time_monotonic_us();
     if (!log_insert(db, next_h, "finalized", true, &work_delta,
@@ -572,42 +681,7 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
             REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_WINDOW_MOVE_US,
             (uint64_t)(platform_time_monotonic_us() - tf_win_t0));
 
-    tip_finalize_observe_inc_finalized();
-    tip_finalize_observe_add_work(&work_delta);
-    if (publish) {
-        int64_t tf_post_t0 = platform_time_monotonic_us();
-        tip_finalize_run_post_finalize(new_tip);
-        reducer_stage_profile_observe_us(
-            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_POST_FINALIZE_US,
-            (uint64_t)(platform_time_monotonic_us() - tf_post_t0));
-        /* Publish the SELF-CONSISTENT authority pair: the served tip block's
-         * OWN height with its OWN hash — derive the label from the block,
-         * never the cursor. Publishing (next_h, hash(next_h+1)) makes
-         * active_chain_height() == active_chain_tip()->nHeight - 1 at the
-         * finalize frontier, and accept_block_header's label-trust install
-         * turns that inconsistent pair into a -1 height splice across the
-         * whole header graph when a peer re-delivers the tip header. */
-        tip_finalize_observe_update_last_advance(new_tip->nHeight,
-                                                 new_tip->phashBlock->data);
-    } else if (new_tip->nStatus & BLOCK_HAVE_DATA) {
-        /* An at-tip authority path may have published this exact block before
-         * the reducer writes its finalized row. The wallet/MMR/MMB effects are
-         * one-shot and remain gated by publish, but cache invalidation and
-         * confirmed-tx removal are idempotent and mandatory. Skipping them
-         * leaves an already-confirmed transaction live in the mempool. */
-        int64_t tf_post_t0 = platform_time_monotonic_us();
-        tip_finalize_run_mempool_reconcile(new_tip);
-        reducer_stage_profile_observe_us(
-            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_POST_FINALIZE_US,
-            (uint64_t)(platform_time_monotonic_us() - tf_post_t0));
-    }
-    /* O(1) watermark advance (or full-fold fallback on any doubt) — see
-     * tf_advance_provable_tip. reorg rewind always takes the full path above. */
-    int64_t tf_pt_t0 = platform_time_monotonic_us();
-    tf_advance_provable_tip(db, next_h);
-    reducer_stage_profile_observe_us(
-        REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_PROVABLE_TIP_US,
-        (uint64_t)(platform_time_monotonic_us() - tf_pt_t0));
+    step_fin_publish_and_advance(db, next_h, new_tip, &work_delta, publish);
     c->cursor_out = c->cursor_in + 1;
     return JOB_ADVANCED;
 }
