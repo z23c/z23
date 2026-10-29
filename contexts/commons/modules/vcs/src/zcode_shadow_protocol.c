@@ -113,15 +113,21 @@ static bool protocol_report_write_u64_fields(
     struct zcl_codec_writer *writer,
     const struct vcs_zcode_shadow_protocol_epoch_report *row)
 {
-    return zcl_codec_write_u64le(writer, row->epoch) &&
-        zcl_codec_write_u64le(writer, row->creations) &&
-        zcl_codec_write_u64le(writer, row->cap_atoms) &&
-        zcl_codec_write_u64le(writer, row->simulated_issue_atoms) &&
-        zcl_codec_write_u64le(writer, row->attributed_atoms) &&
-        zcl_codec_write_u64le(writer, row->unissued_atoms) &&
-        zcl_codec_write_u64le(writer, row->cumulative_issue_atoms) &&
-        zcl_codec_write_u64le(writer,
-                              row->cumulative_attributed_atoms);
+    const uint64_t fields[] = {
+        row->epoch,
+        row->creations,
+        row->cap_atoms,
+        row->simulated_issue_atoms,
+        row->attributed_atoms,
+        row->unissued_atoms,
+        row->cumulative_issue_atoms,
+        row->cumulative_attributed_atoms,
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if (!zcl_codec_write_u64le(writer, fields[i]))
+            return false;
+    }
+    return true;
 }
 
 static bool protocol_report_root(
