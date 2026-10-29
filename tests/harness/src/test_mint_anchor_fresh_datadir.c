@@ -202,16 +202,20 @@ static bool mfd_stub_pass_validator(const struct block_index *bi,
     return true;
 }
 
-static bool mfd_init_all_reducer_stages(struct main_state *ms)
+/* Walk the eight stage initialisers in pipeline order, stopping at the first
+ * one that refuses. */
+static bool mfd_run_stage_init_table(struct main_state *ms)
 {
-    return header_admit_stage_init(ms) &&
-           validate_headers_stage_init(ms) &&
-           body_fetch_stage_init(ms) &&
-           body_persist_stage_init(ms) &&
-           script_validate_stage_init(ms) &&
-           proof_validate_stage_init(ms) &&
-           utxo_apply_stage_init(ms) &&
-           tip_finalize_stage_init(ms);
+    static bool (*const init_fns[])(struct main_state *) = {
+        header_admit_stage_init,    validate_headers_stage_init,
+        body_fetch_stage_init,      body_persist_stage_init,
+        script_validate_stage_init, proof_validate_stage_init,
+        utxo_apply_stage_init,      tip_finalize_stage_init,
+    };
+    for (size_t i = 0; i < sizeof(init_fns) / sizeof(init_fns[0]); i++)
+        if (!init_fns[i](ms))
+            return false;
+    return true;
 }
 
 /* ── Scenario (b): synthetic imported datadir, headers-only, NO bodies ───
@@ -294,7 +298,7 @@ static int test_mfd_scenario_b_headers_no_bodies_walls_frontier(void)
     static struct uint256     mfd_hashes[N];
     mfd_seed_header_only_chain(mfd_blocks, mfd_hashes, N, &ms);
 
-    bool stages_ok = mfd_init_all_reducer_stages(&ms);
+    bool stages_ok = mfd_run_stage_init_table(&ms);
     MFD_CHECK("(b) all eight reducer stages init", stages_ok);
     validate_headers_stage_set_validator(mfd_stub_pass_validator, NULL);
 
@@ -491,7 +495,7 @@ static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
         ms.pindex_best_header = genesis;
     }
 
-    bool stages_ok = mfd_init_all_reducer_stages(&ms);
+    bool stages_ok = mfd_run_stage_init_table(&ms);
     MFD_CHECK("(c) all eight reducer stages init", stages_ok);
     MFD_CHECK("(c) genesis utxo row seeded",
               mfd_seed_genesis_utxo_apply_row(progress_store_db()));
