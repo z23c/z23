@@ -223,15 +223,31 @@ static bool txk_build_htlc_spend(struct transaction *tx,
     return txk_finalize_manual_fee(tx, input_value, out);
 }
 
-static bool txk_build_multisig_spend(
-    struct transaction *tx, const struct uint256 *fund_txid,
-    int64_t input_value, const struct script *to_script,
-    const struct script *redeem, const struct privkey keys[2],
-    struct simnet_tx_result *out, bool *tamper_rejected)
+struct txk_world {
+    struct simnet *sim;
+    struct simnet_wallet *alice;
+    struct simnet_wallet *bob;
+    struct simnet_wallet *carol;
+    struct simnet_wallet *dave;
+    struct simnet_wallet *erin;
+    struct txk_cost_row rows[16];
+    size_t nrows;
+};
+
+struct txk_multisig {
+    struct privkey keys[2];
+    struct pubkey pubkeys[2];
+    struct script redeem;
+    struct script p2sh;
+    bool keys_ready;
+    struct simnet_tx_result fund;
+};
+
+static bool txk_multisig_init_tx(struct transaction *tx,
+                                 const struct uint256 *fund_txid,
+                                 int64_t input_value,
+                                 const struct script *to_script)
 {
-    if (!tx || !fund_txid || input_value <= 5000 || !to_script || !redeem ||
-        !keys || !out || !tamper_rejected)
-        return false;
     transaction_init(tx);
     if (!transaction_alloc(tx, 1, 1))
         return false;
@@ -243,46 +259,42 @@ static bool txk_build_multisig_spend(
     tx->vin[0].sequence = UINT32_MAX;
     tx->vout[0].value = input_value - 5000;
     tx->vout[0].script_pub_key = *to_script;
+    return true;
+}
 
-    struct precomputed_tx_data txdata;
-    precompute_tx_data(tx, &txdata);
-    struct sighash_type hash_type = { .raw = SIGHASH_ALL };
-    struct uint256 sighash;
-    if (!signature_hash(redeem, tx, 0, hash_type, input_value,
-                        TXK_SAPLING_BRANCH_ID, &txdata, &sighash)) {
-        transaction_free(tx);
-        return false;
-    }
-
-    struct script *script_sig = &tx->vin[0].script_sig;
+static bool txk_multisig_build_scriptsig(struct script *script_sig,
+                                         const struct privkey keys[2],
+                                         struct uint256 *sighash,
+                                         const struct script *redeem)
+{
     script_init(script_sig);
     script_sig->data[script_sig->size++] = OP_0;
     for (size_t i = 0; i < 2; i++) {
         unsigned char signature[SIGNATURE_SIZE + 1];
         size_t signature_len = 0;
-        if (!privkey_sign(&keys[i], &sighash, signature, &signature_len)) {
-            transaction_free(tx);
+        if (!privkey_sign(&keys[i], sighash, signature, &signature_len))
             return false;
-        }
         signature[signature_len++] = SIGHASH_ALL;
-        if (!script_push_data(script_sig, signature, signature_len)) {
-            transaction_free(tx);
+        if (!script_push_data(script_sig, signature, signature_len))
             return false;
-        }
     }
-    if (!script_push_data(script_sig, redeem->data, redeem->size)) {
-        transaction_free(tx);
-        return false;
-    }
-    transaction_compute_hash(tx);
+    return script_push_data(script_sig, redeem->data, redeem->size);
+}
 
+static bool txk_multisig_verify(struct transaction *tx,
+                                struct script *script_sig,
+                                const struct script *redeem,
+                                struct precomputed_tx_data *txdata,
+                                int64_t input_value,
+                                bool *tamper_rejected)
+{
     struct script p2sh;
     struct script_id sid;
     script_id_from_script(&sid, redeem);
     script_for_p2sh(&p2sh, &sid);
     struct tx_sig_checker checker_ctx;
     tx_sig_checker_init(&checker_ctx, tx, 0, input_value,
-                        TXK_SAPLING_BRANCH_ID, &txdata);
+                        TXK_SAPLING_BRANCH_ID, txdata);
     struct sig_checker checker = tx_make_sig_checker(&checker_ctx);
     ScriptError script_error = SCRIPT_ERR_OK;
     bool valid = verify_script(script_sig, &p2sh,
@@ -296,7 +308,38 @@ static bool txk_build_multisig_spend(
     *tamper_rejected = !verify_script(
         &tampered, &p2sh, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_STRICTENC,
         &checker, TXK_SAPLING_BRANCH_ID, &script_error);
-    if (!valid || !*tamper_rejected) {
+    return valid && *tamper_rejected;
+}
+
+static bool txk_build_multisig_spend(
+    struct transaction *tx, const struct uint256 *fund_txid,
+    int64_t input_value, const struct script *to_script,
+    const struct script *redeem, const struct privkey keys[2],
+    struct simnet_tx_result *out, bool *tamper_rejected)
+{
+    if (!tx || !fund_txid || input_value <= 5000 || !to_script || !redeem ||
+        !keys || !out || !tamper_rejected)
+        return false;
+    if (!txk_multisig_init_tx(tx, fund_txid, input_value, to_script))
+        return false;
+
+    struct precomputed_tx_data txdata;
+    precompute_tx_data(tx, &txdata);
+    struct sighash_type hash_type = { .raw = SIGHASH_ALL };
+    struct uint256 sighash;
+    if (!signature_hash(redeem, tx, 0, hash_type, input_value,
+                        TXK_SAPLING_BRANCH_ID, &txdata, &sighash)) {
+        transaction_free(tx);
+        return false;
+    }
+    if (!txk_multisig_build_scriptsig(&tx->vin[0].script_sig, keys,
+                                      &sighash, redeem)) {
+        transaction_free(tx);
+        return false;
+    }
+    transaction_compute_hash(tx);
+    if (!txk_multisig_verify(tx, &tx->vin[0].script_sig, redeem, &txdata,
+                             input_value, tamper_rejected)) {
         transaction_free(tx);
         return false;
     }
@@ -311,12 +354,383 @@ static bool txk_build_multisig_spend(
     return out->tx_size > 0;
 }
 
+static int txk_setup_world(struct txk_world *w, struct simnet *sim,
+                           seed_tape_t *tape)
+{
+    int failures = 0;
+    w->sim = sim;
+    w->nrows = 0;
+    TXK_CHECK("simnet init", simnet_init(sim));
+    simnet_use_seed_tape(sim, tape);
+    TXK_CHECK("initial next block time is deterministic",
+              simnet_next_block_time(sim) == 1700000000u);
+
+    w->alice = simnet_wallet_create(sim);
+    w->bob = simnet_wallet_create(sim);
+    w->carol = simnet_wallet_create(sim);
+    w->dave = simnet_wallet_create(sim);
+    w->erin = simnet_wallet_create(sim);
+    TXK_CHECK("wallets create deterministic addresses",
+              w->alice && w->bob && w->carol && w->dave && w->erin &&
+              strcmp(simnet_wallet_address(w->alice),
+                     simnet_wallet_address(w->bob)) != 0);
+    return failures;
+}
+
+static int txk_scenario_p2pkh(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_a1;
+    TXK_CHECK("fund alice and mature coinbase",
+              simnet_wallet_fund(w->alice, 500000, &fund_a1) &&
+              simnet_wallet_balance(w->alice) == 500000);
+
+    struct simnet_tx_result single;
+    TXK_CHECK("P2PKH single-in/single-out send enqueues",
+              simnet_wallet_send_to_wallet(w->alice, w->bob, 50000,
+                                           &single) &&
+              simnet_mempool_size(w->sim) == 1);
+    txk_add_cost(w->rows, &w->nrows, "P2PKH single-in/single-out",
+                 &single, 1);
+    TXK_CHECK("P2PKH single-in/single-out mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_wallet_balance(w->bob) == 50000);
+    return failures;
+}
+
+static int txk_scenario_multi_input(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_b1, fund_b2;
+    TXK_CHECK("fund erin twice for multi-input",
+              simnet_wallet_fund(w->erin, 70000, &fund_b1) &&
+              simnet_wallet_fund(w->erin, 70000, &fund_b2));
+    struct simnet_tx_result multi_in;
+    TXK_CHECK("multi-input consolidation uses two inputs",
+              simnet_wallet_send_to_wallet(w->erin, w->carol, 120000,
+                                           &multi_in) &&
+              multi_in.input_value == 140000);
+    txk_add_cost(w->rows, &w->nrows, "multi-input consolidation",
+                 &multi_in, 1);
+    TXK_CHECK("multi-input consolidation mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_wallet_balance(w->carol) == 120000);
+    return failures;
+}
+
+static int txk_scenario_fan_out(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_c1;
+    TXK_CHECK("fund alice for fan-out",
+              simnet_wallet_fund(w->alice, 300000, &fund_c1));
+    struct simnet_wallet_recipient fanout[3] = {
+        { .wallet = w->bob, .amount = 20000 },
+        { .wallet = w->carol, .amount = 30000 },
+        { .wallet = w->dave, .amount = 40000 },
+    };
+    struct simnet_tx_result fan;
+    TXK_CHECK("multi-output fan-out enqueues",
+              simnet_wallet_send_many(w->alice, fanout, 3, &fan));
+    txk_add_cost(w->rows, &w->nrows, "multi-output fan-out", &fan, 1);
+    TXK_CHECK("multi-output fan-out mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_wallet_balance(w->dave) == 40000);
+    return failures;
+}
+
+static void txk_multisig_setup(struct txk_multisig *m)
+{
+    struct script_id sid;
+    txk_test_key(&m->keys[0], 0x21);
+    txk_test_key(&m->keys[1], 0x42);
+    m->keys_ready =
+        privkey_get_pubkey(&m->keys[0], &m->pubkeys[0]) &&
+        privkey_get_pubkey(&m->keys[1], &m->pubkeys[1]);
+    script_for_multisig(&m->redeem, 2, m->pubkeys, 2);
+    script_id_from_script(&sid, &m->redeem);
+    script_for_p2sh(&m->p2sh, &sid);
+}
+
+static int txk_multisig_fund(struct txk_world *w, struct txk_multisig *m)
+{
+    int failures = 0;
+    txk_multisig_setup(m);
+    TXK_CHECK("fund 2-of-2 P2SH multisig and mint",
+              m->keys_ready &&
+              simnet_wallet_fund(w->alice, 250000, NULL) &&
+              simnet_wallet_send(w->alice, &m->p2sh, 150000,
+                                 &m->fund) &&
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &m->fund.txid, 0, NULL));
+    return failures;
+}
+
+static int txk_multisig_spend(struct txk_world *w, struct txk_multisig *m)
+{
+    int failures = 0;
+    struct transaction multisig_spend;
+    struct simnet_tx_result multisig_spend_result;
+    bool multisig_tamper_rejected = false;
+    bool multisig_spend_ready = txk_build_multisig_spend(
+        &multisig_spend, &m->fund.txid, 150000,
+        simnet_wallet_script(w->bob), &m->redeem,
+        m->keys, &multisig_spend_result,
+        &multisig_tamper_rejected);
+    TXK_CHECK("2-of-2 spend passes consensus interpreter",
+              multisig_spend_ready &&
+              multisig_tamper_rejected);
+    if (multisig_spend_ready)
+        txk_add_cost(w->rows, &w->nrows, "2-of-2 P2SH multisig spend",
+                     &multisig_spend_result, 1);
+    TXK_CHECK("2-of-2 signed spend enqueues and mints",
+              multisig_spend_ready &&
+              simnet_mempool_add(w->sim, &multisig_spend, NULL) &&
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &multisig_spend_result.txid, 0,
+                                NULL));
+    if (multisig_spend_ready)
+        transaction_free(&multisig_spend);
+    return failures;
+}
+
+static int txk_scenario_multisig(struct txk_world *w)
+{
+    struct txk_multisig m;
+    int failures = txk_multisig_fund(w, &m);
+    return failures + txk_multisig_spend(w, &m);
+}
+
+static int txk_scenario_opret(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_d1;
+    TXK_CHECK("fund alice for OP_RETURN",
+              simnet_wallet_fund(w->alice, 120000, &fund_d1));
+    const uint8_t opret_payload[] = { 't', 'x', 'k', 'i', 't' };
+    struct simnet_tx_result opret_only;
+    TXK_CHECK("OP_RETURN without user value output enqueues",
+              simnet_wallet_op_return(w->alice, opret_payload,
+                                      sizeof(opret_payload), NULL,
+                                      &opret_only));
+    txk_add_cost(w->rows, &w->nrows, "OP_RETURN data carrier",
+                 &opret_only, 1);
+    TXK_CHECK("OP_RETURN without user value output mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &opret_only.txid,
+                                opret_only.change_vout, NULL));
+
+    struct simnet_tx_result fund_d2;
+    TXK_CHECK("fund alice for OP_RETURN plus value",
+              simnet_wallet_fund(w->alice, 140000, &fund_d2));
+    struct simnet_wallet_recipient opret_value = {
+        .wallet = w->bob,
+        .amount = 25000,
+    };
+    struct simnet_tx_result opret_with_value;
+    TXK_CHECK("OP_RETURN with value output enqueues",
+              simnet_wallet_op_return(w->alice, opret_payload,
+                                      sizeof(opret_payload), &opret_value,
+                                      &opret_with_value));
+    txk_add_cost(w->rows, &w->nrows, "OP_RETURN plus value output",
+                 &opret_with_value, 1);
+    TXK_CHECK("OP_RETURN with value output mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_wallet_balance(w->bob) >= 75000);
+    return failures;
+}
+
+static int txk_scenario_htlc_redeem(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_e1;
+    TXK_CHECK("fund alice for HTLC",
+              simnet_wallet_fund(w->alice, 400000, &fund_e1));
+    uint8_t contract[HTLC_CONTRACT_SIZE], secret[32];
+    struct script htlc_p2sh;
+    uint32_t lock_height = (uint32_t)(simnet_tip_height(w->sim) + 3);
+    TXK_CHECK("build real HTLC P2SH script",
+              txk_htlc_scripts(lock_height, &htlc_p2sh, contract, secret));
+
+    struct simnet_tx_result htlc_fund;
+    TXK_CHECK("fund P2SH HTLC through wallet/mempool",
+              simnet_wallet_send(w->alice, &htlc_p2sh, 180000, &htlc_fund));
+    txk_add_cost(w->rows, &w->nrows, "P2SH HTLC fund", &htlc_fund, 1);
+    TXK_CHECK("P2SH HTLC fund mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &htlc_fund.txid, 0, NULL));
+
+    struct transaction redeem_tx;
+    struct simnet_tx_result htlc_redeem;
+    TXK_CHECK("build HTLC redeem-path spend",
+              txk_build_htlc_spend(&redeem_tx, &htlc_fund.txid,
+                                   simnet_wallet_script(w->bob), 180000,
+                                   contract, secret, false, 0,
+                                   &htlc_redeem));
+    TXK_CHECK("HTLC redeem-path spend enqueues",
+              simnet_mempool_add(w->sim, &redeem_tx, NULL));
+    txk_add_cost(w->rows, &w->nrows, "HTLC redeem path", &htlc_redeem, 1);
+    TXK_CHECK("HTLC redeem-path spend mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &htlc_redeem.txid, 0, NULL));
+    transaction_free(&redeem_tx);
+    return failures;
+}
+
+static int txk_scenario_htlc_refund(struct txk_world *w)
+{
+    int failures = 0;
+    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
+    struct script refund_p2sh;
+    uint32_t refund_lock_height = (uint32_t)(simnet_tip_height(w->sim) + 3);
+    TXK_CHECK("build refund HTLC P2SH script",
+              txk_htlc_scripts(refund_lock_height, &refund_p2sh,
+                               refund_contract, refund_secret));
+
+    struct simnet_tx_result htlc_fund_refund;
+    TXK_CHECK("fund second P2SH HTLC for refund",
+              simnet_wallet_send(w->alice, &refund_p2sh, 160000,
+                                 &htlc_fund_refund) &&
+              simnet_mempool_mint(w->sim));
+
+    struct transaction refund_tx;
+    struct simnet_tx_result htlc_refund;
+    TXK_CHECK("build HTLC refund-path spend",
+              txk_build_htlc_spend(&refund_tx, &htlc_fund_refund.txid,
+                                   simnet_wallet_script(w->alice), 160000,
+                                   refund_contract, refund_secret, true,
+                                   refund_lock_height,
+                                   &htlc_refund));
+    struct simnet_mempool_result reject_refund;
+    bool refund_before = simnet_mempool_add(w->sim, &refund_tx,
+                                            &reject_refund);
+    TXK_CHECK("HTLC refund before lock height is rejected",
+              !refund_before &&
+              reject_refund.reason == SIMNET_MEMPOOL_REJECT_NONFINAL);
+    TXK_CHECK("advance to lock height",
+              simnet_mint_to_height(w->sim, (int)refund_lock_height));
+    TXK_CHECK("HTLC refund after lock height enqueues",
+              simnet_mempool_add(w->sim, &refund_tx, NULL));
+    txk_add_cost(w->rows, &w->nrows, "HTLC refund path", &htlc_refund, 3);
+    TXK_CHECK("HTLC refund after lock height mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &htlc_refund.txid, 0, NULL));
+    transaction_free(&refund_tx);
+    return failures;
+}
+
+static int txk_scenario_chained(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result fund_f1;
+    TXK_CHECK("fund alice for chained-spend policy",
+              simnet_wallet_fund(w->alice, 110000, &fund_f1));
+    struct simnet_tx_result chain_first;
+    TXK_CHECK("first chained spend enqueues",
+              simnet_wallet_send_to_wallet(w->alice, w->bob, 45000,
+                                           &chain_first));
+
+    struct transaction chain_second;
+    struct simnet_tx_result chain_second_res;
+    TXK_CHECK("build spend of same-batch output",
+              txk_make_manual_spend(&chain_second, &chain_first.txid, 0,
+                                    NULL, simnet_wallet_script(w->carol),
+                                    44000, 0, 0xFFFFFFFFu) &&
+              txk_finalize_manual_fee(&chain_second, 45000,
+                                      &chain_second_res));
+    struct simnet_mempool_result chain_reject;
+    bool chain_same_batch = simnet_mempool_add(w->sim, &chain_second,
+                                               &chain_reject);
+    TXK_CHECK("same-batch chained spend is rejected as missing input",
+              !chain_same_batch &&
+              chain_reject.reason == SIMNET_MEMPOOL_REJECT_MISSING_INPUT &&
+              simnet_mempool_size(w->sim) == 1);
+    TXK_CHECK("mint first chained spend",
+              simnet_mempool_mint(w->sim));
+    TXK_CHECK("chained spend enqueues after first mint",
+              simnet_mempool_add(w->sim, &chain_second, NULL));
+    txk_add_cost(w->rows, &w->nrows, "chained spend after mint",
+                 &chain_second_res, 2);
+    TXK_CHECK("chained spend after mint mints",
+              simnet_mempool_mint(w->sim) &&
+              simnet_coin_value(w->sim, &chain_second_res.txid, 0, NULL));
+    transaction_free(&chain_second);
+    return failures;
+}
+
+static int txk_scenario_missing_input(struct txk_world *w)
+{
+    int failures = 0;
+    struct transaction missing_tx;
+    struct uint256 bogus;
+    memset(bogus.data, 0xAB, sizeof(bogus.data));
+    TXK_CHECK("build missing-input negative tx",
+              txk_make_manual_spend(&missing_tx, &bogus, 0, NULL,
+                                    simnet_wallet_script(w->alice), 1, 0,
+                                    0xFFFFFFFFu));
+    struct simnet_mempool_result missing_reject;
+    bool missing_ok = simnet_mempool_add(w->sim, &missing_tx,
+                                         &missing_reject);
+    TXK_CHECK("mempool rejects missing input with typed reason",
+              !missing_ok &&
+              missing_reject.reason == SIMNET_MEMPOOL_REJECT_MISSING_INPUT);
+    transaction_free(&missing_tx);
+    return failures;
+}
+
+static int txk_scenario_value_overflow(struct txk_world *w)
+{
+    int failures = 0;
+    struct simnet_tx_result poor_send;
+    TXK_CHECK("send exceeding balance fails",
+              !simnet_wallet_send_to_wallet(w->dave, w->alice, 999999999,
+                                            &poor_send));
+
+    struct simnet_tx_result fund_overflow;
+    TXK_CHECK("fund dave for value-overflow negative",
+              simnet_wallet_fund(w->dave, 30000, &fund_overflow));
+    struct transaction overflow_tx;
+    TXK_CHECK("build value-overflow negative tx",
+              txk_make_manual_spend(&overflow_tx, &fund_overflow.txid, 0,
+                                    NULL, simnet_wallet_script(w->alice),
+                                    30001, 0, 0xFFFFFFFFu));
+    struct simnet_mempool_result overflow_reject;
+    bool overflow_ok = simnet_mempool_add(w->sim, &overflow_tx,
+                                          &overflow_reject);
+    TXK_CHECK("mempool rejects value overflow with typed reason",
+              !overflow_ok &&
+              overflow_reject.reason == SIMNET_MEMPOOL_REJECT_VALUE_OVERFLOW);
+    transaction_free(&overflow_tx);
+    return failures;
+}
+
+static int txk_report_costs(struct txk_world *w)
+{
+    int failures = 0;
+    TXK_CHECK("cost table row count", w->nrows == 10);
+    TXK_CHECK("cost table values are deterministic",
+              txk_cost_table_matches(w->rows, w->nrows));
+    txk_print_cost_table(w->rows, w->nrows);
+    return failures;
+}
+
+static void txk_teardown(struct txk_world *w, seed_tape_t *tape)
+{
+    simnet_wallet_free(w->alice);
+    simnet_wallet_free(w->bob);
+    simnet_wallet_free(w->carol);
+    simnet_wallet_free(w->dave);
+    simnet_wallet_free(w->erin);
+    simnet_free(w->sim);
+    seed_tape_uninstall();
+    seed_tape_close(tape);
+}
+
 int test_simnet_txkit(void)
 {
     printf("\n=== simnet transaction toolkit ===\n");
     int failures = 0;
-    struct txk_cost_row rows[16];
-    size_t nrows = 0;
+    struct txk_world world;
 
     seed_tape_t *tape = seed_tape_open(0x54584B4954ULL, 1700000000);
     TXK_CHECK("seed tape opens", tape != NULL);
@@ -325,292 +739,19 @@ int test_simnet_txkit(void)
     seed_tape_install(tape);
 
     struct simnet sim;
-    TXK_CHECK("simnet init", simnet_init(&sim));
-    simnet_use_seed_tape(&sim, tape);
-    TXK_CHECK("initial next block time is deterministic",
-              simnet_next_block_time(&sim) == 1700000000u);
-
-    struct simnet_wallet *alice = simnet_wallet_create(&sim);
-    struct simnet_wallet *bob = simnet_wallet_create(&sim);
-    struct simnet_wallet *carol = simnet_wallet_create(&sim);
-    struct simnet_wallet *dave = simnet_wallet_create(&sim);
-    struct simnet_wallet *erin = simnet_wallet_create(&sim);
-    TXK_CHECK("wallets create deterministic addresses",
-              alice && bob && carol && dave && erin &&
-              strcmp(simnet_wallet_address(alice),
-                     simnet_wallet_address(bob)) != 0);
-
-    struct simnet_tx_result fund_a1;
-    TXK_CHECK("fund alice and mature coinbase",
-              simnet_wallet_fund(alice, 500000, &fund_a1) &&
-              simnet_wallet_balance(alice) == 500000);
-
-    struct simnet_tx_result single;
-    TXK_CHECK("P2PKH single-in/single-out send enqueues",
-              simnet_wallet_send_to_wallet(alice, bob, 50000, &single) &&
-              simnet_mempool_size(&sim) == 1);
-    txk_add_cost(rows, &nrows, "P2PKH single-in/single-out", &single, 1);
-    TXK_CHECK("P2PKH single-in/single-out mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_wallet_balance(bob) == 50000);
-
-    struct simnet_tx_result fund_b1, fund_b2;
-    TXK_CHECK("fund erin twice for multi-input",
-              simnet_wallet_fund(erin, 70000, &fund_b1) &&
-              simnet_wallet_fund(erin, 70000, &fund_b2));
-    struct simnet_tx_result multi_in;
-    TXK_CHECK("multi-input consolidation uses two inputs",
-              simnet_wallet_send_to_wallet(erin, carol, 120000,
-                                           &multi_in) &&
-              multi_in.input_value == 140000);
-    txk_add_cost(rows, &nrows, "multi-input consolidation", &multi_in, 1);
-    TXK_CHECK("multi-input consolidation mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_wallet_balance(carol) == 120000);
-
-    struct simnet_tx_result fund_c1;
-    TXK_CHECK("fund alice for fan-out",
-              simnet_wallet_fund(alice, 300000, &fund_c1));
-    struct simnet_wallet_recipient fanout[3] = {
-        { .wallet = bob, .amount = 20000 },
-        { .wallet = carol, .amount = 30000 },
-        { .wallet = dave, .amount = 40000 },
-    };
-    struct simnet_tx_result fan;
-    TXK_CHECK("multi-output fan-out enqueues",
-              simnet_wallet_send_many(alice, fanout, 3, &fan));
-    txk_add_cost(rows, &nrows, "multi-output fan-out", &fan, 1);
-    TXK_CHECK("multi-output fan-out mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_wallet_balance(dave) == 40000);
-
-    struct privkey multisig_keys[2];
-    struct pubkey multisig_pubkeys[2];
-    txk_test_key(&multisig_keys[0], 0x21);
-    txk_test_key(&multisig_keys[1], 0x42);
-    bool multisig_keys_ready =
-        privkey_get_pubkey(&multisig_keys[0], &multisig_pubkeys[0]) &&
-        privkey_get_pubkey(&multisig_keys[1], &multisig_pubkeys[1]);
-    struct script multisig_redeem, multisig_p2sh;
-    struct script_id multisig_sid;
-    script_for_multisig(&multisig_redeem, 2, multisig_pubkeys, 2);
-    script_id_from_script(&multisig_sid, &multisig_redeem);
-    script_for_p2sh(&multisig_p2sh, &multisig_sid);
-
-    struct simnet_tx_result multisig_fund;
-    TXK_CHECK("fund 2-of-2 P2SH multisig and mint",
-              multisig_keys_ready &&
-              simnet_wallet_fund(alice, 250000, NULL) &&
-              simnet_wallet_send(alice, &multisig_p2sh, 150000,
-                                 &multisig_fund) &&
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &multisig_fund.txid, 0, NULL));
-    struct transaction multisig_spend;
-    struct simnet_tx_result multisig_spend_result;
-    bool multisig_tamper_rejected = false;
-    bool multisig_spend_ready = txk_build_multisig_spend(
-        &multisig_spend, &multisig_fund.txid, 150000,
-        simnet_wallet_script(bob), &multisig_redeem,
-        multisig_keys, &multisig_spend_result,
-        &multisig_tamper_rejected);
-    TXK_CHECK("2-of-2 spend passes consensus interpreter",
-              multisig_spend_ready &&
-              multisig_tamper_rejected);
-    if (multisig_spend_ready)
-        txk_add_cost(rows, &nrows, "2-of-2 P2SH multisig spend",
-                     &multisig_spend_result, 1);
-    TXK_CHECK("2-of-2 signed spend enqueues and mints",
-              multisig_spend_ready &&
-              simnet_mempool_add(&sim, &multisig_spend, NULL) &&
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &multisig_spend_result.txid, 0,
-                                NULL));
-    if (multisig_spend_ready)
-        transaction_free(&multisig_spend);
-
-    struct simnet_tx_result fund_d1;
-    TXK_CHECK("fund alice for OP_RETURN",
-              simnet_wallet_fund(alice, 120000, &fund_d1));
-    const uint8_t opret_payload[] = { 't', 'x', 'k', 'i', 't' };
-    struct simnet_tx_result opret_only;
-    TXK_CHECK("OP_RETURN without user value output enqueues",
-              simnet_wallet_op_return(alice, opret_payload,
-                                      sizeof(opret_payload), NULL,
-                                      &opret_only));
-    txk_add_cost(rows, &nrows, "OP_RETURN data carrier", &opret_only, 1);
-    TXK_CHECK("OP_RETURN without user value output mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &opret_only.txid,
-                                opret_only.change_vout, NULL));
-
-    struct simnet_tx_result fund_d2;
-    TXK_CHECK("fund alice for OP_RETURN plus value",
-              simnet_wallet_fund(alice, 140000, &fund_d2));
-    struct simnet_wallet_recipient opret_value = {
-        .wallet = bob,
-        .amount = 25000,
-    };
-    struct simnet_tx_result opret_with_value;
-    TXK_CHECK("OP_RETURN with value output enqueues",
-              simnet_wallet_op_return(alice, opret_payload,
-                                      sizeof(opret_payload), &opret_value,
-                                      &opret_with_value));
-    txk_add_cost(rows, &nrows, "OP_RETURN plus value output",
-                 &opret_with_value, 1);
-    TXK_CHECK("OP_RETURN with value output mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_wallet_balance(bob) >= 75000);
-
-    struct simnet_tx_result fund_e1;
-    TXK_CHECK("fund alice for HTLC", simnet_wallet_fund(alice, 400000, &fund_e1));
-    uint8_t contract[HTLC_CONTRACT_SIZE], secret[32];
-    struct script htlc_p2sh;
-    uint32_t lock_height = (uint32_t)(simnet_tip_height(&sim) + 3);
-    TXK_CHECK("build real HTLC P2SH script",
-              txk_htlc_scripts(lock_height, &htlc_p2sh, contract, secret));
-
-    struct simnet_tx_result htlc_fund;
-    TXK_CHECK("fund P2SH HTLC through wallet/mempool",
-              simnet_wallet_send(alice, &htlc_p2sh, 180000, &htlc_fund));
-    txk_add_cost(rows, &nrows, "P2SH HTLC fund", &htlc_fund, 1);
-    TXK_CHECK("P2SH HTLC fund mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &htlc_fund.txid, 0, NULL));
-
-    struct transaction redeem_tx;
-    struct simnet_tx_result htlc_redeem;
-    TXK_CHECK("build HTLC redeem-path spend",
-              txk_build_htlc_spend(&redeem_tx, &htlc_fund.txid,
-                                   simnet_wallet_script(bob), 180000,
-                                   contract, secret, false, 0,
-                                   &htlc_redeem));
-    TXK_CHECK("HTLC redeem-path spend enqueues",
-              simnet_mempool_add(&sim, &redeem_tx, NULL));
-    txk_add_cost(rows, &nrows, "HTLC redeem path", &htlc_redeem, 1);
-    TXK_CHECK("HTLC redeem-path spend mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &htlc_redeem.txid, 0, NULL));
-    transaction_free(&redeem_tx);
-
-    uint8_t refund_contract[HTLC_CONTRACT_SIZE], refund_secret[32];
-    struct script refund_p2sh;
-    uint32_t refund_lock_height = (uint32_t)(simnet_tip_height(&sim) + 3);
-    TXK_CHECK("build refund HTLC P2SH script",
-              txk_htlc_scripts(refund_lock_height, &refund_p2sh,
-                               refund_contract, refund_secret));
-
-    struct simnet_tx_result htlc_fund_refund;
-    TXK_CHECK("fund second P2SH HTLC for refund",
-              simnet_wallet_send(alice, &refund_p2sh, 160000,
-                                 &htlc_fund_refund) &&
-              simnet_mempool_mint(&sim));
-
-    struct transaction refund_tx;
-    struct simnet_tx_result htlc_refund;
-    TXK_CHECK("build HTLC refund-path spend",
-              txk_build_htlc_spend(&refund_tx, &htlc_fund_refund.txid,
-                                   simnet_wallet_script(alice), 160000,
-                                   refund_contract, refund_secret, true,
-                                   refund_lock_height,
-                                   &htlc_refund));
-    struct simnet_mempool_result reject_refund;
-    bool refund_before = simnet_mempool_add(&sim, &refund_tx, &reject_refund);
-    TXK_CHECK("HTLC refund before lock height is rejected",
-              !refund_before &&
-              reject_refund.reason == SIMNET_MEMPOOL_REJECT_NONFINAL);
-    TXK_CHECK("advance to lock height",
-              simnet_mint_to_height(&sim, (int)refund_lock_height));
-    TXK_CHECK("HTLC refund after lock height enqueues",
-              simnet_mempool_add(&sim, &refund_tx, NULL));
-    txk_add_cost(rows, &nrows, "HTLC refund path", &htlc_refund, 3);
-    TXK_CHECK("HTLC refund after lock height mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &htlc_refund.txid, 0, NULL));
-    transaction_free(&refund_tx);
-
-    struct simnet_tx_result fund_f1;
-    TXK_CHECK("fund alice for chained-spend policy",
-              simnet_wallet_fund(alice, 110000, &fund_f1));
-    struct simnet_tx_result chain_first;
-    TXK_CHECK("first chained spend enqueues",
-              simnet_wallet_send_to_wallet(alice, bob, 45000,
-                                           &chain_first));
-
-    struct transaction chain_second;
-    struct simnet_tx_result chain_second_res;
-    TXK_CHECK("build spend of same-batch output",
-              txk_make_manual_spend(&chain_second, &chain_first.txid, 0,
-                                    NULL, simnet_wallet_script(carol),
-                                    44000, 0, 0xFFFFFFFFu) &&
-              txk_finalize_manual_fee(&chain_second, 45000,
-                                      &chain_second_res));
-    struct simnet_mempool_result chain_reject;
-    bool chain_same_batch = simnet_mempool_add(&sim, &chain_second,
-                                               &chain_reject);
-    TXK_CHECK("same-batch chained spend is rejected as missing input",
-              !chain_same_batch &&
-              chain_reject.reason == SIMNET_MEMPOOL_REJECT_MISSING_INPUT &&
-              simnet_mempool_size(&sim) == 1);
-    TXK_CHECK("mint first chained spend",
-              simnet_mempool_mint(&sim));
-    TXK_CHECK("chained spend enqueues after first mint",
-              simnet_mempool_add(&sim, &chain_second, NULL));
-    txk_add_cost(rows, &nrows, "chained spend after mint",
-                 &chain_second_res, 2);
-    TXK_CHECK("chained spend after mint mints",
-              simnet_mempool_mint(&sim) &&
-              simnet_coin_value(&sim, &chain_second_res.txid, 0, NULL));
-    transaction_free(&chain_second);
-
-    struct transaction missing_tx;
-    struct uint256 bogus;
-    memset(bogus.data, 0xAB, sizeof(bogus.data));
-    TXK_CHECK("build missing-input negative tx",
-              txk_make_manual_spend(&missing_tx, &bogus, 0, NULL,
-                                    simnet_wallet_script(alice), 1, 0,
-                                    0xFFFFFFFFu));
-    struct simnet_mempool_result missing_reject;
-    bool missing_ok = simnet_mempool_add(&sim, &missing_tx,
-                                         &missing_reject);
-    TXK_CHECK("mempool rejects missing input with typed reason",
-              !missing_ok &&
-              missing_reject.reason == SIMNET_MEMPOOL_REJECT_MISSING_INPUT);
-    transaction_free(&missing_tx);
-
-    struct simnet_tx_result poor_send;
-    TXK_CHECK("send exceeding balance fails",
-              !simnet_wallet_send_to_wallet(dave, alice, 999999999,
-                                            &poor_send));
-
-    struct simnet_tx_result fund_overflow;
-    TXK_CHECK("fund dave for value-overflow negative",
-              simnet_wallet_fund(dave, 30000, &fund_overflow));
-    struct transaction overflow_tx;
-    TXK_CHECK("build value-overflow negative tx",
-              txk_make_manual_spend(&overflow_tx, &fund_overflow.txid, 0,
-                                    NULL, simnet_wallet_script(alice),
-                                    30001, 0, 0xFFFFFFFFu));
-    struct simnet_mempool_result overflow_reject;
-    bool overflow_ok = simnet_mempool_add(&sim, &overflow_tx,
-                                          &overflow_reject);
-    TXK_CHECK("mempool rejects value overflow with typed reason",
-              !overflow_ok &&
-              overflow_reject.reason == SIMNET_MEMPOOL_REJECT_VALUE_OVERFLOW);
-    transaction_free(&overflow_tx);
-
-    TXK_CHECK("cost table row count", nrows == 10);
-    TXK_CHECK("cost table values are deterministic",
-              txk_cost_table_matches(rows, nrows));
-    txk_print_cost_table(rows, nrows);
-
-    simnet_wallet_free(alice);
-    simnet_wallet_free(bob);
-    simnet_wallet_free(carol);
-    simnet_wallet_free(dave);
-    simnet_wallet_free(erin);
-    simnet_free(&sim);
-    seed_tape_uninstall();
-    seed_tape_close(tape);
+    failures += txk_setup_world(&world, &sim, tape);
+    failures += txk_scenario_p2pkh(&world);
+    failures += txk_scenario_multi_input(&world);
+    failures += txk_scenario_fan_out(&world);
+    failures += txk_scenario_multisig(&world);
+    failures += txk_scenario_opret(&world);
+    failures += txk_scenario_htlc_redeem(&world);
+    failures += txk_scenario_htlc_refund(&world);
+    failures += txk_scenario_chained(&world);
+    failures += txk_scenario_missing_input(&world);
+    failures += txk_scenario_value_overflow(&world);
+    failures += txk_report_costs(&world);
+    txk_teardown(&world, tape);
 
     return failures;
 }
