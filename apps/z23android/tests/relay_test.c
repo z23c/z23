@@ -58,9 +58,21 @@ static int stop_relay(pid_t child, int sig)
     assert(kill(child, sig) == 0 && waitpid(child, &status, 0) == child);
     relay_child = 0; return status;
 }
+/* Polls of 20 ms cover 10 s: a relay start writes and fsyncs its token, which can stall on a
+ * loaded host. */
+#define WAIT_POLLS 500
+/* A relay that exits before publishing, for example because it cannot bind its port, fails here
+ * rather than as a stale descriptor. */
+static void assert_relay_running(void)
+{
+    pid_t done = waitpid(relay_child, NULL, WNOHANG);
+    if (done == relay_child) relay_child = 0;
+    assert(done == 0);
+}
 static bool wait_for(const char *path, const char *absent)
 {
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < WAIT_POLLS; i++) {
+        assert_relay_running();
         char text[512] = ""; FILE *f = fopen(path, "r");
         bool ready = f && fgets(text, sizeof(text), f) && (!absent || strcmp(text, absent));
         if (f) fclose(f);
@@ -159,7 +171,7 @@ static void repair_token(const char *dir, const char *path, const char *token_pa
     char token[65];
     FILE *f = fopen(token_path, "w"); assert(f && fputs("abc", f) >= 0 && fclose(f) == 0 && chmod(token_path, 0600) == 0);
     pid_t child = start_relay(dir, port);
-    for (int i = 0; i < 100 && (read_descriptor(path, token), !strcmp(token, first)); i++) {
+    for (int i = 0; i < WAIT_POLLS && (assert_relay_running(), read_descriptor(path, token), !strcmp(token, first)); i++) {
         struct timespec pause = {.tv_nsec = 20000000}; nanosleep(&pause, NULL);
     }
     struct stat st;
@@ -181,7 +193,7 @@ static void persistent_cases(const char *dir, const char *path)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
-    signal(SIGABRT, reap_child); signal(SIGALRM, reap_child); alarm(20);
+    signal(SIGABRT, reap_child); signal(SIGALRM, reap_child); alarm(60);
     char path[512]; snprintf(path, sizeof(path), "%s/codex-bridge.json", argv[1]);
     ephemeral_cases(argv[1], path);
     persistent_cases(argv[1], path);
