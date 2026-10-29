@@ -119,18 +119,34 @@ void dev_activation_json_escape(const char *in, char *out, size_t out_sz)
     out[o] = 0;
 }
 
-static bool dev_snapshot_unchanged(
+/* Same file object: identical size, volume and file id. */
+static bool dev_snapshot_identity_same(
     const struct platform_positioned_file_snapshot *before,
     const struct platform_positioned_file_snapshot *after)
 {
     return before->size == after->size &&
            before->volume == after->volume &&
            before->file_low == after->file_low &&
-           before->file_high == after->file_high &&
-           before->modified_seconds == after->modified_seconds &&
+           before->file_high == after->file_high;
+}
+
+/* Same timestamps: no modify or change stamp moved between the reads. */
+static bool dev_snapshot_stamps_same(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->modified_seconds == after->modified_seconds &&
            before->modified_nanoseconds == after->modified_nanoseconds &&
            before->changed_seconds == after->changed_seconds &&
            before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
+static bool dev_snapshot_unchanged(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return dev_snapshot_identity_same(before, after) &&
+           dev_snapshot_stamps_same(before, after);
 }
 
 bool dev_activation_sha256_file(const char *path, char out[65])
