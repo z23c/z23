@@ -1406,6 +1406,18 @@ static int live_natural_exit(void)
     return failures;
 }
 
+static int census_check(int failures, pid_t pgid, const char *label)
+{
+    uint64_t count = os_sandbox_process_group_census(pgid);
+    if (count == 0)
+        return check(failures, true, label);
+    char detail[256];
+    int n = snprintf(detail, sizeof(detail), "%s [pgid=%ld count=%llu unavailable=%s]",
+                     label, (long)pgid, (unsigned long long)count,
+                     count == OS_SANDBOX_CENSUS_UNAVAILABLE ? "yes" : "no");
+    return check(failures, false, n < 0 || (size_t)n >= sizeof(detail) ? label : detail);
+}
+
 /* Live: the input and output byte budgets end the session and empty the
  * process group. */
 static int live_byte_budgets(void)
@@ -1436,9 +1448,8 @@ static int live_byte_budgets(void)
                              "input over budget -> byte-limit");
             failures = check(failures, !mesh_terminal_worker_alive(&w),
                              "budget kill ended the session");
-            failures = check(failures,
-                             os_sandbox_process_group_census(w.pgid) == 0,
-                             "budget kill emptied the process group");
+            failures = census_check(failures, w.pgid,
+                                    "budget kill emptied the process group");
         }
         mesh_terminal_worker_kill(&w);
     }
@@ -1469,9 +1480,8 @@ static int live_byte_budgets(void)
                              "output over budget -> byte-limit");
             failures = check(failures, w.bytes_out > 64,
                              "output bytes were accounted before the kill");
-            failures = check(failures,
-                             os_sandbox_process_group_census(w.pgid) == 0,
-                             "output budget kill emptied the group");
+            failures = census_check(failures, w.pgid,
+                                    "output budget kill emptied the group");
         }
         mesh_terminal_worker_kill(&w);
     }
@@ -1504,9 +1514,8 @@ static int live_lifetime_and_idle_budgets(void)
                                            w.close_reason ==
                                                MESH_TERMINAL_CLOSE_LIFETIME_LIMIT,
                              "lifetime exceeded -> lifetime-limit");
-            failures = check(failures,
-                             os_sandbox_process_group_census(w.pgid) == 0,
-                             "lifetime kill emptied the group");
+            failures = census_check(failures, w.pgid,
+                                    "lifetime kill emptied the group");
         }
         mesh_terminal_worker_kill(&w);
 
