@@ -901,7 +901,22 @@ static bool receipt_load(const struct proof_paths *paths, const char *local,
         proof_why(why, why_len, "receipt_parse_failed");
         return false;
     }
-    return zcl_dev_proof_receipt_validate(out, local, base, why, why_len);
+    if (!zcl_dev_proof_receipt_validate(out, local, base, why, why_len))
+        return false;
+    /* A key admitted only through signers.allow proves who signed, not that
+     * the proof ran on a toolchain equal to this box's own. */
+    if (zcl_dev_proof_receipt_signer_is_local(out))
+        return true;
+    struct zcl_dev_proof_build_identity_v1 host;
+    char cause[96] = "";
+    if (!zcl_dev_proof_build_identity_v1_capture(paths->root, &host, cause,
+                                                 sizeof(cause))) {
+        proof_why(why, why_len, "remote_toolchain_unverifiable");
+        return false;
+    }
+    return zcl_dev_proof_receipt_toolchain_check(
+        out, host.compiler, host.flags, host.environment, host.build_graph,
+        why, why_len);
 }
 
 static bool proof_read_text(const char *path, char *out, size_t out_size)

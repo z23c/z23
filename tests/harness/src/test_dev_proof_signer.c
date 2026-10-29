@@ -340,6 +340,72 @@ static int test_dps_allowlist(void)
     return failures;
 }
 
+/* Host roots equal to dps_receipt()'s compiler/flags/environment/build_graph
+ * fill bytes (indices 5..8 plus one). */
+static void dps_host_roots(uint8_t r[4][ZCL_DEV_PROOF_ROOT_BYTES])
+{
+    for (int i = 0; i < 4; i++) memset(r[i], 6 + i, ZCL_DEV_PROOF_ROOT_BYTES);
+}
+
+static bool dps_toolchain(const struct zcl_dev_acceptance_receipt_v1 *r,
+                          uint8_t h[4][ZCL_DEV_PROOF_ROOT_BYTES], char *why,
+                          size_t cap)
+{
+    return zcl_dev_proof_receipt_toolchain_check(r, h[0], h[1], h[2], h[3],
+                                                 why, cap);
+}
+
+static int test_dps_remote_toolchain(void)
+{
+    int failures = 0;
+    struct zcl_dev_acceptance_receipt_v1 local, foreign;
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    uint8_t seed[32], host[4][ZCL_DEV_PROOF_ROOT_BYTES];
+    uint8_t pubkey[32], secret[32];
+    char allow[PATH_MAX], hex[66], why[128];
+    TEST("dev proof signer: a foreign allowed signer is admitted only on "
+         "this box's toolchain roots; the local signer is unchanged") {
+        dps_isolate("remote_toolchain");
+        dps_host_roots(host);
+        ASSERT(dps_sealed(&local));
+        ASSERT(zcl_dev_proof_receipt_serialize(&local, wire));
+        memset(seed, 0xA5, sizeof(seed));
+        dps_resign(wire, seed);
+        ASSERT(zcl_dev_proof_receipt_parse(wire, sizeof(wire), &foreign));
+        ed25519_keypair(pubkey, secret, seed);
+        zcl_hex_encode(pubkey, sizeof(pubkey), hex);
+        hex[64] = '\n';
+        ASSERT(dps_allow_path(allow, sizeof(allow)));
+        ASSERT(dps_write(allow, hex, 65, 0600));
+        ASSERT(dps_validate(&foreign, why, sizeof(why)));
+        ASSERT(!zcl_dev_proof_receipt_signer_is_local(&foreign));
+        ASSERT(zcl_dev_proof_receipt_signer_is_local(&local));
+        /* (a) matching roots */
+        ASSERT(dps_toolchain(&foreign, host, why, sizeof(why)));
+        /* (b) each differing root is refused and named */
+        static const char *const names[4] = {
+            "compiler_root", "flags_root", "environment_root",
+            "build_graph_root"};
+        for (int i = 0; i < 4; i++) {
+            uint8_t other[4][ZCL_DEV_PROOF_ROOT_BYTES];
+            dps_host_roots(other);
+            other[i][0] ^= 1u;
+            char want[96];
+            (void)snprintf(want, sizeof(want), "%s:%s",
+                           ZCL_DEV_PROOF_WHY_REMOTE_TOOLCHAIN_MISMATCH,
+                           names[i]);
+            ASSERT(!dps_toolchain(&foreign, other, why, sizeof(why)));
+            ASSERT(strcmp(why, want) == 0);
+            /* (c) the same differing root never matters for our own key */
+            ASSERT(dps_toolchain(&local, other, why, sizeof(why)));
+            ASSERT(why[0] == 0);
+        }
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 6. an unreadable key ───────────────────────────────────────────────── */
 
 static int test_dps_key_unreadable(void)
@@ -1217,6 +1283,7 @@ int test_dev_proof_signer(void)
     failures += test_dps_flipped_byte();
     failures += test_dps_unsigned_record();
     failures += test_dps_allowlist();
+    failures += test_dps_remote_toolchain();
     failures += test_dps_key_unreadable();
     failures += test_dps_leaf_round_trip();
     failures += test_dps_leaf_tamper();

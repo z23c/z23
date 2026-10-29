@@ -175,6 +175,22 @@ bool zcl_dev_proof_receipt_validate(
     const struct zcl_dev_acceptance_receipt_v1 *receipt,
     const char *local_commit, const char *remote_base,
     char *why, size_t why_len);
+/* Remote-signer toolchain gate. A receipt admitted only through signers.allow
+ * says nothing about THIS box unless its toolchain roots equal this box's own
+ * captured build identity. signer_is_local is true when the receipt's key is
+ * this box's own (then nothing extra is required). toolchain_check compares
+ * compiler, flags, environment, build_graph in that order and refuses with
+ * "remote_toolchain_mismatch:<root name>" naming the first that differs. */
+#define ZCL_DEV_PROOF_WHY_REMOTE_TOOLCHAIN_MISMATCH "remote_toolchain_mismatch"
+bool zcl_dev_proof_receipt_signer_is_local(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt);
+bool zcl_dev_proof_receipt_toolchain_check(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    const uint8_t host_compiler[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_flags[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_environment[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_build_graph[ZCL_DEV_PROOF_ROOT_BYTES],
+    char *why, size_t why_len);
 /* Always writes the v2 record (ZCL_DEV_PROOF_WIRE_BYTES). A receipt that was
  * never signed cannot be serialized — refusing here is what keeps an unsigned
  * record from reaching the cache in the first place. */

@@ -433,6 +433,49 @@ bool zcl_dev_proof_receipt_validate(
     return receipt_validate_coverage(receipt, why, why_len);
 }
 
+bool zcl_dev_proof_receipt_signer_is_local(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt)
+{
+    uint8_t own[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
+    bool present = false;
+    const char *why = NULL;
+    return receipt && zcl_dev_proof_signer_public(own, &present, &why) &&
+           present && memcmp(own, receipt->signer_pubkey, sizeof(own)) == 0;
+}
+
+bool zcl_dev_proof_receipt_toolchain_check(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    const uint8_t host_compiler[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_flags[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_environment[ZCL_DEV_PROOF_ROOT_BYTES],
+    const uint8_t host_build_graph[ZCL_DEV_PROOF_ROOT_BYTES],
+    char *why, size_t why_len)
+{
+    if (!receipt || !host_compiler || !host_flags || !host_environment ||
+        !host_build_graph)
+        return fail(why, why_len, "receipt_identity_invalid");
+    if (zcl_dev_proof_receipt_signer_is_local(receipt)) {
+        if (why && why_len) why[0] = 0;
+        return true; /* this box's own proof: today's behaviour, unchanged */
+    }
+    struct { const char *name; const uint8_t *theirs, *ours; } rows[] = {
+        {"compiler_root", receipt->compiler_root, host_compiler},
+        {"flags_root", receipt->flags_root, host_flags},
+        {"environment_root", receipt->environment_root, host_environment},
+        {"build_graph_root", receipt->build_graph_root, host_build_graph},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (memcmp(rows[i].theirs, rows[i].ours, ZCL_DEV_PROOF_ROOT_BYTES)) {
+            if (why && why_len)
+                (void)snprintf(why, why_len, "%s:%s",
+                               ZCL_DEV_PROOF_WHY_REMOTE_TOOLCHAIN_MISMATCH,
+                               rows[i].name);
+            return false;
+        }
+    if (why && why_len) why[0] = 0;
+    return true;
+}
+
 bool zcl_dev_proof_child_receipt_create(
     enum zcl_dev_proof_dimension_id id,
     struct zcl_dev_proof_dimension *dimension,
