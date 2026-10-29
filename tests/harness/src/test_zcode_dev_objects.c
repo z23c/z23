@@ -429,6 +429,48 @@ static unsigned zd_collect_poll_calls;
 static unsigned zd_collect_cancel_calls;
 static bool zd_collect_selector_exact;
 
+static bool zd_collect_begin_selector_exact(const char *params_json)
+{
+    char kind_selector[96];
+    int kind_len = snprintf(kind_selector, sizeof(kind_selector),
+                            "\"kind\":\"%s\"", zd_collect_kind);
+    return params_json &&
+        kind_len > 0 && (size_t)kind_len < sizeof(kind_selector) &&
+        strstr(params_json, kind_selector) &&
+        strstr(params_json, "\"namespace\":\"zclassic23.source\"") &&
+        strstr(params_json, "\"include_evidence_wires\":true") &&
+        strstr(params_json, zd_collect_transport_hex);
+}
+
+static char *zd_collect_poll_body(void)
+{
+    size_t cap = 256u + zd_collect_ack_wire_count *
+        (VCS_ZCODE_DHT_RECORD_WIRE_BYTES * 2u + 32u);
+    char *body = zcl_malloc(cap, "test.zcode_dev.collect_poll");
+    if (!body)
+        return NULL;
+    int n = zd_collect_ack_wire_count == 0u
+        ? snprintf(body, cap,
+                   "{\"ok\":true,\"state\":\"complete\","
+                   "\"records\":[]}")
+        : zd_collect_ack_wire_count == 1u
+        ? snprintf(body, cap,
+                   "{\"ok\":true,\"state\":\"complete\","
+                   "\"records\":[{\"record_wire\":\"%s\"}]}",
+                   zd_collect_ack_wires[0])
+        : snprintf(body, cap,
+                   "{\"ok\":true,\"state\":\"complete\","
+                   "\"records\":[{\"record_wire\":\"%s\"},"
+                   "{\"record_wire\":\"%s\"}]}",
+                   zd_collect_ack_wires[0],
+                   zd_collect_ack_wires[1]);
+    if (n <= 0 || (size_t)n >= cap) {
+        free(body);
+        return NULL;
+    }
+    return body;
+}
+
 static char *zd_collect_rpc_hook(const char *method, const char *params_json)
 {
     if (strcmp(method, "getblockhash") == 0) {
@@ -439,15 +481,7 @@ static char *zd_collect_rpc_hook(const char *method, const char *params_json)
     }
     if (strcmp(method, "zcode_dht_record_begin") == 0) {
         zd_collect_begin_calls++;
-        char kind_selector[96];
-        int kind_len = snprintf(kind_selector, sizeof(kind_selector),
-                                "\"kind\":\"%s\"", zd_collect_kind);
-        zd_collect_selector_exact = params_json &&
-            kind_len > 0 && (size_t)kind_len < sizeof(kind_selector) &&
-            strstr(params_json, kind_selector) &&
-            strstr(params_json, "\"namespace\":\"zclassic23.source\"") &&
-            strstr(params_json, "\"include_evidence_wires\":true") &&
-            strstr(params_json, zd_collect_transport_hex);
+        zd_collect_selector_exact = zd_collect_begin_selector_exact(params_json);
         return zcl_strdup(
             "{\"ok\":true,\"state\":\"pending\","
             "\"lookup_id\":\"11111111111111111111111111111111\","
@@ -456,31 +490,7 @@ static char *zd_collect_rpc_hook(const char *method, const char *params_json)
     }
     if (strcmp(method, "zcode_dht_record_poll") == 0) {
         zd_collect_poll_calls++;
-        size_t cap = 256u + zd_collect_ack_wire_count *
-            (VCS_ZCODE_DHT_RECORD_WIRE_BYTES * 2u + 32u);
-        char *body = zcl_malloc(cap, "test.zcode_dev.collect_poll");
-        if (!body)
-            return NULL;
-        int n = zd_collect_ack_wire_count == 0u
-            ? snprintf(body, cap,
-                       "{\"ok\":true,\"state\":\"complete\","
-                       "\"records\":[]}")
-            : zd_collect_ack_wire_count == 1u
-            ? snprintf(body, cap,
-                       "{\"ok\":true,\"state\":\"complete\","
-                       "\"records\":[{\"record_wire\":\"%s\"}]}",
-                       zd_collect_ack_wires[0])
-            : snprintf(body, cap,
-                       "{\"ok\":true,\"state\":\"complete\","
-                       "\"records\":[{\"record_wire\":\"%s\"},"
-                       "{\"record_wire\":\"%s\"}]}",
-                       zd_collect_ack_wires[0],
-                       zd_collect_ack_wires[1]);
-        if (n <= 0 || (size_t)n >= cap) {
-            free(body);
-            return NULL;
-        }
-        return body;
+        return zd_collect_poll_body();
     }
     if (strcmp(method, "zcode_dht_record_cancel") == 0) {
         zd_collect_cancel_calls++;
@@ -3932,6 +3942,94 @@ static void zd_improve_tmpdir(char *out, size_t cap, const char *prefix,
     test_make_tmpdir(out, cap, prefix, tag);
 }
 
+static bool zd_is_hex64(const char *value)
+{
+    return value && strlen(value) == 64;
+}
+
+static char zd_flip_digit(char digit)
+{
+    return digit == '0' ? '1' : '0';
+}
+
+static bool zd_str_differs(const char *value, const char *other)
+{
+    return value && strcmp(value, other) != 0;
+}
+
+static bool zd_mkdir_ok(const char *path)
+{
+    return platform_directory_create(path, 0700) == 0 || errno == EEXIST;
+}
+
+static const struct vcs_entry *zd_manifest_find_last(
+    const struct vcs_manifest *manifest, const char *path)
+{
+    const struct vcs_entry *found = NULL;
+    for (size_t i = 0; i < manifest->count; i++)
+        if (strcmp(manifest->entries[i].path, path) == 0)
+            found = &manifest->entries[i];
+    return found;
+}
+
+static void zd_improve_fill_roots(char roots[10][65])
+{
+    for (size_t i = 0; i < 10; i++) {
+        uint8_t root[32];
+        zd_root(root, (uint8_t)(i + 1));
+        zcl_hex_encode(root, 32, roots[i]);
+    }
+}
+
+static void zd_note_drift_admit(const struct zcl_command_reply *reply)
+{
+    if (reply->exit_code != ZCL_COMMAND_EXIT_OK)
+        printf("dependency drift admit: %s: %s\n",
+               reply->error.code, reply->error.message);
+}
+
+static void zd_note_proof_counts(
+    const struct build_fabric_proof_evaluation *complete)
+{
+    if (complete->compile_receipts != 3 || complete->test_receipts != 3 ||
+        complete->fuzz_receipts != 2 || complete->review_receipts != 1)
+        printf("proof counts: valid=%zu compile=%zu test=%zu fuzz=%zu "
+               "review=%zu approved_signers=%zu local_reproduced=%d\n",
+               complete->valid_receipts, complete->compile_receipts,
+               complete->test_receipts, complete->fuzz_receipts,
+               complete->review_receipts,
+               complete->approved_distinct_signers,
+               complete->local_reproduced ? 1 : 0);
+}
+
+static void zd_note_reconstruction(
+    enum vcs_source_package_checkout_result result)
+{
+    if (result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        printf("source reconstruction result: %s\n",
+               vcs_source_package_checkout_result_string(result));
+}
+
+static bool zd_package_manifest_has_path(
+    const struct vcs_package_manifest *manifest, const char *path)
+{
+    for (size_t i = 0; i < manifest->count; i++)
+        if (strcmp(manifest->files[i].path, path) == 0)
+            return true;
+    return false;
+}
+
+static int64_t zd_started_before(int64_t now)
+{
+    return now > 0 ? now - 1 : 0;
+}
+
+static void zd_fill_mirror_oid(uint8_t *oid, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        oid[i] = (uint8_t)(0xb1u + i);
+}
+
 static int test_zd_improve_command(void)
 {
     int failures = 0;
@@ -4028,11 +4126,7 @@ static int test_zd_improve_command(void)
                   VCS_ZCODE_DEV_OK);
         zcl_hex_encode(policy_wire, sizeof(policy_wire), policy_hex);
         char roots[10][65];
-        for (size_t i = 0; i < 10; i++) {
-            uint8_t root[32];
-            zd_root(root, (uint8_t)(i + 1));
-            zcl_hex_encode(root, 32, roots[i]);
-        }
+        zd_improve_fill_roots(roots);
         struct db_build_worker admission_worker;
         uint8_t admission_secret[32], admission_key[32];
         ASSERT(build_fabric_worker_identity_load(
@@ -4157,9 +4251,9 @@ static int test_zd_improve_command(void)
             &plan_reply.data, "agent_context_root"));
         const char *planned_scope = json_get_str(json_get(
             &plan_reply.data, "write_scope_root"));
-        ASSERT(planned_task && strlen(planned_task) == 64);
-        ASSERT(planned_context && strlen(planned_context) == 64);
-        ASSERT(planned_scope && strlen(planned_scope) == 64);
+        ASSERT(zd_is_hex64(planned_task));
+        ASSERT(zd_is_hex64(planned_context));
+        ASSERT(zd_is_hex64(planned_scope));
         ASSERT_STR_EQ(json_get_str(json_get(&plan_reply.data, "source_root")),
                       roots[0]);
         char planned_task_saved[65], planned_context_saved[65];
@@ -4222,7 +4316,7 @@ static int test_zd_improve_command(void)
                          &plan_input, "model_policy_root"), roots[4]);
 
         char recipe_magic = task_recipe_hex[0];
-        task_recipe_hex[0] = recipe_magic == '0' ? '1' : '0';
+        task_recipe_hex[0] = zd_flip_digit(recipe_magic);
         json_set_str((struct json_value *)json_get(
                          &plan_input, "acceptance_recipe_hex"),
                      task_recipe_hex);
@@ -4306,10 +4400,16 @@ static int test_zd_improve_command(void)
             &reply.data, "patch_root"));
         const char *candidate_sha256 = json_get_str(json_get(
             &reply.data, "candidate_source_sha256"));
-        ASSERT(task_hex && candidate_hex && action_id && agent_context_hex &&
-               candidate_source_hex && patch_hex && candidate_sha256);
-        ASSERT(strlen(candidate_source_hex) == 64 && strlen(patch_hex) == 64 &&
-               strlen(candidate_sha256) == 64);
+        ASSERT(task_hex);
+        ASSERT(candidate_hex);
+        ASSERT(action_id);
+        ASSERT(agent_context_hex);
+        ASSERT(candidate_source_hex);
+        ASSERT(patch_hex);
+        ASSERT(candidate_sha256);
+        ASSERT(zd_is_hex64(candidate_source_hex));
+        ASSERT(zd_is_hex64(patch_hex));
+        ASSERT(zd_is_hex64(candidate_sha256));
         ASSERT_STR_EQ(json_get_str(json_get(
                           &reply.data, "source_sha256_schema")),
                       VCS_SOURCE_MANIFEST_ID_SCHEMA);
@@ -4481,14 +4581,14 @@ static int test_zd_improve_command(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "lane")), "FRONTIER");
         const char *frontier_receipt = json_get_str(json_get(
             &reply.data, "lane_receipt_root"));
-        ASSERT(frontier_receipt && strlen(frontier_receipt) == 64);
+        ASSERT(zd_is_hex64(frontier_receipt));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_outcome")),
                       "BACKGROUND_PENDING");
         ASSERT_STR_EQ(json_get_str(json_get(
                           &reply.data, "async_proof_state")), "REQUESTED");
         const char *async_event = json_get_str(json_get(
             &reply.data, "async_proof_event_root"));
-        ASSERT(async_event && strlen(async_event) == 64);
+        ASSERT(zd_is_hex64(async_event));
         uint8_t task_root[32], *task_wire = NULL;
         size_t task_wire_len = 0;
         ASSERT(zcl_hex_decode_lower(task_hex, task_root, 32));
@@ -5084,11 +5184,8 @@ static int test_zd_improve_command(void)
         struct vcs_manifest remote_candidate_manifest;
         ASSERT(vcs_tree_load(receiver, candidate.candidate_source_root,
                              &remote_candidate_manifest));
-        const struct vcs_entry *unchanged_input = NULL;
-        for (size_t i = 0; i < remote_candidate_manifest.count; i++)
-            if (strcmp(remote_candidate_manifest.entries[i].path,
-                       "unit.i") == 0)
-                unchanged_input = &remote_candidate_manifest.entries[i];
+        const struct vcs_entry *unchanged_input =
+            zd_manifest_find_last(&remote_candidate_manifest, "unit.i");
         ASSERT(unchanged_input != NULL);
         uint8_t unchanged_blob[32];
         memcpy(unchanged_blob, unchanged_input->blob, 32);
@@ -5359,7 +5456,7 @@ static int test_zd_improve_command(void)
         zcl_hex_encode(fixture_dependency_root, 32, dependency_hex);
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed", workspace);
-        ASSERT(platform_directory_create(installed_dir, 0700) == 0 || errno == EEXIST);
+        ASSERT(zd_mkdir_ok(installed_dir));
         (void)snprintf(installed_dir, sizeof(installed_dir),
                        "%s/zcode/installed/%s", workspace, dependency_hex);
         ASSERT(platform_directory_create(installed_dir, 0700) == 0);
@@ -5437,7 +5534,7 @@ static int test_zd_improve_command(void)
                       VCS_BUILD_ACTION_KIND_PACKAGE_V1);
         const char *package_action_id = json_get_str(json_get(
             &package_reply.data, "action_id"));
-        ASSERT(package_action_id && strcmp(package_action_id, action_id) != 0);
+        ASSERT(zd_str_differs(package_action_id, action_id));
         char package_action_saved[65];
         (void)snprintf(package_action_saved, sizeof(package_action_saved),
                        "%s", package_action_id);
@@ -5568,10 +5665,7 @@ static int test_zd_improve_command(void)
         zcl_command_reply_init(&dependency_drift_reply,
                                "zcl.zcode_improve.v1");
         zcl_native_handle_zcode_improve(&request, &dependency_drift_reply);
-        if (dependency_drift_reply.exit_code != ZCL_COMMAND_EXIT_OK)
-            printf("dependency drift admit: %s: %s\n",
-                   dependency_drift_reply.error.code,
-                   dependency_drift_reply.error.message);
+        zd_note_drift_admit(&dependency_drift_reply);
         ASSERT_EQ(dependency_drift_reply.exit_code, ZCL_COMMAND_EXIT_OK);
         dependency_file = fopen(candidate_source_path, "wb");
         ASSERT(dependency_file != NULL);
@@ -5587,8 +5681,7 @@ static int test_zd_improve_command(void)
                          &input, "candidate_source_sha256"), sha256_saved);
         const char *dependency_drift_action = json_get_str(json_get(
             &dependency_drift_reply.data, "action_id"));
-        ASSERT(dependency_drift_action &&
-               strcmp(dependency_drift_action, package_action_saved) != 0);
+        ASSERT(zd_str_differs(dependency_drift_action, package_action_saved));
         struct db_build_action dependency_drift_row;
         ASSERT(db_build_action_find(&ndb, dependency_drift_action,
                                     &dependency_drift_row));
@@ -5647,7 +5740,7 @@ static int test_zd_improve_command(void)
                       VCS_BUILD_ACTION_KIND_TEST_V1);
         const char *test_action_id = json_get_str(json_get(
             &test_reply.data, "action_id"));
-        ASSERT(test_action_id && strcmp(test_action_id, action_id) != 0);
+        ASSERT(zd_str_differs(test_action_id, action_id));
         char test_action_id_saved[65];
         (void)snprintf(test_action_id_saved, sizeof(test_action_id_saved),
                        "%s", test_action_id);
@@ -5697,9 +5790,8 @@ static int test_zd_improve_command(void)
                       VCS_BUILD_ACTION_KIND_FUZZ_V1);
         const char *local_fuzz_action_id = json_get_str(json_get(
             &fuzz_reply.data, "action_id"));
-        ASSERT(local_fuzz_action_id &&
-               strcmp(local_fuzz_action_id, action_id) != 0 &&
-               strcmp(local_fuzz_action_id, test_action_id_saved) != 0);
+        ASSERT(zd_str_differs(local_fuzz_action_id, action_id));
+        ASSERT(zd_str_differs(local_fuzz_action_id, test_action_id_saved));
         char local_fuzz_action_id_saved[65];
         (void)snprintf(local_fuzz_action_id_saved,
                        sizeof(local_fuzz_action_id_saved), "%s",
@@ -5743,9 +5835,8 @@ static int test_zd_improve_command(void)
         ASSERT_EQ(fuzz_fail_reply.exit_code, ZCL_COMMAND_EXIT_OK);
         const char *fuzz_fail_action_id = json_get_str(json_get(
             &fuzz_fail_reply.data, "action_id"));
-        ASSERT(fuzz_fail_action_id &&
-               strcmp(fuzz_fail_action_id,
-                      local_fuzz_action_id_saved) != 0);
+        ASSERT(zd_str_differs(fuzz_fail_action_id,
+                              local_fuzz_action_id_saved));
         struct db_build_action fuzz_fail_action;
         ASSERT(db_build_action_find(&ndb, fuzz_fail_action_id,
                                     &fuzz_fail_action));
@@ -5821,7 +5912,7 @@ static int test_zd_improve_command(void)
         memcpy(remote_result.receipt.output_root, compile_output_root, 32);
         ASSERT(zcl_hex_decode_lower(receipt.observation_sha3,
                                     remote_result.receipt.evidence_root, 32));
-        remote_result.receipt.started_unix = now > 0 ? now - 1 : 0;
+        remote_result.receipt.started_unix = zd_started_before(now);
         remote_result.receipt.finished_unix = now;
         uint8_t remote_seed[32], remote_secret[32], remote_key[32];
         zd_root(remote_seed, 95);
@@ -6005,15 +6096,7 @@ static int test_zd_improve_command(void)
         struct build_fabric_proof_evaluation complete;
         ASSERT(build_fabric_proof_evaluate(
             &ndb, workspace, action_id, evaluation_now, &complete).ok);
-        if (complete.compile_receipts != 3 || complete.test_receipts != 3 ||
-            complete.fuzz_receipts != 2 || complete.review_receipts != 1)
-            printf("proof counts: valid=%zu compile=%zu test=%zu fuzz=%zu "
-                   "review=%zu approved_signers=%zu local_reproduced=%d\n",
-                   complete.valid_receipts, complete.compile_receipts,
-                   complete.test_receipts, complete.fuzz_receipts,
-                   complete.review_receipts,
-                   complete.approved_distinct_signers,
-                   complete.local_reproduced ? 1 : 0);
+        zd_note_proof_counts(&complete);
         ASSERT_EQ(complete.compile_receipts, 3);
         ASSERT_EQ(complete.test_receipts, 3);
         ASSERT_EQ(complete.fuzz_receipts, 2);
@@ -6076,7 +6159,7 @@ static int test_zd_improve_command(void)
                        publish_pubkey_hex);
         const char *accepted_receipt = json_get_str(json_get(
             &accept_reply.data, "lane_receipt_root"));
-        ASSERT(accepted_receipt && strlen(accepted_receipt) == 64);
+        ASSERT(zd_is_hex64(accepted_receipt));
         char accepted_receipt_saved[65];
         (void)snprintf(accepted_receipt_saved,
                        sizeof(accepted_receipt_saved), "%s",
@@ -6342,10 +6425,12 @@ static int test_zd_improve_command(void)
             &publish_plan_reply.data, "package_root"));
         const char *planned_recipe_hex = json_get_str(json_get(
             &publish_plan_reply.data, "recipe_root"));
-        ASSERT(release_body_hex && signing_digest_hex &&
-               planned_package_hex && planned_recipe_hex &&
-               strlen(signing_digest_hex) == 64 &&
-               strlen(planned_package_hex) == 64);
+        ASSERT(release_body_hex);
+        ASSERT(signing_digest_hex);
+        ASSERT(planned_package_hex);
+        ASSERT(planned_recipe_hex);
+        ASSERT(zd_is_hex64(signing_digest_hex));
+        ASSERT(zd_is_hex64(planned_package_hex));
         char release_body_saved[2 * VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES + 1u];
         char planned_package_saved[65], planned_recipe_saved[65];
         ASSERT(strlen(release_body_hex) < sizeof(release_body_saved));
@@ -6434,7 +6519,7 @@ static int test_zd_improve_command(void)
             &publish_commit_input, "release_hex");
         size_t sealed_len = strlen(sealed_release_saved);
         char last = sealed_release_saved[sealed_len - 1u];
-        sealed_release_saved[sealed_len - 1u] = last == '0' ? '1' : '0';
+        sealed_release_saved[sealed_len - 1u] = zd_flip_digit(last);
         json_set_str(release_value, sealed_release_saved);
         struct zcl_command_reply bad_publish_reply;
         zcl_command_reply_init(&bad_publish_reply,
@@ -6523,11 +6608,8 @@ static int test_zd_improve_command(void)
         ASSERT(vcs_package_manifest_parse(
             published_manifest_wire, published_manifest_wire_len,
             &published_manifest));
-        bool authority_carried = false;
-        for (size_t i = 0; i < published_manifest.count; i++)
-            if (strcmp(published_manifest.files[i].path,
-                       VCS_SOURCE_PACKAGE_AUTHORITY_PATH) == 0)
-                authority_carried = true;
+        bool authority_carried = zd_package_manifest_has_path(
+            &published_manifest, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
         ASSERT(authority_carried);
         vcs_package_manifest_free(&published_manifest);
         free(published_manifest_wire);
@@ -6558,10 +6640,7 @@ static int test_zd_improve_command(void)
                 published_store, published_package_root,
                 reconstructed_source_root, reconstructed_work_root,
                 &reconstruction_metrics);
-        if (reconstruction_result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
-            printf("source reconstruction result: %s\n",
-                   vcs_source_package_checkout_result_string(
-                       reconstruction_result));
+        zd_note_reconstruction(reconstruction_result);
         ASSERT_EQ(reconstruction_result, VCS_SOURCE_PACKAGE_CHECKOUT_OK);
         ASSERT(memcmp(reconstructed_source_root,
                       candidate_source_root, 32) == 0);
@@ -6700,8 +6779,7 @@ static int test_zd_improve_command(void)
         (void)snprintf(wrong_passport_recipe,
                        sizeof(wrong_passport_recipe), "%s",
                        correct_passport_recipe);
-        wrong_passport_recipe[0] =
-            wrong_passport_recipe[0] == '0' ? '1' : '0';
+        wrong_passport_recipe[0] = zd_flip_digit(wrong_passport_recipe[0]);
         json_set_str(passport_recipe_value, wrong_passport_recipe);
         struct zcl_command_reply wrong_recipe_passport_reply;
         zcl_command_reply_init(&wrong_recipe_passport_reply,
@@ -6724,7 +6802,7 @@ static int test_zd_improve_command(void)
         (void)snprintf(wrong_passport_tests,
                        sizeof(wrong_passport_tests), "%s",
                        correct_passport_tests);
-        wrong_passport_tests[0] = wrong_passport_tests[0] == '0' ? '1' : '0';
+        wrong_passport_tests[0] = zd_flip_digit(wrong_passport_tests[0]);
         json_set_str(passport_tests_value, wrong_passport_tests);
         struct zcl_command_reply wrong_passport_plan_reply;
         zcl_command_reply_init(&wrong_passport_plan_reply,
@@ -6788,7 +6866,8 @@ static int test_zd_improve_command(void)
             &passport_commit_reply.data, "passport_root"));
         const char *published_passport_wire = json_get_str(json_get(
             &passport_commit_reply.data, "passport"));
-        ASSERT(published_passport_root && published_passport_wire);
+        ASSERT(published_passport_root);
+        ASSERT(published_passport_wire);
         char published_passport_root_saved[65];
         char published_passport_wire_saved[
             VCS_ZCODE_MODULE_PASSPORT_V1_WIRE_BYTES * 2u + 1u];
@@ -6872,8 +6951,7 @@ static int test_zd_improve_command(void)
         (void)snprintf(wrong_workspace_release,
                        sizeof(wrong_workspace_release), "%s",
                        correct_workspace_release);
-        wrong_workspace_release[0] =
-            wrong_workspace_release[0] == '0' ? '1' : '0';
+        wrong_workspace_release[0] = zd_flip_digit(wrong_workspace_release[0]);
         json_set_str(workspace_release_value, wrong_workspace_release);
         struct zcl_command_reply wrong_workspace_manifest_reply;
         zcl_command_reply_init(
@@ -6946,7 +7024,8 @@ static int test_zd_improve_command(void)
             &workspace_manifest_commit_reply.data, "manifest_root"));
         const char *published_workspace_wire = json_get_str(json_get(
             &workspace_manifest_commit_reply.data, "manifest"));
-        ASSERT(published_workspace_root && published_workspace_wire);
+        ASSERT(published_workspace_root);
+        ASSERT(published_workspace_wire);
         uint8_t workspace_root[32], *stored_workspace = NULL;
         size_t stored_workspace_len = 0;
         ASSERT(zcl_hex_decode_lower(published_workspace_root,
@@ -7129,8 +7208,7 @@ static int test_zd_improve_command(void)
         zcl_command_reply_free(&provider_status_reply);
 
         uint8_t mirror_git_oid[20];
-        for (size_t i = 0; i < sizeof(mirror_git_oid); i++)
-            mirror_git_oid[i] = (uint8_t)(0xb1u + i);
+        zd_fill_mirror_oid(mirror_git_oid, sizeof(mirror_git_oid));
         char mirror_git_hex[41];
         zcl_hex_encode(mirror_git_oid, sizeof(mirror_git_oid),
                        mirror_git_hex);
@@ -7892,6 +7970,11 @@ static bool zd_index_drop_object(const char *workspace, const uint8_t root[32])
     return n > 0 && (size_t)n < sizeof(path) && unlink(path) == 0;
 }
 
+static bool zd_index_str_is(const char *value, const char *want)
+{
+    return value && strcmp(value, want) == 0;
+}
+
 static int test_zd_task_index(void)
 {
     int failures = 0;
@@ -8314,15 +8397,14 @@ static int test_zd_task_index(void)
         const struct json_value *task_a_row = NULL;
         for (size_t i = 0; i < 3; i++) {
             const struct json_value *task_row = json_at(tasks, i);
-            const char *state =
-                json_get_str(json_get(task_row, "state"));
-            saw_awaiting = saw_awaiting ||
-                (state && strcmp(state, "AWAITING_CANDIDATE") == 0);
-            saw_expired = saw_expired ||
-                (state && strcmp(state, "EXPIRED") == 0);
-            const char *task_root =
-                json_get_str(json_get(task_row, "task_root"));
-            if (task_root && strcmp(task_root, root_a_hex) == 0)
+            saw_awaiting |= zd_index_str_is(
+                json_get_str(json_get(task_row, "state")),
+                "AWAITING_CANDIDATE");
+            saw_expired |= zd_index_str_is(
+                json_get_str(json_get(task_row, "state")), "EXPIRED");
+            if (zd_index_str_is(
+                    json_get_str(json_get(task_row, "task_root")),
+                    root_a_hex))
                 task_a_row = task_row;
         }
         ASSERT(saw_awaiting && saw_expired);
@@ -8620,8 +8702,7 @@ static int test_zd_task_index(void)
         for (size_t i = 0; i < 2; i++) {
             const char *root =
                 json_get_str(json_get(json_at(expired_tasks, i), "task_root"));
-            saw_expired_root = saw_expired_root ||
-                (root && strcmp(root, root_expired_hex) == 0);
+            saw_expired_root |= zd_index_str_is(root, root_expired_hex);
         }
         ASSERT(saw_expired_root);
         zcl_command_reply_free(&expired_reply);
