@@ -229,413 +229,471 @@ static bool sm_sign_and_malleate(const struct privkey *key,
     return true;
 }
 
-int test_sighash_malleability(void)
+/* Shared P2PKH-shaped scriptPubKey for the sighash-type and SINGLE cases. */
+static const uint8_t sm_p2pkh[] = {0x76, 0xa9, 0x14, 0x11, 0x22, 0x33, 0x44,
+                                   0x55, 0x88, 0xac};
+
+/* ==================================================================
+ * 1. Pairwise sighash-type distinctness matrix. All six (base-type x
+ *    ANYONECANPAY) combinations MUST hash to six DIFFERENT values for
+ *    the identical transaction/input — proving a signature is bound
+ *    to exactly the type it was made under. Teeth: if any two type
+ *    combinations collapsed to the same digest, a signature made
+ *    under one type would ALSO validate under the other (the classic
+ *    cross-type malleability hole) and this loop's pairwise
+ *    comparison would flip from "all distinct" to "collision found".
+ * ================================================================== */
+static int sm_check_sighash_type_matrix(void)
 {
     int failures = 0;
-    uint8_t p2pkh[] = {0x76, 0xa9, 0x14, 0x11, 0x22, 0x33, 0x44,
-                       0x55, 0x88, 0xac};
+    struct transaction tx =
+        sm_build_tx(2, 3, true, 4, SAPLING_VERSION_GROUP_ID);
+    struct script sc; script_set(&sc, sm_p2pkh, sizeof(sm_p2pkh));
+    const uint32_t branch = 0x76b809bb;
 
-    /* ==================================================================
-     * 1. Pairwise sighash-type distinctness matrix. All six (base-type x
-     *    ANYONECANPAY) combinations MUST hash to six DIFFERENT values for
-     *    the identical transaction/input — proving a signature is bound
-     *    to exactly the type it was made under. Teeth: if any two type
-     *    combinations collapsed to the same digest, a signature made
-     *    under one type would ALSO validate under the other (the classic
-     *    cross-type malleability hole) and this loop's pairwise
-     *    comparison would flip from "all distinct" to "collision found".
-     * ================================================================== */
-    {
-        struct transaction tx =
-            sm_build_tx(2, 3, true, 4, SAPLING_VERSION_GROUP_ID);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        const uint32_t branch = 0x76b809bb;
-
-        uint32_t raw_types[6] = {
-            SIGHASH_ALL,
-            SIGHASH_NONE,
-            SIGHASH_SINGLE,
-            SIGHASH_ALL    | SIGHASH_ANYONECANPAY,
-            SIGHASH_NONE   | SIGHASH_ANYONECANPAY,
-            SIGHASH_SINGLE | SIGHASH_ANYONECANPAY,
-        };
-        struct uint256 digests[6];
-        bool ok = true;
-        for (int i = 0; i < 6; i++) {
-            struct sighash_type ht = { .raw = raw_types[i] };
-            if (!signature_hash(&sc, &tx, 0, ht, 100000000, branch, NULL,
-                                &digests[i]))
-                ok = false;
-        }
-        int collisions = 0;
-        for (int i = 0; ok && i < 6; i++)
-            for (int j = i + 1; j < 6; j++)
-                if (uint256_eq(&digests[i], &digests[j]))
-                    collisions++;
-        sm_free_tx(&tx);
-        SM_CHECK("6-way sighash type matrix pairwise distinct (0 collisions)",
-                 ok && collisions == 0);
+    uint32_t raw_types[6] = {
+        SIGHASH_ALL,
+        SIGHASH_NONE,
+        SIGHASH_SINGLE,
+        SIGHASH_ALL    | SIGHASH_ANYONECANPAY,
+        SIGHASH_NONE   | SIGHASH_ANYONECANPAY,
+        SIGHASH_SINGLE | SIGHASH_ANYONECANPAY,
+    };
+    struct uint256 digests[6];
+    bool ok = true;
+    for (int i = 0; i < 6; i++) {
+        struct sighash_type ht = { .raw = raw_types[i] };
+        if (!signature_hash(&sc, &tx, 0, ht, 100000000, branch, NULL,
+                            &digests[i]))
+            ok = false;
     }
+    int collisions = 0;
+    for (int i = 0; ok && i < 6; i++)
+        for (int j = i + 1; j < 6; j++)
+            if (uint256_eq(&digests[i], &digests[j]))
+                collisions++;
+    sm_free_tx(&tx);
+    SM_CHECK("6-way sighash type matrix pairwise distinct (0 collisions)",
+             ok && collisions == 0);
+    return failures;
+}
 
-    /* Toggling ONLY the ANYONECANPAY bit on an otherwise-identical
-     * SIGHASH_ALL request must change the hash (isolated from the base
-     * type change tested above — this pins the bit in isolation). */
-    {
-        struct transaction tx =
-            sm_build_tx(2, 2, false, 1, 0);
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct uint256 plain, acp;
-        struct sighash_type ht_plain = { .raw = SIGHASH_ALL };
-        struct sighash_type ht_acp   = { .raw = SIGHASH_ALL | SIGHASH_ANYONECANPAY };
-        bool ok = signature_hash(&sc, &tx, 0, ht_plain, 0, 0, NULL, &plain)
-               && signature_hash(&sc, &tx, 0, ht_acp,   0, 0, NULL, &acp);
-        bool good = ok && !uint256_eq(&plain, &acp);
-        sm_free_tx(&tx);
-        SM_CHECK("flipping ANYONECANPAY bit alone changes the hash", good);
-    }
+/* Toggling ONLY the ANYONECANPAY bit on an otherwise-identical
+ * SIGHASH_ALL request must change the hash (isolated from the base
+ * type change tested above — this pins the bit in isolation). */
+static int sm_check_acp_bit_isolated(void)
+{
+    int failures = 0;
+    struct transaction tx =
+        sm_build_tx(2, 2, false, 1, 0);
+    struct script sc; script_set(&sc, sm_p2pkh, sizeof(sm_p2pkh));
+    struct uint256 plain, acp;
+    struct sighash_type ht_plain = { .raw = SIGHASH_ALL };
+    struct sighash_type ht_acp   = { .raw = SIGHASH_ALL | SIGHASH_ANYONECANPAY };
+    bool ok = signature_hash(&sc, &tx, 0, ht_plain, 0, 0, NULL, &plain)
+           && signature_hash(&sc, &tx, 0, ht_acp,   0, 0, NULL, &acp);
+    bool good = ok && !uint256_eq(&plain, &acp);
+    sm_free_tx(&tx);
+    SM_CHECK("flipping ANYONECANPAY bit alone changes the hash", good);
+    return failures;
+}
 
-    /* ==================================================================
-     * 2. SIGHASH_SINGLE out-of-range special case (the classic "sighash
-     *    returns constant 1" surface) — confirm the CURRENT, real
-     *    accept/reject verdict on both sides of the Sprout/ZIP-243 split.
-     *    (The exhaustive edge matrix, including the e2e uint256(1)-
-     *    sentinel parity pin, lives in test_sighash_edge.c; this is a
-     *    compact presence check so a regression here is caught even if
-     *    that file is ever skipped/filtered.) Teeth: each assertion
-     *    checks the OPPOSITE of what a naive "always succeed" or "always
-     *    fail" stub would produce — Sprout must reject, Sapling must
-     *    accept, so a predicate flip in either direction fails exactly
-     *    one of these two checks.
-     * ================================================================== */
-    {
+/* ==================================================================
+ * 2. SIGHASH_SINGLE out-of-range special case (the classic "sighash
+ *    returns constant 1" surface) — confirm the CURRENT, real
+ *    accept/reject verdict on both sides of the Sprout/ZIP-243 split.
+ *    (The exhaustive edge matrix, including the e2e uint256(1)-
+ *    sentinel parity pin, lives in test_sighash_edge.c; this is a
+ *    compact presence check so a regression here is caught even if
+ *    that file is ever skipped/filtered.) Teeth: each assertion
+ *    checks the OPPOSITE of what a naive "always succeed" or "always
+ *    fail" stub would produce — Sprout must reject, Sapling must
+ *    accept, so a predicate flip in either direction fails exactly
+ *    one of these two checks.
+ * ================================================================== */
+static int sm_check_single_sprout_out_of_range(void)
+{
+    int failures = 0;
         /* 2 vin / 1 vout so nIn=1 is a VALID input index (< num_vin=2)
          * that is simultaneously >= num_vout=1 -- isolates the
          * SINGLE-vs-vout boundary from the separate nIn>=num_vin bound
          * checked earlier in domain_consensus_signature_hash(). */
-        struct transaction tx = sm_build_tx(2, 1, false, 1, 0); /* Sprout */
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct sighash_type ht = { .raw = SIGHASH_SINGLE };
-        struct uint256 r;
-        bool rejected = !signature_hash(&sc, &tx, 1 /* == num_vout */, ht,
-                                        0, 0, NULL, &r);
-        sm_free_tx(&tx);
-        SM_CHECK("sprout SIGHASH_SINGLE nIn>=num_vout: rejected (no sentinel)",
-                  rejected);
-    }
-    {
-        struct transaction tx =
-            sm_build_tx(2, 1, true, 4, SAPLING_VERSION_GROUP_ID); /* ZIP-243 */
-        struct script sc; script_set(&sc, p2pkh, sizeof(p2pkh));
-        struct sighash_type ht = { .raw = SIGHASH_SINGLE };
-        struct uint256 r;
-        bool accepted = signature_hash(&sc, &tx, 1 /* == num_vout */, ht,
-                                       100, 0x76b809bb, NULL, &r)
-                     && !uint256_is_null(&r);
-        sm_free_tx(&tx);
-        SM_CHECK("sapling SIGHASH_SINGLE nIn>=num_vout: accepted (null digest)",
-                  accepted);
-    }
+    struct transaction tx = sm_build_tx(2, 1, false, 1, 0); /* Sprout */
+    struct script sc; script_set(&sc, sm_p2pkh, sizeof(sm_p2pkh));
+    struct sighash_type ht = { .raw = SIGHASH_SINGLE };
+    struct uint256 r;
+    bool rejected = !signature_hash(&sc, &tx, 1 /* == num_vout */, ht,
+                                    0, 0, NULL, &r);
+    sm_free_tx(&tx);
+    SM_CHECK("sprout SIGHASH_SINGLE nIn>=num_vout: rejected (no sentinel)",
+              rejected);
+    return failures;
+}
 
-    /* ==================================================================
-     * 3. Cross-type malleability, end-to-end. Sign a real P2PK spend
-     *    under SIGHASH_ALL, then an attacker splices a DIFFERENT
-     *    still-DEFINED type byte (SIGHASH_NONE) onto the identical DER
-     *    body inside the scriptSig — no re-signing. The encoding gate
-     *    (structural DER + defined-hashtype check) is satisfied either
-     *    way, so this exercises the CHECKER's sighash recomputation, not
-     *    just check_transaction_signature_encoding. verify_script MUST
-     *    reject: the recomputed sighash for SIGHASH_NONE differs from
-     *    the one actually signed, so ECDSA verify fails. Teeth: the
-     *    control case (unmodified ALL-typed scriptSig) is asserted to
-     *    SUCCEED with the identical checker/tx/flags — so if signature
-     *    binding to the type byte were ever dropped, the spliced case
-     *    would flip from reject to accept while the control stays
-     *    accept, and this pair of asserts would diverge from expected.
-     * ================================================================== */
-    {
-        struct privkey key;
-        privkey_make_new(&key, true);
-        struct pubkey pub;
-        privkey_get_pubkey(&key, &pub);
+static int sm_check_single_sapling_out_of_range(void)
+{
+    int failures = 0;
+    struct transaction tx =
+        sm_build_tx(2, 1, true, 4, SAPLING_VERSION_GROUP_ID); /* ZIP-243 */
+    struct script sc; script_set(&sc, sm_p2pkh, sizeof(sm_p2pkh));
+    struct sighash_type ht = { .raw = SIGHASH_SINGLE };
+    struct uint256 r;
+    bool accepted = signature_hash(&sc, &tx, 1 /* == num_vout */, ht,
+                                   100, 0x76b809bb, NULL, &r)
+                 && !uint256_is_null(&r);
+    sm_free_tx(&tx);
+    SM_CHECK("sapling SIGHASH_SINGLE nIn>=num_vout: accepted (null digest)",
+              accepted);
+    return failures;
+}
 
-        struct script spk; script_init(&spk);
-        bool built = script_push_data(&spk, pub.vch, pub.size)
-                  && script_push_op(&spk, OP_CHECKSIG);
+/* ==================================================================
+ * 3. Cross-type malleability, end-to-end. Sign a real P2PK spend
+ *    under SIGHASH_ALL, then an attacker splices a DIFFERENT
+ *    still-DEFINED type byte (SIGHASH_NONE) onto the identical DER
+ *    body inside the scriptSig — no re-signing. The encoding gate
+ *    (structural DER + defined-hashtype check) is satisfied either
+ *    way, so this exercises the CHECKER's sighash recomputation, not
+ *    just check_transaction_signature_encoding. verify_script MUST
+ *    reject: the recomputed sighash for SIGHASH_NONE differs from
+ *    the one actually signed, so ECDSA verify fails. Teeth: the
+ *    control case (unmodified ALL-typed scriptSig) is asserted to
+ *    SUCCEED with the identical checker/tx/flags — so if signature
+ *    binding to the type byte were ever dropped, the spliced case
+ *    would flip from reject to accept while the control stays
+ *    accept, and this pair of asserts would diverge from expected.
+ * ================================================================== */
+static int sm_check_cross_type_splice(void)
+{
+    int failures = 0;
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
 
-        struct transaction tx =
-            sm_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-        const uint32_t branch = 0x76b809bb;
-        const int64_t amount = 100000000;
+    struct script spk; script_init(&spk);
+    bool built = script_push_data(&spk, pub.vch, pub.size)
+              && script_push_op(&spk, OP_CHECKSIG);
 
-        struct sighash_type ht_all = { .raw = SIGHASH_ALL };
-        struct uint256 hash_all;
-        bool ok = built &&
-                  signature_hash(&spk, &tx, 0, ht_all, amount, branch, NULL,
-                                &hash_all);
+    struct transaction tx =
+        sm_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
+    const uint32_t branch = 0x76b809bb;
+    const int64_t amount = 100000000;
 
-        unsigned char sig[72]; size_t siglen = sizeof(sig);
-        ok = ok && privkey_sign(&key, &hash_all, sig, &siglen);
-        if (siglen > sizeof(sig))
-            ok = false;
+    struct sighash_type ht_all = { .raw = SIGHASH_ALL };
+    struct uint256 hash_all;
+    bool ok = built &&
+              signature_hash(&spk, &tx, 0, ht_all, amount, branch, NULL,
+                            &hash_all);
+
+    unsigned char sig[72]; size_t siglen = sizeof(sig);
+    ok = ok && privkey_sign(&key, &hash_all, sig, &siglen);
+    if (siglen > sizeof(sig))
+        ok = false;
 
         /* Control scriptSig: <sig || SIGHASH_ALL>. */
-        struct script ssig_ctrl; script_init(&ssig_ctrl);
-        unsigned char sig_all[73];
-        if (ok) {
-            memcpy(sig_all, sig, siglen);
-            sig_all[siglen] = SIGHASH_ALL;
-            ok = script_push_data(&ssig_ctrl, sig_all, siglen + 1);
-        }
+    struct script ssig_ctrl; script_init(&ssig_ctrl);
+    unsigned char sig_all[73];
+    if (ok) {
+        memcpy(sig_all, sig, siglen);
+        sig_all[siglen] = SIGHASH_ALL;
+        ok = script_push_data(&ssig_ctrl, sig_all, siglen + 1);
+    }
 
         /* Attack scriptSig: SAME DER body, trailing byte flipped to
          * SIGHASH_NONE (still a defined type, still valid DER+hashtype
          * shape — the encoding gate alone cannot catch this). */
-        struct script ssig_attack; script_init(&ssig_attack);
-        unsigned char sig_none[73];
-        if (ok) {
-            memcpy(sig_none, sig, siglen);
-            sig_none[siglen] = SIGHASH_NONE;
-            ok = script_push_data(&ssig_attack, sig_none, siglen + 1);
-        }
-
-        struct tx_sig_checker tsc;
-        tx_sig_checker_init(&tsc, &tx, 0, amount, branch, NULL);
-        struct sig_checker checker = tx_make_sig_checker(&tsc);
-
-        ScriptError serr_ctrl = SCRIPT_ERR_OK, serr_attack = SCRIPT_ERR_OK;
-        bool verdict_ctrl = ok && verify_script(&ssig_ctrl, &spk,
-                                                SCRIPT_VERIFY_P2SH, &checker,
-                                                branch, &serr_ctrl);
-        bool verdict_attack = ok && verify_script(&ssig_attack, &spk,
-                                                  SCRIPT_VERIFY_P2SH, &checker,
-                                                  branch, &serr_attack);
-        sm_free_tx(&tx);
-        SM_CHECK("cross-type splice (ALL->NONE, same DER) rejected; "
-                 "unmodified control accepted",
-                 ok && verdict_ctrl && !verdict_attack);
+    struct script ssig_attack; script_init(&ssig_attack);
+    unsigned char sig_none[73];
+    if (ok) {
+        memcpy(sig_none, sig, siglen);
+        sig_none[siglen] = SIGHASH_NONE;
+        ok = script_push_data(&ssig_attack, sig_none, siglen + 1);
     }
 
-    /* ==================================================================
-     * 4. Low-S enforcement against a REAL, mathematically-valid
-     *    malleated signature. (r, s) and (r, n-s) both satisfy ECDSA
-     *    verification for the same (key, hash) — this is the textbook
-     *    BIP62 signature malleability the LOW_S consensus rule exists to
-     *    close. We assert BOTH directions so a predicate flip in either
-     *    is caught: canonical low-S is valid DER AND passes LOW_S;
-     *    malleated high-S is STILL valid DER (structural check
-     *    unaffected) but FAILS specifically with SCRIPT_ERR_SIG_HIGH_S
-     *    once SCRIPT_VERIFY_LOW_S is set, and passes when it is not.
-     * ================================================================== */
-    {
-        struct privkey key;
-        privkey_make_new(&key, true);
-        struct uint256 hash;
-        memset(hash.data, 0x42, 32);
+    struct tx_sig_checker tsc;
+    tx_sig_checker_init(&tsc, &tx, 0, amount, branch, NULL);
+    struct sig_checker checker = tx_make_sig_checker(&tsc);
 
-        unsigned char low_s[72], high_s[72];
-        size_t low_s_len = 0, high_s_len = 0;
-        bool ok = sm_sign_and_malleate(&key, &hash, low_s, &low_s_len,
-                                       high_s, &high_s_len);
+    ScriptError serr_ctrl = SCRIPT_ERR_OK, serr_attack = SCRIPT_ERR_OK;
+    bool verdict_ctrl = ok && verify_script(&ssig_ctrl, &spk,
+                                            SCRIPT_VERIFY_P2SH, &checker,
+                                            branch, &serr_ctrl);
+    bool verdict_attack = ok && verify_script(&ssig_attack, &spk,
+                                              SCRIPT_VERIFY_P2SH, &checker,
+                                              branch, &serr_attack);
+    sm_free_tx(&tx);
+    SM_CHECK("cross-type splice (ALL->NONE, same DER) rejected; "
+             "unmodified control accepted",
+             ok && verdict_ctrl && !verdict_attack);
+    return failures;
+}
 
+/* ==================================================================
+ * 4. Low-S enforcement against a REAL, mathematically-valid
+ *    malleated signature. (r, s) and (r, n-s) both satisfy ECDSA
+ *    verification for the same (key, hash) — this is the textbook
+ *    BIP62 signature malleability the LOW_S consensus rule exists to
+ *    close. We assert BOTH directions so a predicate flip in either
+ *    is caught: canonical low-S is valid DER AND passes LOW_S;
+ *    malleated high-S is STILL valid DER (structural check
+ *    unaffected) but FAILS specifically with SCRIPT_ERR_SIG_HIGH_S
+ *    once SCRIPT_VERIFY_LOW_S is set, and passes when it is not.
+ * ================================================================== */
+/* Encoding-level half of section 4: the canonical and malleated DER
+ * forms checked against the LOW_S and STRICTENC-free flag sets. */
+static int sm_check_low_s_encoding(bool ok, const unsigned char *low_s,
+                                   size_t low_s_len,
+                                   const unsigned char *high_s,
+                                   size_t high_s_len)
+{
+    int failures = 0;
         /* Sanity: the malleated signature is DIFFERENT bytes from the
          * original (else the negation math above is a no-op bug). */
-        bool different_bytes = ok &&
-            (low_s_len != high_s_len ||
-             memcmp(low_s, high_s, low_s_len) != 0);
+    bool different_bytes = ok &&
+        (low_s_len != high_s_len ||
+         memcmp(low_s, high_s, low_s_len) != 0);
 
-        unsigned char low_s_tx[73], high_s_tx[73];
-        if (ok) {
-            memcpy(low_s_tx, low_s, low_s_len);
-            low_s_tx[low_s_len] = SIGHASH_ALL;
-            memcpy(high_s_tx, high_s, high_s_len);
-            high_s_tx[high_s_len] = SIGHASH_ALL;
-        }
+    unsigned char low_s_tx[73], high_s_tx[73];
+    if (ok) {
+        memcpy(low_s_tx, low_s, low_s_len);
+        low_s_tx[low_s_len] = SIGHASH_ALL;
+        memcpy(high_s_tx, high_s, high_s_len);
+        high_s_tx[high_s_len] = SIGHASH_ALL;
+    }
 
-        ScriptError e1 = SCRIPT_ERR_OK, e2 = SCRIPT_ERR_OK, e3 = SCRIPT_ERR_OK;
-        bool low_s_low_flag  = ok && check_transaction_signature_encoding(
-            low_s_tx, low_s_len + 1, SCRIPT_VERIFY_LOW_S, &e1);
-        bool high_s_low_flag = ok && check_transaction_signature_encoding(
-            high_s_tx, high_s_len + 1, SCRIPT_VERIFY_LOW_S, &e2);
-        bool high_s_no_flag  = ok && check_transaction_signature_encoding(
-            high_s_tx, high_s_len + 1, SCRIPT_VERIFY_NONE, &e3);
+    ScriptError e1 = SCRIPT_ERR_OK, e2 = SCRIPT_ERR_OK, e3 = SCRIPT_ERR_OK;
+    bool low_s_low_flag  = ok && check_transaction_signature_encoding(
+        low_s_tx, low_s_len + 1, SCRIPT_VERIFY_LOW_S, &e1);
+    bool high_s_low_flag = ok && check_transaction_signature_encoding(
+        high_s_tx, high_s_len + 1, SCRIPT_VERIFY_LOW_S, &e2);
+    bool high_s_no_flag  = ok && check_transaction_signature_encoding(
+        high_s_tx, high_s_len + 1, SCRIPT_VERIFY_NONE, &e3);
         /* DER structure alone (no LOW_S, no STRICTENC) still accepts the
          * malleated form -- only the LOW_S bit gates it. */
-        (void)e3;
+    (void)e3;
 
-        SM_CHECK("low-S encoding: canonical accepted under LOW_S",
-                 low_s_low_flag && e1 == SCRIPT_ERR_OK);
-        SM_CHECK("low-S encoding: malleated high-S REJECTED under LOW_S "
-                 "(SCRIPT_ERR_SIG_HIGH_S)",
-                 ok && !high_s_low_flag && e2 == SCRIPT_ERR_SIG_HIGH_S);
-        SM_CHECK("low-S encoding: malleated high-S ACCEPTED without LOW_S "
-                 "(DER structurally valid either way)",
-                 high_s_no_flag);
-        SM_CHECK("low-S encoding: malleation actually changed the bytes",
-                 different_bytes);
+    SM_CHECK("low-S encoding: canonical accepted under LOW_S",
+             low_s_low_flag && e1 == SCRIPT_ERR_OK);
+    SM_CHECK("low-S encoding: malleated high-S REJECTED under LOW_S "
+             "(SCRIPT_ERR_SIG_HIGH_S)",
+             ok && !high_s_low_flag && e2 == SCRIPT_ERR_SIG_HIGH_S);
+    SM_CHECK("low-S encoding: malleated high-S ACCEPTED without LOW_S "
+             "(DER structurally valid either way)",
+             high_s_no_flag);
+    SM_CHECK("low-S encoding: malleation actually changed the bytes",
+             different_bytes);
+    return failures;
+}
 
+/* End-to-end half of section 4 (same signing key and ok flag as the
+ * encoding half). */
+static int sm_check_low_s_end_to_end(struct privkey *key, bool ok)
+{
+    int failures = 0;
         /* End-to-end: same asymmetry through the real script VM and a
          * real P2PK output, using the malleated high-S signature. */
-        struct pubkey pub;
-        privkey_get_pubkey(&key, &pub);
-        struct script spk; script_init(&spk);
-        bool built = ok && script_push_data(&spk, pub.vch, pub.size)
-                        && script_push_op(&spk, OP_CHECKSIG);
+    struct pubkey pub;
+    privkey_get_pubkey(key, &pub);
+    struct script spk; script_init(&spk);
+    bool built = ok && script_push_data(&spk, pub.vch, pub.size)
+                    && script_push_op(&spk, OP_CHECKSIG);
 
-        struct transaction tx = sm_build_tx(1, 1, true, 4,
-                                            SAPLING_VERSION_GROUP_ID);
-        const uint32_t branch = 0x76b809bb;
-        struct sighash_type ht_all = { .raw = SIGHASH_ALL };
-        struct uint256 real_hash;
-        bool ok2 = built &&
-                   signature_hash(&spk, &tx, 0, ht_all, 100000000, branch,
-                                 NULL, &real_hash);
+    struct transaction tx = sm_build_tx(1, 1, true, 4,
+                                        SAPLING_VERSION_GROUP_ID);
+    const uint32_t branch = 0x76b809bb;
+    struct sighash_type ht_all = { .raw = SIGHASH_ALL };
+    struct uint256 real_hash;
+    bool ok2 = built &&
+               signature_hash(&spk, &tx, 0, ht_all, 100000000, branch,
+                             NULL, &real_hash);
 
-        unsigned char e2e_low[72], e2e_high[72];
-        size_t e2e_low_len = 0, e2e_high_len = 0;
-        ok2 = ok2 && sm_sign_and_malleate(&key, &real_hash,
-                                         e2e_low, &e2e_low_len,
-                                         e2e_high, &e2e_high_len);
+    unsigned char e2e_low[72], e2e_high[72];
+    size_t e2e_low_len = 0, e2e_high_len = 0;
+    ok2 = ok2 && sm_sign_and_malleate(key, &real_hash,
+                                     e2e_low, &e2e_low_len,
+                                     e2e_high, &e2e_high_len);
 
-        struct script ssig_high; script_init(&ssig_high);
-        if (ok2) {
-            unsigned char buf[73];
-            memcpy(buf, e2e_high, e2e_high_len);
-            buf[e2e_high_len] = SIGHASH_ALL;
-            ok2 = script_push_data(&ssig_high, buf, e2e_high_len + 1);
-        }
-
-        struct tx_sig_checker tsc;
-        tx_sig_checker_init(&tsc, &tx, 0, 100000000, branch, NULL);
-        struct sig_checker checker = tx_make_sig_checker(&tsc);
-
-        ScriptError serr_flag = SCRIPT_ERR_OK, serr_noflag = SCRIPT_ERR_OK;
-        bool verdict_with_flag = ok2 && verify_script(
-            &ssig_high, &spk, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_LOW_S,
-            &checker, branch, &serr_flag);
-        bool verdict_no_flag = ok2 && verify_script(
-            &ssig_high, &spk, SCRIPT_VERIFY_P2SH,
-            &checker, branch, &serr_noflag);
-
-        sm_free_tx(&tx);
-        SM_CHECK("e2e: high-S malleated signature REJECTED with LOW_S flag "
-                 "(SCRIPT_ERR_SIG_HIGH_S)",
-                 ok2 && !verdict_with_flag && serr_flag == SCRIPT_ERR_SIG_HIGH_S);
-        SM_CHECK("e2e: SAME high-S signature ACCEPTED without LOW_S flag "
-                 "(mathematically valid ECDSA signature either way)",
-                 ok2 && verdict_no_flag);
+    struct script ssig_high; script_init(&ssig_high);
+    if (ok2) {
+        unsigned char buf[73];
+        memcpy(buf, e2e_high, e2e_high_len);
+        buf[e2e_high_len] = SIGHASH_ALL;
+        ok2 = script_push_data(&ssig_high, buf, e2e_high_len + 1);
     }
 
-    /* ==================================================================
-     * 5. STRICTENC hashtype-byte validation on the REAL trailing-byte
-     *    path. A DER-valid signature with an UNDEFINED trailing type
-     *    byte (e.g. 0x00 or 0x07) must be rejected with
-     *    SCRIPT_ERR_SIG_HASHTYPE when SCRIPT_VERIFY_STRICTENC is set,
-     *    and accepted (DER-valid, type not checked) when it is clear.
-     *    Teeth: both directions asserted on the byte-identical input —
-     *    only the flag differs — so a predicate flip in either
-     *    direction (always-reject or always-accept regardless of the
-     *    flag) fails one of the two checks.
-     * ================================================================== */
-    {
-        struct privkey key;
-        privkey_make_new(&key, true);
-        struct uint256 hash;
-        memset(hash.data, 0x77, 32);
-        unsigned char sig[72]; size_t siglen = sizeof(sig);
-        bool ok = privkey_sign(&key, &hash, sig, &siglen);
+    struct tx_sig_checker tsc;
+    tx_sig_checker_init(&tsc, &tx, 0, 100000000, branch, NULL);
+    struct sig_checker checker = tx_make_sig_checker(&tsc);
 
-        unsigned char sig_undefined[73], sig_defined[73];
-        if (ok) {
-            memcpy(sig_undefined, sig, siglen);
-            sig_undefined[siglen] = 0x07; /* not ALL/NONE/SINGLE(|ACP) */
-            memcpy(sig_defined, sig, siglen);
-            sig_defined[siglen] = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY;
-        }
+    ScriptError serr_flag = SCRIPT_ERR_OK, serr_noflag = SCRIPT_ERR_OK;
+    bool verdict_with_flag = ok2 && verify_script(
+        &ssig_high, &spk, SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_LOW_S,
+        &checker, branch, &serr_flag);
+    bool verdict_no_flag = ok2 && verify_script(
+        &ssig_high, &spk, SCRIPT_VERIFY_P2SH,
+        &checker, branch, &serr_noflag);
 
-        ScriptError e1 = SCRIPT_ERR_OK, e2 = SCRIPT_ERR_OK, e3 = SCRIPT_ERR_OK;
-        bool undefined_strict = ok && check_transaction_signature_encoding(
-            sig_undefined, siglen + 1, SCRIPT_VERIFY_STRICTENC, &e1);
-        bool undefined_loose  = ok && check_transaction_signature_encoding(
-            sig_undefined, siglen + 1, SCRIPT_VERIFY_NONE, &e2);
-        bool defined_strict   = ok && check_transaction_signature_encoding(
-            sig_defined, siglen + 1, SCRIPT_VERIFY_STRICTENC, &e3);
+    sm_free_tx(&tx);
+    SM_CHECK("e2e: high-S malleated signature REJECTED with LOW_S flag "
+             "(SCRIPT_ERR_SIG_HIGH_S)",
+             ok2 && !verdict_with_flag && serr_flag == SCRIPT_ERR_SIG_HIGH_S);
+    SM_CHECK("e2e: SAME high-S signature ACCEPTED without LOW_S flag "
+             "(mathematically valid ECDSA signature either way)",
+             ok2 && verdict_no_flag);
+    return failures;
+}
 
-        SM_CHECK("STRICTENC rejects undefined hashtype byte "
-                 "(SCRIPT_ERR_SIG_HASHTYPE)",
-                 ok && !undefined_strict && e1 == SCRIPT_ERR_SIG_HASHTYPE);
-        SM_CHECK("undefined hashtype byte accepted when STRICTENC is clear "
-                 "(DER structure alone still valid)",
-                 undefined_loose);
-        SM_CHECK("STRICTENC accepts a defined type (SINGLE|ACP)",
-                 defined_strict && e3 == SCRIPT_ERR_OK);
+/* Sign once, then run both low-S halves on the same signature pair. */
+static int sm_check_low_s_malleation(void)
+{
+    int failures = 0;
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct uint256 hash;
+    memset(hash.data, 0x42, 32);
+
+    unsigned char low_s[72], high_s[72];
+    size_t low_s_len = 0, high_s_len = 0;
+    bool ok = sm_sign_and_malleate(&key, &hash, low_s, &low_s_len,
+                                   high_s, &high_s_len);
+
+    failures += sm_check_low_s_encoding(ok, low_s, low_s_len,
+                                        high_s, high_s_len);
+    failures += sm_check_low_s_end_to_end(&key, ok);
+    return failures;
+}
+
+/* ==================================================================
+ * 5. STRICTENC hashtype-byte validation on the REAL trailing-byte
+ *    path. A DER-valid signature with an UNDEFINED trailing type
+ *    byte (e.g. 0x00 or 0x07) must be rejected with
+ *    SCRIPT_ERR_SIG_HASHTYPE when SCRIPT_VERIFY_STRICTENC is set,
+ *    and accepted (DER-valid, type not checked) when it is clear.
+ *    Teeth: both directions asserted on the byte-identical input —
+ *    only the flag differs — so a predicate flip in either
+ *    direction (always-reject or always-accept regardless of the
+ *    flag) fails one of the two checks.
+ * ================================================================== */
+static int sm_check_strictenc_hashtype(void)
+{
+    int failures = 0;
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct uint256 hash;
+    memset(hash.data, 0x77, 32);
+    unsigned char sig[72]; size_t siglen = sizeof(sig);
+    bool ok = privkey_sign(&key, &hash, sig, &siglen);
+
+    unsigned char sig_undefined[73], sig_defined[73];
+    if (ok) {
+        memcpy(sig_undefined, sig, siglen);
+        sig_undefined[siglen] = 0x07; /* not ALL/NONE/SINGLE(|ACP) */
+        memcpy(sig_defined, sig, siglen);
+        sig_defined[siglen] = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY;
     }
 
-    /* ==================================================================
-     * 6. Replay protection (ZIP-243 consensus_branch_id / forkid) has
-     *    teeth end-to-end. Sign for branch A, verify with a REAL
-     *    tx_sig_checker bound to branch B (mismatched) via the same
-     *    checker connect_block uses — the checker recomputes the
-     *    sighash with ITS OWN bound branch_id (check_sig_cb ignores the
-     *    branch_id argument passed by the script VM and always uses
-     *    tsc->consensus_branch_id), so a signature valid on one branch
-     *    must NOT verify against another. Teeth: the matched-branch
-     *    control is asserted to SUCCEED with the identical signature/tx,
-     *    so only the branch_id differs between the two verdicts.
-     * ================================================================== */
-    {
-        struct privkey key;
-        privkey_make_new(&key, true);
-        struct pubkey pub;
-        privkey_get_pubkey(&key, &pub);
-        struct script spk; script_init(&spk);
-        bool built = script_push_data(&spk, pub.vch, pub.size)
-                  && script_push_op(&spk, OP_CHECKSIG);
+    ScriptError e1 = SCRIPT_ERR_OK, e2 = SCRIPT_ERR_OK, e3 = SCRIPT_ERR_OK;
+    bool undefined_strict = ok && check_transaction_signature_encoding(
+        sig_undefined, siglen + 1, SCRIPT_VERIFY_STRICTENC, &e1);
+    bool undefined_loose  = ok && check_transaction_signature_encoding(
+        sig_undefined, siglen + 1, SCRIPT_VERIFY_NONE, &e2);
+    bool defined_strict   = ok && check_transaction_signature_encoding(
+        sig_defined, siglen + 1, SCRIPT_VERIFY_STRICTENC, &e3);
 
-        struct transaction tx =
-            sm_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
-        const int64_t amount = 100000000;
-        const uint32_t branch_a = 0x76b809bb; /* Sapling mainnet branch id */
-        const uint32_t branch_b = 0x5ba81b19; /* Overwinter branch id — wrong fork */
+    SM_CHECK("STRICTENC rejects undefined hashtype byte "
+             "(SCRIPT_ERR_SIG_HASHTYPE)",
+             ok && !undefined_strict && e1 == SCRIPT_ERR_SIG_HASHTYPE);
+    SM_CHECK("undefined hashtype byte accepted when STRICTENC is clear "
+             "(DER structure alone still valid)",
+             undefined_loose);
+    SM_CHECK("STRICTENC accepts a defined type (SINGLE|ACP)",
+             defined_strict && e3 == SCRIPT_ERR_OK);
+    return failures;
+}
 
-        struct sighash_type ht_all = { .raw = SIGHASH_ALL };
-        struct uint256 hash_a;
-        bool ok = built && signature_hash(&spk, &tx, 0, ht_all, amount,
-                                          branch_a, NULL, &hash_a);
+/* ==================================================================
+ * 6. Replay protection (ZIP-243 consensus_branch_id / forkid) has
+ *    teeth end-to-end. Sign for branch A, verify with a REAL
+ *    tx_sig_checker bound to branch B (mismatched) via the same
+ *    checker connect_block uses — the checker recomputes the
+ *    sighash with ITS OWN bound branch_id (check_sig_cb ignores the
+ *    branch_id argument passed by the script VM and always uses
+ *    tsc->consensus_branch_id), so a signature valid on one branch
+ *    must NOT verify against another. Teeth: the matched-branch
+ *    control is asserted to SUCCEED with the identical signature/tx,
+ *    so only the branch_id differs between the two verdicts.
+ * ================================================================== */
+static int sm_check_replay_branch(void)
+{
+    int failures = 0;
+    struct privkey key;
+    privkey_make_new(&key, true);
+    struct pubkey pub;
+    privkey_get_pubkey(&key, &pub);
+    struct script spk; script_init(&spk);
+    bool built = script_push_data(&spk, pub.vch, pub.size)
+              && script_push_op(&spk, OP_CHECKSIG);
 
-        unsigned char sig[72]; size_t siglen = sizeof(sig);
-        ok = ok && privkey_sign(&key, &hash_a, sig, &siglen);
+    struct transaction tx =
+        sm_build_tx(1, 1, true, 4, SAPLING_VERSION_GROUP_ID);
+    const int64_t amount = 100000000;
+    const uint32_t branch_a = 0x76b809bb; /* Sapling mainnet branch id */
+    const uint32_t branch_b = 0x5ba81b19; /* Overwinter branch id — wrong fork */
 
-        struct script ssig; script_init(&ssig);
-        unsigned char sig_tx[73];
-        if (ok) {
-            memcpy(sig_tx, sig, siglen);
-            sig_tx[siglen] = SIGHASH_ALL;
-            ok = script_push_data(&ssig, sig_tx, siglen + 1);
-        }
+    struct sighash_type ht_all = { .raw = SIGHASH_ALL };
+    struct uint256 hash_a;
+    bool ok = built && signature_hash(&spk, &tx, 0, ht_all, amount,
+                                      branch_a, NULL, &hash_a);
 
-        struct tx_sig_checker tsc_match, tsc_mismatch;
-        tx_sig_checker_init(&tsc_match, &tx, 0, amount, branch_a, NULL);
-        tx_sig_checker_init(&tsc_mismatch, &tx, 0, amount, branch_b, NULL);
-        struct sig_checker checker_match = tx_make_sig_checker(&tsc_match);
-        struct sig_checker checker_mismatch = tx_make_sig_checker(&tsc_mismatch);
+    unsigned char sig[72]; size_t siglen = sizeof(sig);
+    ok = ok && privkey_sign(&key, &hash_a, sig, &siglen);
 
-        ScriptError serr_match = SCRIPT_ERR_OK, serr_mismatch = SCRIPT_ERR_OK;
-        bool verdict_match = ok && verify_script(&ssig, &spk,
-                                                 SCRIPT_VERIFY_P2SH,
-                                                 &checker_match, branch_a,
-                                                 &serr_match);
-        bool verdict_mismatch = ok && verify_script(&ssig, &spk,
-                                                    SCRIPT_VERIFY_P2SH,
-                                                    &checker_mismatch, branch_a,
-                                                    &serr_mismatch);
-        sm_free_tx(&tx);
-        SM_CHECK("replay protection: signature valid on branch_a verifies "
-                 "against a branch_a-bound checker",
-                 ok && verdict_match);
-        SM_CHECK("replay protection: SAME signature does NOT verify against "
-                 "a branch_b-bound checker (wrong forkid)",
-                 ok && !verdict_mismatch);
+    struct script ssig; script_init(&ssig);
+    unsigned char sig_tx[73];
+    if (ok) {
+        memcpy(sig_tx, sig, siglen);
+        sig_tx[siglen] = SIGHASH_ALL;
+        ok = script_push_data(&ssig, sig_tx, siglen + 1);
     }
+
+    struct tx_sig_checker tsc_match, tsc_mismatch;
+    tx_sig_checker_init(&tsc_match, &tx, 0, amount, branch_a, NULL);
+    tx_sig_checker_init(&tsc_mismatch, &tx, 0, amount, branch_b, NULL);
+    struct sig_checker checker_match = tx_make_sig_checker(&tsc_match);
+    struct sig_checker checker_mismatch = tx_make_sig_checker(&tsc_mismatch);
+
+    ScriptError serr_match = SCRIPT_ERR_OK, serr_mismatch = SCRIPT_ERR_OK;
+    bool verdict_match = ok && verify_script(&ssig, &spk,
+                                             SCRIPT_VERIFY_P2SH,
+                                             &checker_match, branch_a,
+                                             &serr_match);
+    bool verdict_mismatch = ok && verify_script(&ssig, &spk,
+                                                SCRIPT_VERIFY_P2SH,
+                                                &checker_mismatch, branch_a,
+                                                &serr_mismatch);
+    sm_free_tx(&tx);
+    SM_CHECK("replay protection: signature valid on branch_a verifies "
+             "against a branch_a-bound checker",
+             ok && verdict_match);
+    SM_CHECK("replay protection: SAME signature does NOT verify against "
+             "a branch_b-bound checker (wrong forkid)",
+             ok && !verdict_mismatch);
+    return failures;
+}
+
+int test_sighash_malleability(void)
+{
+    int failures = 0;
+
+    failures += sm_check_sighash_type_matrix();
+    failures += sm_check_acp_bit_isolated();
+    failures += sm_check_single_sprout_out_of_range();
+    failures += sm_check_single_sapling_out_of_range();
+    failures += sm_check_cross_type_splice();
+    failures += sm_check_low_s_malleation();
+    failures += sm_check_strictenc_hashtype();
+    failures += sm_check_replay_branch();
 
     return failures;
 }

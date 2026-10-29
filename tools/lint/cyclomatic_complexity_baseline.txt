@@ -723,7 +723,6 @@ tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
 tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
 tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41
-tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38
