@@ -471,9 +471,9 @@ static void ar_replay_header(uint8_t *buf, uint64_t seed,
     buf[AR_REPLAY_MAGIC_LEN + 4u + 8u] = planes_per_team;
 }
 
-static int ar_run_match(uint64_t seed, unsigned planes_per_team,
-                        const char *pilot_red_path, const char *pilot_blue_path,
-                        const char *replay_out, bool sandbox)
+/* Sandbox policy: 3 when sandbox mode is requested but Landlock or seccomp
+ * is unavailable; 0 otherwise (--no-sandbox is warned, never refused). */
+static int ar_sandbox_gate(bool sandbox)
 {
     if (sandbox &&
         (os_sandbox_landlock_abi() < 0 || !os_sandbox_seccomp_supported())) {
@@ -489,6 +489,103 @@ static int ar_run_match(uint64_t seed, unsigned planes_per_team,
         fprintf(stderr,
                 "arena_runner: WARNING: --no-sandbox in effect — pilots run "
                 "UNCONFINED (no Landlock/seccomp); dev debugging only\n");
+    return 0;
+}
+
+/* Spawn red, then blue wired to red's pipes. On failure nothing is left
+ * running: a failed blue reaps red before returning false. */
+static bool ar_spawn_pilots(struct ar_pilot *red, struct ar_pilot *blue,
+                            const char *red_path, const char *blue_path,
+                            bool sandbox)
+{
+    if (!ar_pilot_spawn(red, red_path, sandbox, NULL, 0))
+        return false;
+    int red_fds[2] = { red->fd_in, red->fd_out };
+    if (!ar_pilot_spawn(blue, blue_path, sandbox, red_fds, 2)) {
+        ar_pilot_reap(red);
+        return false;
+    }
+    return true;
+}
+
+/* One tick's controls: neutral defaults, red then blue gathered with
+ * runner-side KPI timing, then the zdog step. */
+static void ar_gather_tick(zdog_match *m, struct ar_pilot *red,
+                           struct ar_pilot *blue, unsigned planes_per_team,
+                           zdog_ctl ctls[ZDOG_MAX_PLANES])
+{
+    const unsigned num_planes = 2u * planes_per_team;
+    for (unsigned i = 0; i < num_planes; i++)
+        ctls[i] = AR_NEUTRAL_CTL;
+    /* Runner-side KPI timing via the platform clock (never enters
+     * match state). */
+    uint64_t t0 = (uint64_t)clock_now_monotonic_ns();
+    ar_gather_team_ctls(m, red, 0, planes_per_team, ctls);
+    red->wait_ns += (uint64_t)clock_now_monotonic_ns() - t0;
+    red->exchanges++;
+    t0 = (uint64_t)clock_now_monotonic_ns();
+    ar_gather_team_ctls(m, blue, 1, planes_per_team, ctls);
+    blue->wait_ns += (uint64_t)clock_now_monotonic_ns() - t0;
+    blue->exchanges++;
+    zdog_tick(m, ctls);
+}
+
+/* Append one tick's ctl frames to the replay. Returns 0, 1 when the replay
+ * cap would be exceeded (no truncation), or 2 on a short frame encode. */
+static int ar_append_tick_frames(uint8_t *replay, size_t *replay_len,
+                                 const zdog_ctl ctls[ZDOG_MAX_PLANES],
+                                 unsigned num_planes)
+{
+    const size_t tick_bytes = num_planes * ZDOG_CTL_WIRE_LEN;
+    if (*replay_len + tick_bytes + ZDOG_STATE_WIRE_MAX > AR_MAX_REPLAY_BYTES)
+        return 1;
+    for (unsigned i = 0; i < num_planes; i++) {
+        size_t n = zdog_ctl_encode(&ctls[i], replay + *replay_len,
+                                   ZDOG_CTL_WIRE_LEN);
+        if (n != ZDOG_CTL_WIRE_LEN)
+            return 2;
+        *replay_len += n;
+    }
+    return 0;
+}
+
+/* Print the match summary lines (seed, score, roots, pilot KPIs). */
+static void ar_print_match_summary(uint64_t seed, unsigned planes_per_team,
+                                   const zdog_match *m,
+                                   const struct ar_pilot *red,
+                                   const struct ar_pilot *blue,
+                                   const uint8_t replay_root[SHA3_256_OUTPUT_SIZE],
+                                   const uint8_t final_state_root[SHA3_256_OUTPUT_SIZE],
+                                   const uint8_t chain[SHA3_256_OUTPUT_SIZE])
+{
+    printf("seed=%llu planes_per_team=%u ticks=%llu\n",
+           (unsigned long long)seed, planes_per_team,
+           (unsigned long long)m->tick);
+    printf("score_red=%u score_blue=%u winner=%s\n", m->score[0], m->score[1],
+           ar_winner_name(m->winner));
+    ar_print_hex("replay_root", replay_root);
+    ar_print_hex("final_state_root", final_state_root);
+    ar_print_hex("state_root_chain", chain);
+    ar_print_pilot_status("pilot_red_status", red);
+    putchar(' ');
+    ar_print_pilot_status("pilot_blue_status", blue);
+    putchar('\n');
+    printf("pilot_red_avg_response_us=%llu pilot_blue_avg_response_us=%llu\n",
+           (unsigned long long)(red->exchanges ? red->wait_ns / 1000ull /
+                                                 red->exchanges
+                                               : 0ull),
+           (unsigned long long)(blue->exchanges ? blue->wait_ns / 1000ull /
+                                                  blue->exchanges
+                                               : 0ull));
+}
+
+static int ar_run_match(uint64_t seed, unsigned planes_per_team,
+                        const char *pilot_red_path, const char *pilot_blue_path,
+                        const char *replay_out, bool sandbox)
+{
+    const int gate = ar_sandbox_gate(sandbox);
+    if (gate != 0)
+        return gate;
 
     /* Writes to a dead pilot must return EPIPE, not kill the runner. */
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
@@ -510,13 +607,8 @@ static int ar_run_match(uint64_t seed, unsigned planes_per_team,
 
     struct ar_pilot red = { .pid = -1, .fd_in = -1, .fd_out = -1 };
     struct ar_pilot blue = { .pid = -1, .fd_in = -1, .fd_out = -1 };
-    if (!ar_pilot_spawn(&red, pilot_red_path, sandbox, NULL, 0)) {
-        free(replay);
-        return 4;
-    }
-    int red_fds[2] = { red.fd_in, red.fd_out };
-    if (!ar_pilot_spawn(&blue, pilot_blue_path, sandbox, red_fds, 2)) {
-        ar_pilot_reap(&red);
+    if (!ar_spawn_pilots(&red, &blue, pilot_red_path, pilot_blue_path,
+                         sandbox)) {
         free(replay);
         return 4;
     }
@@ -526,42 +618,25 @@ static int ar_run_match(uint64_t seed, unsigned planes_per_team,
 
     while (m.phase == ZDOG_PHASE_RUNNING) {
         zdog_ctl ctls[ZDOG_MAX_PLANES];
-        for (unsigned i = 0; i < num_planes; i++)
-            ctls[i] = AR_NEUTRAL_CTL;
-        /* Runner-side KPI timing via the platform clock (never enters
-         * match state). */
-        uint64_t t0 = (uint64_t)clock_now_monotonic_ns();
-        ar_gather_team_ctls(&m, &red, 0, planes_per_team, ctls);
-        red.wait_ns += (uint64_t)clock_now_monotonic_ns() - t0;
-        red.exchanges++;
-        t0 = (uint64_t)clock_now_monotonic_ns();
-        ar_gather_team_ctls(&m, &blue, 1, planes_per_team, ctls);
-        blue.wait_ns += (uint64_t)clock_now_monotonic_ns() - t0;
-        blue.exchanges++;
-        zdog_tick(&m, ctls);
+        ar_gather_tick(&m, &red, &blue, planes_per_team, ctls);
 
         /* Append every plane's ctl frame (index order; dead planes' neutral
          * frames included) to the replay. */
-        const size_t tick_bytes = num_planes * ZDOG_CTL_WIRE_LEN;
-        if (replay_len + tick_bytes + ZDOG_STATE_WIRE_MAX >
-            AR_MAX_REPLAY_BYTES) {
+        const int appended =
+            ar_append_tick_frames(replay, &replay_len, ctls, num_planes);
+        if (appended == 1) {
             ar_log_err("replay buffer cap exceeded", "refusing to truncate");
             ar_pilot_reap(&red);
             ar_pilot_reap(&blue);
             free(replay);
             return 4;
         }
-        for (unsigned i = 0; i < num_planes; i++) {
-            size_t n = zdog_ctl_encode(&ctls[i], replay + replay_len,
-                                       ZDOG_CTL_WIRE_LEN);
-            if (n != ZDOG_CTL_WIRE_LEN) {
-                ar_log_err("zdog_ctl_encode short frame", "runner bug");
-                ar_pilot_reap(&red);
-                ar_pilot_reap(&blue);
-                free(replay);
-                return 4;
-            }
-            replay_len += n;
+        if (appended == 2) {
+            ar_log_err("zdog_ctl_encode short frame", "runner bug");
+            ar_pilot_reap(&red);
+            ar_pilot_reap(&blue);
+            free(replay);
+            return 4;
         }
         if (m.tick % AR_CHAIN_FOLD_INTERVAL == 0)
             ar_chain_fold(chain, zdog_state_checksum(&m));
@@ -609,25 +684,8 @@ static int ar_run_match(uint64_t seed, unsigned planes_per_team,
         }
     }
 
-    printf("seed=%llu planes_per_team=%u ticks=%llu\n",
-           (unsigned long long)seed, planes_per_team,
-           (unsigned long long)m.tick);
-    printf("score_red=%u score_blue=%u winner=%s\n", m.score[0], m.score[1],
-           ar_winner_name(m.winner));
-    ar_print_hex("replay_root", replay_root);
-    ar_print_hex("final_state_root", final_state_root);
-    ar_print_hex("state_root_chain", chain);
-    ar_print_pilot_status("pilot_red_status", &red);
-    putchar(' ');
-    ar_print_pilot_status("pilot_blue_status", &blue);
-    putchar('\n');
-    printf("pilot_red_avg_response_us=%llu pilot_blue_avg_response_us=%llu\n",
-           (unsigned long long)(red.exchanges ? red.wait_ns / 1000ull /
-                                                red.exchanges
-                                              : 0ull),
-           (unsigned long long)(blue.exchanges ? blue.wait_ns / 1000ull /
-                                                  blue.exchanges
-                                               : 0ull));
+    ar_print_match_summary(seed, planes_per_team, &m, &red, &blue, replay_root,
+                           final_state_root, chain);
 
     free(replay);
     return 0;
@@ -681,6 +739,42 @@ static int ar_verify_mismatch(const char *what)
     return 1;
 }
 
+/* Check the replay header (length, magic, version, planes). 0 when valid,
+ * otherwise the mismatch status (1) after reporting which check failed. */
+static int ar_verify_header(const uint8_t *buf, size_t len)
+{
+    if (len < AR_HEADER_LEN + ZDOG_STATE_WIRE_MAX)
+        return ar_verify_mismatch("truncated");
+    if (memcmp(buf, AR_REPLAY_MAGIC, AR_REPLAY_MAGIC_LEN) != 0)
+        return ar_verify_mismatch("header-magic");
+    if (zcl_read_u32_le(buf + AR_REPLAY_MAGIC_LEN) != AR_REPLAY_VERSION)
+        return ar_verify_mismatch("header-version");
+    const uint8_t planes_per_team = buf[AR_REPLAY_MAGIC_LEN + 4u + 8u];
+    if (planes_per_team < 1 || planes_per_team > 4)
+        return ar_verify_mismatch("header-planes");
+    return 0;
+}
+
+/* Re-apply the recorded ctl frames tick by tick with NO pilots. *fp walks
+ * the frame region and is left at the trailing state block. */
+static int ar_verify_walk(zdog_match *m, uint8_t chain[SHA3_256_OUTPUT_SIZE],
+                          const uint8_t **fp, uint64_t recorded_ticks,
+                          unsigned num_planes)
+{
+    for (uint64_t t = 0; t < recorded_ticks; t++) {
+        zdog_ctl ctls[ZDOG_MAX_PLANES];
+        for (unsigned i = 0; i < num_planes; i++) {
+            if (!zdog_ctl_decode(*fp, ZDOG_CTL_WIRE_LEN, &ctls[i]))
+                return ar_verify_mismatch("ctl-frame");
+            *fp += ZDOG_CTL_WIRE_LEN;
+        }
+        zdog_tick(m, ctls);
+        if (m->tick % AR_CHAIN_FOLD_INTERVAL == 0)
+            ar_chain_fold(chain, zdog_state_checksum(m));
+    }
+    return 0;
+}
+
 static int ar_verify_replay(const char *path, const char *expected_root_hex)
 {
     size_t len = 0;
@@ -688,25 +782,11 @@ static int ar_verify_replay(const char *path, const char *expected_root_hex)
     if (!buf)
         return 1;
 
-    int rc = 1;
-    if (len < AR_HEADER_LEN + ZDOG_STATE_WIRE_MAX) {
-        rc = ar_verify_mismatch("truncated");
+    int rc = ar_verify_header(buf, len);
+    if (rc != 0)
         goto out;
-    }
-    if (memcmp(buf, AR_REPLAY_MAGIC, AR_REPLAY_MAGIC_LEN) != 0) {
-        rc = ar_verify_mismatch("header-magic");
-        goto out;
-    }
-    if (zcl_read_u32_le(buf + AR_REPLAY_MAGIC_LEN) != AR_REPLAY_VERSION) {
-        rc = ar_verify_mismatch("header-version");
-        goto out;
-    }
     const uint64_t seed = zcl_read_u64_le(buf + AR_REPLAY_MAGIC_LEN + 4u);
     const uint8_t planes_per_team = buf[AR_REPLAY_MAGIC_LEN + 4u + 8u];
-    if (planes_per_team < 1 || planes_per_team > 4) {
-        rc = ar_verify_mismatch("header-planes");
-        goto out;
-    }
     const unsigned num_planes = 2u * planes_per_team;
     const size_t tick_bytes = num_planes * ZDOG_CTL_WIRE_LEN;
     const size_t frames_len = len - AR_HEADER_LEN - ZDOG_STATE_WIRE_MAX;
@@ -722,19 +802,9 @@ static int ar_verify_replay(const char *path, const char *expected_root_hex)
     uint8_t chain[SHA3_256_OUTPUT_SIZE];
     ar_chain_init(chain, seed, planes_per_team);
     const uint8_t *fp = buf + AR_HEADER_LEN;
-    for (uint64_t t = 0; t < recorded_ticks; t++) {
-        zdog_ctl ctls[ZDOG_MAX_PLANES];
-        for (unsigned i = 0; i < num_planes; i++) {
-            if (!zdog_ctl_decode(fp, ZDOG_CTL_WIRE_LEN, &ctls[i])) {
-                rc = ar_verify_mismatch("ctl-frame");
-                goto out;
-            }
-            fp += ZDOG_CTL_WIRE_LEN;
-        }
-        zdog_tick(&m, ctls);
-        if (m.tick % AR_CHAIN_FOLD_INTERVAL == 0)
-            ar_chain_fold(chain, zdog_state_checksum(&m));
-    }
+    rc = ar_verify_walk(&m, chain, &fp, recorded_ticks, num_planes);
+    if (rc != 0)
+        goto out;
     /* The match must have gone DONE at EXACTLY the recorded tick count:
      * if it finished early, zdog_tick no-ops and m.tick stops short; if it
      * never finished, phase is still RUNNING. */
@@ -793,90 +863,135 @@ out:
     return rc;
 }
 
+/* Parsed command-line options (NULL when absent). */
+struct ar_cli {
+    const char *seed_s;
+    const char *planes_s;
+    const char *pilot_red;
+    const char *pilot_blue;
+    const char *replay_out;
+    const char *verify_replay;
+    const char *expected_replay_root;
+    bool no_sandbox;
+};
+
+/* Split argv[i] into option name and value. The value is the text after '='
+ * or the next token; *has_eq reports the '=' form. False on a bad name. */
+static bool ar_split_arg(int argc, char **argv, int i, char *name,
+                         size_t name_cap, const char **v, bool *has_eq)
+{
+    const char *a = argv[i];
+    const char *eq = strchr(a, '=');
+    size_t nl = eq ? (size_t)(eq - a) : strlen(a);
+    if (nl == 0 || nl >= name_cap)
+        return false;
+    memcpy(name, a, nl);
+    name[nl] = '\0';
+    *has_eq = eq != NULL;
+    *v = NULL;
+    if (eq)
+        *v = eq + 1;
+    else if (i + 1 < argc)
+        *v = argv[i + 1];
+    return true;
+}
+
+/* The option slot for a value-taking option; NULL for an unknown name. */
+static const char **ar_cli_value_slot(struct ar_cli *c, const char *name)
+{
+    if (strcmp(name, "--seed") == 0)
+        return &c->seed_s;
+    if (strcmp(name, "--planes-per-team") == 0)
+        return &c->planes_s;
+    if (strcmp(name, "--pilot-red") == 0)
+        return &c->pilot_red;
+    if (strcmp(name, "--pilot-blue") == 0)
+        return &c->pilot_blue;
+    if (strcmp(name, "--replay-out") == 0)
+        return &c->replay_out;
+    if (strcmp(name, "--verify-replay") == 0)
+        return &c->verify_replay;
+    if (strcmp(name, "--expect-replay-root") == 0)
+        return &c->expected_replay_root;
+    return NULL;
+}
+
+/* True when any match-mode argument is present (mixed modes fail closed). */
+static bool ar_cli_has_match_args(const struct ar_cli *c)
+{
+    return c->seed_s || c->planes_s || c->pilot_red || c->pilot_blue ||
+           c->replay_out || c->no_sandbox;
+}
+
+/* True when a required match-mode argument is missing. */
+static bool ar_cli_missing_match_args(const struct ar_cli *c)
+{
+    return !c->seed_s || !c->planes_s || !c->pilot_red || !c->pilot_blue;
+}
+
+/* Planes per team: a decimal u64 in 1..4. */
+static bool ar_parse_planes(const char *s, uint64_t *out)
+{
+    return ar_parse_u64(s, out) && *out >= 1 && *out <= 4;
+}
+
 int main(int argc, char **argv)
 {
-    const char *seed_s = NULL;
-    const char *planes_s = NULL;
-    const char *pilot_red = NULL;
-    const char *pilot_blue = NULL;
-    const char *replay_out = NULL;
-    const char *verify_replay = NULL;
-    const char *expected_replay_root = NULL;
-    bool no_sandbox = false;
+    struct ar_cli cli = { 0 };
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = NULL;
         /* --name value  and  --name=value  are both accepted. */
         char name[64];
-        const char *eq = strchr(a, '=');
-        size_t nl = eq ? (size_t)(eq - a) : strlen(a);
-        if (nl == 0 || nl >= sizeof(name)) {
+        bool has_eq = false;
+        if (!ar_split_arg(argc, argv, i, name, sizeof(name), &v, &has_eq)) {
             ar_log_err("bad argument", a);
             ar_usage(stderr);
             return 2;
         }
-        memcpy(name, a, nl);
-        name[nl] = '\0';
-        if (eq)
-            v = eq + 1;
-        else if (i + 1 < argc)
-            v = argv[i + 1];
-        bool takes_value = true;
-        if (strcmp(name, "--seed") == 0)
-            seed_s = v;
-        else if (strcmp(name, "--planes-per-team") == 0)
-            planes_s = v;
-        else if (strcmp(name, "--pilot-red") == 0)
-            pilot_red = v;
-        else if (strcmp(name, "--pilot-blue") == 0)
-            pilot_blue = v;
-        else if (strcmp(name, "--replay-out") == 0)
-            replay_out = v;
-        else if (strcmp(name, "--verify-replay") == 0)
-            verify_replay = v;
-        else if (strcmp(name, "--expect-replay-root") == 0)
-            expected_replay_root = v;
-        else if (strcmp(name, "--no-sandbox") == 0)
-            takes_value = false, no_sandbox = true;
-        else if (strcmp(name, "--help") == 0) {
+        if (strcmp(name, "--no-sandbox") == 0) {
+            cli.no_sandbox = true;
+            continue;
+        }
+        if (strcmp(name, "--help") == 0) {
             ar_usage(stdout);
             return 0;
-        } else {
+        }
+        const char **slot = ar_cli_value_slot(&cli, name);
+        if (!slot) {
             ar_log_err("unknown argument", a);
             ar_usage(stderr);
             return 2;
         }
-        if (takes_value) {
-            if (!v) {
-                ar_log_err("missing value for", name);
-                ar_usage(stderr);
-                return 2;
-            }
-            if (!eq)
-                i++; /* consume the separate value token */
+        if (!v) {
+            ar_log_err("missing value for", name);
+            ar_usage(stderr);
+            return 2;
         }
+        *slot = v;
+        if (!has_eq)
+            i++; /* consume the separate value token */
     }
 
-    if (verify_replay) {
+    if (cli.verify_replay) {
         /* Fail closed on mixed modes. */
-        if (seed_s || planes_s || pilot_red || pilot_blue || replay_out ||
-            no_sandbox) {
+        if (ar_cli_has_match_args(&cli)) {
             ar_log_err("--verify-replay does not combine with match args",
                        NULL);
             ar_usage(stderr);
             return 2;
         }
-        return ar_verify_replay(verify_replay, expected_replay_root);
+        return ar_verify_replay(cli.verify_replay, cli.expected_replay_root);
     }
 
-    if (expected_replay_root) {
+    if (cli.expected_replay_root) {
         ar_log_err("--expect-replay-root requires --verify-replay", NULL);
         ar_usage(stderr);
         return 2;
     }
 
-    if (!seed_s || !planes_s || !pilot_red || !pilot_blue) {
+    if (ar_cli_missing_match_args(&cli)) {
         ar_log_err("missing required argument(s)",
                    "--seed --planes-per-team --pilot-red --pilot-blue");
         ar_usage(stderr);
@@ -884,14 +999,14 @@ int main(int argc, char **argv)
     }
     uint64_t seed = 0;
     uint64_t planes = 0;
-    if (!ar_parse_u64(seed_s, &seed)) {
-        ar_log_err("bad --seed (want decimal u64)", seed_s);
+    if (!ar_parse_u64(cli.seed_s, &seed)) {
+        ar_log_err("bad --seed (want decimal u64)", cli.seed_s);
         return 2;
     }
-    if (!ar_parse_u64(planes_s, &planes) || planes < 1 || planes > 4) {
-        ar_log_err("bad --planes-per-team (want 1..4)", planes_s);
+    if (!ar_parse_planes(cli.planes_s, &planes)) {
+        ar_log_err("bad --planes-per-team (want 1..4)", cli.planes_s);
         return 2;
     }
-    return ar_run_match(seed, (unsigned)planes, pilot_red, pilot_blue,
-                        replay_out, !no_sandbox);
+    return ar_run_match(seed, (unsigned)planes, cli.pilot_red, cli.pilot_blue,
+                        cli.replay_out, !cli.no_sandbox);
 }
