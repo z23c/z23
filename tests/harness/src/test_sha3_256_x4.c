@@ -86,6 +86,242 @@ static double now_s(void)
     return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
+/* Report a section result: "OK" when clean, else the count. Returns 1 on failure. */
+static int x4_report_fails(int fails)
+{
+    if (fails == 0) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (%d)\n", fails);
+    return 1;
+}
+
+/* The parity passes run on the vector lane when the host has one, else scalar. */
+static void x4_select_parity_impl(bool have_vec)
+{
+    if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
+    else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
+}
+
+#if defined(__aarch64__)
+static int x4_check_neon_refusal(void)
+{
+    printf("sha3_256_x4: AUTO refuses the measured-slower NEON tier... ");
+    if (sha3_256_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR) {
+        printf("OK (scalar)\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+#endif
+
+static int x4_check_kat(bool have_vec)
+{
+    struct { const char *msg; size_t msglen; const char *h256; } kat[] = {
+        { "", 0, "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a" },
+        { "abc", 3, "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532" },
+        { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56,
+          "41c0dba2a9d6240849100376a8235e2c82e1b9998a999e21db32dd97496d3376" },
+    };
+    printf("sha3_256_x4: FIPS-202 KATs through batch path... ");
+    int kat_fail = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        if (pass == 1) {
+            if (!have_vec) break;
+            sha3_256_x4_select_impl(SHA3_IMPL_VEC);
+        } else {
+            sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
+        }
+        for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
+            uint8_t want[32];
+            hex2bin(kat[k].h256, want, 32);
+            const uint8_t *msgs[4] = {
+                (const uint8_t *)kat[k].msg, (const uint8_t *)kat[k].msg,
+                (const uint8_t *)kat[k].msg, (const uint8_t *)kat[k].msg
+            };
+            size_t lens[4] = { kat[k].msglen, kat[k].msglen,
+                               kat[k].msglen, kat[k].msglen };
+            uint8_t out[4][32];
+            sha3_256_x4(msgs, lens, out);
+            for (int i = 0; i < 4; ++i)
+                if (memcmp(out[i], want, 32) != 0) kat_fail++;
+        }
+    }
+    return x4_report_fails(kat_fail);
+}
+
+static int x4_check_equal_len_parity(bool have_vec)
+{
+    printf("sha3_256_x4: parity (4 equal-length lanes) 0..1100... ");
+    int diff_fail = 0;
+    uint8_t buf[4][1101];
+    for (size_t len = 0; len <= 1100; ++len) {
+        for (int i = 0; i < 4; ++i) rng_fill(buf[i], len);
+        const uint8_t *msgs[4] = { buf[0], buf[1], buf[2], buf[3] };
+        size_t lens[4] = { len, len, len, len };
+
+        uint8_t ref[4][32];
+        for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
+
+        x4_select_parity_impl(have_vec);
+        uint8_t got[4][32];
+        sha3_256_x4(msgs, lens, got);
+        for (int i = 0; i < 4; ++i)
+            if (memcmp(ref[i], got[i], 32) != 0) {
+                if (diff_fail < 3) printf("[len %zu lane %d] ", len, i);
+                diff_fail++;
+            }
+    }
+    return x4_report_fails(diff_fail);
+}
+
+static void x4_fill_divergent_lanes(uint8_t *buf[4], size_t lens[4], const uint8_t *msgs[4])
+{
+    for (int i = 0; i < 4; ++i) {
+        /* ~1 in 8 lanes empty; empties alternate NULL / valid ptr. */
+        if ((rng_next() & 7) == 0) {
+            lens[i] = 0;
+            msgs[i] = (rng_next() & 1) ? NULL : buf[i];
+        } else {
+            lens[i] = (size_t)(rng_next() % 1101);
+            rng_fill(buf[i], lens[i]);
+            msgs[i] = buf[i];
+        }
+    }
+}
+
+static int x4_divergent_trial_fails(uint8_t *buf[4], bool have_vec)
+{
+    size_t lens[4];
+    const uint8_t *msgs[4];
+    x4_fill_divergent_lanes(buf, lens, msgs);
+
+    uint8_t ref[4][32];
+    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
+
+    x4_select_parity_impl(have_vec);
+    uint8_t got[4][32];
+    sha3_256_x4(msgs, lens, got);
+    int diff_fail = 0;
+    for (int i = 0; i < 4; ++i)
+        if (memcmp(ref[i], got[i], 32) != 0) diff_fail++;
+    return diff_fail;
+}
+
+static int x4_check_divergent_parity(bool have_vec)
+{
+    printf("sha3_256_x4: parity (4 divergent lengths, empties, NULL) x60000... ");
+    int diff_fail = 0;
+    int alloc_fail = 0;
+    uint8_t *buf[4];
+    for (int i = 0; i < 4; ++i) buf[i] = (uint8_t *)malloc(1200);
+    if (!buf[0] || !buf[1] || !buf[2] || !buf[3]) {
+        printf("alloc FAIL\n");
+        alloc_fail = 1;
+    } else {
+        for (int trial = 0; trial < 60000; ++trial)
+            diff_fail += x4_divergent_trial_fails(buf, have_vec);
+        for (int i = 0; i < 4; ++i) free(buf[i]);
+    }
+    return alloc_fail + x4_report_fails(diff_fail);
+}
+
+static int x4_unaligned_fails(const uint8_t *base, int off, bool have_vec)
+{
+    int diff_fail = 0;
+    const uint8_t *msgs[4] = {
+        base + off, base + (off + 1) % 8,
+        base + (off + 3) % 8, base + (off + 7) % 8
+    };
+    for (size_t len = 130; len <= 142; ++len) {
+        /* Lanes straddle the 136B rate boundary at four lengths. */
+        size_t lens[4] = { len, len + 1, len + 2, len + 3 };
+        uint8_t ref[4][32], got[4][32];
+        for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
+
+        x4_select_parity_impl(have_vec);
+        sha3_256_x4(msgs, lens, got);
+        for (int i = 0; i < 4; ++i)
+            if (memcmp(ref[i], got[i], 32) != 0) diff_fail++;
+    }
+    return diff_fail;
+}
+
+static int x4_check_unaligned_parity(bool have_vec)
+{
+    printf("sha3_256_x4: parity (unaligned buffers, offsets 0..7) x8x16... ");
+    int diff_fail = 0;
+    int alloc_fail = 0;
+    uint8_t *base = (uint8_t *)malloc(4096 + 8);
+    if (!base) {
+        printf("alloc FAIL\n");
+        alloc_fail = 1;
+    } else {
+        rng_fill(base, 4096 + 8);
+        for (int off = 0; off < 8 && diff_fail == 0; ++off)
+            diff_fail += x4_unaligned_fails(base, off, have_vec);
+        free(base);
+    }
+    return alloc_fail + x4_report_fails(diff_fail);
+}
+
+static void x4_bench_one_size(size_t insz, size_t total_mb, const char *name,
+                              bool have_vec, const uint8_t *msgs[4])
+{
+    size_t groups = (total_mb << 20) / (insz * 4);
+    if (groups == 0) groups = 1;
+    size_t lens[4] = { insz, insz, insz, insz };
+    uint8_t out4[4][32], out1[32];
+
+    /* Reference: 4x scalar one-shot sha3_256 (the current consumer). */
+    for (int w = 0; w < 8; ++w)
+        for (int i = 0; i < 4; ++i) sha3_256(msgs[i], insz, out1);
+    double t0 = now_s();
+    for (size_t g = 0; g < groups; ++g)
+        for (int i = 0; i < 4; ++i) sha3_256(msgs[i], insz, out1);
+    double dt_ref = now_s() - t0;
+    double mb_ref = ((double)insz * 4.0 * (double)groups)
+                    / (1024.0*1024.0) / dt_ref;
+
+    /* Batch-of-4 (vector lane when present). */
+    x4_select_parity_impl(have_vec);
+    for (int w = 0; w < 8; ++w) sha3_256_x4(msgs, lens, out4);
+    t0 = now_s();
+    for (size_t g = 0; g < groups; ++g) sha3_256_x4(msgs, lens, out4);
+    double dt_x4 = now_s() - t0;
+    double mb_x4 = ((double)insz * 4.0 * (double)groups)
+                   / (1024.0*1024.0) / dt_x4;
+
+    printf("sha3_256_x4:   %-6s  4x-scalar %8.1f MB/s   batch-x4 %8.1f MB/s   %.2fx%s\n",
+           name, mb_ref, mb_x4, mb_x4 / mb_ref,
+           have_vec ? "" : " (no vector lane: scalar-vs-scalar)");
+}
+
+static int x4_run_benchmark(bool have_vec)
+{
+    static const size_t sizes[] = { 64, 136, 512, 4096, 65536 };
+    static const char  *names[] = { "64B", "136B", "512B", "4KB", "64KB" };
+    static const size_t total_mb[] = { 32, 32, 64, 128, 256 };
+    const size_t maxsz = 65536;
+    int failures = 0;
+    uint8_t *b0 = (uint8_t *)malloc(maxsz), *b1 = (uint8_t *)malloc(maxsz);
+    uint8_t *b2 = (uint8_t *)malloc(maxsz), *b3 = (uint8_t *)malloc(maxsz);
+    if (!b0 || !b1 || !b2 || !b3) {
+        printf("sha3_256_x4: bench alloc failed\n"); failures++;
+    } else {
+        rng_fill(b0, maxsz); rng_fill(b1, maxsz);
+        rng_fill(b2, maxsz); rng_fill(b3, maxsz);
+        printf("sha3_256_x4: --- benchmark (4 independent streams) ---\n");
+        const uint8_t *msgs[4] = { b0, b1, b2, b3 };
+        for (int s = 0; s < 5; ++s)
+            x4_bench_one_size(sizes[s], total_mb[s], names[s], have_vec, msgs);
+    }
+    free(b0); free(b1); free(b2); free(b3);
+    return failures;
+}
+
 int test_sha3_256_x4(void)
 {
     int failures = 0;
@@ -95,199 +331,23 @@ int test_sha3_256_x4(void)
            have_vec ? "YES" : "no (parity runs scalar-vs-scalar)");
 
 #if defined(__aarch64__)
-    printf("sha3_256_x4: AUTO refuses the measured-slower NEON tier... ");
-    if (sha3_256_x4_select_impl(SHA3_IMPL_AUTO) == SHA3_IMPL_SCALAR)
-        printf("OK (scalar)\n");
-    else {
-        printf("FAIL\n");
-        failures++;
-    }
+    failures += x4_check_neon_refusal();
 #endif
 
     /* ── 1. FIPS-202 known-answer vectors through the batch path ─────── */
-    struct { const char *msg; size_t msglen; const char *h256; } kat[] = {
-        { "", 0, "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a" },
-        { "abc", 3, "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532" },
-        { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56,
-          "41c0dba2a9d6240849100376a8235e2c82e1b9998a999e21db32dd97496d3376" },
-    };
-    printf("sha3_256_x4: FIPS-202 KATs through batch path... ");
-    {
-        int kat_fail = 0;
-        for (int pass = 0; pass < 2; ++pass) {
-            if (pass == 1) {
-                if (!have_vec) break;
-                sha3_256_x4_select_impl(SHA3_IMPL_VEC);
-            } else {
-                sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
-            }
-            for (unsigned k = 0; k < sizeof(kat)/sizeof(kat[0]); ++k) {
-                uint8_t want[32];
-                hex2bin(kat[k].h256, want, 32);
-                const uint8_t *msgs[4] = {
-                    (const uint8_t *)kat[k].msg, (const uint8_t *)kat[k].msg,
-                    (const uint8_t *)kat[k].msg, (const uint8_t *)kat[k].msg
-                };
-                size_t lens[4] = { kat[k].msglen, kat[k].msglen,
-                                   kat[k].msglen, kat[k].msglen };
-                uint8_t out[4][32];
-                sha3_256_x4(msgs, lens, out);
-                for (int i = 0; i < 4; ++i)
-                    if (memcmp(out[i], want, 32) != 0) kat_fail++;
-            }
-        }
-        if (kat_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", kat_fail); failures++; }
-    }
+    failures += x4_check_kat(have_vec);
 
     /* ── 2. Parity: all four lanes share every length 0..1100 ───────── */
-    printf("sha3_256_x4: parity (4 equal-length lanes) 0..1100... ");
-    {
-        int diff_fail = 0;
-        uint8_t buf[4][1101];
-        for (size_t len = 0; len <= 1100; ++len) {
-            for (int i = 0; i < 4; ++i) rng_fill(buf[i], len);
-            const uint8_t *msgs[4] = { buf[0], buf[1], buf[2], buf[3] };
-            size_t lens[4] = { len, len, len, len };
-
-            uint8_t ref[4][32];
-            for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
-
-            if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
-            else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
-            uint8_t got[4][32];
-            sha3_256_x4(msgs, lens, got);
-            for (int i = 0; i < 4; ++i)
-                if (memcmp(ref[i], got[i], 32) != 0) {
-                    if (diff_fail < 3) printf("[len %zu lane %d] ", len, i);
-                    diff_fail++;
-                }
-        }
-        if (diff_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", diff_fail); failures++; }
-    }
+    failures += x4_check_equal_len_parity(have_vec);
 
     /* ── 3. Parity: all four lanes at DIFFERENT lengths + empties ───── */
-    printf("sha3_256_x4: parity (4 divergent lengths, empties, NULL) x60000... ");
-    {
-        int diff_fail = 0;
-        uint8_t *buf[4];
-        for (int i = 0; i < 4; ++i) buf[i] = (uint8_t *)malloc(1200);
-        if (!buf[0] || !buf[1] || !buf[2] || !buf[3]) {
-            printf("alloc FAIL\n"); failures++;
-        } else {
-            for (int trial = 0; trial < 60000; ++trial) {
-                size_t lens[4];
-                const uint8_t *msgs[4];
-                for (int i = 0; i < 4; ++i) {
-                    /* ~1 in 8 lanes empty; empties alternate NULL / valid ptr. */
-                    if ((rng_next() & 7) == 0) {
-                        lens[i] = 0;
-                        msgs[i] = (rng_next() & 1) ? NULL : buf[i];
-                    } else {
-                        lens[i] = (size_t)(rng_next() % 1101);
-                        rng_fill(buf[i], lens[i]);
-                        msgs[i] = buf[i];
-                    }
-                }
-                uint8_t ref[4][32];
-                for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
-
-                if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
-                else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
-                uint8_t got[4][32];
-                sha3_256_x4(msgs, lens, got);
-                for (int i = 0; i < 4; ++i)
-                    if (memcmp(ref[i], got[i], 32) != 0) diff_fail++;
-            }
-            for (int i = 0; i < 4; ++i) free(buf[i]);
-        }
-        if (diff_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", diff_fail); failures++; }
-    }
+    failures += x4_check_divergent_parity(have_vec);
 
     /* ── 4. Parity: unaligned lane buffers, divergent lengths ────────── */
-    printf("sha3_256_x4: parity (unaligned buffers, offsets 0..7) x8x16... ");
-    {
-        int diff_fail = 0;
-        uint8_t *base = (uint8_t *)malloc(4096 + 8);
-        if (!base) {
-            printf("alloc FAIL\n"); failures++;
-        } else {
-            rng_fill(base, 4096 + 8);
-            for (int off = 0; off < 8 && diff_fail == 0; ++off) {
-                const uint8_t *msgs[4] = {
-                    base + off, base + (off + 1) % 8,
-                    base + (off + 3) % 8, base + (off + 7) % 8
-                };
-                for (size_t len = 130; len <= 142; ++len) {
-                    /* Lanes straddle the 136B rate boundary at four lengths. */
-                    size_t lens[4] = { len, len + 1, len + 2, len + 3 };
-                    uint8_t ref[4][32], got[4][32];
-                    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
-
-                    if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
-                    else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
-                    sha3_256_x4(msgs, lens, got);
-                    for (int i = 0; i < 4; ++i)
-                        if (memcmp(ref[i], got[i], 32) != 0) diff_fail++;
-                }
-            }
-            free(base);
-        }
-        if (diff_fail == 0) printf("OK\n");
-        else { printf("FAIL (%d)\n", diff_fail); failures++; }
-    }
+    failures += x4_check_unaligned_parity(have_vec);
 
     /* ── 5. Honest benchmark: batch-of-4 vs 4x scalar sha3_256 ──────── */
-    {
-        static const size_t sizes[] = { 64, 136, 512, 4096, 65536 };
-        static const char  *names[] = { "64B", "136B", "512B", "4KB", "64KB" };
-        static const size_t total_mb[] = { 32, 32, 64, 128, 256 };
-        const size_t maxsz = 65536;
-        uint8_t *b0 = (uint8_t *)malloc(maxsz), *b1 = (uint8_t *)malloc(maxsz);
-        uint8_t *b2 = (uint8_t *)malloc(maxsz), *b3 = (uint8_t *)malloc(maxsz);
-        if (!b0 || !b1 || !b2 || !b3) {
-            printf("sha3_256_x4: bench alloc failed\n"); failures++;
-        } else {
-            rng_fill(b0, maxsz); rng_fill(b1, maxsz);
-            rng_fill(b2, maxsz); rng_fill(b3, maxsz);
-            printf("sha3_256_x4: --- benchmark (4 independent streams) ---\n");
-            for (int s = 0; s < 5; ++s) {
-                size_t insz = sizes[s];
-                size_t groups = (total_mb[s] << 20) / (insz * 4);
-                if (groups == 0) groups = 1;
-                const uint8_t *msgs[4] = { b0, b1, b2, b3 };
-                size_t lens[4] = { insz, insz, insz, insz };
-                uint8_t out4[4][32], out1[32];
-
-                /* Reference: 4x scalar one-shot sha3_256 (the current consumer). */
-                for (int w = 0; w < 8; ++w)
-                    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], insz, out1);
-                double t0 = now_s();
-                for (size_t g = 0; g < groups; ++g)
-                    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], insz, out1);
-                double dt_ref = now_s() - t0;
-                double mb_ref = ((double)insz * 4.0 * (double)groups)
-                                / (1024.0*1024.0) / dt_ref;
-
-                /* Batch-of-4 (vector lane when present). */
-                if (have_vec) sha3_256_x4_select_impl(SHA3_IMPL_VEC);
-                else          sha3_256_x4_select_impl(SHA3_IMPL_SCALAR);
-                for (int w = 0; w < 8; ++w) sha3_256_x4(msgs, lens, out4);
-                t0 = now_s();
-                for (size_t g = 0; g < groups; ++g) sha3_256_x4(msgs, lens, out4);
-                double dt_x4 = now_s() - t0;
-                double mb_x4 = ((double)insz * 4.0 * (double)groups)
-                               / (1024.0*1024.0) / dt_x4;
-
-                printf("sha3_256_x4:   %-6s  4x-scalar %8.1f MB/s   batch-x4 %8.1f MB/s   %.2fx%s\n",
-                       names[s], mb_ref, mb_x4, mb_x4 / mb_ref,
-                       have_vec ? "" : " (no vector lane: scalar-vs-scalar)");
-            }
-        }
-        free(b0); free(b1); free(b2); free(b3);
-    }
+    failures += x4_run_benchmark(have_vec);
 
     /* Restore shipped defaults for any subsequent in-process hashing. */
     sha3_256_x4_select_impl(SHA3_IMPL_AUTO);

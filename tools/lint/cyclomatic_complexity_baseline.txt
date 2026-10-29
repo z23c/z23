@@ -648,7 +648,6 @@ tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
 tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
-tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
 tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
