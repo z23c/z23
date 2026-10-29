@@ -607,7 +607,6 @@ tests/harness/src/test_blog.c:test_blog_publication_slice:24
 tests/harness/src/test_build_fabric.c:test_bf_confined_worker:28
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
 tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
-tests/harness/src/test_chain_segment.c:test_chain_segment:45
 tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
 tests/harness/src/test_code_have.c:test_code_have:46
 tests/harness/src/test_code_inventory.c:ci_semantic_known_answers:25

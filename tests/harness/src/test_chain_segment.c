@@ -97,15 +97,11 @@ static int cs_index_bounds(void)
     return failures;
 }
 
-int test_chain_segment(void);
-int test_chain_segment(void)
+/* ── Round-trip: seal [1000,1032) then read every block back ──────── */
+static int cs_roundtrip_read_back(void)
 {
-    printf("\n=== chain_segment tests ===\n");
     int failures = 0;
     char err[256];
-    failures += cs_index_bounds();
-
-    /* ── Round-trip: seal [1000,1032) then read every block back ──────── */
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "roundtrip");
@@ -150,8 +146,14 @@ int test_chain_segment(void)
         chain_segment_close(seg);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Manifest root stability: identical content -> identical root ── */
+/* ── Manifest root stability: identical content -> identical root ── */
+static int cs_manifest_root_stability(void)
+{
+    int failures = 0;
+    char err[256];
     uint8_t root_a[32] = {0};
     {
         char da[256], db[256];
@@ -178,8 +180,14 @@ int test_chain_segment(void)
         test_rm_rf_recursive(da);
         test_rm_rf_recursive(db);
     }
+    return failures;
+}
 
-    /* ── Tamper A: flip one byte in the segment -> open fails ────────── */
+/* ── Tamper A: flip one byte in the segment -> open fails ────────── */
+static int cs_tamper_whole_segment_digest(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "tamperA");
@@ -213,9 +221,47 @@ int test_chain_segment(void)
         chain_segment_close(seg);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Tamper B: corrupt a block body but re-fix the segment trailer so
-     * open passes; the per-block digest must still catch it on read. ── */
+/* Read whole file, flip a data byte, recompute trailer digest. */
+static int cs_corrupt_block_refit_trailer(const char *path)
+{
+    int failures = 0;
+    FILE *f = fopen(path, "rb");
+    long sz = 0;
+    uint8_t *buf = NULL;
+    if (f) {
+        fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+        buf = malloc((size_t)sz);
+        if (buf && fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); buf = NULL; }
+        fclose(f);
+    }
+    bool patched = false;
+    if (buf && sz > 0) {
+        uint32_t count = 100; /* header offset 16 holds block_count */
+        (void)count;
+        size_t data_off = 32 + 4u * 48u; /* header + index for count=4 */
+        buf[data_off] ^= 0xff;            /* corrupt the first block's bytes */
+        size_t trailer_off = (size_t)sz - 32;
+        sha3_256(buf, trailer_off, buf + trailer_off);
+        FILE *w = fopen(path, "wb");
+        if (w) {
+            patched = fwrite(buf, 1, (size_t)sz, w) == (size_t)sz;
+            fclose(w);
+        }
+    }
+    free(buf);
+    CS_CHECK("tamperB patch", patched);
+    return failures;
+}
+
+/* ── Tamper B: corrupt a block body but re-fix the segment trailer so
+ * open passes; the per-block digest must still catch it on read. ── */
+static int cs_tamper_block_body_digest(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "tamperB");
@@ -226,32 +272,7 @@ int test_chain_segment(void)
         snprintf(path, sizeof(path), "%s/seg-100-4.dat", dir);
         chmod(path, 0644);
 
-        /* Read whole file, flip a data byte, recompute trailer digest. */
-        FILE *f = fopen(path, "rb");
-        long sz = 0;
-        uint8_t *buf = NULL;
-        if (f) {
-            fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
-            buf = malloc((size_t)sz);
-            if (buf && fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); buf = NULL; }
-            fclose(f);
-        }
-        bool patched = false;
-        if (buf && sz > 0) {
-            uint32_t count = 100; /* header offset 16 holds block_count */
-            (void)count;
-            size_t data_off = 32 + 4u * 48u; /* header + index for count=4 */
-            buf[data_off] ^= 0xff;            /* corrupt the first block's bytes */
-            size_t trailer_off = (size_t)sz - 32;
-            sha3_256(buf, trailer_off, buf + trailer_off);
-            FILE *w = fopen(path, "wb");
-            if (w) {
-                patched = fwrite(buf, 1, (size_t)sz, w) == (size_t)sz;
-                fclose(w);
-            }
-        }
-        free(buf);
-        CS_CHECK("tamperB patch", patched);
+        failures += cs_corrupt_block_refit_trailer(path);
 
         struct chain_segment *seg = NULL;
         enum cseg_status st = chain_segment_open(path, &seg, err, sizeof(err));
@@ -276,8 +297,14 @@ int test_chain_segment(void)
         chain_segment_close(seg);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Missing body -> whole seal fails closed, no file left ────────── */
+/* ── Missing body -> whole seal fails closed, no file left ────────── */
+static int cs_missing_body_fails_closed(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "missing");
@@ -290,8 +317,14 @@ int test_chain_segment(void)
                  !file_exists(dir, "seg-200-10.dat"));
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Empty range refused ──────────────────────────────────────────── */
+/* ── Empty range refused ──────────────────────────────────────────── */
+static int cs_empty_range_refused(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "empty");
@@ -301,9 +334,15 @@ int test_chain_segment(void)
         CS_CHECK("empty range -> empty_range", st == CSEG_ERR_EMPTY_RANGE);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Two disjoint segments in one store; full verify catches a later
-     * tamper vs the manifest. ── */
+/* ── Two disjoint segments in one store; full verify catches a later
+ * tamper vs the manifest. ── */
+static int cs_two_segment_full_verify(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "twoseg");
@@ -332,8 +371,14 @@ int test_chain_segment(void)
 
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Empty store: no manifest is not an error ─────────────────────── */
+/* ── Empty store: no manifest is not an error ─────────────────────── */
+static int cs_empty_store_stat(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "emptystore");
@@ -343,10 +388,42 @@ int test_chain_segment(void)
                                    !stt.have_range);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Resident store reader (the fold substrate) ─────────────────────
-     * covers()/sealed_max/get_block byte-identity, plus verify_index catching
-     * a per-segment tamper. This is the API block_parse_cache reads through. */
+/* verify_index passes clean on both, then a byte tamper on segment 1's
+ * file makes its verify_index fail with a named typed error. */
+static int cs_store_verify_index_after_tamper(struct chain_segment_store *store,
+                                              const char *dir)
+{
+    int failures = 0;
+    char err[256];
+    CS_CHECK("verify_index clean seg0",
+             store && chain_segment_store_verify_index(store, 0, err, sizeof(err)) == CSEG_OK);
+
+    char tp[512];
+    snprintf(tp, sizeof(tp), "%s/seg-2000-10.dat", dir);
+    chmod(tp, 0644);
+    FILE *tf = fopen(tp, "r+b");
+    if (tf) { fseek(tf, 32 + 10 * 48 + 2, SEEK_SET); int c = fgetc(tf);
+              fseek(tf, 32 + 10 * 48 + 2, SEEK_SET); fputc(c ^ 0xff, tf);
+              fclose(tf); }
+    enum cseg_status vst = store
+        ? chain_segment_store_verify_index(store, 1, err, sizeof(err))
+        : CSEG_OK;
+    CS_CHECK("verify_index catches tamper",
+             vst == CSEG_ERR_SEGMENT_DIGEST || vst == CSEG_ERR_FORMAT ||
+             vst == CSEG_ERR_BLOCK_DIGEST);
+    return failures;
+}
+
+/* ── Resident store reader (the fold substrate) ─────────────────────
+ * covers()/sealed_max/get_block byte-identity, plus verify_index catching
+ * a per-segment tamper. This is the API block_parse_cache reads through. */
+static int cs_store_reader_roundtrip(void)
+{
+    int failures = 0;
+    char err[256];
     {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "chain_segment", "store");
@@ -389,30 +466,19 @@ int test_chain_segment(void)
         CS_CHECK("uncovered height -> not_found", oob == CSEG_ERR_NOT_FOUND);
         free(nb);
 
-        /* verify_index passes clean on both, then a byte tamper on segment 1's
-         * file makes its verify_index fail with a named typed error. */
-        CS_CHECK("verify_index clean seg0",
-                 store && chain_segment_store_verify_index(store, 0, err, sizeof(err)) == CSEG_OK);
-
-        char tp[512];
-        snprintf(tp, sizeof(tp), "%s/seg-2000-10.dat", dir);
-        chmod(tp, 0644);
-        FILE *tf = fopen(tp, "r+b");
-        if (tf) { fseek(tf, 32 + 10 * 48 + 2, SEEK_SET); int c = fgetc(tf);
-                  fseek(tf, 32 + 10 * 48 + 2, SEEK_SET); fputc(c ^ 0xff, tf);
-                  fclose(tf); }
-        enum cseg_status vst = store
-            ? chain_segment_store_verify_index(store, 1, err, sizeof(err))
-            : CSEG_OK;
-        CS_CHECK("verify_index catches tamper",
-                 vst == CSEG_ERR_SEGMENT_DIGEST || vst == CSEG_ERR_FORMAT ||
-                 vst == CSEG_ERR_BLOCK_DIGEST);
+        failures += cs_store_verify_index_after_tamper(store, dir);
 
         chain_segment_store_close(store);
         test_rm_rf_recursive(dir);
     }
+    return failures;
+}
 
-    /* ── Store over an absent dir: empty, covers nothing (default node) ─── */
+/* ── Store over an absent dir: empty, covers nothing (default node) ─── */
+static int cs_absent_dir_store_empty(void)
+{
+    int failures = 0;
+    char err[256];
     {
         struct chain_segment_store *store = NULL;
         enum cseg_status st = chain_segment_store_open(
@@ -423,7 +489,25 @@ int test_chain_segment(void)
                  !chain_segment_store_covers(store, 0));
         chain_segment_store_close(store);
     }
+    return failures;
+}
 
+int test_chain_segment(void);
+int test_chain_segment(void)
+{
+    printf("\n=== chain_segment tests ===\n");
+    int failures = 0;
+    failures += cs_index_bounds();
+    failures += cs_roundtrip_read_back();
+    failures += cs_manifest_root_stability();
+    failures += cs_tamper_whole_segment_digest();
+    failures += cs_tamper_block_body_digest();
+    failures += cs_missing_body_fails_closed();
+    failures += cs_empty_range_refused();
+    failures += cs_two_segment_full_verify();
+    failures += cs_empty_store_stat();
+    failures += cs_store_reader_roundtrip();
+    failures += cs_absent_dir_store_empty();
     printf("chain_segment: %d failures\n", failures);
     return failures;
 }
