@@ -316,6 +316,51 @@ static int payment_test_check_chunk_pricing(const struct file_offer *offer)
     return failures;
 }
 
+static int payment_test_check_auth_error_strings(void)
+{
+    static const struct {
+        enum file_payment_auth_error error;
+        const char *expect;
+    } rows[] = {
+        {FILE_PAYMENT_AUTH_OK, "ok"},
+        {FILE_PAYMENT_AUTH_ERR_NULL, "null-argument"},
+        {FILE_PAYMENT_AUTH_ERR_VERSION, "schema-version"},
+        {FILE_PAYMENT_AUTH_ERR_WIRE_SIZE, "wire-size"},
+        {FILE_PAYMENT_AUTH_ERR_WIRE_MAGIC, "wire-magic"},
+        {FILE_PAYMENT_AUTH_ERR_NETWORK, "network-genesis-zero"},
+        {FILE_PAYMENT_AUTH_ERR_OFFER_ID, "offer-id-zero"},
+        {FILE_PAYMENT_AUTH_ERR_TXID, "txid-zero"},
+        {FILE_PAYMENT_AUTH_ERR_RANGE, "chunk-range-invalid"},
+        {FILE_PAYMENT_AUTH_ERR_AMOUNT, "amount-invalid"},
+        {FILE_PAYMENT_AUTH_ERR_BUYER_KEY, "buyer-key-zero"},
+        {FILE_PAYMENT_AUTH_ERR_SIGNATURE, "signature-invalid"},
+        {FILE_PAYMENT_AUTH_ERR_KEY_MISMATCH, "buyer-key-mismatch"},
+        {FILE_PAYMENT_AUTH_ERR_CLAIM_ID, "claim-id-mismatch"},
+        {FILE_PAYMENT_AUTH_ERR_NETWORK_MISMATCH, "network-mismatch"},
+        {FILE_PAYMENT_AUTH_ERR_OFFER_MISMATCH, "offer-mismatch"},
+        {FILE_PAYMENT_AUTH_ERR_MEMO, "memo-mismatch"},
+    };
+    int failures = 0;
+    int mismatches = 0;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        const char *got = file_payment_auth_error_string(rows[i].error);
+        if (!got || strcmp(got, rows[i].expect) != 0) {
+            printf("file_market payment: auth error row %zu... FAIL\n", i);
+            mismatches++;
+        }
+    }
+    PAYMENT_CHECK("every auth error enum value maps to its exact string",
+                  mismatches == 0);
+    const char *below = file_payment_auth_error_string(
+        (enum file_payment_auth_error)17);
+    const char *negative = file_payment_auth_error_string(
+        (enum file_payment_auth_error)-1);
+    PAYMENT_CHECK("out-of-range auth error values fall back to unknown",
+                  below && strcmp(below, "unknown") == 0 &&
+                  negative && strcmp(negative, "unknown") == 0);
+    return failures;
+}
+
 static int payment_test_check_claim_codec(const struct file_payment *payment,
                                           const struct file_offer *offer)
 {
@@ -680,6 +725,7 @@ int file_market_payment_tests(void)
         return failures;
 
     failures += payment_test_check_chunk_pricing(&offer);
+    failures += payment_test_check_auth_error_strings();
     failures += payment_test_check_claim_codec(&payment, &offer);
 
     char dir[256], dbpath[512];
