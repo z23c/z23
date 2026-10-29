@@ -851,7 +851,7 @@ enum coin_backfill_scan_verdict coin_backfill_scan_step(
             return COIN_SCAN_CLEAN;
         }
         default:
-            break;
+            return COIN_SCAN_GAP; /* raw-return-ok:unreachable, every action is handled above */
         }
     }
     return run.verdict;
