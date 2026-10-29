@@ -637,14 +637,6 @@ tests/harness/src/test_zcode_package_dev.c:zpd_test_project_inspect:34
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start_license_lifecycle:18
-tests/harness/src/test_zcode_swarm_net.c:zwn_author_storage_ack:18
-tests/harness/src/test_zcode_swarm_net.c:zwn_discover_transport:49
-tests/harness/src/test_zcode_swarm_net.c:zwn_fixture_abort_reacquire:18
-tests/harness/src/test_zcode_swarm_net.c:zwn_focus_wire_transfer:23
-tests/harness/src/test_zcode_swarm_net.c:zwn_frame:20
-tests/harness/src/test_zcode_swarm_net.c:zwn_read_package_file:20
-tests/harness/src/test_zcode_swarm_net.c:zwn_t_redundant_publish_disappear:26
-tests/harness/src/test_zcode_swarm_net.c:zwn_test_golden:36
 tools/acme/acme_jws.c:acme_es256_sign:16
 tools/acme/acme_jws.c:acme_jws_body:16
 tools/acme/acme_jws.c:acme_jws_protected_header:19

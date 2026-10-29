@@ -1061,57 +1061,57 @@ static bool zwn_dht_drive_record_query(
     return false;
 }
 
-static bool zwn_discover_transport(
+static bool zwn_discover_packages_pinned(
     const struct zwn_node *publisher, const struct zwn_node *mirror,
-    const struct zwn_node *consumer, const char *namespace_name,
-    const uint8_t semantic_root[32],
-    const uint8_t expected_transport_root[32], uint8_t transport_root[32],
-    struct vcs_zcode_dht_record *provider_record_out, uint64_t now)
+    const uint8_t expected_transport_root[32])
 {
-    if (!namespace_name || now < 2)
-        return false;
     struct vcs_package_store_status publisher_status, mirror_status;
-    if (!vcs_package_store_package_status(
-            publisher->store, expected_transport_root, &publisher_status) ||
-        !vcs_package_store_package_status(
-            mirror->store, expected_transport_root, &mirror_status) ||
-        !publisher_status.complete || !publisher_status.pinned ||
-        !mirror_status.complete || !mirror_status.pinned)
-        return false;
-    char publisher_dht_dir[1200], consumer_dht_dir[1200];
-    int publisher_dir_len = snprintf(
-        publisher_dht_dir, sizeof(publisher_dht_dir), "%s/dht-%" PRIu64,
-        publisher->datadir, now);
-    int consumer_dir_len = snprintf(
-        consumer_dht_dir, sizeof(consumer_dht_dir), "%s/dht-%" PRIu64,
-        consumer->datadir, now);
-    if (publisher_dir_len <= 0 ||
-        (size_t)publisher_dir_len >= sizeof(publisher_dht_dir) ||
-        consumer_dir_len <= 0 ||
-        (size_t)consumer_dir_len >= sizeof(consumer_dht_dir) ||
-        (mkdir(publisher_dht_dir, 0700) != 0 && errno != EEXIST) ||
-        (mkdir(consumer_dht_dir, 0700) != 0 && errno != EEXIST))
-        return false;
-    uint8_t genesis[32], publisher_noise[32], consumer_noise[32];
-    uint8_t transcript[32];
-    memset(genesis, 0x71, sizeof(genesis));
-    memset(publisher_noise, 0x72, sizeof(publisher_noise));
-    memset(consumer_noise, 0x73, sizeof(consumer_noise));
-    memset(transcript, 0x74, sizeof(transcript));
-    if (!zwn_dht_identity(
-            publisher_dht_dir, 0x75, genesis, publisher_noise) ||
-        !zwn_dht_identity(
-            consumer_dht_dir, 0x76, genesis, consumer_noise))
-        return false;
+    return vcs_package_store_package_status(
+               publisher->store, expected_transport_root,
+               &publisher_status) &&
+           vcs_package_store_package_status(
+               mirror->store, expected_transport_root, &mirror_status) &&
+           publisher_status.complete && publisher_status.pinned &&
+           mirror_status.complete && mirror_status.pinned;
+}
 
-    struct vcs_zcode_dht_service *publisher_dht =
-        zwn_dht_service(publisher_dht_dir, genesis, publisher_noise);
-    struct vcs_zcode_dht_service *consumer_dht =
-        zwn_dht_service(consumer_dht_dir, genesis, consumer_noise);
-    const char *stage = "service-create";
-    bool ok = publisher_dht && consumer_dht;
-    if (!ok)
-        goto out;
+static bool zwn_discover_mkdir_ok(const char *dir)
+{
+    return mkdir(dir, 0700) == 0 || errno == EEXIST;
+}
+
+/* Both directory paths are formatted before either directory is created. */
+static bool zwn_discover_dht_dirs(
+    const struct zwn_node *publisher, const struct zwn_node *consumer,
+    uint64_t now, char *publisher_dir, size_t publisher_cap,
+    char *consumer_dir, size_t consumer_cap)
+{
+    int publisher_len = snprintf(publisher_dir, publisher_cap,
+                                 "%s/dht-%" PRIu64, publisher->datadir, now);
+    int consumer_len = snprintf(consumer_dir, consumer_cap,
+                                "%s/dht-%" PRIu64, consumer->datadir, now);
+    if (publisher_len <= 0 || (size_t)publisher_len >= publisher_cap ||
+        consumer_len <= 0 || (size_t)consumer_len >= consumer_cap)
+        return false;
+    return zwn_discover_mkdir_ok(publisher_dir) &&
+           zwn_discover_mkdir_ok(consumer_dir);
+}
+
+static bool zwn_discover_identities(
+    const char *publisher_dir, const char *consumer_dir,
+    uint8_t genesis[32], uint8_t publisher_noise[32],
+    uint8_t consumer_noise[32])
+{
+    return zwn_dht_identity(publisher_dir, 0x75, genesis, publisher_noise) &&
+           zwn_dht_identity(consumer_dir, 0x76, genesis, consumer_noise);
+}
+
+static bool zwn_discover_open_sessions(
+    struct vcs_zcode_dht_service *publisher_dht,
+    struct vcs_zcode_dht_service *consumer_dht,
+    const uint8_t publisher_noise[32], const uint8_t consumer_noise[32],
+    const uint8_t transcript[32], uint64_t now)
+{
     struct vcs_zcode_dht_session publisher_session = {
         .established = true,
         .generation = 1,
@@ -1123,15 +1123,68 @@ static bool zwn_discover_transport(
     memcpy(consumer_session.remote_static, publisher_noise, 32);
     memcpy(publisher_session.transcript_hash, transcript, 32);
     memcpy(consumer_session.transcript_hash, transcript, 32);
-    stage = "session-open";
-    ok = vcs_zcode_dht_service_session_open(
-             publisher_dht, 2, &publisher_session, zwn_dht_time(now - 1)) &&
-         vcs_zcode_dht_service_session_open(
-             consumer_dht, 1, &consumer_session, zwn_dht_time(now - 1)) &&
-         zwn_dht_drive_pair(publisher_dht, consumer_dht, now);
-    if (!ok)
-        goto out;
+    return vcs_zcode_dht_service_session_open(
+               publisher_dht, 2, &publisher_session,
+               zwn_dht_time(now - 1)) &&
+           vcs_zcode_dht_service_session_open(
+               consumer_dht, 1, &consumer_session, zwn_dht_time(now - 1)) &&
+           zwn_dht_drive_pair(publisher_dht, consumer_dht, now);
+}
 
+static bool zwn_discover_publish(
+    struct vcs_zcode_dht_service *dht,
+    struct vcs_zcode_dht_publish_spec *spec, uint8_t plan_token[32],
+    uint64_t at, struct vcs_zcode_dht_record *record)
+{
+    return vcs_zcode_dht_service_record_publish_plan(
+               dht, spec, plan_token, record, NULL) &&
+           vcs_zcode_dht_service_record_publish_commit(
+               dht, spec, plan_token, zwn_dht_time(at), record, NULL) ==
+               VCS_ZCODE_DHT_RECORD_STORE_ADDED;
+}
+
+/* One query round: begin on the consumer, then drive it to a result. The
+ * stage names are reported through *stage as the original code did. */
+static bool zwn_discover_query_run(
+    struct vcs_zcode_dht_service *publisher_dht,
+    struct vcs_zcode_dht_service *consumer_dht,
+    const struct vcs_zcode_dht_record_selector *selector, uint64_t at,
+    uint64_t *operation, struct vcs_zcode_dht_record_operation_result *result,
+    const char **stage, const char *begin_stage, const char *drive_stage)
+{
+    *operation = 0;
+    *stage = begin_stage;
+    bool ok = vcs_zcode_dht_service_record_query_begin(
+        consumer_dht, 1, selector, zwn_dht_time(at), operation);
+    memset(result, 0, sizeof(*result));
+    if (ok) {
+        *stage = drive_stage;
+        ok = zwn_dht_drive_record_query(
+            publisher_dht, consumer_dht, *operation, at, result);
+    }
+    return ok;
+}
+
+static bool zwn_discover_pointer_match(
+    const struct vcs_zcode_dht_record_operation_result *result,
+    const uint8_t semantic_root[32],
+    const uint8_t expected_transport_root[32])
+{
+    return result->state == VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE &&
+           result->record_count == 1 &&
+           result->records[0].kind == VCS_ZCODE_DHT_RECORD_POINTER &&
+           memcmp(result->records[0].semantic_root, semantic_root, 32) == 0 &&
+           memcmp(result->records[0].transport_root,
+                  expected_transport_root, 32) == 0;
+}
+
+static bool zwn_discover_pointer_phase(
+    struct vcs_zcode_dht_service *publisher_dht,
+    struct vcs_zcode_dht_service *consumer_dht, const char *namespace_name,
+    const uint8_t semantic_root[32],
+    const uint8_t expected_transport_root[32], uint64_t now,
+    uint8_t plan_token[32], uint8_t transport_root[32], const char **stage)
+{
     struct vcs_zcode_dht_publish_spec pointer_spec;
     memset(&pointer_spec, 0, sizeof(pointer_spec));
     pointer_spec.kind = VCS_ZCODE_DHT_RECORD_POINTER;
@@ -1143,16 +1196,11 @@ static bool zwn_discover_transport(
     pointer_spec.sequence = 1;
     pointer_spec.not_before = 1000;
     pointer_spec.expiry = 2000;
-    uint8_t plan_token[32];
     struct vcs_zcode_dht_record record;
-    stage = "publish";
-    ok = vcs_zcode_dht_service_record_publish_plan(
-             publisher_dht, &pointer_spec, plan_token, &record, NULL) &&
-         vcs_zcode_dht_service_record_publish_commit(
-             publisher_dht, &pointer_spec, plan_token, zwn_dht_time(now),
-             &record, NULL) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
-    if (!ok)
-        goto out;
+    *stage = "publish";
+    if (!zwn_discover_publish(publisher_dht, &pointer_spec, plan_token, now,
+                              &record))
+        return false;
 
     struct vcs_zcode_dht_record_selector selector = {
         .kind = VCS_ZCODE_DHT_RECORD_POINTER,
@@ -1161,37 +1209,45 @@ static bool zwn_discover_transport(
                    "%s", namespace_name);
     memcpy(selector.root, semantic_root, 32);
     struct vcs_zcode_dht_record empty_cache[1];
-    stage = "empty-local-query";
+    *stage = "empty-local-query";
     if (vcs_zcode_dht_service_record_local_query(
-            consumer_dht, now, &selector, empty_cache, 1) != 0) {
-        ok = false;
-        goto out;
-    }
+            consumer_dht, now, &selector, empty_cache, 1) != 0)
+        return false;
     uint64_t operation = 0;
-    stage = "query-begin";
-    ok = vcs_zcode_dht_service_record_query_begin(
-        consumer_dht, 1, &selector, zwn_dht_time(now), &operation);
     struct vcs_zcode_dht_record_operation_result result;
-    memset(&result, 0, sizeof(result));
-    if (ok) {
-        stage = "query-drive";
-        ok = zwn_dht_drive_record_query(
-            publisher_dht, consumer_dht, operation, now, &result);
-    }
-    if (!ok)
-        goto out;
-    stage = "query-result";
-    ok = result.state == VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE &&
-         result.record_count == 1 &&
-         result.records[0].kind == VCS_ZCODE_DHT_RECORD_POINTER &&
-         memcmp(result.records[0].semantic_root, semantic_root, 32) == 0 &&
-         memcmp(result.records[0].transport_root,
-                expected_transport_root, 32) == 0;
-    if (ok)
-        memcpy(transport_root, result.records[0].transport_root, 32);
-    if (!ok || !provider_record_out)
-        goto out;
+    if (!zwn_discover_query_run(publisher_dht, consumer_dht, &selector, now,
+                                &operation, &result, stage, "query-begin",
+                                "query-drive"))
+        return false;
+    *stage = "query-result";
+    if (!zwn_discover_pointer_match(&result, semantic_root,
+                                    expected_transport_root))
+        return false;
+    memcpy(transport_root, result.records[0].transport_root, 32);
+    return true;
+}
 
+static bool zwn_discover_provider_result_ok(
+    const struct vcs_zcode_dht_record_operation_result *result,
+    const uint8_t expected_transport_root[32],
+    const struct vcs_zcode_dht_record *provider_record)
+{
+    return result->state == VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE &&
+           result->record_count == 1 &&
+           result->records[0].kind == VCS_ZCODE_DHT_RECORD_PROVIDER &&
+           memcmp(result->records[0].transport_root,
+                  expected_transport_root, 32) == 0 &&
+           memcmp(result->records[0].provider_node_id,
+                  provider_record->provider_node_id, 32) == 0;
+}
+
+static bool zwn_discover_provider_phase(
+    struct vcs_zcode_dht_service *publisher_dht,
+    struct vcs_zcode_dht_service *consumer_dht, const char *namespace_name,
+    const uint8_t expected_transport_root[32], uint64_t now,
+    uint8_t plan_token[32], const char **stage,
+    struct vcs_zcode_dht_record *provider_record_out)
+{
     struct vcs_zcode_dht_publish_spec provider_spec;
     memset(&provider_spec, 0, sizeof(provider_spec));
     provider_spec.kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
@@ -1203,16 +1259,10 @@ static bool zwn_discover_transport(
     provider_spec.not_before = 1000;
     provider_spec.expiry = 2000;
     struct vcs_zcode_dht_record provider_record;
-    stage = "provider-publish";
-    ok = vcs_zcode_dht_service_record_publish_plan(
-             publisher_dht, &provider_spec, plan_token, &provider_record,
-             NULL) &&
-         vcs_zcode_dht_service_record_publish_commit(
-             publisher_dht, &provider_spec, plan_token,
-             zwn_dht_time(now + 1),
-             &provider_record, NULL) == VCS_ZCODE_DHT_RECORD_STORE_ADDED;
-    if (!ok)
-        goto out;
+    *stage = "provider-publish";
+    if (!zwn_discover_publish(publisher_dht, &provider_spec, plan_token,
+                              now + 1, &provider_record))
+        return false;
 
     struct vcs_zcode_dht_record_selector provider_selector = {
         .kind = VCS_ZCODE_DHT_RECORD_PROVIDER,
@@ -1221,38 +1271,129 @@ static bool zwn_discover_transport(
                    sizeof(provider_selector.namespace_name),
                    "%s", namespace_name);
     memcpy(provider_selector.root, expected_transport_root, 32);
-    operation = 0;
-    stage = "provider-query-begin";
-    ok = vcs_zcode_dht_service_record_query_begin(
-        consumer_dht, 1, &provider_selector, zwn_dht_time(now + 1),
-        &operation);
-    memset(&result, 0, sizeof(result));
-    if (ok) {
-        stage = "provider-query-drive";
-        ok = zwn_dht_drive_record_query(
-            publisher_dht, consumer_dht, operation, now + 1, &result);
-    }
-    if (!ok)
-        goto out;
-    stage = "provider-query-result";
-    ok = result.state == VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE &&
-         result.record_count == 1 &&
-         result.records[0].kind == VCS_ZCODE_DHT_RECORD_PROVIDER &&
-         memcmp(result.records[0].transport_root,
-                expected_transport_root, 32) == 0 &&
-         memcmp(result.records[0].provider_node_id,
-                provider_record.provider_node_id, 32) == 0;
+    uint64_t operation = 0;
+    struct vcs_zcode_dht_record_operation_result result;
+    if (!zwn_discover_query_run(publisher_dht, consumer_dht,
+                                &provider_selector, now + 1, &operation,
+                                &result, stage, "provider-query-begin",
+                                "provider-query-drive"))
+        return false;
+    *stage = "provider-query-result";
+    bool ok = zwn_discover_provider_result_ok(&result, expected_transport_root,
+                                              &provider_record);
     if (ok && provider_record_out)
         *provider_record_out = result.records[0];
+    return ok;
+}
 
-out:
-    if (!ok)
-        fprintf(stderr, "zwn DHT: %s failed\n", stage);
+static void zwn_discover_free_dht(struct vcs_zcode_dht_service *publisher_dht,
+                                  struct vcs_zcode_dht_service *consumer_dht,
+                                  uint64_t now)
+{
     if (consumer_dht)
         vcs_zcode_dht_service_free(consumer_dht, zwn_dht_time(now + 2));
     if (publisher_dht)
         vcs_zcode_dht_service_free(publisher_dht, zwn_dht_time(now + 2));
+}
+
+static bool zwn_discover_transport(
+    const struct zwn_node *publisher, const struct zwn_node *mirror,
+    const struct zwn_node *consumer, const char *namespace_name,
+    const uint8_t semantic_root[32],
+    const uint8_t expected_transport_root[32], uint8_t transport_root[32],
+    struct vcs_zcode_dht_record *provider_record_out, uint64_t now)
+{
+    if (!namespace_name || now < 2)
+        return false;
+    if (!zwn_discover_packages_pinned(publisher, mirror,
+                                      expected_transport_root))
+        return false;
+    char publisher_dht_dir[1200], consumer_dht_dir[1200];
+    if (!zwn_discover_dht_dirs(publisher, consumer, now, publisher_dht_dir,
+                               sizeof(publisher_dht_dir), consumer_dht_dir,
+                               sizeof(consumer_dht_dir)))
+        return false;
+    uint8_t genesis[32], publisher_noise[32], consumer_noise[32];
+    uint8_t transcript[32];
+    memset(genesis, 0x71, sizeof(genesis));
+    memset(publisher_noise, 0x72, sizeof(publisher_noise));
+    memset(consumer_noise, 0x73, sizeof(consumer_noise));
+    memset(transcript, 0x74, sizeof(transcript));
+    if (!zwn_discover_identities(publisher_dht_dir, consumer_dht_dir, genesis,
+                                 publisher_noise, consumer_noise))
+        return false;
+
+    struct vcs_zcode_dht_service *publisher_dht =
+        zwn_dht_service(publisher_dht_dir, genesis, publisher_noise);
+    struct vcs_zcode_dht_service *consumer_dht =
+        zwn_dht_service(consumer_dht_dir, genesis, consumer_noise);
+    const char *stage = "service-create";
+    bool ok = publisher_dht && consumer_dht;
+    if (!ok)
+        goto out;
+    stage = "session-open";
+    ok = zwn_discover_open_sessions(publisher_dht, consumer_dht,
+                                    publisher_noise, consumer_noise,
+                                    transcript, now);
+    if (!ok)
+        goto out;
+
+    uint8_t plan_token[32];
+    ok = zwn_discover_pointer_phase(
+        publisher_dht, consumer_dht, namespace_name, semantic_root,
+        expected_transport_root, now, plan_token, transport_root, &stage);
+    if (!ok)
+        goto out;
+    if (!provider_record_out)
+        goto out;
+    ok = zwn_discover_provider_phase(
+        publisher_dht, consumer_dht, namespace_name, expected_transport_root,
+        now, plan_token, &stage, provider_record_out);
+
+out:
+    if (!ok)
+        fprintf(stderr, "zwn DHT: %s failed\n", stage);
+    zwn_discover_free_dht(publisher_dht, consumer_dht, now);
     return ok;
+}
+
+static bool zwn_author_ack_commit(
+    struct vcs_zcode_dht_service *service, const struct zwn_node *provider,
+    struct vcs_zcode_dht_publish_spec *spec, const uint8_t transport_root[32],
+    struct vcs_zcode_dht_record *record_out, uint8_t record_root_out[32])
+{
+    uint8_t plan_token[32];
+    struct vcs_zcode_dht_record generic_record;
+    return !vcs_zcode_dht_service_record_publish_plan(
+               service, spec, plan_token, &generic_record, NULL) &&
+           vcs_zcode_dht_service_storage_ack_plan(
+               service, provider->store, spec, plan_token, record_out) &&
+           vcs_zcode_dht_service_storage_ack_commit(
+               service, provider->store, spec, plan_token,
+               zwn_dht_time(1002), record_out) ==
+               VCS_ZCODE_DHT_RECORD_STORE_ADDED &&
+           record_out->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK &&
+           memcmp(record_out->transport_root, transport_root, 32) == 0 &&
+           vcs_zcode_dht_record_id(record_out, record_root_out) ==
+               VCS_ZCODE_DHT_RECORD_OK;
+}
+
+static bool zwn_author_ack_queried(
+    struct vcs_zcode_dht_service *service, const char *namespace_name,
+    const uint8_t transport_root[32],
+    const struct vcs_zcode_dht_record *record_out)
+{
+    struct vcs_zcode_dht_record_selector selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_STORAGE_ACK,
+    };
+    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                   "%s", namespace_name);
+    memcpy(selector.root, transport_root, 32);
+    struct vcs_zcode_dht_record queried;
+    return vcs_zcode_dht_service_record_local_query(
+               service, 1002, &selector, &queried, 1) == 1 &&
+           memcmp(queried.provider_node_id, record_out->provider_node_id, 32) ==
+               0;
 }
 
 static bool zwn_author_storage_ack(
@@ -1291,31 +1432,10 @@ static bool zwn_author_storage_ack(
     spec.sequence = 1;
     spec.not_before = 1000;
     spec.expiry = 2000;
-    uint8_t plan_token[32];
-    struct vcs_zcode_dht_record generic_record;
-    bool ok = !vcs_zcode_dht_service_record_publish_plan(
-                  service, &spec, plan_token, &generic_record, NULL) &&
-        vcs_zcode_dht_service_storage_ack_plan(
-            service, provider->store, &spec, plan_token, record_out) &&
-        vcs_zcode_dht_service_storage_ack_commit(
-            service, provider->store, &spec, plan_token,
-            zwn_dht_time(1002), record_out) ==
-            VCS_ZCODE_DHT_RECORD_STORE_ADDED &&
-        record_out->kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK &&
-        memcmp(record_out->transport_root, transport_root, 32) == 0 &&
-        vcs_zcode_dht_record_id(record_out, record_root_out) ==
-            VCS_ZCODE_DHT_RECORD_OK;
-    struct vcs_zcode_dht_record_selector selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_STORAGE_ACK,
-    };
-    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
-                   "%s", namespace_name);
-    memcpy(selector.root, transport_root, 32);
-    struct vcs_zcode_dht_record queried;
-    ok = ok && vcs_zcode_dht_service_record_local_query(
-                   service, 1002, &selector, &queried, 1) == 1 &&
-        memcmp(queried.provider_node_id, record_out->provider_node_id, 32) ==
-            0;
+    bool ok = zwn_author_ack_commit(service, provider, &spec, transport_root,
+                                    record_out, record_root_out);
+    ok = ok && zwn_author_ack_queried(service, namespace_name, transport_root,
+                                      record_out);
     vcs_zcode_dht_service_free(service, zwn_dht_time(1003));
     return ok;
 }
@@ -1399,6 +1519,54 @@ static void zwn_tcp_frame_observe(struct zwn_node *node,
         node->invalid_chunk_events++;
 }
 
+/* Receipt payloads take their own path: identity notes or a session reply. */
+static void zwn_frame_receipt(struct zwn_node *z, struct p2p_node *node,
+                              const uint8_t *payload, size_t payload_len)
+{
+    uint64_t peer = (uint64_t)node->id;
+    if (payload_len == VCS_SWARM_RECEIPT_IDENTITY_BYTES) {
+        (void)vcs_swarm_receipt_identity_note(z->receipts, peer, payload,
+                                              payload_len);
+        return;
+    }
+    struct vcs_swarm_transfer xfer;
+    if (!vcs_swarm_engine_transfer_snapshot(z->engine, peer, &xfer))
+        return;
+    uint8_t *reply = NULL;
+    size_t reply_len = 0;
+    (void)vcs_swarm_receipt_session_handle(
+        z->receipts, z->book, &xfer, peer, ZWN_DAY, payload,
+        payload_len, &reply, &reply_len);
+    if (reply && reply_len > 0)
+        zwn_send(z, node, reply, reply_len);
+    free(reply);
+}
+
+/* Count CHUNK data replies, optionally tamper with them, then send. */
+static void zwn_frame_reply(struct zwn_node *z, struct p2p_node *node,
+                            struct vcs_swarm_frame_result *ev)
+{
+    struct vcs_package_swarm_message msg;
+    bool parsed = ev->reply_len > 0 &&
+        vcs_package_swarm_parse(ev->reply, ev->reply_len, &msg);
+    if (parsed && msg.type == VCS_PACKAGE_SWARM_DATA &&
+        msg.body.data.object.object_kind ==
+            VCS_PACKAGE_SWARM_OBJECT_CHUNK &&
+        msg.body.data.object.file_index < ZWN_MAX_FILES)
+        z->chunk_data_replies[msg.body.data.object.file_index]++;
+    if (z->tamper_chunks && parsed) {
+        /* Corrupt only CHUNK data replies: the manifest still
+         * verifies, so the download reaches the chunk stage and the
+         * bad-hash path is what gets exercised. */
+        if (msg.type == VCS_PACKAGE_SWARM_DATA &&
+            msg.body.data.object.object_kind ==
+                VCS_PACKAGE_SWARM_OBJECT_CHUNK)
+            ev->reply[ev->reply_len - 1] ^= 0xff;
+    }
+    zwn_send(z, node, ev->reply, ev->reply_len);
+    free(ev->reply);
+}
+
 static bool zwn_frame(struct msg_processor *mp, struct p2p_node *node,
                       const uint8_t *payload, size_t payload_len, void *ctx)
 {
@@ -1408,23 +1576,7 @@ static bool zwn_frame(struct msg_processor *mp, struct p2p_node *node,
         return true;
     (void)vcs_swarm_engine_peer_add(z->engine, (uint64_t)node->id, key);
     if (z->receipts && zwn_receipt_payload(payload, payload_len)) {
-        uint64_t peer = (uint64_t)node->id;
-        if (payload_len == VCS_SWARM_RECEIPT_IDENTITY_BYTES) {
-            (void)vcs_swarm_receipt_identity_note(z->receipts, peer, payload,
-                                                  payload_len);
-            return true;
-        }
-        struct vcs_swarm_transfer xfer;
-        if (!vcs_swarm_engine_transfer_snapshot(z->engine, peer, &xfer))
-            return true;
-        uint8_t *reply = NULL;
-        size_t reply_len = 0;
-        (void)vcs_swarm_receipt_session_handle(
-            z->receipts, z->book, &xfer, peer, ZWN_DAY, payload,
-            payload_len, &reply, &reply_len);
-        if (reply && reply_len > 0)
-            zwn_send(z, node, reply, reply_len);
-        free(reply);
+        zwn_frame_receipt(z, node, payload, payload_len);
         return true;
     }
     struct vcs_swarm_frame_result ev = vcs_swarm_engine_handle_frame(
@@ -1434,27 +1586,8 @@ static bool zwn_frame(struct msg_processor *mp, struct p2p_node *node,
     if (ev.penalty != VCS_SWARM_PENALTY_NONE)
         peer_scoring_record(mp->net_mgr, node, zwn_offence(ev.penalty),
                             "zcode swarm test");
-    if (ev.reply) {
-        struct vcs_package_swarm_message msg;
-        bool parsed = ev.reply_len > 0 &&
-            vcs_package_swarm_parse(ev.reply, ev.reply_len, &msg);
-        if (parsed && msg.type == VCS_PACKAGE_SWARM_DATA &&
-            msg.body.data.object.object_kind ==
-                VCS_PACKAGE_SWARM_OBJECT_CHUNK &&
-            msg.body.data.object.file_index < ZWN_MAX_FILES)
-            z->chunk_data_replies[msg.body.data.object.file_index]++;
-        if (z->tamper_chunks && parsed) {
-            /* Corrupt only CHUNK data replies: the manifest still
-             * verifies, so the download reaches the chunk stage and the
-             * bad-hash path is what gets exercised. */
-            if (msg.type == VCS_PACKAGE_SWARM_DATA &&
-                msg.body.data.object.object_kind ==
-                    VCS_PACKAGE_SWARM_OBJECT_CHUNK)
-                ev.reply[ev.reply_len - 1] ^= 0xff;
-        }
-        zwn_send(z, node, ev.reply, ev.reply_len);
-        free(ev.reply);
-    }
+    if (ev.reply)
+        zwn_frame_reply(z, node, &ev);
     if (ev.disconnect_peer)
         atomic_store(&node->disconnect, true);
     return true;
@@ -1708,6 +1841,27 @@ static void zwn_fixture_cleanup(struct zwn_fixture *fixture)
         zwn_node_free(fixture->nodes[--fixture->node_count]);
 }
 
+static bool zwn_fixture_build(struct zwn_fixture *fixture,
+                              const struct chain_params *params,
+                              const struct zwn_node_spec *nodes,
+                              size_t node_count,
+                              const struct zwn_link_spec *links,
+                              size_t link_count)
+{
+    return zwn_fixture_nodes(fixture, params, nodes, node_count) &&
+           zwn_fixture_links(fixture, links, link_count);
+}
+
+static bool zwn_fixture_detached(const struct zwn_node *a,
+                                 const struct zwn_node *b,
+                                 const struct zwn_link *a_b,
+                                 const struct zwn_link *b_a)
+{
+    return !a->engine && !a->store && !a->book &&
+           !b->engine && !b->store && !b->book &&
+           !a_b->node && !a_b->sentinel && !b_a->node && !b_a->sentinel;
+}
+
 static bool zwn_fixture_abort_reacquire(const struct chain_params *params)
 {
     struct zwn_fixture fixture = {0};
@@ -1720,25 +1874,21 @@ static bool zwn_fixture_abort_reacquire(const struct chain_params *params)
         {&a, &a_b, {10, 2, 0, 1}, "fixture-b"},
         {&b, &b_a, {10, 2, 0, 2}, "fixture-a"},
     };
-    bool initialized = zwn_fixture_nodes(
-        &fixture, params, nodes, sizeof(nodes) / sizeof(nodes[0])) &&
-        zwn_fixture_links(
-            &fixture, links, sizeof(links) / sizeof(links[0]));
+    bool initialized = zwn_fixture_build(
+        &fixture, params, nodes, sizeof(nodes) / sizeof(nodes[0]), links,
+        sizeof(links) / sizeof(links[0]));
 
     /* This is the ASSERT/goto boundary: cleanup must not depend on the
      * scenario reaching its ordinary success epilogue. */
     zwn_fixture_cleanup(&fixture);
     bool released = fixture.node_count == 0 && fixture.link_count == 0 &&
-        !a.engine && !a.store && !a.book &&
-        !b.engine && !b.store && !b.book &&
-        !a_b.node && !a_b.sentinel && !b_a.node && !b_a.sentinel;
+        zwn_fixture_detached(&a, &b, &a_b, &b_a);
     if (!initialized || !released)
         return false;
 
-    initialized = zwn_fixture_nodes(
-        &fixture, params, nodes, sizeof(nodes) / sizeof(nodes[0])) &&
-        zwn_fixture_links(
-            &fixture, links, sizeof(links) / sizeof(links[0]));
+    initialized = zwn_fixture_build(
+        &fixture, params, nodes, sizeof(nodes) / sizeof(nodes[0]), links,
+        sizeof(links) / sizeof(links[0]));
     zwn_fixture_cleanup(&fixture);
     return initialized && fixture.node_count == 0 &&
         fixture.link_count == 0;
@@ -1923,6 +2073,48 @@ static bool zwn_store_matches(struct vcs_package_store *store,
     return true;
 }
 
+static bool zwn_read_manifest_parse(
+    const uint8_t *manifest_wire, size_t manifest_wire_len,
+    const uint8_t package_root[32], struct vcs_package_manifest *manifest)
+{
+    uint8_t checked[32];
+    return vcs_package_manifest_parse(manifest_wire, manifest_wire_len,
+                                      manifest) &&
+           vcs_package_manifest_root(manifest, checked) &&
+           memcmp(checked, package_root, 32) == 0;
+}
+
+static size_t zwn_read_file_index(struct vcs_package_manifest *manifest,
+                                  const char *path)
+{
+    size_t index = 0;
+    while (index < manifest->count &&
+           strcmp(manifest->files[index].path, path) != 0)
+        index++;
+    return index;
+}
+
+static bool zwn_read_file_fits(struct vcs_package_manifest *manifest, bool ok,
+                               size_t index, size_t out_capacity)
+{
+    return ok && index != manifest->count &&
+           manifest->files[index].chunk_count == 1 &&
+           manifest->files[index].size <= out_capacity;
+}
+
+static bool zwn_read_chunk_checked(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct vcs_package_manifest *manifest, size_t index,
+    uint8_t **chunk, size_t *chunk_len)
+{
+    return vcs_package_store_get_chunk_at(
+               store, package_root, (uint32_t)index, 0, chunk, chunk_len) ==
+               VCS_PACKAGE_STORE_OK &&
+           *chunk_len == manifest->files[index].size &&
+           vcs_package_verify_chunk(&manifest->files[index], 0, *chunk,
+                                    *chunk_len);
+}
+
 static bool zwn_read_package_file(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const char *path, uint8_t *out, size_t out_capacity, size_t *out_len)
@@ -1939,30 +2131,20 @@ static bool zwn_read_package_file(
         return false;
     struct vcs_package_manifest manifest;
     vcs_package_manifest_init(&manifest);
-    uint8_t checked[32];
-    bool ok = vcs_package_manifest_parse(
-            manifest_wire, manifest_wire_len, &manifest) &&
-        vcs_package_manifest_root(&manifest, checked) &&
-        memcmp(checked, package_root, 32) == 0;
+    bool ok = zwn_read_manifest_parse(manifest_wire, manifest_wire_len,
+                                      package_root, &manifest);
     free(manifest_wire);
     size_t index = 0;
-    while (ok && index < manifest.count &&
-           strcmp(manifest.files[index].path, path) != 0)
-        index++;
-    if (!ok || index == manifest.count ||
-        manifest.files[index].chunk_count != 1 ||
-        manifest.files[index].size > out_capacity) {
+    if (ok)
+        index = zwn_read_file_index(&manifest, path);
+    if (!zwn_read_file_fits(&manifest, ok, index, out_capacity)) {
         vcs_package_manifest_free(&manifest);
         return false;
     }
     uint8_t *chunk = NULL;
     size_t chunk_len = 0;
-    ok = vcs_package_store_get_chunk_at(
-             store, package_root, (uint32_t)index, 0,
-             &chunk, &chunk_len) == VCS_PACKAGE_STORE_OK &&
-        chunk_len == manifest.files[index].size &&
-        vcs_package_verify_chunk(
-            &manifest.files[index], 0, chunk, chunk_len);
+    ok = zwn_read_chunk_checked(store, package_root, &manifest, index,
+                                &chunk, &chunk_len);
     if (ok) {
         memcpy(out, chunk, chunk_len);
         *out_len = chunk_len;
@@ -2113,6 +2295,339 @@ enum zwn_golden_mode {
     ZWN_GOLDEN_DISCONNECT,
 };
 
+static const char *const zwn_golden_node_tags[3][2] = {
+    {"ga", "gb"},
+    {"ra", "rb"},
+    {"da", "db"},
+};
+
+struct zwn_golden_run {
+    enum zwn_golden_mode mode;
+    const struct chain_params *params;
+    struct zwn_fixture *fixture;
+    struct zwn_pkg *pkg;
+    struct zwn_node a, b, a2;
+    struct zwn_link a_b, b_a, a2_b, b_a2;
+    bool two_servers;
+    bool saw_partial;
+    bool restarted;
+    bool dropped;
+    bool restart_present[ZWN_MAX_FILES];
+    uint32_t restart_replies[ZWN_MAX_FILES];
+    uint32_t restart_present_chunks;
+    uint64_t restart_present_bytes;
+    enum vcs_swarm_download_state state;
+    bool terminal;
+};
+
+static int zwn_golden_setup(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    const struct zwn_node_spec initial_nodes[] = {
+        {&g->a, zwn_golden_node_tags[g->mode][0]},
+        {&g->b, zwn_golden_node_tags[g->mode][1]},
+    };
+    ASSERT(zwn_fixture_nodes(g->fixture, g->params, initial_nodes,
+                             sizeof(initial_nodes) / sizeof(initial_nodes[0])));
+    ASSERT(zwn_store_package(g->a.store, g->pkg));
+
+    const struct zwn_link_spec initial_links[] = {
+        {&g->a, &g->a_b, {5, 6, 7, 8}, "peer-b"},
+        {&g->b, &g->b_a, {1, 2, 3, 4}, "peer-a"},
+    };
+    ASSERT(zwn_fixture_links(g->fixture, initial_links,
+                             sizeof(initial_links) /
+                                 sizeof(initial_links[0])));
+    ASSERT(zwn_meet_side(&g->a, &g->a_b));
+    ASSERT(zwn_meet_side(&g->b, &g->b_a));
+
+    g->two_servers = g->mode == ZWN_GOLDEN_DISCONNECT;
+    if (g->two_servers) {
+        const struct zwn_node_spec extra_node[] = {{&g->a2, "da2"}};
+        ASSERT(zwn_fixture_nodes(g->fixture, g->params, extra_node,
+                                 sizeof(extra_node) /
+                                     sizeof(extra_node[0])));
+        ASSERT(zwn_store_package(g->a2.store, g->pkg));
+        const struct zwn_link_spec extra_links[] = {
+            {&g->a2, &g->a2_b, {9, 9, 9, 9}, "peer-b"},
+            {&g->b, &g->b_a2, {8, 8, 8, 8}, "peer-a2"},
+        };
+        ASSERT(zwn_fixture_links(g->fixture, extra_links,
+                                 sizeof(extra_links) /
+                                     sizeof(extra_links[0])));
+        ASSERT(zwn_meet_side(&g->a2, &g->a2_b));
+        ASSERT(zwn_meet_side(&g->b, &g->b_a2));
+    }
+
+    ASSERT(vcs_swarm_engine_fetch(g->b.engine, g->pkg->root, ZWN_DAY,
+                                  ++g->b.now) == VCS_SWARM_FETCH_OK);
+    g->saw_partial = g->mode == ZWN_GOLDEN_PLAIN;
+    _test_next:
+    return failures;
+}
+
+/* Restart probe: once B holds some but not all chunks, snapshot them, kill
+ * the queued bytes, rebuild B's engine and re-register the peers. */
+static int zwn_golden_restart_step(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status st;
+    memset(&st, 0, sizeof(st));
+    ASSERT(vcs_swarm_engine_download_status(g->b.engine, g->pkg->root, &st));
+    if (st.state == VCS_SWARM_DL_CHUNKS &&
+        st.present_chunks > 0 &&
+        st.present_chunks < st.total_chunks) {
+        g->saw_partial = true;
+        g->restarted = true;
+        g->restart_present_chunks = st.present_chunks;
+        g->restart_present_bytes = st.present_bytes;
+        uint32_t probed_chunks = 0;
+        uint64_t probed_bytes = 0;
+        for (size_t f = 0; f < g->pkg->count; f++) {
+            g->restart_present[f] =
+                vcs_package_store_chunk_present(
+                    g->b.store, g->pkg->root, (uint32_t)f, 0);
+            g->restart_replies[f] = g->a.chunk_data_replies[f];
+            if (g->restart_present[f]) {
+                probed_chunks++;
+                probed_bytes += g->pkg->lens[f];
+            }
+        }
+        ASSERT(probed_chunks == g->restart_present_chunks);
+        ASSERT(probed_bytes == g->restart_present_bytes);
+        /* A real restart kills the sockets with their queued
+         * bytes: drop both queues first, or the new engine
+         * would read the pre-restart DATAs as unrequested
+         * (they would be — its outstanding table is gone). */
+        zwn_drain_quiet(&g->a_b);
+        zwn_drain_quiet(&g->b_a);
+        ASSERT(zwn_node_restart_engine(&g->b));
+        struct vcs_swarm_download_status resumed;
+        memset(&resumed, 0, sizeof(resumed));
+        ASSERT(vcs_swarm_engine_download_status(
+            g->b.engine, g->pkg->root, &resumed));
+        ASSERT(resumed.state == VCS_SWARM_DL_CHUNKS);
+        ASSERT(resumed.present_chunks == g->restart_present_chunks);
+        ASSERT(resumed.present_bytes == g->restart_present_bytes);
+        ASSERT(resumed.reused_objects == g->restart_present_chunks);
+        ASSERT(resumed.reused_bytes == g->restart_present_bytes);
+        ASSERT(resumed.requested_objects == 0);
+        ASSERT(resumed.transferred_objects == 0);
+        /* The restart forgets session peers AND their
+         * advertisements (transport state, never persisted).
+         * A real restart also drops the connections: emulate
+         * the reconnect on both sides — B's new engine
+         * re-registers A, A sees B as a new peer and
+         * re-announces its packages (exactly what the boot
+         * glue's membership sync does for a new node). */
+        ASSERT(zwn_meet_side(&g->b, &g->b_a));
+        vcs_swarm_engine_peer_drop(g->a.engine,
+                                   (uint64_t)g->a_b.node->id);
+        ASSERT(zwn_meet_side(&g->a, &g->a_b));
+    }
+    _test_next:
+    return failures;
+}
+
+/* Disconnect probe: once B holds some but not all chunks, drop the
+ * connection to its serving peer so the work requeues elsewhere. */
+static int zwn_golden_disconnect_step(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status st;
+    memset(&st, 0, sizeof(st));
+    ASSERT(vcs_swarm_engine_download_status(g->b.engine, g->pkg->root, &st));
+    if (st.state == VCS_SWARM_DL_CHUNKS &&
+        st.present_chunks > 0 &&
+        st.present_chunks < st.total_chunks) {
+        g->saw_partial = true;
+        g->dropped = true;
+        /* The membership-sync drop: the connection is gone,
+         * so the engine forgets the peer and requeues its
+         * in-flight work onto the surviving advertiser. The
+         * dead connection's queued bytes die with it. */
+        atomic_store(&g->b_a.node->disconnect, true);
+        zwn_drain_quiet(&g->a_b);
+        zwn_drain_quiet(&g->b_a);
+        vcs_swarm_engine_peer_drop(g->b.engine,
+                                   (uint64_t)g->b_a.node->id);
+    }
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_loop(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    g->state = VCS_SWARM_DL_INACTIVE;
+    g->terminal = false;
+    for (int i = 0; i < 400 && !g->terminal; i++) {
+        ASSERT(zwn_round(&g->a_b, &g->b_a, g->params->pchMessageStart));
+        if (g->two_servers)
+            ASSERT(zwn_round(&g->a2_b, &g->b_a2,
+                             g->params->pchMessageStart));
+
+        if (g->mode == ZWN_GOLDEN_RESTART && !g->restarted) {
+            if (zwn_golden_restart_step(g) != 0) {
+                failures++;
+                goto _test_next;
+            }
+        }
+        if (g->mode == ZWN_GOLDEN_DISCONNECT && !g->dropped) {
+            if (zwn_golden_disconnect_step(g) != 0) {
+                failures++;
+                goto _test_next;
+            }
+        }
+        g->terminal = zwn_download_done(&g->b, g->pkg->root, &g->state);
+    }
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_check_outcome(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    ASSERT(g->saw_partial);
+    if (g->mode == ZWN_GOLDEN_RESTART)
+        ASSERT(g->restarted);
+    if (g->mode == ZWN_GOLDEN_DISCONNECT)
+        ASSERT(g->dropped);
+    ASSERT(g->terminal);
+    ASSERT(g->state == VCS_SWARM_DL_COMPLETE);
+    ASSERT(zwn_store_matches(g->b.store, g->pkg));
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_check_restart_resume(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    if (g->mode == ZWN_GOLDEN_RESTART) {
+        struct vcs_swarm_download_status resumed;
+        memset(&resumed, 0, sizeof(resumed));
+        ASSERT(vcs_swarm_engine_download_status(
+            g->b.engine, g->pkg->root, &resumed));
+        ASSERT(resumed.reused_objects == g->restart_present_chunks);
+        ASSERT(resumed.reused_bytes == g->restart_present_bytes);
+        ASSERT(resumed.requested_objects ==
+               g->pkg->count - g->restart_present_chunks);
+        ASSERT(resumed.transferred_objects ==
+               g->pkg->count - g->restart_present_chunks);
+        ASSERT(resumed.requested_bytes ==
+               g->pkg->total_bytes - g->restart_present_bytes);
+        ASSERT(resumed.transferred_bytes ==
+               g->pkg->total_bytes - g->restart_present_bytes);
+        for (size_t f = 0; f < g->pkg->count; f++)
+            if (g->restart_present[f])
+                ASSERT(g->a.chunk_data_replies[f] == g->restart_replies[f]);
+        char root_hex[65];
+        zcl_hex_encode(g->pkg->root, 32, root_hex);
+        printf("{\"schema\":\"zcl.swarm_restart_resume.v1\","
+               "\"package_root\":\"%s\",\"verdict\":\"PASS\","
+               "\"verified_objects_before_interrupt\":%u,"
+               "\"verified_bytes_before_interrupt\":%" PRIu64 ","
+               "\"objects_reused_after_restart\":%u,"
+               "\"bytes_reused_after_restart\":%" PRIu64 ","
+               "\"remaining_objects_requested\":%u,"
+               "\"remaining_objects_transferred\":%u,"
+               "\"verified_objects_retransmitted\":0,"
+               "\"same_graph\":true}\n",
+               root_hex, g->restart_present_chunks,
+               g->restart_present_bytes, resumed.reused_objects,
+               resumed.reused_bytes, resumed.requested_objects,
+               resumed.transferred_objects);
+    }
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_check_settle(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    ASSERT(g->b_a.node->misbehavior == 0);
+    if (!g->dropped)
+        ASSERT(g->a_b.node->misbehavior == 0);
+    if (g->mode == ZWN_GOLDEN_PLAIN) {
+        for (int i = 0; i < 8; i++)
+            ASSERT(zwn_round(&g->a_b, &g->b_a, g->params->pchMessageStart));
+        ASSERT(vcs_swarm_receipt_session_settled(
+            g->a.receipts, (uint64_t)g->a_b.node->id));
+        ASSERT(vcs_swarm_receipt_session_settled(
+            g->b.receipts, (uint64_t)g->b_a.node->id));
+    }
+    _test_next:
+    return failures;
+}
+
+/* Accounting: B credited the verified bytes it received under the
+ * serving peers' session keys (two keys in the disconnect run —
+ * the work moved from A to A2 mid-download); A credited the
+ * verified bytes it served to B's session key. The manifest wire
+ * is verified+credited too, so the credit sits in [chunks,
+ * chunks + manifest wire]. */
+static int zwn_golden_check_credit(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    uint64_t credited = 0;
+    uint8_t key[33];
+    ASSERT(zwn_peer_key(g->b_a.node, key));
+    struct vcs_service_key_totals kt;
+    ASSERT(vcs_service_key_totals(g->b.book, key, ZWN_DAY, &kt));
+    credited += kt.verified_bytes_downloaded;
+    if (g->two_servers) {
+        ASSERT(zwn_peer_key(g->b_a2.node, key));
+        ASSERT(vcs_service_key_totals(g->b.book, key, ZWN_DAY, &kt));
+        credited += kt.verified_bytes_downloaded;
+    }
+    ASSERT(credited >= g->pkg->total_bytes);
+    ASSERT(credited <= g->pkg->total_bytes + g->pkg->wire_len);
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_check_served(struct zwn_golden_run *g)
+{
+    int failures = 0;
+    uint64_t served = 0;
+    uint8_t key[33];
+    ASSERT(zwn_peer_key(g->a_b.node, key));
+    struct vcs_service_key_totals kt;
+    ASSERT(vcs_service_key_totals(g->a.book, key, ZWN_DAY, &kt));
+    served += kt.verified_bytes_uploaded;
+    if (g->two_servers) {
+        ASSERT(zwn_peer_key(g->a2_b.node, key));
+        ASSERT(vcs_service_key_totals(g->a2.book, key, ZWN_DAY, &kt));
+        served += kt.verified_bytes_uploaded;
+    }
+    ASSERT(served >= g->pkg->total_bytes);
+    /* Non-plain runs discard answered-but-undelivered DATAs with
+     * the drained socket queues, so the surviving server
+     * genuinely re-serves those chunks (upload credit is
+     * recorded at serve time, against the request id — that is
+     * honest); the slack bound is the worst-case in-flight set
+     * at the drain. The plain run keeps the exact bound. */
+    uint64_t slack = g->mode == ZWN_GOLDEN_PLAIN
+                         ? 0
+                         : VCS_SWARM_PEER_INFLIGHT_MAX *
+                               ZWN_MAX_FILE;
+    ASSERT(served <= g->pkg->total_bytes + g->pkg->wire_len + slack);
+    _test_next:
+    return failures;
+}
+
+static int zwn_golden_execute(struct zwn_golden_run *g)
+{
+    if (zwn_golden_setup(g) != 0 || zwn_golden_loop(g) != 0 ||
+        zwn_golden_check_outcome(g) != 0 ||
+        zwn_golden_check_restart_resume(g) != 0 ||
+        zwn_golden_check_settle(g) != 0 ||
+        zwn_golden_check_credit(g) != 0 ||
+        zwn_golden_check_served(g) != 0)
+        return 1;
+    return 0;
+}
+
 static int zwn_test_golden(enum zwn_golden_mode mode,
                            const struct chain_params *params)
 {
@@ -2135,247 +2650,15 @@ static int zwn_test_golden(enum zwn_golden_mode mode,
         size_t file_count = mode == ZWN_GOLDEN_PLAIN ? 6 : 12;
         struct zwn_pkg pkg;
         ASSERT(zwn_make_package(&pkg, file_count, 0x11));
-
-        struct zwn_node a, b, a2;
-        const struct zwn_node_spec initial_nodes[] = {
-            {&a, mode == ZWN_GOLDEN_PLAIN ? "ga" :
-                 mode == ZWN_GOLDEN_RESTART ? "ra" : "da"},
-            {&b, mode == ZWN_GOLDEN_PLAIN ? "gb" :
-                 mode == ZWN_GOLDEN_RESTART ? "rb" : "db"},
+        struct zwn_golden_run run = {
+            .mode = mode,
+            .params = params,
+            .fixture = &fixture,
+            .pkg = &pkg,
         };
-        ASSERT(zwn_fixture_nodes(&fixture, params, initial_nodes,
-                                 sizeof(initial_nodes) /
-                                     sizeof(initial_nodes[0])));
-        ASSERT(zwn_store_package(a.store, &pkg));
-
-        struct zwn_link a_b, b_a;
-        const struct zwn_link_spec initial_links[] = {
-            {&a, &a_b, {5, 6, 7, 8}, "peer-b"},
-            {&b, &b_a, {1, 2, 3, 4}, "peer-a"},
-        };
-        ASSERT(zwn_fixture_links(&fixture, initial_links,
-                                 sizeof(initial_links) /
-                                     sizeof(initial_links[0])));
-        ASSERT(zwn_meet_side(&a, &a_b));
-        ASSERT(zwn_meet_side(&b, &b_a));
-
-        struct zwn_link a2_b, b_a2;
-        bool two_servers = mode == ZWN_GOLDEN_DISCONNECT;
-        if (two_servers) {
-            const struct zwn_node_spec extra_node[] = {{&a2, "da2"}};
-            ASSERT(zwn_fixture_nodes(&fixture, params, extra_node,
-                                     sizeof(extra_node) /
-                                         sizeof(extra_node[0])));
-            ASSERT(zwn_store_package(a2.store, &pkg));
-            const struct zwn_link_spec extra_links[] = {
-                {&a2, &a2_b, {9, 9, 9, 9}, "peer-b"},
-                {&b, &b_a2, {8, 8, 8, 8}, "peer-a2"},
-            };
-            ASSERT(zwn_fixture_links(&fixture, extra_links,
-                                     sizeof(extra_links) /
-                                         sizeof(extra_links[0])));
-            ASSERT(zwn_meet_side(&a2, &a2_b));
-            ASSERT(zwn_meet_side(&b, &b_a2));
-        }
-
-        ASSERT(vcs_swarm_engine_fetch(b.engine, pkg.root, ZWN_DAY,
-                                      ++b.now) == VCS_SWARM_FETCH_OK);
-
-        bool restarted = false;
-        bool dropped = false;
-        bool saw_partial = mode != ZWN_GOLDEN_PLAIN ? false : true;
-        bool restart_present[ZWN_MAX_FILES] = {0};
-        uint32_t restart_replies[ZWN_MAX_FILES] = {0};
-        uint32_t restart_present_chunks = 0;
-        uint64_t restart_present_bytes = 0;
-        enum vcs_swarm_download_state state = VCS_SWARM_DL_INACTIVE;
-        bool terminal = false;
-        for (int i = 0; i < 400 && !terminal; i++) {
-            ASSERT(zwn_round(&a_b, &b_a, params->pchMessageStart));
-            if (two_servers)
-                ASSERT(zwn_round(&a2_b, &b_a2, params->pchMessageStart));
-
-            if (mode == ZWN_GOLDEN_RESTART && !restarted) {
-                struct vcs_swarm_download_status st;
-                memset(&st, 0, sizeof(st));
-                ASSERT(vcs_swarm_engine_download_status(b.engine, pkg.root,
-                                                        &st));
-                if (st.state == VCS_SWARM_DL_CHUNKS &&
-                    st.present_chunks > 0 &&
-                    st.present_chunks < st.total_chunks) {
-                    saw_partial = true;
-                    restarted = true;
-                    restart_present_chunks = st.present_chunks;
-                    restart_present_bytes = st.present_bytes;
-                    uint32_t probed_chunks = 0;
-                    uint64_t probed_bytes = 0;
-                    for (size_t f = 0; f < pkg.count; f++) {
-                        restart_present[f] =
-                            vcs_package_store_chunk_present(
-                                b.store, pkg.root, (uint32_t)f, 0);
-                        restart_replies[f] = a.chunk_data_replies[f];
-                        if (restart_present[f]) {
-                            probed_chunks++;
-                            probed_bytes += pkg.lens[f];
-                        }
-                    }
-                    ASSERT(probed_chunks == restart_present_chunks);
-                    ASSERT(probed_bytes == restart_present_bytes);
-                    /* A real restart kills the sockets with their queued
-                     * bytes: drop both queues first, or the new engine
-                     * would read the pre-restart DATAs as unrequested
-                     * (they would be — its outstanding table is gone). */
-                    zwn_drain_quiet(&a_b);
-                    zwn_drain_quiet(&b_a);
-                    ASSERT(zwn_node_restart_engine(&b));
-                    struct vcs_swarm_download_status resumed;
-                    memset(&resumed, 0, sizeof(resumed));
-                    ASSERT(vcs_swarm_engine_download_status(
-                        b.engine, pkg.root, &resumed));
-                    ASSERT(resumed.state == VCS_SWARM_DL_CHUNKS);
-                    ASSERT(resumed.present_chunks == restart_present_chunks);
-                    ASSERT(resumed.present_bytes == restart_present_bytes);
-                    ASSERT(resumed.reused_objects == restart_present_chunks);
-                    ASSERT(resumed.reused_bytes == restart_present_bytes);
-                    ASSERT(resumed.requested_objects == 0);
-                    ASSERT(resumed.transferred_objects == 0);
-                    /* The restart forgets session peers AND their
-                     * advertisements (transport state, never persisted).
-                     * A real restart also drops the connections: emulate
-                     * the reconnect on both sides — B's new engine
-                     * re-registers A, A sees B as a new peer and
-                     * re-announces its packages (exactly what the boot
-                     * glue's membership sync does for a new node). */
-                    ASSERT(zwn_meet_side(&b, &b_a));
-                    vcs_swarm_engine_peer_drop(a.engine,
-                                               (uint64_t)a_b.node->id);
-                    ASSERT(zwn_meet_side(&a, &a_b));
-                }
-            }
-            if (mode == ZWN_GOLDEN_DISCONNECT && !dropped) {
-                struct vcs_swarm_download_status st;
-                memset(&st, 0, sizeof(st));
-                ASSERT(vcs_swarm_engine_download_status(b.engine, pkg.root,
-                                                        &st));
-                if (st.state == VCS_SWARM_DL_CHUNKS &&
-                    st.present_chunks > 0 &&
-                    st.present_chunks < st.total_chunks) {
-                    saw_partial = true;
-                    dropped = true;
-                    /* The membership-sync drop: the connection is gone,
-                     * so the engine forgets the peer and requeues its
-                     * in-flight work onto the surviving advertiser. The
-                     * dead connection's queued bytes die with it. */
-                    atomic_store(&b_a.node->disconnect, true);
-                    zwn_drain_quiet(&a_b);
-                    zwn_drain_quiet(&b_a);
-                    vcs_swarm_engine_peer_drop(b.engine,
-                                               (uint64_t)b_a.node->id);
-                }
-            }
-            terminal = zwn_download_done(&b, pkg.root, &state);
-        }
-
-        ASSERT(saw_partial);
-        if (mode == ZWN_GOLDEN_RESTART)
-            ASSERT(restarted);
-        if (mode == ZWN_GOLDEN_DISCONNECT)
-            ASSERT(dropped);
-        ASSERT(terminal);
-        ASSERT(state == VCS_SWARM_DL_COMPLETE);
-        ASSERT(zwn_store_matches(b.store, &pkg));
-        if (mode == ZWN_GOLDEN_RESTART) {
-            struct vcs_swarm_download_status resumed;
-            memset(&resumed, 0, sizeof(resumed));
-            ASSERT(vcs_swarm_engine_download_status(b.engine, pkg.root,
-                                                    &resumed));
-            ASSERT(resumed.reused_objects == restart_present_chunks);
-            ASSERT(resumed.reused_bytes == restart_present_bytes);
-            ASSERT(resumed.requested_objects ==
-                   pkg.count - restart_present_chunks);
-            ASSERT(resumed.transferred_objects ==
-                   pkg.count - restart_present_chunks);
-            ASSERT(resumed.requested_bytes ==
-                   pkg.total_bytes - restart_present_bytes);
-            ASSERT(resumed.transferred_bytes ==
-                   pkg.total_bytes - restart_present_bytes);
-            for (size_t f = 0; f < pkg.count; f++)
-                if (restart_present[f])
-                    ASSERT(a.chunk_data_replies[f] == restart_replies[f]);
-            char root_hex[65];
-            zcl_hex_encode(pkg.root, 32, root_hex);
-            printf("{\"schema\":\"zcl.swarm_restart_resume.v1\","
-                   "\"package_root\":\"%s\",\"verdict\":\"PASS\","
-                   "\"verified_objects_before_interrupt\":%u,"
-                   "\"verified_bytes_before_interrupt\":%" PRIu64 ","
-                   "\"objects_reused_after_restart\":%u,"
-                   "\"bytes_reused_after_restart\":%" PRIu64 ","
-                   "\"remaining_objects_requested\":%u,"
-                   "\"remaining_objects_transferred\":%u,"
-                   "\"verified_objects_retransmitted\":0,"
-                   "\"same_graph\":true}\n",
-                   root_hex, restart_present_chunks,
-                   restart_present_bytes, resumed.reused_objects,
-                   resumed.reused_bytes, resumed.requested_objects,
-                   resumed.transferred_objects);
-        }
-        ASSERT(b_a.node->misbehavior == 0);
-        if (!dropped)
-            ASSERT(a_b.node->misbehavior == 0);
-        if (mode == ZWN_GOLDEN_PLAIN) {
-            for (int i = 0; i < 8; i++)
-                ASSERT(zwn_round(&a_b, &b_a, params->pchMessageStart));
-            ASSERT(vcs_swarm_receipt_session_settled(
-                a.receipts, (uint64_t)a_b.node->id));
-            ASSERT(vcs_swarm_receipt_session_settled(
-                b.receipts, (uint64_t)b_a.node->id));
-        }
-
-        /* Accounting: B credited the verified bytes it received under the
-         * serving peers' session keys (two keys in the disconnect run —
-         * the work moved from A to A2 mid-download); A credited the
-         * verified bytes it served to B's session key. The manifest wire
-         * is verified+credited too, so the credit sits in [chunks,
-         * chunks + manifest wire]. */
-        {
-            uint64_t credited = 0;
-            uint8_t key[33];
-            ASSERT(zwn_peer_key(b_a.node, key));
-            struct vcs_service_key_totals kt;
-            ASSERT(vcs_service_key_totals(b.book, key, ZWN_DAY, &kt));
-            credited += kt.verified_bytes_downloaded;
-            if (two_servers) {
-                ASSERT(zwn_peer_key(b_a2.node, key));
-                ASSERT(vcs_service_key_totals(b.book, key, ZWN_DAY, &kt));
-                credited += kt.verified_bytes_downloaded;
-            }
-            ASSERT(credited >= pkg.total_bytes);
-            ASSERT(credited <= pkg.total_bytes + pkg.wire_len);
-        }
-        {
-            uint64_t served = 0;
-            uint8_t key[33];
-            ASSERT(zwn_peer_key(a_b.node, key));
-            struct vcs_service_key_totals kt;
-            ASSERT(vcs_service_key_totals(a.book, key, ZWN_DAY, &kt));
-            served += kt.verified_bytes_uploaded;
-            if (two_servers) {
-                ASSERT(zwn_peer_key(a2_b.node, key));
-                ASSERT(vcs_service_key_totals(a2.book, key, ZWN_DAY, &kt));
-                served += kt.verified_bytes_uploaded;
-            }
-            ASSERT(served >= pkg.total_bytes);
-            /* Non-plain runs discard answered-but-undelivered DATAs with
-             * the drained socket queues, so the surviving server
-             * genuinely re-serves those chunks (upload credit is
-             * recorded at serve time, against the request id — that is
-             * honest); the slack bound is the worst-case in-flight set
-             * at the drain. The plain run keeps the exact bound. */
-            uint64_t slack = mode == ZWN_GOLDEN_PLAIN
-                                 ? 0
-                                 : VCS_SWARM_PEER_INFLIGHT_MAX *
-                                       ZWN_MAX_FILE;
-            ASSERT(served <= pkg.total_bytes + pkg.wire_len + slack);
+        if (zwn_golden_execute(&run) != 0) {
+            failures++;
+            goto _test_next;
         }
 
         zwn_fixture_cleanup(&fixture);
@@ -4660,6 +4943,143 @@ static bool zwn_hop_carrier(struct zwn_node *from, struct zwn_node *to,
  * unique-new quota is the serving-set size; n sits inside that shelf. */
 enum { ZWN_REDUNDANT_MAX = 16 };
 
+struct zwn_redundant_run {
+    struct zwn_fixture *fixture;
+    const struct chain_params *params;
+    const char *test_name;
+    const char *const *dirs;
+    size_t n;
+    uint64_t now_base;
+    const char *name_a, *name_b, *name_c;
+    struct vcs_package_prepared *prepared;
+    struct vcs_package_transport *transport;
+    struct zwn_node a, b, c;
+    struct zwn_link a_b, b_a, b_c, c_b;
+};
+
+static bool zwn_redundant_args_ok(const struct chain_params *params,
+                                  const char *test_name, const char *label,
+                                  const char *const *dirs, size_t n)
+{
+    return params && test_name && label && dirs && n != 0 &&
+           n <= ZWN_REDUNDANT_MAX;
+}
+
+static bool zwn_redundant_name_fits(int written, size_t cap)
+{
+    return written >= 0 && (size_t)written < cap;
+}
+
+static int zwn_redundant_seed(struct zwn_redundant_run *r)
+{
+    int failures = 0;
+    const struct zwn_node_spec nodes[] = {
+        {&r->a, r->name_a}, {&r->b, r->name_b}, {&r->c, r->name_c},
+    };
+    ASSERT(zwn_fixture_nodes(r->fixture, r->params, nodes,
+                             sizeof(nodes) / sizeof(nodes[0])));
+    for (size_t i = 0; i < r->n; i++) {
+        /* Heartbeat: each iteration content-hashes and pins a whole
+         * in-tree package; on a loaded box that can individually run
+         * past the no-output watchdog's window, so print progress
+         * rather than staying silent for the whole loop. */
+        fprintf(stderr, "  ... %s: seeding %s (%zu/%zu)\n", r->test_name,
+                r->dirs[i], i + 1u, r->n);
+        struct zwn_package_scenario sc = {
+            .name = r->dirs[i],
+            .dht_namespace = "package.c23-commons",
+            .source_dir = r->dirs[i],
+            .publisher_sequence = i + 1u,
+            .expected_package_root_hex = NULL,
+        };
+        vcs_package_transport_init(&r->transport[i]);
+        ASSERT(zwn_prepare_package_transport(
+            &sc, r->dirs[i], i + 1u, NULL, &r->prepared[i], &r->transport[i]));
+        ASSERT(vcs_package_transport_store(r->a.store, &r->transport[i],
+                                           r->dirs[i]) ==
+               VCS_PACKAGE_TRANSPORT_OK);
+        ASSERT(vcs_package_store_pin(r->a.store, r->transport[i].transport_root,
+                                     true) == VCS_PACKAGE_STORE_OK);
+        struct vcs_package_store_status seeded;
+        ASSERT(vcs_package_store_package_status(
+            r->a.store, r->transport[i].transport_root, &seeded));
+        ASSERT(seeded.complete && seeded.pinned);
+        struct vcs_package_public_verdict shape;
+        vcs_package_public_shape_classify(r->a.store,
+                                          r->transport[i].transport_root,
+                                          &shape);
+        if (shape.shape == VCS_PACKAGE_PUBLIC_REFUSED)
+            fprintf(stderr, "zwn public_shape %s: %s (%s)\n", r->dirs[i],
+                    shape.rule ? shape.rule : "?",
+                    shape.dependency_rule ? shape.dependency_rule : "-");
+        ASSERT(shape.shape != VCS_PACKAGE_PUBLIC_REFUSED);
+    }
+    _test_next:
+    return failures;
+}
+
+static int zwn_redundant_hop_a_to_b(struct zwn_redundant_run *r)
+{
+    int failures = 0;
+    const struct zwn_link_spec a_b_links[] = {
+        {&r->a, &r->a_b, {11, 0, 0, 1}, r->name_b},
+        {&r->b, &r->b_a, {11, 0, 0, 2}, r->name_a},
+    };
+    ASSERT(zwn_fixture_links(r->fixture, a_b_links,
+                             sizeof(a_b_links) / sizeof(a_b_links[0])));
+    ASSERT(zwn_meet_side(&r->a, &r->a_b));
+    ASSERT(zwn_meet_side(&r->b, &r->b_a));
+    for (size_t i = 0; i < r->n; i++) {
+        fprintf(stderr, "  ... %s: A->B hop %zu/%zu\n", r->test_name,
+                i + 1u, r->n);
+        ASSERT(zwn_hop_carrier(&r->a, &r->b, &r->a_b, &r->b_a,
+                               &r->transport[i], r->params->pchMessageStart,
+                               r->now_base + (uint64_t)i * 10u));
+    }
+    _test_next:
+    return failures;
+}
+
+static void zwn_redundant_release_a(struct zwn_redundant_run *r)
+{
+    zwn_fixture_release_link(r->fixture, &r->a_b);
+    zwn_fixture_release_link(r->fixture, &r->b_a);
+    zwn_fixture_release_node(r->fixture, &r->a);
+}
+
+static int zwn_redundant_hop_b_to_c(struct zwn_redundant_run *r)
+{
+    int failures = 0;
+    const struct zwn_link_spec b_c_links[] = {
+        {&r->b, &r->b_c, {11, 0, 0, 3}, r->name_c},
+        {&r->c, &r->c_b, {11, 0, 0, 4}, r->name_b},
+    };
+    ASSERT(zwn_fixture_links(r->fixture, b_c_links,
+                             sizeof(b_c_links) / sizeof(b_c_links[0])));
+    ASSERT(zwn_meet_side(&r->b, &r->b_c));
+    ASSERT(zwn_meet_side(&r->c, &r->c_b));
+    for (size_t i = 0; i < r->n; i++) {
+        fprintf(stderr, "  ... %s: B->C hop %zu/%zu\n", r->test_name,
+                i + 1u, r->n);
+        ASSERT(zwn_hop_carrier(&r->b, &r->c, &r->b_c, &r->c_b,
+                               &r->transport[i], r->params->pchMessageStart,
+                               r->now_base + 100u + (uint64_t)i * 10u));
+        struct vcs_package_store_status st;
+        ASSERT(vcs_package_store_package_status(
+            r->b.store, r->transport[i].transport_root, &st));
+        ASSERT(st.complete && st.pinned);
+        ASSERT(vcs_package_store_package_status(
+            r->c.store, r->transport[i].transport_root, &st));
+        ASSERT(st.complete && st.pinned);
+        ASSERT(vcs_package_store_verify_possession(
+            r->c.store, r->transport[i].transport_root, false));
+        ASSERT(vcs_package_store_verify_possession(
+            r->c.store, r->transport[i].package_root, false));
+    }
+    _test_next:
+    return failures;
+}
+
 static int zwn_t_redundant_publish_disappear(
     const struct chain_params *params, const char *test_name,
     const char *label, const char *const *dirs, size_t n, uint64_t now_base)
@@ -4672,8 +5092,7 @@ static int zwn_t_redundant_publish_disappear(
     size_t i;
     int wa, wb, wc;
 
-    if (!params || !test_name || !label || !dirs || n == 0 ||
-        n > ZWN_REDUNDANT_MAX) {
+    if (!zwn_redundant_args_ok(params, test_name, label, dirs, n)) {
         fprintf(stderr,
                 "zwn redundant hop: bad args name=%s label=%s n=%zu\n",
                 test_name ? test_name : "(null)",
@@ -4683,106 +5102,41 @@ static int zwn_t_redundant_publish_disappear(
     wa = snprintf(name_a, sizeof(name_a), "%s-a", label);
     wb = snprintf(name_b, sizeof(name_b), "%s-b", label);
     wc = snprintf(name_c, sizeof(name_c), "%s-c", label);
-    if (wa < 0 || (size_t)wa >= sizeof(name_a) || wb < 0 ||
-        (size_t)wb >= sizeof(name_b) || wc < 0 ||
-        (size_t)wc >= sizeof(name_c)) {
+    if (!zwn_redundant_name_fits(wa, sizeof(name_a)) ||
+        !zwn_redundant_name_fits(wb, sizeof(name_b)) ||
+        !zwn_redundant_name_fits(wc, sizeof(name_c))) {
         fprintf(stderr, "zwn redundant hop: node label '%s' too long\n",
                 label);
         return 1;
     }
     memset(prepared, 0, sizeof(prepared));
     memset(transport, 0, sizeof(transport));
+    struct zwn_redundant_run run = {
+        .fixture = &fixture,
+        .params = params,
+        .test_name = test_name,
+        .dirs = dirs,
+        .n = n,
+        .now_base = now_base,
+        .name_a = name_a,
+        .name_b = name_b,
+        .name_c = name_c,
+        .prepared = prepared,
+        .transport = transport,
+    };
     TEST(test_name) {
-        struct zwn_node a, b, c;
-        const struct zwn_node_spec nodes[] = {
-            {&a, name_a}, {&b, name_b}, {&c, name_c},
-        };
-        ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
-                                 sizeof(nodes) / sizeof(nodes[0])));
-        for (i = 0; i < n; i++) {
-            /* Heartbeat: each iteration content-hashes and pins a whole
-             * in-tree package; on a loaded box that can individually run
-             * past the no-output watchdog's window, so print progress
-             * rather than staying silent for the whole loop. */
-            fprintf(stderr, "  ... %s: seeding %s (%zu/%zu)\n", test_name,
-                    dirs[i], i + 1u, n);
-            struct zwn_package_scenario sc = {
-                .name = dirs[i],
-                .dht_namespace = "package.c23-commons",
-                .source_dir = dirs[i],
-                .publisher_sequence = i + 1u,
-                .expected_package_root_hex = NULL,
-            };
-            vcs_package_transport_init(&transport[i]);
-            ASSERT(zwn_prepare_package_transport(
-                &sc, dirs[i], i + 1u, NULL, &prepared[i], &transport[i]));
-            ASSERT(vcs_package_transport_store(a.store, &transport[i],
-                                               dirs[i]) ==
-                   VCS_PACKAGE_TRANSPORT_OK);
-            ASSERT(vcs_package_store_pin(a.store, transport[i].transport_root,
-                                         true) == VCS_PACKAGE_STORE_OK);
-            struct vcs_package_store_status seeded;
-            ASSERT(vcs_package_store_package_status(
-                a.store, transport[i].transport_root, &seeded));
-            ASSERT(seeded.complete && seeded.pinned);
-            struct vcs_package_public_verdict shape;
-            vcs_package_public_shape_classify(a.store,
-                                              transport[i].transport_root,
-                                              &shape);
-            if (shape.shape == VCS_PACKAGE_PUBLIC_REFUSED)
-                fprintf(stderr, "zwn public_shape %s: %s (%s)\n", dirs[i],
-                        shape.rule ? shape.rule : "?",
-                        shape.dependency_rule ? shape.dependency_rule : "-");
-            ASSERT(shape.shape != VCS_PACKAGE_PUBLIC_REFUSED);
+        if (zwn_redundant_seed(&run) != 0) {
+            failures++;
+            goto _test_next;
         }
-
-        struct zwn_link a_b, b_a;
-        const struct zwn_link_spec a_b_links[] = {
-            {&a, &a_b, {11, 0, 0, 1}, name_b},
-            {&b, &b_a, {11, 0, 0, 2}, name_a},
-        };
-        ASSERT(zwn_fixture_links(&fixture, a_b_links,
-                                 sizeof(a_b_links) / sizeof(a_b_links[0])));
-        ASSERT(zwn_meet_side(&a, &a_b));
-        ASSERT(zwn_meet_side(&b, &b_a));
-        for (i = 0; i < n; i++) {
-            fprintf(stderr, "  ... %s: A->B hop %zu/%zu\n", test_name,
-                    i + 1u, n);
-            ASSERT(zwn_hop_carrier(&a, &b, &a_b, &b_a, &transport[i],
-                                   params->pchMessageStart,
-                                   now_base + (uint64_t)i * 10u));
+        if (zwn_redundant_hop_a_to_b(&run) != 0) {
+            failures++;
+            goto _test_next;
         }
-
-        zwn_fixture_release_link(&fixture, &a_b);
-        zwn_fixture_release_link(&fixture, &b_a);
-        zwn_fixture_release_node(&fixture, &a);
-
-        struct zwn_link b_c, c_b;
-        const struct zwn_link_spec b_c_links[] = {
-            {&b, &b_c, {11, 0, 0, 3}, name_c},
-            {&c, &c_b, {11, 0, 0, 4}, name_b},
-        };
-        ASSERT(zwn_fixture_links(&fixture, b_c_links,
-                                 sizeof(b_c_links) / sizeof(b_c_links[0])));
-        ASSERT(zwn_meet_side(&b, &b_c));
-        ASSERT(zwn_meet_side(&c, &c_b));
-        for (i = 0; i < n; i++) {
-            fprintf(stderr, "  ... %s: B->C hop %zu/%zu\n", test_name,
-                    i + 1u, n);
-            ASSERT(zwn_hop_carrier(&b, &c, &b_c, &c_b, &transport[i],
-                                   params->pchMessageStart,
-                                   now_base + 100u + (uint64_t)i * 10u));
-            struct vcs_package_store_status st;
-            ASSERT(vcs_package_store_package_status(
-                b.store, transport[i].transport_root, &st));
-            ASSERT(st.complete && st.pinned);
-            ASSERT(vcs_package_store_package_status(
-                c.store, transport[i].transport_root, &st));
-            ASSERT(st.complete && st.pinned);
-            ASSERT(vcs_package_store_verify_possession(
-                c.store, transport[i].transport_root, false));
-            ASSERT(vcs_package_store_verify_possession(
-                c.store, transport[i].package_root, false));
+        zwn_redundant_release_a(&run);
+        if (zwn_redundant_hop_b_to_c(&run) != 0) {
+            failures++;
+            goto _test_next;
         }
         PASS();
     } _test_next:
@@ -5296,6 +5650,53 @@ static bool zwn_task_offer(struct zwn_node *z, const char *goal,
                VCS_PACKAGE_STORE_OK;
 }
 
+static bool zwn_focus_wire_args_ok(
+    struct zwn_node *from, struct zwn_node *to,
+    struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const uint8_t *wire, size_t wire_len,
+    uint8_t *received, size_t received_cap,
+    uint8_t carrier_root[32], uint32_t *retries)
+{
+    return from && to && from_to && to_from && msgstart && wire &&
+           wire_len != 0 && received && received_cap >= wire_len &&
+           carrier_root && retries;
+}
+
+/* Blob put, pin and the announce + first round, in the original order. */
+static bool zwn_focus_wire_publish(
+    struct zwn_node *from, struct zwn_link *from_to, struct zwn_link *to_from,
+    const unsigned char msgstart[MESSAGE_START_SIZE],
+    const uint8_t *wire, size_t wire_len, uint8_t carrier_root[32])
+{
+    return vcs_blob_put_to(from->store, wire, wire_len, carrier_root) ==
+               VCS_BLOB_OK &&
+           vcs_package_store_pin(from->store, carrier_root, true) ==
+               VCS_PACKAGE_STORE_OK &&
+           vcs_swarm_engine_announce_to(
+               from->engine, (uint64_t)from_to->node->id) != 0 &&
+           zwn_round(from_to, to_from, msgstart);
+}
+
+static bool zwn_focus_wire_collect(
+    struct zwn_node *to, const uint8_t carrier_root[32],
+    uint8_t *received, size_t received_cap, size_t wire_len,
+    uint32_t *retries)
+{
+    size_t received_len = 0;
+    struct vcs_swarm_download_status status;
+    memset(&status, 0, sizeof(status));
+    if (vcs_blob_get_from(to->store, carrier_root, received, received_cap,
+                          &received_len) != VCS_BLOB_OK ||
+        received_len != wire_len ||
+        !vcs_swarm_engine_download_status(to->engine, carrier_root, &status) ||
+        status.state != VCS_SWARM_DL_COMPLETE ||
+        status.requested_objects < status.transferred_objects)
+        return false;
+    *retries += status.requested_objects - status.transferred_objects;
+    return true;
+}
+
 /* Shared-focus wires remain semantic ZVCS objects. This fixture wraps each
  * exact canonical wire in the already-frozen one-chunk content.v2 blob shape,
  * carries it through two independent swarm engines, then returns the received
@@ -5309,16 +5710,11 @@ static bool zwn_focus_wire_transfer(
     uint8_t *received, size_t received_cap,
     uint8_t carrier_root[32], uint32_t *retries)
 {
-    if (!from || !to || !from_to || !to_from || !msgstart || !wire ||
-        wire_len == 0 || !received || received_cap < wire_len ||
-        !carrier_root || !retries ||
-        vcs_blob_put_to(from->store, wire, wire_len, carrier_root) !=
-            VCS_BLOB_OK ||
-        vcs_package_store_pin(from->store, carrier_root, true) !=
-            VCS_PACKAGE_STORE_OK ||
-        vcs_swarm_engine_announce_to(
-            from->engine, (uint64_t)from_to->node->id) == 0 ||
-        !zwn_round(from_to, to_from, msgstart))
+    if (!zwn_focus_wire_args_ok(from, to, from_to, to_from, msgstart, wire,
+                                wire_len, received, received_cap,
+                                carrier_root, retries) ||
+        !zwn_focus_wire_publish(from, from_to, to_from, msgstart, wire,
+                                wire_len, carrier_root))
         return false;
 
     uint32_t replies_before = from->chunk_data_replies[0];
@@ -5327,17 +5723,9 @@ static bool zwn_focus_wire_transfer(
         from->chunk_data_replies[0] <= replies_before)
         return false;
 
-    size_t received_len = 0;
-    struct vcs_swarm_download_status status;
-    memset(&status, 0, sizeof(status));
-    if (vcs_blob_get_from(to->store, carrier_root, received, received_cap,
-                          &received_len) != VCS_BLOB_OK ||
-        received_len != wire_len ||
-        !vcs_swarm_engine_download_status(to->engine, carrier_root, &status) ||
-        status.state != VCS_SWARM_DL_COMPLETE ||
-        status.requested_objects < status.transferred_objects)
+    if (!zwn_focus_wire_collect(to, carrier_root, received, received_cap,
+                                wire_len, retries))
         return false;
-    *retries += status.requested_objects - status.transferred_objects;
     return memcmp(received, wire, wire_len) == 0;
 }
 
