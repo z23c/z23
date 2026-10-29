@@ -22,22 +22,33 @@
 
 /* Re-derive the manifest's own artifact digest and assert the complete/self-
  * bound shape the chain binder and exporter both require. Pure. */
+static bool manifest_shape_refused(
+    const struct consensus_state_bundle_manifest *m)
+{
+    return !m || m->height < 0 || !m->history_complete || !m->source_clean ||
+           m->activation_boundary != 0 || m->sprout_source_cursor != 0 ||
+           m->sapling_source_cursor != 0 || m->nullifier_source_cursor != 0 ||
+           m->source_fold_cursor != (int64_t)m->height + 1 ||
+           m->sapling_frontier_height < 0 ||
+           m->sapling_frontier_height > m->height ||
+           (m->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
+            m->validation_profile != CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD);
+}
+
+static bool manifest_digests_unset(
+    const struct consensus_state_bundle_manifest *m)
+{
+    return !zcl_bytes_any_set(m->block_hash, 32) ||
+           !zcl_bytes_any_set(m->sapling_frontier_root, 32) ||
+           !zcl_bytes_any_set(m->proof_manifest_digest, 32) ||
+           !zcl_bytes_any_set(m->source_digest, 32) ||
+           !zcl_bytes_any_set(m->artifact_digest, 32);
+}
+
 static bool manifest_complete_self_bound(
     const struct consensus_state_bundle_manifest *m)
 {
-    if (!m || m->height < 0 || !m->history_complete || !m->source_clean ||
-        m->activation_boundary != 0 || m->sprout_source_cursor != 0 ||
-        m->sapling_source_cursor != 0 || m->nullifier_source_cursor != 0 ||
-        m->source_fold_cursor != (int64_t)m->height + 1 ||
-        m->sapling_frontier_height < 0 ||
-        m->sapling_frontier_height > m->height ||
-        (m->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
-         m->validation_profile != CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !zcl_bytes_any_set(m->block_hash, 32) ||
-        !zcl_bytes_any_set(m->sapling_frontier_root, 32) ||
-        !zcl_bytes_any_set(m->proof_manifest_digest, 32) ||
-        !zcl_bytes_any_set(m->source_digest, 32) ||
-        !zcl_bytes_any_set(m->artifact_digest, 32))
+    if (manifest_shape_refused(m) || manifest_digests_unset(m))
         return false;
     uint8_t computed[32];
     consensus_state_bundle_artifact_digest(m, computed);
@@ -93,20 +104,10 @@ static void finish(struct consensus_state_publication_decision_record *out,
                                                       out->decision_digest);
 }
 
-void consensus_state_publication_cas_decide(
+static void copy_observed_identity(
     const struct consensus_state_publication_cas_inputs *in,
     struct consensus_state_publication_decision_record *out)
 {
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    if (!in) {
-        finish(out, CONSENSUS_PUBLICATION_REFUSED,
-               CONSENSUS_PUBLICATION_REFUSAL_NULL_INPUT,
-               "no inputs provided");
-        return;
-    }
-
     /* Copy every observed identity into the record up front so a refusal still
      * binds what it saw (and the frontier is always bound for staleness). */
     memcpy(out->artifact_receipt_digest, in->artifact_receipt_digest, 32);
@@ -122,6 +123,66 @@ void consensus_state_publication_cas_decide(
                                                        : -1;
     if (in->frontier_known)
         memcpy(out->expected_frontier_hash, in->frontier_hash, 32);
+}
+
+/* Final profile and frontier checks; writes the ADMIT record when all pass. */
+static void decide_profile_and_frontier(
+    const struct consensus_state_publication_cas_inputs *in,
+    struct consensus_state_publication_decision_record *out)
+{
+    /* Canonical publication is FULL-profile only; a checkpoint-fold state is
+     * non-serving evidence. Manifest and receipt must agree. */
+    if (in->manifest.validation_profile != CONSENSUS_STATE_VALIDATION_FULL ||
+        in->source_receipt.validation_profile !=
+            CONSENSUS_STATE_VALIDATION_FULL) {
+        finish(out, CONSENSUS_PUBLICATION_REFUSED,
+               CONSENSUS_PUBLICATION_REFUSAL_PROFILE_NOT_SERVING,
+               "validation profile is not FULL (non-serving state)");
+        return;
+    }
+    /* CAS frontier binding: ordinary state replacement may not move ahead of
+     * durable H*. Two headers-first paths are different: their opaque chain-
+     * evidence digest already binds the PoW authority and proves the selected
+     * header while the current frontier is still below the bundle —
+     *   (a) the compiled-checkpoint path (checkpoint_authority_used), and
+     *   (b) the ASSISTED above-checkpoint tier (assisted_authority_used): the
+     *       bundle LOCATION + shielded TIP root are PoW-bound in the evidence
+     *       even though the CONTENT below the seam is borrowed and the install
+     *       lands at the non-sovereign RELEASE_ASSISTED tier.
+     * Keep unknown frontiers fail-closed; permit a known, stable below-bundle
+     * frontier only when one of those evidence flags is present. */
+    if (!in->frontier_known) {
+        finish(out, CONSENSUS_PUBLICATION_REFUSED,
+               CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_UNKNOWN,
+               "current durable frontier could not be captured");
+        return;
+    }
+    if (in->frontier_height < in->manifest.height &&
+        !in->checkpoint_authority_used && !in->assisted_authority_used) {
+        finish(out, CONSENSUS_PUBLICATION_REFUSED,
+               CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND,
+               "bundle height exceeds the durable node frontier");
+        return;
+    }
+    finish(out, CONSENSUS_PUBLICATION_ADMIT,
+           CONSENSUS_PUBLICATION_REFUSAL_NONE,
+           "all evidence present and mutually binding");
+}
+
+void consensus_state_publication_cas_decide(
+    const struct consensus_state_publication_cas_inputs *in,
+    struct consensus_state_publication_decision_record *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!in) {
+        finish(out, CONSENSUS_PUBLICATION_REFUSED,
+               CONSENSUS_PUBLICATION_REFUSAL_NULL_INPUT,
+               "no inputs provided");
+        return;
+    }
+    copy_observed_identity(in, out);
 
     if (!lane_name(in->target_lane)) {
         finish(out, CONSENSUS_PUBLICATION_REFUSED,
@@ -181,41 +242,5 @@ void consensus_state_publication_cas_decide(
                "source digest");
         return;
     }
-    /* Canonical publication is FULL-profile only; a checkpoint-fold state is
-     * non-serving evidence. Manifest and receipt must agree. */
-    if (in->manifest.validation_profile != CONSENSUS_STATE_VALIDATION_FULL ||
-        in->source_receipt.validation_profile !=
-            CONSENSUS_STATE_VALIDATION_FULL) {
-        finish(out, CONSENSUS_PUBLICATION_REFUSED,
-               CONSENSUS_PUBLICATION_REFUSAL_PROFILE_NOT_SERVING,
-               "validation profile is not FULL (non-serving state)");
-        return;
-    }
-    /* CAS frontier binding: ordinary state replacement may not move ahead of
-     * durable H*. Two headers-first paths are different: their opaque chain-
-     * evidence digest already binds the PoW authority and proves the selected
-     * header while the current frontier is still below the bundle —
-     *   (a) the compiled-checkpoint path (checkpoint_authority_used), and
-     *   (b) the ASSISTED above-checkpoint tier (assisted_authority_used): the
-     *       bundle LOCATION + shielded TIP root are PoW-bound in the evidence
-     *       even though the CONTENT below the seam is borrowed and the install
-     *       lands at the non-sovereign RELEASE_ASSISTED tier.
-     * Keep unknown frontiers fail-closed; permit a known, stable below-bundle
-     * frontier only when one of those evidence flags is present. */
-    if (!in->frontier_known) {
-        finish(out, CONSENSUS_PUBLICATION_REFUSED,
-               CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_UNKNOWN,
-               "current durable frontier could not be captured");
-        return;
-    }
-    if (in->frontier_height < in->manifest.height &&
-        !in->checkpoint_authority_used && !in->assisted_authority_used) {
-        finish(out, CONSENSUS_PUBLICATION_REFUSED,
-               CONSENSUS_PUBLICATION_REFUSAL_FRONTIER_BEHIND,
-               "bundle height exceeds the durable node frontier");
-        return;
-    }
-    finish(out, CONSENSUS_PUBLICATION_ADMIT,
-           CONSENSUS_PUBLICATION_REFUSAL_NONE,
-           "all evidence present and mutually binding");
+    decide_profile_and_frontier(in, out);
 }
