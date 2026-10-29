@@ -14,6 +14,7 @@ TOOLS := $(SDK_ROOT)/build-tools/$(BUILD_TOOLS_VERSION)
 ANDROID_JAR := $(SDK_ROOT)/platforms/android-$(ANDROID_API)/android.jar
 KEYSTORE ?= $(BUILD_DIR)/development.keystore
 APK := $(BUILD_DIR)/z23.apk
+APP_MANIFEST ?= AndroidManifest.xml
 QUIRC_DIR := $(abspath $(BUILD_DIR)/quirc)
 QUIRC_SOURCES := $(QUIRC_DIR)/quirc.c $(QUIRC_DIR)/decode.c $(QUIRC_DIR)/identify.c $(QUIRC_DIR)/version_db.c
 HOST_CC ?= cc
@@ -21,13 +22,70 @@ HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: apk native install launch check-config check-node prepare-quirc test
+.PHONY: apk native install launch check-config check-node prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
 	patch -s -d '$(QUIRC_DIR)' -p1 < ../../vendor/quirc/patches/strict-c23.patch
 
-test: prepare-quirc
+bridge:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I../../platform/modules/json/include \
+	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include \
+	  bridge/main.c bridge/relay.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/z23-bridge'
+
+test-bridge: bridge
+	@mkdir -p '$(BUILD_DIR)/bridge-fixture'
+	$(HOST_CC) $(HOST_WARNINGS) bridge/mock_codex.c -o '$(BUILD_DIR)/bridge-fixture/codex'
+	@unset BRIDGE_MOCK_UNKNOWN_ENABLED; printf '%s\n' '{"prompt":"test"}' | \
+	  PATH='$(abspath $(BUILD_DIR))/bridge-fixture' '$(BUILD_DIR)/z23-bridge' > '$(BUILD_DIR)/bridge-ok.json'
+	grep -Fx '{"ok":true,"answer":"mock answer"}' '$(BUILD_DIR)/bridge-ok.json'
+	@if printf '%s\n' '{"prompt":"test"}' | \
+	  PATH='$(abspath $(BUILD_DIR))/bridge-fixture' BRIDGE_MOCK_UNKNOWN_ENABLED=1 \
+	  '$(BUILD_DIR)/z23-bridge' > '$(BUILD_DIR)/bridge-refused.json'; then exit 1; fi
+	grep -Fx '{"ok":false,"error":"Could not safely configure local Codex."}' '$(BUILD_DIR)/bridge-refused.json'
+	$(HOST_CC) $(HOST_WARNINGS) -I. -Ibridge -I../../platform/modules/json/include \
+	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include \
+	  tests/relay_test.c bridge/relay.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/relay-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/relay-test.XXXXXX'); \
+	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/relay-test' "$$scratch"
+
+SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
+SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
+HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c bridge/host.c bridge/relay.c hosts.c pairing.c \
+  ../../platform/modules/sha3/src/sha3.c \
+  ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
+.PHONY: speech-bridge speech-probe test-voice test-host preview-apk
+speech-bridge:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) bridge/speech_main.c $(HOST_SOURCES) \
+	  $(SPEECH_JSON) -o '$(BUILD_DIR)/z23-speech-bridge'
+
+speech-probe:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/speech_roundtrip.c speech_client.c bridge_client.c voice.c \
+	  $(SPEECH_JSON) -o '$(BUILD_DIR)/speech-roundtrip'
+
+preview-apk:
+	@mkdir -p '$(BUILD_DIR)/preview'
+	sed -e 's/org.z23.nativeapp/org.z23.voicepreview/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
+	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
+	$(MAKE) apk APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml'
+
+test-voice:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/voice_test.c voice.c -o '$(BUILD_DIR)/voice-test'
+	'$(BUILD_DIR)/voice-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/speech_client_test.c speech_client.c voice.c \
+	  $(SPEECH_JSON) -o '$(BUILD_DIR)/speech-client-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
+	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
+
+test: prepare-quirc test-bridge test-voice test-host
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -80,7 +138,7 @@ apk: check-node native $(KEYSTORE)
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
 	cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'
-	'$(TOOLS)/aapt' package -f -M AndroidManifest.xml -S res \
+	'$(TOOLS)/aapt' package -f -M '$(APP_MANIFEST)' -S res \
 	  -I '$(ANDROID_JAR)' -F '$(BUILD_DIR)/resources.apk'
 	cp '$(BUILD_DIR)/resources.apk' '$(BUILD_DIR)/unsigned.apk'
 	'$(JAVA_HOME)/bin/jar' uf '$(BUILD_DIR)/unsigned.apk' -C '$(BUILD_DIR)/package' lib
@@ -96,3 +154,13 @@ install: apk
 launch:
 	@test -n '$(ANDROID_SERIAL)' || { echo 'Set ANDROID_SERIAL to one adb device serial' >&2; exit 1; }
 	'$(ADB)' -s '$(ANDROID_SERIAL)' shell am start -n '$(APP_ID)/android.app.NativeActivity'
+
+HOST_TEST_BASE := $(SPEECH_JSON) ../../platform/modules/sha3/src/sha3.c
+test-host:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
+	'$(BUILD_DIR)/hosts-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c $(SPEECH_JSON) -o '$(BUILD_DIR)/fleet-probe-test'
+	'$(BUILD_DIR)/fleet-probe-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/http_test.c bridge/http.c $(SPEECH_JSON) -o '$(BUILD_DIR)/http-test'
+	'$(BUILD_DIR)/http-test'

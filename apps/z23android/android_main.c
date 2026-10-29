@@ -23,6 +23,8 @@ static jobject active;
 static ALooper *looper;
 static int signal_pipe[2] = {-1, -1};
 static uint64_t permission_ticket;
+static bool foreground = true;
+static bool microphone_allowed(JNIEnv *env, jobject activity);
 
 static bool clean(JNIEnv *env)
 {
@@ -48,19 +50,25 @@ static void refresh(JNIEnv *env)
 }
 static void action(const char *name, const char *argument)
 {
+    if (!strcmp(name, "voice_start")) {
+        JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
+        if (!foreground || !current_vm ||
+            (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK ||
+            !active || !microphone_allowed(env, active)) return;
+    }
     if (!zapp_controller_action(name, argument, "")) {
         JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
         if (current_vm && (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK)
             zapp_native_ui_update(env, NULL, "Unable to start that action.");
     } else notify();
 }
-static void request_permission(JNIEnv *env, jobject activity)
+static void request_permission(JNIEnv *env, jobject activity, const char *name)
 {
     jclass cls = (*env)->GetObjectClass(env, activity);
     jclass string_cls = (*env)->FindClass(env, "java/lang/String");
     jmethodID method = cls ? (*env)->GetMethodID(env, cls, "requestPermissions", "([Ljava/lang/String;I)V") : NULL;
     jobjectArray permissions = string_cls ? (*env)->NewObjectArray(env, 1, string_cls, NULL) : NULL;
-    jstring camera = (*env)->NewStringUTF(env, "android.permission.CAMERA");
+    jstring camera = (*env)->NewStringUTF(env, name);
     if (clean(env) && method && permissions && camera) {
         (*env)->SetObjectArrayElement(env, permissions, 0, camera);
         if (clean(env)) (*env)->CallVoidMethod(env, activity, method, permissions, 1);
@@ -70,6 +78,24 @@ static void request_permission(JNIEnv *env, jobject activity)
     if (permissions) (*env)->DeleteLocalRef(env, permissions);
     if (string_cls) (*env)->DeleteLocalRef(env, string_cls);
     if (cls) (*env)->DeleteLocalRef(env, cls);
+}
+static bool microphone_allowed(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
+    jstring permission = (*env)->NewStringUTF(env, "android.permission.RECORD_AUDIO");
+    bool granted = false;
+    if (clean(env) && check && permission) {
+        jint result = (*env)->CallIntMethod(env, activity, check, permission);
+        granted = clean(env) && result == 0;
+    }
+    (*env)->PopLocalFrame(env, NULL);
+    if (!granted) {
+        request_permission(env, activity, "android.permission.RECORD_AUDIO");
+        zapp_native_ui_update(env, "Microphone permission required. After granting access, press Talk again.", NULL);
+    }
+    return granted;
 }
 static int signal_ready(int fd, int events, void *context)
 {
@@ -83,7 +109,7 @@ static int signal_ready(int fd, int events, void *context)
     bool request = permission_ticket && permission_ticket == zapp_camera_ticket();
     permission_ticket = 0;
     pthread_mutex_unlock(&lock);
-    if (activity && request) request_permission(env, activity);
+    if (activity && request) request_permission(env, activity, "android.permission.CAMERA");
     if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
     return 1;
 }
@@ -184,6 +210,26 @@ static bool native_directory(JNIEnv *env, jobject activity, char *out, size_t ca
 out:
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
+/* Reads and removes the pairing descriptor a USB-connected laptop host offered
+ * through the launch intent. The owner still accepts it on screen. */
+static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
+{
+    bool ok = false;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = cls ? (*env)->GetMethodID(env, cls, "getIntent", "()Landroid/content/Intent;") : NULL;
+    jobject intent = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
+    jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
+    jmethodID remove = intent_cls ? (*env)->GetMethodID(env, intent_cls, "removeExtra", "(Ljava/lang/String;)V") : NULL;
+    jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.pair") : NULL;
+    jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
+    const char *chars = clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
+    if (chars && strlen(chars) < cap) { memcpy(out, chars, strlen(chars) + 1); ok = true; }
+    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+    if (value) (*env)->CallVoidMethod(env, intent, remove, key);
+    (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
+}
 static bool release_surface(JNIEnv *env, jobject activity)
 {
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
@@ -202,9 +248,10 @@ static bool release_surface(JNIEnv *env, jobject activity)
 out:
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
-static void destroy(ANativeActivity *activity)
+/* Releases activity-bound state. A relaunch creates the new activity before the old one is
+ * destroyed, so the newest activity takes this state over and the old one skips it. */
+static void detach_activity(JNIEnv *env)
 {
-    JNIEnv *env = activity->env;
     zapp_controller_detach();
     zapp_camera_set_frame_notify(NULL);
     zapp_camera_stop();
@@ -218,15 +265,38 @@ static void destroy(ANativeActivity *activity)
     zapp_native_ui_destroy(env);
     if (retained) (*env)->DeleteGlobalRef(env, retained);
 }
+static void destroy(ANativeActivity *activity)
+{
+    JNIEnv *env = activity->env;
+    pthread_mutex_lock(&lock);
+    bool owner = active && (*env)->IsSameObject(env, active, activity->clazz);
+    pthread_mutex_unlock(&lock);
+    if (owner) detach_activity(env);
+}
+static void pause_activity(ANativeActivity *activity)
+{
+    (void)activity; foreground = false;
+    zapp_controller_pause();
+    zapp_camera_stop();
+}
+static void resume_activity(ANativeActivity *activity)
+{
+    foreground = true;
+    refresh(activity->env);
+}
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)
 {
     (void)state; (void)state_size;
     atomic_store(&vm, activity->vm);
     activity->callbacks->onDestroy = destroy;
+    activity->callbacks->onPause = pause_activity;
+    activity->callbacks->onResume = resume_activity;
     activity->callbacks->onInputQueueCreated = queue_created;
     activity->callbacks->onInputQueueDestroyed = queue_destroyed;
     JNIEnv *env = activity->env; char native_dir[4096];
+    pthread_mutex_lock(&lock); bool previous = active != NULL; pthread_mutex_unlock(&lock);
+    if (previous) detach_activity(env);
     if (!activity->internalDataPath || !native_directory(env, activity->clazz, native_dir, sizeof(native_dir))) goto fail;
     looper = ALooper_forThread();
     if (!looper) goto fail;
@@ -238,6 +308,11 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
         !zapp_controller_start(activity->internalDataPath, native_dir, notify) ||
         !zapp_native_ui_create(env, activity->clazz, action)) goto fail;
     zapp_camera_set_frame_notify(notify);
+    char offer[256];
+    if (intent_pairing(env, activity->clazz, offer, sizeof(offer))) {
+        (void)zapp_controller_action("pair_offer", offer, "");
+        memset(offer, 0, sizeof(offer));
+    }
     refresh(env); return;
 fail:
     (void)clean(env); ANativeActivity_finish(activity);

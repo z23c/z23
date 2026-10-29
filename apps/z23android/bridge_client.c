@@ -16,7 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define WIRE_CAP 131072
+#define WIRE_CAP 2097152
 static int64_t now_ms(void)
 {
     struct timespec now;
@@ -56,7 +56,8 @@ static bool descriptor_read(int fd, char text[512], size_t *used)
 static bool descriptor_parse(const char *text, size_t used, uint16_t *port, char token[65])
 {
     struct json_value root = {0};
-    bool ok = !memchr(text, 0, used) && json_read(&root, text, used);
+    bool ok = !memchr(text, 0, used) && !strstr(text, "\\u") &&
+        json_read(&root, text, used) && root.type == JSON_OBJ && root.num_children == 2;
     const struct json_value *p = json_get(&root, "port");
     const char *t = json_get_str(json_get(&root, "token"));
     ok = ok && p && p->type == JSON_INT && json_get_int(p) > 0 && json_get_int(p) <= 65535 &&
@@ -65,11 +66,11 @@ static bool descriptor_parse(const char *text, size_t used, uint16_t *port, char
     json_cleanse_strings(&root); json_free(&root);
     return ok;
 }
-static bool descriptor(const char *files, uint16_t *port, char token[65])
+static bool descriptor(const char *files, const char *name, uint16_t *port, char token[65])
 {
     int dir = open(files, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (dir < 0) return false;
-    int fd = openat(dir, "codex-bridge.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(dir, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     close(dir);
     if (fd < 0) return false;
     char text[512] = ""; size_t used = 0;
@@ -145,7 +146,8 @@ static bool bridge_exchange(const char *prompt, const char *token, uint16_t port
     int fd = ok && now >= 0 ? connect_local(port, now + 100000, cancel) : -1;
     ok = fd >= 0 && exchange_send(fd, wire, size, now + 100000, cancel) &&
         exchange_receive(fd, reply, now + 100000, cancel) && !cancelled(cancel) &&
-        json_read(&response, reply, strlen(reply));
+        !strstr(reply, "\\u0000") && json_read(&response, reply, strlen(reply)) &&
+        response.type == JSON_OBJ && response.num_children == 2;
     if (fd >= 0) close(fd);
     ok = bridge_response(ok, &response, out, cap);
     json_cleanse_strings(&request); json_free(&request);
@@ -161,8 +163,20 @@ bool zapp_bridge_chat(const char *files, const char *prompt, char *out, size_t c
     snprintf(out, cap, "Connect the paired laptop over USB and keep its Z23 bridge open.");
     uint16_t port = 0; char token[65] = "";
     bool ok = !cancelled(cancel) && prompt[0] && strlen(prompt) <= 16000 &&
-        descriptor(files, &port, token) && !cancelled(cancel);
+        descriptor(files, "codex-bridge.json", &port, token) && !cancelled(cancel);
     if (ok) ok = bridge_exchange(prompt, token, port, out, cap, cancel);
     if (cancelled(cancel)) { snprintf(out, cap, "Reply cancelled."); ok = false; }
+    memory_cleanse(token, sizeof(token)); return ok;
+}
+bool zapp_bridge_speech(const char *files, const char *request, char *out, size_t cap,
+                       const atomic_bool *cancel)
+{
+    if (!files || !request || !out || !cap) return false;
+    snprintf(out, cap, "Pair your voice host and connect its USB tunnel.");
+    uint16_t port = 0; char token[65] = "";
+    bool ok = !cancelled(cancel) && request[0] && strlen(request) <= 1300000 &&
+        descriptor(files, "speech-bridge.json", &port, token) && !cancelled(cancel);
+    if (ok) ok = bridge_exchange(request, token, port, out, cap, cancel);
+    if (cancelled(cancel)) { snprintf(out, cap, "Voice cancelled."); ok = false; }
     memory_cleanse(token, sizeof(token)); return ok;
 }

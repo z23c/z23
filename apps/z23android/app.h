@@ -3,6 +3,7 @@
 #define Z23_ANDROID_APP_H
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define ZAPP_TEXT_CAP 65536
 #define ZAPP_ERROR_CAP 256
@@ -16,6 +17,8 @@ struct zapp_operation {
 const struct zapp_operation *zapp_operations(size_t *count);
 
 enum zapp_reply_state { ZAPP_REPLY_READY, ZAPP_REPLY_WAITING, ZAPP_REPLY_CANCELLING };
+enum zapp_voice_state { ZAPP_VOICE_READY, ZAPP_VOICE_RECORDING, ZAPP_VOICE_TRANSCRIBING,
+    ZAPP_VOICE_OBSERVING, ZAPP_VOICE_SYNTHESIZING, ZAPP_VOICE_PLAYING, ZAPP_VOICE_CANCELLING };
 
 struct zapp_view {
     char notice[512];
@@ -33,7 +36,14 @@ struct zapp_view {
     char fleet_status[8192];
     bool busy;
     bool node_running;
+    bool node_process_running;
     bool scanning;
     enum zapp_reply_state reply_state;
+    enum zapp_voice_state voice_state;
+    char voice_status[256];
+    char voice_proposal[32];
+    uint64_t voice_pair_generation;
+    char pair_offer[256]; /* Descriptor offered over USB, awaiting the owner's decision. */
+    char pair_code[8];
 };
 #endif

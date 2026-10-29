@@ -7,6 +7,7 @@
 struct zapp_conversation_snapshot {
     char sync_status[1024];
     char balance[512];
+    char history[4096]; /* Recent exchanges, oldest first; empty when none. */
     bool balance_known, balance_stale, node_running;
 };
 bool zapp_conversation_format(const struct zapp_conversation_snapshot *snapshot,

@@ -8,19 +8,95 @@
 
 static jobject root, status_view, output_view, prompt_view, invite_view, camera_view, balance_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
-static jobject buttons[9];
+static jobject voice_view, pair_view, hosts_view;
+static jobject buttons[16];
+static uint64_t voice_pair_generation;
+static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
 static zapp_native_action callback;
 static int pressed = -1;
 static float down_x, down_y;
 static char last_receipt[8192];
+static float density = 1.0f;
+static bool voice_preview;
 static const char *const actions[] = {"node_start", "node_stop", "operation", "chat", "fleet_scan", "fleet_preview", "fleet_join", "fleet_refresh"};
 
 static bool clean(JNIEnv *env)
 {
     if (!(*env)->ExceptionCheck(env)) return true;
     (*env)->ExceptionClear(env); return false;
+}
+static int dp(float value) { return (int)(value * density + 0.5f); }
+static bool int_property(JNIEnv *env, jobject view, const char *name, jint value)
+{
+    jclass cls = (*env)->GetObjectClass(env, view);
+    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, name, "(I)V") : NULL;
+    bool ok = clean(env) && method;
+    if (ok) { (*env)->CallVoidMethod(env, view, method, value); ok = clean(env); }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+static bool bool_property(JNIEnv *env, jobject view, const char *name, bool value)
+{
+    jclass cls = (*env)->GetObjectClass(env, view);
+    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, name, "(Z)V") : NULL;
+    bool ok = clean(env) && method;
+    if (ok) { (*env)->CallVoidMethod(env, view, method, (jboolean)value); ok = clean(env); }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+static bool padding(JNIEnv *env, jobject view, int horizontal, int vertical)
+{
+    jclass cls = (*env)->GetObjectClass(env, view);
+    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, "setPadding", "(IIII)V") : NULL;
+    bool ok = clean(env) && method;
+    if (ok) {
+        (*env)->CallVoidMethod(env, view, method, dp((float)horizontal), dp((float)vertical),
+                              dp((float)horizontal), dp((float)vertical));
+        ok = clean(env);
+    }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+static bool typography(JNIEnv *env, jobject view, float sp, jint color)
+{
+    jclass cls = (*env)->GetObjectClass(env, view);
+    jmethodID size = clean(env) && cls ? (*env)->GetMethodID(env, cls, "setTextSize", "(F)V") : NULL;
+    bool ok = clean(env) && size;
+    if (ok) { (*env)->CallVoidMethod(env, view, size, sp); ok = clean(env); }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok && int_property(env, view, "setTextColor", color);
+}
+static bool load_density(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getResources", "()Landroid/content/res/Resources;") : NULL;
+    jobject resources = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    jclass resource_cls = clean(env) && resources ? (*env)->GetObjectClass(env, resources) : NULL;
+    jmethodID metrics = clean(env) && resource_cls ? (*env)->GetMethodID(env, resource_cls, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;") : NULL;
+    jobject display = clean(env) && metrics ? (*env)->CallObjectMethod(env, resources, metrics) : NULL;
+    jclass display_cls = clean(env) && display ? (*env)->GetObjectClass(env, display) : NULL;
+    jfieldID field = clean(env) && display_cls ? (*env)->GetFieldID(env, display_cls, "density", "F") : NULL;
+    bool ok = clean(env) && field;
+    if (ok) { density = (*env)->GetFloatField(env, display, field); ok = clean(env) && density > 0.0f && density < 16.0f; }
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
+static bool load_identity(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jstring package = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    const char *name = clean(env) && package ? (*env)->GetStringUTFChars(env, package, NULL) : NULL;
+    bool ok = clean(env) && name;
+    if (ok) voice_preview = !strncmp(name, "org.z23.voicepreview", strlen("org.z23.voicepreview"));
+    if (name) (*env)->ReleaseStringUTFChars(env, package, name);
+    ok = clean(env) && ok;
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
 }
 static jobject widget(JNIEnv *env, const char *type, jobject activity)
 {
@@ -73,14 +149,27 @@ static bool keep(JNIEnv *env, jobject *dest, jobject value)
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
 {
     jobject view = widget(env, "android/widget/TextView", activity);
-    bool ok = view && text(env, view, label) && append(env, layout, view) && (!save || keep(env, save, view));
+    float sp = !strcmp(label, "Z23") || !strcmp(label, "Z23 Voice Preview") ? 24.0f :
+        !strcmp(label, "Fleet") || !strcmp(label, "Phone node") ? 20.0f :
+        save == &status_view || save == &connection_view || save == &voice_view ||
+        !strncmp(label, "Self-hosted", 11) || !strncmp(label, "Private voice on", 16) ||
+        !strncmp(label, "Voice pairing:", 14) ? 14.0f : 16.0f;
+    bool ok = view && typography(env, view, sp, (jint)0xff262b2b) && padding(env, view, 0, 4) &&
+        text(env, view, label) && append(env, layout, view) && (!save || keep(env, save, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
 static bool add_button(JNIEnv *env, jobject layout, jobject activity, const char *label, size_t i)
 {
     jobject view = widget(env, "android/widget/Button", activity);
-    bool ok = view && text(env, view, label) && append(env, layout, view) && keep(env, &buttons[i], view);
+    bool primary = i == 9 || i == 0;
+    bool ok = view && typography(env, view, 16.0f, primary ? (jint)0xffffffff : (jint)0xff264a43) &&
+        bool_property(env, view, "setAllCaps", false) &&
+        int_property(env, view, "setMinHeight", dp(i == 9 ? 72.0f : 48.0f)) &&
+        int_property(env, view, "setMinimumHeight", dp(i == 9 ? 72.0f : 48.0f)) &&
+        padding(env, view, 16, 8) && text(env, view, label) &&
+        append(env, layout, view) && keep(env, &buttons[i], view);
+    if (ok && primary) ok = int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -90,35 +179,51 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
     }
-    jobject *views[] = {&root, &status_view, &balance_view, &output_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view};
+    jobject *views[] = {&root, &status_view, &balance_view, &output_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
     }
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
+    voice_pair_generation = 0;
 }
+/* Voice controls come first so the Talk button stays put while node and fleet text change. */
 static bool node_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
     (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
-    return !(!add_text(env, layout, activity, "Z23", NULL) ||
-        !add_text(env, layout, activity, "Balance unavailable", &balance_view) ||
-        !add_text(env, layout, activity, "Node status unknown", &status_view) ||
-        !add_text(env, layout, activity, "", &notice_view));
+    return !(!add_text(env, layout, activity, voice_preview ? "Z23 Voice Preview" : "Z23", NULL) ||
+        !add_text(env, layout, activity, voice_preview ?
+            "Private voice on your laptop GPU · separate test app, your main node and wallet are unchanged." :
+            "Private voice on your laptop GPU", NULL) ||
+        !add_text(env, layout, activity, "", &pair_view) ||
+        !add_button(env, layout, activity, "Accept pairing", 12) ||
+        !add_button(env, layout, activity, "Reject", 13) ||
+        !add_button(env, layout, activity, "Talk", 9) ||
+        !add_text(env, layout, activity, "Press Talk and ask anything. Answers stay on your laptop.", &voice_view) ||
+        !int_property(env, voice_view, "setMinLines", 2) ||
+        !add_button(env, layout, activity, "Confirm", 10));
 }
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
     (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
-    return !(        !add_text(env, layout, activity, "Chat", NULL) ||
+    return !(!add_text(env, layout, activity, "", &transcript_view) ||
+        !add_text(env, layout, activity, "Or type to the private assistant", NULL) ||
         !add_text(env, layout, activity, "Not connected", &connection_view) ||
-        !add_text(env, layout, activity, "", &transcript_view) ||
         !append(env, layout, prompt) || !keep(env, &prompt_view, prompt) ||
         !add_button(env, layout, activity, "Send", 3) ||
+        !add_text(env, layout, activity, "Fleet", NULL) ||
+        !add_text(env, layout, activity, "Ask by voice, or refresh to probe every host.", &hosts_view) ||
+        !add_button(env, layout, activity, "Refresh fleet", 14) ||
+        !add_text(env, layout, activity, "Phone node", NULL) ||
+        !add_text(env, layout, activity, "Balance appears when your node is ready", &balance_view) ||
+        !add_text(env, layout, activity, "Node not started", &status_view) ||
+        !add_button(env, layout, activity, "Start node", 0) ||
+        !add_text(env, layout, activity, "", &notice_view) ||
         !add_button(env, layout, activity, "Details", 8));
 }
 static bool detail_controls(JNIEnv *env, jobject layout, jobject activity)
 {
-    return add_button(env, layout, activity, "Start node", 0) &&
-        add_button(env, layout, activity, "Stop node", 1) &&
+    return add_button(env, layout, activity, "Stop node", 1) &&
         add_button(env, layout, activity, "Check status", 2) &&
         add_text(env, layout, activity, "Fleet invitation", NULL);
 }
@@ -129,6 +234,8 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
         !add_button(env, layout, activity, "Scan invitation", 4) ||
         !append(env, layout, camera) || !keep(env, &camera_view, camera) ||
         !append(env, layout, invite) || !keep(env, &invite_view, invite) ||
+        !add_text(env, layout, activity, "Voice pairing: paste the host descriptor in the field above, then pair.", NULL) ||
+        !add_button(env, layout, activity, "Pair voice host", 11) ||
         !add_button(env, layout, activity, "Review invitation", 5) ||
         !add_button(env, layout, activity, "Trust manager and join", 6) ||
         !add_button(env, layout, activity, "Refresh fleet status", 7) ||
@@ -164,12 +271,34 @@ static bool show_root(JNIEnv *env, jobject activity, jobject scroll)
     (*env)->CallVoidMethod(env, activity, method, scroll);
     return clean(env);
 }
+static bool style_system_bars(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getWindow", "()Landroid/view/Window;") : NULL;
+    jobject window = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    jclass window_cls = clean(env) && window ? (*env)->GetObjectClass(env, window) : NULL;
+    jmethodID decor = clean(env) && window_cls ? (*env)->GetMethodID(env, window_cls, "getDecorView", "()Landroid/view/View;") : NULL;
+    jobject view = clean(env) && decor ? (*env)->CallObjectMethod(env, window, decor) : NULL;
+    bool ok = clean(env) && view && int_property(env, view, "setSystemUiVisibility", 0x2010);
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
+}
 static bool prepare_layouts(JNIEnv *env, jobject scroll, jobject layout,
                             jobject details, jobject prompt, jobject invite,
                             jobject camera, jobject receipt)
 {
     return scroll && layout && prompt && invite && camera && receipt && details &&
-           orient_layout(env, layout) && orient_layout(env, details);
+           orient_layout(env, layout) && orient_layout(env, details) &&
+           bool_property(env, scroll, "setFitsSystemWindows", true) &&
+           int_property(env, scroll, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           padding(env, layout, 20, 20) &&
+           typography(env, prompt, 16.0f, (jint)0xff262b2b) &&
+           typography(env, invite, 16.0f, (jint)0xff262b2b) &&
+           int_property(env, prompt, "setMinLines", 1) &&
+           int_property(env, prompt, "setMaxLines", 4) &&
+           int_property(env, invite, "setMinLines", 1) &&
+           int_property(env, invite, "setMaxLines", 4);
 }
 static bool attach_details(JNIEnv *env, jobject details, jobject layout, jobject scroll)
 {
@@ -182,6 +311,7 @@ bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action act
     if (!env || !activity || !action || root) return false;
     if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)clean(env); return false; }
     bool ok = false;
+    if (!load_density(env, activity) || !load_identity(env, activity) || !style_system_bars(env, activity)) goto out;
     jobject scroll = widget(env, "android/widget/ScrollView", activity);
     jobject layout = widget(env, "android/widget/LinearLayout", activity);
     jobject details = widget(env, "android/widget/LinearLayout", activity);
@@ -284,6 +414,19 @@ static void input_up(JNIEnv *env, float x, float y)
             callback("chat_cancel", "");
             return;
         }
+        if (index == 9) {
+            callback(voice_state == ZAPP_VOICE_READY ? "voice_start" :
+                voice_state == ZAPP_VOICE_RECORDING ? "voice_finish" : "voice_cancel", "");
+            return;
+        }
+        if (index == 10) { callback("voice_confirm", ""); return; }
+        if (index == 12 || index == 13) { callback(index == 12 ? "pair_accept" : "pair_reject", ""); return; }
+        if (index == 14) { callback("fleet_hosts", "refresh"); return; }
+        if (index == 11) {
+            char *value = prompt_utf8(env, invite_view);
+            if (value) { callback("voice_pair", value); memset(value, 0, strlen(value)); free(value); }
+            return;
+        }
         bool needs_text = index == 3 || index == 5;
         char *value = needs_text ? prompt_utf8(env, index == 3 ? prompt_view : invite_view) : NULL;
         if (!needs_text || value) callback(actions[index], value ? value : index == 2 ? "status" : "");
@@ -349,25 +492,49 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!env || !view) return;
     reply_state = view->reply_state;
+    voice_state = view->voice_state;
+    if (view->voice_pair_generation != voice_pair_generation) {
+        (void)text(env, invite_view, "");
+        voice_pair_generation = view->voice_pair_generation;
+    }
+    if (buttons[9]) (void)text(env, buttons[9], voice_state == ZAPP_VOICE_READY ? "Talk" :
+        voice_state == ZAPP_VOICE_RECORDING ? "Done talking" :
+        voice_state == ZAPP_VOICE_PLAYING ? "Stop speaking" : "Cancel");
+    if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
+        "Press Talk and ask anything. Answers stay on your laptop.");
+    if (buttons[10]) {
+        (void)text(env, buttons[10], !strcmp(view->voice_proposal, "node_start") ? "Confirm start" : "Confirm stop");
+        (void)set_visible(env, buttons[10], view->voice_proposal[0] && !view->busy);
+    }
     const char *send_label = reply_state == ZAPP_REPLY_WAITING ? "Stop reply" :
         reply_state == ZAPP_REPLY_CANCELLING ? "Stopping…" : "Send";
     if (buttons[3]) (void)text(env, buttons[3], send_label);
     char status[1400];
-    snprintf(status, sizeof(status), "Node: %s%s\n%s", view->node_running ? "responding" : "unavailable",
+    snprintf(status, sizeof(status), "%s%s\n%s", view->node_running ? "Node responding" :
+             view->node_process_running ? "Node is starting" : "Node not started",
              view->busy ? " · working" : "", view->sync_status[0] ? view->sync_status : "Sync status unknown");
     (void)text(env, status_view, status);
+    if (buttons[0]) (void)set_visible(env, buttons[0], !view->busy &&
+        !view->node_running && !view->node_process_running);
     char balance[600];
     snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last observed (stale):\n" : "",
-             view->balance[0] ? view->balance : "Balance unavailable");
+             view->balance[0] ? view->balance : "Balance appears when your node is ready");
     (void)text(env, balance_view, balance);
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
     (void)text(env, transcript_view, view->transcript);
-    char fleet[18432];
-    snprintf(fleet, sizeof(fleet), "%s%s%s%s%s", view->fleet_preview,
-             view->fleet_preview[0] && view->fleet_status[0] ? "\n" : "", view->fleet_status,
+    (void)set_visible(env, transcript_view, view->transcript[0] != 0);
+    char fleet[10272], pairing[160];
+    snprintf(fleet, sizeof(fleet), "%s%s%s", view->fleet_preview,
              view->fleet_receipt[0] ? "\nReceipt: " : "", view->fleet_receipt);
+    snprintf(pairing, sizeof(pairing), "Your laptop offers private voice and fleet control. "
+             "Accept only if the laptop shows code %s.", view->pair_code);
+    (void)text(env, pair_view, pairing);
+    (void)set_visible(env, pair_view, view->pair_offer[0] != 0);
+    for (int i = 12; i <= 13; ++i) if (buttons[i]) (void)set_visible(env, buttons[i], view->pair_offer[0] && !view->busy);
+    if (view->fleet_status[0]) (void)text(env, hosts_view, view->fleet_status);
     (void)text(env, fleet_view, fleet);
     (void)text(env, notice_view, view->notice);
+    (void)set_visible(env, notice_view, view->notice[0] != 0);
     (void)text(env, output_view, view->output);
     receipt_qr(env, view->fleet_receipt);
 }

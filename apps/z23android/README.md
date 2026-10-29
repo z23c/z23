@@ -58,39 +58,107 @@ Details contains node controls, fleet invitations, QR codes and diagnostic
 output. Failed balance refreshes retain the last value with a stale label;
 an unavailable balance is not displayed as zero.
 
-Chat refreshes a bounded read-only node summary before asking the paired
-assistant. The summary includes synchronization text, balance and availability
-flags. It excludes keys, addresses and raw RPC output. This summary and the
-question are sent to the configured assistant through the laptop bridge.
+Chat refreshes a bounded read-only node summary before asking the private
+model on the paired laptop host. The summary includes synchronization text,
+balance, availability flags and recent conversation. It excludes keys,
+addresses and raw RPC output.
 Chat cannot execute wallet operations or spend funds.
 While an answer is pending, Send becomes Stop reply. Cancellation closes the
 client connection and discards late answers. It does not stop the full node
 or establish that remote model generation stopped. Cancellation during the
 initial node refresh waits for the bounded observation commands to finish.
 
-## Voice architecture
+## Private voice and fleet host
 
-Voice conversation is planned, not yet operational. The intended flow is
-microphone capture, transcription, a node-grounded answer and spoken playback.
-The Android app remains C23. Its controller owns the conversation lifecycle;
-audio adapters own capture and playback, and the existing authenticated bridge
-owns transport. Model inference belongs on a paired fleet machine to preserve
-phone resources for node validation.
+A laptop connected over USB runs the private assistant. The C23 host
+`z23-speech-bridge` starts three local `llama-server` processes (chat,
+speech recognition and speech synthesis), relays phone requests over an
+`adb reverse` loopback tunnel, and probes fleet hosts over SSH. Audio,
+questions and answers stay on the laptop and phone; nothing is sent to a
+cloud service. Model weights are external inputs and are not bundled in the
+repository or APK.
 
-Recording must start with an explicit user action, show its state, and stop
-when cancelled or the app leaves the foreground. Audio queues and utterances
-must be bounded. Cancellation must discard late replies. Network or model
-failure must leave text input available. No microphone button is exposed until
-capture, transcription and playback work together on the device.
+### Build llama.cpp and the host
 
-Qwen speech generation needs a qualified native backend and measured response
-latency. A generated WAV alone does not establish a natural conversation.
-Device acceptance includes microphone permission denial, cancellation,
-disconnects, stale node data, audible replies and concurrent node progress.
+Build [llama.cpp](https://github.com/ggml-org/llama.cpp) with
+`-DGGML_VULKAN=ON` (Vulkan headers and SPIR-V headers required). The measured
+build is commit `2e0d86b`. Then, from the repository root:
+
+```sh
+make -C apps/z23android speech-bridge speech-probe
+make -C apps/z23android test
+```
+
+On managed hosts, prefix builds and tests with `devbuild --wait`. The host
+binary is `build/android-app/z23-speech-bridge`.
+
+### Pinned models
+
+Place these files, verified with `sha256sum -c`, in one models directory.
+They come from `unsloth/Qwen3.5-4B-GGUF` revision
+`e87f176479d0855a907a41277aca2f8ee7a09523`, `unslothai/Qwen3-ASR-0.6B-GGUF`
+revision `9045ad9c16021af1f08a4862a9a13d56177eec24` and
+`ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF` revision
+`ca27d74bc954b73dadab5b71ca265d87fc861a7c`. Review each model card and
+license before downloading.
+
+```text
+00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4  Qwen3.5-4B-Q4_K_M.gguf
+bca259818b50ca7c4c05e9bdb35a5dc04fa039653a6d6f3f0f331f96f6aa1971  Qwen3-ASR-0.6B-Q8_0.gguf
+41a342b5e4c514e968cb756de6cd1b7be39eff43c44c57a2ef5fc6522e36603d  mmproj-Qwen3-ASR-0.6B-Q8_0.gguf
+ac7931aeb2e7aad1a6ed6602d353a5679c9d096b18ce8204ac730a8408d572e1  Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+6fd65188839bcd6ecc91b277ad471e22a0edfada4699a0fe82f1165c18cfcce2  mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+```
+
+### Run and pair
+
+```sh
+mkdir -p -m 700 "$HOME/.cache/z23-voice/host"
+build/android-app/z23-speech-bridge --dir "$HOME/.cache/z23-voice/host" \
+  --llama-server /path/to/llama.cpp/build/bin/llama-server --models /path/to/models \
+  --speaker voice.wav --fleet r1=host1.example,r2=host2.example \
+  --adb "$ANDROID_SDK_ROOT/platform-tools/adb" --serial "$ANDROID_SERIAL" \
+  --app org.z23.nativeapp
+```
+
+`--speaker` is a short mono WAV of the voice to imitate; without it the
+synthesized voice varies between answers. `--fleet` lists SSH destinations
+that accept non-interactive key login; the host runs only a fixed read-only
+status command on each and reports block height against `zclassicd`.
+
+On first start the host prints a six-character pairing code and opens the app
+with a pairing offer. Accept on the phone only if it shows the same code. The
+host keeps its port and token in `--dir`, so later restarts reconnect without
+another pairing. The token is passed to `adb` on standard input, never in
+process arguments, and the app stores it privately as `speech-bridge.json`.
+
+### Use
+
+Press **Talk** and ask a question; recording ends after a pause of about
+0.8 seconds, or press **Done talking**. The answer appears in the
+conversation and is spoken sentence by sentence; **Stop speaking** interrupts
+it. Typed questions use the same private model. **Refresh fleet** probes every
+host. “Start node” and “stop node” create proposals that require **Confirm
+start** or **Confirm stop** on screen. The assistant cannot run commands,
+change hosts or spend funds.
+
+### Measured latency
+
+Measured 2026-10-29 on an AMD Ryzen 7 PRO 8840U with Radeon 780M graphics
+(Vulkan, RADV) and a Pixel over USB, for a 2-second spoken fleet question:
+recognition 0.23 s, chat 4.3 s, first synthesized chunk 4.5 s; first audio
+9.4 s after the end of speech. Synthesis runs at about 0.9 times real time
+with about 0.5 s fixed cost per request. These are single observations, not
+guarantees. Recognition accuracy and speech quality are unqualified.
+
+`make -C apps/z23android preview-apk` builds a separate
+`org.z23.voicepreview` package with debugging enabled for testing. That
+preview is separate from the production `org.z23.nativeapp` package and its
+private state; it does not establish production readiness.
 
 The app uses Android widgets and the system keyboard. Camera scanning, chat,
-and fleet operations still require device qualification. Chat requires a
-separate laptop bridge and a verified connection. Background operation and
+and fleet operations still require device qualification. Chat and voice
+require the paired laptop host. Background operation and
 hardware-backed wallet custody are not qualified.
 
 The [isolated shielded transaction experiment](../../docs/experiments/2026-10-28-pixel-shielded-api.md)

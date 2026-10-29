@@ -1,13 +1,21 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-int main(void)
+int main(int argc, char **argv)
 {
+    bool disabled = false;
+    for (int i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], "mcp_servers.unknown_sentinel.enabled=false")) disabled = true;
     char line[131072];
     while (fgets(line, sizeof(line), stdin)) {
         if (strstr(line, "\"method\":\"initialize\"")) puts("{\"id\":1,\"result\":{}}");
-        else if (strstr(line, "\"method\":\"account/read\"")) {
+        else if (strstr(line, "\"method\":\"config/read\"")) {
+            if (disabled && !getenv("BRIDGE_MOCK_UNKNOWN_ENABLED"))
+                puts("{\"id\":5,\"result\":{\"config\":{\"mcp_servers\":{\"unknown_sentinel\":{\"enabled\":false}}}}}");
+            else puts("{\"id\":5,\"result\":{\"config\":{\"mcp_servers\":{\"unknown_sentinel\":{\"enabled\":true}}}}}");
+        } else if (strstr(line, "\"method\":\"account/read\"")) {
             if (getenv("BRIDGE_MOCK_APIKEY")) puts("{\"id\":2,\"result\":{\"account\":{\"type\":\"apiKey\"}}}");
             else puts("{\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\"}}}");
         } else if (strstr(line, "\"method\":\"thread/start\"")) puts("{\"id\":3,\"result\":{\"thread\":{\"id\":\"t\"}}}");

@@ -31,6 +31,15 @@ int main(void)
     assert(json_get_bool(json_get(&root, "balance_stale")));
     assert(!strcmp(json_get_str(json_get(&root, "balance")), s.balance));
     json_free(&root);
+    memcpy(s.history, "You: hi\n\nZ23: hello\n", sizeof("You: hi\n\nZ23: hello\n"));
+    assert(zapp_conversation_format(&s, "and now?", out, sizeof(out)));
+    json = strchr(out, '\n');
+    assert(json_read(&root, json + 1, strlen(json + 1)) && json_size(&root) == 6);
+    assert(!strcmp(json_get_str(json_get(&root, "recent_conversation")), s.history));
+    json_free(&root);
+    s.history[0] = '\xff';
+    assert(!zapp_conversation_format(&s, "and now?", out, sizeof(out)));
+    s.history[0] = 0;
     assert(!zapp_conversation_format(&s, "", out, sizeof(out)));
     assert(!zapp_conversation_format(&s, "\xff", out, sizeof(out)));
     assert(!zapp_conversation_format(&s, "question", out, 10));
