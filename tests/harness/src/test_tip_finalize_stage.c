@@ -737,26 +737,9 @@ static int case_rung_install_fold_advances_hstar(void)
     return failures;
 }
 
-int test_tip_finalize_stage(void);
-int test_tip_finalize_stage(void)
+static int case_uv_gap_clamp(void)
 {
-    printf("\n=== tip_finalize_stage tests ===\n");
     int failures = 0;
-
-    blocker_module_init();
-
-    /* uv_cursor_gap crash-window clamp (Lane C root-cause fix).
-     *
-     * The reorg unwind commits the utxo_apply cursor rewind in one txn
-     * (utxo_apply_delta_reorg.c) while tip_finalize's own cursor is rewound in
-     * a SEPARATE, LATER txn (rewind_cursor_if_active_chain_reorged). A kill-9
-     * between those two durable commits persists tip_finalize_cursor >
-     * utxo_apply_cursor. On the next open, hydrate must clamp the tip_finalize
-     * CURSOR down to the utxo_apply frontier (restoring the step_finalize
-     * invariant tip_finalize <= utxo_apply) WITHOUT deleting a tip_finalize_log
-     * row — otherwise step_finalize wedges forever on tip_finalize.uv_cursor_gap.
-     * Pre-fix this case is RED (cursor stays at 5). */
-    {
         char dir[256];
         test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "uv_gap_clamp");
         mkdir_p_tf("./test-tmp");
@@ -808,9 +791,12 @@ int test_tip_finalize_stage(void)
         if (s) stage_destroy(s);
         progress_store_close();
         test_cleanup_tmpdir(dir);
-    }
+    return failures;
+}
 
-    {
+static int case_authority_guard(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("authority_guard: setup",
                  tf_setup("authority_guard", 3, TF_FAIL_NONE, -1,
@@ -828,9 +814,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("authority_guard: cache records raw local write",
                  active_chain_cached_tip(&ms.chain_active) == &sc.blocks[1]);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_stale_cursor(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         bool ok_setup = true;
         test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "stale_cursor");
@@ -889,9 +878,12 @@ int test_tip_finalize_stage(void)
                  !log_row_at(progress_store_db(), 5, &row_ok, status,
                              sizeof(status), &depth, &utxos));
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_repair_replay(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("repair_replay: setup",
                  tf_setup("repair_replay", 3, TF_FAIL_NONE, -1,
@@ -920,9 +912,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("repair_replay: replay row finalized",
                  row_ok == 1 && strcmp(status, "finalized") == 0);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_happy(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("happy: setup",
                  tf_setup("happy", 3, TF_FAIL_NONE, -1, dir, sizeof(dir),
@@ -949,13 +944,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("happy: next step IDLE",
                  tip_finalize_stage_step_once() == JOB_IDLE);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* A durable upstream hole is hidden behind the derived contiguous-success
-     * frontier: tip_finalize stops before the missing row and publishes no
-     * downstream failure. Refilling the row raises that frontier and resumes
-     * immediately. */
-    {
+static int case_upstream_log_hole(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("upstream_log_hole: setup",
                  tf_setup("upstream_hole", 3, TF_FAIL_NONE, -1, dir,
@@ -1010,9 +1004,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("upstream_log_hole: blocker cleared on resolve",
                  !blocker_exists("tip_finalize.upstream_log_hole"));
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_checkpoint_evidence(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("checkpoint_evidence: setup",
                  tf_setup("checkpoint_evidence", 3, TF_FAIL_NONE, -1,
@@ -1032,9 +1029,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("checkpoint_evidence: names causal blocker",
                  blocker_exists("tip_finalize.validation_evidence"));
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_forked_utxo_evidence(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("forked_utxo_evidence: setup",
                  tf_setup("forked_utxo_evidence",3,TF_FAIL_NONE,-1,
@@ -1048,9 +1048,12 @@ int test_tip_finalize_stage(void)
                  tip_finalize_stage_cursor()==0&&
                  blocker_exists("tip_finalize.validation_evidence"));
         tf_teardown(dir,&ms,&sc);
-    }
+    return failures;
+}
 
-    {
+static int case_anchor_storage(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         int row_ok = -1;
         char status[32];
@@ -1119,19 +1122,112 @@ int test_tip_finalize_stage(void)
                  tip_finalize_trusted_anchor_at(
                      progress_store_db(), 3, &sc.hashes[3]) == 0);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* Live-frontier no-skip (task #30 root cause): every chain_set_active_tip re-anchors the JUST-PUBLISHED
-     * tip via set_authoritative_tip. The old height+1 anchor target bumped
-     * the cursor past the pending tip→tip+1 transition, so each new block
-     * could only be published when ITS successor arrived — the served tip
-     * trailed the network by one full inter-block interval (the alternating
-     * finalized/anchor lattice in tip_finalize_log). This block pins:
-     * (a) the self re-anchor is a cursor no-op, (b) the successor publishes
-     * on FIRST arrival, (c) the resolver returns a self-consistent pair in
-     * the advance→anchor crash window, (d) a stale re-commit never
-     * downgrades a finalized row to an anchor row. */
-    {
+static int noskip_successor_publishes(struct main_state *ms,
+                                      struct synth_chain_tf *sc)
+{
+    int failures = 0;
+        int row_ok = -1, depth = -1; int64_t utxos = -1; char status[32];
+        bool ok_setup;
+
+        /* (b) Successor arrives: map + utxo witness, ONE step publishes it. */
+        ok_setup = test_block_map_insert(&ms->map_block_index,
+                                    sc->blocks[4].phashBlock, &sc->blocks[4]);
+        ok_setup = ok_setup && seed_utxo_apply(progress_store_db(), 4, -1);
+        ok_setup = ok_setup &&
+            seed_upstream_logs_tf(progress_store_db(), sc, 4);
+        TF_CHECK("noskip: successor arrival setup", ok_setup);
+        TF_CHECK("noskip: successor publishes on FIRST arrival",
+                 tip_finalize_stage_step_once() == JOB_ADVANCED);
+        TF_CHECK("noskip: cursor advanced", tip_finalize_stage_cursor() == 4);
+        TF_CHECK("noskip: successor is the published tip",
+                 tip_finalize_stage_last_height() == 4);
+        TF_CHECK("noskip: anchor row upgraded to finalized",
+                 log_row_at(progress_store_db(), 3, &row_ok, status,
+                            sizeof(status), &depth, &utxos) &&
+                 row_ok == 1 && strcmp(status, "finalized") == 0);
+    return failures;
+}
+
+static int noskip_resolver_and_capture(struct synth_chain_tf *sc)
+{
+    int failures = 0;
+        /* (c) Crash-window resolver: cursor=4, no row at 4 yet (the next
+         * trusted-tip anchor has not landed). The naive cursor-1 raw read
+         * would pair (3, hash(4)) — the splice-class poisoned pair; the
+         * resolver must return (4, hash(4)). */
+        int rh = -1; uint8_t rhash[32];
+        TF_CHECK("noskip: resolver finds a durable tip",
+                 tip_finalize_stage_resolve_durable_tip(progress_store_db(),
+                                                        &rh, rhash));
+        TF_CHECK("noskip: resolver pair is self-consistent",
+                 rh == 4 && memcmp(rhash, sc->hashes[4].data, 32) == 0);
+
+        /* (c') CAS frontier capture over the SAME finalized lattice. This is
+         * exactly the live -install-consensus-bundle refusal state: the durable
+         * tip resolves to 4 (a `finalized` row at H binds tip H+1) while H* is
+         * 3 (the deepest finalized ROW). The pre-fix capture demanded
+         * durable_h == H* and REFUSED (frontier_unknown); the corrected capture
+         * binds H* with H*'s OWN hash, which is (3, hash(3)). */
+        {
+            int32_t cf_h = -999; uint8_t cf_hash[32];
+            int32_t hs = -999, sf = -999;
+            progress_store_tx_lock();
+            bool hs_ok = reducer_frontier_compute_hstar(progress_store_db(),
+                                                        &hs, &sf);
+            progress_store_tx_unlock();
+            TF_CHECK("noskip: H* is 3 while durable tip is 4 (lattice +1)",
+                     hs_ok && hs == 3 && rh == hs + 1);
+            TF_CHECK("noskip: CAS capture SUCCEEDS when durable leads H* by one",
+                     consensus_state_publication_cas_capture_frontier(
+                         &cf_h, cf_hash));
+            TF_CHECK("noskip: CAS capture binds (H*, hash-of-H*)",
+                     cf_h == 3 &&
+                     memcmp(cf_hash, sc->hashes[3].data, 32) == 0);
+        }
+    return failures;
+}
+
+static int noskip_stale_recommit(struct synth_chain_tf *sc)
+{
+    int failures = 0;
+        int row_ok = -1, depth = -1; int64_t utxos = -1; char status[32];
+        /* (d) A stale authority re-commit of an already-finalized height
+         * must not downgrade the finalized row (it carries the successor
+         * hash block_hash_at reads) and must not move the cursor. */
+        tip_finalize_stage_set_authoritative_tip(3, sc->hashes[3].data);
+        TF_CHECK("noskip: stale re-commit keeps the finalized row",
+                 log_row_at(progress_store_db(), 3, &row_ok, status,
+                            sizeof(status), &depth, &utxos) &&
+                 row_ok == 1 && strcmp(status, "finalized") == 0);
+        TF_CHECK("noskip: stale re-commit keeps the cursor",
+                 tip_finalize_stage_cursor() == 4);
+    return failures;
+}
+
+static int noskip_uncomputable_refusal(void)
+{
+    int failures = 0;
+        /* (e) Genuine-unknown refusal: with the finalized log wiped, H*'s hash
+         * is unresolvable, so capture must REFUSE (return false) and LOG_ERROR
+         * every number — never a blind refusal. */
+        TF_CHECK("noskip: wipe tip_finalize_log for uncomputable-frontier case",
+                 exec_sql(progress_store_db(),
+                          "DELETE FROM tip_finalize_log"));
+        {
+            int32_t cf_h = -999; uint8_t cf_hash[32];
+            TF_CHECK("noskip: CAS capture REFUSES on an uncomputable frontier",
+                     !consensus_state_publication_cas_capture_frontier(
+                         &cf_h, cf_hash));
+        }
+    return failures;
+}
+
+static int case_noskip(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         bool ok_setup = true;
         test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "noskip");
@@ -1172,84 +1268,17 @@ int test_tip_finalize_stage(void)
         TF_CHECK("noskip: idle while successor absent",
                  tip_finalize_stage_step_once() == JOB_IDLE);
 
-        /* (b) Successor arrives: map + utxo witness, ONE step publishes it. */
-        ok_setup = test_block_map_insert(&ms.map_block_index,
-                                    sc.blocks[4].phashBlock, &sc.blocks[4]);
-        ok_setup = ok_setup && seed_utxo_apply(progress_store_db(), 4, -1);
-        ok_setup = ok_setup &&
-            seed_upstream_logs_tf(progress_store_db(), &sc, 4);
-        TF_CHECK("noskip: successor arrival setup", ok_setup);
-        TF_CHECK("noskip: successor publishes on FIRST arrival",
-                 tip_finalize_stage_step_once() == JOB_ADVANCED);
-        TF_CHECK("noskip: cursor advanced", tip_finalize_stage_cursor() == 4);
-        TF_CHECK("noskip: successor is the published tip",
-                 tip_finalize_stage_last_height() == 4);
-        TF_CHECK("noskip: anchor row upgraded to finalized",
-                 log_row_at(progress_store_db(), 3, &row_ok, status,
-                            sizeof(status), &depth, &utxos) &&
-                 row_ok == 1 && strcmp(status, "finalized") == 0);
-
-        /* (c) Crash-window resolver: cursor=4, no row at 4 yet (the next
-         * trusted-tip anchor has not landed). The naive cursor-1 raw read
-         * would pair (3, hash(4)) — the splice-class poisoned pair; the
-         * resolver must return (4, hash(4)). */
-        int rh = -1; uint8_t rhash[32];
-        TF_CHECK("noskip: resolver finds a durable tip",
-                 tip_finalize_stage_resolve_durable_tip(progress_store_db(),
-                                                        &rh, rhash));
-        TF_CHECK("noskip: resolver pair is self-consistent",
-                 rh == 4 && memcmp(rhash, sc.hashes[4].data, 32) == 0);
-
-        /* (c') CAS frontier capture over the SAME finalized lattice. This is
-         * exactly the live -install-consensus-bundle refusal state: the durable
-         * tip resolves to 4 (a `finalized` row at H binds tip H+1) while H* is
-         * 3 (the deepest finalized ROW). The pre-fix capture demanded
-         * durable_h == H* and REFUSED (frontier_unknown); the corrected capture
-         * binds H* with H*'s OWN hash, which is (3, hash(3)). */
-        {
-            int32_t cf_h = -999; uint8_t cf_hash[32];
-            int32_t hs = -999, sf = -999;
-            progress_store_tx_lock();
-            bool hs_ok = reducer_frontier_compute_hstar(progress_store_db(),
-                                                        &hs, &sf);
-            progress_store_tx_unlock();
-            TF_CHECK("noskip: H* is 3 while durable tip is 4 (lattice +1)",
-                     hs_ok && hs == 3 && rh == hs + 1);
-            TF_CHECK("noskip: CAS capture SUCCEEDS when durable leads H* by one",
-                     consensus_state_publication_cas_capture_frontier(
-                         &cf_h, cf_hash));
-            TF_CHECK("noskip: CAS capture binds (H*, hash-of-H*)",
-                     cf_h == 3 &&
-                     memcmp(cf_hash, sc.hashes[3].data, 32) == 0);
-        }
-
-        /* (d) A stale authority re-commit of an already-finalized height
-         * must not downgrade the finalized row (it carries the successor
-         * hash block_hash_at reads) and must not move the cursor. */
-        tip_finalize_stage_set_authoritative_tip(3, sc.hashes[3].data);
-        TF_CHECK("noskip: stale re-commit keeps the finalized row",
-                 log_row_at(progress_store_db(), 3, &row_ok, status,
-                            sizeof(status), &depth, &utxos) &&
-                 row_ok == 1 && strcmp(status, "finalized") == 0);
-        TF_CHECK("noskip: stale re-commit keeps the cursor",
-                 tip_finalize_stage_cursor() == 4);
-
-        /* (e) Genuine-unknown refusal: with the finalized log wiped, H*'s hash
-         * is unresolvable, so capture must REFUSE (return false) and LOG_ERROR
-         * every number — never a blind refusal. */
-        TF_CHECK("noskip: wipe tip_finalize_log for uncomputable-frontier case",
-                 exec_sql(progress_store_db(),
-                          "DELETE FROM tip_finalize_log"));
-        {
-            int32_t cf_h = -999; uint8_t cf_hash[32];
-            TF_CHECK("noskip: CAS capture REFUSES on an uncomputable frontier",
-                     !consensus_state_publication_cas_capture_frontier(
-                         &cf_h, cf_hash));
-        }
+        failures += noskip_successor_publishes(&ms, &sc);
+        failures += noskip_resolver_and_capture(&sc);
+        failures += noskip_stale_recommit(&sc);
+        failures += noskip_uncomputable_refusal();
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_authority_pair(void)
+{
+    int failures = 0;
         /* AUTHORITY PAIR SELF-CONSISTENCY (height-splice class):
          * after a finalize PUBLISH the served pair must be the tip block's
          * OWN (height, hash) — active_chain_tip()->nHeight ==
@@ -1273,9 +1302,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("authority_pair: published authority did not regress",
                  tip_finalize_stage_last_height() == 3);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_authority_coin_cap(void)
+{
+    int failures = 0;
         /* A boot-time active-chain window may sit ahead of the coins frontier
          * after a torn/overextended restore. The generic active-tip re-anchor
          * must not turn that window into served finality: only a height whose
@@ -1325,9 +1357,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("authority_coin_cap: cursor remains durable tip",
                  tip_finalize_stage_cursor() == 2);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_reorg(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("reorg: setup",
                  tf_setup("reorg", 3, TF_FAIL_REORG, -1, dir, sizeof(dir),
@@ -1348,9 +1383,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("reorg: cursor advances to 2",
                  tip_finalize_stage_cursor() == 2);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_reorg_replay(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("reorg_replay: setup",
                  tf_setup("reorg_replay", 3, TF_FAIL_NONE, -1,
@@ -1386,9 +1424,12 @@ int test_tip_finalize_stage(void)
                  log_tip_hash_at(progress_store_db(), 1, &logged) &&
                  uint256_eq(&logged, sc.blocks[2].phashBlock));
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_no_false_reorg(void)
+{
+    int failures = 0;
         /* SAFETY / NO-FALSE-REORG (the rejected chain-extender rung regression).
          * The rung admitted a pprev-less body at tip+1 into the window on weak
          * "unique have-data, non-failed body" criteria; tip_finalize then read
@@ -1480,12 +1521,12 @@ int test_tip_finalize_stage(void)
                      ok == 0 && strcmp(status, "reorg_detected") == 0);
         }
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* A snapshot/refold boot can already have a durable, coherent tip_finalize
-     * frontier before the first coordinator step. Public RPC must not serve the
-     * unpublished H* sentinel (0) while waiting for a later stage tick. */
-    {
+static int case_provable_tip_init(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         bool ok_setup = true;
         reducer_frontier_test_set_compiled_anchor(0);
@@ -1527,21 +1568,12 @@ int test_tip_finalize_stage(void)
                     compute_hstar_now(progress_store_db()));
         tf_teardown(dir, &ms, &sc);
         reducer_frontier_test_set_compiled_anchor(-1);
-    }
+    return failures;
+}
 
-    /* Phase 0.2 — the EXTERNAL provable-tip cache (H*) MIRRORS compute_hstar at
-     * steady state and is LOWERED at the reorg-rewind chokepoint. Lower the
-     * compiled-anchor floor so H* reflects the synthetic heights (without the
-     * override compute_hstar clamps the cache up to the mainnet checkpoint).
-     *
-     * tf_setup only seeds utxo_apply; reducer_frontier_compute_hstar MIN-folds
-     * over SIX logs (validate_headers, script_validate, body_persist,
-     * proof_validate, utxo_apply, tip_finalize), so the other four must be
-     * seeded too or H* = MIN(...) stays pinned to the anchor (0) by their
-     * unseeded cursor=0 logs (the original RED assertion's defect). We seed all
-     * four ok=1 with matching synthetic hashes so the C3 hash-agreement check
-     * passes and H* can reach the real synthetic frontier. */
-    {
+static int case_provable_tip(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         reducer_frontier_test_set_compiled_anchor(0);
         TF_CHECK("provable_tip: setup",
@@ -1632,25 +1664,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("provable_tip: shutdown reset cache to 0 (unpublished sentinel)",
                  reducer_frontier_provable_tip_cached() == 0);
         reducer_frontier_test_set_compiled_anchor(-1); /* restore mainnet floor */
-    }
+    return failures;
+}
 
-    /* Phase 0.3 — the O(1) H* fast path (tf_advance_provable_tip) can NEVER
-     * publish a height whose consensus receipts name a block other than the one
-     * being finalized. The fast path itself reads no rows: it bumps the
-     * watermark on the sole condition cached == next_h - 1. What makes that safe
-     * is the finalize gate ABOVE it — tip_finalize_full_evidence_at() requires
-     * header_admit.hash, validate_headers.hash, utxo_apply_delta.branch_hash,
-     * script_validate.block_hash and proof_validate.block_hash to ALL equal the
-     * selected block's hash, with ok=1 + VERIFIED evidence. That is a STRICTER
-     * binding than the fold's own C3 hash-agreement check (which only demands
-     * the rows agree with EACH OTHER, and exempts a NULL nullable witness).
-     *
-     * These are the 2026-07-27 one-block-fork shapes at h=3,195,363: a verdict
-     * row left hash-bound to the LOSING block while a different block is
-     * canonical. Each must hold the cursor AND the published height, and the
-     * cache must stay equal to the full recompute — proving the cheap path
-     * cannot report a height the node is refusing to apply. */
-    {
+static int case_fastpath_binding(void)
+{
+    int failures = 0;
         static const struct {
             const char *tag;
             const char *name;
@@ -1711,9 +1730,12 @@ int test_tip_finalize_stage(void)
             tf_teardown(dir, &ms, &sc);
             reducer_frontier_test_set_compiled_anchor(-1);
         }
-    }
+    return failures;
+}
 
-    {
+static int case_precondition(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("precondition: setup",
                  tf_setup("precondition", 3, TF_FAIL_PRECONDITION, -1,
@@ -1767,9 +1789,12 @@ int test_tip_finalize_stage(void)
                  tip_finalize_stage_drain(100) == 2 &&
                  tip_finalize_stage_cursor() == 3);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_failed_successor(void)
+{
+    int failures = 0;
         /* INVALIDATED SUCCESSOR HOLD.  Reproduce the physical-node race where
          * chain[] has already retreated below block[2], but the durable
          * finalized-hash table can still resolve block[2]'s FAILED map owner.
@@ -1814,9 +1839,12 @@ int test_tip_finalize_stage(void)
             json_free(&v);
         }
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_header_witness(void)
+{
+    int failures = 0;
         /* HEADER-ONLY CANONICAL-SUCCESSOR FINALIZE (deadlock-cure step 3).
          * The precondition hold above (best_header unset) proves tip_finalize
          * HOLDS at height 1 when the lookahead successor block[2] is body-
@@ -1859,9 +1887,12 @@ int test_tip_finalize_stage(void)
                      uint256_eq(&th, sc.blocks[2].phashBlock));
         }
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_header_witness_neg(void)
+{
+    int failures = 0;
         /* NEGATIVE GUARD: a RESOLVABLE successor that is NOT a canonical header
          * successor (here block[2] carries EQUAL — not strictly greater — work)
          * must STILL HOLD. No header-witness finalize, no DB row, cursor frozen.
@@ -1889,9 +1920,12 @@ int test_tip_finalize_stage(void)
                                 sizeof(status), &depth, &utxos) == false);
         }
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_header_witness_fork_guard(void)
+{
+    int failures = 0;
         /* FORK-LOOKAHEAD GUARD: best_header can rescue a missing N+1 only when
          * that header is the direct child of the already-finalized N. A
          * higher-work header fork whose parent hash differs from active N is a
@@ -1945,9 +1979,12 @@ int test_tip_finalize_stage(void)
                                 sizeof(status), &depth, &utxos) == false);
         }
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_script_log_heal(void)
+{
+    int failures = 0;
         /* The block_index BLOCK_VALID_SCRIPTS mirror drifted CLEAR for the
          * lookahead (block[2]) — the live 3134954 wedge. The reducer's
          * hash-bound script_validate_log proves the scripts WERE validated, so
@@ -1968,9 +2005,12 @@ int test_tip_finalize_stage(void)
                  (sc.blocks[2].nStatus & BLOCK_VALID_MASK) >=
                      BLOCK_VALID_SCRIPTS);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_script_log_stale_reorg(void)
+{
+    int failures = 0;
         /* REORG SAFETY: a stale ok=1 row left by an orphaned block that once
          * held height 2 carries a DIFFERENT block_hash. The height-keyed log
          * must NOT be trusted — finalizing the active (unvalidated) block here
@@ -1991,9 +2031,12 @@ int test_tip_finalize_stage(void)
                  (sc.blocks[2].nStatus & BLOCK_VALID_MASK) <
                      BLOCK_VALID_SCRIPTS);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_script_log_ok0(void)
+{
+    int failures = 0;
         /* ok=0 must never heal even with a matching hash: a recorded script
          * FAILURE is authoritative too — finalizing over it is forbidden. */
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
@@ -2024,9 +2067,12 @@ int test_tip_finalize_stage(void)
                  tip_finalize_stage_last_height() !=
                      (int64_t)tip_finalize_stage_cursor());
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_utxo_count(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("utxo_count: setup",
                  tf_setup("utxo_count", 3, TF_FAIL_UTXO_COUNT, -1,
@@ -2042,9 +2088,12 @@ int test_tip_finalize_stage(void)
                  strcmp(status, "utxo_count_diverged") == 0);
         TF_CHECK("utxo_count: live count recorded", utxos == 99);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_upstream_failed(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("upstream_failed: setup",
                  tf_setup("upstream", 3, TF_FAIL_NONE, 2, dir, sizeof(dir),
@@ -2060,9 +2109,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("upstream_failed: no downstream h=2 row",
                  ok == -1 && status[0] == '\0');
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_idle(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("idle: setup",
                  tf_setup("idle", 3, TF_FAIL_NONE, -1, dir, sizeof(dir),
@@ -2075,16 +2127,22 @@ int test_tip_finalize_stage(void)
                  tip_finalize_stage_step_once() == JOB_IDLE);
         TF_CHECK("idle: cursor stays 1", tip_finalize_stage_cursor() == 1);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    {
+static int case_guard(void)
+{
+    int failures = 0;
         TF_CHECK("guard: step_once with no init returns IDLE",
                  tip_finalize_stage_step_once() == JOB_IDLE);
         TF_CHECK("guard: init(NULL) rejected",
                  !tip_finalize_stage_init(NULL));
-    }
+    return failures;
+}
 
-    {
+static int case_dump(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         TF_CHECK("dump: setup",
                  tf_setup("dump", 2, TF_FAIL_NONE, -1, dir, sizeof(dir),
@@ -2124,16 +2182,30 @@ int test_tip_finalize_stage(void)
                  json_get_int(json_get(&v, "step_us_ewma")) > 0);
         json_free(&v);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* TASK #31 — seed-anchor cursor unification: tip_finalize_stage_seed_anchor
-     * stamps the tip_finalize cursor to the seeded tip's OWN height H (the
-     * served-tip convention), NEVER H+1. A cursor of H+1 would claim the
-     * unfinalized H→H+1 transition and skip it forever (the cursor is
-     * monotonic) — one late block per cold-import/snapshot seed: block H+1
-     * could only publish when H+2 arrived. This pins that the seed cursor is H
-     * and the very next arriving block (H+1) publishes on its FIRST step. */
-    {
+static int seed_no_late_utxo_row_survives(void)
+{
+    int failures = 0;
+            sqlite3_stmt *st = NULL;
+            char ua_status[32] = ""; int ua_ok = -1;
+            TF_CHECK("seed_no_late_block: real utxo_apply row at H survives",
+                     sqlite3_prepare_v2(progress_store_db(),
+                         "SELECT status, ok FROM utxo_apply_log "
+                         "WHERE height = 3", -1, &st, NULL) == SQLITE_OK &&
+                     sqlite3_step(st) == SQLITE_ROW &&
+                     (snprintf(ua_status, sizeof(ua_status), "%s",
+                               sqlite3_column_text(st, 0)) > 0) &&
+                     (ua_ok = sqlite3_column_int(st, 1)) == 1 &&
+                     strcmp(ua_status, "verified") == 0);
+            if (st) sqlite3_finalize(st);
+    return failures;
+}
+
+static int case_seed_no_late_block(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         bool ok_setup = true;
         test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "seed_no_late_block");
@@ -2172,20 +2244,7 @@ int test_tip_finalize_stage(void)
         /* The seed's utxo_apply trust stamp is INSERT OR IGNORE: the real
          * 'verified' verdict row at H (pre-written by seed_utxo_apply above)
          * must survive the seed un-clobbered. */
-        {
-            sqlite3_stmt *st = NULL;
-            char ua_status[32] = ""; int ua_ok = -1;
-            TF_CHECK("seed_no_late_block: real utxo_apply row at H survives",
-                     sqlite3_prepare_v2(progress_store_db(),
-                         "SELECT status, ok FROM utxo_apply_log "
-                         "WHERE height = 3", -1, &st, NULL) == SQLITE_OK &&
-                     sqlite3_step(st) == SQLITE_ROW &&
-                     (snprintf(ua_status, sizeof(ua_status), "%s",
-                               sqlite3_column_text(st, 0)) > 0) &&
-                     (ua_ok = sqlite3_column_int(st, 1)) == 1 &&
-                     strcmp(ua_status, "verified") == 0);
-            if (st) sqlite3_finalize(st);
-        }
+        failures += seed_no_late_utxo_row_survives();
         /* The boot resolver returns the seeded tip self-consistently from the
          * served-tip cursor (no +1, no -1 splice). */
         int rh = -1; uint8_t rhash[32];
@@ -2212,17 +2271,30 @@ int test_tip_finalize_stage(void)
         TF_CHECK("seed_no_late_block: H+1 is the published tip",
                  tip_finalize_stage_last_height() == 4);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* TASK #31, second member — the COLD-IMPORT row gap: on a real import
-     * the utxo_apply cursor is seeded to H+1 with NO log rows at all (the
-     * coins arrived inside the verified chainstate; utxo_apply never
-     * re-applies ≤H). step_finalize at cursor H consumes the utxo_apply row
-     * AT H, so without the seed's own trust stamp the stage idles forever on
-     * uv_row_missing when upstream has applied through
-     * the live tip while tip_finalize holds at the seed. This pins that the
-     * seed itself supplies the row and the first live successor publishes. */
-    {
+static int seed_cold_import_utxo_row_stamped(void)
+{
+    int failures = 0;
+            sqlite3_stmt *st = NULL;
+            char ua_status[32] = ""; int ua_ok = -1;
+            TF_CHECK("seed_cold_import_row_gap: seed stamps utxo_apply row at H",
+                     sqlite3_prepare_v2(progress_store_db(),
+                         "SELECT status, ok FROM utxo_apply_log "
+                         "WHERE height = 3", -1, &st, NULL) == SQLITE_OK &&
+                     sqlite3_step(st) == SQLITE_ROW &&
+                     (snprintf(ua_status, sizeof(ua_status), "%s",
+                               sqlite3_column_text(st, 0)) > 0) &&
+                     (ua_ok = sqlite3_column_int(st, 1)) == 1 &&
+                     strcmp(ua_status, "anchor") == 0);
+            if (st) sqlite3_finalize(st);
+    return failures;
+}
+
+static int case_seed_cold_import_row_gap(void)
+{
+    int failures = 0;
         char dir[256]; struct main_state ms; struct synth_chain_tf sc;
         bool ok_setup = true;
         test_fmt_tmpdir(dir, sizeof(dir), "tip_finalize", "seed_cold_import_row_gap");
@@ -2258,20 +2330,7 @@ int test_tip_finalize_stage(void)
         TF_CHECK("seed_cold_import_row_gap: seed_anchor at H succeeds",
                  tip_finalize_stage_seed_anchor(3, sc.hashes[3].data, true));
         /* THE PIN: the seed supplied its own utxo_apply trust row at H. */
-        {
-            sqlite3_stmt *st = NULL;
-            char ua_status[32] = ""; int ua_ok = -1;
-            TF_CHECK("seed_cold_import_row_gap: seed stamps utxo_apply row at H",
-                     sqlite3_prepare_v2(progress_store_db(),
-                         "SELECT status, ok FROM utxo_apply_log "
-                         "WHERE height = 3", -1, &st, NULL) == SQLITE_OK &&
-                     sqlite3_step(st) == SQLITE_ROW &&
-                     (snprintf(ua_status, sizeof(ua_status), "%s",
-                               sqlite3_column_text(st, 0)) > 0) &&
-                     (ua_ok = sqlite3_column_int(st, 1)) == 1 &&
-                     strcmp(ua_status, "anchor") == 0);
-            if (st) sqlite3_finalize(st);
-        }
+        failures += seed_cold_import_utxo_row_stamped();
         /* No successor yet → idle (and NOT uv_row_missing-pinned). */
         TF_CHECK("seed_cold_import_row_gap: idle while successor absent",
                  tip_finalize_stage_step_once() == JOB_IDLE);
@@ -2302,17 +2361,12 @@ int test_tip_finalize_stage(void)
         TF_CHECK("seed_cold_import_row_gap: H+1 is the published tip",
                  tip_finalize_stage_last_height() == 4);
         tf_teardown(dir, &ms, &sc);
-    }
+    return failures;
+}
 
-    /* Task A #11 — current-tip-missing names a typed blocker. Previously this
-     * anomaly (the block finalize extends FROM resolvable from NEITHER the
-     * active-chain window, NOR the durable finalized-hash table, NOR the
-     * best-header ancestry) set only the internal g_blocked_class counter — no
-     * registry-visible blocker, so the stall-meta safety net could not see it.
-     * note_tip_missing now raises a TRANSIENT "tip_finalize.current_tip_missing"
-     * (height in reason), and the clear helper (called once old_tip resolves)
-     * removes it. */
-    {
+static int case_tip_missing(void)
+{
+    int failures = 0;
         blocker_clear("tip_finalize.current_tip_missing");
         tip_finalize_observe_note_tip_missing(3162166);
         struct blocker_snapshot sn[32];
@@ -2330,16 +2384,33 @@ int test_tip_finalize_stage(void)
         tip_finalize_observe_clear_tip_missing();
         TF_CHECK("tip_missing: clear helper removes it on resolve",
                  !blocker_exists("tip_finalize.current_tip_missing"));
-    }
+    return failures;
+}
 
-    /* Differential property KAT: the incremental utxo_apply SUM cache must
-     * equal the pure SUM(...) WHERE height<=? AND ok=1 at EVERY finalized
-     * height, across a randomized log with ok=0 gaps (which force the
-     * non-adjacent fallback) and a mid-stream reset (a shutdown/reinit). The
-     * cache is the watermark discipline the whole task rests on: a running
-     * total that is byte-identical to the full recompute. Deterministic
-     * (fixed-seed LCG — no external RNG), so failures are reproducible. */
-    {
+static int sum_cache_kat_mismatches(sqlite3 *sdb, bool ins_ok, int n,
+                                    const int *kat_ok,
+                                    const int64_t *kat_spent,
+                                    const int64_t *kat_added)
+{
+        int mismatches = 0;
+        for (int h = 0; h < n && ins_ok; h++) {
+            if (h == n / 2)
+                utxo_apply_sum_through_reset();  /* mid-stream shutdown/reinit */
+            if (!kat_ok[h])
+                continue;  /* production calls the cache only on ok=1 finalizes */
+            int64_t is = -1, ia = -1, fs = -1, fa = -1;
+            bool a = utxo_apply_sum_through_incremental(sdb, h, kat_spent[h],
+                                                        kat_added[h], &is, &ia);
+            bool b = utxo_apply_sums_through(sdb, h, &fs, &fa);
+            if (!a || !b || is != fs || ia != fa)
+                mismatches++;
+        }
+    return mismatches;
+}
+
+static int case_sum_cache_kat(void)
+{
+    int failures = 0;
         sqlite3 *sdb = NULL;
         bool open_ok = sqlite3_open(":memory:", &sdb) == SQLITE_OK;
         TF_CHECK("sum_cache_kat: open :memory:", open_ok);
@@ -2381,24 +2452,177 @@ int test_tip_finalize_stage(void)
         TF_CHECK("sum_cache_kat: randomized log built", ins_ok);
 
         utxo_apply_sum_through_reset();
-        int mismatches = 0;
-        for (int h = 0; h < KAT_N && ins_ok; h++) {
-            if (h == KAT_N / 2)
-                utxo_apply_sum_through_reset();  /* mid-stream shutdown/reinit */
-            if (!kat_ok[h])
-                continue;  /* production calls the cache only on ok=1 finalizes */
-            int64_t is = -1, ia = -1, fs = -1, fa = -1;
-            bool a = utxo_apply_sum_through_incremental(sdb, h, kat_spent[h],
-                                                        kat_added[h], &is, &ia);
-            bool b = utxo_apply_sums_through(sdb, h, &fs, &fa);
-            if (!a || !b || is != fs || ia != fa)
-                mismatches++;
-        }
+    int mismatches = sum_cache_kat_mismatches(sdb, ins_ok, KAT_N, kat_ok, kat_spent, kat_added);
         TF_CHECK("sum_cache_kat: incremental == full SUM at every ok=1 height",
                  ins_ok && mismatches == 0);
         utxo_apply_sum_through_reset();
         if (sdb) sqlite3_close(sdb);
-    }
+    return failures;
+}
+
+int test_tip_finalize_stage(void);
+int test_tip_finalize_stage(void)
+{
+    printf("\n=== tip_finalize_stage tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+
+    /* uv_cursor_gap crash-window clamp (Lane C root-cause fix).
+     *
+     * The reorg unwind commits the utxo_apply cursor rewind in one txn
+     * (utxo_apply_delta_reorg.c) while tip_finalize's own cursor is rewound in
+     * a SEPARATE, LATER txn (rewind_cursor_if_active_chain_reorged). A kill-9
+     * between those two durable commits persists tip_finalize_cursor >
+     * utxo_apply_cursor. On the next open, hydrate must clamp the tip_finalize
+     * CURSOR down to the utxo_apply frontier (restoring the step_finalize
+     * invariant tip_finalize <= utxo_apply) WITHOUT deleting a tip_finalize_log
+     * row — otherwise step_finalize wedges forever on tip_finalize.uv_cursor_gap.
+     * Pre-fix this case is RED (cursor stays at 5). */
+    failures += case_uv_gap_clamp();
+
+    failures += case_authority_guard();
+
+    failures += case_stale_cursor();
+
+    failures += case_repair_replay();
+
+    failures += case_happy();
+
+    /* A durable upstream hole is hidden behind the derived contiguous-success
+     * frontier: tip_finalize stops before the missing row and publishes no
+     * downstream failure. Refilling the row raises that frontier and resumes
+     * immediately. */
+    failures += case_upstream_log_hole();
+
+    failures += case_checkpoint_evidence();
+
+    failures += case_forked_utxo_evidence();
+
+    failures += case_anchor_storage();
+
+    /* Live-frontier no-skip (task #30 root cause): every chain_set_active_tip re-anchors the JUST-PUBLISHED
+     * tip via set_authoritative_tip. The old height+1 anchor target bumped
+     * the cursor past the pending tip→tip+1 transition, so each new block
+     * could only be published when ITS successor arrived — the served tip
+     * trailed the network by one full inter-block interval (the alternating
+     * finalized/anchor lattice in tip_finalize_log). This block pins:
+     * (a) the self re-anchor is a cursor no-op, (b) the successor publishes
+     * on FIRST arrival, (c) the resolver returns a self-consistent pair in
+     * the advance→anchor crash window, (d) a stale re-commit never
+     * downgrades a finalized row to an anchor row. */
+    failures += case_noskip();
+
+    failures += case_authority_pair();
+
+    failures += case_authority_coin_cap();
+
+    failures += case_reorg();
+
+    failures += case_reorg_replay();
+
+    failures += case_no_false_reorg();
+
+    /* A snapshot/refold boot can already have a durable, coherent tip_finalize
+     * frontier before the first coordinator step. Public RPC must not serve the
+     * unpublished H* sentinel (0) while waiting for a later stage tick. */
+    failures += case_provable_tip_init();
+
+    /* Phase 0.2 — the EXTERNAL provable-tip cache (H*) MIRRORS compute_hstar at
+     * steady state and is LOWERED at the reorg-rewind chokepoint. Lower the
+     * compiled-anchor floor so H* reflects the synthetic heights (without the
+     * override compute_hstar clamps the cache up to the mainnet checkpoint).
+     *
+     * tf_setup only seeds utxo_apply; reducer_frontier_compute_hstar MIN-folds
+     * over SIX logs (validate_headers, script_validate, body_persist,
+     * proof_validate, utxo_apply, tip_finalize), so the other four must be
+     * seeded too or H* = MIN(...) stays pinned to the anchor (0) by their
+     * unseeded cursor=0 logs (the original RED assertion's defect). We seed all
+     * four ok=1 with matching synthetic hashes so the C3 hash-agreement check
+     * passes and H* can reach the real synthetic frontier. */
+    failures += case_provable_tip();
+
+    /* Phase 0.3 — the O(1) H* fast path (tf_advance_provable_tip) can NEVER
+     * publish a height whose consensus receipts name a block other than the one
+     * being finalized. The fast path itself reads no rows: it bumps the
+     * watermark on the sole condition cached == next_h - 1. What makes that safe
+     * is the finalize gate ABOVE it — tip_finalize_full_evidence_at() requires
+     * header_admit.hash, validate_headers.hash, utxo_apply_delta.branch_hash,
+     * script_validate.block_hash and proof_validate.block_hash to ALL equal the
+     * selected block's hash, with ok=1 + VERIFIED evidence. That is a STRICTER
+     * binding than the fold's own C3 hash-agreement check (which only demands
+     * the rows agree with EACH OTHER, and exempts a NULL nullable witness).
+     *
+     * These are the 2026-07-27 one-block-fork shapes at h=3,195,363: a verdict
+     * row left hash-bound to the LOSING block while a different block is
+     * canonical. Each must hold the cursor AND the published height, and the
+     * cache must stay equal to the full recompute — proving the cheap path
+     * cannot report a height the node is refusing to apply. */
+    failures += case_fastpath_binding();
+
+    failures += case_precondition();
+
+    failures += case_failed_successor();
+
+    failures += case_header_witness();
+
+    failures += case_header_witness_neg();
+
+    failures += case_header_witness_fork_guard();
+
+    failures += case_script_log_heal();
+
+    failures += case_script_log_stale_reorg();
+
+    failures += case_script_log_ok0();
+
+    failures += case_utxo_count();
+
+    failures += case_upstream_failed();
+
+    failures += case_idle();
+
+    failures += case_guard();
+
+    failures += case_dump();
+
+    /* TASK #31 — seed-anchor cursor unification: tip_finalize_stage_seed_anchor
+     * stamps the tip_finalize cursor to the seeded tip's OWN height H (the
+     * served-tip convention), NEVER H+1. A cursor of H+1 would claim the
+     * unfinalized H→H+1 transition and skip it forever (the cursor is
+     * monotonic) — one late block per cold-import/snapshot seed: block H+1
+     * could only publish when H+2 arrived. This pins that the seed cursor is H
+     * and the very next arriving block (H+1) publishes on its FIRST step. */
+    failures += case_seed_no_late_block();
+
+    /* TASK #31, second member — the COLD-IMPORT row gap: on a real import
+     * the utxo_apply cursor is seeded to H+1 with NO log rows at all (the
+     * coins arrived inside the verified chainstate; utxo_apply never
+     * re-applies ≤H). step_finalize at cursor H consumes the utxo_apply row
+     * AT H, so without the seed's own trust stamp the stage idles forever on
+     * uv_row_missing when upstream has applied through
+     * the live tip while tip_finalize holds at the seed. This pins that the
+     * seed itself supplies the row and the first live successor publishes. */
+    failures += case_seed_cold_import_row_gap();
+
+    /* Task A #11 — current-tip-missing names a typed blocker. Previously this
+     * anomaly (the block finalize extends FROM resolvable from NEITHER the
+     * active-chain window, NOR the durable finalized-hash table, NOR the
+     * best-header ancestry) set only the internal g_blocked_class counter — no
+     * registry-visible blocker, so the stall-meta safety net could not see it.
+     * note_tip_missing now raises a TRANSIENT "tip_finalize.current_tip_missing"
+     * (height in reason), and the clear helper (called once old_tip resolves)
+     * removes it. */
+    failures += case_tip_missing();
+
+    /* Differential property KAT: the incremental utxo_apply SUM cache must
+     * equal the pure SUM(...) WHERE height<=? AND ok=1 at EVERY finalized
+     * height, across a randomized log with ok=0 gaps (which force the
+     * non-adjacent fallback) and a mid-stream reset (a shutdown/reinit). The
+     * cache is the watermark discipline the whole task rests on: a running
+     * total that is byte-identical to the full recompute. Deterministic
+     * (fixed-seed LCG — no external RNG), so failures are reproducible. */
+    failures += case_sum_cache_kat();
 
     failures += case_rung_install_fold_advances_hstar();
 
