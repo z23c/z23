@@ -816,22 +816,9 @@ static int chacha20_isa_concurrent_kat(void)
     return failures;
 }
 
-int test_chacha20_isa_parity(void)
+static int chacha20_isa_tier_compiled_check(void)
 {
-    printf("\n=== chacha20_isa_parity (portable vs four-block differential oracle) ===\n");
     int failures = 0;
-    uint8_t key[32], nonce[12], plain[4096];
-    chacha_rng_fill(key, sizeof key);
-    chacha_rng_fill(nonce, sizeof nonce);
-    chacha_rng_fill(plain, sizeof plain);
-
-    failures += chacha20_isa_concurrent_kat();
-
-    printf("chacha20_isa_parity: compiled=%s KAT-usable=%s AUTO=%s\n",
-           chacha20_vector4_compiled() ? "yes" : "no",
-           chacha20_vector4_available() ? "yes" : "no",
-           chacha20_select_impl(CHACHA20_IMPL_AUTO) != CHACHA20_IMPL_PORTABLE
-               ? chacha20_implementation() : "portable");
 #if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
     if (!chacha20_vector4_compiled() ||
         !chacha20_vector4_available()) {
@@ -839,6 +826,12 @@ int test_chacha20_isa_parity(void)
         failures++;
     }
 #endif
+    return failures;
+}
+
+static int chacha20_isa_auto_promotion_check(void)
+{
+    int failures = 0;
     {
         /* x86-64 AUTO takes the widest KAT-verified tier (AVX-512F > AVX2 >
          * SSE2) under ZCL_CHACHA20_AUTO_X86_64_TIER; every other target keeps
@@ -858,8 +851,12 @@ int test_chacha20_isa_parity(void)
             failures++;
         }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: complete RFC 7539 block vector... ");
+static int chacha20_isa_rfc_block_kat(void)
+{
+    int failures = 0;
     {
         static const uint8_t kat_nonce[12] = {
             0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x4a,0x00,0x00,0x00,0x00 };
@@ -874,8 +871,13 @@ int test_chacha20_isa_parity(void)
         if (memcmp(got, want, sizeof want) == 0) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: every length 0..1024, out-of-place + in-place... ");
+static int chacha20_isa_length_sweep(uint8_t key[32], uint8_t nonce[12],
+                                       uint8_t *plain)
+{
+    int failures = 0;
     {
         int diffs = 0;
         for (size_t len = 0; len <= 1024; len++)
@@ -883,8 +885,13 @@ int test_chacha20_isa_parity(void)
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: randomized parity x2000 (0..4096 bytes)... ");
+static int chacha20_isa_random_sweep(uint8_t key[32], uint8_t nonce[12],
+                                      uint8_t *plain)
+{
+    int failures = 0;
     {
         int diffs = 0;
         for (int trial = 0; trial < 2000; trial++) {
@@ -897,8 +904,13 @@ int test_chacha20_isa_parity(void)
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: counter exhaustion refuses before output... ");
+static int chacha20_isa_counter_exhaustion(uint8_t key[32], uint8_t nonce[12],
+                                            uint8_t *plain)
+{
+    int failures = 0;
     {
         uint8_t out[193], before[193];
         memset(out, 0x5a, sizeof out); memcpy(before, out, sizeof out);
@@ -918,8 +930,13 @@ int test_chacha20_isa_parity(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: complete AEAD parity at caller boundaries... ");
+static int chacha20_isa_aead_boundaries(uint8_t key[32], uint8_t nonce[12],
+                                         uint8_t *plain)
+{
+    int failures = 0;
     {
         static const size_t lens[] = {0,1,7,15,16,17,63,64,65,255,256,257,
                                       564,585,1536,2048,4096};
@@ -941,8 +958,12 @@ int test_chacha20_isa_parity(void)
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
+    return failures;
+}
 
-    printf("chacha20_isa_parity: caller-shaped opens authenticate before output... ");
+static int chacha20_isa_caller_opens(uint8_t key[32], uint8_t nonce[12])
+{
+    int failures = 0;
     {
         static const struct { size_t plen, aad_len; } shapes[] = {
             {564u, 0u}, {1536u, 7u}, {65520u, 85u},
@@ -954,6 +975,45 @@ int test_chacha20_isa_parity(void)
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
+    return failures;
+}
+
+int test_chacha20_isa_parity(void)
+{
+    printf("\n=== chacha20_isa_parity (portable vs four-block differential oracle) ===\n");
+    int failures = 0;
+    uint8_t key[32], nonce[12], plain[4096];
+    chacha_rng_fill(key, sizeof key);
+    chacha_rng_fill(nonce, sizeof nonce);
+    chacha_rng_fill(plain, sizeof plain);
+
+    failures += chacha20_isa_concurrent_kat();
+
+    printf("chacha20_isa_parity: compiled=%s KAT-usable=%s AUTO=%s\n",
+           chacha20_vector4_compiled() ? "yes" : "no",
+           chacha20_vector4_available() ? "yes" : "no",
+           chacha20_select_impl(CHACHA20_IMPL_AUTO) != CHACHA20_IMPL_PORTABLE
+               ? chacha20_implementation() : "portable");
+    failures += chacha20_isa_tier_compiled_check();
+    failures += chacha20_isa_auto_promotion_check();
+
+    printf("chacha20_isa_parity: complete RFC 7539 block vector... ");
+    failures += chacha20_isa_rfc_block_kat();
+
+    printf("chacha20_isa_parity: every length 0..1024, out-of-place + in-place... ");
+    failures += chacha20_isa_length_sweep(key, nonce, plain);
+
+    printf("chacha20_isa_parity: randomized parity x2000 (0..4096 bytes)... ");
+    failures += chacha20_isa_random_sweep(key, nonce, plain);
+
+    printf("chacha20_isa_parity: counter exhaustion refuses before output... ");
+    failures += chacha20_isa_counter_exhaustion(key, nonce, plain);
+
+    printf("chacha20_isa_parity: complete AEAD parity at caller boundaries... ");
+    failures += chacha20_isa_aead_boundaries(key, nonce, plain);
+
+    printf("chacha20_isa_parity: caller-shaped opens authenticate before output... ");
+    failures += chacha20_isa_caller_opens(key, nonce);
 
     failures += rfc8439_vectors();
 
