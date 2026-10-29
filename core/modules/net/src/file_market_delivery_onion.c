@@ -241,7 +241,7 @@ size_t file_market_delivery_onion_handle_request(
         memory_cleanse(chunk.data, chunk.size);
     free(chunk.data);
     size_t response_len = onion_http_respond(
-        response, response_max, 200, "OK", "engine/application/octet-stream",
+        response, response_max, 200, "OK", "application/octet-stream",
         payload, header_len + payload_len);
     memory_cleanse(payload, sizeof(payload));
     return response_len;

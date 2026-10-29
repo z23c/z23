@@ -918,7 +918,7 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
         if (api_route_is_operator_private(path)) {
             const char *resp =
                 "HTTP/1.1 403 Forbidden\r\n"
-                "Content-Type: engine/application/json\r\n"
+                "Content-Type: application/json\r\n"
                 "Connection: close\r\n\r\n"
                 "{\"error\":\"operator-private endpoint: "
                 "not served on the public listener\"}";

@@ -37,13 +37,13 @@
 
 #define ONION_HEAD_200_124 \
     "HTTP/1.1 200 OK\r\n" \
-    "Content-Type: engine/application/octet-stream\r\n" \
+    "Content-Type: application/octet-stream\r\n" \
     "Content-Length: 124\r\n" \
     "Cache-Control: no-store\r\n" \
     "Connection: close\r\n\r\n"
 #define ONION_HEAD_200_129 \
     "HTTP/1.1 200 OK\r\n" \
-    "Content-Type: engine/application/octet-stream\r\n" \
+    "Content-Type: application/octet-stream\r\n" \
     "Content-Length: 129\r\n" \
     "Cache-Control: no-store\r\n" \
     "Connection: close\r\n\r\n"

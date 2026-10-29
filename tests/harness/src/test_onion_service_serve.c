@@ -258,7 +258,7 @@ static int svc_status_shape(void)
     size_t n = svc_get("/status");
     const char *body = svc_body();
     failures += svc_check("/status answers 200 as JSON with CORS",
-        svc_is_200(n, "engine/application/json") &&
+        svc_is_200(n, "application/json") &&
         svc_has(SVC_RESP, "Access-Control-Allow-Origin: *\r\n"));
     failures += svc_check("/status opens with height, peers, version, uptime",
         svc_starts(body, "{\"height\":0,\"peers\":0,\"version\":\"0.1.0\","
@@ -285,7 +285,7 @@ static int svc_status_block_and_onion(void)
     const char *body = svc_body();
     long age = -1;
     failures += svc_check("/status with a stored block answers 200 JSON",
-        svc_is_200(n, "engine/application/json"));
+        svc_is_200(n, "application/json"));
     failures += svc_check("/status reports the age of the newest block",
         svc_json_long(body, "last_block_age", &age) &&
         age >= 1000 && age <= 1010);
@@ -304,7 +304,7 @@ static int svc_status_no_datadir(void)
     size_t n = svc_get("/status");
     const char *body = svc_body();
     failures += svc_check("/status with no datadir still answers 200 JSON",
-        svc_is_200(n, "engine/application/json"));
+        svc_is_200(n, "application/json"));
     failures += svc_check("/status with no datadir reports zero height and peers",
         svc_starts(body, "{\"height\":0,\"peers\":0,"));
     failures += svc_check("/status with no datadir reports no block, no txs",
@@ -432,7 +432,7 @@ static int svc_directory_json_rows(void)
     size_t n = svc_get("/directory.json");
     const char *body = svc_body();
     failures += svc_check("/directory.json answers 200 as JSON with CORS",
-        svc_is_200(n, "engine/application/json") &&
+        svc_is_200(n, "application/json") &&
         svc_has(SVC_RESP, "Access-Control-Allow-Origin: *\r\n"));
     failures += svc_check("the document is a nodes array closed by an object",
         svc_starts(body, "{\"nodes\":[") && svc_ends_with(body, "}"));

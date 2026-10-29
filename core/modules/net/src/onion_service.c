@@ -807,7 +807,7 @@ static size_t serve_directory_json(uint8_t *response, size_t max)
 
     return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n\r\n"
@@ -1046,7 +1046,7 @@ static size_t serve_status(uint8_t *response, size_t max)
 
     return onion_render_response((char *)response,max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n"
@@ -1090,7 +1090,7 @@ static size_t serve_puzzle_required(const struct onion_pow_challenge *ch,
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>402 Proof of Work Required</title>"
-        "<script type='engine/application/json' id='pow-challenge'>"
+        "<script type='application/json' id='pow-challenge'>"
         "{\"seed\":\"%s\",\"token\":\"%s\",\"bits\":%d,\"server_time\":%lld}"
         "</script>"
         "<style>%s</style></head><body>"
