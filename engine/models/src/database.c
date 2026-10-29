@@ -718,6 +718,90 @@ static bool db_build_schema_with_repair(struct node_db *ndb, const char *path,
            db_build_schema(ndb, boot_ceremony, &corrupt, "recovery");
 }
 
+/* Canonicalise the caller's path into ndb->path; a NULL path is left alone. */
+static bool db_open_store_identity(struct node_db *ndb, const char *path)
+{
+    return !path || platform_path_identity(ndb->path, sizeof(ndb->path), path);
+}
+
+/* Install the lifetime hooks, name the owner and join the pathname lease. */
+static bool db_open_join_owner_lease(struct node_db *ndb, bool boot_ceremony,
+                                     const char *reason)
+{
+    if (!db_lifetime_install())
+        return false; // raw-return-ok:db_lifetime_install failure aborts the open in node_db_open_impl
+    ndb->lifetime_backing_owner = boot_ceremony;
+    (void)snprintf(ndb->lifetime_owner, sizeof(ndb->lifetime_owner), "%s",
+                   boot_ceremony ? "node_db.canonical" : reason);
+    /* Every mutable handle explicitly joins the pathname lease.  In-process
+     * runtime helpers share the canonical owner's lease; a one-shot process
+     * cannot open the live node database behind that owner's back. */
+    return node_db_owner_lease_acquire(ndb, true);
+}
+
+/* True (after logging the refusal) when the preflight found a newer or
+ * unreadable schema marker that this open must not touch. */
+static bool db_schema_preflight_refused(
+    const struct node_db_schema_preflight *pf)
+{
+    if (pf->state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
+        node_db_log_newer_schema_refusal((int)pf->version, (int)pf->floor);
+        return true;
+    }
+    if (pf->state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
+        node_db_log_unknown_schema_refusal(pf->detail);
+        return true;
+    }
+    return false;
+}
+
+/* The first raw open under its lifetime scope; records the generation. */
+static bool db_open_raw_initial(struct node_db *ndb, const char *path,
+                                bool boot_ceremony)
+{
+    struct db_lifetime_scope open_scope;
+    db_lifetime_scope_enter(
+        &open_scope, ndb->lifetime_owner,
+        boot_ceremony ? DB_LIFETIME_BACKING_OWNER
+                      : DB_LIFETIME_HANDLE_OWNER,
+        0);
+    bool raw_opened = db_open_raw(&ndb->db, path, boot_ceremony, "initial");
+    ndb->lifetime_generation = db_lifetime_scope_generation();
+    db_lifetime_scope_leave(&open_scope);
+    return raw_opened;
+}
+
+/* Boot quick_check: false only when it ran and found the store malformed. */
+static bool db_boot_quick_check_clean(struct node_db *ndb, const char *path)
+{
+    /* Skip-probe: true = verified-clean skip or unclean/unverified
+     * deferral (probe logs which). False = run blocking PRAGMA. */
+    bool skip_quick_check = g_quick_check_skip_probe && path &&
+                            g_quick_check_skip_probe(path);
+    if (skip_quick_check)
+        return true;
+    int64_t t_qc = db_now_ms();
+    bool qc_ok = db_quick_check_ok(ndb->db, path);
+    printf("[boot]   %-28s %lldms\n", "sqlite.quick_check",
+           (long long)(db_now_ms() - t_qc));
+    return qc_ok;
+}
+
+/* Both staging deletes of the boot crash recovery; true when both succeed or
+ * when this is a runtime reopen, which skips them. */
+static bool db_boot_staging_cleanup(struct node_db *ndb, const char *path,
+                                    bool boot_ceremony)
+{
+    if (!boot_ceremony)
+        return true;
+    return db_exec_checked_progress(ndb->db,
+               "DELETE FROM snapshot_staging_utxos",
+               "snapshot_staging_boot_cleanup", path) == SQLITE_OK &&
+           db_exec_checked_progress(ndb->db,
+               "DELETE FROM node_state WHERE key LIKE 'snapshot_staging_%'",
+               "snapshot_staging_state_boot_cleanup", path) == SQLITE_OK;
+}
+
 /* Shared open path. boot_ceremony=true is the one-time boot open (quick_check +
  * migration banner + staging cleanup); false is a runtime reopen that skips all
  * three and names itself (see node_db_open_runtime). */
@@ -726,8 +810,8 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
 {
     memset(ndb, 0, sizeof(*ndb));
     ndb->lifetime_owner_lease_slot = -1;
-    if (path && !platform_path_identity(ndb->path, sizeof(ndb->path), path))
-        return false;
+    if (!db_open_store_identity(ndb, path))
+        return false; /* raw-return-ok:path identity failure, nothing opened yet */
     path = ndb->path;
 
     /* Darwin's mutable pathname lease is a sibling file.  Refuse an
@@ -737,26 +821,11 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
      * acquisition to close the inspect-to-open race. */
     struct node_db_schema_preflight prelease_preflight =
         db_boot_schema_preflight(path, boot_ceremony, "sqlite.preflight_prelease");
-    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
-        node_db_log_newer_schema_refusal((int)prelease_preflight.version,
-                                         (int)prelease_preflight.floor);
+    if (db_schema_preflight_refused(&prelease_preflight))
         return false;
-    }
-    if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
-        node_db_log_unknown_schema_refusal(prelease_preflight.detail);
-        return false;
-    }
 
     node_db_state_init(ndb);
-    if (!db_lifetime_install())
-        return node_db_open_abort(ndb);
-    ndb->lifetime_backing_owner = boot_ceremony;
-    (void)snprintf(ndb->lifetime_owner, sizeof(ndb->lifetime_owner), "%s",
-                   boot_ceremony ? "node_db.canonical" : reason);
-    /* Every mutable handle explicitly joins the pathname lease.  In-process
-     * runtime helpers share the canonical owner's lease; a one-shot process
-     * cannot open the live node database behind that owner's back. */
-    if (!node_db_owner_lease_acquire(ndb, true))
+    if (!db_open_join_owner_lease(ndb, boot_ceremony, reason))
         return node_db_open_abort(ndb);
 
     /* No anonymous DB open: a reopen names who/why so it cannot look like a
@@ -771,59 +840,25 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
      * store must never be interpreted as schema 0 and migrated in place. */
     struct node_db_schema_preflight preflight =
         db_boot_schema_preflight(path, boot_ceremony, "sqlite.preflight_postlease");
-    if (preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
-        node_db_log_newer_schema_refusal((int)preflight.version,
-                                         (int)preflight.floor);
+    if (db_schema_preflight_refused(&preflight))
         return node_db_open_abort(ndb);
-    }
-    if (preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
-        node_db_log_unknown_schema_refusal(preflight.detail);
-        return node_db_open_abort(ndb);
-    }
 
-    struct db_lifetime_scope open_scope;
-    db_lifetime_scope_enter(
-        &open_scope, ndb->lifetime_owner,
-        boot_ceremony ? DB_LIFETIME_BACKING_OWNER
-                      : DB_LIFETIME_HANDLE_OWNER,
-        0);
-    bool raw_opened = db_open_raw(&ndb->db, path, boot_ceremony, "initial");
-    ndb->lifetime_generation = db_lifetime_scope_generation();
-    db_lifetime_scope_leave(&open_scope);
-    if (!raw_opened)
+    if (!db_open_raw_initial(ndb, path, boot_ceremony))
         return node_db_open_abort(ndb);
     const char *schema_attempt = "initial";
-    if (boot_ceremony) {
-        /* Skip-probe: true = verified-clean skip or unclean/unverified
-         * deferral (probe logs which). False = run blocking PRAGMA. */
-        bool skip_quick_check = g_quick_check_skip_probe && path &&
-                                g_quick_check_skip_probe(path);
-        if (!skip_quick_check) {
-            int64_t t_qc = db_now_ms();
-            bool qc_ok = db_quick_check_ok(ndb->db, path);
-            printf("[boot]   %-28s %lldms\n", "sqlite.quick_check",
-                   (long long)(db_now_ms() - t_qc));
-            if (!qc_ok) {
-                LOG_INFO("db", "db: %s is malformed; rebuilding fresh SQLite state",
-                         path);
-                if (!db_quarantine_and_reopen(ndb, path, boot_ceremony))
-                    return node_db_open_abort(ndb);
-                schema_attempt = "recovery";
-            }
-        }
+    if (boot_ceremony && !db_boot_quick_check_clean(ndb, path)) {
+        LOG_INFO("db", "db: %s is malformed; rebuilding fresh SQLite state",
+                 path);
+        if (!db_quarantine_and_reopen(ndb, path, boot_ceremony))
+            return node_db_open_abort(ndb);
+        schema_attempt = "recovery";
     }
 
     if (!db_build_schema_with_repair(ndb, path, boot_ceremony, schema_attempt))
         return node_db_open_abort(ndb);
     /* Crash recovery: staged snapshot rows are never authoritative across
      * process lifetimes. BOOT-only (a reopen must not re-run it every cycle). */
-    if (boot_ceremony &&
-        (db_exec_checked_progress(ndb->db,
-            "DELETE FROM snapshot_staging_utxos",
-            "snapshot_staging_boot_cleanup", path) != SQLITE_OK ||
-         db_exec_checked_progress(ndb->db,
-            "DELETE FROM node_state WHERE key LIKE 'snapshot_staging_%'",
-            "snapshot_staging_state_boot_cleanup", path) != SQLITE_OK))
+    if (!db_boot_staging_cleanup(ndb, path, boot_ceremony))
         return node_db_open_abort(ndb);
     if (!prepare_statements(ndb))
         return node_db_open_abort(ndb);
