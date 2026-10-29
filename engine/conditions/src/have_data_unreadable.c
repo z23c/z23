@@ -90,11 +90,11 @@ static int hdu_select_idle_candidate_height(
     bool tip_recent, struct block_index *candidate, int cur_target)
 {
     if (tip_recent || !g_select_idle_is_read_failure_fn())
-        return -1;
+        return -1;  // raw-return-ok:no qualifying candidate, not an error; original skipped silently
     int64_t ua_h = g_select_idle_height_fn();
     if (ua_h >= 0 && (candidate == NULL || ua_h < cur_target))
         return (int)ua_h;
-    return -1;
+    return -1;  // raw-return-ok:no qualifying candidate, not an error; original skipped silently
 }
 
 /* Candidate 3 pre-check: snapshot the stage_repair body-read note and
