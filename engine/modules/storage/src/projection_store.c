@@ -440,6 +440,29 @@ static bool projection_clean_receipt_consume(const char *path)
     return memcmp(&want, &have, sizeof(want)) == 0;
 }
 
+/* Receipt path plus its per-process staging name; false when either does not
+ * fit. */
+static bool projection_receipt_stage_paths(const char *path, char *receipt,
+                                           size_t receipt_n, char *tmp,
+                                           size_t tmp_n)
+{
+    if (!projection_receipt_path(receipt, receipt_n, path))
+        return false;
+    int tn = snprintf(tmp, tmp_n, "%s.tmp.%llu", receipt,
+                      (unsigned long long)os_proc_current_pid());
+    return tn > 0 && (size_t)tn < tmp_n;
+}
+
+/* Flush the receipt's parent directory after the replace. */
+static bool projection_receipt_parent_flushed(const char *receipt)
+{
+    char resolved[PROJECTION_STORE_PATH_MAX + 16];
+    char parent[PROJECTION_STORE_PATH_MAX + 16];
+    return platform_private_path_resolve(receipt, resolved, sizeof(resolved),
+                                         parent, sizeof(parent)) &&
+           platform_private_parent_flush(parent);
+}
+
 static bool projection_clean_receipt_write(const char *path)
 {
     struct projection_file_identity id;
@@ -448,11 +471,8 @@ static bool projection_clean_receipt_write(const char *path)
         return false;
     char receipt[PROJECTION_STORE_PATH_MAX + 16];
     char tmp[PROJECTION_STORE_PATH_MAX + 64];
-    if (!projection_receipt_path(receipt, sizeof(receipt), path))
-        return false;
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", receipt,
-                      (unsigned long long)os_proc_current_pid());
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
+    if (!projection_receipt_stage_paths(path, receipt, sizeof(receipt), tmp,
+                                        sizeof(tmp)))
         return false;
     char content[768];
     int cn = snprintf(
@@ -480,13 +500,7 @@ static bool projection_clean_receipt_write(const char *path)
               platform_private_file_replace(&staged, tmp, receipt);
     platform_private_file_close(&staged);
     if (!ok) (void)platform_private_file_unlink_missing_ok(tmp);
-    char resolved[PROJECTION_STORE_PATH_MAX + 16];
-    char parent[PROJECTION_STORE_PATH_MAX + 16];
-    if (ok && (!platform_private_path_resolve(receipt, resolved,
-                                              sizeof(resolved), parent,
-                                              sizeof(parent)) ||
-               !platform_private_parent_flush(parent)))
-        ok = false;
+    ok = ok && projection_receipt_parent_flushed(receipt);
     if (!ok) (void)platform_private_file_unlink_missing_ok(receipt);
     return ok;
 }
@@ -813,15 +827,139 @@ static bool apply_pragmas(sqlite3 *db)
     return true;
 }
 
+#ifdef _WIN32
+typedef uintptr_t projection_dir_cap_t;
+#else
+typedef int projection_dir_cap_t;
+#endif
+
+/* True when `opened` names the directory the store already holds; releases
+ * `opened` either way. Called under g_lock. */
+static bool projection_open_same_dir_release(projection_dir_cap_t opened)
+{
+#ifdef _WIN32
+    bool same = progress_directory_same(g_dir_handle, opened);
+    platform_private_directory_close(opened);
+#else
+    struct stat have;
+    struct stat want;
+    bool same = g_dir_fd >= 0 && fstat(g_dir_fd, &have) == 0 &&
+                fstat(opened, &want) == 0 &&
+                have.st_dev == want.st_dev && have.st_ino == want.st_ino;
+    (void)close(opened);
+#endif
+    return same;
+}
+
+/* Report a failed sqlite3_open_v2 and drop the half-open handle. */
+static void projection_open_report_sqlite_failure(const char *path,
+                                                  sqlite3 *db, int rc)
+{
+    fprintf(stderr,  // obs-ok:projection-store-open-failure
+            "[projection_store] sqlite3_open_v2(%s) failed: %s\n",
+            path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+    if (db) sqlite3_close(db);
+}
+
+/* The integrity-gate announcement for the chosen plan. */
+static void projection_open_log_plan(enum projection_integrity_plan plan,
+                                     const char *display_path)
+{
+    if (plan == PROJECTION_INTEGRITY_SKIP) {
+        fprintf(stderr,  // obs-ok:projection-store-lifecycle
+                "[projection_store] quick_check skipped "
+                "(content-bound clean-close receipt) path=%s\n", display_path);
+    } else {
+        projection_integrity_announce(plan, display_path);
+    }
+}
+
+static void projection_open_log_quick_check_done(
+    enum projection_integrity_plan plan, const char *display_path,
+    int64_t started_ms)
+{
+    if (plan == PROJECTION_INTEGRITY_SCAN_NOW) {
+        fprintf(stderr,  // obs-ok:projection-store-lifecycle
+                "[projection_store] quick_check done path=%s elapsed_ms=%lld\n",
+                display_path,
+                (long long)(platform_time_monotonic_ms() - started_ms));
+    }
+}
+
+#ifndef _WIN32
+/* Quarantine the corrupt file, reopen a fresh one and re-check it. On false
+ * the handle and the directory capability are already released and the
+ * recovery event emitted; the caller still holds g_lock. */
+static bool projection_open_requarantine(const char *path, sqlite3 **dbp,
+                                         int opened_dir_fd)
+{
+    sqlite3 *db = *dbp;
+    fprintf(stderr,  // obs-ok:projection-store-open-failure
+            "[projection_store] %s failed integrity quick_check; "
+            "quarantining + re-deriving\n", path);
+    sqlite3_close(db);
+    db = NULL;
+    sqlite_integrity_quarantine_corrupt(path, "projection_store",
+                                        "projection_store_quarantine");
+
+    int rc = sqlite3_open_v2(path, &db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        NULL);
+    *dbp = db;
+    if (rc != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:projection-store-open-failure
+                "[projection_store] reopen after quarantine of %s failed: "
+                "%s — disk/fs fault\n",
+                path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
+        if (db) sqlite3_close(db);
+        (void)close(opened_dir_fd);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=projection_store_reopen_failed "
+                    "reason=disk_fault path=%s", path);
+        return false;
+    }
+    if (!sqlite_integrity_quick_check_ok(db, "projection_store")) {
+        /* A freshly-created, empty DB that fails quick_check cannot be
+         * derived-state corruption — the underlying storage is broken.
+         * Do NOT quarantine again (that would loop); fail terminally. */
+        fprintf(stderr,  // obs-ok:projection-store-open-failure
+                "[projection_store] FRESH %s still fails quick_check — "
+                "terminal disk/fs fault, refusing to loop\n", path);
+        sqlite3_close(db);
+        (void)close(opened_dir_fd);
+        event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=projection_store_fresh_corrupt "
+                    "reason=disk_fault path=%s", path);
+        return false;
+    }
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] fresh %s opened after quarantine "
+            "(projections re-derive on next fold)\n", path);
+    return true;
+}
+#endif
+
+/* <datadir>/<filename> for display; false when it does not fit. */
+static bool projection_open_display_path(char *out, size_t out_n,
+                                         const char *datadir)
+{
+    int n = snprintf(out, out_n, "%s/%s", datadir, PROJECTION_STORE_FILENAME);
+    return n > 0 && (size_t)n < out_n;
+}
+
+static bool projection_open_datadir_given(const char *datadir)
+{
+    return datadir && datadir[0];
+}
+
 bool projection_store_open(const char *datadir)
 {
-    if (!datadir || !datadir[0]) LOG_FAIL("projection_store",
+    if (!projection_open_datadir_given(datadir)) LOG_FAIL("projection_store",
         "open: empty datadir");
 
     char display_path[PROJECTION_STORE_PATH_MAX];
-    int n = snprintf(display_path, sizeof(display_path), "%s/%s",
-                     datadir, PROJECTION_STORE_FILENAME);
-    if (n <= 0 || (size_t)n >= sizeof(display_path))
+    if (!projection_open_display_path(display_path, sizeof(display_path),
+                                      datadir))
         LOG_FAIL("projection_store", "open: datadir path too long");
 
 #ifdef _WIN32
@@ -848,16 +986,9 @@ bool projection_store_open(const char *datadir)
 
     if (atomic_load_explicit(&g_db, memory_order_relaxed) != NULL) {
 #ifdef _WIN32
-        bool same = progress_directory_same(g_dir_handle,
-                                            opened_dir_handle);
-        platform_private_directory_close(opened_dir_handle);
+        bool same = projection_open_same_dir_release(opened_dir_handle);
 #else
-        struct stat have;
-        struct stat want;
-        bool same = g_dir_fd >= 0 && fstat(g_dir_fd, &have) == 0 &&
-                    fstat(opened_dir_fd, &want) == 0 &&
-                    have.st_dev == want.st_dev && have.st_ino == want.st_ino;
-        (void)close(opened_dir_fd);
+        bool same = projection_open_same_dir_release(opened_dir_fd);
 #endif
         pthread_mutex_unlock(&g_lock);
         if (!same)
@@ -900,10 +1031,7 @@ bool projection_store_open(const char *datadir)
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
         sqlite_vfs);
     if (rc != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:projection-store-open-failure
-                "[projection_store] sqlite3_open_v2(%s) failed: %s\n",
-                path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
-        if (db) sqlite3_close(db);
+        projection_open_report_sqlite_failure(path, db, rc);
 #ifdef _WIN32
         (void)sqlite_vfs_dir_unregister(opened_vfs_name);
         platform_private_directory_close(opened_dir_handle);
@@ -956,13 +1084,7 @@ bool projection_store_open(const char *datadir)
      * storage/projection_store.h and config/boot_fast_restart.h). The scan
      * is never skipped or shortened; only its thread changes. */
     int64_t quick_check_started = platform_time_monotonic_ms();
-    if (plan == PROJECTION_INTEGRITY_SKIP) {
-        fprintf(stderr,  // obs-ok:projection-store-lifecycle
-                "[projection_store] quick_check skipped "
-                "(content-bound clean-close receipt) path=%s\n", display_path);
-    } else {
-        projection_integrity_announce(plan, display_path);
-    }
+    projection_open_log_plan(plan, display_path);
     if (plan == PROJECTION_INTEGRITY_SCAN_NOW &&
         !sqlite_integrity_quick_check_ok(db, "projection_store")) {
 #ifdef _WIN32
@@ -976,64 +1098,14 @@ bool projection_store_open(const char *datadir)
         pthread_mutex_unlock(&g_lock);
         return false;
 #else
-        fprintf(stderr,  // obs-ok:projection-store-open-failure
-                "[projection_store] %s failed integrity quick_check; "
-                "quarantining + re-deriving\n", path);
-        sqlite3_close(db);
-        db = NULL;
-        sqlite_integrity_quarantine_corrupt(path, "projection_store",
-                                            "projection_store_quarantine");
-
-        rc = sqlite3_open_v2(path, &db,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-            NULL);
-        if (rc != SQLITE_OK) {
-            fprintf(stderr,  // obs-ok:projection-store-open-failure
-                    "[projection_store] reopen after quarantine of %s failed: "
-                    "%s — disk/fs fault\n",
-                    path, db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
-            if (db) sqlite3_close(db);
-#ifdef _WIN32
-            platform_private_directory_close(opened_dir_handle);
-#else
-            (void)close(opened_dir_fd);
-#endif
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=projection_store_reopen_failed "
-                        "reason=disk_fault path=%s", path);
+        if (!projection_open_requarantine(path, &db, opened_dir_fd)) {
             pthread_mutex_unlock(&g_lock);
             return false;
         }
-        if (!sqlite_integrity_quick_check_ok(db, "projection_store")) {
-            /* A freshly-created, empty DB that fails quick_check cannot be
-             * derived-state corruption — the underlying storage is broken.
-             * Do NOT quarantine again (that would loop); fail terminally. */
-            fprintf(stderr,  // obs-ok:projection-store-open-failure
-                    "[projection_store] FRESH %s still fails quick_check — "
-                    "terminal disk/fs fault, refusing to loop\n", path);
-            sqlite3_close(db);
-#ifdef _WIN32
-            platform_private_directory_close(opened_dir_handle);
-#else
-            (void)close(opened_dir_fd);
-#endif
-            event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=projection_store_fresh_corrupt "
-                        "reason=disk_fault path=%s", path);
-            pthread_mutex_unlock(&g_lock);
-            return false;
-        }
-        fprintf(stderr,  // obs-ok:projection-store-lifecycle
-                "[projection_store] fresh %s opened after quarantine "
-                "(projections re-derive on next fold)\n", path);
 #endif
     }
-    if (plan == PROJECTION_INTEGRITY_SCAN_NOW) {
-        fprintf(stderr,  // obs-ok:projection-store-lifecycle
-                "[projection_store] quick_check done path=%s elapsed_ms=%lld\n",
-                display_path,
-                (long long)(platform_time_monotonic_ms() - quick_check_started));
-    }
+    projection_open_log_quick_check_done(plan, display_path,
+                                         quick_check_started);
 
     if (!apply_pragmas(db)) {
         sqlite3_close(db);

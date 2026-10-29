@@ -502,8 +502,6 @@ engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41
 engine/modules/storage/src/event_log.c:event_log_append:16
 engine/modules/storage/src/event_log.c:event_log_read:17
 engine/modules/storage/src/event_log.c:event_log_stream:19
-engine/modules/storage/src/projection_store.c:projection_clean_receipt_write:17
-engine/modules/storage/src/projection_store.c:projection_store_open:28
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_open_impl:32
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_xlock:26
 engine/reducer/conditions/src/reducer_drive_watchdog.c:reducer_drive_dump_state_json:51
