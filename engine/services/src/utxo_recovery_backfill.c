@@ -28,6 +28,7 @@
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/result.h"
+#include "util/safe_alloc.h"
 #include <stdio.h>
 #include <sqlite3.h>
 
@@ -98,7 +99,8 @@ static bool backfill_open_write(struct node_db *ndb, sqlite3_stmt **upd_out,
     sqlite3_stmt *ins = NULL;
     if (sqlite3_prepare_v2(
             ndb->db,
-            "UPDATE blocks SET sapling_value=?, sprout_value=? WHERE hash=?",
+            "UPDATE blocks SET sapling_value=?1, sprout_value=?2 WHERE hash=?3 "
+            "AND (sapling_value IS NOT ?1 OR sprout_value IS NOT ?2)",
             -1, &upd, NULL) != SQLITE_OK) {
         LOG_WARN("utxo_recovery", "backfill: prepare UPDATE failed: %s",
                  sqlite3_errmsg(ndb->db));
@@ -106,7 +108,7 @@ static bool backfill_open_write(struct node_db *ndb, sqlite3_stmt **upd_out,
     }
     if (sqlite3_prepare_v2(
             ndb->db,
-            "INSERT INTO blocks"
+            "INSERT OR IGNORE INTO blocks"
             "(hash,height,prev_hash,version,merkle_root,"
             "time,bits,nonce,solution,chain_work,status,"
             "file_num,data_pos,undo_pos,num_tx,"
@@ -157,43 +159,41 @@ static bool backfill_finish_write(struct node_db *ndb, sqlite3_stmt *upd,
     return true;
 }
 
-/* Resolve one block's shielded values in place. Returns 0 with the values
- * resolved (the block body is read only when the cached pair is an ambiguous
- * zero), or -1 when the body cannot be read, in which case the caller must
- * stop without advancing the cursor. */
+/* Derive one block's shielded values from its BODY. A cached non-zero
+ * nSaplingValue/nSproutValue is never trusted: blocks connected before the
+ * valueDeltaZat sign fix (8d8346b743) can carry the wrong sign in the index.
+ * Returns 0 with both values derived and the in-memory index refreshed, or -1
+ * when the body cannot be read, in which case the caller must stop without
+ * advancing the cursor (we cannot PROVE the value, zero or otherwise). */
 static int backfill_resolve_block_values(struct block_index *bi,
                                          const char *datadir,
                                          int64_t *sprout_val,
                                          int64_t *sapling_val)
 {
-    if (*sprout_val == 0 && *sapling_val == 0) {
-        /* Cached zero is ambiguous. Read the body to resolve it. A read
-         * failure means we cannot PROVE zero, so we must not advance the
-         * cursor past this height — stop and retry next boot. */
-        struct block blk;
-        if (!read_block_from_disk_index(&blk, bi, datadir))
-            return -1; /* raw-return-ok:unreadable body; the walk stops and retries next boot */
-        connect_block_shielded_values(&blk, sprout_val, sapling_val);
-        block_free(&blk);
-        if (*sprout_val != 0 || *sapling_val != 0) {
-            bi->nSproutValue = *sprout_val;
-            bi->nSaplingValue = *sapling_val;
-        }
-    }
+    struct block blk;
+    if (!read_block_from_disk_index(&blk, bi, datadir))
+        return -1; /* raw-return-ok:unreadable body; the walk stops and retries next boot */
+    connect_block_shielded_values(&blk, sprout_val, sapling_val);
+    block_free(&blk);
+    bi->nSproutValue = *sprout_val;
+    bi->nSaplingValue = *sapling_val;
     return 0;
 }
 
-/* Write one block's derived shielded values. Returns 1 when a value row was
- * written, 0 when there was nothing to write and -1 when a step failed. A
+
+/* Write one block's derived shielded values, compare-first: the UPDATE only
+ * touches a row whose stored pair differs, so a correct row is never rewritten
+ * (and is not counted). Returns 1 when a value row was repaired or inserted,
+ * 0 when nothing changed and -1 when a step failed.  allow_insert=false (the
+ * self-verify pass) never creates rows. A
  * failure is rolled back and both statements finalized HERE, while the
  * SQLITE_STATIC bindings of this frame are still alive. */
 static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
                                     sqlite3_stmt *ins,
                                     struct block_index *bi,
-                                    int64_t sprout_val, int64_t sapling_val)
+                                    int64_t sprout_val, int64_t sapling_val,
+                                    bool allow_insert)
 {
-    if (sprout_val == 0 && sapling_val == 0)
-        return 0;
     /* Primary path: derive-only UPDATE keyed by hash. Touches ONLY the
      * two shielded-value columns — the consensus columns of an
      * already-populated row are left exactly as normal sync wrote them. */
@@ -208,6 +208,8 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
     }
     if (sqlite3_changes(ndb->db) > 0)
         return 1;
+    if (!allow_insert || (sprout_val == 0 && sapling_val == 0))
+        return 0;   /* nothing to repair; never invent an all-zero row */
     /* No row for this hash yet: insert a FULL row from the in-memory
      * block_index (real solution/chain_work/undo_pos/sapling_root),
      * so the computed value is preserved instead of silently lost. */
@@ -245,7 +247,8 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
         backfill_abort_write(ndb, upd, ins, "INSERT value row");
         return -1; /* raw-return-ok:backfill_abort_write logged the failed step */
     }
-    return 1;
+    /* INSERT OR IGNORE: 0 changes means a row appeared meanwhile; leave it. */
+    return sqlite3_changes(ndb->db) > 0 ? 1 : 0;
 }
 
 /* Durably commit one scanned batch and advance the in-transaction cursor.
@@ -312,7 +315,7 @@ static int backfill_walk_value_range(struct node_db *ndb,
             break;
 
         int wrote = backfill_write_value_row(ndb, upd, ins, bi,
-                                             sprout_val, sapling_val);
+                                             sprout_val, sapling_val, true);
         if (wrote < 0)
             return BACKFILL_WALK_CLEANED;
         if (wrote > 0)
@@ -483,4 +486,198 @@ void utxo_recovery_backfill_shielded_if_needed(struct node_db *ndb,
     }
     /* The durable cursor is advanced inside the walk (crash-safe), so a
      * partial pass resumes from where it committed rather than restarting. */
+}
+
+/* ── Background self-verify of the persisted shielded values ─────────────
+ *
+ * blocks.sapling_value must equal zclassicd's valueDeltaZat (-sum(valueBalance)).
+ * Rows written by self-connection before the sign fix can carry the wrong sign
+ * BELOW the boot backfill cursor, where the boot walk never looks again.  This
+ * pass re-derives both values from the block bodies, in small paced batches
+ * through the node's own write helpers, and compare-and-updates by hash.  It is
+ * explorer/projection data only; no consensus predicate reads it.
+ *
+ * Cursor `shielded_value_verify_height` is the highest height fully verified
+ * (advanced in the same transaction as the row repairs).  Marker
+ * `shielded_value_verify_done` is set once the pass has covered the tip. */
+
+#define SHIELDED_VERIFY_CURSOR_KEY "shielded_value_verify_height"
+#define SHIELDED_VERIFY_DONE_KEY "shielded_value_verify_done"
+
+struct shielded_verify_item {
+    struct block_index *bi;
+    int64_t sprout;
+    int64_t sapling;
+};
+
+struct shielded_verify_ctx {
+    struct shielded_verify_item *items;
+    int count;
+    int through;      /* cursor value to persist with this batch */
+    bool mark_done;   /* persist the done marker in the same transaction */
+    int repaired;
+};
+
+int utxo_recovery_shielded_verify_may_run(int chain_tip, int projection_tip,
+                                           int64_t header_tip)
+{
+    if (chain_tip <= 0 || projection_tip < 0 || header_tip < 0)
+        return 0;
+    /* Both the node.db projection and the header chain must be within the live
+     * edge; anything further behind is sync work this pass must not compete
+     * with. */
+    return projection_tip + 1 >= chain_tip && header_tip <= (int64_t)chain_tip + 1 ? 1 : 0;
+}
+
+/* Phase 1 (no db): derive the values of [from, to] from block bodies. Heights
+ * with no body, or whose body cannot be read, are skipped. */
+static int verify_collect_range(struct active_chain *chain, const char *datadir,
+                                int from, int to,
+                                struct shielded_verify_item *items)
+{
+    int n = 0;
+    for (int h = from; h <= to; h++) {
+        struct block_index *bi = active_chain_at(chain, h);
+        if (!bi || bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
+            (bi->nDataPos == 0 && bi->nHeight > 0))
+            continue;
+        int64_t sprout = 0, sapling = 0;
+        if (backfill_resolve_block_values(bi, datadir, &sprout, &sapling) != 0)
+            continue;
+        items[n++] = (struct shielded_verify_item){ bi, sprout, sapling };
+    }
+    return n;
+}
+
+static bool verify_write_batch(struct node_db *ndb, void *ctx_ptr)
+{
+    struct shielded_verify_ctx *vctx = ctx_ptr;
+    if (!ndb || !ndb->open || !vctx)
+        LOG_FAIL("utxo_recovery", "shielded verify: null or closed db");
+    sqlite3_stmt *upd = NULL;
+    sqlite3_stmt *ins = NULL;
+    if (!backfill_open_write(ndb, &upd, &ins))
+        return false; // raw-return-ok:backfill_open_write-logs-each-failure
+    vctx->repaired = 0;
+    for (int i = 0; i < vctx->count; i++) {
+        const struct shielded_verify_item *it = &vctx->items[i];
+        int wrote = backfill_write_value_row(ndb, upd, ins, it->bi,
+                                             it->sprout, it->sapling, false);
+        if (wrote < 0)
+            return false; // raw-return-ok:backfill_write_value_row rolled back
+        vctx->repaired += wrote;
+    }
+    if (!node_db_state_set_int(ndb, SHIELDED_VERIFY_CURSOR_KEY, vctx->through))
+        return backfill_abort_write(ndb, upd, ins, "persist verify cursor");
+    if (vctx->mark_done &&
+        !node_db_state_set_int(ndb, SHIELDED_VERIFY_DONE_KEY, 1))
+        return backfill_abort_write(ndb, upd, ins, "persist verify done marker");
+    if (!node_db_commit(ndb))
+        return backfill_abort_write(ndb, upd, ins, "commit verify batch");
+    sqlite3_finalize(upd);
+    sqlite3_finalize(ins);
+    return true;
+}
+
+/* Phase 2: run the collected batch through the node's write path, then refresh
+ * the in-memory index from the derived values. Frees vctx->items. */
+static bool verify_commit_batch(struct node_db *ndb, struct db_service *dbsvc,
+                                struct shielded_verify_ctx *vctx)
+{
+    bool ok = dbsvc ? db_service_run_write(dbsvc, verify_write_batch, vctx)
+                    : verify_write_batch(ndb, vctx);
+    if (ok)
+        for (int i = 0; i < vctx->count; i++) {
+            vctx->items[i].bi->nSproutValue = vctx->items[i].sprout;
+            vctx->items[i].bi->nSaplingValue = vctx->items[i].sapling;
+        }
+    free(vctx->items);
+    vctx->items = NULL;
+    return ok;
+}
+
+/* First height still to verify: above the persisted cursor, never below Sapling
+ * activation. */
+static int verify_first_height(struct node_db *ndb, int sapling_activation,
+                               int64_t *cursor)
+{
+    *cursor = -1;
+    node_db_state_get_int(ndb, SHIELDED_VERIFY_CURSOR_KEY, cursor);
+    int from = (int)*cursor + 1;
+    if (from < sapling_activation)
+        from = sapling_activation;
+    return from < 1 ? 1 : from;
+}
+
+static bool verify_args_ok(const struct node_db *ndb, int max_heights)
+{
+    return ndb && ndb->open && max_heights > 0;
+}
+
+static bool verify_marker_set(struct node_db *ndb)
+{
+    int64_t done = 0;
+    return node_db_state_get_int(ndb, SHIELDED_VERIFY_DONE_KEY, &done) && done;
+}
+
+static void verify_report(const struct shielded_value_verify_batch *res,
+                          bool had_range, int tip_height)
+{
+    if (had_range)
+        LOG_INFO("utxo_recovery",
+                 "shielded verify: heights %d..%d scanned=%d repaired=%d",
+                 res->from, res->through, res->scanned, res->repaired);
+    if (res->at_tip)
+        LOG_INFO("utxo_recovery",
+                 "shielded verify: complete through tip height %d", tip_height);
+}
+
+struct zcl_result utxo_recovery_verify_shielded_values_batch(
+    struct node_db *ndb, struct db_service *dbsvc, struct main_state *state,
+    const char *datadir, int sapling_activation, int tip_height,
+    int max_heights, struct shielded_value_verify_batch *out)
+{
+    struct shielded_value_verify_batch res = {0};
+    struct zcl_result valid = backfill_validate_args(ndb, dbsvc, state);
+    if (!valid.ok)
+        return valid;
+    if (!verify_args_ok(ndb, max_heights))
+        return ZCL_ERR(-53, "shielded verify: bad batch arguments");
+
+    if (verify_marker_set(ndb)) {
+        res.at_tip = res.already_done = true;
+        if (out)
+            *out = res;
+        return ZCL_OK;
+    }
+    int64_t cursor;
+    int from = verify_first_height(ndb, sapling_activation, &cursor);
+    if (cursor < 0)
+        cursor = 0;
+    int to = from + max_heights - 1;
+    if (to > tip_height)
+        to = tip_height;
+    res.from = from;
+    res.through = to < from ? from - 1 : to;
+    int persist = to < from ? (int)cursor : to;
+    struct shielded_verify_ctx vctx = {
+        .through = persist,
+        .mark_done = to >= tip_height,
+    };
+    size_t slots = to >= from ? (size_t)(to - from + 1) : 1;
+    vctx.items = zcl_calloc(slots, sizeof(*vctx.items), "shielded_verify_items");
+    if (!vctx.items)
+        return ZCL_ERR(-54, "shielded verify: out of memory");
+    if (to >= from)
+        vctx.count = verify_collect_range(&state->chain_active, datadir,
+                                          from, to, vctx.items);
+    if (!verify_commit_batch(ndb, dbsvc, &vctx))
+        return ZCL_ERR(-55, "shielded verify: batch write failed");
+    res.scanned = vctx.count;
+    res.repaired = vctx.repaired;
+    res.at_tip = vctx.mark_done;
+    verify_report(&res, to >= from, tip_height);
+    if (out)
+        *out = res;
+    return ZCL_OK;
 }

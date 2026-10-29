@@ -19,6 +19,10 @@
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
+#include "storage/disk_block_io.h"
+#include "primitives/block.h"
+#include "primitives/transaction.h"
+#include "core/amount.h"
 #include "core/uint256.h"
 
 #include <sqlite3.h>
@@ -31,24 +35,58 @@
            failures++; }                                               \
 } while (0)
 
-static void sbf_hash_for(int h, struct uint256 *out)
+/* Build the body for height h whose Sapling valueDelta is `sapling_value`
+ * (zclassicd: valueDeltaZat = -sum(tx.valueBalance), so valueBalance is the
+ * negation). Header fields make the hash unique per height. */
+static void sbf_make_block(struct block *b, int h, int64_t sapling_value)
 {
-    memset(out->data, 0, 32);
-    out->data[0] = (uint8_t)(h & 0xFF);
-    out->data[1] = (uint8_t)((h >> 8) & 0xFF);
-    out->data[2] = (uint8_t)((h >> 16) & 0xFF);
-    out->data[31] = 0x5B;
+    block_init(b);
+    b->header.nVersion = 4;
+    b->header.nTime = 1700000000u + (uint32_t)h;
+    b->header.nBits = 0x2000ffffu;
+    b->header.nNonce.data[0] = (uint8_t)(h & 0xFF);
+    b->header.nNonce.data[1] = (uint8_t)((h >> 8) & 0xFF);
+    b->num_vtx = 1;
+    b->vtx = calloc(1, sizeof(struct transaction)); // raw-alloc-ok:test-fixture
+    transaction_init(&b->vtx[0]);
+    transaction_alloc(&b->vtx[0], 1, 1);
+    b->vtx[0].vin[0].sequence = 0xffffffff;
+    b->vtx[0].vout[0].value = COIN;
+    b->vtx[0].overwintered = true;
+    b->vtx[0].version = 4;
+    b->vtx[0].version_group_id = SAPLING_VERSION_GROUP_ID;
+    b->vtx[0].value_balance = -sapling_value;
 }
 
-/* Install a body-backed block_index at height h on the active chain with the
- * given (nonzero) shielded value. Heights MUST be installed in ascending order
- * so the chain height publishes as the maximum. A nonzero value means the walk
- * resolves it from the cached index and never touches disk. */
-static struct block_index *sbf_install(struct main_state *ms, int h,
-                                       int64_t sapling_value)
+/* The block hash for height h (header-only; independent of the body value). */
+static void sbf_hash_for(int h, struct uint256 *out)
 {
+    struct block b;
+    sbf_make_block(&b, h, 0);
+    block_get_hash(&b, out);
+    block_free(&b);
+}
+
+/* Install a body-backed block_index at height h on the active chain whose BODY
+ * on disk carries `sapling_value` (the truth). The cached nSaplingValue is
+ * seeded with `cached` so tests can prove the cache never wins over the body.
+ * Heights MUST be installed in ascending order. */
+static struct block_index *sbf_install_cached(struct main_state *ms,
+                                              const char *datadir, int h,
+                                              int64_t sapling_value,
+                                              int64_t cached)
+{
+    struct block b;
+    sbf_make_block(&b, h, sapling_value);
     struct uint256 hh;
-    sbf_hash_for(h, &hh);
+    block_get_hash(&b, &hh);
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    unsigned char msg_start[4] = {0x24, 0xe9, 0x27, 0x64};
+    bool wrote = write_block_to_disk(&b, &pos, datadir, msg_start);
+    block_free(&b);
+    if (!wrote)
+        return NULL;
     struct block_index *bi =
         chainstate_insert_block_index((struct chainstate *)ms, &hh);
     if (!bi)
@@ -57,16 +95,22 @@ static struct block_index *sbf_install(struct main_state *ms, int h,
     bi->nVersion = 4;
     bi->nBits = 0x2000ffffu;
     bi->nTime = 1700000000u + (uint32_t)h;
-    memset(tbi_ext(bi)->hashMerkleRoot.data, 0x11, 32);
     bi->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
-    bi->nFile = 1;
-    bi->nDataPos = 1000 + h;
+    bi->nFile = pos.nFile;
+    bi->nDataPos = pos.nPos;
     bi->nTx = 1;
     bi->nSproutValue = 0;
-    bi->nSaplingValue = sapling_value;
+    bi->nSaplingValue = cached;
     if (!active_chain_install_tip_slot(&ms->chain_active, bi))
         return NULL;
     return bi;
+}
+
+static const char *g_sbf_dir;
+static struct block_index *sbf_install(struct main_state *ms, int h,
+                                       int64_t sapling_value)
+{
+    return sbf_install_cached(ms, g_sbf_dir, h, sapling_value, sapling_value);
 }
 
 /* Count blocks rows carrying a nonzero shielded value within [lo,hi]. */
@@ -163,6 +207,169 @@ static int64_t sbf_read_col_int(struct node_db *ndb, int height, const char *col
     return v;
 }
 
+/* Heights 1..8 with body + row (3..5 carry the WRONG sign, the pre-8d8346b743
+ * writer's output); height 9 has a body but no blocks row. */
+static bool sbf_build_verify_fixture(struct main_state *ms, struct node_db *ndb)
+{
+    uint8_t sol[8], cw[32], sr[32];
+    memset(sol, 0x11, sizeof(sol));
+    memset(cw, 0x22, sizeof(cw));
+    memset(sr, 0x33, sizeof(sr));
+    bool built = true;
+    for (int h = 1; h <= 8; h++) {
+        built &= (sbf_install(ms, h, 100 + h) != NULL);
+        struct uint256 hh;
+        sbf_hash_for(h, &hh);
+        built &= sbf_insert_real_row(ndb, &hh, h, sol, (int)sizeof(sol), cw, sr);
+        sqlite3_stmt *s = NULL;
+        sqlite3_prepare_v2(ndb->db,
+            "UPDATE blocks SET sapling_value=? WHERE height=?", -1, &s, NULL);
+        sqlite3_bind_int64(s, 1, (h >= 3 && h <= 5) ? -(100 + h) : 100 + h);
+        sqlite3_bind_int(s, 2, h);
+        built &= (sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+    }
+    return built & (sbf_install(ms, 9, 109) != NULL);
+}
+
+/* self-verify: wrong-sign repair, no rewrite of correct rows, cursor resume */
+static int sbf_test_verify_pass(void)
+{
+    int failures = 0;
+    char vdir[256];
+    {
+        test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "verify");
+        g_sbf_dir = vdir;
+        char vpath[320];
+        snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        SBF_CHECK("(f) node.db opens", node_db_open(&ndb, vpath));
+        struct main_state ms;
+        main_state_init(&ms);
+        SBF_CHECK("(f) fixture built", sbf_build_verify_fixture(&ms, &ndb));
+        uint8_t cw[32];
+        memset(cw, 0x22, sizeof(cw));
+        SBF_CHECK("(f) update-count trigger installs",
+                  sqlite3_exec(ndb.db,
+                      "CREATE TABLE upd_log(h INTEGER);"
+                      "CREATE TRIGGER log_upd AFTER UPDATE OF sapling_value,"
+                      "sprout_value ON blocks BEGIN "
+                      "INSERT INTO upd_log VALUES(NEW.height); END",
+                      NULL, NULL, NULL) == SQLITE_OK);
+
+        struct shielded_value_verify_batch b1 = {0};
+        struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+            &ndb, NULL, &ms, vdir, 1, 9, 4, &b1);
+        SBF_CHECK("(i) batch 1 ok", r.ok && b1.from == 1 && b1.through == 4 &&
+                  !b1.at_tip);
+        SBF_CHECK("(i) batch 1 repaired heights 3 and 4", b1.repaired == 2);
+        int64_t cur = -1;
+        node_db_state_get_int(&ndb, "shielded_value_verify_height", &cur);
+        SBF_CHECK("(i) cursor persisted at 4", cur == 4);
+
+        /* reboot: close + reopen; the next batch resumes above the cursor */
+        node_db_close(&ndb);
+        memset(&ndb, 0, sizeof(ndb));
+        SBF_CHECK("(i) node.db reopens", node_db_open(&ndb, vpath));
+        struct shielded_value_verify_batch b2 = {0};
+        r = utxo_recovery_verify_shielded_values_batch(&ndb, NULL, &ms, vdir,
+                                                       1, 9, 4, &b2);
+        SBF_CHECK("(i) batch 2 resumes at 5", r.ok && b2.from == 5 &&
+                  b2.through == 8 && !b2.at_tip);
+        SBF_CHECK("(i) batch 2 repaired height 5 only", b2.repaired == 1);
+        struct shielded_value_verify_batch b3 = {0};
+        r = utxo_recovery_verify_shielded_values_batch(&ndb, NULL, &ms, vdir,
+                                                       1, 9, 4, &b3);
+        SBF_CHECK("(i) batch 3 reaches tip", r.ok && b3.from == 9 &&
+                  b3.at_tip && b3.repaired == 0);
+        struct shielded_value_verify_batch b4 = {0};
+        r = utxo_recovery_verify_shielded_values_batch(&ndb, NULL, &ms, vdir,
+                                                       1, 9, 4, &b4);
+        SBF_CHECK("(i) finished pass is a no-op", r.ok && b4.already_done &&
+                  b4.scanned == 0);
+
+        bool all_ok = true;
+        for (int h = 1; h <= 8; h++)
+            all_ok &= (sbf_read_col_int(&ndb, h, "sapling_value") == 100 + h);
+        SBF_CHECK("(f) every wrong-sign row repaired to the derived value",
+                  all_ok);
+        sqlite3_stmt *s = NULL;
+        int updates = -1;
+        sqlite3_prepare_v2(ndb.db, "SELECT COUNT(*) FROM upd_log", -1, &s,
+                           NULL);
+        if (sqlite3_step(s) == SQLITE_ROW)
+            updates = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+        SBF_CHECK("(g) correct rows were not rewritten (3 updates total)",
+                  updates == 3);
+        SBF_CHECK("(f) no row invented for a height without one",
+                  sbf_shielded_rows(&ndb, 9, 9) == 0);
+        SBF_CHECK("(f) in-memory index refreshed to the derived value",
+                  active_chain_at(&ms.chain_active, 4)->nSaplingValue == 104);
+        uint8_t got[32];
+        SBF_CHECK("(f) consensus columns untouched",
+                  sbf_read_col_blob(&ndb, 4, "chain_work", got, 32) == 32 &&
+                  memcmp(got, cw, 32) == 0);
+        main_state_free(&ms);
+        node_db_close(&ndb);
+    }
+    return failures;
+}
+
+/* a cached WRONG nSaplingValue must not win over the body */
+static int sbf_test_cache_vs_body(void)
+{
+    int failures = 0;
+    char vdir[256];
+    {
+        test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "cache");
+        g_sbf_dir = vdir;
+        char vpath[320];
+        snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        SBF_CHECK("(h) node.db opens", node_db_open(&ndb, vpath));
+        struct main_state ms;
+        main_state_init(&ms);
+        struct block_index *bi = sbf_install_cached(&ms, vdir, 1, 700, -700);
+        SBF_CHECK("(h) block with wrong-sign cache installed", bi != NULL);
+        int updated = -1;
+        struct zcl_result r = utxo_recovery_backfill_shielded_range(
+            &ndb, NULL, &ms, vdir, 1, 1, &updated);
+        SBF_CHECK("(h) backfill ok", r.ok && updated == 1);
+        SBF_CHECK("(h) row carries the body-derived value, not the cache",
+                  sbf_read_col_int(&ndb, 1, "sapling_value") == 700);
+        SBF_CHECK("(h) in-memory cache refreshed to the derived value",
+                  bi && bi->nSaplingValue == 700);
+        /* a second pass finds a correct row: nothing to count */
+        updated = -1;
+        r = utxo_recovery_backfill_shielded_range(&ndb, NULL, &ms, vdir, 1, 1,
+                                                  &updated);
+        SBF_CHECK("(h) re-run rewrites nothing", r.ok && updated == 0);
+        main_state_free(&ms);
+        node_db_close(&ndb);
+    }
+    return failures;
+}
+
+/* the verify pass yields to sync */
+static int sbf_test_verify_yield(void)
+{
+    int failures = 0;
+    SBF_CHECK("(j) runs at the live edge",
+              utxo_recovery_shielded_verify_may_run(1000, 1000, 1000) &&
+              utxo_recovery_shielded_verify_may_run(1000, 999, 1001));
+    SBF_CHECK("(j) yields while the projection lags",
+              !utxo_recovery_shielded_verify_may_run(1000, 900, 1000));
+    SBF_CHECK("(j) yields while headers are ahead of the chain",
+              !utxo_recovery_shielded_verify_may_run(1000, 1000, 1500));
+    SBF_CHECK("(j) yields with no chain or unknown tips",
+              !utxo_recovery_shielded_verify_may_run(0, 0, 0) &&
+              !utxo_recovery_shielded_verify_may_run(1000, -1, 1000));
+    return failures;
+}
+
 int test_utxo_recovery_shielded_backfill(void);
 int test_utxo_recovery_shielded_backfill(void)
 {
@@ -185,10 +392,12 @@ int test_utxo_recovery_shielded_backfill(void)
 
     char dir[256];
     char ndb_path[320];
+    disk_block_io_set_deferred_sync(true);
 
     /* ---- (b) suffix-only walk visits ONLY heights above the cursor ---- */
     {
         test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "suffix");
+        g_sbf_dir = dir;
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
 
         struct node_db ndb;
@@ -226,6 +435,7 @@ int test_utxo_recovery_shielded_backfill(void)
     /* ---- (a) cursor sticks across a simulated reboot ---- */
     {
         test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "reboot");
+        g_sbf_dir = dir;
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
 
         struct node_db ndb;
@@ -277,6 +487,7 @@ int test_utxo_recovery_shielded_backfill(void)
     /* ---- (c) stale cursor → suffix only; recorded prefix stays untouched ---- */
     {
         test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "regression");
+        g_sbf_dir = dir;
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
 
         struct node_db ndb;
@@ -315,6 +526,7 @@ int test_utxo_recovery_shielded_backfill(void)
     /* ---- (d) a pre-populated REAL row keeps its consensus columns ---- */
     {
         test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "preserve");
+        g_sbf_dir = dir;
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
 
         struct node_db ndb;
@@ -373,6 +585,7 @@ int test_utxo_recovery_shielded_backfill(void)
     /* ---- (e) a failed value write must not certify coverage in the cursor ---- */
     {
         test_make_tmpdir(dir, sizeof(dir), "shielded_backfill", "write_fail");
+        g_sbf_dir = dir;
         snprintf(ndb_path, sizeof(ndb_path), "%s/node.db", dir);
 
         struct node_db ndb;
@@ -416,6 +629,11 @@ int test_utxo_recovery_shielded_backfill(void)
         main_state_free(&ms);
         node_db_close(&ndb);
     }
+
+    failures += sbf_test_verify_pass();
+    failures += sbf_test_cache_vs_body();
+    failures += sbf_test_verify_yield();
+    disk_block_io_set_deferred_sync(false);
 
     printf("=== shielded backfill: %d failure(s) ===\n", failures);
     return failures;

@@ -423,4 +423,30 @@ void utxo_recovery_backfill_shielded_if_needed(struct node_db *ndb,
                                                const char *datadir,
                                                int tip_height);
 
+/* ── Background self-verify of blocks.{sapling,sprout}_value ────────────
+ * Re-derives both values from the block bodies (valueDeltaZat =
+ * -sum(valueBalance)) for the active chain from Sapling activation upward, in
+ * small batches, and compare-and-updates rows keyed by hash. Cursor
+ * `shielded_value_verify_height` (node_state) is advanced in the same
+ * transaction as the repairs; `shielded_value_verify_done` marks a completed
+ * pass. Explorer/projection data only, never a consensus predicate. */
+struct shielded_value_verify_batch {
+    int from;          /* first height of this batch */
+    int through;       /* last height covered by this batch */
+    int scanned;       /* heights whose body was derived */
+    int repaired;      /* rows whose stored pair differed and was rewritten */
+    bool at_tip;       /* pass complete (this batch reached the tip) */
+    bool already_done; /* done marker was already set; nothing ran */
+};
+
+/* Pure yield gate (1/0): 1 only when the node.db projection and the header chain
+ * are both within one block of the active tip. */
+int utxo_recovery_shielded_verify_may_run(int chain_tip, int projection_tip,
+                                           int64_t header_tip);
+
+struct zcl_result utxo_recovery_verify_shielded_values_batch(
+    struct node_db *ndb, struct db_service *dbsvc, struct main_state *state,
+    const char *datadir, int sapling_activation, int tip_height,
+    int max_heights, struct shielded_value_verify_batch *out);
+
 #endif /* ZCL_SERVICES_UTXO_RECOVERY_SERVICE_H */

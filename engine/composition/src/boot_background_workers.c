@@ -24,7 +24,9 @@
 #include "config/boot_background_workers.h"
 #include "config/boot_projection_hole_scan.h"
 #include "config/boot_snapshot_import.h"
+#include "consensus/params.h"
 #include "services/hodl_history_service.h"
+#include "services/utxo_recovery_service.h"
 #include "services/node_db_catchup_service.h"
 #include "services/chain_state_service.h"
 #include "controllers/store_controller.h"
@@ -530,6 +532,41 @@ static bool projection_backfill_start_pending(int projection_tip,
     return projection_tip < chain_tip && !sparse_tip_pending;
 }
 
+/* SHIELDED_VERIFY_BATCH heights per tick (one tick per idle sleep): paced so
+ * the pass is invisible next to sync and the serialized DB writer. */
+#define SHIELDED_VERIFY_BATCH 512
+
+/* One paced step of the shielded-value self-verify pass. Yields (does nothing)
+ * unless node.db and headers are at the live edge; never blocks READY because
+ * this worker only starts after boot. Latches off once the durable done marker
+ * is seen so a caught-up node pays nothing per tick. */
+static void projection_backfill_shielded_verify_tick(struct boot_svc_ctx *svc,
+                                                     struct node_db *ndb,
+                                                     int chain_tip)
+{
+    static _Atomic bool verify_done = false;
+    if (atomic_load(&verify_done) || !svc->state || !ndb || !ndb->open)
+        return;
+    int projection_tip = node_db_sync_get_tip_height(ndb);
+    int64_t header_tip = csr_header_height(csr_instance());
+    if (!utxo_recovery_shielded_verify_may_run(chain_tip, projection_tip,
+                                               header_tip))
+        return;
+    const struct chain_params *params = chain_params_get();
+    int activation = params
+        ? params->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight : -1;
+    if (activation < 0)
+        return;
+    struct shielded_value_verify_batch batch;
+    struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+        ndb, boot_db_service(svc), svc->state, svc->datadir, activation,
+        chain_tip, SHIELDED_VERIFY_BATCH, &batch);
+    if (!r.ok)
+        LOG_WARN("utxo_recovery", "shielded verify: %s", r.message);
+    else if (batch.at_tip)
+        atomic_store(&verify_done, true);
+}
+
 static void *projection_backfill_service_thread(void *arg)
 {
     struct boot_svc_ctx *svc = arg;
@@ -709,6 +746,8 @@ static void *projection_backfill_service_thread(void *arg)
                 }
             }
         }
+
+        projection_backfill_shielded_verify_tick(svc, ndb, chain_tip);
 
         projection_backfill_idle_sleep(svc);
     }
