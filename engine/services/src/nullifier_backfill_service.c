@@ -91,52 +91,89 @@ static bool nbf_collect_nullifiers(const struct block *blk,
     return true;
 }
 
+static bool nbf_entries_have_duplicate(const struct nbf_nullifier_entry *entries,
+                                       size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = 0; j < i; j++) {
+            if (entries[i].pool == entries[j].pool &&
+                memcmp(entries[i].bytes, entries[j].bytes, 32) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+enum nbf_height_scan {
+    NBF_HEIGHT_SCAN_OK = 0,
+    NBF_HEIGHT_SCAN_KV_FAILED,
+    NBF_HEIGHT_SCAN_MISMATCH,
+};
+
+/* Scans stored heights in entry order; stops at the first kv failure or
+ * mismatch.  On mismatch *stored_out holds the stored height. */
+static enum nbf_height_scan nbf_entries_scan_heights(
+    sqlite3 *db, const struct nbf_nullifier_entry *entries, size_t count,
+    int64_t height, int64_t *stored_out)
+{
+    for (size_t i = 0; i < count; i++) {
+        bool found = false;
+        int64_t stored_height = -1;
+        if (!nullifier_kv_get(db, entries[i].bytes, entries[i].pool,
+                              &found, &stored_height))
+            return NBF_HEIGHT_SCAN_KV_FAILED;
+        if (found && stored_height != height) {
+            *stored_out = stored_height;
+            return NBF_HEIGHT_SCAN_MISMATCH;
+        }
+    }
+    return NBF_HEIGHT_SCAN_OK;
+}
+
+static bool nbf_entries_add_missing(sqlite3 *db,
+                                    const struct nbf_nullifier_entry *entries,
+                                    size_t count, int64_t height)
+{
+    for (size_t i = 0; i < count; i++) {
+        bool found = false;
+        if (!nullifier_kv_get(db, entries[i].bytes, entries[i].pool,
+                              &found, NULL) ||
+            (!found && !nullifier_kv_add(db, entries[i].bytes,
+                                         entries[i].pool, height)))
+            return false;
+    }
+    return true;
+}
+
 static bool nbf_reconcile_preloaded_nullifiers(sqlite3 *db,
                                                const struct block *blk,
                                                int64_t height)
 {
     struct nbf_nullifier_entry *entries = NULL;
     size_t count = 0;
+    int64_t stored_height = -1;
     if (!nbf_collect_nullifiers(blk, &entries, &count))
         LOG_RETURN(false, NBF_SUBSYS,
                    "reconcile_preloaded: collect failed h=%lld",
                    (long long)height);
     bool ok = true;
-    for (size_t i = 0; ok && i < count; i++) {
-        for (size_t j = 0; j < i; j++) {
-            if (entries[i].pool == entries[j].pool &&
-                memcmp(entries[i].bytes, entries[j].bytes, 32) == 0) {
-                LOG_WARN(NBF_SUBSYS,
-                         "reconcile_preloaded: duplicate within block h=%lld",
-                         (long long)height);
-                ok = false;
-                break;
-            }
-        }
+    if (nbf_entries_have_duplicate(entries, count)) {
+        LOG_WARN(NBF_SUBSYS,
+                 "reconcile_preloaded: duplicate within block h=%lld",
+                 (long long)height);
+        ok = false;
     }
-    for (size_t i = 0; ok && i < count; i++) {
-        bool found = false;
-        int64_t stored_height = -1;
-        if (!nullifier_kv_get(db, entries[i].bytes, entries[i].pool,
-                              &found, &stored_height)) {
-            ok = false;
-            break;
-        }
-        if (found && stored_height != height) {
+    if (ok) {
+        enum nbf_height_scan scan = nbf_entries_scan_heights(
+            db, entries, count, height, &stored_height);
+        if (scan == NBF_HEIGHT_SCAN_MISMATCH)
             LOG_WARN(NBF_SUBSYS,
                      "reconcile_preloaded: height mismatch want=%lld got=%lld",
                      (long long)height, (long long)stored_height);
-            ok = false;
-        }
+        ok = scan == NBF_HEIGHT_SCAN_OK;
     }
-    for (size_t i = 0; ok && i < count; i++) {
-        bool found = false;
-        if (!nullifier_kv_get(db, entries[i].bytes, entries[i].pool,
-                              &found, NULL) ||
-            (!found && !nullifier_kv_add(db, entries[i].bytes,
-                                         entries[i].pool, height)))
-            ok = false;
-    }
+    if (ok)
+        ok = nbf_entries_add_missing(db, entries, count, height);
     free(entries);
     return ok;
 }
@@ -448,6 +485,90 @@ static struct zcl_result nbf_finish_complete(
     return ZCL_OK;
 }
 
+enum nbf_read_status {
+    NBF_READ_OK = 0,
+    NBF_READ_FAILED,
+    NBF_READ_MISSING,
+};
+
+/* Reads one block body; frees the block itself on any non-OK status. */
+static enum nbf_read_status nbf_read_height(
+    nullifier_backfill_read_block_fn reader, struct block *blk, int64_t h,
+    const char *datadir, void *reader_user)
+{
+    bool found = false;
+
+    block_init(blk);
+    if (!reader(blk, h, datadir, reader_user, &found)) {
+        block_free(blk);
+        return NBF_READ_FAILED;
+    }
+    if (!found) {
+        block_free(blk);
+        return NBF_READ_MISSING;
+    }
+    return NBF_READ_OK;
+}
+
+static struct zcl_result nbf_verify_and_backfill(
+    sqlite3 *db, const struct nbf_chain_binding *binding,
+    const struct block *blk, int64_t h)
+{
+    struct zcl_result one = nbf_chain_body_verify(binding, blk, h);
+
+    if (!one.ok)
+        return one;
+    return nbf_backfill_one(db, blk, h);
+}
+
+static struct nullifier_backfill_report *nbf_report_reset(
+    struct nullifier_backfill_report *report,
+    struct nullifier_backfill_report *fallback)
+{
+    if (!report)
+        report = fallback;
+    memset(report, 0, sizeof(*report));
+    return report;
+}
+
+static int64_t nbf_cursor_if_found(bool found, int64_t cursor)
+{
+    return found ? cursor : 0;
+}
+
+static nullifier_backfill_read_block_fn nbf_select_reader(
+    const struct nullifier_backfill_config *cfg)
+{
+    return cfg->read_block ? cfg->read_block : nbf_default_read_block;
+}
+
+static void *nbf_select_reader_user(const struct nullifier_backfill_config *cfg)
+{
+    return cfg->read_block ? cfg->read_block_user : cfg->ndb;
+}
+
+static bool nbf_cfg_lacks_progress_db(const struct nullifier_backfill_config *cfg)
+{
+    return !cfg || !cfg->progress_db;
+}
+
+static bool nbf_activation_out_of_range(int64_t activation)
+{
+    return activation < 0 || activation > INT_MAX;
+}
+
+static bool nbf_resume_invalid(bool resume_found, int64_t resume,
+                               int64_t activation)
+{
+    return resume_found && (resume < 0 || resume > activation);
+}
+
+static bool nbf_default_reader_unusable(
+    const struct nullifier_backfill_config *cfg)
+{
+    return !cfg->read_block && (!cfg->ndb || !cfg->ndb->open || !cfg->datadir);
+}
+
 struct zcl_result nullifier_backfill_service_run(
     const struct nullifier_backfill_config *cfg,
     struct nullifier_backfill_report *report)
@@ -463,11 +584,9 @@ struct zcl_result nullifier_backfill_service_run(
     bool resume_found = false;
     struct nbf_chain_binding binding;
 
-    if (!report)
-        report = &local_report;
-    memset(report, 0, sizeof(*report));
+    report = nbf_report_reset(report, &local_report);
 
-    if (!cfg || !cfg->progress_db) {
+    if (nbf_cfg_lacks_progress_db(cfg)) {
         LOG_WARN(NBF_SUBSYS, "run: missing config/progress db");
         return ZCL_ERR(-40, "missing nullifier backfill config/progress db");
     }
@@ -483,7 +602,7 @@ struct zcl_result nullifier_backfill_service_run(
 
     ZCL_CHECK(nbf_read_meta_i64(db, NULLIFIER_BACKFILL_ACTIVATION_KEY,
                                 &activation, &activation_found));
-    report->activation_cursor = activation_found ? activation : 0;
+    report->activation_cursor = nbf_cursor_if_found(activation_found, activation);
     if (!activation_found) {
         LOG_WARN(NBF_SUBSYS,
                  "run: activation marker absent; history coverage unknown");
@@ -496,7 +615,7 @@ struct zcl_result nullifier_backfill_service_run(
         utxo_apply_nullifier_gap_blocker_refresh(db);
         return ZCL_OK;
     }
-    if (activation < 0 || activation > INT_MAX) {
+    if (nbf_activation_out_of_range(activation)) {
         LOG_WARN(NBF_SUBSYS, "run: activation cursor too high: %lld",
                  (long long)activation);
         return ZCL_ERR(-43, "activation cursor out of range: %lld",
@@ -505,7 +624,7 @@ struct zcl_result nullifier_backfill_service_run(
 
     ZCL_CHECK(nbf_read_meta_i64(db, NULLIFIER_BACKFILL_RESUME_KEY,
                                 &resume, &resume_found));
-    if (resume_found && (resume < 0 || resume > activation)) {
+    if (nbf_resume_invalid(resume_found, resume, activation)) {
         LOG_WARN(NBF_SUBSYS, "run: invalid resume marker %lld target=%lld",
                  (long long)resume, (long long)activation);
         return ZCL_ERR(-44, "invalid nullifier backfill resume marker %lld "
@@ -517,13 +636,13 @@ struct zcl_result nullifier_backfill_service_run(
     ZCL_CHECK(nbf_prepare_generation(db, activation, &binding,
                                      resume_found, resume, &start));
 
-    reader = cfg->read_block ? cfg->read_block : nbf_default_read_block;
-    reader_user = cfg->read_block ? cfg->read_block_user : cfg->ndb;
+    reader = nbf_select_reader(cfg);
+    reader_user = nbf_select_reader_user(cfg);
     if (!reader) {
         LOG_WARN(NBF_SUBSYS, "run: no block reader available");
         return ZCL_ERR(-45, "no block reader available");
     }
-    if (!cfg->read_block && (!cfg->ndb || !cfg->ndb->open || !cfg->datadir)) {
+    if (nbf_default_reader_unusable(cfg)) {
         LOG_WARN(NBF_SUBSYS, "run: default reader missing ndb/datadir");
         return ZCL_ERR(-46, "default block reader requires node db/datadir");
     }
@@ -534,12 +653,11 @@ struct zcl_result nullifier_backfill_service_run(
 
     for (int64_t h = start; h < activation; h++) {
         struct block blk;
-        bool found = false;
         struct zcl_result one;
+        enum nbf_read_status rs =
+            nbf_read_height(reader, &blk, h, cfg->datadir, reader_user);
 
-        block_init(&blk);
-        if (!reader(&blk, h, cfg->datadir, reader_user, &found)) {
-            block_free(&blk);
+        if (rs == NBF_READ_FAILED) {
             /* De-stormed: a stuck resume marker re-hits this same height on
              * every backfill tick until the reader fault clears. */
             static struct log_throttle thr = LOG_THROTTLE_INIT;
@@ -550,8 +668,7 @@ struct zcl_result nullifier_backfill_service_run(
             return ZCL_ERR(-47, "block reader failed at height %lld",
                            (long long)h);
         }
-        if (!found) {
-            block_free(&blk);
+        if (rs == NBF_READ_MISSING) {
             static struct log_throttle thr = LOG_THROTTLE_INIT;
             if (log_throttle_should_emit(&thr, (uint64_t)h,
                                          platform_time_wall_unix(), 300, NULL))
@@ -563,13 +680,7 @@ struct zcl_result nullifier_backfill_service_run(
                            (long long)h);
         }
 
-        one = nbf_chain_body_verify(&binding, &blk, h);
-        if (!one.ok) {
-            block_free(&blk);
-            return one;
-        }
-
-        one = nbf_backfill_one(db, &blk, h);
+        one = nbf_verify_and_backfill(db, &binding, &blk, h);
         block_free(&blk);
         if (!one.ok)
             return one;
