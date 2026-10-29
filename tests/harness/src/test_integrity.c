@@ -401,6 +401,369 @@ static int test_integrity_xor_verify_db_match(void)
     return failures;
 }
 
+/* ── Characterization: boot_check_and_refresh branches ───────────── */
+
+static void seed_utxo_row(sqlite3 *db, const char *table, uint8_t tag,
+                          uint32_t vout, int64_t value, int32_t height)
+{
+    uint8_t txid[32];
+    memset(txid, tag, 32);
+    char sql[96];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO %s (txid, vout, value, height) VALUES (?, ?, ?, ?)",
+             table);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) return;
+    sqlite3_bind_blob(s, 1, txid, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 2, vout);
+    sqlite3_bind_int64(s, 3, value);
+    sqlite3_bind_int64(s, 4, height);
+    sqlite3_step(s);
+    sqlite3_finalize(s);
+}
+
+static int test_integrity_xor_boot_check_null_and_empty(void)
+{
+    int failures = 0;
+
+    TEST("integrity: boot_check_and_refresh refuses a NULL db; with no "
+         "checkpoint stored it returns true and writes nothing") {
+        struct utxo_commitment computed = {0};
+        bool refreshed = true;
+        ASSERT(!utxo_commitment_boot_check_and_refresh(NULL, 200, &computed, &refreshed));
+        ASSERT(!refreshed);
+        ASSERT(computed.count == 0);
+
+        sqlite3 *db = open_test_db();
+        seed_utxo_row(db, "utxos", 0x11, 0, 100, 5);
+        computed.count = 77;
+        refreshed = true;
+        ASSERT(utxo_commitment_boot_check_and_refresh(db, 10, &computed, &refreshed));
+        ASSERT(!refreshed);
+        ASSERT(computed.count == 77); /* out_computed left as the caller set it */
+        struct utxo_commitment none = {0};
+        ASSERT(!utxo_commitment_load_checkpoint(db, &none));
+
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_integrity_xor_boot_check_refresh_paths(void)
+{
+    int failures = 0;
+
+    TEST("integrity: boot_check_and_refresh refresh paths: plain save at "
+         "mirror_height -1, stamp-height mismatch, accurate unstamped kept") {
+        /* Stale, unstamped checkpoint, mirror_height -1: refresh via the plain
+         * save (no stamp), NULL out params accepted. */
+        {
+            sqlite3 *db = open_test_db();
+            struct utxo_commitment stale = {0};
+            uint8_t stale_txid[32];
+            memset(stale_txid, 0x88, 32);
+            utxo_commitment_add(&stale, stale_txid, 0, 1, 1);
+            ASSERT(utxo_commitment_save_checkpoint(db, &stale));
+            seed_utxo_row(db, "utxos", 0x99, 0, 500000, 300);
+
+            ASSERT(utxo_commitment_boot_check_and_refresh(db, -1, NULL, NULL));
+            struct utxo_commitment ground_truth = {0};
+            utxo_commitment_compute_db(db, &ground_truth);
+            struct utxo_commitment saved = {0};
+            ASSERT(utxo_commitment_load_checkpoint(db, &saved));
+            ASSERT(utxo_commitment_equal(&saved, &ground_truth));
+            int32_t h = -1;
+            ASSERT(!utxo_commitment_load_checkpoint_at_height(db, &saved, &h));
+            sqlite3_close(db);
+        }
+
+        /* Stamped at 200, asked about 201: no fast path, recompute over the
+         * empty utxos table and re-stamp at 201. */
+        {
+            sqlite3 *db = open_test_db();
+            struct utxo_commitment stamped = {0};
+            uint8_t txid[32];
+            memset(txid, 0xAA, 32);
+            utxo_commitment_add(&stamped, txid, 0, 1, 1);
+            ASSERT(utxo_commitment_save_checkpoint_at_height(db, &stamped, 200));
+
+            struct utxo_commitment computed = {0};
+            bool refreshed = false;
+            ASSERT(utxo_commitment_boot_check_and_refresh(db, 201, &computed, &refreshed));
+            ASSERT(refreshed);
+            ASSERT(computed.count == 0);
+            struct utxo_commitment restamped = {0};
+            int32_t h = -1;
+            ASSERT(utxo_commitment_load_checkpoint_at_height(db, &restamped, &h));
+            ASSERT(h == 201);
+            ASSERT(restamped.count == 0);
+            sqlite3_close(db);
+        }
+
+        /* Accurate but unstamped: kept as is, not restamped. */
+        {
+            sqlite3 *db = open_test_db();
+            seed_utxo_row(db, "utxos", 0x44, 1, 700, 20);
+            struct utxo_commitment ground_truth = {0};
+            utxo_commitment_compute_db(db, &ground_truth);
+            ASSERT(utxo_commitment_save_checkpoint(db, &ground_truth));
+
+            struct utxo_commitment computed = {0};
+            bool refreshed = true;
+            ASSERT(utxo_commitment_boot_check_and_refresh(db, 300, &computed, &refreshed));
+            ASSERT(!refreshed);
+            ASSERT(utxo_commitment_equal(&computed, &ground_truth));
+            struct utxo_commitment after = {0};
+            int32_t h = -1;
+            ASSERT(!utxo_commitment_load_checkpoint_at_height(db, &after, &h));
+            sqlite3_close(db);
+        }
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_integrity_xor_boot_check_save_failure(void)
+{
+    int failures = 0;
+
+    TEST("integrity: boot_check_and_refresh reports a failed refresh save "
+         "as false, for the stamped and the plain save") {
+        sqlite3 *db = open_test_db();
+        struct utxo_commitment stale = {0};
+        uint8_t stale_txid[32];
+        memset(stale_txid, 0xBB, 32);
+        utxo_commitment_add(&stale, stale_txid, 0, 1, 1);
+        ASSERT(utxo_commitment_save_checkpoint(db, &stale));
+        seed_utxo_row(db, "utxos", 0xCC, 0, 900, 400);
+
+        struct utxo_commitment ground_truth = {0};
+        utxo_commitment_compute_db(db, &ground_truth);
+
+        /* Block every node_state insert; the SELECT-side loader still works. */
+        ASSERT(sqlite3_exec(db,
+            "CREATE TRIGGER block_node_state_write BEFORE INSERT ON node_state "
+            "BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            NULL, NULL, NULL) == SQLITE_OK);
+
+        struct utxo_commitment computed = {0};
+        bool refreshed = true;
+        ASSERT(!utxo_commitment_boot_check_and_refresh(db, 400, &computed, &refreshed));
+        ASSERT(!refreshed);
+        ASSERT(utxo_commitment_equal(&computed, &ground_truth));
+        ASSERT(!utxo_commitment_boot_check_and_refresh(db, -1, NULL, &refreshed));
+        ASSERT(!refreshed);
+
+        /* The stale blob is still what is stored. */
+        struct utxo_commitment still = {0};
+        ASSERT(utxo_commitment_load_checkpoint(db, &still));
+        ASSERT(utxo_commitment_equal(&still, &stale));
+
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+/* ── Characterization: compute_range (bounded keyspace window) ───── */
+
+/* Three valid 32-byte txids (tags 0x11 < 0x22 < 0x33) plus one 1-byte txid
+ * that sorts last: compute_range counts it toward the SQL LIMIT but skips
+ * it (sqlite3_column_bytes < 32), so it never adds a row. */
+static void seed_range_fixture(sqlite3 *db)
+{
+    seed_utxo_row(db, "utxos", 0x11, 0, 100, 5);
+    seed_utxo_row(db, "utxos", 0x22, 1, 200, 9);
+    seed_utxo_row(db, "utxos", 0x33, 2, 300, 7);
+    sqlite3_exec(db,
+        "INSERT INTO utxos (txid, vout, value, height) VALUES (X'FF', 0, 1, 1)",
+        NULL, NULL, NULL);
+}
+
+static int test_integrity_range_refuses_bad_args(void)
+{
+    int failures = 0;
+
+    TEST("integrity: compute_range refuses NULL db/out/txid, max_rows <= 0, "
+         "any table other than coins/utxos, and an absent table") {
+        sqlite3 *db = open_test_db();
+        seed_range_fixture(db);
+        uint8_t lo[32] = {0};
+        struct utxo_commitment out = {0};
+        size_t rows = 99;
+        int32_t mn = 0;
+        int32_t mx = 0;
+
+        ASSERT(!utxo_commitment_compute_range(NULL, "utxos", lo, 10,
+                                              &out, &rows, &mn, &mx, NULL));
+        ASSERT(rows == 0);
+        ASSERT(mn == INT32_MAX);
+        ASSERT(mx == INT32_MIN);
+        ASSERT(!utxo_commitment_compute_range(db, "utxos", lo, 10,
+                                              NULL, &rows, &mn, &mx, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "utxos", NULL, 10,
+                                              &out, &rows, &mn, &mx, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "utxos", lo, 0,
+                                              &out, &rows, &mn, &mx, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "utxos", lo, -1,
+                                              &out, &rows, &mn, &mx, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, NULL, lo, 10,
+                                              &out, &rows, NULL, NULL, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "node_state", lo, 10,
+                                              &out, &rows, NULL, NULL, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "UTXOS", lo, 10,
+                                              &out, &rows, NULL, NULL, NULL));
+        ASSERT(!utxo_commitment_compute_range(db, "utxos;DROP TABLE utxos", lo, 10,
+                                              &out, &rows, NULL, NULL, NULL));
+        ASSERT(rows == 0);
+        ASSERT(out.count == 0);
+
+        /* `coins` is allowed but absent from this schema: prepare fails. */
+        ASSERT(!utxo_commitment_compute_range(db, "coins", lo, 10,
+                                              &out, &rows, NULL, NULL, NULL));
+        ASSERT(rows == 0);
+        ASSERT(out.count == 0);
+
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_integrity_range_windows(void)
+{
+    int failures = 0;
+
+    TEST("integrity: compute_range windows: full keyspace, max_rows cap, "
+         "inclusive txid_lo, short-txid-only window, empty table") {
+        sqlite3 *db = open_test_db();
+        seed_range_fixture(db);
+        uint8_t tag11[32];
+        uint8_t tag22[32];
+        uint8_t tag33[32];
+        memset(tag11, 0x11, 32);
+        memset(tag22, 0x22, 32);
+        memset(tag33, 0x33, 32);
+        uint8_t lo[32] = {0};
+        uint8_t last[32] = {0};
+        struct utxo_commitment out = {0};
+        size_t rows = 0;
+        int32_t mn = 0;
+        int32_t mx = 0;
+
+        /* Full keyspace: matches compute_db; the short txid is skipped. */
+        ASSERT(utxo_commitment_compute_range(db, "utxos", lo, 100,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 3);
+        ASSERT(out.count == 3);
+        ASSERT(mn == 5);
+        ASSERT(mx == 9);
+        ASSERT(memcmp(last, tag33, 32) == 0);
+        struct utxo_commitment full = {0};
+        utxo_commitment_compute_db(db, &full);
+        ASSERT(utxo_commitment_equal(&out, &full));
+
+        /* NULL rows/min/max/last outputs are accepted. */
+        struct utxo_commitment bare = {0};
+        ASSERT(utxo_commitment_compute_range(db, "utxos", lo, 100,
+                                             &bare, NULL, NULL, NULL, NULL));
+        ASSERT(utxo_commitment_equal(&bare, &full));
+
+        /* max_rows cap keeps the first two rows in txid order. */
+        ASSERT(utxo_commitment_compute_range(db, "utxos", lo, 2,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 2);
+        ASSERT(mn == 5);
+        ASSERT(mx == 9);
+        ASSERT(memcmp(last, tag22, 32) == 0);
+        struct utxo_commitment expect = {0};
+        utxo_commitment_add(&expect, tag11, 0, 100, 5);
+        utxo_commitment_add(&expect, tag22, 1, 200, 9);
+        ASSERT(utxo_commitment_equal(&out, &expect));
+
+        /* txid_lo = 0x22.. is inclusive: rows 0x22 and 0x33 only. */
+        memset(lo, 0x22, 32);
+        ASSERT(utxo_commitment_compute_range(db, "utxos", lo, 10,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 2);
+        ASSERT(out.count == 2);
+        ASSERT(mn == 7);
+        ASSERT(mx == 9);
+        ASSERT(memcmp(last, tag33, 32) == 0);
+
+        /* Only the short txid is in window: zero rows, last_txid untouched. */
+        memset(lo, 0x44, 32);
+        memset(last, 0xCD, 32);
+        ASSERT(utxo_commitment_compute_range(db, "utxos", lo, 10,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 0);
+        ASSERT(out.count == 0);
+        ASSERT(mn == INT32_MAX);
+        ASSERT(mx == INT32_MIN);
+        ASSERT(last[0] == 0xCD && last[31] == 0xCD);
+
+        /* Empty table: a valid zero-row success, same sentinel behaviour. */
+        sqlite3 *empty = open_test_db();
+        memset(lo, 0, 32);
+        ASSERT(utxo_commitment_compute_range(empty, "utxos", lo, 10,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 0);
+        ASSERT(out.count == 0);
+        ASSERT(mn == INT32_MAX);
+        ASSERT(mx == INT32_MIN);
+        ASSERT(last[0] == 0xCD);
+        sqlite3_close(empty);
+
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_integrity_range_coins_table(void)
+{
+    int failures = 0;
+
+    TEST("integrity: compute_range accepts the coins table with the same "
+         "hash-and-fold") {
+        sqlite3 *db = open_test_db();
+        ASSERT(sqlite3_exec(db,
+            "CREATE TABLE coins (txid BLOB, vout INT, value INT, height INT,"
+            " PRIMARY KEY (txid, vout));",
+            NULL, NULL, NULL) == SQLITE_OK);
+        seed_utxo_row(db, "coins", 0x55, 3, 1, 42);
+
+        uint8_t lo[32] = {0};
+        uint8_t last[32] = {0};
+        struct utxo_commitment out = {0};
+        size_t rows = 0;
+        int32_t mn = 0;
+        int32_t mx = 0;
+        ASSERT(utxo_commitment_compute_range(db, "coins", lo, 10,
+                                             &out, &rows, &mn, &mx, last));
+        ASSERT(rows == 1);
+        ASSERT(mn == 42);
+        ASSERT(mx == 42);
+        uint8_t tag55[32];
+        memset(tag55, 0x55, 32);
+        ASSERT(memcmp(last, tag55, 32) == 0);
+        struct utxo_commitment expect = {0};
+        utxo_commitment_add(&expect, tag55, 3, 1, 42);
+        ASSERT(utxo_commitment_equal(&out, &expect));
+
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 /* ── UTXO count sanity check tests ───────────────────────────────── */
 
 static int test_integrity_utxo_count_check(void)
@@ -1033,6 +1396,12 @@ int test_integrity(void)
     failures += test_integrity_xor_boot_check_fast_path_no_scan();
     failures += test_integrity_xor_boot_check_slow_path_refreshes();
     failures += test_integrity_xor_verify_db_match();
+    failures += test_integrity_xor_boot_check_null_and_empty();
+    failures += test_integrity_xor_boot_check_refresh_paths();
+    failures += test_integrity_xor_boot_check_save_failure();
+    failures += test_integrity_range_refuses_bad_args();
+    failures += test_integrity_range_windows();
+    failures += test_integrity_range_coins_table();
 
     /* UTXO count sanity check */
     failures += test_integrity_utxo_count_check();
