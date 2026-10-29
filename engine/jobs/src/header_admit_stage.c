@@ -359,6 +359,53 @@ static bool rewind_forward_child_if_stale(sqlite3 *db, uint64_t cursor,
     return true;
 }
 
+enum rewind_scan_rc {
+    REWIND_SCAN_OK = 0,
+    REWIND_SCAN_PREPARE_FAILED,
+    REWIND_SCAN_AUDIT_FAILED,
+};
+
+static void rewind_window_bounds(uint64_t cursor, int *out_floor, int *out_top)
+{
+    /* Scan the recent window below the cursor for the deepest height
+     * whose logged hash no longer matches the active chain. */
+    int floor_h = (int)cursor - HEADER_ADMIT_REORG_REWIND_MAX_DEPTH;
+    if (floor_h < 0) floor_h = 0;
+    /* Above the raw lookahead bound active_chain_at() is known NULL. */
+    int top_h = (int)cursor - 1;
+    int window_h = active_chain_cached_height(&g_ms->chain_active);
+    if (top_h > window_h)
+        top_h = window_h;
+    *out_floor = floor_h;
+    *out_top = top_h;
+}
+
+/* Walk top_h down to floor_h and report the lowest mismatching height. The
+ * caller logs a prepare failure (db error text is still current on return). */
+static enum rewind_scan_rc rewind_scan_window(sqlite3 *db, int floor_h,
+                                              int top_h, int *out_deepest)
+{
+    sqlite3_stmt *match_st = NULL;
+    if (top_h >= floor_h && sqlite3_prepare_v2(
+            db, "SELECT hash FROM header_admit_log WHERE height=?",
+            -1, &match_st, NULL) != SQLITE_OK)
+        return REWIND_SCAN_PREPARE_FAILED;
+    enum rewind_scan_rc rc = REWIND_SCAN_OK;
+    for (int h = top_h; h >= floor_h; h--) {
+        atomic_fetch_add_explicit(&g_reorg_audit_height_checks, 1,
+                                  memory_order_relaxed);
+        bool known = false, matches = false;
+        if (!log_row_active_match(match_st, h, &known, &matches)) {
+            rc = REWIND_SCAN_AUDIT_FAILED;
+            break;
+        }
+        if (known && !matches)
+            *out_deepest = h;  /* keep going: find the lowest one */
+    }
+    sqlite3_finalize(match_st);
+    return rc;
+}
+
 /* A divergence can sit below a matching tip, so scan the bounded recent
  * active-window overlap and rewind to the deepest mismatch. This mutates only
  * the stage cursor/log; SQL or cursor persistence failure is fatal. */
@@ -388,39 +435,18 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
     if (rewound_forward)
         return true;
 
-    /* Scan the recent window below the cursor for the deepest height
-     * whose logged hash no longer matches the active chain. */
-    int floor_h = (int)cursor - HEADER_ADMIT_REORG_REWIND_MAX_DEPTH;
-    if (floor_h < 0) floor_h = 0;
-    /* Above the raw lookahead bound active_chain_at() is known NULL. */
-    int top_h = (int)cursor - 1;
-    int window_h = active_chain_cached_height(&g_ms->chain_active);
-    if (top_h > window_h)
-        top_h = window_h;
+    int floor_h = 0, top_h = 0;
+    rewind_window_bounds(cursor, &floor_h, &top_h);
 
-    sqlite3_stmt *match_st = NULL;
-    if (top_h >= floor_h && sqlite3_prepare_v2(
-            db, "SELECT hash FROM header_admit_log WHERE height=?",
-            -1, &match_st, NULL) != SQLITE_OK) {
+    int deepest_divergent = -1;
+    enum rewind_scan_rc scan_rc =
+        rewind_scan_window(db, floor_h, top_h, &deepest_divergent);
+    if (scan_rc == REWIND_SCAN_PREPARE_FAILED) {
         LOG_WARN("header_admit", "[header_admit] rewind prepare failed: %s",
                  sqlite3_errmsg(db));
         return false;
     }
-    int deepest_divergent = -1;
-    bool audit_ok = true;
-    for (int h = top_h; h >= floor_h; h--) {
-        atomic_fetch_add_explicit(&g_reorg_audit_height_checks, 1,
-                                  memory_order_relaxed);
-        bool known = false, matches = false;
-        if (!log_row_active_match(match_st, h, &known, &matches)) {
-            audit_ok = false;
-            break;
-        }
-        if (known && !matches)
-            deepest_divergent = h;  /* keep going: find the lowest one */
-    }
-    sqlite3_finalize(match_st);
-    if (!audit_ok)
+    if (scan_rc != REWIND_SCAN_OK)
         return false;
     if (deepest_divergent < 0)
         return true;  /* recent window is consistent → no rewind */
@@ -476,6 +502,56 @@ static struct block_index *produce_block_index(struct main_state *ms,
     return bi;
 }
 
+/* Resolve the parent hash for next_h; false means the step is BLOCKED and the
+ * blocker is already filled in (no logging happens here or in the caller). */
+static bool admit_resolve_parent_hash(struct stage_step_ctx *c,
+                                      const struct block_index *bi, int next_h,
+                                      const struct uint256 **out_parent_hash)
+{
+    if (next_h > 0) {
+        if (!bi->pprev || !bi->pprev->phashBlock) {
+            blocker_init(&c->blocker, "header_admit",
+                          "missing_parent",
+                          BLOCKER_PERMANENT,
+                          "block_index entry has no pprev linkage");
+            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+            return false;  // raw-return-ok:blocker set, caller returns JOB_BLOCKED
+        }
+        *out_parent_hash = bi->pprev->phashBlock;
+    }
+    return true;
+}
+
+static enum csr_result admit_promote_header(struct main_state *ms,
+                                            struct block_index *bi,
+                                            bool *promoted)
+{
+    /* CSR's single-writer lock prevents stale promotion over a newer header. */
+    enum csr_result promote_rc = csr_promote_header_tip(
+        csr_instance(), &ms->chain_active, &ms->pindex_best_header, bi,
+        "header_admit", promoted);
+#ifdef ZCL_TESTING
+    /* Isolated fixtures omit CSR; production has no raw writer. */
+    if (promote_rc == CSR_REJECTED_NOT_INITIALIZED) {
+        struct block_index *current = ms->pindex_best_header;
+        bool advance = current == NULL;
+        if (current && current != bi) {
+            bool have_work = !arith_uint256_is_zero(&bi->nChainWork) &&
+                             !arith_uint256_is_zero(&current->nChainWork);
+            advance = have_work
+                ? arith_uint256_compare(&bi->nChainWork,
+                                        &current->nChainWork) > 0
+                : bi->nHeight > current->nHeight;
+        }
+        if (advance)
+            ms->pindex_best_header = bi;
+        promote_rc = CSR_OK;
+        *promoted = advance;
+    }
+#endif
+    return promote_rc;
+}
+
 static job_result_t step_admit(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
@@ -502,17 +578,8 @@ static job_result_t step_admit(struct stage_step_ctx *c)
     }
 
     const struct uint256 *parent_hash = NULL;
-    if (next_h > 0) {
-        if (!bi->pprev || !bi->pprev->phashBlock) {
-            blocker_init(&c->blocker, "header_admit",
-                          "missing_parent",
-                          BLOCKER_PERMANENT,
-                          "block_index entry has no pprev linkage");
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            return JOB_BLOCKED;
-        }
-        parent_hash = bi->pprev->phashBlock;
-    }
+    if (!admit_resolve_parent_hash(c, bi, next_h, &parent_hash))
+        return JOB_BLOCKED;
 
     if (!authoritative_admit(ms, bi)) {
         LOG_WARN("header_admit",
@@ -521,30 +588,8 @@ static job_result_t step_admit(struct stage_step_ctx *c)
         return JOB_FATAL;
     }
 
-    /* CSR's single-writer lock prevents stale promotion over a newer header. */
     bool promoted = false;
-    enum csr_result promote_rc = csr_promote_header_tip(
-        csr_instance(), &ms->chain_active, &ms->pindex_best_header, bi,
-        "header_admit", &promoted);
-#ifdef ZCL_TESTING
-    /* Isolated fixtures omit CSR; production has no raw writer. */
-    if (promote_rc == CSR_REJECTED_NOT_INITIALIZED) {
-        struct block_index *current = ms->pindex_best_header;
-        bool advance = current == NULL;
-        if (current && current != bi) {
-            bool have_work = !arith_uint256_is_zero(&bi->nChainWork) &&
-                             !arith_uint256_is_zero(&current->nChainWork);
-            advance = have_work
-                ? arith_uint256_compare(&bi->nChainWork,
-                                        &current->nChainWork) > 0
-                : bi->nHeight > current->nHeight;
-        }
-        if (advance)
-            ms->pindex_best_header = bi;
-        promote_rc = CSR_OK;
-        promoted = advance;
-    }
-#endif
+    enum csr_result promote_rc = admit_promote_header(ms, bi, &promoted);
     (void)promoted;
     if (promote_rc != CSR_OK) {
         LOG_WARN("header_admit",
