@@ -80,6 +80,136 @@ struct zcl_result snapsync_finalize_fail_internal(struct snapsync_finalize_ctx *
 
 /* ── Finalize (SHA3 verification + atomic activate) ──────── */
 
+static bool snapsync_finalize_count_mismatch(
+    struct snapsync_finalize_ctx *finalize, struct node_db *ndb,
+    struct snapshot_sync_service *svc, uint32_t serving_peer_id)
+{
+    event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
+                "snapshot=FAILED reason=count_mismatch received=%llu offered=%llu",
+                (unsigned long long)svc->received_utxos,
+                (unsigned long long)svc->offered_count);
+    return snapsync_finalize_fail_internal(finalize, ndb, svc, serving_peer_id,
+                                           "count_mismatch",
+                                           "snapshot count mismatch").ok;
+}
+
+static void snapsync_finalize_emit_progress(
+    const struct snapshot_sync_service *svc, uint32_t serving_peer_id)
+{
+    double elapsed_s =
+        (double)(snapsync_now_us_internal() - svc->start_time_us) / 1000000.0;
+    event_emitf(EV_SNAPSYNC_PROGRESS, serving_peer_id,
+                "phase=snapshot_verify received=%llu/%llu rate=%.0f/s",
+                (unsigned long long)svc->received_utxos,
+                (unsigned long long)svc->offered_count,
+                elapsed_s > 0 ? (double)svc->received_utxos / elapsed_s : 0);
+}
+
+/* Anchor-root mismatch tail: leave turbo mode, emit the checkpoint-fail
+ * event, then discard staging through the common failure path (false). */
+static bool snapsync_finalize_anchor_mismatch(
+    struct snapsync_finalize_ctx *finalize, struct node_db *ndb,
+    struct snapshot_sync_service *svc, uint32_t serving_peer_id,
+    const struct sha3_utxo_checkpoint *cp, const char *want, const char *have)
+{
+    if (!snapsync_exit_turbo_mode_internal(svc).ok)
+        event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
+                    "snapshot=FAILED reason=turbo_exit_failed");
+    event_emitf(EV_UTXO_CHECKPOINT_FAIL, 0,
+                "snapshot anchor-root MISMATCH height=%d compiled=%s local=%s",
+                cp->height, want, have);
+    return snapsync_finalize_fail_internal(finalize, ndb, svc,
+                                           serving_peer_id,
+                                           "anchor_root_mismatch",
+                                           "snapshot anchor root mismatch").ok;
+}
+
+/* SHA3 verified: hand off to activation, which is contained (false). */
+static bool snapsync_finalize_contain_activation(
+    struct snapsync_finalize_ctx *finalize, struct node_db *ndb,
+    struct snapshot_sync_service *svc, uint32_t serving_peer_id,
+    const uint8_t local_root[32], uint64_t local_count,
+    const struct chain_evidence_record *snapshot_verified)
+{
+    /* The activation service owns the complete canonical transaction.
+     * Today it returns the containment result before its first mutation;
+     * keeping this handoff outside a node.db-only transaction prevents a
+     * future installer from being falsely wrapped in partial atomicity. */
+    finalize->activation_attempted = true;
+    finalize->activation_result =
+        snapsync_stage_promote_active_internal(ndb, svc, local_root,
+                                               local_count,
+                                               snapshot_verified);
+    if (finalize->activation_result.ok)
+        finalize->activation_result = ZCL_ERR(
+            SNAPSYNC_ACTIVATION_CONTAINED_ERROR_CODE,
+            "peer snapshot activation cannot publish COMPLETE until "
+            "consensus_state_snapshot_install is available");
+
+    /* Independent verifier-side containment: changing the apply service's
+     * return value alone can never publish COMPLETE. Removing this branch
+     * is part of the future unified-installer activation transaction. */
+    snapsync_mark_failed_internal(
+        svc, "peer snapshot activation contained: unified installer required");
+    event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
+                "snapshot=VERIFIED activation=CONTAINED blocker=%s "
+                "staging_preserved=true",
+                SNAPSYNC_ACTIVATION_CONTAINED_BLOCKER_ID);
+    return false;
+}
+
+/* SHA3 mismatch tail: report expected/got, leave turbo mode, discard staging. */
+static bool snapsync_finalize_sha3_failed(
+    struct snapsync_finalize_ctx *finalize, struct node_db *ndb,
+    struct snapshot_sync_service *svc, uint32_t serving_peer_id,
+    const uint8_t local_root[32], uint64_t local_count)
+{
+    char exp[65], got[65];
+    HexStr(svc->offered_utxo_root, 32, false, exp, sizeof(exp));
+    HexStr(local_root, 32, false, got, sizeof(got));
+    if (!snapsync_exit_turbo_mode_internal(svc).ok)
+        event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
+                    "snapshot=FAILED reason=turbo_exit_failed");
+    event_emitf(EV_UTXO_CHECKPOINT_FAIL, 0,
+                "snapshot SHA3 FAILED expected=%s got=%s count=%llu offered=%llu",
+                exp, got,
+                (unsigned long long)local_count,
+                (unsigned long long)svc->offered_count);
+    return snapsync_finalize_fail_internal(finalize, ndb, svc, serving_peer_id,
+                                           "sha3_failed",
+                                           "SHA3 verification failed").ok;
+}
+
+/* Received UTXO count equals a non-zero offered count. */
+static bool snapsync_finalize_counts_match(const struct snapshot_sync_service *svc)
+{
+    return !(svc->offered_count == 0 ||
+             svc->received_utxos != svc->offered_count);
+}
+
+/* Offered root and count both match the locally staged set. */
+static bool snapsync_finalize_offer_matches(
+    const struct snapshot_sync_service *svc, const uint8_t local_root[32],
+    uint64_t local_count)
+{
+    bool ok = (memcmp(local_root, svc->offered_utxo_root, 32) == 0);
+    if (local_count != svc->offered_count)
+        ok = false;
+    return ok;
+}
+
+static bool snapsync_finalize_at_anchor(const struct snapshot_sync_service *svc,
+                                        const struct sha3_utxo_checkpoint *cp)
+{
+    return (cp && svc->offered_height == cp->height);
+}
+
+static bool snapsync_finalize_anchor_count_ok(
+    const struct sha3_utxo_checkpoint *cp, uint64_t local_count)
+{
+    return (cp->utxo_count == 0 || local_count == cp->utxo_count);
+}
+
 static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
 {
     struct snapsync_finalize_ctx *finalize = ctx;
@@ -90,7 +220,6 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
     struct node_db_status db_status = {0};
     bool fc_verified;
     bool sha3_ok;
-    double elapsed_s;
 
     if (!finalize || !finalize->svc || !ndb || !ndb->open)
         LOG_FAIL("snapshot_sync", "finalize_write: null args finalize=%p ndb=%p", (void*)finalize, (void*)ndb);
@@ -112,23 +241,12 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
                                                "proof_missing",
                                                "snapshot proof missing").ok;
 
-    if (svc->offered_count == 0 ||
-        svc->received_utxos != svc->offered_count) {
-        event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
-                    "snapshot=FAILED reason=count_mismatch received=%llu offered=%llu",
-                    (unsigned long long)svc->received_utxos,
-                    (unsigned long long)svc->offered_count);
-        return snapsync_finalize_fail_internal(finalize, ndb, svc, serving_peer_id,
-                                               "count_mismatch",
-                                               "snapshot count mismatch").ok;
+    if (!snapsync_finalize_counts_match(svc)) {
+        return snapsync_finalize_count_mismatch(finalize, ndb, svc,
+                                                serving_peer_id);
     }
 
-    elapsed_s = (double)(snapsync_now_us_internal() - svc->start_time_us) / 1000000.0;
-    event_emitf(EV_SNAPSYNC_PROGRESS, serving_peer_id,
-                "phase=snapshot_verify received=%llu/%llu rate=%.0f/s",
-                (unsigned long long)svc->received_utxos,
-                (unsigned long long)svc->offered_count,
-                elapsed_s > 0 ? (double)svc->received_utxos / elapsed_s : 0);
+    snapsync_finalize_emit_progress(svc, serving_peer_id);
 
     if (!snapsync_set_staging_phase_internal(ndb, SNAPSYNC_PHASE_SNAPSHOT_VERIFY).ok)
         LOG_FAIL("snapshot_sync", "finalize_write: failed to set verify phase");
@@ -136,9 +254,7 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
 
     /* Self-consistency: the offered set we staged must hash to the root the
      * peer offered (kept exactly as before — never weakened). */
-    sha3_ok = (memcmp(local_root, svc->offered_utxo_root, 32) == 0);
-    if (local_count != svc->offered_count)
-        sha3_ok = false;
+    sha3_ok = snapsync_finalize_offer_matches(svc, local_root, local_count);
 
     /* Anchor bind (only-tightening): at the in-binary checkpoint height we do
      * not trust the peer's offered root at all — we require our OWN locally
@@ -153,11 +269,10 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
      * extra requirement: sha3_ok can flip true->false here, never false->true. */
     {
         const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        bool at_anchor = (cp && svc->offered_height == cp->height);
+        bool at_anchor = snapsync_finalize_at_anchor(svc, cp);
         if (at_anchor) {
             bool root_ok  = (memcmp(local_root, cp->sha3_hash, 32) == 0);
-            bool count_ok = (cp->utxo_count == 0 ||
-                             local_count == cp->utxo_count);
+            bool count_ok = snapsync_finalize_anchor_count_ok(cp, local_count);
             if (!root_ok || !count_ok) {
                 char want[65], have[65];
                 HexStr(cp->sha3_hash, 32, false, want, sizeof(want));
@@ -173,16 +288,9 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
                         (unsigned long long)cp->utxo_count,
                         (unsigned long long)local_count, root_ok, count_ok);
                 sha3_ok = false;
-                if (!snapsync_exit_turbo_mode_internal(svc).ok)
-                    event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
-                                "snapshot=FAILED reason=turbo_exit_failed");
-                event_emitf(EV_UTXO_CHECKPOINT_FAIL, 0,
-                            "snapshot anchor-root MISMATCH height=%d compiled=%s local=%s",
-                            cp->height, want, have);
-                return snapsync_finalize_fail_internal(finalize, ndb, svc,
-                                                       serving_peer_id,
-                                                       "anchor_root_mismatch",
-                                                       "snapshot anchor root mismatch").ok;
+                return snapsync_finalize_anchor_mismatch(finalize, ndb, svc,
+                                                         serving_peer_id, cp,
+                                                         want, have);
             }
         }
     }
@@ -193,46 +301,38 @@ static bool snapsync_finalize_write(struct node_db *ndb, void *ctx)
             .mmb_flyclient_proof_verified = fc_verified,
         };
 
-        /* The activation service owns the complete canonical transaction.
-         * Today it returns the containment result before its first mutation;
-         * keeping this handoff outside a node.db-only transaction prevents a
-         * future installer from being falsely wrapped in partial atomicity. */
-        finalize->activation_attempted = true;
-        finalize->activation_result =
-            snapsync_stage_promote_active_internal(ndb, svc, local_root,
-                                                   local_count,
-                                                   &snapshot_verified);
-        if (finalize->activation_result.ok)
-            finalize->activation_result = ZCL_ERR(
-                SNAPSYNC_ACTIVATION_CONTAINED_ERROR_CODE,
-                "peer snapshot activation cannot publish COMPLETE until "
-                "consensus_state_snapshot_install is available");
-
-        /* Independent verifier-side containment: changing the apply service's
-         * return value alone can never publish COMPLETE. Removing this branch
-         * is part of the future unified-installer activation transaction. */
-        snapsync_mark_failed_internal(
-            svc, "peer snapshot activation contained: unified installer required");
-        event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
-                    "snapshot=VERIFIED activation=CONTAINED blocker=%s "
-                    "staging_preserved=true",
-                    SNAPSYNC_ACTIVATION_CONTAINED_BLOCKER_ID);
-        return false;
+        return snapsync_finalize_contain_activation(finalize, ndb, svc,
+                                                    serving_peer_id, local_root,
+                                                    local_count,
+                                                    &snapshot_verified);
     } else {
-        char exp[65], got[65];
-        HexStr(svc->offered_utxo_root, 32, false, exp, sizeof(exp));
-        HexStr(local_root, 32, false, got, sizeof(got));
+        return snapsync_finalize_sha3_failed(finalize, ndb, svc,
+                                             serving_peer_id, local_root,
+                                             local_count);
+    }
+}
+
+/* The finalize write path failed: force FAILED state and leave turbo mode. */
+static void snapsync_finalize_mark_write_failed(
+    struct snapshot_sync_service *svc, bool turbo_active)
+{
+    bool keep_failed_state = false;
+
+    snapsync_service_lock_internal();
+    keep_failed_state = (svc->state == SNAPSYNC_FAILED);
+    if (!keep_failed_state)
+        svc->state = SNAPSYNC_FAILED;
+    snapsync_service_unlock_internal();
+
+    if (!keep_failed_state) {
+        snapsync_set_state(SNAPSYNC_FAILED, "finalize write path failed");
         if (!snapsync_exit_turbo_mode_internal(svc).ok)
-            event_emitf(EV_SNAPSYNC_VERIFIED, serving_peer_id,
-                        "snapshot=FAILED reason=turbo_exit_failed");
-        event_emitf(EV_UTXO_CHECKPOINT_FAIL, 0,
-                    "snapshot SHA3 FAILED expected=%s got=%s count=%llu offered=%llu",
-                    exp, got,
-                    (unsigned long long)local_count,
-                    (unsigned long long)svc->offered_count);
-        return snapsync_finalize_fail_internal(finalize, ndb, svc, serving_peer_id,
-                                               "sha3_failed",
-                                               "SHA3 verification failed").ok;
+            event_emitf(EV_SNAPSYNC_VERIFIED, 0,
+                        "snapshot=FAILED reason=turbo_exit_failed path=finalize");
+    } else if (turbo_active) {
+        if (!snapsync_exit_turbo_mode_internal(svc).ok)
+            event_emitf(EV_SNAPSYNC_VERIFIED, 0,
+                        "snapshot=FAILED reason=turbo_exit_failed path=finalize_failed_state");
     }
 }
 
@@ -241,7 +341,6 @@ struct zcl_result snapsync_finalize(struct snapshot_sync_service *svc)
     struct snapsync_finalize_ctx ctx;
     bool finalize_allowed = false;
     bool turbo_active = false;
-    bool keep_failed_state = false;
 
     if (!svc)
         return ZCL_ERR(-1, "finalize: svc is NULL");
@@ -260,22 +359,7 @@ struct zcl_result snapsync_finalize(struct snapshot_sync_service *svc)
     ctx.svc = svc;
 
     if (!snapsync_run_write_internal(svc, snapsync_finalize_write, &ctx)) {
-        snapsync_service_lock_internal();
-        keep_failed_state = (svc->state == SNAPSYNC_FAILED);
-        if (!keep_failed_state)
-            svc->state = SNAPSYNC_FAILED;
-        snapsync_service_unlock_internal();
-
-        if (!keep_failed_state) {
-            snapsync_set_state(SNAPSYNC_FAILED, "finalize write path failed");
-            if (!snapsync_exit_turbo_mode_internal(svc).ok)
-                event_emitf(EV_SNAPSYNC_VERIFIED, 0,
-                            "snapshot=FAILED reason=turbo_exit_failed path=finalize");
-        } else if (turbo_active) {
-            if (!snapsync_exit_turbo_mode_internal(svc).ok)
-                event_emitf(EV_SNAPSYNC_VERIFIED, 0,
-                            "snapshot=FAILED reason=turbo_exit_failed path=finalize_failed_state");
-        }
+        snapsync_finalize_mark_write_failed(svc, turbo_active);
         if (ctx.activation_attempted && !ctx.activation_result.ok)
             return ctx.activation_result;
         return ZCL_ERR(-3, "finalize: write path failed");
@@ -293,6 +377,37 @@ struct zcl_result snapsync_finalize(struct snapshot_sync_service *svc)
 }
 
 /* ── FlyClient wire format helpers ───────────────────────── */
+
+/* Read the fixed-size part of one sample (leaf + proof header); false on a
+ * short read or an oversized sibling count. */
+static bool snapsync_fc_read_sample_head(struct byte_stream *s,
+                                         struct fc_sample *sample)
+{
+    return stream_read_bytes(s, sample->leaf.block_hash, 32) &&
+           stream_read_u32_le(s, &sample->leaf.height) &&
+           stream_read_u32_le(s, &sample->leaf.timestamp) &&
+           stream_read_u32_le(s, &sample->leaf.nBits) &&
+           stream_read_bytes(s, sample->leaf.sapling_root, 32) &&
+           stream_read_bytes(s, sample->leaf.chain_work, 32) &&
+           stream_read_u64_le(s, &sample->proof.leaf_index) &&
+           stream_read_bytes(s, sample->proof.leaf_hash, 32) &&
+           stream_read_u32_le(s, &sample->proof.num_siblings) &&
+           !(sample->proof.num_siblings > MMB_MAX_MOUNTAINS);
+}
+
+/* Read count 32-byte hashes in order; on a short read *failed_at is the
+ * index that failed. */
+static bool snapsync_fc_read_hash_run(struct byte_stream *s, uint8_t (*out)[32],
+                                      uint32_t count, uint32_t *failed_at)
+{
+    for (uint32_t j = 0; j < count; j++) {
+        if (!stream_read_bytes(s, out[j], 32)) {
+            *failed_at = j;
+            return false;
+        }
+    }
+    return true;
+}
 
 struct zcl_result snapsync_parse_fc_response(struct fc_response *resp,
                                 struct byte_stream *s)
@@ -312,25 +427,16 @@ struct zcl_result snapsync_parse_fc_response(struct fc_response *resp,
     resp->num_samples = num_samples;
     for (uint32_t i = 0; i < num_samples; i++) {
         struct fc_sample *sample = &resp->samples[i];
-        if (!stream_read_bytes(s, sample->leaf.block_hash, 32) ||
-            !stream_read_u32_le(s, &sample->leaf.height) ||
-            !stream_read_u32_le(s, &sample->leaf.timestamp) ||
-            !stream_read_u32_le(s, &sample->leaf.nBits) ||
-            !stream_read_bytes(s, sample->leaf.sapling_root, 32) ||
-            !stream_read_bytes(s, sample->leaf.chain_work, 32) ||
-            !stream_read_u64_le(s, &sample->proof.leaf_index) ||
-            !stream_read_bytes(s, sample->proof.leaf_hash, 32) ||
-            !stream_read_u32_le(s, &sample->proof.num_siblings) ||
-            sample->proof.num_siblings > MMB_MAX_MOUNTAINS) {
+        if (!snapsync_fc_read_sample_head(s, sample)) {
             return ZCL_ERR(-3, "parse_fc_response: truncated sample %u at pos %zu/%zu",
                      i, s->read_pos, s->size);
         }
 
-        for (uint32_t j = 0; j < sample->proof.num_siblings; j++) {
-            if (!stream_read_bytes(s, sample->proof.siblings[j], 32))
-                return ZCL_ERR(-4, "parse_fc_response: truncated sibling %u/%u in sample %u",
-                         j, sample->proof.num_siblings, i);
-        }
+        uint32_t j = 0;
+        if (!snapsync_fc_read_hash_run(s, sample->proof.siblings,
+                                       sample->proof.num_siblings, &j))
+            return ZCL_ERR(-4, "parse_fc_response: truncated sibling %u/%u in sample %u",
+                     j, sample->proof.num_siblings, i);
 
         if (!stream_read_u32_le(s, &sample->proof.num_peaks) ||
             sample->proof.num_peaks > MMB_MAX_MOUNTAINS) {
@@ -338,11 +444,10 @@ struct zcl_result snapsync_parse_fc_response(struct fc_response *resp,
                      sample->proof.num_peaks, i);
         }
 
-        for (uint32_t j = 0; j < sample->proof.num_peaks; j++) {
-            if (!stream_read_bytes(s, sample->proof.peaks[j], 32))
-                return ZCL_ERR(-6, "parse_fc_response: truncated peak %u/%u in sample %u",
-                         j, sample->proof.num_peaks, i);
-        }
+        if (!snapsync_fc_read_hash_run(s, sample->proof.peaks,
+                                       sample->proof.num_peaks, &j))
+            return ZCL_ERR(-6, "parse_fc_response: truncated peak %u/%u in sample %u",
+                     j, sample->proof.num_peaks, i);
 
         if (!stream_read_u64_le(s, &sample->proof.mmb_size))
             return ZCL_ERR(-7, "parse_fc_response: truncated mmb_size in sample %u", i);
@@ -361,6 +466,102 @@ struct zcl_result snapsync_write_fc_challenge(const struct snapshot_sync_service
     stream_write_u64_le(s, svc->fc_challenge.chain_length);
     stream_write_bytes(s, svc->fc_challenge.mmb_root, 32);
     return ZCL_OK;
+}
+
+/* Fill sample->leaf from the active-chain block index; false when the index
+ * has no block hash (the caller then tries the legacy oracle). */
+static bool snapsync_fc_leaf_from_block_index(const struct block_index *bi,
+                                              struct fc_sample *sample)
+{
+    if (!(bi && bi->phashBlock))
+        return false;
+    /* Reproduce the boundary utxo_root so this prover-side leaf hashes
+     * identically to the stored leaf hash mmb_prove returned (the leaf
+     * store keeps only the hash, so the root must come from the
+     * persisted boundary table). Missing → zero sentinel. */
+    uint8_t utxo_root[32] = {0};
+    if (bi->nHeight > 0 &&
+        bi->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
+        sqlite3 *pdb = progress_store_db();
+        bool found = false;
+        if (pdb)
+            coins_kv_boundary_root_get(pdb, bi->nHeight, utxo_root,
+                                       &found);
+        if (!found) memset(utxo_root, 0, 32);
+    }
+    mmb_leaf_from_block(&sample->leaf,
+                        bi->phashBlock->data,
+                        bi->nHeight, bi->nTime, bi->nBits,
+                        bi->hashFinalSaplingRoot.data,
+                        (const uint8_t *)bi->nChainWork.pn,
+                        utxo_root);
+    return true;
+}
+
+/* Leaf/proof hash mismatch: adopt the oracle leaf when it hashes to the
+ * proof's leaf hash, else report why it cannot be reconciled. */
+static struct zcl_result snapsync_fc_reconcile_leaf(struct fc_sample *sample,
+                                                    int h, uint32_t i)
+{
+    struct mmb_leaf oracle_leaf;
+    uint8_t oracle_leaf_hash[32];
+
+    if (legacy_chain_rpc_get_mmb_leaf(h, &oracle_leaf)) {
+        mmb_hash_leaf(&oracle_leaf, oracle_leaf_hash);
+        if (memcmp(oracle_leaf_hash, sample->proof.leaf_hash, 32) == 0) {
+            sample->leaf = oracle_leaf;
+        } else {
+            return ZCL_ERR(-5,
+                     "build_fc_response: leaf/proof hash mismatch at height %d sample %u",
+                     h, i);
+        }
+    } else {
+        return ZCL_ERR(-6,
+                 "build_fc_response: cannot reconcile leaf/proof hash mismatch at height %d sample %u",
+                 h, i);
+    }
+    return ZCL_OK;
+}
+
+/* Leaf for height h: the active-chain block index first, then the legacy
+ * oracle; false when neither has block metadata. */
+static bool snapsync_fc_fill_leaf(const struct active_chain *chain_active,
+                                  int h, struct fc_sample *sample)
+{
+    const struct block_index *bi = active_chain_at(chain_active, h);
+    bool have_leaf = snapsync_fc_leaf_from_block_index(bi, sample);
+
+    if (!have_leaf && legacy_chain_rpc_get_mmb_leaf(h, &sample->leaf))
+        have_leaf = true;
+    return have_leaf;
+}
+
+/* MMB inclusion proof for height h over the first min(chain_length,
+ * num_leaves) leaves. */
+static bool snapsync_fc_prove_sample(const uint8_t (*all_hashes)[32],
+                                     uint64_t chain_length, uint64_t num_leaves,
+                                     int h, struct fc_sample *sample)
+{
+    uint64_t prove_len = chain_length;
+
+    if (prove_len > num_leaves)
+        prove_len = num_leaves;
+    return mmb_prove(all_hashes, prove_len, (uint64_t)h, &sample->proof);
+}
+
+/* Verify every sample proof against the challenge root; *bad is the first
+ * failing sample index. */
+static bool snapsync_fc_verify_proofs(const struct fc_response *resp,
+                                      uint32_t count, const uint8_t mmb_root[32],
+                                      uint32_t *bad)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (!mmb_verify(&resp->samples[i].proof, mmb_root)) {
+            *bad = i;
+            return false;
+        }
+    }
+    return true;
 }
 
 struct zcl_result snapsync_build_fc_response(struct fc_response *resp,
@@ -390,74 +591,30 @@ struct zcl_result snapsync_build_fc_response(struct fc_response *resp,
 
     for (uint32_t i = 0; i < count; i++) {
         int h = (int)indices[i];
-        uint64_t prove_len = challenge->chain_length;
-        const struct block_index *bi = active_chain_at(chain_active, h);
         struct fc_sample *sample = &resp->samples[i];
-        bool have_leaf = false;
 
-        if (bi && bi->phashBlock) {
-            /* Reproduce the boundary utxo_root so this prover-side leaf hashes
-             * identically to the stored leaf hash mmb_prove returned (the leaf
-             * store keeps only the hash, so the root must come from the
-             * persisted boundary table). Missing → zero sentinel. */
-            uint8_t utxo_root[32] = {0};
-            if (bi->nHeight > 0 &&
-                bi->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
-                sqlite3 *pdb = progress_store_db();
-                bool found = false;
-                if (pdb)
-                    coins_kv_boundary_root_get(pdb, bi->nHeight, utxo_root,
-                                               &found);
-                if (!found) memset(utxo_root, 0, 32);
-            }
-            mmb_leaf_from_block(&sample->leaf,
-                                bi->phashBlock->data,
-                                bi->nHeight, bi->nTime, bi->nBits,
-                                bi->hashFinalSaplingRoot.data,
-                                (const uint8_t *)bi->nChainWork.pn,
-                                utxo_root);
-            have_leaf = true;
-        }
-        if (!have_leaf && legacy_chain_rpc_get_mmb_leaf(h, &sample->leaf))
-            have_leaf = true;
-        if (!have_leaf) {
+        if (!snapsync_fc_fill_leaf(chain_active, h, sample)) {
             return ZCL_ERR(-3,
                      "build_fc_response: no block metadata at height %d for sample %u",
                      h, i);
         }
 
-        if (prove_len > leaf_store->num_leaves)
-            prove_len = leaf_store->num_leaves;
-        if (!mmb_prove(all_hashes, prove_len, (uint64_t)h, &sample->proof))
+        if (!snapsync_fc_prove_sample(all_hashes, challenge->chain_length,
+                                      leaf_store->num_leaves, h, sample))
             return ZCL_ERR(-4, "build_fc_response: mmb_prove failed for height %d sample %u", h, i);
 
         uint8_t sample_leaf_hash[32];
         mmb_hash_leaf(&sample->leaf, sample_leaf_hash);
         if (memcmp(sample_leaf_hash, sample->proof.leaf_hash, 32) != 0) {
-            struct mmb_leaf oracle_leaf;
-            uint8_t oracle_leaf_hash[32];
-
-            if (legacy_chain_rpc_get_mmb_leaf(h, &oracle_leaf)) {
-                mmb_hash_leaf(&oracle_leaf, oracle_leaf_hash);
-                if (memcmp(oracle_leaf_hash, sample->proof.leaf_hash, 32) == 0) {
-                    sample->leaf = oracle_leaf;
-                } else {
-                    return ZCL_ERR(-5,
-                             "build_fc_response: leaf/proof hash mismatch at height %d sample %u",
-                             h, i);
-                }
-            } else {
-                return ZCL_ERR(-6,
-                         "build_fc_response: cannot reconcile leaf/proof hash mismatch at height %d sample %u",
-                         h, i);
-            }
+            struct zcl_result rec = snapsync_fc_reconcile_leaf(sample, h, i);
+            if (!rec.ok)
+                return rec;
         }
     }
 
-    for (uint32_t i = 0; i < count; i++) {
-        if (!mmb_verify(&resp->samples[i].proof, challenge->mmb_root))
-            return ZCL_ERR(-7, "build_fc_response: mmb_verify failed for sample %u", i);
-    }
+    uint32_t bad = 0;
+    if (!snapsync_fc_verify_proofs(resp, count, challenge->mmb_root, &bad))
+        return ZCL_ERR(-7, "build_fc_response: mmb_verify failed for sample %u", bad);
 
     return ZCL_OK;
 }
@@ -495,6 +652,63 @@ struct zcl_result snapsync_write_fc_response(struct byte_stream *s,
 }
 
 /* -- FlyClient proof verification --------------------------------------- */
+
+static struct zcl_result snapsync_fc_check_chainwork_floor(
+    const struct consensus_params *consensus,
+    const uint8_t offered_chain_work[32], uint32_t serving_peer_id)
+{
+    /* Minimum-chainwork FLOOR: serialize the consensus nMinimumChainWork to the
+     * canonical little-endian byte layout (byte 0 = least significant), which is
+     * exactly the layout of offered_chain_work / mmb_leaf.chain_work, and reject
+     * any offered anchor whose accumulated work is below it. The floor sits far
+     * below any genuine ~3M-height snapshot, so it never false-rejects a real
+     * anchor, but it blocks a forged minimum-difficulty chain whose tiny work
+     * could otherwise pass the relative leaf<=offered checks below. */
+    uint8_t min_chainwork_le[32];
+    {
+        struct arith_uint256 floor_arith;
+        struct uint256 floor_le;
+        uint256_to_arith(&floor_arith, &consensus->nMinimumChainWork);
+        arith_to_uint256(&floor_le, &floor_arith);
+        memcpy(min_chainwork_le, floor_le.data, 32);
+    }
+    if (zcl_chainwork_below_floor(offered_chain_work, min_chainwork_le)) {
+        char got[65], floor_hex[65];
+        HexStr(offered_chain_work, 32, false, got, sizeof(got));
+        HexStr(min_chainwork_le, 32, false, floor_hex, sizeof(floor_hex));
+        printf("[snapsync] FlyClient: offered chainwork below floor "
+               "(work=%s floor=%s)\n", got, floor_hex);
+        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
+                    "flyclient=FAILED chainwork=below_floor");
+        return ZCL_ERR(-9, "verify_flyclient: offered chainwork %s below "
+                       "minimum floor %s", got, floor_hex);
+    }
+    return ZCL_OK;
+}
+
+static void snapsync_fc_count_sample_failures(
+    const struct fc_response *resp, const struct consensus_params *consensus,
+    const uint8_t offered_chain_work[32],
+    uint32_t *pow_failures, uint32_t *work_failures)
+{
+    for (uint32_t i = 0; i < resp->num_samples; i++) {
+        const struct mmb_leaf *leaf = &resp->samples[i].leaf;
+        struct uint256 hash;
+        if (zcl_chainwork_is_zero(leaf->chain_work) ||
+            zcl_chainwork_compare_le(leaf->chain_work,
+                                     offered_chain_work) > 0) {
+            printf("[snapsync] FlyClient: chainwork check FAILED for "
+                   "sample %u (h=%u)\n", i, leaf->height);
+            (*work_failures)++;
+        }
+        memcpy(hash.data, leaf->block_hash, 32);
+        if (!CheckProofOfWork(hash, leaf->nBits, consensus)) {
+            printf("[snapsync] FlyClient: PoW check FAILED for sample %u "
+                   "(h=%u)\n", i, leaf->height);
+            (*pow_failures)++;
+        }
+    }
+}
 
 /* Action: verify FlyClient proofs before accepting snapshot UTXO staging.
  * Checks 20 random block samples with MMB inclusion proofs
@@ -551,52 +765,15 @@ struct zcl_result snapsync_verify_flyclient(struct snapshot_sync_service *svc,
         return ZCL_ERR(-5, "verify_flyclient: no chain params for PoW check");
     }
 
-    /* Minimum-chainwork FLOOR: serialize the consensus nMinimumChainWork to the
-     * canonical little-endian byte layout (byte 0 = least significant), which is
-     * exactly the layout of offered_chain_work / mmb_leaf.chain_work, and reject
-     * any offered anchor whose accumulated work is below it. The floor sits far
-     * below any genuine ~3M-height snapshot, so it never false-rejects a real
-     * anchor, but it blocks a forged minimum-difficulty chain whose tiny work
-     * could otherwise pass the relative leaf<=offered checks below. */
-    uint8_t min_chainwork_le[32];
-    {
-        struct arith_uint256 floor_arith;
-        struct uint256 floor_le;
-        uint256_to_arith(&floor_arith, &consensus->nMinimumChainWork);
-        arith_to_uint256(&floor_le, &floor_arith);
-        memcpy(min_chainwork_le, floor_le.data, 32);
-    }
-    if (zcl_chainwork_below_floor(offered_chain_work, min_chainwork_le)) {
-        char got[65], floor_hex[65];
-        HexStr(offered_chain_work, 32, false, got, sizeof(got));
-        HexStr(min_chainwork_le, 32, false, floor_hex, sizeof(floor_hex));
-        printf("[snapsync] FlyClient: offered chainwork below floor "
-               "(work=%s floor=%s)\n", got, floor_hex);
-        event_emitf(EV_FC_CHAIN_VERIFIED, serving_peer_id,
-                    "flyclient=FAILED chainwork=below_floor");
-        return ZCL_ERR(-9, "verify_flyclient: offered chainwork %s below "
-                       "minimum floor %s", got, floor_hex);
-    }
+    struct zcl_result floor_res = snapsync_fc_check_chainwork_floor(
+        consensus, offered_chain_work, serving_peer_id);
+    if (!floor_res.ok)
+        return floor_res;
 
     uint32_t pow_failures = 0;
     uint32_t work_failures = 0;
-    for (uint32_t i = 0; i < resp->num_samples; i++) {
-        const struct mmb_leaf *leaf = &resp->samples[i].leaf;
-        struct uint256 hash;
-        if (zcl_chainwork_is_zero(leaf->chain_work) ||
-            zcl_chainwork_compare_le(leaf->chain_work,
-                                     offered_chain_work) > 0) {
-            printf("[snapsync] FlyClient: chainwork check FAILED for "
-                   "sample %u (h=%u)\n", i, leaf->height);
-            work_failures++;
-        }
-        memcpy(hash.data, leaf->block_hash, 32);
-        if (!CheckProofOfWork(hash, leaf->nBits, consensus)) {
-            printf("[snapsync] FlyClient: PoW check FAILED for sample %u "
-                   "(h=%u)\n", i, leaf->height);
-            pow_failures++;
-        }
-    }
+    snapsync_fc_count_sample_failures(resp, consensus, offered_chain_work,
+                                      &pow_failures, &work_failures);
 
     if (pow_failures > 0) {
         printf("[snapsync] FlyClient: %u/%u PoW checks FAILED\n",
