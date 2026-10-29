@@ -290,22 +290,9 @@ struct scs_fixture {
     char netdir[512];
 };
 
-/* Build the fixture: genesis + SCS_N_BLOCKS regtest blocks, all eight
- * reducer stages initialised, headers admitted (durably, via the real
- * mailbox + header_admit_stage_drain — so its commits participate in the
- * boundary sweep exactly like the other seven stages), bodies persisted,
- * fold ceiling set. Safe to call again on an already-populated (or
- * crash-truncated) datadir: block_index is rebuilt in-memory from
- * scratch every call (deterministic from height + prev-hash), and every
- * durable write here (header_admit's stage cursor, body files) is either
- * naturally idempotent (header_admit's own cursor gate no-ops on an
- * already-admitted height) or unconditionally deterministic (body bytes
- * are pure functions of height) — the same resume contract
- * test_fold_inram_crash_proof.c's fip_setup documents. */
-static bool scs_setup(const char *dir, int n_blocks, struct scs_fixture *fx)
+/* Create the datadir tree for `dir` and open its progress store. */
+static bool scs_setup_dirs(const char *dir, struct scs_fixture *fx)
 {
-    memset(fx, 0, sizeof(*fx));
-
     scs_mkdir_p("./test-tmp");
     if (!scs_mkdir_p(dir)) return false;
     SetDataDir(dir);
@@ -316,7 +303,13 @@ static bool scs_setup(const char *dir, int n_blocks, struct scs_fixture *fx)
     if (!scs_mkdir_p(blocksdir)) return false;
 
     if (!progress_store_open(dir)) return false;
+    return true;
+}
 
+/* Insert the genesis block, initialise the eight reducer stages and seed
+ * their genesis rows. */
+static bool scs_setup_genesis(struct scs_fixture *fx)
+{
     chain_params_select(CHAIN_REGTEST);
     fx->cp = chain_params_get();
     main_state_init(&fx->ms);
@@ -346,42 +339,72 @@ static bool scs_setup(const char *dir, int n_blocks, struct scs_fixture *fx)
 
     if (!scs_seed_genesis_utxo_apply_row(progress_store_db())) return false;
     if (!tip_finalize_stage_seed_anchor(0, genesis_hash.data, false)) return false;
+    return true;
+}
+
+/* Build regtest block `h` on top of *prev_hash, admit its header, persist
+ * its body and advance *prev_hash. */
+static bool scs_setup_add_block(struct scs_fixture *fx, int h,
+                                struct uint256 *prev_hash)
+{
+    struct block blk;
+    if (!scs_build_regtest_block(&blk, h, prev_hash, fx->cp)) return false;
+    if (!mine_block_pow(&blk, h, fx->cp, 0)) { block_free(&blk); return false; }
+
+    struct uint256 hh;
+    block_get_hash(&blk, &hh);
+
+    struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
+    if (!bi || !bi->phashBlock) { block_free(&blk); return false; }
+    if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
+        bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    fx->ms.pindex_best_header = bi;
+
+    struct header_admit_msg m;
+    memset(&m, 0, sizeof(m));
+    m.hash = hh;
+    m.has_header = true;
+    m.header = blk.header;
+    m.height = -1;
+    if (!mailbox_header_admit_push(&m)) { block_free(&blk); return false; }
+    (void)header_admit_stage_drain(50);
+
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
+                                         fx->cp->pchMessageStart) &&
+                     block_index_set_have_data_verified(bi, &pos, fx->netdir);
+    block_free(&blk);
+    if (!persisted) return false;
+
+    *prev_hash = hh;
+    return true;
+}
+
+/* Build the fixture: genesis + SCS_N_BLOCKS regtest blocks, all eight
+ * reducer stages initialised, headers admitted (durably, via the real
+ * mailbox + header_admit_stage_drain — so its commits participate in the
+ * boundary sweep exactly like the other seven stages), bodies persisted,
+ * fold ceiling set. Safe to call again on an already-populated (or
+ * crash-truncated) datadir: block_index is rebuilt in-memory from
+ * scratch every call (deterministic from height + prev-hash), and every
+ * durable write here (header_admit's stage cursor, body files) is either
+ * naturally idempotent (header_admit's own cursor gate no-ops on an
+ * already-admitted height) or unconditionally deterministic (body bytes
+ * are pure functions of height) — the same resume contract
+ * test_fold_inram_crash_proof.c's fip_setup documents. */
+static bool scs_setup(const char *dir, int n_blocks, struct scs_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+
+    if (!scs_setup_dirs(dir, fx)) return false;
+    if (!scs_setup_genesis(fx)) return false;
 
     mint_fold_ceiling_set(n_blocks);
 
-    struct uint256 prev_hash = genesis_hash;
+    struct uint256 prev_hash = fx->cp->consensus.hashGenesisBlock;
     for (int h = 1; h <= n_blocks; h++) {
-        struct block blk;
-        if (!scs_build_regtest_block(&blk, h, &prev_hash, fx->cp)) return false;
-        if (!mine_block_pow(&blk, h, fx->cp, 0)) { block_free(&blk); return false; }
-
-        struct uint256 hh;
-        block_get_hash(&blk, &hh);
-
-        struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
-        if (!bi || !bi->phashBlock) { block_free(&blk); return false; }
-        if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
-            bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
-        fx->ms.pindex_best_header = bi;
-
-        struct header_admit_msg m;
-        memset(&m, 0, sizeof(m));
-        m.hash = hh;
-        m.has_header = true;
-        m.header = blk.header;
-        m.height = -1;
-        if (!mailbox_header_admit_push(&m)) { block_free(&blk); return false; }
-        (void)header_admit_stage_drain(50);
-
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
-                                             fx->cp->pchMessageStart) &&
-                         block_index_set_have_data_verified(bi, &pos, fx->netdir);
-        block_free(&blk);
-        if (!persisted) return false;
-
-        prev_hash = hh;
+        if (!scs_setup_add_block(fx, h, &prev_hash)) return false;
     }
 
     activation_controller_init(&fx->ctl, &fx->ms, NULL, fx->cp, fx->netdir);
@@ -549,20 +572,10 @@ static bool scs_golden_run(const char *dir, struct scs_digest *out_digest,
     return ok && done;
 }
 
-/* One crash-at-N cycle: fork a crasher (self-SIGKILLs at boundary N), then
- * a resumer (fresh process, same datadir). Returns true iff every
- * assertion for this N held (failures already printed on mismatch).
- * `out_rseen` receives the number of commit boundaries THIS cycle's resumer
- * performed (0 when the cycle could not produce one) so the caller can total
- * the sweep's work and check it against the forced analytic value. */
-static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
-                      const struct scs_digest *golden, uint64_t *out_rseen)
+/* Crasher phase of one cycle: fork a child that self-SIGKILLs at boundary
+ * n. Returns true iff the child was terminated by SIGKILL. */
+static bool scs_cycle_crash_phase(const char *dir, int64_t n)
 {
-    if (out_rseen) *out_rseen = 0;
-    char dir[300];
-    snprintf(dir, sizeof(dir), "%s_n%" PRId64, base_dir, n);
-    test_rm_rf_recursive(dir);
-
     pid_t pidC = fork();
     if (pidC < 0) { perror("fork"); return false; }
     if (pidC == 0) {
@@ -586,7 +599,14 @@ static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
         test_rm_rf_recursive(dir);
         return false;
     }
+    return true;
+}
 
+/* Resumer phase of one cycle: fork a fresh process on the same datadir
+ * that folds to completion and writes its result file. Returns true iff
+ * that process exited 0. */
+static bool scs_cycle_resume_phase(const char *dir, int64_t n)
+{
     pid_t pidR = fork();
     if (pidR < 0) { perror("fork"); test_rm_rf_recursive(dir); return false; }
     if (pidR == 0) {
@@ -608,7 +628,15 @@ static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
         test_rm_rf_recursive(dir);
         return false;
     }
+    return true;
+}
 
+/* Read the resumer's result file and check it against the golden digest
+ * and the forced analytic boundary count. Returns true iff all held. */
+static bool scs_cycle_check_result(const char *dir, int64_t n, uint64_t g,
+                                   const struct scs_digest *golden,
+                                   uint64_t *out_rseen)
+{
     struct scs_digest rd;
     uint64_t rseen = 0;
     bool rdone = false;
@@ -653,6 +681,25 @@ static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
         pass = false;
     }
     return pass;
+}
+
+/* One crash-at-N cycle: fork a crasher (self-SIGKILLs at boundary N), then
+ * a resumer (fresh process, same datadir). Returns true iff every
+ * assertion for this N held (failures already printed on mismatch).
+ * `out_rseen` receives the number of commit boundaries THIS cycle's resumer
+ * performed (0 when the cycle could not produce one) so the caller can total
+ * the sweep's work and check it against the forced analytic value. */
+static bool scs_cycle(const char *base_dir, int64_t n, uint64_t g,
+                      const struct scs_digest *golden, uint64_t *out_rseen)
+{
+    if (out_rseen) *out_rseen = 0;
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s_n%" PRId64, base_dir, n);
+    test_rm_rf_recursive(dir);
+
+    if (!scs_cycle_crash_phase(dir, n)) return false;
+    if (!scs_cycle_resume_phase(dir, n)) return false;
+    return scs_cycle_check_result(dir, n, g, golden, out_rseen);
 }
 
 static int test_stage_crash_sweep_platform_arm(void);
