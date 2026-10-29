@@ -177,6 +177,21 @@ static bool mvspace_roots(const struct json_value *input, const char *key,
   return true;
 }
 
+static uint8_t mvspace_verb_bit(const struct json_value *value)
+{
+  const char *verb = value && value->type == JSON_STR
+                         ? json_get_str(value) : NULL;
+  return verb && strcmp(verb, "discover") == 0
+             ? VCS_SERVICE_VERB_DISCOVER
+         : verb && strcmp(verb, "fetch") == 0
+             ? VCS_SERVICE_VERB_FETCH
+         : verb && strcmp(verb, "list") == 0
+             ? VCS_SERVICE_VERB_LIST
+         : verb && strcmp(verb, "query") == 0
+             ? VCS_SERVICE_VERB_QUERY
+             : 0;
+}
+
 static bool mvspace_verbs(const struct json_value *input, uint8_t *out)
 {
   const struct json_value *verbs =
@@ -186,18 +201,7 @@ static bool mvspace_verbs(const struct json_value *input, uint8_t *out)
     return false;
   uint8_t mask = 0;
   for (size_t i = 0; i < json_size(verbs); i++) {
-    const struct json_value *value = json_at(verbs, i);
-    const char *verb = value && value->type == JSON_STR
-                           ? json_get_str(value) : NULL;
-    uint8_t bit = verb && strcmp(verb, "discover") == 0
-                      ? VCS_SERVICE_VERB_DISCOVER
-                  : verb && strcmp(verb, "fetch") == 0
-                      ? VCS_SERVICE_VERB_FETCH
-                  : verb && strcmp(verb, "list") == 0
-                      ? VCS_SERVICE_VERB_LIST
-                  : verb && strcmp(verb, "query") == 0
-                      ? VCS_SERVICE_VERB_QUERY
-                      : 0;
+    uint8_t bit = mvspace_verb_bit(json_at(verbs, i));
     if (!bit || (mask & bit))
       return false;
     mask |= bit;
@@ -233,14 +237,10 @@ static bool mvspace_chain_matches(
          memcmp(wire, proof->wire, sizeof(wire)) == 0;
 }
 
-static bool mvspace_manifest(
+static bool mvspace_manifest_scalars(
     const struct json_value *input, struct vcs_space_manifest_v1 *manifest,
-    struct vcs_space_manifest_verify_context *verify,
-    struct mvspace_chain_proof *proof, struct zcl_command_reply *reply,
-    const char *leaf)
+    struct zcl_command_reply *reply, const char *leaf)
 {
-  memset(manifest, 0, sizeof(*manifest));
-  manifest->schema_version = VCS_SPACE_MANIFEST_VERSION;
   int64_t sequence = mvspace_int(input, "sequence", 0);
   int64_t not_before = mvspace_int(input, "not_before", 0);
   int64_t expiry = mvspace_int(input, "expiry", 0);
@@ -260,6 +260,13 @@ static bool mvspace_manifest(
   (void)snprintf(manifest->name, sizeof(manifest->name), "%s", name);
   (void)snprintf(manifest->description, sizeof(manifest->description), "%s",
                  description);
+  return true;
+}
+
+static bool mvspace_manifest_roots(
+    const struct json_value *input, struct vcs_space_manifest_v1 *manifest,
+    struct zcl_command_reply *reply, const char *leaf)
+{
   if (!mvspace_roots(input, "service_roots", manifest->service_roots,
                      VCS_SPACE_SERVICE_MAX, &manifest->service_count) ||
       !mvspace_roots(input, "object_roots", manifest->object_roots,
@@ -271,6 +278,13 @@ static bool mvspace_manifest(
                  leaf);
     return false;
   }
+  return true;
+}
+
+static bool mvspace_manifest_admission(
+    const struct json_value *input, struct vcs_space_manifest_v1 *manifest,
+    struct zcl_command_reply *reply, const char *leaf)
+{
   const char *admission = mvspace_str(input, "admission_root");
   if (admission) {
     if (!mvspace_root(admission, manifest->admission_root)) {
@@ -281,15 +295,24 @@ static bool mvspace_manifest(
     }
     manifest->has_admission = true;
   }
+  return true;
+}
+
+/* Load the delegation and online key, then sign. The shared error buffer is
+ * owned by the caller so the authorization step reports the same text. */
+static bool mvspace_manifest_sign(
+    const struct json_value *input, struct vcs_space_manifest_v1 *manifest,
+    struct zcl_command_reply *reply, const char *leaf, char *error,
+    size_t error_size)
+{
   const char *datadir = mvspace_datadir(input);
   uint8_t online_seed[32], online_pubkey[32];
-  char error[192] = {0};
   enum vcs_space_result sign_rc = VCS_SPACE_OK;
   bool identity_loaded =
       datadir && vcs_zcode_dht_delegation_load(
-                     datadir, &manifest->delegation, error, sizeof(error)) &&
+                     datadir, &manifest->delegation, error, error_size) &&
       vcs_zcode_dht_online_key_load(datadir, online_seed, online_pubkey,
-                                    error, sizeof(error));
+                                    error, error_size);
   if (identity_loaded) {
     /* A signer/window refusal is a DIFFERENT failure from a missing identity
      * file and must be named as itself: collapsing it into the generic
@@ -302,7 +325,7 @@ static bool mvspace_manifest(
     else
       sign_rc = vcs_space_manifest_sign(manifest, online_seed);
     if (sign_rc != VCS_SPACE_OK)
-      (void)snprintf(error, sizeof(error),
+      (void)snprintf(error, error_size,
                      "local online key cannot sign this manifest: %s",
                      vcs_space_result_string(sign_rc));
   }
@@ -312,7 +335,7 @@ static bool mvspace_manifest(
      * (native_zcode_network_command.c load_or_create) — name the remedy
      * instead of leaving the operator with a bare I/O error. */
     if (strcmp(error, "cannot open DHT identity file") == 0)
-      (void)snprintf(error, sizeof(error),
+      (void)snprintf(error, error_size,
                      "cannot open DHT identity file — run `z23 zcode "
                      "network delegate` once to provision it");
     mvspace_blocked(reply, "IDENTITY_UNAVAILABLE",
@@ -321,8 +344,16 @@ static bool mvspace_manifest(
                     leaf);
     return false;
   }
+  return true;
+}
+
+static bool mvspace_manifest_authorize(
+    struct vcs_space_manifest_v1 *manifest, struct mvspace_chain_proof *proof,
+    struct zcl_command_reply *reply, const char *leaf, char *error,
+    size_t error_size)
+{
   if (!zcl_native_zcode_delegation_authorized(
-          &manifest->delegation, error, sizeof(error)) ||
+          &manifest->delegation, error, error_size) ||
       vcs_zcode_dht_delegation_encode(&manifest->delegation, proof->wire) !=
           VCS_ZCODE_DHT_DELEGATION_OK) {
     mvspace_blocked(reply, "OWNER_NOT_CHAIN_AUTHORIZED",
@@ -331,6 +362,26 @@ static bool mvspace_manifest(
                     leaf);
     return false;
   }
+  return true;
+}
+
+static bool mvspace_manifest(
+    const struct json_value *input, struct vcs_space_manifest_v1 *manifest,
+    struct vcs_space_manifest_verify_context *verify,
+    struct mvspace_chain_proof *proof, struct zcl_command_reply *reply,
+    const char *leaf)
+{
+  memset(manifest, 0, sizeof(*manifest));
+  manifest->schema_version = VCS_SPACE_MANIFEST_VERSION;
+  char error[192] = {0};
+  if (!mvspace_manifest_scalars(input, manifest, reply, leaf) ||
+      !mvspace_manifest_roots(input, manifest, reply, leaf) ||
+      !mvspace_manifest_admission(input, manifest, reply, leaf) ||
+      !mvspace_manifest_sign(input, manifest, reply, leaf, error,
+                             sizeof(error)) ||
+      !mvspace_manifest_authorize(manifest, proof, reply, leaf, error,
+                                  sizeof(error)))
+    return false;
   memset(verify, 0, sizeof(*verify));
   memcpy(verify->network_genesis, manifest->delegation.network_genesis, 32);
   verify->now_unix = (uint64_t)platform_time_wall_unix();
@@ -1195,70 +1246,28 @@ static bool mvspace_store(const char *datadir, bool *live,
   return *out != NULL;
 }
 
-void zcl_native_handle_metaverse_space_publish(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static bool mvspace_publish_manifest_current(
+    struct zcl_command_reply *reply, struct metaverse_space_object *object)
 {
-  if (!request || !reply)
-    return;
-  const char *root = mvspace_str(request->input, "root");
-  const char *datadir = mvspace_datadir(request->input);
-  char workspace[MVSPACE_PATH_MAX], blob[65];
-  const char *resolved = mvspace_workspace(request->input, workspace);
-  enum metaverse_space_object_kind kind;
-  struct metaverse_space_object object;
-  struct zcl_result transport = root && resolved
-      ? metaverse_space_transport_root(resolved, root, blob, &kind)
-      : ZCL_ERR(-1, "space-publish-root-or-workspace-invalid");
-  struct zcl_result shown = transport.ok
-      ? metaverse_space_show(resolved, root, &object)
-      : transport;
-  if (!shown.ok) {
-    mvspace_fail(reply, "PUBLISH_REFUSED", shown.message,
-                 "metaverse.space.publish");
-    return;
-  }
-  char owner[65];
-  const char *publisher = NULL;
-  if (kind == METAVERSE_SPACE_OBJECT_MANIFEST) {
-    zcl_hex_encode(object.as.manifest.delegation.doc.master_pubkey, 32, owner);
-    publisher = owner;
-    uint64_t now = (uint64_t)platform_time_wall_unix();
-    if (vcs_space_manifest_validate_at(
-            &object.as.manifest,
-            object.as.manifest.delegation.network_genesis, now) !=
-            VCS_SPACE_OK ||
-        !zcl_native_zcode_delegation_authorized(
-            &object.as.manifest.delegation, NULL, 0)) {
-      mvspace_blocked(reply, "OWNER_NOT_CHAIN_AUTHORIZED",
-                      "manifest is not currently valid and chain-authorized",
-                      "metaverse.space.publish");
-      return;
-    }
-  }
-  static const enum vcs_zcode_sovereignty_action actions[] = {
-      VCS_ZCODE_SOVEREIGNTY_STORE, VCS_ZCODE_SOVEREIGNTY_INDEX,
-      VCS_ZCODE_SOVEREIGNTY_SERVE, VCS_ZCODE_SOVEREIGNTY_FORWARD};
-  if (!mvspace_policy_actions(
-          datadir, actions, sizeof(actions) / sizeof(actions[0]), root, blob,
-          publisher, mvspace_service_type(kind), reply,
-          "metaverse.space.publish"))
-    return;
-  bool live = false;
-  struct vcs_package_store *store = NULL;
-  if (!mvspace_store(datadir, &live, &store)) {
-    mvspace_blocked(reply, "NO_STORE", "package store failed to open",
+  uint64_t now = (uint64_t)platform_time_wall_unix();
+  if (vcs_space_manifest_validate_at(
+          &object->as.manifest,
+          object->as.manifest.delegation.network_genesis, now) !=
+          VCS_SPACE_OK ||
+      !zcl_native_zcode_delegation_authorized(
+          &object->as.manifest.delegation, NULL, 0)) {
+    mvspace_blocked(reply, "OWNER_NOT_CHAIN_AUTHORIZED",
+                    "manifest is not currently valid and chain-authorized",
                     "metaverse.space.publish");
-    return;
+    return false;
   }
-  struct zcl_result published = metaverse_space_publish(
-      store, resolved, root, blob, &kind);
-  if (!live)
-    vcs_package_store_close(store);
-  if (!published.ok) {
-    mvspace_fail(reply, "PUBLISH_REFUSED", published.message,
-                 "metaverse.space.publish");
-    return;
-  }
+  return true;
+}
+
+static void mvspace_publish_push_records(struct zcl_command_reply *reply,
+                                         const char *root, const char *blob,
+                                         enum metaverse_space_object_kind kind)
+{
   int64_t now = platform_time_wall_unix();
   char pointer_token[65], provider_token[65], pointer_error[64] = {0};
   char provider_error[64] = {0};
@@ -1287,6 +1296,469 @@ void zcl_native_handle_metaverse_space_publish(
   }
 }
 
+void zcl_native_handle_metaverse_space_publish(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+  if (!request || !reply)
+    return;
+  const char *root = mvspace_str(request->input, "root");
+  const char *datadir = mvspace_datadir(request->input);
+  char workspace[MVSPACE_PATH_MAX], blob[65];
+  const char *resolved = mvspace_workspace(request->input, workspace);
+  enum metaverse_space_object_kind kind;
+  struct metaverse_space_object object;
+  struct zcl_result transport = root && resolved
+      ? metaverse_space_transport_root(resolved, root, blob, &kind)
+      : ZCL_ERR(-1, "space-publish-root-or-workspace-invalid");
+  struct zcl_result shown = transport.ok
+      ? metaverse_space_show(resolved, root, &object)
+      : transport;
+  if (!shown.ok) {
+    mvspace_fail(reply, "PUBLISH_REFUSED", shown.message,
+                 "metaverse.space.publish");
+    return;
+  }
+  char owner[65];
+  const char *publisher = NULL;
+  if (kind == METAVERSE_SPACE_OBJECT_MANIFEST) {
+    zcl_hex_encode(object.as.manifest.delegation.doc.master_pubkey, 32, owner);
+    publisher = owner;
+    if (!mvspace_publish_manifest_current(reply, &object))
+      return;
+  }
+  static const enum vcs_zcode_sovereignty_action actions[] = {
+      VCS_ZCODE_SOVEREIGNTY_STORE, VCS_ZCODE_SOVEREIGNTY_INDEX,
+      VCS_ZCODE_SOVEREIGNTY_SERVE, VCS_ZCODE_SOVEREIGNTY_FORWARD};
+  if (!mvspace_policy_actions(
+          datadir, actions, sizeof(actions) / sizeof(actions[0]), root, blob,
+          publisher, mvspace_service_type(kind), reply,
+          "metaverse.space.publish"))
+    return;
+  bool live = false;
+  struct vcs_package_store *store = NULL;
+  if (!mvspace_store(datadir, &live, &store)) {
+    mvspace_blocked(reply, "NO_STORE", "package store failed to open",
+                    "metaverse.space.publish");
+    return;
+  }
+  struct zcl_result published = metaverse_space_publish(
+      store, resolved, root, blob, &kind);
+  if (!live)
+    vcs_package_store_close(store);
+  if (!published.ok) {
+    mvspace_fail(reply, "PUBLISH_REFUSED", published.message,
+                 "metaverse.space.publish");
+    return;
+  }
+  mvspace_publish_push_records(reply, root, blob, kind);
+}
+
+/* Per-candidate outcome: SKIP moves to the next candidate, STOP ends the
+ * candidate scan (success, refusal or deadline), PROCEED continues the chain. */
+enum mvspace_discover_step {
+  MVSPACE_DISCOVER_PROCEED,
+  MVSPACE_DISCOVER_SKIP,
+  MVSPACE_DISCOVER_STOP
+};
+
+struct mvspace_discover_run {
+  const struct json_value *input;
+  struct zcl_command_reply *reply;
+  const char *root;
+  enum metaverse_space_object_kind kind;
+  int64_t deadline;
+  size_t max_wire;
+  const char *datadir;
+  const char *resolved;
+  char workspace[MVSPACE_PATH_MAX];
+  bool live;
+  struct vcs_package_store *store;
+  struct zcl_native_zcode_pointer_candidates candidates;
+  size_t candidate_count;
+  size_t policy_denied, tried, provider_records_seen;
+  bool scheduled, admitted, is_new, byte_limit_reached, deadline_reached;
+  char selected_blob[65], selected_pointer_publisher[65];
+  struct metaverse_space_object object;
+};
+
+static void mvspace_discover_reject(struct zcl_command_reply *reply,
+                                    const char *root,
+                                    enum metaverse_space_object_kind kind)
+{
+  mvspace_discovery_state(reply, "invalid", false, "validate", 0, root, kind);
+  mvspace_fail(reply, "BAD_DISCOVERY_ROOT",
+               "discover requires one exact root and an optional known kind",
+               "metaverse.space.discover");
+}
+
+static bool mvspace_discover_policy_gate(
+    const char *datadir, const char *root,
+    enum metaverse_space_object_kind kind, struct zcl_command_reply *reply)
+{
+  static const enum vcs_zcode_sovereignty_action discover_action[] = {
+      VCS_ZCODE_SOVEREIGNTY_DISCOVER};
+  if (!mvspace_policy_actions(
+          datadir, discover_action, 1, root, NULL, NULL,
+          mvspace_service_type(kind), reply, "metaverse.space.discover")) {
+    mvspace_discovery_state(reply, "blocked", true, "policy_discover", 0,
+                            root, kind);
+    return false;
+  }
+  return true;
+}
+
+static bool mvspace_discover_lookup(struct mvspace_discover_run *run)
+{
+  struct json_value selector, result;
+  json_init(&selector);
+  json_set_object(&selector);
+  json_push_kv_str(&selector, "kind", "pointer");
+  json_push_kv_str(&selector, "namespace", mvspace_namespace(run->kind));
+  json_push_kv_str(&selector, "semantic_root", run->root);
+  bool discovered = run->deadline > 0
+      ? zcl_native_zcode_records_discover_until(
+            &selector, &result, run->deadline, &run->deadline_reached)
+      : zcl_native_zcode_records_discover(&selector, &result);
+  if (!discovered) {
+    json_free(&result);
+    json_free(&selector);
+    json_push_kv_str(&run->reply->data, "failure_code",
+                     run->deadline_reached ? "DISCOVERY_DEADLINE"
+                                           : "DISCOVERY_UNAVAILABLE");
+    mvspace_discovery_state(run->reply, "pending", true, "pointer_lookup", 1,
+                            run->root, run->kind);
+    return false;
+  }
+  (void)zcl_native_zcode_pointer_candidates_build(
+      json_get(&result, "records"), &run->candidates);
+  run->candidate_count = run->candidates.count;
+  json_free(&result);
+  json_free(&selector);
+  if (!run->candidate_count) {
+    json_push_kv_str(&run->reply->data, "failure_code",
+                     "NO_USABLE_SPACE_CANDIDATE");
+    mvspace_discovery_state(run->reply, "not_found", true,
+                            "pointer_selection", 1, run->root, run->kind);
+    return false;
+  }
+  return true;
+}
+
+static bool mvspace_discover_open_store(struct mvspace_discover_run *run)
+{
+  if (!mvspace_store(run->datadir, &run->live, &run->store)) {
+    mvspace_discovery_state(run->reply, "blocked", true, "package_store", 1,
+                            run->root, run->kind);
+    mvspace_blocked(run->reply, "NO_STORE", "package store failed to open",
+                    "metaverse.space.discover");
+    return false;
+  }
+  run->resolved = mvspace_workspace(run->input, run->workspace);
+  return true;
+}
+
+static void mvspace_discover_select(struct mvspace_discover_run *run, size_t i)
+{
+  (void)snprintf(run->selected_blob, sizeof(run->selected_blob), "%s",
+                 run->candidates.rows[i].transport_root);
+  (void)snprintf(run->selected_pointer_publisher,
+                 sizeof(run->selected_pointer_publisher), "%s",
+                 run->candidates.rows[i].publisher_zid);
+}
+
+static bool mvspace_discover_route_provider(
+    struct mvspace_discover_run *run, const char *transport_root,
+    bool *route_byte_limit)
+{
+  struct json_value route_input, route_result;
+  json_init(&route_input);
+  json_init(&route_result);
+  json_set_object(&route_input);
+  json_push_kv_str(&route_input, "kind", "provider");
+  json_push_kv_str(&route_input, "namespace", mvspace_namespace(run->kind));
+  json_push_kv_str(&route_input, "transport_root", transport_root);
+  if (run->max_wire <= (size_t)INT64_MAX)
+    json_push_kv_int(&route_input, "maximum_bytes",
+                     (int64_t)run->max_wire);
+  uint32_t provider_count = 0;
+  bool routed = run->deadline > 0
+      ? zcl_native_zcode_provider_discover_and_route_until(
+            &route_input, &route_result, &provider_count, run->deadline,
+            &run->deadline_reached)
+      : zcl_native_zcode_provider_discover_and_route(
+            &route_input, &route_result, &provider_count);
+  const char *fetch_result =
+      json_get_str(json_get(&route_result, "fetch_result"));
+  *route_byte_limit = fetch_result &&
+      (strcmp(fetch_result, "byte-limit") == 0 ||
+       strcmp(fetch_result, "bound-not-owned") == 0);
+  run->provider_records_seen += provider_count;
+  json_free(&route_result);
+  json_free(&route_input);
+  return routed;
+}
+
+static bool mvspace_discover_await_inspect(struct mvspace_discover_run *run,
+                                           size_t i)
+{
+  size_t inspected_wire_bytes = 0;
+  struct zcl_result inspected;
+  /* A healthy local swarm usually commits the fetched blob quickly.
+   * Spend only the caller-owned foreground budget trying to finish the
+   * exact same candidate; otherwise preserve PENDING rather than calling
+   * the scheduled fetch a vague success or failure. */
+  do {
+    inspected = metaverse_space_blob_inspect_bounded(
+        run->store, run->candidates.rows[i].transport_root, run->max_wire,
+        &run->object, &inspected_wire_bytes);
+    if (inspected.ok)
+      break;
+    if (strcmp(inspected.message,
+               "space-blob-inspect-byte-limit") == 0) {
+      run->byte_limit_reached = true;
+      break;
+    }
+    if (run->deadline <= 0 ||
+        platform_time_monotonic_ms() >= run->deadline) {
+      run->deadline_reached = run->deadline > 0;
+      break;
+    }
+    platform_sleep_ms(50);
+  } while (true);
+  return inspected.ok;
+}
+
+static enum mvspace_discover_step mvspace_discover_schedule(
+    struct mvspace_discover_run *run, size_t i)
+{
+  bool route_byte_limit = false;
+  bool routed = mvspace_discover_route_provider(
+      run, run->candidates.rows[i].transport_root, &route_byte_limit);
+  if (run->deadline_reached)
+    return MVSPACE_DISCOVER_STOP;
+  if (route_byte_limit) {
+    run->byte_limit_reached = true;
+    return MVSPACE_DISCOVER_STOP;
+  }
+  if (!routed)
+    return MVSPACE_DISCOVER_SKIP;
+  run->scheduled = true;
+  mvspace_discover_select(run, i);
+  return mvspace_discover_await_inspect(run, i) ? MVSPACE_DISCOVER_PROCEED
+                                                : MVSPACE_DISCOVER_STOP;
+}
+
+static enum mvspace_discover_step mvspace_discover_fetch(
+    struct mvspace_discover_run *run, size_t i)
+{
+  static const enum vcs_zcode_sovereignty_action fetch_actions[] = {
+      VCS_ZCODE_SOVEREIGNTY_DISCOVER, VCS_ZCODE_SOVEREIGNTY_FETCH};
+  if (!mvspace_policy_actions(
+          run->datadir, fetch_actions, 2, run->root,
+          run->candidates.rows[i].transport_root,
+          run->candidates.rows[i].publisher_zid,
+          mvspace_service_type(run->kind), NULL,
+          "metaverse.space.discover")) {
+    run->policy_denied++;
+    return MVSPACE_DISCOVER_SKIP;
+  }
+  run->tried++;
+  size_t inspected_wire_bytes = 0;
+  struct zcl_result inspected = metaverse_space_blob_inspect_bounded(
+      run->store, run->candidates.rows[i].transport_root, run->max_wire,
+      &run->object, &inspected_wire_bytes);
+  if (!inspected.ok &&
+      strcmp(inspected.message, "space-blob-inspect-byte-limit") == 0) {
+    run->byte_limit_reached = true;
+    return MVSPACE_DISCOVER_STOP;
+  }
+  if (inspected.ok)
+    return MVSPACE_DISCOVER_PROCEED;
+  return mvspace_discover_schedule(run, i);
+}
+
+static enum mvspace_discover_step mvspace_discover_manifest_check(
+    struct mvspace_discover_run *run)
+{
+  uint64_t now = (uint64_t)platform_time_wall_unix();
+  bool authorization_deadline = false;
+  bool authorized = run->deadline > 0
+      ? zcl_native_zcode_delegation_authorized_until(
+            &run->object.as.manifest.delegation, run->deadline,
+            NULL, 0, &authorization_deadline)
+      : zcl_native_zcode_delegation_authorized(
+            &run->object.as.manifest.delegation, NULL, 0);
+  if (authorization_deadline) {
+    run->deadline_reached = true;
+    return MVSPACE_DISCOVER_STOP;
+  }
+  if (vcs_space_manifest_validate_at(
+          &run->object.as.manifest,
+          run->object.as.manifest.delegation.network_genesis, now) !=
+          VCS_SPACE_OK ||
+      !authorized)
+    return MVSPACE_DISCOVER_SKIP;
+  return MVSPACE_DISCOVER_PROCEED;
+}
+
+static enum mvspace_discover_step mvspace_discover_verify(
+    struct mvspace_discover_run *run, char owner[65], const char **owner_ptr)
+{
+  char derived[65];
+  zcl_hex_encode(run->object.root, 32, derived);
+  if (strcmp(derived, run->root) != 0 || run->object.kind != run->kind)
+    return MVSPACE_DISCOVER_SKIP;
+  if (run->kind != METAVERSE_SPACE_OBJECT_MANIFEST)
+    return MVSPACE_DISCOVER_PROCEED;
+  zcl_hex_encode(run->object.as.manifest.delegation.doc.master_pubkey, 32,
+                 owner);
+  *owner_ptr = owner;
+  return mvspace_discover_manifest_check(run);
+}
+
+static enum mvspace_discover_step mvspace_discover_admit(
+    struct mvspace_discover_run *run, size_t i, const char *owner_ptr)
+{
+  if (!mvspace_admit_policy(
+          run->datadir, run->root, run->candidates.rows[i].transport_root,
+          run->candidates.rows[i].publisher_zid, owner_ptr,
+          mvspace_service_type(run->kind))) {
+    run->policy_denied++;
+    return MVSPACE_DISCOVER_SKIP;
+  }
+  enum metaverse_space_object_kind admitted_kind =
+      METAVERSE_SPACE_OBJECT_NONE;
+  struct zcl_result stored = run->resolved ? metaverse_space_admit_bounded(
+      run->store, run->resolved, run->root,
+      run->candidates.rows[i].transport_root, run->max_wire, &admitted_kind,
+      &run->is_new)
+      : ZCL_ERR(-1, "workspace-invalid");
+  if (!stored.ok && strcmp(stored.message, "space-admit-byte-limit") == 0) {
+    run->byte_limit_reached = true;
+    return MVSPACE_DISCOVER_STOP;
+  }
+  if (!stored.ok || admitted_kind != run->kind)
+    return MVSPACE_DISCOVER_SKIP;
+  run->admitted = true;
+  mvspace_discover_select(run, i);
+  return MVSPACE_DISCOVER_STOP;
+}
+
+/* Fetch, verify and admit one candidate. Admission always answers SKIP or
+ * STOP, so the caller only needs to distinguish SKIP from everything else. */
+static enum mvspace_discover_step mvspace_discover_candidate(
+    struct mvspace_discover_run *run, size_t i)
+{
+  char owner[65];
+  const char *owner_ptr = NULL;
+  enum mvspace_discover_step step = mvspace_discover_fetch(run, i);
+  if (step == MVSPACE_DISCOVER_PROCEED)
+    step = mvspace_discover_verify(run, owner, &owner_ptr);
+  if (step == MVSPACE_DISCOVER_PROCEED)
+    step = mvspace_discover_admit(run, i, owner_ptr);
+  return step;
+}
+
+static void mvspace_discover_candidates(struct mvspace_discover_run *run)
+{
+  for (size_t i = 0; i < run->candidate_count && run->tried < VCS_ZCODE_DHT_K;
+       i++) {
+    if (mvspace_discover_candidate(run, i) == MVSPACE_DISCOVER_SKIP)
+      continue;
+    break;
+  }
+}
+
+static void mvspace_discover_push_summary(struct mvspace_discover_run *run)
+{
+  struct json_value *data = &run->reply->data;
+  json_push_kv_str(data, "object_root", run->root);
+  json_push_kv_str(data, "namespace", mvspace_namespace(run->kind));
+  json_push_kv_int(data, "pointer_candidates",
+                   (int64_t)run->candidate_count);
+  json_push_kv_int(data, "pointer_conflicts", run->candidates.conflicts);
+  json_push_kv_int(data, "pointer_superseded", run->candidates.superseded);
+  json_push_kv_int(data, "policy_denied", (int64_t)run->policy_denied);
+  json_push_kv_int(data, "candidates_tried", (int64_t)run->tried);
+  json_push_kv_int(data, "provider_records_seen",
+                   (int64_t)run->provider_records_seen);
+  json_push_kv_bool(data, "fetch_scheduled", run->scheduled);
+  json_push_kv_bool(data, "admitted", run->admitted);
+  json_push_kv_bool(data, "deadline_reached", run->deadline_reached);
+  json_push_kv_bool(data, "byte_limit_reached", run->byte_limit_reached);
+  if (run->selected_blob[0]) {
+    json_push_kv_str(data, "blob_root", run->selected_blob);
+    json_push_kv_str(data, "pointer_publisher_zid",
+                     run->selected_pointer_publisher);
+  }
+}
+
+static void mvspace_discover_push_admitted(struct mvspace_discover_run *run)
+{
+  struct json_value *data = &run->reply->data;
+  json_push_kv_bool(data, "new", run->is_new);
+  if (run->kind == METAVERSE_SPACE_OBJECT_MANIFEST) {
+    push_manifest(data, &run->object.as.manifest);
+    char owner[65];
+    zcl_hex_encode(run->object.as.manifest.delegation.doc.master_pubkey, 32,
+                   owner);
+    json_push_kv_str(data, "space_owner_zid", owner);
+    json_push_kv_bool(data, "owner_is_pointer_publisher",
+                      strcmp(owner, run->selected_pointer_publisher) == 0);
+  } else {
+    push_service(data, &run->object.as.service);
+  }
+  mvspace_discovery_state(run->reply, "present", false, "complete", 4,
+                          run->root, run->kind);
+}
+
+static void mvspace_discover_push_blocked(struct mvspace_discover_run *run)
+{
+  json_push_kv_str(&run->reply->data, "failure_code",
+                   run->byte_limit_reached ? "FETCH_BYTE_LIMIT"
+                                           : run->deadline_reached
+                                                 ? "PROVIDER_ROUTE_DEADLINE"
+                                                 : "PROVIDER_ROUTE_UNAVAILABLE");
+  mvspace_discovery_state(run->reply, "blocked", !run->byte_limit_reached,
+                          run->byte_limit_reached ? "fetch_verify"
+                                                  : "provider_route",
+                          run->byte_limit_reached ? 2 : 1, run->root,
+                          run->kind);
+  if (!run->scheduled)
+    mvspace_blocked(run->reply,
+                    run->deadline_reached ? "DISCOVERY_DEADLINE" :
+                    run->byte_limit_reached ? "DISCOVERY_BYTE_LIMIT"
+                                            : "NO_USABLE_SPACE_CANDIDATE",
+                    run->deadline_reached
+                    ? "the caller-owned discovery deadline expired"
+                    : run->byte_limit_reached
+                    ? "the exact object exceeds the caller-owned byte limit"
+                    :
+                    run->candidate_count ?
+                    "all pointer candidates were denied, invalid, or lacked "
+                    "an authenticated restricted provider" :
+                    "no usable signed pointer evidence was discovered",
+                    "metaverse.space.discover");
+}
+
+static void mvspace_discover_report(struct mvspace_discover_run *run)
+{
+  mvspace_discover_push_summary(run);
+  if (run->admitted) {
+    mvspace_discover_push_admitted(run);
+    return;
+  }
+  if (run->scheduled && !run->byte_limit_reached) {
+    json_push_kv_str(&run->reply->data, "failure_code",
+                     run->deadline_reached ? "FETCH_DEADLINE"
+                                           : "FETCH_PENDING");
+    mvspace_discovery_state(run->reply, "pending", true, "package_fetch", 2,
+                            run->root, run->kind);
+    return;
+  }
+  mvspace_discover_push_blocked(run);
+}
+
 void zcl_native_metaverse_space_discover_until(
     const struct zcl_command_request *request, struct zcl_command_reply *reply,
     int64_t discovery_deadline, size_t maximum_wire_bytes)
@@ -1299,287 +1771,26 @@ void zcl_native_metaverse_space_discover_until(
       mvspace_kind_from_text(kind_text);
   uint8_t decoded[32];
   if (!mvspace_root(root, decoded) || kind == METAVERSE_SPACE_OBJECT_NONE) {
-    mvspace_discovery_state(reply, "invalid", false, "validate", 0,
-                            root, kind);
-    mvspace_fail(reply, "BAD_DISCOVERY_ROOT",
-                 "discover requires one exact root and an optional known kind",
-                 "metaverse.space.discover");
+    mvspace_discover_reject(reply, root, kind);
     return;
   }
-  const char *datadir = mvspace_datadir(request->input);
-  static const enum vcs_zcode_sovereignty_action discover_action[] = {
-      VCS_ZCODE_SOVEREIGNTY_DISCOVER};
-  if (!mvspace_policy_actions(
-          datadir, discover_action, 1, root, NULL, NULL,
-          mvspace_service_type(kind), reply, "metaverse.space.discover")) {
-    mvspace_discovery_state(reply, "blocked", true, "policy_discover", 0,
-                            root, kind);
+  struct mvspace_discover_run run;
+  memset(&run, 0, sizeof(run));
+  run.input = request->input;
+  run.reply = reply;
+  run.root = root;
+  run.kind = kind;
+  run.deadline = discovery_deadline;
+  run.max_wire = maximum_wire_bytes;
+  run.datadir = mvspace_datadir(request->input);
+  if (!mvspace_discover_policy_gate(run.datadir, root, kind, reply))
     return;
-  }
-  struct json_value selector, result;
-  json_init(&selector);
-  json_set_object(&selector);
-  json_push_kv_str(&selector, "kind", "pointer");
-  json_push_kv_str(&selector, "namespace", mvspace_namespace(kind));
-  json_push_kv_str(&selector, "semantic_root", root);
-  bool deadline_reached = false;
-  bool discovered = discovery_deadline > 0
-      ? zcl_native_zcode_records_discover_until(
-            &selector, &result, discovery_deadline, &deadline_reached)
-      : zcl_native_zcode_records_discover(&selector, &result);
-  if (!discovered) {
-    json_free(&result);
-    json_free(&selector);
-    json_push_kv_str(&reply->data, "failure_code",
-                     deadline_reached ? "DISCOVERY_DEADLINE"
-                                      : "DISCOVERY_UNAVAILABLE");
-    mvspace_discovery_state(reply, "pending", true, "pointer_lookup", 1,
-                            root, kind);
+  if (!mvspace_discover_lookup(&run) || !mvspace_discover_open_store(&run))
     return;
-  }
-  struct zcl_native_zcode_pointer_candidates candidates;
-  (void)zcl_native_zcode_pointer_candidates_build(
-      json_get(&result, "records"), &candidates);
-  size_t candidate_count = candidates.count;
-  json_free(&result);
-  json_free(&selector);
-  if (!candidate_count) {
-    json_push_kv_str(&reply->data, "failure_code",
-                     "NO_USABLE_SPACE_CANDIDATE");
-    mvspace_discovery_state(reply, "not_found", true,
-                            "pointer_selection", 1, root, kind);
-    return;
-  }
-  bool live = false;
-  struct vcs_package_store *store = NULL;
-  if (!mvspace_store(datadir, &live, &store)) {
-    mvspace_discovery_state(reply, "blocked", true, "package_store", 1,
-                            root, kind);
-    mvspace_blocked(reply, "NO_STORE", "package store failed to open",
-                    "metaverse.space.discover");
-    return;
-  }
-  char workspace[MVSPACE_PATH_MAX];
-  const char *resolved = mvspace_workspace(request->input, workspace);
-  size_t policy_denied = 0, tried = 0;
-  size_t provider_records_seen = 0;
-  bool scheduled = false, admitted = false, is_new = false;
-  bool byte_limit_reached = false;
-  char selected_blob[65] = {0}, selected_pointer_publisher[65] = {0};
-  struct metaverse_space_object object;
-  memset(&object, 0, sizeof(object));
-  static const enum vcs_zcode_sovereignty_action fetch_actions[] = {
-      VCS_ZCODE_SOVEREIGNTY_DISCOVER, VCS_ZCODE_SOVEREIGNTY_FETCH};
-  for (size_t i = 0; i < candidate_count && tried < VCS_ZCODE_DHT_K; i++) {
-    if (!mvspace_policy_actions(
-            datadir, fetch_actions, 2, root,
-            candidates.rows[i].transport_root,
-            candidates.rows[i].publisher_zid, mvspace_service_type(kind),
-            NULL, "metaverse.space.discover")) {
-      policy_denied++;
-      continue;
-    }
-    tried++;
-    size_t inspected_wire_bytes = 0;
-    struct zcl_result inspected = metaverse_space_blob_inspect_bounded(
-        store, candidates.rows[i].transport_root, maximum_wire_bytes,
-        &object, &inspected_wire_bytes);
-    if (!inspected.ok &&
-        strcmp(inspected.message, "space-blob-inspect-byte-limit") == 0) {
-      byte_limit_reached = true;
-      break;
-    }
-    if (!inspected.ok) {
-      struct json_value route_input, route_result;
-      json_init(&route_input);
-      json_init(&route_result);
-      json_set_object(&route_input);
-      json_push_kv_str(&route_input, "kind", "provider");
-      json_push_kv_str(&route_input, "namespace", mvspace_namespace(kind));
-      json_push_kv_str(&route_input, "transport_root",
-                       candidates.rows[i].transport_root);
-      if (maximum_wire_bytes <= (size_t)INT64_MAX)
-        json_push_kv_int(&route_input, "maximum_bytes",
-                         (int64_t)maximum_wire_bytes);
-      uint32_t provider_count = 0;
-      bool routed = discovery_deadline > 0
-          ? zcl_native_zcode_provider_discover_and_route_until(
-                &route_input, &route_result, &provider_count,
-                discovery_deadline, &deadline_reached)
-          : zcl_native_zcode_provider_discover_and_route(
-                &route_input, &route_result, &provider_count);
-      const char *fetch_result =
-          json_get_str(json_get(&route_result, "fetch_result"));
-      bool route_byte_limit = fetch_result &&
-          (strcmp(fetch_result, "byte-limit") == 0 ||
-           strcmp(fetch_result, "bound-not-owned") == 0);
-      provider_records_seen += provider_count;
-      json_free(&route_result);
-      json_free(&route_input);
-      if (deadline_reached)
-        break;
-      if (route_byte_limit) {
-        byte_limit_reached = true;
-        break;
-      }
-      if (!routed)
-        continue;
-      scheduled = true;
-      (void)snprintf(selected_blob, sizeof(selected_blob), "%s",
-                     candidates.rows[i].transport_root);
-      (void)snprintf(selected_pointer_publisher,
-                     sizeof(selected_pointer_publisher), "%s",
-                     candidates.rows[i].publisher_zid);
-      /* A healthy local swarm usually commits the fetched blob quickly.
-       * Spend only the caller-owned foreground budget trying to finish the
-       * exact same candidate; otherwise preserve PENDING rather than calling
-       * the scheduled fetch a vague success or failure. */
-      do {
-        inspected = metaverse_space_blob_inspect_bounded(
-            store, candidates.rows[i].transport_root, maximum_wire_bytes,
-            &object, &inspected_wire_bytes);
-        if (inspected.ok)
-          break;
-        if (strcmp(inspected.message,
-                   "space-blob-inspect-byte-limit") == 0) {
-          byte_limit_reached = true;
-          break;
-        }
-        if (discovery_deadline <= 0 ||
-            platform_time_monotonic_ms() >= discovery_deadline) {
-          deadline_reached = discovery_deadline > 0;
-          break;
-        }
-        platform_sleep_ms(50);
-      } while (true);
-      if (!inspected.ok)
-        break;
-    }
-    char derived[65], owner[65];
-    zcl_hex_encode(object.root, 32, derived);
-    if (strcmp(derived, root) != 0 || object.kind != kind)
-      continue;
-    const char *owner_ptr = NULL;
-    if (kind == METAVERSE_SPACE_OBJECT_MANIFEST) {
-      zcl_hex_encode(object.as.manifest.delegation.doc.master_pubkey, 32,
-                     owner);
-      owner_ptr = owner;
-      uint64_t now = (uint64_t)platform_time_wall_unix();
-      bool authorization_deadline = false;
-      bool authorized = discovery_deadline > 0
-          ? zcl_native_zcode_delegation_authorized_until(
-                &object.as.manifest.delegation, discovery_deadline,
-                NULL, 0, &authorization_deadline)
-          : zcl_native_zcode_delegation_authorized(
-                &object.as.manifest.delegation, NULL, 0);
-      if (authorization_deadline) {
-        deadline_reached = true;
-        break;
-      }
-      if (vcs_space_manifest_validate_at(
-              &object.as.manifest,
-              object.as.manifest.delegation.network_genesis, now) !=
-              VCS_SPACE_OK ||
-          !authorized)
-        continue;
-    }
-    if (!mvspace_admit_policy(
-            datadir, root, candidates.rows[i].transport_root,
-            candidates.rows[i].publisher_zid, owner_ptr,
-            mvspace_service_type(kind))) {
-      policy_denied++;
-      continue;
-    }
-    enum metaverse_space_object_kind admitted_kind =
-        METAVERSE_SPACE_OBJECT_NONE;
-    struct zcl_result stored = resolved ? metaverse_space_admit_bounded(
-        store, resolved, root, candidates.rows[i].transport_root,
-        maximum_wire_bytes, &admitted_kind, &is_new)
-        : ZCL_ERR(-1, "workspace-invalid");
-    if (!stored.ok && strcmp(stored.message, "space-admit-byte-limit") == 0) {
-      byte_limit_reached = true;
-      break;
-    }
-    if (!stored.ok || admitted_kind != kind)
-      continue;
-    admitted = true;
-    (void)snprintf(selected_blob, sizeof(selected_blob), "%s",
-                   candidates.rows[i].transport_root);
-    (void)snprintf(selected_pointer_publisher,
-                   sizeof(selected_pointer_publisher), "%s",
-                   candidates.rows[i].publisher_zid);
-    break;
-  }
-  if (!live)
-    vcs_package_store_close(store);
-  json_push_kv_str(&reply->data, "object_root", root);
-  json_push_kv_str(&reply->data, "namespace", mvspace_namespace(kind));
-  json_push_kv_int(&reply->data, "pointer_candidates",
-                   (int64_t)candidate_count);
-  json_push_kv_int(&reply->data, "pointer_conflicts", candidates.conflicts);
-  json_push_kv_int(&reply->data, "pointer_superseded",
-                   candidates.superseded);
-  json_push_kv_int(&reply->data, "policy_denied", (int64_t)policy_denied);
-  json_push_kv_int(&reply->data, "candidates_tried", (int64_t)tried);
-  json_push_kv_int(&reply->data, "provider_records_seen",
-                   (int64_t)provider_records_seen);
-  json_push_kv_bool(&reply->data, "fetch_scheduled", scheduled);
-  json_push_kv_bool(&reply->data, "admitted", admitted);
-  json_push_kv_bool(&reply->data, "deadline_reached", deadline_reached);
-  json_push_kv_bool(&reply->data, "byte_limit_reached", byte_limit_reached);
-  if (selected_blob[0]) {
-    json_push_kv_str(&reply->data, "blob_root", selected_blob);
-    json_push_kv_str(&reply->data, "pointer_publisher_zid",
-                     selected_pointer_publisher);
-  }
-  if (admitted) {
-    json_push_kv_bool(&reply->data, "new", is_new);
-    if (kind == METAVERSE_SPACE_OBJECT_MANIFEST) {
-      push_manifest(&reply->data, &object.as.manifest);
-      char owner[65];
-      zcl_hex_encode(object.as.manifest.delegation.doc.master_pubkey, 32,
-                     owner);
-      json_push_kv_str(&reply->data, "space_owner_zid", owner);
-      json_push_kv_bool(&reply->data, "owner_is_pointer_publisher",
-                        strcmp(owner, selected_pointer_publisher) == 0);
-    } else {
-      push_service(&reply->data, &object.as.service);
-    }
-    mvspace_discovery_state(reply, "present", false, "complete", 4,
-                            root, kind);
-    return;
-  }
-  if (scheduled && !byte_limit_reached) {
-    json_push_kv_str(&reply->data, "failure_code",
-                     deadline_reached ? "FETCH_DEADLINE" : "FETCH_PENDING");
-    mvspace_discovery_state(reply, "pending", true, "package_fetch", 2,
-                            root, kind);
-    return;
-  }
-  json_push_kv_str(&reply->data, "failure_code",
-                   byte_limit_reached ? "FETCH_BYTE_LIMIT"
-                                      : deadline_reached
-                                            ? "PROVIDER_ROUTE_DEADLINE"
-                                            : "PROVIDER_ROUTE_UNAVAILABLE");
-  mvspace_discovery_state(reply, "blocked", !byte_limit_reached,
-                          byte_limit_reached ? "fetch_verify"
-                                             : "provider_route",
-                          byte_limit_reached ? 2 : 1, root, kind);
-  if (!scheduled)
-    mvspace_blocked(reply,
-                    deadline_reached ? "DISCOVERY_DEADLINE" :
-                    byte_limit_reached ? "DISCOVERY_BYTE_LIMIT"
-                                     : "NO_USABLE_SPACE_CANDIDATE",
-                    deadline_reached
-                    ? "the caller-owned discovery deadline expired"
-                    : byte_limit_reached
-                    ? "the exact object exceeds the caller-owned byte limit"
-                    :
-                    candidate_count ?
-                    "all pointer candidates were denied, invalid, or lacked "
-                    "an authenticated restricted provider" :
-                    "no usable signed pointer evidence was discovered",
-                    "metaverse.space.discover");
+  mvspace_discover_candidates(&run);
+  if (!run.live)
+    vcs_package_store_close(run.store);
+  mvspace_discover_report(&run);
 }
 
 void zcl_native_handle_metaverse_space_discover(
