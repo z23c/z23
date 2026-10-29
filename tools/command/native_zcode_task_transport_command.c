@@ -660,24 +660,11 @@ struct ztt_row {
     char goal[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
 };
 
-void zcl_native_handle_zcode_task_pull(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* Parse maximum_records; false means the reply already carries the refusal. */
+static bool ztt_pull_cap(const struct zcl_command_request *request,
+                         struct zcl_command_reply *reply, uint32_t *cap)
 {
-    if (!request || !reply)
-        return;
-    char zcode_dir[4400];
-    if (!ztl_zcode_dir(request, reply, "zcode.task.pull", zcode_dir))
-        return;
-    uint8_t task_root[32];
-    if (!ztl_hex32(request, reply, "zcode.task.pull", "task_root",
-                   "BAD_TASK_ROOT",
-                   "the task the contexts must prove they post", task_root))
-        return;
-    char task_hex[65];
-    zcl_hex_encode(task_root, 32, task_hex);
-
-    uint32_t cap = ZTT_ROWS_DEFAULT;
+    *cap = ZTT_ROWS_DEFAULT;
     const struct json_value *mv = json_get(request->input, "maximum_records");
     if (mv && mv->type == JSON_INT) {
         int64_t want = json_get_int(mv);
@@ -689,34 +676,22 @@ void zcl_native_handle_zcode_task_pull(
                                    "maximum_records must be a positive "
                                    "integer",
                                    "zcode.task.pull");
-            return;
+            return false;
         }
-        cap = want > (int64_t)ZTT_ROWS_CEILING ? ZTT_ROWS_CEILING
-                                               : (uint32_t)want;
+        *cap = want > (int64_t)ZTT_ROWS_CEILING ? ZTT_ROWS_CEILING
+                                                : (uint32_t)want;
     }
+    return true;
+}
 
-    struct json_value pointers;
-    if (!ztl_query_pointers(request, reply, VCS_ZCODE_TASK_DHT_NAMESPACE,
-                            task_hex, &pointers))
-        return;
-
-    /* Distinct transport roots, in discovery order, bounded. A republished
-     * sequence of the same context collapses here so one publisher cannot
-     * consume the row budget by republishing. */
-    size_t seen = json_size(&pointers);
-    struct ztt_row *rows = zcl_calloc(cap, sizeof(*rows), "ztt_pull_rows");
-    if (!rows) {
-        json_free(&pointers);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC", "execute",
-                               false, false, "pull row table",
-                               "zcode.task.pull");
-        return;
-    }
+/* Distinct transport roots, in discovery order, bounded by cap. */
+static uint32_t ztt_pull_collect(struct ztt_row *rows, uint32_t cap,
+                                 const struct json_value *pointers,
+                                 size_t seen, bool *truncated)
+{
     uint32_t distinct = 0;
-    bool truncated = false;
     for (size_t i = 0; i < seen; i++) {
-        const struct json_value *record = json_at(&pointers, i);
+        const struct json_value *record = json_at(pointers, i);
         const char *transport =
             record ? json_get_str(json_get(record, "transport_root")) : NULL;
         if (!transport || strlen(transport) != 64)
@@ -730,7 +705,7 @@ void zcl_native_handle_zcode_task_pull(
         if (duplicate)
             continue;
         if (distinct >= cap) {
-            truncated = true;
+            *truncated = true;
             break;
         }
         (void)snprintf(rows[distinct].transport_root,
@@ -744,26 +719,44 @@ void zcl_native_handle_zcode_task_pull(
                        "not-attempted");
         distinct++;
     }
-    json_free(&pointers);
+    return distinct;
+}
 
-    bool own_store = false;
-    struct vcs_package_store *store = NULL;
-    if (distinct > 0) {
-        store = ztl_open_store(request, &own_store, "zcode.task");
-        if (!store) {
-            free(rows);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
-                                   "execute", false, false,
-                                   "the package store could not be opened; "
-                                   "task contexts cannot be fetched or "
-                                   "verified without one",
-                                   zcode_dir);
-            return;
-        }
+/* Admit one fetched row against the caller's task root; true when admitted. */
+static bool ztt_pull_admit_row(struct ztt_row *row,
+                               struct vcs_package_store *store,
+                               const uint8_t task_root[32], int64_t now)
+{
+    uint8_t transport_root[32];
+    if (!zcl_hex_decode_lower(row->transport_root, transport_root, 32)) {
+        (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
+                       "pointer-transport-root-not-canonical-hex");
+        return false;
     }
+    struct vcs_zcode_task_v1 task;
+    uint8_t derived_task_root[32];
+    size_t goal_len = 0;
+    enum vcs_zcode_task_context_error r = vcs_zcode_task_context_admit(
+        store, transport_root, task_root, now, &task, NULL,
+        (uint8_t *)row->goal, sizeof(row->goal) - 1u, &goal_len,
+        derived_task_root);
+    (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
+                   vcs_zcode_task_context_error_string(r));
+    if (r != VCS_ZCODE_TASK_CONTEXT_OK)
+        return false;
+    row->admitted = true;
+    row->expires_unix = task.expires_unix;
+    row->goal[goal_len] = '\0';
+    return true;
+}
 
-    uint32_t fetched = 0, admitted = 0, refused = 0;
+/* Fetch then admit every row; a failing row stays in the report. */
+static void ztt_pull_sweep(const struct zcl_command_request *request,
+                           struct vcs_package_store *store,
+                           const uint8_t task_root[32], struct ztt_row *rows,
+                           uint32_t distinct, uint32_t *fetched,
+                           uint32_t *admitted, uint32_t *refused)
+{
     int64_t now = (int64_t)platform_time_wall_unix();
     for (uint32_t i = 0; i < distinct; i++) {
         struct ztt_row *row = &rows[i];
@@ -772,7 +765,7 @@ void zcl_native_handle_zcode_task_pull(
                       (int64_t)VCS_ZCODE_TASK_CONTEXT_MAX_PACKAGE_BYTES,
                       &row->fetched, NULL, row->fetch_outcome,
                       sizeof(row->fetch_outcome));
-        fetched += row->fetched ? 1u : 0u;
+        *fetched += row->fetched ? 1u : 0u;
 
         /* expect_task_root is the caller's root and is NEVER NULL. This
          * single argument is the whole reason a hostile pointer in this
@@ -782,72 +775,41 @@ void zcl_native_handle_zcode_task_pull(
          * the fetch only SCHEDULED the download — the store is the
          * authority on whether the bytes are here. A row that fails stays
          * in the report; the sweep continues. */
-        uint8_t transport_root[32];
-        if (!zcl_hex_decode_lower(row->transport_root, transport_root, 32)) {
-            (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
-                           "pointer-transport-root-not-canonical-hex");
-            refused++;
-            continue;
-        }
-        struct vcs_zcode_task_v1 task;
-        uint8_t derived_task_root[32];
-        size_t goal_len = 0;
-        enum vcs_zcode_task_context_error r = vcs_zcode_task_context_admit(
-            store, transport_root, task_root, now, &task, NULL,
-            (uint8_t *)row->goal, sizeof(row->goal) - 1u, &goal_len,
-            derived_task_root);
-        (void)snprintf(row->admit_rule, sizeof(row->admit_rule), "%s",
-                       vcs_zcode_task_context_error_string(r));
-        if (r != VCS_ZCODE_TASK_CONTEXT_OK) {
-            refused++;
-            continue;
-        }
-        row->admitted = true;
-        row->expires_unix = task.expires_unix;
-        row->goal[goal_len] = '\0';
-        admitted++;
+        if (ztt_pull_admit_row(row, store, task_root, now))
+            (*admitted)++;
+        else
+            (*refused)++;
     }
-    ztl_close_store(store, own_store);
+}
 
-    /* Two very different dead ends, never merged into one "not found":
-     * nobody has posted this task, versus somebody has and nobody
-     * reachable is serving the context. The next step differs
-     * completely — wait for a poster, or fix reachability. */
-    const char *status = "TASKS_VERIFIED";
-    const char *blocker = "";
+/* Pick the status; blocker stays "" on success. */
+static const char *ztt_pull_status(uint32_t distinct, uint32_t admitted,
+                                   uint32_t fetched, const char **blocker)
+{
+    *blocker = "";
     if (distinct == 0) {
-        status = "NO_TASK_POINTERS";
-        blocker = "no_pointer_record_names_a_posting_for_this_task_root";
-    } else if (admitted == 0) {
-        /* admitted is tested BEFORE fetched, exactly as the work lane: the
-         * admit above is deliberately unconditional, so a context this
-         * node already holds verifies even when provider discovery served
-         * nothing. */
-        if (fetched == 0) {
-            status = "TASK_BYTES_UNREACHABLE";
-            blocker = "pointers_exist_but_no_authenticated_provider_served_"
-                      "the_context_bytes";
-        } else {
-            status = "TASKS_REFUSED";
-            blocker = "every_fetched_context_failed_a_named_admission_rule";
-        }
+        *blocker = "no_pointer_record_names_a_posting_for_this_task_root";
+        return "NO_TASK_POINTERS";
     }
+    if (admitted != 0)
+        return "TASKS_VERIFIED";
+    /* admitted is tested BEFORE fetched, exactly as the work lane: the
+     * admit above is deliberately unconditional, so a context this
+     * node already holds verifies even when provider discovery served
+     * nothing. */
+    if (fetched == 0) {
+        *blocker = "pointers_exist_but_no_authenticated_provider_served_"
+                   "the_context_bytes";
+        return "TASK_BYTES_UNREACHABLE";
+    }
+    *blocker = "every_fetched_context_failed_a_named_admission_rule";
+    return "TASKS_REFUSED";
+}
 
-    (void)json_push_kv_str(&reply->data, "task_root", task_hex);
-    (void)json_push_kv_str(&reply->data, "namespace",
-                           VCS_ZCODE_TASK_DHT_NAMESPACE);
-    (void)json_push_kv_str(&reply->data, "status", status);
-    if (blocker[0])
-        (void)json_push_kv_str(&reply->data, "blocker", blocker);
-    (void)json_push_kv_int(&reply->data, "pointers_seen", (int64_t)seen);
-    (void)json_push_kv_int(&reply->data, "distinct_transport_roots",
-                           (int64_t)distinct);
-    (void)json_push_kv_int(&reply->data, "fetched", (int64_t)fetched);
-    (void)json_push_kv_int(&reply->data, "admitted", (int64_t)admitted);
-    (void)json_push_kv_int(&reply->data, "refused", (int64_t)refused);
-    (void)json_push_kv_int(&reply->data, "maximum_records", (int64_t)cap);
-    (void)json_push_kv_bool(&reply->data, "rows_truncated", truncated);
-
+/* Push the per-row report list into data under "rows". */
+static void ztt_pull_push_rows(struct json_value *data,
+                               const struct ztt_row *rows, uint32_t distinct)
+{
     struct json_value list;
     json_init(&list);
     json_set_array(&list);
@@ -870,8 +832,98 @@ void zcl_native_handle_zcode_task_pull(
         (void)json_push_back(&list, &entry);
         json_free(&entry);
     }
-    (void)json_push_kv(&reply->data, "rows", &list);
+    (void)json_push_kv(data, "rows", &list);
     json_free(&list);
+}
+
+void zcl_native_handle_zcode_task_pull(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    char zcode_dir[4400];
+    if (!ztl_zcode_dir(request, reply, "zcode.task.pull", zcode_dir))
+        return;
+    uint8_t task_root[32];
+    if (!ztl_hex32(request, reply, "zcode.task.pull", "task_root",
+                   "BAD_TASK_ROOT",
+                   "the task the contexts must prove they post", task_root))
+        return;
+    char task_hex[65];
+    zcl_hex_encode(task_root, 32, task_hex);
+
+    uint32_t cap;
+    if (!ztt_pull_cap(request, reply, &cap))
+        return;
+
+    struct json_value pointers;
+    if (!ztl_query_pointers(request, reply, VCS_ZCODE_TASK_DHT_NAMESPACE,
+                            task_hex, &pointers))
+        return;
+
+    /* Distinct transport roots, in discovery order, bounded. A republished
+     * sequence of the same context collapses here so one publisher cannot
+     * consume the row budget by republishing. */
+    size_t seen = json_size(&pointers);
+    struct ztt_row *rows = zcl_calloc(cap, sizeof(*rows), "ztt_pull_rows");
+    if (!rows) {
+        json_free(&pointers);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC", "execute",
+                               false, false, "pull row table",
+                               "zcode.task.pull");
+        return;
+    }
+    bool truncated = false;
+    uint32_t distinct = ztt_pull_collect(rows, cap, &pointers, seen, &truncated);
+    json_free(&pointers);
+
+    bool own_store = false;
+    struct vcs_package_store *store = NULL;
+    if (distinct > 0) {
+        store = ztl_open_store(request, &own_store, "zcode.task");
+        if (!store) {
+            free(rows);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                                   "execute", false, false,
+                                   "the package store could not be opened; "
+                                   "task contexts cannot be fetched or "
+                                   "verified without one",
+                                   zcode_dir);
+            return;
+        }
+    }
+
+    uint32_t fetched = 0, admitted = 0, refused = 0;
+    ztt_pull_sweep(request, store, task_root, rows, distinct, &fetched,
+                   &admitted, &refused);
+    ztl_close_store(store, own_store);
+
+    /* Two very different dead ends, never merged into one "not found":
+     * nobody has posted this task, versus somebody has and nobody
+     * reachable is serving the context. The next step differs
+     * completely — wait for a poster, or fix reachability. */
+    const char *blocker;
+    const char *status = ztt_pull_status(distinct, admitted, fetched, &blocker);
+
+    (void)json_push_kv_str(&reply->data, "task_root", task_hex);
+    (void)json_push_kv_str(&reply->data, "namespace",
+                           VCS_ZCODE_TASK_DHT_NAMESPACE);
+    (void)json_push_kv_str(&reply->data, "status", status);
+    if (blocker[0])
+        (void)json_push_kv_str(&reply->data, "blocker", blocker);
+    (void)json_push_kv_int(&reply->data, "pointers_seen", (int64_t)seen);
+    (void)json_push_kv_int(&reply->data, "distinct_transport_roots",
+                           (int64_t)distinct);
+    (void)json_push_kv_int(&reply->data, "fetched", (int64_t)fetched);
+    (void)json_push_kv_int(&reply->data, "admitted", (int64_t)admitted);
+    (void)json_push_kv_int(&reply->data, "refused", (int64_t)refused);
+    (void)json_push_kv_int(&reply->data, "maximum_records", (int64_t)cap);
+    (void)json_push_kv_bool(&reply->data, "rows_truncated", truncated);
+
+    ztt_pull_push_rows(&reply->data, rows, distinct);
     free(rows);
 
     (void)json_push_kv_str(
@@ -890,12 +942,50 @@ void zcl_native_handle_zcode_task_pull(
  * context this node already holds is re-verified and carries its goal, so
  * an operator reads problem statements straight off the board. Rows whose
  * bytes are not here yet say so — zcode task pull fetches them. */
-void zcl_native_handle_zcode_task_board(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+
+/* Build one board row; a row whose bytes this node does not hold says so. */
+static void ztt_board_row(struct vcs_package_store *store, int64_t now,
+                          const char *semantic, const char *transport,
+                          struct json_value *rows)
 {
-    if (!request || !reply)
-        return;
+    struct json_value entry;
+    json_init(&entry);
+    json_set_object(&entry);
+    (void)json_push_kv_str(&entry, "task_root", semantic);
+    (void)json_push_kv_str(&entry, "context_root", transport);
+    uint8_t task_root[32], context_root[32];
+    if (store && zcl_hex_decode_lower(semantic, task_root, 32) &&
+        zcl_hex_decode_lower(transport, context_root, 32)) {
+        struct vcs_zcode_task_v1 task;
+        char goal[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
+        size_t goal_len = 0;
+        enum vcs_zcode_task_context_error r =
+            vcs_zcode_task_context_admit(
+                store, context_root, task_root, now, &task, NULL,
+                (uint8_t *)goal, sizeof(goal) - 1u, &goal_len, NULL);
+        (void)json_push_kv_str(&entry, "admit_rule",
+                               vcs_zcode_task_context_error_string(r));
+        if (r == VCS_ZCODE_TASK_CONTEXT_OK) {
+            goal[goal_len] = '\0';
+            (void)json_push_kv_bool(&entry, "verified", true);
+            (void)json_push_kv_int(&entry, "expires_unix",
+                                   (int64_t)task.expires_unix);
+            (void)json_push_kv_str(&entry, "goal", goal);
+        } else {
+            (void)json_push_kv_bool(&entry, "verified", false);
+        }
+    } else {
+        (void)json_push_kv_str(&entry, "admit_rule", "bytes-not-held");
+        (void)json_push_kv_bool(&entry, "verified", false);
+    }
+    (void)json_push_back(rows, &entry);
+    json_free(&entry);
+}
+
+/* Run the records lane's board listing into records. */
+static void ztt_board_list(const struct zcl_command_request *request,
+                           struct zcl_command_reply *records)
+{
     struct json_value forwarded_input;
     json_init(&forwarded_input);
     json_set_object(&forwarded_input);
@@ -908,10 +998,40 @@ void zcl_native_handle_zcode_task_board(
     (void)json_push_kv_bool(&forwarded_input, "board", true);
     struct zcl_command_request forwarded = *request;
     forwarded.input = &forwarded_input;
-    struct zcl_command_reply records;
-    zcl_command_reply_init(&records, "zcl.zcode_network_records.v1");
-    zcl_native_handle_zcode_network_records(&forwarded, &records);
+    zcl_command_reply_init(records, "zcl.zcode_network_records.v1");
+    zcl_native_handle_zcode_network_records(&forwarded, records);
     json_free(&forwarded_input);
+}
+
+/* Enrich every well-formed listed record into rows. */
+static void ztt_board_rows(const struct json_value *in_rows,
+                           struct vcs_package_store *store, int64_t now,
+                           struct json_value *rows)
+{
+    size_t count = in_rows && in_rows->type == JSON_ARR
+                       ? json_size(in_rows)
+                       : 0;
+    for (size_t i = 0; i < count; i++) {
+        const struct json_value *record = json_at(in_rows, i);
+        const char *semantic =
+            record ? json_get_str(json_get(record, "semantic_root")) : NULL;
+        const char *transport =
+            record ? json_get_str(json_get(record, "transport_root")) : NULL;
+        if (!semantic || strlen(semantic) != 64 || !transport ||
+            strlen(transport) != 64)
+            continue;
+        ztt_board_row(store, now, semantic, transport, rows);
+    }
+}
+
+void zcl_native_handle_zcode_task_board(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    struct zcl_command_reply records;
+    ztt_board_list(request, &records);
     if (records.exit_code != ZCL_COMMAND_EXIT_OK) {
         zcl_command_reply_fail(
             reply, records.status, records.exit_code,
@@ -935,51 +1055,7 @@ void zcl_native_handle_zcode_task_board(
     const struct json_value *in_rows = json_get(&records.data, "records");
     json_init(&rows);
     json_set_array(&rows);
-    size_t count = in_rows && in_rows->type == JSON_ARR
-                       ? json_size(in_rows)
-                       : 0;
-    for (size_t i = 0; i < count; i++) {
-        const struct json_value *record = json_at(in_rows, i);
-        const char *semantic =
-            record ? json_get_str(json_get(record, "semantic_root")) : NULL;
-        const char *transport =
-            record ? json_get_str(json_get(record, "transport_root")) : NULL;
-        if (!semantic || strlen(semantic) != 64 || !transport ||
-            strlen(transport) != 64)
-            continue;
-        struct json_value entry;
-        json_init(&entry);
-        json_set_object(&entry);
-        (void)json_push_kv_str(&entry, "task_root", semantic);
-        (void)json_push_kv_str(&entry, "context_root", transport);
-        uint8_t task_root[32], context_root[32];
-        if (store && zcl_hex_decode_lower(semantic, task_root, 32) &&
-            zcl_hex_decode_lower(transport, context_root, 32)) {
-            struct vcs_zcode_task_v1 task;
-            char goal[VCS_ZCODE_TASK_CONTEXT_GOAL_MAX + 1u];
-            size_t goal_len = 0;
-            enum vcs_zcode_task_context_error r =
-                vcs_zcode_task_context_admit(
-                    store, context_root, task_root, now, &task, NULL,
-                    (uint8_t *)goal, sizeof(goal) - 1u, &goal_len, NULL);
-            (void)json_push_kv_str(&entry, "admit_rule",
-                                   vcs_zcode_task_context_error_string(r));
-            if (r == VCS_ZCODE_TASK_CONTEXT_OK) {
-                goal[goal_len] = '\0';
-                (void)json_push_kv_bool(&entry, "verified", true);
-                (void)json_push_kv_int(&entry, "expires_unix",
-                                       (int64_t)task.expires_unix);
-                (void)json_push_kv_str(&entry, "goal", goal);
-            } else {
-                (void)json_push_kv_bool(&entry, "verified", false);
-            }
-        } else {
-            (void)json_push_kv_str(&entry, "admit_rule", "bytes-not-held");
-            (void)json_push_kv_bool(&entry, "verified", false);
-        }
-        (void)json_push_back(&rows, &entry);
-        json_free(&entry);
-    }
+    ztt_board_rows(in_rows, store, now, &rows);
     zcl_command_reply_free(&records);
 
     (void)json_push_kv_str(&reply->data, "namespace",
