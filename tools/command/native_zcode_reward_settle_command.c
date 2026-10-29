@@ -172,47 +172,25 @@ static void zs8_push_entry_row(struct json_value *row,
         (void)json_push_kv_str(row, "rejected_rule", e->rejected_rule);
 }
 
-/* ── zcode reward queue ─────────────────────────────────────────────── */
-
-void zcl_native_handle_zcode_reward_queue(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* The state filter index for a queue state name, or -1 when unknown. */
+static int zs8_queue_state_index(const char *state)
 {
-    if (!request || !reply)
-        return;
-    struct vcs_reward_ledger *l =
-        zs8_ledger_load(request, reply, "zcode.reward.queue");
-    if (!l)
-        return;
-
-    /* Optional state filter. */
-    int state_filter = -1;
-    const char *state = zs8_input_str(request->input, "state");
-    if (state && state[0]) {
-        for (int s = 0; s <= (int)VCS_REWARD_STATE_REJECTED; s++) {
-            if (strcmp(state, vcs_reward_state_string(
-                                  (enum vcs_reward_state)s)) == 0) {
-                state_filter = s;
-                break;
-            }
-        }
-        if (state_filter < 0) {
-            vcs_reward_ledger_free(l);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID,
-                                   "BAD_STATE_FILTER", "normalize", false,
-                                   false,
-                                   "state must be queued, planned, settled, "
-                                   "or rejected", state);
-            return;
-        }
+    for (int s = 0; s <= (int)VCS_REWARD_STATE_REJECTED; s++) {
+        if (strcmp(state, vcs_reward_state_string(
+                              (enum vcs_reward_state)s)) == 0)
+            return s;
     }
+    return -1;
+}
 
+static void zs8_push_queue_summary(struct json_value *data,
+                                   struct vcs_reward_ledger *l)
+{
     struct vcs_reward_queue_tally tally;
     vcs_reward_queue_tally(l, &tally);
-    (void)json_push_kv_int(&reply->data, "total_entries",
+    (void)json_push_kv_int(data, "total_entries",
                            (int64_t)vcs_reward_ledger_entry_count(l));
-    (void)json_push_kv_int(&reply->data, "settled_facts",
+    (void)json_push_kv_int(data, "settled_facts",
                            (int64_t)vcs_reward_ledger_fact_count(l));
     struct json_value tallies;
     json_init(&tallies);
@@ -221,10 +199,13 @@ void zcl_native_handle_zcode_reward_queue(
     (void)json_push_kv_int(&tallies, "planned", (int64_t)tally.planned);
     (void)json_push_kv_int(&tallies, "settled", (int64_t)tally.settled);
     (void)json_push_kv_int(&tallies, "rejected", (int64_t)tally.rejected);
-    (void)json_push_kv(&reply->data, "tallies", &tallies);
+    (void)json_push_kv(data, "tallies", &tallies);
     json_free(&tallies);
+}
 
-    /* Filtered matching count, then the bounded page. */
+static size_t zs8_queue_match_count(struct vcs_reward_ledger *l,
+                                    int state_filter)
+{
     size_t matches = 0;
     for (size_t i = 0; i < vcs_reward_ledger_entry_count(l); i++) {
         const struct vcs_reward_entry *e = vcs_reward_ledger_entry_at(l, i);
@@ -232,9 +213,15 @@ void zcl_native_handle_zcode_reward_queue(
             continue;
         matches++;
     }
-    size_t shown = 0;
-    bool truncated = false;
-    size_t offset = zs8_page(request->input, matches, &shown, &truncated);
+    return matches;
+}
+
+/* Push the bounded page of queue rows; returns how many were emitted. */
+static size_t zs8_push_queue_rows(struct json_value *data,
+                                  struct vcs_reward_ledger *l,
+                                  int state_filter, size_t offset,
+                                  size_t shown)
+{
     struct json_value rows;
     json_init(&rows);
     json_set_array(&rows);
@@ -254,8 +241,168 @@ void zcl_native_handle_zcode_reward_queue(
         json_free(&row);
         emitted++;
     }
-    (void)json_push_kv(&reply->data, "rows", &rows);
+    (void)json_push_kv(data, "rows", &rows);
     json_free(&rows);
+    return emitted;
+}
+
+/* The plan-persist failure reply; the caller frees the ledger and plan
+ * before calling. */
+static void zs8_plan_persist_fail(struct zcl_command_reply *reply,
+                                  enum vcs_reward_plan_persist_error perr)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INTERNAL,
+                           perr == VCS_REWARD_PLAN_PERSIST_FULL
+                               ? "PLAN_STORE_FULL"
+                               : "PLAN_PERSIST_IO",
+                           "execute", false, false,
+                           perr == VCS_REWARD_PLAN_PERSIST_FULL
+                               ? "the plan store reached its bound"
+                               : "the plan wire could not be persisted",
+                           "rewards/plans");
+}
+
+static uint32_t zs8_plan_recipients(struct vcs_reward_ledger *l,
+                                    struct vcs_reward_plan *plan)
+{
+    uint32_t recipients = 0;
+    for (size_t i = 0; i < plan->row_count; i++) {
+        if (plan->rows[i].disposition != VCS_REWARD_DISP_PLANNED)
+            continue;
+        const struct vcs_reward_entry *e =
+            vcs_reward_ledger_find(l, plan->rows[i].entry_id);
+        if (!e)
+            continue;
+        bool seen = false;
+        for (size_t j = 0; j < i && !seen; j++) {
+            if (plan->rows[j].disposition != VCS_REWARD_DISP_PLANNED)
+                continue;
+            const struct vcs_reward_entry *p =
+                vcs_reward_ledger_find(l, plan->rows[j].entry_id);
+            if (p && memcmp(p->contributor, e->contributor, 33) == 0)
+                seen = true;
+        }
+        if (!seen)
+            recipients++;
+    }
+    return recipients;
+}
+
+/* Push the bounded batch of planned rows; returns how many were emitted. */
+static size_t zs8_plan_push_batch(struct json_value *data,
+                                  struct vcs_reward_ledger *l,
+                                  struct vcs_reward_plan *plan)
+{
+    char hex[67];
+    struct json_value batch;
+    json_init(&batch);
+    json_set_array(&batch);
+    size_t emitted = 0;
+    for (size_t i = 0; i < plan->row_count && emitted < ZS8_PLAN_ROWS_CAP;
+         i++) {
+        if (plan->rows[i].disposition != VCS_REWARD_DISP_PLANNED)
+            continue;
+        const struct vcs_reward_entry *e =
+            vcs_reward_ledger_find(l, plan->rows[i].entry_id);
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        zcl_hex_encode(plan->rows[i].entry_id, 32, hex);
+        (void)json_push_kv_str(&row, "entry_id", hex);
+        if (e) {
+            zcl_hex_encode(e->contributor, 33, hex);
+            (void)json_push_kv_str(&row, "contributor", hex);
+            (void)json_push_kv_str(&row, "category",
+                                   vcs_reward_category_string(e->category));
+        }
+        (void)json_push_kv_int(&row, "points_requested",
+                               (int64_t)plan->rows[i].points_requested);
+        (void)json_push_kv_int(&row, "points_settled",
+                               (int64_t)plan->rows[i].points_settled);
+        if (plan->rows[i].weekly_cap_clamped)
+            (void)json_push_kv_bool(&row, "weekly_cap_clamped", true);
+        (void)json_push_back(&batch, &row);
+        json_free(&row);
+        emitted++;
+    }
+    (void)json_push_kv(data, "batch", &batch);
+    json_free(&batch);
+    return emitted;
+}
+
+/* Push the bounded exclusion rows; returns how many were emitted. */
+static size_t zs8_plan_push_exclusions(struct json_value *data,
+                                       struct vcs_reward_plan *plan)
+{
+    char hex[67];
+    struct json_value exclusions;
+    json_init(&exclusions);
+    json_set_array(&exclusions);
+    size_t emitted = 0;
+    for (size_t i = 0; i < plan->row_count && emitted < ZS8_PLAN_ROWS_CAP;
+         i++) {
+        if (plan->rows[i].disposition == VCS_REWARD_DISP_PLANNED)
+            continue;
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        zcl_hex_encode(plan->rows[i].entry_id, 32, hex);
+        (void)json_push_kv_str(&row, "entry_id", hex);
+        (void)json_push_kv_str(
+            &row, "disposition",
+            vcs_reward_disposition_string(plan->rows[i].disposition));
+        (void)json_push_kv_str(&row, "rule", plan->rows[i].rule);
+        (void)json_push_kv_int(&row, "points_requested",
+                               (int64_t)plan->rows[i].points_requested);
+        (void)json_push_back(&exclusions, &row);
+        json_free(&row);
+        emitted++;
+    }
+    (void)json_push_kv(data, "exclusions", &exclusions);
+    json_free(&exclusions);
+    return emitted;
+}
+
+/* ── zcode reward queue ─────────────────────────────────────────────── */
+
+void zcl_native_handle_zcode_reward_queue(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    struct vcs_reward_ledger *l =
+        zs8_ledger_load(request, reply, "zcode.reward.queue");
+    if (!l)
+        return;
+
+    /* Optional state filter. */
+    int state_filter = -1;
+    const char *state = zs8_input_str(request->input, "state");
+    if (state && state[0]) {
+        state_filter = zs8_queue_state_index(state);
+        if (state_filter < 0) {
+            vcs_reward_ledger_free(l);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INVALID,
+                                   "BAD_STATE_FILTER", "normalize", false,
+                                   false,
+                                   "state must be queued, planned, settled, "
+                                   "or rejected", state);
+            return;
+        }
+    }
+
+    zs8_push_queue_summary(&reply->data, l);
+
+    /* Filtered matching count, then the bounded page. */
+    size_t matches = zs8_queue_match_count(l, state_filter);
+    size_t shown = 0;
+    bool truncated = false;
+    size_t offset = zs8_page(request->input, matches, &shown, &truncated);
+    size_t emitted = zs8_push_queue_rows(&reply->data, l, state_filter,
+                                         offset, shown);
     (void)json_push_kv_int(&reply->data, "total_matches", (int64_t)matches);
     (void)json_push_kv_int(&reply->data, "rendered", (int64_t)emitted);
     (void)json_push_kv_bool(&reply->data, "items_truncated", truncated);
@@ -322,16 +469,7 @@ void zcl_native_handle_zcode_reward_plan(
         perr != VCS_REWARD_PLAN_PERSIST_DUPLICATE) {
         vcs_reward_plan_free(&plan);
         vcs_reward_ledger_free(l);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL,
-                               perr == VCS_REWARD_PLAN_PERSIST_FULL
-                                   ? "PLAN_STORE_FULL"
-                                   : "PLAN_PERSIST_IO",
-                               "execute", false, false,
-                               perr == VCS_REWARD_PLAN_PERSIST_FULL
-                                   ? "the plan store reached its bound"
-                                   : "the plan wire could not be persisted",
-                               "rewards/plans");
+        zs8_plan_persist_fail(reply, perr);
         return;
     }
 
@@ -353,93 +491,18 @@ void zcl_native_handle_zcode_reward_plan(
                            (int64_t)plan.points_total);
 
     /* Distinct recipients in the batch. */
-    uint32_t recipients = 0;
-    for (size_t i = 0; i < plan.row_count; i++) {
-        if (plan.rows[i].disposition != VCS_REWARD_DISP_PLANNED)
-            continue;
-        const struct vcs_reward_entry *e =
-            vcs_reward_ledger_find(l, plan.rows[i].entry_id);
-        if (!e)
-            continue;
-        bool seen = false;
-        for (size_t j = 0; j < i && !seen; j++) {
-            if (plan.rows[j].disposition != VCS_REWARD_DISP_PLANNED)
-                continue;
-            const struct vcs_reward_entry *p =
-                vcs_reward_ledger_find(l, plan.rows[j].entry_id);
-            if (p && memcmp(p->contributor, e->contributor, 33) == 0)
-                seen = true;
-        }
-        if (!seen)
-            recipients++;
-    }
+    uint32_t recipients = zs8_plan_recipients(l, &plan);
     (void)json_push_kv_int(&reply->data, "recipients", (int64_t)recipients);
 
     /* The batch (planned rows), bounded. */
-    struct json_value batch;
-    json_init(&batch);
-    json_set_array(&batch);
-    size_t emitted = 0;
-    for (size_t i = 0; i < plan.row_count && emitted < ZS8_PLAN_ROWS_CAP;
-         i++) {
-        if (plan.rows[i].disposition != VCS_REWARD_DISP_PLANNED)
-            continue;
-        const struct vcs_reward_entry *e =
-            vcs_reward_ledger_find(l, plan.rows[i].entry_id);
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        zcl_hex_encode(plan.rows[i].entry_id, 32, hex);
-        (void)json_push_kv_str(&row, "entry_id", hex);
-        if (e) {
-            zcl_hex_encode(e->contributor, 33, hex);
-            (void)json_push_kv_str(&row, "contributor", hex);
-            (void)json_push_kv_str(&row, "category",
-                                   vcs_reward_category_string(e->category));
-        }
-        (void)json_push_kv_int(&row, "points_requested",
-                               (int64_t)plan.rows[i].points_requested);
-        (void)json_push_kv_int(&row, "points_settled",
-                               (int64_t)plan.rows[i].points_settled);
-        if (plan.rows[i].weekly_cap_clamped)
-            (void)json_push_kv_bool(&row, "weekly_cap_clamped", true);
-        (void)json_push_back(&batch, &row);
-        json_free(&row);
-        emitted++;
-    }
-    (void)json_push_kv(&reply->data, "batch", &batch);
-    json_free(&batch);
+    size_t emitted = zs8_plan_push_batch(&reply->data, l, &plan);
     (void)json_push_kv_bool(&reply->data, "batch_truncated",
                             plan.planned_count > emitted);
 
     /* Every exclusion with its named rule, bounded. */
-    struct json_value exclusions;
-    json_init(&exclusions);
-    json_set_array(&exclusions);
     size_t excluded = plan.deferred_count + plan.blocked_count +
                       plan.duplicate_count;
-    emitted = 0;
-    for (size_t i = 0; i < plan.row_count && emitted < ZS8_PLAN_ROWS_CAP;
-         i++) {
-        if (plan.rows[i].disposition == VCS_REWARD_DISP_PLANNED)
-            continue;
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        zcl_hex_encode(plan.rows[i].entry_id, 32, hex);
-        (void)json_push_kv_str(&row, "entry_id", hex);
-        (void)json_push_kv_str(
-            &row, "disposition",
-            vcs_reward_disposition_string(plan.rows[i].disposition));
-        (void)json_push_kv_str(&row, "rule", plan.rows[i].rule);
-        (void)json_push_kv_int(&row, "points_requested",
-                               (int64_t)plan.rows[i].points_requested);
-        (void)json_push_back(&exclusions, &row);
-        json_free(&row);
-        emitted++;
-    }
-    (void)json_push_kv(&reply->data, "exclusions", &exclusions);
-    json_free(&exclusions);
+    emitted = zs8_plan_push_exclusions(&reply->data, &plan);
     (void)json_push_kv_bool(&reply->data, "exclusions_truncated",
                             excluded > emitted);
 
