@@ -137,7 +137,11 @@ static pid_t spawn_orphan(const char *self, const char *first, const char *secon
 {
     pid_t other = fork();
     assert(other >= 0);
-    if (!other) { execl(self, self, first, second, (char *)NULL); _exit(127); }
+    if (!other) {
+        /* A non-interactive shell starts background jobs with SIGINT ignored, and exec keeps that. */
+        if (signal(SIGINT, SIG_DFL) != SIG_ERR) execl(self, self, first, second, (char *)NULL);
+        _exit(127);
+    }
     FILE *f = fopen(pidfile, "w");
     assert(f && fprintf(f, "%d\n", (int)other) > 0 && fclose(f) == 0);
     return other;
