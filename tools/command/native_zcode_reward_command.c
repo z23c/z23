@@ -348,109 +348,85 @@ static bool zr_lineage_absorb(const struct zr_target *t,
 
 /* ── zcode reward score ─────────────────────────────────────────────── */
 
-void zcl_native_handle_zcode_reward_score(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* Read every manifest file's content (files over the per-file scoring
+ * cap stay unread and are excluded by declared size). */
+static bool zr_score_read_inputs(const struct zr_target *t,
+                                 struct vcs_score_input_file *inputs,
+                                 uint8_t **contents)
 {
-    if (!request || !reply)
-        return;
-    struct zr_target t;
-    if (!zr_target_load(request, reply, &t, "zcode.reward.score"))
-        return;
-
-    /* Read every manifest file's content (files over the per-file scoring
-     * cap stay unread and are excluded by declared size). */
-    struct vcs_score_input_file *inputs = NULL;
-    uint8_t **contents = NULL;
-    bool ok = true;
-    if (t.manifest.count > 0) {
-        inputs = zcl_calloc(t.manifest.count, sizeof(*inputs),
-                            "zr_score_inputs");
-        contents = zcl_calloc(t.manifest.count, sizeof(*contents),
-                              "zr_score_contents");
-        if (!inputs || !contents) {
-            free(inputs);
-            free(contents);
-            zr_target_free(&t);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
-                                   "execute", false, false,
-                                   "score input buffers", t.root_hex);
-            return;
-        }
-    }
-    for (size_t i = 0; i < t.manifest.count && ok; i++) {
-        const struct vcs_package_file *f = &t.manifest.files[i];
+    for (size_t i = 0; i < t->manifest.count; i++) {
+        const struct vcs_package_file *f = &t->manifest.files[i];
         inputs[i].path = f->path;
         inputs[i].declared_size = f->size;
         size_t len = 0;
         bool oversize = false;
-        if (!zr_read_file_content(t.zcode_dir, f, &contents[i], &len,
-                                  &oversize)) {
-            ok = false;
-            break;
-        }
+        if (!zr_read_file_content(t->zcode_dir, f, &contents[i], &len,
+                                  &oversize))
+            return false;
         if (!oversize) {
             inputs[i].bytes = contents[i];
             inputs[i].len = len;
         }
     }
-    if (!ok) {
-        for (size_t i = 0; i < t.manifest.count; i++)
-            free(contents ? contents[i] : NULL);
-        free(contents);
-        free(inputs);
-        zr_target_free(&t);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "CHUNK_READ",
-                               "execute", false, false,
-                               "a committed chunk is missing or does not "
-                               "verify against the manifest", t.root_hex);
-        return;
-    }
+    return true;
+}
 
-    struct vcs_score_set lineage;
-    vcs_score_set_init(&lineage);
-    uint32_t ancestors = 0;
-    bool lineage_complete = true;
-    ok = zr_lineage_absorb(&t, &t.release, &lineage, &ancestors,
-                           &lineage_complete);
-    if (ok)
-        vcs_score_set_finalize(&lineage);
-    struct vcs_score_release score;
-    if (ok)
-        ok = vcs_score_release_compute(inputs, t.manifest.count, &lineage,
-                                       t.release.has_parent, &score);
-    for (size_t i = 0; i < t.manifest.count; i++)
+/* Allocate the score input and content arrays (none when the manifest is
+ * empty). On failure both are freed and cleared; the caller replies. */
+static bool zr_score_alloc_inputs(const struct zr_target *t,
+                                  struct vcs_score_input_file **inputs,
+                                  uint8_t ***contents)
+{
+    if (t->manifest.count == 0)
+        return true;
+    *inputs = zcl_calloc(t->manifest.count, sizeof(**inputs),
+                         "zr_score_inputs");
+    *contents = zcl_calloc(t->manifest.count, sizeof(**contents),
+                           "zr_score_contents");
+    if (*inputs && *contents)
+        return true;
+    free(*inputs);
+    free(*contents);
+    *inputs = NULL;
+    *contents = NULL;
+    return false;
+}
+
+static void zr_score_free_inputs(const struct zr_target *t,
+                                 struct vcs_score_input_file *inputs,
+                                 uint8_t **contents)
+{
+    for (size_t i = 0; i < t->manifest.count; i++)
         free(contents ? contents[i] : NULL);
     free(contents);
     free(inputs);
-    if (!ok) {
-        vcs_score_set_free(&lineage);
-        zr_target_free(&t);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
-                               "execute", false, false,
-                               "score computation", t.root_hex);
-        return;
-    }
+}
 
+static void zr_score_push_identity(struct zcl_command_reply *reply,
+                                   const struct zr_target *t,
+                                   const struct vcs_score_release *score)
+{
     char pub_hex[67];
-    zcl_hex_encode(t.release.publisher_pubkey, 33, pub_hex);
+    zcl_hex_encode(t->release.publisher_pubkey, 33, pub_hex);
     (void)json_push_kv_str(&reply->data, "credit_class",
                            "legacy_non_credit");
-    (void)json_push_kv_str(&reply->data, "name", t.release.name);
-    (void)json_push_kv_str(&reply->data, "semver", t.release.semver);
-    (void)json_push_kv_str(&reply->data, "release_id", t.release_id_hex);
-    (void)json_push_kv_str(&reply->data, "package_root", t.root_hex);
+    (void)json_push_kv_str(&reply->data, "name", t->release.name);
+    (void)json_push_kv_str(&reply->data, "semver", t->release.semver);
+    (void)json_push_kv_str(&reply->data, "release_id", t->release_id_hex);
+    (void)json_push_kv_str(&reply->data, "package_root", t->root_hex);
     (void)json_push_kv_str(&reply->data, "publisher", pub_hex);
     (void)json_push_kv_bool(&reply->data, "has_parent",
-                            t.release.has_parent);
+                            t->release.has_parent);
     (void)json_push_kv_str(&reply->data, "category",
-                           vcs_score_category_string(score.category));
+                           vcs_score_category_string(score->category));
     (void)json_push_kv_int(&reply->data, "category_base",
-                           (int64_t)score.category_base);
+                           (int64_t)score->category_base);
+}
 
+static void zr_score_push_lineage(struct zcl_command_reply *reply,
+                                  const struct vcs_score_set *lineage,
+                                  uint32_t ancestors, bool lineage_complete)
+{
     struct json_value lin;
     json_init(&lin);
     json_set_object(&lin);
@@ -458,58 +434,73 @@ void zcl_native_handle_zcode_reward_score(
     (void)json_push_kv_int(&lin, "depth_cap",
                            (int64_t)VCS_SCORE_MAX_LINEAGE_DEPTH);
     (void)json_push_kv_bool(&lin, "complete", lineage_complete);
-    (void)json_push_kv_int(&lin, "lineage_units", (int64_t)lineage.count);
+    (void)json_push_kv_int(&lin, "lineage_units", (int64_t)lineage->count);
     (void)json_push_kv(&reply->data, "lineage", &lin);
     json_free(&lin);
+}
 
+static void zr_score_push_lines(struct zcl_command_reply *reply,
+                                const struct vcs_score_release *score)
+{
     struct json_value lines;
     json_init(&lines);
     json_set_object(&lines);
     (void)json_push_kv_int(&lines, "semantic",
-                           (int64_t)score.semantic_lines);
-    (void)json_push_kv_int(&lines, "blank", (int64_t)score.blank_lines);
+                           (int64_t)score->semantic_lines);
+    (void)json_push_kv_int(&lines, "blank", (int64_t)score->blank_lines);
     (void)json_push_kv_int(&lines, "comment_only",
-                           (int64_t)score.comment_lines);
+                           (int64_t)score->comment_lines);
     (void)json_push_kv_int(&lines, "brace_only",
-                           (int64_t)score.brace_lines);
+                           (int64_t)score->brace_lines);
     (void)json_push_kv(&reply->data, "lines", &lines);
     json_free(&lines);
+}
 
+static void zr_score_push_units(struct zcl_command_reply *reply,
+                                const struct vcs_score_release *score)
+{
     struct json_value units;
     json_init(&units);
     json_set_object(&units);
-    (void)json_push_kv_int(&units, "total", (int64_t)score.units_total);
+    (void)json_push_kv_int(&units, "total", (int64_t)score->units_total);
     (void)json_push_kv_int(&units, "duplicate_within_release",
-                           (int64_t)score.units_duplicate);
+                           (int64_t)score->units_duplicate);
     (void)json_push_kv_int(&units, "already_rewarded",
-                           (int64_t)score.units_already_rewarded);
+                           (int64_t)score->units_already_rewarded);
     (void)json_push_kv_int(&units, "new_source",
-                           (int64_t)score.new_source_units);
+                           (int64_t)score->new_source_units);
     (void)json_push_kv_int(&units, "new_test",
-                           (int64_t)score.new_test_units);
+                           (int64_t)score->new_test_units);
     (void)json_push_kv(&reply->data, "units", &units);
     json_free(&units);
+}
 
+static void zr_score_push_points(struct zcl_command_reply *reply,
+                                 const struct vcs_score_release *score)
+{
     struct json_value points;
     json_init(&points);
     json_set_object(&points);
     (void)json_push_kv_int(&points, "raw_line_points",
-                           (int64_t)score.raw_line_points);
+                           (int64_t)score->raw_line_points);
     (void)json_push_kv_int(&points, "line_cap",
                            (int64_t)VCS_SCORE_MAX_LINE_POINTS_PER_RELEASE);
     (void)json_push_kv_bool(&points, "line_cap_applied",
-                            score.line_cap_applied);
+                            score->line_cap_applied);
     (void)json_push_kv_int(&points, "line_points",
-                           (int64_t)score.line_points);
-    (void)json_push_kv_int(&points, "raw_total", (int64_t)score.raw_total);
+                           (int64_t)score->line_points);
+    (void)json_push_kv_int(&points, "raw_total", (int64_t)score->raw_total);
     (void)json_push_kv_int(&points, "release_cap",
                            (int64_t)VCS_SCORE_MAX_TOTAL_PER_RELEASE);
     (void)json_push_kv_bool(&points, "release_cap_applied",
-                            score.release_cap_applied);
-    (void)json_push_kv_int(&points, "total", (int64_t)score.total);
+                            score->release_cap_applied);
+    (void)json_push_kv_int(&points, "total", (int64_t)score->total);
     (void)json_push_kv(&reply->data, "points", &points);
     json_free(&points);
+}
 
+static void zr_score_push_caps(struct zcl_command_reply *reply)
+{
     struct json_value caps;
     json_init(&caps);
     json_set_object(&caps);
@@ -527,7 +518,10 @@ void zcl_native_handle_zcode_reward_score(
                            (int64_t)VCS_SCORE_TEST_LINE_POINTS);
     (void)json_push_kv(&reply->data, "caps", &caps);
     json_free(&caps);
+}
 
+static void zr_score_push_table(struct zcl_command_reply *reply)
+{
     size_t table_count = 0;
     const struct vcs_score_category_constant *table =
         vcs_score_category_table(&table_count);
@@ -549,38 +543,49 @@ void zcl_native_handle_zcode_reward_score(
     }
     (void)json_push_kv(&reply->data, "scoring_table", &tbl);
     json_free(&tbl);
+}
 
+static void zr_score_push_file_row(struct json_value *files,
+                                   const struct vcs_score_file_report *fr)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "path", fr->path);
+    (void)json_push_kv_str(&row, "kind",
+                           vcs_score_file_kind_string(fr->kind));
+    if (fr->kind == VCS_SCORE_FILE_EXCLUDED)
+        (void)json_push_kv_str(
+            &row, "reason", vcs_score_exclude_reason_string(fr->reason));
+    (void)json_push_kv_int(&row, "semantic_lines",
+                           (int64_t)fr->lines.semantic);
+    (void)json_push_kv_int(&row, "new_units", (int64_t)fr->new_units);
+    (void)json_push_kv_int(&row, "points", (int64_t)fr->points);
+    (void)json_push_back(files, &row);
+    json_free(&row);
+}
+
+static void zr_score_push_files(struct zcl_command_reply *reply,
+                                const struct vcs_score_release *score)
+{
     struct json_value files;
     json_init(&files);
     json_set_array(&files);
-    for (size_t i = 0; i < score.file_report_count; i++) {
-        const struct vcs_score_file_report *fr = &score.files[i];
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "path", fr->path);
-        (void)json_push_kv_str(&row, "kind",
-                               vcs_score_file_kind_string(fr->kind));
-        if (fr->kind == VCS_SCORE_FILE_EXCLUDED)
-            (void)json_push_kv_str(
-                &row, "reason",
-                vcs_score_exclude_reason_string(fr->reason));
-        (void)json_push_kv_int(&row, "semantic_lines",
-                               (int64_t)fr->lines.semantic);
-        (void)json_push_kv_int(&row, "new_units",
-                               (int64_t)fr->new_units);
-        (void)json_push_kv_int(&row, "points", (int64_t)fr->points);
-        (void)json_push_back(&files, &row);
-        json_free(&row);
-    }
+    for (size_t i = 0; i < score->file_report_count; i++)
+        zr_score_push_file_row(&files, &score->files[i]);
     (void)json_push_kv(&reply->data, "files", &files);
     json_free(&files);
+}
+
+static void zr_score_push_file_summary(struct zcl_command_reply *reply,
+                                       const struct vcs_score_release *score)
+{
     (void)json_push_kv_int(&reply->data, "files_scored",
-                           (int64_t)score.files_scored);
+                           (int64_t)score->files_scored);
     (void)json_push_kv_int(&reply->data, "files_excluded",
-                           (int64_t)score.files_excluded);
+                           (int64_t)score->files_excluded);
     (void)json_push_kv_bool(&reply->data, "files_truncated",
-                            score.file_reports_truncated);
+                            score->file_reports_truncated);
     (void)json_push_kv_str(
         &reply->data, "determinism_note",
         "same persisted bytes -> same score: no wall-clock, no randomness; "
@@ -594,6 +599,71 @@ void zcl_native_handle_zcode_reward_score(
         "the reward-history ledger, and SIMULATED settlement are slice 8 — "
         "zcode reward queue/plan/commit/receipt (placeholder token id "
         "only; the real ZSLP transfer is slice 14)");
+}
+
+void zcl_native_handle_zcode_reward_score(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    struct zr_target t;
+    if (!zr_target_load(request, reply, &t, "zcode.reward.score"))
+        return;
+
+    struct vcs_score_input_file *inputs = NULL;
+    uint8_t **contents = NULL;
+    if (!zr_score_alloc_inputs(&t, &inputs, &contents)) {
+        zr_target_free(&t);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
+                               "execute", false, false,
+                               "score input buffers", t.root_hex);
+        return;
+    }
+    if (!zr_score_read_inputs(&t, inputs, contents)) {
+        zr_score_free_inputs(&t, inputs, contents);
+        zr_target_free(&t);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "CHUNK_READ",
+                               "execute", false, false,
+                               "a committed chunk is missing or does not "
+                               "verify against the manifest", t.root_hex);
+        return;
+    }
+
+    struct vcs_score_set lineage;
+    vcs_score_set_init(&lineage);
+    uint32_t ancestors = 0;
+    bool lineage_complete = true;
+    bool ok = zr_lineage_absorb(&t, &t.release, &lineage, &ancestors,
+                                &lineage_complete);
+    if (ok)
+        vcs_score_set_finalize(&lineage);
+    struct vcs_score_release score;
+    if (ok)
+        ok = vcs_score_release_compute(inputs, t.manifest.count, &lineage,
+                                       t.release.has_parent, &score);
+    zr_score_free_inputs(&t, inputs, contents);
+    if (!ok) {
+        vcs_score_set_free(&lineage);
+        zr_target_free(&t);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
+                               "execute", false, false,
+                               "score computation", t.root_hex);
+        return;
+    }
+
+    zr_score_push_identity(reply, &t, &score);
+    zr_score_push_lineage(reply, &lineage, ancestors, lineage_complete);
+    zr_score_push_lines(reply, &score);
+    zr_score_push_units(reply, &score);
+    zr_score_push_points(reply, &score);
+    zr_score_push_caps(reply);
+    zr_score_push_table(reply);
+    zr_score_push_files(reply, &score);
+    zr_score_push_file_summary(reply, &score);
     vcs_score_set_free(&lineage);
     zr_target_free(&t);
 }
