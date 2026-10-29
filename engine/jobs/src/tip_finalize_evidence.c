@@ -19,6 +19,53 @@
 
 #define TF_EVIDENCE_BLOCKER_ID "tip_finalize.validation_evidence"
 
+static const void *tip_finalize_col_blob(sqlite3_stmt *st, int col)
+{
+    return sqlite3_column_type(st, col) == SQLITE_BLOB
+        ? sqlite3_column_blob(st, col) : NULL;
+}
+
+static bool tip_finalize_col_ok_flag(sqlite3_stmt *st, int col)
+{
+    return sqlite3_column_type(st, col) == SQLITE_INTEGER &&
+           sqlite3_column_int(st, col) == 1;
+}
+
+static bool tip_finalize_status_verified(sqlite3_stmt *st, int col)
+{
+    const void *status = sqlite3_column_type(st, col) == SQLITE_TEXT
+        ? sqlite3_column_text(st, col) : NULL;
+    return status && mint_validation_evidence_parse(
+        status, (size_t)sqlite3_column_bytes(st, col)) ==
+        MINT_VALIDATION_EVIDENCE_VERIFIED;
+}
+
+static bool tip_finalize_hashes_match(const struct uint256 *block_hash,
+                                      const void *admit,
+                                      const void *validated,
+                                      const void *delta)
+{
+    return memcmp(admit, block_hash->data, 32) == 0 &&
+           memcmp(validated, block_hash->data, 32) == 0 &&
+           memcmp(delta, block_hash->data, 32) == 0;
+}
+
+static bool tip_finalize_chain_utxo_row_exact(
+    sqlite3_stmt *st, const struct uint256 *block_hash)
+{
+    const void *admit = tip_finalize_col_blob(st, 0);
+    const void *validated = tip_finalize_col_blob(st, 2);
+    const void *delta = tip_finalize_col_blob(st, 5);
+    bool verified = tip_finalize_status_verified(st, 4);
+    return block_hash && admit && validated && delta &&
+        sqlite3_column_bytes(st, 0) == 32 &&
+        tip_finalize_col_ok_flag(st, 1) &&
+        sqlite3_column_bytes(st, 2) == 32 &&
+        tip_finalize_col_ok_flag(st, 3) && verified &&
+        sqlite3_column_bytes(st, 5) == 32 &&
+        tip_finalize_hashes_match(block_hash, admit, validated, delta);
+}
+
 static int tip_finalize_chain_utxo_evidence_at(
     sqlite3 *db, int height, const struct uint256 *block_hash)
 {
@@ -37,28 +84,7 @@ static int tip_finalize_chain_utxo_evidence_at(
     int rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
     int exact = 0;
     if (rc == SQLITE_ROW) {
-        const void *admit = sqlite3_column_type(st, 0) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 0) : NULL;
-        const void *validated = sqlite3_column_type(st, 2) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 2) : NULL;
-        const void *status = sqlite3_column_type(st, 4) == SQLITE_TEXT
-            ? sqlite3_column_text(st, 4) : NULL;
-        const void *delta = sqlite3_column_type(st, 5) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 5) : NULL;
-        bool verified = status && mint_validation_evidence_parse(
-            status, (size_t)sqlite3_column_bytes(st, 4)) ==
-            MINT_VALIDATION_EVIDENCE_VERIFIED;
-        exact = block_hash && admit && validated && delta &&
-            sqlite3_column_bytes(st, 0) == 32 &&
-            sqlite3_column_type(st, 1) == SQLITE_INTEGER &&
-            sqlite3_column_int(st, 1) == 1 &&
-            sqlite3_column_bytes(st, 2) == 32 &&
-            sqlite3_column_type(st, 3) == SQLITE_INTEGER &&
-            sqlite3_column_int(st, 3) == 1 && verified &&
-            sqlite3_column_bytes(st, 5) == 32 &&
-            memcmp(admit, block_hash->data, 32) == 0 &&
-            memcmp(validated, block_hash->data, 32) == 0 &&
-            memcmp(delta, block_hash->data, 32) == 0;
+        exact = tip_finalize_chain_utxo_row_exact(st, block_hash);
         rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
         if (rc != SQLITE_DONE)
             exact = -1;
@@ -107,6 +133,23 @@ int tip_finalize_script_evidence_at(sqlite3 *db, int height,
            row.has_block_hash && uint256_eq(&row.block_hash, block_hash);
 }
 
+static bool tip_finalize_anchor_row_exact(const struct finalized_tip_row *row,
+                                          const struct uint256 *block_hash)
+{
+    bool row_hash_match = row->has_tip_hash &&
+                          uint256_eq(&row->tip_hash, block_hash);
+    return row->found && row->ok && row->is_anchor && row->has_tip_hash &&
+           row_hash_match;
+}
+
+static bool tip_finalize_trusted_hash_match(bool trusted_found,
+                                            const uint8_t hash_blob[32],
+                                            const struct uint256 *block_hash)
+{
+    return trusted_found &&
+           memcmp(hash_blob, block_hash->data, 32) == 0;
+}
+
 int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
                                    const struct uint256 *block_hash)
 {
@@ -115,16 +158,13 @@ int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
     struct finalized_tip_row row;
     if (!finalized_tip_row_at(db, height, &row))
         LOG_ERR("tip_finalize", "trusted anchor row read failed h=%d", height);
-    bool row_hash_match = row.has_tip_hash &&
-                          uint256_eq(&row.tip_hash, block_hash);
     /* This predicate is intentionally attempted for every successor before
      * the full-validation path.  A missing/non-anchor row is therefore the
      * normal case, not an anomaly: logging it once per distinct height turns
      * a fast fold into an O(delta) warning storm.  Keep diagnostics for the
      * only surprising case below — a row that claims to be the anchor but
      * disagrees with the trusted-base metadata. */
-    if (!row.found || !row.ok || !row.is_anchor || !row.has_tip_hash ||
-        !row_hash_match)
+    if (!tip_finalize_anchor_row_exact(&row, block_hash))
         return 0;
     uint8_t hash_blob[32] = {0};
     int32_t trusted_height = -1;
@@ -134,9 +174,8 @@ int tip_finalize_trusted_anchor_at(sqlite3 *db, int height,
         LOG_ERR("tip_finalize", "trusted base metadata read failed h=%d",
                 height);
     bool height_match = trusted_found && trusted_height == height;
-    bool hash_match = trusted_found &&
-                      memcmp(hash_blob, block_hash->data,
-                             sizeof(hash_blob)) == 0;
+    bool hash_match = tip_finalize_trusted_hash_match(
+        trusted_found, hash_blob, block_hash);
     if (!height_match || !hash_match) {
         static struct log_throttle meta_throttle = LOG_THROTTLE_INIT;
         uint64_t repeats = 0;
