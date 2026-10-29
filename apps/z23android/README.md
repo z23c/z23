@@ -104,9 +104,11 @@ They come from `unsloth/Qwen3.5-4B-GGUF` revision
 revision `9045ad9c16021af1f08a4862a9a13d56177eec24` and
 `mradermacher/Qwen3-TTS-12Hz-0.6B-Base-GGUF` revision
 `0762b31e9cd99274d49dca4e895bd81863134f08`. Review each model card and
-license before downloading. The 0.6B speech model synthesizes at 0.77 times
-real time on the measured laptop against 0.96 for the 1.7B model, which leaves
-headroom for gapless streamed answers.
+license before downloading. With the laptop GPU clocked up, the 0.6B speech
+model synthesizes at 0.77 times real time against 0.96 for the 1.7B model,
+which leaves headroom for gapless streamed answers. At the GPU's lowest clock
+it is more than twice as slow as playback; see the power level under
+[Measured latency](#measured-latency).
 
 ```text
 00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4  Qwen3.5-4B-Q4_K_M.gguf
@@ -202,6 +204,27 @@ In one live conversation the app answered a question, heard a follow-up spoken
 1.0 s after the first answer ended and answered it, then ended after 6 seconds
 of silence. The two answers played 18.1 s and 19.3 s with one gap each, of
 1.46 s and 0.38 s.
+
+Those gaps came from chunk lengths: each chunk is synthesized while the audio
+before it plays, and a second chunk could hold up to 160 bytes after a first
+chunk of at most 32. In the 1.46 s case the second chunk took 4.49 s to
+synthesize. Each later chunk is now at most 32 bytes plus a quarter of the text
+already spoken, which keeps synthesis ahead of playback up to 0.8 of real time
+when the first chunk is full, and a forced split after the first chunk ends at
+a word rather than at a short clause. Over 84 recorded answers this gives 5.2
+chunks per answer instead of 3.7, with 2.0 chunk boundaries inside a clause
+instead of 0.6. Ten recorded answers were replayed through the speech server
+with both rules interleaved; over the five synthesized at normal speed under
+both, gaps fell from 5.2 s to 1.8 s. In six live answers of 13.4-26.8 s with
+the new rule, four had one gap each of 0.24-1.28 s; the GPU clock was not
+recorded. Two later answers of 10.5 s and 11.4 s, synthesized with the GPU at
+1.4-2.4 GHz, played without a gap.
+
+Synthesis speed depends on the integrated GPU clock. Under the `auto` power
+level, seven of eight identical requests ran with the GPU at its lowest clock,
+800 MHz, and took 2.2-2.3 times real time; the eighth reached 1.8-2.7 GHz and
+took 0.66. Half of the replayed answers ran at 2.2-2.5 times real time and left
+gaps of 10-28 s under every rule.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That

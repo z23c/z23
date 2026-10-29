@@ -80,9 +80,10 @@ static void sentence_cases(const struct zapp_assistant *a)
         reset_log();
         struct respond *r = new_respond(a, true);
         assert(feed(r, fixture, pieces[p]) && r->done && respond_finish(r));
-        assert(emitted_count == 2);
+        assert(emitted_count == 3);
         expect_line(0, "text", "Hello there, my friend.");
-        expect_line(1, "text", "The fleet is fine. Everything looks good today.");
+        expect_line(1, "text", "The fleet is fine.");
+        expect_line(2, "text", "Everything looks good today.");
         assert(!strcmp(r->text, "Hello there, my friend. The fleet is fine. Everything looks good today."));
         free_respond(r);
     }
@@ -103,8 +104,16 @@ static void think_cases(const struct zapp_assistant *a)
     assert(!strcmp(r->text, "<"));
     free_respond(r);
 }
+static size_t words_in(const char *line)
+{
+    size_t n = 0;
+    for (const char *p = strstr(line, "word"); p; p = strstr(p + 4, "word")) n++;
+    return n;
+}
+/* Unpunctuated text splits at words, each chunk within the cap the text already spoken allows. */
 static void split_cases(const struct zapp_assistant *a)
 {
+    static const size_t counts[] = {6, 8, 10, 12, 15, 9};
     char words[400] = "", delta[512], sse[1024];
     for (int i = 0; i < 60; i++) strcat(words, "word ");
     snprintf(delta, sizeof(delta), "%s", words);
@@ -112,19 +121,51 @@ static void split_cases(const struct zapp_assistant *a)
     reset_log();
     struct respond *r = new_respond(a, true);
     assert(feed(r, sse, 1000) && respond_finish(r));
-    assert(emitted_count == 3 && strlen(r->text) == strlen(words) - 1);
+    assert(emitted_count == 6 && strlen(r->text) == strlen(words) - 1);
     assert(!strncmp(emitted[0], "{\"event\":\"text\",\"data\":\"word word", 33));
-    const char *six = "\"data\":\"word word word word word word\"";
-    assert(strstr(emitted[0], six) && !strstr(emitted[1], six));
+    for (size_t i = 0; i < 6; i++) assert(words_in(emitted[i]) == counts[i]);
     free_respond(r);
     const char *sentence = "Hello there, my friend. The fleet is fine. More";
-    assert(ready_len("Short one.", 10, MAX_CHUNK) == 0 && ready_len(sentence, strlen(sentence), MAX_CHUNK) == 42);
-    assert(ready_len("aaaaaaaaaaaaaaaaaaaaaaa. b", 26, MAX_CHUNK) == 24 && ready_len("aaaaaaaaaaaaaaaaaaaaaa. b", 25, MAX_CHUNK) == 0);
+    assert(ready_len("Short one.", 10, MAX_CHUNK, false) == 0 && ready_len(sentence, strlen(sentence), MAX_CHUNK, false) == 42);
+    assert(ready_len("aaaaaaaaaaaaaaaaaaaaaaa. b", 26, MAX_CHUNK, false) == 24 && ready_len("aaaaaaaaaaaaaaaaaaaaaa. b", 25, MAX_CHUNK, false) == 0);
     char run[200]; memset(run, 'a', sizeof(run)); run[199] = 0; run[100] = ' ';
-    assert(ready_len(run, 199, MAX_CHUNK) == 100 && ready_len(run, 100, MAX_CHUNK) == 0);
-    assert(ready_len(sentence, strlen(sentence), FIRST_CHUNK) == 23 && ready_len(run, 199, FIRST_CHUNK) == 32);
+    assert(ready_len(run, 199, MAX_CHUNK, false) == 100 && ready_len(run, 100, MAX_CHUNK, false) == 0);
+    assert(ready_len(sentence, strlen(sentence), FIRST_CHUNK, true) == 23 && ready_len(run, 199, FIRST_CHUNK, true) == 32);
     const char *counting = "one two three four five six seven eight nine ten eleven";
-    assert(ready_len(counting, strlen(counting), FIRST_CHUNK) == 27 && ready_len(counting, 32, FIRST_CHUNK) == 0);
+    assert(ready_len(counting, strlen(counting), FIRST_CHUNK, true) == 27 && ready_len(counting, 32, FIRST_CHUNK, true) == 0);
+}
+static void cap_cases(const struct zapp_assistant *a)
+{
+    struct respond *r = new_respond(a, true);
+    assert(chunk_cap(r) == FIRST_CHUNK);
+    r->text_len = 4; assert(chunk_cap(r) == 33);
+    r->text_len = 64; assert(chunk_cap(r) == 48);
+    r->text_len = 511; assert(chunk_cap(r) == 159);
+    r->text_len = 512; assert(chunk_cap(r) == MAX_CHUNK);
+    r->text_len = 600; assert(chunk_cap(r) == MAX_CHUNK);
+    free_respond(r);
+}
+/* A short first sentence speaks at once; later forced splits end at words, not short clauses. */
+static void clause_cases(const struct zapp_assistant *a)
+{
+    static const char answer[] =
+        "Yes. The node is synchronized and healthy, and the wallet balance is unchanged since this morning.";
+    char sse[512];
+    snprintf(sse, sizeof(sse), "data: {\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\ndata: [DONE]\n", answer);
+    reset_log();
+    struct respond *r = new_respond(a, true);
+    assert(feed(r, sse, 7) && respond_finish(r) && emitted_count == 4 && !strcmp(r->text, answer));
+    expect_line(0, "text", "Yes.");
+    expect_line(1, "text", "The node is synchronized and");
+    expect_line(2, "text", "healthy, and the wallet balance is");
+    expect_line(3, "text", "unchanged since this morning.");
+    free_respond(r);
+    const char *clause = "Yes, the node is synchronized and healthy";
+    assert(ready_len(clause, strlen(clause), 33, true) == 4 && ready_len(clause, strlen(clause), 33, false) == 33);
+    char run[48] = {0};
+    memset(run, 'a', sizeof(run) - 1);
+    run[32] = ',';
+    assert(ready_len(run, strlen(run), 33, false) == 33 && ready_len(run, strlen(run), 33, true) == 33);
 }
 static void rejected_cases(const struct zapp_assistant *a)
 {
@@ -274,9 +315,17 @@ static size_t audio_between(size_t from, size_t to)
     free(samples);
     return total;
 }
+static void expect_tts(const char *body, const char *input)
+{
+    char want[128];
+    snprintf(want, sizeof(want), "\"input\":\"%s\"", input);
+    assert(strstr(body, "\"response_format\":\"pcm\"") && strstr(body, "\"stream\":true") &&
+           strstr(body, "\"seed\":7") && strstr(body, "\"speaker_ref_b64\":\"c3BlYWtlcg==\"") &&
+           strstr(body, "\"lang\":\"en\"") && strstr(body, want));
+}
 static void respond_streamed(void)
 {
-    struct mock chat = {.chat = true, .connections = 1}, tts = {.connections = 2};
+    struct mock chat = {.chat = true, .connections = 1}, tts = {.connections = 3};
     pthread_t chat_thread, tts_thread;
     start_mock(&chat, &chat_thread); start_mock(&tts, &tts_thread);
     struct zapp_assistant a = {.chat_port = chat.port, .tts_port = tts.port, .speaker_b64 = "c3BlYWtlcg=="};
@@ -287,16 +336,15 @@ static void respond_streamed(void)
     assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
     assert(strstr(chat.body[0], "\"stream\":true") && strstr(chat.body[0], "\"max_tokens\":320") &&
            strstr(chat.body[0], "How is the fleet?") && strstr(chat.body[0], "ctx"));
-    for (unsigned i = 0; i < 2; i++)
-        assert(strstr(tts.body[i], "\"response_format\":\"pcm\"") && strstr(tts.body[i], "\"stream\":true") &&
-               strstr(tts.body[i], "\"seed\":7") && strstr(tts.body[i], "\"speaker_ref_b64\":\"c3BlYWtlcg==\"") &&
-               strstr(tts.body[i], "\"lang\":\"en\""));
-    assert(strstr(tts.body[0], "\"input\":\"Hello there, my friend.\"") &&
-           strstr(tts.body[1], "\"input\":\"The fleet is fine. Everything looks good today.\""));
-    size_t second = 0;
-    for (size_t i = 1; i < emitted_count; i++) if (strstr(emitted[i], "\"event\":\"text\"")) second = i;
-    assert(emitted_count >= 4 && strstr(emitted[0], "\"event\":\"text\"") && second > 1);
-    assert(audio_between(1, second) == 2000 && audio_between(second + 1, emitted_count) == 2000);
+    expect_tts(tts.body[0], "Hello there, my friend.");
+    expect_tts(tts.body[1], "The fleet is fine.");
+    expect_tts(tts.body[2], "Everything looks good today.");
+    size_t text[4] = {0}, texts = 0;
+    for (size_t i = 0; i < emitted_count; i++)
+        if (strstr(emitted[i], "\"event\":\"text\"")) { assert(texts < 3); text[texts++] = i; }
+    assert(texts == 3 && text[0] == 0);
+    text[3] = emitted_count;
+    for (size_t t = 0; t < 3; t++) assert(text[t + 1] > text[t] + 1 && audio_between(text[t] + 1, text[t + 1]) == 2000);
     close(chat.listener); close(tts.listener);
 }
 /* A failed synthesis silences the answer; its text still streams and completes. */
@@ -310,7 +358,10 @@ static void respond_muted(void)
     reset_log();
     assert(zapp_assistant_respond(&a, "How is the fleet?", NULL, NULL, -1, answer, sizeof(answer)));
     pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
-    assert(emitted_count == 2 && strstr(emitted[0], "\"event\":\"text\"") && strstr(emitted[1], "Everything"));
+    assert(emitted_count == 3);
+    expect_line(0, "text", "Hello there, my friend.");
+    expect_line(1, "text", "The fleet is fine.");
+    expect_line(2, "text", "Everything looks good today.");
     close(chat2.listener); close(tts2.listener);
     reset_log();
     a.chat_port = 1;
@@ -362,7 +413,8 @@ static void message_cases(void)
 int main(void)
 {
     struct zapp_assistant a = {.speaker_b64 = NULL};
-    sentence_cases(&a); think_cases(&a); split_cases(&a); rejected_cases(&a);
+    sentence_cases(&a); think_cases(&a); split_cases(&a); cap_cases(&a); clause_cases(&a);
+    rejected_cases(&a);
     pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); message_cases();
     reset_log();
     puts("assistant tests passed");
