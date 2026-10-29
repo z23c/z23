@@ -53,15 +53,10 @@ static int https_ascii_casecmp_n(const char *left, const char *right, size_t n)
 #define ACME_CHALLENGE_ROOT "/var/www/html/.well-known/acme-challenge"
 #define ACME_CHALLENGE_URL_MAX 2047
 
-static bool acme_challenge_filepath_under_root(const char *root,
-                                               const char *path,
-                                               char *out,
-                                               size_t out_len)
+#if !defined(_WIN32)
+static bool acme_challenge_request_ok(const char *root, const char *path,
+                                      char *out, size_t out_len)
 {
-#if defined(_WIN32)
-    (void)root; (void)path; (void)out; (void)out_len;
-    return false;
-#else
     if (!root || !path || !out || out_len == 0)
         return false;
     if (!path_check_url_arg(path, ACME_CHALLENGE_URL_MAX))
@@ -71,7 +66,23 @@ static bool acme_challenge_filepath_under_root(const char *root,
     if (strncmp(path, ACME_CHALLENGE_URL_PREFIX, prefix_len) != 0 ||
         path[prefix_len] == '\0')
         return false;
+    return true;
+}
+#endif
 
+static bool acme_challenge_filepath_under_root(const char *root,
+                                               const char *path,
+                                               char *out,
+                                               size_t out_len)
+{
+#if defined(_WIN32)
+    (void)root; (void)path; (void)out; (void)out_len;
+    return false;
+#else
+    if (!acme_challenge_request_ok(root, path, out, out_len))
+        return false;
+
+    const size_t prefix_len = sizeof(ACME_CHALLENGE_URL_PREFIX) - 1;
     char root_real[PATH_MAX];
     if (!realpath(root, root_real))
         return false;
@@ -112,6 +123,54 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
 }
 #endif
 
+/* Returns true when the header block ended cleanly; false means the caller
+ * must close the connection and drop it (cap hit, oversized Host, or EOF). */
+static bool http_redirect_drain_headers(struct https_frontdoor_fd_reader *reader,
+                                        char *line, size_t line_len,
+                                        char *req_host, size_t req_host_len)
+{
+    /* Drain headers, capturing the request Host for a generic redirect.
+     * Cap the count to bound an endless-header (slowloris) connection. */
+    int hdr_count = 0;
+    bool headers_complete = false;
+    while (plain_read_line(reader, line, line_len)) {
+        if (line[0] == '\0') {
+            headers_complete = true;
+            break;
+        }
+        if (++hdr_count > HTTP_MAX_REQUEST_HEADERS)
+            return false;
+        if (req_host[0] == '\0' &&
+            https_ascii_casecmp_n(line, "Host:", 5) == 0) {
+            const char *v = line + 5;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t host_len = strlen(v);
+            if (host_len >= req_host_len)
+                return false;
+            memcpy(req_host, v, host_len + 1u);
+        }
+    }
+    return headers_complete;
+}
+
+static int http_redirect_format_response(char *resp, size_t resp_size,
+                                         const char *redir_host,
+                                         const char *path)
+{
+    if (redir_host)
+        return snprintf(resp, resp_size,
+            "HTTP/1.1 301 Moved Permanently\r\n"
+            "Location: https://%s%s\r\n"
+            "Connection: close\r\n\r\n",
+            redir_host, path);
+    /* No host known: relative redirect keeps the browser's authority. */
+    return snprintf(resp, resp_size,
+        "HTTP/1.1 301 Moved Permanently\r\n"
+        "Location: %s\r\n"
+        "Connection: close\r\n\r\n",
+        path);
+}
+
 void https_server_handle_http_client_fd(platform_socket_t fd,
                                         int64_t deadline_ms)
 {
@@ -128,32 +187,9 @@ void https_server_handle_http_client_fd(platform_socket_t fd,
     char method[16] = "", path[2048] = "";
     sscanf(line, "%15s %2047s", method, path);
 
-    /* Drain headers, capturing the request Host for a generic redirect.
-     * Cap the count to bound an endless-header (slowloris) connection. */
     char req_host[256] = "";
-    int hdr_count = 0;
-    bool headers_complete = false;
-    while (plain_read_line(&reader, line, sizeof(line))) {
-        if (line[0] == '\0') {
-            headers_complete = true;
-            break;
-        }
-        if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) {
-            platform_socket_close(fd); return;
-        }
-        if (req_host[0] == '\0' &&
-            https_ascii_casecmp_n(line, "Host:", 5) == 0) {
-            const char *v = line + 5;
-            while (*v == ' ' || *v == '\t') v++;
-            size_t host_len = strlen(v);
-            if (host_len >= sizeof(req_host)) {
-                platform_socket_close(fd);
-                return;
-            }
-            memcpy(req_host, v, host_len + 1u);
-        }
-    }
-    if (!headers_complete) {
+    if (!http_redirect_drain_headers(&reader, line, sizeof(line),
+                                     req_host, sizeof(req_host))) {
         platform_socket_close(fd);
         return;
     }
@@ -199,20 +235,7 @@ void https_server_handle_http_client_fd(platform_socket_t fd,
     const char *redir_host = cfg_host[0] ? cfg_host :
                              (req_host[0] ? req_host : NULL);
     char resp[4096];
-    int n;
-    if (redir_host)
-        n = snprintf(resp, sizeof(resp),
-            "HTTP/1.1 301 Moved Permanently\r\n"
-            "Location: https://%s%s\r\n"
-            "Connection: close\r\n\r\n",
-            redir_host, path);
-    else
-        /* No host known: relative redirect keeps the browser's authority. */
-        n = snprintf(resp, sizeof(resp),
-            "HTTP/1.1 301 Moved Permanently\r\n"
-            "Location: %s\r\n"
-            "Connection: close\r\n\r\n",
-            path);
+    int n = http_redirect_format_response(resp, sizeof(resp), redir_host, path);
     /* Best-effort and deliberately unlogged: this is the unauthenticated
      * port-80 redirect, a peer hanging up mid-response is routine, and one log
      * line per failed client write would hand an anonymous caller control of

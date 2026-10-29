@@ -69,6 +69,34 @@ static int b64url_value(char c)
     return -1;
 }
 
+enum {
+    B64URL_CHUNK_OK = 0,
+    B64URL_CHUNK_BAD_BYTE = 1,
+    B64URL_CHUNK_BAD_PAD = 2
+};
+
+/* Decode one 2..4 character group into dst at *o; returns a B64URL_CHUNK_*
+ * status and writes nothing unless the whole group is valid. */
+static int b64url_decode_chunk(const char *text, size_t chunk,
+                               unsigned char *dst, size_t *o)
+{
+    int v[4] = {0, 0, 0, 0};
+    for (size_t k = 0; k < chunk; k++) {
+        v[k] = b64url_value(text[k]);
+        if (v[k] < 0)
+            return B64URL_CHUNK_BAD_BYTE;
+    }
+    if ((chunk == 2 && (v[1] & 0x0f) != 0) ||
+        (chunk == 3 && (v[2] & 0x03) != 0))
+        return B64URL_CHUNK_BAD_PAD;
+    const uint32_t acc = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) |
+                         ((uint32_t)v[2] << 6) | (uint32_t)v[3];
+    if (chunk >= 2) dst[(*o)++] = (unsigned char)((acc >> 16) & 0xff);
+    if (chunk >= 3) dst[(*o)++] = (unsigned char)((acc >> 8) & 0xff);
+    if (chunk == 4) dst[(*o)++] = (unsigned char)(acc & 0xff);
+    return B64URL_CHUNK_OK;
+}
+
 bool acme_b64url_decode(const char *text, void *out, size_t out_len,
                         size_t *decoded)
 {
@@ -94,20 +122,11 @@ bool acme_b64url_decode(const char *text, void *out, size_t out_len,
     size_t i = 0;
     while (i < n) {
         const size_t chunk = (n - i >= 4) ? 4 : n - i;
-        int v[4] = {0, 0, 0, 0};
-        for (size_t k = 0; k < chunk; k++) {
-            v[k] = b64url_value(text[i + k]);
-            if (v[k] < 0)
-                LOG_FAIL("acme", "refusing a byte outside the base64url alphabet");
-        }
-        if ((chunk == 2 && (v[1] & 0x0f) != 0) ||
-            (chunk == 3 && (v[2] & 0x03) != 0))
+        const int st = b64url_decode_chunk(text + i, chunk, dst, &o);
+        if (st == B64URL_CHUNK_BAD_BYTE)
+            LOG_FAIL("acme", "refusing a byte outside the base64url alphabet");
+        if (st == B64URL_CHUNK_BAD_PAD)
             LOG_FAIL("acme", "refusing non-canonical base64url pad bits");
-        const uint32_t acc = ((uint32_t)v[0] << 18) | ((uint32_t)v[1] << 12) |
-                             ((uint32_t)v[2] << 6) | (uint32_t)v[3];
-        if (chunk >= 2) dst[o++] = (unsigned char)((acc >> 16) & 0xff);
-        if (chunk >= 3) dst[o++] = (unsigned char)((acc >> 8) & 0xff);
-        if (chunk == 4) dst[o++] = (unsigned char)(acc & 0xff);
         i += chunk;
     }
     *decoded = o;

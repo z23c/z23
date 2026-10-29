@@ -112,6 +112,30 @@ static bool take_field(const char *line, const char *key, char *out,
     return true;
 }
 
+/* Split the staged buffer into lines and take the domain and keyauth fields.
+ * True only when both were found and both are plain. */
+static bool acme_arm_parse_lines(char *buf, char *domain, size_t domain_len,
+                                 char *key_authz, size_t key_authz_len)
+{
+    char *save = buf;
+    bool have_domain = false;
+    bool have_authz = false;
+    while (*save) {
+        char *nl = strchr(save, '\n');
+        if (nl)
+            *nl = '\0';
+        if (take_field(save, "domain", domain, domain_len))
+            have_domain = true;
+        else if (take_field(save, "keyauth", key_authz, key_authz_len))
+            have_authz = true;
+        if (!nl)
+            break;
+        save = nl + 1;
+    }
+    return have_domain && have_authz &&
+           field_is_plain(domain) && field_is_plain(key_authz);
+}
+
 bool acme_arm_file_read(const char *path, char *domain, size_t domain_len,
                         char *key_authz, size_t key_authz_len)
 {
@@ -134,23 +158,8 @@ bool acme_arm_file_read(const char *path, char *domain, size_t domain_len,
                  ACME_ARM_MAX_FILE);
     buf[got] = '\0';
 
-    char *save = buf;
-    bool have_domain = false;
-    bool have_authz = false;
-    while (*save) {
-        char *nl = strchr(save, '\n');
-        if (nl)
-            *nl = '\0';
-        if (take_field(save, "domain", domain, domain_len))
-            have_domain = true;
-        else if (take_field(save, "keyauth", key_authz, key_authz_len))
-            have_authz = true;
-        if (!nl)
-            break;
-        save = nl + 1;
-    }
-    if (!have_domain || !have_authz ||
-        !field_is_plain(domain) || !field_is_plain(key_authz)) {
+    if (!acme_arm_parse_lines(buf, domain, domain_len, key_authz,
+                              key_authz_len)) {
         domain[0] = '\0';
         key_authz[0] = '\0';
         LOG_FAIL("acme", "challenge handoff at %s is not a usable domain/keyauth pair",

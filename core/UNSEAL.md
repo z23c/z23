@@ -328,3 +328,7 @@ later lane flips it HARD.
 - 2026-10-28T20:13:58Z — REASON: Owner authorized 2026-10-28 narrow Pixel mempool and tip-finalization deadlock repair with independent review and regression tests; validation predicates unchanged
   old ROOT: 732b7c8429b23432a3e9fa340ba6fb9b554a87331eed6d83105cd501c80ffeb1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-29T11:51:34Z — REASON: Owner-authorized 2026-10-19 hardening program, behaviour-preserving: core wave 1 complexity splits of 9 functions in 5 tier-A net files (acme_b64url, acme_selfsigned, acme_arm_file, https_server_redirect, rom_seed_policy); no validity predicate touched; Sonnet writers, Sonnet non-author reviews
+  old ROOT: 21061f6194fbaed2abae7d60072b91ed8f762681c53a8544245399bf8505b80f
+  by: owner unseal ritual (make core-unseal)

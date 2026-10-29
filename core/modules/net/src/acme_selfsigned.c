@@ -36,6 +36,21 @@
 
 /* ── the name ────────────────────────────────────────────────────────── */
 
+static bool ldh_dot_ok(const char *domain, size_t i, size_t label)
+{
+    return !(label == 0 || domain[i - 1] == '-');
+}
+
+static bool ldh_char_ok(const char *domain, size_t len, size_t i, size_t label)
+{
+    const unsigned char c = (unsigned char)domain[i];
+    if (label == 0 && c == '-')
+        return false;
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '-' ||
+           (c == '*' && i == 0 && len > 2 && domain[1] == '.');
+}
+
 bool acme_domain_is_ldh(const char *domain)
 {
     if (!domain || !domain[0])
@@ -46,20 +61,14 @@ bool acme_domain_is_ldh(const char *domain)
     size_t label = 0;
     size_t label_start = 0;
     for (size_t i = 0; i < len; i++) {
-        const unsigned char c = (unsigned char)domain[i];
-        if (c == '.') {
-            if (label == 0 || domain[i - 1] == '-')
+        if (domain[i] == '.') {
+            if (!ldh_dot_ok(domain, i, label))
                 return false;
             label = 0;
             label_start = i + 1u;
             continue;
         }
-        if (label == 0 && c == '-')
-            return false;
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '-' ||
-                        (c == '*' && i == 0 && len > 2 && domain[1] == '.');
-        if (!ok)
+        if (!ldh_char_ok(domain, len, i, label))
             return false;
         if (++label > 63)
             return false;
@@ -129,6 +138,29 @@ static bool set_subject(X509 *cert, const char *domain, const char *org)
     return true;
 }
 
+static bool selfsigned_fill(const struct acme_selfsigned_spec *spec,
+                            EVP_PKEY *key, X509 *cert, BIGNUM *serial)
+{
+    if (BN_rand(serial, 128, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY) != 1)
+        return false;
+    if (!BN_to_ASN1_INTEGER(serial, X509_get_serialNumber(cert)))
+        return false;
+    if (X509_set_version(cert, 2 /* v3 */) != 1)
+        return false;
+    if (!X509_gmtime_adj(X509_getm_notBefore(cert), -spec->backdate_seconds) ||
+        !X509_gmtime_adj(X509_getm_notAfter(cert), spec->lifetime_seconds))
+        return false;
+    if (X509_set_pubkey(cert, key) != 1)
+        return false;
+    if (!set_subject(cert, spec->domain, spec->organization))
+        return false;
+    if (!set_subject_alt_name(cert, spec->domain))
+        return false;
+    if (spec->extra && X509_add_ext(cert, spec->extra, -1) != 1)
+        return false;
+    return X509_sign(cert, key, EVP_sha256()) != 0;
+}
+
 bool acme_selfsigned_build(const struct acme_selfsigned_spec *spec,
                            X509 **out_cert, EVP_PKEY **out_key)
 {
@@ -151,26 +183,7 @@ bool acme_selfsigned_build(const struct acme_selfsigned_spec *spec,
     bool ok = false;
     if (!key || !cert || !serial)
         goto done;
-    if (BN_rand(serial, 128, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY) != 1)
-        goto done;
-    if (!BN_to_ASN1_INTEGER(serial, X509_get_serialNumber(cert)))
-        goto done;
-    if (X509_set_version(cert, 2 /* v3 */) != 1)
-        goto done;
-    if (!X509_gmtime_adj(X509_getm_notBefore(cert), -spec->backdate_seconds) ||
-        !X509_gmtime_adj(X509_getm_notAfter(cert), spec->lifetime_seconds))
-        goto done;
-    if (X509_set_pubkey(cert, key) != 1)
-        goto done;
-    if (!set_subject(cert, spec->domain, spec->organization))
-        goto done;
-    if (!set_subject_alt_name(cert, spec->domain))
-        goto done;
-    if (spec->extra && X509_add_ext(cert, spec->extra, -1) != 1)
-        goto done;
-    if (X509_sign(cert, key, EVP_sha256()) == 0)
-        goto done;
-    ok = true;
+    ok = selfsigned_fill(spec, key, cert, serial);
 
 done:
     BN_free(serial);

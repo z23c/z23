@@ -60,13 +60,9 @@ static _Atomic uint64_t g_policy_temp_sequence = 0;
 
 /* ── validation (pure) ──────────────────────────────────────────────── */
 
-static bool policy_valid(const struct rom_seed_policy *p, char *err,
-                         size_t errlen)
+static bool policy_rates_valid(const struct rom_seed_policy *p, char *err,
+                               size_t errlen)
 {
-    if (!p) {
-        if (err && errlen) snprintf(err, errlen, "null policy");
-        return false;
-    }
     if (p->global_up_bytes_per_sec < ROM_SEED_POLICY_MIN_GLOBAL_BPS ||
         p->global_up_bytes_per_sec > ROM_SEED_POLICY_MAX_GLOBAL_BPS) {
         if (err && errlen)
@@ -92,6 +88,12 @@ static bool policy_valid(const struct rom_seed_policy *p, char *err,
                     "global_up_bytes_per_sec");
         return false;
     }
+    return true;
+}
+
+static bool policy_limits_valid(const struct rom_seed_policy *p, char *err,
+                                size_t errlen)
+{
     if (p->max_concurrent_uploads < ROM_SEED_POLICY_MIN_CONCURRENCY ||
         p->max_concurrent_uploads > ROM_SEED_POLICY_MAX_CONCURRENCY) {
         if (err && errlen)
@@ -108,6 +110,18 @@ static bool policy_valid(const struct rom_seed_policy *p, char *err,
         return false;
     }
     return true;
+}
+
+static bool policy_valid(const struct rom_seed_policy *p, char *err,
+                         size_t errlen)
+{
+    if (!p) {
+        if (err && errlen) snprintf(err, errlen, "null policy");
+        return false;
+    }
+    if (!policy_rates_valid(p, err, errlen))
+        return false;
+    return policy_limits_valid(p, err, errlen);
 }
 
 /* ── persistence (tmp+rename, mirrors boot_status_publish_locked) ─────── */
@@ -161,9 +175,8 @@ static void apply_locked(const struct rom_seed_policy *p)
                           memory_order_relaxed);
 }
 
-/* Best-effort write; logs and returns on any failure without disturbing the
- * in-memory policy the caller already applied. */
-static void persist_locked(const struct rom_seed_policy *p)
+static size_t serialize_policy(const struct rom_seed_policy *p, char *buf,
+                               size_t bufsize)
 {
     struct json_value root;
     json_init(&root);
@@ -181,9 +194,35 @@ static void persist_locked(const struct rom_seed_policy *p)
     (void)json_push_kv_int(&root, "updated_unix",
                            platform_time_wall_unix());
 
-    char buf[512];
-    size_t n = json_write(&root, buf, sizeof(buf));
+    size_t n = json_write(&root, buf, bufsize);
     json_free(&root);
+    return n;
+}
+
+static bool create_staged_policy(char *tmp_path, size_t tmp_size,
+                                 const char *resolved_path,
+                                 struct platform_private_file *staged)
+{
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add(&g_policy_temp_sequence, 1);
+        int written = snprintf(tmp_path, tmp_size, "%s.tmp.%llu",
+                               resolved_path, (unsigned long long)seq);
+        if (written <= 0 || (size_t)written >= tmp_size)
+            break;
+        created = platform_private_file_create(tmp_path, staged);
+        if (!created && errno != EEXIST)
+            break;
+    }
+    return created;
+}
+
+/* Best-effort write; logs and returns on any failure without disturbing the
+ * in-memory policy the caller already applied. */
+static void persist_locked(const struct rom_seed_policy *p)
+{
+    char buf[512];
+    size_t n = serialize_policy(p, buf, sizeof(buf));
     if (n == 0 || n >= sizeof(buf)) {
         LOG_WARN("rom_seed_policy", "serialize failed");
         return;
@@ -204,17 +243,8 @@ static void persist_locked(const struct rom_seed_policy *p)
 
     struct platform_private_file staged;
     platform_private_file_init(&staged);
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t seq = atomic_fetch_add(&g_policy_temp_sequence, 1);
-        int written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%llu",
-                               resolved_path, (unsigned long long)seq);
-        if (written <= 0 || (size_t)written >= sizeof(tmp_path))
-            break;
-        created = platform_private_file_create(tmp_path, &staged);
-        if (!created && errno != EEXIST)
-            break;
-    }
+    bool created = create_staged_policy(tmp_path, sizeof(tmp_path),
+                                        resolved_path, &staged);
     if (!created) {
         LOG_WARN("rom_seed_policy", "private staging create failed for %s",
                  resolved_path);
@@ -233,6 +263,61 @@ static void persist_locked(const struct rom_seed_policy *p)
     }
 }
 
+static bool snapshot_unchanged(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high &&
+           before->size == after->size &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
+/* Read the whole policy file into raw (NUL-terminated at *r) when it is
+ * non-empty, smaller than rawcap and unchanged across the read. */
+static bool read_policy_file(const char *path, char *raw, size_t rawcap,
+                             int64_t *r)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
+        return false;
+    if (!platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= rawcap) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    *r = platform_positioned_file_read(&file, raw, (size_t)before.size, 0);
+    bool stable = *r == (int64_t)before.size &&
+                  platform_positioned_file_snapshot(&file, &after) &&
+                  snapshot_unchanged(&before, &after);
+    platform_positioned_file_close(&file);
+    if (!stable)
+        return false;
+    raw[*r] = '\0';
+    return true;
+}
+
+static void policy_from_json(const struct json_value *doc,
+                             struct rom_seed_policy *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->enabled = json_get_bool(json_get(doc, "enabled"));
+    p->global_up_bytes_per_sec =
+        (uint64_t)json_get_int(json_get(doc, "global_up_bytes_per_sec"));
+    p->per_peer_up_bytes_per_sec =
+        (uint64_t)json_get_int(json_get(doc, "per_peer_up_bytes_per_sec"));
+    p->max_concurrent_uploads =
+        (uint32_t)json_get_int(json_get(doc, "max_concurrent_uploads"));
+    p->generosity_boost_days =
+        (uint32_t)json_get_int(json_get(doc, "generosity_boost_days"));
+}
+
 /* Fill `out` from the persisted file. Returns false (out untouched) when
  * the file is missing, unreadable, not a JSON object, or fails bounds
  * validation — every case falls back to the compiled defaults, never a
@@ -243,33 +328,10 @@ static bool load_from_disk(struct rom_seed_policy *out)
     if (!policy_path(path, sizeof(path)))
         return false;
 
-    struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open(&file, path))
-        return false;
     char raw[2048];
-    if (!platform_positioned_file_snapshot(&file, &before) ||
-        before.size == 0 || before.size >= sizeof(raw)) {
-        platform_positioned_file_close(&file);
+    int64_t r = 0;
+    if (!read_policy_file(path, raw, sizeof(raw), &r))
         return false;
-    }
-    int64_t r = platform_positioned_file_read(&file, raw,
-                                              (size_t)before.size, 0);
-    bool stable = r == (int64_t)before.size &&
-                  platform_positioned_file_snapshot(&file, &after) &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds;
-    platform_positioned_file_close(&file);
-    if (!stable)
-        return false;
-    raw[r] = '\0';
 
     struct json_value doc;
     if (!json_read(&doc, raw, (size_t)r) || doc.type != JSON_OBJ) {
@@ -280,16 +342,7 @@ static bool load_from_disk(struct rom_seed_policy *out)
     }
 
     struct rom_seed_policy p;
-    memset(&p, 0, sizeof(p));
-    p.enabled = json_get_bool(json_get(&doc, "enabled"));
-    p.global_up_bytes_per_sec =
-        (uint64_t)json_get_int(json_get(&doc, "global_up_bytes_per_sec"));
-    p.per_peer_up_bytes_per_sec =
-        (uint64_t)json_get_int(json_get(&doc, "per_peer_up_bytes_per_sec"));
-    p.max_concurrent_uploads =
-        (uint32_t)json_get_int(json_get(&doc, "max_concurrent_uploads"));
-    p.generosity_boost_days =
-        (uint32_t)json_get_int(json_get(&doc, "generosity_boost_days"));
+    policy_from_json(&doc, &p);
     json_free(&doc);
 
     char err[160];

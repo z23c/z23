@@ -112,10 +112,6 @@ core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_avx512:17
 core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/mining/src/gen.c:try_solve_equihash:16
-core/modules/net/src/acme_arm_file.c:acme_arm_file_read:19
-core/modules/net/src/acme_b64url.c:acme_b64url_decode:20
-core/modules/net/src/acme_selfsigned.c:acme_domain_is_ldh:24
-core/modules/net/src/acme_selfsigned.c:acme_selfsigned_build:21
 core/modules/net/src/addnode_file.c:addnode_file_parse_line:25
 core/modules/net/src/addrman.c:addrman_add:34
 core/modules/net/src/addrman.c:addrman_consistency_check:30
@@ -181,8 +177,6 @@ core/modules/net/src/https_server.c:https_server_start_on_port:19
 core/modules/net/src/https_server.c:sni_certificates_refresh:18
 core/modules/net/src/https_server_install.c:https_server_try_public_install:18
 core/modules/net/src/https_server_install.c:public_install_filepath_under_root:16
-core/modules/net/src/https_server_redirect.c:acme_challenge_filepath_under_root:16
-core/modules/net/src/https_server_redirect.c:https_server_handle_http_client_fd:22
 core/modules/net/src/msg_blocks.c:process_block_msg:55
 core/modules/net/src/msg_blocks.c:process_getdata:17
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17
@@ -257,9 +251,6 @@ core/modules/net/src/rom_fetch.c:rom_fetch_verify_file:21
 core/modules/net/src/rom_seed.c:rom_seed_read_chunk:17
 core/modules/net/src/rom_seed.c:rom_seed_register:30
 core/modules/net/src/rom_seed.c:rom_seed_scan_datadir:19
-core/modules/net/src/rom_seed_policy.c:load_from_disk:19
-core/modules/net/src/rom_seed_policy.c:persist_locked:17
-core/modules/net/src/rom_seed_policy.c:policy_valid:22
 core/modules/net/src/state_offer.c:offer_shape:17
 core/modules/net/src/state_offer.c:state_offer_error_string:17
 core/modules/net/src/tor_config_log.c:tor_log_last_ephemeral_address:17
