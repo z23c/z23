@@ -171,6 +171,78 @@ static uint32_t zdir_candidate_age(const struct zdir_params *params,
 
 /* ── selection ──────────────────────────────────────────────────────── */
 
+/* Eligibility of candidate i for the next slot: not already preferred and
+ * under the per-owner cap. */
+static bool zdir_slot_eligible(const struct zdir_selection *out,
+                               const struct zdir_candidate *candidates,
+                               size_t i, uint32_t owner_cap)
+{
+    /* Already preferred? (preferred_count <= 8, so this stays cheap.) */
+    bool taken = false;
+    uint32_t owner_used = 0;
+    for (uint32_t k = 0; k < out->preferred_count; k++) {
+        size_t p = (size_t)out->preferred[k];
+        if (p == i) { taken = true; break; }
+        if (memcmp(candidates[p].owner_id, candidates[i].owner_id,
+                   32) == 0)
+            owner_used++;
+    }
+    return !(taken || owner_used >= owner_cap);
+}
+
+struct zdir_best {
+    bool have_best;
+    size_t best_idx;
+    uint8_t best_score[32];
+    uint16_t best_weight;
+};
+
+/* Score candidate i and keep it if it beats the current best. Returns false
+ * only when the score derivation fails. */
+static bool zdir_consider(const struct zdir_params *params,
+                          const struct zdir_candidate *candidates, size_t i,
+                          const struct zdir_selection *out,
+                          struct zdir_best *b)
+{
+    uint8_t score[32];
+    if (!zdir_candidate_score(score, out->seed, candidates[i].id))
+        return false;
+    uint16_t weight =
+        zdir_weight_milli(candidates[i].bandwidth_score,
+                          zdir_candidate_age(params, &candidates[i]),
+                          params->seniority_full_blocks);
+
+    if (!b->have_best ||
+        zdir_better(score, weight, candidates[i].id, b->best_score,
+                    b->best_weight, candidates[b->best_idx].id)) {
+        b->have_best = true;
+        b->best_idx = i;
+        b->best_weight = weight;
+        memcpy(b->best_score, score, 32);
+    }
+    return true;
+}
+
+/* Record the slot winner in the selection and the weight output. */
+static void zdir_commit_best(const struct zdir_best *b,
+                             uint16_t *weight_milli_out,
+                             struct zdir_selection *out)
+{
+    out->preferred[out->preferred_count] = (uint32_t)b->best_idx;
+    memcpy(out->score[out->preferred_count], b->best_score, 32);
+    out->preferred_count++;
+    if (weight_milli_out)
+        weight_milli_out[b->best_idx] = b->best_weight;
+}
+
+static void zdir_fill_neutral(uint16_t *weight_milli_out, size_t count)
+{
+    if (weight_milli_out) {
+        for (size_t i = 0; i < count; i++)
+            weight_milli_out[i] = (uint16_t)ZDIR_WEIGHT_NEUTRAL_MILLI;
+    }
+}
+
 bool zdir_select(const struct zdir_params *params,
                  const struct zdir_candidate *candidates, size_t count,
                  uint16_t *weight_milli_out, struct zdir_selection *out)
@@ -191,10 +263,7 @@ bool zdir_select(const struct zdir_params *params,
     /* Neutral first: any candidate this function never prefers keeps the
      * exact behaviour of a node with no directory. Non-exclusion is the
      * default state of the output buffer, not a branch we must remember. */
-    if (weight_milli_out) {
-        for (size_t i = 0; i < count; i++)
-            weight_milli_out[i] = (uint16_t)ZDIR_WEIGHT_NEUTRAL_MILLI;
-    }
+    zdir_fill_neutral(weight_milli_out, count);
 
     uint32_t want = params->want;
     if (want > (uint32_t)ZDIR_PREFERRED_MAX)
@@ -202,52 +271,25 @@ bool zdir_select(const struct zdir_params *params,
     uint32_t owner_cap = params->per_owner_cap ? params->per_owner_cap : 1u;
 
     for (uint32_t slot = 0; slot < want; slot++) {
-        bool have_best = false;
-        size_t best_idx = 0;
-        uint8_t best_score[32] = { 0 };
-        uint16_t best_weight = (uint16_t)ZDIR_WEIGHT_NEUTRAL_MILLI;
+        struct zdir_best b = {
+            .have_best = false,
+            .best_idx = 0,
+            .best_score = { 0 },
+            .best_weight = (uint16_t)ZDIR_WEIGHT_NEUTRAL_MILLI,
+        };
 
         for (size_t i = 0; i < count; i++) {
-            /* Already preferred? (preferred_count <= 8, so this stays cheap.) */
-            bool taken = false;
-            uint32_t owner_used = 0;
-            for (uint32_t k = 0; k < out->preferred_count; k++) {
-                size_t p = (size_t)out->preferred[k];
-                if (p == i) { taken = true; break; }
-                if (memcmp(candidates[p].owner_id, candidates[i].owner_id,
-                           32) == 0)
-                    owner_used++;
-            }
-            if (taken || owner_used >= owner_cap)
+            if (!zdir_slot_eligible(out, candidates, i, owner_cap))
                 continue;
-
-            uint8_t score[32];
-            if (!zdir_candidate_score(score, out->seed, candidates[i].id))
+            if (!zdir_consider(params, candidates, i, out, &b))
                 LOG_FAIL("zdir", "select: score derivation failed at index %zu",
                          i);
-            uint16_t weight =
-                zdir_weight_milli(candidates[i].bandwidth_score,
-                                  zdir_candidate_age(params, &candidates[i]),
-                                  params->seniority_full_blocks);
-
-            if (!have_best ||
-                zdir_better(score, weight, candidates[i].id, best_score,
-                            best_weight, candidates[best_idx].id)) {
-                have_best = true;
-                best_idx = i;
-                best_weight = weight;
-                memcpy(best_score, score, 32);
-            }
         }
 
-        if (!have_best)
+        if (!b.have_best)
             break;   /* fewer eligible candidates than slots — not an error */
 
-        out->preferred[out->preferred_count] = (uint32_t)best_idx;
-        memcpy(out->score[out->preferred_count], best_score, 32);
-        out->preferred_count++;
-        if (weight_milli_out)
-            weight_milli_out[best_idx] = best_weight;
+        zdir_commit_best(&b, weight_milli_out, out);
     }
 
     return true;

@@ -259,6 +259,22 @@ int game_type_count(void)
 
 /* ── Wire format serialization ───────────────────────────── */
 
+static void game_deserialize_state(const uint8_t *data, size_t len,
+                                   struct ttt_state *state_out)
+{
+    if (len >= 14 && state_out) {
+        memcpy(state_out->board, data + 2, 9);
+        /* Validate board values (0=empty, 1=X, 2=O) */
+        for (int vi = 0; vi < 9; vi++) {
+            if (state_out->board[vi] > 2)
+                state_out->board[vi] = 0;
+        }
+        state_out->turn = (data[11] <= 2) ? data[11] : 1;
+        state_out->winner = (data[12] <= 3) ? data[12] : 0;
+        state_out->move_count = (data[13] <= 9) ? data[13] : 0;
+    }
+}
+
 enum game_action game_deserialize(const uint8_t *data, size_t len,
                                    uint8_t *game_type_out,
                                    uint8_t *position_out,
@@ -281,17 +297,7 @@ enum game_action game_deserialize(const uint8_t *data, size_t len,
         return GAME_MOVE;
 
     case GAME_STATE:
-        if (len >= 14 && state_out) {
-            memcpy(state_out->board, data + 2, 9);
-            /* Validate board values (0=empty, 1=X, 2=O) */
-            for (int vi = 0; vi < 9; vi++) {
-                if (state_out->board[vi] > 2)
-                    state_out->board[vi] = 0;
-            }
-            state_out->turn = (data[11] <= 2) ? data[11] : 1;
-            state_out->winner = (data[12] <= 3) ? data[12] : 0;
-            state_out->move_count = (data[13] <= 9) ? data[13] : 0;
-        }
+        game_deserialize_state(data, len, state_out);
         return GAME_STATE;
 
     default:

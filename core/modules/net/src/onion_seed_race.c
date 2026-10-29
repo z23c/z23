@@ -211,6 +211,86 @@ static int onion_seed_race_start_worker(struct onion_seed_race_wave *wave,
     return 0;
 }
 
+static void onion_seed_race_wave_init(struct onion_seed_race_wave *wave,
+                                      struct onion_seed_race_join *join,
+                                      onion_seed_fetch_fn fetch,
+                                      void *fetch_ctx,
+                                      onion_seed_usable_fn usable,
+                                      void *usable_ctx, int timeout_secs)
+{
+    atomic_init(&wave->refs, 1);
+    atomic_init(&wave->in_flight, 0);
+    atomic_init(&wave->winner_claimed, 0);
+    atomic_init(&wave->winner_ready, 0);
+    wave->fetch = fetch;
+    wave->fetch_ctx = fetch_ctx;
+    wave->usable = usable;
+    wave->usable_ctx = usable_ctx;
+    wave->timeout_secs = timeout_secs;
+    wave->join = join;
+}
+
+static void onion_seed_race_pump(struct onion_seed_race_wave *wave,
+                                 const char *const *hosts, size_t n,
+                                 const _Atomic bool *stop)
+{
+    size_t next = 0;
+    while (next < n && next < (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
+        (void)onion_seed_race_start_worker(wave, hosts[next], next);
+        next++;
+    }
+
+    for (;;) {
+        if (atomic_load_explicit(&wave->winner_ready, memory_order_acquire))
+            break;
+        if (stop && atomic_load_explicit(stop, memory_order_acquire))
+            break;
+
+        int inflight = atomic_load_explicit(&wave->in_flight,
+                                            memory_order_acquire);
+        if (inflight == 0) {
+            while (next < n &&
+                   (size_t)atomic_load_explicit(&wave->in_flight,
+                                                memory_order_acquire) <
+                       (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
+                (void)onion_seed_race_start_worker(wave, hosts[next], next);
+                next++;
+            }
+            if (atomic_load_explicit(&wave->in_flight,
+                                     memory_order_acquire) == 0 &&
+                next >= n)
+                break;
+        } else if (next < n &&
+                   (size_t)inflight < (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
+            (void)onion_seed_race_start_worker(wave, hosts[next], next);
+            next++;
+            continue;
+        }
+        onion_seed_race_beat();
+        platform_sleep_ms(10);
+    }
+}
+
+static int onion_seed_race_take_winner(struct onion_seed_race_wave *wave,
+                                       struct onion_fetch_result *winner,
+                                       size_t *winner_index)
+{
+    int rc = -1;
+    if (atomic_load_explicit(&wave->winner_ready, memory_order_acquire)) {
+        atomic_store_explicit(&winner->complete,
+                              atomic_load_explicit(&wave->winner.complete,
+                                                   memory_order_relaxed),
+                              memory_order_relaxed);
+        winner->status = wave->winner.status;
+        winner->body = wave->winner.body;
+        winner->body_len = wave->winner.body_len;
+        wave->winner.body = NULL;
+        *winner_index = wave->winner_index;
+        rc = 0;
+    }
+    return rc;
+}
+
 int onion_seed_race_first_usable(const char *const *hosts,
                                  size_t n,
                                  onion_seed_fetch_fn fetch,
@@ -257,66 +337,12 @@ int onion_seed_race_first_usable(const char *const *hosts,
         free(join);
         LOG_ERR("net", "onion seed race wave allocation failed");
     }
-    atomic_init(&wave->refs, 1);
-    atomic_init(&wave->in_flight, 0);
-    atomic_init(&wave->winner_claimed, 0);
-    atomic_init(&wave->winner_ready, 0);
-    wave->fetch = fetch;
-    wave->fetch_ctx = fetch_ctx;
-    wave->usable = usable;
-    wave->usable_ctx = usable_ctx;
-    wave->timeout_secs = timeout_secs;
-    wave->join = join;
+    onion_seed_race_wave_init(wave, join, fetch, fetch_ctx, usable,
+                              usable_ctx, timeout_secs);
 
-    size_t next = 0;
-    while (next < n && next < (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
-        (void)onion_seed_race_start_worker(wave, hosts[next], next);
-        next++;
-    }
+    onion_seed_race_pump(wave, hosts, n, stop);
 
-    for (;;) {
-        if (atomic_load_explicit(&wave->winner_ready, memory_order_acquire))
-            break;
-        if (stop && atomic_load_explicit(stop, memory_order_acquire))
-            break;
-
-        int inflight = atomic_load_explicit(&wave->in_flight,
-                                            memory_order_acquire);
-        if (inflight == 0) {
-            while (next < n &&
-                   (size_t)atomic_load_explicit(&wave->in_flight,
-                                                memory_order_acquire) <
-                       (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
-                (void)onion_seed_race_start_worker(wave, hosts[next], next);
-                next++;
-            }
-            if (atomic_load_explicit(&wave->in_flight,
-                                     memory_order_acquire) == 0 &&
-                next >= n)
-                break;
-        } else if (next < n &&
-                   (size_t)inflight < (size_t)ONION_SEED_RACE_MAX_INFLIGHT) {
-            (void)onion_seed_race_start_worker(wave, hosts[next], next);
-            next++;
-            continue;
-        }
-        onion_seed_race_beat();
-        platform_sleep_ms(10);
-    }
-
-    int rc = -1;
-    if (atomic_load_explicit(&wave->winner_ready, memory_order_acquire)) {
-        atomic_store_explicit(&winner->complete,
-                              atomic_load_explicit(&wave->winner.complete,
-                                                   memory_order_relaxed),
-                              memory_order_relaxed);
-        winner->status = wave->winner.status;
-        winner->body = wave->winner.body;
-        winner->body_len = wave->winner.body_len;
-        wave->winner.body = NULL;
-        *winner_index = wave->winner_index;
-        rc = 0;
-    }
+    int rc = onion_seed_race_take_winner(wave, winner, winner_index);
 
     onion_seed_race_wave_release(wave);
     return rc;

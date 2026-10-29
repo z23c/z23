@@ -28,6 +28,88 @@ static bool delivery_deadline_active(int64_t deadline_ms)
     return now_ms > 0 && now_ms < deadline_ms;
 }
 
+/* Returns FILE_MARKET_DELIVERY_READY once the request is sent; any other
+ * value is the final status for the caller to return. */
+static enum file_market_delivery_status delivery_send_request(
+    struct fs_session *session, struct file_market_delivery_request *request,
+    const uint8_t buyer_seed[32], int64_t deadline_ms)
+{
+    if (file_market_delivery_request_seal(request, buyer_seed) !=
+        FILE_MARKET_DELIVERY_OK)
+        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
+    uint8_t request_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
+    if (file_market_delivery_request_encode(request, request_wire) !=
+            FILE_MARKET_DELIVERY_OK ||
+        !fs_send_frame_until(session, FS_REQUEST, request_wire,
+                             sizeof(request_wire), deadline_ms))
+        return delivery_deadline_active(deadline_ms)
+            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
+            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+/* Returns FILE_MARKET_DELIVERY_READY when a matching reply was decoded into
+ * *reply; any other value is the final status for the caller to return. */
+static enum file_market_delivery_status delivery_recv_reply(
+    struct fs_session *session, const uint8_t offer_id[32],
+    uint32_t chunk_index, int64_t deadline_ms,
+    struct file_market_delivery_reply *reply)
+{
+    uint8_t frame_type = 0;
+    const uint8_t *payload = NULL;
+    uint32_t payload_len = 0;
+    if (!fs_recv_frame_until(session, &frame_type, &payload, &payload_len,
+                             deadline_ms))
+        return delivery_deadline_active(deadline_ms)
+            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
+            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    if (!delivery_deadline_active(deadline_ms))
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    if (frame_type != FS_MARKET_REPLY ||
+        !file_market_delivery_reply_decode(payload, payload_len, reply) ||
+        memcmp(reply->offer_id, offer_id, 32) != 0 ||
+        reply->chunk_index != chunk_index)
+        return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+/* Returns FILE_MARKET_DELIVERY_READY with the data and size owned by the caller. */
+static enum file_market_delivery_status delivery_recv_chunk(
+    struct fs_session *session, const struct file_market_delivery_reply *reply,
+    int64_t deadline_ms, uint8_t **data, uint32_t *size)
+{
+    *data = NULL;
+    *size = 0;
+    if (!fs_recv_chunk_private_until(session, data, size, reply->size,
+                                     reply->sha3, deadline_ms) ||
+        !*data || *size != reply->size) {
+        if (*data && *size > 0)
+            memory_cleanse(*data, *size);
+        free(*data);
+        *data = NULL;
+        return delivery_deadline_active(deadline_ms)
+            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
+            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    }
+    if (!delivery_deadline_active(deadline_ms)) {
+        memory_cleanse(*data, *size);
+        free(*data);
+        *data = NULL;
+        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    }
+    return FILE_MARKET_DELIVERY_READY;
+}
+
+static bool delivery_fetch_args_valid(
+    const struct fs_session *session, const uint8_t network_genesis[32],
+    const uint8_t offer_id[32], const uint8_t buyer_pubkey[32],
+    const uint8_t buyer_seed[32],
+    const struct file_market_delivery_chunk *out_chunk)
+{
+    return session && session->key_established && network_genesis &&
+        offer_id && buyer_pubkey && buyer_seed && out_chunk;
+}
+
 enum file_market_delivery_status file_market_delivery_fetch_session_until(
     struct fs_session *session, const uint8_t network_genesis[32],
     const uint8_t offer_id[32], uint32_t chunk_index,
@@ -36,8 +118,8 @@ enum file_market_delivery_status file_market_delivery_fetch_session_until(
 {
     if (out_chunk)
         memset(out_chunk, 0, sizeof(*out_chunk));
-    if (!session || !session->key_established || !network_genesis ||
-        !offer_id || !buyer_pubkey || !buyer_seed || !out_chunk)
+    if (!delivery_fetch_args_valid(session, network_genesis, offer_id,
+                                   buyer_pubkey, buyer_seed, out_chunk))
         return FILE_MARKET_DELIVERY_MALFORMED;
     if (!delivery_deadline_active(deadline_ms))
         return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
@@ -52,34 +134,16 @@ enum file_market_delivery_status file_market_delivery_fetch_session_until(
     file_market_delivery_session_id(network_genesis, session->our_nonce,
                                     session->peer_nonce,
                                     request.session_id);
-    if (file_market_delivery_request_seal(&request, buyer_seed) !=
-        FILE_MARKET_DELIVERY_OK)
-        return FILE_MARKET_DELIVERY_UNAUTHENTICATED;
-    uint8_t request_wire[FILE_MARKET_DELIVERY_WIRE_BYTES];
-    if (file_market_delivery_request_encode(&request, request_wire) !=
-            FILE_MARKET_DELIVERY_OK ||
-        !fs_send_frame_until(session, FS_REQUEST, request_wire,
-                             sizeof(request_wire), deadline_ms))
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
+    enum file_market_delivery_status st =
+        delivery_send_request(session, &request, buyer_seed, deadline_ms);
+    if (st != FILE_MARKET_DELIVERY_READY)
+        return st;
 
-    uint8_t frame_type = 0;
-    const uint8_t *payload = NULL;
-    uint32_t payload_len = 0;
     struct file_market_delivery_reply reply;
-    if (!fs_recv_frame_until(session, &frame_type, &payload, &payload_len,
-                             deadline_ms))
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    if (!delivery_deadline_active(deadline_ms))
-        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    if (frame_type != FS_MARKET_REPLY ||
-        !file_market_delivery_reply_decode(payload, payload_len, &reply) ||
-        memcmp(reply.offer_id, offer_id, 32) != 0 ||
-        reply.chunk_index != chunk_index)
-        return FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN;
+    st = delivery_recv_reply(session, offer_id, chunk_index, deadline_ms,
+                             &reply);
+    if (st != FILE_MARKET_DELIVERY_READY)
+        return st;
     if (reply.status != FILE_MARKET_DELIVERY_READY)
         return reply.status;
     if (reply.size == 0 || reply.size > FILE_MARKET_CHUNK_SIZE ||
@@ -88,21 +152,9 @@ enum file_market_delivery_status file_market_delivery_fetch_session_until(
 
     uint8_t *data = NULL;
     uint32_t size = 0;
-    if (!fs_recv_chunk_private_until(session, &data, &size, reply.size,
-                                     reply.sha3, deadline_ms) ||
-        !data || size != reply.size) {
-        if (data && size > 0)
-            memory_cleanse(data, size);
-        free(data);
-        return delivery_deadline_active(deadline_ms)
-            ? FILE_MARKET_DELIVERY_PAYMENT_UNKNOWN
-            : FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    }
-    if (!delivery_deadline_active(deadline_ms)) {
-        memory_cleanse(data, size);
-        free(data);
-        return FILE_MARKET_DELIVERY_RESOURCE_LIMIT;
-    }
+    st = delivery_recv_chunk(session, &reply, deadline_ms, &data, &size);
+    if (st != FILE_MARKET_DELIVERY_READY)
+        return st;
     out_chunk->data = data;
     out_chunk->size = size;
     memcpy(out_chunk->sha3, reply.sha3, 32);
@@ -120,6 +172,43 @@ enum file_market_delivery_status file_market_delivery_fetch_session(
         buyer_seed, INT64_MAX, out_chunk);
 }
 
+/* True once the in-progress connect finished cleanly inside the deadline. */
+static bool delivery_wait_connected(platform_socket_t fd, int64_t deadline_ms)
+{
+    int timeout_ms = 10000;
+    if (deadline_ms != INT64_MAX) {
+        int64_t now_ms = platform_time_monotonic_ms();
+        if (now_ms <= 0 || now_ms >= deadline_ms)
+            return false;
+        int64_t remain_ms = deadline_ms - now_ms;
+        if (remain_ms < timeout_ms) timeout_ms = (int)remain_ms;
+    }
+    int rc = platform_socket_wait_writable(fd, timeout_ms);
+    int socket_error = 0;
+    if (rc <= 0 || platform_socket_pending_error(fd, &socket_error) != 0 ||
+        socket_error != 0 || !delivery_deadline_active(deadline_ms))
+        return false;
+    return true;
+}
+
+/* True when fd is connected; the caller closes fd on false. */
+static bool delivery_connect_socket(platform_socket_t fd,
+                                    const uint8_t peer_ip[16],
+                                    uint16_t peer_port, int64_t deadline_ms)
+{
+    struct sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(peer_port);
+    memcpy(&addr.sin6_addr, peer_ip, 16);
+    int rc = netbase_connect_guarded(fd, (struct sockaddr *)&addr,
+                                     sizeof(addr));
+    int connect_error = rc == 0 ? 0 : platform_socket_last_error();
+    if (rc != 0 && platform_socket_error_in_progress(connect_error))
+        return delivery_wait_connected(fd, deadline_ms);
+    return rc == 0;
+}
+
 static platform_socket_t delivery_connect_endpoint(const uint8_t peer_ip[16],
                                                    uint16_t peer_port,
                                                    int64_t deadline_ms)
@@ -134,33 +223,7 @@ static platform_socket_t delivery_connect_endpoint(const uint8_t peer_ip[16],
                                                 true, true);
     if (fd == PLATFORM_SOCKET_INVALID)
         return PLATFORM_SOCKET_INVALID;
-    struct sockaddr_in6 addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(peer_port);
-    memcpy(&addr.sin6_addr, peer_ip, 16);
-    int rc = netbase_connect_guarded(fd, (struct sockaddr *)&addr,
-                                     sizeof(addr));
-    int connect_error = rc == 0 ? 0 : platform_socket_last_error();
-    if (rc != 0 && platform_socket_error_in_progress(connect_error)) {
-        int timeout_ms = 10000;
-        if (deadline_ms != INT64_MAX) {
-            now_ms = platform_time_monotonic_ms();
-            if (now_ms <= 0 || now_ms >= deadline_ms) {
-                platform_socket_close(fd);
-                return PLATFORM_SOCKET_INVALID;
-            }
-            int64_t remain_ms = deadline_ms - now_ms;
-            if (remain_ms < timeout_ms) timeout_ms = (int)remain_ms;
-        }
-        rc = platform_socket_wait_writable(fd, timeout_ms);
-        int socket_error = 0;
-        if (rc <= 0 || platform_socket_pending_error(fd, &socket_error) != 0 ||
-            socket_error != 0 || !delivery_deadline_active(deadline_ms)) {
-            platform_socket_close(fd);
-            return PLATFORM_SOCKET_INVALID;
-        }
-    } else if (rc != 0) {
+    if (!delivery_connect_socket(fd, peer_ip, peer_port, deadline_ms)) {
         platform_socket_close(fd);
         return PLATFORM_SOCKET_INVALID;
     }

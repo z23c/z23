@@ -45,6 +45,20 @@ static bool identity_error(char *out, size_t cap, const char *what)
     return false;
 }
 
+static bool identity_snapshot_same(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high &&
+           before->size == after->size &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
 static bool identity_read(const char *path, uint8_t private_out[32],
                           uint8_t public_out[32], char *err, size_t err_cap)
 {
@@ -61,14 +75,7 @@ static bool identity_read(const char *path, uint8_t private_out[32],
     }
     bool stable = platform_positioned_file_read(&file, private_out, 32, 0) == 32 &&
                   platform_positioned_file_snapshot(&file, &after) &&
-                  before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high &&
-                  before.size == after.size &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.modified_nanoseconds == after.modified_nanoseconds &&
-                  before.changed_seconds == after.changed_seconds &&
-                  before.changed_nanoseconds == after.changed_nanoseconds;
+                  identity_snapshot_same(&before, &after);
     platform_positioned_file_close(&file);
     if (!stable) {
         memory_cleanse(private_out, 32);
@@ -118,6 +125,18 @@ static bool identity_write(const char *dir, const char *path,
     return true;
 }
 
+static bool identity_key_path(char *path, size_t cap, const char *datadir)
+{
+    int n = snprintf(path, cap, "%s/v2_identity.key", datadir);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool identity_generate(uint8_t fresh[32], uint8_t public_out[32])
+{
+    return zcl_random_secret_bytes(fresh, 32, "v2_identity") &&
+           curve25519_scalarmult_base(public_out, fresh);
+}
+
 bool v2_identity_load_or_create(const char *datadir,
                                 uint8_t private_out[32],
                                 uint8_t public_out[32],
@@ -130,8 +149,7 @@ bool v2_identity_load_or_create(const char *datadir,
     memset(private_out, 0, 32);
     memset(public_out, 0, 32);
     char path[1152];
-    int n = snprintf(path, sizeof(path), "%s/v2_identity.key", datadir);
-    if (n <= 0 || (size_t)n >= sizeof(path))
+    if (!identity_key_path(path, sizeof(path), datadir))
         return identity_error(err, err_cap, "v2 identity path too long");
 
     if (identity_read(path, private_out, public_out, err, err_cap))
@@ -143,8 +161,7 @@ bool v2_identity_load_or_create(const char *datadir,
     }
 
     uint8_t fresh[32];
-    if (!zcl_random_secret_bytes(fresh, sizeof(fresh), "v2_identity") ||
-        !curve25519_scalarmult_base(public_out, fresh)) {
+    if (!identity_generate(fresh, public_out)) {
         memory_cleanse(fresh, sizeof(fresh));
         return identity_error(err, err_cap, "v2 identity generation failed");
     }
