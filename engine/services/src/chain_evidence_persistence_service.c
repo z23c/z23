@@ -51,66 +51,121 @@ static bool cec_retryable_sqlite_rc(int rc)
            rc == SQLITE_ERROR || rc == SQLITE_MISUSE;
 }
 
+/* One write attempt: the try-set fast path, then the detached fallback.
+ * On failure *st and *rc hold the database status read after the attempt. */
+static bool cec_state_set_attempt(struct node_db *ndb, const char *key,
+                                  const void *value, size_t len,
+                                  struct node_db_status *st, int *rc)
+{
+    /* A historical catch-up pass can occupy the worker for hours.
+     * Never wait behind it from health collection: use the existing
+     * detached, busy-timeout-bounded fallback when admission is busy. */
+    if (app_runtime_node_db_state_try_set(ndb, key, value, len))
+        return true;
+
+    node_db_get_status(ndb, st);
+    *rc = st->last_sqlite_rc;
+    if (node_db_state_set_detached(ndb, key, value, len))
+        return true;
+    node_db_get_status(ndb, st);
+    *rc = st->last_sqlite_rc;
+    return false;
+}
+
+static bool cec_state_set_ndb_unavailable(const struct node_db *ndb)
+{
+    return !ndb || !ndb->open;
+}
+
+static bool cec_state_set_input_missing(const char *key, const void *value)
+{
+    return !key || !value;
+}
+
+/* True when the failed attempt i must not be retried. */
+static bool cec_state_set_give_up(int rc, int i)
+{
+    return !cec_retryable_sqlite_rc(rc) ||
+           i + 1 >= CEC_STATE_SET_RETRY_ATTEMPTS;
+}
+
+static struct zcl_result cec_state_set_err_unavailable(const char *key,
+                                                       const char *owner)
+{
+    return ZCL_ERR(-1, "state_set_retry: unavailable ndb owner=%s key=%s",
+                   owner ? owner : "(unknown)", key ? key : "(null)");
+}
+
+static struct zcl_result cec_state_set_err_invalid(const char *key,
+                                                   const void *value,
+                                                   const char *owner)
+{
+    return ZCL_ERR(-2,
+                   "state_set_retry: invalid input owner=%s key=%s value=%d",
+                   owner ? owner : "(unknown)", key ? key : "(null)",
+                   value != NULL);
+}
+
+static struct zcl_result cec_state_set_err_failed(const char *key,
+                                                  const char *owner,
+                                                  int attempts, int rc,
+                                                  const struct node_db_status *st)
+{
+    return ZCL_ERR(-3,
+                   "state_set_retry: failed owner=%s key=%s "
+                   "attempts=%d rc=%d op=%s err=%s",
+                   owner ? owner : "(unknown)", key,
+                   attempts, rc, st->last_op[0] ? st->last_op : "(none)",
+                   sqlite3_errstr(rc));
+}
+
+static struct zcl_result cec_state_set_err_exhausted(const char *key,
+                                                     const char *owner)
+{
+    return ZCL_ERR(-4, "state_set_retry: exhausted owner=%s key=%s",
+                   owner ? owner : "(unknown)", key);
+}
+
 struct zcl_result chain_evidence_state_set_retry(struct node_db *ndb,
                                                  const char *key,
                                                  const void *value,
                                                  size_t len,
                                                  const char *owner)
 {
-    if (!ndb || !ndb->open) {
+    if (cec_state_set_ndb_unavailable(ndb)) {
         LOG_WARN("cec.store",
                  "state_set_retry: unavailable ndb owner=%s key=%s",
                  owner ? owner : "(unknown)", key ? key : "(null)");
-        return ZCL_ERR(-1, "state_set_retry: unavailable ndb owner=%s key=%s",
-                       owner ? owner : "(unknown)", key ? key : "(null)");
+        return cec_state_set_err_unavailable(key, owner);
     }
-    if (!key || !value) {
+    if (cec_state_set_input_missing(key, value)) {
         LOG_WARN("cec.store",
                  "state_set_retry: invalid input owner=%s key=%s value=%d",
                  owner ? owner : "(unknown)", key ? key : "(null)",
                  value != NULL);
-        return ZCL_ERR(-2,
-                       "state_set_retry: invalid input owner=%s key=%s value=%d",
-                       owner ? owner : "(unknown)", key ? key : "(null)",
-                       value != NULL);
+        return cec_state_set_err_invalid(key, value, owner);
     }
 
     for (int i = 0; i < CEC_STATE_SET_RETRY_ATTEMPTS; i++) {
-        /* A historical catch-up pass can occupy the worker for hours.
-         * Never wait behind it from health collection: use the existing
-         * detached, busy-timeout-bounded fallback when admission is busy. */
-        if (app_runtime_node_db_state_try_set(ndb, key, value, len))
-            return ZCL_OK;
-
         struct node_db_status st;
-        node_db_get_status(ndb, &st);
-        int rc = st.last_sqlite_rc;
-        if (node_db_state_set_detached(ndb, key, value, len))
+        int rc = 0;
+        if (cec_state_set_attempt(ndb, key, value, len, &st, &rc))
             return ZCL_OK;
-        node_db_get_status(ndb, &st);
-        rc = st.last_sqlite_rc;
-        if (!cec_retryable_sqlite_rc(rc) ||
-            i + 1 >= CEC_STATE_SET_RETRY_ATTEMPTS) {
+        if (cec_state_set_give_up(rc, i)) {
             LOG_WARN("cec.store",
                      "state_set_retry: failed owner=%s key=%s "
                      "attempts=%d rc=%d op=%s err=%s",
                      owner ? owner : "(unknown)", key,
                      i + 1, rc, st.last_op[0] ? st.last_op : "(none)",
                      sqlite3_errstr(rc));
-            return ZCL_ERR(-3,
-                           "state_set_retry: failed owner=%s key=%s "
-                           "attempts=%d rc=%d op=%s err=%s",
-                           owner ? owner : "(unknown)", key,
-                           i + 1, rc, st.last_op[0] ? st.last_op : "(none)",
-                           sqlite3_errstr(rc));
+            return cec_state_set_err_failed(key, owner, i + 1, rc, &st);
         }
         platform_sleep_ms(CEC_STATE_SET_RETRY_BASE_MS * (i + 1));
     }
     LOG_WARN("cec.store",
              "state_set_retry: exhausted owner=%s key=%s",
              owner ? owner : "(unknown)", key);
-    return ZCL_ERR(-4, "state_set_retry: exhausted owner=%s key=%s",
-                   owner ? owner : "(unknown)", key);
+    return cec_state_set_err_exhausted(key, owner);
 }
 
 struct zcl_result chain_evidence_state_set_int_retry(struct node_db *ndb,
