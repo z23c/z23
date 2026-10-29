@@ -2282,8 +2282,8 @@ static int test_bf_worker_identity_capability_honesty(void)
     return failures;
 }
 
-static int test_bf_assert_native_object_header(const uint8_t *object,
-                                               size_t object_len)
+static int test_bf_assert_mach_o_or_elf_object_header(const uint8_t *object,
+                                                      size_t object_len)
 {
     int failures = 0;
 #if defined(__APPLE__)
@@ -2299,7 +2299,7 @@ static int test_bf_assert_native_object_header(const uint8_t *object,
     return failures;
 }
 
-static int test_bf_assert_release_qualified(
+static int test_bf_assert_qualification_report_gates(
     struct build_fabric_release_qualification_report qualified)
 {
     int failures = 0;
@@ -2448,8 +2448,9 @@ static int test_bf_confined_worker(void)
                                       &object_len), 0);
         ASSERT(vcs_build_artifact_manifest_v1_verify_chunk(
             &manifest, 0, object, object_len));
-        if (test_bf_assert_native_object_header(object, object_len) != 0) {
-            failures++;
+        failures += test_bf_assert_mach_o_or_elf_object_header(object,
+                                                               object_len);
+        if (failures != 0) {
             goto _test_next;
         }
         free(object);
@@ -2609,8 +2610,8 @@ static int test_bf_confined_worker(void)
         struct build_fabric_release_qualification_report qualified;
         ASSERT(build_fabric_release_qualify(
             &ndb, dir, confirmation_hex, now + 5, &qualified).ok);
-        if (test_bf_assert_release_qualified(qualified) != 0) {
-            failures++;
+        failures += test_bf_assert_qualification_report_gates(qualified);
+        if (failures != 0) {
             goto _test_next;
         }
         ASSERT(strlen(qualified.qualification_root_sha3) == 64);
