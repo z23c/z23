@@ -127,6 +127,26 @@ enum vcs_package_capsule_error vcs_package_capsule_serialize(
     return VCS_PACKAGE_CAPSULE_OK;
 }
 
+/* Decode one wire entry, advancing only through bytes already available. */
+static bool capsule_read_header(const uint8_t *wire, size_t wire_len,
+                                size_t *off, struct vcs_package_capsule *out,
+                                uint16_t i)
+{
+    if (*off > wire_len || wire_len - *off < 2u)
+        return false;
+    uint16_t len = vcs_rd_u16le(wire + *off);
+    *off += 2u;
+    if (len == 0 || len > VCS_PACKAGE_PATH_MAX ||
+        *off > wire_len || wire_len - *off < (size_t)len + 32u)
+        return false;
+    memcpy(out->headers[i].path, wire + *off, len);
+    *off += len;
+    memcpy(out->headers[i].file_root, wire + *off, 32);
+    *off += 32u;
+    out->count++;
+    return true;
+}
+
 enum vcs_package_capsule_error vcs_package_capsule_parse(
     const uint8_t *wire, size_t wire_len, struct vcs_package_capsule *out)
 {
@@ -148,15 +168,8 @@ enum vcs_package_capsule_error vcs_package_capsule_parse(
     if (count > VCS_PACKAGE_CAPSULE_MAX_HEADERS)
         return VCS_PACKAGE_CAPSULE_ERR_COUNT;
     for (uint16_t i = 0; i < count; i++) {
-        if (off > wire_len || wire_len - off < 2u)
+        if (!capsule_read_header(wire, wire_len, &off, out, i))
             goto truncated;
-        uint16_t len = vcs_rd_u16le(wire + off); off += 2u;
-        if (len == 0 || len > VCS_PACKAGE_PATH_MAX ||
-            off > wire_len || wire_len - off < (size_t)len + 32u)
-            goto truncated;
-        memcpy(out->headers[i].path, wire + off, len); off += len;
-        memcpy(out->headers[i].file_root, wire + off, 32); off += 32u;
-        out->count++;
     }
     if (off != wire_len) {
         vcs_package_capsule_init(out);
