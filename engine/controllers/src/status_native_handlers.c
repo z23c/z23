@@ -31,6 +31,231 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Parsed and derived facts for the full status document. */
+struct status_full_eval {
+    int pc, inbound, outbound, zcl23_cnt, magicbean_cnt;
+    int max_peer_height;
+    bool max_peer_height_known;
+    bool peer_direction_known;
+    bool height_ok, peers_ok, chain_ok, header_ok, health_ok;
+    const struct json_value *header_value;
+    int block_height, header_height, header_gap, target_height, sync_gap;
+    bool header_gap_known, header_sync_behind;
+    bool chain_evidence_known, chain_evidence_consistent;
+    bool sync_gap_known, sync_behind;
+};
+
+static const int status_full_sync_behind_threshold_blocks = 144;
+
+static void status_full_parse_inputs(struct status_full_eval *e,
+                                     struct json_value *height_j,
+                                     struct json_value *peers_j,
+                                     struct json_value *chain_j,
+                                     struct json_value *health_j,
+                                     const char *h, const char *p,
+                                     const char *ci, const char *hc)
+{
+    e->height_ok = status_parse_rpc_json(height_j, h, JSON_INT) &&
+                   height_j->val.i >= 0 && height_j->val.i <= INT_MAX;
+    e->peers_ok = status_parse_rpc_json(peers_j, p, JSON_ARR) &&
+                  status_peer_array_is_valid(peers_j);
+    e->chain_ok = status_parse_rpc_json(chain_j, ci, JSON_OBJ);
+    e->header_value =
+        e->chain_ok ? json_get(chain_j, "best_header_height") : NULL;
+    e->header_ok = e->header_value && e->header_value->type == JSON_INT &&
+                   e->header_value->val.i >= 0 &&
+                   e->header_value->val.i <= INT_MAX;
+    e->health_ok = status_parse_rpc_json(health_j, hc, JSON_OBJ);
+    if (e->peers_ok) {
+        struct peer_survey ps;
+        status_peer_survey(peers_j, &ps);
+        e->pc = ps.total;
+        e->inbound = ps.inbound;
+        e->outbound = ps.outbound;
+        e->zcl23_cnt = ps.zcl23;
+        e->magicbean_cnt = ps.magicbean;
+        e->max_peer_height = ps.max_height;
+        e->max_peer_height_known = ps.max_height_known;
+        e->peer_direction_known = ps.direction_known;
+    }
+}
+
+static void status_full_derive_gaps(struct status_full_eval *e,
+                                    const struct json_value *height_j)
+{
+    e->block_height = e->height_ok ? (int)height_j->val.i : 0;
+    e->header_height = e->header_ok ? (int)e->header_value->val.i : 0;
+    e->header_gap = e->max_peer_height - e->header_height;
+    if (e->header_gap < 0) e->header_gap = 0;
+    e->header_gap_known = e->max_peer_height_known && e->header_ok;
+    e->header_sync_behind =
+        e->header_gap > status_full_sync_behind_threshold_blocks;
+    /* Only locally validated headers define the synchronization target.
+     * max_peer_height is an untrusted availability hint; one lying peer must
+     * never manufacture an authoritative node gap. */
+    e->target_height = e->header_height;
+    e->chain_evidence_known = e->height_ok && e->header_ok;
+    e->chain_evidence_consistent =
+        e->chain_evidence_known && e->block_height <= e->header_height;
+    e->sync_gap = e->chain_evidence_consistent
+        ? e->target_height - e->block_height : 0;
+    e->sync_gap_known = e->chain_evidence_consistent;
+    e->sync_behind =
+        e->sync_gap > status_full_sync_behind_threshold_blocks;
+}
+
+static void status_full_push_chain(struct json_value *root,
+                                   const struct status_full_eval *e,
+                                   const struct json_value *health_j)
+{
+    const struct json_value *commit_value =
+        e->health_ok ? json_get(health_j, "build_commit") : NULL;
+    const char *node_commit = json_get_str(commit_value);
+    bool have_node_commit = node_commit && node_commit[0];
+
+    json_push_kv_str(root, "execution_locus", "composite");
+    status_push_int_if_known(root, "height", e->height_ok, e->block_height);
+    /* build_commit must describe the target node. The command client may run
+     * a different binary, so keep its hash separate and leave the node field
+     * null when target evidence is unavailable. */
+    if (have_node_commit) {
+        json_push_kv_str(root, "build_commit", node_commit);
+    } else {
+        struct json_value unknown;
+        json_init(&unknown);
+        json_set_null(&unknown);
+        json_push_kv(root, "build_commit", &unknown);
+        json_free(&unknown);
+    }
+    json_push_kv_str(root, "build_commit_source",
+                     have_node_commit ? "target_node.healthcheck"
+                                      : "target_node.unavailable");
+    json_push_kv_str(root, "client_build_commit", zcl_build_commit());
+    status_push_int_if_known(root, "header_height", e->header_ok,
+                             e->header_height);
+    status_push_int_if_known(root, "max_peer_height",
+                             e->max_peer_height_known,
+                             e->max_peer_height);
+    json_push_kv_bool(root, "max_peer_height_known",
+                      e->max_peer_height_known);
+    json_push_kv_str(root, "max_peer_height_trust",
+                     "untrusted_peer_advertisement");
+    status_push_int_if_known(root, "header_gap", e->header_gap_known,
+                             e->header_gap);
+    status_push_bool_if_known(root, "header_sync_behind",
+                              e->header_gap_known, e->header_sync_behind);
+    status_push_int_if_known(root, "target_height", e->header_ok,
+                             e->target_height);
+    json_push_kv_str(root, "target_height_source",
+                     e->header_ok ? "target_node.validated_header_tip"
+                                  : "unavailable");
+    status_push_int_if_known(root, "sync_gap", e->sync_gap_known,
+                             e->sync_gap);
+    json_push_kv_int(root, "sync_behind_threshold_blocks",
+                     status_full_sync_behind_threshold_blocks);
+    status_push_bool_if_known(root, "sync_behind", e->sync_gap_known,
+                              e->sync_behind);
+    status_push_bool_if_known(root, "chain_evidence_consistent",
+                              e->chain_evidence_known,
+                              e->chain_evidence_consistent);
+    status_push_int_if_known(root, "peers", e->peers_ok, e->pc);
+}
+
+static void status_full_push_input_errors(struct json_value *root,
+                                          const struct status_full_eval *e,
+                                          const char *h, const char *p,
+                                          const char *ci)
+{
+    if (!e->height_ok)
+        status_push_rpc_parse_error(root, "height", h,
+                                    "getblockcount returned invalid data");
+    if (!e->peers_ok)
+        status_push_rpc_parse_error(root, "peers", p,
+                                    "getpeerinfo returned invalid data");
+    else if (!e->max_peer_height_known) {
+        status_push_json_error(root, "max_peer_height",
+                               "no connected peer supplied a valid height claim",
+                               NULL);
+        status_push_json_error(root, "header_gap",
+                               "peer height claim unavailable", NULL);
+    }
+    if (!e->header_ok)
+        status_push_rpc_parse_error(
+            root, "header_height", ci,
+            "getblockchaininfo missing valid best_header_height");
+    if (e->chain_evidence_known && !e->chain_evidence_consistent)
+        status_push_json_error(
+            root, "chain_evidence",
+            "served H* exceeds the locally validated header frontier",
+            NULL);
+}
+
+static void status_full_push_connections(struct json_value *root,
+                                         const struct status_full_eval *e)
+{
+    struct json_value conn;
+    json_init(&conn);
+    json_set_object(&conn);
+    json_push_kv_bool(&conn, "known", e->peers_ok && e->peer_direction_known);
+    json_push_kv_bool(&conn, "total_known", e->peers_ok);
+    json_push_kv_bool(&conn, "direction_known", e->peer_direction_known);
+    status_push_int_if_known(&conn, "total", e->peers_ok, e->pc);
+    status_push_int_if_known(&conn, "inbound", e->peer_direction_known,
+                             e->inbound);
+    status_push_int_if_known(&conn, "outbound", e->peer_direction_known,
+                             e->outbound);
+    status_push_int_if_known(&conn, "zcl23", e->peers_ok, e->zcl23_cnt);
+    status_push_int_if_known(&conn, "magicbean", e->peers_ok,
+                             e->magicbean_cnt);
+    if (e->peers_ok && !e->peer_direction_known)
+        status_push_json_error(&conn, "direction",
+                               "peer entry missing boolean inbound field",
+                               NULL);
+    json_push_kv(root, "connections", &conn);
+    json_free(&conn);
+}
+
+static void status_full_push_health(struct json_value *root,
+                                    const struct status_full_eval *e,
+                                    const struct json_value *health_j)
+{
+    const struct json_value *memory_value =
+        e->health_ok ? json_get(health_j, "memory_rss_mb") : NULL;
+    const struct json_value *uptime_value =
+        e->health_ok ? json_get(health_j, "uptime_seconds") : NULL;
+    bool memory_known = memory_value && memory_value->type == JSON_INT &&
+                        memory_value->val.i >= 0;
+    bool uptime_known = uptime_value && uptime_value->type == JSON_INT &&
+                        uptime_value->val.i >= 0;
+    status_push_int_if_known(root, "memory_rss_mb", memory_known,
+                             memory_known ? memory_value->val.i : 0);
+    status_push_int_if_known(root, "uptime_secs", uptime_known,
+                             uptime_known ? uptime_value->val.i : 0);
+    if (!memory_known)
+        status_push_json_error(root, "memory_rss_mb",
+                               "healthcheck missing valid nonnegative memory",
+                               NULL);
+    if (!uptime_known)
+        status_push_json_error(root, "uptime_secs",
+                               "healthcheck missing valid nonnegative uptime",
+                               NULL);
+}
+
+static void status_full_push_trust_mode(struct json_value *root)
+{
+    /* Also surface trust_mode as a flat top-level field — the operator
+     * sovereignty posture (docs/node/shielded-history-importer.md
+     * §5.5) is load-bearing enough to not require drilling into
+     * `sovereignty.trust_mode`. Reads the just-pushed nested object rather
+     * than re-parsing `sv`, so it can never disagree with it. */
+    const struct json_value *sov_state = json_get(root, "sovereignty");
+    const struct json_value *tm = sov_state
+        ? json_get(sov_state, "trust_mode") : NULL;
+    json_push_kv_str(root, "trust_mode",
+                     tm && json_get_str(tm) ? json_get_str(tm)
+                                             : "unknown");
+}
+
 /* The legacy full-detail composition: TWELVE sequential node_rpc_call()s,
  * each re-entering the 4-worker RPC pool and racing the fold under a 10s
  * kill-timeout. Kept verbatim behind `status --full` for the cold SQLite
@@ -54,172 +279,19 @@ static char *zcl_native_status_body_full(const struct json_value *args,
     char *bl = node_rpc_call("dumpstate", "[\"blocker\"]");
     char *sv = node_rpc_call("dumpstate", "[\"sovereignty\"]");
 
-    int pc = 0, inbound = 0, outbound = 0, zcl23_cnt = 0, magicbean_cnt = 0;
-    int max_peer_height = 0;
-    bool max_peer_height_known = false;
-    bool peer_direction_known = false;
+    struct status_full_eval ev = {0};
     struct json_value height_j, peers_j, chain_j, health_j;
-    bool height_ok = status_parse_rpc_json(&height_j, h, JSON_INT) &&
-                     height_j.val.i >= 0 && height_j.val.i <= INT_MAX;
-    bool peers_ok = status_parse_rpc_json(&peers_j, p, JSON_ARR) &&
-                    status_peer_array_is_valid(&peers_j);
-    bool chain_ok = status_parse_rpc_json(&chain_j, ci, JSON_OBJ);
-    const struct json_value *header_value =
-        chain_ok ? json_get(&chain_j, "best_header_height") : NULL;
-    bool header_ok = header_value && header_value->type == JSON_INT &&
-                     header_value->val.i >= 0 &&
-                     header_value->val.i <= INT_MAX;
-    bool health_ok = status_parse_rpc_json(&health_j, hc, JSON_OBJ);
-    if (peers_ok) {
-        struct peer_survey ps;
-        status_peer_survey(&peers_j, &ps);
-        pc = ps.total;
-        inbound = ps.inbound;
-        outbound = ps.outbound;
-        zcl23_cnt = ps.zcl23;
-        magicbean_cnt = ps.magicbean;
-        max_peer_height = ps.max_height;
-        max_peer_height_known = ps.max_height_known;
-        peer_direction_known = ps.direction_known;
-    }
-
-    int block_height = height_ok ? (int)height_j.val.i : 0;
-    int header_height = header_ok ? (int)header_value->val.i : 0;
-    const int sync_behind_threshold_blocks = 144;
-    int header_gap = max_peer_height - header_height;
-    if (header_gap < 0) header_gap = 0;
-    bool header_gap_known = max_peer_height_known && header_ok;
-    bool header_sync_behind =
-        header_gap > sync_behind_threshold_blocks;
-    /* Only locally validated headers define the synchronization target.
-     * max_peer_height is an untrusted availability hint; one lying peer must
-     * never manufacture an authoritative node gap. */
-    int target_height = header_height;
-    bool chain_evidence_known = height_ok && header_ok;
-    bool chain_evidence_consistent =
-        chain_evidence_known && block_height <= header_height;
-    int sync_gap = chain_evidence_consistent
-        ? target_height - block_height : 0;
-    bool sync_gap_known = chain_evidence_consistent;
-    bool sync_behind = sync_gap > sync_behind_threshold_blocks;
-
-    const struct json_value *memory_value =
-        health_ok ? json_get(&health_j, "memory_rss_mb") : NULL;
-    const struct json_value *uptime_value =
-        health_ok ? json_get(&health_j, "uptime_seconds") : NULL;
-    bool memory_known = memory_value && memory_value->type == JSON_INT &&
-                        memory_value->val.i >= 0;
-    bool uptime_known = uptime_value && uptime_value->type == JSON_INT &&
-                        uptime_value->val.i >= 0;
-    const struct json_value *commit_value =
-        health_ok ? json_get(&health_j, "build_commit") : NULL;
-    const char *node_commit = json_get_str(commit_value);
-    bool have_node_commit = node_commit && node_commit[0];
+    status_full_parse_inputs(&ev, &height_j, &peers_j, &chain_j, &health_j,
+                             h, p, ci, hc);
+    status_full_derive_gaps(&ev, &height_j);
 
     struct json_value root;
     json_init(&root);
     json_set_object(&root);
-    json_push_kv_str(&root, "execution_locus", "composite");
-    status_push_int_if_known(&root, "height", height_ok, block_height);
-    /* build_commit must describe the target node. The command client may run
-     * a different binary, so keep its hash separate and leave the node field
-     * null when target evidence is unavailable. */
-    if (have_node_commit) {
-        json_push_kv_str(&root, "build_commit", node_commit);
-    } else {
-        struct json_value unknown;
-        json_init(&unknown);
-        json_set_null(&unknown);
-        json_push_kv(&root, "build_commit", &unknown);
-        json_free(&unknown);
-    }
-    json_push_kv_str(&root, "build_commit_source",
-                     have_node_commit ? "target_node.healthcheck"
-                                      : "target_node.unavailable");
-    json_push_kv_str(&root, "client_build_commit", zcl_build_commit());
-    status_push_int_if_known(&root, "header_height", header_ok,
-                             header_height);
-    status_push_int_if_known(&root, "max_peer_height",
-                             max_peer_height_known,
-                             max_peer_height);
-    json_push_kv_bool(&root, "max_peer_height_known",
-                      max_peer_height_known);
-    json_push_kv_str(&root, "max_peer_height_trust",
-                     "untrusted_peer_advertisement");
-    status_push_int_if_known(&root, "header_gap", header_gap_known,
-                             header_gap);
-    status_push_bool_if_known(&root, "header_sync_behind",
-                              header_gap_known, header_sync_behind);
-    status_push_int_if_known(&root, "target_height", header_ok,
-                             target_height);
-    json_push_kv_str(&root, "target_height_source",
-                     header_ok ? "target_node.validated_header_tip"
-                               : "unavailable");
-    status_push_int_if_known(&root, "sync_gap", sync_gap_known, sync_gap);
-    json_push_kv_int(&root, "sync_behind_threshold_blocks",
-                     sync_behind_threshold_blocks);
-    status_push_bool_if_known(&root, "sync_behind", sync_gap_known,
-                              sync_behind);
-    status_push_bool_if_known(&root, "chain_evidence_consistent",
-                              chain_evidence_known,
-                              chain_evidence_consistent);
-    status_push_int_if_known(&root, "peers", peers_ok, pc);
-
-    if (!height_ok)
-        status_push_rpc_parse_error(&root, "height", h,
-                                    "getblockcount returned invalid data");
-    if (!peers_ok)
-        status_push_rpc_parse_error(&root, "peers", p,
-                                    "getpeerinfo returned invalid data");
-    else if (!max_peer_height_known) {
-        status_push_json_error(&root, "max_peer_height",
-                               "no connected peer supplied a valid height claim",
-                               NULL);
-        status_push_json_error(&root, "header_gap",
-                               "peer height claim unavailable", NULL);
-    }
-    if (!header_ok)
-        status_push_rpc_parse_error(
-            &root, "header_height", ci,
-            "getblockchaininfo missing valid best_header_height");
-    if (chain_evidence_known && !chain_evidence_consistent)
-        status_push_json_error(
-            &root, "chain_evidence",
-            "served H* exceeds the locally validated header frontier",
-            NULL);
-
-    struct json_value conn;
-    json_init(&conn);
-    json_set_object(&conn);
-    json_push_kv_bool(&conn, "known", peers_ok && peer_direction_known);
-    json_push_kv_bool(&conn, "total_known", peers_ok);
-    json_push_kv_bool(&conn, "direction_known", peer_direction_known);
-    status_push_int_if_known(&conn, "total", peers_ok, pc);
-    status_push_int_if_known(&conn, "inbound", peer_direction_known,
-                             inbound);
-    status_push_int_if_known(&conn, "outbound", peer_direction_known,
-                             outbound);
-    status_push_int_if_known(&conn, "zcl23", peers_ok, zcl23_cnt);
-    status_push_int_if_known(&conn, "magicbean", peers_ok, magicbean_cnt);
-    if (peers_ok && !peer_direction_known)
-        status_push_json_error(&conn, "direction",
-                               "peer entry missing boolean inbound field",
-                               NULL);
-    json_push_kv(&root, "connections", &conn);
-    json_free(&conn);
-
-    status_push_int_if_known(&root, "memory_rss_mb", memory_known,
-                             memory_known ? memory_value->val.i : 0);
-    status_push_int_if_known(&root, "uptime_secs", uptime_known,
-                             uptime_known ? uptime_value->val.i : 0);
-    if (!memory_known)
-        status_push_json_error(&root, "memory_rss_mb",
-                               "healthcheck missing valid nonnegative memory",
-                               NULL);
-    if (!uptime_known)
-        status_push_json_error(&root, "uptime_secs",
-                               "healthcheck missing valid nonnegative uptime",
-                               NULL);
+    status_full_push_chain(&root, &ev, &health_j);
+    status_full_push_input_errors(&root, &ev, h, p, ci);
+    status_full_push_connections(&root, &ev);
+    status_full_push_health(&root, &ev, &health_j);
     status_push_rpc_json(&root, "sync", s, "syncstate");
     status_push_rpc_json(&root, "validation", v, "validationstatus");
     status_push_rpc_json(&root, "health", hc, "healthcheck");
@@ -231,19 +303,7 @@ static char *zcl_native_status_body_full(const struct json_value *args,
     status_push_dumpstate_json(&root, "condition_engine",
                                "condition_engine", ce);
     status_push_dumpstate_json(&root, "sovereignty", "sovereignty", sv);
-    /* Also surface trust_mode as a flat top-level field — the operator
-     * sovereignty posture (docs/node/shielded-history-importer.md
-     * §5.5) is load-bearing enough to not require drilling into
-     * `sovereignty.trust_mode`. Reads the just-pushed nested object rather
-     * than re-parsing `sv`, so it can never disagree with it. */
-    {
-        const struct json_value *sov_state = json_get(&root, "sovereignty");
-        const struct json_value *tm = sov_state
-            ? json_get(sov_state, "trust_mode") : NULL;
-        json_push_kv_str(&root, "trust_mode",
-                         tm && json_get_str(tm) ? json_get_str(tm)
-                                                 : "unknown");
-    }
+    status_full_push_trust_mode(&root);
     bool blocker_fields_attached = status_push_blocker_summary(&root, bl);
 
     char *out = blocker_fields_attached
