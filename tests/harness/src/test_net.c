@@ -5916,7 +5916,8 @@ static bool listen_accept_cap_refusal_row(void)
     ok = ok && nm.num_nodes == 0;
     /* The refusal consumed the queued connection: a raw accept now sees an
      * empty queue (would-block), not a socket. */
-    zcl_socket_t raw = accept(nm.listen_sockets[0].socket, NULL, NULL);
+    zcl_socket_t raw = ZCL_INVALID_SOCKET;
+    if (ok) raw = accept(nm.listen_sockets[0].socket, NULL, NULL);
     ok = ok && raw == ZCL_INVALID_SOCKET &&
          platform_socket_error_would_block(platform_socket_last_error());
     if (raw != ZCL_INVALID_SOCKET) close_socket(&raw);
@@ -5952,10 +5953,16 @@ static int test_net_bind_listen_port_branches(void)
         ok = ok && nm.num_listen_sockets == 1;
         ok = ok && nm.listen_sockets[0].local_port > 0;
         ok = ok && !nm.listen_sockets[0].whitelisted;
-        /* bind() on a port a live listener holds is refused; nothing recorded */
-        uint16_t port = nm.listen_sockets[0].local_port;
-        ok = ok && !listen_fixture_bind(&nm, port, false);
-        ok = ok && nm.num_listen_sockets == 1;
+#ifndef _WIN32
+        /* POSIX only: SO_REUSEADDR (net_listen.c) lets Windows rebind a live
+         * port. bind() on a port a live listener holds is refused; nothing
+         * recorded. Guarded so a failed first bind never reads listen_sockets. */
+        if (ok) {
+            uint16_t port = nm.listen_sockets[0].local_port;
+            ok = !listen_fixture_bind(&nm, port, false);
+            ok = ok && nm.num_listen_sockets == 1;
+        }
+#endif
         net_manager_free(&nm);
     }
     {
