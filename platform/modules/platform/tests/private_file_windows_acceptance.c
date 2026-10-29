@@ -82,173 +82,251 @@ static DWORD WINAPI wait_lock_thread(LPVOID opaque) {
   return 0;
 }
 
-int main(void) {
-  wchar_t temp[MAX_PATH], directory[MAX_PATH];
-  if (!GetTempPathW(MAX_PATH, temp) ||
-      !GetTempFileNameW(temp, L"zpf", 0, directory) ||
-      !DeleteFileW(directory) || !CreateDirectoryW(directory, NULL))
-    return fail("temporary directory");
+static const char pf_test_payload[] = "position-safe";
 
+struct pf_test_fixture {
+  wchar_t directory[MAX_PATH];
   char dir[4 * MAX_PATH];
-  if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, directory, -1, dir,
-                           sizeof(dir), NULL, NULL))
-    return fail("temporary path encoding");
   char stage[4 * MAX_PATH], destination[4 * MAX_PATH], resolved[4 * MAX_PATH],
       parent[4 * MAX_PATH], conflict[4 * MAX_PATH];
   char invalid[4 * MAX_PATH], wait_lock[4 * MAX_PATH];
-  if (!join_path(stage, sizeof(stage), dir, "\\stage.part") ||
-      !join_path(destination, sizeof(destination), dir, "\\result.bin") ||
-      !join_path(conflict, sizeof(conflict), dir, "\\conflict.bin") ||
-      !join_path(wait_lock, sizeof(wait_lock), dir, "\\wait.lock") ||
-      !join_path(invalid, sizeof(invalid), dir, "\\file:stream"))
-    return fail("fixture path");
-  if (platform_private_path_resolve("relative\\file", resolved,
-                                    sizeof(resolved), parent,
-                                    sizeof(parent)) ||
-      platform_private_path_resolve("\\\\server\\share\\file", resolved,
-                                    sizeof(resolved), parent,
-                                    sizeof(parent)) ||
-      platform_private_path_resolve(invalid, resolved, sizeof(resolved),
-                                    parent, sizeof(parent)))
-    return fail("unsafe path accepted");
-  if (!join_path(invalid, sizeof(invalid), dir, "\\CON.txt"))
-    return fail("reserved path");
-  if (platform_private_path_resolve(invalid, resolved, sizeof(resolved),
-                                    parent, sizeof(parent)))
-    return fail("reserved device leaf accepted");
-  if (!join_path(invalid, sizeof(invalid), dir, "\\trailing."))
-    return fail("trailing-dot path");
-  if (platform_private_path_resolve(invalid, resolved, sizeof(resolved),
-                                    parent, sizeof(parent)))
-    return fail("ambiguous trailing-dot leaf accepted");
-  if (!platform_private_path_resolve(destination, resolved, sizeof(resolved),
-                                     parent, sizeof(parent)) ||
-      strcmp(resolved, destination) != 0)
-    return fail("canonical parent resolution");
-
   struct platform_private_file file, second;
-  platform_private_file_init(&file);
-  platform_private_file_init(&second);
-  if (!platform_private_file_create(stage, &file))
-    return fail("exclusive create");
-  platform_private_file_close(&file);
+  struct platform_private_file_identity identity;
+  bool same;
+};
+
+/* Each scenario helper returns NULL on success or the failure message; main
+ * reports it through fail() with no Win32 call in between. */
+static const char *pf_test_make_directory(struct pf_test_fixture *fx) {
+  wchar_t temp[MAX_PATH];
+  if (!GetTempPathW(MAX_PATH, temp) ||
+      !GetTempFileNameW(temp, L"zpf", 0, fx->directory) ||
+      !DeleteFileW(fx->directory) || !CreateDirectoryW(fx->directory, NULL))
+    return "temporary directory";
+
+  if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fx->directory, -1,
+                           fx->dir, sizeof(fx->dir), NULL, NULL))
+    return "temporary path encoding";
+  return NULL;
+}
+
+static const char *pf_test_fixture_paths(struct pf_test_fixture *fx) {
+  if (!join_path(fx->stage, sizeof(fx->stage), fx->dir, "\\stage.part") ||
+      !join_path(fx->destination, sizeof(fx->destination), fx->dir,
+                 "\\result.bin") ||
+      !join_path(fx->conflict, sizeof(fx->conflict), fx->dir,
+                 "\\conflict.bin") ||
+      !join_path(fx->wait_lock, sizeof(fx->wait_lock), fx->dir,
+                 "\\wait.lock") ||
+      !join_path(fx->invalid, sizeof(fx->invalid), fx->dir, "\\file:stream"))
+    return "fixture path";
+  return NULL;
+}
+
+static bool pf_test_resolve_invalid(struct pf_test_fixture *fx) {
+  return platform_private_path_resolve(fx->invalid, fx->resolved,
+                                       sizeof(fx->resolved), fx->parent,
+                                       sizeof(fx->parent));
+}
+
+static const char *pf_test_unsafe_paths(struct pf_test_fixture *fx) {
+  if (platform_private_path_resolve("relative\\file", fx->resolved,
+                                    sizeof(fx->resolved), fx->parent,
+                                    sizeof(fx->parent)) ||
+      platform_private_path_resolve("\\\\server\\share\\file", fx->resolved,
+                                    sizeof(fx->resolved), fx->parent,
+                                    sizeof(fx->parent)) ||
+      pf_test_resolve_invalid(fx))
+    return "unsafe path accepted";
+  if (!join_path(fx->invalid, sizeof(fx->invalid), fx->dir, "\\CON.txt"))
+    return "reserved path";
+  if (pf_test_resolve_invalid(fx))
+    return "reserved device leaf accepted";
+  if (!join_path(fx->invalid, sizeof(fx->invalid), fx->dir, "\\trailing."))
+    return "trailing-dot path";
+  if (pf_test_resolve_invalid(fx))
+    return "ambiguous trailing-dot leaf accepted";
+  if (!platform_private_path_resolve(fx->destination, fx->resolved,
+                                     sizeof(fx->resolved), fx->parent,
+                                     sizeof(fx->parent)) ||
+      strcmp(fx->resolved, fx->destination) != 0)
+    return "canonical parent resolution";
+  return NULL;
+}
+
+static const char *pf_test_create_and_lock(struct pf_test_fixture *fx) {
+  platform_private_file_init(&fx->file);
+  platform_private_file_init(&fx->second);
+  if (!platform_private_file_create(fx->stage, &fx->file))
+    return "exclusive create";
+  platform_private_file_close(&fx->file);
   struct platform_positioned_file reader;
   platform_positioned_file_init(&reader);
-  if (!platform_positioned_file_open(&reader, stage) ||
+  if (!platform_positioned_file_open(&reader, fx->stage) ||
       !platform_positioned_file_is_private(&reader))
-    return fail("private ACL validation");
+    return "private ACL validation";
   platform_positioned_file_close(&reader);
-  if (!platform_positioned_file_open_beneath(&reader, dir, "stage.part") ||
+  if (!platform_positioned_file_open_beneath(&reader, fx->dir, "stage.part") ||
       !platform_positioned_file_is_private(&reader))
-    return fail("private ACL validation through retained parent");
+    return "private ACL validation through retained parent";
   platform_positioned_file_close(&reader);
-  if (platform_private_file_create(stage, &file))
-    return fail("create clobbered existing file");
-  if (!platform_private_file_open_locked(stage, &file))
-    return fail("locked open");
-  if (platform_private_file_open_locked(stage, &second))
-    return fail("lock admitted second writer");
+  if (platform_private_file_create(fx->stage, &fx->file))
+    return "create clobbered existing file";
+  if (!platform_private_file_open_locked(fx->stage, &fx->file))
+    return "locked open";
+  if (platform_private_file_open_locked(fx->stage, &fx->second))
+    return "lock admitted second writer";
+  return NULL;
+}
 
+static const char *pf_test_waiting_lock(struct pf_test_fixture *fx) {
   /* Waiting locks must reach LockFileEx rather than fail in CreateFileW.
    * The contender stays blocked while the first handle owns the range, then
    * succeeds promptly after release. This specifically proves that every
    * access requested by pf_open(), including DELETE, is shared. */
   struct platform_private_file held;
   platform_private_file_init(&held);
-  if (!pf_test_hold_writer(wait_lock, &held))
-    return fail("waiting lock create");
-  struct wait_lock_context wait_context = {.path = wait_lock};
+  if (!pf_test_hold_writer(fx->wait_lock, &held))
+    return "waiting lock create";
+  struct wait_lock_context wait_context = {.path = fx->wait_lock};
   HANDLE waiter = CreateThread(NULL, 0, wait_lock_thread, &wait_context, 0,
                                NULL);
   if (!waiter)
-    return fail("waiting lock thread");
+    return "waiting lock thread";
   if (WaitForSingleObject(waiter, 100) != WAIT_TIMEOUT) {
     CloseHandle(waiter);
-    return fail("waiting lock did not block");
+    return "waiting lock did not block";
   }
   platform_private_file_close(&held);
   if (WaitForSingleObject(waiter, 5000) != WAIT_OBJECT_0 ||
       !wait_context.acquired) {
     CloseHandle(waiter);
     SetLastError(wait_context.error);
-    return fail("waiting lock did not acquire after release");
+    return "waiting lock did not acquire after release";
   }
   CloseHandle(waiter);
-  static const char payload[] = "position-safe";
-  if (!platform_private_file_write_at(&file, payload, sizeof(payload), 17) ||
-      !platform_private_file_flush(&file))
-    return fail("positional durable write");
-  char observed[sizeof(payload)] = {0};
-  if (!platform_private_file_read_at(&file, observed, sizeof(observed), 17) ||
-      memcmp(payload, observed, sizeof(payload)))
-    return fail("positional read");
+  return NULL;
+}
+
+static const char *pf_test_positional_io(struct pf_test_fixture *fx) {
+  const char *payload = pf_test_payload;
+  if (!platform_private_file_write_at(&fx->file, payload,
+                                      sizeof(pf_test_payload), 17) ||
+      !platform_private_file_flush(&fx->file))
+    return "positional durable write";
+  char observed[sizeof(pf_test_payload)] = {0};
+  if (!platform_private_file_read_at(&fx->file, observed, sizeof(observed),
+                                     17) ||
+      memcmp(payload, observed, sizeof(pf_test_payload)))
+    return "positional read";
   uint64_t size = 0;
-  if (!platform_private_file_size(&file, &size) ||
-      size != 17 + sizeof(payload) ||
-      !platform_private_file_truncate(&file, sizeof(payload)) ||
-      !platform_private_file_flush(&file))
-    return fail("size/truncate");
-  struct platform_private_file_identity identity;
-  if (!platform_private_file_identity(&file, &identity))
-    return fail("identity");
-  bool same = false;
-  if (!platform_private_file_link_no_clobber(stage, destination, &identity,
-                                             &same) ||
-      same)
-    return fail("first no-clobber publication");
-  if (!platform_private_file_link_no_clobber(stage, destination, &identity,
-                                             &same) ||
-      !same)
-    return fail("idempotent publication identity");
-  platform_private_file_close(&file);
+  if (!platform_private_file_size(&fx->file, &size) ||
+      size != 17 + sizeof(pf_test_payload) ||
+      !platform_private_file_truncate(&fx->file, sizeof(pf_test_payload)) ||
+      !platform_private_file_flush(&fx->file))
+    return "size/truncate";
+  return NULL;
+}
 
-  if (!platform_private_file_create(conflict, &second))
-    return fail("conflict fixture");
-  platform_private_file_close(&second);
-  same = false;
-  if (platform_private_file_link_no_clobber(stage, conflict, &identity,
-                                            &same) ||
-      same)
-    return fail("conflicting destination accepted");
+static const char *pf_test_publication(struct pf_test_fixture *fx) {
+  if (!platform_private_file_identity(&fx->file, &fx->identity))
+    return "identity";
+  fx->same = false;
+  if (!platform_private_file_link_no_clobber(fx->stage, fx->destination,
+                                             &fx->identity, &fx->same) ||
+      fx->same)
+    return "first no-clobber publication";
+  if (!platform_private_file_link_no_clobber(fx->stage, fx->destination,
+                                             &fx->identity, &fx->same) ||
+      !fx->same)
+    return "idempotent publication identity";
+  platform_private_file_close(&fx->file);
 
+  if (!platform_private_file_create(fx->conflict, &fx->second))
+    return "conflict fixture";
+  platform_private_file_close(&fx->second);
+  fx->same = false;
+  if (platform_private_file_link_no_clobber(fx->stage, fx->conflict,
+                                            &fx->identity, &fx->same) ||
+      fx->same)
+    return "conflicting destination accepted";
+  return NULL;
+}
+
+static const char *pf_test_replacement(struct pf_test_fixture *fx) {
   /* Replacement stays tied to the verified staging handle and replaces an
    * existing destination atomically. */
   char replacement[4 * MAX_PATH];
-  if (!join_path(replacement, sizeof(replacement), dir,
+  if (!join_path(replacement, sizeof(replacement), fx->dir,
                  "\\replacement.part"))
-    return fail("replacement path");
-  if (!platform_private_file_create(replacement, &second) ||
-      !platform_private_file_write_at(&second, payload, sizeof(payload), 0) ||
-      !platform_private_file_replace(&second, replacement, conflict) ||
+    return "replacement path";
+  if (!platform_private_file_create(replacement, &fx->second) ||
+      !platform_private_file_write_at(&fx->second, pf_test_payload,
+                                      sizeof(pf_test_payload), 0) ||
+      !platform_private_file_replace(&fx->second, replacement, fx->conflict) ||
       !platform_private_path_absent(replacement) ||
-      !platform_private_parent_flush(parent))
-    return fail("handle-bound replacement");
-  platform_private_file_init(&second);
-  FILE *installed = fopen(conflict, "rb");
+      !platform_private_parent_flush(fx->parent))
+    return "handle-bound replacement";
+  platform_private_file_init(&fx->second);
+  char observed[sizeof(pf_test_payload)];
+  FILE *installed = fopen(fx->conflict, "rb");
   memset(observed, 0, sizeof(observed));
   if (!installed || fread(observed, 1, sizeof(observed), installed) !=
                         sizeof(observed) ||
-      fclose(installed) != 0 || memcmp(observed, payload, sizeof(payload)))
-    return fail("replacement contents");
+      fclose(installed) != 0 ||
+      memcmp(observed, pf_test_payload, sizeof(pf_test_payload)))
+    return "replacement contents";
+  return NULL;
+}
 
-  if (!platform_private_file_open_locked(stage, &file) ||
-      !platform_private_file_retire(&file, stage) ||
-      !platform_private_path_absent(stage) ||
-      !platform_private_file_unlink_missing_ok(stage) ||
-      !platform_private_parent_flush(parent))
-    return fail("durable cleanup");
+static const char *pf_test_durable_cleanup(struct pf_test_fixture *fx) {
+  if (!platform_private_file_open_locked(fx->stage, &fx->file) ||
+      !platform_private_file_retire(&fx->file, fx->stage) ||
+      !platform_private_path_absent(fx->stage) ||
+      !platform_private_file_unlink_missing_ok(fx->stage) ||
+      !platform_private_parent_flush(fx->parent))
+    return "durable cleanup";
+  return NULL;
+}
 
+static void pf_test_remove_fixture(struct pf_test_fixture *fx) {
   wchar_t wstage[4 * MAX_PATH], wdestination[4 * MAX_PATH],
       wconflict[4 * MAX_PATH];
-  MultiByteToWideChar(CP_UTF8, 0, stage, -1, wstage, 4 * MAX_PATH);
-  MultiByteToWideChar(CP_UTF8, 0, destination, -1, wdestination, 4 * MAX_PATH);
-  MultiByteToWideChar(CP_UTF8, 0, conflict, -1, wconflict, 4 * MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, fx->stage, -1, wstage, 4 * MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, fx->destination, -1, wdestination,
+                      4 * MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, fx->conflict, -1, wconflict, 4 * MAX_PATH);
   DeleteFileW(wdestination);
   DeleteFileW(wconflict);
   wchar_t wwait_lock[4 * MAX_PATH];
-  MultiByteToWideChar(CP_UTF8, 0, wait_lock, -1, wwait_lock, 4 * MAX_PATH);
+  MultiByteToWideChar(CP_UTF8, 0, fx->wait_lock, -1, wwait_lock, 4 * MAX_PATH);
   DeleteFileW(wwait_lock);
-  RemoveDirectoryW(directory);
+  RemoveDirectoryW(fx->directory);
+}
+
+int main(void) {
+  struct pf_test_fixture fx;
+  memset(&fx, 0, sizeof(fx));
+  const char *failure = pf_test_make_directory(&fx);
+  if (!failure)
+    failure = pf_test_fixture_paths(&fx);
+  if (!failure)
+    failure = pf_test_unsafe_paths(&fx);
+  if (!failure)
+    failure = pf_test_create_and_lock(&fx);
+  if (!failure)
+    failure = pf_test_waiting_lock(&fx);
+  if (!failure)
+    failure = pf_test_positional_io(&fx);
+  if (!failure)
+    failure = pf_test_publication(&fx);
+  if (!failure)
+    failure = pf_test_replacement(&fx);
+  if (!failure)
+    failure = pf_test_durable_cleanup(&fx);
+  if (failure)
+    return fail(failure);
+  pf_test_remove_fixture(&fx);
   puts("PASS private_file_acceptance");
   return 0;
 }
