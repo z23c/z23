@@ -116,6 +116,35 @@ static bool score_transport_import(
                                  wire, wire_len);
 }
 
+static bool score_transport_file_chunks(
+    struct vcs_package_store *source, struct vcs_package_store *destination,
+    const char *workspace, const uint8_t package_root[32],
+    uint32_t file_index, const struct vcs_package_file *file)
+{
+    for (uint32_t j = 0; j < file->chunk_count; j++) {
+        uint8_t *chunk = NULL;
+        size_t chunk_len = 0;
+        if (vcs_package_store_get_chunk_at(
+                source, package_root, file_index, j,
+                &chunk, &chunk_len) != VCS_PACKAGE_STORE_OK ||
+            vcs_package_store_put_chunk(
+                destination, package_root, file->path, j,
+                chunk, chunk_len) != VCS_PACKAGE_STORE_OK) {
+            free(chunk);
+            return false;
+        }
+        if (strcmp(file->path, "LICENSE") == 0 &&
+            !vcs_object_put_addressed(
+                workspace, file->chunk_hashes + (size_t)j * 32u,
+                chunk, chunk_len)) {
+            free(chunk);
+            return false;
+        }
+        free(chunk);
+    }
+    return true;
+}
+
 static bool score_transport_package(
     struct vcs_package_store *source, struct vcs_package_store *destination,
     const char *workspace, const uint8_t package_root[32],
@@ -147,29 +176,11 @@ static bool score_transport_package(
         return true;
     }
     for (size_t i = 0; i < manifest.count; i++) {
-        const struct vcs_package_file *file = &manifest.files[i];
-        for (uint32_t j = 0; j < file->chunk_count; j++) {
-            uint8_t *chunk = NULL;
-            size_t chunk_len = 0;
-            if (vcs_package_store_get_chunk_at(
-                    source, package_root, (uint32_t)i, j,
-                    &chunk, &chunk_len) != VCS_PACKAGE_STORE_OK ||
-                vcs_package_store_put_chunk(
-                    destination, package_root, file->path, j,
-                    chunk, chunk_len) != VCS_PACKAGE_STORE_OK) {
-                free(chunk);
-                vcs_package_manifest_free(&manifest);
-                return false;
-            }
-            if (strcmp(file->path, "LICENSE") == 0 &&
-                !vcs_object_put_addressed(
-                    workspace, file->chunk_hashes + (size_t)j * 32u,
-                    chunk, chunk_len)) {
-                free(chunk);
-                vcs_package_manifest_free(&manifest);
-                return false;
-            }
-            free(chunk);
+        if (!score_transport_file_chunks(
+                source, destination, workspace, package_root, (uint32_t)i,
+                &manifest.files[i])) {
+            vcs_package_manifest_free(&manifest);
+            return false;
         }
     }
     vcs_package_manifest_free(&manifest);
@@ -540,6 +551,88 @@ static int test_score_happy_path(void)
     return failures;
 }
 
+struct score_store_encoding {
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
+    uint8_t score_wire[VCS_ZCODE_SCORE_WIRE_BYTES];
+    uint8_t policy_root[32];
+    size_t proof_len;
+};
+
+static bool score_store_encode(
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct vcs_zcode_proof_policy_v1 *policy,
+    const struct vcs_zcode_lane_receipt_v1 *lane,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    uint8_t proof_roots[VCS_ZCODE_SCORE_UNITS][32],
+    struct score_store_encoding *enc,
+    uint8_t task_root[32], uint8_t candidate_root[32],
+    uint8_t proof_set_root[32], uint8_t lane_root[32], uint8_t score_root[32])
+{
+    enc->proof_len = 0;
+    if (vcs_zcode_task_serialize(task, enc->task_wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_serialize(candidate, enc->candidate_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_policy_serialize(policy, enc->policy_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_serialize(lane, enc->lane_wire) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_set_serialize(
+            proof_roots, VCS_ZCODE_SCORE_UNITS, enc->proof_wire,
+            sizeof(enc->proof_wire), &enc->proof_len) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_score_receipt_serialize(score, enc->score_wire) !=
+            VCS_ZCODE_SCORE_OK ||
+        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_candidate_root(candidate, candidate_root) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_policy_root(policy, enc->policy_root) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_proof_set_root(proof_roots, VCS_ZCODE_SCORE_UNITS,
+                                 proof_set_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_lane_receipt_id(lane, lane_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_score_receipt_id(score, score_root) !=
+            VCS_ZCODE_SCORE_OK)
+        return false;
+    return true;
+}
+
+static bool score_store_put_encoded(
+    const char *workspace, struct score_store_encoding *enc,
+    uint8_t task_root[32], uint8_t candidate_root[32],
+    uint8_t proof_set_root[32], uint8_t lane_root[32], uint8_t score_root[32],
+    const struct score_work_fixture works[VCS_ZCODE_SCORE_UNITS])
+{
+    if (!vcs_object_store_init(workspace) ||
+        !vcs_object_put_addressed(workspace, task_root, enc->task_wire,
+                                  sizeof(enc->task_wire)) ||
+        !vcs_object_put_addressed(workspace, candidate_root,
+                                  enc->candidate_wire,
+                                  sizeof(enc->candidate_wire)) ||
+        !vcs_object_put_addressed(workspace, enc->policy_root,
+                                  enc->policy_wire,
+                                  sizeof(enc->policy_wire)) ||
+        !vcs_object_put_addressed(workspace, proof_set_root, enc->proof_wire,
+                                  enc->proof_len) ||
+        !vcs_object_put_addressed(workspace, lane_root, enc->lane_wire,
+                                  sizeof(enc->lane_wire)) ||
+        !vcs_object_put_addressed(workspace, score_root, enc->score_wire,
+                                  sizeof(enc->score_wire)))
+        return false;
+    for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++) {
+        uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        if (vcs_zcode_work_receipt_serialize(&works[i].receipt, work_wire) !=
+                VCS_ZCODE_DEV_OK ||
+            !vcs_object_put_addressed(workspace, works[i].root, work_wire,
+                                      sizeof(work_wire)))
+            return false;
+    }
+    return true;
+}
+
 static bool score_store_vertical(
     const char *workspace, const struct vcs_zcode_task_v1 *task,
     const struct vcs_zcode_candidate_v1 *candidate,
@@ -551,62 +644,17 @@ static bool score_store_vertical(
     uint8_t proof_set_root[32], uint8_t lane_root[32],
     uint8_t score_root[32])
 {
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
-    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
-    uint8_t score_wire[VCS_ZCODE_SCORE_WIRE_BYTES];
-    uint8_t policy_root[32], proof_roots[VCS_ZCODE_SCORE_UNITS][32];
-    size_t proof_len = 0;
+    struct score_store_encoding enc;
+    uint8_t proof_roots[VCS_ZCODE_SCORE_UNITS][32];
     for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++)
         memcpy(proof_roots[i], works[i].root, 32);
-    if (vcs_zcode_task_serialize(task, task_wire) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_serialize(candidate, candidate_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_serialize(policy, policy_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_serialize(lane, lane_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_serialize(
-            proof_roots, VCS_ZCODE_SCORE_UNITS, proof_wire,
-            sizeof(proof_wire), &proof_len) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_score_receipt_serialize(score, score_wire) !=
-            VCS_ZCODE_SCORE_OK ||
-        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_root(candidate, candidate_root) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_root(policy, policy_root) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_root(proof_roots, VCS_ZCODE_SCORE_UNITS,
-                                 proof_set_root) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_id(lane, lane_root) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_score_receipt_id(score, score_root) !=
-            VCS_ZCODE_SCORE_OK)
+    if (!score_store_encode(task, candidate, policy, lane, score, proof_roots,
+                            &enc, task_root, candidate_root, proof_set_root,
+                            lane_root, score_root))
         return false;
-    if (!vcs_object_store_init(workspace) ||
-        !vcs_object_put_addressed(workspace, task_root, task_wire,
-                                  sizeof(task_wire)) ||
-        !vcs_object_put_addressed(workspace, candidate_root, candidate_wire,
-                                  sizeof(candidate_wire)) ||
-        !vcs_object_put_addressed(workspace, policy_root, policy_wire,
-                                  sizeof(policy_wire)) ||
-        !vcs_object_put_addressed(workspace, proof_set_root, proof_wire,
-                                  proof_len) ||
-        !vcs_object_put_addressed(workspace, lane_root, lane_wire,
-                                  sizeof(lane_wire)) ||
-        !vcs_object_put_addressed(workspace, score_root, score_wire,
-                                  sizeof(score_wire)))
-        return false;
-    for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++) {
-        uint8_t work_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
-        if (vcs_zcode_work_receipt_serialize(&works[i].receipt, work_wire) !=
-                VCS_ZCODE_DEV_OK ||
-            !vcs_object_put_addressed(workspace, works[i].root, work_wire,
-                                      sizeof(work_wire)))
-            return false;
-    }
-    return true;
+    return score_store_put_encoded(workspace, &enc, task_root, candidate_root,
+                                   proof_set_root, lane_root, score_root,
+                                   works);
 }
 
 static int test_score_package_verticals(void)
@@ -2385,6 +2433,298 @@ static int test_creation_attribution_cross_validation(void)
     return failures;
 }
 
+static size_t score_reproduce_index(
+    const struct score_work_fixture works[VCS_ZCODE_SCORE_UNITS])
+{
+    size_t reproduce_index = VCS_ZCODE_SCORE_UNITS;
+    for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++)
+        if (works[i].receipt.work_kind == VCS_ZCODE_WORK_REPRODUCE)
+            reproduce_index = i;
+    return reproduce_index;
+}
+
+static bool score_put_license_chunks(
+    const char *workspace, const struct vcs_package_file *license_file)
+{
+    int failures = 0;
+    uint8_t chunk[VCS_PACKAGE_CHUNK_BYTES];
+    for (uint32_t i = 0; i < license_file->chunk_count; i++) {
+        size_t chunk_len = 0;
+        enum vcs_package_publish_rule rule;
+        ASSERT(vcs_package_publish_read_chunk(
+            score_packages[0].dir, license_file, i, chunk,
+            &chunk_len, &rule));
+        ASSERT(vcs_object_put_addressed(
+            workspace, license_file->chunk_hashes + (size_t)i * 32u,
+            chunk, chunk_len));
+    }
+    _test_next:;
+    return failures == 0;
+}
+
+static bool score_requester_store_chunks(
+    struct vcs_package_store *requester_store, const uint8_t package[32],
+    struct vcs_package_prepared *prepared)
+{
+    int failures = 0;
+    uint8_t chunk[VCS_PACKAGE_CHUNK_BYTES];
+    for (size_t i = 0; i < prepared->manifest.count; i++) {
+        const struct vcs_package_file *file = &prepared->manifest.files[i];
+        for (uint32_t j = 0; j < file->chunk_count; j++) {
+            size_t chunk_len = 0;
+            enum vcs_package_publish_rule rule;
+            ASSERT(vcs_package_publish_read_chunk(
+                score_packages[0].dir, file, j, chunk,
+                &chunk_len, &rule));
+            ASSERT_EQ(vcs_package_store_put_chunk(
+                          requester_store, package, file->path, j,
+                          chunk, chunk_len), VCS_PACKAGE_STORE_OK);
+        }
+    }
+    _test_next:;
+    return failures == 0;
+}
+
+static bool score_reproducer_import(
+    bool ok, struct vcs_package_store *source,
+    struct vcs_package_store *destination, const char *workspace_b,
+    struct score_transport_entry request_entries[], size_t request_entry_count,
+    uint8_t package[32])
+{
+    if (ok) {
+        struct score_transport_entry corrupt = request_entries[0];
+        corrupt.transport_root[0] ^= 1u;
+        ok = !score_transport_import(
+            source, destination, workspace_b, &corrupt);
+    }
+    if (ok && request_entry_count > 0)
+        ok = !vcs_object_has(
+            workspace_b,
+            request_entries[request_entry_count - 1].semantic_root);
+    for (size_t i = 0; ok && i < request_entry_count; i++)
+        ok = score_transport_import(
+            source, destination, workspace_b, &request_entries[i]);
+    if (ok)
+        ok = score_transport_package(
+            source, destination, workspace_b, package, true);
+    struct vcs_package_store_status package_status;
+    if (ok)
+        ok = vcs_package_store_package_status(
+                 destination, package, &package_status) &&
+             !package_status.complete;
+    if (ok)
+        ok = score_transport_package(
+            source, destination, workspace_b, package, false);
+    return ok;
+}
+
+static bool score_reproducer_seal(
+    bool ok, const char *workspace_b,
+    struct vcs_zcode_work_receipt_v1 reproduction_work,
+    uint8_t reproducer_secret[32], uint8_t reproducer_pubkey[32],
+    uint8_t reproduction_work_root[32], uint8_t reproduction_work_wire[],
+    const uint8_t *result_semantic_roots[], const uint8_t *result_wires[],
+    const size_t result_wire_lens[],
+    struct score_transport_entry result_entries[],
+    struct vcs_package_store *destination)
+{
+    struct vcs_zcode_work_receipt_v1 signed_result =
+        reproduction_work;
+    if (ok)
+        ok = vcs_zcode_work_receipt_seal(
+                 &signed_result, reproducer_secret,
+                 reproducer_pubkey) == VCS_ZCODE_DEV_OK;
+    uint8_t signed_root[32], signed_wire[
+        VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    if (ok)
+        ok = vcs_zcode_work_receipt_id(
+                 &signed_result, signed_root) == VCS_ZCODE_DEV_OK &&
+             memcmp(signed_root, reproduction_work_root, 32) == 0 &&
+             vcs_zcode_work_receipt_serialize(
+                 &signed_result, signed_wire) == VCS_ZCODE_DEV_OK &&
+             memcmp(signed_wire, reproduction_work_wire,
+                    sizeof(signed_wire)) == 0;
+    for (size_t i = 0; ok && i < 4; i++) {
+        ok = vcs_object_put_addressed(
+                 workspace_b, result_semantic_roots[i],
+                 result_wires[i], result_wire_lens[i]) &&
+             score_transport_export(
+                 destination, workspace_b,
+                 result_semantic_roots[i], &result_entries[i]);
+    }
+    return ok;
+}
+
+static void score_reproducer_child(
+    const char *transport_a, const char *transport_b,
+    uint64_t transport_quota, const char *workspace_b,
+    struct score_transport_entry request_entries[], size_t request_entry_count,
+    uint8_t package[32], struct vcs_zcode_work_receipt_v1 reproduction_work,
+    uint8_t reproducer_secret[32], uint8_t reproducer_pubkey[32],
+    uint8_t reproduction_work_root[32], uint8_t reproduction_work_wire[],
+    const uint8_t *result_semantic_roots[], const uint8_t *result_wires[],
+    const size_t result_wire_lens[],
+    struct score_transport_entry result_entries[])
+{
+    bool ok = true;
+    struct vcs_package_store *source =
+        vcs_package_store_open(transport_a, transport_quota);
+    struct vcs_package_store *destination =
+        vcs_package_store_open(transport_b, transport_quota);
+    ok = source && destination;
+    ok = score_reproducer_import(ok, source, destination, workspace_b,
+                                 request_entries, request_entry_count,
+                                 package);
+    ok = score_reproducer_seal(ok, workspace_b, reproduction_work,
+                               reproducer_secret, reproducer_pubkey,
+                               reproduction_work_root, reproduction_work_wire,
+                               result_semantic_roots, result_wires,
+                               result_wire_lens, result_entries, destination);
+    vcs_package_store_close(destination);
+    vcs_package_store_close(source);
+    _exit(ok ? 0 : 31);
+}
+
+static bool score_observer_import(
+    bool ok, struct vcs_package_store *source,
+    struct vcs_package_store *destination, const char *workspace_c,
+    struct score_transport_entry request_entries[], size_t request_entry_count,
+    struct score_transport_entry result_entries[], uint8_t package[32])
+{
+    for (size_t i = 0; ok && i < request_entry_count; i++)
+        ok = score_transport_import(
+            source, destination, workspace_c, &request_entries[i]);
+    for (size_t i = 0; ok && i < 4; i++)
+        ok = score_transport_import(
+            source, destination, workspace_c, &result_entries[i]);
+    if (ok)
+        ok = score_transport_package(
+            source, destination, workspace_c, package, false);
+    return ok;
+}
+
+static bool score_observer_qualify(
+    bool ok, const char *workspace_c, uint8_t score_root[32],
+    uint8_t policy_root[32], uint8_t request_root[32],
+    uint8_t reproduction_proof_set_root[32])
+{
+    struct vcs_zcode_reproduction_qualification_report observed;
+    if (ok)
+        ok = vcs_zcode_reproduction_qualify_cas(
+                 workspace_c, score_root, policy_root, request_root,
+                 reproduction_proof_set_root, 0, 605800,
+                 &observed) == VCS_ZCODE_QUALIFICATION_READY &&
+             observed.exact_reproduction_match &&
+             observed.distinct_signer &&
+             observed.signer_policy_approved &&
+             !observed.remote_transport_used &&
+             !observed.physical_independence_proven;
+    return ok;
+}
+
+static bool score_observer_attest(
+    bool ok, const char *workspace_c, uint8_t score_root[32],
+    uint8_t policy_root[32], uint8_t request_root[32],
+    uint8_t reproduction_proof_set_root[32],
+    uint8_t requester_binding_root[32])
+{
+    struct vcs_zcode_shadow_attribution_input observed_input = {
+        .workspace = workspace_c,
+        .score_receipt_root = score_root,
+        .policy_candidate_root = policy_root,
+        .reproduction_request_root = request_root,
+        .reproduction_proof_set_root = reproduction_proof_set_root,
+        .contributor_binding_root = requester_binding_root,
+        .epoch = 0,
+        .now_unix = 605800,
+    };
+    struct vcs_zcode_shadow_attribution_plan observed_attribution;
+    if (ok)
+        ok = vcs_zcode_shadow_attribution_plan_cas(
+                 &observed_input, &observed_attribution) ==
+             VCS_ZCODE_SHADOW_SIMULATION_OK;
+    uint8_t observed_wire[
+        VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES];
+    if (ok)
+        ok = vcs_zcode_creation_attribution_serialize(
+                 &observed_attribution.attribution, observed_wire) ==
+                 VCS_ZCODE_CREATION_OK &&
+             vcs_object_put_addressed(
+                 workspace_c, observed_attribution.attribution_root,
+                 observed_wire, sizeof(observed_wire));
+    struct vcs_zcode_shadow_epoch_input observed_epoch_input = {
+        .workspace = workspace_c,
+        .policy_candidate_root = policy_root,
+        .attribution_root = observed_attribution.attribution_root,
+        .fixture_branch_root =
+            observed_attribution.fixture_branch_root,
+        .previous_epoch_creation_root = (const uint8_t[32]){0},
+        .now_unix = 605800,
+    };
+    struct vcs_zcode_shadow_epoch_plan observed_epoch;
+    if (ok)
+        ok = vcs_zcode_shadow_epoch_plan_cas(
+                 &observed_epoch_input, &observed_epoch) ==
+             VCS_ZCODE_SHADOW_SIMULATION_OK;
+    uint8_t *epoch_wire = NULL;
+    size_t epoch_wire_len = 0;
+    if (ok)
+        ok = vcs_zcode_epoch_creation_serialize(
+                 &observed_epoch.epoch, &epoch_wire,
+                 &epoch_wire_len) == VCS_ZCODE_EPOCH_CREATION_OK &&
+             vcs_object_put_addressed(
+                 workspace_c, observed_epoch.epoch_root,
+                 epoch_wire, epoch_wire_len);
+    free(epoch_wire);
+    vcs_zcode_shadow_epoch_plan_free(&observed_epoch);
+    return ok;
+}
+
+static bool score_observer_projection(bool ok, const char *workspace_c)
+{
+    struct vcs_zcode_commons_projection *first = ok
+        ? vcs_zcode_commons_projection_build(workspace_c) : NULL;
+    struct vcs_zcode_commons_projection *second = ok
+        ? vcs_zcode_commons_projection_build(workspace_c) : NULL;
+    uint8_t first_root[32], second_root[32];
+    ok = ok && first && second &&
+        vcs_zcode_commons_projection_root(first, first_root) &&
+        vcs_zcode_commons_projection_root(second, second_root) &&
+        memcmp(first_root, second_root, 32) == 0;
+    vcs_zcode_commons_projection_free(second);
+    vcs_zcode_commons_projection_free(first);
+    return ok;
+}
+
+static void score_observer_child(
+    const char *transport_b, const char *transport_c,
+    uint64_t transport_quota, const char *workspace_c,
+    struct score_transport_entry request_entries[], size_t request_entry_count,
+    struct score_transport_entry result_entries[], uint8_t package[32],
+    uint8_t score_root[32], uint8_t policy_root[32], uint8_t request_root[32],
+    uint8_t reproduction_proof_set_root[32],
+    uint8_t requester_binding_root[32])
+{
+    bool ok = true;
+    struct vcs_package_store *source =
+        vcs_package_store_open(transport_b, transport_quota);
+    struct vcs_package_store *destination =
+        vcs_package_store_open(transport_c, transport_quota);
+    ok = source && destination;
+    ok = score_observer_import(ok, source, destination, workspace_c,
+                               request_entries, request_entry_count,
+                               result_entries, package);
+    ok = score_observer_qualify(ok, workspace_c, score_root, policy_root,
+                                request_root, reproduction_proof_set_root);
+    ok = score_observer_attest(ok, workspace_c, score_root, policy_root,
+                               request_root, reproduction_proof_set_root,
+                               requester_binding_root);
+    ok = score_observer_projection(ok, workspace_c);
+    vcs_package_store_close(destination);
+    vcs_package_store_close(source);
+    _exit(ok ? 0 : 32);
+}
+
 static int test_reproduction_qualification(void)
 {
     int failures = 0;
@@ -2533,10 +2873,7 @@ static int test_reproduction_qualification(void)
         ASSERT_EQ(vcs_zcode_reproduction_request_root(
                       &request, request_root), VCS_ZCODE_REPRODUCTION_OK);
 
-        size_t reproduce_index = VCS_ZCODE_SCORE_UNITS;
-        for (size_t i = 0; i < VCS_ZCODE_SCORE_UNITS; i++)
-            if (works[i].receipt.work_kind == VCS_ZCODE_WORK_REPRODUCE)
-                reproduce_index = i;
+        size_t reproduce_index = score_reproduce_index(works);
         ASSERT(reproduce_index < VCS_ZCODE_SCORE_UNITS);
 
         uint8_t proof_roots[VCS_ZCODE_SCORE_UNITS][32];
@@ -2736,17 +3073,7 @@ static int test_reproduction_qualification(void)
             if (strcmp(prepared.manifest.files[i].path, "LICENSE") == 0)
                 license_file = &prepared.manifest.files[i];
         ASSERT(license_file != NULL);
-        uint8_t chunk[VCS_PACKAGE_CHUNK_BYTES];
-        for (uint32_t i = 0; i < license_file->chunk_count; i++) {
-            size_t chunk_len = 0;
-            enum vcs_package_publish_rule rule;
-            ASSERT(vcs_package_publish_read_chunk(
-                score_packages[0].dir, license_file, i, chunk,
-                &chunk_len, &rule));
-            ASSERT(vcs_object_put_addressed(
-                workspace, license_file->chunk_hashes + (size_t)i * 32u,
-                chunk, chunk_len));
-        }
+        ASSERT(score_put_license_chunks(workspace, license_file));
 
         /* O5 three-party acceptance.  Every semantic object rides as an
          * existing one-chunk content.v2 blob, while the real package uses
@@ -2775,19 +3102,8 @@ static int test_reproduction_qualification(void)
                       prepared.manifest_wire_len, admitted_package),
                   VCS_PACKAGE_STORE_OK);
         ASSERT(memcmp(admitted_package, package, 32) == 0);
-        for (size_t i = 0; i < prepared.manifest.count; i++) {
-            const struct vcs_package_file *file = &prepared.manifest.files[i];
-            for (uint32_t j = 0; j < file->chunk_count; j++) {
-                size_t chunk_len = 0;
-                enum vcs_package_publish_rule rule;
-                ASSERT(vcs_package_publish_read_chunk(
-                    score_packages[0].dir, file, j, chunk,
-                    &chunk_len, &rule));
-                ASSERT_EQ(vcs_package_store_put_chunk(
-                              requester_store, package, file->path, j,
-                              chunk, chunk_len), VCS_PACKAGE_STORE_OK);
-            }
-        }
+        ASSERT(score_requester_store_chunks(requester_store, package,
+                                            &prepared));
         ASSERT(vcs_package_store_verify_possession(
             requester_store, package, false));
 
@@ -2845,64 +3161,13 @@ static int test_reproduction_qualification(void)
         pid_t reproducer_pid = fork();
         ASSERT(reproducer_pid >= 0);
         if (reproducer_pid == 0) {
-            bool ok = true;
-            struct vcs_package_store *source =
-                vcs_package_store_open(transport_a, transport_quota);
-            struct vcs_package_store *destination =
-                vcs_package_store_open(transport_b, transport_quota);
-            ok = source && destination;
-            if (ok) {
-                struct score_transport_entry corrupt = request_entries[0];
-                corrupt.transport_root[0] ^= 1u;
-                ok = !score_transport_import(
-                    source, destination, workspace_b, &corrupt);
-            }
-            if (ok && request_entry_count > 0)
-                ok = !vcs_object_has(
-                    workspace_b,
-                    request_entries[request_entry_count - 1].semantic_root);
-            for (size_t i = 0; ok && i < request_entry_count; i++)
-                ok = score_transport_import(
-                    source, destination, workspace_b, &request_entries[i]);
-            if (ok)
-                ok = score_transport_package(
-                    source, destination, workspace_b, package, true);
-            struct vcs_package_store_status package_status;
-            if (ok)
-                ok = vcs_package_store_package_status(
-                         destination, package, &package_status) &&
-                     !package_status.complete;
-            if (ok)
-                ok = score_transport_package(
-                    source, destination, workspace_b, package, false);
-
-            struct vcs_zcode_work_receipt_v1 signed_result =
-                reproduction_work;
-            if (ok)
-                ok = vcs_zcode_work_receipt_seal(
-                         &signed_result, reproducer_secret,
-                         reproducer_pubkey) == VCS_ZCODE_DEV_OK;
-            uint8_t signed_root[32], signed_wire[
-                VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
-            if (ok)
-                ok = vcs_zcode_work_receipt_id(
-                         &signed_result, signed_root) == VCS_ZCODE_DEV_OK &&
-                     memcmp(signed_root, reproduction_work_root, 32) == 0 &&
-                     vcs_zcode_work_receipt_serialize(
-                         &signed_result, signed_wire) == VCS_ZCODE_DEV_OK &&
-                     memcmp(signed_wire, reproduction_work_wire,
-                            sizeof(signed_wire)) == 0;
-            for (size_t i = 0; ok && i < 4; i++) {
-                ok = vcs_object_put_addressed(
-                         workspace_b, result_semantic_roots[i],
-                         result_wires[i], result_wire_lens[i]) &&
-                     score_transport_export(
-                         destination, workspace_b,
-                         result_semantic_roots[i], &result_entries[i]);
-            }
-            vcs_package_store_close(destination);
-            vcs_package_store_close(source);
-            _exit(ok ? 0 : 31);
+            score_reproducer_child(
+                transport_a, transport_b, transport_quota, workspace_b,
+                request_entries, request_entry_count, package,
+                reproduction_work, reproducer_secret, reproducer_pubkey,
+                reproduction_work_root, reproduction_work_wire,
+                result_semantic_roots, result_wires, result_wire_lens,
+                result_entries);
         }
         int reproducer_status = 0;
         ASSERT(waitpid(reproducer_pid, &reproducer_status, 0) ==
@@ -2923,95 +3188,11 @@ static int test_reproduction_qualification(void)
         pid_t observer_pid = fork();
         ASSERT(observer_pid >= 0);
         if (observer_pid == 0) {
-            bool ok = true;
-            struct vcs_package_store *source =
-                vcs_package_store_open(transport_b, transport_quota);
-            struct vcs_package_store *destination =
-                vcs_package_store_open(transport_c, transport_quota);
-            ok = source && destination;
-            for (size_t i = 0; ok && i < request_entry_count; i++)
-                ok = score_transport_import(
-                    source, destination, workspace_c, &request_entries[i]);
-            for (size_t i = 0; ok && i < 4; i++)
-                ok = score_transport_import(
-                    source, destination, workspace_c, &result_entries[i]);
-            if (ok)
-                ok = score_transport_package(
-                    source, destination, workspace_c, package, false);
-            struct vcs_zcode_reproduction_qualification_report observed;
-            if (ok)
-                ok = vcs_zcode_reproduction_qualify_cas(
-                         workspace_c, score_root, policy_root, request_root,
-                         reproduction_proof_set_root, 0, 605800,
-                         &observed) == VCS_ZCODE_QUALIFICATION_READY &&
-                     observed.exact_reproduction_match &&
-                     observed.distinct_signer &&
-                     observed.signer_policy_approved &&
-                     !observed.remote_transport_used &&
-                     !observed.physical_independence_proven;
-            struct vcs_zcode_shadow_attribution_input observed_input = {
-                .workspace = workspace_c,
-                .score_receipt_root = score_root,
-                .policy_candidate_root = policy_root,
-                .reproduction_request_root = request_root,
-                .reproduction_proof_set_root = reproduction_proof_set_root,
-                .contributor_binding_root = requester_binding_root,
-                .epoch = 0,
-                .now_unix = 605800,
-            };
-            struct vcs_zcode_shadow_attribution_plan observed_attribution;
-            if (ok)
-                ok = vcs_zcode_shadow_attribution_plan_cas(
-                         &observed_input, &observed_attribution) ==
-                     VCS_ZCODE_SHADOW_SIMULATION_OK;
-            uint8_t observed_wire[
-                VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES];
-            if (ok)
-                ok = vcs_zcode_creation_attribution_serialize(
-                         &observed_attribution.attribution, observed_wire) ==
-                         VCS_ZCODE_CREATION_OK &&
-                     vcs_object_put_addressed(
-                         workspace_c, observed_attribution.attribution_root,
-                         observed_wire, sizeof(observed_wire));
-            struct vcs_zcode_shadow_epoch_input observed_epoch_input = {
-                .workspace = workspace_c,
-                .policy_candidate_root = policy_root,
-                .attribution_root = observed_attribution.attribution_root,
-                .fixture_branch_root =
-                    observed_attribution.fixture_branch_root,
-                .previous_epoch_creation_root = (const uint8_t[32]){0},
-                .now_unix = 605800,
-            };
-            struct vcs_zcode_shadow_epoch_plan observed_epoch;
-            if (ok)
-                ok = vcs_zcode_shadow_epoch_plan_cas(
-                         &observed_epoch_input, &observed_epoch) ==
-                     VCS_ZCODE_SHADOW_SIMULATION_OK;
-            uint8_t *epoch_wire = NULL;
-            size_t epoch_wire_len = 0;
-            if (ok)
-                ok = vcs_zcode_epoch_creation_serialize(
-                         &observed_epoch.epoch, &epoch_wire,
-                         &epoch_wire_len) == VCS_ZCODE_EPOCH_CREATION_OK &&
-                     vcs_object_put_addressed(
-                         workspace_c, observed_epoch.epoch_root,
-                         epoch_wire, epoch_wire_len);
-            free(epoch_wire);
-            vcs_zcode_shadow_epoch_plan_free(&observed_epoch);
-            struct vcs_zcode_commons_projection *first = ok
-                ? vcs_zcode_commons_projection_build(workspace_c) : NULL;
-            struct vcs_zcode_commons_projection *second = ok
-                ? vcs_zcode_commons_projection_build(workspace_c) : NULL;
-            uint8_t first_root[32], second_root[32];
-            ok = ok && first && second &&
-                vcs_zcode_commons_projection_root(first, first_root) &&
-                vcs_zcode_commons_projection_root(second, second_root) &&
-                memcmp(first_root, second_root, 32) == 0;
-            vcs_zcode_commons_projection_free(second);
-            vcs_zcode_commons_projection_free(first);
-            vcs_package_store_close(destination);
-            vcs_package_store_close(source);
-            _exit(ok ? 0 : 32);
+            score_observer_child(
+                transport_b, transport_c, transport_quota, workspace_c,
+                request_entries, request_entry_count, result_entries, package,
+                score_root, policy_root, request_root,
+                reproduction_proof_set_root, requester_binding_root);
         }
         int observer_status = 0;
         ASSERT(waitpid(observer_pid, &observer_status, 0) == observer_pid);
@@ -3292,22 +3473,22 @@ static int test_reproduction_qualification(void)
     return failures;
 }
 
-static bool shadow_protocol_package_vertical(
-    const char *workspace, const struct score_package_fixture *package,
-    const struct vcs_zcode_policy_candidate_v1 *shadow_policy,
-    const uint8_t policy_root[32], const uint8_t branch_root[32],
-    uint64_t epoch, uint8_t identity_value, uint8_t attribution_root[32])
+static bool shadow_package_hex_roots(
+    const struct score_package_fixture *package, uint8_t content[32],
+    uint8_t release_root[32], uint8_t recipe[32], uint8_t lock[32],
+    uint8_t capsule[32])
 {
-    uint8_t content[32], release_root[32], recipe[32], lock[32], capsule[32];
-    if (!workspace || !package || !shadow_policy || !policy_root ||
-        !branch_root || !attribution_root ||
-        !zcl_hex_decode_lower(package->content, content, 32) ||
-        !zcl_hex_decode_lower(package->release, release_root, 32) ||
-        !zcl_hex_decode_lower(package->recipe, recipe, 32) ||
-        !zcl_hex_decode_lower(package->lock, lock, 32) ||
-        !zcl_hex_decode_lower(package->capsule, capsule, 32))
-        return false;
+    return zcl_hex_decode_lower(package->content, content, 32) &&
+        zcl_hex_decode_lower(package->release, release_root, 32) &&
+        zcl_hex_decode_lower(package->recipe, recipe, 32) &&
+        zcl_hex_decode_lower(package->lock, lock, 32) &&
+        zcl_hex_decode_lower(package->capsule, capsule, 32);
+}
 
+static bool shadow_package_prepare(
+    const struct score_package_fixture *package, const uint8_t content[32],
+    struct vcs_package_prepared *prepared)
+{
     struct vcs_package_prepare_options options = {
         .dir = package->dir,
         .publisher_sequence = package->sequence,
@@ -3317,46 +3498,58 @@ static bool shadow_protocol_package_vertical(
     if (!zcl_hex_decode_lower(package->publisher, options.publisher_pubkey,
                               sizeof(options.publisher_pubkey)))
         return false;
-    struct vcs_package_prepared prepared;
     char detail[256];
-    if (vcs_package_prepare(&options, &prepared, detail, sizeof(detail)) !=
+    if (vcs_package_prepare(&options, prepared, detail, sizeof(detail)) !=
             VCS_PACKAGE_PREPARE_OK ||
-        !zcl_hex_decode_lower(package->signature, prepared.release.signature,
-                              sizeof(prepared.release.signature)) ||
-        vcs_package_release_verify(&prepared.release) !=
+        !zcl_hex_decode_lower(package->signature, prepared->release.signature,
+                              sizeof(prepared->release.signature)) ||
+        vcs_package_release_verify(&prepared->release) !=
             VCS_PACKAGE_RELEASE_OK ||
-        prepared.release.has_parent ||
-        memcmp(prepared.package_root, content, 32) != 0) {
-        vcs_package_prepared_free(&prepared);
+        prepared->release.has_parent ||
+        memcmp(prepared->package_root, content, 32) != 0) {
+        vcs_package_prepared_free(prepared);
         return false;
     }
+    return true;
+}
+
+static bool shadow_package_store_release(
+    const char *workspace, uint8_t content[32], uint8_t release_root[32],
+    uint8_t recipe[32], uint8_t lock[32], uint8_t capsule[32],
+    struct vcs_package_prepared *prepared)
+{
     uint8_t *release_wire = NULL;
     size_t release_wire_len = 0;
     uint8_t observed_release[32];
     bool ok = vcs_package_release_id(
-                  &prepared.release, observed_release) ==
+                  &prepared->release, observed_release) ==
                   VCS_PACKAGE_RELEASE_OK &&
         memcmp(observed_release, release_root, 32) == 0 &&
         vcs_package_release_serialize(
-            &prepared.release, &release_wire, &release_wire_len) ==
+            &prepared->release, &release_wire, &release_wire_len) ==
             VCS_PACKAGE_RELEASE_OK &&
-        vcs_object_put_addressed(workspace, content, prepared.manifest_wire,
-                                 prepared.manifest_wire_len) &&
+        vcs_object_put_addressed(workspace, content, prepared->manifest_wire,
+                                 prepared->manifest_wire_len) &&
         vcs_object_put_addressed(workspace, release_root, release_wire,
                                  release_wire_len) &&
-        vcs_object_put_addressed(workspace, recipe, prepared.recipe_wire,
-                                 prepared.recipe_wire_len) &&
-        vcs_object_put_addressed(workspace, lock, prepared.lock_wire,
-                                 prepared.lock_wire_len) &&
-        vcs_object_put_addressed(workspace, capsule, prepared.capsule_wire,
-                                 prepared.capsule_wire_len);
+        vcs_object_put_addressed(workspace, recipe, prepared->recipe_wire,
+                                 prepared->recipe_wire_len) &&
+        vcs_object_put_addressed(workspace, lock, prepared->lock_wire,
+                                 prepared->lock_wire_len) &&
+        vcs_object_put_addressed(workspace, capsule, prepared->capsule_wire,
+                                 prepared->capsule_wire_len);
     free(release_wire);
+    return ok;
+}
 
+static bool shadow_package_put_license(
+    bool ok, const char *workspace, const char *dir,
+    struct vcs_package_prepared *prepared, uint8_t license_root[32])
+{
     const struct vcs_package_file *license_file = NULL;
-    for (size_t i = 0; ok && i < prepared.manifest.count; i++)
-        if (strcmp(prepared.manifest.files[i].path, "LICENSE") == 0)
-            license_file = &prepared.manifest.files[i];
-    uint8_t license_root[32];
+    for (size_t i = 0; ok && i < prepared->manifest.count; i++)
+        if (strcmp(prepared->manifest.files[i].path, "LICENSE") == 0)
+            license_file = &prepared->manifest.files[i];
     ok = ok && license_file &&
         vcs_package_file_hash(license_file, license_root);
     uint8_t chunk[VCS_PACKAGE_CHUNK_BYTES];
@@ -3364,34 +3557,38 @@ static bool shadow_protocol_package_vertical(
         size_t chunk_len = 0;
         enum vcs_package_publish_rule rule;
         ok = vcs_package_publish_read_chunk(
-                 package->dir, license_file, i, chunk, &chunk_len, &rule) &&
+                 dir, license_file, i, chunk, &chunk_len, &rule) &&
             vcs_object_put_addressed(
                 workspace, license_file->chunk_hashes + (size_t)i * 32u,
                 chunk, chunk_len);
     }
-    if (!ok) {
-        vcs_package_prepared_free(&prepared);
-        return false;
-    }
+    return ok;
+}
 
-    uint8_t zid_pubkey[32], zid_secret[32];
-    struct vcs_zcode_contributor_binding_v1 binding;
-    if (!qualification_test_binding(
-            &binding, shadow_policy->network_genesis_root,
-            identity_value, (uint8_t)(identity_value + 1u),
-            zid_pubkey, zid_secret)) {
-        vcs_package_prepared_free(&prepared);
-        return false;
-    }
-    uint8_t binding_root[32];
+static bool shadow_package_put_binding(
+    const char *workspace, struct vcs_zcode_contributor_binding_v1 *binding,
+    uint8_t binding_root[32])
+{
     uint8_t binding_wire[VCS_ZCODE_CONTRIBUTOR_BINDING_WIRE_BYTES];
-    ok = vcs_zcode_contributor_binding_root(
-             &binding, binding_root) == VCS_ZCODE_BINDING_OK &&
+    return vcs_zcode_contributor_binding_root(
+               binding, binding_root) == VCS_ZCODE_BINDING_OK &&
         vcs_zcode_contributor_binding_serialize(
-            &binding, binding_wire) == VCS_ZCODE_BINDING_OK &&
+            binding, binding_wire) == VCS_ZCODE_BINDING_OK &&
         vcs_object_put_addressed(workspace, binding_root, binding_wire,
                                  sizeof(binding_wire));
+}
 
+struct shadow_score_roots {
+    uint8_t task[32], candidate[32], proof_set[32];
+    uint8_t lane[32], score[32], proof_policy[32];
+};
+
+static bool shadow_package_score(
+    bool ok, const char *workspace, uint8_t content[32],
+    uint8_t release_root[32], uint8_t recipe[32], uint8_t lock[32],
+    uint8_t capsule[32], uint8_t zid_pubkey[32],
+    struct shadow_score_roots *roots)
+{
     struct vcs_zcode_task_v1 task;
     struct vcs_zcode_candidate_v1 candidate;
     struct vcs_zcode_proof_policy_v1 proof_policy;
@@ -3422,15 +3619,23 @@ static bool shadow_protocol_package_vertical(
                    VCS_ZCODE_SCORE_OK &&
         vcs_zcode_score_receipt_seal(&score, lane_secret, lane_pubkey) ==
             VCS_ZCODE_SCORE_OK;
-    uint8_t task_root[32], candidate_root[32], proof_set_root[32];
-    uint8_t lane_root[32], score_root[32], proof_policy_root[32];
     ok = ok && score_store_vertical(
         workspace, &task, &candidate, &proof_policy, &lane, works,
-        &score, task_root, candidate_root, proof_set_root,
-        lane_root, score_root) &&
+        &score, roots->task, roots->candidate, roots->proof_set,
+        roots->lane, roots->score) &&
         vcs_zcode_proof_policy_root(
-            &proof_policy, proof_policy_root) == VCS_ZCODE_DEV_OK;
+            &proof_policy, roots->proof_policy) == VCS_ZCODE_DEV_OK;
+    return ok;
+}
 
+static bool shadow_package_attribute(
+    bool ok, const char *workspace,
+    const struct vcs_zcode_policy_candidate_v1 *shadow_policy,
+    const uint8_t policy_root[32], const uint8_t branch_root[32],
+    uint64_t epoch, uint8_t binding_root[32], uint8_t content[32],
+    uint8_t release_root[32], uint8_t license_root[32],
+    const struct shadow_score_roots *roots, uint8_t attribution_root[32])
+{
     struct vcs_zcode_creation_attribution_v1 attribution;
     memset(&attribution, 0, sizeof(attribution));
     attribution.schema_version = VCS_ZCODE_CREATION_ATTRIBUTION_VERSION;
@@ -3454,12 +3659,12 @@ static bool shadow_protocol_package_vertical(
            shadow_policy->network_genesis_root, 32);
     memcpy(attribution.zc23_policy_root, policy_root, 32);
     memcpy(attribution.contributor_binding_root, binding_root, 32);
-    memcpy(attribution.task_root, task_root, 32);
-    memcpy(attribution.candidate_root, candidate_root, 32);
-    memcpy(attribution.proof_policy_root, proof_policy_root, 32);
-    memcpy(attribution.proof_set_root, proof_set_root, 32);
-    memcpy(attribution.proven_lane_root, lane_root, 32);
-    memcpy(attribution.score_receipt_root, score_root, 32);
+    memcpy(attribution.task_root, roots->task, 32);
+    memcpy(attribution.candidate_root, roots->candidate, 32);
+    memcpy(attribution.proof_policy_root, roots->proof_policy, 32);
+    memcpy(attribution.proof_set_root, roots->proof_set, 32);
+    memcpy(attribution.proven_lane_root, roots->lane, 32);
+    memcpy(attribution.score_receipt_root, roots->score, 32);
     memcpy(attribution.package_root, content, 32);
     memcpy(attribution.release_root, release_root, 32);
     memcpy(attribution.license_evidence_root, license_root, 32);
@@ -3472,6 +3677,53 @@ static bool shadow_protocol_package_vertical(
         vcs_object_put_addressed(workspace, attribution_root,
                                  attribution_wire,
                                  sizeof(attribution_wire));
+    return ok;
+}
+
+static bool shadow_protocol_package_vertical(
+    const char *workspace, const struct score_package_fixture *package,
+    const struct vcs_zcode_policy_candidate_v1 *shadow_policy,
+    const uint8_t policy_root[32], const uint8_t branch_root[32],
+    uint64_t epoch, uint8_t identity_value, uint8_t attribution_root[32])
+{
+    uint8_t content[32], release_root[32], recipe[32], lock[32], capsule[32];
+    if (!workspace || !package || !shadow_policy || !policy_root ||
+        !branch_root || !attribution_root ||
+        !shadow_package_hex_roots(package, content, release_root, recipe,
+                                  lock, capsule))
+        return false;
+
+    struct vcs_package_prepared prepared;
+    if (!shadow_package_prepare(package, content, &prepared))
+        return false;
+    bool ok = shadow_package_store_release(
+        workspace, content, release_root, recipe, lock, capsule, &prepared);
+    uint8_t license_root[32];
+    ok = shadow_package_put_license(ok, workspace, package->dir, &prepared,
+                                    license_root);
+    if (!ok) {
+        vcs_package_prepared_free(&prepared);
+        return false;
+    }
+
+    uint8_t zid_pubkey[32], zid_secret[32];
+    struct vcs_zcode_contributor_binding_v1 binding;
+    if (!qualification_test_binding(
+            &binding, shadow_policy->network_genesis_root,
+            identity_value, (uint8_t)(identity_value + 1u),
+            zid_pubkey, zid_secret)) {
+        vcs_package_prepared_free(&prepared);
+        return false;
+    }
+    uint8_t binding_root[32];
+    ok = shadow_package_put_binding(workspace, &binding, binding_root);
+    struct shadow_score_roots roots;
+    ok = shadow_package_score(ok, workspace, content, release_root, recipe,
+                              lock, capsule, zid_pubkey, &roots);
+    ok = shadow_package_attribute(
+        ok, workspace, shadow_policy, policy_root, branch_root, epoch,
+        binding_root, content, release_root, license_root, &roots,
+        attribution_root);
     vcs_package_prepared_free(&prepared);
     return ok;
 }

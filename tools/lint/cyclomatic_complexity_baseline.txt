@@ -637,10 +637,6 @@ tests/harness/src/test_zcode_package_dev.c:zpd_test_project_inspect:34
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start_license_lifecycle:18
-tests/harness/src/test_zcode_score_receipt.c:score_store_vertical:24
-tests/harness/src/test_zcode_score_receipt.c:score_transport_package:18
-tests/harness/src/test_zcode_score_receipt.c:shadow_protocol_package_vertical:49
-tests/harness/src/test_zcode_score_receipt.c:test_reproduction_qualification:59
 tests/harness/src/test_zcode_swarm_net.c:zwn_author_storage_ack:18
 tests/harness/src/test_zcode_swarm_net.c:zwn_discover_transport:49
 tests/harness/src/test_zcode_swarm_net.c:zwn_fixture_abort_reacquire:18
