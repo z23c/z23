@@ -120,6 +120,589 @@ static bool ph_auth_get_hash(uint8_t out[32])
     return true;
 }
 
+/* Case 1: oversize count (> 2000) is rejected and penalized. */
+static int ph_case_oversize(struct main_state *ms, struct msg_processor *mp,
+                            struct p2p_node *node)
+{
+    int failures = 0;
+    size_t map0 = ms->map_block_index.size;
+    struct msg_headers_stats st0, st1;
+    msg_headers_get_stats(&st0);
+    struct byte_stream s;
+    stream_init(&s, 64);
+    stream_write_compact_size(&s, 2001);
+    bool ret = process_headers(mp, node, &s);
+    msg_headers_get_stats(&st1);
+    PH_CHECK("oversize: handler returns false", ret == false);
+    PH_CHECK("oversize: peer flagged for disconnect",
+             node->disconnect == true);
+    PH_CHECK("oversize: peer penalized",
+             atomic_load(&node->misbehavior) > 0);
+    PH_CHECK("oversize: no block-tree mutation",
+             ms->map_block_index.size == map0);
+    PH_CHECK("oversize: no batch counted",
+             st1.batches_received == st0.batches_received);
+    stream_free(&s);
+    return failures;
+}
+
+/* Case 2: a truncated header yields a clean failure with no partial accept. */
+static int ph_case_truncated(struct main_state *ms, struct msg_processor *mp,
+                             struct p2p_node *node)
+{
+    int failures = 0;
+    node->disconnect = false;
+    atomic_store(&node->misbehavior, 0);
+    size_t map0 = ms->map_block_index.size;
+    struct msg_headers_stats st0, st1;
+    msg_headers_get_stats(&st0);
+    struct byte_stream s;
+    stream_init(&s, 64);
+    stream_write_compact_size(&s, 2); /* promises 2 headers... */
+    unsigned char garbage[20];
+    memset(garbage, 0xab, sizeof(garbage));
+    stream_write_bytes(&s, garbage, sizeof(garbage)); /* ...delivers 20B */
+    bool ret = process_headers(mp, node, &s);
+    msg_headers_get_stats(&st1);
+    PH_CHECK("truncated: handler returns false", ret == false);
+    PH_CHECK("truncated: peer penalized",
+             atomic_load(&node->misbehavior) > 0);
+    PH_CHECK("truncated: no block-tree mutation",
+             ms->map_block_index.size == map0);
+    PH_CHECK("truncated: nothing accepted",
+             st1.total_accepted == st0.total_accepted &&
+             st1.batches_received == st0.batches_received);
+    stream_free(&s);
+    return failures;
+}
+
+/* Case 3 setup: mine the two connecting regtest headers h1 (h=1), h2 (h=2). */
+static bool ph_mine_chain_pair(struct block_header *h1,
+                               struct block_header *h2,
+                               struct uint256 *h1_hash,
+                               struct uint256 *gh,
+                               const struct chain_params *cp)
+{
+    bool mined = ph_mine_header(h1, 1, gh, cp);
+    if (mined) {
+        block_header_get_hash(h1, h1_hash);
+        mined = ph_mine_header(h2, 2, h1_hash, cp);
+    }
+    return mined;
+}
+
+/* Case 3: a valid 2-header batch followed by trailing garbage. */
+static int ph_case_valid_batch(struct main_state *ms, struct msg_processor *mp,
+                               struct p2p_node *node, struct block_header *h1,
+                               struct block_header *h2,
+                               struct uint256 *h1_hash)
+{
+    int failures = 0;
+    g_ph_header_votes = 0;
+    g_ph_header_vote_peer = 0;
+    g_ph_header_vote_height = -1;
+    g_ph_header_vote_hash[0] = '\0';
+    node->disconnect = false;
+    atomic_store(&node->misbehavior, 0);
+    struct msg_headers_stats st0, st1;
+    msg_headers_get_stats(&st0);
+    struct byte_stream s;
+    stream_init(&s, 1024);
+    stream_write_compact_size(&s, 2);
+    bool wrote = ph_write_header(&s, h1) && ph_write_header(&s, h2);
+    unsigned char garbage[16];
+    memset(garbage, 0xcd, sizeof(garbage));
+    wrote = wrote && stream_write_bytes(&s, garbage, sizeof(garbage));
+    PH_CHECK("batch payload built", wrote);
+    size_t payload_end = s.size - sizeof(garbage);
+    bool ret = process_headers(mp, node, &s);
+    msg_headers_get_stats(&st1);
+    PH_CHECK("valid batch: handler returns true", ret == true);
+    PH_CHECK("valid batch: both headers accepted",
+             st1.total_accepted == st0.total_accepted + 2 &&
+             st1.newly_added == st0.newly_added + 2);
+    struct uint256 h2_hash;
+    block_header_get_hash(h2, &h2_hash);
+    struct block_index *bi1 = block_map_find(&ms->map_block_index, h1_hash);
+    struct block_index *bi2 = block_map_find(&ms->map_block_index, &h2_hash);
+    PH_CHECK("valid batch: both in block tree at h=1,2",
+             bi1 && bi1->nHeight == 1 && bi2 && bi2->nHeight == 2);
+    PH_CHECK("valid batch: compact-size consumed exactly "
+             "(garbage never parsed)",
+             s.read_pos == payload_end);
+    PH_CHECK("valid batch: best header promoted to h=2",
+             ms->pindex_best_header == bi2);
+    char h2_hex[65];
+    uint256_get_hex(&h2_hash, h2_hex);
+    PH_CHECK("valid batch: standard peer contributes header vote",
+             node->services == 0 && g_ph_header_votes == 1 &&
+             g_ph_header_vote_peer == (uint32_t)node->id &&
+             g_ph_header_vote_height == 2 &&
+             strcmp(g_ph_header_vote_hash, h2_hex) == 0);
+    PH_CHECK("valid batch: honest peer not penalized",
+             atomic_load(&node->misbehavior) == 0 && !node->disconnect);
+    stream_free(&s);
+    return failures;
+}
+
+/* Case 4: a non-connecting (orphan) header is rejected with DoS 0. */
+static int ph_case_non_connecting(struct main_state *ms,
+                                  struct msg_processor *mp,
+                                  struct p2p_node *node,
+                                  const struct chain_params *cp)
+{
+    int failures = 0;
+    struct uint256 unknown_prev;
+    memset(unknown_prev.data, 0xee, 32);
+    struct block_header orphan;
+    bool orphan_mined = ph_mine_header(&orphan, 1, &unknown_prev, cp);
+    PH_CHECK("orphan header mined", orphan_mined);
+    if (orphan_mined) {
+        node->disconnect = false;
+        atomic_store(&node->misbehavior, 0);
+        /* The all-rejected recovery probe (bad-prevblk -> getheaders from
+         * our best header) would fire here; arm its per-peer rate limit
+         * so the send path stays untouched (a failed send would close the
+         * stub node and mask the penalty assertions). The probe decision
+         * itself is pinned in test_sync_service. */
+        int64_t probe_armed = (int64_t)platform_time_wall_time_t();
+        atomic_store(&node->last_reject_probe_time, probe_armed);
+        size_t map0 = ms->map_block_index.size;
+        struct msg_headers_stats st0, st1;
+        msg_headers_get_stats(&st0);
+        struct byte_stream s;
+        stream_init(&s, 1024);
+        stream_write_compact_size(&s, 1);
+        PH_CHECK("orphan payload built", ph_write_header(&s, &orphan));
+        bool ret = process_headers(mp, node, &s);
+        msg_headers_get_stats(&st1);
+        PH_CHECK("non-connecting: handler completes", ret == true);
+        struct uint256 ohash;
+        block_header_get_hash(&orphan, &ohash);
+        PH_CHECK("non-connecting: header NOT added to block tree",
+                 block_map_find(&ms->map_block_index, &ohash) == NULL &&
+                 ms->map_block_index.size == map0);
+        PH_CHECK("non-connecting: counted as rejected",
+                 st1.total_rejected == st0.total_rejected + 1);
+        PH_CHECK("non-connecting: DoS 0 — orphan peer NOT penalized",
+                 atomic_load(&node->misbehavior) == 0 && !node->disconnect);
+        PH_CHECK("non-connecting: recovery probe rate-limited, not fired",
+                 atomic_load(&node->last_reject_probe_time) == probe_armed);
+        PH_CHECK("non-connecting: recovery probe pending armed",
+                 atomic_load(&node->reject_probe_pending));
+        atomic_store(&node->reject_probe_pending, false);
+        stream_free(&s);
+    }
+    return failures;
+}
+
+/* Case 5 part A: the re-delivered tip under an inconsistent authority pair. */
+static int ph_relabel_accept_tip(struct main_state *ms, struct block_header *h2,
+                                 struct uint256 *h2_hash,
+                                 struct block_index *bi1,
+                                 struct block_index *bi2,
+                                 struct block_index *gen,
+                                 const struct chain_params *cp)
+{
+    int failures = 0;
+    PH_CHECK("relabel: window tip installed at h=2",
+             active_chain_move_window_tip(&ms->chain_active, bi2));
+    g_ph_auth_height = bi2->nHeight - 1;       /* the poisoned label */
+    memcpy(g_ph_auth_hash, h2_hash->data, 32);  /* ...of the tip hash */
+    struct active_chain_authority poisoned = {
+        .get_height = ph_auth_get_height,
+        .get_hash = ph_auth_get_hash,
+        .is_authoritative = ph_auth_is_authoritative,
+    };
+    active_chain_register_authority(&poisoned);
+    active_chain_register_block_map(&ms->map_block_index);
+    PH_CHECK("relabel: simulated pair is the inconsistent one",
+             active_chain_height(&ms->chain_active) == 1 &&
+             active_chain_tip(&ms->chain_active) == bi2);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    struct block_index *re = NULL;
+    bool ok = accept_block_header(h2, &state, ms, cp, &re);
+    PH_CHECK("relabel: re-delivered tip header accepted",
+             ok && re == bi2);
+    PH_CHECK("relabel: tip nHeight NOT mutated", bi2->nHeight == 2);
+    PH_CHECK("relabel: parent nHeight NOT mutated", bi1->nHeight == 1);
+    PH_CHECK("relabel: links intact",
+             bi2->pprev == bi1 && bi1->pprev == gen &&
+             gen->nHeight == 0);
+    return failures;
+}
+
+/* Case 5 part B: a successor above the re-delivered tip derives parent+1. */
+static int ph_relabel_successor(struct main_state *ms, struct uint256 *h2_hash,
+                                struct block_index *bi1,
+                                struct block_index *bi2,
+                                const struct chain_params *cp)
+{
+    int failures = 0;
+    /* Overlapping successor batch: a child above the re-delivered
+     * tip still derives parent+1, never authority-label+1. */
+    struct block_header h3;
+    bool m3 = ph_mine_header(&h3, 3, h2_hash, cp);
+    PH_CHECK("relabel: successor mined", m3);
+    if (m3) {
+        struct validation_state st3;
+        validation_state_init(&st3);
+        struct block_index *bi3 = NULL;
+        bool ok3 = accept_block_header(&h3, &st3, ms, cp, &bi3);
+        PH_CHECK("relabel: successor derives parent+1",
+                 ok3 && bi3 && bi3->nHeight == 3 &&
+                 bi3->pprev == bi2);
+        PH_CHECK("relabel: graph heights unchanged after batch",
+                 bi1->nHeight == 1 && bi2->nHeight == 2);
+    }
+    return failures;
+}
+
+/* Case 5: tip-header re-delivery must NOT relabel heights. */
+static int ph_case_relabel(struct main_state *ms, struct block_header *h2,
+                           struct uint256 *h1_hash, struct block_index *gen,
+                           const struct chain_params *cp)
+{
+    int failures = 0;
+    struct uint256 h2_hash;
+    block_header_get_hash(h2, &h2_hash);
+    struct block_index *bi1 = block_map_find(&ms->map_block_index, h1_hash);
+    struct block_index *bi2 = block_map_find(&ms->map_block_index, &h2_hash);
+    PH_CHECK("relabel: accepted tip + parent present", bi1 && bi2);
+    if (bi1 && bi2) {
+        failures += ph_relabel_accept_tip(ms, h2, &h2_hash, bi1, bi2, gen, cp);
+        failures += ph_relabel_successor(ms, &h2_hash, bi1, bi2, cp);
+        /* Restore globals for the sequential in-process runner. */
+        struct active_chain_authority none = {0};
+        active_chain_register_authority(&none);
+        active_chain_register_block_map(NULL);
+    }
+    return failures;
+}
+
+/* Case 6: push_getheaders_from continuation suppression is counted. */
+static int ph_case_getheaders_from(const struct chain_params *cp, char *dir,
+                                   struct p2p_node *node)
+{
+    int failures = 0;
+    struct main_state ms2;
+    main_state_init(&ms2);
+    struct msg_processor mp2;
+    msg_processor_init(&mp2, &ms2, NULL, NULL, cp, dir, &g_ph_nm, NULL);
+
+    /* (a) null-hash anchor: counted no-hash suppression, never a silent
+     *     `return;`. */
+    {
+        struct block_index ghost;
+        memset(&ghost, 0, sizeof(ghost));
+        ghost.nHeight = 5;
+        ghost.phashBlock = NULL;   /* stable hash slot never populated */
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        push_getheaders_from(&mp2, node, &ghost);
+        msg_headers_get_stats(&b);
+        PH_CHECK("null-hash anchor: counted (no silent continuation drop)",
+                 b.getheaders_suppressed_no_hash ==
+                     a.getheaders_suppressed_no_hash + 1);
+    }
+
+    /* (b) active snapshot exchange: counted snapshot suppression, never
+     *     a silent latch. */
+    {
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        msg_processor_set_snapshot_active(&mp2, ph_snapshot_active_true,
+                                          NULL);
+        push_getheaders_from(&mp2, node, NULL);
+        msg_processor_set_snapshot_active(&mp2, NULL, NULL);
+        msg_headers_get_stats(&b);
+        PH_CHECK("snapshot active: counted getheaders suppression",
+                 b.getheaders_suppressed_snapshot ==
+                     a.getheaders_suppressed_snapshot + 1);
+    }
+
+    main_state_free(&ms2);
+    return failures;
+}
+
+/* Case 7: sibling silent-drop sites all count instead of returning silently. */
+static int ph_case_sibling_drops(const struct chain_params *cp, char *dir,
+                                 struct p2p_node *node, struct uint256 *gh)
+{
+    int failures = 0;
+    struct main_state ms3;
+    main_state_init(&ms3);
+    struct msg_processor mp3;
+    msg_processor_init(&mp3, &ms3, NULL, NULL, cp, dir, &g_ph_nm, NULL);
+
+    /* (a) process_headers: inbound headers dropped while a snapshot
+     *     exchange is active — counted, never a silent stop. */
+    {
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
+                                          NULL);
+        struct byte_stream s;
+        stream_init(&s, 8);
+        bool ret = process_headers(&mp3, node, &s);
+        msg_processor_set_snapshot_active(&mp3, NULL, NULL);
+        stream_free(&s);
+        msg_headers_get_stats(&b);
+        PH_CHECK("process_headers: snapshot-active drop counted",
+                 ret == true &&
+                 b.headers_recv_suppressed_snapshot ==
+                     a.headers_recv_suppressed_snapshot + 1);
+    }
+
+    /* (b) push_getheaders: send-side request suppressed while a
+     *     snapshot exchange is active — counted. */
+    {
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
+                                          NULL);
+        push_getheaders(&mp3, node);
+        msg_processor_set_snapshot_active(&mp3, NULL, NULL);
+        msg_headers_get_stats(&b);
+        PH_CHECK("push_getheaders: snapshot-active drop counted",
+                 b.push_getheaders_suppressed_snapshot ==
+                     a.push_getheaders_suppressed_snapshot + 1);
+    }
+
+    /* (c) push_getheaders_span: span request suppressed while a
+     *     snapshot exchange is active — counted. */
+    {
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
+                                          NULL);
+        push_getheaders_span(&mp3, node, gh, NULL);
+        msg_processor_set_snapshot_active(&mp3, NULL, NULL);
+        msg_headers_get_stats(&b);
+        PH_CHECK("push_getheaders_span: snapshot-active drop counted",
+                 b.push_getheaders_span_suppressed_snapshot ==
+                     a.push_getheaders_span_suppressed_snapshot + 1);
+    }
+
+    /* (d) process_getheaders: request deferred while we are serving a
+     *     snapshot to this peer — counted. */
+    {
+        struct msg_headers_stats a, b;
+        msg_headers_get_stats(&a);
+        bool saved = node->swarm_manifest_sent;
+        node->swarm_manifest_sent = true;
+        struct byte_stream s;
+        stream_init(&s, 8);
+        bool ret = process_getheaders(&mp3, node, &s);
+        stream_free(&s);
+        node->swarm_manifest_sent = saved;
+        msg_headers_get_stats(&b);
+        PH_CHECK("process_getheaders: snapshot-serving defer counted",
+                 ret == true &&
+                 b.getheaders_deferred_snapshot_serving ==
+                     a.getheaders_deferred_snapshot_serving + 1);
+    }
+
+    main_state_free(&ms3);
+    return failures;
+}
+
+/* Case 8: the getheaders serve batch stays under the wire byte cap. */
+static int ph_case_serve_byte_cap(void)
+{
+    int failures = 0;
+    struct block_header big;
+    block_header_init(&big);
+    big.nBits = 0x1f07ffff;
+    big.nSolutionSize = MAX_SOLUTION_SIZE;   /* pre-Bubbles 200,9 size */
+    memset(big.nSolution, 0xab, MAX_SOLUTION_SIZE);
+
+    struct byte_stream body;
+    stream_init(&body, 1u << 20);
+    int served = 0;
+    bool stopped_by_cap = false;
+    for (int i = 0; i < 2000; i++) {
+        if (!getheaders_try_append_header(&body, &big)) {
+            stopped_by_cap = true;
+            break;
+        }
+        served++;
+    }
+    size_t framed = compact_size_sizeof((uint64_t)served) + body.size;
+    PH_CHECK("getheaders serve: byte cap stops the batch before count 2000",
+             stopped_by_cap && served > 0 && served < 2000);
+    PH_CHECK("getheaders serve: framed reply within wire cap",
+             framed <= (size_t)MAX_PROTOCOL_MESSAGE_LENGTH);
+    PH_CHECK("getheaders serve: one more header would overflow (tight)",
+             body.size + 1488u + 16u > (size_t)MAX_PROTOCOL_MESSAGE_LENGTH);
+    stream_free(&body);
+    return failures;
+}
+
+/* Case 9 setup: mine the three chained regtest headers A, B, C. */
+static bool ph_mine_three(struct block_header *ha, struct block_header *hb,
+                          struct block_header *hc, struct uint256 *gh4,
+                          const struct chain_params *cp)
+{
+    bool ok = ph_mine_header(ha, 1, gh4, cp);
+    if (ok) {
+        struct uint256 ha_hash;
+        block_header_get_hash(ha, &ha_hash);
+        ok = ph_mine_header(hb, 2, &ha_hash, cp);
+        if (ok) {
+            struct uint256 hb_hash;
+            block_header_get_hash(hb, &hb_hash);
+            ok = ph_mine_header(hc, 3, &hb_hash, cp);
+        }
+    }
+    return ok;
+}
+
+/* Case 9, batch 1 [A]: admitted through the heal path with an honest anchor. */
+static int ph_stale_admit_batch1(struct main_state *ms4,
+                                 struct msg_processor *mp4,
+                                 struct p2p_node *node,
+                                 struct block_header *ha, size_t map0)
+{
+    int failures = 0;
+    struct byte_stream s1;
+    stream_init(&s1, 512);
+    stream_write_compact_size(&s1, 1);
+    PH_CHECK("stale-anchor: batch1 payload built",
+             ph_write_header(&s1, ha));
+    PH_CHECK("stale-anchor: honest batch1 accepted",
+             process_headers(mp4, node, &s1));
+    PH_CHECK("stale-anchor: batch1 grew the map by one",
+             ms4->map_block_index.size == map0 + 1);
+    stream_free(&s1);
+    return failures;
+}
+
+/* Case 9, batch 2 [B(prev=A), C(prev=B)] against the staged out-of-map twin. */
+static int ph_stale_refuse_batch2(struct main_state *ms4,
+                                  struct msg_processor *mp4,
+                                  struct p2p_node *node,
+                                  struct block_index *twin,
+                                  struct block_header *hb,
+                                  struct block_header *hc, size_t map0)
+{
+    int failures = 0;
+    PH_CHECK("stale-anchor: twin installed as window tip",
+             active_chain_move_window_tip(&ms4->chain_active, twin));
+
+    node->disconnect = false;
+    atomic_store(&node->misbehavior, 0);
+
+    /* Batch 2 [B(prev=A), C(prev=B)] with the anchor stale. */
+    struct byte_stream s2;
+    stream_init(&s2, 1024);
+    stream_write_compact_size(&s2, 2);
+    PH_CHECK("stale-anchor: batch2 payload built",
+             ph_write_header(&s2, hb) && ph_write_header(&s2, hc));
+    bool ret9 = process_headers(mp4, node, &s2);
+    stream_free(&s2);
+    PH_CHECK("stale-anchor: batch2 completes", ret9 == true);
+    PH_CHECK("stale-anchor: batch2 grew the map by two",
+             ms4->map_block_index.size == map0 + 3);
+    return failures;
+}
+
+/* Case 9 final: B keeps its map-resolved parent; the cursor still advances. */
+static int ph_stale_check_ladder(struct main_state *ms4,
+                                 struct p2p_node *node,
+                                 struct block_header *hb,
+                                 struct block_header *hc,
+                                 struct block_index *map_a,
+                                 struct block_index *gen4)
+{
+    int failures = 0;
+    struct uint256 hb_hash, hc_hash;
+    block_header_get_hash(hb, &hb_hash);
+    block_header_get_hash(hc, &hc_hash);
+    struct block_index *bi_b =
+        block_map_find(&ms4->map_block_index, &hb_hash);
+    struct block_index *bi_c =
+        block_map_find(&ms4->map_block_index, &hc_hash);
+    PH_CHECK("stale-anchor: B kept its MAP-resolved parent "
+             "(not mutated onto the twin)",
+             bi_b && bi_b->nHeight == 2 &&
+             map_a && bi_b->pprev == map_a);
+    PH_CHECK("stale-anchor: cursor survived the refusal — "
+             "next header admits at parent+1",
+             bi_c && bi_c->nHeight == 3 &&
+             bi_c->pprev == bi_b);
+    PH_CHECK("stale-anchor: refusal scores no penalty",
+             atomic_load(&node->misbehavior) == 0 && !node->disconnect);
+    PH_CHECK("stale-anchor: ladder unchanged elsewhere",
+             map_a->nHeight == 1 &&
+             (gen4 ? gen4->nHeight == 0 : true));
+    return failures;
+}
+
+/* Case 9 driver: stale anchor refused without mutation, cursor survives. */
+static int ph_stale_run(struct main_state *ms4, struct msg_processor *mp4,
+                        struct p2p_node *node, struct block_index *gen4,
+                        struct uint256 *gh4, const struct chain_params *cp)
+{
+    int failures = 0;
+    struct block_header ha, hb, hc;
+    bool ok9 = ph_mine_three(&ha, &hb, &hc, gh4, cp);
+    PH_CHECK("stale-anchor: three chained regtest headers mined", ok9);
+
+    /* Batch 1 [A]: admitted through the heal path with an honest
+     * anchor (genesis resolves in the map) — the healthy flow
+     * this slice must preserve. */
+    size_t map0 = ms4->map_block_index.size;
+    failures += ph_stale_admit_batch1(ms4, mp4, node, &ha, map0);
+
+    struct uint256 ha_hash;
+    block_header_get_hash(&ha, &ha_hash);
+    struct block_index *map_a =
+        block_map_find(&ms4->map_block_index, &ha_hash);
+    PH_CHECK("stale-anchor: A resolved in the map", map_a != NULL);
+
+    /* Stage the out-of-map twin as the sequence anchor. */
+    struct uint256 twin_hash;
+    struct block_index twin;
+    memset(&twin, 0, sizeof(twin));
+    twin.nHeight = 1;
+    twin.phashBlock = &twin_hash;
+    memcpy(twin_hash.data, ha_hash.data, 32);
+    failures += ph_stale_refuse_batch2(ms4, mp4, node, &twin, &hb, &hc, map0);
+    failures += ph_stale_check_ladder(ms4, node, &hb, &hc, map_a, gen4);
+    return failures;
+}
+
+/* Case 9: batch-order relink heal refuses a STALE ANCHOR (refuse, don't
+ * mutate). */
+static int ph_case_stale_anchor(const struct chain_params *cp, char *dir,
+                                struct p2p_node *node)
+{
+    int failures = 0;
+    struct main_state ms4;
+    main_state_init(&ms4);
+    struct msg_processor mp4;
+    msg_processor_init(&mp4, &ms4, NULL, NULL, cp, dir, &g_ph_nm, NULL);
+
+    struct uint256 gh4 = cp->consensus.hashGenesisBlock;
+    struct block_index *gen4 =
+        chainstate_insert_block_index((struct chainstate *)&ms4, &gh4);
+    PH_CHECK("stale-anchor: genesis inserted", gen4 != NULL);
+    if (gen4) {
+        gen4->nHeight = 0;
+        gen4->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        gen4->nTx = 1;
+        gen4->nChainTx = 1;
+        active_chain_move_window_tip(&ms4.chain_active, gen4);
+        ms4.pindex_best_header = gen4;
+        failures += ph_stale_run(&ms4, &mp4, node, gen4, &gh4, cp);
+    }
+    main_state_free(&ms4);
+    return failures;
+}
+
 int test_process_headers_adversarial(void);
 int test_process_headers_adversarial(void)
 {
@@ -162,152 +745,26 @@ int test_process_headers_adversarial(void)
 
     /* ── 1. oversize count (> 2000): reject + penalize + disconnect ── */
     if (gen) {
-        size_t map0 = ms.map_block_index.size;
-        struct msg_headers_stats st0, st1;
-        msg_headers_get_stats(&st0);
-        struct byte_stream s;
-        stream_init(&s, 64);
-        stream_write_compact_size(&s, 2001);
-        bool ret = process_headers(&mp, &node, &s);
-        msg_headers_get_stats(&st1);
-        PH_CHECK("oversize: handler returns false", ret == false);
-        PH_CHECK("oversize: peer flagged for disconnect",
-                 node.disconnect == true);
-        PH_CHECK("oversize: peer penalized",
-                 atomic_load(&node.misbehavior) > 0);
-        PH_CHECK("oversize: no block-tree mutation",
-                 ms.map_block_index.size == map0);
-        PH_CHECK("oversize: no batch counted",
-                 st1.batches_received == st0.batches_received);
-        stream_free(&s);
+        failures += ph_case_oversize(&ms, &mp, &node);
     }
 
     /* ── 2. truncated mid-header: clean failure, no partial accept ── */
     if (gen) {
-        node.disconnect = false;
-        atomic_store(&node.misbehavior, 0);
-        size_t map0 = ms.map_block_index.size;
-        struct msg_headers_stats st0, st1;
-        msg_headers_get_stats(&st0);
-        struct byte_stream s;
-        stream_init(&s, 64);
-        stream_write_compact_size(&s, 2); /* promises 2 headers... */
-        unsigned char garbage[20];
-        memset(garbage, 0xab, sizeof(garbage));
-        stream_write_bytes(&s, garbage, sizeof(garbage)); /* ...delivers 20B */
-        bool ret = process_headers(&mp, &node, &s);
-        msg_headers_get_stats(&st1);
-        PH_CHECK("truncated: handler returns false", ret == false);
-        PH_CHECK("truncated: peer penalized",
-                 atomic_load(&node.misbehavior) > 0);
-        PH_CHECK("truncated: no block-tree mutation",
-                 ms.map_block_index.size == map0);
-        PH_CHECK("truncated: nothing accepted",
-                 st1.total_accepted == st0.total_accepted &&
-                 st1.batches_received == st0.batches_received);
-        stream_free(&s);
+        failures += ph_case_truncated(&ms, &mp, &node);
     }
 
     /* ── 3. valid 2-header batch + trailing garbage ── */
     struct block_header h1, h2;
     struct uint256 h1_hash;
-    bool mined = gen &&
-                 ph_mine_header(&h1, 1, &gh, cp);
-    if (mined) {
-        block_header_get_hash(&h1, &h1_hash);
-        mined = ph_mine_header(&h2, 2, &h1_hash, cp);
-    }
+    bool mined = gen && ph_mine_chain_pair(&h1, &h2, &h1_hash, &gh, cp);
     PH_CHECK("two connecting regtest headers mined", mined);
     if (mined) {
-        g_ph_header_votes = 0;
-        g_ph_header_vote_peer = 0;
-        g_ph_header_vote_height = -1;
-        g_ph_header_vote_hash[0] = '\0';
-        node.disconnect = false;
-        atomic_store(&node.misbehavior, 0);
-        struct msg_headers_stats st0, st1;
-        msg_headers_get_stats(&st0);
-        struct byte_stream s;
-        stream_init(&s, 1024);
-        stream_write_compact_size(&s, 2);
-        bool wrote = ph_write_header(&s, &h1) && ph_write_header(&s, &h2);
-        unsigned char garbage[16];
-        memset(garbage, 0xcd, sizeof(garbage));
-        wrote = wrote && stream_write_bytes(&s, garbage, sizeof(garbage));
-        PH_CHECK("batch payload built", wrote);
-        size_t payload_end = s.size - sizeof(garbage);
-        bool ret = process_headers(&mp, &node, &s);
-        msg_headers_get_stats(&st1);
-        PH_CHECK("valid batch: handler returns true", ret == true);
-        PH_CHECK("valid batch: both headers accepted",
-                 st1.total_accepted == st0.total_accepted + 2 &&
-                 st1.newly_added == st0.newly_added + 2);
-        struct uint256 h2_hash;
-        block_header_get_hash(&h2, &h2_hash);
-        struct block_index *bi1 = block_map_find(&ms.map_block_index, &h1_hash);
-        struct block_index *bi2 = block_map_find(&ms.map_block_index, &h2_hash);
-        PH_CHECK("valid batch: both in block tree at h=1,2",
-                 bi1 && bi1->nHeight == 1 && bi2 && bi2->nHeight == 2);
-        PH_CHECK("valid batch: compact-size consumed exactly "
-                 "(garbage never parsed)",
-                 s.read_pos == payload_end);
-        PH_CHECK("valid batch: best header promoted to h=2",
-                 ms.pindex_best_header == bi2);
-        char h2_hex[65];
-        uint256_get_hex(&h2_hash, h2_hex);
-        PH_CHECK("valid batch: standard peer contributes header vote",
-                 node.services == 0 && g_ph_header_votes == 1 &&
-                 g_ph_header_vote_peer == (uint32_t)node.id &&
-                 g_ph_header_vote_height == 2 &&
-                 strcmp(g_ph_header_vote_hash, h2_hex) == 0);
-        PH_CHECK("valid batch: honest peer not penalized",
-                 atomic_load(&node.misbehavior) == 0 && !node.disconnect);
-        stream_free(&s);
+        failures += ph_case_valid_batch(&ms, &mp, &node, &h1, &h2, &h1_hash);
     }
 
     /* ── 4. non-connecting batch: reject, DoS 0, no tree mutation ── */
     if (gen) {
-        struct uint256 unknown_prev;
-        memset(unknown_prev.data, 0xee, 32);
-        struct block_header orphan;
-        bool orphan_mined = ph_mine_header(&orphan, 1, &unknown_prev, cp);
-        PH_CHECK("orphan header mined", orphan_mined);
-        if (orphan_mined) {
-            node.disconnect = false;
-            atomic_store(&node.misbehavior, 0);
-            /* The all-rejected recovery probe (bad-prevblk -> getheaders from
-             * our best header) would fire here; arm its per-peer rate limit
-             * so the send path stays untouched (a failed send would close the
-             * stub node and mask the penalty assertions). The probe decision
-             * itself is pinned in test_sync_service. */
-            int64_t probe_armed = (int64_t)platform_time_wall_time_t();
-            atomic_store(&node.last_reject_probe_time, probe_armed);
-            size_t map0 = ms.map_block_index.size;
-            struct msg_headers_stats st0, st1;
-            msg_headers_get_stats(&st0);
-            struct byte_stream s;
-            stream_init(&s, 1024);
-            stream_write_compact_size(&s, 1);
-            PH_CHECK("orphan payload built", ph_write_header(&s, &orphan));
-            bool ret = process_headers(&mp, &node, &s);
-            msg_headers_get_stats(&st1);
-            PH_CHECK("non-connecting: handler completes", ret == true);
-            struct uint256 ohash;
-            block_header_get_hash(&orphan, &ohash);
-            PH_CHECK("non-connecting: header NOT added to block tree",
-                     block_map_find(&ms.map_block_index, &ohash) == NULL &&
-                     ms.map_block_index.size == map0);
-            PH_CHECK("non-connecting: counted as rejected",
-                     st1.total_rejected == st0.total_rejected + 1);
-            PH_CHECK("non-connecting: DoS 0 — orphan peer NOT penalized",
-                     atomic_load(&node.misbehavior) == 0 && !node.disconnect);
-            PH_CHECK("non-connecting: recovery probe rate-limited, not fired",
-                     atomic_load(&node.last_reject_probe_time) == probe_armed);
-            PH_CHECK("non-connecting: recovery probe pending armed",
-                     atomic_load(&node.reject_probe_pending));
-            atomic_store(&node.reject_probe_pending, false);
-            stream_free(&s);
-        }
+        failures += ph_case_non_connecting(&ms, &mp, &node, cp);
     }
 
     /* ── 5. tip-header re-delivery must NOT relabel heights. Re-use h1/h2
@@ -318,61 +775,7 @@ int test_process_headers_adversarial(void)
      *       header above; the derive-from-parent rule must leave the graph
      *       untouched and a successor must still land at parent+1. */
     if (mined) {
-        struct uint256 h2_hash;
-        block_header_get_hash(&h2, &h2_hash);
-        struct block_index *bi1 = block_map_find(&ms.map_block_index, &h1_hash);
-        struct block_index *bi2 = block_map_find(&ms.map_block_index, &h2_hash);
-        PH_CHECK("relabel: accepted tip + parent present", bi1 && bi2);
-        if (bi1 && bi2) {
-            PH_CHECK("relabel: window tip installed at h=2",
-                     active_chain_move_window_tip(&ms.chain_active, bi2));
-            g_ph_auth_height = bi2->nHeight - 1;       /* the poisoned label */
-            memcpy(g_ph_auth_hash, h2_hash.data, 32);  /* ...of the tip hash */
-            struct active_chain_authority poisoned = {
-                .get_height = ph_auth_get_height,
-                .get_hash = ph_auth_get_hash,
-                .is_authoritative = ph_auth_is_authoritative,
-            };
-            active_chain_register_authority(&poisoned);
-            active_chain_register_block_map(&ms.map_block_index);
-            PH_CHECK("relabel: simulated pair is the inconsistent one",
-                     active_chain_height(&ms.chain_active) == 1 &&
-                     active_chain_tip(&ms.chain_active) == bi2);
-
-            struct validation_state state;
-            validation_state_init(&state);
-            struct block_index *re = NULL;
-            bool ok = accept_block_header(&h2, &state, &ms, cp, &re);
-            PH_CHECK("relabel: re-delivered tip header accepted",
-                     ok && re == bi2);
-            PH_CHECK("relabel: tip nHeight NOT mutated", bi2->nHeight == 2);
-            PH_CHECK("relabel: parent nHeight NOT mutated", bi1->nHeight == 1);
-            PH_CHECK("relabel: links intact",
-                     bi2->pprev == bi1 && bi1->pprev == gen &&
-                     gen->nHeight == 0);
-
-            /* Overlapping successor batch: a child above the re-delivered
-             * tip still derives parent+1, never authority-label+1. */
-            struct block_header h3;
-            bool m3 = ph_mine_header(&h3, 3, &h2_hash, cp);
-            PH_CHECK("relabel: successor mined", m3);
-            if (m3) {
-                struct validation_state st3;
-                validation_state_init(&st3);
-                struct block_index *bi3 = NULL;
-                bool ok3 = accept_block_header(&h3, &st3, &ms, cp, &bi3);
-                PH_CHECK("relabel: successor derives parent+1",
-                         ok3 && bi3 && bi3->nHeight == 3 &&
-                         bi3->pprev == bi2);
-                PH_CHECK("relabel: graph heights unchanged after batch",
-                         bi1->nHeight == 1 && bi2->nHeight == 2);
-            }
-
-            /* Restore globals for the sequential in-process runner. */
-            struct active_chain_authority none = {0};
-            active_chain_register_authority(&none);
-            active_chain_register_block_map(NULL);
-        }
+        failures += ph_case_relabel(&ms, &h2, &h1_hash, gen, cp);
     }
 
     /* ── 6. push_getheaders_from continuation-suppression must be LOUD +
@@ -380,159 +783,20 @@ int test_process_headers_adversarial(void)
      *       main_state so the null-hash re-anchor finds no hashed frontier
      *       and returns after counting, and the snapshot guard returns before
      *       touching the send path; both stay off the node send mutex. */
-    {
-        struct main_state ms2;
-        main_state_init(&ms2);
-        struct msg_processor mp2;
-        msg_processor_init(&mp2, &ms2, NULL, NULL, cp, dir, &g_ph_nm, NULL);
-
-        /* (a) null-hash anchor: counted no-hash suppression, never a silent
-         *     `return;`. */
-        {
-            struct block_index ghost;
-            memset(&ghost, 0, sizeof(ghost));
-            ghost.nHeight = 5;
-            ghost.phashBlock = NULL;   /* stable hash slot never populated */
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            push_getheaders_from(&mp2, &node, &ghost);
-            msg_headers_get_stats(&b);
-            PH_CHECK("null-hash anchor: counted (no silent continuation drop)",
-                     b.getheaders_suppressed_no_hash ==
-                         a.getheaders_suppressed_no_hash + 1);
-        }
-
-        /* (b) active snapshot exchange: counted snapshot suppression, never
-         *     a silent latch. */
-        {
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            msg_processor_set_snapshot_active(&mp2, ph_snapshot_active_true,
-                                              NULL);
-            push_getheaders_from(&mp2, &node, NULL);
-            msg_processor_set_snapshot_active(&mp2, NULL, NULL);
-            msg_headers_get_stats(&b);
-            PH_CHECK("snapshot active: counted getheaders suppression",
-                     b.getheaders_suppressed_snapshot ==
-                         a.getheaders_suppressed_snapshot + 1);
-        }
-
-        main_state_free(&ms2);
-    }
+    failures += ph_case_getheaders_from(cp, dir, &node);
 
     /* ── 7. sibling silent-drop sites: inbound `headers` dropped receive-side,
      *       push_getheaders() and push_getheaders_span() dropped send-side
      *       while a snapshot exchange owns the wire, and the getheaders-
      *       serving defer during a peer snapshot transfer must all count and
      *       (rising-edge) log instead of silently returning. */
-    {
-        struct main_state ms3;
-        main_state_init(&ms3);
-        struct msg_processor mp3;
-        msg_processor_init(&mp3, &ms3, NULL, NULL, cp, dir, &g_ph_nm, NULL);
-
-        /* (a) process_headers: inbound headers dropped while a snapshot
-         *     exchange is active — counted, never a silent stop. */
-        {
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
-                                              NULL);
-            struct byte_stream s;
-            stream_init(&s, 8);
-            bool ret = process_headers(&mp3, &node, &s);
-            msg_processor_set_snapshot_active(&mp3, NULL, NULL);
-            stream_free(&s);
-            msg_headers_get_stats(&b);
-            PH_CHECK("process_headers: snapshot-active drop counted",
-                     ret == true &&
-                     b.headers_recv_suppressed_snapshot ==
-                         a.headers_recv_suppressed_snapshot + 1);
-        }
-
-        /* (b) push_getheaders: send-side request suppressed while a
-         *     snapshot exchange is active — counted. */
-        {
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
-                                              NULL);
-            push_getheaders(&mp3, &node);
-            msg_processor_set_snapshot_active(&mp3, NULL, NULL);
-            msg_headers_get_stats(&b);
-            PH_CHECK("push_getheaders: snapshot-active drop counted",
-                     b.push_getheaders_suppressed_snapshot ==
-                         a.push_getheaders_suppressed_snapshot + 1);
-        }
-
-        /* (c) push_getheaders_span: span request suppressed while a
-         *     snapshot exchange is active — counted. */
-        {
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            msg_processor_set_snapshot_active(&mp3, ph_snapshot_active_true,
-                                              NULL);
-            push_getheaders_span(&mp3, &node, &gh, NULL);
-            msg_processor_set_snapshot_active(&mp3, NULL, NULL);
-            msg_headers_get_stats(&b);
-            PH_CHECK("push_getheaders_span: snapshot-active drop counted",
-                     b.push_getheaders_span_suppressed_snapshot ==
-                         a.push_getheaders_span_suppressed_snapshot + 1);
-        }
-
-        /* (d) process_getheaders: request deferred while we are serving a
-         *     snapshot to this peer — counted. */
-        {
-            struct msg_headers_stats a, b;
-            msg_headers_get_stats(&a);
-            bool saved = node.swarm_manifest_sent;
-            node.swarm_manifest_sent = true;
-            struct byte_stream s;
-            stream_init(&s, 8);
-            bool ret = process_getheaders(&mp3, &node, &s);
-            stream_free(&s);
-            node.swarm_manifest_sent = saved;
-            msg_headers_get_stats(&b);
-            PH_CHECK("process_getheaders: snapshot-serving defer counted",
-                     ret == true &&
-                     b.getheaders_deferred_snapshot_serving ==
-                         a.getheaders_deferred_snapshot_serving + 1);
-        }
-
-        main_state_free(&ms3);
-    }
+    failures += ph_case_sibling_drops(cp, dir, &node, &gh);
 
     /* ── 8. getheaders SERVE side: the reply must stay under the 2 MiB wire
      *       cap. ~2000 Equihash headers (1344-byte solution) serialize to
      *       ~2.9 MB > MAX_PROTOCOL_MESSAGE_LENGTH, so
      *       getheaders_try_append_header() bounds the batch by bytes. */
-    {
-        struct block_header big;
-        block_header_init(&big);
-        big.nBits = 0x1f07ffff;
-        big.nSolutionSize = MAX_SOLUTION_SIZE;   /* pre-Bubbles 200,9 size */
-        memset(big.nSolution, 0xab, MAX_SOLUTION_SIZE);
-
-        struct byte_stream body;
-        stream_init(&body, 1u << 20);
-        int served = 0;
-        bool stopped_by_cap = false;
-        for (int i = 0; i < 2000; i++) {
-            if (!getheaders_try_append_header(&body, &big)) {
-                stopped_by_cap = true;
-                break;
-            }
-            served++;
-        }
-        size_t framed = compact_size_sizeof((uint64_t)served) + body.size;
-        PH_CHECK("getheaders serve: byte cap stops the batch before count 2000",
-                 stopped_by_cap && served > 0 && served < 2000);
-        PH_CHECK("getheaders serve: framed reply within wire cap",
-                 framed <= (size_t)MAX_PROTOCOL_MESSAGE_LENGTH);
-        PH_CHECK("getheaders serve: one more header would overflow (tight)",
-                 body.size + 1488u + 16u > (size_t)MAX_PROTOCOL_MESSAGE_LENGTH);
-        stream_free(&body);
-    }
+    failures += ph_case_serve_byte_cap();
 
     /* ── 9. batch-order relink heal refuses a STALE ANCHOR (refuse, don't
      *       mutate). The heal may only rewrite an entry's parent/height/skip/
@@ -546,107 +810,7 @@ int test_process_headers_adversarial(void)
      *       B(prev=A) must be refused without mutation, the cursor keeps the
      *       last map-agreed anchor, and the next header in the batch still
      *       admits cleanly. */
-    {
-        struct main_state ms4;
-        main_state_init(&ms4);
-        struct msg_processor mp4;
-        msg_processor_init(&mp4, &ms4, NULL, NULL, cp, dir, &g_ph_nm, NULL);
-
-        struct uint256 gh4 = cp->consensus.hashGenesisBlock;
-        struct block_index *gen4 =
-            chainstate_insert_block_index((struct chainstate *)&ms4, &gh4);
-        PH_CHECK("stale-anchor: genesis inserted", gen4 != NULL);
-        if (gen4) {
-            gen4->nHeight = 0;
-            gen4->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-            gen4->nTx = 1;
-            gen4->nChainTx = 1;
-            active_chain_move_window_tip(&ms4.chain_active, gen4);
-            ms4.pindex_best_header = gen4;
-
-            struct block_header ha, hb, hc;
-            bool ok9 = ph_mine_header(&ha, 1, &gh4, cp);
-            if (ok9) {
-                struct uint256 ha_hash;
-                block_header_get_hash(&ha, &ha_hash);
-                ok9 = ph_mine_header(&hb, 2, &ha_hash, cp);
-                if (ok9) {
-                    struct uint256 hb_hash;
-                    block_header_get_hash(&hb, &hb_hash);
-                    ok9 = ph_mine_header(&hc, 3, &hb_hash, cp);
-                }
-            }
-            PH_CHECK("stale-anchor: three chained regtest headers mined", ok9);
-
-            /* Batch 1 [A]: admitted through the heal path with an honest
-             * anchor (genesis resolves in the map) — the healthy flow
-             * this slice must preserve. */
-            size_t map0 = ms4.map_block_index.size;
-            struct byte_stream s1;
-            stream_init(&s1, 512);
-            stream_write_compact_size(&s1, 1);
-            PH_CHECK("stale-anchor: batch1 payload built",
-                     ph_write_header(&s1, &ha));
-            PH_CHECK("stale-anchor: honest batch1 accepted",
-                     process_headers(&mp4, &node, &s1));
-            PH_CHECK("stale-anchor: batch1 grew the map by one",
-                     ms4.map_block_index.size == map0 + 1);
-            stream_free(&s1);
-
-            struct uint256 ha_hash;
-            block_header_get_hash(&ha, &ha_hash);
-            struct block_index *map_a =
-                block_map_find(&ms4.map_block_index, &ha_hash);
-            PH_CHECK("stale-anchor: A resolved in the map", map_a != NULL);
-
-            /* Stage the out-of-map twin as the sequence anchor. */
-            struct uint256 twin_hash;
-            struct block_index twin;
-            memset(&twin, 0, sizeof(twin));
-            twin.nHeight = 1;
-            twin.phashBlock = &twin_hash;
-            memcpy(twin_hash.data, ha_hash.data, 32);
-            PH_CHECK("stale-anchor: twin installed as window tip",
-                     active_chain_move_window_tip(&ms4.chain_active, &twin));
-
-            node.disconnect = false;
-            atomic_store(&node.misbehavior, 0);
-
-            /* Batch 2 [B(prev=A), C(prev=B)] with the anchor stale. */
-            struct byte_stream s2;
-            stream_init(&s2, 1024);
-            stream_write_compact_size(&s2, 2);
-            PH_CHECK("stale-anchor: batch2 payload built",
-                     ph_write_header(&s2, &hb) && ph_write_header(&s2, &hc));
-            bool ret9 = process_headers(&mp4, &node, &s2);
-            stream_free(&s2);
-            PH_CHECK("stale-anchor: batch2 completes", ret9 == true);
-            PH_CHECK("stale-anchor: batch2 grew the map by two",
-                     ms4.map_block_index.size == map0 + 3);
-
-            struct uint256 hb_hash, hc_hash;
-            block_header_get_hash(&hb, &hb_hash);
-            block_header_get_hash(&hc, &hc_hash);
-            struct block_index *bi_b =
-                block_map_find(&ms4.map_block_index, &hb_hash);
-            struct block_index *bi_c =
-                block_map_find(&ms4.map_block_index, &hc_hash);
-            PH_CHECK("stale-anchor: B kept its MAP-resolved parent "
-                     "(not mutated onto the twin)",
-                     bi_b && bi_b->nHeight == 2 &&
-                     map_a && bi_b->pprev == map_a);
-            PH_CHECK("stale-anchor: cursor survived the refusal — "
-                     "next header admits at parent+1",
-                     bi_c && bi_c->nHeight == 3 &&
-                     bi_c->pprev == bi_b);
-            PH_CHECK("stale-anchor: refusal scores no penalty",
-                     atomic_load(&node.misbehavior) == 0 && !node.disconnect);
-            PH_CHECK("stale-anchor: ladder unchanged elsewhere",
-                     map_a->nHeight == 1 &&
-                     (gen4 ? gen4->nHeight == 0 : true));
-        }
-        main_state_free(&ms4);
-    }
+    failures += ph_case_stale_anchor(cp, dir, &node);
 
     sync_set_state(sync0, "process_headers_adversarial restore");
     main_state_free(&ms);

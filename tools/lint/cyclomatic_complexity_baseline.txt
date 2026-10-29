@@ -708,7 +708,6 @@ tests/harness/src/test_parallel.c:rerun_load_flaky_groups:20
 tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:34
 tests/harness/src/test_payment_shutdown_owner.c:payment_shutdown_lifecycle_acceptance:25
-tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55
 tests/harness/src/test_pv_lookahead.c:la_fold_from:27
 tests/harness/src/test_pv_lookahead.c:test_pv_lookahead:39
 tests/harness/src/test_reducer_frontier_reconcile_light.c:make_fixture_block_readable:20
