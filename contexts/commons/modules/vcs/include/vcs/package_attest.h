@@ -142,45 +142,9 @@ enum vcs_package_attest_isolation {
 
 /* Every rejection names the failed rule. The enum order is frozen. */
 enum vcs_package_attest_error {
-    VCS_PACKAGE_ATTEST_OK = 0,
-    VCS_PACKAGE_ATTEST_ERR_NULL,           /* null argument */
-    VCS_PACKAGE_ATTEST_ERR_ALLOC,          /* allocation failure */
-    VCS_PACKAGE_ATTEST_ERR_SCHEMA_VERSION, /* schema_version != 1 */
-    VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC,     /* bad magic */
-    VCS_PACKAGE_ATTEST_ERR_WIRE_OVERSIZE,  /* exceeds MAX_WIRE_BYTES */
-    VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED, /* a field runs past the end */
-    VCS_PACKAGE_ATTEST_ERR_WIRE_TRAILING,  /* bytes after the signature */
-    VCS_PACKAGE_ATTEST_ERR_PACKAGE_ROOT,   /* all-zero package root */
-    VCS_PACKAGE_ATTEST_ERR_RELEASE_ID,     /* all-zero release id */
-    VCS_PACKAGE_ATTEST_ERR_RECIPE_ROOT,    /* all-zero recipe root */
-    VCS_PACKAGE_ATTEST_ERR_RESULT_CLASS,   /* unknown result class */
-    VCS_PACKAGE_ATTEST_ERR_DETAIL_CODE,    /* unknown detail code */
-    VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT,    /* non-printable or over bound */
-    VCS_PACKAGE_ATTEST_ERR_DETAIL_REQUIRED, /* fail class with detail_code 0 */
-    VCS_PACKAGE_ATTEST_ERR_DETAIL_FORBIDDEN, /* pass class carrying detail */
-    VCS_PACKAGE_ATTEST_ERR_COMPILER_COUNT, /* 0 or > MAX compilers */
-    VCS_PACKAGE_ATTEST_ERR_COMPILER_ID,    /* id charset/bound */
-    VCS_PACKAGE_ATTEST_ERR_COMPILER_VERSION, /* version charset/bound */
-    VCS_PACKAGE_ATTEST_ERR_COMPILER_OUTCOME, /* unknown compiler outcome */
-    VCS_PACKAGE_ATTEST_ERR_COMPILER_ORDER, /* unsorted or duplicate entry */
-    VCS_PACKAGE_ATTEST_ERR_SANITIZER_COUNT, /* > MAX sanitizers */
-    VCS_PACKAGE_ATTEST_ERR_SANITIZER_NAME, /* name charset/bound */
-    VCS_PACKAGE_ATTEST_ERR_SANITIZER_OUTCOME, /* unknown sanitizer outcome */
-    VCS_PACKAGE_ATTEST_ERR_SANITIZER_ORDER, /* unsorted or duplicate entry */
-    VCS_PACKAGE_ATTEST_ERR_SANITIZER_FINDINGS, /* findings in a non-
-                                                  sanitizer-fail class, or
-                                                  sanitizer-fail without one */
-    VCS_PACKAGE_ATTEST_ERR_TEST_FLAG,      /* test_ran byte not 0/1 */
-    VCS_PACKAGE_ATTEST_ERR_TEST_EXIT,      /* exit code nonzero when
-                                              test_ran=0 (non-canonical) */
-    VCS_PACKAGE_ATTEST_ERR_TEST_CLASS,     /* test_ran inconsistent with
-                                              the result class */
-    VCS_PACKAGE_ATTEST_ERR_OUTCOME_CLASS,  /* a compiler failed but the
-                                              class is a PASS class */
-    VCS_PACKAGE_ATTEST_ERR_ISOLATION,      /* unknown isolation level */
-    VCS_PACKAGE_ATTEST_ERR_PUBKEY,         /* not a compressed curve point */
-    VCS_PACKAGE_ATTEST_ERR_SIG_LOW_S,      /* high-S (malleated) signature */
-    VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY,     /* ECDSA verification failed */
+#define VCS_PACKAGE_ATTEST_ERROR(symbol, value, text) symbol = value,
+#include "vcs/package_attest_errors.def"
+#undef VCS_PACKAGE_ATTEST_ERROR
 };
 
 struct vcs_package_attest_compiler {

@@ -543,6 +543,126 @@ static int zv_codec_validate_rules(const uint8_t pr[32], const uint8_t ri[32],
     return failures;
 }
 
+/* Pin complete-prefix failures and the documented partial-output boundaries. */
+static bool zv_codec_prefixes(const uint8_t *wire, size_t len,
+                              const struct vcs_package_attest *expected)
+{
+    for (size_t n = 0; n < len; n++) {
+        struct vcs_package_attest out;
+        memset(&out, 0xa5, sizeof(out));
+        if (vcs_package_attest_parse(wire, n, &out) !=
+            VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED) return false;
+        if (out.schema_version != (n >= 10 ? expected->schema_version : 0)) return false;
+        if (memcmp(out.package_root, n >= 42 ? expected->package_root :
+                   (const uint8_t[32]){0}, 32)) return false;
+        if (memcmp(out.release_id, n >= 74 ? expected->release_id :
+                   (const uint8_t[32]){0}, 32)) return false;
+        if (memcmp(out.recipe_root, n >= 106 ? expected->recipe_root :
+                   (const uint8_t[32]){0}, 32)) return false;
+    }
+    return true;
+}
+
+static int zv_codec_boundary_wire(const uint8_t *wire, size_t len,
+                                  const struct vcs_package_attest *expected)
+{
+    int failures = 0;
+    uint8_t bad[VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES];
+    struct vcs_package_attest out;
+    ZV_CHECK("codec: every valid-wire prefix truncates with partial roots",
+             zv_codec_prefixes(wire, len, expected));
+    memcpy(bad, wire, len);
+    bad[112] = 0; /* first compiler id, embedded NUL */
+    ZV_CHECK("codec: embedded NUL compiler id",
+             vcs_package_attest_parse(bad, len, &out) == VCS_PACKAGE_ATTEST_ERR_COMPILER_ID);
+    memcpy(bad, wire, len);
+    bad[111] = VCS_PACKAGE_ATTEST_COMPILER_ID_MAX + 1;
+    ZV_CHECK("codec: oversized compiler token",
+             vcs_package_attest_parse(bad, len, &out) == VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED);
+    memset(&out, 0xa5, sizeof(out));
+    ZV_CHECK("codec: null wire clears output",
+             vcs_package_attest_parse(NULL, 0, &out) == VCS_PACKAGE_ATTEST_ERR_NULL &&
+             out.schema_version == 0 && out.compiler_count == 0 && out.package_root[0] == 0);
+    return failures;
+}
+
+static int zv_codec_precedence(struct vcs_package_attest m)
+{
+    int failures = 0;
+    uint8_t root[32];
+    memcpy(root, m.package_root, sizeof(root));
+    memset(m.package_root, 0, sizeof(m.package_root));
+    m.detail[0] = 1;
+    m.compilers[0].id[0] = 0;
+    m.sanitizers[0].name[0] = 0;
+    m.test_ran = false;
+    m.isolation = 255;
+    ZV_CHECK("codec: root precedes later errors", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_PACKAGE_ROOT);
+    memcpy(m.package_root, root, sizeof(root));
+    ZV_CHECK("codec: detail precedes later errors", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT);
+    m.detail[0] = 0;
+    ZV_CHECK("codec: compiler precedes later errors", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_COMPILER_ID);
+    memcpy(m.compilers[0].id, "clang", sizeof("clang"));
+    ZV_CHECK("codec: sanitizer precedes later errors", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_SANITIZER_NAME);
+    memcpy(m.sanitizers[0].name, "asan", sizeof("asan"));
+    ZV_CHECK("codec: test class precedes isolation", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_TEST_CLASS);
+    m.test_ran = true;
+    ZV_CHECK("codec: isolation after earlier errors cleared", vcs_package_attest_validate(&m) == VCS_PACKAGE_ATTEST_ERR_ISOLATION);
+    return failures;
+}
+
+/* Public error numbers/names are a frozen compatibility contract. */
+static bool zv_codec_error_names(void)
+{
+    static const char *const expected[] = {
+        "ok",
+        "null-argument",
+        "allocation-failure",
+        "schema-version",
+        "wire-magic",
+        "wire-oversize",
+        "wire-truncated",
+        "wire-trailing",
+        "package-root-zero",
+        "release-id-zero",
+        "recipe-root-zero",
+        "result-class",
+        "detail-code",
+        "detail-text",
+        "detail-required",
+        "detail-forbidden",
+        "compiler-count",
+        "compiler-id",
+        "compiler-version",
+        "compiler-outcome",
+        "compiler-order",
+        "sanitizer-count",
+        "sanitizer-name",
+        "sanitizer-outcome",
+        "sanitizer-order",
+        "sanitizer-findings-class",
+        "test-flag",
+        "test-exit-canonical",
+        "test-class-mismatch",
+        "outcome-class-mismatch",
+        "isolation-level",
+        "verifier-pubkey",
+        "signature-low-s",
+        "signature-verify",
+    };
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); i++) {
+        if (strcmp(vcs_package_attest_error_string(
+                       (enum vcs_package_attest_error)i), expected[i]) != 0)
+            return false;
+    }
+    return strcmp(vcs_package_attest_error_string(
+                      (enum vcs_package_attest_error)-1), "unknown-error") == 0 &&
+           strcmp(vcs_package_attest_error_string(
+                      (enum vcs_package_attest_error)34), "unknown-error") == 0 &&
+           strcmp(vcs_package_attest_error_string(
+                      (enum vcs_package_attest_error)65535), "unknown-error") == 0;
+}
+
 static int t_codec(void)
 {
     int failures = 0;
@@ -569,9 +689,12 @@ static int t_codec(void)
         return failures + 1;
     }
     failures += zv_codec_hostile_wire(wire, wire_len);
+    failures += zv_codec_boundary_wire(wire, wire_len, &a);
+    ZV_CHECK("codec: frozen error names and unknown bounds", zv_codec_error_names());
+    failures += zv_codec_precedence(a);
     free(wire);
 
-    zv_codec_validate_rules(pr, ri, rr);
+    failures += zv_codec_validate_rules(pr, ri, rr);
     return failures;
 }
 

@@ -65,44 +65,15 @@ static const uint8_t attest_half_order[32] = {
 const char *vcs_package_attest_error_string(
     enum vcs_package_attest_error error)
 {
-    switch (error) {
-    case VCS_PACKAGE_ATTEST_OK: return "ok";
-    case VCS_PACKAGE_ATTEST_ERR_NULL: return "null-argument";
-    case VCS_PACKAGE_ATTEST_ERR_ALLOC: return "allocation-failure";
-    case VCS_PACKAGE_ATTEST_ERR_SCHEMA_VERSION: return "schema-version";
-    case VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_PACKAGE_ATTEST_ERR_WIRE_OVERSIZE: return "wire-oversize";
-    case VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED: return "wire-truncated";
-    case VCS_PACKAGE_ATTEST_ERR_WIRE_TRAILING: return "wire-trailing";
-    case VCS_PACKAGE_ATTEST_ERR_PACKAGE_ROOT: return "package-root-zero";
-    case VCS_PACKAGE_ATTEST_ERR_RELEASE_ID: return "release-id-zero";
-    case VCS_PACKAGE_ATTEST_ERR_RECIPE_ROOT: return "recipe-root-zero";
-    case VCS_PACKAGE_ATTEST_ERR_RESULT_CLASS: return "result-class";
-    case VCS_PACKAGE_ATTEST_ERR_DETAIL_CODE: return "detail-code";
-    case VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT: return "detail-text";
-    case VCS_PACKAGE_ATTEST_ERR_DETAIL_REQUIRED: return "detail-required";
-    case VCS_PACKAGE_ATTEST_ERR_DETAIL_FORBIDDEN: return "detail-forbidden";
-    case VCS_PACKAGE_ATTEST_ERR_COMPILER_COUNT: return "compiler-count";
-    case VCS_PACKAGE_ATTEST_ERR_COMPILER_ID: return "compiler-id";
-    case VCS_PACKAGE_ATTEST_ERR_COMPILER_VERSION: return "compiler-version";
-    case VCS_PACKAGE_ATTEST_ERR_COMPILER_OUTCOME: return "compiler-outcome";
-    case VCS_PACKAGE_ATTEST_ERR_COMPILER_ORDER: return "compiler-order";
-    case VCS_PACKAGE_ATTEST_ERR_SANITIZER_COUNT: return "sanitizer-count";
-    case VCS_PACKAGE_ATTEST_ERR_SANITIZER_NAME: return "sanitizer-name";
-    case VCS_PACKAGE_ATTEST_ERR_SANITIZER_OUTCOME: return "sanitizer-outcome";
-    case VCS_PACKAGE_ATTEST_ERR_SANITIZER_ORDER: return "sanitizer-order";
-    case VCS_PACKAGE_ATTEST_ERR_SANITIZER_FINDINGS:
-        return "sanitizer-findings-class";
-    case VCS_PACKAGE_ATTEST_ERR_TEST_FLAG: return "test-flag";
-    case VCS_PACKAGE_ATTEST_ERR_TEST_EXIT: return "test-exit-canonical";
-    case VCS_PACKAGE_ATTEST_ERR_TEST_CLASS: return "test-class-mismatch";
-    case VCS_PACKAGE_ATTEST_ERR_OUTCOME_CLASS: return "outcome-class-mismatch";
-    case VCS_PACKAGE_ATTEST_ERR_ISOLATION: return "isolation-level";
-    case VCS_PACKAGE_ATTEST_ERR_PUBKEY: return "verifier-pubkey";
-    case VCS_PACKAGE_ATTEST_ERR_SIG_LOW_S: return "signature-low-s";
-    case VCS_PACKAGE_ATTEST_ERR_SIG_VERIFY: return "signature-verify";
-    }
-    return "unknown-error";
+    static const char *const names[] = {
+#define VCS_PACKAGE_ATTEST_ERROR(symbol, value, text) [symbol] = text,
+#include "vcs/package_attest_errors.def"
+#undef VCS_PACKAGE_ATTEST_ERROR
+    };
+    size_t index = (size_t)error;
+    if (index >= sizeof(names) / sizeof(names[0]))
+        return "unknown-error";
+    return names[index] ? names[index] : "unknown-error";
 }
 
 const char *vcs_package_attest_result_string(uint8_t result_class)
@@ -204,11 +175,8 @@ static bool attest_oncurve(const uint8_t pubkey[33])
 
 /* ── validation ─────────────────────────────────────────────────────── */
 
-enum vcs_package_attest_error vcs_package_attest_validate(
-    const struct vcs_package_attest *attest)
+static enum vcs_package_attest_error attest_validate_identity(const struct vcs_package_attest *attest)
 {
-    if (!attest)
-        LOG_RETURN(VCS_PACKAGE_ATTEST_ERR_NULL, ATTEST_LOG, "null attest");
     if (attest->schema_version != VCS_PACKAGE_ATTEST_VERSION)
         return VCS_PACKAGE_ATTEST_ERR_SCHEMA_VERSION;
     if (!attest_root_nonzero(attest->package_root))
@@ -232,6 +200,11 @@ enum vcs_package_attest_error vcs_package_attest_validate(
     if (!pass && attest->detail_code == VCS_PACKAGE_ATTEST_DETAIL_NONE)
         return VCS_PACKAGE_ATTEST_ERR_DETAIL_REQUIRED;
 
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_validate_compilers(const struct vcs_package_attest *attest)
+{
     if (attest->compiler_count == 0 ||
         attest->compiler_count > VCS_PACKAGE_ATTEST_MAX_COMPILERS)
         return VCS_PACKAGE_ATTEST_ERR_COMPILER_COUNT;
@@ -247,10 +220,15 @@ enum vcs_package_attest_error vcs_package_attest_validate(
             return VCS_PACKAGE_ATTEST_ERR_COMPILER_OUTCOME;
         if (i > 0 && !attest_compiler_cmp(attest, i - 1, i))
             return VCS_PACKAGE_ATTEST_ERR_COMPILER_ORDER;
-        if (pass && c->outcome == VCS_PACKAGE_ATTEST_OUTCOME_FAIL)
+        if (vcs_package_attest_result_is_pass(attest->result_class) && c->outcome == VCS_PACKAGE_ATTEST_OUTCOME_FAIL)
             return VCS_PACKAGE_ATTEST_ERR_OUTCOME_CLASS;
     }
 
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_validate_sanitizers(const struct vcs_package_attest *attest)
+{
     if (attest->sanitizer_count > VCS_PACKAGE_ATTEST_MAX_SANITIZERS)
         return VCS_PACKAGE_ATTEST_ERR_SANITIZER_COUNT;
     bool any_findings = false;
@@ -272,6 +250,11 @@ enum vcs_package_attest_error vcs_package_attest_validate(
         return VCS_PACKAGE_ATTEST_ERR_SANITIZER_FINDINGS;
     }
 
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_validate_test(const struct vcs_package_attest *attest)
+{
     switch (attest->result_class) {
     case VCS_PACKAGE_ATTEST_RESULT_BUILD_PASS:
     case VCS_PACKAGE_ATTEST_RESULT_BUILD_FAIL:
@@ -291,6 +274,23 @@ enum vcs_package_attest_error vcs_package_attest_validate(
         return VCS_PACKAGE_ATTEST_ERR_ISOLATION;
     if (!attest_oncurve(attest->verifier_pubkey))
         return VCS_PACKAGE_ATTEST_ERR_PUBKEY;
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+enum vcs_package_attest_error vcs_package_attest_validate(
+    const struct vcs_package_attest *attest)
+{
+    if (!attest)
+        LOG_RETURN(VCS_PACKAGE_ATTEST_ERR_NULL, ATTEST_LOG, "null attest");
+    enum vcs_package_attest_error err;
+    err = attest_validate_identity(attest);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_validate_compilers(attest);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_validate_sanitizers(attest);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_validate_test(attest);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
     return VCS_PACKAGE_ATTEST_OK;
 }
 
@@ -439,6 +439,143 @@ static enum vcs_package_attest_error attest_rd_token(
     return VCS_PACKAGE_ATTEST_OK;
 }
 
+static enum vcs_package_attest_error attest_parse_header(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct vcs_package_attest *out)
+{
+    enum vcs_package_attest_error err;
+    uint8_t magic[VCS_PACKAGE_ATTEST_WIRE_MAGIC_BYTES];
+    err =
+        attest_rd_bytes(wire, wire_len, off, magic, sizeof(magic));
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    if (memcmp(magic, attest_wire_magic, sizeof(magic)) != 0)
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC;
+    if (!attest_wire_has(wire_len, (*off), 2u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    out->schema_version = vcs_rd_u16le(wire + (*off));
+    (*off) += 2;
+    if (out->schema_version != VCS_PACKAGE_ATTEST_VERSION)
+        return VCS_PACKAGE_ATTEST_ERR_SCHEMA_VERSION;
+
+    err = attest_rd_bytes(wire, wire_len, off, out->package_root, 32);
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    err = attest_rd_bytes(wire, wire_len, off, out->release_id, 32);
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    err = attest_rd_bytes(wire, wire_len, off, out->recipe_root, 32);
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    if (!attest_wire_has(wire_len, (*off), 2u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    out->result_class = wire[(*off)++];
+    out->detail_code = wire[(*off)++];
+
+    /* detail: [2 len][bytes]; embedded NUL is a detail-grammar rejection. */
+    if (!attest_wire_has(wire_len, (*off), 2u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    uint16_t detail_len = vcs_rd_u16le(wire + (*off));
+    (*off) += 2;
+    if (detail_len > VCS_PACKAGE_ATTEST_DETAIL_MAX ||
+        !attest_wire_has(wire_len, (*off), detail_len))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    if (detail_len > 0)
+        memcpy(out->detail, wire + (*off), detail_len);
+    out->detail[detail_len] = '\0';
+    if (strnlen(out->detail, detail_len) != detail_len)
+        return VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT;
+    (*off) += detail_len;
+
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_parse_compilers(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct vcs_package_attest *out)
+{
+    enum vcs_package_attest_error err;
+    if (!attest_wire_has(wire_len, (*off), 1u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    out->compiler_count = wire[(*off)++];
+    if (out->compiler_count > VCS_PACKAGE_ATTEST_MAX_COMPILERS)
+        return VCS_PACKAGE_ATTEST_ERR_COMPILER_COUNT;
+    for (size_t i = 0; i < out->compiler_count; i++) {
+        struct vcs_package_attest_compiler *c = &out->compilers[i];
+        err = attest_rd_token(wire, wire_len, off,
+                              VCS_PACKAGE_ATTEST_COMPILER_ID_MAX, c->id,
+                              sizeof(c->id), VCS_PACKAGE_ATTEST_ERR_COMPILER_ID);
+        if (err != VCS_PACKAGE_ATTEST_OK)
+            return err;
+        err = attest_rd_token(wire, wire_len, off,
+                              VCS_PACKAGE_ATTEST_COMPILER_VERSION_MAX,
+                              c->version, sizeof(c->version),
+                              VCS_PACKAGE_ATTEST_ERR_COMPILER_VERSION);
+        if (err != VCS_PACKAGE_ATTEST_OK)
+            return err;
+        if (!attest_wire_has(wire_len, (*off), 1u))
+            return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+        c->outcome = wire[(*off)++];
+    }
+
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_parse_sanitizers(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct vcs_package_attest *out)
+{
+    enum vcs_package_attest_error err;
+    if (!attest_wire_has(wire_len, (*off), 1u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    out->sanitizer_count = wire[(*off)++];
+    if (out->sanitizer_count > VCS_PACKAGE_ATTEST_MAX_SANITIZERS)
+        return VCS_PACKAGE_ATTEST_ERR_SANITIZER_COUNT;
+    for (size_t i = 0; i < out->sanitizer_count; i++) {
+        struct vcs_package_attest_sanitizer *s = &out->sanitizers[i];
+        err = attest_rd_token(wire, wire_len, off,
+                              VCS_PACKAGE_ATTEST_SANITIZER_NAME_MAX, s->name,
+                              sizeof(s->name),
+                              VCS_PACKAGE_ATTEST_ERR_SANITIZER_NAME);
+        if (err != VCS_PACKAGE_ATTEST_OK)
+            return err;
+        if (!attest_wire_has(wire_len, (*off), 1u))
+            return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+        s->outcome = wire[(*off)++];
+    }
+
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
+static enum vcs_package_attest_error attest_parse_tail(
+    const uint8_t *wire, size_t wire_len, size_t *off,
+    struct vcs_package_attest *out)
+{
+    enum vcs_package_attest_error err;
+    if (!attest_wire_has(wire_len, (*off), 1u + 4u + 1u))
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
+    uint8_t test_flag = wire[(*off)++];
+    if (test_flag > 1u)
+        return VCS_PACKAGE_ATTEST_ERR_TEST_FLAG;
+    out->test_ran = test_flag == 1u;
+    out->test_exit_code = vcs_rd_u32le(wire + (*off));
+    (*off) += 4;
+    out->isolation = wire[(*off)++];
+
+    err = attest_rd_bytes(wire, wire_len, off, out->verifier_pubkey,
+                          VCS_PACKAGE_ATTEST_PUBKEY_BYTES);
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    err = attest_rd_bytes(wire, wire_len, off, out->signature,
+                          VCS_PACKAGE_ATTEST_SIGNATURE_BYTES);
+    if (err != VCS_PACKAGE_ATTEST_OK)
+        return err;
+    if ((*off) != wire_len)
+        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRAILING;
+
+    return VCS_PACKAGE_ATTEST_OK;
+}
+
 enum vcs_package_attest_error vcs_package_attest_parse(
     const uint8_t *wire, size_t wire_len, struct vcs_package_attest *out)
 {
@@ -451,111 +588,15 @@ enum vcs_package_attest_error vcs_package_attest_parse(
         return VCS_PACKAGE_ATTEST_ERR_WIRE_OVERSIZE;
 
     size_t off = 0;
-    uint8_t magic[VCS_PACKAGE_ATTEST_WIRE_MAGIC_BYTES];
-    enum vcs_package_attest_error err =
-        attest_rd_bytes(wire, wire_len, &off, magic, sizeof(magic));
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    if (memcmp(magic, attest_wire_magic, sizeof(magic)) != 0)
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_MAGIC;
-    if (!attest_wire_has(wire_len, off, 2u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    out->schema_version = vcs_rd_u16le(wire + off);
-    off += 2;
-    if (out->schema_version != VCS_PACKAGE_ATTEST_VERSION)
-        return VCS_PACKAGE_ATTEST_ERR_SCHEMA_VERSION;
-
-    err = attest_rd_bytes(wire, wire_len, &off, out->package_root, 32);
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    err = attest_rd_bytes(wire, wire_len, &off, out->release_id, 32);
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    err = attest_rd_bytes(wire, wire_len, &off, out->recipe_root, 32);
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    if (!attest_wire_has(wire_len, off, 2u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    out->result_class = wire[off++];
-    out->detail_code = wire[off++];
-
-    /* detail: [2 len][bytes]; embedded NUL is a detail-grammar rejection. */
-    if (!attest_wire_has(wire_len, off, 2u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    uint16_t detail_len = vcs_rd_u16le(wire + off);
-    off += 2;
-    if (detail_len > VCS_PACKAGE_ATTEST_DETAIL_MAX ||
-        !attest_wire_has(wire_len, off, detail_len))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    if (detail_len > 0)
-        memcpy(out->detail, wire + off, detail_len);
-    out->detail[detail_len] = '\0';
-    if (strnlen(out->detail, detail_len) != detail_len)
-        return VCS_PACKAGE_ATTEST_ERR_DETAIL_TEXT;
-    off += detail_len;
-
-    if (!attest_wire_has(wire_len, off, 1u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    out->compiler_count = wire[off++];
-    if (out->compiler_count > VCS_PACKAGE_ATTEST_MAX_COMPILERS)
-        return VCS_PACKAGE_ATTEST_ERR_COMPILER_COUNT;
-    for (size_t i = 0; i < out->compiler_count; i++) {
-        struct vcs_package_attest_compiler *c = &out->compilers[i];
-        err = attest_rd_token(wire, wire_len, &off,
-                              VCS_PACKAGE_ATTEST_COMPILER_ID_MAX, c->id,
-                              sizeof(c->id), VCS_PACKAGE_ATTEST_ERR_COMPILER_ID);
-        if (err != VCS_PACKAGE_ATTEST_OK)
-            return err;
-        err = attest_rd_token(wire, wire_len, &off,
-                              VCS_PACKAGE_ATTEST_COMPILER_VERSION_MAX,
-                              c->version, sizeof(c->version),
-                              VCS_PACKAGE_ATTEST_ERR_COMPILER_VERSION);
-        if (err != VCS_PACKAGE_ATTEST_OK)
-            return err;
-        if (!attest_wire_has(wire_len, off, 1u))
-            return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-        c->outcome = wire[off++];
-    }
-
-    if (!attest_wire_has(wire_len, off, 1u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    out->sanitizer_count = wire[off++];
-    if (out->sanitizer_count > VCS_PACKAGE_ATTEST_MAX_SANITIZERS)
-        return VCS_PACKAGE_ATTEST_ERR_SANITIZER_COUNT;
-    for (size_t i = 0; i < out->sanitizer_count; i++) {
-        struct vcs_package_attest_sanitizer *s = &out->sanitizers[i];
-        err = attest_rd_token(wire, wire_len, &off,
-                              VCS_PACKAGE_ATTEST_SANITIZER_NAME_MAX, s->name,
-                              sizeof(s->name),
-                              VCS_PACKAGE_ATTEST_ERR_SANITIZER_NAME);
-        if (err != VCS_PACKAGE_ATTEST_OK)
-            return err;
-        if (!attest_wire_has(wire_len, off, 1u))
-            return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-        s->outcome = wire[off++];
-    }
-
-    if (!attest_wire_has(wire_len, off, 1u + 4u + 1u))
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRUNCATED;
-    uint8_t test_flag = wire[off++];
-    if (test_flag > 1u)
-        return VCS_PACKAGE_ATTEST_ERR_TEST_FLAG;
-    out->test_ran = test_flag == 1u;
-    out->test_exit_code = vcs_rd_u32le(wire + off);
-    off += 4;
-    out->isolation = wire[off++];
-
-    err = attest_rd_bytes(wire, wire_len, &off, out->verifier_pubkey,
-                          VCS_PACKAGE_ATTEST_PUBKEY_BYTES);
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    err = attest_rd_bytes(wire, wire_len, &off, out->signature,
-                          VCS_PACKAGE_ATTEST_SIGNATURE_BYTES);
-    if (err != VCS_PACKAGE_ATTEST_OK)
-        return err;
-    if (off != wire_len)
-        return VCS_PACKAGE_ATTEST_ERR_WIRE_TRAILING;
-
+    enum vcs_package_attest_error err;
+    err = attest_parse_header(wire, wire_len, &off, out);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_parse_compilers(wire, wire_len, &off, out);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_parse_sanitizers(wire, wire_len, &off, out);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
+    err = attest_parse_tail(wire, wire_len, &off, out);
+    if (err != VCS_PACKAGE_ATTEST_OK) return err;
     /* Field grammars + consistency (the signature is verify()'s step). */
     return vcs_package_attest_validate(out);
 }
