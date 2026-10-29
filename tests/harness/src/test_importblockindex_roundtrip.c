@@ -313,32 +313,54 @@ static void ibr_check_header_fields(int *failure_count, struct node_db *ndb,
     }
 }
 
-int test_importblockindex_roundtrip(void)
+/* ==================================================================
+ * Scenario A row checks: header_only=true force-zeroes the positions and
+ * clears HAVE_DATA/HAVE_UNDO while keeping the other status bits. */
+static int ibr_check_scenario_a_rows(struct node_db *ndb,
+                                     const struct ibr_block_fixture *fx)
 {
     int failures = 0;
+    bool positions_zeroed = true, status_masked = true;
+    for (int h = 0; h < IBR_N_BLOCKS; h++) {
+        struct db_block row;
+        if (!db_block_find_by_height(ndb, h, &row)) { positions_zeroed = false; continue; }
+        if (row.file_num != 0 || row.data_pos != 0 || row.undo_pos != 0)
+            positions_zeroed = false;
+        unsigned int expect_status =
+            fx[h].status & ~(unsigned int)(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        if ((unsigned int)row.status != expect_status)
+            status_masked = false;
+    }
+    IBR_CHECK("scenario A: file_num/data_pos/undo_pos force-zeroed for "
+              "EVERY height (not leaked/garbled from the source, even "
+              "though the fixture carries nFile=1 and large nDataPos "
+              "values for h>=16)", positions_zeroed);
+    IBR_CHECK("scenario A: status has HAVE_DATA/HAVE_UNDO cleared, other "
+              "bits (BLOCK_VALID_TRANSACTIONS) preserved", status_masked);
+    return failures;
+}
 
-    ibr_mkdir_p("./test-tmp");
-    char base[300];
-    test_fmt_tmpdir(base, sizeof(base), "importblockindex_roundtrip", "main");
-    ibr_mkdir_p(base);
+/* Fast-boot cursors: both state keys must read back as the max height. */
+static int ibr_check_tip_cursors(struct node_db *ndb, const char *name)
+{
+    int failures = 0;
+    int64_t pprev_h = -2, shielded_h = -2;
+    bool cursors_ok = node_db_state_get_int(ndb, "pprev_repaired_height", &pprev_h) &&
+                      node_db_state_get_int(ndb, "shielded_backfill_height", &shielded_h);
+    IBR_CHECK(name, cursors_ok && pprev_h == IBR_N_BLOCKS - 1 &&
+              shielded_h == IBR_N_BLOCKS - 1);
+    return failures;
+}
 
-    char src_dir[340];
-    snprintf(src_dir, sizeof(src_dir), "%s/legacy-src", base);
-    ibr_mkdir_p(src_dir);
-
-    struct ibr_block_fixture fx[IBR_N_BLOCKS];
-    bool fixture_ok = ibr_build_fixture(src_dir, fx, IBR_N_BLOCKS);
-    IBR_CHECK("fixture: synthesize N=32 legacy blocks/index LevelDB records "
-              "(incl. file-0 low-offset shape nDataPos=1711 at h=1)",
-              fixture_ok);
-    if (!fixture_ok)
-        return failures + 1;
-
-    /* ==================================================================
-     * Scenario A — header_only=true: the --importblockindex CLI dispatch
-     * shape (importblockindex_cli_mode, engine/entry/main_cli_modes.c).
-     * Positions must be force-zeroed, HAVE_DATA/HAVE_UNDO cleared.
-     * ================================================================== */
+/* ==================================================================
+ * Scenario A — header_only=true: the --importblockindex CLI dispatch
+ * shape (importblockindex_cli_mode, engine/entry/main_cli_modes.c).
+ * Positions must be force-zeroed, HAVE_DATA/HAVE_UNDO cleared.
+ * ================================================================== */
+static int ibr_scenario_a(const char *base, const char *src_dir,
+                          const struct ibr_block_fixture *fx)
+{
+    int failures = 0;
     {
         char db_path[380];
         snprintf(db_path, sizeof(db_path), "%s/node_a.db", base);
@@ -354,32 +376,10 @@ int test_importblockindex_roundtrip(void)
         IBR_CHECK("scenario A: target node.db opens", node_db_open(&ndb, db_path));
 
         ibr_check_header_fields(&failures, &ndb, fx, IBR_N_BLOCKS);
-
-        bool positions_zeroed = true, status_masked = true;
-        for (int h = 0; h < IBR_N_BLOCKS; h++) {
-            struct db_block row;
-            if (!db_block_find_by_height(&ndb, h, &row)) { positions_zeroed = false; continue; }
-            if (row.file_num != 0 || row.data_pos != 0 || row.undo_pos != 0)
-                positions_zeroed = false;
-            unsigned int expect_status =
-                fx[h].status & ~(unsigned int)(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            if ((unsigned int)row.status != expect_status)
-                status_masked = false;
-        }
-        IBR_CHECK("scenario A: file_num/data_pos/undo_pos force-zeroed for "
-                  "EVERY height (not leaked/garbled from the source, even "
-                  "though the fixture carries nFile=1 and large nDataPos "
-                  "values for h>=16)", positions_zeroed);
-        IBR_CHECK("scenario A: status has HAVE_DATA/HAVE_UNDO cleared, other "
-                  "bits (BLOCK_VALID_TRANSACTIONS) preserved", status_masked);
-
-        int64_t pprev_h = -2, shielded_h = -2;
-        bool cursors_ok = node_db_state_get_int(&ndb, "pprev_repaired_height", &pprev_h) &&
-                          node_db_state_get_int(&ndb, "shielded_backfill_height", &shielded_h);
-        IBR_CHECK("scenario A: fast-boot cursors (pprev_repaired_height, "
-                  "shielded_backfill_height) stamped to max height (N-1)",
-                  cursors_ok && pprev_h == IBR_N_BLOCKS - 1 &&
-                  shielded_h == IBR_N_BLOCKS - 1);
+        failures += ibr_check_scenario_a_rows(&ndb, fx);
+        failures += ibr_check_tip_cursors(&ndb,
+            "scenario A: fast-boot cursors (pprev_repaired_height, "
+            "shielded_backfill_height) stamped to max height (N-1)");
 
         int count_before = db_block_count(&ndb);
         node_db_close(&ndb);
@@ -400,11 +400,50 @@ int test_importblockindex_roundtrip(void)
                   "not 2N)", count_before == IBR_N_BLOCKS && count_after == IBR_N_BLOCKS);
         node_db_close(&ndb2);
     }
+    return failures;
+}
 
-    /* ==================================================================
-     * Scenario B — header_only=false: the snapshot-bundle loader shape.
-     * Positions must be copied VERBATIM.
-     * ================================================================== */
+/* ==================================================================
+ * Scenario B row checks: header_only=false copies positions and status
+ * verbatim, including the file-0 low-offset entry at h=1. */
+static int ibr_check_scenario_b_rows(struct node_db *ndb,
+                                     const struct ibr_block_fixture *fx)
+{
+    int failures = 0;
+    bool positions_exact = true, status_exact = true;
+    for (int h = 0; h < IBR_N_BLOCKS; h++) {
+        struct db_block row;
+        if (!db_block_find_by_height(ndb, h, &row)) { positions_exact = false; continue; }
+        if (row.file_num != fx[h].nfile ||
+            (uint32_t)row.data_pos != fx[h].ndatapos ||
+            (uint32_t)row.undo_pos != fx[h].nundopos)
+            positions_exact = false;
+        if ((unsigned int)row.status != fx[h].status)
+            status_exact = false;
+    }
+    IBR_CHECK("scenario B: file_num/data_pos/undo_pos copied VERBATIM "
+              "for every height (no translation)", positions_exact);
+    IBR_CHECK("scenario B: status copied verbatim (unmasked)", status_exact);
+
+    /* The file-0 low-offset entry (h=1, nFile=0, nDataPos=1711) must land
+     * as EXACTLY 1711. */
+    struct db_block row1;
+    bool h1_ok = db_block_find_by_height(ndb, 1, &row1);
+    IBR_CHECK("scenario B: file-0 low-offset entry (h=1) nDataPos is "
+              "PRESERVED EXACTLY at 1711 (the historical bug translated "
+              "this to 3414 instead of passing it through)",
+              h1_ok && row1.file_num == 0 && row1.data_pos == 1711);
+    return failures;
+}
+
+/* ==================================================================
+ * Scenario B — header_only=false: the snapshot-bundle loader shape.
+ * Positions must be copied VERBATIM.
+ * ================================================================== */
+static int ibr_scenario_b(const char *base, const char *src_dir,
+                          const struct ibr_block_fixture *fx)
+{
+    int failures = 0;
     {
         char db_path[380];
         snprintf(db_path, sizeof(db_path), "%s/node_b.db", base);
@@ -420,37 +459,9 @@ int test_importblockindex_roundtrip(void)
         IBR_CHECK("scenario B: target node.db opens", node_db_open(&ndb, db_path));
 
         ibr_check_header_fields(&failures, &ndb, fx, IBR_N_BLOCKS);
-
-        bool positions_exact = true, status_exact = true;
-        for (int h = 0; h < IBR_N_BLOCKS; h++) {
-            struct db_block row;
-            if (!db_block_find_by_height(&ndb, h, &row)) { positions_exact = false; continue; }
-            if (row.file_num != fx[h].nfile ||
-                (uint32_t)row.data_pos != fx[h].ndatapos ||
-                (uint32_t)row.undo_pos != fx[h].nundopos)
-                positions_exact = false;
-            if ((unsigned int)row.status != fx[h].status)
-                status_exact = false;
-        }
-        IBR_CHECK("scenario B: file_num/data_pos/undo_pos copied VERBATIM "
-                  "for every height (no translation)", positions_exact);
-        IBR_CHECK("scenario B: status copied verbatim (unmasked)", status_exact);
-
-        /* The file-0 low-offset entry (h=1, nFile=0, nDataPos=1711) must land
-         * as EXACTLY 1711. */
-        struct db_block row1;
-        bool h1_ok = db_block_find_by_height(&ndb, 1, &row1);
-        IBR_CHECK("scenario B: file-0 low-offset entry (h=1) nDataPos is "
-                  "PRESERVED EXACTLY at 1711 (the historical bug translated "
-                  "this to 3414 instead of passing it through)",
-                  h1_ok && row1.file_num == 0 && row1.data_pos == 1711);
-
-        int64_t pprev_h = -2, shielded_h = -2;
-        bool cursors_ok = node_db_state_get_int(&ndb, "pprev_repaired_height", &pprev_h) &&
-                          node_db_state_get_int(&ndb, "shielded_backfill_height", &shielded_h);
-        IBR_CHECK("scenario B: fast-boot cursors stamped to max height (N-1)",
-                  cursors_ok && pprev_h == IBR_N_BLOCKS - 1 &&
-                  shielded_h == IBR_N_BLOCKS - 1);
+        failures += ibr_check_scenario_b_rows(&ndb, fx);
+        failures += ibr_check_tip_cursors(&ndb,
+            "scenario B: fast-boot cursors stamped to max height (N-1)");
 
         int count_before = db_block_count(&ndb);
         node_db_close(&ndb);
@@ -469,238 +480,287 @@ int test_importblockindex_roundtrip(void)
                   "not 2N)", count_before == IBR_N_BLOCKS && count_after == IBR_N_BLOCKS);
         node_db_close(&ndb2);
     }
+    return failures;
+}
 
-    /* ==================================================================
-     * Scenario C — per-row trust: hash-bind + PoW-target check at import
-     * time (default ROM checkpoint, so both bad rows fail the UNCONDITIONAL
-     * checks). h=0 good, h=1 bad hash-bind, h=2 bad PoW-target, h=3 good:
-     * the batch continues past two consecutive bad rows. */
+/* Writes the scenario C corrupt-row source: h=0 good, h=1 bad hash-bind,
+ * h=2 bad PoW-target, h=3 good. *built_out is true only if every row landed. */
+static int ibr_c_write_fixture(const char *src_dir_c, bool *built_out)
+{
+    int failures = 0;
+    char idx_dir_c[512];
+    snprintf(idx_dir_c, sizeof(idx_dir_c), "%s/blocks/index", src_dir_c);
+
+    struct db_wrapper dbw;
+    bool dbw_ok = db_wrapper_open(&dbw, idx_dir_c, 4 << 20, false, true);
+    IBR_CHECK("scenario C fixture: open corrupt-row source LevelDB", dbw_ok);
+
+    uint32_t pow_bits = ibr_pow_limit_bits();
+    bool built = dbw_ok;
+
+    /* h=0: good row (mined PoW, correct hash-bind). */
+    struct disk_block_index dbi0;
+    struct uint256 hash0;
+    if (built) {
+        disk_block_index_init(&dbi0);
+        dbi0.nHeight = 0;
+        dbi0.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
+                                      BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        dbi0.nTx = 1;
+        dbi0.nFile = 0; dbi0.nDataPos = 100; dbi0.nUndoPos = 200;
+        dbi0.nVersion = 4;
+        dbi0.hashMerkleRoot.data[0] = 0x21;
+        dbi0.nSolutionSize = 0;
+        built = ibr_mine_pow(&dbi0, pow_bits, &hash0) &&
+               ibr_write_row(&dbw, &dbi0, hash0.data);
+    }
+    IBR_CHECK("scenario C fixture: write h=0 (good)", built);
+
+    /* h=1: bad hash-bind — keyed by something other than the real hash. */
+    struct disk_block_index dbi1;
+    struct uint256 hash1_real;
+    uint8_t claimed_hash1[32];
+    if (built) {
+        disk_block_index_init(&dbi1);
+        dbi1.nHeight = 1;
+        memcpy(dbi1.hashPrev.data, hash0.data, 32);
+        dbi1.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
+                                      BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        dbi1.nTx = 1;
+        dbi1.nFile = 0; dbi1.nDataPos = 300; dbi1.nUndoPos = 400;
+        dbi1.nVersion = 4;
+        dbi1.hashMerkleRoot.data[0] = 0x22;
+        dbi1.nSolutionSize = 0;
+        built = ibr_mine_pow(&dbi1, pow_bits, &hash1_real);
+        if (built) {
+            memcpy(claimed_hash1, hash1_real.data, 32);
+            claimed_hash1[0] ^= 0xFF;  /* claim a WRONG key on purpose */
+            built = ibr_write_row(&dbw, &dbi1, claimed_hash1);
+        }
+    }
+    IBR_CHECK("scenario C fixture: write h=1 (bad hash-bind)", built);
+
+    /* h=2: bad PoW-target — hash-bind correct, nBits demands target=65536
+     * (vs. powLimit ~2^243), so it fails by construction. */
+    struct disk_block_index dbi2;
+    struct uint256 hash2;
+    if (built) {
+        disk_block_index_init(&dbi2);
+        dbi2.nHeight = 2;
+        memcpy(dbi2.hashPrev.data, claimed_hash1, 32);
+        dbi2.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
+                                      BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        dbi2.nTx = 1;
+        dbi2.nFile = 0; dbi2.nDataPos = 500; dbi2.nUndoPos = 600;
+        dbi2.nVersion = 4;
+        dbi2.hashMerkleRoot.data[0] = 0x23;
+        dbi2.nTime = 1231006505u;
+        dbi2.nBits = 0x03010000u;  /* compact target = 65536 */
+        dbi2.nSolutionSize = 0;
+        disk_block_index_get_hash(&dbi2, &hash2);
+        built = ibr_write_row(&dbw, &dbi2, hash2.data);
+    }
+    IBR_CHECK("scenario C fixture: write h=2 (bad PoW-target)", built);
+
+    /* h=3: good row again — the batch continued past two bad rows. */
+    struct disk_block_index dbi3;
+    struct uint256 hash3;
+    if (built) {
+        disk_block_index_init(&dbi3);
+        dbi3.nHeight = 3;
+        memcpy(dbi3.hashPrev.data, hash2.data, 32);
+        dbi3.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
+                                      BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        dbi3.nTx = 1;
+        dbi3.nFile = 0; dbi3.nDataPos = 700; dbi3.nUndoPos = 800;
+        dbi3.nVersion = 4;
+        dbi3.hashMerkleRoot.data[0] = 0x24;
+        dbi3.nSolutionSize = 0;
+        built = ibr_mine_pow(&dbi3, pow_bits, &hash3) &&
+               ibr_write_row(&dbw, &dbi3, hash3.data);
+    }
+    IBR_CHECK("scenario C fixture: write h=3 (good, after two bad rows)",
+              built);
+
+    db_wrapper_close(&dbw);
+    *built_out = built;
+    return failures;
+}
+
+/* Imports the scenario C corrupt source and checks the quarantine outcome. */
+static int ibr_c_check_import(const char *base, const char *src_dir_c)
+{
+    int failures = 0;
+    char db_path_c[380];
+    snprintf(db_path_c, sizeof(db_path_c), "%s/node_c.db", base);
+
+    uint64_t q_before = snapshot_import_block_index_quarantine_total();
+    int count_c = -1;
+    bool ok_c = snapshot_import_block_index(src_dir_c, db_path_c,
+                                             /*header_only=*/true,
+                                             &count_c);
+    uint64_t q_after = snapshot_import_block_index_quarantine_total();
+
+    IBR_CHECK("scenario C: import returns ok DESPITE two bad rows "
+              "(quarantine, not abort)", ok_c);
+    IBR_CHECK("scenario C: only the 2 good rows (h=0,3) imported",
+              count_c == 2);
+    IBR_CHECK("scenario C: quarantine counter advanced by exactly 2",
+              q_after - q_before == 2);
+
+    struct node_db ndb_c;
+    bool opened_c = node_db_open(&ndb_c, db_path_c);
+    IBR_CHECK("scenario C: target node.db opens", opened_c);
+    if (opened_c) {
+        struct db_block row;
+        IBR_CHECK("scenario C: h=0 landed",
+                  db_block_find_by_height(&ndb_c, 0, &row));
+        IBR_CHECK("scenario C: h=1 (bad hash-bind) did NOT land",
+                  !db_block_find_by_height(&ndb_c, 1, &row));
+        IBR_CHECK("scenario C: h=2 (bad PoW-target) did NOT land",
+                  !db_block_find_by_height(&ndb_c, 2, &row));
+        IBR_CHECK("scenario C: h=3 landed (import continued past "
+                  "both bad rows)",
+                  db_block_find_by_height(&ndb_c, 3, &row));
+        IBR_CHECK("scenario C: exactly 2 rows total in target",
+                  db_block_count(&ndb_c) == 2);
+        node_db_close(&ndb_c);
+    }
+
+    IBR_CHECK("scenario C: typed blocker "
+              "'importblockindex_row_quarantine' set",
+              blocker_exists("importblockindex_row_quarantine"));
+    IBR_CHECK("scenario C: blocker class is TRANSIENT (recoverable "
+              "— row skipped, import continues)",
+              blocker_class_for("importblockindex_row_quarantine") ==
+              (int)BLOCKER_TRANSIENT);
+    return failures;
+}
+
+/* ==================================================================
+ * Scenario C — per-row trust: hash-bind + PoW-target check at import
+ * time (default ROM checkpoint, so both bad rows fail the UNCONDITIONAL
+ * checks). h=0 good, h=1 bad hash-bind, h=2 bad PoW-target, h=3 good:
+ * the batch continues past two consecutive bad rows. */
+static int ibr_scenario_c(const char *base)
+{
+    int failures = 0;
     {
         char src_dir_c[340];
         snprintf(src_dir_c, sizeof(src_dir_c), "%s/legacy-src-corrupt", base);
         ibr_mkdir_p(src_dir_c);
-        char idx_dir_c[512];
-        snprintf(idx_dir_c, sizeof(idx_dir_c), "%s/blocks/index", src_dir_c);
 
-        struct db_wrapper dbw;
-        bool dbw_ok = db_wrapper_open(&dbw, idx_dir_c, 4 << 20, false, true);
-        IBR_CHECK("scenario C fixture: open corrupt-row source LevelDB", dbw_ok);
+        bool built = false;
+        failures += ibr_c_write_fixture(src_dir_c, &built);
+        if (built)
+            failures += ibr_c_check_import(base, src_dir_c);
+    }
+    return failures;
+}
 
+/* Writes the scenario D bad-solution source: h=1 has a correct hash-bind and
+ * mined PoW but a garbage Equihash solution. *built_out reports success. */
+static int ibr_d_write_fixture(const char *src_dir_d, bool *built_out)
+{
+    int failures = 0;
+    char idx_dir_d[512];
+    snprintf(idx_dir_d, sizeof(idx_dir_d), "%s/blocks/index", src_dir_d);
+
+    struct db_wrapper dbw;
+    bool dbw_ok = db_wrapper_open(&dbw, idx_dir_d, 4 << 20, false, true);
+    IBR_CHECK("scenario D fixture: open bad-solution source LevelDB",
+              dbw_ok);
+
+    bool built = dbw_ok;
+    if (built) {
         uint32_t pow_bits = ibr_pow_limit_bits();
-        bool built = dbw_ok;
+        struct disk_block_index dbi;
+        disk_block_index_init(&dbi);
+        dbi.nHeight = 1;  /* > overridden checkpoint height=0 */
+        dbi.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
+                                     BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
+        dbi.nTx = 1;
+        dbi.nFile = 0; dbi.nDataPos = 100; dbi.nUndoPos = 200;
+        dbi.nVersion = 4;
+        dbi.hashMerkleRoot.data[0] = 0x31;
+        dbi.nSolutionSize = MAX_SOLUTION_SIZE;  /* 1344 — the real (200,9)
+                                                   size, garbage content */
+        memset(dbi.nSolution, 0x42, dbi.nSolutionSize);
 
-        /* h=0: good row (mined PoW, correct hash-bind). */
-        struct disk_block_index dbi0;
-        struct uint256 hash0;
-        if (built) {
-            disk_block_index_init(&dbi0);
-            dbi0.nHeight = 0;
-            dbi0.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
-                                          BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            dbi0.nTx = 1;
-            dbi0.nFile = 0; dbi0.nDataPos = 100; dbi0.nUndoPos = 200;
-            dbi0.nVersion = 4;
-            dbi0.hashMerkleRoot.data[0] = 0x21;
-            dbi0.nSolutionSize = 0;
-            built = ibr_mine_pow(&dbi0, pow_bits, &hash0) &&
-                   ibr_write_row(&dbw, &dbi0, hash0.data);
-        }
-        IBR_CHECK("scenario C fixture: write h=0 (good)", built);
-
-        /* h=1: bad hash-bind — keyed by something other than the real hash. */
-        struct disk_block_index dbi1;
-        struct uint256 hash1_real;
-        uint8_t claimed_hash1[32];
-        if (built) {
-            disk_block_index_init(&dbi1);
-            dbi1.nHeight = 1;
-            memcpy(dbi1.hashPrev.data, hash0.data, 32);
-            dbi1.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
-                                          BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            dbi1.nTx = 1;
-            dbi1.nFile = 0; dbi1.nDataPos = 300; dbi1.nUndoPos = 400;
-            dbi1.nVersion = 4;
-            dbi1.hashMerkleRoot.data[0] = 0x22;
-            dbi1.nSolutionSize = 0;
-            built = ibr_mine_pow(&dbi1, pow_bits, &hash1_real);
-            if (built) {
-                memcpy(claimed_hash1, hash1_real.data, 32);
-                claimed_hash1[0] ^= 0xFF;  /* claim a WRONG key on purpose */
-                built = ibr_write_row(&dbw, &dbi1, claimed_hash1);
-            }
-        }
-        IBR_CHECK("scenario C fixture: write h=1 (bad hash-bind)", built);
-
-        /* h=2: bad PoW-target — hash-bind correct, nBits demands target=65536
-         * (vs. powLimit ~2^243), so it fails by construction. */
-        struct disk_block_index dbi2;
-        struct uint256 hash2;
-        if (built) {
-            disk_block_index_init(&dbi2);
-            dbi2.nHeight = 2;
-            memcpy(dbi2.hashPrev.data, claimed_hash1, 32);
-            dbi2.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
-                                          BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            dbi2.nTx = 1;
-            dbi2.nFile = 0; dbi2.nDataPos = 500; dbi2.nUndoPos = 600;
-            dbi2.nVersion = 4;
-            dbi2.hashMerkleRoot.data[0] = 0x23;
-            dbi2.nTime = 1231006505u;
-            dbi2.nBits = 0x03010000u;  /* compact target = 65536 */
-            dbi2.nSolutionSize = 0;
-            disk_block_index_get_hash(&dbi2, &hash2);
-            built = ibr_write_row(&dbw, &dbi2, hash2.data);
-        }
-        IBR_CHECK("scenario C fixture: write h=2 (bad PoW-target)", built);
-
-        /* h=3: good row again — the batch continued past two bad rows. */
-        struct disk_block_index dbi3;
-        struct uint256 hash3;
-        if (built) {
-            disk_block_index_init(&dbi3);
-            dbi3.nHeight = 3;
-            memcpy(dbi3.hashPrev.data, hash2.data, 32);
-            dbi3.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
-                                          BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            dbi3.nTx = 1;
-            dbi3.nFile = 0; dbi3.nDataPos = 700; dbi3.nUndoPos = 800;
-            dbi3.nVersion = 4;
-            dbi3.hashMerkleRoot.data[0] = 0x24;
-            dbi3.nSolutionSize = 0;
-            built = ibr_mine_pow(&dbi3, pow_bits, &hash3) &&
-                   ibr_write_row(&dbw, &dbi3, hash3.data);
-        }
-        IBR_CHECK("scenario C fixture: write h=3 (good, after two bad rows)",
-                  built);
-
-        db_wrapper_close(&dbw);
-
-        if (built) {
-            char db_path_c[380];
-            snprintf(db_path_c, sizeof(db_path_c), "%s/node_c.db", base);
-
-            uint64_t q_before = snapshot_import_block_index_quarantine_total();
-            int count_c = -1;
-            bool ok_c = snapshot_import_block_index(src_dir_c, db_path_c,
-                                                     /*header_only=*/true,
-                                                     &count_c);
-            uint64_t q_after = snapshot_import_block_index_quarantine_total();
-
-            IBR_CHECK("scenario C: import returns ok DESPITE two bad rows "
-                      "(quarantine, not abort)", ok_c);
-            IBR_CHECK("scenario C: only the 2 good rows (h=0,3) imported",
-                      count_c == 2);
-            IBR_CHECK("scenario C: quarantine counter advanced by exactly 2",
-                      q_after - q_before == 2);
-
-            struct node_db ndb_c;
-            bool opened_c = node_db_open(&ndb_c, db_path_c);
-            IBR_CHECK("scenario C: target node.db opens", opened_c);
-            if (opened_c) {
-                struct db_block row;
-                IBR_CHECK("scenario C: h=0 landed",
-                          db_block_find_by_height(&ndb_c, 0, &row));
-                IBR_CHECK("scenario C: h=1 (bad hash-bind) did NOT land",
-                          !db_block_find_by_height(&ndb_c, 1, &row));
-                IBR_CHECK("scenario C: h=2 (bad PoW-target) did NOT land",
-                          !db_block_find_by_height(&ndb_c, 2, &row));
-                IBR_CHECK("scenario C: h=3 landed (import continued past "
-                          "both bad rows)",
-                          db_block_find_by_height(&ndb_c, 3, &row));
-                IBR_CHECK("scenario C: exactly 2 rows total in target",
-                          db_block_count(&ndb_c) == 2);
-                node_db_close(&ndb_c);
-            }
-
-            IBR_CHECK("scenario C: typed blocker "
-                      "'importblockindex_row_quarantine' set",
-                      blocker_exists("importblockindex_row_quarantine"));
-            IBR_CHECK("scenario C: blocker class is TRANSIENT (recoverable "
-                      "— row skipped, import continues)",
-                      blocker_class_for("importblockindex_row_quarantine") ==
-                      (int)BLOCKER_TRANSIENT);
-        }
+        struct uint256 hash;
+        built = ibr_mine_pow(&dbi, pow_bits, &hash) &&
+                ibr_write_row(&dbw, &dbi, hash.data);
     }
+    IBR_CHECK("scenario D fixture: write h=1 (garbage Equihash solution, "
+              "correct hash-bind + PoW target)", built);
 
-    /* ==================================================================
-     * Scenario D — the stride/above-checkpoint full-Equihash gate
-     * (import_row_verify's expensive path) fires. The ROM checkpoint is
-     * overridden to height=0 so height=1 is "above checkpoint"; the row has a
-     * correct hash-bind and mined PoW but a garbage 1344-byte solution that
-     * only the full check catches.
-     * ================================================================== */
-    {
-        struct rom_state_checkpoint low_cp;
-        memset(&low_cp, 0, sizeof(low_cp));
-        low_cp.height = 0;
-        checkpoints_set_rom_state_override_for_test(&low_cp);
+    db_wrapper_close(&dbw);
+    *built_out = built;
+    return failures;
+}
 
-        char src_dir_d[340];
-        snprintf(src_dir_d, sizeof(src_dir_d), "%s/legacy-src-badsol", base);
-        ibr_mkdir_p(src_dir_d);
-        char idx_dir_d[512];
-        snprintf(idx_dir_d, sizeof(idx_dir_d), "%s/blocks/index", src_dir_d);
+/* Imports the scenario D source and checks the above-checkpoint quarantine. */
+static int ibr_d_check_import(const char *base, const char *src_dir_d)
+{
+    int failures = 0;
+    char db_path_d[380];
+    snprintf(db_path_d, sizeof(db_path_d), "%s/node_d.db", base);
 
-        struct db_wrapper dbw;
-        bool dbw_ok = db_wrapper_open(&dbw, idx_dir_d, 4 << 20, false, true);
-        IBR_CHECK("scenario D fixture: open bad-solution source LevelDB",
-                  dbw_ok);
+    uint64_t q_before = snapshot_import_block_index_quarantine_total();
+    int count_d = -1;
+    bool ok_d = snapshot_import_block_index(src_dir_d, db_path_d,
+                                             /*header_only=*/true,
+                                             &count_d);
+    uint64_t q_after = snapshot_import_block_index_quarantine_total();
 
-        bool built = dbw_ok;
-        if (built) {
-            uint32_t pow_bits = ibr_pow_limit_bits();
-            struct disk_block_index dbi;
-            disk_block_index_init(&dbi);
-            dbi.nHeight = 1;  /* > overridden checkpoint height=0 */
-            dbi.nStatus = (unsigned int)(BLOCK_VALID_TRANSACTIONS |
-                                         BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO);
-            dbi.nTx = 1;
-            dbi.nFile = 0; dbi.nDataPos = 100; dbi.nUndoPos = 200;
-            dbi.nVersion = 4;
-            dbi.hashMerkleRoot.data[0] = 0x31;
-            dbi.nSolutionSize = MAX_SOLUTION_SIZE;  /* 1344 — the real (200,9)
-                                                       size, garbage content */
-            memset(dbi.nSolution, 0x42, dbi.nSolutionSize);
+    IBR_CHECK("scenario D: import returns ok (quarantine, not abort)",
+              ok_d);
+    IBR_CHECK("scenario D: the bad-solution row did NOT import",
+              count_d == 0);
+    IBR_CHECK("scenario D: quarantine counter advanced by exactly 1 "
+              "(the above-checkpoint full Equihash check fired)",
+              q_after - q_before == 1);
+    return failures;
+}
 
-            struct uint256 hash;
-            built = ibr_mine_pow(&dbi, pow_bits, &hash) &&
-                   ibr_write_row(&dbw, &dbi, hash.data);
-        }
-        IBR_CHECK("scenario D fixture: write h=1 (garbage Equihash solution, "
-                  "correct hash-bind + PoW target)", built);
+/* ==================================================================
+ * Scenario D — the stride/above-checkpoint full-Equihash gate
+ * (import_row_verify's expensive path) fires. The ROM checkpoint is
+ * overridden to height=0 so height=1 is "above checkpoint"; the row has a
+ * correct hash-bind and mined PoW but a garbage 1344-byte solution that
+ * only the full check catches.
+ * ================================================================== */
+static int ibr_scenario_d(const char *base)
+{
+    int failures = 0;
+    struct rom_state_checkpoint low_cp;
+    memset(&low_cp, 0, sizeof(low_cp));
+    low_cp.height = 0;
+    checkpoints_set_rom_state_override_for_test(&low_cp);
 
-        db_wrapper_close(&dbw);
+    char src_dir_d[340];
+    snprintf(src_dir_d, sizeof(src_dir_d), "%s/legacy-src-badsol", base);
+    ibr_mkdir_p(src_dir_d);
 
-        if (built) {
-            char db_path_d[380];
-            snprintf(db_path_d, sizeof(db_path_d), "%s/node_d.db", base);
+    bool built = false;
+    failures += ibr_d_write_fixture(src_dir_d, &built);
+    if (built)
+        failures += ibr_d_check_import(base, src_dir_d);
 
-            uint64_t q_before = snapshot_import_block_index_quarantine_total();
-            int count_d = -1;
-            bool ok_d = snapshot_import_block_index(src_dir_d, db_path_d,
-                                                     /*header_only=*/true,
-                                                     &count_d);
-            uint64_t q_after = snapshot_import_block_index_quarantine_total();
+    checkpoints_reset_rom_state_override_for_test();
+    return failures;
+}
 
-            IBR_CHECK("scenario D: import returns ok (quarantine, not abort)",
-                      ok_d);
-            IBR_CHECK("scenario D: the bad-solution row did NOT import",
-                      count_d == 0);
-            IBR_CHECK("scenario D: quarantine counter advanced by exactly 1 "
-                      "(the above-checkpoint full Equihash check fired)",
-                      q_after - q_before == 1);
-        }
-
-        checkpoints_reset_rom_state_override_for_test();
-    }
-
-    /* ==================================================================
-     * Scenario E — throughput profile. Measures the marginal per-row cost
-     * import_row_verify adds: one disk_block_index_get_hash() plus one
-     * CheckProofOfWork(). The full check_equihash_solution() is excluded (it
-     * runs only on the stride/above-checkpoint rows). 1,000,000 iterations on
-     * a pre-mined header, extrapolated x3.1 to the real row count, asserted
-     * against a generous ceiling. */
+/* ==================================================================
+ * Scenario E — throughput profile. Measures the marginal per-row cost
+ * import_row_verify adds: one disk_block_index_get_hash() plus one
+ * CheckProofOfWork(). The full check_equihash_solution() is excluded (it
+ * runs only on the stride/above-checkpoint rows). 1,000,000 iterations on
+ * a pre-mined header, extrapolated x3.1 to the real row count, asserted
+ * against a generous ceiling. */
+static int ibr_scenario_e(void)
+{
+    int failures = 0;
     {
         uint32_t pow_bits = ibr_pow_limit_bits();
         struct disk_block_index dbi;
@@ -747,13 +807,18 @@ int test_importblockindex_roundtrip(void)
                       us_per_row <= 5.0);
         }
     }
+    return failures;
+}
 
-    /* ==================================================================
-     * Scenario F — a stale same-height fork must not evict the selected
-     * chain parent through SQLite's partial unique-height index. The source
-     * has main 0->1->2->3 plus a stale sibling at h=2; the unique highest
-     * tip h=3 selects the main h=2 by hashPrev, independent of LevelDB key
-     * order. */
+/* ==================================================================
+ * Scenario F — a stale same-height fork must not evict the selected
+ * chain parent through SQLite's partial unique-height index. The source
+ * has main 0->1->2->3 plus a stale sibling at h=2; the unique highest
+ * tip h=3 selects the main h=2 by hashPrev, independent of LevelDB key
+ * order. */
+static int ibr_scenario_f(const char *base)
+{
+    int failures = 0;
     {
         char src_dir_f[340];
         snprintf(src_dir_f, sizeof(src_dir_f), "%s/legacy-src-fork", base);
@@ -817,6 +882,36 @@ int test_importblockindex_roundtrip(void)
             }
         }
     }
+    return failures;
+}
+
+int test_importblockindex_roundtrip(void)
+{
+    int failures = 0;
+
+    ibr_mkdir_p("./test-tmp");
+    char base[300];
+    test_fmt_tmpdir(base, sizeof(base), "importblockindex_roundtrip", "main");
+    ibr_mkdir_p(base);
+
+    char src_dir[340];
+    snprintf(src_dir, sizeof(src_dir), "%s/legacy-src", base);
+    ibr_mkdir_p(src_dir);
+
+    struct ibr_block_fixture fx[IBR_N_BLOCKS];
+    bool fixture_ok = ibr_build_fixture(src_dir, fx, IBR_N_BLOCKS);
+    IBR_CHECK("fixture: synthesize N=32 legacy blocks/index LevelDB records "
+              "(incl. file-0 low-offset shape nDataPos=1711 at h=1)",
+              fixture_ok);
+    if (!fixture_ok)
+        return failures + 1;
+
+    failures += ibr_scenario_a(base, src_dir, fx);
+    failures += ibr_scenario_b(base, src_dir, fx);
+    failures += ibr_scenario_c(base);
+    failures += ibr_scenario_d(base);
+    failures += ibr_scenario_e();
+    failures += ibr_scenario_f(base);
 
     failures += ibr_test_shutdown_abort();
 
