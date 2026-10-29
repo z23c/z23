@@ -23,6 +23,7 @@
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
 #include "rpc/protocol.h"
+#include "sha3/sha3.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -641,6 +642,82 @@ void zcl_native_handle_fleet_board_status(
 }
 
 /* ── fleet wiki write ───────────────────────────────────────────────── */
+static void fb_wiki_hash_str(struct sha3_256_ctx *ctx, const char *s)
+{
+    sha3_256_write(ctx, (const unsigned char *)s, strlen(s) + 1);
+}
+
+/* The plan id binds every field the write forwards, so any change between
+ * the plan call and the confirmed call makes the old id stale. */
+static void fb_wiki_plan_id(const struct json_value *in, char out[65])
+{
+    static const char tag[] = "z23.fleet_wiki_write.plan.v1";
+    static const char *const keys[] = {"slug", "title", "text", "supersedes",
+                                       "format"};
+    struct sha3_256_ctx ctx;
+    unsigned char d[32];
+    char ttl[32] = "";
+    const struct json_value *t = json_get(in, "ttl");
+    const char *agent = json_get_str(json_get(in, "agent"));
+    if (!agent[0] && getenv(FLEET_BOARD_AGENT_ENV))
+        agent = getenv(FLEET_BOARD_AGENT_ENV);
+    if (t && t->type == JSON_INT)
+        (void)snprintf(ttl, sizeof(ttl), "%lld", (long long)json_get_int(t));
+    else if (t && t->type == JSON_STR)
+        (void)snprintf(ttl, sizeof(ttl), "%s", json_get_str(t));
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)tag, sizeof(tag));
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+        fb_wiki_hash_str(&ctx, json_get_str(json_get(in, keys[i])));
+    fb_wiki_hash_str(&ctx, agent);
+    fb_wiki_hash_str(&ctx, ttl);
+    sha3_256_finalize(&ctx, d);
+    for (size_t i = 0; i < 32; i++)
+        (void)snprintf(out + 2 * i, 3, "%02x", d[i]);
+}
+
+/* MCP only: plan without writing, then write on a matching plan_id and
+ * confirm:true. Returns true when the write may proceed. */
+static bool fb_wiki_write_authorised(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    const struct json_value *in = request->input;
+    const char *given = json_get_str(json_get(in, "plan_id"));
+    char want[65];
+    if (!request->context || !request->context->plan_first)
+        return true;
+    fb_wiki_plan_id(in, want);
+    if (!json_get_bool(json_get(in, "confirm"))) {
+        if (given[0]) {
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                    "CONFIRM_REQUIRED", "confirm", false,
+                    "a plan_id commits only with confirm:true", "confirm");
+            return false;
+        }
+        (void)json_push_kv_str(&reply->data, "plan_id", want);
+        (void)json_push_kv_str(&reply->data, "slug",
+                               json_get_str(json_get(in, "slug")));
+        (void)json_push_kv_str(&reply->data, "title",
+                               json_get_str(json_get(in, "title")));
+        (void)json_push_kv_int(&reply->data, "bytes",
+            (int64_t)strlen(json_get_str(json_get(in, "text"))));
+        (void)json_push_kv_str(&reply->data, "supersedes",
+                               json_get_str(json_get(in, "supersedes")));
+        (void)json_push_kv_bool(&reply->data, "mutated", false);
+        (void)json_push_kv_str(&reply->data, "next",
+            "repeat the same call with this plan_id and confirm:true to write");
+        return false;
+    }
+    if (strcmp(given, want) != 0) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "PLAN_MISMATCH", "confirm", false,
+                "plan_id is missing or stale for these inputs; request a new "
+                "plan without confirm", "plan_id");
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_fleet_wiki_write(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -656,6 +733,8 @@ void zcl_native_handle_fleet_wiki_write(
                 "lowercase [a-z0-9-]", "slug,title,text");
         return;
     }
+    if (!fb_wiki_write_authorised(request, reply))
+        return;
     struct json_value out;
     json_init(&out);
     json_set_object(&out);

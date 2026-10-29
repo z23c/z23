@@ -824,8 +824,128 @@ static int fwm_review_missing(void)
     return failures;
 }
 
+/* MCP plan/confirm for fleet.wiki.write: the stub node forwards each RPC
+ * call to a real fleet_board table so a confirmed write is really stored. */
+static struct rpc_table *fwm_plan_table;
+static unsigned fwm_plan_calls;
+static char *fwm_plan_rpc(const char *method, const char *params)
+{
+    struct json_value p, result;
+    char *out = NULL;
+    (void)method;
+    fwm_plan_calls++;
+    json_init(&p); json_init(&result);
+    if (json_read(&p, params, strlen(params)) && json_at(&p, 0) &&
+        fwm_rpc_call(fwm_plan_table, json_at(&p, 0), &result)) {
+        size_t n = json_write(&result, NULL, 0);
+        out = malloc(n + 1);
+        if (out && json_write(&result, out, n + 1) == 0) { free(out); out = NULL; }
+    }
+    json_free(&p); json_free(&result);
+    return out;
+}
+
+static bool fwm_plan_call(const struct zcl_command_context *ctx, const char *slug,
+    const char *text, const char *plan_id, bool confirm,
+    struct zcl_command_reply *reply)
+{
+    struct json_value in;
+    json_init(&in); json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "slug", slug) &&
+        json_push_kv_str(&in, "title", "Plan write") &&
+        json_push_kv_str(&in, "text", text) &&
+        (!plan_id || json_push_kv_str(&in, "plan_id", plan_id)) &&
+        (!confirm || json_push_kv_bool(&in, "confirm", true));
+    struct zcl_command_request request = {.context = ctx, .input = &in,
+        .budget_bytes = 8192};
+    zcl_command_reply_init(reply, "zcl.fleet_board_post_id.v1");
+    if (ok) zcl_native_handle_fleet_wiki_write(&request, reply);
+    json_free(&in);
+    return ok;
+}
+
+static bool fwm_plan_find(const char *slug)
+{
+    struct json_value in;
+    json_init(&in); json_set_object(&in);
+    bool found = json_push_kv_str(&in, "q", slug);
+    struct zcl_command_request request = {.input = &in, .budget_bytes = 8192,
+        .success_data_budget_provided = true, .success_data_budget = 7000};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.fleet_wiki_find.v1");
+    if (found) zcl_native_handle_fleet_wiki_find(&request, &reply);
+    found = found && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        json_size(json_get(&reply.data, "entries")) == 1 &&
+        !strcmp(json_get_str(json_get(json_at(json_get(&reply.data, "entries"), 0),
+            "slug")), slug);
+    zcl_command_reply_free(&reply);
+    json_free(&in);
+    return found;
+}
+
+static int fwm_plan_confirm(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    char dir[256] = {0}, warmup[256];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof(warmup));
+    TEST("wiki write: MCP plans without writing, confirms with the plan_id, CLI writes at once") {
+        ASSERT(node_db_open(&db, ":memory:"));
+        test_make_tmpdir(dir, sizeof(dir), "fleetboard", "planwrite");
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        struct boot_svc_ctx svc = {.node_db = &db, .datadir = dir};
+        boot_fleet_board_shutdown(); boot_fleet_board_wire(&svc);
+        app_runtime_set_current(&runtime);
+        struct rpc_table table;
+        rpc_table_init(&table); boot_fleet_board_register_rpc(&table);
+        set_rpc_warmup_finished();
+        fwm_plan_table = &table; fwm_plan_calls = 0;
+        node_rpc_client_set_test_hook(fwm_plan_rpc);
+        struct zcl_command_context mcp = {.plan_first = true};
+        struct zcl_command_reply plan, bad, done, cli;
+        char id[65];
+        ASSERT(fwm_plan_call(&mcp, "plan-write", "first body", NULL, false, &plan));
+        ASSERT_EQ(plan.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(fwm_plan_calls, 0);
+        ASSERT(!json_get_bool(json_get(&plan.data, "mutated")));
+        ASSERT_EQ(json_get_int(json_get(&plan.data, "bytes")), 10);
+        ASSERT(!strcmp(json_get_str(json_get(&plan.data, "slug")), "plan-write"));
+        snprintf(id, sizeof(id), "%s", json_get_str(json_get(&plan.data, "plan_id")));
+        ASSERT_EQ(strlen(id), 64);
+        ASSERT(!fwm_plan_find("plan-write"));
+        ASSERT(fwm_plan_call(&mcp, "plan-write", "other body", id, true, &bad));
+        ASSERT_EQ(bad.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(bad.error.code, "PLAN_MISMATCH"));
+        ASSERT_EQ(fwm_plan_calls, 0);
+        zcl_command_reply_free(&bad);
+        ASSERT(fwm_plan_call(&mcp, "plan-write", "first body", "wrong", true, &bad));
+        ASSERT(!strcmp(bad.error.code, "PLAN_MISMATCH"));
+        ASSERT_EQ(fwm_plan_calls, 0);
+        zcl_command_reply_free(&bad);
+        ASSERT(fwm_plan_call(&mcp, "plan-write", "first body", id, true, &done));
+        ASSERT_EQ(done.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(fwm_plan_calls, 1);
+        ASSERT(fwm_plan_find("plan-write"));
+        ASSERT(fwm_plan_call(NULL, "cli-write", "cli body", NULL, false, &cli));
+        ASSERT_EQ(cli.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(fwm_plan_calls, 2);
+        ASSERT(fwm_plan_find("cli-write"));
+        zcl_command_reply_free(&plan); zcl_command_reply_free(&done);
+        zcl_command_reply_free(&cli);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    app_runtime_set_current(NULL);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    boot_fleet_board_shutdown();
+    if (db.open) node_db_close(&db);
+    if (dir[0]) test_rm_rf(dir);
+    return failures;
+}
+
 int test_fleet_wiki_mutation(void)
 {
-    return fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
+    return fwm_plan_confirm() +fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
         fwm_sequence_overflow() + fwm_eviction_case() + fwm_head_step_case();
 }

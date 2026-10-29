@@ -210,6 +210,7 @@ static void build_context(struct mcp_serve *s)
     s->cmd.granted_capabilities = ~(uint64_t)0;
     s->cmd.authority_ceiling = ZCL_COMMAND_AUTH_OWNER;
     s->cmd.agent_session = zcl_native_agent_session_env();
+    s->cmd.plan_first = true;
 #ifdef ZCL_DEV_BUILD
     s->cmd.dev_build = true;
 #endif

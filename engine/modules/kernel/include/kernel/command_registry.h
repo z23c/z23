@@ -280,6 +280,9 @@ struct zcl_command_context {
     const char *agent_session;
     const struct zcl_command_invocation_runtime *invocation;
     bool dev_build;
+    /* MCP front door: a mutating leaf with a plan/confirm flow plans first
+     * here and writes only on plan_id + confirm:true. The CLI leaves it false. */
+    bool plan_first;
 };
 
 struct zcl_command_request {

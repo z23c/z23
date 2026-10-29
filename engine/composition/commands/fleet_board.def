@@ -121,16 +121,16 @@ ZCL_COMMAND_READY_COMMAND(
     "JSON object (topic, summary, lessons, applies_to, updated), which "
     "`fleet wiki find` and `fleet wiki read` return as structured data; "
     "without it the page stays plain text. Wiki revisions have their own "
-    "per-key budget, separate from board posts.", 0,
+    "per-key budget, separate from board posts. Over MCP a call without confirm returns a plan (plan_id, slug, title, bytes, supersedes) and writes nothing; repeat it with plan_id and confirm:true to write. The CLI writes at once.", 0,
     "wiki,write,page,revision,knowledge",
     "zcl.fleet_wiki_write_input.v1", "zcl.fleet_board_post_id.v1",
-    "slug,title,text,agent,supersedes,ttl,format", "slug,title,text",
+    "slug,title,text,agent,supersedes,ttl,format,plan_id,confirm", "slug,title,text",
     "z23 fleet wiki write push-gate \"What the push gate checks\" @notes.md",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_fleet_wiki_write)
 
