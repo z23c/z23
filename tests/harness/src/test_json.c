@@ -934,6 +934,121 @@ static int json_write_boundary_case(void)
     return ok ? 0 : 1;
 }
 
+/* Pins json_escape_str's writer output through json_write: it escapes only
+ * the quote, backslash and C-named controls, uses lowercase \u00XX for the
+ * other controls below 0x20, and copies every other byte (0x7f, multi-byte
+ * UTF-8 and invalid UTF-8 alike) unchanged without validating UTF-8. */
+static bool json_escape_row(const char *in, const char *expect)
+{
+    struct json_value v;
+    json_init(&v);
+    json_set_str(&v, in);
+    char buf[512];
+    memset(buf, 'Z', sizeof(buf));
+    size_t n = json_write(&v, buf, sizeof(buf));
+    bool ok = v.type == JSON_STR && n == strlen(expect) &&
+        strcmp(buf, expect) == 0;
+    json_free(&v);
+    return ok;
+}
+
+static bool json_escape_key_case(void)
+{
+    struct json_value v;
+    json_init(&v);
+    json_set_object(&v);
+    bool pushed = json_push_kv_str(&v, "k\"\n", "v");
+    const char *expect = "{\"k\\\"\\n\":\"v\"}";
+    char buf[64];
+    size_t n = json_write(&v, buf, sizeof(buf));
+    bool ok = pushed && n == strlen(expect) && strcmp(buf, expect) == 0;
+    json_free(&v);
+    return ok;
+}
+
+static bool json_escape_capacity_case(void)
+{
+    /* Output for a"\n is 7 bytes; the NUL needs an 8th. */
+    struct json_value v;
+    json_init(&v);
+    json_set_str(&v, "a\"\n");
+    char buf[16];
+    memset(buf, 'Z', sizeof(buf));
+    size_t n = json_write(&v, buf, 8);
+    bool ok = n == 7 && strcmp(buf, "\"a\\\"\\n\"") == 0;
+    memset(buf, 'Z', sizeof(buf));
+    n = json_write(&v, buf, 7);
+    /* One byte too small: the final NUL lands on the closing quote. */
+    ok = ok && n == 7 && strcmp(buf, "\"a\\\"\\n") == 0 && buf[7] == 'Z';
+    memset(buf, 'Z', sizeof(buf));
+    n = json_write(&v, buf, 6);
+    ok = ok && n == 7 && strcmp(buf, "\"a\\\"\\") == 0 && buf[6] == 'Z';
+    memset(buf, 'Z', sizeof(buf));
+    n = json_write(&v, buf, 0);
+    ok = ok && n == 7 && buf[0] == 'Z';
+    json_free(&v);
+    return ok;
+}
+
+static bool json_escape_null_string_case(void)
+{
+    /* A JSON_STR with a NULL payload (only reachable by field write) is
+     * written as the empty string. */
+    struct json_value v;
+    json_init(&v);
+    v.type = JSON_STR;
+    v.val.s = NULL;
+    char buf[8];
+    memset(buf, 'Z', sizeof(buf));
+    size_t n = json_write(&v, buf, sizeof(buf));
+    bool ok = n == 2 && strcmp(buf, "\"\"") == 0;
+    v.type = JSON_NULL;
+    json_free(&v);
+    return ok;
+}
+
+static int json_escape_output_cases(void)
+{
+    static const struct { const char *in; const char *out; } rows[] = {
+        {"", "\"\""},
+        {"abc XYZ 019 ~!/", "\"abc XYZ 019 ~!/\""},
+        {"\"", "\"\\\"\""},
+        {"\\", "\"\\\\\""},
+        {"\b", "\"\\b\""},
+        {"\f", "\"\\f\""},
+        {"\n", "\"\\n\""},
+        {"\r", "\"\\r\""},
+        {"\t", "\"\\t\""},
+        {"\x01", "\"\\u0001\""},
+        {"\x0b", "\"\\u000b\""},
+        {"\x1b", "\"\\u001b\""},
+        {"\x1f", "\"\\u001f\""},
+        {"\x01\x02\x03\x04\x05\x06\x07\x0b\x0e\x0f\x10\x11\x12\x13\x14\x15"
+         "\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f",
+         "\"\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u000b"
+         "\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015"
+         "\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d"
+         "\\u001e\\u001f\""},
+        {"\x7f", "\"\x7f\""},
+        {"\xc3\xa9", "\"\xc3\xa9\""},
+        {"\xe2\x82\xac", "\"\xe2\x82\xac\""},
+        {"\xf0\x9f\x98\x80", "\"\xf0\x9f\x98\x80\""},
+        {"\x80", "\"\x80\""},
+        {"\xe2\x82", "\"\xe2\x82\""},
+        {"\xc0\xaf", "\"\xc0\xaf\""},
+        {"\xed\xa0\x80", "\"\xed\xa0\x80\""},
+        {"\xff", "\"\xff\""},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        ok = json_escape_row(rows[i].in, rows[i].out) && ok;
+    ok = ok && json_escape_key_case() && json_escape_capacity_case() &&
+        json_escape_null_string_case();
+    printf("json string writer pins escapes, UTF-8 passthrough and capacity... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_json(void)
 {
     int failures = json_unicode_cases() + json_number_cases() + json_heap_accounting_cases() + json_checked_copy_cases() + json_growth_cases() + json_append_target_cases() + cgo_decoder_tests() + cgo_passive_tests() + cga_goal_tests();
@@ -953,6 +1068,7 @@ int test_json(void)
     failures += json_parse_large_array_case();
     failures += json_write_read_roundtrip_case();
     failures += json_write_boundary_case();
+    failures += json_escape_output_cases();
     failures += json_scalar_boundary_case();
     failures += json_nesting_limit_and_copy_cases();
     failures += json_accessors_null_safe_case();
