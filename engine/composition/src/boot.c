@@ -550,6 +550,21 @@ static bool boot_promote_header_via_csr(struct block_index *header,
     }
     return true;
 }
+static void boot_init_deferred_proof_validation(const struct app_context *ctx, const struct chain_params *params)
+{
+    if (ctx->defer_proof_validation_below && strcmp(ctx->defer_proof_validation_below, "0") == 0) {
+        g_deferred_proof_validation_below_height = -1;
+        printf("Deferred proof validation: disabled (verifying all proofs)\n");
+    } else if (ctx->defer_proof_validation_below) {
+        /* Resolve user-provided hash after block index loads (deferred) */
+    } else if (params->checkpointData.nEntries > 0) {
+        /* Default: latest checkpoint height */
+        g_deferred_proof_validation_below_height =
+            params->checkpointData.entries[params->checkpointData.nEntries - 1].height;
+        printf("Deferred proof validation: height %d (latest checkpoint)\n",
+               g_deferred_proof_validation_below_height);
+    }
+}
 static bool boot_step_init_crypto_and_state(struct app_context *ctx,
                                              const struct chain_params *params)
 {
@@ -580,20 +595,7 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     /* -deferproofvalidationbelow: skip Groth16/Sapling proof verification for blocks
      * at or below the specified hash's height. Default: latest checkpoint.
      * Pass -deferproofvalidationbelow=0 to disable (verify everything). */
-    if (ctx->defer_proof_validation_below && strcmp(ctx->defer_proof_validation_below, "0") == 0) {
-        g_deferred_proof_validation_below_height = -1;
-        printf("Deferred proof validation: disabled (verifying all proofs)\n");
-    } else if (ctx->defer_proof_validation_below) {
-        /* Resolve user-provided hash after block index loads (deferred) */
-    } else {
-        /* Default: latest checkpoint height */
-        if (params->checkpointData.nEntries > 0) {
-            g_deferred_proof_validation_below_height =
-                params->checkpointData.entries[params->checkpointData.nEntries - 1].height;
-            printf("Deferred proof validation: height %d (latest checkpoint)\n",
-                   g_deferred_proof_validation_below_height);
-        }
-    }
+    boot_init_deferred_proof_validation(ctx, params);
     /* Defer ZK key loading to background thread — not needed for RPC startup.
      * Keys load in parallel while block index + wallet initialize. */
     g_params_thread_started = false;
@@ -920,6 +922,19 @@ static struct zcl_result sr_services_running(void *ctx)
  * extra read-only paths the confined node opens post-boot (Sapling params dir,
  * /etc/resolv.conf) — enabled for -confine, which uses a strict seccomp
  * allow-list and therefore benefits from the fuller path set. */
+static void sandbox_add_home_dir_rule(struct os_sandbox_path_rule *rules, size_t cap, size_t *n,
+                                      char scratch[][PATH_MAX], size_t scratch_cap, size_t *s,
+                                      const char *home, const char *subdir, bool allow_write)
+{
+    if (!(home && home[0] && *n < cap && *s < scratch_cap)) return;
+    snprintf(scratch[*s], PATH_MAX, "%s/%s", home, subdir);
+    struct stat st;
+    if (stat(scratch[*s], &st) == 0 && S_ISDIR(st.st_mode)) {
+        rules[(*n)++] = (struct os_sandbox_path_rule){
+            .path = scratch[*s], .allow_read = true, .allow_write = allow_write };
+        (*s)++;
+    }
+}
 static size_t sandbox_build_fs_rules(const char *datadir,
                                      struct os_sandbox_path_rule *rules,
                                      size_t cap, bool extra_ro,
@@ -931,26 +946,11 @@ static size_t sandbox_build_fs_rules(const char *datadir,
     rules[n++] = (struct os_sandbox_path_rule){
         .path = datadir, .allow_read = true, .allow_write = true };
     const char *home = getenv("HOME");
-    if (home && home[0] && n < cap && s < scratch_cap) {
-        snprintf(scratch[s], PATH_MAX, "%s/.zclassic-c23-agent-test-status", home);
-        struct stat st;
-        if (stat(scratch[s], &st) == 0 && S_ISDIR(st.st_mode)) {
-            rules[n++] = (struct os_sandbox_path_rule){
-                .path = scratch[s], .allow_read = true, .allow_write = true };
-            s++;
-        }
-    }
+    sandbox_add_home_dir_rule(rules, cap, &n, scratch, scratch_cap, &s, home,
+                              ".zclassic-c23-agent-test-status", true);
     if (extra_ro) {
         /* Sapling params dir (read-only proving/verifying keys). */
-        if (home && home[0] && n < cap && s < scratch_cap) {
-            snprintf(scratch[s], PATH_MAX, "%s/.zcash-params", home);
-            struct stat st;
-            if (stat(scratch[s], &st) == 0 && S_ISDIR(st.st_mode)) {
-                rules[n++] = (struct os_sandbox_path_rule){
-                    .path = scratch[s], .allow_read = true };
-                s++;
-            }
-        }
+        sandbox_add_home_dir_rule(rules, cap, &n, scratch, scratch_cap, &s, home, ".zcash-params", false);
         /* DNS resolver config (peer hostname resolution). Grant the /etc/
          * directory read-only only if it exists (it always does on Linux). */
         struct stat est;
