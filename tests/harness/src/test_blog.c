@@ -308,7 +308,6 @@ static int test_blog_publication_anchor_plan(
         &anchor_runtime, "dev", anchor_plan.plan_id, &anchor_replay).ok);
     ASSERT(anchor_replay.idempotent_replay &&
            anchor_fixture.publishes == 1);
-    return failures;
 _test_next:
     return failures;
 }
@@ -899,7 +898,7 @@ static bool test_blog_serve_traversal_403(void)
     return ok;
 }
 
-static bool test_blog_serve_null_inputs(void)
+static bool test_blog_serve_rejects_null_and_small_buffer(void)
 {
     char out[4096];
     char dir[256];
@@ -933,7 +932,7 @@ static bool test_blog_announce_rejects_invalid(void)
     return ok;
 }
 
-static bool test_blog_announce_new_address(void)
+static bool test_blog_announce_skips_repeat_address(void)
 {
     char dir[256];
     test_make_tmpdir(dir, sizeof(dir), "blog_ann", "onion");
@@ -1020,7 +1019,7 @@ int test_blog(void)
 
     printf("blog: serve handles NULL/empty inputs... ");
     {
-        bool ok = test_blog_serve_null_inputs();
+        bool ok = test_blog_serve_rejects_null_and_small_buffer();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -1044,7 +1043,7 @@ int test_blog(void)
 
     printf("blog: auto_announce_onion announces new address... ");
     {
-        bool ok = test_blog_announce_new_address();
+        bool ok = test_blog_announce_skips_repeat_address();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
