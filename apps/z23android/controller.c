@@ -33,6 +33,8 @@ struct controller {
     void (*notify)(void);
     bool pending, autostart_checked, hidden, shown;
     time_t fleet_at;
+    bool seen_responding;
+    int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
 };
@@ -108,6 +110,13 @@ static struct node_reading read_status(const char *output)
     json_free(&root);
     return n;
 }
+/* Caller holds c->lock. Offers one question from the latest node reading and current fleet report. */
+static void refresh_suggestion(struct controller *c)
+{
+    int attention = c->view.fleet_stale ? 0 : zapp_fleet_attention(c->view.fleet_status);
+    zapp_suggestion(c->view.fleet_paired, c->seen_responding, c->seen_height, c->seen_target, c->seen_peers,
+                    attention, c->view.suggestion, sizeof(c->view.suggestion));
+}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -127,6 +136,8 @@ static void observe_node(struct controller *c)
     c->view.node_wanted = wanted;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
+    c->seen_responding = n.responding; c->seen_height = n.height; c->seen_target = n.target; c->seen_peers = n.peers;
+    refresh_suggestion(c);
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
 }
@@ -220,6 +231,7 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
                   "Laptop host connected. It sent no fleet report." :
                   "Laptop host not answering. Connect it over USB and keep it running.");
     }
+    refresh_suggestion(c);
     pthread_mutex_unlock(&c->lock);
     copy_text(out, ZAPP_TEXT_CAP, ok ? formatted : "Fleet status is unavailable. Connect the laptop host over USB.");
     free(formatted);

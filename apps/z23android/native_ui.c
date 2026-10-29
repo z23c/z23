@@ -21,6 +21,7 @@ static float down_x, down_y;
 static char last_receipt[8192];
 static float density = 1.0f;
 static bool voice_preview;
+static char suggestion[96]; /* The question on the button, so a tap sends exactly what was shown. */
 static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join"};
 
 static bool clean(JNIEnv *env)
@@ -203,9 +204,11 @@ static bool add_button(JNIEnv *env, jobject layout, jobject activity, const char
 {
     jobject view = widget(env, "android/widget/Button", activity);
     bool primary = i == 9 || i == 0;
+    bool flat = i == 15;
     bool ok = view && style_button(env, view, i, primary) && text(env, view, label) &&
         append(env, layout, view) && keep(env, &buttons[i], view);
     if (ok && primary) ok = int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
+    if (ok && flat) ok = int_property(env, view, "setBackgroundColor", 0);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -220,6 +223,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
     }
+    suggestion[0] = 0;
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
 }
 /* The main screen holds only the status, Talk and the conversation; everything else is under More.
@@ -234,6 +238,7 @@ static bool node_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
         !add_button(env, layout, activity, "Reject", 13) ||
         !add_button(env, layout, activity, "Talk", 9) ||
         !add_text(env, layout, activity, "Press Talk and ask anything.", &voice_view) ||
+        !add_button(env, layout, activity, "", 15) ||
         !add_button(env, layout, activity, "Confirm", 10) ||
         !add_text(env, layout, activity, "", &notice_view) ||
         !add_text(env, layout, activity, "", &transcript_view) ||
@@ -441,6 +446,7 @@ static bool fixed_action(int index, const char **action, const char **arg)
     case 12: *action = "pair_accept"; return true;
     case 13: *action = "pair_reject"; return true;
     case 14: *action = "fleet_hosts"; *arg = "refresh"; return true;
+    case 15: *action = "chat"; *arg = suggestion; return suggestion[0] != 0;
     default: return false;
     }
 }
@@ -527,9 +533,20 @@ static const char *talk_label(enum zapp_voice_state state)
     return state == ZAPP_VOICE_READY ? "Talk" : state == ZAPP_VOICE_RECORDING ? "Done talking" :
         state == ZAPP_VOICE_PLAYING ? "Stop speaking" : "Cancel";
 }
+/* The suggestion takes the hint's place while voice is idle, nothing awaits confirmation, no reply is
+ * pending and an assistant exists. */
+static bool suggestion_shown(const struct zapp_view *view)
+{
+    return !voice_preview && view->suggestion[0] && !view->voice_status[0] && !view->voice_proposal[0] &&
+        view->voice_state == ZAPP_VOICE_READY && view->reply_state == ZAPP_REPLY_READY;
+}
 static void render_voice(JNIEnv *env, const struct zapp_view *view)
 {
     if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state));
+    bool offer = suggestion_shown(view);
+    snprintf(suggestion, sizeof(suggestion), "%s", offer ? view->suggestion : "");
+    if (buttons[15]) { (void)text(env, buttons[15], suggestion); (void)set_visible(env, buttons[15], offer); }
+    if (voice_view) (void)set_visible(env, voice_view, !offer);
     if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
         "Press Talk and ask anything.");
     if (buttons[10]) {

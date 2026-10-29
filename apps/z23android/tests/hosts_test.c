@@ -38,6 +38,28 @@ static void fleet_line_tests(void)
     assert(!strcmp(zapp_fleet_line("", true, false, line, sizeof(line)), ""));
     assert(!strcmp(zapp_fleet_line("", false, false, line, sizeof(line)), ""));
 }
+/* One informational question per state; the node's trouble outranks the fleet's, and nothing is offered
+ * without a paired host. */
+static void suggestion_tests(void)
+{
+    char q[96];
+    const char *report = "2 of 3 hosts in sync\n\nr1 · in sync · 3,301,702\n";
+    assert(zapp_fleet_attention(report) == 1);
+    assert(zapp_fleet_attention("3 of 3 hosts in sync\n") == 0);
+    assert(zapp_fleet_attention("0 of 2 hosts in sync\n") == 2);
+    assert(zapp_fleet_attention("") == 0 && zapp_fleet_attention(NULL) == 0);
+    assert(zapp_fleet_attention("Fleet status is unavailable.") == 0);
+    assert(zapp_fleet_attention("5 of 3 hosts in sync\n") == 0);
+    assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, 2, q, sizeof(q)), ""));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, 0, q, sizeof(q)), "Why does my node have no peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, 0, q, sizeof(q)), "Why does my node have no peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 0, q, sizeof(q)), "How long until my node catches up?"));
+    assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 1, q, sizeof(q)), "How long until my node catches up?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, 1, q, sizeof(q)), "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, 1, q, sizeof(q)), "Which hosts need attention?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, 0, q, sizeof(q)), "How is my fleet?"));
+    assert(!strcmp(zapp_suggestion(true, false, -1, -1, -1, 0, q, sizeof(q)), "How is my fleet?"));
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -58,6 +80,7 @@ int main(void)
     assert(!strstr(out, "Blocked") && !strstr(out, "bootstrap") && !strstr(out, "GB"));
     sync_rule_tests();
     fleet_line_tests();
+    suggestion_tests();
     static const char skew[] = "{\"hosts\":["
         "{\"host\":\"r2\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301630,\"reference_height\":3301631},"
         "{\"host\":\"r1\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301633,\"reference_height\":3301631},"

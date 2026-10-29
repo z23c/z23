@@ -23,4 +23,13 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
  * or that none are. Arguments as for zapp_node_line. Returns out. */
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
                            char *out, size_t cap);
+/* Hosts not in sync in a zapp_hosts_format report, read from its headline; 0 for an empty or
+ * unreadable report. */
+int zapp_fleet_attention(const char *report);
+/* The one question offered under Talk, or "" when none is worth asking. Not paired: "". Node
+ * trouble comes first (no peers, then catching up), then hosts needing attention, else a general
+ * fleet question. Height, target and peers are negative when unknown. Questions only, never a
+ * control such as start, stop or join. Returns out. */
+const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
+                            int fleet_attention, char *out, size_t cap);
 #endif
