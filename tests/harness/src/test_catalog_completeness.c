@@ -62,8 +62,10 @@ cc_find(const struct catalog_index_status *rows, size_t n, const char *name)
     return NULL;
 }
 
-/* Scenario A: fetch the db handle and seed every store the catalog reads
- * (schemas, from-genesis histories, reducer height, anchor frontiers). */
+/* Scenario A: fetch the db handle and seed the shielded, coins and
+ * address_index stores only (schemas, from-genesis histories, reducer
+ * height, anchor frontiers). Other catalog rows (txindex, op_return, ...)
+ * are not seeded here; they degrade or stay at their default state. */
 static int cc_seed_genesis_store(void)
 {
     int failures = 0;
