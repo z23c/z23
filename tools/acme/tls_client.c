@@ -171,6 +171,35 @@ static bool ci_equal(const char *a, const char *b, size_t n)
     return true;
 }
 
+/* Offset of the first CR or LF at or after `from`, or blob_len. */
+static size_t header_line_end(const char *blob, size_t blob_len, size_t from)
+{
+    while (from < blob_len && blob[from] != '\r' && blob[from] != '\n')
+        from++;
+    return from;
+}
+
+/* Offset of the first byte at or after `from` that is not a CR or LF. */
+static size_t header_skip_eol(const char *blob, size_t blob_len, size_t from)
+{
+    while (from < blob_len && (blob[from] == '\r' || blob[from] == '\n'))
+        from++;
+    return from;
+}
+
+/* Trim blanks around the value in blob[v, line_end) and report the span. */
+static void header_trim_value(const char *blob, size_t v, size_t line_end,
+                              const char **val, size_t *val_len)
+{
+    while (v < line_end && (blob[v] == ' ' || blob[v] == '\t'))
+        v++;
+    size_t e = line_end;
+    while (e > v && (blob[e - 1] == ' ' || blob[e - 1] == '\t'))
+        e--;
+    *val = blob + v;
+    *val_len = e - v;
+}
+
 /* Find `name:` in a header blob and return the trimmed value span. */
 static bool header_span(const char *blob, size_t blob_len, const char *name,
                         const char **val, size_t *val_len)
@@ -178,24 +207,14 @@ static bool header_span(const char *blob, size_t blob_len, const char *name,
     const size_t name_len = strlen(name);
     size_t line_start = 0;
     while (line_start < blob_len) {
-        size_t line_end = line_start;
-        while (line_end < blob_len && blob[line_end] != '\r' && blob[line_end] != '\n')
-            line_end++;
+        size_t line_end = header_line_end(blob, blob_len, line_start);
         const size_t line_len = line_end - line_start;
         if (line_len > name_len && blob[line_start + name_len] == ':' &&
             ci_equal(blob + line_start, name, name_len)) {
-            size_t v = line_start + name_len + 1;
-            while (v < line_end && (blob[v] == ' ' || blob[v] == '\t'))
-                v++;
-            size_t e = line_end;
-            while (e > v && (blob[e - 1] == ' ' || blob[e - 1] == '\t'))
-                e--;
-            *val = blob + v;
-            *val_len = e - v;
+            header_trim_value(blob, line_start + name_len + 1, line_end, val, val_len);
             return true;
         }
-        while (line_end < blob_len && (blob[line_end] == '\r' || blob[line_end] == '\n'))
-            line_end++;
+        line_end = header_skip_eol(blob, blob_len, line_end);
         line_start = line_end;
     }
     return false;
@@ -242,6 +261,60 @@ static bool header_is_chunked(const char *blob, size_t blob_len)
     return n == 7 && ci_equal(v, "chunked", 7);
 }
 
+/* Offset of the CR of the first CRLF at or after `off`; line_end + 1 >= len
+ * when no complete line is present. */
+static size_t chunk_line_end(const char *p, size_t len, size_t off)
+{
+    size_t line_end = off;
+    while (line_end + 1 < len && !(p[line_end] == '\r' && p[line_end + 1] == '\n'))
+        line_end++;
+    return line_end;
+}
+
+/* Parse the hex chunk size in p[off, line_end). False on a bad digit, an
+ * overflow past `cap`, or an empty size. */
+static bool chunk_parse_size(const char *p, size_t off, size_t line_end,
+                             size_t cap, size_t *size_out)
+{
+    size_t size = 0;
+    size_t digits = 0;
+    size_t i = off;
+    for (; i < line_end; i++) {
+        const char c = p[i];
+        if (c == ';')
+            break; /* chunk extension */
+        /* RFC 9112 chunk sizes are hex; the one hex codec owns the
+         * character rule, upper case included. */
+        const int d = zcl_hex_nibble(c, true);
+        if (d < 0)
+            return false;
+        if (size > (cap + 1) / 16)
+            return false;
+        size = size * 16 + (size_t)d;
+        digits++;
+    }
+    if (digits == 0)
+        return false;
+    *size_out = size;
+    return true;
+}
+
+/* True when the blank line ending the trailer was seen, false when the trailer
+ * is truncated. */
+static bool chunk_trailer_complete(const char *p, size_t len, size_t off)
+{
+    /* Trailer section: consume header lines until the blank line. */
+    for (;;) {
+        size_t t_end = chunk_line_end(p, len, off);
+        if (t_end + 1 >= len)
+            return false; /* truncated trailer */
+        const bool blank = (t_end == off);
+        off = t_end + 2;
+        if (blank)
+            return true;
+    }
+}
+
 /* Walk a chunked body. `complete` reports whether the terminating zero chunk
  * and trailer were seen; `decoded_len` counts payload bytes. Writes into
  * `decoded` when non-NULL (caller sized it with a prior sizing pass). */
@@ -252,51 +325,19 @@ static bool chunked_walk(const char *p, size_t len, size_t cap, bool *complete,
     size_t total = 0;
     *complete = false;
     for (;;) {
-        size_t line_end = off;
-        while (line_end + 1 < len && !(p[line_end] == '\r' && p[line_end + 1] == '\n'))
-            line_end++;
+        const size_t line_end = chunk_line_end(p, len, off);
         if (line_end + 1 >= len) {
             *decoded_len = total;
             return true; /* truncated, not malformed */
         }
         size_t size = 0;
-        size_t digits = 0;
-        size_t i = off;
-        for (; i < line_end; i++) {
-            const char c = p[i];
-            if (c == ';')
-                break; /* chunk extension */
-            /* RFC 9112 chunk sizes are hex; the one hex codec owns the
-             * character rule, upper case included. */
-            const int d = zcl_hex_nibble(c, true);
-            if (d < 0)
-                return false;
-            if (size > (cap + 1) / 16)
-                return false;
-            size = size * 16 + (size_t)d;
-            digits++;
-        }
-        if (digits == 0)
+        if (!chunk_parse_size(p, off, line_end, cap, &size))
             return false;
         off = line_end + 2;
         if (size == 0) {
-            /* Trailer section: consume header lines until the blank line. */
-            for (;;) {
-                size_t t_end = off;
-                while (t_end + 1 < len && !(p[t_end] == '\r' && p[t_end + 1] == '\n'))
-                    t_end++;
-                if (t_end + 1 >= len) {
-                    *decoded_len = total;
-                    return true; /* truncated trailer */
-                }
-                const bool blank = (t_end == off);
-                off = t_end + 2;
-                if (blank) {
-                    *complete = true;
-                    *decoded_len = total;
-                    return true;
-                }
-            }
+            *complete = chunk_trailer_complete(p, len, off);
+            *decoded_len = total;
+            return true;
         }
         if (total > cap - size)
             return false;
@@ -350,6 +391,15 @@ bool tls_client_response_complete(const char *raw, size_t len)
     return tls_client_response_complete_bounded(raw, len, 0);
 }
 
+static bool status_code_digits(const char *raw)
+{
+    for (int k = 9; k <= 11; k++) {
+        if (raw[k] < '0' || raw[k] > '9')
+            return false;
+    }
+    return true;
+}
+
 static bool parse_status_line(const char *raw, size_t len, int *status,
                               size_t *line_len)
 {
@@ -366,8 +416,7 @@ static bool parse_status_line(const char *raw, size_t len, int *status,
         return false;
     if (raw[8] != ' ')
         return false;
-    if (raw[9] < '0' || raw[9] > '9' || raw[10] < '0' || raw[10] > '9' ||
-        raw[11] < '0' || raw[11] > '9')
+    if (!status_code_digits(raw))
         return false;
     *status = (raw[9] - '0') * 100 + (raw[10] - '0') * 10 + (raw[11] - '0');
     *line_len = i + 2;

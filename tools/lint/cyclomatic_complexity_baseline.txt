@@ -1002,9 +1002,6 @@ tests/harness/src/test_zcode_swarm_net.c:zwn_test_golden:36
 tools/acme/acme_jws.c:acme_es256_sign:16
 tools/acme/acme_jws.c:acme_jws_body:16
 tools/acme/acme_jws.c:acme_jws_protected_header:19
-tools/acme/tls_client.c:chunked_walk:23
-tools/acme/tls_client.c:header_span:17
-tools/acme/tls_client.c:parse_status_line:16
 tools/acme/tls_client.c:tls_client_fetch:50
 tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:33
