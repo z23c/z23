@@ -225,10 +225,11 @@ static int bilr_decode_candidate_value(const char *v, size_t vlen,
     struct byte_stream s;
     stream_init_from_data(&s, (unsigned char *)v, vlen);
 
-    bool ok = disk_block_index_deserialize(dbi, &s);
-    stream_free(&s);
-    if (!ok)
+    if (!disk_block_index_deserialize(dbi, &s)) {
+        stream_free(&s);
         return 1;
+    }
+    stream_free(&s);
 
     /* Only keep entries that are usable for body-pull:
      * BLOCK_HAVE_DATA must be set (we need an nFile/nDataPos),
