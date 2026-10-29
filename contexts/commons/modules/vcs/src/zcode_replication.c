@@ -86,7 +86,8 @@ static void count_provider_hint(
 }
 
 /* Tallies one storage-ACK record as expired, or as a fresh ack with its
- * owner group and any local revalidation. */
+ * owner group and any local revalidation; unexpired acks that repeat an
+ * acknowledger or hit the acknowledger cap are not tallied. */
 static void count_storage_ack(
     const struct vcs_zcode_dht_record *record,
     const struct vcs_zcode_replication_evidence *evidence, uint64_t now_unix,
