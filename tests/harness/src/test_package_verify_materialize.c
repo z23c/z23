@@ -653,6 +653,82 @@ static int pvm_wait_fault_case(int fault)
 }
 #endif
 
+#if defined(__linux__)
+/* Exercise the verifier's actual deny-set, not a copy of its policy. */
+static bool pvm_arm_alarm(void)
+{
+    sigset_t alarms;
+    if (signal(SIGALRM, SIG_DFL) == SIG_ERR || sigemptyset(&alarms) != 0 ||
+        sigaddset(&alarms, SIGALRM) != 0 || sigprocmask(SIG_UNBLOCK, &alarms, NULL) != 0) return false;
+    alarm(5); return true;
+}
+static int pvm_group_fork_exec(void)
+{
+    if (access("/bin/true", X_OK) != 0) return 73;
+    pid_t child = fork();
+    if (child < 0) return 74;
+    if (child == 0) { if (!pvm_arm_alarm()) _exit(75); execl("/bin/true", "true", (char *)NULL); _exit(76); }
+    int status = 0; pid_t got;
+    do { got = waitpid(child, &status, 0); } while (got < 0 && errno == EINTR);
+    return got == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 77;
+}
+static int pvm_group_action(int op, bool confined)
+{
+    if (confined && (!os_sandbox_no_new_privs() ||
+        !os_sandbox_seccomp_deny(g_pv_child_denied, PV_CHILD_DENIED_COUNT, false).ok)) return 70;
+    if (op == 0) return setsid() < 0 ? 71 : 0;
+    if (op == 1) return setpgid(0, 0) < 0 ? 72 : 0;
+    return pvm_group_fork_exec();
+}
+static int pvm_group_timeout(pid_t child)
+{
+    if (kill(child, SIGKILL) != 0 && errno != ESRCH) return -104;
+    int status = 0;
+    for (int i = 0; i < 500; ++i) {
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child || (got < 0 && errno == ECHILD)) return -102;
+        if (got < 0 && errno != EINTR) return -101;
+        struct timespec delay = {.tv_nsec = 10000000};
+        (void)nanosleep(&delay, NULL); /* real-clock: bounded real-child reap; kernel completion has no injected clock */
+    }
+    return -105;
+}
+static int pvm_group_wait(pid_t child)
+{
+    int status = 0;
+    for (int i = 0; i < 700; ++i) {
+        pid_t got = waitpid(child, &status, WNOHANG);
+        if (got == child) {
+            if (WIFSIGNALED(status)) return -WTERMSIG(status);
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -103;
+        }
+        if (got < 0 && errno != EINTR) return -101;
+        struct timespec delay = {.tv_nsec = 10000000};
+        (void)nanosleep(&delay, NULL); /* real-clock: bounded real-child reap; kernel completion has no injected clock */
+    }
+    return pvm_group_timeout(child);
+}
+static int pvm_group_run(int op, bool confined)
+{
+    pid_t child = fork(); if (child < 0) return -100;
+    if (child == 0) { if (!pvm_arm_alarm()) _exit(78); _exit(pvm_group_action(op, confined)); }
+    return pvm_group_wait(child);
+}
+static int t_package_group_custody(void)
+{
+    static const char *const labels[] = {"setsid", "setpgid", "fork/exec"};
+    int failures = 0;
+    for (int op = 0; op < 3; ++op) {
+        int control = pvm_group_run(op, false);
+        int confined = pvm_group_run(op, true);
+        printf("  package group %s control=%d confined=%d\n", labels[op], control, confined);
+        PVM_CHECK(labels[op], control == 0 && confined == (op < 2 ? -SIGSYS : 0));
+    }
+    return failures;
+}
+#endif
+
+
 int test_package_verify_materialize(void)
 {
     int failures = 0;
@@ -664,6 +740,9 @@ int test_package_verify_materialize(void)
     failures += t_success_identical();
     failures += t_write_error_custody();
     failures += t_size_disagrees_with_tail();
+#if defined(__linux__)
+    failures += t_package_group_custody();
+#endif
 #if defined(__linux__) || defined(__APPLE__)
     failures += t_census_unavailable();
     failures += t_census_budget_control();

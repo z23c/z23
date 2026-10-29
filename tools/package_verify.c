@@ -546,6 +546,7 @@ static const int g_pv_child_denied[] = {
     __NR_getsockname, __NR_getpeername,
     __NR_ptrace, __NR_process_vm_readv, __NR_process_vm_writev,
     __NR_mount, __NR_umount2, __NR_pivot_root, __NR_setns, __NR_unshare,
+    __NR_setsid, __NR_setpgid,
     __NR_bpf, __NR_kexec_load, __NR_kexec_file_load,
     __NR_init_module, __NR_finit_module, __NR_delete_module,
     __NR_perf_event_open,
@@ -564,7 +565,7 @@ static bool g_pv_fix_admit;
 #if defined(__linux__)
 static const int g_pv_fix_admit_denied[] = {
     __NR_kill, __NR_tkill, __NR_tgkill, __NR_rt_sigqueueinfo,
-    __NR_rt_tgsigqueueinfo, __NR_setsid, __NR_setpgid,
+    __NR_rt_tgsigqueueinfo,
 #ifdef __NR_pidfd_send_signal
     __NR_pidfd_send_signal,
 #endif
@@ -1083,7 +1084,8 @@ static _Noreturn void pv_run_child_exec(const char *const argv[],
      * budget enforceable (the parent censuses this group) and what makes
      * the deadline kill reach the WHOLE subtree instead of just this
      * process. A group id is inherited across fork and is not lost when a
-     * grandchild is reparented, so nothing in the tree can escape it.
+     * grandchild is reparented. The Linux deny-set prevents group changes;
+     * Darwin package group-change containment remains unqualified.
      * Raced with the parent's identical call so neither ordering loses. */
     (void)setpgid(0, 0);
     close(out_pipe[0]);
