@@ -412,8 +412,7 @@ static bool la_fold_seed_stage(struct main_state *ms, struct la_chain *sc,
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
     return la_seed_script_validate(progress_store_db(), sc) &&
            la_seed_stage_cursor(progress_store_db(), "proof_validate",
-                                start_cursor) &&
-           proof_validate_stage_init(ms);
+                                start_cursor);
 }
 
 static void la_fold_start_pool(struct la_result *out, struct main_state *ms,
@@ -497,7 +496,8 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
         la_fold_release(&ms, &sc);
         return;
     }
-    if (!la_fold_seed_stage(&ms, &sc, n, start_cursor)) {
+    if (!la_fold_seed_stage(&ms, &sc, n, start_cursor) ||
+        !proof_validate_stage_init(&ms)) {
         la_fold_release(&ms, &sc);
         return;
     }
