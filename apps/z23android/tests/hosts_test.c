@@ -19,11 +19,18 @@ int main(void)
     char out[4096];
     assert(zapp_hosts_format(snapshot, out, sizeof(out)));
     assert(!strncmp(out, "1 of 3 hosts match zclassicd\n", 29));
-    assert(strstr(out, "\nr1 · in step\n  height 3301130 matches zclassicd\n"));
+    assert(strstr(out, "\nr1 · in step\n  height 3,301,130 matches zclassicd\n"));
     assert(strstr(out, "node blocked: review_required_bootstrap_trust · 644 GB free\n"));
-    assert(strstr(out, "\nr2 · needs attention\n  height 3301120 · zclassicd 3301130\n  node ok\n"));
+    assert(strstr(out, "\nr2 · needs attention\n  height 3,301,120 · zclassicd 3,301,130\n  node ok\n"));
     assert(strstr(out, "\nmac · unreachable after 25.0 s\n"));
     assert(!strstr(out, "0 GB"));
+    static const char small[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":999,"
+        "\"reference_height\":1000}]}";
+    assert(zapp_hosts_format(small, out, sizeof(out)) && strstr(out, "  height 999 · zclassicd 1,000\n"));
+    static const char large[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":-5,"
+        "\"reference_height\":9223372036854775807}]}";
+    assert(zapp_hosts_format(large, out, sizeof(out)) &&
+           strstr(out, "  height -5 · zclassicd 9,223,372,036,854,775,807\n"));
     assert(!zapp_hosts_format("{\"hosts\":[]}", out, sizeof(out)) && !out[0]);
     assert(!zapp_hosts_format("not json", out, sizeof(out)));
     assert(!zapp_hosts_format(snapshot, out, 40) && !out[0]);

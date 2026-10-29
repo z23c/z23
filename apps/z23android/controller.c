@@ -101,11 +101,13 @@ static void observe_node(struct controller *c)
         const struct json_value *target = json_get(data, "max_peer_height");
         if (ok && height && height->type == JSON_INT) {
             responding = true;
+            char local[32], peer[32];
             if (target && target->type == JSON_INT && json_get_int(target) > 0)
-                snprintf(status, sizeof(status), "Local height %lld\nPeer-reported height %lld · %lld peers\nFull validation is still being checked.",
-                    (long long)json_get_int(height), (long long)json_get_int(target),
-                    (long long)json_get_int(peers));
-            else snprintf(status, sizeof(status), "Local height %lld\nWaiting for peers with a current chain view.", (long long)json_get_int(height));
+                snprintf(status, sizeof(status), "Local height %s\nPeer-reported height %s · %lld peers\n"
+                    "Full validation is still being checked.", zapp_grouped(json_get_int(height), local),
+                    zapp_grouped(json_get_int(target), peer), (long long)json_get_int(peers));
+            else snprintf(status, sizeof(status), "Local height %s\nWaiting for peers with a current chain view.",
+                          zapp_grouped(json_get_int(height), local));
         }
         json_free(&root);
     }

@@ -169,6 +169,10 @@ change hosts or spend funds.
   first text and the first audio. On the measured Pixel,
   speech from a laptop speaker peaked at mean levels of 417-556 over a floor
   of 10-12.
+- Heights in the fleet summary and the phone status use thousands separators.
+  In four sampled answers about a fleet at height 2950000, the chat model
+  misread raw digits once (as 29,500,000) and copied grouped digits correctly
+  every time.
 
 ### Measured latency
 

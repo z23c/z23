@@ -32,15 +32,30 @@ static size_t append(char *out, size_t cap, size_t used, const char *format, ...
     va_end(args);
     return n < 0 || (size_t)n >= cap - used ? cap : used + (size_t)n;
 }
+const char *zapp_grouped(int64_t value, char out[32])
+{
+    char digits[24];
+    int n = snprintf(digits, sizeof(digits), "%lld", (long long)value);
+    if (n <= 0 || value < 0) { snprintf(out, 32, "%s", n > 0 ? digits : "?"); return out; }
+    size_t at = 0;
+    for (int i = 0; i < n; i++) {
+        if (i && (n - i) % 3 == 0) out[at++] = ',';
+        out[at++] = digits[i];
+    }
+    out[at] = 0;
+    return out;
+}
 static size_t height_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
     int64_t height = 0, reference = 0;
     bool has_height = count_of(row, "height", &height), has_ref = count_of(row, "reference_height", &reference);
+    char a[32], b[32];
     if (has_height && has_ref && height == reference)
-        return append(out, cap, used, "  height %lld matches zclassicd\n", (long long)height);
+        return append(out, cap, used, "  height %s matches zclassicd\n", zapp_grouped(height, a));
     if (has_height && has_ref)
-        return append(out, cap, used, "  height %lld · zclassicd %lld\n", (long long)height, (long long)reference);
-    if (has_height) return append(out, cap, used, "  height %lld · zclassicd unknown\n", (long long)height);
+        return append(out, cap, used, "  height %s · zclassicd %s\n", zapp_grouped(height, a),
+                      zapp_grouped(reference, b));
+    if (has_height) return append(out, cap, used, "  height %s · zclassicd unknown\n", zapp_grouped(height, a));
     return append(out, cap, used, "  height unknown\n");
 }
 static size_t row_text(const struct json_value *row, char *out, size_t cap, size_t used)
