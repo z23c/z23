@@ -54,6 +54,34 @@ static void *send_timeout_record(void *opaque)
     return NULL;
 }
 
+static bool legacy_timeout_configure(platform_socket_t pair[2])
+{
+    bool configured = platform_socket_set_send_buffer(pair[0], 4096) == 0 &&
+        platform_socket_set_receive_buffer(pair[1], 4096) == 0 &&
+        platform_socket_set_send_timeout(pair[0], 50) == 0;
+    uint8_t fill[4096] = {0};
+    while (configured &&
+           platform_socket_send_nonblocking(pair[0], fill, sizeof(fill)) > 0) {}
+    return configured;
+}
+
+static bool legacy_timeout_wait_done(struct timeout_sender_args *args)
+{
+    for (unsigned i = 0; i < 500; i++) {
+        if (atomic_load_explicit(&args->done, memory_order_acquire))
+            return true;
+        platform_sleep_ms(1);
+    }
+    return false;
+}
+
+static void transport_close_socket(platform_socket_t *sock)
+{
+    if (*sock != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(*sock);
+    *sock = PLATFORM_SOCKET_INVALID;
+}
+
 static bool legacy_send_timeout_is_bounded(void)
 {
     platform_socket_t pair[2] = {
@@ -64,34 +92,18 @@ static bool legacy_send_timeout_is_bounded(void)
     fs_session_init(&sender, pair[0]);
     sender.key[0] = 1;
     sender.key_established = true;
-    bool configured = platform_socket_set_send_buffer(pair[0], 4096) == 0 &&
-        platform_socket_set_receive_buffer(pair[1], 4096) == 0 &&
-        platform_socket_set_send_timeout(pair[0], 50) == 0;
-    uint8_t fill[4096] = {0};
-    while (configured &&
-           platform_socket_send_nonblocking(pair[0], fill, sizeof(fill)) > 0) {}
+    bool configured = legacy_timeout_configure(pair);
 
     struct timeout_sender_args args = {.session = &sender};
     pthread_t thread;
     bool started = configured &&
         pthread_create(&thread, NULL, send_timeout_record, &args) == 0; /* raw-pthread-ok: short-burst-joined-immediately */
-    bool finished = false;
-    for (unsigned i = 0; started && i < 500; i++) {
-        if (atomic_load_explicit(&args.done, memory_order_acquire)) {
-            finished = true;
-            break;
-        }
-        platform_sleep_ms(1);
-    }
-    if (!finished) {
-        platform_socket_close(pair[1]);
-        pair[1] = PLATFORM_SOCKET_INVALID;
-    }
+    bool finished = started && legacy_timeout_wait_done(&args);
+    if (!finished)
+        transport_close_socket(&pair[1]);
     bool joined = !started || pthread_join(thread, NULL) == 0;
-    if (pair[0] != PLATFORM_SOCKET_INVALID)
-        platform_socket_close(pair[0]);
-    if (pair[1] != PLATFORM_SOCKET_INVALID)
-        platform_socket_close(pair[1]);
+    transport_close_socket(&pair[0]);
+    transport_close_socket(&pair[1]);
     return started && finished && joined && !args.ok;
 }
 
@@ -111,6 +123,49 @@ static int refuse(const char *message, platform_socket_t pair[2],
     return 1;
 }
 
+static void transport_init_sessions(struct fs_session *sender,
+                                    struct fs_session *receiver,
+                                    const platform_socket_t pair[2])
+{
+    fs_session_init(sender, pair[0]);
+    fs_session_init(receiver, pair[1]);
+    for (size_t i = 0; i < sizeof(sender->key); i++)
+        sender->key[i] = receiver->key[i] = (uint8_t)(i * 7u + 3u);
+    sender->key_established = receiver->key_established = true;
+}
+
+static bool transport_recv_frame_ok(struct fs_session *receiver,
+                                    const struct sender_args *args)
+{
+    uint8_t type = 0;
+    const uint8_t *received_frame = NULL;
+    uint32_t received_frame_size = 0;
+    return fs_recv_frame(receiver, &type, &received_frame,
+                         &received_frame_size) &&
+        type == FS_MANIFEST && received_frame_size == args->frame_size &&
+        memcmp(received_frame, args->frame_payload, args->frame_size) == 0;
+}
+
+static bool transport_recv_chunk_ok(struct fs_session *receiver,
+                                    const struct sender_args *args,
+                                    uint8_t **received_chunk,
+                                    uint32_t *received_chunk_size)
+{
+    return fs_recv_chunk_fast(receiver, received_chunk, received_chunk_size,
+                              args->chunk_digest) &&
+        *received_chunk_size == TEST_CHUNK_BYTES &&
+        memcmp(*received_chunk, args->chunk, TEST_CHUNK_BYTES) == 0;
+}
+
+static bool transport_accounting_ok(const struct fs_session *sender,
+                                    const struct fs_session *receiver)
+{
+    return sender->send_counter == 2 && receiver->recv_counter == 2 &&
+        sender->bytes_sent == receiver->bytes_received &&
+        sender->bytes_sent == FS_FRAME_SIZE + 4u + TEST_CHUNK_BYTES + 32u &&
+        fs_session_mbps(sender) > 0.0;
+}
+
 int main(void)
 {
     platform_socket_t pair[2] = {
@@ -119,11 +174,7 @@ int main(void)
         return refuse("loopback socket pair unavailable", pair, NULL, NULL);
 
     struct fs_session sender, receiver;
-    fs_session_init(&sender, pair[0]);
-    fs_session_init(&receiver, pair[1]);
-    for (size_t i = 0; i < sizeof(sender.key); i++)
-        sender.key[i] = receiver.key[i] = (uint8_t)(i * 7u + 3u);
-    sender.key_established = receiver.key_established = true;
+    transport_init_sessions(&sender, &receiver, pair);
 
     static const uint8_t frame_payload[] =
         "native-windows-c23-commons-transport";
@@ -148,27 +199,15 @@ int main(void)
     if (pthread_create(&thread, NULL, send_records, &args) != 0)
         return refuse("sender thread creation failed", pair, chunk, NULL);
 
-    uint8_t type = 0;
-    const uint8_t *received_frame = NULL;
-    uint32_t received_frame_size = 0;
-    bool frame_ok = fs_recv_frame(&receiver, &type, &received_frame,
-                                  &received_frame_size) &&
-        type == FS_MANIFEST && received_frame_size == args.frame_size &&
-        memcmp(received_frame, frame_payload, args.frame_size) == 0;
+    bool frame_ok = transport_recv_frame_ok(&receiver, &args);
     uint8_t *received_chunk = NULL;
     uint32_t received_chunk_size = 0;
     bool chunk_ok = frame_ok &&
-        fs_recv_chunk_fast(&receiver, &received_chunk, &received_chunk_size,
-                           args.chunk_digest) &&
-        received_chunk_size == TEST_CHUNK_BYTES &&
-        memcmp(received_chunk, chunk, TEST_CHUNK_BYTES) == 0;
+        transport_recv_chunk_ok(&receiver, &args, &received_chunk,
+                                &received_chunk_size);
     bool joined = pthread_join(thread, NULL) == 0;
 
-    bool accounting_ok =
-        sender.send_counter == 2 && receiver.recv_counter == 2 &&
-        sender.bytes_sent == receiver.bytes_received &&
-        sender.bytes_sent == FS_FRAME_SIZE + 4u + TEST_CHUNK_BYTES + 32u &&
-        fs_session_mbps(&sender) > 0.0;
+    bool accounting_ok = transport_accounting_ok(&sender, &receiver);
     if (!args.ok || !frame_ok || !chunk_ok || !joined || !accounting_ok)
         return refuse("frame/chunk parity or accounting failed", pair, chunk,
                       received_chunk);
