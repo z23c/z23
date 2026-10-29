@@ -43,30 +43,9 @@ static bool running_binary_digest(uint8_t out[32])
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    uint8_t buffer[32768];
-    bool ok = true;
-    uint64_t offset = 0;
-    while (offset < before.size) {
-        size_t want = before.size - offset < sizeof(buffer)
-                          ? (size_t)(before.size - offset)
-                          : sizeof(buffer);
-        int64_t got =
-            platform_positioned_file_read(&file, buffer, want, offset);
-        if (got != (int64_t)want) {
-            ok = false;
-            break;
-        }
-        sha3_256_write(&ctx, buffer, want);
-        offset += want;
-    }
+    bool ok = consensus_state_hash_positioned_file(&file, before.size, &ctx);
     ok = ok && platform_positioned_file_snapshot(&file, &after) &&
-         before.size == after.size && before.volume == after.volume &&
-         before.file_low == after.file_low &&
-         before.file_high == after.file_high &&
-         before.modified_seconds == after.modified_seconds &&
-         before.modified_nanoseconds == after.modified_nanoseconds &&
-         before.changed_seconds == after.changed_seconds &&
-         before.changed_nanoseconds == after.changed_nanoseconds;
+         platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&ctx, out);

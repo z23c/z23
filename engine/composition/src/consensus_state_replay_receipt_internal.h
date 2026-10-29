@@ -17,6 +17,7 @@
 #ifndef ZCL_CONFIG_CONSENSUS_STATE_REPLAY_RECEIPT_INTERNAL_H
 #define ZCL_CONFIG_CONSENSUS_STATE_REPLAY_RECEIPT_INTERNAL_H
 
+#include "consensus_state_positioned_hash.h"
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdint.h>

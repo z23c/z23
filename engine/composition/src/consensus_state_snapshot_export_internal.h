@@ -5,6 +5,7 @@
 
 #include "config/consensus_state_snapshot_export.h"
 #include "base/format_attribute.h"
+#include "consensus_state_positioned_hash.h"
 #include "storage/consensus_state_bundle_codec.h"
 
 #include <sqlite3.h>

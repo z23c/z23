@@ -70,24 +70,10 @@ bool rr_fail(struct consensus_state_replay_result *out, const char *fmt,
     return false;
 }
 
+/* The running-binary digest below streams its image through the shared
+ * consensus_state_hash_positioned_file(file, size, ctx)
+ * (consensus_state_positioned_hash.h), whose contract is: */
 /* Stream exactly `size` bytes of `file` into `ctx`; false on any short read. */
-static bool rr_hash_positioned_file(struct platform_positioned_file *file,
-                                    uint64_t size, struct sha3_256_ctx *ctx)
-{
-    uint8_t buffer[32768];
-    uint64_t offset = 0;
-    while (offset < size) {
-        size_t want = size - offset < sizeof(buffer)
-                          ? (size_t)(size - offset)
-                          : sizeof(buffer);
-        int64_t n = platform_positioned_file_read(file, buffer, want, offset);
-        if (n != (int64_t)want)
-            return false;
-        sha3_256_write(ctx, buffer, want);
-        offset += want;
-    }
-    return true;
-}
 
 /* SHA3-256 of the running executable image — the race-free /proc/self/exe idiom
  * (matches consensus_state_producer_receipt.c's running_binary_digest).
@@ -116,7 +102,7 @@ static bool rr_verifier_binary_digest(uint8_t out[32])
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    bool ok = rr_hash_positioned_file(&file, before.size, &ctx) &&
+    bool ok = consensus_state_hash_positioned_file(&file, before.size, &ctx) &&
               platform_positioned_file_snapshot(&file, &after) &&
               platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
