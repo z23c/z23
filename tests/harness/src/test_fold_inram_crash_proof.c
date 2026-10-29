@@ -185,11 +185,8 @@ struct fip_fixture {
     uint8_t tip_hash[32];
 };
 
-static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
+static bool fip_setup_datadir(const char *dir, struct fip_fixture *fx)
 {
-    memset(fx, 0, sizeof(*fx));
-    snprintf(fx->dir, sizeof(fx->dir), "%s", dir);
-
     fip_mkdir_p("./test-tmp");
     if (!fip_mkdir_p(dir)) return false;
     SetDataDir(dir);
@@ -200,14 +197,13 @@ static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
     if (!fip_mkdir_p(blocksdir)) return false;
 
     if (!progress_store_open(dir)) return false;
+    return true;
+}
 
-    chain_params_select(CHAIN_REGTEST);
-    fx->cp = chain_params_get();
-    main_state_init(&fx->ms);
-
-    struct uint256 genesis_hash = fx->cp->consensus.hashGenesisBlock;
+static bool fip_setup_genesis(struct fip_fixture *fx, struct uint256 *genesis_hash)
+{
     struct block_index *genesis = chainstate_insert_block_index(
-        (struct chainstate *)&fx->ms, &genesis_hash);
+        (struct chainstate *)&fx->ms, genesis_hash);
     if (!genesis) return false;
     genesis->nHeight = 0;
     genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
@@ -216,9 +212,12 @@ static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
     genesis->nChainWork = GetBlockProof(genesis);
     active_chain_move_window_tip(&fx->ms.chain_active, genesis);
     fx->ms.pindex_best_header = genesis;
+    return true;
+}
 
-    bool stages_ok =
-        header_admit_stage_init(&fx->ms) &&
+static bool fip_setup_stages_init(struct fip_fixture *fx)
+{
+    return header_admit_stage_init(&fx->ms) &&
         validate_headers_stage_init(&fx->ms) &&
         body_fetch_stage_init(&fx->ms) &&
         body_persist_stage_init(&fx->ms) &&
@@ -226,7 +225,93 @@ static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
         proof_validate_stage_init(&fx->ms) &&
         utxo_apply_stage_init(&fx->ms) &&
         tip_finalize_stage_init(&fx->ms);
-    if (!stages_ok) return false;
+}
+
+static bool fip_setup_one_block(struct fip_fixture *fx, int h,
+                                struct uint256 *prev_hash)
+{
+    struct block blk;
+    if (!fip_build_regtest_block(&blk, h, prev_hash, fx->cp)) return false;
+    if (!mine_block_pow(&blk, h, fx->cp, 0)) { block_free(&blk); return false; }
+
+    struct uint256 hh;
+    block_get_hash(&blk, &hh);
+
+    /* Build the block_index entry DIRECTLY via the same primitive
+     * header_admit_stage's reducer-producer path uses internally
+     * (add_to_block_index), independent of header_admit's OWN durable
+     * stage cursor. A resumer child re-running this same loop on a
+     * crash-truncated datadir opens a process where header_admit's
+     * persisted cursor is already advanced past every height in this
+     * fixture (the crasher fully admitted headers before crashing
+     * mid-utxo_apply) — so header_admit_stage's step function, gated
+     * strictly on cursor_in, would never look at height h again and
+     * this fresh process's (empty) map_block_index would stay empty.
+     * add_to_block_index is idempotent on an already-mapped hash (it
+     * returns the existing entry without re-deriving pprev/nHeight/
+     * nChainWork), so calling it here is safe alongside the mailbox
+     * push below, which still separately advances header_admit's own
+     * cursor/log for downstream upstream-cursor gates in the
+     * fresh-datadir (golden/crasher) legs. */
+    struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
+    if (!bi || !bi->phashBlock) { block_free(&blk); return false; }
+    if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
+        bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
+    /* header_admit_stage's own step (gated on ITS cursor, see the
+     * comment above) is what normally advances pindex_best_header —
+     * skipped here in the resumer, so advance it directly. Heights
+     * are strictly increasing in this loop, so this is always the new
+     * best header; reducer_extend_window_to_candidate (called by
+     * every downstream stage step) walks the have-data window out to
+     * pindex_best_header, which is what makes active_chain_at(height)
+     * resolve for utxo_apply's block selection. */
+    fx->ms.pindex_best_header = bi;
+
+    struct header_admit_msg m;
+    memset(&m, 0, sizeof(m));
+    m.hash = hh;
+    m.has_header = true;
+    m.header = blk.header;
+    m.height = -1;
+    if (!mailbox_header_admit_push(&m)) { block_free(&blk); return false; }
+    (void)header_admit_stage_drain(50);
+
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
+                                         fx->cp->pchMessageStart) &&
+                     block_index_set_have_data_verified(bi, &pos, fx->netdir);
+    block_free(&blk);
+    if (!persisted) return false;
+
+    *prev_hash = hh;
+    memcpy(fx->tip_hash, hh.data, 32);
+    return true;
+}
+
+static bool fip_setup_blocks(struct fip_fixture *fx, int n_blocks,
+                             struct uint256 *prev_hash)
+{
+    for (int h = 1; h <= n_blocks; h++) {
+        if (!fip_setup_one_block(fx, h, prev_hash)) return false;
+    }
+    return true;
+}
+
+static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    snprintf(fx->dir, sizeof(fx->dir), "%s", dir);
+
+    if (!fip_setup_datadir(dir, fx)) return false;
+
+    chain_params_select(CHAIN_REGTEST);
+    fx->cp = chain_params_get();
+    main_state_init(&fx->ms);
+
+    struct uint256 genesis_hash = fx->cp->consensus.hashGenesisBlock;
+    if (!fip_setup_genesis(fx, &genesis_hash)) return false;
+    if (!fip_setup_stages_init(fx)) return false;
 
     if (!fip_seed_genesis_utxo_apply_row(progress_store_db())) return false;
     if (!tip_finalize_stage_seed_anchor(0, genesis_hash.data, false)) return false;
@@ -234,64 +319,7 @@ static bool fip_setup(const char *dir, int n_blocks, struct fip_fixture *fx)
     mint_fold_ceiling_set(n_blocks);
 
     struct uint256 prev_hash = genesis_hash;
-    for (int h = 1; h <= n_blocks; h++) {
-        struct block blk;
-        if (!fip_build_regtest_block(&blk, h, &prev_hash, fx->cp)) return false;
-        if (!mine_block_pow(&blk, h, fx->cp, 0)) { block_free(&blk); return false; }
-
-        struct uint256 hh;
-        block_get_hash(&blk, &hh);
-
-        /* Build the block_index entry DIRECTLY via the same primitive
-         * header_admit_stage's reducer-producer path uses internally
-         * (add_to_block_index), independent of header_admit's OWN durable
-         * stage cursor. A resumer child re-running this same loop on a
-         * crash-truncated datadir opens a process where header_admit's
-         * persisted cursor is already advanced past every height in this
-         * fixture (the crasher fully admitted headers before crashing
-         * mid-utxo_apply) — so header_admit_stage's step function, gated
-         * strictly on cursor_in, would never look at height h again and
-         * this fresh process's (empty) map_block_index would stay empty.
-         * add_to_block_index is idempotent on an already-mapped hash (it
-         * returns the existing entry without re-deriving pprev/nHeight/
-         * nChainWork), so calling it here is safe alongside the mailbox
-         * push below, which still separately advances header_admit's own
-         * cursor/log for downstream upstream-cursor gates in the
-         * fresh-datadir (golden/crasher) legs. */
-        struct block_index *bi = add_to_block_index(&fx->ms, &blk.header);
-        if (!bi || !bi->phashBlock) { block_free(&blk); return false; }
-        if ((bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
-            bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_TREE;
-        /* header_admit_stage's own step (gated on ITS cursor, see the
-         * comment above) is what normally advances pindex_best_header —
-         * skipped here in the resumer, so advance it directly. Heights
-         * are strictly increasing in this loop, so this is always the new
-         * best header; reducer_extend_window_to_candidate (called by
-         * every downstream stage step) walks the have-data window out to
-         * pindex_best_header, which is what makes active_chain_at(height)
-         * resolve for utxo_apply's block selection. */
-        fx->ms.pindex_best_header = bi;
-
-        struct header_admit_msg m;
-        memset(&m, 0, sizeof(m));
-        m.hash = hh;
-        m.has_header = true;
-        m.header = blk.header;
-        m.height = -1;
-        if (!mailbox_header_admit_push(&m)) { block_free(&blk); return false; }
-        (void)header_admit_stage_drain(50);
-
-        struct disk_block_pos pos;
-        disk_block_pos_init(&pos);
-        bool persisted = write_block_to_disk(&blk, &pos, fx->netdir,
-                                             fx->cp->pchMessageStart) &&
-                         block_index_set_have_data_verified(bi, &pos, fx->netdir);
-        block_free(&blk);
-        if (!persisted) return false;
-
-        prev_hash = hh;
-        memcpy(fx->tip_hash, hh.data, 32);
-    }
+    if (!fip_setup_blocks(fx, n_blocks, &prev_hash)) return false;
 
     activation_controller_init(&fx->ctl, &fx->ms, NULL, fx->cp, fx->netdir);
     return true;
@@ -423,56 +451,22 @@ static bool fip_read_result(const char *path, char sha3_hex[65],
  * (1) DURABLE-vs-INRAM A/B EQUIVALENCE
  * ══════════════════════════════════════════════════════════════════════ */
 
-static int fip_proof1_ab_equivalence(void)
+/* One A/B leg, run inside its own fork()ed child: inram=false is the
+ * durable ZCL_FOLD_INRAM=0 fold, inram=true the ZCL_FOLD_INRAM=1 overlay. */
+static bool fip_ab_leg_child(const char *dir, const char *res, bool inram)
+{
+    setenv("ZCL_FOLD_INRAM", inram ? "1" : "0", 1);
+    if (inram) setenv("ZCL_FOLD_INRAM_FLUSH_EVERY", "2", 1);
+    struct fip_fixture fx;
+    return fip_setup(dir, FIP_N_BLOCKS, &fx) &&
+           fip_drive_to_completion(&fx, FIP_N_BLOCKS, 8192) &&
+           fip_write_result(&fx, FIP_N_BLOCKS, res);
+}
+
+/* Read both legs' terminal results and assert the A/B equivalence. */
+static int fip_ab_compare_results(const char *resA, const char *resB)
 {
     int failures = 0;
-    printf("\n=== fold_inram_crash_proof: (1) durable-vs-INRAM A/B "
-           "equivalence over a real %d-block regtest fold ===\n", FIP_N_BLOCKS);
-
-    char dirA[256], dirB[256];
-    test_fmt_tmpdir(dirA, sizeof(dirA), "fold_inram_ab", "durable");
-    test_fmt_tmpdir(dirB, sizeof(dirB), "fold_inram_ab", "inram");
-    char resA[320], resB[320];
-    snprintf(resA, sizeof(resA), "%s.result", dirA);
-    snprintf(resB, sizeof(resB), "%s.result", dirB);
-    unlink(resA);
-    unlink(resB);
-
-    pid_t pidA = fork();
-    if (pidA < 0) { perror("fork"); return ++failures; }
-    if (pidA == 0) {
-        setenv("ZCL_FOLD_INRAM", "0", 1);
-        struct fip_fixture fx;
-        bool ok = fip_setup(dirA, FIP_N_BLOCKS, &fx) &&
-                  fip_drive_to_completion(&fx, FIP_N_BLOCKS, 8192) &&
-                  fip_write_result(&fx, FIP_N_BLOCKS, resA);
-        _exit(ok ? 0 : 1);
-    }
-
-    pid_t pidB = fork();
-    if (pidB < 0) {
-        perror("fork");
-        waitpid(pidA, NULL, 0);
-        return ++failures;
-    }
-    if (pidB == 0) {
-        setenv("ZCL_FOLD_INRAM", "1", 1);
-        setenv("ZCL_FOLD_INRAM_FLUSH_EVERY", "2", 1);
-        struct fip_fixture fx;
-        bool ok = fip_setup(dirB, FIP_N_BLOCKS, &fx) &&
-                  fip_drive_to_completion(&fx, FIP_N_BLOCKS, 8192) &&
-                  fip_write_result(&fx, FIP_N_BLOCKS, resB);
-        _exit(ok ? 0 : 1);
-    }
-
-    int stA = 0, stB = 0;
-    waitpid(pidA, &stA, 0);
-    waitpid(pidB, &stB, 0);
-    FIP_CHECK("leg A (ZCL_FOLD_INRAM=0, durable) fold completed",
-              WIFEXITED(stA) && WEXITSTATUS(stA) == 0);
-    FIP_CHECK("leg B (ZCL_FOLD_INRAM=1, overlay) fold completed",
-              WIFEXITED(stB) && WEXITSTATUS(stB) == 0);
-
     char sha3A[65] = {0}, sha3B[65] = {0};
     uint64_t cntA = 0, cntB = 0;
     int64_t supA = 0, supB = 0;
@@ -490,6 +484,45 @@ static int fip_proof1_ab_equivalence(void)
               rA && rB && strcmp(sha3A, sha3B) == 0);
     if (rA && rB && strcmp(sha3A, sha3B) != 0)
         printf("  >> durable=%s inram=%s\n", sha3A, sha3B);
+    return failures;
+}
+
+static int fip_proof1_ab_equivalence(void)
+{
+    int failures = 0;
+    printf("\n=== fold_inram_crash_proof: (1) durable-vs-INRAM A/B "
+           "equivalence over a real %d-block regtest fold ===\n", FIP_N_BLOCKS);
+
+    char dirA[256], dirB[256];
+    test_fmt_tmpdir(dirA, sizeof(dirA), "fold_inram_ab", "durable");
+    test_fmt_tmpdir(dirB, sizeof(dirB), "fold_inram_ab", "inram");
+    char resA[320], resB[320];
+    snprintf(resA, sizeof(resA), "%s.result", dirA);
+    snprintf(resB, sizeof(resB), "%s.result", dirB);
+    unlink(resA);
+    unlink(resB);
+
+    pid_t pidA = fork();
+    if (pidA < 0) { perror("fork"); return ++failures; }
+    if (pidA == 0) _exit(fip_ab_leg_child(dirA, resA, false) ? 0 : 1);
+
+    pid_t pidB = fork();
+    if (pidB < 0) {
+        perror("fork");
+        waitpid(pidA, NULL, 0);
+        return ++failures;
+    }
+    if (pidB == 0) _exit(fip_ab_leg_child(dirB, resB, true) ? 0 : 1);
+
+    int stA = 0, stB = 0;
+    waitpid(pidA, &stA, 0);
+    waitpid(pidB, &stB, 0);
+    FIP_CHECK("leg A (ZCL_FOLD_INRAM=0, durable) fold completed",
+              WIFEXITED(stA) && WEXITSTATUS(stA) == 0);
+    FIP_CHECK("leg B (ZCL_FOLD_INRAM=1, overlay) fold completed",
+              WIFEXITED(stB) && WEXITSTATUS(stB) == 0);
+
+    failures += fip_ab_compare_results(resA, resB);
 
     test_rm_rf_recursive(dirA);
     test_rm_rf_recursive(dirB);
@@ -544,6 +577,121 @@ static bool fip_resumer_child(const char *dir, int n_blocks,
     return fip_write_result(&fx, n_blocks, result_path);
 }
 
+/* Terminal snapshot of one fold: the golden run every crash cycle must
+ * reproduce exactly. */
+struct fip_terminal {
+    char sha3[65];
+    uint64_t cnt;
+    int64_t sup;
+    int32_t app;
+};
+
+/* Fork the crasher, poll for its progress marker, SIGKILL it and reap it.
+ * Sets *killed_ok once the cycle has a reaped crasher and may resume. */
+static int fip_crash_kill_phase(int c, const char *dirC, const char *marker,
+                                int32_t kill_after, bool *killed_ok)
+{
+    int failures = 0;
+    *killed_ok = false;
+    pid_t pidC = fork();
+    if (pidC < 0) { perror("fork"); failures++; return failures; }
+    if (pidC == 0) {
+        bool ok = fip_crasher_child(dirC, FIP_N_BLOCKS, kill_after, marker);
+        _exit(ok ? 0 : 1);
+    }
+
+    bool saw_marker = false;
+    for (int p = 0; p < 5000; p++) {
+        struct stat st;
+        if (stat(marker, &st) == 0) { saw_marker = true; break; }
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 2 * 1000 * 1000L };
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    if (!saw_marker) {
+        printf("FAIL (cycle %d: progress marker never appeared within "
+               "budget)\n", c);
+        failures++;
+        kill(pidC, SIGKILL);
+        waitpid(pidC, NULL, 0);
+        test_rm_rf_recursive(dirC);
+        return failures;
+    }
+
+    if (kill(pidC, SIGKILL) != 0 && errno != ESRCH) {
+        perror("kill");
+        failures++;
+    }
+    int stC = 0;
+    if (waitpid(pidC, &stC, 0) != pidC) {
+        printf("FAIL (cycle %d: waitpid failed)\n", c);
+        failures++;
+        test_rm_rf_recursive(dirC);
+        return failures;
+    }
+    bool killed = WIFSIGNALED(stC) && WTERMSIG(stC) == SIGKILL;
+    FIP_CHECK("crasher terminated by SIGKILL (not a graceful exit)",
+              killed);
+    *killed_ok = true;
+    return failures;
+}
+
+/* Fork the fresh-process resumer over the crash-truncated datadir, compare
+ * its terminal against the golden one, then clean the cycle's paths up. */
+static int fip_crash_resume_phase(const char *dirC, const char *marker,
+                                  const char *resC,
+                                  const struct fip_terminal *golden)
+{
+    int failures = 0;
+    pid_t pidR = fork();
+    if (pidR < 0) {
+        perror("fork");
+        failures++;
+        test_rm_rf_recursive(dirC);
+        return failures;
+    }
+    if (pidR == 0) {
+        bool ok = fip_resumer_child(dirC, FIP_N_BLOCKS, resC);
+        _exit(ok ? 0 : 1);
+    }
+    int stR = 0;
+    waitpid(pidR, &stR, 0);
+    FIP_CHECK("resumer (fresh process) drove the fold to completion",
+              WIFEXITED(stR) && WEXITSTATUS(stR) == 0);
+
+    char sha3C[65] = {0};
+    uint64_t cntC = 0;
+    int64_t supC = 0;
+    int32_t appC = -1;
+    bool rC = fip_read_result(resC, sha3C, &cntC, &supC, &appC);
+    FIP_CHECK("resume result readable", rC);
+    FIP_CHECK("resume: applied-height == golden",
+              rC && appC == golden->app);
+    FIP_CHECK("resume: coins count == golden", rC && cntC == golden->cnt);
+    FIP_CHECK("resume: total supply == golden", rC && supC == golden->sup);
+    FIP_CHECK("resume: terminal snapshot SHA3 == golden (the "
+              "crash-ordering proof)",
+              rC && strcmp(sha3C, golden->sha3) == 0);
+    if (rC && strcmp(sha3C, golden->sha3) != 0)
+        printf("  >> golden=%s resumed=%s\n", golden->sha3, sha3C);
+
+    test_rm_rf_recursive(dirC);
+    unlink(marker);
+    unlink(resC);
+    return failures;
+}
+
+/* One crash cycle: kill the crasher, then resume and verify. A cycle whose
+ * kill phase failed skips the resume, as the failure paths always have. */
+static int fip_crash_cycle(int c, const char *dirC, const char *marker,
+                           const char *resC, int32_t kill_after,
+                           const struct fip_terminal *golden)
+{
+    bool killed_ok = false;
+    int failures = fip_crash_kill_phase(c, dirC, marker, kill_after, &killed_ok);
+    if (!killed_ok) return failures;
+    return failures + fip_crash_resume_phase(dirC, marker, resC, golden);
+}
+
 static int fip_proof2_crash_resume(void)
 {
     int failures = 0;
@@ -576,11 +724,9 @@ static int fip_proof2_crash_resume(void)
     FIP_CHECK("golden uninterrupted INRAM fold completed",
               WIFEXITED(stG) && WEXITSTATUS(stG) == 0);
 
-    char sha3G[65] = {0};
-    uint64_t cntG = 0;
-    int64_t supG = 0;
-    int32_t appG = -1;
-    bool rG = fip_read_result(resG, sha3G, &cntG, &supG, &appG);
+    struct fip_terminal golden = { .app = -1 };
+    bool rG = fip_read_result(resG, golden.sha3, &golden.cnt, &golden.sup,
+                              &golden.app);
     FIP_CHECK("golden result readable", rG);
 
     /* ZCL_FOLD_INRAM_FLUSH_EVERY=2 -> flush boundaries at applied-height
@@ -606,81 +752,8 @@ static int fip_proof2_crash_resume(void)
         printf("  fold_inram_crash_proof: cycle %d: SIGKILL %s\n",
                c, kill_labels[c]);
 
-        pid_t pidC = fork();
-        if (pidC < 0) { perror("fork"); failures++; continue; }
-        if (pidC == 0) {
-            bool ok = fip_crasher_child(dirC, FIP_N_BLOCKS, kill_points[c],
-                                        marker);
-            _exit(ok ? 0 : 1);
-        }
-
-        bool saw_marker = false;
-        for (int p = 0; p < 5000; p++) {
-            struct stat st;
-            if (stat(marker, &st) == 0) { saw_marker = true; break; }
-            struct timespec ts = { .tv_sec = 0, .tv_nsec = 2 * 1000 * 1000L };
-            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-        }
-        if (!saw_marker) {
-            printf("FAIL (cycle %d: progress marker never appeared within "
-                   "budget)\n", c);
-            failures++;
-            kill(pidC, SIGKILL);
-            waitpid(pidC, NULL, 0);
-            test_rm_rf_recursive(dirC);
-            continue;
-        }
-
-        if (kill(pidC, SIGKILL) != 0 && errno != ESRCH) {
-            perror("kill");
-            failures++;
-        }
-        int stC = 0;
-        if (waitpid(pidC, &stC, 0) != pidC) {
-            printf("FAIL (cycle %d: waitpid failed)\n", c);
-            failures++;
-            test_rm_rf_recursive(dirC);
-            continue;
-        }
-        bool killed = WIFSIGNALED(stC) && WTERMSIG(stC) == SIGKILL;
-        FIP_CHECK("crasher terminated by SIGKILL (not a graceful exit)",
-                  killed);
-
-        pid_t pidR = fork();
-        if (pidR < 0) {
-            perror("fork");
-            failures++;
-            test_rm_rf_recursive(dirC);
-            continue;
-        }
-        if (pidR == 0) {
-            bool ok = fip_resumer_child(dirC, FIP_N_BLOCKS, resC);
-            _exit(ok ? 0 : 1);
-        }
-        int stR = 0;
-        waitpid(pidR, &stR, 0);
-        FIP_CHECK("resumer (fresh process) drove the fold to completion",
-                  WIFEXITED(stR) && WEXITSTATUS(stR) == 0);
-
-        char sha3C[65] = {0};
-        uint64_t cntC = 0;
-        int64_t supC = 0;
-        int32_t appC = -1;
-        bool rC = fip_read_result(resC, sha3C, &cntC, &supC, &appC);
-        FIP_CHECK("resume result readable", rC);
-        FIP_CHECK("resume: applied-height == golden",
-                  rC && appC == appG);
-        FIP_CHECK("resume: coins count == golden", rC && cntC == cntG);
-        FIP_CHECK("resume: total supply == golden", rC && supC == supG);
-        FIP_CHECK("resume: terminal snapshot SHA3 == golden (the "
-                  "crash-ordering proof)",
-                  rC && strcmp(sha3C, sha3G) == 0);
-        if (rC && strcmp(sha3C, sha3G) != 0)
-            printf("  >> golden=%s resumed=%s\n", sha3G, sha3C);
-
-        test_rm_rf_recursive(dirC);
-        unlink(marker);
-        unlink(resC);
+        failures += fip_crash_cycle(c, dirC, marker, resC, kill_points[c],
+                                    &golden);
     }
 
     test_rm_rf_recursive(dirG);
