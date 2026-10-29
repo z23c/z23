@@ -2457,9 +2457,59 @@ static bool rlc_generation_ladder_ok(bool variants, const char *ztasks_sha3,
            strcmp(b->sha3, n2->sha3) != 0;
 }
 
+#if !defined(_WIN32)
+static bool rlc_snapshot_lease_setup(struct package_resident *app,
+                                     const char *root, char blocker[160])
+{
+    int n = snprintf(app->snapshot_directory, sizeof(app->snapshot_directory), "%s/snapshot", root);
+    if (n < 0 || (size_t)n >= sizeof(app->snapshot_directory) ||
+        mkdir(app->snapshot_directory, 0700) != 0) return false;
+    n = snprintf(blocker, 160, "%s/blocker", app->snapshot_directory);
+    int m = snprintf(app->snapshot_lease.path, sizeof(app->snapshot_lease.path), "%s/lease", root);
+    if (n < 0 || n >= 160 || m < 0 || (size_t)m >= sizeof(app->snapshot_lease.path)) return false;
+    int fd = open(blocker, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int lease_fd = open(app->snapshot_lease.path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || lease_fd < 0) {
+        if (fd >= 0) close(fd);
+        if (lease_fd >= 0) close(lease_fd);
+        return false;
+    }
+    close(fd);
+    close(lease_fd);
+    app->snapshot_lease.held = true;
+    return true;
+}
+
+static int rlc_snapshot_lease_cleanup(void)
+{
+    int failures = 0;
+    char root[128], blocker[160];
+    if (!test_mkdtemp(root, sizeof(root), "resident_lease")) return 1;
+    struct package_resident app;
+    package_resident_init(&app);
+    if (!rlc_snapshot_lease_setup(&app, root, blocker)) {
+        test_rm_rf_recursive(root);
+        return 1;
+    }
+    char lease_path[sizeof(app.snapshot_lease.path)];
+    memcpy(lease_path, app.snapshot_lease.path, sizeof(lease_path));
+    RLC_CHECK("failed snapshot cleanup retains lease", !package_resident_close(&app).ok &&
+              app.snapshot_lease.held && access(app.snapshot_lease.path, F_OK) == 0);
+    RLC_CHECK("retry removes snapshot then releases lease", unlink(blocker) == 0 &&
+              package_resident_close(&app).ok && !app.snapshot_lease.held &&
+              access(lease_path, F_OK) != 0 && errno == ENOENT);
+    test_rm_rf_recursive(root);
+    return failures;
+}
+#else
+static int rlc_snapshot_lease_cleanup(void) { return 0; }
+#endif
+
+
 int test_resident_launch_contract(void)
 {
     int failures = 0;
+    failures += rlc_snapshot_lease_cleanup();
     const struct zcl_command_spec *spec =
         zcl_command_registry_find(zcl_command_catalog(), RLC_LEAF, NULL);
 #if defined(_WIN32)

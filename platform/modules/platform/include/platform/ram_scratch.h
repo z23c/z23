@@ -61,6 +61,23 @@ struct platform_ram_scratch_lease {
 bool platform_ram_scratch_reserve(const char *root, uint64_t bytes,
                                   struct platform_ram_scratch_lease *out);
 
+/* Evaluates observed root facts only; it does not observe or reserve a path. */
+struct platform_ram_scratch_root_facts {
+    bool directory, owner, owner_private, tmpfs, noexec, readonly, free_inodes;
+};
+bool platform_ram_scratch_root_facts_admit(
+    const struct platform_ram_scratch_root_facts *facts);
+
+/* Locate the candidate private runtime root without changing the environment.
+ * An explicit ZCL_RAM_SCRATCH_ROOT takes precedence and is never bypassed. */
+bool platform_ram_scratch_private_root(char *out_path, size_t out_cap);
+
+/* Reserve only a private, executable Linux tmpfs with proven host and
+ * complete cgroup headroom. Unknown capacity refuses. The existing lease
+ * ledger and 8 GiB guard remain authoritative. */
+bool platform_ram_scratch_reserve_private(const char *root, uint64_t bytes,
+                                          struct platform_ram_scratch_lease *out);
+
 /* Give a held reservation back by unlinking its lease file. Safe on a zeroed
  * or already-released lease, where it does nothing. */
 void platform_ram_scratch_release(struct platform_ram_scratch_lease *lease);

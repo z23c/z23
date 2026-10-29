@@ -32,6 +32,13 @@
 #include "platform/os_proc.h"
 
 #include <stdatomic.h>
+#include <errno.h>
+#include <stdlib.h>
+#if defined(__linux__)
+#include <sys/stat.h>
+#include <sys/vfs.h>
+#include <linux/magic.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -420,4 +427,215 @@ int64_t os_proc_resident_kib(void)
     if (!os_proc_mem_read(&m) || m.rss_bytes < 0)
         return -1;
     return m.rss_bytes / 1024;
+}
+
+#if defined(__linux__)
+/* Read one complete control value. Truncation and I/O failures are unknown. */
+static bool os_proc_control(const char *dir, const char *name, char *out, size_t cap)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = fgets(out, (int)cap, f) != NULL && strchr(out, '\n') != NULL &&
+              fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (ok) os_proc_trim_newline(out);
+    return ok;
+}
+
+static bool os_proc_control_number(const char *dir, const char *name,
+                                   bool allow_max, uint64_t *out, bool *unlimited)
+{
+    char buf[64];
+    if (!os_proc_control(dir, name, buf, sizeof(buf))) return false;
+    *unlimited = false;
+    if (allow_max && strcmp(buf, "max") == 0) { *unlimited = true; return true; }
+    if (buf[0] < '0' || buf[0] > '9') return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(buf, &end, 10);
+    if (errno || !end || *end) return false;
+    *out = (uint64_t)value;
+    return true;
+}
+
+static bool os_proc_cgroup_missing(const char *root, const char *name)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+static bool os_proc_cgroup_path_valid(const char *path)
+{
+    if (!path || path[0] != '/' || strstr(path, "//") ||
+        strstr(path, "/../") || strstr(path, "/./")) return false;
+    size_t n = strlen(path);
+    return !(n >= 3 && strcmp(path + n - 3, "/..") == 0) &&
+           !(n >= 2 && strcmp(path + n - 2, "/.") == 0);
+}
+
+static bool os_proc_cgroup_leaf(const char *root, char *out, size_t cap)
+{
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f) return false;
+    char line[4096];
+    bool found = false, valid = true;
+    while (fgets(line, sizeof(line), f)) {
+        if (!strchr(line, '\n')) { valid = false; break; }
+        if (strncmp(line, "0::", 3) != 0) continue;
+        os_proc_trim_newline(line);
+        if (found || !os_proc_cgroup_path_valid(line + 3)) { valid = false; break; }
+        int n = snprintf(out, cap, "%s%s", root, line + 3);
+        if (n < 0 || (size_t)n >= cap) { valid = false; break; }
+        found = true;
+    }
+    if (ferror(f)) valid = false;
+    if (fclose(f) != 0) valid = false;
+    return valid && found;
+}
+
+static bool os_proc_cgroup_level(const char *dir, uint64_t *headroom)
+{
+    uint64_t current, high = UINT64_MAX, max = UINT64_MAX;
+    bool current_unlimited, high_unlimited, max_unlimited;
+    if (!os_proc_control_number(dir, "memory.current", false, &current, &current_unlimited) ||
+        !os_proc_control_number(dir, "memory.high", true, &high, &high_unlimited) ||
+        !os_proc_control_number(dir, "memory.max", true, &max, &max_unlimited)) return false;
+    uint64_t limit = high < max ? high : max;
+    if (!high_unlimited || !max_unlimited) {
+        uint64_t available = current < limit ? limit - current : 0;
+        if (available < *headroom) *headroom = available;
+    }
+    return true;
+}
+#endif
+
+/* cgroup.type and cgroup.events are CFTYPE_NOT_ON_ROOT in Linux. A
+ * namespace-hidden nonroot still has them; absence must be exact ENOENT.
+ * This shape is only meaningful on the separately verified cgroup2 mount. */
+bool os_proc_cgroup_root_controls_match(const char *root)
+{
+#if defined(__linux__)
+    char controls[1024];
+    if (!root || !os_proc_control(root, "cgroup.controllers", controls, sizeof(controls)) ||
+        !os_proc_cgroup_missing(root, "cgroup.type") ||
+        !os_proc_cgroup_missing(root, "cgroup.events")) return false;
+    char *save = NULL;
+    for (char *token = strtok_r(controls, " ", &save); token;
+         token = strtok_r(NULL, " ", &save))
+        if (strcmp(token, "memory") == 0) return true;
+    return false;
+#else
+    (void)root;
+    return false;
+#endif
+}
+
+#if defined(__linux__)
+static bool os_proc_cgroup_pid_line(const char *line, uint64_t *pid)
+{
+    if (line[0] < '0' || line[0] > '9') return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(line, &end, 10);
+    if (errno || !end || strcmp(end, "\n") != 0 || value == 0) return false;
+    *pid = (uint64_t)value;
+    return true;
+}
+#endif
+
+bool os_proc_cgroup_contains_pid(const char *dir, uint64_t pid)
+{
+#if defined(__linux__)
+    if (!dir || !pid) return false;
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/cgroup.procs", dir);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[32];
+    size_t bytes = 0;
+    bool found = false, valid = true;
+    while (fgets(line, sizeof(line), f)) {
+        bytes += strlen(line);
+        uint64_t value;
+        if (bytes > 65536u || !os_proc_cgroup_pid_line(line, &value)) {
+            valid = false;
+            break;
+        }
+        if (value == pid) found = true;
+    }
+    if (ferror(f)) valid = false;
+    if (fclose(f) != 0) valid = false;
+    return valid && found;
+#else
+    (void)dir; (void)pid;
+    return false;
+#endif
+}
+
+#if defined(__linux__)
+static bool os_proc_cgroup_walk_levels(const char *root, char *resolved,
+                                        uint64_t *out)
+{
+    size_t root_len = strlen(root);
+    if (strncmp(root, resolved, root_len) != 0 ||
+        (resolved[root_len] != '\0' && resolved[root_len] != '/')) return false;
+    struct stat root_stat;
+    if (stat(root, &root_stat) != 0) return false;
+    uint64_t headroom = UINT64_MAX;
+    while (strcmp(root, resolved) != 0) {
+        struct stat st;
+        if (stat(resolved, &st) != 0 || st.st_dev != root_stat.st_dev ||
+            !os_proc_cgroup_level(resolved, &headroom)) return false;
+        char *slash = strrchr(resolved, '/');
+        if (!slash || (size_t)(slash - resolved) < root_len) return false;
+        *slash = '\0';
+    }
+    *out = headroom;
+    return true;
+}
+#endif
+
+bool os_proc_cgroup_memory_levels_read(const char *root_path, const char *leaf,
+                                        uint64_t *out)
+{
+    if (!out) return false;
+    *out = 0;
+#if defined(__linux__)
+    char root[4096], resolved[4096];
+    if (!root_path || !leaf || !realpath(root_path, root) ||
+        !realpath(leaf, resolved)) return false;
+    return os_proc_cgroup_walk_levels(root, resolved, out);
+#else
+    (void)root_path; (void)leaf;
+    return false;
+#endif
+}
+
+bool os_proc_cgroup_memory_headroom(uint64_t *out)
+{
+    if (!out) return false;
+    *out = 0;
+#if defined(__linux__)
+    char root[4096], leaf[4096];
+    uint64_t headroom;
+    struct statfs fs;
+    if (!realpath(OS_PROC_CGROUP_ROOT, root) || statfs(root, &fs) != 0 ||
+        (unsigned long)fs.f_type != CGROUP2_SUPER_MAGIC ||
+        !os_proc_cgroup_root_controls_match(root) ||
+        !os_proc_cgroup_leaf(root, leaf, sizeof(leaf)) ||
+        !os_proc_cgroup_contains_pid(leaf, (uint64_t)getpid()) ||
+        !os_proc_cgroup_memory_levels_read(root, leaf, &headroom) ||
+        !os_proc_cgroup_contains_pid(leaf, (uint64_t)getpid())) return false;
+    *out = headroom;
+    return true;
+#else
+    return false;
+#endif
 }

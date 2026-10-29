@@ -97,15 +97,16 @@ static bool temp_directory_publish_path(char *out_path, size_t out_cap,
     return false;
 }
 
-bool platform_temp_directory_create(const char *name_prefix, char *out_path,
-                                    size_t out_cap)
+static bool temp_directory_create_under(const char *root, const char *name_prefix,
+                                        char *out_path, size_t out_cap)
 {
     if (!temp_directory_arguments_valid(name_prefix, out_path, out_cap)) {
         errno = EINVAL;
         return false;
     }
     char base[TEMP_DIRECTORY_BASE_MAX];
-    if (!temp_directory_base(base, sizeof(base))) {
+    int copied = root ? snprintf(base, sizeof(base), "%s", root) : -1;
+    if (copied < 0 || (size_t)copied >= sizeof(base)) {
         errno = ENOENT;
         return false;
     }
@@ -147,4 +148,38 @@ bool platform_temp_directory_create(const char *name_prefix, char *out_path,
     }
     errno = EEXIST;
     return false;
+}
+
+bool platform_temp_directory_create(const char *name_prefix, char *out_path,
+                                    size_t out_cap)
+{
+    if (!temp_directory_arguments_valid(name_prefix, out_path, out_cap)) {
+        errno = EINVAL;
+        return false;
+    }
+    char base[TEMP_DIRECTORY_BASE_MAX];
+    if (!temp_directory_base(base, sizeof(base))) {
+        if (out_path && out_cap) out_path[0] = '\0';
+        errno = ENOENT;
+        return false;
+    }
+    return temp_directory_create_under(base, name_prefix, out_path, out_cap);
+}
+
+bool platform_temp_directory_create_under(const char *root, const char *name_prefix,
+                                          char *out_path, size_t out_cap)
+{
+#if defined(_WIN32)
+    bool absolute = root && ((strlen(root) >= 3 && root[1] == ':' &&
+                    (root[2] == '\\' || root[2] == '/')) ||
+                    (root[0] == '\\' && root[1] == '\\'));
+#else
+    bool absolute = root && root[0] == '/';
+#endif
+    if (!absolute) {
+        if (out_path && out_cap) out_path[0] = '\0';
+        errno = EINVAL;
+        return false;
+    }
+    return temp_directory_create_under(root, name_prefix, out_path, out_cap);
 }

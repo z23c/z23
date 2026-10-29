@@ -146,6 +146,24 @@ const char *os_proc_environment_string(enum os_proc_environment environment);
  * installed, returns a copy of it and always true. */
 bool os_proc_mem_read(struct os_proc_mem *out);
 
+/* Check root-only control-file shape; this does not authenticate the
+ * filesystem or establish a complete hierarchy on its own. */
+bool os_proc_cgroup_root_controls_match(const char *root);
+
+/* Check one bounded cgroup.procs listing for an exact PID. This observes
+ * the supplied file only; it does not authenticate a hierarchy. */
+bool os_proc_cgroup_contains_pid(const char *dir, uint64_t pid);
+
+/* Read level values in an already verified hierarchy; this does not prove
+ * its root is complete or its files are kernel controls. */
+bool os_proc_cgroup_memory_levels_read(const char *root, const char *leaf,
+                                        uint64_t *out);
+
+/* Conservative Linux cgroup-v2 memory headroom, including all ancestors.
+ * False means the complete hierarchy or a value could not be proven.
+ * UINT64_MAX denotes all applicable limits are explicitly unlimited. */
+bool os_proc_cgroup_memory_headroom(uint64_t *out);
+
 /* Resident set in KiB (Linux: /proc/self/statm), -1 on failure. */
 int64_t os_proc_resident_kib(void);
 

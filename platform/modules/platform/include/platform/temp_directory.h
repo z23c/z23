@@ -42,4 +42,9 @@
 bool platform_temp_directory_create(const char *name_prefix, char *out_path,
                                     size_t out_cap);
 
+/* Create under an explicit absolute root, with the same private ownership
+ * and failure semantics as platform_temp_directory_create(). */
+bool platform_temp_directory_create_under(const char *root, const char *name_prefix,
+                                          char *out_path, size_t out_cap);
+
 #endif

@@ -25,7 +25,10 @@
 
 #include "test/test_core.h"
 #include "platform/allocator_compat.h"
+#include "platform/disk_space.h"
 #include "platform/os_proc.h"
+#include "platform/ram_scratch.h"
+#include "platform/temp_directory.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -38,6 +41,10 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <dirent.h>
+#include <sys/file.h>
 #endif
 
 #define OSPROC_CHECK(name, expr) do { \
@@ -708,6 +715,272 @@ static int os_proc_arena_cap_default_checks(void)
     return failures;
 }
 
+#if defined(__linux__)
+static bool os_proc_test_control(const char *dir, const char *name, const char *value)
+{
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(value, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool os_proc_test_level(const char *dir, const char *current,
+                               const char *high, const char *max)
+{
+    return os_proc_test_control(dir, "memory.current", current) &&
+           os_proc_test_control(dir, "memory.high", high) &&
+           os_proc_test_control(dir, "memory.max", max);
+}
+
+static int os_proc_cgroup_levels_values(const char *root, const char *parent,
+                                         const char *leaf)
+{
+    int failures = 0;
+    uint64_t headroom = 0;
+    OSPROC_CHECK("tight parent bounds generous child",
+        os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == 10);
+    OSPROC_CHECK("explicit max is unlimited", os_proc_test_level(parent, "90\n", "max\n", "max\n") &&
+        os_proc_test_level(leaf, "5\n", "max\n", "max\n") &&
+        os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == UINT64_MAX);
+    OSPROC_CHECK("exhausted parent gives zero", os_proc_test_level(parent, "101\n", "max\n", "100\n") &&
+        os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == 0);
+    return failures;
+}
+
+static int os_proc_cgroup_levels_refusals(const char *root, const char *parent,
+                                           const char *leaf)
+{
+    int failures = 0;
+    uint64_t headroom = 0;
+    OSPROC_CHECK("malformed limit is unknown", os_proc_test_control(parent, "memory.max", "12oops\n") &&
+        !os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == 0);
+    OSPROC_CHECK("overflow limit is unknown", os_proc_test_control(parent, "memory.max", "18446744073709551616\n") &&
+        !os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == 0);
+    char missing[PATH_MAX + 48];
+    (void)snprintf(missing, sizeof(missing), "%s/memory.high", parent);
+    OSPROC_CHECK("missing limit is unknown", os_proc_test_control(parent, "memory.max", "100\n") &&
+        unlink(missing) == 0 && !os_proc_cgroup_memory_levels_read(root, leaf, &headroom) && headroom == 0);
+    return failures;
+}
+
+static int os_proc_cgroup_root_controls_checks(const char *root)
+{
+    int failures = 0;
+    char path[PATH_MAX + 32];
+    (void)snprintf(path, sizeof(path), "%s/cgroup.type", root);
+    OSPROC_CHECK("root controls prove only root-shaped fixture",
+        os_proc_test_control(root, "cgroup.controllers", "cpu memory\n") &&
+        os_proc_cgroup_root_controls_match(root));
+    OSPROC_CHECK("visible nonroot controls refuse root shape",
+        os_proc_test_control(root, "cgroup.type", "domain\n") &&
+        !os_proc_cgroup_root_controls_match(root));
+    OSPROC_CHECK("missing memory controller refuses root shape",
+        unlink(path) == 0 && os_proc_test_control(root, "cgroup.controllers", "cpu\n") &&
+        !os_proc_cgroup_root_controls_match(root));
+    (void)snprintf(path, sizeof(path), "%s/cgroup.controllers", root);
+    OSPROC_CHECK("missing controllers are unknown",
+        unlink(path) == 0 && !os_proc_cgroup_root_controls_match(root));
+    return failures;
+}
+
+static int os_proc_cgroup_membership_checks(const char *root)
+{
+    int failures = 0;
+    OSPROC_CHECK("root shape alone does not establish membership",
+        os_proc_test_control(root, "cgroup.controllers", "memory\n") &&
+        os_proc_cgroup_root_controls_match(root) &&
+        os_proc_test_control(root, "cgroup.procs", "123\n456\n") &&
+        !os_proc_cgroup_contains_pid(root, 789));
+    OSPROC_CHECK("exact member is found", os_proc_cgroup_contains_pid(root, 456));
+    OSPROC_CHECK("malformed membership listing refuses",
+        os_proc_test_control(root, "cgroup.procs", "456\n123x\n") &&
+        !os_proc_cgroup_contains_pid(root, 456));
+    return failures;
+}
+
+static int os_proc_cgroup_levels_fixture_checks(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], parent[PATH_MAX + 16], leaf[PATH_MAX + 32];
+    if (!test_mkdtemp(root, sizeof(root), "os_proc_levels")) return 1;
+    (void)snprintf(parent, sizeof(parent), "%s/parent", root);
+    (void)snprintf(leaf, sizeof(leaf), "%s/child", parent);
+    if (mkdir(parent, 0700) != 0 || mkdir(leaf, 0700) != 0 ||
+        !os_proc_test_level(parent, "90\n", "max\n", "100\n") ||
+        !os_proc_test_level(leaf, "5\n", "max\n", "1000\n")) {
+        test_rm_rf_recursive(root);
+        return 1;
+    }
+    failures += os_proc_cgroup_root_controls_checks(root);
+    failures += os_proc_cgroup_membership_checks(root);
+    failures += os_proc_cgroup_levels_values(root, parent, leaf);
+    failures += os_proc_cgroup_levels_refusals(root, parent, leaf);
+    test_rm_rf_recursive(root);
+    return failures;
+}
+#else
+static int os_proc_cgroup_levels_fixture_checks(void) { return 0; }
+#endif
+
+static int os_proc_scratch_metadata_checks(void)
+{
+    int failures = 0;
+    struct platform_ram_scratch_root_facts f = {
+        .directory = true, .owner = true, .owner_private = true,
+        .tmpfs = true, .free_inodes = true
+    };
+    OSPROC_CHECK("qualified scratch metadata", platform_ram_scratch_root_facts_admit(&f));
+    f.noexec = true;
+    OSPROC_CHECK("noexec root refused", !platform_ram_scratch_root_facts_admit(&f));
+    f.noexec = false; f.tmpfs = false;
+    OSPROC_CHECK("non-tmpfs root refused", !platform_ram_scratch_root_facts_admit(&f));
+    f.tmpfs = true; f.owner_private = false;
+    OSPROC_CHECK("shared root refused", !platform_ram_scratch_root_facts_admit(&f));
+    f.owner_private = true; f.owner = false;
+    OSPROC_CHECK("foreign owner refused", !platform_ram_scratch_root_facts_admit(&f));
+    f.owner = true; f.readonly = true;
+    OSPROC_CHECK("readonly root refused", !platform_ram_scratch_root_facts_admit(&f));
+    f.readonly = false; f.free_inodes = false;
+    OSPROC_CHECK("exhausted root refused", !platform_ram_scratch_root_facts_admit(&f));
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int os_proc_scratch_private_checks(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], path[PATH_MAX + 32], made[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof(root), "private_scratch")) return 1;
+    int n = snprintf(path, sizeof(path), "%s/.z23-leases", root);
+    if (n < 0 || (size_t)n >= sizeof(path) || chmod(root, 0777) != 0) {
+        test_rm_rf_recursive(root);
+        return 1;
+    }
+    struct platform_ram_scratch_lease lease = {0};
+    OSPROC_CHECK("unsafe root refuses before lease creation",
+        !platform_ram_scratch_reserve_private(root, 1, &lease) && !lease.held &&
+        access(path, F_OK) != 0);
+    OSPROC_CHECK("oversized reservation refuses without overflow",
+        !platform_ram_scratch_reserve(root, UINT64_MAX, &lease) && !lease.held);
+    OSPROC_CHECK("explicit temp root creates a private child",
+        platform_temp_directory_create_under(root, "child-", made, sizeof(made)) &&
+        rmdir(made) == 0);
+    OSPROC_CHECK("relative temp root refuses", !platform_temp_directory_create_under(
+        "relative", "child-", made, sizeof(made)) && made[0] == '\0');
+    test_rm_rf_recursive(root);
+    return failures;
+}
+#else
+static int os_proc_scratch_private_checks(void) { return 0; }
+#endif
+
+#if defined(__linux__)
+static bool os_proc_scratch_live_capacity(const char *root)
+{
+    struct os_proc_mem memory;
+    uint64_t cgroup, free_bytes;
+    const uint64_t required = PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES + 4096u;
+    return os_proc_mem_read(&memory) && memory.sys_avail_bytes >= 0 &&
+        (uint64_t)memory.sys_avail_bytes >= required &&
+        os_proc_cgroup_memory_headroom(&cgroup) && cgroup >= required &&
+        platform_disk_space_available(root, &free_bytes) && free_bytes >= required;
+}
+
+static bool os_proc_scratch_only_lease(const char *root, const char *expected)
+{
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/.z23-leases", root);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool found = false, ok = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) { if (errno) ok = false; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+            !strcmp(entry->d_name, "lock")) continue;
+        if (strcmp(entry->d_name, expected) || found) { ok = false; break; }
+        found = true;
+    }
+    if (closedir(dir) != 0) ok = false;
+    return ok && found;
+}
+
+static int os_proc_scratch_low_memory_check(const char *root, const char *lease_path)
+{
+    int failures = 0;
+    struct os_proc_mem memory;
+    if (!os_proc_mem_read(&memory)) return 1;
+    memory.sys_avail_bytes = 0;
+    os_proc_mem_set_override(&memory);
+    struct platform_ram_scratch_lease denied = {0};
+    bool refused = !platform_ram_scratch_reserve_private(root, 4096, &denied);
+    os_proc_mem_set_override(NULL);
+    const char *name = strrchr(lease_path, '/');
+    OSPROC_CHECK("low host memory refuses without another lease", refused && !denied.held &&
+        name && os_proc_scratch_only_lease(root, name + 1));
+    platform_ram_scratch_release(&denied);
+    return failures;
+}
+
+static int os_proc_scratch_contention_check(const char *root)
+{
+    int failures = 0;
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/.z23-leases/lock", root);
+    if (n < 0 || (size_t)n >= sizeof(path)) return 1;
+    int fd = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); return 1; }
+    struct platform_ram_scratch_lease denied = {0};
+    bool refused = !platform_ram_scratch_reserve_private(root, 4096, &denied);
+    bool unlocked = flock(fd, LOCK_UN) == 0;
+    bool closed = close(fd) == 0;
+    OSPROC_CHECK("contended private lease refuses without waiting",
+        refused && !denied.held && unlocked && closed);
+    platform_ram_scratch_release(&denied);
+    return failures;
+}
+
+static int os_proc_scratch_live_lease_checks(void)
+{
+    int failures = 0;
+    char base[PLATFORM_TEMP_PATH_MAX], root[PLATFORM_TEMP_PATH_MAX];
+    if (!platform_ram_scratch_private_root(base, sizeof(base))) {
+        printf("os_proc: private tmpfs lease not exercised (no qualified runtime root)\n");
+        return 0;
+    }
+    if (!platform_temp_directory_create_under(base, "z23-lease-test-", root, sizeof(root))) return 1;
+    struct platform_ram_scratch_lease lease = {0};
+    if (!os_proc_scratch_live_capacity(root)) {
+        printf("os_proc: private tmpfs lease not exercised (headroom unavailable)\n");
+        test_rm_rf_recursive(root);
+        return 0;
+    }
+    if (!platform_ram_scratch_reserve_private(root, 4096, &lease)) {
+        printf("os_proc: qualified private lease... FAIL\n");
+        test_rm_rf_recursive(root);
+        return 1;
+    }
+    char path[sizeof(lease.path)];
+    memcpy(path, lease.path, sizeof(path));
+    OSPROC_CHECK("qualified root creates a live private lease", lease.held && access(path, F_OK) == 0);
+    failures += os_proc_scratch_low_memory_check(root, path);
+    failures += os_proc_scratch_contention_check(root);
+    platform_ram_scratch_release(&lease);
+    OSPROC_CHECK("private lease release removes its file", !lease.held &&
+        access(path, F_OK) != 0 && errno == ENOENT);
+    test_rm_rf_recursive(root);
+    return failures;
+}
+#else
+static int os_proc_scratch_live_lease_checks(void) { return 0; }
+#endif
+
 int test_os_proc(void);
 int test_os_proc(void)
 {
@@ -717,6 +990,10 @@ int test_os_proc(void)
     failures += os_proc_open_fd_count_checks();
     failures += os_proc_image_cloexec_checks();
     failures += os_proc_cgroup_stat_fixture_checks();
+    failures += os_proc_cgroup_levels_fixture_checks();
+    failures += os_proc_scratch_metadata_checks();
+    failures += os_proc_scratch_private_checks();
+    failures += os_proc_scratch_live_lease_checks();
     failures += os_proc_preserved_report_fd_checks();
     failures += os_proc_seccomp_filters_parse_checks();
     failures += os_proc_self_exe_open_path_checks();

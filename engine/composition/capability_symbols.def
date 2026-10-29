@@ -554,6 +554,7 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_serialize", CAP_FS_READ,
 ZCL_CAPABILITY_SYMBOL("sqlite3_table_column_metadata", CAP_FS_READ,
     "Reads the schema.")
 ZCL_CAPABILITY_SYMBOL("stat", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("statfs", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("statvfs", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("__fread_chk", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("__isoc23_fscanf", CAP_FS_READ,

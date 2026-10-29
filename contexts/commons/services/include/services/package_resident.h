@@ -5,6 +5,7 @@
 
 #include "base/result.h"
 #include "platform/resident_launch.h"
+#include "platform/ram_scratch.h"
 #include "services/package_lifecycle.h"
 
 /* This is an inert acceptance projection, never an execution grant. The
@@ -43,6 +44,7 @@ struct package_resident {
     struct resident_launch launch;
     struct resident_receipt receipt;
     struct resident_startup startup;
+    struct platform_ram_scratch_lease snapshot_lease;
     char snapshot_directory[128];
     char snapshot_image[160];
 };

@@ -2,6 +2,7 @@
  * purpose: own installed app snapshot lifetime around the existing resident seam. */
 #include "services/package_resident.h"
 #include "platform/os_proc.h"
+#include "platform/temp_directory.h"
 #include "base/hex.h"
 #include "sha3/sha3.h"
 
@@ -39,6 +40,7 @@ struct zcl_result package_resident_close(struct package_resident *app)
     if (app->snapshot_directory[0] && rmdir(app->snapshot_directory) != 0 && errno != ENOENT)
         return ZCL_ERR(-1, "resident-snapshot-directory-cleanup: %s", strerror(errno));
     app->snapshot_directory[0] = 0;
+    platform_ram_scratch_release(&app->snapshot_lease);
 #endif
     return ZCL_OK;
 }
@@ -118,6 +120,22 @@ static bool pr_snapshot_fill(int in, int target, int dir, uint64_t size, bool cl
         fchmod(target, 0500) == 0 && fsync(target) == 0 && fsync(dir) == 0;
 }
 
+static bool pr_snapshot_directory(struct package_resident *app, uint64_t size)
+{
+    char root[128];
+    if (platform_ram_scratch_private_root(root, sizeof(root)) &&
+        platform_ram_scratch_reserve_private(root, size, &app->snapshot_lease)) {
+        if (platform_temp_directory_create_under(root, "z23-resident-",
+                app->snapshot_directory, sizeof(app->snapshot_directory))) return true;
+        platform_ram_scratch_release(&app->snapshot_lease);
+    }
+    (void)snprintf(app->snapshot_directory, sizeof(app->snapshot_directory),
+                   "/tmp/z23-resident-XXXXXX");
+    if (mkdtemp(app->snapshot_directory)) return true;
+    app->snapshot_directory[0] = 0;
+    return false;
+}
+
 static bool pr_snapshot(struct package_resident *app,
                         struct resident_launch_accepted *accepted)
 {
@@ -130,9 +148,7 @@ static bool pr_snapshot(struct package_resident *app,
         !platform_positioned_file_snapshot(&source, &before) ||
         before.size != app->artifact.accepted.image_size || before.size > 64u * 1024u * 1024u)
         goto done;
-    (void)snprintf(app->snapshot_directory, sizeof(app->snapshot_directory),
-                   "/tmp/z23-resident-XXXXXX");
-    if (!mkdtemp(app->snapshot_directory)) { app->snapshot_directory[0] = 0; goto done; }
+    if (!pr_snapshot_directory(app, before.size)) goto done;
     dir = open(app->snapshot_directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dir < 0) goto done;
     (void)snprintf(app->snapshot_image, sizeof(app->snapshot_image), "%s/image", app->snapshot_directory);
