@@ -36,14 +36,10 @@ static bool trees_equal_by_root(const struct incremental_merkle_tree *a,
     return memcmp(ra.data, rb.data, 32) == 0;
 }
 
-int test_sapling_tree(void)
+static int sapling_tree_round_trip_case(void)
 {
     int failures = 0;
     char path[128];
-
-    /* Each case uses its own temp path; tmpnam is deprecated but
-     * we only need uniqueness within a single test run. Use mkstemp
-     * for a proper fd then close+unlink so we can own the filename. */
 
     printf("sapling_tree checkpoint round-trip (flush then load) ... ");
     {
@@ -100,6 +96,13 @@ int test_sapling_tree(void)
         printf("OK\n");
 done_round_trip:;
     }
+    return failures;
+}
+
+static int sapling_tree_delta_replay_case(void)
+{
+    int failures = 0;
+    char path[128];
 
     printf("sapling_tree checkpoint + delta-replay root equivalence ... ");
     {
@@ -179,6 +182,13 @@ done_round_trip:;
         printf("OK\n");
 done_delta:;
     }
+    return failures;
+}
+
+static int sapling_tree_corruption_case(void)
+{
+    int failures = 0;
+    char path[128];
 
     printf("sapling_tree checkpoint corruption detected on load ... ");
     {
@@ -238,6 +248,12 @@ done_delta:;
         unlink(path);
 done_corrupt:;
     }
+    return failures;
+}
+
+static int sapling_tree_missing_file_case(void)
+{
+    int failures = 0;
 
     printf("sapling_tree checkpoint missing file returns false ... ");
     {
@@ -253,6 +269,13 @@ done_corrupt:;
             printf("OK\n");
         }
     }
+    return failures;
+}
+
+static int sapling_tree_load_speed_case(void)
+{
+    int failures = 0;
+    char path[128];
 
     printf("sapling_tree checkpoint load is <1s for 10k leaves ... ");
     {
@@ -303,6 +326,22 @@ done_corrupt:;
         }
 done_speed:;
     }
+    return failures;
+}
+
+int test_sapling_tree(void)
+{
+    int failures = 0;
+
+    /* Each case uses its own temp path; tmpnam is deprecated but
+     * we only need uniqueness within a single test run. Use mkstemp
+     * for a proper fd then close+unlink so we can own the filename. */
+
+    failures += sapling_tree_round_trip_case();
+    failures += sapling_tree_delta_replay_case();
+    failures += sapling_tree_corruption_case();
+    failures += sapling_tree_missing_file_case();
+    failures += sapling_tree_load_speed_case();
 
     return failures;
 }
