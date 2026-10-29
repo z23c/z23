@@ -352,14 +352,9 @@ static void sv_teardown(const char *dir, struct main_state *ms,
     ClearDataDirCache();
 }
 
-int test_script_validate_stage(void);
-int test_script_validate_stage(void)
+static int sv_case_happy(void)
 {
-    printf("\n=== script_validate_stage tests ===\n");
     int failures = 0;
-
-    blocker_module_init();
-
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("happy: setup",
@@ -383,7 +378,12 @@ int test_script_validate_stage(void)
                  script_validate_stage_step_once() == JOB_IDLE);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_script_invalid(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("script_invalid: setup",
@@ -402,7 +402,12 @@ int test_script_validate_stage(void)
         SV_CHECK("script_invalid: first vin 0", vin == 0);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_upstream_failed(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("upstream_failed: setup",
@@ -419,7 +424,12 @@ int test_script_validate_stage(void)
                  strcmp(status, "upstream_failed") == 0);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_upstream_storage(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("upstream_storage: setup",
@@ -446,7 +456,12 @@ int test_script_validate_stage(void)
                              sizeof(status), &vin));
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_internal_error(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("internal_error: setup",
@@ -469,7 +484,12 @@ int test_script_validate_stage(void)
                  !row && ok == -1);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_torn_hold_signal(void)
+{
+    int failures = 0;
     {
         /* STEP-2A torn-coin remedy (never-stuck-invariant-0): the real stage
          * HOLDS on a torn pre-anchor coin (no terminal ok=0 row), but it MUST
@@ -541,7 +561,12 @@ int test_script_validate_stage(void)
         SV_CHECK("torn_hold_signal: pending signal CLEARED on resolve", !pf2);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_internal_error_dry_run(void)
+{
+    int failures = 0;
     {
         /* Regression for wedge-retry: a transient internal_error dry-run
          * (missing prevout / sapling-ctx race) must report
@@ -561,7 +586,12 @@ int test_script_validate_stage(void)
                  !dry.ok && dry.internal_error);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_script_invalid_dry_run(void)
+{
+    int failures = 0;
     /* FIX A regression pin (wedge-retry, stage_repair_reducer_frontier_coin.c
      * maybe_repair_stale_script): the repair discriminates a TRANSIENT
      * internal_error (ok=0 + internal_error=true → one-shot rewind, retriable)
@@ -592,7 +622,12 @@ int test_script_validate_stage(void)
                  !dry.internal_error);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_bounded_created(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct synth_chain_sv sc;
         test_fmt_tmpdir(dir, sizeof(dir), "script_validate",
@@ -621,7 +656,12 @@ int test_script_validate_stage(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int sv_case_bounded_future_coin(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct synth_chain_sv sc;
         test_fmt_tmpdir(dir, sizeof(dir), "script_validate",
@@ -665,7 +705,12 @@ int test_script_validate_stage(void)
         progress_store_close();
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
 
+static int sv_case_idle(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("idle: setup",
@@ -681,14 +726,24 @@ int test_script_validate_stage(void)
                  script_validate_stage_cursor() == 1);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_guard(void)
+{
+    int failures = 0;
     {
         SV_CHECK("guard: step_once with no init returns IDLE",
                  script_validate_stage_step_once() == JOB_IDLE);
         SV_CHECK("guard: init(NULL) rejected",
                  !script_validate_stage_init(NULL));
     }
+    return failures;
+}
 
+static int sv_case_dump(void)
+{
+    int failures = 0;
     {
         char dir[256]; struct main_state ms; struct synth_chain_sv sc;
         SV_CHECK("dump: setup",
@@ -710,7 +765,12 @@ int test_script_validate_stage(void)
         json_free(&v);
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_upstream_log_hole(void)
+{
+    int failures = 0;
     /* stall-taxonomy audit: stage_upstream_log_hole_note. A durable
      * hole (row deleted below the already-advanced upstream cursor — the
      * residue of a noncanonical-row purge in script_validate_log +
@@ -774,7 +834,12 @@ int test_script_validate_stage(void)
                  !blocker_exists("script_validate.upstream_log_hole"));
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_body_read_failed(void)
+{
+    int failures = 0;
     /* lane/stall-taxonomy audit: stage_body_read_hold. body_persist already
      * verified this body's hash+merkle root before advancing (BLOCK_HAVE_
      * DATA set), so a later stage_read_block() failure here is on-disk
@@ -823,7 +888,12 @@ int test_script_validate_stage(void)
                  !blocker_exists("script_validate.body_read_failed"));
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_torn_cause(void)
+{
+    int failures = 0;
     {
         /* Lane E3, part 3 — downstream cause naming. A torn ANCESTOR body
          * (recorded by stage_repair_read_active_block_checked via the
@@ -890,7 +960,12 @@ int test_script_validate_stage(void)
         blocker_reset_for_testing();
         sv_teardown(dir, &ms, &sc);
     }
+    return failures;
+}
 
+static int sv_case_root_cause(void)
+{
+    int failures = 0;
     /* Root-cause chaining exemplar: script_validate's prevout_unresolved
      * defer path wires caused_by to an active body-availability blocker
      * (see util/blocker.h "Root-cause chaining" + sv_find_body_availability_
@@ -928,6 +1003,35 @@ int test_script_validate_stage(void)
         blocker_clear("utxo_apply.body_read_failed");
         blocker_clear("body_persist.body_read_failed");
     }
+    return failures;
+}
+
+int test_script_validate_stage(void);
+int test_script_validate_stage(void)
+{
+    printf("\n=== script_validate_stage tests ===\n");
+    int failures = 0;
+
+    blocker_module_init();
+
+    failures += sv_case_happy();
+    failures += sv_case_script_invalid();
+    failures += sv_case_upstream_failed();
+    failures += sv_case_upstream_storage();
+    failures += sv_case_internal_error();
+    failures += sv_case_torn_hold_signal();
+    failures += sv_case_internal_error_dry_run();
+    failures += sv_case_script_invalid_dry_run();
+    failures += sv_case_bounded_created();
+    failures += sv_case_bounded_future_coin();
+    failures += sv_case_idle();
+    failures += sv_case_guard();
+    failures += sv_case_dump();
+    failures += sv_case_upstream_log_hole();
+    failures += sv_case_body_read_failed();
+    failures += sv_case_torn_cause();
+    failures += sv_case_root_cause();
+
 
     printf("script_validate_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
