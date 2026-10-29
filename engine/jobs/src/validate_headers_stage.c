@@ -310,17 +310,10 @@ static void vh_recheck_rollback(sqlite3 *db, bool batched)
     }
 }
 
-static job_result_t recheck_failed_rows(struct main_state *ms,
-                                          sqlite3 *db,
-                                          uint64_t validated_cursor)
+/* Anchor the recheck scan start at the durable executable frontier; false when
+ * a frontier cursor cannot be read (the caller reports the db fault). */
+static bool vh_recheck_anchor_start(sqlite3 *db, int64_t *start)
 {
-    if (!ms || !db || validated_cursor == 0)
-        return JOB_IDLE;
-
-    int64_t start = atomic_load(&g_failure_recheck_cursor);
-    if (start < 0)
-        start = 0;
-
     /* Anchor the scan at the live pipeline frontier so stale reindex-artifact
      * ok=0 rows (cold-imported solutionless headers far below the tip) can
      * never pin the bounded (LIMIT VH_BATCH_SIZE) batch before it reaches the
@@ -343,8 +336,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
                                        &fin_cursor) ||
             !stage_cursor_read_or_zero(db, "body_fetch", STAGE_NAME,
                                        &bf_cursor))
-            return vh_db_fault(sqlite3_extended_errcode(db), (int)start,
-                               "recheck frontier cursor read");
+            return false;
         int64_t fin_cur = (int64_t)fin_cursor;
         int64_t bf_cur  = (int64_t)bf_cursor;
         int64_t frontier = fin_cur;
@@ -352,8 +344,194 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
             frontier = bf_cur;
         atomic_store(&g_last_recheck_frontier, frontier);
         if (frontier > 0)
-            start = frontier;
+            *start = frontier;
     }
+    return true;
+}
+
+/* Prepare + bind the bounded failed-row recheck query; returns the sqlite rc
+ * (the caller logs and releases the lock on failure). */
+static int vh_recheck_prepare(sqlite3 *db, int64_t start,
+                              uint64_t validated_cursor, sqlite3_stmt **stmt)
+{
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT height, COALESCE(fail_reason,'') FROM validate_headers_log"
+        " WHERE ok=0 AND height>=? AND height<?"
+        " AND fail_reason IN (?, ?)"
+        " ORDER BY height ASC LIMIT ?",
+        -1, stmt, NULL);
+    if (rc != SQLITE_OK)
+        return rc;
+    sqlite3_bind_int64(*stmt, 1, (sqlite3_int64)start);
+    sqlite3_bind_int64(*stmt, 2, (sqlite3_int64)validated_cursor);
+    sqlite3_bind_text(*stmt, 3, STAGE_REPAIR_SOLUTIONLESS_REASON, -1,
+                      SQLITE_STATIC);
+    sqlite3_bind_text(*stmt, 4, "header-source-hash-mismatch", -1,
+                      SQLITE_STATIC);
+    sqlite3_bind_int(*stmt, 5, VH_BATCH_SIZE * 64);
+    return SQLITE_OK;
+}
+
+/* Triage one selected failed row: resolve its block, skip non-candidates, pin
+ * the lowest unresolved height, and bind a job when it is ready to recheck.
+ * Returns true when a job was bound at jobs[*n]. */
+static bool vh_recheck_collect_row(struct main_state *ms, sqlite3 *db,
+                                   int64_t h64, const char *reason,
+                                   struct vh_job *jobs, int *n,
+                                   int64_t *first_unresolved)
+{
+    struct block_index *bi = vh_resolve_bi(ms, (int)h64);
+    if (!bi || !bi->phashBlock) {
+        /* Transient resolve miss. SKIP this height rather than abort the
+         * whole pass; remember the lowest such height so the floor never
+         * advances past it (retried next pass). */
+        vh_window_miss_note((int)h64, "recheck");
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        if (*first_unresolved < 0)
+            *first_unresolved = h64;
+        return false;  // raw-return-ok:skipped-row-pinned-via-first-unresolved-and-retried
+    }
+    blocker_clear(VH_WINDOW_MISS_BLOCKER_ID);
+    if (!vh_failure_is_recheck_candidate(reason))
+        return false;  // raw-return-ok:skipped-row-pinned-via-first-unresolved-and-retried
+    if (!validate_headers_recheck_ready(db, (int)h64, bi, reason)) {
+        /* No exact solution bytes yet: the condition engine owns their
+         * backfill/refetch. Pin the lowest unresolved height and back off
+         * rather than claiming progress from an unchanged verdict. */
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        if (*first_unresolved < 0)
+            *first_unresolved = h64;
+        return false;  // raw-return-ok:skipped-row-pinned-via-first-unresolved-and-retried
+    }
+    vh_job_bind_block(db, &jobs[*n], bi, (int)h64);
+    (*n)++;
+    return true;
+}
+
+/* Lowest height among the repairable (solutionless) failures of a
+ * height-ascending job batch, or -1 when none. */
+static int64_t vh_lowest_repairable_failure(const struct vh_job *jobs, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!jobs[i].ok && vh_failure_is_repairable(jobs[i].reason))
+            return jobs[i].height;
+    return -1;
+}
+
+enum vh_recheck_write { VH_RW_OK, VH_RW_BLOCKED, VH_RW_LOG_FAULT };
+
+/* Mark and log every recheck job inside the open write transaction. On a
+ * failure the transaction is rolled back and unlocked here; VH_RW_LOG_FAULT
+ * reports the sqlite code and height through the out-parameters. */
+static enum vh_recheck_write vh_recheck_write_rows(sqlite3 *db,
+                                                   struct vh_job *jobs, int n,
+                                                   bool vh_batched,
+                                                   int *fault_rc,
+                                                   int *fault_height)
+{
+    for (int i = 0; i < n; i++) {
+        /* Recheck rows are pre-filtered to the repairable reasons (solutionless /
+         * source-hash-mismatch), so a stale BLOCK_FAILED mask on a now-passing
+         * header IS the serve-refusal class: pass clearable=true. This is the
+         * reachable repair (deliverable b) — clear the mask and flip the row to
+         * ok=1 once the backfilled solution makes the unchanged validator pass. */
+        if (jobs[i].ok &&
+            !vh_authoritative_mark(&jobs[i], true)) {
+            /* Still un-markable after the scoped clear (e.g. a NULL entry). Name
+             * ONE typed blocker (throttled) and back off JOB_IDLE — never
+             * the JOB_FATAL hot loop. */
+            vh_mark_fail_note(jobs[i].height, jobs[i].mark_bi);
+            vh_recheck_rollback(db, vh_batched);
+            progress_store_tx_unlock();
+            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+            return VH_RW_BLOCKED;
+        }
+        if (!validate_headers_log_insert(db, jobs[i].height,
+                                         jobs[i].bi->phashBlock, jobs[i].ok,
+                                         jobs[i].reason)) {
+            *fault_rc = sqlite3_extended_errcode(db);
+            *fault_height = jobs[i].height;
+            vh_recheck_rollback(db, vh_batched);
+            progress_store_tx_unlock();
+            return VH_RW_LOG_FAULT;
+        }
+        if (jobs[i].ok)
+            atomic_fetch_add(&g_passed_total, 1);
+        else
+            atomic_fetch_add(&g_failed_total, 1);
+    }
+    return VH_RW_OK;
+}
+
+/* The in-process recheck floor, clamped to a non-negative height. */
+static int64_t vh_recheck_initial_start(void)
+{
+    int64_t start = atomic_load(&g_failure_recheck_cursor);
+    if (start < 0)
+        start = 0;
+    return start;
+}
+
+/* Floor to store when no job was selected: if every selected row was skipped
+ * (unresolvable), pin at the lowest skipped height. */
+static int64_t vh_recheck_idle_floor(int64_t first_unresolved,
+                                     uint64_t validated_cursor)
+{
+    return (first_unresolved >= 0) ? first_unresolved
+                                   : (int64_t)validated_cursor;
+}
+
+static int64_t vh_recheck_pick_floor(int64_t lowest_still_failing,
+                                     int64_t last_seen,
+                                     int64_t first_unresolved)
+{
+    int64_t new_floor = (lowest_still_failing >= 0)
+                        ? lowest_still_failing : (last_seen + 1);
+    /* Never advance the floor past a height skipped as unresolvable this pass —
+     * it must be retried on the next pass, not stepped over. */
+    if (first_unresolved >= 0 && new_floor > first_unresolved)
+        new_floor = first_unresolved;
+    return new_floor;
+}
+
+/* Step the recheck statement, triaging each row into jobs[]. Returns the last
+ * sqlite step rc; sets *range_bad (with the offending height in *last_seen)
+ * when a row height is outside the int32 range, leaving the statement open for
+ * the caller to finalize and log. */
+static int vh_recheck_scan_rows(struct main_state *ms, sqlite3 *db,
+                                sqlite3_stmt *stmt, struct vh_job *jobs,
+                                int *n, int64_t *last_seen,
+                                int64_t *first_unresolved, bool *range_bad)
+{
+    int rc = SQLITE_OK;
+    while (*n < VH_BATCH_SIZE &&
+           (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+        int64_t h64 = sqlite3_column_int64(stmt, 0);
+        const unsigned char *reason_txt = sqlite3_column_text(stmt, 1);
+        const char *reason = reason_txt ? (const char *)reason_txt : "";
+        *last_seen = h64;
+        if (h64 < 0 || h64 > INT32_MAX) {
+            *range_bad = true;
+            return rc;
+        }
+        vh_recheck_collect_row(ms, db, h64, reason, jobs, n,
+                               first_unresolved);
+    }
+    return rc;
+}
+
+static job_result_t recheck_failed_rows(struct main_state *ms,
+                                          sqlite3 *db,
+                                          uint64_t validated_cursor)
+{
+    if (!ms || !db || validated_cursor == 0)
+        return JOB_IDLE;
+
+    int64_t start = vh_recheck_initial_start();
+
+    if (!vh_recheck_anchor_start(db, &start))
+        return vh_db_fault(sqlite3_extended_errcode(db), (int)start,
+                           "recheck frontier cursor read");
     atomic_store(&g_last_recheck_start, start);
     atomic_store(&g_last_recheck_selected, 0);
 
@@ -362,12 +540,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
 
     progress_store_tx_lock();
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT height, COALESCE(fail_reason,'') FROM validate_headers_log"
-        " WHERE ok=0 AND height>=? AND height<?"
-        " AND fail_reason IN (?, ?)"
-        " ORDER BY height ASC LIMIT ?",
-        -1, &stmt, NULL);
+    int rc = vh_recheck_prepare(db, start, validated_cursor, &stmt);
     if (rc != SQLITE_OK) {
         progress_store_tx_unlock();
         /* De-storm: a stuck db connection re-hits this same prepare failure
@@ -382,67 +555,31 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
                       rc, (unsigned long long)reps);
         return vh_db_fault(rc, (int)start, "recheck query prepare");
     }
-    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)start);
-    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)validated_cursor);
-    sqlite3_bind_text(stmt, 3, STAGE_REPAIR_SOLUTIONLESS_REASON, -1,
-                      SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 4, "header-source-hash-mismatch", -1,
-                      SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 5, VH_BATCH_SIZE * 64);
-
     struct vh_job jobs[VH_BATCH_SIZE];
     memset(jobs, 0, sizeof(jobs));
     int n = 0;
     int64_t last_seen = start - 1;
     int64_t first_unresolved = -1;
-    while (n < VH_BATCH_SIZE &&
-           (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        int64_t h64 = sqlite3_column_int64(stmt, 0);
-        const unsigned char *reason_txt = sqlite3_column_text(stmt, 1);
-        const char *reason = reason_txt ? (const char *)reason_txt : "";
-        last_seen = h64;
-        if (h64 < 0 || h64 > INT32_MAX) {
-            sqlite3_finalize(stmt);
-            progress_store_tx_unlock();
-            /* De-storm: key on the offending height so a genuinely different
-             * corrupt row re-emits but the same one collapses to first-fire +
-             * 60 s keepalive. */
-            static struct log_throttle recheck_range_throttle = LOG_THROTTLE_INIT;
-            uint64_t reps = 0;
-            if (log_throttle_should_emit(&recheck_range_throttle,
-                                         (uint64_t)h64,
-                                         platform_time_wall_unix(), 60, &reps))
-                LOG_ERROR("validate_headers",
-                          "failed-row recheck height out of range h=%lld "
-                          "repeats=%llu", (long long)h64,
-                          (unsigned long long)reps);
-            return JOB_FATAL;
-        }
-        struct block_index *bi = vh_resolve_bi(ms, (int)h64);
-        if (!bi || !bi->phashBlock) {
-            /* Transient resolve miss. SKIP this height rather than abort the
-             * whole pass; remember the lowest such height so the floor never
-             * advances past it (retried next pass). */
-            vh_window_miss_note((int)h64, "recheck");
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            if (first_unresolved < 0)
-                first_unresolved = h64;
-            continue;
-        }
-        blocker_clear(VH_WINDOW_MISS_BLOCKER_ID);
-        if (!vh_failure_is_recheck_candidate(reason))
-            continue;
-        if (!validate_headers_recheck_ready(db, (int)h64, bi, reason)) {
-            /* No exact solution bytes yet: the condition engine owns their
-             * backfill/refetch. Pin the lowest unresolved height and back off
-             * rather than claiming progress from an unchanged verdict. */
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            if (first_unresolved < 0)
-                first_unresolved = h64;
-            continue;
-        }
-        vh_job_bind_block(db, &jobs[n], bi, (int)h64);
-        n++;
+    bool range_bad = false;
+    rc = vh_recheck_scan_rows(ms, db, stmt, jobs, &n, &last_seen,
+                              &first_unresolved, &range_bad);
+    if (range_bad) {
+        int64_t h64 = last_seen;
+        sqlite3_finalize(stmt);
+        progress_store_tx_unlock();
+        /* De-storm: key on the offending height so a genuinely different
+         * corrupt row re-emits but the same one collapses to first-fire +
+         * 60 s keepalive. */
+        static struct log_throttle recheck_range_throttle = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&recheck_range_throttle,
+                                     (uint64_t)h64,
+                                     platform_time_wall_unix(), 60, &reps))
+            LOG_ERROR("validate_headers",
+                      "failed-row recheck height out of range h=%lld "
+                      "repeats=%llu", (long long)h64,
+                      (unsigned long long)reps);
+        return JOB_FATAL;
     }
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         sqlite3_finalize(stmt);
@@ -465,9 +602,9 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
         /* If every selected row was skipped (unresolvable), pin at the lowest
          * skipped height so the next pass retries it; only a genuinely empty
          * scan may jump the floor to validated_cursor. */
-        int64_t idle_floor = (first_unresolved >= 0)
-                             ? first_unresolved : (int64_t)validated_cursor;
-        atomic_store(&g_failure_recheck_cursor, idle_floor);
+        atomic_store(&g_failure_recheck_cursor,
+                     vh_recheck_idle_floor(first_unresolved,
+                                           validated_cursor));
         return JOB_IDLE;
     }
 
@@ -501,36 +638,15 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
         progress_store_tx_unlock();
         return vh_db_fault(frc, (int)start, "recheck begin/savepoint");
     }
-    for (int i = 0; i < n; i++) {
-        /* Recheck rows are pre-filtered to the repairable reasons (solutionless /
-         * source-hash-mismatch), so a stale BLOCK_FAILED mask on a now-passing
-         * header IS the serve-refusal class: pass clearable=true. This is the
-         * reachable repair (deliverable b) — clear the mask and flip the row to
-         * ok=1 once the backfilled solution makes the unchanged validator pass. */
-        if (jobs[i].ok &&
-            !vh_authoritative_mark(&jobs[i], true)) {
-            /* Still un-markable after the scoped clear (e.g. a NULL entry). Name
-             * ONE typed blocker (throttled) and back off JOB_IDLE — never
-             * the JOB_FATAL hot loop. */
-            vh_mark_fail_note(jobs[i].height, jobs[i].mark_bi);
-            vh_recheck_rollback(db, vh_batched);
-            progress_store_tx_unlock();
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            return JOB_IDLE;
-        }
-        if (!validate_headers_log_insert(db, jobs[i].height,
-                                         jobs[i].bi->phashBlock, jobs[i].ok,
-                                         jobs[i].reason)) {
-            int frc = sqlite3_extended_errcode(db);
-            vh_recheck_rollback(db, vh_batched);
-            progress_store_tx_unlock();
-            return vh_db_fault(frc, jobs[i].height, "recheck log insert");
-        }
-        if (jobs[i].ok)
-            atomic_fetch_add(&g_passed_total, 1);
-        else
-            atomic_fetch_add(&g_failed_total, 1);
-    }
+    int wfault_rc = 0;
+    int wfault_height = 0;
+    enum vh_recheck_write wr = vh_recheck_write_rows(db, jobs, n, vh_batched,
+                                                     &wfault_rc,
+                                                     &wfault_height);
+    if (wr == VH_RW_BLOCKED)
+        return JOB_IDLE;
+    if (wr == VH_RW_LOG_FAULT)
+        return vh_db_fault(wfault_rc, wfault_height, "recheck log insert");
     if (sqlite3_exec(db, vh_commit, NULL, NULL, &err) != SQLITE_OK) {
         int frc = sqlite3_extended_errcode(db);
         /* De-storm: keyed on frc, mirrors recheck_begin_throttle above. */
@@ -556,17 +672,9 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
      * before its solution landed — the same monotonic-strand defect as the
      * forward drain. Verdict-preserving: a row only leaves ok=0 via a genuine
      * PoW + Equihash pass in vh_pool_run_batch above. */
-    int64_t lowest_still_failing = -1;
-    for (int i = 0; i < n; i++)
-        if (!jobs[i].ok && vh_failure_is_repairable(jobs[i].reason)) {
-            lowest_still_failing = jobs[i].height; break;
-        }
-    int64_t new_floor = (lowest_still_failing >= 0)
-                        ? lowest_still_failing : (last_seen + 1);
-    /* Never advance the floor past a height skipped as unresolvable this pass —
-     * it must be retried on the next pass, not stepped over. */
-    if (first_unresolved >= 0 && new_floor > first_unresolved)
-        new_floor = first_unresolved;
+    int64_t lowest_still_failing = vh_lowest_repairable_failure(jobs, n);
+    int64_t new_floor = vh_recheck_pick_floor(lowest_still_failing, last_seen,
+                                              first_unresolved);
     atomic_store(&g_failure_recheck_cursor, new_floor);
     /* Only claim progress when the floor actually advanced. A pinned floor
      * (the lowest repairable row still has no backfilled solution) returns
@@ -680,6 +788,97 @@ static bool vh_authoritative_mark(struct vh_job *job, bool clearable)
 
 /* ── Step body ────────────────────────────────────────────────────── */
 
+/* Bind every job of the forward batch to its block_index entry; false when a
+ * height does not resolve (a typed blocker is named and the step backs off). */
+static bool vh_bind_forward_batch(struct main_state *ms, sqlite3 *db,
+                                  struct vh_job *jobs, int next_h,
+                                  int batch_n)
+{
+    for (int i = 0; i < batch_n; i++) {
+        int h = next_h + i;
+        struct block_index *bi = vh_resolve_bi(ms, h);
+        if (!bi || !bi->phashBlock) {
+            /* Shouldn't happen (header_admit just admitted it), but a
+             * concurrent reorg is conceivable — name a typed blocker rather
+             * than rely solely on the 60-min stage-freeze backstop. */
+            vh_window_miss_note(h, "validation");
+            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+            return false;
+        }
+        blocker_clear(VH_WINDOW_MISS_BLOCKER_ID);
+        vh_job_bind_block(db, &jobs[i], bi, h);
+    }
+    return true;
+}
+
+/* Write the forward batch's log rows. VH_RW_BLOCKED means a validated header
+ * could not be marked (back off); VH_RW_LOG_FAULT carries the failing height
+ * and sqlite code through the out-parameters. */
+static enum vh_recheck_write vh_write_forward_rows(sqlite3 *db,
+                                                   struct vh_job *jobs,
+                                                   int batch_n, int *fault_rc,
+                                                   int *fault_height)
+{
+    for (int i = 0; i < batch_n; i++) {
+        if (jobs[i].ok &&
+            !vh_authoritative_mark(&jobs[i], jobs[i].had_repair_row)) {
+            /* Validator PASSED but the block_index entry is FAILED-masked and no
+             * clearable repair row proves it is the serve-refusal class. Name
+             * ONE typed blocker (throttled) and BACK OFF (JOB_IDLE) —
+             * never the hot JOB_FATAL loop that stormed 18,440 WARN lines at
+             * h=3,179,245. Backing off also un-starves the condition runner so
+             * block_failed_mask_at_tip / process_block_revalidate can clear the
+             * mask consensus-safely; the cursor holds until it does. The step's
+             * partial writes roll back (stage_run_once), so a mid-batch hold is
+             * clean and the whole batch re-marks idempotently next tick. */
+            vh_mark_fail_note(jobs[i].height, jobs[i].mark_bi);
+            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+            return VH_RW_BLOCKED;
+        }
+        if (!validate_headers_log_insert(db, jobs[i].height,
+                                         jobs[i].bi->phashBlock, jobs[i].ok,
+                                         jobs[i].reason)) {
+            *fault_rc = sqlite3_extended_errcode(db);
+            *fault_height = jobs[i].height;
+            return VH_RW_LOG_FAULT;
+        }
+        if (jobs[i].ok) atomic_fetch_add(&g_passed_total, 1);
+        else            atomic_fetch_add(&g_failed_total, 1);
+    }
+    return VH_RW_OK;
+}
+
+/* Move the failure-recheck floor after a forward batch. */
+static void vh_forward_update_recheck_floor(const struct vh_job *jobs,
+                                            int batch_n, uint64_t cursor_out)
+{
+    /* Failure-recheck floor: the lowest height recheck_failed_rows will
+     * revisit. It must NEVER advance past a still-failing (ok=0) row. recheck
+     * only scans [floor, validated_cursor); slaving the floor to the forward
+     * cursor (the old `floor = max(floor, cursor_out)`) made recheck a no-op
+     * for every row this drain logged ok=0 — they were stranded the instant
+     * they were written. That is the live tip-wedge: validate_headers logged
+     * height H ok=0 "no-header-solution-backfill-required" (its Equihash
+     * solution not yet backfilled), the floor jumped past H, backfill_header_
+     * solutions later supplied H's solution, but recheck never looked back —
+     * so body_fetch stalled at H and the public tip froze one block below.
+     * Pin the floor at the lowest failure in this batch; only advance to
+     * cursor_out when the whole batch passed. This changes only WHICH rows are
+     * re-validated, never the verdict — a row still flips to ok=1 solely
+     * through the unchanged PoW + Equihash validator, so it can never admit an
+     * invalid header (zero fork risk). Only REPAIRABLE (solutionless) failures
+     * pin the floor; a terminal rejection advances it exactly as before, so
+     * recheck never re-runs the validator on a permanently-bad header. */
+    int64_t lowest_fail = vh_lowest_repairable_failure(jobs, batch_n);
+    int64_t recheck_floor = atomic_load(&g_failure_recheck_cursor);
+    if (lowest_fail >= 0) {
+        if (recheck_floor > lowest_fail)
+            atomic_store(&g_failure_recheck_cursor, lowest_fail);
+    } else if (recheck_floor < (int64_t)cursor_out) {
+        atomic_store(&g_failure_recheck_cursor, (int64_t)cursor_out);
+    }
+}
+
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
@@ -714,80 +913,26 @@ static job_result_t step_validate(struct stage_step_ctx *c)
      * its target height. */
     struct vh_job *jobs = g_pool.batch;
     memset(jobs, 0, sizeof(*jobs) * (size_t)batch_n);
-    for (int i = 0; i < batch_n; i++) {
-        int h = next_h + i;
-        struct block_index *bi = vh_resolve_bi(ms, h);
-        if (!bi || !bi->phashBlock) {
-            /* Shouldn't happen (header_admit just admitted it), but a
-             * concurrent reorg is conceivable — name a typed blocker rather
-             * than rely solely on the 60-min stage-freeze backstop. */
-            vh_window_miss_note(h, "validation");
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            return JOB_IDLE;
-        }
-        blocker_clear(VH_WINDOW_MISS_BLOCKER_ID);
-        vh_job_bind_block(db, &jobs[i], bi, h);
-    }
+    if (!vh_bind_forward_batch(ms, db, jobs, next_h, batch_n))
+        return JOB_IDLE;
 
     /* Dispatch + await. Pool stays inside this step. */
     vh_pool_run_batch(&g_pool, jobs, sizeof(jobs[0]), batch_n);
 
     /* Write rows + bump cursor, all under the F-2 BEGIN IMMEDIATE txn. */
-    for (int i = 0; i < batch_n; i++) {
-        if (jobs[i].ok &&
-            !vh_authoritative_mark(&jobs[i], jobs[i].had_repair_row)) {
-            /* Validator PASSED but the block_index entry is FAILED-masked and no
-             * clearable repair row proves it is the serve-refusal class. Name
-             * ONE typed blocker (throttled) and BACK OFF (JOB_IDLE) —
-             * never the hot JOB_FATAL loop that stormed 18,440 WARN lines at
-             * h=3,179,245. Backing off also un-starves the condition runner so
-             * block_failed_mask_at_tip / process_block_revalidate can clear the
-             * mask consensus-safely; the cursor holds until it does. The step's
-             * partial writes roll back (stage_run_once), so a mid-batch hold is
-             * clean and the whole batch re-marks idempotently next tick. */
-            vh_mark_fail_note(jobs[i].height, jobs[i].mark_bi);
-            atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-            return JOB_IDLE;
-        }
-        if (!validate_headers_log_insert(db, jobs[i].height,
-                                         jobs[i].bi->phashBlock, jobs[i].ok,
-                                         jobs[i].reason))
-            return vh_db_fault(sqlite3_extended_errcode(db), jobs[i].height,
-                               "validate_headers_log insert");
-        if (jobs[i].ok) atomic_fetch_add(&g_passed_total, 1);
-        else            atomic_fetch_add(&g_failed_total, 1);
-    }
+    int wfault_rc = 0;
+    int wfault_height = 0;
+    enum vh_recheck_write wr = vh_write_forward_rows(db, jobs, batch_n,
+                                                     &wfault_rc,
+                                                     &wfault_height);
+    if (wr == VH_RW_BLOCKED)
+        return JOB_IDLE;
+    if (wr == VH_RW_LOG_FAULT)
+        return vh_db_fault(wfault_rc, wfault_height,
+                           "validate_headers_log insert");
 
     c->cursor_out = c->cursor_in + (uint64_t)batch_n;
-    /* Failure-recheck floor: the lowest height recheck_failed_rows will
-     * revisit. It must NEVER advance past a still-failing (ok=0) row. recheck
-     * only scans [floor, validated_cursor); slaving the floor to the forward
-     * cursor (the old `floor = max(floor, cursor_out)`) made recheck a no-op
-     * for every row this drain logged ok=0 — they were stranded the instant
-     * they were written. That is the live tip-wedge: validate_headers logged
-     * height H ok=0 "no-header-solution-backfill-required" (its Equihash
-     * solution not yet backfilled), the floor jumped past H, backfill_header_
-     * solutions later supplied H's solution, but recheck never looked back —
-     * so body_fetch stalled at H and the public tip froze one block below.
-     * Pin the floor at the lowest failure in this batch; only advance to
-     * cursor_out when the whole batch passed. This changes only WHICH rows are
-     * re-validated, never the verdict — a row still flips to ok=1 solely
-     * through the unchanged PoW + Equihash validator, so it can never admit an
-     * invalid header (zero fork risk). Only REPAIRABLE (solutionless) failures
-     * pin the floor; a terminal rejection advances it exactly as before, so
-     * recheck never re-runs the validator on a permanently-bad header. */
-    int64_t lowest_fail = -1;
-    for (int i = 0; i < batch_n; i++)
-        if (!jobs[i].ok && vh_failure_is_repairable(jobs[i].reason)) {
-            lowest_fail = jobs[i].height; break;
-        }
-    int64_t recheck_floor = atomic_load(&g_failure_recheck_cursor);
-    if (lowest_fail >= 0) {
-        if (recheck_floor > lowest_fail)
-            atomic_store(&g_failure_recheck_cursor, lowest_fail);
-    } else if (recheck_floor < (int64_t)c->cursor_out) {
-        atomic_store(&g_failure_recheck_cursor, (int64_t)c->cursor_out);
-    }
+    vh_forward_update_recheck_floor(jobs, batch_n, c->cursor_out);
     /* Clean advancing step — the infra-db fault retry budget resets. */
     stage_db_fault_clear(&g_vh_db_fault);
     return JOB_ADVANCED;
