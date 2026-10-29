@@ -1000,11 +1000,15 @@ static void csi_dialect_discriminates(void)
         snprintf(full, sizeof(full), "%s/core/ab.c", root_abs);
         struct stat st;
         if (stat(full, &st) == 0) {
+            bool sealer_ok =
+                csi_sealer_leaf_matches(root_abs, l.digest.bytes);
             CSI_CHECK("sealer's hash_file MATCHES codeindex's leaf digest",
-                      csi_sealer_leaf_matches(root_abs, l.digest.bytes));
+                      sealer_ok);
 
+            bool no_nul_ok =
+                csi_leaf_no_nul_differs(full, &st, l.digest.bytes);
             CSI_CHECK("a leaf domain without its NUL FAILS to match",
-                      csi_leaf_no_nul_differs(full, &st, l.digest.bytes));
+                      no_nul_ok);
         }
     }
 
