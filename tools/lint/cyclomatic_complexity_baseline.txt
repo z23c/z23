@@ -802,7 +802,6 @@ tests/harness/src/test_https_sni_select.c:handshake:19
 tests/harness/src/test_https_sni_select.c:test_https_sni_select:39
 tests/harness/src/test_keys.c:test_keys:27
 tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
-tests/harness/src/test_mempool_orphan.c:test_mempool_orphan:45
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
 tests/harness/src/test_mint_anchor_fresh_datadir.c:test_mfd_scenario_b_headers_no_bodies_walls_frontier:24

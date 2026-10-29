@@ -59,12 +59,10 @@ static void free_orphan_tx(struct transaction *tx)
     free(tx->vout);
 }
 
-/* ── tests ──────────────────────────────────────────────── */
-
-int test_mempool_orphan(void)
+/* Checks size of an empty pool, add/exists, and duplicate rejection. */
+static int check_orphan_add_basics(void)
 {
     int failures = 0;
-    printf("\n=== Mempool Orphan Pool ===\n");
 
     printf("GIVEN empty pool THEN size is 0... ");
     {
@@ -102,6 +100,14 @@ int test_mempool_orphan(void)
         if (dup || sz != 1) { printf("FAIL\n"); failures++; }
         else printf("OK\n");
     }
+
+    return failures;
+}
+
+/* Checks the 50-entry cap, remove by hash, and clear. */
+static int check_orphan_capacity_and_removal(void)
+{
+    int failures = 0;
 
     printf("GIVEN full pool (50 txs) THEN 51st add is rejected... ");
     {
@@ -151,6 +157,14 @@ int test_mempool_orphan(void)
         orphan_pool_free(&pool);
     }
 
+    return failures;
+}
+
+/* Checks that expiry removes only orphans past the TTL. */
+static int check_orphan_expiry(void)
+{
+    int failures = 0;
+
     printf("GIVEN expired orphans THEN expire removes them... ");
     {
         struct orphan_pool pool;
@@ -191,6 +205,14 @@ int test_mempool_orphan(void)
         if (removed != 0) { printf("FAIL\n"); failures++; }
         else printf("OK\n");
     }
+
+    return failures;
+}
+
+/* Checks find_children and extract_children for a present parent. */
+static int check_orphan_child_queries(void)
+{
+    int failures = 0;
 
     printf("GIVEN orphan spending parent P THEN find_children returns it... ");
     {
@@ -238,6 +260,14 @@ int test_mempool_orphan(void)
         else printf("OK\n");
     }
 
+    return failures;
+}
+
+/* Checks find_children for any-input match and for no parent match. */
+static int check_orphan_find_children_edges(void)
+{
+    int failures = 0;
+
     printf("GIVEN multi-input orphan THEN find_children matches on any input... ");
     {
         struct orphan_pool pool;
@@ -271,6 +301,14 @@ int test_mempool_orphan(void)
         if (n != 0) { printf("FAIL\n"); failures++; }
         else printf("OK\n");
     }
+
+    return failures;
+}
+
+/* Checks edge cases: NULL tx, missing-hash remove, 0-input tx, re-add. */
+static int check_orphan_pool_edge_cases(void)
+{
+    int failures = 0;
 
     printf("GIVEN NULL tx THEN add returns false... ");
     {
@@ -322,6 +360,14 @@ int test_mempool_orphan(void)
         else printf("OK\n");
     }
 
+    return failures;
+}
+
+/* Checks expiry of a full pool and extract_children capped at max_out. */
+static int check_orphan_bulk_expiry_and_capped_extract(void)
+{
+    int failures = 0;
+
     printf("GIVEN all 50 expired THEN expire removes all... ");
     {
         struct orphan_pool pool;
@@ -366,6 +412,24 @@ int test_mempool_orphan(void)
         if (n != 1 || sz != 1) { printf("FAIL (n=%zu sz=%zu)\n", n, sz); failures++; }
         else printf("OK\n");
     }
+
+    return failures;
+}
+
+/* ── tests ──────────────────────────────────────────────── */
+
+int test_mempool_orphan(void)
+{
+    int failures = 0;
+    printf("\n=== Mempool Orphan Pool ===\n");
+
+    failures += check_orphan_add_basics();
+    failures += check_orphan_capacity_and_removal();
+    failures += check_orphan_expiry();
+    failures += check_orphan_child_queries();
+    failures += check_orphan_find_children_edges();
+    failures += check_orphan_pool_edge_cases();
+    failures += check_orphan_bulk_expiry_and_capped_extract();
 
     printf("=== Mempool Orphan Pool: %d failures ===\n\n", failures);
     return failures;
