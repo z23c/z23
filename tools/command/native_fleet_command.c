@@ -610,9 +610,9 @@ static void fleet_host_memory(bool mem_ok, const struct os_proc_mem *mem,
 }
 
 /* The uptime row, then this node's RSS row, in the original write order. */
-static void fleet_host_tail(bool mem_ok, const struct os_proc_mem *mem,
-                            int64_t up, int64_t v[ZCL_FLEET_HOST_N],
-                            bool p[ZCL_FLEET_HOST_N])
+static void fleet_host_uptime_rss(bool mem_ok, const struct os_proc_mem *mem,
+                                  int64_t up, int64_t v[ZCL_FLEET_HOST_N],
+                                  bool p[ZCL_FLEET_HOST_N])
 {
     const int64_t mib = 1024 * 1024;
     p[7] = up >= 0; v[7] = up;
@@ -645,7 +645,7 @@ void zcl_fleet_host_snapshot(const char *datadir, int64_t v[ZCL_FLEET_HOST_N],
     fleet_host_cpu(load, cores, v, p);
     fleet_host_memory(mem_ok, &mem, v, p);
     fleet_host_disk(disk, d_avail, d_total, v, p);
-    fleet_host_tail(mem_ok, &mem, up, v, p);
+    fleet_host_uptime_rss(mem_ok, &mem, up, v, p);
 }
 
 /* The one metric id asked for, or NULL when the request names none. */
@@ -1231,20 +1231,30 @@ static void fleet_stats_row(struct json_value *rows,
     json_free(&row);
 }
 
+/* One group's formatted optional fields, filled before its JSON row. */
+struct fleet_stats_text {
+    char wall[32], toks[32], ratio[32], land[32];
+};
+
+static void fleet_stats_format(struct fleet_stats_text *f,
+                               const struct zcl_fleet_experiment_group *g,
+                               int64_t land_bp, uint8_t have_land)
+{
+    fleet_exp_absent_or_i64(f->wall, sizeof f->wall, g->have_median_wall,
+                            g->median_wall_s);
+    fleet_exp_absent_or_i64(f->toks, sizeof f->toks, g->have_median_tokens,
+                            g->median_tokens);
+    fleet_exp_absent_or_i64(f->ratio, sizeof f->ratio, g->have_pred_actual,
+                            g->pred_actual_bp);
+    fleet_exp_absent_or_i64(f->land, sizeof f->land, have_land, land_bp);
+}
+
 /* One group's line in the text answer, kept only while it fits. */
 static void fleet_stats_line(char *text, size_t cap, size_t *tlen,
                              const struct zcl_fleet_experiment_group *g,
                              const char *class_name, const char *model_name,
-                             int64_t land_bp, uint8_t have_land)
+                             const struct fleet_stats_text *f)
 {
-    char wall[32], toks[32], ratio[32], land[32];
-    fleet_exp_absent_or_i64(wall, sizeof wall, g->have_median_wall,
-                            g->median_wall_s);
-    fleet_exp_absent_or_i64(toks, sizeof toks, g->have_median_tokens,
-                            g->median_tokens);
-    fleet_exp_absent_or_i64(ratio, sizeof ratio, g->have_pred_actual,
-                            g->pred_actual_bp);
-    fleet_exp_absent_or_i64(land, sizeof land, have_land, land_bp);
     int wrote = snprintf(
         text + *tlen, cap - *tlen,
         "%s %s predicts=%llu results=%llu lands=%llu land_bp=%s "
@@ -1253,7 +1263,7 @@ static void fleet_stats_line(char *text, size_t cap, size_t *tlen,
         class_name ? class_name : "", model_name ? model_name : "",
         (unsigned long long)g->predicts,
         (unsigned long long)g->results,
-        (unsigned long long)g->lands, land, wall, toks, ratio,
+        (unsigned long long)g->lands, f->land, f->wall, f->toks, f->ratio,
         (unsigned long long)g->unpredicted);
     if (wrote > 0 && (size_t)wrote < cap - *tlen)
         *tlen += (size_t)wrote;
@@ -1272,9 +1282,10 @@ static void fleet_stats_group(struct json_value *rows, char *text, size_t cap,
         land_bp = (int64_t)((g->lands * 10000ull) / g->results);
         have_land = 1;
     }
+    struct fleet_stats_text f;
+    fleet_stats_format(&f, g, land_bp, have_land);
     fleet_stats_row(rows, g, class_name, model_name, land_bp, have_land);
-    fleet_stats_line(text, cap, tlen, g, class_name, model_name, land_bp,
-                     have_land);
+    fleet_stats_line(text, cap, tlen, g, class_name, model_name, &f);
 }
 
 /* The totals line that closes the text answer. */
