@@ -142,41 +142,23 @@ static enum vcs_package_deps_error deps_check_schema(
     return VCS_PACKAGE_DEPS_OK;
 }
 
-static enum vcs_package_deps_error deps_parse_edge_name(
-    const struct json_value *row, struct vcs_package_dep *edge, size_t i,
-    char *detail, size_t detail_cap)
+/* Optional label field (name or semver) copied into dst, then checked. */
+static enum vcs_package_deps_error deps_parse_edge_label(
+    const struct json_value *row, const char *key, char *dst, size_t dst_cap,
+    enum vcs_package_deps_error err_code, size_t i, char *detail,
+    size_t detail_cap)
 {
-    const struct json_value *nv = json_get(row, "name");
-    if (nv) {
-        const char *s = nv->type == JSON_STR ? json_get_str(nv) : NULL;
-        if (!s || strlen(s) >= sizeof(edge->name)) {
-            deps_detail(detail, detail_cap, "dependencies[%zu].name", i);
-            return VCS_PACKAGE_DEPS_ERR_DEP_NAME;
+    const struct json_value *lv = json_get(row, key);
+    if (lv) {
+        const char *s = lv->type == JSON_STR ? json_get_str(lv) : NULL;
+        if (!s || strlen(s) >= dst_cap) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].%s", i, key);
+            return err_code;
         }
-        (void)snprintf(edge->name, sizeof(edge->name), "%s", s);
-        if (!deps_label_ok(edge->name, sizeof(edge->name))) {
-            deps_detail(detail, detail_cap, "dependencies[%zu].name", i);
-            return VCS_PACKAGE_DEPS_ERR_DEP_NAME;
-        }
-    }
-    return VCS_PACKAGE_DEPS_OK;
-}
-
-static enum vcs_package_deps_error deps_parse_edge_semver(
-    const struct json_value *row, struct vcs_package_dep *edge, size_t i,
-    char *detail, size_t detail_cap)
-{
-    const struct json_value *sv = json_get(row, "semver");
-    if (sv) {
-        const char *s = sv->type == JSON_STR ? json_get_str(sv) : NULL;
-        if (!s || strlen(s) >= sizeof(edge->semver)) {
-            deps_detail(detail, detail_cap, "dependencies[%zu].semver", i);
-            return VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
-        }
-        (void)snprintf(edge->semver, sizeof(edge->semver), "%s", s);
-        if (!deps_label_ok(edge->semver, sizeof(edge->semver))) {
-            deps_detail(detail, detail_cap, "dependencies[%zu].semver", i);
-            return VCS_PACKAGE_DEPS_ERR_DEP_SEMVER;
+        (void)snprintf(dst, dst_cap, "%s", s);
+        if (!deps_label_ok(dst, dst_cap)) {
+            deps_detail(detail, detail_cap, "dependencies[%zu].%s", i, key);
+            return err_code;
         }
     }
     return VCS_PACKAGE_DEPS_OK;
@@ -202,11 +184,14 @@ static enum vcs_package_deps_error deps_parse_edge(
                     rhex ? rhex : "(missing)");
         return VCS_PACKAGE_DEPS_ERR_DEP_ROOT;
     }
-    enum vcs_package_deps_error err =
-        deps_parse_edge_name(row, &edge, i, detail, detail_cap);
+    enum vcs_package_deps_error err = deps_parse_edge_label(
+        row, "name", edge.name, sizeof(edge.name),
+        VCS_PACKAGE_DEPS_ERR_DEP_NAME, i, detail, detail_cap);
     if (err != VCS_PACKAGE_DEPS_OK)
         return err;
-    err = deps_parse_edge_semver(row, &edge, i, detail, detail_cap);
+    err = deps_parse_edge_label(row, "semver", edge.semver, sizeof(edge.semver),
+                                VCS_PACKAGE_DEPS_ERR_DEP_SEMVER, i, detail,
+                                detail_cap);
     if (err != VCS_PACKAGE_DEPS_OK)
         return err;
     err = deps_insert(out, &edge);
