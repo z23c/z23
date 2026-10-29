@@ -2308,6 +2308,36 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
     return failures;
 }
 
+/* Boundary errors preserve null-output behavior and clear partial entries. */
+static bool zpd_capsule_parse_boundaries(const uint8_t *wire, size_t len)
+{
+    if (len < 47u) return false;
+    struct vcs_package_capsule out, before;
+    memset(&out, 0xa5, sizeof(out));
+    memcpy(&before, &out, sizeof(out));
+    if (vcs_package_capsule_parse(NULL, len, &out) != VCS_PACKAGE_CAPSULE_ERR_NULL ||
+        memcmp(&out, &before, sizeof(out)) != 0) return false;
+    if (vcs_package_capsule_parse(wire, len, NULL) != VCS_PACKAGE_CAPSULE_ERR_NULL)
+        return false;
+    if (vcs_package_capsule_parse(wire, len - 1, &out) != VCS_PACKAGE_CAPSULE_ERR_TRUNCATED ||
+        out.count != 0 || out.headers[0].path[0] != 0 || out.headers[0].file_root[0] != 0)
+        return false;
+    uint8_t *bad = malloc(len + 1u); // raw-alloc-ok:test-fixture
+    if (!bad) return false;
+    memcpy(bad, wire, len);
+    bad[0] ^= 1u;
+    bad[8] ^= 1u;
+    bool ok = vcs_package_capsule_parse(bad, len, &out) == VCS_PACKAGE_CAPSULE_ERR_MAGIC &&
+              out.count == 0;
+    memcpy(bad, wire, len);
+    bad[14] = 0; /* invalid first path, but trailing takes precedence */
+    bad[len] = 0;
+    ok = ok && vcs_package_capsule_parse(bad, len + 1u, &out) ==
+                   VCS_PACKAGE_CAPSULE_ERR_TRAILING && out.count == 0;
+    free(bad);
+    return ok;
+}
+
 static int zpd_test_base(secp256k1_context *ctx, const uint8_t secret[32],
                          const uint8_t pubkey[33])
 {
@@ -2358,6 +2388,8 @@ static int zpd_test_base(secp256k1_context *ctx, const uint8_t secret[32],
         json_free(&prepare_input);
 
         struct vcs_package_capsule parsed;
+        ASSERT(zpd_capsule_parse_boundaries(prepared.capsule_wire,
+                                            prepared.capsule_wire_len));
         ASSERT(vcs_package_capsule_parse(prepared.capsule_wire,
                                          prepared.capsule_wire_len,
                                          &parsed) == VCS_PACKAGE_CAPSULE_OK);
