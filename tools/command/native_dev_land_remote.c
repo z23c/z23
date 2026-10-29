@@ -25,7 +25,22 @@
  *          ssh or scp and needs no --host: data.bundle, data.bundle_sha256,
  *          data.commit and data.lane, plus a READY line naming the commit and
  *          sha256, are the handoff to a queue host reached another way.
- * receive  (queue host) verifies the bundle in the checkout that owns the
+ *          It also writes <bundle_out>.offer.json (SEND_OFFER_EXISTS when
+ *          that exists; reported as data.offer), a flat manifest
+ *          {schema "zcl.dev_land_offer.v1", commit, base (the origin/main
+ *          commit the bundle excludes), bundle_sha256, lane} that the
+ *          receiver checks with check_offer before it trusts the bundle.
+ * check_offer (any machine, read-only) takes --bundle and --offer (absolute
+ *          paths) and optional --repo (default: the checkout above the
+ *          current directory). It queues nothing, fetches nothing and
+ *          touches no worktree. Refusals: OFFER_BAD_MANIFEST (wrong schema,
+ *          malformed commit, base or sha), OFFER_SHA_MISMATCH (the bundle's
+ *          sha256 is not the offered one), OFFER_BAD_BUNDLE (git bundle
+ *          verify failed in --repo), OFFER_HEAD_MISMATCH (not exactly one
+ *          head, equal to the offered commit), OFFER_BASE_MISMATCH (not
+ *          exactly one prerequisite, equal to the offered base). Reply:
+ *          data {commit, base, bundle_sha256, verdict "ok"}.
+ * receive (queue host) verifies the bundle in the checkout that owns the
  *          queue (RECEIVE_BAD_BUNDLE), fetches its single head into
  *          refs/heads/remote/<lane>, readies the detached worktree
  *          <state root>/land-remote/<lane> (never under land/, which the
@@ -196,13 +211,19 @@ static bool dlr_bundle_abs(const char *in, char *out, size_t cap)
     return snprintf(out, cap, "%s/%s", cwd, in) < (int)cap;
 }
 
-static bool dlr_recv_bundle_verify(struct dlr_recv *r, const char *in,
-                                   struct zcl_command_reply *reply)
+/* git bundle verify of r->bundle in r->root. */
+static bool dlr_bundle_verify_ok(const struct dlr_recv *r)
 {
     const char *args[] = {"bundle", "verify", r->bundle, NULL};
     char sink[512];
+    return dlr_git(r->root, args, sink, sizeof(sink)) == 0;
+}
+
+static bool dlr_recv_bundle_verify(struct dlr_recv *r, const char *in,
+                                   struct zcl_command_reply *reply)
+{
     if (!dlr_bundle_abs(in, r->bundle, sizeof(r->bundle)) ||
-        dlr_git(r->root, args, sink, sizeof(sink)) != 0) {
+        !dlr_bundle_verify_ok(r)) {
         dlr_recv_fail(reply, "RECEIVE_BAD_BUNDLE", "verify",
                       "git bundle verify refused the bundle; it is not a "
                       "complete bundle on top of this checkout's history",
@@ -213,25 +234,30 @@ static bool dlr_recv_bundle_verify(struct dlr_recv *r, const char *in,
 }
 
 /* A bundle must carry exactly one head: "<sha> <ref>\n". */
-static bool dlr_recv_head(struct dlr_recv *r, struct zcl_command_reply *reply)
+static bool dlr_head_parse(struct dlr_recv *r)
 {
     const char *args[] = {"bundle", "list-heads", r->bundle, NULL};
     char out[2048], *nl;
     size_t n = 0;
     out[0] = '\0';
     if (dlr_git(r->root, args, out, sizeof(out)) != 0)
-        goto bad;
+        return false;
     dlr_trim(out);
     nl = strchr(out, '\n');
     if (nl || !dlr_sha_ok(out, &n) || out[n] != ' ' || !out[n + 1] ||
         out[n + 1] == '-' ||
         snprintf(r->ref, sizeof(r->ref), "%s", out + n + 1) >=
             (int)sizeof(r->ref))
-        goto bad;
+        return false;
     out[n] = '\0';
     (void)snprintf(r->sha, sizeof(r->sha), "%s", out);
     return true;
-bad:
+}
+
+static bool dlr_recv_head(struct dlr_recv *r, struct zcl_command_reply *reply)
+{
+    if (dlr_head_parse(r))
+        return true;
     dlr_recv_fail(reply, "RECEIVE_BAD_BUNDLE", "heads",
                   "a bundle must carry exactly one head (HEAD ^origin/main "
                   "makes one)",
@@ -391,6 +417,8 @@ struct dlr_send {
     const char *commit, *out;
     char root[DLR_PATH];
     char sha[80];
+    char base[80];
+    char offer[DLR_PATH + 16];
     char tmpdir[PLATFORM_TEMP_PATH_MAX];
     char bundle[DLR_PATH];
     char remote[DLR_PATH];
@@ -440,6 +468,34 @@ static bool dlr_out_ok(const char *p)
                   dlr_arg_ok(p, true));
 }
 
+/* bundle_out and its <bundle_out>.offer.json must both be absent: neither
+ * is ever overwritten. */
+static bool dlr_send_out_free(struct dlr_send *s,
+                              struct zcl_command_reply *reply)
+{
+    if (dlr_exists(s->out)) {
+        dlr_send_fail(reply, "SEND_BUNDLE_EXISTS", "bundle",
+                      "bundle_out already exists; it is never overwritten",
+                      s->out);
+        return false;
+    }
+    if (snprintf(s->offer, sizeof(s->offer), "%s.offer.json", s->out) >=
+        (int)sizeof(s->offer)) {
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "bundle_out is too long for its .offer.json sibling",
+                      "input.bundle_out");
+        return false;
+    }
+    if (dlr_exists(s->offer)) {
+        dlr_send_fail(reply, "SEND_OFFER_EXISTS", "offer",
+                      "the .offer.json beside bundle_out already exists; it "
+                      "is never overwritten",
+                      s->offer);
+        return false;
+    }
+    return true;
+}
+
 static bool dlr_send_args(const struct zcl_command_request *req,
                           struct dlr_send *s, struct zcl_command_reply *reply)
 {
@@ -472,13 +528,7 @@ static bool dlr_send_args(const struct zcl_command_request *req,
                           "input.commit or input.bundle_out");
             return false;
         }
-        if (s->out && dlr_exists(s->out)) {
-            dlr_send_fail(reply, "SEND_BUNDLE_EXISTS", "bundle",
-                          "bundle_out already exists; it is never overwritten",
-                          s->out);
-            return false;
-        }
-        return true;
+        return !s->out || dlr_send_out_free(s, reply);
     }
     dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
                   "host, lane, note, remote_cmd, inbox and remote_checkout may hold "
@@ -735,6 +785,50 @@ static bool dlr_send_bundle(struct dlr_send *s, struct zcl_command_reply *reply)
     return false;
 }
 
+/* Writes <bundle_out>.offer.json, the flat manifest a receiver checks with
+ * dev.land.check_offer: schema, commit, the origin/main commit the bundle
+ * excludes, the bundle's sha256 and the lane. Created exclusively. */
+static bool dlr_send_offer(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+    const char *rp[] = {"rev-parse", "--verify", "--quiet", "origin/main",
+                        NULL};
+    struct json_value doc;
+    char body[1024];
+    size_t n = 0;
+    bool ok = false;
+    FILE *f;
+    if (!dlr_send_git(s, rp, s->base, sizeof(s->base), "SEND_GIT_FAILED",
+                      reply))
+        return false;
+    json_init(&doc);
+    json_set_object(&doc);
+    ok = json_push_kv_str(&doc, "schema", "zcl.dev_land_offer.v1") &&
+         json_push_kv_str(&doc, "commit", s->sha) &&
+         json_push_kv_str(&doc, "base", s->base) &&
+         json_push_kv_str(&doc, "bundle_sha256", s->bsha) &&
+         json_push_kv_str(&doc, "lane", s->lane);
+    if (ok) {
+        n = json_write(&doc, body, sizeof(body) - 1);
+        ok = n > 0 && n < sizeof(body) - 1;
+    }
+    json_free(&doc);
+    f = ok ? fopen(s->offer, "wx") : NULL;
+    if (f) {
+        body[n++] = '\n';
+        ok = fwrite(body, 1, n, f) == n;
+        ok = fclose(f) == 0 && ok;
+        if (!ok)
+            (void)remove(s->offer);
+    } else {
+        ok = false;
+    }
+    if (!ok)
+        dlr_send_fail(reply, "SEND_OFFER_FAILED", "offer",
+                      "cannot write the offer manifest beside bundle_out",
+                      s->offer);
+    return ok;
+}
+
 /* --bundle_out: the handoff for a machine with no ssh to the queue host. */
 static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
 {
@@ -751,6 +845,10 @@ static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
                       "cannot read back the bundle to hash it", s->out);
         return;
     }
+    if (!dlr_send_offer(s, reply)) {
+        (void)remove(s->out);
+        return;
+    }
     /* The READY line is meant for the board, so it names no local path. */
     if (snprintf(ready, sizeof(ready), "READY %s %s bundle_sha256=%s",
                  s->lane, s->sha, s->bsha) >= (int)sizeof(ready)) {
@@ -763,6 +861,7 @@ static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
     (void)json_push_kv_str(&reply->data, "bundle_sha256", s->bsha);
     (void)json_push_kv_str(&reply->data, "commit", s->sha);
     (void)json_push_kv_str(&reply->data, "lane", s->lane);
+    (void)json_push_kv_str(&reply->data, "offer", s->offer);
     (void)json_push_kv_str(&reply->data, "ready", ready);
 }
 
@@ -878,6 +977,187 @@ static void dlr_send(const struct zcl_command_request *req,
     free(s);
 }
 
+/* ── check_offer ───────────────────────────────────────────────────────── */
+
+#define DLR_OFFER_SCHEMA "zcl.dev_land_offer.v1"
+#define DLR_OFFER_MAX 4096u
+
+struct dlr_offer {
+    struct dlr_recv r;
+    char commit[48], base[48], bsha[80], lane[64], prereq[48];
+};
+
+static void dlr_offer_fail(struct zcl_command_reply *reply, const char *code,
+                           const char *phase, const char *msg,
+                           const char *evidence)
+{
+    dlr_fail(reply, "dev.land.check_offer", code, phase, msg, evidence);
+}
+
+static bool dlr_hex_n(const char *s, size_t want)
+{
+    size_t n = 0;
+    return s && dlr_sha_ok(s, &n) && n == want && s[n] == '\0';
+}
+
+/* A manifest string field, copied; false when absent, not a string or long. */
+static bool dlr_offer_str(const struct json_value *doc, const char *key,
+                          char *dst, size_t cap)
+{
+    const struct json_value *v = json_get(doc, key);
+    return v && v->type == JSON_STR && json_get_str(v) &&
+           snprintf(dst, cap, "%s", json_get_str(v)) < (int)cap;
+}
+
+static bool dlr_offer_fields(const struct json_value *doc, struct dlr_offer *o)
+{
+    char schema[48];
+    return dlr_offer_str(doc, "schema", schema, sizeof(schema)) &&
+           strcmp(schema, DLR_OFFER_SCHEMA) == 0 &&
+           dlr_offer_str(doc, "commit", o->commit, sizeof(o->commit)) &&
+           dlr_offer_str(doc, "base", o->base, sizeof(o->base)) &&
+           dlr_offer_str(doc, "bundle_sha256", o->bsha, sizeof(o->bsha)) &&
+           dlr_offer_str(doc, "lane", o->lane, sizeof(o->lane)) &&
+           dlr_hex_n(o->commit, 40) && dlr_hex_n(o->base, 40) &&
+           dlr_hex_n(o->bsha, 64) && dlr_lane_ok(o->lane);
+}
+
+/* Reads the flat manifest: right schema, 40-hex commit and base, 64-hex
+ * bundle sha256, a lane name. */
+static bool dlr_offer_read(const char *path, struct dlr_offer *o,
+                           struct zcl_command_reply *reply)
+{
+    char raw[DLR_OFFER_MAX];
+    struct json_value doc;
+    size_t n = 0;
+    bool ok = false;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        n = fread(raw, 1, sizeof(raw), f);
+        ok = !ferror(f) && n > 0 && n < sizeof(raw);
+        (void)fclose(f);
+    }
+    json_init(&doc);
+    ok = ok && json_read(&doc, raw, n) && doc.type == JSON_OBJ &&
+         dlr_offer_fields(&doc, o);
+    json_free(&doc);
+    if (!ok)
+        dlr_offer_fail(reply, "OFFER_BAD_MANIFEST", "manifest",
+                       "the offer is not a flat zcl.dev_land_offer.v1 object "
+                       "with a 40-hex commit and base, a 64-hex "
+                       "bundle_sha256 and a lane",
+                       path);
+    return ok;
+}
+
+/* The bundle's prerequisites from its header ("-<sha> <subject>" lines
+ * before the blank line that ends it): how many, and the first. */
+static bool dlr_offer_prereq(const char *bundle, char out[48], int *count)
+{
+    char line[512];
+    FILE *f = fopen(bundle, "rb");
+    bool ok = f != NULL;
+    *count = 0;
+    out[0] = '\0';
+    while (ok && fgets(line, sizeof(line), f) && line[0] != '\n') {
+        if (line[0] != '-')
+            continue;
+        if (++*count == 1)
+            ok = snprintf(out, 48, "%.40s", line + 1) < 48;
+    }
+    if (f)
+        ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
+/* The bundle against the offer: sha256, git's own verify, one head equal to
+ * the commit, one prerequisite equal to the base. */
+static bool dlr_offer_bundle(struct dlr_offer *o,
+                             struct zcl_command_reply *reply)
+{
+    char hex[SHA256_OUTPUT_SIZE * 2 + 1];
+    int count = 0;
+    if (!dlr_file_sha256(o->r.bundle, hex) || strcmp(hex, o->bsha) != 0)
+        dlr_offer_fail(reply, "OFFER_SHA_MISMATCH", "sha256",
+                       "the bundle's sha256 is not the one the offer names",
+                       o->r.bundle);
+    else if (!dlr_bundle_verify_ok(&o->r))
+        dlr_offer_fail(reply, "OFFER_BAD_BUNDLE", "verify",
+                       "git bundle verify refused the bundle in this "
+                       "checkout",
+                       o->r.bundle);
+    else if (!dlr_head_parse(&o->r) || strcmp(o->r.sha, o->commit) != 0)
+        dlr_offer_fail(reply, "OFFER_HEAD_MISMATCH", "heads",
+                       "the bundle must carry exactly one head, and it must "
+                       "be the offered commit",
+                       o->commit);
+    else if (!dlr_offer_prereq(o->r.bundle, o->prereq, &count) ||
+             count != 1 || strcmp(o->prereq, o->base) != 0)
+        dlr_offer_fail(reply, "OFFER_BASE_MISMATCH", "base",
+                       "the bundle must have exactly one prerequisite, and "
+                       "it must be the offered base",
+                       o->base);
+    else
+        return true;
+    return false;
+}
+
+/* The repository the bundle is verified in: --repo (absolute, inside a
+ * checkout) or the checkout above the current directory. */
+static bool dlr_offer_root(const struct zcl_command_request *req,
+                           struct dlr_offer *o,
+                           struct zcl_command_reply *reply)
+{
+    const char *dir = dlr_str(req, "repo");
+    bool ok = dir ? dir[0] == '/' && dlr_arg_ok(dir, true) &&
+                        zcl_devagent_checkout_root(dir, o->r.root,
+                                                   sizeof(o->r.root))
+                  : zcl_devagent_checkout_root(NULL, o->r.root,
+                                               sizeof(o->r.root));
+    if (!ok)
+        dlr_offer_fail(reply, "OFFER_BAD_REPO", "repo",
+                       "--repo must be the absolute path of a checkout; "
+                       "without it the checkout above the current directory "
+                       "is used",
+                       dir ? dir : "no checkout root above the cwd");
+    return ok;
+}
+
+static void dlr_offer_ok(const struct dlr_offer *o,
+                         struct zcl_command_reply *reply)
+{
+    (void)json_push_kv_str(&reply->data, "leaf", "dev.land.check_offer");
+    (void)json_push_kv_str(&reply->data, "commit", o->commit);
+    (void)json_push_kv_str(&reply->data, "base", o->base);
+    (void)json_push_kv_str(&reply->data, "bundle_sha256", o->bsha);
+    (void)json_push_kv_str(&reply->data, "verdict", "ok");
+}
+
+/* Read-only: nothing is queued, fetched or written, and no worktree is
+ * touched; every check is on bytes already on disk. */
+static void dlr_check_offer(const struct zcl_command_request *req,
+                            struct zcl_command_reply *reply)
+{
+    struct dlr_offer *o;
+    const char *bundle = dlr_str(req, "bundle");
+    const char *offer = dlr_str(req, "offer");
+    if (!bundle || !offer) {
+        dlr_offer_fail(reply, "OFFER_BAD_ARGUMENT", "input",
+                       "bundle and offer must each name a file",
+                       "input.bundle or input.offer missing");
+        return;
+    }
+    o = zcl_calloc(1, sizeof(*o), "dev_land_remote.offer");
+    if (dlr_offer_read(offer, o, reply) && dlr_offer_root(req, o, reply)) {
+        if (!dlr_bundle_abs(bundle, o->r.bundle, sizeof(o->r.bundle)))
+            dlr_offer_fail(reply, "OFFER_BAD_BUNDLE", "verify",
+                           "bundle is not a usable path", bundle);
+        else if (dlr_offer_bundle(o, reply))
+            dlr_offer_ok(o, reply);
+    }
+    free(o);
+}
+
 void zcl_native_handle_dev_land_remote(const struct zcl_command_request *req,
                                        struct zcl_command_reply *reply)
 {
@@ -889,8 +1169,11 @@ void zcl_native_handle_dev_land_remote(const struct zcl_command_request *req,
         dlr_send(req, reply);
     else if (path && strcmp(path, "dev.land.receive") == 0)
         dlr_receive(req, reply);
+    else if (path && strcmp(path, "dev.land.check_offer") == 0)
+        dlr_check_offer(req, reply);
     else
         dlr_fail(reply, "dev.land.remote", "UNKNOWN_LEAF", "route",
-                 "this handler serves dev.land.send and dev.land.receive",
+                 "this handler serves dev.land.send, dev.land.receive and "
+                 "dev.land.check_offer",
                  path ? path : "no leaf resolved");
 }

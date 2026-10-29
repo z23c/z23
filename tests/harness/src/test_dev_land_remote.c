@@ -708,10 +708,173 @@ _test_next:;
     return failures;
 }
 
+/* dev.land.send's offer manifest and dev.land.check_offer, on a fresh rig. */
+static void dlt_check(struct dlt_call *c, const char *cwd, const char *bundle,
+                      const char *offer, const char *repo)
+{
+    dlt_begin(c, "dev.land.check_offer");
+    (void)json_push_kv_str(&c->input, "bundle", bundle);
+    (void)json_push_kv_str(&c->input, "offer", offer);
+    if (repo)
+        (void)json_push_kv_str(&c->input, "repo", repo);
+    dlt_cd(cwd);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static bool dlt_manifest(const char *path, const char *schema,
+                         const char *commit, const char *base,
+                         const char *sha, const char *lane)
+{
+    char body[600];
+    (void)snprintf(body, sizeof(body),
+                   "{\"schema\":\"%s\",\"commit\":\"%s\",\"base\":\"%s\","
+                   "\"bundle_sha256\":\"%s\",\"lane\":\"%s\"}\n",
+                   schema, commit, base, sha, lane);
+    return dlt_write(path, body, 0644);
+}
+
+/* Copies src to dst with the last byte flipped. */
+static bool dlt_flip(const char *src, const char *dst)
+{
+    static unsigned char blob[1 << 16];
+    FILE *f = fopen(src, "rb");
+    size_t n;
+    bool ok;
+    if (!f)
+        return false;
+    n = fread(blob, 1, sizeof(blob), f);
+    ok = fclose(f) == 0 && n > 0 && n < sizeof(blob);
+    if (!ok)
+        return false;
+    blob[n - 1] ^= 0xff;
+    f = fopen(dst, "wb");
+    if (!f)
+        return false;
+    ok = fwrite(blob, 1, n, f) == n;
+    return fclose(f) == 0 && ok;
+}
+
+static int dlt_offer_cases(void)
+{
+    int failures = 0;
+    struct dlt_rig r;
+    struct dlt_call c;
+    char tip[64], b[900], o[900], bad[900], mo[900], bsha[ZSHA256_HEX_LEN];
+    char text[1024];
+    struct json_value doc;
+    if (!dlt_rig(&r, "offer") || !dlt_commit(r.sender, "a.txt", "a\n") ||
+        DLT_GIT(tip, sizeof(tip), r.sender, "rev-parse", "HEAD") != 0) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    tip[strcspn(tip, "\n")] = '\0';
+    (void)snprintf(b, sizeof(b), "%s/o.bundle", r.base);
+    (void)snprintf(o, sizeof(o), "%s/o.bundle.offer.json", r.base);
+    (void)snprintf(bad, sizeof(bad), "%s/bad.bundle", r.base);
+    (void)snprintf(mo, sizeof(mo), "%s/mo.offer.json", r.base);
+
+    TEST("land.send --bundle_out: writes <bundle_out>.offer.json and reports "
+         "it as data.offer") {
+        dlt_send_x(&c, &r, tip, b, false);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "offer")), o) == 0);
+        (void)snprintf(bsha, sizeof(bsha), "%s",
+                       json_get_str(json_get(&c.reply.data, "bundle_sha256")));
+        dlt_end(&c);
+        ASSERT(dlt_slurp(o, text, sizeof(text)));
+        json_init(&doc);
+        ASSERT(json_read(&doc, text, strlen(text)));
+        ASSERT_STR_EQ(json_get_str(json_get(&doc, "schema")),
+                      "zcl.dev_land_offer.v1");
+        ASSERT_STR_EQ(json_get_str(json_get(&doc, "commit")), tip);
+        ASSERT_STR_EQ(json_get_str(json_get(&doc, "base")), r.base_sha);
+        ASSERT_STR_EQ(json_get_str(json_get(&doc, "bundle_sha256")), bsha);
+        ASSERT_STR_EQ(json_get_str(json_get(&doc, "lane")), "mac");
+        json_free(&doc);
+        PASS();
+    }
+
+    TEST("land.check_offer: a sent bundle and its manifest check ok") {
+        dlt_check(&c, r.queue, b, o, NULL);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "commit")), tip);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "base")),
+                      r.base_sha);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "bundle_sha256")),
+                      bsha);
+        dlt_end(&c);
+        dlt_check(&c, "/", b, o, r.queue);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.check_offer: one flipped bundle byte refuses OFFER_SHA_MISMATCH") {
+        ASSERT(dlt_flip(b, bad));
+        dlt_check(&c, r.queue, bad, o, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_SHA_MISMATCH"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.check_offer: a manifest naming another commit refuses "
+         "OFFER_HEAD_MISMATCH") {
+        ASSERT(dlt_manifest(mo, "zcl.dev_land_offer.v1", r.base_sha,
+                            r.base_sha, bsha, "mac"));
+        dlt_check(&c, r.queue, b, mo, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_HEAD_MISMATCH"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.check_offer: a manifest naming another base refuses "
+         "OFFER_BASE_MISMATCH") {
+        ASSERT(dlt_manifest(mo, "zcl.dev_land_offer.v1", tip, tip, bsha,
+                            "mac"));
+        dlt_check(&c, r.queue, b, mo, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_BASE_MISMATCH"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.check_offer: a bad schema or malformed commit refuses "
+         "OFFER_BAD_MANIFEST") {
+        ASSERT(dlt_manifest(mo, "zcl.other.v1", tip, r.base_sha, bsha, "mac"));
+        dlt_check(&c, r.queue, b, mo, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_MANIFEST"));
+        dlt_end(&c);
+        ASSERT(dlt_manifest(mo, "zcl.dev_land_offer.v1", "xyz", r.base_sha,
+                            bsha, "mac"));
+        dlt_check(&c, r.queue, b, mo, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_MANIFEST"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.send --bundle_out: an existing .offer.json refuses "
+         "SEND_OFFER_EXISTS and writes no bundle") {
+        char nb[900], no[900];
+        (void)snprintf(nb, sizeof(nb), "%s/n.bundle", r.base);
+        (void)snprintf(no, sizeof(no), "%s/n.bundle.offer.json", r.base);
+        ASSERT(dlt_write(no, "{}\n", 0644));
+        dlt_send_x(&c, &r, tip, nb, false);
+        ASSERT(dlt_refused(&c, "SEND_OFFER_EXISTS"));
+        dlt_end(&c);
+        ASSERT(access(nb, F_OK) != 0);
+        PASS();
+    }
+
+_test_next:;
+    dlt_done(&r);
+    return failures;
+}
+
 int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
-    int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases();
+    int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases() +
+                   dlt_offer_cases();
     if (failures == 0)
         printf("test_dev_land_remote: all passed\n");
     else

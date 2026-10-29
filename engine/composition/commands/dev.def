@@ -2398,8 +2398,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "with the command that makes it single; an already-landed commit refuses "
     "SEND_NOTHING_AHEAD. bundle_out=<absolute path> writes the bundle there "
     "with its sha256 and runs no ssh or scp (no host needed): data.bundle, "
-    "data.bundle_sha256, data.commit, data.lane and a READY line; an existing "
-    "path refuses SEND_BUNDLE_EXISTS. data.commit and data.bundle_sha256 are "
+    "data.bundle_sha256, data.commit, data.lane, data.offer (the "
+    "<bundle_out>.offer.json manifest, SEND_OFFER_EXISTS) and a READY line; "
+    "an existing path refuses SEND_BUNDLE_EXISTS. data.commit and data.bundle_sha256 are "
     "also returned on the scp/ssh path. Host, lane, note, remote_cmd, inbox "
     "and remote_checkout are checked against "
     "[A-Za-z0-9 ._,:/()+=-] because ssh joins its argv into a remote shell "
@@ -2425,6 +2426,31 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_land_remote,
     "sending a bundle to the queue host is a development-lane operation",
     "z23-dev dev land send")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.check_offer", "dev.land", "",
+    "Check a sent bundle against its offer manifest, read-only",
+    "Reads <bundle_out>.offer.json and checks the bundle, queueing and "
+    "touching nothing: OFFER_BAD_MANIFEST (schema, commit, base or sha), "
+    "OFFER_SHA_MISMATCH, OFFER_BAD_BUNDLE (git bundle verify in repo, "
+    "default the checkout above the cwd), OFFER_HEAD_MISMATCH (one head, "
+    "the offered commit), OFFER_BASE_MISMATCH (one prerequisite, the "
+    "offered base). Returns commit, base, bundle_sha256, verdict ok.",
+    65536,
+    "land,offer,bundle,verify,p2p",
+    "zcl.land_check_offer_input.v1", "zcl.land_check_offer.v1",
+    "bundle,offer,repo", "bundle,offer",
+    "z23-dev dev land check_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json",
+    ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_remote,
+    "checking an offered bundle is a development-lane operation",
+    "z23-dev dev land check_offer")
 
 /* ── dev.lane ──────────────────────────────────────────────────────────────
  * An agent worktree with the proof's vendored dependencies primed onto
