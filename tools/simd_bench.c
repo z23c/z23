@@ -855,6 +855,25 @@ static void chacha_verify_tier(struct bench *b, struct chacha_aead_ctx *ctx,
         b->tier[t].verified = true;
 }
 
+/* Print only losing pairs, after all timing has finished. Positions are
+ * zero-based within the rotated schedule; durations cover one repetition. */
+static void chacha_report_losing_pairs(const struct bench *b, const int *active,
+                                       int n, uint64_t samples[MAX_TIERS][BENCH_MAX_REPS])
+{
+    if (!g_require_chacha_wins) return;
+    for (int rep = 0; rep < g_reps; rep++) {
+        for (int i = 1; i < n; i++) {
+            int t = active[i];
+            if (samples[t][rep] < samples[0][rep]) continue;
+            fprintf(stderr, "PAIR NO-WIN: %s tier='%s' rep=%d portable_order=%d vector_order=%d portable_ns=%llu vector_ns=%llu\n",
+                    b->primitive, b->tier[t].name, rep,
+                    (n - rep % n) % n, (i - rep % n + n) % n,
+                    (unsigned long long)samples[0][rep],
+                    (unsigned long long)samples[t][rep]);
+        }
+    }
+}
+
 /* Rotated paired schedule over every verified tier: each repetition times each
  * active tier once, the starting tier advancing by one so no tier always runs
  * first or last. won[t] records whether tier t beat portable in every pair. */
@@ -880,6 +899,7 @@ static void chacha_time_tiers(struct bench *b, struct chacha_aead_ctx *ctx,
             if (samples[active[i]][rep] >= samples[0][rep])
                 won[active[i]] = false;
     }
+    chacha_report_losing_pairs(b, active, n, samples);
     for (int i = 0; i < n; i++) {
         if (ctx[active[i]].failed) {
             fprintf(stderr, "FATAL: %s AEAD %s failed during timing.\n",
