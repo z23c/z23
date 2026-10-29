@@ -290,6 +290,40 @@ static int test_sapling_persist_pair_round_trip(void)
     return failures;
 }
 
+static bool usf_caller_tx_rolled_back_absent(struct node_db *ndb,
+                                             const struct byte_stream *ts,
+                                             int64_t saved_h, bool refused,
+                                             int64_t *got_h)
+{
+    bool began_rollback = refused && node_db_begin(ndb);
+    bool wrote_then_rolled_back = began_rollback &&
+        sapling_tree_persist_pair_in_open_tx(ndb, ts->data, ts->size,
+                                              saved_h) &&
+        node_db_rollback(ndb);
+    return wrote_then_rolled_back &&
+        !node_db_state_get_int(ndb, "sapling_tree_rebuild_height", got_h);
+}
+
+static bool usf_caller_tx_committed_visible(struct node_db *ndb,
+                                            const struct byte_stream *ts,
+                                            int64_t saved_h, bool absent,
+                                            int64_t *got_h)
+{
+    bool began_commit = absent && node_db_begin(ndb);
+    bool wrote_then_committed = began_commit &&
+        sapling_tree_persist_pair_in_open_tx(ndb, ts->data, ts->size,
+                                              saved_h) &&
+        node_db_commit(ndb);
+    size_t tree_len = 0;
+    uint8_t tree_buf[8192];
+    return wrote_then_committed &&
+        node_db_state_get_int(ndb, "sapling_tree_rebuild_height", got_h) &&
+        *got_h == saved_h &&
+        node_db_state_get(ndb, "sapling_tree", tree_buf, sizeof(tree_buf),
+                          &tree_len) && tree_len == ts->size &&
+        memcmp(tree_buf, ts->data, tree_len) == 0;
+}
+
 /* The projection catchup owns a plain transaction but intentionally does not
  * set the reducer-specific sync_in_batch flag. Prove that its explicit entry
  * point writes inside that transaction without attempting a nested BEGIN,
@@ -321,28 +355,13 @@ static int test_sapling_persist_pair_inside_caller_transaction(void)
     bool refused_without_tx = ok &&
         !sapling_tree_persist_pair_in_open_tx(&ndb, ts.data, ts.size,
                                               saved_h);
-    bool began_rollback = refused_without_tx && node_db_begin(&ndb);
-    bool wrote_then_rolled_back = began_rollback &&
-        sapling_tree_persist_pair_in_open_tx(&ndb, ts.data, ts.size,
-                                              saved_h) &&
-        node_db_rollback(&ndb);
     int64_t got_h = -1;
-    bool absent_after_rollback = wrote_then_rolled_back &&
-        !node_db_state_get_int(&ndb, "sapling_tree_rebuild_height", &got_h);
-
-    bool began_commit = absent_after_rollback && node_db_begin(&ndb);
-    bool wrote_then_committed = began_commit &&
-        sapling_tree_persist_pair_in_open_tx(&ndb, ts.data, ts.size,
-                                              saved_h) &&
-        node_db_commit(&ndb);
-    size_t tree_len = 0;
-    uint8_t tree_buf[8192];
-    bool pair_visible = wrote_then_committed &&
-        node_db_state_get_int(&ndb, "sapling_tree_rebuild_height", &got_h) &&
-        got_h == saved_h &&
-        node_db_state_get(&ndb, "sapling_tree", tree_buf, sizeof(tree_buf),
-                          &tree_len) && tree_len == ts.size &&
-        memcmp(tree_buf, ts.data, tree_len) == 0;
+    bool absent_after_rollback =
+        usf_caller_tx_rolled_back_absent(&ndb, &ts, saved_h,
+                                         refused_without_tx, &got_h);
+    bool pair_visible =
+        usf_caller_tx_committed_visible(&ndb, &ts, saved_h,
+                                        absent_after_rollback, &got_h);
 
     ok = ok && refused_without_tx && absent_after_rollback && pair_visible;
     stream_free(&ts);
@@ -374,6 +393,64 @@ static bool make_output_only_tx(struct transaction *tx,
     tx->v_shielded_output[0].cm = *cm;
     transaction_compute_hash(tx);
     return true;
+}
+
+static bool usf_build_fold_block(struct block *blk, const struct uint256 *cm3,
+                                 bool ok)
+{
+    block_init(blk);
+    blk->vtx = zcl_calloc(1, sizeof(struct transaction), "test_sapling_fold_vtx");
+    ok = ok && blk->vtx != NULL;
+    if (blk->vtx) {
+        blk->num_vtx = 1;
+        ok = ok && make_output_only_tx(&blk->vtx[0], cm3);
+        blk->header.nVersion = 4;
+        blk->header.nTime = 1700000000u;
+        blk->header.nBits = 0x2000ffffu;
+        struct uint256 txid = blk->vtx[0].hash;
+        blk->header.hashMerkleRoot = compute_merkle_root(&txid, 1);
+    }
+    return ok;
+}
+
+static bool usf_install_fold_chain(struct active_chain *chain,
+                                   struct block_index *bi_sapling,
+                                   struct block_index *bi_saved,
+                                   struct block_index *bi_tip)
+{
+    return active_chain_install_tip_slot(chain, bi_sapling) &&
+           active_chain_install_tip_slot(chain, bi_saved) &&
+           active_chain_install_tip_slot(chain, bi_tip);
+}
+
+static bool usf_read_fold_result(struct node_db *ndb, bool ok,
+                                 struct incremental_merkle_tree *persisted,
+                                 int64_t *persisted_h, bool *loaded,
+                                 bool *got_h)
+{
+    uint8_t rbuf[8192];
+    size_t rlen = 0;
+    *loaded = ok && node_db_state_get(ndb, "sapling_tree", rbuf,
+                                      sizeof(rbuf), &rlen) && rlen > 0;
+    *got_h = *loaded && node_db_state_get_int(ndb,
+                                "sapling_tree_rebuild_height", persisted_h);
+    sapling_tree_init(persisted);
+    struct byte_stream rs;
+    stream_init_from_data(&rs, rbuf, rlen);
+    return *got_h && incremental_tree_deserialize(persisted, &rs);
+}
+
+static void usf_scratch_fold_root(const struct uint256 *cm1,
+                                  const struct uint256 *cm2,
+                                  const struct uint256 *cm3,
+                                  struct uint256 *root)
+{
+    struct incremental_merkle_tree scratch;
+    sapling_tree_init(&scratch);
+    incremental_tree_append(&scratch, cm1);
+    incremental_tree_append(&scratch, cm2);
+    incremental_tree_append(&scratch, cm3);
+    incremental_tree_root(&scratch, root);
 }
 
 /* Reproduces the exact boot-time scenario this lane fixes: a tree persisted
@@ -431,18 +508,7 @@ static int test_sapling_rebuild_folds_forward_from_saved_height(void)
      * does; the test proves boot.c may now rely on it instead of deferring
      * or replaying from activation. */
     struct block blk;
-    block_init(&blk);
-    blk.vtx = zcl_calloc(1, sizeof(struct transaction), "test_sapling_fold_vtx");
-    ok = ok && blk.vtx != NULL;
-    if (blk.vtx) {
-        blk.num_vtx = 1;
-        ok = ok && make_output_only_tx(&blk.vtx[0], &cm3);
-        blk.header.nVersion = 4;
-        blk.header.nTime = 1700000000u;
-        blk.header.nBits = 0x2000ffffu;
-        struct uint256 txid = blk.vtx[0].hash;
-        blk.header.hashMerkleRoot = compute_merkle_root(&txid, 1);
-    }
+    ok = usf_build_fold_block(&blk, &cm3, ok);
 
     static const unsigned char msg[4] = {0x24, 0xe9, 0x27, 0x64};
     struct disk_block_pos pos;
@@ -461,35 +527,22 @@ static int test_sapling_rebuild_folds_forward_from_saved_height(void)
     bi_tip.nFile = pos.nFile;
     bi_tip.nDataPos = pos.nPos;
 
-    ok = ok && active_chain_install_tip_slot(&chain, &bi_sapling);
-    ok = ok && active_chain_install_tip_slot(&chain, &bi_saved);
-    ok = ok && active_chain_install_tip_slot(&chain, &bi_tip);
+    ok = ok && usf_install_fold_chain(&chain, &bi_sapling, &bi_saved, &bi_tip);
 
     int appended = ok ? sapling_tree_rebuild(&ndb, &chain, dir) : -1;
 
-    uint8_t rbuf[8192];
-    size_t rlen = 0;
-    bool loaded = ok && node_db_state_get(&ndb, "sapling_tree", rbuf,
-                                          sizeof(rbuf), &rlen) && rlen > 0;
     int64_t persisted_h = -1;
-    bool got_h = loaded && node_db_state_get_int(&ndb,
-                                "sapling_tree_rebuild_height", &persisted_h);
+    bool loaded = false;
+    bool got_h = false;
     struct incremental_merkle_tree persisted;
-    sapling_tree_init(&persisted);
-    struct byte_stream rs;
-    stream_init_from_data(&rs, rbuf, rlen);
-    bool deser = got_h && incremental_tree_deserialize(&persisted, &rs);
+    bool deser = usf_read_fold_result(&ndb, ok, &persisted, &persisted_h,
+                                      &loaded, &got_h);
     struct uint256 persisted_root;
     incremental_tree_root(&persisted, &persisted_root);
 
     /* Independent from-scratch build — never touches sapling_tree_rebuild. */
-    struct incremental_merkle_tree scratch;
-    sapling_tree_init(&scratch);
-    incremental_tree_append(&scratch, &cm1);
-    incremental_tree_append(&scratch, &cm2);
-    incremental_tree_append(&scratch, &cm3);
     struct uint256 scratch_root;
-    incremental_tree_root(&scratch, &scratch_root);
+    usf_scratch_fold_root(&cm1, &cm2, &cm3, &scratch_root);
 
     bool matches_scratch = deser &&
         memcmp(persisted_root.data, scratch_root.data, 32) == 0;
@@ -629,6 +682,45 @@ static int test_sapling_persist_pair_busy_exhausted_names_blocker(void)
     return failures;
 }
 
+static bool usf_persist_four_while_open(struct node_db *ndb,
+                                        const struct byte_stream *ts,
+                                        int64_t saved_h, bool tx_opened)
+{
+    bool persisted_while_open = false;
+    if (tx_opened) {
+        for (int i = 0; i < 4; i++) {
+            persisted_while_open =
+                sapling_tree_persist_pair(ndb, ts->data, ts->size, saved_h);
+            if (persisted_while_open)
+                break;
+        }
+    }
+    return persisted_while_open;
+}
+
+static bool usf_persist_busy_blocker_transient(void)
+{
+    return blocker_exists("sapling_tree_rebuild.persist_busy") &&
+           blocker_class_for("sapling_tree_rebuild.persist_busy") ==
+               BLOCKER_TRANSIENT;
+}
+
+static bool usf_persist_after_close(struct node_db *ndb,
+                                    const struct byte_stream *ts,
+                                    int64_t saved_h, bool tx_closed)
+{
+    return tx_closed &&
+           sapling_tree_persist_pair(ndb, ts->data, ts->size, saved_h);
+}
+
+static bool usf_defer_final_ok(bool persisted_after_close,
+                               bool no_extra_deferral, bool blocker_cleared,
+                               bool got, bool height_matches)
+{
+    return persisted_after_close && no_extra_deferral && blocker_cleared &&
+           got && height_matches;
+}
+
 /* The REAL production failure the adversarial verifier isolated: the rebuild
  * shares the reducer's node_db connection, so a persist attempted while that
  * connection already has an OPEN transaction issues a nested BEGIN, which
@@ -677,23 +769,13 @@ static int test_sapling_persist_pair_defers_while_tx_open(void)
      * deferral budget and must name the livelock blocker with the production
      * height, proving an open reducer transaction cannot remain silent. */
     int deferrals_before = sapling_tree_rebuild_test_persist_deferrals();
-    bool persisted_while_open = false;
-    if (tx_opened) {
-        for (int i = 0; i < 4; i++) {
-            persisted_while_open =
-                sapling_tree_persist_pair(&ndb, ts.data, ts.size, saved_h);
-            if (persisted_while_open)
-                break;
-        }
-    }
+    bool persisted_while_open =
+        usf_persist_four_while_open(&ndb, &ts, saved_h, tx_opened);
     int deferrals_after = sapling_tree_rebuild_test_persist_deferrals();
 
     bool deferred = !persisted_while_open &&
                     (deferrals_after == deferrals_before + 4);
-    bool blocker_named =
-        blocker_exists("sapling_tree_rebuild.persist_busy") &&
-        blocker_class_for("sapling_tree_rebuild.persist_busy") ==
-            BLOCKER_TRANSIENT;
+    bool blocker_named = usf_persist_busy_blocker_transient();
 
     /* Nothing was written while deferred: the height key must still be absent. */
     int64_t peek_h = -1;
@@ -707,8 +789,7 @@ static int test_sapling_persist_pair_defers_while_tx_open(void)
      * NOT defer again — proving the deferral is transient, not a dead end. */
     int deferrals_pre_retry = sapling_tree_rebuild_test_persist_deferrals();
     bool persisted_after_close =
-        tx_closed &&
-        sapling_tree_persist_pair(&ndb, ts.data, ts.size, saved_h);
+        usf_persist_after_close(&ndb, &ts, saved_h, tx_closed);
     bool no_extra_deferral =
         sapling_tree_rebuild_test_persist_deferrals() == deferrals_pre_retry;
     bool blocker_cleared =
@@ -723,8 +804,9 @@ static int test_sapling_persist_pair_defers_while_tx_open(void)
     sapling_tree_rebuild_test_reset_persist_deferrals();
 
     ok = ok && tx_opened && deferred && blocker_named &&
-         absent_while_deferred && tx_closed && persisted_after_close &&
-         no_extra_deferral && blocker_cleared && got && got_h == saved_h;
+         absent_while_deferred && tx_closed;
+    ok = ok && usf_defer_final_ok(persisted_after_close, no_extra_deferral,
+                                  blocker_cleared, got, got_h == saved_h);
 
     node_db_close(&ndb);
     test_rm_rf_recursive(dir);
