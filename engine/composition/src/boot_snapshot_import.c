@@ -661,6 +661,132 @@ static bool snapshot_import_complete(struct node_db *ndb)
     return true;
 }
 
+static bool snapshot_import_src_integrity_ok(sqlite3 *src)
+{
+    bool integrity_ok = false;
+    {
+        sqlite3_stmt *ck = NULL;
+        if (sqlite3_prepare_v2(src, "PRAGMA integrity_check",
+                               -1, &ck, NULL) == SQLITE_OK && ck) {
+            if (sqlite3_step(ck) == SQLITE_ROW) {  // raw-sql-ok:integrity-pragma
+                const unsigned char *r = sqlite3_column_text(ck, 0);
+                integrity_ok = r && strcmp((const char *)r, "ok") == 0;
+            }
+            sqlite3_finalize(ck);
+        }
+    }
+    return integrity_ok;
+}
+
+static int64_t snapshot_import_src_height(sqlite3 *src)
+{
+    int64_t snap_height = -1;
+    {
+        sqlite3_stmt *q = NULL;
+        if (sqlite3_prepare_v2(src,
+                "SELECT value FROM _snapshot_meta WHERE key='height'",
+                -1, &q, NULL) == SQLITE_OK && q) {
+            if (sqlite3_step(q) == SQLITE_ROW) {  // raw-sql-ok:read-only-snapshot
+                const unsigned char *v = sqlite3_column_text(q, 0);
+                if (v) snap_height = strtoll((const char *)v, NULL, 10);
+            }
+            sqlite3_finalize(q);
+        }
+    }
+    return snap_height;
+}
+
+static bool snapshot_import_src_best_hash(sqlite3 *src, int64_t snap_height,
+                                          uint8_t best_hash[32])
+{
+    bool best_found = false;
+    {
+        sqlite3_stmt *q = NULL;
+        if (sqlite3_prepare_v2(src,
+                "SELECT hash FROM blocks WHERE height=?",
+                -1, &q, NULL) == SQLITE_OK && q) {
+            sqlite3_bind_int64(q, 1, snap_height);
+            if (sqlite3_step(q) == SQLITE_ROW) {  // raw-sql-ok:read-only-snapshot
+                const void *b = sqlite3_column_blob(q, 0);
+                int n = sqlite3_column_bytes(q, 0);
+                if (b && n == 32) {
+                    memcpy(best_hash, b, 32);
+                    best_found = true;
+                }
+            }
+            sqlite3_finalize(q);
+        }
+    }
+    return best_found;
+}
+
+static int64_t snapshot_import_src_utxo_count(sqlite3 *src)
+{
+    int64_t snap_utxos = 0;
+    {
+        sqlite3_stmt *q = NULL;
+        if (sqlite3_prepare_v2(src,
+                "SELECT COUNT(*) FROM utxos",
+                -1, &q, NULL) == SQLITE_OK && q) {
+            if (sqlite3_step(q) == SQLITE_ROW)  // raw-sql-ok:read-only-snapshot
+                snap_utxos = sqlite3_column_int64(q, 0);
+            sqlite3_finalize(q);
+        }
+    }
+    return snap_utxos;
+}
+
+/* Runs sql on db; on failure copies the SQLite error text (or "?") into msg. */
+static bool snapshot_import_exec_msg(sqlite3 *db, const char *sql,
+                                     char msg[256])
+{
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        snprintf(msg, 256, "?");
+        if (err) { snprintf(msg, 256, "%s", err); sqlite3_free(err); }
+        return false;
+    }
+    return true;
+}
+
+static bool snapshot_import_bulk_copy(struct node_db *ndb)
+{
+    bool ok = true;
+    if (ok && ar_exec_write_sql(ndb->db, "DELETE FROM main.utxos")
+                  != SQLITE_OK) {
+        fprintf(stderr, "[boot_snapshot_import] clear utxos: %s\n",  // obs-ok:bulk-import-failure
+                sqlite3_errmsg(ndb->db));
+        ok = false;
+    }
+    if (ok && ar_exec_write_sql(ndb->db,
+            "INSERT INTO main.utxos SELECT * FROM snapsrc.utxos")
+                  != SQLITE_OK) {
+        fprintf(stderr, "[boot_snapshot_import] copy utxos: %s\n",  // obs-ok:bulk-import-failure
+                sqlite3_errmsg(ndb->db));
+        ok = false;
+    }
+    return ok;
+}
+
+/* Recomputes the SHA3 over the installed set; true when it matches cp. */
+static bool snapshot_import_checkpoint_match(struct node_db *ndb,
+    const struct sha3_utxo_checkpoint *cp, uint64_t *cnt)
+{
+    uint8_t root[32];
+    *cnt = 0;
+    utxo_commitment_sha3_compute(ndb->db, root, cnt);
+    return !(*cnt != cp->utxo_count || memcmp(root, cp->sha3_hash, 32) != 0);
+}
+
+static void snapshot_import_publish_outputs(int64_t *out_utxo_count, int64_t snap_utxos,
+    int64_t *out_snap_height, int64_t snap_height,
+    uint8_t out_best_hash[32], const uint8_t best_hash[32])
+{
+    if (out_utxo_count)  *out_utxo_count  = snap_utxos;
+    if (out_snap_height) *out_snap_height = snap_height;
+    if (out_best_hash)   memcpy(out_best_hash, best_hash, 32);
+}
+
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,
                               int64_t *out_utxo_count,
@@ -690,37 +816,14 @@ bool boot_import_snapshot_db(struct node_db *ndb,
                  snapshot_path, m);
     }
 
-    bool integrity_ok = false;
-    {
-        sqlite3_stmt *ck = NULL;
-        if (sqlite3_prepare_v2(src, "PRAGMA integrity_check",
-                               -1, &ck, NULL) == SQLITE_OK && ck) {
-            if (sqlite3_step(ck) == SQLITE_ROW) {  // raw-sql-ok:integrity-pragma
-                const unsigned char *r = sqlite3_column_text(ck, 0);
-                integrity_ok = r && strcmp((const char *)r, "ok") == 0;
-            }
-            sqlite3_finalize(ck);
-        }
-    }
+    bool integrity_ok = snapshot_import_src_integrity_ok(src);
     if (!integrity_ok) {
         sqlite3_close(src);
         LOG_FAIL("boot_snapshot_import",
                  "integrity_check failed for %s", snapshot_path);
     }
 
-    int64_t snap_height = -1;
-    {
-        sqlite3_stmt *q = NULL;
-        if (sqlite3_prepare_v2(src,
-                "SELECT value FROM _snapshot_meta WHERE key='height'",
-                -1, &q, NULL) == SQLITE_OK && q) {
-            if (sqlite3_step(q) == SQLITE_ROW) {  // raw-sql-ok:read-only-snapshot
-                const unsigned char *v = sqlite3_column_text(q, 0);
-                if (v) snap_height = strtoll((const char *)v, NULL, 10);
-            }
-            sqlite3_finalize(q);
-        }
-    }
+    int64_t snap_height = snapshot_import_src_height(src);
     if (snap_height < 1) {
         sqlite3_close(src);
         LOG_FAIL("boot_snapshot_import",
@@ -756,41 +859,14 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     }
 
     uint8_t best_hash[32] = {0};
-    bool best_found = false;
-    {
-        sqlite3_stmt *q = NULL;
-        if (sqlite3_prepare_v2(src,
-                "SELECT hash FROM blocks WHERE height=?",
-                -1, &q, NULL) == SQLITE_OK && q) {
-            sqlite3_bind_int64(q, 1, snap_height);
-            if (sqlite3_step(q) == SQLITE_ROW) {  // raw-sql-ok:read-only-snapshot
-                const void *b = sqlite3_column_blob(q, 0);
-                int n = sqlite3_column_bytes(q, 0);
-                if (b && n == 32) {
-                    memcpy(best_hash, b, 32);
-                    best_found = true;
-                }
-            }
-            sqlite3_finalize(q);
-        }
-    }
+    bool best_found = snapshot_import_src_best_hash(src, snap_height, best_hash);
     if (!best_found) {
         sqlite3_close(src);
         LOG_FAIL("boot_snapshot_import",
                  "no blocks row at h=%lld", (long long)snap_height);
     }
 
-    int64_t snap_utxos = 0;
-    {
-        sqlite3_stmt *q = NULL;
-        if (sqlite3_prepare_v2(src,
-                "SELECT COUNT(*) FROM utxos",
-                -1, &q, NULL) == SQLITE_OK && q) {
-            if (sqlite3_step(q) == SQLITE_ROW)  // raw-sql-ok:read-only-snapshot
-                snap_utxos = sqlite3_column_int64(q, 0);
-            sqlite3_finalize(q);
-        }
-    }
+    int64_t snap_utxos = snapshot_import_src_utxo_count(src);
     sqlite3_close(src);
     if (snap_utxos < 1000)
         LOG_FAIL("boot_snapshot_import",
@@ -803,18 +879,12 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     char attach_sql[640];
     snprintf(attach_sql, sizeof(attach_sql),
              "ATTACH DATABASE '%s' AS snapsrc", snapshot_path);
-    char *err = NULL;
-    if (sqlite3_exec(ndb->db, attach_sql, NULL, NULL, &err) != SQLITE_OK) {
-        char msg[256] = "?";
-        if (err) { snprintf(msg, sizeof(msg), "%s", err); sqlite3_free(err); }
+    char msg[256];
+    if (!snapshot_import_exec_msg(ndb->db, attach_sql, msg))
         LOG_FAIL("boot_snapshot_import", "ATTACH failed: %s", msg);
-    }
 
     bool ok = true;
-    if (sqlite3_exec(ndb->db, "BEGIN IMMEDIATE", NULL, NULL, &err)
-        != SQLITE_OK) {
-        char msg[256] = "?";
-        if (err) { snprintf(msg, sizeof(msg), "%s", err); sqlite3_free(err); }
+    if (!snapshot_import_exec_msg(ndb->db, "BEGIN IMMEDIATE", msg)) {
         sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
         LOG_FAIL("boot_snapshot_import", "BEGIN failed: %s", msg);
     }
@@ -823,19 +893,7 @@ bool boot_import_snapshot_db(struct node_db *ndb,
      * INSERT alive forever once watchdog progress exemptions became active. */
     sqlite3_progress_handler(ndb->db, 50000,
                              snapshot_import_progress, NULL);
-    if (ok && ar_exec_write_sql(ndb->db, "DELETE FROM main.utxos")
-                  != SQLITE_OK) {
-        fprintf(stderr, "[boot_snapshot_import] clear utxos: %s\n",  // obs-ok:bulk-import-failure
-                sqlite3_errmsg(ndb->db));
-        ok = false;
-    }
-    if (ok && ar_exec_write_sql(ndb->db,
-            "INSERT INTO main.utxos SELECT * FROM snapsrc.utxos")
-                  != SQLITE_OK) {
-        fprintf(stderr, "[boot_snapshot_import] copy utxos: %s\n",  // obs-ok:bulk-import-failure
-                sqlite3_errmsg(ndb->db));
-        ok = false;
-    }
+    ok = snapshot_import_bulk_copy(ndb);
     /* WRITE-TIME VERIFICATION (mirrors utxo_recovery_restore.c):
      * before COMMIT, recompute the SHA3 over the just-installed set. At the
      * compiled checkpoint height there is a cryptographic ground truth, so
@@ -851,9 +909,8 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     if (ok) {
         const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
         if (cp && snap_height == (int64_t)cp->height) {
-            uint8_t root[32]; uint64_t cnt = 0;
-            utxo_commitment_sha3_compute(ndb->db, root, &cnt);
-            if (cnt != cp->utxo_count || memcmp(root, cp->sha3_hash, 32) != 0) {
+            uint64_t cnt = 0;
+            if (!snapshot_import_checkpoint_match(ndb, cp, &cnt)) {
                 LOG_WARN("boot_snapshot_import",
                          "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
                          "want=%llu) — snapshot REJECTED, not installed as "
@@ -899,8 +956,7 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     if (!snapshot_import_complete(ndb))
         return false;
 
-    if (out_utxo_count)  *out_utxo_count  = snap_utxos;
-    if (out_snap_height) *out_snap_height = snap_height;
-    if (out_best_hash)   memcpy(out_best_hash, best_hash, 32);
+    snapshot_import_publish_outputs(out_utxo_count, snap_utxos, out_snap_height,
+                                    snap_height, out_best_hash, best_hash);
     return true;
 }

@@ -244,7 +244,7 @@ engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:23
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:80
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
-engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
+engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:29
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:37
 engine/entry/main_cli_modes.c:bench_crypto_vs_rust:51
