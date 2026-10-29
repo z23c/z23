@@ -31,7 +31,8 @@ bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 bool zapp_balance_format(const char *json, char *out, size_t cap);
 /* One plain line per fleet doctor detail, naming the checks that share it ("Identity and wiki: detail"),
- * as many lines as fit. Informational checks and next-step commands are left out. */
+ * as many lines as fit, or "No fleet check applies here." when only informational checks remain.
+ * Informational checks and next-step commands are left out. */
 bool zapp_fleet_doctor_format(const char *json, char *out, size_t cap);
 /* The JSON object in command output: at its start, or on the first line beginning with {, after
  * warnings the command wrote first. NULL when there is none. */

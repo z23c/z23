@@ -36,6 +36,10 @@ static void on_interrupt(int signal) { (void)signal; interrupted = 1; }
 static int orphan(const char *mode, const char *data)
 {
     alarm(30);
+    sigset_t blocked, waiting;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &blocked, &waiting)) return 6;
+    sigdelset(&waiting, SIGINT);
     if (!strcmp(mode, "saving")) {
         char ready[300];
         signal(SIGINT, on_interrupt);
@@ -43,7 +47,7 @@ static int orphan(const char *mode, const char *data)
         FILE *f = fopen(ready, "w");
         if (!f || fclose(f)) return 5;
     }
-    while (!interrupted) pause();
+    while (!interrupted) sigsuspend(&waiting);
     struct timespec save = {.tv_sec = 2}; nanosleep(&save, NULL);
     return 0;
 }
@@ -110,6 +114,8 @@ static void doctor_tests(void)
         "{\"name\":\"wiki\",\"detail\":\"Needs a node.\"}]}}";
     assert(zapp_fleet_doctor_format(shared, out, sizeof(out)));
     assert(!strcmp(out, "Node: No node answered.\nIdentity, transport and wiki: Needs a node.\nMembership: Not in a fleet."));
+    const char *quiet = "{\"ok\":true,\"data\":{\"checks\":[{\"name\":\"mail\",\"detail\":\"Developer tool.\",\"informational\":true}]}}";
+    assert(zapp_fleet_doctor_format(quiet, out, sizeof(out)) && !strcmp(out, "No fleet check applies here."));
     assert(!zapp_fleet_doctor_format("{\"ok\":false,\"data\":{\"checks\":[]}}", out, sizeof(out)));
     assert(!zapp_fleet_doctor_format("not json", out, sizeof(out)) && !out[0]);
     char failed[128] = "{\"ok\":false,\"error\":{\"code\":\"E\",\"message\":\"The manager is offline.\"}}";
@@ -196,14 +202,17 @@ static void earlier_cases(struct zapp_runtime *r, const char *self, const char *
     assert(f && fprintf(f, "%d\n", (int)getpid()) > 0 && fclose(f) == 0);
     assert(!zapp_node_running(r) && unlink(pidfile) == 0);
 }
-/* The preview package neither starts a node nor reads the owner's Start choice. */
+/* With the owner's Start choice saved, the preview package still neither starts a node nor reads
+ * the choice. */
 static void preview_cases(struct zapp_runtime *r)
 {
     char out[128];
+    assert(zapp_node_wanted(r));
     r->preview = true;
     assert(!zapp_node_start(r, out, sizeof(out)) && strstr(out, "preview app does not run a node"));
     assert(!zapp_node_wanted(r) && r->node == 0);
     r->preview = false;
+    assert(zapp_node_wanted(r));
 }
 static void command_cases(struct zapp_runtime *r)
 {
@@ -234,10 +243,10 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(snprintf(r->state_root, sizeof(r->state_root), "%s", directory) > 0);
     assert(setenv("ZAPP_TEST_STATE", r->state_root, 1) == 0);
     assert(!zapp_node_wanted(r));
-    preview_cases(r);
     assert(zapp_node_start(r, out, sizeof(out)) && zapp_node_wanted(r));
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
+    preview_cases(r);
     assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(r));
     earlier_cases(r, self, directory);
 }

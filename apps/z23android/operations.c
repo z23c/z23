@@ -511,10 +511,13 @@ bool zapp_fleet_doctor_format(const char *json, char *out, size_t cap)
     const struct json_value *checks = json_get(json_get(&root, "data"), "checks");
     ok = ok && success && success->type == JSON_BOOL && json_get_bool(success) &&
          checks && checks->type == JSON_ARR;
-    size_t used = 0;
-    for (size_t i = 0; ok && i < json_size(checks); ++i)
+    size_t used = 0, shown = 0;
+    for (size_t i = 0; ok && i < json_size(checks); ++i) {
+        shown += doctor_detail(checks, i) != NULL;
         if (!doctor_line(checks, i, out, cap, &used)) break;
+    }
     json_free(&root);
+    if (ok && !shown) (void)put(out, cap, &used, "No fleet check applies here.");
     return ok && used;
 }
 

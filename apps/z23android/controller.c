@@ -212,8 +212,8 @@ static bool conversation_chat(struct controller *c, const char *question, char *
 static bool fleet_hosts(struct controller *c, bool refresh, char *out)
 {
     char *formatted = calloc(1, sizeof(c->view.fleet_status));
-    bool ok = formatted && zapp_speech_client_fleet(c->files, refresh, out, ZAPP_TEXT_CAP, NULL) &&
-        zapp_hosts_format(out, formatted, sizeof(c->view.fleet_status));
+    bool answered = formatted && zapp_speech_client_fleet(c->files, refresh, out, ZAPP_TEXT_CAP, NULL);
+    bool ok = answered && zapp_hosts_format(out, formatted, sizeof(c->view.fleet_status));
     pthread_mutex_lock(&c->lock);
     if (ok) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
@@ -221,9 +221,11 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
         /* An answered fleet request proves the paired host is reachable. */
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
     } else if (c->view.fleet_status[0]) {
-        /* The last report stays visible, marked old, once the host stops answering. */
+        /* The last report stays visible, marked old, once no current one arrives. */
         c->view.fleet_stale = true;
-        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host not answering. Connect it over USB and keep it running.");
+        copy_text(c->view.connection, sizeof(c->view.connection), answered ?
+                  "Laptop host connected. It sent no fleet report." :
+                  "Laptop host not answering. Connect it over USB and keep it running.");
     }
     pthread_mutex_unlock(&c->lock);
     copy_text(out, ZAPP_TEXT_CAP, ok ? formatted : "Fleet status is unavailable. Connect the laptop host over USB.");

@@ -564,7 +564,7 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[160] = "", status[320];
     size_t n = strcspn(view->fleet_status, "\n");
-    if (n && view->fleet_stale) snprintf(fleet, sizeof(fleet), "\nFleet · laptop host not answering");
+    if (n && view->fleet_stale) snprintf(fleet, sizeof(fleet), "\nFleet · no current report");
     else if (n && n < 140) snprintf(fleet, sizeof(fleet), "\nFleet · %.*s", (int)n, view->fleet_status);
     snprintf(status, sizeof(status), "%s%s", voice_preview ?
              "Preview · separate from your main node" : view->node_line, fleet);
@@ -576,7 +576,7 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[10272], pairing[160];
     if (view->fleet_status[0]) {
-        snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_stale ? "Laptop host not answering. Last report:\n\n" : "",
+        snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_stale ? "No current fleet report. Last report:\n\n" : "",
                  view->fleet_status);
         (void)text(env, hosts_view, fleet);
     }

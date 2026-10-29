@@ -74,8 +74,8 @@ through the node's pid file and its first argument, this `-datadir`: it shows
 that node as running, refuses a second start and stops that node on request.
 The preview package never runs a node: it has no **Start node** button,
 answers a spoken start request without proposing one, and states that it is
-separate from the main node. When the laptop host stops answering, the fleet
-line says so and **More** labels the last fleet report as old.
+separate from the main node. When no current fleet report arrives, the fleet
+line says so and **More** labels the last report as old.
 
 Chat refreshes a bounded read-only node summary before asking the private
 model on the paired laptop host. The summary includes synchronization text,
