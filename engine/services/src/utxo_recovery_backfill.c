@@ -172,7 +172,7 @@ static int backfill_resolve_block_values(struct block_index *bi,
          * cursor past this height — stop and retry next boot. */
         struct block blk;
         if (!read_block_from_disk_index(&blk, bi, datadir))
-            return -1;
+            return -1; /* raw-return-ok:unreadable body; the walk stops and retries next boot */
         connect_block_shielded_values(&blk, sprout_val, sapling_val);
         block_free(&blk);
         if (*sprout_val != 0 || *sapling_val != 0) {
@@ -204,7 +204,7 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
 
     if (AR_STEP_WRITE(upd) != SQLITE_DONE) {
         backfill_abort_write(ndb, upd, ins, "UPDATE value row");
-        return -1;
+        return -1; /* raw-return-ok:backfill_abort_write logged the failed step */
     }
     if (sqlite3_changes(ndb->db) > 0)
         return 1;
@@ -243,7 +243,7 @@ static int backfill_write_value_row(struct node_db *ndb, sqlite3_stmt *upd,
     sqlite3_bind_int64(ins, 18, sprout_val);
     if (AR_STEP_WRITE(ins) != SQLITE_DONE) {
         backfill_abort_write(ndb, upd, ins, "INSERT value row");
-        return -1;
+        return -1; /* raw-return-ok:backfill_abort_write logged the failed step */
     }
     return 1;
 }
@@ -259,7 +259,7 @@ static int backfill_flush_scan_batch(struct node_db *ndb, int h,
      * and the cursor commit atomically together (crash-safe). */
     if (!node_db_state_set_int(ndb, "shielded_backfill_height", h)) {
         *abort_op = "persist batch cursor";
-        return -1;
+        return -1; /* raw-return-ok:the caller aborts and logs *abort_op */
     }
     if (!node_db_commit(ndb)) {
         *abort_op = "commit value batch";
