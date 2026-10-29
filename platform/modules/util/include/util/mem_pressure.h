@@ -139,6 +139,9 @@ bool mem_pressure_dump_state_json(struct json_value *out, const char *key);
  * os_proc test override (see platform/os_proc.h) — callers manage that
  * separately. */
 void mem_pressure_reset_for_testing(void);
+/* Reads memory as on Android, where MemAvailable leaves out cached apps that lmkd reclaims,
+ * until the next reset. */
+void mem_pressure_set_android_for_testing(bool android);
 #endif
 
 #ifdef __cplusplus

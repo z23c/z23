@@ -154,6 +154,26 @@ int test_mem_pressure(void)
                  mem_pressure_current() == MEM_NOMINAL);
     }
 
+    /* ── Android: MemAvailable leaves out cached apps lmkd reclaims ──── */
+    {
+        mem_pressure_set_android_for_testing(true);
+        set_override(120, -1, -1, -1, 1000, 210);  /* 79% in use, 12% resident */
+        mem_pressure_poll_tick();
+        MP_CHECK("Android: 79% in use but 12% resident -> NOMINAL",
+                 mem_pressure_current() == MEM_NOMINAL);
+
+        set_override(950, -1, -1, -1, 1000, 600);  /* 40% in use but 95% resident */
+        mem_pressure_poll_tick();
+        MP_CHECK("Android: 40% in use but 95% resident -> CRITICAL",
+                 mem_pressure_current() == MEM_CRITICAL);
+
+        mem_pressure_set_android_for_testing(false);
+        set_override(120, -1, -1, -1, 1000, 210);
+        mem_pressure_poll_tick();
+        MP_CHECK("elsewhere the same reading, 79% in use -> HIGH",
+                 mem_pressure_current() == MEM_HIGH);
+    }
+
     /* ── host availability captures pressure outside this process ───── */
     {
         set_override(10, -1, -1, -1, 1000, 100); /* host is 90% used */

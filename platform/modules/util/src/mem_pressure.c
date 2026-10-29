@@ -267,6 +267,43 @@ static int64_t cgroup_unreclaimable_bytes(const struct os_proc_mem *m)
     return m->cgroup_current - evictable;
 }
 
+/* Android keeps cached app processes resident and lets lmkd reclaim them when memory is
+ * needed, so MemAvailable stays low on a healthy device: a Pixel 3 read 79 % in use while
+ * this node held 120 MB. There the node's own resident size against physical memory is the
+ * usable reading. */
+#if defined(__ANDROID__)
+#define MEM_PRESSURE_AVAILABLE_USABLE false
+#else
+#define MEM_PRESSURE_AVAILABLE_USABLE true
+#endif
+static _Atomic bool g_available_usable = MEM_PRESSURE_AVAILABLE_USABLE;
+
+/* The usage numerator and denominator for one reading: the cgroup charge when a limit is
+ * set, else system memory in use, else this process's resident size. */
+static enum mem_pressure_denominator_basis select_basis(const struct os_proc_mem *m,
+                                                        int64_t *current_bytes,
+                                                        int64_t *denom_bytes)
+{
+    if (m->cgroup_current >= 0 && (m->cgroup_high > 0 || m->cgroup_max > 0)) {
+        *current_bytes = cgroup_unreclaimable_bytes(m);
+        *denom_bytes = m->cgroup_high > 0 ? m->cgroup_high : m->cgroup_max;
+        return m->cgroup_high > 0 ? MEM_PRESSURE_BASIS_CGROUP_HIGH
+                                  : MEM_PRESSURE_BASIS_CGROUP_MAX;
+    }
+    if (atomic_load(&g_available_usable) && m->sys_total_bytes > 0 &&
+        m->sys_avail_bytes >= 0 && m->sys_avail_bytes <= m->sys_total_bytes) {
+        *current_bytes = m->sys_total_bytes - m->sys_avail_bytes;
+        *denom_bytes = m->sys_total_bytes;
+        return MEM_PRESSURE_BASIS_SYS_AVAILABLE;
+    }
+    if (m->sys_total_bytes > 0) {
+        *current_bytes = m->rss_bytes;
+        *denom_bytes = m->sys_total_bytes;
+        return MEM_PRESSURE_BASIS_SYS_TOTAL;
+    }
+    return MEM_PRESSURE_BASIS_NONE;
+}
+
 /* The one operator-visible line the organ emits. Its own function so the
  * charge/evictable split can be printed without adding a decision point to
  * mem_pressure_poll_tick, which the complexity baseline holds at its exact
@@ -302,26 +339,8 @@ void mem_pressure_poll_tick(void)
     int64_t denom_bytes = -1;
     enum mem_pressure_denominator_basis basis = MEM_PRESSURE_BASIS_NONE;
 
-    if (ok) {
-        if (mem.cgroup_current >= 0 && mem.cgroup_high > 0) {
-            current_bytes = cgroup_unreclaimable_bytes(&mem);
-            denom_bytes = mem.cgroup_high;
-            basis = MEM_PRESSURE_BASIS_CGROUP_HIGH;
-        } else if (mem.cgroup_current >= 0 && mem.cgroup_max > 0) {
-            current_bytes = cgroup_unreclaimable_bytes(&mem);
-            denom_bytes = mem.cgroup_max;
-            basis = MEM_PRESSURE_BASIS_CGROUP_MAX;
-        } else if (mem.sys_total_bytes > 0 && mem.sys_avail_bytes >= 0 &&
-                   mem.sys_avail_bytes <= mem.sys_total_bytes) {
-            current_bytes = mem.sys_total_bytes - mem.sys_avail_bytes;
-            denom_bytes = mem.sys_total_bytes;
-            basis = MEM_PRESSURE_BASIS_SYS_AVAILABLE;
-        } else if (mem.sys_total_bytes > 0) {
-            current_bytes = mem.rss_bytes;
-            denom_bytes = mem.sys_total_bytes;
-            basis = MEM_PRESSURE_BASIS_SYS_TOTAL;
-        }
-    }
+    if (ok)
+        basis = select_basis(&mem, &current_bytes, &denom_bytes);
 
     enum mem_pressure_level level = classify(current_bytes, denom_bytes, &t);
 
@@ -451,5 +470,11 @@ void mem_pressure_reset_for_testing(void)
     atomic_store(&g_evictable_bytes, -1);
     atomic_store(&g_malloc_trim_sink.last_shrink_unix, 0);
     atomic_store(&g_malloc_trim_sink.shrink_calls, 0);
+    atomic_store(&g_available_usable, MEM_PRESSURE_AVAILABLE_USABLE);
+}
+
+void mem_pressure_set_android_for_testing(bool android)
+{
+    atomic_store(&g_available_usable, !android);
 }
 #endif
