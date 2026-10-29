@@ -29,6 +29,8 @@
 #include "util/blocker.h"
 #include "util/thread_registry.h"
 #include "validation/main_state.h"
+#include "validation/chainstate.h"
+#include "platform/socket_compat.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -1451,6 +1453,405 @@ static int test_intake_worker_accept_without_landing_not_marked_seen(void)
     return failures;
 }
 
+/* ── process_getdata / self-suspicion-gate pins (msg_blocks.c) ─────────
+ *
+ * Characterization: pin today's observable behaviour of process_getdata()
+ * for each early return and for the notfound branches that need no mempool
+ * or block file, and of msg_block_reject_self_suspected() as reached through
+ * process_block_msg(). Wire output is read from node->send_head. */
+
+#define PIN_NOTFOUND_PAYLOAD_SIZE 37 /* compact count(1) + inv type(4) + hash(32) */
+
+static struct p2p_node *pin_peer_node(struct net_manager *nm, uint32_t id)
+{
+    struct net_address addr;
+    net_address_init(&addr);
+    unsigned char ip[4] = {198, 51, 100, (unsigned char)id};
+    net_addr_set_ipv4(&addr.svc.addr, ip);
+    addr.svc.port = 8033;
+    return p2p_node_create(nm, ZCL_INVALID_SOCKET, &addr, "pin-peer", true);
+}
+
+static size_t pin_segment_count(struct p2p_node *node)
+{
+    size_t n = 0;
+    for (struct send_segment *seg = node->send_head; seg; seg = seg->next)
+        n++;
+    return n;
+}
+
+/* True when exactly one wire "notfound" message carrying `hash` is queued. */
+static bool pin_is_single_notfound(struct p2p_node *node,
+                                   const struct uint256 *hash)
+{
+    const struct send_segment *seg = node->send_head;
+    if (!seg || seg->next)
+        return false;
+    if (seg->size != MSG_HEADER_SIZE + PIN_NOTFOUND_PAYLOAD_SIZE)
+        return false;
+    if (strcmp((const char *)seg->data + MESSAGE_START_SIZE, "notfound") != 0)
+        return false;
+    const unsigned char *p =
+        (const unsigned char *)seg->data + MSG_HEADER_SIZE;
+    return p[0] == 1 && memcmp(p + 5, hash->data, 32) == 0;
+}
+
+static void pin_mp_init(struct msg_processor *mp, struct main_state *ms,
+                        struct net_manager *nm)
+{
+    memset(mp, 0, sizeof(*mp));
+    mp->main_state = ms;
+    mp->params = chain_params_get();
+    mp->net_mgr = nm;
+}
+
+static void pin_inv_stream(struct byte_stream *s, uint32_t type,
+                           const struct uint256 *hash)
+{
+    struct inv_item inv;
+    inv_item_init_typed(&inv, type, hash);
+    inv_item_serialize(&inv, s);
+}
+
+static int test_pin_getdata_manifest_defers(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata while a snapshot manifest is sent is deferred") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 611);
+        ASSERT(node != NULL);
+        node->swarm_manifest_sent = true;
+
+        struct uint256 h;
+        memset(h.data, 0x61, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_BLOCK, &h);
+
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(!node->disconnect);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_count_unreadable(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata with an empty payload fails, no reply, no penalty") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 612);
+        ASSERT(node != NULL);
+
+        struct byte_stream s;
+        stream_init(&s, 8);
+        ASSERT(process_getdata(&mp, node, &s) == false);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(!node->disconnect);
+        ASSERT(atomic_load(&node->misbehavior) == 0);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_oversized_count(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata count above MAX_INV_SZ refuses, disconnects, scores 20") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 613);
+        ASSERT(node != NULL);
+
+        struct byte_stream s;
+        stream_init(&s, 8);
+        stream_write_compact_size(&s, MAX_INV_SZ + 1);
+        ASSERT(process_getdata(&mp, node, &s) == false);
+        ASSERT(node->disconnect);
+        ASSERT(atomic_load(&node->misbehavior) == 20);
+        ASSERT(pin_segment_count(node) == 0);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_empty_count(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata count 0 succeeds with nothing queued") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 614);
+        ASSERT(node != NULL);
+
+        struct byte_stream s;
+        stream_init(&s, 8);
+        stream_write_compact_size(&s, 0);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_segment_count(node) == 0);
+        ASSERT(!node->disconnect);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_truncated_item(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata whose declared inv is truncated fails, no reply") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 615);
+        ASSERT(node != NULL);
+
+        struct byte_stream s;
+        stream_init(&s, 8);
+        stream_write_compact_size(&s, 1);
+        ASSERT(process_getdata(&mp, node, &s) == false);
+        ASSERT(pin_segment_count(node) == 0);
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_unknown_type_notfound(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata inv of an unserved type gets one notfound") {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, NULL, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 616);
+        ASSERT(node != NULL);
+
+        struct uint256 h;
+        memset(h.data, 0x62, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_FILTERED_BLOCK, &h);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_segment_count(node) == 1);
+        ASSERT(pin_is_single_notfound(node, &h));
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_unindexed_block_notfound(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata for a block absent from the index gets notfound") {
+        struct main_state ms;
+        main_state_init(&ms);
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, &ms, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 617);
+        ASSERT(node != NULL);
+
+        struct uint256 h;
+        memset(h.data, 0x63, sizeof(h.data));
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_BLOCK, &h);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_is_single_notfound(node, &h));
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_getdata_unservable_indexed_block_notfound(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: getdata for an indexed block without stored data gets notfound") {
+        struct main_state ms;
+        main_state_init(&ms);
+        struct net_manager nm;
+        net_manager_init(&nm);
+        struct msg_processor mp;
+        pin_mp_init(&mp, &ms, &nm);
+        struct p2p_node *node = pin_peer_node(&nm, 618);
+        ASSERT(node != NULL);
+
+        struct uint256 h;
+        memset(h.data, 0x64, sizeof(h.data));
+        struct block_index *bi =
+            chainstate_insert_block_index((struct chainstate *)&ms, &h);
+        ASSERT(bi != NULL);
+        bi->nStatus = 0; /* header only: BLOCK_HAVE_DATA not set */
+
+        struct byte_stream s;
+        stream_init(&s, 64);
+        stream_write_compact_size(&s, 1);
+        pin_inv_stream(&s, MSG_BLOCK, &h);
+        ASSERT(process_getdata(&mp, node, &s) == true);
+        ASSERT(pin_is_single_notfound(node, &h));
+        stream_free(&s);
+        p2p_node_free(node);
+        net_manager_free(&nm);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── process_block_msg reject path: self-suspicion gate ───────────── */
+
+enum pin_reject_mode {
+    PIN_REJECT_NO_INDEX,
+    PIN_REJECT_EQUAL_WORK,
+    PIN_REJECT_MORE_WORK_BODY_INVALID,
+};
+
+static bool pin_submit_invalid(struct block *block,
+                               struct validation_state *out, void *ctx)
+{
+    (void)block;
+    (void)ctx;
+    validation_state_invalid(out, false, REJECT_INVALID,
+                             "bad-txns-inputs-missingorspent", NULL);
+    return false;
+}
+
+/* Feed one locally-rejected, non-retryable block through process_block_msg.
+ * The gate declines to self-suspect in every mode here (no index, equal work,
+ * or a body that fails check_block), so the block must be dedup-marked. */
+static bool pin_reject_marks_seen(enum pin_reject_mode mode)
+{
+    struct block blk;
+    block_init(&blk);
+    blk.header.nVersion = 4;
+    blk.header.nTime = 1700000030u + (uint32_t)mode;
+    blk.header.nBits = 0x1f00ffffu;
+    blk.header.nNonce.data[0] = (uint8_t)(40 + mode);
+
+    struct uint256 hash;
+    block_get_hash(&blk, &hash);
+    block_clear_seen(&hash);
+
+    struct byte_stream s;
+    stream_init(&s, 256);
+    bool ok = block_serialize(&blk, &s);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 gh = chain_params_get()->consensus.hashGenesisBlock;
+    struct block_index *gen =
+        chainstate_insert_block_index((struct chainstate *)&ms, &gh);
+    if (gen) {
+        gen->nHeight = 0;
+        gen->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        active_chain_move_window_tip(&ms.chain_active, gen);
+        ms.pindex_best_header = gen;
+    }
+    if (mode != PIN_REJECT_NO_INDEX) {
+        struct block_index *bi =
+            chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+        if (bi) {
+            bi->nHeight = 1;
+            if (mode == PIN_REJECT_MORE_WORK_BODY_INVALID) {
+                bool neg = false, ovf = false;
+                arith_uint256_set_compact(&bi->nChainWork, 0x1f00ffffu,
+                                          &neg, &ovf);
+            }
+        }
+    }
+
+    peer_scoring_init();
+    dl_init(get_download_mgr());
+    struct net_manager nm;
+    net_manager_init(&nm);
+    struct msg_processor mp;
+    pin_mp_init(&mp, &ms, &nm);
+    mp.block_submit = pin_submit_invalid;
+    mp.block_submit_ctx = NULL;
+    struct p2p_node *node = pin_peer_node(&nm, 621);
+
+    bool ret = ok && node && process_block_msg(&mp, node, &s);
+    bool seen = block_already_seen(&hash);
+
+    if (node)
+        p2p_node_free(node);
+    net_manager_free(&nm);
+    stream_free(&s);
+    block_free(&blk);
+    main_state_free(&ms);
+    block_clear_seen(&hash);
+    return ret && seen;
+}
+
+static int test_pin_reject_no_index_marks_seen(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: rejected block with no header index is marked seen (ban path)") {
+        ASSERT(pin_reject_marks_seen(PIN_REJECT_NO_INDEX));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_reject_equal_work_marks_seen(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: rejected block with work equal to tip is marked seen (ban path)") {
+        ASSERT(pin_reject_marks_seen(PIN_REJECT_EQUAL_WORK));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pin_reject_more_work_body_invalid_marks_seen(void)
+{
+    int failures = 0;
+    TEST("msg_handlers: more-work block with an invalid body is marked seen (ban path)") {
+        ASSERT(pin_reject_marks_seen(PIN_REJECT_MORE_WORK_BODY_INVALID));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Entry point ───────────────────────────────────────────────── */
 
 int test_msg_handlers(void);
@@ -1492,6 +1893,17 @@ int test_msg_handlers(void)
     failures += test_intake_worker_rejects_nonretryable_body();
     failures += test_intake_worker_submit_unavailable_rejects();
     failures += test_intake_worker_accept_without_landing_not_marked_seen();
+    failures += test_pin_getdata_manifest_defers();
+    failures += test_pin_getdata_count_unreadable();
+    failures += test_pin_getdata_oversized_count();
+    failures += test_pin_getdata_empty_count();
+    failures += test_pin_getdata_truncated_item();
+    failures += test_pin_getdata_unknown_type_notfound();
+    failures += test_pin_getdata_unindexed_block_notfound();
+    failures += test_pin_getdata_unservable_indexed_block_notfound();
+    failures += test_pin_reject_no_index_marks_seen();
+    failures += test_pin_reject_equal_work_marks_seen();
+    failures += test_pin_reject_more_work_body_invalid_marks_seen();
 
     return failures;
 }
