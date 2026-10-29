@@ -288,6 +288,28 @@ static bool dvm_contains_fold(const char *hay, const char *needle)
 
 /* ── refusal scanners ────────────────────────────────────────────────────── */
 
+/* Parse one 1-3 digit octet <= 255 at *pp; on success advance *pp past it. */
+static bool dvm_ipv4_octet(const char **pp, unsigned *out)
+{
+    const char *q = *pp;
+    if (!isdigit((unsigned char)*q))
+        return false;
+    unsigned v = 0;
+    int digits = 0;
+    while (isdigit((unsigned char)*q) && digits < 3) {
+        v = v * 10u + (unsigned)(*q - '0');
+        q++;
+        digits++;
+    }
+    if (isdigit((unsigned char)*q))
+        return false; /* 4+ digit run: not an octet */
+    if (v > 255)
+        return false;
+    *out = v;
+    *pp = q;
+    return true;
+}
+
 static bool dvm_has_ipv4(const char *s)
 {
     /* Four dot-separated 1-3 digit groups, each <= 255, bounded by
@@ -297,31 +319,18 @@ static bool dvm_has_ipv4(const char *s)
             continue;
         if (p != s && (isdigit((unsigned char)p[-1]) || p[-1] == '.'))
             continue;
-        unsigned vals[4];
         const char *q = p;
         int g = 0;
         for (; g < 4; g++) {
-            if (!isdigit((unsigned char)*q))
+            unsigned v;
+            if (!dvm_ipv4_octet(&q, &v))
                 break;
-            unsigned v = 0;
-            int digits = 0;
-            while (isdigit((unsigned char)*q) && digits < 3) {
-                v = v * 10u + (unsigned)(*q - '0');
-                q++;
-                digits++;
-            }
-            if (isdigit((unsigned char)*q))
-                break; /* 4+ digit run: not an octet */
-            if (v > 255)
-                break;
-            vals[g] = v;
             if (g < 3) {
                 if (*q != '.')
                     break;
                 q++;
             }
         }
-        (void)vals;
         if (g == 4 && !isdigit((unsigned char)*q) && *q != '.')
             return true;
     }
