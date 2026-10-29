@@ -543,11 +543,8 @@ static bool setup_climb_fixture(struct rrw_fixture *fx, const char *tag, int top
     return true;
 }
 
-int test_reducer_reconcile_witness(void);
-int test_reducer_reconcile_witness(void)
+static int rrw_t10a_budget_refresh(void)
 {
-    test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
-    printf("\n=== reducer_reconcile_witness (FIX-5) tests ===\n");
     int failures = 0;
 
     /* ── T10a: ADVANCING record REFRESHES the budget (TL-1) ──────────── */
@@ -608,6 +605,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
+    return failures;
+}
+
+static int rrw_t10b_frozen_pages(void)
+{
+    int failures = 0;
+
     /* ── T10b: frozen record exhausts the budget and pages ───────────── */
     {
         struct rrw_fixture fx;
@@ -660,6 +664,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
+    return failures;
+}
+
+static int rrw_t10b2_malformed_absent(void)
+{
+    int failures = 0;
+
     /* ── T10b2: malformed TIPFIN progress is diagnostic-absent ─────── */
     {
         struct rrw_fixture fx;
@@ -709,6 +720,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
+    return failures;
+}
+
+static int rrw_t10b3_insert_edge(void)
+{
+    int failures = 0;
+
     /* ── T10b3: inserted-coin progress is edge-triggered ───────────── */
     {
         struct rrw_fixture fx;
@@ -737,6 +755,13 @@ int test_reducer_reconcile_witness(void)
         reducer_frontier_reconcile_light_test_reset();
         teardown_fixture(&fx);
     }
+
+    return failures;
+}
+
+static int rrw_t10c_climb_clears(void)
+{
+    int failures = 0;
 
     /* ── T10c: H* baseline captured ONCE at the rising edge (inv-3) ──── */
     {
@@ -788,6 +813,13 @@ int test_reducer_reconcile_witness(void)
         net_manager_free(&cm.manager);
         teardown_fixture(&fx);
     }
+
+    return failures;
+}
+
+static int rrw_t11a_bypass(void)
+{
+    int failures = 0;
 
     /* ── T11a: peers-not-ahead + pending tear -> gate BYPASS ─────────── */
     {
@@ -855,6 +887,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
+    return failures;
+}
+
+static int rrw_t11b_suppress(void)
+{
+    int failures = 0;
+
     /* ── T11b: same peer state, NO tear -> gate suppresses as today ──── */
     {
         struct rrw_fixture fx;
@@ -907,17 +946,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
-    /* ── P2: the purge clamps script/proof cursors to the hole it makes ──
-     * A 1-block reorg leaves rows at h describing the invalidated block; the
-     * reconcile apply pass purges them. The purge must clamp the
-     * script_validate / proof_validate cursors to h in the SAME apply pass,
-     * atomically with the deletes (stage_repair_reducer_frontier_purge.c),
-     * or no stage re-derives the rows. Shape: h == coins_applied == hstar+1
-     * (no coin tear), cursors above h. */
-    {
-        struct rrw_fixture fx;
-        RRW_CHECK("P2: setup fixture", setup_fixture(&fx, "p2_purge_clamp"));
-        sqlite3 *db = progress_store_db();
+    return failures;
+}
+
+static int rrw_p2_dry_run(struct rrw_fixture *fx, sqlite3 *db)
+{
+    int failures = 0;
+
         /* progress.kv reopens per fixture; drop the dry-run detect memo so a
          * reused db pointer cannot replay a prior fixture's clean result. */
         stage_reducer_frontier_reset_detect_memo_for_testing();
@@ -929,8 +964,8 @@ int test_reducer_reconcile_witness(void)
 
         /* The purge judges rows against the ACTIVE chain at their height. */
         RRW_CHECK("P2: active chain installs",
-                  active_chain_move_window_tip(&fx.ms.chain_active,
-                                               fx.idx[3]));
+                  active_chain_move_window_tip(&fx->ms.chain_active,
+                                               fx->idx[3]));
 
         /* Reorg residue at h=A+2 (== coins_applied == hstar+1): rewrite the
          * validate/script rows with the invalidated block's hash, ok=0 (the
@@ -949,7 +984,7 @@ int test_reducer_reconcile_witness(void)
 
         struct stage_reducer_frontier_reconcile_result dry;
         RRW_CHECK("P2: dry-run succeeds",
-                  stage_reducer_frontier_reconcile_light_needed(db, &fx.ms,
+                  stage_reducer_frontier_reconcile_light_needed(db, &fx->ms,
                                                                 &dry));
         RRW_CHECK("P2: dry-run finds the residue and the would-be clamp",
                   dry.noncanonical_found >= 1 &&
@@ -961,9 +996,16 @@ int test_reducer_reconcile_witness(void)
                   cursor_value(db, "script_validate") == A + 4 &&
                   cursor_value(db, "proof_validate") == A + 4);
 
+    return failures;
+}
+
+static int rrw_p2_apply(struct rrw_fixture *fx, sqlite3 *db)
+{
+    int failures = 0;
+
         struct stage_reducer_frontier_reconcile_result rr;
         RRW_CHECK("P2: apply succeeds",
-                  stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+                  stage_reducer_frontier_reconcile_light(db, &fx->ms, &rr));
         RRW_CHECK("P2: apply purges the residue rows",
                   rr.noncanonical_purged >= 2 && rr.repaired &&
                   rr.clamped_script_validate && rr.clamped_proof_validate);
@@ -991,11 +1033,18 @@ int test_reducer_reconcile_witness(void)
         sqlite3_finalize(st);
         RRW_CHECK("P2: purged height is fully rowless", rows_left == 0);
 
+    return failures;
+}
+
+static int rrw_p2_rederive(struct rrw_fixture *fx, sqlite3 *db)
+{
+    int failures = 0;
+
         /* Stages re-run from the clamped cursors: they rewrite canonical
          * ok=1 rows at A+2 and walk back up. Simulate that, then assert the
          * dry-run reports no remaining script/proof hole or residue. */
         RRW_CHECK("P2: stages re-derive canonical rows at A+2",
-                  put_upstream_ok(db, A + 2, &fx.hashes[2]) &&
+                  put_upstream_ok(db, A + 2, &fx->hashes[2]) &&
                   seed_cursor(db, "validate_headers", A + 4) &&
                   seed_cursor(db, "body_fetch", A + 4) &&
                   seed_cursor(db, "body_persist", A + 4) &&
@@ -1004,7 +1053,7 @@ int test_reducer_reconcile_witness(void)
 
         struct stage_reducer_frontier_reconcile_result dry2;
         RRW_CHECK("P2: post-re-derive dry-run succeeds",
-                  stage_reducer_frontier_reconcile_light_needed(db, &fx.ms,
+                  stage_reducer_frontier_reconcile_light_needed(db, &fx->ms,
                                                                 &dry2));
         RRW_CHECK("P2: no remaining script/proof hole or residue",
                   dry2.noncanonical_found == 0 &&
@@ -1014,8 +1063,32 @@ int test_reducer_reconcile_witness(void)
                   !dry2.clamped_proof_validate &&
                   !dry2.refused_coin_tear);
 
-        teardown_fixture(&fx);
-    }
+    return failures;
+}
+
+    /* ── P2: the purge clamps script/proof cursors to the hole it makes ──
+     * A 1-block reorg leaves rows at h describing the invalidated block; the
+     * reconcile apply pass purges them. The purge must clamp the
+     * script_validate / proof_validate cursors to h in the SAME apply pass,
+     * atomically with the deletes (stage_repair_reducer_frontier_purge.c),
+     * or no stage re-derives the rows. Shape: h == coins_applied == hstar+1
+     * (no coin tear), cursors above h. */
+static int rrw_p2_purge_clamp(void)
+{
+    int failures = 0;
+    struct rrw_fixture fx;
+        RRW_CHECK("P2: setup fixture", setup_fixture(&fx, "p2_purge_clamp"));
+        sqlite3 *db = progress_store_db();
+    failures += rrw_p2_dry_run(&fx, db);
+    failures += rrw_p2_apply(&fx, db);
+    failures += rrw_p2_rederive(&fx, db);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rrw_t12_churn_arms(void)
+{
+    int failures = 0;
 
     /* ── T12: same-height churn exhausts the budget and ARMS the escalator ──
      * A backfill record that never advances past its high-water baseline (a
@@ -1082,6 +1155,13 @@ int test_reducer_reconcile_witness(void)
         teardown_fixture(&fx);
     }
 
+    return failures;
+}
+
+static int rrw_t13_highwater(void)
+{
+    int failures = 0;
+
     /* ── T13: a rewind BELOW the high-water then a re-advance to a
      *   previously-seen height does NOT refresh progressing() (FIX-1) ────────
      * Drives progressing() directly. The old code re-baselined the record to
@@ -1126,6 +1206,27 @@ int test_reducer_reconcile_witness(void)
         reducer_frontier_reconcile_light_test_reset();
         teardown_fixture(&fx);
     }
+
+    return failures;
+}
+
+int test_reducer_reconcile_witness(void);
+int test_reducer_reconcile_witness(void)
+{
+    test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
+    printf("\n=== reducer_reconcile_witness (FIX-5) tests ===\n");
+    int failures = 0;
+
+    failures += rrw_t10a_budget_refresh();
+    failures += rrw_t10b_frozen_pages();
+    failures += rrw_t10b2_malformed_absent();
+    failures += rrw_t10b3_insert_edge();
+    failures += rrw_t10c_climb_clears();
+    failures += rrw_t11a_bypass();
+    failures += rrw_t11b_suppress();
+    failures += rrw_p2_purge_clamp();
+    failures += rrw_t12_churn_arms();
+    failures += rrw_t13_highwater();
 
     printf("reducer_reconcile_witness: %d failures\n", failures);
     return failures;
