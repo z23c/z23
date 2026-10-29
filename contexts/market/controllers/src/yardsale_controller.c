@@ -320,6 +320,66 @@ enum yardsale_error yardsale_seller_handle_accept_wire(
 
 /* ── Buyer side ──────────────────────────────────────────────────── */
 
+static enum yardsale_error buyer_begin_check_terms(
+    const struct zswap_quote_v1 *ad,
+    const struct zswap_buyer_accept *buyer, int64_t now_unix)
+{
+    enum zswap_quote_error qe = zswap_quote_validate_at(ad, now_unix);
+    if (qe == ZSWAP_QUOTE_ERR_EXPIRED || qe == ZSWAP_QUOTE_ERR_NOT_YET_VALID)
+        return (enum yardsale_error)(
+            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_EXPIRED);
+    if (qe != ZSWAP_QUOTE_OK)
+        return (enum yardsale_error)(
+            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_AD);
+    if (zswap_buyer_accept_validate(buyer) != ZSWAP_ASSEMBLY_OK)
+        return (enum yardsale_error)(
+            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_ACCEPT);
+    return YARDSALE_OK;
+}
+
+/* Pick the slot a new buy lands in: the first free slot, or one holding the
+ * same quote root or an expired ceremony (cleared first). NULL when every
+ * slot holds a live ceremony. */
+static struct yardsale_pending_buy *pending_slot_locked(
+    const uint8_t quote_root[32], int64_t now_unix)
+{
+    for (size_t i = 0; i < YARDSALE_PENDING_MAX; i++) {
+        if (!g_pending[i].used)
+            return &g_pending[i];
+        if (memcmp(g_pending[i].quote_root, quote_root, 32) == 0) {
+            pending_clear_locked(&g_pending[i]); /* re-buy replaces */
+            return &g_pending[i];
+        }
+        if (g_pending[i].deadline_unix <= now_unix) {
+            pending_clear_locked(&g_pending[i]);
+            return &g_pending[i];
+        }
+    }
+    return NULL;
+}
+
+static enum yardsale_error buyer_begin_store(
+    const struct zswap_quote_v1 *ad, const struct zswap_accept_v1 *accept,
+    const struct privkey *input_keys, size_t num_keys, int64_t now_unix)
+{
+    pthread_mutex_lock(&g_yardsale_mutex);
+    struct yardsale_pending_buy *slot =
+        pending_slot_locked(accept->quote_root, now_unix);
+    if (!slot) {
+        pthread_mutex_unlock(&g_yardsale_mutex);
+        return YARDSALE_ERR_PENDING_FULL;
+    }
+    slot->used = true;
+    memcpy(slot->quote_root, accept->quote_root, 32);
+    slot->ad = *ad;
+    slot->accept = *accept;
+    for (size_t i = 0; i < num_keys; i++)
+        slot->input_keys[i] = input_keys[i];
+    slot->deadline_unix = ad->expires_unix;
+    pthread_mutex_unlock(&g_yardsale_mutex);
+    return YARDSALE_OK;
+}
+
 enum yardsale_error yardsale_buyer_begin(
     const struct zswap_quote_v1 *ad,
     const struct zswap_buyer_accept *buyer,
@@ -335,16 +395,9 @@ enum yardsale_error yardsale_buyer_begin(
     if (num_keys != buyer->num_inputs)
         return YARDSALE_ERR_KEY_COUNT;
 
-    enum zswap_quote_error qe = zswap_quote_validate_at(ad, now_unix);
-    if (qe == ZSWAP_QUOTE_ERR_EXPIRED || qe == ZSWAP_QUOTE_ERR_NOT_YET_VALID)
-        return (enum yardsale_error)(
-            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_EXPIRED);
-    if (qe != ZSWAP_QUOTE_OK)
-        return (enum yardsale_error)(
-            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_AD);
-    if (zswap_buyer_accept_validate(buyer) != ZSWAP_ASSEMBLY_OK)
-        return (enum yardsale_error)(
-            YARDSALE_ERR_CEREMONY_BASE + ZSWAP_CEREMONY_ERR_ACCEPT);
+    enum yardsale_error terms = buyer_begin_check_terms(ad, buyer, now_unix);
+    if (terms != YARDSALE_OK)
+        return terms;
 
     struct zswap_accept_v1 accept;
     memset(&accept, 0, sizeof(accept));
@@ -367,36 +420,10 @@ enum yardsale_error yardsale_buyer_begin(
                    "buyer_begin: outbound gossip port unwired");
     }
 
-    pthread_mutex_lock(&g_yardsale_mutex);
-    struct yardsale_pending_buy *slot = NULL;
-    for (size_t i = 0; i < YARDSALE_PENDING_MAX; i++) {
-        if (!g_pending[i].used) {
-            slot = &g_pending[i];
-            break;
-        }
-        if (memcmp(g_pending[i].quote_root, accept.quote_root, 32) == 0) {
-            pending_clear_locked(&g_pending[i]); /* re-buy replaces */
-            slot = &g_pending[i];
-            break;
-        }
-        if (g_pending[i].deadline_unix <= now_unix) {
-            pending_clear_locked(&g_pending[i]);
-            slot = &g_pending[i];
-            break;
-        }
-    }
-    if (!slot) {
-        pthread_mutex_unlock(&g_yardsale_mutex);
-        return YARDSALE_ERR_PENDING_FULL;
-    }
-    slot->used = true;
-    memcpy(slot->quote_root, accept.quote_root, 32);
-    slot->ad = *ad;
-    slot->accept = accept;
-    for (size_t i = 0; i < num_keys; i++)
-        slot->input_keys[i] = input_keys[i];
-    slot->deadline_unix = ad->expires_unix;
-    pthread_mutex_unlock(&g_yardsale_mutex);
+    enum yardsale_error stored =
+        buyer_begin_store(ad, &accept, input_keys, num_keys, now_unix);
+    if (stored != YARDSALE_OK)
+        return stored;
 
     g_flood(ZSWAP_MSG_ACCEPT, wire_out, len, g_flood_ctx);
     *wire_len = len;
@@ -459,20 +486,109 @@ int yardsale_ceremony_accept_ingest(const uint8_t *wire, size_t wire_len,
     return ZSWAP_CEREMONY_WIRE_RESPOND;
 }
 
-int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
-                                     int64_t peer_id, int64_t now_unix)
+/* Wire sanity, dedup and per-peer admission for an inbound partial. On
+ * success hash holds the wire digest the caller marks seen later. */
+static bool partial_admit(const uint8_t *wire, size_t wire_len,
+                          int64_t peer_id, int64_t now_unix, uint8_t hash[32])
 {
     if (!wire || wire_len == 0 || wire_len > ZSWAP_PARTIAL_WIRE_MAX_BYTES)
-        return ZSWAP_CEREMONY_WIRE_DROP;
-
-    uint8_t hash[32];
+        return false;
     wire_hash(wire, wire_len, hash);
 
     pthread_mutex_lock(&g_yardsale_mutex);
     bool dup = seen_lookup_locked(hash);
     bool admitted = !dup && peer_clamp_admit_locked(peer_id, now_unix);
     pthread_mutex_unlock(&g_yardsale_mutex);
-    if (dup || !admitted)
+    return admitted;
+}
+
+/* Move the pending buy this partial answers out of the table into buy. */
+static bool partial_take_pending(const struct zswap_partial_v1 *partial,
+                                 struct yardsale_pending_buy *buy)
+{
+    bool found = false;
+    pthread_mutex_lock(&g_yardsale_mutex);
+    for (size_t i = 0; i < YARDSALE_PENDING_MAX; i++) {
+        if (g_pending[i].used &&
+            memcmp(g_pending[i].quote_root, partial->quote_root, 32) == 0) {
+            *buy = g_pending[i];
+            pending_clear_locked(&g_pending[i]);
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_yardsale_mutex);
+    return found;
+}
+
+/* The seller's token input must be the confirmed holder of the ad's exact
+ * token: same txid output, class, token id, amount, value and script. */
+static bool partial_token_leg_matches(bool fetched_ok,
+                                      struct transaction *token_tx,
+                                      const struct zswap_partial_v1 *partial,
+                                      const struct yardsale_pending_buy *buy)
+{
+    if (!fetched_ok ||
+        partial->seller.token_input.vout >= token_tx->num_vout)
+        return false;
+    const struct tx_out *claimed =
+        &token_tx->vout[partial->seller.token_input.vout];
+    struct slp_output_metadata meta;
+    memset(&meta, 0, sizeof(meta));
+    return slp_classify_tx_output(token_tx,
+                                  partial->seller.token_input.vout, &meta) &&
+        meta.role == SLP_OUTPUT_TOKEN &&
+        memcmp(meta.token_id, buy->ad.token_id, 32) == 0 &&
+        meta.amount == buy->ad.token_amount &&
+        claimed->value == partial->seller.token_input.value_sats &&
+        claimed->script_pub_key.size ==
+            partial->seller.token_input.script_len &&
+        memcmp(claimed->script_pub_key.data,
+               partial->seller.token_input.script_pub_key,
+               partial->seller.token_input.script_len) == 0;
+}
+
+/* Index of the buyer accept entry that spends vin's outpoint, or
+ * ba->num_inputs when vin is not one of the buyer's inputs. */
+static size_t partial_buyer_input_index(const struct zswap_buyer_accept *ba,
+                                        const struct tx_in *vin)
+{
+    for (size_t j = 0; j < ba->num_inputs; j++) {
+        if (memcmp(vin->prevout.hash.data, ba->inputs[j].txid, 32) == 0 &&
+            vin->prevout.n == ba->inputs[j].vout)
+            return j;
+    }
+    return ba->num_inputs;
+}
+
+/* Sign every buyer input of tx, stopping at the first failure; on failure
+ * *fail_vi names the failing vin index. */
+static enum zswap_ceremony_error partial_sign_buyer_inputs(
+    struct transaction *tx, const struct yardsale_pending_buy *buy,
+    uint32_t branch_id, size_t *fail_vi)
+{
+    const struct zswap_buyer_accept *ba = &buy->accept.buyer;
+    for (size_t vi = 0; vi < tx->num_vin; vi++) {
+        size_t j = partial_buyer_input_index(ba, &tx->vin[vi]);
+        if (j >= ba->num_inputs)
+            continue;
+        enum zswap_ceremony_error e = zswap_ceremony_sign_input_p2pkh(
+            tx, vi, ba->inputs[j].script_pub_key,
+            ba->inputs[j].script_len, ba->inputs[j].value_sats,
+            branch_id, &buy->input_keys[j]);
+        if (e != ZSWAP_CEREMONY_OK) {
+            *fail_vi = vi;
+            return e;
+        }
+    }
+    return ZSWAP_CEREMONY_OK;
+}
+
+int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
+                                     int64_t peer_id, int64_t now_unix)
+{
+    uint8_t hash[32];
+    if (!partial_admit(wire, wire_len, peer_id, now_unix, hash))
         return ZSWAP_CEREMONY_WIRE_DROP;
 
     struct zswap_partial_v1 partial;
@@ -484,18 +600,7 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
      * private copy. A second identical partial then finds no pending buy
      * and is relayed — it can never double-broadcast. */
     struct yardsale_pending_buy buy;
-    bool found = false;
-    pthread_mutex_lock(&g_yardsale_mutex);
-    for (size_t i = 0; i < YARDSALE_PENDING_MAX; i++) {
-        if (g_pending[i].used &&
-            memcmp(g_pending[i].quote_root, partial.quote_root, 32) == 0) {
-            buy = g_pending[i];
-            pending_clear_locked(&g_pending[i]);
-            found = true;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_yardsale_mutex);
+    bool found = partial_take_pending(&partial, &buy);
 
     pthread_mutex_lock(&g_yardsale_mutex);
     seen_mark_locked(hash);
@@ -544,24 +649,8 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
                         partial.seller.token_input.txid,
                         partial.seller.token_input.vout, buy.ad.token_id,
                         buy.ad.token_amount, &token_tx);
-    bool token_ok = fetched.ok &&
-        partial.seller.token_input.vout < token_tx.num_vout;
-    const struct tx_out *claimed =
-        token_ok ? &token_tx.vout[partial.seller.token_input.vout] : NULL;
-    struct slp_output_metadata meta;
-    memset(&meta, 0, sizeof(meta));
-    token_ok = token_ok && claimed &&
-        slp_classify_tx_output(&token_tx,
-                               partial.seller.token_input.vout, &meta) &&
-        meta.role == SLP_OUTPUT_TOKEN &&
-        memcmp(meta.token_id, buy.ad.token_id, 32) == 0 &&
-        meta.amount == buy.ad.token_amount &&
-        claimed->value == partial.seller.token_input.value_sats &&
-        claimed->script_pub_key.size ==
-            partial.seller.token_input.script_len &&
-        memcmp(claimed->script_pub_key.data,
-               partial.seller.token_input.script_pub_key,
-               partial.seller.token_input.script_len) == 0;
+    bool token_ok =
+        partial_token_leg_matches(fetched.ok, &token_tx, &partial, &buy);
     transaction_free(&token_tx);
     if (!token_ok) {
         LOG_WARN("yardsale", "seller token input is not the confirmed "
@@ -584,32 +673,14 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     /* Sign every buyer input: the vin holds seller inputs first, then the
      * buyer's in canonical sorted order — map each vin back to its accept
      * entry (and its key) by outpoint, never by position. */
-    bool sign_ok = true;
-    const struct zswap_buyer_accept *ba = &buy.accept.buyer;
-    for (size_t vi = 0; vi < tx.num_vin && sign_ok; vi++) {
-        for (size_t j = 0; j < ba->num_inputs; j++) {
-            if (memcmp(tx.vin[vi].prevout.hash.data, ba->inputs[j].txid,
-                       32) != 0 ||
-                tx.vin[vi].prevout.n != ba->inputs[j].vout)
-                continue;
-            e = zswap_ceremony_sign_input_p2pkh(
-                &tx, vi, ba->inputs[j].script_pub_key,
-                ba->inputs[j].script_len, ba->inputs[j].value_sats,
-                branch_id, &buy.input_keys[j]);
-            if (e != ZSWAP_CEREMONY_OK) {
-                LOG_WARN("yardsale", "buyer input %zu signing failed: %s",
-                         vi, zswap_ceremony_error_string(e));
-                sign_ok = false;
-            }
-            break;
-        }
-    }
+    size_t vi = 0;
+    e = partial_sign_buyer_inputs(&tx, &buy, branch_id, &vi);
+    if (e != ZSWAP_CEREMONY_OK)
+        LOG_WARN("yardsale", "buyer input %zu signing failed: %s",
+                 vi, zswap_ceremony_error_string(e));
     memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
 
-    if (sign_ok && !zswap_ceremony_all_inputs_signed(&tx))
-        sign_ok = false;
-
-    if (!sign_ok) {
+    if (e != ZSWAP_CEREMONY_OK || !zswap_ceremony_all_inputs_signed(&tx)) {
         transaction_free(&tx);
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
