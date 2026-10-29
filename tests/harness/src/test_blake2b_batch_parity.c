@@ -145,6 +145,138 @@ static void report_divergence(const char *what, int at,
     printf("...\n");
 }
 
+#define TIER_COUNT 3
+
+static const enum blake2b_batch_impl tier_impl[TIER_COUNT] = {
+    BLAKE2B_BATCH_IMPL_SCALAR,
+    BLAKE2B_BATCH_IMPL_AVX2,
+    BLAKE2B_BATCH_IMPL_AVX512
+};
+static const char *const tier_name[TIER_COUNT] = { "scalar", "4-way SIMD", "8-way SIMD" };
+
+/* Legs 1+2 for one forced tier: batch8, then batch4, each against the
+ * sequential reference. Returns the number of divergent entry points. */
+static int check_tier_vs_reference(const struct blake2b_ctx *base, const uint32_t *idx,
+                                   size_t hash_len, int t,
+                                   unsigned char dig[EH_INDICES][DIGEST_CAP],
+                                   const unsigned char refdig[EH_INDICES][DIGEST_CAP])
+{
+    int tier_bad = 0;
+    for (int use8 = 1; use8 >= 0; use8--) {
+        memset(dig, 0, EH_INDICES * DIGEST_CAP);
+        fill_batch(base, idx, dig, hash_len, use8 != 0);
+
+        int at = first_divergence(dig, refdig, hash_len);
+        if (at >= 0) {
+            report_divergence(use8 ? "batch8 vs sequential reference"
+                                   : "batch4 vs sequential reference",
+                              at, dig[at], refdig[at], hash_len);
+            printf("    tier: %s\n", tier_name[t]);
+            tier_bad++;
+        }
+    }
+    return tier_bad;
+}
+
+/* One tier of Legs 1+2. An unavailable tier is reported as skipped and counts nothing. */
+static int check_one_tier(const struct blake2b_ctx *base, const uint32_t *idx,
+                          size_t hash_len, int t,
+                          unsigned char dig[EH_INDICES][DIGEST_CAP],
+                          const unsigned char refdig[EH_INDICES][DIGEST_CAP],
+                          bool *ran)
+{
+    int got = equihash_blake2b_batch_select_impl(tier_impl[t]);
+    if (got != (int)tier_impl[t]) {
+        printf("  %-16s : not available on this host (skipped)\n",
+               tier_name[t]);
+        return 0;
+    }
+    *ran = true;
+
+    int tier_bad = check_tier_vs_reference(base, idx, hash_len, t, dig, refdig);
+    printf("  %-16s : %s\n", tier_name[t],
+           tier_bad ? "DIVERGED from the sequential reference"
+                    : "batch8 + batch4 == sequential reference");
+    return tier_bad;
+}
+
+/* Cross-tier: each available tier against scalar. */
+static int check_cross_tiers(unsigned char tier_dig[TIER_COUNT][EH_INDICES][DIGEST_CAP],
+                             const bool tier_ran[TIER_COUNT], size_t hash_len)
+{
+    int failures = 0;
+    for (int t = 1; t < TIER_COUNT; t++) {
+        if (!tier_ran[0] || !tier_ran[t]) continue;
+        int at = first_divergence(tier_dig[t], tier_dig[0], hash_len);
+        if (at >= 0) {
+            report_divergence("tier vs scalar", at,
+                              tier_dig[t][at], tier_dig[0][at], hash_len);
+            failures++;
+        }
+    }
+    return failures;
+}
+
+/* Legs 1+2 for one index pattern: sequential reference first, then every tier. */
+static int check_index_pattern(const struct blake2b_ctx *base, const uint32_t *idx, int L,
+                               unsigned char refdig[EH_INDICES][DIGEST_CAP],
+                               unsigned char tier_dig[TIER_COUNT][EH_INDICES][DIGEST_CAP],
+                               bool tier_ran[TIER_COUNT])
+{
+    int failures = 0;
+    size_t hash_len = EH_HASH_LEN;
+
+    printf("%s indices, hash_len=%zu:\n",
+           (L == 0) ? "contiguous" : "strided+repeating", hash_len);
+
+    memset(refdig, 0, EH_INDICES * DIGEST_CAP);
+    for (int i = 0; i < EH_INDICES; i++)
+        ref_hash(base, idx[i], refdig[i], hash_len);
+
+    for (int t = 0; t < TIER_COUNT; t++)
+        failures += check_one_tier(base, idx, hash_len, t, tier_dig[t], refdig, &tier_ran[t]);
+    failures += check_cross_tiers(tier_dig, tier_ran, hash_len);
+    return failures;
+}
+
+/* Leg 4, part a: a one-bit change in the header must change the digest. */
+static int check_hash_not_hollow(const struct blake2b_ctx *base)
+{
+    struct blake2b_ctx tweaked;
+    eh_base_state(&tweaked, 0x01);
+    unsigned char a[DIGEST_CAP] = {0}, b[DIGEST_CAP] = {0};
+    ref_hash(base, 7, a, EH_HASH_LEN);
+    ref_hash(&tweaked, 7, b, EH_HASH_LEN);
+    if (memcmp(a, b, EH_HASH_LEN) == 0) {
+        printf("\n  FAIL: a one-bit header change did not change the "
+               "digest — the hash under test is hollow.\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* The comparator must SEE a planted mismatch. */
+static int check_comparator_teeth(void)
+{
+    int failures = 0;
+    static unsigned char p0[EH_INDICES][DIGEST_CAP];
+    static unsigned char p1[EH_INDICES][DIGEST_CAP];
+    memset(p0, 0xAB, sizeof(p0));
+    memcpy(p1, p0, sizeof(p1));
+    if (first_divergence(p0, p1, EH_HASH_LEN) != -1) {
+        printf("\n  FAIL: comparator reported a difference between "
+               "identical buffers.\n");
+        failures++;
+    }
+    p1[EH_INDICES - 1][EH_HASH_LEN - 1] ^= 0x01u;
+    if (first_divergence(p0, p1, EH_HASH_LEN) != EH_INDICES - 1) {
+        printf("\n  FAIL: comparator missed a planted one-bit "
+               "divergence — this oracle cannot fail.\n");
+        failures++;
+    }
+    return failures;
+}
+
 int test_blake2b_batch_parity(void);
 int test_blake2b_batch_parity(void)
 {
@@ -166,72 +298,17 @@ int test_blake2b_batch_parity(void)
     struct blake2b_ctx base;
     eh_base_state(&base, 0);
 
-    static unsigned char tier_dig[3][EH_INDICES][DIGEST_CAP];
+    static unsigned char tier_dig[TIER_COUNT][EH_INDICES][DIGEST_CAP];
     static unsigned char refdig[EH_INDICES][DIGEST_CAP];
-
-    const enum blake2b_batch_impl want[3] = {
-        BLAKE2B_BATCH_IMPL_SCALAR,
-        BLAKE2B_BATCH_IMPL_AVX2,
-        BLAKE2B_BATCH_IMPL_AVX512
-    };
-    const char *tier_name[3] = { "scalar", "4-way SIMD", "8-way SIMD" };
-    bool tier_ran[3] = { false, false, false };
+    bool tier_ran[TIER_COUNT] = { false, false, false };
 
     /* ── Leg 1+2: every tier, both entry points, vs the portable reference ──
      * hash_len is always p->hash_output (50): blake2b_final() rejects any other
      * outlen and the Equihash verifier only passes 50. The variation that
      * matters is the INDEX pattern. */
-    for (int L = 0; L < 2; L++) {
-        size_t hash_len = EH_HASH_LEN;
-        const uint32_t *idx = (L == 0) ? idx_contig : idx_mixed;
-
-        printf("%s indices, hash_len=%zu:\n",
-               (L == 0) ? "contiguous" : "strided+repeating", hash_len);
-
-        memset(refdig, 0, sizeof(refdig));
-        for (int i = 0; i < EH_INDICES; i++)
-            ref_hash(&base, idx[i], refdig[i], hash_len);
-
-        for (int t = 0; t < 3; t++) {
-            int got = equihash_blake2b_batch_select_impl(want[t]);
-            if (got != (int)want[t]) {
-                printf("  %-16s : not available on this host (skipped)\n",
-                       tier_name[t]);
-                continue;
-            }
-            tier_ran[t] = true;
-
-            int tier_bad = 0;
-            for (int use8 = 1; use8 >= 0; use8--) {
-                memset(tier_dig[t], 0, sizeof(tier_dig[t]));
-                fill_batch(&base, idx, tier_dig[t], hash_len, use8 != 0);
-
-                int at = first_divergence(tier_dig[t], refdig, hash_len);
-                if (at >= 0) {
-                    report_divergence(use8 ? "batch8 vs sequential reference"
-                                           : "batch4 vs sequential reference",
-                                      at, tier_dig[t][at], refdig[at], hash_len);
-                    printf("    tier: %s\n", tier_name[t]);
-                    tier_bad++;
-                }
-            }
-            failures += tier_bad;
-            printf("  %-16s : %s\n", tier_name[t],
-                   tier_bad ? "DIVERGED from the sequential reference"
-                            : "batch8 + batch4 == sequential reference");
-        }
-
-        /* Cross-tier: each available tier against scalar. */
-        for (int t = 1; t < 3; t++) {
-            if (!tier_ran[0] || !tier_ran[t]) continue;
-            int at = first_divergence(tier_dig[t], tier_dig[0], hash_len);
-            if (at >= 0) {
-                report_divergence("tier vs scalar", at,
-                                  tier_dig[t][at], tier_dig[0][at], hash_len);
-                failures++;
-            }
-        }
-    }
+    for (int L = 0; L < 2; L++)
+        failures += check_index_pattern(&base, (L == 0) ? idx_contig : idx_mixed, L,
+                                        refdig, tier_dig, tier_ran);
 
     if (!tier_ran[0]) {
         printf("FAIL: the scalar tier could not be forced — the oracle has no "
@@ -241,36 +318,9 @@ int test_blake2b_batch_parity(void)
 
     /* ── Leg 4: teeth ─────────────────────────────────────────────────── */
     printf("teeth... ");
-    {
-        struct blake2b_ctx tweaked;
-        eh_base_state(&tweaked, 0x01);
-        unsigned char a[DIGEST_CAP] = {0}, b[DIGEST_CAP] = {0};
-        ref_hash(&base, 7, a, EH_HASH_LEN);
-        ref_hash(&tweaked, 7, b, EH_HASH_LEN);
-        if (memcmp(a, b, EH_HASH_LEN) == 0) {
-            printf("\n  FAIL: a one-bit header change did not change the "
-                   "digest — the hash under test is hollow.\n");
-            failures++;
-        }
-
-        /* The comparator must SEE a planted mismatch. */
-        static unsigned char p0[EH_INDICES][DIGEST_CAP];
-        static unsigned char p1[EH_INDICES][DIGEST_CAP];
-        memset(p0, 0xAB, sizeof(p0));
-        memcpy(p1, p0, sizeof(p1));
-        if (first_divergence(p0, p1, EH_HASH_LEN) != -1) {
-            printf("\n  FAIL: comparator reported a difference between "
-                   "identical buffers.\n");
-            failures++;
-        }
-        p1[EH_INDICES - 1][EH_HASH_LEN - 1] ^= 0x01u;
-        if (first_divergence(p0, p1, EH_HASH_LEN) != EH_INDICES - 1) {
-            printf("\n  FAIL: comparator missed a planted one-bit "
-                   "divergence — this oracle cannot fail.\n");
-            failures++;
-        }
-        printf("ok\n");
-    }
+    failures += check_hash_not_hollow(&base);
+    failures += check_comparator_teeth();
+    printf("ok\n");
 
     /* ── Leg 5: never leave a tier forced for the rest of the run ─────── */
     equihash_blake2b_batch_select_impl(BLAKE2B_BATCH_IMPL_AUTO);
