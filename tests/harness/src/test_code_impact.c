@@ -1021,6 +1021,8 @@ static int test_code_impact_rule_predicate(void)
             size_t group_count;
             const char *groups[4];
         } cases[] = {
+            {"tests/harness/include/test/plugin_host_node_fixture.h", 1, 3,
+             {"plugin_package", "plugin_run_hostcall", "make_lint_gates"}},
             {"engine/composition/goals.def", 1, 2,
              {"fleet_goals", "make_lint_gates"}},
             {"tests/fixtures/lab/rev_cases.json", 1, 4,

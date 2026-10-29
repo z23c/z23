@@ -45,7 +45,7 @@ The order is the order of work: each later item depends on the earlier ones. Shi
 
 ## 4. Distribution
 
-The command catalog in `engine/composition/commands/plugin.def` and `plugin_attest.def` provides `plugin publish`, `plugin fetch`, `plugin fetch_remote`, `plugin attest`, and `plugin attest_verify`. `tests/harness/src/test_plugin_package.c` exercises package transfer and installation; `tests/harness/src/test_plugin_attest.c` covers attestation verification. An attestation records a builder's signed claim; it does not by itself establish independent reproduction. The full app journey and its acceptance remain to be demonstrated.
+The command catalog in `engine/composition/commands/plugin.def` and `plugin_attest.def` provides `plugin publish`, `plugin fetch`, `plugin fetch_remote`, `plugin attest`, and `plugin attest_verify`. `tests/harness/src/test_plugin_package.c` composes two-store transfer, pinned local fixture attestations, installation and a confined resident plugin chain-tip read against a node-backed fixture chain; `tests/harness/src/test_plugin_attest.c` covers attestation verification. The local fixture does not demonstrate independent reproduction or network authentication. An attestation records a builder's signed claim; it does not by itself establish independent reproduction. The full app journey and its acceptance remain to be demonstrated.
 
 ## 5. Links
 
@@ -58,3 +58,5 @@ This page is linked from [`docs/README.md`](../README.md) and from [`docs/work/F
 <!-- claim: file-present contexts/commons/apps/yardsale/app.def # declarative app -->
 <!-- claim: file-present apps/zcl-ledger/README.md # separate custody-adjacent host -->
 <!-- claim: symbol-present ZCL_SERVICE_ENFORCEMENT_SHADOW engine/composition/services/catalog.def # still shadow-only -->
+
+<!-- claim: symbol-present pp_attested_host_journey tests/harness/src/test_plugin_package.c # local attested transfer and node-backed hostcall -->

@@ -4,6 +4,9 @@
 #include "test/test_core.h"
 #include "test/test_zcode_swarm_priv.h"
 #include "test/public_shape_fixture.h"
+#if defined(__linux__)
+#include "test/plugin_host_node_fixture.h"
+#endif
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_store.h"
 #include "plugin/plugin_run.h"
@@ -419,17 +422,6 @@ static int pp_runtime_journey(void)
     pp_close(&f);
     return failures;
 }
-/* This local handler proves the confined child reached the granted host call. */
-static int pp_tip(void *ctx, const uint8_t *payload, size_t len,
-                  uint8_t *out, size_t cap, size_t *out_len)
-{
-    (void)ctx; (void)payload;
-    if (len != 0 || cap < 4) return -1;
-    out[0] = out[1] = out[2] = 0; out[3] = 7;
-    *out_len = 4;
-    return 0;
-}
-
 static bool pp_host_image(struct pp_fixture *f)
 {
     FILE *image = fopen("build/fixtures/plugin_hostcall_child", "rb");
@@ -487,6 +479,7 @@ static int pp_attested_host_journey(void)
     int failures = 0;
     struct pp_fixture f = {0};
     struct plugin_run *run = NULL;
+    struct prh_chain chain = {0};
     bool ready = pp_open(&f);
     TEST("plugin package: attested received generation makes a host call") {
         char generation[129], dir[1400], pins[1400], image[1400], digest[129];
@@ -523,12 +516,11 @@ static int pp_attested_host_journey(void)
         ASSERT_STR_EQ(report.image, digest);
         ASSERT_STR_EQ(generation, f.packed.generation);
         ASSERT_EQ(plugin_store_switch(f.plugins, "demo", generation), PLUGIN_OK);
-        struct plugin_hostcall_handlers handlers = {0};
-        handlers.method[PLUGIN_HOSTCALL_M_CHAIN_TIP - 1] = pp_tip;
+        ASSERT(prh_chain_open(&chain));
         struct plugin_run_options options = {
             .root = f.plugins, .name = "demo", .ping_interval_ms = 40,
             .ping_deadline_ms = 2000, .ping_miss_limit = 2, .backoff_initial_ms = 20,
-            .backoff_max_ms = 2000, .stable_ms = 60000, .hostcall = &handlers
+            .backoff_max_ms = 2000, .stable_ms = 60000, .hostcall = &chain.handlers
         };
         ASSERT_EQ(plugin_run_open(&options, &run, NULL), PLUGIN_RUN_OK);
         struct plugin_run_info info;
@@ -542,6 +534,7 @@ static int pp_attested_host_journey(void)
         PASS();
     } _test_next:;
     plugin_run_close(run);
+    prh_chain_close(&chain);
     pp_close(&f);
     return failures;
 }
