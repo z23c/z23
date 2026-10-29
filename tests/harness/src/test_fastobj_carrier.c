@@ -303,6 +303,150 @@ static void fcw_candidate_options(const char **argv, bool allow_testless,
     argv[n] = NULL;
 }
 
+struct fcw_cand_args {
+    char source_arg[4200], recipe_arg[4200], emit_arg[4096],
+         lock_arg[128], fast_arg[4096], name_arg[128], cpu_arg[64],
+         plan_arg[4200];
+};
+
+/* Formats every candidate-build flag; false when any value would not fit. */
+static bool fcw_candidate_format(struct fcw_cand_args *ca, const char *pkg_abs,
+                                 const char *recipe_abs, const char *emit_dir,
+                                 const char *lock_hex, const char *cache_dir)
+{
+    return !(snprintf(ca->source_arg, sizeof(ca->source_arg),
+                      "--zbuild-package-source=%s", pkg_abs) >=
+             (int)sizeof(ca->source_arg) ||
+             snprintf(ca->recipe_arg, sizeof(ca->recipe_arg),
+                      "--zbuild-package-recipe=%s", recipe_abs) >=
+             (int)sizeof(ca->recipe_arg) ||
+             snprintf(ca->emit_arg, sizeof(ca->emit_arg), "--emit=%s", emit_dir) >=
+             (int)sizeof(ca->emit_arg) ||
+             snprintf(ca->lock_arg, sizeof(ca->lock_arg), "--lock-root=%s", lock_hex) >=
+             (int)sizeof(ca->lock_arg) ||
+             snprintf(ca->fast_arg, sizeof(ca->fast_arg), "--fast-cache=%s",
+                      cache_dir) >= (int)sizeof(ca->fast_arg) ||
+             snprintf(ca->name_arg, sizeof(ca->name_arg),
+                      "--zbuild-package-name=fixture/tiny-lines") >=
+             (int)sizeof(ca->name_arg) ||
+             snprintf(ca->plan_arg, sizeof(ca->plan_arg), "--plan=%s.plan", emit_dir) >=
+             (int)sizeof(ca->plan_arg) ||
+             snprintf(ca->cpu_arg, sizeof(ca->cpu_arg),
+                      "--zbuild-package-max-cpu-seconds=120") >=
+             (int)sizeof(ca->cpu_arg));
+}
+
+/* Forks the worker with stdout and stderr on one pipe. Returns the child pid,
+ * or -1 with both pipe ends closed. */
+static pid_t fcw_candidate_spawn(const char *worker, const char *const *argv,
+                                 int fds[2])
+{
+    if (pipe(fds) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        if (dup2(fds[1], STDOUT_FILENO) < 0 ||
+            dup2(fds[1], STDERR_FILENO) < 0)
+            _exit(126);
+        close(fds[0]);
+        close(fds[1]);
+        execv(worker, (char *const *)argv);
+        _exit(127);
+    }
+    return pid;
+}
+
+/* Drain until EOF, a 1 MiB cap, or 300 s of silence — whichever
+ * comes first. */
+/* Returns a NUL-terminated buffer (NULL on allocation failure) and its length. */
+static char *fcw_candidate_drain(int fd, size_t *len_out)
+{
+    size_t cap = 1024u * 1024u, len = 0;
+    *len_out = 0;
+    char *text = malloc(cap);
+    if (!text)
+        return NULL;
+    int idle = 0;
+    while (len + 1u < cap && idle < 300) {
+        struct pollfd pfd = {fd, POLLIN, 0};
+        int pr = poll(&pfd, 1, 1000);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (pr == 0) {
+            idle++;
+            continue;
+        }
+        ssize_t got = read(fd, text + len, cap - len - 1u);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (got == 0)
+            break; /* EOF */
+        len += (size_t)got;
+        idle = 0;
+    }
+    text[len] = '\0';
+    *len_out = len;
+    return text;
+}
+
+/* Reap: up to 60 s past EOF for the exit syscall, then SIGKILL. */
+/* Returns true when the child had to be killed. */
+static bool fcw_candidate_reap(pid_t pid, int *status)
+{
+    bool reaped = false, killed = false;
+    for (int i = 0; i < 60 && !reaped; i++) {
+        if (waitpid(pid, status, WNOHANG) == pid) {
+            reaped = true;
+            break;
+        }
+        sleep(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    if (!reaped) {
+        kill(pid, SIGKILL);
+        killed = true;
+        (void)waitpid(pid, status, 0);
+    }
+    return killed;
+}
+
+/* Reads the first line, the last line and every marker from the merged output. */
+static void fcw_candidate_collect(struct fcw_build_result *out, char *text,
+                                  size_t len)
+{
+    snprintf(out->first_line, sizeof(out->first_line), "%.255s", text);
+    const char *end = text + len;
+    if (end > text && end[-1] == '\n')
+        end--;
+    const char *tail = end;
+    while (tail > text && tail[-1] != '\n')
+        tail--;
+    snprintf(out->last_line, sizeof(out->last_line), "%.*s",
+             (int)(end - tail), tail);
+    out->saw_refusal =
+        strstr(text, "zbuild-package-standard-refused=1") != NULL;
+    out->saw_test_23 = strstr(text, "exit 23, expected 0") != NULL;
+    out->saw_test_24 = strstr(text, "exit 24, expected 0") != NULL;
+    out->saw_program_link_error =
+        strstr(text, "detail=gcc: collect2: error: ld returned") != NULL;
+    fcw_parse_perf(text, out);
+    char *line = strstr(text, "zbuild-package-fast-cache=v1");
+    if (line)
+        out->cache_complete = sscanf(line,
+                     "zbuild-package-fast-cache=v1 hits=%llu "
+                     "misses=%llu", &out->hits, &out->misses) == 2;
+}
+
 /* Spawn the verifier in candidate proof mode with a fast cache, capture
  * merged stdout/stderr, and parse the fast-cache counters line.
  * allow_testless passes --allow-testless-standard. */
@@ -315,128 +459,32 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
 {
     memset(out, 0, sizeof(*out));
     out->exit_code = -1;
-    char source_arg[4200], recipe_arg[4200], emit_arg[4096],
-         lock_arg[128], fast_arg[4096], name_arg[128], cpu_arg[64],
-         plan_arg[4200];
-    if (snprintf(source_arg, sizeof(source_arg),
-                 "--zbuild-package-source=%s", pkg_abs) >=
-            (int)sizeof(source_arg) ||
-        snprintf(recipe_arg, sizeof(recipe_arg),
-                 "--zbuild-package-recipe=%s", recipe_abs) >=
-            (int)sizeof(recipe_arg) ||
-        snprintf(emit_arg, sizeof(emit_arg), "--emit=%s", emit_dir) >=
-            (int)sizeof(emit_arg) ||
-        snprintf(lock_arg, sizeof(lock_arg), "--lock-root=%s", lock_hex) >=
-            (int)sizeof(lock_arg) ||
-        snprintf(fast_arg, sizeof(fast_arg), "--fast-cache=%s",
-                 cache_dir) >= (int)sizeof(fast_arg) ||
-        snprintf(name_arg, sizeof(name_arg),
-                 "--zbuild-package-name=fixture/tiny-lines") >=
-            (int)sizeof(name_arg) ||
-        snprintf(plan_arg, sizeof(plan_arg), "--plan=%s.plan", emit_dir) >=
-            (int)sizeof(plan_arg) ||
-        snprintf(cpu_arg, sizeof(cpu_arg),
-                 "--zbuild-package-max-cpu-seconds=120") >=
-            (int)sizeof(cpu_arg))
+    struct fcw_cand_args ca;
+    if (!fcw_candidate_format(&ca, pkg_abs, recipe_abs, emit_dir, lock_hex,
+                              cache_dir))
         return;
-    const char *argv[] = {worker,       root_hex,     source_arg,
-                          recipe_arg,   name_arg,
+    const char *argv[] = {worker,       root_hex,     ca.source_arg,
+                          ca.recipe_arg, ca.name_arg,
                           "--zbuild-package-profile=standard",
-                          cpu_arg,      emit_arg,     lock_arg,
-                          fast_arg, "--require-full-isolation",
+                          ca.cpu_arg,   ca.emit_arg,  ca.lock_arg,
+                          ca.fast_arg, "--require-full-isolation",
                           NULL, NULL, NULL};
-    fcw_candidate_options(argv + 11, allow_testless, with_plan, plan_arg);
+    fcw_candidate_options(argv + 11, allow_testless, with_plan, ca.plan_arg);
     int fds[2];
-    if (pipe(fds) != 0)
+    pid_t pid = fcw_candidate_spawn(worker, argv, fds);
+    if (pid < 0)
         return;
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
-        return;
-    }
-    if (pid == 0) {
-        if (dup2(fds[1], STDOUT_FILENO) < 0 ||
-            dup2(fds[1], STDERR_FILENO) < 0)
-            _exit(126);
-        close(fds[0]);
-        close(fds[1]);
-        execv(worker, (char *const *)argv);
-        _exit(127);
-    }
     close(fds[1]);
-    /* Drain until EOF, a 1 MiB cap, or 300 s of silence — whichever
-     * comes first. */
-    size_t cap = 1024u * 1024u, len = 0;
-    char *text = malloc(cap);
-    if (text) {
-        int idle = 0;
-        while (len + 1u < cap && idle < 300) {
-            struct pollfd pfd = {fds[0], POLLIN, 0};
-            int pr = poll(&pfd, 1, 1000);
-            if (pr < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (pr == 0) {
-                idle++;
-                continue;
-            }
-            ssize_t got = read(fds[0], text + len, cap - len - 1u);
-            if (got < 0) {
-                if (errno == EINTR)
-                    continue;
-                break;
-            }
-            if (got == 0)
-                break; /* EOF */
-            len += (size_t)got;
-            idle = 0;
-        }
-        text[len] = '\0';
-    }
-    /* Reap: up to 60 s past EOF for the exit syscall, then SIGKILL. */
+    size_t len = 0;
+    char *text = fcw_candidate_drain(fds[0], &len);
     int status = 0;
-    bool reaped = false, killed = false;
-    for (int i = 0; i < 60 && !reaped; i++) {
-        if (waitpid(pid, &status, WNOHANG) == pid) {
-            reaped = true;
-            break;
-        }
-        sleep(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-    }
-    if (!reaped) {
-        kill(pid, SIGKILL);
-        killed = true;
-        (void)waitpid(pid, &status, 0);
-    }
+    bool killed = fcw_candidate_reap(pid, &status);
     close(fds[0]);
     out->exit_code = !killed && WIFEXITED(status) ? WEXITSTATUS(status)
                                                   : -1;
     out->ok = !killed && out->exit_code == 0;
     if (text) {
-        snprintf(out->first_line, sizeof(out->first_line), "%.255s", text);
-        const char *end = text + len;
-        if (end > text && end[-1] == '\n')
-            end--;
-        const char *tail = end;
-        while (tail > text && tail[-1] != '\n')
-            tail--;
-        snprintf(out->last_line, sizeof(out->last_line), "%.*s",
-                 (int)(end - tail), tail);
-        out->saw_refusal =
-            strstr(text, "zbuild-package-standard-refused=1") != NULL;
-        out->saw_test_23 = strstr(text, "exit 23, expected 0") != NULL;
-        out->saw_test_24 = strstr(text, "exit 24, expected 0") != NULL;
-        out->saw_program_link_error =
-            strstr(text, "detail=gcc: collect2: error: ld returned") != NULL;
-        fcw_parse_perf(text, out);
-        char *line = strstr(text, "zbuild-package-fast-cache=v1");
-        if (line)
-            out->cache_complete = sscanf(line,
-                         "zbuild-package-fast-cache=v1 hits=%llu "
-                         "misses=%llu", &out->hits, &out->misses) == 2;
+        fcw_candidate_collect(out, text, len);
         free(text);
     }
 }
@@ -1582,154 +1630,192 @@ static int fcw_anonymous_crash_refusal(const char *base,
 }
 #endif
 
-static int test_fastobj_carrier_platform_arm(void)
-{
-    int failures = 0;
-    printf("fastobj_carrier: object-set carrier, offline proof\n");
-
-    /* Everything done: cleanup touches is declared and initialized before
-     * the first goto done. */
-    char err[512] = "";
-    struct vcs_package_prepared prep;
-    vcs_package_prepared_init(&prep);
-    struct vcs_package_prepared prepT;
-    vcs_package_prepared_init(&prepT);
-    struct vcs_package_prepared prepF;
-    vcs_package_prepared_init(&prepF);
-    struct vcs_fastobj_carrier_stats stA, stC, stF, stAd, stD, stRef;
-    memset(&stA, 0, sizeof(stA));
-    memset(&stC, 0, sizeof(stC));
-    memset(&stF, 0, sizeof(stF));
-    memset(&stAd, 0, sizeof(stAd));
-    memset(&stD, 0, sizeof(stD));
-    memset(&stRef, 0, sizeof(stRef));
-    uint8_t rootA[32] = {0}, rootC[32] = {0}, rootD[32] = {0}, rootL[32] = {0};
-    struct vcs_package_store *nodeA = NULL, *nodeB = NULL, *nodeC = NULL,
-                             *nodeD = NULL, *storeR = NULL;
-    size_t r1_len = 0, r2_len = 0, rT_len = 0, rF_len = 0;
-    uint8_t *r1 = NULL, *r2 = NULL, *rT = NULL, *rF = NULL;
-
-    /* The confined worker ships beside this binary — never from PATH. */
+/* Shared state for the platform arm: every scratch path, root, store and
+ * receipt that more than one leg reads. The legs run in the original order;
+ * a leg sets stop where the original goto done fired, and fatal where the
+ * original returned before cleanup. */
+struct fcw_arm {
+    bool stop;
+    bool fatal;
+    bool testless_ready;
+    bool finding_ready;
+    char err[512];
     char worker[4096];
-    bool have_worker = fcw_worker_path(worker, sizeof(worker));
-    FC_CHECK("package verifier beside the test binary (make dev-bin)",
-             have_worker);
-    char cwd[3072];
     char base[4096];
-    bool base_ok = getcwd(cwd, sizeof(cwd)) != NULL &&
-        snprintf(base, sizeof(base), "%s/test-tmp/fastobj_carrier_%ld",
-                 cwd, (long)getpid()) < (int)sizeof(base);
-    if (!base_ok || !have_worker) {
-        printf("fastobj_carrier: FAIL (setup)\n");
-        return 1;
-    }
-    (void)fcw_rm_rf(base);
-    if (!fcw_mkdir_p(base)) {
-        printf("fastobj_carrier: FAIL (scratch %s)\n", base);
-        return 1;
-    }
-
     char pkg[4096], cacheA[4096], cacheB[4096], emit1[4096], emit2[4096],
          recipe_path[4096], dirA[4096], dirB[4096], dirC[4096], dirD[4096],
          dirR[4096];
+    char root_hex[65], lock_hex[65], key[65];
+    struct pubkey pk;
+    struct vcs_package_prepared prep, prepT, prepF;
+    struct fcw_build_result run1, run2, tref, tok;
+    struct vcs_fastobj_carrier_stats stA, stC, stF, stAd, stD, stRef;
+    uint8_t rootA[32], rootC[32], rootD[32], rootL[32];
+    struct vcs_package_store *nodeA, *nodeB, *nodeC, *nodeD, *storeR;
+    size_t r1_len, r2_len, rT_len, rF_len;
+    uint8_t *r1, *r2, *rT, *rF;
+    char pkgT[4096], recipeT_path[4096], emitT1[4096], emitT2[4096],
+         cacheT[4096], rootT_hex[65], lockT_hex[65];
+    char pkgF[4096], recipeF_path[4096], emitF[4096], cacheF[4096],
+         rootF_hex[65], lockF_hex[65];
+};
+
+static int fcw_arm_setup(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* The confined worker ships beside this binary — never from PATH. */
+    bool have_worker = fcw_worker_path(a->worker, sizeof(a->worker));
+    FC_CHECK("package verifier beside the test binary (make dev-bin)",
+             have_worker);
+    char cwd[3072];
+    bool base_ok = getcwd(cwd, sizeof(cwd)) != NULL &&
+        snprintf(a->base, sizeof(a->base), "%s/test-tmp/fastobj_carrier_%ld",
+                 cwd, (long)getpid()) < (int)sizeof(a->base);
+    if (!base_ok || !have_worker) {
+        printf("fastobj_carrier: FAIL (setup)\n");
+        a->fatal = true;
+        return failures;
+    }
+    (void)fcw_rm_rf(a->base);
+    if (!fcw_mkdir_p(a->base)) {
+        printf("fastobj_carrier: FAIL (scratch %s)\n", a->base);
+        a->fatal = true;
+    }
+    return failures;
+}
+
+static int fcw_arm_layout(struct fcw_arm *a)
+{
+    int failures = 0;
     bool paths_ok =
-        snprintf(pkg, sizeof(pkg), "%s/pkg", base) < (int)sizeof(pkg) &&
-        snprintf(cacheA, sizeof(cacheA), "%s/cacheA", base) <
-            (int)sizeof(cacheA) &&
-        snprintf(cacheB, sizeof(cacheB), "%s/cacheB", base) <
-            (int)sizeof(cacheB) &&
-        snprintf(emit1, sizeof(emit1), "%s/emit1", base) <
-            (int)sizeof(emit1) &&
-        snprintf(emit2, sizeof(emit2), "%s/emit2", base) <
-            (int)sizeof(emit2) &&
-        snprintf(recipe_path, sizeof(recipe_path), "%s/recipe.wire", base) <
-            (int)sizeof(recipe_path) &&
-        snprintf(dirA, sizeof(dirA), "%s/nodeA", base) < (int)sizeof(dirA) &&
-        snprintf(dirB, sizeof(dirB), "%s/nodeB", base) < (int)sizeof(dirB) &&
-        snprintf(dirC, sizeof(dirC), "%s/nodeC", base) < (int)sizeof(dirC) &&
-        snprintf(dirD, sizeof(dirD), "%s/nodeD", base) < (int)sizeof(dirD) &&
-        snprintf(dirR, sizeof(dirR), "%s/storeR", base) < (int)sizeof(dirR);
+        snprintf(a->pkg, sizeof(a->pkg), "%s/pkg", a->base) < (int)sizeof(a->pkg) &&
+        snprintf(a->cacheA, sizeof(a->cacheA), "%s/cacheA", a->base) <
+            (int)sizeof(a->cacheA) &&
+        snprintf(a->cacheB, sizeof(a->cacheB), "%s/cacheB", a->base) <
+            (int)sizeof(a->cacheB) &&
+        snprintf(a->emit1, sizeof(a->emit1), "%s/emit1", a->base) <
+            (int)sizeof(a->emit1) &&
+        snprintf(a->emit2, sizeof(a->emit2), "%s/emit2", a->base) <
+            (int)sizeof(a->emit2) &&
+        snprintf(a->recipe_path, sizeof(a->recipe_path), "%s/recipe.wire", a->base) <
+            (int)sizeof(a->recipe_path) &&
+        snprintf(a->dirA, sizeof(a->dirA), "%s/nodeA", a->base) < (int)sizeof(a->dirA) &&
+        snprintf(a->dirB, sizeof(a->dirB), "%s/nodeB", a->base) < (int)sizeof(a->dirB) &&
+        snprintf(a->dirC, sizeof(a->dirC), "%s/nodeC", a->base) < (int)sizeof(a->dirC) &&
+        snprintf(a->dirD, sizeof(a->dirD), "%s/nodeD", a->base) < (int)sizeof(a->dirD) &&
+        snprintf(a->dirR, sizeof(a->dirR), "%s/storeR", a->base) < (int)sizeof(a->dirR);
     FC_CHECK("scratch paths laid out", paths_ok);
     if (!paths_ok)
-        goto done;
+        a->stop = true;
+    return failures;
+}
 
+static int fcw_arm_prepare(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 1. prepare the tiny-lines fixture (contexts/commons/modules/vcs only — the candidate
      * proof action needs no signed release). */
     FC_CHECK("tiny-lines fixture copied to scratch",
-             fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", pkg));
+             fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", a->pkg));
     struct vcs_package_prepare_options opts;
     memset(&opts, 0, sizeof(opts));
-    opts.dir = pkg;
+    opts.dir = a->pkg;
     /* The release layer validates the publisher pubkey as a compressed
      * curve point, so derive a real one (the test_zcode_add idiom). */
     struct privkey sk;
-    struct pubkey pk;
     memset(sk.vch, 0x11, 32);
     sk.fValid = true;
     sk.fCompressed = true;
-    bool have_pk = privkey_get_pubkey(&sk, &pk);
+    bool have_pk = privkey_get_pubkey(&sk, &a->pk);
     FC_CHECK("publisher pubkey derived for prepare", have_pk);
-    if (!have_pk)
-        goto done;
-    memcpy(opts.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    if (!have_pk) {
+        a->stop = true;
+        return failures;
+    }
+    memcpy(opts.publisher_pubkey, a->pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
     opts.publisher_sequence = 1;
     char prep_detail[512] = "";
     enum vcs_package_prepare_error prc =
-        vcs_package_prepare(&opts, &prep, prep_detail, sizeof(prep_detail));
+        vcs_package_prepare(&opts, &a->prep, prep_detail, sizeof(prep_detail));
     FC_CHECK("package prepared (root, recipe, lock derived)",
              prc == VCS_PACKAGE_PREPARE_OK);
     if (prc != VCS_PACKAGE_PREPARE_OK)
         printf("    prepare: %s\n", prep_detail);
-    char root_hex[65] = "", lock_hex[65] = "";
-    zcl_hex_encode(prep.package_root, 32, root_hex);
-    zcl_hex_encode(prep.lock_root, 32, lock_hex);
+    zcl_hex_encode(a->prep.package_root, 32, a->root_hex);
+    zcl_hex_encode(a->prep.lock_root, 32, a->lock_hex);
     FC_CHECK("recipe wire written for the worker",
              prc == VCS_PACKAGE_PREPARE_OK &&
-                 fcw_write_file(recipe_path, prep.recipe_wire,
-                                prep.recipe_wire_len));
+                 fcw_write_file(a->recipe_path, a->prep.recipe_wire,
+                                a->prep.recipe_wire_len));
     if (prc != VCS_PACKAGE_PREPARE_OK)
-        goto done;
+        a->stop = true;
+    return failures;
+}
 
+static int fcw_arm_build_cold(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 2. candidate build #1 on a COLD cacheA: the compile really runs. */
-    struct fcw_build_result run1, run2;
-    memset(&run1, 0, sizeof(run1));
-    memset(&run2, 0, sizeof(run2));
-    fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
-                        cacheA, false, false, &run1);
-    FC_CHECK("candidate build #1 (cold cacheA) succeeded", run1.ok);
-    if (!run1.ok) {
-        printf("    build #1 exit %d: %.200s\n", run1.exit_code,
-               run1.first_line);
-        printf("    build #1 final: %.240s\n", run1.last_line);
+    fcw_candidate_build(a->worker, a->root_hex, a->pkg, a->recipe_path, a->emit1,
+                        a->lock_hex, a->cacheA, false, false, &a->run1);
+    FC_CHECK("candidate build #1 (cold cacheA) succeeded", a->run1.ok);
+    if (!a->run1.ok) {
+        printf("    build #1 exit %d: %.200s\n", a->run1.exit_code,
+               a->run1.first_line);
+        printf("    build #1 final: %.240s\n", a->run1.last_line);
     }
     FC_CHECK("build #1 compiled both library and test objects",
-             run1.ok && run1.misses == 2u && run1.hits == 0u);
-    printf("    build #1: hits=%llu misses=%llu\n", run1.hits, run1.misses);
-    if (!run1.ok)
-        goto done;
+             a->run1.ok && a->run1.misses == 2u && a->run1.hits == 0u);
+    printf("    build #1: hits=%llu misses=%llu\n", a->run1.hits, a->run1.misses);
+    if (!a->run1.ok)
+        a->stop = true;
+    return failures;
+}
 
+static int fcw_arm_export_a(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 3. export cacheA into store nodeA as ONE content.v2 carrier. */
-    nodeA = vcs_package_store_open(dirA, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    bool expA = nodeA != NULL && vcs_fastobj_carrier_export(
-                                    cacheA, nodeA, rootA, &stA, err,
-                                    sizeof(err));
+    a->nodeA = vcs_package_store_open(a->dirA, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    bool expA = a->nodeA != NULL && vcs_fastobj_carrier_export(
+                                        a->cacheA, a->nodeA, a->rootA, &a->stA, a->err,
+                                        sizeof(a->err));
     FC_CHECK("cacheA exported as one content.v2 carrier", expA);
     if (!expA)
-        printf("    export: %s\n", err);
+        printf("    export: %s\n", a->err);
     FC_CHECK("carrier entries == build #1 misses",
-             expA && stA.entries == (uint32_t)run1.misses);
+             expA && a->stA.entries == (uint32_t)a->run1.misses);
     FC_CHECK("carrier files are object+sidecar pairs",
-             expA && stA.files == 2u * stA.entries);
+             expA && a->stA.files == 2u * a->stA.entries);
     FC_CHECK("carrier carries real object bytes",
-             expA && stA.object_bytes > 0u);
+             expA && a->stA.object_bytes > 0u);
     if (!expA)
-        goto done;
+        a->stop = true;
+    return failures;
+}
 
+static int fcw_arm_first(struct fcw_arm *a)
+{
+    int failures = fcw_arm_layout(a);
+    if (a->stop)
+        return failures;
+    failures += fcw_arm_prepare(a);
+    if (a->stop)
+        return failures;
+    failures += fcw_arm_build_cold(a);
+    if (a->stop)
+        return failures;
+    return failures + fcw_arm_export_a(a);
+}
+
+static int fcw_arm_shape_a(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 4. the carrier has a public shape: a -packagehost=1 node may announce
      *    and serve it; the serve-time proof is the consumer's admit proof. */
     struct vcs_package_public_verdict shape_v;
     enum vcs_package_public_shape pub =
-        vcs_package_public_shape_classify(nodeA, rootA, &shape_v);
+        vcs_package_public_shape_classify(a->nodeA, a->rootA, &shape_v);
     FC_CHECK("exported carrier classifies as fastobj-carrier",
              pub == VCS_PACKAGE_PUBLIC_FASTOBJ_CARRIER);
     FC_CHECK("the carrier rule is its shape string",
@@ -1739,93 +1825,122 @@ static int test_fastobj_carrier_platform_arm(void)
     FC_CHECK("fastobj carrier is not licensed content",
              !vcs_package_public_shape_licensed(pub));
     FC_CHECK("read-only carrier verify passes on the exporter's store",
-             vcs_fastobj_carrier_verify(nodeA, rootA, err, sizeof(err)));
+             vcs_fastobj_carrier_verify(a->nodeA, a->rootA, a->err, sizeof(a->err)));
+    return failures;
+}
 
+static int fcw_arm_reexport_c(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 5. re-export into a THIRD store: the root must not move. */
-    nodeC = vcs_package_store_open(dirC, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    bool expC = nodeC != NULL && vcs_fastobj_carrier_export(
-                                     cacheA, nodeC, rootC, &stC, err,
-                                     sizeof(err));
+    a->nodeC = vcs_package_store_open(a->dirC, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    bool expC = a->nodeC != NULL && vcs_fastobj_carrier_export(
+                                         a->cacheA, a->nodeC, a->rootC, &a->stC, a->err,
+                                         sizeof(a->err));
     FC_CHECK("re-export into a third store succeeded", expC);
     if (!expC)
-        printf("    re-export: %s\n", err);
+        printf("    re-export: %s\n", a->err);
     FC_CHECK("the carrier root is deterministic (same cache, same root)",
-             expC && memcmp(rootA, rootC, 32) == 0);
+             expC && memcmp(a->rootA, a->rootC, 32) == 0);
+    return failures;
+}
 
+static int fcw_arm_fetch_admit(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 6. fetch store-to-store: the offline stand-in for the swarm wire. */
-    nodeB = vcs_package_store_open(dirB, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    bool fetched = nodeB != NULL && vcs_fastobj_carrier_fetch(
-                                        nodeB, nodeA, rootA, &stF, err,
-                                        sizeof(err));
+    a->nodeB = vcs_package_store_open(a->dirB, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    bool fetched = a->nodeB != NULL && vcs_fastobj_carrier_fetch(
+                                           a->nodeB, a->nodeA, a->rootA, &a->stF, a->err,
+                                           sizeof(a->err));
     FC_CHECK("carrier fetched store-to-store into nodeB", fetched);
     if (!fetched)
-        printf("    fetch: %s\n", err);
+        printf("    fetch: %s\n", a->err);
     FC_CHECK("fetched carrier carries the same entries",
-             fetched && stF.entries == stA.entries);
-
-    failures += fcw_fetch_resume(nodeB, nodeA, rootA, dirB, dirA, fetched);
-
+             fetched && a->stF.entries == a->stA.entries);
+    failures += fcw_fetch_resume(a->nodeB, a->nodeA, a->rootA, a->dirB, a->dirA, fetched);
     /* 7. admit nodeB's carrier into a FRESH cacheB. */
     bool admitted = fetched && vcs_fastobj_carrier_admit(
-                                   cacheB, nodeB, rootA, &stAd, err,
-                                   sizeof(err));
+                                   a->cacheB, a->nodeB, a->rootA, &a->stAd, a->err,
+                                   sizeof(a->err));
     FC_CHECK("carrier admitted into a fresh cacheB", admitted);
     if (!admitted)
-        printf("    admit: %s\n", err);
+        printf("    admit: %s\n", a->err);
     FC_CHECK("cacheB holds every carried entry",
-             admitted && stAd.entries == stA.entries);
+             admitted && a->stAd.entries == a->stA.entries);
+    return failures;
+}
 
+static int fcw_arm_reexport_d(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 8. re-export cacheB into a FOURTH store: same root again. */
-    nodeD = vcs_package_store_open(dirD, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    bool expD = nodeD != NULL && vcs_fastobj_carrier_export(
-                                     cacheB, nodeD, rootD, &stD, err,
-                                     sizeof(err));
+    a->nodeD = vcs_package_store_open(a->dirD, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    bool expD = a->nodeD != NULL && vcs_fastobj_carrier_export(
+                                        a->cacheB, a->nodeD, a->rootD, &a->stD, a->err,
+                                        sizeof(a->err));
     FC_CHECK("cacheB re-exported into a fourth store", expD);
     if (!expD)
-        printf("    re-export cacheB: %s\n", err);
+        printf("    re-export cacheB: %s\n", a->err);
     FC_CHECK("round-trip root identical (cacheB bytes == cacheA bytes)",
-             expD && memcmp(rootA, rootD, 32) == 0);
+             expD && memcmp(a->rootA, a->rootD, 32) == 0);
+    return failures;
+}
 
+static int fcw_arm_build_warm(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 9. Adding dependency-plan evidence must reuse the same object digest. */
-    fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit2, lock_hex,
-                        cacheB, false, true, &run2);
-    FC_CHECK("candidate build #2 (warm cacheB) succeeded", run2.ok);
-    if (!run2.ok)
-        printf("    build #2 exit %d: %.200s\n", run2.exit_code,
-               run2.first_line);
-    printf("    build #2: hits=%llu misses=%llu\n", run2.hits, run2.misses);
+    fcw_candidate_build(a->worker, a->root_hex, a->pkg, a->recipe_path, a->emit2,
+                        a->lock_hex, a->cacheB, false, true, &a->run2);
+    FC_CHECK("candidate build #2 (warm cacheB) succeeded", a->run2.ok);
+    if (!a->run2.ok)
+        printf("    build #2 exit %d: %.200s\n", a->run2.exit_code,
+               a->run2.first_line);
+    printf("    build #2: hits=%llu misses=%llu\n", a->run2.hits, a->run2.misses);
     FC_CHECK("build #2 has no eligible object misses",
-             run2.ok && run2.misses == 0u);
+             a->run2.ok && a->run2.misses == 0u);
     FC_CHECK("build #2 hit every entry build #1 missed",
-             run2.ok && run2.hits == run1.misses);
-    failures += fcw_check_perf(&run1, &run2);
+             a->run2.ok && a->run2.hits == a->run1.misses);
+    failures += fcw_check_perf(&a->run1, &a->run2);
+    return failures;
+}
 
+static int fcw_arm_receipts_emit(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 10. the ZCLBLD receipts are byte-identical. */
     char report1[4096], report2[4096];
     bool got_reports =
-        snprintf(report1, sizeof(report1), "%s/build-report", emit1) <
+        snprintf(report1, sizeof(report1), "%s/build-report", a->emit1) <
             (int)sizeof(report1) &&
-        snprintf(report2, sizeof(report2), "%s/build-report", emit2) <
+        snprintf(report2, sizeof(report2), "%s/build-report", a->emit2) <
             (int)sizeof(report2);
     if (got_reports) {
-        r1 = fcw_read_file(report1, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                           &r1_len);
-        r2 = fcw_read_file(report2, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                           &r2_len);
+        a->r1 = fcw_read_file(report1, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                              &a->r1_len);
+        a->r2 = fcw_read_file(report2, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                              &a->r2_len);
     }
-    FC_CHECK("both ZCLBLD build-reports emitted", r1 != NULL && r2 != NULL);
+    FC_CHECK("both ZCLBLD build-reports emitted", a->r1 != NULL && a->r2 != NULL);
     FC_CHECK("build-report #2 is byte-identical to #1",
-             r1 && r2 && r1_len == r2_len && memcmp(r1, r2, r1_len) == 0);
+             a->r1 && a->r2 && a->r1_len == a->r2_len &&
+                 memcmp(a->r1, a->r2, a->r1_len) == 0);
+    return failures;
+}
+
+static int fcw_arm_receipts_ids(struct fcw_arm *a)
+{
+    int failures = 0;
     struct vcs_package_build_receipt rec1, rec2;
     uint8_t id1[32] = {0}, id2[32] = {0};
-    bool ids_ok = r1 && r2 &&
-        vcs_package_build_parse(r1, r1_len, &rec1) == VCS_PACKAGE_BUILD_OK &&
-        vcs_package_build_parse(r2, r2_len, &rec2) == VCS_PACKAGE_BUILD_OK &&
+    bool ids_ok = a->r1 && a->r2 &&
+        vcs_package_build_parse(a->r1, a->r1_len, &rec1) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_parse(a->r2, a->r2_len, &rec2) == VCS_PACKAGE_BUILD_OK &&
         vcs_package_build_id(&rec1, id1) == VCS_PACKAGE_BUILD_OK &&
         vcs_package_build_id(&rec2, id2) == VCS_PACKAGE_BUILD_OK;
     FC_CHECK("both receipts parse and hash to the same id",
              ids_ok && memcmp(id1, id2, 32) == 0);
-
     /* 10. receipt #1 really ran the fixture's tests and its flags string
      * claims "clean" (both sanitizer outcomes PASS). */
     FC_CHECK("tested standard receipt really ran its tests",
@@ -1833,105 +1948,128 @@ static int test_fastobj_carrier_platform_arm(void)
                  rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS);
     FC_CHECK("tested standard receipt flags still claim asan,ubsan=clean",
              ids_ok && strstr(rec1.flags, "asan,ubsan=clean") != NULL);
+    return failures;
+}
 
+static int fcw_arm_bypass_legs(struct fcw_arm *a)
+{
+    int failures = 0;
 #if defined(__linux__)
-    failures += fcw_asm_bypass(base, worker, &pk, false);
-    failures += fcw_attribute_bypass(base, worker, &pk);
-    failures += fcw_test_cache_failure(base, worker, &pk);
-    failures += fcw_program_cache_probe(base, worker, &pk);
+    failures += fcw_asm_bypass(a->base, a->worker, &a->pk, false);
+    failures += fcw_attribute_bypass(a->base, a->worker, &a->pk);
+    failures += fcw_test_cache_failure(a->base, a->worker, &a->pk);
+    failures += fcw_program_cache_probe(a->base, a->worker, &a->pk);
 #elif defined(__APPLE__)
-    failures += fcw_asm_bypass(base, worker, &pk, false);
-    failures += fcw_apple_attribute_spellings(base, worker, &pk);
+    failures += fcw_asm_bypass(a->base, a->worker, &a->pk, false);
+    failures += fcw_apple_attribute_spellings(a->base, a->worker, &a->pk);
 #endif
+    return failures;
+}
 
+static int fcw_arm_testless_prepare(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 11. testless standard-profile refusal: a copy without tests/ is
      * REFUSED with exit 6 in the evidence shape, and BUILDS with
      * --allow-testless-standard, recording test_ran=false,
      * result_class=BUILD_PASS. */
-    char pkgT[4096], recipeT_path[4096], emitT1[4096], emitT2[4096],
-         cacheT[4096], testsT[4096];
+    char testsT[4096];
     bool pathsT_ok =
-        snprintf(pkgT, sizeof(pkgT), "%s/pkgT", base) < (int)sizeof(pkgT) &&
-        snprintf(recipeT_path, sizeof(recipeT_path), "%s/recipeT.wire",
-                 base) < (int)sizeof(recipeT_path) &&
-        snprintf(emitT1, sizeof(emitT1), "%s/emitT1", base) <
-            (int)sizeof(emitT1) &&
-        snprintf(emitT2, sizeof(emitT2), "%s/emitT2", base) <
-            (int)sizeof(emitT2) &&
-        snprintf(cacheT, sizeof(cacheT), "%s/cacheT", base) <
-            (int)sizeof(cacheT) &&
-        snprintf(testsT, sizeof(testsT), "%s/tests", pkgT) <
+        snprintf(a->pkgT, sizeof(a->pkgT), "%s/pkgT", a->base) < (int)sizeof(a->pkgT) &&
+        snprintf(a->recipeT_path, sizeof(a->recipeT_path), "%s/recipeT.wire",
+                 a->base) < (int)sizeof(a->recipeT_path) &&
+        snprintf(a->emitT1, sizeof(a->emitT1), "%s/emitT1", a->base) <
+            (int)sizeof(a->emitT1) &&
+        snprintf(a->emitT2, sizeof(a->emitT2), "%s/emitT2", a->base) <
+            (int)sizeof(a->emitT2) &&
+        snprintf(a->cacheT, sizeof(a->cacheT), "%s/cacheT", a->base) <
+            (int)sizeof(a->cacheT) &&
+        snprintf(testsT, sizeof(testsT), "%s/tests", a->pkgT) <
             (int)sizeof(testsT);
     bool testless_ready = pathsT_ok &&
-        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", pkgT) &&
+        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", a->pkgT) &&
         fcw_rm_rf(testsT);
     struct vcs_package_prepare_options optsT;
     memset(&optsT, 0, sizeof(optsT));
-    optsT.dir = pkgT;
-    memcpy(optsT.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    optsT.dir = a->pkgT;
+    memcpy(optsT.publisher_pubkey, a->pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
     optsT.publisher_sequence = 1;
     char prepT_detail[512] = "";
     enum vcs_package_prepare_error prcT = VCS_PACKAGE_PREPARE_ERR_IO;
     if (testless_ready)
-        prcT = vcs_package_prepare(&optsT, &prepT, prepT_detail,
+        prcT = vcs_package_prepare(&optsT, &a->prepT, prepT_detail,
                                    sizeof(prepT_detail));
-    char rootT_hex[65] = "", lockT_hex[65] = "";
     if (prcT == VCS_PACKAGE_PREPARE_OK) {
-        zcl_hex_encode(prepT.package_root, 32, rootT_hex);
-        zcl_hex_encode(prepT.lock_root, 32, lockT_hex);
+        zcl_hex_encode(a->prepT.package_root, 32, a->rootT_hex);
+        zcl_hex_encode(a->prepT.lock_root, 32, a->lockT_hex);
     }
     testless_ready =
         testless_ready && prcT == VCS_PACKAGE_PREPARE_OK &&
-        fcw_write_file(recipeT_path, prepT.recipe_wire,
-                       prepT.recipe_wire_len);
+        fcw_write_file(a->recipeT_path, a->prepT.recipe_wire,
+                       a->prepT.recipe_wire_len);
     FC_CHECK("testless fixture variant (tests/ dropped) prepared",
              testless_ready);
     if (!testless_ready && prcT != VCS_PACKAGE_PREPARE_OK)
         printf("    prepare testless: %s\n", prepT_detail);
-    if (testless_ready) {
-        struct fcw_build_result tref, tok;
-        memset(&tref, 0, sizeof(tref));
-        memset(&tok, 0, sizeof(tok));
-        fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT1,
-                            lockT_hex, cacheT, false, false, &tref);
-        FC_CHECK("evidence-shape standard run of a testless package "
-                 "refuses (exit 6 + refusal line)",
-                 tref.exit_code == 6 && tref.saw_refusal);
-        if (!(tref.exit_code == 6 && tref.saw_refusal))
-            printf("    testless refuse: exit %d: %.200s\n",
-                   tref.exit_code, tref.first_line);
-        fcw_candidate_build(worker, rootT_hex, pkgT, recipeT_path, emitT2,
-                            lockT_hex, cacheT, true, false, &tok);
-        FC_CHECK("reproduce-shape standard run of a testless package "
-                 "builds", tok.ok);
-        FC_CHECK("testless build reports no test processes",
-                 fcw_testless_perf(&tok));
-        if (!tok.ok)
-            printf("    testless allow: exit %d: %.200s\n", tok.exit_code,
-                   tok.first_line);
-        char reportT[4096];
-        if (tok.ok &&
-            snprintf(reportT, sizeof(reportT), "%s/build-report", emitT2) <
-                (int)sizeof(reportT))
-            rT = fcw_read_file(reportT, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                               &rT_len);
-        struct vcs_package_build_receipt recT;
-        bool recT_ok =
-            rT != NULL && vcs_package_build_parse(rT, rT_len, &recT) ==
-                              VCS_PACKAGE_BUILD_OK;
-        FC_CHECK("testless emit receipt parses", recT_ok);
-        FC_CHECK("testless receipt records the honest facts (no test run, "
-                 "build-pass only)",
-                 recT_ok && !recT.test_ran &&
-                     recT.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_PASS);
-        FC_CHECK("testless receipt flags say asan,ubsan=not-run (never ran, "
-                 "never claimed clean)",
-                 recT_ok &&
-                     strstr(recT.flags, "asan,ubsan=not-run") != NULL);
-        FC_CHECK("testless receipt stays installable for reproduction",
-                 recT_ok && vcs_package_build_installable(&recT));
-    }
+    a->testless_ready = testless_ready;
+    return failures;
+}
 
+static int fcw_arm_testless_refuse_allow(struct fcw_arm *a)
+{
+    int failures = 0;
+    memset(&a->tref, 0, sizeof(a->tref));
+    memset(&a->tok, 0, sizeof(a->tok));
+    fcw_candidate_build(a->worker, a->rootT_hex, a->pkgT, a->recipeT_path, a->emitT1,
+                        a->lockT_hex, a->cacheT, false, false, &a->tref);
+    FC_CHECK("evidence-shape standard run of a testless package "
+             "refuses (exit 6 + refusal line)",
+             a->tref.exit_code == 6 && a->tref.saw_refusal);
+    if (!(a->tref.exit_code == 6 && a->tref.saw_refusal))
+        printf("    testless refuse: exit %d: %.200s\n",
+               a->tref.exit_code, a->tref.first_line);
+    fcw_candidate_build(a->worker, a->rootT_hex, a->pkgT, a->recipeT_path, a->emitT2,
+                        a->lockT_hex, a->cacheT, true, false, &a->tok);
+    FC_CHECK("reproduce-shape standard run of a testless package "
+             "builds", a->tok.ok);
+    FC_CHECK("testless build reports no test processes",
+             fcw_testless_perf(&a->tok));
+    if (!a->tok.ok)
+        printf("    testless allow: exit %d: %.200s\n", a->tok.exit_code,
+               a->tok.first_line);
+    return failures;
+}
+
+static int fcw_arm_testless_receipt(struct fcw_arm *a)
+{
+    int failures = 0;
+    char reportT[4096];
+    if (a->tok.ok &&
+        snprintf(reportT, sizeof(reportT), "%s/build-report", a->emitT2) <
+            (int)sizeof(reportT))
+        a->rT = fcw_read_file(reportT, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                              &a->rT_len);
+    struct vcs_package_build_receipt recT;
+    bool recT_ok =
+        a->rT != NULL && vcs_package_build_parse(a->rT, a->rT_len, &recT) ==
+                              VCS_PACKAGE_BUILD_OK;
+    FC_CHECK("testless emit receipt parses", recT_ok);
+    FC_CHECK("testless receipt records the honest facts (no test run, "
+             "build-pass only)",
+             recT_ok && !recT.test_ran &&
+                 recT.result_class == VCS_PACKAGE_BUILD_RESULT_BUILD_PASS);
+    FC_CHECK("testless receipt flags say asan,ubsan=not-run (never ran, "
+             "never claimed clean)",
+             recT_ok &&
+                 strstr(recT.flags, "asan,ubsan=not-run") != NULL);
+    FC_CHECK("testless receipt stays installable for reproduction",
+             recT_ok && vcs_package_build_installable(&recT));
+    return failures;
+}
+
+static int fcw_arm_finding_prepare(struct fcw_arm *a)
+{
+    int failures = 0;
     /* 12. a sanitizer finding on the reproduce track: the test reads freed
      * heap hidden in a second TU, so ASan reports it. With the opt-out flag
      * the build still EMITS an installable TEST_PASS receipt (evidence, not
@@ -1964,313 +2102,424 @@ static int test_fastobj_carrier_platform_arm(void)
         "{\n"
         "    free(p);\n"
         "}\n";
-    char pkgF[4096], recipeF_path[4096], emitF[4096], cacheF[4096],
-         testF_path[4096], helperF_path[4096];
+    char testF_path[4096], helperF_path[4096];
     bool pathsF_ok =
-        snprintf(pkgF, sizeof(pkgF), "%s/pkgF", base) < (int)sizeof(pkgF) &&
-        snprintf(recipeF_path, sizeof(recipeF_path), "%s/recipeF.wire",
-                 base) < (int)sizeof(recipeF_path) &&
-        snprintf(emitF, sizeof(emitF), "%s/emitF", base) <
-            (int)sizeof(emitF) &&
-        snprintf(cacheF, sizeof(cacheF), "%s/cacheF", base) <
-            (int)sizeof(cacheF) &&
+        snprintf(a->pkgF, sizeof(a->pkgF), "%s/pkgF", a->base) < (int)sizeof(a->pkgF) &&
+        snprintf(a->recipeF_path, sizeof(a->recipeF_path), "%s/recipeF.wire",
+                 a->base) < (int)sizeof(a->recipeF_path) &&
+        snprintf(a->emitF, sizeof(a->emitF), "%s/emitF", a->base) <
+            (int)sizeof(a->emitF) &&
+        snprintf(a->cacheF, sizeof(a->cacheF), "%s/cacheF", a->base) <
+            (int)sizeof(a->cacheF) &&
         snprintf(testF_path, sizeof(testF_path),
-                 "%s/tests/test_tiny_lines.c", pkgF) < (int)sizeof(testF_path) &&
+                 "%s/tests/test_tiny_lines.c", a->pkgF) < (int)sizeof(testF_path) &&
         snprintf(helperF_path, sizeof(helperF_path),
-                 "%s/tests/uaf_helper.c", pkgF) < (int)sizeof(helperF_path);
+                 "%s/tests/uaf_helper.c", a->pkgF) < (int)sizeof(helperF_path);
     struct vcs_package_prepare_options optsF;
     memset(&optsF, 0, sizeof(optsF));
-    optsF.dir = pkgF;
-    memcpy(optsF.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    optsF.dir = a->pkgF;
+    memcpy(optsF.publisher_pubkey, a->pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
     optsF.publisher_sequence = 1;
     char prepF_detail[512] = "";
     enum vcs_package_prepare_error prcF = VCS_PACKAGE_PREPARE_ERR_IO;
     bool finding_ready = pathsF_ok &&
-        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", pkgF) &&
+        fcw_copy_tree("tests/harness/fixtures/zcode/tiny-lines", a->pkgF) &&
         fcw_write_file(testF_path, (const uint8_t *)uaf_test,
                        sizeof(uaf_test) - 1u) &&
         fcw_write_file(helperF_path, (const uint8_t *)uaf_helper,
                        sizeof(uaf_helper) - 1u);
     if (finding_ready)
-        prcF = vcs_package_prepare(&optsF, &prepF, prepF_detail,
+        prcF = vcs_package_prepare(&optsF, &a->prepF, prepF_detail,
                                    sizeof(prepF_detail));
-    char rootF_hex[65] = "", lockF_hex[65] = "";
     if (prcF == VCS_PACKAGE_PREPARE_OK) {
-        zcl_hex_encode(prepF.package_root, 32, rootF_hex);
-        zcl_hex_encode(prepF.lock_root, 32, lockF_hex);
+        zcl_hex_encode(a->prepF.package_root, 32, a->rootF_hex);
+        zcl_hex_encode(a->prepF.lock_root, 32, a->lockF_hex);
     }
     finding_ready =
         finding_ready && prcF == VCS_PACKAGE_PREPARE_OK &&
-        fcw_write_file(recipeF_path, prepF.recipe_wire,
-                       prepF.recipe_wire_len);
+        fcw_write_file(a->recipeF_path, a->prepF.recipe_wire,
+                       a->prepF.recipe_wire_len);
     FC_CHECK("use-after-free fixture variant prepared", finding_ready);
     if (!finding_ready && prcF != VCS_PACKAGE_PREPARE_OK)
         printf("    prepare findings: %s\n", prepF_detail);
-    if (finding_ready) {
-        struct fcw_build_result frun;
-        memset(&frun, 0, sizeof(frun));
-        fcw_candidate_build(worker, rootF_hex, pkgF, recipeF_path, emitF,
-                            lockF_hex, cacheF, true, false, &frun);
-        FC_CHECK("reproduce-shape standard run with an ASan finding still "
-                 "emits (evidence, not a gate)", frun.ok);
-        if (!frun.ok)
-            printf("    findings run: exit %d: %.200s\n", frun.exit_code,
-                   frun.first_line);
-        printf("    findings run tail: %.200s\n", frun.last_line);
-        char reportF[4096];
-        if (frun.ok &&
-            snprintf(reportF, sizeof(reportF), "%s/build-report", emitF) <
-                (int)sizeof(reportF))
-            rF = fcw_read_file(reportF, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
-                               &rF_len);
-        struct vcs_package_build_receipt recF;
-        bool recF_ok =
-            rF != NULL && vcs_package_build_parse(rF, rF_len, &recF) ==
+    a->finding_ready = finding_ready;
+    return failures;
+}
+
+static int fcw_arm_finding_run(struct fcw_arm *a)
+{
+    int failures = 0;
+    struct fcw_build_result frun;
+    memset(&frun, 0, sizeof(frun));
+    fcw_candidate_build(a->worker, a->rootF_hex, a->pkgF, a->recipeF_path, a->emitF,
+                        a->lockF_hex, a->cacheF, true, false, &frun);
+    FC_CHECK("reproduce-shape standard run with an ASan finding still "
+             "emits (evidence, not a gate)", frun.ok);
+    if (!frun.ok)
+        printf("    findings run: exit %d: %.200s\n", frun.exit_code,
+               frun.first_line);
+    printf("    findings run tail: %.200s\n", frun.last_line);
+    char reportF[4096];
+    if (frun.ok &&
+        snprintf(reportF, sizeof(reportF), "%s/build-report", a->emitF) <
+            (int)sizeof(reportF))
+        a->rF = fcw_read_file(reportF, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES,
+                              &a->rF_len);
+    return failures;
+}
+
+static int fcw_arm_finding_receipt(struct fcw_arm *a)
+{
+    int failures = 0;
+    struct vcs_package_build_receipt recF;
+    bool recF_ok =
+        a->rF != NULL && vcs_package_build_parse(a->rF, a->rF_len, &recF) ==
                               VCS_PACKAGE_BUILD_OK;
-        FC_CHECK("findings emit receipt parses", recF_ok);
-        FC_CHECK("findings receipt flags say asan,ubsan=findings (never "
-                 "clean)",
-                 recF_ok &&
-                     strstr(recF.flags, "asan,ubsan=findings") != NULL);
-        FC_CHECK("findings receipt keeps the build+test verdict "
-                 "(test-pass, installable) — unchanged emit semantics",
-                 recF_ok && recF.test_ran &&
-                     recF.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
-                     vcs_package_build_installable(&recF));
-    }
+    FC_CHECK("findings emit receipt parses", recF_ok);
+    FC_CHECK("findings receipt flags say asan,ubsan=findings (never "
+             "clean)",
+             recF_ok &&
+                 strstr(recF.flags, "asan,ubsan=findings") != NULL);
+    FC_CHECK("findings receipt keeps the build+test verdict "
+             "(test-pass, installable) — unchanged emit semantics",
+             recF_ok && recF.test_ran &&
+                 recF.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
+                 vcs_package_build_installable(&recF));
+    return failures;
+}
 
-    /* ── refusal legs: nothing above is trusted, everything re-proves ── */
-
-    char key[65];
-    FC_CHECK("a real cache entry was found for the refusal legs",
-             fcw_first_entry(cacheA, key));
-    if (strlen(key) == 64u) {
-        /* R1: a torn pair (sidecar deleted) refuses the WHOLE export. */
-        char torn[4096];
-        if (snprintf(torn, sizeof(torn), "%s/torn", base) <
-            (int)sizeof(torn)) {
-            (void)fcw_rm_rf(torn);
-            if (fcw_copy_tree(cacheA, torn)) {
-                char o[4096], s[4096];
-                if (vcs_fastobj_cache_paths(torn, key, o, sizeof(o), s,
-                                            sizeof(s)))
-                    (void)unlink(s);
-                bool refused = !vcs_fastobj_carrier_export(
-                    torn, nodeA, rootL, &stRef, err, sizeof(err));
-                FC_CHECK("export refuses a torn pair",
-                         refused && strstr(err, "torn") != NULL);
-                if (!(refused && strstr(err, "torn")))
-                    printf("    torn export: %s\n", err);
-            } else {
-                FC_CHECK("export refuses a torn pair", false);
-            }
+static int fcw_arm_refuse_torn(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* R1: a torn pair (sidecar deleted) refuses the WHOLE export. */
+    char torn[4096];
+    if (snprintf(torn, sizeof(torn), "%s/torn", a->base) <
+        (int)sizeof(torn)) {
+        (void)fcw_rm_rf(torn);
+        if (fcw_copy_tree(a->cacheA, torn)) {
+            char o[4096], s[4096];
+            if (vcs_fastobj_cache_paths(torn, a->key, o, sizeof(o), s,
+                                        sizeof(s)))
+                (void)unlink(s);
+            bool refused = !vcs_fastobj_carrier_export(
+                torn, a->nodeA, a->rootL, &a->stRef, a->err, sizeof(a->err));
+            FC_CHECK("export refuses a torn pair",
+                     refused && strstr(a->err, "torn") != NULL);
+            if (!(refused && strstr(a->err, "torn")))
+                printf("    torn export: %s\n", a->err);
+        } else {
+            FC_CHECK("export refuses a torn pair", false);
         }
+    }
+    return failures;
+}
 
-        /* R2: a sidecar whose object_sha3 lies about its object. */
-        char lying[4096];
-        if (snprintf(lying, sizeof(lying), "%s/lying", base) <
-            (int)sizeof(lying)) {
-            (void)fcw_rm_rf(lying);
-            if (fcw_copy_tree(cacheA, lying)) {
-                char o[4096], s[4096];
-                size_t side_len = 0;
-                uint8_t *side = NULL;
-                if (vcs_fastobj_cache_paths(lying, key, o, sizeof(o), s,
-                                            sizeof(s)) &&
-                    (side = fcw_read_file(s, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
-                                          &side_len)) != NULL) {
-                    const char *hit = fcw_find(side, side_len,
-                                               "\"object_sha3\":\"");
-                    if (hit) {
-                        char *hex = (char *)hit +
-                                    strlen("\"object_sha3\":\"");
-                        hex[0] = hex[0] == '0' ? '1' : '0';
-                    }
-                    if (hit && fcw_write_file(s, side, side_len)) {
-                        bool refused = !vcs_fastobj_carrier_export(
-                            lying, nodeA, rootL, &stRef, err, sizeof(err));
-                        FC_CHECK("export refuses a lying object_sha3",
-                                 refused && strstr(err, "does not hash") !=
-                                               NULL);
-                        if (!(refused &&
-                              strstr(err, "does not hash")))
-                            printf("    lying export: %s\n", err);
-                    } else {
-                        FC_CHECK("export refuses a lying object_sha3",
-                                 false);
-                    }
-                    free(side);
+static int fcw_arm_refuse_lying(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* R2: a sidecar whose object_sha3 lies about its object. */
+    char lying[4096];
+    if (snprintf(lying, sizeof(lying), "%s/lying", a->base) <
+        (int)sizeof(lying)) {
+        (void)fcw_rm_rf(lying);
+        if (fcw_copy_tree(a->cacheA, lying)) {
+            char o[4096], s[4096];
+            size_t side_len = 0;
+            uint8_t *side = NULL;
+            if (vcs_fastobj_cache_paths(lying, a->key, o, sizeof(o), s,
+                                        sizeof(s)) &&
+                (side = fcw_read_file(s, VCS_FASTOBJ_SIDECAR_MAX_BYTES,
+                                      &side_len)) != NULL) {
+                const char *hit = fcw_find(side, side_len,
+                                           "\"object_sha3\":\"");
+                if (hit) {
+                    char *hex = (char *)hit +
+                                strlen("\"object_sha3\":\"");
+                    hex[0] = hex[0] == '0' ? '1' : '0';
+                }
+                if (hit && fcw_write_file(s, side, side_len)) {
+                    bool refused = !vcs_fastobj_carrier_export(
+                        lying, a->nodeA, a->rootL, &a->stRef, a->err, sizeof(a->err));
+                    FC_CHECK("export refuses a lying object_sha3",
+                             refused && strstr(a->err, "does not hash") !=
+                                           NULL);
+                    if (!(refused &&
+                          strstr(a->err, "does not hash")))
+                        printf("    lying export: %s\n", a->err);
                 } else {
                     FC_CHECK("export refuses a lying object_sha3", false);
                 }
+                free(side);
             } else {
                 FC_CHECK("export refuses a lying object_sha3", false);
             }
-        }
-
-        /* R3: an entry renamed to a key it does not hash to. */
-        char misl[4096];
-        if (snprintf(misl, sizeof(misl), "%s/mislabeled", base) <
-            (int)sizeof(misl)) {
-            (void)fcw_rm_rf(misl);
-            if (fcw_copy_tree(cacheA, misl)) {
-                char key2[65];
-                memcpy(key2, key, 65);
-                key2[63] = key2[63] == '0' ? '1' : '0';
-                char o1[4096], s1[4096], o2[4096], s2[4096];
-                if (vcs_fastobj_cache_paths(misl, key, o1, sizeof(o1), s1,
-                                            sizeof(s1)) &&
-                    vcs_fastobj_cache_paths(misl, key2, o2, sizeof(o2), s2,
-                                            sizeof(s2)) &&
-                    rename(o1, o2) == 0 && rename(s1, s2) == 0) {
-                    bool refused = !vcs_fastobj_carrier_export(
-                        misl, nodeA, rootL, &stRef, err, sizeof(err));
-                    FC_CHECK("export refuses an entry filed under a "
-                             "wrong key",
-                             refused && strstr(err, "filed under") != NULL);
-                    if (!(refused && strstr(err, "filed under")))
-                        printf("    mislabeled export: %s\n", err);
-                } else {
-                    FC_CHECK(
-                        "export refuses an entry filed under a wrong key",
-                        false);
-                }
-            } else {
-                FC_CHECK("export refuses an entry filed under a wrong key",
-                         false);
-            }
-        }
-
-        failures += fcw_linked_sidecar_refusal(base, cacheA, key, nodeA,
-                                                rootL, &stRef, err,
-                                                sizeof(err));
-        failures += fcw_linked_object_refusal(base, cacheA, key, nodeA,
-                                               rootL, &stRef, err,
-                                               sizeof(err));
-        failures += fcw_linked_shard_refusal(base, cacheA, key, nodeA,
-                                              rootL, &stRef, err,
-                                              sizeof(err));
-        failures += fcw_linked_admit_shard_refusal(base, key, nodeA, rootA,
-                                                    err, sizeof(err));
-        failures += fcw_portable_partial_retry(base, nodeA, rootA);
-#if defined(__linux__)
-        failures += fcw_anonymous_crash_refusal(base, nodeA, rootA);
-#endif
-
-        /* R4: a hand-built carrier whose sidecar is filed under a key it
-         * does not hash to — ADMIT must refuse at the destination. */
-        {
-            char o[4096], s[4096];
-            size_t obj_len = 0, side_len = 0;
-            uint8_t *obj = NULL, *side = NULL;
-            if (vcs_fastobj_cache_paths(cacheA, key, o, sizeof(o), s,
-                                        sizeof(s)) &&
-                (obj = fcw_read_file(
-                     o, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, &obj_len)) !=
-                    NULL &&
-                (side = fcw_read_file(
-                     s, VCS_FASTOBJ_SIDECAR_MAX_BYTES, &side_len)) !=
-                    NULL) {
-                char key2[65];
-                memcpy(key2, key, 65);
-                key2[63] = key2[63] == '0' ? '1' : '0';
-                char cobj[4096], cside[4096];
-                struct vcs_package_manifest manifest;
-                vcs_package_manifest_init(&manifest);
-                uint8_t *wire = NULL;
-                size_t wire_len = 0;
-                bool built =
-                    snprintf(cobj, sizeof(cobj), "%s/%s.o",
-                             VCS_FASTOBJ_CARRIER_DIR, key2) <
-                        (int)sizeof(cobj) &&
-                    snprintf(cside, sizeof(cside), "%s/%s.json",
-                             VCS_FASTOBJ_CARRIER_DIR, key2) <
-                        (int)sizeof(cside) &&
-                    vcs_package_content_add_file(&manifest, cobj,
-                                                 VCS_PACKAGE_MODE_FILE, obj,
-                                                 obj_len) &&
-                    vcs_package_content_add_file(&manifest, cside,
-                                                 VCS_PACKAGE_MODE_FILE, side,
-                                                 side_len) &&
-                    vcs_package_manifest_serialize(&manifest, &wire,
-                                                   &wire_len) &&
-                    vcs_package_manifest_root(&manifest, rootL);
-                storeR = vcs_package_store_open(
-                    dirR, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-                uint8_t stored[32] = {0};
-                bool stored_ok =
-                    built && storeR != NULL &&
-                    vcs_package_store_put_manifest(storeR, wire, wire_len,
-                                                   stored) ==
-                        VCS_PACKAGE_STORE_OK &&
-                    memcmp(stored, rootL, 32) == 0 &&
-                    vcs_package_content_put_file(storeR, rootL, cobj, obj,
-                                                 obj_len) ==
-                        VCS_PACKAGE_STORE_OK &&
-                    vcs_package_content_put_file(storeR, rootL, cside, side,
-                                                 side_len) ==
-                        VCS_PACKAGE_STORE_OK;
-                FC_CHECK("lying carrier hand-built and stored", stored_ok);
-                if (stored_ok) {
-                    char admit_dir[4096];
-                    if (snprintf(admit_dir, sizeof(admit_dir), "%s/admitX",
-                                 base) < (int)sizeof(admit_dir)) {
-                        bool refused =
-                            !vcs_fastobj_carrier_admit(admit_dir, storeR,
-                                                       rootL, &stRef, err,
-                                                       sizeof(err));
-                        FC_CHECK("admit refuses a carrier whose sidecar "
-                                 "lies about its key",
-                                 refused &&
-                                     strstr(err, "filed under") != NULL);
-                        if (!(refused && strstr(err, "filed under")))
-                            printf("    lying admit: %s\n", err);
-                    }
-                    /* The public-shape gate runs the same proof the admit
-                     * above just refused: no shape, no announce, no serve. */
-                    struct vcs_package_public_verdict lie_v;
-                    enum vcs_package_public_shape pub_l =
-                        vcs_package_public_shape_classify(storeR, rootL,
-                                                          &lie_v);
-                    FC_CHECK("the public-shape gate refuses the lying "
-                             "carrier",
-                             pub_l == VCS_PACKAGE_PUBLIC_REFUSED &&
-                                 lie_v.rule != NULL &&
-                                 strncmp(lie_v.rule, "fastobj-carrier",
-                                         15) == 0);
-                }
-                free(wire);
-                vcs_package_manifest_free(&manifest);
-            } else {
-                FC_CHECK("lying carrier hand-built and stored", false);
-            }
-            free(obj);
-            free(side);
+        } else {
+            FC_CHECK("export refuses a lying object_sha3", false);
         }
     }
+    return failures;
+}
+
+static int fcw_arm_refuse_mislabeled(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* R3: an entry renamed to a key it does not hash to. */
+    char misl[4096];
+    if (snprintf(misl, sizeof(misl), "%s/mislabeled", a->base) <
+        (int)sizeof(misl)) {
+        (void)fcw_rm_rf(misl);
+        if (fcw_copy_tree(a->cacheA, misl)) {
+            char key2[65];
+            memcpy(key2, a->key, 65);
+            key2[63] = key2[63] == '0' ? '1' : '0';
+            char o1[4096], s1[4096], o2[4096], s2[4096];
+            if (vcs_fastobj_cache_paths(misl, a->key, o1, sizeof(o1), s1,
+                                        sizeof(s1)) &&
+                vcs_fastobj_cache_paths(misl, key2, o2, sizeof(o2), s2,
+                                        sizeof(s2)) &&
+                rename(o1, o2) == 0 && rename(s1, s2) == 0) {
+                bool refused = !vcs_fastobj_carrier_export(
+                    misl, a->nodeA, a->rootL, &a->stRef, a->err, sizeof(a->err));
+                FC_CHECK("export refuses an entry filed under a "
+                         "wrong key",
+                         refused && strstr(a->err, "filed under") != NULL);
+                if (!(refused && strstr(a->err, "filed under")))
+                    printf("    mislabeled export: %s\n", a->err);
+            } else {
+                FC_CHECK(
+                    "export refuses an entry filed under a wrong key",
+                    false);
+            }
+        } else {
+            FC_CHECK("export refuses an entry filed under a wrong key",
+                     false);
+        }
+    }
+    return failures;
+}
+
+static int fcw_arm_refuse_linked(struct fcw_arm *a)
+{
+    int failures = 0;
+    failures += fcw_linked_sidecar_refusal(a->base, a->cacheA, a->key, a->nodeA,
+                                            a->rootL, &a->stRef, a->err,
+                                            sizeof(a->err));
+    failures += fcw_linked_object_refusal(a->base, a->cacheA, a->key, a->nodeA,
+                                           a->rootL, &a->stRef, a->err,
+                                           sizeof(a->err));
+    failures += fcw_linked_shard_refusal(a->base, a->cacheA, a->key, a->nodeA,
+                                          a->rootL, &a->stRef, a->err,
+                                          sizeof(a->err));
+    failures += fcw_linked_admit_shard_refusal(a->base, a->key, a->nodeA, a->rootA,
+                                                a->err, sizeof(a->err));
+    failures += fcw_portable_partial_retry(a->base, a->nodeA, a->rootA);
+#if defined(__linux__)
+    failures += fcw_anonymous_crash_refusal(a->base, a->nodeA, a->rootA);
+#endif
+    return failures;
+}
+
+/* Hand-built carrier: stores the lying object and sidecar under key2 into
+ * store R and returns whether every put landed. The manifest and wire are
+ * freed here, once the store holds them. */
+static bool fcw_arm_handbuilt_store(struct fcw_arm *a, const char *key2,
+                                    uint8_t *obj, size_t obj_len,
+                                    uint8_t *side, size_t side_len)
+{
+    char cobj[4096], cside[4096];
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool built =
+        snprintf(cobj, sizeof(cobj), "%s/%s.o",
+                 VCS_FASTOBJ_CARRIER_DIR, key2) <
+            (int)sizeof(cobj) &&
+        snprintf(cside, sizeof(cside), "%s/%s.json",
+                 VCS_FASTOBJ_CARRIER_DIR, key2) <
+            (int)sizeof(cside) &&
+        vcs_package_content_add_file(&manifest, cobj,
+                                     VCS_PACKAGE_MODE_FILE, obj,
+                                     obj_len) &&
+        vcs_package_content_add_file(&manifest, cside,
+                                     VCS_PACKAGE_MODE_FILE, side,
+                                     side_len) &&
+        vcs_package_manifest_serialize(&manifest, &wire,
+                                       &wire_len) &&
+        vcs_package_manifest_root(&manifest, a->rootL);
+    a->storeR = vcs_package_store_open(
+        a->dirR, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    uint8_t stored[32] = {0};
+    bool stored_ok =
+        built && a->storeR != NULL &&
+        vcs_package_store_put_manifest(a->storeR, wire, wire_len,
+                                       stored) ==
+            VCS_PACKAGE_STORE_OK &&
+        memcmp(stored, a->rootL, 32) == 0 &&
+        vcs_package_content_put_file(a->storeR, a->rootL, cobj, obj,
+                                     obj_len) ==
+            VCS_PACKAGE_STORE_OK &&
+        vcs_package_content_put_file(a->storeR, a->rootL, cside, side,
+                                     side_len) ==
+            VCS_PACKAGE_STORE_OK;
+    free(wire);
+    vcs_package_manifest_free(&manifest);
+    return stored_ok;
+}
+
+/* ADMIT and the public-shape gate must both refuse the stored lying carrier. */
+static int fcw_arm_handbuilt_admit(struct fcw_arm *a)
+{
+    int failures = 0;
+    char admit_dir[4096];
+    if (snprintf(admit_dir, sizeof(admit_dir), "%s/admitX", a->base) <
+        (int)sizeof(admit_dir)) {
+        bool refused =
+            !vcs_fastobj_carrier_admit(admit_dir, a->storeR,
+                                       a->rootL, &a->stRef, a->err,
+                                       sizeof(a->err));
+        FC_CHECK("admit refuses a carrier whose sidecar "
+                 "lies about its key",
+                 refused &&
+                     strstr(a->err, "filed under") != NULL);
+        if (!(refused && strstr(a->err, "filed under")))
+            printf("    lying admit: %s\n", a->err);
+    }
+    /* The public-shape gate runs the same proof the admit
+     * above just refused: no shape, no announce, no serve. */
+    struct vcs_package_public_verdict lie_v;
+    enum vcs_package_public_shape pub_l =
+        vcs_package_public_shape_classify(a->storeR, a->rootL,
+                                          &lie_v);
+    FC_CHECK("the public-shape gate refuses the lying "
+             "carrier",
+             pub_l == VCS_PACKAGE_PUBLIC_REFUSED &&
+                 lie_v.rule != NULL &&
+                 strncmp(lie_v.rule, "fastobj-carrier",
+                         15) == 0);
+    return failures;
+}
+
+static int fcw_arm_refuse_handbuilt(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* R4: a hand-built carrier whose sidecar is filed under a key it
+     * does not hash to — ADMIT must refuse at the destination. */
+    char o[4096], s[4096];
+    size_t obj_len = 0, side_len = 0;
+    uint8_t *obj = NULL, *side = NULL;
+    if (vcs_fastobj_cache_paths(a->cacheA, a->key, o, sizeof(o), s,
+                                sizeof(s)) &&
+        (obj = fcw_read_file(
+             o, VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES, &obj_len)) !=
+            NULL &&
+        (side = fcw_read_file(
+             s, VCS_FASTOBJ_SIDECAR_MAX_BYTES, &side_len)) !=
+            NULL) {
+        char key2[65];
+        memcpy(key2, a->key, 65);
+        key2[63] = key2[63] == '0' ? '1' : '0';
+        bool stored_ok = fcw_arm_handbuilt_store(a, key2, obj, obj_len,
+                                                 side, side_len);
+        FC_CHECK("lying carrier hand-built and stored", stored_ok);
+        if (stored_ok)
+            failures += fcw_arm_handbuilt_admit(a);
+    } else {
+        FC_CHECK("lying carrier hand-built and stored", false);
+    }
+    free(obj);
+    free(side);
+    return failures;
+}
+
+static int fcw_arm_refusals(struct fcw_arm *a)
+{
+    int failures = 0;
+    /* ── refusal legs: nothing above is trusted, everything re-proves ── */
+    FC_CHECK("a real cache entry was found for the refusal legs",
+             fcw_first_entry(a->cacheA, a->key));
+    if (strlen(a->key) == 64u) {
+        failures += fcw_arm_refuse_torn(a);
+        failures += fcw_arm_refuse_lying(a);
+        failures += fcw_arm_refuse_mislabeled(a);
+        failures += fcw_arm_refuse_linked(a);
+        failures += fcw_arm_refuse_handbuilt(a);
+    }
+    return failures;
+}
+
+static int fcw_arm_second(struct fcw_arm *a)
+{
+    int failures = fcw_arm_shape_a(a);
+    failures += fcw_arm_reexport_c(a);
+    failures += fcw_arm_fetch_admit(a);
+    failures += fcw_arm_reexport_d(a);
+    failures += fcw_arm_build_warm(a);
+    failures += fcw_arm_receipts_emit(a);
+    failures += fcw_arm_receipts_ids(a);
+    failures += fcw_arm_bypass_legs(a);
+    return failures;
+}
+
+static int fcw_arm_third(struct fcw_arm *a)
+{
+    int failures = fcw_arm_testless_prepare(a);
+    if (a->testless_ready) {
+        failures += fcw_arm_testless_refuse_allow(a);
+        failures += fcw_arm_testless_receipt(a);
+    }
+    failures += fcw_arm_finding_prepare(a);
+    if (a->finding_ready) {
+        failures += fcw_arm_finding_run(a);
+        failures += fcw_arm_finding_receipt(a);
+    }
+    return failures + fcw_arm_refusals(a);
+}
+
+static int test_fastobj_carrier_platform_arm(void)
+{
+    struct fcw_arm a;
+    int failures = 0;
+    printf("fastobj_carrier: object-set carrier, offline proof\n");
+
+    /* Everything done: cleanup touches is declared and initialized before
+     * the first goto done. */
+    memset(&a, 0, sizeof(a));
+    vcs_package_prepared_init(&a.prep);
+    vcs_package_prepared_init(&a.prepT);
+    vcs_package_prepared_init(&a.prepF);
+
+    failures += fcw_arm_setup(&a);
+    if (a.fatal)
+        return 1;
+    failures += fcw_arm_first(&a);
+    if (a.stop)
+        goto done;
+    failures += fcw_arm_second(&a);
+    failures += fcw_arm_third(&a);
 
 done:
-    free(r1);
-    free(r2);
-    free(rT);
-    free(rF);
-    vcs_package_prepared_free(&prep);
-    vcs_package_prepared_free(&prepT);
-    vcs_package_prepared_free(&prepF);
-    if (nodeA)
-        vcs_package_store_close(nodeA);
-    if (nodeB)
-        vcs_package_store_close(nodeB);
-    if (nodeC)
-        vcs_package_store_close(nodeC);
-    if (nodeD)
-        vcs_package_store_close(nodeD);
-    if (storeR)
-        vcs_package_store_close(storeR);
+    free(a.r1);
+    free(a.r2);
+    free(a.rT);
+    free(a.rF);
+    vcs_package_prepared_free(&a.prep);
+    vcs_package_prepared_free(&a.prepT);
+    vcs_package_prepared_free(&a.prepF);
+    if (a.nodeA)
+        vcs_package_store_close(a.nodeA);
+    if (a.nodeB)
+        vcs_package_store_close(a.nodeB);
+    if (a.nodeC)
+        vcs_package_store_close(a.nodeC);
+    if (a.nodeD)
+        vcs_package_store_close(a.nodeD);
+    if (a.storeR)
+        vcs_package_store_close(a.storeR);
     if (failures == 0) {
-        (void)fcw_rm_rf(base);
+        (void)fcw_rm_rf(a.base);
     } else {
-        printf("fastobj_carrier: scratch kept for inspection: %s\n", base);
+        printf("fastobj_carrier: scratch kept for inspection: %s\n", a.base);
     }
     printf("fastobj_carrier: %s (%d failure%s)\n",
            failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
