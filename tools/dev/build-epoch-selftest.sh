@@ -86,23 +86,27 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 WORK="$(cd "$WORK" && pwd -P)"
 CHILD_PIDS=()
 IDENTITY_PAIR_PIDS=()
-SELFTEST_WATCHDOG_PID=""
 
 cleanup()
 {
-    local pid
-    # The outer wall-clock watchdog must die with a normal exit, or its
-    # pending kill could land on a recycled pid long after this run.
-    if [ -n "$SELFTEST_WATCHDOG_PID" ]; then
-        kill "$SELFTEST_WATCHDOG_PID" 2>/dev/null || true
-    fi
+    local status=$? pid phase_name=unknown
+    # Reap every child before retaining or removing its working directory.
     for pid in "${CHILD_PIDS[@]}" "${IDENTITY_PAIR_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
     for pid in "${CHILD_PIDS[@]}" "${IDENTITY_PAIR_PIDS[@]}"; do
         wait "$pid" 2>/dev/null || true
     done
-    rm -rf "$WORK"
+    if [ "$status" -eq 0 ]; then
+        rm -rf "$WORK"
+    else
+        if [ -f "${PHASE_FILE:-}" ]; then
+            IFS= read -r phase_name < "$PHASE_FILE" || true
+        fi
+        printf 'build-epoch-selftest: preserved failure work=%s phase=%s status=%s\n' \
+            "$WORK" "$phase_name" "$status" >&2
+    fi
+    return "$status"
 }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
@@ -193,7 +197,7 @@ load_average()
 # imposes no per-gate timeout, so a stuck rendezvous below used to hold the
 # whole lint run (and the shared lint lock every other lane waits on)
 # forever. On expiry the watchdog reports the reason and terminates the
-# script; the EXIT trap still removes the work directory and reaps children,
+# script; the EXIT trap preserves the work directory and reaps children,
 # and the driver sees a FAIL. A hung gate turns red, never waits.
 # The sleep runs as its own child so cleanup's TERM to the watchdog can
 # take it down too; a bare foreground sleep outlived the watchdog as an
@@ -206,7 +210,7 @@ load_average()
       "tools/dev/build-epoch-selftest.sh" "$SELFTEST_TIMEOUT" \
       "$(cat "$PHASE_FILE" 2>/dev/null || printf unknown)" \
       "$(load_average || printf unavailable)" >&2
-  kill -TERM "$$" ) & SELFTEST_WATCHDOG_PID=$!
+  kill -TERM "$$" ) & CHILD_PIDS+=("$!")
 
 sha_label()
 {
