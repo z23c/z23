@@ -401,7 +401,7 @@ static int ra_first_window_start(int current_end)
     if (next_start <= current_end) {
         /* Should be exactly current_end + 1, but be defensive. */
         next_start = current_end + 1;
-        if (next_start % SHA3_WINDOW_SIZE != 0) return -1;
+        if (next_start % SHA3_WINDOW_SIZE != 0) return -1; /* raw-return-ok:not an error, the caller extends nothing */
     }
     return next_start;
 }
