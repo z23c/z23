@@ -627,6 +627,34 @@ static bool dry_run_after_inverse(sqlite3 *db, int height, int cursor,
     return true;
 }
 
+static bool repair_value_overflow_nothing_to_rewind(int height,
+                                                    uint64_t cursor)
+{
+    return height < 0 || cursor == 0 || (uint64_t)height >= cursor;
+}
+
+/* The committing walk inside the caller's open transaction: inverse deltas,
+ * row delete, cursor, frontier, one-shot marker.  On false the caller rolls
+ * back and unlocks; the failing callee has already reported. */
+static bool repair_value_overflow_rewind_in_tx(
+    sqlite3 *db, int height, int C, const struct uint256 *block_hash)
+{
+    for (int h = C - 1; h >= height; h--) {
+        if (!utxo_apply_emit_inverse_delta(db, h))
+            return false;  // raw-return-ok:caller rolls back, callee logged
+    }
+    if (!utxo_apply_delete_rows_above(db, height, C - 1))
+        return false;  // raw-return-ok:caller rolls back, callee logged
+    if (!utxo_apply_unwind_write_cursor(db, (uint64_t)height))
+        return false;  // raw-return-ok:caller rolls back, callee logged
+    if (!utxo_apply_frontier_set_in_tx(db, height))
+        return false;  // raw-return-ok:caller rolls back, callee logged
+    static const uint8_t present = 1;  /* legacy progress_meta presence value */
+    return repair_marker_note_in_tx(db, REPAIR_MARKER_KIND_UTXO_VALUE_OVERFLOW,
+                                    height, block_hash->data, &present,
+                                    sizeof(present));
+}
+
 bool utxo_apply_repair_value_overflow_hole(
     sqlite3 *db,
     int height,
@@ -650,7 +678,7 @@ bool utxo_apply_repair_value_overflow_hole(
                  (void *)db, (const void *)block_hash, (const void *)blk);
         return false;
     }
-    if (height < 0 || cursor == 0 || (uint64_t)height >= cursor) {
+    if (repair_value_overflow_nothing_to_rewind(height, cursor)) {
         if (out)
             *out = local;
         return true;
@@ -800,32 +828,7 @@ bool utxo_apply_repair_value_overflow_hole(
         return false;
     }
 
-    for (int h = C - 1; h >= height; h--) {
-        if (!utxo_apply_emit_inverse_delta(db, h)) {
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            progress_store_tx_unlock();
-            return false;
-        }
-    }
-    if (!utxo_apply_delete_rows_above(db, height, C - 1)) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return false;
-    }
-    if (!utxo_apply_unwind_write_cursor(db, (uint64_t)height)) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return false;
-    }
-    if (!utxo_apply_frontier_set_in_tx(db, height)) {
-        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-        progress_store_tx_unlock();
-        return false;
-    }
-    static const uint8_t present = 1;  /* legacy progress_meta presence value */
-    if (!repair_marker_note_in_tx(db, REPAIR_MARKER_KIND_UTXO_VALUE_OVERFLOW,
-                                  height, block_hash->data, &present,
-                                  sizeof(present))) {
+    if (!repair_value_overflow_rewind_in_tx(db, height, C, block_hash)) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
         return false;
