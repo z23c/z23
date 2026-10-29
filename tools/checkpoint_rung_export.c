@@ -91,27 +91,19 @@ static sqlite3 *open_bundle_readonly(const char *bundle_path)
     return db;
 }
 
-/* Serialize the rung and write <out_dir>/rung-<height>.rung; returns 0, or
- * exit code 1 after printing the failure. */
-static int checkpoint_rung_export_write_rung_file(struct checkpoint_rung *rung,
-                                 const char *out_dir, char *bin_path,
-                                 size_t bin_path_size)
+/* Write LEN bytes of DATA to PATH opened with MODE; returns 0, or exit code 1
+ * after printing the failure. Shared by the .rung and .c outputs. */
+static int checkpoint_rung_export_write_bytes(const char *path, const char *mode,
+                                              const uint8_t *data, size_t len)
 {
-    uint8_t wire[CHECKPOINT_RUNG_WIRE_SIZE];
-    if (!checkpoint_rung_serialize(rung, wire)) {
-        fprintf(stderr, "checkpoint_rung_export: serialize failed\n");
+    FILE *f = fopen(path, mode);
+    if (!f || fwrite(data, 1, len, f) != len) {
+        fprintf(stderr, "checkpoint_rung_export: write %s failed\n", path);
+        if (f)
+            fclose(f);
         return 1;
     }
-    snprintf(bin_path, bin_path_size, "%s/rung-%d.rung", out_dir,
-             rung->height);
-    FILE *bf = fopen(bin_path, "wb");
-    if (!bf || fwrite(wire, 1, sizeof(wire), bf) != sizeof(wire)) {
-        fprintf(stderr, "checkpoint_rung_export: write %s failed\n", bin_path);
-        if (bf)
-            fclose(bf);
-        return 1;
-    }
-    fclose(bf);
+    fclose(f);
     return 0;
 }
 
@@ -141,8 +133,15 @@ int main(int argc, char **argv)
     }
 
     /* Binary artifact. */
+    uint8_t wire[CHECKPOINT_RUNG_WIRE_SIZE];
+    if (!checkpoint_rung_serialize(&rung, wire)) {
+        fprintf(stderr, "checkpoint_rung_export: serialize failed\n");
+        return 1;
+    }
     char bin_path[4200];
-    rc = checkpoint_rung_export_write_rung_file(&rung, out_dir, bin_path, sizeof(bin_path));
+    snprintf(bin_path, sizeof(bin_path), "%s/rung-%d.rung", out_dir,
+             rung.height);
+    rc = checkpoint_rung_export_write_bytes(bin_path, "wb", wire, sizeof(wire));
     if (rc != 0)
         return rc;
 
@@ -156,14 +155,10 @@ int main(int argc, char **argv)
     }
     char c_path[4200];
     snprintf(c_path, sizeof(c_path), "%s/rung-%d.c", out_dir, rung.height);
-    FILE *cf = fopen(c_path, "w");
-    if (!cf || fwrite(frag, 1, (size_t)fn, cf) != (size_t)fn) {
-        fprintf(stderr, "checkpoint_rung_export: write %s failed\n", c_path);
-        if (cf)
-            fclose(cf);
-        return 1;
-    }
-    fclose(cf);
+    rc = checkpoint_rung_export_write_bytes(c_path, "w", (const uint8_t *)frag,
+                                            (size_t)fn);
+    if (rc != 0)
+        return rc;
 
     fputs(frag, stdout);
     fprintf(stderr,
