@@ -39,6 +39,15 @@
  *          pre-push hook trusts; RECEIVE_WORKTREE_DIRTY when it holds tracked
  *          changes, which are never reset) and queues the tip through the
  *          in-process submit path, returning submit's reply unchanged.
+ *          Admission: the host's file <state root>/queue/receive-policy
+ *          (beside queue.jsonl) holds one line `require_receipts=N`. Absent
+ *          or N=0 changes nothing. With N>0 receive needs --offer and
+ *          --receipts (RECEIVE_RECEIPTS_REQUIRED), runs check_offer's checks
+ *          on the bundle (its OFFER_* codes), then qualify_offer's count
+ *          with require=N (RECEIVE_NOT_QUALIFIED, evidence = qualify's code
+ *          and counts), and only then verifies, fetches and queues. A
+ *          malformed or unreadable policy refuses RECEIVE_BAD_POLICY. The
+ *          caller has no input that lowers N.
  *
  * No shell anywhere: every child is an argv through the spawn seam. Tests
  * (ZCL_TESTING builds only) put one program in front of ssh and scp with
@@ -62,6 +71,7 @@
 #include "crypto/sha256.h"
 #include "dev_proof_signer.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -375,6 +385,108 @@ static bool dlr_recv_root(const struct zcl_command_request *req,
     return false;
 }
 
+/* The queue host's admission policy: the file receive-policy beside
+ * queue.jsonl holds exactly `require_receipts=N` (N 0..16, one optional
+ * newline). Absent means 0. Anything else, or a file that cannot be read,
+ * refuses RECEIVE_BAD_POLICY: the caller can never lower N. */
+#define DLR_POLICY_KEY "require_receipts="
+
+static bool dlr_policy_parse(const char *text, int *need)
+{
+    const char *p = text + strlen(DLR_POLICY_KEY);
+    int n = 0, digits = 0;
+    if (strncmp(text, DLR_POLICY_KEY, strlen(DLR_POLICY_KEY)) != 0)
+        return false;
+    for (; *p >= '0' && *p <= '9' && digits < 3; p++, digits++)
+        n = n * 10 + (*p - '0');
+    if (digits == 0 || digits > 2 || n > 16 ||
+        (*p == '\n' ? p[1] != '\0' : *p != '\0'))
+        return false;
+    *need = n;
+    return true;
+}
+
+static bool dlr_recv_policy(int *need, struct zcl_command_reply *reply)
+{
+    char state[DLR_PATH], path[DLR_PATH + 32], text[64];
+    FILE *f;
+    size_t n;
+    bool ok;
+    *need = 0;
+    if (!platform_state_root(state, sizeof(state)))
+        return true; /* no state root: the worktree step refuses as before */
+    if (snprintf(path, sizeof(path), "%s/queue/receive-policy", state) >=
+        (int)sizeof(path)) {
+        dlr_recv_fail(reply, "RECEIVE_BAD_POLICY", "policy",
+                      "the receive-policy path is too long", state);
+        return false;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        if (errno == ENOENT)
+            return true;
+        dlr_recv_fail(reply, "RECEIVE_BAD_POLICY", "policy",
+                      "receive-policy cannot be read", path);
+        return false;
+    }
+    n = fread(text, 1, sizeof(text) - 1, f);
+    ok = !ferror(f);
+    (void)fclose(f);
+    text[n] = '\0';
+    if (ok && strlen(text) == n && dlr_policy_parse(text, need))
+        return true;
+    *need = 0;
+    dlr_recv_fail(reply, "RECEIVE_BAD_POLICY", "policy",
+                  "receive-policy must be exactly require_receipts=N, N 0 to "
+                  "16",
+                  path);
+    return false;
+}
+
+/* With require_receipts=N > 0 the offered commit must pass check_offer and
+ * be qualified by N distinct re-verified signers before anything is fetched
+ * or queued. Without a policy this is a no-op. */
+static bool dlr_recv_admit(const struct zcl_command_request *req,
+                           const struct dlr_recv *r, const char *bundle,
+                           struct zcl_command_reply *reply)
+{
+    const char *offer = zcl_dlr_str(req, "offer");
+    const char *receipts = zcl_dlr_str(req, "receipts");
+    struct dlr_qual q;
+    struct zcl_command_reply tmp;
+    char ev[256];
+    int need;
+    bool ok;
+    if (!dlr_recv_policy(&need, reply))
+        return false;
+    if (need == 0)
+        return true;
+    if (!offer || !receipts) {
+        dlr_recv_fail(reply, "RECEIVE_RECEIPTS_REQUIRED", "admit",
+                      "this queue host requires offer and receipts: it "
+                      "admits a commit only with qualified receipts",
+                      offer ? "input.receipts missing" : "input.offer missing");
+        return false;
+    }
+    if (!zcl_dlr_check_offer_at(r->root, bundle, offer, "dev.land.receive",
+                                reply))
+        return false;
+    zcl_command_reply_init(&tmp, "zcl.land.v1");
+    ok = zcl_dlr_qualify(offer, receipts, need, &q, &tmp);
+    if (!ok) {
+        (void)snprintf(ev, sizeof(ev),
+                       "%s qualified=%d required=%d duplicates=%d %s",
+                       q.code, q.qualified, q.required, q.duplicates,
+                       tmp.error.evidence);
+        dlr_recv_fail(reply, "RECEIVE_NOT_QUALIFIED", "admit",
+                      "the offered commit is not qualified by enough "
+                      "distinct re-verified receipts",
+                      ev);
+    }
+    zcl_command_reply_free(&tmp);
+    return ok;
+}
+
 static void dlr_receive(const struct zcl_command_request *req,
                         struct zcl_command_reply *reply)
 {
@@ -390,6 +502,7 @@ static void dlr_receive(const struct zcl_command_request *req,
     }
     r = zcl_calloc(1, sizeof(*r), "dev_land_remote.recv");
     if (dlr_recv_root(req, r, reply) &&
+        dlr_recv_admit(req, r, bundle, reply) &&
         dlr_recv_bundle_verify(r, bundle, reply) &&
         dlr_recv_head(r, reply) && dlr_recv_fetch(r, lane, reply) &&
         dlr_recv_worktree(r, lane, reply))

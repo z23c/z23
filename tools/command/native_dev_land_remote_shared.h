@@ -55,6 +55,11 @@ struct dlr_qual {
     int required, qualified, duplicates;
 };
 
+/* check_offer's checks with the checkout already known (the receiver's);
+ * a refusal is in reply under leaf. */
+bool zcl_dlr_check_offer_at(const char *root, const char *bundle,
+                            const char *offer, const char *leaf,
+                            struct zcl_command_reply *reply);
 /* qualify_offer's count: true when at least `require` distinct signers other
  * than this box's own key re-verified the offer. A refusal is in reply and
  * q->code, with the counts in q. */

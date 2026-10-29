@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Acceptance tests for dev.land.qualify_offer
- * (tools/command/native_dev_land_offer.c). "Lab B" and "lab C" are foreign
- * signer keys made
+ * Acceptance tests for dev.land.qualify_offer and for the receive-policy
+ * admission in dev.land.receive (tools/command/native_dev_land_offer.c and
+ * native_dev_land_remote.c). "Lab B" and "lab C" are foreign signer keys made
  * the way the receipt tests make one: another XDG_STATE_HOME. Their receipts
  * are signed here over the receipt message with checks that include cx_check
  * (what reverify_offer writes), and their keys are put on this box's
@@ -224,8 +224,155 @@ _test_next:;
     return failures;
 }
 
+/* dev.land.receive on the queue host, with and without receive-policy. */
+static void dlq_receive(struct dlt_call *c, const struct dlq_fixture *f,
+                        const char *lane, const char *offer,
+                        const char *receipts)
+{
+    dlt_begin(c, "dev.land.receive");
+    (void)json_push_kv_str(&c->input, "bundle", f->bundle);
+    (void)json_push_kv_str(&c->input, "lane", lane);
+    if (offer)
+        (void)json_push_kv_str(&c->input, "offer", offer);
+    if (receipts)
+        (void)json_push_kv_str(&c->input, "receipts", receipts);
+    dlt_cd(f->r.queue);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static bool dlq_policy(const char *text)
+{
+    char st[600], dir[700], path[800];
+    if (!platform_state_root(st, sizeof(st)))
+        return false;
+    (void)snprintf(dir, sizeof(dir), "%s/queue", st);
+    (void)snprintf(path, sizeof(path), "%s/receive-policy", dir);
+    (void)mkdir(dir, 0700);
+    (void)remove(path);
+    return !text || dlt_write(path, text, 0600);
+}
+
+static bool dlq_queued(const struct dlt_call *c)
+{
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           json_get_int(json_get(&c->reply.data, "seq")) >= 1;
+}
+
+static int dlq_receive_cases(void)
+{
+    int failures = 0;
+    struct dlq_fixture f;
+    struct dlt_call c;
+    char sb[900], sa[900], rb[900], ra[900], bsign[65], asign[65];
+    if (!dlq_fixture(&f, "admit")) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    (void)snprintf(sb, sizeof(sb), "%s/lab-b", f.r.base);
+    (void)snprintf(sa, sizeof(sa), "%s", f.r.state);
+    (void)snprintf(rb, sizeof(rb), "%s/b.receipt.json", f.r.base);
+    (void)snprintf(ra, sizeof(ra), "%s/a.receipt.json", f.r.base);
+    if (!dlq_sign(&f, sb, rb, DLQ_CX, bsign) ||
+        !dlq_sign(&f, sa, ra, DLQ_CX, asign) || !dlq_allow(bsign)) {
+        printf("receipt setup FAILED\n");
+        dlt_done(&f.r);
+        return 1;
+    }
+
+    TEST("land.receive: no receive-policy file queues as before") {
+        ASSERT(dlq_policy(NULL));
+        dlq_receive(&c, &f, "plain", NULL, NULL);
+        ASSERT(dlq_queued(&c));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: require_receipts=0 queues without receipts") {
+        ASSERT(dlq_policy("require_receipts=0\n"));
+        dlq_receive(&c, &f, "zero", NULL, NULL);
+        ASSERT(dlq_queued(&c));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: require_receipts=1 without receipts refuses "
+         "RECEIVE_RECEIPTS_REQUIRED") {
+        ASSERT(dlq_policy("require_receipts=1\n"));
+        dlq_receive(&c, &f, "needs", NULL, NULL);
+        ASSERT(dlt_refused(&c, "RECEIVE_RECEIPTS_REQUIRED"));
+        dlt_end(&c);
+        dlq_receive(&c, &f, "needs", f.offer, NULL);
+        ASSERT(dlt_refused(&c, "RECEIVE_RECEIPTS_REQUIRED"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: require_receipts=1 with lab B's receipt queues") {
+        ASSERT(dlq_policy("require_receipts=1\n"));
+        dlq_receive(&c, &f, "admitted", f.offer, rb);
+        ASSERT(dlq_queued(&c));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: this box's own receipt refuses "
+         "RECEIVE_NOT_QUALIFIED naming QUALIFY_SIGNER_NOT_DISTINCT") {
+        ASSERT(dlq_policy("require_receipts=1\n"));
+        dlq_receive(&c, &f, "selfish", f.offer, ra);
+        ASSERT(dlt_refused(&c, "RECEIVE_NOT_QUALIFIED"));
+        ASSERT(strstr(c.reply.error.evidence, "QUALIFY_SIGNER_NOT_DISTINCT") !=
+               NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: require_receipts=2 with one signer refuses "
+         "RECEIVE_NOT_QUALIFIED with the counts") {
+        ASSERT(dlq_policy("require_receipts=2\n"));
+        dlq_receive(&c, &f, "short", f.offer, rb);
+        ASSERT(dlt_refused(&c, "RECEIVE_NOT_QUALIFIED"));
+        ASSERT(strstr(c.reply.error.evidence,
+                      "QUALIFY_SHORT qualified=1 required=2 duplicates=0") !=
+               NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: an unreadable offer refuses OFFER_BAD_MANIFEST before "
+         "anything is queued") {
+        char other[900];
+        ASSERT(dlq_policy("require_receipts=1\n"));
+        (void)snprintf(other, sizeof(other), "%s/none.offer.json", f.r.base);
+        dlq_receive(&c, &f, "ghost", other, rb);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_MANIFEST"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: require_receipts=x refuses RECEIVE_BAD_POLICY even "
+         "with good receipts") {
+        ASSERT(dlq_policy("require_receipts=x\n"));
+        dlq_receive(&c, &f, "badpol", f.offer, rb);
+        ASSERT(dlt_refused(&c, "RECEIVE_BAD_POLICY"));
+        dlt_end(&c);
+        ASSERT(dlq_policy("require_receipts=1 \n"));
+        dlq_receive(&c, &f, "badpol", f.offer, rb);
+        ASSERT(dlt_refused(&c, "RECEIVE_BAD_POLICY"));
+        dlt_end(&c);
+        ASSERT(dlq_policy("require_receipts=17\n"));
+        dlq_receive(&c, &f, "badpol", f.offer, rb);
+        ASSERT(dlt_refused(&c, "RECEIVE_BAD_POLICY"));
+        dlt_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlt_done(&f.r);
+    return failures;
+}
+
 int dlq_remote_cases(void);
 int dlq_remote_cases(void)
 {
-    return dlq_qualify_cases();
+    return dlq_qualify_cases() + dlq_receive_cases();
 }

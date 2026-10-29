@@ -2366,12 +2366,17 @@ ZCL_COMMAND_DEV_COMMAND(
     "RECEIVE_BAD_CHECKOUT (checkout is the absolute path of the queue "
     "checkout, for a caller whose current directory is outside it, as over "
     "ssh; without it the checkout is found above the current directory, "
-    "else RECEIVE_NO_CHECKOUT).",
+    "else RECEIVE_NO_CHECKOUT). The host's file receive-policy beside "
+    "queue.jsonl, one line require_receipts=N, makes N>0 demand offer and "
+    "receipts (RECEIVE_RECEIPTS_REQUIRED), check_offer's checks and "
+    "qualify_offer's count (RECEIVE_NOT_QUALIFIED) before any fetch; a bad "
+    "file is RECEIVE_BAD_POLICY; absent or 0 changes nothing.",
     65536,
     "land,receive,bundle,remote,queue",
-    "zcl.land_receive_input.v1", "zcl.land.v1", "bundle,lane,note,checkout",
+    "zcl.land_receive_input.v1", "zcl.land.v1",
+    "bundle,lane,note,checkout,offer,receipts",
     "bundle,lane",
-    "z23-dev dev land receive --bundle=PATH --lane=NAME [--checkout=DIR]",
+    "z23-dev dev land receive --bundle=PATH --lane=NAME [--checkout=DIR] [--offer=/abs/x.offer.json --receipts=/abs/a.json,...]",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,

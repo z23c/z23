@@ -64,7 +64,8 @@
  *          cannot be read). A signer seen again counts once, as a duplicate.
  *          Fewer qualified signers than required refuses QUALIFY_SHORT with
  *          the counts. Reply: data {commit, base, required, qualified,
- *          signers[], duplicates, verdict "ready"}.
+ *          signers[], duplicates, verdict "ready"}. zcl_dlr_qualify is also
+ *          what dev.land.receive admits on.
  */
 
 #include "command/native_command.h"
@@ -294,6 +295,22 @@ static struct dlr_offer *dlr_offer_checked(const struct zcl_command_request *req
         return NULL;
     }
     return o;
+}
+
+/* check_offer's checks for a caller that already holds the checkout (the
+ * receiver, before it admits a bundle); refusals land in reply under leaf. */
+bool zcl_dlr_check_offer_at(const char *root, const char *bundle,
+                            const char *offer, const char *leaf,
+                            struct zcl_command_reply *reply)
+{
+    struct dlr_offer *o = zcl_calloc(1, sizeof(*o), "dev_land_remote.offer");
+    bool ok = snprintf(o->r.root, sizeof(o->r.root), "%s", root) <
+              (int)sizeof(o->r.root);
+    o->leaf = leaf;
+    ok = ok && dlr_offer_read(offer, o, reply) &&
+         dlr_offer_run(o, bundle, reply);
+    free(o);
+    return ok;
 }
 
 /* Read-only: nothing is queued, fetched or written, and no worktree is
