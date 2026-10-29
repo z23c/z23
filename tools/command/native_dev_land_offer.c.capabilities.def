@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_offer.c", CAP_FS_READ|CAP_FS_WRITE, "reads an offered bundle and manifest for check_offer and attest_offer, writes the attest_offer receipt, and reads a receipt and offer for verify_offer_receipt; every git child goes through the spawn seam with an argv and no shell")
