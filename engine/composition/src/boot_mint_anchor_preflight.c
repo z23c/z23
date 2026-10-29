@@ -408,7 +408,8 @@ static bool source_unchanged(int dirfd, const struct preflight_source_file *file
            identity_equal(&file->identity, &opened) && identity_equal(&file->identity, &named);
 }
 
-static bool copy_exact_file(const struct preflight_source_file *source, const char *destination) {
+static bool copy_exact_file(const struct preflight_source_file *source, const char *destination,
+                            const char *copy_mark, const char *fsync_mark) {
     if (!source->exists)
         return true;
     int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
@@ -417,6 +418,7 @@ static bool copy_exact_file(const struct preflight_source_file *source, const ch
     uint8_t buffer[64u * 1024u];
     off_t offset = 0;
     bool ok = true;
+    int64_t phase = boot_clock_ms();
     while (offset < source->identity.st_size) {
         size_t want = sizeof(buffer);
         off_t left = source->identity.st_size - offset;
@@ -444,8 +446,13 @@ static bool copy_exact_file(const struct preflight_source_file *source, const ch
             break;
         offset += got;
     }
-    if (ok && fsync(out) != 0)
-        ok = false;
+    (void)boot_submark(copy_mark, phase);
+    if (ok) {
+        phase = boot_clock_ms();
+        if (fsync(out) != 0)
+            ok = false;
+        (void)boot_submark(fsync_mark, phase);
+    }
     if (close(out) != 0)
         ok = false;
     return ok;
@@ -511,7 +518,10 @@ static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbas
     if (n1 <= 0 || n1 >= 2304 || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy))
         return false;
     int64_t phase = boot_clock_ms();
-    bool copied = copy_exact_file(&files[0], main_copy) && copy_exact_file(&files[1], wal_copy);
+    /* Distinct names preserve both files in the flight recorder, whose
+     * repeated stage names replace the previous observation. */
+    bool copied = copy_exact_file(&files[0], main_copy, "mint_preflight.main_copy", "mint_preflight.main_fsync") &&
+                  copy_exact_file(&files[1], wal_copy, "mint_preflight.wal_copy", "mint_preflight.wal_fsync");
     phase = boot_submark("mint_preflight.copy", phase);
     if (!copied) return false;
     bool stable = true;
