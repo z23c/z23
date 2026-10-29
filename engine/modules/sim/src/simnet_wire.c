@@ -664,6 +664,74 @@ static size_t simnet_wire_recv_cap_for_queue(size_t queued, size_t base_cap)
     return base_cap;
 }
 
+enum simnet_wire_pump_step {
+    SIMNET_WIRE_PUMP_STOP,
+    SIMNET_WIRE_PUMP_REJECTED,
+    SIMNET_WIRE_PUMP_DELIVERED
+};
+
+/* Feed one random-sized chunk of the peer's to_nut ring into the NUT under
+ * its recv lock. The lock is always released before returning. */
+static enum simnet_wire_pump_step
+simnet_wire_pump_one_chunk(struct simnet_wire *wire, struct wire_peer *peer,
+                           size_t *chunk_out, const uint8_t **ptr_out)
+{
+    struct p2p_node *node = peer->node;
+    zcl_mutex_lock(&node->cs_recv);
+    size_t queued = node->recv_msg_count;
+    if (queued >= MAX_RECV_MESSAGES) {
+        event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
+                    "cmd=wire reason=recv_queue_full");
+        zcl_mutex_unlock(&node->cs_recv);
+        return SIMNET_WIRE_PUMP_STOP;
+    }
+
+    size_t linear_len = 0;
+    const uint8_t *ptr = ring_linear_ptr(&peer->link.to_nut, &linear_len);
+    if (!ptr || linear_len == 0) {
+        zcl_mutex_unlock(&node->cs_recv);
+        return SIMNET_WIRE_PUMP_STOP;
+    }
+
+    size_t cap = simnet_wire_recv_cap_for_queue(
+        queued, SIMNET_WIRE_IO_CHUNK_BASE);
+    if (peer->link.down_tokens < cap)
+        cap = peer->link.down_tokens;
+    if (cap == 0) {
+        zcl_mutex_unlock(&node->cs_recv);
+        return SIMNET_WIRE_PUMP_STOP;
+    }
+    if (cap > linear_len)
+        cap = linear_len;
+    size_t chunk = 1u + (rng_u64() % cap);
+
+    bool ok = p2p_node_receive_bytes(node, (const char *)ptr,
+                                     (unsigned int)chunk,
+                                     wire->params->pchMessageStart);
+    if (!ok) {
+        (void)p2p_node_request_disconnect(
+            node, P2P_DISCONNECT_MESSAGE_PARSE,
+            P2P_DISCONNECT_SOURCE_SOCKET,
+            node->endpoint_generation);
+        for (size_t i = 0; i < node->recv_msg_count; i++)
+            net_message_free(&node->recv_msgs[i]);
+        node->recv_msg_count = 0;
+        zcl_mutex_unlock(&node->cs_recv);
+        return SIMNET_WIRE_PUMP_REJECTED;
+    }
+    node->last_recv = platform_time_wall_time_t();
+    atomic_store_explicit(&node->last_activity_monotonic_us,
+                          platform_time_monotonic_us(),
+                          memory_order_relaxed);
+    node->recv_bytes += (uint64_t)chunk;
+    if (peer->link.down_tokens != SIZE_MAX)
+        peer->link.down_tokens -= chunk;
+    zcl_mutex_unlock(&node->cs_recv);
+    *chunk_out = chunk;
+    *ptr_out = ptr;
+    return SIMNET_WIRE_PUMP_DELIVERED;
+}
+
 static bool simnet_wire_pump_to_nut(struct simnet_wire *wire, size_t peer_id,
                                     bool *progress)
 {
@@ -674,56 +742,14 @@ static bool simnet_wire_pump_to_nut(struct simnet_wire *wire, size_t peer_id,
 
     while (peer->link.open && !node->disconnect &&
            ring_available(&peer->link.to_nut) > 0) {
-        zcl_mutex_lock(&node->cs_recv);
-        size_t queued = node->recv_msg_count;
-        if (queued >= MAX_RECV_MESSAGES) {
-            event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
-                        "cmd=wire reason=recv_queue_full");
-            zcl_mutex_unlock(&node->cs_recv);
+        size_t chunk = 0;
+        const uint8_t *ptr = NULL;
+        enum simnet_wire_pump_step step =
+            simnet_wire_pump_one_chunk(wire, peer, &chunk, &ptr);
+        if (step == SIMNET_WIRE_PUMP_STOP)
             break;
-        }
-
-        size_t linear_len = 0;
-        const uint8_t *ptr = ring_linear_ptr(&peer->link.to_nut, &linear_len);
-        if (!ptr || linear_len == 0) {
-            zcl_mutex_unlock(&node->cs_recv);
-            break;
-        }
-
-        size_t cap = simnet_wire_recv_cap_for_queue(
-            queued, SIMNET_WIRE_IO_CHUNK_BASE);
-        if (peer->link.down_tokens < cap)
-            cap = peer->link.down_tokens;
-        if (cap == 0) {
-            zcl_mutex_unlock(&node->cs_recv);
-            break;
-        }
-        if (cap > linear_len)
-            cap = linear_len;
-        size_t chunk = 1u + (rng_u64() % cap);
-
-        bool ok = p2p_node_receive_bytes(node, (const char *)ptr,
-                                         (unsigned int)chunk,
-                                         wire->params->pchMessageStart);
-        if (!ok) {
-            (void)p2p_node_request_disconnect(
-                node, P2P_DISCONNECT_MESSAGE_PARSE,
-                P2P_DISCONNECT_SOURCE_SOCKET,
-                node->endpoint_generation);
-            for (size_t i = 0; i < node->recv_msg_count; i++)
-                net_message_free(&node->recv_msgs[i]);
-            node->recv_msg_count = 0;
-            zcl_mutex_unlock(&node->cs_recv);
+        if (step == SIMNET_WIRE_PUMP_REJECTED)
             LOG_FAIL("simnet.wire", "NUT rejected inbound bytes");
-        }
-        node->last_recv = platform_time_wall_time_t();
-        atomic_store_explicit(&node->last_activity_monotonic_us,
-                              platform_time_monotonic_us(),
-                              memory_order_relaxed);
-        node->recv_bytes += (uint64_t)chunk;
-        if (peer->link.down_tokens != SIZE_MAX)
-            peer->link.down_tokens -= chunk;
-        zcl_mutex_unlock(&node->cs_recv);
 
         simnet_wire_fp_mix(wire, peer_id, 1, ptr, chunk);
         wire->delivered_to_nut_bytes += chunk;
@@ -734,13 +760,78 @@ static bool simnet_wire_pump_to_nut(struct simnet_wire *wire, size_t peer_id,
     return true;
 }
 
+static bool simnet_wire_frame_checksum_matches(const uint8_t *payload,
+                                               size_t payload_len,
+                                               unsigned int want)
+{
+    struct uint256 checksum;
+    hash256(payload_len ? payload : (const uint8_t *)"",
+            payload_len, checksum.data);
+    unsigned int expected = 0;
+    memcpy(&expected, checksum.data, sizeof(expected));
+    return expected == want;
+}
+
+static bool simnet_wire_parse_version_payload(const uint8_t *payload,
+                                              size_t payload_len)
+{
+    struct byte_stream s;
+    struct version_message ver;
+    version_message_init(&ver);
+    stream_init_from_data(&s, payload, payload_len);
+    bool ok = version_message_deserialize(&ver, &s);
+    stream_free(&s);
+    return ok;
+}
+
+static bool simnet_wire_read_nonce_payload(const uint8_t *payload,
+                                           size_t payload_len,
+                                           uint64_t *nonce)
+{
+    struct byte_stream s;
+    stream_init_from_data(&s, payload, payload_len);
+    bool ok = stream_read_u64_le(&s, nonce);
+    stream_free(&s);
+    return ok;
+}
+
+static bool simnet_wire_peer_frame_args_valid(const struct simnet_wire *wire,
+                                              size_t peer_id,
+                                              const uint8_t *frame,
+                                              size_t frame_len)
+{
+    return wire && peer_id < wire->peer_count && frame &&
+           frame_len >= MSG_HEADER_SIZE;
+}
+
+static bool simnet_wire_ensure_verack_sent(struct simnet_wire *wire,
+                                           size_t peer_id,
+                                           struct wire_peer *peer)
+{
+    if (peer->verack_sent)
+        return true;
+    if (!simnet_wire_enqueue_verack(wire, peer_id))
+        return false;
+    peer->verack_sent = true;
+    return true;
+}
+
+static bool simnet_wire_reply_to_ping(struct simnet_wire *wire, size_t peer_id,
+                                      const uint8_t *payload,
+                                      size_t payload_len)
+{
+    uint64_t nonce = 0;
+    if (!simnet_wire_read_nonce_payload(payload, payload_len, &nonce))
+        return true;
+    return simnet_wire_enqueue_pong(wire, peer_id, nonce);
+}
+
 static bool simnet_wire_peer_handle_frame(struct simnet_wire *wire,
                                           size_t peer_id,
                                           const uint8_t *frame,
                                           size_t frame_len)
 {
-    if (!wire || peer_id >= wire->peer_count || !frame ||
-        frame_len < MSG_HEADER_SIZE)
+    if (!simnet_wire_peer_frame_args_valid(wire, peer_id, frame, frame_len))
         LOG_FAIL("simnet.wire", "invalid peer frame");
 
     struct msg_header hdr;
@@ -752,12 +843,8 @@ static bool simnet_wire_peer_handle_frame(struct simnet_wire *wire,
         LOG_FAIL("simnet.wire", "frame length mismatch");
 
     const uint8_t *payload = frame + MSG_HEADER_SIZE;
-    struct uint256 checksum;
-    hash256(payload_len ? payload : (const uint8_t *)"",
-            payload_len, checksum.data);
-    unsigned int expected = 0;
-    memcpy(&expected, checksum.data, sizeof(expected));
-    if (expected != hdr.nChecksum)
+    if (!simnet_wire_frame_checksum_matches(payload, payload_len,
+                                            hdr.nChecksum))
         LOG_FAIL("simnet.wire", "peer saw checksum mismatch");
 
     char cmd[COMMAND_SIZE + 1];
@@ -765,38 +852,21 @@ static bool simnet_wire_peer_handle_frame(struct simnet_wire *wire,
     struct wire_peer *peer = &wire->peers[peer_id];
 
     if (strcmp(cmd, "version") == 0) {
-        struct byte_stream s;
-        struct version_message ver;
-        version_message_init(&ver);
-        stream_init_from_data(&s, payload, payload_len);
-        bool ok = version_message_deserialize(&ver, &s);
-        stream_free(&s);
-        if (!ok)
+        if (!simnet_wire_parse_version_payload(payload, payload_len))
             LOG_FAIL("simnet.wire", "peer failed to parse NUT version");
         peer->saw_nut_version = true;
-        if (!peer->verack_sent) {
-            if (!simnet_wire_enqueue_verack(wire, peer_id))
-                return false;
-            peer->verack_sent = true;
-        }
+        if (!simnet_wire_ensure_verack_sent(wire, peer_id, peer))
+            return false;
     } else if (strcmp(cmd, "verack") == 0) {
         peer->saw_nut_verack = true;
     } else if (strcmp(cmd, "sendheaders") == 0) {
         peer->saw_nut_sendheaders = true;
     } else if (strcmp(cmd, "ping") == 0) {
-        struct byte_stream s;
-        uint64_t nonce = 0;
-        stream_init_from_data(&s, payload, payload_len);
-        bool ok = stream_read_u64_le(&s, &nonce);
-        stream_free(&s);
-        if (ok && !simnet_wire_enqueue_pong(wire, peer_id, nonce))
+        if (!simnet_wire_reply_to_ping(wire, peer_id, payload, payload_len))
             return false;
     } else if (strcmp(cmd, "pong") == 0) {
-        struct byte_stream s;
         uint64_t nonce = 0;
-        stream_init_from_data(&s, payload, payload_len);
-        bool ok = stream_read_u64_le(&s, &nonce);
-        stream_free(&s);
+        bool ok = simnet_wire_read_nonce_payload(payload, payload_len, &nonce);
         if (!ok)
             LOG_FAIL("simnet.wire", "peer failed to parse pong");
         peer->saw_nut_pong = true;
@@ -918,6 +988,39 @@ static uint64_t simnet_wire_progress_signature(const struct simnet_wire *wire)
     return h;
 }
 
+static bool simnet_wire_peer_adversary_pending(const struct simnet_wire *wire,
+                                               size_t i)
+{
+    if (wire->peers[i].kind == SIMNET_WIRE_PEER_FLOOD &&
+        wire->peers[i].flood_active)
+        return true;
+    if (wire->peers[i].kind == SIMNET_WIRE_PEER_SLOWLORIS &&
+        !wire->peers[i].adversary_done)
+        return true;
+    if (wire->peers[i].kind == SIMNET_WIRE_PEER_REPLAY &&
+        !wire->peers[i].replay_done)
+        return true;
+    if (wire->peers[i].kind == SIMNET_WIRE_PEER_REORDER &&
+        !wire->peers[i].reorder_done)
+        return true;
+    return false;
+}
+
+static bool simnet_wire_peer_has_pending_work(const struct simnet_wire *wire,
+                                              size_t i)
+{
+    if (simnet_wire_peer_adversary_pending(wire, i))
+        return true;
+    if ((wire->peers[i].kind == SIMNET_WIRE_PEER_INVALID_BLOCK ||
+         wire->peers[i].kind == SIMNET_WIRE_PEER_INVALID_HEADER) &&
+        !wire->peers[i].byz_injected &&
+        !wire->peers[i].adversary_done &&
+        wire->nut && !wire->nut->disconnect)
+        return true;
+    return ring_available(&wire->peers[i].link.to_nut) > 0 ||
+           ring_available(&wire->peers[i].link.to_peer) > 0;
+}
+
 static bool simnet_wire_idle(const struct simnet_wire *wire)
 {
     if (!wire || wire->queue_count > 0)
@@ -947,29 +1050,32 @@ static bool simnet_wire_idle(const struct simnet_wire *wire)
     if (simnet_wire_scenario_partitions_pending(wire))
         return false;
     for (size_t i = 0; i < wire->peer_count; i++) {
-        if (wire->peers[i].kind == SIMNET_WIRE_PEER_FLOOD &&
-            wire->peers[i].flood_active)
-            return false;
-        if (wire->peers[i].kind == SIMNET_WIRE_PEER_SLOWLORIS &&
-            !wire->peers[i].adversary_done)
-            return false;
-        if (wire->peers[i].kind == SIMNET_WIRE_PEER_REPLAY &&
-            !wire->peers[i].replay_done)
-            return false;
-        if (wire->peers[i].kind == SIMNET_WIRE_PEER_REORDER &&
-            !wire->peers[i].reorder_done)
-            return false;
-        if ((wire->peers[i].kind == SIMNET_WIRE_PEER_INVALID_BLOCK ||
-             wire->peers[i].kind == SIMNET_WIRE_PEER_INVALID_HEADER) &&
-            !wire->peers[i].byz_injected &&
-            !wire->peers[i].adversary_done &&
-            wire->nut && !wire->nut->disconnect)
-            return false;
-        if (ring_available(&wire->peers[i].link.to_nut) > 0 ||
-            ring_available(&wire->peers[i].link.to_peer) > 0)
+        if (simnet_wire_peer_has_pending_work(wire, i))
             return false;
     }
     return true;
+}
+
+static void simnet_wire_refill_tokens(struct simnet_wire *wire)
+{
+    /* Refill each link's per-tick bandwidth budget. SIZE_MAX caps stay
+     * unbounded (unchanged behavior); a finite cap set via
+     * simnet_wire_set_link_bandwidth() bounds this tick's throughput. */
+    for (size_t i = 0; i < wire->peer_count; i++) {
+        wire->peers[i].link.down_tokens = wire->peers[i].link.down_cap;
+        wire->peers[i].link.up_tokens = wire->peers[i].link.up_cap;
+    }
+}
+
+static void simnet_wire_track_deliver_delta(struct simnet_wire *wire)
+{
+    /* Track the largest single-tick delivery INTO the NUT — the bandwidth
+     * monitor for capped links (a capped tick can deliver at most down_cap
+     * bytes). */
+    uint64_t delta = wire->delivered_to_nut_bytes - wire->last_delivered_to_nut;
+    if (delta > wire->max_deliver_to_nut_per_tick)
+        wire->max_deliver_to_nut_per_tick = delta;
+    wire->last_delivered_to_nut = wire->delivered_to_nut_bytes;
 }
 
 static bool simnet_wire_tick(struct simnet_wire *wire, bool *progress)
@@ -978,13 +1084,7 @@ static bool simnet_wire_tick(struct simnet_wire *wire, bool *progress)
         LOG_FAIL("simnet.wire", "invalid tick args");
     *progress = false;
 
-    /* Refill each link's per-tick bandwidth budget. SIZE_MAX caps stay
-     * unbounded (unchanged behavior); a finite cap set via
-     * simnet_wire_set_link_bandwidth() bounds this tick's throughput. */
-    for (size_t i = 0; i < wire->peer_count; i++) {
-        wire->peers[i].link.down_tokens = wire->peers[i].link.down_cap;
-        wire->peers[i].link.up_tokens = wire->peers[i].link.up_cap;
-    }
+    simnet_wire_refill_tokens(wire);
 
     if (!simnet_wire_apply_scenario_partitions(wire, progress))
         return false;
@@ -1012,13 +1112,7 @@ static bool simnet_wire_tick(struct simnet_wire *wire, bool *progress)
             return false;
     }
     wire->ticks++;
-    /* Track the largest single-tick delivery INTO the NUT — the bandwidth
-     * monitor for capped links (a capped tick can deliver at most down_cap
-     * bytes). */
-    uint64_t delta = wire->delivered_to_nut_bytes - wire->last_delivered_to_nut;
-    if (delta > wire->max_deliver_to_nut_per_tick)
-        wire->max_deliver_to_nut_per_tick = delta;
-    wire->last_delivered_to_nut = wire->delivered_to_nut_bytes;
+    simnet_wire_track_deliver_delta(wire);
     return simnet_wire_monitor_after_tick(wire);
 }
 
