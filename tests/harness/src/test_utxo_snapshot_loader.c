@@ -455,6 +455,538 @@ static int uss_loader_check_corruption(const char *tmp)
     return 0;
 }
 
+/* ── Pinned branches of uss_open(), uss_layout_exact() and
+ * uss_component_record(). Every row reaches its branch through a public
+ * call; the static helpers are never copied here. Rows are sealed with the
+ * body SHA3 unless the row exists to test the digest itself. ── */
+
+#define USS_PIN_BYTES  1024
+#define USS_PIN_HDR    104
+#define USS_PIN_PATHMAX 1024
+
+struct uss_pin_file {
+    uint8_t bytes[USS_PIN_BYTES];
+    size_t  len;
+    bool    overflow;
+};
+
+static void uss_pin_begin(struct uss_pin_file *f, uint32_t version,
+                          uint32_t height, uint64_t count, int64_t supply)
+{
+    memset(f, 0, sizeof(*f));
+    memcpy(f->bytes, "ZCLUTXO\x00", 8);
+    wle32(f->bytes + 8, version);
+    wle32(f->bytes + 16, height);
+    wle64(f->bytes + 24, count);
+    wle64(f->bytes + 32, (uint64_t)supply);
+    f->len = USS_PIN_HDR;
+}
+
+static void uss_pin_put(struct uss_pin_file *f, const void *src, size_t n)
+{
+    if (n > sizeof(f->bytes) - f->len) {
+        f->overflow = true;
+        return;
+    }
+    memcpy(f->bytes + f->len, src, n);
+    f->len += n;
+}
+
+static void uss_pin_fill(struct uss_pin_file *f, uint8_t byte, size_t n)
+{
+    uint8_t buf[USS_PIN_BYTES];
+    if (n > sizeof(buf)) {
+        f->overflow = true;
+        return;
+    }
+    memset(buf, byte, n);
+    uss_pin_put(f, buf, n);
+}
+
+static void uss_pin_u32(struct uss_pin_file *f, uint32_t v)
+{
+    uint8_t b[4];
+    wle32(b, v);
+    uss_pin_put(f, b, sizeof(b));
+}
+
+static void uss_pin_u64(struct uss_pin_file *f, uint64_t v)
+{
+    uint8_t b[8];
+    wle64(b, v);
+    uss_pin_put(f, b, sizeof(b));
+}
+
+/* The first 48 bytes of a record: txid, vout, value, script_len. */
+static void uss_pin_record_head(struct uss_pin_file *f, uint8_t txid_fill,
+                                uint32_t vout, int64_t value,
+                                uint32_t script_len)
+{
+    uss_pin_fill(f, txid_fill, 32);
+    uss_pin_u32(f, vout);
+    uss_pin_u64(f, (uint64_t)value);
+    uss_pin_u32(f, script_len);
+}
+
+/* A complete canonical record; the script is script_len bytes of 0x51. */
+static void uss_pin_record(struct uss_pin_file *f, uint8_t txid_fill,
+                           uint32_t vout, int64_t value, uint32_t script_len,
+                           uint32_t height, uint8_t is_cb)
+{
+    uss_pin_record_head(f, txid_fill, vout, value, script_len);
+    uss_pin_fill(f, 0x51, script_len);
+    uss_pin_u32(f, height);
+    uss_pin_fill(f, is_cb, 1);
+}
+
+/* Stamp header bytes 72..103 with the SHA3 of the body. */
+static void uss_pin_seal(struct uss_pin_file *f)
+{
+    struct sha3_256_ctx ctx;
+    uint8_t digest[32];
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, f->bytes + USS_PIN_HDR, f->len - USS_PIN_HDR);
+    sha3_256_finalize(&ctx, digest);
+    memcpy(f->bytes + 72, digest, sizeof(digest));
+}
+
+static bool uss_pin_write_raw(const char *path, const uint8_t *bytes,
+                              size_t len)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+        return false;
+    bool ok = fwrite(bytes, 1, len, fp) == len;
+    return fclose(fp) == 0 && ok;
+}
+
+/* Expect uss_open() to refuse the bytes with exactly `expect`. */
+static int uss_pin_reject_raw(const char *path, const uint8_t *bytes,
+                              size_t len, bool verify,
+                              const uint8_t *expect_sha3, const char *expect)
+{
+    if (!uss_pin_write_raw(path, bytes, len)) {
+        printf("uss pin: fixture write FAIL\n");
+        return 1;
+    }
+    char err[160] = {0};
+    struct uss_handle *h = uss_open(path, verify, expect_sha3, NULL,
+                                    err, sizeof(err));
+    if (h) {
+        uss_close(h);
+        printf("uss pin: opened, wanted '%s'\n", expect);
+        return 1;
+    }
+    if (strcmp(err, expect) != 0) {
+        printf("uss pin: got '%s', wanted '%s'\n", err, expect);
+        return 1;
+    }
+    return 0;
+}
+
+/* Expect uss_open() to accept the bytes; optionally return the header. */
+static int uss_pin_accept_raw(const char *path, const uint8_t *bytes,
+                              size_t len, bool verify,
+                              const uint8_t *expect_sha3,
+                              struct uss_header *hdr)
+{
+    if (!uss_pin_write_raw(path, bytes, len)) {
+        printf("uss pin: fixture write FAIL\n");
+        return 1;
+    }
+    char err[160] = {0};
+    struct uss_handle *h = uss_open(path, verify, expect_sha3, hdr,
+                                    err, sizeof(err));
+    if (!h) {
+        printf("uss pin: open FAIL (%s)\n", err);
+        return 1;
+    }
+    uss_close(h);
+    return 0;
+}
+
+static int uss_pin_reject(const char *path, const struct uss_pin_file *f,
+                          const char *expect)
+{
+    if (f->overflow) {
+        printf("uss pin: fixture overflow\n");
+        return 1;
+    }
+    return uss_pin_reject_raw(path, f->bytes, f->len, false, NULL, expect);
+}
+
+static int uss_pin_accept(const char *path, const struct uss_pin_file *f,
+                          struct uss_header *hdr)
+{
+    if (f->overflow) {
+        printf("uss pin: fixture overflow\n");
+        return 1;
+    }
+    return uss_pin_accept_raw(path, f->bytes, f->len, false, NULL, hdr);
+}
+
+static int uss_pin_check_open_rows(const char *ussdir, const char *pin)
+{
+    int fail = 0;
+    char err[160] = {0};
+    struct uss_handle *h = uss_open(NULL, false, NULL, NULL,
+                                    err, sizeof(err));
+    if (h) {
+        uss_close(h);
+        fail++;
+    }
+    if (strcmp(err, "null path") != 0) {
+        printf("uss pin: null path got '%s'\n", err);
+        fail++;
+    }
+
+    char missing[USS_PIN_PATHMAX];
+    char want[USS_PIN_PATHMAX + 16];
+    snprintf(missing, sizeof(missing), "%s/uss_pin_missing.dat", ussdir);
+    snprintf(want, sizeof(want), "open(%s): ", missing);
+    memset(err, 0, sizeof(err));
+    h = uss_open(missing, false, NULL, NULL, err, sizeof(err));
+    if (h) {
+        uss_close(h);
+        fail++;
+    }
+    if (strncmp(err, want, strlen(want)) != 0) {
+        printf("uss pin: missing file got '%s'\n", err);
+        fail++;
+    }
+
+    uint8_t small[103];
+    memset(small, 0, sizeof(small));
+    memcpy(small, "ZCLUTXO\x00", 8);
+    fail += uss_pin_reject_raw(pin, small, sizeof(small), false, NULL,
+                               "too small or metadata failed");
+
+    struct uss_pin_file f;
+    uss_pin_begin(&f, 1, 0, 0, 0);
+    f.bytes[7] = 'X';
+    fail += uss_pin_reject(pin, &f, "bad magic");
+
+    uss_pin_begin(&f, 0, 0, 0, 0);
+    fail += uss_pin_reject(pin, &f, "bad version 0");
+    uss_pin_begin(&f, 4, 0, 0, 0);
+    fail += uss_pin_reject(pin, &f, "bad version 4");
+
+    uss_pin_begin(&f, 1, 0, 0, 0);
+    f.bytes[20] = 1;
+    fail += uss_pin_reject(pin, &f, "nonzero reserved header bytes");
+
+    uss_pin_begin(&f, 1, 0, 0, -1);
+    fail += uss_pin_reject(pin, &f, "negative header supply");
+    return fail;
+}
+
+static int uss_pin_check_header_fields(const char *pin)
+{
+    struct uss_pin_file f;
+    uss_pin_begin(&f, 1, 7, 0, 0);
+    memset(f.bytes + 40, 0x5a, 32);
+    uss_pin_seal(&f);
+
+    struct uss_header hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    int fail = uss_pin_accept(pin, &f, &hdr);
+    uint8_t anchor[32];
+    memset(anchor, 0x5a, sizeof(anchor));
+    if (hdr.version != 1 || hdr.height != 7 || hdr.count != 0 ||
+        hdr.total_supply != 0 ||
+        memcmp(hdr.anchor_block_hash, anchor, 32) != 0 ||
+        memcmp(hdr.sha3_hash, f.bytes + 72, 32) != 0) {
+        printf("uss pin: header fields not copied to hdr_out\n");
+        fail++;
+    }
+    return fail;
+}
+
+static int uss_pin_check_expected_sha(const char *pin)
+{
+    struct uss_pin_file f;
+    uss_pin_begin(&f, 1, 0, 0, 0);
+    uss_pin_seal(&f);
+    uint8_t want[32];
+    uint8_t zero[32] = {0};
+    memcpy(want, f.bytes + 72, sizeof(want));
+    int fail = uss_pin_reject_raw(pin, f.bytes, f.len, false, zero,
+                                  "expected sha3 mismatch");
+    fail += uss_pin_accept_raw(pin, f.bytes, f.len, false, want, NULL);
+    fail += uss_pin_accept_raw(pin, f.bytes, f.len, true, want, NULL);
+    return fail;
+}
+
+/* verify_full_sha3 = false skips the body digest; = true enforces it. */
+static int uss_pin_check_verify_flag(const char *pin)
+{
+    struct uss_pin_file f;
+    uss_pin_begin(&f, 1, 100, 1, 50000);
+    uss_pin_record(&f, 0x01, 0, 50000, 3, 100, 0);
+    uss_pin_seal(&f);
+    int fail = uss_pin_accept_raw(pin, f.bytes, f.len, false, NULL, NULL);
+    f.bytes[USS_PIN_HDR + 5] ^= 0xff; /* txid byte: layout still exact */
+    fail += uss_pin_accept_raw(pin, f.bytes, f.len, false, NULL, NULL);
+    fail += uss_pin_reject_raw(pin, f.bytes, f.len, true, NULL,
+                               "body sha3 mismatch");
+    return fail;
+}
+
+/* uss_layout_exact() for versions 1 and 2. */
+static int uss_pin_check_layout_legacy(const char *pin)
+{
+    struct uss_pin_file f;
+    int fail = 0;
+
+    uss_pin_begin(&f, 1, 0, 1, 0);
+    fail += uss_pin_reject(pin, &f, "truncated UTXO record 0");
+
+    uss_pin_begin(&f, 1, 0, 1, 0);
+    uss_pin_fill(&f, 0x00, 47);
+    fail += uss_pin_reject(pin, &f, "truncated UTXO record 0");
+
+    uss_pin_begin(&f, 1, 0, 1, 0);
+    uss_pin_record_head(&f, 0x01, 0, 1, 3);
+    fail += uss_pin_reject(pin, &f, "truncated UTXO script 0");
+
+    uss_pin_begin(&f, 1, 0, 2, 0);
+    uss_pin_record(&f, 0x01, 0, 0, 0, 0, 0);
+    fail += uss_pin_reject(pin, &f, "truncated UTXO record 1");
+
+    uss_pin_begin(&f, 1, 0, 0, 0);
+    uss_pin_fill(&f, 0x00, 1);
+    fail += uss_pin_reject(pin, &f, "v1 trailing payload bytes");
+
+    uss_pin_begin(&f, 1, 0, 0, 0);
+    fail += uss_pin_accept(pin, &f, NULL);
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    fail += uss_pin_reject(pin, &f, "missing Sapling section length");
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    uss_pin_fill(&f, 0x00, 3);
+    fail += uss_pin_reject(pin, &f, "missing Sapling section length");
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    uss_pin_u32(&f, 10);
+    uss_pin_fill(&f, 0x00, 2);
+    fail += uss_pin_reject(pin, &f, "truncated Sapling section");
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    fail += uss_pin_reject(pin, &f, "empty v2 Sapling section");
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    uss_pin_u32(&f, 5);
+    uss_pin_fill(&f, 0x11, 5);
+    uss_pin_fill(&f, 0x00, 1);
+    fail += uss_pin_reject(pin, &f, "v2 trailing payload bytes");
+
+    uss_pin_begin(&f, 2, 0, 0, 0);
+    uss_pin_u32(&f, 5);
+    uss_pin_fill(&f, 0x11, 5);
+    fail += uss_pin_accept(pin, &f, NULL);
+    return fail;
+}
+
+/* uss_layout_exact() for version 3: Sapling, Sprout and nullifier sections. */
+static int uss_pin_check_layout_v3(const char *pin)
+{
+    struct uss_pin_file f;
+    int fail = 0;
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    fail += uss_pin_reject(pin, &f, "missing Sapling section length");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 10);
+    uss_pin_fill(&f, 0x00, 2);
+    fail += uss_pin_reject(pin, &f, "truncated Sapling section");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    fail += uss_pin_reject(pin, &f, "missing Sprout section length");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 10);
+    uss_pin_fill(&f, 0x00, 2);
+    fail += uss_pin_reject(pin, &f, "truncated Sprout section");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    fail += uss_pin_reject(pin, &f, "missing nullifier count");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u64(&f, UINT64_MAX);
+    fail += uss_pin_reject(pin, &f, "nullifier count overflow");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u64(&f, 1);
+    uss_pin_fill(&f, 0x00, 40);
+    fail += uss_pin_reject(pin, &f, "truncated nullifier section");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u64(&f, 0);
+    uss_pin_fill(&f, 0x00, 1);
+    fail += uss_pin_reject(pin, &f, "v3 trailing payload bytes");
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u64(&f, 0);
+    fail += uss_pin_accept(pin, &f, NULL);
+
+    uss_pin_begin(&f, 3, 0, 0, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u32(&f, 0);
+    uss_pin_u64(&f, 1);
+    uss_pin_fill(&f, 0x00, 41);
+    fail += uss_pin_accept(pin, &f, NULL);
+    return fail;
+}
+
+/* Seal, write, and run uss_utxo_component_compute() on the opened file.
+ * Returns true when the component pass succeeds; `cerr` gets the reason. */
+static bool uss_pin_component_run(const char *pin, struct uss_pin_file *f,
+                                  struct uss_utxo_component *comp,
+                                  char *cerr, size_t cerr_sz)
+{
+    uss_pin_seal(f);
+    if (!uss_pin_write_raw(pin, f->bytes, f->len)) {
+        snprintf(cerr, cerr_sz, "fixture write");
+        return false;
+    }
+    char err[160] = {0};
+    struct uss_handle *h = uss_open(pin, true, NULL, NULL, err, sizeof(err));
+    if (!h) {
+        snprintf(cerr, cerr_sz, "open: %s", err);
+        return false;
+    }
+    bool ok = uss_utxo_component_compute(h, comp, cerr, cerr_sz);
+    uss_close(h);
+    return ok;
+}
+
+static int uss_pin_component_reject(const char *pin, struct uss_pin_file *f,
+                                    const char *expect)
+{
+    struct uss_utxo_component comp;
+    char cerr[160] = {0};
+    if (uss_pin_component_run(pin, f, &comp, cerr, sizeof(cerr))) {
+        printf("uss pin: component accepted, wanted '%s'\n", expect);
+        return 1;
+    }
+    if (strcmp(cerr, expect) != 0) {
+        printf("uss pin: component got '%s', wanted '%s'\n", cerr, expect);
+        return 1;
+    }
+    return 0;
+}
+
+static int uss_pin_component_accept(const char *pin, struct uss_pin_file *f,
+                                    uint64_t count, int64_t supply)
+{
+    struct uss_utxo_component comp;
+    char cerr[160] = {0};
+    if (!uss_pin_component_run(pin, f, &comp, cerr, sizeof(cerr))) {
+        printf("uss pin: component FAIL (%s)\n", cerr);
+        return 1;
+    }
+    if (comp.count != count || comp.total_supply != supply) {
+        printf("uss pin: component count/supply mismatch\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* uss_component_record() refusals, reached through the component pass. */
+static int uss_pin_check_component_reject(const char *pin)
+{
+    struct uss_pin_file f;
+    int fail = 0;
+
+    uss_pin_begin(&f, 1, 0, 1, 50000);
+    uss_pin_record(&f, 0x01, 0, 50000, 3, 100, 0);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "UTXO height above snapshot");
+
+    uss_pin_begin(&f, 1, 100, 1, 0);
+    uss_pin_record(&f, 0x01, 0, -1, 0, 100, 0);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "UTXO value outside MoneyRange");
+
+    uss_pin_begin(&f, 1, 100, 1, 50000);
+    uss_pin_record(&f, 0x01, 0, 50000, 3, 100, 2);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "non-canonical coinbase flag");
+
+    uss_pin_begin(&f, 1, 100, 2, 100000);
+    uss_pin_record(&f, 0x01, 1, 50000, 0, 100, 0);
+    uss_pin_record(&f, 0x01, 1, 50000, 0, 100, 0);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "non-canonical or duplicate UTXO order");
+
+    uss_pin_begin(&f, 1, 100, 2, 100000);
+    uss_pin_record(&f, 0xff, 0, 50000, 0, 100, 0);
+    uss_pin_record(&f, 0x00, 0, 50000, 0, 100, 0);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "non-canonical or duplicate UTXO order");
+
+    uss_pin_begin(&f, 1, 0, 2, 2 * (int64_t)MAX_MONEY);
+    uss_pin_record(&f, 0x01, 0, MAX_MONEY, 0, 0, 0);
+    uss_pin_record(&f, 0x01, 1, MAX_MONEY, 0, 0, 0);
+    fail += uss_pin_component_reject(pin, &f,
+                                     "UTXO supply outside MoneyRange");
+    return fail;
+}
+
+/* uss_component_record() accepting boundary and ascending-txid records. */
+static int uss_pin_check_component_accept(const char *pin)
+{
+    struct uss_pin_file f;
+    int fail = 0;
+
+    uss_pin_begin(&f, 1, 100, 1, MAX_MONEY);
+    uss_pin_record(&f, 0x01, 0, MAX_MONEY, 0, 100, 0);
+    fail += uss_pin_component_accept(pin, &f, 1, MAX_MONEY);
+
+    uss_pin_begin(&f, 1, 100, 2, 100000);
+    uss_pin_record(&f, 0x00, 5, 50000, 3, 100, 0);
+    uss_pin_record(&f, 0x01, 0, 50000, 0, 100, 0);
+    fail += uss_pin_component_accept(pin, &f, 2, 100000);
+    return fail;
+}
+
+static int uss_pin_check_all(const char *ussdir)
+{
+    char pin[USS_PIN_PATHMAX];
+    snprintf(pin, sizeof(pin), "%s/uss_pin.dat", ussdir);
+    printf("uss: uss_open / layout / component branch pins... ");
+    int fail = uss_pin_check_open_rows(ussdir, pin) +
+               uss_pin_check_header_fields(pin) +
+               uss_pin_check_expected_sha(pin) +
+               uss_pin_check_verify_flag(pin) +
+               uss_pin_check_layout_legacy(pin) +
+               uss_pin_check_layout_v3(pin) +
+               uss_pin_check_component_reject(pin) +
+               uss_pin_check_component_accept(pin);
+    unlink(pin);
+    if (fail) {
+        printf("FAIL (%d rows)\n", fail);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
 int test_utxo_snapshot_loader(void)
 {
     int failures = 0;
@@ -492,6 +1024,8 @@ int test_utxo_snapshot_loader(void)
     int corr_rc = uss_loader_check_corruption(tmp);
     if (corr_rc < 0) { failures++; goto cleanup; }
     failures += corr_rc;
+
+    failures += uss_pin_check_all(ussdir);
 
 cleanup:
     unlink(tmp);
