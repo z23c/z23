@@ -463,7 +463,9 @@ static struct zcl_result ysa_prevout_service_call(
         &fx->view, fx->token_id, 1, fx->token_id, amount, out);
 }
 
-static int t_prevout_service_strict(void)
+/* The six verdict cases share one macro: each builds a fresh fixture,
+ * calls the production service once and checks one assertion. */
+static int ysa_prevout_service_refusal_cases(void)
 {
     int failures = 0;
     struct ysa_prevout_service_fixture fx;
@@ -502,6 +504,17 @@ static int t_prevout_service_strict(void)
                      result.ok &&
                      !ysa_prevout_service_call(&fx, fx.amount + 1, &out).ok);
 
+#undef YSA_PREVOUT_CASE
+    return failures;
+}
+
+/* A read that loses its canonical tip during the copy is refused. */
+static int ysa_prevout_service_reorg_case(void)
+{
+    int failures = 0;
+    struct ysa_prevout_service_fixture fx;
+    struct transaction out;
+
     transaction_init(&out);
     bool ready = ysa_prevout_service_fixture_init(
         &fx, "reorg", true, true, false, false);
@@ -513,9 +526,19 @@ static int t_prevout_service_strict(void)
               ready && !result.ok && strstr(result.message, "changed"));
     transaction_free(&out);
     if (ready) ysa_prevout_service_fixture_free(&fx);
+    return failures;
+}
+
+/* An allocation failure while copying the result leaves the caller's
+ * output untouched. */
+static int ysa_prevout_service_copy_oom_case(void)
+{
+    int failures = 0;
+    struct ysa_prevout_service_fixture fx;
+    struct transaction out;
 
     transaction_init(&out);
-    ready = ysa_prevout_service_fixture_init(
+    bool ready = ysa_prevout_service_fixture_init(
         &fx, "copy_oom", true, true, false, false) &&
         transaction_alloc(&out, 0, 1);
     struct tx_out *original_vout = ready ? out.vout : NULL;
@@ -523,15 +546,23 @@ static int t_prevout_service_strict(void)
         out.vout[0].value = 777;
         fx.fail_result_copy = true;
     }
-    result = ready ? ysa_prevout_service_call(&fx, fx.amount, &out)
-                   : ZCL_ERR(-99, "fixture setup failed");
+    struct zcl_result result = ready
+        ? ysa_prevout_service_call(&fx, fx.amount, &out)
+        : ZCL_ERR(-99, "fixture setup failed");
     YSA_CHECK("prevout service: copy OOM leaves caller output untouched",
               ready && !result.ok && out.vout == original_vout &&
               out.num_vout == 1 && out.vout[0].value == 777);
     transaction_free(&out);
     if (ready) ysa_prevout_service_fixture_free(&fx);
+    return failures;
+}
 
-#undef YSA_PREVOUT_CASE
+static int t_prevout_service_strict(void)
+{
+    int failures = 0;
+    failures += ysa_prevout_service_refusal_cases();
+    failures += ysa_prevout_service_reorg_case();
+    failures += ysa_prevout_service_copy_oom_case();
     return failures;
 }
 
@@ -837,39 +868,73 @@ static int t_ceremony_roundtrip(void)
 
 /* ── Exact controller-produced transaction through connect_block ─── */
 
-static int t_simnet_atomic_purchase(void)
+/* The isolated-chain purchase state, shared by the phases of
+ * t_simnet_atomic_purchase: the sim, the parties, the confirmed token
+ * send and the captured broadcast. */
+struct ysa_atomic {
+    struct simnet sim;
+    bool sim_ok;
+    struct privkey seller_key;
+    struct privkey buyer_key;
+    uint8_t seller_spk_bytes[25];
+    uint8_t buyer_spk_bytes[25];
+    struct script seller_spk;
+    struct script buyer_spk;
+    bool scripts_ok;
+    struct zswap_quote_v1 ad;
+    bool ad_ok;
+    struct uint256 junk_fund;
+    struct uint256 buyer_fund_a;
+    struct uint256 buyer_fund_b;
+    bool funded;
+    uint8_t token_txid[32];
+    struct uint256 token_out;
+    bool token_served;
+    struct ysa_flood_capture flood;
+    struct ysa_transaction_capture broadcast;
+    bool mined;
+    struct uint256 final_txid;
+};
+
+/* Opens the isolated chain and derives the parties' funding scripts and
+ * the signed Yardsale ad. sim_ok tells the caller whether the chain
+ * exists; a false sim_ok stops the purchase before any state is set. */
+static int ysa_atomic_open(struct ysa_atomic *t)
 {
     int failures = 0;
-    ysa_reset_all();
-
-    struct simnet sim;
-    bool sim_ok = simnet_init(&sim);
-    YSA_CHECK("simnet: isolated chain initializes", sim_ok);
-    if (!sim_ok)
+    t->sim_ok = simnet_init(&t->sim);
+    YSA_CHECK("simnet: isolated chain initializes", t->sim_ok);
+    if (!t->sim_ok)
         return failures;
-    simnet_activate_sapling_at(&sim, simnet_tip_height(&sim) + 1);
+    simnet_activate_sapling_at(&t->sim, simnet_tip_height(&t->sim) + 1);
 
-    struct privkey seller_key, buyer_key;
-    ysa_key(&seller_key, 0x31);
-    ysa_key(&buyer_key, 0x42);
-    uint8_t seller_spk_bytes[25], buyer_spk_bytes[25];
-    bool scripts_ok =
-        ysa_p2pkh_script(&seller_key, seller_spk_bytes) == 25 &&
-        ysa_p2pkh_script(&buyer_key, buyer_spk_bytes) == 25;
-    struct script seller_spk, buyer_spk;
-    memset(&seller_spk, 0, sizeof(seller_spk));
-    memset(&buyer_spk, 0, sizeof(buyer_spk));
-    if (scripts_ok) {
-        script_set(&seller_spk, seller_spk_bytes, sizeof(seller_spk_bytes));
-        script_set(&buyer_spk, buyer_spk_bytes, sizeof(buyer_spk_bytes));
+    ysa_key(&t->seller_key, 0x31);
+    ysa_key(&t->buyer_key, 0x42);
+    t->scripts_ok =
+        ysa_p2pkh_script(&t->seller_key, t->seller_spk_bytes) == 25 &&
+        ysa_p2pkh_script(&t->buyer_key, t->buyer_spk_bytes) == 25;
+    memset(&t->seller_spk, 0, sizeof(t->seller_spk));
+    memset(&t->buyer_spk, 0, sizeof(t->buyer_spk));
+    if (t->scripts_ok) {
+        script_set(&t->seller_spk, t->seller_spk_bytes,
+                   sizeof(t->seller_spk_bytes));
+        script_set(&t->buyer_spk, t->buyer_spk_bytes,
+                   sizeof(t->buyer_spk_bytes));
     }
-    YSA_CHECK("simnet: seller and buyer funding scripts derive", scripts_ok);
+    YSA_CHECK("simnet: seller and buyer funding scripts derive",
+              t->scripts_ok);
 
-    struct zswap_quote_v1 ad;
     uint8_t quote_root[32];
-    bool ad_ok = ysa_ingest_kat_ad(&ad, quote_root);
-    YSA_CHECK("simnet: signed Yardsale ad enters the app cache", ad_ok);
+    t->ad_ok = ysa_ingest_kat_ad(&t->ad, quote_root);
+    YSA_CHECK("simnet: signed Yardsale ad enters the app cache", t->ad_ok);
+    return failures;
+}
 
+/* Funds the seller and buyer on the isolated chain and matures the
+ * outputs; sets t->funded for the caller's early return. */
+static int ysa_atomic_fund(struct ysa_atomic *t)
+{
+    int failures = 0;
     /* Controller-only fixture: the injected port stands for a completed
      * strict-chain decision and returns the body whose value/script the
      * controller must bind. The direct production-service cases below prove
@@ -878,40 +943,42 @@ static int t_simnet_atomic_purchase(void)
     /* Fixture-only funding coinbase the token send consumes; the 100
      * filler blocks minted below satisfy its coinbase maturity before
      * the send lands. */
-    struct uint256 junk_fund;
-    bool junk_ok = scripts_ok &&
-        simnet_mint_coinbase_to(&sim, &seller_spk,
-                                YSA_SELLER_INPUT_VALUE * 10, &junk_fund);
+    bool junk_ok = t->scripts_ok &&
+        simnet_mint_coinbase_to(&t->sim, &t->seller_spk,
+                                YSA_SELLER_INPUT_VALUE * 10,
+                                &t->junk_fund);
 
-    struct uint256 buyer_fund_a, buyer_fund_b;
     bool funded = junk_ok &&
-        simnet_mint_coinbase_to(&sim, &buyer_spk,
-                                YSA_BUYER_IN_A_VALUE, &buyer_fund_a) &&
-        simnet_mint_coinbase_to(&sim, &buyer_spk,
-                                YSA_BUYER_IN_B_VALUE, &buyer_fund_b) &&
-        simnet_mint_to_height(&sim, 201);
+        simnet_mint_coinbase_to(&t->sim, &t->buyer_spk,
+                                YSA_BUYER_IN_A_VALUE, &t->buyer_fund_a) &&
+        simnet_mint_coinbase_to(&t->sim, &t->buyer_spk,
+                                YSA_BUYER_IN_B_VALUE, &t->buyer_fund_b) &&
+        simnet_mint_to_height(&t->sim, 201);
     YSA_CHECK("simnet: funding outputs mature", funded);
-    if (!funded) {
-        simnet_free(&sim);
-        ysa_reset_all();
-        return failures;
-    }
+    t->funded = funded;
+    return failures;
+}
 
+/* Builds the seller's token-send body spending the fixture coinbase, mints
+ * it on the sim and serves it through the trusted port fixture. */
+static int ysa_atomic_token_send(struct ysa_atomic *t)
+{
+    int failures = 0;
     struct transaction token_tx;
     memset(&token_tx, 0, sizeof(token_tx));
     transaction_init(&token_tx);
-    uint64_t token_send_q = ad_ok ? ad.token_amount : 0;
-    bool token_built = ad_ok && transaction_alloc(&token_tx, 1, 2);
+    uint64_t token_send_q = t->ad_ok ? t->ad.token_amount : 0;
+    bool token_built = t->ad_ok && transaction_alloc(&token_tx, 1, 2);
     if (token_built) {
         uint8_t opret[256];
         struct uint256 wire_id;
         for (int i = 0; i < 32; i++)
-            wire_id.data[i] = ad.token_id[31 - i];
+            wire_id.data[i] = t->ad.token_id[31 - i];
         size_t olen = slp_build_send(opret, sizeof(opret), &wire_id,
                                      &token_send_q, 1);
         uint8_t sig[] = {0x00, 0x00};
         script_set(&token_tx.vin[0].script_sig, sig, sizeof(sig));
-        token_tx.vin[0].prevout.hash = junk_fund;
+        token_tx.vin[0].prevout.hash = t->junk_fund;
         token_tx.vin[0].prevout.n = 0;
         token_tx.vin[0].sequence = 0xFFFFFFFF;
         token_tx.vout[0].value = 0; /* op-return output */
@@ -919,64 +986,65 @@ static int t_simnet_atomic_purchase(void)
         memcpy(token_tx.vout[0].script_pub_key.data, opret, olen);
         token_tx.vout[1].value = YSA_SELLER_INPUT_VALUE;
         token_tx.vout[1].script_pub_key.size = 25;
-        memcpy(token_tx.vout[1].script_pub_key.data, seller_spk_bytes,
+        memcpy(token_tx.vout[1].script_pub_key.data, t->seller_spk_bytes,
                25);
         transaction_compute_hash(&token_tx);
         token_built = olen > 0;
     }
     YSA_CHECK("simnet: seller token send body builds", token_built);
 
-    uint8_t token_txid[32];
-    memset(token_txid, 0, sizeof(token_txid));
-    struct uint256 token_out;
-    uint256_set_null(&token_out);
+    memset(t->token_txid, 0, sizeof(t->token_txid));
+    uint256_set_null(&t->token_out);
     bool token_served = false;
     if (token_built) {
-        memcpy(token_txid, token_tx.hash.data, 32);
-        memcpy(token_out.data, token_txid, 32);
+        memcpy(t->token_txid, token_tx.hash.data, 32);
+        memcpy(t->token_out.data, t->token_txid, 32);
         token_served = ysa_prevout_serve_body(&token_tx) &&
-            simnet_mint_txs(&sim, &token_tx, 1); /* ownership -> sim */
+            simnet_mint_txs(&t->sim, &token_tx, 1); /* ownership -> sim */
         transaction_init(&token_tx); /* the sim owns the minted body */
     }
     YSA_CHECK("simnet: body confirms; trusted port fixture serves it",
               token_served);
-    if (!token_served) {
-        simnet_free(&sim);
-        ysa_reset_all();
-        return failures;
-    }
+    t->token_served = token_served;
+    return failures;
+}
 
+/* Builds the seller's and buyer's terms, runs the real controller ceremony
+ * through the seller's ingest and the buyer's partial ingest, and records
+ * the captured broadcast. */
+static int ysa_atomic_terms_and_ceremony(struct ysa_atomic *t)
+{
+    int failures = 0;
     struct zswap_seller_accept seller;
     bool seller_ok = ysa_seller(&seller);
     if (seller_ok)
-        ysa_fill_exact_input(&seller.token_input, token_txid, 1,
-                             YSA_SELLER_INPUT_VALUE, seller_spk_bytes, 25);
+        ysa_fill_exact_input(&seller.token_input, t->token_txid, 1,
+                             YSA_SELLER_INPUT_VALUE, t->seller_spk_bytes, 25);
     YSA_CHECK("simnet: seller terms name the confirmed token send",
               seller_ok);
     if (seller_ok)
-        yardsale_seller_profile_configure(&seller, &seller_key);
+        yardsale_seller_profile_configure(&seller, &t->seller_key);
 
     struct zswap_buyer_accept buyer;
     bool buyer_ok = ysa_buyer(&buyer);
     if (buyer_ok) {
         /* Deliberately list B before A; the ceremony must canonical-sort the
          * real outpoints rather than relying on collection order. */
-        ysa_fill_exact_input(&buyer.inputs[0], buyer_fund_b.data, 0,
-                             YSA_BUYER_IN_B_VALUE, buyer_spk_bytes, 25);
-        ysa_fill_exact_input(&buyer.inputs[1], buyer_fund_a.data, 0,
-                             YSA_BUYER_IN_A_VALUE, buyer_spk_bytes, 25);
+        ysa_fill_exact_input(&buyer.inputs[0], t->buyer_fund_b.data, 0,
+                             YSA_BUYER_IN_B_VALUE, t->buyer_spk_bytes, 25);
+        ysa_fill_exact_input(&buyer.inputs[1], t->buyer_fund_a.data, 0,
+                             YSA_BUYER_IN_A_VALUE, t->buyer_spk_bytes, 25);
     }
     YSA_CHECK("simnet: buyer terms name both isolated ZCL inputs", buyer_ok);
 
     struct privkey buyer_keys[2];
-    buyer_keys[0] = buyer_key;
-    buyer_keys[1] = buyer_key;
-    struct ysa_flood_capture flood = {0};
-    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &flood);
+    buyer_keys[0] = t->buyer_key;
+    buyer_keys[1] = t->buyer_key;
+    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &t->flood);
     uint8_t accept_wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
     size_t accept_len = 0;
-    bool begun = ad_ok && seller_ok && buyer_ok &&
-        yardsale_buyer_begin(&ad, &buyer, buyer_keys, 2, YSA_NOW,
+    bool begun = t->ad_ok && seller_ok && buyer_ok &&
+        yardsale_buyer_begin(&t->ad, &buyer, buyer_keys, 2, YSA_NOW,
                              accept_wire, sizeof(accept_wire), &accept_len) ==
             YARDSALE_OK;
     YSA_CHECK("simnet: buyer starts the real controller ceremony", begun);
@@ -989,8 +1057,8 @@ static int t_simnet_atomic_purchase(void)
     YSA_CHECK("simnet: seller validates terms and signs its input",
               seller_verdict == ZSWAP_CEREMONY_WIRE_RESPOND);
 
-    struct ysa_transaction_capture broadcast = {0};
-    yardsale_ceremony_set_broadcast(ysa_transaction_capture_fn, &broadcast);
+    yardsale_ceremony_set_broadcast(ysa_transaction_capture_fn,
+                                    &t->broadcast);
     yardsale_ceremony_set_prevout_fetch(ysa_prevout_fetch_fn, NULL);
     int buyer_verdict = seller_verdict == ZSWAP_CEREMONY_WIRE_RESPOND
         ? yardsale_ceremony_partial_ingest(partial_wire, partial_len, 17,
@@ -998,38 +1066,50 @@ static int t_simnet_atomic_purchase(void)
         : ZSWAP_CEREMONY_WIRE_RELAY;
     YSA_CHECK("simnet: buyer verifies seller and signs both ZCL inputs",
               buyer_verdict == ZSWAP_CEREMONY_WIRE_DROP &&
-              broadcast.count == 1 && broadcast.copied &&
-              zswap_ceremony_all_inputs_signed(&broadcast.tx));
+              t->broadcast.count == 1 && t->broadcast.copied &&
+              zswap_ceremony_all_inputs_signed(&t->broadcast.tx));
+    return failures;
+}
 
-    bool exact_inputs = broadcast.copied && broadcast.tx.num_vin == 3 &&
-        simnet_coin_value(&sim, &token_out, 1, NULL) &&
-        simnet_coin_value(&sim, &buyer_fund_a, 0, NULL) &&
-        simnet_coin_value(&sim, &buyer_fund_b, 0, NULL);
+/* Checks that the captured broadcast spends exactly the three live inputs,
+ * then mines it onto the sim. */
+static int ysa_atomic_mine(struct ysa_atomic *t)
+{
+    int failures = 0;
+    bool exact_inputs = t->broadcast.copied && t->broadcast.tx.num_vin == 3 &&
+        simnet_coin_value(&t->sim, &t->token_out, 1, NULL) &&
+        simnet_coin_value(&t->sim, &t->buyer_fund_a, 0, NULL) &&
+        simnet_coin_value(&t->sim, &t->buyer_fund_b, 0, NULL);
     YSA_CHECK("simnet: captured broadcast spends the three live inputs",
               exact_inputs);
 
-    struct uint256 final_txid;
-    uint256_set_null(&final_txid);
-    if (broadcast.copied) {
-        transaction_compute_hash(&broadcast.tx);
-        final_txid = broadcast.tx.hash;
+    uint256_set_null(&t->final_txid);
+    if (t->broadcast.copied) {
+        transaction_compute_hash(&t->broadcast.tx);
+        t->final_txid = t->broadcast.tx.hash;
     }
-    bool mined = exact_inputs && simnet_mint_txs(&sim, &broadcast.tx, 1);
-    if (mined)
-        broadcast.copied = false; /* ownership transferred to simnet */
+    t->mined = exact_inputs && simnet_mint_txs(&t->sim, &t->broadcast.tx, 1);
+    if (t->mined)
+        t->broadcast.copied = false; /* ownership transferred to simnet */
     YSA_CHECK("simnet: exact controller broadcast passes connect_block",
-              mined && simnet_tip_height(&sim) == 203);
+              t->mined && simnet_tip_height(&t->sim) == 203);
+    return failures;
+}
 
+/* Checks the settled outputs of the mined broadcast and the exact fee. */
+static int ysa_atomic_settle(struct ysa_atomic *t)
+{
+    int failures = 0;
     int64_t token_dust = 0, seller_paid = 0;
     int64_t seller_change = 0, buyer_change = 0;
-    bool settled = mined &&
-        !simnet_coin_value(&sim, &token_out, 1, NULL) &&
-        !simnet_coin_value(&sim, &buyer_fund_a, 0, NULL) &&
-        !simnet_coin_value(&sim, &buyer_fund_b, 0, NULL) &&
-        simnet_coin_value(&sim, &final_txid, 1, &token_dust) &&
-        simnet_coin_value(&sim, &final_txid, 2, &seller_paid) &&
-        simnet_coin_value(&sim, &final_txid, 3, &seller_change) &&
-        simnet_coin_value(&sim, &final_txid, 4, &buyer_change);
+    bool settled = t->mined &&
+        !simnet_coin_value(&t->sim, &t->token_out, 1, NULL) &&
+        !simnet_coin_value(&t->sim, &t->buyer_fund_a, 0, NULL) &&
+        !simnet_coin_value(&t->sim, &t->buyer_fund_b, 0, NULL) &&
+        simnet_coin_value(&t->sim, &t->final_txid, 1, &token_dust) &&
+        simnet_coin_value(&t->sim, &t->final_txid, 2, &seller_paid) &&
+        simnet_coin_value(&t->sim, &t->final_txid, 3, &seller_change) &&
+        simnet_coin_value(&t->sim, &t->final_txid, 4, &buyer_change);
     YSA_CHECK("simnet: settlement values and fee are exact",
               settled && token_dust == ZSWAP_TOKEN_DUST_ZAT &&
               seller_paid == (int64_t)YSA_ZCL_AMOUNT &&
@@ -1038,10 +1118,41 @@ static int t_simnet_atomic_purchase(void)
               buyer_change == YSA_BUYER_IN_A_VALUE + YSA_BUYER_IN_B_VALUE -
                                   (int64_t)YSA_ZCL_AMOUNT -
                                   (int64_t)YSA_FEE_SATS);
+    return failures;
+}
 
-    if (broadcast.copied)
-        transaction_free(&broadcast.tx);
-    simnet_free(&sim);
+static int t_simnet_atomic_purchase(void)
+{
+    int failures = 0;
+    ysa_reset_all();
+
+    struct ysa_atomic t;
+    memset(&t, 0, sizeof(t));
+    failures += ysa_atomic_open(&t);
+    if (!t.sim_ok)
+        return failures;
+
+    failures += ysa_atomic_fund(&t);
+    if (!t.funded) {
+        simnet_free(&t.sim);
+        ysa_reset_all();
+        return failures;
+    }
+
+    failures += ysa_atomic_token_send(&t);
+    if (!t.token_served) {
+        simnet_free(&t.sim);
+        ysa_reset_all();
+        return failures;
+    }
+
+    failures += ysa_atomic_terms_and_ceremony(&t);
+    failures += ysa_atomic_mine(&t);
+    failures += ysa_atomic_settle(&t);
+
+    if (t.broadcast.copied)
+        transaction_free(&t.broadcast.tx);
+    simnet_free(&t.sim);
     ysa_reset_all();
     return failures;
 }
@@ -1219,10 +1330,9 @@ static bool ysa_guard_setup(int case_i, struct zswap_quote_v1 *ad,
                partial_len) == ZSWAP_CEREMONY_WIRE_RESPOND;
 }
 
-static int t_prevout_guard(void)
-{
-    int failures = 0;
-    enum {
+/* The guard cases: one ceremony round each, with the fake port armed to
+ * the honest body or to a body corrupted in exactly one claim. */
+enum {
         PV_SERVE = 0,   /* honest body: the positive control */
         PV_UNWIRED,     /* prevout port left NULL */
         PV_NO_BRANCH,   /* branch-id port left NULL */
@@ -1233,7 +1343,93 @@ static int t_prevout_guard(void)
         PV_WRONG_VAL,   /* claimed sat value does not match the body */
         PV_WRONG_SPK,   /* claimed script does not match the body */
         PV_CASES
-    };
+};
+
+/* Arms the fake prevout port for one guard case; false when the case's
+ * corrupted body could not be built. */
+static bool ysa_guard_arm_case(int c, const struct zswap_quote_v1 *ad,
+                               const struct zswap_seller_accept *seller)
+{
+    bool armed = false;
+    uint8_t spk[25];
+    struct privkey bk;
+    ysa_key(&bk, 0x42);
+    size_t spk_len =
+        ysa_p2pkh_script(&bk, spk) == 25 ? 25 : 0;
+    switch (c) {
+    case PV_SERVE:
+        armed = ysa_prevout_arm(ad, seller);
+        break;
+    case PV_UNWIRED:
+        armed = ysa_prevout_arm(ad, seller);
+        break;
+    case PV_NO_BRANCH:
+    case PV_NO_BROADCAST:
+        armed = ysa_prevout_arm(ad, seller);
+        break;
+    case PV_MISS:
+        armed = ysa_prevout_arm(ad, seller);
+        ysa_prevout_serve = false;
+        break;
+    case PV_WRONG_TOKEN: {
+        uint8_t bad[32];
+        memcpy(bad, ad->token_id, 32);
+        bad[0] ^= 0x01;
+        armed = ysa_prevout_build(seller->token_input.txid, bad,
+                                  ad->token_amount,
+                                  seller->token_input.value_sats,
+                                  seller->token_input.script_pub_key,
+                                  seller->token_input.script_len);
+        break;
+    }
+    case PV_WRONG_AMT:
+        armed = ysa_prevout_build(
+            seller->token_input.txid, ad->token_id,
+            ad->token_amount - 1,
+            seller->token_input.value_sats,
+            seller->token_input.script_pub_key,
+            seller->token_input.script_len);
+        break;
+    case PV_WRONG_VAL:
+        armed = ysa_prevout_build(
+            seller->token_input.txid, ad->token_id,
+            ad->token_amount,
+            seller->token_input.value_sats - 1,
+            seller->token_input.script_pub_key,
+            seller->token_input.script_len);
+        break;
+    case PV_WRONG_SPK:
+        armed = spk_len == 25 &&
+            ysa_prevout_build(
+                seller->token_input.txid, ad->token_id,
+                ad->token_amount,
+                seller->token_input.value_sats, spk, 25);
+        break;
+    default:
+        armed = false;
+        break;
+    }
+    return armed;
+}
+
+/* Wires the buyer's ports for one armed case: UNWIRED leaves the
+ * chain-content port NULL, NO_BRANCH the branch-id port, NO_BROADCAST
+ * the broadcast port. */
+static void ysa_guard_wire_ports(int c,
+                                 struct ysa_broadcast_capture *broadcast)
+{
+    if (c != PV_UNWIRED)
+        yardsale_ceremony_set_prevout_fetch(ysa_prevout_fetch_fn, NULL);
+    if (c == PV_NO_BRANCH)
+        yardsale_ceremony_set_branch_id_source(NULL, NULL);
+    if (c != PV_NO_BROADCAST)
+        yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn,
+                                        broadcast);
+}
+
+static int t_prevout_guard(void)
+{
+    int failures = 0;
     static const char *const names[PV_CASES] = {
         "guard: trusted port matching body signs and broadcasts",
         "guard: unwired port refuses to sign",
@@ -1258,81 +1454,15 @@ static int t_prevout_guard(void)
         struct zswap_buyer_accept buyer;
         bool have_buyer = ysa_buyer(&buyer);
         bool armed = ready && have_seller && have_buyer;
-        if (armed) {
-            uint8_t spk[25];
-            struct privkey bk;
-            ysa_key(&bk, 0x42);
-            size_t spk_len =
-                ysa_p2pkh_script(&bk, spk) == 25 ? 25 : 0;
-            switch (c) {
-            case PV_SERVE:
-                armed = ysa_prevout_arm(&ad, &seller);
-                break;
-            case PV_UNWIRED:
-                armed = ysa_prevout_arm(&ad, &seller);
-                break;
-            case PV_NO_BRANCH:
-            case PV_NO_BROADCAST:
-                armed = ysa_prevout_arm(&ad, &seller);
-                break;
-            case PV_MISS:
-                armed = ysa_prevout_arm(&ad, &seller);
-                ysa_prevout_serve = false;
-                break;
-            case PV_WRONG_TOKEN: {
-                uint8_t bad[32];
-                memcpy(bad, ad.token_id, 32);
-                bad[0] ^= 0x01;
-                armed = ysa_prevout_build(seller.token_input.txid, bad,
-                                          ad.token_amount,
-                                          seller.token_input.value_sats,
-                                          seller.token_input.script_pub_key,
-                                          seller.token_input.script_len);
-                break;
-            }
-            case PV_WRONG_AMT:
-                armed = ysa_prevout_build(
-                    seller.token_input.txid, ad.token_id,
-                    ad.token_amount - 1,
-                    seller.token_input.value_sats,
-                    seller.token_input.script_pub_key,
-                    seller.token_input.script_len);
-                break;
-            case PV_WRONG_VAL:
-                armed = ysa_prevout_build(
-                    seller.token_input.txid, ad.token_id,
-                    ad.token_amount,
-                    seller.token_input.value_sats - 1,
-                    seller.token_input.script_pub_key,
-                    seller.token_input.script_len);
-                break;
-            case PV_WRONG_SPK:
-                armed = spk_len == 25 &&
-                    ysa_prevout_build(
-                        seller.token_input.txid, ad.token_id,
-                        ad.token_amount,
-                        seller.token_input.value_sats, spk, 25);
-                break;
-            default:
-                armed = false;
-                break;
-            }
-        }
+        if (armed)
+            armed = ysa_guard_arm_case(c, &ad, &seller);
 
         /* The buyer's half: ports wired per case (UNWIRED leaves the
          * chain-content port NULL; the positive control alone may
          * broadcast). */
         struct ysa_broadcast_capture broadcast = {0};
-        if (armed) {
-            if (c != PV_UNWIRED)
-                yardsale_ceremony_set_prevout_fetch(
-                    ysa_prevout_fetch_fn, NULL);
-            if (c == PV_NO_BRANCH)
-                yardsale_ceremony_set_branch_id_source(NULL, NULL);
-            if (c != PV_NO_BROADCAST)
-                yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn,
-                                                &broadcast);
-        }
+        if (armed)
+            ysa_guard_wire_ports(c, &broadcast);
         int verdict = armed
             ? yardsale_ceremony_partial_ingest(partial_wire, partial_len,
                                                (int64_t)(100 + c), YSA_NOW)
@@ -1525,57 +1655,45 @@ static int t_seller_web_endpoint(void)
 #define YSA_SELLER_STALE \
     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccx.onion"
 
-static int t_known_sellers(void)
+/* Opens the sellers fixture: the node db, the db service and the app
+ * runtime, then starts the onion mount over the same db. A false return
+ * leaves the caller to remove the datadir and restore the onion address. */
+static bool ysa_sellers_fixture_open(struct node_db *ndb,
+                                     struct db_service *dbsvc,
+                                     struct app_runtime_context *rt,
+                                     const char *dir)
 {
-    int failures = 0;
-    ysa_reset_all();
-
-    /* The onion address singleton is process-global; the sequential
-     * runner shares it across groups. Snapshot and restore. */
-    const char *prev = onion_service_get_address();
-    char saved[128] = "";
-    if (prev)
-        snprintf(saved, sizeof(saved), "%s", prev);
-    onion_service_set_address(NULL);
-
-    /* Static: onion_service_start() borrows this pointer. */
-    static char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "yardsale_site", "sellers");
     char dbpath[320];
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
-
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open(&ndb, dbpath)) {
+    memset(ndb, 0, sizeof(*ndb));
+    if (!node_db_open(ndb, dbpath)) {
         printf("  yardsale_app: sellers fixture node_db_open... FAIL\n");
-        test_cleanup_tmpdir(dir);
-        onion_service_set_address(saved[0] ? saved : NULL);
-        return 1;
+        return false;
     }
-    struct db_service dbsvc;
-    memset(&dbsvc, 0, sizeof(dbsvc));
-    struct app_runtime_context rt;
-    memset(&rt, 0, sizeof(rt));
-    db_service_init(&dbsvc);
-    if (!db_service_attach(&dbsvc, &ndb) || !db_service_start(&dbsvc)) {
+    memset(dbsvc, 0, sizeof(*dbsvc));
+    memset(rt, 0, sizeof(*rt));
+    db_service_init(dbsvc);
+    if (!db_service_attach(dbsvc, ndb) || !db_service_start(dbsvc)) {
         printf("  yardsale_app: sellers fixture db_service... FAIL\n");
-        node_db_close(&ndb);
-        test_cleanup_tmpdir(dir);
-        onion_service_set_address(saved[0] ? saved : NULL);
-        return 1;
+        node_db_close(ndb);
+        return false;
     }
-    rt.db_service = &dbsvc;
-    app_runtime_set_current(&rt);
+    rt->db_service = dbsvc;
+    app_runtime_set_current(rt);
     onion_service_start(dir);   /* creates peer_directory in the same db */
+    return true;
+}
 
-    static uint8_t resp[262144];
-
+/* The landing page before any seller is known: the honest empty state. */
+static int ysa_sellers_check_empty(uint8_t *resp, size_t resp_bytes)
+{
+    int failures = 0;
     /* HONEST EMPTY: no sellers discovered yet, and the page says so. */
-    memset(resp, 0, sizeof(resp));
+    memset(resp, 0, resp_bytes);
     size_t n = yardsale_site_handle_request("GET", "/yardsale", NULL, 0,
-                                            resp, sizeof(resp) - 1);
-    YSA_CHECK("sellers: empty index renders", n > 0 && n < sizeof(resp));
-    if (n > 0 && n < sizeof(resp))
+                                            resp, resp_bytes - 1);
+    YSA_CHECK("sellers: empty index renders", n > 0 && n < resp_bytes);
+    if (n > 0 && n < resp_bytes)
         resp[n] = '\0';
     YSA_CHECK("sellers: the section is on the landing page",
               n > 0 && strstr((const char *)resp, "Known sellers") != NULL);
@@ -1583,7 +1701,14 @@ static int t_known_sellers(void)
               n > 0 &&
               strstr((const char *)resp, "no sellers discovered yet") &&
               strstr((const char *)resp, "gossip"));
+    return failures;
+}
 
+/* Seeds the peer directory and the ZNAM label through the real writers,
+ * plus a stale row and a junk-apps row as an older binary might store. */
+static int ysa_sellers_seed(struct node_db *ndb)
+{
+    int failures = 0;
     /* Seed through the REAL harvest writer: one fresh yardsale seller,
      * one peer serving only the blog App. */
     YSA_CHECK("sellers: fresh yardsale peer learned",
@@ -1594,7 +1719,7 @@ static int t_known_sellers(void)
                                             "blog"));
 
     /* The ZNAM label join: register a name for the seller. */
-    bool named = node_db_exec(&ndb,
+    bool named = node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS znam_names ("
         "name TEXT PRIMARY KEY,"
         "owner_address TEXT NOT NULL,"
@@ -1605,7 +1730,7 @@ static int t_known_sellers(void)
         "last_update_txid BLOB NOT NULL)");
     if (named) {
         sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(ndb.db,
+        if (sqlite3_prepare_v2(ndb->db,
             "INSERT OR REPLACE INTO znam_names "
             "(name, owner_address, target_type, target_value, reg_txid,"
             " reg_height, last_update_txid) "
@@ -1633,7 +1758,7 @@ static int t_known_sellers(void)
         (long long)((int64_t)platform_time_wall_time_t() -
                     ONION_DIR_STALE_SECS - 60));
     YSA_CHECK("sellers: stale seller fixture row",
-              node_db_exec(&ndb, sql));
+              node_db_exec(ndb, sql));
     snprintf(sql, sizeof(sql),
         "INSERT OR REPLACE INTO peer_directory "
         "(onion_address, port, services, height, last_seen, version, self,"
@@ -1642,13 +1767,19 @@ static int t_known_sellers(void)
         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddx.onion",
         (long long)platform_time_wall_time_t());
     YSA_CHECK("sellers: junk-apps fixture row",
-              node_db_exec(&ndb, sql));
+              node_db_exec(ndb, sql));
+    return failures;
+}
 
-    memset(resp, 0, sizeof(resp));
-    n = yardsale_site_handle_request("GET", "/yardsale", NULL, 0,
-                                     resp, sizeof(resp) - 1);
-    YSA_CHECK("sellers: populated index renders", n > 0 && n < sizeof(resp));
-    if (n > 0 && n < sizeof(resp))
+/* The landing page once peers exist: links, labels, withheld rows. */
+static int ysa_sellers_check_populated(uint8_t *resp, size_t resp_bytes)
+{
+    int failures = 0;
+    memset(resp, 0, resp_bytes);
+    size_t n = yardsale_site_handle_request("GET", "/yardsale", NULL, 0,
+                                            resp, resp_bytes - 1);
+    YSA_CHECK("sellers: populated index renders", n > 0 && n < resp_bytes);
+    if (n > 0 && n < resp_bytes)
         resp[n] = '\0';
     const char *page = (const char *)resp;
     YSA_CHECK("sellers: fresh seller linked by its onion mount",
@@ -1677,6 +1808,39 @@ static int t_known_sellers(void)
                   ".onion/yardsale") != NULL);
     YSA_CHECK("sellers: hostile stored apps token never rendered",
               n > 0 && strstr(page, "<img") == NULL);
+    return failures;
+}
+
+static int t_known_sellers(void)
+{
+    int failures = 0;
+    ysa_reset_all();
+
+    /* The onion address singleton is process-global; the sequential
+     * runner shares it across groups. Snapshot and restore. */
+    const char *prev = onion_service_get_address();
+    char saved[128] = "";
+    if (prev)
+        snprintf(saved, sizeof(saved), "%s", prev);
+    onion_service_set_address(NULL);
+
+    /* Static: onion_service_start() borrows this pointer. */
+    static char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "yardsale_site", "sellers");
+
+    struct node_db ndb;
+    struct db_service dbsvc;
+    struct app_runtime_context rt;
+    if (!ysa_sellers_fixture_open(&ndb, &dbsvc, &rt, dir)) {
+        test_cleanup_tmpdir(dir);
+        onion_service_set_address(saved[0] ? saved : NULL);
+        return 1;
+    }
+
+    static uint8_t resp[262144];
+    failures += ysa_sellers_check_empty(resp, sizeof(resp));
+    failures += ysa_sellers_seed(&ndb);
+    failures += ysa_sellers_check_populated(resp, sizeof(resp));
 
     onion_service_stop();
     app_runtime_set_current(NULL);
@@ -1689,6 +1853,303 @@ static int t_known_sellers(void)
 }
 
 /* ── The /yardsale/buy plan gate ─────────────────────────────────── */
+
+/* The plan-gate state shared by the webbuy phases: the plan ledger handle,
+ * the flood capture, the response buffer and the three request forms. */
+struct ysa_webbuy {
+    struct node_db *ndb;
+    int64_t now;
+    struct ysa_flood_capture flood;
+    uint8_t resp[16384];
+    char base_form[1280];
+    char confirm_form[1320];
+    char variant_form[1320];
+    int planned_rows;
+    char webbuy_request[65];
+};
+
+/* Builds the base, confirm and variant forms from the KAT coin; returns
+ * whether the coin script and both addresses derived. */
+static bool ysa_webbuy_forms(struct ysa_webbuy *w, const char *root_hex)
+{
+    bool made = true;
+    uint8_t script[25];
+    struct privkey coin_key;
+    ysa_key(&coin_key, 0x42);
+    made = ysa_p2pkh_script(&coin_key, script) == 25;
+    const struct chain_params *cp = chain_params_get();
+    size_t sec_len = 0;
+    const unsigned char *sec_pfx =
+        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_len);
+    char wif[128] = { 0 };
+    made = made && encode_secret(&coin_key, sec_pfx, sec_len, wif,
+                                 sizeof(wif));
+    char addr_recv[ZSWAP_ADDRESS_FIELD_BYTES];
+    char addr_change[ZSWAP_ADDRESS_FIELD_BYTES];
+    struct privkey recv_key, change_key;
+    ysa_key(&recv_key, 0x42);
+    ysa_key(&change_key, 0x43);
+    made = made && ysa_address(&recv_key, addr_recv) &&
+           ysa_address(&change_key, addr_change);
+
+    char txid_b_hex[65] = "", txid_a_hex[65] = "";
+    uint8_t txid_pat[32];
+    ysa_pattern32(txid_pat, 0x60);
+    ysa_hex(txid_pat, 32, txid_b_hex);
+    ysa_pattern32(txid_pat, 0x50);
+    ysa_hex(txid_pat, 32, txid_a_hex);
+    char script_hex[64] = "";
+    ysa_hex(script, 25, script_hex);
+
+    /* Both KAT coins and the shared WIF: the same key funds and signs. */
+    snprintf(w->base_form, sizeof(w->base_form),
+             "root=%s&token_recv=%s&change=%s&fee=%llu"
+             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s",
+             root_hex, addr_recv, addr_change,
+             (unsigned long long)YSA_FEE_SATS,
+             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
+             wif,
+             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
+             wif);
+    snprintf(w->confirm_form, sizeof(w->confirm_form),
+             "%s&confirm=true", w->base_form);
+    /* Changed terms under confirm get their own plan identity — refuse
+     * instead of arming on lookalike terms. */
+    snprintf(w->variant_form, sizeof(w->variant_form),
+             "root=%s&token_recv=%s&change=%s&fee=%llu"
+             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s"
+             "&confirm=true",
+             root_hex, addr_recv, addr_change,
+             (unsigned long long)(YSA_FEE_SATS + 1),
+             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
+             wif,
+             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
+             wif);
+    memory_cleanse(wif, sizeof(wif)); /* never leaves this stack dirty */
+    return made;
+}
+
+/* Phase A — no confirm field: exact terms get a PLANNED row and
+ * the reply is a plan page, not an armed accept. */
+static int ysa_webbuy_plan_page(struct ysa_webbuy *w)
+{
+    int failures = 0;
+    memset(w->resp, 0, sizeof(w->resp));
+    size_t n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->base_form,
+        strlen(w->base_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: plan page renders before anything arms",
+              n > 0 &&
+              strstr((const char *)w->resp, "Accept planned") != NULL &&
+              strstr((const char *)w->resp, "confirm=true") != NULL);
+    YSA_CHECK("webbuy: planning gossips nothing",
+              w->flood.count == 0);
+    w->planned_rows = 0;
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(w->ndb->db,
+            "SELECT COUNT(*) FROM yardsale_plans WHERE state='PLANNED'",
+            -1, &q, NULL) == SQLITE_OK &&
+        sqlite3_step(q) == SQLITE_ROW)
+        w->planned_rows = sqlite3_column_int(q, 0);
+    sqlite3_finalize(q);
+    YSA_CHECK("webbuy: phase A stored exactly one PLANNED row",
+              w->planned_rows == 1);
+
+    memset(w->webbuy_request, 0, sizeof(w->webbuy_request));
+    q = NULL;
+    if (sqlite3_prepare_v2(w->ndb->db,
+            "SELECT request_hash FROM yardsale_plans LIMIT 1",
+            -1, &q, NULL) == SQLITE_OK &&
+        sqlite3_step(q) == SQLITE_ROW) {
+        const unsigned char *text = sqlite3_column_text(q, 0);
+        if (text)
+            snprintf(w->webbuy_request, sizeof(w->webbuy_request), "%s",
+                     (const char *)text);
+    }
+    sqlite3_finalize(q);
+    return failures;
+}
+
+/* Phase A, part 2: one claimant crosses PLANNED to ARMING, an uncertain
+ * ARMING row never replays, and inspecting live terms renews an expired
+ * plan. */
+static int ysa_webbuy_claim_rows(struct ysa_webbuy *w)
+{
+    int failures = 0;
+    struct db_yardsale_plan claim_a, claim_b;
+    memset(&claim_a, 0, sizeof(claim_a));
+    memset(&claim_b, 0, sizeof(claim_b));
+    bool found_a = db_yardsale_plan_find_by_request(
+        w->ndb, w->webbuy_request, &claim_a);
+    bool found_b = db_yardsale_plan_find_by_request(
+        w->ndb, w->webbuy_request, &claim_b);
+    enum db_yardsale_plan_claim_result won_a = found_a
+        ? db_yardsale_plan_claim(w->ndb, &claim_a, w->now)
+        : DB_YARDSALE_PLAN_CLAIM_ERROR;
+    enum db_yardsale_plan_claim_result won_b = found_b
+        ? db_yardsale_plan_claim(w->ndb, &claim_b, w->now)
+        : DB_YARDSALE_PLAN_CLAIM_ERROR;
+    YSA_CHECK("webbuy: only one claimant can cross PLANNED to ARMING",
+              won_a == DB_YARDSALE_PLAN_CLAIMED &&
+              won_b == DB_YARDSALE_PLAN_CLAIM_REFUSED);
+    memset(w->resp, 0, sizeof(w->resp));
+    size_t n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->confirm_form,
+        strlen(w->confirm_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: an uncertain ARMING row never replays",
+              n > 0 && strstr((const char *)w->resp, "400") != NULL &&
+              w->flood.count == 0);
+    snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+             YARDSALE_PLAN_STATE_PLANNED);
+    claim_a.result[0] = '\0';
+    YSA_CHECK("webbuy: fixture releases the claimed row",
+              db_yardsale_plan_save(w->ndb, &claim_a));
+    snprintf(claim_a.state, sizeof(claim_a.state), "%s",
+             YARDSALE_PLAN_STATE_EXPIRED);
+    YSA_CHECK("webbuy: fixture expires the live-terms plan",
+              db_yardsale_plan_save(w->ndb, &claim_a));
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->base_form,
+        strlen(w->base_form), w->resp, sizeof(w->resp) - 1);
+    memset(&claim_a, 0, sizeof(claim_a));
+    bool renewed = db_yardsale_plan_find_by_request(
+        w->ndb, w->webbuy_request, &claim_a);
+    YSA_CHECK("webbuy: inspecting live terms renews an expired plan",
+              n > 0 && renewed &&
+              strcmp(claim_a.state, YARDSALE_PLAN_STATE_PLANNED) == 0);
+    return failures;
+}
+
+/* Phase A, part 3: a field-name suffix, duplicate or junk money fields,
+ * and a question mark inside a value never confirm. */
+static int ysa_webbuy_probe_confirm_text(struct ysa_webbuy *w)
+{
+    int failures = 0;
+    char alias_form[1340], junk_fee_form[1340];
+    snprintf(alias_form, sizeof(alias_form), "%s&xconfirm=true",
+             w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    size_t n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)alias_form,
+        strlen(alias_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: a field-name suffix cannot confirm",
+              n > 0 && strstr((const char *)w->resp, "Accept planned") &&
+              w->flood.count == 0);
+    snprintf(junk_fee_form, sizeof(junk_fee_form), "%s&fee=1junk",
+             w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)junk_fee_form,
+        strlen(junk_fee_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: duplicate or junk money fields never confirm",
+              n > 0 && strstr((const char *)w->resp, "400") != NULL &&
+              w->flood.count == 0);
+
+    char disguised_confirm[1360];
+    snprintf(disguised_confirm, sizeof(disguised_confirm),
+             "%s&memo=x?confirm=true", w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)disguised_confirm,
+        strlen(disguised_confirm), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: question mark inside a value cannot arm money",
+              n > 0 &&
+              strstr((const char *)w->resp, "Accept planned") != NULL &&
+              w->flood.count == 0);
+
+    char spaced_confirm[1360];
+    snprintf(spaced_confirm, sizeof(spaced_confirm),
+             "%s&confirm=true anything", w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)spaced_confirm,
+        strlen(spaced_confirm), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: a true prefix followed by space cannot arm money",
+              n > 0 &&
+              strstr((const char *)w->resp, "Accept planned") != NULL &&
+              w->flood.count == 0);
+    return failures;
+}
+
+/* Phase A, part 4: a decoded NUL, a malformed escape, and confirm on
+ * unplanned terms each refuse without arming. */
+static int ysa_webbuy_probe_malformed(struct ysa_webbuy *w)
+{
+    int failures = 0;
+    char nul_confirm[1360];
+    snprintf(nul_confirm, sizeof(nul_confirm),
+             "%s&confirm=true%%00false", w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    size_t n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)nul_confirm,
+        strlen(nul_confirm), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: a decoded NUL cannot hide confirm suffix bytes",
+              n > 0 && strstr((const char *)w->resp, "400") != NULL &&
+              w->flood.count == 0);
+
+    char malformed_confirm[1360];
+    snprintf(malformed_confirm, sizeof(malformed_confirm),
+             "%s&confirm=true%%", w->base_form);
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)malformed_confirm,
+        strlen(malformed_confirm), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: malformed escape cannot arm money",
+              n > 0 && strstr((const char *)w->resp, "400") != NULL &&
+              w->flood.count == 0);
+
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->variant_form,
+        strlen(w->variant_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK(
+        "webbuy: confirm on unplanned terms names the inspection gap",
+        n > 0 && strstr((const char *)w->resp, "400") != NULL &&
+                 strstr((const char *)w->resp,
+                        "no plan names these exact terms") != NULL);
+    return failures;
+}
+
+/* Phase B — the same stored terms plus confirm=true arm once. */
+static int ysa_webbuy_arm_once(struct ysa_webbuy *w)
+{
+    int failures = 0;
+    memset(w->resp, 0, sizeof(w->resp));
+    size_t n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->confirm_form,
+        strlen(w->confirm_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: confirm on stored terms pins the accept",
+              n > 0 &&
+              strstr((const char *)w->resp, "pinned on the seller") !=
+                  NULL);
+    YSA_CHECK("webbuy: arming gossips the accept exactly once",
+              w->flood.count == 1 &&
+              strcmp(w->flood.last_command, ZSWAP_MSG_ACCEPT) == 0);
+    int committed_rows = 0;
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(w->ndb->db,
+            "SELECT COUNT(*) FROM yardsale_plans "
+            "WHERE state='COMMITTED' AND result='begun'",
+            -1, &q, NULL) == SQLITE_OK &&
+        sqlite3_step(q) == SQLITE_ROW)
+        committed_rows = sqlite3_column_int(q, 0);
+    sqlite3_finalize(q);
+    YSA_CHECK("webbuy: armed row is COMMITTED exactly once",
+              committed_rows == 1 && w->planned_rows == 1);
+
+    /* Phase B replay: identical resubmit answers idempotently from
+     * the ledger instead of arming again. */
+    memset(w->resp, 0, sizeof(w->resp));
+    n = yardsale_site_handle_request(
+        "POST", "/yardsale/buy", (const uint8_t *)w->confirm_form,
+        strlen(w->confirm_form), w->resp, sizeof(w->resp) - 1);
+    YSA_CHECK("webbuy: committed replay changes nothing",
+              n > 0 &&
+              strstr((const char *)w->resp, "already pinned") != NULL &&
+              w->flood.count == 1);
+    return failures;
+}
 
 static int t_webbuy_plan_gate(void)
 {
@@ -1743,260 +2204,23 @@ static int t_webbuy_plan_gate(void)
 
     /* One real p2pkh coin whose WIF the form carries, mirroring the
      * KAT buyer (the same 0x42 key funds the script and signs). */
-    bool made = true;
-    uint8_t script[25];
-    struct privkey coin_key;
-    ysa_key(&coin_key, 0x42);
-    made = ysa_p2pkh_script(&coin_key, script) == 25;
-    const struct chain_params *cp = chain_params_get();
-    size_t sec_len = 0;
-    const unsigned char *sec_pfx =
-        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_len);
-    char wif[128] = { 0 };
-    made = made && encode_secret(&coin_key, sec_pfx, sec_len, wif,
-                                 sizeof(wif));
-    char addr_recv[ZSWAP_ADDRESS_FIELD_BYTES];
-    char addr_change[ZSWAP_ADDRESS_FIELD_BYTES];
-    struct privkey recv_key, change_key;
-    ysa_key(&recv_key, 0x42);
-    ysa_key(&change_key, 0x43);
-    made = made && ysa_address(&recv_key, addr_recv) &&
-           ysa_address(&change_key, addr_change);
-
-    char txid_b_hex[65] = "", txid_a_hex[65] = "";
-    uint8_t txid_pat[32];
-    ysa_pattern32(txid_pat, 0x60);
-    ysa_hex(txid_pat, 32, txid_b_hex);
-    ysa_pattern32(txid_pat, 0x50);
-    ysa_hex(txid_pat, 32, txid_a_hex);
-    char script_hex[64] = "";
-    ysa_hex(script, 25, script_hex);
-
-    /* Both KAT coins and the shared WIF: the same key funds and signs. */
-    char base_form[1280], confirm_form[1320], variant_form[1320];
-    snprintf(base_form, sizeof(base_form),
-             "root=%s&token_recv=%s&change=%s&fee=%llu"
-             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s",
-             root_hex, addr_recv, addr_change,
-             (unsigned long long)YSA_FEE_SATS,
-             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
-             wif,
-             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
-             wif);
-    snprintf(confirm_form, sizeof(confirm_form),
-             "%s&confirm=true", base_form);
-    /* Changed terms under confirm get their own plan identity — refuse
-     * instead of arming on lookalike terms. */
-    snprintf(variant_form, sizeof(variant_form),
-             "root=%s&token_recv=%s&change=%s&fee=%llu"
-             "&in1=%s:0:%lld:%s&key1=%s&in2=%s:1:%lld:%s&key2=%s"
-             "&confirm=true",
-             root_hex, addr_recv, addr_change,
-             (unsigned long long)(YSA_FEE_SATS + 1),
-             txid_b_hex, (long long)YSA_BUYER_IN_B_VALUE, script_hex,
-             wif,
-             txid_a_hex, (long long)YSA_BUYER_IN_A_VALUE, script_hex,
-             wif);
-    memory_cleanse(wif, sizeof(wif)); /* never leaves this stack dirty */
-
-    static uint8_t resp[16384];
+    struct ysa_webbuy w;
+    memset(&w, 0, sizeof(w));
+    w.ndb = &ndb;
+    w.now = now;
+    bool made = ysa_webbuy_forms(&w, root_hex);
 
     /* Wire the ceremony's outbound gossip like the KAT roundtrip so
      * begin() can run; the capture also proves how many times the form
      * armed. */
-    struct ysa_flood_capture flood = {0};
-    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &flood);
+    yardsale_ceremony_set_flood(ysa_flood_capture_fn, &w.flood);
 
     if (made) {
-        /* Phase A — no confirm field: exact terms get a PLANNED row and
-         * the reply is a plan page, not an armed accept. */
-        memset(resp, 0, sizeof(resp));
-        size_t n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)base_form,
-            strlen(base_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: plan page renders before anything arms",
-                  n > 0 &&
-                  strstr((const char *)resp, "Accept planned") != NULL &&
-                  strstr((const char *)resp, "confirm=true") != NULL);
-        YSA_CHECK("webbuy: planning gossips nothing",
-                  flood.count == 0);
-        int planned_rows = 0;
-        sqlite3_stmt *q = NULL;
-        if (sqlite3_prepare_v2(ndb.db,
-                "SELECT COUNT(*) FROM yardsale_plans WHERE state='PLANNED'",
-                -1, &q, NULL) == SQLITE_OK &&
-            sqlite3_step(q) == SQLITE_ROW)
-            planned_rows = sqlite3_column_int(q, 0);
-        sqlite3_finalize(q);
-        YSA_CHECK("webbuy: phase A stored exactly one PLANNED row",
-                  planned_rows == 1);
-
-        char webbuy_request[65] = {0};
-        q = NULL;
-        if (sqlite3_prepare_v2(ndb.db,
-                "SELECT request_hash FROM yardsale_plans LIMIT 1",
-                -1, &q, NULL) == SQLITE_OK &&
-            sqlite3_step(q) == SQLITE_ROW) {
-            const unsigned char *text = sqlite3_column_text(q, 0);
-            if (text)
-                snprintf(webbuy_request, sizeof(webbuy_request), "%s",
-                         (const char *)text);
-        }
-        sqlite3_finalize(q);
-
-        struct db_yardsale_plan claim_a, claim_b;
-        memset(&claim_a, 0, sizeof(claim_a));
-        memset(&claim_b, 0, sizeof(claim_b));
-        bool found_a = db_yardsale_plan_find_by_request(
-            &ndb, webbuy_request, &claim_a);
-        bool found_b = db_yardsale_plan_find_by_request(
-            &ndb, webbuy_request, &claim_b);
-        enum db_yardsale_plan_claim_result won_a = found_a
-            ? db_yardsale_plan_claim(&ndb, &claim_a, now)
-            : DB_YARDSALE_PLAN_CLAIM_ERROR;
-        enum db_yardsale_plan_claim_result won_b = found_b
-            ? db_yardsale_plan_claim(&ndb, &claim_b, now)
-            : DB_YARDSALE_PLAN_CLAIM_ERROR;
-        YSA_CHECK("webbuy: only one claimant can cross PLANNED to ARMING",
-                  won_a == DB_YARDSALE_PLAN_CLAIMED &&
-                  won_b == DB_YARDSALE_PLAN_CLAIM_REFUSED);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
-            strlen(confirm_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: an uncertain ARMING row never replays",
-                  n > 0 && strstr((const char *)resp, "400") != NULL &&
-                  flood.count == 0);
-        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
-                 YARDSALE_PLAN_STATE_PLANNED);
-        claim_a.result[0] = '\0';
-        YSA_CHECK("webbuy: fixture releases the claimed row",
-                  db_yardsale_plan_save(&ndb, &claim_a));
-        snprintf(claim_a.state, sizeof(claim_a.state), "%s",
-                 YARDSALE_PLAN_STATE_EXPIRED);
-        YSA_CHECK("webbuy: fixture expires the live-terms plan",
-                  db_yardsale_plan_save(&ndb, &claim_a));
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)base_form,
-            strlen(base_form), resp, sizeof(resp) - 1);
-        memset(&claim_a, 0, sizeof(claim_a));
-        bool renewed = db_yardsale_plan_find_by_request(
-            &ndb, webbuy_request, &claim_a);
-        YSA_CHECK("webbuy: inspecting live terms renews an expired plan",
-                  n > 0 && renewed &&
-                  strcmp(claim_a.state, YARDSALE_PLAN_STATE_PLANNED) == 0);
-
-        char alias_form[1340], junk_fee_form[1340];
-        snprintf(alias_form, sizeof(alias_form), "%s&xconfirm=true",
-                 base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)alias_form,
-            strlen(alias_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: a field-name suffix cannot confirm",
-                  n > 0 && strstr((const char *)resp, "Accept planned") &&
-                  flood.count == 0);
-        snprintf(junk_fee_form, sizeof(junk_fee_form), "%s&fee=1junk",
-                 base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)junk_fee_form,
-            strlen(junk_fee_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: duplicate or junk money fields never confirm",
-                  n > 0 && strstr((const char *)resp, "400") != NULL &&
-                  flood.count == 0);
-
-        char disguised_confirm[1360];
-        snprintf(disguised_confirm, sizeof(disguised_confirm),
-                 "%s&memo=x?confirm=true", base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)disguised_confirm,
-            strlen(disguised_confirm), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: question mark inside a value cannot arm money",
-                  n > 0 &&
-                  strstr((const char *)resp, "Accept planned") != NULL &&
-                  flood.count == 0);
-
-        char spaced_confirm[1360];
-        snprintf(spaced_confirm, sizeof(spaced_confirm),
-                 "%s&confirm=true anything", base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)spaced_confirm,
-            strlen(spaced_confirm), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: a true prefix followed by space cannot arm money",
-                  n > 0 &&
-                  strstr((const char *)resp, "Accept planned") != NULL &&
-                  flood.count == 0);
-
-        char nul_confirm[1360];
-        snprintf(nul_confirm, sizeof(nul_confirm),
-                 "%s&confirm=true%%00false", base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)nul_confirm,
-            strlen(nul_confirm), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: a decoded NUL cannot hide confirm suffix bytes",
-                  n > 0 && strstr((const char *)resp, "400") != NULL &&
-                  flood.count == 0);
-
-        char malformed_confirm[1360];
-        snprintf(malformed_confirm, sizeof(malformed_confirm),
-                 "%s&confirm=true%%", base_form);
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)malformed_confirm,
-            strlen(malformed_confirm), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: malformed escape cannot arm money",
-                  n > 0 && strstr((const char *)resp, "400") != NULL &&
-                  flood.count == 0);
-
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)variant_form,
-            strlen(variant_form), resp, sizeof(resp) - 1);
-        YSA_CHECK(
-            "webbuy: confirm on unplanned terms names the inspection gap",
-            n > 0 && strstr((const char *)resp, "400") != NULL &&
-                     strstr((const char *)resp,
-                            "no plan names these exact terms") != NULL);
-
-        /* Phase B — the same stored terms plus confirm=true arm once. */
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
-            strlen(confirm_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: confirm on stored terms pins the accept",
-                  n > 0 &&
-                  strstr((const char *)resp, "pinned on the seller") !=
-                      NULL);
-        YSA_CHECK("webbuy: arming gossips the accept exactly once",
-                  flood.count == 1 &&
-                  strcmp(flood.last_command, ZSWAP_MSG_ACCEPT) == 0);
-        int committed_rows = 0;
-        q = NULL;
-        if (sqlite3_prepare_v2(ndb.db,
-                "SELECT COUNT(*) FROM yardsale_plans "
-                "WHERE state='COMMITTED' AND result='begun'",
-                -1, &q, NULL) == SQLITE_OK &&
-            sqlite3_step(q) == SQLITE_ROW)
-            committed_rows = sqlite3_column_int(q, 0);
-        sqlite3_finalize(q);
-        YSA_CHECK("webbuy: armed row is COMMITTED exactly once",
-                  committed_rows == 1 && planned_rows == 1);
-
-        /* Phase B replay: identical resubmit answers idempotently from
-         * the ledger instead of arming again. */
-        memset(resp, 0, sizeof(resp));
-        n = yardsale_site_handle_request(
-            "POST", "/yardsale/buy", (const uint8_t *)confirm_form,
-            strlen(confirm_form), resp, sizeof(resp) - 1);
-        YSA_CHECK("webbuy: committed replay changes nothing",
-                  n > 0 &&
-                  strstr((const char *)resp, "already pinned") != NULL &&
-                  flood.count == 1);
+        failures += ysa_webbuy_plan_page(&w);
+        failures += ysa_webbuy_claim_rows(&w);
+        failures += ysa_webbuy_probe_confirm_text(&w);
+        failures += ysa_webbuy_probe_malformed(&w);
+        failures += ysa_webbuy_arm_once(&w);
     } else {
         printf("  yardsale_app: webbuy fixture build... FAIL\n");
         failures++;
