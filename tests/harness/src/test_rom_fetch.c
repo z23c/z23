@@ -2059,6 +2059,372 @@ struct rf_forked_case {
     pid_t pid; /* < 0: fork failed, run inline at reap time */
 };
 
+/* ── Characterization: download drivers, refusal and status branches ──────
+ *
+ * Pin the current observable behaviour of rom_fetch_download and of the
+ * per-chunk-verified core (reached through rom_fetch_download_verified):
+ * every early refusal, the staging/journal open failures, the progress
+ * callback contract, and the wrong-sized-chunk refusal. Expectations are
+ * read from rom_fetch.c; no branch here needs a real peer. */
+
+/* A 2-chunk manifest for the refusal rows; nothing is fetched for these. */
+static void rf_char_manifest(struct rom_fetch_manifest *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->used = true;
+    m->size_bytes = (uint64_t)ROM_SEED_CHUNK_SIZE + 4096;
+    m->chunk_size = ROM_SEED_CHUNK_SIZE;
+    m->num_chunks = 2;
+    snprintf(m->filename, sizeof(m->filename), "%s",
+             "consensus-state-bundle-refuse.sqlite");
+}
+
+/* Start the real serve path on sdir; 0 when it did not come up. */
+static uint16_t rf_char_serve(const char *sdir)
+{
+    fs_server_start(sdir, 0); /* OS-assigned: no cross-checkout port collisions */
+    for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+        platform_sleep_ms(50);
+    return fs_server_is_running() ? fs_server_get_port() : 0;
+}
+
+static int test_download_driver_local_refusals(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: rom_fetch_download refuses bad args, unsafe names, "
+         "insane manifests and overlong paths before any attempt; a "
+         "staging open failure is recorded as a failed attempt") {
+        rom_seed_reset();
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_dlref");
+        ASSERT(cdir != NULL);
+        struct rom_fetch_manifest m;
+        rf_char_manifest(&m);
+
+        struct rom_fetch_status before;
+        rom_fetch_status_snapshot(&before);
+        struct rom_fetch_status st;
+
+        /* (1) Null or empty arguments: refused, and not counted as attempts. */
+        ASSERT(!rom_fetch_download(NULL, 1, &m, cdir, NULL, NULL));
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, NULL, cdir, NULL, NULL));
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &m, NULL, NULL, NULL));
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &m, "", NULL, NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(st.attempts == before.attempts);
+
+        /* (2) Unsafe filename, and manifests that fail the sanity screen. */
+        struct rom_fetch_manifest bad = m;
+        snprintf(bad.filename, sizeof(bad.filename), "%s", "../evil.sqlite");
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &bad, cdir, NULL, NULL));
+        bad = m;
+        bad.chunk_size = ROM_SEED_CHUNK_SIZE / 2;
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &bad, cdir, NULL, NULL));
+        bad = m;
+        bad.num_chunks = 3;
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &bad, cdir, NULL, NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(st.attempts == before.attempts);
+
+        /* (3) An out_dir so long the .part path overflows: refused pre-open. */
+        char longdir[1200];
+        memset(longdir, 'd', sizeof(longdir) - 1);
+        longdir[sizeof(longdir) - 1] = '\0';
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &m, longdir, NULL, NULL));
+
+        /* (4) The .part name is occupied by a directory: the open fails after
+         * the attempt is begun, so it is recorded as a failed attempt. */
+        char part_dir[1200];
+        snprintf(part_dir, sizeof(part_dir), "%s/%s%s", cdir, m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        ASSERT(mkdir(part_dir, 0700) == 0);
+        ASSERT(!rom_fetch_download("127.0.0.1", 1, &m, cdir, NULL, NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(st.ever_attempted && !st.in_progress && !st.last_ok);
+        ASSERT(st.attempts == before.attempts + 1);
+        ASSERT(st.failures == before.failures + 1);
+        ASSERT(strcmp(st.detail, "could not open staging file") == 0);
+        ASSERT(rmdir(part_dir) == 0);
+
+        rmdir(cdir);
+        rom_seed_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_verified_core_local_refusals(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: per-chunk-verified download refuses bad args, unsafe "
+         "names, insane manifests, a num_chunks mismatch, overlong paths, "
+         "an unopenable journal and an unopenable staging file") {
+        rom_seed_reset();
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_vref");
+        ASSERT(cdir != NULL);
+        struct rom_fetch_manifest m;
+        rf_char_manifest(&m);
+        uint8_t sha3_zero[2][32];
+        memset(sha3_zero, 0, sizeof(sha3_zero));
+
+        /* (1) Null or empty arguments. */
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, sha3_zero, 2,
+                                            "", NULL, NULL));
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, NULL, 2,
+                                            cdir, NULL, NULL));
+
+        /* (2) Unsafe filename, insane manifest, num_chunks mismatch. */
+        struct rom_fetch_manifest bad = m;
+        snprintf(bad.filename, sizeof(bad.filename), "%s", "../evil.sqlite");
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &bad, sha3_zero,
+                                            2, cdir, NULL, NULL));
+        bad = m;
+        bad.chunk_size = ROM_SEED_CHUNK_SIZE / 2;
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &bad, sha3_zero,
+                                            2, cdir, NULL, NULL));
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, sha3_zero, 3,
+                                            cdir, NULL, NULL));
+
+        /* (3) Overlong out_dir: the .part path overflows before any open. */
+        char longdir[1200];
+        memset(longdir, 'd', sizeof(longdir) - 1);
+        longdir[sizeof(longdir) - 1] = '\0';
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, sha3_zero, 2,
+                                            longdir, NULL, NULL));
+
+        /* (4) A missing out_dir: the resume journal cannot be opened. */
+        char missing[PATH_MAX];
+        snprintf(missing, sizeof(missing), "%s/no-such-dir", cdir);
+        struct rom_fetch_status st;
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, sha3_zero, 2,
+                                            missing, NULL, NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(st.ever_attempted && !st.in_progress && !st.last_ok);
+        ASSERT(strcmp(st.detail, "could not open resume journal") == 0);
+
+        /* (5) The .part name is a directory: the journal opens (count 0, so
+         * no resume) but the staging open fails. The journal file is left
+         * behind by design and is removed here. */
+        char part_dir[1200];
+        snprintf(part_dir, sizeof(part_dir), "%s/%s%s", cdir, m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        char jrnl_path[1264];
+        snprintf(jrnl_path, sizeof(jrnl_path), "%s.journal", part_dir);
+        ASSERT(mkdir(part_dir, 0700) == 0);
+        ASSERT(!rom_fetch_download_verified("127.0.0.1", 1, &m, sha3_zero, 2,
+                                            cdir, NULL, NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(strcmp(st.detail, "could not open staging file") == 0);
+        ASSERT(rmdir(part_dir) == 0);
+        (void)unlink(jrnl_path);
+
+        rmdir(cdir);
+        rom_seed_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Progress recorder for rom_fetch_download: the first four calls are kept,
+ * and the caller's stop_first makes the first call return false. */
+struct rf_char_cb {
+    uint32_t calls;
+    uint32_t done[4];
+    uint64_t bytes[4];
+    uint32_t total;
+    bool stop_first;
+};
+
+static bool rf_char_cb(uint32_t chunks_done, uint32_t chunks_total,
+                       uint64_t bytes_done, void *ctx)
+{
+    struct rf_char_cb *r = (struct rf_char_cb *)ctx;
+    if (r->calls < 4) {
+        r->done[r->calls] = chunks_done;
+        r->bytes[r->calls] = bytes_done;
+    }
+    r->total = chunks_total;
+    r->calls++;
+    return !r->stop_first;
+}
+
+static int test_download_driver_wire_branches(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: rom_fetch_download reports each landed chunk to the "
+         "callback, keeps the .part on a caller abort, and refuses a "
+         "wrong-sized chunk without retrying") {
+        fs_server_stop(); /* never inherit a leaked server */
+        rom_seed_reset();
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_wsrv");
+        ASSERT(sdir != NULL);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_wcli");
+        ASSERT(cdir != NULL);
+
+        /* 2 chunks: one full chunk + a short 4 KB tail. */
+        size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
+        uint8_t *content = malloc(size);
+        ASSERT(content != NULL);
+        gen_content(content, size);
+        ASSERT(write_file(sdir, "consensus-state-bundle-wire.sqlite",
+                          content, size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-wire.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+        uint16_t port = rf_char_serve(sdir);
+        ASSERT(port != 0);
+
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+        char part_path[1200];
+        snprintf(part_path, sizeof(part_path), "%s/%s%s", cdir, m.filename,
+                 ROM_FETCH_PART_SUFFIX);
+        struct stat sb;
+
+        /* (1) One callback per chunk, in order, with exact byte counts. */
+        struct rf_char_cb rec;
+        memset(&rec, 0, sizeof(rec));
+        ASSERT(rom_fetch_download("127.0.0.1", port, &m, cdir, rf_char_cb,
+                                  &rec));
+        ASSERT(rec.calls == 2);
+        ASSERT(rec.total == 2);
+        ASSERT(rec.done[0] == 1 && rec.bytes[0] == ROM_SEED_CHUNK_SIZE);
+        ASSERT(rec.done[1] == 2 && rec.bytes[1] == size);
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+        ASSERT(stat(part_path, &sb) != 0); /* renamed into place */
+        unlink(final_path);
+
+        /* (2) A caller abort on the first chunk stops the loop there; the
+         * .part is kept for resume and nothing is installed. */
+        struct rf_char_cb stop;
+        memset(&stop, 0, sizeof(stop));
+        stop.stop_first = true;
+        ASSERT(!rom_fetch_download("127.0.0.1", port, &m, cdir, rf_char_cb,
+                                   &stop));
+        ASSERT(stop.calls == 1);
+        struct rom_fetch_status st;
+        rom_fetch_status_snapshot(&st);
+        ASSERT(strcmp(st.detail, "aborted by caller") == 0);
+        ASSERT(stat(part_path, &sb) == 0);
+        ASSERT(stat(final_path, &sb) != 0);
+        unlink(part_path);
+
+        /* (3) The manifest claims one chunk of 8 MB - 4 KB; the seeder serves
+         * the full 8 MB chunk. The size mismatch is refused without a retry
+         * and the .part is kept. */
+        struct rom_fetch_manifest wrong = m;
+        wrong.size_bytes = ROM_SEED_CHUNK_SIZE - 4096;
+        wrong.num_chunks = 1;
+        snprintf(wrong.filename, sizeof(wrong.filename), "%s",
+                 "consensus-state-bundle-wrongsize.sqlite");
+        char wrong_part[1200];
+        snprintf(wrong_part, sizeof(wrong_part), "%s/%s%s", cdir,
+                 wrong.filename, ROM_FETCH_PART_SUFFIX);
+        ASSERT(!rom_fetch_download("127.0.0.1", port, &wrong, cdir, NULL,
+                                   NULL));
+        rom_fetch_status_snapshot(&st);
+        ASSERT(strcmp(st.detail, "peer served a wrong-sized chunk") == 0);
+        ASSERT(stat(wrong_part, &sb) == 0);
+        unlink(wrong_part);
+
+        fs_server_stop();
+        free(content);
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-wire.sqlite", sdir);
+        unlink(p);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_verified_core_resume_without_part(void)
+{
+    int failures = 0;
+    TEST("rom_fetch: verified download with a journal bit set but no .part "
+         "rejects the resume, restarts fresh, and fetches every chunk") {
+        fs_server_stop(); /* never inherit a leaked server */
+        rom_seed_reset();
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_romfetch_nps");
+        ASSERT(sdir != NULL);
+        char croot[PATH_MAX];
+        char *cdir = test_mkdtemp(croot, sizeof(croot), "zcl_romfetch_npc");
+        ASSERT(cdir != NULL);
+
+        size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
+        uint8_t *content = malloc(size);
+        ASSERT(content != NULL);
+        gen_content(content, size);
+        ASSERT(write_file(sdir, "consensus-state-bundle-nps.sqlite",
+                          content, size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-nps.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        struct rom_fetch_manifest m;
+        manifest_from_artifact(&art, &m);
+        uint16_t port = rf_char_serve(sdir);
+        ASSERT(port != 0);
+
+        uint8_t (*chunk_sha3)[32] = malloc((size_t)ROM_SEED_MAX_CHUNKS * 32);
+        ASSERT(chunk_sha3 != NULL);
+        uint32_t manifest_chunks = 0;
+        ASSERT(rom_fetch_get_manifest("127.0.0.1", port, m.chunk_root,
+                                      chunk_sha3, ROM_SEED_MAX_CHUNKS,
+                                      &manifest_chunks));
+        ASSERT(manifest_chunks == 2);
+
+        /* A journal with chunk 0 marked done, and deliberately no .part. */
+        char jrnl_path[1264];
+        snprintf(jrnl_path, sizeof(jrnl_path), "%s/%s%s.journal", cdir,
+                 m.filename, ROM_FETCH_PART_SUFFIX);
+        struct rom_journal *j = rom_journal_open(jrnl_path, m.chunk_root,
+                                                 m.whole_sha3, m.chunk_size,
+                                                 m.num_chunks);
+        ASSERT(j != NULL);
+        ASSERT(rom_journal_mark(j, 0));
+        ASSERT(rom_journal_count_done(j) == 1);
+        rom_journal_close(j);
+
+        char final_path[1200];
+        snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
+        int64_t served_before = seed_chunks_served();
+        ASSERT(rom_fetch_download_verified("127.0.0.1", port, &m, chunk_sha3,
+                                           manifest_chunks, cdir, NULL, NULL));
+        /* No journal bit was trusted: both chunks crossed the wire. */
+        ASSERT(seed_chunks_served() - served_before == 2);
+        ASSERT(rom_fetch_verify_file(final_path, &m));
+        struct stat sb;
+        ASSERT(stat(jrnl_path, &sb) != 0); /* journal discarded on install */
+
+        fs_server_stop();
+        free(chunk_sha3);
+        free(content);
+        unlink(final_path);
+        char p[1200];
+        snprintf(p, sizeof(p), "%s/consensus-state-bundle-nps.sqlite", sdir);
+        unlink(p);
+        rmdir(sdir);
+        rmdir(cdir);
+        rom_seed_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static struct rf_forked_case rf_spawn_case(int (*run)(void))
 {
     struct rf_forked_case c = {.run = run, .pid = -1};
@@ -2111,6 +2477,10 @@ static int test_rom_fetch_platform_arm(void)
     failures += test_dial_cost_of_a_download();
     failures += test_dead_seed_is_dialled_once_per_job();
     failures += test_bundle_handler_corrupted_refused();
+    failures += test_download_driver_local_refusals();
+    failures += test_verified_core_local_refusals();
+    failures += test_download_driver_wire_branches();
+    failures += test_verified_core_resume_without_part();
     failures += rf_reap_case(&cut_case);
     failures += rf_reap_case(&no_seeder_case);
     return failures;
