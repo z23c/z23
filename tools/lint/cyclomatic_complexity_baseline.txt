@@ -101,8 +101,6 @@ contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_publish_to:17
 contexts/commons/modules/vcs/src/zendp_swarm.c:zendp_result_string:21
 contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_big_transfer:29
 contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_data_controls:26
-contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_negotiation:49
-contexts/commons/modules/zssh/tests/test_zssh_kex.c:group_tamper:46
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zdogfight/tests/test_zdogfight.c:test_bounds_and_wrap:30

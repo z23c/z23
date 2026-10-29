@@ -638,15 +638,9 @@ static bool contains(const uint8_t *h, size_t n, const char *s)
     return false;
 }
 
-static void group_negotiation(void)
+static size_t negotiation_expected_client_kexinit(uint8_t *exp)
 {
-    struct zssh_neg neg;
-    uint8_t ki[ZSSH_KEXINIT_MAX], exp[ZSSH_KEXINIT_MAX];
-    struct zssh_kexinit_view v;
-    size_t n, en;
-    group_begin();
-    /* exact bytes of a client KEXINIT, rebuilt independently */
-    n = build_ki(ZSSH_ROLE_CLIENT, BOTH, false, ki, sizeof ki);
+    size_t en;
     {
         struct tb t = { .n = 0 };
         uint8_t ty = 20, ck[16], zero = 0;
@@ -659,10 +653,27 @@ static void group_negotiation(void)
         tb_raw(&t, &zero, 1); tb_u32(&t, 0);
         en = t.n; memcpy(exp, t.b, t.n);
     }
+    return en;
+}
+
+static void negotiation_client_kexinit_exact(void)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX], exp[ZSSH_KEXINIT_MAX];
+    struct zssh_kexinit_view v;
+    size_t n, en;
+    /* exact bytes of a client KEXINIT, rebuilt independently */
+    n = build_ki(ZSSH_ROLE_CLIENT, BOTH, false, ki, sizeof ki);
+    en = negotiation_expected_client_kexinit(exp);
     CHECK(n == en && memcmp(ki, exp, en) == 0, "client KEXINIT bytes (hybrid first, strict-c last)");
     CHECK(zssh_kex_parse_kexinit(ki, n, &v) == ZSSH_E_NONE && !v.first_kex_packet_follows
           && zssh_namelist_has(v.list[ZSSH_KI_KEX], "kex-strict-c-v00@openssh.com")
           && !zssh_namelist_has(v.list[ZSSH_KI_KEX], "kex-strict-s-v00@openssh.com"), "parse own client KEXINIT");
+}
+
+static void negotiation_kexinit_markers(void)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX];
+    size_t n;
     n = build_ki(ZSSH_ROLE_SERVER, BOTH, false, ki, sizeof ki);
     CHECK(contains(ki, n, "kex-strict-s-v00@openssh.com") && !contains(ki, n, "kex-strict-c-v00"),
           "server uses the -s- marker");
@@ -671,7 +682,11 @@ static void group_negotiation(void)
           "require_pq offers no classical name anywhere");
     n = build_ki(ZSSH_ROLE_CLIENT, ZSSH_KEX_CURVE25519_SHA256, false, ki, sizeof ki);
     CHECK(n > 0 && !contains(ki, n, "mlkem"), "curve-only offers no hybrid");
+}
 
+static void negotiation_build_errors(void)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX];
     /* build errors */
     {
         struct zssh_kex_policy p = pol(ZSSH_ROLE_CLIENT, 0, false);
@@ -685,60 +700,76 @@ static void group_negotiation(void)
         zssh_wr_init(&w, small, sizeof small);
         CHECK(zssh_kex_build_kexinit(&p, ck, &w) == ZSSH_E_TOO_LARGE, "small buffer -> TOO_LARGE");
     }
+}
 
+static void negotiation_happy_paths(struct zssh_neg *neg)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX];
+    size_t n;
     /* happy paths */
-    CHECK(negotiate_pair(ZSSH_ROLE_SERVER, BOTH, false, ZSSH_ROLE_CLIENT, BOTH, false, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_MLKEM768X25519 && neg.strict, "both/both -> hybrid (server view)");
-    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, BOTH, false, ZSSH_ROLE_SERVER, BOTH, false, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_MLKEM768X25519 && neg.strict, "both/both -> hybrid (client view)");
-    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, ZSSH_KEX_CURVE25519_SHA256, false, ZSSH_ROLE_SERVER, BOTH, false, &neg)
-          == ZSSH_E_NONE && neg.alg == ZSSH_KEXALG_CURVE25519, "curve-only client / both server -> curve");
-    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, BOTH, true, ZSSH_ROLE_SERVER, BOTH, false, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_MLKEM768X25519, "require_pq client / capable server -> hybrid");
+    CHECK(negotiate_pair(ZSSH_ROLE_SERVER, BOTH, false, ZSSH_ROLE_CLIENT, BOTH, false, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_MLKEM768X25519 && neg->strict, "both/both -> hybrid (server view)");
+    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, BOTH, false, ZSSH_ROLE_SERVER, BOTH, false, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_MLKEM768X25519 && neg->strict, "both/both -> hybrid (client view)");
+    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, ZSSH_KEX_CURVE25519_SHA256, false, ZSSH_ROLE_SERVER, BOTH, false, neg)
+          == ZSSH_E_NONE && neg->alg == ZSSH_KEXALG_CURVE25519, "curve-only client / both server -> curve");
+    CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, BOTH, true, ZSSH_ROLE_SERVER, BOTH, false, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_MLKEM768X25519, "require_pq client / capable server -> hybrid");
     /* client order decides: crafted client lists curve first, server allows both */
     n = craft_ki(ki, sizeof ki, "curve25519-sha256,mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
                  "ssh-ed25519", "chacha20-poly1305@openssh.com", "none", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_CURVE25519, "client's first supported name wins");
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, true, ki, n, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_MLKEM768X25519, "server require_pq skips the classical name");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_CURVE25519, "client's first supported name wins");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, true, ki, n, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_MLKEM768X25519, "server require_pq skips the classical name");
+}
 
+static void negotiation_refusals(struct zssh_neg *neg)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX];
+    size_t n;
     /* refusals */
     CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, ZSSH_KEX_MLKEM768X25519_SHA256, false, ZSSH_ROLE_SERVER,
-                         ZSSH_KEX_CURVE25519_SHA256, false, &neg) == ZSSH_E_KEX_NO_MATCH
-          && neg.alg == ZSSH_KEXALG_NONE && !neg.strict, "no common algorithm -> KEX_NO_MATCH, out zeroed");
+                         ZSSH_KEX_CURVE25519_SHA256, false, neg) == ZSSH_E_KEX_NO_MATCH
+          && neg->alg == ZSSH_KEXALG_NONE && !neg->strict, "no common algorithm -> KEX_NO_MATCH, out zeroed");
     CHECK(negotiate_pair(ZSSH_ROLE_CLIENT, BOTH, true, ZSSH_ROLE_SERVER, ZSSH_KEX_CURVE25519_SHA256, false,
-                         &neg) == ZSSH_E_KEX_NO_MATCH, "require_pq vs classical-only server -> refused");
+                         neg) == ZSSH_E_KEX_NO_MATCH, "require_pq vs classical-only server -> refused");
     CHECK(negotiate_pair(ZSSH_ROLE_SERVER, BOTH, true, ZSSH_ROLE_CLIENT, ZSSH_KEX_CURVE25519_SHA256, false,
-                         &neg) == ZSSH_E_KEX_NO_MATCH, "require_pq server vs classical-only client -> refused");
+                         neg) == ZSSH_E_KEX_NO_MATCH, "require_pq server vs classical-only client -> refused");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,curve25519-sha256",
                  "ssh-ed25519", "chacha20-poly1305@openssh.com", "none", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_STRICT_KEX_REQUIRED
-          && neg.alg == ZSSH_KEXALG_NONE, "no strict marker -> STRICT_KEX_REQUIRED");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_STRICT_KEX_REQUIRED
+          && neg->alg == ZSSH_KEXALG_NONE, "no strict marker -> STRICT_KEX_REQUIRED");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,kex-strict-s-v00@openssh.com",
                  "ssh-ed25519", "chacha20-poly1305@openssh.com", "none", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_STRICT_KEX_REQUIRED,
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_STRICT_KEX_REQUIRED,
           "wrong-role marker -> STRICT_KEX_REQUIRED");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
                  "ssh-ed25519", "chacha20-poly1305@openssh.com", "none", true);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_PROTOCOL,
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_PROTOCOL,
           "first_kex_packet_follows -> PROTOCOL");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
                  "ssh-ed25519", "aes128-ctr", "none", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_KEX_NO_MATCH, "no cipher match");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_KEX_NO_MATCH, "no cipher match");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
                  "ssh-rsa", "chacha20-poly1305@openssh.com", "none", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_KEX_NO_MATCH, "no host key match");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_KEX_NO_MATCH, "no host key match");
     n = craft_ki(ki, sizeof ki, "mlkem768x25519-sha256,kex-strict-c-v00@openssh.com",
                  "ssh-ed25519", "chacha20-poly1305@openssh.com", "zlib", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_KEX_NO_MATCH, "no 'none' compression");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_KEX_NO_MATCH, "no 'none' compression");
     /* OpenSSH-shaped peer: extra names around ours are fine */
     n = craft_ki(ki, sizeof ki,
                  "sntrup761x25519-sha512,mlkem768x25519-sha256,curve25519-sha256,ext-info-c,kex-strict-c-v00@openssh.com",
                  "rsa-sha2-512,ssh-ed25519", "aes256-ctr,chacha20-poly1305@openssh.com", "none,zlib@openssh.com", false);
-    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, &neg) == ZSSH_E_NONE
-          && neg.alg == ZSSH_KEXALG_MLKEM768X25519, "OpenSSH-style client accepted");
+    CHECK(negotiate_raw(ZSSH_ROLE_SERVER, BOTH, false, ki, n, neg) == ZSSH_E_NONE
+          && neg->alg == ZSSH_KEXALG_MLKEM768X25519, "OpenSSH-style client accepted");
+}
 
+static void negotiation_parse_errors(void)
+{
+    uint8_t ki[ZSSH_KEXINIT_MAX];
+    struct zssh_kexinit_view v;
+    size_t n;
     /* parse errors */
     n = build_ki(ZSSH_ROLE_CLIENT, BOTH, false, ki, sizeof ki);
     for (size_t cut = 0; cut < n; cut++)
@@ -758,7 +789,10 @@ static void group_negotiation(void)
     CHECK(strcmp(zssh_kex_alg_name(ZSSH_KEXALG_MLKEM768X25519), "mlkem768x25519-sha256") == 0
           && strcmp(zssh_kex_alg_name(ZSSH_KEXALG_CURVE25519), "curve25519-sha256") == 0
           && zssh_kex_alg_name(ZSSH_KEXALG_NONE)[0] == '\0', "alg names");
+}
 
+static void negotiation_msg_wait_states(void)
+{
     /* message order predicate */
     CHECK(zssh_kex_msg_allowed(20, ZSSH_KP_WAIT_KEXINIT) && !zssh_kex_msg_allowed(2, ZSSH_KP_WAIT_KEXINIT)
           && !zssh_kex_msg_allowed(4, ZSSH_KP_WAIT_KEXINIT) && !zssh_kex_msg_allowed(30, ZSSH_KP_WAIT_KEXINIT)
@@ -769,11 +803,19 @@ static void group_negotiation(void)
           && !zssh_kex_msg_allowed(7, ZSSH_KP_WAIT_REPLY), "WAIT_REPLY: only 31");
     CHECK(zssh_kex_msg_allowed(21, ZSSH_KP_WAIT_NEWKEYS) && !zssh_kex_msg_allowed(2, ZSSH_KP_WAIT_NEWKEYS)
           && !zssh_kex_msg_allowed(50, ZSSH_KP_WAIT_NEWKEYS), "WAIT_NEWKEYS: only 21");
+}
+
+static void negotiation_msg_done(void)
+{
     CHECK(zssh_kex_msg_allowed(50, ZSSH_KP_DONE) && zssh_kex_msg_allowed(94, ZSSH_KP_DONE)
           && zssh_kex_msg_allowed(20, ZSSH_KP_DONE) && zssh_kex_msg_allowed(5, ZSSH_KP_DONE)
           && !zssh_kex_msg_allowed(21, ZSSH_KP_DONE) && !zssh_kex_msg_allowed(30, ZSSH_KP_DONE)
           && !zssh_kex_msg_allowed(31, ZSSH_KP_DONE) && !zssh_kex_msg_allowed(0, ZSSH_KP_DONE),
           "DONE: post-kex set, not 21/30/31");
+}
+
+static void negotiation_msg_done_exact(void)
+{
     {
         static const uint8_t defined[] = { 2, 3, 4, 5, 6, 7, 20, 50, 51, 52, 53, 60,
                                            80, 81, 82, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100 };
@@ -787,28 +829,51 @@ static void group_negotiation(void)
         CHECK(!zssh_kex_msg_allowed(83, ZSSH_KP_DONE) && !zssh_kex_msg_allowed(89, ZSSH_KP_DONE),
               "DONE refuses undefined 83 and 89");
     }
+}
+
+static void group_negotiation(void)
+{
+    struct zssh_neg neg;
+    group_begin();
+    negotiation_client_kexinit_exact();
+    negotiation_kexinit_markers();
+    negotiation_build_errors();
+    negotiation_happy_paths(&neg);
+    negotiation_refusals(&neg);
+    negotiation_parse_errors();
+    negotiation_msg_wait_states();
+    negotiation_msg_done();
+    negotiation_msg_done_exact();
     group_end("KEXINIT, negotiation, message order");
 }
 
 /* (5) tampering and malformed input. */
-static void group_tamper(void)
+static void tamper_baseline_exchange(uint8_t good_h[32])
 {
     struct rng cr, sr;
-    uint8_t good_h[32], tampered[2048];
-    size_t gl, off_ct = 1 + 4 + 51 + 4;
-    group_begin();
     rng_init(&cr, 33); rng_init(&sr, 44);
     pair_setup(ZSSH_KEXALG_MLKEM768X25519);
     CHECK(do_init(&cr) == ZSSH_E_NONE && do_reply(&sr) == ZSSH_E_NONE && do_finish() == ZSSH_E_NONE,
           "baseline hybrid exchange");
     memcpy(good_h, g_c.h, 32);
+}
+
+static size_t tamper_fresh_reply(void)
+{
+    struct rng cr, sr;
     /* the successful finish consumed the client's ephemerals: redo the exchange */
     rng_init(&cr, 33); rng_init(&sr, 44);
     pair_setup(ZSSH_KEXALG_MLKEM768X25519);
     CHECK(do_init(&cr) == ZSSH_E_NONE && do_reply(&sr) == ZSSH_E_NONE, "fresh exchange for tamper");
-    gl = g_reply_len;
-    memcpy(tampered, g_reply, gl);
+    return g_reply_len;
+}
 
+static void tamper_ciphertext_flip(const uint8_t *good_h, size_t gl)
+{
+    uint8_t tampered[2048];
+    size_t off_ct = 1 + 4 + 51 + 4;
+    (void)good_h;
+    memcpy(tampered, g_reply, gl);
     /* flipped ciphertext byte: implicit rejection -> different H -> signature fails */
     tampered[off_ct + 100] ^= 0x01;
     memcpy(g_reply, tampered, gl);
@@ -823,7 +888,11 @@ static void group_tamper(void)
           && !g_c.have_h && !g_c.have_session_id && is_zero(g_c.session_id, 32),
           "failure leaves K, H, session id, host blob zero");
     CHECK(is_zero(g_c.x25519_sk, 32) && is_zero(g_c.mlkem_dk, sizeof g_c.mlkem_dk), "failure wipes ephemerals");
+}
 
+static void tamper_other_flips(void)
+{
+    size_t off_ct = 1 + 4 + 51 + 4;
     /* the same flips elsewhere: X25519 half and signature */
     for (int which = 0; which < 2; which++) {
         struct rng cr2, sr2;
@@ -834,7 +903,11 @@ static void group_tamper(void)
         else g_reply[g_reply_len - 3] ^= 0x01;                    /* signature */
         CHECK(do_finish() == ZSSH_E_HOST_SIG, "tamper variant %d -> HOST_SIG", which);
     }
+}
 
+static void tamper_wrong_host_key(void)
+{
+    size_t off_ct = 1 + 4 + 51 + 4;
     /* wrong host key: refused BEFORE any key agreement or signature check */
     {
         struct rng cr2, sr2;
@@ -867,7 +940,10 @@ static void group_tamper(void)
               "pinned key differs again -> HOST_KEY_MISMATCH");
         CHECK(g_verify_calls == 0 && g_c.q_s_len == 0 && is_zero(g_c.k, 32) && is_zero(g_c.h, 32) && !g_c.have_h && !g_c.have_session_id && is_zero(g_c.host_blob, sizeof g_c.host_blob), "valid signature but wrong pin: no math, no signature check, no H/K/session id kept");
     }
+}
 
+static void tamper_reply_truncation(size_t gl)
+{
     /* truncated REPLY at every length, and trailing byte */
     for (size_t cut = 0; cut < gl; cut++) {
         struct rng cr2, sr2;
@@ -878,6 +954,10 @@ static void group_tamper(void)
         if (do_finish() != ZSSH_E_PROTOCOL) { CHECK(false, "REPLY cut at %zu not PROTOCOL", cut); break; }
         if (cut > 600) cut += 97;   /* sample the bulk of the blob; every boundary near the ends */
     }
+}
+
+static void tamper_reply_trailing_byte(void)
+{
     {
         struct rng cr2, sr2;
         rng_init(&cr2, 33); rng_init(&sr2, 44);
@@ -888,6 +968,10 @@ static void group_tamper(void)
         g_reply_len--; g_reply[0] = 30;
         CHECK(do_finish() == ZSSH_E_PROTOCOL, "REPLY with type 30 -> PROTOCOL");
     }
+}
+
+static void tamper_q_s_size(void)
+{
     /* well-formed REPLY whose Q_S has the wrong size */
     {
         struct rng cr2, sr2;
@@ -903,7 +987,10 @@ static void group_tamper(void)
         memcpy(g_reply, t.b, t.n); g_reply_len = t.n;
         CHECK(do_finish() == ZSSH_E_PROTOCOL, "Q_S of 1119 bytes -> PROTOCOL");
     }
+}
 
+static void tamper_server_init(void)
+{
     /* server side: malformed INIT */
     {
         struct rng cr2, sr2;
@@ -936,6 +1023,10 @@ static void group_tamper(void)
         rng_init(&sr2, 44);
         CHECK(do_reply(&sr2) == ZSSH_E_PROTOCOL, "INIT type 31 -> PROTOCOL");
     }
+}
+
+static void tamper_curve25519(void)
+{
     /* curve25519: low-order points give an all-zero secret */
     {
         struct rng cr2, sr2;
@@ -956,6 +1047,23 @@ static void group_tamper(void)
         rng_init(&sr2, 6);
         CHECK(do_reply(&sr2) == ZSSH_E_PROTOCOL, "short curve INIT -> PROTOCOL");
     }
+}
+
+static void group_tamper(void)
+{
+    uint8_t good_h[32];
+    size_t gl;
+    group_begin();
+    tamper_baseline_exchange(good_h);
+    gl = tamper_fresh_reply();
+    tamper_ciphertext_flip(good_h, gl);
+    tamper_other_flips();
+    tamper_wrong_host_key();
+    tamper_reply_truncation(gl);
+    tamper_reply_trailing_byte();
+    tamper_q_s_size();
+    tamper_server_init();
+    tamper_curve25519();
     group_end("tamper and malformed input");
 }
 
