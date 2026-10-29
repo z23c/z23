@@ -1430,6 +1430,177 @@ static int t_v29_incompatible_schema_fails_without_stamp(void)
     return failures;
 }
 
+/* The v29 app_events table exactly as sqlite_master stores it: keyword
+ * case and IF NOT EXISTS normalised by SQLite, body verbatim (see
+ * k_app_events_table_stored in database_migrate_features.c). */
+static const char k_v29_mig_std_table[] =
+    "CREATE TABLE app_events (receive_cursor INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "event_id BLOB NOT NULL UNIQUE CHECK(length(event_id)=32),"
+    "app_id TEXT NOT NULL CHECK(length(app_id) BETWEEN 1 AND 63),"
+    "topic TEXT NOT NULL CHECK(length(topic) BETWEEN 1 AND 127),"
+    "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 4294967295),"
+    "chain_id BLOB NOT NULL CHECK(length(chain_id)=32),"
+    "author_key_id BLOB NOT NULL CHECK(length(author_key_id)=20),"
+    "author_pubkey BLOB NOT NULL CHECK(length(author_pubkey)=33),"
+    "sequence INTEGER NOT NULL CHECK(sequence>0),"
+    "previous_event_id BLOB NOT NULL CHECK(length(previous_event_id)=32),"
+    "created_at INTEGER NOT NULL CHECK(created_at>0),"
+    "payload BLOB NOT NULL CHECK(length(payload)<=65536),"
+    "signature BLOB NOT NULL CHECK(length(signature) BETWEEN 8 AND 72),"
+    "signature_len INTEGER NOT NULL CHECK(signature_len=length(signature)),"
+    "received_at INTEGER NOT NULL CHECK(received_at>0))";
+
+/* One v29 schema-match case. prologue runs after the schema_migrations
+ * '029' row is removed and before the schema is stamped back to 28. When
+ * table_from is set, that text in k_v29_mig_std_table is replaced by
+ * table_to and the result is run as the app_events DDL. expect_stamp is
+ * the count of '029' rows after the open attempt. expect_open is 1 or 0,
+ * or -1 when the open outcome is decided by later migration steps and is
+ * not pinned here. */
+struct v29_schema_row {
+    const char *name;
+    const char *prologue;
+    const char *table_from;
+    const char *table_to;
+    int expect_stamp;
+    int expect_open;
+};
+
+static bool db_mig_v29_replace(char *out, size_t n, const char *src,
+                               const char *from, const char *to)
+{
+    const char *hit = strstr(src, from);
+    if (!hit)
+        return false;
+    int w = snprintf(out, n, "%.*s%s%s", (int)(hit - src), src, to,
+                     hit + strlen(from));
+    return w >= 0 && (size_t)w < n;
+}
+
+static bool db_mig_v29_seed(const char *dbpath, const char *prologue,
+                            const char *table_sql)
+{
+    struct node_db seed;
+    if (!node_db_open(&seed, dbpath))
+        return false;
+    node_db_close(&seed);
+
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(dbpath, &raw) != SQLITE_OK) {
+        sqlite3_close(raw);
+        return false;
+    }
+    bool ok = db_mig_exec_raw(raw,
+                  "DELETE FROM schema_migrations WHERE version='029'") &&
+              db_mig_exec_raw(raw, prologue) &&
+              (!table_sql || db_mig_exec_raw(raw, table_sql)) &&
+              db_mig_stamp_schema(raw, 28);
+    sqlite3_close(raw);
+    return ok;
+}
+
+static bool db_mig_v29_outcome(const char *dbpath, int *opened, int *stamp)
+{
+    struct node_db ndb;
+    *opened = node_db_open(&ndb, dbpath) ? 1 : 0;
+    if (*opened)
+        node_db_close(&ndb);
+
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(dbpath, &raw) != SQLITE_OK) {
+        sqlite3_close(raw);
+        return false;
+    }
+    *stamp = db_mig_count(raw,
+        "SELECT count(*) FROM schema_migrations WHERE version='029'");
+    sqlite3_close(raw);
+    return *stamp >= 0;
+}
+
+static int t_v29_schema_match_table(void)
+{
+    int failures = 0;
+    static const struct v29_schema_row rows[] = {
+        {"exact standard objects match",
+         "", NULL, NULL, 1, 1},
+        {"missing index is recreated by the v29 DDL",
+         "DROP INDEX idx_app_events_previous;", NULL, NULL, 1, 1},
+        {"missing table is recreated by the v29 DDL",
+         "DROP TABLE app_events;", NULL, NULL, 1, 1},
+        {"extra index with an unrelated name is tolerated",
+         "CREATE INDEX idx_app_events_extra ON app_events(app_id);",
+         NULL, NULL, 1, 1},
+        {"extra unrelated table is tolerated",
+         "CREATE TABLE app_events_extra(x INTEGER);", NULL, NULL, 1, 1},
+        {"lower-case CREATE TABLE keywords normalise to the stored form",
+         "DROP TABLE app_events;", "CREATE TABLE", "create table", 1, 1},
+        {"extra spaces after the CREATE TABLE keywords normalise away",
+         "DROP TABLE app_events;", "CREATE TABLE app_events",
+         "CREATE  TABLE   app_events", 1, 1},
+        {"column type difference fails the match",
+         "DROP TABLE app_events;", "kind INTEGER", "kind TEXT", 0, -1},
+        {"column order difference fails the match",
+         "DROP TABLE app_events;",
+         "app_id TEXT NOT NULL CHECK(length(app_id) BETWEEN 1 AND 63),"
+         "topic TEXT NOT NULL CHECK(length(topic) BETWEEN 1 AND 127),",
+         "topic TEXT NOT NULL CHECK(length(topic) BETWEEN 1 AND 127),"
+         "app_id TEXT NOT NULL CHECK(length(app_id) BETWEEN 1 AND 63),",
+         0, -1},
+        {"column name case difference fails the match",
+         "DROP TABLE app_events;", "receive_cursor INTEGER",
+         "RECEIVE_CURSOR INTEGER", 0, -1},
+        {"body whitespace difference fails the match (no normalisation)",
+         "DROP TABLE app_events;", "receive_cursor INTEGER",
+         "receive_cursor  INTEGER", 0, -1},
+        {"extra table column fails the match",
+         "DROP TABLE app_events;",
+         "received_at INTEGER NOT NULL CHECK(received_at>0))",
+         "received_at INTEGER NOT NULL CHECK(received_at>0),"
+         "extra_col INTEGER)",
+         0, -1},
+        {"index column order difference fails the match",
+         "DROP INDEX idx_app_events_previous;"
+         "CREATE INDEX idx_app_events_previous "
+         "ON app_events(app_id,event_id,previous_event_id);",
+         NULL, NULL, 0, -1},
+        {"index whitespace difference fails the match (no normalisation)",
+         "DROP INDEX idx_app_events_previous;"
+         "CREATE INDEX idx_app_events_previous "
+         "ON app_events(app_id, previous_event_id, event_id);",
+         NULL, NULL, 0, -1},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        const struct v29_schema_row *row = &rows[i];
+        char tag[32];
+        snprintf(tag, sizeof(tag), "v29_row%zu", i);
+        char dir[256];
+        db_mig_path(dir, sizeof(dir), tag);
+        mkdir_p(dir);
+        char dbpath[512];
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+        TEST(row->name) {
+            char table_sql[1200];
+            const char *table = NULL;
+            if (row->table_from) {
+                ASSERT(db_mig_v29_replace(table_sql, sizeof(table_sql),
+                                          k_v29_mig_std_table,
+                                          row->table_from, row->table_to));
+                table = table_sql;
+            }
+            ASSERT(db_mig_v29_seed(dbpath, row->prologue, table));
+            int opened = 0;
+            int stamp = -1;
+            ASSERT(db_mig_v29_outcome(dbpath, &opened, &stamp));
+            ASSERT_EQ(stamp, row->expect_stamp);
+            ASSERT(row->expect_open < 0 || opened == row->expect_open);
+            PASS();
+        } _test_next:;
+        test_cleanup_tmpdir(dir);
+    }
+    return failures;
+}
+
 static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
 {
     int failures = 0;
@@ -2078,6 +2249,7 @@ int test_db_migration_idempotent(void)
     failures += t_existing_empty_database_may_initialize();
     failures += t_supported_current_schema_reopens_normally();
     failures += t_v29_incompatible_schema_fails_without_stamp();
+    failures += t_v29_schema_match_table();
     failures += t_v82_board_kind_ceiling_row_copy_is_lossless();
     failures += t_v84_board_arrival_survives_remigration();
     failures += t_additive_migration_keeps_floor();
