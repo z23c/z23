@@ -744,6 +744,7 @@ struct zcl_result pkgl_mkdir_p(const char *path)
 #endif
 }
 
+#if !defined(_WIN32)
 /* Remove one directory entry; a child path that does not fit is an error. */
 static struct zcl_result pkgl_rm_rf_entry(const char *path, const char *name)
 {
@@ -753,6 +754,7 @@ static struct zcl_result pkgl_rm_rf_entry(const char *path, const char *name)
         return ZCL_ERR(-1, "path too long under %s", path);
     return pkgl_rm_rf(child);
 }
+#endif
 
 struct zcl_result pkgl_rm_rf(const char *path)
 {
