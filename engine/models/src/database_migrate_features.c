@@ -66,13 +66,43 @@ static const char k_app_events_previous_index_stored[] =
 
 #undef APP_EVENTS_TABLE_BODY
 
+static bool migration_schema_args_present(
+    struct node_db *ndb, const char *type, const char *name,
+    const char *created_sql, const char *normalized_sql)
+{
+    return ndb && ndb->db && type && name && created_sql && normalized_sql;
+}
+
+/* Bind name, step once and report whether the stored row matches; returns
+ * the result of the confirming second step (SQLITE_DONE when exactly one
+ * row exists). The caller finalizes stmt. */
+static int migration_schema_probe(
+    sqlite3_stmt *stmt, const char *name, const char *type,
+    const char *created_sql, const char *normalized_sql, bool *matches)
+{
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt); // raw-sql-ok:migration-schema-inspection
+    const char *stored_type = rc == SQLITE_ROW
+        ? (const char *)sqlite3_column_text(stmt, 0) : NULL;
+    const char *stored_sql = rc == SQLITE_ROW
+        ? (const char *)sqlite3_column_text(stmt, 1) : NULL;
+    *matches = stored_type && stored_sql &&
+        strcmp(stored_type, type) == 0 &&
+        (strcmp(stored_sql, created_sql) == 0 ||
+         strcmp(stored_sql, normalized_sql) == 0);
+    rc = rc == SQLITE_ROW
+        ? sqlite3_step(stmt) // raw-sql-ok:migration-schema-inspection
+        : rc;
+    return rc;
+}
+
 static bool migration_schema_object_matches(
     struct node_db *ndb, const char *type, const char *name,
     const char *created_sql, const char *normalized_sql)
 {
     sqlite3_stmt *stmt = NULL;
-    if (!ndb || !ndb->db || !type || !name || !created_sql ||
-        !normalized_sql ||
+    if (!migration_schema_args_present(ndb, type, name, created_sql,
+                                       normalized_sql) ||
         sqlite3_prepare_v2(ndb->db,
             "SELECT type,sql FROM sqlite_master WHERE name=?", -1,
             &stmt, NULL) != SQLITE_OK || !stmt) {
@@ -81,19 +111,9 @@ static bool migration_schema_object_matches(
         LOG_FAIL("db", "migrate v29: cannot inspect schema object %s",
                  name ? name : "(null)");
     }
-    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt); // raw-sql-ok:migration-schema-inspection
-    const char *stored_type = rc == SQLITE_ROW
-        ? (const char *)sqlite3_column_text(stmt, 0) : NULL;
-    const char *stored_sql = rc == SQLITE_ROW
-        ? (const char *)sqlite3_column_text(stmt, 1) : NULL;
-    bool matches = stored_type && stored_sql &&
-        strcmp(stored_type, type) == 0 &&
-        (strcmp(stored_sql, created_sql) == 0 ||
-         strcmp(stored_sql, normalized_sql) == 0);
-    rc = rc == SQLITE_ROW
-        ? sqlite3_step(stmt) // raw-sql-ok:migration-schema-inspection
-        : rc;
+    bool matches = false;
+    int rc = migration_schema_probe(stmt, name, type, created_sql,
+                                    normalized_sql, &matches);
     sqlite3_finalize(stmt);
     if (!matches || rc != SQLITE_DONE)
         LOG_FAIL("db", "migrate v29: schema object %s is absent or incompatible",
@@ -164,216 +184,369 @@ static int db_migrate_v29_app_events(struct node_db *ndb, int floor_ver)
     return 0;
 }
 
+static void db_migrate_v14_store_tables(struct node_db *ndb)
+{
+    /* v14: Store product/order tables as model-owned app schema. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS products ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "name TEXT NOT NULL,"
+        "description TEXT,"
+        "price_zatoshi INTEGER NOT NULL,"
+        "token_id TEXT,"
+        "tokens_per_purchase INTEGER NOT NULL DEFAULT 1,"
+        "active INTEGER NOT NULL DEFAULT 1)");
+
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS orders ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "product_id INTEGER NOT NULL,"
+        "customer_addr TEXT,"
+        "payment_addr TEXT NOT NULL,"
+        "amount_zatoshi INTEGER NOT NULL,"
+        "payment_txid TEXT,"
+        "mint_txid TEXT,"
+        "status INTEGER NOT NULL DEFAULT 0,"
+        "created_at INTEGER NOT NULL,"
+        "paid_at INTEGER)");
+
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_orders_status_created "
+        "ON orders(status, created_at DESC)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('014')");
+}
+
+static void db_migrate_v15_file_offers(struct node_db *ndb)
+{
+    /* v15: ZCL Market — file offers for crypto-incentivized sharing */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS file_offers ("
+        "root_hash BLOB NOT NULL PRIMARY KEY,"
+        "filename TEXT NOT NULL,"
+        "size_bytes INTEGER NOT NULL,"
+        "num_chunks INTEGER NOT NULL,"
+        "price_per_mb INTEGER NOT NULL,"
+        "z_addr BLOB,"
+        "peer_ip BLOB,"
+        "peer_port INTEGER,"
+        "last_seen INTEGER,"
+        "ttl INTEGER DEFAULT 4)");
+
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_file_offers_last_seen "
+        "ON file_offers(last_seen DESC)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('015')");
+}
+
+static void db_migrate_v16_znam_names(struct node_db *ndb)
+{
+    /* v16: ZCL Names (ZNAM) — on-chain name registry */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS znam_names ("
+        "name TEXT PRIMARY KEY,"
+        "owner_address TEXT NOT NULL,"
+        "target_type INTEGER NOT NULL,"
+        "target_value TEXT NOT NULL,"
+        "reg_txid BLOB NOT NULL,"
+        "reg_height INTEGER NOT NULL,"
+        "last_update_txid BLOB NOT NULL)");
+
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_znam_owner "
+        "ON znam_names(owner_address)");
+
+    /* ENS-inspired text records (TextResolver) */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS znam_text_records ("
+        "name TEXT NOT NULL,"
+        "key TEXT NOT NULL,"
+        "value TEXT,"
+        "PRIMARY KEY(name, key))");
+
+    /* ENS-inspired multi-coin address records (AddrResolver) */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS znam_addr_records ("
+        "name TEXT NOT NULL,"
+        "coin_type INTEGER NOT NULL,"
+        "address TEXT NOT NULL,"
+        "PRIMARY KEY(name, coin_type))");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('016')");
+}
+
+static void db_migrate_v17_zmsg_messages(struct node_db *ndb)
+{
+    /* v17: ZCL Messaging (ZMSG) — encrypted P2P messages */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS zmsg_messages ("
+        "msg_id BLOB PRIMARY KEY,"
+        "direction INTEGER NOT NULL,"
+        "channel INTEGER NOT NULL,"
+        "sender TEXT NOT NULL,"
+        "recipient TEXT NOT NULL,"
+        "body TEXT NOT NULL,"
+        "timestamp INTEGER NOT NULL,"
+        "txid BLOB,"
+        "read INTEGER NOT NULL DEFAULT 0)");
+
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_zmsg_time "
+        "ON zmsg_messages(timestamp DESC)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_zmsg_unread "
+        "ON zmsg_messages(read) WHERE read=0");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('017')");
+}
+
+static void db_migrate_v18_zswp_contracts(struct node_db *ndb)
+{
+    /* v18: Atomic swaps (ZSWP) — HTLC contracts for BTC/LTC/DOGE */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS zswp_contracts ("
+        "swap_id TEXT PRIMARY KEY,"
+        "role INTEGER NOT NULL,"
+        "state INTEGER NOT NULL,"
+        "chain INTEGER NOT NULL DEFAULT 0,"
+        "secret_hash BLOB NOT NULL,"
+        "secret BLOB,"
+        "amount INTEGER NOT NULL,"
+        "locktime INTEGER NOT NULL,"
+        "my_address TEXT NOT NULL,"
+        "counter_address TEXT NOT NULL,"
+        "funding_txid BLOB,"
+        "funding_vout INTEGER,"
+        "redeem_script BLOB NOT NULL,"
+        "redeem_script_len INTEGER NOT NULL,"
+        "p2sh_address TEXT NOT NULL,"
+        "created_at INTEGER NOT NULL)");
+
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_zswp_state "
+        "ON zswp_contracts(state)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('018')");
+}
+
+static void db_migrate_v19_hodl_history(struct node_db *ndb)
+{
+    /* v19: HODL wave history — one row per sample height, populated
+     * lazily by engine/services/src/hodl_history_service.c. Each row
+     * is the reconstructed UTXO snapshot as of that height:
+     *   total_zat = sum of unspent output value at H
+     *   older_1y_zat = subset that was older than 1 year at H
+     *   older_1y_pct = older_1y_zat / total_zat * 100
+     * Source: tx_outputs + tx_inputs, no current-UTXO-table dep. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS hodl_history ("
+        "height INTEGER PRIMARY KEY,"
+        "time INTEGER NOT NULL,"
+        "total_zat INTEGER NOT NULL DEFAULT 0 CHECK(total_zat >= 0),"
+        "older_1y_zat INTEGER NOT NULL DEFAULT 0 "
+        "  CHECK(older_1y_zat >= 0 AND older_1y_zat <= total_zat),"
+        "older_1y_pct REAL NOT NULL DEFAULT 0,"
+        "calc_version INTEGER NOT NULL DEFAULT 0,"
+        "source_tip_height INTEGER NOT NULL DEFAULT -1)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_hodl_history_time "
+        "ON hodl_history(time)");
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('019')");
+}
+
+static void db_migrate_v20_store_blobs(struct node_db *ndb)
+{
+    /* v20: content-addressed blob store; products.content_hash NULL = none. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS store_blobs ("
+        "content_hash BLOB NOT NULL PRIMARY KEY,"
+        "content_type TEXT NOT NULL DEFAULT 'engine/application/octet-stream',"
+        "filename TEXT,"
+        "size_bytes INTEGER NOT NULL,"
+        "data BLOB NOT NULL)");
+    node_db_exec(ndb, "ALTER TABLE products ADD COLUMN content_hash BLOB");
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('020')");
+}
+
+static void db_migrate_v26_principals(struct node_db *ndb)
+{
+    /* v26: multi-user-server identity overlay. `principals` is one row per
+     * authenticated public key (address = base58check(hash160(pubkey)) is
+     * the PK); role is the only authorization input and
+     * granted_capabilities is a derived cache the model recomputes on every
+     * save. `auth_challenges` is the single-use login-nonce store. Pure
+     * app-layer overlay — sybil_proof_height is bookkeeping and is never
+     * consulted by consensus. Idempotent (IF NOT EXISTS) on a pre-v26 db. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS principals ("
+        "address TEXT PRIMARY KEY,"
+        "pubkey_hex TEXT NOT NULL,"
+        "key_kind INTEGER NOT NULL DEFAULT 0,"
+        "znam_name TEXT NOT NULL DEFAULT '',"
+        "role TEXT NOT NULL DEFAULT 'guest' "
+        "  CHECK(role IN ('guest','member','operator','owner')),"
+        "granted_capabilities INTEGER NOT NULL DEFAULT 0,"
+        "created_at INTEGER NOT NULL,"
+        "last_login INTEGER NOT NULL DEFAULT 0,"
+        "status TEXT NOT NULL DEFAULT 'active' "
+        "  CHECK(status IN ('active','suspended')),"
+        "sybil_proof_height INTEGER NOT NULL DEFAULT -1)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_principals_pubkey "
+        "ON principals(pubkey_hex)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_principals_role "
+        "ON principals(role)");
+
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS auth_challenges ("
+        "nonce_hex TEXT PRIMARY KEY,"
+        "address TEXT NOT NULL,"
+        "issued_at INTEGER NOT NULL,"
+        "expires_at INTEGER NOT NULL,"
+        "consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN (0,1)))");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_auth_challenges_address "
+        "ON auth_challenges(address)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_auth_challenges_expiry "
+        "ON auth_challenges(expires_at)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('026')");
+}
+
+static void db_migrate_v27_peer_observations(struct node_db *ndb)
+{
+    /* v27: network-monitor per-peer chain-intelligence history. One row
+     * per sampled peer per monitor tick (best height, learnable tip hash,
+     * version/user-agent, latency, first/last seen). Purely observational —
+     * never read by consensus/chain selection. Bounded retention: the
+     * network monitor prunes to the newest N rows. Idempotent on a pre-v27
+     * db. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS peer_chain_observations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "peer_id INTEGER NOT NULL,"
+        "addr TEXT NOT NULL DEFAULT '',"
+        "user_agent TEXT NOT NULL DEFAULT '',"
+        "version INTEGER NOT NULL DEFAULT 0,"
+        "best_height INTEGER NOT NULL DEFAULT -1,"
+        "tip_hash TEXT NOT NULL DEFAULT '',"
+        "latency_us INTEGER NOT NULL DEFAULT 0,"
+        "inbound INTEGER NOT NULL DEFAULT 0,"
+        "first_seen INTEGER NOT NULL DEFAULT 0,"
+        "last_seen INTEGER NOT NULL DEFAULT 0,"
+        "observed_at INTEGER NOT NULL)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_peer_chain_obs_observed_at "
+        "ON peer_chain_observations(observed_at DESC)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('027')");
+}
+
+static void db_migrate_v28_blog_posts(struct node_db *ndb)
+{
+    /* v28: Rails-style Blog reference slice. Posts are immutable signed
+     * App events; publication receipts are reorg-aware observations over
+     * the full-node block/transaction/OP_RETURN projections. This is an
+     * application overlay only and is never consulted by consensus. */
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS blog_posts ("
+        "event_id BLOB PRIMARY KEY CHECK(length(event_id)=32),"
+        "blog_name TEXT NOT NULL,"
+        "slug TEXT NOT NULL,"
+        "title TEXT NOT NULL,"
+        "body TEXT NOT NULL,"
+        "author_key_id BLOB NOT NULL CHECK(length(author_key_id)=20),"
+        "author_pubkey BLOB NOT NULL CHECK(length(author_pubkey)=33),"
+        "author_address TEXT NOT NULL,"
+        "chain_id BLOB NOT NULL CHECK(length(chain_id)=32),"
+        "sequence INTEGER NOT NULL CHECK(sequence>0),"
+        "previous_event_id BLOB NOT NULL "
+        "  CHECK(length(previous_event_id)=32),"
+        "event_created_at INTEGER NOT NULL CHECK(event_created_at>0),"
+        "signature BLOB NOT NULL "
+        "  CHECK(length(signature) BETWEEN 8 AND 72),"
+        "signature_len INTEGER NOT NULL "
+        "  CHECK(signature_len=length(signature)),"
+        "stored_at INTEGER NOT NULL CHECK(stored_at>0))");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_blog_posts_name_sequence "
+        "ON blog_posts(blog_name,sequence DESC)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_blog_posts_name_slug_event "
+        "ON blog_posts(blog_name,slug,event_id)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_blog_posts_author_sequence "
+        "ON blog_posts(author_key_id,sequence,event_id)");
+
+    node_db_exec(ndb,
+        "CREATE TABLE IF NOT EXISTS blog_publication_receipts ("
+        "txid BLOB PRIMARY KEY CHECK(length(txid)=32),"
+        "event_id BLOB NOT NULL CHECK(length(event_id)=32),"
+        "blog_name TEXT NOT NULL,"
+        "author_key_id BLOB NOT NULL CHECK(length(author_key_id)=20),"
+        "znam_reg_txid BLOB NOT NULL CHECK(length(znam_reg_txid)=32),"
+        "block_hash BLOB "
+        "  CHECK(block_hash IS NULL OR length(block_hash)=32),"
+        "block_height INTEGER NOT NULL CHECK(block_height>=-1),"
+        "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 2),"
+        "observed_at INTEGER NOT NULL CHECK(observed_at>0),"
+        "FOREIGN KEY(event_id) REFERENCES blog_posts(event_id) "
+        "  ON DELETE CASCADE)");
+    node_db_exec(ndb,
+        "CREATE INDEX IF NOT EXISTS idx_blog_receipts_event "
+        "ON blog_publication_receipts(event_id,observed_at DESC)");
+
+    node_db_exec(ndb,
+        "INSERT OR IGNORE INTO schema_migrations(version) VALUES('028')");
+}
+
+/* Versions whose migration is pure DDL with no failure path of its own:
+ * only the version/floor persist can fail, and that stays in the caller. */
+struct db_migrate_ddl_step {
+    int version;
+    void (*run)(struct node_db *ndb);
+};
+
+static const struct db_migrate_ddl_step k_ddl_only_steps[] = {
+    {14, db_migrate_v14_store_tables},
+    {15, db_migrate_v15_file_offers},
+    {16, db_migrate_v16_znam_names},
+    {17, db_migrate_v17_zmsg_messages},
+    {18, db_migrate_v18_zswp_contracts},
+    {19, db_migrate_v19_hodl_history},
+    {20, db_migrate_v20_store_blobs},
+    {26, db_migrate_v26_principals},
+    {27, db_migrate_v27_peer_observations},
+    {28, db_migrate_v28_blog_posts},
+};
+enum { DDL_STEPS_THROUGH_V20 = 7, DDL_STEPS_TOTAL = 10 };
+
 int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
 {
     int applied = 0;
     int current_ver = *version;
     int floor_ver = *floor;
 
-    if (current_ver < 14) {
-        /* v14: Store product/order tables as model-owned app schema. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS products ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "name TEXT NOT NULL,"
-            "description TEXT,"
-            "price_zatoshi INTEGER NOT NULL,"
-            "token_id TEXT,"
-            "tokens_per_purchase INTEGER NOT NULL DEFAULT 1,"
-            "active INTEGER NOT NULL DEFAULT 1)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS orders ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "product_id INTEGER NOT NULL,"
-            "customer_addr TEXT,"
-            "payment_addr TEXT NOT NULL,"
-            "amount_zatoshi INTEGER NOT NULL,"
-            "payment_txid TEXT,"
-            "mint_txid TEXT,"
-            "status INTEGER NOT NULL DEFAULT 0,"
-            "created_at INTEGER NOT NULL,"
-            "paid_at INTEGER)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_orders_status_created "
-            "ON orders(status, created_at DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('014')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 14, floor_ver);
-        current_ver = 14;
-        applied++;
-    }
-
-    if (current_ver < 15) {
-        /* v15: ZCL Market — file offers for crypto-incentivized sharing */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS file_offers ("
-            "root_hash BLOB NOT NULL PRIMARY KEY,"
-            "filename TEXT NOT NULL,"
-            "size_bytes INTEGER NOT NULL,"
-            "num_chunks INTEGER NOT NULL,"
-            "price_per_mb INTEGER NOT NULL,"
-            "z_addr BLOB,"
-            "peer_ip BLOB,"
-            "peer_port INTEGER,"
-            "last_seen INTEGER,"
-            "ttl INTEGER DEFAULT 4)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_file_offers_last_seen "
-            "ON file_offers(last_seen DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('015')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 15, floor_ver);
-        current_ver = 15;
-        applied++;
-    }
-
-    if (current_ver < 16) {
-        /* v16: ZCL Names (ZNAM) — on-chain name registry */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS znam_names ("
-            "name TEXT PRIMARY KEY,"
-            "owner_address TEXT NOT NULL,"
-            "target_type INTEGER NOT NULL,"
-            "target_value TEXT NOT NULL,"
-            "reg_txid BLOB NOT NULL,"
-            "reg_height INTEGER NOT NULL,"
-            "last_update_txid BLOB NOT NULL)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_znam_owner "
-            "ON znam_names(owner_address)");
-
-        /* ENS-inspired text records (TextResolver) */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS znam_text_records ("
-            "name TEXT NOT NULL,"
-            "key TEXT NOT NULL,"
-            "value TEXT,"
-            "PRIMARY KEY(name, key))");
-
-        /* ENS-inspired multi-coin address records (AddrResolver) */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS znam_addr_records ("
-            "name TEXT NOT NULL,"
-            "coin_type INTEGER NOT NULL,"
-            "address TEXT NOT NULL,"
-            "PRIMARY KEY(name, coin_type))");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('016')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 16, floor_ver);
-        current_ver = 16;
-        applied++;
-    }
-
-    if (current_ver < 17) {
-        /* v17: ZCL Messaging (ZMSG) — encrypted P2P messages */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zmsg_messages ("
-            "msg_id BLOB PRIMARY KEY,"
-            "direction INTEGER NOT NULL,"
-            "channel INTEGER NOT NULL,"
-            "sender TEXT NOT NULL,"
-            "recipient TEXT NOT NULL,"
-            "body TEXT NOT NULL,"
-            "timestamp INTEGER NOT NULL,"
-            "txid BLOB,"
-            "read INTEGER NOT NULL DEFAULT 0)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zmsg_time "
-            "ON zmsg_messages(timestamp DESC)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zmsg_unread "
-            "ON zmsg_messages(read) WHERE read=0");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('017')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 17, floor_ver);
-        current_ver = 17;
-        applied++;
-    }
-
-    if (current_ver < 18) {
-        /* v18: Atomic swaps (ZSWP) — HTLC contracts for BTC/LTC/DOGE */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS zswp_contracts ("
-            "swap_id TEXT PRIMARY KEY,"
-            "role INTEGER NOT NULL,"
-            "state INTEGER NOT NULL,"
-            "chain INTEGER NOT NULL DEFAULT 0,"
-            "secret_hash BLOB NOT NULL,"
-            "secret BLOB,"
-            "amount INTEGER NOT NULL,"
-            "locktime INTEGER NOT NULL,"
-            "my_address TEXT NOT NULL,"
-            "counter_address TEXT NOT NULL,"
-            "funding_txid BLOB,"
-            "funding_vout INTEGER,"
-            "redeem_script BLOB NOT NULL,"
-            "redeem_script_len INTEGER NOT NULL,"
-            "p2sh_address TEXT NOT NULL,"
-            "created_at INTEGER NOT NULL)");
-
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_zswp_state "
-            "ON zswp_contracts(state)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('018')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 18, floor_ver);
-        current_ver = 18;
-        applied++;
-    }
-
-    if (current_ver < 19) {
-        /* v19: HODL wave history — one row per sample height, populated
-         * lazily by engine/services/src/hodl_history_service.c. Each row
-         * is the reconstructed UTXO snapshot as of that height:
-         *   total_zat = sum of unspent output value at H
-         *   older_1y_zat = subset that was older than 1 year at H
-         *   older_1y_pct = older_1y_zat / total_zat * 100
-         * Source: tx_outputs + tx_inputs, no current-UTXO-table dep. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS hodl_history ("
-            "height INTEGER PRIMARY KEY,"
-            "time INTEGER NOT NULL,"
-            "total_zat INTEGER NOT NULL DEFAULT 0 CHECK(total_zat >= 0),"
-            "older_1y_zat INTEGER NOT NULL DEFAULT 0 "
-            "  CHECK(older_1y_zat >= 0 AND older_1y_zat <= total_zat),"
-            "older_1y_pct REAL NOT NULL DEFAULT 0,"
-            "calc_version INTEGER NOT NULL DEFAULT 0,"
-            "source_tip_height INTEGER NOT NULL DEFAULT -1)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_hodl_history_time "
-            "ON hodl_history(time)");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('019')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 19, floor_ver);
-        current_ver = 19;
-        applied++;
-    }
-
-    if (current_ver < 20) {
-        /* v20: content-addressed blob store; products.content_hash NULL = none. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS store_blobs ("
-            "content_hash BLOB NOT NULL PRIMARY KEY,"
-            "content_type TEXT NOT NULL DEFAULT 'engine/application/octet-stream',"
-            "filename TEXT,"
-            "size_bytes INTEGER NOT NULL,"
-            "data BLOB NOT NULL)");
-        node_db_exec(ndb, "ALTER TABLE products ADD COLUMN content_hash BLOB");
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('020')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 20, floor_ver);
-        current_ver = 20;
-        applied++;
+    for (size_t i = 0; i < DDL_STEPS_THROUGH_V20; i++) {
+        if (current_ver < k_ddl_only_steps[i].version) {
+            k_ddl_only_steps[i].run(ndb);
+            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, k_ddl_only_steps[i].version,
+                                             floor_ver);
+            current_ver = k_ddl_only_steps[i].version;
+            applied++;
+        }
     }
 
     if (current_ver < 21) {
@@ -537,146 +710,14 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
         applied++;
     }
 
-    if (current_ver < 26) {
-        /* v26: multi-user-server identity overlay. `principals` is one row per
-         * authenticated public key (address = base58check(hash160(pubkey)) is
-         * the PK); role is the only authorization input and
-         * granted_capabilities is a derived cache the model recomputes on every
-         * save. `auth_challenges` is the single-use login-nonce store. Pure
-         * app-layer overlay — sybil_proof_height is bookkeeping and is never
-         * consulted by consensus. Idempotent (IF NOT EXISTS) on a pre-v26 db. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS principals ("
-            "address TEXT PRIMARY KEY,"
-            "pubkey_hex TEXT NOT NULL,"
-            "key_kind INTEGER NOT NULL DEFAULT 0,"
-            "znam_name TEXT NOT NULL DEFAULT '',"
-            "role TEXT NOT NULL DEFAULT 'guest' "
-            "  CHECK(role IN ('guest','member','operator','owner')),"
-            "granted_capabilities INTEGER NOT NULL DEFAULT 0,"
-            "created_at INTEGER NOT NULL,"
-            "last_login INTEGER NOT NULL DEFAULT 0,"
-            "status TEXT NOT NULL DEFAULT 'active' "
-            "  CHECK(status IN ('active','suspended')),"
-            "sybil_proof_height INTEGER NOT NULL DEFAULT -1)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_principals_pubkey "
-            "ON principals(pubkey_hex)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_principals_role "
-            "ON principals(role)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS auth_challenges ("
-            "nonce_hex TEXT PRIMARY KEY,"
-            "address TEXT NOT NULL,"
-            "issued_at INTEGER NOT NULL,"
-            "expires_at INTEGER NOT NULL,"
-            "consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN (0,1)))");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_auth_challenges_address "
-            "ON auth_challenges(address)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_auth_challenges_expiry "
-            "ON auth_challenges(expires_at)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('026')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 26, floor_ver);
-        current_ver = 26;
-        applied++;
-    }
-
-    if (current_ver < 27) {
-        /* v27: network-monitor per-peer chain-intelligence history. One row
-         * per sampled peer per monitor tick (best height, learnable tip hash,
-         * version/user-agent, latency, first/last seen). Purely observational —
-         * never read by consensus/chain selection. Bounded retention: the
-         * network monitor prunes to the newest N rows. Idempotent on a pre-v27
-         * db. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS peer_chain_observations ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "peer_id INTEGER NOT NULL,"
-            "addr TEXT NOT NULL DEFAULT '',"
-            "user_agent TEXT NOT NULL DEFAULT '',"
-            "version INTEGER NOT NULL DEFAULT 0,"
-            "best_height INTEGER NOT NULL DEFAULT -1,"
-            "tip_hash TEXT NOT NULL DEFAULT '',"
-            "latency_us INTEGER NOT NULL DEFAULT 0,"
-            "inbound INTEGER NOT NULL DEFAULT 0,"
-            "first_seen INTEGER NOT NULL DEFAULT 0,"
-            "last_seen INTEGER NOT NULL DEFAULT 0,"
-            "observed_at INTEGER NOT NULL)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_peer_chain_obs_observed_at "
-            "ON peer_chain_observations(observed_at DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('027')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 27, floor_ver);
-        current_ver = 27;
-        applied++;
-    }
-
-    if (current_ver < 28) {
-        /* v28: Rails-style Blog reference slice. Posts are immutable signed
-         * App events; publication receipts are reorg-aware observations over
-         * the full-node block/transaction/OP_RETURN projections. This is an
-         * application overlay only and is never consulted by consensus. */
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS blog_posts ("
-            "event_id BLOB PRIMARY KEY CHECK(length(event_id)=32),"
-            "blog_name TEXT NOT NULL,"
-            "slug TEXT NOT NULL,"
-            "title TEXT NOT NULL,"
-            "body TEXT NOT NULL,"
-            "author_key_id BLOB NOT NULL CHECK(length(author_key_id)=20),"
-            "author_pubkey BLOB NOT NULL CHECK(length(author_pubkey)=33),"
-            "author_address TEXT NOT NULL,"
-            "chain_id BLOB NOT NULL CHECK(length(chain_id)=32),"
-            "sequence INTEGER NOT NULL CHECK(sequence>0),"
-            "previous_event_id BLOB NOT NULL "
-            "  CHECK(length(previous_event_id)=32),"
-            "event_created_at INTEGER NOT NULL CHECK(event_created_at>0),"
-            "signature BLOB NOT NULL "
-            "  CHECK(length(signature) BETWEEN 8 AND 72),"
-            "signature_len INTEGER NOT NULL "
-            "  CHECK(signature_len=length(signature)),"
-            "stored_at INTEGER NOT NULL CHECK(stored_at>0))");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blog_posts_name_sequence "
-            "ON blog_posts(blog_name,sequence DESC)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blog_posts_name_slug_event "
-            "ON blog_posts(blog_name,slug,event_id)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blog_posts_author_sequence "
-            "ON blog_posts(author_key_id,sequence,event_id)");
-
-        node_db_exec(ndb,
-            "CREATE TABLE IF NOT EXISTS blog_publication_receipts ("
-            "txid BLOB PRIMARY KEY CHECK(length(txid)=32),"
-            "event_id BLOB NOT NULL CHECK(length(event_id)=32),"
-            "blog_name TEXT NOT NULL,"
-            "author_key_id BLOB NOT NULL CHECK(length(author_key_id)=20),"
-            "znam_reg_txid BLOB NOT NULL CHECK(length(znam_reg_txid)=32),"
-            "block_hash BLOB "
-            "  CHECK(block_hash IS NULL OR length(block_hash)=32),"
-            "block_height INTEGER NOT NULL CHECK(block_height>=-1),"
-            "status INTEGER NOT NULL CHECK(status BETWEEN 0 AND 2),"
-            "observed_at INTEGER NOT NULL CHECK(observed_at>0),"
-            "FOREIGN KEY(event_id) REFERENCES blog_posts(event_id) "
-            "  ON DELETE CASCADE)");
-        node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_blog_receipts_event "
-            "ON blog_publication_receipts(event_id,observed_at DESC)");
-
-        node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('028')");
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 28, floor_ver);
-        current_ver = 28;
-        applied++;
+    for (size_t i = DDL_STEPS_THROUGH_V20; i < DDL_STEPS_TOTAL; i++) {
+        if (current_ver < k_ddl_only_steps[i].version) {
+            k_ddl_only_steps[i].run(ndb);
+            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, k_ddl_only_steps[i].version,
+                                             floor_ver);
+            current_ver = k_ddl_only_steps[i].version;
+            applied++;
+        }
     }
 
     if (current_ver < 29) {
