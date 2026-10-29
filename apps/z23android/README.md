@@ -129,8 +129,9 @@ status command on each and reports block height against `zclassicd`.
 On first start the host prints a six-character pairing code and opens the app
 with a pairing offer. Accept on the phone only if it shows the same code. The
 host keeps its port and token in `--dir`, so later restarts reconnect without
-another pairing. The token is passed to `adb` on standard input, never in
-process arguments, and the app stores it privately as `speech-bridge.json`.
+another pairing. The token reaches `adb` on standard input, not in laptop process arguments;
+on the phone it is briefly visible to shell and root in the arguments of the
+`am` command. The app stores it privately as `speech-bridge.json`.
 
 ### Use
 
@@ -141,6 +142,24 @@ it. Typed questions use the same private model. **Refresh fleet** probes every
 host. “Start node” and “stop node” create proposals that require **Confirm
 start** or **Confirm stop** on screen. The assistant cannot run commands,
 change hosts or spend funds.
+
+### Developer notes
+
+- Host tests run on Linux with `make -C apps/z23android test HOST_CC=clang
+  BUILD_DIR=../../build/android-voice`. `preview-apk` needs `NODE_BIN`,
+  `ANDROID_NDK_ROOT`, `SDK_ROOT` and `JAVA_HOME`; without them it stops before
+  building and leaves any previous APK in place.
+- The host defaults to `--app org.z23.nativeapp`. Pass
+  `--app org.z23.voicepreview` when testing the preview package, or the pairing
+  offer reopens the production app.
+- Android app data directories are mode `0771` and owned by the app group;
+  private-directory checks allow group write only for the app's own group.
+- A relaunch with `FLAG_ACTIVITY_CLEAR_TASK` creates the new activity before
+  the old one is destroyed; the newest activity takes over the native UI.
+- Each capture logs its level floor and peak under logcat tag `z23`, and the
+  host logs the elapsed milliseconds of every operation. On the measured Pixel,
+  speech from a laptop speaker peaked at mean levels of 417-556 over a floor
+  of 10-12.
 
 ### Measured latency
 

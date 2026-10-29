@@ -6,14 +6,14 @@ static bool space(unsigned char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
 }
-enum zapp_voice_intent zapp_voice_interpret(const char *text)
+/* Lowercases ASCII text, collapses whitespace and drops trailing punctuation. */
+static bool normalize(const char *text, char normalized[64])
 {
-    if (!text) return ZAPP_VOICE_UNKNOWN;
-    char normalized[64]; size_t used = 0; bool gap = false;
+    size_t used = 0; bool gap = false;
     for (; *text; ++text) {
         unsigned char c = (unsigned char)*text;
         if (space(c)) { gap = used != 0; continue; }
-        if (c >= 128 || used + (gap ? 1u : 0u) + 1 >= sizeof(normalized)) return ZAPP_VOICE_UNKNOWN;
+        if (c >= 128 || used + (gap ? 1u : 0u) + 1 >= 64) return false;
         if (gap) normalized[used++] = ' ';
         gap = false;
         normalized[used++] = (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
@@ -21,6 +21,12 @@ enum zapp_voice_intent zapp_voice_interpret(const char *text)
     while (used && (normalized[used - 1] == '?' || normalized[used - 1] == '.' || normalized[used - 1] == '!')) --used;
     while (used && normalized[used - 1] == ' ') --used;
     normalized[used] = 0;
+    return true;
+}
+enum zapp_voice_intent zapp_voice_interpret(const char *text)
+{
+    char normalized[64];
+    if (!text || !normalize(text, normalized)) return ZAPP_VOICE_UNKNOWN;
     static const struct { const char *phrase; enum zapp_voice_intent intent; } phrases[] = {
         {"status", ZAPP_VOICE_STATUS}, {"node status", ZAPP_VOICE_STATUS},
         {"the node status", ZAPP_VOICE_STATUS}, {"note status", ZAPP_VOICE_STATUS},
@@ -88,13 +94,17 @@ static bool chunks(const unsigned char *wav, size_t size, struct wav_parts *part
     }
     return have_format && parts->data;
 }
+static bool riff_header(const unsigned char *wav, size_t size)
+{
+    return wav && size >= 44 && size <= ZAPP_VOICE_WAV_BYTES && !memcmp(wav, "RIFF", 4) &&
+        !memcmp(wav + 8, "WAVE", 4) && read32(wav + 4) == size - 8;
+}
 bool zapp_voice_wav_decode(const unsigned char *wav, size_t size,
     int16_t *samples, size_t capacity, size_t *count, uint32_t *rate)
 {
     if (count) *count = 0;
     if (rate) *rate = 0;
-    if (!wav || !samples || !count || !rate || size < 44 || size > ZAPP_VOICE_WAV_BYTES ||
-        memcmp(wav, "RIFF", 4) || memcmp(wav + 8, "WAVE", 4) || read32(wav + 4) != size - 8) return false;
+    if (!samples || !count || !rate || !riff_header(wav, size)) return false;
     struct wav_parts parts = {0};
     if (!chunks(wav, size, &parts)) return false;
     size_t n = parts.bytes / 2;
@@ -127,16 +137,23 @@ bool zapp_endpoint_update(struct zapp_endpoint *e, const int16_t *frame, size_t 
     if (e->voiced >= 2) e->speech = true;
     return e->speech && e->quiet >= 8;
 }
-size_t zapp_voice_chunk(const char *text, size_t cap)
+/* Last sentence end within cap, else last clause end, else 0. */
+static size_t phrase_end(const char *text, size_t cap)
 {
-    size_t n = text ? strlen(text) : 0, end = 0, clause = 0;
-    if (n <= cap) return n;
+    size_t end = 0, clause = 0;
     for (size_t i = 0; i < cap; ++i) {
         bool boundary = text[i + 1] == ' ' || text[i + 1] == 0;
         if (boundary && strchr(".!?", text[i])) end = i + 1;
         else if (boundary && strchr(",;:", text[i])) clause = i + 1;
     }
-    if (end || clause) return end ? end : clause;
+    return end ? end : clause;
+}
+size_t zapp_voice_chunk(const char *text, size_t cap)
+{
+    size_t n = text ? strlen(text) : 0;
+    if (n <= cap) return n;
+    size_t end = phrase_end(text, cap);
+    if (end) return end;
     for (end = cap; end > 0 && text[end] != ' '; --end) {}
     if (!end) for (end = cap; end > 0 && ((unsigned char)text[end] & 0xc0) == 0x80; --end) {}
     return end ? end : cap;

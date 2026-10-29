@@ -42,28 +42,34 @@ static bool write_all(int fd, const unsigned char *bytes, size_t size)
     }
     return true;
 }
-static bool save_wav(const char *path, const int16_t *samples, size_t count, int rate)
+static void wav_fill(unsigned char *wav, size_t size, const int16_t *samples, size_t count, int rate)
 {
-    if (!count || count > 480000 || rate < 16000 || rate > 48000) return false;
-    size_t size = 44 + count * 2;
-    unsigned char *wav = calloc(1, size);
-    if (!wav) return false;
     memcpy(wav, "RIFF", 4); little32(wav + 4, (uint32_t)(size - 8));
     memcpy(wav + 8, "WAVEfmt ", 8); little32(wav + 16, 16);
     little16(wav + 20, 1); little16(wav + 22, 1); little32(wav + 24, (uint32_t)rate);
     little32(wav + 28, (uint32_t)rate * 2); little16(wav + 32, 2); little16(wav + 34, 16);
     memcpy(wav + 36, "data", 4); little32(wav + 40, (uint32_t)(count * 2));
     for (size_t i = 0; i < count; ++i) little16(wav + 44 + i * 2, (uint16_t)samples[i]);
+}
+static void remove_if_same(const char *path, const struct stat *identity)
+{
+    struct stat current;
+    if (!lstat(path, &current) && current.st_dev == identity->st_dev && current.st_ino == identity->st_ino)
+        (void)unlink(path);
+}
+static bool save_wav(const char *path, const int16_t *samples, size_t count, int rate)
+{
+    if (!count || count > 480000 || rate < 16000 || rate > 48000) return false;
+    size_t size = 44 + count * 2;
+    unsigned char *wav = calloc(1, size);
+    if (!wav) return false;
+    wav_fill(wav, size, samples, count, rate);
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     struct stat identity = {0};
     bool owned = fd >= 0 && !fstat(fd, &identity);
     bool ok = owned && !fchmod(fd, 0600) && write_all(fd, wav, size) && !fsync(fd);
     if (fd >= 0 && close(fd)) ok = false;
-    if (owned && !ok) {
-        struct stat current;
-        if (!lstat(path, &current) && current.st_dev == identity.st_dev && current.st_ino == identity.st_ino)
-            (void)unlink(path);
-    }
+    if (owned && !ok) remove_if_same(path, &identity);
     dispose(wav, size); return ok;
 }
 static bool load_capture(const char *path, int16_t *samples, size_t *count)
@@ -96,6 +102,30 @@ static bool report(struct json_value *result, int64_t start)
     if (ok) ok = puts(wire) >= 0;
     dispose(wire, size + 1); return ok;
 }
+static bool run_speak(char **argv, struct json_value *result, int16_t **samples)
+{
+    size_t count = 0; int rate = 0;
+    char error[256] = {0};
+    bool ok = zapp_speech_client_speak(argv[1], argv[3], samples, &count, &rate,
+        NULL, error, sizeof(error)) && save_wav(argv[4], *samples, count, rate) &&
+        json_push_kv_int(result, "samples", (int64_t)count) &&
+        json_push_kv_int(result, "sample_rate", rate);
+    memory_cleanse(error, sizeof(error));
+    return ok;
+}
+static bool run_transcribe(char **argv, struct json_value *result, int16_t **samples)
+{
+    size_t count = 0;
+    *samples = malloc(320000 * sizeof(**samples));
+    char *text = calloc(1, 65536);
+    bool ok = *samples && text && load_capture(argv[3], *samples, &count) &&
+        zapp_speech_client_transcribe(argv[1], *samples, count, text, 65536, NULL) &&
+        json_push_kv_str(result, "text", text) &&
+        json_push_kv_int(result, "samples", (int64_t)count) &&
+        json_push_kv_int(result, "sample_rate", 16000);
+    dispose(text, 65536);
+    return ok;
+}
 int main(int argc, char **argv)
 {
     bool speaking = argc == 5 && !strcmp(argv[2], "speak");
@@ -109,24 +139,8 @@ int main(int argc, char **argv)
     struct json_value result = {0}; json_set_object(&result);
     bool ok = json_push_kv_str(&result, "schema", "z23.speech-roundtrip/1") &&
         json_push_kv_str(&result, "operation", argv[2]);
-    int16_t *samples = NULL; size_t count = 0; int rate = 0;
-    if (ok && speaking) {
-        char error[256] = {0};
-        ok = zapp_speech_client_speak(argv[1], argv[3], &samples, &count, &rate,
-            NULL, error, sizeof(error)) && save_wav(argv[4], samples, count, rate) &&
-            json_push_kv_int(&result, "samples", (int64_t)count) &&
-            json_push_kv_int(&result, "sample_rate", rate);
-        memory_cleanse(error, sizeof(error));
-    } else if (ok) {
-        samples = malloc(320000 * sizeof(*samples));
-        char *text = calloc(1, 65536);
-        ok = samples && text && load_capture(argv[3], samples, &count) &&
-            zapp_speech_client_transcribe(argv[1], samples, count, text, 65536, NULL) &&
-            json_push_kv_str(&result, "text", text) &&
-            json_push_kv_int(&result, "samples", (int64_t)count) &&
-            json_push_kv_int(&result, "sample_rate", 16000);
-        dispose(text, 65536);
-    }
+    int16_t *samples = NULL;
+    if (ok) ok = speaking ? run_speak(argv, &result, &samples) : run_transcribe(argv, &result, &samples);
     if (ok) ok = report(&result, start);
     if (!ok) fputs("Speech integration failed; no successful result recorded.\n", stderr);
     dispose(samples, (speaking ? 480000u : 320000u) * sizeof(*samples));

@@ -124,22 +124,36 @@ static bool format_head(const struct zapp_http_request *r, char *head, size_t ca
     *length = n > 0 ? (size_t)n : 0;
     return n > 0 && (size_t)n < cap;
 }
+static bool request_valid(const struct zapp_http_request *r)
+{
+    return r && r->port && r->method && r->path && r->timeout_ms > 0 && r->response_cap &&
+        (!r->body || r->content_type);
+}
+static bool transfer(const struct zapp_http_request *r, int fd, const char *head, size_t head_length,
+                     unsigned char *raw, size_t cap, int64_t deadline, size_t *offset, size_t *length)
+{
+    size_t used = 0;
+    return fd >= 0 && send_all(fd, head, head_length, deadline, r->alive_fd) &&
+        (!r->body || send_all(fd, r->body, r->body_size, deadline, r->alive_fd)) &&
+        receive_all(fd, raw, cap, &used, deadline, r->alive_fd) &&
+        parse_response(raw, used, offset, length) && *length <= r->response_cap;
+}
 bool zapp_http_exchange(const struct zapp_http_request *r, unsigned char **body, size_t *size)
 {
     *body = NULL; *size = 0;
     char head[1024]; size_t head_length = 0;
-    if (!r || !r->port || !r->method || !r->path || r->timeout_ms <= 0 || !r->response_cap ||
-        (r->body && !r->content_type) || !format_head(r, head, sizeof(head), &head_length)) return false;
+    if (!request_valid(r) || !format_head(r, head, sizeof(head), &head_length)) return false;
     int64_t start = now_ms(), deadline = start + r->timeout_ms;
-    size_t cap = r->response_cap + HEADER_CAP, used = 0, offset = 0, length = 0;
+    size_t cap = r->response_cap + HEADER_CAP, offset = 0, length = 0;
     unsigned char *raw = start >= 0 ? malloc(cap + 1) : NULL;
     int fd = raw ? connect_loopback(r->port) : -1;
-    bool ok = fd >= 0 && send_all(fd, head, head_length, deadline, r->alive_fd) &&
-        (!r->body || send_all(fd, r->body, r->body_size, deadline, r->alive_fd)) &&
-        receive_all(fd, raw, cap, &used, deadline, r->alive_fd) &&
-        parse_response(raw, used, &offset, &length) && length <= r->response_cap;
+    bool ok = transfer(r, fd, head, head_length, raw, cap, deadline, &offset, &length);
     if (fd >= 0) close(fd);
-    if (ok) { memmove(raw, raw + offset, length); raw[length] = 0; *body = raw; *size = length; }
+    if (ok) {
+        memmove(raw, raw + offset, length); raw[length] = 0;
+        memory_cleanse(raw + length + 1, cap - length);
+        *body = raw; *size = length;
+    }
     else if (raw) { memory_cleanse(raw, cap + 1); free(raw); }
     return ok;
 }

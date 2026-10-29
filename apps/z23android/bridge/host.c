@@ -32,27 +32,35 @@ static bool path_join(char *out, size_t cap, const char *dir, const char *name)
     int n = snprintf(out, cap, "%s/%s", dir, name);
     return n > 0 && (size_t)n < cap;
 }
+static bool server_paths(const char *models, const char *dir, const struct model_role *role,
+                         char *model, char *mmproj, char *log, size_t cap)
+{
+    char logname[32];
+    snprintf(logname, sizeof(logname), "%s.log", role->name);
+    return path_join(model, cap, models, role->model) && !access(model, R_OK) &&
+        (!role->mmproj || (path_join(mmproj, cap, models, role->mmproj) && !access(mmproj, R_OK))) &&
+        path_join(log, cap, dir, logname);
+}
+static void exec_server(const char *exe, char *const argv[], const char *log)
+{
+    int nul = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int out = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (setpgid(0, 0) || prctl(PR_SET_PDEATHSIG, SIGTERM) || nul < 0 || out < 0 ||
+        dup2(nul, 0) < 0 || dup2(out, 1) < 0 || dup2(out, 2) < 0) _exit(127);
+    execv(exe, argv);
+    _exit(127);
+}
 static pid_t spawn_server(const char *exe, const char *models, const char *dir,
                           const struct model_role *role, uint16_t port)
 {
-    char model[1024], mmproj[1024], log[1024], port_text[8], logname[32];
+    char model[1024], mmproj[1024], log[1024], port_text[8];
     snprintf(port_text, sizeof(port_text), "%u", port);
-    snprintf(logname, sizeof(logname), "%s.log", role->name);
-    if (!path_join(model, sizeof(model), models, role->model) || access(model, R_OK) ||
-        (role->mmproj && (!path_join(mmproj, sizeof(mmproj), models, role->mmproj) || access(mmproj, R_OK))) ||
-        !path_join(log, sizeof(log), dir, logname)) return -1;
+    if (!server_paths(models, dir, role, model, mmproj, log, sizeof(model))) return -1;
     char *argv[] = {(char *)exe, "-m", model, "--host", "127.0.0.1", "--port", port_text,
         "-ngl", "99", "-c", (char *)role->context, "-np", "1",
         role->mmproj ? "--mmproj" : NULL, mmproj, NULL};
     pid_t pid = fork();
-    if (pid == 0) {
-        int nul = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        int out = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
-        if (setpgid(0, 0) || prctl(PR_SET_PDEATHSIG, SIGTERM) || nul < 0 || out < 0 ||
-            dup2(nul, 0) < 0 || dup2(out, 1) < 0 || dup2(out, 2) < 0) _exit(127);
-        execv(exe, argv);
-        _exit(127);
-    }
+    if (pid == 0) exec_server(exe, argv, log);
     if (pid > 0) (void)setpgid(pid, pid);
     return pid;
 }
@@ -105,6 +113,16 @@ void zapp_host_stop(struct zapp_host_servers *s)
         s->pid[i] = -1;
     }
 }
+static bool read_all(int fd, unsigned char *buf, size_t n)
+{
+    for (size_t used = 0; used < n;) {
+        ssize_t r = read(fd, buf + used, n - used);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return false;
+        used += (size_t)r;
+    }
+    return true;
+}
 bool zapp_host_read_file(const char *path, size_t cap, unsigned char **bytes, size_t *size)
 {
     *bytes = NULL; *size = 0;
@@ -112,18 +130,23 @@ bool zapp_host_read_file(const char *path, size_t cap, unsigned char **bytes, si
     struct stat st;
     bool ok = fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == getuid() &&
         st.st_size > 0 && (size_t)st.st_size <= cap;
-    size_t n = ok ? (size_t)st.st_size : 0, used = 0;
+    size_t n = ok ? (size_t)st.st_size : 0;
     unsigned char *buf = ok ? malloc(n + 1) : NULL;
-    ok = buf != NULL;
-    while (ok && used < n) {
-        ssize_t r = read(fd, buf + used, n - used);
-        if (r < 0 && errno == EINTR) continue;
-        if (r <= 0) ok = false; else used += (size_t)r;
-    }
+    ok = buf != NULL && read_all(fd, buf, n);
     if (fd >= 0) close(fd);
     if (ok) { buf[n] = 0; *bytes = buf; *size = n; }
     else if (buf) { memory_cleanse(buf, n + 1); free(buf); }
     return ok;
+}
+static bool write_all(int fd, const char *input)
+{
+    for (size_t used = 0, n = input ? strlen(input) : 0; used < n;) {
+        ssize_t w = write(fd, input + used, n - used);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return false;
+        used += (size_t)w;
+    }
+    return true;
 }
 static bool run_adb(const char *adb, char *const argv[], const char *input)
 {
@@ -138,11 +161,7 @@ static bool run_adb(const char *adb, char *const argv[], const char *input)
     }
     close(in[0]);
     bool ok = pid > 0;
-    for (size_t used = 0, n = input ? strlen(input) : 0; ok && used < n;) {
-        ssize_t w = write(in[1], input + used, n - used);
-        if (w < 0 && errno == EINTR) continue;
-        if (w <= 0) ok = false; else used += (size_t)w;
-    }
+    if (ok) ok = write_all(in[1], input);
     close(in[1]);
     int status = 0;
     while (pid > 0 && waitpid(pid, &status, 0) < 0 && errno == EINTR) {}

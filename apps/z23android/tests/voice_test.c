@@ -97,17 +97,25 @@ static bool feed(struct zapp_endpoint *e, int16_t amplitude, unsigned frames)
     for (unsigned f = 0; f < frames; ++f) ended = zapp_endpoint_update(e, frame, ZAPP_VOICE_FRAME);
     return ended;
 }
-static void endpoint(void)
+static void endpoint_speech(void)
 {
     struct zapp_endpoint e; zapp_endpoint_init(&e);
     assert(!feed(&e, 60, 5) && !feed(&e, 3000, 1) && !feed(&e, 60, 20) && !e.speech);
     assert(!feed(&e, 3000, 6) && e.speech && !feed(&e, 60, 7) && !feed(&e, 3000, 1));
     assert(!feed(&e, 60, 7) && feed(&e, 60, 1));
-    zapp_endpoint_init(&e);
+}
+static void endpoint_floor(void)
+{
+    struct zapp_endpoint e; zapp_endpoint_init(&e);
     assert(!feed(&e, 0, 3) && e.floor == UINT32_MAX && !feed(&e, 10, 5) && e.floor == 10);
     assert(!feed(&e, 149, 4) && !e.speech && !feed(&e, 150, 2) && e.speech);
     assert(e.peak == 150 && e.frames == 14);
     assert(!zapp_endpoint_update(&e, NULL, 1) && !zapp_endpoint_update(&e, (int16_t[1]){0}, 0));
+}
+static void endpoint(void)
+{
+    endpoint_speech();
+    endpoint_floor();
 }
 static void chunks(void)
 {

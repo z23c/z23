@@ -31,6 +31,6 @@ struct zapp_endpoint { uint32_t floor, peak, frames, voiced, quiet; bool speech;
 void zapp_endpoint_init(struct zapp_endpoint *e);
 bool zapp_endpoint_update(struct zapp_endpoint *e, const int16_t *frame, size_t count);
 /* Length of the next spoken chunk of at most cap bytes: whole sentences, else clauses, else
- * words, never splitting UTF-8. Returns 0 only for empty text. */
+ * words, never splitting UTF-8. Returns 0 only for empty text or a zero cap. */
 size_t zapp_voice_chunk(const char *text, size_t cap);
 #endif

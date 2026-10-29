@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -129,13 +130,41 @@ static bool fleet(const struct json_value *request, struct json_value *response)
 {
     bool refresh = string_is(request, "scope", "refresh");
     if (!refresh && !string_is(request, "scope", "status")) return false;
-    if (refresh || !fleet_time) (void)refresh_fleet();
+    pthread_mutex_lock(&fleet_lock);
+    bool observed = fleet_time != 0;
+    pthread_mutex_unlock(&fleet_lock);
+    if (refresh || !observed) (void)refresh_fleet();
     struct json_value snapshot = {0};
     pthread_mutex_lock(&fleet_lock);
     bool ok = fleet_time && json_read(&snapshot, fleet_snapshot, strlen(fleet_snapshot)) &&
         json_push_kv(response, "fleet", &snapshot);
     pthread_mutex_unlock(&fleet_lock);
     json_free(&snapshot);
+    return ok;
+}
+static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet"};
+static size_t find_op(const struct json_value *request)
+{
+    size_t op = 0;
+    while (op < 4 && !string_is(request, "op", ops[op])) op++;
+    return op;
+}
+static bool run_op(size_t op, const struct json_value *request, int client, struct json_value *response)
+{
+    if (op == 0) return transcribe(request, client, response);
+    if (op == 1) return chat(request, client, response);
+    if (op == 2) return synthesize(request, client, response);
+    if (op == 3) return fleet(request, response);
+    return false;
+}
+static bool timed_op(size_t op, const struct json_value *request, int client, struct json_value *response)
+{
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    bool ok = run_op(op, request, client, response);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    if (op < 4) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
+        (long long)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
     return ok;
 }
 static bool answer(int client, const char *prompt, char *out, size_t capacity, const char **error)
@@ -145,21 +174,7 @@ static bool answer(int client, const char *prompt, char *out, size_t capacity, c
     json_set_object(&response);
     bool ok = prompt && no_nul_escape(prompt) && json_read(&request, prompt, strlen(prompt)) &&
         request.type == JSON_OBJ && request.num_children == 3 && string_is(&request, "schema", "z23.voice/1");
-    static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet"};
-    size_t op = 0;
-    while (ok && op < 4 && !string_is(&request, "op", ops[op])) op++;
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    if (ok) {
-        if (op == 0) ok = transcribe(&request, client, &response);
-        else if (op == 1) ok = chat(&request, client, &response);
-        else if (op == 2) ok = synthesize(&request, client, &response);
-        else if (op == 3) ok = fleet(&request, &response);
-        else ok = false;
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        if (op < 4) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
-            (long long)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
-    }
+    if (ok) ok = timed_op(find_op(&request), &request, client, &response);
     if (ok) ok = json_write(&response, out, capacity) < capacity;
     if (!ok && capacity) out[0] = 0;
     json_cleanse_strings(&request); json_free(&request);
@@ -183,23 +198,40 @@ static const char usage[] =
     "Usage: z23-speech-bridge --dir DIR --llama-server PATH --models DIR [--port N]\n"
     "         [--speaker WAV] [--fleet label=ssh-destination,...]\n"
     "         [--adb PATH --serial SERIAL [--app PACKAGE]]\n";
+static bool set_option(int c, struct options *o)
+{
+    switch (c) {
+    case 'd': o->dir = optarg; return true;
+    case 'l': o->llama = optarg; return true;
+    case 'm': o->models = optarg; return true;
+    case 's': o->speaker = optarg; return true;
+    case 'f': o->fleet = optarg; return true;
+    case 'a': o->adb = optarg; return true;
+    case 'S': o->serial = optarg; return true;
+    case 'A': o->app = optarg; return true;
+    case 'p': {
+        long v = strtol(optarg, NULL, 10);
+        if (v < 1024 || v > 65530) return false;
+        o->port = (uint16_t)v; return true;
+    }
+    default: return false;
+    }
+}
+static bool options_valid(const struct options *o)
+{
+    return o->dir && o->llama && o->models && !o->adb == !o->serial &&
+        strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
+        (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
+}
 static bool parse(int argc, char **argv, struct options *o)
 {
     static const struct option longs[] = {{"dir", 1, 0, 'd'}, {"llama-server", 1, 0, 'l'},
         {"models", 1, 0, 'm'}, {"port", 1, 0, 'p'}, {"speaker", 1, 0, 's'}, {"fleet", 1, 0, 'f'},
         {"adb", 1, 0, 'a'}, {"serial", 1, 0, 'S'}, {"app", 1, 0, 'A'}, {0, 0, 0, 0}};
     *o = (struct options){.port = 8770, .app = "org.z23.nativeapp"};
-    for (int c; (c = getopt_long(argc, argv, "", longs, NULL)) != -1;) {
-        if (c == 'd') o->dir = optarg; else if (c == 'l') o->llama = optarg;
-        else if (c == 'm') o->models = optarg; else if (c == 's') o->speaker = optarg;
-        else if (c == 'f') o->fleet = optarg; else if (c == 'a') o->adb = optarg;
-        else if (c == 'S') o->serial = optarg; else if (c == 'A') o->app = optarg;
-        else if (c == 'p') { long v = strtol(optarg, NULL, 10); if (v < 1024 || v > 65530) return false; o->port = (uint16_t)v; }
-        else return false;
-    }
-    return optind == argc && o->dir && o->llama && o->models && !o->adb == !o->serial &&
-        strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
-        (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
+    for (int c; (c = getopt_long(argc, argv, "", longs, NULL)) != -1;)
+        if (!set_option(c, o)) return false;
+    return optind == argc && options_valid(o);
 }
 static char *load_speaker(const char *path)
 {
@@ -212,6 +244,7 @@ int main(int argc, char **argv)
 {
     struct options o;
     if (!parse(argc, argv, &o)) { fputs(usage, stderr); return 2; }
+    signal(SIGPIPE, SIG_IGN);
     struct zapp_host_servers servers;
     char *speaker = load_speaker(o.speaker);
     if (o.speaker && !speaker) { fputs("Could not read the speaker reference WAV.\n", stderr); return 1; }
@@ -223,6 +256,8 @@ int main(int argc, char **argv)
     if (o.adb && !pthread_create(&thread, NULL, pairing_loop, &o)) pthread_detach(thread);
     fprintf(stderr, "Z23 laptop host listening on 127.0.0.1:%u. Press Ctrl-C to stop.\n", o.port);
     int rc = zapp_relay_run_persistent(o.dir, o.port, answer, 1300000, 1950000);
+    if (rc) fprintf(stderr, "The laptop host stopped: port %u is in use or %s is not a private directory.\n",
+        o.port, o.dir);
     zapp_host_stop(&servers);
     free(speaker);
     return rc;

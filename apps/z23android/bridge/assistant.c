@@ -131,39 +131,54 @@ static uint32_t le32(const unsigned char *p)
 { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static void put32(unsigned char *p, uint32_t v)
 { p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8); p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24); }
+struct wav_info { unsigned format, channels, bits; uint32_t rate; const unsigned char *data; size_t bytes; };
+static void wav_fmt(struct wav_info *w, const unsigned char *p)
+{
+    w->format = p[0] | p[1] << 8; w->channels = p[2] | p[3] << 8;
+    w->rate = le32(p + 4); w->bits = p[14] | p[15] << 8;
+}
+static bool wav_scan(const unsigned char *in, size_t n, struct wav_info *w)
+{
+    for (size_t at = 12; at + 8 <= n;) {
+        size_t size = le32(in + at + 4), next = at + 8;
+        if (!memcmp(in + at, "data", 4)) { w->data = in + next; w->bytes = size > n - next ? n - next : size; return true; }
+        if (size > n - next) return false;
+        if (!memcmp(in + at, "fmt ", 4) && size >= 16) wav_fmt(w, in + next);
+        at = next + size + (size & 1);
+    }
+    return true;
+}
+static int32_t wav_sample(const unsigned char *data, size_t i, bool pcm)
+{
+    if (pcm) return (int16_t)(data[i * 2] | data[i * 2 + 1] << 8);
+    float f; uint32_t u = le32(data + i * 4); memcpy(&f, &u, 4);
+    return f != f ? 0 : f >= 1.0f ? 32767 : f <= -1.0f ? -32768 : (int32_t)(f * 32767.0f);
+}
+static unsigned char *wav_convert(const struct wav_info *i, bool pcm, size_t *out_size)
+{
+    size_t samples = i->bytes / (i->bits / 8), size = 44 + samples * 2;
+    unsigned char *w = samples ? malloc(size) : NULL;
+    if (!w) return NULL;
+    memcpy(w, "RIFF", 4); put32(w + 4, (uint32_t)size - 8); memcpy(w + 8, "WAVEfmt ", 8);
+    put32(w + 16, 16); w[20] = 1; w[21] = 0; w[22] = 1; w[23] = 0; put32(w + 24, i->rate);
+    put32(w + 28, i->rate * 2); w[32] = 2; w[33] = 0; w[34] = 16; w[35] = 0;
+    memcpy(w + 36, "data", 4); put32(w + 40, (uint32_t)samples * 2);
+    for (size_t k = 0; k < samples; k++) {
+        int32_t v = wav_sample(i->data, k, pcm);
+        w[44 + k * 2] = (unsigned char)(v & 0xff); w[45 + k * 2] = (unsigned char)((v >> 8) & 0xff);
+    }
+    *out_size = size; return w;
+}
 /* Accepts mono PCM16 or float32 WAV and returns mono PCM16 WAV at the same rate. */
 static bool pcm16(const unsigned char *in, size_t n, unsigned char **out, size_t *out_size)
 {
     if (n < 44 || memcmp(in, "RIFF", 4) || memcmp(in + 8, "WAVE", 4)) return false;
-    unsigned format = 0, channels = 0, bits = 0; uint32_t rate = 0;
-    const unsigned char *data = NULL; size_t bytes = 0;
-    for (size_t at = 12; at + 8 <= n;) {
-        size_t size = le32(in + at + 4), next = at + 8;
-        if (!memcmp(in + at, "data", 4)) { data = in + next; bytes = size > n - next ? n - next : size; break; }
-        if (size > n - next) return false;
-        if (!memcmp(in + at, "fmt ", 4) && size >= 16) {
-            format = in[next] | in[next + 1] << 8; channels = in[next + 2] | in[next + 3] << 8;
-            rate = le32(in + next + 4); bits = in[next + 14] | in[next + 15] << 8;
-        }
-        at = next + size + (size & 1);
-    }
-    bool pcm = format == 1 && bits == 16, flt = format == 3 && bits == 32;
-    if (!data || channels != 1 || rate < 8000 || rate > 48000 || !(pcm || flt)) return false;
-    size_t samples = bytes / (bits / 8), size = 44 + samples * 2;
-    unsigned char *w = samples ? malloc(size) : NULL;
-    if (!w) return false;
-    memcpy(w, "RIFF", 4); put32(w + 4, (uint32_t)size - 8); memcpy(w + 8, "WAVEfmt ", 8);
-    put32(w + 16, 16); w[20] = 1; w[21] = 0; w[22] = 1; w[23] = 0; put32(w + 24, rate);
-    put32(w + 28, rate * 2); w[32] = 2; w[33] = 0; w[34] = 16; w[35] = 0;
-    memcpy(w + 36, "data", 4); put32(w + 40, (uint32_t)samples * 2);
-    for (size_t i = 0; i < samples; i++) {
-        int32_t v;
-        if (pcm) v = (int16_t)(data[i * 2] | data[i * 2 + 1] << 8);
-        else { float f; uint32_t u = le32(data + i * 4); memcpy(&f, &u, 4);
-            v = f != f ? 0 : f >= 1.0f ? 32767 : f <= -1.0f ? -32768 : (int32_t)(f * 32767.0f); }
-        w[44 + i * 2] = (unsigned char)(v & 0xff); w[45 + i * 2] = (unsigned char)((v >> 8) & 0xff);
-    }
-    *out = w; *out_size = size; return true;
+    struct wav_info i = {0};
+    if (!wav_scan(in, n, &i)) return false;
+    bool pcm = i.format == 1 && i.bits == 16, flt = i.format == 3 && i.bits == 32;
+    if (!i.data || i.channels != 1 || i.rate < 8000 || i.rate > 48000 || !(pcm || flt)) return false;
+    *out = wav_convert(&i, pcm, out_size);
+    return *out != NULL;
 }
 bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
     int client, unsigned char **wav, size_t *size)

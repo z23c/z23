@@ -28,27 +28,47 @@ static bool write_all(int fd, const char *data, size_t size)
     }
     return true;
 }
+static bool pairing_descriptor(const char *json, size_t len, struct json_value *root)
+{
+    if (!len || len >= 256 || strstr(json, "\\u") || !json_read(root, json, len)) return false;
+    const char *token = json_get_str(json_get(root, "token"));
+    const struct json_value *port = json_get(root, "port");
+    return root->type == JSON_OBJ && root->num_children == 2 && token &&
+        strlen(token) == 64 && strspn(token, "0123456789abcdef") == 64 &&
+        port && port->type == JSON_INT && json_get_int(port) > 0 && json_get_int(port) <= 65535;
+}
+/* Opens the app files directory when only this user can write to it. */
+static int private_directory(const char *files)
+{
+    int dir = open(files, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (dir < 0) return -1;
+    if (fstat(dir, &st) == 0 && st.st_uid == getuid() && !(st.st_mode & 0002) &&
+        (!(st.st_mode & 0020) || st.st_gid == getgid())) return dir;
+    close(dir);
+    return -1;
+}
+static bool store_pairing(int dir, const char *json, size_t len)
+{
+    struct stat stale;
+    if (!fstatat(dir, ".speech-pairing", &stale, AT_SYMLINK_NOFOLLOW) && S_ISREG(stale.st_mode) &&
+        stale.st_uid == getuid()) (void)unlinkat(dir, ".speech-pairing", 0);
+    int fd = openat(dir, ".speech-pairing", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool ok = fd >= 0 && fchmod(fd, 0600) == 0 && write_all(fd, json, len) && fsync(fd) == 0;
+    if (fd >= 0 && close(fd)) ok = false;
+    if (ok) ok = renameat(dir, ".speech-pairing", dir, "speech-bridge.json") == 0;
+    if (fd >= 0 && !ok) (void)unlinkat(dir, ".speech-pairing", 0);
+    return ok;
+}
 bool zapp_speech_client_pair(const char *files, const char *json, char *error, size_t cap)
 {
     if (!files || !json || !error || !cap) return false;
     snprintf(error, cap, "Voice pairing is invalid. Paste the host pairing JSON.");
     size_t len = strlen(json);
     struct json_value root = {0};
-    bool ok = len && len < 256 && !strstr(json, "\\u") && json_read(&root, json, len);
-    const char *token = json_get_str(json_get(&root, "token"));
-    const struct json_value *port = json_get(&root, "port");
-    ok = ok && root.type == JSON_OBJ && root.num_children == 2 && token &&
-        strlen(token) == 64 && strspn(token, "0123456789abcdef") == 64 &&
-        port && port->type == JSON_INT && json_get_int(port) > 0 && json_get_int(port) <= 65535;
-    int dir = ok ? open(files, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    struct stat st;
-    ok = dir >= 0 && fstat(dir, &st) == 0 && st.st_uid == getuid() && !(st.st_mode & 0002) &&
-        (!(st.st_mode & 0020) || st.st_gid == getgid());
-    int fd = ok ? openat(dir, ".speech-pairing", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    ok = fd >= 0 && fchmod(fd, 0600) == 0 && write_all(fd, json, len) && fsync(fd) == 0;
-    if (fd >= 0 && close(fd)) ok = false;
-    if (ok) ok = renameat(dir, ".speech-pairing", dir, "speech-bridge.json") == 0;
-    if (fd >= 0 && !ok) (void)unlinkat(dir, ".speech-pairing", 0);
+    bool ok = pairing_descriptor(json, len, &root);
+    int dir = ok ? private_directory(files) : -1;
+    ok = dir >= 0 && store_pairing(dir, json, len);
     if (dir >= 0) close(dir);
     json_cleanse_strings(&root); json_free(&root);
     if (ok) snprintf(error, cap, "Voice host paired. Keep its USB tunnel connected.");

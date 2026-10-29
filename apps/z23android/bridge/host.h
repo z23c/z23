@@ -15,8 +15,9 @@ bool zapp_host_start(const char *llama_server, const char *models, const char *d
 void zapp_host_stop(struct zapp_host_servers *servers);
 /* Maps the phone's loopback port to the same port on this host. */
 bool zapp_host_route(const char *adb, const char *serial, uint16_t port);
-/* Maps the phone's loopback port to this host and offers the descriptor to the
- * app through adb standard input, so the token never appears in argv. */
+/* Maps the phone's loopback port to this host and offers the descriptor to the app.
+ * The token reaches adb on standard input, not in laptop process arguments; on the phone
+ * it is briefly visible to shell and root in the arguments of the am command. */
 bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *app, uint16_t port,
                              const char *directory);
 /* Reads a regular file of at most cap bytes owned by this user. */

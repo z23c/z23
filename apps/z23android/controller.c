@@ -241,6 +241,22 @@ static void voice_reply(struct controller *c, const char *transcript, char *answ
     voice_answer(c, intent, brief);
     copy_text(answer, ZAPP_TEXT_CAP, brief);
 }
+static bool speak_chunk(struct controller *c, const char *chunk, struct zapp_player **player,
+                        char *error, size_t error_cap)
+{
+    int16_t *samples = NULL; size_t count = 0; int rate = 0;
+    bool ok = zapp_speech_client_speak(c->files, chunk, &samples, &count, &rate,
+                                       &c->voice_cancel, error, error_cap);
+    if (ok && !*player && (ok = zapp_player_open(player, rate, error, error_cap)))
+        voice_stage(c, ZAPP_VOICE_PLAYING, "Speaking…");
+    if (ok && rate != zapp_player_rate(*player)) {
+        copy_text(error, error_cap, "Spoken audio changed format."); ok = false;
+    }
+    if (ok) ok = zapp_player_write(*player, samples, count, &c->voice_cancel, error, error_cap);
+    if (samples) memory_cleanse(samples, count * sizeof(*samples));
+    free(samples);
+    return ok;
+}
 /* Speaks the answer in chunks of similar length: laptop synthesis runs near real time with
  * a fixed cost per request, so the next chunk is ready about when the previous one ends. */
 static bool voice_speak(struct controller *c, const char *text, char *error, size_t error_cap)
@@ -251,21 +267,13 @@ static bool voice_speak(struct controller *c, const char *text, char *error, siz
         while (*p == ' ' || *p == '\n') p++;
         size_t n = zapp_voice_chunk(p, 80);
         if (!n) break;
-        char chunk[81]; int16_t *samples = NULL; size_t count = 0; int rate = 0;
+        char chunk[81];
         snprintf(chunk, sizeof(chunk), "%.*s", (int)n, p);
         p += n;
-        ok = zapp_speech_client_speak(c->files, chunk, &samples, &count, &rate,
-                                      &c->voice_cancel, error, error_cap);
-        if (ok && !player && (ok = zapp_player_open(&player, rate, error, error_cap)))
-            voice_stage(c, ZAPP_VOICE_PLAYING, "Speaking…");
-        if (ok && rate != zapp_player_rate(player)) {
-            copy_text(error, error_cap, "Spoken audio changed format."); ok = false;
-        }
-        if (ok) ok = zapp_player_write(player, samples, count, &c->voice_cancel, error, error_cap);
-        if (samples) memory_cleanse(samples, count * sizeof(*samples));
-        free(samples);
+        ok = speak_chunk(c, chunk, &player, error, error_cap);
     }
-    return zapp_player_close(player, ok, &c->voice_cancel, error, error_cap) && ok;
+    bool drain = !atomic_load(&c->voice_cancel);
+    return zapp_player_close(player, drain, &c->voice_cancel, ok ? error : NULL, ok ? error_cap : 0) && ok;
 }
 static bool voice_conversation(struct controller *c, char *out)
 {
@@ -284,77 +292,107 @@ static bool voice_conversation(struct controller *c, char *out)
     return true;
 }
 
-static bool execute_action(struct controller *c, const char *action, const char *arg,
-                           uint64_t ticket, char *out)
+static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
+{
+    char error[256] = "";
+    bool ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
+    if (!ok) { copy_text(out, ZAPP_TEXT_CAP, error); return false; }
+    ok = invitation(c, out);
+    copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation.");
+    return ok;
+}
+static bool execute_fleet(struct controller *c, const char *action, const char *arg,
+                          uint64_t ticket, char *out)
 {
     bool ok = false;
-    if (!strcmp(action, "node_start")) ok = zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
-    else if (!strcmp(action, "node_stop")) ok = zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
-    else if (!strcmp(action, "operation")) ok = zapp_operation_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
-    else if (!strcmp(action, "fleet_refresh")) ok = zapp_operation_run(&c->runtime, "fleet_doctor", out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "fleet_refresh")) ok = zapp_operation_run(&c->runtime, "fleet_doctor", out, ZAPP_TEXT_CAP);
     else if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
     else if (!strcmp(action, "fleet_join")) ok = zapp_fleet_join_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
     else if (!strcmp(action, "fleet_preview")) {
         ok = invitation(c, arg);
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the manager invitation." : "This is not a valid fleet invitation.");
-    } else if (!strcmp(action, "fleet_scan")) {
-        char error[256] = "";
-        ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
-        if (ok) { ok = invitation(c, out); copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation."); }
-        else copy_text(out, ZAPP_TEXT_CAP, error);
-    } else if (!strcmp(action, "chat")) ok = conversation_chat(c, arg, out);
-    else if (!strcmp(action, "voice_start")) ok = voice_conversation(c, out);
-    else if (!strcmp(action, "voice_pair")) {
-        char error[256] = "";
-        ok = zapp_speech_client_pair(c->files, arg, error, sizeof(error));
-        copy_text(out, ZAPP_TEXT_CAP, ok ? "Laptop host paired. Press Talk to begin." :
-            "Pairing failed. Restart the laptop host to offer pairing again.");
-        if (ok) {
-            pthread_mutex_lock(&c->lock);
-            ++c->view.voice_pair_generation;
-            c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0;
-            copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Laptop host paired. Press Talk to begin.");
-            pthread_mutex_unlock(&c->lock);
-        }
-        memory_cleanse(error, sizeof(error));
-    }
+    } else if (!strcmp(action, "fleet_scan")) ok = scan_invitation(c, ticket, out);
     return ok;
 }
+static bool pair_voice_host(struct controller *c, const char *arg, char *out)
+{
+    char error[256] = "";
+    bool ok = zapp_speech_client_pair(c->files, arg, error, sizeof(error));
+    copy_text(out, ZAPP_TEXT_CAP, ok ? "Laptop host paired. Press Talk to begin." :
+        "Pairing failed. Restart the laptop host to offer pairing again.");
+    if (ok) {
+        pthread_mutex_lock(&c->lock);
+        ++c->view.voice_pair_generation;
+        c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0;
+        copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Laptop host paired. Press Talk to begin.");
+        pthread_mutex_unlock(&c->lock);
+    }
+    memory_cleanse(error, sizeof(error));
+    return ok;
+}
+static bool execute_action(struct controller *c, const char *action, const char *arg,
+                           uint64_t ticket, char *out)
+{
+    if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, ticket, out);
+    if (!strcmp(action, "node_start")) return zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "node_stop")) return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "operation")) return zapp_operation_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
+    if (!strcmp(action, "voice_start")) return voice_conversation(c, out);
+    if (!strcmp(action, "voice_pair")) return pair_voice_host(c, arg, out);
+    return false;
+}
 
+/* Caller holds c->lock. Returns false when the voice turn was cancelled. */
+static bool voice_result(struct controller *c, bool ok, const char *out)
+{
+    c->view.voice_state = ZAPP_VOICE_READY;
+    if (atomic_load(&c->voice_cancel)) {
+        c->view.voice_proposal[0] = 0;
+        copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Voice cancelled. Press Talk to begin again.");
+        return false;
+    }
+    if (!ok) copy_text(c->view.voice_status, sizeof(c->view.voice_status), out);
+    else if (!strcmp(c->view.voice_status, "Speaking…"))
+        copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Ready. Press Talk to begin.");
+    return true;
+}
+/* Caller holds c->lock. Returns false when the reply was cancelled. */
+static bool chat_state(struct controller *c)
+{
+    c->view.reply_state = ZAPP_REPLY_READY;
+    if (!atomic_load(&c->reply_cancel)) return true;
+    copy_text(c->view.notice, sizeof(c->view.notice), "Reply cancelled.");
+    return false;
+}
+/* Caller holds c->lock. */
+static void chat_outcome(struct controller *c, const char *arg, bool ok, char *out)
+{
+    if (ok) {
+        chat_result(c, arg, out);
+        copy_text(c->view.connection, sizeof(c->view.connection), "Answered privately by the model on your laptop.");
+    } else if (strcmp(out, "Question is invalid or too long.") &&
+               strcmp(out, "Not enough memory to prepare the question."))
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host unavailable. Connect it over USB and keep it running.");
+}
+/* Caller holds c->lock. */
+static bool join_result(struct controller *c, char *out)
+{
+    bool ok = parse_receipt(out, c->view.fleet_receipt, sizeof(c->view.fleet_receipt));
+    if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show the receipt QR to your manager. Admission and network connection are still pending."); }
+    return ok;
+}
 static void execute_result(struct controller *c, const char *action, const char *arg,
                            char *out, bool ok)
 {
+    bool chat = !strcmp(action, "chat");
     pthread_mutex_lock(&c->lock);
-    if (!strcmp(action, "voice_start")) {
-        c->view.voice_state = ZAPP_VOICE_READY;
-        if (atomic_load(&c->voice_cancel)) {
-            c->view.voice_proposal[0] = 0;
-            copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Voice cancelled. Press Talk to begin again.");
-            pthread_mutex_unlock(&c->lock); return;
-        }
-        if (!ok) copy_text(c->view.voice_status, sizeof(c->view.voice_status), out);
-        else if (!strcmp(c->view.voice_status, "Speaking…"))
-            copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Ready. Press Talk to begin.");
+    if (!strcmp(action, "voice_start") && !voice_result(c, ok, out)) {
+        pthread_mutex_unlock(&c->lock); return;
     }
-    if (!strcmp(action, "chat")) {
-        c->view.reply_state = ZAPP_REPLY_READY;
-        if (atomic_load(&c->reply_cancel)) {
-            copy_text(c->view.notice, sizeof(c->view.notice), "Reply cancelled.");
-            pthread_mutex_unlock(&c->lock);
-            return;
-        }
-    }
-    if (!strcmp(action, "fleet_join") && ok) {
-        ok = parse_receipt(out, c->view.fleet_receipt, sizeof(c->view.fleet_receipt));
-        if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show the receipt QR to your manager. Admission and network connection are still pending."); }
-    }
-    if (!strcmp(action, "chat") && ok) {
-        chat_result(c, arg, out);
-        copy_text(c->view.connection, sizeof(c->view.connection), "Answered privately by the model on your laptop.");
-    }
-    if (!strcmp(action, "chat") && !ok && strcmp(out, "Question is invalid or too long.") &&
-        strcmp(out, "Not enough memory to prepare the question."))
-        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host unavailable. Connect it over USB and keep it running.");
+    if (chat && !chat_state(c)) { pthread_mutex_unlock(&c->lock); return; }
+    if (!strcmp(action, "fleet_join") && ok) ok = join_result(c, out);
+    if (chat) chat_outcome(c, arg, ok, out);
     copy_text(c->view.output, sizeof(c->view.output), out);
     copy_text(c->view.notice, sizeof(c->view.notice), ok ? "" : out[0] ? out : "Operation could not complete.");
     c->view.scanning = false;
@@ -479,6 +517,69 @@ static bool valid_action_request(const char *action, const char *arg)
         action_allowed(action));
 }
 
+static bool is_voice_control(const char *action)
+{
+    return !strcmp(action, "voice_finish") || !strcmp(action, "voice_cancel");
+}
+/* Caller holds c->lock. */
+static void voice_control(struct controller *c, const char *action)
+{
+    if (!strcmp(action, "voice_finish")) { atomic_store(&c->voice_stop, true); return; }
+    atomic_store(&c->voice_cancel, true);
+    c->view.voice_proposal[0] = 0;
+    if (c->view.voice_state != ZAPP_VOICE_READY) c->view.voice_state = ZAPP_VOICE_CANCELLING;
+}
+static bool is_pair_control(const char *action)
+{
+    return !strcmp(action, "pair_offer") || !strcmp(action, "pair_reject");
+}
+/* Caller holds c->lock. Returns whether the request was accepted. */
+static bool pair_control(struct controller *c, const char *action, const char *arg)
+{
+    bool known = !strcmp(action, "pair_offer") && zapp_speech_client_paired(c->files, arg);
+    bool offer = !known && !strcmp(action, "pair_offer") && strlen(arg) < sizeof(c->view.pair_offer) &&
+        zapp_pair_code(arg, c->view.pair_code);
+    copy_text(c->view.pair_offer, sizeof(c->view.pair_offer), offer ? arg : "");
+    if (!offer) c->view.pair_code[0] = 0;
+    if (known) copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
+    return offer || known || !strcmp(action, "pair_reject");
+}
+static const char *confirmed_action(const struct controller *c)
+{
+    if (!strcmp(c->view.voice_proposal, "node_start")) return "node_start";
+    if (!strcmp(c->view.voice_proposal, "node_stop")) return "node_stop";
+    return NULL;
+}
+/* Caller holds c->lock. Rewrites `action` and `arg` for confirmations; false rejects the request. */
+static bool resolve_action(struct controller *c, const char **action, const char **arg)
+{
+    if (c->view.busy) return false;
+    if (!strcmp(*action, "pair_accept")) {
+        if (!c->view.pair_offer[0]) return false;
+        *action = "voice_pair"; *arg = c->view.pair_offer;
+    }
+    if (!strcmp(*action, "voice_confirm") && !(*action = confirmed_action(c))) return false;
+    if (!strcmp(*action, "fleet_join")) *arg = c->view.fleet_token;
+    return (*arg)[0] || (strcmp(*action, "chat") && strcmp(*action, "fleet_join"));
+}
+/* Caller holds c->lock. */
+static void queue_action(struct controller *c, const char *action, const char *arg)
+{
+    c->view.voice_proposal[0] = 0;
+    if (!strcmp(action, "voice_start")) {
+        atomic_store(&c->voice_cancel, false); atomic_store(&c->voice_stop, false);
+        c->view.voice_state = ZAPP_VOICE_RECORDING;
+        copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Starting recording…");
+    }
+    copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
+    c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
+    c->view.scanning = !strcmp(action, "fleet_scan"); c->view.notice[0] = 0;
+    if (!strcmp(action, "chat")) {
+        atomic_store(&c->reply_cancel, false);
+        c->view.reply_state = ZAPP_REPLY_WAITING;
+    }
+    pthread_cond_signal(&c->changed);
+}
 bool zapp_controller_action(const char *action, const char *arg, const char *model)
 {
     (void)model;
@@ -487,54 +588,11 @@ bool zapp_controller_action(const char *action, const char *arg, const char *mod
     pthread_mutex_lock(&startup_lock); struct controller *c = current;
     if (!c) { pthread_mutex_unlock(&startup_lock); return false; }
     pthread_mutex_lock(&c->lock);
-    if (!strcmp(action, "voice_finish") || !strcmp(action, "voice_cancel")) {
-        if (!strcmp(action, "voice_finish")) atomic_store(&c->voice_stop, true);
-        else {
-            atomic_store(&c->voice_cancel, true);
-            c->view.voice_proposal[0] = 0;
-            if (c->view.voice_state != ZAPP_VOICE_READY) c->view.voice_state = ZAPP_VOICE_CANCELLING;
-        }
-        pthread_mutex_unlock(&c->lock); pthread_mutex_unlock(&startup_lock);
-        notify_view(c); return true;
-    }
-    if (!strcmp(action, "pair_offer") || !strcmp(action, "pair_reject")) {
-        bool known = !strcmp(action, "pair_offer") && zapp_speech_client_paired(c->files, arg);
-        bool offer = !known && !strcmp(action, "pair_offer") && strlen(arg) < sizeof(c->view.pair_offer) &&
-            zapp_pair_code(arg, c->view.pair_code);
-        copy_text(c->view.pair_offer, sizeof(c->view.pair_offer), offer ? arg : "");
-        if (!offer) c->view.pair_code[0] = 0;
-        if (known) copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
-        pthread_mutex_unlock(&c->lock); pthread_mutex_unlock(&startup_lock);
-        notify_view(c); return offer || known || !strcmp(action, "pair_reject");
-    }
-    bool ok = !c->view.busy;
-    if (ok && !strcmp(action, "pair_accept")) {
-        ok = c->view.pair_offer[0] != 0;
-        action = "voice_pair"; arg = c->view.pair_offer;
-    }
-    if (ok && !strcmp(action, "voice_confirm")) {
-        if (!strcmp(c->view.voice_proposal, "node_start")) action = "node_start";
-        else if (!strcmp(c->view.voice_proposal, "node_stop")) action = "node_stop";
-        else ok = false;
-    }
-    if (ok && !strcmp(action, "fleet_join")) arg = c->view.fleet_token;
-    if (ok && (!strcmp(action, "chat") || !strcmp(action, "fleet_join")) && !arg[0]) ok = false;
-    if (ok) {
-        c->view.voice_proposal[0] = 0;
-        if (!strcmp(action, "voice_start")) {
-            atomic_store(&c->voice_cancel, false); atomic_store(&c->voice_stop, false);
-            c->view.voice_state = ZAPP_VOICE_RECORDING;
-            copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Starting recording…");
-        }
-        copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
-        c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-        c->view.scanning = !strcmp(action, "fleet_scan"); c->view.notice[0] = 0;
-        if (!strcmp(action, "chat")) {
-            atomic_store(&c->reply_cancel, false);
-            c->view.reply_state = ZAPP_REPLY_WAITING;
-        }
-        pthread_cond_signal(&c->changed);
-    }
+    bool control = is_voice_control(action), pairing = is_pair_control(action);
+    bool ok = true;
+    if (control) voice_control(c, action);
+    else if (pairing) ok = pair_control(c, action, arg);
+    else if ((ok = resolve_action(c, &action, &arg))) queue_action(c, action, arg);
     pthread_mutex_unlock(&c->lock); pthread_mutex_unlock(&startup_lock);
     if (ok) notify_view(c);
     return ok;

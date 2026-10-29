@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "app.h"
+#include "base/cleanse.h"
 #include "camera.h"
 #include "controller.h"
 #include "native_ui.h"
@@ -210,23 +211,33 @@ static bool native_directory(JNIEnv *env, jobject activity, char *out, size_t ca
 out:
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
+static jobject launch_intent(JNIEnv *env, jobject activity)
+{
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = cls ? (*env)->GetMethodID(env, cls, "getIntent", "()Landroid/content/Intent;") : NULL;
+    return clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+}
+static bool copy_utf(JNIEnv *env, jstring value, char *out, size_t cap)
+{
+    const char *chars = clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
+    bool ok = chars && strlen(chars) < cap;
+    if (ok) memcpy(out, chars, strlen(chars) + 1);
+    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+    return ok;
+}
 /* Reads and removes the pairing descriptor a USB-connected laptop host offered
  * through the launch intent. The owner still accepts it on screen. */
 static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
 {
     bool ok = false;
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
-    jclass cls = (*env)->GetObjectClass(env, activity);
-    jmethodID get = cls ? (*env)->GetMethodID(env, cls, "getIntent", "()Landroid/content/Intent;") : NULL;
-    jobject intent = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    jobject intent = launch_intent(env, activity);
     jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
     jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
     jmethodID remove = intent_cls ? (*env)->GetMethodID(env, intent_cls, "removeExtra", "(Ljava/lang/String;)V") : NULL;
     jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.pair") : NULL;
     jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
-    const char *chars = clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
-    if (chars && strlen(chars) < cap) { memcpy(out, chars, strlen(chars) + 1); ok = true; }
-    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+    ok = copy_utf(env, value, out, cap);
     if (value) (*env)->CallVoidMethod(env, intent, remove, key);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
@@ -311,7 +322,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     char offer[256];
     if (intent_pairing(env, activity->clazz, offer, sizeof(offer))) {
         (void)zapp_controller_action("pair_offer", offer, "");
-        memset(offer, 0, sizeof(offer));
+        memory_cleanse(offer, sizeof(offer));
     }
     refresh(env); return;
 fail:

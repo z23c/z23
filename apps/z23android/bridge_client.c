@@ -134,20 +134,32 @@ static bool bridge_response(bool ok, const struct json_value *response, char *ou
     }
     return ok;
 }
+static bool encode_request(struct json_value *request, char *wire, const char *token,
+                           const char *prompt, size_t *size)
+{
+    bool ok = wire && json_push_kv_str(request, "token", token) && json_push_kv_str(request, "prompt", prompt);
+    *size = ok ? json_write(request, wire, WIRE_CAP - 1) : WIRE_CAP;
+    if (*size < WIRE_CAP - 1) wire[(*size)++] = '\n'; else ok = false;
+    return ok;
+}
+static bool read_reply(int fd, const char *wire, size_t size, char *reply, int64_t deadline,
+                       const atomic_bool *cancel, struct json_value *response)
+{
+    return fd >= 0 && exchange_send(fd, wire, size, deadline, cancel) &&
+        exchange_receive(fd, reply, deadline, cancel) && !cancelled(cancel) &&
+        !strstr(reply, "\\u0000") && json_read(response, reply, strlen(reply)) &&
+        response->type == JSON_OBJ && response->num_children == 2;
+}
 static bool bridge_exchange(const char *prompt, const char *token, uint16_t port,
                             char *out, size_t cap, const atomic_bool *cancel)
 {
     struct json_value request = {0}, response = {0}; json_set_object(&request);
     char *wire = calloc(1, WIRE_CAP), *reply = calloc(1, WIRE_CAP);
-    bool ok = wire && reply && json_push_kv_str(&request, "token", token) && json_push_kv_str(&request, "prompt", prompt);
-    size_t size = ok ? json_write(&request, wire, WIRE_CAP - 1) : WIRE_CAP;
-    if (size < WIRE_CAP - 1) wire[size++] = '\n'; else ok = false;
+    size_t size = 0;
+    bool ok = reply && encode_request(&request, wire, token, prompt, &size);
     int64_t now = now_ms();
     int fd = ok && now >= 0 ? connect_local(port, now + 100000, cancel) : -1;
-    ok = fd >= 0 && exchange_send(fd, wire, size, now + 100000, cancel) &&
-        exchange_receive(fd, reply, now + 100000, cancel) && !cancelled(cancel) &&
-        !strstr(reply, "\\u0000") && json_read(&response, reply, strlen(reply)) &&
-        response.type == JSON_OBJ && response.num_children == 2;
+    ok = read_reply(fd, wire, size, reply, now + 100000, cancel, &response);
     if (fd >= 0) close(fd);
     ok = bridge_response(ok, &response, out, cap);
     json_cleanse_strings(&request); json_free(&request);

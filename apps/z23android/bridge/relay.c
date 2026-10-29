@@ -102,7 +102,8 @@ static bool write_descriptor(int fd, uint16_t port, const char *token)
     memory_cleanse(data, sizeof(data));
     return ok;
 }
-static int publish(int dir, uint16_t port, const char *token, struct stat *identity)
+/* A persistent relay owns its fixed port, so an existing descriptor is stale and is replaced. */
+static int publish(int dir, uint16_t port, const char *token, bool replace, struct stat *identity)
 {
     char nonce[65], name[96];
     if (!random_token(nonce)) return -1;
@@ -113,7 +114,8 @@ static int publish(int dir, uint16_t port, const char *token, struct stat *ident
     if (fd < 0) return -1;
     if (fstat(fd, identity)) { close(fd); return -1; }
     bool ok = write_descriptor(fd, port, token) && same_file(dir, name, identity) &&
-              linkat(dir, name, dir, "codex-bridge.json", 0) == 0 &&
+              (replace ? renameat(dir, name, dir, "codex-bridge.json") :
+                         linkat(dir, name, dir, "codex-bridge.json", 0)) == 0 &&
               same_file(dir, "codex-bridge.json", identity);
     remove_owned(dir, name, identity);
     if (!ok) {
@@ -220,15 +222,46 @@ static bool stored_token(int dir, char token[65])
     close(fd); token[64] = 0;
     return n == 64 && strspn(token, "0123456789abcdef") == 64;
 }
+/* Reuses a valid stored token; otherwise writes a new one through a private temporary
+ * file and renames it over any partial or invalid token left by an interrupted start. */
 static bool persistent_token(int dir, char token[65])
 {
     if (stored_token(dir, token)) return true;
     if (!random_token(token)) return false;
-    int fd = openat(dir, "host-token", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    (void)unlinkat(dir, ".host-token", 0);
+    int fd = openat(dir, ".host-token", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     bool ok = fd >= 0 && fchmod(fd, 0600) == 0 && write(fd, token, 64) == 64 && fsync(fd) == 0;
     if (fd >= 0 && close(fd)) ok = false;
-    if (!ok && fd >= 0) (void)unlinkat(dir, "host-token", 0);
+    ok = ok && renameat(dir, ".host-token", dir, "host-token") == 0;
+    if (!ok && fd >= 0) (void)unlinkat(dir, ".host-token", 0);
     return ok;
+}
+static const int stop_signals[] = {SIGINT, SIGTERM, SIGHUP};
+static bool catch_stop(struct sigaction old[3])
+{
+    struct sigaction sa = {.sa_handler = stop_signal};
+    sigemptyset(&sa.sa_mask); stopping = 0;
+    for (size_t i = 0; i < 3; ++i)
+        if (sigaction(stop_signals[i], &sa, &old[i])) {
+            while (i--) sigaction(stop_signals[i], &old[i], NULL);
+            return false;
+        }
+    return true;
+}
+static void release_stop(const struct sigaction old[3])
+{
+    for (size_t i = 0; i < 3; ++i) sigaction(stop_signals[i], &old[i], NULL);
+}
+static int accept_loop(int server, const char *token,
+                       bool (*answer)(int, const char *, char *, size_t, const char **))
+{
+    while (!stopping) {
+        int64_t now = now_ms(); if (now < 0) return 1;
+        if (!wait_fd(server, POLLIN, now + 1000)) continue;
+        int client = accept4(server, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (client >= 0) { serve(client, token, answer); close(client); }
+    }
+    return 0;
 }
 static int relay_run(const char *directory, uint16_t port, bool persistent,
                      bool (*answer)(int, const char *, char *, size_t, const char **),
@@ -241,22 +274,14 @@ static int relay_run(const char *directory, uint16_t port, bool persistent,
     char token[65] = {0}; struct stat identity;
     int server = listen_local(&port), descriptor = -1, rc = 1;
     if (server < 0 || !(persistent ? persistent_token(dir, token) : random_token(token))) goto done;
-    struct sigaction sa = {.sa_handler = stop_signal}, old_int, old_term;
-    sigemptyset(&sa.sa_mask); stopping = 0;
-    if (sigaction(SIGINT, &sa, &old_int)) goto done;
-    if (sigaction(SIGTERM, &sa, &old_term)) { sigaction(SIGINT, &old_int, NULL); goto done; }
-    descriptor = publish(dir, port, token, &identity);
+    struct sigaction old[3];
+    if (!catch_stop(old)) goto done;
+    descriptor = publish(dir, port, token, persistent, &identity);
     if (descriptor >= 0) {
-        rc = 0;
-        while (!stopping) {
-            int64_t now = now_ms(); if (now < 0) { rc = 1; break; }
-            if (!wait_fd(server, POLLIN, now + 1000)) continue;
-            int client = accept4(server, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-            if (client >= 0) { serve(client, token, answer); close(client); }
-        }
+        rc = accept_loop(server, token, answer);
         unpublish(dir, &identity); close(descriptor);
     }
-    sigaction(SIGTERM, &old_term, NULL); sigaction(SIGINT, &old_int, NULL);
+    release_stop(old);
 done:
     if (server >= 0) close(server);
     close(dir); memory_cleanse(token, sizeof(token)); return rc;

@@ -16,7 +16,8 @@ static const char *const replies[] = {
     "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
     "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\n\r\nfail",
     "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort",
-    "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\ntoo long body",
+    "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\ntoo long body",
+    "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\ntoo long body",
     "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nZZ\r\nbad\r\n0\r\n\r\n",
 };
 static int listener;
@@ -43,21 +44,26 @@ static bool exchange(uint16_t port, bool post, size_t cap, unsigned char **body,
         .timeout_ms = 5000, .alive_fd = -1};
     return zapp_http_exchange(&r, body, size);
 }
-int main(void)
+static uint16_t open_listener(void)
 {
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     socklen_t n = sizeof(a);
     listener = socket(AF_INET, SOCK_STREAM, 0);
     assert(listener >= 0 && !bind(listener, (struct sockaddr *)&a, n) && !listen(listener, 8) &&
         !getsockname(listener, (struct sockaddr *)&a, &n));
-    uint16_t port = ntohs(a.sin_port);
+    return ntohs(a.sin_port);
+}
+int main(void)
+{
+    uint16_t port = open_listener();
     pthread_t thread; assert(!pthread_create(&thread, NULL, serve, NULL));
     unsigned char *body = NULL; size_t size = 0;
     assert(exchange(port, false, 64, &body, &size) && size == 5 && !strcmp((char *)body, "hello")); free(body);
     assert(exchange(port, true, 64, &body, &size) && size == 11 && !strcmp((char *)body, "hello world")); free(body);
     assert(!exchange(port, true, 64, &body, &size) && !body && !size);
     assert(!exchange(port, true, 64, &body, &size) && !body);
-    assert(!exchange(port, true, 8, &body, &size) && !body);
+    assert(!exchange(port, true, 12, &body, &size) && !body);
+    assert(exchange(port, true, 13, &body, &size) && size == 13 && !strcmp((char *)body, "too long body")); free(body);
     assert(!exchange(port, true, 64, &body, &size) && !body);
     pthread_join(thread, NULL); close(listener);
     assert(!exchange(port, false, 64, &body, &size) && !body);

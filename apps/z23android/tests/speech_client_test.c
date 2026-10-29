@@ -55,24 +55,24 @@ static void path_join(char *out, size_t cap, const char *directory, const char *
     int n = snprintf(out, cap, "%s/%s", directory, name);
     assert(n > 0 && (size_t)n < cap);
 }
-static void pairing_cases(const char *directory)
+struct pair_paths { char path[4096], stage[4096], target[4096], linked[4096]; };
+static void stored_pairing(const char *directory, const struct pair_paths *p)
 {
-    char error[256], path[4096], stage[4096], target[4096], linked[4096];
-    path_join(path, sizeof(path), directory, "speech-bridge.json");
-    path_join(stage, sizeof(stage), directory, ".speech-pairing");
-    path_join(target, sizeof(target), directory, "target");
-    path_join(linked, sizeof(linked), directory, "linked");
+    char error[256], bytes[256] = {0};
     mode_t mask = umask(0777);
     assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
     umask(mask);
     struct stat st;
-    assert(!lstat(path, &st) && S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600);
+    assert(!lstat(p->path, &st) && S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600);
     assert(zapp_speech_client_paired(directory, pairing) && !zapp_speech_client_paired(directory, "{}"));
     assert(!zapp_speech_client_paired(NULL, pairing) && !zapp_speech_client_paired(directory, NULL));
-    char bytes[256] = {0};
-    int fd = open(path, O_RDONLY);
+    int fd = open(p->path, O_RDONLY);
     assert(fd >= 0 && read(fd, bytes, sizeof(bytes)) == (ssize_t)strlen(pairing) && !strcmp(bytes, pairing));
     assert(!close(fd));
+}
+static void invalid_pairing(const char *directory, const struct pair_paths *p)
+{
+    char error[256];
     const char *invalid[] = {
         "{}", "[]", "{\"port\":12345,\"token\":\"short\"}",
         "{\"port\":65536,\"token\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
@@ -82,23 +82,47 @@ static void pairing_cases(const char *directory)
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
         assert(!zapp_speech_client_pair(directory, invalid[i], error, sizeof(error)));
-    assert(!symlink(directory, linked));
-    assert(!zapp_speech_client_pair(linked, pairing, error, sizeof(error)));
-    assert(!unlink(linked));
-    fd = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(!symlink(directory, p->linked));
+    assert(!zapp_speech_client_pair(p->linked, pairing, error, sizeof(error)));
+    assert(!unlink(p->linked));
+}
+static void staged_pairing(const char *directory, const struct pair_paths *p)
+{
+    char error[256], bytes[256] = {0};
+    struct stat st;
+    int fd = open(p->target, O_WRONLY | O_CREAT | O_EXCL, 0600);
     assert(fd >= 0 && write(fd, "keep", 4) == 4 && !close(fd));
-    assert(!symlink(target, stage));
+    assert(!symlink(p->target, p->stage));
     assert(!zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
-    assert(!unlink(stage));
-    assert(!unlink(path) && !symlink(target, path));
+    assert(!unlink(p->stage));
+    fd = open(p->stage, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && write(fd, "{", 1) == 1 && !close(fd));
+    assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)) && access(p->stage, F_OK));
+    assert(!unlink(p->path) && !symlink(p->target, p->path));
     assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
-    assert(!lstat(path, &st) && S_ISREG(st.st_mode));
-    memset(bytes, 0, sizeof(bytes)); fd = open(target, O_RDONLY);
+    assert(!lstat(p->path, &st) && S_ISREG(st.st_mode));
+    fd = open(p->target, O_RDONLY);
     assert(fd >= 0 && read(fd, bytes, sizeof(bytes)) == 4 && !strcmp(bytes, "keep") && !close(fd));
-    assert(!unlink(target) && !unlink(path));
+    assert(!unlink(p->target) && !unlink(p->path));
+}
+static void directory_modes(const char *directory, const struct pair_paths *p)
+{
+    char error[256];
     assert(!chmod(directory, 0771) && zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
-    assert(!unlink(path) && !chmod(directory, 0703));
+    assert(!unlink(p->path) && !chmod(directory, 0703));
     assert(!zapp_speech_client_pair(directory, pairing, error, sizeof(error)) && !chmod(directory, 0700));
+}
+static void pairing_cases(const char *directory)
+{
+    struct pair_paths p;
+    path_join(p.path, sizeof(p.path), directory, "speech-bridge.json");
+    path_join(p.stage, sizeof(p.stage), directory, ".speech-pairing");
+    path_join(p.target, sizeof(p.target), directory, "target");
+    path_join(p.linked, sizeof(p.linked), directory, "linked");
+    stored_pairing(directory, &p);
+    invalid_pairing(directory, &p);
+    staged_pairing(directory, &p);
+    directory_modes(directory, &p);
 }
 static void transcribe_cases(const char *directory)
 {

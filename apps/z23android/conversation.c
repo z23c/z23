@@ -14,6 +14,16 @@ static bool valid_snapshot(const struct zapp_conversation_snapshot *s, const cha
         zutf8_validate(s->balance);
 }
 
+static bool push_snapshot(struct json_value *root, const struct zapp_conversation_snapshot *s, const char *question)
+{
+    return json_push_kv_str(root, "sync_status", s->sync_status) &&
+        json_push_kv_str(root, "balance", s->balance_known ? s->balance : "unavailable") &&
+        json_push_kv_bool(root, "balance_stale", s->balance_known && s->balance_stale) &&
+        json_push_kv_bool(root, "node_running", s->node_running) &&
+        (!s->history[0] || json_push_kv_str(root, "recent_conversation", s->history)) &&
+        json_push_kv_str(root, "question", question);
+}
+
 bool zapp_conversation_format(const struct zapp_conversation_snapshot *s,
                               const char *question, char *out, size_t cap)
 {
@@ -23,12 +33,7 @@ bool zapp_conversation_format(const struct zapp_conversation_snapshot *s,
     if (!valid_snapshot(s, question)) return false;
     struct json_value root = {0};
     json_set_object(&root);
-    bool ok = json_push_kv_str(&root, "sync_status", s->sync_status) &&
-        json_push_kv_str(&root, "balance", s->balance_known ? s->balance : "unavailable") &&
-        json_push_kv_bool(&root, "balance_stale", s->balance_known && s->balance_stale) &&
-        json_push_kv_bool(&root, "node_running", s->node_running) &&
-        (!s->history[0] || json_push_kv_str(&root, "recent_conversation", s->history)) &&
-        json_push_kv_str(&root, "question", question);
+    bool ok = push_snapshot(&root, s, question);
     size_t prefix = sizeof(instruction) - 1;
     if (ok && cap > prefix) {
         memcpy(out, instruction, prefix);
