@@ -718,6 +718,83 @@ static void restore_install_placeholder_anchor(
                  "chain_restore_anchor");
 }
 
+/* True when ctx or any member restore needs is missing. */
+static bool restore_ctx_incomplete(const struct utxo_recovery_ctx *ctx)
+{
+    return !ctx || !ctx->state || !ctx->coins_tip || !ctx->ndb ||
+           !ctx->params;
+}
+
+/* True when the finalized-floor guard refuses the scan_fallback rollback;
+ * the caller logs and fills the result from the out-parameters. */
+static bool restore_floor_guard_hit(struct utxo_recovery_ctx *ctx,
+                                    struct block_index *scan_fallback,
+                                    int *served_floor,
+                                    struct uint256 *served_hash,
+                                    bool *have_served_hash)
+{
+    if (utxo_recovery_scan_fallback_below_finalized_floor(
+            scan_fallback, served_floor, served_hash, have_served_hash)) {
+        /* The floor outranks scan_fallback — but only a floor BOTH
+         * Invariant A authorities can back is real authority. The
+         * settle loop (utxo_recovery_frontier_gate.c) flips
+         * unbackable rows, loudest-first, until the floor is
+         * evidence again or stops outranking scan_fallback. */
+        *served_floor = utxo_recovery_settle_finalized_floor(
+            ctx, scan_fallback->nHeight, *served_floor,
+            served_hash, have_served_hash);
+        if (*served_floor > scan_fallback->nHeight)
+            return true;
+        /* fall through: every row outranking scan_fallback was
+         * unbackable and is now rewound — the commit is permitted. */
+    }
+    return false;
+}
+
+/* Disk-backed UTXO ancestor when coins_best is genesis; *max_utxo_h is set
+ * only in the genesis case, and the ancestor only when it exceeds 1000. */
+static struct block_index *restore_genesis_utxo_tip(
+    struct utxo_recovery_ctx *ctx, const struct block_index *best,
+    const struct uint256 *best_hash, int *max_utxo_h)
+{
+    if (!(best && best->nHeight == 0 &&
+          uint256_eq(best_hash, &ctx->params->consensus.hashGenesisBlock)))
+        return NULL;
+    *max_utxo_h = utxo_recovery_max_utxo_height(ctx);
+    if (*max_utxo_h > 1000)
+        return restore_find_hashed_utxo_tip(ctx, *max_utxo_h);
+    return NULL;
+}
+
+/* Picks the tip to restore: *kind 1 = nearest backed ancestor (best is not
+ * backed), 2 = parent of a fork leaf with a backed sibling, 0 = best. */
+static struct block_index *restore_select_backed_tip(
+    struct utxo_recovery_ctx *ctx, struct block_index *best,
+    bool best_backed, const struct uint256 *seed_anchor_hash_p,
+    int seed_anchor_h, int *kind)
+{
+    if (!best_backed) {
+        *kind = 1;
+        return chain_restore_nearest_consensus_backed_ancestor_on_disk_seeded(
+            best, ctx->datadir, seed_anchor_hash_p, seed_anchor_h);
+    }
+    if (has_disk_backed_competing_sibling(ctx->state, best, ctx->datadir)) {
+        *kind = 2;
+        return best->pprev;
+    }
+    return best;
+}
+
+/* True when the restore target is the provenance-matched seed anchor. */
+static bool restore_tip_is_seed_anchor(const struct block_index *restore_tip,
+                                       const struct uint256 *seed_anchor_hash_p,
+                                       int seed_anchor_h)
+{
+    return seed_anchor_hash_p && restore_tip->phashBlock &&
+           restore_tip->nHeight == seed_anchor_h &&
+           uint256_cmp(restore_tip->phashBlock, seed_anchor_hash_p) == 0;
+}
+
 struct chain_restore_result utxo_recovery_restore_chain_tip(
     struct utxo_recovery_ctx *ctx,
     struct block_index *scan_fallback)
@@ -725,8 +802,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
     struct chain_restore_result res = { .status = recovery_status_ok() };
     res.restored_height = -1;
 
-    if (!ctx || !ctx->state || !ctx->coins_tip || !ctx->ndb ||
-        !ctx->params) {
+    if (restore_ctx_incomplete(ctx)) {
         res.status = ZCL_ERR(-20,
             "utxo_recovery_restore_chain_tip: invalid ctx=%p state=%p "
             "coins_tip=%p ndb=%p params=%p",
@@ -753,37 +829,24 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
             int served_floor = -1;
             struct uint256 served_hash;
             bool have_served_hash = false;
-            if (utxo_recovery_scan_fallback_below_finalized_floor(
-                    scan_fallback, &served_floor, &served_hash,
-                    &have_served_hash)) {
-                /* The floor outranks scan_fallback — but only a floor BOTH
-                 * Invariant A authorities can back is real authority. The
-                 * settle loop (utxo_recovery_frontier_gate.c) flips
-                 * unbackable rows, loudest-first, until the floor is
-                 * evidence again or stops outranking scan_fallback. */
-                served_floor = utxo_recovery_settle_finalized_floor(
-                    ctx, scan_fallback->nHeight, served_floor,
-                    &served_hash, &have_served_hash);
-                if (served_floor > scan_fallback->nHeight) {
-                    /* The held floor is VERIFIED above: hash resolves at
-                     * the recorded height on a trust-rooted chain. The
-                     * boot consumer re-checks that agreement before any
-                     * active-chain install. */
-                    LOG_WARN("utxo_recovery",
-                             "scan_fallback h=%d below durable finalized floor "
-                             "h=%d; refusing active-tip rollback",
-                             scan_fallback->nHeight, served_floor);
-                    res.restored = true;
-                    res.restored_height = served_floor;
-                    if (have_served_hash)
-                        res.restored_hash = served_hash;
-                    res.skip_activate = true;
-                    snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                             "finalized_floor_guard");
-                    return res;
-                }
-                /* fall through: every row outranking scan_fallback was
-                 * unbackable and is now rewound — the commit is permitted. */
+            if (restore_floor_guard_hit(ctx, scan_fallback, &served_floor,
+                                        &served_hash, &have_served_hash)) {
+                /* The held floor is VERIFIED above: hash resolves at
+                 * the recorded height on a trust-rooted chain. The
+                 * boot consumer re-checks that agreement before any
+                 * active-chain install. */
+                LOG_WARN("utxo_recovery",
+                         "scan_fallback h=%d below durable finalized floor "
+                         "h=%d; refusing active-tip rollback",
+                         scan_fallback->nHeight, served_floor);
+                res.restored = true;
+                res.restored_height = served_floor;
+                if (have_served_hash)
+                    res.restored_hash = served_hash;
+                res.skip_activate = true;
+                snprintf(res.anchor_reason, sizeof(res.anchor_reason),
+                         "finalized_floor_guard");
+                return res;
             }
             struct block_index *committed = scan_fallback;
             if (utxo_recovery_commit_tip(
@@ -818,21 +881,18 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
             best = NULL;
     }
 
-    if (best && best->nHeight == 0 &&
-        uint256_eq(&best_hash, &ctx->params->consensus.hashGenesisBlock)) {
-        int max_utxo_h = utxo_recovery_max_utxo_height(ctx);
-        if (max_utxo_h > 1000) {
-            struct block_index *utxo_tip =
-                restore_find_hashed_utxo_tip(ctx, max_utxo_h);
-            if (utxo_tip) {
-                char tip_hex[65] = {0};
-                uint256_get_hex(utxo_tip->phashBlock, tip_hex);
-                LOG_INFO("boot", "[boot] coins_best_block is genesis but UTXOs reach " "h=%d; recovering directly to disk-backed UTXO ancestor " "h=%d hash=%s", max_utxo_h, utxo_tip->nHeight, tip_hex);
-                best = utxo_tip;
-                best_hash = *utxo_tip->phashBlock;
-            } else {
-                LOG_INFO("boot", "[boot] coins_best_block is genesis but UTXOs reach " "h=%d; no disk-backed UTXO ancestor found within " "10000 blocks", max_utxo_h);
-            }
+    int max_utxo_h = -1;
+    struct block_index *utxo_tip =
+        restore_genesis_utxo_tip(ctx, best, &best_hash, &max_utxo_h);
+    if (max_utxo_h > 1000) {
+        if (utxo_tip) {
+            char tip_hex[65] = {0};
+            uint256_get_hex(utxo_tip->phashBlock, tip_hex);
+            LOG_INFO("boot", "[boot] coins_best_block is genesis but UTXOs reach " "h=%d; recovering directly to disk-backed UTXO ancestor " "h=%d hash=%s", max_utxo_h, utxo_tip->nHeight, tip_hex);
+            best = utxo_tip;
+            best_hash = *utxo_tip->phashBlock;
+        } else {
+            LOG_INFO("boot", "[boot] coins_best_block is genesis but UTXOs reach " "h=%d; no disk-backed UTXO ancestor found within " "10000 blocks", max_utxo_h);
         }
     }
 
@@ -865,18 +925,18 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
             restore_format_best_hexes(best, best_hex, prev_hex);
             LOG_INFO("boot", "[boot] coins_best_block validation h=%d hash=%s " "status=%u file=%d pos=%u tx=%u chaintx=%lld bits=%u " "pprev_h=%d pprev=%s merkle_null=%d disk_backed=%d", best->nHeight, best_hex[0] ? best_hex : "<null>", best->nStatus, best->nFile, best->nDataPos, best->nTx, (long long)best->nChainTx, best->nBits, best->pprev ? best->pprev->nHeight : -1, prev_hex[0] ? prev_hex : "<null>", merkle_null ? 1 : 0, best_backed ? 1 : 0);
         }
-        if (!best_backed) {
-            restore_tip = chain_restore_nearest_consensus_backed_ancestor_on_disk_seeded(
-                best, ctx->datadir, seed_anchor_hash_p, seed_anchor_h);
+        int tip_kind = 0;
+        restore_tip = restore_select_backed_tip(ctx, best, best_backed,
+                                                seed_anchor_hash_p,
+                                                seed_anchor_h, &tip_kind);
+        if (tip_kind == 1) {
             if (restore_tip && restore_tip->phashBlock) {
                 char bad_hex[65], good_hex[65];
                 uint256_get_hex(&best_hash, bad_hex);
                 uint256_get_hex(restore_tip->phashBlock, good_hex);
                 LOG_INFO("boot", "[boot] coins_best_block %s at h=%d is not backed by " "real block data; using nearest consensus-backed " "ancestor h=%d hash=%s", bad_hex, best->nHeight, restore_tip->nHeight, good_hex);
             }
-        } else if (has_disk_backed_competing_sibling(ctx->state, best,
-                                                    ctx->datadir)) {
-            restore_tip = best->pprev;
+        } else if (tip_kind == 2) {
             if (restore_tip && restore_tip->phashBlock) {
                 char bad_hex[65], parent_hex[65];
                 uint256_get_hex(&best_hash, bad_hex);
@@ -892,9 +952,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
 
         /* PART B success path: the restore target IS the provenance-matched
          * cold-import seed anchor — name it loudly for a copy-prove. */
-        if (seed_anchor_hash_p && restore_tip->phashBlock &&
-            restore_tip->nHeight == seed_anchor_h &&
-            uint256_cmp(restore_tip->phashBlock, seed_anchor_hash_p) == 0) {
+        if (restore_tip_is_seed_anchor(restore_tip, seed_anchor_hash_p,
+                                       seed_anchor_h)) {
             char sa_hex[65] = {0};
             uint256_get_hex(restore_tip->phashBlock, sa_hex);
             LOG_INFO("boot", "[boot] restoring to provenance-matched cold-import seed anchor h=%d hash=%s", restore_tip->nHeight, sa_hex);
