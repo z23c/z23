@@ -72,16 +72,6 @@ void zcl_shop_want_view_push_json(
         (void)json_push_kv_int(into, "posted_unix", view->posted_unix);
 }
 
-/* Record a frozen-vector failure message and report the KAT as failed. */
-static bool shop_want_view_kat_report_failure(char *why, size_t why_sz,
-                                              const char *message)
-{
-    if (why == NULL || why_sz == 0)
-        return false;
-    (void)snprintf(why, why_sz, "%s", message);
-    return false;
-}
-
 /* Run the frozen open/preview vector; true when every output matches. */
 static bool shop_want_view_kat_open_preview_matches(
     const struct shop_want_view_service_v1 *service,
@@ -132,6 +122,109 @@ static bool shop_want_view_kat_cancelled_full_matches(
            strstr(out->next_action, "moves no value") != NULL;
 }
 
+/* Open/preview vector gate; the failure message is a literal snprintf. */
+static bool shop_want_view_kat_open_preview_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_want_view_input_v1 *input,
+    struct shop_want_view_result_v1 *out, char *why, size_t why_sz)
+{
+    if (service && service->render && service->render_fulfillment_status &&
+        shop_want_view_kat_open_preview_matches(service, input, out))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz,
+                       "frozen buyer-want open/preview vector failed");
+    return false;
+}
+
+/* Hidden fulfillment vector gate; the failure message is a literal snprintf. */
+static bool shop_want_view_kat_fulfill_hidden_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out, char *why,
+    size_t why_sz)
+{
+    if (shop_want_view_kat_fulfill_hidden_matches(service, status, status_out))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz, "frozen fulfillment hidden vector failed");
+    return false;
+}
+
+/* Visible fulfillment vector gate; the failure message is a literal. */
+static bool shop_want_view_kat_fulfill_visible_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out, char *why,
+    size_t why_sz)
+{
+    if (shop_want_view_kat_fulfill_readiness_matches(
+            service, status, status_out, "ready_for_human_review"))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz, "frozen fulfillment visible vector failed");
+    return false;
+}
+
+/* Evidence fulfillment vector gate; the failure message is a literal. */
+static bool shop_want_view_kat_fulfill_evidence_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out, char *why,
+    size_t why_sz)
+{
+    if (shop_want_view_kat_fulfill_readiness_matches(
+            service, status, status_out, "blocked_by_evidence"))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz,
+                       "frozen fulfillment evidence vector failed");
+    return false;
+}
+
+/* Closed fulfillment vector gate; the failure message is a literal snprintf. */
+static bool shop_want_view_kat_fulfill_closed_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_fulfill_status_view_input_v1 *status,
+    struct shop_fulfill_status_view_result_v1 *status_out, char *why,
+    size_t why_sz)
+{
+    if (shop_want_view_kat_fulfill_readiness_matches(service, status,
+                                                     status_out, "closed"))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz, "frozen fulfillment closed vector failed");
+    return false;
+}
+
+/* Cancelled/full vector gate; the failure message is a literal snprintf. */
+static bool shop_want_view_kat_cancelled_full_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_want_view_input_v1 *input,
+    struct shop_want_view_result_v1 *out, char *why, size_t why_sz)
+{
+    if (shop_want_view_kat_cancelled_full_matches(service, input, out))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz,
+                       "frozen buyer-want cancelled/full vector failed");
+    return false;
+}
+
+/* Invalid-state vector gate: the render must be refused. */
+static bool shop_want_view_kat_invalid_state_ok(
+    const struct shop_want_view_service_v1 *service,
+    struct shop_want_view_input_v1 *input,
+    struct shop_want_view_result_v1 *out, char *why, size_t why_sz)
+{
+    if (!service->render(input, out))
+        return true;
+    if (why && why_sz)
+        (void)snprintf(why, why_sz,
+                       "frozen buyer-want invalid-state vector failed");
+    return false;
+}
+
 static bool shop_want_view_frozen_kat(const void *opaque, char *why,
                                       size_t why_sz)
 {
@@ -148,47 +241,37 @@ static bool shop_want_view_frozen_kat(const void *opaque, char *why,
     input.buyer_pubkey[0] = 2;
     memset(input.criteria, 'x', input.criteria_len);
     struct shop_want_view_result_v1 out;
-    if (!service || !service->render || !service->render_fulfillment_status)
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen buyer-want open/preview vector failed");
-    if (!shop_want_view_kat_open_preview_matches(service, &input, &out))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen buyer-want open/preview vector failed");
+    if (!shop_want_view_kat_open_preview_ok(service, &input, &out, why, why_sz))
+        return false; // raw-return-ok: the gate already filled why
     struct shop_fulfill_status_view_input_v1 status = {
         .signature_valid = true,
         .evidence_valid = true,
     };
     struct shop_fulfill_status_view_result_v1 status_out;
-    if (!shop_want_view_kat_fulfill_hidden_matches(service, &status,
-                                                   &status_out))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen fulfillment hidden vector failed");
+    if (!shop_want_view_kat_fulfill_hidden_ok(service, &status, &status_out,
+                                              why, why_sz))
+        return false;
     status.visible = true;
-    if (!shop_want_view_kat_fulfill_readiness_matches(
-            service, &status, &status_out, "ready_for_human_review"))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen fulfillment visible vector failed");
+    if (!shop_want_view_kat_fulfill_visible_ok(service, &status, &status_out,
+                                               why, why_sz))
+        return false;
     status.evidence_valid = false;
-    if (!shop_want_view_kat_fulfill_readiness_matches(
-            service, &status, &status_out, "blocked_by_evidence"))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen fulfillment evidence vector failed");
+    if (!shop_want_view_kat_fulfill_evidence_ok(service, &status, &status_out,
+                                                why, why_sz))
+        return false;
     status.withdrawn = true;
-    if (!shop_want_view_kat_fulfill_readiness_matches(service, &status,
-                                                      &status_out, "closed"))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen fulfillment closed vector failed");
+    if (!shop_want_view_kat_fulfill_closed_ok(service, &status, &status_out,
+                                              why, why_sz))
+        return false;
     input.full = true;
     input.cancelled_unix = 175;
     input.spec_hash[0] = 3;
-    if (!shop_want_view_kat_cancelled_full_matches(service, &input, &out))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen buyer-want cancelled/full vector failed");
+    if (!shop_want_view_kat_cancelled_full_ok(service, &input, &out, why,
+                                              why_sz))
+        return false;
     input.review_state = 99;
-    if (service->render(&input, &out))
-        return shop_want_view_kat_report_failure(
-            why, why_sz, "frozen buyer-want invalid-state vector failed");
-    return true;
+    return shop_want_view_kat_invalid_state_ok(service, &input, &out, why,
+                                               why_sz);
 }
 
 static const struct zcl_hotswap_service_contract k_shop_want_contract = {
