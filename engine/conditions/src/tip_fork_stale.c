@@ -185,7 +185,7 @@ static bool same_index_hash(const struct block_index *a,
 }
 
 static bool same_parent_hash(const struct block_index *a,
-                            const struct block_index *b)
+                             const struct block_index *b)
 {
     return a && b && a->pprev && b->pprev &&
            same_index_hash(a->pprev, b->pprev);
@@ -313,7 +313,7 @@ static bool detect_tip_fork_stale(void)
     /* (a) sustained no-advance window. Reset the timer whenever the tip
      * moves; only a tip that has held still for TIP_STALL_SECS qualifies. */
     if (!tip_stall_window_elapsed(tip_h))
-        return false;
+        return false; // raw-return-ok:not yet stalled is the normal quiet path, not a failure
 
     /* (b) a strictly higher-work HEADER chain exists. */
     struct block_index *bh = best_header_ahead_of_tip(ms, tip, tip_h);
