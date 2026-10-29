@@ -992,16 +992,24 @@ static int test_snapshot_offer_serving(void)
 {
     int failures = 0;
 
-    TEST("snapshot send tick: a serving peer with no cached offer falls "
-         "through to the idle path and keeps its serving state") {
+    TEST("snapshot send tick: a serving peer with no cached offer is reset "
+         "to active by the serve half's no-snapshot-buffer branch and then "
+         "falls through to the idle path") {
         struct ot_rig r;
 
+        /* mp_snapshot_send_tick_serve takes its else branch whenever the
+         * snapshot buffer is absent OR msg_processor_get_offer fails (the
+         * invalidated cache here, and it never rebuilds lazily). That branch
+         * calls peer_set_state_checked(PEER_ACTIVE, "no snapshot buffer")
+         * (a legal SERVING->ACTIVE edge) and returns false, so the tick
+         * continues to the idle path. The outcome is the same whether or not
+         * an earlier row left a snapshot buffer loaded. */
         msg_processor_invalidate_offer();
         ASSERT(ot_rig_init(&r, 150));
         r.node->state = PEER_SNAPSHOT_SERVING;
         mp_snapshot_send_tick(&r.mp, r.node);
         ASSERT(ot_queued(&r) == 0);
-        ASSERT(r.node->state == PEER_SNAPSHOT_SERVING);
+        ASSERT(r.node->state == PEER_ACTIVE);
         ot_rig_free(&r);
         PASS();
     } _test_next:;
