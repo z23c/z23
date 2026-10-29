@@ -127,17 +127,18 @@ static bool cf_enter_confine_serving(void)
     return os_sandbox_enter(&prof).ok;
 }
 
-/* (a) representative confined ops — must all succeed under the allow-list. */
-static int c_confine_normal_ops(void)
+static int c_confine_normal_malloc(void)
 {
-    if (!cf_enter_confine()) return 70;
-
     /* malloc / free */
     void *p = malloc(1u << 20);
     if (!p) return 71;
     memset(p, 0x5a, 1u << 20);
     free(p);
+    return 0;
+}
 
+static int c_confine_normal_file_io(void)
+{
     /* file I/O under the granted datadir */
     char fp[512];
     snprintf(fp, sizeof(fp), "%s/scratch", g_dir);
@@ -153,7 +154,11 @@ static int c_confine_normal_ops(void)
     char rb[4096];
     if (read(fd, rb, sizeof(rb)) != (ssize_t)sizeof(rb)) return 76;
     close(fd);
+    return 0;
+}
 
+static int c_confine_normal_random_clock(void)
+{
     /* getrandom + monotonic clock — RAW on purpose: this test's job is to prove
      * the seccomp allow-list permits the exact __NR_getrandom / __NR_clock_
      * gettime syscalls the node makes, so routing through platform.rng/clock
@@ -162,7 +167,11 @@ static int c_confine_normal_ops(void)
     if (getrandom(rnd, sizeof(rnd), 0) != (ssize_t)sizeof(rnd)) return 77;  // platform-ok:confine allow-list must cover the raw getrandom syscall
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 78;  // platform-ok:confine allow-list must cover the raw clock_gettime syscall
+    return 0;
+}
 
+static int c_confine_normal_sqlite(void)
+{
     /* a real "storage query": SQLite WAL CREATE/INSERT/SELECT on a datadir db */
     char dbpath[512];
     snprintf(dbpath, sizeof(dbpath), "%s/confine.db", g_dir);
@@ -186,6 +195,22 @@ static int c_confine_normal_ops(void)
     sqlite3_finalize(st);
     sqlite3_close(db);
     if (cnt != 3) return 85;
+    return 0;
+}
+
+/* (a) representative confined ops — must all succeed under the allow-list. */
+static int c_confine_normal_ops(void)
+{
+    if (!cf_enter_confine()) return 70;
+
+    int rc = c_confine_normal_malloc();
+    if (rc != 0) return rc;
+    rc = c_confine_normal_file_io();
+    if (rc != 0) return rc;
+    rc = c_confine_normal_random_clock();
+    if (rc != 0) return rc;
+    rc = c_confine_normal_sqlite();
+    if (rc != 0) return rc;
 
     return 0;  /* all confined ops succeeded */
 }
@@ -211,32 +236,33 @@ static int c_confine_forbidden_syscall(void)
     return 7;  /* reached only if the allow-list let socket() through */
 }
 
-/* (e) representative confined SERVING ops — a real loopback TCP round trip
- * (socket/bind/listen/accept/send/recv, both sides in this one child via a
- * connecting sub-process) PLUS a SQLite query, all under the node_confine_
- * serving allow-list. Must all succeed — proves normal serving ops survive. */
-static int c_confine_serving_normal_ops(void)
+/* Serving listener: loopback socket bound to the ephemeral port in *addr. */
+static int c_confine_serving_listen(int *lfd, struct sockaddr_in *addr)
 {
-    if (!cf_enter_confine_serving()) return 90;
+    *lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (*lfd < 0) return 91;
+    if (bind(*lfd, (struct sockaddr *)addr, sizeof(*addr)) != 0) return 92;
+    socklen_t alen = sizeof(*addr);
+    if (getsockname(*lfd, (struct sockaddr *)addr, &alen) != 0) return 93;
+    if (listen(*lfd, 1) != 0) return 94;
+    return 0;
+}
 
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) return 91;
-    struct sockaddr_in addr = { .sin_family = AF_INET,
-                                 .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) return 92;
-    socklen_t alen = sizeof(addr);
-    if (getsockname(lfd, (struct sockaddr *)&addr, &alen) != 0) return 93;
-    if (listen(lfd, 1) != 0) return 94;
-
+static int c_confine_serving_connect(struct sockaddr_in *addr, int *cfd)
+{
     /* Connect to ourselves from a second socket in the SAME confined child —
      * a nonblocking connect + accept avoids needing a second process. */
-    int cfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (cfd < 0) return 95;
-    int fl = fcntl(cfd, F_GETFL, 0);
-    if (fl < 0 || fcntl(cfd, F_SETFL, fl | O_NONBLOCK) != 0) return 96;
-    int cr = connect(cfd, (struct sockaddr *)&addr, sizeof(addr));
+    *cfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (*cfd < 0) return 95;
+    int fl = fcntl(*cfd, F_GETFL, 0);
+    if (fl < 0 || fcntl(*cfd, F_SETFL, fl | O_NONBLOCK) != 0) return 96;
+    int cr = connect(*cfd, (struct sockaddr *)addr, sizeof(*addr));
     if (cr != 0 && errno != EINPROGRESS) return 97;
+    return 0;
+}
 
+static int c_confine_serving_accept(int lfd, int *sfd)
+{
     /* select() readiness wait for the listener to become acceptable. */
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -245,9 +271,13 @@ static int c_confine_serving_normal_ops(void)
     int sr = select(lfd + 1, &rfds, NULL, NULL, &tv);
     if (sr <= 0) return 98;
 
-    int sfd = accept(lfd, NULL, NULL);
-    if (sfd < 0) return 99;
+    *sfd = accept(lfd, NULL, NULL);
+    if (*sfd < 0) return 99;
+    return 0;
+}
 
+static int c_confine_serving_exchange(int sfd, int cfd)
+{
     /* getsockopt/setsockopt exercise. */
     int err = 0;
     socklen_t elen = sizeof(err);
@@ -265,10 +295,11 @@ static int c_confine_serving_normal_ops(void)
         return 103;
 
     if (shutdown(sfd, SHUT_RDWR) != 0) return 104;
-    close(sfd);
-    close(cfd);
-    close(lfd);
+    return 0;
+}
 
+static int c_confine_serving_sqlite(void)
+{
     /* a real "storage query" alongside the network ops, same as (a). */
     char dbpath[512];
     snprintf(dbpath, sizeof(dbpath), "%s/confine_serving.db", g_dir);
@@ -292,6 +323,38 @@ static int c_confine_serving_normal_ops(void)
     sqlite3_finalize(st);
     sqlite3_close(db);
     if (cnt != 1) return 110;
+    return 0;
+}
+
+/* (e) representative confined SERVING ops — a real loopback TCP round trip
+ * (socket/bind/listen/accept/send/recv, both sides in this one child via a
+ * connecting sub-process) PLUS a SQLite query, all under the node_confine_
+ * serving allow-list. Must all succeed — proves normal serving ops survive. */
+static int c_confine_serving_normal_ops(void)
+{
+    if (!cf_enter_confine_serving()) return 90;
+
+    int lfd = -1;
+    struct sockaddr_in addr = { .sin_family = AF_INET,
+                                 .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    int rc = c_confine_serving_listen(&lfd, &addr);
+    if (rc != 0) return rc;
+
+    int cfd = -1;
+    rc = c_confine_serving_connect(&addr, &cfd);
+    if (rc != 0) return rc;
+
+    int sfd = -1;
+    rc = c_confine_serving_accept(lfd, &sfd);
+    if (rc != 0) return rc;
+    rc = c_confine_serving_exchange(sfd, cfd);
+    if (rc != 0) return rc;
+    close(sfd);
+    close(cfd);
+    close(lfd);
+
+    rc = c_confine_serving_sqlite();
+    if (rc != 0) return rc;
 
     return 0;  /* all confined serving ops succeeded */
 }
