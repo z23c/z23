@@ -77,16 +77,35 @@ static enum vcs_zcode_focus_error focus_validate_capabilities(
     return VCS_ZCODE_FOCUS_OK;
 }
 
+/* The eight 32-byte roots, in wire order, as byte offsets into the struct. */
+#define FOCUS_ROOT_COUNT 8u
+static const size_t focus_root_offsets[FOCUS_ROOT_COUNT] = {
+    offsetof(struct vcs_zcode_focus_v1, task_root),
+    offsetof(struct vcs_zcode_focus_v1, goal_root),
+    offsetof(struct vcs_zcode_focus_v1, source_universe_root),
+    offsetof(struct vcs_zcode_focus_v1, context_root),
+    offsetof(struct vcs_zcode_focus_v1, story_graph_root),
+    offsetof(struct vcs_zcode_focus_v1, claim_set_root),
+    offsetof(struct vcs_zcode_focus_v1, required_evidence_root),
+    offsetof(struct vcs_zcode_focus_v1, authority_limits_root),
+};
+
+static const uint8_t *focus_root_at(const struct vcs_zcode_focus_v1 *focus,
+                                    size_t index)
+{
+    return (const uint8_t *)focus + focus_root_offsets[index];
+}
+
+static uint8_t *focus_root_at_mut(struct vcs_zcode_focus_v1 *out, size_t index)
+{
+    return (uint8_t *)out + focus_root_offsets[index];
+}
+
 static enum vcs_zcode_focus_error focus_validate_roots(
     const struct vcs_zcode_focus_v1 *focus)
 {
-    const uint8_t *roots[] = {
-        focus->task_root, focus->goal_root, focus->source_universe_root,
-        focus->context_root, focus->story_graph_root, focus->claim_set_root,
-        focus->required_evidence_root, focus->authority_limits_root,
-    };
-    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!zcl_bytes_any_set(roots[i], 32))
+    for (size_t i = 0; i < FOCUS_ROOT_COUNT; i++)
+        if (!zcl_bytes_any_set(focus_root_at(focus, i), 32))
             return VCS_ZCODE_FOCUS_ROOT_ZERO;
     return VCS_ZCODE_FOCUS_OK;
 }
@@ -122,29 +141,43 @@ static bool focus_write_header(struct zcl_codec_writer *writer,
         zcl_codec_write_u32le(writer, focus->capabilities);
 }
 
+/* The seven budget fields in wire order; width is the integer size in bytes. */
+#define FOCUS_LIMIT_COUNT 7u
+struct focus_limit_field {
+    size_t offset;
+    size_t width;
+};
+static const struct focus_limit_field focus_limit_fields[FOCUS_LIMIT_COUNT] = {
+    { offsetof(struct vcs_zcode_focus_v1, max_changed_files), 4 },
+    { offsetof(struct vcs_zcode_focus_v1, max_patch_bytes), 8 },
+    { offsetof(struct vcs_zcode_focus_v1, max_context_bytes), 8 },
+    { offsetof(struct vcs_zcode_focus_v1, max_cpu_seconds), 4 },
+    { offsetof(struct vcs_zcode_focus_v1, reserved_budget), 4 },
+    { offsetof(struct vcs_zcode_focus_v1, max_memory_bytes), 8 },
+    { offsetof(struct vcs_zcode_focus_v1, max_output_bytes), 8 },
+};
+
 static bool focus_write_limits(struct zcl_codec_writer *writer,
                                const struct vcs_zcode_focus_v1 *focus)
 {
-    return zcl_codec_write_u32le(writer, focus->max_changed_files) &&
-        zcl_codec_write_u64le(writer, focus->max_patch_bytes) &&
-        zcl_codec_write_u64le(writer, focus->max_context_bytes) &&
-        zcl_codec_write_u32le(writer, focus->max_cpu_seconds) &&
-        zcl_codec_write_u32le(writer, focus->reserved_budget) &&
-        zcl_codec_write_u64le(writer, focus->max_memory_bytes) &&
-        zcl_codec_write_u64le(writer, focus->max_output_bytes);
+    for (size_t i = 0; i < FOCUS_LIMIT_COUNT; i++) {
+        const struct focus_limit_field *field = &focus_limit_fields[i];
+        const uint8_t *at = (const uint8_t *)focus + field->offset;
+        bool ok = field->width == 4
+            ? zcl_codec_write_u32le(writer, *(const uint32_t *)at)
+            : zcl_codec_write_u64le(writer, *(const uint64_t *)at);
+        if (!ok) return false;
+    }
+    return true;
 }
 
 static bool focus_write_roots(struct zcl_codec_writer *writer,
                               const struct vcs_zcode_focus_v1 *focus)
 {
-    return zcl_codec_write_bytes(writer, focus->task_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->goal_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->source_universe_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->context_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->story_graph_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->claim_set_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->required_evidence_root, 32) &&
-        zcl_codec_write_bytes(writer, focus->authority_limits_root, 32);
+    for (size_t i = 0; i < FOCUS_ROOT_COUNT; i++)
+        if (!zcl_codec_write_bytes(writer, focus_root_at(focus, i), 32))
+            return false;
+    return true;
 }
 
 enum vcs_zcode_focus_error vcs_zcode_focus_serialize(
@@ -181,26 +214,24 @@ static bool focus_read_header(struct zcl_codec_reader *reader,
 static bool focus_read_limits(struct zcl_codec_reader *reader,
                               struct vcs_zcode_focus_v1 *out)
 {
-    return zcl_codec_read_u32le(reader, &out->max_changed_files) &&
-        zcl_codec_read_u64le(reader, &out->max_patch_bytes) &&
-        zcl_codec_read_u64le(reader, &out->max_context_bytes) &&
-        zcl_codec_read_u32le(reader, &out->max_cpu_seconds) &&
-        zcl_codec_read_u32le(reader, &out->reserved_budget) &&
-        zcl_codec_read_u64le(reader, &out->max_memory_bytes) &&
-        zcl_codec_read_u64le(reader, &out->max_output_bytes);
+    for (size_t i = 0; i < FOCUS_LIMIT_COUNT; i++) {
+        const struct focus_limit_field *field = &focus_limit_fields[i];
+        uint8_t *at = (uint8_t *)out + field->offset;
+        bool ok = field->width == 4
+            ? zcl_codec_read_u32le(reader, (uint32_t *)at)
+            : zcl_codec_read_u64le(reader, (uint64_t *)at);
+        if (!ok) return false;
+    }
+    return true;
 }
 
 static bool focus_read_roots(struct zcl_codec_reader *reader,
                              struct vcs_zcode_focus_v1 *out)
 {
-    return zcl_codec_read_bytes(reader, out->task_root, 32) &&
-        zcl_codec_read_bytes(reader, out->goal_root, 32) &&
-        zcl_codec_read_bytes(reader, out->source_universe_root, 32) &&
-        zcl_codec_read_bytes(reader, out->context_root, 32) &&
-        zcl_codec_read_bytes(reader, out->story_graph_root, 32) &&
-        zcl_codec_read_bytes(reader, out->claim_set_root, 32) &&
-        zcl_codec_read_bytes(reader, out->required_evidence_root, 32) &&
-        zcl_codec_read_bytes(reader, out->authority_limits_root, 32);
+    for (size_t i = 0; i < FOCUS_ROOT_COUNT; i++)
+        if (!zcl_codec_read_bytes(reader, focus_root_at_mut(out, i), 32))
+            return false;
+    return true;
 }
 
 enum vcs_zcode_focus_error vcs_zcode_focus_parse(
