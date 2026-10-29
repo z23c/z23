@@ -39,7 +39,7 @@
     },
     {
       "name": "zhkdf/zhkdf",
-      "root": "fd931afdaea20e2459a12442561c8084cf00462aa439f83b5bd766aff8024ba4",
+      "root": "04e604eeeb3570a556c663f527818ad5911acad5159938af163cb1dd192b67fe",
       "semver": "0.1.0"
     },
     {
@@ -74,7 +74,7 @@
     },
     {
       "name": "zscrypt/zscrypt",
-      "root": "731b2f2bdddb524bc026eb2282724c4bc2d4faeb47605f52a9e1b050b0d9378d",
+      "root": "84a2e884fb4c64946527a897650893c401ec6c7648a9075ebb277863850bf8f4",
       "semver": "0.1.0"
     },
     {
