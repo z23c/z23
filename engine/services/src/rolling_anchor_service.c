@@ -174,10 +174,10 @@ static bool ra_persist_locked(void)
     }
     return rolling_anchor_parent_flush(g_ra.file_path);
 }
-/* Read + verify file. Returns true on success (file absent counts as
- * success — caller leaves g_ra empty). On corruption returns false;
- * caller decides whether to delete the file. */
-static bool ra_load_locked(void)
+/* Open, snapshot, read and re-verify the snapshot of the anchor file.
+ * Returns the malloc'd image in *buf_out / *fsz_out, or false (nothing
+ * allocated, file closed) on any failure. Caller holds the lock. */
+static bool ra_read_file_image(uint8_t **buf_out, size_t *fsz_out)
 {
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
@@ -226,6 +226,46 @@ static bool ra_load_locked(void)
         return false;
     }
     platform_positioned_file_close(&file);
+    *buf_out = buf;
+    *fsz_out = fsz;
+    return true;
+}
+
+/* Fill recs[0..count) from the file image, checking each start_height
+ * against *expected_start. Returns the number of records accepted; when
+ * that is below count, *bad_h is the offending height and *expected_start
+ * the height that was expected there. */
+static uint32_t ra_parse_records(const uint8_t *buf, uint32_t count,
+                                 struct ra_record *recs, int *expected_start,
+                                 int32_t *bad_h)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *p = buf + RA_MAGIC_LEN + 4 + 4 +
+                            (size_t)i * RA_RECORD_SIZE;
+        int32_t h = 0;
+        memcpy(&h, p, 4);
+        if (h != *expected_start || h % SHA3_WINDOW_SIZE != 0) {
+            *bad_h = h;
+            return i;
+        }
+        recs[i].start_height = h;
+        memcpy(recs[i].hash, p + 4, 32);
+        *expected_start += (int)SHA3_WINDOW_SIZE;
+    }
+    return count;
+}
+
+/* Read + verify file. Returns true on success (file absent counts as
+ * success — caller leaves g_ra empty). On corruption returns false;
+ * caller decides whether to delete the file. */
+static bool ra_load_locked(void)
+{
+    uint8_t *buf = NULL;
+    size_t fsz = 0;
+    if (!ra_read_file_image(&buf, &fsz))
+        return false; // raw-return-ok:caller rolling_anchor_init wipes the file and returns ZCL_ERR(-2)
+    if (buf == NULL)
+        return true;
     /* Layout: body (fsz - 32) || digest (32). */
     size_t body_len = fsz - 32;
     uint8_t expected[32];
@@ -269,20 +309,16 @@ static bool ra_load_locked(void)
         recs = zcl_calloc(count, sizeof(*recs), "ra.load.recs");
         if (!recs) { free(buf); return false; }
     }
-    for (uint32_t i = 0; i < count; i++) {
-        const uint8_t *p = buf + RA_MAGIC_LEN + 4 + 4 +
-                            (size_t)i * RA_RECORD_SIZE;
-        int32_t h = 0;
-        memcpy(&h, p, 4);
-        if (h != expected_start || h % SHA3_WINDOW_SIZE != 0) {
-            LOG_WARN("rolling_anchor", "[rolling_anchor] load: bad start_height at idx %u " "(got %d expected %d) — discarding", i, h, expected_start);
-            free(recs);
-            free(buf);
-            return false;
-        }
-        recs[i].start_height = h;
-        memcpy(recs[i].hash, p + 4, 32);
-        expected_start += (int)SHA3_WINDOW_SIZE;
+    int32_t bad_h = 0;
+    uint32_t parsed = ra_parse_records(buf, count, recs, &expected_start,
+                                       &bad_h);
+    if (parsed != count) {
+        uint32_t i = parsed;
+        int32_t h = bad_h;
+        LOG_WARN("rolling_anchor", "[rolling_anchor] load: bad start_height at idx %u " "(got %d expected %d) — discarding", i, h, expected_start);
+        free(recs);
+        free(buf);
+        return false;
     }
     free(buf);
     /* Adopt. */
@@ -356,6 +392,61 @@ static bool ra_note_window_read_failure(int sealed_end,
     }
     return false;
 }
+/* First window start after current_end (>= 0 here), or -1 when it is not
+ * window aligned. */
+static int ra_first_window_start(int current_end)
+{
+    int next_start = ((current_end + 1) / (int)SHA3_WINDOW_SIZE) *
+                     (int)SHA3_WINDOW_SIZE;
+    if (next_start <= current_end) {
+        /* Should be exactly current_end + 1, but be defensive. */
+        next_start = current_end + 1;
+        if (next_start % SHA3_WINDOW_SIZE != 0) return -1;
+    }
+    return next_start;
+}
+
+enum ra_commit_status {
+    RA_COMMIT_OK,
+    RA_COMMIT_NOMEM,
+    RA_COMMIT_PERSIST_FAILED
+};
+
+/* Append one window to the ring and persist it; on a persist failure the
+ * in-memory entry is rolled back. Takes and releases g_ra.lock itself. */
+static enum ra_commit_status ra_commit_window(int next_start,
+                                              const uint8_t hash[32])
+{
+    pthread_mutex_lock(&g_ra.lock);
+    if (g_ra.count == g_ra.capacity) {
+        int new_cap = g_ra.capacity ? g_ra.capacity * 2 : 16;
+        struct ra_record *r =
+            zcl_realloc(g_ra.windows,
+                        (size_t)new_cap * sizeof(*r),
+                        "rolling_anchor.windows");
+        if (!r) {
+            pthread_mutex_unlock(&g_ra.lock);
+            return RA_COMMIT_NOMEM;
+        }
+        g_ra.windows = r;
+        g_ra.capacity = new_cap;
+    }
+    g_ra.windows[g_ra.count].start_height = next_start;
+    memcpy(g_ra.windows[g_ra.count].hash, hash, 32);
+    g_ra.count++;
+    bool persisted = ra_persist_locked();
+    pthread_mutex_unlock(&g_ra.lock);
+    if (!persisted) {
+        /* Disk write failure - roll back the in-memory entry so
+         * we don't claim evidence that is not on disk. */
+        pthread_mutex_lock(&g_ra.lock);
+        if (g_ra.count > 0) g_ra.count--;
+        pthread_mutex_unlock(&g_ra.lock);
+        return RA_COMMIT_PERSIST_FAILED;
+    }
+    return RA_COMMIT_OK;
+}
+
 int rolling_anchor_extend_if_due(struct main_state *ms,
                                   const char *datadir)
 {
@@ -375,13 +466,8 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
     pthread_mutex_unlock(&g_ra.lock);
     if (current_end < 0) return 0;  /* no compile-time anchors */
     int sealed_end = current_end;
-    int next_start = ((current_end + 1) / (int)SHA3_WINDOW_SIZE) *
-                     (int)SHA3_WINDOW_SIZE;
-    if (next_start <= current_end) {
-        /* Should be exactly current_end + 1, but be defensive. */
-        next_start = current_end + 1;
-        if (next_start % SHA3_WINDOW_SIZE != 0) return 0;
-    }
+    int next_start = ra_first_window_start(current_end);
+    if (next_start < 0) return 0;
     int extended = 0;
     while (extended < cap) {
         int last_h_in_win = next_start + (int)SHA3_WINDOW_SIZE - 1;
@@ -404,31 +490,10 @@ int rolling_anchor_extend_if_due(struct main_state *ms,
             (void)ra_note_window_read_failure(sealed_end, next_start, fail_h);
             break;
         }
-        pthread_mutex_lock(&g_ra.lock);
-        if (g_ra.count == g_ra.capacity) {
-            int new_cap = g_ra.capacity ? g_ra.capacity * 2 : 16;
-            struct ra_record *r =
-                zcl_realloc(g_ra.windows,
-                            (size_t)new_cap * sizeof(*r),
-                            "rolling_anchor.windows");
-            if (!r) {
-                pthread_mutex_unlock(&g_ra.lock);
-                break;
-            }
-            g_ra.windows = r;
-            g_ra.capacity = new_cap;
-        }
-        g_ra.windows[g_ra.count].start_height = next_start;
-        memcpy(g_ra.windows[g_ra.count].hash, hash, 32);
-        g_ra.count++;
-        bool persisted = ra_persist_locked();
-        pthread_mutex_unlock(&g_ra.lock);
-        if (!persisted) {
-            /* Disk write failure - roll back the in-memory entry so
-             * we don't claim evidence that is not on disk. */
-            pthread_mutex_lock(&g_ra.lock);
-            if (g_ra.count > 0) g_ra.count--;
-            pthread_mutex_unlock(&g_ra.lock);
+        enum ra_commit_status committed = ra_commit_window(next_start, hash);
+        if (committed == RA_COMMIT_NOMEM)
+            break;
+        if (committed == RA_COMMIT_PERSIST_FAILED) {
             LOG_WARN("rolling_anchor", "[rolling_anchor] extend: persist failed at start=%d " "— in-memory rollback", next_start);
             break;
         }
