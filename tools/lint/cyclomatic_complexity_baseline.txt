@@ -43,9 +43,6 @@ contexts/commons/services/src/package_lifecycle_store.c:pkgl_rm_rf:16
 contexts/commons/services/src/package_lifecycle_store.c:pkgl_verify_package:28
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
-contexts/market/controllers/src/shop_native_fulfill.c:shf_build_row:22
-contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_post:26
-contexts/market/controllers/src/shop_native_fulfill.c:zcl_native_handle_shop_want_fulfill_withdraw:20
 contexts/wallet/controllers/src/vault_intent_controller.c:rpc_vi_plan_checked:48
 contexts/wallet/controllers/src/vault_intent_controller.c:vault_intent_commit_input:48
 contexts/wallet/controllers/src/vault_intent_controller.c:vi_build_prepared:20

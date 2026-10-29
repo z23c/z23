@@ -166,13 +166,10 @@ static void shf_push_row(struct json_value *into,
     if (facts) shf_push_evidence(into, &row->fulfill, facts);
 }
 
-static bool shf_build_row(const struct zcl_command_request *request,
-                          int64_t now, struct shop_fulfill *row,
-                          struct zcl_command_reply *reply)
+static bool shf_build_row_ids(const struct zcl_command_request *request,
+                              struct shop_fulfill_v1 *f,
+                              struct zcl_command_reply *reply)
 {
-    memset(row, 0, sizeof(*row));
-    struct shop_fulfill_v1 *f = &row->fulfill;
-    f->schema_version = SHOP_FULFILL_VERSION;
     if (!shf_required_id(request, "want_id", f->want_id, reply) ||
         !shf_required_id(request, "artifact_root", f->artifact_root, reply) ||
         !shf_required_id(request, "content_root", f->content_root, reply) ||
@@ -183,7 +180,13 @@ static bool shf_build_row(const struct zcl_command_request *request,
         !shf_optional_id(request, "bench_receipt_id",
                          f->bench_receipt_id, reply))
         return false;
+    return true;
+}
 
+static bool shf_parse_row_timing(const struct zcl_command_request *request,
+                                 struct shop_fulfill_v1 *f, int64_t now,
+                                 struct zcl_command_reply *reply)
+{
     const struct json_value *issued = json_get(request->input, "issued_unix");
     if (!issued || issued->type != JSON_INT || json_get_int(issued) <= 0) {
         shf_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -221,6 +224,19 @@ static bool shf_build_row(const struct zcl_command_request *request,
                  "more than 30 days later", "expires_unix");
         return false;
     }
+    return true;
+}
+
+static bool shf_build_row(const struct zcl_command_request *request,
+                          int64_t now, struct shop_fulfill *row,
+                          struct zcl_command_reply *reply)
+{
+    memset(row, 0, sizeof(*row));
+    struct shop_fulfill_v1 *f = &row->fulfill;
+    f->schema_version = SHOP_FULFILL_VERSION;
+    if (!shf_build_row_ids(request, f, reply) ||
+        !shf_parse_row_timing(request, f, now, reply))
+        return false;
     uint8_t seed[32];
     if (!shf_seller_secret(request, seed, reply)) return false;
     shf_derive_pubkey(f->seller_pubkey, seed);
@@ -316,6 +332,87 @@ static bool shf_issued_fresh(const struct shop_fulfill *row, int64_t now,
     return false;
 }
 
+static bool shf_post_check_readonly(const char *datadir,
+                                    struct shop_fulfill *row, int64_t now,
+                                    bool *already, struct shf_evidence *facts,
+                                    struct zcl_command_reply *reply)
+{
+    sqlite3 *db = NULL;
+    struct node_db ndb;
+    if (!shf_open_readonly(datadir, &db, &ndb, reply)) return false;
+    struct shop_fulfill existing, replay;
+    *already = db_shop_fulfill_find(&ndb, row->fulfill_id, &existing);
+    if (*already && !shf_same_wire(&existing, row)) {
+        zcl_native_node_db_close_readonly(&db, &ndb);
+        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                 "FULFILLMENT_ID_COLLISION", "replay",
+                 "the stored row under this fulfillment id carries different "
+                 "signed bytes; quarantine and inspect node.db", "fulfill_id");
+        return false;
+    }
+    bool valid = *already ||
+        (shf_issued_fresh(row, now, reply) &&
+         shf_validate_claim(&ndb, datadir, row, now, facts, reply));
+    bool nonce_replay = !*already && valid &&
+        db_shop_fulfill_find_seller_nonce(&ndb, row->fulfill.seller_pubkey,
+                                          row->fulfill.nonce, &replay);
+    zcl_native_node_db_close_readonly(&db, &ndb);
+    if (!valid) return false;
+    if (nonce_replay) {
+        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                 "FULFILL_NONCE_REPLAY", "replay",
+                 "this seller already used the nonce for a different "
+                 "fulfillment", "seller_pubkey+nonce");
+        return false;
+    }
+    return true;
+}
+
+static bool shf_post_save_claim(const char *datadir,
+                                struct shop_fulfill *row, int64_t now,
+                                bool *already, struct shf_evidence *facts,
+                                struct zcl_command_reply *reply)
+{
+    struct node_db ndb;
+    if (!shf_open_write(datadir, &ndb, reply)) return false;
+    struct shop_fulfill existing, replay;
+    *already = db_shop_fulfill_find(&ndb, row->fulfill_id, &existing);
+    if (*already && !shf_same_wire(&existing, row)) {
+        node_db_close(&ndb);
+        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                 "FULFILLMENT_ID_COLLISION", "replay",
+                 "the stored row under this fulfillment id carries different "
+                 "signed bytes; quarantine and inspect node.db", "fulfill_id");
+        return false;
+    }
+    if (!*already) {
+        if (!shf_issued_fresh(row, now, reply) ||
+            !shf_validate_claim(&ndb, datadir, row, now, facts, reply)) {
+            node_db_close(&ndb);
+            return false;
+        }
+        bool nonce_replay = db_shop_fulfill_find_seller_nonce(
+            &ndb, row->fulfill.seller_pubkey, row->fulfill.nonce, &replay);
+        if (nonce_replay) {
+            node_db_close(&ndb);
+            shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                     ZCL_COMMAND_EXIT_DENIED, "FULFILL_NONCE_REPLAY",
+                     "replay", "this seller already used the nonce for a "
+                     "different fulfillment", "seller_pubkey+nonce");
+            return false;
+        }
+    }
+    bool saved = *already || db_shop_fulfill_save(&ndb, row);
+    node_db_close(&ndb);
+    if (!saved) {
+        shf_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                 "FULFILLMENT_SAVE_FAILED", "execute",
+                 "the verified fulfillment could not be persisted", "node.db");
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_shop_want_fulfill_post(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -333,35 +430,10 @@ void zcl_native_handle_shop_want_fulfill_post(
     struct shop_fulfill row;
     if (!shf_build_row(request, now, &row, reply)) return;
 
-    sqlite3 *db = NULL;
-    struct node_db ndb;
-    if (!shf_open_readonly(datadir, &db, &ndb, reply)) return;
-    struct shop_fulfill existing, replay;
-    bool already = db_shop_fulfill_find(&ndb, row.fulfill_id, &existing);
-    if (already && !shf_same_wire(&existing, &row)) {
-        zcl_native_node_db_close_readonly(&db, &ndb);
-        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                 "FULFILLMENT_ID_COLLISION", "replay",
-                 "the stored row under this fulfillment id carries different "
-                 "signed bytes; quarantine and inspect node.db", "fulfill_id");
-        return;
-    }
+    bool already = false;
     struct shf_evidence facts;
-    bool valid = already ||
-        (shf_issued_fresh(&row, now, reply) &&
-         shf_validate_claim(&ndb, datadir, &row, now, &facts, reply));
-    bool nonce_replay = !already && valid &&
-        db_shop_fulfill_find_seller_nonce(&ndb, row.fulfill.seller_pubkey,
-                                          row.fulfill.nonce, &replay);
-    zcl_native_node_db_close_readonly(&db, &ndb);
-    if (!valid) return;
-    if (nonce_replay) {
-        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                 "FULFILL_NONCE_REPLAY", "replay",
-                 "this seller already used the nonce for a different "
-                 "fulfillment", "seller_pubkey+nonce");
-        return;
-    }
+    if (!shf_post_check_readonly(datadir, &row, now, &already, &facts,
+                                 reply)) return;
 
     if (!json_get_bool_or(request->input, "confirm", false)) {
         (void)json_push_kv_str(&reply->data, "mode", "plan");
@@ -379,41 +451,8 @@ void zcl_native_handle_shop_want_fulfill_post(
         return;
     }
 
-    if (!shf_open_write(datadir, &ndb, reply)) return;
-    already = db_shop_fulfill_find(&ndb, row.fulfill_id, &existing);
-    if (already && !shf_same_wire(&existing, &row)) {
-        node_db_close(&ndb);
-        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                 "FULFILLMENT_ID_COLLISION", "replay",
-                 "the stored row under this fulfillment id carries different "
-                 "signed bytes; quarantine and inspect node.db", "fulfill_id");
+    if (!shf_post_save_claim(datadir, &row, now, &already, &facts, reply))
         return;
-    }
-    if (!already) {
-        if (!shf_issued_fresh(&row, now, reply) ||
-            !shf_validate_claim(&ndb, datadir, &row, now, &facts, reply)) {
-            node_db_close(&ndb);
-            return;
-        }
-        nonce_replay = db_shop_fulfill_find_seller_nonce(
-            &ndb, row.fulfill.seller_pubkey, row.fulfill.nonce, &replay);
-        if (nonce_replay) {
-            node_db_close(&ndb);
-            shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                     ZCL_COMMAND_EXIT_DENIED, "FULFILL_NONCE_REPLAY",
-                     "replay", "this seller already used the nonce for a "
-                     "different fulfillment", "seller_pubkey+nonce");
-            return;
-        }
-    }
-    bool saved = already || db_shop_fulfill_save(&ndb, &row);
-    node_db_close(&ndb);
-    if (!saved) {
-        shf_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                 "FULFILLMENT_SAVE_FAILED", "execute",
-                 "the verified fulfillment could not be persisted", "node.db");
-        return;
-    }
     char id[65];
     zcl_hex_encode(row.fulfill_id, 32, id);
     (void)json_push_kv_str(&reply->data, "mode", "commit");
@@ -598,6 +637,30 @@ void zcl_native_handle_shop_want_fulfill_status(
     (void)json_push_kv_str(&reply->data, "terms_note", SHF_TERMS_NOTE);
 }
 
+static bool shf_withdraw_check_owner(bool confirm, sqlite3 **db,
+                                     struct node_db *ndb,
+                                     uint8_t fulfill_id[32],
+                                     uint8_t seller[32],
+                                     struct shop_fulfill *row,
+                                     struct zcl_command_reply *reply)
+{
+    bool found = db_shop_fulfill_find(ndb, fulfill_id, row);
+    if (!found || memcmp(seller, row->fulfill.seller_pubkey, 32) != 0) {
+        if (confirm) node_db_close(ndb);
+        else zcl_native_node_db_close_readonly(db, ndb);
+        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                 found ? ZCL_COMMAND_EXIT_DENIED : ZCL_COMMAND_EXIT_BLOCKED,
+                 found ? "WRONG_SELLER_KEY" : "FULFILLMENT_NOT_FOUND",
+                 found ? "custody" : "execute",
+                 found ? "only the Ed25519 key that signed the fulfillment "
+                         "may withdraw it"
+                       : "no fulfillment with this id is stored on this node",
+                 "fulfill_id");
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_shop_want_fulfill_withdraw(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -627,20 +690,9 @@ void zcl_native_handle_shop_want_fulfill_withdraw(
         return;
     }
     struct shop_fulfill row;
-    bool found = db_shop_fulfill_find(&ndb, fulfill_id, &row);
-    if (!found || memcmp(seller, row.fulfill.seller_pubkey, 32) != 0) {
-        if (confirm) node_db_close(&ndb);
-        else zcl_native_node_db_close_readonly(&db, &ndb);
-        shf_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                 found ? ZCL_COMMAND_EXIT_DENIED : ZCL_COMMAND_EXIT_BLOCKED,
-                 found ? "WRONG_SELLER_KEY" : "FULFILLMENT_NOT_FOUND",
-                 found ? "custody" : "execute",
-                 found ? "only the Ed25519 key that signed the fulfillment "
-                         "may withdraw it"
-                       : "no fulfillment with this id is stored on this node",
-                 "fulfill_id");
+    if (!shf_withdraw_check_owner(confirm, &db, &ndb, fulfill_id, seller,
+                                  &row, reply))
         return;
-    }
     bool already = row.withdrawn_unix > 0;
     if (!confirm) {
         zcl_native_node_db_close_readonly(&db, &ndb);
