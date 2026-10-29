@@ -44,8 +44,6 @@ contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:shadow_package_facts:
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_attribution_plan_cas:31
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:vcs_zcode_shadow_epoch_plan_cas:36
 contexts/commons/modules/vcs/src/zcode_write_scope.c:vcs_zcode_write_scope_parse:16
-contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_big_transfer:29
-contexts/commons/modules/zssh/tests/test_zssh_channel.c:test_data_controls:26
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zdogfight/tests/test_zdogfight.c:test_bounds_and_wrap:30

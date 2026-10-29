@@ -341,48 +341,138 @@ static void test_blocked_consumer(void)
     group("blocked consumer", before);
 }
 
+/* Fill both source streams from the PRNG and clear the destinations. */
+static void transfer_fill_sources(void)
+{
+    for (size_t i = 0; i < BIG; i++) g_src_f[i] = (uint8_t)(rng_next() >> 32);
+    for (size_t i = 0; i < REV; i++) g_src_r[i] = (uint8_t)(rng_next() >> 40);
+    memset(g_dst_f, 0xA5, sizeof g_dst_f);
+    memset(g_dst_r, 0x5A, sizeof g_dst_r);
+}
+
+/* One client -> server step: send what the window allows. */
+static void transfer_forward_step(struct zssh_chan *cl, struct zssh_chan *sv,
+                                  size_t *fpos, size_t *stalls)
+{
+    if (*fpos < BIG) {                                     /* client -> server */
+        size_t want = 1 + rng_next() % 5000;
+        if (want > BIG - *fpos) want = BIG - *fpos;
+        size_t take = zssh_chan_send_plan(cl, want, ZSSH_CHAN_MAX_PACKET);
+        if (take) {
+            CHECK(push_data(cl, sv, g_src_f + *fpos, take) == ZSSH_E_NONE, "fwd push");
+            *fpos += take;
+        } else {
+            (*stalls)++;
+            CHECK(cl->send_window == 0, "forward block only at window 0");
+        }
+    }
+}
+
+/* One server -> client step: send what the window allows. */
+static void transfer_reverse_step(struct zssh_chan *sv, struct zssh_chan *cl, size_t *rpos)
+{
+    if (*rpos < REV) {                                     /* server -> client */
+        size_t want = 1 + rng_next() % 3000;
+        if (want > REV - *rpos) want = REV - *rpos;
+        size_t take = zssh_chan_send_plan(sv, want, ZSSH_CHAN_MAX_PACKET);
+        if (take) {
+            CHECK(push_data(sv, cl, g_src_r + *rpos, take) == ZSSH_E_NONE, "rev push");
+            *rpos += take;
+        }
+    }
+}
+
+/* Slow server-side consumer of the forward stream. */
+static void transfer_drain_server(struct zssh_chan *sv, struct zssh_chan *cl, uint8_t *rb,
+                                  size_t *frd, size_t *adjusts)
+{
+    size_t got = zssh_chan_recv(sv, rb, 1 + rng_next() % 7000);
+    memcpy(g_dst_f + *frd, rb, got); *frd += got;
+    *adjusts += push_adjust(sv, cl) != 0;
+}
+
+/* Client-side consumer of the reverse stream. */
+static void transfer_drain_client(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *rb,
+                                  size_t *rrd, size_t *adjusts)
+{
+    size_t got = zssh_chan_recv(cl, rb, 1 + rng_next() % 5000);
+    memcpy(g_dst_r + *rrd, rb, got); *rrd += got;
+    *adjusts += push_adjust(cl, sv) != 0;
+}
+
+/* Half-close: client EOF, then the server EOF, with data still flowing. */
+static void transfer_eof_exchange(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *rb)
+{
+    uint8_t m[64];
+    struct zssh_wr w;
+    /* client finishes its sending: EOF. */
+    zssh_wr_init(&w, m, sizeof m);
+    zssh_chan_build_eof(cl, &w);
+    zssh_chan_mark_eof_sent(cl);                             /* CONN marks it sent */
+    CHECK(zssh_chan_on_eof(sv, m, w.off) == ZSSH_E_NONE, "server sees EOF");
+    CHECK(sv->recv_eof && !sv->recv_close && sv->state == ZSSH_CH_OPEN, "EOF is not CLOSE");
+    /* client side: no more data, but it still receives. */
+    CHECK(zssh_chan_send_plan(cl, 10, 100) == 0, "no send after our EOF");
+    CHECK(push_data(cl, sv, (const uint8_t *)"z", 1) == ZSSH_E_PROTOCOL, "send_build after EOF");
+    /* server after recv-EOF can still send until it sends EOF. */
+    CHECK(zssh_chan_send_plan(sv, 10, 100) == 10, "server may still send after recv-EOF");
+    CHECK(push_data(sv, cl, (const uint8_t *)"tail-data", 9) == ZSSH_E_NONE, "send after recv-EOF");
+    CHECK(zssh_chan_recv(cl, rb, 100) == 9 && memcmp(rb, "tail-data", 9) == 0, "client gets tail");
+    /* data from client after its EOF reaching the server is refused. */
+    size_t ml = m_data(m, 0, (const uint8_t *)"late", 4);
+    CHECK(zssh_chan_on_data(sv, m, ml) == ZSSH_E_PROTOCOL, "no data after EOF accepted");
+    ml = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
+    CHECK(zssh_chan_on_eof(sv, m, ml) == ZSSH_E_PROTOCOL, "second EOF refused");
+    /* server EOF. */
+    zssh_wr_init(&w, m, sizeof m);
+    zssh_chan_build_eof(sv, &w);
+    zssh_chan_mark_eof_sent(sv);
+    CHECK(zssh_chan_on_eof(cl, m, w.off) == ZSSH_E_NONE, "client sees EOF");
+    CHECK(zssh_chan_send_plan(sv, 10, 100) == 0, "server stops after own EOF");
+}
+
+/* CLOSE handshake: client CLOSE, then the server answers once. */
+static void transfer_close_exchange(struct zssh_chan *cl, struct zssh_chan *sv)
+{
+    uint8_t m[64];
+    struct zssh_wr w;
+    /* client CLOSE; server records it, answers once. */
+    zssh_wr_init(&w, m, sizeof m);
+    zssh_chan_build_close(cl, &w);
+    zssh_chan_mark_close_sent(cl);
+    CHECK(cl->sent_close && cl->state == ZSSH_CH_OPEN, "our CLOSE alone does not close");
+    /* After our CLOSE the peer may still send data / window until its CLOSE. */
+    size_t am = m_u32msg(m + 32, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 5);
+    CHECK(zssh_chan_on_window_adjust(cl, m + 32, am) == ZSSH_E_NONE,
+          "window adjust accepted after our CLOSE");
+    CHECK(zssh_chan_on_close(sv, m, w.off) == ZSSH_E_NONE, "server sees CLOSE");
+    CHECK(sv->recv_close && !sv->sent_close && sv->state == ZSSH_CH_OPEN, "CLOSE awaits our answer");
+    CHECK(zssh_chan_on_close(sv, m, w.off) == ZSSH_E_PROTOCOL, "second CLOSE refused");
+    zssh_wr_init(&w, m, sizeof m);
+    zssh_chan_build_close(sv, &w);
+    zssh_chan_mark_close_sent(sv);
+    CHECK(sv->state == ZSSH_CH_CLOSED, "mark_close_sent after peer CLOSE closes");
+    CHECK(zssh_chan_on_close(cl, m, w.off) == ZSSH_E_NONE, "client sees answer");
+    CHECK(cl->state == ZSSH_CH_CLOSED, "client closed (on_close after own CLOSE)");
+    CHECK(zssh_chan_window_adjust_due(cl) == 0, "no adjust after close");
+}
+
 static void test_big_transfer(void)
 {
     int before = g_fail;
     struct zssh_chan cl, sv;
     open_pair(&cl, &sv, 0);
-    for (size_t i = 0; i < BIG; i++) g_src_f[i] = (uint8_t)(rng_next() >> 32);
-    for (size_t i = 0; i < REV; i++) g_src_r[i] = (uint8_t)(rng_next() >> 40);
-    memset(g_dst_f, 0xA5, sizeof g_dst_f);
-    memset(g_dst_r, 0x5A, sizeof g_dst_r);
+    transfer_fill_sources();
     size_t fpos = 0, frd = 0, rpos = 0, rrd = 0, stalls = 0, adjusts = 0;
     static uint8_t rb[7001];
     for (size_t it = 0; it < 50000000u && (frd < BIG || rrd < REV); it++) {
-        if (fpos < BIG) {                                     /* client -> server */
-            size_t want = 1 + rng_next() % 5000;
-            if (want > BIG - fpos) want = BIG - fpos;
-            size_t take = zssh_chan_send_plan(&cl, want, ZSSH_CHAN_MAX_PACKET);
-            if (take) {
-                CHECK(push_data(&cl, &sv, g_src_f + fpos, take) == ZSSH_E_NONE, "fwd push");
-                fpos += take;
-            } else {
-                stalls++;
-                CHECK(cl.send_window == 0, "forward block only at window 0");
-            }
-        }
-        if (rpos < REV) {                                     /* server -> client */
-            size_t want = 1 + rng_next() % 3000;
-            if (want > REV - rpos) want = REV - rpos;
-            size_t take = zssh_chan_send_plan(&sv, want, ZSSH_CHAN_MAX_PACKET);
-            if (take) {
-                CHECK(push_data(&sv, &cl, g_src_r + rpos, take) == ZSSH_E_NONE, "rev push");
-                rpos += take;
-            }
-        }
+        transfer_forward_step(&cl, &sv, &fpos, &stalls);
+        transfer_reverse_step(&sv, &cl, &rpos);
         if (rng_next() % 4 == 0) {                            /* slow consumers */
-            size_t got = zssh_chan_recv(&sv, rb, 1 + rng_next() % 7000);
-            memcpy(g_dst_f + frd, rb, got); frd += got;
-            adjusts += push_adjust(&sv, &cl) != 0;
+            transfer_drain_server(&sv, &cl, rb, &frd, &adjusts);
         }
         if (rng_next() % 2 == 0) {
-            size_t got = zssh_chan_recv(&cl, rb, 1 + rng_next() % 5000);
-            memcpy(g_dst_r + rrd, rb, got); rrd += got;
-            adjusts += push_adjust(&cl, &sv) != 0;
+            transfer_drain_client(&cl, &sv, rb, &rrd, &adjusts);
         }
         CHECK(sv.recv_window + sv.ring_len + sv.freed_unreported == ZSSH_CHAN_WINDOW, "inv sv");
         CHECK(cl.recv_window + cl.ring_len + cl.freed_unreported == ZSSH_CHAN_WINDOW, "inv cl");
@@ -394,51 +484,8 @@ static void test_big_transfer(void)
 
     /* ---- half-close then close (group 4 shares this pair) ---- */
     int b4 = g_fail;
-    uint8_t m[64];
-    struct zssh_wr w;
-    /* client finishes its sending: EOF. */
-    zssh_wr_init(&w, m, sizeof m);
-    zssh_chan_build_eof(&cl, &w);
-    zssh_chan_mark_eof_sent(&cl);                             /* CONN marks it sent */
-    CHECK(zssh_chan_on_eof(&sv, m, w.off) == ZSSH_E_NONE, "server sees EOF");
-    CHECK(sv.recv_eof && !sv.recv_close && sv.state == ZSSH_CH_OPEN, "EOF is not CLOSE");
-    /* client side: no more data, but it still receives. */
-    CHECK(zssh_chan_send_plan(&cl, 10, 100) == 0, "no send after our EOF");
-    CHECK(push_data(&cl, &sv, (const uint8_t *)"z", 1) == ZSSH_E_PROTOCOL, "send_build after EOF");
-    /* server after recv-EOF can still send until it sends EOF. */
-    CHECK(zssh_chan_send_plan(&sv, 10, 100) == 10, "server may still send after recv-EOF");
-    CHECK(push_data(&sv, &cl, (const uint8_t *)"tail-data", 9) == ZSSH_E_NONE, "send after recv-EOF");
-    CHECK(zssh_chan_recv(&cl, rb, 100) == 9 && memcmp(rb, "tail-data", 9) == 0, "client gets tail");
-    /* data from client after its EOF reaching the server is refused. */
-    size_t ml = m_data(m, 0, (const uint8_t *)"late", 4);
-    CHECK(zssh_chan_on_data(&sv, m, ml) == ZSSH_E_PROTOCOL, "no data after EOF accepted");
-    ml = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
-    CHECK(zssh_chan_on_eof(&sv, m, ml) == ZSSH_E_PROTOCOL, "second EOF refused");
-    /* server EOF. */
-    zssh_wr_init(&w, m, sizeof m);
-    zssh_chan_build_eof(&sv, &w);
-    zssh_chan_mark_eof_sent(&sv);
-    CHECK(zssh_chan_on_eof(&cl, m, w.off) == ZSSH_E_NONE, "client sees EOF");
-    CHECK(zssh_chan_send_plan(&sv, 10, 100) == 0, "server stops after own EOF");
-    /* client CLOSE; server records it, answers once. */
-    zssh_wr_init(&w, m, sizeof m);
-    zssh_chan_build_close(&cl, &w);
-    zssh_chan_mark_close_sent(&cl);
-    CHECK(cl.sent_close && cl.state == ZSSH_CH_OPEN, "our CLOSE alone does not close");
-    /* After our CLOSE the peer may still send data / window until its CLOSE. */
-    size_t am = m_u32msg(m + 32, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 5);
-    CHECK(zssh_chan_on_window_adjust(&cl, m + 32, am) == ZSSH_E_NONE,
-          "window adjust accepted after our CLOSE");
-    CHECK(zssh_chan_on_close(&sv, m, w.off) == ZSSH_E_NONE, "server sees CLOSE");
-    CHECK(sv.recv_close && !sv.sent_close && sv.state == ZSSH_CH_OPEN, "CLOSE awaits our answer");
-    CHECK(zssh_chan_on_close(&sv, m, w.off) == ZSSH_E_PROTOCOL, "second CLOSE refused");
-    zssh_wr_init(&w, m, sizeof m);
-    zssh_chan_build_close(&sv, &w);
-    zssh_chan_mark_close_sent(&sv);
-    CHECK(sv.state == ZSSH_CH_CLOSED, "mark_close_sent after peer CLOSE closes");
-    CHECK(zssh_chan_on_close(&cl, m, w.off) == ZSSH_E_NONE, "client sees answer");
-    CHECK(cl.state == ZSSH_CH_CLOSED, "client closed (on_close after own CLOSE)");
-    CHECK(zssh_chan_window_adjust_due(&cl) == 0, "no adjust after close");
+    transfer_eof_exchange(&cl, &sv, rb);
+    transfer_close_exchange(&cl, &sv);
     struct zssh_channel_flags f;
     zssh_chan_flags(&sv, &f);
     CHECK(f.sent_eof && f.recv_eof && f.sent_close && f.recv_close, "flags all set");
@@ -578,201 +625,268 @@ static void test_client_controls(void)
     group("client controls", before);
 }
 
+/* Oversize packets and the receive window bounds. */
+static void data_window_limits(struct zssh_chan *sv, uint8_t *m, const uint8_t *big)
+{
+    /* oversize packet: fits the window (32768) but exceeds max packet. */
+    size_t n = m_data(m, 0, big, ZSSH_CHAN_MAX_PACKET + 1);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_WINDOW, "oversize packet refused");
+    CHECK(sv->ring_len == 0 && sv->recv_window == ZSSH_CHAN_WINDOW, "oversize leaves state");
+    n = m_data(m, 0, big, ZSSH_CHAN_MAX_PACKET);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_NONE, "max packet accepted");
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_NONE, "second max packet accepted");
+    /* window overrun: window now 0 -> 1 byte is too much. */
+    n = m_data(m, 0, big, 1);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_WINDOW, "window overrun refused");
+    /* partial overrun: free 10 bytes, send 11. */
+    uint8_t rb[64];
+    CHECK(zssh_chan_recv(sv, rb, 10) == 10, "read 10");
+    zssh_chan_window_adjust_sent(sv, 10);
+    n = m_data(m, 0, big, 11);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_WINDOW, "11 > window 10 refused");
+    n = m_data(m, 0, big, 10);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_NONE, "exactly the window accepted");
+    CHECK(sv->recv_window == 0 && sv->ring_len == ZSSH_CHAN_WINDOW, "window 0, ring full");
+    /* ring wrap-around integrity: 10 freed bytes were at the head. */
+    CHECK(sv->ring_head == 10, "ring head advanced");
+}
+
+/* Malformed DATA messages are protocol errors and store nothing. */
+static void data_malformed(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m,
+                           const uint8_t *big)
+{
+    /* malformed data. */
+    open_pair(cl, sv, 0);
+    size_t n = m_data(m, 0, big, 5);
+    CHECK(zssh_chan_on_data(sv, m, n - 1) == ZSSH_E_PROTOCOL, "short string body");
+    m[n] = 0;
+    CHECK(zssh_chan_on_data(sv, m, n + 1) == ZSSH_E_PROTOCOL, "trailing byte");
+    CHECK(zssh_chan_on_data(sv, m, 4) == ZSSH_E_PROTOCOL, "header truncated");
+    n = m_data(m, 0, big, 1);
+    put32(m + 5, 0xffffffffu);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_PROTOCOL, "huge string length");
+    CHECK(sv->ring_len == 0, "malformed data stored nothing");
+    n = m_data(m, 0, big, 0);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_NONE, "empty data tolerated");
+}
+
+/* unknown recipient on every inbound message. */
+static void data_unknown_recipient(struct zssh_chan *sv, uint8_t *m)
+{
+    uint8_t one[8] = { 0 };
+    size_t n = m_data(m, 1, one, 1);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_PROTOCOL, "data to channel 1");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 1, 10);
+    CHECK(zssh_chan_on_window_adjust(sv, m, n) == ZSSH_E_PROTOCOL, "adjust to channel 1");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 1);
+    CHECK(zssh_chan_on_eof(sv, m, n) == ZSSH_E_PROTOCOL, "eof to channel 1");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0xffffffffu);
+    CHECK(zssh_chan_on_close(sv, m, n) == ZSSH_E_PROTOCOL, "close to channel -1");
+    CHECK(!sv->recv_eof && !sv->recv_close, "unknown recipient changes nothing");
+    /* wrong message byte for the handler. */
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
+    CHECK(zssh_chan_on_eof(sv, m, n) == ZSSH_E_PROTOCOL, "eof handler rejects close");
+}
+
+/* WINDOW_ADJUST may raise the send window to 2^32-1 and no further. */
+static void data_adjust_limits(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    /* adjust overflow. */
+    open_pair(cl, sv, 0);
+    size_t n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 0xffffffffu);
+    CHECK(zssh_chan_on_window_adjust(cl, m, n) == ZSSH_E_PROTOCOL, "adjust overflow refused");
+    CHECK(cl->send_window == ZSSH_CHAN_WINDOW, "overflow leaves window");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 0xffffffffu - ZSSH_CHAN_WINDOW);
+    CHECK(zssh_chan_on_window_adjust(cl, m, n) == ZSSH_E_NONE && cl->send_window == 0xffffffffu,
+          "adjust to exactly 2^32-1 allowed");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 1);
+    CHECK(zssh_chan_on_window_adjust(cl, m, n) == ZSSH_E_PROTOCOL, "one more refused");
+    CHECK(zssh_chan_on_window_adjust(cl, m, n - 1) == ZSSH_E_PROTOCOL, "adjust truncated");
+}
+
+/* messages on a channel that is not open. */
+static void data_idle_channel(uint8_t *m)
+{
+    uint8_t one[8] = { 0 };
+    struct zssh_chan idle;
+    zssh_chan_init(&idle);
+    size_t n = m_data(m, 0, one, 1);
+    CHECK(zssh_chan_on_data(&idle, m, n) == ZSSH_E_PROTOCOL, "data on idle channel");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
+    CHECK(zssh_chan_on_eof(&idle, m, n) == ZSSH_E_PROTOCOL, "eof on idle channel");
+    CHECK(zssh_chan_send_plan(&idle, 5, 5) == 0, "no send on idle channel");
+}
+
+/* data and adjust after peer CLOSE. */
+static void data_after_peer_close(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    uint8_t one[8] = { 0 };
+    open_pair(cl, sv, 0);
+    size_t n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
+    CHECK(zssh_chan_on_close(sv, m, n) == ZSSH_E_NONE, "close recorded");
+    n = m_data(m, 0, one, 1);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_PROTOCOL, "data after CLOSE");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 10);
+    uint32_t sw = sv->send_window;
+    CHECK(zssh_chan_on_window_adjust(sv, m, n) == ZSSH_E_PROTOCOL, "WINDOW_ADJUST after peer CLOSE");
+    CHECK(sv->send_window == sw, "refused adjust leaves window");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
+    CHECK(zssh_chan_on_eof(sv, m, n) == ZSSH_E_PROTOCOL, "EOF after peer CLOSE");
+    CHECK(zssh_chan_send_plan(sv, 5, 5) == 0, "no send after peer CLOSE");
+}
+
+/* After OUR close (peer CLOSE not yet seen) data and adjust still land. */
+static void data_after_our_close(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    open_pair(cl, sv, 0);
+    zssh_chan_mark_close_sent(sv);
+    size_t n = m_data(m, 0, (const uint8_t *)"late", 4);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_NONE && sv->ring_len == 4,
+          "data accepted after our CLOSE");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 7);
+    CHECK(zssh_chan_on_window_adjust(sv, m, n) == ZSSH_E_NONE &&
+          sv->send_window == ZSSH_CHAN_WINDOW + 7, "adjust accepted after our CLOSE");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
+    CHECK(zssh_chan_on_close(sv, m, n) == ZSSH_E_NONE && sv->state == ZSSH_CH_CLOSED,
+          "peer CLOSE after ours closes");
+    n = m_data(m, 0, (const uint8_t *)"x", 1);
+    CHECK(zssh_chan_on_data(sv, m, n) == ZSSH_E_PROTOCOL, "no data once CLOSED");
+}
+
+/* Trailing bytes on EOF / CLOSE / WINDOW_ADJUST are protocol errors. */
+static void data_trailing_bytes(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    open_pair(cl, sv, 0);
+    size_t n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0); m[n] = 0;
+    CHECK(zssh_chan_on_eof(sv, m, n + 1) == ZSSH_E_PROTOCOL && !sv->recv_eof, "EOF trailing byte");
+    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0); m[n] = 0;
+    CHECK(zssh_chan_on_close(sv, m, n + 1) == ZSSH_E_PROTOCOL && !sv->recv_close, "CLOSE trailing byte");
+    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 1); m[n] = 0;
+    CHECK(zssh_chan_on_window_adjust(sv, m, n + 1) == ZSSH_E_PROTOCOL &&
+          sv->send_window == ZSSH_CHAN_WINDOW, "ADJUST trailing byte");
+}
+
+/* window_adjust_sent never credits more than was freed. */
+static void data_adjust_sent_clamp(struct zssh_chan *cl, struct zssh_chan *sv)
+{
+    uint8_t rb[64];
+    open_pair(cl, sv, 0);
+    CHECK(push_data(cl, sv, (const uint8_t *)"abcdefghij", 10) == ZSSH_E_NONE, "feed ring");
+    CHECK(zssh_chan_recv(sv, rb, 5) == 5 && sv->freed_unreported == 5, "free 5");
+    zssh_chan_window_adjust_sent(sv, 1000);
+    CHECK(sv->freed_unreported == 0 && sv->recv_window == ZSSH_CHAN_WINDOW - 10 + 5,
+          "adjust_sent clamped to freed");
+    CHECK(sv->recv_window + sv->ring_len + sv->freed_unreported == ZSSH_CHAN_WINDOW,
+          "invariant after clamp");
+    zssh_chan_window_adjust_sent(sv, 3);
+    CHECK(sv->recv_window == ZSSH_CHAN_WINDOW - 10 + 5, "adjust_sent with nothing freed adds nothing");
+}
+
+/* scrub: ring bytes and indices zero, state and flags kept. */
+static void data_scrub(struct zssh_chan *sv)
+{
+    zssh_chan_mark_eof_sent(sv);
+    CHECK(sv->ring[sv->ring_head] != 0, "ring holds data before scrub");
+    zssh_chan_scrub(sv);
+    bool zero = true;
+    for (size_t i = 0; i < sizeof sv->ring; i++) zero = zero && sv->ring[i] == 0;
+    CHECK(zero && sv->ring_len == 0 && sv->ring_head == 0, "scrub zeroes the ring");
+    CHECK(sv->state == ZSSH_CH_OPEN && sv->sent_eof, "scrub keeps state and flags");
+    CHECK(sv->send_window == ZSSH_CHAN_WINDOW, "scrub keeps windows");
+}
+
+/* Data queued before the peer's CLOSE stays readable until drained. */
+static void data_queued_before_close(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    uint8_t rb[64];
+    open_pair(cl, sv, 0);
+    CHECK(push_data(cl, sv, (const uint8_t *)"queued", 6) == ZSSH_E_NONE, "queue data");
+    size_t n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
+    CHECK(zssh_chan_on_close(sv, m, n) == ZSSH_E_NONE, "close after data");
+    CHECK(sv->ring_len == 6 && zssh_chan_recv(sv, rb, sizeof rb) == 6 &&
+          memcmp(rb, "queued", 6) == 0, "ring readable after CLOSE");
+    CHECK(sv->ring_len == 0 && zssh_chan_recv(sv, rb, sizeof rb) == 0, "drained");
+}
+
+/* send misuse and bounds. */
+static void data_send_misuse(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m,
+                             size_t mcap, const uint8_t *big)
+{
+    struct zssh_wr w;
+    open_pair(cl, sv, 0);
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, nullptr, 0, &w) == ZSSH_E_INTERNAL, "zero-length send refused");
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, big, ZSSH_CHAN_MAX_PACKET + 1, &w) == ZSSH_E_INTERNAL,
+          "send above max packet refused");
+    cl->send_window = 3;
+    CHECK(zssh_chan_send_plan(cl, 100, 100) == 3, "plan bounded by window");
+    cl->send_window = 1000; cl->send_maxpkt = 7;
+    CHECK(zssh_chan_send_plan(cl, 100, 100) == 7, "plan bounded by peer max packet");
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, big, 8, &w) == ZSSH_E_INTERNAL && cl->send_window == 1000,
+          "send above peer max packet refused");
+    zssh_chan_mark_close_sent(cl);
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, big, 1, &w) == ZSSH_E_PROTOCOL, "send after our CLOSE");
+}
+
+/* Queue refusal: build succeeds but CONN does not commit (queue full) ->
+ * the window is unchanged and the same build can be retried. */
+static void data_queue_refusal(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m,
+                               size_t mcap, const uint8_t *big)
+{
+    struct zssh_wr w;
+    open_pair(cl, sv, 0);
+    uint32_t win0 = cl->send_window;
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, big, 100, &w) == ZSSH_E_NONE, "build for refused queue");
+    CHECK(cl->send_window == win0, "queue failure leaves window unchanged");
+    zssh_wr_init(&w, m, mcap);
+    CHECK(zssh_chan_send_build(cl, big, 100, &w) == ZSSH_E_NONE && cl->send_window == win0,
+          "retry after refused queue");
+    zssh_chan_send_commit(cl, 100);
+    CHECK(cl->send_window == win0 - 100, "commit charges once");
+}
+
+/* mark_close_sent closes only when the peer CLOSE was already received. */
+static void data_close_ordering(struct zssh_chan *cl, struct zssh_chan *sv, uint8_t *m)
+{
+    open_pair(cl, sv, 0);
+    zssh_chan_mark_close_sent(cl);
+    CHECK(cl->sent_close && cl->state == ZSSH_CH_OPEN, "our CLOSE first: still open");
+    size_t n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
+    CHECK(zssh_chan_on_close(cl, m, n) == ZSSH_E_NONE && cl->state == ZSSH_CH_CLOSED,
+          "peer CLOSE second: closed");
+    open_pair(cl, sv, 0);
+    CHECK(zssh_chan_on_close(cl, m, n) == ZSSH_E_NONE && cl->state == ZSSH_CH_OPEN,
+          "peer CLOSE first: still open");
+    zssh_chan_mark_close_sent(cl);
+    CHECK(cl->state == ZSSH_CH_CLOSED, "our CLOSE second: closed");
+}
+
 static void test_data_controls(void)
 {
     int before = g_fail;
     struct zssh_chan cl, sv;
     static uint8_t m[ZSSH_CHAN_MAX_PACKET + 64], big[ZSSH_CHAN_MAX_PACKET + 1];
-    size_t n;
 
     memset(big, 0x42, sizeof big);
     open_pair(&cl, &sv, 0);
-    /* oversize packet: fits the window (32768) but exceeds max packet. */
-    n = m_data(m, 0, big, ZSSH_CHAN_MAX_PACKET + 1);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_WINDOW, "oversize packet refused");
-    CHECK(sv.ring_len == 0 && sv.recv_window == ZSSH_CHAN_WINDOW, "oversize leaves state");
-    n = m_data(m, 0, big, ZSSH_CHAN_MAX_PACKET);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_NONE, "max packet accepted");
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_NONE, "second max packet accepted");
-    /* window overrun: window now 0 -> 1 byte is too much. */
-    n = m_data(m, 0, big, 1);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_WINDOW, "window overrun refused");
-    /* partial overrun: free 10 bytes, send 11. */
-    uint8_t rb[64];
-    CHECK(zssh_chan_recv(&sv, rb, 10) == 10, "read 10");
-    zssh_chan_window_adjust_sent(&sv, 10);
-    n = m_data(m, 0, big, 11);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_WINDOW, "11 > window 10 refused");
-    n = m_data(m, 0, big, 10);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_NONE, "exactly the window accepted");
-    CHECK(sv.recv_window == 0 && sv.ring_len == ZSSH_CHAN_WINDOW, "window 0, ring full");
-    /* ring wrap-around integrity: 10 freed bytes were at the head. */
-    CHECK(sv.ring_head == 10, "ring head advanced");
-
-    /* malformed data. */
-    open_pair(&cl, &sv, 0);
-    n = m_data(m, 0, big, 5);
-    CHECK(zssh_chan_on_data(&sv, m, n - 1) == ZSSH_E_PROTOCOL, "short string body");
-    m[n] = 0;
-    CHECK(zssh_chan_on_data(&sv, m, n + 1) == ZSSH_E_PROTOCOL, "trailing byte");
-    CHECK(zssh_chan_on_data(&sv, m, 4) == ZSSH_E_PROTOCOL, "header truncated");
-    n = m_data(m, 0, big, 1);
-    put32(m + 5, 0xffffffffu);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_PROTOCOL, "huge string length");
-    CHECK(sv.ring_len == 0, "malformed data stored nothing");
-    n = m_data(m, 0, big, 0);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_NONE, "empty data tolerated");
-
-    /* unknown recipient on every inbound message. */
-    uint8_t one[8] = { 0 };
-    n = m_data(m, 1, one, 1);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_PROTOCOL, "data to channel 1");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 1, 10);
-    CHECK(zssh_chan_on_window_adjust(&sv, m, n) == ZSSH_E_PROTOCOL, "adjust to channel 1");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 1);
-    CHECK(zssh_chan_on_eof(&sv, m, n) == ZSSH_E_PROTOCOL, "eof to channel 1");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0xffffffffu);
-    CHECK(zssh_chan_on_close(&sv, m, n) == ZSSH_E_PROTOCOL, "close to channel -1");
-    CHECK(!sv.recv_eof && !sv.recv_close, "unknown recipient changes nothing");
-    /* wrong message byte for the handler. */
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
-    CHECK(zssh_chan_on_eof(&sv, m, n) == ZSSH_E_PROTOCOL, "eof handler rejects close");
-
-    /* adjust overflow. */
-    open_pair(&cl, &sv, 0);
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 0xffffffffu);
-    CHECK(zssh_chan_on_window_adjust(&cl, m, n) == ZSSH_E_PROTOCOL, "adjust overflow refused");
-    CHECK(cl.send_window == ZSSH_CHAN_WINDOW, "overflow leaves window");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 0xffffffffu - ZSSH_CHAN_WINDOW);
-    CHECK(zssh_chan_on_window_adjust(&cl, m, n) == ZSSH_E_NONE && cl.send_window == 0xffffffffu,
-          "adjust to exactly 2^32-1 allowed");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 1);
-    CHECK(zssh_chan_on_window_adjust(&cl, m, n) == ZSSH_E_PROTOCOL, "one more refused");
-    CHECK(zssh_chan_on_window_adjust(&cl, m, n - 1) == ZSSH_E_PROTOCOL, "adjust truncated");
-
-    /* messages on a channel that is not open. */
-    struct zssh_chan idle;
-    zssh_chan_init(&idle);
-    n = m_data(m, 0, one, 1);
-    CHECK(zssh_chan_on_data(&idle, m, n) == ZSSH_E_PROTOCOL, "data on idle channel");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
-    CHECK(zssh_chan_on_eof(&idle, m, n) == ZSSH_E_PROTOCOL, "eof on idle channel");
-    CHECK(zssh_chan_send_plan(&idle, 5, 5) == 0, "no send on idle channel");
-
-    /* data and adjust after peer CLOSE. */
-    open_pair(&cl, &sv, 0);
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
-    CHECK(zssh_chan_on_close(&sv, m, n) == ZSSH_E_NONE, "close recorded");
-    n = m_data(m, 0, one, 1);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_PROTOCOL, "data after CLOSE");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 10);
-    uint32_t sw = sv.send_window;
-    CHECK(zssh_chan_on_window_adjust(&sv, m, n) == ZSSH_E_PROTOCOL, "WINDOW_ADJUST after peer CLOSE");
-    CHECK(sv.send_window == sw, "refused adjust leaves window");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0);
-    CHECK(zssh_chan_on_eof(&sv, m, n) == ZSSH_E_PROTOCOL, "EOF after peer CLOSE");
-    CHECK(zssh_chan_send_plan(&sv, 5, 5) == 0, "no send after peer CLOSE");
-
-    /* After OUR close (peer CLOSE not yet seen) data and adjust still land. */
-    open_pair(&cl, &sv, 0);
-    zssh_chan_mark_close_sent(&sv);
-    n = m_data(m, 0, (const uint8_t *)"late", 4);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_NONE && sv.ring_len == 4,
-          "data accepted after our CLOSE");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 7);
-    CHECK(zssh_chan_on_window_adjust(&sv, m, n) == ZSSH_E_NONE &&
-          sv.send_window == ZSSH_CHAN_WINDOW + 7, "adjust accepted after our CLOSE");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
-    CHECK(zssh_chan_on_close(&sv, m, n) == ZSSH_E_NONE && sv.state == ZSSH_CH_CLOSED,
-          "peer CLOSE after ours closes");
-    n = m_data(m, 0, (const uint8_t *)"x", 1);
-    CHECK(zssh_chan_on_data(&sv, m, n) == ZSSH_E_PROTOCOL, "no data once CLOSED");
-
-    /* Trailing bytes on EOF / CLOSE / WINDOW_ADJUST are protocol errors. */
-    open_pair(&cl, &sv, 0);
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_EOF, 0); m[n] = 0;
-    CHECK(zssh_chan_on_eof(&sv, m, n + 1) == ZSSH_E_PROTOCOL && !sv.recv_eof, "EOF trailing byte");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0); m[n] = 0;
-    CHECK(zssh_chan_on_close(&sv, m, n + 1) == ZSSH_E_PROTOCOL && !sv.recv_close, "CLOSE trailing byte");
-    n = m_u32msg(m, ZSSH_MSG_CHANNEL_WINDOW_ADJUST, 0, 1); m[n] = 0;
-    CHECK(zssh_chan_on_window_adjust(&sv, m, n + 1) == ZSSH_E_PROTOCOL &&
-          sv.send_window == ZSSH_CHAN_WINDOW, "ADJUST trailing byte");
-
-    /* window_adjust_sent never credits more than was freed. */
-    open_pair(&cl, &sv, 0);
-    CHECK(push_data(&cl, &sv, (const uint8_t *)"abcdefghij", 10) == ZSSH_E_NONE, "feed ring");
-    CHECK(zssh_chan_recv(&sv, rb, 5) == 5 && sv.freed_unreported == 5, "free 5");
-    zssh_chan_window_adjust_sent(&sv, 1000);
-    CHECK(sv.freed_unreported == 0 && sv.recv_window == ZSSH_CHAN_WINDOW - 10 + 5,
-          "adjust_sent clamped to freed");
-    CHECK(sv.recv_window + sv.ring_len + sv.freed_unreported == ZSSH_CHAN_WINDOW,
-          "invariant after clamp");
-    zssh_chan_window_adjust_sent(&sv, 3);
-    CHECK(sv.recv_window == ZSSH_CHAN_WINDOW - 10 + 5, "adjust_sent with nothing freed adds nothing");
-
-    /* scrub: ring bytes and indices zero, state and flags kept. */
-    zssh_chan_mark_eof_sent(&sv);
-    CHECK(sv.ring[sv.ring_head] != 0, "ring holds data before scrub");
-    zssh_chan_scrub(&sv);
-    bool zero = true;
-    for (size_t i = 0; i < sizeof sv.ring; i++) zero = zero && sv.ring[i] == 0;
-    CHECK(zero && sv.ring_len == 0 && sv.ring_head == 0, "scrub zeroes the ring");
-    CHECK(sv.state == ZSSH_CH_OPEN && sv.sent_eof, "scrub keeps state and flags");
-    CHECK(sv.send_window == ZSSH_CHAN_WINDOW, "scrub keeps windows");
-
-    /* Data queued before the peer's CLOSE stays readable until drained. */
-    open_pair(&cl, &sv, 0);
-    CHECK(push_data(&cl, &sv, (const uint8_t *)"queued", 6) == ZSSH_E_NONE, "queue data");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
-    CHECK(zssh_chan_on_close(&sv, m, n) == ZSSH_E_NONE, "close after data");
-    CHECK(sv.ring_len == 6 && zssh_chan_recv(&sv, rb, sizeof rb) == 6 &&
-          memcmp(rb, "queued", 6) == 0, "ring readable after CLOSE");
-    CHECK(sv.ring_len == 0 && zssh_chan_recv(&sv, rb, sizeof rb) == 0, "drained");
-
-    /* send misuse and bounds. */
-    open_pair(&cl, &sv, 0);
-    struct zssh_wr w;
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, nullptr, 0, &w) == ZSSH_E_INTERNAL, "zero-length send refused");
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, big, ZSSH_CHAN_MAX_PACKET + 1, &w) == ZSSH_E_INTERNAL,
-          "send above max packet refused");
-    cl.send_window = 3;
-    CHECK(zssh_chan_send_plan(&cl, 100, 100) == 3, "plan bounded by window");
-    cl.send_window = 1000; cl.send_maxpkt = 7;
-    CHECK(zssh_chan_send_plan(&cl, 100, 100) == 7, "plan bounded by peer max packet");
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, big, 8, &w) == ZSSH_E_INTERNAL && cl.send_window == 1000,
-          "send above peer max packet refused");
-    zssh_chan_mark_close_sent(&cl);
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, big, 1, &w) == ZSSH_E_PROTOCOL, "send after our CLOSE");
-
-    /* Queue refusal: build succeeds but CONN does not commit (queue full) ->
-     * the window is unchanged and the same build can be retried. */
-    open_pair(&cl, &sv, 0);
-    uint32_t win0 = cl.send_window;
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, big, 100, &w) == ZSSH_E_NONE, "build for refused queue");
-    CHECK(cl.send_window == win0, "queue failure leaves window unchanged");
-    zssh_wr_init(&w, m, sizeof m);
-    CHECK(zssh_chan_send_build(&cl, big, 100, &w) == ZSSH_E_NONE && cl.send_window == win0,
-          "retry after refused queue");
-    zssh_chan_send_commit(&cl, 100);
-    CHECK(cl.send_window == win0 - 100, "commit charges once");
-
-    /* mark_close_sent closes only when the peer CLOSE was already received. */
-    open_pair(&cl, &sv, 0);
-    zssh_chan_mark_close_sent(&cl);
-    CHECK(cl.sent_close && cl.state == ZSSH_CH_OPEN, "our CLOSE first: still open");
-    n = m_hdr(m, ZSSH_MSG_CHANNEL_CLOSE, 0);
-    CHECK(zssh_chan_on_close(&cl, m, n) == ZSSH_E_NONE && cl.state == ZSSH_CH_CLOSED,
-          "peer CLOSE second: closed");
-    open_pair(&cl, &sv, 0);
-    CHECK(zssh_chan_on_close(&cl, m, n) == ZSSH_E_NONE && cl.state == ZSSH_CH_OPEN,
-          "peer CLOSE first: still open");
-    zssh_chan_mark_close_sent(&cl);
-    CHECK(cl.state == ZSSH_CH_CLOSED, "our CLOSE second: closed");
+    data_window_limits(&sv, m, big);
+    data_malformed(&cl, &sv, m, big);
+    data_unknown_recipient(&sv, m);
+    data_adjust_limits(&cl, &sv, m);
+    data_idle_channel(m);
+    data_after_peer_close(&cl, &sv, m);
+    data_after_our_close(&cl, &sv, m);
+    data_trailing_bytes(&cl, &sv, m);
+    data_adjust_sent_clamp(&cl, &sv);
+    data_scrub(&sv);
+    data_queued_before_close(&cl, &sv, m);
+    data_send_misuse(&cl, &sv, m, sizeof m, big);
+    data_queue_refusal(&cl, &sv, m, sizeof m, big);
+    data_close_ordering(&cl, &sv, m);
     group("data controls", before);
 }
 
