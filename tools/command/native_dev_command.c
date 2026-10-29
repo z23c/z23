@@ -172,6 +172,124 @@ void zcl_native_handle_dev_status(const struct zcl_command_request *request,
  * zcl_devloop_process_run() subprocess primitive the reload/redeploy path
  * uses (see dev_vcs_shell_fallback_activate() above), which is DEV_ONLY
  * linked (Makefile DEV_ONLY_SRCS) — so a release build never spawns this. */
+#ifdef ZCL_DEV_BUILD
+/* Publication state of a ZVCS anchor that the passing ladder produced. */
+static void dev_ff_push_publication(struct zcl_command_reply *reply,
+                                    const struct vcs_devloop_anchor_result *anchor)
+{
+    char hex[65];
+    const char *publication =
+        anchor->publication_status == VCS_DEVLOOP_PUBLICATION_QUEUED
+            ? "QUEUED"
+            : anchor->publication_status ==
+                  VCS_DEVLOOP_PUBLICATION_ERROR
+                ? "ERROR" : "NOT_ELIGIBLE";
+    (void)json_push_kv_str(&reply->data, "publication_status",
+                           publication);
+    if (anchor->publication_status ==
+        VCS_DEVLOOP_PUBLICATION_QUEUED) {
+        zcl_hex_encode(anchor->proof_receipt_root, 32, hex);
+        (void)json_push_kv_str(&reply->data,
+                               "proof_receipt_root", hex);
+        zcl_hex_encode(anchor->publication_job_root, 32, hex);
+        (void)json_push_kv_str(&reply->data,
+                               "publication_job_root", hex);
+        (void)json_push_kv_int(&reply->data,
+                               "publication_enqueue_us",
+                               anchor->publication_enqueue_us);
+        (void)json_push_kv_bool(&reply->data,
+                                "publication_reused",
+                                anchor->publication_reused);
+        char next_command[256];
+        (void)snprintf(
+            next_command, sizeof(next_command),
+            "z23-dev dev publication status --input='"
+            "{\"job_root\":\"%s\"}'",
+            hex);
+        (void)json_push_kv_str(
+            &reply->data, "publication_next_command",
+            next_command);
+    }
+    if (anchor->publication_error[0])
+        (void)json_push_kv_str(&reply->data, "publication_error",
+                               anchor->publication_error);
+}
+
+/* A passing ladder is anchored as a ZVCS commit against its exact source. */
+static void dev_ff_push_anchor(struct zcl_command_reply *reply,
+                               const char *root, int64_t elapsed_ms,
+                               const struct dev_source_record *source_before)
+{
+    struct vcs_devloop_verdict verdict = {
+        .verdict_status = 0,
+        .phase = "verify",
+        .elapsed_ms = elapsed_ms,
+        .defer_initial_snapshot = true,
+        .proof_complete = true,
+        .proof_scope = "source_wide_compile_tests_lint_fast",
+        .source_identity_hex = source_before->source_id,
+        .source_cas_hex = source_before->cas_present
+            ? source_before->cas_root_sha3 : NULL,
+    };
+    struct vcs_devloop_anchor_result anchor;
+    vcs_devloop_anchor_cycle(root, &verdict, &anchor);
+    if (anchor.status == VCS_DEVLOOP_ANCHOR_OK) {
+        char hex[65];
+        zcl_hex_encode(anchor.commit_id, 32, hex);
+        (void)json_push_kv_str(&reply->data, "vcs_commit", hex);
+        dev_ff_push_publication(reply, &anchor);
+    } else {
+        (void)json_push_kv_str(&reply->data, "vcs_error",
+                               anchor.error[0]
+                                   ? anchor.error
+                                   : "ZVCS anchor unavailable");
+        (void)json_push_kv_bool(&reply->data, "vcs_deferred",
+                                anchor.status ==
+                                    VCS_DEVLOOP_ANCHOR_DEFERRED);
+    }
+    (void)json_push_kv_str(&reply->data, "source_identity_sha256",
+                           source_before->source_id);
+    if (source_before->cas_present)
+        (void)json_push_kv_str(&reply->data, "source_cas_sha3",
+                               source_before->cas_root_sha3);
+}
+
+/* A failing ladder reports its output tail and the FIRST-ERROR evidence. */
+static void dev_ff_push_failure(struct zcl_command_reply *reply,
+                                const struct zcl_devloop_process_result *result)
+{
+    const char *tail = result->output;
+    if (result->output_len > 2048)
+        tail += result->output_len - 2048;
+    (void)json_push_kv_str(&reply->data, "output_tail", tail);
+    /* The failing envelope drops reply->data (see serialize_reply()), so
+     * carry the ladder's own dense "FIRST-ERROR[<rung>]: ..." line (see
+     * tools/agent_fast_ci.sh) in the error evidence, where it is
+     * actually rendered. Falls back to a short output tail if the
+     * marker was not printed (e.g. a killed/timed-out subprocess). */
+    char evidence[256];
+    const char *marker = strstr(result->output, "FIRST-ERROR[");
+    if (marker) {
+        const char *eol = strchr(marker, '\n');
+        size_t len = eol ? (size_t)(eol - marker) : strlen(marker);
+        if (len >= sizeof(evidence))
+            len = sizeof(evidence) - 1;
+        memcpy(evidence, marker, len);
+        evidence[len] = 0;
+    } else {
+        (void)snprintf(evidence, sizeof(evidence), "%s",
+                       result->output_len > sizeof(evidence) - 1
+                           ? result->output +
+                                 (result->output_len - (sizeof(evidence) - 1))
+                           : result->output);
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_FAILED, "FF_LADDER_FAILED",
+                           "prove", true, false,
+                           "fail-fast ladder failed", evidence);
+}
+#endif
+
 void zcl_native_handle_dev_ff(const struct zcl_command_request *request,
                               struct zcl_command_reply *reply)
 {
@@ -231,105 +349,10 @@ void zcl_native_handle_dev_ff(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "elapsed_ms", result.elapsed_ms);
     (void)json_push_kv_int(&reply->data, "exit_code", result.exit_code);
     (void)json_push_kv_bool(&reply->data, "timed_out", result.timed_out);
-    if (ok) {
-        struct vcs_devloop_verdict verdict = {
-            .verdict_status = 0,
-            .phase = "verify",
-            .elapsed_ms = result.elapsed_ms,
-            .defer_initial_snapshot = true,
-            .proof_complete = true,
-            .proof_scope = "source_wide_compile_tests_lint_fast",
-            .source_identity_hex = source_before.source_id,
-            .source_cas_hex = source_before.cas_present
-                ? source_before.cas_root_sha3 : NULL,
-        };
-        struct vcs_devloop_anchor_result anchor;
-        vcs_devloop_anchor_cycle(root, &verdict, &anchor);
-        if (anchor.status == VCS_DEVLOOP_ANCHOR_OK) {
-            char hex[65];
-            zcl_hex_encode(anchor.commit_id, 32, hex);
-            (void)json_push_kv_str(&reply->data, "vcs_commit", hex);
-            const char *publication =
-                anchor.publication_status == VCS_DEVLOOP_PUBLICATION_QUEUED
-                    ? "QUEUED"
-                    : anchor.publication_status ==
-                          VCS_DEVLOOP_PUBLICATION_ERROR
-                        ? "ERROR" : "NOT_ELIGIBLE";
-            (void)json_push_kv_str(&reply->data, "publication_status",
-                                   publication);
-            if (anchor.publication_status ==
-                VCS_DEVLOOP_PUBLICATION_QUEUED) {
-                zcl_hex_encode(anchor.proof_receipt_root, 32, hex);
-                (void)json_push_kv_str(&reply->data,
-                                       "proof_receipt_root", hex);
-                zcl_hex_encode(anchor.publication_job_root, 32, hex);
-                (void)json_push_kv_str(&reply->data,
-                                       "publication_job_root", hex);
-                (void)json_push_kv_int(&reply->data,
-                                       "publication_enqueue_us",
-                                       anchor.publication_enqueue_us);
-                (void)json_push_kv_bool(&reply->data,
-                                        "publication_reused",
-                                        anchor.publication_reused);
-                char next_command[256];
-                (void)snprintf(
-                    next_command, sizeof(next_command),
-                    "z23-dev dev publication status --input='"
-                    "{\"job_root\":\"%s\"}'",
-                    hex);
-                (void)json_push_kv_str(
-                    &reply->data, "publication_next_command",
-                    next_command);
-            }
-            if (anchor.publication_error[0])
-                (void)json_push_kv_str(&reply->data, "publication_error",
-                                       anchor.publication_error);
-        } else {
-            (void)json_push_kv_str(&reply->data, "vcs_error",
-                                   anchor.error[0]
-                                       ? anchor.error
-                                       : "ZVCS anchor unavailable");
-            (void)json_push_kv_bool(&reply->data, "vcs_deferred",
-                                    anchor.status ==
-                                        VCS_DEVLOOP_ANCHOR_DEFERRED);
-        }
-        (void)json_push_kv_str(&reply->data, "source_identity_sha256",
-                               source_before.source_id);
-        if (source_before.cas_present)
-            (void)json_push_kv_str(&reply->data, "source_cas_sha3",
-                                   source_before.cas_root_sha3);
-    }
-    if (!ok) {
-        const char *tail = result.output;
-        if (result.output_len > 2048)
-            tail += result.output_len - 2048;
-        (void)json_push_kv_str(&reply->data, "output_tail", tail);
-        /* The failing envelope drops reply->data (see serialize_reply()), so
-         * carry the ladder's own dense "FIRST-ERROR[<rung>]: ..." line (see
-         * tools/agent_fast_ci.sh) in the error evidence, where it is
-         * actually rendered. Falls back to a short output tail if the
-         * marker was not printed (e.g. a killed/timed-out subprocess). */
-        char evidence[256];
-        const char *marker = strstr(result.output, "FIRST-ERROR[");
-        if (marker) {
-            const char *eol = strchr(marker, '\n');
-            size_t len = eol ? (size_t)(eol - marker) : strlen(marker);
-            if (len >= sizeof(evidence))
-                len = sizeof(evidence) - 1;
-            memcpy(evidence, marker, len);
-            evidence[len] = 0;
-        } else {
-            (void)snprintf(evidence, sizeof(evidence), "%s",
-                           result.output_len > sizeof(evidence) - 1
-                               ? result.output +
-                                     (result.output_len - (sizeof(evidence) - 1))
-                               : result.output);
-        }
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "FF_LADDER_FAILED",
-                               "prove", true, false,
-                               "fail-fast ladder failed", evidence);
-    }
+    if (ok)
+        dev_ff_push_anchor(reply, root, result.elapsed_ms, &source_before);
+    if (!ok)
+        dev_ff_push_failure(reply, &result);
 #endif
 }
 
@@ -708,6 +731,20 @@ static void dev_pub_status_push_p2p(
     (void)json_push_kv_bool(out, "physical_independence_attested", false);
 }
 
+static void dev_pub_status_push_receipts(
+    struct json_value *out, const struct dev_pub_chain *chain,
+    const struct vcs_package_mapping_set *mapping,
+    const struct vcs_devloop_publication_receipt *progress,
+    const uint8_t progress_root[32], bool advanced, bool accepted)
+{
+    if (advanced)
+        dev_pub_push_root(out, "progress_receipt_root", progress_root);
+    if (accepted)
+        dev_pub_push_root(out, "lane_receipt_root",
+                          chain->mapping_ready ? mapping->lane_receipt_root
+                                               : progress->artifact_root);
+}
+
 void zcl_native_handle_dev_publication_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -786,12 +823,8 @@ void zcl_native_handle_dev_publication_status(
     (void)json_push_kv_bool(out, "proof_complete", true);
     (void)json_push_kv_str(out, "publication_job_root", job_hex);
     dev_pub_status_push_job_roots(out, &job);
-    if (advanced)
-        dev_pub_push_root(out, "progress_receipt_root", progress_root);
-    if (accepted)
-        dev_pub_push_root(out, "lane_receipt_root",
-                          chain.mapping_ready ? mapping.lane_receipt_root
-                                              : progress.artifact_root);
+    dev_pub_status_push_receipts(out, &chain, &mapping, &progress,
+                                 progress_root, advanced, accepted);
     dev_pub_status_push_chain_roots(out, &chain, &progress, mapping_root);
     dev_pub_status_push_p2p(out, &chain, advanced, &progress);
     dev_pub_status_push_mirror(out, mirror_lookup, &mirror, mirror_root);
@@ -802,6 +835,71 @@ void zcl_native_handle_dev_publication_status(
         dev_pub_status_next_command(&chain, accepted, advanced, queued,
                                     next_command, collect_command));
     vcs_package_mapping_set_free(&mapping);
+}
+
+/* The lane's accepted work must resolve to this exact source root. */
+static bool dev_publication_accepted_work(
+    const char *workspace, const uint8_t source_root[32], int64_t now,
+    const struct zcode_lane_status *status, bool found_ok,
+    struct vcs_zcode_accepted_work_v1 *accepted)
+{
+    uint8_t accepted_root[32];
+    return found_ok && status->lane == VCS_ZCODE_LANE_PROVEN &&
+        zcl_hex_decode_lower(status->receipt_root_sha3, accepted_root, 32) &&
+        vcs_zcode_accepted_work_resolve(
+            workspace, accepted_root, now, accepted) &&
+        memcmp(accepted->candidate.candidate_source_root, source_root, 32) == 0 &&
+        memcmp(accepted->accepted_work_root, accepted_root, 32) == 0;
+}
+
+/* Some approved, unrevoked, unexpired worker signs with the expected key. */
+static bool dev_publication_signer_current(
+    const struct db_build_worker *workers, int worker_count,
+    const char *expected_signer, int64_t now)
+{
+    for (int i = 0; i < worker_count; i++)
+        if (strcmp(workers[i].signer_pubkey, expected_signer) == 0 &&
+            workers[i].approved && !workers[i].revoked &&
+            (workers[i].expires_at == 0 || now < workers[i].expires_at))
+            return true;
+    return false;
+}
+
+/* One candidate action whose exact evidence satisfies the proof policy over
+ * the lane's proof set root. */
+static bool dev_publication_action_proved(const char *workspace,
+                                          const char *datadir,
+                                          const char *action_id,
+                                          const char *proof_set_root)
+{
+    struct zcl_command_reply evidence_reply;
+    zcl_command_reply_init(&evidence_reply, "zcl.zcode_evidence.v1");
+    zcl_native_zcode_evidence_exact(workspace, datadir, action_id,
+                                    &evidence_reply);
+    const char *evaluated_proof = json_get_str(
+        json_get(&evidence_reply.data, "proof_set_root"));
+    const struct json_value *policy_value = json_get(
+        &evidence_reply.data, "policy_satisfied");
+    bool proved = evidence_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        evidence_reply.exit_code == ZCL_COMMAND_EXIT_OK &&
+        policy_value && policy_value->type == JSON_BOOL &&
+        json_get_bool(policy_value) && evaluated_proof &&
+        strcmp(evaluated_proof, proof_set_root) == 0;
+    zcl_command_reply_free(&evidence_reply);
+    return proved;
+}
+
+static bool dev_publication_any_action_proved(
+    const char *workspace, const char *datadir,
+    const struct db_build_action *actions, int action_count,
+    const char *proof_set_root)
+{
+    for (int i = 0; i < action_count; i++)
+        if (dev_publication_action_proved(workspace, datadir,
+                                          actions[i].action_id,
+                                          proof_set_root))
+            return true;
+    return false;
 }
 
 static bool dev_publication_lane_lookup(
@@ -821,14 +919,9 @@ static bool dev_publication_lane_lookup(
     struct zcode_lane_status status;
     struct zcl_result found = zcode_lane_find(
         &ndb, workspace, source_hex, &status);
-    uint8_t accepted_root[32];
     struct vcs_zcode_accepted_work_v1 accepted;
-    bool accepted_ok = found.ok && status.lane == VCS_ZCODE_LANE_PROVEN &&
-        zcl_hex_decode_lower(status.receipt_root_sha3, accepted_root, 32) &&
-        vcs_zcode_accepted_work_resolve(
-            workspace, accepted_root, now, &accepted) &&
-        memcmp(accepted.candidate.candidate_source_root, source_root, 32) == 0 &&
-        memcmp(accepted.accepted_work_root, accepted_root, 32) == 0;
+    bool accepted_ok = dev_publication_accepted_work(
+        workspace, source_root, now, &status, found.ok, &accepted);
     struct db_build_action actions[DEV_PUBLICATION_ACTION_MAX + 1];
     int action_count = accepted_ok ? db_build_candidate_actions(
         &ndb, status.task_root_sha3, status.candidate_root_sha3,
@@ -840,35 +933,17 @@ static bool dev_publication_lane_lookup(
     char expected_signer[65];
     if (accepted_ok)
         zcl_hex_encode(accepted.expected_signer, 32, expected_signer);
-    bool signer_current = false;
-    for (int i = 0; accepted_ok && i < worker_count; i++)
-        if (strcmp(workers[i].signer_pubkey, expected_signer) == 0 &&
-            workers[i].approved && !workers[i].revoked &&
-            (workers[i].expires_at == 0 || now < workers[i].expires_at))
-            signer_current = true;
+    bool signer_current = accepted_ok && dev_publication_signer_current(
+        workers, worker_count, expected_signer, now);
     zcl_native_node_db_close_readonly(&db, &ndb);
     if (!accepted_ok || action_count <= 0 ||
         action_count > DEV_PUBLICATION_ACTION_MAX || worker_count <= 0 ||
         worker_count > DEV_PUBLICATION_WORKER_MAX || !signer_current)
         return false;
 
-    bool proof_verified = false;
-    for (int i = 0; i < action_count && !proof_verified; i++) {
-        struct zcl_command_reply evidence_reply;
-        zcl_command_reply_init(&evidence_reply, "zcl.zcode_evidence.v1");
-        zcl_native_zcode_evidence_exact(
-            workspace, datadir, actions[i].action_id, &evidence_reply);
-        const char *evaluated_proof = json_get_str(
-            json_get(&evidence_reply.data, "proof_set_root"));
-        const struct json_value *policy_value = json_get(
-            &evidence_reply.data, "policy_satisfied");
-        proof_verified = evidence_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-            evidence_reply.exit_code == ZCL_COMMAND_EXIT_OK &&
-            policy_value && policy_value->type == JSON_BOOL &&
-            json_get_bool(policy_value) && evaluated_proof &&
-            strcmp(evaluated_proof, status.proof_set_root_sha3) == 0;
-        zcl_command_reply_free(&evidence_reply);
-    }
+    bool proof_verified = dev_publication_any_action_proved(
+        workspace, datadir, actions, action_count,
+        status.proof_set_root_sha3);
     if (!proof_verified) return false;
     memcpy(lane_root, accepted.accepted_work_root, 32);
     zcl_hex_encode(accepted.proof_set_root, 32, proof_set_hex);
@@ -1215,6 +1290,247 @@ void zcl_native_handle_dev_publication_advance(
     zcl_dev_publication_advance(&publication, reply);
 }
 
+static void dev_pub_collect_push_header(
+    struct zcl_command_reply *reply, const char *job_hex,
+    bool collecting_reproduction,
+    const struct vcs_devloop_publication_ack_target *target)
+{
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.dev_publication_collect.v1");
+    (void)json_push_kv_str(&reply->data, "publication_job_root", job_hex);
+    (void)json_push_kv_int(&reply->data, "required_storage_acks",
+                           VCS_DEVLOOP_PUBLICATION_ACK_MIN);
+    (void)json_push_kv_int(&reply->data,
+                           "required_source_reproduction_acks", 1);
+    (void)json_push_kv_bool(&reply->data, "network_called", true);
+    (void)json_push_kv_bool(&reply->data, "discovery_called",
+                            collecting_reproduction
+                                ? !target->already_reproduced
+                                : !target->already_acknowledged);
+    (void)json_push_kv_str(
+        &reply->data, "chain_authority",
+        "authenticated_local_node_discovery_plus_local_signature_recheck");
+}
+
+static void dev_pub_collect_push_reproduced(
+    struct zcl_command_reply *reply,
+    const struct vcs_devloop_publication_ack_target *target)
+{
+    (void)json_push_kv_str(&reply->data, "status",
+                           "SOURCE_REPRODUCED");
+    (void)json_push_kv_int(&reply->data, "storage_acks",
+                           target->existing_acks);
+    (void)json_push_kv_str(
+        &reply->data, "reproduced",
+        "signed_distinct_source_reconstruction");
+    (void)json_push_kv_bool(
+        &reply->data, "physical_independence_attested", false);
+    (void)json_push_kv_bool(&reply->data, "receipt_reused", true);
+    (void)json_push_kv_bool(&reply->data, "receipt_written", false);
+    (void)json_push_kv_str(&reply->data, "blocker",
+                           "physical_off_host_attestation_not_represented");
+}
+
+static void dev_pub_collect_discovery_fail(
+    struct zcl_command_reply *reply,
+    const struct zcl_command_reply *discovery,
+    bool collecting_reproduction)
+{
+    zcl_command_reply_fail(
+        reply, discovery->status, discovery->exit_code,
+        discovery->error.code[0] ? discovery->error.code
+                                 : collecting_reproduction
+                                     ? "SOURCE_REPRODUCTION_DISCOVERY_FAILED"
+                                     : "STORAGE_ACK_DISCOVERY_FAILED",
+        discovery->error.phase[0] ? discovery->error.phase : "network",
+        discovery->error.retryable, false,
+        discovery->error.message[0]
+            ? discovery->error.message
+            : collecting_reproduction
+                ? "source reproduction discovery failed"
+                : "storage ACK discovery failed",
+        discovery->error.evidence);
+}
+
+/* Keep the discovered records that carry a well-formed wire, in order. */
+static size_t dev_pub_collect_wires(
+    const struct json_value *rows, size_t row_count,
+    uint8_t wires[VCS_DEVLOOP_PUBLICATION_ACK_MAX]
+                 [VCS_ZCODE_DHT_RECORD_WIRE_BYTES],
+    const uint8_t *wire_ptrs[VCS_DEVLOOP_PUBLICATION_ACK_MAX],
+    size_t wire_lengths[VCS_DEVLOOP_PUBLICATION_ACK_MAX])
+{
+    size_t wire_count = 0;
+    for (size_t i = 0;
+         i < row_count && wire_count < VCS_DEVLOOP_PUBLICATION_ACK_MAX; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *wire_hex = row
+            ? json_get_str(json_get(row, "record_wire")) : NULL;
+        if (!wire_hex ||
+            strlen(wire_hex) != VCS_ZCODE_DHT_RECORD_WIRE_BYTES * 2u ||
+            !zcl_hex_decode_lower(
+                wire_hex, wires[wire_count], sizeof(wires[wire_count])))
+            continue;
+        wire_ptrs[wire_count] = wires[wire_count];
+        wire_lengths[wire_count] = sizeof(wires[wire_count]);
+        wire_count++;
+    }
+    return wire_count;
+}
+
+static void dev_pub_collect_pending(
+    struct zcl_command_reply *reply, const char *job_hex,
+    bool collecting_reproduction,
+    const struct vcs_devloop_publication_ack_target *target,
+    const char *transport_hex, size_t wire_count)
+{
+    (void)json_push_kv_str(
+        &reply->data, "status",
+        collecting_reproduction
+            ? "SOURCE_REPRODUCTION_PENDING" : "ACKS_PENDING");
+    (void)json_push_kv_int(&reply->data, "storage_acks",
+                           collecting_reproduction
+                               ? target->existing_acks
+                               : (int64_t)wire_count);
+    (void)json_push_kv_bool(&reply->data, "receipt_reused", false);
+    (void)json_push_kv_bool(&reply->data, "receipt_written", false);
+    (void)json_push_kv_str(
+        &reply->data, "blocker",
+        collecting_reproduction
+            ? "distinct_signed_source_reconstruction_required"
+            : "independent_storage_acks_required");
+    char next[256];
+    int n = snprintf(
+        next, sizeof(next),
+        "z23-dev dev publication collect --input='"
+        "{\"job_root\":\"%s\"}'", job_hex);
+    if (collecting_reproduction && n > 0 &&
+        (size_t)n < sizeof(next))
+        (void)json_push_kv_str(
+            &reply->data, "after_reproduction_command", next);
+    if (collecting_reproduction) {
+        char reproduce[384];
+        int rn = snprintf(
+            reproduce, sizeof(reproduce),
+            "z23 zcode package source reproduce --input='"
+            "{\"mode\":\"plan\",\"root\":\"%s\","
+            "\"namespace\":\"%s\"}'",
+            transport_hex, target->namespace_name);
+        if (rn > 0 && (size_t)rn < sizeof(reproduce))
+            (void)json_push_kv_str(
+                &reply->data, "next_command", reproduce);
+    } else if (n > 0 && (size_t)n < sizeof(next)) {
+        (void)json_push_kv_str(&reply->data, "next_command", next);
+    }
+}
+
+/* Bind the discovered wires into the job's receipt chain. */
+static bool dev_pub_collect_advance(
+    const char *repo_root, uint8_t job_root[32],
+    bool collecting_reproduction, const uint8_t *wire_ptrs[],
+    size_t wire_lengths[], size_t wire_count,
+    struct vcs_zcode_dht_record_verify_context *verify,
+    uint8_t receipt_root[32], bool *reused)
+{
+    bool advanced = false;
+    if (collecting_reproduction) {
+        for (size_t i = 0; i < wire_count && !advanced; i++)
+            advanced =
+                vcs_devloop_publication_advance_source_reproduction_ack(
+                    repo_root, job_root, wire_ptrs[i], wire_lengths[i],
+                    verify, receipt_root, reused);
+    } else {
+        advanced = vcs_devloop_publication_advance_storage_acks(
+            repo_root, job_root, wire_ptrs, wire_lengths, wire_count,
+            verify, receipt_root, reused);
+    }
+    return advanced;
+}
+
+static void dev_pub_collect_bind_fail(struct zcl_command_reply *reply,
+                                      const char *job_hex,
+                                      bool collecting_reproduction)
+{
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        collecting_reproduction ? "SOURCE_REPRODUCTION_BIND_FAILED"
+                               : "STORAGE_ACK_BIND_FAILED",
+        "verify", true, false,
+        collecting_reproduction
+            ? "the signed reconstruction failed exact source/package/witness-distinct verification"
+            : "discovered ACK wires failed exact job/package/diversity verification",
+        job_hex);
+}
+
+static void dev_pub_collect_push_success(
+    struct zcl_command_reply *reply, bool collecting_reproduction,
+    const struct vcs_devloop_publication_ack_target *target,
+    size_t wire_count, const uint8_t receipt_root[32], bool reused,
+    const char *transport_hex)
+{
+    char receipt_hex[65];
+    zcl_hex_encode(receipt_root, 32, receipt_hex);
+    (void)json_push_kv_str(
+        &reply->data, "status",
+        collecting_reproduction ? "SOURCE_REPRODUCED"
+                               : "STORAGE_ACKNOWLEDGED");
+    (void)json_push_kv_int(&reply->data, "storage_acks",
+                           collecting_reproduction
+                               ? target->existing_acks
+                               : (int64_t)wire_count);
+    (void)json_push_kv_str(&reply->data, "progress_receipt_root",
+                           receipt_hex);
+    (void)json_push_kv_bool(&reply->data, "receipt_reused", reused);
+    (void)json_push_kv_bool(&reply->data, "receipt_written", !reused);
+    if (collecting_reproduction) {
+        (void)json_push_kv_str(
+            &reply->data, "reproduced",
+            "signed_distinct_source_reconstruction");
+        (void)json_push_kv_bool(
+            &reply->data, "physical_independence_attested", false);
+        (void)json_push_kv_str(
+            &reply->data, "blocker",
+            "physical_off_host_attestation_not_represented");
+    } else {
+        char reproduce[384];
+        int rn = snprintf(
+            reproduce, sizeof(reproduce),
+            "z23 zcode package source reproduce --input='"
+            "{\"mode\":\"plan\",\"root\":\"%s\","
+            "\"namespace\":\"%s\"}'",
+            transport_hex, target->namespace_name);
+        (void)json_push_kv_str(&reply->data, "blocker",
+                               "remote_reproduction_required");
+        if (rn > 0 && (size_t)rn < sizeof(reproduce))
+            (void)json_push_kv_str(
+                &reply->data, "next_command", reproduce);
+    }
+}
+
+/* Count the discovered records, report them, and keep the usable wires. */
+static size_t dev_pub_collect_records(
+    struct zcl_command_reply *reply, const struct zcl_command_reply *discovery,
+    uint8_t wires[VCS_DEVLOOP_PUBLICATION_ACK_MAX]
+                 [VCS_ZCODE_DHT_RECORD_WIRE_BYTES],
+    const uint8_t *wire_ptrs[VCS_DEVLOOP_PUBLICATION_ACK_MAX],
+    size_t wire_lengths[VCS_DEVLOOP_PUBLICATION_ACK_MAX])
+{
+    const struct json_value *rows = json_get(&discovery->data, "records");
+    size_t row_count = rows && rows->type == JSON_ARR ? json_size(rows) : 0;
+    size_t wire_count = dev_pub_collect_wires(rows, row_count, wires,
+                                              wire_ptrs, wire_lengths);
+    (void)json_push_kv_int(&reply->data, "records_seen", (int64_t)row_count);
+    (void)json_push_kv_int(&reply->data, "evidence_wires",
+                           (int64_t)wire_count);
+    return wire_count;
+}
+
+static size_t dev_pub_collect_required(bool collecting_reproduction)
+{
+    return collecting_reproduction
+        ? 1u : VCS_DEVLOOP_PUBLICATION_ACK_MIN;
+}
+
 void zcl_dev_publication_collect(
     const struct zcl_dev_publication_input *input,
     struct zcl_command_reply *reply)
@@ -1258,35 +1574,10 @@ void zcl_dev_publication_collect(
         return;
     }
 
-    (void)json_push_kv_str(&reply->data, "schema",
-                           "zcl.dev_publication_collect.v1");
-    (void)json_push_kv_str(&reply->data, "publication_job_root", job_hex);
-    (void)json_push_kv_int(&reply->data, "required_storage_acks",
-                           VCS_DEVLOOP_PUBLICATION_ACK_MIN);
-    (void)json_push_kv_int(&reply->data,
-                           "required_source_reproduction_acks", 1);
-    (void)json_push_kv_bool(&reply->data, "network_called", true);
-    (void)json_push_kv_bool(&reply->data, "discovery_called",
-                            collecting_reproduction
-                                ? !target.already_reproduced
-                                : !target.already_acknowledged);
-    (void)json_push_kv_str(
-        &reply->data, "chain_authority",
-        "authenticated_local_node_discovery_plus_local_signature_recheck");
+    dev_pub_collect_push_header(reply, job_hex, collecting_reproduction,
+                                &target);
     if (collecting_reproduction && target.already_reproduced) {
-        (void)json_push_kv_str(&reply->data, "status",
-                               "SOURCE_REPRODUCED");
-        (void)json_push_kv_int(&reply->data, "storage_acks",
-                               target.existing_acks);
-        (void)json_push_kv_str(
-            &reply->data, "reproduced",
-            "signed_distinct_source_reconstruction");
-        (void)json_push_kv_bool(
-            &reply->data, "physical_independence_attested", false);
-        (void)json_push_kv_bool(&reply->data, "receipt_reused", true);
-        (void)json_push_kv_bool(&reply->data, "receipt_written", false);
-        (void)json_push_kv_str(&reply->data, "blocker",
-                               "physical_off_host_attestation_not_represented");
+        dev_pub_collect_push_reproduced(reply, &target);
         return;
     }
 
@@ -1298,20 +1589,8 @@ void zcl_dev_publication_collect(
         collecting_reproduction ? "source_reproduction_ack" : "storage_ack",
         target.namespace_name, transport_hex, true, &discovery);
     if (discovery.exit_code != ZCL_COMMAND_EXIT_OK) {
-        zcl_command_reply_fail(
-            reply, discovery.status, discovery.exit_code,
-            discovery.error.code[0] ? discovery.error.code
-                                    : collecting_reproduction
-                                        ? "SOURCE_REPRODUCTION_DISCOVERY_FAILED"
-                                        : "STORAGE_ACK_DISCOVERY_FAILED",
-            discovery.error.phase[0] ? discovery.error.phase : "network",
-            discovery.error.retryable, false,
-            discovery.error.message[0]
-                ? discovery.error.message
-                : collecting_reproduction
-                    ? "source reproduction discovery failed"
-                    : "storage ACK discovery failed",
-            discovery.error.evidence);
+        dev_pub_collect_discovery_fail(reply, &discovery,
+                                       collecting_reproduction);
         zcl_command_reply_free(&discovery);
         return;
     }
@@ -1320,135 +1599,28 @@ void zcl_dev_publication_collect(
                  [VCS_ZCODE_DHT_RECORD_WIRE_BYTES];
     const uint8_t *wire_ptrs[VCS_DEVLOOP_PUBLICATION_ACK_MAX];
     size_t wire_lengths[VCS_DEVLOOP_PUBLICATION_ACK_MAX];
-    size_t wire_count = 0;
-    const struct json_value *rows = json_get(&discovery.data, "records");
-    size_t row_count = rows && rows->type == JSON_ARR ? json_size(rows) : 0;
-    for (size_t i = 0;
-         i < row_count && wire_count < VCS_DEVLOOP_PUBLICATION_ACK_MAX; i++) {
-        const struct json_value *row = json_at(rows, i);
-        const char *wire_hex = row
-            ? json_get_str(json_get(row, "record_wire")) : NULL;
-        if (!wire_hex ||
-            strlen(wire_hex) != VCS_ZCODE_DHT_RECORD_WIRE_BYTES * 2u ||
-            !zcl_hex_decode_lower(
-                wire_hex, wires[wire_count], sizeof(wires[wire_count])))
-            continue;
-        wire_ptrs[wire_count] = wires[wire_count];
-        wire_lengths[wire_count] = sizeof(wires[wire_count]);
-        wire_count++;
-    }
-    (void)json_push_kv_int(&reply->data, "records_seen", (int64_t)row_count);
-    (void)json_push_kv_int(&reply->data, "evidence_wires",
-                           (int64_t)wire_count);
-    size_t required = collecting_reproduction
-        ? 1u : VCS_DEVLOOP_PUBLICATION_ACK_MIN;
-    if (wire_count < required) {
-        (void)json_push_kv_str(
-            &reply->data, "status",
-            collecting_reproduction
-                ? "SOURCE_REPRODUCTION_PENDING" : "ACKS_PENDING");
-        (void)json_push_kv_int(&reply->data, "storage_acks",
-                               collecting_reproduction
-                                   ? target.existing_acks
-                                   : (int64_t)wire_count);
-        (void)json_push_kv_bool(&reply->data, "receipt_reused", false);
-        (void)json_push_kv_bool(&reply->data, "receipt_written", false);
-        (void)json_push_kv_str(
-            &reply->data, "blocker",
-            collecting_reproduction
-                ? "distinct_signed_source_reconstruction_required"
-                : "independent_storage_acks_required");
-        char next[256];
-        int n = snprintf(
-            next, sizeof(next),
-            "z23-dev dev publication collect --input='"
-            "{\"job_root\":\"%s\"}'", job_hex);
-        if (collecting_reproduction && n > 0 &&
-            (size_t)n < sizeof(next))
-            (void)json_push_kv_str(
-                &reply->data, "after_reproduction_command", next);
-        if (collecting_reproduction) {
-            char reproduce[384];
-            int rn = snprintf(
-                reproduce, sizeof(reproduce),
-                "z23 zcode package source reproduce --input='"
-                "{\"mode\":\"plan\",\"root\":\"%s\","
-                "\"namespace\":\"%s\"}'",
-                transport_hex, target.namespace_name);
-            if (rn > 0 && (size_t)rn < sizeof(reproduce))
-                (void)json_push_kv_str(
-                    &reply->data, "next_command", reproduce);
-        } else if (n > 0 && (size_t)n < sizeof(next)) {
-            (void)json_push_kv_str(&reply->data, "next_command", next);
-        }
+    size_t wire_count = dev_pub_collect_records(reply, &discovery, wires,
+                                                wire_ptrs, wire_lengths);
+    if (wire_count < dev_pub_collect_required(collecting_reproduction)) {
+        dev_pub_collect_pending(reply, job_hex, collecting_reproduction,
+                                &target, transport_hex, wire_count);
         zcl_command_reply_free(&discovery);
         return;
     }
 
     uint8_t receipt_root[32];
     bool reused = false;
-    bool advanced = false;
-    if (collecting_reproduction) {
-        for (size_t i = 0; i < wire_count && !advanced; i++)
-            advanced =
-                vcs_devloop_publication_advance_source_reproduction_ack(
-                    repo_root, job_root, wire_ptrs[i], wire_lengths[i],
-                    &verify, receipt_root, &reused);
-    } else {
-        advanced = vcs_devloop_publication_advance_storage_acks(
-            repo_root, job_root, wire_ptrs, wire_lengths, wire_count,
-            &verify, receipt_root, &reused);
-    }
+    bool advanced = dev_pub_collect_advance(
+        repo_root, job_root, collecting_reproduction, wire_ptrs,
+        wire_lengths, wire_count, &verify, receipt_root, &reused);
     zcl_command_reply_free(&discovery);
     if (!advanced) {
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            collecting_reproduction ? "SOURCE_REPRODUCTION_BIND_FAILED"
-                                   : "STORAGE_ACK_BIND_FAILED",
-            "verify", true, false,
-            collecting_reproduction
-                ? "the signed reconstruction failed exact source/package/witness-distinct verification"
-                : "discovered ACK wires failed exact job/package/diversity verification",
-            job_hex);
+        dev_pub_collect_bind_fail(reply, job_hex, collecting_reproduction);
         return;
     }
-    char receipt_hex[65];
-    zcl_hex_encode(receipt_root, 32, receipt_hex);
-    (void)json_push_kv_str(
-        &reply->data, "status",
-        collecting_reproduction ? "SOURCE_REPRODUCED"
-                               : "STORAGE_ACKNOWLEDGED");
-    (void)json_push_kv_int(&reply->data, "storage_acks",
-                           collecting_reproduction
-                               ? target.existing_acks
-                               : (int64_t)wire_count);
-    (void)json_push_kv_str(&reply->data, "progress_receipt_root",
-                           receipt_hex);
-    (void)json_push_kv_bool(&reply->data, "receipt_reused", reused);
-    (void)json_push_kv_bool(&reply->data, "receipt_written", !reused);
-    if (collecting_reproduction) {
-        (void)json_push_kv_str(
-            &reply->data, "reproduced",
-            "signed_distinct_source_reconstruction");
-        (void)json_push_kv_bool(
-            &reply->data, "physical_independence_attested", false);
-        (void)json_push_kv_str(
-            &reply->data, "blocker",
-            "physical_off_host_attestation_not_represented");
-    } else {
-        char reproduce[384];
-        int rn = snprintf(
-            reproduce, sizeof(reproduce),
-            "z23 zcode package source reproduce --input='"
-            "{\"mode\":\"plan\",\"root\":\"%s\","
-            "\"namespace\":\"%s\"}'",
-            transport_hex, target.namespace_name);
-        (void)json_push_kv_str(&reply->data, "blocker",
-                               "remote_reproduction_required");
-        if (rn > 0 && (size_t)rn < sizeof(reproduce))
-            (void)json_push_kv_str(
-                &reply->data, "next_command", reproduce);
-    }
+    dev_pub_collect_push_success(reply, collecting_reproduction, &target,
+                                 wire_count, receipt_root, reused,
+                                 transport_hex);
 }
 
 void zcl_native_handle_dev_publication_collect(
@@ -1615,6 +1787,33 @@ void zcl_native_handle_dev_app_scaffold(
 }
 
 /* ── dev.app.simulate ──────────────────────────────────────────────────── */
+/* Parse a present, non-null "seed": a nonzero uint64 string or a positive
+ * integer. Returns false on any other shape or value. */
+static bool dev_app_simulate_seed_parse(const struct json_value *seed_v,
+                                        uint64_t *seed)
+{
+    if (seed_v->type == JSON_STR) {
+        char *end = NULL;
+        errno = 0;
+        *seed = strtoull(json_get_str(seed_v), &end, 0);
+        return !(errno != 0 || !end || *end || *seed == 0);
+    }
+    if (seed_v->type == JSON_INT && json_get_int(seed_v) > 0) {
+        *seed = (uint64_t)json_get_int(seed_v);
+        return true;
+    }
+    return false;
+}
+
+/* "scenario", when present and non-null, must be 'default' or 'network'. */
+static bool dev_app_simulate_scenario_valid(const struct json_value *scenario_v)
+{
+    return !scenario_v || json_is_null(scenario_v) ||
+        (scenario_v->type == JSON_STR &&
+         (strcmp(json_get_str(scenario_v), "default") == 0 ||
+          strcmp(json_get_str(scenario_v), "network") == 0));
+}
+
 void zcl_native_handle_dev_app_simulate(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1628,35 +1827,17 @@ void zcl_native_handle_dev_app_simulate(
     }
     uint64_t seed = UINT64_C(0x534f4349414c0001);
     const struct json_value *seed_v = json_get(request->input, "seed");
-    if (seed_v && !json_is_null(seed_v)) {
-        if (seed_v->type == JSON_STR) {
-            char *end = NULL;
-            errno = 0;
-            seed = strtoull(json_get_str(seed_v), &end, 0);
-            if (errno != 0 || !end || *end || seed == 0) {
-                zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                       ZCL_COMMAND_EXIT_INVALID, "INVALID_SEED",
-                                       "normalize", false, false,
-                                       "seed must be a nonzero uint64 integer or string",
-                                       "seed");
-                return;
-            }
-        } else if (seed_v->type == JSON_INT && json_get_int(seed_v) > 0) {
-            seed = (uint64_t)json_get_int(seed_v);
-        } else {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "INVALID_SEED",
-                                   "normalize", false, false,
-                                   "seed must be a nonzero uint64 integer or string",
-                                   "seed");
-            return;
-        }
+    if (seed_v && !json_is_null(seed_v) &&
+        !dev_app_simulate_seed_parse(seed_v, &seed)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_SEED",
+                               "normalize", false, false,
+                               "seed must be a nonzero uint64 integer or string",
+                               "seed");
+        return;
     }
     const struct json_value *scenario_v = json_get(request->input, "scenario");
-    if (scenario_v && !json_is_null(scenario_v) &&
-        (scenario_v->type != JSON_STR ||
-         (strcmp(json_get_str(scenario_v), "default") != 0 &&
-          strcmp(json_get_str(scenario_v), "network") != 0))) {
+    if (!dev_app_simulate_scenario_valid(scenario_v)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_SCENARIO",
                                "normalize", false, false,
@@ -1824,6 +2005,111 @@ static bool dev_drive_copy(const struct json_value *from,
     return !value || json_push_kv(to, to_key, value);
 }
 
+/* The wait loop's carried state: the epoch cursor, whether the first save
+ * was seen, and the edit epoch the drive is bound to once one is known. */
+struct dev_drive_wait_state {
+    int64_t current_epoch;
+    bool edit_seen;
+    bool wait_for_edit;
+    char target_edit_epoch[65];
+};
+
+enum dev_drive_wait_step {
+    DEV_DRIVE_WAIT_NEXT,
+    DEV_DRIVE_WAIT_ACCEPT,
+    DEV_DRIVE_WAIT_STOP,
+    DEV_DRIVE_WAIT_FAIL,
+};
+
+/* Input checks for dev.drive: after_epoch, timeout_ms and wait_for_edit. */
+static bool dev_drive_wait_args_valid(
+    const struct zcl_command_request *request,
+    const struct json_value *wait_v, int64_t *after, int64_t *timeout_ms)
+{
+    return zcl_dev_drive_input_int(request->input, "after_epoch", 0, after) &&
+        *after >= 0 &&
+        zcl_dev_drive_input_int(request->input, "timeout_ms", 30000,
+                                timeout_ms) &&
+        *timeout_ms >= 1 && *timeout_ms <= 300000 &&
+        !(wait_v && wait_v->type != JSON_BOOL);
+}
+
+/* Whether a streamed cycle ends the wait. Advances the edit-seen and target
+ * epoch state; a skipped cycle is discarded by the caller. */
+static bool dev_drive_wait_accepts(struct dev_drive_wait_state *st,
+                                   const char *status, const char *source,
+                                   const char *event_edit_epoch)
+{
+    if (!st->edit_seen) {
+        if (status && strcmp(status, "edit_seen") == 0)
+            st->edit_seen = true;
+        return false;
+    }
+    /* SUPERSEDED names work from the prior edit. It is part of the exact
+     * stream, but must never bind a new drive to that prior epoch or
+     * become the one-command result for the newer save. */
+    if (st->wait_for_edit && status && strcmp(status, "superseded") == 0)
+        return false;
+    if (!st->target_edit_epoch[0] && event_edit_epoch &&
+        strlen(event_edit_epoch) == 64)
+        (void)snprintf(st->target_edit_epoch, sizeof(st->target_edit_epoch),
+                       "%s", event_edit_epoch);
+    if (st->target_edit_epoch[0] && event_edit_epoch &&
+        strcmp(st->target_edit_epoch, event_edit_epoch) != 0)
+        return false;
+    const struct dev_reflex_policy_service_v1 *policy =
+        dev_reflex_policy_service_builtin();
+    return policy->action_changing(status, source);
+}
+
+/* One lookup of the next cycle state after the carried epoch. */
+static enum dev_drive_wait_step dev_drive_wait_once(
+    const struct zcl_command_request *request, struct json_value *cycle,
+    int64_t remaining_ms, struct dev_drive_wait_state *st,
+    struct zcl_command_reply *reply)
+{
+    char body[16384], why[160] = {0};
+    size_t body_len = 0;
+    enum zcl_devloop_state_lookup lookup =
+        zcl_devloop_cycle_state_wait_after(
+            zcl_native_source_root(request), st->current_epoch, (int)remaining_ms,
+            body, sizeof(body), &body_len, &st->current_epoch,
+            why, sizeof(why));
+    if (lookup == ZCL_DEVLOOP_STATE_INVALID) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "DEV_CYCLE_STATE_INVALID", "read", false, false,
+            "workspace cycle state failed schema, SHA3, inode, or event-watch validation",
+            why[0] ? why : "cycle_state_invalid");
+        return DEV_DRIVE_WAIT_FAIL;
+    }
+    if (lookup != ZCL_DEVLOOP_STATE_FOUND)
+        return DEV_DRIVE_WAIT_STOP;
+    if (!json_read(cycle, body, body_len) || cycle->type != JSON_OBJ) {
+        json_free(cycle);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INTERNAL, "DEV_CYCLE_STATE_INVALID",
+            "decode", false, false,
+            "workspace cycle state is not one canonical object",
+            "cycle_state_decode_failed");
+        return DEV_DRIVE_WAIT_FAIL;
+    }
+    const char *status = json_get_str(json_get(cycle, "status"));
+    const char *source = json_get_str(json_get(cycle, "source_tu"));
+    const char *event_edit_epoch =
+        json_get_str(json_get(cycle, "edit_epoch"));
+    if (dev_drive_wait_accepts(st, status, source, event_edit_epoch))
+        return DEV_DRIVE_WAIT_ACCEPT;
+    /* `dev.loop.wait` exposes every stage. The normal one-command drive
+     * consumes acknowledgements internally and returns the first result
+     * that can change the next edit: a diagnostic, or this owner's exact
+     * HOT_SHADOW behavior story. */
+    json_free(cycle);
+    json_init(cycle);
+    return DEV_DRIVE_WAIT_NEXT;
+}
+
 static bool dev_drive_wait_cycle(
     const struct zcl_command_request *request, struct json_value *cycle,
     int64_t *epoch_out, struct zcl_command_reply *reply)
@@ -1833,12 +2119,7 @@ static bool dev_drive_wait_cycle(
         ? json_get(request->input, "wait_for_edit") : NULL;
     bool wait_for_edit = wait_v && wait_v->type == JSON_BOOL
         ? json_get_bool(wait_v) : false;
-    if (!zcl_dev_drive_input_int(request->input, "after_epoch", 0, &after) ||
-        after < 0 ||
-        !zcl_dev_drive_input_int(request->input, "timeout_ms", 30000,
-                                 &timeout_ms) ||
-        timeout_ms < 1 || timeout_ms > 300000 ||
-        (wait_v && wait_v->type != JSON_BOOL)) {
+    if (!dev_drive_wait_args_valid(request, wait_v, &after, &timeout_ms)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "INVALID_DRIVE", "normalize", false, false,
@@ -1847,86 +2128,30 @@ static bool dev_drive_wait_cycle(
         return false;
     }
     int64_t deadline_us = platform_time_monotonic_us() + timeout_ms * 1000;
-    int64_t current_epoch = after;
-    bool edit_seen = !wait_for_edit;
-    char target_edit_epoch[65] = {0};
+    struct dev_drive_wait_state st = {
+        .current_epoch = after,
+        .edit_seen = !wait_for_edit,
+        .wait_for_edit = wait_for_edit,
+    };
     for (;;) {
         int64_t remaining_us = deadline_us - platform_time_monotonic_us();
         if (remaining_us <= 0)
             break;
         int64_t remaining_ms = (remaining_us + 999) / 1000;
-        char body[16384], why[160] = {0};
-        size_t body_len = 0;
-        enum zcl_devloop_state_lookup lookup =
-            zcl_devloop_cycle_state_wait_after(
-                zcl_native_source_root(request), current_epoch, (int)remaining_ms,
-                body, sizeof(body), &body_len, &current_epoch,
-                why, sizeof(why));
-        if (lookup == ZCL_DEVLOOP_STATE_INVALID) {
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "DEV_CYCLE_STATE_INVALID", "read", false, false,
-                "workspace cycle state failed schema, SHA3, inode, or event-watch validation",
-                why[0] ? why : "cycle_state_invalid");
-            return false;
-        }
-        if (lookup != ZCL_DEVLOOP_STATE_FOUND)
-            break;
-        if (!json_read(cycle, body, body_len) || cycle->type != JSON_OBJ) {
-            json_free(cycle);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED,
-                ZCL_COMMAND_EXIT_INTERNAL, "DEV_CYCLE_STATE_INVALID",
-                "decode", false, false,
-                "workspace cycle state is not one canonical object",
-                "cycle_state_decode_failed");
-            return false;
-        }
-        const char *status = json_get_str(json_get(cycle, "status"));
-        const char *source = json_get_str(json_get(cycle, "source_tu"));
-        const char *event_edit_epoch =
-            json_get_str(json_get(cycle, "edit_epoch"));
-        if (!edit_seen) {
-            if (status && strcmp(status, "edit_seen") == 0)
-                edit_seen = true;
-            json_free(cycle);
-            json_init(cycle);
-            continue;
-        }
-        /* SUPERSEDED names work from the prior edit. It is part of the exact
-         * stream, but must never bind a new drive to that prior epoch or
-         * become the one-command result for the newer save. */
-        if (wait_for_edit && status && strcmp(status, "superseded") == 0) {
-            json_free(cycle);
-            json_init(cycle);
-            continue;
-        }
-        if (!target_edit_epoch[0] && event_edit_epoch &&
-            strlen(event_edit_epoch) == 64)
-            (void)snprintf(target_edit_epoch, sizeof(target_edit_epoch), "%s",
-                           event_edit_epoch);
-        if (target_edit_epoch[0] && event_edit_epoch &&
-            strcmp(target_edit_epoch, event_edit_epoch) != 0) {
-            json_free(cycle);
-            json_init(cycle);
-            continue;
-        }
-        const struct dev_reflex_policy_service_v1 *policy =
-            dev_reflex_policy_service_builtin();
-        if (policy->action_changing(status, source)) {
-            *epoch_out = current_epoch;
+        enum dev_drive_wait_step step = dev_drive_wait_once(
+            request, cycle, remaining_ms, &st, reply);
+        if (step == DEV_DRIVE_WAIT_ACCEPT) {
+            *epoch_out = st.current_epoch;
             return true;
         }
-        /* `dev.loop.wait` exposes every stage. The normal one-command drive
-         * consumes acknowledgements internally and returns the first result
-         * that can change the next edit: a diagnostic, or this owner's exact
-         * HOT_SHADOW behavior story. */
-        json_free(cycle);
-        json_init(cycle);
+        if (step == DEV_DRIVE_WAIT_FAIL)
+            return false;
+        if (step == DEV_DRIVE_WAIT_STOP)
+            break;
     }
     char evidence[128];
     (void)snprintf(evidence, sizeof(evidence), "current_epoch=%lld",
-                   (long long)current_epoch);
+                   (long long)st.current_epoch);
     zcl_command_reply_fail(
         reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
         "DRIVE_TIMEOUT", "wait", true, false,
@@ -2058,6 +2283,72 @@ static void dev_drive_next_command(
                           : "z23-dev dev diagnose latest");
 }
 
+/* The status facts of one streamed cycle that shape a compact drive view. */
+struct dev_drive_facts {
+    bool passed;
+    bool edit_seen;
+    bool impact_ready;
+    bool reflex_ready;
+    bool compile_only;
+    bool story_green;
+    bool story_red;
+    bool reactor_pending;
+    bool proof_pending;
+    bool proof_complete;
+};
+
+/* A cycle whose proof is still owed: the explicit pending status, or a
+ * focused or fallback ready status whose integration proof is deferred. */
+static bool dev_drive_deferred_proof(const struct json_value *cycle,
+                                     const char *status)
+{
+    return status &&
+        ((dev_status_focused_ready(status) &&
+          json_get_bool(json_get(cycle, "immediate_proof_complete"))) ||
+         strcmp(status, "fallback_ready") == 0) &&
+        json_get_bool(json_get(cycle, "integration_proof_deferred"));
+}
+
+static struct dev_drive_facts dev_drive_facts_read(
+    const struct json_value *cycle, const char *status)
+{
+    struct dev_drive_facts f;
+    f.passed = status && strcmp(status, "passed") == 0;
+    f.edit_seen = status && strcmp(status, "edit_seen") == 0;
+    f.impact_ready = status && strcmp(status, "impact_ready") == 0;
+    f.reflex_ready = status && strcmp(status, "reflex_ready") == 0;
+    f.compile_only = status && strcmp(status, "compile_only") == 0;
+    f.story_green = status && strcmp(status, "story_green") == 0;
+    f.story_red = status && strcmp(status, "story_red") == 0;
+    bool explicit_proof_pending =
+        status && strcmp(status, "proof_pending") == 0;
+    f.reactor_pending = f.edit_seen || f.impact_ready;
+    f.proof_pending = explicit_proof_pending || f.reflex_ready ||
+        f.story_green || dev_drive_deferred_proof(cycle, status);
+    f.proof_complete = json_get_bool(json_get(cycle, "proof_complete"));
+    return f;
+}
+
+static const char *dev_drive_stage(const struct dev_drive_facts *f)
+{
+    return f->reactor_pending ? "REFLEX" :
+        (f->reflex_ready || f->story_green) ? "ASYNC_PROOF" :
+        f->compile_only ? "PROOF_PENDING" :
+        f->proof_pending ? "PROOF_PENDING" : "NOT_QUEUED";
+}
+
+static const char *dev_drive_blocker(const struct dev_drive_facts *f)
+{
+    return f->edit_seen ? "impact_analysis_running" :
+        f->impact_ready ? "candidate_diagnostics_running" :
+        (f->reflex_ready || f->story_green) ? "affected_proof_running" :
+        f->compile_only ? "candidate_story_not_available" :
+        f->story_red ? "behavior_story_failed" :
+        f->proof_pending ? "integration_proof_pending" :
+        f->proof_complete ? "publication_job_missing" :
+        f->passed ? "complete_reusable_proof_required" : "proof_failed";
+}
+
 void zcl_native_handle_dev_drive(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -2087,45 +2378,14 @@ void zcl_native_handle_dev_drive(
         dev_drive_merge_publication(request, job_root, &compact);
     } else {
         const char *status = json_get_str(json_get(&cycle, "status"));
-        bool passed = status && strcmp(status, "passed") == 0;
-        bool edit_seen = status && strcmp(status, "edit_seen") == 0;
-        bool impact_ready = status && strcmp(status, "impact_ready") == 0;
-        bool reflex_ready = status && strcmp(status, "reflex_ready") == 0;
-        bool compile_only = status && strcmp(status, "compile_only") == 0;
-        bool story_green = status && strcmp(status, "story_green") == 0;
-        bool story_red = status && strcmp(status, "story_red") == 0;
-        bool explicit_proof_pending =
-            status && strcmp(status, "proof_pending") == 0;
-        bool reactor_pending = edit_seen || impact_ready;
-        bool proof_pending = explicit_proof_pending || reflex_ready ||
-            story_green ||
-            (status &&
-             ((dev_status_focused_ready(status) &&
-               json_get_bool(json_get(&cycle,
-                                      "immediate_proof_complete"))) ||
-              strcmp(status, "fallback_ready") == 0) &&
-             json_get_bool(json_get(&cycle, "integration_proof_deferred")));
-        bool proof_complete =
-            json_get_bool(json_get(&cycle, "proof_complete"));
-        (void)json_push_kv_str(
-            &compact, "publication_stage",
-            reactor_pending ? "REFLEX" :
-            (reflex_ready || story_green) ? "ASYNC_PROOF" :
-            compile_only ? "PROOF_PENDING" :
-            proof_pending ? "PROOF_PENDING" : "NOT_QUEUED");
-        (void)json_push_kv_str(
-            &compact, "blocker",
-            edit_seen ? "impact_analysis_running" :
-            impact_ready ? "candidate_diagnostics_running" :
-            (reflex_ready || story_green) ? "affected_proof_running" :
-            compile_only ? "candidate_story_not_available" :
-            story_red ? "behavior_story_failed" :
-            proof_pending ? "integration_proof_pending" :
-            proof_complete ? "publication_job_missing" :
-            passed ? "complete_reusable_proof_required" : "proof_failed");
+        struct dev_drive_facts facts = dev_drive_facts_read(&cycle, status);
+        (void)json_push_kv_str(&compact, "publication_stage",
+                               dev_drive_stage(&facts));
+        (void)json_push_kv_str(&compact, "blocker", dev_drive_blocker(&facts));
         char next[192];
-        dev_drive_next_command(&cycle, status, epoch, reactor_pending,
-                               proof_pending, passed, next, sizeof(next));
+        dev_drive_next_command(&cycle, status, epoch, facts.reactor_pending,
+                               facts.proof_pending, facts.passed, next,
+                               sizeof(next));
         (void)json_push_kv_str(&compact, "next_command", next);
     }
     dev_drive_finish_timed(&compact, &cycle, reply, drive_started_us,
@@ -2531,6 +2791,46 @@ static bool dev_legacy_watch_lock_path(char lock[PATH_MAX])
 }
 #endif
 
+/* Basename of a watcher image: the dev binary names, exact on POSIX and
+ * case-insensitive with the .exe names on Windows. */
+static bool dev_watcher_basename_is_watcher(const char *base)
+{
+#if defined(_WIN32)
+    static const char *const names[] = {
+        "zclassic23-dev.exe", "zclassic23-dev", "z23-dev.exe", "z23-dev",
+    };
+#else
+    static const char *const names[] = {"zclassic23-dev", "z23-dev"};
+#endif
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+#if defined(_WIN32)
+        if (_stricmp(base, names[i]) == 0)
+#else
+        if (strcmp(base, names[i]) == 0)
+#endif
+            return true;
+    }
+    return false;
+}
+
+#if !defined(_WIN32)
+/* A live watcher whose on-disk binary was replaced (every rebuild of
+ * build/bin/zclassic23-dev does exactly this while the watcher runs)
+ * shows up as "<path> (deleted)" in /proc/<pid>/exe. Strip that suffix
+ * before the basename compare so the watcher stays recognized across a
+ * dev-binary rebuild — otherwise `dev loop status` reports active:false
+ * and `dev loop ensure` tries to spawn a duplicate against the held
+ * singleton lock. */
+static void dev_strip_deleted_suffix(char *exe)
+{
+    static const char kDeleted[] = " (deleted)";
+    size_t dlen = sizeof(kDeleted) - 1;
+    size_t exe_len = strlen(exe);
+    if (exe_len >= dlen && strcmp(exe + exe_len - dlen, kDeleted) == 0)
+        exe[exe_len - dlen] = 0;
+}
+#endif
+
 static bool dev_pid_is_watcher(dev_pid_t pid)
 {
 #if defined(_WIN32)
@@ -2539,31 +2839,16 @@ static bool dev_pid_is_watcher(dev_pid_t pid)
         !os_proc_pid_exe_path(pid, exe, sizeof(exe))) return false;
     const char *base = strrchr(exe, '\\');
     if (!base) base = strrchr(exe, '/');
-    return base && (_stricmp(base + 1, "zclassic23-dev.exe") == 0 ||
-                    _stricmp(base + 1, "zclassic23-dev") == 0 ||
-                    _stricmp(base + 1, "z23-dev.exe") == 0 ||
-                    _stricmp(base + 1, "z23-dev") == 0);
+    return base && dev_watcher_basename_is_watcher(base + 1);
 #else
     if (pid <= 1 || (kill(pid, 0) != 0 && errno != EPERM))
         return false;
     char exe[PATH_MAX];
     if (!os_proc_pid_exe_path(pid, exe, sizeof(exe)))
         return false;
-    /* A live watcher whose on-disk binary was replaced (every rebuild of
-     * build/bin/zclassic23-dev does exactly this while the watcher runs)
-     * shows up as "<path> (deleted)" in /proc/<pid>/exe. Strip that suffix
-     * before the basename compare so the watcher stays recognized across a
-     * dev-binary rebuild — otherwise `dev loop status` reports active:false
-     * and `dev loop ensure` tries to spawn a duplicate against the held
-     * singleton lock. */
-    static const char kDeleted[] = " (deleted)";
-    size_t dlen = sizeof(kDeleted) - 1;
-    size_t exe_len = strlen(exe);
-    if (exe_len >= dlen && strcmp(exe + exe_len - dlen, kDeleted) == 0)
-        exe[exe_len - dlen] = 0;
+    dev_strip_deleted_suffix(exe);
     const char *base = strrchr(exe, '/');
-    return base && (strcmp(base + 1, "zclassic23-dev") == 0 ||
-                    strcmp(base + 1, "z23-dev") == 0);
+    return base && dev_watcher_basename_is_watcher(base + 1);
 #endif
 }
 
@@ -2742,6 +3027,103 @@ static bool dev_watcher_publish_verified(
     return true;
 }
 
+/* One {word, value} row of a lock-file token table. */
+struct dev_watcher_word {
+    const char *word;
+    int value;
+};
+
+static const struct dev_watcher_word kWatcherModeWords[] = {
+    {"verify", ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY},
+    {"auto", ZCL_DEVLOOP_PUBLISH_APPLY},
+};
+
+static const struct dev_watcher_word kWatcherStateWords[] = {
+    {"starting", 0},
+    {"ready", 1},
+};
+
+/* First byte at or after p that ends a lock-file token. */
+static char *dev_watcher_token_end(char *p)
+{
+    while (*p && *p != '\n' && *p != ' ' && *p != '\t')
+        p++;
+    return p;
+}
+
+static char *dev_watcher_skip_blanks(char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* Index of the row whose word equals [begin, begin + len), or -1. */
+static int dev_watcher_word_index(const char *begin, size_t len,
+                                  const struct dev_watcher_word *words,
+                                  size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (len == strlen(words[i].word) &&
+            memcmp(begin, words[i].word, len) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Open the lock file and return its fd only while another process holds
+ * the flock. Returns -1 when the file is absent, unlocked or unreadable. */
+static int dev_watcher_lock_open_busy(const char *lock)
+{
+    int fd = open(lock, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+        return -1;
+    }
+    if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* The optional "<mode> [<state>] [<capability>]" tail after the pid. Absent
+ * tokens keep the legacy defaults. Returns false on any unknown token. */
+static bool dev_watcher_lock_tail(char *end,
+                                  enum zcl_devloop_publish_mode *publish_mode,
+                                  const char **mode_name, bool *ready,
+                                  struct dev_watcher_info *observed)
+{
+    *publish_mode = ZCL_DEVLOOP_PUBLISH_APPLY;
+    *mode_name = "legacy-auto";
+    *ready = true;
+    if (*end == '\n' || *end == 0)
+        return true;
+    char *mode_end = dev_watcher_token_end(end);
+    int mode = dev_watcher_word_index(end, (size_t)(mode_end - end),
+                                      kWatcherModeWords, 2);
+    if (mode < 0)
+        return false;
+    *publish_mode = (enum zcl_devloop_publish_mode)kWatcherModeWords[mode].value;
+    *mode_name = kWatcherModeWords[mode].word;
+    mode_end = dev_watcher_skip_blanks(mode_end);
+    if (*mode_end == '\n' || *mode_end == 0)
+        return true;
+    char *state_end = dev_watcher_token_end(mode_end);
+    int state = dev_watcher_word_index(mode_end,
+                                       (size_t)(state_end - mode_end),
+                                       kWatcherStateWords, 2);
+    if (state < 0)
+        return false;
+    *ready = kWatcherStateWords[state].value != 0;
+    state_end = dev_watcher_skip_blanks(state_end);
+    return *state_end == '\n' || *state_end == 0 ||
+           dev_watcher_parse_capability(state_end, observed);
+}
+
 static bool dev_watcher_active_at(const char *lock, const char *root,
                                   struct dev_watcher_info *info_out)
 {
@@ -2751,18 +3133,9 @@ static bool dev_watcher_active_at(const char *lock, const char *root,
     if (!lock || !lock[0])
         return false;
     /* Presence arms post-commit proof hooks; an observation must not arm one. */
-    int fd = open(lock, O_RDWR | O_CLOEXEC);
+    int fd = dev_watcher_lock_open_busy(lock);
     if (fd < 0)
         return false;
-    if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-        (void)flock(fd, LOCK_UN);
-        close(fd);
-        return false;
-    }
-    if (errno != EWOULDBLOCK && errno != EAGAIN) {
-        close(fd);
-        return false;
-    }
     struct stat lock_stat;
     bool identified = dev_watcher_lock_snapshot(fd, buf, &lock_stat);
     close(fd);
@@ -2772,51 +3145,13 @@ static bool dev_watcher_active_at(const char *lock, const char *root,
     long value = strtol(buf, &end, 10);
     if (!end || value <= 1)
         return false;
-    while (*end == ' ' || *end == '\t')
-        end++;
+    end = dev_watcher_skip_blanks(end);
     enum zcl_devloop_publish_mode publish_mode = ZCL_DEVLOOP_PUBLISH_APPLY;
     const char *mode_name = "legacy-auto";
     bool ready = true;
-    if (*end != '\n' && *end != 0) {
-        char *mode_end = end;
-        while (*mode_end && *mode_end != '\n' && *mode_end != ' ' &&
-               *mode_end != '\t')
-            mode_end++;
-        size_t mode_len = (size_t)(mode_end - end);
-        if (mode_len == strlen("verify") &&
-            memcmp(end, "verify", mode_len) == 0) {
-            publish_mode = ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY;
-            mode_name = "verify";
-        } else if (mode_len == strlen("auto") &&
-                   memcmp(end, "auto", mode_len) == 0) {
-            publish_mode = ZCL_DEVLOOP_PUBLISH_APPLY;
-            mode_name = "auto";
-        } else {
-            return false;
-        }
-        while (*mode_end == ' ' || *mode_end == '\t')
-            mode_end++;
-        if (*mode_end != '\n' && *mode_end != 0) {
-            char *state_end = mode_end;
-            while (*state_end && *state_end != '\n' &&
-                   *state_end != ' ' && *state_end != '\t')
-                state_end++;
-            size_t state_len = (size_t)(state_end - mode_end);
-            if (state_len == strlen("starting") &&
-                memcmp(mode_end, "starting", state_len) == 0)
-                ready = false;
-            else if (state_len == strlen("ready") &&
-                     memcmp(mode_end, "ready", state_len) == 0)
-                ready = true;
-            else
-                return false;
-            while (*state_end == ' ' || *state_end == '\t')
-                state_end++;
-            if (*state_end != '\n' && *state_end != 0 &&
-                !dev_watcher_parse_capability(state_end, &observed))
-                return false;
-        }
-    }
+    if (!dev_watcher_lock_tail(end, &publish_mode, &mode_name, &ready,
+                               &observed))
+        return false;
     dev_pid_t pid = (dev_pid_t)value;
     return dev_watcher_publish_verified(root, &lock_stat, pid, &observed,
                                         publish_mode, mode_name, ready, info_out);
@@ -2850,16 +3185,17 @@ static bool dev_root_identity(const char *root,
     return ok;
 }
 
-static bool dev_watcher_active_windows(const char *repo_root,
-                                       struct dev_watcher_info *out)
+/* The durable watcher record for this root, parsed and naming a live
+ * process. Returns false when it is absent, corrupt or stale. */
+static bool dev_watcher_windows_record(const char *repo_root,
+                                       char root[PATH_MAX],
+                                       struct platform_watcher_record *record)
 {
-    char root[PATH_MAX], state[PATH_MAX], workspace[65], lock_leaf[96],
-         record_leaf[96], encoded[PLATFORM_WATCHER_RECORD_ENCODED_MAX];
+    char state[PATH_MAX], workspace[65], lock_leaf[96], record_leaf[96],
+         encoded[PLATFORM_WATCHER_RECORD_ENCODED_MAX];
     size_t length = 0;
     struct platform_watcher_store store;
-    struct platform_watcher_record record;
     platform_watcher_store_init(&store);
-    if (out) memset(out, 0, sizeof(*out));
     bool names = dev_canonical_directory(repo_root, root) &&
         platform_state_root(state, sizeof(state)) &&
         zcl_devloop_workspace_id(root, workspace) &&
@@ -2872,48 +3208,78 @@ static bool dev_watcher_active_windows(const char *repo_root,
               &length, NULL)
         : PLATFORM_WATCHER_STORE_INVALID;
     platform_watcher_store_close(&store);
-    if (read != PLATFORM_WATCHER_STORE_OK ||
-        !platform_watcher_record_parse(encoded, length, &record) ||
-        strcmp(record.canonical_root, root) != 0 ||
-        record.pid <= 1 || os_proc_pid_liveness(record.pid) !=
-                              OS_PROC_LIVENESS_RUNNING)
-        return false;
+    return read == PLATFORM_WATCHER_STORE_OK &&
+        platform_watcher_record_parse(encoded, length, record) &&
+        strcmp(record->canonical_root, root) == 0 &&
+        record->pid > 1 && os_proc_pid_liveness(record->pid) ==
+                               OS_PROC_LIVENESS_RUNNING;
+}
+
+/* The recorded process still runs the recorded image, which still matches
+ * its hash. The current image path is returned for the identity check. */
+static bool dev_watcher_windows_process_ok(
+    const struct platform_watcher_record *record, char current_image[PATH_MAX])
+{
     uint64_t start = 0;
-    char process_image[PATH_MAX], current_image[PATH_MAX], current_hash[65];
-    struct platform_watcher_file_identity root_id;
-    struct platform_positioned_file image_file;
-    struct platform_positioned_file_snapshot image_info;
-    platform_positioned_file_init(&image_file);
-    bool valid = os_proc_pid_start_token(record.pid, &start) &&
-        start == record.start_token &&
-        os_proc_pid_exe_path(record.pid, process_image, sizeof(process_image)) &&
-        strcmp(process_image, record.canonical_image) == 0 &&
-        os_proc_exe_path(current_image, sizeof(current_image)) &&
-        strcmp(current_image, record.canonical_image) == 0 &&
+    char process_image[PATH_MAX], current_hash[65];
+    return os_proc_pid_start_token(record->pid, &start) &&
+        start == record->start_token &&
+        os_proc_pid_exe_path(record->pid, process_image, sizeof(process_image)) &&
+        strcmp(process_image, record->canonical_image) == 0 &&
+        os_proc_exe_path(current_image, PATH_MAX) &&
+        strcmp(current_image, record->canonical_image) == 0 &&
         dev_activation_sha256_file(current_image, current_hash) &&
-        strcmp(current_hash, record.image_sha256) == 0 &&
-        dev_root_identity(root, &root_id) &&
-        root_id.volume == record.root_identity.volume &&
-        root_id.file_low == record.root_identity.file_low &&
-        root_id.file_high == record.root_identity.file_high &&
-        platform_positioned_file_open(&image_file, current_image) &&
-        platform_positioned_file_snapshot(&image_file, &image_info) &&
-        image_info.volume == record.image_identity.volume &&
-        image_info.file_low == record.image_identity.file_low &&
-        image_info.file_high == record.image_identity.file_high &&
-        image_info.size == record.image_size;
+        strcmp(current_hash, record->image_sha256) == 0;
+}
+
+/* The root directory and the image file carry the recorded identities. */
+static bool dev_watcher_windows_identity_ok(
+    const struct platform_watcher_record *record, const char *root,
+    const char *current_image, struct platform_positioned_file *image_file)
+{
+    struct platform_watcher_file_identity root_id;
+    struct platform_positioned_file_snapshot image_info;
+    return dev_root_identity(root, &root_id) &&
+        root_id.volume == record->root_identity.volume &&
+        root_id.file_low == record->root_identity.file_low &&
+        root_id.file_high == record->root_identity.file_high &&
+        platform_positioned_file_open(image_file, current_image) &&
+        platform_positioned_file_snapshot(image_file, &image_info) &&
+        image_info.volume == record->image_identity.volume &&
+        image_info.file_low == record->image_identity.file_low &&
+        image_info.file_high == record->image_identity.file_high &&
+        image_info.size == record->image_size;
+}
+
+static void dev_watcher_windows_fill(struct dev_watcher_info *out,
+                                     const struct platform_watcher_record *record)
+{
+    out->pid = record->pid; out->start_token = record->start_token;
+    out->publish_mode = record->mode == PLATFORM_WATCHER_MODE_AUTO
+        ? ZCL_DEVLOOP_PUBLISH_APPLY : ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY;
+    out->ready = record->state == PLATFORM_WATCHER_STATE_READY;
+    (void)snprintf(out->mode_name, sizeof(out->mode_name), "%s",
+                   record->mode == PLATFORM_WATCHER_MODE_AUTO ? "auto" : "verify");
+    memcpy(out->nonce, record->nonce, sizeof(out->nonce));
+    memcpy(out->image, record->canonical_image, sizeof(out->image));
+}
+
+static bool dev_watcher_active_windows(const char *repo_root,
+                                       struct dev_watcher_info *out)
+{
+    char root[PATH_MAX], current_image[PATH_MAX];
+    struct platform_watcher_record record;
+    struct platform_positioned_file image_file;
+    if (out) memset(out, 0, sizeof(*out));
+    if (!dev_watcher_windows_record(repo_root, root, &record))
+        return false;
+    platform_positioned_file_init(&image_file);
+    bool valid = dev_watcher_windows_process_ok(&record, current_image) &&
+        dev_watcher_windows_identity_ok(&record, root, current_image,
+                                        &image_file);
     platform_positioned_file_close(&image_file);
     if (!valid) return false;
-    if (out) {
-        out->pid = record.pid; out->start_token = record.start_token;
-        out->publish_mode = record.mode == PLATFORM_WATCHER_MODE_AUTO
-            ? ZCL_DEVLOOP_PUBLISH_APPLY : ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY;
-        out->ready = record.state == PLATFORM_WATCHER_STATE_READY;
-        (void)snprintf(out->mode_name, sizeof(out->mode_name), "%s",
-                       record.mode == PLATFORM_WATCHER_MODE_AUTO ? "auto" : "verify");
-        memcpy(out->nonce, record.nonce, sizeof(out->nonce));
-        memcpy(out->image, record.canonical_image, sizeof(out->image));
-    }
+    if (out) dev_watcher_windows_fill(out, &record);
     return true;
 }
 #endif
@@ -3031,6 +3397,40 @@ static void dev_emit_retiring_sessions(const char *repo_root,
 }
 #endif
 
+static void dev_emit_loop_latest_verdict(struct zcl_command_reply *reply,
+                                         const struct json_value *cycle)
+{
+    /* Loop ownership/status has a deliberately small response budget.
+     * Activation receipts may contain a full behavioral probe (several
+     * KiB), so nesting the durable cycle verbatim made `ensure` start the
+     * watcher and then fail serialization. Keep the decision fields here;
+     * `dev.status` / `dev.loop.wait` remain the full receipt surfaces. */
+    static const char *const summary_fields[] = {
+        "schema", "producer", "status", "action", "reason", "phase",
+        "runtime_published", "elapsed_us", "elapsed_ms", "source_tu",
+        "file_count", "proof_complete", "immediate_proof_complete",
+        "integration_proof_deferred", "bounded_proof_deferred",
+        "closure_refresh_deferred",
+        "feedback_parallel", "source_guard_us",
+        "source_guard_captures", "source_guard_bytes_read",
+        "source_bytes_total", "changed_source_bytes",
+        "source_byte_accounting_complete", "closure_us", "failure_capsule",
+        "why_not_live", "contract_path", "service_source",
+        "agent_next_action",
+    };
+    struct json_value summary;
+    json_init(&summary);
+    json_set_object(&summary);
+    for (size_t i = 0;
+         i < sizeof(summary_fields) / sizeof(summary_fields[0]); i++) {
+        const struct json_value *value = json_get(cycle, summary_fields[i]);
+        if (value)
+            (void)json_push_kv(&summary, summary_fields[i], value);
+    }
+    (void)json_push_kv(&reply->data, "latest_verdict", &summary);
+    json_free(&summary);
+}
+
 static void dev_emit_loop_status(const char *repo_root,
                                  struct zcl_command_reply *reply)
 {
@@ -3090,39 +3490,9 @@ static void dev_emit_loop_status(const char *repo_root,
         return;
     }
     (void)json_push_kv_int(&reply->data, "epoch", epoch);
-    if (lookup == ZCL_DEVLOOP_STATE_FOUND) {
-        /* Loop ownership/status has a deliberately small response budget.
-         * Activation receipts may contain a full behavioral probe (several
-         * KiB), so nesting the durable cycle verbatim made `ensure` start the
-         * watcher and then fail serialization. Keep the decision fields here;
-         * `dev.status` / `dev.loop.wait` remain the full receipt surfaces. */
-        static const char *const summary_fields[] = {
-            "schema", "producer", "status", "action", "reason", "phase",
-            "runtime_published", "elapsed_us", "elapsed_ms", "source_tu",
-            "file_count", "proof_complete", "immediate_proof_complete",
-            "integration_proof_deferred", "bounded_proof_deferred",
-            "closure_refresh_deferred",
-            "feedback_parallel", "source_guard_us",
-            "source_guard_captures", "source_guard_bytes_read",
-            "source_bytes_total", "changed_source_bytes",
-            "source_byte_accounting_complete", "closure_us", "failure_capsule",
-            "why_not_live", "contract_path", "service_source",
-            "agent_next_action",
-        };
-        struct json_value summary;
-        json_init(&summary);
-        json_set_object(&summary);
-        for (size_t i = 0;
-             i < sizeof(summary_fields) / sizeof(summary_fields[0]); i++) {
-            const struct json_value *value = json_get(&cycle, summary_fields[i]);
-            if (value)
-                (void)json_push_kv(&summary, summary_fields[i], value);
-        }
-        (void)json_push_kv(&reply->data, "latest_verdict", &summary);
-        json_free(&summary);
-        json_free(&cycle);
-    } else
-        json_free(&cycle);
+    if (lookup == ZCL_DEVLOOP_STATE_FOUND)
+        dev_emit_loop_latest_verdict(reply, &cycle);
+    json_free(&cycle);
 }
 
 static bool dev_requested_watch_mode(const struct json_value *input,
@@ -3365,6 +3735,200 @@ static bool dev_checkout_root(const char *requested, char root[PATH_MAX])
     return n > 0 && n < (int)sizeof(makefile) && access(makefile, R_OK) == 0;
 }
 
+/* The watcher process one ensure call started, until it is handed off. */
+struct dev_loop_spawn {
+#if defined(_WIN32)
+    struct platform_process child;
+#else
+    pid_t spawned;
+#endif
+};
+
+/* An already-running watcher answers the request. Returns true once the
+ * reply is final; false leaves the start path to run. */
+static bool dev_loop_ensure_existing(
+    const char *root, struct zcl_command_reply *reply,
+    enum zcl_devloop_publish_mode requested_mode,
+    const char *requested_mode_name, bool wait_ready)
+{
+    struct dev_watcher_info existing = {0};
+    if (!dev_watcher_active(root, &existing))
+        return false;
+    if (existing.publish_mode != requested_mode) {
+        char evidence[96];
+        (void)snprintf(evidence, sizeof(evidence),
+                       "running_mode=%s requested_mode=%s watcher_id=%ld",
+                       existing.mode_name, requested_mode_name,
+                       (long)existing.pid);
+        dev_emit_loop_status(root, reply);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "WATCHER_MODE_MISMATCH", "ownership", false, false,
+            "existing watcher must be stopped before changing publication mode",
+            evidence);
+        return true;
+    }
+    for (int i = 0; wait_ready && i < 250 && !existing.ready; i++) {
+        platform_sleep_ms(20);
+        if (!dev_watcher_active(root, &existing))
+            break;
+    }
+    if (existing.pid > 1 && (existing.ready || !wait_ready)) {
+        dev_emit_loop_status(root, reply);
+        (void)json_push_kv_bool(&reply->data, "created", false);
+        return true;
+    }
+    if (existing.pid > 1) {
+        dev_emit_loop_status(root, reply);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "WATCH_STARTING", "start", true, false,
+            "watcher did not finish source reconciliation within 5 seconds",
+            "watcher_ready=false");
+        return true;
+    }
+    return false;
+}
+
+#if defined(_WIN32)
+/* Launch the exact watcher image hidden and keep its process handle. */
+static bool dev_loop_spawn_windows(const char *root,
+                                   const char *requested_mode_name,
+                                   struct platform_process *child,
+                                   struct zcl_command_reply *reply)
+{
+    char image[PATH_MAX];
+    char image_hash[65], inherited_text[32];
+    struct platform_watcher_launch launch;
+    platform_watcher_launch_init(&launch);
+    const char *worker_argv[] = {NULL, "--z23-internal-watch-worker",
+                                 inherited_text, root, requested_mode_name,
+                                 image_hash, NULL};
+    if (!os_proc_exe_path(image, sizeof(image)) ||
+        !dev_activation_sha256_file(image, image_hash) ||
+        !platform_watcher_launch_prepare(&launch, root, image, image_hash)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_IMAGE_FAILED",
+                               "start", false, false,
+                               "could not resolve the exact watcher image", "");
+        return false;
+    }
+    (void)snprintf(inherited_text, sizeof(inherited_text), "%llu",
+        (unsigned long long)platform_watcher_launch_inherited(&launch));
+    worker_argv[0] = image;
+    uintptr_t inherited[] = {platform_watcher_launch_inherited(&launch)};
+    static const char *const watcher_environment[] = {NULL};
+    struct platform_process_options options = {
+        .image = image, .argv = worker_argv, .cwd = root,
+        .env = watcher_environment, .inherited = inherited,
+        .inherited_count = 1};
+    if (!platform_process_start_hidden(child, &options) ||
+        !platform_watcher_launch_publish(&launch)) {
+        platform_watcher_launch_close(&launch);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_START_FAILED",
+                               "start", false, false,
+                               "could not start native watcher", "CreateProcessW");
+        return false;
+    }
+    platform_watcher_launch_close(&launch);
+    return true;
+}
+
+/* Transfer the started watcher's containment to this process, or tear the
+ * child down and refuse. */
+static bool dev_loop_detach_windows(struct platform_process *child,
+                                    struct zcl_command_reply *reply)
+{
+    if (platform_process_detach(child))
+        return true;
+    (void)platform_process_terminate(child, 1);
+    platform_process_close(child);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+        "WATCH_DETACH_FAILED", "start", false, false,
+        "could not transfer native watcher containment", "DuplicateHandle");
+    return false;
+}
+#endif
+
+/* Start the watcher process for this root. Returns false with the reply
+ * already refused. */
+static bool dev_loop_spawn_start(struct dev_loop_spawn *spawn,
+                                 const char *root, const char *log,
+                                 enum zcl_devloop_publish_mode requested_mode,
+                                 const char *requested_mode_name,
+                                 struct zcl_command_reply *reply)
+{
+#if defined(_WIN32)
+    (void)log;
+    (void)requested_mode;
+    platform_process_init(&spawn->child);
+    return dev_loop_spawn_windows(root, requested_mode_name, &spawn->child,
+                                  reply);
+#else
+    (void)requested_mode_name;
+    spawn->spawned = dev_watch_spawn(root, log, requested_mode);
+    if (spawn->spawned < 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_FORK_FAILED",
+                               "start", false, false,
+                               "could not start native watcher", strerror(errno));
+        return false;
+    }
+    return true;
+#endif
+}
+
+/* Wait for the started watcher to report ready, then classify it. Returns
+ * false once the reply is final. */
+static bool dev_loop_ensure_wait(const char *root, const char *log,
+                                 enum zcl_devloop_publish_mode requested_mode,
+                                 struct zcl_command_reply *reply,
+                                 struct dev_loop_spawn *spawn)
+{
+    struct dev_watcher_info started = {0};
+    for (int i = 0; i < 250 &&
+         (!dev_watcher_active(root, &started) || !started.ready); i++)
+        platform_sleep_ms(20);
+    struct zcl_dev_watch_start_info wait_obs = {
+        .pid = (int64_t)started.pid,
+        .ready = started.ready,
+        .is_watcher = dev_pid_is_root_watcher(root, started.pid),
+        .publish_mode = started.publish_mode,
+    };
+    struct zcl_dev_watch_start_wait_reply_internal wait =
+        dev_watch_start_wait_classify(&wait_obs, requested_mode);
+    if (wait.status == ZCL_COMMAND_STATUS_BLOCKED) {
+        char evidence[96];
+        (void)snprintf(evidence, sizeof(evidence),
+                       "watcher_id=%ld watcher_ready=false",
+                       (long)started.pid);
+        dev_emit_loop_status(root, reply);
+        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
+                               "start", wait.retryable, false, wait.message,
+                               evidence);
+        return false;
+    }
+    if (wait.status != ZCL_COMMAND_STATUS_PASSED) {
+#if defined(_WIN32)
+        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
+                               "start", wait.retryable, false, wait.message,
+                               log);
+        (void)platform_process_terminate(&spawn->child, 1);
+        platform_process_close(&spawn->child);
+#else
+        dev_watch_start_failed(root, spawn->spawned, &wait, log, reply);
+#endif
+        return false;
+    }
+#if defined(_WIN32)
+    if (!dev_loop_detach_windows(&spawn->child, reply))
+        return false;
+#endif
+    return true;
+}
+
 static void dev_loop_ensure(
     const struct zcl_command_request *request, struct zcl_command_reply *reply,
     bool wait_ready)
@@ -3396,42 +3960,9 @@ static void dev_loop_ensure(
     if (!dev_watch_admit(root, reply))
         return;
 #endif
-    struct dev_watcher_info existing = {0};
-    if (dev_watcher_active(root, &existing)) {
-        if (existing.publish_mode != requested_mode) {
-            char evidence[96];
-            (void)snprintf(evidence, sizeof(evidence),
-                           "running_mode=%s requested_mode=%s watcher_id=%ld",
-                           existing.mode_name, requested_mode_name,
-                           (long)existing.pid);
-            dev_emit_loop_status(root, reply);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "WATCHER_MODE_MISMATCH", "ownership", false, false,
-                "existing watcher must be stopped before changing publication mode",
-                evidence);
-            return;
-        }
-        for (int i = 0; wait_ready && i < 250 && !existing.ready; i++) {
-            platform_sleep_ms(20);
-            if (!dev_watcher_active(root, &existing))
-                break;
-        }
-        if (existing.pid > 1 && (existing.ready || !wait_ready)) {
-            dev_emit_loop_status(root, reply);
-            (void)json_push_kv_bool(&reply->data, "created", false);
-            return;
-        }
-        if (existing.pid > 1) {
-            dev_emit_loop_status(root, reply);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                "WATCH_STARTING", "start", true, false,
-                "watcher did not finish source reconciliation within 5 seconds",
-                "watcher_ready=false");
-            return;
-        }
-    }
+    if (dev_loop_ensure_existing(root, reply, requested_mode,
+                                 requested_mode_name, wait_ready))
+        return;
     char state_dir[PATH_MAX];
     if (!dev_state_dir(state_dir) || !dev_mkdirs(state_dir)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -3440,65 +3971,14 @@ static void dev_loop_ensure(
                                "could not prepare watcher state directory", "");
         return;
     }
-#if defined(_WIN32)
-    char image[PATH_MAX];
-    char image_hash[65], inherited_text[32];
-    struct platform_watcher_launch launch;
-    platform_watcher_launch_init(&launch);
-    const char *worker_argv[] = {NULL, "--z23-internal-watch-worker",
-                                 inherited_text, root, requested_mode_name,
-                                 image_hash, NULL};
-    struct platform_process child;
-    platform_process_init(&child);
-    if (!os_proc_exe_path(image, sizeof(image)) ||
-        !dev_activation_sha256_file(image, image_hash) ||
-        !platform_watcher_launch_prepare(&launch, root, image, image_hash)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_IMAGE_FAILED",
-                               "start", false, false,
-                               "could not resolve the exact watcher image", "");
+    struct dev_loop_spawn spawn;
+    if (!dev_loop_spawn_start(&spawn, root, log, requested_mode,
+                              requested_mode_name, reply))
         return;
-    }
-    (void)snprintf(inherited_text, sizeof(inherited_text), "%llu",
-        (unsigned long long)platform_watcher_launch_inherited(&launch));
-    worker_argv[0] = image;
-    uintptr_t inherited[] = {platform_watcher_launch_inherited(&launch)};
-    static const char *const watcher_environment[] = {NULL};
-    struct platform_process_options options = {
-        .image = image, .argv = worker_argv, .cwd = root,
-        .env = watcher_environment, .inherited = inherited,
-        .inherited_count = 1};
-    if (!platform_process_start_hidden(&child, &options) ||
-        !platform_watcher_launch_publish(&launch)) {
-        platform_watcher_launch_close(&launch);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_START_FAILED",
-                               "start", false, false,
-                               "could not start native watcher", "CreateProcessW");
-        return;
-    }
-    platform_watcher_launch_close(&launch);
-#else
-    pid_t spawned = dev_watch_spawn(root, log, requested_mode);
-    if (spawned < 0) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "WATCH_FORK_FAILED",
-                               "start", false, false,
-                               "could not start native watcher", strerror(errno));
-        return;
-    }
-#endif
     if (!wait_ready) {
 #if defined(_WIN32)
-        if (!platform_process_detach(&child)) {
-            (void)platform_process_terminate(&child, 1);
-            platform_process_close(&child);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "WATCH_DETACH_FAILED", "start", false, false,
-                "could not transfer native watcher containment", "DuplicateHandle");
+        if (!dev_loop_detach_windows(&spawn.child, reply))
             return;
-        }
 #endif
         (void)json_push_kv_str(&reply->data, "schema",
                                "zcl.dev_loop_start.v1");
@@ -3506,52 +3986,8 @@ static void dev_loop_ensure(
         (void)json_push_kv_str(&reply->data, "root", root);
         return;
     }
-    struct dev_watcher_info started = {0};
-    for (int i = 0; i < 250 &&
-         (!dev_watcher_active(root, &started) || !started.ready); i++)
-        platform_sleep_ms(20);
-    struct zcl_dev_watch_start_info wait_obs = {
-        .pid = (int64_t)started.pid,
-        .ready = started.ready,
-        .is_watcher = dev_pid_is_root_watcher(root, started.pid),
-        .publish_mode = started.publish_mode,
-    };
-    struct zcl_dev_watch_start_wait_reply_internal wait =
-        dev_watch_start_wait_classify(&wait_obs, requested_mode);
-    if (wait.status == ZCL_COMMAND_STATUS_BLOCKED) {
-        char evidence[96];
-        (void)snprintf(evidence, sizeof(evidence),
-                       "watcher_id=%ld watcher_ready=false",
-                       (long)started.pid);
-        dev_emit_loop_status(root, reply);
-        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
-                               "start", wait.retryable, false, wait.message,
-                               evidence);
+    if (!dev_loop_ensure_wait(root, log, requested_mode, reply, &spawn))
         return;
-    }
-    if (wait.status != ZCL_COMMAND_STATUS_PASSED) {
-#if defined(_WIN32)
-        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
-                               "start", wait.retryable, false, wait.message,
-                               log);
-        (void)platform_process_terminate(&child, 1);
-        platform_process_close(&child);
-#else
-        dev_watch_start_failed(root, spawned, &wait, log, reply);
-#endif
-        return;
-    }
-#if defined(_WIN32)
-    if (!platform_process_detach(&child)) {
-        (void)platform_process_terminate(&child, 1);
-        platform_process_close(&child);
-        zcl_command_reply_fail(
-            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-            "WATCH_DETACH_FAILED", "start", false, false,
-            "could not transfer native watcher containment", "DuplicateHandle");
-        return;
-    }
-#endif
     dev_emit_loop_status(root, reply);
     (void)json_push_kv_bool(&reply->data, "created", true);
     (void)json_push_kv_str(&reply->data, "root", root);
