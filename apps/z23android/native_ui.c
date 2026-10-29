@@ -533,20 +533,20 @@ static const char *talk_label(enum zapp_voice_state state)
     return state == ZAPP_VOICE_READY ? "Talk" : state == ZAPP_VOICE_RECORDING ? "Done talking" :
         state == ZAPP_VOICE_PLAYING ? "Stop speaking" : "Cancel";
 }
-/* The suggestion takes the hint's place while voice is idle, nothing awaits confirmation, no reply is
- * pending and an assistant exists. */
+/* The suggestion shows while voice is idle, nothing awaits confirmation and no reply is pending. */
 static bool suggestion_shown(const struct zapp_view *view)
 {
-    return !voice_preview && view->suggestion[0] && !view->voice_status[0] && !view->voice_proposal[0] &&
+    return view->suggestion[0] && !view->voice_proposal[0] &&
         view->voice_state == ZAPP_VOICE_READY && view->reply_state == ZAPP_REPLY_READY;
 }
+/* A voice status line stays above the suggestion; only the default hint gives way to it. */
 static void render_voice(JNIEnv *env, const struct zapp_view *view)
 {
     if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state));
     bool offer = suggestion_shown(view);
     snprintf(suggestion, sizeof(suggestion), "%s", offer ? view->suggestion : "");
     if (buttons[15]) { (void)text(env, buttons[15], suggestion); (void)set_visible(env, buttons[15], offer); }
-    if (voice_view) (void)set_visible(env, voice_view, !offer);
+    if (voice_view) (void)set_visible(env, voice_view, view->voice_status[0] || !offer);
     if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
         "Press Talk and ask anything.");
     if (buttons[10]) {

@@ -27,7 +27,7 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
  * unreadable report. */
 int zapp_fleet_attention(const char *report);
 /* The one question offered under Talk, or "" when none is worth asking. Not paired: "". Node
- * trouble comes first (no peers, then catching up), then hosts needing attention, else a general
+ * trouble comes first (waiting for peers, then catching up), then hosts needing attention, else a general
  * fleet question. Height, target and peers are negative when unknown. Questions only, never a
  * control such as start, stop or join. Returns out. */
 const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,

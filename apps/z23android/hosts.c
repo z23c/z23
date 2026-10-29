@@ -152,7 +152,7 @@ const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_
 {
     const char *q = "How is my fleet?";
     if (!paired) q = "";
-    else if (responding && (peers == 0 || target <= 0)) q = "Why does my node have no peers?";
+    else if (responding && (peers == 0 || target <= 0)) q = "Why is my node waiting for peers?";
     else if (responding && height >= 0 && height < target) q = "How long until my node catches up?";
     else if (fleet_attention > 0) q = "Which hosts need attention?";
     snprintf(out, cap, "%s", q);

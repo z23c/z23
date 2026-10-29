@@ -59,10 +59,12 @@ is stopped, starting, waiting for peers, catching up (height of target) or in
 sync, with its peer count. The fleet line repeats the paired host's cached
 fleet headline, read every 60 seconds without probing the hosts again; while a
 laptop host is paired it reads "Fleet · checking" until the first report, so
-the screen does not shift under a tap when the report arrives. While a laptop host is paired and
-voice is idle, the line under **Talk** offers one question for the current state (no peers, catching
-up, hosts needing attention, else the fleet in general); tapping it asks it as a typed question and
-it never suggests starting, stopping or joining. When
+the screen does not shift under a tap when the report arrives. While a laptop
+host is paired and voice is idle, a button under **Talk** offers one question
+for the current state: why the node waits for peers, how long it needs to
+catch up, which hosts need attention, else how the fleet is. A voice status
+line stays above it; only the default hint gives way. Tapping it asks it as a
+typed question, and it never suggests starting, stopping or joining. When
 the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
 synchronization detail, balance, **Stop node** and fleet invitations. Each host

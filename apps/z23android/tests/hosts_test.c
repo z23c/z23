@@ -51,8 +51,8 @@ static void suggestion_tests(void)
     assert(zapp_fleet_attention("Fleet status is unavailable.") == 0);
     assert(zapp_fleet_attention("5 of 3 hosts in sync\n") == 0);
     assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, 2, q, sizeof(q)), ""));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, 0, q, sizeof(q)), "Why does my node have no peers?"));
-    assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, 0, q, sizeof(q)), "Why does my node have no peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, 0, q, sizeof(q)), "Why is my node waiting for peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, 0, q, sizeof(q)), "Why is my node waiting for peers?"));
     assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 0, q, sizeof(q)), "How long until my node catches up?"));
     assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, 1, q, sizeof(q)), "How long until my node catches up?"));
     assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, 1, q, sizeof(q)), "Which hosts need attention?"));
