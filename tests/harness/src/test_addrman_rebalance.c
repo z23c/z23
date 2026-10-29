@@ -13,6 +13,7 @@
 #include "util/timedata.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 /* Build a routable IPv4-mapped address: ::ffff:a.b.c.d
@@ -749,9 +750,497 @@ static int addrman_rebalance_index_grow(void)
     return failures;
 }
 
+/* ── Characterization of addrman_add / addrman_select / make_tried /
+ * addrman_consistency_check (pins current behaviour before the core split).
+ * make_tried is static: it is driven through addrman_good. ───────────── */
+
+/* A fresh addrman with one hand-built used "new" entry at vvNew[0][0] and
+ * no index, so each consistency branch can be reached without placement. */
+static void pin_manual_base(struct addr_man *am)
+{
+    addrman_init(am);
+    free(am->idx);
+    am->idx = NULL;
+    am->idx_slots = 0;
+    am->idx_live = 0;
+    am->idx_tombs = 0;
+    struct addr_info *e = &am->entries[0];
+    e->addr = make_pub_addr(60, 1, 2, 3, 8033);
+    e->source = make_pub_source(50, 9, 0, 1);
+    e->used = true;
+    e->ref_count = 1;
+    am->id_count = 1;
+    am->new_count = 1;
+    am->vvNew[0][0] = 0;
+}
+
+/* Same entry, moved into the tried table at vvTried[0][0]. */
+static void pin_manual_tried(struct addr_man *am)
+{
+    pin_manual_base(am);
+    am->vvNew[0][0] = -1;
+    am->new_count = 0;
+    am->entries[0].in_tried = true;
+    am->vvTried[0][0] = 0;
+    am->tried_count = 1;
+}
+
+static void pin_reset_new(struct addr_man *am)
+{
+    addrman_free(am);
+    pin_manual_base(am);
+}
+
+static void pin_reset_tried(struct addr_man *am)
+{
+    addrman_free(am);
+    pin_manual_tried(am);
+}
+
+/* Run the check and compare rc and the exact error text ("" = no error). */
+static int pin_consistency_row(const char *label, const struct addr_man *am,
+                               int want_rc, const char *want_err)
+{
+    char err[256] = {0};
+    int rc = addrman_consistency_check(am, err, sizeof(err));
+    if (rc == want_rc && strcmp(err, want_err) == 0)
+        return 0;
+    printf("\n  FAIL %s: rc=%d err=\"%s\" want rc=%d err=\"%s\"",
+           label, rc, err, want_rc, want_err);
+    return 1;
+}
+
+static int addrman_pin_consistency_branches(void)
+{
+    int failures = 0;
+    struct addr_man am;
+
+    printf("addrman_pin: consistency branches... ");
+    pin_manual_base(&am);
+    failures += pin_consistency_row("valid new entry", &am, 0, "");
+
+    am.vvNew[0][0] = -5;
+    failures += pin_consistency_row("new id negative", &am, -1,
+                                    "new[0][0]: id=-5 out of range (cap=4096)");
+    pin_reset_new(&am);
+    am.vvNew[0][0] = 4096;
+    failures += pin_consistency_row("new id at cap", &am, -1,
+                                    "new[0][0]: id=4096 out of range (cap=4096)");
+    pin_reset_new(&am);
+    am.entries[0].used = false;
+    failures += pin_consistency_row("new entry not used", &am, -1,
+                                    "new[0][0]: id=0 not used");
+    pin_reset_new(&am);
+    am.entries[0].in_tried = true;
+    failures += pin_consistency_row("new entry in tried", &am, -1,
+                                    "new[0][0]: id=0 is in tried table");
+    pin_reset_new(&am);
+    am.entries[0].ref_count = 0;
+    failures += pin_consistency_row("new ref_count zero", &am, -1,
+                                    "new[0][0]: id=0 ref_count=0 <= 0");
+    pin_reset_new(&am);
+    am.entries[0].ref_count = 2;
+    failures += pin_consistency_row("ref_count vs bucket refs", &am, -1,
+                                    "entry 0: ref_count=2 but 1 bucket refs");
+
+    pin_reset_tried(&am);
+    failures += pin_consistency_row("valid tried entry", &am, 0, "");
+    am.vvTried[0][0] = 4096;
+    failures += pin_consistency_row("tried id at cap", &am, -1,
+                                    "tried[0][0]: id=4096 out of range");
+    pin_reset_tried(&am);
+    am.entries[0].used = false;
+    failures += pin_consistency_row("tried entry not used", &am, -1,
+                                    "tried[0][0]: id=0 not used");
+    pin_reset_tried(&am);
+    am.entries[0].in_tried = false;
+    failures += pin_consistency_row("tried entry not in_tried", &am, -1,
+                                    "tried[0][0]: id=0 not marked in_tried");
+    pin_reset_tried(&am);
+    am.tried_count = 2;
+    failures += pin_consistency_row("tried_count mismatch", &am, -1,
+                                    "tried_count mismatch: table has 1, tracked 2");
+    pin_reset_tried(&am);
+    am.vvTried[0][1] = 0;
+    am.tried_count = 2;
+    failures += pin_consistency_row("duplicate tried id", &am, -1,
+                                    "tried[0]: duplicate id=0 at pos 0 and 1");
+
+    /* Index verification runs only when the O(1) index exists. */
+    addrman_free(&am);
+    addrman_init(&am);
+    am.idx_live = 5;
+    failures += pin_consistency_row("index live count mismatch", &am, -1,
+                                    "idx_live=5 but 0 used entries");
+
+    /* NULL and zero-capacity error buffers: still fail, never write. */
+    am.idx_live = 0;
+    addrman_free(&am);
+    pin_manual_base(&am);
+    am.vvNew[0][0] = 4096;
+    failures += (addrman_consistency_check(&am, NULL, 0) == -1) ? 0 : 1;
+    char keep[8] = "keep";
+    failures += (addrman_consistency_check(&am, keep, 0) == -1 &&
+                 strcmp(keep, "keep") == 0) ? 0 : 1;
+
+    if (failures == 0) printf("OK\n");
+    else printf("\n");
+    addrman_free(&am);
+    return failures;
+}
+
+static int addrman_pin_add_refusals(void)
+{
+    int failures = 0;
+    printf("addrman_pin: add refusals... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    struct net_address priv = make_pub_addr(10, 0, 0, 1, 8033);
+    struct net_address loop = make_pub_addr(127, 0, 0, 1, 8033);
+    struct net_address pub = make_pub_addr(60, 1, 2, 3, 8033);
+
+    bool ok = !addrman_add(NULL, &pub, &src, 0);
+    ok = ok && !addrman_add(&am, NULL, &src, 0);
+    ok = ok && !addrman_add(&am, &priv, &src, 0);
+    ok = ok && !addrman_add(&am, &loop, &src, 0);
+    ok = ok && addrman_size(&am) == 0;
+
+    /* Torn-down table (entries freed) refuses before taking the lock. */
+    struct addr_info *saved = am.entries;
+    am.entries = NULL;
+    ok = ok && !addrman_add(&am, &pub, &src, 0);
+    am.entries = saved;
+    ok = ok && addrman_size(&am) == 0;
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
+/* New entries keep their timestamp, less the penalty (clamped at 0). */
+static bool pin_accepts_stored(struct addr_man *am, const struct net_addr *src,
+                               int64_t T)
+{
+    struct addr_info out;
+    struct net_address a = make_pub_addr(60, 1, 2, 3, 8033);
+    struct net_address b = make_pub_addr(60, 1, 2, 4, 8033);
+    a.nTime = (uint32_t)T;
+    b.nTime = (uint32_t)T;
+    bool ok = addrman_add(am, &a, src, 0) && addrman_find_info(am, &a.svc, &out);
+    ok = ok && out.addr.nTime == (uint32_t)T && !out.in_tried &&
+         out.ref_count == 1;
+    ok = ok && addrman_add(am, &b, src, 100) && addrman_find_info(am, &b.svc, &out);
+    ok = ok && out.addr.nTime == (uint32_t)(T - 100);
+    return ok;
+}
+
+/* A penalty above the timestamp clamps to 0; a zero timestamp is accepted. */
+static bool pin_accepts_clamped(struct addr_man *am, const struct net_addr *src,
+                                int64_t T)
+{
+    struct addr_info out;
+    struct net_address c = make_pub_addr(60, 1, 2, 5, 8033);
+    struct net_address z = make_pub_addr(60, 1, 2, 6, 8033);
+    c.nTime = (uint32_t)T;
+    z.nTime = 0;
+    bool ok = addrman_add(am, &c, src, T + 10) &&
+              addrman_find_info(am, &c.svc, &out) && out.addr.nTime == 0;
+    ok = ok && addrman_add(am, &z, src, 0) &&
+         addrman_find_info(am, &z.svc, &out) && out.addr.nTime == 0;
+    ok = ok && addrman_size(am) == 4 && am->new_count == 4 &&
+         am->tried_count == 0;
+    return ok;
+}
+
+static int addrman_pin_add_accepts(void)
+{
+    int failures = 0;
+    printf("addrman_pin: add accepts and time penalty... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    int64_t T = (int64_t)platform_time_wall_time_t();
+
+    bool ok = pin_accepts_stored(&am, &src, T);
+    ok = ok && pin_accepts_clamped(&am, &src, T);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
+/* Same timestamp and zero timestamp are refused; a newer timestamp is
+ * refused too, yet the stored timestamp still advances to it. */
+static bool pin_dup_refresh(struct addr_man *am, const struct net_addr *src,
+                            int64_t T)
+{
+    struct addr_info out;
+    struct net_address a = make_pub_addr(60, 1, 2, 3, 8033);
+    a.nTime = (uint32_t)T;
+    struct net_address zero = a;
+    zero.nTime = 0;
+    struct net_address newer = a;
+    newer.nTime = (uint32_t)(T + 2 * 24 * 60 * 60);
+    bool ok = addrman_add(am, &a, src, 0) && !addrman_add(am, &a, src, 0);
+    ok = ok && !addrman_add(am, &zero, src, 0) && addrman_size(am) == 1;
+    ok = ok && !addrman_add(am, &newer, src, 0);
+    ok = ok && addrman_find_info(am, &a.svc, &out) &&
+         out.addr.nTime == (uint32_t)(T + 2 * 24 * 60 * 60);
+    return ok;
+}
+
+/* Refused when already in tried, and when the bucket-cap reference count
+ * is reached. */
+static bool pin_dup_tried_and_cap(struct addr_man *am,
+                                  const struct net_addr *src, int64_t T)
+{
+    struct addr_info out;
+    struct net_address t = make_pub_addr(60, 1, 2, 7, 8033);
+    struct net_address cap = make_pub_addr(60, 1, 2, 8, 8033);
+    t.nTime = (uint32_t)T;
+    cap.nTime = (uint32_t)T;
+    struct net_address t_newer = t;
+    t_newer.nTime = (uint32_t)(T + 1);
+    struct net_address cap_newer = cap;
+    cap_newer.nTime = (uint32_t)(T + 1);
+
+    bool ok = addrman_add(am, &t, src, 0);
+    addrman_good(am, &t.svc, T);
+    ok = ok && !addrman_add(am, &t_newer, src, 0);
+    ok = ok && addrman_find_info(am, &t.svc, &out) && out.in_tried;
+    ok = ok && am->tried_count == 1 && am->new_count == 1;
+
+    ok = ok && addrman_add(am, &cap, src, 0);
+    am->entries[2].ref_count = ADDRMAN_NEW_BUCKETS_PER_ADDRESS;
+    ok = ok && !addrman_add(am, &cap_newer, src, 0);
+    return ok;
+}
+
+static int addrman_pin_add_duplicates(void)
+{
+    int failures = 0;
+    printf("addrman_pin: add duplicates... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    int64_t T = (int64_t)platform_time_wall_time_t();
+
+    bool ok = pin_dup_refresh(&am, &src, T);
+    ok = ok && pin_dup_tried_and_cap(&am, &src, T);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
+/* Unknown endpoint and same address on another port: no change. */
+static bool pin_good_noops(struct addr_man *am, const struct net_address *x,
+                           int64_t T)
+{
+    struct addr_info out;
+    struct net_address other = make_pub_addr(60, 1, 2, 4, 8033);
+    struct net_service wrong_port = x->svc;
+    wrong_port.port = 8034;
+    addrman_good(am, &other.svc, T);
+    bool ok = am->tried_count == 0 && am->new_count == 1;
+    addrman_good(am, &wrong_port, T);
+    ok = ok && addrman_find_info(am, &x->svc, &out) && !out.in_tried;
+    ok = ok && out.last_success == 0 && am->tried_count == 0;
+    return ok;
+}
+
+/* New to tried: stats reset and the table stays consistent. */
+static bool pin_good_promotes(struct addr_man *am, const struct net_address *x,
+                              int64_t T)
+{
+    struct addr_info out;
+    addrman_good(am, &x->svc, T);
+    bool ok = addrman_find_info(am, &x->svc, &out) && out.in_tried;
+    ok = ok && out.last_success == T && out.last_try == T && out.attempts == 0;
+    ok = ok && am->tried_count == 1 && am->new_count == 0;
+    ok = ok && addrman_consistency_check(am, NULL, 0) == 0;
+    return ok;
+}
+
+/* Already tried: timestamps refresh and the tried count is unchanged. */
+static bool pin_good_retry(struct addr_man *am, const struct net_address *x,
+                           int64_t T)
+{
+    struct addr_info out;
+    addrman_attempt(am, &x->svc, T + 1);
+    bool ok = addrman_find_info(am, &x->svc, &out) && out.attempts == 1;
+    addrman_good(am, &x->svc, T + 5);
+    ok = ok && addrman_find_info(am, &x->svc, &out) && out.in_tried;
+    ok = ok && out.last_success == T + 5 && out.attempts == 0;
+    ok = ok && am->tried_count == 1;
+    return ok;
+}
+
+/* Present in the index but in no new bucket: no promotion. */
+static bool pin_good_missing_new(struct addr_man *am,
+                                 const struct net_address *y, int64_t T)
+{
+    int yid = am->id_count - 1;
+    for (int b = 0; b < ADDRMAN_NEW_BUCKET_COUNT; b++)
+        for (int p = 0; p < ADDRMAN_BUCKET_SIZE; p++)
+            if (am->vvNew[b][p] == yid) am->vvNew[b][p] = -1;
+    addrman_good(am, &y->svc, T + 7);
+    struct addr_info out;
+    bool ok = addrman_find_info(am, &y->svc, &out) && !out.in_tried;
+    ok = ok && out.last_success == T + 7 && am->tried_count == 1;
+    return ok;
+}
+
+static int addrman_pin_good_promotion(void)
+{
+    int failures = 0;
+    printf("addrman_pin: good promotion... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    int64_t T = (int64_t)platform_time_wall_time_t();
+    struct net_address x = make_pub_addr(60, 1, 2, 3, 8033);
+    struct net_address y = make_pub_addr(60, 1, 2, 5, 8033);
+    x.nTime = (uint32_t)T;
+    y.nTime = (uint32_t)T;
+
+    bool ok = addrman_add(&am, &x, &src, 0);
+    ok = ok && pin_good_noops(&am, &x, T);
+    ok = ok && pin_good_promotes(&am, &x, T);
+    ok = ok && pin_good_retry(&am, &x, T);
+    ok = ok && addrman_add(&am, &y, &src, 0);
+    ok = ok && pin_good_missing_new(&am, &y, T);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
+/* Brute-force an address whose tried slot equals target's slot. Uses only
+ * the public bucket functions, so the search tracks the real hash. */
+static bool pin_find_tried_collision(const struct addr_man *am,
+                                     const struct addr_info *target,
+                                     const struct net_addr *src,
+                                     struct net_address *out)
+{
+    int tb = addr_info_get_tried_bucket(target, &am->nKey);
+    int tp = addr_info_get_bucket_position(target, &am->nKey, false, tb);
+    for (uint32_t i = 0; i < 2000000u; i++) {
+        struct net_address cand = make_pub_addr(
+            (uint8_t)(60 + (i >> 16) % 40), (uint8_t)(i >> 8), (uint8_t)i,
+            (uint8_t)(i % 254 + 1), 8033);
+        struct addr_info info;
+        memset(&info, 0, sizeof(info));
+        info.addr = cand;
+        info.source = *src;
+        if (addr_info_get_tried_bucket(&info, &am->nKey) != tb)
+            continue;
+        if (addr_info_get_bucket_position(&info, &am->nKey, false, tb) == tp) {
+            *out = cand;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int addrman_pin_tried_eviction(void)
+{
+    int failures = 0;
+    printf("addrman_pin: make_tried evicts tried occupant... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    int64_t T = (int64_t)platform_time_wall_time_t();
+
+    struct net_address y = make_pub_addr(60, 1, 2, 3, 8033);
+    y.nTime = (uint32_t)T;
+    bool ok = addrman_add(&am, &y, &src, 0);
+    addrman_good(&am, &y.svc, T);
+
+    struct addr_info yinfo;
+    ok = ok && addrman_find_info(&am, &y.svc, &yinfo) && yinfo.in_tried;
+
+    struct net_address x = make_pub_addr(60, 1, 2, 3, 8033);
+    ok = ok && pin_find_tried_collision(&am, &yinfo, &src, &x);
+    x.nTime = (uint32_t)T;
+    ok = ok && addrman_add(&am, &x, &src, 0);
+    addrman_good(&am, &x.svc, T);
+
+    /* X displaces Y from the shared tried slot; Y returns to new. */
+    struct addr_info out;
+    ok = ok && addrman_find_info(&am, &x.svc, &out) && out.in_tried;
+    ok = ok && addrman_find_info(&am, &y.svc, &out) && !out.in_tried;
+    ok = ok && am.tried_count == 1 && am.new_count == 1;
+    ok = ok && addrman_consistency_check(&am, NULL, 0) == 0;
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
+static int addrman_pin_select_branches(void)
+{
+    int failures = 0;
+    printf("addrman_pin: select branches... ");
+
+    struct addr_man am;
+    addrman_init(&am);
+    struct net_addr src = make_pub_source(50, 9, 0, 1);
+    int64_t T = (int64_t)platform_time_wall_time_t();
+    struct addr_info r;
+
+    bool ok = !addrman_select(&am, false, &r);
+
+    struct net_address x = make_pub_addr(60, 1, 2, 3, 8033);
+    x.nTime = (uint32_t)T;
+    ok = ok && addrman_add(&am, &x, &src, 0);
+    ok = ok && addrman_select(&am, true, &r) && !r.in_tried &&
+         net_addr_eq(&r.addr.svc.addr, &x.svc.addr);
+    ok = ok && addrman_select(&am, false, &r) && !r.in_tried &&
+         net_addr_eq(&r.addr.svc.addr, &x.svc.addr);
+
+    /* Only tried entries: new-only has nothing to return. */
+    addrman_good(&am, &x.svc, T);
+    ok = ok && !addrman_select(&am, true, &r);
+    ok = ok && addrman_select(&am, false, &r) && r.in_tried &&
+         net_addr_eq(&r.addr.svc.addr, &x.svc.addr);
+    addrman_free(&am);
+
+    /* Tried count without any occupied tried slot: refused, no fallback. */
+    addrman_init(&am);
+    ok = ok && addrman_add(&am, &x, &src, 0);
+    am.new_count = 0;
+    am.tried_count = 1;
+    ok = ok && !addrman_select(&am, false, &r);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    addrman_free(&am);
+    return failures;
+}
+
 int test_addrman_rebalance(void)
 {
     int failures = 0;
+
+    failures += addrman_pin_consistency_branches();
+    failures += addrman_pin_add_refusals();
+    failures += addrman_pin_add_accepts();
+    failures += addrman_pin_add_duplicates();
+    failures += addrman_pin_good_promotion();
+    failures += addrman_pin_tried_eviction();
+    failures += addrman_pin_select_branches();
 
     failures += addrman_rebalance_empty_consistency();
     failures += addrman_rebalance_add_consistency();
