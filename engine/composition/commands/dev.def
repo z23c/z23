@@ -2152,7 +2152,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "the landing queue is a development-lane coordination surface",
     "z23 dev land drive")
 
-ZCL_COMMAND_DEV_READ(
+ZCL_COMMAND_READY_READ(
     "dev.land.status", "dev.land", "",
     "Read the landing queue and the exact proof handoff",
     "Reads the queue rows, the in-flight proof pair and the publication hold "
@@ -2161,12 +2161,12 @@ ZCL_COMMAND_DEV_READ(
     "land,status,queue,proof,hold",
     "zcl.land_status_input.v1", "zcl.land.v1", "json", "",
     "z23-dev dev land status",
-    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
-    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_land,
-    "the landing queue is a development-lane coordination surface",
-    "z23-dev dev land status")
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_land_status)
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.step", "dev.land", "",

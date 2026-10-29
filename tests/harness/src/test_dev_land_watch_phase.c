@@ -1245,6 +1245,56 @@ int test_dev_land_status_observation(void)
 #endif
 
 #if !defined(_WIN32)
+/* dev.land.status through the registry executor, the path z23_run takes: the
+ * leaf must be READY with a handler in every build (not COMPAT_ONLY), answer
+ * ok:true over a fixture state root, and refuse a smuggled mutating verb. */
+int test_dev_land_status_registry_run(void)
+{
+    int failures = 0;
+    char root[4096], wire[16384];
+    enum zcl_command_exit code;
+    struct json_value input, doc;
+    bool opened = false;
+    const struct zcl_command_spec *spec = NULL;
+    TEST("land: dev.land.status runs through the registry executor") {
+        dlx_isolate("status_registry");
+        ASSERT(platform_state_root(root, sizeof(root)));
+        spec = zcl_command_registry_find(zcl_command_catalog(),
+                                         "dev.land.status", NULL);
+        ASSERT(spec != NULL);
+        ASSERT_EQ(spec->availability, ZCL_COMMAND_READY);
+        ASSERT(spec->handler != NULL);
+        json_init(&input);
+        json_set_object(&input);
+        json_init(&doc);
+        opened = true;
+        size_t len = zcl_command_registry_execute_json(
+            zcl_command_catalog(), spec, NULL, &input, false,
+            "dev.land.status", NULL, 0, 0, NULL, wire, sizeof(wire), &code);
+        ASSERT(len > 0 && json_read(&doc, wire, len));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_get_bool(json_get(&doc, "ok")));
+        ASSERT(json_get(json_get(&doc, "data"), "queued") != NULL);
+        json_free(&doc);
+        json_init(&doc);
+        ASSERT(json_push_kv_str(&input, "action", "step"));
+        len = zcl_command_registry_execute_json(
+            zcl_command_catalog(), spec, NULL, &input, false,
+            "dev.land.status", NULL, 0, 0, NULL, wire, sizeof(wire), &code);
+        ASSERT(len > 0 && json_read(&doc, wire, len));
+        ASSERT(!json_get_bool(json_get(&doc, "ok")));
+        PASS();
+    } _test_next:;
+    if (opened) {
+        json_free(&doc);
+        json_free(&input);
+    }
+    dlx_restore();
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
 /* Real local bare receiver and independently signed, same-tree successor.
  * The proof stub hashes each distinct pair: equal trees do not share proof. */
 bool dlx_fence_prepare(struct dlx_rig *rig, const char *tag,

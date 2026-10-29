@@ -13157,6 +13157,26 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
     dl_reply_name_next(request, request ? dl_action(request) : NULL, reply);
 }
 
+/* The read-only status leaf, executable in the release binary (and so over
+ * MCP). It pins the verb to status: the shared handler would honor an
+ * `action` input, which would let this read leaf reach a mutating verb. */
+void zcl_native_handle_dev_land_status(const struct zcl_command_request *request,
+                                       struct zcl_command_reply *reply)
+{
+    const char *action;
+    if (!reply)
+        return;
+    action = request && request->input ? dl_str(request, "action") : NULL;
+    if (action && strcmp(action, "status") != 0) {
+        dl_fail(reply, "BAD_INPUT", "route",
+                "dev.land.status only reads the queue",
+                "input.action must be absent or status");
+        return;
+    }
+    dl_status(request, reply);
+    dl_fence_status(reply);
+}
+
 /* Narrow in-process entries for tools/command/native_dev_land_remote.c: the
  * receive leaf prepares a worktree at a fetched tip and then queues it through
  * exactly the submit handler above, so none of submit's checks is duplicated.
