@@ -911,10 +911,10 @@ int check_rpc_tls_start_self_signed(void)
     printf("rpc TLS start with self-signed cert... ");
     {
         /* Generate a self-signed cert+key in temp files */
-        char cert_path[] = "/tmp/zcl_test_cert_XXXXXX";
-        char key_path[] = "/tmp/zcl_test_key_XXXXXX";
-        int cfd = mkstemp(cert_path);
-        int kfd = mkstemp(key_path);
+        char cert_path[512];
+        char key_path[512];
+        int cfd = test_mkstemp(cert_path, sizeof(cert_path), "zcl_test_cert");
+        int kfd = test_mkstemp(key_path, sizeof(key_path), "zcl_test_key");
         bool ok = false;
         /* Private datadir: rpc_http_start writes <datadir>/.cookie, so a
          * shared "/tmp" would let concurrent runs clobber each other. */

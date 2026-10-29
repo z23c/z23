@@ -594,8 +594,8 @@ int test_noise_transport_parity(void)
         /* (7) the shared persistent key loader creates atomically, reloads
          * exactly, and refuses an over-permissive existing key. */
         {
-            char dir[] = "/tmp/zcl_v2_identity_XXXXXX";
-            ASSERT(mkdtemp(dir) != NULL);
+            char dir[512];
+            ASSERT(test_mkdtemp(dir, sizeof(dir), "zcl_v2_identity") != NULL);
             uint8_t priv1[32], pub1[32], priv2[32], pub2[32];
             char err[160];
             ASSERT(v2_identity_load_or_create(dir, priv1, pub1, err,

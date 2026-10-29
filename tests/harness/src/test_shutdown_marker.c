@@ -459,8 +459,8 @@ static int shutdown_marker_reject_non_sqlite(const char *path)
 static int shutdown_marker_identity_read_case(void)
 {
     printf("shutdown_marker file identity read ... ");
-    char path[] = "/tmp/zcl_shutmark_iddb_XXXXXX";
-    int fd = mkstemp(path);
+    char path[512];
+    int fd = test_mkstemp(path, sizeof(path), "zcl_shutmark_iddb");
     struct node_db_file_identity id;
     int failures = 0;
     if (fd < 0) { printf("FAIL (mkstemp)\n"); failures++; }
@@ -635,8 +635,8 @@ static int shutdown_marker_e2e_unclean_and_absent(const char *dir,
 static int shutdown_marker_e2e_case(void)
 {
     printf("shutdown_marker end-to-end skip + corruption refusal ... ");
-    char dir[] = "/tmp/zcl_shutmark_dir_XXXXXX";
-    if (!mkdtemp(dir)) {
+    char dir[512];
+    if (!test_mkdtemp(dir, sizeof(dir), "zcl_shutmark_dir")) {
         printf("FAIL (mkdtemp)\n");
         return 1;
     }

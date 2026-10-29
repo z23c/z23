@@ -170,8 +170,8 @@ static bool check_receipt_content(void)
 
 static bool check_terminal_receipt_writer(void)
 {
-    char path[] = "/tmp/zcl_swrcpt_XXXXXX";
-    int fd = mkstemp(path);
+    char path[512];
+    int fd = test_mkstemp(path, sizeof(path), "zcl_swrcpt");
     bool ok = fd >= 0;
     if (ok) {
         int w = shutdown_stagewatch_write_terminal_receipt_fd(
@@ -189,8 +189,8 @@ static bool check_terminal_receipt_writer(void)
 
 static bool check_end_to_end_replacement(void)
 {
-    char dir[] = "/tmp/zcl_swdd_XXXXXX";
-    bool ok = mkdtemp(dir) != NULL;
+    char dir[512];
+    bool ok = test_mkdtemp(dir, sizeof(dir), "zcl_swdd") != NULL;
     if (ok) {
         char rpath[512];
         snprintf(rpath, sizeof(rpath), "%s/shutdown-receipt.v1", dir);

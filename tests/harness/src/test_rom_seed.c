@@ -63,8 +63,8 @@ static int test_deregister(void)
     int failures = 0;
     TEST("rom_seed: deregister drops the artifact from count + serve_lookup") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romseed_dereg_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romseed_dereg");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
@@ -126,8 +126,8 @@ static int test_register_digests(void)
     int failures = 0;
     TEST("rom_seed: registration re-derives correct multi-chunk digests") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romseed_dig_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romseed_dig");
         ASSERT(dir != NULL);
 
         /* Two chunks: one full 4 MB chunk + a short 4 KB tail. */
@@ -208,8 +208,8 @@ static int test_free_vs_priced(void)
     int failures = 0;
     TEST("rom_seed: free artifact serves without payment, unknown root does not") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romseed_free_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romseed_free");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024; /* single chunk */
@@ -319,8 +319,8 @@ static int test_corrupt_refused(void)
     int failures = 0;
     TEST("rom_seed: corrupt / invalid artifact refused and never offered") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romseed_bad_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romseed_bad");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
@@ -389,8 +389,8 @@ static int test_scan_and_directory(void)
     int failures = 0;
     TEST("rom_seed: bounded datadir scan registers bundles + directory json") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_romseed_scan_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_romseed_scan");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;

@@ -97,8 +97,8 @@ static int test_sapling_sapling_init_params_rejects_tampered_params_agent_(void)
          * its content hashes to a different SHA-512 than the baked-in
          * constants. sapling_init_params must fail BEFORE attempting to
          * parse groth16 structure. */
-        char tmpdir[] = "/tmp/zcl_tampered_params_XXXXXX";
-        const char *dir = mkdtemp(tmpdir);
+        char tmpdir[512];
+        const char *dir = test_mkdtemp(tmpdir, sizeof(tmpdir), "zcl_tampered_params");
         bool ok = false;
         if (dir) {
             const char *files[] = {

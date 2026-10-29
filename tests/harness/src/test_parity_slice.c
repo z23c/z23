@@ -125,8 +125,8 @@ static int slice_case_consistent_zero_mismatch(void)
 {
     int failures = 0;
     TEST("parity_slice (A): consistent reducer-vs-fixture set -> 0 mismatches") {
-        char path[] = "/tmp/zcl23-parity-slice-ok-XXXXXX";
-        int fd = mkstemp(path);
+        char path[512];
+        int fd = test_mkstemp(path, sizeof(path), "zcl23-parity-slice-ok");
         ASSERT(fd >= 0);
         close(fd);
 
@@ -175,8 +175,8 @@ static int slice_case_injected_mismatch_detected(void)
 {
     int failures = 0;
     TEST("parity_slice (B): injected extra outpoint -> service detects mismatch") {
-        char path[] = "/tmp/zcl23-parity-slice-drift-XXXXXX";
-        int fd = mkstemp(path);
+        char path[512];
+        int fd = test_mkstemp(path, sizeof(path), "zcl23-parity-slice-drift");
         ASSERT(fd >= 0);
         close(fd);
 
@@ -235,8 +235,8 @@ static int slice_case_coarse_match_no_drift(void)
 {
     int failures = 0;
     TEST("parity_slice (C1): coarse same-height -> MATCH, empty ref, no drift") {
-        char path[] = "/tmp/zcl23-parity-slice-coarse-ok-XXXXXX";
-        int fd = mkstemp(path);
+        char path[512];
+        int fd = test_mkstemp(path, sizeof(path), "zcl23-parity-slice-coarse-ok");
         ASSERT(fd >= 0);
         close(fd);
 
@@ -282,8 +282,8 @@ static int slice_case_coarse_skew_local_only(void)
 {
     int failures = 0;
     TEST("parity_slice (C2): coarse height-skew -> LOCAL_ONLY, never drift") {
-        char path[] = "/tmp/zcl23-parity-slice-coarse-skew-XXXXXX";
-        int fd = mkstemp(path);
+        char path[512];
+        int fd = test_mkstemp(path, sizeof(path), "zcl23-parity-slice-coarse-skew");
         ASSERT(fd >= 0);
         close(fd);
 
@@ -328,8 +328,8 @@ static int slice_case_coarse_clears_prior_exact_drift(void)
 {
     int failures = 0;
     TEST("parity_slice (C3): coarse confirmation clears a prior exact drift") {
-        char path[] = "/tmp/zcl23-parity-slice-coarse-clear-XXXXXX";
-        int fd = mkstemp(path);
+        char path[512];
+        int fd = test_mkstemp(path, sizeof(path), "zcl23-parity-slice-coarse-clear");
         ASSERT(fd >= 0);
         close(fd);
 

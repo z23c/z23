@@ -271,8 +271,8 @@ int test_onion_pair_watch_live(void)
         return 1;
     }
 
-    char tmpdir[] = "/tmp/zcl_opw_live_XXXXXX";
-    if (!mkdtemp(tmpdir)) {
+    char tmpdir[512];
+    if (!test_mkdtemp(tmpdir, sizeof(tmpdir), "zcl_opw_live")) {
         printf("FAIL (mkdtemp)\n");
         return 1;
     }

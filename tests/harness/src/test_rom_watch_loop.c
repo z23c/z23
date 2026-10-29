@@ -212,8 +212,8 @@ static int test_rom_offline_wellformed_log(void)
 
     TEST("rom offline: a well-formed mint-progress.log parses the eight "
          "stage EWMAs and the bottleneck") {
-        char tmpl[] = "/tmp/zcl_romoff_XXXXXX";
-        char *dir = mkdtemp(tmpl);
+        char tmpl[512];
+        char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_romoff");
         ASSERT(dir != NULL);
 
         char logpath[512];
@@ -284,8 +284,8 @@ static int test_rom_offline_malformed_log(void)
 
     TEST("rom offline: a malformed/absent log yields zeroed EWMAs, never an "
          "error") {
-        char tmpl[] = "/tmp/zcl_romoff_XXXXXX";
-        char *dir = mkdtemp(tmpl);
+        char tmpl[512];
+        char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_romoff");
         ASSERT(dir != NULL);
 
         char logpath[512];

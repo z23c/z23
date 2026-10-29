@@ -12,6 +12,7 @@
  * real-file path runs only when ~/.zcash-params is present.
  */
 
+#include "test/test_core.h"
 #include "sapling/params_fetch.h"
 #include "net/params_service.h"
 #include "crypto/sha256.h"
@@ -44,8 +45,8 @@ static char g_dir[512];
 
 static bool make_scratch_dir(void)
 {
-    char tmpl[] = "/tmp/zcl_paramfetch_XXXXXX";
-    char *d = mkdtemp(tmpl);
+    char tmpl[512];
+    char *d = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_paramfetch");
     if (!d)
         return false;
     snprintf(g_dir, sizeof(g_dir), "%s", d);

@@ -156,8 +156,8 @@ static int64_t query_height_readonly(const char *path)
 static int check_projection_query_text_and_double(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl-projection-typed-XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[512];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl-projection-typed");
     if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto typed_done; }
 
     char path[320];
@@ -191,8 +191,8 @@ typed_done:
 static int check_chain_projection_best_heights(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl-chain-projection-XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[512];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl-chain-projection");
     if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto chain_done; }
 
     char path[320];
@@ -226,8 +226,8 @@ chain_done:
 static int check_projection_mvcc_under_load(void)
 {
     int failures = 0;
-    char tmpl[] = "/tmp/zcl-projection-load-XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[512];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl-projection-load");
     if (!dir) { failures++; printf("FAIL (mkdtemp)\n"); goto load_done; }
 
     char path[320];

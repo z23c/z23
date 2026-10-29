@@ -63,8 +63,8 @@ static int test_admit_with_valid_receipt(void)
     int failures = 0;
     TEST("rom_bundle_admission: matching receipt admits into rom_seed catalog") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_rba_ok_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_rba_ok");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
@@ -112,8 +112,8 @@ static int test_refuse_without_receipt(void)
     int failures = 0;
     TEST("rom_bundle_admission: no receipt refuses (fail-closed)") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_rba_norcpt_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_rba_norcpt");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
@@ -149,8 +149,8 @@ static int test_refuse_mismatched_receipt(void)
     int failures = 0;
     TEST("rom_bundle_admission: receipt bound to a different bundle refuses") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_rba_mismatch_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_rba_mismatch");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
@@ -194,8 +194,8 @@ static int test_scan_admits_only_receipt_bound(void)
     int failures = 0;
     TEST("rom_bundle_admission: scan admits only the bundle its receipt binds") {
         rom_seed_reset();
-        char root[] = "/tmp/zcl_rba_scan_XXXXXX";
-        char *dir = mkdtemp(root);
+        char root[512];
+        char *dir = test_mkdtemp(root, sizeof(root), "zcl_rba_scan");
         ASSERT(dir != NULL);
 
         size_t size = 64 * 1024;
