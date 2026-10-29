@@ -168,108 +168,126 @@ bool dev_activation_install_file(const char *src, const char *dst, mode_t mode)
     return true;
 }
 
-/* Stage the candidate: sha the artifact, build gen-<sha> immutably. Sets
- * candidate_* fields. Idempotent on an existing matching generation; refuses a
- * quarantined generation. */
-int dev_activation_stage_candidate(struct dev_activation_txn *txn)
+static bool dev_stage_artifact_executable(const char *path)
 {
-    struct dev_activation_result *r = txn->result;
     struct platform_positioned_file artifact;
     platform_positioned_file_init(&artifact);
-    bool artifact_executable =
-        platform_positioned_file_open(&artifact, txn->req->artifact_path) &&
-        platform_positioned_file_is_executable(&artifact);
+    bool executable = platform_positioned_file_open(&artifact, path) &&
+                      platform_positioned_file_is_executable(&artifact);
     platform_positioned_file_close(&artifact);
-    if (!artifact_executable) {
-        fprintf(stderr, "[dev-activation] artifact missing/not executable: %s\n",
-                txn->req->artifact_path);
-        return DEV_ACTIVATION_E_STAGE;
-    }
-    if (!dev_activation_sha256_file(txn->req->artifact_path,
-                                    txn->candidate_sha_hex))
-        return DEV_ACTIVATION_E_STAGE;
-    dev_stage_run_after_hash_hook();
-    snprintf(r->candidate_sha256, sizeof(r->candidate_sha256), "%s",
-             txn->candidate_sha_hex);
+    return executable;
+}
+
+/* Derive gen-<sha>, its candidate directory and binary paths. */
+static bool dev_stage_name_candidate(struct dev_activation_txn *txn)
+{
+    struct dev_activation_result *r = txn->result;
     int n = snprintf(txn->candidate_generation,
                      sizeof(txn->candidate_generation), "gen-%s",
                      txn->candidate_sha_hex);
     if (n <= 0 || (size_t)n >= sizeof(txn->candidate_generation))
-        return DEV_ACTIVATION_E_STAGE;
+        return false;
     snprintf(r->candidate_generation, sizeof(r->candidate_generation), "%s",
              txn->candidate_generation);
     if (!zcl_path_join(txn->candidate_dir, sizeof(txn->candidate_dir),
                   txn->gen_root, txn->candidate_generation))
-        return DEV_ACTIVATION_E_STAGE;
+        return false;
     n = snprintf(txn->candidate_bin, sizeof(txn->candidate_bin),
                  "%s/zclassic23-dev", txn->candidate_dir);
-    if (n <= 0 || (size_t)n >= sizeof(txn->candidate_bin))
-        return DEV_ACTIVATION_E_STAGE;
+    return n > 0 && (size_t)n < sizeof(txn->candidate_bin);
+}
 
+static bool dev_stage_quarantined(const struct dev_activation_txn *txn)
+{
     char reject_marker[PATH_MAX];
-    n = snprintf(reject_marker, sizeof(reject_marker), "%s/%s.json",
-                 txn->rejected_dir, txn->candidate_generation);
-    if (n > 0 && (size_t)n < sizeof(reject_marker) &&
-        access(reject_marker, F_OK) == 0) {
-        fprintf(stderr, "[dev-activation] candidate %s is quarantined\n",
-                txn->candidate_generation);
+    int n = snprintf(reject_marker, sizeof(reject_marker), "%s/%s.json",
+                     txn->rejected_dir, txn->candidate_generation);
+    return n > 0 && (size_t)n < sizeof(reject_marker) &&
+           access(reject_marker, F_OK) == 0;
+}
+
+/* Validate an already-published generation directory against the artifact. */
+static int dev_stage_check_existing(struct dev_activation_txn *txn)
+{
+    /* Immutable collision: an existing gen dir must carry the same sha. */
+    char have[65];
+    if (access(txn->candidate_bin, X_OK) != 0 ||
+        !dev_activation_sha256_file(txn->candidate_bin, have) ||
+        strcmp(have, txn->candidate_sha_hex) != 0) {
+        fprintf(stderr, "[dev-activation] immutable generation collision: %s\n",
+                txn->candidate_dir);
         return DEV_ACTIVATION_E_STAGE;
     }
+    char staged_source_id[65];
+    dev_activation_generation_source_id(
+        txn, txn->candidate_generation, staged_source_id);
+    if (strcmp(staged_source_id, txn->req->source_identity) != 0) {
+        fprintf(stderr,
+                "[dev-activation] immutable generation source identity "
+                "mismatch: %s\n",
+                txn->candidate_dir);
+        return DEV_ACTIVATION_E_STAGE;
+    }
+    return DEV_ACTIVATION_OK; /* already staged, byte-identical */
+}
 
+/* Returns true when no candidate generation exists and one must be published.
+ * Otherwise sets *rc to the final staging result and returns false. */
+static bool dev_stage_probe_candidate(struct dev_activation_txn *txn, int *rc)
+{
+    if (!dev_stage_name_candidate(txn)) {
+        *rc = DEV_ACTIVATION_E_STAGE;
+        return false;
+    }
+    if (dev_stage_quarantined(txn)) {
+        fprintf(stderr, "[dev-activation] candidate %s is quarantined\n",
+                txn->candidate_generation);
+        *rc = DEV_ACTIVATION_E_STAGE;
+        return false;
+    }
     enum platform_directory_probe_result candidate_probe =
         platform_directory_probe_real(txn->candidate_dir);
     if (candidate_probe == PLATFORM_DIRECTORY_PROBE_OK) {
-        /* Immutable collision: an existing gen dir must carry the same sha. */
-        char have[65];
-        if (access(txn->candidate_bin, X_OK) != 0 ||
-            !dev_activation_sha256_file(txn->candidate_bin, have) ||
-            strcmp(have, txn->candidate_sha_hex) != 0) {
-            fprintf(stderr, "[dev-activation] immutable generation collision: %s\n",
-                    txn->candidate_dir);
-            return DEV_ACTIVATION_E_STAGE;
-        }
-        char staged_source_id[65];
-        dev_activation_generation_source_id(
-            txn, txn->candidate_generation, staged_source_id);
-        if (strcmp(staged_source_id, txn->req->source_identity) != 0) {
-            fprintf(stderr,
-                    "[dev-activation] immutable generation source identity "
-                    "mismatch: %s\n",
-                    txn->candidate_dir);
-            return DEV_ACTIVATION_E_STAGE;
-        }
-        return DEV_ACTIVATION_OK; /* already staged, byte-identical */
+        *rc = dev_stage_check_existing(txn);
+        return false;
     }
+    if (candidate_probe != PLATFORM_DIRECTORY_PROBE_MISSING) {
+        *rc = DEV_ACTIVATION_E_STAGE;
+        return false;
+    }
+    return true;
+}
 
-    if (candidate_probe != PLATFORM_DIRECTORY_PROBE_MISSING)
-        return DEV_ACTIVATION_E_STAGE;
-    char tmpl[PATH_MAX];
+static bool dev_stage_make_tmpdir(const struct dev_activation_txn *txn,
+                                  char *tmpl, size_t cap)
+{
     bool made_tmpdir = false;
     for (unsigned int attempt = 0; attempt < 64 && !made_tmpdir; attempt++) {
         uint64_t sequence = atomic_fetch_add_explicit(
             &g_stage_directory_sequence, 1, memory_order_relaxed);
-        n = snprintf(tmpl, sizeof(tmpl), "%s/.candidate.%llu.%llu",
-                     txn->gen_root,
-                     (unsigned long long)os_proc_current_pid(),
-                     (unsigned long long)sequence);
-        if (n <= 0 || (size_t)n >= sizeof(tmpl))
+        int n = snprintf(tmpl, cap, "%s/.candidate.%llu.%llu",
+                         txn->gen_root,
+                         (unsigned long long)os_proc_current_pid(),
+                         (unsigned long long)sequence);
+        if (n <= 0 || (size_t)n >= cap)
             break;
         made_tmpdir = platform_private_directory_create(tmpl);
         if (!made_tmpdir && errno != EEXIST)
             break;
     }
-    if (!made_tmpdir) {
-        LOG_ERR("dev-activation", "candidate mkdtemp: %s", strerror(errno));
-        return DEV_ACTIVATION_E_STAGE;
-    }
-    const char *tmpdir = tmpl;
-    char tmp_bin[PATH_MAX], tmp_manifest[PATH_MAX];
-    if (!zcl_path_join(tmp_bin, sizeof(tmp_bin), tmpdir,
-                             "zclassic23-dev") ||
-        !zcl_path_join(tmp_manifest, sizeof(tmp_manifest), tmpdir,
-                             "manifest.json")) {
+    return made_tmpdir;
+}
+
+/* Fill the private staging directory with the copied binary and manifest.
+ * Both buffers are PATH_MAX bytes, as allocated by the caller. */
+static bool dev_stage_fill_tmp(struct dev_activation_txn *txn,
+                               const char *tmpdir, char *tmp_bin,
+                               char *tmp_manifest)
+{
+    if (!zcl_path_join(tmp_bin, PATH_MAX, tmpdir, "zclassic23-dev") ||
+        !zcl_path_join(tmp_manifest, PATH_MAX, tmpdir, "manifest.json")) {
         (void)platform_private_directory_remove_empty(tmpdir);
-        return DEV_ACTIVATION_E_STAGE;
+        return false;
     }
     char copied_sha[65];
     if (!dev_activation_install_file(txn->req->artifact_path, tmp_bin, 0555) ||
@@ -282,7 +300,7 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
         (void)platform_private_file_unlink_missing_ok(tmp_bin);
         (void)platform_private_file_unlink_missing_ok(tmp_manifest);
         (void)platform_private_directory_remove_empty(tmpdir);
-        return DEV_ACTIVATION_E_STAGE;
+        return false;
     }
 #if !defined(_WIN32)
     /* The manifest is sealed here, but the DIRECTORY is not: publishing it
@@ -291,12 +309,51 @@ int dev_activation_stage_candidate(struct dev_activation_txn *txn)
      * directory is sealed below, once it has landed at its final name. */
     (void)chmod(tmp_manifest, 0444);
 #endif
+    return true;
+}
+
+static void dev_stage_discard_tmp(const char *tmpdir, const char *tmp_bin,
+                                  const char *tmp_manifest)
+{
+    (void)platform_private_file_unlink_missing_ok(tmp_bin);
+    (void)platform_private_file_unlink_missing_ok(tmp_manifest);
+    (void)platform_private_directory_remove_empty(tmpdir);
+}
+
+/* Stage the candidate: sha the artifact, build gen-<sha> immutably. Sets
+ * candidate_* fields. Idempotent on an existing matching generation; refuses a
+ * quarantined generation. */
+int dev_activation_stage_candidate(struct dev_activation_txn *txn)
+{
+    struct dev_activation_result *r = txn->result;
+    if (!dev_stage_artifact_executable(txn->req->artifact_path)) {
+        fprintf(stderr, "[dev-activation] artifact missing/not executable: %s\n",
+                txn->req->artifact_path);
+        return DEV_ACTIVATION_E_STAGE;
+    }
+    if (!dev_activation_sha256_file(txn->req->artifact_path,
+                                    txn->candidate_sha_hex))
+        return DEV_ACTIVATION_E_STAGE;
+    dev_stage_run_after_hash_hook();
+    snprintf(r->candidate_sha256, sizeof(r->candidate_sha256), "%s",
+             txn->candidate_sha_hex);
+    int rc = DEV_ACTIVATION_OK;
+    if (!dev_stage_probe_candidate(txn, &rc))
+        return rc;
+
+    char tmpl[PATH_MAX];
+    if (!dev_stage_make_tmpdir(txn, tmpl, sizeof(tmpl))) {
+        LOG_ERR("dev-activation", "candidate mkdtemp: %s", strerror(errno));
+        return DEV_ACTIVATION_E_STAGE;
+    }
+    const char *tmpdir = tmpl;
+    char tmp_bin[PATH_MAX], tmp_manifest[PATH_MAX];
+    if (!dev_stage_fill_tmp(txn, tmpdir, tmp_bin, tmp_manifest))
+        return DEV_ACTIVATION_E_STAGE;
     bool published = platform_private_directory_publish_no_clobber(
         tmpdir, txn->candidate_dir);
     if (!published) {
-        (void)platform_private_file_unlink_missing_ok(tmp_bin);
-        (void)platform_private_file_unlink_missing_ok(tmp_manifest);
-        (void)platform_private_directory_remove_empty(tmpdir);
+        dev_stage_discard_tmp(tmpdir, tmp_bin, tmp_manifest);
         if (access(txn->candidate_bin, X_OK) != 0) {
             LOG_ERR("dev-activation", "candidate rename lost the race: %s",
                     strerror(errno));
