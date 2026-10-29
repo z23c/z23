@@ -407,30 +407,12 @@ static void artifact_evidence_discard(
     (void)artifact_evidence_close_checked(&evidence);
 }
 
-static struct zcl_result artifact_evidence_open_impl(
-    const char *bundle_path, int datadir_fd,
-    enum consensus_state_install_failpoint requested_failpoint,
-    struct consensus_state_install_result *legacy_result,
-    struct consensus_state_artifact_evidence **out)
+/* Stage 1 of artifact evidence open: pin the immutable file and hash it.
+ * Discards the evidence on failure, exactly as the inline checks did. */
+static struct zcl_result artifact_evidence_open_pinned_file(
+    const char *bundle_path,
+    struct consensus_state_artifact_evidence *evidence)
 {
-    if (out)
-        *out = NULL;
-    if (!bundle_path || !out)
-        return ZCL_ERR(-1, "artifact evidence: null path/output");
-    if (requested_failpoint < CONSENSUS_INSTALL_FAIL_NONE ||
-        requested_failpoint > CONSENSUS_INSTALL_FAIL_AFTER_BUNDLE_VALIDATE)
-        return ZCL_ERR(-2, "artifact evidence: invalid failpoint=%d",
-                       (int)requested_failpoint);
-
-    struct consensus_state_artifact_evidence *evidence = zcl_malloc(
-        sizeof(*evidence), "consensus state artifact evidence");
-    if (!evidence)
-        return ZCL_ERR(-3, "artifact evidence: allocation failed");
-    memset(evidence, 0, sizeof(*evidence));
-    zcl_mutex_init(&evidence->mutex);
-    evidence->artifact_fd = -1;
-    platform_positioned_file_init(&evidence->artifact_file);
-
     if (!immutable_regular_file_open(bundle_path, &evidence->artifact_file,
                                      &evidence->artifact_fd, &evidence->identity,
                                      &evidence->artifact_snapshot) ||
@@ -443,31 +425,26 @@ static struct zcl_result artifact_evidence_open_impl(
         artifact_evidence_discard(evidence);
         return ZCL_ERR(-5, "artifact evidence: initial complete-file hash failed");
     }
+    return ZCL_OK;
+}
 
-    /* Install-verify receipt: a prior full content verify of this exact
-     * bundle SHA3-256 under this exact verifying binary's build epoch lets
-     * the O(bundle-size) deep scan below be skipped. Admission (chain
-     * binding, CAS, guards) is untouched — this only decides how much of
-     * consensus_state_bundle_validate_ex() runs; the cheap structural checks
-     * always run. Any failure to compute the epoch (unstamped build) or find
-     * a matching receipt fails soft to a full verify. */
-    bool skip_deep_scan = false;
-    uint8_t verifier_epoch[32];
-    bool have_epoch =
-        consensus_state_producer_receipt_current_binary_epoch(verifier_epoch);
-    if (have_epoch && datadir_fd >= 0) {
-        int64_t age_us = 0;
-        if (consensus_state_install_verify_receipt_lookup(
-                datadir_fd, evidence->file_digest, verifier_epoch,
-                &age_us)) {
-            skip_deep_scan = true;
-            LOG_INFO(INSTALL_SUBSYS,
-                     "install-verify receipt honored: deep content scan "
-                     "skipped (receipt age=%.0fs)",
-                     (double)age_us / 1000000.0);
-        }
-    }
+/* True when a prior full verify receipt for this bundle digest and the
+ * current binary epoch exists; *age_us then holds the receipt age. */
+static bool artifact_evidence_receipt_honored(
+    bool have_epoch, int datadir_fd,
+    const struct consensus_state_artifact_evidence *evidence,
+    const uint8_t verifier_epoch[32], int64_t *age_us)
+{
+    return have_epoch && datadir_fd >= 0 &&
+           consensus_state_install_verify_receipt_lookup(
+               datadir_fd, evidence->file_digest, verifier_epoch, age_us);
+}
 
+/* Stage 2: open the SQLite descriptor and apply the after-open failpoint. */
+static struct zcl_result artifact_evidence_open_bundle_stage(
+    struct consensus_state_artifact_evidence *evidence,
+    enum consensus_state_install_failpoint requested_failpoint)
+{
     if (!open_bundle_descriptor(evidence)) {
         artifact_evidence_discard(evidence);
         return ZCL_ERR(-6, "artifact evidence: immutable SQLite open failed");
@@ -481,7 +458,16 @@ static struct zcl_result artifact_evidence_open_impl(
         artifact_evidence_discard(evidence);
         return ZCL_ERR(-8, "artifact evidence: injected failure after open");
     }
+    return ZCL_OK;
+}
 
+/* Stage 3: semantic validation, then re-check that the descriptor identity
+ * and the complete-file digest did not move, then the after-validate failpoint. */
+static struct zcl_result artifact_evidence_validate_stage(
+    struct consensus_state_artifact_evidence *evidence,
+    enum consensus_state_install_failpoint requested_failpoint,
+    struct consensus_state_install_result *legacy_result, bool skip_deep_scan)
+{
     struct consensus_state_install_result validation_result;
     memset(&validation_result, 0, sizeof(validation_result));
     struct consensus_state_install_result *validation_out =
@@ -512,10 +498,80 @@ static struct zcl_result artifact_evidence_open_impl(
         return ZCL_ERR(-12,
                        "artifact evidence: injected failure after validation");
     }
-    artifact_receipt_digest_build(evidence, evidence->receipt_digest);
+    return ZCL_OK;
+}
+
+/* Record a receipt after a full (non-skipped) verify when an epoch exists. */
+static void artifact_evidence_receipt_store_after_full_verify(
+    bool skip_deep_scan, bool have_epoch, int datadir_fd,
+    const struct consensus_state_artifact_evidence *evidence,
+    const uint8_t verifier_epoch[32])
+{
     if (!skip_deep_scan && have_epoch && datadir_fd >= 0)
         consensus_state_install_verify_receipt_store(
             datadir_fd, evidence->file_digest, verifier_epoch);
+}
+
+static struct zcl_result artifact_evidence_open_impl(
+    const char *bundle_path, int datadir_fd,
+    enum consensus_state_install_failpoint requested_failpoint,
+    struct consensus_state_install_result *legacy_result,
+    struct consensus_state_artifact_evidence **out)
+{
+    if (out)
+        *out = NULL;
+    if (!bundle_path || !out)
+        return ZCL_ERR(-1, "artifact evidence: null path/output");
+    if (requested_failpoint < CONSENSUS_INSTALL_FAIL_NONE ||
+        requested_failpoint > CONSENSUS_INSTALL_FAIL_AFTER_BUNDLE_VALIDATE)
+        return ZCL_ERR(-2, "artifact evidence: invalid failpoint=%d",
+                       (int)requested_failpoint);
+
+    struct consensus_state_artifact_evidence *evidence = zcl_malloc(
+        sizeof(*evidence), "consensus state artifact evidence");
+    if (!evidence)
+        return ZCL_ERR(-3, "artifact evidence: allocation failed");
+    memset(evidence, 0, sizeof(*evidence));
+    zcl_mutex_init(&evidence->mutex);
+    evidence->artifact_fd = -1;
+    platform_positioned_file_init(&evidence->artifact_file);
+
+    struct zcl_result stage = artifact_evidence_open_pinned_file(
+        bundle_path, evidence);
+    if (!stage.ok)
+        return stage;
+
+    /* Install-verify receipt: a prior full content verify of this exact
+     * bundle SHA3-256 under this exact verifying binary's build epoch lets
+     * the O(bundle-size) deep scan below be skipped. Admission (chain
+     * binding, CAS, guards) is untouched — this only decides how much of
+     * consensus_state_bundle_validate_ex() runs; the cheap structural checks
+     * always run. Any failure to compute the epoch (unstamped build) or find
+     * a matching receipt fails soft to a full verify. */
+    bool skip_deep_scan = false;
+    uint8_t verifier_epoch[32];
+    bool have_epoch =
+        consensus_state_producer_receipt_current_binary_epoch(verifier_epoch);
+    int64_t age_us = 0;
+    if (artifact_evidence_receipt_honored(have_epoch, datadir_fd, evidence,
+                                          verifier_epoch, &age_us)) {
+        skip_deep_scan = true;
+        LOG_INFO(INSTALL_SUBSYS,
+                 "install-verify receipt honored: deep content scan "
+                 "skipped (receipt age=%.0fs)",
+                 (double)age_us / 1000000.0);
+    }
+
+    stage = artifact_evidence_open_bundle_stage(evidence, requested_failpoint);
+    if (!stage.ok)
+        return stage;
+    stage = artifact_evidence_validate_stage(evidence, requested_failpoint,
+                                             legacy_result, skip_deep_scan);
+    if (!stage.ok)
+        return stage;
+    artifact_receipt_digest_build(evidence, evidence->receipt_digest);
+    artifact_evidence_receipt_store_after_full_verify(
+        skip_deep_scan, have_epoch, datadir_fd, evidence, verifier_epoch);
     *out = evidence;
     return ZCL_OK;
 }
@@ -835,6 +891,40 @@ static void artifact_coins_abort_platform_arm(
     if (it) (void)artifact_coins_release(it);
 }
 
+/* Map an admission failure code to the install status; same precedence as
+ * the original inline chain (injected failpoint first, then store errors). */
+static enum consensus_state_install_status
+install_status_for_admission_failure(
+    enum consensus_state_install_failpoint failpoint, int code)
+{
+    if (failpoint != CONSENSUS_INSTALL_FAIL_NONE &&
+        (code == -8 || code == -12))
+        return CONSENSUS_INSTALL_INJECTED_FAILURE;
+    if (code == -3 || code == -5 || code == -6)
+        return CONSENSUS_INSTALL_STORE_ERROR;
+    return CONSENSUS_INSTALL_REFUSED;
+}
+
+static bool snapshot_install_caller_assertion_mismatch(
+    const struct consensus_state_snapshot_install_request *request,
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    return request->expected_height != manifest->height ||
+           memcmp(request->expected_block_hash, manifest->block_hash, 32) != 0;
+}
+
+static void snapshot_install_publish_manifest_fields(
+    struct consensus_state_install_result *result,
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    if (!result)
+        return;
+    result->height = manifest->height;
+    result->history_complete = manifest->history_complete;
+    result->source_clean = manifest->source_clean;
+    result->validation_profile = manifest->validation_profile;
+}
+
 bool consensus_state_snapshot_install(
     sqlite3 *progress_db,
     const struct consensus_state_snapshot_install_request *request,
@@ -858,16 +948,12 @@ bool consensus_state_snapshot_install(
         request->bundle_path, -1, request->failpoint, result, &evidence);
     sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_VERIFY);
     bool ok = admitted.ok;
-    if (!ok) {
-        enum consensus_state_install_status status = CONSENSUS_INSTALL_REFUSED;
-        if (request->failpoint != CONSENSUS_INSTALL_FAIL_NONE &&
-            (admitted.code == -8 || admitted.code == -12))
-            status = CONSENSUS_INSTALL_INJECTED_FAILURE;
-        else if (admitted.code == -3 || admitted.code == -5 ||
-                 admitted.code == -6)
-            status = CONSENSUS_INSTALL_STORE_ERROR;
-        return install_fail(result, status, "%s", admitted.message);
-    }
+    if (!ok)
+        return install_fail(
+            result,
+            install_status_for_admission_failure(request->failpoint,
+                                                 admitted.code),
+            "%s", admitted.message);
     /* SYNC_BENCH_INSTALL brackets the admission-to-contained-result stretch:
      * manifest copy, the caller-assertion match, and the verified-contained
      * status build. sync_benchmark_mark_ready() fires exactly once, the
@@ -884,19 +970,13 @@ bool consensus_state_snapshot_install(
         return install_fail(result, CONSENSUS_INSTALL_REFUSED,
                             "artifact evidence became stale after admission");
     }
-    if (ok && (request->expected_height != manifest.height ||
-               memcmp(request->expected_block_hash, manifest.block_hash, 32)
-                   != 0)) {
+    if (ok && snapshot_install_caller_assertion_mismatch(request, &manifest)) {
         (void)install_fail(result, CONSENSUS_INSTALL_REFUSED,
                            "bundle height/hash does not match caller assertion");
         ok = false;
     }
-    if (ok && result) {
-        result->height = manifest.height;
-        result->history_complete = manifest.history_complete;
-        result->source_clean = manifest.source_clean;
-        result->validation_profile = manifest.validation_profile;
-    }
+    if (ok)
+        snapshot_install_publish_manifest_fields(result, &manifest);
     if (ok) {
         /* Containment is load-bearing. Presence of roots/cursors/digests and a
          * caller boolean cannot prove complete historical anchors/nullifiers,

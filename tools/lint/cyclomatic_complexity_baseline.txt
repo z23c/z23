@@ -362,8 +362,6 @@ engine/composition/src/consensus_state_producer_receipt.c:producer_session_misma
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_anchors:21
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
-engine/composition/src/consensus_state_snapshot_install.c:artifact_evidence_open_impl:25
-engine/composition/src/consensus_state_snapshot_install.c:consensus_state_snapshot_install#2:22
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_apply_in_tx:37
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_stream_copy:16
 engine/composition/src/consensus_state_snapshot_install_activate.c:activate_verify_terminal_in_tx:16
