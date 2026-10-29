@@ -380,6 +380,95 @@ static bool la_seed_stage_cursor(sqlite3 *db, const char *name, int cursor)
     return ok;
 }
 
+static bool la_fold_args_ok(int n, int start_cursor, int body_gap)
+{
+    return !(n > 64 || start_cursor < 0 || start_cursor > n ||
+             (body_gap >= 0 && (body_gap < start_cursor || body_gap >= n)));
+}
+
+/* Teardown shared by every exit after the chain is built. */
+static void la_fold_release(struct main_state *ms, struct la_chain *sc)
+{
+    la_chain_free(sc);
+    active_chain_free(&ms->chain_active);
+    progress_store_close();
+}
+
+/* HEIGHT_GAP clears one body bit; a missing gap height is a setup refusal. */
+static bool la_fold_clear_gap_body(struct la_chain *sc, enum la_pool_mode mode,
+                                   int body_gap)
+{
+    if (mode != LA_POOL_HEIGHT_GAP)
+        return true;
+    if (body_gap < 0)
+        return false;
+    block_index_status_clear_bits(&sc->blocks[body_gap], BLOCK_HAVE_DATA);
+    return true;
+}
+
+static bool la_fold_seed_stage(struct main_state *ms, struct la_chain *sc,
+                               int n, int start_cursor)
+{
+    active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
+    return la_seed_script_validate(progress_store_db(), sc) &&
+           la_seed_stage_cursor(progress_store_db(), "proof_validate",
+                                start_cursor) &&
+           proof_validate_stage_init(ms);
+}
+
+static void la_fold_start_pool(struct la_result *out, struct main_state *ms,
+                               const char *dir, struct la_chain *sc,
+                               enum la_pool_mode mode, bool use_real_verifier,
+                               uint64_t warm_expect)
+{
+    out->warm_ok = true;
+    if (mode == LA_POOL_WARM || mode == LA_POOL_HEIGHT_GAP) {
+        out->warm_ok = proof_validate_lookahead_start() &&
+                       la_wait_populated(warm_expect, 10000);
+    } else if (mode == LA_POOL_DEAD_READER) {
+        /* Direct start with a reader that never yields a block: every consume
+         * must MISS and the stage must fold inline, verdict-identical. */
+        out->warm_ok = pv_lookahead_start(
+            ms, dir, la_reader_never, sc,
+            use_real_verifier ? NULL : la_verifier,
+            use_real_verifier ? NULL : (void *)sc);
+    }
+}
+
+static void la_fold_gap_probe(struct la_result *out, struct la_chain *sc,
+                              int n, int body_gap, bool use_real_verifier)
+{
+    /* A wrong hash at the first readable height beyond the gap must miss
+     * without consuming the exact-hash slot.  The serial drive below then
+     * consumes that same slot through the selected block hash. */
+    int probe_h = body_gap + 1;
+    if (out->warm_ok && probe_h < n) {
+        struct uint256 wrong = sc->hashes[probe_h];
+        wrong.data[0] ^= 0xff;
+        struct pv_lookahead_verdict ignored;
+        out->wrong_hash_missed = !pv_lookahead_take(
+            probe_h, &wrong,
+            use_real_verifier ? NULL : la_verifier,
+            use_real_verifier ? NULL : (void *)sc, &ignored);
+    }
+    /* Make the held serial height readable.  The pool deliberately does
+     * not backtrack over a per-height gap, so this height verifies inline;
+     * the already-warmed later heights remain exact-hash cache hits. */
+    block_index_status_fetch_or(&sc->blocks[body_gap], BLOCK_HAVE_DATA);
+}
+
+static void la_fold_capture(struct la_result *out, int n)
+{
+    out->drained = proof_validate_stage_drain(1000);
+    out->cursor = proof_validate_stage_cursor();
+    out->hits = pv_lookahead_hit_total();
+    out->misses = pv_lookahead_miss_total();
+    la_counters_capture(&out->counters);
+    out->n_rows = n;
+    for (int h = 0; h < n; h++)
+        (void)la_row_at(progress_store_db(), h, &out->rows[h]);
+}
+
 static void la_fold_from(struct la_result *out, const char *tag, int n,
                          bool plain_first, int fail_height,
                          bool fail_internal, bool use_real_verifier,
@@ -387,8 +476,7 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
                          int start_cursor, int body_gap)
 {
     memset(out, 0, sizeof(*out));
-    if (n > 64 || start_cursor < 0 || start_cursor > n ||
-        (body_gap >= 0 && (body_gap < start_cursor || body_gap >= n)))
+    if (!la_fold_args_ok(n, start_cursor, body_gap))
         return;
 
     char dir[256];
@@ -405,23 +493,12 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
     }
     sc.fail_height = fail_height;
     sc.fail_internal = fail_internal;
-    if (mode == LA_POOL_HEIGHT_GAP) {
-        if (body_gap < 0) {
-            la_chain_free(&sc);
-            active_chain_free(&ms.chain_active);
-            progress_store_close();
-            return;
-        }
-        block_index_status_clear_bits(&sc.blocks[body_gap], BLOCK_HAVE_DATA);
+    if (!la_fold_clear_gap_body(&sc, mode, body_gap)) {
+        la_fold_release(&ms, &sc);
+        return;
     }
-    active_chain_move_window_tip(&ms.chain_active, &sc.blocks[n - 1]);
-    if (!la_seed_script_validate(progress_store_db(), &sc) ||
-        !la_seed_stage_cursor(progress_store_db(), "proof_validate",
-                              start_cursor) ||
-        !proof_validate_stage_init(&ms)) {
-        la_chain_free(&sc);
-        active_chain_free(&ms.chain_active);
-        progress_store_close();
+    if (!la_fold_seed_stage(&ms, &sc, n, start_cursor)) {
+        la_fold_release(&ms, &sc);
         return;
     }
     proof_validate_stage_set_reader(la_reader, &sc);
@@ -429,52 +506,14 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
         proof_validate_stage_set_tx_verifier(la_verifier, &sc);
     out->setup_ok = true;
 
-    out->warm_ok = true;
-    if (mode == LA_POOL_WARM || mode == LA_POOL_HEIGHT_GAP) {
-        out->warm_ok = proof_validate_lookahead_start() &&
-                       la_wait_populated(warm_expect, 10000);
-    } else if (mode == LA_POOL_DEAD_READER) {
-        /* Direct start with a reader that never yields a block: every consume
-         * must MISS and the stage must fold inline, verdict-identical. */
-        out->warm_ok = pv_lookahead_start(
-            &ms, dir, la_reader_never, &sc,
-            use_real_verifier ? NULL : la_verifier,
-            use_real_verifier ? NULL : (void *)&sc);
-    }
-
-    if (mode == LA_POOL_HEIGHT_GAP) {
-        /* A wrong hash at the first readable height beyond the gap must miss
-         * without consuming the exact-hash slot.  The serial drive below then
-         * consumes that same slot through the selected block hash. */
-        int probe_h = body_gap + 1;
-        if (out->warm_ok && probe_h < n) {
-            struct uint256 wrong = sc.hashes[probe_h];
-            wrong.data[0] ^= 0xff;
-            struct pv_lookahead_verdict ignored;
-            out->wrong_hash_missed = !pv_lookahead_take(
-                probe_h, &wrong,
-                use_real_verifier ? NULL : la_verifier,
-                use_real_verifier ? NULL : (void *)&sc, &ignored);
-        }
-        /* Make the held serial height readable.  The pool deliberately does
-         * not backtrack over a per-height gap, so this height verifies inline;
-         * the already-warmed later heights remain exact-hash cache hits. */
-        block_index_status_fetch_or(&sc.blocks[body_gap], BLOCK_HAVE_DATA);
-    }
-
-    out->drained = proof_validate_stage_drain(1000);
-    out->cursor = proof_validate_stage_cursor();
-    out->hits = pv_lookahead_hit_total();
-    out->misses = pv_lookahead_miss_total();
-    la_counters_capture(&out->counters);
-    out->n_rows = n;
-    for (int h = 0; h < n; h++)
-        (void)la_row_at(progress_store_db(), h, &out->rows[h]);
+    la_fold_start_pool(out, &ms, dir, &sc, mode, use_real_verifier,
+                       warm_expect);
+    if (mode == LA_POOL_HEIGHT_GAP)
+        la_fold_gap_probe(out, &sc, n, body_gap, use_real_verifier);
+    la_fold_capture(out, n);
 
     proof_validate_stage_shutdown();   /* stops the pool first (idempotent) */
-    la_chain_free(&sc);
-    active_chain_free(&ms.chain_active);
-    progress_store_close();
+    la_fold_release(&ms, &sc);
     test_cleanup_tmpdir(dir);
 }
 
@@ -711,41 +750,36 @@ static bool la_params_available(void)
     return sapling_init_params(params_dir);
 }
 
-int test_pv_lookahead(void);
-int test_pv_lookahead(void)
+/* 1) Full-window differential: 64 heights, one poisoned proof at h=40 —
+ * every consume is a HIT, all rows + counters identical to serial. */
+static int la_test_diff_full(void)
 {
-    printf("\n=== pv_lookahead differential parity tests ===\n");
     int failures = 0;
-    blocker_module_init();
-    chain_params_select(CHAIN_MAIN);
+    struct la_result serial, pooled;
+    la_fold(&serial, "d_ser", 64, false, 40, false, false,
+            LA_POOL_OFF, 0);
+    la_fold(&pooled, "d_pool", 64, false, 40, false, false,
+            LA_POOL_WARM, 64);
+    PVLA_CHECK("diff: serial setup + full drain",
+               serial.setup_ok && serial.drained == 64);
+    PVLA_CHECK("diff: pool warmed all 64 heights", pooled.warm_ok);
+    PVLA_CHECK("diff: pooled fold consumed 64 hits, 0 misses",
+               pooled.hits == 64 && pooled.misses == 0);
+    PVLA_CHECK("diff: rows + counters + cursor identical",
+               la_results_identical(&serial, &pooled));
+    PVLA_CHECK("diff: poisoned row is proof_invalid/sapling_spend both ways",
+               serial.rows[40].present && serial.rows[40].ok == 0 &&
+               strcmp(serial.rows[40].status, "proof_invalid") == 0 &&
+               strcmp(serial.rows[40].type, "sapling_spend") == 0 &&
+               pooled.rows[40].present && pooled.rows[40].ok == 0);
+    return failures;
+}
 
-    PVLA_CHECK("capacity: one default catch-up drain fits in the exact-key ring",
-               PV_LOOKAHEAD_WINDOW >= CATCHUP_CADENCE_DEFAULT_DRAIN_BATCH);
-
-    /* 1) Full-window differential: 64 heights, one poisoned proof at h=40 —
-     * every consume is a HIT, all rows + counters identical to serial. */
-    {
-        struct la_result serial, pooled;
-        la_fold(&serial, "d_ser", 64, false, 40, false, false,
-                LA_POOL_OFF, 0);
-        la_fold(&pooled, "d_pool", 64, false, 40, false, false,
-                LA_POOL_WARM, 64);
-        PVLA_CHECK("diff: serial setup + full drain",
-                   serial.setup_ok && serial.drained == 64);
-        PVLA_CHECK("diff: pool warmed all 64 heights", pooled.warm_ok);
-        PVLA_CHECK("diff: pooled fold consumed 64 hits, 0 misses",
-                   pooled.hits == 64 && pooled.misses == 0);
-        PVLA_CHECK("diff: rows + counters + cursor identical",
-                   la_results_identical(&serial, &pooled));
-        PVLA_CHECK("diff: poisoned row is proof_invalid/sapling_spend both ways",
-                   serial.rows[40].present && serial.rows[40].ok == 0 &&
-                   strcmp(serial.rows[40].status, "proof_invalid") == 0 &&
-                   strcmp(serial.rows[40].type, "sapling_spend") == 0 &&
-                   pooled.rows[40].present && pooled.rows[40].ok == 0);
-    }
-
-    /* 2) REAL verifier (sapling params + ed25519): h0 proof-free (real ok),
-     * h1 garbage joinsplit sig (real proof_invalid/joinsplit_sig). */
+/* 2) REAL verifier (sapling params + ed25519): h0 proof-free (real ok),
+ * h1 garbage joinsplit sig (real proof_invalid/joinsplit_sig). */
+static int la_test_real_verifier(void)
+{
+    int failures = 0;
     if (!la_params_available()) {
         /* Loud self-skip (counted by test_parallel's "SKIP (" sentinel
          * scan): a genuine joinsplit-signature-invalid verdict needs the
@@ -771,119 +805,151 @@ int test_pv_lookahead(void)
                    serial.rows[1].ok == 0 &&
                    strcmp(serial.rows[1].type, "joinsplit_sig") == 0);
     }
+    return failures;
+}
 
-    /* 3) Wrong-hash / wrong-verifier keying: a populated slot never matches a
-     * different block hash or verifier pair, and a hit consumes the slot. */
-    {
-        char dir[256];
-        struct main_state ms;
-        struct la_chain sc;
-        test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", "keying");
-        bool setup = progress_store_open(dir);
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
-        setup = setup && la_chain_build(&sc, 4, false);
-        if (setup) {
-            active_chain_move_window_tip(&ms.chain_active, &sc.blocks[3]);
-            setup = la_seed_script_validate(progress_store_db(), &sc) &&
-                    proof_validate_stage_init(&ms);
-        }
-        if (setup) {
-            proof_validate_stage_set_reader(la_reader, &sc);
-            proof_validate_stage_set_tx_verifier(la_verifier, &sc);
-        }
-        PVLA_CHECK("keying: setup", setup);
-        PVLA_CHECK("keying: pool warms 4",
-                   setup && proof_validate_lookahead_start() &&
-                   la_wait_populated(4, 10000));
-        struct pv_lookahead_verdict v;
-        struct uint256 flipped = sc.hashes[2];
-        flipped.data[0] ^= 0xff;
-        PVLA_CHECK("keying: flipped hash misses",
-                   !pv_lookahead_take(2, &flipped, la_verifier, &sc, &v));
-        PVLA_CHECK("keying: wrong verifier pair misses",
-                   !pv_lookahead_take(2, &sc.hashes[2], NULL, NULL, &v));
-        PVLA_CHECK("keying: exact key hits with ok verdict",
-                   pv_lookahead_take(2, &sc.hashes[2], la_verifier, &sc, &v) &&
-                   v.ok == 1 && v.sapling_spends_total == 1);
-        PVLA_CHECK("keying: consumed slot misses on re-take",
-                   !pv_lookahead_take(2, &sc.hashes[2], la_verifier, &sc, &v));
-        proof_validate_stage_shutdown();
-        la_chain_free(&sc);
-        active_chain_free(&ms.chain_active);
-        progress_store_close();
-        test_cleanup_tmpdir(dir);
+/* 3) Wrong-hash / wrong-verifier keying: a populated slot never matches a
+ * different block hash or verifier pair, and a hit consumes the slot. */
+static int la_test_keying(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct main_state ms;
+    struct la_chain sc;
+    test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", "keying");
+    bool setup = progress_store_open(dir);
+    memset(&ms, 0, sizeof(ms));
+    active_chain_init(&ms.chain_active);
+    setup = setup && la_chain_build(&sc, 4, false);
+    if (setup) {
+        active_chain_move_window_tip(&ms.chain_active, &sc.blocks[3]);
+        setup = la_seed_script_validate(progress_store_db(), &sc) &&
+                proof_validate_stage_init(&ms);
     }
+    if (setup) {
+        proof_validate_stage_set_reader(la_reader, &sc);
+        proof_validate_stage_set_tx_verifier(la_verifier, &sc);
+    }
+    PVLA_CHECK("keying: setup", setup);
+    PVLA_CHECK("keying: pool warms 4",
+               setup && proof_validate_lookahead_start() &&
+               la_wait_populated(4, 10000));
+    struct pv_lookahead_verdict v;
+    struct uint256 flipped = sc.hashes[2];
+    flipped.data[0] ^= 0xff;
+    PVLA_CHECK("keying: flipped hash misses",
+               !pv_lookahead_take(2, &flipped, la_verifier, &sc, &v));
+    PVLA_CHECK("keying: wrong verifier pair misses",
+               !pv_lookahead_take(2, &sc.hashes[2], NULL, NULL, &v));
+    PVLA_CHECK("keying: exact key hits with ok verdict",
+               pv_lookahead_take(2, &sc.hashes[2], la_verifier, &sc, &v) &&
+               v.ok == 1 && v.sapling_spends_total == 1);
+    PVLA_CHECK("keying: consumed slot misses on re-take",
+               !pv_lookahead_take(2, &sc.hashes[2], la_verifier, &sc, &v));
+    proof_validate_stage_shutdown();
+    la_chain_free(&sc);
+    active_chain_free(&ms.chain_active);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
 
-    /* 4) Per-height body gap: begin at h3 with its HAVE_DATA bit absent while
-     * h4..h7 are readable.  The pool must retain exact-hash h4/h5 work instead
-     * of parking behind h3, and h4..h7 must consume the warmed verdicts;
-     * rows/counters remain serial-identical.
-     *
-     * h3 is a RACE by design and its count is asserted as a range: the
-     * worker loop re-sweeps from the lowest gapped height, so either the
-     * drive reaches it first (inline miss, 4 hits) or a re-sweeping worker
-     * verifies it first (5 hits). The verdict is identical either way. */
-    {
-        struct la_result serial, pooled;
-        la_fold_from(&serial, "g_ser", 8, false, -1, false, false,
-                     LA_POOL_OFF, 0, /*start_cursor=*/3, /*body_gap=*/-1);
-        la_fold_from(&pooled, "g_pool", 8, false, -1, false, false,
-                     LA_POOL_HEIGHT_GAP, /*h4..h7=*/4,
-                     /*start_cursor=*/3, /*body_gap=*/3);
-        PVLA_CHECK("gap: serial folds h3..h7",
-                   serial.setup_ok && serial.drained == 5 &&
-                   serial.cursor == 8);
-        PVLA_CHECK("gap: h4..h7 warm while h3 body is absent",
-                   pooled.warm_ok);
-        PVLA_CHECK("gap: wrong h4 hash misses without consuming exact slot",
-                   pooled.wrong_hash_missed);
-        /* Six takes either way: h3..h7 plus the wrong-hash probe. h4..h7
-         * are always hits; h3 is the raced height, so hits is 4 or 5.
-         * drained/cursor stay exact. */
-        PVLA_CHECK("gap: h4..h7 are hits, h3 raced, six takes total",
-                   pooled.hits >= 4 && pooled.hits <= 5 &&
-                   pooled.hits + pooled.misses == 6 &&
-                   pooled.drained == 5 && pooled.cursor == 8);
-        PVLA_CHECK("gap: rows + counters + cursor remain serial-identical",
-                   la_results_identical(&serial, &pooled));
-        PVLA_CHECK("gap: exact h4/h5 verdicts reached selected rows",
-                   pooled.rows[4].present && pooled.rows[4].ok == 1 &&
-                   pooled.rows[5].present && pooled.rows[5].ok == 1);
-    }
+/* 4) Per-height body gap: begin at h3 with its HAVE_DATA bit absent while
+ * h4..h7 are readable.  The pool must retain exact-hash h4/h5 work instead
+ * of parking behind h3, and h4..h7 must consume the warmed verdicts;
+ * rows/counters remain serial-identical.
+ *
+ * h3 is a RACE by design and its count is asserted as a range: the
+ * worker loop re-sweeps from the lowest gapped height, so either the
+ * drive reaches it first (inline miss, 4 hits) or a re-sweeping worker
+ * verifies it first (5 hits). The verdict is identical either way. */
+static int la_test_body_gap(void)
+{
+    int failures = 0;
+    struct la_result serial, pooled;
+    la_fold_from(&serial, "g_ser", 8, false, -1, false, false,
+                 LA_POOL_OFF, 0, /*start_cursor=*/3, /*body_gap=*/-1);
+    la_fold_from(&pooled, "g_pool", 8, false, -1, false, false,
+                 LA_POOL_HEIGHT_GAP, /*h4..h7=*/4,
+                 /*start_cursor=*/3, /*body_gap=*/3);
+    PVLA_CHECK("gap: serial folds h3..h7",
+               serial.setup_ok && serial.drained == 5 &&
+               serial.cursor == 8);
+    PVLA_CHECK("gap: h4..h7 warm while h3 body is absent",
+               pooled.warm_ok);
+    PVLA_CHECK("gap: wrong h4 hash misses without consuming exact slot",
+               pooled.wrong_hash_missed);
+    /* Six takes either way: h3..h7 plus the wrong-hash probe. h4..h7
+     * are always hits; h3 is the raced height, so hits is 4 or 5.
+     * drained/cursor stay exact. */
+    PVLA_CHECK("gap: h4..h7 are hits, h3 raced, six takes total",
+               pooled.hits >= 4 && pooled.hits <= 5 &&
+               pooled.hits + pooled.misses == 6 &&
+               pooled.drained == 5 && pooled.cursor == 8);
+    PVLA_CHECK("gap: rows + counters + cursor remain serial-identical",
+               la_results_identical(&serial, &pooled));
+    PVLA_CHECK("gap: exact h4/h5 verdicts reached selected rows",
+               pooled.rows[4].present && pooled.rows[4].ok == 1 &&
+               pooled.rows[5].present && pooled.rows[5].ok == 1);
+    return failures;
+}
 
-    /* 5) All-miss fallback: pool running but its reader never yields a block —
-     * zero hits, the stage folds inline, rows identical to serial. */
-    {
-        struct la_result serial, dead;
-        la_fold(&serial, "m_ser", 8, false, 5, false, false, LA_POOL_OFF, 0);
-        la_fold(&dead, "m_dead", 8, false, 5, false, false,
-                LA_POOL_DEAD_READER, 0);
-        PVLA_CHECK("miss: pool started with dead reader", dead.warm_ok);
-        PVLA_CHECK("miss: zero hits, every consume missed",
-                   dead.hits == 0 && dead.misses == 8);
-        PVLA_CHECK("miss: inline fallback rows identical",
-                   la_results_identical(&serial, &dead));
-    }
+/* 5) All-miss fallback: pool running but its reader never yields a block —
+ * zero hits, the stage folds inline, rows identical to serial. */
+static int la_test_all_miss(void)
+{
+    int failures = 0;
+    struct la_result serial, dead;
+    la_fold(&serial, "m_ser", 8, false, 5, false, false, LA_POOL_OFF, 0);
+    la_fold(&dead, "m_dead", 8, false, 5, false, false,
+            LA_POOL_DEAD_READER, 0);
+    PVLA_CHECK("miss: pool started with dead reader", dead.warm_ok);
+    PVLA_CHECK("miss: zero hits, every consume missed",
+               dead.hits == 0 && dead.misses == 8);
+    PVLA_CHECK("miss: inline fallback rows identical",
+               la_results_identical(&serial, &dead));
+    return failures;
+}
 
-    /* 6) internal_error is NEVER cached: the drive resolves it inline and the
-     * TL-2 HOLD semantics are unchanged (no row, cursor held, counter == 1). */
-    {
-        struct la_result serial, pooled;
-        la_fold(&serial, "i_ser", 3, false, 1, true, false, LA_POOL_OFF, 0);
-        /* h=1 never populates: expect only h0 + h2 cached. */
-        la_fold(&pooled, "i_pool", 3, false, 1, true, false, LA_POOL_WARM, 2);
-        PVLA_CHECK("internal: serial holds at the hole",
-                   serial.setup_ok && serial.drained == 1 &&
-                   serial.cursor == 1 && !serial.rows[1].present &&
-                   serial.counters.internal_error == 1);
-        PVLA_CHECK("internal: pooled warm_ok (h0+h2 cached, h1 skipped)",
-                   pooled.warm_ok);
-        PVLA_CHECK("internal: pooled fold identical (hold, no row at h1)",
-                   la_results_identical(&serial, &pooled));
-        PVLA_CHECK("internal: h0 was a hit, h1 was an inline miss",
-                   pooled.hits >= 1 && pooled.misses >= 1);
-    }
+/* 6) internal_error is NEVER cached: the drive resolves it inline and the
+ * TL-2 HOLD semantics are unchanged (no row, cursor held, counter == 1). */
+static int la_test_internal_hold(void)
+{
+    int failures = 0;
+    struct la_result serial, pooled;
+    la_fold(&serial, "i_ser", 3, false, 1, true, false, LA_POOL_OFF, 0);
+    /* h=1 never populates: expect only h0 + h2 cached. */
+    la_fold(&pooled, "i_pool", 3, false, 1, true, false, LA_POOL_WARM, 2);
+    PVLA_CHECK("internal: serial holds at the hole",
+               serial.setup_ok && serial.drained == 1 &&
+               serial.cursor == 1 && !serial.rows[1].present &&
+               serial.counters.internal_error == 1);
+    PVLA_CHECK("internal: pooled warm_ok (h0+h2 cached, h1 skipped)",
+               pooled.warm_ok);
+    PVLA_CHECK("internal: pooled fold identical (hold, no row at h1)",
+               la_results_identical(&serial, &pooled));
+    PVLA_CHECK("internal: h0 was a hit, h1 was an inline miss",
+               pooled.hits >= 1 && pooled.misses >= 1);
+    return failures;
+}
+
+int test_pv_lookahead(void);
+int test_pv_lookahead(void)
+{
+    printf("\n=== pv_lookahead differential parity tests ===\n");
+    int failures = 0;
+    blocker_module_init();
+    chain_params_select(CHAIN_MAIN);
+
+    PVLA_CHECK("capacity: one default catch-up drain fits in the exact-key ring",
+               PV_LOOKAHEAD_WINDOW >= CATCHUP_CADENCE_DEFAULT_DRAIN_BATCH);
+
+    failures += la_test_diff_full();
+    failures += la_test_real_verifier();
+    failures += la_test_keying();
+    failures += la_test_body_gap();
+    failures += la_test_all_miss();
+    failures += la_test_internal_hold();
 
     /* 7) Bodiless HAVE_DATA storm bound (own functions: this one's branch
      * count is pinned by the shrink-only complexity ratchet). */
