@@ -71,7 +71,7 @@ bool zapp_speech_client_pair(const char *files, const char *json, char *error, s
     ok = dir >= 0 && store_pairing(dir, json, len);
     if (dir >= 0) close(dir);
     json_cleanse_strings(&root); json_free(&root);
-    if (ok) snprintf(error, cap, "Voice host paired. Keep its USB tunnel connected.");
+    if (ok) snprintf(error, cap, "Laptop host paired. Press Talk to begin.");
     return ok;
 }
 bool zapp_speech_client_paired(const char *files, const char *json)

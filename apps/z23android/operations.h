@@ -30,15 +30,10 @@ bool zapp_node_wanted(const struct zapp_runtime *r);
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 bool zapp_balance_format(const char *json, char *out, size_t cap);
-/* One plain line per fleet doctor detail, naming the checks that share it ("Identity and wiki: detail"),
- * as many lines as fit, or "No fleet check applies here." when only informational checks remain.
- * Informational checks and next-step commands are left out. */
-bool zapp_fleet_doctor_format(const char *json, char *out, size_t cap);
 /* The JSON object in command output: at its start, or on the first line beginning with {, after
  * warnings the command wrote first. NULL when there is none. */
 const char *zapp_json_object(const char *text);
 /* Replaces command output that holds a JSON object with that object's error message, or a plain
  * notice when it has none, so raw JSON never reaches the screen. Other text is left as it is. */
 void zapp_plain_text(char *text, size_t cap);
-void zapp_device_info(char *out, size_t cap);
 #endif

@@ -58,16 +58,16 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
     return out;
 }
-/* "in step", blocks behind or ahead of zclassicd, then the height; a negative height is unknown. */
+/* "in sync", blocks behind or ahead of the host's zclassicd, then the height; a negative height is unknown. */
 static size_t state_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
     int64_t height = -1, reference = -1;
     char at[32], by[32];
     if (!count_of(row, "height", &height) || height < 0) return append(out, cap, used, "height unknown");
     zapp_grouped(height, at);
-    if (host_ok(row)) return append(out, cap, used, "in step · %s", at);
+    if (host_ok(row)) return append(out, cap, used, "in sync · %s", at);
     if (!count_of(row, "reference_height", &reference) || reference < 0)
-        return append(out, cap, used, "zclassicd unknown · %s", at);
+        return append(out, cap, used, "network height unknown · %s", at);
     if (height == reference) return append(out, cap, used, "not synced · %s", at);
     int64_t gap = height < reference ? reference - height : height - reference;
     return append(out, cap, used, "%s %s %s · %s", zapp_grouped(gap, by), gap == 1 ? "block" : "blocks",
@@ -106,7 +106,7 @@ static size_t row_text(const struct json_value *row, char *out, size_t cap, size
     int64_t ms = 0;
     (void)count_of(row, "probe_ms", &ms);
     if (!reachable || reachable->type != JSON_BOOL || !json_get_bool(reachable))
-        return append(out, cap, used, "\n%s · unreachable after %lld.%lld s\n", text_of(row, "host"),
+        return append(out, cap, used, "\n%s · not answering after %lld.%lld s\n", text_of(row, "host"),
             (long long)(ms / 1000), (long long)(ms % 1000 / 100));
     used = append(out, cap, used, "\n%s · ", text_of(row, "host"));
     used = state_text(row, out, cap, used);
@@ -123,7 +123,7 @@ bool zapp_hosts_format(const char *json, char *out, size_t cap)
     ok = hosts && hosts->type == JSON_ARR && hosts->num_children;
     size_t healthy = 0, total = ok ? hosts->num_children : 0, used = 0;
     for (size_t i = 0; i < total; i++) healthy += host_ok(json_at(hosts, i));
-    if (ok) used = append(out, cap, 0, "%zu of %zu hosts in step\n", healthy, total);
+    if (ok) used = append(out, cap, 0, "%zu of %zu hosts in sync\n", healthy, total);
     for (size_t i = 0; ok && i < total; i++) used = row_text(json_at(hosts, i), out, cap, used);
     ok = ok && used < cap;
     if (!ok) out[0] = 0;

@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <stdarg.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
@@ -16,41 +15,17 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 extern char **environ;
-struct operation { struct zapp_operation ui; const char *args[6]; };
+/* The only read-only commands the app runs; start, stop and fleet join have their own paths. */
+struct operation { const char *id; const char *args[4]; };
 static const struct operation operations[] = {
-    {{"version", "Build identity", "Inspect the native executable and Tor build.", "Device"}, {"--version"}},
-    {{"status", "Node status", "Read readiness, sync state, and the next action.", "Node"}, {"core", "status"}},
-    {{"sync", "Sync progress", "Inspect the current validation and download state.", "Node"}, {"core", "sync", "status"}},
-    {{"blockers", "Sync blockers", "See why the node is waiting and its suggested remedies.", "Node"}, {"core", "sync", "blockers"}},
-    {{"health", "Health report", "Inspect the node's health rollup.", "Diagnostics"}, {"ops", "health"}},
-    {{"peers", "Connected peers", "Inspect actual peer connections.", "Network"}, {"core", "network", "peers", "list"}},
-    {{"network", "Network status", "Read transport and connection information.", "Network"}, {"core", "network", "status"}},
-    {{"chain_tip", "Chain tip", "Read the current active chain tip.", "Node"}, {"core", "chain", "tip"}},
-    {{"wallet_balance", "Wallet balance", "Inspect balances without exporting keys or sending funds.", "Wallet"}, {"core", "wallet", "balance"}},
-    {{"wallet_status", "Wallet status", "Read the wallet summary and readiness.", "Wallet"}, {"core", "wallet", "status"}},
-    {{"commands", "Command catalog", "Explore Z23's native command families.", "Explore"}, {"discover", "help"}},
-    {{"fleet_doctor", "Fleet doctor", "Distinguish enrollment, admission, and transport readiness.", "Fleet"}, {"fleet", "doctor"}},
-    {{"fleet_machines", "Fleet machines", "List machines admitted to the owner roster.", "Fleet"}, {"fleet", "machines"}}
+    {"status", {"core", "status"}},
+    {"wallet_balance", {"core", "wallet", "balance"}},
 };
-
-static struct zapp_operation items[sizeof(operations) / sizeof(operations[0])];
-static pthread_once_t catalog_once = PTHREAD_ONCE_INIT;
-static void catalog_init(void)
-{
-    for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); ++i) items[i] = operations[i].ui;
-}
-const struct zapp_operation *zapp_operations(size_t *count)
-{
-    pthread_once(&catalog_once, catalog_init);
-    if (count) *count = sizeof(items) / sizeof(items[0]);
-    return items;
-}
 
 static int64_t milliseconds(void)
 {
@@ -311,7 +286,7 @@ static void pump_finish(struct pump *p, char *out, size_t cap, bool ended, int *
     if (p->input >= 0) close(p->input);
     if (p->output >= 0) close(p->output);
     if (!ended) { (void)kill(-p->pid, SIGKILL); while (waitpid(p->pid, status, 0) < 0 && errno == EINTR) {} }
-    if (!ended) snprintf(out + p->used, cap - p->used, "\nOperation timed out or the clock was unavailable.");
+    if (!ended) snprintf(out + p->used, cap - p->used, "\nThe command timed out.");
     if (p->truncated && cap > 32) {
         const char marker[] = "\n[Output limit reached]\n";
         memcpy(out + cap - sizeof(marker), marker, sizeof(marker));
@@ -426,7 +401,7 @@ bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_
 {
     if (!r || !id || !out || !cap) return false;
     for (size_t i = 0; i < sizeof(operations) / sizeof(operations[0]); ++i)
-        if (strcmp(id, operations[i].ui.id) == 0) return command(r, operations[i].args, NULL, out, cap);
+        if (strcmp(id, operations[i].id) == 0) return command(r, operations[i].args, NULL, out, cap);
     snprintf(out, cap, "This operation is not available in the phone's permission set.");
     return false;
 }
@@ -442,83 +417,6 @@ bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, s
     ok = n < sizeof(wire) && command(r, args, wire, out, cap);
     memory_cleanse(wire, sizeof(wire));
     return ok;
-}
-
-void zapp_device_info(char *out, size_t cap)
-{
-    struct utsname info;
-    if (uname(&info) != 0) { snprintf(out, cap, "Device information unavailable."); return; }
-    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    snprintf(out, cap, "Android · %s\n%ld logical CPUs\nKernel %s\nNative C23 · app-private storage", info.machine, cpus, info.release);
-}
-
-[[gnu::format(printf, 4, 5)]]
-static bool put(char *out, size_t cap, size_t *used, const char *format, ...)
-{
-    va_list args; va_start(args, format);
-    int n = vsnprintf(out + *used, cap - *used, format, args);
-    va_end(args);
-    if (n < 0 || (size_t)n >= cap - *used) return false;
-    *used += (size_t)n;
-    return true;
-}
-static const char *doctor_detail(const struct json_value *checks, size_t i)
-{
-    const struct json_value *check = json_at(checks, i);
-    const struct json_value *info = json_get(check, "informational");
-    const char *name = json_get_str(json_get(check, "name"));
-    const char *detail = json_get_str(json_get(check, "detail"));
-    bool shown = name && name[0] && detail && detail[0] && !(info && info->type == JSON_BOOL && json_get_bool(info));
-    return shown ? detail : NULL;
-}
-static size_t doctor_peers(const struct json_value *checks, size_t from, const char *detail)
-{
-    size_t count = 0;
-    for (size_t j = from; j < json_size(checks); j++) {
-        const char *other = doctor_detail(checks, j);
-        count += other && !strcmp(other, detail);
-    }
-    return count;
-}
-/* Writes check i with every later check that shares its detail, "Identity and wiki: detail", unless an
- * earlier check already wrote that detail. False only when the line does not fit. */
-static bool doctor_line(const struct json_value *checks, size_t i, char *out, size_t cap, size_t *used)
-{
-    const char *detail = doctor_detail(checks, i);
-    if (!detail || doctor_peers(checks, 0, detail) != doctor_peers(checks, i, detail)) return true;
-    size_t start = *used, total = doctor_peers(checks, i, detail), count = 0;
-    bool ok = !start || put(out, cap, used, "\n");
-    for (size_t j = i; ok && j < json_size(checks); j++) {
-        const char *other = doctor_detail(checks, j);
-        if (!other || strcmp(other, detail)) continue;
-        const char *name = json_get_str(json_get(json_at(checks, j), "name"));
-        char first = !count && name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 'a' + 'A') : name[0];
-        ok = put(out, cap, used, "%s%c%s", !count ? "" : count + 1 == total ? " and " : ", ", first, name + 1);
-        count++;
-    }
-    ok = ok && put(out, cap, used, ": %s", detail);
-    if (!ok) { *used = start; out[start] = 0; }
-    return ok;
-}
-
-bool zapp_fleet_doctor_format(const char *json, char *out, size_t cap)
-{
-    if (!json || !out || !cap) return false;
-    out[0] = 0;
-    struct json_value root = {0};
-    bool ok = json_read(&root, json, strlen(json));
-    const struct json_value *success = json_get(&root, "ok");
-    const struct json_value *checks = json_get(json_get(&root, "data"), "checks");
-    ok = ok && success && success->type == JSON_BOOL && json_get_bool(success) &&
-         checks && checks->type == JSON_ARR;
-    size_t used = 0, shown = 0;
-    for (size_t i = 0; ok && i < json_size(checks); ++i) {
-        shown += doctor_detail(checks, i) != NULL;
-        if (!doctor_line(checks, i, out, cap, &used)) break;
-    }
-    json_free(&root);
-    if (ok && !shown) (void)put(out, cap, &used, "No fleet check applies here.");
-    return ok && used;
 }
 
 const char *zapp_json_object(const char *text)

@@ -74,7 +74,7 @@ preview-apk:
 	@mkdir -p '$(BUILD_DIR)/preview'
 	sed -e 's/org.z23.nativeapp/org.z23.voicepreview/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
-	$(MAKE) apk APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml'
+	$(MAKE) apk APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
 
 test-voice:
 	@mkdir -p '$(BUILD_DIR)'

@@ -18,10 +18,10 @@ int main(void)
         "],\"observed_at\":1793247494}";
     char out[4096];
     assert(zapp_hosts_format(snapshot, out, sizeof(out)));
-    assert(!strncmp(out, "1 of 3 hosts in step\n", 21));
-    assert(strstr(out, "\nr1 · in step · 3,301,130\n  Blocked: review required bootstrap trust · 644 GB free\n"));
+    assert(!strncmp(out, "1 of 3 hosts in sync\n", 21));
+    assert(strstr(out, "\nr1 · in sync · 3,301,130\n  Blocked: review required bootstrap trust · 644 GB free\n"));
     assert(strstr(out, "\nr2 · 10 blocks behind · 3,301,120\n\nmac"));
-    assert(strstr(out, "\nmac · unreachable after 25.0 s\n"));
+    assert(strstr(out, "\nmac · not answering after 25.0 s\n"));
     assert(!strstr(out, "0 GB"));
     static const char small[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"height\":999,"
         "\"reference_height\":1000}]}";

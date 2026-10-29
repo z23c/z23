@@ -28,11 +28,15 @@ struct zapp_player {
     uint32_t gaps;
 };
 
-static bool audio_error(char *error, size_t cap, const char *message,
-                        aaudio_result_t result) {
-    if (error != NULL && cap != 0)
-        (void)snprintf(error, cap, "%s: %s", message, AAudio_convertResultToText(result));
+static bool audio_notice(char *error, size_t cap, const char *message) {
+    if (error != NULL && cap != 0) (void)snprintf(error, cap, "%s", message);
     return false;
+}
+/* The failed step and AAudio's result go to logcat; the screen gets a plain sentence. */
+static bool audio_error(char *error, size_t cap, const char *step,
+                        aaudio_result_t result) {
+    __android_log_print(ANDROID_LOG_WARN, "z23", "audio %s: %s", step, AAudio_convertResultToText(result));
+    return audio_notice(error, cap, "Audio is not available right now. Try again.");
 }
 
 static bool audio_flag(const atomic_bool *flag) {
@@ -120,9 +124,9 @@ static bool capture_precheck(const int16_t *samples, size_t capacity, const size
     if (samples == NULL || count == NULL || capacity < 480 || capacity > 320000)
         return audio_error(error, error_cap, "Invalid capture buffer", AAUDIO_ERROR_ILLEGAL_ARGUMENT);
     if (audio_flag(cancel))
-        return audio_error(error, error_cap, "Recording cancelled", AAUDIO_ERROR_INVALID_STATE);
+        return audio_notice(error, error_cap, "Recording cancelled.");
     if (audio_flag(stop))
-        return audio_error(error, error_cap, "Recording too short", AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+        return audio_notice(error, error_cap, "Recording too short. Press Talk and speak.");
     return true;
 }
 
@@ -136,7 +140,7 @@ static bool capture_read(AAudioStream *stream, int16_t *samples, size_t *used, s
     if (result < 0 || result > frames)
         return audio_error(error, error_cap, "Read microphone", result < 0 ? result : AAUDIO_ERROR_INTERNAL);
     if (now < 0 || *progress < 0 || (result == 0 && now - *progress >= AUDIO_STALL_NS))
-        return audio_error(error, error_cap, "Microphone stalled", AAUDIO_ERROR_TIMEOUT);
+        return audio_notice(error, error_cap, "The microphone stopped responding. Try again.");
     if (result > 0) {
         *used += (size_t)result;
         *progress = now;
@@ -155,9 +159,9 @@ static bool capture_scan(struct zapp_endpoint *endpoint, const int16_t *samples,
 static bool capture_verdict(bool ok, size_t used, bool kept, const atomic_bool *cancel,
                             char *error, size_t error_cap) {
     if (audio_flag(cancel))
-        ok = audio_error(error, error_cap, "Recording cancelled", AAUDIO_ERROR_INVALID_STATE);
+        ok = audio_notice(error, error_cap, "Recording cancelled.");
     if (ok && kept && used < 480)
-        ok = audio_error(error, error_cap, "Recording too short", AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+        ok = audio_notice(error, error_cap, "Recording too short. Press Talk and speak.");
     return ok;
 }
 
@@ -239,12 +243,12 @@ static bool player_wait(struct zapp_player *p, uint64_t limit, const atomic_bool
         int64_t now = audio_now();
         if (head - tail <= limit) return true;
         if (audio_flag(cancel))
-            return audio_error(error, cap, "Playback cancelled", AAUDIO_ERROR_INVALID_STATE);
+            return audio_notice(error, cap, "Playback cancelled.");
         if (atomic_load(&p->failed))
-            return audio_error(error, cap, "Playback interrupted", AAUDIO_ERROR_DISCONNECTED);
+            return audio_notice(error, cap, "Playback stopped. The audio output changed.");
         if (tail != last) { last = tail; progress = now; }
         if (now < 0 || progress < 0 || now - progress >= AUDIO_STALL_NS)
-            return audio_error(error, cap, "Playback stalled", AAUDIO_ERROR_TIMEOUT);
+            return audio_notice(error, cap, "Playback stopped responding. Try again.");
         audio_pause();
     }
 }
@@ -275,7 +279,7 @@ bool zapp_player_close(struct zapp_player *p, bool drain, const atomic_bool *can
         int64_t tail = (buffered > 0 ? buffered : 0) * INT64_C(1000000000) / p->rate + AUDIO_TAIL_NS;
         for (int64_t start = audio_now(), now = start; ok && now >= 0 && now - start < tail; now = audio_now()) {
             if (audio_flag(cancel))
-                ok = audio_error(error, error_cap, "Playback cancelled", AAUDIO_ERROR_INVALID_STATE);
+                ok = audio_notice(error, error_cap, "Playback cancelled.");
             else audio_pause();
         }
     }

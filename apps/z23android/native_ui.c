@@ -11,7 +11,6 @@ static jobject root, status_view, result_view, prompt_view, invite_view, camera_
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view;
 static jobject buttons[16];
-static uint64_t voice_pair_generation;
 static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
@@ -21,7 +20,7 @@ static float down_x, down_y;
 static char last_receipt[8192];
 static float density = 1.0f;
 static bool voice_preview;
-static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join", "fleet_refresh"};
+static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join"};
 
 static bool clean(JNIEnv *env)
 {
@@ -142,16 +141,20 @@ static jstring make_string(JNIEnv *env, const char *value)
     if (cls) (*env)->DeleteLocalRef(env, cls);
     return result;
 }
-static bool text(JNIEnv *env, jobject view, const char *value)
+static bool char_sequence(JNIEnv *env, jobject view, const char *method, const char *value)
 {
     jclass cls = (*env)->GetObjectClass(env, view);
     if (!clean(env) || !cls) return false;
-    jmethodID set = (*env)->GetMethodID(env, cls, "setText", "(Ljava/lang/CharSequence;)V");
+    jmethodID set = (*env)->GetMethodID(env, cls, method, "(Ljava/lang/CharSequence;)V");
     jstring string = make_string(env, value);
     bool ok = clean(env) && set && string;
     if (ok) { (*env)->CallVoidMethod(env, view, set, string); ok = clean(env); }
     if (string) (*env)->DeleteLocalRef(env, string);
     (*env)->DeleteLocalRef(env, cls); return ok;
+}
+static bool text(JNIEnv *env, jobject view, const char *value)
+{
+    return char_sequence(env, view, "setText", value);
 }
 static bool append(JNIEnv *env, jobject layout, jobject view)
 {
@@ -217,7 +220,6 @@ void zapp_native_ui_destroy(JNIEnv *env)
         *views[i] = NULL;
     }
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
-    voice_pair_generation = 0;
 }
 /* The main screen holds only the status, Talk and the conversation; everything else is under More.
  * Talk stays put above the conversation while status text changes. */
@@ -244,7 +246,7 @@ static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
         !add_button(env, layout, activity, "Send", 3) ||
         !add_text(env, layout, activity, "Not connected", &connection_view) ||
         !add_text(env, layout, activity, "Fleet", NULL) ||
-        !add_text(env, layout, activity, "Ask by voice, or refresh to probe every host.", &hosts_view) ||
+        !add_text(env, layout, activity, "Ask by voice, or refresh to check every host.", &hosts_view) ||
         !add_button(env, layout, activity, "Refresh fleet", 14) ||
         !add_text(env, layout, activity, "Phone node", NULL) ||
         !add_text(env, layout, activity, "", &sync_view) ||
@@ -262,11 +264,8 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
         !add_button(env, layout, activity, "Scan invitation", 4) ||
         !append(env, layout, camera) || !keep(env, &camera_view, camera) ||
         !append(env, layout, invite) || !keep(env, &invite_view, invite) ||
-        !add_text(env, layout, activity, "Voice pairing: paste the host descriptor in the field above, then pair.", NULL) ||
-        !add_button(env, layout, activity, "Pair voice host", 11) ||
         !add_button(env, layout, activity, "Review invitation", 5) ||
-        !add_button(env, layout, activity, "Trust manager and join", 6) ||
-        !add_button(env, layout, activity, "Refresh fleet status", 7) ||
+        !add_button(env, layout, activity, "Join fleet", 6) ||
         !add_text(env, layout, activity, "", &fleet_view));
 }
 static bool finish_widgets(JNIEnv *env, jobject layout, jobject activity, jobject receipt)
@@ -321,7 +320,8 @@ static bool prepare_layouts(JNIEnv *env, jobject scroll, jobject layout,
            orient_layout(env, layout) && orient_layout(env, details) &&
            bool_property(env, scroll, "setFitsSystemWindows", true) &&
            int_property(env, scroll, "setBackgroundColor", (jint)0xfff7f5ef) &&
-           padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite);
+           padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
+           char_sequence(env, invite, "setHint", "Or paste an invitation");
 }
 static bool attach_details(JNIEnv *env, jobject details, jobject layout, jobject scroll)
 {
@@ -461,10 +461,7 @@ static void input_up(JNIEnv *env, float x, float y)
     }
     const char *action, *arg;
     if (fixed_action(index, &action, &arg)) { callback(action, arg); return; }
-    if (index == 3 || index == 5 || index == 11) {
-        text_action(env, index == 11 ? "voice_pair" : actions[index], index == 3 ? prompt_view : invite_view);
-        return;
-    }
+    if (index == 3 || index == 5) { text_action(env, actions[index], index == 3 ? prompt_view : invite_view); return; }
     callback(actions[index], "");
 }
 void zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
@@ -530,10 +527,6 @@ static const char *talk_label(enum zapp_voice_state state)
 }
 static void render_voice(JNIEnv *env, const struct zapp_view *view)
 {
-    if (view->voice_pair_generation != voice_pair_generation) {
-        (void)text(env, invite_view, "");
-        voice_pair_generation = view->voice_pair_generation;
-    }
     if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state));
     if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
         "Press Talk and ask anything.");
@@ -550,9 +543,10 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     char status[1100];
     snprintf(status, sizeof(status), "%s%s", view->sync_status[0] ? view->sync_status : "Sync status unknown",
              view->busy ? "\nWorking…" : "");
-    (void)text(env, sync_view, status);
+    (void)text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
+    (void)set_visible(env, balance_view, !voice_preview);
     char balance[600];
-    snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last observed (stale):\n" : "",
+    snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known, may be out of date:\n" : "",
              view->balance[0] ? view->balance : "Balance appears when your node is ready");
     (void)text(env, balance_view, balance);
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
@@ -569,15 +563,19 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
     snprintf(status, sizeof(status), "%s%s", voice_preview ?
              "Preview · separate from your main node" : view->node_line, fleet);
     (void)text(env, status_view, status);
-    if (buttons[0]) (void)set_visible(env, buttons[0], !voice_preview && !view->busy &&
-        !view->node_running && !view->node_process_running);
+    bool running = view->node_running || view->node_process_running;
+    if (buttons[0]) (void)set_visible(env, buttons[0], !voice_preview && !view->busy && !running);
+    if (buttons[1]) (void)set_visible(env, buttons[1], !voice_preview && !view->busy && running);
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[10272], pairing[160];
+    /* The headline is already at the top of the screen; More lists the hosts under it. */
+    const char *rows = strchr(view->fleet_status, '\n');
+    if (rows) rows += strspn(rows, "\n");
     if (view->fleet_status[0]) {
         snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_stale ? "No current fleet report. Last report:\n\n" : "",
-                 view->fleet_status);
+                 view->fleet_stale || !rows ? view->fleet_status : rows);
         (void)text(env, hosts_view, fleet);
     }
     snprintf(fleet, sizeof(fleet), "%s%s%s", view->fleet_preview,

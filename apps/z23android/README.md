@@ -60,14 +60,17 @@ sync, with its peer count. The fleet line repeats the paired host's cached
 fleet headline, read every 60 seconds without probing the hosts again. When
 the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
-synchronization detail, balance, node controls and fleet invitations. The
-screen never shows raw command output: **Refresh fleet status** shows one plain
-sentence per fleet check, without command suggestions. Failed balance
-refreshes retain the last value with a stale label; an unavailable balance is
-not displayed as zero.
+synchronization detail, balance, **Stop node** and fleet invitations. Command
+output reaches the screen only as plain sentences; a JSON error shows its
+message alone, and audio failures show one sentence while their cause goes to
+logcat. The app runs only two read-only node commands, the node status and
+the wallet balance, besides starting, stopping and joining a fleet. Failed
+balance refreshes keep the last value, labelled as possibly out of date; an
+unavailable balance is not displayed as zero.
 
 **Start node** records the choice in the app's private state, and the app
 starts the node each time it opens until **Stop node** clears the choice.
+Closing or leaving the app does not stop the node.
 After **Stop node** the node line reads "Node stopping" until the node has
 saved its data and exited. The app finds a node left by an earlier app process
 through the node's pid file and its first argument, this `-datadir`: it shows
@@ -190,6 +193,21 @@ change hosts or spend funds.
 - The host defaults to `--app org.z23.nativeapp`. Pass
   `--app org.z23.voicepreview` when testing the preview package, or the pairing
   offer reopens the production app.
+- The phone screen shows plain sentences only; inspect a running phone node
+  over adb instead. `adb forward tcp:28443 tcp:8443`, then
+  `curl -sk https://127.0.0.1:28443/api/status` reads the node status;
+  `/api/v1/sync/detail`, `/api/v1/peers`, `/api/v1/bootstrap` and
+  `/api/v1/syncstate` read sync detail, peers, bootstrap state and sync
+  state. The phone node listens on P2P 8033, RPC 18232, HTTPS 8443, file
+  service 18034 and Tor SOCKS 19999.
+- `org.z23.nativeapp` is not debuggable, so `run-as` refuses it. For the
+  preview package, pipe a script: `adb shell 'run-as org.z23.voicepreview sh
+  -s' < script.sh`. A `run-as … sh -c '…'` command passed through `adb shell`
+  is split again by the device shell, and parts of it run outside the app
+  sandbox.
+- Never uninstall either package to reinstall it: uninstalling deletes the
+  node data directory and the app's pairing state. `adb install -r` keeps
+  them, given the same signing key.
 - Android app data directories are mode `0771` and owned by the app group;
   private-directory checks allow group write only for the app's own group.
 - A relaunch with `FLAG_ACTIVITY_CLEAR_TASK` creates the new activity before
@@ -285,7 +303,8 @@ answer from the conversation word for word, suggestion included. Two of 10
 answers about r2 with a report still said its blockers keep it from syncing.
 
 `make -C apps/z23android preview-apk` builds a separate
-`org.z23.voicepreview` package with debugging enabled for testing. That
+`org.z23.voicepreview` package with debugging enabled for testing, written to
+`z23-preview.apk` beside the production APK. That
 preview is separate from the production `org.z23.nativeapp` package and its
 private state; it does not establish production readiness.
 

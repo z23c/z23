@@ -221,7 +221,7 @@ static bool speech_call(const char *files, const char *request, char *out, size_
                         const atomic_bool *cancel, const struct events *events)
 {
     if (!files || !request || !out || !cap) return false;
-    snprintf(out, cap, "Pair your voice host and connect its USB tunnel.");
+    snprintf(out, cap, "Laptop host not answering. Connect it over USB and keep it running.");
     uint16_t port = 0; char token[65] = "";
     bool ok = !cancelled(cancel) && request[0] && strlen(request) <= 1300000 &&
         descriptor(files, "speech-bridge.json", &port, token) && !cancelled(cancel);

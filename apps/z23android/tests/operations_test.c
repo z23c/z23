@@ -95,29 +95,8 @@ static void balance_tests(void)
     assert(!zapp_balance_format(valid, out, 8));
 }
 
-static void doctor_tests(void)
+static void plain_text_tests(void)
 {
-    char out[256];
-    const char *json = "{\"ok\":true,\"data\":{\"state\":\"missing\",\"checks\":["
-        "{\"name\":\"node\",\"state\":\"ok\",\"detail\":\"A node is running and answered.\",\"next\":\"\"},"
-        "{\"name\":\"identity\",\"state\":\"ok\"},"
-        "{\"name\":\"membership\",\"state\":\"missing\",\"detail\":\"This box is not in a fleet.\","
-        "\"next\":\"z23 fleet invite --name=<box>\"}]}}";
-    assert(zapp_fleet_doctor_format(json, out, sizeof(out)));
-    assert(!strcmp(out, "Node: A node is running and answered.\nMembership: This box is not in a fleet."));
-    assert(zapp_fleet_doctor_format(json, out, 40) && !strcmp(out, "Node: A node is running and answered."));
-    assert(!zapp_fleet_doctor_format(json, out, 20) && !out[0]);
-    const char *shared = "{\"ok\":true,\"data\":{\"checks\":["
-        "{\"name\":\"node\",\"detail\":\"No node answered.\"},{\"name\":\"identity\",\"detail\":\"Needs a node.\"},"
-        "{\"name\":\"membership\",\"detail\":\"Not in a fleet.\"},{\"name\":\"transport\",\"detail\":\"Needs a node.\"},"
-        "{\"name\":\"mail\",\"detail\":\"Developer tool.\",\"informational\":true},"
-        "{\"name\":\"wiki\",\"detail\":\"Needs a node.\"}]}}";
-    assert(zapp_fleet_doctor_format(shared, out, sizeof(out)));
-    assert(!strcmp(out, "Node: No node answered.\nIdentity, transport and wiki: Needs a node.\nMembership: Not in a fleet."));
-    const char *quiet = "{\"ok\":true,\"data\":{\"checks\":[{\"name\":\"mail\",\"detail\":\"Developer tool.\",\"informational\":true}]}}";
-    assert(zapp_fleet_doctor_format(quiet, out, sizeof(out)) && !strcmp(out, "No fleet check applies here."));
-    assert(!zapp_fleet_doctor_format("{\"ok\":false,\"data\":{\"checks\":[]}}", out, sizeof(out)));
-    assert(!zapp_fleet_doctor_format("not json", out, sizeof(out)) && !out[0]);
     char failed[128] = "{\"ok\":false,\"error\":{\"code\":\"E\",\"message\":\"The manager is offline.\"}}";
     zapp_plain_text(failed, sizeof(failed));
     assert(!strcmp(failed, "The manager is offline."));
@@ -222,6 +201,7 @@ static void command_cases(struct zapp_runtime *r)
 {
     char out[128];
     assert(!zapp_operation_run(r, "not-allowed", out, sizeof(out)));
+    assert(!zapp_operation_run(r, "fleet_doctor", out, sizeof(out)) && strstr(out, "not available"));
     assert(!zapp_operation_run(r, "status", out, sizeof(out)));
     assert(strstr(out, "[Output limit reached]"));
     assert(zapp_fleet_join_run(r, "invitation", out, sizeof(out)));
@@ -260,7 +240,7 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "command")) return orphan("orphan", argv[2]);
     if (argc > 1) return child(argc, argv);
     balance_tests();
-    doctor_tests();
+    plain_text_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);

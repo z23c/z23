@@ -69,7 +69,7 @@ static bool invitation(struct controller *c, const char *text)
     if (ok) {
         copy_text(c->view.fleet_token, sizeof(c->view.fleet_token), token);
         copy_text(c->view.fleet_preview, sizeof(c->view.fleet_preview),
-            "Invitation received. Confirm it came from your fleet manager before joining. Z23 checks its signature and expiry when you join.");
+            "Invitation received. Join only if it came from your fleet manager. Z23 checks its signature and expiry when you join.");
     }
     pthread_mutex_unlock(&c->lock);
     memory_cleanse(token, sizeof(token)); return ok;
@@ -398,24 +398,11 @@ static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
     copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation.");
     return ok;
 }
-/* Fleet doctor JSON stays off screen: the notice holds one plain line per check. */
-static bool fleet_doctor(struct controller *c, char *out)
-{
-    char *json = calloc(1, ZAPP_TEXT_CAP);
-    bool ran = json && zapp_operation_run(&c->runtime, "fleet_doctor", json, ZAPP_TEXT_CAP);
-    const char *body = json ? zapp_json_object(json) : NULL;
-    bool ok = body && zapp_fleet_doctor_format(body, out, ZAPP_NOTICE_CAP);
-    if (!ok && json) zapp_plain_text(json, ZAPP_TEXT_CAP);
-    if (!ok) copy_text(out, ZAPP_TEXT_CAP, json && json[0] ? json : "The fleet check could not run.");
-    free(json);
-    return ran && ok;
-}
 static bool execute_fleet(struct controller *c, const char *action, const char *arg,
                           uint64_t ticket, char *out)
 {
     bool ok = false;
-    if (!strcmp(action, "fleet_refresh")) ok = fleet_doctor(c, out);
-    else if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
+    if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
     else if (!strcmp(action, "fleet_join")) ok = zapp_fleet_join_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
     else if (!strcmp(action, "fleet_preview")) {
         ok = invitation(c, arg);
@@ -431,7 +418,6 @@ static bool pair_voice_host(struct controller *c, const char *arg, char *out)
         "Pairing failed. Restart the laptop host to offer pairing again.");
     if (ok) {
         pthread_mutex_lock(&c->lock);
-        ++c->view.voice_pair_generation;
         c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0;
         copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Laptop host paired. Press Talk to begin.");
         pthread_mutex_unlock(&c->lock);
@@ -481,13 +467,13 @@ static void chat_outcome(struct controller *c, const char *arg, bool ok, char *o
         copy_text(c->view.connection, sizeof(c->view.connection), "Answered privately by the model on your laptop.");
     } else if (strcmp(out, "Question is invalid or too long.") &&
                strcmp(out, "Not enough memory to prepare the question."))
-        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host unavailable. Connect it over USB and keep it running.");
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host not answering. Connect it over USB and keep it running.");
 }
 /* Caller holds c->lock. */
 static bool join_result(struct controller *c, char *out)
 {
     bool ok = parse_receipt(out, c->view.fleet_receipt, sizeof(c->view.fleet_receipt));
-    if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show the receipt QR to your manager. Admission and network connection are still pending."); }
+    if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show this QR code to your fleet manager. The phone joins once they admit it."); }
     return ok;
 }
 /* The node line already shows a start or stop; a notice is needed only when the choice was not saved. */
@@ -617,7 +603,6 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
     zapp_node_line(false, c->view.node_process_running, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
     copy_text(c->view.connection, sizeof(c->view.connection), "Private assistant: pair your laptop host over USB.");
-    zapp_device_info(c->view.hardware, sizeof(c->view.hardware));
     pthread_t thread;
     if (pthread_create(&thread, NULL, worker, c)) {
         zapp_runtime_destroy(&c->runtime); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail;
@@ -637,7 +622,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "fleet_refresh", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "voice_pair", "fleet_hosts", "pair_accept"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;
