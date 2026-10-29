@@ -614,28 +614,22 @@ static struct block_index *insert_index(struct main_state *ms,
     return bi;
 }
 
-static bool make_fixture_block_readable(struct rfrl_fixture *fx, int slot)
+static bool rfrl_fixture_make_blocks_dir(const struct rfrl_fixture *fx,
+                                         char *netdir, size_t netdir_len)
 {
-    if (!fx || slot <= 0 || slot >= 4 || !fx->idx[slot] ||
-        !fx->idx[slot]->pprev || !fx->idx[slot]->pprev->phashBlock)
-        return false;
-
-    chain_params_select(CHAIN_REGTEST);
-    reducer_frontier_test_set_compiled_anchor(A);
-    const struct chain_params *cp = chain_params_get();
-    if (!cp)
-        return false;
-
     SetDataDir(fx->dir);
-    char netdir[512];
-    GetDataDir(true, netdir, sizeof(netdir));
+    GetDataDir(true, netdir, netdir_len);
     if (rfrl_mkdir_p(netdir) != 0)
         return false;
     char blocksdir[640];
     snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", netdir);
-    if (rfrl_mkdir_p(blocksdir) != 0)
-        return false;
+    return rfrl_mkdir_p(blocksdir) == 0;
+}
 
+static bool rfrl_fixture_write_block_file(struct rfrl_fixture *fx, int slot,
+                                          const struct chain_params *cp,
+                                          const char *netdir)
+{
     struct block blk;
     bool ok = rfrl_build_regtest_block(
         &blk, fx->idx[slot]->nHeight, fx->idx[slot]->pprev->phashBlock, cp);
@@ -655,9 +649,11 @@ static bool make_fixture_block_readable(struct rfrl_fixture *fx, int slot)
              block_index_set_have_data_verified(fx->idx[slot], &pos, netdir);
     }
     block_free(&blk);
-    if (!ok)
-        return false;
+    return ok;
+}
 
+static bool rfrl_fixture_admit_rows(struct rfrl_fixture *fx, int slot)
+{
     sqlite3 *db = progress_store_db();
     const struct uint256 *parent_hash = fx->idx[slot]->pprev->phashBlock;
     return put_header_admit(db, fx->idx[slot]->nHeight, &fx->hashes[slot],
@@ -671,6 +667,26 @@ static bool make_fixture_block_readable(struct rfrl_fixture *fx, int slot)
                         fx->idx[slot]->nHeight, 1, &fx->hashes[slot]) &&
            put_utxo_delta(db, fx->idx[slot]->nHeight, &fx->hashes[slot]) &&
            active_chain_move_window_tip(&fx->ms.chain_active, fx->idx[3]);
+}
+
+static bool make_fixture_block_readable(struct rfrl_fixture *fx, int slot)
+{
+    if (!fx || slot <= 0 || slot >= 4 || !fx->idx[slot] ||
+        !fx->idx[slot]->pprev || !fx->idx[slot]->pprev->phashBlock)
+        return false;
+
+    chain_params_select(CHAIN_REGTEST);
+    reducer_frontier_test_set_compiled_anchor(A);
+    const struct chain_params *cp = chain_params_get();
+    if (!cp)
+        return false;
+
+    char netdir[512];
+    if (!rfrl_fixture_make_blocks_dir(fx, netdir, sizeof(netdir)))
+        return false;
+    if (!rfrl_fixture_write_block_file(fx, slot, cp, netdir))
+        return false;
+    return rfrl_fixture_admit_rows(fx, slot);
 }
 
 static bool setup_fixture(struct rfrl_fixture *fx, const char *tag)
@@ -879,6 +895,1919 @@ static int cursor_value(sqlite3 *db, const char *name)
     return value;
 }
 
+static int rfrl_check_result_helpers_tail(
+    const struct stage_reducer_frontier_reconcile_result *zero)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result rr;
+    rr = *zero;
+    rr.refused_coin_tear = true;
+    RFRL_CHECK("result helpers: coin tear bypass separate",
+               !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               !stage_reducer_frontier_result_is_memo_clean(&rr));
+
+    rr = *zero;
+    rr.repaired = true;
+    RFRL_CHECK("result helpers: repaired is not memo-clean",
+               !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               !stage_reducer_frontier_result_is_memo_clean(&rr));
+    return failures;
+}
+
+static int rfrl_check_result_helpers(void)
+{
+    int failures = 0;
+    /* Mirror reducer_frontier_reconcile_light_impl's init for the
+     * -1-sentinel refill-hole fields (memset(0) reads as a hole at 0). */
+    struct stage_reducer_frontier_reconcile_result zero;
+    memset(&zero, 0, sizeof(zero));
+    zero.lowest_validate_headers_refill_hole = -1;
+    zero.lowest_body_fetch_refill_hole = -1;
+    zero.lowest_body_persist_refill_hole = -1;
+    zero.lowest_script_validate_refill_hole = -1;
+    zero.lowest_proof_validate_refill_hole = -1;
+    zero.label_splice_rebind_lowest = -1;  /* -1 sentinel = no re-bind */
+
+    struct stage_reducer_frontier_reconcile_result rr = zero;
+    RFRL_CHECK("result helpers: clean baseline",
+               !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
+               !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
+               !stage_reducer_frontier_result_has_refill_hole_evidence(&rr) &&
+               !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               stage_reducer_frontier_result_is_memo_clean(&rr));
+
+    rr = zero;
+    rr.coin_backfill_attempted = true;
+    RFRL_CHECK("result helpers: coin repair evidence",
+               stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
+               !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
+               stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               !stage_reducer_frontier_result_is_memo_clean(&rr));
+
+    rr = zero;
+    rr.noncanonical_found = 1;
+    RFRL_CHECK("result helpers: row residue evidence",
+               !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
+               stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
+               stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               !stage_reducer_frontier_result_is_memo_clean(&rr));
+
+    rr = zero;
+    rr.lowest_script_validate_refill_hole = A + 2;
+    RFRL_CHECK("result helpers: refill hole evidence",
+               !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
+               !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
+               stage_reducer_frontier_result_has_refill_hole_evidence(&rr) &&
+               stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
+               !stage_reducer_frontier_result_is_memo_clean(&rr));
+
+    failures += rfrl_check_result_helpers_tail(&zero);
+    return failures;
+}
+
+static bool rfrl_dry_run_repair_ok(const struct stage_reducer_frontier_reconcile_result *dry)
+{
+    return dry->repaired && dry->hstar == A + 1 &&
+               dry->sweep_top == A + 3 &&
+               dry->lowest_have_data_cleared == A + 2 &&
+               dry->lowest_validate_headers_refill_hole == -1 &&
+               dry->lowest_body_fetch_refill_hole == A + 2 &&
+               dry->lowest_body_persist_refill_hole == -1 &&
+               dry->validate_headers_cursor_before == A + 4 &&
+               dry->validate_headers_cursor_after == A + 4 &&
+               dry->body_fetch_cursor_before == A + 4 &&
+               dry->body_fetch_cursor_after == A + 2 &&
+               dry->clamped_body_fetch &&
+               !dry->clamped_body_persist &&
+               /* OWN-frame: clamp band [hstar, hstar+1] capped at
+                * coins_applied = A+2, the ceiling the step rests at. */
+               dry->tip_finalize_cursor_after == A + 2;
+}
+
+static bool rfrl_dry_run_mutate_ok(const struct rfrl_fixture *fx, unsigned before2,
+                                     unsigned before3, sqlite3 *db)
+{
+    return fx->idx[2]->nStatus == before2 &&
+               fx->idx[3]->nStatus == before3 &&
+               cursor_value(db, "validate_headers") == A + 4 &&
+               cursor_value(db, "body_fetch") == A + 4 &&
+               cursor_value(db, "body_persist") == A + 4 &&
+               cursor_value(db, "tip_finalize") == A + 4;
+}
+
+static bool rfrl_apply_clamp_ok(const struct stage_reducer_frontier_reconcile_result *applied,
+                                 sqlite3 *db)
+{
+    return cursor_value(db, "tip_finalize") == A + 2 &&
+               cursor_value(db, "validate_headers") == A + 4 &&
+               cursor_value(db, "body_fetch") == A + 2 &&
+               cursor_value(db, "body_persist") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 4 &&
+               applied->clamped_body_fetch &&
+               !applied->clamped_body_persist &&
+               applied->clamped_tip_finalize;
+}
+
+static int rfrl_check_dry_run_apply(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup dry-run/apply fixture",
+               setup_fixture(&fx, "apply"));
+
+    sqlite3 *db = progress_store_db();
+    unsigned before2 = fx.idx[2]->nStatus;
+    unsigned before3 = fx.idx[3]->nStatus;
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("dry-run reports repair",
+               rfrl_dry_run_repair_ok(&dry));
+    RFRL_CHECK("dry-run does not mutate",
+               rfrl_dry_run_mutate_ok(&fx, before2, before3, db));
+
+    struct stage_reducer_frontier_reconcile_result applied;
+    RFRL_CHECK("apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &applied));
+    RFRL_CHECK("apply clamps body_fetch and tip_finalize",
+               rfrl_apply_clamp_ok(&applied, db));
+    RFRL_CHECK("script bits restored",
+               (fx.idx[2]->nStatus & BLOCK_VALID_MASK) ==
+                   BLOCK_VALID_SCRIPTS &&
+               (fx.idx[3]->nStatus & BLOCK_VALID_MASK) ==
+                   BLOCK_VALID_SCRIPTS &&
+               applied.scripts_set == 2);
+    RFRL_CHECK("unreadable HAVE_DATA cleared",
+               (fx.idx[2]->nStatus & BLOCK_HAVE_DATA) == 0 &&
+               (fx.idx[3]->nStatus & BLOCK_HAVE_DATA) == 0 &&
+               applied.have_data_cleared == 2);
+    RFRL_CHECK("proved stale failure mask cleared",
+               (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) == 0 &&
+               applied.failed_mask_cleared == 1);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_failed_mask_proof_split(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("failed-mask proof split: setup",
+               setup_fixture(&fx, "failed_mask_proof_split"));
+    sqlite3 *db = progress_store_db();
+    struct uint256 fork = fx.hashes[3];
+    fork.data[31] ^= 0x5au;
+    RFRL_CHECK("failed-mask proof split: seed forked proof receipt",
+               put_hash_log(db, "proof_validate_log", "block_hash",
+                            A + 3, 1, &fork));
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("failed-mask proof split: reconcile completes",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("failed-mask proof split: failure evidence retained",
+               (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) != 0 &&
+               rr.failed_mask_cleared == 0);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_failed_mask_utxo_split(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("failed-mask UTXO split: setup",
+               setup_fixture(&fx, "failed_mask_utxo_split"));
+    sqlite3 *db = progress_store_db();
+    struct uint256 fork = fx.hashes[3];
+    fork.data[31] ^= 0xa5u;
+    RFRL_CHECK("failed-mask UTXO split: seed forked delta receipt",
+               put_utxo_delta(db, A + 3, &fork));
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("failed-mask UTXO split: reconcile completes",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("failed-mask UTXO split: failure evidence retained",
+               (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) != 0 &&
+               rr.failed_mask_cleared == 0);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_validate_refill_hole(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup validate-refill-hole fixture",
+               setup_fixture(&fx, "validate_refill_hole"));
+    sqlite3 *db = progress_store_db();
+
+    fx.idx[2]->nStatus = BLOCK_VALID_SCRIPTS;
+    fx.idx[3]->nStatus = BLOCK_VALID_SCRIPTS;
+    RFRL_CHECK("validate-refill-hole: seed later body_fetch row",
+               put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
+    RFRL_CHECK("validate-refill-hole: delete reducer rows at hole",
+               delete_height(db, "validate_headers_log", A + 2) &&
+               delete_height(db, "body_fetch_log", A + 2) &&
+               delete_height(db, "body_persist_log", A + 2) &&
+               delete_height(db, "script_validate_log", A + 2) &&
+               delete_height(db, "proof_validate_log", A + 2) &&
+               delete_height(db, "utxo_apply_log", A + 2));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("validate-refill-hole: apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("validate-refill-hole: clamps upstream refill cursors",
+               rr.lowest_validate_headers_refill_hole == A + 2 &&
+               rr.lowest_body_fetch_refill_hole == -1 &&
+               rr.lowest_body_persist_refill_hole == -1 &&
+               rr.clamped_validate_headers &&
+               rr.clamped_body_fetch &&
+               rr.clamped_body_persist &&
+               cursor_value(db, "validate_headers") == A + 2 &&
+               cursor_value(db, "body_fetch") == A + 2 &&
+               cursor_value(db, "body_persist") == A + 2 &&
+               /* tip_finalize is OWN-frame: served tip = A+2, backed by the
+                * transition row at A+1 and coins applied through A+1. */
+               cursor_value(db, "tip_finalize") == A + 2);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_validate_hash_split(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup validate-hash-split fixture",
+               setup_fixture(&fx, "validate_hash_split"));
+    sqlite3 *db = progress_store_db();
+
+    struct uint256 stale = fx.hashes[2];
+    stale.data[0] ^= 0x5a;
+    RFRL_CHECK("validate-hash-split: seed stale validate hash",
+               put_hash_log(db, "validate_headers_log", "hash",
+                            A + 2, 1, &stale));
+    RFRL_CHECK("validate-hash-split: seed coins above split hstar",
+               seed_coins_applied(db, A + 3));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("validate-hash-split: apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    /* A stale validate hash with utxo_apply SOLID is NOT a coin tear (coins
+     * track utxo_apply's own log, not the hash-split-pinned H*). The split
+     * still caps H* and is healed via the downstream refill: it re-walks
+     * validate_headers AND its dependent cursors (body_fetch, tip_finalize)
+     * back to the split height A+2; body_persist already holds its rows so
+     * it is not clamped. */
+    RFRL_CHECK("validate-hash-split: downstream refill heals the split",
+               rr.repaired &&
+               !rr.refused_coin_tear &&
+               rr.lowest_validate_headers_hash_split == A + 2 &&
+               rr.lowest_validate_headers_refill_hole == -1 &&
+               rr.clamped_validate_headers &&
+               cursor_value(db, "validate_headers") == A + 2 &&
+               cursor_value(db, "body_fetch") == A + 2 &&
+               cursor_value(db, "body_persist") == A + 4 &&
+               cursor_value(db, "tip_finalize") == A + 2);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_body_refill_hole(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup body-refill-hole fixture",
+               setup_fixture(&fx, "body_refill_hole"));
+    sqlite3 *db = progress_store_db();
+
+    fx.idx[2]->nStatus = BLOCK_VALID_SCRIPTS;
+    fx.idx[3]->nStatus = BLOCK_VALID_SCRIPTS;
+    RFRL_CHECK("body-refill-hole: seed body_fetch rows around hole",
+               put_body_fetch_ok(db, A + 1, &fx.hashes[1]) &&
+               put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("body-refill-hole: apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("body-refill-hole: clamps to missing body_fetch row",
+               rr.lowest_have_data_cleared == -1 &&
+               rr.lowest_validate_headers_refill_hole == -1 &&
+               rr.lowest_body_fetch_refill_hole == A + 2 &&
+               rr.lowest_body_persist_refill_hole == -1 &&
+               rr.clamped_body_fetch &&
+               !rr.clamped_body_persist &&
+               cursor_value(db, "body_fetch") == A + 2);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_coin_tear(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup coin-tear fixture",
+               setup_fixture(&fx, "cointear"));
+    sqlite3 *db = progress_store_db();
+    /* REAL coin tear: a HOLE in utxo_apply's OWN ok=1 log below the coins
+     * frontier. utxo_apply ok=0 at A+2 (status='verified', so neither the
+     * value_overflow nor stale_script replays engage) stops its contiguous
+     * prefix at A+1; coins seeded at A+3 give coins_applied >
+     * utxo_apply_contig+1, a genuine tear. tipfin_backfill's G3 refuses on
+     * the ok=0 row, so the tear survives every pre-refusal repair and the
+     * L1 refusal stands. */
+    RFRL_CHECK("seed real utxo_apply hole below coins frontier",
+               put_simple_log(db, "utxo_apply_log", A + 2, 0) &&
+               seed_coins_applied(db, A + 3));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("coin-tear detect call succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("coin-tear refused without mutation",
+               rr.refused_coin_tear &&
+               cursor_value(db, "tip_finalize") == A + 4 &&
+               (fx.idx[2]->nStatus & BLOCK_VALID_MASK) == 0);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_served_floor(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup served-floor fixture",
+               setup_fixture(&fx, "served_floor"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("seed served floor above hstar without contiguous prefix",
+               put_tip_log(db, A + 3, 1, &fx.hashes[3]));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("served-floor apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("served-floor cannot override coins cap",
+               rr.hstar == A + 1 &&
+               rr.served_floor == A + 3 &&
+               rr.coins_applied_height == A + 2 &&
+               /* OWN-frame: served tip capped at coins_applied's frame
+                * (A+2 NEXT-frame => applied through A+1 => serves the
+                * transition row at A+1, served tip A+2). */
+               rr.tip_finalize_cursor_after == A + 2 &&
+               cursor_value(db, "tip_finalize") == A + 2 &&
+               rr.clamped_tip_finalize);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_coin_lag(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup coin-lag fixture",
+               setup_fixture(&fx, "coin_lag"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("seed contiguous hstar above coins_applied",
+               put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
+               put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
+               seed_coins_applied(db, A + 3));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("coin-lag apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("coin-lag caps tip_finalize at coins_applied",
+               rr.hstar == A + 3 &&
+               rr.coins_applied_height == A + 3 &&
+               /* OWN-frame: hstar allows served A+3..A+4 but coins
+                * (NEXT-frame A+3 => applied through A+2) cap the served-tip
+                * claim at A+3, where the step itself rests. */
+               rr.tip_finalize_cursor_after == A + 3 &&
+               cursor_value(db, "tip_finalize") == A + 3 &&
+               rr.clamped_tip_finalize);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_deep_coin_lag(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup deep-coin-lag fixture",
+               setup_fixture(&fx, "deep_coin_lag"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("seed hstar above a deeply lagging coins frontier",
+               put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
+               put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
+               seed_coins_applied(db, A + 1));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("deep-coin-lag apply succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("deep-coin-lag refuses anchor-breaking tip clamp",
+               rr.hstar == A + 3 &&
+               rr.coins_applied_height == A + 1 &&
+               !rr.clamped_tip_finalize &&
+               rr.tip_finalize_cursor_after == A + 4 &&
+               cursor_value(db, "tip_finalize") == A + 4);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_unknown_coin(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup unknown-coin fixture",
+               setup_fixture(&fx, "unknown"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("unknown-coin: active chain installs",
+               active_chain_move_window_tip(&fx.ms.chain_active,
+                                            fx.idx[3]));
+    RFRL_CHECK("unknown-coin: seed noncanonical script row",
+               put_script_status(db, A + 2, 0, "contextual_invalid",
+                                 &fx.hashes[3]));
+    RFRL_CHECK("unknown-coin: remove durable frontier authority",
+               exec_sql(db, "DELETE FROM progress_meta "
+                            "WHERE key='coins_applied_height'"));
+    struct stage_reducer_frontier_reconcile_result purge;
+    memset(&purge, 0, sizeof(purge));
+    purge.hstar = A + 1;
+    purge.sweep_top = A + 2;
+    purge.coins_applied_found = false;
+    purge.coins_applied_height = -1;
+    purge.lowest_noncanonical = -1;
+    RFRL_CHECK("unknown-coin: direct purge detects but refuses",
+               stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
+                                                         &purge) &&
+               purge.noncanonical_found >= 1 &&
+               purge.noncanonical_purged == 0);
+    RFRL_CHECK("unknown-coin: direct purge leaves rows intact",
+               count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
+               count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
+               count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("unknown-coin call succeeds",
+               stage_reducer_frontier_reconcile_light(
+                   db, &fx.ms, &rr));
+    RFRL_CHECK("unknown-coin refused without mutation",
+               rr.refused_coin_unknown &&
+               rr.noncanonical_purged == 0 &&
+               cursor_value(db, "tip_finalize") == A + 4 &&
+               (fx.idx[2]->nStatus & BLOCK_VALID_MASK) == 0);
+    RFRL_CHECK("unknown-coin leaves purge evidence rows intact",
+               count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
+               count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
+               count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static bool rfrl_zero_peer_first_snapshot_ok(bool got,
+                                             struct condition_runtime_snapshot snap,
+                                             sqlite3 *db)
+{
+    bool ok = got &&
+              reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
+              cursor_value(db, "body_fetch") == A + 2 &&
+              cursor_value(db, "tip_finalize") == A + 2 &&
+              snap.currently_active &&
+              snap.attempts == 1 &&
+              snap.last_outcome == COND_REMEDY_UNWITNESSED &&
+              snap.cleared_count == 0 &&
+              !snap.operator_needed_emitted;
+    return ok;
+}
+
+static bool rfrl_zero_peer_detect_fields_ok(bool ok,
+                                               const struct json_value *detail)
+{
+    ok = ok &&
+         json_get_int(json_get(detail, "hstar_at_detect")) == A + 1;
+    ok = ok &&
+         json_get_int(json_get(detail, "sweep_top_at_detect")) == A + 3;
+    ok = ok &&
+         json_get_int(json_get(
+             detail, "body_fetch_cursor_at_detect")) == A + 4;
+    ok = ok &&
+         json_get_int(json_get(
+             detail, "tip_finalize_cursor_at_detect")) == A + 4;
+    ok = ok &&
+         json_get_int(json_get(
+             detail, "coin_backfill_scan_present_at_detect")) == 0;
+    ok = ok &&
+         json_get_int(json_get(
+             detail, "tipfin_backfill_present_at_detect")) == 0;
+    ok = ok && json_get_int(json_get(detail, "remedy_calls")) == 1;
+    return ok;
+}
+
+static bool rfrl_zero_peer_repair_a_fields_ok(bool ok,
+                                                const struct json_value *detail)
+{
+    ok = ok && json_get_bool(json_get(
+                 detail, "last_reconcile_seen"));
+    ok = ok && strcmp(json_get_str(json_get(
+                 detail, "last_reconcile_phase")), "remedy") == 0;
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_refused_coin_tear"));
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_hstar")) == A + 1;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_body_fetch_cursor_before"))
+                 == A + 4;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_body_fetch_cursor_after"))
+                 == A + 2;
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_clamped_script_validate"));
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_clamped_proof_validate"));
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_script_validate_cursor_before"))
+                 == A + 4;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_script_validate_cursor_after"))
+                 == A + 4;
+    return ok;
+}
+
+static bool rfrl_zero_peer_repair_b_fields_ok(bool ok,
+                                                const struct json_value *detail)
+{
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_proof_validate_cursor_before"))
+                 == A + 4;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_proof_validate_cursor_after"))
+                 == A + 4;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_lowest_script_validate_hash_split"))
+                 == -1;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_lowest_script_validate_refill_hole"))
+                 == -1;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_lowest_proof_validate_refill_hole"))
+                 == -1;
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_pre_refusal_unapplied_clamp"));
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tip_finalize_cursor_before"))
+                 == A + 4;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tip_finalize_cursor_after"))
+                 == A + 2;
+    return ok;
+}
+
+static bool rfrl_zero_peer_recheck_ok(bool ok, bool got,
+                                         struct condition_runtime_snapshot snap)
+{
+    ok = ok && got &&
+         snap.currently_active &&
+         snap.cleared_count == 0 &&
+         !snap.operator_needed_emitted;
+    return ok;
+}
+
+static int rfrl_check_zero_peer_condition(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup zero-peer condition fixture",
+               setup_fixture(&fx, "zero_peer_condition"));
+
+    struct connman cm;
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    sqlite3 *db = progress_store_db();
+    /* STEP 4: the cursor-desync repair clamps the cursors, but a cursor
+     * clamp does NOT advance the provable frontier H*
+     * (reducer_frontier_compute_hstar stays at A+1, pinned by
+     * tip_finalize). The H*-only witness must NOT clear on cursor churn:
+     * it stays active with one accrued attempt. */
+    bool ok = rfrl_zero_peer_first_snapshot_ok(got, snap, db);
+
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    ok = ok && condition_engine_dump_state_json(&dump, NULL);
+    const struct json_value *cond =
+        rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
+    const struct json_value *detail = json_get(cond, "detail");
+    ok = ok && detail != NULL;
+    ok = rfrl_zero_peer_detect_fields_ok(ok, detail);
+    ok = rfrl_zero_peer_repair_a_fields_ok(ok, detail);
+    ok = rfrl_zero_peer_repair_b_fields_ok(ok, detail);
+    json_free(&dump);
+
+    /* A second tick must still NOT false-clear: with H* unchanged the
+     * witness stays false, the condition stays active and un-cleared, and
+     * a single bounded attempt does not page the operator. */
+    condition_engine_tick();
+    got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    ok = rfrl_zero_peer_recheck_ok(ok, got, snap);
+    RFRL_CHECK("zero-peer cursor repair does not false-clear "
+               "(H*-only witness)", ok);
+
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static bool rfrl_coin_tear_snapshot_ok(bool got,
+                                       struct condition_runtime_snapshot snap,
+                                       sqlite3 *db, struct rfrl_fixture *fx)
+{
+    bool ok = got &&
+              reducer_frontier_reconcile_light_test_remedy_calls() == 5 &&
+              snap.currently_active &&
+              snap.attempts >= 5 &&
+              snap.last_outcome == COND_REMEDY_FAILED &&
+              snap.operator_needed_emitted &&
+              cursor_value(db, "tip_finalize") == A + 4 &&
+              cursor_value(db, "body_fetch") == A + 4 &&
+              (fx->idx[2]->nStatus & BLOCK_VALID_MASK) == 0;
+    return ok;
+}
+
+static bool rfrl_coin_tear_detail_ok(bool ok,
+                                      const struct json_value *detail)
+{
+    ok = ok && json_get_bool(json_get(
+                 detail, "last_reconcile_seen"));
+    ok = ok && strcmp(json_get_str(json_get(
+                 detail, "last_reconcile_phase")), "remedy") == 0;
+    ok = ok && json_get_bool(json_get(
+                 detail, "last_reconcile_refused_coin_tear"));
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_refused_coin_unknown"));
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_coins_applied_height"))
+                 == A + 3;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tipfin_backfill_refused_reason"))
+                 == STAGE_REPAIR_TIPFIN_REFUSED_G3_MISSING_EVIDENCE;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tipfin_backfill_refused_height"))
+                 == A + 2;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tipfin_backfill_refused_log"))
+                 == STAGE_REPAIR_TIPFIN_LOG_UTXO_APPLY;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_tip_finalize_cursor_before"))
+                 == A + 4;
+    return ok;
+}
+
+static int rfrl_check_coin_tear_condition(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup coin-tear condition fixture",
+               setup_fixture(&fx, "cointear_condition"));
+    sqlite3 *db = progress_store_db();
+    /* REAL coin tear (same shape as the detect-path case above): a
+     * utxo_apply ok=0 hole at A+2 caps its contiguous prefix at A+1 while
+     * coins_applied sits at A+3, so coins_applied > utxo_apply_contig+1.
+     * The hole survives every pre-refusal repair, so the Condition
+     * escalates to operator_needed without mutating any cursor or block
+     * flag. */
+    RFRL_CHECK("coin-tear condition: seed real utxo_apply hole",
+               put_simple_log(db, "utxo_apply_log", A + 2, 0) &&
+               seed_coins_applied(db, A + 3));
+
+    struct connman cm;
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    for (int i = 0; i < 5; i++) {
+        reducer_frontier_reconcile_light_test_clear_backoff();
+        condition_engine_tick();
+    }
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    bool ok = rfrl_coin_tear_snapshot_ok(got, snap, db, &fx);
+
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    ok = ok && condition_engine_dump_state_json(&dump, NULL);
+    const struct json_value *cond =
+        rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
+    const struct json_value *detail = json_get(cond, "detail");
+    ok = ok && detail != NULL;
+    ok = rfrl_coin_tear_detail_ok(ok, detail);
+    json_free(&dump);
+
+    RFRL_CHECK("coin-tear condition escalates without mutation", ok);
+
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_stale_script(void)
+{
+    int failures = 0;
+    /* Stale-script replay refusal: the hole's preconditions pass but the
+     * block is unreadable (fixture nFile == -1), so the replay refuses
+     * AFTER the cursor snapshot, under the progress lock held from
+     * snapshot to rewind COMMIT. The probe thread proves every traversed
+     * refusal path released it. */
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup stale-script fixture",
+               setup_fixture(&fx, "stale_script"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("stale-script: seed internal_error hole below cursor",
+               put_script_status(db, A + 2, 0, "internal_error",
+                                 &fx.hashes[2]));
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("stale-script: dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("stale-script: dry-run reports the hole without mutation",
+               dry.repaired &&
+               dry.stale_script_repair_height == A + 2 &&
+               !dry.stale_script_repaired &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 4);
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("stale-script: apply succeeds",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("stale-script: unreadable block refuses without rewind",
+               rr.stale_script_repair_height == A + 2 &&
+               !rr.stale_script_repaired &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "proof_validate") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 4);
+
+    bool probed = false;
+    pthread_t probe;
+    RFRL_CHECK("stale-script: probe thread starts",
+               pthread_create(&probe, NULL, progress_lock_probe,
+                              &probed) == 0);
+    pthread_join(probe, NULL);
+    RFRL_CHECK("stale-script: progress lock released on refusal", probed);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static bool rfrl_stale_script_dry_run_ok(const struct stage_reducer_frontier_reconcile_result *dry,
+                                         sqlite3 *db)
+{
+    return dry->repaired &&
+               !dry->refused_coin_tear &&
+               dry->hstar == A + 1 &&
+               dry->stale_script_repair_height == A + 2 &&
+               dry->stale_script_backfill_first == A + 2 &&
+               dry->stale_script_backfill_last == A + 2 &&
+               !dry->stale_script_repaired &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "proof_validate") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 2;
+}
+
+static bool rfrl_stale_script_replay_a_ok(const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    return rr->stale_script_repair_attempted &&
+               rr->stale_script_repaired &&
+               rr->stale_script_repair_height == A + 2 &&
+               rr->stale_script_cursor_before == A + 4 &&
+               rr->stale_script_cursor_after == A + 2 &&
+               rr->stale_script_backfill_first == A + 2 &&
+               rr->stale_script_backfill_last == A + 2;
+}
+
+static bool rfrl_stale_script_replay_b_ok(const struct stage_reducer_frontier_reconcile_result *rr,
+                                            sqlite3 *db)
+{
+    return !rr->stale_script_repair_genuinely_invalid &&
+               !rr->refused_coin_tear &&
+               cursor_value(db, "script_validate") == A + 2 &&
+               cursor_value(db, "proof_validate") == A + 2 &&
+               cursor_value(db, "tip_finalize") == A + 2 &&
+               cursor_value(db, "utxo_apply") == A + 2 &&
+               cursor_value(db, "body_persist") == A + 3 &&
+               count_range(db, "script_validate_log", A + 2, A + 4) == 0 &&
+               count_range(db, "proof_validate_log", A + 2, A + 4) == 0 &&
+               count_range(db, "validate_headers_log", A + 2, A + 4) == 2;
+}
+
+static int rfrl_check_readable_stale_script(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup readable stale-script fixture",
+               setup_fixture(&fx, "stale_script_readable"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("readable stale-script: canonical body is readable",
+               make_fixture_block_readable(&fx, 2));
+    RFRL_CHECK("readable stale-script: seed one-body replay span",
+               seed_cursor(db, "body_persist", A + 3) &&
+               seed_cursor(db, "utxo_apply", A + 2) &&
+               put_script_status(db, A + 2, 0, "internal_error",
+                                 &fx.hashes[2]));
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("readable stale-script: dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("readable stale-script: dry-run reports without mutation",
+               rfrl_stale_script_dry_run_ok(&dry, db));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    struct rfrl_main_cycle cycle = {.ms = &fx.ms, .db = db};
+    RFRL_CHECK("readable stale-script: main waiter leaves progress available",
+               rfrl_run_main_cycle(&cycle));
+    rr = cycle.result;
+    RFRL_CHECK("readable stale-script: production replay rewinds rows",
+               rfrl_stale_script_replay_a_ok(&rr) &&
+               rfrl_stale_script_replay_b_ok(&rr, db));
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static bool rfrl_stale_proof_dry_run_ok(const struct stage_reducer_frontier_reconcile_result *dry,
+                                            sqlite3 *db)
+{
+    return dry->repaired &&
+               !dry->refused_coin_tear &&
+               dry->hstar == A + 1 &&
+               dry->stale_script_repair_attempted &&
+               dry->stale_script_repair_height == A + 2 &&
+               dry->stale_script_cursor_before == A + 4 &&
+               dry->stale_script_cursor_after == A + 4 &&
+               !dry->stale_script_repaired &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "proof_validate") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 2;
+}
+
+static bool rfrl_stale_proof_replay_a_ok(const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    return rr->stale_script_repair_attempted &&
+               rr->stale_script_repaired &&
+               rr->stale_script_repair_height == A + 2 &&
+               rr->stale_script_cursor_before == A + 4 &&
+               rr->stale_script_cursor_after == A + 2 &&
+               rr->stale_script_utxo_cursor_before == A + 2;
+}
+
+static bool rfrl_stale_proof_replay_b_ok(const struct stage_reducer_frontier_reconcile_result *rr,
+                                            sqlite3 *db)
+{
+    return !rr->refused_coin_tear &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "proof_validate") == A + 2 &&
+               cursor_value(db, "tip_finalize") == A + 2 &&
+               cursor_value(db, "utxo_apply") == A + 2 &&
+               count_range(db, "proof_validate_log", A + 2, A + 4) == 0 &&
+               count_range(db, "script_validate_log", A + 2, A + 4) == 2;
+}
+
+static int rfrl_check_readable_stale_proof(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup readable stale-proof fixture",
+               setup_fixture(&fx, "stale_proof_readable"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("readable stale-proof: canonical body is readable",
+               make_fixture_block_readable(&fx, 2));
+    RFRL_CHECK("readable stale-proof: seed proof-only internal_error",
+               seed_cursor(db, "utxo_apply", A + 2) &&
+               put_script_status(db, A + 2, 1, "verified",
+                                 &fx.hashes[2]) &&
+               put_proof_status(db, A + 2, 0, "internal_error",
+                                &fx.hashes[2]));
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("readable stale-proof: dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("readable stale-proof: dry-run reports without mutation",
+               rfrl_stale_proof_dry_run_ok(&dry, db));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("readable stale-proof: apply succeeds",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("readable stale-proof: production replay rewinds proof only",
+               rfrl_stale_proof_replay_a_ok(&rr) &&
+               rfrl_stale_proof_replay_b_ok(&rr, db));
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_stale_script_higher_split(void)
+{
+    int failures = 0;
+    /* Dispatcher-order pin: a lower stale-script transient owns the shared
+     * stale_script_* result fields even when a higher script-side
+     * validate/script hash_split is present; the hash-split probe must not
+     * overwrite the lower repair height the replay ladder addresses first. */
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup stale-script + higher hash-split fixture",
+               setup_fixture(&fx, "stale_script_before_split"));
+    sqlite3 *db = progress_store_db();
+
+    struct uint256 stale = fx.hashes[3];
+    stale.data[0] ^= 0x5a;
+    RFRL_CHECK("stale-script+split: seed lower stale script and higher split",
+               put_script_status(db, A + 2, 0, "internal_error",
+                                 &fx.hashes[2]) &&
+               put_hash_log(db, "script_validate_log", "block_hash",
+                            A + 3, 1, &stale));
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("stale-script+split: dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("stale-script+split: lower stale-script hole keeps ownership",
+               dry.repaired &&
+               dry.stale_script_repair_height == A + 2 &&
+               dry.stale_script_cursor_before == A + 4 &&
+               dry.stale_script_cursor_after == A + 4 &&
+               (dry.lowest_script_validate_hash_split < 0 ||
+                dry.stale_script_repair_height <
+                    dry.lowest_script_validate_hash_split) &&
+               !dry.stale_script_repaired &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "proof_validate") == A + 4);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_coin_backfill_terminal(void)
+{
+    int failures = 0;
+    /* A coin-backfill refusal is terminal for the current L1 pass: the
+     * missing coin owns the prevout_unresolved hole, so ordinary cursor
+     * repair must not report `repaired` while the blocker stands. */
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup coin-backfill terminal refusal fixture",
+               setup_fixture(&fx, "coin_backfill_terminal"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("coin-backfill terminal: seed prevout hole below cursor",
+               put_script_status(db, A + 2, 0, "prevout_unresolved",
+                                 &fx.hashes[2]));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("coin-backfill terminal: apply succeeds",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("coin-backfill terminal: refusal does not fall through",
+               rr.coin_backfill_attempted &&
+               rr.coin_backfill_status != COIN_BACKFILL_NOT_APPLICABLE &&
+               !rr.repaired &&
+               !rr.clamped_body_fetch &&
+               !rr.clamped_tip_finalize &&
+               cursor_value(db, "body_fetch") == A + 4 &&
+               cursor_value(db, "tip_finalize") == A + 4 &&
+               cursor_value(db, "script_validate") == A + 4 &&
+               cursor_value(db, "utxo_apply") == A + 4);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static bool rfrl_coin_backfill_snapshot_ok(bool got,
+                                            struct condition_runtime_snapshot snap,
+                                            sqlite3 *db)
+{
+    bool ok = got &&
+              reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
+              snap.currently_active &&
+              snap.attempts == 1 &&
+              snap.last_outcome == COND_REMEDY_FAILED &&
+              !snap.operator_needed_emitted &&
+              cursor_value(db, "body_fetch") == A + 2 &&
+              cursor_value(db, "tip_finalize") == A + 1 &&
+              cursor_value(db, "script_validate") == A + 4 &&
+              cursor_value(db, "utxo_apply") == A + 4;
+    return ok;
+}
+
+static bool rfrl_coin_backfill_detail_ok(bool ok,
+                                           const struct json_value *detail)
+{
+    ok = ok && json_get_bool(json_get(
+                 detail, "last_reconcile_seen"));
+    ok = ok && strcmp(json_get_str(json_get(
+                 detail, "last_reconcile_phase")), "remedy") == 0;
+    ok = ok && json_get_bool(json_get(
+                 detail, "last_reconcile_coin_backfill_attempted"));
+    ok = ok && !json_get_bool(json_get(
+                 detail, "last_reconcile_repaired"));
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_coin_backfill_hole_height"))
+                 == A + 2;
+    ok = ok && json_get_int(json_get(
+                 detail, "last_reconcile_coin_backfill_status")) > 0;
+    ok = ok && strcmp(json_get_str(json_get(
+                 detail,
+                 "last_reconcile_coin_backfill_status_label")),
+                 "not_applicable") != 0;
+    return ok;
+}
+
+static int rfrl_check_coin_backfill_condition(void)
+{
+    int failures = 0;
+    /* A coin-backfill refusal is a named self-heal failure, not a quiet
+     * no-op: the fixture block is unreadable (nFile == -1), so the
+     * prevout_unresolved hole refuses through the backfill ladder and the
+     * condition must report FAILED, not SKIP. */
+    struct rfrl_fixture fx;
+    RFRL_CHECK("setup coin-backfill refusal condition fixture",
+               setup_fixture(&fx, "coin_backfill_refusal"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("coin-backfill refusal: seed prevout hole below cursor",
+               put_script_status(db, A + 2, 0, "prevout_unresolved",
+                                 &fx.hashes[2]));
+    RFRL_CHECK("coin-backfill refusal: pre-align benign cursors",
+               seed_cursor(db, "body_fetch", A + 2) &&
+               seed_cursor(db, "tip_finalize", A + 1));
+
+    struct connman cm;
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    bool ok = rfrl_coin_backfill_snapshot_ok(got, snap, db);
+    struct json_value dump;
+    json_init(&dump);
+    json_set_object(&dump);
+    ok = ok && condition_engine_dump_state_json(&dump, NULL);
+    const struct json_value *cond =
+        rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
+    const struct json_value *detail = json_get(cond, "detail");
+    ok = ok && detail != NULL;
+    ok = rfrl_coin_backfill_detail_ok(ok, detail);
+    json_free(&dump);
+    RFRL_CHECK("coin-backfill refusal condition is failed, not skipped",
+               ok);
+
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_noncanon_residue(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("noncanon: setup fixture", setup_fixture(&fx, "noncanon"));
+    sqlite3 *db = progress_store_db();
+
+    RFRL_CHECK("noncanon: active chain installs",
+               active_chain_move_window_tip(&fx.ms.chain_active,
+                                            fx.idx[3]));
+
+    /* Stale row at A+2: recorded with A+3's hash (a relabel wrote the
+     * wrong block's verdict here). False ok=0, like bad-cb-height. */
+    RFRL_CHECK("noncanon: seed stale script row",
+               put_script_status(db, A + 2, 0, "contextual_invalid",
+                                 &fx.hashes[3]));
+    /* Genuine reject at A+3: ok=0 but hash IS canonical — kept. */
+    RFRL_CHECK("noncanon: seed genuine reject",
+               put_script_status(db, A + 3, 0, "contextual_invalid",
+                                 &fx.hashes[3]));
+
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("noncanon: dry-run succeeds",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry));
+    RFRL_CHECK("noncanon: dry-run finds, does not purge",
+               dry.noncanonical_found >= 1 &&
+               dry.noncanonical_purged == 0 &&
+               dry.lowest_noncanonical == A + 2);
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("noncanon: apply succeeds",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
+    RFRL_CHECK("noncanon: apply purges the stale row",
+               rr.noncanonical_purged >= 1 && rr.repaired);
+
+    sqlite3_stmt *st = NULL;
+    int stale_left = -1, genuine_left = -1, vh_left = -1;
+    if (sqlite3_prepare_v2(db,
+            "SELECT "
+            " (SELECT COUNT(*) FROM script_validate_log WHERE height=?),"
+            " (SELECT COUNT(*) FROM script_validate_log WHERE height=?),"
+            " (SELECT COUNT(*) FROM validate_headers_log WHERE height=?)",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(st, 1, A + 2);
+        sqlite3_bind_int(st, 2, A + 3);
+        sqlite3_bind_int(st, 3, A + 2);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            stale_left = sqlite3_column_int(st, 0);
+            genuine_left = sqlite3_column_int(st, 1);
+            vh_left = sqlite3_column_int(st, 2);
+        }
+    }
+    sqlite3_finalize(st);
+    RFRL_CHECK("noncanon: stale gone, genuine + canonical rows kept",
+               stale_left == 0 && genuine_left == 1 && vh_left == 1);
+
+    int dep_left = -1;
+    if (sqlite3_prepare_v2(db,
+            "SELECT (SELECT COUNT(*) FROM proof_validate_log "
+            "WHERE height=?) + (SELECT COUNT(*) FROM body_persist_log "
+            "WHERE height=?)",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(st, 1, A + 2);
+        sqlite3_bind_int(st, 2, A + 2);
+        if (sqlite3_step(st) == SQLITE_ROW)
+            dep_left = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    RFRL_CHECK("noncanon: hashless downstream rows purged transitively",
+               dep_left == 0);
+
+    bool progress_probed = false;
+    pthread_t progress_probe;
+    bool progress_probe_started =
+        pthread_create(&progress_probe, NULL, progress_lock_probe,
+                       &progress_probed) == 0;
+    RFRL_CHECK("noncanon: progress lock probe starts",
+               progress_probe_started);
+    if (progress_probe_started) {
+        pthread_join(progress_probe, NULL);
+        RFRL_CHECK("noncanon: progress lock released",
+                   progress_probed);
+    }
+
+    struct active_chain_lock_probe_arg chain_probe_arg = {
+        .chain = &fx.ms.chain_active,
+        .probed = false,
+    };
+    pthread_t chain_probe;
+    bool chain_probe_started =
+        pthread_create(&chain_probe, NULL, active_chain_lock_probe,
+                       &chain_probe_arg) == 0;
+    RFRL_CHECK("noncanon: active-chain lock probe starts",
+               chain_probe_started);
+    if (chain_probe_started) {
+        pthread_join(chain_probe, NULL);
+        RFRL_CHECK("noncanon: active-chain lock released",
+                   chain_probe_arg.probed);
+    }
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_noncanon_below_coins(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("noncanon-below-coins: setup fixture",
+               setup_fixture(&fx, "noncanon_below_coins"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("noncanon-below-coins: active chain installs",
+               active_chain_move_window_tip(&fx.ms.chain_active,
+                                            fx.idx[3]));
+    RFRL_CHECK("noncanon-below-coins: seed coins above stale row",
+               seed_coins_applied(db, A + 3));
+    RFRL_CHECK("noncanon-below-coins: seed stale script row",
+               put_script_status(db, A + 2, 0, "contextual_invalid",
+                                 &fx.hashes[3]));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.hstar = A + 1;
+    rr.sweep_top = A + 2;
+    rr.coins_applied_found = true;
+    rr.coins_applied_height = A + 3;
+    rr.lowest_noncanonical = -1;
+    RFRL_CHECK("noncanon-below-coins: direct purge succeeds",
+               stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
+                                                         &rr));
+    RFRL_CHECK("noncanon-below-coins: evidence is not purged",
+               rr.noncanonical_found >= 1 &&
+               rr.noncanonical_purged == 0 &&
+               count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
+               count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
+               count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_noncanon_utxo_suffix(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("noncanon-utxo-suffix: setup fixture",
+               setup_fixture(&fx, "noncanon_utxo_suffix"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("noncanon-utxo-suffix: active chain installs",
+               active_chain_move_window_tip(&fx.ms.chain_active,
+                                            fx.idx[3]));
+    struct uint256 fork = fx.hashes[3];
+    fork.data[31] ^= 0x6du;
+    RFRL_CHECK("noncanon-utxo-suffix: seed mixed fork and anchors",
+               put_utxo_delta(db, A + 3, &fork) &&
+               put_sapling_anchor_residue(db, A + 1, &fx.hashes[1]) &&
+               put_sapling_anchor_residue(db, A + 3, &fork));
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.hstar = A + 1;
+    rr.sweep_top = A + 3;
+    rr.coins_applied_found = true;
+    rr.coins_applied_height = A + 1; /* stale pre-lock snapshot */
+    rr.lowest_noncanonical = -1;
+    RFRL_CHECK("noncanon-utxo-suffix: direct purge succeeds",
+               stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
+                                                         &rr));
+    RFRL_CHECK("noncanon-utxo-suffix: live frontier wins stale snapshot",
+               rr.coins_applied_found &&
+               rr.coins_applied_height == A + 2 &&
+               cursor_value(db, "utxo_apply") == A + 2);
+    RFRL_CHECK("noncanon-utxo-suffix: abandoned kernel suffix removed",
+               count_range(db, "utxo_apply_log", A + 2, A + 4) == 0 &&
+               count_range(db, "utxo_apply_delta", A + 2, A + 4) == 0 &&
+               count_range(db, "sapling_anchors", A + 2, A + 4) == 0 &&
+               count_range(db, "sapling_anchors", A + 1, A + 2) == 1);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_refill_bypass(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("refill bypass: setup fixture",
+               setup_fixture(&fx, "refill_bypass"));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("refill bypass: delete script+proof rows at the hole",
+               delete_height(db, "script_validate_log", A + 2) &&
+               delete_height(db, "proof_validate_log", A + 2));
+
+    /* One peer, NOT ahead: services=0 keeps connman_max_peer_height at -1
+     * while node_count=1, so peer_lag_allows_repair returns false. */
+    struct connman cm;
+    struct p2p_node p1;
+    struct p2p_node *peers[1];
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+    memset(&p1, 0, sizeof(p1));
+    p1.id = 1;
+    p1.starting_height = A + 1;
+    p1.state = PEER_ACTIVE;
+    peers[0] = &p1;
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    RFRL_CHECK("refill bypass: detect fires with no peer ahead and the "
+               "remedy clamps script/proof cursors to the hole",
+               got &&
+               reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
+               snap.currently_active &&
+               cursor_value(db, "script_validate") == A + 2 &&
+               cursor_value(db, "proof_validate") == A + 2);
+    RFRL_CHECK("refill bypass: transition WARN exactly once, no "
+               "suppression WARN",
+               reducer_frontier_reconcile_light_test_bypass_warns() == 1 &&
+               reducer_frontier_reconcile_light_test_gate_suppress_warns()
+                   == 0);
+
+    cm.manager.nodes = NULL;
+    cm.manager.num_nodes = 0;
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_churn_suppress(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("churn suppress: setup fixture",
+               setup_fixture(&fx, "churn_suppress"));
+    sqlite3 *db = progress_store_db();
+    /* Fill body_fetch_log A+1..A+3 so no body_fetch refill hole exists;
+     * the dry-run still reports repaired via the tip_finalize clamp and
+     * the unreadable-HAVE_DATA flag sweep. */
+    RFRL_CHECK("churn suppress: fill body_fetch rows",
+               put_body_fetch_ok(db, A + 1, &fx.hashes[1]) &&
+               put_body_fetch_ok(db, A + 2, &fx.hashes[2]) &&
+               put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
+
+    struct connman cm;
+    struct p2p_node p1;
+    struct p2p_node *peers[1];
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+    memset(&p1, 0, sizeof(p1));
+    p1.id = 1;
+    p1.starting_height = A + 1;
+    p1.state = PEER_ACTIVE;
+    peers[0] = &p1;
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+    reducer_frontier_reconcile_light_test_clear_backoff();
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    RFRL_CHECK("churn suppress: gate holds, remedy never runs, silent",
+               got &&
+               reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
+               !snap.currently_active &&
+               reducer_frontier_reconcile_light_test_bypass_warns() == 0 &&
+               reducer_frontier_reconcile_light_test_gate_suppress_warns()
+                   == 0);
+    RFRL_CHECK("churn suppress: no mutation while suppressed",
+               cursor_value(db, "tip_finalize") == A + 4 &&
+               cursor_value(db, "body_fetch") == A + 4);
+
+    cm.manager.nodes = NULL;
+    cm.manager.num_nodes = 0;
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_loud_suppress(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("loud suppress: setup fixture",
+               setup_fixture(&fx, "loud_suppress"));
+    sqlite3 *db = progress_store_db();
+
+    struct connman cm;
+    struct p2p_node p1;
+    struct p2p_node *peers[1];
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+    memset(&p1, 0, sizeof(p1));
+    p1.id = 1;
+    p1.starting_height = A + 1;
+    p1.state = PEER_ACTIVE;
+    peers[0] = &p1;
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    RFRL_CHECK("loud suppress: gate suppresses but WARNs once",
+               got &&
+               !snap.currently_active &&
+               reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
+               reducer_frontier_reconcile_light_test_bypass_warns() == 0 &&
+               reducer_frontier_reconcile_light_test_gate_suppress_warns()
+                   == 1);
+
+    reducer_frontier_reconcile_light_test_clear_backoff();
+    condition_engine_tick();
+    RFRL_CHECK("loud suppress: WARN throttled on the next tick",
+               reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
+               reducer_frontier_reconcile_light_test_gate_suppress_warns()
+                   == 1);
+    RFRL_CHECK("loud suppress: no mutation while suppressed",
+               cursor_value(db, "body_fetch") == A + 4 &&
+               cursor_value(db, "tip_finalize") == A + 4);
+
+    cm.manager.nodes = NULL;
+    cm.manager.num_nodes = 0;
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_f6_hstar_gate(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("F6: setup fixture", setup_fixture(&fx, "f6_hstar_gate"));
+    sqlite3 *db = progress_store_db();
+    /* Download tip at A+3 (active_chain_height) while H* stays pinned at
+     * A+1 (tip_finalize ok=1 only at A+1). */
+    RFRL_CHECK("F6: active chain tip at A+3",
+               active_chain_move_window_tip(&fx.ms.chain_active,
+                                            fx.idx[3]));
+
+    /* One block-serving peer whose starting_height (A+2) is ABOVE H* (A+1)
+     * but BELOW the download tip (A+3). */
+    struct connman cm;
+    struct p2p_node p1;
+    struct p2p_node *peers[1];
+    memset(&cm, 0, sizeof(cm));
+    net_manager_init(&cm.manager);
+    memset(&p1, 0, sizeof(p1));
+    p1.id = 1;
+    p1.starting_height = A + 2;
+    p1.state = PEER_HANDSHAKE_COMPLETE;
+    p1.services = NODE_NETWORK;
+    peers[0] = &p1;
+    cm.manager.nodes = peers;
+    cm.manager.num_nodes = 1;
+
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    sync_monitor_init();
+    sync_monitor_set_context(&cm, NULL, &fx.ms);
+    sync_monitor_test_set_tip_advance_ts(1);
+    register_reducer_frontier_reconcile_light();
+
+    condition_engine_tick();
+
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "reducer_frontier_reconcile_light", &snap);
+    RFRL_CHECK("F6: peer ahead of H* (not the download tip) admits the "
+               "repair — remedy runs and clamps tip_finalize to H*+1",
+               got &&
+               reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
+               snap.currently_active &&
+               cursor_value(db, "tip_finalize") == A + 2);
+    /* Admitted via the H* peer-lag path, not the tear/refill bypass. */
+    RFRL_CHECK("F6: no tear/refill bypass WARN (plain peer-ahead admit)",
+               reducer_frontier_reconcile_light_test_bypass_warns() == 0);
+
+    cm.manager.nodes = NULL;
+    cm.manager.num_nodes = 0;
+    sync_monitor_set_context(NULL, NULL, NULL);
+    sync_monitor_test_set_tip_advance_ts(0);
+    condition_engine_reset_for_testing();
+    reducer_frontier_reconcile_light_test_reset();
+    net_manager_free(&cm.manager);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_rebind_direct_dry_run(sqlite3 *db, int N, int pv, int SPAN)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.hstar = N;
+    rr.label_splice_rebind_lowest = -1;
+    bool mutated = true;
+    RFRL_CHECK("rebind-direct: dry-run returns ok",
+               stage_reducer_frontier_try_label_splice_rebind(
+                   db, false, &rr, &mutated));
+    RFRL_CHECK("rebind-direct: dry-run detects N+1, no mutation",
+               !mutated && rr.label_splice_rebind_lowest == N + 1 &&
+               rr.label_splice_rebound == 0 &&
+               cursor_value(db, "proof_validate") == pv &&
+               cursor_value(db, "script_validate") == pv &&
+               count_null_block_hash(db, "proof_validate_log",
+                                     N + 1, pv) == SPAN);
+    return failures;
+}
+
+static int rfrl_rebind_direct_cap_gate(sqlite3 *db, int N, int pv, int SPAN)
+{
+    int failures = 0;
+    setenv("ZCL_MAX_VALIDATION_REBIND", "100", 1);
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.hstar = N;
+    rr.label_splice_rebind_lowest = -1;
+    bool mutated = true;
+    RFRL_CHECK("rebind-direct: cap=100 returns ok",
+               stage_reducer_frontier_try_label_splice_rebind(
+                   db, true, &rr, &mutated));
+    RFRL_CHECK("rebind-direct: cap=100 REFUSES 163-deep rewind",
+               !mutated && rr.label_splice_rebound == 0 &&
+               cursor_value(db, "proof_validate") == pv &&
+               count_null_block_hash(db, "proof_validate_log",
+                                     N + 1, pv) == SPAN);
+    unsetenv("ZCL_MAX_VALIDATION_REBIND");
+    return failures;
+}
+
+static int rfrl_rebind_direct_apply(sqlite3 *db, int N, int pv)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.hstar = N;
+    rr.label_splice_rebind_lowest = -1;
+    rr.label_splice_proof_rewound_to = -1;
+    rr.label_splice_script_rewound_to = -1;
+    bool mutated = false;
+    RFRL_CHECK("rebind-direct: apply returns ok",
+               stage_reducer_frontier_try_label_splice_rebind(
+                   db, true, &rr, &mutated));
+    RFRL_CHECK("rebind-direct: apply re-bound BOTH cursors to N+1",
+               mutated && rr.label_splice_rebound == 2 &&
+               rr.label_splice_proof_rewound_to == N + 1 &&
+               rr.label_splice_script_rewound_to == N + 1 &&
+               cursor_value(db, "proof_validate") == N + 1 &&
+               cursor_value(db, "script_validate") == N + 1);
+    RFRL_CHECK("rebind-direct: NULL suffix deleted, floor row kept, "
+               "utxo_apply/tip_finalize untouched",
+               count_null_block_hash(db, "proof_validate_log",
+                                     N + 1, pv) == 0 &&
+               count_null_block_hash(db, "script_validate_log",
+                                     N + 1, pv) == 0 &&
+               count_range(db, "proof_validate_log", N, N + 1) == 1 &&
+               count_range(db, "script_validate_log", N, N + 1) == 1 &&
+               cursor_value(db, "utxo_apply") == N + 1 &&
+               cursor_value(db, "tip_finalize") == N);
+    return failures;
+}
+
+static int rfrl_check_rebind_direct(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir),
+                     "reducer_frontier_reconcile_light", "rebind_direct");
+    RFRL_CHECK("rebind-direct: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    RFRL_CHECK("rebind-direct: schema", seed_schema(db));
+
+    const int N = 1000;          /* anchor-free height */
+    const int SPAN = 163;        /* NULL suffix over (N, N+163] */
+    const int pv = N + SPAN + 1; /* proof/script cursor = N+164 */
+
+    /* Row at N is hashed (below the consumer floor) — must NOT be touched. */
+    struct uint256 hN; memset(&hN, 0, sizeof(hN)); hN.data[0] = 0x11;
+    RFRL_CHECK("rebind-direct: hashed row at N (below floor)",
+               put_hash_log(db, "proof_validate_log", "block_hash",
+                            N, 1, &hN) &&
+               put_hash_log(db, "script_validate_log", "block_hash",
+                            N, 1, &hN));
+    bool seeded = true;
+    for (int h = N + 1; h <= N + SPAN; h++)
+        seeded = seeded &&
+                 put_verdict_null_hash(db, "proof_validate_log", h) &&
+                 put_verdict_null_hash(db, "script_validate_log", h);
+    RFRL_CHECK("rebind-direct: NULL suffix seeded", seeded);
+    RFRL_CHECK("rebind-direct: cursors seeded",
+               seed_cursor(db, "proof_validate", pv) &&
+               seed_cursor(db, "script_validate", pv) &&
+               seed_cursor(db, "utxo_apply", N + 1) &&
+               seed_cursor(db, "tip_finalize", N));
+
+    /* Dry-run: reports the pending re-bind, mutates NOTHING. */
+    failures += rfrl_rebind_direct_dry_run(db, N, pv, SPAN);
+
+    /* Cap gate: a small validation cap refuses the 163-deep rewind. */
+    failures += rfrl_rebind_direct_cap_gate(db, N, pv, SPAN);
+
+    /* Apply: default cap (4096) admits the 163-deep rewind of BOTH cursors. */
+    failures += rfrl_rebind_direct_apply(db, N, pv);
+
+    progress_store_close();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static bool rfrl_rebind_wire_shape_ok(struct rfrl_fixture *fx, sqlite3 *db)
+{
+    return delete_height(db, "utxo_apply_log", A + 2) &&
+               delete_height(db, "utxo_apply_log", A + 3) &&
+               delete_height(db, "utxo_apply_delta", A + 2) &&
+               delete_height(db, "utxo_apply_delta", A + 3) &&
+               put_verdict_null_hash(db, "proof_validate_log", A + 2) &&
+               put_verdict_null_hash(db, "proof_validate_log", A + 3) &&
+               put_verdict_null_hash(db, "script_validate_log", A + 2) &&
+               put_verdict_null_hash(db, "script_validate_log", A + 3) &&
+               seed_cursor(db, "utxo_apply", A + 2) &&
+               seed_cursor(db, "tip_finalize", A + 2) &&
+               seed_coins_applied(db, A + 2) &&
+               active_chain_move_window_tip(&fx->ms.chain_active, fx->idx[1]);
+}
+
+static int rfrl_check_rebind_wire(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("rebind-wire: setup", setup_fixture(&fx, "rebind_wire"));
+    sqlite3 *db = progress_store_db();
+
+    /* utxo_apply STUCK at A+2 (log ok=1 only through A+1); proof/script
+     * validated ahead to A+4 with a NULL-block_hash suffix at A+2, A+3.
+     * Active window tip pinned at A+1 (== hstar) so the noncanonical purge
+     * scans empty. */
+    RFRL_CHECK("rebind-wire: shape the wedge",
+               rfrl_rebind_wire_shape_ok(&fx, db));
+
+    /* Dry-run detect sees the pending re-bind (activates the Condition). */
+    struct stage_reducer_frontier_reconcile_result dry;
+    RFRL_CHECK("rebind-wire: dry-run detects re-bind pending",
+               stage_reducer_frontier_reconcile_light_needed(
+                   db, &fx.ms, &dry) &&
+               dry.label_splice_rebind_lowest == A + 2 &&
+               dry.hstar == A + 1 &&
+               cursor_value(db, "proof_validate") == A + 4 &&
+               count_null_block_hash(db, "proof_validate_log",
+                                     A + 2, A + 4) == 2);
+
+    /* Apply: the wired impl runs the arm; proof/script cursors rewind and
+     * the NULL suffix is deleted. */
+    struct stage_reducer_frontier_reconcile_result rr;
+    RFRL_CHECK("rebind-wire: apply runs the arm (RED->GREEN)",
+               stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr) &&
+               rr.label_splice_rebound == 2 &&
+               cursor_value(db, "proof_validate") == A + 2 &&
+               cursor_value(db, "script_validate") == A + 2 &&
+               count_null_block_hash(db, "proof_validate_log",
+                                     A + 2, A + 4) == 0 &&
+               count_null_block_hash(db, "script_validate_log",
+                                     A + 2, A + 4) == 0 &&
+               /* utxo_apply cursor NEVER touched by the arm. */
+               cursor_value(db, "utxo_apply") == A + 2);
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_conflation_control(void)
+{
+    int failures = 0;
+    struct stage_reducer_frontier_reconcile_result rr;
+    memset(&rr, 0, sizeof(rr));
+    rr.coin_backfill_attempted = true;
+    rr.coin_backfill_owner_refused = true;
+    rr.coin_backfill_hole_height = A + 900;
+    RFRL_CHECK("conflation: coin refusal alone -> FAILED (control)",
+               reducer_frontier_reconcile_light_test_remedy_outcome(&rr) ==
+                   COND_REMEDY_FAILED);
+
+    rr.label_splice_rebound = 2;
+    rr.label_splice_rebind_lowest = A + 2;
+    rr.repaired = true;
+    RFRL_CHECK("conflation: re-bind + coin refusal -> OK (re-bind wins)",
+               reducer_frontier_reconcile_light_test_remedy_outcome(&rr) ==
+                   COND_REMEDY_OK);
+    return failures;
+}
+
+static int rfrl_check_lock_order_flags(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("lock-order: setup fixture",
+               setup_fixture(&fx, "lock_order_csmain"));
+    sqlite3 *db = progress_store_db();
+
+    pthread_mutex_lock(&g_order_mu);
+    g_order_csmain_held = false;
+    g_order_release = false;
+    pthread_mutex_unlock(&g_order_mu);
+
+    struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
+                                      .finished = false, .ok = false };
+    pthread_t holder;
+    bool holder_started =
+        pthread_create(&holder, NULL, rfrl_csmain_holder, &fx.ms) == 0;
+    RFRL_CHECK("lock-order: cs_main holder starts", holder_started);
+
+    if (holder_started) {
+        pthread_mutex_lock(&g_order_mu);
+        while (!g_order_csmain_held)
+            pthread_cond_wait(&g_order_cv, &g_order_mu);
+        pthread_mutex_unlock(&g_order_mu);
+
+        pthread_t worker;
+        bool worker_started =
+            pthread_create(&worker, NULL, rfrl_reconcile_worker,
+                           &probe) == 0;
+        RFRL_CHECK("lock-order: reconcile worker starts", worker_started);
+
+        bool tx_free = false;
+        bool parked = false;
+        if (worker_started) {
+            /* Settle: let the worker reach the lock it blocks on (it
+             * cannot complete while cs_main is held). */
+            rfrl_order_sleep_ms(300);
+            parked = !__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE);
+
+            /* Decisive poll. The correct order parks on cs_main owning
+             * nothing, so the progress lock stays free; the inverted order
+             * parks holding it. Early polls can miss: the reconcile takes
+             * and releases the progress lock a few times on its way in. */
+            for (int i = 0; i < 250 && !tx_free; i++) {
+                if (progress_store_tx_trylock()) {
+                    progress_store_tx_unlock();
+                    tx_free = true;
+                    break;
+                }
+                rfrl_order_sleep_ms(20);
+            }
+        }
+
+        RFRL_CHECK("lock-order: reconcile waits on cs_main (probe valid)",
+                   parked);
+        RFRL_CHECK("lock-order: progress lock NOT held while waiting for "
+                   "cs_main",
+                   tx_free);
+
+        pthread_mutex_lock(&g_order_mu);
+        g_order_release = true;
+        pthread_cond_broadcast(&g_order_cv);
+        pthread_mutex_unlock(&g_order_mu);
+
+        if (worker_started) {
+            pthread_join(worker, NULL);
+            RFRL_CHECK("lock-order: reconcile completes after release",
+                       probe.ok);
+        }
+        pthread_join(holder, NULL);
+    }
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int rfrl_check_lock_order_progress_held(void)
+{
+    int failures = 0;
+    struct rfrl_fixture fx;
+    RFRL_CHECK("lock-order: setup fixture (progress-held)",
+               setup_fixture(&fx, "lock_order_progress"));
+    sqlite3 *db = progress_store_db();
+    stage_reducer_frontier_reset_detect_memo_for_testing();
+
+    pthread_mutex_lock(&g_order_mu);
+    g_order_progress_held = false;
+    g_order_release = false;
+    pthread_mutex_unlock(&g_order_mu);
+
+    struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
+                                      .finished = false, .ok = false };
+    pthread_t holder;
+    bool holder_started =
+        pthread_create(&holder, NULL, rfrl_progress_holder, NULL) == 0;
+    RFRL_CHECK("lock-order: progress holder starts", holder_started);
+
+    if (holder_started) {
+        pthread_mutex_lock(&g_order_mu);
+        while (!g_order_progress_held)
+            pthread_cond_wait(&g_order_cv, &g_order_mu);
+        pthread_mutex_unlock(&g_order_mu);
+
+        pthread_t worker;
+        bool worker_started =
+            pthread_create(&worker, NULL, rfrl_flags_worker,
+                           &probe) == 0;
+        RFRL_CHECK("lock-order: flags worker starts (progress-held)",
+                   worker_started);
+
+        /* The seam calls reconcile_block_index_flags directly, so entry
+         * into the both-locks section is structural. Both assertions fail
+         * against a BLOCKING acquire, which parks inside the section still
+         * owning cs_main until the drain lets go. */
+        bool declined = false;
+        bool csmain_free = false;
+        if (worker_started) {
+            for (int i = 0; i < 250 && !declined; i++) {
+                if (__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE)) {
+                    declined = true;
+                    break;
+                }
+                rfrl_order_sleep_ms(20);
+            }
+            for (int i = 0; i < 250 && !csmain_free; i++) {
+                if (zcl_mutex_trylock(&fx.ms.cs_main)) {
+                    zcl_mutex_unlock(&fx.ms.cs_main);
+                    csmain_free = true;
+                    break;
+                }
+                rfrl_order_sleep_ms(20);
+            }
+        }
+
+        RFRL_CHECK("lock-order: reconcile DECLINES rather than blocking "
+                   "on a progress store held by a drain",
+                   declined);
+        RFRL_CHECK("lock-order: cs_main NOT held while the drain owns the "
+                   "progress store",
+                   csmain_free);
+
+        pthread_mutex_lock(&g_order_mu);
+        g_order_release = true;
+        pthread_cond_broadcast(&g_order_cv);
+        pthread_mutex_unlock(&g_order_mu);
+
+        if (worker_started)
+            pthread_join(worker, NULL);
+        pthread_join(holder, NULL);
+    }
+
+    teardown_fixture(&fx);
+    return failures;
+}
+
 int test_reducer_frontier_reconcile_light(void);
 int test_reducer_frontier_reconcile_light(void)
 {
@@ -886,1320 +2815,82 @@ int test_reducer_frontier_reconcile_light(void)
     printf("\n=== reducer_frontier_reconcile_light tests ===\n");
     int failures = 0;
 
-    {
-        /* Mirror reducer_frontier_reconcile_light_impl's init for the
-         * -1-sentinel refill-hole fields (memset(0) reads as a hole at 0). */
-        struct stage_reducer_frontier_reconcile_result zero;
-        memset(&zero, 0, sizeof(zero));
-        zero.lowest_validate_headers_refill_hole = -1;
-        zero.lowest_body_fetch_refill_hole = -1;
-        zero.lowest_body_persist_refill_hole = -1;
-        zero.lowest_script_validate_refill_hole = -1;
-        zero.lowest_proof_validate_refill_hole = -1;
-        zero.label_splice_rebind_lowest = -1;  /* -1 sentinel = no re-bind */
+    failures += rfrl_check_result_helpers();
 
-        struct stage_reducer_frontier_reconcile_result rr = zero;
-        RFRL_CHECK("result helpers: clean baseline",
-                   !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
-                   !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
-                   !stage_reducer_frontier_result_has_refill_hole_evidence(&rr) &&
-                   !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   stage_reducer_frontier_result_is_memo_clean(&rr));
+    failures += rfrl_check_dry_run_apply();
 
-        rr = zero;
-        rr.coin_backfill_attempted = true;
-        RFRL_CHECK("result helpers: coin repair evidence",
-                   stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
-                   !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
-                   stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   !stage_reducer_frontier_result_is_memo_clean(&rr));
+    failures += rfrl_check_failed_mask_proof_split();
 
-        rr = zero;
-        rr.noncanonical_found = 1;
-        RFRL_CHECK("result helpers: row residue evidence",
-                   !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
-                   stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
-                   stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   !stage_reducer_frontier_result_is_memo_clean(&rr));
+    failures += rfrl_check_failed_mask_utxo_split();
 
-        rr = zero;
-        rr.lowest_script_validate_refill_hole = A + 2;
-        RFRL_CHECK("result helpers: refill hole evidence",
-                   !stage_reducer_frontier_result_has_coin_repair_evidence(&rr) &&
-                   !stage_reducer_frontier_result_has_row_residue_evidence(&rr) &&
-                   stage_reducer_frontier_result_has_refill_hole_evidence(&rr) &&
-                   stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   !stage_reducer_frontier_result_is_memo_clean(&rr));
+    failures += rfrl_check_validate_refill_hole();
 
-        rr = zero;
-        rr.refused_coin_tear = true;
-        RFRL_CHECK("result helpers: coin tear bypass separate",
-                   !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   !stage_reducer_frontier_result_is_memo_clean(&rr));
+    failures += rfrl_check_validate_hash_split();
 
-        rr = zero;
-        rr.repaired = true;
-        RFRL_CHECK("result helpers: repaired is not memo-clean",
-                   !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr) &&
-                   !stage_reducer_frontier_result_is_memo_clean(&rr));
-    }
+    failures += rfrl_check_body_refill_hole();
 
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup dry-run/apply fixture",
-                   setup_fixture(&fx, "apply"));
+    failures += rfrl_check_coin_tear();
 
-        sqlite3 *db = progress_store_db();
-        unsigned before2 = fx.idx[2]->nStatus;
-        unsigned before3 = fx.idx[3]->nStatus;
+    failures += rfrl_check_served_floor();
 
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("dry-run reports repair",
-                   dry.repaired && dry.hstar == A + 1 &&
-                   dry.sweep_top == A + 3 &&
-                   dry.lowest_have_data_cleared == A + 2 &&
-                   dry.lowest_validate_headers_refill_hole == -1 &&
-                   dry.lowest_body_fetch_refill_hole == A + 2 &&
-                   dry.lowest_body_persist_refill_hole == -1 &&
-                   dry.validate_headers_cursor_before == A + 4 &&
-                   dry.validate_headers_cursor_after == A + 4 &&
-                   dry.body_fetch_cursor_before == A + 4 &&
-                   dry.body_fetch_cursor_after == A + 2 &&
-                   dry.clamped_body_fetch &&
-                   !dry.clamped_body_persist &&
-                   /* OWN-frame: clamp band [hstar, hstar+1] capped at
-                    * coins_applied = A+2, the ceiling the step rests at. */
-                   dry.tip_finalize_cursor_after == A + 2);
-        RFRL_CHECK("dry-run does not mutate",
-                   fx.idx[2]->nStatus == before2 &&
-                   fx.idx[3]->nStatus == before3 &&
-                   cursor_value(db, "validate_headers") == A + 4 &&
-                   cursor_value(db, "body_fetch") == A + 4 &&
-                   cursor_value(db, "body_persist") == A + 4 &&
-                   cursor_value(db, "tip_finalize") == A + 4);
+    failures += rfrl_check_coin_lag();
 
-        struct stage_reducer_frontier_reconcile_result applied;
-        RFRL_CHECK("apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &applied));
-        RFRL_CHECK("apply clamps body_fetch and tip_finalize",
-                   cursor_value(db, "tip_finalize") == A + 2 &&
-                   cursor_value(db, "validate_headers") == A + 4 &&
-                   cursor_value(db, "body_fetch") == A + 2 &&
-                   cursor_value(db, "body_persist") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 4 &&
-                   applied.clamped_body_fetch &&
-                   !applied.clamped_body_persist &&
-                   applied.clamped_tip_finalize);
-        RFRL_CHECK("script bits restored",
-                   (fx.idx[2]->nStatus & BLOCK_VALID_MASK) ==
-                       BLOCK_VALID_SCRIPTS &&
-                   (fx.idx[3]->nStatus & BLOCK_VALID_MASK) ==
-                       BLOCK_VALID_SCRIPTS &&
-                   applied.scripts_set == 2);
-        RFRL_CHECK("unreadable HAVE_DATA cleared",
-                   (fx.idx[2]->nStatus & BLOCK_HAVE_DATA) == 0 &&
-                   (fx.idx[3]->nStatus & BLOCK_HAVE_DATA) == 0 &&
-                   applied.have_data_cleared == 2);
-        RFRL_CHECK("proved stale failure mask cleared",
-                   (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) == 0 &&
-                   applied.failed_mask_cleared == 1);
+    failures += rfrl_check_deep_coin_lag();
 
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_unknown_coin();
 
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("failed-mask proof split: setup",
-                   setup_fixture(&fx, "failed_mask_proof_split"));
-        sqlite3 *db = progress_store_db();
-        struct uint256 fork = fx.hashes[3];
-        fork.data[31] ^= 0x5au;
-        RFRL_CHECK("failed-mask proof split: seed forked proof receipt",
-                   put_hash_log(db, "proof_validate_log", "block_hash",
-                                A + 3, 1, &fork));
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("failed-mask proof split: reconcile completes",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("failed-mask proof split: failure evidence retained",
-                   (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) != 0 &&
-                   rr.failed_mask_cleared == 0);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_zero_peer_condition();
 
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("failed-mask UTXO split: setup",
-                   setup_fixture(&fx, "failed_mask_utxo_split"));
-        sqlite3 *db = progress_store_db();
-        struct uint256 fork = fx.hashes[3];
-        fork.data[31] ^= 0xa5u;
-        RFRL_CHECK("failed-mask UTXO split: seed forked delta receipt",
-                   put_utxo_delta(db, A + 3, &fork));
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("failed-mask UTXO split: reconcile completes",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("failed-mask UTXO split: failure evidence retained",
-                   (fx.idx[3]->nStatus & BLOCK_FAILED_MASK) != 0 &&
-                   rr.failed_mask_cleared == 0);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_coin_tear_condition();
 
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup validate-refill-hole fixture",
-                   setup_fixture(&fx, "validate_refill_hole"));
-        sqlite3 *db = progress_store_db();
+    failures += rfrl_check_stale_script();
 
-        fx.idx[2]->nStatus = BLOCK_VALID_SCRIPTS;
-        fx.idx[3]->nStatus = BLOCK_VALID_SCRIPTS;
-        RFRL_CHECK("validate-refill-hole: seed later body_fetch row",
-                   put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
-        RFRL_CHECK("validate-refill-hole: delete reducer rows at hole",
-                   delete_height(db, "validate_headers_log", A + 2) &&
-                   delete_height(db, "body_fetch_log", A + 2) &&
-                   delete_height(db, "body_persist_log", A + 2) &&
-                   delete_height(db, "script_validate_log", A + 2) &&
-                   delete_height(db, "proof_validate_log", A + 2) &&
-                   delete_height(db, "utxo_apply_log", A + 2));
+    failures += rfrl_check_readable_stale_script();
 
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("validate-refill-hole: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("validate-refill-hole: clamps upstream refill cursors",
-                   rr.lowest_validate_headers_refill_hole == A + 2 &&
-                   rr.lowest_body_fetch_refill_hole == -1 &&
-                   rr.lowest_body_persist_refill_hole == -1 &&
-                   rr.clamped_validate_headers &&
-                   rr.clamped_body_fetch &&
-                   rr.clamped_body_persist &&
-                   cursor_value(db, "validate_headers") == A + 2 &&
-                   cursor_value(db, "body_fetch") == A + 2 &&
-                   cursor_value(db, "body_persist") == A + 2 &&
-                   /* tip_finalize is OWN-frame: served tip = A+2, backed by the
-                    * transition row at A+1 and coins applied through A+1. */
-                   cursor_value(db, "tip_finalize") == A + 2);
+    failures += rfrl_check_readable_stale_proof();
 
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_stale_script_higher_split();
 
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup validate-hash-split fixture",
-                   setup_fixture(&fx, "validate_hash_split"));
-        sqlite3 *db = progress_store_db();
+    failures += rfrl_check_coin_backfill_terminal();
 
-        struct uint256 stale = fx.hashes[2];
-        stale.data[0] ^= 0x5a;
-        RFRL_CHECK("validate-hash-split: seed stale validate hash",
-                   put_hash_log(db, "validate_headers_log", "hash",
-                                A + 2, 1, &stale));
-        RFRL_CHECK("validate-hash-split: seed coins above split hstar",
-                   seed_coins_applied(db, A + 3));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("validate-hash-split: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        /* A stale validate hash with utxo_apply SOLID is NOT a coin tear (coins
-         * track utxo_apply's own log, not the hash-split-pinned H*). The split
-         * still caps H* and is healed via the downstream refill: it re-walks
-         * validate_headers AND its dependent cursors (body_fetch, tip_finalize)
-         * back to the split height A+2; body_persist already holds its rows so
-         * it is not clamped. */
-        RFRL_CHECK("validate-hash-split: downstream refill heals the split",
-                   rr.repaired &&
-                   !rr.refused_coin_tear &&
-                   rr.lowest_validate_headers_hash_split == A + 2 &&
-                   rr.lowest_validate_headers_refill_hole == -1 &&
-                   rr.clamped_validate_headers &&
-                   cursor_value(db, "validate_headers") == A + 2 &&
-                   cursor_value(db, "body_fetch") == A + 2 &&
-                   cursor_value(db, "body_persist") == A + 4 &&
-                   cursor_value(db, "tip_finalize") == A + 2);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup body-refill-hole fixture",
-                   setup_fixture(&fx, "body_refill_hole"));
-        sqlite3 *db = progress_store_db();
-
-        fx.idx[2]->nStatus = BLOCK_VALID_SCRIPTS;
-        fx.idx[3]->nStatus = BLOCK_VALID_SCRIPTS;
-        RFRL_CHECK("body-refill-hole: seed body_fetch rows around hole",
-                   put_body_fetch_ok(db, A + 1, &fx.hashes[1]) &&
-                   put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("body-refill-hole: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("body-refill-hole: clamps to missing body_fetch row",
-                   rr.lowest_have_data_cleared == -1 &&
-                   rr.lowest_validate_headers_refill_hole == -1 &&
-                   rr.lowest_body_fetch_refill_hole == A + 2 &&
-                   rr.lowest_body_persist_refill_hole == -1 &&
-                   rr.clamped_body_fetch &&
-                   !rr.clamped_body_persist &&
-                   cursor_value(db, "body_fetch") == A + 2);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup coin-tear fixture",
-                   setup_fixture(&fx, "cointear"));
-        sqlite3 *db = progress_store_db();
-        /* REAL coin tear: a HOLE in utxo_apply's OWN ok=1 log below the coins
-         * frontier. utxo_apply ok=0 at A+2 (status='verified', so neither the
-         * value_overflow nor stale_script replays engage) stops its contiguous
-         * prefix at A+1; coins seeded at A+3 give coins_applied >
-         * utxo_apply_contig+1, a genuine tear. tipfin_backfill's G3 refuses on
-         * the ok=0 row, so the tear survives every pre-refusal repair and the
-         * L1 refusal stands. */
-        RFRL_CHECK("seed real utxo_apply hole below coins frontier",
-                   put_simple_log(db, "utxo_apply_log", A + 2, 0) &&
-                   seed_coins_applied(db, A + 3));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("coin-tear detect call succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("coin-tear refused without mutation",
-                   rr.refused_coin_tear &&
-                   cursor_value(db, "tip_finalize") == A + 4 &&
-                   (fx.idx[2]->nStatus & BLOCK_VALID_MASK) == 0);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup served-floor fixture",
-                   setup_fixture(&fx, "served_floor"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("seed served floor above hstar without contiguous prefix",
-                   put_tip_log(db, A + 3, 1, &fx.hashes[3]));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("served-floor apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("served-floor cannot override coins cap",
-                   rr.hstar == A + 1 &&
-                   rr.served_floor == A + 3 &&
-                   rr.coins_applied_height == A + 2 &&
-                   /* OWN-frame: served tip capped at coins_applied's frame
-                    * (A+2 NEXT-frame => applied through A+1 => serves the
-                    * transition row at A+1, served tip A+2). */
-                   rr.tip_finalize_cursor_after == A + 2 &&
-                   cursor_value(db, "tip_finalize") == A + 2 &&
-                   rr.clamped_tip_finalize);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup coin-lag fixture",
-                   setup_fixture(&fx, "coin_lag"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("seed contiguous hstar above coins_applied",
-                   put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
-                   put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
-                   seed_coins_applied(db, A + 3));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("coin-lag apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("coin-lag caps tip_finalize at coins_applied",
-                   rr.hstar == A + 3 &&
-                   rr.coins_applied_height == A + 3 &&
-                   /* OWN-frame: hstar allows served A+3..A+4 but coins
-                    * (NEXT-frame A+3 => applied through A+2) cap the served-tip
-                    * claim at A+3, where the step itself rests. */
-                   rr.tip_finalize_cursor_after == A + 3 &&
-                   cursor_value(db, "tip_finalize") == A + 3 &&
-                   rr.clamped_tip_finalize);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup deep-coin-lag fixture",
-                   setup_fixture(&fx, "deep_coin_lag"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("seed hstar above a deeply lagging coins frontier",
-                   put_tip_log(db, A + 2, 1, &fx.hashes[2]) &&
-                   put_tip_log(db, A + 3, 1, &fx.hashes[3]) &&
-                   seed_coins_applied(db, A + 1));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("deep-coin-lag apply succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("deep-coin-lag refuses anchor-breaking tip clamp",
-                   rr.hstar == A + 3 &&
-                   rr.coins_applied_height == A + 1 &&
-                   !rr.clamped_tip_finalize &&
-                   rr.tip_finalize_cursor_after == A + 4 &&
-                   cursor_value(db, "tip_finalize") == A + 4);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup unknown-coin fixture",
-                   setup_fixture(&fx, "unknown"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("unknown-coin: active chain installs",
-                   active_chain_move_window_tip(&fx.ms.chain_active,
-                                                fx.idx[3]));
-        RFRL_CHECK("unknown-coin: seed noncanonical script row",
-                   put_script_status(db, A + 2, 0, "contextual_invalid",
-                                     &fx.hashes[3]));
-        RFRL_CHECK("unknown-coin: remove durable frontier authority",
-                   exec_sql(db, "DELETE FROM progress_meta "
-                                "WHERE key='coins_applied_height'"));
-        struct stage_reducer_frontier_reconcile_result purge;
-        memset(&purge, 0, sizeof(purge));
-        purge.hstar = A + 1;
-        purge.sweep_top = A + 2;
-        purge.coins_applied_found = false;
-        purge.coins_applied_height = -1;
-        purge.lowest_noncanonical = -1;
-        RFRL_CHECK("unknown-coin: direct purge detects but refuses",
-                   stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
-                                                             &purge) &&
-                   purge.noncanonical_found >= 1 &&
-                   purge.noncanonical_purged == 0);
-        RFRL_CHECK("unknown-coin: direct purge leaves rows intact",
-                   count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("unknown-coin call succeeds",
-                   stage_reducer_frontier_reconcile_light(
-                       db, &fx.ms, &rr));
-        RFRL_CHECK("unknown-coin refused without mutation",
-                   rr.refused_coin_unknown &&
-                   rr.noncanonical_purged == 0 &&
-                   cursor_value(db, "tip_finalize") == A + 4 &&
-                   (fx.idx[2]->nStatus & BLOCK_VALID_MASK) == 0);
-        RFRL_CHECK("unknown-coin leaves purge evidence rows intact",
-                   count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup zero-peer condition fixture",
-                   setup_fixture(&fx, "zero_peer_condition"));
-
-        struct connman cm;
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        sqlite3 *db = progress_store_db();
-        /* STEP 4: the cursor-desync repair clamps the cursors, but a cursor
-         * clamp does NOT advance the provable frontier H*
-         * (reducer_frontier_compute_hstar stays at A+1, pinned by
-         * tip_finalize). The H*-only witness must NOT clear on cursor churn:
-         * it stays active with one accrued attempt. */
-        bool ok = got &&
-                  reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
-                  cursor_value(db, "body_fetch") == A + 2 &&
-                  cursor_value(db, "tip_finalize") == A + 2 &&
-                  snap.currently_active &&
-                  snap.attempts == 1 &&
-                  snap.last_outcome == COND_REMEDY_UNWITNESSED &&
-                  snap.cleared_count == 0 &&
-                  !snap.operator_needed_emitted;
-
-        struct json_value dump;
-        json_init(&dump);
-        json_set_object(&dump);
-        ok = ok && condition_engine_dump_state_json(&dump, NULL);
-        const struct json_value *cond =
-            rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
-        const struct json_value *detail = json_get(cond, "detail");
-        ok = ok && detail != NULL;
-        ok = ok &&
-             json_get_int(json_get(detail, "hstar_at_detect")) == A + 1;
-        ok = ok &&
-             json_get_int(json_get(detail, "sweep_top_at_detect")) == A + 3;
-        ok = ok &&
-             json_get_int(json_get(
-                 detail, "body_fetch_cursor_at_detect")) == A + 4;
-        ok = ok &&
-             json_get_int(json_get(
-                 detail, "tip_finalize_cursor_at_detect")) == A + 4;
-        ok = ok &&
-             json_get_int(json_get(
-                 detail, "coin_backfill_scan_present_at_detect")) == 0;
-        ok = ok &&
-             json_get_int(json_get(
-                 detail, "tipfin_backfill_present_at_detect")) == 0;
-        ok = ok && json_get_int(json_get(detail, "remedy_calls")) == 1;
-        ok = ok && json_get_bool(json_get(
-                     detail, "last_reconcile_seen"));
-        ok = ok && strcmp(json_get_str(json_get(
-                     detail, "last_reconcile_phase")), "remedy") == 0;
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_refused_coin_tear"));
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_hstar")) == A + 1;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_body_fetch_cursor_before"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_body_fetch_cursor_after"))
-                     == A + 2;
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_clamped_script_validate"));
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_clamped_proof_validate"));
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_script_validate_cursor_before"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_script_validate_cursor_after"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_proof_validate_cursor_before"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_proof_validate_cursor_after"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_lowest_script_validate_hash_split"))
-                     == -1;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_lowest_script_validate_refill_hole"))
-                     == -1;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_lowest_proof_validate_refill_hole"))
-                     == -1;
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_pre_refusal_unapplied_clamp"));
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tip_finalize_cursor_before"))
-                     == A + 4;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tip_finalize_cursor_after"))
-                     == A + 2;
-        json_free(&dump);
-
-        /* A second tick must still NOT false-clear: with H* unchanged the
-         * witness stays false, the condition stays active and un-cleared, and
-         * a single bounded attempt does not page the operator. */
-        condition_engine_tick();
-        got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        ok = ok && got &&
-             snap.currently_active &&
-             snap.cleared_count == 0 &&
-             !snap.operator_needed_emitted;
-        RFRL_CHECK("zero-peer cursor repair does not false-clear "
-                   "(H*-only witness)", ok);
-
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup coin-tear condition fixture",
-                   setup_fixture(&fx, "cointear_condition"));
-        sqlite3 *db = progress_store_db();
-        /* REAL coin tear (same shape as the detect-path case above): a
-         * utxo_apply ok=0 hole at A+2 caps its contiguous prefix at A+1 while
-         * coins_applied sits at A+3, so coins_applied > utxo_apply_contig+1.
-         * The hole survives every pre-refusal repair, so the Condition
-         * escalates to operator_needed without mutating any cursor or block
-         * flag. */
-        RFRL_CHECK("coin-tear condition: seed real utxo_apply hole",
-                   put_simple_log(db, "utxo_apply_log", A + 2, 0) &&
-                   seed_coins_applied(db, A + 3));
-
-        struct connman cm;
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        for (int i = 0; i < 5; i++) {
-            reducer_frontier_reconcile_light_test_clear_backoff();
-            condition_engine_tick();
-        }
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        bool ok = got &&
-                  reducer_frontier_reconcile_light_test_remedy_calls() == 5 &&
-                  snap.currently_active &&
-                  snap.attempts >= 5 &&
-                  snap.last_outcome == COND_REMEDY_FAILED &&
-                  snap.operator_needed_emitted &&
-                  cursor_value(db, "tip_finalize") == A + 4 &&
-                  cursor_value(db, "body_fetch") == A + 4 &&
-                  (fx.idx[2]->nStatus & BLOCK_VALID_MASK) == 0;
-
-        struct json_value dump;
-        json_init(&dump);
-        json_set_object(&dump);
-        ok = ok && condition_engine_dump_state_json(&dump, NULL);
-        const struct json_value *cond =
-            rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
-        const struct json_value *detail = json_get(cond, "detail");
-        ok = ok && detail != NULL;
-        ok = ok && json_get_bool(json_get(
-                     detail, "last_reconcile_seen"));
-        ok = ok && strcmp(json_get_str(json_get(
-                     detail, "last_reconcile_phase")), "remedy") == 0;
-        ok = ok && json_get_bool(json_get(
-                     detail, "last_reconcile_refused_coin_tear"));
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_refused_coin_unknown"));
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_coins_applied_height"))
-                     == A + 3;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tipfin_backfill_refused_reason"))
-                     == STAGE_REPAIR_TIPFIN_REFUSED_G3_MISSING_EVIDENCE;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tipfin_backfill_refused_height"))
-                     == A + 2;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tipfin_backfill_refused_log"))
-                     == STAGE_REPAIR_TIPFIN_LOG_UTXO_APPLY;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_tip_finalize_cursor_before"))
-                     == A + 4;
-        json_free(&dump);
-
-        RFRL_CHECK("coin-tear condition escalates without mutation", ok);
-
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
-
-    {
-        /* Stale-script replay refusal: the hole's preconditions pass but the
-         * block is unreadable (fixture nFile == -1), so the replay refuses
-         * AFTER the cursor snapshot, under the progress lock held from
-         * snapshot to rewind COMMIT. The probe thread proves every traversed
-         * refusal path released it. */
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup stale-script fixture",
-                   setup_fixture(&fx, "stale_script"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("stale-script: seed internal_error hole below cursor",
-                   put_script_status(db, A + 2, 0, "internal_error",
-                                     &fx.hashes[2]));
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("stale-script: dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("stale-script: dry-run reports the hole without mutation",
-                   dry.repaired &&
-                   dry.stale_script_repair_height == A + 2 &&
-                   !dry.stale_script_repaired &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 4);
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("stale-script: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("stale-script: unreadable block refuses without rewind",
-                   rr.stale_script_repair_height == A + 2 &&
-                   !rr.stale_script_repaired &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "proof_validate") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 4);
-
-        bool probed = false;
-        pthread_t probe;
-        RFRL_CHECK("stale-script: probe thread starts",
-                   pthread_create(&probe, NULL, progress_lock_probe,
-                                  &probed) == 0);
-        pthread_join(probe, NULL);
-        RFRL_CHECK("stale-script: progress lock released on refusal", probed);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup readable stale-script fixture",
-                   setup_fixture(&fx, "stale_script_readable"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("readable stale-script: canonical body is readable",
-                   make_fixture_block_readable(&fx, 2));
-        RFRL_CHECK("readable stale-script: seed one-body replay span",
-                   seed_cursor(db, "body_persist", A + 3) &&
-                   seed_cursor(db, "utxo_apply", A + 2) &&
-                   put_script_status(db, A + 2, 0, "internal_error",
-                                     &fx.hashes[2]));
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("readable stale-script: dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("readable stale-script: dry-run reports without mutation",
-                   dry.repaired &&
-                   !dry.refused_coin_tear &&
-                   dry.hstar == A + 1 &&
-                   dry.stale_script_repair_height == A + 2 &&
-                   dry.stale_script_backfill_first == A + 2 &&
-                   dry.stale_script_backfill_last == A + 2 &&
-                   !dry.stale_script_repaired &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "proof_validate") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 2);
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        struct rfrl_main_cycle cycle = {.ms = &fx.ms, .db = db};
-        RFRL_CHECK("readable stale-script: main waiter leaves progress available",
-                   rfrl_run_main_cycle(&cycle));
-        rr = cycle.result;
-        RFRL_CHECK("readable stale-script: production replay rewinds rows",
-                   rr.stale_script_repair_attempted &&
-                   rr.stale_script_repaired &&
-                   rr.stale_script_repair_height == A + 2 &&
-                   rr.stale_script_cursor_before == A + 4 &&
-                   rr.stale_script_cursor_after == A + 2 &&
-                   rr.stale_script_backfill_first == A + 2 &&
-                   rr.stale_script_backfill_last == A + 2 &&
-                   !rr.stale_script_repair_genuinely_invalid &&
-                   !rr.refused_coin_tear &&
-                   cursor_value(db, "script_validate") == A + 2 &&
-                   cursor_value(db, "proof_validate") == A + 2 &&
-                   cursor_value(db, "tip_finalize") == A + 2 &&
-                   cursor_value(db, "utxo_apply") == A + 2 &&
-                   cursor_value(db, "body_persist") == A + 3 &&
-                   count_range(db, "script_validate_log", A + 2, A + 4) == 0 &&
-                   count_range(db, "proof_validate_log", A + 2, A + 4) == 0 &&
-                   count_range(db, "validate_headers_log", A + 2, A + 4) == 2);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup readable stale-proof fixture",
-                   setup_fixture(&fx, "stale_proof_readable"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("readable stale-proof: canonical body is readable",
-                   make_fixture_block_readable(&fx, 2));
-        RFRL_CHECK("readable stale-proof: seed proof-only internal_error",
-                   seed_cursor(db, "utxo_apply", A + 2) &&
-                   put_script_status(db, A + 2, 1, "verified",
-                                     &fx.hashes[2]) &&
-                   put_proof_status(db, A + 2, 0, "internal_error",
-                                    &fx.hashes[2]));
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("readable stale-proof: dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("readable stale-proof: dry-run reports without mutation",
-                   dry.repaired &&
-                   !dry.refused_coin_tear &&
-                   dry.hstar == A + 1 &&
-                   dry.stale_script_repair_attempted &&
-                   dry.stale_script_repair_height == A + 2 &&
-                   dry.stale_script_cursor_before == A + 4 &&
-                   dry.stale_script_cursor_after == A + 4 &&
-                   !dry.stale_script_repaired &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "proof_validate") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 2);
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("readable stale-proof: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("readable stale-proof: production replay rewinds proof only",
-                   rr.stale_script_repair_attempted &&
-                   rr.stale_script_repaired &&
-                   rr.stale_script_repair_height == A + 2 &&
-                   rr.stale_script_cursor_before == A + 4 &&
-                   rr.stale_script_cursor_after == A + 2 &&
-                   rr.stale_script_utxo_cursor_before == A + 2 &&
-                   !rr.refused_coin_tear &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "proof_validate") == A + 2 &&
-                   cursor_value(db, "tip_finalize") == A + 2 &&
-                   cursor_value(db, "utxo_apply") == A + 2 &&
-                   count_range(db, "proof_validate_log", A + 2, A + 4) == 0 &&
-                   count_range(db, "script_validate_log", A + 2, A + 4) == 2);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        /* Dispatcher-order pin: a lower stale-script transient owns the shared
-         * stale_script_* result fields even when a higher script-side
-         * validate/script hash_split is present; the hash-split probe must not
-         * overwrite the lower repair height the replay ladder addresses first. */
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup stale-script + higher hash-split fixture",
-                   setup_fixture(&fx, "stale_script_before_split"));
-        sqlite3 *db = progress_store_db();
-
-        struct uint256 stale = fx.hashes[3];
-        stale.data[0] ^= 0x5a;
-        RFRL_CHECK("stale-script+split: seed lower stale script and higher split",
-                   put_script_status(db, A + 2, 0, "internal_error",
-                                     &fx.hashes[2]) &&
-                   put_hash_log(db, "script_validate_log", "block_hash",
-                                A + 3, 1, &stale));
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("stale-script+split: dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("stale-script+split: lower stale-script hole keeps ownership",
-                   dry.repaired &&
-                   dry.stale_script_repair_height == A + 2 &&
-                   dry.stale_script_cursor_before == A + 4 &&
-                   dry.stale_script_cursor_after == A + 4 &&
-                   (dry.lowest_script_validate_hash_split < 0 ||
-                    dry.stale_script_repair_height <
-                        dry.lowest_script_validate_hash_split) &&
-                   !dry.stale_script_repaired &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "proof_validate") == A + 4);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        /* A coin-backfill refusal is terminal for the current L1 pass: the
-         * missing coin owns the prevout_unresolved hole, so ordinary cursor
-         * repair must not report `repaired` while the blocker stands. */
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup coin-backfill terminal refusal fixture",
-                   setup_fixture(&fx, "coin_backfill_terminal"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("coin-backfill terminal: seed prevout hole below cursor",
-                   put_script_status(db, A + 2, 0, "prevout_unresolved",
-                                     &fx.hashes[2]));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("coin-backfill terminal: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("coin-backfill terminal: refusal does not fall through",
-                   rr.coin_backfill_attempted &&
-                   rr.coin_backfill_status != COIN_BACKFILL_NOT_APPLICABLE &&
-                   !rr.repaired &&
-                   !rr.clamped_body_fetch &&
-                   !rr.clamped_tip_finalize &&
-                   cursor_value(db, "body_fetch") == A + 4 &&
-                   cursor_value(db, "tip_finalize") == A + 4 &&
-                   cursor_value(db, "script_validate") == A + 4 &&
-                   cursor_value(db, "utxo_apply") == A + 4);
-
-        teardown_fixture(&fx);
-    }
-
-    {
-        /* A coin-backfill refusal is a named self-heal failure, not a quiet
-         * no-op: the fixture block is unreadable (nFile == -1), so the
-         * prevout_unresolved hole refuses through the backfill ladder and the
-         * condition must report FAILED, not SKIP. */
-        struct rfrl_fixture fx;
-        RFRL_CHECK("setup coin-backfill refusal condition fixture",
-                   setup_fixture(&fx, "coin_backfill_refusal"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("coin-backfill refusal: seed prevout hole below cursor",
-                   put_script_status(db, A + 2, 0, "prevout_unresolved",
-                                     &fx.hashes[2]));
-        RFRL_CHECK("coin-backfill refusal: pre-align benign cursors",
-                   seed_cursor(db, "body_fetch", A + 2) &&
-                   seed_cursor(db, "tip_finalize", A + 1));
-
-        struct connman cm;
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        bool ok = got &&
-                  reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
-                  snap.currently_active &&
-                  snap.attempts == 1 &&
-                  snap.last_outcome == COND_REMEDY_FAILED &&
-                  !snap.operator_needed_emitted &&
-                  cursor_value(db, "body_fetch") == A + 2 &&
-                  cursor_value(db, "tip_finalize") == A + 1 &&
-                  cursor_value(db, "script_validate") == A + 4 &&
-                  cursor_value(db, "utxo_apply") == A + 4;
-        struct json_value dump;
-        json_init(&dump);
-        json_set_object(&dump);
-        ok = ok && condition_engine_dump_state_json(&dump, NULL);
-        const struct json_value *cond =
-            rfrl_json_condition(&dump, "reducer_frontier_reconcile_light");
-        const struct json_value *detail = json_get(cond, "detail");
-        ok = ok && detail != NULL;
-        ok = ok && json_get_bool(json_get(
-                     detail, "last_reconcile_seen"));
-        ok = ok && strcmp(json_get_str(json_get(
-                     detail, "last_reconcile_phase")), "remedy") == 0;
-        ok = ok && json_get_bool(json_get(
-                     detail, "last_reconcile_coin_backfill_attempted"));
-        ok = ok && !json_get_bool(json_get(
-                     detail, "last_reconcile_repaired"));
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_coin_backfill_hole_height"))
-                     == A + 2;
-        ok = ok && json_get_int(json_get(
-                     detail, "last_reconcile_coin_backfill_status")) > 0;
-        ok = ok && strcmp(json_get_str(json_get(
-                     detail,
-                     "last_reconcile_coin_backfill_status_label")),
-                     "not_applicable") != 0;
-        json_free(&dump);
-        RFRL_CHECK("coin-backfill refusal condition is failed, not skipped",
-                   ok);
-
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_coin_backfill_condition();
 
     /* ── non-canonical residue purge (the relabel-offset class) ──
      * Rows recorded for the WRONG block at their height (hash != canonical
      * active-chain block), including false ok=0 bad-cb-height verdicts, are
      * purged; a GENUINE consensus reject (ok=0 with the canonical hash)
      * survives. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("noncanon: setup fixture", setup_fixture(&fx, "noncanon"));
-        sqlite3 *db = progress_store_db();
-
-        RFRL_CHECK("noncanon: active chain installs",
-                   active_chain_move_window_tip(&fx.ms.chain_active,
-                                                fx.idx[3]));
-
-        /* Stale row at A+2: recorded with A+3's hash (a relabel wrote the
-         * wrong block's verdict here). False ok=0, like bad-cb-height. */
-        RFRL_CHECK("noncanon: seed stale script row",
-                   put_script_status(db, A + 2, 0, "contextual_invalid",
-                                     &fx.hashes[3]));
-        /* Genuine reject at A+3: ok=0 but hash IS canonical — kept. */
-        RFRL_CHECK("noncanon: seed genuine reject",
-                   put_script_status(db, A + 3, 0, "contextual_invalid",
-                                     &fx.hashes[3]));
-
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("noncanon: dry-run succeeds",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry));
-        RFRL_CHECK("noncanon: dry-run finds, does not purge",
-                   dry.noncanonical_found >= 1 &&
-                   dry.noncanonical_purged == 0 &&
-                   dry.lowest_noncanonical == A + 2);
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("noncanon: apply succeeds",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr));
-        RFRL_CHECK("noncanon: apply purges the stale row",
-                   rr.noncanonical_purged >= 1 && rr.repaired);
-
-        sqlite3_stmt *st = NULL;
-        int stale_left = -1, genuine_left = -1, vh_left = -1;
-        if (sqlite3_prepare_v2(db,
-                "SELECT "
-                " (SELECT COUNT(*) FROM script_validate_log WHERE height=?),"
-                " (SELECT COUNT(*) FROM script_validate_log WHERE height=?),"
-                " (SELECT COUNT(*) FROM validate_headers_log WHERE height=?)",
-                -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_int(st, 1, A + 2);
-            sqlite3_bind_int(st, 2, A + 3);
-            sqlite3_bind_int(st, 3, A + 2);
-            if (sqlite3_step(st) == SQLITE_ROW) {
-                stale_left = sqlite3_column_int(st, 0);
-                genuine_left = sqlite3_column_int(st, 1);
-                vh_left = sqlite3_column_int(st, 2);
-            }
-        }
-        sqlite3_finalize(st);
-        RFRL_CHECK("noncanon: stale gone, genuine + canonical rows kept",
-                   stale_left == 0 && genuine_left == 1 && vh_left == 1);
-
-        int dep_left = -1;
-        if (sqlite3_prepare_v2(db,
-                "SELECT (SELECT COUNT(*) FROM proof_validate_log "
-                "WHERE height=?) + (SELECT COUNT(*) FROM body_persist_log "
-                "WHERE height=?)",
-                -1, &st, NULL) == SQLITE_OK) {
-            sqlite3_bind_int(st, 1, A + 2);
-            sqlite3_bind_int(st, 2, A + 2);
-            if (sqlite3_step(st) == SQLITE_ROW)
-                dep_left = sqlite3_column_int(st, 0);
-        }
-        sqlite3_finalize(st);
-        RFRL_CHECK("noncanon: hashless downstream rows purged transitively",
-                   dep_left == 0);
-
-        bool progress_probed = false;
-        pthread_t progress_probe;
-        bool progress_probe_started =
-            pthread_create(&progress_probe, NULL, progress_lock_probe,
-                           &progress_probed) == 0;
-        RFRL_CHECK("noncanon: progress lock probe starts",
-                   progress_probe_started);
-        if (progress_probe_started) {
-            pthread_join(progress_probe, NULL);
-            RFRL_CHECK("noncanon: progress lock released",
-                       progress_probed);
-        }
-
-        struct active_chain_lock_probe_arg chain_probe_arg = {
-            .chain = &fx.ms.chain_active,
-            .probed = false,
-        };
-        pthread_t chain_probe;
-        bool chain_probe_started =
-            pthread_create(&chain_probe, NULL, active_chain_lock_probe,
-                           &chain_probe_arg) == 0;
-        RFRL_CHECK("noncanon: active-chain lock probe starts",
-                   chain_probe_started);
-        if (chain_probe_started) {
-            pthread_join(chain_probe, NULL);
-            RFRL_CHECK("noncanon: active-chain lock released",
-                       chain_probe_arg.probed);
-        }
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_noncanon_residue();
 
     /* Non-canonical evidence below the known coins frontier is replay-domain,
      * not purge-domain: deleting it creates a rowless hole below coins where
      * forward refills refuse to run. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("noncanon-below-coins: setup fixture",
-                   setup_fixture(&fx, "noncanon_below_coins"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("noncanon-below-coins: active chain installs",
-                   active_chain_move_window_tip(&fx.ms.chain_active,
-                                                fx.idx[3]));
-        RFRL_CHECK("noncanon-below-coins: seed coins above stale row",
-                   seed_coins_applied(db, A + 3));
-        RFRL_CHECK("noncanon-below-coins: seed stale script row",
-                   put_script_status(db, A + 2, 0, "contextual_invalid",
-                                     &fx.hashes[3]));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        memset(&rr, 0, sizeof(rr));
-        rr.hstar = A + 1;
-        rr.sweep_top = A + 2;
-        rr.coins_applied_found = true;
-        rr.coins_applied_height = A + 3;
-        rr.lowest_noncanonical = -1;
-        RFRL_CHECK("noncanon-below-coins: direct purge succeeds",
-                   stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
-                                                             &rr));
-        RFRL_CHECK("noncanon-below-coins: evidence is not purged",
-                   rr.noncanonical_found >= 1 &&
-                   rr.noncanonical_purged == 0 &&
-                   count_range(db, "script_validate_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "body_persist_log", A + 2, A + 3) == 1 &&
-                   count_range(db, "proof_validate_log", A + 2, A + 3) == 1);
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_noncanon_below_coins();
 
     /* A mixed-fork UTXO suffix is removed as one kernel unit. The pre-lock
      * result carries a stale coin frontier: purge must re-read the durable
      * frontier under its lock, clamp there, and remove future
      * log/delta/anchor state. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("noncanon-utxo-suffix: setup fixture",
-                   setup_fixture(&fx, "noncanon_utxo_suffix"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("noncanon-utxo-suffix: active chain installs",
-                   active_chain_move_window_tip(&fx.ms.chain_active,
-                                                fx.idx[3]));
-        struct uint256 fork = fx.hashes[3];
-        fork.data[31] ^= 0x6du;
-        RFRL_CHECK("noncanon-utxo-suffix: seed mixed fork and anchors",
-                   put_utxo_delta(db, A + 3, &fork) &&
-                   put_sapling_anchor_residue(db, A + 1, &fx.hashes[1]) &&
-                   put_sapling_anchor_residue(db, A + 3, &fork));
-
-        struct stage_reducer_frontier_reconcile_result rr;
-        memset(&rr, 0, sizeof(rr));
-        rr.hstar = A + 1;
-        rr.sweep_top = A + 3;
-        rr.coins_applied_found = true;
-        rr.coins_applied_height = A + 1; /* stale pre-lock snapshot */
-        rr.lowest_noncanonical = -1;
-        RFRL_CHECK("noncanon-utxo-suffix: direct purge succeeds",
-                   stage_reducer_frontier_purge_noncanonical(db, &fx.ms, true,
-                                                             &rr));
-        RFRL_CHECK("noncanon-utxo-suffix: live frontier wins stale snapshot",
-                   rr.coins_applied_found &&
-                   rr.coins_applied_height == A + 2 &&
-                   cursor_value(db, "utxo_apply") == A + 2);
-        RFRL_CHECK("noncanon-utxo-suffix: abandoned kernel suffix removed",
-                   count_range(db, "utxo_apply_log", A + 2, A + 4) == 0 &&
-                   count_range(db, "utxo_apply_delta", A + 2, A + 4) == 0 &&
-                   count_range(db, "sapling_anchors", A + 2, A + 4) == 0 &&
-                   count_range(db, "sapling_anchors", A + 1, A + 2) == 1);
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_noncanon_utxo_suffix();
 
     /* ── P3: peer-gate BYPASS for internal re-derivations ──
      * A rowless script_validate_log + proof_validate_log hole below the
      * cursors re-derives from local persisted state alone, so
      * peers-present-but-none-ahead must NOT suppress the healer. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("refill bypass: setup fixture",
-                   setup_fixture(&fx, "refill_bypass"));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("refill bypass: delete script+proof rows at the hole",
-                   delete_height(db, "script_validate_log", A + 2) &&
-                   delete_height(db, "proof_validate_log", A + 2));
-
-        /* One peer, NOT ahead: services=0 keeps connman_max_peer_height at -1
-         * while node_count=1, so peer_lag_allows_repair returns false. */
-        struct connman cm;
-        struct p2p_node p1;
-        struct p2p_node *peers[1];
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-        memset(&p1, 0, sizeof(p1));
-        p1.id = 1;
-        p1.starting_height = A + 1;
-        p1.state = PEER_ACTIVE;
-        peers[0] = &p1;
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        RFRL_CHECK("refill bypass: detect fires with no peer ahead and the "
-                   "remedy clamps script/proof cursors to the hole",
-                   got &&
-                   reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
-                   snap.currently_active &&
-                   cursor_value(db, "script_validate") == A + 2 &&
-                   cursor_value(db, "proof_validate") == A + 2);
-        RFRL_CHECK("refill bypass: transition WARN exactly once, no "
-                   "suppression WARN",
-                   reducer_frontier_reconcile_light_test_bypass_warns() == 1 &&
-                   reducer_frontier_reconcile_light_test_gate_suppress_warns()
-                       == 0);
-
-        cm.manager.nodes = NULL;
-        cm.manager.num_nodes = 0;
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_refill_bypass();
 
     /* ── P3: gate PRESERVED for plain cursor churn (no repair evidence) ──
      * Same peer state (present, not ahead) with no refill hole, tear or
      * residue: the tip_finalize clamp alone is not peer-independent evidence,
      * so detect stays suppressed, silently (no WARN). */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("churn suppress: setup fixture",
-                   setup_fixture(&fx, "churn_suppress"));
-        sqlite3 *db = progress_store_db();
-        /* Fill body_fetch_log A+1..A+3 so no body_fetch refill hole exists;
-         * the dry-run still reports repaired via the tip_finalize clamp and
-         * the unreadable-HAVE_DATA flag sweep. */
-        RFRL_CHECK("churn suppress: fill body_fetch rows",
-                   put_body_fetch_ok(db, A + 1, &fx.hashes[1]) &&
-                   put_body_fetch_ok(db, A + 2, &fx.hashes[2]) &&
-                   put_body_fetch_ok(db, A + 3, &fx.hashes[3]));
-
-        struct connman cm;
-        struct p2p_node p1;
-        struct p2p_node *peers[1];
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-        memset(&p1, 0, sizeof(p1));
-        p1.id = 1;
-        p1.starting_height = A + 1;
-        p1.state = PEER_ACTIVE;
-        peers[0] = &p1;
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-        reducer_frontier_reconcile_light_test_clear_backoff();
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        RFRL_CHECK("churn suppress: gate holds, remedy never runs, silent",
-                   got &&
-                   reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
-                   !snap.currently_active &&
-                   reducer_frontier_reconcile_light_test_bypass_warns() == 0 &&
-                   reducer_frontier_reconcile_light_test_gate_suppress_warns()
-                       == 0);
-        RFRL_CHECK("churn suppress: no mutation while suppressed",
-                   cursor_value(db, "tip_finalize") == A + 4 &&
-                   cursor_value(db, "body_fetch") == A + 4);
-
-        cm.manager.nodes = NULL;
-        cm.manager.num_nodes = 0;
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_churn_suppress();
 
     /* ── P3: LOUD suppression — actionable evidence discarded at the gate
      * must WARN (throttled), never silently idle. The default fixture's empty
      * body_fetch_log reports lowest_body_fetch_refill_hole=A+2, actionable but
      * NOT in the internal-rederivation bypass list (re-fetching a body needs a
      * peer), so the gate suppresses it and node.log must name the suppression. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("loud suppress: setup fixture",
-                   setup_fixture(&fx, "loud_suppress"));
-        sqlite3 *db = progress_store_db();
-
-        struct connman cm;
-        struct p2p_node p1;
-        struct p2p_node *peers[1];
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-        memset(&p1, 0, sizeof(p1));
-        p1.id = 1;
-        p1.starting_height = A + 1;
-        p1.state = PEER_ACTIVE;
-        peers[0] = &p1;
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        RFRL_CHECK("loud suppress: gate suppresses but WARNs once",
-                   got &&
-                   !snap.currently_active &&
-                   reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
-                   reducer_frontier_reconcile_light_test_bypass_warns() == 0 &&
-                   reducer_frontier_reconcile_light_test_gate_suppress_warns()
-                       == 1);
-
-        reducer_frontier_reconcile_light_test_clear_backoff();
-        condition_engine_tick();
-        RFRL_CHECK("loud suppress: WARN throttled on the next tick",
-                   reducer_frontier_reconcile_light_test_remedy_calls() == 0 &&
-                   reducer_frontier_reconcile_light_test_gate_suppress_warns()
-                       == 1);
-        RFRL_CHECK("loud suppress: no mutation while suppressed",
-                   cursor_value(db, "body_fetch") == A + 4 &&
-                   cursor_value(db, "tip_finalize") == A + 4);
-
-        cm.manager.nodes = NULL;
-        cm.manager.num_nodes = 0;
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_loud_suppress();
 
     /* ── F6: the peer gate compares the PROVABLE tip (H*), not the download tip ──
      * With the fold stalled below the header tip, the download tip
@@ -2207,63 +2898,7 @@ int test_reducer_frontier_reconcile_light(void)
      * starting_height while H* lags. A block-serving peer whose
      * starting_height is AHEAD of H* but BEHIND the download tip is evidence
      * the provable tip is stale, so the repair must be admitted. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("F6: setup fixture", setup_fixture(&fx, "f6_hstar_gate"));
-        sqlite3 *db = progress_store_db();
-        /* Download tip at A+3 (active_chain_height) while H* stays pinned at
-         * A+1 (tip_finalize ok=1 only at A+1). */
-        RFRL_CHECK("F6: active chain tip at A+3",
-                   active_chain_move_window_tip(&fx.ms.chain_active,
-                                                fx.idx[3]));
-
-        /* One block-serving peer whose starting_height (A+2) is ABOVE H* (A+1)
-         * but BELOW the download tip (A+3). */
-        struct connman cm;
-        struct p2p_node p1;
-        struct p2p_node *peers[1];
-        memset(&cm, 0, sizeof(cm));
-        net_manager_init(&cm.manager);
-        memset(&p1, 0, sizeof(p1));
-        p1.id = 1;
-        p1.starting_height = A + 2;
-        p1.state = PEER_HANDSHAKE_COMPLETE;
-        p1.services = NODE_NETWORK;
-        peers[0] = &p1;
-        cm.manager.nodes = peers;
-        cm.manager.num_nodes = 1;
-
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        sync_monitor_init();
-        sync_monitor_set_context(&cm, NULL, &fx.ms);
-        sync_monitor_test_set_tip_advance_ts(1);
-        register_reducer_frontier_reconcile_light();
-
-        condition_engine_tick();
-
-        struct condition_runtime_snapshot snap;
-        bool got = condition_engine_get_registered_snapshot(
-            "reducer_frontier_reconcile_light", &snap);
-        RFRL_CHECK("F6: peer ahead of H* (not the download tip) admits the "
-                   "repair — remedy runs and clamps tip_finalize to H*+1",
-                   got &&
-                   reducer_frontier_reconcile_light_test_remedy_calls() == 1 &&
-                   snap.currently_active &&
-                   cursor_value(db, "tip_finalize") == A + 2);
-        /* Admitted via the H* peer-lag path, not the tear/refill bypass. */
-        RFRL_CHECK("F6: no tear/refill bypass WARN (plain peer-ahead admit)",
-                   reducer_frontier_reconcile_light_test_bypass_warns() == 0);
-
-        cm.manager.nodes = NULL;
-        cm.manager.num_nodes = 0;
-        sync_monitor_set_context(NULL, NULL, NULL);
-        sync_monitor_test_set_tip_advance_ts(0);
-        condition_engine_reset_for_testing();
-        reducer_frontier_reconcile_light_test_reset();
-        net_manager_free(&cm.manager);
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_f6_hstar_gate();
 
     /* ── Label-splice re-bind (direct arm): deep NULL-block_hash suffix ──
      * Proof/script cursors at N+164, an ok=1/NULL-block_hash suffix over
@@ -2272,263 +2907,24 @@ int test_reducer_frontier_reconcile_light(void)
      * MIN(utxo_apply, tip_finalize)) and deletes the NULL suffix. The 163-deep
      * span exceeds the block_rollback cap (100), so the larger validation-rebind
      * cap is what admits it. Pure progress-store arm; no main_state needed. */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir),
-                         "reducer_frontier_reconcile_light", "rebind_direct");
-        RFRL_CHECK("rebind-direct: store opens", progress_store_open(dir));
-        sqlite3 *db = progress_store_db();
-        RFRL_CHECK("rebind-direct: schema", seed_schema(db));
-
-        const int N = 1000;          /* anchor-free height */
-        const int SPAN = 163;        /* NULL suffix over (N, N+163] */
-        const int pv = N + SPAN + 1; /* proof/script cursor = N+164 */
-
-        /* Row at N is hashed (below the consumer floor) — must NOT be touched. */
-        struct uint256 hN; memset(&hN, 0, sizeof(hN)); hN.data[0] = 0x11;
-        RFRL_CHECK("rebind-direct: hashed row at N (below floor)",
-                   put_hash_log(db, "proof_validate_log", "block_hash",
-                                N, 1, &hN) &&
-                   put_hash_log(db, "script_validate_log", "block_hash",
-                                N, 1, &hN));
-        bool seeded = true;
-        for (int h = N + 1; h <= N + SPAN; h++)
-            seeded = seeded &&
-                     put_verdict_null_hash(db, "proof_validate_log", h) &&
-                     put_verdict_null_hash(db, "script_validate_log", h);
-        RFRL_CHECK("rebind-direct: NULL suffix seeded", seeded);
-        RFRL_CHECK("rebind-direct: cursors seeded",
-                   seed_cursor(db, "proof_validate", pv) &&
-                   seed_cursor(db, "script_validate", pv) &&
-                   seed_cursor(db, "utxo_apply", N + 1) &&
-                   seed_cursor(db, "tip_finalize", N));
-
-        /* Dry-run: reports the pending re-bind, mutates NOTHING. */
-        {
-            struct stage_reducer_frontier_reconcile_result rr;
-            memset(&rr, 0, sizeof(rr));
-            rr.hstar = N;
-            rr.label_splice_rebind_lowest = -1;
-            bool mutated = true;
-            RFRL_CHECK("rebind-direct: dry-run returns ok",
-                       stage_reducer_frontier_try_label_splice_rebind(
-                           db, false, &rr, &mutated));
-            RFRL_CHECK("rebind-direct: dry-run detects N+1, no mutation",
-                       !mutated && rr.label_splice_rebind_lowest == N + 1 &&
-                       rr.label_splice_rebound == 0 &&
-                       cursor_value(db, "proof_validate") == pv &&
-                       cursor_value(db, "script_validate") == pv &&
-                       count_null_block_hash(db, "proof_validate_log",
-                                             N + 1, pv) == SPAN);
-        }
-
-        /* Cap gate: a small validation cap refuses the 163-deep rewind. */
-        {
-            setenv("ZCL_MAX_VALIDATION_REBIND", "100", 1);
-            struct stage_reducer_frontier_reconcile_result rr;
-            memset(&rr, 0, sizeof(rr));
-            rr.hstar = N;
-            rr.label_splice_rebind_lowest = -1;
-            bool mutated = true;
-            RFRL_CHECK("rebind-direct: cap=100 returns ok",
-                       stage_reducer_frontier_try_label_splice_rebind(
-                           db, true, &rr, &mutated));
-            RFRL_CHECK("rebind-direct: cap=100 REFUSES 163-deep rewind",
-                       !mutated && rr.label_splice_rebound == 0 &&
-                       cursor_value(db, "proof_validate") == pv &&
-                       count_null_block_hash(db, "proof_validate_log",
-                                             N + 1, pv) == SPAN);
-            unsetenv("ZCL_MAX_VALIDATION_REBIND");
-        }
-
-        /* Apply: default cap (4096) admits the 163-deep rewind of BOTH cursors. */
-        {
-            struct stage_reducer_frontier_reconcile_result rr;
-            memset(&rr, 0, sizeof(rr));
-            rr.hstar = N;
-            rr.label_splice_rebind_lowest = -1;
-            rr.label_splice_proof_rewound_to = -1;
-            rr.label_splice_script_rewound_to = -1;
-            bool mutated = false;
-            RFRL_CHECK("rebind-direct: apply returns ok",
-                       stage_reducer_frontier_try_label_splice_rebind(
-                           db, true, &rr, &mutated));
-            RFRL_CHECK("rebind-direct: apply re-bound BOTH cursors to N+1",
-                       mutated && rr.label_splice_rebound == 2 &&
-                       rr.label_splice_proof_rewound_to == N + 1 &&
-                       rr.label_splice_script_rewound_to == N + 1 &&
-                       cursor_value(db, "proof_validate") == N + 1 &&
-                       cursor_value(db, "script_validate") == N + 1);
-            RFRL_CHECK("rebind-direct: NULL suffix deleted, floor row kept, "
-                       "utxo_apply/tip_finalize untouched",
-                       count_null_block_hash(db, "proof_validate_log",
-                                             N + 1, pv) == 0 &&
-                       count_null_block_hash(db, "script_validate_log",
-                                             N + 1, pv) == 0 &&
-                       count_range(db, "proof_validate_log", N, N + 1) == 1 &&
-                       count_range(db, "script_validate_log", N, N + 1) == 1 &&
-                       cursor_value(db, "utxo_apply") == N + 1 &&
-                       cursor_value(db, "tip_finalize") == N);
-        }
-
-        progress_store_close();
-        test_rm_rf_recursive(dir);
-    }
+    failures += rfrl_check_rebind_direct();
 
     /* ── Label-splice re-bind (WIRING via the public reconcile entry) ──
      * The impl must CALL the arm: seed a NULL-block_hash proof/script suffix
      * at the utxo_apply frontier; only the re-bind arm rewinds the proof/script
      * VALIDATION cursors (otherwise they stay at A+4). */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("rebind-wire: setup", setup_fixture(&fx, "rebind_wire"));
-        sqlite3 *db = progress_store_db();
-
-        /* utxo_apply STUCK at A+2 (log ok=1 only through A+1); proof/script
-         * validated ahead to A+4 with a NULL-block_hash suffix at A+2, A+3.
-         * Active window tip pinned at A+1 (== hstar) so the noncanonical purge
-         * scans empty. */
-        RFRL_CHECK("rebind-wire: shape the wedge",
-                   delete_height(db, "utxo_apply_log", A + 2) &&
-                   delete_height(db, "utxo_apply_log", A + 3) &&
-                   delete_height(db, "utxo_apply_delta", A + 2) &&
-                   delete_height(db, "utxo_apply_delta", A + 3) &&
-                   put_verdict_null_hash(db, "proof_validate_log", A + 2) &&
-                   put_verdict_null_hash(db, "proof_validate_log", A + 3) &&
-                   put_verdict_null_hash(db, "script_validate_log", A + 2) &&
-                   put_verdict_null_hash(db, "script_validate_log", A + 3) &&
-                   seed_cursor(db, "utxo_apply", A + 2) &&
-                   seed_cursor(db, "tip_finalize", A + 2) &&
-                   seed_coins_applied(db, A + 2) &&
-                   active_chain_move_window_tip(&fx.ms.chain_active, fx.idx[1]));
-
-        /* Dry-run detect sees the pending re-bind (activates the Condition). */
-        struct stage_reducer_frontier_reconcile_result dry;
-        RFRL_CHECK("rebind-wire: dry-run detects re-bind pending",
-                   stage_reducer_frontier_reconcile_light_needed(
-                       db, &fx.ms, &dry) &&
-                   dry.label_splice_rebind_lowest == A + 2 &&
-                   dry.hstar == A + 1 &&
-                   cursor_value(db, "proof_validate") == A + 4 &&
-                   count_null_block_hash(db, "proof_validate_log",
-                                         A + 2, A + 4) == 2);
-
-        /* Apply: the wired impl runs the arm; proof/script cursors rewind and
-         * the NULL suffix is deleted. */
-        struct stage_reducer_frontier_reconcile_result rr;
-        RFRL_CHECK("rebind-wire: apply runs the arm (RED->GREEN)",
-                   stage_reducer_frontier_reconcile_light(db, &fx.ms, &rr) &&
-                   rr.label_splice_rebound == 2 &&
-                   cursor_value(db, "proof_validate") == A + 2 &&
-                   cursor_value(db, "script_validate") == A + 2 &&
-                   count_null_block_hash(db, "proof_validate_log",
-                                         A + 2, A + 4) == 0 &&
-                   count_null_block_hash(db, "script_validate_log",
-                                         A + 2, A + 4) == 0 &&
-                   /* utxo_apply cursor NEVER touched by the arm. */
-                   cursor_value(db, "utxo_apply") == A + 2);
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_rebind_wire();
 
     /* A fired re-bind outranks a coin_backfill refusal. The remedy decision
      * (rfrl_remedy_outcome) is a PURE function of the result: a successful
      * label_splice re-bind reports OK even with an unrelated coin_backfill
      * owner-refusal at a later height; the control (no re-bind) shows the coin
      * refusal alone would fail the remedy. */
-    {
-        struct stage_reducer_frontier_reconcile_result rr;
-        memset(&rr, 0, sizeof(rr));
-        rr.coin_backfill_attempted = true;
-        rr.coin_backfill_owner_refused = true;
-        rr.coin_backfill_hole_height = A + 900;
-        RFRL_CHECK("conflation: coin refusal alone -> FAILED (control)",
-                   reducer_frontier_reconcile_light_test_remedy_outcome(&rr) ==
-                       COND_REMEDY_FAILED);
-
-        rr.label_splice_rebound = 2;
-        rr.label_splice_rebind_lowest = A + 2;
-        rr.repaired = true;
-        RFRL_CHECK("conflation: re-bind + coin refusal -> OK (re-bind wins)",
-                   reducer_frontier_reconcile_light_test_remedy_outcome(&rr) ==
-                       COND_REMEDY_OK);
-    }
+    failures += rfrl_check_conflation_control();
 
     /* ABBA regression: the reconcile must not own progress_store_tx_lock
      * while it waits for cs_main (see rfrl_order_probe above). */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("lock-order: setup fixture",
-                   setup_fixture(&fx, "lock_order_csmain"));
-        sqlite3 *db = progress_store_db();
-
-        pthread_mutex_lock(&g_order_mu);
-        g_order_csmain_held = false;
-        g_order_release = false;
-        pthread_mutex_unlock(&g_order_mu);
-
-        struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
-                                          .finished = false, .ok = false };
-        pthread_t holder;
-        bool holder_started =
-            pthread_create(&holder, NULL, rfrl_csmain_holder, &fx.ms) == 0;
-        RFRL_CHECK("lock-order: cs_main holder starts", holder_started);
-
-        if (holder_started) {
-            pthread_mutex_lock(&g_order_mu);
-            while (!g_order_csmain_held)
-                pthread_cond_wait(&g_order_cv, &g_order_mu);
-            pthread_mutex_unlock(&g_order_mu);
-
-            pthread_t worker;
-            bool worker_started =
-                pthread_create(&worker, NULL, rfrl_reconcile_worker,
-                               &probe) == 0;
-            RFRL_CHECK("lock-order: reconcile worker starts", worker_started);
-
-            bool tx_free = false;
-            bool parked = false;
-            if (worker_started) {
-                /* Settle: let the worker reach the lock it blocks on (it
-                 * cannot complete while cs_main is held). */
-                rfrl_order_sleep_ms(300);
-                parked = !__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE);
-
-                /* Decisive poll. The correct order parks on cs_main owning
-                 * nothing, so the progress lock stays free; the inverted order
-                 * parks holding it. Early polls can miss: the reconcile takes
-                 * and releases the progress lock a few times on its way in. */
-                for (int i = 0; i < 250 && !tx_free; i++) {
-                    if (progress_store_tx_trylock()) {
-                        progress_store_tx_unlock();
-                        tx_free = true;
-                        break;
-                    }
-                    rfrl_order_sleep_ms(20);
-                }
-            }
-
-            RFRL_CHECK("lock-order: reconcile waits on cs_main (probe valid)",
-                       parked);
-            RFRL_CHECK("lock-order: progress lock NOT held while waiting for "
-                       "cs_main",
-                       tx_free);
-
-            pthread_mutex_lock(&g_order_mu);
-            g_order_release = true;
-            pthread_cond_broadcast(&g_order_cv);
-            pthread_mutex_unlock(&g_order_mu);
-
-            if (worker_started) {
-                pthread_join(worker, NULL);
-                RFRL_CHECK("lock-order: reconcile completes after release",
-                           probe.ok);
-            }
-            pthread_join(holder, NULL);
-        }
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_lock_order_flags();
 
     /* ABBA regression, other direction: a reducer drain owns the progress
      * store and the reconcile must DECLINE rather than park on it.
@@ -2538,81 +2934,7 @@ int test_reducer_frontier_reconcile_light(void)
      * progress store in read_frontier_snapshot() (no cs_main held); it must
      * never park on it while OWNING cs_main. Mirror of the case above: with
      * the progress store held, cs_main must stay free. */
-    {
-        struct rfrl_fixture fx;
-        RFRL_CHECK("lock-order: setup fixture (progress-held)",
-                   setup_fixture(&fx, "lock_order_progress"));
-        sqlite3 *db = progress_store_db();
-        stage_reducer_frontier_reset_detect_memo_for_testing();
-
-        pthread_mutex_lock(&g_order_mu);
-        g_order_progress_held = false;
-        g_order_release = false;
-        pthread_mutex_unlock(&g_order_mu);
-
-        struct rfrl_order_probe probe = { .db = db, .ms = &fx.ms,
-                                          .finished = false, .ok = false };
-        pthread_t holder;
-        bool holder_started =
-            pthread_create(&holder, NULL, rfrl_progress_holder, NULL) == 0;
-        RFRL_CHECK("lock-order: progress holder starts", holder_started);
-
-        if (holder_started) {
-            pthread_mutex_lock(&g_order_mu);
-            while (!g_order_progress_held)
-                pthread_cond_wait(&g_order_cv, &g_order_mu);
-            pthread_mutex_unlock(&g_order_mu);
-
-            pthread_t worker;
-            bool worker_started =
-                pthread_create(&worker, NULL, rfrl_flags_worker,
-                               &probe) == 0;
-            RFRL_CHECK("lock-order: flags worker starts (progress-held)",
-                       worker_started);
-
-            /* The seam calls reconcile_block_index_flags directly, so entry
-             * into the both-locks section is structural. Both assertions fail
-             * against a BLOCKING acquire, which parks inside the section still
-             * owning cs_main until the drain lets go. */
-            bool declined = false;
-            bool csmain_free = false;
-            if (worker_started) {
-                for (int i = 0; i < 250 && !declined; i++) {
-                    if (__atomic_load_n(&probe.finished, __ATOMIC_ACQUIRE)) {
-                        declined = true;
-                        break;
-                    }
-                    rfrl_order_sleep_ms(20);
-                }
-                for (int i = 0; i < 250 && !csmain_free; i++) {
-                    if (zcl_mutex_trylock(&fx.ms.cs_main)) {
-                        zcl_mutex_unlock(&fx.ms.cs_main);
-                        csmain_free = true;
-                        break;
-                    }
-                    rfrl_order_sleep_ms(20);
-                }
-            }
-
-            RFRL_CHECK("lock-order: reconcile DECLINES rather than blocking "
-                       "on a progress store held by a drain",
-                       declined);
-            RFRL_CHECK("lock-order: cs_main NOT held while the drain owns the "
-                       "progress store",
-                       csmain_free);
-
-            pthread_mutex_lock(&g_order_mu);
-            g_order_release = true;
-            pthread_cond_broadcast(&g_order_cv);
-            pthread_mutex_unlock(&g_order_mu);
-
-            if (worker_started)
-                pthread_join(worker, NULL);
-            pthread_join(holder, NULL);
-        }
-
-        teardown_fixture(&fx);
-    }
+    failures += rfrl_check_lock_order_progress_held();
 
     printf("reducer_frontier_reconcile_light: %d failures\n", failures);
     return failures;
