@@ -81,36 +81,57 @@ static bool ascii_alnum(unsigned char c)
                               c <= (unsigned char)'Z') || ascii_digit(c);
 }
 
-static bool token_safe(const char *value, bool task_id)
+static bool token_char_allowed(unsigned char c, bool task_id)
 {
-    if (!value || !value[0]) return false;
-    size_t n = strlen(value);
-    if (n > (task_id ? EVAL_ID_MAX : EVAL_PATH_MAX)) return false;
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)value[i];
-        if (task_id) {
-            if (!(ascii_lower(c) || ascii_digit(c) || c == '_')) return false;
-        } else if (!(ascii_alnum(c) || c == '.' || c == '_' || c == '/' ||
-                     c == '+' || c == '@' || c == '-')) {
-            return false;
-        }
-    }
-    if (task_id && !(ascii_lower((unsigned char)value[0]) ||
-                     ascii_digit((unsigned char)value[0])))
+    if (task_id) return ascii_lower(c) || ascii_digit(c) || c == '_';
+    return ascii_alnum(c) || c == '.' || c == '_' || c == '/' ||
+           c == '+' || c == '@' || c == '-';
+}
+
+static bool token_chars_safe(const char *value, size_t n, bool task_id)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!token_char_allowed((unsigned char)value[i], task_id)) return false;
+    return true;
+}
+
+static bool token_lead_safe(const char *value, bool task_id)
+{
+    unsigned char c = (unsigned char)value[0];
+    if (task_id) return ascii_lower(c) || ascii_digit(c);
+    return ascii_alnum(c);
+}
+
+static bool token_component_safe(const char *component, size_t length)
+{
+    if (length == 0 || (length == 1 && component[0] == '.') ||
+        (length == 2 && component[0] == '.' && component[1] == '.'))
         return false;
-    if (!task_id && !ascii_alnum((unsigned char)value[0])) return false;
+    return true;
+}
+
+static bool token_components_safe(const char *value)
+{
     const char *component = value;
     for (const char *p = value;; p++) {
         if (*p == '/' || *p == '\0') {
             size_t length = (size_t)(p - component);
-            if (length == 0 || (length == 1 && component[0] == '.') ||
-                (length == 2 && component[0] == '.' && component[1] == '.'))
-                return false;
+            if (!token_component_safe(component, length)) return false;
             if (*p == '\0') break;
             component = p + 1;
         }
     }
     return true;
+}
+
+static bool token_safe(const char *value, bool task_id)
+{
+    if (!value || !value[0]) return false;
+    size_t n = strlen(value);
+    if (n > (task_id ? EVAL_ID_MAX : EVAL_PATH_MAX)) return false;
+    if (!token_chars_safe(value, n, task_id) || !token_lead_safe(value, task_id))
+        return false;
+    return token_components_safe(value);
 }
 
 static bool split_exact(char *line, char **fields, size_t expected)
@@ -263,53 +284,48 @@ static void u64le(uint8_t out[8], uint64_t value)
     }
 }
 
-static int rank_root_mode(const char *complete_text)
+static bool rank_root_split_row(char *line, char *fields[3])
 {
-    size_t complete = 0, count = 0;
-    char line[EVAL_LINE_MAX];
-    if (!parse_size(complete_text, 1, &complete)) {
-        (void)fail("rank-root completeness must be 0 or 1");
-        return 1;
-    }
-    struct eval_arm_storage *arm = &g_tasks[0].literal;
-    while (read_line(line)) {
-        if (count == ZCL_RETRIEVAL_EVAL_RANK_MAX) {
-            (void)fail("rank-root input exceeds 128 rows");
-            return 1;
-        }
-        char *fields[3] = {line, NULL, NULL};
-        char *first_tab = strchr(line, '\t');
-        char *second_tab = first_tab ? strchr(first_tab + 1, '\t') : NULL;
-        if (!first_tab || !second_tab || strchr(second_tab + 1, '\t')) {
-            (void)fail("rank-root row is not rank<TAB>bytes<TAB>path");
-            return 1;
-        }
-        *first_tab = '\0';
-        *second_tab = '\0';
-        fields[1] = first_tab + 1;
-        fields[2] = second_tab + 1;
-        size_t rank = 0, context_bytes = 0;
-        if (!parse_size(fields[0], ZCL_RETRIEVAL_EVAL_RANK_MAX, &rank) ||
-            rank != count + 1u ||
-            !parse_size(fields[1], SIZE_MAX, &context_bytes) ||
-            !token_safe(fields[2], false)) {
-            (void)fail("invalid rank-root row");
-            return 1;
-        }
-        for (size_t i = 0; i < count; i++)
-            if (strcmp(arm->paths[i], fields[2]) == 0) {
-                (void)fail("duplicate rank-root path");
-                return 1;
-            }
-        memcpy(arm->paths[count], fields[2], strlen(fields[2]) + 1u);
-        arm->ranked[count].path = arm->paths[count];
-        arm->ranked[count].context_bytes = (uint64_t)context_bytes;
-        count++;
-    }
-    if (ferror(stdin)) {
-        (void)fail("rank-root input read failed");
-        return 1;
-    }
+    char *first_tab = strchr(line, '\t');
+    char *second_tab = first_tab ? strchr(first_tab + 1, '\t') : NULL;
+    if (!first_tab || !second_tab || strchr(second_tab + 1, '\t')) return false;
+    *first_tab = '\0';
+    *second_tab = '\0';
+    fields[0] = line;
+    fields[1] = first_tab + 1;
+    fields[2] = second_tab + 1;
+    return true;
+}
+
+static bool rank_root_fields_valid(char *fields[3], size_t count,
+                                   size_t *context_bytes)
+{
+    size_t rank = 0;
+    return parse_size(fields[0], ZCL_RETRIEVAL_EVAL_RANK_MAX, &rank) &&
+           rank == count + 1u &&
+           parse_size(fields[1], SIZE_MAX, context_bytes) &&
+           token_safe(fields[2], false);
+}
+
+static bool rank_root_path_seen(const struct eval_arm_storage *arm,
+                                size_t count, const char *path)
+{
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(arm->paths[i], path) == 0) return true;
+    return false;
+}
+
+static void rank_root_store(struct eval_arm_storage *arm, size_t count,
+                            const char *path, size_t context_bytes)
+{
+    memcpy(arm->paths[count], path, strlen(path) + 1u);
+    arm->ranked[count].path = arm->paths[count];
+    arm->ranked[count].context_bytes = (uint64_t)context_bytes;
+}
+
+static void rank_root_digest(const struct eval_arm_storage *arm, size_t count,
+                             bool complete, uint8_t digest[SHA3_256_OUTPUT_SIZE])
+{
     static const char domain[] = "zcl.retrieval_ranked_files.v1";
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
@@ -325,9 +341,47 @@ static int rank_root_mode(const char *complete_text)
         u64le(encoded, arm->ranked[i].context_bytes);
         sha3_256_write(&sha, encoded, sizeof(encoded));
     }
+    sha3_256_finalize(&sha, digest);
+}
+
+static int rank_root_mode(const char *complete_text)
+{
+    size_t complete = 0, count = 0;
+    char line[EVAL_LINE_MAX];
+    if (!parse_size(complete_text, 1, &complete)) {
+        (void)fail("rank-root completeness must be 0 or 1");
+        return 1;
+    }
+    struct eval_arm_storage *arm = &g_tasks[0].literal;
+    while (read_line(line)) {
+        if (count == ZCL_RETRIEVAL_EVAL_RANK_MAX) {
+            (void)fail("rank-root input exceeds 128 rows");
+            return 1;
+        }
+        char *fields[3] = {line, NULL, NULL};
+        if (!rank_root_split_row(line, fields)) {
+            (void)fail("rank-root row is not rank<TAB>bytes<TAB>path");
+            return 1;
+        }
+        size_t context_bytes = 0;
+        if (!rank_root_fields_valid(fields, count, &context_bytes)) {
+            (void)fail("invalid rank-root row");
+            return 1;
+        }
+        if (rank_root_path_seen(arm, count, fields[2])) {
+            (void)fail("duplicate rank-root path");
+            return 1;
+        }
+        rank_root_store(arm, count, fields[2], context_bytes);
+        count++;
+    }
+    if (ferror(stdin)) {
+        (void)fail("rank-root input read failed");
+        return 1;
+    }
     uint8_t digest[SHA3_256_OUTPUT_SIZE];
     char hex[SHA3_256_OUTPUT_SIZE * 2u + 1u];
-    sha3_256_finalize(&sha, digest);
+    rank_root_digest(arm, count, complete != 0, digest);
     zcl_hex_encode(digest, sizeof(digest), hex);
     printf("%s\n", hex);
     return ferror(stdout) ? 1 : 0;
@@ -508,89 +562,132 @@ static int profile_replay_mode(
     return ferror(stdout) ? 1 : 0;
 }
 
-int main(int argc, char **argv)
-{
-    if (argc == 3 && strcmp(argv[1], "--rank-root") == 0)
-        return rank_root_mode(argv[2]);
-    bool experiment_mode = false;
-    bool profile_mode = false;
-    size_t experiment_prefix = 0;
+struct eval_cli {
+    bool experiment_mode;
+    bool profile_mode;
+    size_t experiment_prefix;
     struct zcl_retrieval_profile_v1 profile;
-    uint8_t evaluator_root[32] = {0};
-    if (argc == 3 && strcmp(argv[1], "--experiment-prefix") == 0) {
-        if (!parse_size(argv[2], ZCL_RETRIEVAL_EXPERIMENT_TOP,
-                        &experiment_prefix)) {
-            (void)fail("experiment prefix must be 0 through 5");
-            return 64;
-        }
-        experiment_mode = true;
-    } else if (argc == 5 && strcmp(argv[1], "--profile-hex") == 0 &&
-               strcmp(argv[3], "--evaluator-root") == 0) {
-        uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
-        if (!zcl_hex_decode_lower(argv[2], wire, sizeof(wire)) ||
-            zcl_retrieval_profile_parse(wire, sizeof(wire), &profile) !=
-                ZCL_RETRIEVAL_EXPERIMENT_OK ||
-            !zcl_hex_decode_lower(argv[4], evaluator_root,
-                                  sizeof(evaluator_root))) {
-            (void)fail("profile or evaluator root is not canonical");
-            return 64;
-        }
-        profile_mode = true;
-    } else if (argc != 1) {
-        fputs("usage: retrieval-eval < batch.txt\n"
-              "       retrieval-eval --rank-root 0|1 < ranks.tsv\n"
-              "       retrieval-eval --experiment-prefix 0..5 < batch.txt\n"
-              "       retrieval-eval --profile-hex HEX "
-              "--evaluator-root ROOT < batch.txt\n",
-              stderr);
+    uint8_t evaluator_root[32];
+};
+
+static void print_usage(void)
+{
+    fputs("usage: retrieval-eval < batch.txt\n"
+          "       retrieval-eval --rank-root 0|1 < ranks.tsv\n"
+          "       retrieval-eval --experiment-prefix 0..5 < batch.txt\n"
+          "       retrieval-eval --profile-hex HEX "
+          "--evaluator-root ROOT < batch.txt\n",
+          stderr);
+}
+
+static int parse_experiment_prefix_arg(const char *text, struct eval_cli *cli)
+{
+    if (!parse_size(text, ZCL_RETRIEVAL_EXPERIMENT_TOP,
+                    &cli->experiment_prefix)) {
+        (void)fail("experiment prefix must be 0 through 5");
         return 64;
     }
-    if (profile_mode) {
-        g_hash_input = true;
-        sha3_256_init(&g_input_sha);
+    cli->experiment_mode = true;
+    return 0;
+}
+
+static int parse_profile_args(char **argv, struct eval_cli *cli)
+{
+    uint8_t wire[ZCL_RETRIEVAL_PROFILE_WIRE_BYTES];
+    if (!zcl_hex_decode_lower(argv[2], wire, sizeof(wire)) ||
+        zcl_retrieval_profile_parse(wire, sizeof(wire), &cli->profile) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK ||
+        !zcl_hex_decode_lower(argv[4], cli->evaluator_root,
+                              sizeof(cli->evaluator_root))) {
+        (void)fail("profile or evaluator root is not canonical");
+        return 64;
     }
-    char line[EVAL_LINE_MAX];
-    size_t task_count, declared_relevance_judgments;
+    cli->profile_mode = true;
+    return 0;
+}
+
+static int parse_cli_args(int argc, char **argv, struct eval_cli *cli)
+{
+    if (argc == 3 && strcmp(argv[1], "--experiment-prefix") == 0)
+        return parse_experiment_prefix_arg(argv[2], cli);
+    if (argc == 5 && strcmp(argv[1], "--profile-hex") == 0 &&
+        strcmp(argv[3], "--evaluator-root") == 0)
+        return parse_profile_args(argv, cli);
+    if (argc != 1) {
+        print_usage();
+        return 64;
+    }
+    return 0;
+}
+
+static bool read_batch_header(char line[EVAL_LINE_MAX], size_t *task_count,
+                              size_t *declared_relevance_judgments)
+{
     if (!read_line(line) ||
-        !parse_header(line, &task_count, &declared_relevance_judgments)) {
+        !parse_header(line, task_count, declared_relevance_judgments)) {
         (void)fail("invalid batch header");
-        return 1;
+        return false;
     }
-    size_t observed_relevance_judgments = 0;
-    for (size_t t = 0; t < task_count; t++) {
-        if (!read_line(line) || !parse_task(&g_tasks[t], line)) return 1;
-        if (g_tasks[t].relevant_count >
-            SIZE_MAX - observed_relevance_judgments) {
-            (void)fail("eligible relevance-judgment count overflow");
-            return 1;
-        }
-        observed_relevance_judgments += g_tasks[t].relevant_count;
-        for (size_t prior = 0; prior < t; prior++)
-            if (strcmp(g_tasks[prior].id, g_tasks[t].id) == 0) {
-                (void)fail("duplicate task id");
-                return 1;
-            }
-        if (!read_line(line) || !parse_query(&g_tasks[t], line)) return 1;
-        for (size_t i = 0; i < g_tasks[t].relevant_count; i++)
-            if (!read_line(line) || !parse_relevant(&g_tasks[t], i, line))
-                return 1;
-        if (!read_arm(&g_tasks[t].literal, "literal", line) ||
-            !read_arm(&g_tasks[t].bm25, "bm25", line))
-            return 1;
+    return true;
+}
+
+static bool task_id_duplicate(size_t t)
+{
+    for (size_t prior = 0; prior < t; prior++)
+        if (strcmp(g_tasks[prior].id, g_tasks[t].id) == 0) return true;
+    return false;
+}
+
+static bool read_relevant_rows(char line[EVAL_LINE_MAX], size_t t)
+{
+    for (size_t i = 0; i < g_tasks[t].relevant_count; i++)
+        if (!read_line(line) || !parse_relevant(&g_tasks[t], i, line))
+            return false;
+    return true;
+}
+
+static bool read_task_block(char line[EVAL_LINE_MAX], size_t t,
+                            size_t *observed_relevance_judgments)
+{
+    if (!read_line(line) || !parse_task(&g_tasks[t], line)) return false;
+    if (g_tasks[t].relevant_count >
+        SIZE_MAX - *observed_relevance_judgments) {
+        (void)fail("eligible relevance-judgment count overflow");
+        return false;
     }
-    if (observed_relevance_judgments != declared_relevance_judgments) {
-        (void)fail("declared eligible relevance-judgment count differs from tasks");
-        return 1;
+    *observed_relevance_judgments += g_tasks[t].relevant_count;
+    if (task_id_duplicate(t)) {
+        (void)fail("duplicate task id");
+        return false;
     }
+    if (!read_line(line) || !parse_query(&g_tasks[t], line)) return false;
+    return read_relevant_rows(line, t) &&
+           read_arm(&g_tasks[t].literal, "literal", line) &&
+           read_arm(&g_tasks[t].bm25, "bm25", line);
+}
+
+static bool read_batch_tasks(char line[EVAL_LINE_MAX], size_t task_count,
+                             size_t *observed_relevance_judgments)
+{
+    for (size_t t = 0; t < task_count; t++)
+        if (!read_task_block(line, t, observed_relevance_judgments)) return false;
+    return true;
+}
+
+static bool expect_batch_end(char line[EVAL_LINE_MAX])
+{
     if (!read_line(line) || strcmp(line, "end") != 0 ||
         fgetc(stdin) != EOF || ferror(stdin)) {
         (void)fail("missing canonical end or trailing input");
-        return 1;
+        return false;
     }
-    uint8_t raw_batch_root[32] = {0};
-    if (profile_mode) sha3_256_finalize(&g_input_sha, raw_batch_root);
-    struct zcl_retrieval_gold_task literal[EVAL_TASK_MAX] = {0};
-    struct zcl_retrieval_gold_task bm25[EVAL_TASK_MAX] = {0};
+    return true;
+}
+
+static void build_gold_tasks(size_t task_count,
+                             struct zcl_retrieval_gold_task literal[],
+                             struct zcl_retrieval_gold_task bm25[])
+{
     for (size_t t = 0; t < task_count; t++) {
         literal[t] = (struct zcl_retrieval_gold_task){
             .task_id = g_tasks[t].id,
@@ -606,65 +703,86 @@ int main(int argc, char **argv)
         bm25[t].ranked_count = g_tasks[t].bm25.count;
         bm25[t].ranking_complete = g_tasks[t].bm25.complete;
     }
-    if (profile_mode)
-        return profile_replay_mode(
-            &profile, evaluator_root, task_count,
-            observed_relevance_judgments, raw_batch_root);
-    if (experiment_mode) {
-        struct zcl_retrieval_experiment_eval_task
-            tasks[EVAL_TASK_MAX] = {0};
-        for (size_t t = 0; t < task_count; t++) {
-            tasks[t] = (struct zcl_retrieval_experiment_eval_task){
-                .task_id = g_tasks[t].id,
-                .query = g_tasks[t].query,
-                .relevant_paths = g_tasks[t].relevant_ptrs,
-                .relevant_count = g_tasks[t].relevant_count,
-                .bm25 = g_tasks[t].literal.ranked,
-                .bm25_count = g_tasks[t].literal.count,
-                .bm25_complete = g_tasks[t].literal.complete,
-                .parent = g_tasks[t].bm25.ranked,
-                .parent_count = g_tasks[t].bm25.count,
-                .parent_complete = g_tasks[t].bm25.complete,
-            };
-        }
-        struct zcl_retrieval_experiment_eval_report report;
-        enum zcl_retrieval_experiment_error error =
-            zcl_retrieval_experiment_evaluate(
-                tasks, task_count, (uint8_t)experiment_prefix, &report);
-        if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
-            fprintf(stderr, "retrieval-eval: experiment refused: %s\n",
-                    zcl_retrieval_experiment_error_string(error));
-            return 1;
-        }
-        printf("{\"schema\":\"zcl.retrieval_experiment_eval_result.v1\","
-               "\"algorithm\":\"%s\",\"bm25_prefix\":%zu,"
-               "\"tasks_evaluated\":%zu,"
-               "\"aggregation_kind\":\"macro_equal_task_weight\","
-               "\"eligible_relevance_judgments\":%zu,"
-               "\"input_arm_binding\":"
-               "\"literal_is_bm25_base_bm25_is_parent\","
-               "\"projector_gold_input\":\"none\","
-               "\"evaluation_gold_stage\":"
-               "\"same_process_after_projection\","
-               "\"scope_basis\":\"unavailable_labels_erased_before_eval\","
-               "\"candidate\":",
-               ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM, experiment_prefix,
-               task_count, observed_relevance_judgments);
-        print_arm(&report.metrics);
-        printf(",\"changed_positions_at_5\":%zu,"
-               "\"fallback_tasks\":%zu,"
-               "\"top20_membership_preserved\":%s,"
-               "\"full_retained_set_preserved\":%s,"
-               "\"context_ceiling_preserved\":%s,"
-               "\"evaluation_status\":\"observed_exploratory\","
-               "\"replication_status\":\"not_run\","
-               "\"promotion_authorized\":false}\n",
-               report.changed_positions_at_5, report.fallback_tasks,
-               report.top20_membership_preserved ? "true" : "false",
-               report.full_retained_set_preserved ? "true" : "false",
-               report.context_ceiling_preserved ? "true" : "false");
-        return ferror(stdout) ? 1 : 0;
+}
+
+static void build_experiment_tasks(size_t task_count,
+                                   struct zcl_retrieval_experiment_eval_task tasks[])
+{
+    for (size_t t = 0; t < task_count; t++) {
+        tasks[t] = (struct zcl_retrieval_experiment_eval_task){
+            .task_id = g_tasks[t].id,
+            .query = g_tasks[t].query,
+            .relevant_paths = g_tasks[t].relevant_ptrs,
+            .relevant_count = g_tasks[t].relevant_count,
+            .bm25 = g_tasks[t].literal.ranked,
+            .bm25_count = g_tasks[t].literal.count,
+            .bm25_complete = g_tasks[t].literal.complete,
+            .parent = g_tasks[t].bm25.ranked,
+            .parent_count = g_tasks[t].bm25.count,
+            .parent_complete = g_tasks[t].bm25.complete,
+        };
     }
+}
+
+static void print_experiment_report(
+    size_t task_count, size_t observed_relevance_judgments,
+    size_t experiment_prefix,
+    struct zcl_retrieval_experiment_eval_report *report)
+{
+    printf("{\"schema\":\"zcl.retrieval_experiment_eval_result.v1\","
+           "\"algorithm\":\"%s\",\"bm25_prefix\":%zu,"
+           "\"tasks_evaluated\":%zu,"
+           "\"aggregation_kind\":\"macro_equal_task_weight\","
+           "\"eligible_relevance_judgments\":%zu,"
+           "\"input_arm_binding\":"
+           "\"literal_is_bm25_base_bm25_is_parent\","
+           "\"projector_gold_input\":\"none\","
+           "\"evaluation_gold_stage\":"
+           "\"same_process_after_projection\","
+           "\"scope_basis\":\"unavailable_labels_erased_before_eval\","
+           "\"candidate\":",
+           ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM, experiment_prefix,
+           task_count, observed_relevance_judgments);
+    print_arm(&report->metrics);
+    printf(",\"changed_positions_at_5\":%zu,"
+           "\"fallback_tasks\":%zu,"
+           "\"top20_membership_preserved\":%s,"
+           "\"full_retained_set_preserved\":%s,"
+           "\"context_ceiling_preserved\":%s,"
+           "\"evaluation_status\":\"observed_exploratory\","
+           "\"replication_status\":\"not_run\","
+           "\"promotion_authorized\":false}\n",
+           report->changed_positions_at_5, report->fallback_tasks,
+           report->top20_membership_preserved ? "true" : "false",
+           report->full_retained_set_preserved ? "true" : "false",
+           report->context_ceiling_preserved ? "true" : "false");
+}
+
+static int run_experiment_mode(size_t task_count,
+                               size_t observed_relevance_judgments,
+                               size_t experiment_prefix)
+{
+    struct zcl_retrieval_experiment_eval_task tasks[EVAL_TASK_MAX] = {0};
+    build_experiment_tasks(task_count, tasks);
+    struct zcl_retrieval_experiment_eval_report report;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_experiment_evaluate(
+            tasks, task_count, (uint8_t)experiment_prefix, &report);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+        fprintf(stderr, "retrieval-eval: experiment refused: %s\n",
+                zcl_retrieval_experiment_error_string(error));
+        return 1;
+    }
+    print_experiment_report(task_count, observed_relevance_judgments,
+                            experiment_prefix, &report);
+    return ferror(stdout) ? 1 : 0;
+}
+
+static int run_metric_batch(struct zcl_retrieval_gold_task literal[],
+                            struct zcl_retrieval_gold_task bm25[],
+                            size_t task_count,
+                            size_t observed_relevance_judgments)
+{
     struct zcl_retrieval_eval_metrics literal_metrics, bm25_metrics;
     if (!zcl_retrieval_evaluate(literal, task_count, &literal_metrics) ||
         !zcl_retrieval_evaluate(bm25, task_count, &bm25_metrics)) {
@@ -689,4 +807,43 @@ int main(int argc, char **argv)
         return 1;
     }
     return 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "--rank-root") == 0)
+        return rank_root_mode(argv[2]);
+    struct eval_cli cli = {0};
+    int status = parse_cli_args(argc, argv, &cli);
+    if (status != 0) return status;
+    if (cli.profile_mode) {
+        g_hash_input = true;
+        sha3_256_init(&g_input_sha);
+    }
+    char line[EVAL_LINE_MAX];
+    size_t task_count, declared_relevance_judgments;
+    if (!read_batch_header(line, &task_count, &declared_relevance_judgments))
+        return 1;
+    size_t observed_relevance_judgments = 0;
+    if (!read_batch_tasks(line, task_count, &observed_relevance_judgments))
+        return 1;
+    if (observed_relevance_judgments != declared_relevance_judgments) {
+        (void)fail("declared eligible relevance-judgment count differs from tasks");
+        return 1;
+    }
+    if (!expect_batch_end(line)) return 1;
+    uint8_t raw_batch_root[32] = {0};
+    if (cli.profile_mode) sha3_256_finalize(&g_input_sha, raw_batch_root);
+    struct zcl_retrieval_gold_task literal[EVAL_TASK_MAX] = {0};
+    struct zcl_retrieval_gold_task bm25[EVAL_TASK_MAX] = {0};
+    build_gold_tasks(task_count, literal, bm25);
+    if (cli.profile_mode)
+        return profile_replay_mode(
+            &cli.profile, cli.evaluator_root, task_count,
+            observed_relevance_judgments, raw_batch_root);
+    if (cli.experiment_mode)
+        return run_experiment_mode(task_count, observed_relevance_judgments,
+                                   cli.experiment_prefix);
+    return run_metric_batch(literal, bm25, task_count,
+                            observed_relevance_judgments);
 }
