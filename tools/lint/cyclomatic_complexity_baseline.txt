@@ -348,8 +348,6 @@ engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_services.c:app_init_services:109
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
-engine/composition/src/boot_tip_hooks.c:boot_process_block_commit_tip:21
-engine/composition/src/boot_tip_hooks.c:boot_process_block_restore_mempool:56
 engine/composition/src/boot_zcode_dht_rpc.c:rpc_publish_impl:46
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_swarm_frame:32
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:23
