@@ -693,9 +693,13 @@ bool dlx_queue_empty(void)
 {
     struct dlx_call c;
     dlx_begin(&c, "status");
-    bool ok = dlx_run(&c) && dlx_ok(&c);
-    const struct json_value *rows = dlx_arr(&c, "queued");
-    ok = ok && rows && rows->num_children == 0;
+    bool ran = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = ran ? dlx_arr(&c, "queued") : NULL;
+    bool ok = rows && json_size(rows) == 0;
+    if (!ok)
+        fprintf(stderr, "dlx_queue_empty: status %s, queued %s, %zu rows\n",
+                ran ? "ok" : dlx_err_code(&c), rows ? "present" : "absent",
+                json_size(rows));
     dlx_end(&c);
     return ok;
 }
