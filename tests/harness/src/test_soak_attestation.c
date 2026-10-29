@@ -519,33 +519,107 @@ static bool sb_timing_ok(const struct json_value *timings, const char *phase,
     return json_is_null(v);
 }
 
+/* Drive one well-formed sync: two timed phases, the derived T_ready
+ * milestone and the reused/downloaded byte counts. Returns the result of
+ * sync_benchmark_write_receipt(); the tape clock is cleared before return. */
+static bool sb_drive_wellformed_sync(void)
+{
+    sync_benchmark_reset_for_test();
+    make_tmpdir();
+    g_fake_us = 100000;              /* arbitrary origin */
+    platform_clock_set_source(&g_sb_clock);
+    sync_benchmark_init(g_tmpdir);   /* t0 = 100000 us */
+    sync_benchmark_set_artifact("deadbeef");
+
+    /* Phase MANIFEST: 3 ms. */
+    sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
+    g_fake_us += 3000;
+    sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
+    /* Phase ARTIFACT_DOWNLOAD: 7 ms. */
+    sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+    g_fake_us += 7000;
+    sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
+    sync_benchmark_note_reused(4096);
+    sync_benchmark_note_downloaded(9000);
+    /* Derived milestone: T_ready at +12 ms from t0. */
+    g_fake_us += 2000;
+    sync_benchmark_mark_ready();
+
+    bool wrote = sync_benchmark_write_receipt(false, "unit_fixture");
+    platform_clock_clear_source();
+    return wrote;
+}
+
+/* Schema, artifact id, source epoch key and completion flag. */
+static bool sb_receipt_identity_ok(const struct json_value *r)
+{
+    bool ok = true;
+    const char *schema = json_get_str(json_get(r, "schema"));
+    ok = ok && schema && strcmp(schema, "zcl.sync_benchmark.v1") == 0;
+    ok = ok && json_get(r, "source_epoch");     /* key present */
+    const char *aid = json_get_str(json_get(r, "artifact_id"));
+    ok = ok && aid && strcmp(aid, "deadbeef") == 0;
+    ok = ok && json_get(r, "complete") &&
+               !json_get_bool(json_get(r, "complete"));
+    return ok;
+}
+
+/* Phase presence: driven phases non-negative, the rest null. */
+static bool sb_receipt_phases_ok(const struct json_value *t)
+{
+    bool ok = true;
+    ok = ok && t && t->type == JSON_OBJ;
+    /* The two driven phases are present + non-negative. */
+    ok = ok && sb_timing_ok(t, "manifest", true);
+    ok = ok && sb_timing_ok(t, "artifact_download", true);
+    /* Non-driven phases are null (honest, never fabricated). */
+    ok = ok && sb_timing_ok(t, "peer_discovery", false);
+    ok = ok && sb_timing_ok(t, "headers", false);
+    ok = ok && sb_timing_ok(t, "tail_fold", false);
+    /* T_ready derived (+12 ms), monotonic w.r.t. non-negative. */
+    ok = ok && sb_timing_ok(t, "t_ready", true);
+    ok = ok && sb_timing_ok(t, "t_sovereign", false); /* never marked */
+    return ok;
+}
+
+/* Exact deterministic values from the tape clock. */
+/* Caller checks that t is a JSON object first. */
+static bool sb_receipt_values_exact_ok(const struct json_value *t)
+{
+    bool ok = json_get_int(json_get(t, "manifest")) == 3;
+    ok = ok && json_get_int(json_get(t, "artifact_download")) == 7;
+    ok = ok && json_get_int(json_get(t, "t_ready")) == 12;
+    return ok;
+}
+
+static bool sb_receipt_timings_ok(const struct json_value *r)
+{
+    const struct json_value *t = json_get(r, "timings_ms");
+    bool ok = sb_receipt_phases_ok(t);
+    return ok && sb_receipt_values_exact_ok(t);
+}
+
+static bool sb_receipt_resources_ok(const struct json_value *r)
+{
+    const struct json_value *res = json_get(r, "resources");
+    bool ok = res && res->type == JSON_OBJ;
+    ok = ok && json_get_int(json_get(res, "bytes_reused")) == 4096;
+    ok = ok && json_get_int(json_get(res, "bytes_downloaded")) == 9000;
+    return ok;
+}
+
+static bool sb_receipt_wellformed(const struct json_value *r)
+{
+    bool ok = sb_receipt_identity_ok(r);
+    ok = ok && sb_receipt_timings_ok(r);
+    return ok && sb_receipt_resources_ok(r);
+}
+
 static int test_sync_benchmark_receipt_wellformed(void)
 {
     int failures = 0;
     TEST("sync_benchmark: receipt written, well-formed, phases monotonic") {
-        sync_benchmark_reset_for_test();
-        make_tmpdir();
-        g_fake_us = 100000;              /* arbitrary origin */
-        platform_clock_set_source(&g_sb_clock);
-        sync_benchmark_init(g_tmpdir);   /* t0 = 100000 us */
-        sync_benchmark_set_artifact("deadbeef");
-
-        /* Phase MANIFEST: 3 ms. */
-        sync_benchmark_phase_begin(SYNC_BENCH_MANIFEST);
-        g_fake_us += 3000;
-        sync_benchmark_phase_end(SYNC_BENCH_MANIFEST);
-        /* Phase ARTIFACT_DOWNLOAD: 7 ms. */
-        sync_benchmark_phase_begin(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-        g_fake_us += 7000;
-        sync_benchmark_phase_end(SYNC_BENCH_ARTIFACT_DOWNLOAD);
-        sync_benchmark_note_reused(4096);
-        sync_benchmark_note_downloaded(9000);
-        /* Derived milestone: T_ready at +12 ms from t0. */
-        g_fake_us += 2000;
-        sync_benchmark_mark_ready();
-
-        bool wrote = sync_benchmark_write_receipt(false, "unit_fixture");
-        platform_clock_clear_source();
+        bool wrote = sb_drive_wellformed_sync();
 
         if (!wrote) { printf("FAIL: write_receipt returned false\n");
                       failures++; goto _done_wf; }
@@ -555,36 +629,7 @@ static int test_sync_benchmark_receipt_wellformed(void)
             printf("FAIL: receipt missing/unparseable\n");
             failures++; goto _done_wf;
         }
-        bool ok = true;
-        const char *schema = json_get_str(json_get(&r, "schema"));
-        ok = ok && schema && strcmp(schema, "zcl.sync_benchmark.v1") == 0;
-        ok = ok && json_get(&r, "source_epoch");     /* key present */
-        const char *aid = json_get_str(json_get(&r, "artifact_id"));
-        ok = ok && aid && strcmp(aid, "deadbeef") == 0;
-        ok = ok && json_get(&r, "complete") &&
-                   !json_get_bool(json_get(&r, "complete"));
-
-        const struct json_value *t = json_get(&r, "timings_ms");
-        ok = ok && t && t->type == JSON_OBJ;
-        /* The two driven phases are present + non-negative. */
-        ok = ok && sb_timing_ok(t, "manifest", true);
-        ok = ok && sb_timing_ok(t, "artifact_download", true);
-        /* Non-driven phases are null (honest, never fabricated). */
-        ok = ok && sb_timing_ok(t, "peer_discovery", false);
-        ok = ok && sb_timing_ok(t, "headers", false);
-        ok = ok && sb_timing_ok(t, "tail_fold", false);
-        /* Exact deterministic values from the tape clock. */
-        ok = ok && json_get_int(json_get(t, "manifest")) == 3;
-        ok = ok && json_get_int(json_get(t, "artifact_download")) == 7;
-        /* T_ready derived (+12 ms), monotonic w.r.t. non-negative. */
-        ok = ok && sb_timing_ok(t, "t_ready", true);
-        ok = ok && json_get_int(json_get(t, "t_ready")) == 12;
-        ok = ok && sb_timing_ok(t, "t_sovereign", false); /* never marked */
-
-        const struct json_value *res = json_get(&r, "resources");
-        ok = ok && res && res->type == JSON_OBJ;
-        ok = ok && json_get_int(json_get(res, "bytes_reused")) == 4096;
-        ok = ok && json_get_int(json_get(res, "bytes_downloaded")) == 9000;
+        bool ok = sb_receipt_wellformed(&r);
         json_free(&r);
 
         if (ok) PASS();
