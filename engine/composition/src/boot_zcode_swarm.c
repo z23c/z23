@@ -180,6 +180,94 @@ static struct zcl_result boot_zcode_work_admit_planned(
         return ZCL_ERR(-1, "remote action is terminal: %s", current->state);
     return ZCL_OK;
 }
+static bool boot_zcode_work_restore_exact(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_context_v1 *context,
+    const struct boot_zcode_work_preflight *preflight, int64_t now,
+    struct vcs_zcode_work_context_roots *restored)
+{
+    enum vcs_zcode_work_context_result loaded =
+        vcs_zcode_work_context_restore_for_kind(
+            store, request->context_root, s_work_workspace,
+            preflight->action_kind, now,
+            restored);
+    return loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
+        memcmp(restored->action_root, preflight->action, 32) == 0 &&
+        memcmp(restored->input_root, preflight->input, 32) == 0 &&
+        memcmp(restored->source_manifest_id, context->source_sha256, 32) == 0 &&
+        memcmp(restored->source_root,
+               context->candidate.candidate_source_root, 32) == 0;
+}
+
+/* Fill the PLANNED job and SNAPSHOTTED action; false if the fixed action
+ * descriptor is gone. */
+static bool boot_zcode_work_fill_plan(
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_context_v1 *context,
+    const struct boot_zcode_work_preflight *preflight,
+    const struct vcs_zcode_work_context_roots *restored, int64_t now,
+    struct db_build_job *job, struct db_build_action *action)
+{
+    zcl_hex_encode(context->source_sha256, 32, job->source_sha256);
+    zcl_hex_encode(context->candidate.candidate_source_root, 32,
+                   job->source_cas_sha3);
+    zcl_hex_encode(context->task.toolchain_capsule_root, 32,
+                   job->toolchain_sha3);
+    (void)snprintf(job->profile, sizeof(job->profile), "%s", context->profile);
+    (void)snprintf(job->state, sizeof(job->state), "PLANNED");
+    job->created_at = job->updated_at = now;
+    action->sequence = 0;
+    (void)snprintf(action->kind, sizeof(action->kind), "%s",
+                   preflight->action_kind);
+    (void)snprintf(action->state, sizeof(action->state), "SNAPSHOTTED");
+    zcl_hex_encode(restored->input_root, 32, action->input_root_sha3);
+    zcl_hex_encode(preflight->task, 32, action->task_root_sha3);
+    zcl_hex_encode(preflight->candidate, 32, action->candidate_root_sha3);
+    zcl_hex_encode(preflight->policy, 32, action->proof_policy_root_sha3);
+    zcl_hex_encode(request->context_root, 32, action->context_root_sha3);
+    (void)snprintf(action->target, sizeof(action->target), "%s",
+                   VCS_BUILD_TARGET_V1);
+    uint8_t fixed_flags[32], fixed_environment[32];
+    const char *workdir = NULL, *output = NULL, *resource = NULL;
+    if (!vcs_build_action_v1_descriptors(
+            preflight->action_kind, &workdir, &output, &resource) ||
+        !vcs_build_action_v1_fixed_flags_root_for_kind(
+            preflight->action_kind, fixed_flags) ||
+        !vcs_build_action_v1_fixed_environment_root_for_kind(
+            preflight->action_kind, fixed_environment))
+        return false;
+    zcl_hex_encode(fixed_flags, 32, action->flags_sha3);
+    zcl_hex_encode(fixed_environment, 32, action->environment_sha3);
+    (void)snprintf(action->virtual_workdir, sizeof(action->virtual_workdir),
+                   "%s", workdir);
+    (void)snprintf(action->declared_outputs, sizeof(action->declared_outputs),
+                   "%s", output);
+    (void)snprintf(action->resource_policy, sizeof(action->resource_policy),
+                   "%s", resource);
+    action->created_at = action->updated_at = now;
+    return true;
+}
+
+static struct zcl_result boot_zcode_work_plan_ids(
+    const struct vcs_zcode_work_request_v1 *request,
+    struct db_build_job *job, struct db_build_action *action)
+{
+    struct zcl_result ids = build_fabric_action_id(
+        job, action, action->action_id);
+    if (ids.ok && strcmp(action->action_id, "") != 0) {
+        uint8_t checked[32];
+        ids.ok = zcl_hex_decode_lower(action->action_id, checked, 32) &&
+                 memcmp(checked, request->action_root, 32) == 0;
+    }
+    if (ids.ok)
+        ids = build_fabric_job_id(job, action->action_id, job->job_id);
+    if (ids.ok)
+        (void)snprintf(action->job_id, sizeof(action->job_id), "%s",
+                       job->job_id);
+    return ids;
+}
+
 /* Rebuild content.v2 into the fixed action; only ZBuild state is mutable. */
 static struct zcl_result boot_zcode_work_admit(
     const struct vcs_zcode_work_request_v1 *request, int64_t now)
@@ -203,73 +291,19 @@ static struct zcl_result boot_zcode_work_admit(
         return ZCL_ERR(-1, "context does not reconstruct the signed request");
     }
     struct vcs_zcode_work_context_roots restored;
-    loaded = vcs_zcode_work_context_restore_for_kind(
-        store, request->context_root, s_work_workspace,
-        preflight.action_kind, now,
-        &restored);
-    bool restored_exact = loaded == VCS_ZCODE_WORK_CONTEXT_OK &&
-        memcmp(restored.action_root, preflight.action, 32) == 0 &&
-        memcmp(restored.input_root, preflight.input, 32) == 0 &&
-        memcmp(restored.source_manifest_id, context.source_sha256, 32) == 0 &&
-        memcmp(restored.source_root,
-               context.candidate.candidate_source_root, 32) == 0;
-    if (!restored_exact) {
+    if (!boot_zcode_work_restore_exact(store, request, &context, &preflight,
+                                       now, &restored)) {
         vcs_zcode_work_context_free(&context);
         return ZCL_ERR(-1, "context source closure could not be restored");
     }
     struct db_build_job job = {0};
     struct db_build_action action = {0};
-    zcl_hex_encode(context.source_sha256, 32, job.source_sha256);
-    zcl_hex_encode(context.candidate.candidate_source_root, 32,
-                   job.source_cas_sha3);
-    zcl_hex_encode(context.task.toolchain_capsule_root, 32,
-                   job.toolchain_sha3);
-    (void)snprintf(job.profile, sizeof(job.profile), "%s", context.profile);
-    (void)snprintf(job.state, sizeof(job.state), "PLANNED");
-    job.created_at = job.updated_at = now;
-    action.sequence = 0;
-    (void)snprintf(action.kind, sizeof(action.kind), "%s",
-                   preflight.action_kind);
-    (void)snprintf(action.state, sizeof(action.state), "SNAPSHOTTED");
-    zcl_hex_encode(restored.input_root, 32, action.input_root_sha3);
-    zcl_hex_encode(preflight.task, 32, action.task_root_sha3);
-    zcl_hex_encode(preflight.candidate, 32, action.candidate_root_sha3);
-    zcl_hex_encode(preflight.policy, 32, action.proof_policy_root_sha3);
-    zcl_hex_encode(request->context_root, 32, action.context_root_sha3);
-    (void)snprintf(action.target, sizeof(action.target), "%s",
-                   VCS_BUILD_TARGET_V1);
-    uint8_t fixed_flags[32], fixed_environment[32];
-    const char *workdir = NULL, *output = NULL, *resource = NULL;
-    if (!vcs_build_action_v1_descriptors(
-            preflight.action_kind, &workdir, &output, &resource) ||
-        !vcs_build_action_v1_fixed_flags_root_for_kind(
-            preflight.action_kind, fixed_flags) ||
-        !vcs_build_action_v1_fixed_environment_root_for_kind(
-            preflight.action_kind, fixed_environment)) {
+    if (!boot_zcode_work_fill_plan(request, &context, &preflight, &restored,
+                                   now, &job, &action)) {
         vcs_zcode_work_context_free(&context);
         return ZCL_ERR(-1, "fixed action descriptor disappeared");
     }
-    zcl_hex_encode(fixed_flags, 32, action.flags_sha3);
-    zcl_hex_encode(fixed_environment, 32, action.environment_sha3);
-    (void)snprintf(action.virtual_workdir, sizeof(action.virtual_workdir),
-                   "%s", workdir);
-    (void)snprintf(action.declared_outputs, sizeof(action.declared_outputs),
-                   "%s", output);
-    (void)snprintf(action.resource_policy, sizeof(action.resource_policy),
-                   "%s", resource);
-    action.created_at = action.updated_at = now;
-    struct zcl_result ids = build_fabric_action_id(
-        &job, &action, action.action_id);
-    if (ids.ok && strcmp(action.action_id, "") != 0) {
-        uint8_t checked[32];
-        ids.ok = zcl_hex_decode_lower(action.action_id, checked, 32) &&
-                 memcmp(checked, request->action_root, 32) == 0;
-    }
-    if (ids.ok)
-        ids = build_fabric_job_id(&job, action.action_id, job.job_id);
-    if (ids.ok)
-        (void)snprintf(action.job_id, sizeof(action.job_id), "%s",
-                       job.job_id);
+    struct zcl_result ids = boot_zcode_work_plan_ids(request, &job, &action);
     vcs_zcode_work_context_free(&context);
     if (!ids.ok) return ZCL_ERR(-1, "context action identity mismatch");
     ZCL_CHECK(build_fabric_plan(ndb, &job, &action));
@@ -527,6 +561,39 @@ static size_t boot_zcode_work_skip_published_siblings(
     return skipped;
 }
 
+/* Load, parse and verify the stored receipt as a signed RESULT for request. */
+static bool boot_zcode_work_result_from_receipt(
+    const struct db_build_receipt *stored,
+    const struct vcs_zcode_work_request_v1 *request, bool exact_positive,
+    const uint8_t current_receipt_root[32],
+    struct vcs_zcode_work_result_v1 *out)
+{
+    uint8_t receipt_root[32]; uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (!zcl_hex_decode_lower(stored->work_receipt_sha3,
+                              receipt_root, 32) ||
+        (exact_positive && memcmp(
+            receipt_root, current_receipt_root, 32) != 0) ||
+        vcs_object_load_raw(s_work_workspace, receipt_root, &wire,
+                            &wire_len) != 0)
+        return false;
+    struct vcs_zcode_work_result_v1 result = {
+        .request_id = request->request_id,
+    };
+    memcpy(result.task_root, request->task_root, 32);
+    memcpy(result.candidate_root, request->candidate_root, 32);
+    memcpy(result.action_root, request->action_root, 32);
+    bool parsed = vcs_zcode_work_receipt_parse(
+        wire, wire_len, &result.receipt) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    if (!parsed) return false;
+    memcpy(result.output_root, result.receipt.output_root, 32);
+    if (!vcs_zcode_work_result_verify(request, &result, s_work_pubkey))
+        return false;
+    *out = result;
+    return true;
+}
+
 static void boot_zcode_work_publish_results(int64_t now)
 {
     struct node_db *ndb = app_runtime_node_db();
@@ -557,28 +624,10 @@ static void boot_zcode_work_publish_results(int64_t now)
             ndb, action.job_id, receipts, 8);
         for (int j = 0; j < receipt_count; j++) {
             if (strcmp(receipts[j].action_id, action_id) != 0) continue;
-            uint8_t receipt_root[32]; uint8_t *wire = NULL;
-            size_t wire_len = 0;
-            if (!zcl_hex_decode_lower(receipts[j].work_receipt_sha3,
-                                      receipt_root, 32) ||
-                (exact_positive && memcmp(
-                    receipt_root, current_receipt_root, 32) != 0) ||
-                vcs_object_load_raw(s_work_workspace, receipt_root, &wire,
-                                    &wire_len) != 0)
-                continue;
-            struct vcs_zcode_work_result_v1 result = {
-                .request_id = requests[i].request_id,
-            };
-            memcpy(result.task_root, requests[i].task_root, 32);
-            memcpy(result.candidate_root, requests[i].candidate_root, 32);
-            memcpy(result.action_root, requests[i].action_root, 32);
-            bool parsed = vcs_zcode_work_receipt_parse(
-                wire, wire_len, &result.receipt) == VCS_ZCODE_DEV_OK;
-            free(wire);
-            if (!parsed) continue;
-            memcpy(result.output_root, result.receipt.output_root, 32);
-            if (!vcs_zcode_work_result_verify(
-                    &requests[i], &result, s_work_pubkey))
+            struct vcs_zcode_work_result_v1 result;
+            if (!boot_zcode_work_result_from_receipt(
+                    &receipts[j], &requests[i], exact_positive,
+                    current_receipt_root, &result))
                 continue;
             /* ANNOUNCE before RESULT: package frames drain first, so the
              * result-triggered fetch already knows its exact provider. */
@@ -851,12 +900,11 @@ static void boot_zcode_work_fetch(
              (unsigned long long)limit);
 }
 
-bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
-                            const uint8_t *payload, size_t payload_len,
-                            void *ctx)
+/* Frames answered before swarm hosting is considered. */
+static bool boot_zcode_swarm_unhosted_frame(
+    struct msg_processor *mp, struct p2p_node *node,
+    const uint8_t *payload, size_t payload_len, void *ctx)
 {
-    if (!mp || !node || !payload)
-        LOG_FAIL("net.zcode_swarm", "null mp/node/payload");
     if (boot_zcode_dht_frame(mp, node, payload, payload_len,
                              (struct boot_svc_ctx *)ctx))
         return true;
@@ -874,6 +922,82 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
      * gated on swarm hosting. */
     if (mesh_stream_frame(mp, node, payload, payload_len,
                           (struct boot_svc_ctx *)ctx))
+        return true;
+    return false;
+}
+
+/* Caller holds s_lock. */
+static void boot_zcode_work_frame_accepted(
+    struct msg_processor *mp, struct p2p_node *node,
+    struct vcs_swarm_engine *engine, const uint8_t *payload,
+    size_t payload_len, uint64_t peer_id, int64_t day, uint64_t now)
+{
+    struct vcs_zcode_work_swarm_message message;
+    if (!vcs_zcode_work_swarm_parse(payload, payload_len, &message))
+        return;
+    const uint8_t *wanted = message.type == VCS_ZCODE_WORK_SWARM_REQUEST
+        ? boot_zcode_work_request_context_root(
+            &message.body.request, peer_id, (int64_t)now)
+        : message.type == VCS_ZCODE_WORK_SWARM_RESULT
+        ? message.body.result.output_root : NULL;
+    /* The accepted signed frame binds this root to the
+     * authenticated sender; the fetch remains asynchronous. */
+    if (wanted)
+        boot_zcode_work_fetch(engine, &message, wanted,
+                              peer_id, day, now);
+    /* Network callbacks may advance only the in-memory swarm.
+     * SQLite-backed admission/projection remains owned by the
+     * periodic service lane; doing it here races foreground
+     * requester transactions on the canonical node handle. */
+    (void)boot_zcode_swarm_drain_node(mp, engine, node);
+}
+
+static void boot_zcode_work_frame_score(
+    struct msg_processor *mp, struct p2p_node *node,
+    enum vcs_zcode_work_node_result wr)
+{
+    if (wr != VCS_ZCODE_WORK_NODE_MALFORMED &&
+        wr != VCS_ZCODE_WORK_NODE_REPLAY &&
+        wr != VCS_ZCODE_WORK_NODE_UNREQUESTED &&
+        wr != VCS_ZCODE_WORK_NODE_BINDING)
+        return;
+    char context[96];
+    (void)snprintf(context, sizeof(context), "zcode work: %s",
+                   vcs_zcode_work_node_result_string(wr));
+    if (mp->net_mgr)
+        peer_scoring_record(mp->net_mgr, node,
+                            PEER_OFFENCE_INVALID_PAYLOAD, context);
+}
+
+static void boot_zcode_swarm_finish_frame(
+    struct msg_processor *mp, struct p2p_node *node,
+    struct vcs_swarm_frame_result *ev)
+{
+    if (ev->penalty != VCS_SWARM_PENALTY_NONE && mp->net_mgr) {
+        char context[96];
+        (void)snprintf(context, sizeof(context), "zcode swarm: %s",
+                       ev->rule ? ev->rule : "penalty");
+        peer_scoring_record(mp->net_mgr, node,
+                            boot_zcode_swarm_offence(ev->penalty), context);
+    }
+    if (ev->reply) {
+        if (ev->reply_len > 0 && !atomic_load(&node->disconnect))
+            boot_zcode_swarm_send(mp, node, ev->reply, ev->reply_len);
+        free(ev->reply);
+    }
+    if (ev->disconnect_peer)
+        (void)p2p_node_request_disconnect(
+            node, P2P_DISCONNECT_APPLICATION,
+            P2P_DISCONNECT_SOURCE_APPLICATION, node->endpoint_generation);
+}
+
+bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
+                            const uint8_t *payload, size_t payload_len,
+                            void *ctx)
+{
+    if (!mp || !node || !payload)
+        LOG_FAIL("net.zcode_swarm", "null mp/node/payload");
+    if (boot_zcode_swarm_unhosted_frame(mp, node, payload, payload_len, ctx))
         return true;
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -902,43 +1026,16 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
         enum vcs_zcode_work_node_result wr =
             vcs_zcode_work_node_handle_frame(s_work, peer_id, payload,
                                               payload_len, (int64_t)now);
-        if (wr == VCS_ZCODE_WORK_NODE_OK) {
-            struct vcs_zcode_work_swarm_message message;
-            if (vcs_zcode_work_swarm_parse(payload, payload_len, &message)) {
-                const uint8_t *wanted = message.type == VCS_ZCODE_WORK_SWARM_REQUEST
-                    ? boot_zcode_work_request_context_root(
-                        &message.body.request, peer_id, (int64_t)now)
-                    : message.type == VCS_ZCODE_WORK_SWARM_RESULT
-                    ? message.body.result.output_root : NULL;
-                /* The accepted signed frame binds this root to the
-                 * authenticated sender; the fetch remains asynchronous. */
-                if (wanted)
-                    boot_zcode_work_fetch(engine, &message, wanted,
-                                          peer_id, day, now);
-                /* Network callbacks may advance only the in-memory swarm.
-                 * SQLite-backed admission/projection remains owned by the
-                 * periodic service lane; doing it here races foreground
-                 * requester transactions on the canonical node handle. */
-                (void)boot_zcode_swarm_drain_node(mp, engine, node);
-            }
-        }
+        if (wr == VCS_ZCODE_WORK_NODE_OK)
+            boot_zcode_work_frame_accepted(mp, node, engine, payload,
+                                           payload_len, peer_id, day, now);
         zcl_mutex_unlock(&s_lock);
         if (wr == VCS_ZCODE_WORK_NODE_OK)
             boot_zcode_swarm_request_tick();
         if (wr != VCS_ZCODE_WORK_NODE_OK)
             LOG_WARN("net.zcode_swarm", "peer %llu work frame refused: %s",
                      (unsigned long long)peer_id, vcs_zcode_work_node_result_string(wr));
-        if (wr == VCS_ZCODE_WORK_NODE_MALFORMED ||
-            wr == VCS_ZCODE_WORK_NODE_REPLAY ||
-            wr == VCS_ZCODE_WORK_NODE_UNREQUESTED ||
-            wr == VCS_ZCODE_WORK_NODE_BINDING) {
-            char context[96];
-            (void)snprintf(context, sizeof(context), "zcode work: %s",
-                           vcs_zcode_work_node_result_string(wr));
-            if (mp->net_mgr)
-                peer_scoring_record(mp->net_mgr, node,
-                                    PEER_OFFENCE_INVALID_PAYLOAD, context);
-        }
+        boot_zcode_work_frame_score(mp, node, wr);
         return true;
     }
     struct vcs_swarm_frame_result ev = vcs_swarm_engine_handle_frame(
@@ -949,22 +1046,7 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
     zcl_mutex_unlock(&s_lock);
     boot_zcode_swarm_request_tick();
 
-    if (ev.penalty != VCS_SWARM_PENALTY_NONE && mp->net_mgr) {
-        char context[96];
-        (void)snprintf(context, sizeof(context), "zcode swarm: %s",
-                       ev.rule ? ev.rule : "penalty");
-        peer_scoring_record(mp->net_mgr, node,
-                            boot_zcode_swarm_offence(ev.penalty), context);
-    }
-    if (ev.reply) {
-        if (ev.reply_len > 0 && !atomic_load(&node->disconnect))
-            boot_zcode_swarm_send(mp, node, ev.reply, ev.reply_len);
-        free(ev.reply);
-    }
-    if (ev.disconnect_peer)
-        (void)p2p_node_request_disconnect(
-            node, P2P_DISCONNECT_APPLICATION,
-            P2P_DISCONNECT_SOURCE_APPLICATION, node->endpoint_generation);
+    boot_zcode_swarm_finish_frame(mp, node, &ev);
     return true;
 }
 
