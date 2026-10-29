@@ -578,7 +578,7 @@ static int catchup_advance_sparse_tip(
                                           sparse_tip->phashBlock->data,
                                           sparse_target))
         return sparse_target;
-    return -1;
+    return -1; // raw-return-ok:caller logs "final commit missing tip hash" and fails the walk
 }
 
 int node_db_catchup_service_run(struct node_db *ndb,
