@@ -40,6 +40,38 @@ static void notify(void)
     if (signal_pipe[1] >= 0) { char byte = 1; (void)write(signal_pipe[1], &byte, 1); }
     pthread_mutex_unlock(&lock);
 }
+/* True when the app is already exempt from battery optimization, or when that cannot be read. */
+static bool background_exempt(JNIEnv *env, jobject activity, jstring package)
+{
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID service = cls ? (*env)->GetMethodID(env, cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jstring power_name = clean(env) ? (*env)->NewStringUTF(env, "power") : NULL;
+    jobject power = clean(env) && service && power_name ? (*env)->CallObjectMethod(env, activity, service, power_name) : NULL;
+    jclass power_cls = clean(env) && power ? (*env)->GetObjectClass(env, power) : NULL;
+    jmethodID ignoring = power_cls ? (*env)->GetMethodID(env, power_cls, "isIgnoringBatteryOptimizations", "(Ljava/lang/String;)Z") : NULL;
+    bool exempt = !clean(env) || !ignoring || (*env)->CallBooleanMethod(env, power, ignoring, package);
+    return !clean(env) || exempt;
+}
+/* package:<name> as an android.net.Uri, or NULL. */
+static jobject package_uri(JNIEnv *env, jstring package)
+{
+    jclass cls = (*env)->FindClass(env, "android/net/Uri");
+    jmethodID parts = clean(env) && cls ? (*env)->GetStaticMethodID(env, cls, "fromParts",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;") : NULL;
+    jstring scheme = clean(env) ? (*env)->NewStringUTF(env, "package") : NULL;
+    jobject uri = clean(env) && parts && scheme ? (*env)->CallStaticObjectMethod(env, cls, parts, scheme, package, NULL) : NULL;
+    return clean(env) ? uri : NULL;
+}
+/* The system dialog that exempts package from battery optimization, as an Intent, or NULL. */
+static jobject background_request(JNIEnv *env, jstring package)
+{
+    jobject uri = package_uri(env, package);
+    jclass cls = uri ? (*env)->FindClass(env, "android/content/Intent") : NULL;
+    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V") : NULL;
+    jstring action = clean(env) ? (*env)->NewStringUTF(env, "android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS") : NULL;
+    jobject intent = clean(env) && ctor && action ? (*env)->NewObject(env, cls, ctor, action, uri) : NULL;
+    return clean(env) ? intent : NULL;
+}
 /* Android withholds the network from a hidden app and from the node it started,
  * unless the owner lets the app run in the background; ask through the system dialog. */
 static void allow_background_network(JNIEnv *env, jobject activity)
@@ -47,26 +79,11 @@ static void allow_background_network(JNIEnv *env, jobject activity)
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)clean(env); return; }
     jclass cls = (*env)->GetObjectClass(env, activity);
     jmethodID name = cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
-    jmethodID service = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
     jmethodID start = clean(env) && cls ? (*env)->GetMethodID(env, cls, "startActivity", "(Landroid/content/Intent;)V") : NULL;
     jstring package = clean(env) && name ? (*env)->CallObjectMethod(env, activity, name) : NULL;
-    jstring power_name = clean(env) ? (*env)->NewStringUTF(env, "power") : NULL;
-    jobject power = clean(env) && service && power_name ? (*env)->CallObjectMethod(env, activity, service, power_name) : NULL;
-    jclass power_cls = clean(env) && power ? (*env)->GetObjectClass(env, power) : NULL;
-    jmethodID ignoring = power_cls ? (*env)->GetMethodID(env, power_cls, "isIgnoringBatteryOptimizations", "(Ljava/lang/String;)Z") : NULL;
-    if (!clean(env) || !package || !ignoring || !start ||
-        (*env)->CallBooleanMethod(env, power, ignoring, package) || !clean(env)) goto out;
-    jclass uri_cls = (*env)->FindClass(env, "android/net/Uri");
-    jmethodID parts = clean(env) && uri_cls ? (*env)->GetStaticMethodID(env, uri_cls, "fromParts",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;") : NULL;
-    jstring scheme = clean(env) ? (*env)->NewStringUTF(env, "package") : NULL;
-    jobject uri = clean(env) && parts && scheme ? (*env)->CallStaticObjectMethod(env, uri_cls, parts, scheme, package, NULL) : NULL;
-    jclass intent_cls = clean(env) && uri ? (*env)->FindClass(env, "android/content/Intent") : NULL;
-    jmethodID ctor = clean(env) && intent_cls ? (*env)->GetMethodID(env, intent_cls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V") : NULL;
-    jstring request = clean(env) ? (*env)->NewStringUTF(env, "android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS") : NULL;
-    jobject intent = clean(env) && ctor && request ? (*env)->NewObject(env, intent_cls, ctor, request, uri) : NULL;
-    if (clean(env) && intent) (*env)->CallVoidMethod(env, activity, start, intent);
-out:
+    jobject intent = clean(env) && package && start && !background_exempt(env, activity, package) ?
+        background_request(env, package) : NULL;
+    if (intent) (*env)->CallVoidMethod(env, activity, start, intent);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }
 static void refresh(JNIEnv *env)
