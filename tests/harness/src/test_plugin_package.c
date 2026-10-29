@@ -705,6 +705,24 @@ static bool pp_fetch_again(struct pp_fixture *f, uint64_t first_tick)
     return false;
 }
 
+/* An existing destination must not be replaced; early errors reset metrics. */
+static bool pp_checkout_existing(struct pp_fixture *f)
+{
+    char path[1400], text[8] = {0};
+    struct vcs_package_checkout_metrics metrics;
+    if (!pp_path(path, sizeof(path), f->base, "occupied") ||
+        !pp_write(path, "keep", 4)) return false;
+    memset(&metrics, 0xa5, sizeof(metrics));
+    if (vcs_package_checkout(f->receiver.store, f->root, path, &metrics) !=
+        VCS_PACKAGE_CHECKOUT_DESTINATION || metrics.files || metrics.chunks || metrics.bytes)
+        return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    bool ok = fread(text, 1, 4, file) == 4 && memcmp(text, "keep", 4) == 0 &&
+              fgetc(file) == EOF && !ferror(file);
+    return fclose(file) == 0 && ok;
+}
+
 static int pp_refusal_transit(void)
 {
     static const char image[] = "inert plugin image, transit variant\n";
@@ -748,6 +766,7 @@ static int pp_refusal_transit(void)
         ASSERT_EQ(vcs_package_store_put_chunk(f.publisher.store, f.root, "demo", 0,
                       (const uint8_t *)image, sizeof(image) - 1), VCS_PACKAGE_STORE_OK);
         ASSERT(pp_fetch_again(&f, 200));
+        ASSERT(pp_checkout_existing(&f));
         ASSERT(pp_path(f.checkout, sizeof(f.checkout), f.base, "transit-good"));
         ASSERT_EQ(vcs_package_checkout(f.receiver.store, f.root, f.checkout, &metrics),
                   VCS_PACKAGE_CHECKOUT_OK);

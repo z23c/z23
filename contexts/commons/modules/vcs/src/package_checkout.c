@@ -232,66 +232,40 @@ static enum vcs_package_checkout_result checkout_materialize(
     return VCS_PACKAGE_CHECKOUT_OK;
 }
 
-enum vcs_package_checkout_result vcs_package_checkout(
+static enum vcs_package_checkout_result checkout_read_manifest(
     struct vcs_package_store *store, const uint8_t package_root[32],
-    const char *destination, struct vcs_package_checkout_metrics *metrics)
+    struct vcs_package_manifest *manifest)
 {
-    if (metrics)
-        memset(metrics, 0, sizeof(*metrics));
-    if (!store || !package_root || !destination)
-        return VCS_PACKAGE_CHECKOUT_NULL;
-    struct vcs_package_store_status status;
-    if (!vcs_package_store_package_status(store, package_root, &status) ||
-        !status.complete)
-        return VCS_PACKAGE_CHECKOUT_INCOMPLETE;
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (vcs_package_store_get_manifest_wire(
             store, package_root, &wire, &wire_len) != VCS_PACKAGE_STORE_OK)
         return VCS_PACKAGE_CHECKOUT_MANIFEST;
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
+    vcs_package_manifest_init(manifest);
     uint8_t observed[32];
-    bool manifest_ok = vcs_package_manifest_parse(wire, wire_len, &manifest) &&
-        vcs_package_manifest_root(&manifest, observed) &&
+    bool manifest_ok = vcs_package_manifest_parse(wire, wire_len, manifest) &&
+        vcs_package_manifest_root(manifest, observed) &&
         memcmp(observed, package_root, 32) == 0;
     free(wire);
     if (!manifest_ok) {
-        vcs_package_manifest_free(&manifest);
+        vcs_package_manifest_free(manifest);
         return VCS_PACKAGE_CHECKOUT_MANIFEST;
     }
 
-    char parent[PACKAGE_CHECKOUT_PATH_MAX], leaf[NAME_MAX + 1u];
-    if (!checkout_destination_parts(destination, parent, sizeof(parent),
-                                    leaf, sizeof(leaf))) {
-        vcs_package_manifest_free(&manifest);
-        return VCS_PACKAGE_CHECKOUT_DESTINATION;
-    }
-    int parent_fd = open(parent,
-                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat st;
-    if (parent_fd < 0 ||
-        fstatat(parent_fd, leaf, &st, AT_SYMLINK_NOFOLLOW) == 0 ||
-        errno != ENOENT) {
-        if (parent_fd >= 0)
-            close(parent_fd);
-        vcs_package_manifest_free(&manifest);
-        return VCS_PACKAGE_CHECKOUT_DESTINATION;
-    }
-    char stage[NAME_MAX + 1u];
-    int n = snprintf(stage, sizeof(stage), ".%s.zcheckout.%ld", leaf,
-                     (long)getpid());
-    if (n <= 0 || (size_t)n >= sizeof(stage) ||
-        mkdirat(parent_fd, stage, 0700) != 0) {
-        close(parent_fd);
-        vcs_package_manifest_free(&manifest);
-        return VCS_PACKAGE_CHECKOUT_DESTINATION;
-    }
+    return VCS_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_package_checkout_result checkout_materialize_publish(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const struct vcs_package_manifest *manifest, int parent_fd,
+    const char *stage, const char *leaf,
+    struct vcs_package_checkout_metrics *metrics)
+{
     int stage_fd = openat(parent_fd, stage,
                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     enum vcs_package_checkout_result result = stage_fd < 0
         ? VCS_PACKAGE_CHECKOUT_DESTINATION
-        : checkout_materialize(store, package_root, &manifest, stage_fd,
+        : checkout_materialize(store, package_root, manifest, stage_fd,
                                metrics);
     if (stage_fd >= 0 && fsync(stage_fd) != 0 &&
         result == VCS_PACKAGE_CHECKOUT_OK)
@@ -311,7 +285,60 @@ enum vcs_package_checkout_result vcs_package_checkout(
     }
     if (result != VCS_PACKAGE_CHECKOUT_OK)
         (void)checkout_tree_remove_at(parent_fd, published ? leaf : stage);
+    return result;
+}
+
+static enum vcs_package_checkout_result checkout_publish(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *destination, const struct vcs_package_manifest *manifest,
+    struct vcs_package_checkout_metrics *metrics)
+{
+    char parent[PACKAGE_CHECKOUT_PATH_MAX], leaf[NAME_MAX + 1u];
+    if (!checkout_destination_parts(destination, parent, sizeof(parent),
+                                    leaf, sizeof(leaf))) {
+        return VCS_PACKAGE_CHECKOUT_DESTINATION;
+    }
+    int parent_fd = open(parent,
+                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (parent_fd < 0 ||
+        fstatat(parent_fd, leaf, &st, AT_SYMLINK_NOFOLLOW) == 0 ||
+        errno != ENOENT) {
+        if (parent_fd >= 0)
+            close(parent_fd);
+        return VCS_PACKAGE_CHECKOUT_DESTINATION;
+    }
+    char stage[NAME_MAX + 1u];
+    int n = snprintf(stage, sizeof(stage), ".%s.zcheckout.%ld", leaf,
+                     (long)getpid());
+    if (n <= 0 || (size_t)n >= sizeof(stage) ||
+        mkdirat(parent_fd, stage, 0700) != 0) {
+        close(parent_fd);
+        return VCS_PACKAGE_CHECKOUT_DESTINATION;
+    }
+    enum vcs_package_checkout_result result = checkout_materialize_publish(
+        store, package_root, manifest, parent_fd, stage, leaf, metrics);
     close(parent_fd);
+    return result;
+}
+
+enum vcs_package_checkout_result vcs_package_checkout(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *destination, struct vcs_package_checkout_metrics *metrics)
+{
+    if (metrics)
+        memset(metrics, 0, sizeof(*metrics));
+    if (!store || !package_root || !destination)
+        return VCS_PACKAGE_CHECKOUT_NULL;
+    struct vcs_package_store_status status;
+    if (!vcs_package_store_package_status(store, package_root, &status) ||
+        !status.complete)
+        return VCS_PACKAGE_CHECKOUT_INCOMPLETE;
+    struct vcs_package_manifest manifest;
+    enum vcs_package_checkout_result result =
+        checkout_read_manifest(store, package_root, &manifest);
+    if (result != VCS_PACKAGE_CHECKOUT_OK) return result;
+    result = checkout_publish(store, package_root, destination, &manifest, metrics);
     vcs_package_manifest_free(&manifest);
     return result;
 }
