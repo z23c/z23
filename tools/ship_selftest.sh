@@ -452,8 +452,9 @@ mk_observer no-identity <<EOF
 echo "observed=1 exists=1 pid=9 start=5 sha=$WANT_SHA ident=no rpc=ok cpu=7 blkio=7 io=7"
 EOF
 
-# Every scenario below waits on a real clock, because the thing under test IS
-# a clock policy. Run sequentially they add up to most of the gate's runtime,
+# Scenarios use a real clock except the I/O-only case, which advances a
+# private logical clock to guarantee multiple observations under host load.
+# Run sequentially they add up to most of the gate's runtime,
 # and they are completely independent of each other — separate observer,
 # separate counter, separate shell. So they are started together and judged
 # afterwards; the wall time becomes the longest one rather than their sum.
@@ -466,7 +467,7 @@ AWAIT_N=0
 AWAIT_PIDS=""
 
 # spawn_await <tag> <want-verdict> <want-rc> <observer> <window> <silence>
-#             <crash-n> <unknown-n> [poll]
+#             <crash-n> <unknown-n> [poll] [clock]
 spawn_await() {
     local tag="$1"
     printf '%s\n' "$2 $3 $4" > "$SANDBOX/$tag.want"
@@ -477,9 +478,16 @@ spawn_await() {
             SHIP_AWAIT_WINDOW="$5" SHIP_AWAIT_SILENCE="$6" \
             SHIP_AWAIT_CRASH_SAMPLES="$7" SHIP_AWAIT_UNKNOWN_SAMPLES="$8" \
             SHIP_AWAIT_POLL="${9:-1}" SHIP_AWAIT_RPC_BUDGETS="1 1 1" \
-            bash -c '. "$1"; ship_await fixture "$2" "$3"' _ \
+            bash -c '
+                if [ "$4" = logical ]; then
+                    _fixture_now=0
+                    date() { [ "$1" = +%s ] || return 1; printf "%s\n" "$_fixture_now"; }
+                    sleep() { _fixture_now=$((_fixture_now + $1)); }
+                fi
+                . "$1"; ship_await fixture "$2" "$3"
+            ' _ \
                 "$ROOT/tools/scripts/ship_progress_lib.sh" \
-                "$SANDBOX/$4" "$WANT_SHA" 2>&1)" || rc=$?
+                "$SANDBOX/$4" "$WANT_SHA" "${10:-real}" 2>&1)" || rc=$?
         printf '%s\n' "$rc" > "$SANDBOX/$tag.rc"
         printf '%s\n' "$out" > "$SANDBOX/$tag.out"
     ) &
@@ -529,7 +537,8 @@ spawn_await s2    QUALIFIED   0   late-answer        30     10      3     5     
 # first poll can stall for seconds, and a window sized to the bare minimum
 # would measure the host's scheduler instead of the classifier.
 spawn_await s3    SLOW        3   blocked-on-disk     6     60      3     5     1
-spawn_await s4    SLOW        3   io-only-kernel      6     60      3     5     1
+# The I/O-only classifier uses logical time; the disk case above tests real time.
+spawn_await s4    SLOW        3   io-only-kernel      6     60      3     5     1 logical
 # ── BAR 2 ── a genuinely wedged box must STILL be rolled back. Same observer
 # shape, nothing moving: WEDGED, exit 1.
 spawn_await s5    WEDGED      1   wedged             60      3      3     5     1
@@ -557,6 +566,13 @@ spawn_await s14   CRASHED     1   restart-storm      60    600      3     5     
 wait_await_pids
 for tag in s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 s14; do judge_await "$tag"; done
 [ "$AWAIT_N" -eq 14 ] || fail "expected 14 loop scenarios, spawned $AWAIT_N"
+s4_out="$(cat "$SANDBOX/s4.out" 2>/dev/null || true)"
+if str_contains "$s4_out" "SLOW after 6s (7 observations, 6 observed advances" &&
+   [ "$(cat "$SANDBOX/s4.counter" 2>/dev/null || true)" = 7 ]; then
+    pass "I/O-only logical window observed six advances across seven polls"
+else
+    fail "I/O-only logical window did not exercise seven polls and six advances: $s4_out"
+fi
 # A verdict that cannot show the restart it forgave is a verdict nobody can
 # audit: the summary has to name both the restart count and how many polls
 # were excused, or the next reader is back to guessing "restarting" from
