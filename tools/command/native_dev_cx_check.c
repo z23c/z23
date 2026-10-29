@@ -242,6 +242,140 @@ static size_t ck_tokens(char *text, const char **argv, size_t n, size_t max)
     return n;
 }
 
+/* ── the file's own quoted headers ───────────────────────────────────────── */
+
+#define CK_EXTRA_INC 16
+#define CK_EXTRA_BYTES 8192
+
+/* -I flags added for the target file; argv points into store. */
+struct ck_extra {
+    char store[CK_EXTRA_BYTES];
+    size_t used;
+};
+
+/* The text after lit (leading blanks skipped), or NULL when it is not there. */
+static const char *ck_after(const char *q, const char *end, const char *lit)
+{
+    size_t n = strlen(lit);
+    while (q < end && (*q == ' ' || *q == '\t'))
+        q++;
+    if ((size_t)(end - q) < n || strncmp(q, lit, n) != 0)
+        return NULL;
+    return q + n;
+}
+
+/* The name of a quoted `#include "name"` line; only plain relative names of
+ * safe characters qualify (no "..", no glob characters). */
+static bool ck_include_name(const char *p, size_t n, char *out, size_t cap)
+{
+    const char *end = p + n;
+    const char *q = ck_after(p, end, "#");
+    const char *close;
+    q = q ? ck_after(q, end, "include") : NULL;
+    q = q ? ck_after(q, end, "\"") : NULL;
+    close = q ? memchr(q, '"', (size_t)(end - q)) : NULL;
+    if (!close || close == q || (size_t)(close - q) >= cap)
+        return false;
+    snprintf(out, cap, "%.*s", (int)(close - q), q);
+    return out[0] != '/' && !strstr(out, "..") && ck_safe_chars(out, "_./+-");
+}
+
+/* The directory of the target file, "." at the checkout root. */
+static void ck_own_dir(const struct cx_check *ck, char *own, size_t cap)
+{
+    char *slash;
+    snprintf(own, cap, "%s", ck->file);
+    slash = strrchr(own, '/');
+    if (slash)
+        *slash = '\0';
+    else
+        snprintf(own, cap, ".");
+}
+
+static bool ck_inc_exists(const char *wt, const char *dir, const char *name)
+{
+    char path[ZCL_CX_PATH_MAX];
+    int w = dir[0] == '/' ? snprintf(path, sizeof(path), "%s/%s", dir, name)
+                          : snprintf(path, sizeof(path), "%s/%s/%s", wt, dir,
+                                     name);
+    return w < (int)sizeof(path) && access(path, F_OK) == 0;
+}
+
+/* Does one of the -I flags in argv find name? */
+static bool ck_inc_resolves(const struct cx_check *ck, const char **argv,
+                            size_t n, const char *name)
+{
+    for (size_t i = 0; i < n; i++)
+        if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] &&
+            ck_inc_exists(ck->wt, argv[i] + 2, name))
+            return true;
+    return false;
+}
+
+/* The -I root of the one tracked file whose path ends in /name (the root is
+ * that path minus name). Zero or several such files: false, fail closed. */
+static bool ck_inc_root(struct cx_check *ck, const char *name, char *root,
+                        size_t cap)
+{
+    char spec[ZCL_CX_FILE_MAX + 16];
+    const char *argv[] = {"git", "ls-files", "--", spec, NULL};
+    size_t len = strlen(name), ll;
+    const char *nl;
+    snprintf(spec, sizeof(spec), ":(glob)**/%s", name);
+    if (cx_run(ck->wt, argv, ck->log, CK_LOG_CAP, CK_MAKE_MS, false) != 0)
+        return false;
+    nl = strchr(ck->log, '\n');
+    if (!nl || nl[1] != '\0')
+        return false;
+    ll = (size_t)(nl - ck->log);
+    if (ll < len || strncmp(ck->log + ll - len, name, len) != 0 ||
+        (ll > len && ck->log[ll - len - 1] != '/'))
+        return false;
+    if (ll == len)
+        return snprintf(root, cap, ".") < (int)cap;
+    return snprintf(root, cap, "%.*s", (int)(ll - len - 1), ck->log) < (int)cap;
+}
+
+static size_t ck_push_dir(struct ck_extra *x, const char **argv, size_t n,
+                          size_t max, const char *dir)
+{
+    int w;
+    if (n >= max || x->used >= sizeof(x->store))
+        return n;
+    w = snprintf(x->store + x->used, sizeof(x->store) - x->used, "-I%s", dir);
+    if (w < 0 || x->used + (size_t)w + 1 > sizeof(x->store))
+        return n;
+    argv[n++] = x->store + x->used;
+    x->used += (size_t)w + 1;
+    return n;
+}
+
+/* Adds -I for the file's own directory and, for each quoted include the set
+ * does not find, the root of the one tracked file that provides it. */
+static size_t ck_add_includes(struct cx_check *ck, const char **argv, size_t n,
+                              size_t max, struct ck_extra *x)
+{
+    char path[ZCL_CX_PATH_MAX], own[ZCL_CX_FILE_MAX], name[ZCL_CX_FILE_MAX];
+    char root[ZCL_CX_FILE_MAX];
+    char *text;
+    ck_own_dir(ck, own, sizeof(own));
+    n = ck_push_dir(x, argv, n, max, own);
+    if (snprintf(path, sizeof(path), "%s/%s", ck->wt, ck->file) >=
+        (int)sizeof(path))
+        return n;
+    text = cx_read_file(path, NULL);
+    for (const char *p = text; p && *p;) {
+        size_t l = strcspn(p, "\n");
+        if (ck_include_name(p, l, name, sizeof(name)) &&
+            !ck_inc_resolves(ck, argv, n, name) &&
+            ck_inc_root(ck, name, root, sizeof(root)))
+            n = ck_push_dir(x, argv, n, max, root);
+        p += l + (p[l] ? 1 : 0);
+    }
+    free(text);
+    return n;
+}
+
 /* CX_COMPILE: the file builds as C23 with the bridge's flags and the
  * Makefile's own include set (make print-includes). */
 static const char *ck_step_compile(struct cx_check *ck)
@@ -255,6 +389,7 @@ static const char *ck_step_compile(struct cx_check *ck)
     const size_t nfixed = sizeof(fixed) / sizeof(*fixed);
     char inc[65536];
     const char *argv[CK_MAX_INCLUDES + 24];
+    struct ck_extra extra = {.used = 0};
     size_t n = 0;
     if (!ck_make_includes(ck, inc, sizeof(inc))) {
         (void)snprintf(ck->detail, sizeof(ck->detail),
@@ -266,6 +401,7 @@ static const char *ck_step_compile(struct cx_check *ck)
     n = ck_tokens(inc, argv, n, CK_MAX_INCLUDES);
     argv[n++] = "-I./tools";
     argv[n++] = "-I./tools/acme";
+    n = ck_add_includes(ck, argv, n, CK_MAX_INCLUDES + 16, &extra);
     argv[n++] = ck->file;
     argv[n] = NULL;
     if (cx_run(ck->wt, argv, ck->log, CK_LOG_CAP, CK_CC_MS, true) == 0)

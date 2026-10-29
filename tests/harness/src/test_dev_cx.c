@@ -544,6 +544,60 @@ _test_next:;
     return failures;
 }
 
+/* A lane whose src/split.c includes "ns/h.h", which lives only under inc/
+ * (and, when twin, also under other/): the Makefile include set is -I. . */
+static void cxt_inc_lane(char *dir, size_t cap, const char *tag, bool twin)
+{
+    static char text[16384];
+    cxt_new_repo(dir, cap, tag);
+    (void)snprintf(text, sizeof(text), "#include \"ns/h.h\"\n\n");
+    cxt_fn(text, sizeof(text), "big_a", 16);
+    cxt_put(dir, "src/split.c", text);
+    cxt_put(dir, "inc/ns/h.h", "#define NS_H_ONE 1\n");
+    if (twin)
+        cxt_put(dir, "other/ns/h.h", "#define NS_H_ONE 2\n");
+    cxt_pin_and_commit(dir);
+}
+
+/* The same split as cxt_split_ok, keeping the include line. */
+static void cxt_split_inc(const char *dir)
+{
+    static char text[16384];
+    (void)snprintf(text, sizeof(text), "#include \"ns/h.h\"\n\n");
+    cxt_fn(text, sizeof(text), "part_a", 8);
+    cxt_fn(text, sizeof(text), "part_b", 8);
+    (void)strcat(text, "int big_a(int x)\n{\n    return part_a(x) + part_b(x);\n}\n");
+    cxt_put(dir, "src/split.c", text);
+}
+
+static int cxt_test_check_headers(void)
+{
+    int failures = 0;
+    struct cxt_call c;
+    char dir[CXT_PATH];
+    TEST("dev.cx.check: a quoted header only one tracked file provides resolves") {
+        cxt_inc_lane(dir, sizeof(dir), "inc_one", false);
+        cxt_split_inc(dir);
+        cxt_check(&c, dir, "src/split.c", "big_a");
+        ASSERT(cxt_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "pass");
+        ASSERT(!cxt_baseline_has(dir, "src/split.c:big_a"));
+        cxt_end(&c);
+        PASS();
+    }
+    TEST("dev.cx.check: CX_COMPILE when two tracked files could provide the header") {
+        cxt_inc_lane(dir, sizeof(dir), "inc_two", true);
+        cxt_split_inc(dir);
+        cxt_check(&c, dir, "src/split.c", "big_a");
+        ASSERT(cxt_code_is(&c, "CX_COMPILE"));
+        ASSERT(cxt_baseline_has(dir, "src/split.c:big_a:17"));
+        cxt_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int cxt_test_check_over(void)
 {
     int failures = 0;
@@ -713,6 +767,7 @@ int test_dev_cx(void)
     failures += cxt_test_check_pass();
     failures += cxt_test_check_scope();
     failures += cxt_test_check_compile();
+    failures += cxt_test_check_headers();
     failures += cxt_test_check_over();
     failures += cxt_test_check_added();
     failures += cxt_test_check_gate();
