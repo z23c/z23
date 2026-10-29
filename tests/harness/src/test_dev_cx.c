@@ -575,6 +575,76 @@ _test_next:;
     return failures;
 }
 
+/* A lane whose src/split.c opens with one comment line, then big_a at 17. */
+static void cxt_commented_lane(char *dir, size_t cap, const char *tag,
+                               const char *comment)
+{
+    static char text[16384];
+    text[0] = '\0';
+    (void)snprintf(text, sizeof(text), "%s\n", comment);
+    cxt_fn(text, sizeof(text), "big_a", 16);
+    cxt_new_repo(dir, cap, tag);
+    cxt_put(dir, "src/split.c", text);
+    cxt_pin_and_commit(dir);
+}
+
+/* The same split as cxt_split_ok, opening with the given comment line. */
+static void cxt_split_commented(const char *dir, const char *comment)
+{
+    static char text[16384];
+    text[0] = '\0';
+    (void)snprintf(text, sizeof(text), "%s\n", comment);
+    cxt_fn(text, sizeof(text), "part_a", 8);
+    cxt_fn(text, sizeof(text), "part_b", 8);
+    (void)strcat(text, "int big_a(int x)\n{\n    return part_a(x) + part_b(x);\n}\n");
+    cxt_put(dir, "src/split.c", text);
+}
+
+static int cxt_test_check_preserved(void)
+{
+    int failures = 0;
+    struct cxt_call c;
+    char dir[CXT_PATH];
+    char *before, *after;
+    TEST("dev.cx.check: CX_PRESERVED when a split rewords a comment line") {
+        cxt_commented_lane(dir, sizeof(dir), "reworded", "/* keep this line */");
+        before = cxt_baseline(dir);
+        cxt_split_commented(dir, "/* reworded line */");
+        cxt_check(&c, dir, "src/split.c", "big_a");
+        ASSERT(cxt_code_is(&c, "CX_PRESERVED"));
+        ASSERT(strstr(json_get_str(json_get(&c.reply.data, "detail")),
+                      "lost or reworded") != NULL);
+        cxt_end(&c);
+        after = cxt_baseline(dir);
+        ASSERT(before && after && strcmp(before, after) == 0);
+        free(before);
+        free(after);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int cxt_test_check_preserved_pass(void)
+{
+    int failures = 0;
+    struct cxt_call c;
+    char dir[CXT_PATH];
+    TEST("dev.cx.check: a split that keeps its comment line passes") {
+        cxt_commented_lane(dir, sizeof(dir), "kept", "/* keep this line */");
+        ASSERT(cxt_baseline_has(dir, "src/split.c:big_a:17"));
+        cxt_split_commented(dir, "/* keep this line */");
+        cxt_check(&c, dir, "src/split.c", "big_a");
+        ASSERT(cxt_ok(&c));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "pass");
+        ASSERT(!cxt_baseline_has(dir, "src/split.c:big_a"));
+        cxt_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_cx(void);
 int test_dev_cx(void)
 {
@@ -596,6 +666,8 @@ int test_dev_cx(void)
     failures += cxt_test_check_over();
     failures += cxt_test_check_added();
     failures += cxt_test_check_gate();
+    failures += cxt_test_check_preserved();
+    failures += cxt_test_check_preserved_pass();
     return failures;
 }
 #endif

@@ -2,10 +2,12 @@
  * purpose: dev.cx.check. Verifies one complexity-split unit in a worktree and,
  *          when it passes, applies the baseline tighten there (rows only
  *          deleted). Each failure carries one named code: CX_SCOPE,
- *          CX_COMPILE, CX_BASELINE_ADDED, CX_STILL_OVER, CX_GATE. The metric
- *          is the lane's own build/bin/z23-lint check-cyclomatic-complexity;
- *          nothing is reimplemented and no shell runs. A failed check leaves
- *          the baseline byte-for-byte as it was. Ports cx-swarm's check(). */
+ *          CX_PRESERVED, CX_COMPILE, CX_BASELINE_ADDED, CX_STILL_OVER,
+ *          CX_GATE. The metric is the lane's own build/bin/z23-lint
+ *          check-cyclomatic-complexity; CX_PRESERVED runs its own
+ *          check-split-preserved against HEAD. Nothing is reimplemented and no
+ *          shell runs. A failed check leaves the baseline byte-for-byte as it
+ *          was. Ports cx-swarm's check(). */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
@@ -369,9 +371,55 @@ static const char *ck_step_gate(struct cx_check *ck)
     return "CX_GATE";
 }
 
+/* CX_PRESERVED: the split keeps every licence line, include, LOG call in its
+ * function and comment line of HEAD (the file the scope step pins to). Runs
+ * before the tighten so a refusal leaves the baseline untouched. */
+#define CK_PRESERVED_RULE                                                    \
+    "the split must keep each licence line, include, LOG call and comment " \
+    "line of the base: "
+
+/* The first CK_SHOW FAIL lines of the lint output, after the rule text. */
+static void ck_fail_lines(struct cx_check *ck)
+{
+    size_t used = (size_t)snprintf(ck->detail, sizeof(ck->detail), "%s",
+                                   CK_PRESERVED_RULE);
+    int shown = 0;
+    for (const char *p = ck->log; *p && shown < CK_SHOW && used < sizeof(ck->detail);) {
+        size_t n = strcspn(p, "\n");
+        if (strncmp(p, "FAIL ", 5) == 0) {
+            int w = snprintf(ck->detail + used, sizeof(ck->detail) - used,
+                             "%s%.*s", shown ? "; " : "", (int)n, p);
+            if (w < 0 || (size_t)w >= sizeof(ck->detail) - used)
+                break;
+            used += (size_t)w;
+            shown++;
+        }
+        p += n + (p[n] ? 1 : 0);
+    }
+}
+
+static const char *ck_step_preserved(struct cx_check *ck)
+{
+    const char *argv[] = {ck->lint, "check-split-preserved", "--base=HEAD",
+                          ck->file, NULL};
+    int rc = cx_run(ck->wt, argv, ck->log, CK_LOG_CAP, CK_LINT_MS, true);
+    if (rc == 0)
+        return NULL;
+    if (rc == 1) {
+        ck_fail_lines(ck);
+        return "CX_PRESERVED";
+    }
+    /* Fail closed: a refusal, a crash or a spawn failure is never a pass. */
+    ck_tail(ck);
+    if (!ck->detail[0])
+        (void)snprintf(ck->detail, sizeof(ck->detail),
+                       "check-split-preserved gave no output (status %d)", rc);
+    return "CX_PRESERVED";
+}
+
 static const cx_step_fn k_steps[] = {
-    ck_step_scope, ck_step_compile, ck_step_tighten, ck_step_added,
-    ck_step_still_over, ck_step_gate
+    ck_step_scope, ck_step_preserved, ck_step_compile, ck_step_tighten,
+    ck_step_added, ck_step_still_over, ck_step_gate
 };
 
 /* ── reply ───────────────────────────────────────────────────────────────── */
