@@ -288,6 +288,35 @@ static void test_cli_arity(void)
     cli_sink = stdout; cli_errors = NULL;
 }
 
+/* A known op reports a bad number or a missing operand before any operand
+   count, as it did before surplus operands were refused. */
+static void test_cli_known_op_precedence(void)
+{
+    static const struct { int argc; char *args[6]; const char *want; } rows[] = {
+        {3, {"zu256", "add", "bad!"}, "zu256: bad number bad!\n"},
+        {5, {"zu256", "dec", "bad!", "1", "2"}, "zu256: bad number bad!\n"},
+        {5, {"zu256", "add", "1", "bad!", "2"}, "zu256: bad number bad!\n"},
+        {3, {"zu256", "shl", "1"}, "zu256: missing operand\n"},
+        {5, {"zu256", "addjunk", "1", "2", "3"}, "zu256: unknown op addjunk\n"},
+        {5, {"zu256", "add", "1", "2", "3"}, "zu256: add expects 2 operands\n"},
+        {4, {"zu256", "hex", "1", "2"}, "zu256: hex expects 1 operand\n"},
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        char *args[6];
+        memcpy(args, rows[i].args, sizeof args);
+        char got[96] = {0};
+        cli_sink = tmpfile(); cli_errors = tmpfile();
+        CHECK(cli_sink && cli_errors);
+        CHECK(zu256_cli_main(rows[i].argc, args) == 2);
+        CHECK(fflush(cli_errors) == 0);
+        rewind(cli_errors);
+        CHECK(fread(got, 1, sizeof got - 1, cli_errors) == strlen(rows[i].want));
+        CHECK(strcmp(got, rows[i].want) == 0);
+        CHECK(fclose(cli_sink) == 0 && fclose(cli_errors) == 0);
+    }
+    cli_sink = stdout; cli_errors = NULL;
+}
+
 static void test_cli_output(void);
 
 int main(void)
@@ -295,6 +324,7 @@ int main(void)
     cli_sink = stdout;
     test_cli_output();
     test_cli_arity();
+    test_cli_known_op_precedence();
     test_cli_shift_counts();
     test_cli_rejects_unknown_operations();
     test_identities();

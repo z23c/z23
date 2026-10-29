@@ -73,49 +73,51 @@ static int binary_command(const char *op, zu256256 a, zu256256 b)
     }
 }
 
+/* A known op given more operands than it takes is refused only after its own
+   operand checks pass, so every older error keeps its precedence. */
+static bool surplus(int argc, char **argv, int want)
+{
+    if (argc <= want) return false;
+    fprintf(stderr, "zu256: %s expects %d operand%s\n", argv[1], want - 2,
+            want == 3 ? "" : "s");
+    return true;
+}
+
 static bool known_binary(const char *op)
 {
-    static const char *const ops[] = {"add", "sub", "mul", "div", "mod", "shl", "shr"};
+    static const char *const ops[] = {"add", "sub", "mul", "div", "mod"};
     for (size_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
         if (strcmp(op, ops[i]) == 0) return true;
     }
     return false;
 }
 
-static int check_arity(int argc, char **argv)
+static int unary_command(int argc, char **argv, zu256256 a)
+{
+    if (surplus(argc, argv, 3)) return 2;
+    if (strcmp(argv[1], "hex") == 0) return show(a);
+    char buf[80];
+    if (!zu256_to_dec(a, buf, sizeof buf)) return 1;
+    return finish_output(puts(buf));
+}
+
+int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr,
             "usage: zu256 add|sub|mul|div|mod A B | shl|shr A N | dec|hex A\n");
         return 2;
     }
-    bool unary = strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "hex") == 0;
-    /* unknown ops keep the older precedence: missing operand, bad A/B, then unknown op */
-    if (!unary && !known_binary(argv[1])) return 0;
-    int expected = unary ? 3 : 4;
-    if (argc != expected) {
-        fprintf(stderr, "zu256: %s expects %d operand%s\n", argv[1],
-                expected - 2, expected == 3 ? "" : "s");
-        return 2;
-    }
-    return 0;
-}
-
-int main(int argc, char **argv)
-{
-    if (check_arity(argc, argv)) return 2;
     zu256256 a, b;
     if (!parse(argv[2], &a)) {
         fprintf(stderr, "zu256: bad number %s\n", argv[2]);
         return 2;
     }
-    if (strcmp(argv[1], "dec") == 0) {
-        char buf[80];
-        if (!zu256_to_dec(a, buf, sizeof buf)) return 1;
-        return finish_output(puts(buf));
-    }
-    if (strcmp(argv[1], "hex") == 0) {
-        return show(a);
+    if (strcmp(argv[1], "dec") == 0 || strcmp(argv[1], "hex") == 0)
+        return unary_command(argc, argv, a);
+    if (argc < 4) {
+        fprintf(stderr, "zu256: missing operand\n");
+        return 2;
     }
     if (strcmp(argv[1], "shl") == 0 || strcmp(argv[1], "shr") == 0) {
         unsigned n;
@@ -123,15 +125,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "zu256: shift count must be a nonnegative decimal within unsigned long long range\n");
             return 2;
         }
+        if (surplus(argc, argv, 4)) return 2;
         return show(argv[1][2] == 'l' ? zu256_shl(a, n) : zu256_shr(a, n));
-    }
-    if (argc < 4) {
-        fprintf(stderr, "zu256: missing operand\n");
-        return 2;
     }
     if (!parse(argv[3], &b)) {
         fprintf(stderr, "zu256: bad number %s\n", argv[3]);
         return 2;
     }
+    if (known_binary(argv[1]) && surplus(argc, argv, 4)) return 2;
     return binary_command(argv[1], a, b);
 }
