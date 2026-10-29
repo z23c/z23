@@ -267,6 +267,99 @@ static int x4_check_unaligned_parity(bool have_vec)
     return alloc_fail + x4_report_fails(diff_fail);
 }
 
+#if defined(__x86_64__)
+/* The AVX-512 lane entry point: non-static in sha3_256_x4.c and declared in no
+ * header, so the oracle declares it here. Called only after the module's own
+ * keccak_x4_available() confirms the CPU has the lane. */
+void sha3_256_x4_avx512(const uint8_t *const msgs[4], const size_t lens[4],
+                        uint8_t out[4][32]);
+#endif
+
+typedef void (*x4_entry_fn)(const uint8_t *const msgs[4], const size_t lens[4],
+                            uint8_t out[4][32]);
+
+/* Pinned length rows: empty, one byte, the 135/136/137 rate edge, two full
+ * blocks plus one, each shared by all four lanes and also split unequal. */
+#define X4_PIN_BUF 288u
+static const size_t x4_pin_rows[][4] = {
+    { 0, 0, 0, 0 },           { 1, 1, 1, 1 },
+    { 135, 135, 135, 135 },   { 136, 136, 136, 136 },
+    { 137, 137, 137, 137 },   { 272, 272, 272, 272 },
+    { 0, 1, 135, 136 },       { 137, 272, 0, 1 },
+    { 136, 137, 271, 273 },
+};
+#define X4_PIN_ROWS (sizeof(x4_pin_rows) / sizeof(x4_pin_rows[0]))
+
+/* Hash one pinned row through fn and count the lanes that differ from
+ * one-shot scalar sha3_256 of the same bytes. */
+static int x4_pin_row_fails(x4_entry_fn fn, const uint8_t buf[4][X4_PIN_BUF],
+                            const size_t lens[4])
+{
+    const uint8_t *msgs[4] = { buf[0], buf[1], buf[2], buf[3] };
+    uint8_t ref[4][32], got[4][32];
+    int fails = 0;
+    for (int i = 0; i < 4; ++i) sha3_256(msgs[i], lens[i], ref[i]);
+    fn(msgs, lens, got);
+    for (int i = 0; i < 4; ++i)
+        if (memcmp(ref[i], got[i], 32) != 0) fails++;
+    return fails;
+}
+
+static int x4_pin_rows_run(x4_entry_fn fn)
+{
+    uint8_t buf[4][X4_PIN_BUF];
+    int fails = 0;
+    for (size_t r = 0; r < X4_PIN_ROWS; ++r) {
+        for (int i = 0; i < 4; ++i) rng_fill(buf[i], x4_pin_rows[r][i]);
+        fails += x4_pin_row_fails(fn, buf, x4_pin_rows[r]);
+    }
+    return fails;
+}
+
+/* Literal SHA3-256 of the empty string, lane by lane, through fn. */
+static int x4_pin_empty_literal_fails(x4_entry_fn fn)
+{
+    static const char want_hex[] =
+        "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a";
+    static const uint8_t none[1] = { 0 };
+    const uint8_t *msgs[4] = { none, none, none, none };
+    const size_t lens[4] = { 0, 0, 0, 0 };
+    uint8_t want[32], out[4][32];
+    int fails = 0;
+    if (hex2bin(want_hex, want, 32) != 0) return 1;
+    fn(msgs, lens, out);
+    for (int i = 0; i < 4; ++i)
+        if (memcmp(out[i], want, 32) != 0) fails++;
+    return fails;
+}
+
+/* Direct AVX-512 lane against scalar. The row is skipped (not failed) when the
+ * host CPU lacks the lane, or on a non-x86-64 target that has no such symbol. */
+static int x4_check_avx512_lane(void)
+{
+    printf("sha3_256_x4: direct AVX-512 lane vs scalar (pinned rows, empty literal)... ");
+#if defined(__x86_64__)
+    if (!keccak_x4_available()) {
+        printf("SKIP (host has no AVX-512 lane)\n");
+        return 0;
+    }
+    return x4_report_fails(x4_pin_empty_literal_fails(sha3_256_x4_avx512) +
+                           x4_pin_rows_run(sha3_256_x4_avx512));
+#else
+    printf("SKIP (not x86-64)\n");
+    return 0;
+#endif
+}
+
+/* The public dispatcher under the shipped AUTO selection, against scalar. */
+static int x4_check_dispatch_pinned(void)
+{
+    printf("sha3_256_x4: public dispatcher (AUTO) vs scalar (pinned rows, empty literal)... ");
+    sha3_256_x4_select_impl(SHA3_IMPL_AUTO);
+    return x4_report_fails(x4_pin_empty_literal_fails(sha3_256_x4) +
+                           x4_pin_rows_run(sha3_256_x4));
+}
+
 static void x4_bench_one_size(size_t insz, size_t total_mb, const char *name,
                               bool have_vec, const uint8_t *msgs[4])
 {
@@ -336,6 +429,10 @@ int test_sha3_256_x4(void)
 
     /* ── 1. FIPS-202 known-answer vectors through the batch path ─────── */
     failures += x4_check_kat(have_vec);
+
+    /* ── 1b. Pinned rows: direct AVX-512 lane and public dispatcher ──── */
+    failures += x4_check_avx512_lane();
+    failures += x4_check_dispatch_pinned();
 
     /* ── 2. Parity: all four lanes share every length 0..1100 ───────── */
     failures += x4_check_equal_len_parity(have_vec);
