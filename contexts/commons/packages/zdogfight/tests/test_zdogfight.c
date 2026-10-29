@@ -238,63 +238,96 @@ static void test_kill_and_respawn(void)
 /* 4. World bounds: y clamp (+ pitch zeroed), x/z toroidal wrap        */
 /* ------------------------------------------------------------------ */
 
+/* Observations accumulated across the bounds scenario. */
+struct bounds_probe {
+    int wrap_x, wrap_z, clamp_hi, clamp_lo;
+    int in_bounds;
+    int32_t prev_x0, prev_z1;
+};
+
+/* Scripted inputs for this tick, chosen from the pre-tick state. */
+static void bounds_pilots(const zdog_match *m, uint64_t t, zdog_ctl *c)
+{
+    for (unsigned i = 0; i < ZDOG_MAX_PLANES; i++)
+        pilot_sit(&c[i]);
+    /* plane 0: straight east at full throttle -> wraps +x */
+    c[0].throttle = 32767;
+    /* plane 1: turn until facing +z (yaw 0), then full throttle */
+    c[1].throttle = 32767;
+    if (m->planes[1].yaw > 300 && m->planes[1].yaw <= 32768)
+        c[1].roll = -30000;
+    else if (m->planes[1].yaw > 32768 && m->planes[1].yaw < 65236)
+        c[1].roll = 30000;
+    /* plane 3: climb into the ceiling, then dive into the floor */
+    c[3].pitch = (int16_t)(t < 600 ? -32767 : 32767);
+    c[3].throttle = 32767;
+}
+
+static int bounds_planes_ok(const zdog_match *m)
+{
+    for (unsigned i = 0; i < m->num_planes; i++) {
+        const zdog_plane *p = &m->planes[i];
+
+        if (p->x < -1000000 || p->x >= 1000000 || p->z < -1000000 ||
+            p->z >= 1000000 || p->y < 10000 || p->y > 500000)
+            return 0;
+    }
+    return 1;
+}
+
+static void bounds_track_wrap(struct bounds_probe *bp, const zdog_match *m,
+                              uint64_t t)
+{
+    if (t > 0) {
+        if (m->planes[0].x - bp->prev_x0 < -100000)
+            bp->wrap_x = 1;
+        if (m->planes[1].z - bp->prev_z1 < -100000 ||
+            m->planes[1].z - bp->prev_z1 > 100000)
+            bp->wrap_z = 1;
+    }
+    bp->prev_x0 = m->planes[0].x;
+    bp->prev_z1 = m->planes[1].z;
+}
+
+static void bounds_track_clamps(struct bounds_probe *bp, const zdog_match *m,
+                                uint64_t t)
+{
+    if (t > 100 && m->planes[3].y == 500000 && m->planes[3].pitch == 0)
+        bp->clamp_hi = 1;
+    if (t > 700 && m->planes[3].y == 10000 && m->planes[3].pitch == 0)
+        bp->clamp_lo = 1;
+}
+
+static void bounds_check_periodic(const zdog_match *m, uint64_t t)
+{
+    if (t > 1000 && t % 100 == 0)
+        check(m->planes[3].y == 10000, "y stays on the floor");
+    if (t > 200 && t < 600 && t % 100 == 0)
+        check(m->planes[3].y == 500000, "y stays on the ceiling");
+}
+
 static void test_bounds_and_wrap(void)
 {
     zdog_match m;
-    int wrap_x = 0, wrap_z = 0, clamp_hi = 0, clamp_lo = 0;
-    int in_bounds = 1;
-    int32_t prev_x0 = 0, prev_z1 = 0;
+    struct bounds_probe bp = { .in_bounds = 1 };
 
     zdog_match_init(&m, 99, 2);
     for (uint64_t t = 0; t < 1300; t++) {
         zdog_ctl c[ZDOG_MAX_PLANES];
 
-        for (unsigned i = 0; i < ZDOG_MAX_PLANES; i++)
-            pilot_sit(&c[i]);
-        /* plane 0: straight east at full throttle -> wraps +x */
-        c[0].throttle = 32767;
-        /* plane 1: turn until facing +z (yaw 0), then full throttle */
-        c[1].throttle = 32767;
-        if (m.planes[1].yaw > 300 && m.planes[1].yaw <= 32768)
-            c[1].roll = -30000;
-        else if (m.planes[1].yaw > 32768 && m.planes[1].yaw < 65236)
-            c[1].roll = 30000;
-        /* plane 3: climb into the ceiling, then dive into the floor */
-        c[3].pitch = (int16_t)(t < 600 ? -32767 : 32767);
-        c[3].throttle = 32767;
-
+        bounds_pilots(&m, t, c);
         zdog_tick(&m, c);
-
-        for (unsigned i = 0; i < m.num_planes; i++) {
-            const zdog_plane *p = &m.planes[i];
-
-            if (p->x < -1000000 || p->x >= 1000000 || p->z < -1000000 ||
-                p->z >= 1000000 || p->y < 10000 || p->y > 500000)
-                in_bounds = 0;
-        }
-        if (t > 0) {
-            if (m.planes[0].x - prev_x0 < -100000)
-                wrap_x = 1;
-            if (m.planes[1].z - prev_z1 < -100000 ||
-                m.planes[1].z - prev_z1 > 100000)
-                wrap_z = 1;
-        }
-        prev_x0 = m.planes[0].x;
-        prev_z1 = m.planes[1].z;
-        if (t > 100 && m.planes[3].y == 500000 && m.planes[3].pitch == 0)
-            clamp_hi = 1;
-        if (t > 700 && m.planes[3].y == 10000 && m.planes[3].pitch == 0)
-            clamp_lo = 1;
-        if (t > 1000 && t % 100 == 0)
-            check(m.planes[3].y == 10000, "y stays on the floor");
-        if (t > 200 && t < 600 && t % 100 == 0)
-            check(m.planes[3].y == 500000, "y stays on the ceiling");
+        if (!bounds_planes_ok(&m))
+            bp.in_bounds = 0;
+        bounds_track_wrap(&bp, &m, t);
+        bounds_track_clamps(&bp, &m, t);
+        bounds_check_periodic(&m, t);
     }
-    check(in_bounds, "all planes in bounds every tick");
-    check(wrap_x, "x toroidal wrap observed");
-    check(wrap_z, "z toroidal wrap observed");
-    check(clamp_hi, "y ceiling clamp with pitch zeroed");
-    check(clamp_lo, "y floor clamp with pitch zeroed");
+    check(bp.in_bounds, "all planes in bounds every tick");
+    check(bp.wrap_x, "x toroidal wrap observed");
+    check(bp.wrap_z, "z toroidal wrap observed");
+    check(bp.clamp_hi, "y ceiling clamp with pitch zeroed");
+    check(bp.clamp_lo, "y floor clamp with pitch zeroed");
 }
 
 /* ------------------------------------------------------------------ */
