@@ -1907,12 +1907,82 @@ _test_next:;
 }
 #endif /* !defined(_WIN32) */
 
+#if !defined(_WIN32)
+/* A forked child posts one leaf row and exits with its verdict. */
+static void dvx_post_child_exit(const char *name)
+{
+    struct dvx_call c;
+    dvx_post(&c, "leaf", name, NULL, NULL, NULL, NULL, -1);
+    (void)dvx_run(&c);
+    /* _exit with the handler's verdict: a failure here must fail
+     * the parent even though output is captured per process. */
+    _exit(dvx_ok(&c) ? 0 : 1);
+}
 
-int test_devagent_queue(void);
-int test_devagent_queue(void)
+/* The concurrent-post case, in its own function so the suite entry
+ * stays under the complexity gate. Returns the failure count. */
+static int dvx_concurrent_post_case(void)
 {
     int failures = 0;
+    TEST("queue: two processes posting at once never interleave rows") {
+        char qd[1100], qf[1200];
+        pid_t a, b;
+        int sa = 0, sb = 0;
+        FILE *f;
+        char line[8192];
+        int nlines = 0;
+        dvx_isolate("fork");
+        a = fork();
+        ASSERT(a >= 0);
+        if (a == 0)
+            dvx_post_child_exit("proc-a");
+        b = fork();
+        ASSERT(b >= 0);
+        if (b == 0)
+            dvx_post_child_exit("proc-b");
+        while (waitpid(a, &sa, 0) < 0)
+            ;
+        while (waitpid(b, &sb, 0) < 0)
+            ;
+        ASSERT(WIFEXITED(sa) && WEXITSTATUS(sa) == 0);
+        ASSERT(WIFEXITED(sb) && WEXITSTATUS(sb) == 0);
+        /* Every queue line is one complete, parseable row (no interleaved writes). */
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(qf, sizeof(qf), "%s/queue.jsonl", qd);
+        f = fopen(qf, "r");
+        ASSERT(f != NULL);
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                struct json_value v;
+                size_t len = strlen(line);
+                while (len > 0 &&
+                       (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                    line[--len] = '\0';
+                if (len == 0)
+                    continue;
+                nlines++;
+                json_init(&v);
+                ASSERT(json_read(&v, line, len) && v.type == JSON_OBJ);
+                json_free(&v);
+            }
+            (void)fclose(f);
+        }
+        ASSERT_EQ((long long)nlines, 2);
+        ASSERT_EQ(dvx_queued_count("proc-a"), 1);
+        ASSERT_EQ(dvx_queued_count("proc-b"), 1);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif /* !defined(_WIN32) */
 
+/* The registration case, in its own function so the suite entry stays
+ * under the complexity gate. Returns the failure count. */
+static int dvx_registration_case(void)
+{
+    int failures = 0;
     TEST("queue: the leaf is registered with its verb and row keys") {
         const struct zcl_command_spec *spec =
             zcl_command_registry_find(zcl_command_catalog(), DVX_PATH, NULL);
@@ -1932,6 +2002,19 @@ int test_devagent_queue(void)
                strstr(spec->positional_keys, "action") != NULL);
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+
+int test_devagent_queue(void);
+int test_devagent_queue(void)
+{
+    int failures = 0;
+
+    failures += dvx_registration_case();
+    if (failures)
+        goto _test_next;
 
     TEST("queue: bad posts are refused and store nothing") {
         struct dvx_call c;
@@ -2185,65 +2268,7 @@ int test_devagent_queue(void)
         PASS();
     }
 
-    TEST("queue: two processes posting at once never interleave rows") {
-        char qd[1100], qf[1200];
-        pid_t a, b;
-        int sa = 0, sb = 0;
-        FILE *f;
-        char line[8192];
-        int nlines = 0;
-        dvx_isolate("fork");
-        a = fork();
-        ASSERT(a >= 0);
-        if (a == 0) {
-            struct dvx_call c;
-            dvx_post(&c, "leaf", "proc-a", NULL, NULL, NULL, NULL, -1);
-            (void)dvx_run(&c);
-            /* _exit with the handler's verdict: a failure here must fail
-             * the parent even though output is captured per process. */
-            _exit(dvx_ok(&c) ? 0 : 1);
-        }
-        b = fork();
-        ASSERT(b >= 0);
-        if (b == 0) {
-            struct dvx_call c;
-            dvx_post(&c, "leaf", "proc-b", NULL, NULL, NULL, NULL, -1);
-            (void)dvx_run(&c);
-            _exit(dvx_ok(&c) ? 0 : 1);
-        }
-        while (waitpid(a, &sa, 0) < 0)
-            ;
-        while (waitpid(b, &sb, 0) < 0)
-            ;
-        ASSERT(WIFEXITED(sa) && WEXITSTATUS(sa) == 0);
-        ASSERT(WIFEXITED(sb) && WEXITSTATUS(sb) == 0);
-        /* Every queue line is one complete, parseable row (no interleaved writes). */
-        dvx_queuedir(qd, sizeof(qd));
-        (void)snprintf(qf, sizeof(qf), "%s/queue.jsonl", qd);
-        f = fopen(qf, "r");
-        ASSERT(f != NULL);
-        if (f) {
-            while (fgets(line, sizeof(line), f)) {
-                struct json_value v;
-                size_t len = strlen(line);
-                while (len > 0 &&
-                       (line[len - 1] == '\n' || line[len - 1] == '\r'))
-                    line[--len] = '\0';
-                if (len == 0)
-                    continue;
-                nlines++;
-                json_init(&v);
-                ASSERT(json_read(&v, line, len) && v.type == JSON_OBJ);
-                json_free(&v);
-            }
-            (void)fclose(f);
-        }
-        ASSERT_EQ((long long)nlines, 2);
-        ASSERT_EQ(dvx_queued_count("proc-a"), 1);
-        ASSERT_EQ(dvx_queued_count("proc-b"), 1);
-        dvx_restore();
-        PASS();
-    }
+    failures += dvx_concurrent_post_case();
 #endif /* !defined(_WIN32) */
 
 _test_next:;
