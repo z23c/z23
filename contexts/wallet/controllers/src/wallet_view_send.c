@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Renders the /wallet/send form, review and confirm steps, and runs the send.
+ */
 
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"

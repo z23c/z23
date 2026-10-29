@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Declares the wallet rescan RPC registration and the rescan report JSON serializer.
+ */
 
 #ifndef ZCL_CONTROLLERS_WALLET_RESCAN_CONTROLLER_H
 #define ZCL_CONTROLLERS_WALLET_RESCAN_CONTROLLER_H

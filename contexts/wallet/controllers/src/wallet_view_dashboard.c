@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Renders the /wallet dashboard page and its live pulse JSON for balances and sync state.
+ */
 
 #include "platform/time_compat.h"
 #include "controllers/wallet_view_internal.h"

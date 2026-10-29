@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Shared wallet RPC context, commit and flush entry points, and amount and address helpers.
+ */
 
 #ifndef ZCL_CONTROLLERS_WALLET_HELPERS_H
 #define ZCL_CONTROLLERS_WALLET_HELPERS_H

@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Renders the /wallet/receive page with transparent and shielded addresses and QR codes.
+ */
 
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"

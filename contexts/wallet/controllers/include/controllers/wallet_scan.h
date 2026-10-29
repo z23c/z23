@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Declares the fast block-rescan entry point and the Pass-1 file-match cache validity checks.
+ */
 
 #ifndef ZCL_DB_WALLET_SCAN_H
 #define ZCL_DB_WALLET_SCAN_H

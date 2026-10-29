@@ -80,9 +80,6 @@ engine/controllers/include/controllers/repair_controller.h
 engine/controllers/include/controllers/rpc_chainstate_guard.h
 engine/controllers/include/controllers/snapshot_controller.h
 contexts/wallet/controllers/include/controllers/wallet_diagnostic_controller.h
-contexts/wallet/controllers/include/controllers/wallet_helpers.h
-contexts/wallet/controllers/include/controllers/wallet_rescan_controller.h
-contexts/wallet/controllers/include/controllers/wallet_scan.h
 contexts/wallet/controllers/include/controllers/wallet_shielded_controller.h
 cognition/controllers/src/agent_anchor_status_controller.c
 cognition/controllers/src/agent_contract_capability_registry.c
@@ -105,11 +102,6 @@ engine/controllers/src/legacy_import_scan.h
 engine/controllers/src/network_peer_incidents_compat_controller.c
 engine/controllers/src/rpc_chainstate_guard.c
 contexts/wallet/controllers/src/wallet_view_coins.c
-contexts/wallet/controllers/src/wallet_view_dashboard.c
-contexts/wallet/controllers/src/wallet_view_history.c
-contexts/wallet/controllers/src/wallet_view_node.c
-contexts/wallet/controllers/src/wallet_view_receive.c
-contexts/wallet/controllers/src/wallet_view_send.c
 contexts/wallet/controllers/src/wallet_view_shield.c
 engine/jobs/include/jobs/created_outputs_index.h
 engine/jobs/src/header_admit_forward_rewind.c
