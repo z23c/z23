@@ -351,12 +351,235 @@ static int case_workload_mutations(void)
     return failures;
 }
 
+static int pe_root_only_mutations(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2],
+    const uint8_t root[32], bool ready)
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+#define PE_WORKLOAD_MUTATION(name_, mutation_) do {                         \
+    memcpy(tasks, base, sizeof(tasks));                                     \
+    mutation_;                                                              \
+    uint8_t mutated[32];                                                    \
+    bool changed_root = pe_workload_root(fixture, tasks, 2u, mutated) ==    \
+            ZCL_RETRIEVAL_EXPERIMENT_OK &&                                 \
+        memcmp(root, mutated, 32u) != 0;                                    \
+    PE_CHECK((name_), ready && changed_root);                               \
+} while (0)
+    PE_WORKLOAD_MUTATION("root-only task id binds", tasks[0].task_id = "a2");
+    PE_WORKLOAD_MUTATION("root-only query binds", tasks[0].query = "q2");
+    const char *other_relevance[2] = {"src/a.c", "src/new.c"};
+    PE_WORKLOAD_MUTATION("root-only relevance binds",
+                         tasks[0].relevant_paths = other_relevance);
+    const char *reordered[2] = {"src/shared.c", "src/a.c"};
+    PE_WORKLOAD_MUTATION("root-only relevance order binds",
+                         tasks[0].relevant_paths = reordered);
+    PE_WORKLOAD_MUTATION("root-only task order binds",
+                         tasks[0] = base[1]; tasks[1] = base[0]);
+#undef PE_WORKLOAD_MUTATION
+    return failures;
+}
+
+static int pe_root_only_external_roots(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2],
+    const uint8_t root[32], bool ready)
+{
+    int failures = 0;
+    struct pe_fixture changed;
+    bool external_roots = true;
+    for (size_t which = 0; which < 3u; which++) {
+        changed = *fixture;
+        uint8_t *roots[] = {
+            changed.task_root, changed.source_root, changed.projection_root};
+        roots[which][0] ^= 1u;
+        uint8_t mutated[32];
+        external_roots = external_roots &&
+            pe_workload_root(&changed, base, 2u, mutated) ==
+                ZCL_RETRIEVAL_EXPERIMENT_OK &&
+            memcmp(root, mutated, 32u) != 0;
+    }
+    PE_CHECK("root-only task source and projection roots bind",
+             ready && external_roots);
+    return failures;
+}
+
+static int pe_root_only_duplicates(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[1].task_id = tasks[0].task_id;
+    bool duplicate_task = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    const char *duplicate_relevance[2] = {"src/a.c", "src/a.c"};
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_paths = duplicate_relevance;
+    bool duplicate_relevant = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    PE_CHECK("root-only duplicates refuse atomically",
+             duplicate_task && duplicate_relevant);
+    return failures;
+}
+
+static int pe_root_only_empty_fields(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_count = 0u;
+    bool empty_relevance = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = "";
+    bool empty_id = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = "";
+    bool empty_query = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    bool empty_batch = pe_workload_refused(
+        base, 0u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    PE_CHECK("root-only empty fields and batch refuse atomically",
+             empty_relevance && empty_id && empty_query && empty_batch);
+    return failures;
+}
+
+static int pe_root_only_limits(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_count = ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX + 1u;
+    bool relevance_limit = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    bool task_limit = pe_workload_refused(
+        base, ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX + 1u, fixture->task_root,
+        fixture->source_root, fixture->projection_root);
+    char long_query[ZCL_RETRIEVAL_PAIRED_EVALUATION_QUERY_MAX + 2u];
+    memset(long_query, 'q', sizeof(long_query));
+    long_query[sizeof(long_query) - 1u] = 0;
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = long_query;
+    bool query_limit = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    char long_id[ZCL_RETRIEVAL_PAIRED_EVALUATION_TASK_ID_MAX + 2u];
+    memset(long_id, 'i', sizeof(long_id));
+    long_id[sizeof(long_id) - 1u] = 0;
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = long_id;
+    bool id_limit = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    char long_path[ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX + 2u];
+    memset(long_path, 'p', sizeof(long_path));
+    long_path[sizeof(long_path) - 1u] = 0;
+    const char *long_relevance[2] = {long_path, "src/shared.c"};
+    memcpy(tasks, base, sizeof(tasks));
+    tasks[0].relevant_paths = long_relevance;
+    bool path_limit = pe_workload_refused(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root);
+    PE_CHECK("root-only count and text limits refuse atomically",
+             relevance_limit && task_limit && query_limit && id_limit &&
+             path_limit);
+    return failures;
+}
+
+static int pe_root_only_zero_roots(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    uint8_t zero[32] = {0};
+    bool zero_task = pe_workload_refused(
+        base, 2u, zero, fixture->source_root, fixture->projection_root);
+    bool zero_source = pe_workload_refused(
+        base, 2u, fixture->task_root, zero, fixture->projection_root);
+    bool zero_projection = pe_workload_refused(
+        base, 2u, fixture->task_root, fixture->source_root, zero);
+    PE_CHECK("root-only zero roots refuse atomically",
+             zero_task && zero_source && zero_projection);
+    return failures;
+}
+
+static int pe_root_only_aliases(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+    union pe_workload_direct_alias {
+        uint8_t out[32];
+        struct zcl_retrieval_evaluation_workload_task_v1 task;
+    } direct, direct_before;
+    direct.task = base[0]; direct_before = direct;
+    bool direct_alias = zcl_retrieval_evaluation_workload_root(
+        &direct.task, 1u, fixture->task_root, fixture->source_root,
+        fixture->projection_root, direct.out) == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+        memcmp(&direct, &direct_before, sizeof(direct)) == 0;
+    union pe_workload_reachable_alias { uint8_t out[32]; char text[32]; }
+        reachable, reachable_before;
+    memset(&reachable, 0, sizeof(reachable));
+    memcpy(reachable.text, "reachable-workload", 19u);
+    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = reachable.text;
+    reachable_before = reachable;
+    bool reachable_alias = zcl_retrieval_evaluation_workload_root(
+        tasks, 2u, fixture->task_root, fixture->source_root,
+        fixture->projection_root, reachable.out) ==
+            ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+        memcmp(&reachable, &reachable_before, sizeof(reachable)) == 0;
+    PE_CHECK("root-only direct and reachable aliases refuse atomically",
+             direct_alias && reachable_alias);
+    return failures;
+}
+
+static int pe_root_only_hostile_aliases(struct pe_fixture *fixture,
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2])
+{
+    int failures = 0;
+    struct zcl_retrieval_evaluation_workload_task_v1 tasks[2];
+    union pe_workload_hostile_alias {
+        uint8_t out[32];
+        const char *pointer_table[4];
+    } hostile, hostile_before;
+    bool hostile_aliases = true;
+    for (size_t mutation = 0; mutation < 4u && hostile_aliases; mutation++) {
+        memset(&hostile, 0xa5, sizeof(hostile));
+        hostile_before = hostile;
+        memcpy(tasks, base, sizeof(tasks));
+        const char *relevance[2] = {
+            fixture->alpha_relevant[0], fixture->alpha_relevant[1]};
+        switch (mutation) {
+        case 0: tasks[0].task_id = (const char *)hostile.out; break;
+        case 1: tasks[0].query = (const char *)hostile.out; break;
+        case 2:
+            relevance[0] = (const char *)hostile.out;
+            tasks[0].relevant_paths = relevance;
+            break;
+        default: tasks[0].relevant_paths = hostile.pointer_table; break;
+        }
+        hostile_aliases = zcl_retrieval_evaluation_workload_root(
+                tasks, 2u, fixture->task_root, fixture->source_root,
+                fixture->projection_root, hostile.out) ==
+                ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+            memcmp(&hostile, &hostile_before, sizeof(hostile)) == 0;
+    }
+    PE_CHECK("root-only hostile text and pointer-table aliases preflight",
+             hostile_aliases);
+    return failures;
+}
+
 static int case_root_only_workload(void)
 {
     int failures = 0;
-    struct pe_fixture fixture, changed;
+    struct pe_fixture fixture;
     pe_fixture_init(&fixture);
-    struct zcl_retrieval_evaluation_workload_task_v1 base[2], tasks[2];
+    struct zcl_retrieval_evaluation_workload_task_v1 base[2];
     pe_workload_tasks(&fixture, base);
     uint8_t root[32], repeated[32];
     struct zcl_retrieval_paired_evaluation_report_v1 paired;
@@ -377,171 +600,14 @@ static int case_root_only_workload(void)
              memcmp(root, repeated, 32u) == 0 &&
              memcmp(root, paired.workload_root, 32u) == 0);
 
-#define PE_WORKLOAD_MUTATION(name_, mutation_) do {                         \
-    memcpy(tasks, base, sizeof(tasks));                                     \
-    mutation_;                                                              \
-    uint8_t mutated[32];                                                    \
-    bool changed_root = pe_workload_root(&fixture, tasks, 2u, mutated) ==   \
-            ZCL_RETRIEVAL_EXPERIMENT_OK &&                                 \
-        memcmp(root, mutated, 32u) != 0;                                    \
-    PE_CHECK((name_), ready && changed_root);                               \
-} while (0)
-    PE_WORKLOAD_MUTATION("root-only task id binds", tasks[0].task_id = "a2");
-    PE_WORKLOAD_MUTATION("root-only query binds", tasks[0].query = "q2");
-    const char *other_relevance[2] = {"src/a.c", "src/new.c"};
-    PE_WORKLOAD_MUTATION("root-only relevance binds",
-                         tasks[0].relevant_paths = other_relevance);
-    const char *reordered[2] = {"src/shared.c", "src/a.c"};
-    PE_WORKLOAD_MUTATION("root-only relevance order binds",
-                         tasks[0].relevant_paths = reordered);
-    PE_WORKLOAD_MUTATION("root-only task order binds",
-                         tasks[0] = base[1]; tasks[1] = base[0]);
-#undef PE_WORKLOAD_MUTATION
-
-    bool external_roots = true;
-    for (size_t which = 0; which < 3u; which++) {
-        changed = fixture;
-        uint8_t *roots[] = {
-            changed.task_root, changed.source_root, changed.projection_root};
-        roots[which][0] ^= 1u;
-        uint8_t mutated[32];
-        external_roots = external_roots &&
-            pe_workload_root(&changed, base, 2u, mutated) ==
-                ZCL_RETRIEVAL_EXPERIMENT_OK &&
-            memcmp(root, mutated, 32u) != 0;
-    }
-    PE_CHECK("root-only task source and projection roots bind",
-             ready && external_roots);
-
-    memcpy(tasks, base, sizeof(tasks));
-    tasks[1].task_id = tasks[0].task_id;
-    bool duplicate_task = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    const char *duplicate_relevance[2] = {"src/a.c", "src/a.c"};
-    memcpy(tasks, base, sizeof(tasks));
-    tasks[0].relevant_paths = duplicate_relevance;
-    bool duplicate_relevant = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    PE_CHECK("root-only duplicates refuse atomically",
-             duplicate_task && duplicate_relevant);
-
-    memcpy(tasks, base, sizeof(tasks));
-    tasks[0].relevant_count = 0u;
-    bool empty_relevance = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = "";
-    bool empty_id = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = "";
-    bool empty_query = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    bool empty_batch = pe_workload_refused(
-        base, 0u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    PE_CHECK("root-only empty fields and batch refuse atomically",
-             empty_relevance && empty_id && empty_query && empty_batch);
-
-    memcpy(tasks, base, sizeof(tasks));
-    tasks[0].relevant_count = ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX + 1u;
-    bool relevance_limit = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    bool task_limit = pe_workload_refused(
-        base, ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX + 1u, fixture.task_root,
-        fixture.source_root, fixture.projection_root);
-    char long_query[ZCL_RETRIEVAL_PAIRED_EVALUATION_QUERY_MAX + 2u];
-    memset(long_query, 'q', sizeof(long_query));
-    long_query[sizeof(long_query) - 1u] = 0;
-    memcpy(tasks, base, sizeof(tasks)); tasks[0].query = long_query;
-    bool query_limit = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    char long_id[ZCL_RETRIEVAL_PAIRED_EVALUATION_TASK_ID_MAX + 2u];
-    memset(long_id, 'i', sizeof(long_id));
-    long_id[sizeof(long_id) - 1u] = 0;
-    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = long_id;
-    bool id_limit = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    char long_path[ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX + 2u];
-    memset(long_path, 'p', sizeof(long_path));
-    long_path[sizeof(long_path) - 1u] = 0;
-    const char *long_relevance[2] = {long_path, "src/shared.c"};
-    memcpy(tasks, base, sizeof(tasks));
-    tasks[0].relevant_paths = long_relevance;
-    bool path_limit = pe_workload_refused(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root);
-    PE_CHECK("root-only count and text limits refuse atomically",
-             relevance_limit && task_limit && query_limit && id_limit &&
-             path_limit);
-
-    uint8_t zero[32] = {0};
-    bool zero_task = pe_workload_refused(
-        base, 2u, zero, fixture.source_root, fixture.projection_root);
-    bool zero_source = pe_workload_refused(
-        base, 2u, fixture.task_root, zero, fixture.projection_root);
-    bool zero_projection = pe_workload_refused(
-        base, 2u, fixture.task_root, fixture.source_root, zero);
-    PE_CHECK("root-only zero roots refuse atomically",
-             zero_task && zero_source && zero_projection);
-
-    union pe_workload_direct_alias {
-        uint8_t out[32];
-        struct zcl_retrieval_evaluation_workload_task_v1 task;
-    } direct, direct_before;
-    direct.task = base[0]; direct_before = direct;
-    bool direct_alias = zcl_retrieval_evaluation_workload_root(
-        &direct.task, 1u, fixture.task_root, fixture.source_root,
-        fixture.projection_root, direct.out) == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
-        memcmp(&direct, &direct_before, sizeof(direct)) == 0;
-    union pe_workload_reachable_alias { uint8_t out[32]; char text[32]; }
-        reachable, reachable_before;
-    memset(&reachable, 0, sizeof(reachable));
-    memcpy(reachable.text, "reachable-workload", 19u);
-    memcpy(tasks, base, sizeof(tasks)); tasks[0].task_id = reachable.text;
-    reachable_before = reachable;
-    bool reachable_alias = zcl_retrieval_evaluation_workload_root(
-        tasks, 2u, fixture.task_root, fixture.source_root,
-        fixture.projection_root, reachable.out) ==
-            ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
-        memcmp(&reachable, &reachable_before, sizeof(reachable)) == 0;
-    PE_CHECK("root-only direct and reachable aliases refuse atomically",
-             direct_alias && reachable_alias);
-
-    union pe_workload_hostile_alias {
-        uint8_t out[32];
-        const char *pointer_table[4];
-    } hostile, hostile_before;
-    bool hostile_aliases = true;
-    for (size_t mutation = 0; mutation < 4u && hostile_aliases; mutation++) {
-        memset(&hostile, 0xa5, sizeof(hostile));
-        hostile_before = hostile;
-        memcpy(tasks, base, sizeof(tasks));
-        const char *relevance[2] = {
-            fixture.alpha_relevant[0], fixture.alpha_relevant[1]};
-        switch (mutation) {
-        case 0: tasks[0].task_id = (const char *)hostile.out; break;
-        case 1: tasks[0].query = (const char *)hostile.out; break;
-        case 2:
-            relevance[0] = (const char *)hostile.out;
-            tasks[0].relevant_paths = relevance;
-            break;
-        default: tasks[0].relevant_paths = hostile.pointer_table; break;
-        }
-        hostile_aliases = zcl_retrieval_evaluation_workload_root(
-                tasks, 2u, fixture.task_root, fixture.source_root,
-                fixture.projection_root, hostile.out) ==
-                ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
-            memcmp(&hostile, &hostile_before, sizeof(hostile)) == 0;
-    }
-    PE_CHECK("root-only hostile text and pointer-table aliases preflight",
-             hostile_aliases);
+    failures += pe_root_only_mutations(&fixture, base, root, ready);
+    failures += pe_root_only_external_roots(&fixture, base, root, ready);
+    failures += pe_root_only_duplicates(&fixture, base);
+    failures += pe_root_only_empty_fields(&fixture, base);
+    failures += pe_root_only_limits(&fixture, base);
+    failures += pe_root_only_zero_roots(&fixture, base);
+    failures += pe_root_only_aliases(&fixture, base);
+    failures += pe_root_only_hostile_aliases(&fixture, base);
     return failures;
 }
 

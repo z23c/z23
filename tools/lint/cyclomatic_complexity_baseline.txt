@@ -638,7 +638,6 @@ tests/harness/src/test_reducer_frontier_reconcile_light.c:make_fixture_block_rea
 tests/harness/src/test_reducer_frontier_reconcile_light.c:test_reducer_frontier_reconcile_light:369
 tests/harness/src/test_reducer_reconcile_witness.c:test_reducer_reconcile_witness:62
 tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
-tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
 tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
