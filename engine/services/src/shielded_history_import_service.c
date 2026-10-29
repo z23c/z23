@@ -458,6 +458,47 @@ static bool shi_write_provenance(sqlite3 *db, const struct uint256 *best_block,
     return true;
 }
 
+static bool shi_import_args_ok(sqlite3 *progress_db,
+                               const char *chainstate_src_path,
+                               int64_t expected_tip_height,
+                               const struct uint256 *expected_tip_block_hash,
+                               const struct uint256 *expected_tip_sapling_root)
+{
+    return progress_db && chainstate_src_path && expected_tip_block_hash &&
+           expected_tip_sapling_root && expected_tip_height >= 0;
+}
+
+static bool shi_schema_ensure(sqlite3 *progress_db)
+{
+    return anchor_kv_ensure_schema(progress_db) &&
+           nullifier_kv_ensure_schema(progress_db) &&
+           progress_meta_table_ensure(progress_db);
+}
+
+/* Flip BOTH activation cursors to zero and cancel the full replay. */
+static bool shi_publish_cursors(sqlite3 *progress_db, int64_t anchor_boundary,
+                                int64_t nullifier_boundary)
+{
+    return anchor_kv_publish_full_replay_complete_in_tx(progress_db,
+                                                        anchor_boundary) &&
+           nullifier_kv_publish_full_replay_complete_in_tx(
+               progress_db, nullifier_boundary) &&
+           shielded_history_cancel_full_replay_in_tx(progress_db);
+}
+
+/* Release the chainstate handle and end the progress surface. */
+static void shi_abort_source(void *h)
+{
+    chainstate_legacy_close(h);
+    shi_progress_end();
+}
+
+static bool shi_sprout_pass_incomplete(int64_t n, bool best_present,
+                                       bool saw_best)
+{
+    return n < 0 || (best_present && !saw_best);
+}
+
 bool shielded_history_import_from_chainstate(
     sqlite3 *progress_db, const char *chainstate_src_path,
     int64_t expected_tip_height, const struct uint256 *expected_tip_block_hash,
@@ -468,8 +509,9 @@ bool shielded_history_import_from_chainstate(
     if (out)
         *out = report;
 
-    if (!progress_db || !chainstate_src_path || !expected_tip_block_hash ||
-        !expected_tip_sapling_root || expected_tip_height < 0)
+    if (!shi_import_args_ok(progress_db, chainstate_src_path,
+                            expected_tip_height, expected_tip_block_hash,
+                            expected_tip_sapling_root))
         LOG_FAIL(SHI_SUBSYS, "invalid args");
 
     /* Fork-safety, defense-in-depth: an all-zero expected root means the caller
@@ -485,9 +527,7 @@ bool shielded_history_import_from_chainstate(
                  "obtain the header-committed hashFinalSaplingRoot; refusing to "
                  "bind the tip frontier against zeros (wedge left intact)");
 
-    if (!anchor_kv_ensure_schema(progress_db) ||
-        !nullifier_kv_ensure_schema(progress_db) ||
-        !progress_meta_table_ensure(progress_db))
+    if (!shi_schema_ensure(progress_db))
         LOG_FAIL(SHI_SUBSYS, "schema ensure failed");
 
     int64_t anchor_boundary = 0, nullifier_boundary = 0;
@@ -533,8 +573,7 @@ bool shielded_history_import_from_chainstate(
     struct uint256 best_block;
     uint256_set_null(&best_block);
     if (!chainstate_legacy_get_best_block(h, &best_block)) {
-        chainstate_legacy_close(h);
-        shi_progress_end();
+        shi_abort_source(h);
         LOG_FAIL(SHI_SUBSYS,
                  "source best-block bind FAILED: chainstate has no readable "
                  "best-block pointer; refusing before import");
@@ -543,8 +582,7 @@ bool shielded_history_import_from_chainstate(
         char source_hex[65], target_hex[65];
         uint256_get_hex(&best_block, source_hex);
         uint256_get_hex(expected_tip_block_hash, target_hex);
-        chainstate_legacy_close(h);
-        shi_progress_end();
+        shi_abort_source(h);
         LOG_FAIL(SHI_SUBSYS,
                  "source best-block bind FAILED: source=%s target=%s at "
                  "resume_h=%lld — importing an additive nullifier set from "
@@ -568,8 +606,7 @@ bool shielded_history_import_from_chainstate(
     enum chainstate_anchor_result tip_ar = chainstate_legacy_get_sapling_anchor(
         h, expected_tip_sapling_root, &tip_tree);
     if (tip_ar != CHAINSTATE_ANCHOR_FOUND) {
-        chainstate_legacy_close(h);
-        shi_progress_end();
+        shi_abort_source(h);
         LOG_FAIL(SHI_SUBSYS,
                  "tip bind FAILED: chainstate has no Sapling anchor record "
                  "for the fold-resume root at h=%lld (result=%d) — the "
@@ -580,8 +617,7 @@ bool shielded_history_import_from_chainstate(
     struct uint256 tip_recomputed;
     incremental_tree_root(&tip_tree, &tip_recomputed);
     if (!uint256_eq(&tip_recomputed, expected_tip_sapling_root)) {
-        chainstate_legacy_close(h);
-        shi_progress_end();
+        shi_abort_source(h);
         LOG_FAIL(SHI_SUBSYS,
                  "tip bind FAILED: anchor tree for the fold-resume root at "
                  "h=%lld does not hash to the header-committed "
@@ -638,7 +674,7 @@ bool shielded_history_import_from_chainstate(
     n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SPROUT,
                             sprout_best_present, &best_sprout,
                             expected_tip_height, &spr_count, &spr_saw_best);
-    if (n < 0 || (sprout_best_present && !spr_saw_best)) {
+    if (shi_sprout_pass_incomplete(n, sprout_best_present, spr_saw_best)) {
         shi_rollback(progress_db);
         chainstate_legacy_close(h);
         LOG_FAIL(SHI_SUBSYS,
@@ -681,11 +717,8 @@ bool shielded_history_import_from_chainstate(
     /* Flip BOTH activation cursors to zero — only now, after the COMPLETE set
      * is staged in this transaction and the tip was bound. */
     shi_progress_phase(SHI_PHASE_BIND);
-    if (!anchor_kv_publish_full_replay_complete_in_tx(progress_db,
-                                                      anchor_boundary) ||
-        !nullifier_kv_publish_full_replay_complete_in_tx(progress_db,
-                                                         nullifier_boundary) ||
-        !shielded_history_cancel_full_replay_in_tx(progress_db)) {
+    if (!shi_publish_cursors(progress_db, anchor_boundary,
+                             nullifier_boundary)) {
         shi_rollback(progress_db);
         LOG_FAIL(SHI_SUBSYS, "cursor publish failed — rolled back");
     }

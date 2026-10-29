@@ -602,7 +602,7 @@ engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_int
 engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/rolling_anchor_service.c:ra_load_locked:23
 engine/services/src/rolling_anchor_service.c:rolling_anchor_extend_if_due:19
-engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:41
+engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:31
 engine/services/src/shielded_history_promote_service.c:shielded_history_promote_run:59
 engine/services/src/slo_ledger_summary.c:slo_ledger_summary_render_path:39
 engine/services/src/snapshot_fetch.c:snapsync_apply_chunk_local:25
