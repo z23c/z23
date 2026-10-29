@@ -32,28 +32,35 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Closed code -> text table; one row per verdict. */
+static const struct {
+    enum boot_mesh_status_begin_result result;
+    const char *text;
+} k_begin_result_text[] = {
+    {MESH_STATUS_BEGIN_OK, "ok"},
+    {MESH_STATUS_BEGIN_BAD_ARGUMENT, "bad_argument"},
+    {MESH_STATUS_BEGIN_UNAVAILABLE, "unavailable"},
+    {MESH_STATUS_BEGIN_NOISE_DISABLED, "noise_transport_disabled"},
+    {MESH_STATUS_BEGIN_NOT_PAIRED, "not_paired"},
+    {MESH_STATUS_BEGIN_REVOKED, "revoked"},
+    {MESH_STATUS_BEGIN_EXPIRED, "expired"},
+    {MESH_STATUS_BEGIN_PEER_NOT_CONNECTED, "peer_not_connected"},
+    {MESH_STATUS_BEGIN_ROUTE_PENDING, "route_pending"},
+    {MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH, "route_identity_mismatch"},
+    {MESH_STATUS_BEGIN_ROUTE_DOWNGRADE, "route_plaintext_downgrade"},
+    {MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE, "identity_unavailable"},
+    {MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE, "peer_identity_unavailable"},
+    {MESH_STATUS_BEGIN_BUSY, "busy"},
+    {MESH_STATUS_BEGIN_SEND_FAILED, "send_failed"},
+};
+
 const char *boot_mesh_status_begin_result_string(
     enum boot_mesh_status_begin_result result)
 {
-    switch (result) {
-    case MESH_STATUS_BEGIN_OK: return "ok";
-    case MESH_STATUS_BEGIN_BAD_ARGUMENT: return "bad_argument";
-    case MESH_STATUS_BEGIN_UNAVAILABLE: return "unavailable";
-    case MESH_STATUS_BEGIN_NOISE_DISABLED: return "noise_transport_disabled";
-    case MESH_STATUS_BEGIN_NOT_PAIRED: return "not_paired";
-    case MESH_STATUS_BEGIN_REVOKED: return "revoked";
-    case MESH_STATUS_BEGIN_EXPIRED: return "expired";
-    case MESH_STATUS_BEGIN_PEER_NOT_CONNECTED: return "peer_not_connected";
-    case MESH_STATUS_BEGIN_ROUTE_PENDING: return "route_pending";
-    case MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH:
-        return "route_identity_mismatch";
-    case MESH_STATUS_BEGIN_ROUTE_DOWNGRADE: return "route_plaintext_downgrade";
-    case MESH_STATUS_BEGIN_IDENTITY_UNAVAILABLE: return "identity_unavailable";
-    case MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE:
-        return "peer_identity_unavailable";
-    case MESH_STATUS_BEGIN_BUSY: return "busy";
-    case MESH_STATUS_BEGIN_SEND_FAILED: return "send_failed";
-    }
+    for (size_t i = 0;
+         i < sizeof(k_begin_result_text) / sizeof(k_begin_result_text[0]); i++)
+        if (k_begin_result_text[i].result == result)
+            return k_begin_result_text[i].text;
     return "bad_argument";
 }
 
@@ -64,13 +71,108 @@ const char *boot_mesh_status_begin_result_string(
  * — an open and a status request must pre-flight the identical authority the
  * responder re-verifies. */
 
+/* True when the caller's arguments are well formed; decodes the pairing id. */
+static bool mesh_status_begin_args_ok(const char *pairing_id_hex,
+                                      uint8_t request_id_out[32],
+                                      uint8_t pairing_id[32])
+{
+    return pairing_id_hex && strlen(pairing_id_hex) == MESH_PAIRING_ID_HEX &&
+           zcl_hex_decode_lower(pairing_id_hex, pairing_id, 32) &&
+           request_id_out;
+}
+
+/* Maps a route-acquire verdict to the begin verdict (OK when acquired). */
+static enum boot_mesh_status_begin_result mesh_status_begin_route_verdict(
+    enum boot_mesh_route_result route)
+{
+    switch (route) {
+    case BOOT_MESH_ROUTE_ACQUIRED: return MESH_STATUS_BEGIN_OK;
+    case BOOT_MESH_ROUTE_PENDING:
+    case BOOT_MESH_ROUTE_RESOURCE_DEFERRED:
+        return MESH_STATUS_BEGIN_ROUTE_PENDING;
+    case BOOT_MESH_ROUTE_IDENTITY_MISMATCH:
+        return MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH;
+    case BOOT_MESH_ROUTE_DOWNGRADE:
+        return MESH_STATUS_BEGIN_ROUTE_DOWNGRADE;
+    case BOOT_MESH_ROUTE_AMBIGUOUS_ENDPOINT:
+        return MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE;
+    case BOOT_MESH_ROUTE_BUSY:
+        return MESH_STATUS_BEGIN_BUSY;
+    case BOOT_MESH_ROUTE_NO_ENDPOINT:
+    case BOOT_MESH_ROUTE_EXHAUSTED:
+        return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
+    default:
+        return MESH_STATUS_BEGIN_UNAVAILABLE;
+    }
+}
+
+/* No live session peer: try to acquire a route. OK means *peer is held. */
+static enum boot_mesh_status_begin_result mesh_status_begin_acquire_route(
+    struct boot_svc_ctx *svc, const struct db_mesh_pairing *row, int64_t now,
+    struct p2p_node **peer, struct noise_transport_snapshot *session)
+{
+    int64_t now_mono = platform_time_monotonic_ms();
+    if (now_mono <= 0)
+        return MESH_STATUS_BEGIN_UNAVAILABLE;
+    enum boot_mesh_route_result route = boot_mesh_route_acquire(
+        svc, row, (uint64_t)now, (uint64_t)now_mono, peer, session);
+    return mesh_status_begin_route_verdict(route);
+}
+
+/* True when the responder's delegation is held and authorizes status. */
+static bool mesh_status_begin_responder_ok(
+    struct node_db *ndb, const struct db_mesh_pairing *row,
+    const char *pairing_id_hex, const struct noise_transport_snapshot *session,
+    int64_t now, struct vcs_zcode_dht_delegation *responder_delegation)
+{
+    uint8_t network_genesis[32];
+    return boot_mesh_peer_delegation(row, responder_delegation) &&
+           boot_zcode_dht_network_genesis(network_genesis) &&
+           mesh_pairing_service_authorize_status(
+               ndb, network_genesis, pairing_id_hex, responder_delegation,
+               session->remote_static, now) == MESH_PAIRING_OK;
+}
+
+/* Draws a free request id. 0 ok, 1 random source failed, 2 collisions. */
+static int mesh_status_begin_draw_request_id(
+    struct mesh_status_request_v1 *request)
+{
+    bool have_id = false;
+    for (int attempt = 0; attempt < 4 && !have_id; attempt++) {
+        if (!zcl_random_secret_bytes(request->request_id, 32,
+                                     "mesh_status_request"))
+            return 1;
+        have_id = mesh_status_request_id_free(request->request_id);
+    }
+    return have_id ? 0 : 2;
+}
+
+/* Fills the request fields that follow the id draw. */
+static void mesh_status_begin_fill_request(
+    struct mesh_status_request_v1 *request, const struct msg_processor *mp,
+    const struct db_mesh_pairing *row,
+    const struct vcs_zcode_dht_delegation *local,
+    const struct noise_transport_snapshot *session,
+    const uint8_t pairing_id[32], int64_t now)
+{
+    memcpy(request->network_genesis,
+           mp->params->consensus.hashGenesisBlock.data, 32);
+    memcpy(request->target_master_pubkey, row->peer_master_pubkey, 32);
+    memcpy(request->requester_master_pubkey, local->doc.master_pubkey, 32);
+    memcpy(request->requester_noise_static, mp->net_mgr->identity_pub, 32);
+    memcpy(request->pairing_id, pairing_id, 32);
+    /* The request binds the shared session evidence (see the header). */
+    memcpy(request->transcript_hash, session->transcript_hash, 32);
+    request->connection_generation = session->connection_generation;
+    request->issued_unix = (uint64_t)now;
+    request->expires_unix = (uint64_t)now + MESH_STATUS_REQUEST_LIFETIME_SECONDS;
+}
+
 enum boot_mesh_status_begin_result boot_mesh_status_begin(
     const char *pairing_id_hex, uint8_t request_id_out[32])
 {
     uint8_t pairing_id[32];
-    if (!pairing_id_hex || strlen(pairing_id_hex) != MESH_PAIRING_ID_HEX ||
-        !zcl_hex_decode_lower(pairing_id_hex, pairing_id, 32) ||
-        !request_id_out)
+    if (!mesh_status_begin_args_ok(pairing_id_hex, request_id_out, pairing_id))
         return MESH_STATUS_BEGIN_BAD_ARGUMENT;
 
     uint64_t generation = 0;
@@ -118,39 +220,15 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
     struct p2p_node *peer = boot_mesh_find_session_peer(
         mp->net_mgr, row.peer_noise_pubkey, &session);
     if (!peer) {
-        int64_t now_mono = platform_time_monotonic_ms();
-        if (now_mono <= 0)
-            return MESH_STATUS_BEGIN_UNAVAILABLE;
-        enum boot_mesh_route_result route = boot_mesh_route_acquire(
-            svc, &row, (uint64_t)now, (uint64_t)now_mono, &peer, &session);
-        switch (route) {
-        case BOOT_MESH_ROUTE_ACQUIRED: break;
-        case BOOT_MESH_ROUTE_PENDING:
-        case BOOT_MESH_ROUTE_RESOURCE_DEFERRED:
-            return MESH_STATUS_BEGIN_ROUTE_PENDING;
-        case BOOT_MESH_ROUTE_IDENTITY_MISMATCH:
-            return MESH_STATUS_BEGIN_ROUTE_IDENTITY_MISMATCH;
-        case BOOT_MESH_ROUTE_DOWNGRADE:
-            return MESH_STATUS_BEGIN_ROUTE_DOWNGRADE;
-        case BOOT_MESH_ROUTE_AMBIGUOUS_ENDPOINT:
-            return MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE;
-        case BOOT_MESH_ROUTE_BUSY:
-            return MESH_STATUS_BEGIN_BUSY;
-        case BOOT_MESH_ROUTE_NO_ENDPOINT:
-        case BOOT_MESH_ROUTE_EXHAUSTED:
-            return MESH_STATUS_BEGIN_PEER_NOT_CONNECTED;
-        default:
-            return MESH_STATUS_BEGIN_UNAVAILABLE;
-        }
+        enum boot_mesh_status_begin_result route_verdict =
+            mesh_status_begin_acquire_route(svc, &row, now, &peer, &session);
+        if (route_verdict != MESH_STATUS_BEGIN_OK)
+            return route_verdict;
     }
 
     struct vcs_zcode_dht_delegation responder_delegation;
-    uint8_t network_genesis[32];
-    if (!boot_mesh_peer_delegation(&row, &responder_delegation) ||
-        !boot_zcode_dht_network_genesis(network_genesis) ||
-        mesh_pairing_service_authorize_status(
-            ndb, network_genesis, pairing_id_hex, &responder_delegation,
-            session.remote_static, now) != MESH_PAIRING_OK) {
+    if (!mesh_status_begin_responder_ok(ndb, &row, pairing_id_hex, &session,
+                                        now, &responder_delegation)) {
         p2p_node_release(peer);
         return MESH_STATUS_BEGIN_PEER_IDENTITY_UNAVAILABLE;
     }
@@ -160,32 +238,19 @@ enum boot_mesh_status_begin_result boot_mesh_status_begin(
     request.version = MESH_STATUS_PROTO_VERSION;
     request.flags = MESH_STATUS_PROTO_FLAGS_NONE;
     request.capability = MESH_STATUS_CAP_STATUS_READ;
-    bool have_id = false;
-    for (int attempt = 0; attempt < 4 && !have_id; attempt++) {
-        if (!zcl_random_secret_bytes(request.request_id, 32,
-                                     "mesh_status_request")) {
-            p2p_node_release(peer);
-            LOG_ERROR("net.mesh_status", "begin: request id generation failed");
-            return MESH_STATUS_BEGIN_UNAVAILABLE;
-        }
-        have_id = mesh_status_request_id_free(request.request_id);
+    int id_status = mesh_status_begin_draw_request_id(&request);
+    if (id_status == 1) {
+        p2p_node_release(peer);
+        LOG_ERROR("net.mesh_status", "begin: request id generation failed");
+        return MESH_STATUS_BEGIN_UNAVAILABLE;
     }
-    if (!have_id) {
+    if (id_status != 0) {
         p2p_node_release(peer);
         LOG_ERROR("net.mesh_status", "begin: request id collision persisted");
         return MESH_STATUS_BEGIN_BUSY;
     }
-    memcpy(request.network_genesis,
-           mp->params->consensus.hashGenesisBlock.data, 32);
-    memcpy(request.target_master_pubkey, row.peer_master_pubkey, 32);
-    memcpy(request.requester_master_pubkey, local.doc.master_pubkey, 32);
-    memcpy(request.requester_noise_static, mp->net_mgr->identity_pub, 32);
-    memcpy(request.pairing_id, pairing_id, 32);
-    /* The request binds the shared session evidence (see the header). */
-    memcpy(request.transcript_hash, session.transcript_hash, 32);
-    request.connection_generation = session.connection_generation;
-    request.issued_unix = (uint64_t)now;
-    request.expires_unix = (uint64_t)now + MESH_STATUS_REQUEST_LIFETIME_SECONDS;
+    mesh_status_begin_fill_request(&request, mp, &row, &local, &session,
+                                   pairing_id, now);
 
     uint8_t wire[MESH_STATUS_REQUEST_V1_WIRE_BYTES];
     enum mesh_status_proto_error encoded =

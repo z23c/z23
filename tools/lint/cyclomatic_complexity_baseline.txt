@@ -245,8 +245,7 @@ core/modules/validation/src/process_block_tip_child.c:find_best_active_tip_child
 core/modules/validation/src/process_block_tip_child.c:find_verified_unlinked_active_tip_child:23
 core/modules/validation/src/txmempool.c:tx_mempool_add_unchecked:18
 core/modules/validation/src/update_coins.c:update_coins_with_undo:16
-engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
-engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin_result_string:16
+engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:23
 engine/composition/src/boot_refold_staged.c:boot_autodetect_bundle_snapshot:24
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:113
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_authority:33
