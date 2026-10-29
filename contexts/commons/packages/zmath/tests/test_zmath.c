@@ -63,6 +63,8 @@ static void test_checked_u64(void)
 /* Checked int64_t addition: sums, extremes, and overflow refusals. */
 static int64_t checked_i64_add_cases(int64_t v)
 {
+/* #line keeps CHECK's printed line numbers identical to the pre-split file. */
+#line 67
     CHECK(zmath_add_i64(1, 2, &v) && v == 3);
     CHECK(zmath_add_i64(-1, -2, &v) && v == -3);
     CHECK(zmath_add_i64(INT64_MAX, 0, &v) && v == INT64_MAX);
@@ -75,6 +77,7 @@ static int64_t checked_i64_add_cases(int64_t v)
 /* Checked int64_t subtraction: differences, extremes, and overflow refusals. */
 static int64_t checked_i64_sub_cases(int64_t v)
 {
+#line 74
     CHECK(zmath_sub_i64(1, 2, &v) && v == -1);
     CHECK(zmath_sub_i64(INT64_MIN, 0, &v) && v == INT64_MIN);
     CHECK(!zmath_sub_i64(INT64_MIN, 1, &v));
@@ -87,6 +90,7 @@ static int64_t checked_i64_sub_cases(int64_t v)
 /* Checked int64_t multiplication: products, extremes, and overflow refusals. */
 static int64_t checked_i64_mul_cases(int64_t v)
 {
+#line 81
     CHECK(zmath_mul_i64(3, 4, &v) && v == 12);
     CHECK(zmath_mul_i64(-3, 4, &v) && v == -12);
     CHECK(zmath_mul_i64(-3, -4, &v) && v == 12);
@@ -115,10 +119,12 @@ static void test_checked_i64(void)
     v = checked_i64_sub_cases(v);
     v = checked_i64_mul_cases(v);
 
+#line 99
     CHECK(!zmath_add_i64(1, 1, NULL));
     CHECK(!zmath_sub_i64(1, 1, NULL));
     CHECK(!zmath_mul_i64(1, 1, NULL));
 }
+#line 103
 
 static void test_saturating(void)
 {
