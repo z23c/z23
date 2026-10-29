@@ -141,14 +141,66 @@ static int probe_compare(int height, int *probes,
     return strcasecmp(local, remote) == 0 ? 1 : 0;
 }
 
+static bool mdl_relocate_rate_limited(int64_t now)
+{
+    int64_t last = atomic_load(&g_last_locate_unix);
+    return last != 0 && now - last < MDL_RELOCATE_MIN_SECS;
+}
+
+/* Genesis probe: records the probe count on abort so the caller only returns.
+ * Returns the probe_compare result (1 agree, 0 disagree, -1 abort). */
+static int mdl_probe_genesis(int *probes)
+{
+    int lo_cmp = probe_compare(0, probes, NULL, NULL);
+    if (lo_cmp < 0)
+        atomic_store(&g_probes_last_run, *probes);
+    return lo_cmp;
+}
+
+/* Tip-window pending record: true when the same first_div persisted long
+ * enough; otherwise (re)arms the record. Reports the age seen. */
+static bool mdl_pending_persisted(int first_div, int64_t now,
+                                  int64_t *pending_age)
+{
+    bool persisted = false;
+    pthread_mutex_lock(&g_pending_lock);
+    if (g_pending_first_div == first_div) {
+        *pending_age = now - g_pending_first_seen_unix;
+        persisted = *pending_age >= MDL_CONFIRM_PERSIST_SECS;
+    } else {
+        g_pending_first_div = first_div;
+        g_pending_first_seen_unix = now;
+    }
+    pthread_mutex_unlock(&g_pending_lock);
+    return persisted;
+}
+
+static void mdl_clear_pending(void)
+{
+    pthread_mutex_lock(&g_pending_lock);
+    g_pending_first_div = -1;
+    g_pending_first_seen_unix = 0;
+    pthread_mutex_unlock(&g_pending_lock);
+}
+
+/* Returns blocker_set's result, or -1 when the record could not be built. */
+static int mdl_set_located_blocker(const char *reason)
+{
+    struct blocker_record rec;
+    int rc = -1;
+    if (blocker_init(&rec, "mirror.divergence_located", "validation_pack",
+                     BLOCKER_PERMANENT, reason))
+        rc = blocker_set(&rec);
+    return rc;
+}
+
 int mirror_divergence_locate(int disagree_height)
 {
     if (disagree_height < 0)
         return -1; // raw-return-ok:nothing-to-locate
 
     int64_t now = platform_time_wall_unix();
-    int64_t last = atomic_load(&g_last_locate_unix);
-    if (last != 0 && now - last < MDL_RELOCATE_MIN_SECS)
+    if (mdl_relocate_rate_limited(now))
         return -1; // raw-return-ok:rate-limited-relocate-by-design
     atomic_store(&g_last_locate_unix, now);
 
@@ -167,11 +219,9 @@ int mirror_divergence_locate(int disagree_height)
      * the first diverging height. */
     int lo = 0, hi = disagree_height;
     if (hi > 0) {
-        int lo_cmp = probe_compare(0, &probes, NULL, NULL);
-        if (lo_cmp < 0) {
-            atomic_store(&g_probes_last_run, probes);
+        int lo_cmp = mdl_probe_genesis(&probes);
+        if (lo_cmp < 0)
             return -1; // raw-return-ok:probe-failure-abort-is-the-contract
-        }
         if (lo_cmp == 0)
             hi = 0; /* diverged from genesis */
     }
@@ -209,17 +259,8 @@ int mirror_divergence_locate(int disagree_height)
      * repeated locates for >= MDL_CONFIRM_PERSIST_SECS (a stuck tip never
      * advances, so depth never confirms). */
     if (first_div > disagree_height - MDL_CONFIRM_DEPTH) {
-        bool persisted = false;
         int64_t pending_age = 0;
-        pthread_mutex_lock(&g_pending_lock);
-        if (g_pending_first_div == first_div) {
-            pending_age = now - g_pending_first_seen_unix;
-            persisted = pending_age >= MDL_CONFIRM_PERSIST_SECS;
-        } else {
-            g_pending_first_div = first_div;
-            g_pending_first_seen_unix = now;
-        }
-        pthread_mutex_unlock(&g_pending_lock);
+        bool persisted = mdl_pending_persisted(first_div, now, &pending_age);
         if (!persisted) {
             LOG_WARN("validation_pack",
                      "[mirror_divergence] tip-window divergence at h=%d "
@@ -245,11 +286,7 @@ int mirror_divergence_locate(int disagree_height)
     int prev_first_div = atomic_exchange(&g_last_first_div, first_div);
     atomic_store(&g_divergence_latched, true);
 
-    struct blocker_record rec;
-    int rc = -1;
-    if (blocker_init(&rec, "mirror.divergence_located", "validation_pack",
-                     BLOCKER_PERMANENT, reason))
-        rc = blocker_set(&rec);
+    int rc = mdl_set_located_blocker(reason);
 
     /* ONE loud page per located height: emit on a fresh blocker write or
      * when the located height CHANGED (deeper/different divergence). */
@@ -272,10 +309,7 @@ int mirror_divergence_locate(int disagree_height)
         chain_linkage_hold_set("mirror_divergence", first_div, reason);
 
     /* Escalated: the pending record served its purpose. */
-    pthread_mutex_lock(&g_pending_lock);
-    g_pending_first_div = -1;
-    g_pending_first_seen_unix = 0;
-    pthread_mutex_unlock(&g_pending_lock);
+    mdl_clear_pending();
 
     /* Feed the existing oracle disagreement state machine with the
      * LOCATED height. */
