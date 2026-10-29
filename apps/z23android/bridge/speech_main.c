@@ -196,6 +196,18 @@ static void *pairing_loop(void *opaque)
     }
     return NULL;
 }
+static struct json_value tool_schema;
+static bool run_tool(const char *name, const char *arguments, char *out, size_t cap)
+{
+    const struct zapp_fleet_host *host = zapp_fleet_tool_host(fleet_hosts, fleet_count, name, arguments);
+    return host && zapp_fleet_blockers(host, 5000, out, cap);
+}
+static bool tool_wanted(const char *prompt, char *name, size_t name_cap, char *arguments, size_t arguments_cap)
+{
+    return zapp_fleet_tool_wanted(fleet_hosts, fleet_count, prompt, name, name_cap, arguments, arguments_cap);
+}
+static const struct zapp_assistant_tools fleet_tools = {.schema = &tool_schema, .guide = zapp_fleet_tool_guide,
+                                                       .run = run_tool, .wanted = tool_wanted};
 static const char usage[] =
     "Usage: z23-speech-bridge --dir DIR --llama-server PATH --models DIR [--port N]\n"
     "         [--speaker WAV] [--fleet label=ssh-destination,...]\n"
@@ -253,6 +265,8 @@ int main(int argc, char **argv)
     if (!zapp_host_start(o.llama, o.models, o.dir, o.port, &servers)) { free(speaker); return 1; }
     assistant = (struct zapp_assistant){.chat_port = servers.port[ZAPP_HOST_CHAT],
         .asr_port = servers.port[ZAPP_HOST_ASR], .tts_port = servers.port[ZAPP_HOST_TTS], .speaker_b64 = speaker};
+    if (fleet_count && zapp_fleet_tool_schema(fleet_hosts, fleet_count, &tool_schema))
+        assistant.tools = &fleet_tools;
     pthread_t thread;
     if (fleet_count && !pthread_create(&thread, NULL, fleet_loop, NULL)) pthread_detach(thread);
     if (o.adb && !pthread_create(&thread, NULL, pairing_loop, &o)) pthread_detach(thread);
@@ -261,6 +275,7 @@ int main(int argc, char **argv)
     if (rc) fprintf(stderr, "The laptop host stopped: port %u is in use or %s is not a private directory.\n",
         o.port, o.dir);
     zapp_host_stop(&servers);
+    json_free(&tool_schema);
     free(speaker);
     return rc;
 }

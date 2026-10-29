@@ -160,7 +160,8 @@ test-host:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
 	'$(BUILD_DIR)/hosts-test'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c $(SPEECH_JSON) -o '$(BUILD_DIR)/fleet-probe-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c \
+	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/fleet-probe-test'
 	'$(BUILD_DIR)/fleet-probe-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/http_test.c bridge/http.c $(SPEECH_JSON) -o '$(BUILD_DIR)/http-test'
 	'$(BUILD_DIR)/http-test'

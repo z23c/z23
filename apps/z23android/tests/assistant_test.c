@@ -73,6 +73,43 @@ static const char fixture[] =
     "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n"
     "data: [DONE]\n\n"
     "data: {\"choices\":[{\"delta\":{\"content\":\"ignored after done\"}}]}\n\n";
+static const char tool_fixture[] =
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n"
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\","
+    "\"function\":{\"name\":\"host_blockers\",\"arguments\":\"{\"}}]}}]}\n\n"
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"host\\\":\"}}]}}]}\n\n"
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-2\",\"function\":{\"name\":\"x\"}}]}}]}\n\n"
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"r1\\\"}\"}}]}}]}\n\n"
+    "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"index\":0,\"delta\":{}}]}\n\n"
+    "data: [DONE]\n\n";
+/* Tool call pieces join in order; a second parallel call and oversized arguments are not taken. */
+static void tool_cases(const struct zapp_assistant *a)
+{
+    struct respond *r = new_respond(a, true);
+    assert(feed(r, tool_fixture, 13) && r->done && !r->text_len && !r->pending_len);
+    assert(!strcmp(r->tool_id, "call-1") && !strcmp(r->tool_name, "host_blockers") && !strcmp(r->tool_args, "{\"host\":\"r1\"}"));
+    free_respond(r);
+    char big[600], sse[800];
+    memset(big, 'a', sizeof(big) - 1); big[sizeof(big) - 1] = 0;
+    snprintf(sse, sizeof(sse), "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":"
+             "{\"arguments\":\"%s\"}}]}}]}\n", big);
+    r = new_respond(a, true);
+    assert(!feed(r, sse, 64));
+    free_respond(r);
+}
+/* Underscores read as spaces, so identifiers such as blocker ids are spoken as words. */
+static void underscore_cases(const struct zapp_assistant *a)
+{
+    char text[] = "r2 waits on *review_required*\nnow";
+    spoken(text);
+    assert(!strcmp(text, "r2 waits on review required now"));
+    reset_log();
+    struct respond *r = new_respond(a, true);
+    assert(feed(r, "data: {\"choices\":[{\"delta\":{\"content\":\"Blocked by review_required.\"}}]}\n"
+                "data: [DONE]\n", 9) && respond_finish(r) && emitted_count == 1);
+    expect_line(0, "text", "Blocked by review required.");
+    free_respond(r);
+}
 static void sentence_cases(const struct zapp_assistant *a)
 {
     static const size_t pieces[] = {1, 3, 7, 64, 100000};
@@ -237,7 +274,7 @@ static void type_cases(const struct zapp_assistant *a)
     assert(!tts_sink(one, 4, r) && r->dead && !tts_sink(one, 4, r));
     free_respond(r);
 }
-struct mock { int listener; uint16_t port; unsigned connections; bool chat, fail; char body[4][4096]; };
+struct mock { int listener; uint16_t port; unsigned connections; bool chat, fail; const char *script[4]; char body[4][4096]; };
 static void send_chunk(int fd, const void *data, size_t size)
 {
     char head[24];
@@ -260,12 +297,13 @@ static void read_request(int fd, char *body, size_t cap)
     while (have < want) { ssize_t n = recv(fd, body + have, want - have, 0); assert(n > 0); have += (size_t)n; }
     body[want] = 0;
 }
-static void answer_chat(int fd)
+static void answer_chat(int fd, const char *script)
 {
     static const char head[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
     assert(send(fd, head, sizeof(head) - 1, MSG_NOSIGNAL) == (ssize_t)sizeof(head) - 1);
-    for (size_t at = 0; at < sizeof(fixture) - 1; at += 17)
-        send_chunk(fd, fixture + at, sizeof(fixture) - 1 - at < 17 ? sizeof(fixture) - 1 - at : 17);
+    size_t n = strlen(script);
+    for (size_t at = 0; at < n; at += 17)
+        send_chunk(fd, script + at, n - at < 17 ? n - at : 17);
     assert(send(fd, "0\r\n\r\n", 5, MSG_NOSIGNAL) == 5);
 }
 static void answer_tts(int fd)
@@ -286,7 +324,7 @@ static void *serve_mock(void *opaque)
         int fd = accept(m->listener, NULL, NULL); assert(fd >= 0);
         read_request(fd, m->body[i], sizeof(m->body[i]));
         if (m->fail) assert(send(fd, "HTTP/1.1 500 Error\r\nContent-Length: 0\r\n\r\n", 41, MSG_NOSIGNAL) == 41);
-        else if (m->chat) answer_chat(fd);
+        else if (m->chat) answer_chat(fd, m->script[i] ? m->script[i] : fixture);
         else answer_tts(fd);
         close(fd);
     }
@@ -335,7 +373,7 @@ static void respond_streamed(void)
     pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
     assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
     assert(strstr(chat.body[0], "\"stream\":true") && strstr(chat.body[0], "\"max_tokens\":320") &&
-           strstr(chat.body[0], "How is the fleet?") && strstr(chat.body[0], "ctx"));
+           strstr(chat.body[0], "How is the fleet?") && strstr(chat.body[0], "ctx") && !strstr(chat.body[0], "\"tools\""));
     expect_tts(tts.body[0], "Hello there, my friend.");
     expect_tts(tts.body[1], "The fleet is fine.");
     expect_tts(tts.body[2], "Everything looks good today.");
@@ -367,6 +405,74 @@ static void respond_muted(void)
     a.chat_port = 1;
     assert(!zapp_assistant_respond(&a, "Hi", NULL, NULL, -1, answer, sizeof(answer)) && strstr(answer, "unavailable"));
 }
+static char tool_seen[2][256];
+static bool tool_answers;
+static bool fake_tool(const char *name, const char *arguments, char *out, size_t cap)
+{
+    snprintf(tool_seen[0], sizeof(tool_seen[0]), "%s", name);
+    snprintf(tool_seen[1], sizeof(tool_seen[1]), "%s", arguments);
+    snprintf(out, cap, "{\"host\":\"r1\",\"active\":1,\"blockers\":[{\"id\":\"boot.slow\"}]}");
+    return tool_answers;
+}
+/* A reply that only calls a tool is answered by a second request that carries the call and its
+ * result, or the refusal, and offers no tools. */
+static void respond_tool(bool answers)
+{
+    static const char tool_schema[] = "[{\"type\":\"function\",\"function\":{\"name\":\"host_blockers\"}}]";
+    struct json_value schema = {0};
+    assert(json_read(&schema, tool_schema, strlen(tool_schema)));
+    struct zapp_assistant_tools tools = {.schema = &schema, .guide = "Call host_blockers first.", .run = fake_tool};
+    struct mock chat = {.chat = true, .connections = 2, .script = {tool_fixture}}, tts = {.connections = 3};
+    pthread_t chat_thread, tts_thread;
+    start_mock(&chat, &chat_thread); start_mock(&tts, &tts_thread);
+    struct zapp_assistant a = {.chat_port = chat.port, .tts_port = tts.port, .speaker_b64 = "c3BlYWtlcg==",
+                               .tools = &tools};
+    char answer[512];
+    reset_log(); tool_answers = answers;
+    assert(zapp_assistant_respond(&a, "What blocks r1?", NULL, "ctx", -1, answer, sizeof(answer)));
+    pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
+    assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
+    assert(!strcmp(tool_seen[0], "host_blockers") && !strcmp(tool_seen[1], "{\"host\":\"r1\"}"));
+    assert(strstr(chat.body[0], "\"tools\":[{\"type\":\"function\"") && !strstr(chat.body[1], "\"tools\""));
+    assert(strstr(chat.body[0], "own laptop") && strstr(chat.body[0], "Call host_blockers first."));
+    assert(strstr(chat.body[1], "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call-1\","
+        "\"type\":\"function\",\"function\":{\"name\":\"host_blockers\",\"arguments\":\"{\\\"host\\\":\\\"r1\\\"}\"}}]}"));
+    assert(strstr(chat.body[1], "{\"role\":\"tool\",\"tool_call_id\":\"call-1\",\"content\":\""));
+    assert(!strstr(chat.body[1], answers ? "refused" : "boot.slow"));
+    assert(strstr(chat.body[1], answers ? "boot.slow" : "That tool call was refused."));
+    assert(emitted_count > 3 && strstr(emitted[0], "\"event\":\"text\""));
+    close(chat.listener); close(tts.listener);
+    json_free(&schema);
+}
+static bool fill_call(const char *prompt, char *name, size_t name_cap, char *arguments, size_t arguments_cap)
+{
+    if (!strstr(prompt, "r1")) return false;
+    snprintf(name, name_cap, "host_blockers"); snprintf(arguments, arguments_cap, "{\"host\":\"r1\"}");
+    return true;
+}
+/* A call the prompt wants runs before the model answers, so one request carries its result. */
+static void respond_wanted(void)
+{
+    static const char tool_schema[] = "[{\"type\":\"function\",\"function\":{\"name\":\"host_blockers\"}}]";
+    struct json_value schema = {0};
+    assert(json_read(&schema, tool_schema, strlen(tool_schema)));
+    struct zapp_assistant_tools tools = {.schema = &schema, .run = fake_tool, .wanted = fill_call};
+    struct mock chat = {.chat = true, .connections = 1}, tts = {.connections = 3};
+    pthread_t chat_thread, tts_thread;
+    start_mock(&chat, &chat_thread); start_mock(&tts, &tts_thread);
+    struct zapp_assistant a = {.chat_port = chat.port, .tts_port = tts.port, .speaker_b64 = "c3BlYWtlcg==",
+                               .tools = &tools};
+    char answer[512];
+    reset_log(); tool_answers = true; tool_seen[0][0] = tool_seen[1][0] = 0;
+    assert(zapp_assistant_respond(&a, "What blocks r1?", NULL, "ctx", -1, answer, sizeof(answer)));
+    pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
+    assert(!strcmp(answer, "Hello there, my friend. The fleet is fine. Everything looks good today."));
+    assert(!strcmp(tool_seen[0], "host_blockers") && !strcmp(tool_seen[1], "{\"host\":\"r1\"}"));
+    assert(!strstr(chat.body[0], "\"tools\"") && strstr(chat.body[0], "\"tool_call_id\":\"call-0\""));
+    assert(strstr(chat.body[0], "\"arguments\":\"{\\\"host\\\":\\\"r1\\\"}\"") && strstr(chat.body[0], "boot.slow"));
+    close(chat.listener); close(tts.listener);
+    json_free(&schema);
+}
 static void expect_message(const struct json_value *messages, size_t i, const char *role, const char *content)
 {
     const struct json_value *m = json_at(messages, i);
@@ -377,16 +483,21 @@ static bool messages_for(const char *history_json, struct json_value *messages)
 {
     struct json_value history = {0};
     assert(json_read(&history, history_json, strlen(history_json)));
-    bool ok = chat_messages(messages, "Q?", &history, "fleet data");
+    bool ok = chat_messages(messages, "Q?", &history, "fleet data", NULL);
     json_free(&history);
     return ok;
 }
 static void message_cases(void)
 {
     struct json_value messages = {0};
-    assert(chat_messages(&messages, "Q?", NULL, NULL) && json_size(&messages) == 2);
+    assert(chat_messages(&messages, "Q?", NULL, NULL, NULL) && json_size(&messages) == 2);
     expect_message(&messages, 0, "system", system_prompt);
     expect_message(&messages, 1, "user", "Observations:\nnone\n\nQ?");
+    json_free(&messages);
+    char guided[sizeof(system_prompt) + 16];
+    snprintf(guided, sizeof(guided), "%s Use the tool.", system_prompt);
+    assert(chat_messages(&messages, "Q?", NULL, NULL, "Use the tool.") && json_size(&messages) == 2);
+    expect_message(&messages, 0, "system", guided);
     json_free(&messages);
     assert(messages_for("[[\"q1\",\"a1\"],[\"q2\",\"a2\"]]", &messages) && json_size(&messages) == 6);
     expect_message(&messages, 0, "system", system_prompt);
@@ -416,8 +527,9 @@ int main(void)
 {
     struct zapp_assistant a = {.speaker_b64 = NULL};
     sentence_cases(&a); think_cases(&a); split_cases(&a); cap_cases(&a); clause_cases(&a);
-    rejected_cases(&a);
-    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); message_cases();
+    rejected_cases(&a); tool_cases(&a); underscore_cases(&a);
+    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
+    message_cases();
     reset_log();
     puts("assistant tests passed");
     return 0;

@@ -134,8 +134,11 @@ build/android-app/z23-speech-bridge --dir "$HOME/.cache/z23-voice/host" \
 
 `--speaker` is a short mono WAV of the voice to imitate; without it the
 synthesized voice varies between answers. `--fleet` lists SSH destinations
-that accept non-interactive key login; the host runs only a fixed read-only
-status command on each and reports block height against `zclassicd`.
+that accept non-interactive key login; the host runs only two fixed read-only
+commands on them: a status command on each host, reported as block height
+against `zclassicd`, and `z23 core sync blockers` on one configured host, either
+when a question names it and asks about its blockers or problems, or when the
+chat model asks for that host's report.
 
 On first start the host prints a six-character pairing code and opens the app
 with a pairing offer. Accept on the phone only if it shows the same code. The
@@ -239,6 +242,28 @@ per-question instruction; answers that confused the phone node with the fleet
 or named a missing control fell from 10 to 5, and the prompt shrank from
 346-349 to 322-325 tokens. Most remaining misses suggest starting the phone
 node to fix a fleet host.
+
+The fleet observations carry at most one blocker per host. When the model could
+only choose to request a host's full blocker report, it did so for 3 of 18
+questions about the blockers of r1, r2 and the Mac, and all 9 answers about r2
+across three runs said nothing else was wrong while its report listed four more
+blockers. The host now runs `z23 core sync blockers` itself when a question
+names a host and asks about its blockers or problems, and adds at most six of
+them to the request. Over 15 such answers on 2026-10-29, five for each host,
+every r1 answer named both of its blockers and every r2 answer named its four
+standing blockers, omitting a transient one the report also showed. The report
+took 0.82-0.99 s on r1 and r2; the Mac's node accepted the connection without
+answering, so its report ended at the 5-second limit and the answer used its
+status line. Over that run and an earlier one, 16 answers about r1 and r2 had a
+report: 12 ran while the GPU clock peaked above 2.3 GHz, and 11 of those gave
+first audio 4.3-6.1 s after the host received the question, against 3.4-5.6 s
+for the three answers without a report that peaked above 2.3 GHz. The twelfth
+and the four whose clock stayed at 800 MHz took 12.7-14.6 s. Before the guide
+stated that only an operator on the host clears blockers, 2 of 10 answers with
+a report suggested a control for a blocker; afterwards none of 16 new questions
+did. A question repeated on the phone after that change returned the earlier
+answer from the conversation word for word, suggestion included. Two of 10
+answers about r2 with a report still said its blockers keep it from syncing.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That

@@ -1,25 +1,30 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "fleet_probe.h"
+#include "zutf8/zutf8.h"
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #define PROBE_HOSTS 16u
-#define PROBE_BYTES 4096u
+#define PROBE_BYTES 16384u
+#define BLOCKERS_SHOWN 6u
 static const char probe_command[] =
     "echo \"status=$(z23 status 2>/dev/null | head -n 1)\"; "
     "echo \"height=$(z23 getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"reference=$(zclassic-cli getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"uptime=$(uptime)\"; "
     "echo \"disk_kb=$(df -Pk \"$HOME\" | awk 'NR==2{print $4}')\"";
+static const char blockers_command[] = "z23 core sync blockers 2>/dev/null";
 
 static const struct json_value json_null = {.type = JSON_NULL};
 struct probe { pid_t pid; int fd; char output[PROBE_BYTES]; size_t used; int64_t start, end; bool exited; };
@@ -120,12 +125,12 @@ bool zapp_fleet_row(const char *label, const char *output, int64_t elapsed_ms, s
     output_value(output, "disk_kb", disk, sizeof(disk));
     return ok && push_load(row, uptime) && push_disk(row, disk);
 }
-static bool spawn(const struct zapp_fleet_host *host, struct probe *p)
+static bool spawn(const struct zapp_fleet_host *host, const char *command, struct probe *p)
 {
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC)) return false;
     char *argv[] = {"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-T", "--",
-        (char *)host->destination, (char *)probe_command, NULL};
+        (char *)host->destination, (char *)command, NULL};
     p->pid = fork();
     if (p->pid == 0) {
         signal(SIGPIPE, SIG_DFL);
@@ -187,7 +192,7 @@ bool zapp_fleet_probe(const struct zapp_fleet_host *hosts, size_t count, int tim
     if (!hosts || !count || count > PROBE_HOSTS || timeout_ms <= 0 || !out || !cap) return false;
     struct probe *p = calloc(count, sizeof(*p));
     if (!p) return false;
-    for (size_t i = 0; i < count; i++) { p[i].fd = -1; if (!spawn(&hosts[i], &p[i])) p[i].pid = -1; }
+    for (size_t i = 0; i < count; i++) { p[i].fd = -1; if (!spawn(&hosts[i], probe_command, &p[i])) p[i].pid = -1; }
     int64_t start = now_ms();
     collect(p, count, start + timeout_ms);
     reap(p, count);
@@ -198,4 +203,119 @@ bool zapp_fleet_probe(const struct zapp_fleet_host *hosts, size_t count, int tim
         json_push_kv_int(&root, "observed_at", (int64_t)time(NULL)) && json_write(&root, out, cap) < cap;
     json_free(&rows); json_free(&root); free(p);
     return ok;
+}
+static bool blocker_rows(const struct json_value *items, struct json_value *list)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < json_size(items) && i < BLOCKERS_SHOWN; i++) {
+        const struct json_value *item = json_at(items, i);
+        const char *id = json_get_str(json_get(item, "id")), *kind = json_get_str(json_get(item, "class")),
+            *reason = json_get_str(json_get(item, "reason"));
+        if (!id[0]) continue;
+        struct json_value row = {0}; json_set_object(&row);
+        ok = json_push_kv_str(&row, "id", id) && json_push_kv_str(&row, "class", kind[0] ? kind : "unknown") &&
+            json_push_kv_str(&row, "reason", reason) && json_push_back(list, &row);
+        json_free(&row);
+    }
+    return ok;
+}
+static const char *blockers_error(const struct json_value *doc, bool parsed, const char *output)
+{
+    const char *message = json_get_str(json_get(json_get(doc, "error"), "message"));
+    if (!output) return "The host did not answer.";
+    if (!parsed) return "The host's blocker report could not be read.";
+    return message[0] && strlen(message) < 400 ? message : "The host reported no blocker list.";
+}
+bool zapp_fleet_blockers_summary(const char *label, const char *output, char *out, size_t cap)
+{
+    struct json_value doc = {0}, root = {0}, list = {0};
+    bool parsed = output && zutf8_validate(output) && json_read(&doc, output, strlen(output));
+    const struct json_value *data = json_get(&doc, "data"), *items = json_get(data, "blockers");
+    json_set_object(&root); json_set_array(&list);
+    bool ok = json_push_kv_str(&root, "host", label);
+    if (parsed && items && json_get_bool(json_get(&doc, "ok")))
+        ok = ok && json_push_kv_int(&root, "active", json_get_int(json_get(data, "active_count"))) &&
+            blocker_rows(items, &list) && json_push_kv(&root, "blockers", &list);
+    else ok = ok && json_push_kv_str(&root, "error", blockers_error(&doc, parsed, output));
+    ok = ok && json_write(&root, out, cap) < cap;
+    json_cleanse_strings(&doc); json_free(&doc); json_free(&list); json_free(&root);
+    return ok;
+}
+bool zapp_fleet_blockers(const struct zapp_fleet_host *host, int timeout_ms, char *out, size_t cap)
+{
+    if (!host || timeout_ms <= 0 || !out || !cap) return false;
+    struct probe *p = calloc(1, sizeof(*p));
+    if (!p) return false;
+    p->fd = -1;
+    if (!spawn(host, blockers_command, p)) p->pid = -1;
+    collect(p, 1, now_ms() + timeout_ms);
+    reap(p, 1);
+    p->output[p->used] = 0;
+    bool ok = zapp_fleet_blockers_summary(host->label, p->end > 0 && p->used ? p->output : NULL, out, cap);
+    free(p);
+    return ok;
+}
+const char zapp_fleet_tool_guide[] = "The fleet observations show at most one blocker for each host and never "
+    "the rest. Whenever a question asks about a host's blockers or problems, or why it is blocked, "
+    "call host_blockers for that host before answering. Only an operator on that host can clear its "
+    "blockers; no control in this app clears them, so never suggest one for a blocker.";
+bool zapp_fleet_tool_schema(const struct zapp_fleet_host *hosts, size_t count, struct json_value *schema)
+{
+    char labels[PROBE_HOSTS * 20] = "", text[2048];
+    size_t used = 0;
+    for (size_t i = 0; i < count && i < PROBE_HOSTS; i++)
+        used += (size_t)snprintf(labels + used, sizeof(labels) - used, "%s\"%s\"", i ? "," : "", hosts[i].label);
+    int n = snprintf(text, sizeof(text), "[{\"type\":\"function\",\"function\":{\"name\":\"host_blockers\","
+        "\"description\":\"Read the current sync blockers of one fleet host with each blocker's reason. "
+        "Read-only; use it when the observations do not answer the question.\",\"parameters\":"
+        "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"enum\":[%s]}},"
+        "\"required\":[\"host\"]}}}]", labels);
+    return count && n > 0 && (size_t)n < sizeof(text) && json_read(schema, text, (size_t)n);
+}
+const struct zapp_fleet_host *zapp_fleet_tool_host(const struct zapp_fleet_host *hosts, size_t count,
+                                                   const char *name, const char *arguments)
+{
+    struct json_value args = {0};
+    const char *label = name && !strcmp(name, "host_blockers") && arguments &&
+        json_read(&args, arguments, strlen(arguments)) ? json_get_str(json_get(&args, "host")) : NULL;
+    const struct zapp_fleet_host *host = NULL;
+    for (size_t i = 0; label && !host && i < count; i++)
+        if (!strcasecmp(hosts[i].label, label)) host = &hosts[i];
+    json_free(&args);
+    return host;
+}
+static bool mentions(const char *text, const char *word)
+{
+    size_t n = strlen(word);
+    for (const char *at = strcasestr(text, word); at; at = strcasestr(at + 1, word))
+        if ((at == text || !isalnum((unsigned char)at[-1])) && !isalnum((unsigned char)at[n])) return true;
+    return false;
+}
+/* A label is heard as written ("r1", "r 1") or with its last digit spoken ("r one"). */
+static bool mentions_label(const char *text, const char *label)
+{
+    static const char *const digits[] = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"};
+    size_t n = strlen(label);
+    char spaced[24], spoken[32];
+    if (mentions(text, label)) return true;
+    if (n < 2 || !isdigit((unsigned char)label[n - 1])) return false;
+    snprintf(spaced, sizeof(spaced), "%.*s %c", (int)(n - 1), label, label[n - 1]);
+    snprintf(spoken, sizeof(spoken), "%.*s %s", (int)(n - 1), label, digits[label[n - 1] - '0']);
+    return mentions(text, spaced) || mentions(text, spoken);
+}
+bool zapp_fleet_tool_wanted(const struct zapp_fleet_host *hosts, size_t count, const char *prompt,
+                            char *name, size_t name_cap, char *arguments, size_t arguments_cap)
+{
+    static const char *const asks[] = {"blocker", "blocked", "blocking", "wrong", "problem", "issue", "stuck"};
+    const char *question = prompt;
+    for (const char *at = prompt ? strstr(prompt, "Question: ") : NULL; at; at = strstr(at + 1, "Question: "))
+        question = at + 10;
+    const struct zapp_fleet_host *named = NULL;
+    bool asked = false;
+    for (size_t i = 0; question && !asked && i < sizeof(asks) / sizeof(asks[0]); i++)
+        asked = strcasestr(question, asks[i]);
+    for (size_t i = 0; asked && !named && i < count; i++)
+        if (mentions_label(question, hosts[i].label)) named = &hosts[i];
+    return named && snprintf(name, name_cap, "host_blockers") < (int)name_cap &&
+        snprintf(arguments, arguments_cap, "{\"host\":\"%s\"}", named->label) < (int)arguments_cap;
 }
