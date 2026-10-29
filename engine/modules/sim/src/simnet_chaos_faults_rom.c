@@ -341,6 +341,121 @@ static void sfm_bad_peer_join(struct sfm_bad_peer *bp)
     pthread_join(bp->thread, NULL);
 }
 
+/* Create the server/client temp-directory pair; on failure the server
+ * directory (if made) is removed and the capsule note says why. */
+static bool sfm_make_dir_pair(const char *srv_prefix, const char *cli_prefix,
+                              char *sroot, char *croot,
+                              struct sync_fault_capsule *out)
+{
+    bool made_s = platform_temp_directory_create(srv_prefix, sroot,
+                                                 PLATFORM_TEMP_PATH_MAX);
+    if (!made_s || !platform_temp_directory_create(cli_prefix, croot,
+                                                   PLATFORM_TEMP_PATH_MAX)) {
+        if (made_s) rmdir(sroot);
+        sfm_note(out, "temporary directory create failed");
+        return false;
+    }
+    return true;
+}
+
+/* Open the client .part file (fd, -1 on failure) and its resume journal
+ * (NULL when the file could not be opened). */
+static struct rom_journal *sfm_open_part_journal(const char *part_path,
+                                                 const char *jrnl_path,
+                                                 int *fd,
+                                                 const uint8_t chunk_root[32],
+                                                 const uint8_t whole_sha3[32],
+                                                 uint32_t chunk_size,
+                                                 uint32_t num_chunks)
+{
+    *fd = open(part_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    return *fd >= 0
+        ? rom_journal_open(jrnl_path, chunk_root, whole_sha3, chunk_size,
+                           num_chunks)
+        : NULL;
+}
+
+static void sfm_close_part_journal(struct rom_journal *j, int fd)
+{
+    if (j) rom_journal_close(j);
+    if (fd >= 0) close(fd);
+}
+
+struct sfm_g_bad_result {
+    uint32_t bad_got;
+    bool transport_ok;
+    bool content_differs;
+    bool content_rejected;
+    bool named;
+    bool deprioritized;
+    bool part_kept;
+    bool journal_kept;
+};
+
+/* GOOD peer baseline: real bytes, verified, durably written and journaled. */
+static bool sfm_g_fetch_good(int fd, struct rom_journal *j, uint8_t *good_buf,
+                             const struct rom_artifact *art,
+                             uint16_t good_port, uint32_t *good_got)
+{
+    return fd >= 0 && j && good_buf &&
+        rom_fetch_chunk("127.0.0.1", good_port, art->chunk_root, 0, good_buf,
+                        art->chunk_size, good_got) &&
+        rom_fetch_verify_chunk(good_buf, *good_got, art->chunk_sha3[0]) &&
+        chaos_pwrite(fd, good_buf, *good_got, 0) == (ssize_t)*good_got &&
+        platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
+}
+
+static void sfm_g_probe_bad(const struct sfm_bad_peer *bad,
+                            const struct rom_artifact *art, uint8_t *bad_buf,
+                            const uint8_t *good_buf, uint32_t good_got, int fd,
+                            const struct rom_journal *j,
+                            struct sfm_g_bad_result *r)
+{
+    /* BAD fetch: same chunk_root/index, a DIFFERENT real peer, DIFFERENT
+     * real bytes. Transport succeeds (self-consistent MAC); content verify
+     * must fail against the SAME committed digest the good peer satisfied. */
+    r->bad_got = 0;
+    r->transport_ok = bad_buf &&
+        rom_fetch_chunk("127.0.0.1", bad->port, art->chunk_root, 0, bad_buf,
+                        art->chunk_size, &r->bad_got);
+    r->content_differs = r->transport_ok && r->bad_got == good_got &&
+        memcmp(bad_buf, good_buf, good_got) != 0;
+    r->content_rejected = r->transport_ok &&
+        !rom_fetch_verify_chunk(bad_buf, r->bad_got, art->chunk_sha3[0]);
+    r->named = r->content_rejected &&
+        rom_peer_note_bad_chunk("127.0.0.1", bad->port, 0, "digest");
+    r->deprioritized = r->named &&
+        rom_peer_is_deprioritized("127.0.0.1", bad->port);
+
+    /* The good chunk is KEPT: this fixture never pwrites/marks the bad
+     * bytes (mirrors rf_ver_worker's real "verify BEFORE any durable write"
+     * ordering), so both the journal bit AND the on-disk .part bytes for
+     * chunk 0 must still read back exactly what the good peer served. */
+    uint8_t reread[SFM_ARTIFACT_BYTES];
+    r->part_kept = chaos_pread(fd, reread, good_got, 0) == (ssize_t)good_got &&
+                   memcmp(reread, good_buf, good_got) == 0;
+    r->journal_kept = rom_journal_is_done(j, 0) &&
+                      rom_journal_count_done(j) == 1;
+}
+
+static bool sfm_g_recovered(const struct sfm_g_bad_result *r)
+{
+    return r->transport_ok && r->content_differs && r->content_rejected &&
+           r->named && r->deprioritized && r->part_kept && r->journal_kept;
+}
+
+static void sfm_g_remove_files(const char *sdir, const char *cdir,
+                               const char *jrnl_path, const char *part_path)
+{
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/consensus-state-bundle-sfmg.sqlite", sdir);
+    unlink(p);
+    rmdir(sdir);
+    unlink(jrnl_path);
+    unlink(part_path);
+    rmdir(cdir);
+}
+
 bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
                                          struct sync_fault_capsule *out)
 {
@@ -355,14 +470,9 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
     rom_seed_set_global_bps_cap(1ull << 30);
 
     char sroot[PLATFORM_TEMP_PATH_MAX], croot[PLATFORM_TEMP_PATH_MAX];
-    bool made_s = platform_temp_directory_create("zcl_sfm_g_srv_", sroot,
-                                                 sizeof(sroot));
-    if (!made_s || !platform_temp_directory_create("zcl_sfm_g_cli_", croot,
-                                                   sizeof(croot))) {
-        if (made_s) rmdir(sroot);
-        sfm_note(out, "temporary directory create failed");
+    if (!sfm_make_dir_pair("zcl_sfm_g_srv_", "zcl_sfm_g_cli_", sroot, croot,
+                           out))
         return false;
-    }
     char *sdir = sroot, *cdir = croot;
 
     uint8_t content[SFM_ARTIFACT_BYTES];
@@ -400,28 +510,22 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
              "%s/consensus-state-bundle-sfmg.sqlite.part", cdir);
     char jrnl_path[1364];
     snprintf(jrnl_path, sizeof(jrnl_path), "%s.journal", part_path);
-    int fd = open(part_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    struct rom_journal *j = fd >= 0
-        ? rom_journal_open(jrnl_path, art.chunk_root, art.whole_sha3,
-                           art.chunk_size, art.num_chunks)
-        : NULL;
+    int fd;
+    struct rom_journal *j = sfm_open_part_journal(
+        part_path, jrnl_path, &fd, art.chunk_root, art.whole_sha3,
+        art.chunk_size, art.num_chunks);
 
     /* GOOD fetch first: real bytes, verifies, durably journaled + on disk. */
     uint8_t *good_buf = malloc(art.chunk_size); // raw-alloc-ok:test
     uint32_t good_got = 0;
-    bool good_ok = fd >= 0 && j && good_buf &&
-        rom_fetch_chunk("127.0.0.1", good_port, art.chunk_root, 0, good_buf,
-                        art.chunk_size, &good_got) &&
-        rom_fetch_verify_chunk(good_buf, good_got, art.chunk_sha3[0]) &&
-        chaos_pwrite(fd, good_buf, good_got, 0) == (ssize_t)good_got &&
-        platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
+    bool good_ok = sfm_g_fetch_good(fd, j, good_buf, &art, good_port,
+                                    &good_got);
     snprintf(out->state_before, sizeof(out->state_before),
              "good peer fetched+verified+journaled chunk 0 (%u bytes)",
              good_got);
     if (!good_ok) {
         sfm_note(out, "good-peer baseline fetch/verify/mark failed");
-        if (j) rom_journal_close(j);
-        if (fd >= 0) close(fd);
+        sfm_close_part_journal(j, fd);
         free(good_buf);
         sfm_bad_peer_join(&bad);
         fs_server_stop();
@@ -429,38 +533,15 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
         return false;
     }
 
-    /* BAD fetch: same chunk_root/index, a DIFFERENT real peer, DIFFERENT
-     * real bytes. Transport succeeds (self-consistent MAC); content verify
-     * must fail against the SAME committed digest the good peer satisfied. */
     uint8_t *bad_buf = malloc(art.chunk_size); // raw-alloc-ok:test
-    uint32_t bad_got = 0;
-    bool transport_ok = bad_buf &&
-        rom_fetch_chunk("127.0.0.1", bad.port, art.chunk_root, 0, bad_buf,
-                        art.chunk_size, &bad_got);
-    bool content_differs = transport_ok && bad_got == good_got &&
-        memcmp(bad_buf, good_buf, good_got) != 0;
-    bool content_rejected = transport_ok &&
-        !rom_fetch_verify_chunk(bad_buf, bad_got, art.chunk_sha3[0]);
-    bool named = content_rejected &&
-        rom_peer_note_bad_chunk("127.0.0.1", bad.port, 0, "digest");
-    bool deprioritized = named &&
-        rom_peer_is_deprioritized("127.0.0.1", bad.port);
-
-    /* The good chunk is KEPT: this fixture never pwrites/marks the bad
-     * bytes (mirrors rf_ver_worker's real "verify BEFORE any durable write"
-     * ordering), so both the journal bit AND the on-disk .part bytes for
-     * chunk 0 must still read back exactly what the good peer served. */
-    uint8_t reread[SFM_ARTIFACT_BYTES];
-    bool part_kept = chaos_pread(fd, reread, good_got, 0) == (ssize_t)good_got &&
-                     memcmp(reread, good_buf, good_got) == 0;
-    bool journal_kept = rom_journal_is_done(j, 0) &&
-                        rom_journal_count_done(j) == 1;
+    struct sfm_g_bad_result res;
+    sfm_g_probe_bad(&bad, &art, bad_buf, good_buf, good_got, fd, j, &res);
 
     snprintf(out->state_after, sizeof(out->state_after),
              "bad peer transport_ok=%d content_differs=%d rejected=%d "
              "named=%d deprioritized=%d good chunk kept(part=%d,journal=%d)",
-             transport_ok, content_differs, content_rejected, named,
-             deprioritized, part_kept, journal_kept);
+             res.transport_ok, res.content_differs, res.content_rejected,
+             res.named, res.deprioritized, res.part_kept, res.journal_kept);
     out->event_number = 2; /* fetch #1 = good peer, fetch #2 = bad peer */
     snprintf(out->phase, sizeof(out->phase), "content_verify");
     snprintf(out->replay_command, sizeof(out->replay_command),
@@ -468,14 +549,13 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
              (unsigned long long)seed);
 
     out->base.ok = true;
-    out->base.recovered = transport_ok && content_differs && content_rejected &&
-                          named && deprioritized && part_kept && journal_kept;
+    out->base.recovered = sfm_g_recovered(&res);
     out->base.operator_paged = false;
     sfm_note(out, "conflicting chunk peers: good=%u/%u bad=%u/%u differ=%d "
              "reject=%d named=%d deprio=%d part_kept=%d journal_kept=%d",
-             good_got, art.chunk_size, bad_got, art.chunk_size,
-             content_differs, content_rejected, named, deprioritized,
-             part_kept, journal_kept);
+             good_got, art.chunk_size, res.bad_got, art.chunk_size,
+             res.content_differs, res.content_rejected, res.named,
+             res.deprioritized, res.part_kept, res.journal_kept);
 
     free(good_buf);
     free(bad_buf);
@@ -483,13 +563,7 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
     close(fd);
     sfm_bad_peer_join(&bad);
     fs_server_stop();
-    char p[1024];
-    snprintf(p, sizeof(p), "%s/consensus-state-bundle-sfmg.sqlite", sdir);
-    unlink(p);
-    rmdir(sdir);
-    unlink(jrnl_path);
-    unlink(part_path);
-    rmdir(cdir);
+    sfm_g_remove_files(sdir, cdir, jrnl_path, part_path);
     rom_seed_reset();
     rom_peer_scoring_test_reset();
     return true;
@@ -498,6 +572,55 @@ bool chaos_fault_conflicting_chunk_peers(uint64_t seed,
 /* ══════════════════════════════════════════════════════════════════════
  * (h) ENOSPC (write failure) during a journal bitmap commit
  * ══════════════════════════════════════════════════════════════════════ */
+
+#if !defined(_WIN32)
+struct sfm_h_mark_result {
+    bool limited;
+    bool mark_failed;
+    bool bit_rolled_back;
+    bool count_unaffected;
+    bool retry_ok;
+};
+
+/* Run the injected-failure mark(1) under the tight RLIMIT_FSIZE, restore the
+ * limit, then retry the mark. */
+static void sfm_h_mark_under_rlimit(struct rom_journal *j, rlim_t limit,
+                                    const struct rlimit *orig,
+                                    struct sfm_h_mark_result *r)
+{
+    struct sigaction old_sa, ign_sa;
+    memset(&ign_sa, 0, sizeof(ign_sa));
+    ign_sa.sa_handler = SIG_IGN; /* EFBIG return instead of process death */
+    sigaction(SIGXFSZ, &ign_sa, &old_sa);
+    struct rlimit tight = { .rlim_cur = limit, .rlim_max = orig->rlim_max };
+    r->limited = setrlimit(RLIMIT_FSIZE, &tight) == 0;
+
+    r->mark_failed = r->limited && !rom_journal_mark(j, 1);
+    r->bit_rolled_back = r->mark_failed && !rom_journal_is_done(j, 1);
+    r->count_unaffected = r->mark_failed && rom_journal_count_done(j) == 1;
+
+    /* Restore: raising the soft limit back toward the original is always
+     * permitted (never requires privilege). */
+    setrlimit(RLIMIT_FSIZE, orig);
+    sigaction(SIGXFSZ, &old_sa, NULL);
+
+    r->retry_ok = r->mark_failed && rom_journal_mark(j, 1);
+}
+
+/* Reopen fresh from disk: the failed attempt left ZERO trace — a set bit
+ * ALWAYS implies durable data, never a half-committed one. */
+static bool sfm_h_reopen_agrees(const char *jrnl_path, const uint8_t root[32],
+                                const uint8_t whole[32], uint32_t num_chunks)
+{
+    struct rom_journal *j2 = rom_journal_open(jrnl_path, root, whole, 4096,
+                                              num_chunks);
+    bool reopen_agrees = j2 && rom_journal_is_done(j2, 0) &&
+                        rom_journal_is_done(j2, 1) &&
+                        rom_journal_count_done(j2) == 2;
+    rom_journal_close(j2);
+    return reopen_agrees;
+}
+#endif
 
 bool chaos_fault_journal_commit_enospc(uint64_t seed,
                                        struct sync_fault_capsule *out)
@@ -567,33 +690,17 @@ bool chaos_fault_journal_commit_enospc(uint64_t seed,
         test_cleanup_tmpdir(dir);
         return false;
     }
-    struct sigaction old_sa, ign_sa;
-    memset(&ign_sa, 0, sizeof(ign_sa));
-    ign_sa.sa_handler = SIG_IGN; /* EFBIG return instead of process death */
-    sigaction(SIGXFSZ, &ign_sa, &old_sa);
-    struct rlimit tight = { .rlim_cur = limit, .rlim_max = orig.rlim_max };
-    bool limited = setrlimit(RLIMIT_FSIZE, &tight) == 0;
-
-    bool mark_failed = limited && !rom_journal_mark(j, 1);
-    bool bit_rolled_back = mark_failed && !rom_journal_is_done(j, 1);
-    bool count_unaffected = mark_failed && rom_journal_count_done(j) == 1;
-
-    /* Restore: raising the soft limit back toward the original is always
-     * permitted (never requires privilege). */
-    setrlimit(RLIMIT_FSIZE, &orig);
-    sigaction(SIGXFSZ, &old_sa, NULL);
-
-    bool retry_ok = mark_failed && rom_journal_mark(j, 1);
+    struct sfm_h_mark_result mr;
+    sfm_h_mark_under_rlimit(j, limit, &orig, &mr);
+    bool limited = mr.limited;
+    bool mark_failed = mr.mark_failed;
+    bool bit_rolled_back = mr.bit_rolled_back;
+    bool count_unaffected = mr.count_unaffected;
+    bool retry_ok = mr.retry_ok;
     rom_journal_close(j);
 
-    /* Reopen fresh from disk: the failed attempt left ZERO trace — a set bit
-     * ALWAYS implies durable data, never a half-committed one. */
-    struct rom_journal *j2 = rom_journal_open(jrnl_path, root, whole, 4096,
-                                              num_chunks);
-    bool reopen_agrees = j2 && rom_journal_is_done(j2, 0) &&
-                        rom_journal_is_done(j2, 1) &&
-                        rom_journal_count_done(j2) == 2;
-    rom_journal_close(j2);
+    bool reopen_agrees = sfm_h_reopen_agrees(jrnl_path, root, whole,
+                                             num_chunks);
 
     snprintf(out->state_after, sizeof(out->state_after),
              "mark_failed=%d rolled_back=%d count_unaffected=%d retry_ok=%d "
@@ -622,14 +729,101 @@ bool chaos_fault_journal_commit_enospc(uint64_t seed,
  * (i) kill at the two resume boundaries rom_journal.h documents
  * ══════════════════════════════════════════════════════════════════════ */
 
+/* Select between two fixed strings; keeps the boundary-mode wording in one
+ * place instead of repeating a ternary at every call site. */
+static const char *sfm_pick(bool first, const char *yes, const char *no)
+{
+    return first ? yes : no;
+}
+
+struct sfm_i_resume_result {
+    bool resumed;
+    bool verifies;
+    bool journal_cleaned;
+    int64_t served_before;
+    int64_t refetched;
+    char final_path[1300];
+};
+
+/* Fetch + verify one chunk and make its bytes durable in the .part file at
+ * `offset`. The journal bit is the caller's decision. */
+static bool sfm_i_stage_chunk(int fd, uint8_t *cbuf,
+                              const struct rom_fetch_manifest *m,
+                              const uint8_t expected_sha3[32], uint16_t port,
+                              uint32_t idx, off_t offset)
+{
+    uint32_t got = 0;
+    return rom_fetch_chunk("127.0.0.1", port, m->chunk_root, idx, cbuf,
+                           ROM_SEED_CHUNK_SIZE, &got) &&
+           rom_fetch_verify_chunk(cbuf, got, expected_sha3) &&
+           chaos_pwrite(fd, cbuf, got, offset) == (ssize_t)got &&
+           platform_data_sync(fd) == 0;
+}
+
+/* Build the on-disk state at the chosen resume boundary. */
+static bool sfm_i_build_boundary(int fd, struct rom_journal *j,
+                                 const struct rom_fetch_manifest *m,
+                                 const struct rom_artifact *art, uint16_t port,
+                                 bool after_bitmap_commit)
+{
+    uint8_t *cbuf = malloc(ROM_SEED_CHUNK_SIZE); // raw-alloc-ok:test
+    bool built = fd >= 0 && j && cbuf;
+    /* Chunk 0: always fully durable + marked — established prior progress. */
+    if (built)
+        built = sfm_i_stage_chunk(fd, cbuf, m, art->chunk_sha3[0], port, 0, 0) &&
+                rom_journal_mark(j, 0);
+    /* Chunk 1 (the short tail): data written+fsynced either way — the fault
+     * is whether the BITMAP BIT was committed before the simulated kill. */
+    if (built) {
+        built = sfm_i_stage_chunk(fd, cbuf, m, art->chunk_sha3[1], port, 1,
+                                  (off_t)m->chunk_size);
+        if (built && after_bitmap_commit)
+            built = rom_journal_mark(j, 1); /* commit past this boundary too */
+        /* else: bytes are durable on disk; the mark is deliberately skipped
+         * — the simulated kill lands exactly between fdatasync(.part) and
+         * rom_journal_mark(), the "before bitmap commit" boundary. */
+    }
+    free(cbuf);
+    return built;
+}
+
+/* "Restart" after the simulated kill and measure what the resume refetched. */
+static void sfm_i_resume(const struct rom_fetch_manifest *m,
+                         const struct rom_artifact *art, uint16_t port,
+                         const char *cdir, const char *jrnl_path,
+                         struct sfm_i_resume_result *r)
+{
+    /* The response completes before the server records it; await setup. */
+    for (int i = 0; i < 40 && sfm_seed_chunks_served() < 2; i++)
+        platform_sleep_ms(50);
+    r->served_before = sfm_seed_chunks_served();
+    /* "Restart": resume through the real driver. */
+    r->resumed = rom_fetch_download_verified(
+        "127.0.0.1", port, m, art->chunk_sha3, m->num_chunks, cdir, NULL, NULL);
+    int64_t served_after = sfm_seed_chunks_served();
+    r->refetched = served_after - r->served_before;
+    snprintf(r->final_path, sizeof(r->final_path), "%s/%s", cdir, m->filename);
+    r->verifies = r->resumed && rom_fetch_verify_file(r->final_path, m);
+    struct stat jst;
+    r->journal_cleaned = r->resumed && stat(jrnl_path, &jst) != 0;
+}
+
+static bool sfm_i_recovered(const struct sfm_i_resume_result *r,
+                            int64_t want_refetch)
+{
+    return r->served_before >= 2 && r->resumed &&
+           r->refetched == want_refetch && r->refetched <= 1 &&
+           r->verifies && r->journal_cleaned;
+}
+
 bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
                                       struct sync_fault_capsule *out)
 {
     sfm_capsule_init(out, seed);
-    snprintf(out->fault_point, sizeof(out->fault_point),
-             after_bitmap_commit
-                 ? "kill after every chunk's bitmap bit, before the rename"
-                 : "kill after data fsync, before that chunk's bitmap bit");
+    snprintf(out->fault_point, sizeof(out->fault_point), "%s",
+             sfm_pick(after_bitmap_commit,
+                      "kill after every chunk's bitmap bit, before the rename",
+                      "kill after data fsync, before that chunk's bitmap bit"));
 
     fs_server_stop();
     rom_seed_reset();
@@ -638,14 +832,9 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
     rom_seed_set_global_bps_cap(1ull << 30);
 
     char sroot[PLATFORM_TEMP_PATH_MAX], croot[PLATFORM_TEMP_PATH_MAX];
-    bool made_s = platform_temp_directory_create("zcl_sfm_i_srv_", sroot,
-                                                 sizeof(sroot));
-    if (!made_s || !platform_temp_directory_create("zcl_sfm_i_cli_", croot,
-                                                   sizeof(croot))) {
-        if (made_s) rmdir(sroot);
-        sfm_note(out, "temporary directory create failed");
+    if (!sfm_make_dir_pair("zcl_sfm_i_srv_", "zcl_sfm_i_cli_", sroot, croot,
+                           out))
         return false;
-    }
     char *sdir = sroot, *cdir = croot;
 
     size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096; /* 2 chunks */
@@ -658,7 +847,7 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
     sfm_gen_content(content, size, seed);
     char fname[80];
     snprintf(fname, sizeof(fname), "consensus-state-bundle-sfmi%s.sqlite",
-             after_bitmap_commit ? "b" : "a");
+             sfm_pick(after_bitmap_commit, "b", "a"));
     bool wrote = sfm_write_file(sdir, fname, content, size);
 
     struct rom_artifact art;
@@ -686,42 +875,13 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
     char jrnl_path[1364];
     snprintf(jrnl_path, sizeof(jrnl_path), "%s.journal", part_path);
 
-    int fd = open(part_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    struct rom_journal *j = fd >= 0
-        ? rom_journal_open(jrnl_path, m.chunk_root, m.whole_sha3,
-                           m.chunk_size, m.num_chunks)
-        : NULL;
-    uint8_t *cbuf = malloc(ROM_SEED_CHUNK_SIZE); // raw-alloc-ok:test
-    bool built = fd >= 0 && j && cbuf;
-    /* Chunk 0: always fully durable + marked — established prior progress. */
-    if (built) {
-        uint32_t got = 0;
-        built = rom_fetch_chunk("127.0.0.1", port, m.chunk_root, 0, cbuf,
-                                ROM_SEED_CHUNK_SIZE, &got) &&
-               rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[0]) &&
-               chaos_pwrite(fd, cbuf, got, 0) == (ssize_t)got &&
-               platform_data_sync(fd) == 0 && rom_journal_mark(j, 0);
-    }
-    /* Chunk 1 (the short tail): data written+fsynced either way — the fault
-     * is whether the BITMAP BIT was committed before the simulated kill. */
-    if (built) {
-        uint32_t got = 0;
-        built = rom_fetch_chunk("127.0.0.1", port, m.chunk_root, 1, cbuf,
-                                ROM_SEED_CHUNK_SIZE, &got) &&
-               rom_fetch_verify_chunk(cbuf, got, art.chunk_sha3[1]) &&
-               chaos_pwrite(fd, cbuf, got, (off_t)m.chunk_size) == (ssize_t)got &&
-               platform_data_sync(fd) == 0;
-        if (built && after_bitmap_commit)
-            built = rom_journal_mark(j, 1); /* commit past this boundary too */
-        /* else: bytes are durable on disk; the mark is deliberately skipped
-         * — the simulated kill lands exactly between fdatasync(.part) and
-         * rom_journal_mark(), the "before bitmap commit" boundary. */
-    }
-    free(cbuf);
-    if (!built) {
+    int fd;
+    struct rom_journal *j = sfm_open_part_journal(
+        part_path, jrnl_path, &fd, m.chunk_root, m.whole_sha3, m.chunk_size,
+        m.num_chunks);
+    if (!sfm_i_build_boundary(fd, j, &m, &art, port, after_bitmap_commit)) {
         sfm_note(out, "fixture boundary construction failed");
-        if (j) rom_journal_close(j);
-        if (fd >= 0) close(fd);
+        sfm_close_part_journal(j, fd);
         fs_server_stop(); free(content); rmdir(sdir); rmdir(cdir);
         return false;
     }
@@ -731,49 +891,36 @@ bool chaos_fault_kill_resume_boundary(uint64_t seed, bool after_bitmap_commit,
              "rename not yet performed", done_before_kill);
     close(fd);
     rom_journal_close(j); /* "process dies" here — no clean shutdown */
-    /* The response completes before the server records it; await setup. */
-    for (int i = 0; i < 40 && sfm_seed_chunks_served() < 2; i++)
-        platform_sleep_ms(50);
-    int64_t served_before = sfm_seed_chunks_served();
-    /* "Restart": resume through the real driver. */
-    bool resumed = rom_fetch_download_verified(
-        "127.0.0.1", port, &m, art.chunk_sha3, m.num_chunks, cdir, NULL, NULL);
-    int64_t served_after = sfm_seed_chunks_served();
-    int64_t refetched = served_after - served_before;
-    char final_path[1300];
-    snprintf(final_path, sizeof(final_path), "%s/%s", cdir, m.filename);
-    bool verifies = resumed && rom_fetch_verify_file(final_path, &m);
-    struct stat jst;
-    bool journal_cleaned = resumed && stat(jrnl_path, &jst) != 0;
+    struct sfm_i_resume_result res;
+    sfm_i_resume(&m, &art, port, cdir, jrnl_path, &res);
 
-    int64_t want_refetch = after_bitmap_commit ? 0 : 1;
+    int64_t want_refetch = !after_bitmap_commit;
     snprintf(out->state_after, sizeof(out->state_after),
              "resumed=%d refetched=%lld (want %lld, always <=1) verifies=%d "
-             "journal_cleaned=%d", resumed, (long long)refetched,
-             (long long)want_refetch, verifies, journal_cleaned);
+             "journal_cleaned=%d", res.resumed, (long long)res.refetched,
+             (long long)want_refetch, res.verifies, res.journal_cleaned);
     out->event_number = 3;
     snprintf(out->phase, sizeof(out->phase), "resume");
     snprintf(out->replay_command, sizeof(out->replay_command),
              "chaos_fault_kill_resume_boundary(0x%016llx, %s, &out)",
-             (unsigned long long)seed, after_bitmap_commit ? "true" : "false");
+             (unsigned long long)seed,
+             sfm_pick(after_bitmap_commit, "true", "false"));
 
     out->base.ok = true;
-    out->base.recovered = served_before >= 2 && resumed &&
-                          refetched == want_refetch && refetched <= 1 &&
-                          verifies && journal_cleaned;
+    out->base.recovered = sfm_i_recovered(&res, want_refetch);
     out->base.operator_paged = false;
     sfm_note(out, "kill at resume boundary (%s): refetched=%lld verifies=%d "
              "journal_cleaned=%d",
-             after_bitmap_commit ? "after bitmap, before rename"
-                                  : "before bitmap, after data fsync",
-             (long long)refetched, verifies, journal_cleaned);
+             sfm_pick(after_bitmap_commit, "after bitmap, before rename",
+                      "before bitmap, after data fsync"),
+             (long long)res.refetched, res.verifies, res.journal_cleaned);
 
     fs_server_stop();
     free(content);
     char p[1024];
     snprintf(p, sizeof(p), "%s/%s", sdir, fname);
     unlink(p);
-    unlink(final_path);
+    unlink(res.final_path);
     unlink(part_path);
     unlink(jrnl_path);
     rmdir(sdir);
