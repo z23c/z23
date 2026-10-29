@@ -157,14 +157,6 @@ static bool backfill_finish_write(struct node_db *ndb, sqlite3_stmt *upd,
     return true;
 }
 
-/* True when the in-memory index entry carries a committed block body this
- * backfill can derive shielded values from. */
-static bool backfill_index_has_block_data(const struct block_index *bi)
-{
-    return !(bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
-             (bi->nDataPos == 0 && bi->nHeight > 0));
-}
-
 /* Resolve one block's shielded values in place. Returns 0 with the values
  * resolved (the block body is read only when the cached pair is an ambiguous
  * zero), or -1 when the body cannot be read, in which case the caller must
@@ -309,7 +301,8 @@ static int backfill_walk_value_range(struct node_db *ndb,
         struct block_index *bi = active_chain_at(chain, h);
         if (!bi)
             break;   /* gap on the active chain: stop; keep the cursor honest */
-        if (!backfill_index_has_block_data(bi))
+        if (bi->nFile < 0 || !(bi->nStatus & BLOCK_HAVE_DATA) ||
+            (bi->nDataPos == 0 && bi->nHeight > 0))
             break;   /* no committed body → cannot compute; stop advancing */
 
         int64_t sprout_val = bi->nSproutValue;
