@@ -298,6 +298,42 @@ static bool cse_binary_digest(uint8_t out[32])
     return ok;
 }
 
+/* Binds the 12 receipt columns in schema order; the caller steps the statement. */
+static bool cse_receipt_bind_row(sqlite3_stmt *st,
+                                 const struct consensus_state_source_receipt *receipt)
+{
+    int i = 1;
+    const char *receipt_schema =
+        consensus_state_source_receipt_schema(receipt->schema_version);
+    size_t commit_len = strnlen(receipt->producer_commit,
+                                sizeof(receipt->producer_commit));
+    return receipt_schema &&
+           sqlite3_bind_text(st, i++, receipt_schema, -1,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->source_epoch_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->source_tree_root, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->running_binary_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->toolchain_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->build_inputs_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->chain_corpus_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_int(st, i++, receipt->source_clean ? 1 : 0) ==
+               SQLITE_OK &&
+           sqlite3_bind_int(st, i++, receipt->validation_profile) ==
+               SQLITE_OK &&
+           sqlite3_bind_text(st, i++, receipt->producer_commit,
+                             (int)commit_len,
+                             SQLITE_STATIC) == SQLITE_OK &&
+           sqlite3_bind_int64(st, i++, receipt->fold_cursor) == SQLITE_OK &&
+           sqlite3_bind_blob(st, i++, receipt->receipt_digest, 32,
+                             SQLITE_STATIC) == SQLITE_OK;
+}
+
 static bool cse_seed_receipt_version(sqlite3 *db, uint8_t hash[2][32],
                                      uint8_t validation_profile, bool corrupt,
                                      uint8_t receipt_version,
@@ -343,36 +379,7 @@ static bool cse_seed_receipt_version(sqlite3 *db, uint8_t hash[2][32],
             "INSERT OR REPLACE INTO consensus_state_source_receipt VALUES"
             "(1,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &st, NULL) != SQLITE_OK)
         return false;
-    int i = 1;
-    const char *receipt_schema =
-        consensus_state_source_receipt_schema(receipt.schema_version);
-    size_t commit_len = strnlen(receipt.producer_commit,
-                                sizeof(receipt.producer_commit));
-    bool ok = receipt_schema &&
-              sqlite3_bind_text(st, i++, receipt_schema, -1,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.source_epoch_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.source_tree_root, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.running_binary_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.toolchain_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.build_inputs_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.chain_corpus_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_int(st, i++, receipt.source_clean ? 1 : 0) ==
-                  SQLITE_OK &&
-              sqlite3_bind_int(st, i++, receipt.validation_profile) ==
-                  SQLITE_OK &&
-              sqlite3_bind_text(st, i++, receipt.producer_commit,
-                                (int)commit_len,
-                                SQLITE_STATIC) == SQLITE_OK &&
-              sqlite3_bind_int64(st, i++, receipt.fold_cursor) == SQLITE_OK &&
-              sqlite3_bind_blob(st, i++, receipt.receipt_digest, 32,
-                                SQLITE_STATIC) == SQLITE_OK &&
+    bool ok = cse_receipt_bind_row(st, &receipt) &&
               sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:test-fixture-seeding
     sqlite3_finalize(st);
     if (ok)
@@ -404,6 +411,68 @@ static bool cse_insert_tip(sqlite3 *db, int height, const char *status,
               sqlite3_step(st) == SQLITE_DONE; // raw-sql-ok:test-fixture-seeding
     sqlite3_finalize(st);
     return ok;
+}
+
+static bool cse_seed_source_headers(sqlite3 *db, uint8_t hash[2][32])
+{
+    if (!cse_insert_header(db, 0, hash[0], NULL) ||
+        !cse_insert_header(db, 1, hash[1], hash[0]) ||
+        !cse_insert_tip(db, 0, "finalized", hash[1]) ||
+        !cse_insert_tip(db, 1, "anchor", hash[1]))
+        return false;
+    return true;
+}
+
+static bool cse_seed_source_hash_rows(sqlite3 *db, uint8_t hash[2][32])
+{
+    static const char *const hash_sql[] = {
+        "INSERT INTO validate_headers_log VALUES(?,?,1)",
+        "INSERT INTO body_fetch_log VALUES(?,?,1)",
+        "INSERT INTO script_validate_log("
+        "height,block_hash,ok,status,source_epoch_digest) "
+        "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta WHERE key='"
+        CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
+        "INSERT INTO proof_validate_log("
+        "height,block_hash,ok,status,source_epoch_digest) "
+        "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta WHERE key='"
+        CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
+        ("INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) "
+         "VALUES(?,?,X'',X'')"),
+    };
+    for (size_t table = 0; table < sizeof(hash_sql) / sizeof(hash_sql[0]);
+         table++) {
+        for (int height = 0; height <= 1; height++) {
+            if (!cse_insert_hash_row(db, hash_sql[table], height,
+                                     hash[height]))
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool cse_seed_source_pools(sqlite3 *db, uint8_t nf[32])
+{
+    uint8_t txid[32];
+    for (size_t i = 0; i < sizeof(txid); i++)
+        txid[i] = (uint8_t)(0xc1u + i);
+    const uint8_t script[] = {0x51};
+    if (!coins_kv_add(db, txid, 0, 5000, 0, true, script,
+                      sizeof(script)))
+        return false;
+    struct incremental_merkle_tree sprout;
+    struct incremental_merkle_tree sapling;
+    struct uint256 leaf;
+    sprout_tree_init(&sprout);
+    sapling_tree_init(&sapling);
+    for (size_t i = 0; i < sizeof(leaf.data); i++)
+        leaf.data[i] = (uint8_t)(0xe1u + i);
+    incremental_tree_append(&sprout, &leaf);
+    incremental_tree_append(&sapling, &leaf);
+    if (!anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &sprout, 1) ||
+        !anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &sapling, 1) ||
+        !nullifier_kv_add(db, nf, 0, 1))
+        return false;
+    return true;
 }
 
 static bool cse_seed_source(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
@@ -450,53 +519,11 @@ static bool cse_seed_source(sqlite3 *db, uint8_t hash[2][32], uint8_t nf[32])
     }
     if (!cse_seed_receipt(db, hash, CONSENSUS_STATE_VALIDATION_FULL, false))
         return false;
-    if (!cse_insert_header(db, 0, hash[0], NULL) ||
-        !cse_insert_header(db, 1, hash[1], hash[0]) ||
-        !cse_insert_tip(db, 0, "finalized", hash[1]) ||
-        !cse_insert_tip(db, 1, "anchor", hash[1]))
+    if (!cse_seed_source_headers(db, hash))
         return false;
-    static const char *const hash_sql[] = {
-        "INSERT INTO validate_headers_log VALUES(?,?,1)",
-        "INSERT INTO body_fetch_log VALUES(?,?,1)",
-        "INSERT INTO script_validate_log("
-        "height,block_hash,ok,status,source_epoch_digest) "
-        "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta WHERE key='"
-        CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
-        "INSERT INTO proof_validate_log("
-        "height,block_hash,ok,status,source_epoch_digest) "
-        "VALUES(?,?,1,'verified',(SELECT value FROM progress_meta WHERE key='"
-        CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "'))",
-        ("INSERT INTO utxo_apply_delta(height,branch_hash,spent_blob,added_blob) "
-         "VALUES(?,?,X'',X'')"),
-    };
-    for (size_t table = 0; table < sizeof(hash_sql) / sizeof(hash_sql[0]);
-         table++) {
-        for (int height = 0; height <= 1; height++) {
-            if (!cse_insert_hash_row(db, hash_sql[table], height,
-                                     hash[height]))
-                return false;
-        }
-    }
-
-    uint8_t txid[32];
-    for (size_t i = 0; i < sizeof(txid); i++)
-        txid[i] = (uint8_t)(0xc1u + i);
-    const uint8_t script[] = {0x51};
-    if (!coins_kv_add(db, txid, 0, 5000, 0, true, script,
-                      sizeof(script)))
+    if (!cse_seed_source_hash_rows(db, hash))
         return false;
-    struct incremental_merkle_tree sprout;
-    struct incremental_merkle_tree sapling;
-    struct uint256 leaf;
-    sprout_tree_init(&sprout);
-    sapling_tree_init(&sapling);
-    for (size_t i = 0; i < sizeof(leaf.data); i++)
-        leaf.data[i] = (uint8_t)(0xe1u + i);
-    incremental_tree_append(&sprout, &leaf);
-    incremental_tree_append(&sapling, &leaf);
-    if (!anchor_kv_add_tree(db, ANCHOR_POOL_SPROUT, &sprout, 1) ||
-        !anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &sapling, 1) ||
-        !nullifier_kv_add(db, nf, 0, 1))
+    if (!cse_seed_source_pools(db, nf))
         return false;
 
     /* Stamp the exporter-required authority markers through the SAME production
@@ -701,35 +728,21 @@ static int cse_run_baked_ladder_rung_tests(const struct checkpoint_rung *baked)
            cse_baked_rung_divergence(&up);
 }
 
-static void cse_run_rung_ladder_tests(int *failures_ptr)
+static int cse_rung_wire_checks(struct checkpoint_rung *baked)
 {
-    int failures = *failures_ptr;
-
-    /* (1) GOLDEN fold: the compiled sealed keystone's rom_state_root MUST
-     * recompute from its own fields through the rung fold — this pins the rung
-     * fold to the byte-exact sealed constant in checkpoints.c. */
-    const struct rom_state_checkpoint *cp = get_rom_state_checkpoint();
-    CSE_CHECK("rung: compiled keystone present", cp != NULL);
-    struct checkpoint_rung baked;
-    CSE_CHECK("rung: from_rom_checkpoint",
-              cp && checkpoint_rung_from_rom_checkpoint(cp, NULL, &baked));
-    CSE_CHECK("rung: fold reproduces sealed rom_state_root byte-for-byte",
-              cp && memcmp(baked.rom_state_root, cp->rom_state_root, 32) == 0);
-    CSE_CHECK("rung: baked rung is self-consistent",
-              checkpoint_rung_self_consistent(&baked));
-
+    int failures = 0;
     /* (1b) determinism + serialize/parse round-trip. */
     uint8_t wire_a[CHECKPOINT_RUNG_WIRE_SIZE];
     uint8_t wire_b[CHECKPOINT_RUNG_WIRE_SIZE];
-    struct checkpoint_rung baked2 = baked;
-    CSE_CHECK("rung: serialize A", checkpoint_rung_serialize(&baked, wire_a));
+    struct checkpoint_rung baked2 = *baked;
+    CSE_CHECK("rung: serialize A", checkpoint_rung_serialize(baked, wire_a));
     CSE_CHECK("rung: serialize B", checkpoint_rung_serialize(&baked2, wire_b));
     CSE_CHECK("rung: serialize is deterministic",
               memcmp(wire_a, wire_b, sizeof(wire_a)) == 0);
     struct checkpoint_rung parsed;
     CSE_CHECK("rung: parse round-trips",
               checkpoint_rung_parse(wire_a, sizeof(wire_a), &parsed) &&
-              memcmp(&parsed, &baked, sizeof(parsed)) == 0);
+              memcmp(&parsed, baked, sizeof(parsed)) == 0);
 
     /* (1c) parse rejects tampered / foreign bytes. */
     uint8_t tampered[CHECKPOINT_RUNG_WIRE_SIZE];
@@ -747,7 +760,7 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
 
     /* (1d) C fragment shape. */
     char frag[8192];
-    int fn = checkpoint_rung_emit_c_fragment(&baked, frag, sizeof(frag));
+    int fn = checkpoint_rung_emit_c_fragment(baked, frag, sizeof(frag));
     CSE_CHECK("rung: fragment emits within buffer",
               fn > 0 && (size_t)fn < sizeof(frag));
     CSE_CHECK("rung: fragment carries rom_state_checkpoint literal",
@@ -756,6 +769,12 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
     CSE_CHECK("rung: fragment is labelled candidate_unbaked",
               strstr(frag, "candidate_unbaked") != NULL);
 
+    return failures;
+}
+
+static int cse_rung_bundle_checks(void)
+{
+    int failures = 0;
     /* (2) derive-from-bundle plumbing. */
     char bundle_path[PATH_MAX];
     int bfd = test_mkstemp(bundle_path, sizeof(bundle_path), "zcl-rung-bundle");
@@ -780,10 +799,17 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
         sqlite3_close(bdb);
     (void)unlink(bundle_path);
 
+    return failures;
+}
+
+static int cse_rung_verify_checks(struct checkpoint_rung *baked,
+                                       struct checkpoint_rung *evil_out)
+{
+    int failures = 0;
     /* (3) verifier: the baked rung binds and reads VERIFIED. */
     struct checkpoint_ladder_result res[8];
     bool any_mm = false;
-    size_t n = checkpoint_ladder_verify(&baked, 1, NULL, res, 8, &any_mm);
+    size_t n = checkpoint_ladder_verify(baked, 1, NULL, res, 8, &any_mm);
     CSE_CHECK("verify: baked rung -> 1 result, no mismatch",
               n == 1 && !any_mm);
     CSE_CHECK("verify: baked rung is bound + VERIFIED + not candidate",
@@ -791,7 +817,7 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
                   res[0].verdict == CHECKPOINT_RUNG_VERIFIED);
 
     /* (4) tampered rung AT the keystone height conflicts the sealed keystone. */
-    struct checkpoint_rung evil = baked;
+    struct checkpoint_rung evil = *baked;
     evil.anchor_digest[0] ^= 0xff;
     checkpoint_rung_finalize(&evil); /* self-consistent but fields differ */
     any_mm = false;
@@ -800,16 +826,33 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
               n == 1 && any_mm && res[0].verdict == CHECKPOINT_RUNG_MISMATCH &&
                   !res[0].bound);
 
-    failures += cse_run_baked_ladder_rung_tests(&baked);
+    *evil_out = evil;
+    return failures;
+}
 
+static int cse_rung_broken_checks(struct checkpoint_rung *baked)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    size_t n = 0;
     /* (5) self-inconsistent artifact (root not refolded) -> MISMATCH. */
-    struct checkpoint_rung broken = baked;
+    struct checkpoint_rung broken = *baked;
     broken.rom_state_root[0] ^= 0xff; /* corrupt WITHOUT re-finalizing */
     any_mm = false;
     n = checkpoint_ladder_verify(&broken, 1, NULL, res, 8, &any_mm);
     CSE_CHECK("verify: self-inconsistent rung -> MISMATCH",
               n == 1 && any_mm && res[0].verdict == CHECKPOINT_RUNG_MISMATCH);
 
+    return failures;
+}
+
+static int cse_rung_monotonic_checks(struct checkpoint_rung *out_a)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    size_t n = 0;
     /* (6) monotonicity on candidate rungs away from the keystone height. */
     struct checkpoint_rung a = {0}, b = {0};
     a.height = 100;
@@ -844,6 +887,17 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
                   CHECKPOINT_RUNG_UNVERIFIABLE && res[0].candidate_unbaked &&
                   !res[0].bound);
 
+    *out_a = a;
+    return failures;
+}
+
+static int cse_rung_hook_checks(struct checkpoint_rung *in_a)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    size_t n = 0;
+    struct checkpoint_rung a = *in_a;
     /* (7) hooks: header-chain + rederive witnesses. */
     struct checkpoint_ladder_hooks hooks = {
         .ctx = NULL,
@@ -885,6 +939,17 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
     g_rung_hook_hash_return = false;
     g_rung_hook_rederive_return = false;
 
+    return failures;
+}
+
+static int cse_rung_ladder_load_checks(struct checkpoint_rung *in_a,
+                                            struct checkpoint_rung *in_evil)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    struct checkpoint_rung a = *in_a;
+    struct checkpoint_rung evil = *in_evil;
     /* (8) end-to-end load: candidate artifacts on disk. */
     char rung_dir[PATH_MAX];
     char *rd = test_mkdtemp(rung_dir, sizeof(rung_dir), "zcl-rungdir");
@@ -902,7 +967,7 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
                   cse_write_rung_file(rd, &evil));
         lc = checkpoint_ladder_load_candidates(rd, loaded, 8);
         any_mm = false;
-        n = checkpoint_ladder_verify(loaded, lc, NULL, res, 8, &any_mm);
+        (void)checkpoint_ladder_verify(loaded, lc, NULL, res, 8, &any_mm);
         CSE_CHECK("ladder: divergent candidate trips MISMATCH", any_mm);
         char pa[1100], pb[1100];
         snprintf(pa, sizeof(pa), "%s/rung-%d.rung", rd, a.height);
@@ -912,6 +977,36 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
         (void)rmdir(rd);
     }
 
+    return failures;
+}
+
+static void cse_run_rung_ladder_tests(int *failures_ptr)
+{
+    int failures = *failures_ptr;
+
+    /* (1) GOLDEN fold: the compiled sealed keystone's rom_state_root MUST
+     * recompute from its own fields through the rung fold — this pins the rung
+     * fold to the byte-exact sealed constant in checkpoints.c. */
+    const struct rom_state_checkpoint *cp = get_rom_state_checkpoint();
+    CSE_CHECK("rung: compiled keystone present", cp != NULL);
+    struct checkpoint_rung baked;
+    CSE_CHECK("rung: from_rom_checkpoint",
+              cp && checkpoint_rung_from_rom_checkpoint(cp, NULL, &baked));
+    CSE_CHECK("rung: fold reproduces sealed rom_state_root byte-for-byte",
+              cp && memcmp(baked.rom_state_root, cp->rom_state_root, 32) == 0);
+    CSE_CHECK("rung: baked rung is self-consistent",
+              checkpoint_rung_self_consistent(&baked));
+
+    failures += cse_rung_wire_checks(&baked);
+    failures += cse_rung_bundle_checks();
+    struct checkpoint_rung evil;
+    failures += cse_rung_verify_checks(&baked, &evil);
+    failures += cse_run_baked_ladder_rung_tests(&baked);
+    failures += cse_rung_broken_checks(&baked);
+    struct checkpoint_rung a;
+    failures += cse_rung_monotonic_checks(&a);
+    failures += cse_rung_hook_checks(&a);
+    failures += cse_rung_ladder_load_checks(&a, &evil);
     *failures_ptr = failures;
 }
 
