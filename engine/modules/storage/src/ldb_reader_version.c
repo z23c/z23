@@ -652,24 +652,17 @@ static bool collect_wal_numbers(const char *dir, const struct ldb_version *v,
             *logs = nl;
             cap = ncap;
         }
-        (*logs)[(*nlogs)++] = number;
+        /* Ascending file number = ascending sequence. */
+        /* Insert in place so the caller receives the logs already ordered. */
+        size_t j = (*nlogs)++;
+        while (j > 0 && (*logs)[j - 1] > number) {
+            (*logs)[j] = (*logs)[j - 1];
+            j--;
+        }
+        (*logs)[j] = number;
     }
     closedir(d);
     return true;
-}
-
-/* Ascending file number = ascending sequence. */
-static void sort_log_numbers(uint64_t *logs, size_t nlogs)
-{
-    for (size_t i = 1; i < nlogs; i++) {
-        uint64_t key = logs[i];
-        size_t j = i;
-        while (j > 0 && logs[j - 1] > key) {
-            logs[j] = logs[j - 1];
-            j--;
-        }
-        logs[j] = key;
-    }
 }
 
 bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
@@ -681,7 +674,6 @@ bool ldb_memtable_load(struct ldb_memtable *m, const char *dir,
     size_t nlogs = 0;
     if (!collect_wal_numbers(dir, v, &logs, &nlogs, err))
         return false;
-    sort_log_numbers(logs, nlogs);
 
     bool ok = true;
     for (size_t i = 0; i < nlogs && ok; i++) {
