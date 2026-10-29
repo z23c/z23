@@ -2896,17 +2896,9 @@ static int testcache_retry_result_contracts(void)
     return failures;
 }
 
-int test_testcache(void)
+static int tc_phase_a_store_hit(uint8_t keyA[32], bool *have_out)
 {
     int failures = 0;
-    struct tc_envsave caller_store;
-    tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
-    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
-    (void)tc_shell("rm -rf %s %s %s %s %s", TC_FIX, TC_STORE,
-                   TC_FIX2, TC_CAP, TC_CAP2);
-
-    /* ── Phase A: cacheable, miss, store, hit ── */
-    uint8_t keyA[32];
     bool have_keyA = false;
     TC_CHECK("fixture writes", write_fixture(TC_LEAF_A, TC_OTHER_A, TC_H_A));
     {
@@ -2933,31 +2925,18 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    *have_out = have_keyA;
+    return failures;
+}
 
-    failures += tc_observation_store_key_invariance();
-
-    /* Activated execution has its own identity but must run even when a PASS
-     * exists at that identity. Exercise the real closure and object store. */
-    {
-        struct testcache *tc = testcache_open(TC_FIX);
-        TC_CHECK("policy fixture cache opens", tc != NULL);
-        if (tc) {
-            struct testcache_probe ordinary, none, active[4], again, bad;
-            testcache_probe_group(tc, "test_demo_entry", &ordinary);
-            testcache_probe_group_proof(tc, "test_demo_entry",
-                                       ZCL_TEST_PROOF_NONE, &none);
-            TC_CHECK("NONE preserves ordinary key and stored hit",
-                     ordinary.key_valid && none.key_valid && none.cacheable &&
-                     none.hit && memcmp(ordinary.key, none.key, 32) == 0);
-            const enum zcl_test_proof_contract modes[] = {
-                ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_EVENT_LOG_KILL9,
-                ZCL_TEST_PROOF_EVENT_LOG_BENCH, ZCL_TEST_PROOF_GOLDEN_TIMING,
-            };
-            const char *const names[] = {
-                "ZCL_STRESS_TESTS", "ZCL_EVENT_LOG_KILL9_FUZZ",
-                "ZCL_EVENT_LOG_BENCH_PROOF", "ZCL_GOLDEN_TIMING_STRICT",
-            };
-            for (size_t i = 0; i < 4; i++) {
+static int tc_policy_mode_case(struct testcache *tc,
+                               struct testcache_probe ordinary,
+                               const enum zcl_test_proof_contract *modes,
+                               const char *const *names,
+                               struct testcache_probe *active, size_t i)
+{
+    int failures = 0;
+    struct testcache_probe again;
                 const char *name = NULL, *value = NULL;
                 TC_CHECK("contract resolves exact child assignment",
                          zcl_test_proof_contract_environment(modes[i],
@@ -2985,7 +2964,13 @@ int test_testcache(void)
                          again.key_valid && !again.cacheable && !again.hit &&
                          !again.hit_flaky &&
                          memcmp(again.key, active[i].key, 32) == 0);
-            }
+    return failures;
+}
+
+static int tc_policy_refusals(struct testcache *tc)
+{
+    int failures = 0;
+    struct testcache_probe bad;
             testcache_probe_group_proof(tc, "test_demo_entry",
                                        (enum zcl_test_proof_contract)255, &bad);
             TC_CHECK("unknown execution policy refuses identity and reuse",
@@ -3001,10 +2986,46 @@ int test_testcache(void)
             TC_CHECK("activation cannot qualify unresolved closure",
                      !bad.key_valid && !bad.cacheable && !bad.hit &&
                      bad.code == TESTCACHE_R_ENTRY_UNRESOLVED);
+    return failures;
+}
+
+static int tc_phase_policy_modes(void)
+{
+    int failures = 0;
+    /* Activated execution has its own identity but must run even when a PASS
+     * exists at that identity. Exercise the real closure and object store. */
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        TC_CHECK("policy fixture cache opens", tc != NULL);
+        if (tc) {
+            struct testcache_probe ordinary, none, active[4];
+            testcache_probe_group(tc, "test_demo_entry", &ordinary);
+            testcache_probe_group_proof(tc, "test_demo_entry",
+                                       ZCL_TEST_PROOF_NONE, &none);
+            TC_CHECK("NONE preserves ordinary key and stored hit",
+                     ordinary.key_valid && none.key_valid && none.cacheable &&
+                     none.hit && memcmp(ordinary.key, none.key, 32) == 0);
+            const enum zcl_test_proof_contract modes[] = {
+                ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_EVENT_LOG_KILL9,
+                ZCL_TEST_PROOF_EVENT_LOG_BENCH, ZCL_TEST_PROOF_GOLDEN_TIMING,
+            };
+            const char *const names[] = {
+                "ZCL_STRESS_TESTS", "ZCL_EVENT_LOG_KILL9_FUZZ",
+                "ZCL_EVENT_LOG_BENCH_PROOF", "ZCL_GOLDEN_TIMING_STRICT",
+            };
+            for (size_t i = 0; i < 4; i++)
+                failures += tc_policy_mode_case(tc, ordinary, modes, names,
+                                                active, i);
+            failures += tc_policy_refusals(tc);
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_a2_verdict_store(uint8_t keyA[32], bool have_keyA)
+{
+    int failures = 0;
     /* ── Phase A2: receipt storage is independent from source inspection ── */
     TC_CHECK("separate verdict store starts empty",
              tc_shell("rm -rf %s", TC_STORE) &&
@@ -3018,7 +3039,7 @@ int test_testcache(void)
             testcache_probe_group(tc, "test_demo_entry", &p);
             TC_CHECK("separate store does not borrow the source-local PASS",
                      p.cacheable && !p.hit && have_keyA &&
-                     memcmp(keyA, p.key, sizeof(keyA)) == 0);
+                     memcmp(keyA, p.key, 32) == 0);
             if (p.cacheable) testcache_store_pass(tc, p.key);
             testcache_close(tc);
         }
@@ -3034,7 +3055,12 @@ int test_testcache(void)
         }
     }
     unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    return failures;
+}
 
+static int tc_phase_a3_flaky_store(void)
+{
+    int failures = 0;
     /* ── Phase A3: load-flaky PASS — the rerun-alone policy's cache contract.
      * test_parallel.c's rerun_load_flaky_groups gives a FAIL/WEDGED group one
      * alone rerun before it counts; when that rerun passes, the group is a
@@ -3075,7 +3101,12 @@ int test_testcache(void)
         }
     }
     unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    return failures;
+}
 
+static int tc_phase_b_c_leaf_edits(uint8_t keyA[32], bool have_keyA)
+{
+    int failures = 0;
     /* ── Phase B: SOUNDNESS — edit a CLOSURE-MEMBER body => key changes, miss ── */
     TC_CHECK("rewrite leaf body", write_fixture(TC_LEAF_B, TC_OTHER_A, TC_H_A));
     {
@@ -3108,7 +3139,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_c2_snapshot(uint8_t keyA[32], bool have_keyA)
+{
+    int failures = 0;
     /* ── Phase C2: resident snapshot mode never rebuilds or trusts an edit ──
      * The verified index still describes Phase C. An in-closure edit must run
      * fresh; an out-of-closure edit may reuse the exact stored PASS. */
@@ -3146,7 +3182,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_d_uncacheable(void)
+{
+    int failures = 0;
     /* ── Phase D: UNCACHEABLE cases ── */
     {
         struct testcache *tc = testcache_open(TC_FIX);
@@ -3162,7 +3203,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_e_header(uint8_t keyA[32], bool have_keyA)
+{
+    int failures = 0;
     /* ── Phase E: header edit (an included file) also changes the key ── */
     TC_CHECK("edit included header", write_fixture(TC_LEAF_A, TC_OTHER_A, TC_H_B));
     {
@@ -3175,7 +3221,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_f_def_registry(void)
+{
+    int failures = 0;
     /* ── Phase F: a *.def registry edit MOVES the key ──────────────────────
      * The include graph is built from the compiler's depfiles, and the depfile
      * lists tc_registry.def as a prerequisite of tc_top.c. Filtering
@@ -3212,7 +3263,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_g_no_graph(void)
+{
+    int failures = 0;
     /* ── Phase G: an absent include graph is UNCACHEABLE, not header-free ──
      * With no depfiles under build/, codeindex produces zero include edges. That
      * is not a smaller-but-complete closure — it is NO closure, and it was never
@@ -3236,7 +3292,12 @@ int test_testcache(void)
             testcache_close(tc);
         }
     }
+    return failures;
+}
 
+static int tc_phase_h_stress_env(void)
+{
+    int failures = 0;
     /* ── Phase H: coverage-gating env is IN the key ────────────────────────
      * ~16 groups `return 0` from a `SKIP (set ZCL_STRESS_TESTS=1 ...)` path, so
      * their source bytes are identical whether the stress lane ran or not.
@@ -3306,7 +3367,12 @@ int test_testcache(void)
                  back && strcmp(back, "tc-phase-h-sentinel") == 0);
     }
     tc_env_restore(&caller_stress, "ZCL_STRESS_TESTS");
+    return failures;
+}
 
+static int tc_phase_inherited_flags(void)
+{
+    int failures = 0;
     /* Inherited flags still affect ordinary execution. The activated-key
      * extension must not remove any flag from the existing parent digest. */
     const char *const proof_flags[] = {
@@ -3350,7 +3416,12 @@ int test_testcache(void)
         }
         tc_env_restore(&caller_flag, proof_flags[i]);
     }
+    return failures;
+}
 
+static int tc_phase_fast_record(void)
+{
+    int failures = 0;
     /* Fast-CI's frozen source record is orchestration identity, not test
      * behavior. Hashing it globally defeats the closure key: even a docs-only
      * rebase changes the record and invalidates every unrelated group. */
@@ -3390,7 +3461,12 @@ int test_testcache(void)
     tc_env_restore(&caller_fast_record, "ZCL_FAST_BUILD_SOURCE_RECORD");
     /* The lint-only per-TU cache knob has no bearing on test verdicts. */
     failures += tc_non_test_controls_stable();
+    return failures;
+}
 
+static int tc_phase_env_restore_probe(void)
+{
+    int failures = 0;
     /* Both branches of the capture/restore pair on a private variable, so the
      * "caller had it set" case above is not the only one covered. test.c runs
      * this group in-process ahead of 125 more groups; leaking either branch
@@ -3413,7 +3489,12 @@ int test_testcache(void)
         TC_CHECK("an UNSET caller value is left unset, not invented",
                  getenv(probe) == NULL);
     }
+    return failures;
+}
 
+static int tc_phase_i_denylist(void)
+{
+    int failures = 0;
     /* ── Phase I: the denylist matches EXACT names, and covers the binaries ──
      * The old strstr() form could not list "net" (it would have swallowed
      * netmask/subnet/net_bootstrap), which is exactly why test_net — a group
@@ -3433,7 +3514,12 @@ int test_testcache(void)
              testcache_group_is_denylisted("test_replay_canary_verdict"));
     TC_CHECK("a plain in-tree unit group stays cacheable",
              !testcache_group_is_denylisted("test_hkdf_sha256_rfc5869"));
+    return failures;
+}
 
+static int tc_phase_j_toolkey(void)
+{
+    int failures = 0;
     /* ── Phase J: the toolkey binds the FLAGS, not just the compiler ───────
      * BUILD_COMPILER_ID fingerprints the CC/CXX argv and tool bytes only, so
      * the -O1 fast profile and the -O3 release profile shared one keyspace and
@@ -3455,6 +3541,12 @@ int test_testcache(void)
         testcache_toolkey_digest12(d);
         TC_CHECK("toolkey digest12 is 12 chars", strlen(d) == 12);
     }
+    return failures;
+}
+
+static int tc_phase_makefile_toolkey(void)
+{
+    int failures = 0;
     /* Each needle is text this change INTRODUCED. The bare variable names
      * (TEST_FAST_EPOCH_COMPILE_FLAGS et al) are not: the epoch machinery has
      * defined all three for a long time, so asserting on them pinned nothing —
@@ -3474,7 +3566,12 @@ int test_testcache(void)
                            "$(call TESTCACHE_TOOLKEY_CPPFLAGS,"
                            "$(TEST_ASAN_PROFILE),"
                            "TEST_ASAN_EPOCH_COMPILE_FLAGS)"));
+    return failures;
+}
 
+static int tc_phase_k_headline(void)
+{
+    int failures = 0;
     /* ── Phase K: the headline cannot claim a cold pass for a cached run ───
      * test_parallel printed "ALL TESTS PASSED" whether it ran 743 groups or 1,
      * and the push gate greps that exact string. Source-contract assertions:
@@ -3489,7 +3586,12 @@ int test_testcache(void)
     TC_CHECK("runner never stores a self-skipped group as PASS",
              file_contains("tests/harness/src/test_parallel.c",
                            "results[i].skip_markers == 0"));
+    return failures;
+}
 
+static int tc_phase_k_unobserved(void)
+{
+    int failures = 0;
     /* An environment-dependent leg that never reported is NOT a skip. The
      * group ran and hard-asserted every leg that does not depend on the
      * environment; only an observation was missing. Two things must both hold,
@@ -3535,6 +3637,12 @@ int test_testcache(void)
                            "rejected an environment-unobserved leg") &&
              file_contains("tools/agent_fast_ci.sh",
                            "accepted a runtime SKIP"));
+    return failures;
+}
+
+static int tc_phase_k_receipts(void)
+{
+    int failures = 0;
     TC_CHECK("pre-push opts into exact per-group PASS receipts",
              file_contains("tools/agent_fast_ci.sh",
                            "T_FAST_EXACT_ARGS=--cache "
@@ -3571,7 +3679,12 @@ int test_testcache(void)
     TC_CHECK("CI retry runs cold so a flake cannot be laundered into a PASS",
              file_contains("Makefile",
                            "$(TEST_PARALLEL_REL_ACTIVE) --no-cache"));
+    return failures;
+}
 
+static int tc_phase_l_rerun_policy(void)
+{
+    int failures = 0;
     /* ── Phase L: rerun-alone policy (test_parallel.c) — source-contract
      * pins. This module cannot fork a whole 8-worker suite run to reproduce
      * the actual race (that is exactly the flake the policy exists for), so
@@ -3619,7 +3732,12 @@ int test_testcache(void)
              file_contains("tests/harness/src/test_parallel.c",
                            "printf(\"LOAD-FLAKY %s first=%s alone=PASS "
                            "first_log=%s \""));
-    failures += testcache_retry_result_contracts();
+    return failures;
+}
+
+static int tc_phase_l_report_contracts(void)
+{
+    int failures = 0;
     {
         static const char *const deadline_report_pins[] = {
             "print_failed_group_prefix(const char *name,",
@@ -3659,7 +3777,12 @@ int test_testcache(void)
              "(a cache hit sets it on the same field)",
              file_contains("tests/harness/src/test_parallel.c",
                            "if (results[i].load_flaky) load_flaky_groups++;"));
+    return failures;
+}
 
+static int tc_phase_m_unobserved_rerun(void)
+{
+    int failures = 0;
     /* ── Phase M: a PASS that prints UNOBSERVED also gets rerun alone ──────
      * The onion bootstrap window (test_onion_bootstrap) is the motivating
      * case: it can print "UNOBSERVED (" under a saturated shared pool while
@@ -3694,7 +3817,12 @@ int test_testcache(void)
              "unlike an ordinary load-flaky PASS",
              file_contains("tests/harness/src/test_parallel.c",
                            "!results[i].load_unobserved && probes &&"));
+    return failures;
+}
 
+static int tc_phase_pb_cli_flags(void)
+{
+    int failures = 0;
     /* ── Phase PB: batched proof-reuse lookup over the routed set ── */
     {
         /* The runner's capsule-flag parser must size every prefix from
@@ -3717,6 +3845,47 @@ int test_testcache(void)
                                    sizeof(cli_len_pins) /
                                        sizeof(cli_len_pins[0])));
     }
+    return failures;
+}
+
+int test_testcache(void)
+{
+    int failures = 0;
+    struct tc_envsave caller_store;
+    tc_env_capture(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+    (void)tc_shell("rm -rf %s %s %s %s %s", TC_FIX, TC_STORE,
+                   TC_FIX2, TC_CAP, TC_CAP2);
+
+    /* ── Phase A: cacheable, miss, store, hit ── */
+    uint8_t keyA[32];
+    bool have_keyA = false;
+    failures += tc_phase_a_store_hit(keyA, &have_keyA);
+    failures += tc_observation_store_key_invariance();
+    failures += tc_phase_policy_modes();
+    failures += tc_phase_a2_verdict_store(keyA, have_keyA);
+    failures += tc_phase_a3_flaky_store();
+    failures += tc_phase_b_c_leaf_edits(keyA, have_keyA);
+    failures += tc_phase_c2_snapshot(keyA, have_keyA);
+    failures += tc_phase_d_uncacheable();
+    failures += tc_phase_e_header(keyA, have_keyA);
+    failures += tc_phase_f_def_registry();
+    failures += tc_phase_g_no_graph();
+    failures += tc_phase_h_stress_env();
+    failures += tc_phase_inherited_flags();
+    failures += tc_phase_fast_record();
+    failures += tc_phase_env_restore_probe();
+    failures += tc_phase_i_denylist();
+    failures += tc_phase_j_toolkey();
+    failures += tc_phase_makefile_toolkey();
+    failures += tc_phase_k_headline();
+    failures += tc_phase_k_unobserved();
+    failures += tc_phase_k_receipts();
+    failures += tc_phase_l_rerun_policy();
+    failures += testcache_retry_result_contracts();
+    failures += tc_phase_l_report_contracts();
+    failures += tc_phase_m_unobserved_rerun();
+    failures += tc_phase_pb_cli_flags();
     failures += tc_capsule_roundtrip();
     failures += tc_capsule_tamper();
     failures += tc_capsule_bindings();
