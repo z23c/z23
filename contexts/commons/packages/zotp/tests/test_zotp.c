@@ -176,8 +176,12 @@ static void test_cli_args(void)
     bool rendered = zotp_hotp(args[1], strlen(args[1]), UINT64_MAX, 6, want);
     CHECK(rendered);
     if (rendered) {
-        strcat(want, "\n");
-        CHECK(cli_case(5, args, 0, want) == 0);
+        char expected[sizeof want + 2];
+        int written = snprintf(expected, sizeof expected, "%s\n", want);
+        CHECK(written > 0 && (size_t)written < sizeof expected);
+        if (written > 0 && (size_t)written < sizeof expected) {
+            CHECK(cli_case(5, args, 0, expected) == 0);
+        }
     }
     args[3] = "0";
     CHECK(cli_case(5, args, 0, "") == 0);
