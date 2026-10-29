@@ -10,7 +10,9 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "command/native_dev_job.h"
+#include "command/native_dev_fleet_job.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
@@ -194,6 +196,142 @@ static bool dj_error_is(const struct dj_call *c, const char *code)
            strcmp(c->reply.error.code, code) == 0;
 }
 
+static const char *dj_fleet_response;
+static int dj_fleet_calls;
+static bool dj_fleet_timeout;
+static bool dj_fleet_argv_ok;
+static int dj_fleet_transport(const char *const argv[], char *out, size_t cap,
+                              int timeout_ms, bool *timed_out)
+{
+    (void)timeout_ms;
+    dj_fleet_calls++;
+    *timed_out = dj_fleet_timeout;
+    dj_fleet_argv_ok = !strcmp(argv[0], "ssh") && !strcmp(argv[1], "-o") &&
+        !strcmp(argv[2], "BatchMode=yes") && !strcmp(argv[4], "StrictHostKeyChecking=yes") &&
+        !strcmp(argv[5], "--") && !strcmp(argv[6], "r2") &&
+        !strcmp(argv[7], "/opt/z23-dev") && !strcmp(argv[8], "dev") &&
+        !strcmp(argv[9], "fleet") && !strcmp(argv[10], "job");
+    if (!strcmp(argv[11], "--operation=wait"))
+        dj_fleet_argv_ok = dj_fleet_argv_ok && !strcmp(argv[13], "--timeout_s=1");
+    snprintf(out, cap, "%s", dj_fleet_response);
+    return dj_fleet_timeout ? 124 : (strstr(dj_fleet_response, "SOURCE_MISMATCH") ? 1 : 0);
+}
+
+static bool dj_fleet_one(const char *op, const char *response, bool want_ok)
+{
+    struct dj_call c;
+    dj_begin(&c);
+    (void)json_push_kv_str(&c.input, "operation", op);
+    (void)json_push_kv_str(&c.input, "peer", "r2");
+    (void)json_push_kv_str(&c.input, "peer_binary", "/opt/z23-dev");
+    if (!strcmp(op, "start")) {
+        (void)json_push_kv_str(&c.input, "cwd", "/work/tree");
+        (void)json_push_kv_str(&c.input, "expected_head", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        (void)json_push_kv_str(&c.input, "task", "test");
+        (void)json_push_kv_str(&c.input, "group", "dev_job");
+    } else {
+        (void)json_push_kv_str(&c.input, "job_id", "job1");
+        (void)json_push_kv_int(&c.input, "timeout_s", 1);
+    }
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.fleet.job", NULL);
+    char why[256];
+    bool valid = spec && zcl_command_registry_input_validate(spec, &c.input, why, sizeof why);
+    dj_fleet_response = response;
+    dj_fleet_calls = 0;
+    dj_fleet_argv_ok = false;
+    zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+    bool ok = valid && dj_fleet_calls == 1 && dj_fleet_argv_ok &&
+        (want_ok ? dj_ok(&c) : dj_error_is(&c, "PEER_OUTCOME_UNKNOWN"));
+    dj_end(&c);
+    return ok;
+}
+
+static int dj_fleet_registry_rejects_argv(void)
+{
+    struct json_value input, argv;
+    json_init(&input); json_set_object(&input);
+    json_init(&argv); json_set_array(&argv);
+    bool built = json_push_kv_str(&input, "operation", "start") &&
+        json_push_kv_str(&input, "cwd", "/work/tree") &&
+        json_push_kv_str(&input, "expected_head", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
+        json_push_kv_str(&input, "task", "lint") && json_push_kv(&input, "argv", &argv);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.fleet.job", NULL);
+    char why[256];
+    bool rejected = built && spec && !zcl_command_registry_input_validate(spec, &input, why, sizeof why);
+    json_free(&argv); json_free(&input);
+    if (!rejected) printf("dev.fleet.job public argv rejected... FAIL\n");
+    return rejected ? 0 : 1;
+}
+
+static int dj_fleet_peer_cases(void)
+{
+    static const char prefix[] = "{\"schema\":\"zcl.result.v1\",\"command\":\"dev.fleet.job\",\"ok\":true,\"data\":";
+    static const char *const bodies[] = {
+        "{\"state\":\"started\",\"job_id\":\"job1\",\"preflight_head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+        "{\"state\":\"started\",\"job_id\":\"job1\",\"preflight_head\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}",
+        "{\"state\":\"invented\",\"job_id\":\"job1\",\"preflight_head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+        "{\"state\":\"passed\",\"job_id\":\"job1\"}}",
+        "{\"state\":\"passed\",\"job_id\":\"other\"}}",
+        "{\"state\":\"invented\",\"job_id\":\"job1\"}}",
+        "broken"
+    };
+    int failures = 0;
+    zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    for (size_t i = 0; i < sizeof bodies / sizeof bodies[0]; i++) {
+        char response[512];
+        snprintf(response, sizeof response, "%s%s", prefix, bodies[i]);
+        bool ok = dj_fleet_one(i < 3 ? "start" : "wait", response, i == 0 || i == 3);
+        if (!ok) { printf("dev.fleet.job peer row %zu... FAIL\n", i); failures++; }
+    }
+    zcl_fleet_job_set_test_transport(NULL);
+    return failures;
+}
+
+static int dj_fleet_refusal_cases(void)
+{
+    static const struct { const char *status, *mutation; bool timeout, start, refused; } cases[] = {
+        {"failed", ",\"mutated\":false", false, false, true},
+        {"blocked", ",\"mutated\":false", false, false, true},
+        {"failed", ",\"mutated\":false", true, true, false},
+        {"failed", ",\"mutated\":true", false, true, false},
+        {"failed", "", false, true, false},
+        {"passed", ",\"mutated\":false", false, true, false},
+    };
+    int failures = 0;
+    zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        struct dj_call c;
+        char response[512];
+        snprintf(response, sizeof response,
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"dev.fleet.job\",\"ok\":false,"
+            "\"status\":\"%s\",\"error\":{\"code\":\"SOURCE_MISMATCH\","
+            "\"message\":\"tracked source changed\"%s}}", cases[i].status, cases[i].mutation);
+        dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", cases[i].start ? "start" : "wait");
+        (void)json_push_kv_str(&c.input, "peer", "r2");
+        (void)json_push_kv_str(&c.input, "peer_binary", "/opt/z23-dev");
+        if (cases[i].start) {
+            (void)json_push_kv_str(&c.input, "cwd", "/work/tree");
+            (void)json_push_kv_str(&c.input, "expected_head", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            (void)json_push_kv_str(&c.input, "task", "test");
+            (void)json_push_kv_str(&c.input, "group", "dev_job");
+        } else (void)json_push_kv_str(&c.input, "job_id", "job1");
+        dj_fleet_response = response; dj_fleet_calls = 0; dj_fleet_timeout = cases[i].timeout;
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        bool ok = dj_fleet_calls == 1 && dj_error_is(&c, cases[i].refused ? "PEER_REFUSED" : "PEER_OUTCOME_UNKNOWN") &&
+            c.reply.error.mutated == (cases[i].start && !cases[i].refused);
+        if (cases[i].refused) ok = ok && strstr(c.reply.error.evidence, "SOURCE_MISMATCH") &&
+                                      strstr(c.reply.error.evidence, "tracked source changed");
+        if (!ok) { printf("dev.fleet.job refusal row %zu... FAIL\n", i); failures++; }
+        dj_end(&c);
+    }
+    dj_fleet_timeout = false;
+    zcl_fleet_job_set_test_transport(NULL);
+    return failures;
+}
+
 /* ── fixtures ────────────────────────────────────────────────────────────── */
 
 static void dj_git(const char *dir, const char *a, const char *b,
@@ -252,6 +390,72 @@ static void dj_isolate(void)
     dj_git(g_repo, "init", "-q", NULL, NULL, NULL);
     dj_git(g_repo, "commit", "-q", "--allow-empty", "-m", "fixture");
     dj_write_makefile(g_repo);
+}
+
+static bool dj_fleet_local_refusal(const char *head)
+{
+    struct dj_call c;
+    dj_begin(&c);
+    (void)json_push_kv_str(&c.input, "operation", "start");
+    (void)json_push_kv_str(&c.input, "cwd", g_repo);
+    (void)json_push_kv_str(&c.input, "expected_head", head);
+    (void)json_push_kv_str(&c.input, "task", "test");
+    (void)json_push_kv_str(&c.input, "group", "dev_job");
+    zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+    bool ok = dj_error_is(&c, "SOURCE_MISMATCH");
+    dj_end(&c);
+    return ok;
+}
+
+static int dj_fleet_source_refusals(void)
+{
+    int failures = 0;
+    const char *rev[] = {"git", "rev-parse", "HEAD", NULL};
+    char head[128] = {0};
+    bool have_head = zcl_spawn_capture_in_dir_observed(rev, g_repo, head, sizeof head, 15000, NULL) == 0;
+    head[strcspn(head, "\r\n")] = 0;
+    if (!have_head || !dj_fleet_local_refusal("0000000000000000000000000000000000000000")) {
+        printf("dev.fleet.job wrong HEAD... FAIL\n"); failures++;
+    }
+    dj_git(g_repo, "add", "fx.mk", NULL, NULL, NULL);
+    if (!have_head || !dj_fleet_local_refusal(head)) {
+        printf("dev.fleet.job dirty tracked source... FAIL\n"); failures++;
+    }
+    dj_git(g_repo, "reset", "-q", "--", "fx.mk", NULL);
+    return failures;
+}
+
+static int dj_fleet_shape_cases(void)
+{
+    int failures = 0;
+    const char *rev[] = {"git", "rev-parse", "HEAD", NULL};
+    char head[128] = {0};
+    bool got = zcl_spawn_capture_in_dir_observed(rev, g_repo, head, sizeof head, 15000, NULL) == 0;
+    head[strcspn(head, "\r\n")] = 0;
+    g_no_child = true;
+    zcl_fleet_job_set_test_transport(dj_fleet_transport);
+    for (int i = 0; i < 4; i++) {
+        struct dj_call c;
+        dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", "start");
+        (void)json_push_kv_str(&c.input, "cwd", g_repo);
+        (void)json_push_kv_str(&c.input, "expected_head", head);
+        (void)json_push_kv_str(&c.input, "task", "test");
+        (void)json_push_kv_str(&c.input, "group", "dev_job");
+        if (i == 0) (void)json_push_kv_int(&c.input, "peer", 7);
+        if (i == 1) (void)json_push_kv_str(&c.input, "timeout_s", "60");
+        if (i == 2) (void)json_push_kv_str(&c.input, "peer", "");
+        if (i == 3) (void)json_push_kv_str(&c.input, "peer_binary", "/opt/z23-dev");
+        dj_fleet_calls = 0;
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        if (!got || !dj_error_is(&c, "INVALID_INPUT") || dj_fleet_calls != 0) {
+            printf("dev.fleet.job malformed input row %d... FAIL\n", i); failures++;
+        }
+        dj_end(&c);
+    }
+    zcl_fleet_job_set_test_transport(NULL);
+    g_no_child = false;
+    return failures;
 }
 
 static void dj_restore(void)
@@ -356,6 +560,65 @@ int test_dev_job(void)
     hooks.primary_checkout = g_repo;
     zcl_dev_job_set_hooks(&hooks);
     failures += dj_test_unknown_liveness(&hooks);
+    failures += dj_fleet_peer_cases();
+    failures += dj_fleet_registry_rejects_argv();
+    failures += dj_fleet_refusal_cases();
+    failures += dj_fleet_source_refusals();
+    failures += dj_fleet_shape_cases();
+
+    TEST("dev.fleet.job: unsafe peer is rejected before SSH") {
+        dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", "wait");
+        (void)json_push_kv_str(&c.input, "peer", "-oProxyCommand=x");
+        (void)json_push_kv_str(&c.input, "peer_binary", "/opt/z23/z23-dev");
+        (void)json_push_kv_str(&c.input, "job_id", "job1");
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        ASSERT(dj_error_is(&c, "INVALID_INPUT"));
+        dj_end(&c);
+        PASS();
+    }
+    TEST("dev.fleet.job: unknown group refuses before execution") {
+        dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", "start");
+        (void)json_push_kv_str(&c.input, "cwd", g_repo);
+        (void)json_push_kv_str(&c.input, "expected_head", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        (void)json_push_kv_str(&c.input, "task", "test");
+        (void)json_push_kv_str(&c.input, "group", "missing_group_xyz");
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        ASSERT(dj_error_is(&c, "INVALID_INPUT"));
+        dj_end(&c);
+        PASS();
+    }
+
+    TEST("dev.fleet.job: local registered test constructs the admitted job") {
+        const char *rev[] = {"git", "rev-parse", "HEAD", NULL};
+        char head[128];
+        ASSERT_EQ(zcl_spawn_capture_in_dir_observed(rev, g_repo, head, sizeof head, 15000, NULL), 0);
+        head[strcspn(head, "\r\n")] = 0;
+        g_no_child = true;
+        dj_begin(&c);
+        (void)json_push_kv_str(&c.input, "operation", "start");
+        (void)json_push_kv_str(&c.input, "cwd", g_repo);
+        (void)json_push_kv_str(&c.input, "expected_head", head);
+        (void)json_push_kv_str(&c.input, "task", "test");
+        (void)json_push_kv_str(&c.input, "group", "dev_job");
+        zcl_native_handle_dev_fleet_job(&c.request, &c.reply);
+        ASSERT(dj_ok(&c));
+        ASSERT_STR_EQ(dj_str(&c, "preflight_head"), head);
+        struct json_value handle;
+        ASSERT(zcl_dev_job_read_handle(dj_str(&c, "job_id"), &handle));
+        const struct json_value *argv = json_get(&handle, "argv");
+        ASSERT_EQ(json_size(argv), 5u);
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 0)), "devbuild");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 1)), "--wait");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 2)), "make");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 3)), "t-fast-exact");
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 4)), "ONLY=dev_job");
+        json_free(&handle);
+        dj_end(&c);
+        g_no_child = false;
+        PASS();
+    }
 
     TEST("dev.job: argv[0] outside the allowlist is refused") {
         dj_start(&c, g_repo, "sh", "ok", true);

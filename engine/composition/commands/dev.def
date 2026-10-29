@@ -2685,6 +2685,27 @@ ZCL_COMMAND_DEV_READ(
     "agent mail waiting is a development-lane coordination surface",
     "z23-dev dev agent mail wait")
 
+/* Typed fleet jobs use SSH machine authorization and local job admission. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.fleet.job", "dev.fleet", "",
+    "Start or observe a typed development job on an SSH peer",
+    "Accepts only build, lint or a registered test group. A remote peer is "
+    "reached through authorized SSH; the receiver validates the workspace "
+    "and observed HEAD and uses its local job and host admission rail. "
+    "Results are observations, not source-identity proof receipts.", 8192,
+    "fleet,job,build,test,lint", "zcl.dev_fleet_job.input.v1", "zcl.dev_job.v1",
+    "operation,peer,peer_binary,cwd,expected_head,task,group,job_id,timeout_s", "",
+    "z23-dev dev fleet job --operation=start --task=lint --cwd=/worktree --expected_head=<sha>",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_fleet_job,
+    "fleet jobs are a development-lane surface",
+    "z23-dev dev fleet job")
+
 /* ── dev.loop.job.start / .wait / .exec ──────────────────
  * Start a long job detached and wait for it in slices of at most 230 s, so
  * an agent never blocks a tool call past the prompt-cache TTL

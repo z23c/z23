@@ -195,3 +195,43 @@ carry an older product name; that is the installed name, not another product.
 8. Ask `z23 code have <thing>` before writing anything new.
 9. Build and test through your host's build scheduler, if it has one.
 10. Land through the lane protocol; write the lesson to the wiki.
+
+## 8. Share development compute with any AI client
+
+An AI client with operator-authorized SSH access can use
+`dev.fleet.job` to start a build, lint, or one registered test group on a
+peer, then observe the existing job handle. This is a development CLI
+interface; fleet membership or a steering message alone grants no SSH
+execution authority. Use the receiver's sanctioned, claimed worktree and
+installed development binary.
+
+Inspect `fleet.vitals.table` for current capacity observations. Available
+memory or a low load does not reserve resources: the receiver's installed
+`devbuild --wait` policy admits each job. No worker service is installed or
+enabled by this command.
+
+For a registered test, supply the authorized peer alias, absolute remote
+binary and worktree paths, exact expected Git HEAD, and group:
+
+```text
+z23-dev dev fleet job --operation=start --peer=<peer> --peer_binary=<absolute-z23-dev> --cwd=<absolute-worktree> --expected_head=<40-hex-head> --task=test --group=hex_codec
+z23-dev dev fleet job --operation=wait --peer=<same-peer> --peer_binary=<same-binary> --job_id=<returned-id> --timeout_s=30
+```
+
+Use `--task=build` or `--task=lint` without a group for the corresponding
+fixed Make target. Omit peer and slot to use the same interface locally.
+The receiver requires a registered workspace with matching HEAD and clean
+tracked files before submission. Keep ownership of that workspace while the
+job waits and runs. The reported `preflight_head` is a preflight observation:
+it does not bind untracked inputs or prevent later source changes.
+
+A returned job state is an execution observation, not an independently
+verified build receipt or permission to land or deploy. Preserve the job
+handle and inspect the existing test/build evidence for the actual verdict.
+On an unknown remote outcome, reconcile the receiver's job state before
+retrying: loss of a reply does not prove that no job started. Source transfer,
+peer provisioning, production deployment and model inference are separate
+operations.
+
+<!-- claim: symbol-present zcl_native_handle_dev_fleet_job tools/command/native_dev_fleet_job.c -->
+<!-- claim: symbol-present dev.fleet.job engine/composition/commands/dev.def -->

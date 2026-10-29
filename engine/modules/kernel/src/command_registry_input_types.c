@@ -472,6 +472,10 @@ static bool cr_match_job_wait_ints(const char *path, const char *key,
                                    const struct json_value *value,
                                    bool *type_ok)
 {
+    if (strcmp(path, "dev.fleet.job") == 0 && strcmp(key, "timeout_s") == 0) {
+        *type_ok = cr_int_range(value, 1, 230);
+        return true;
+    }
     if (strcmp(path, "dev.loop.job.wait") != 0 ||
         (strcmp(key, "timeout_s") != 0 && strcmp(key, "tail_lines") != 0))
         return false;
@@ -744,6 +748,9 @@ static const struct cr_int_bound *cr_job_wait_bound(const char *path,
                                                    const char *key)
 {
     static const struct cr_int_bound job_wait = { "job_wait", 1, 1000000 };
+    static const struct cr_int_bound fleet_wait = { "timeout_s", 1, 230 };
+    if (strcmp(path, "dev.fleet.job") == 0 && strcmp(key, "timeout_s") == 0)
+        return &fleet_wait;
     bool ints = strcmp(key, "timeout_s") == 0 || strcmp(key, "tail_lines") == 0;
     return ints && strcmp(path, "dev.loop.job.wait") == 0 ? &job_wait : NULL;
 }
