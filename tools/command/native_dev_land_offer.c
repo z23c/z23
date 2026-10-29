@@ -347,17 +347,24 @@ struct dlr_receipt {
 
 /* The one signed message: the schema as the domain separator, then the five
  * fields in this fixed order, each followed by a newline. */
-static size_t dlr_receipt_msg(const struct dlr_receipt *t, char *out,
-                              size_t cap)
+[[maybe_unused]] static size_t dlr_receipt_msg(const struct dlr_receipt *t,
+                                               char *out, size_t cap)
 {
     int n = snprintf(out, cap, DLR_RECEIPT_SCHEMA "\n%s\n%s\n%s\n%s\n%s\n",
                      t->commit, t->base, t->bsha, t->checks, t->verdict);
     return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }
 
-/* Signs t's message with this box's key; fills t->signer and t->sig. */
+/* Signs t's message with this box's key; fills t->signer and t->sig. The
+ * signer links only into the dev binary and tests, as in native_dev_land.c's
+ * dl_publication_sign(); the release binary refuses with a reason. */
 static bool dlr_receipt_sign(struct dlr_receipt *t, const char **why)
 {
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
+    (void)t;
+    *why = "receipt signing requires the dev binary (make dev-bin)";
+    return false; // raw-return-ok:the caller reports why as OFFER_RECEIPT_FAILED
+#else
     char msg[512];
     size_t n = dlr_receipt_msg(t, msg, sizeof(msg));
     uint8_t pub[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
@@ -368,6 +375,7 @@ static bool dlr_receipt_sign(struct dlr_receipt *t, const char **why)
     zcl_hex_encode(pub, sizeof(pub), t->signer);
     zcl_hex_encode(sig, sizeof(sig), t->sig);
     return true;
+#endif
 }
 
 static void dlr_attest_fail(const char *leaf, struct zcl_command_reply *reply,
@@ -501,6 +509,13 @@ static bool dlr_receipt_read(const char *path, struct dlr_receipt *t,
 static bool dlr_receipt_verify(const struct dlr_receipt *t,
                                struct zcl_command_reply *reply)
 {
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
+    dlr_verify_fail(reply, "DEV_BUILD_REQUIRED",
+                    "receipt verification reads this box's signer key and "
+                    "signers.allow list, which only the dev binary carries",
+                    t->signer);
+    return false;
+#else
     char msg[512];
     size_t n = dlr_receipt_msg(t, msg, sizeof(msg));
     const char *why = NULL;
@@ -518,6 +533,7 @@ static bool dlr_receipt_verify(const struct dlr_receipt *t,
                         "fields",
                         why ? why : "signature_invalid");
     return false;
+#endif
 }
 
 /* --offer: the receipt must be about this offer's commit, base and sha. */
@@ -722,6 +738,13 @@ bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
                                "offer is an absolute path, receipts a "
                                "comma list of absolute paths, require 1..16",
                                "input.offer, input.receipts or input.require");
+#if !defined(ZCL_DEV_BUILD) && !defined(ZCL_TESTING)
+    (void)why;
+    return dlr_qual_refuse(&x, "DEV_BUILD_REQUIRED",
+                           "qualify_offer reads this box's signer key, which "
+                           "only the dev binary carries",
+                           "make dev-bin");
+#else
     if (!zcl_dev_proof_signer_public(x.own, &x.own_present, &why))
         return dlr_qual_refuse(&x, "QUALIFY_SIGNER_KEY_UNREADABLE",
                                "this box's signer key cannot be read; it is "
@@ -729,6 +752,7 @@ bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
                                "(dev land attest_offer or a proof), so sign "
                                "once here first",
                                why ? why : "signer_key_unreadable");
+#endif
     if (!dlr_qual_each(&x, receipts))
         return false;
     if (q->qualified >= require)
