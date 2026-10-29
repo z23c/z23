@@ -177,11 +177,11 @@ static bool verdicts_match(const struct domain_verdict *d,
     return true;
 }
 
-int test_domain_consensus_sapling_structural(void)
+/* Contract cases: NULL/negative inputs and the null out_failure tolerance.
+ * Takes the params by value so each helper keeps the original `&cp` call sites. */
+static int dcs_check_contract(struct consensus_params cp)
 {
     int failures = 0;
-    struct consensus_params cp;
-    build_test_params(&cp);
 
     /* --- contract: NULL tx -> typed error --- */
     {
@@ -229,6 +229,13 @@ int test_domain_consensus_sapling_structural(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int dcs_check_pre_overwinter(struct consensus_params cp)
+{
+    int failures = 0;
+
     /* --- shape: pre-Overwinter sprout tx at h=ACT_OVERWINTER-1 passes --- */
     {
         struct transaction tx;
@@ -258,6 +265,13 @@ int test_domain_consensus_sapling_structural(void)
                   verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int dcs_check_overwinter_active(struct consensus_params cp)
+{
+    int failures = 0;
 
     /* --- shape: Overwinter active, non-overwintered tx with version<3 passes
      *      domain version-group block, then fails on "tx-overwinter-active". */
@@ -321,6 +335,13 @@ int test_domain_consensus_sapling_structural(void)
         DCS_CHECK("ow ver-too-high: verdicts agree", verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+static int dcs_check_sapling_active(struct consensus_params cp)
+{
+    int failures = 0;
 
     /* --- shape: Sapling-active boundary at ACT_SAPLING --- */
     {
@@ -395,6 +416,13 @@ int test_domain_consensus_sapling_structural(void)
         transaction_free(&tx);
     }
 
+    return failures;
+}
+
+static int dcs_check_activation_boundaries(struct consensus_params cp)
+{
+    int failures = 0;
+
     /* --- shape: At Sapling activation - 1 (Overwinter only) --- */
     {
         struct transaction tx;
@@ -458,6 +486,21 @@ int test_domain_consensus_sapling_structural(void)
                   verdicts_match(&d, &l));
         transaction_free(&tx);
     }
+
+    return failures;
+}
+
+int test_domain_consensus_sapling_structural(void)
+{
+    int failures = 0;
+    struct consensus_params cp;
+    build_test_params(&cp);
+
+    failures += dcs_check_contract(cp);
+    failures += dcs_check_pre_overwinter(cp);
+    failures += dcs_check_overwinter_active(cp);
+    failures += dcs_check_sapling_active(cp);
+    failures += dcs_check_activation_boundaries(cp);
 
     return failures;
 }
