@@ -36,10 +36,15 @@ static bool fixture_identity(struct device_identity *identity, uint8_t seed)
     return curve25519_scalarmult_base(identity->public_key, identity->private_key);
 }
 
+/* Pure wait ceilings: nothing asserts elapsed time; generous so a loaded host
+ * (hundreds of concurrent builds) cannot expire a handshake or child reap. */
+static const int64_t DEVICE_TEST_REAP_US = INT64_C(60000000);
+static const int64_t DEVICE_TEST_REVOKE_NS = INT64_C(30000000000);
+
 static bool reap_bounded(pid_t child)
 {
     int status = 0;
-    int64_t deadline = platform_time_monotonic_us() + INT64_C(3000000);
+    int64_t deadline = platform_time_monotonic_us() + DEVICE_TEST_REAP_US;
     while (platform_time_monotonic_us() < deadline) {
         pid_t result = waitpid(child, &status, WNOHANG);
         if (result == child) return WIFEXITED(status) && WEXITSTATUS(status) == 0;
@@ -202,7 +207,7 @@ static bool perform_revoked_exchange(struct device_identity *client,
     uint8_t hello[40] = {'Z','2','3','D','E','V',1,0}, wire[NOISE_MAX_MESSAGE];
     memcpy(hello + 8, client->public_key, 32);
     size_t size = 0;
-    int64_t deadline = clock_now_monotonic_ns() + INT64_C(2000000000);
+    int64_t deadline = clock_now_monotonic_ns() + DEVICE_TEST_REVOKE_NS;
     bool ok = a.ok && b.ok && platform_socket_set_nonblocking(socket, true) &&
         device_channel_init(&channel, true, client_store.profile, client->private_key,
                              client->public_key, server->public_key).ok &&
@@ -231,7 +236,7 @@ static bool revoke_mid_handshake(struct device_identity *client,
     if (!child) {
         platform_socket_close(sockets[0]);
         struct zcl_result result = device_connection_respond(server, sockets[1],
-            clock_now_monotonic_ns() + INT64_C(2000000000),
+            clock_now_monotonic_ns() + DEVICE_TEST_REVOKE_NS,
             server->directory, server->directory);
         platform_socket_close(sockets[1]);
         _exit(result.ok ? 1 : 0);
