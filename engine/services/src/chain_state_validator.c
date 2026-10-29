@@ -241,13 +241,6 @@ static bool tip_matches_derived_best(const struct block_index *chain_tip,
            memcmp(d_hash, chain_tip->phashBlock->data, 32) == 0;
 }
 
-/* Suffix reporting whether the DERIVED coins-best has a durable hash
- * witness. */
-static const char *derived_witness_suffix(bool d_have)
-{
-    return d_have ? ", hash-verified" : "";
-}
-
 /* True when the durable reducer-finalized tip matches the active tip's
  * height and hash. */
 static bool durable_tip_matches_active_tip(int fin_height,
@@ -369,7 +362,7 @@ struct boot_validation_result validate_coins_chain_agreement(
                  "[boot] active tip h=%d matches the DERIVED coins-best "
                  "(coins_kv authority%s); legacy coins.db view (h=%d) is "
                  "a lagging projection — AGREE, no tip reset",
-                 d_h, derived_witness_suffix(d_have), r.coins_height);
+                 d_h, d_have ? ", hash-verified" : "", r.coins_height);
         r.action = BOOT_OK;
         r.coins_height = r.chain_height;
         return r;
