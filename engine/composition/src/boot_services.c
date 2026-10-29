@@ -1297,23 +1297,7 @@ static void boot_start_background_workers(struct boot_svc_ctx *svc)
     }
 }
 
-static void boot_start_runtime_or_degrade(struct boot_svc_ctx *svc)
-{
-    /* De-fatal: all runtime specs (bg_validation, gap_fill, legacy_mirror,
-     * oracle, rolling_anchor, ...) are ZCL_SERVICE_OPTIONAL and the
-     * reducer/coordinator drives chain-advance independently, so a runtime-start
-     * failure does not stall consensus. Serve DEGRADED + continue (LOUD via
-     * stderr + event); the sync-monitor self-heal re-raises to SYNCING/HEALTHY.
-     * Refresh-only if already DEGRADED (don't clobber a frontend reason). */
-    if (!boot_register_runtime_services(svc) ||
-        !zcl_service_kernel_start_all(&svc->runtime_kernel)) {
-        fprintf(stderr, "WARNING: runtime services failed to start; serving DEGRADED "
-            "(bg-validation/gap-fill/legacy-mirror may be unavailable)\n");
-        event_emitf(EV_BOOT_ACTIVATE, 0, "degraded_serving runtime_services_unavailable");
-        if (service_state_current() != SERVICE_STATE_DEGRADED_SERVING)
-            service_state_advance(SERVICE_STATE_DEGRADED_SERVING, "runtime_services_unavailable");
-    }
-}
+static void boot_start_runtime_or_degrade(struct boot_svc_ctx *svc);
 
 static void boot_start_catchup_and_backfill(struct boot_svc_ctx *svc, const struct app_context *ctx)
 {
@@ -1491,6 +1475,24 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     if (boot_frontend_async_gate_ready("A/B promote"))
         binary_ab_promote_on_ready_env();
     return true;
+}
+
+static void boot_start_runtime_or_degrade(struct boot_svc_ctx *svc)
+{
+    /* De-fatal: all runtime specs (bg_validation, gap_fill, legacy_mirror,
+     * oracle, rolling_anchor, ...) are ZCL_SERVICE_OPTIONAL and the
+     * reducer/coordinator drives chain-advance independently, so a runtime-start
+     * failure does not stall consensus. Serve DEGRADED + continue (LOUD via
+     * stderr + event); the sync-monitor self-heal re-raises to SYNCING/HEALTHY.
+     * Refresh-only if already DEGRADED (don't clobber a frontend reason). */
+    if (!boot_register_runtime_services(svc) ||
+        !zcl_service_kernel_start_all(&svc->runtime_kernel)) {
+        fprintf(stderr, "WARNING: runtime services failed to start; serving DEGRADED "
+            "(bg-validation/gap-fill/legacy-mirror may be unavailable)\n");
+        event_emitf(EV_BOOT_ACTIVATE, 0, "degraded_serving runtime_services_unavailable");
+        if (service_state_current() != SERVICE_STATE_DEGRADED_SERVING)
+            service_state_advance(SERVICE_STATE_DEGRADED_SERVING, "runtime_services_unavailable");
+    }
 }
 
 /* ── Shutdown ──────────────────────────────────────────────── */
