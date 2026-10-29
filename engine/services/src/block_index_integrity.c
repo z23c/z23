@@ -229,6 +229,141 @@ int block_index_repair_heights(struct main_state *ms)
     return block_index_repair_heights_range(ms, -1, NULL);
 }
 
+/* Pass 1 tallies for block_index_repair_heights_range. */
+struct bii_height_scan {
+    int wrong;
+    int detached;
+    int max_h;
+    const struct block_index *first_detached;
+};
+
+enum bii_height_verdict {
+    BII_HEIGHT_FINE = 0,
+    BII_HEIGHT_WRONG,
+    BII_HEIGHT_DETACHED,
+};
+
+/* Classify one entry for pass 1. */
+static enum bii_height_verdict bii_height_classify(const struct block_index *pi,
+                                                   int min_height)
+{
+    /* Cursor gate (OS-S2 #1): a prior verified run already covered
+     * entries at/below min_height, so only re-count wrongs above it.
+     * The true genesis is always checked (it must sit at 0). */
+    if (pi->pprev && pi->nHeight > min_height &&
+        pi->nHeight != pi->pprev->nHeight + 1)
+        return BII_HEIGHT_WRONG;
+    if (pi->pprev)
+        return BII_HEIGHT_FINE;
+    if (bii_is_genesis(pi))
+        return pi->nHeight != 0 ? BII_HEIGHT_WRONG : BII_HEIGHT_FINE;
+    if (pi->nHeight > min_height &&
+        (pi->nHeight != 0 || (pi->nStatus & BLOCK_HAVE_DATA)))
+        return BII_HEIGHT_DETACHED;
+    return BII_HEIGHT_FINE;
+}
+
+/* Pass 1: count entries with wrong heights. Parentless entries are
+ * judged BY HASH: only the true genesis must sit at 0. A parentless
+ * non-genesis entry is a detached root — its stored height is the
+ * only truth we have until block_index_repair_pprev relinks it from
+ * the durable prev-hash record, so it is reported, never counted as
+ * "wrong" (see bii_is_genesis for the relabel failure mode). */
+static void bii_height_scan_entries(struct block_index *const *arr, size_t n,
+                                    int min_height,
+                                    struct bii_height_scan *scan)
+{
+    scan->wrong = 0;
+    scan->detached = 0;
+    scan->max_h = -1;
+    scan->first_detached = NULL;
+    for (size_t i = 0; i < n; i++) {
+        struct block_index *pi = arr[i];
+        if (!pi) continue;
+        if (pi->nHeight > scan->max_h) scan->max_h = pi->nHeight;
+        enum bii_height_verdict v = bii_height_classify(pi, min_height);
+        if (v == BII_HEIGHT_WRONG) {
+            scan->wrong++;
+        } else if (v == BII_HEIGHT_DETACHED) {
+            scan->detached++;
+            if (!scan->first_detached)
+                scan->first_detached = pi;
+        }
+    }
+}
+
+/* Seed the reachability marks from the true genesis; returns heights fixed. */
+static int bii_height_mark_genesis(struct block_index *const *arr, size_t n,
+                                   struct block_index *const *byptr,
+                                   uint8_t *mark)
+{
+    int repaired = 0;
+    for (size_t i = 0; i < n; i++) {
+        struct block_index *b = arr[i];
+        if (!b->pprev && bii_is_genesis(b)) {
+            if (b->nHeight != 0) {
+                b->nHeight = 0;
+                repaired++;
+            }
+            size_t gi = bii_ptr_index(byptr, n, b);
+            if (gi < n)
+                mark[gi] = 1;
+        }
+    }
+    return repaired;
+}
+
+/* Multi-pass forward propagation through genesis-rooted entries; returns
+ * heights fixed. */
+static int bii_height_propagate(struct block_index *const *arr, size_t n,
+                                struct block_index *const *byptr,
+                                uint8_t *mark)
+{
+    int repaired = 0;
+    for (int pass = 0; pass < 20; pass++) {
+        int progressed = 0;
+        for (size_t i = 0; i < n; i++) {
+            struct block_index *b = arr[i];
+            if (!b->pprev)
+                continue;
+            size_t bi_idx = bii_ptr_index(byptr, n, b);
+            if (bi_idx >= n || mark[bi_idx])
+                continue;
+            size_t pp_idx = bii_ptr_index(byptr, n, b->pprev);
+            if (pp_idx >= n || !mark[pp_idx])
+                continue; /* parent not (yet) genesis-rooted */
+            int expected = b->pprev->nHeight + 1;
+            if (b->nHeight != expected) {
+                b->nHeight = expected;
+                repaired++;
+            }
+            mark[bi_idx] = 1;
+            progressed++;
+        }
+        if (progressed == 0)
+            break;
+    }
+    return repaired;
+}
+
+/* Recompute nChainWork for genesis-rooted entries of a height-sorted array. */
+static void bii_height_recompute_work(struct block_index *const *arr, size_t n,
+                                      struct block_index *const *byptr,
+                                      const uint8_t *mark)
+{
+    for (size_t i = 0; i < n; i++) {
+        struct block_index *b = arr[i];
+        size_t bi_idx = bii_ptr_index(byptr, n, b);
+        if (bi_idx >= n || !mark[bi_idx])
+            continue;
+        struct arith_uint256 proof = GetBlockProof(b);
+        if (b->pprev)
+            arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
+        else
+            b->nChainWork = proof;
+    }
+}
+
 int block_index_repair_heights_range(struct main_state *ms, int min_height,
                                      int *out_max_height)
 {
@@ -250,39 +385,13 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
         return 0;
     }
 
-    /* Pass 1: count entries with wrong heights. Parentless entries are
-     * judged BY HASH: only the true genesis must sit at 0. A parentless
-     * non-genesis entry is a detached root — its stored height is the
-     * only truth we have until block_index_repair_pprev relinks it from
-     * the durable prev-hash record, so it is reported, never counted as
-     * "wrong" (see bii_is_genesis for the relabel failure mode). */
-    int wrong = 0;
-    int detached = 0;
-    int max_h = -1;
+    struct bii_height_scan scan;
+    bii_height_scan_entries(arr, n, min_height, &scan);
+    int wrong = scan.wrong;
+    int detached = scan.detached;
+    int max_h = scan.max_h;
     {
-        const struct block_index *first_detached = NULL;
-        for (size_t i = 0; i < n; i++) {
-            struct block_index *pi = arr[i];
-            if (!pi) continue;
-            if (pi->nHeight > max_h) max_h = pi->nHeight;
-            /* Cursor gate (OS-S2 #1): a prior verified run already covered
-             * entries at/below min_height, so only re-count wrongs above it.
-             * The true genesis is always checked (it must sit at 0). */
-            if (pi->pprev && pi->nHeight > min_height &&
-                pi->nHeight != pi->pprev->nHeight + 1)
-                wrong++;
-            else if (!pi->pprev) {
-                if (bii_is_genesis(pi)) {
-                    if (pi->nHeight != 0)
-                        wrong++;
-                } else if (pi->nHeight > min_height &&
-                           (pi->nHeight != 0 || (pi->nStatus & BLOCK_HAVE_DATA))) {
-                    detached++;
-                    if (!first_detached)
-                        first_detached = pi;
-                }
-            }
-        }
+        const struct block_index *first_detached = scan.first_detached;
         if (out_max_height) *out_max_height = max_h;
         if (detached > 0 && first_detached && first_detached->phashBlock) {
             char hex[65];
@@ -334,42 +443,8 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
     memcpy(byptr, arr, n * sizeof(*byptr));
     qsort(byptr, n, sizeof(*byptr), bii_cmp_ptr);
 
-    for (size_t i = 0; i < n; i++) {
-        struct block_index *b = arr[i];
-        if (!b->pprev && bii_is_genesis(b)) {
-            if (b->nHeight != 0) {
-                b->nHeight = 0;
-                repaired++;
-            }
-            size_t gi = bii_ptr_index(byptr, n, b);
-            if (gi < n)
-                mark[gi] = 1;
-        }
-    }
-
-    for (int pass = 0; pass < 20; pass++) {
-        int progressed = 0;
-        for (size_t i = 0; i < n; i++) {
-            struct block_index *b = arr[i];
-            if (!b->pprev)
-                continue;
-            size_t bi_idx = bii_ptr_index(byptr, n, b);
-            if (bi_idx >= n || mark[bi_idx])
-                continue;
-            size_t pp_idx = bii_ptr_index(byptr, n, b->pprev);
-            if (pp_idx >= n || !mark[pp_idx])
-                continue; /* parent not (yet) genesis-rooted */
-            int expected = b->pprev->nHeight + 1;
-            if (b->nHeight != expected) {
-                b->nHeight = expected;
-                repaired++;
-            }
-            mark[bi_idx] = 1;
-            progressed++;
-        }
-        if (progressed == 0)
-            break;
-    }
+    repaired += bii_height_mark_genesis(arr, n, byptr, mark);
+    repaired += bii_height_propagate(arr, n, byptr, mark);
 
     /* Pass 3: Recompute nChainWork now that heights are correct — same
      * genesis-rooted gate: chain work derived from a detached root's
@@ -377,17 +452,7 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
      * the earlier sort used the pre-repair labels, and parents must be
      * recomputed before their children. */
     qsort(arr, n, sizeof(*arr), bii_cmp_height);
-    for (size_t i = 0; i < n; i++) {
-        struct block_index *b = arr[i];
-        size_t bi_idx = bii_ptr_index(byptr, n, b);
-        if (bi_idx >= n || !mark[bi_idx])
-            continue;
-        struct arith_uint256 proof = GetBlockProof(b);
-        if (b->pprev)
-            arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
-        else
-            b->nChainWork = proof;
-    }
+    bii_height_recompute_work(arr, n, byptr, mark);
 
     free(byptr);
     free(mark);
@@ -408,6 +473,164 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
 
     atomic_store(&g_heights_repaired, true);
     return repaired;
+}
+
+/* Collect scan candidates (see the by-hash note inside) into `arr`; returns
+ * the count and writes the highest height seen to *out_max_h. */
+static size_t bii_pprev_collect(struct main_state *ms,
+                                struct block_index **arr, int min_height,
+                                int *out_max_h)
+{
+    size_t iter = 0, count = 0;
+    struct block_index *pi;
+    int max_h = -1;
+    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+        if (!pi) continue;
+        if (pi->nHeight > max_h) max_h = pi->nHeight;
+        /* By hash, not by height: a detached root relabeled to 0 (or
+         * loaded that way from a corrupted flat save) is EXACTLY the
+         * entry this pass must relink — an `nHeight > 0` filter would
+         * exclude it forever. Only the true genesis has no parent.
+         * min_height only skips blocks a prior verified run already
+         * covered; a detached root at height 0 is never skipped because
+         * min_height < 0 on any datadir that still has unrepaired roots. */
+        if (!bii_is_genesis(pi) && (pi->nStatus & BLOCK_HAVE_DATA) &&
+            pi->nFile >= 0 && pi->nDataPos > 0 && pi->nHeight > min_height)
+            arr[count++] = pi;
+    }
+    *out_max_h = max_h;
+    return count;
+}
+
+static size_t bii_pprev_read_limit(size_t max_reads, size_t count)
+{
+    return (max_reads > 0 && max_reads < count) ? max_reads : count;
+}
+
+static int64_t bii_pprev_advise_window(const struct storage_pacing *pacing)
+{
+    return pacing->sequential_readahead
+               ? pacing->boot_readahead_window_bytes
+               : 0;
+}
+
+/* Readahead cursor: the position past which the hint was already issued. */
+struct bii_pprev_advise {
+    int64_t window;
+    int file;
+    int64_t until;
+};
+
+static void bii_pprev_advise_entry(const char *datadir,
+                                   const struct block_index *bi,
+                                   struct bii_pprev_advise *adv)
+{
+    if (adv->window > 0 &&
+        (bi->nFile != adv->file ||
+         (int64_t)bi->nDataPos >= adv->until)) {
+        disk_block_io_advise_range(datadir, bi->nFile, "blk",
+                                   (int64_t)bi->nDataPos, adv->window);
+        adv->file = bi->nFile;
+        adv->until = (int64_t)bi->nDataPos + adv->window;
+    }
+}
+
+/* Counters for the pprev read loop. */
+struct bii_pprev_tally {
+    int repaired;
+    int heights_fixed;
+    int read_errors;
+};
+
+/* Read one entry's on-disk parent and fix pprev/height. Returns true when
+ * the entry was resolved (a parent was found), false on a read error or a
+ * parent missing from the index. */
+static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
+                                struct block_index *bi,
+                                struct bii_pprev_tally *tally)
+{
+    /* Read just nVersion (4 bytes) + hashPrevBlock (32 bytes) = 36 bytes
+     * from the start of block data on disk. This is much faster than
+     * deserializing the entire block. */
+    uint8_t hdr_buf[36];
+    struct disk_block_pos pos = {
+        .nFile = bi->nFile,
+        .nPos = bi->nDataPos
+    };
+    ssize_t nr = disk_block_pread(datadir, &pos, "blk", hdr_buf, 36);
+    if (nr < 36) {
+        tally->read_errors++;
+        return false;
+    }
+
+    /* hashPrevBlock is at offset 4 (after nVersion) in little-endian */
+    struct uint256 prev_hash;
+    memcpy(prev_hash.data, hdr_buf + 4, 32);
+
+    /* Look up the correct parent in the block map */
+    struct block_index *correct_pprev =
+        block_map_find(&ms->map_block_index, &prev_hash);
+
+    if (!correct_pprev)
+        return false; /* parent not in index — can't fix */
+
+    if (bi->pprev != correct_pprev) {
+        bi->pprev = correct_pprev;
+        tally->repaired++;
+    }
+    if (bi->nHeight != correct_pprev->nHeight + 1) {
+        bi->nHeight = correct_pprev->nHeight + 1;
+        tally->heights_fixed++;
+        block_index_build_skip(bi);
+    }
+    return true;
+}
+
+/* Recompute nChainWork/nChainTx over ALL entries after pprev changed. */
+static void bii_pprev_recompute_chain(struct main_state *ms, size_t n)
+{
+    size_t iter = 0;
+    struct block_index *pi;
+    /* Re-collect ALL entries (not just HAVE_DATA) for chain recomputation */
+    size_t all_count = 0;
+    struct block_index **all = zcl_malloc(n * sizeof(*all), "pprev_repair_all");
+    if (all) {
+        iter = 0;
+        while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+            if (pi && all_count < n)
+                all[all_count++] = pi;
+        }
+        qsort(all, all_count, sizeof(*all), bii_cmp_height);
+
+        int fixed_work = 0, fixed_tx = 0;
+        for (size_t i = 0; i < all_count; i++) {
+            struct block_index *b = all[i];
+            struct arith_uint256 proof = GetBlockProof(b);
+            struct arith_uint256 expected;
+
+            if (b->pprev) {
+                arith_uint256_add(&expected, &b->pprev->nChainWork, &proof);
+                if (arith_uint256_compare(&expected, &b->nChainWork) != 0) {
+                    b->nChainWork = expected;
+                    fixed_work++;
+                }
+                if (b->nTx > 0 && b->pprev->nChainTx > 0) {
+                    uint32_t expected_ctx = b->pprev->nChainTx + b->nTx;
+                    if (b->nChainTx != expected_ctx) {
+                        b->nChainTx = expected_ctx;
+                        fixed_tx++;
+                    }
+                }
+            } else {
+                b->nChainWork = proof;
+            }
+        }
+        free(all);
+
+        if (fixed_work > 0 || fixed_tx > 0)
+            printf("[pprev-repair] recomputed: %d chain_work, %d chain_tx\n",
+                   fixed_work, fixed_tx);
+    }
 }
 
 /* ── pprev chain repair ────────────────────────────────────────
@@ -439,23 +662,8 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
         return 0;
     }
 
-    size_t iter = 0, count = 0;
-    struct block_index *pi;
-    int max_h = -1;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
-        if (!pi) continue;
-        if (pi->nHeight > max_h) max_h = pi->nHeight;
-        /* By hash, not by height: a detached root relabeled to 0 (or
-         * loaded that way from a corrupted flat save) is EXACTLY the
-         * entry this pass must relink — an `nHeight > 0` filter would
-         * exclude it forever. Only the true genesis has no parent.
-         * min_height only skips blocks a prior verified run already
-         * covered; a detached root at height 0 is never skipped because
-         * min_height < 0 on any datadir that still has unrepaired roots. */
-        if (!bii_is_genesis(pi) && (pi->nStatus & BLOCK_HAVE_DATA) &&
-            pi->nFile >= 0 && pi->nDataPos > 0 && pi->nHeight > min_height)
-            arr[count++] = pi;
-    }
+    int max_h;
+    size_t count = bii_pprev_collect(ms, arr, min_height, &max_h);
     if (out_max_height) *out_max_height = max_h;
 
     if (count == 0) {
@@ -468,15 +676,13 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
     qsort(arr, count, sizeof(*arr), bii_cmp_disk_pos);
 
     size_t max_reads = bii_pprev_repair_max_reads();
-    size_t read_limit = (max_reads > 0 && max_reads < count)
-                            ? max_reads
-                            : count;
+    size_t read_limit = bii_pprev_read_limit(max_reads, count);
     printf("[pprev-repair] scanning %zu/%zu blocks with data "
            "(ZCL_PPREV_REPAIR_MAX_READS=%zu)\n",
            read_limit, count, max_reads);
     fflush(stdout);
 
-    int repaired = 0, heights_fixed = 0, read_errors = 0;
+    struct bii_pprev_tally tally = {0};
 
     /* Readahead over the already-sorted walk.
      *
@@ -492,11 +698,11 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
      * Everything here is advisory. `advise_until` is the position past which
      * the hint has already been issued; a file change resets it. */
     const struct storage_pacing *pacing = storage_pacing();
-    const int64_t advise_window = pacing->sequential_readahead
-                                      ? pacing->boot_readahead_window_bytes
-                                      : 0;
-    int advised_file = -1;
-    int64_t advised_until = 0;
+    struct bii_pprev_advise adv = {
+        .window = bii_pprev_advise_window(pacing),
+        .file = -1,
+        .until = 0,
+    };
 
     /* One fd per block file instead of one open()+close() per block. The
      * repair reads up to ~3.2M entries; at boot no writer touches blk*.dat
@@ -507,105 +713,30 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
     for (size_t i = 0; i < read_limit; i++) {
         struct block_index *bi = arr[i];
 
-        if (advise_window > 0 &&
-            (bi->nFile != advised_file ||
-             (int64_t)bi->nDataPos >= advised_until)) {
-            disk_block_io_advise_range(datadir, bi->nFile, "blk",
-                                       (int64_t)bi->nDataPos, advise_window);
-            advised_file = bi->nFile;
-            advised_until = (int64_t)bi->nDataPos + advise_window;
-        }
+        bii_pprev_advise_entry(datadir, bi, &adv);
 
-        /* Read just nVersion (4 bytes) + hashPrevBlock (32 bytes) = 36 bytes
-         * from the start of block data on disk. This is much faster than
-         * deserializing the entire block. */
-        uint8_t hdr_buf[36];
-        struct disk_block_pos pos = {
-            .nFile = bi->nFile,
-            .nPos = bi->nDataPos
-        };
-        ssize_t nr = disk_block_pread(datadir, &pos, "blk", hdr_buf, 36);
-        if (nr < 36) {
-            read_errors++;
+        if (!bii_pprev_fix_entry(ms, datadir, bi, &tally))
             continue;
-        }
-
-        /* hashPrevBlock is at offset 4 (after nVersion) in little-endian */
-        struct uint256 prev_hash;
-        memcpy(prev_hash.data, hdr_buf + 4, 32);
-
-        /* Look up the correct parent in the block map */
-        struct block_index *correct_pprev =
-            block_map_find(&ms->map_block_index, &prev_hash);
-
-        if (!correct_pprev)
-            continue; /* parent not in index — can't fix */
-
-        if (bi->pprev != correct_pprev) {
-            bi->pprev = correct_pprev;
-            repaired++;
-        }
-        if (bi->nHeight != correct_pprev->nHeight + 1) {
-            bi->nHeight = correct_pprev->nHeight + 1;
-            heights_fixed++;
-            block_index_build_skip(bi);
-        }
 
         boot_progress_note("block_index.pprev_repair", i + 1, read_limit);
         if ((i + 1) % 50000 == 0) {
             printf("[pprev-repair] progress %zu/%zu repaired=%d "
                    "heights=%d read_errors=%d\n",
-                   i + 1, read_limit, repaired, heights_fixed, read_errors);
+                   i + 1, read_limit, tally.repaired, tally.heights_fixed,
+                   tally.read_errors);
             fflush(stdout);
         }
     }
+    int repaired = tally.repaired;
+    int heights_fixed = tally.heights_fixed;
+    int read_errors = tally.read_errors;
 
     disk_block_io_read_fd_cache_exit();
 
     /* After fixing pprev, recompute nChainWork and nChainTx.
      * Sort all entries by height for forward propagation. */
-    if (repaired > 0 || heights_fixed > 0) {
-        /* Re-collect ALL entries (not just HAVE_DATA) for chain recomputation */
-        size_t all_count = 0;
-        struct block_index **all = zcl_malloc(n * sizeof(*all), "pprev_repair_all");
-        if (all) {
-            iter = 0;
-            while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
-                if (pi && all_count < n)
-                    all[all_count++] = pi;
-            }
-            qsort(all, all_count, sizeof(*all), bii_cmp_height);
-
-            int fixed_work = 0, fixed_tx = 0;
-            for (size_t i = 0; i < all_count; i++) {
-                struct block_index *b = all[i];
-                struct arith_uint256 proof = GetBlockProof(b);
-                struct arith_uint256 expected;
-
-                if (b->pprev) {
-                    arith_uint256_add(&expected, &b->pprev->nChainWork, &proof);
-                    if (arith_uint256_compare(&expected, &b->nChainWork) != 0) {
-                        b->nChainWork = expected;
-                        fixed_work++;
-                    }
-                    if (b->nTx > 0 && b->pprev->nChainTx > 0) {
-                        uint32_t expected_ctx = b->pprev->nChainTx + b->nTx;
-                        if (b->nChainTx != expected_ctx) {
-                            b->nChainTx = expected_ctx;
-                            fixed_tx++;
-                        }
-                    }
-                } else {
-                    b->nChainWork = proof;
-                }
-            }
-            free(all);
-
-            if (fixed_work > 0 || fixed_tx > 0)
-                printf("[pprev-repair] recomputed: %d chain_work, %d chain_tx\n",
-                       fixed_work, fixed_tx);
-        }
-    }
+    if (repaired > 0 || heights_fixed > 0)
+        bii_pprev_recompute_chain(ms, n);
 
     free(arr);
 
@@ -639,6 +770,78 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
 #include "services/chain_tip.h"
 #include "coins/coins_view.h"
 #include "validation/chainstate.h"
+
+/* Step 2 walk: fix heights DOWN the pprev chain. Returns true when the walk
+ * was refused at genesis (the anchor height is wrong); *out_refused_expected
+ * then holds the height the walk wanted genesis to take. */
+static bool bii_anchor_walk_down(struct block_index *coins_bi,
+                                 int pre_scan_coins_h, int *out_fixed,
+                                 int *out_refused_expected)
+{
+    bool refused = false;
+    int fixed = 0;
+    int steps = 0;
+    struct block_index *cur = coins_bi;
+    const int max_steps = pre_scan_coins_h + 1024;
+    while (cur && cur->pprev && steps++ < max_steps) {
+        int expected = cur->nHeight - 1;
+        if (cur->pprev->nHeight != expected) {
+            /* A walk that wants the true genesis at a nonzero
+             * height proves the ANCHOR is mislabeled — abort the
+             * relabel rather than shift the whole ancestry (the
+             * global relabel class, see bii_is_genesis). */
+            if (bii_is_genesis(cur->pprev) && expected != 0) {
+                *out_refused_expected = expected;
+                refused = true;
+                break;
+            }
+            cur->pprev->nHeight = expected;
+            fixed++;
+        }
+        cur = cur->pprev;
+        if (expected <= 0) break;
+    }
+    *out_fixed = fixed;
+    return refused;
+}
+
+/* Commit the disk-backed coins tip. Sets result->tip_restored on success
+ * (and on the test-only uninitialised-service path); returns csr's verdict. */
+static enum csr_result bii_anchor_commit_tip(
+    struct main_state *ms, struct block_index *coins_bi,
+    struct bii_post_activation_result *result)
+{
+    struct chain_state_rollback_authorization rollback_auth = {
+        .source = CSR_ROLLBACK_SOURCE_RESTORE,
+        .decision = POLICY_ALLOW,
+        .from_height = active_chain_height(&ms->chain_active),
+        .to_height = coins_bi->nHeight,
+        .max_depth = INT64_MAX,
+        .evidence_class = "block_index_integrity_disk_backed",
+        .reason = "bii_anchor_restore_disk_backed",
+    };
+    struct chain_state_commit commit = {
+        .new_tip = coins_bi,
+        .new_coins_best = *coins_bi->phashBlock,
+        .expected_utxo_count = 0,
+        .update_header_tip = true,
+        .rollback_auth = &rollback_auth,
+        .wallet_scan_height = -1,
+        .reason = "bii_anchor_restore_disk_backed",
+    };
+    enum csr_result rc = csr_commit_tip(csr_instance(), &commit);
+    if (rc == CSR_OK) {
+        result->tip_restored = true;
+#ifdef ZCL_TESTING
+    } else if (rc == CSR_REJECTED_NOT_INITIALIZED) {
+        (void)chain_set_active_tip(ms, coins_bi, TIP_FROM_P2P_REPAIR,
+                              "bii_anchor_restore_csr_uninit");
+        ms->pindex_best_header = coins_bi;
+        result->tip_restored = true;
+#endif
+    }
+    return rc;
+}
 
 int bii_repair_post_activation_anchor(
     struct main_state            *ms,
@@ -684,29 +887,13 @@ int bii_repair_post_activation_anchor(
      * cap keeps the repair bounded. */
     {
         int fixed = 0;
-        int steps = 0;
-        struct block_index *cur = coins_bi;
-        const int max_steps = pre_scan_coins_h + 1024;
-        while (cur && cur->pprev && steps++ < max_steps) {
-            int expected = cur->nHeight - 1;
-            if (cur->pprev->nHeight != expected) {
-                /* A walk that wants the true genesis at a nonzero
-                 * height proves the ANCHOR is mislabeled — abort the
-                 * relabel rather than shift the whole ancestry (the
-                 * global relabel class, see bii_is_genesis). */
-                if (bii_is_genesis(cur->pprev) && expected != 0) {
-                    LOG_WARN("bii", "[bii-anchor] refused: walk from "
-                             "anchor h=%d reaches genesis at h=%d — "
-                             "anchor height is wrong, not the chain",
-                             pre_scan_coins_h, expected);
-                    break;
-                }
-                cur->pprev->nHeight = expected;
-                fixed++;
-            }
-            cur = cur->pprev;
-            if (expected <= 0) break;
-        }
+        int expected = 0;
+        if (bii_anchor_walk_down(coins_bi, pre_scan_coins_h, &fixed,
+                                 &expected))
+            LOG_WARN("bii", "[bii-anchor] refused: walk from "
+                     "anchor h=%d reaches genesis at h=%d — "
+                     "anchor height is wrong, not the chain",
+                     pre_scan_coins_h, expected);
         result->heights_fixed_down = fixed;
         if (fixed > 0)
             printf("[bii-anchor] fixed %d pprev heights "
@@ -734,35 +921,8 @@ int bii_repair_post_activation_anchor(
             printf("[bii-anchor] restoring disk-backed coins tip "
                    "h=%d (activation picked h=%d)\n",
                    pre_scan_coins_h, post_act_h);
-            struct chain_state_rollback_authorization rollback_auth = {
-                .source = CSR_ROLLBACK_SOURCE_RESTORE,
-                .decision = POLICY_ALLOW,
-                .from_height = active_chain_height(&ms->chain_active),
-                .to_height = coins_bi->nHeight,
-                .max_depth = INT64_MAX,
-                .evidence_class = "block_index_integrity_disk_backed",
-                .reason = "bii_anchor_restore_disk_backed",
-            };
-            struct chain_state_commit commit = {
-                .new_tip = coins_bi,
-                .new_coins_best = *coins_bi->phashBlock,
-                .expected_utxo_count = 0,
-                .update_header_tip = true,
-                .rollback_auth = &rollback_auth,
-                .wallet_scan_height = -1,
-                .reason = "bii_anchor_restore_disk_backed",
-            };
-            enum csr_result rc = csr_commit_tip(csr_instance(), &commit);
-            if (rc == CSR_OK) {
-                result->tip_restored = true;
-#ifdef ZCL_TESTING
-            } else if (rc == CSR_REJECTED_NOT_INITIALIZED) {
-                (void)chain_set_active_tip(ms, coins_bi, TIP_FROM_P2P_REPAIR,
-                                      "bii_anchor_restore_csr_uninit");
-                ms->pindex_best_header = coins_bi;
-                result->tip_restored = true;
-#endif
-            } else {
+            enum csr_result rc = bii_anchor_commit_tip(ms, coins_bi, result);
+            if (!result->tip_restored) {
                 LOG_WARN("bii", "[bii-anchor] csr rejected disk-backed tip restore " "(%s) h=%d", csr_result_name(rc), pre_scan_coins_h);
                 result->tip_restore_refused = true;
             }
