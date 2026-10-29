@@ -519,6 +519,167 @@ static uint8_t ci_candidate_verdict(
     return verdict;
 }
 
+struct ci_semantic_kat_picks {
+    const struct fp_candidate *loop;
+    const struct fp_candidate *formula;
+    const struct fp_candidate *changed;
+    const struct fp_candidate *indirect;
+};
+
+static struct ci_semantic_kat_picks ci_semantic_pick(
+    const struct fp_candidate *candidates, long count, const size_t *tally)
+{
+    struct ci_semantic_kat_picks picks = {0};
+    if (count >= 0) {
+        picks.loop = ci_fp_candidate(candidates, count, "ci_semantic_loop");
+        picks.formula = ci_fp_candidate(candidates, count,
+                                        "ci_semantic_formula");
+        picks.changed = ci_fp_candidate(candidates, count,
+                                        "ci_semantic_changed");
+        picks.indirect = ci_fp_candidate(candidates, count,
+                                         "ci_semantic_indirect");
+    }
+    CI_ASSERT(picks.loop != NULL);
+    CI_ASSERT(picks.formula != NULL);
+    CI_ASSERT(picks.changed != NULL);
+    CI_ASSERT(picks.indirect == NULL);
+    CI_ASSERT(tally[FP_V_FUNCTION_POINTER] >= 1u);
+    return picks;
+}
+
+static void ci_semantic_load_graphs(struct codeindex *code_index,
+                                    struct ci_semantic_kat_graph *loop,
+                                    struct ci_semantic_kat_graph *formula,
+                                    struct ci_semantic_kat_graph *changed,
+                                    struct ci_semantic_kat_graph *indirect)
+{
+    CI_ASSERT(code_index != NULL);
+    if (!code_index) return;
+    CI_ASSERT(ci_graph_fingerprint(
+        code_index, "ci_semantic_loop", loop));
+    CI_ASSERT(ci_graph_fingerprint(
+        code_index, "ci_semantic_formula", formula));
+    CI_ASSERT(ci_graph_fingerprint(
+        code_index, "ci_semantic_changed", changed));
+    CI_ASSERT(ci_graph_fingerprint(
+        code_index, "ci_semantic_indirect", indirect));
+}
+
+static void ci_semantic_fingerprint_pair(
+    ci_semantic_kat_fn function, const struct fp_candidate *candidate,
+    struct ci_semantic_kat_runtime *first,
+    struct ci_semantic_kat_runtime *confirm)
+{
+    if (!candidate) return;
+    ci_runtime_fingerprint(function, candidate->shape, FP_ITERATIONS, 0,
+                           first);
+    ci_runtime_fingerprint(function, candidate->shape,
+                           FP_CONFIRM_ITERATIONS, FP_CONFIRM_SALT, confirm);
+}
+
+static enum ci_semantic_kat_evidence ci_runtime_pair_evidence(
+    const struct fp_candidate *left, const struct fp_candidate *right,
+    const struct ci_semantic_kat_runtime *a,
+    const struct ci_semantic_kat_runtime *b)
+{
+    return left && right ? ci_runtime_evidence(a, b)
+                         : CI_SEMANTIC_KAT_UNKNOWN;
+}
+
+static void ci_semantic_expect_loop_formula(
+    const struct ci_semantic_kat_row *row)
+{
+    CI_ASSERT(row->exact == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->alpha == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->shape == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->graph == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->runtime_a == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->runtime_b == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->distinct_a_left >= FP_REPORT_MIN_DISTINCT);
+    CI_ASSERT(row->distinct_a_right >= FP_REPORT_MIN_DISTINCT);
+    CI_ASSERT(row->distinct_b_left >= FP_REPORT_MIN_DISTINCT);
+    CI_ASSERT(row->distinct_b_right >= FP_REPORT_MIN_DISTINCT);
+    CI_ASSERT(row->vector == CI_SEMANTIC_KAT_MODEL_HINT);
+    CI_ASSERT(row->candidate == ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
+}
+
+static void ci_semantic_expect_formula_changed(
+    const struct ci_semantic_kat_row *row)
+{
+    CI_ASSERT(row->exact == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->alpha == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->shape == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->graph == CI_SEMANTIC_KAT_MATCH);
+    CI_ASSERT(row->runtime_a == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->runtime_b == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->vector == CI_SEMANTIC_KAT_MODEL_HINT);
+    CI_ASSERT(row->candidate == ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
+}
+
+static void ci_semantic_expect_indirect(
+    const struct ci_semantic_kat_row *row,
+    const struct ci_semantic_kat_graph *indirect)
+{
+    CI_ASSERT(row->exact == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->alpha == CI_SEMANTIC_KAT_MISMATCH);
+    CI_ASSERT(row->shape == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(!indirect->known);
+    CI_ASSERT(row->graph == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(row->runtime_a == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(row->runtime_b == CI_SEMANTIC_KAT_UNKNOWN);
+    CI_ASSERT(row->vector == CI_SEMANTIC_KAT_MODEL_HINT);
+    CI_ASSERT(row->candidate == ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+}
+
+static void ci_semantic_expect_mutations(
+    const struct ci_semantic_kat_row *rows)
+{
+    struct ci_semantic_kat_row mutation = rows[0];
+    mutation.graph = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+    mutation = rows[0];
+    mutation.runtime_b = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
+    mutation = rows[0];
+    mutation.vector = CI_SEMANTIC_KAT_UNKNOWN;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
+    mutation = rows[0];
+    mutation.distinct_b_right = ZCL_CODE_SEMANTIC_MIN_DISTINCT - 1;
+    CI_ASSERT(ci_candidate_verdict(&mutation) == 0);
+    mutation = rows[1];
+    mutation.vector = CI_SEMANTIC_KAT_MODEL_HINT;
+    CI_ASSERT(ci_candidate_verdict(&mutation) ==
+              ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
+}
+
+static void ci_semantic_expect_verdict_counts(
+    const struct ci_semantic_kat_row *rows, size_t count)
+{
+    size_t verdict_counts[4] = {0};
+    for (size_t i = 0; i < count; i++)
+        if (rows[i].candidate < sizeof(verdict_counts) /
+                                sizeof(verdict_counts[0]))
+            verdict_counts[rows[i].candidate]++;
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE] == 1);
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_MISMATCH] == 1);
+    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE] == 1);
+}
+
+static void ci_semantic_expect_contract(
+    const struct ci_semantic_kat_row *rows, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        CI_ASSERT(rows[i].proof_needed != NULL &&
+                  rows[i].proof_needed[0] != '\0');
+        CI_ASSERT(rows[i].action_count == 0);
+        CI_ASSERT(rows[i].merge_authorizations == 0);
+        CI_ASSERT(rows[i].delete_authorizations == 0);
+    }
+}
+
 static void ci_semantic_known_answers(
     const struct ci_inventory_report *report)
 {
@@ -539,24 +700,8 @@ static void ci_semantic_known_answers(
             fingerprint_index, candidates,
             sizeof(candidates) / sizeof(candidates[0]), tally);
     CI_ASSERT(candidate_count >= 0);
-
-    const struct fp_candidate *loop = candidate_count >= 0
-        ? ci_fp_candidate(candidates, candidate_count, "ci_semantic_loop")
-        : NULL;
-    const struct fp_candidate *formula = candidate_count >= 0
-        ? ci_fp_candidate(candidates, candidate_count, "ci_semantic_formula")
-        : NULL;
-    const struct fp_candidate *changed = candidate_count >= 0
-        ? ci_fp_candidate(candidates, candidate_count, "ci_semantic_changed")
-        : NULL;
-    const struct fp_candidate *indirect = candidate_count >= 0
-        ? ci_fp_candidate(candidates, candidate_count, "ci_semantic_indirect")
-        : NULL;
-    CI_ASSERT(loop != NULL);
-    CI_ASSERT(formula != NULL);
-    CI_ASSERT(changed != NULL);
-    CI_ASSERT(indirect == NULL);
-    CI_ASSERT(tally[FP_V_FUNCTION_POINTER] >= 1u);
+    struct ci_semantic_kat_picks picks = ci_semantic_pick(
+        candidates, candidate_count, tally);
 
     struct codeindex *code_index = codeindex_open_source_view(CI_FIX);
     struct ci_semantic_kat_graph loop_graph, formula_graph, changed_graph;
@@ -565,43 +710,19 @@ static void ci_semantic_known_answers(
     memset(&formula_graph, 0, sizeof(formula_graph));
     memset(&changed_graph, 0, sizeof(changed_graph));
     memset(&indirect_graph, 0, sizeof(indirect_graph));
-    CI_ASSERT(code_index != NULL);
-    if (code_index) {
-        CI_ASSERT(ci_graph_fingerprint(
-            code_index, "ci_semantic_loop", &loop_graph));
-        CI_ASSERT(ci_graph_fingerprint(
-            code_index, "ci_semantic_formula", &formula_graph));
-        CI_ASSERT(ci_graph_fingerprint(
-            code_index, "ci_semantic_changed", &changed_graph));
-        CI_ASSERT(ci_graph_fingerprint(
-            code_index, "ci_semantic_indirect", &indirect_graph));
-    }
+    ci_semantic_load_graphs(code_index, &loop_graph, &formula_graph,
+                            &changed_graph, &indirect_graph);
 
     struct ci_semantic_kat_runtime loop_a = {0}, formula_a = {0};
     struct ci_semantic_kat_runtime changed_a = {0};
     struct ci_semantic_kat_runtime loop_b = {0}, formula_b = {0};
     struct ci_semantic_kat_runtime changed_b = {0};
-    if (loop) {
-        ci_runtime_fingerprint(ci_semantic_loop, loop->shape, FP_ITERATIONS,
-                               0, &loop_a);
-        ci_runtime_fingerprint(ci_semantic_loop, loop->shape,
-                               FP_CONFIRM_ITERATIONS, FP_CONFIRM_SALT,
-                               &loop_b);
-    }
-    if (formula) {
-        ci_runtime_fingerprint(ci_semantic_formula, formula->shape,
-                               FP_ITERATIONS, 0, &formula_a);
-        ci_runtime_fingerprint(ci_semantic_formula, formula->shape,
-                               FP_CONFIRM_ITERATIONS, FP_CONFIRM_SALT,
-                               &formula_b);
-    }
-    if (changed) {
-        ci_runtime_fingerprint(ci_semantic_changed, changed->shape,
-                               FP_ITERATIONS, 0, &changed_a);
-        ci_runtime_fingerprint(ci_semantic_changed, changed->shape,
-                               FP_CONFIRM_ITERATIONS, FP_CONFIRM_SALT,
-                               &changed_b);
-    }
+    ci_semantic_fingerprint_pair(ci_semantic_loop, picks.loop,
+                                 &loop_a, &loop_b);
+    ci_semantic_fingerprint_pair(ci_semantic_formula, picks.formula,
+                                 &formula_a, &formula_b);
+    ci_semantic_fingerprint_pair(ci_semantic_changed, picks.changed,
+                                 &changed_a, &changed_b);
 
     bool model_hint_valid = ci_semantic_model_hint();
     CI_ASSERT(model_hint_valid);
@@ -639,33 +760,29 @@ static void ci_semantic_known_answers(
                                           : CI_SEMANTIC_KAT_UNKNOWN;
     }
 
-    rows[0].shape = ci_shape_evidence(loop, formula);
+    rows[0].shape = ci_shape_evidence(picks.loop, picks.formula);
     rows[0].graph = ci_graph_evidence(&loop_graph, &formula_graph);
-    rows[0].runtime_a = loop && formula
-        ? ci_runtime_evidence(&loop_a, &formula_a)
-        : CI_SEMANTIC_KAT_UNKNOWN;
-    rows[0].runtime_b = loop && formula
-        ? ci_runtime_evidence(&loop_b, &formula_b)
-        : CI_SEMANTIC_KAT_UNKNOWN;
+    rows[0].runtime_a = ci_runtime_pair_evidence(
+        picks.loop, picks.formula, &loop_a, &formula_a);
+    rows[0].runtime_b = ci_runtime_pair_evidence(
+        picks.loop, picks.formula, &loop_b, &formula_b);
     rows[0].distinct_a_left = loop_a.distinct;
     rows[0].distinct_a_right = formula_a.distinct;
     rows[0].distinct_b_left = loop_b.distinct;
     rows[0].distinct_b_right = formula_b.distinct;
 
-    rows[1].shape = ci_shape_evidence(formula, changed);
+    rows[1].shape = ci_shape_evidence(picks.formula, picks.changed);
     rows[1].graph = ci_graph_evidence(&formula_graph, &changed_graph);
-    rows[1].runtime_a = formula && changed
-        ? ci_runtime_evidence(&formula_a, &changed_a)
-        : CI_SEMANTIC_KAT_UNKNOWN;
-    rows[1].runtime_b = formula && changed
-        ? ci_runtime_evidence(&formula_b, &changed_b)
-        : CI_SEMANTIC_KAT_UNKNOWN;
+    rows[1].runtime_a = ci_runtime_pair_evidence(
+        picks.formula, picks.changed, &formula_a, &changed_a);
+    rows[1].runtime_b = ci_runtime_pair_evidence(
+        picks.formula, picks.changed, &formula_b, &changed_b);
     rows[1].distinct_a_left = formula_a.distinct;
     rows[1].distinct_a_right = changed_a.distinct;
     rows[1].distinct_b_left = formula_b.distinct;
     rows[1].distinct_b_right = changed_b.distinct;
 
-    rows[2].shape = ci_shape_evidence(loop, indirect);
+    rows[2].shape = ci_shape_evidence(picks.loop, picks.indirect);
     rows[2].graph = ci_graph_evidence(&loop_graph, &indirect_graph);
     rows[2].runtime_a = CI_SEMANTIC_KAT_UNKNOWN;
     rows[2].runtime_b = CI_SEMANTIC_KAT_UNKNOWN;
@@ -685,74 +802,12 @@ static void ci_semantic_known_answers(
     CI_ASSERT(ci_candidate_verdict(&graph_mismatch) ==
               ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
 
-    CI_ASSERT(rows[0].exact == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[0].alpha == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[0].shape == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[0].graph == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[0].runtime_a == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[0].runtime_b == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[0].distinct_a_left >= FP_REPORT_MIN_DISTINCT);
-    CI_ASSERT(rows[0].distinct_a_right >= FP_REPORT_MIN_DISTINCT);
-    CI_ASSERT(rows[0].distinct_b_left >= FP_REPORT_MIN_DISTINCT);
-    CI_ASSERT(rows[0].distinct_b_right >= FP_REPORT_MIN_DISTINCT);
-    CI_ASSERT(rows[0].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[0].candidate == ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
-
-    CI_ASSERT(rows[1].exact == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[1].alpha == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[1].shape == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[1].graph == CI_SEMANTIC_KAT_MATCH);
-    CI_ASSERT(rows[1].runtime_a == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[1].runtime_b == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[1].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[1].candidate == ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
-
-    CI_ASSERT(rows[2].exact == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[2].alpha == CI_SEMANTIC_KAT_MISMATCH);
-    CI_ASSERT(rows[2].shape == CI_SEMANTIC_KAT_UNKNOWN);
-    CI_ASSERT(!indirect_graph.known);
-    CI_ASSERT(rows[2].graph == CI_SEMANTIC_KAT_UNKNOWN);
-    CI_ASSERT(rows[2].runtime_a == CI_SEMANTIC_KAT_UNKNOWN);
-    CI_ASSERT(rows[2].runtime_b == CI_SEMANTIC_KAT_UNKNOWN);
-    CI_ASSERT(rows[2].vector == CI_SEMANTIC_KAT_MODEL_HINT);
-    CI_ASSERT(rows[2].candidate == ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
-
-    struct ci_semantic_kat_row mutation = rows[0];
-    mutation.graph = CI_SEMANTIC_KAT_UNKNOWN;
-    CI_ASSERT(ci_candidate_verdict(&mutation) ==
-              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
-    mutation = rows[0];
-    mutation.runtime_b = CI_SEMANTIC_KAT_UNKNOWN;
-    CI_ASSERT(ci_candidate_verdict(&mutation) ==
-              ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE);
-    mutation = rows[0];
-    mutation.vector = CI_SEMANTIC_KAT_UNKNOWN;
-    CI_ASSERT(ci_candidate_verdict(&mutation) ==
-              ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE);
-    mutation = rows[0];
-    mutation.distinct_b_right = ZCL_CODE_SEMANTIC_MIN_DISTINCT - 1;
-    CI_ASSERT(ci_candidate_verdict(&mutation) == 0);
-    mutation = rows[1];
-    mutation.vector = CI_SEMANTIC_KAT_MODEL_HINT;
-    CI_ASSERT(ci_candidate_verdict(&mutation) ==
-              ZCL_CODE_SEMANTIC_VERDICT_MISMATCH);
-
-    size_t verdict_counts[4] = {0};
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
-        if (rows[i].candidate < sizeof(verdict_counts) /
-                                sizeof(verdict_counts[0]))
-            verdict_counts[rows[i].candidate]++;
-    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_CANDIDATE] == 1);
-    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_MISMATCH] == 1);
-    CI_ASSERT(verdict_counts[ZCL_CODE_SEMANTIC_VERDICT_INCOMPLETE] == 1);
-
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        CI_ASSERT(rows[i].proof_needed != NULL &&
-                  rows[i].proof_needed[0] != '\0');
-        CI_ASSERT(rows[i].action_count == 0);
-        CI_ASSERT(rows[i].merge_authorizations == 0);
-        CI_ASSERT(rows[i].delete_authorizations == 0);
-    }
+    ci_semantic_expect_loop_formula(&rows[0]);
+    ci_semantic_expect_formula_changed(&rows[1]);
+    ci_semantic_expect_indirect(&rows[2], &indirect_graph);
+    ci_semantic_expect_mutations(rows);
+    ci_semantic_expect_verdict_counts(rows, sizeof(rows) / sizeof(rows[0]));
+    ci_semantic_expect_contract(rows, sizeof(rows) / sizeof(rows[0]));
     codeindex_close(code_index);
     fp_index_free(fingerprint_index);
 }
@@ -1030,15 +1085,8 @@ static void ci_include_resolution_lifetime(void)
         TEST_DISCARD(system("rm -rf " CI_INCLUDE_FIX));
 }
 
-int test_code_inventory(void)
+static void ci_registered_root_checks(const struct ci_inventory_report *first)
 {
-    ci_failures = 0;
-    CI_ASSERT(ci_fixture());
-    CI_ASSERT(ci_test_room_fixture());
-    struct ci_inventory_report *first = codeindex_inventory_analyze(CI_FIX);
-    CI_ASSERT(first != NULL);
-    if (!first) return 1;
-    ci_include_work_once();
     CI_ASSERT(first->registered_test_groups == 2);
     CI_ASSERT(first->registered_test_roots_found == 1);
     CI_ASSERT(first->registered_test_roots_missing == 1);
@@ -1047,13 +1095,13 @@ int test_code_inventory(void)
     CI_ASSERT(first->test_root_gap_count == 1 &&
               strcmp(first->test_root_gaps[0].group,
                      "generated_fixture") == 0);
+}
 
-    const struct ci_inventory_capability *demo = ci_cap(
-        first, "platform/modules/demo/include/demo/demo.h");
-    const struct ci_inventory_capability *package = ci_cap(
-        first, "contexts/commons/packages/zmini/include/zmini/zmini.h");
-    const struct ci_inventory_capability *other = ci_cap(
-        first, "platform/modules/demo/include/demo/other.h");
+static void ci_capability_checks(
+    const struct ci_inventory_capability *demo,
+    const struct ci_inventory_capability *package,
+    const struct ci_inventory_capability *other)
+{
     CI_ASSERT(demo != NULL);
     CI_ASSERT(package != NULL);
     CI_ASSERT(other != NULL);
@@ -1061,17 +1109,12 @@ int test_code_inventory(void)
     CI_ASSERT(demo && demo->production_use_files >= 1);
     CI_ASSERT(demo && demo->test_use_files >= 1);
     CI_ASSERT(demo && demo->purpose_unproven);
+}
 
-    const struct ci_inventory_symbol *validate = ci_symbol(
-        first, demo, "demo_validate");
-    const struct ci_inventory_symbol *stub = ci_symbol(first, demo, "demo_stub");
-    ci_test_room_uses(first, demo);
-    const struct ci_inventory_symbol *demo_local = ci_symbol(
-        first, demo, "local_pick");
-    const struct ci_inventory_symbol *other_local = ci_symbol(
-        first, other, "local_pick");
-    const struct ci_inventory_symbol *platform = ci_symbol(
-        first, demo, "demo_platform");
+static void ci_symbol_checks(const struct ci_inventory_symbol *validate,
+                             const struct ci_inventory_symbol *stub,
+                             const struct ci_inventory_symbol *platform)
+{
     CI_ASSERT(validate != NULL);
     CI_ASSERT(validate && validate->test_evidence ==
               CI_INVENTORY_TEST_REGISTERED_REACHABLE);
@@ -1088,6 +1131,13 @@ int test_code_inventory(void)
     CI_ASSERT(platform && !platform->constant_return_body);
     CI_ASSERT(platform && strcmp(platform->definition_evidence,
               "multiple_preprocessor_arms_UNPROVEN") == 0);
+}
+
+static void ci_local_symbol_checks(
+    const struct ci_inventory_report *first,
+    const struct ci_inventory_symbol *demo_local,
+    const struct ci_inventory_symbol *other_local)
+{
     CI_ASSERT(demo_local != NULL);
     CI_ASSERT(other_local != NULL);
     CI_ASSERT(demo_local && strcmp(demo_local->definition_path,
@@ -1103,37 +1153,47 @@ int test_code_inventory(void)
     CI_ASSERT(other_local && other_local->test_evidence !=
               CI_INVENTORY_TEST_REGISTERED_REACHABLE);
     CI_ASSERT(first->unresolved_include_sites == 3);
+}
 
-    bool exact = false, shape = false, stub_gap = false, platform_gap = false;
-    bool platform_constant_arm = false, platform_real_arm = false;
+static void ci_duplicate_scan(const struct ci_inventory_report *first,
+                              bool *exact, bool *shape)
+{
     for (int i = 0; i < first->duplicate_count; i++) {
         const struct ci_inventory_duplicate *d = &first->duplicates[i];
         if (d->kind == CI_INVENTORY_DUPLICATE_EXACT_BODY &&
-            ((strcmp(d->symbol_a, "demo_validate") == 0 &&
-              strcmp(d->symbol_b, "demo_validate_copy") == 0) ||
-             (strcmp(d->symbol_b, "demo_validate") == 0 &&
-              strcmp(d->symbol_a, "demo_validate_copy") == 0))) exact = true;
+            ci_pair_names(d->symbol_a, d->symbol_b,
+                          "demo_validate", "demo_validate_copy"))
+            *exact = true;
         if (d->kind == CI_INVENTORY_DUPLICATE_ALPHA_SHAPE &&
-            ((strcmp(d->symbol_a, "alpha_one") == 0 &&
-              strcmp(d->symbol_b, "alpha_two") == 0) ||
-             (strcmp(d->symbol_b, "alpha_one") == 0 &&
-              strcmp(d->symbol_a, "alpha_two") == 0))) {
-            shape = true;
+            ci_pair_names(d->symbol_a, d->symbol_b,
+                          "alpha_one", "alpha_two")) {
+            *shape = true;
             CI_ASSERT(d->proof_needed[0] != '\0');
         }
     }
-    for (int i = 0; i < first->invariant_count; i++)
-        if (strcmp(first->invariants[i].symbol, "demo_stub") == 0 &&
-            strcmp(first->invariants[i].verdict, "UNPROVEN") == 0)
-            stub_gap = true;
-        else if (strcmp(first->invariants[i].symbol, "demo_platform") == 0 &&
-                 first->invariants[i].constant_return_body &&
-                 strcmp(first->invariants[i].constant_return_value,
-                        "true") == 0 &&
-                 first->invariants[i].multi_arm_definition &&
-                 strcmp(first->invariants[i].definition_scope,
+}
+
+static void ci_invariant_scan(const struct ci_inventory_report *first,
+                              bool *stub_gap, bool *platform_gap)
+{
+    for (int i = 0; i < first->invariant_count; i++) {
+        const struct ci_inventory_invariant *inv = &first->invariants[i];
+        if (strcmp(inv->symbol, "demo_stub") == 0 &&
+            strcmp(inv->verdict, "UNPROVEN") == 0)
+            *stub_gap = true;
+        else if (strcmp(inv->symbol, "demo_platform") == 0 &&
+                 inv->constant_return_body &&
+                 strcmp(inv->constant_return_value, "true") == 0 &&
+                 inv->multi_arm_definition &&
+                 strcmp(inv->definition_scope,
                         "preprocessor_arm_UNPROVEN") == 0)
-            platform_gap = true;
+            *platform_gap = true;
+    }
+}
+
+static void ci_definition_arm_scan(const struct ci_inventory_report *first,
+                                   bool *constant_arm, bool *real_arm)
+{
     for (int i = 0; i < first->definition_arm_count; i++) {
         const struct ci_inventory_definition_arm *arm =
             &first->definition_arms[i];
@@ -1141,12 +1201,51 @@ int test_code_inventory(void)
         if (arm->constant_return_body &&
             strcmp(arm->constant_return_value, "true") == 0 &&
             strcmp(arm->preprocessor_guard, "defined(_WIN32)") == 0)
-            platform_constant_arm = true;
+            *constant_arm = true;
         if (!arm->constant_return_body &&
             strcmp(arm->preprocessor_guard,
                    "else:defined(_WIN32)") == 0)
-            platform_real_arm = true;
+            *real_arm = true;
     }
+}
+
+int test_code_inventory(void)
+{
+    ci_failures = 0;
+    CI_ASSERT(ci_fixture());
+    CI_ASSERT(ci_test_room_fixture());
+    struct ci_inventory_report *first = codeindex_inventory_analyze(CI_FIX);
+    CI_ASSERT(first != NULL);
+    if (!first) return 1;
+    ci_include_work_once();
+    ci_registered_root_checks(first);
+
+    const struct ci_inventory_capability *demo = ci_cap(
+        first, "platform/modules/demo/include/demo/demo.h");
+    const struct ci_inventory_capability *package = ci_cap(
+        first, "contexts/commons/packages/zmini/include/zmini/zmini.h");
+    const struct ci_inventory_capability *other = ci_cap(
+        first, "platform/modules/demo/include/demo/other.h");
+    ci_capability_checks(demo, package, other);
+
+    const struct ci_inventory_symbol *validate = ci_symbol(
+        first, demo, "demo_validate");
+    const struct ci_inventory_symbol *stub = ci_symbol(first, demo, "demo_stub");
+    ci_test_room_uses(first, demo);
+    const struct ci_inventory_symbol *demo_local = ci_symbol(
+        first, demo, "local_pick");
+    const struct ci_inventory_symbol *other_local = ci_symbol(
+        first, other, "local_pick");
+    const struct ci_inventory_symbol *platform = ci_symbol(
+        first, demo, "demo_platform");
+    ci_symbol_checks(validate, stub, platform);
+    ci_local_symbol_checks(first, demo_local, other_local);
+
+    bool exact = false, shape = false, stub_gap = false, platform_gap = false;
+    bool platform_constant_arm = false, platform_real_arm = false;
+    ci_duplicate_scan(first, &exact, &shape);
+    ci_invariant_scan(first, &stub_gap, &platform_gap);
+    ci_definition_arm_scan(first, &platform_constant_arm, &platform_real_arm);
     CI_ASSERT(exact);
     CI_ASSERT(shape);
     CI_ASSERT(stub_gap);
