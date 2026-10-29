@@ -91,229 +91,185 @@ static struct boot_validation_result case_legacy_coins_empty(
     return r;
 }
 
-struct boot_validation_result validate_coins_chain_agreement(
-    struct main_state *ms,
-    struct coins_view_cache *cvtip,
-    const char *datadir)
+/* Height of the active chain tip, or 0 when the chain is empty. */
+static int32_t tip_height_or_zero(const struct block_index *chain_tip)
 {
-    struct boot_validation_result r = {0};
+    if (!chain_tip)
+        return 0;
+    return chain_tip->nHeight;
+}
 
-    struct block_index *chain_tip = active_chain_tip(&ms->chain_active);
-    struct uint256 coins_best;
-    coins_view_cache_get_best_block(cvtip, &coins_best);
+/* True when the active chain is empty or sits at genesis height. */
+static bool chain_at_or_below_genesis(const struct block_index *chain_tip)
+{
+    return !chain_tip || chain_tip->nHeight <= 0;
+}
 
-    r.chain_height = chain_tip ? chain_tip->nHeight : 0;
-    memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
-    r.coins_height = -1;
+/* DERIVED coins-best (positive height, durable hash witness) whose block
+ * is in the index at that height; reports the derived height and hash. */
+static bool derived_best_indexed_at_height(struct main_state *ms,
+                                           int32_t *d_h,
+                                           struct uint256 *d_hash)
+{
+    uint8_t d_bytes[32];
+    bool d_have = false;
+    *d_h = -1;
+    if (!reducer_frontier_derive_coins_best_now(d_h, d_bytes, &d_have) ||
+        *d_h <= 0 || !d_have)
+        return false;
+    memcpy(d_hash->data, d_bytes, sizeof(d_hash->data));
+    struct block_index *db = block_map_find(&ms->map_block_index, d_hash);
+    return db && db->nHeight == *d_h;
+}
 
-    /* Case 1: Chain at genesis or empty */
-    if (!chain_tip || chain_tip->nHeight <= 0) {
-        /* The restore target is the DERIVED coins-best when the canonical
-         * store is proven — the legacy coins.db view below is a lagging
-         * rebuildable projection. Without this, a boot whose in-memory chain
-         * reads as genesis at validation time restores to the stale legacy
-         * height: committing the stale legacy height bulldozes the CSR's
-         * correct derived tip. Requires the durable hash witness + the block
-         * present in the index at the derived height; otherwise falls through
-         * to the legacy paths. */
-        {
-            int32_t d_h = -1;
-            uint8_t d_hash[32];
-            bool d_have = false;
-            if (reducer_frontier_derive_coins_best_now(&d_h, d_hash,
-                                                       &d_have) &&
-                d_h > 0 && d_have) {
-                struct uint256 dh;
-                memcpy(dh.data, d_hash, sizeof(dh.data));
-                struct block_index *db = block_map_find(
-                    &ms->map_block_index, &dh);
-                if (db && db->nHeight == d_h) {
-                    printf("Chain at genesis but DERIVED coins-best at "
-                           "h=%d (coins_kv authority, hash-verified) — "
-                           "restoring chain tip to the derivation\n", d_h);
-                    event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=reset_chain reason=derived_coins_best "
-                        "coins_h=%d", d_h);
-                    r.action = BOOT_RECOVER_RESET_CHAIN;
-                    r.coins_height = d_h;
-                    memcpy(&r.coins_hash, &dh, sizeof(r.coins_hash));
-                    return r;
-                }
-            }
-        }
-        if (!uint256_is_null(&coins_best)) {
-            /* coins_best_block is set but chain tip is at genesis.
-             * Two scenarios:
-             * a) Fresh LDB import — coins_best_block references a block
-             *    that IS in our index but hasn't been set as chain tip yet.
-             *    -> Reset chain to that block (BOOT_RECOVER_RESET_CHAIN).
-             * b) Stale state after OOM — coins_best_block references a
-             *    block NOT in our index (corrupt/partial state).
-             *    -> Wipe and resync (BOOT_RECOVER_WIPE_WAIT). */
-            struct block_index *coins_block = block_map_find(
-                &ms->map_block_index, &coins_best);
-            if (coins_block && coins_block->nHeight > 0) {
-                printf("Chain at genesis but coins at h=%d — "
-                       "restoring chain tip\n", coins_block->nHeight);
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=reset_chain reason=coins_ahead_of_chain coins_h=%d",
-                    coins_block->nHeight);
-                r.action = BOOT_RECOVER_RESET_CHAIN;
-                r.coins_height = coins_block->nHeight;
-                memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
-            } else if (coins_block && coins_block->nHeight == 0) {
-                /* Block exists in index but with nHeight=0 — this happens
-                 * after LDB import when block index heights haven't been
-                 * fully resolved yet. Walk pprev to find actual height. */
-                struct block_index *walk = NULL;
-                int walk_h = pprev_walk_depth(coins_block, 10000000,
-                    "chain_state_validator.coins_resolve", &walk);
-                if (walk_h < 0) walk_h = 0;
-                if (walk_h > 0) {
-                    printf("Post-import: coins_best_block resolved to h=%d "
-                           "via pprev walk — restoring chain tip\n", walk_h);
-                    event_emitf(EV_RECOVERY_ACTION, 0,
-                        "action=reset_chain_pprev_walk reason=post_import coins_h=%d",
-                        walk_h);
-                    coins_block->nHeight = walk_h;
-                    r.action = BOOT_RECOVER_RESET_CHAIN;
-                    r.coins_height = walk_h;
-                    memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
-                } else {
-                    /* Can't resolve height — keep UTXOs, wait for P2P */
-                    printf("Post-import: coins_best_block at h=0, no pprev "
-                           "chain — will sync via P2P\n");
-                    r.action = BOOT_OK;
-                }
-            } else {
-                /* coins_best_block not in block map. Ask the recovery
-                 * executor to move the cursor through CSR instead of
-                 * mutating the coins view in the validator. */
-                printf("Chain at genesis, coins_best_block not in index "
-                       "— requesting genesis cursor reset\n");
-                event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=reset_coins_to_genesis reason=coins_not_in_index chain_h=%d",
-                    chain_tip ? chain_tip->nHeight : 0);
-                r.action = BOOT_RECOVER_RESET_COINS_TO_GENESIS;
-                r.coins_height = 0;
-            }
-            return r;
-        }
-        r.action = BOOT_OK;
-        return r;
-    }
-
-    /* Case 2: Coins DB empty but chain has blocks */
-    if (uint256_is_null(&coins_best))
-        return case_legacy_coins_empty(ms, chain_tip, datadir, r);
-
-    /* Case 3: Coins and chain agree — all good */
-    if (chain_tip->phashBlock &&
-        uint256_cmp(chain_tip->phashBlock, &coins_best) == 0) {
-        r.action = BOOT_OK;
-        r.coins_height = r.chain_height;
-        return r;
-    }
-
-    /* Case 3a (the DERIVED coins-best is the runtime coins authority): if
-     * the active tip equals the derivation (coins_kv proven authority +
-     * durable-log hash witness), the legacy coins.db view read above is just
-     * a LAGGING REBUILDABLE PROJECTION — AGREE and let it reconcile forward.
-     * Without this, a stale legacy view below a freshly restored derived tip
-     * drives Case-4 RESET_CHAIN every boot — a deterministic pull-down of the
-     * seeded tip. Hash-checked when the derivation has a durable witness;
-     * height-only otherwise (the derivation abstains entirely unless coins_kv
-     * is proven). */
-    if (chain_tip->phashBlock) {
+/* Case 1: chain at genesis or empty — resolve the coins side against the
+ * DERIVED coins-best first, then the legacy coins.db paths. */
+static struct boot_validation_result case_chain_at_genesis(
+    struct main_state *ms, const struct block_index *chain_tip,
+    struct uint256 coins_best, struct boot_validation_result r)
+{
+    /* The restore target is the DERIVED coins-best when the canonical
+     * store is proven — the legacy coins.db view below is a lagging
+     * rebuildable projection. Without this, a boot whose in-memory chain
+     * reads as genesis at validation time restores to the stale legacy
+     * height: committing the stale legacy height bulldozes the CSR's
+     * correct derived tip. Requires the durable hash witness + the block
+     * present in the index at the derived height; otherwise falls through
+     * to the legacy paths. */
+    {
         int32_t d_h = -1;
-        uint8_t d_hash[32];
-        bool d_have = false;
-        if (reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_have) &&
-            chain_tip->nHeight == d_h &&
-            (!d_have ||
-             memcmp(d_hash, chain_tip->phashBlock->data, 32) == 0)) {
-            LOG_INFO("boot",
-                     "[boot] active tip h=%d matches the DERIVED coins-best "
-                     "(coins_kv authority%s); legacy coins.db view (h=%d) is "
-                     "a lagging projection — AGREE, no tip reset",
-                     d_h, d_have ? ", hash-verified" : "",
-                     r.coins_height);
-            r.action = BOOT_OK;
-            r.coins_height = r.chain_height;
+        struct uint256 dh;
+        if (derived_best_indexed_at_height(ms, &d_h, &dh)) {
+            printf("Chain at genesis but DERIVED coins-best at "
+                   "h=%d (coins_kv authority, hash-verified) — "
+                   "restoring chain tip to the derivation\n", d_h);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=reset_chain reason=derived_coins_best "
+                "coins_h=%d", d_h);
+            r.action = BOOT_RECOVER_RESET_CHAIN;
+            r.coins_height = d_h;
+            memcpy(&r.coins_hash, &dh, sizeof(r.coins_hash));
             return r;
         }
     }
-
-    /* Case 3b (reducer-finalized tip is the coins authority): coins_best
-     * disagrees with the active chain tip, BUT the active chain tip IS the
-     * durable reducer-finalized tip (tip_finalize_log, in progress.kv). The runtime
-     * coins authority is the coins_kv read view (g_coins_read_view, a
-     * coins_view_kv over progress.kv, bound at engine/composition/src/boot.c). coins_kv is
-     * authored in-txn with the tip_finalize cursor, so it IS at this finalized
-     * tip by atomic co-commit; a stale/behind coins.db coins_best_block is
-     * benign lagging materialization the reducer reconciles forward — NOT a
-     * chain disagreement. Returning BOOT_OK here stops the Case-4 RESET_CHAIN
-     * that would discard finalized progress on every restart.
-     *
-     * STRICTLY guarded so it can never mask real corruption: AGREE only when
-     * the active tip's (height,hash) BYTE-MATCHES the durable finalized tip,
-     * resolved self-consistently by tip_finalize_stage_resolve_durable_tip
-     * (the returned height always owns the returned hash, across BOTH log
-     * conventions — anchor rows and finalized lookahead rows). Resolving the
-     * tip self-consistently across both conventions is required: a raw
-     * fin_cursor-1 read matches anchor rows only, so a clean shutdown whose
-     * last row is a finalized row would fall through to the Case-4 reset this
-     * branch exists to stop. No-resolve, coins.db AHEAD of the finalized tip,
-     * or not in the index, falls through to the Case-4 reset/wipe path
-     * unchanged. Read is safe here: progress_store_open precedes this
-     * validator in boot ordering. */
-    if (chain_tip->phashBlock) {
-        sqlite3 *pdb = progress_store_db();
-        int fin_height = -1;
-        uint8_t fin_hash[32];
-        if (pdb &&
-            tip_finalize_stage_resolve_durable_tip(pdb, &fin_height,
-                                                   fin_hash)) {
-            if (fin_height == chain_tip->nHeight &&
-                memcmp(fin_hash, chain_tip->phashBlock->data, 32) == 0) {
-                struct block_index *cb = block_map_find(&ms->map_block_index,
-                                                        &coins_best);
-                if (cb && cb->nHeight <= chain_tip->nHeight) {
-                    LOG_INFO("boot",
-                             "[boot] coins_best (h=%d) behind reducer-finalized "
-                             "tip (h=%d); active chain matches the finalized "
-                             "authority — AGREE (coins reconciles forward, no "
-                             "tip reset)",
-                             cb->nHeight, chain_tip->nHeight);
-                    r.action = BOOT_OK;
-                    r.coins_height = r.chain_height;
-                    return r;
-                }
-                LOG_WARN("boot",
-                         "[boot] Case-3b AGREE denied: durable tip matches "
-                         "the active tip (h=%d) but coins_best is %s — "
-                         "falling through to Case 4",
-                         chain_tip->nHeight,
-                         cb ? "AHEAD of the chain tip" : "not in the index");
+    if (!uint256_is_null(&coins_best)) {
+        /* coins_best_block is set but chain tip is at genesis.
+         * Two scenarios:
+         * a) Fresh LDB import — coins_best_block references a block
+         *    that IS in our index but hasn't been set as chain tip yet.
+         *    -> Reset chain to that block (BOOT_RECOVER_RESET_CHAIN).
+         * b) Stale state after OOM — coins_best_block references a
+         *    block NOT in our index (corrupt/partial state).
+         *    -> Wipe and resync (BOOT_RECOVER_WIPE_WAIT). */
+        struct block_index *coins_block = block_map_find(
+            &ms->map_block_index, &coins_best);
+        if (coins_block && coins_block->nHeight > 0) {
+            printf("Chain at genesis but coins at h=%d — "
+                   "restoring chain tip\n", coins_block->nHeight);
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=reset_chain reason=coins_ahead_of_chain coins_h=%d",
+                coins_block->nHeight);
+            r.action = BOOT_RECOVER_RESET_CHAIN;
+            r.coins_height = coins_block->nHeight;
+            memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
+        } else if (coins_block && coins_block->nHeight == 0) {
+            /* Block exists in index but with nHeight=0 — this happens
+             * after LDB import when block index heights haven't been
+             * fully resolved yet. Walk pprev to find actual height. */
+            struct block_index *walk = NULL;
+            int walk_h = pprev_walk_depth(coins_block, 10000000,
+                "chain_state_validator.coins_resolve", &walk);
+            if (walk_h < 0) walk_h = 0;
+            if (walk_h > 0) {
+                printf("Post-import: coins_best_block resolved to h=%d "
+                       "via pprev walk — restoring chain tip\n", walk_h);
+                event_emitf(EV_RECOVERY_ACTION, 0,
+                    "action=reset_chain_pprev_walk reason=post_import coins_h=%d",
+                    walk_h);
+                coins_block->nHeight = walk_h;
+                r.action = BOOT_RECOVER_RESET_CHAIN;
+                r.coins_height = walk_h;
+                memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
             } else {
-                LOG_WARN("boot",
-                         "[boot] Case-3b AGREE denied: durable finalized tip "
-                         "(h=%d) does not match the active tip (h=%d, hash %s"
-                         ") — falling through to Case 4",
-                         fin_height, chain_tip->nHeight,
-                         fin_height == chain_tip->nHeight ? "MISMATCH"
-                                                          : "n/a");
+                /* Can't resolve height — keep UTXOs, wait for P2P */
+                printf("Post-import: coins_best_block at h=0, no pprev "
+                       "chain — will sync via P2P\n");
+                r.action = BOOT_OK;
             }
-        } else if (pdb) {
-            LOG_WARN("boot",
-                     "[boot] Case-3b AGREE denied: no self-consistent durable "
-                     "tip resolves from the tip_finalize cursor — falling "
-                     "through to Case 4 (a reset here loses no proven "
-                     "finality, but the cause should be named: empty cursor "
-                     "or no witness row at cursor/cursor-1)");
+        } else {
+            /* coins_best_block not in block map. Ask the recovery
+             * executor to move the cursor through CSR instead of
+             * mutating the coins view in the validator. */
+            printf("Chain at genesis, coins_best_block not in index "
+                   "— requesting genesis cursor reset\n");
+            event_emitf(EV_RECOVERY_ACTION, 0,
+                "action=reset_coins_to_genesis reason=coins_not_in_index chain_h=%d",
+                tip_height_or_zero(chain_tip));
+            r.action = BOOT_RECOVER_RESET_COINS_TO_GENESIS;
+            r.coins_height = 0;
         }
+        return r;
     }
+    r.action = BOOT_OK;
+    return r;
+}
 
+/* True when the active tip's hash equals coins_best_block. */
+static bool active_tip_hash_matches(const struct block_index *chain_tip,
+                                    const struct uint256 *coins_best)
+{
+    return chain_tip->phashBlock &&
+           uint256_cmp(chain_tip->phashBlock, coins_best) == 0;
+}
+
+/* True when the active tip's height (and hash, when the derivation has a
+ * durable witness) matches the DERIVED coins-best; reports both. */
+static bool tip_matches_derived_best(const struct block_index *chain_tip,
+                                     int32_t *d_h, bool *d_have)
+{
+    uint8_t d_hash[32];
+    *d_h = -1;
+    *d_have = false;
+    if (!chain_tip->phashBlock)
+        return false;
+    if (!reducer_frontier_derive_coins_best_now(d_h, d_hash, d_have) ||
+        chain_tip->nHeight != *d_h)
+        return false;
+    return !*d_have ||
+           memcmp(d_hash, chain_tip->phashBlock->data, 32) == 0;
+}
+
+/* Suffix reporting whether the DERIVED coins-best has a durable hash
+ * witness. */
+static const char *derived_witness_suffix(bool d_have)
+{
+    return d_have ? ", hash-verified" : "";
+}
+
+/* True when the durable reducer-finalized tip matches the active tip's
+ * height and hash. */
+static bool durable_tip_matches_active_tip(int fin_height,
+                                           const uint8_t fin_hash[32],
+                                           const struct block_index *chain_tip)
+{
+    if (fin_height != chain_tip->nHeight)
+        return false;
+    return memcmp(fin_hash, chain_tip->phashBlock->data, 32) == 0;
+}
+
+/* True when the coins_best block is indexed at or behind the active tip. */
+static bool coins_block_at_or_behind_tip(const struct block_index *coins_block,
+                                         const struct block_index *chain_tip)
+{
+    return coins_block && coins_block->nHeight <= chain_tip->nHeight;
+}
+
+/* Case 4: coins and chain disagree — pick the recovery action and emit
+ * EV_BOOT_VALIDATION_FAILED. */
+static struct boot_validation_result case_coins_chain_mismatch(
+    struct main_state *ms, const struct block_index *chain_tip,
+    struct uint256 coins_best, struct boot_validation_result r)
+{
     /* Case 4: Coins and chain disagree — find coins block in index */
     struct block_index *coins_block = block_map_find(
         &ms->map_block_index, &coins_best);
@@ -362,4 +318,132 @@ struct boot_validation_result validate_coins_chain_agreement(
         r.action == BOOT_RECOVER_REIMPORT ? "reimport" : "wipe_wait");
 
     return r;
+}
+
+struct boot_validation_result validate_coins_chain_agreement(
+    struct main_state *ms,
+    struct coins_view_cache *cvtip,
+    const char *datadir)
+{
+    struct boot_validation_result r = {0};
+
+    struct block_index *chain_tip = active_chain_tip(&ms->chain_active);
+    struct uint256 coins_best;
+    coins_view_cache_get_best_block(cvtip, &coins_best);
+
+    r.chain_height = tip_height_or_zero(chain_tip);
+    memcpy(&r.coins_hash, &coins_best, sizeof(r.coins_hash));
+    r.coins_height = -1;
+
+    /* Case 1: Chain at genesis or empty */
+    if (chain_at_or_below_genesis(chain_tip)) {
+        return case_chain_at_genesis(ms, chain_tip, coins_best, r);
+    }
+
+    /* Case 2: Coins DB empty but chain has blocks */
+    if (uint256_is_null(&coins_best))
+        return case_legacy_coins_empty(ms, chain_tip, datadir, r);
+
+    /* Case 3: Coins and chain agree — all good */
+    if (active_tip_hash_matches(chain_tip, &coins_best)) {
+        r.action = BOOT_OK;
+        r.coins_height = r.chain_height;
+        return r;
+    }
+
+    /* Case 3a (the DERIVED coins-best is the runtime coins authority): if
+     * the active tip equals the derivation (coins_kv proven authority +
+     * durable-log hash witness), the legacy coins.db view read above is just
+     * a LAGGING REBUILDABLE PROJECTION — AGREE and let it reconcile forward.
+     * Without this, a stale legacy view below a freshly restored derived tip
+     * drives Case-4 RESET_CHAIN every boot — a deterministic pull-down of the
+     * seeded tip. Hash-checked when the derivation has a durable witness;
+     * height-only otherwise (the derivation abstains entirely unless coins_kv
+     * is proven). */
+    int32_t d_h = -1;
+    bool d_have = false;
+    if (tip_matches_derived_best(chain_tip, &d_h, &d_have)) {
+        LOG_INFO("boot",
+                 "[boot] active tip h=%d matches the DERIVED coins-best "
+                 "(coins_kv authority%s); legacy coins.db view (h=%d) is "
+                 "a lagging projection — AGREE, no tip reset",
+                 d_h, derived_witness_suffix(d_have), r.coins_height);
+        r.action = BOOT_OK;
+        r.coins_height = r.chain_height;
+        return r;
+    }
+
+    /* Case 3b (reducer-finalized tip is the coins authority): coins_best
+     * disagrees with the active chain tip, BUT the active chain tip IS the
+     * durable reducer-finalized tip (tip_finalize_log, in progress.kv). The runtime
+     * coins authority is the coins_kv read view (g_coins_read_view, a
+     * coins_view_kv over progress.kv, bound at engine/composition/src/boot.c). coins_kv is
+     * authored in-txn with the tip_finalize cursor, so it IS at this finalized
+     * tip by atomic co-commit; a stale/behind coins.db coins_best_block is
+     * benign lagging materialization the reducer reconciles forward — NOT a
+     * chain disagreement. Returning BOOT_OK here stops the Case-4 RESET_CHAIN
+     * that would discard finalized progress on every restart.
+     *
+     * STRICTLY guarded so it can never mask real corruption: AGREE only when
+     * the active tip's (height,hash) BYTE-MATCHES the durable finalized tip,
+     * resolved self-consistently by tip_finalize_stage_resolve_durable_tip
+     * (the returned height always owns the returned hash, across BOTH log
+     * conventions — anchor rows and finalized lookahead rows). Resolving the
+     * tip self-consistently across both conventions is required: a raw
+     * fin_cursor-1 read matches anchor rows only, so a clean shutdown whose
+     * last row is a finalized row would fall through to the Case-4 reset this
+     * branch exists to stop. No-resolve, coins.db AHEAD of the finalized tip,
+     * or not in the index, falls through to the Case-4 reset/wipe path
+     * unchanged. Read is safe here: progress_store_open precedes this
+     * validator in boot ordering. */
+    if (chain_tip->phashBlock) {
+        sqlite3 *pdb = progress_store_db();
+        int fin_height = -1;
+        uint8_t fin_hash[32];
+        if (pdb) {
+            if (tip_finalize_stage_resolve_durable_tip(pdb, &fin_height,
+                                                       fin_hash)) {
+                if (durable_tip_matches_active_tip(fin_height, fin_hash,
+                                                   chain_tip)) {
+                    struct block_index *cb = block_map_find(
+                        &ms->map_block_index, &coins_best);
+                    if (coins_block_at_or_behind_tip(cb, chain_tip)) {
+                        LOG_INFO("boot",
+                                 "[boot] coins_best (h=%d) behind reducer-finalized "
+                                 "tip (h=%d); active chain matches the finalized "
+                                 "authority — AGREE (coins reconciles forward, no "
+                                 "tip reset)",
+                                 cb->nHeight, chain_tip->nHeight);
+                        r.action = BOOT_OK;
+                        r.coins_height = r.chain_height;
+                        return r;
+                    }
+                    LOG_WARN("boot",
+                             "[boot] Case-3b AGREE denied: durable tip matches "
+                             "the active tip (h=%d) but coins_best is %s — "
+                             "falling through to Case 4",
+                             chain_tip->nHeight,
+                             cb ? "AHEAD of the chain tip" : "not in the index");
+                } else {
+                    LOG_WARN("boot",
+                             "[boot] Case-3b AGREE denied: durable finalized tip "
+                             "(h=%d) does not match the active tip (h=%d, hash %s"
+                             ") — falling through to Case 4",
+                             fin_height, chain_tip->nHeight,
+                             fin_height == chain_tip->nHeight ? "MISMATCH"
+                                                              : "n/a");
+                }
+            } else {
+                LOG_WARN("boot",
+                         "[boot] Case-3b AGREE denied: no self-consistent durable "
+                         "tip resolves from the tip_finalize cursor — falling "
+                         "through to Case 4 (a reset here loses no proven "
+                         "finality, but the cause should be named: empty cursor "
+                         "or no witness row at cursor/cursor-1)");
+            }
+        }
+    }
+
+    /* Case 4 */
+    return case_coins_chain_mismatch(ms, chain_tip, coins_best, r);
 }
