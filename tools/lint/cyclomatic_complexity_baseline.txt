@@ -833,10 +833,6 @@ tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_stats:33
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_ledger_add:21
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_usage:31
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_vitals_sample:20
-tools/command/native_presentation_code_change_command.c:npc_includes:29
-tools/command/native_presentation_code_change_command.c:npc_lines:19
-tools/command/native_presentation_code_change_command.c:zcl_native_handle_presentation_code_change:23
-tools/command/native_presentation_code_change_command.c:zcl_native_presentation_code_change_model_from_facts:41
 tools/command/native_story_projection.c:zcl_story_graph_from_work_facts:48
 tools/command/native_vault_command.c:vault_dispatch:24
 tools/command/native_vault_command.c:vault_read_seam:16

@@ -85,6 +85,29 @@ static void npc_item(struct zcl_present_model_v1 *model, uint16_t kind,
     (void)snprintf(item->value, sizeof(item->value), "%s", value);
 }
 
+static size_t npc_line_total(const uint8_t *bytes, size_t len)
+{
+    size_t n = len ? 1u : 0u;
+    for (size_t i = 0; i < len; i++)
+        if (bytes[i] == '\n' && i + 1u < len) n++;
+    return n;
+}
+
+static size_t npc_line_fill(const uint8_t *bytes, size_t len,
+                            struct npc_line *lines)
+{
+    size_t start = 0, used = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i != len && bytes[i] != '\n') continue;
+        if (i == len && start == len) break;
+        size_t line_len = i - start;
+        if (line_len && bytes[start + line_len - 1u] == '\r') line_len--;
+        lines[used++] = (struct npc_line){bytes + start, line_len};
+        start = i + 1u;
+    }
+    return used;
+}
+
 static bool npc_lines(const uint8_t *bytes, size_t len,
                       struct npc_line **out, size_t *count,
                       char *why, size_t why_cap)
@@ -96,9 +119,7 @@ static bool npc_lines(const uint8_t *bytes, size_t len,
                        "source must be bounded NUL-free C text");
         return false;
     }
-    size_t n = len ? 1u : 0u;
-    for (size_t i = 0; i < len; i++)
-        if (bytes[i] == '\n' && i + 1u < len) n++;
+    size_t n = npc_line_total(bytes, len);
     if (n > NPC_LINE_MAX) {
         (void)snprintf(why, why_cap, "source exceeds the 8192-line bound");
         return false;
@@ -110,17 +131,8 @@ static bool npc_lines(const uint8_t *bytes, size_t len,
         (void)snprintf(why, why_cap, "could not allocate bounded line view");
         return false;
     }
-    size_t start = 0, used = 0;
-    for (size_t i = 0; i <= len; i++) {
-        if (i != len && bytes[i] != '\n') continue;
-        if (i == len && start == len) break;
-        size_t line_len = i - start;
-        if (line_len && bytes[start + line_len - 1u] == '\r') line_len--;
-        lines[used++] = (struct npc_line){bytes + start, line_len};
-        start = i + 1u;
-    }
     *out = lines;
-    *count = used;
+    *count = npc_line_fill(bytes, len, lines);
     return true;
 }
 
@@ -182,6 +194,47 @@ static bool npc_word(const uint8_t *bytes, size_t len, size_t *at,
     return true;
 }
 
+static size_t npc_skip_space(const uint8_t *bytes, size_t at, size_t end)
+{
+    while (at < end && isspace(bytes[at])) at++;
+    return at;
+}
+
+static bool npc_include_directive(const uint8_t *bytes, size_t start,
+                                  size_t end, size_t *at)
+{
+    *at = npc_skip_space(bytes, start, end);
+    if (*at >= end || bytes[*at] != '#') return false;
+    *at = npc_skip_space(bytes, *at + 1u, end);
+    if (!npc_word(bytes, end, at, "include")) return false;
+    return *at == end || isspace(bytes[*at]) || bytes[*at] == '"' ||
+           bytes[*at] == '<';
+}
+
+static bool npc_include_span(const uint8_t *bytes, size_t start, size_t end,
+                             size_t *value_start, size_t *value_end)
+{
+    size_t at = 0;
+    if (!npc_include_directive(bytes, start, end, &at)) return false;
+    at = npc_skip_space(bytes, at, end);
+    if (at >= end || (bytes[at] != '"' && bytes[at] != '<')) return false;
+    uint8_t close = bytes[at] == '"' ? '"' : '>';
+    *value_start = ++at;
+    while (at < end && bytes[at] != close) at++;
+    if (at >= end || at <= *value_start) return false;
+    *value_end = at;
+    return true;
+}
+
+static void npc_include_copy(char value[128], const uint8_t *bytes,
+                             size_t start, size_t end)
+{
+    size_t n = end - start;
+    if (n >= 128u) n = 127u;
+    memcpy(value, bytes + start, n);
+    value[n] = '\0';
+}
+
 static size_t npc_includes(const uint8_t *bytes, size_t len,
                            char values[NPC_INCLUDE_MAX][128],
                            size_t *total)
@@ -192,30 +245,12 @@ static size_t npc_includes(const uint8_t *bytes, size_t len,
     while (start < len) {
         size_t end = start;
         while (end < len && bytes[end] != '\n') end++;
-        size_t at = start;
-        while (at < end && isspace(bytes[at])) at++;
-        if (at < end && bytes[at] == '#') {
-            at++;
-            while (at < end && isspace(bytes[at])) at++;
-            if (npc_word(bytes, end, &at, "include") &&
-                (at == end || isspace(bytes[at]) || bytes[at] == '"' ||
-                 bytes[at] == '<')) {
-                while (at < end && isspace(bytes[at])) at++;
-                uint8_t close = at < end && bytes[at] == '"' ? '"' : '>';
-                if (at < end && (bytes[at] == '"' || bytes[at] == '<')) {
-                    size_t value_start = ++at;
-                    while (at < end && bytes[at] != close) at++;
-                    if (at < end && at > value_start) {
-                        (*total)++;
-                        if (shown < NPC_INCLUDE_MAX) {
-                            size_t n = at - value_start;
-                            if (n >= 128u) n = 127u;
-                            memcpy(values[shown], bytes + value_start, n);
-                            values[shown][n] = '\0';
-                            shown++;
-                        }
-                    }
-                }
+        size_t value_start = 0, value_end = 0;
+        if (npc_include_span(bytes, start, end, &value_start, &value_end)) {
+            (*total)++;
+            if (shown < NPC_INCLUDE_MAX) {
+                npc_include_copy(values[shown], bytes, value_start, value_end);
+                shown++;
             }
         }
         start = end + (end < len ? 1u : 0u);
@@ -247,6 +282,98 @@ static void npc_tests_value(const char *path, char out[257])
     }
 }
 
+static void npc_dependency_item(struct zcl_present_model_v1 *model,
+                                const uint8_t *after, size_t after_len)
+{
+    char value[257] = {0};
+    char includes[NPC_INCLUDE_MAX][128];
+    size_t include_total = 0;
+    size_t include_shown = npc_includes(after, after_len, includes,
+                                        &include_total);
+    size_t used = 0;
+    for (size_t i = 0; i < include_shown; i++) {
+        int wrote = snprintf(value + used, sizeof(value) - used, "%s%s",
+                             used ? ", " : "", includes[i]);
+        if (wrote < 0 || (size_t)wrote >= sizeof(value) - used) break;
+        used += (size_t)wrote;
+    }
+    if (include_total > include_shown && used < sizeof(value) - 1u)
+        (void)snprintf(value + used, sizeof(value) - used, " +%zu more",
+                       include_total - include_shown);
+    if (include_total == 0) (void)snprintf(value, sizeof(value), "none");
+    npc_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
+             "dependencies", "LOCAL OBSERVATION - Candidate includes", value);
+}
+
+struct npc_span {
+    size_t prefix;
+    size_t suffix;
+    size_t removed;
+    size_t added;
+};
+
+static void npc_diff_bounds(const struct npc_line *old_lines,
+                            size_t old_count,
+                            const struct npc_line *new_lines,
+                            size_t new_count, struct npc_span *span)
+{
+    size_t prefix = 0;
+    while (prefix < old_count && prefix < new_count &&
+           npc_line_equal(&old_lines[prefix], &new_lines[prefix])) prefix++;
+    size_t suffix = 0;
+    while (suffix < old_count - prefix && suffix < new_count - prefix &&
+           npc_line_equal(&old_lines[old_count - suffix - 1u],
+                          &new_lines[new_count - suffix - 1u])) suffix++;
+    span->prefix = prefix;
+    span->suffix = suffix;
+    span->removed = old_count - prefix - suffix;
+    span->added = new_count - prefix - suffix;
+}
+
+static void npc_diff_rows(struct zcl_present_model_v1 *model,
+                          const struct npc_line *old_lines,
+                          const struct npc_line *new_lines,
+                          size_t new_count, const struct npc_span *span)
+{
+    if (span->prefix)
+        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_CONTEXT, "ctx-before",
+                      span->prefix, &old_lines[span->prefix - 1u]);
+    size_t remove_show = span->removed < NPC_DIFF_SIDE_MAX ? span->removed :
+                         NPC_DIFF_SIDE_MAX;
+    for (size_t i = 0; i < remove_show; i++)
+        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_REMOVE, "remove",
+                      span->prefix + i + 1u, &old_lines[span->prefix + i]);
+    npc_omitted(model, "remove-more", span->removed - remove_show, "removed");
+    size_t add_show = span->added < NPC_DIFF_SIDE_MAX ? span->added :
+                      NPC_DIFF_SIDE_MAX;
+    for (size_t i = 0; i < add_show; i++)
+        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_ADD, "add",
+                      span->prefix + i + 1u, &new_lines[span->prefix + i]);
+    npc_omitted(model, "add-more", span->added - add_show, "added");
+    if (span->suffix)
+        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_CONTEXT, "ctx-after",
+                      new_count - span->suffix + 1u,
+                      &new_lines[new_count - span->suffix]);
+}
+
+static bool npc_facts_text_ok(const char *path, const char *requested,
+                              const char *before_behavior,
+                              const char *after_behavior)
+{
+    return npc_source_path(path) && requested && before_behavior &&
+           after_behavior && strlen(requested) <= 256u &&
+           strlen(before_behavior) <= 256u && strlen(after_behavior) <= 256u;
+}
+
+static bool npc_facts_hex_ok(const char *before_blob_hex,
+                             const char *candidate_blob_hex,
+                             const char *candidate_root_hex)
+{
+    return before_blob_hex && candidate_blob_hex && candidate_root_hex &&
+           strlen(before_blob_hex) == 64u && strlen(candidate_blob_hex) == 64u &&
+           strlen(candidate_root_hex) == 64u;
+}
+
 bool zcl_native_presentation_code_change_model_from_facts(
     const uint8_t *before, size_t before_len,
     const uint8_t *after, size_t after_len, const char *path,
@@ -255,12 +382,10 @@ bool zcl_native_presentation_code_change_model_from_facts(
     const char *candidate_blob_hex, const char *candidate_root_hex,
     struct zcl_present_model_v1 *model, char *why, size_t why_cap)
 {
-    if (!model || !npc_source_path(path) || !requested || !before_behavior ||
-        !after_behavior || !before_blob_hex || !candidate_blob_hex ||
-        !candidate_root_hex || strlen(requested) > 256u ||
-        strlen(before_behavior) > 256u || strlen(after_behavior) > 256u ||
-        strlen(before_blob_hex) != 64u || strlen(candidate_blob_hex) != 64u ||
-        strlen(candidate_root_hex) != 64u) {
+    if (!model || !npc_facts_text_ok(path, requested, before_behavior,
+                                     after_behavior) ||
+        !npc_facts_hex_ok(before_blob_hex, candidate_blob_hex,
+                          candidate_root_hex)) {
         (void)snprintf(why, why_cap, "code-change facts are missing or unbounded");
         return false;
     }
@@ -278,16 +403,9 @@ bool zcl_native_presentation_code_change_model_from_facts(
         free(old_lines); free(new_lines);
         return false;
     }
-    size_t prefix = 0;
-    while (prefix < old_count && prefix < new_count &&
-           npc_line_equal(&old_lines[prefix], &new_lines[prefix])) prefix++;
-    size_t suffix = 0;
-    while (suffix < old_count - prefix && suffix < new_count - prefix &&
-           npc_line_equal(&old_lines[old_count - suffix - 1u],
-                          &new_lines[new_count - suffix - 1u])) suffix++;
-    size_t removed = old_count - prefix - suffix;
-    size_t added = new_count - prefix - suffix;
-    if (removed == 0 && added == 0) {
+    struct npc_span span;
+    npc_diff_bounds(old_lines, old_count, new_lines, new_count, &span);
+    if (span.removed == 0 && span.added == 0) {
         free(old_lines); free(new_lines);
         (void)snprintf(why, why_cap, "selected path has no byte change");
         return false;
@@ -323,48 +441,110 @@ bool zcl_native_presentation_code_change_model_from_facts(
     npc_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
              "tests", "LOCAL OBSERVATION - Affected tests", value);
 
-    char includes[NPC_INCLUDE_MAX][128];
-    size_t include_total = 0;
-    size_t include_shown = npc_includes(after, after_len, includes,
-                                        &include_total);
-    value[0] = '\0';
-    size_t used = 0;
-    for (size_t i = 0; i < include_shown; i++) {
-        int wrote = snprintf(value + used, sizeof(value) - used, "%s%s",
-                             used ? ", " : "", includes[i]);
-        if (wrote < 0 || (size_t)wrote >= sizeof(value) - used) break;
-        used += (size_t)wrote;
-    }
-    if (include_total > include_shown && used < sizeof(value) - 1u)
-        (void)snprintf(value + used, sizeof(value) - used, " +%zu more",
-                       include_total - include_shown);
-    if (include_total == 0) (void)snprintf(value, sizeof(value), "none");
-    npc_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
-             "dependencies", "LOCAL OBSERVATION - Candidate includes", value);
+    npc_dependency_item(model, after, after_len);
     (void)snprintf(value, sizeof(value),
                    "%zu before bytes -> %zu candidate bytes; %zu removed / %zu added lines",
-                   before_len, after_len, removed, added);
+                   before_len, after_len, span.removed, span.added);
     npc_item(model, ZCL_PRESENT_ITEM_KEY_VALUE, ZCL_PRESENT_STATUS_INFO,
              "observation", "LOCAL OBSERVATION - Changed span", value);
 
-    if (prefix)
-        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_CONTEXT, "ctx-before",
-                      prefix, &old_lines[prefix - 1u]);
-    size_t remove_show = removed < NPC_DIFF_SIDE_MAX ? removed : NPC_DIFF_SIDE_MAX;
-    for (size_t i = 0; i < remove_show; i++)
-        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_REMOVE, "remove",
-                      prefix + i + 1u, &old_lines[prefix + i]);
-    npc_omitted(model, "remove-more", removed - remove_show, "removed");
-    size_t add_show = added < NPC_DIFF_SIDE_MAX ? added : NPC_DIFF_SIDE_MAX;
-    for (size_t i = 0; i < add_show; i++)
-        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_ADD, "add",
-                      prefix + i + 1u, &new_lines[prefix + i]);
-    npc_omitted(model, "add-more", added - add_show, "added");
-    if (suffix)
-        npc_diff_line(model, ZCL_PRESENT_ITEM_DIFF_CONTEXT, "ctx-after",
-                      new_count - suffix + 1u, &new_lines[new_count - suffix]);
+    npc_diff_rows(model, old_lines, new_lines, new_count, &span);
     free(old_lines); free(new_lines);
     return zcl_present_model_validate_v1(model, why, why_cap);
+}
+
+static bool npc_input_roots(const char *workspace_arg, char workspace[PATH_MAX],
+                            const char *before_root_hex,
+                            const char *candidate_root_hex,
+                            uint8_t before_root[32], uint8_t candidate_root[32])
+{
+    return workspace_arg &&
+           platform_directory_canonical_real(workspace_arg, workspace,
+                                             PATH_MAX) &&
+           before_root_hex && candidate_root_hex &&
+           zcl_hex_decode_lower(before_root_hex, before_root, 32) &&
+           zcl_hex_decode_lower(candidate_root_hex, candidate_root, 32);
+}
+
+static bool npc_input_text(const char *path, const char *requested,
+                           const char *before_behavior,
+                           const char *after_behavior)
+{
+    return npc_source_path(path) && requested && before_behavior &&
+           after_behavior;
+}
+
+static bool npc_load_manifests(struct zcl_command_reply *reply,
+                               const char *workspace,
+                               const uint8_t *before_root,
+                               const uint8_t *candidate_root,
+                               struct vcs_manifest *before,
+                               struct vcs_manifest *candidate)
+{
+    if (!vcs_tree_load(workspace, before_root, before)) {
+        npc_fail(reply, "BEFORE_ROOT_UNVERIFIED",
+                 "before_root did not rederive from the local ZVCS CAS");
+        return false;
+    }
+    if (!vcs_tree_load(workspace, candidate_root, candidate)) {
+        vcs_manifest_free(before);
+        npc_fail(reply, "CANDIDATE_ROOT_UNVERIFIED",
+                 "candidate_root did not rederive from the local ZVCS CAS");
+        return false;
+    }
+    return true;
+}
+
+struct npc_blobs {
+    uint8_t before[32];
+    uint8_t candidate[32];
+    size_t before_size;
+    size_t candidate_size;
+    uint8_t *before_bytes;
+    uint8_t *candidate_bytes;
+    size_t before_len;
+    size_t candidate_len;
+};
+
+static bool npc_locate_blobs(struct zcl_command_reply *reply, const char *path,
+                             struct vcs_manifest *before,
+                             struct vcs_manifest *candidate,
+                             struct npc_blobs *blobs)
+{
+    const struct vcs_entry *before_entry = npc_entry(before, path);
+    const struct vcs_entry *candidate_entry = npc_entry(candidate, path);
+    if (!before_entry || !candidate_entry || before_entry->size > NPC_SOURCE_MAX ||
+        candidate_entry->size > NPC_SOURCE_MAX) {
+        vcs_manifest_free(before);
+        vcs_manifest_free(candidate);
+        npc_fail(reply, "CODE_PATH_UNVERIFIED",
+                 "the bounded C path must exist in both exact source trees");
+        return false;
+    }
+    memcpy(blobs->before, before_entry->blob, 32);
+    memcpy(blobs->candidate, candidate_entry->blob, 32);
+    blobs->before_size = (size_t)before_entry->size;
+    blobs->candidate_size = (size_t)candidate_entry->size;
+    vcs_manifest_free(before);
+    vcs_manifest_free(candidate);
+    return true;
+}
+
+static bool npc_fetch_blobs(struct zcl_command_reply *reply,
+                            const char *workspace, struct npc_blobs *blobs)
+{
+    if (vcs_object_get(workspace, blobs->before, VCS_TAG_BLOB,
+                       &blobs->before_bytes, &blobs->before_len) != 0 ||
+        blobs->before_len != blobs->before_size ||
+        vcs_object_get(workspace, blobs->candidate, VCS_TAG_BLOB,
+                       &blobs->candidate_bytes, &blobs->candidate_len) != 0 ||
+        blobs->candidate_len != blobs->candidate_size) {
+        free(blobs->before_bytes); free(blobs->candidate_bytes);
+        npc_fail(reply, "CODE_BLOB_UNVERIFIED",
+                 "one source blob failed its exact ZVCS address or size check");
+        return false;
+    }
+    return true;
 }
 
 void zcl_native_handle_presentation_code_change(
@@ -379,70 +559,31 @@ void zcl_native_handle_presentation_code_change(
     const char *after_behavior = npc_str(request->input, "after_behavior");
     char workspace[PATH_MAX];
     uint8_t before_root[32], candidate_root[32];
-    if (!workspace_arg ||
-        !platform_directory_canonical_real(workspace_arg, workspace,
-                                           sizeof(workspace)) ||
-        !before_root_hex || !candidate_root_hex ||
-        !zcl_hex_decode_lower(before_root_hex, before_root, 32) ||
-        !zcl_hex_decode_lower(candidate_root_hex, candidate_root, 32) ||
-        !npc_source_path(path) || !requested || !before_behavior ||
-        !after_behavior) {
+    if (!npc_input_roots(workspace_arg, workspace, before_root_hex,
+                         candidate_root_hex, before_root, candidate_root) ||
+        !npc_input_text(path, requested, before_behavior, after_behavior)) {
         npc_fail(reply, "BAD_CODE_CHANGE_INPUT",
                  "workspace, two lowercase ZVCS roots, one C path, and three bounded behavior summaries are required");
         return;
     }
     struct vcs_manifest before_manifest, candidate_manifest;
-    if (!vcs_tree_load(workspace, before_root, &before_manifest)) {
-        npc_fail(reply, "BEFORE_ROOT_UNVERIFIED",
-                 "before_root did not rederive from the local ZVCS CAS");
-        return;
-    }
-    if (!vcs_tree_load(workspace, candidate_root, &candidate_manifest)) {
-        vcs_manifest_free(&before_manifest);
-        npc_fail(reply, "CANDIDATE_ROOT_UNVERIFIED",
-                 "candidate_root did not rederive from the local ZVCS CAS");
-        return;
-    }
-    const struct vcs_entry *before_entry = npc_entry(&before_manifest, path);
-    const struct vcs_entry *candidate_entry = npc_entry(&candidate_manifest, path);
-    if (!before_entry || !candidate_entry || before_entry->size > NPC_SOURCE_MAX ||
-        candidate_entry->size > NPC_SOURCE_MAX) {
-        vcs_manifest_free(&before_manifest);
-        vcs_manifest_free(&candidate_manifest);
-        npc_fail(reply, "CODE_PATH_UNVERIFIED",
-                 "the bounded C path must exist in both exact source trees");
-        return;
-    }
-    uint8_t before_blob_root[32], candidate_blob_root[32];
-    memcpy(before_blob_root, before_entry->blob, 32);
-    memcpy(candidate_blob_root, candidate_entry->blob, 32);
-    size_t expected_before_len = (size_t)before_entry->size;
-    size_t expected_candidate_len = (size_t)candidate_entry->size;
-    vcs_manifest_free(&before_manifest);
-    vcs_manifest_free(&candidate_manifest);
-    uint8_t *before_bytes = NULL, *candidate_bytes = NULL;
-    size_t before_len = 0, candidate_len = 0;
-    if (vcs_object_get(workspace, before_blob_root, VCS_TAG_BLOB,
-                       &before_bytes, &before_len) != 0 ||
-        before_len != expected_before_len ||
-        vcs_object_get(workspace, candidate_blob_root, VCS_TAG_BLOB,
-                       &candidate_bytes, &candidate_len) != 0 ||
-        candidate_len != expected_candidate_len) {
-        free(before_bytes); free(candidate_bytes);
-        npc_fail(reply, "CODE_BLOB_UNVERIFIED",
-                 "one source blob failed its exact ZVCS address or size check");
-        return;
-    }
+    if (!npc_load_manifests(reply, workspace, before_root, candidate_root,
+                            &before_manifest, &candidate_manifest)) return;
+    struct npc_blobs blobs = {0};
+    if (!npc_locate_blobs(reply, path, &before_manifest, &candidate_manifest,
+                          &blobs)) return;
+    if (!npc_fetch_blobs(reply, workspace, &blobs)) return;
     char before_blob_hex[65], candidate_blob_hex[65];
-    zcl_hex_encode(before_blob_root, 32, before_blob_hex);
-    zcl_hex_encode(candidate_blob_root, 32, candidate_blob_hex);
+    zcl_hex_encode(blobs.before, 32, before_blob_hex);
+    zcl_hex_encode(blobs.candidate, 32, candidate_blob_hex);
     struct zcl_present_model_v1 model;
     char why[192];
     bool built = zcl_native_presentation_code_change_model_from_facts(
-        before_bytes, before_len, candidate_bytes, candidate_len, path,
-        requested, before_behavior, after_behavior, before_blob_hex,
-        candidate_blob_hex, candidate_root_hex, &model, why, sizeof(why));
-    free(before_bytes); free(candidate_bytes);
+        blobs.before_bytes, blobs.before_len, blobs.candidate_bytes,
+        blobs.candidate_len, path, requested, before_behavior, after_behavior,
+        before_blob_hex, candidate_blob_hex, candidate_root_hex, &model, why,
+        sizeof(why));
+    free(blobs.before_bytes); free(blobs.candidate_bytes);
     if (!built) {
         npc_fail(reply, "CODE_CHANGE_MODEL_INVALID", why);
         return;
